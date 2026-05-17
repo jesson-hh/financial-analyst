@@ -1,0 +1,60 @@
+name: stock-deep-dive
+description: A-share single-stock deep-dive research (13 agents, 3 tiers)
+variables:
+  - name: code
+    type: string
+    required: true
+  - name: asof_date
+    type: string
+    default: today
+
+agents:
+  # Tier 1 — parallel, no dependencies
+  - name: quote-fetcher
+    deps: []
+    input_keys: [code, asof_date]
+  - name: factor-computer
+    deps: []
+    input_keys: [code, asof_date]
+  - name: model-predictor
+    deps: []
+    input_keys: [code, asof_date]
+  - name: news-reader
+    deps: []
+    input_keys: [code, asof_date]
+  - name: f10-reader
+    deps: []
+    input_keys: [code, asof_date]
+
+  # Tier 2 — parallel after Tier 1
+  - name: fundamental-analyst
+    deps: [quote-fetcher]
+    input_keys: [quote-fetcher]
+  - name: technical-analyst
+    deps: [quote-fetcher, factor-computer]
+    input_keys: [quote-fetcher, factor-computer]
+  - name: whale-analyst
+    deps: [quote-fetcher, factor-computer]
+    input_keys: [quote-fetcher, factor-computer]
+  - name: quant-analyst
+    deps: [model-predictor, factor-computer]
+    input_keys: [model-predictor, factor-computer]
+
+  # Tier 3 — bull/bear parallel, then CRO, then writer
+  - name: bull-advocate
+    deps: [fundamental-analyst, technical-analyst, whale-analyst, quant-analyst]
+    input_keys: [fundamental-analyst, technical-analyst, whale-analyst, quant-analyst]
+  - name: bear-advocate
+    deps: [fundamental-analyst, technical-analyst, whale-analyst, quant-analyst]
+    input_keys: [fundamental-analyst, technical-analyst, whale-analyst, quant-analyst]
+  - name: risk-officer
+    deps: [bull-advocate, bear-advocate, news-reader, f10-reader, factor-computer]
+    input_keys: [bull-advocate, bear-advocate, news-reader, f10-reader, factor-computer]
+    borrows_memory: [bear-advocate]
+  - name: report-writer
+    deps: [quote-fetcher, factor-computer, model-predictor, fundamental-analyst,
+           technical-analyst, whale-analyst, quant-analyst,
+           bull-advocate, bear-advocate, risk-officer]
+    input_keys: [quote-fetcher, factor-computer, model-predictor,
+                 fundamental-analyst, technical-analyst, whale-analyst, quant-analyst,
+                 bull-advocate, bear-advocate, risk-officer, code, asof_date, out_dir]
