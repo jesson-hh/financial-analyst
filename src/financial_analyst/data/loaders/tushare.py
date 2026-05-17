@@ -9,6 +9,7 @@ from financial_analyst.data.loaders.base import BaseLoader
 class TushareLoader(BaseLoader):
     def __init__(self, token: Optional[str] = None):
         os.environ["NO_PROXY"] = "*"
+        os.environ["no_proxy"] = "*"
         token = token or os.environ.get("TUSHARE_TOKEN")
         if not token:
             raise ValueError("TUSHARE_TOKEN missing (env or constructor)")

@@ -2,6 +2,10 @@ from __future__ import annotations
 import asyncio
 import typer
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(override=True)  # populate os.environ from .env (overrides any existing shell vars)
+
 from financial_analyst import __version__
 
 app = typer.Typer(

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import yaml
@@ -58,5 +59,10 @@ class LLMClient:
         provider_cfg = self.config.get("providers", {}).get(self.provider, {})
         if "base_url" in provider_cfg:
             kwargs["api_base"] = provider_cfg["base_url"]
+        api_key_env = provider_cfg.get("api_key_env")
+        if api_key_env:
+            api_key = os.environ.get(api_key_env)
+            if api_key:
+                kwargs["api_key"] = api_key
 
         return await acompletion(**kwargs)
