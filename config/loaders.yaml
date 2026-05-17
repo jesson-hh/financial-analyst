@@ -1,0 +1,7 @@
+default: tushare
+
+loaders:
+  tushare:
+    class: financial_analyst.data.loaders.tushare.TushareLoader
+    init_args:
+      token_env: TUSHARE_TOKEN
