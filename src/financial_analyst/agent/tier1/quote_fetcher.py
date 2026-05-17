@@ -71,8 +71,8 @@ class QuoteFetcher(SubAgent[QuoteOutput]):
                 "pb": float(row["pb"]) if "pb" in row else None,
                 "ps": float(row["ps_ttm"]) if "ps_ttm" in row else None,
                 "dv": float(row["dv_ttm"]) if "dv_ttm" in row else None,
-                "mv_yi": float(row["total_mv"]) / 100000 if "total_mv" in row else None,
-                "circ_mv_yi": float(row["circ_mv"]) / 100000 if "circ_mv" in row else None,
+                "mv_yi": float(row["total_mv"]) / 10000 if "total_mv" in row else None,
+                "circ_mv_yi": float(row["circ_mv"]) / 10000 if "circ_mv" in row else None,
                 "turnover_rate": float(row["turnover_rate"]) if "turnover_rate" in row else None,
             })
         return out

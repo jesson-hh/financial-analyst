@@ -14,7 +14,7 @@ async def test_quote_fetcher_outputs_required_fields(tmp_path):
     fake_db = pd.DataFrame({
         "trade_date": [pd.Timestamp("2026-05-17")],
         "pe_ttm": [25.0], "pb": [3.0], "ps_ttm": [2.0], "dv_ttm": [1.5],
-        "total_mv": [800_0000.0], "circ_mv": [500_0000.0], "turnover_rate": [3.5],
+        "total_mv": [80_0000.0], "circ_mv": [50_0000.0], "turnover_rate": [3.5],
     })
     agent = QuoteFetcher(memory_root=tmp_path)
     with patch.object(agent, "_get_loader") as m:
