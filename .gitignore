@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.env
+out/
+news/**/*.txt
+news/**/*.html
+news/**/*.pdf
+kb/**/*.parquet
+.venv/
+venv/
