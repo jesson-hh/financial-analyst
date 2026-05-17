@@ -1,0 +1,28 @@
+default_provider: anthropic
+default_model: claude-opus-4-7
+
+providers:
+  anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+    models: [claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5]
+  openai:
+    api_key_env: OPENAI_API_KEY
+    models: [gpt-4o, gpt-4-turbo]
+  qwen:
+    api_key_env: DASHSCOPE_API_KEY
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    models: [qwen-plus, qwen-max]
+  deepseek:
+    api_key_env: DEEPSEEK_API_KEY
+    models: [deepseek-chat]
+
+agent_overrides:
+  report-writer:
+    provider: anthropic
+    model: claude-opus-4-7
+  news-reader:
+    provider: qwen
+    model: qwen-plus
+  f10-reader:
+    provider: qwen
+    model: qwen-plus
