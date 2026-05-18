@@ -149,10 +149,27 @@ Run `/dream` (or `financial-analyst dream`) to:
 
 See [docs/dream_loop.md](docs/dream_loop.md).
 
+## MCP Server
+
+Use financial-analyst from Claude Desktop / Claude Code via MCP:
+
+```json
+{
+  "mcpServers": {
+    "financial-analyst": {
+      "command": "financial-analyst-mcp",
+      "env": {"TUSHARE_TOKEN": "...", "DASHSCOPE_API_KEY": "..."}
+    }
+  }
+}
+```
+
+12 tools exposed (ask / quick_quote / quick_factors / memory_search / list_past_reports / read_past_report / list_dream_proposals / mainline / brief / intraday / report / dream). See [docs/mcp.md](docs/mcp.md).
+
 ## Tests
 
 ```bash
-pytest tests/                                       # 240 unit + integration tests (mocked)
+pytest tests/                                       # 291 unit + integration tests (mocked)
 FA_E2E=1 pytest tests/integration/test_end_to_end.py  # real Tushare + LLM round-trip
 ```
 

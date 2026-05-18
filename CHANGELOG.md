@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.10.0 — 2026-05-18
+
+### Added (MCP Server)
+- `src/financial_analyst/mcp_server.py` — MCP stdio server exposing 12 tools to Claude Desktop / Claude Code / OpenClaw.
+- Tools: `ask`, `quick_quote`, `quick_factors`, `memory_search`, `list_past_reports`, `read_past_report`, `list_dream_proposals`, `report`, `mainline`, `brief`, `intraday`, `dream`.
+- `financial-analyst-mcp` console script entry point registered in `pyproject.toml`.
+- `docs/mcp.md` — setup guide + tool reference + security model + troubleshooting.
+- `tests/test_mcp_server.py` — 10 unit tests covering tool registry, dispatch, and schema validation.
+- `mcp>=1.0` added to dependencies.
+
+### Changed
+- Version bump 0.6.0 → 0.10.0.
+- README: added MCP Server section + updated test count.
+
 ## v0.6.0 — 2026-05-18
 
 ### Added
