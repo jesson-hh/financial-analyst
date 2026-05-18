@@ -1,7 +1,11 @@
+# config/loaders.yaml
+# Change `default` to switch the data source used by all sub-agents.
 default: tushare
 
 loaders:
   tushare:
-    class: financial_analyst.data.loaders.tushare.TushareLoader
-    init_args:
-      token_env: TUSHARE_TOKEN
+    cache_enabled: true
+    cache_ttl_seconds: 86400   # 1 day
+
+  qlib_binary:
+    provider_uri: G:/stocks/stock_data/cn_data   # local Qlib data root

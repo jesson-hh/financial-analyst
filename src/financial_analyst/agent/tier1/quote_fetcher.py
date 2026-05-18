@@ -3,7 +3,7 @@ from typing import Any, Dict, Optional
 import pandas as pd
 from pydantic import BaseModel
 from financial_analyst.agent.base import SubAgent
-from financial_analyst.data.loaders.tushare import TushareLoader
+from financial_analyst.data.loader_factory import get_default_loader
 
 
 def _safe_float(val) -> Optional[float]:
@@ -51,7 +51,7 @@ class QuoteFetcher(SubAgent[QuoteOutput]):
         self._loader = loader
 
     def _get_loader(self):
-        return self._loader or TushareLoader()
+        return self._loader or get_default_loader()
 
     async def _execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         code = inputs["code"]

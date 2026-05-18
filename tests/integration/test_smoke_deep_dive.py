@@ -43,14 +43,14 @@ async def test_smoke_tier1_data_layer_wires(tmp_path, monkeypatch):
         "turnover_rate": [3.5] * 80,
     })
 
-    # Mock TushareLoader at construction — patch both quote-fetcher and factor-computer modules
+    # Mock get_default_loader at construction — patch loader factory used by all sub-agents
     mock_loader = MagicMock()
     mock_loader.fetch_quote.return_value = fake_quote
     mock_loader.fetch_daily_basic.return_value = fake_db
 
-    with patch("financial_analyst.agent.tier1.quote_fetcher.TushareLoader", return_value=mock_loader), \
-         patch("financial_analyst.agent.tier1.factor_computer.TushareLoader", return_value=mock_loader), \
-         patch("financial_analyst.models.lgb_momentum.TushareLoader", return_value=mock_loader):
+    with patch("financial_analyst.agent.tier1.quote_fetcher.get_default_loader", return_value=mock_loader), \
+         patch("financial_analyst.agent.tier1.factor_computer.get_default_loader", return_value=mock_loader), \
+         patch("financial_analyst.models.lgb_momentum.get_default_loader", return_value=mock_loader):
 
         # Mock LiteLLM for any Tier 2/3 agent that gets called
         stub_response = MagicMock()

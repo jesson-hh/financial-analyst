@@ -1,8 +1,10 @@
 from __future__ import annotations
 import os
+from pathlib import Path
 from typing import Dict, List, Optional
 import pandas as pd
 import requests
+from financial_analyst.data.cache import ParquetCache
 from financial_analyst.data.loaders.base import BaseLoader
 
 TUSHARE_URL = "http://api.tushare.pro"
@@ -12,9 +14,21 @@ class TushareLoader(BaseLoader):
     """Tushare data loader using raw requests (bypasses the ``tushare`` Python
     library, which round-robins between api.tushare.pro and api.waditu.com and
     times out behind corporate proxies). Forces HTTP to avoid HTTPS interception.
+
+    Results are cached as Parquet files under ``cache_dir`` (default:
+    ``~/.financial-analyst/cache/tushare``) with a TTL of ``cache_ttl_seconds``
+    (default: 86400 s = 1 day). Pass ``enable_cache=False`` to skip caching.
     """
 
-    def __init__(self, token: Optional[str] = None, url: str = TUSHARE_URL, timeout: int = 30):
+    def __init__(
+        self,
+        token: Optional[str] = None,
+        url: str = TUSHARE_URL,
+        timeout: int = 30,
+        cache_dir: Optional[Path] = None,
+        cache_ttl: int = 86400,
+        enable_cache: bool = True,
+    ) -> None:
         os.environ["NO_PROXY"] = "*"
         os.environ["no_proxy"] = "*"
         token = token or os.environ.get("TUSHARE_TOKEN")
@@ -24,6 +38,14 @@ class TushareLoader(BaseLoader):
         self._url = url
         self._timeout = timeout
         self._pro = self._make_pro_shim()
+        self.enable_cache = enable_cache
+        if enable_cache:
+            resolved_dir = cache_dir or (Path.home() / ".financial-analyst" / "cache")
+            self._cache: Optional[ParquetCache] = ParquetCache(
+                resolved_dir / "tushare", ttl_seconds=cache_ttl
+            )
+        else:
+            self._cache = None
 
     def _query(self, api_name: str, fields: str = "", **params) -> pd.DataFrame:
         req = {"api_name": api_name, "token": self._token, "params": params}
@@ -77,29 +99,56 @@ class TushareLoader(BaseLoader):
         return market == "a_share"
 
     def fetch_quote(self, code: str, start: str, end: str) -> pd.DataFrame:
+        cache_params = {"code": code, "start": start, "end": end}
+        if self._cache is not None:
+            cached = self._cache.get("quote", cache_params)
+            if cached is not None:
+                return cached
         ts_code = self._to_tushare_code(code)
-        start = start.replace("-", "")
-        end = end.replace("-", "")
-        df = self._query("daily", ts_code=ts_code, start_date=start, end_date=end)
-        return self._normalize(df)
+        df = self._query(
+            "daily",
+            ts_code=ts_code,
+            start_date=start.replace("-", ""),
+            end_date=end.replace("-", ""),
+        )
+        df = self._normalize(df)
+        if self._cache is not None and df is not None and not df.empty:
+            self._cache.set("quote", cache_params, df)
+        return df
 
     def fetch_daily_basic(self, code: str, start: str, end: str) -> pd.DataFrame:
+        cache_params = {"code": code, "start": start, "end": end}
+        if self._cache is not None:
+            cached = self._cache.get("daily_basic", cache_params)
+            if cached is not None:
+                return cached
         ts_code = self._to_tushare_code(code)
-        start = start.replace("-", "")
-        end = end.replace("-", "")
         df = self._query(
             "daily_basic",
             fields="ts_code,trade_date,pe_ttm,pb,ps_ttm,dv_ttm,total_mv,circ_mv,turnover_rate",
-            ts_code=ts_code, start_date=start, end_date=end,
+            ts_code=ts_code,
+            start_date=start.replace("-", ""),
+            end_date=end.replace("-", ""),
         )
-        return self._normalize(df)
+        df = self._normalize(df)
+        if self._cache is not None and df is not None and not df.empty:
+            self._cache.set("daily_basic", cache_params, df)
+        return df
 
     def fetch_financials(self, code: str) -> pd.DataFrame:
+        cache_params = {"code": code}
+        if self._cache is not None:
+            cached = self._cache.get("financials", cache_params)
+            if cached is not None:
+                return cached
         ts_code = self._to_tushare_code(code)
         df = self._query("fina_indicator", ts_code=ts_code)
         if df is None or df.empty:
             return df
-        return df.sort_values("end_date", ascending=False).reset_index(drop=True)
+        df = df.sort_values("end_date", ascending=False).reset_index(drop=True)
+        if self._cache is not None and df is not None and not df.empty:
+            self._cache.set("financials", cache_params, df)
+        return df
 
     def fetch_news(self, code: str, days: int = 30) -> List[Dict]:
         return []

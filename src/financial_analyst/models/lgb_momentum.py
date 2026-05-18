@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import lightgbm as lgb
 from financial_analyst.models.base import BaseModel
-from financial_analyst.data.loaders.tushare import TushareLoader
+from financial_analyst.data.loader_factory import get_default_loader
 
 FEATURE_WINDOWS = [5, 10, 20, 60]
 LABEL_HORIZON = 5
@@ -19,7 +19,7 @@ class LGBMomentumModel(BaseModel):
         return {"name": "lgb_momentum", "version": "0.1", "horizon_days": LABEL_HORIZON}
 
     def _fetch_quote(self, code: str, asof: str) -> pd.DataFrame:
-        loader = self._loader or TushareLoader()
+        loader = self._loader or get_default_loader()
         asof_ts = pd.Timestamp(asof)
         start = (asof_ts - pd.Timedelta(days=self._lookback * 2)).strftime("%Y-%m-%d")
         return loader.fetch_quote(code, start, asof)

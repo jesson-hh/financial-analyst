@@ -6,7 +6,7 @@ from financial_analyst.agent.base import SubAgent
 from financial_analyst.factors.core import compute_factors
 from financial_analyst.factors.whale import compute_whale_signals
 from financial_analyst.factors.sentiment import score_board, compute_vol_regime
-from financial_analyst.data.loaders.tushare import TushareLoader
+from financial_analyst.data.loader_factory import get_default_loader
 
 
 class FactorOutput(BaseModel):
@@ -27,7 +27,7 @@ class FactorComputer(SubAgent[FactorOutput]):
         self._loader = loader
 
     def _get_loader(self):
-        return self._loader or TushareLoader()
+        return self._loader or get_default_loader()
 
     async def _execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         code, asof = inputs["code"], inputs["asof_date"]
