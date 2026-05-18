@@ -113,6 +113,62 @@ def ingest(
     )
 
 
+@app.command()
+def dream(
+    since: int = typer.Option(30, "--since", help="Days lookback for reports"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Discover only, don't write proposals"),
+    out_dir: Path = typer.Option(Path("out"), "--out", help="Report output dir"),
+):
+    """Run the dream loop: introspect past reports, propose memory updates."""
+    asyncio.run(_run_dream(since=since, dry_run=dry_run, out_dir=out_dir))
+
+
+async def _run_dream(since: int, dry_run: bool, out_dir: Path):
+    """Body of the dream command — also called by TUI /dream."""
+    from financial_analyst.data.loader_factory import get_default_loader
+    from financial_analyst.dream import OutcomeTracker, Introspector, write_proposals
+
+    loader = get_default_loader()
+    tracker = OutcomeTracker(loader=loader, out_dir=out_dir)
+    outcomes = tracker.collect(since_days=since)
+
+    typer.echo(f"Found {len(outcomes)} reports in last {since} days")
+    verdict_counts: dict = {}
+    for o in outcomes:
+        verdict_counts[o.verdict] = verdict_counts.get(o.verdict, 0) + 1
+    typer.echo(f"  verdicts: {verdict_counts}")
+
+    if not outcomes:
+        typer.echo("No reports to introspect. Run some `financial-analyst report <code>` first.")
+        return
+
+    wrong_or_partial = [o for o in outcomes if o.verdict in ("wrong", "partial")]
+    if not wrong_or_partial:
+        typer.echo("All outcomes correct or pending — nothing to propose.")
+        return
+
+    typer.echo(f"Introspecting {len(wrong_or_partial)} wrong/partial cases (via LLM)...")
+    agent = Introspector(memory_root=Path("memories"))
+    result = await agent.run({"outcomes": [o.to_dict() for o in outcomes]})
+
+    if not result.ok:
+        typer.echo(f"introspector failed: {result.error}")
+        return
+
+    proposals = result.output.proposals
+    typer.echo(f"Generated {len(proposals)} proposals:")
+    for p in proposals:
+        typer.echo(f"  [{p.confidence}] {p.target_agent}/{p.topic_slug}: {p.title}")
+
+    if dry_run:
+        typer.echo("(--dry-run: no files written)")
+        return
+
+    written = write_proposals(proposals)
+    typer.echo(f"Wrote {len(written)} proposals to memories/_proposed/")
+    typer.echo("Review with `/memory list-proposals` then `/memory accept` or `/memory reject`.")
+
+
 @app.callback(invoke_without_command=True)
 def _default(ctx: typer.Context):
     if ctx.invoked_subcommand is None:

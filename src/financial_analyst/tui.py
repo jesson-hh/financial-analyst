@@ -242,6 +242,22 @@ async def handle_slash(cmd: str, args: List[str]) -> None:
             html_path = render_report(files[0])
             console.print(f"[dim]html: [link={_to_file_url(html_path)}]{_to_file_url(html_path)}[/link][/dim]")
 
+    elif cmd == "dream":
+        # parse args: /dream --since 30 --dry-run
+        since = 30
+        dry_run = False
+        out_dir_arg = Path("out")
+        for a in args:
+            if a.startswith("--since="):
+                try:
+                    since = int(a.split("=", 1)[1])
+                except ValueError:
+                    pass
+            elif a == "--dry-run":
+                dry_run = True
+        from financial_analyst.cli import _run_dream
+        await _run_dream(since=since, dry_run=dry_run, out_dir=out_dir_arg)
+
     elif cmd == "provider":
         console.print(
             "[yellow]provider switching: see config/llm.yaml (live switch TBD in v0.2)[/yellow]"
@@ -277,7 +293,10 @@ async def handle_memory_cmd(args: List[str]) -> None:
             "  /memory stats\n"
             "  /memory diff\n"
             "  /memory reindex\n"
-            "  /memory reload"
+            "  /memory reload\n"
+            "  /memory list-proposals\n"
+            "  /memory accept _proposed/<agent>/<file>.md\n"
+            "  /memory reject _proposed/<agent>/<file>.md"
         )
         return
 
@@ -381,12 +400,78 @@ async def handle_memory_cmd(args: List[str]) -> None:
     elif sub == "reload":
         console.print("[green]memory cache cleared; next agent invocation will reload[/green]")
 
+    elif sub == "list-proposals":
+        proposed = mem_root / "_proposed"
+        if not proposed.exists():
+            console.print("[yellow]no proposals yet — run /dream to generate[/yellow]")
+            return
+        tbl = Table(title="Memory Proposals (staged)")
+        tbl.add_column("Agent", style="cyan")
+        tbl.add_column("File", style="green")
+        tbl.add_column("Confidence")
+        import yaml as _yaml
+        n = 0
+        for agent_dir in sorted(proposed.iterdir()):
+            if not agent_dir.is_dir():
+                continue
+            for f in sorted(agent_dir.glob("*.md")):
+                text = f.read_text(encoding="utf-8")
+                conf = "?"
+                if text.startswith("---"):
+                    end = text.find("---", 3)
+                    if end > 0:
+                        try:
+                            fm = _yaml.safe_load(text[3:end])
+                            conf = (fm or {}).get("confidence", "?")
+                        except Exception:
+                            pass
+                tbl.add_row(agent_dir.name, f.name, conf)
+                n += 1
+        if n == 0:
+            console.print("[yellow]no proposals yet — run /dream to generate[/yellow]")
+        else:
+            console.print(tbl)
+
+    elif sub == "accept" and len(args) >= 2:
+        src_rel = args[1]
+        if not src_rel.startswith("_proposed/"):
+            console.print("[red]accept argument must start with '_proposed/'[/red]")
+            return
+        src = mem_root / src_rel
+        if not src.exists():
+            console.print(f"[red]not found: {src}[/red]")
+            return
+        rel_parts = src_rel.split("/", 2)
+        if len(rel_parts) != 3:
+            console.print(f"[red]bad path: {src_rel}[/red]")
+            return
+        dest = mem_root / rel_parts[1] / rel_parts[2]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        src.rename(dest)
+        console.print(f"[green]accepted -> {dest}[/green]")
+        console.print("[dim]Next agent invocation will read it (memory hot-reloads on mtime change)[/dim]")
+
+    elif sub == "reject" and len(args) >= 2:
+        src_rel = args[1]
+        if not src_rel.startswith("_proposed/"):
+            console.print("[red]reject argument must start with '_proposed/'[/red]")
+            return
+        src = mem_root / src_rel
+        if not src.exists():
+            console.print(f"[red]not found: {src}[/red]")
+            return
+        src.unlink()
+        console.print(f"[yellow]rejected (deleted): {src_rel}[/yellow]")
+
     else:
         console.print(f"[red]unknown subcommand: {sub}[/red]")
         console.print(
             "[dim]usage:[/dim]\n"
             "  /memory list <agent> | show <agent>/<file> | edit <agent>/<file>\n"
-            "  /memory search <query> | stats | diff | reindex | reload"
+            "  /memory search <query> | stats | diff | reindex | reload\n"
+            "  /memory list-proposals\n"
+            "  /memory accept _proposed/<agent>/<file>.md\n"
+            "  /memory reject _proposed/<agent>/<file>.md"
         )
 
 
