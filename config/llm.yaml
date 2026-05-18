@@ -41,3 +41,6 @@ agent_overrides:
   morning-brief-writer:
     provider: qwen
     model: qwen3.5-plus
+  intraday-reviewer:
+    provider: qwen
+    model: qwen3.5-plus

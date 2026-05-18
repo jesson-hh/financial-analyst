@@ -380,6 +380,40 @@ async def _run_brief(asof, universe, universe_file, max_scan, out_dir):
                 typer.echo(f"{n}: {r.error}")
 
 
+@app.command()
+def intraday(
+    codes: str = typer.Option("", "--codes", help="Comma-separated codes (or empty to auto-detect from recent reports)"),
+    asof: str = typer.Option(None, "--asof", help="As-of date YYYY-MM-DD (default: today)"),
+    out_dir: Path = typer.Option(Path("out"), "--out", help="Output directory"),
+):
+    """Lunch-break intraday review: judge each stock OK / 警惕 / 撤离."""
+    asyncio.run(_run_intraday(codes=codes, asof=asof, out_dir=out_dir))
+
+
+async def _run_intraday(codes: str, asof: Optional[str], out_dir: Path):
+    from financial_analyst.agent.orchestrator import Orchestrator
+    from financial_analyst.agent.market.intraday_reviewer import IntradayReviewer
+    from financial_analyst.agent.orchestrator import DAGNode
+
+    agent = IntradayReviewer(memory_root=Path("memories"))
+    nodes = [DAGNode(agent=agent, deps=[], input_keys=["codes", "asof_date", "out_dir"])]
+    asof = asof or pd.Timestamp.today().strftime("%Y-%m-%d")
+    orch = Orchestrator(nodes)
+    typer.echo(f"Reviewing intraday for {asof}...")
+    results = await orch.run({"codes": codes, "asof_date": asof, "out_dir": str(out_dir)})
+    rev_result = results.get("intraday-reviewer")
+    if rev_result and rev_result.ok:
+        typer.echo(f"Review: {rev_result.output.output_md_path}")
+        typer.echo(f"Summary: {rev_result.output.summary}")
+        typer.echo(f"N stocks: {rev_result.output.n_stocks}")
+        for v in rev_result.output.verdicts[:10]:
+            typer.echo(f"  [{v.verdict}] {v.code}: {v.reason}")
+    else:
+        for n, r in results.items():
+            if not r.ok:
+                typer.echo(f"{n}: {r.error}")
+
+
 @app.callback(invoke_without_command=True)
 def _default(ctx: typer.Context):
     if ctx.invoked_subcommand is None:

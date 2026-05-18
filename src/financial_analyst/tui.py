@@ -190,6 +190,7 @@ def _ensure_registered() -> None:
     from financial_analyst.agent.mainline.mainline_writer import MainlineWriter
     from financial_analyst.agent.market.market_scanner import MarketScanner
     from financial_analyst.agent.market.morning_brief_writer import MorningBriefWriter
+    from financial_analyst.agent.market.intraday_reviewer import IntradayReviewer
 
     for name, cls in [
         ("quote-fetcher", QuoteFetcher),
@@ -209,6 +210,7 @@ def _ensure_registered() -> None:
         ("mainline-writer", MainlineWriter),
         ("market-scanner", MarketScanner),
         ("morning-brief-writer", MorningBriefWriter),
+        ("intraday-reviewer", IntradayReviewer),
     ]:
         if name not in SubAgentRegistry.names():
             SubAgentRegistry.register(name, cls)
@@ -305,6 +307,17 @@ async def handle_slash(cmd: str, args: List[str]) -> None:
         from financial_analyst.cli import _run_brief
         await _run_brief(asof=asof, universe=universe, universe_file=None,
                           max_scan=5000, out_dir=Path("out"))
+
+    elif cmd == "intraday":
+        codes = ""
+        asof = None
+        for a in args:
+            if a.startswith("--codes="):
+                codes = a.split("=", 1)[1]
+            elif a.startswith("--asof="):
+                asof = a.split("=", 1)[1]
+        from financial_analyst.cli import _run_intraday
+        await _run_intraday(codes=codes, asof=asof, out_dir=Path("out"))
 
     elif cmd == "provider":
         console.print(
