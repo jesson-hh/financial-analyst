@@ -58,6 +58,24 @@ class NewsReader(SubAgent[NewsOutput]):
         for f in sorted(code_dir.glob("*.txt"))[-20:]:
             files_text_parts.append(f"--- file: {f.name} ---\n{f.read_text(encoding='utf-8', errors='ignore')[:4000]}")
 
+        # NEW: if drop-zone empty or thin, also pull from NewsDB
+        if len(files_text_parts) < 5:
+            try:
+                from financial_analyst.data.news_db import NewsDB
+                db = NewsDB()
+                rows = db.query_news(code=code, since_days=14, limit=30)
+                db.close()
+                if rows:
+                    db_block = ["--- source: NewsDB (eastmoney_kuaixun + sinafinance_news) ---"]
+                    for r in rows:
+                        db_block.append(f"{r['ts']} [{r['source']}] {r['title']}")
+                        if r.get("content"):
+                            db_block.append((r["content"] or "")[:300])
+                        db_block.append("")
+                    files_text_parts.append("\n".join(db_block))
+            except Exception:
+                pass
+
         if not files_text_parts:
             return {"code": code, "asof_date": asof, "events": [], "numbers": []}
 

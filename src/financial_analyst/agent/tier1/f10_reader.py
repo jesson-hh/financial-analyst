@@ -59,6 +59,34 @@ class F10Reader(SubAgent[F10Output]):
         for f in sorted(code_dir.glob("*.txt"))[-10:]:
             parts.append(f"--- {f.name} ---\n{f.read_text(encoding='utf-8', errors='ignore')[:6000]}")
 
+        # NEW: augment with NewsDB when drop-zone is sparse
+        if len(parts) < 3:
+            try:
+                from financial_analyst.data.news_db import NewsDB
+                db = NewsDB()
+                lhb_rows = db.query_lhb(code=code, since_days=60, limit=20)
+                holders_rows = db.query_holders(code=code, latest_only=True)
+                db.close()
+                if lhb_rows:
+                    lhb_block = ["--- source: NewsDB.lhb ---"]
+                    for r in lhb_rows:
+                        lhb_block.append(
+                            f"{r['trade_date']} {r['code']} {r['name']} chg={r['change_rate']:+.2f}% "
+                            f"buy={r['buy_amt']/1e8:.2f}亿 sell={r['sell_amt']/1e8:.2f}亿 "
+                            f"net={r['net_amt']/1e8:+.2f}亿 [{r['reason']}]"
+                        )
+                    parts.append("\n".join(lhb_block))
+                if holders_rows:
+                    h_block = ["--- source: NewsDB.holders (latest) ---"]
+                    for r in holders_rows:
+                        h_block.append(
+                            f"#{r['rank']} {r['holder_name']} hold={r['hold_num']:,} "
+                            f"ratio={r['float_ratio']:.2f}% change={r['change']}"
+                        )
+                    parts.append("\n".join(h_block))
+            except Exception:
+                pass
+
         if not parts:
             return empty
 

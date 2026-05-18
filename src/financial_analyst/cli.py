@@ -445,6 +445,97 @@ async def _run_intraday(codes: str, asof: Optional[str], out_dir: Path):
                 typer.echo(f"{n}: {r.error}")
 
 
+@app.command(name="news-collect")
+def news_collect_cmd(
+    sources: str = typer.Option(
+        "kuaixun,longhu", "--sources",
+        help="Comma list: kuaixun, longhu, holders, sinafinance",
+    ),
+    code: str = typer.Option("", "--code", help="Filter to one stock (for holders, required)"),
+    limit: int = typer.Option(200, "--limit", help="Max items per source"),
+):
+    """Collect news/F10 from OpenCLI sources into ~/.financial-analyst/data/news.sqlite."""
+    from financial_analyst.data.news_db import NewsDB
+    from financial_analyst.data.collectors.opencli import (
+        is_opencli_available, EastmoneyKuaixunCollector, EastmoneyLonghuCollector,
+        EastmoneyHoldersCollector, SinafinanceNewsCollector,
+    )
+    if not is_opencli_available():
+        typer.echo("opencli not on PATH. Install: npm install -g @jackwener/opencli")
+        raise typer.Exit(code=1)
+
+    db = NewsDB()
+    src_list = [s.strip() for s in sources.split(",") if s.strip()]
+    totals = {}
+    for src in src_list:
+        try:
+            if src == "kuaixun":
+                items = EastmoneyKuaixunCollector().fetch(limit=limit)
+                n = db.upsert_news(items, source="eastmoney_kuaixun")
+                totals["kuaixun"] = n
+            elif src == "longhu":
+                items = EastmoneyLonghuCollector().fetch()
+                n = db.upsert_lhb(items)
+                totals["longhu"] = n
+            elif src == "holders":
+                if not code:
+                    typer.echo("--code required for holders source")
+                    continue
+                items = EastmoneyHoldersCollector().fetch(code)
+                n = db.upsert_holders(code, items)
+                totals[f"holders_{code}"] = n
+            elif src == "sinafinance":
+                items = SinafinanceNewsCollector().fetch(limit=limit)
+                n = db.upsert_news(items, source="sinafinance_news")
+                totals["sinafinance"] = n
+            else:
+                typer.echo(f"Unknown source: {src} (try kuaixun/longhu/holders/sinafinance)")
+        except Exception as exc:
+            typer.echo(f"[{src}] failed: {exc}")
+    db.close()
+    typer.echo("Collected:")
+    for k, v in totals.items():
+        typer.echo(f"  {k}: {v} rows")
+
+
+@app.command(name="news-query")
+def news_query_cmd(
+    code: str = typer.Argument(..., help="Stock code (or 'all')"),
+    days: int = typer.Option(7, "--days"),
+    limit: int = typer.Option(20, "--limit"),
+    fts: str = typer.Option("", "--fts", help="Full-text search query"),
+):
+    """Query the local news DB."""
+    from financial_analyst.data.news_db import NewsDB
+    db = NewsDB()
+    if fts:
+        rows = db.search_news(fts, limit=limit)
+    elif code == "all":
+        rows = db.query_news(since_days=days, limit=limit)
+    else:
+        rows = db.query_news(code=code, since_days=days, limit=limit)
+    db.close()
+    if not rows:
+        typer.echo("(no results)")
+        return
+    for r in rows:
+        typer.echo(f"\n[{r['source']}] {r['ts']}  {r['title']}")
+        if r.get("content"):
+            typer.echo((r["content"] or "")[:200])
+
+
+@app.command(name="news-stats")
+def news_stats_cmd():
+    """Show NewsDB row counts."""
+    from financial_analyst.data.news_db import NewsDB
+    db = NewsDB()
+    stats = db.stats()
+    db.close()
+    typer.echo("Local news DB stats:")
+    for k, v in stats.items():
+        typer.echo(f"  {k}: {v}")
+
+
 @app.callback(invoke_without_command=True)
 def _default(ctx: typer.Context):
     if ctx.invoked_subcommand is None:

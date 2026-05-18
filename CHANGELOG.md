@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.1.0 — 2026-05-18
+
+### Added (OpenCLI integration → local news DB)
+- **NewsDB** at `~/.financial-analyst/data/news.sqlite` with `news`, `lhb`, `holders` tables + FTS5 full-text index
+- **4 OpenCLI collectors** for eastmoney 7x24 快讯 + 龙虎榜 + 十大流通股东 + sinafinance 7x24
+- **3 CLI commands**: `news-collect`, `news-query`, `news-stats`
+- `news-reader` + `f10-reader` sub-agents now augment from NewsDB when drop-zone is sparse
+
+### Use case
+Daily cron / scheduled task:
+```bash
+financial-analyst news-collect --sources kuaixun,longhu --limit 500
+```
+Then every `financial-analyst report SH600519` automatically has the latest news + 龙虎榜 + 股东 context — without consuming LLM tokens to scrape.
+
+### Requirements
+- `npm install -g @jackwener/opencli` (Node.js >= 21)
+- Collectors are PUBLIC (no login). xueqiu cookies-based ones reserved for v1.2.
+
 ## v1.0.0 — 2026-05-18
 
 ### Added
