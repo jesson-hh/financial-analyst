@@ -1,8 +1,17 @@
 from __future__ import annotations
 import asyncio
+import sys
 import typer
 from pathlib import Path
 from dotenv import load_dotenv
+
+# On Windows zh-CN PowerShell, default stdout codec is GBK which chokes on ¥, emoji,
+# and any rare CJK char. Force UTF-8 with replace-on-error so reports always render.
+for stream in (sys.stdout, sys.stderr):
+    try:
+        stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 load_dotenv(override=True)  # populate os.environ from .env (overrides any existing shell vars)
 

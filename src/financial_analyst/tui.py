@@ -3,17 +3,59 @@ from __future__ import annotations
 
 import asyncio
 import re
+import sys
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import List, Union
 
+# Force UTF-8 stdout/stderr on Windows so Chinese chars, ¥, and emoji render
+# (GBK default on zh-CN PowerShell chokes on many of them).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 from rich.console import Console
 from rich.live import Live
+from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.rule import Rule
 from rich.table import Table
 
 console = Console()
+
+
+# ---------------------------------------------------------------------------
+# Report renderer — print to terminal + export HTML
+# ---------------------------------------------------------------------------
+
+def render_report(md_path: Path) -> Path:
+    """Render a markdown report to the terminal (Rich Markdown) AND export an
+    HTML copy next to the .md file with the same colored output.
+
+    Returns the path to the generated HTML file.
+    """
+    md_text = md_path.read_text(encoding="utf-8")
+
+    # 1) Print to live terminal so the user sees the report immediately
+    console.print(Rule(f"Report: {md_path.name}", style="cyan"))
+    console.print(Markdown(md_text))
+    console.print(Rule(style="cyan"))
+
+    # 2) Re-render into a recording console to capture HTML with colors
+    record_console = Console(record=True, width=120)
+    record_console.print(Markdown(md_text))
+    html_path = md_path.with_suffix(".html")
+    record_console.save_html(str(html_path), inline_styles=True)
+    return html_path
+
+
+def _to_file_url(path: Path) -> str:
+    """Convert a Windows/POSIX path into a clickable file:/// URL."""
+    abs_path = path.resolve()
+    return f"file:///{str(abs_path).replace(chr(92), '/').lstrip('/')}"
 
 # ---------------------------------------------------------------------------
 # Intent dataclasses
@@ -197,7 +239,8 @@ async def handle_slash(cmd: str, args: List[str]) -> None:
         if not files:
             console.print("[yellow]no reports yet[/yellow]")
         else:
-            console.print(files[0].read_text(encoding="utf-8"))
+            html_path = render_report(files[0])
+            console.print(f"[dim]html: [link={_to_file_url(html_path)}]{_to_file_url(html_path)}[/link][/dim]")
 
     elif cmd == "provider":
         console.print(
@@ -410,9 +453,20 @@ async def run_report_oneshot(code: str, asof, out_dir: Path) -> None:
 
     writer_result = results.get("report-writer")
     if writer_result and writer_result.ok:
-        console.print(
-            f"\n[bold green]Report:[/bold green] {writer_result.output.output_md_path}"
-        )
+        md_path = Path(writer_result.output.output_md_path)
+        # Render the report inline + write a colored HTML copy next to it
+        try:
+            html_path = render_report(md_path)
+            console.print(
+                f"\n[bold green]Report rendered.[/bold green]\n"
+                f"  md:   {md_path}\n"
+                f"  html: [link={_to_file_url(html_path)}]{_to_file_url(html_path)}[/link]"
+            )
+        except Exception as exc:  # rendering is best-effort
+            console.print(
+                f"\n[bold green]Report saved:[/bold green] {md_path}\n"
+                f"[yellow]inline render failed: {exc}[/yellow]"
+            )
     else:
         console.print("\n[bold red]Failed.[/bold red]")
         for n, r in results.items():
