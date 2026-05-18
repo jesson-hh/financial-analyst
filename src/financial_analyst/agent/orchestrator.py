@@ -55,7 +55,25 @@ class Orchestrator:
 
             self.on_event("wave_start", {"agents": wave})
             coros = [self.nodes[n].agent.run(self._build_inputs(n, base_inputs, done)) for n in wave]
-            results = await asyncio.gather(*coros)
+            try:
+                results = await asyncio.gather(*coros)
+            except asyncio.CancelledError:
+                # Mark all wave agents as cancelled, exit early with partial results
+                for name in wave:
+                    if name not in done:
+                        done[name] = SubAgentResult(
+                            ok=False, agent_name=name,
+                            error="cancelled by user (KeyboardInterrupt / CancelledError)",
+                        )
+                # Also mark all not-yet-started as cancelled
+                for name in remaining - set(wave):
+                    done[name] = SubAgentResult(
+                        ok=False, agent_name=name,
+                        error="cancelled before start",
+                    )
+                self.on_event("cancelled", {"completed": len([d for d in done.values() if d.ok])})
+                raise  # re-raise so the caller knows the user cancelled
+
             for name, result in zip(wave, results):
                 done[name] = result
                 self.on_event("agent_done", {"agent": name, "ok": result.ok, "elapsed": result.elapsed_seconds})

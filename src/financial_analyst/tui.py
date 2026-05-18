@@ -612,7 +612,7 @@ async def handle_memory_cmd(args: List[str]) -> None:
 # One-shot report runner (called by CLI + TUI)
 # ---------------------------------------------------------------------------
 
-async def run_report_oneshot(code: str, asof, out_dir: Path) -> None:
+async def run_report_oneshot(code: str, asof, out_dir: Path, trace: bool = False) -> None:
     _ensure_registered()
 
     from financial_analyst.agent.memory_index import MemoryIndex
@@ -655,19 +655,51 @@ async def run_report_oneshot(code: str, asof, out_dir: Path) -> None:
             tbl.add_row(name, f"[{color}]{s['state']}[/{color}]", f"{s['elapsed']:.1f}s")
         return tbl
 
-    with Live(make_table(), console=console, refresh_per_second=4) as live:
-        def on_event(evt: str, data: dict) -> None:
-            if evt == "wave_start":
-                for n in data["agents"]:
-                    status[n]["state"] = "running"
-            elif evt == "agent_done":
-                status[data["agent"]]["state"] = "done" if data["ok"] else "fail"
-                status[data["agent"]]["elapsed"] = data["elapsed"]
-            live.update(make_table())
+    cancelled = False
+    results: dict = {}
+    try:
+        with Live(make_table(), console=console, refresh_per_second=4) as live:
+            def on_event(evt: str, data: dict) -> None:
+                if evt == "wave_start":
+                    for n in data["agents"]:
+                        status[n]["state"] = "running"
+                elif evt == "agent_done":
+                    status[data["agent"]]["state"] = "done" if data["ok"] else "fail"
+                    status[data["agent"]]["elapsed"] = data["elapsed"]
+                live.update(make_table())
 
-        orch = Orchestrator(nodes, on_event=on_event)
-        console.print(f"[bold]Running stock-deep-dive for {code} (asof={asof})…[/bold]")
-        results = await orch.run({"code": code, "asof_date": asof, "out_dir": str(out_dir)})
+            orch = Orchestrator(nodes, on_event=on_event)
+            console.print(f"[bold]Running stock-deep-dive for {code} (asof={asof})…[/bold]")
+            results = await orch.run({"code": code, "asof_date": asof, "out_dir": str(out_dir)})
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        cancelled = True
+        console.print("\n[bold yellow]Cancelled by user.[/bold yellow]")
+
+    if trace:
+        ttbl = Table(title=f"Trace · {code} · {asof}")
+        ttbl.add_column("Agent", style="cyan")
+        ttbl.add_column("Status")
+        ttbl.add_column("Elapsed", justify="right")
+        ttbl.add_column("Output bytes (rough token proxy)", justify="right")
+        total_elapsed = 0.0
+        for n in nodes:
+            name = n.agent.NAME
+            r = results.get(name)
+            ok = "✓" if (r and r.ok) else ("✗" if r else "—")
+            elapsed = r.elapsed_seconds if r else 0.0
+            total_elapsed += elapsed
+            output_size = 0
+            if r and r.ok and r.output is not None:
+                try:
+                    output_size = len(r.output.model_dump_json())
+                except Exception:
+                    output_size = 0
+            ttbl.add_row(name, ok, f"{elapsed:.1f}s", str(output_size))
+        ttbl.add_row("[bold]TOTAL[/bold]", "", f"[bold]{total_elapsed:.1f}s[/bold]", "")
+        console.print(ttbl)
+
+    if cancelled:
+        return
 
     writer_result = results.get("report-writer")
     if writer_result and writer_result.ok:

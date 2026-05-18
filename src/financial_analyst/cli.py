@@ -42,13 +42,34 @@ def version():
 
 @app.command()
 def report(
-    code: str = typer.Argument(..., help="Stock code, e.g. SH600519"),
+    code: Optional[str] = typer.Argument(None, help="Stock code, e.g. SH600519 (or use -f for batch)"),
     asof: str = typer.Option(None, help="As-of date YYYY-MM-DD (default: today)"),
     out_dir: Path = typer.Option(Path("./out"), help="Output directory"),
+    file: Optional[Path] = typer.Option(None, "--file", "-f", help="Read codes from file (one per line) for batch"),
+    trace: bool = typer.Option(False, "--trace", help="Print per-agent timing table after run"),
 ):
     """Generate single-stock deep-dive report (one-shot)."""
     from financial_analyst.tui import run_report_oneshot
-    asyncio.run(run_report_oneshot(code=code, asof=asof, out_dir=out_dir))
+
+    codes: list[str] = []
+    if code:
+        codes.append(code)
+    if file:
+        text = file.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                codes.append(line)
+    if not codes:
+        typer.echo("Error: provide a code as argument or use -f <file>")
+        raise typer.Exit(code=1)
+
+    for c in codes:
+        try:
+            asyncio.run(run_report_oneshot(code=c, asof=asof, out_dir=out_dir, trace=trace))
+        except KeyboardInterrupt:
+            typer.echo(f"\n[interrupted] cancelled report for {c}")
+            break
 
 
 @app.command()
@@ -277,12 +298,22 @@ def collectors_cmd(
 
 @app.command(name="ask")
 def ask_cmd(
-    query: str = typer.Argument(..., help="Natural-language question"),
+    query: Optional[str] = typer.Argument(None, help="Natural-language question (or use --file/stdin)"),
+    file: Optional[Path] = typer.Option(None, "--file", "-f", help="Read query from file"),
 ):
     """Ask the front-desk agent a question. Uses tools to search memory, read past reports, fetch quotes."""
     from financial_analyst.ask import ask
     from financial_analyst.tui import console
     from rich.markdown import Markdown
+
+    # Resolve query: argument > file > stdin
+    if query is None and file is not None:
+        query = file.read_text(encoding="utf-8").strip()
+    if query is None and not sys.stdin.isatty():
+        query = sys.stdin.read().strip()
+    if not query:
+        typer.echo("Error: provide a query as argument, with -f <file>, or via stdin")
+        raise typer.Exit(code=1)
 
     output = asyncio.run(ask(query))
     console.print(Markdown(output.answer or "(no answer)"))
