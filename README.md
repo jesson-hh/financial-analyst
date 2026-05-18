@@ -1,49 +1,78 @@
 # Financial Analyst
 
-A-share single-stock deep-dive multi-agent research workstation.
+[![tests](https://img.shields.io/badge/tests-226_passed-brightgreen)](https://github.com/jesson-hh/financial-analyst/actions)
+[![python](https://img.shields.io/badge/python-3.11+-blue)](https://www.python.org/)
+[![license](https://img.shields.io/badge/license-Apache_2.0-green)](LICENSE)
 
-**13 sub-agents in three trust tiers** — five Tier-1 data fetchers (two of which read untrusted news/F10 with JSON-schema-locked output), four Tier-2 analysts (fundamental, technical, whale-sentiment, quant), four Tier-3 decision agents (bull, bear, risk officer, report writer). Only the report writer can write files. Validated A-share research experience from a private quant platform is extracted into per-agent pluggable memory directories — edit a markdown, the next report uses it.
+**A-share single-stock deep-dive multi-agent research workstation.**
+
+**13 sub-agents in three trust tiers** — five Tier-1 data fetchers (two of which read untrusted news/F10 with JSON-schema-locked output), four Tier-2 analysts (fundamental, technical, whale-sentiment, quant), four Tier-3 decision agents (bull, bear, risk officer, report writer). Only the report writer can write files. Memory is pluggable per-agent (`memories/<agent>/*.md`) — edit a markdown, the next report uses it. FTS5-backed retrieval keeps prompt costs ~60% lower than naive full-injection.
 
 Inspired by [Anthropic's financial-services](https://github.com/anthropics/financial-services) (3-tier trust isolation, single-writer pattern) and [HKUDS/Vibe-Trading](https://github.com/HKUDS/Vibe-Trading) (YAML swarm presets, multi-provider LLM).
+
+## What's in v0.4
+
+- **13 sub-agent DAG** (data → analyst → decision), Qwen/Claude/DeepSeek/Ollama via LiteLLM
+- **QlibBinaryLoader** (day + 5min) + **TushareLoader** (HTTP + ParquetCache) + **CSV ingester**
+- **R7-R20 sentiment signals** (board_scorer v5, volume_regime super_distr/tail_surge, whale signals)
+- **Pluggable memory** with FTS5 retrieval + always_include white-list + `_shared/` cross-agent playbook
+- **Dream loop** — agent self-improving memory (OutcomeTracker + Introspector + `memories/_proposed/` staging + human accept/reject)
+- **BYOM** — registry-based plug-in points for models / loaders / collectors / sub-agents / KBs; `config/plugins.yaml` auto-loads user `.py` files at startup
+- **Markdown + JSON + HTML** output (Rich Markdown rendering + standalone HTML file)
+- **226 tests** unit + integration (mocked LLM)
 
 ## Quick Start
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/jesson-hh/financial-analyst.git
 cd financial-analyst
-python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
+python -m venv .venv && .venv\Scripts\activate    # Windows; on Unix: source .venv/bin/activate
 pip install -e .[dev]
 cp .env.example .env
-# Edit .env: set TUSHARE_TOKEN and ANTHROPIC_API_KEY (minimum)
-financial-analyst                                      # boots TUI
+# Edit .env: set TUSHARE_TOKEN + your LLM provider key (default config uses DASHSCOPE_API_KEY for Qwen)
+financial-analyst                                  # boots TUI
 ```
 
 In TUI:
+
 ```
 > 看看 600519
-> /agents
+> /agents                              # list 13 sub-agents
+> /memory search 游资                   # FTS5 across all memories
 > /memory list bear-advocate
-> /memory search 游资       # find all memory mentioning game-capital traders
-> /memory stats             # per-agent file count + bytes
+> /show                                # show last report
+> /dream --since 30                    # introspect past reports
+> /memory list-proposals               # see dream proposals
+> /memory accept _proposed/<file>      # merge a proposal into live memory
 > /quit
 ```
 
 One-shot:
+
 ```bash
-financial-analyst report SH600519
+financial-analyst report SH600519                  # single stock deep-dive
+financial-analyst ingest --source my_csv           # CSV → Qlib binary
+financial-analyst dream --since 30                 # introspect & propose memory updates
+financial-analyst models list                      # what models are registered
+financial-analyst loaders list                     # what loaders configured
+financial-analyst agents list                      # what sub-agents available
 ```
 
 ## Architecture
 
 ```
-Orchestrator -> Tier 1 (data, parallel) -> Tier 2 (analysts, parallel) -> Tier 3 (decision, serial)
+Orchestrator → Tier 1 (data, parallel) → Tier 2 (analysts, parallel) → Tier 3 (decision, serial)
+                  ↓                          ↓                              ↓
+              fetch + factor              4 analysts                  bull/bear/risk → writer
+              + read untrusted            consume tier 1 JSON         consume tier 2 JSON
+              with JSON schemas
 ```
 
-See [docs/architecture.md](docs/architecture.md) for the full DAG.
+See [docs/architecture.md](docs/architecture.md) for the full DAG and trust model.
 
 ## Extending — Bring Your Own Models (BYOM)
 
-`financial-analyst` is a framework. Plug in your own private models / loaders / collectors via the registry pattern:
+`financial-analyst` is a **framework**, not a fixed product. Plug in your own private models / loaders / collectors:
 
 ```python
 # G:/my_private_code/my_fm.py
@@ -51,7 +80,7 @@ from financial_analyst.models import BaseModel, ModelRegistry
 
 class MyFMCluster(BaseModel):
     def predict(self, code, asof):
-        return {"score": ..., "rank_pct": ...}
+        return {"score": ..., "rank_pct": ..., "cluster": ...}
     def metadata(self):
         return {"name": "my_fm", "version": "W10"}
 
@@ -64,31 +93,55 @@ load_at_startup:
   - G:/my_private_code/my_fm.py
 ```
 
-Now `financial-analyst report SH600519` will include your model in the quant consensus.
+Now `financial-analyst report SH600519` includes your model in the quant consensus. **No proprietary checkpoint enters the open-source repo.**
 
-See [docs/byom.md](docs/byom.md) for the full guide and `examples/` for 4 stub implementations (FM cluster, CSV loader, news collector, F10 collector).
+See [docs/byom.md](docs/byom.md) for the full guide. Examples for FM cluster / CSV loader / Tushare news collector / pytdx F10 collector are in [`examples/`](examples/).
 
-Inspect what's registered:
-```bash
-financial-analyst models list
-financial-analyst loaders list
-financial-analyst agents list
-financial-analyst collectors list
+## Data Ingestion
+
+If you don't have a Qlib data directory, ingest your CSVs:
+
+```yaml
+# config/data_sources.yaml
+sources:
+  - name: my_csv
+    type: csv
+    path: G:/my_data/*.csv
+    code_col: ts_code
+    date_col: trade_date
+    target: ~/.financial-analyst/data/my_csv
 ```
+
+```bash
+financial-analyst ingest --source my_csv
+# Then point config/loaders.yaml `qlib_binary.provider_uri.day` at the target
+```
+
+See [docs/data_ingest.md](docs/data_ingest.md).
 
 ## Memory System
 
-Each sub-agent has a `memories/<agent-name>/` directory. Files are concatenated into the agent's system prompt at runtime. Edit a memory file → next agent invocation picks it up. No restart required.
+Each sub-agent has `memories/<agent-name>/` with markdown files. Files are appended to the agent's system prompt at runtime. v0.2+: FTS5 retrieval keeps prompt cost down for agents marked `memory_mode: retrieval`. Critical files listed in `memories/<agent>/always_include.txt` are loaded unconditionally.
 
-**v0.2: FTS5 retrieval mode.** Per-agent `memory_mode: retrieval` (set in preset yaml) switches inline-injection to top-K FTS5 retrieval, cutting prompt tokens ~60% for agents with large memory libraries (e.g. `bear-advocate`, `risk-officer`). The `_shared/` directory always loads in full. See [docs/memories.md](docs/memories.md).
+See [docs/memories.md](docs/memories.md) for principles, file-organization advice, and CLI commands.
 
-See [docs/memories.md](docs/memories.md).
+## Dream Loop — Agent Self-Improving Memory
+
+Run `/dream` (or `financial-analyst dream`) to:
+1. Score past reports against T+5d / T+20d actual prices.
+2. Have an introspector sub-agent identify patterns in wrong predictions.
+3. Stage proposals in `memories/_proposed/<agent>/` for human review.
+4. `/memory accept` merges; `/memory reject` discards.
+
+**Auto-accept is intentionally NOT implemented** — incorrect memory updates compound losses in quant systems. Human review only.
+
+See [docs/dream_loop.md](docs/dream_loop.md).
 
 ## Tests
 
 ```bash
-pytest tests/                # ~100 unit + integration tests, all mocked
-FA_E2E=1 pytest tests/integration/test_end_to_end.py  # real Tushare + Claude
+pytest tests/                                       # 226 unit + integration tests (mocked)
+FA_E2E=1 pytest tests/integration/test_end_to_end.py  # real Tushare + LLM round-trip
 ```
 
 ## License
