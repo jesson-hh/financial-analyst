@@ -1,0 +1,20 @@
+# docker compose up    # interactive TUI
+# docker compose run --rm fa report SH600519
+# docker compose run --rm fa ask "PE of SH600519"
+
+services:
+  fa:
+    build: .
+    image: financial-analyst:latest
+    # Environment from .env file in compose dir (NOT committed)
+    env_file:
+      - .env
+    # Volumes — your data + reports persist on host
+    volumes:
+      - ./out:/app/out                    # generated reports
+      - ./news:/app/news                  # news drop-zone
+      - ./f10:/app/f10                    # F10 drop-zone
+      - ./memories:/app/memories           # your edited memory files
+      - ~/.financial-analyst/cache:/root/.financial-analyst/cache   # FTS5 index + parquet cache
+    stdin_open: true
+    tty: true

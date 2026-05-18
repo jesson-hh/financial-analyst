@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.0.0 — 2026-05-18
+
+### Added
+- **Docker support**: `Dockerfile` + `docker-compose.yml` for zero-config deployment.
+- **README polish**: three install paths (PyPI / Docker / source), all 13 CLI commands documented in quick-start.
+- **Badges**: PyPI version, Python compat, tests, license, status.
+
+### Changed
+- Bumped version to **1.0.0** — stable API.
+- README quick-start rewritten to highlight Docker as 2-minute path.
+- `Development Status` classifier updated to `5 - Production/Stable`.
+
+### Stability promise from 1.0
+- All public APIs (`BaseLoader`, `BaseModel`, `BaseIngester`, `BaseNewsCollector`, `BaseF10Collector`, `KnowledgeBase`, `SubAgent`, registries, CLI subcommands) follow semver from here.
+- Breaking changes require major version bump.
+- v1.x will focus on stability + ecosystem (additional collectors / models / docs), not protocol changes.
+
+### Capabilities at 1.0
+- 13 single-stock sub-agents in three trust tiers + 5 market-level agents + introspector + ask-agent = 20 agents total
+- 7 swarm presets: stock-deep-dive, mainline-radar, morning-brief, intraday-review, dream (implicit)
+- 12 MCP tools exposed for Claude Desktop integration
+- 11 CLI subcommands (report / ask / ingest / dream / mainline / brief / intraday / models / loaders / agents / collectors / version)
+- 290 tests + 1 opt-in real E2E test
+- Memory system: per-agent + _shared + always_include + FTS5 retrieval + hot reload + dream-loop proposals
+- BYOM via `config/plugins.yaml` — register your private models / loaders / collectors without forking
+
 ## v0.10.0 — 2026-05-18
 
 ### Added (MCP Server)
