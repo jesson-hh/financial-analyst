@@ -7,13 +7,13 @@ from financial_analyst.llm.client import LLMClient
 
 
 class WhaleOutput(BaseModel):
-    whale_score: int  # -2..+2
-    sentiment_label: str  # super_distr | distr | tail_surge | bounce | neutral
-    vol_regime_label: str
+    whale_score: int = 0  # -2..+2
+    sentiment_label: str = "neutral"  # super_distr | distr | tail_surge | bounce | neutral
+    vol_regime_label: str = "neutral"
     board_total_score: Optional[int] = None  # -7..+8 if limit-up day exists
-    alerts: List[str]
-    bull_points: List[str]
-    bear_points: List[str]
+    alerts: List[str] = []
+    bull_points: List[str] = []
+    bear_points: List[str] = []
 
 
 SYSTEM_PROMPT = """You are a whale-behavior + sentiment analyst for A-shares. You interpret:

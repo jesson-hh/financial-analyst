@@ -7,12 +7,12 @@ from financial_analyst.llm.client import LLMClient
 
 
 class QuantOutput(BaseModel):
-    quant_score: int  # -2..+2
-    model_consensus: str  # strong_long | weak_long | neutral | weak_short | strong_short
-    conviction_level: str  # low | medium | high
-    anti_signals: List[str]
-    bull_points: List[str]
-    bear_points: List[str]
+    quant_score: int = 0  # -2..+2
+    model_consensus: str = "neutral"  # strong_long | weak_long | neutral | weak_short | strong_short
+    conviction_level: str = "low"  # low | medium | high
+    anti_signals: List[str] = []
+    bull_points: List[str] = []
+    bear_points: List[str] = []
 
 
 SYSTEM_PROMPT = """You are a quantitative analyst for A-shares. You receive predictions from registered models

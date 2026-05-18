@@ -10,8 +10,8 @@ from financial_analyst.llm.client import LLMClient
 class ReportOutput(BaseModel):
     output_md_path: str
     output_json_path: str
-    rating_overall: int             # -10..+10 (sum of 5 dimensions)
-    rating_dimensions: Dict[str, int]   # 5 dims, each -2..+2
+    rating_overall: int                  # -10..+10 (sum of 5 dimensions)
+    rating_dimensions: Dict[str, int] = {} # 5 dims, each -2..+2
     action: str                          # buy | hold | sell | avoid
     target_price: float
     stop_loss: float

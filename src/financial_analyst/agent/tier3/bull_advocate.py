@@ -7,12 +7,12 @@ from financial_analyst.llm.client import LLMClient
 
 
 class BullOutput(BaseModel):
-    thesis_bullets: List[str]      # 3-5 bullish bullets
-    catalysts: List[str]            # upcoming events that could re-rate
-    target_price_high: float
-    target_price_base: float
-    disproof_signals: List[str]     # what would invalidate the bull thesis
-    v_anchors: List[str]            # V1-V9 references, e.g. ["V1", "V4-立讯模式"]
+    thesis_bullets: List[str] = []      # 3-5 bullish bullets
+    catalysts: List[str] = []            # upcoming events that could re-rate
+    target_price_high: float = 0.0
+    target_price_base: float = 0.0
+    disproof_signals: List[str] = []     # what would invalidate the bull thesis
+    v_anchors: List[str] = []            # V1-V9 references, e.g. ["V1", "V4-立讯模式"]
 
 
 SYSTEM_PROMPT = """You are a buy-side Bull Advocate for A-share single-stock research. You receive:

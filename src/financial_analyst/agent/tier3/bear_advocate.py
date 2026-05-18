@@ -7,12 +7,12 @@ from financial_analyst.llm.client import LLMClient
 
 
 class BearOutput(BaseModel):
-    thesis_bullets: List[str]              # 3-5 bearish bullets
-    valuation_concerns: List[str]
-    technical_breakdown: List[str]
-    target_price_low: float
-    downside_pct: float                     # vs current price, e.g. -0.20
-    f_anchors: List[str]                    # F1-F14 failure mode references
+    thesis_bullets: List[str] = []              # 3-5 bearish bullets
+    valuation_concerns: List[str] = []
+    technical_breakdown: List[str] = []
+    target_price_low: float = 0.0
+    downside_pct: float = 0.0                    # vs current price, e.g. -0.20
+    f_anchors: List[str] = []                    # F1-F14 failure mode references
 
 
 SYSTEM_PROMPT = """You are a buy-side Bear Advocate for A-share single-stock research. You receive same upstream as bull.

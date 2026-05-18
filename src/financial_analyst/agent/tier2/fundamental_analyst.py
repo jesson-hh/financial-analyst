@@ -7,12 +7,12 @@ from financial_analyst.llm.client import LLMClient
 
 
 class FundamentalOutput(BaseModel):
-    valuation_score: int  # -2..+2
-    mv_tier: str  # "large" | "mid" | "small"
-    dimension_detail: Dict[str, str]  # e.g. {"pe": "in line", "pb": "premium"}
-    red_flags: List[str]
-    bull_points: List[str]
-    bear_points: List[str]
+    valuation_score: int = 0  # -2..+2
+    mv_tier: str = "mid"  # "large" | "mid" | "small"
+    dimension_detail: Dict[str, str] = {}
+    red_flags: List[str] = []
+    bull_points: List[str] = []
+    bear_points: List[str] = []
 
 
 SYSTEM_PROMPT = """You are a fundamental equity analyst for A-shares. You receive structured quote data

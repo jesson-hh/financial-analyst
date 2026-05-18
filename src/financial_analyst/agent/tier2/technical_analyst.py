@@ -7,14 +7,14 @@ from financial_analyst.llm.client import LLMClient
 
 
 class TechnicalOutput(BaseModel):
-    technical_score: int  # -2..+2
-    ma_state: str           # bullish | bearish | neutral
-    rsi_state: str          # overbought | oversold | neutral
-    macd_state: str         # bullish_cross | bearish_cross | neutral
-    factor_consensus: str   # strong_long | weak_long | neutral | weak_short | strong_short
+    technical_score: int = 0  # -2..+2
+    ma_state: str = "neutral"           # bullish | bearish | neutral
+    rsi_state: str = "neutral"          # overbought | oversold | neutral
+    macd_state: str = "neutral"         # bullish_cross | bearish_cross | neutral
+    factor_consensus: str = "neutral"   # strong_long | weak_long | neutral | weak_short | strong_short
     breakout_signal: Optional[str] = None
-    bull_points: List[str]
-    bear_points: List[str]
+    bull_points: List[str] = []
+    bear_points: List[str] = []
 
 
 SYSTEM_PROMPT = """You are a technical analyst for A-shares. You receive quote data (returns, MA, vol, volume_ratio) and factor scores (rev_20, mom_20, rsi_14, macd_bar, bb_pct_20, obv_slope_20, etc.).

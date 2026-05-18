@@ -19,10 +19,10 @@ providers:
 agent_overrides:
   report-writer:
     provider: qwen
-    model: qwen3-max
+    model: qwen3.5-plus
   news-reader:
     provider: qwen
-    model: qwen3.5-flash
+    model: qwen3.5-plus
   f10-reader:
     provider: qwen
-    model: qwen3.5-flash
+    model: qwen3.5-plus

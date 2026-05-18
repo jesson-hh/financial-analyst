@@ -7,12 +7,12 @@ from financial_analyst.llm.client import LLMClient
 
 
 class RiskOutput(BaseModel):
-    risk_score: int                    # -2..0 (risk officer never positive — only constrains)
-    blind_spots: List[str]             # things both Bull and Bear missed
-    position_sizing_advice: str        # "0%" | "1-3%" | "3-5%" | "5-8%"
-    veto_flags: List[str]              # if non-empty, position_pct should be 0
-    conditional_approval: str          # e.g. "OK if stop-loss at 1450; reduce if super_distr persists"
-    hard_rule_triggers: List[str]      # rules from memory that fired
+    risk_score: int = 0                # -2..0 (risk officer never positive — only constrains)
+    blind_spots: List[str] = []        # things both Bull and Bear missed
+    position_sizing_advice: str = "0%" # "0%" | "1-3%" | "3-5%" | "5-8%"
+    veto_flags: List[str] = []         # if non-empty, position_pct should be 0
+    conditional_approval: str = ""     # e.g. "OK if stop-loss at 1450; reduce if super_distr persists"
+    hard_rule_triggers: List[str] = [] # rules from memory that fired
 
 
 SYSTEM_PROMPT = """You are an independent Chief Risk Officer for an A-share research desk. You receive:
