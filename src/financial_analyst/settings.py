@@ -23,6 +23,10 @@ class Settings(BaseSettings):
         validation_alias="FA_CACHE_DIR",
     )
 
+    mainline_panel_path: Optional[str] = Field(
+        default=None, validation_alias="FA_MAINLINE_PANEL",
+    )
+
     def __init__(self, **kw):
         super().__init__(**kw)
         self.cache_dir = Path(self.cache_dir).expanduser()

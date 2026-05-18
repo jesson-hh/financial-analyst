@@ -170,11 +170,8 @@ def render_banner() -> None:
 # ---------------------------------------------------------------------------
 
 def _ensure_registered() -> None:
-    """Register all 13 sub-agents into SubAgentRegistry (idempotent)."""
+    """Register all 15 sub-agents into SubAgentRegistry (idempotent)."""
     from financial_analyst.agent.registry import SubAgentRegistry
-
-    if SubAgentRegistry.names():
-        return
 
     from financial_analyst.agent.tier1.quote_fetcher import QuoteFetcher
     from financial_analyst.agent.tier1.factor_computer import FactorComputer
@@ -189,6 +186,8 @@ def _ensure_registered() -> None:
     from financial_analyst.agent.tier3.bear_advocate import BearAdvocate
     from financial_analyst.agent.tier3.risk_officer import RiskOfficer
     from financial_analyst.agent.tier3.report_writer import ReportWriter
+    from financial_analyst.agent.mainline.mainline_classifier import MainlineClassifier
+    from financial_analyst.agent.mainline.mainline_writer import MainlineWriter
 
     for name, cls in [
         ("quote-fetcher", QuoteFetcher),
@@ -204,6 +203,8 @@ def _ensure_registered() -> None:
         ("bear-advocate", BearAdvocate),
         ("risk-officer", RiskOfficer),
         ("report-writer", ReportWriter),
+        ("mainline-classifier", MainlineClassifier),
+        ("mainline-writer", MainlineWriter),
     ]:
         if name not in SubAgentRegistry.names():
             SubAgentRegistry.register(name, cls)
@@ -225,6 +226,8 @@ async def handle_slash(cmd: str, args: List[str]) -> None:
                 tier = "1"
             elif "analyst" in name:
                 tier = "2"
+            elif "mainline" in name:
+                tier = "M"
             else:
                 tier = "3"
             tbl.add_row(name, tier)
@@ -273,6 +276,19 @@ async def handle_slash(cmd: str, args: List[str]) -> None:
             console.print(
                 f"\n[yellow]Recommend: /report {output.suggested_code}[/yellow]"
             )
+
+    elif cmd == "mainline":
+        # parse args: /mainline [--asof=YYYY-MM-DD] [--panel=/path]
+        asof = None
+        panel = None
+        out_dir = Path("out")
+        for a in args:
+            if a.startswith("--asof="):
+                asof = a.split("=", 1)[1]
+            elif a.startswith("--panel="):
+                panel = a.split("=", 1)[1]
+        from financial_analyst.cli import _run_mainline
+        await _run_mainline(asof=asof, panel=panel, out_dir=out_dir)
 
     elif cmd == "provider":
         console.print(

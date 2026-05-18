@@ -29,3 +29,9 @@ agent_overrides:
   ask:
     provider: qwen
     model: qwen3.5-plus
+  mainline-classifier:
+    provider: qwen
+    model: qwen3.5-plus     # actually no LLM call but for consistency
+  mainline-writer:
+    provider: qwen
+    model: qwen3.5-plus

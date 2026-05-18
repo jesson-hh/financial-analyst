@@ -3,7 +3,9 @@ import asyncio
 import sys
 import typer
 from pathlib import Path
+from typing import Optional
 from dotenv import load_dotenv
+import pandas as pd
 
 # On Windows zh-CN PowerShell, default stdout codec is GBK which chokes on ¥, emoji,
 # and any rare CJK char. Force UTF-8 with replace-on-error so reports always render.
@@ -229,7 +231,7 @@ def loaders_cmd(
 def agents_cmd(
     action: str = typer.Argument("list", help="Subcommand: list"),
 ):
-    """List registered sub-agents (13 built-in + any user-added)."""
+    """List registered sub-agents (15 built-in + any user-added)."""
     if action != "list":
         typer.echo(f"Unknown action: {action}. Try: list")
         raise typer.Exit(code=1)
@@ -245,6 +247,8 @@ def agents_cmd(
             tier = "Tier 2"
         elif n == "introspector":
             tier = "Dream"
+        elif "mainline" in n:
+            tier = "Tier M"
         else:
             tier = "Tier 3"
         typer.echo(f"  {n:<24} {tier}")
@@ -291,6 +295,43 @@ def ask_cmd(
             f"\n[yellow]This requires a full deep-dive. Run:[/yellow]\n"
             f"  financial-analyst report {output.suggested_code}"
         )
+
+
+@app.command()
+def mainline(
+    asof: str = typer.Option(None, "--asof", help="As-of date YYYY-MM-DD (default: latest)"),
+    panel: str = typer.Option(None, "--panel", help="Path to panel parquet"),
+    out_dir: Path = typer.Option(Path("out"), "--out", help="Output directory"),
+):
+    """Generate monthly mainline radar brief (sector-level)."""
+    asyncio.run(_run_mainline(asof=asof, panel=panel, out_dir=out_dir))
+
+
+async def _run_mainline(asof: Optional[str], panel: Optional[str], out_dir: Path):
+    from financial_analyst.agent.orchestrator import Orchestrator
+    from financial_analyst.agent.registry import SubAgentRegistry
+    from financial_analyst.swarm import load_preset
+    from financial_analyst.tui import _ensure_registered
+
+    _ensure_registered()
+    nodes = load_preset("mainline-radar", memory_root=Path("memories"))
+    asof = asof or pd.Timestamp.today().strftime("%Y-%m-%d")
+    base_inputs = {"asof_date": asof, "out_dir": str(out_dir)}
+    if panel:
+        base_inputs["panel_path"] = panel
+
+    orch = Orchestrator(nodes)
+    typer.echo(f"Running mainline-radar for {asof}...")
+    results = await orch.run(base_inputs)
+
+    writer_result = results.get("mainline-writer")
+    if writer_result and writer_result.ok:
+        typer.echo(f"Brief: {writer_result.output.output_md_path}")
+        typer.echo(f"Headline: {writer_result.output.headline}")
+    else:
+        for n, r in results.items():
+            if not r.ok:
+                typer.echo(f"[red]{n}: {r.error}[/red]")
 
 
 @app.callback(invoke_without_command=True)
