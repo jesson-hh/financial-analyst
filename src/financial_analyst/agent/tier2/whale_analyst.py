@@ -44,14 +44,45 @@ class WhaleAnalyst(SubAgent[WhaleOutput]):
         client = LLMClient.for_agent(self.NAME)
         quote = inputs.get("quote-fetcher", {})
         factors = inputs.get("factor-computer", {})
+        code = quote.get("code", "") if isinstance(quote, dict) else ""
+
         upstream = json.dumps({
             "quote": quote,
             "whale_signals": factors.get("whale_signals", {}) if isinstance(factors, dict) else {},
             "board_score": factors.get("board_score", {}) if isinstance(factors, dict) else {},
             "vol_regime": factors.get("vol_regime", {}) if isinstance(factors, dict) else {},
         }, default=str, ensure_ascii=False)
+
+        # v1.2: augment with social posts from NewsDB (retail sentiment)
+        social_block = ""
+        if code:
+            try:
+                from financial_analyst.data.news_db import NewsDB
+                db = NewsDB()
+                posts = db.query_social_posts(code=code, since_days=7, limit=20)
+                db.close()
+                if posts:
+                    lines = [f"## 雪球散户讨论 (近 7 日, {len(posts)} 条):\n"]
+                    # Aggregate stats
+                    total_likes = sum(p.get("likes", 0) or 0 for p in posts)
+                    total_comments = sum(p.get("comments_count", 0) or 0 for p in posts)
+                    lines.append(f"- 总点赞: {total_likes}, 总评论: {total_comments}\n")
+                    # Sample posts (top by engagement)
+                    top_posts = sorted(
+                        posts,
+                        key=lambda p: (p.get("likes", 0) or 0) + (p.get("comments_count", 0) or 0),
+                        reverse=True,
+                    )[:5]
+                    for p in top_posts:
+                        likes = p.get("likes", 0)
+                        content = (p.get("content", "") or "")[:200]
+                        lines.append(f"- [{likes}赞] {content}")
+                    social_block = "\n\n# 散户情绪 (NewsDB.social_posts)\n" + "\n".join(lines)
+            except Exception:
+                pass
+
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT + "\n\n# Memory\n" + self.memory.load_all()},
+            {"role": "system", "content": SYSTEM_PROMPT + "\n\n# Memory\n" + self.memory.load_all() + social_block},
             {"role": "user", "content": f"Upstream:\n{upstream}\n\nReturn JSON."},
         ]
         response = await client.chat(

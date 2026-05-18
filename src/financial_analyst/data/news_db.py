@@ -1,10 +1,13 @@
-"""Local SQLite news DB. Stores news/lhb/holders + FTS5 full-text index.
+"""Local SQLite news DB. Stores news/lhb/holders/social/hot/earnings + FTS5 full-text index.
 
 Schema:
-    news       — eastmoney_kuaixun / sinafinance_news / etc
-    lhb        — 龙虎榜 daily entries
-    holders    — 十大流通股东 quarterly snapshots
-    news_fts   — FTS5 virtual table over news.title || news.content
+    news          — eastmoney_kuaixun / sinafinance_news / etc
+    lhb           — 龙虎榜 daily entries
+    holders       — 十大流通股东 quarterly snapshots
+    news_fts      — FTS5 virtual table over news.title || news.content
+    social_posts  — xueqiu comments / weibo (retail sentiment)
+    hot_stocks    — xueqiu/sinafinance heat rankings
+    earnings_dates — upcoming earnings release calendar
 """
 from __future__ import annotations
 import json
@@ -65,6 +68,43 @@ CREATE INDEX IF NOT EXISTS holders_code_idx ON holders(code);
 CREATE VIRTUAL TABLE IF NOT EXISTS news_fts USING fts5(
     title, content, related_codes,
     tokenize="unicode61 remove_diacritics 2"
+);
+
+CREATE TABLE IF NOT EXISTS social_posts (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    code TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    author TEXT,
+    content TEXT,
+    likes INTEGER,
+    comments_count INTEGER,
+    retweet_count INTEGER,
+    raw TEXT
+);
+CREATE INDEX IF NOT EXISTS social_code_idx ON social_posts(code);
+CREATE INDEX IF NOT EXISTS social_ts_idx ON social_posts(ts);
+
+CREATE TABLE IF NOT EXISTS hot_stocks (
+    snapshot_date TEXT NOT NULL,
+    source TEXT NOT NULL,
+    rank INTEGER NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    price REAL,
+    change_percent REAL,
+    heat INTEGER,
+    PRIMARY KEY (snapshot_date, source, rank)
+);
+CREATE INDEX IF NOT EXISTS hot_code_idx ON hot_stocks(code);
+
+CREATE TABLE IF NOT EXISTS earnings_dates (
+    code TEXT NOT NULL,
+    report_date TEXT NOT NULL,
+    quarter TEXT,
+    source TEXT,
+    captured_at TEXT,
+    PRIMARY KEY (code, report_date)
 );
 """
 
@@ -238,9 +278,128 @@ class NewsDB:
             )
         return [dict(row) for row in cur.fetchall()]
 
+    # ---- social_posts ----
+
+    def upsert_social_posts(self, code: str, items: Iterable[Dict[str, Any]], source: str) -> int:
+        """Insert/update social media posts for a stock."""
+        n = 0
+        for it in items:
+            post_id = str(it.get("id") or it.get("post_id") or it.get("ts") or "")
+            row_id = f"{source}::{code}::{post_id}"
+            self.conn.execute(
+                "INSERT OR REPLACE INTO social_posts (id, source, code, ts, author, content, "
+                "likes, comments_count, retweet_count, raw) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    row_id, source, code.upper(),
+                    str(it.get("ts") or it.get("time") or it.get("created_at") or ""),
+                    str(it.get("author") or it.get("user") or ""),
+                    str(it.get("content") or it.get("text") or ""),
+                    it.get("likes") or it.get("like_count") or 0,
+                    it.get("comments_count") or it.get("comments") or it.get("reply_count") or 0,
+                    it.get("retweet_count") or it.get("retweets") or 0,
+                    json.dumps(it, ensure_ascii=False, default=str),
+                ),
+            )
+            n += 1
+        self.conn.commit()
+        return n
+
+    def query_social_posts(self, code: str, since_days: int = 7, limit: int = 50) -> List[Dict[str, Any]]:
+        """Recent social posts for a stock."""
+        from datetime import timedelta
+        cutoff = (datetime.now() - timedelta(days=since_days)).strftime("%Y-%m-%d")
+        cur = self.conn.execute(
+            "SELECT * FROM social_posts WHERE code = ? AND ts >= ? ORDER BY ts DESC LIMIT ?",
+            (code.upper(), cutoff, limit),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    # ---- hot_stocks ----
+
+    def upsert_hot_stocks(self, items: Iterable[Dict[str, Any]], source: str,
+                           snapshot_date: Optional[str] = None) -> int:
+        snapshot = snapshot_date or datetime.now().strftime("%Y-%m-%d")
+        n = 0
+        for it in items:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO hot_stocks (snapshot_date, source, rank, code, name, "
+                "price, change_percent, heat) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    snapshot, source, it.get("rank"),
+                    str(it.get("symbol") or it.get("code") or ""),
+                    it.get("name"),
+                    it.get("price"),
+                    it.get("changePercent") or it.get("change_percent"),
+                    it.get("heat") or it.get("hotness") or 0,
+                ),
+            )
+            n += 1
+        self.conn.commit()
+        return n
+
+    def query_hot_stocks(self, source: Optional[str] = None,
+                          latest_only: bool = True, limit: int = 50) -> List[Dict[str, Any]]:
+        if latest_only:
+            sql = """SELECT * FROM hot_stocks
+                     WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM hot_stocks)"""
+            params: list = []
+            if source:
+                sql += " AND source = ?"
+                params.append(source)
+            sql += " ORDER BY rank LIMIT ?"
+            params.append(limit)
+        else:
+            sql = "SELECT * FROM hot_stocks"
+            params = []
+            if source:
+                sql += " WHERE source = ?"
+                params.append(source)
+            sql += " ORDER BY snapshot_date DESC, rank LIMIT ?"
+            params.append(limit)
+        cur = self.conn.execute(sql, params)
+        return [dict(row) for row in cur.fetchall()]
+
+    # ---- earnings_dates ----
+
+    def upsert_earnings_dates(self, items: Iterable[Dict[str, Any]], source: str) -> int:
+        captured = datetime.now().isoformat(timespec="seconds")
+        n = 0
+        for it in items:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO earnings_dates (code, report_date, quarter, source, captured_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    str(it.get("code") or it.get("symbol") or "").upper(),
+                    str(it.get("report_date") or it.get("date") or ""),
+                    str(it.get("quarter") or ""),
+                    source,
+                    captured,
+                ),
+            )
+            n += 1
+        self.conn.commit()
+        return n
+
+    def query_earnings_dates(self, code: Optional[str] = None,
+                              upcoming_days: int = 90) -> List[Dict[str, Any]]:
+        from datetime import timedelta
+        today = datetime.now().strftime("%Y-%m-%d")
+        cutoff = (datetime.now() + timedelta(days=upcoming_days)).strftime("%Y-%m-%d")
+        params: list = [today, cutoff]
+        sql = "SELECT * FROM earnings_dates WHERE report_date >= ? AND report_date <= ?"
+        if code:
+            sql += " AND code = ?"
+            params.append(code.upper())
+        sql += " ORDER BY report_date ASC"
+        cur = self.conn.execute(sql, params)
+        return [dict(row) for row in cur.fetchall()]
+
     def stats(self) -> Dict[str, int]:
         return {
             "news": self.conn.execute("SELECT COUNT(*) FROM news").fetchone()[0],
             "lhb": self.conn.execute("SELECT COUNT(*) FROM lhb").fetchone()[0],
             "holders": self.conn.execute("SELECT COUNT(*) FROM holders").fetchone()[0],
+            "social_posts": self.conn.execute("SELECT COUNT(*) FROM social_posts").fetchone()[0],
+            "hot_stocks": self.conn.execute("SELECT COUNT(*) FROM hot_stocks").fetchone()[0],
+            "earnings_dates": self.conn.execute("SELECT COUNT(*) FROM earnings_dates").fetchone()[0],
         }

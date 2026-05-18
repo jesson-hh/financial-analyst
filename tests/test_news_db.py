@@ -6,7 +6,14 @@ from financial_analyst.data.news_db import NewsDB
 def test_news_db_init_creates_tables(tmp_path):
     db = NewsDB(path=tmp_path / "test.sqlite")
     stats = db.stats()
-    assert stats == {"news": 0, "lhb": 0, "holders": 0}
+    # Core tables always present
+    assert stats["news"] == 0
+    assert stats["lhb"] == 0
+    assert stats["holders"] == 0
+    # v1.2 tables
+    assert stats["social_posts"] == 0
+    assert stats["hot_stocks"] == 0
+    assert stats["earnings_dates"] == 0
     db.close()
 
 

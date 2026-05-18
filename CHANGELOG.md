@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.2.0 — 2026-05-18
+
+### Added
+- **3 xueqiu cookie-mode collectors**: `xueqiu-comments` (散户讨论), `xueqiu-hot` (热股榜), `xueqiu-earnings` (财报日历)
+- NewsDB extended with 3 new tables: `social_posts`, `hot_stocks`, `earnings_dates`
+- `news-collect --sources xueqiu-comments --code SH600519` etc
+- `financial-analyst doctor` command for env diagnostics (OpenCLI / Chrome / NewsDB / loaders)
+- `whale-analyst` sub-agent now pulls retail sentiment from `social_posts` when available
+
+### Requirements
+xueqiu commands need OpenCLI Chrome extension + Chrome login on xueqiu.com. See [docs/xueqiu_setup.md](docs/xueqiu_setup.md).
+
+### Why this matters
+Tushare and other APIs can't access retail-investor discussion. Xueqiu is the largest Chinese stock community — its `social_posts` give whale-analyst access to crowd sentiment that quantitative signals miss. Initial use case: validate that 主力 OBV trend matches retail engagement (or detect divergence).
+
 ## v1.1.0 — 2026-05-18
 
 ### Added (OpenCLI integration → local news DB)

@@ -449,9 +449,9 @@ async def _run_intraday(codes: str, asof: Optional[str], out_dir: Path):
 def news_collect_cmd(
     sources: str = typer.Option(
         "kuaixun,longhu", "--sources",
-        help="Comma list: kuaixun, longhu, holders, sinafinance",
+        help="Comma list: kuaixun, longhu, holders, sinafinance, xueqiu-comments, xueqiu-hot, xueqiu-earnings",
     ),
-    code: str = typer.Option("", "--code", help="Filter to one stock (for holders, required)"),
+    code: str = typer.Option("", "--code", help="Filter to one stock (for holders/xueqiu-comments/xueqiu-earnings, required)"),
     limit: int = typer.Option(200, "--limit", help="Max items per source"),
 ):
     """Collect news/F10 from OpenCLI sources into ~/.financial-analyst/data/news.sqlite."""
@@ -459,6 +459,7 @@ def news_collect_cmd(
     from financial_analyst.data.collectors.opencli import (
         is_opencli_available, EastmoneyKuaixunCollector, EastmoneyLonghuCollector,
         EastmoneyHoldersCollector, SinafinanceNewsCollector,
+        XueqiuCommentsCollector, XueqiuHotStockCollector, XueqiuEarningsCollector,
     )
     if not is_opencli_available():
         typer.echo("opencli not on PATH. Install: npm install -g @jackwener/opencli")
@@ -488,8 +489,26 @@ def news_collect_cmd(
                 items = SinafinanceNewsCollector().fetch(limit=limit)
                 n = db.upsert_news(items, source="sinafinance_news")
                 totals["sinafinance"] = n
+            elif src == "xueqiu-comments":
+                if not code:
+                    typer.echo("--code required for xueqiu-comments source")
+                    continue
+                items = XueqiuCommentsCollector().fetch(code, limit=limit)
+                n = db.upsert_social_posts(code, items, source="xueqiu_comments")
+                totals[f"xueqiu_comments_{code}"] = n
+            elif src == "xueqiu-hot":
+                items = XueqiuHotStockCollector().fetch(limit=limit)
+                n = db.upsert_hot_stocks(items, source="xueqiu_hot_stock")
+                totals["xueqiu_hot_stock"] = n
+            elif src == "xueqiu-earnings":
+                if not code:
+                    typer.echo("--code required for xueqiu-earnings source")
+                    continue
+                items = XueqiuEarningsCollector().fetch(code)
+                n = db.upsert_earnings_dates(items, source="xueqiu_earnings")
+                totals[f"xueqiu_earnings_{code}"] = n
             else:
-                typer.echo(f"Unknown source: {src} (try kuaixun/longhu/holders/sinafinance)")
+                typer.echo(f"Unknown source: {src} (try kuaixun/longhu/holders/sinafinance/xueqiu-comments/xueqiu-hot/xueqiu-earnings)")
         except Exception as exc:
             typer.echo(f"[{src}] failed: {exc}")
     db.close()
@@ -534,6 +553,81 @@ def news_stats_cmd():
     typer.echo("Local news DB stats:")
     for k, v in stats.items():
         typer.echo(f"  {k}: {v}")
+
+
+@app.command()
+def doctor():
+    """Diagnose financial-analyst environment (OpenCLI / Chrome / paths)."""
+    import shutil
+    import os
+    typer.echo("=== financial-analyst doctor ===\n")
+
+    # Python
+    typer.echo(f"Python: {sys.version.split()[0]}")
+    typer.echo(f"financial-analyst: {__version__}\n")
+
+    # Env vars
+    typer.echo("Env vars:")
+    for key in ("TUSHARE_TOKEN", "DASHSCOPE_API_KEY", "ANTHROPIC_API_KEY",
+                "FA_CACHE_DIR", "FA_UNIVERSE_FILE", "FA_MAINLINE_PANEL"):
+        val = os.environ.get(key, "")
+        marker = "v" if val else "x"
+        masked = (val[:6] + "..." if len(val) > 8 else val) if val else "(unset)"
+        typer.echo(f"  {marker} {key}: {masked}")
+    typer.echo("")
+
+    # OpenCLI
+    typer.echo("OpenCLI:")
+    opencli_path = shutil.which("opencli")
+    if opencli_path:
+        typer.echo(f"  v opencli on PATH: {opencli_path}")
+        # Try public command
+        try:
+            from financial_analyst.data.collectors.opencli import run_opencli
+            test = run_opencli("eastmoney", "kuaixun", "--limit", "1", timeout=15)
+            if isinstance(test, list) and test:
+                typer.echo("  v opencli eastmoney kuaixun: working")
+            else:
+                typer.echo("  ~ opencli eastmoney kuaixun: returned empty (check network)")
+        except Exception as exc:
+            typer.echo(f"  x opencli public test failed: {exc}")
+        # Try xueqiu (cookie-mode)
+        try:
+            from financial_analyst.data.collectors.opencli import XueqiuHotStockCollector
+            test = XueqiuHotStockCollector().fetch(limit=1)
+            if isinstance(test, list) and test:
+                typer.echo("  v opencli xueqiu hot-stock: working (cookie OK)")
+            else:
+                typer.echo("  ~ opencli xueqiu hot-stock: returned empty (Chrome ext not installed / not logged in)")
+        except Exception as exc:
+            typer.echo(f"  ~ opencli xueqiu test failed: {exc}")
+    else:
+        typer.echo("  x opencli not on PATH. Install: npm install -g @jackwener/opencli")
+    typer.echo("")
+
+    # NewsDB
+    typer.echo("NewsDB:")
+    try:
+        from financial_analyst.data.news_db import NewsDB, DEFAULT_DB_PATH
+        db = NewsDB()
+        stats = db.stats()
+        db.close()
+        typer.echo(f"  v DB path: {DEFAULT_DB_PATH}")
+        for k, v in stats.items():
+            typer.echo(f"    {k}: {v}")
+    except Exception as exc:
+        typer.echo(f"  x NewsDB error: {exc}")
+
+    # Data loaders
+    typer.echo("\nData loaders:")
+    try:
+        from financial_analyst.data.loader_factory import get_default_loader
+        loader = get_default_loader()
+        typer.echo(f"  v default loader: {type(loader).__name__}")
+    except Exception as exc:
+        typer.echo(f"  x default loader: {exc}")
+
+    typer.echo("\n=== done ===")
 
 
 @app.callback(invoke_without_command=True)
