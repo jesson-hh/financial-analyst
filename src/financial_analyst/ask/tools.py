@@ -18,7 +18,7 @@ def list_past_reports(out_dir: Path = Path("out"), limit: int = 10) -> List[Dict
     out_dir = Path(out_dir)
     if not out_dir.exists():
         return []
-    md_files = sorted(out_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+    md_files = sorted(out_dir.glob("*.md"), key=lambda p: p.name, reverse=True)
     results: List[Dict[str, Any]] = []
     for f in md_files[:limit]:
         stem = f.stem
@@ -59,7 +59,7 @@ def read_past_report(code: str, date_str: Optional[str] = None,
         path = out_dir / f"{code}_{date_str}.md"
         return path.read_text(encoding="utf-8") if path.exists() else None
     # Find most recent for this code
-    candidates = sorted(out_dir.glob(f"{code}_*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+    candidates = sorted(out_dir.glob(f"{code}_*.md"), key=lambda p: p.name, reverse=True)
     if not candidates:
         return None
     return candidates[0].read_text(encoding="utf-8")

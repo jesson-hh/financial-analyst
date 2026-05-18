@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.6.0 — 2026-05-18
+
+### Added
+- First PyPI release. Install: `pip install financial-analyst`.
+- Polished `pyproject.toml` with full metadata (classifiers, urls, keywords, authors).
+
+### Changed
+- README quick-start lead now shows `pip install financial-analyst` instead of `git clone`.
+- Version bump 0.5.0 → 0.6.0.
+
+### Notes
+- No functional code changes vs v0.5.0. This release is packaging-only.
+
 ## v0.4.0 — 2026-05-18
 
 ### Added (BYOM: Bring Your Own Models)

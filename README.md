@@ -1,6 +1,7 @@
 # Financial Analyst
 
-[![tests](https://img.shields.io/badge/tests-226_passed-brightgreen)](https://github.com/jesson-hh/financial-analyst/actions)
+[![PyPI](https://img.shields.io/pypi/v/financial-analyst)](https://pypi.org/project/financial-analyst/)
+[![tests](https://img.shields.io/badge/tests-240_passed-brightgreen)](https://github.com/jesson-hh/financial-analyst/actions)
 [![python](https://img.shields.io/badge/python-3.11+-blue)](https://www.python.org/)
 [![license](https://img.shields.io/badge/license-Apache_2.0-green)](LICENSE)
 
@@ -10,7 +11,7 @@
 
 Inspired by [Anthropic's financial-services](https://github.com/anthropics/financial-services) (3-tier trust isolation, single-writer pattern) and [HKUDS/Vibe-Trading](https://github.com/HKUDS/Vibe-Trading) (YAML swarm presets, multi-provider LLM).
 
-## What's in v0.4
+## What's in v0.6
 
 - **13 sub-agent DAG** (data → analyst → decision), Qwen/Claude/DeepSeek/Ollama via LiteLLM
 - **QlibBinaryLoader** (day + 5min) + **TushareLoader** (HTTP + ParquetCache) + **CSV ingester**
@@ -23,11 +24,24 @@ Inspired by [Anthropic's financial-services](https://github.com/anthropics/finan
 
 ## Quick Start
 
+**One-line install (when v0.6.0 is on PyPI):**
+
+```bash
+pip install financial-analyst
+```
+
+Or **from source** (development):
+
 ```bash
 git clone https://github.com/jesson-hh/financial-analyst.git
 cd financial-analyst
-python -m venv .venv && .venv\Scripts\activate    # Windows; on Unix: source .venv/bin/activate
+python -m venv .venv && .venv\Scripts\activate    # Windows; or `source .venv/bin/activate`
 pip install -e .[dev]
+```
+
+Then:
+
+```bash
 cp .env.example .env
 # Edit .env: set TUSHARE_TOKEN + your LLM provider key (default config uses DASHSCOPE_API_KEY for Qwen)
 financial-analyst                                  # boots TUI
@@ -37,25 +51,23 @@ In TUI:
 
 ```
 > 看看 600519
-> /agents                              # list 13 sub-agents
-> /memory search 游资                   # FTS5 across all memories
-> /memory list bear-advocate
-> /show                                # show last report
-> /dream --since 30                    # introspect past reports
-> /memory list-proposals               # see dream proposals
-> /memory accept _proposed/<file>      # merge a proposal into live memory
+> /ask 我最近研报里 bear 段是不是过激了
+> /agents
+> /memory search 游资
+> /show
+> /dream --since 30
+> /memory list-proposals
 > /quit
 ```
 
 One-shot:
 
 ```bash
-financial-analyst report SH600519                  # single stock deep-dive
-financial-analyst ingest --source my_csv           # CSV → Qlib binary
-financial-analyst dream --since 30                 # introspect & propose memory updates
-financial-analyst models list                      # what models are registered
-financial-analyst loaders list                     # what loaders configured
-financial-analyst agents list                      # what sub-agents available
+financial-analyst report SH600519
+financial-analyst ask "SH600519 现在 PE 多少"
+financial-analyst ingest --source my_csv
+financial-analyst dream --since 30
+financial-analyst models list
 ```
 
 ## Architecture
@@ -140,7 +152,7 @@ See [docs/dream_loop.md](docs/dream_loop.md).
 ## Tests
 
 ```bash
-pytest tests/                                       # 226 unit + integration tests (mocked)
+pytest tests/                                       # 240 unit + integration tests (mocked)
 FA_E2E=1 pytest tests/integration/test_end_to_end.py  # real Tushare + LLM round-trip
 ```
 

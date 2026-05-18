@@ -3,10 +3,11 @@ from financial_analyst.cli import app
 
 
 def test_version_command():
+    from financial_analyst import __version__
     runner = CliRunner()
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
-    assert "0.1.0" in result.stdout
+    assert __version__ in result.stdout
 
 
 def test_help_lists_commands():

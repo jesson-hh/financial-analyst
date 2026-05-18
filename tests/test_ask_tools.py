@@ -30,13 +30,9 @@ def test_list_past_reports_with_files(tmp_path):
 def test_read_past_report_latest(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
-    p1 = out / "SH600519_2026-05-15.md"
-    p2 = out / "SH600519_2026-05-16.md"
-    p1.write_text("first", encoding="utf-8")
-    p2.write_text("second", encoding="utf-8")
-    # Ensure p2 has a later mtime
-    import time
-    p2.touch()
+    (out / "SH600519_2026-05-15.md").write_text("first", encoding="utf-8")
+    (out / "SH600519_2026-05-16.md").write_text("second", encoding="utf-8")
+    # Latest by filename date (2026-05-16 > 2026-05-15 lexicographically)
     text = read_past_report("SH600519", out_dir=out)
     assert text == "second"
 
