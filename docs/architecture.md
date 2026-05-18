@@ -42,6 +42,8 @@ Orchestrator
 
 Each agent loads its own `memories/<name>/*.md` + `memories/_shared/*.md` at instantiation. The concatenated content is appended to the agent's system prompt as a `# Memory` section. Hot reload by calling `agent.memory.reload()`.
 
+**v0.2: retrieval mode.** Agents configured with `memory_mode: retrieval` in their swarm preset entry switch from `load_all()` to `load_relevant(query, top_k=5)`, backed by a shared SQLite FTS5 index over `memories/**/*.md`. The query is derived from the agent's upstream JSON. `_shared/` is always included regardless of mode.
+
 ## Extension Points
 
 | Axis | Interface | Default v0.1 | How to extend |
@@ -51,3 +53,4 @@ Each agent loads its own `memories/<name>/*.md` + `memories/_shared/*.md` at ins
 | KB | `KnowledgeBase` | LocalMarkdownKB | Implement, inject into sub-agent |
 | Sub-agent | `SubAgent` | 13 built-in | Implement, register, add to preset yaml |
 | Swarm preset | YAML | stock-deep-dive | Drop new yaml into `config/swarm/` |
+| Memory mode | per-agent `memory_mode` yaml key | full | Set `retrieval` to switch to FTS5 top-K retrieval (cuts prompt tokens) |

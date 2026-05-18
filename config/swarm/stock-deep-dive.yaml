@@ -47,10 +47,12 @@ agents:
   - name: bear-advocate
     deps: [fundamental-analyst, technical-analyst, whale-analyst, quant-analyst]
     input_keys: [fundamental-analyst, technical-analyst, whale-analyst, quant-analyst]
+    memory_mode: retrieval    # large pitfalls.md, F1-F14 — better retrieved
   - name: risk-officer
     deps: [bull-advocate, bear-advocate, news-reader, f10-reader, factor-computer]
     input_keys: [bull-advocate, bear-advocate, news-reader, f10-reader, factor-computer]
     borrows_memory: [bear-advocate]
+    memory_mode: retrieval    # 3 memory files + borrowed — better retrieved
   - name: report-writer
     deps: [quote-fetcher, factor-computer, model-predictor, fundamental-analyst,
            technical-analyst, whale-analyst, quant-analyst,

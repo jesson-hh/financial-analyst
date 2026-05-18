@@ -23,6 +23,8 @@ In TUI:
 > 看看 600519
 > /agents
 > /memory list bear-advocate
+> /memory search 游资       # find all memory mentioning game-capital traders
+> /memory stats             # per-agent file count + bytes
 > /quit
 ```
 
@@ -51,6 +53,8 @@ See [docs/extending.md](docs/extending.md).
 ## Memory System
 
 Each sub-agent has a `memories/<agent-name>/` directory. Files are concatenated into the agent's system prompt at runtime. Edit a memory file → next agent invocation picks it up. No restart required.
+
+**v0.2: FTS5 retrieval mode.** Per-agent `memory_mode: retrieval` (set in preset yaml) switches inline-injection to top-K FTS5 retrieval, cutting prompt tokens ~60% for agents with large memory libraries (e.g. `bear-advocate`, `risk-officer`). The `_shared/` directory always loads in full. See [docs/memories.md](docs/memories.md).
 
 See [docs/memories.md](docs/memories.md).
 

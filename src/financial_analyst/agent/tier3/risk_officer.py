@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import re
 from typing import Any, Dict, List
 from pydantic import BaseModel
 from financial_analyst.agent.base import SubAgent
@@ -59,8 +60,20 @@ class RiskOfficer(SubAgent[RiskOutput]):
             "f10": inputs.get("f10-reader", {}),
             "factor": inputs.get("factor-computer", {}),
         }, default=str, ensure_ascii=False)
+
+        # Use FTS5 retrieval when an index is available; fall back to full load
+        if self.memory.index is not None:
+            # Strip JSON punctuation so FTS5 doesn't mis-parse keys as column filters
+            query = " ".join(re.findall(r"[A-Za-z一-鿿]+", upstream[:1500]))
+            if query:
+                memory_text = self.memory.load_relevant(query, top_k=5)
+            else:
+                memory_text = self.memory.load_all()
+        else:
+            memory_text = self.memory.load_all()
+
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT + "\n\n# Memory\n" + self.memory.load_all()},
+            {"role": "system", "content": SYSTEM_PROMPT + "\n\n# Memory\n" + memory_text},
             {"role": "user", "content": f"Upstream:\n{upstream}\n\nReturn JSON per schema."},
         ]
         response = await client.chat(

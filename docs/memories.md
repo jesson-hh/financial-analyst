@@ -56,7 +56,33 @@ In a swarm yaml, declare `borrows_memory: [other-agent]` to grant read access:
   borrows_memory: [bear-advocate]   # CRO sees bear's pitfalls
 ```
 
+## Retrieval Mode (v0.2+)
+
+For agents with large memory libraries, you can switch from full-inline injection to FTS5-retrieved top-K snippets. This drops the system-prompt token cost ~60% without losing the most relevant context.
+
+In `config/swarm/<preset>.yaml`, mark an agent for retrieval:
+
+```yaml
+agents:
+  - name: bear-advocate
+    memory_mode: retrieval    # default: full
+```
+
+When `memory_mode: retrieval` is set AND the orchestrator builds the agent with a `MemoryIndex`, the agent calls `memory.load_relevant(query, top_k=5)` instead of `memory.load_all()`. The query is built from the agent's upstream JSON (first 1500 chars, FTS5-safe alphanumeric+CJK tokens). The `_shared/` directory is always included (core rules everyone needs).
+
+The FTS5 index lives at `~/.financial-analyst/cache/memory.fts5.db` and rebuilds incrementally on each TUI startup (via file mtime tracking). You can force a rebuild with `/memory reindex`.
+
 ## CLI commands
 
-- `/memory list <agent>` — list memory files
-- `/memory reload` — clear cached memory (next invocation reloads)
+| Command | Purpose |
+|---------|---------|
+| `/memory list <agent>` | List markdown files in `memories/<agent>/` |
+| `/memory show <agent>/<file>` | Print markdown content (rendered) |
+| `/memory edit <agent>/<file>` | Open in `$EDITOR` (notepad on Windows by default) |
+| `/memory search <query>` | FTS5 full-text search across all memories (top 10) |
+| `/memory stats` | Per-agent file count + byte size from FTS5 index |
+| `/memory diff` | Last 7 days of `git log` restricted to `memories/` |
+| `/memory reindex` | Force rebuild of FTS5 index from filesystem |
+| `/memory reload` | Clear in-memory caches (next agent invocation re-reads) |
+
+The `search` command auto-appends `*` to query tokens so prefix queries match (helpful for CJK terms like `游资*` matching `游资博弈`).

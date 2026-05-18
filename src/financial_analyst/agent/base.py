@@ -1,9 +1,12 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, Generic, Optional, Type, TypeVar
+from typing import TYPE_CHECKING, Any, Dict, Generic, Optional, Type, TypeVar
 from pydantic import BaseModel, ValidationError
 from financial_analyst.agent.memory import AgentMemory
+
+if TYPE_CHECKING:
+    from financial_analyst.agent.memory_index import MemoryIndex
 
 TOutput = TypeVar("TOutput", bound=BaseModel)
 
@@ -24,12 +27,13 @@ class SubAgent(ABC, Generic[TOutput]):
         self,
         memory_root: Path,
         borrows: Optional[list[str]] = None,
+        index: Optional["MemoryIndex"] = None,
     ):
         if not self.NAME:
             raise ValueError(f"{type(self).__name__}.NAME must be set")
         if self.OUTPUT_SCHEMA is None:
             raise ValueError(f"{type(self).__name__}.OUTPUT_SCHEMA must be set")
-        self.memory = AgentMemory(self.NAME, memory_root, borrows=borrows)
+        self.memory = AgentMemory(self.NAME, memory_root, borrows=borrows, index=index)
 
     @abstractmethod
     async def _execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]: ...
