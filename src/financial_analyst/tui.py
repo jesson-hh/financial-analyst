@@ -26,6 +26,18 @@ from rich.table import Table
 
 console = Console()
 
+from financial_analyst.sessions import SessionManager, SessionEvent
+
+session_mgr = SessionManager()   # auto-creates "default" session
+
+
+def _active_n_messages() -> int:
+    """Return n_messages for the currently active session."""
+    for m in session_mgr.list():
+        if m.name == session_mgr.active_name:
+            return m.n_messages
+    return 0
+
 
 # ---------------------------------------------------------------------------
 # Report renderer — print to terminal + export HTML
@@ -156,8 +168,10 @@ def render_banner() -> None:
     panel = Panel(
         f"[bold cyan]Financial Analyst v{__version__}[/bold cyan]\n"
         f"Provider: {cfg['default_provider']} / {cfg['default_model']}\n"
-        f"Sub-agents registered: {len(SubAgentRegistry.names())}\n\n"
-        "[dim]Commands: /report <code> · /memory · /provider · /agents · /show · /quit\n"
+        f"Sub-agents registered: {len(SubAgentRegistry.names())}\n"
+        f"Active session: [bold]{session_mgr.active_name}[/bold] "
+        f"({_active_n_messages()} past events)\n\n"
+        "[dim]Commands: /report <code> · /memory · /sessions · /provider · /agents · /show · /quit\n"
         "Natural language: '看看 600519'[/dim]",
         title="Welcome",
         border_style="cyan",
@@ -323,6 +337,64 @@ async def handle_slash(cmd: str, args: List[str]) -> None:
         console.print(
             "[yellow]provider switching: see config/llm.yaml (live switch TBD in v0.2)[/yellow]"
         )
+
+    elif cmd == "sessions":
+        if not args:
+            # /sessions — list all
+            tbl = Table(title="Sessions")
+            tbl.add_column("Name", style="cyan")
+            tbl.add_column("Active")
+            tbl.add_column("Messages", justify="right")
+            tbl.add_column("Last Active")
+            for m in session_mgr.list():
+                active_marker = "✓" if m.name == session_mgr.active_name else ""
+                name_cell = ("* " if m.name == session_mgr.active_name else "  ") + m.name
+                tbl.add_row(name_cell, active_marker, str(m.n_messages), m.last_active_at)
+            console.print(tbl)
+        elif args[0] == "new" and len(args) >= 2:
+            try:
+                meta = session_mgr.create(args[1])
+                session_mgr.switch(args[1])
+                console.print(f"[green]created + switched to:[/green] {meta.name}")
+            except ValueError as exc:
+                console.print(f"[red]{exc}[/red]")
+        elif args[0] == "switch" and len(args) >= 2:
+            try:
+                meta = session_mgr.switch(args[1])
+                console.print(f"[green]switched to:[/green] {meta.name}")
+            except Exception as exc:
+                console.print(f"[red]{exc}[/red]")
+        elif args[0] == "delete" and len(args) >= 2:
+            try:
+                session_mgr.delete(args[1])
+                console.print(f"[yellow]deleted:[/yellow] {args[1]}")
+            except (ValueError, FileNotFoundError) as exc:
+                console.print(f"[red]{exc}[/red]")
+        elif args[0] == "show":
+            target = args[1] if len(args) >= 2 else session_mgr.active_name
+            events = session_mgr.history(name=target, limit=30)
+            if not events:
+                console.print(f"[yellow]no events in session: {target}[/yellow]")
+                return
+            tbl = Table(title=f"Session {target} — last {len(events)} events")
+            tbl.add_column("Time", style="dim")
+            tbl.add_column("Kind", style="cyan")
+            tbl.add_column("Input")
+            tbl.add_column("Summary")
+            for e in events:
+                input_short = (e.input[:50] + "...") if len(e.input) > 50 else e.input
+                sum_short = (e.output_summary[:50] + "...") if len(e.output_summary) > 50 else e.output_summary
+                tbl.add_row(e.ts, e.kind, input_short, sum_short)
+            console.print(tbl)
+        else:
+            console.print(
+                "[dim]usage:[/dim]\n"
+                "  /sessions               — list all\n"
+                "  /sessions new <name>    — create + switch\n"
+                "  /sessions switch <name> — switch active\n"
+                "  /sessions show [name]   — view history (default: active)\n"
+                "  /sessions delete <name> — delete (not 'default')"
+            )
 
     else:
         console.print(f"[red]unknown command: /{cmd}[/red]")
@@ -636,6 +708,7 @@ async def dispatch(intent: Intent) -> None:
 
 
 async def run_tui() -> None:
+    import time
     from prompt_toolkit import PromptSession
     from prompt_toolkit.history import InMemoryHistory
 
@@ -650,5 +723,20 @@ async def run_tui() -> None:
         intent = parse_input(text)
         if isinstance(intent, IntentQuit):
             break
-        await dispatch(intent)
+        start = time.time()
+        try:
+            await dispatch(intent)
+        finally:
+            if isinstance(intent, IntentReport):
+                kind = "report"
+            elif isinstance(intent, IntentSlashCmd):
+                kind = "slash"
+            else:
+                kind = "chat"
+            session_mgr.append(SessionEvent(
+                kind=kind,
+                input=text,
+                output_summary="",
+                duration_s=round(time.time() - start, 2),
+            ))
     console.print("[dim]bye[/dim]")
