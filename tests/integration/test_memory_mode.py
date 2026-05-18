@@ -163,4 +163,5 @@ async def test_bear_advocate_uses_load_relevant_when_index_set(tmp_path):
 
     assert result.ok is True, f"agent.run() failed: {result.error}"
     assert spy_rel.called, "load_relevant should be called when index is set"
-    assert not spy_all.called, "load_all should NOT be called when index is set"
+    # Note: load_relevant may internally call load_all as a 0-hit fallback (Fix 1 v0.2.3);
+    # the important invariant is that load_relevant is the entry-point, not raw load_all.

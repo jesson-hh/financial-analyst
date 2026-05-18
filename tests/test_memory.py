@@ -121,3 +121,29 @@ def test_load_relevant_without_shared_when_disabled(tmp_path):
     text = mem.load_relevant("pitfall", top_k=2, always_include_shared=False)
     assert "pitfall content" in text
     assert "V10 rule" not in text
+
+
+def test_load_relevant_fallback_to_load_all_on_zero_hits(tmp_path):
+    """When FTS5 returns 0 hits, load_relevant should fall back to load_all."""
+    (tmp_path / "agent_x").mkdir()
+    (tmp_path / "agent_x" / "rules.md").write_text("rule content xyzzy", encoding="utf-8")
+    idx = MemoryIndex(memory_root=tmp_path, db_path=tmp_path / "idx.db")
+    idx.rebuild()
+    mem = AgentMemory("agent_x", tmp_path, index=idx)
+    # query for nonsense — FTS5 won't match
+    text = mem.load_relevant("absolutely_nonexistent_term_zzzzzz", top_k=3)
+    assert "rule content xyzzy" in text  # fell back
+
+
+def test_always_include_loaded_unconditionally(tmp_path):
+    """Files listed in always_include.txt always load, regardless of query."""
+    (tmp_path / "risk-officer").mkdir()
+    (tmp_path / "risk-officer" / "hard_rules.md").write_text("CRITICAL hard rule", encoding="utf-8")
+    (tmp_path / "risk-officer" / "other.md").write_text("other content matchable", encoding="utf-8")
+    (tmp_path / "risk-officer" / "always_include.txt").write_text("hard_rules.md\n", encoding="utf-8")
+    idx = MemoryIndex(memory_root=tmp_path, db_path=tmp_path / "idx.db")
+    idx.rebuild()
+    mem = AgentMemory("risk-officer", tmp_path, index=idx)
+    text = mem.load_relevant("matchable", top_k=1)
+    assert "CRITICAL hard rule" in text   # always_include should be there
+    assert "other content matchable" in text  # also there via FTS5 hit

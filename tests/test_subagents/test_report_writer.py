@@ -46,3 +46,60 @@ async def test_report_writer_rejects_bad_schema(tmp_path):
         result = await agent.run({"code": "X", "asof_date": "2026-05-17", "out_dir": str(tmp_path / "out")})
     # rating_overall = int(...) will coerce "not-int" → raises ValueError, caught in SubAgent.run
     assert result.ok is False
+
+
+@pytest.mark.asyncio
+async def test_report_writer_forces_zero_position_on_negative_rating(tmp_path):
+    """If LLM returns rating <= 0 with positive position, writer overrides to 0."""
+    fake_content = json.dumps({
+        "markdown_body": "# X Report",
+        "rating_overall": -1,
+        "rating_dimensions": {"fundamental": 0, "technical": -1, "whale": 0, "quant": 1, "risk": -1},
+        "action": "sell",
+        "target_price": 5.0,
+        "stop_loss": 3.0,
+        "position_pct": 0.075,   # inconsistent with negative rating
+        "summary_json": {"code": "SH999"}
+    })
+    fake = {"choices": [{"message": {"content": fake_content}}]}
+    out_dir = tmp_path / "out"
+    agent = ReportWriter(memory_root=tmp_path)
+    with patch("financial_analyst.agent.tier3.report_writer.LLMClient.for_agent") as mock_for:
+        client = AsyncMock()
+        client.chat = AsyncMock(return_value=fake)
+        mock_for.return_value = client
+        result = await agent.run({"code": "SH999", "asof_date": "2026-05-18", "out_dir": str(out_dir)})
+    assert result.ok
+    assert result.output.position_pct == 0.0   # forced
+    assert result.output.action in ("sell", "avoid")  # consistent with negative rating
+    md = (out_dir / "SH999_2026-05-18.md").read_text(encoding="utf-8")
+    assert "sanity" in md.lower()  # override note appended
+
+
+@pytest.mark.asyncio
+async def test_report_writer_forces_zero_position_on_active_veto(tmp_path):
+    """If risk-officer.veto_flags is non-empty, position must be 0."""
+    fake_content = json.dumps({
+        "markdown_body": "# X Report",
+        "rating_overall": 2,        # positive rating
+        "rating_dimensions": {},
+        "action": "buy",
+        "target_price": 10.0,
+        "stop_loss": 6.0,
+        "position_pct": 0.05,
+        "summary_json": {}
+    })
+    fake = {"choices": [{"message": {"content": fake_content}}]}
+    out_dir = tmp_path / "out"
+    agent = ReportWriter(memory_root=tmp_path)
+    with patch("financial_analyst.agent.tier3.report_writer.LLMClient.for_agent") as mock_for:
+        client = AsyncMock()
+        client.chat = AsyncMock(return_value=fake)
+        mock_for.return_value = client
+        # risk-officer indicates a veto
+        result = await agent.run({
+            "code": "SH999", "asof_date": "2026-05-18", "out_dir": str(out_dir),
+            "risk-officer": {"veto_flags": ["game_capital_speculation"]},
+        })
+    assert result.ok
+    assert result.output.position_pct == 0.0   # forced because veto

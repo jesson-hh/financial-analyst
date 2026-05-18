@@ -93,6 +93,36 @@ class ReportWriter(SubAgent[ReportOutput]):
         )
         parsed = json.loads(response["choices"][0]["message"]["content"])
 
+        # Sanity-check the output before writing files — enforce internal consistency
+        rating_overall = int(parsed.get("rating_overall", 0))
+        position_pct = float(parsed.get("position_pct", 0.0))
+        veto_flags_from_risk = inputs.get("risk-officer", {}).get("veto_flags", [])
+
+        sanity_notes = []
+        if veto_flags_from_risk:
+            if position_pct > 0:
+                sanity_notes.append(f"veto active ({veto_flags_from_risk}) — position_pct forced 0")
+                position_pct = 0.0
+        elif rating_overall <= 0:
+            if position_pct > 0:
+                sanity_notes.append(f"rating={rating_overall} <= 0 — position_pct forced 0")
+                position_pct = 0.0
+
+        # Derive action consistently with final position
+        if position_pct == 0.0:
+            action = "avoid" if rating_overall <= -3 else "sell" if rating_overall <= 0 else "hold"
+        else:
+            action = str(parsed.get("action", "hold"))
+
+        if sanity_notes:
+            markdown_body = parsed.get("markdown_body", "")
+            markdown_body += (
+                "\n\n---\n*Post-write sanity overrides:*\n"
+                + "\n".join(f"- {n}" for n in sanity_notes)
+                + "\n"
+            )
+            parsed["markdown_body"] = markdown_body
+
         md_path = out_dir / f"{code}_{asof}.md"
         json_path = out_dir / f"{code}_{asof}.json"
         md_path.write_text(parsed.get("markdown_body", f"# {code} Report\n(empty)"), encoding="utf-8")
@@ -101,10 +131,10 @@ class ReportWriter(SubAgent[ReportOutput]):
         return {
             "output_md_path": str(md_path),
             "output_json_path": str(json_path),
-            "rating_overall": int(parsed.get("rating_overall", 0)),
+            "rating_overall": rating_overall,
             "rating_dimensions": parsed.get("rating_dimensions", {}),
-            "action": str(parsed.get("action", "hold")),
+            "action": action,
             "target_price": float(parsed.get("target_price", 0.0)),
             "stop_loss": float(parsed.get("stop_loss", 0.0)),
-            "position_pct": float(parsed.get("position_pct", 0.0)),
+            "position_pct": position_pct,
         }

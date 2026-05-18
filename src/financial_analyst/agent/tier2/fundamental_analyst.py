@@ -1,14 +1,25 @@
 from __future__ import annotations
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal
 from pydantic import BaseModel
 from financial_analyst.agent.base import SubAgent
 from financial_analyst.llm.client import LLMClient
 
+_MV_TIER_NORM: Dict[str, str] = {
+    "大盘": "large",
+    "大盘股": "large",
+    "large_cap": "large",
+    "中盘": "mid",
+    "mid_cap": "mid",
+    "中小盘": "small",
+    "小盘": "small",
+    "small_cap": "small",
+}
+
 
 class FundamentalOutput(BaseModel):
     valuation_score: int = 0  # -2..+2
-    mv_tier: str = "mid"  # "large" | "mid" | "small"
+    mv_tier: Literal["large", "mid", "small"] = "mid"
     dimension_detail: Dict[str, str] = {}
     red_flags: List[str] = []
     bull_points: List[str] = []
@@ -46,4 +57,8 @@ class FundamentalAnalyst(SubAgent[FundamentalOutput]):
             response_format={"type": "json_object"},
             temperature=0.2,
         )
-        return json.loads(response["choices"][0]["message"]["content"])
+        parsed = json.loads(response["choices"][0]["message"]["content"])
+        # Normalize Chinese or variant mv_tier strings before pydantic validation
+        if parsed.get("mv_tier") in _MV_TIER_NORM:
+            parsed["mv_tier"] = _MV_TIER_NORM[parsed["mv_tier"]]
+        return parsed

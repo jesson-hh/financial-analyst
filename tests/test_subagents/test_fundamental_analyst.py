@@ -87,3 +87,34 @@ async def test_fundamental_analyst_passes_upstream_data_to_llm(tmp_path):
     messages = call_args.kwargs.get("messages") or call_args.args[0]
     user_msg = next(m["content"] for m in messages if m["role"] == "user")
     assert "SZ002594" in user_msg
+
+
+@pytest.mark.asyncio
+async def test_fundamental_analyst_normalizes_chinese_mv_tier(tmp_path):
+    """Qwen may return '中小盘' — agent should normalize to 'small' before pydantic."""
+    fake_response = {
+        "choices": [{"message": {"content": '{"valuation_score": 0, "mv_tier": "中小盘", "dimension_detail": {}, "red_flags": [], "bull_points": [], "bear_points": []}'}}]
+    }
+    agent = FundamentalAnalyst(memory_root=tmp_path)
+    with patch("financial_analyst.agent.tier2.fundamental_analyst.LLMClient.for_agent") as mock_for:
+        mock_client = AsyncMock()
+        mock_client.chat = AsyncMock(return_value=fake_response)
+        mock_for.return_value = mock_client
+        result = await agent.run({"quote-fetcher": {"mv_yi": 158}})
+    assert result.ok is True
+    assert result.output.mv_tier == "small"
+
+
+@pytest.mark.asyncio
+async def test_fundamental_analyst_rejects_invalid_mv_tier_after_norm(tmp_path):
+    """If mv_tier is something truly unrecognized, pydantic Literal rejects."""
+    fake_response = {
+        "choices": [{"message": {"content": '{"valuation_score": 0, "mv_tier": "garbage_value", "dimension_detail": {}, "red_flags": [], "bull_points": [], "bear_points": []}'}}]
+    }
+    agent = FundamentalAnalyst(memory_root=tmp_path)
+    with patch("financial_analyst.agent.tier2.fundamental_analyst.LLMClient.for_agent") as mock_for:
+        mock_client = AsyncMock()
+        mock_client.chat = AsyncMock(return_value=fake_response)
+        mock_for.return_value = mock_client
+        result = await agent.run({"quote-fetcher": {"mv_yi": 158}})
+    assert result.ok is False

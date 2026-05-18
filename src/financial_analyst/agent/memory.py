@@ -19,6 +19,7 @@ class AgentMemory:
         self.index = index
         self._cache: Optional[str] = None
         self._shared_cache: Optional[str] = None
+        self._always_include_cache: Optional[str] = None
 
     def _collect_files(self) -> List[Path]:
         paths: List[Path] = []
@@ -33,6 +34,27 @@ class AgentMemory:
             if other_dir.exists():
                 paths.extend(sorted(other_dir.glob("*.md")))
         return paths
+
+    def _load_always_include(self) -> str:
+        """Read memories/<agent>/always_include.txt (newline-separated filenames),
+        return concatenated content. These files load regardless of retrieval results.
+        """
+        if self._always_include_cache is not None:
+            return self._always_include_cache
+        include_path = self.memory_root / self.agent_name / "always_include.txt"
+        if not include_path.exists():
+            self._always_include_cache = ""
+            return ""
+        chunks: List[str] = []
+        for line in include_path.read_text(encoding="utf-8").splitlines():
+            name = line.strip()
+            if not name:
+                continue
+            f = self.memory_root / self.agent_name / name
+            if f.exists():
+                chunks.append(f"# {self.agent_name}/{f.stem}\n{f.read_text(encoding='utf-8')}\n")
+        self._always_include_cache = "\n".join(chunks)
+        return self._always_include_cache
 
     def _load_shared(self) -> str:
         if self._shared_cache is not None:
@@ -71,19 +93,37 @@ class AgentMemory:
             if shared:
                 parts.append(shared)
 
+        # Always include critical files listed in always_include.txt
+        critical = self._load_always_include()
+        if critical:
+            parts.append(critical)
+
         own_hits = self.index.search(query, agent=self.agent_name, top_k=top_k)
-        for h in own_hits:
+        borrowed_hits: List[dict] = []
+        for other in self.borrows:
+            borrowed_hits.extend(self.index.search(query, agent=other, top_k=top_k))
+
+        # If FTS5 returned 0 results for both own + borrowed, fall back to load_all
+        if not own_hits and not borrowed_hits:
+            full = self.load_all()
+            joined = "\n".join(parts)
+            if full and full not in joined:
+                parts.append(full)
+            return "\n".join(parts)
+
+        seen_keys: set = set()
+        # Avoid duplicates between critical and search hits
+        for h in own_hits + borrowed_hits:
+            key = (h["agent"], h["filename"])
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
             label = f"{h['agent']}/{Path(h['filename']).stem}"
             parts.append(f"# {label}\n{h['content']}\n")
-
-        for other in self.borrows:
-            borrowed_hits = self.index.search(query, agent=other, top_k=top_k)
-            for h in borrowed_hits:
-                label = f"{h['agent']}/{Path(h['filename']).stem}"
-                parts.append(f"# {label}\n{h['content']}\n")
 
         return "\n".join(parts)
 
     def reload(self) -> None:
         self._cache = None
         self._shared_cache = None
+        self._always_include_cache = None
