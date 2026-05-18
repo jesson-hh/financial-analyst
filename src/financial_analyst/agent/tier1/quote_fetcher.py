@@ -1,8 +1,24 @@
 from __future__ import annotations
 from typing import Any, Dict, Optional
+import pandas as pd
 from pydantic import BaseModel
 from financial_analyst.agent.base import SubAgent
 from financial_analyst.data.loaders.tushare import TushareLoader
+
+
+def _safe_float(val) -> Optional[float]:
+    """Coerce to float; return None for None/NaN/non-numeric values."""
+    if val is None:
+        return None
+    try:
+        if pd.isna(val):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
 
 
 class QuoteOutput(BaseModel):
@@ -66,13 +82,15 @@ class QuoteFetcher(SubAgent[QuoteOutput]):
         }
         if db is not None and not db.empty:
             row = db.iloc[-1]
+            total_mv = _safe_float(row.get("total_mv"))
+            circ_mv = _safe_float(row.get("circ_mv"))
             out.update({
-                "pe": float(row["pe_ttm"]) if "pe_ttm" in row and row["pe_ttm"] is not None else None,
-                "pb": float(row["pb"]) if "pb" in row else None,
-                "ps": float(row["ps_ttm"]) if "ps_ttm" in row else None,
-                "dv": float(row["dv_ttm"]) if "dv_ttm" in row else None,
-                "mv_yi": float(row["total_mv"]) / 10000 if "total_mv" in row else None,
-                "circ_mv_yi": float(row["circ_mv"]) / 10000 if "circ_mv" in row else None,
-                "turnover_rate": float(row["turnover_rate"]) if "turnover_rate" in row else None,
+                "pe": _safe_float(row.get("pe_ttm")),
+                "pb": _safe_float(row.get("pb")),
+                "ps": _safe_float(row.get("ps_ttm")),
+                "dv": _safe_float(row.get("dv_ttm")),
+                "mv_yi": total_mv / 10000 if total_mv is not None else None,
+                "circ_mv_yi": circ_mv / 10000 if circ_mv is not None else None,
+                "turnover_rate": _safe_float(row.get("turnover_rate")),
             })
         return out
