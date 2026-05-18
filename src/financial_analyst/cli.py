@@ -334,6 +334,52 @@ async def _run_mainline(asof: Optional[str], panel: Optional[str], out_dir: Path
                 typer.echo(f"[red]{n}: {r.error}[/red]")
 
 
+@app.command()
+def brief(
+    asof: str = typer.Option(None, "--asof", help="As-of date YYYY-MM-DD (default: today)"),
+    universe: str = typer.Option("all", "--universe", help="Universe name (informational)"),
+    universe_file: str = typer.Option(None, "--universe-file", help="Override instruments file path"),
+    max_scan: int = typer.Option(5000, "--max-scan", help="Cap on stocks scanned"),
+    out_dir: Path = typer.Option(Path("out"), "--out", help="Output directory"),
+):
+    """Generate daily A-share morning brief (market-wide 异动 scan)."""
+    asyncio.run(_run_brief(asof=asof, universe=universe,
+                            universe_file=universe_file, max_scan=max_scan, out_dir=out_dir))
+
+
+async def _run_brief(asof, universe, universe_file, max_scan, out_dir):
+    from financial_analyst.agent.orchestrator import Orchestrator
+    from financial_analyst.agent.market.market_scanner import MarketScanner
+    from financial_analyst.agent.market.morning_brief_writer import MorningBriefWriter
+    from financial_analyst.agent.orchestrator import DAGNode
+    from financial_analyst.tui import _ensure_registered
+
+    _ensure_registered()
+    # Build agents manually to pass universe_file + max_scan to scanner
+    scanner = MarketScanner(memory_root=Path("memories"),
+                             universe_file=universe_file, max_scan=max_scan)
+    writer = MorningBriefWriter(memory_root=Path("memories"))
+    nodes = [
+        DAGNode(agent=scanner, deps=[], input_keys=["asof_date", "universe"]),
+        DAGNode(agent=writer, deps=["market-scanner"],
+                input_keys=["market-scanner", "asof_date", "out_dir"]),
+    ]
+    asof = asof or pd.Timestamp.today().strftime("%Y-%m-%d")
+    orch = Orchestrator(nodes)
+    typer.echo(f"Scanning market for {asof}...")
+    results = await orch.run({"asof_date": asof, "universe": universe, "out_dir": str(out_dir)})
+    writer_result = results.get("morning-brief-writer")
+    if writer_result and writer_result.ok:
+        typer.echo(f"Brief: {writer_result.output.output_md_path}")
+        typer.echo(f"Headline: {writer_result.output.headline}")
+        if writer_result.output.watchlist_today:
+            typer.echo(f"Watchlist: {writer_result.output.watchlist_today}")
+    else:
+        for n, r in results.items():
+            if not r.ok:
+                typer.echo(f"{n}: {r.error}")
+
+
 @app.callback(invoke_without_command=True)
 def _default(ctx: typer.Context):
     if ctx.invoked_subcommand is None:

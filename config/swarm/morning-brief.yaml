@@ -1,0 +1,17 @@
+name: morning-brief
+description: Daily A-share market-wide morning brief — scan 异动 + write summary
+variables:
+  - name: asof_date
+    type: string
+    default: today
+  - name: universe
+    type: string
+    default: all
+
+agents:
+  - name: market-scanner
+    deps: []
+    input_keys: [asof_date, universe]
+  - name: morning-brief-writer
+    deps: [market-scanner]
+    input_keys: [market-scanner, asof_date, out_dir]

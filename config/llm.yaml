@@ -35,3 +35,9 @@ agent_overrides:
   mainline-writer:
     provider: qwen
     model: qwen3.5-plus
+  market-scanner:
+    provider: qwen
+    model: qwen3.5-plus
+  morning-brief-writer:
+    provider: qwen
+    model: qwen3.5-plus
