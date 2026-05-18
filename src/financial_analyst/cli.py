@@ -15,6 +15,14 @@ for stream in (sys.stdout, sys.stderr):
 
 load_dotenv(override=True)  # populate os.environ from .env (overrides any existing shell vars)
 
+# Load user plugins (user-private .py files that call ModelRegistry.register etc.)
+# Errors here are non-fatal — a broken plugin won't prevent the CLI from working.
+try:
+    from financial_analyst.plugins import load_plugins
+    load_plugins()
+except Exception:
+    pass
+
 from financial_analyst import __version__
 
 app = typer.Typer(
@@ -167,6 +175,100 @@ async def _run_dream(since: int, dry_run: bool, out_dir: Path):
     written = write_proposals(proposals)
     typer.echo(f"Wrote {len(written)} proposals to memories/_proposed/")
     typer.echo("Review with `/memory list-proposals` then `/memory accept` or `/memory reject`.")
+
+
+@app.command("models")
+def models_cmd(
+    action: str = typer.Argument("list", help="Subcommand: list"),
+):
+    """List registered quant models."""
+    if action != "list":
+        typer.echo(f"Unknown action: {action}. Try: list")
+        raise typer.Exit(code=1)
+    # Ensure built-in + user models registered
+    from financial_analyst.models import ModelRegistry
+    import financial_analyst.models  # triggers built-in registration via __init__
+
+    names = ModelRegistry.names()
+    if not names:
+        typer.echo("(no models registered)")
+        return
+    typer.echo(f"{len(names)} registered model(s):")
+    for n in names:
+        try:
+            inst = ModelRegistry.get_instance(n)
+            meta = inst.metadata()
+            typer.echo(f"  {n:<24} {meta}")
+        except Exception as exc:
+            typer.echo(f"  {n:<24} (metadata error: {exc})")
+
+
+@app.command("loaders")
+def loaders_cmd(
+    action: str = typer.Argument("list", help="Subcommand: list"),
+):
+    """List configured data loaders + their type."""
+    if action != "list":
+        typer.echo(f"Unknown action: {action}. Try: list")
+        raise typer.Exit(code=1)
+    import yaml
+    loaders_yaml = Path("config/loaders.yaml")
+    if not loaders_yaml.exists():
+        typer.echo(f"(no loaders config at {loaders_yaml})")
+        return
+    cfg = yaml.safe_load(loaders_yaml.read_text(encoding="utf-8"))
+    default = cfg.get("default", "?")
+    typer.echo(f"default loader: {default}")
+    typer.echo("loaders configured:")
+    for name, entry in (cfg.get("loaders") or {}).items():
+        marker = "* " if name == default else "  "
+        typer.echo(f"{marker}{name}: {entry}")
+
+
+@app.command("agents")
+def agents_cmd(
+    action: str = typer.Argument("list", help="Subcommand: list"),
+):
+    """List registered sub-agents (13 built-in + any user-added)."""
+    if action != "list":
+        typer.echo(f"Unknown action: {action}. Try: list")
+        raise typer.Exit(code=1)
+    from financial_analyst.agent.registry import SubAgentRegistry
+    from financial_analyst.tui import _ensure_registered
+    _ensure_registered()
+    names = SubAgentRegistry.names()
+    typer.echo(f"{len(names)} registered sub-agent(s):")
+    for n in names:
+        if any(s in n for s in ["fetcher", "reader", "computer", "predictor"]):
+            tier = "Tier 1"
+        elif "analyst" in n:
+            tier = "Tier 2"
+        elif n == "introspector":
+            tier = "Dream"
+        else:
+            tier = "Tier 3"
+        typer.echo(f"  {n:<24} {tier}")
+
+
+@app.command("collectors")
+def collectors_cmd(
+    action: str = typer.Argument("list", help="Subcommand: list"),
+):
+    """List available news/F10 collector base classes + example implementations."""
+    if action != "list":
+        typer.echo(f"Unknown action: {action}. Try: list")
+        raise typer.Exit(code=1)
+    typer.echo("Available collector interfaces:")
+    typer.echo("  BaseNewsCollector  (financial_analyst.data.collectors.news.base)")
+    typer.echo("  BaseF10Collector   (financial_analyst.data.collectors.f10.base)")
+    typer.echo("")
+    typer.echo("Example implementations (under examples/):")
+    examples_dir = Path("examples")
+    if examples_dir.exists():
+        for f in sorted(examples_dir.glob("custom_*collector*.py")):
+            typer.echo(f"  {f}")
+    typer.echo("")
+    typer.echo("Define your own + register via config/plugins.yaml `load_at_startup`.")
 
 
 @app.callback(invoke_without_command=True)

@@ -41,14 +41,40 @@ Orchestrator -> Tier 1 (data, parallel) -> Tier 2 (analysts, parallel) -> Tier 3
 
 See [docs/architecture.md](docs/architecture.md) for the full DAG.
 
-## Extending
+## Extending — Bring Your Own Models (BYOM)
 
-- Add a model: implement `BaseModel`, register in `ModelRegistry` — `model-predictor` picks it up automatically
-- Add a sub-agent: implement `SubAgent`, register, add to a swarm preset yaml
-- Add a knowledge base: implement `KnowledgeBase`
-- Add a memory rule: drop a markdown into `memories/<agent>/`
+`financial-analyst` is a framework. Plug in your own private models / loaders / collectors via the registry pattern:
 
-See [docs/extending.md](docs/extending.md).
+```python
+# G:/my_private_code/my_fm.py
+from financial_analyst.models import BaseModel, ModelRegistry
+
+class MyFMCluster(BaseModel):
+    def predict(self, code, asof):
+        return {"score": ..., "rank_pct": ...}
+    def metadata(self):
+        return {"name": "my_fm", "version": "W10"}
+
+ModelRegistry.register("my_fm", MyFMCluster)
+```
+
+```yaml
+# config/plugins.yaml
+load_at_startup:
+  - G:/my_private_code/my_fm.py
+```
+
+Now `financial-analyst report SH600519` will include your model in the quant consensus.
+
+See [docs/byom.md](docs/byom.md) for the full guide and `examples/` for 4 stub implementations (FM cluster, CSV loader, news collector, F10 collector).
+
+Inspect what's registered:
+```bash
+financial-analyst models list
+financial-analyst loaders list
+financial-analyst agents list
+financial-analyst collectors list
+```
 
 ## Memory System
 
