@@ -2,6 +2,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
 
+from financial_analyst.agent.memory_index import MemoryIndex
+
 
 class AgentMemory:
     def __init__(
@@ -9,11 +11,14 @@ class AgentMemory:
         agent_name: str,
         memory_root: Path,
         borrows: Optional[List[str]] = None,
+        index: Optional[MemoryIndex] = None,
     ):
         self.agent_name = agent_name
         self.memory_root = Path(memory_root)
         self.borrows = borrows or []
+        self.index = index
         self._cache: Optional[str] = None
+        self._shared_cache: Optional[str] = None
 
     def _collect_files(self) -> List[Path]:
         paths: List[Path] = []
@@ -29,6 +34,20 @@ class AgentMemory:
                 paths.extend(sorted(other_dir.glob("*.md")))
         return paths
 
+    def _load_shared(self) -> str:
+        if self._shared_cache is not None:
+            return self._shared_cache
+        shared = self.memory_root / "_shared"
+        if not shared.exists():
+            self._shared_cache = ""
+            return ""
+        chunks = []
+        for p in sorted(shared.glob("*.md")):
+            label = f"_shared/{p.stem}"
+            chunks.append(f"# {label}\n{p.read_text(encoding='utf-8')}\n")
+        self._shared_cache = "\n".join(chunks)
+        return self._shared_cache
+
     def load_all(self) -> str:
         if self._cache is not None:
             return self._cache
@@ -39,5 +58,32 @@ class AgentMemory:
         self._cache = "\n".join(chunks)
         return self._cache
 
+    def load_relevant(self, query: str, top_k: int = 5, always_include_shared: bool = True) -> str:
+        if self.index is None:
+            raise RuntimeError(
+                "AgentMemory.load_relevant requires MemoryIndex; pass index= to constructor"
+            )
+
+        parts: List[str] = []
+
+        if always_include_shared:
+            shared = self._load_shared()
+            if shared:
+                parts.append(shared)
+
+        own_hits = self.index.search(query, agent=self.agent_name, top_k=top_k)
+        for h in own_hits:
+            label = f"{h['agent']}/{Path(h['filename']).stem}"
+            parts.append(f"# {label}\n{h['content']}\n")
+
+        for other in self.borrows:
+            borrowed_hits = self.index.search(query, agent=other, top_k=top_k)
+            for h in borrowed_hits:
+                label = f"{h['agent']}/{Path(h['filename']).stem}"
+                parts.append(f"# {label}\n{h['content']}\n")
+
+        return "\n".join(parts)
+
     def reload(self) -> None:
         self._cache = None
+        self._shared_cache = None
