@@ -209,11 +209,46 @@ async def handle_slash(cmd: str, args: List[str]) -> None:
 
 
 async def handle_memory_cmd(args: List[str]) -> None:
+    """Handle /memory subcommands.
+
+    Subcommands:
+      list <agent>           — list files in memories/<agent>/
+      show <agent>/<file>    — print file content
+      edit <agent>/<file>    — open in $EDITOR
+      search <query>         — FTS5 search across all memories
+      stats                  — show MemoryIndex stats
+      diff                   — show recent git log in memories/
+      reindex                — force rebuild MemoryIndex
+      reload                 — clear in-memory caches (next agent invocation re-reads)
+    """
+    from financial_analyst.agent.memory_index import MemoryIndex
+    from financial_analyst.settings import Settings
+
     if not args:
-        console.print("usage: /memory <list|show|reload> [agent] [file]")
+        console.print(
+            "[dim]usage:[/dim]\n"
+            "  /memory list <agent>\n"
+            "  /memory show <agent>/<file>\n"
+            "  /memory edit <agent>/<file>\n"
+            "  /memory search <query>\n"
+            "  /memory stats\n"
+            "  /memory diff\n"
+            "  /memory reindex\n"
+            "  /memory reload"
+        )
         return
+
     sub = args[0]
     mem_root = Path("memories")
+
+    def _get_index() -> MemoryIndex:
+        settings = Settings()
+        cache_dir = Path(settings.cache_dir)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        idx = MemoryIndex(memory_root=mem_root, db_path=cache_dir / "memory.fts5.db")
+        idx.update_changed()
+        return idx
+
     if sub == "list" and len(args) >= 2:
         agent_dir = mem_root / args[1]
         if not agent_dir.exists():
@@ -221,10 +256,95 @@ async def handle_memory_cmd(args: List[str]) -> None:
             return
         for f in sorted(agent_dir.glob("*.md")):
             console.print(f"  {f.name}")
+
+    elif sub == "show" and len(args) >= 2:
+        path = mem_root / args[1]
+        if not path.exists() or not str(path.resolve()).startswith(str(mem_root.resolve())):
+            console.print(f"[red]not found: {path}[/red]")
+            return
+        from rich.markdown import Markdown
+        console.print(Markdown(path.read_text(encoding="utf-8")))
+
+    elif sub == "edit" and len(args) >= 2:
+        import os
+        import subprocess
+        path = mem_root / args[1]
+        if not path.exists():
+            console.print(f"[red]not found: {path}[/red]")
+            return
+        editor = os.environ.get("EDITOR")
+        if not editor:
+            editor = "notepad" if os.name == "nt" else "vi"
+        try:
+            subprocess.Popen([editor, str(path)])
+            console.print(f"[green]opened {path} in {editor}[/green]")
+        except FileNotFoundError:
+            console.print(f"[red]editor not found: {editor}[/red]")
+
+    elif sub == "search" and len(args) >= 2:
+        query = " ".join(args[1:])
+        idx = _get_index()
+        hits = idx.search(query, top_k=10)
+        if not hits:
+            console.print(f"[yellow]no matches for {query!r}[/yellow]")
+            return
+        tbl = Table(title=f"Memory search: {query}")
+        tbl.add_column("Agent", style="cyan")
+        tbl.add_column("File", style="green")
+        tbl.add_column("Snippet")
+        for h in hits:
+            snippet = h["content"][:120].replace("\n", " ")
+            if len(h["content"]) > 120:
+                snippet += "…"
+            tbl.add_row(h["agent"], h["filename"], snippet)
+        console.print(tbl)
+
+    elif sub == "stats":
+        idx = _get_index()
+        s = idx.stats()
+        tbl = Table(title="Memory Stats")
+        tbl.add_column("Agent", style="cyan")
+        tbl.add_column("Files", justify="right")
+        tbl.add_column("Bytes", justify="right")
+        for agent, count in sorted(s.get("per_agent", {}).items()):
+            agent_bytes = s.get("per_agent_bytes", {}).get(agent, 0)
+            tbl.add_row(agent, str(count), str(agent_bytes))
+        tbl.add_row("[bold]TOTAL[/bold]", str(s.get("total_files", 0)), str(s.get("total_bytes", 0)))
+        console.print(tbl)
+
+    elif sub == "diff":
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["git", "log", "--since=7 days ago", "--oneline", "--", "memories/"],
+                capture_output=True, text=True, cwd=".",
+            )
+            if result.returncode != 0:
+                console.print(f"[red]git log failed:[/red] {result.stderr.strip()}")
+                return
+            output = result.stdout.strip()
+            if not output:
+                console.print("[yellow]no memory changes in last 7 days[/yellow]")
+            else:
+                console.print(output)
+        except FileNotFoundError:
+            console.print("[red]git not found[/red]")
+
+    elif sub == "reindex":
+        idx = MemoryIndex(memory_root=mem_root, db_path=Path(Settings().cache_dir) / "memory.fts5.db")
+        n = idx.rebuild()
+        console.print(f"[green]reindexed {n} memory files[/green]")
+
     elif sub == "reload":
         console.print("[green]memory cache cleared; next agent invocation will reload[/green]")
+
     else:
-        console.print("usage: /memory list <agent>  |  /memory reload")
+        console.print(f"[red]unknown subcommand: {sub}[/red]")
+        console.print(
+            "[dim]usage:[/dim]\n"
+            "  /memory list <agent> | show <agent>/<file> | edit <agent>/<file>\n"
+            "  /memory search <query> | stats | diff | reindex | reload"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -234,11 +354,24 @@ async def handle_memory_cmd(args: List[str]) -> None:
 async def run_report_oneshot(code: str, asof, out_dir: Path) -> None:
     _ensure_registered()
 
+    from financial_analyst.agent.memory_index import MemoryIndex
     from financial_analyst.agent.orchestrator import Orchestrator
+    from financial_analyst.settings import Settings
     from financial_analyst.swarm import load_preset
 
     asof = asof or date.today().isoformat()
-    nodes = load_preset("stock-deep-dive", memory_root=Path("memories"))
+
+    # Build shared FTS5 index (incremental — cheap if already up-to-date)
+    settings = Settings()
+    cache_dir = Path(settings.cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    mem_index = MemoryIndex(
+        memory_root=Path("memories"),
+        db_path=cache_dir / "memory.fts5.db",
+    )
+    mem_index.update_changed()
+
+    nodes = load_preset("stock-deep-dive", memory_root=Path("memories"), memory_index=mem_index)
 
     status: dict[str, dict] = {
         n.agent.NAME: {"state": "pending", "elapsed": 0.0} for n in nodes

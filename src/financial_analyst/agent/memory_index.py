@@ -241,6 +241,7 @@ class MemoryIndex:
         conn = self._get_conn()
 
         per_agent: Dict[str, int] = {}
+        per_agent_bytes: Dict[str, int] = {}
         total_files = 0
         total_bytes = 0
 
@@ -249,12 +250,15 @@ class MemoryIndex:
         ).fetchall()
         for row in rows:
             agent_name = row["agent"]
+            n = len(row["content"].encode("utf-8"))
             per_agent[agent_name] = per_agent.get(agent_name, 0) + 1
+            per_agent_bytes[agent_name] = per_agent_bytes.get(agent_name, 0) + n
             total_files += 1
-            total_bytes += len(row["content"].encode("utf-8"))
+            total_bytes += n
 
         return {
             "total_files": total_files,
             "total_bytes": total_bytes,
             "per_agent": per_agent,
+            "per_agent_bytes": per_agent_bytes,
         }
