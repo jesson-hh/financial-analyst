@@ -26,3 +26,6 @@ agent_overrides:
   f10-reader:
     provider: qwen
     model: qwen3.5-plus
+  ask:
+    provider: qwen
+    model: qwen3.5-plus

@@ -271,6 +271,28 @@ def collectors_cmd(
     typer.echo("Define your own + register via config/plugins.yaml `load_at_startup`.")
 
 
+@app.command(name="ask")
+def ask_cmd(
+    query: str = typer.Argument(..., help="Natural-language question"),
+):
+    """Ask the front-desk agent a question. Uses tools to search memory, read past reports, fetch quotes."""
+    from financial_analyst.ask import ask
+    from financial_analyst.tui import console
+    from rich.markdown import Markdown
+
+    output = asyncio.run(ask(query))
+    console.print(Markdown(output.answer or "(no answer)"))
+    if output.actions_taken:
+        console.print(f"\n[dim]actions: {output.actions_taken}[/dim]")
+    if output.references:
+        console.print(f"[dim]references: {output.references}[/dim]")
+    if output.needs_full_report and output.suggested_code:
+        console.print(
+            f"\n[yellow]This requires a full deep-dive. Run:[/yellow]\n"
+            f"  financial-analyst report {output.suggested_code}"
+        )
+
+
 @app.callback(invoke_without_command=True)
 def _default(ctx: typer.Context):
     if ctx.invoked_subcommand is None:

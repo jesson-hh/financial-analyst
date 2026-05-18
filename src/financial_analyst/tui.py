@@ -258,6 +258,22 @@ async def handle_slash(cmd: str, args: List[str]) -> None:
         from financial_analyst.cli import _run_dream
         await _run_dream(since=since, dry_run=dry_run, out_dir=out_dir_arg)
 
+    elif cmd == "ask":
+        query = " ".join(args).strip()
+        if not query:
+            console.print("[dim]usage: /ask <question>[/dim]")
+            return
+        from financial_analyst.ask import ask
+        output = await ask(query)
+        from rich.markdown import Markdown
+        console.print(Markdown(output.answer or "(no answer)"))
+        if output.actions_taken:
+            console.print(f"\n[dim]actions: {output.actions_taken}[/dim]")
+        if output.needs_full_report and output.suggested_code:
+            console.print(
+                f"\n[yellow]Recommend: /report {output.suggested_code}[/yellow]"
+            )
+
     elif cmd == "provider":
         console.print(
             "[yellow]provider switching: see config/llm.yaml (live switch TBD in v0.2)[/yellow]"
