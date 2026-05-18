@@ -1,6 +1,7 @@
 from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
+import pandas as pd
 from pydantic import BaseModel
 from financial_analyst.agent.base import SubAgent
 from financial_analyst.factors.core import compute_factors
@@ -41,10 +42,56 @@ class FactorComputer(SubAgent[FactorOutput]):
         whale = compute_whale_signals(quote)
         tr_latest = float(db["turnover_rate"].iloc[-1]) if db is not None and not db.empty else 5.0
         mv_yi = float(db["total_mv"].iloc[-1]) / 10000 if (db is not None and not db.empty and "total_mv" in db.columns) else 200.0
-        board = score_board(quote, turnover_rate=tr_latest, market_cap_yi=mv_yi)
+
+        # ------------------------------------------------------------------
+        # Auto-fetch 5min bars where the loader supports them.
+        # Failures are silently swallowed — v5/R11 enrichment is best-effort.
+        # ------------------------------------------------------------------
+        bars_5m_last_day: Optional[pd.DataFrame] = None
+        bars_5m_on_board_day: Optional[pd.DataFrame] = None
+
+        if quote is not None and not quote.empty:
+            last_day = pd.Timestamp(quote["trade_date"].iloc[-1]).strftime("%Y-%m-%d")
+
+            # 1. Last-day 5min bars — feed into compute_vol_regime (R11 tail_surge)
+            try:
+                bars = loader.fetch_quote(code, last_day, last_day, freq="5min")
+                if bars is not None and not bars.empty:
+                    bars_5m_last_day = bars
+            except Exception:
+                pass  # loader doesn't support 5min or data absent — that's fine
+
+            # 2. Most recent limit-up day in the lookback window — feed into
+            #    score_board v5 (seal_micro dimension).
+            if "close" in quote.columns and len(quote) >= 2:
+                pct_chg = quote["close"].pct_change()
+                limit_up_mask = pct_chg >= 0.095
+                limit_up_days = quote.loc[limit_up_mask]
+                if not limit_up_days.empty:
+                    board_day = pd.Timestamp(
+                        limit_up_days["trade_date"].iloc[-1]
+                    ).strftime("%Y-%m-%d")
+                    try:
+                        bars = loader.fetch_quote(code, board_day, board_day, freq="5min")
+                        if bars is not None and not bars.empty:
+                            bars_5m_on_board_day = bars
+                    except Exception:
+                        pass
+
+        board = score_board(
+            quote,
+            turnover_rate=tr_latest,
+            market_cap_yi=mv_yi,
+            bars_5m_on_board_day=bars_5m_on_board_day,
+        )
         regime = compute_vol_regime(
             close_day=quote["close"],
-            turnover_rate_day=(db["turnover_rate"] if db is not None and not db.empty else quote["vol"] / quote["vol"].mean() * 5),
+            turnover_rate_day=(
+                db["turnover_rate"]
+                if db is not None and not db.empty
+                else quote["vol"] / quote["vol"].mean() * 5
+            ),
+            bars_5m_last_day=bars_5m_last_day,
         )
 
         return {

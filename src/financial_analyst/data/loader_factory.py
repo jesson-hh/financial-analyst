@@ -67,7 +67,9 @@ def get_default_loader(config_path: Optional[Path] = None) -> BaseLoader:
             raise ValueError(
                 "qlib_binary loader requires 'provider_uri' in config/loaders.yaml"
             )
-        return QlibBinaryLoader(provider_uri=str(provider_uri))
+        # provider_uri may be a plain string (day-only, backward compat) or a
+        # dict mapping freq names to roots (multi-freq).  Pass through as-is.
+        return QlibBinaryLoader(provider_uri=provider_uri)
 
     # Default branch: TushareLoader with optional cache settings
     cache_enabled: bool = bool(entry.get("cache_enabled", True))

@@ -1,6 +1,6 @@
 # config/loaders.yaml
 # Change `default` to switch the data source used by all sub-agents.
-default: tushare
+default: qlib_binary
 
 loaders:
   tushare:
@@ -8,4 +8,7 @@ loaders:
     cache_ttl_seconds: 86400   # 1 day
 
   qlib_binary:
-    provider_uri: G:/stocks/stock_data/cn_data   # local Qlib data root
+    provider_uri:
+      day: G:/stocks/stock_data/cn_data
+      5min: G:/stocks/stock_data/cn_data_5min
+      # 1min: G:/stocks/stock_data/cn_data_1min   # uncomment if needed

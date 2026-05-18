@@ -98,7 +98,11 @@ class TushareLoader(BaseLoader):
     def supports(self, market: str) -> bool:
         return market == "a_share"
 
-    def fetch_quote(self, code: str, start: str, end: str) -> pd.DataFrame:
+    def fetch_quote(self, code: str, start: str, end: str, freq: str = "day") -> pd.DataFrame:
+        if freq != "day":
+            # Tushare 5min/1min requires a premium tier and a different API;
+            # not supported here.  Return empty so callers degrade gracefully.
+            return pd.DataFrame()
         cache_params = {"code": code, "start": start, "end": end}
         if self._cache is not None:
             cached = self._cache.get("quote", cache_params)
