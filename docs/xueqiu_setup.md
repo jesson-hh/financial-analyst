@@ -4,7 +4,17 @@ xueqiu commands in OpenCLI are **cookie-mode** — they reuse your Chrome's xueq
 
 ## 1. Install OpenCLI Chrome extension
 
-Follow https://github.com/jackwener/OpenCLI README. The extension lets opencli drive your real Chrome session (cookies, JS execution, login state).
+The extension lets opencli drive your real Chrome session (cookies, JS execution, login state).
+
+**Option A — Chrome Web Store (recommended):**
+Install **OpenCLI** from the [Chrome Web Store](https://chromewebstore.google.com/detail/opencli/ildkmabpimmkaediidaifkhjpohdnifk).
+
+**Option B — Manual install:**
+1. Download `opencli-extension-v{version}.zip` from [GitHub Releases](https://github.com/jackwener/opencli/releases).
+2. Unzip it, open `chrome://extensions` in Chrome, and enable **Developer mode**.
+3. Click **Load unpacked** and select the unzipped folder.
+
+Sanity-check with `opencli doctor` (the OpenCLI binary's own doctor, not `financial-analyst doctor`) before moving on — it should confirm the bridge is connected.
 
 ## 2. Log into xueqiu.com in Chrome
 
