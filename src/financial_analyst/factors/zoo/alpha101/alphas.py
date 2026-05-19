@@ -335,3 +335,134 @@ register(AlphaSpec(
     formula_text="rank((((-1*returns) * (sum(volume,20)/20)) * vwap) * (high - close))",
     compute=_a025,
 ))
+
+
+def _a017(p: PanelData) -> pd.Series:
+    """(((-1 * rank(ts_rank(close,10))) * rank(delta(delta(close,1),1))) * rank(ts_rank((volume/adv20),5)))"""
+    adv20 = ts_sum(p.volume, 20) / 20.0
+    vol_ratio = p.volume / adv20.replace(0, np.nan)
+    return ((-1.0 * rank(ts_rank(p.close, 10)))
+            * rank(delta(delta(p.close, 1), 1))
+            * rank(ts_rank(vol_ratio, 5)))
+
+
+register(AlphaSpec(
+    name="alpha017", family=FAMILY, paper=_PAPER,
+    description="Triple-rank composite — recency × acceleration × relative volume rank",
+    formula_text="(-1*rank(ts_rank(close,10))) * rank(delta(delta(close,1),1)) * rank(ts_rank(volume/adv20,5))",
+    compute=_a017,
+))
+
+
+def _a023(p: PanelData) -> pd.Series:
+    """((sum(high,20)/20 < high) ? (-1*delta(high,2)) : 0)"""
+    sma20_high = ts_sum(p.high, 20) / 20.0
+    fade = -1.0 * delta(p.high, 2)
+    return fade.where(sma20_high < p.high, 0.0)
+
+
+register(AlphaSpec(
+    name="alpha023", family=FAMILY, paper=_PAPER,
+    description="Fade 2d high change when today's high pierces 20d high SMA — breakout-fade",
+    formula_text="(sum(high,20)/20 < high) ? -1*delta(high,2) : 0",
+    compute=_a023,
+))
+
+
+def _a026(p: PanelData) -> pd.Series:
+    """-1 * ts_max(correlation(ts_rank(volume,5), ts_rank(high,5), 5), 3)"""
+    return -1.0 * ts_max(correlation(ts_rank(p.volume, 5), ts_rank(p.high, 5), 5), 3)
+
+
+register(AlphaSpec(
+    name="alpha026", family=FAMILY, paper=_PAPER,
+    description="Negative recent peak of vol-high ts-rank correlation — sister to gtja005",
+    formula_text="-1 * ts_max(correlation(ts_rank(volume,5), ts_rank(high,5), 5), 3)",
+    compute=_a026,
+))
+
+
+def _a028(p: PanelData) -> pd.Series:
+    """scale(((correlation(adv20,low,5) + ((high+low)/2)) - close))"""
+    adv20 = ts_sum(p.volume, 20) / 20.0
+    return scale(correlation(adv20, p.low, 5) + (p.high + p.low) / 2.0 - p.close)
+
+
+register(AlphaSpec(
+    name="alpha028", family=FAMILY, paper=_PAPER,
+    description="Scaled (ADV-low correlation + midpoint) − close — flow-weighted reversion",
+    formula_text="scale((correlation(adv20,low,5) + (high+low)/2) - close)",
+    compute=_a028,
+))
+
+
+def _a030(p: PanelData) -> pd.Series:
+    """(((1.0 - rank((sign(close-delay(close,1)) + sign(delay(close,1)-delay(close,2)) + sign(delay(close,2)-delay(close,3))))) * sum(volume,5)) / sum(volume,20))"""
+    s1 = sign(p.close - delay(p.close, 1))
+    s2 = sign(delay(p.close, 1) - delay(p.close, 2))
+    s3 = sign(delay(p.close, 2) - delay(p.close, 3))
+    return (1.0 - rank(s1 + s2 + s3)) * ts_sum(p.volume, 5) / ts_sum(p.volume, 20).replace(0, np.nan)
+
+
+register(AlphaSpec(
+    name="alpha030", family=FAMILY, paper=_PAPER,
+    description="3-day directional consistency penalty × 5/20 volume ratio — fades sustained one-side runs",
+    formula_text="(1 - rank(sum of 3 sign-of-deltas)) * sum(volume,5) / sum(volume,20)",
+    compute=_a030,
+))
+
+
+def _a033(p: PanelData) -> pd.Series:
+    """rank(-1 * (1 - open/close)^1)"""
+    safe_close = p.close.replace(0, np.nan)
+    return rank(-1.0 * (1.0 - p.open / safe_close))
+
+
+register(AlphaSpec(
+    name="alpha033", family=FAMILY, paper=_PAPER,
+    description="Rank of (open/close - 1) — intraday-return rank, simple gap fade",
+    formula_text="rank(-1 * (1 - open/close))",
+    compute=_a033,
+))
+
+
+def _a034(p: PanelData) -> pd.Series:
+    """rank(((1 - rank(stddev(returns,2)/stddev(returns,5))) + (1 - rank(delta(close,1)))))"""
+    vol_ratio = stddev(p.returns, 2) / stddev(p.returns, 5).replace(0, np.nan)
+    return rank((1.0 - rank(vol_ratio)) + (1.0 - rank(delta(p.close, 1))))
+
+
+register(AlphaSpec(
+    name="alpha034", family=FAMILY, paper=_PAPER,
+    description="Combine low-recent-vol rank and low-recent-delta rank — quiet stock reversion",
+    formula_text="rank((1 - rank(stddev(returns,2)/stddev(returns,5))) + (1 - rank(delta(close,1))))",
+    compute=_a034,
+))
+
+
+def _a035(p: PanelData) -> pd.Series:
+    """(ts_rank(volume,32) * (1 - ts_rank((close+high-low),16))) * (1 - ts_rank(returns,32))"""
+    return (ts_rank(p.volume, 32)
+            * (1.0 - ts_rank(p.close + p.high - p.low, 16))
+            * (1.0 - ts_rank(p.returns, 32)))
+
+
+register(AlphaSpec(
+    name="alpha035", family=FAMILY, paper=_PAPER,
+    description="High recent volume × low recent price-range × low recent return — accumulation gauge",
+    formula_text="ts_rank(volume,32) * (1 - ts_rank(close+high-low,16)) * (1 - ts_rank(returns,32))",
+    compute=_a035,
+))
+
+
+def _a040(p: PanelData) -> pd.Series:
+    """(-1 * rank(stddev(high,10))) * correlation(high,volume,10)"""
+    return (-1.0 * rank(stddev(p.high, 10))) * correlation(p.high, p.volume, 10)
+
+
+register(AlphaSpec(
+    name="alpha040", family=FAMILY, paper=_PAPER,
+    description="Penalise vol-of-high names × high-volume corr — sister to gtja042",
+    formula_text="(-1*rank(stddev(high,10))) * correlation(high,volume,10)",
+    compute=_a040,
+))

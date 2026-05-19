@@ -53,18 +53,25 @@ def test_registry_contains_shipped_families():
     fams = set(families())
     assert "alpha101" in fams
     assert "gtja191" in fams
+    assert "qlib158" in fams  # added in v1.3.2
 
 
 def test_registry_list_filtered_by_family():
     a101 = list_alphas(family="alpha101")
     gtja = list_alphas(family="gtja191")
-    # v1.3.0 shipped 10 + 12 = 22 alphas; v1.3.1 added 12 + 15 = 27 more
-    # (49 total). Lower bounds prevent silent regressions; expect counts to
-    # tick up monotonically with future patch releases.
-    assert len(a101) >= 22, f"alpha101 dropped below v1.3.1 baseline: {len(a101)}"
-    assert len(gtja) >= 27, f"gtja191 dropped below v1.3.1 baseline: {len(gtja)}"
+    qlib = list_alphas(family="qlib158")
+    # Baselines:
+    # v1.3.0: 10 + 12 = 22
+    # v1.3.1: +12 alpha101, +15 gtja191 = 49
+    # v1.3.2: +9 alpha101, +11 gtja191, +35 qlib158 = 104
+    # Lower bounds prevent silent regressions; expect counts to tick up
+    # monotonically with future patch releases.
+    assert len(a101) >= 31, f"alpha101 dropped below v1.3.2 baseline: {len(a101)}"
+    assert len(gtja) >= 38, f"gtja191 dropped below v1.3.2 baseline: {len(gtja)}"
+    assert len(qlib) >= 35, f"qlib158 dropped below v1.3.2 baseline: {len(qlib)}"
     assert all(s.family == "alpha101" for s in a101)
     assert all(s.family == "gtja191" for s in gtja)
+    assert all(s.family == "qlib158" for s in qlib)
 
 
 def test_registry_get_unknown_raises_helpful():

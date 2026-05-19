@@ -4,7 +4,7 @@
 
 # Consumer / liquor
 SH600519  # 贵州茅台
-SH000858  # 五粮液
+SZ000858  # 五粮液 (Shenzhen, not Shanghai)
 SH600887  # 伊利股份
 SH603288  # 海天味业
 

@@ -1,5 +1,67 @@
 # Changelog
 
+## v1.3.2 — 2026-05-19
+
+### Added — qlib158 family (35 first-batch alphas)
+New family `qlib158` ports the simple OHLC-ratio + moving-stat + stochastic
+features from Microsoft Qlib's `Alpha158` handler. v1.3.2 ships the first 35
+of 158:
+
+- **6 candle shape**: `qlib_KMID`, `qlib_KLEN`, `qlib_KMID2`, `qlib_KUP`,
+  `qlib_KLOW`, `qlib_KSFT` — body/wick/range ratios.
+- **12 MA/STD/ROC**: `qlib_MA{5,10,20,60}`, `qlib_STD{5,10,20,60}`,
+  `qlib_ROC{5,10,20,60}` — relative MA, dispersion, lagged-close ratios.
+- **9 stochastic / argmax-argmin**: `qlib_RSV{5,10,20}`,
+  `qlib_IMAX{5,10,20}`, `qlib_IMIN{5,10,20}` — %K position, high-recency,
+  low-recency.
+- **6 up/down counts**: `qlib_CNTP{5,20,60}`, `qlib_CNTN{5,20,60}` —
+  positive/negative day fractions.
+- **2 price-vol correlations**: `qlib_CORR{5,20}` —
+  `correlation(close, log(volume), N)`.
+
+### Added — 20 more alphas across alpha101 + gtja191
+- **alpha101 +9 → 31 total**: `alpha017`, `023`, `026`, `028`, `030`,
+  `033`, `034`, `035`, `040`.
+- **gtja191 +11 → 38 total**: `gtja022`, `024`, `029`, `031`, `034`,
+  `038`, `040`, `046`, `054`, `057`, `065`.
+
+**Zoo now ships 104 alphas total** (was 49 in v1.3.1).
+
+### Fixed
+- `config/universes/sample30.txt` had `SH000858` (五粮液); correct prefix
+  is `SZ000858`. Bench output silently dropped this code as "empty";
+  fixing brings the sample universe back to 30 codes.
+
+### Top signals on sample30 (2024-06 to 2024-12, fwd_5d)
+The qlib158 family dominates the leaderboard once added:
+
+```
+qlib_CNTN60  -0.651   ← new strongest signal in entire zoo
+qlib_CNTP60  +0.599
+qlib_RSV20   +0.579
+alpha005     -0.262
+qlib_STD60   -0.237
+gtja008      -0.233
+gtja001      -0.225
+```
+
+The CNTN/CNTP findings re-confirm the well-known "high recent down-day
+count ⇒ mean-reversion bounce" effect on A-share large caps. n_dates
+is smaller (~80) because of the 60-day window.
+
+### Tests
+- Count assertions bumped to v1.3.2 baseline (alpha101 ≥ 31,
+  gtja191 ≥ 38, qlib158 ≥ 35).
+- Existing 14 tests pass unchanged.
+
+### Roadmap
+- alpha101 remaining: 70 alphas (mostly the regression-based ones —
+  REGBETA, RESIDUAL — which need a new linear-regression operator first).
+- gtja191 remaining: 153 alphas.
+- qlib158 remaining: 123 (including the heavier BETA/RSQR/RESI regression
+  features which need the same operator as alpha101's regression
+  variants).
+
 ## v1.3.1 — 2026-05-19
 
 ### Added — 27 more alpha ports

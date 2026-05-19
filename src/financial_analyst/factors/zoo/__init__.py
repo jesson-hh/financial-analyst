@@ -41,6 +41,7 @@ if os.environ.get("FA_ZOO_LAZY", "") != "1":
     # Import families so their @register decorators fire.
     from financial_analyst.factors.zoo import alpha101  # noqa: F401
     from financial_analyst.factors.zoo import gtja191   # noqa: F401
+    from financial_analyst.factors.zoo import qlib158   # noqa: F401
 
 __all__ = [
     "AlphaSpec", "register", "get", "list_alphas", "families", "PanelData",
