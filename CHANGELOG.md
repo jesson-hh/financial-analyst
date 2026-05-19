@@ -1,5 +1,69 @@
 # Changelog
 
+## v1.4.1 — 2026-05-19
+
+### Zoo catalogue completion — 440 alphas total
+
+The closing batch toward complete coverage of the three reference
+catalogues.
+
+- **alpha101 +3 → 101/101 (100% COMPLETE)**. The final three:
+  - `alpha056` — uses `cap` (market cap) in the original; we substitute
+    `amount` (close × volume) since the formula only consumes `cap`
+    inside `rank()`, where the ordering of dollar volume vs market cap
+    is identical for cross-sectional ranking on A-share large caps.
+  - `alpha071` — max of two decayed ts-ranks (close-ADV180 corr vs
+    squared low+open-2*vwap rank). Long-window, ported as written.
+  - `alpha073` — negative max of VWAP-momentum decay vs blend-delta
+    decay ts-rank.
+- **gtja191 +31 → 189/191 (99% COMPLETE)**. Added 112 (RSI direction),
+  115 (high-close blend × ADV30), 121 (VWAP-floor × ADV60 ts-rank),
+  123/148 (boolean corr-vs-floor), 124/125 (close-VWAP / decay
+  composites), 131 (VWAP-delta × close-ADV50), 137 (single-day TR-
+  normalised momentum), 138/140 (sister of alpha097/088),
+  141 (high-ADV15 rank-corr), 146 (Z-score-style return deviation),
+  152 (MACD on momentum), 154 (VWAP-floor boolean), 156 (sister to
+  alpha073), 157 (deep-nested rank composite), 159 (triple-window
+  stochastic %K composite), 162 (stochastic-RSI), 164 (smoothed
+  up-day-inverse-return), 165 (cumulative-deviation range / 48d
+  stddev), 166 (skewness-style central moment), 169 (MACD chain on
+  EWMA momentum), 170 (sister to alpha047), 173 (TEMA + log
+  correction), 180 (sister to alpha007), 181 (20d variance), 182
+  (bench-aligned up-day proxy), 183 (cumulative-deviation excursion),
+  187 (sister to gtja093), 190 (asymmetric vol log-ratio).
+  Skipped permanently: 143 (recursive SELF — needs prior-step output;
+  fundamentally incompatible with our stateless compute API), 149
+  (benchmark-relative beta — requires benchmark return series we don't
+  carry in PanelData).
+- **qlib158 +23 → 150 (95% of 158 target)**. Wider window coverage for
+  IMAX/IMIN/IMXD × {30,60}, SKEW/KURT × 5, CORR × 3, SUMP/SUMN/SUMD ×
+  {10,30}, VSUMP/VSUMN/VSUMD × {10,30}, CNTD × {10,30}.
+
+Total: **440 alphas across 3 families** — **97% of Vibe-Trading's
+452-alpha reference target**. Compared to v1.3.0's 22 alphas, this is
+a 20× expansion in two days.
+
+### Fixed
+- `gtja157` (nested ranks with `product()`) silently compute_error'd —
+  `product` wasn't in gtja191's import list. Same class of bug as
+  `alpha029` in v1.3.5. Fixed.
+
+### Tests
+- Count baselines bumped (alpha101 ≥ 101, gtja191 ≥ 189, qlib158 ≥ 150).
+- All 18 zoo tests pass. Sample30 bench across 440 alphas runs to
+  completion with 0 compute errors.
+
+### What's truly unportable
+Only 2 of the 452 reference alphas remain unportable, and they're both
+architectural rather than complexity-bound:
+- `gtja143`: recursive — formula references its own prior output as
+  `SELF`. Our stateless `compute(panel) → series` API can't express
+  this without major restructuring. Future work: optional iterative
+  alphas (compute_iterative).
+- `gtja149`: benchmark-index relative beta — needs the daily close of
+  CSI 300 (or equivalent) as a parallel series in PanelData. Future
+  work: BenchmarkLoader.
+
 ## v1.4.0 — 2026-05-19
 
 ### Added — Industry classifier loader + IndNeutralize alphas

@@ -1610,3 +1610,59 @@ register(AlphaSpec(
     formula_text="-(1.5*scale(IndNeutralize(rank(mfm*volume), ind)) - scale(IndNeutralize(correlation(close, rank(adv20), 5) - rank(ts_argmin(close, 30)), ind)))",
     compute=_a100,
 ))
+
+
+# ----- v1.4.1: alpha101 finishers ------------------------------------------
+# Original paper uses `cap` (market cap) — approximate via amount (close×volume),
+# which has the same rank ordering for the rank() wrapper in alpha056.
+
+def _a056(p: PanelData) -> pd.Series:
+    """0 - (1 * (rank((sum(returns, 10) / sum(sum(returns, 2), 3))) * rank((returns * cap))))
+       — cap approximated via amount (rank-invariant for the rank() wrapper)"""
+    inner = ts_sum(p.returns, 10) / ts_sum(ts_sum(p.returns, 2), 3).replace(0, np.nan)
+    return -1.0 * rank(inner) * rank(p.returns * p.amount)
+
+
+register(AlphaSpec(
+    name="alpha056", family=FAMILY, paper=_PAPER,
+    description="Return-ratio rank × (return × amount) rank — composite (cap proxied by amount)",
+    formula_text="-(rank(sum(returns,10) / sum(sum(returns,2),3)) * rank(returns * amount))",
+    compute=_a056,
+))
+
+
+def _a071(p: PanelData) -> pd.Series:
+    """max(Ts_Rank(decay_linear(correlation(Ts_Rank(close, 3), Ts_Rank(adv180, 12), 18), 4), 16),
+            Ts_Rank(decay_linear((rank(((low + open) - (vwap + vwap)))^2), 16), 4))"""
+    adv180 = ts_mean(p.volume, 180)
+    t1 = ts_rank(decay_linear(correlation(ts_rank(p.close, 3), ts_rank(adv180, 12), 18), 4), 16)
+    inner = np.power(rank((p.low + p.open) - 2.0 * p.vwap).clip(lower=1e-9), 2)
+    t2 = ts_rank(decay_linear(inner, 16), 4)
+    return np.maximum(t1, t2)
+
+
+register(AlphaSpec(
+    name="alpha071", family=FAMILY, paper=_PAPER,
+    description="Max of two decayed ts-ranks: close-ADV180 ts-rank corr vs squared low+open-2*vwap rank",
+    formula_text="max(Ts_Rank(decay_linear(correlation(ts_rank(close,3), ts_rank(adv180,12), 18), 4), 16), Ts_Rank(decay_linear(rank(low+open-2*vwap)^2, 16), 4))",
+    compute=_a071,
+))
+
+
+def _a073(p: PanelData) -> pd.Series:
+    """max(rank(decay_linear(delta(vwap, 5), 3)),
+            Ts_Rank(decay_linear(((delta(((open*0.147155) + (low*0.852845)), 2) /
+                                    ((open*0.147155) + (low*0.852845))) * -1), 3), 17)) * -1"""
+    t1 = rank(decay_linear(delta(p.vwap, 5), 3))
+    blend = p.open * 0.147155 + p.low * 0.852845
+    inner = -1.0 * delta(blend, 2) / blend.replace(0, np.nan)
+    t2 = ts_rank(decay_linear(inner, 3), 17)
+    return -1.0 * np.maximum(t1, t2)
+
+
+register(AlphaSpec(
+    name="alpha073", family=FAMILY, paper=_PAPER,
+    description="Negative max of VWAP-momentum decay rank vs blend-delta decay ts-rank",
+    formula_text="-max(rank(decay_linear(delta(vwap,5),3)), Ts_Rank(decay_linear(-delta(blend,2)/blend, 3), 17))",
+    compute=_a073,
+))

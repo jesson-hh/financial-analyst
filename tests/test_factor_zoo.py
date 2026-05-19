@@ -68,11 +68,13 @@ def test_registry_list_filtered_by_family():
     # v1.3.5: +37 alpha101, +65 gtja191, +46 qlib158 = 290
     # v1.3.6: +49 gtja191, +25 qlib158 = 364
     # v1.4.0: +19 alpha101 (IndNeutralize) = 383
+    # v1.4.1: +3 alpha101 (now 101/101), +31 gtja191 (now 189/191),
+    #         +23 qlib158 (now 150/158) = 440 total
     # Lower bounds prevent silent regressions; expect counts to tick up
     # monotonically with future patch releases.
-    assert len(a101) >= 98, f"alpha101 dropped below v1.4.0 baseline: {len(a101)}"
-    assert len(gtja) >= 158, f"gtja191 dropped below v1.4.0 baseline: {len(gtja)}"
-    assert len(qlib) >= 127, f"qlib158 dropped below v1.4.0 baseline: {len(qlib)}"
+    assert len(a101) >= 101, f"alpha101 dropped below v1.4.1 baseline: {len(a101)}"
+    assert len(gtja) >= 189, f"gtja191 dropped below v1.4.1 baseline: {len(gtja)}"
+    assert len(qlib) >= 150, f"qlib158 dropped below v1.4.1 baseline: {len(qlib)}"
     assert all(s.family == "alpha101" for s in a101)
     assert all(s.family == "gtja191" for s in gtja)
     assert all(s.family == "qlib158" for s in qlib)

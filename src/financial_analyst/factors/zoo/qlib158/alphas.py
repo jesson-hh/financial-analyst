@@ -693,3 +693,107 @@ for _n in (30, 60):
         formula_text=f"(close - ts_min(low,{_n})) / (ts_max(high,{_n}) - ts_min(low,{_n}))",
         compute=_make_RSV(_n),
     ))
+
+
+# ----- v1.4.1: fill remaining qlib158 window variants -----------------------
+
+# IMAX/IMIN longer windows (only had 5, 10, 20 — add 30, 60)
+for _n in (30, 60):
+    register(AlphaSpec(
+        name=f"qlib_IMAX{_n}", family=FAMILY, paper=_PAPER,
+        description=f"Position of {_n}-day high (1=oldest, {_n}=newest), normalised by N",
+        formula_text=f"ts_argmax(high, {_n}) / {_n}",
+        compute=_make_IMAX(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_IMIN{_n}", family=FAMILY, paper=_PAPER,
+        description=f"Position of {_n}-day low (1=oldest, {_n}=newest), normalised by N",
+        formula_text=f"ts_argmin(low, {_n}) / {_n}",
+        compute=_make_IMIN(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_IMXD{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day argmax(high) - argmin(low) / n",
+        formula_text=f"(ts_argmax(high, {_n}) - ts_argmin(low, {_n})) / {_n}",
+        compute=_make_IMXD(_n),
+    ))
+
+
+# SKEW/KURT shorter window (5)
+for _n in (5,):
+    register(AlphaSpec(
+        name=f"qlib_SKEW{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day rolling skewness of close",
+        formula_text=f"skew(close, {_n})",
+        compute=_make_SKEW(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_KURT{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day rolling kurtosis of close",
+        formula_text=f"kurt(close, {_n})",
+        compute=_make_KURT(_n),
+    ))
+
+
+# Additional CORR/CORD on shorter horizons
+for _n in (3,):
+    register(AlphaSpec(
+        name=f"qlib_CORR{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day correlation(close, log(volume)) — very short window",
+        formula_text=f"correlation(close, log(volume), {_n})",
+        compute=_make_CORR(_n),
+    ))
+
+
+# Wider SUMP/SUMN/SUMD coverage on close
+for _n in (10, 30):
+    register(AlphaSpec(
+        name=f"qlib_SUMP{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day fraction of positive close-changes",
+        formula_text=f"sum(max(delta(close,1),0), {_n}) / sum(|delta(close,1)|, {_n})",
+        compute=_make_SUMP(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_SUMN{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day fraction of negative close-changes",
+        formula_text=f"sum(max(-delta(close,1),0), {_n}) / sum(|delta(close,1)|, {_n})",
+        compute=_make_SUMN(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_SUMD{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day net close-change fraction",
+        formula_text=f"(sum_pos - sum_neg) / sum_abs, n={_n}",
+        compute=_make_SUMD(_n),
+    ))
+
+
+# Wider VSUMN/VSUMD coverage
+for _n in (10, 30):
+    register(AlphaSpec(
+        name=f"qlib_VSUMP{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day fraction of volume increases",
+        formula_text=f"sum(max(delta(volume,1),0), {_n}) / sum(|delta(volume,1)|, {_n})",
+        compute=_make_VSUMP(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_VSUMN{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day fraction of volume decreases",
+        formula_text=f"sum(max(-delta(volume,1),0), {_n}) / sum(|delta(volume,1)|, {_n})",
+        compute=_make_VSUMN(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_VSUMD{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day net volume direction",
+        formula_text=f"(sum_pos_vdelta - sum_neg_vdelta) / sum_abs, n={_n}",
+        compute=_make_VSUMD(_n),
+    ))
+
+
+# CNTD coverage
+for _n in (10, 30):
+    register(AlphaSpec(
+        name=f"qlib_CNTD{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day net count direction",
+        formula_text=f"(count_up - count_down) / {_n}",
+        compute=_make_CNTD(_n),
+    ))
