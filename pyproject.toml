@@ -89,6 +89,22 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/financial_analyst"]
 
+[tool.hatch.build.targets.sdist]
+# Keep code, tests, docs, configs, examples, memories — exclude dev-meta only
+exclude = [
+    "CLAUDE.md",
+    "AGENTS.md",
+    "GEMINI.md",
+    "RELEASE_NOTES_v*.md",
+    ".env",
+    ".env.local",
+    "out/",
+    ".pytest_cache/",
+    ".ruff_cache/",
+    "__pycache__/",
+    "**/__pycache__/",
+]
+
 [tool.ruff]
 line-length = 120
 target-version = "py311"
