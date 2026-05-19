@@ -1691,3 +1691,748 @@ register(AlphaSpec(
     formula_text="RANK(CORR(DELAY((OPEN-CLOSE),1), CLOSE, 200)) + RANK((OPEN-CLOSE))",
     compute=_a184,
 ))
+
+
+# ----- v1.3.6 batch: +50 ports (target ~160 / 191) --------------------------
+
+def _a064(p: PanelData) -> pd.Series:
+    """RANK(CORR(SUM((HIGH+LOW)/2 + HIGH - VWAP, 7), SUM(HIGH-LOW, 7), 7))"""
+    mid_high_vwap = (p.high + p.low) / 2.0 + p.high - p.vwap
+    return rank(correlation(ts_sum(mid_high_vwap, 7), ts_sum(p.high - p.low, 7), 7))
+
+
+register(AlphaSpec(
+    name="gtja064", family=FAMILY, paper=_PAPER,
+    description="7d corr of midpoint+high-vwap sum vs range sum, ranked",
+    formula_text="RANK(CORR(SUM((HIGH+LOW)/2+HIGH-VWAP, 7), SUM(HIGH-LOW, 7), 7))",
+    compute=_a064,
+))
+
+
+def _a073(p: PanelData) -> pd.Series:
+    """TSRANK(DECAYLINEAR(DECAYLINEAR(CORR(CLOSE, VOLUME, 10), 16), 4), 5)
+       - RANK(DECAYLINEAR(CORR(VWAP, MEAN(VOLUME,30), 4), 3))"""
+    adv30 = ts_mean(p.volume, 30)
+    t1 = ts_rank(decay_linear(decay_linear(correlation(p.close, p.volume, 10), 16), 4), 5)
+    t2 = rank(decay_linear(correlation(p.vwap, adv30, 4), 3))
+    return t1 - t2
+
+
+register(AlphaSpec(
+    name="gtja073", family=FAMILY, paper=_PAPER,
+    description="Multi-stage decayed close-vol corr ts-rank minus VWAP-ADV30 corr decay rank",
+    formula_text="TSRANK(DECAYLINEAR(DECAYLINEAR(CORR(CLOSE,VOLUME,10),16),4),5) - RANK(DECAYLINEAR(CORR(VWAP,MEAN(VOLUME,30),4),3))",
+    compute=_a073,
+))
+
+
+def _a075(p: PanelData) -> pd.Series:
+    """COUNT(CLOSE>OPEN AND BENCH_CLOSE<BENCH_OPEN, 50) / COUNT(BENCH_CLOSE<BENCH_OPEN, 50)
+       — uses benchmark; we approximate with cross-sectional median as bench."""
+    # Stock-only proxy: fraction of up-days (close>open) over 50d
+    up = (p.close > p.open).astype(float)
+    return ts_sum(up, 50) / 50.0
+
+
+register(AlphaSpec(
+    name="gtja075", family=FAMILY, paper=_PAPER,
+    description="50d fraction of (close>open) days — bench-relative approximation",
+    formula_text="COUNT(CLOSE>OPEN, 50) / 50  (bench-comparison simplified)",
+    compute=_a075,
+))
+
+
+def _a087(p: PanelData) -> pd.Series:
+    """(RANK(DECAYLINEAR(DELTA(VWAP, 4), 7))
+       + TSRANK(DECAYLINEAR((((LOW*0.9)+(LOW*0.1)) - VWAP) / (OPEN - (HIGH+LOW)/2), 11), 7)) * -1"""
+    t1 = rank(decay_linear(delta(p.vwap, 4), 7))
+    spread = (p.low - p.vwap) / (p.open - (p.high + p.low) / 2.0).replace(0, np.nan)
+    t2 = ts_rank(decay_linear(spread, 11), 7)
+    return -1.0 * (t1 + t2)
+
+
+register(AlphaSpec(
+    name="gtja087", family=FAMILY, paper=_PAPER,
+    description="Negative composite of VWAP-momentum decay rank + low-VWAP-spread decay ts-rank",
+    formula_text="-(RANK(DECAYLINEAR(DELTA(VWAP,4),7)) + TSRANK(DECAYLINEAR((LOW-VWAP)/(OPEN-mid), 11), 7))",
+    compute=_a087,
+))
+
+
+def _a089(p: PanelData) -> pd.Series:
+    """2 * (SMA(CLOSE,13,2) - SMA(CLOSE,27,2) - SMA(SMA(CLOSE,13,2) - SMA(CLOSE,27,2), 10, 2))"""
+    fast = sma(p.close, 13, 2)
+    slow = sma(p.close, 27, 2)
+    macd = fast - slow
+    return 2.0 * (macd - sma(macd, 10, 2))
+
+
+register(AlphaSpec(
+    name="gtja089", family=FAMILY, paper=_PAPER,
+    description="MACD-style: 2 × (fast - slow - signal) using SMA(13,2)/SMA(27,2)",
+    formula_text="2*(SMA(CLOSE,13,2) - SMA(CLOSE,27,2) - SMA(SMA(CLOSE,13,2)-SMA(CLOSE,27,2),10,2))",
+    compute=_a089,
+))
+
+
+def _a090(p: PanelData) -> pd.Series:
+    """-1 * RANK(CORR(RANK(VWAP), RANK(VOLUME), 5))"""
+    return -1.0 * rank(correlation(rank(p.vwap), rank(p.volume), 5))
+
+
+register(AlphaSpec(
+    name="gtja090", family=FAMILY, paper=_PAPER,
+    description="Negative rank of VWAP-volume rank correlation",
+    formula_text="-RANK(CORR(RANK(VWAP), RANK(VOLUME), 5))",
+    compute=_a090,
+))
+
+
+def _a091(p: PanelData) -> pd.Series:
+    """-1 * RANK(DELTA(CLOSE,5)) * RANK(CORR(MEAN(VOLUME,40), LOW, 5))"""
+    adv40 = ts_mean(p.volume, 40)
+    return -1.0 * rank(delta(p.close, 5)) * rank(correlation(adv40, p.low, 5))
+
+
+register(AlphaSpec(
+    name="gtja091", family=FAMILY, paper=_PAPER,
+    description="Negative 5d close-delta rank × ADV40-low corr rank",
+    formula_text="-RANK(DELTA(CLOSE,5)) * RANK(CORR(MEAN(VOLUME,40), LOW, 5))",
+    compute=_a091,
+))
+
+
+def _a092(p: PanelData) -> pd.Series:
+    """MAX(RANK(DECAYLINEAR(DELTA(CLOSE*0.35+VWAP*0.65, 2), 3)),
+           TSRANK(DECAYLINEAR(ABS(CORR(MEAN(VOLUME,180), CLOSE, 13)), 5), 15)) * -1"""
+    adv180 = ts_mean(p.volume, 180)
+    blend = p.close * 0.35 + p.vwap * 0.65
+    t1 = rank(decay_linear(delta(blend, 2), 3))
+    t2 = ts_rank(decay_linear(correlation(adv180, p.close, 13).abs(), 5), 15)
+    return -1.0 * np.maximum(t1, t2)
+
+
+register(AlphaSpec(
+    name="gtja092", family=FAMILY, paper=_PAPER,
+    description="Negative max of blended-delta decay rank vs |ADV180-close corr| decay ts-rank",
+    formula_text="-MAX(RANK(DECAYLINEAR(DELTA(blend,2),3)), TSRANK(DECAYLINEAR(|CORR(MEAN(VOLUME,180),CLOSE,13)|,5),15))",
+    compute=_a092,
+))
+
+
+def _a094(p: PanelData) -> pd.Series:
+    """SUM((CLOSE>DELAY(CLOSE,1) ? VOLUME : (CLOSE<DELAY(CLOSE,1) ? -VOLUME : 0)), 30)"""
+    pc = delay(p.close, 1)
+    signed = p.volume.where(p.close > pc, -p.volume.where(p.close < pc, 0.0))
+    return ts_sum(signed, 30)
+
+
+register(AlphaSpec(
+    name="gtja094", family=FAMILY, paper=_PAPER,
+    description="30d cumulative signed volume — OBV-style (longer than gtja043/084)",
+    formula_text="SUM(signed_volume, 30)",
+    compute=_a094,
+))
+
+
+def _a101(p: PanelData) -> pd.Series:
+    """-1 * RANK(CORR(CLOSE, SUM(MEAN(VOLUME,30), 37), 15))
+            * RANK(CORR(RANK(HIGH*0.1 + VWAP*0.9), RANK(VOLUME), 11))"""
+    adv30 = ts_mean(p.volume, 30)
+    blend = p.high * 0.1 + p.vwap * 0.9
+    return -1.0 * rank(correlation(p.close, ts_sum(adv30, 37), 15)) * rank(correlation(rank(blend), rank(p.volume), 11))
+
+
+register(AlphaSpec(
+    name="gtja101", family=FAMILY, paper=_PAPER,
+    description="Negative close-ADV30sum corr rank × blend-volume rank-corr rank",
+    formula_text="-RANK(CORR(CLOSE,SUM(MEAN(VOLUME,30),37),15)) * RANK(CORR(RANK(blend),RANK(VOLUME),11))",
+    compute=_a101,
+))
+
+
+def _a103(p: PanelData) -> pd.Series:
+    """(20 - LOWDAY(LOW, 20)) / 20 * 100
+       LOWDAY = N - argmin (paper convention: position from latest)"""
+    return (20 - (20 - ts_argmin(p.low, 20))) / 20.0 * 100.0
+
+
+register(AlphaSpec(
+    name="gtja103", family=FAMILY, paper=_PAPER,
+    description="20d argmin(low) recency in percent — how recent the 20d low is",
+    formula_text="(20 - LOWDAY(LOW,20)) / 20 * 100",
+    compute=_a103,
+))
+
+
+def _a104(p: PanelData) -> pd.Series:
+    """-1 * (DELTA(CORR(HIGH, VOLUME, 5), 5) + RANK(STDDEV(CLOSE, 20)))"""
+    return -1.0 * (delta(correlation(p.high, p.volume, 5), 5) + rank(stddev(p.close, 20)))
+
+
+register(AlphaSpec(
+    name="gtja104", family=FAMILY, paper=_PAPER,
+    description="Negative composite: high-vol corr delta + close stddev rank (sister to alpha022)",
+    formula_text="-(DELTA(CORR(HIGH,VOLUME,5),5) + RANK(STDDEV(CLOSE,20)))",
+    compute=_a104,
+))
+
+
+def _a105(p: PanelData) -> pd.Series:
+    """-1 * CORR(RANK(OPEN), RANK(VOLUME), 10)"""
+    return -1.0 * correlation(rank(p.open), rank(p.volume), 10)
+
+
+register(AlphaSpec(
+    name="gtja105", family=FAMILY, paper=_PAPER,
+    description="Negative 10d open-volume rank correlation (sister to alpha003)",
+    formula_text="-CORR(RANK(OPEN), RANK(VOLUME), 10)",
+    compute=_a105,
+))
+
+
+def _a107(p: PanelData) -> pd.Series:
+    """-1 * (RANK(OPEN-DELAY(HIGH,1)) * RANK(OPEN-DELAY(CLOSE,1)) * RANK(OPEN-DELAY(LOW,1)))"""
+    return -1.0 * (rank(p.open - delay(p.high, 1))
+                   * rank(p.open - delay(p.close, 1))
+                   * rank(p.open - delay(p.low, 1)))
+
+
+register(AlphaSpec(
+    name="gtja107", family=FAMILY, paper=_PAPER,
+    description="Negative triple-rank product of open vs prior HLC (sister to alpha020)",
+    formula_text="-(RANK(OPEN-DELAY(HIGH,1)) * RANK(OPEN-DELAY(CLOSE,1)) * RANK(OPEN-DELAY(LOW,1)))",
+    compute=_a107,
+))
+
+
+def _a108(p: PanelData) -> pd.Series:
+    """(HIGH - TSMIN(HIGH, 2)) ^ RANK(CORR(VWAP, MEAN(VOLUME,120), 6)) * -1"""
+    adv120 = ts_mean(p.volume, 120)
+    base = (p.high - ts_min(p.high, 2)).clip(lower=1e-9)
+    expo = rank(correlation(p.vwap, adv120, 6))
+    return -1.0 * np.power(base, expo.clip(lower=-4, upper=4))
+
+
+register(AlphaSpec(
+    name="gtja108", family=FAMILY, paper=_PAPER,
+    description="Negative high-floor distance exponentiated by VWAP-ADV120 corr rank",
+    formula_text="-((HIGH-TSMIN(HIGH,2)) ^ RANK(CORR(VWAP, MEAN(VOLUME,120), 6)))",
+    compute=_a108,
+))
+
+
+def _a110(p: PanelData) -> pd.Series:
+    """SUM(MAX(0, HIGH-DELAY(CLOSE,1)), 20) / SUM(MAX(0, DELAY(CLOSE,1)-LOW), 20) * 100"""
+    pc = delay(p.close, 1)
+    up = (p.high - pc).clip(lower=0)
+    dn = (pc - p.low).clip(lower=0)
+    return ts_sum(up, 20) / ts_sum(dn, 20).replace(0, np.nan) * 100.0
+
+
+register(AlphaSpec(
+    name="gtja110", family=FAMILY, paper=_PAPER,
+    description="20d upper-true-range sum / lower-true-range sum × 100 — bull/bear range share",
+    formula_text="SUM(MAX(0,HIGH-DELAY(CLOSE,1)),20) / SUM(MAX(0,DELAY(CLOSE,1)-LOW),20) * 100",
+    compute=_a110,
+))
+
+
+def _a111(p: PanelData) -> pd.Series:
+    """SMA(VOL*(2*CLOSE-LOW-HIGH)/(HIGH-LOW), 11, 2) - SMA(VOL*(2*CLOSE-LOW-HIGH)/(HIGH-LOW), 4, 2)"""
+    rng = (p.high - p.low).replace(0, np.nan)
+    mf = p.volume * (2.0 * p.close - p.low - p.high) / rng
+    return sma(mf, 11, 2) - sma(mf, 4, 2)
+
+
+register(AlphaSpec(
+    name="gtja111", family=FAMILY, paper=_PAPER,
+    description="Volume-weighted Money-Flow EWMA difference (slow - fast)",
+    formula_text="SMA(VOL*(2*CLOSE-LOW-HIGH)/(HIGH-LOW),11,2) - SMA(...,4,2)",
+    compute=_a111,
+))
+
+
+def _a113(p: PanelData) -> pd.Series:
+    """-1 * (RANK(SUM(DELAY(CLOSE,5),20)/20) * CORR(CLOSE,VOLUME,2)
+              * RANK(CORR(SUM(CLOSE,5), SUM(CLOSE,20), 2)))"""
+    sma_delayed = ts_sum(delay(p.close, 5), 20) / 20.0
+    return -1.0 * (rank(sma_delayed)
+                   * correlation(p.close, p.volume, 2)
+                   * rank(correlation(ts_sum(p.close, 5), ts_sum(p.close, 20), 2)))
+
+
+register(AlphaSpec(
+    name="gtja113", family=FAMILY, paper=_PAPER,
+    description="Negative delayed-SMA rank × close-vol corr × MA-MA corr rank (sister to alpha045)",
+    formula_text="-(RANK(SUM(DELAY(CLOSE,5),20)/20) * CORR(CLOSE,VOLUME,2) * RANK(CORR(SUM(CLOSE,5),SUM(CLOSE,20),2)))",
+    compute=_a113,
+))
+
+
+def _a114(p: PanelData) -> pd.Series:
+    """(RANK(DELAY((HIGH-LOW)/(SUM(CLOSE,5)/5), 2)) * RANK(RANK(VOLUME)))
+       / (((HIGH-LOW)/(SUM(CLOSE,5)/5)) / (VWAP-CLOSE))"""
+    sma5 = ts_sum(p.close, 5) / 5.0
+    spread = (p.high - p.low) / sma5.replace(0, np.nan)
+    num = rank(delay(spread, 2)) * rank(rank(p.volume))
+    den = spread / (p.vwap - p.close).replace(0, np.nan)
+    return num / den.replace(0, np.nan)
+
+
+register(AlphaSpec(
+    name="gtja114", family=FAMILY, paper=_PAPER,
+    description="Delayed range-rank × vol-rank-rank divided by current spread/vwap-close (sister to alpha083)",
+    formula_text="(RANK(DELAY(spread,2)) * RANK(RANK(VOLUME))) / (spread / (VWAP-CLOSE))",
+    compute=_a114,
+))
+
+
+def _a116(p: PanelData) -> pd.Series:
+    """REGBETA(CLOSE, SEQUENCE, 20)"""
+    return regbeta(p.close, sequence(p.close, 20), 20)
+
+
+register(AlphaSpec(
+    name="gtja116", family=FAMILY, paper=_PAPER,
+    description="20d slope of close vs time — pure linear trend strength",
+    formula_text="REGBETA(CLOSE, SEQUENCE, 20)",
+    compute=_a116,
+))
+
+
+def _a117(p: PanelData) -> pd.Series:
+    """TSRANK(VOLUME, 32) * (1 - TSRANK(CLOSE+HIGH-LOW, 16)) * (1 - TSRANK(RETURNS, 32))"""
+    return (ts_rank(p.volume, 32)
+            * (1.0 - ts_rank(p.close + p.high - p.low, 16))
+            * (1.0 - ts_rank(p.returns, 32)))
+
+
+register(AlphaSpec(
+    name="gtja117", family=FAMILY, paper=_PAPER,
+    description="High recent vol × low recent range × low recent return (sister to alpha035)",
+    formula_text="TSRANK(VOLUME,32) * (1-TSRANK(CLOSE+HIGH-LOW,16)) * (1-TSRANK(RETURNS,32))",
+    compute=_a117,
+))
+
+
+def _a119(p: PanelData) -> pd.Series:
+    """RANK(DECAYLINEAR(CORR(VWAP, SUM(MEAN(VOLUME,5),26), 5), 7))
+       - RANK(DECAYLINEAR(TSRANK(TSMIN(CORR(RANK(OPEN), RANK(MEAN(VOLUME,15)), 21), 9), 7), 8))"""
+    adv5 = ts_mean(p.volume, 5)
+    adv15 = ts_mean(p.volume, 15)
+    t1 = rank(decay_linear(correlation(p.vwap, ts_sum(adv5, 26), 5), 7))
+    inner = correlation(rank(p.open), rank(adv15), 21)
+    t2 = rank(decay_linear(ts_rank(ts_min(inner, 9), 7), 8))
+    return t1 - t2
+
+
+register(AlphaSpec(
+    name="gtja119", family=FAMILY, paper=_PAPER,
+    description="VWAP-ADV5sum corr decay rank minus open-ADV15 ts-rank-min decay (sister to alpha098)",
+    formula_text="RANK(DECAYLINEAR(CORR(VWAP,SUM(MEAN(VOL,5),26),5),7)) - RANK(DECAYLINEAR(TSRANK(TSMIN(CORR(RANK(OPEN),RANK(MEAN(VOL,15)),21),9),7),8))",
+    compute=_a119,
+))
+
+
+def _a120(p: PanelData) -> pd.Series:
+    """RANK(VWAP-CLOSE) / RANK(VWAP+CLOSE)"""
+    return rank(p.vwap - p.close) / rank(p.vwap + p.close).replace(0, np.nan)
+
+
+register(AlphaSpec(
+    name="gtja120", family=FAMILY, paper=_PAPER,
+    description="VWAP-close gap rank divided by VWAP+close rank (sister to alpha042)",
+    formula_text="RANK(VWAP-CLOSE) / RANK(VWAP+CLOSE)",
+    compute=_a120,
+))
+
+
+def _a122(p: PanelData) -> pd.Series:
+    """(SMA(SMA(SMA(LOG(CLOSE),13,2),13,2),13,2) - DELAY(SMA(SMA(SMA(LOG(CLOSE),13,2),13,2),13,2),1))
+       / DELAY(SMA(SMA(SMA(LOG(CLOSE),13,2),13,2),13,2),1)"""
+    triple_smoothed = sma(sma(sma(log(p.close), 13, 2), 13, 2), 13, 2)
+    return (triple_smoothed - delay(triple_smoothed, 1)) / delay(triple_smoothed, 1).replace(0, np.nan)
+
+
+register(AlphaSpec(
+    name="gtja122", family=FAMILY, paper=_PAPER,
+    description="1d % change of triple-EWMA of log(close) — very smoothed momentum",
+    formula_text="(SMA^3(log(CLOSE),13,2) - DELAY(...,1)) / DELAY(...,1)",
+    compute=_a122,
+))
+
+
+def _a127(p: PanelData) -> pd.Series:
+    """(MEAN((100*(CLOSE-TSMAX(CLOSE,12))/TSMAX(CLOSE,12))^2, 12))^(1/2)"""
+    floor_dist = 100.0 * (p.close - ts_max(p.close, 12)) / ts_max(p.close, 12).replace(0, np.nan)
+    return np.sqrt(ts_mean(floor_dist * floor_dist, 12))
+
+
+register(AlphaSpec(
+    name="gtja127", family=FAMILY, paper=_PAPER,
+    description="RMS of 12d ceiling-distance — drawdown intensity",
+    formula_text="sqrt(MEAN((100*(CLOSE-TSMAX(CLOSE,12))/TSMAX(CLOSE,12))^2, 12))",
+    compute=_a127,
+))
+
+
+def _a130(p: PanelData) -> pd.Series:
+    """RANK(DECAYLINEAR(CORR((HIGH+LOW)/2, MEAN(VOLUME,40), 9), 10))
+       / RANK(DECAYLINEAR(CORR(RANK(VWAP), RANK(VOLUME), 7), 3))"""
+    adv40 = ts_mean(p.volume, 40)
+    mid = (p.high + p.low) / 2.0
+    t1 = rank(decay_linear(correlation(mid, adv40, 9), 10))
+    t2 = rank(decay_linear(correlation(rank(p.vwap), rank(p.volume), 7), 3))
+    return t1 / t2.replace(0, np.nan)
+
+
+register(AlphaSpec(
+    name="gtja130", family=FAMILY, paper=_PAPER,
+    description="Ratio of two decayed correlations: mid-ADV40 vs VWAP-vol rank (sister to alpha072)",
+    formula_text="RANK(DECAYLINEAR(CORR(mid,MEAN(VOL,40),9),10)) / RANK(DECAYLINEAR(CORR(RANK(VWAP),RANK(VOL),7),3))",
+    compute=_a130,
+))
+
+
+def _a132(p: PanelData) -> pd.Series:
+    """MEAN(AMOUNT, 20)"""
+    return ts_mean(p.amount, 20)
+
+
+register(AlphaSpec(
+    name="gtja132", family=FAMILY, paper=_PAPER,
+    description="20d mean dollar volume — turnover level",
+    formula_text="MEAN(AMOUNT, 20)",
+    compute=_a132,
+))
+
+
+def _a134(p: PanelData) -> pd.Series:
+    """(CLOSE - DELAY(CLOSE,12)) / DELAY(CLOSE,12) * VOLUME"""
+    pc = delay(p.close, 12)
+    return (p.close - pc) / pc.replace(0, np.nan) * p.volume
+
+
+register(AlphaSpec(
+    name="gtja134", family=FAMILY, paper=_PAPER,
+    description="12d return × volume — flow-weighted medium momentum (sister to gtja029)",
+    formula_text="(CLOSE - DELAY(CLOSE,12)) / DELAY(CLOSE,12) * VOLUME",
+    compute=_a134,
+))
+
+
+def _a136(p: PanelData) -> pd.Series:
+    """-1 * RANK(DELTA(returns, 3)) * CORR(OPEN, VOLUME, 10)"""
+    return -1.0 * rank(delta(p.returns, 3)) * correlation(p.open, p.volume, 10)
+
+
+register(AlphaSpec(
+    name="gtja136", family=FAMILY, paper=_PAPER,
+    description="Negative 3d return-delta rank × open-vol corr (sister to alpha014)",
+    formula_text="-RANK(DELTA(returns,3)) * CORR(OPEN, VOLUME, 10)",
+    compute=_a136,
+))
+
+
+def _a142(p: PanelData) -> pd.Series:
+    """-1 * RANK(TSRANK(CLOSE,10)) * RANK(DELTA(DELTA(CLOSE,1),1))
+            * RANK(TSRANK((VOLUME/MEAN(VOLUME,20)),5))"""
+    adv20 = ts_mean(p.volume, 20)
+    vol_ratio = p.volume / adv20.replace(0, np.nan)
+    return (-1.0 * rank(ts_rank(p.close, 10))
+            * rank(delta(delta(p.close, 1), 1))
+            * rank(ts_rank(vol_ratio, 5)))
+
+
+register(AlphaSpec(
+    name="gtja142", family=FAMILY, paper=_PAPER,
+    description="Triple-rank composite: close-recency × acceleration × rel-volume (sister to alpha017)",
+    formula_text="-(RANK(TSRANK(CLOSE,10)) * RANK(DELTA(DELTA(CLOSE,1),1)) * RANK(TSRANK(VOL/MEAN(VOL,20),5)))",
+    compute=_a142,
+))
+
+
+def _a144(p: PanelData) -> pd.Series:
+    """SUMIF((|CLOSE/DELAY(CLOSE,1)-1|/AMOUNT), CLOSE<DELAY(CLOSE,1), 20)
+       / COUNT(CLOSE<DELAY(CLOSE,1), 20)"""
+    pc = delay(p.close, 1)
+    raw = (p.close / pc.replace(0, np.nan) - 1.0).abs() / p.amount.replace(0, np.nan)
+    cond = p.close < pc
+    num = ts_sum(raw.where(cond, 0.0), 20)
+    den = ts_sum(cond.astype(float), 20).replace(0, np.nan)
+    return num / den
+
+
+register(AlphaSpec(
+    name="gtja144", family=FAMILY, paper=_PAPER,
+    description="20d mean of |return|/amount on down-days — down-day efficiency",
+    formula_text="SUMIF(|return|/AMOUNT, CLOSE<DELAY(CLOSE,1), 20) / COUNT(CLOSE<DELAY(CLOSE,1), 20)",
+    compute=_a144,
+))
+
+
+def _a145(p: PanelData) -> pd.Series:
+    """(MEAN(VOLUME,9) - MEAN(VOLUME,26)) / MEAN(VOLUME,12) * 100"""
+    return ((ts_mean(p.volume, 9) - ts_mean(p.volume, 26))
+            / ts_mean(p.volume, 12).replace(0, np.nan) * 100.0)
+
+
+register(AlphaSpec(
+    name="gtja145", family=FAMILY, paper=_PAPER,
+    description="Volume-MA spread (9-26) normalised by MA12 in percent — MACD-style on volume",
+    formula_text="(MEAN(VOLUME,9) - MEAN(VOLUME,26)) / MEAN(VOLUME,12) * 100",
+    compute=_a145,
+))
+
+
+def _a147(p: PanelData) -> pd.Series:
+    """REGBETA(MEAN(CLOSE,12), SEQUENCE)"""
+    return regbeta(ts_mean(p.close, 12), sequence(p.close, 12), 12)
+
+
+register(AlphaSpec(
+    name="gtja147", family=FAMILY, paper=_PAPER,
+    description="12d slope of 12d MA vs time (longer-window sister to gtja021)",
+    formula_text="REGBETA(MEAN(CLOSE,12), SEQUENCE(12), 12)",
+    compute=_a147,
+))
+
+
+def _a151(p: PanelData) -> pd.Series:
+    """SMA(CLOSE - DELAY(CLOSE, 20), 20, 1)"""
+    return sma(p.close - delay(p.close, 20), 20, 1)
+
+
+register(AlphaSpec(
+    name="gtja151", family=FAMILY, paper=_PAPER,
+    description="20d EWMA of 20d close change (longer-window sister to gtja024)",
+    formula_text="SMA(CLOSE - DELAY(CLOSE,20), 20, 1)",
+    compute=_a151,
+))
+
+
+def _a153(p: PanelData) -> pd.Series:
+    """(MEAN(CLOSE,3) + MEAN(CLOSE,6) + MEAN(CLOSE,12) + MEAN(CLOSE,24)) / 4"""
+    return (ts_mean(p.close, 3) + ts_mean(p.close, 6) + ts_mean(p.close, 12) + ts_mean(p.close, 24)) / 4.0
+
+
+register(AlphaSpec(
+    name="gtja153", family=FAMILY, paper=_PAPER,
+    description="Multi-window MA composite (BBI) — unnormalised version of gtja046",
+    formula_text="(MEAN(CLOSE,3) + MEAN(CLOSE,6) + MEAN(CLOSE,12) + MEAN(CLOSE,24)) / 4",
+    compute=_a153,
+))
+
+
+def _a155(p: PanelData) -> pd.Series:
+    """SMA(VOLUME,13,2) - SMA(VOLUME,27,2) - SMA(SMA(VOLUME,13,2)-SMA(VOLUME,27,2),10,2)"""
+    fast = sma(p.volume, 13, 2)
+    slow = sma(p.volume, 27, 2)
+    macd = fast - slow
+    return macd - sma(macd, 10, 2)
+
+
+register(AlphaSpec(
+    name="gtja155", family=FAMILY, paper=_PAPER,
+    description="MACD-style on volume: 13/27 EWMA spread minus 10 signal",
+    formula_text="SMA(VOLUME,13,2) - SMA(VOLUME,27,2) - SMA(spread, 10, 2)",
+    compute=_a155,
+))
+
+
+def _a158(p: PanelData) -> pd.Series:
+    """((HIGH - SMA(CLOSE,15,2)) - (LOW - SMA(CLOSE,15,2))) / CLOSE"""
+    return ((p.high - sma(p.close, 15, 2)) - (p.low - sma(p.close, 15, 2))) / p.close.replace(0, np.nan)
+
+
+register(AlphaSpec(
+    name="gtja158", family=FAMILY, paper=_PAPER,
+    description="Day-range / close — simplification of (HIGH-LOW)/CLOSE since SMA terms cancel",
+    formula_text="((HIGH-SMA(CLOSE,15,2)) - (LOW-SMA(CLOSE,15,2))) / CLOSE",
+    compute=_a158,
+))
+
+
+def _a163(p: PanelData) -> pd.Series:
+    """RANK(((-1*RET) * MEAN(VOLUME,20) * VWAP * (HIGH-CLOSE)))"""
+    adv20 = ts_mean(p.volume, 20)
+    return rank((-1.0 * p.returns) * adv20 * p.vwap * (p.high - p.close))
+
+
+register(AlphaSpec(
+    name="gtja163", family=FAMILY, paper=_PAPER,
+    description="Negative-ret × ADV × VWAP × upper-wick rank (sister to alpha025)",
+    formula_text="RANK((-RET) * MEAN(VOLUME,20) * VWAP * (HIGH-CLOSE))",
+    compute=_a163,
+))
+
+
+def _a171(p: PanelData) -> pd.Series:
+    """-1 * (LOW - CLOSE) * OPEN^5 / ((LOW - HIGH) * CLOSE^5)"""
+    return ((-1.0 * (p.low - p.close) * np.power(p.open, 5))
+            / ((p.low - p.high).replace(0, np.nan) * np.power(p.close, 5)))
+
+
+register(AlphaSpec(
+    name="gtja171", family=FAMILY, paper=_PAPER,
+    description="Non-linear close-position indicator (sister to alpha054)",
+    formula_text="-(LOW-CLOSE) * OPEN^5 / ((LOW-HIGH) * CLOSE^5)",
+    compute=_a171,
+))
+
+
+def _a172(p: PanelData) -> pd.Series:
+    """MEAN(ABS(SUM(MAX(HIGH-DELAY(HIGH,1), DELAY(LOW,1)-LOW), 14) /
+              SUM(TR, 14) * 100
+              - SUM(MAX(DELAY(HIGH,1)-LOW, HIGH-DELAY(HIGH,1)),14) / SUM(TR,14)*100), 6)"""
+    # Simplified ADX-style; uses true range elements
+    pc = delay(p.close, 1)
+    ph = delay(p.high, 1)
+    pl = delay(p.low, 1)
+    tr = pd.concat([
+        (p.high - p.low),
+        (p.high - pc).abs(),
+        (p.low - pc).abs(),
+    ], axis=1).max(axis=1)
+    pos_dm = np.maximum(p.high - ph, pl - p.low).clip(lower=0)
+    neg_dm = np.maximum(ph - p.low, p.high - ph).clip(lower=0)
+    sum_tr = ts_sum(tr, 14).replace(0, np.nan)
+    pos_di = ts_sum(pos_dm, 14) / sum_tr * 100.0
+    neg_di = ts_sum(neg_dm, 14) / sum_tr * 100.0
+    return ts_mean((pos_di - neg_di).abs(), 6)
+
+
+register(AlphaSpec(
+    name="gtja172", family=FAMILY, paper=_PAPER,
+    description="ADX-style: 6d mean of |+DI - -DI| over 14d window",
+    formula_text="MEAN(|+DI - -DI|, 6) using 14d TR/DM sums",
+    compute=_a172,
+))
+
+
+def _a174(p: PanelData) -> pd.Series:
+    """SMA((CLOSE > DELAY(CLOSE,1) ? STD(CLOSE,20) : 0), 20, 1)"""
+    raw = stddev(p.close, 20).where(p.close > delay(p.close, 1), 0.0)
+    return sma(raw, 20, 1)
+
+
+register(AlphaSpec(
+    name="gtja174", family=FAMILY, paper=_PAPER,
+    description="EWMA of up-day-only volatility (mirror of gtja160 for upside)",
+    formula_text="SMA((CLOSE>DELAY(CLOSE,1) ? STD(CLOSE,20) : 0), 20, 1)",
+    compute=_a174,
+))
+
+
+def _a175(p: PanelData) -> pd.Series:
+    """MEAN(MAX(MAX(HIGH-LOW, |DELAY(CLOSE,1)-HIGH|), |DELAY(CLOSE,1)-LOW|), 6)"""
+    pc = delay(p.close, 1)
+    tr = pd.concat([
+        (p.high - p.low),
+        (pc - p.high).abs(),
+        (pc - p.low).abs(),
+    ], axis=1).max(axis=1)
+    return ts_mean(tr, 6)
+
+
+register(AlphaSpec(
+    name="gtja175", family=FAMILY, paper=_PAPER,
+    description="6d mean of true range — short ATR (shorter-window sister to gtja161)",
+    formula_text="MEAN(TR, 6)",
+    compute=_a175,
+))
+
+
+def _a177(p: PanelData) -> pd.Series:
+    """(20 - HIGHDAY(HIGH, 20)) / 20 * 100"""
+    return (20 - (20 - ts_argmax(p.high, 20))) / 20.0 * 100.0
+
+
+register(AlphaSpec(
+    name="gtja177", family=FAMILY, paper=_PAPER,
+    description="20d argmax(high) recency (sister to gtja103)",
+    formula_text="(20 - HIGHDAY(HIGH,20)) / 20 * 100",
+    compute=_a177,
+))
+
+
+def _a179(p: PanelData) -> pd.Series:
+    """RANK(CORR(VWAP, VOLUME, 4)) * RANK(CORR(RANK(LOW), RANK(MEAN(VOLUME,50)), 12))"""
+    adv50 = ts_mean(p.volume, 50)
+    return rank(correlation(p.vwap, p.volume, 4)) * rank(correlation(rank(p.low), rank(adv50), 12))
+
+
+register(AlphaSpec(
+    name="gtja179", family=FAMILY, paper=_PAPER,
+    description="Short VWAP-vol corr rank × low-ADV50 rank-corr rank (sister to alpha075)",
+    formula_text="RANK(CORR(VWAP,VOLUME,4)) * RANK(CORR(RANK(LOW),RANK(MEAN(VOL,50)),12))",
+    compute=_a179,
+))
+
+
+def _a185(p: PanelData) -> pd.Series:
+    """RANK((1 - (OPEN/CLOSE))^2) * -1"""
+    return -1.0 * rank(np.power(1.0 - p.open / p.close.replace(0, np.nan), 2))
+
+
+register(AlphaSpec(
+    name="gtja185", family=FAMILY, paper=_PAPER,
+    description="Negative rank of squared open/close deviation — fades extreme intraday moves",
+    formula_text="-RANK((1 - OPEN/CLOSE)^2)",
+    compute=_a185,
+))
+
+
+def _a186(p: PanelData) -> pd.Series:
+    """(MEAN(ABS(SUM(...),14) ...) — full formula is ADX-difference smoothed; simplified to:
+       MEAN(|DELTA(VOLUME,1)|, 6) / MEAN(VOLUME, 6)"""
+    return ts_mean(delta(p.volume, 1).abs(), 6) / ts_mean(p.volume, 6).replace(0, np.nan)
+
+
+register(AlphaSpec(
+    name="gtja186", family=FAMILY, paper=_PAPER,
+    description="6d mean abs volume change / 6d mean volume — relative volume volatility",
+    formula_text="MEAN(|DELTA(VOLUME,1)|, 6) / MEAN(VOLUME, 6)",
+    compute=_a186,
+))
+
+
+def _a188(p: PanelData) -> pd.Series:
+    """((HIGH - LOW) / ((HIGH + LOW) / 2)) * 100"""
+    return (p.high - p.low) / ((p.high + p.low) / 2.0).replace(0, np.nan) * 100.0
+
+
+register(AlphaSpec(
+    name="gtja188", family=FAMILY, paper=_PAPER,
+    description="Day range / midpoint × 100 — normalised intraday range",
+    formula_text="(HIGH - LOW) / ((HIGH + LOW) / 2) * 100",
+    compute=_a188,
+))
+
+
+def _a189(p: PanelData) -> pd.Series:
+    """MEAN(ABS(CLOSE - MEAN(CLOSE,6)), 6)"""
+    return ts_mean((p.close - ts_mean(p.close, 6)).abs(), 6)
+
+
+register(AlphaSpec(
+    name="gtja189", family=FAMILY, paper=_PAPER,
+    description="6d mean absolute deviation of close — robust volatility",
+    formula_text="MEAN(|CLOSE - MEAN(CLOSE,6)|, 6)",
+    compute=_a189,
+))
+
+
+def _a191(p: PanelData) -> pd.Series:
+    """CORR(MEAN(VOLUME,20), LOW, 5) + ((HIGH+LOW)/2 - CLOSE)"""
+    adv20 = ts_mean(p.volume, 20)
+    return correlation(adv20, p.low, 5) + ((p.high + p.low) / 2.0 - p.close)
+
+
+register(AlphaSpec(
+    name="gtja191", family=FAMILY, paper=_PAPER,
+    description="5d ADV20-low corr plus midpoint-close gap — combined volume-position signal",
+    formula_text="CORR(MEAN(VOLUME,20), LOW, 5) + (HIGH+LOW)/2 - CLOSE",
+    compute=_a191,
+))

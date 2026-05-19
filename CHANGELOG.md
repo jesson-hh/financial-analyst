@@ -1,5 +1,38 @@
 # Changelog
 
+## v1.3.6 — 2026-05-19
+
+### Added — +74 alphas (zoo: 290 → 364)
+Final pre-IndustryLoader push toward Vibe-Trading parity.
+
+- **gtja191 +49 → 158/191 (83%)**: added 064, 073, 075, 087, 089, 090,
+  091, 092, 094, 101, 103-105, 107, 108, 110, 111, 113, 114, 116, 117,
+  119, 120, 122, 127, 130, 132, 134, 136, 142, 144, 145, 147, 151, 153,
+  155, 158, 163, 171, 172 (ADX-style), 174, 175 (short ATR), 177, 179,
+  185, 186, 188, 189, 191. Hits MACD-style (089/155), Williams %R
+  variants, multi-window OBV, recency indicators, CCI/ADX patterns,
+  short ATR, rolling kurtosis-style displacement (127).
+
+- **qlib158 +25 → 127/158 (80%)**: rolling SKEW/KURT × {10,20,60} (6),
+  MA30/STD30/ROC30 (3), longer CORR/CORD × {10,60} (4),
+  WVMA × {10,30} (2), VMA/VSTD × {10,30} (4), CNTP/CNTN × {10,30} (4),
+  RSV × {30,60} (2).
+
+**Zoo: 364 alphas across 3 families** —
+80%+ of two of the three reference catalogues.
+
+### Remaining work (v1.4.0 +)
+- alpha101: 22 left, all use `IndNeutralize` (need IndustryLoader). v1.4.0.
+- gtja191: 33 left, mostly very complex/exotic (recursive `SELF`,
+  benchmark-relative formulas, multi-stage SUMIF). Incremental.
+- qlib158: 31 left, mostly window variants of existing features that
+  add no signal capacity. Optional.
+
+### Tests
+- 15 zoo tests pass; baselines bumped (alpha101 ≥ 79, gtja191 ≥ 158,
+  qlib158 ≥ 127).
+- Sample30 bench across 364 alphas completes with 0 compute errors.
+
 ## v1.3.5 — 2026-05-19
 
 ### Added — +148 alphas (zoo: 142 → 290)

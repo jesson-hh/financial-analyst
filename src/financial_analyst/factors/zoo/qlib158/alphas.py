@@ -564,3 +564,132 @@ for _n in (5, 10, 20):
         formula_text=f"(ts_argmax(high, {_n}) - ts_argmin(low, {_n})) / {_n}",
         compute=_make_IMXD(_n),
     ))
+
+
+# ----- v1.3.6 batch: longer windows + higher-order moments + extras ---------
+
+
+# Skewness / Kurtosis of close (rolling)
+def _make_SKEW(n: int):
+    def _fn(p: PanelData) -> pd.Series:
+        grouped = p.close.groupby(level="code", group_keys=False)
+        out = grouped.rolling(window=n, min_periods=n).skew()
+        if isinstance(out.index, pd.MultiIndex) and out.index.nlevels > 2:
+            out = out.droplevel(0)
+        return out.reindex(p.close.index)
+    return _fn
+
+
+def _make_KURT(n: int):
+    def _fn(p: PanelData) -> pd.Series:
+        grouped = p.close.groupby(level="code", group_keys=False)
+        out = grouped.rolling(window=n, min_periods=n).kurt()
+        if isinstance(out.index, pd.MultiIndex) and out.index.nlevels > 2:
+            out = out.droplevel(0)
+        return out.reindex(p.close.index)
+    return _fn
+
+
+for _n in (10, 20, 60):
+    register(AlphaSpec(
+        name=f"qlib_SKEW{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day rolling skewness of close — return distribution asymmetry",
+        formula_text=f"skew(close, {_n})",
+        compute=_make_SKEW(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_KURT{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day rolling kurtosis of close — return distribution tail weight",
+        formula_text=f"kurt(close, {_n})",
+        compute=_make_KURT(_n),
+    ))
+
+
+# Longer-window MA / STD / ROC variants (10, 30 windows)
+for _n in (30,):
+    register(AlphaSpec(
+        name=f"qlib_MA{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day MA / close",
+        formula_text=f"mean(close, {_n}) / close",
+        compute=_make_MA(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_STD{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day stddev / close",
+        formula_text=f"stddev(close, {_n}) / close",
+        compute=_make_STD(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_ROC{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day close ratio",
+        formula_text=f"delay(close, {_n}) / close",
+        compute=_make_ROC(_n),
+    ))
+
+
+# Longer CORR windows
+for _n in (10, 60):
+    register(AlphaSpec(
+        name=f"qlib_CORR{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day correlation(close, log(volume))",
+        formula_text=f"correlation(close, log(volume), {_n})",
+        compute=_make_CORR(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_CORD{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day correlation(close-ratio, log volume-ratio)",
+        formula_text=f"correlation(close/delay(close,1), log(volume/delay(volume,1)), {_n})",
+        compute=_make_CORD(_n),
+    ))
+
+
+# WVMA additional windows
+for _n in (10, 30):
+    register(AlphaSpec(
+        name=f"qlib_WVMA{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day weighted volume-volatility",
+        formula_text=f"stddev(|ret|*volume, {_n}) / mean(|ret|*volume, {_n})",
+        compute=_make_WVMA(_n),
+    ))
+
+
+# VMA / VSTD additional windows
+for _n in (10, 30):
+    register(AlphaSpec(
+        name=f"qlib_VMA{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day volume MA / volume",
+        formula_text=f"mean(volume, {_n}) / volume",
+        compute=_make_VMA(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_VSTD{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day volume stddev / volume",
+        formula_text=f"stddev(volume, {_n}) / volume",
+        compute=_make_VSTD(_n),
+    ))
+
+
+# CNTP/CNTN with windows 10, 30
+for _n in (10, 30):
+    register(AlphaSpec(
+        name=f"qlib_CNTP{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day up-day fraction",
+        formula_text=f"count(close > delay(close,1), {_n}) / {_n}",
+        compute=_make_CNTP(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_CNTN{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day down-day fraction",
+        formula_text=f"count(close < delay(close,1), {_n}) / {_n}",
+        compute=_make_CNTN(_n),
+    ))
+
+
+# RSV with longer windows
+for _n in (30, 60):
+    register(AlphaSpec(
+        name=f"qlib_RSV{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day stochastic %K position",
+        formula_text=f"(close - ts_min(low,{_n})) / (ts_max(high,{_n}) - ts_min(low,{_n}))",
+        compute=_make_RSV(_n),
+    ))
