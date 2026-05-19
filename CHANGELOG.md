@@ -1,5 +1,41 @@
 # Changelog
 
+## v1.2.2 — 2026-05-19
+
+### Fixed
+- **xueqiu social_posts dedup collapse**. The opencli xueqiu/comments
+  adapter returns items shaped `{author, text, likes, replies, retweets,
+  created_at, url}` with no explicit `id`. The earlier upsert chain only
+  consulted `id` / `post_id` / `ts`, so every row in a 30-comment batch
+  hashed to `xueqiu_comments::SH600519::` and `INSERT OR REPLACE` left
+  only the last item alive. Net effect on v1.2.0 / v1.2.1: every
+  `news-collect --sources xueqiu-comments` call wrote exactly **1 row**
+  no matter how many comments came back.
+- Fix: extend the post_id fallback chain to consult `url` (xueqiu's
+  unique per-post URL) and `created_at`. Also map `replies` →
+  `comments_count` to match xueqiu's field name.
+
+### Changed
+- `whale-analyst` social_posts lookback widened from 7 → 30 days.
+  xueqiu activity for any single stock is bursty; a 7-day window
+  frequently misses the latest discussion wave even for liquid names.
+
+### Verification
+- Cleared `social_posts`, re-collected 30 SH600519 xueqiu comments →
+  30 distinct rows in DB with intact Chinese, `replies` mapped to
+  `comments_count`, url-based unique IDs.
+- New regression test `test_social_posts_real_xueqiu_schema` feeds the
+  exact upstream payload shape to lock in the fix.
+
+If you were on v1.2.0 / v1.2.1 and collected xueqiu data, **re-run the
+collection** — only the last comment per stock survived in your DB:
+```bash
+python -c "from financial_analyst.data.news_db import NewsDB; \
+db=NewsDB(); db.conn.execute('DELETE FROM social_posts'); \
+db.conn.commit(); db.close()"
+financial-analyst news-collect --sources xueqiu-comments --code SH600519 --limit 30
+```
+
 ## v1.2.1 — 2026-05-19
 
 ### Fixed
