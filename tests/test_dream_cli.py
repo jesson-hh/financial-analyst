@@ -99,3 +99,121 @@ def test_cli_dream_help():
     assert result.exit_code == 0
     assert "since" in result.stdout.lower()
     assert "dry-run" in result.stdout.lower()
+
+
+# ---- v1.4.3: dream review / accept / reject subcommands -------------------
+
+
+def _make_synthetic_proposal(root: Path, agent: str, slug: str, confidence: str = "med") -> Path:
+    """Write a fake proposal markdown under memories/_proposed/<agent>/."""
+    proposed_dir = root / "memories" / "_proposed" / agent
+    proposed_dir.mkdir(parents=True, exist_ok=True)
+    body = (
+        "---\n"
+        f"topic: {slug}\n"
+        f"title: Test rule {slug}\n"
+        f"target_agent: {agent}\n"
+        f"confidence: {confidence}\n"
+        "generated_at: '2024-12-31'\n"
+        "supporting_cases:\n"
+        "  - 'case 1'\n"
+        "  - 'case 2'\n"
+        "  - 'case 3'\n"
+        "reasoning: synthetic test\n"
+        "---\n\n"
+        f"# Test rule {slug}\n\nbody body body\n"
+    )
+    out = proposed_dir / f"2024-12-31_{slug}.md"
+    out.write_text(body, encoding="utf-8")
+    return out
+
+
+def test_cli_dream_review_empty(tmp_path, monkeypatch):
+    """`dream review` with no proposals dir should report it clearly."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(app, ["dream", "review"])
+    assert result.exit_code == 0
+    assert "no proposals" in result.stdout.lower() or "empty" in result.stdout.lower()
+
+
+def test_cli_dream_review_lists_proposals(tmp_path, monkeypatch):
+    """`dream review` should list each proposal with confidence + title."""
+    monkeypatch.chdir(tmp_path)
+    _make_synthetic_proposal(tmp_path, "whale-analyst", "rule-a", confidence="med")
+    _make_synthetic_proposal(tmp_path, "bear-advocate", "rule-b", confidence="high")
+    runner = CliRunner()
+    result = runner.invoke(app, ["dream", "review"])
+    assert result.exit_code == 0
+    assert "whale-analyst/rule-a" in result.stdout
+    assert "bear-advocate/rule-b" in result.stdout
+    # Both confidence labels rendered
+    assert "med" in result.stdout
+    assert "high" in result.stdout
+
+
+def test_cli_dream_accept_promotes_proposal(tmp_path, monkeypatch):
+    """`dream accept` moves the proposal from _proposed/ to the agent's
+    permanent memory dir."""
+    monkeypatch.chdir(tmp_path)
+    src = _make_synthetic_proposal(tmp_path, "whale-analyst", "no-vr-without-obv")
+    runner = CliRunner()
+    result = runner.invoke(app, ["dream", "accept", "whale-analyst/no-vr-without-obv"])
+    assert result.exit_code == 0, result.stdout
+    # Source file gone
+    assert not src.exists()
+    # Destination present under memories/<agent>/<slug>.md
+    dst = tmp_path / "memories" / "whale-analyst" / "no-vr-without-obv.md"
+    assert dst.exists()
+    # Content preserved (frontmatter + body)
+    text = dst.read_text(encoding="utf-8")
+    assert text.startswith("---")
+    assert "no-vr-without-obv" in text
+
+
+def test_cli_dream_accept_refuses_overwrite(tmp_path, monkeypatch):
+    """`dream accept` should refuse to clobber an existing memory file."""
+    monkeypatch.chdir(tmp_path)
+    _make_synthetic_proposal(tmp_path, "whale-analyst", "existing-rule")
+    # Pre-create the destination
+    dst_dir = tmp_path / "memories" / "whale-analyst"
+    dst_dir.mkdir(parents=True)
+    (dst_dir / "existing-rule.md").write_text("preexisting content", encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["dream", "accept", "whale-analyst/existing-rule"])
+    assert result.exit_code != 0
+    assert "refusing to overwrite" in result.stdout.lower()
+    # Original preserved
+    assert (dst_dir / "existing-rule.md").read_text(encoding="utf-8") == "preexisting content"
+
+
+def test_cli_dream_reject_deletes_proposal(tmp_path, monkeypatch):
+    """`dream reject` should delete the proposal file."""
+    monkeypatch.chdir(tmp_path)
+    src = _make_synthetic_proposal(tmp_path, "whale-analyst", "bad-idea")
+    runner = CliRunner()
+    result = runner.invoke(app, ["dream", "reject", "whale-analyst/bad-idea"])
+    assert result.exit_code == 0, result.stdout
+    assert not src.exists()
+    # Not promoted either
+    assert not (tmp_path / "memories" / "whale-analyst" / "bad-idea.md").exists()
+
+
+def test_cli_dream_accept_unknown_proposal(tmp_path, monkeypatch):
+    """`dream accept` with a missing slug should error with a helpful list."""
+    monkeypatch.chdir(tmp_path)
+    _make_synthetic_proposal(tmp_path, "whale-analyst", "real-slug")
+    runner = CliRunner()
+    result = runner.invoke(app, ["dream", "accept", "whale-analyst/nonexistent"])
+    assert result.exit_code != 0
+    assert "no proposal matching" in result.stdout.lower()
+
+
+def test_cli_dream_accept_bad_target_format(tmp_path, monkeypatch):
+    """`dream accept` with target missing slash should error early."""
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(app, ["dream", "accept", "no-slash"])
+    assert result.exit_code != 0
+    assert "<agent>/<slug>" in result.stdout

@@ -1,5 +1,50 @@
 # Changelog
 
+## v1.4.3 — 2026-05-19
+
+### Added — `dream review / accept / reject` subcommands
+
+The dream loop was code-complete since v0.3 but missing the
+human-in-the-loop tools for triaging proposals. v1.4.3 closes that:
+
+```bash
+financial-analyst dream                                        # = dream run (default)
+financial-analyst dream review                                 # list pending proposals
+financial-analyst dream accept whale-analyst/no-vr-without-obv # promote to permanent
+financial-analyst dream reject whale-analyst/bad-idea          # discard
+```
+
+- `dream review` walks `memories/_proposed/` and prints each proposal
+  with `[confidence] agent/slug  (N cases)` + the title + the file path.
+- `dream accept <agent>/<slug>` moves the proposal from
+  `memories/_proposed/<agent>/<date>_<slug>.md` to
+  `memories/<agent>/<slug>.md` (preserving the YAML frontmatter +
+  body). Refuses to overwrite an existing permanent memory file.
+- `dream reject <agent>/<slug>` deletes the proposal.
+
+After accept, the next `financial-analyst report` call automatically
+uses the new rule — markdown memory is hot-reloadable.
+
+### Closing the self-update loop
+
+End-to-end workflow now possible without leaving the CLI:
+
+```bash
+financial-analyst report SH600519                              # 1. run reports over time
+# ...wait T+5d for outcomes...
+financial-analyst dream                                        # 2. introspect
+financial-analyst dream review                                 # 3. read what was proposed
+financial-analyst dream accept whale-analyst/<slug>            # 4. promote good ideas
+financial-analyst dream reject <other-agent>/<slug>            # 5. discard noise
+financial-analyst report SH600519                              # 6. new rule in effect
+```
+
+### Tests
+- 7 new dream CLI tests (review empty / review lists / accept promotes /
+  accept refuses overwrite / reject deletes / accept unknown / accept bad
+  target). 11 dream tests pass total; old 4 unchanged.
+- Backward compat: `financial-analyst dream` with no args still defaults to `dream run`.
+
 ## v1.4.2 — 2026-05-19
 
 ### Added — dynamic zoo signal selection (440-rolling instead of fixed top-10)

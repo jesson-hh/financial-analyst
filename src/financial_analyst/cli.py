@@ -146,12 +146,120 @@ def ingest(
 
 @app.command()
 def dream(
-    since: int = typer.Option(30, "--since", help="Days lookback for reports"),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Discover only, don't write proposals"),
-    out_dir: Path = typer.Option(Path("out"), "--out", help="Report output dir"),
+    action: str = typer.Argument("run", help="One of: run | review | accept | reject"),
+    target: Optional[str] = typer.Argument(None, help="For accept/reject: <agent>/<slug> (e.g. whale-analyst/dont-trust-VR-without-OBV)"),
+    since: int = typer.Option(30, "--since", help="run: days lookback for reports"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="run: discover only, don't write proposals"),
+    out_dir: Path = typer.Option(Path("out"), "--out", help="run: report output dir"),
 ):
-    """Run the dream loop: introspect past reports, propose memory updates."""
-    asyncio.run(_run_dream(since=since, dry_run=dry_run, out_dir=out_dir))
+    """Dream loop — introspect past reports + manage memory proposals.
+
+    Subcommands:
+      dream run                              — collect outcomes + propose memory updates (default)
+      dream review                           — list pending proposals under memories/_proposed/
+      dream accept <agent>/<slug>            — promote a proposal into the agent's permanent memory
+      dream reject <agent>/<slug>            — delete a proposal
+
+    Examples:
+      financial-analyst dream                                            # same as `dream run`
+      financial-analyst dream review
+      financial-analyst dream accept whale-analyst/dont-trust-VR-without-OBV
+      financial-analyst dream reject whale-analyst/dont-trust-VR-without-OBV
+    """
+    if action == "run":
+        asyncio.run(_run_dream(since=since, dry_run=dry_run, out_dir=out_dir))
+        return
+    if action == "review":
+        _dream_review()
+        return
+    if action == "accept":
+        if not target:
+            typer.echo("dream accept requires <agent>/<slug>; run `dream review` to see options.")
+            raise typer.Exit(1)
+        _dream_promote(target, action="accept")
+        return
+    if action == "reject":
+        if not target:
+            typer.echo("dream reject requires <agent>/<slug>; run `dream review` to see options.")
+            raise typer.Exit(1)
+        _dream_promote(target, action="reject")
+        return
+    typer.echo(f"Unknown dream action {action!r}; use run | review | accept | reject")
+    raise typer.Exit(1)
+
+
+def _dream_review() -> None:
+    """List all proposals under memories/_proposed/ with metadata + diff preview."""
+    import yaml
+    proposed_root = Path("memories") / "_proposed"
+    if not proposed_root.exists():
+        typer.echo(f"No proposals directory at {proposed_root}. Run `dream run` first to generate some.")
+        return
+    files = sorted(proposed_root.rglob("*.md"))
+    if not files:
+        typer.echo(f"{proposed_root} is empty. Run `dream run` after accumulating a few reports.")
+        return
+    typer.echo(f"Pending proposals under {proposed_root} ({len(files)} total):\n")
+    for f in files:
+        try:
+            text = f.read_text(encoding="utf-8")
+            fm: dict = {}
+            if text.startswith("---\n"):
+                end = text.find("\n---\n", 4)
+                if end > 0:
+                    fm = yaml.safe_load(text[4:end]) or {}
+            agent = f.parent.name
+            slug = f.stem.split("_", 1)[1] if "_" in f.stem else f.stem
+            conf = fm.get("confidence", "?")
+            title = fm.get("title", "(no title)")
+            n_cases = len(fm.get("supporting_cases", []))
+            typer.echo(f"  [{conf:>4}] {agent}/{slug}  ({n_cases} cases)")
+            typer.echo(f"         {title}")
+            typer.echo(f"         file: {f}")
+        except Exception as e:
+            typer.echo(f"  [err]  {f}: {e}")
+    typer.echo("")
+    typer.echo("To promote one:  financial-analyst dream accept <agent>/<slug>")
+    typer.echo("To discard one:  financial-analyst dream reject <agent>/<slug>")
+
+
+def _dream_promote(target: str, action: str) -> None:
+    """Move (accept) or delete (reject) a proposal."""
+    if "/" not in target:
+        typer.echo(f"target must be <agent>/<slug>, got {target!r}.")
+        raise typer.Exit(1)
+    agent, slug = target.split("/", 1)
+    proposed_dir = Path("memories") / "_proposed" / agent
+    if not proposed_dir.exists():
+        typer.echo(f"No proposals for agent {agent!r}. Run `dream review` to see what's available.")
+        raise typer.Exit(1)
+    # Match either exact <slug>.md or <date>_<slug>.md
+    candidates = list(proposed_dir.glob(f"*{slug}*.md"))
+    matches = [c for c in candidates if c.stem == slug or c.stem.endswith(f"_{slug}")]
+    if not matches:
+        typer.echo(f"No proposal matching {slug!r} in {proposed_dir}.")
+        typer.echo(f"Available: {[c.name for c in candidates] or '(none)'}")
+        raise typer.Exit(1)
+    if len(matches) > 1:
+        typer.echo(f"Ambiguous — {len(matches)} files match {slug!r}: {[c.name for c in matches]}")
+        raise typer.Exit(1)
+    src = matches[0]
+
+    if action == "reject":
+        src.unlink()
+        typer.echo(f"Rejected and deleted: {src}")
+        return
+
+    # accept: move src → memories/<agent>/<slug>.md, preserving frontmatter
+    dst_dir = Path("memories") / agent
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst = dst_dir / f"{slug}.md"
+    if dst.exists():
+        typer.echo(f"Refusing to overwrite existing {dst}. Move or rename manually.")
+        raise typer.Exit(1)
+    src.rename(dst)
+    typer.echo(f"Accepted: {src} → {dst}")
+    typer.echo(f"Next `financial-analyst report` call will use this rule in agent {agent!r}.")
 
 
 async def _run_dream(since: int, dry_run: bool, out_dir: Path):
@@ -197,7 +305,7 @@ async def _run_dream(since: int, dry_run: bool, out_dir: Path):
 
     written = write_proposals(proposals)
     typer.echo(f"Wrote {len(written)} proposals to memories/_proposed/")
-    typer.echo("Review with `/memory list-proposals` then `/memory accept` or `/memory reject`.")
+    typer.echo("Next: `financial-analyst dream review` to list, then `dream accept <agent>/<slug>` or `dream reject <agent>/<slug>`.")
 
 
 @app.command("models")
