@@ -2,11 +2,14 @@
 
 [![PyPI](https://img.shields.io/pypi/v/financial-analyst.svg)](https://pypi.org/project/financial-analyst/)
 [![Python](https://img.shields.io/pypi/pyversions/financial-analyst.svg)](https://pypi.org/project/financial-analyst/)
-[![tests](https://img.shields.io/badge/tests-290_passed-brightgreen)](https://github.com/jesson-hh/financial-analyst/actions)
+[![tests](https://img.shields.io/badge/tests-350+_passed-brightgreen)](https://github.com/jesson-hh/financial-analyst/actions)
 [![license](https://img.shields.io/badge/license-Apache_2.0-green)](LICENSE)
-[![status](https://img.shields.io/badge/status-stable_1.0-success)](https://github.com/jesson-hh/financial-analyst/releases)
+[![status](https://img.shields.io/badge/status-stable_1.4-success)](https://github.com/jesson-hh/financial-analyst/releases)
+[![alphas](https://img.shields.io/badge/alphas-440-blue)](docs/journey.md)
 
 **A-share single-stock deep-dive multi-agent research workstation.**
+
+📖 New here? Read the [build journey & architecture overview](docs/journey.md) — a two-week retrospective from empty repo to 440 alphas + 21 sub-agents.
 
 **13 sub-agents in three trust tiers** — five Tier-1 data fetchers (two of which read untrusted news/F10 with JSON-schema-locked output), four Tier-2 analysts (fundamental, technical, whale-sentiment, quant), four Tier-3 decision agents (bull, bear, risk officer, report writer). Only the report writer can write files. Memory is pluggable per-agent (`memories/<agent>/*.md`) — edit a markdown, the next report uses it. FTS5-backed retrieval keeps prompt costs ~60% lower than naive full-injection.
 
