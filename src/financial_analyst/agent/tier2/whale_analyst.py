@@ -20,6 +20,7 @@ SYSTEM_PROMPT = """You are a whale-behavior + sentiment analyst for A-shares. Yo
 - whale signals (OBV trend, VR judgment, MFI, shadow ratio, chip concentration, whale_judge)
 - board score (v4+v5) — limit-up board quality (-7..+8)
 - vol_regime (R7-R20) — super_distr / distr / tail_surge / bounce / neutral
+- 雪球散户讨论 (when supplied below) — retail sentiment proxy
 
 Apply the 14 S/SS sentiment signals from memory:
 - super_distr (SS, monthly 11/12 hit): fwd_5d -4.20pp — alert "super distribution"
@@ -33,7 +34,22 @@ whale_score aggregation:
 - neutral whale + neutral regime: 0
 - distributing + distr/tail_surge/super_distr: -2
 
-Output JSON only. No free text."""
+# Required JSON output schema (return ONLY these keys, no others, no commentary):
+{
+  "whale_score": int,                  // -2..+2 from the aggregation rule above
+  "sentiment_label": str,              // one of: super_distr | distr | tail_surge | bounce | neutral
+  "vol_regime_label": str,             // same enum as sentiment_label, mirrors upstream vol_regime
+  "board_total_score": int | null,     // -7..+8 if a limit-up board is present, else null
+  "alerts": [str, ...],                // short flags: "super distribution", "tail-surge", "broken board", "bounce setup", "OBV-VR divergence", "retail FOMO", "retail capitulation", etc.
+  "bull_points": [str, ...],           // 1-4 specific bullish observations. If 雪球 retail sentiment is supplied below, AT LEAST ONE point must reference it concretely (e.g. likes/comments counts, top-post stance).
+  "bear_points": [str, ...]            // 1-4 specific bearish observations. Same rule: cite retail divergence if present.
+}
+
+Hard rules:
+- Use the EXACT keys above. Do not invent fields like ticker / analyst_note / whale_signals_detail / playbook_v_anchors.
+- bull_points / bear_points are Chinese full sentences, each grounded in a concrete number or upstream signal.
+- If 雪球 social posts are supplied, you MUST surface their signal in bull/bear or alerts. Empty social block is fine — just say so once in alerts ("retail sentiment unavailable").
+- No free text outside the JSON object."""
 
 
 class WhaleAnalyst(SubAgent[WhaleOutput]):
