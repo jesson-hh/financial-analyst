@@ -9,7 +9,7 @@
 
 **A-share single-stock deep-dive multi-agent research workstation.**
 
-📖 New here? Read the [build journey & architecture overview](docs/journey.md) ([中文版](docs/journey_zh.md)) — a two-week retrospective from empty repo to 440 alphas + 21 sub-agents.
+📖 New here? Read the [build journey & architecture overview](docs/journey.md) (中英双语 / bilingual) — a two-week retrospective from empty repo to 440 alphas + 21 sub-agents.
 
 **13 sub-agents in three trust tiers** — five Tier-1 data fetchers (two of which read untrusted news/F10 with JSON-schema-locked output), four Tier-2 analysts (fundamental, technical, whale-sentiment, quant), four Tier-3 decision agents (bull, bear, risk officer, report writer). Only the report writer can write files. Memory is pluggable per-agent (`memories/<agent>/*.md`) — edit a markdown, the next report uses it. FTS5-backed retrieval keeps prompt costs ~60% lower than naive full-injection.
 
