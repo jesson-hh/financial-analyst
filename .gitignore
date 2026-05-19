@@ -13,3 +13,11 @@ news/**/*.pdf
 kb/**/*.parquet
 .venv/
 venv/
+
+# Agent-runtime instructions — dev-only, kept locally if needed
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+
+# Historical release notes (CHANGELOG.md is the source of truth)
+RELEASE_NOTES_v*.md
