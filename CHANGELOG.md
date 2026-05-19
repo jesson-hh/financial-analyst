@@ -1,5 +1,58 @@
 # Changelog
 
+## v1.3.0 — 2026-05-19
+
+### Added — Alpha Zoo (inspired by HKUDS/Vibe-Trading)
+A registry of named alpha formulas with a `alpha bench` CLI that emits
+IC / IR / hit-rate per alpha against a chosen universe and period.
+Two families ship in this release:
+
+- **`alpha101`** — 10 of the most-cited WorldQuant 101 Formulaic Alphas
+  (Kakushadze 2015, arXiv:1601.00991): alpha001-004, 006, 007, 012-015.
+- **`gtja191`** — 12 of the most-cited Guotai Junan 191 Alphas (国泰君安
+  2017), designed specifically for A-share short-horizon prediction:
+  gtja001-005, 007, 009, 012, 014, 018, 042, 053.
+
+Three CLI commands:
+- `financial-analyst alpha list [family]` — Rich table of names + descriptions
+- `financial-analyst alpha show <name>` — formula text + paper citation
+- `financial-analyst alpha bench <family> --universe <path|name> --since <date> --until <date> [--fwd-days N] [--top K]`
+
+Bench output is sorted by `|rank_IR|` descending. Verified end-to-end on
+30 A-share large caps × 138 trading days: `gtja001 rank_IR=-0.225`,
+`gtja014 rank_IR=+0.201` etc.
+
+### Added — sample30 universe
+`config/universes/sample30.txt` — 30 hand-picked A-share large caps
+(Maotai/Wuliangye/Ping An/CATL/BYD/Hikvision/etc) so `alpha bench
+--universe sample30` works out-of-box with no additional setup.
+
+### Added — `financial_analyst.factors.zoo` package
+Public API: `register`, `get`, `list_alphas`, `families`, `PanelData`,
+`run_bench`, `bench_one`. Operators (`rank`, `ts_rank`, `delta`,
+`correlation`, `decay_linear`, `sma`, etc.) live in
+`factors.zoo.operators`. All `ts_*` ops use `min_periods=window` so
+alphas never emit partial-window signals — full look-ahead protection
+on shipped alphas.
+
+User-supplied alphas register via `register(AlphaSpec(...))` from any
+plugin under `~/.financial-analyst/plugins/`.
+
+### Tests
+- `tests/test_factor_zoo.py` — 14 new tests covering registry, panel
+  alias normalisation, operator semantics, and end-to-end bench. Total
+  package test count now 335+.
+
+### Docs
+- `docs/alpha_zoo.md` — full reference: CLI usage, operator catalogue,
+  how to add your own alpha, how the bench loop works.
+
+### Known limitations (rolling forward in 1.3.x patches)
+- Only 22 / 292 alphas ported in v1.3.0; remaining alphas land in 1.3.x
+  patches.
+- `qlib158` and `academic` families are placeholders.
+- Daily-bar panel only; 5min support is a future PanelData extension.
+
 ## v1.2.2 — 2026-05-19
 
 ### Fixed

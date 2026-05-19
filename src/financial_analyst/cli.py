@@ -630,6 +630,133 @@ def doctor():
     typer.echo("\n=== done ===")
 
 
+@app.command(name="alpha")
+def alpha_cmd(
+    action: str = typer.Argument(..., help="One of: list | show | bench"),
+    target: Optional[str] = typer.Argument(None, help="For show: alpha name. For bench: family slug (or omit for all)."),
+    universe: str = typer.Option("csi300", "--universe", "-u", help="Universe file or named universe (csi300/csi500/all)"),
+    since: str = typer.Option("2024-01-01", "--since", help="Start date YYYY-MM-DD"),
+    until: str = typer.Option("2024-12-31", "--until", help="End date YYYY-MM-DD"),
+    fwd_days: int = typer.Option(5, "--fwd-days", "-n", help="Forward-return horizon for IC"),
+    top: int = typer.Option(20, "--top", "-k", help="Show top-K rows by |rank_IR|"),
+):
+    """Alpha zoo — list / inspect / bench formulaic alphas.
+
+    Examples:
+      financial-analyst alpha list
+      financial-analyst alpha list gtja191
+      financial-analyst alpha show alpha001
+      financial-analyst alpha bench gtja191 --universe csi300 --since 2024-06-01
+    """
+    from financial_analyst.factors.zoo import list_alphas, get, families
+    from rich.console import Console
+    from rich.table import Table
+
+    console = Console()
+
+    if action == "list":
+        fam = target  # may be None
+        rows = list_alphas(family=fam)
+        if not rows:
+            typer.echo(f"No alphas registered for family={fam!r}. Known: {families()}")
+            raise typer.Exit(1)
+        table = Table(title=f"Alpha Zoo — {fam or 'all families'} ({len(rows)} alphas)")
+        table.add_column("name", style="cyan", no_wrap=True)
+        table.add_column("family", style="green")
+        table.add_column("description")
+        for a in rows:
+            table.add_row(a.name, a.family, a.description)
+        console.print(table)
+        return
+
+    if action == "show":
+        if not target:
+            typer.echo("alpha show requires an alpha name (e.g. alpha001)")
+            raise typer.Exit(1)
+        try:
+            spec = get(target)
+        except KeyError as e:
+            typer.echo(str(e))
+            raise typer.Exit(1)
+        console.print(f"[bold cyan]{spec.name}[/]  [green]({spec.family})[/]")
+        console.print(f"[dim]{spec.paper}[/]" if spec.paper else "")
+        console.print(f"\n[bold]Description:[/] {spec.description}")
+        console.print(f"\n[bold]Formula:[/]")
+        console.print(f"  {spec.formula_text}")
+        return
+
+    if action == "bench":
+        # Resolve universe: named ("csi300") or path to a text file with one code per line
+        codes = _resolve_universe(universe)
+        if not codes:
+            typer.echo(f"Universe {universe!r} produced 0 codes — aborting.")
+            raise typer.Exit(1)
+        typer.echo(f"Loading {len(codes)} codes from universe {universe!r} ({since} → {until})...")
+        from financial_analyst.data.loader_factory import get_default_loader
+        from financial_analyst.factors.zoo import PanelData
+        from financial_analyst.factors.zoo.bench_runner import run_bench
+        loader = get_default_loader()
+        panel = PanelData.from_loader(loader, codes, since, until, freq="day")
+        typer.echo(f"Panel ready: {panel}")
+        typer.echo(f"Benching family={target or '<all>'}, fwd_days={fwd_days}...")
+        results = run_bench(panel, family=target, fwd_days=fwd_days)
+
+        table = Table(title=f"Alpha Bench — {target or 'all'} / fwd_{fwd_days}d / {len(codes)} codes")
+        for c in ["name", "family", "ic", "rank_ic", "ir", "rank_ir", "hit_rate", "n_dates"]:
+            table.add_column(c, justify="right" if c not in ("name", "family") else "left",
+                             style="cyan" if c == "name" else "green" if c == "family" else "")
+        for _, row in results.head(top).iterrows():
+            table.add_row(
+                row["name"], row["family"],
+                f"{row['ic']:+.4f}" if pd.notna(row["ic"]) else "—",
+                f"{row['rank_ic']:+.4f}" if pd.notna(row["rank_ic"]) else "—",
+                f"{row['ir']:+.3f}" if pd.notna(row["ir"]) else "—",
+                f"{row['rank_ir']:+.3f}" if pd.notna(row["rank_ir"]) else "—",
+                f"{row['hit_rate']:.1%}" if pd.notna(row["hit_rate"]) else "—",
+                str(int(row["n_dates"])),
+            )
+        console.print(table)
+
+        errors = results[results["status"] != "ok"]
+        if len(errors):
+            console.print(f"\n[red]{len(errors)} alphas had errors:[/]")
+            for _, row in errors.iterrows():
+                console.print(f"  {row['name']} ({row['family']}): {row['error']}")
+        return
+
+    typer.echo(f"Unknown action {action!r}; use list / show / bench")
+    raise typer.Exit(1)
+
+
+def _resolve_universe(universe: str) -> list[str]:
+    """Resolve universe string to a list of stock codes.
+
+    Accepts:
+    - A path to a text file (one code per line, ``#`` for comments)
+    - A named universe: ``csi300``, ``csi500``, ``all`` — looked up under
+      ``~/.financial-analyst/universes/<name>.txt`` then ``config/universes/<name>.txt``
+    """
+    from pathlib import Path
+    p = Path(universe)
+    if p.exists():
+        candidate = p
+    else:
+        home_path = Path.home() / ".financial-analyst" / "universes" / f"{universe}.txt"
+        repo_path = Path(__file__).parent.parent.parent / "config" / "universes" / f"{universe}.txt"
+        for path in (home_path, repo_path):
+            if path.exists():
+                candidate = path
+                break
+        else:
+            return []
+    codes = []
+    for line in candidate.read_text(encoding="utf-8").splitlines():
+        line = line.strip().split("#", 1)[0].strip()
+        if line:
+            codes.append(line)
+    return codes
+
+
 @app.callback(invoke_without_command=True)
 def _default(ctx: typer.Context):
     if ctx.invoked_subcommand is None:
