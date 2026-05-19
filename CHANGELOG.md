@@ -1,5 +1,81 @@
 # Changelog
 
+## v1.4.2 — 2026-05-19
+
+### Added — dynamic zoo signal selection (440-rolling instead of fixed top-10)
+
+The hardcoded `PRODUCTION_TOP10` is no longer the only path. v1.4.2 wires
+up a rolling top-N pick from the latest bench result, so when the alpha
+catalogue or universe regime shifts, the report pipeline picks up the new
+strongest signals automatically.
+
+**New module: `financial_analyst.factors.zoo.selector`**
+- `select_top_alphas(bench_df, n=20, min_n_dates=30, min_abs_rank_ir=0.05,
+   require_sign_agreement=True, family=None)` — filters out noise alphas
+  (short bench, weak signal, sign-disagreement between `rank_IR` and
+  `hit_rate`), then returns top-N by `|rank_IR|`.
+- `load_latest_bench(universe)` — reads the canonical cached CSV.
+- `alpha_metadata_from_bench(bench_df, names)` — returns
+  `{name: {bench_rank_ic, bench_hit_rate, bench_n_dates}}` for snapshot
+  enrichment.
+- `bench_csv_path(universe)` — canonical filename for cached bench output.
+
+**CLI: `alpha bench --save`**
+- After benching, persists the full result CSV to
+  `~/.financial-analyst/cache/bench_<universe>_latest.csv`. Used as the
+  input for `snapshot --auto`.
+
+**CLI: `alpha snapshot auto`**
+- New target keyword: pass `auto` instead of `top10` or a comma-list.
+- Reads the cached bench for the same `--universe`, picks the top-N
+  (via `--top-n`, default 20) using `select_top_alphas`, builds the
+  snapshot. Each row now carries `bench_rank_ic`, `bench_hit_rate`,
+  and `bench_n_dates` so downstream LLM consumers know each alpha's
+  validated direction without hard-coded sign conventions.
+
+**Recommended workflow (weekly cron)**:
+```bash
+financial-analyst alpha bench --universe csi300_active \
+    --since 2024-06-01 --until 2024-12-31 --save
+financial-analyst alpha snapshot auto --universe csi300_active \
+    --until 2024-12-31 --top-n 20
+```
+
+### Changed — `quant-analyst` SYSTEM_PROMPT is now sign-agnostic
+
+Previously the prompt listed the v1.3.4 sign convention for the
+hardcoded top-10 alphas (`qlib_VSTD60 POSITIVE`, `gtja095 NEGATIVE`,
+etc.). With dynamic top-N this is no longer maintainable.
+
+The new prompt teaches the LLM to derive direction per-alpha from each
+row's `bench_rank_ic` sign:
+- bullish if `(rank_pct > 0.7 AND bench_rank_ic > 0)` OR
+  `(rank_pct < 0.3 AND bench_rank_ic < 0)`
+- bearish symmetrically
+- low-confidence if `|bench_rank_ic| < 0.05 OR bench_n_dates < 30`
+- `bull_points` / `bear_points` must cite both `rank_pct` and
+  `bench_rank_ic` so readers can verify the direction.
+
+### Verified end-to-end on CSI300 / 2024-12-31
+
+```
+bench --save: 440 alphas across 868 codes × 144 days → CSV cached
+snapshot auto --top-n 20: picked top-20 by |rank_IR|, each with
+  bench_rank_ic + bench_hit_rate metadata. Examples:
+    gtja042       bench_rank_ic=+0.0650  hit=52.5%
+    qlib_VSUMP20  bench_rank_ic=-0.0457  hit=49.1%
+    qlib_STD5     bench_rank_ic=-0.0701  hit=48.9%
+    alpha089      bench_rank_ic=-0.0266  hit=48.9%
+17219 rows = 20 alphas × ~860 codes
+```
+
+### Backward compatibility
+
+- Old `snapshot top10` keyword still works → uses `PRODUCTION_TOP10`.
+- Old snapshot parquet files (without bench metadata) still readable —
+  rows just lack the optional `bench_*` columns and quant-analyst
+  treats them as low-confidence.
+
 ## v1.4.1 — 2026-05-19
 
 ### Zoo catalogue completion — 440 alphas total

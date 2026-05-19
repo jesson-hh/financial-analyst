@@ -60,12 +60,19 @@ def build_snapshot(
     names: Optional[Sequence[str]] = None,
     lookback_days: int = 365,
     industry_loader=None,
+    bench_metadata: Optional[dict] = None,
 ) -> pd.DataFrame:
     """Compute the latest-bar value of each alpha for every stock in the
     universe at ``asof``. ``rank_pct`` is the cross-sectional percentile
     rank of the alpha value across the universe on that date.
 
-    Returns a tidy DataFrame: ``code | alpha | value | rank_pct | n_obs``.
+    When ``bench_metadata`` is supplied (``{name: {bench_rank_ic,
+    bench_hit_rate, bench_n_dates}}``), those fields land on every row so
+    downstream LLM consumers can interpret rank_pct against the alpha's
+    bench-validated direction without hard-coded sign conventions.
+
+    Returns a tidy DataFrame: ``code | alpha | value | rank_pct | n_obs
+    [| bench_rank_ic | bench_hit_rate | bench_n_dates]``.
     """
     if names is None:
         names = PRODUCTION_TOP10
@@ -107,14 +114,20 @@ def build_snapshot(
         else:
             cs = series.xs(max_date, level="datetime").dropna()
         ranks = cs.rank(pct=True)
+        meta = (bench_metadata or {}).get(spec.name, {})
         for code in cs.index:
-            rows.append({
+            row = {
                 "code": code,
                 "alpha": spec.name,
                 "value": float(cs.loc[code]),
                 "rank_pct": float(ranks.loc[code]),
                 "n_obs": int(len(cs)),
-            })
+            }
+            if meta:
+                row["bench_rank_ic"] = meta.get("bench_rank_ic")
+                row["bench_hit_rate"] = meta.get("bench_hit_rate")
+                row["bench_n_dates"] = meta.get("bench_n_dates")
+            rows.append(row)
 
     return pd.DataFrame(rows)
 

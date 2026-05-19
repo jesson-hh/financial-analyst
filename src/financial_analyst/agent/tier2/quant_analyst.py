@@ -25,22 +25,48 @@ Apply rules from memory:
 - Models diverging > 0.3 spread = low conviction
 - Single-model with rank_pct in [0.4, 0.6] = neutral
 
-# Alpha-Zoo signals (v1.3.4+)
-When ``zoo_signals.alphas`` is present, each entry is `{value, rank_pct, universe_n}`
-where ``rank_pct`` is the stock's cross-sectional percentile within the
-snapshot universe (typically 868-stock CSI300). Treat them as
-INDEPENDENT confirmations of the model consensus:
-- 3+ zoo alphas agreeing (all rank_pct > 0.7 or all < 0.3) bumps conviction one level
-- zoo + model agreeing: bull_points must cite at least one specific alpha by name+pct
-- zoo CONTRADICTING the model (e.g. model long but zoo top alphas rank_pct < 0.3) → conviction=low, list under anti_signals as "zoo_model_disagreement"
+# Alpha-Zoo signals (v1.4.2+ rolling top-N with bench metadata)
+The snapshot rotates through 440 alphas weekly — quant-analyst sees the
+top-20 picked by latest-bench |rank_IR| for the current universe. Each
+entry in ``zoo_signals.alphas`` has:
 
-Sign conventions (from CSI300 2024-H2 bench, docs/csi300_bench_2024h2.md):
-- `qlib_VSTD60` POSITIVE (high rank_pct = bullish)
-- `qlib_ROC60` POSITIVE (rank_pct > 0.7 = oversold recovery candidate)
-- `gtja095`, `qlib_STD10`, `qlib_KLEN`, `gtja052`, `qlib_VSUMP20`,
-  `qlib_BETA20`, `qlib_IMAX20` NEGATIVE (high rank_pct = bearish; low
-  rank_pct = bullish)
-- `gtja042` POSITIVE
+    {
+      value: float,          // raw alpha value for this stock
+      rank_pct: float,       // cross-sectional percentile in [0, 1]
+      universe_n: int,       // number of stocks in the rank pool
+      bench_rank_ic: float,  // signed cross-universe rank-IC from bench
+      bench_hit_rate: float, // bench-measured direction-accuracy [0, 1]
+      bench_n_dates: int     // bench window length (>=30 trustworthy)
+    }
+
+# Direction interpretation (sign-agnostic, derived per-alpha)
+Compute each alpha's direction from its own ``bench_rank_ic`` sign — do
+NOT hard-code sign conventions; the alpha set is dynamic.
+
+For each alpha row, the BULLISH side is:
+- ``rank_pct > 0.7`` IF ``bench_rank_ic > 0`` (positive-class alpha,
+  high rank predicts forward gain)
+- ``rank_pct < 0.3`` IF ``bench_rank_ic < 0`` (reversal-class alpha,
+  low rank predicts forward gain)
+
+Symmetrically, the BEARISH side is the opposite extreme. Treat alphas
+with ``bench_hit_rate`` near 50% as low-confidence; only count an alpha
+toward the consensus if ``|bench_rank_ic| > 0.05 AND bench_n_dates >= 30``.
+
+# Consensus aggregation
+- 5+ bullish alphas with no bearish ones: +2 (strong_long) if model agrees
+- 3+ bullish: +1 (weak_long)
+- Mixed (some bullish, some bearish): 0 (neutral)
+- 3+ bearish: -1 (weak_short)
+- 5+ bearish: -2 (strong_short)
+- ZOO CONTRADICTS MODEL (model rank_pct > 0.7 but zoo majority bearish, or
+  vice versa) → conviction=low, anti_signals += "zoo_model_disagreement"
+
+bull_points / bear_points MUST cite at least one specific alpha row,
+quoting both ``rank_pct`` and ``bench_rank_ic`` so the reader can verify
+the direction. Example bull_point:
+"qlib_VSTD60 rank_pct=85% with bench_rank_ic=+0.054 (positive-class) →
+bullish reading from this alpha."
 
 model_consensus mapping:
 - consensus_rank_pct > 0.8: strong_long

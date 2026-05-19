@@ -671,13 +671,15 @@ def industry_cmd(
 
 @app.command(name="alpha")
 def alpha_cmd(
-    action: str = typer.Argument(..., help="One of: list | show | bench"),
-    target: Optional[str] = typer.Argument(None, help="For show: alpha name. For bench: family slug (or omit for all)."),
+    action: str = typer.Argument(..., help="One of: list | show | bench | snapshot"),
+    target: Optional[str] = typer.Argument(None, help="For show: alpha name. For bench: family slug. For snapshot: 'top10' / 'auto' / comma-list."),
     universe: str = typer.Option("csi300", "--universe", "-u", help="Universe file or named universe (csi300/csi500/all)"),
     since: str = typer.Option("2024-01-01", "--since", help="Start date YYYY-MM-DD"),
     until: str = typer.Option("2024-12-31", "--until", help="End date YYYY-MM-DD"),
     fwd_days: int = typer.Option(5, "--fwd-days", "-n", help="Forward-return horizon for IC"),
     top: int = typer.Option(20, "--top", "-k", help="Show top-K rows by |rank_IR|"),
+    save: bool = typer.Option(False, "--save", help="Bench only: persist CSV to cache for snapshot --auto"),
+    top_n: int = typer.Option(20, "--top-n", help="Snapshot --auto: how many top alphas to pick from latest bench"),
 ):
     """Alpha zoo — list / inspect / bench formulaic alphas.
 
@@ -738,14 +740,41 @@ def alpha_cmd(
         from financial_analyst.factors.zoo.snapshot import (
             build_snapshot, snapshot_path, PRODUCTION_TOP10,
         )
+        from financial_analyst.factors.zoo.selector import (
+            load_latest_bench, select_top_alphas, alpha_metadata_from_bench,
+        )
         loader = get_default_loader()
         ind_loader = IndustryLoader() if industry_map_path().exists() else None
-        names = None if target in (None, "top10", "default") else (target.split(",") if "," in target else None)
-        if names is None:
+
+        # Resolve alpha names. Priority: --auto > comma-list > top10 keyword > PRODUCTION_TOP10.
+        names: Optional[list[str]] = None
+        bench_metadata: dict = {}
+        if target == "auto":
+            bench_df = load_latest_bench(universe)
+            if bench_df is None:
+                typer.echo(f"No cached bench for universe={universe!r}. Run `alpha bench --universe {universe} --save` first.")
+                raise typer.Exit(1)
+            names = select_top_alphas(bench_df, n=top_n)
+            bench_metadata = alpha_metadata_from_bench(bench_df, names)
+            typer.echo(f"--auto: picked {len(names)} alphas from latest bench (top-{top_n} by |rank_IR|):")
+            for nm in names:
+                meta = bench_metadata.get(nm, {})
+                ric = meta.get("bench_rank_ic")
+                hr = meta.get("bench_hit_rate")
+                typer.echo(f"  {nm:18s}  bench_rank_ic={ric:+.4f}  hit={hr:.1%}" if ric is not None else f"  {nm}")
+        elif target and "," in target:
+            names = [s.strip() for s in target.split(",") if s.strip()]
+            typer.echo(f"Using custom alpha set ({len(names)} alphas): {', '.join(names)}")
+        elif target in (None, "top10", "default"):
+            names = None  # falls through to PRODUCTION_TOP10
             typer.echo(f"Using PRODUCTION_TOP10 ({len(PRODUCTION_TOP10)} alphas): {', '.join(PRODUCTION_TOP10)}")
         else:
-            typer.echo(f"Using custom alpha set ({len(names)} alphas): {', '.join(names)}")
-        df = build_snapshot(loader, codes, asof, names=names, industry_loader=ind_loader)
+            # Unrecognised single token — treat as a single alpha name
+            names = [target]
+            typer.echo(f"Using single alpha: {target}")
+
+        df = build_snapshot(loader, codes, asof, names=names, industry_loader=ind_loader,
+                            bench_metadata=bench_metadata)
         out_path = snapshot_path(universe, asof)
         df.to_parquet(out_path, index=False)
         typer.echo(f"Wrote {out_path} ({len(df)} rows)")
@@ -801,6 +830,14 @@ def alpha_cmd(
             console.print(f"\n[red]{len(errors)} alphas had errors:[/]")
             for _, row in errors.iterrows():
                 console.print(f"  {row['name']} ({row['family']}): {row['error']}")
+
+        # v1.4.2: --save persists CSV to canonical cache so `snapshot --auto`
+        # can pick it up.
+        if save:
+            from financial_analyst.factors.zoo.selector import bench_csv_path
+            cache_path = bench_csv_path(universe)
+            results.to_csv(cache_path, index=False)
+            console.print(f"\n[green]Saved bench CSV to {cache_path} for snapshot --auto[/]")
         return
 
     typer.echo(f"Unknown action {action!r}; use list / show / bench")

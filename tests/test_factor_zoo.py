@@ -323,6 +323,56 @@ def test_panel_carries_industry_when_loader_supplied():
     assert by_code["SH999999"] == "未知"
 
 
+def test_selector_picks_top_n_by_abs_rank_ir():
+    """v1.4.2: select_top_alphas should filter noise then sort by |rank_IR|."""
+    from financial_analyst.factors.zoo.selector import select_top_alphas
+    bench = pd.DataFrame([
+        {"name": "alpha_strong_bull", "family": "alpha101", "rank_ir": +0.30,
+         "rank_ic": +0.05, "hit_rate": 0.55, "n_dates": 100, "status": "ok"},
+        {"name": "alpha_strong_bear", "family": "alpha101", "rank_ir": -0.28,
+         "rank_ic": -0.04, "hit_rate": 0.45, "n_dates": 100, "status": "ok"},
+        {"name": "alpha_noise",       "family": "alpha101", "rank_ir": +0.01,
+         "rank_ic": +0.001, "hit_rate": 0.50, "n_dates": 100, "status": "ok"},
+        {"name": "alpha_short_window","family": "alpha101", "rank_ir": +0.50,
+         "rank_ic": +0.10, "hit_rate": 0.60, "n_dates": 10, "status": "ok"},
+        {"name": "alpha_sign_disagree","family": "alpha101", "rank_ir": +0.20,
+         "rank_ic": +0.03, "hit_rate": 0.45, "n_dates": 100, "status": "ok"},
+        {"name": "alpha_error",       "family": "alpha101", "rank_ir": None,
+         "rank_ic": None, "hit_rate": None, "n_dates": None, "status": "compute_error"},
+    ])
+    picked = select_top_alphas(bench, n=10)
+    # noise (under threshold), short_window (n_dates=10), sign_disagree (rank_ir>0
+    # but hit<0.5), error (NaN) all filtered out
+    assert picked == ["alpha_strong_bull", "alpha_strong_bear"]
+
+
+def test_selector_filter_relaxed():
+    """Relaxing thresholds should let weaker alphas through."""
+    from financial_analyst.factors.zoo.selector import select_top_alphas
+    bench = pd.DataFrame([
+        {"name": "a1", "family": "x", "rank_ir": +0.30, "rank_ic": +0.05,
+         "hit_rate": 0.55, "n_dates": 100, "status": "ok"},
+        {"name": "a2", "family": "x", "rank_ir": +0.10, "rank_ic": +0.02,
+         "hit_rate": 0.51, "n_dates": 100, "status": "ok"},
+    ])
+    picked = select_top_alphas(bench, n=10, min_abs_rank_ir=0.0,
+                                min_n_dates=0, require_sign_agreement=False)
+    assert set(picked) == {"a1", "a2"}
+
+
+def test_alpha_metadata_from_bench():
+    """Snapshot enrichment helper — pulls per-alpha bench metadata."""
+    from financial_analyst.factors.zoo.selector import alpha_metadata_from_bench
+    bench = pd.DataFrame([
+        {"name": "a1", "rank_ic": +0.05, "hit_rate": 0.55, "n_dates": 100},
+        {"name": "a2", "rank_ic": -0.03, "hit_rate": 0.48, "n_dates": 80},
+    ])
+    meta = alpha_metadata_from_bench(bench, ["a1", "a2", "a_missing"])
+    assert meta["a1"]["bench_rank_ic"] == pytest.approx(0.05)
+    assert meta["a2"]["bench_hit_rate"] == pytest.approx(0.48)
+    assert meta["a_missing"]["bench_rank_ic"] is None
+
+
 def test_snapshot_round_trip(tmp_path, monkeypatch):
     """v1.3.4: build_snapshot → load_snapshot_for_code round-trip.
     Uses a stub loader that returns synthetic panels per code, so the test
