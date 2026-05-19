@@ -38,7 +38,180 @@ pip install financial-analyst
 financial-analyst report SH600519
 ```
 
-### 2. Architecture — three trust tiers + plug-in everything
+### 2. What can it do for you?
+
+Eight concrete capabilities, each tied to a CLI command. Output snippets are real (lightly trimmed).
+
+#### 2.1 Single-stock deep-dive report — 5 minutes end-to-end
+
+```bash
+financial-analyst report SH600519 --asof 2024-12-31
+```
+
+Orchestrates 13+ sub-agents and writes a Chinese research report to `out/SH600519_2024-12-31.{md,html,json}`. Sample sections:
+
+```
+## 一、综合评级
+总评 0/10 | 操作: 持有/观望
+
+| 维度 | 评分 |
+|------|------|
+| 基本面 | 0  |
+| 技术面 | -1 |
+| 主力情绪 | 0 |
+| 量化模型 | 1 |
+| 风险面 | 0 |
+
+## 五、量化共识 (QuantAnalyst)
+- 模型排名: 综合排名 74.5%, 模型给分 +1
+- Zoo alphas: qlib_WVMA60 rank_pct=91.1% (positive-class, +0.052 IC) →
+  bullish; qlib_STD10 rank_pct=10.9% (reversal-class, -0.082 IC) → bullish
+- 共识: weak_long, 置信度 high (zoo + 模型一致)
+
+## 六、多空辩论
+看多 (Bull, V-anchors: V1, V2, V10)
+- PE 20.18x 历史低位 + 3.87% 股息率提供下行保护...
+看空 (Bear, V-anchors: V5, V8, V10)
+- 均线空头排列 + 60 日收益 -12.02%...
+
+## 七、风控审查 (RiskOfficer)
+- Veto: 无
+- 仓位建议: 1-3%
+- 止损: ¥1180
+- 盲点提示: 宏观流动性切换可能引发防御性资金流出...
+
+## 八、操作建议
+- 目标价: ¥1390
+- 仓位: 2%
+- 止损: ¥1180
+```
+
+#### 2.2 Natural-language Q&A — ask anything in Chinese
+
+```bash
+financial-analyst ask "为什么茅台技术面这么弱"
+financial-analyst ask "csi300 里 ROE > 15% 且 PE < 25 的票"
+financial-analyst ask "最近 7 天龙虎榜净买入最多的 5 只"
+```
+
+The `ask` agent picks one of 6 tools (`quote_lookup`, `factor_query`, `news_search`, `lhb_filter`, `holder_lookup`, `report_link`) and runs the right sub-agent stack.
+
+#### 2.3 Market-wide briefings — morning brief + intraday review
+
+```bash
+financial-analyst morning-brief                  # 盘前: 隔夜动态 + 当日关注
+financial-analyst intraday-review --time 14:00   # 盘中: 当日异动 + 主线轮动
+```
+
+Both run market-level analysts (`market-scanner` + `morning-brief-writer` / `intraday-reviewer`) and dump a multi-stock summary.
+
+#### 2.4 Industry-chain mainline radar — what's leading the market now
+
+```bash
+financial-analyst mainline-classify
+```
+
+The `mainline-classifier` agent reads cross-sectional state (turnover concentration, sector momentum, 主线 fwd_60d > +4pp historical baseline) and emits a 5-state label per industry: `mainline` / `initiation` / `revival` / `decay` / `cold`.
+
+Sample output:
+```
+{
+  "AI算力": "mainline (fwd_60d +5.2pp historical hit 68%)",
+  "光伏": "decay (主流退潮, 大龙参与=反指标)",
+  "白酒": "cold",
+  "机器人": "initiation (init→main 转换金信号)",
+  ...
+}
+```
+
+#### 2.5 Alpha-zoo research — 440 formulas, one CLI
+
+```bash
+# List the 440 registered alphas
+financial-analyst alpha list
+
+# Inspect any single formula + paper citation
+financial-analyst alpha show gtja089
+# → Industry-neutral VWAP-delta vs low-ADV10 ts-rank...
+#   Paper: Guotai Junan 191 Alphas (国泰君安, 2017)
+#   Formula: Ts_Rank(decay_linear(correlation(low, adv10, 6), 5), 3) -
+#            Ts_Rank(decay_linear(delta(IndNeutralize(vwap, ind), 3), 10), 15)
+
+# Benchmark all 440 against your universe (2m 43s for csi300 × 144 days)
+financial-analyst alpha bench --universe csi300_active \
+    --since 2024-06-01 --until 2024-12-31 --save
+
+# Build a snapshot with auto top-N picked from latest bench
+financial-analyst alpha snapshot auto --universe csi300_active \
+    --until 2024-12-31 --top-n 20
+# → ~/.financial-analyst/cache/zoo_snapshot_csi300_active_2024-12-31.parquet
+#   Every subsequent `report` auto-uses these signals
+```
+
+#### 2.6 Local news + sentiment DB — 7 collectors, zero LLM token cost
+
+```bash
+# Public collectors (no login required)
+financial-analyst news-collect --sources kuaixun,longhu,sinafinance --limit 200
+
+# Cookie-mode collectors (need OpenCLI Chrome extension + login)
+financial-analyst news-collect --sources xueqiu-comments --code SH600519
+financial-analyst news-collect --sources xueqiu-hot --limit 50
+
+# FTS5 query across all of it
+financial-analyst news-query SH600519 --days 7
+financial-analyst news-query all --fts "白酒库存"
+```
+
+Data lands in `~/.financial-analyst/data/news.sqlite` with FTS5 full-text index. Reports automatically read from it when the drop-zone is thin.
+
+#### 2.7 Industry classifier — Tushare 申万 mapping
+
+```bash
+financial-analyst industry refresh         # one-time, ~5s
+financial-analyst industry show SH600519   # → 白酒
+financial-analyst industry stats           # 5519 codes, 110 industries
+```
+
+Powers `indneutralize` in the alpha zoo and gives `whale-analyst` industry-relative context.
+
+#### 2.8 MCP server — Claude Desktop integration
+
+```bash
+financial-analyst-mcp
+```
+
+Starts an MCP server exposing 12 tools (report / ask / news-query / alpha-bench / etc.) so you can drive the whole stack from Claude Desktop with natural-language prompts.
+
+#### 2.9 Memory editing — capture your research as markdown
+
+```bash
+# Open the whale-analyst's memory in your editor
+$EDITOR memories/whale-analyst/_shared/playbook.md
+
+# Save. Next report uses it. No restart, no deploy.
+financial-analyst report SH600519
+```
+
+50+ memory files distil 5 years of A-share research into per-agent prompt context. **Editing markdown changes LLM behaviour the same way editing code would.**
+
+#### 2.10 Dream-loop self-improvement (early)
+
+```bash
+financial-analyst dream                    # process recent report outcomes
+financial-analyst dream review             # see proposed memory updates
+financial-analyst dream accept <id>        # promote into permanent memory
+```
+
+The `introspector` sub-agent reads recent report outcomes (was the call right?), drafts memory deltas to `memories/_proposed/`, and a human approves before they land. Underused today; gains value once you have 100+ reports of history.
+
+---
+
+### 2.5 The 30-second elevator pitch
+
+You give it a stock code → it gives you a research-desk-quality report with star rating, target, stop, position size, and reasoning grounded in 440 quantitative alphas + your own 5-year research memos. Everything is local, plug-in-able, and **edits to markdown change LLM behaviour without a deploy**.
+
+### 3. Architecture — three trust tiers + plug-in everything
 
 #### Trust isolation
 
@@ -82,7 +255,7 @@ analyst's prompt because the structure strips free-form text.
 - **Memories**: per-agent markdown under `memories/<agent>/*.md`. Edit a file → next agent invocation picks it up. SQLite FTS5 full-text retrieval; falls back to `load_all()` when search returns thin results.
 - **Alphas**: register via `AlphaSpec` decorator in `factors/zoo/{family}/alphas.py`. The 440-alpha zoo is just the curated default.
 
-### 3. Build journey — chronological
+### 4. Build journey — chronological
 
 #### Phase 0: Design & scaffolding (Day −2 to 0)
 
@@ -165,7 +338,7 @@ This is where the project changed scale. We started v1.3.0 with **22 hand-picked
 - **gtja143**: recursive `SELF` reference. Needs an optional `compute_iterative(panel, state) → (series, state)` API. Planned for v1.5.x.
 - **gtja149**: benchmark-relative beta. Needs `BenchmarkLoader` to carry CSI300 close as a parallel series. Planned for v1.5.x.
 
-### 4. Numbers at a glance
+### 5. Numbers at a glance
 
 | Metric | v0.1.0 | v1.4.2 |
 |--------|-------:|-------:|
@@ -180,7 +353,7 @@ This is where the project changed scale. We started v1.3.0 with **22 hand-picked
 | PyPI releases | 1 | 12 |
 | Build days | 14 | 14 (final 2 = zoo) |
 
-### 5. Lessons learned
+### 6. Lessons learned
 
 #### What worked
 
@@ -209,7 +382,7 @@ This is where the project changed scale. We started v1.3.0 with **22 hand-picked
 - The dream loop (`OutcomeTracker → Introspector`) is conceptually elegant but underused at current scale. Will become valuable when there's enough report history to detect patterns.
 - 29-preset swarm shotgun (Vibe-Trading's approach). We have 4 deep presets and they're enough. Preset count is vanity; preset depth is reach.
 
-### 6. Where to next
+### 7. Where to next
 
 In rough priority order, based on user value × cost:
 
@@ -219,7 +392,7 @@ In rough priority order, based on user value × cost:
 4. **`BenchmarkLoader` + iterative compute** (M): unlocks `gtja143` and `gtja149`, closes the catalogue to 100%.
 5. **Shadow-account analysis**: parse 同花顺 / 东方财富 trade exports, KMeans-cluster round-trips into implicit rules, replay as shadow backtest. Novel feature; needs user trade history to validate.
 
-### 7. Quick reference for new contributors
+### 8. Quick reference for new contributors
 
 ```bash
 # Setup
@@ -280,7 +453,180 @@ pip install financial-analyst
 financial-analyst report SH600519
 ```
 
-### 2. 架构 — 三层信任 + 处处可插拔
+### 2. 能干什么?
+
+10 个具体能力, 每个都附 CLI 命令 + 真实输出片段 (略修剪).
+
+#### 2.1 个股深度研报 — 5 分钟出一份
+
+```bash
+financial-analyst report SH600519 --asof 2024-12-31
+```
+
+调度 13+ 个 sub-agent, 写中文研报到 `out/SH600519_2024-12-31.{md,html,json}`. 样章:
+
+```
+## 一、综合评级
+总评 0/10 | 操作: 持有/观望
+
+| 维度 | 评分 |
+|------|------|
+| 基本面 | 0  |
+| 技术面 | -1 |
+| 主力情绪 | 0 |
+| 量化模型 | 1 |
+| 风险面 | 0 |
+
+## 五、量化共识 (QuantAnalyst)
+- 模型排名: 综合排名 74.5%, 模型给分 +1
+- Zoo alphas: qlib_WVMA60 rank_pct=91.1% (正向类, IC=+0.052) → 看多;
+  qlib_STD10 rank_pct=10.9% (反转类, IC=-0.082) → 看多
+- 共识: weak_long, 置信度 high (zoo + 模型方向一致)
+
+## 六、多空辩论
+看多 (Bull, V-anchors: V1, V2, V10)
+- PE 20.18x 历史低位 + 3.87% 股息率提供下行保护...
+看空 (Bear, V-anchors: V5, V8, V10)
+- 均线空头排列 + 60 日收益 -12.02%...
+
+## 七、风控审查 (RiskOfficer)
+- Veto: 无
+- 仓位建议: 1-3%
+- 止损: ¥1180
+- 盲点提示: 宏观流动性切换可能引发防御性资金流出...
+
+## 八、操作建议
+- 目标价: ¥1390
+- 仓位: 2%
+- 止损: ¥1180
+```
+
+#### 2.2 自然语言问答 — 中文随便问
+
+```bash
+financial-analyst ask "为什么茅台技术面这么弱"
+financial-analyst ask "csi300 里 ROE > 15% 且 PE < 25 的票"
+financial-analyst ask "最近 7 天龙虎榜净买入最多的 5 只"
+```
+
+`ask` agent 自动从 6 个 tool 里挑一个 (`quote_lookup` / `factor_query` / `news_search` / `lhb_filter` / `holder_lookup` / `report_link`), 跑对应 sub-agent stack.
+
+#### 2.3 市场级简报 — 盘前 + 盘中复盘
+
+```bash
+financial-analyst morning-brief                  # 盘前: 隔夜动态 + 当日关注
+financial-analyst intraday-review --time 14:00   # 盘中: 当日异动 + 主线轮动
+```
+
+跑市场级 agent (`market-scanner` + `morning-brief-writer` / `intraday-reviewer`), 出多股汇总.
+
+#### 2.4 产业链主线雷达 — 看谁在领涨
+
+```bash
+financial-analyst mainline-classify
+```
+
+`mainline-classifier` agent 读横截面状态 (换手集中度 / 板块动量 / 主线 fwd_60d > +4pp 历史基准) 给每个产业链打 5 状态: `mainline` / `initiation` / `revival` / `decay` / `cold`.
+
+样输出:
+```
+{
+  "AI算力": "mainline (fwd_60d +5.2pp 历史胜率 68%)",
+  "光伏": "decay (主流退潮, 大龙参与=反指标)",
+  "白酒": "cold",
+  "机器人": "initiation (init→main 转换金信号)",
+  ...
+}
+```
+
+#### 2.5 Alpha-Zoo 研究 — 440 个公式一个 CLI 拿下
+
+```bash
+# 列出全 440 个注册因子
+financial-analyst alpha list
+
+# 看任一公式 + 论文出处
+financial-analyst alpha show gtja089
+# → 行业中性 VWAP-delta vs low-ADV10 ts-rank...
+#   论文: Guotai Junan 191 Alphas (国泰君安, 2017)
+#   公式: Ts_Rank(decay_linear(correlation(low, adv10, 6), 5), 3) -
+#         Ts_Rank(decay_linear(delta(IndNeutralize(vwap, ind), 3), 10), 15)
+
+# 跑全 440 因子 bench (csi300 × 144 天 2 分 43 秒)
+financial-analyst alpha bench --universe csi300_active \
+    --since 2024-06-01 --until 2024-12-31 --save
+
+# 用最新 bench 自动挑 top-N 建 snapshot
+financial-analyst alpha snapshot auto --universe csi300_active \
+    --until 2024-12-31 --top-n 20
+# → ~/.financial-analyst/cache/zoo_snapshot_csi300_active_2024-12-31.parquet
+#   之后所有 `report` 自动用这些信号
+```
+
+#### 2.6 本地新闻+情绪库 — 7 个采集器 0 token 成本
+
+```bash
+# 公开采集 (不需登录)
+financial-analyst news-collect --sources kuaixun,longhu,sinafinance --limit 200
+
+# Cookie-mode (需 OpenCLI Chrome 扩展 + 登录)
+financial-analyst news-collect --sources xueqiu-comments --code SH600519
+financial-analyst news-collect --sources xueqiu-hot --limit 50
+
+# FTS5 跨全库查询
+financial-analyst news-query SH600519 --days 7
+financial-analyst news-query all --fts "白酒库存"
+```
+
+数据落到 `~/.financial-analyst/data/news.sqlite` 带 FTS5 全文索引. 研报自动从这里取上下文.
+
+#### 2.7 行业分类器 — Tushare 申万映射
+
+```bash
+financial-analyst industry refresh         # 一次性, ~5 秒
+financial-analyst industry show SH600519   # → 白酒
+financial-analyst industry stats           # 5519 股, 110 行业
+```
+
+支撑 alpha zoo 的 `indneutralize` op + 给 `whale-analyst` 提供行业相对 context.
+
+#### 2.8 MCP server — Claude Desktop 集成
+
+```bash
+financial-analyst-mcp
+```
+
+跑 MCP server 暴露 12 个 tool (report / ask / news-query / alpha-bench / ...), 让你在 Claude Desktop 里用自然语言驱动整个栈.
+
+#### 2.9 经验沉淀 = 编辑 markdown
+
+```bash
+# 在编辑器里打开 whale-analyst 的 memory
+$EDITOR memories/whale-analyst/_shared/playbook.md
+
+# 保存. 下次 report 用上. 不用重启, 不用部署.
+financial-analyst report SH600519
+```
+
+50+ memory 文件把 5 年 A 股研究蒸馏成 per-agent prompt context. **改 markdown 改的就是 LLM 行为, 等价改代码**.
+
+#### 2.10 Dream-loop 自我反思 (实验性)
+
+```bash
+financial-analyst dream                    # 处理最近研报的实际表现
+financial-analyst dream review             # 看建议的 memory 更新
+financial-analyst dream accept <id>        # 升级为永久 memory
+```
+
+`introspector` sub-agent 读最近研报的结果 (call 对了吗?), 写 memory diff 到 `memories/_proposed/`, 人审核后落库. 现在用得少, 等积累 100+ 历史研报就有意义.
+
+---
+
+### 2.5 30 秒电梯陈述
+
+你给它一个股票代码 → 它给你一份券商研究水平的研报, 含星级评级 / 目标价 / 止损 / 仓位 / 论证, 论证基于 440 个量化 alpha + 你自己 5 年的研究心得. 全本地, 全可插拔, **改 markdown 改的就是 LLM 行为, 不用部署**.
+
+### 3. 架构 — 三层信任 + 处处可插拔
 
 #### 信任隔离
 
@@ -322,7 +668,7 @@ financial-analyst report SH600519
 - **Memory**: 每个 agent 在 `memories/<agent>/*.md` 下放 markdown. 改完文件下次调用就生效. SQLite FTS5 全文检索, 没命中时 fallback 到 `load_all()`.
 - **因子**: 用 `@register(AlphaSpec(...))` 装饰器注册到 `factors/zoo/{family}/alphas.py`. 440 个因子就是默认包.
 
-### 3. 建设历程 — 按时间线
+### 4. 建设历程 — 按时间线
 
 #### Phase 0: 设计 + 搭架子 (Day −2 至 0)
 
@@ -405,7 +751,7 @@ financial-analyst report SH600519
 - **gtja143**: 递归 `SELF` 引用自己上一步输出. 需要新增可选的 `compute_iterative(panel, state) → (series, state)` API. 计划 v1.5.x.
 - **gtja149**: 基准指数相对 beta. 需要 `BenchmarkLoader` 把 CSI300 收盘当作并行 series 接入 panel. 计划 v1.5.x.
 
-### 4. 关键数字对比
+### 5. 关键数字对比
 
 | 指标 | v0.1.0 | v1.4.2 |
 |---|---:|---:|
@@ -420,7 +766,7 @@ financial-analyst report SH600519
 | PyPI 发布 | 1 | 12 |
 | 建设天数 | 14 | 14 (最后 2 天 = zoo) |
 
-### 5. 教训
+### 6. 教训
 
 #### 做对的
 
@@ -449,7 +795,7 @@ financial-analyst report SH600519
 - dream loop (`OutcomeTracker → Introspector`) 概念优雅但当前规模用得少. 等历史报告积累够了再放光. 现在是占位.
 - 29-preset swarm 散弹 (Vibe-Trading 的做法). 我们 4 个深 preset 就够了. **Preset 数量是虚荣, preset 深度才是触达**.
 
-### 6. 下一步往哪走
+### 7. 下一步往哪走
 
 按用户价值 × 成本粗排:
 
@@ -459,7 +805,7 @@ financial-analyst report SH600519
 4. **`BenchmarkLoader` + iterative compute** (M): 解锁 `gtja143` 和 `gtja149`, 目录 100% 完结.
 5. **Shadow account 分析**: 解析 同花顺/东方财富 对账单, KMeans 聚类 round-trip → 隐含规则 → shadow 回测. 新颖功能, 需要用户交易历史验证.
 
-### 7. 新贡献者快查
+### 8. 新贡献者快查
 
 ```bash
 # 安装
