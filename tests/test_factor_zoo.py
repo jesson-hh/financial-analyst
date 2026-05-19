@@ -220,3 +220,53 @@ def test_run_bench_unknown_family_raises():
     panel = _make_panel(n_codes=3, n_dates=20)
     with pytest.raises(ValueError, match="no alphas to run"):
         run_bench(panel, family="nonexistent_family", fwd_days=5)
+
+
+def test_snapshot_round_trip(tmp_path, monkeypatch):
+    """v1.3.4: build_snapshot → load_snapshot_for_code round-trip.
+    Uses a stub loader that returns synthetic panels per code, so the test
+    doesn't depend on any real data source."""
+    from financial_analyst.factors.zoo import snapshot as snap_mod
+    from financial_analyst.factors.zoo.snapshot import (
+        build_snapshot, load_snapshot_for_code, snapshot_path, PRODUCTION_TOP10,
+    )
+
+    # Redirect cache to tmp_path
+    monkeypatch.setattr(snap_mod, "_cache_dir", lambda: tmp_path)
+
+    class StubLoader:
+        def fetch_quote(self, code, start, end, freq="day"):
+            np.random.seed(hash(code) & 0xFFFF)
+            dates = pd.date_range(start, end, freq="B")
+            n = len(dates)
+            base = 50 + (hash(code) % 50)
+            rets = np.random.randn(n) * 0.02
+            close = base * np.exp(np.cumsum(rets))
+            df = pd.DataFrame({
+                "trade_date": dates,
+                "open": close * (1 + np.random.randn(n) * 0.005),
+                "high": close * (1 + np.abs(np.random.randn(n)) * 0.01),
+                "low":  close * (1 - np.abs(np.random.randn(n)) * 0.01),
+                "close": close,
+                "vol":  np.abs(1 + np.random.randn(n) * 0.2) * 1e6,
+            })
+            df = df.set_index("trade_date")
+            df.index.name = "datetime"
+            return df
+
+    codes = [f"SH{600000 + i:06d}" for i in range(40)]
+    df = build_snapshot(
+        StubLoader(), codes, asof="2024-12-31",
+        # Use just 3 alphas to keep the test fast (full PRODUCTION_TOP10 also works)
+        names=["qlib_KLEN", "qlib_STD10", "gtja042"],
+    )
+    assert {"code", "alpha", "value", "rank_pct", "n_obs"}.issubset(df.columns)
+    # Three alphas × ~40 codes = ~120 rows. Allow some NaN drops.
+    assert len(df) > 80, f"snapshot too small: {len(df)} rows"
+
+    # Persist + look up
+    df.to_parquet(snapshot_path("test_universe", "2024-12-31"), index=False)
+    sub = load_snapshot_for_code("test_universe", codes[0], asof_or_earlier="2024-12-31")
+    assert sub is not None
+    assert set(sub["alpha"]) == {"qlib_KLEN", "qlib_STD10", "gtja042"}
+    assert (sub["rank_pct"] >= 0).all() and (sub["rank_pct"] <= 1).all()

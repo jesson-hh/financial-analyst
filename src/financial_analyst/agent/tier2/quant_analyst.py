@@ -16,13 +16,31 @@ class QuantOutput(BaseModel):
 
 
 SYSTEM_PROMPT = """You are a quantitative analyst for A-shares. You receive predictions from registered models
-(LGB momentum, possibly FM cluster, B3 TSFM in v0.2+). You also see factor scores.
+(LGB momentum, possibly FM cluster, B3 TSFM in v0.2+). You also see factor scores
+and (when available) a curated Alpha-Zoo snapshot.
 
 Apply rules from memory:
 - For game-capital tickers (mv<200亿 + pe>100 + ret60>50%): quant signals UNRELIABLE — neutralize, set anti_signals="game_capital_speculation"
 - Models agreeing (all rank_pct > 0.7 or all < 0.3) = high conviction
 - Models diverging > 0.3 spread = low conviction
 - Single-model with rank_pct in [0.4, 0.6] = neutral
+
+# Alpha-Zoo signals (v1.3.4+)
+When ``zoo_signals.alphas`` is present, each entry is `{value, rank_pct, universe_n}`
+where ``rank_pct`` is the stock's cross-sectional percentile within the
+snapshot universe (typically 868-stock CSI300). Treat them as
+INDEPENDENT confirmations of the model consensus:
+- 3+ zoo alphas agreeing (all rank_pct > 0.7 or all < 0.3) bumps conviction one level
+- zoo + model agreeing: bull_points must cite at least one specific alpha by name+pct
+- zoo CONTRADICTING the model (e.g. model long but zoo top alphas rank_pct < 0.3) → conviction=low, list under anti_signals as "zoo_model_disagreement"
+
+Sign conventions (from CSI300 2024-H2 bench, docs/csi300_bench_2024h2.md):
+- `qlib_VSTD60` POSITIVE (high rank_pct = bullish)
+- `qlib_ROC60` POSITIVE (rank_pct > 0.7 = oversold recovery candidate)
+- `gtja095`, `qlib_STD10`, `qlib_KLEN`, `gtja052`, `qlib_VSUMP20`,
+  `qlib_BETA20`, `qlib_IMAX20` NEGATIVE (high rank_pct = bearish; low
+  rank_pct = bullish)
+- `gtja042` POSITIVE
 
 model_consensus mapping:
 - consensus_rank_pct > 0.8: strong_long
@@ -38,7 +56,7 @@ quant_score:
 - weak_short: -1
 - strong_short: -2
 
-List anti_signals (rules from memory that fired against the model output).
+List anti_signals (rules from memory or zoo disagreements that fired against the model output).
 Output JSON only. No free text."""
 
 
@@ -48,9 +66,11 @@ class QuantAnalyst(SubAgent[QuantOutput]):
 
     async def _execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         client = LLMClient.for_agent(self.NAME)
+        factor = inputs.get("factor-computer", {}) or {}
         upstream = json.dumps({
             "model_predictor": inputs.get("model-predictor", {}),
-            "factor_scores": (inputs.get("factor-computer", {}) or {}).get("factor_scores", {}),
+            "factor_scores": factor.get("factor_scores", {}),
+            "zoo_signals": factor.get("zoo_signals", {}),  # v1.3.4+
         }, default=str, ensure_ascii=False)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT + "\n\n# Memory\n" + self.memory.load_all()},

@@ -17,6 +17,7 @@ class FactorOutput(BaseModel):
     whale_signals: Dict[str, Any]
     board_score: Dict[str, Any]
     vol_regime: Dict[str, Any]
+    zoo_signals: Dict[str, Any] = {}  # v1.3.4: latest snapshot lookup, optional
 
 
 class FactorComputer(SubAgent[FactorOutput]):
@@ -94,10 +95,35 @@ class FactorComputer(SubAgent[FactorOutput]):
             bars_5m_last_day=bars_5m_last_day,
         )
 
+        # v1.3.4: look up most-recent zoo snapshot (best-effort, silent on miss)
+        zoo_signals: Dict[str, Any] = {}
+        try:
+            from financial_analyst.factors.zoo.snapshot import load_snapshot_for_code
+            # Try the canonical universe first, fall back to others if absent
+            for universe_name in ("csi300_active", "csi300_2024h2", "sample30"):
+                sub = load_snapshot_for_code(universe_name, code, asof_or_earlier=asof)
+                if sub is not None:
+                    zoo_signals = {
+                        "snapshot_universe": universe_name,
+                        "snapshot_asof": str(sub["snapshot_asof"].iloc[0]),
+                        "alphas": {
+                            row["alpha"]: {
+                                "value": float(row["value"]),
+                                "rank_pct": float(row["rank_pct"]),
+                                "universe_n": int(row["n_obs"]),
+                            }
+                            for _, row in sub.iterrows()
+                        },
+                    }
+                    break
+        except Exception:
+            pass  # snapshot module missing or read error — silent skip
+
         return {
             "code": code, "asof_date": asof,
             "factor_scores": {k: (float(v) if v is not None and v == v else 0.0) for k, v in factors.items()},
             "whale_signals": whale,
             "board_score": board,
             "vol_regime": regime,
+            "zoo_signals": zoo_signals,
         }

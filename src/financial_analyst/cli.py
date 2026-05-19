@@ -685,6 +685,37 @@ def alpha_cmd(
         console.print(f"  {spec.formula_text}")
         return
 
+    if action == "snapshot":
+        # Build a universe-wide snapshot of curated top alphas at one asof
+        # date and cache it for fast per-stock lookup in reports.
+        codes = _resolve_universe(universe)
+        if not codes:
+            typer.echo(f"Universe {universe!r} produced 0 codes — aborting.")
+            raise typer.Exit(1)
+        asof = until  # reuse --until as the snapshot anchor date
+        typer.echo(f"Building snapshot: universe={universe!r} ({len(codes)} codes), asof={asof}")
+        from financial_analyst.data.loader_factory import get_default_loader
+        from financial_analyst.factors.zoo.snapshot import (
+            build_snapshot, snapshot_path, PRODUCTION_TOP10,
+        )
+        loader = get_default_loader()
+        names = None if target in (None, "top10", "default") else (target.split(",") if "," in target else None)
+        if names is None:
+            typer.echo(f"Using PRODUCTION_TOP10 ({len(PRODUCTION_TOP10)} alphas): {', '.join(PRODUCTION_TOP10)}")
+        else:
+            typer.echo(f"Using custom alpha set ({len(names)} alphas): {', '.join(names)}")
+        df = build_snapshot(loader, codes, asof, names=names)
+        out_path = snapshot_path(universe, asof)
+        df.to_parquet(out_path, index=False)
+        typer.echo(f"Wrote {out_path} ({len(df)} rows)")
+        # Quick summary: per-alpha n_obs
+        if "alpha" in df.columns:
+            summary = df.groupby("alpha")["n_obs"].max().sort_values(ascending=False)
+            typer.echo("Per-alpha n_obs (max across universe):")
+            for alpha, n in summary.items():
+                typer.echo(f"  {alpha}: {n}")
+        return
+
     if action == "bench":
         # Resolve universe: named ("csi300") or path to a text file with one code per line
         codes = _resolve_universe(universe)

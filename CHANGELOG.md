@@ -1,5 +1,66 @@
 # Changelog
 
+## v1.3.4 — 2026-05-19
+
+### Added — Alpha-Zoo snapshot integration into the research pipeline
+The 142-alpha zoo finally reaches end users. New flow:
+
+1. **Periodic snapshot** — user runs
+   `financial-analyst alpha snapshot top10 --universe csi300_active --until 2024-12-31`
+   weekly (or any cadence). Output:
+   `~/.financial-analyst/cache/zoo_snapshot_<universe>_<asof>.parquet`,
+   with one row per (code, alpha) carrying the current value plus the
+   stock's cross-sectional percentile rank within the snapshot universe.
+2. **Factor-computer auto-lookup** — every stock report now looks up
+   the most-recent snapshot whose asof ≤ report asof and surfaces a
+   `zoo_signals` block with the target stock's values + rank_pct for the
+   curated production-top-10 alphas. Silent skip when the cache is
+   absent (preserves backward compatibility).
+3. **Quant-analyst consumes** — `quant-analyst`'s system prompt now
+   includes the v1.3.4 sign conventions (positive vs negative-rank
+   alphas) and decision rules:
+   - 3+ zoo alphas agreeing with the model bumps conviction
+   - Zoo + model disagreement flagged as `zoo_model_disagreement` in
+     `anti_signals`
+   - `bull_points` must cite specific zoo alphas by name + rank_pct
+
+### Added — `PRODUCTION_TOP10` curated alpha list
+Hard-coded in `financial_analyst.factors.zoo.snapshot`. Derived from the
+CSI300 2024-H2 bench (docs/csi300_bench_2024h2.md §8) — the 10 alphas
+with strongest cross-universe `|rank_IR|` and >50% hit rate:
+
+```
+qlib_VSTD60, gtja095, qlib_STD10, gtja052, gtja042,
+qlib_VSUMP20, qlib_KLEN, qlib_BETA20, qlib_ROC60, qlib_IMAX20
+```
+
+### Tests
+- `test_snapshot_round_trip` — builds a 40-stock snapshot with a stub
+  loader and verifies `load_snapshot_for_code` round-trips correctly.
+- Full test suite: 15 zoo tests pass.
+
+### Verified end-to-end on SH600519 (asof 2024-12-31)
+Snapshot lookup shows the LLM:
+```
+qlib_VSTD60   rank_pct=19.8%   (low — bearish for VSTD60 positive sign)
+gtja095       rank_pct=98.4%   (high turnover vol — bearish, negative sign)
+qlib_STD10    rank_pct=10.9%   (low close vol — bullish, negative sign)
+gtja042       rank_pct=8.9%    (low vol-of-high crowd — bearish, positive sign)
+qlib_KLEN     rank_pct=2.1%    (very tight range — bullish, negative sign)
+qlib_BETA20   rank_pct=74.4%   (strong 20d slope — bearish, negative sign)
+qlib_ROC60    rank_pct=67.8%   (mid-high 60d ratio — slightly bullish)
+```
+
+quant-analyst now produces `bull_points` / `bear_points` grounded in
+these specific alpha readings instead of just the LGB rank.
+
+### Roadmap
+- v1.3.5: industry-neutralise the volatility alphas (need industry
+  classifier loader first — Tushare `stock_basic` has `industry` field)
+- v1.3.x: backfill remaining alpha101/gtja191/qlib158 alphas (~310 left)
+  for completeness, even though the top-10 already captures 80%+ of
+  bench signal magnitude.
+
 ## v1.3.3 — 2026-05-19
 
 ### Added — regression operators (regbeta / regresi / rsqr / sequence / wma)
