@@ -54,15 +54,19 @@ class WhaleAnalyst(SubAgent[WhaleOutput]):
         }, default=str, ensure_ascii=False)
 
         # v1.2: augment with social posts from NewsDB (retail sentiment)
+        # since_days=30 because xueqiu activity for any single stock is often
+        # bursty — 7 days frequently has zero posts even for liquid names like
+        # 600519. 30 captures the latest discussion wave without bleeding into
+        # ancient sentiment.
         social_block = ""
         if code:
             try:
                 from financial_analyst.data.news_db import NewsDB
                 db = NewsDB()
-                posts = db.query_social_posts(code=code, since_days=7, limit=20)
+                posts = db.query_social_posts(code=code, since_days=30, limit=20)
                 db.close()
                 if posts:
-                    lines = [f"## 雪球散户讨论 (近 7 日, {len(posts)} 条):\n"]
+                    lines = [f"## 雪球散户讨论 (近 30 日, {len(posts)} 条):\n"]
                     # Aggregate stats
                     total_likes = sum(p.get("likes", 0) or 0 for p in posts)
                     total_comments = sum(p.get("comments_count", 0) or 0 for p in posts)

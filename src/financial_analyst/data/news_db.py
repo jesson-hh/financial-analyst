@@ -281,10 +281,26 @@ class NewsDB:
     # ---- social_posts ----
 
     def upsert_social_posts(self, code: str, items: Iterable[Dict[str, Any]], source: str) -> int:
-        """Insert/update social media posts for a stock."""
+        """Insert/update social media posts for a stock.
+
+        The opencli xueqiu/comments adapter returns items shaped like
+        ``{author, text, likes, replies, retweets, created_at, url}`` — no
+        explicit ``id`` field. ``url`` is the only stable per-post identifier
+        (the trailing number is the post ID on xueqiu). Without it every row
+        in a batch collapses to the same ``source::code::`` key under
+        ``INSERT OR REPLACE`` and only the last item survives.
+        """
         n = 0
         for it in items:
-            post_id = str(it.get("id") or it.get("post_id") or it.get("ts") or "")
+            post_id = str(
+                it.get("id")
+                or it.get("post_id")
+                or it.get("url")          # xueqiu: unique per-post URL
+                or it.get("created_at")   # xueqiu: ISO timestamp
+                or it.get("ts")
+                or it.get("time")
+                or ""
+            )
             row_id = f"{source}::{code}::{post_id}"
             self.conn.execute(
                 "INSERT OR REPLACE INTO social_posts (id, source, code, ts, author, content, "
@@ -295,7 +311,8 @@ class NewsDB:
                     str(it.get("author") or it.get("user") or ""),
                     str(it.get("content") or it.get("text") or ""),
                     it.get("likes") or it.get("like_count") or 0,
-                    it.get("comments_count") or it.get("comments") or it.get("reply_count") or 0,
+                    it.get("comments_count") or it.get("comments")
+                    or it.get("reply_count") or it.get("replies") or 0,
                     it.get("retweet_count") or it.get("retweets") or 0,
                     json.dumps(it, ensure_ascii=False, default=str),
                 ),

@@ -62,3 +62,47 @@ def test_social_posts_dedupe(tmp_path):
     db.upsert_social_posts("SH600519", [item], source="xueqiu_comments")
     assert db.stats()["social_posts"] == 1
     db.close()
+
+
+def test_social_posts_real_xueqiu_schema(tmp_path):
+    """Regression: opencli xueqiu/comments emits items shaped like
+    ``{author, text, likes, replies, retweets, created_at, url}`` — no
+    explicit ``id`` field. Earlier upsert collapsed every row in a batch
+    to the same ``source::code::`` key because the post_id fallback chain
+    only knew about ``id`` / ``post_id`` / ``ts``. ``url`` is the only
+    stable per-post identifier coming back from xueqiu, so the chain now
+    includes it (and ``created_at`` as backup).
+
+    Also confirms ``replies`` lands in the comments_count column."""
+    db = NewsDB(path=tmp_path / "test.sqlite")
+    real_items = [
+        {
+            "author": "多伦多的大道信徒",
+            "text": "段永平说\"...\"——这句话把择时的逻辑彻底清空了",
+            "likes": 8, "replies": 13, "retweets": 2,
+            "created_at": "2026-04-28T11:56:41.000Z",
+            "url": "https://xueqiu.com/7736566551/386342158",
+        },
+        {
+            "author": "多伦多的大道信徒",
+            "text": "段永平说\"任何时代都是难的\"——这三句话是对...",
+            "likes": 2, "replies": 2, "retweets": 0,
+            "created_at": "2026-04-28T00:27:02.000Z",
+            "url": "https://xueqiu.com/7736566551/386156933",
+        },
+    ]
+    n = db.upsert_social_posts("SH600519", real_items, source="xueqiu_comments")
+    assert n == 2
+    assert db.stats()["social_posts"] == 2, "two distinct urls must produce two rows"
+
+    posts = db.query_social_posts("SH600519", since_days=365)
+    assert len(posts) == 2
+    # text → content, replies → comments_count
+    contents = {p["content"] for p in posts}
+    assert any("择时" in c for c in contents)
+    by_url = {p["id"]: p for p in posts}
+    one = next(p for p in posts if p["likes"] == 8)
+    assert one["comments_count"] == 13  # replies mapped through
+    assert one["retweet_count"] == 2
+    assert one["author"] == "多伦多的大道信徒"
+    db.close()
