@@ -1,5 +1,45 @@
 # Changelog
 
+## v1.3.5 — 2026-05-19
+
+### Added — +148 alphas (zoo: 142 → 290)
+A push toward catalog completeness. Three batches across three families:
+
+- **alpha101 +37 → 79/101** (77% of WorldQuant's catalogue): added
+  021, 027, 029, 031, 032, 036-039, 046, 047, 051, 057, 060-062, 064-066,
+  068, 072, 074, 075, 077, 078, 081, 083-086, 088, 092, 094, 096, 098,
+  099, 101. Skipped: ~22 that need `IndNeutralize` (industry classifier
+  loader, planned for v1.4.0) and a few using `cap` (market cap from
+  daily_basic, not yet in PanelData).
+- **gtja191 +65 → 109/191** (57% of GTJA's catalogue): added 015, 016,
+  023, 026, 030, 032, 033, 035, 036, 039, 041, 043-045, 048-051, 055, 056,
+  059-063, 066, 067, 069-072, 074, 077-086, 088, 093, 096-100, 102, 106,
+  109, 118, 126, 129, 133, 135, 139, 150, 161, 167, 168, 176, 178, 184.
+- **qlib158 +46 → 102/158** (65% of Qlib's Alpha158): new
+  SUMP/SUMN/SUMD × {5,20,60} on close (9), VSUMN/VSUMD × {5,20,60} (6),
+  CORD × {5,20} (2), WVMA × {5,20,60} (3), MAX/MIN × 4 windows (8),
+  QTLU/QTLD × 4 windows (8), RANK × 4 (4), CNTD × 3 (3),
+  IMXD × 3 (3).
+
+**Zoo now ships 290 alphas total** — close to two-thirds of the original
+Vibe-Trading 452-alpha goal. Remaining: ~80 alpha101 (mostly
+IndNeutralize-blocked), ~82 gtja191 (mostly complex/exotic), ~56 qlib158.
+
+### Fixed
+- `alpha029` / `alpha081` used `product()` but it wasn't imported into
+  alpha101/alphas.py — silent `compute_error` until now. Fixed.
+- `qlib_CORD5` / `qlib_CORD20` used `log()` for log-volume ratios but
+  it wasn't imported into qlib158/alphas.py — same silent error. Fixed.
+
+### Tests
+- 15 zoo tests still pass; count baselines bumped (alpha101 ≥ 79,
+  gtja191 ≥ 109, qlib158 ≥ 102).
+
+### Performance note
+A `alpha bench --universe csi300_active` over 290 alphas now takes
+~3-4 minutes (vs ~2m for 142 in v1.3.3). All alphas use the same
+panel — adding more alphas grows linearly in benchmark time.
+
 ## v1.3.4 — 2026-05-19
 
 ### Added — Alpha-Zoo snapshot integration into the research pipeline

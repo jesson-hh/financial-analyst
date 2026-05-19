@@ -14,7 +14,7 @@ from financial_analyst.factors.zoo.panel import PanelData
 from financial_analyst.factors.zoo.registry import AlphaSpec, register
 from financial_analyst.factors.zoo.operators import (
     rank, ts_max, ts_min, ts_sum, ts_mean, ts_rank, ts_argmax, ts_argmin,
-    delta, delay, correlation, stddev, sign,
+    delta, delay, correlation, stddev, sign, log,
     regbeta, regresi, rsqr, sequence,
 )
 
@@ -323,4 +323,244 @@ for _n in (5, 20, 60):
         description=f"{_n}-day fraction of volume increases — positive-flow direction",
         formula_text=f"sum(max(delta(volume,1), 0), {_n}) / sum(|delta(volume,1)|, {_n})",
         compute=_make_VSUMP(_n),
+    ))
+
+
+# ----- v1.3.5: SUMP/SUMN/SUMD on close (3N features) ------------------------
+
+
+def _make_SUMP(n: int):
+    def _fn(p: PanelData) -> pd.Series:
+        d = delta(p.close, 1)
+        return ts_sum(d.clip(lower=0), n) / ts_sum(d.abs(), n).replace(0, np.nan)
+    return _fn
+
+
+def _make_SUMN(n: int):
+    def _fn(p: PanelData) -> pd.Series:
+        d = delta(p.close, 1)
+        return ts_sum((-d).clip(lower=0), n) / ts_sum(d.abs(), n).replace(0, np.nan)
+    return _fn
+
+
+def _make_SUMD(n: int):
+    def _fn(p: PanelData) -> pd.Series:
+        d = delta(p.close, 1)
+        denom = ts_sum(d.abs(), n).replace(0, np.nan)
+        return (ts_sum(d.clip(lower=0), n) - ts_sum((-d).clip(lower=0), n)) / denom
+    return _fn
+
+
+for _n in (5, 20, 60):
+    register(AlphaSpec(
+        name=f"qlib_SUMP{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day fraction of positive close-changes vs total absolute change",
+        formula_text=f"sum(max(delta(close,1),0), {_n}) / sum(|delta(close,1)|, {_n})",
+        compute=_make_SUMP(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_SUMN{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day fraction of negative close-changes vs total absolute change",
+        formula_text=f"sum(max(-delta(close,1),0), {_n}) / sum(|delta(close,1)|, {_n})",
+        compute=_make_SUMN(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_SUMD{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day net (up-down) close-change fraction — momentum direction",
+        formula_text=f"(sum_pos - sum_neg) / sum_abs, n={_n}",
+        compute=_make_SUMD(_n),
+    ))
+
+
+# ----- VSUMN / VSUMD (volume direction) -------------------------------------
+
+
+def _make_VSUMN(n: int):
+    def _fn(p: PanelData) -> pd.Series:
+        d = delta(p.volume, 1)
+        return ts_sum((-d).clip(lower=0), n) / ts_sum(d.abs(), n).replace(0, np.nan)
+    return _fn
+
+
+def _make_VSUMD(n: int):
+    def _fn(p: PanelData) -> pd.Series:
+        d = delta(p.volume, 1)
+        denom = ts_sum(d.abs(), n).replace(0, np.nan)
+        return (ts_sum(d.clip(lower=0), n) - ts_sum((-d).clip(lower=0), n)) / denom
+    return _fn
+
+
+for _n in (5, 20, 60):
+    register(AlphaSpec(
+        name=f"qlib_VSUMN{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day fraction of volume decreases",
+        formula_text=f"sum(max(-delta(volume,1),0), {_n}) / sum(|delta(volume,1)|, {_n})",
+        compute=_make_VSUMN(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_VSUMD{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day net volume direction — flow direction",
+        formula_text=f"(sum_pos_vdelta - sum_neg_vdelta) / sum_abs, n={_n}",
+        compute=_make_VSUMD(_n),
+    ))
+
+
+# ----- CORD: corr of returns vs volume returns (2 features) -----------------
+
+
+def _make_CORD(n: int):
+    def _fn(p: PanelData) -> pd.Series:
+        cr = p.close / delay(p.close, 1).replace(0, np.nan)
+        vr = p.volume / delay(p.volume, 1).replace(0, np.nan)
+        return correlation(cr, log(vr), n)
+    return _fn
+
+
+for _n in (5, 20):
+    register(AlphaSpec(
+        name=f"qlib_CORD{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day correlation(close-ratio, log volume-ratio) — return-flow alignment",
+        formula_text=f"correlation(close/delay(close,1), log(volume/delay(volume,1)), {_n})",
+        compute=_make_CORD(_n),
+    ))
+
+
+# ----- WVMA: weighted volume-volatility (2 features) ------------------------
+
+
+def _make_WVMA(n: int):
+    def _fn(p: PanelData) -> pd.Series:
+        ret = (p.close / delay(p.close, 1).replace(0, np.nan) - 1.0).abs()
+        # stddev of (return * volume) / mean of (return * volume)
+        x = ret * p.volume
+        return stddev(x, n) / ts_mean(x, n).replace(0, np.nan)
+    return _fn
+
+
+for _n in (5, 20, 60):
+    register(AlphaSpec(
+        name=f"qlib_WVMA{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day weighted-volume-volatility — |return|*vol coefficient of variation",
+        formula_text=f"stddev(|ret|*volume, {_n}) / mean(|ret|*volume, {_n})",
+        compute=_make_WVMA(_n),
+    ))
+
+
+# ----- MAX / MIN / QTLU / QTLD (relative to close, 4N features) -------------
+
+
+def _make_MAX(n: int):
+    def _fn(p: PanelData) -> pd.Series:
+        return ts_max(p.high, n) / p.close.replace(0, np.nan)
+    return _fn
+
+
+def _make_MIN(n: int):
+    def _fn(p: PanelData) -> pd.Series:
+        return ts_min(p.low, n) / p.close.replace(0, np.nan)
+    return _fn
+
+
+def _make_QTLU(n: int):
+    """80th percentile of close in last n days / current close — upper band proxy."""
+    def _fn(p: PanelData) -> pd.Series:
+        grouped = p.close.groupby(level="code", group_keys=False)
+        out = grouped.rolling(window=n, min_periods=n).quantile(0.8)
+        if isinstance(out.index, pd.MultiIndex) and out.index.nlevels > 2:
+            out = out.droplevel(0)
+        return out.reindex(p.close.index) / p.close.replace(0, np.nan)
+    return _fn
+
+
+def _make_QTLD(n: int):
+    """20th percentile of close in last n days / current close — lower band proxy."""
+    def _fn(p: PanelData) -> pd.Series:
+        grouped = p.close.groupby(level="code", group_keys=False)
+        out = grouped.rolling(window=n, min_periods=n).quantile(0.2)
+        if isinstance(out.index, pd.MultiIndex) and out.index.nlevels > 2:
+            out = out.droplevel(0)
+        return out.reindex(p.close.index) / p.close.replace(0, np.nan)
+    return _fn
+
+
+for _n in (5, 10, 20, 60):
+    register(AlphaSpec(
+        name=f"qlib_MAX{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day high / current close — resistance distance",
+        formula_text=f"ts_max(high, {_n}) / close",
+        compute=_make_MAX(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_MIN{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day low / current close — support distance",
+        formula_text=f"ts_min(low, {_n}) / close",
+        compute=_make_MIN(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_QTLU{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day 80th percentile of close / current — upper-band proxy",
+        formula_text=f"quantile(close, 0.8, {_n}) / close",
+        compute=_make_QTLU(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_QTLD{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day 20th percentile of close / current — lower-band proxy",
+        formula_text=f"quantile(close, 0.2, {_n}) / close",
+        compute=_make_QTLD(_n),
+    ))
+
+
+# ----- RANK (relative position within window, 4 features) -------------------
+
+
+def _make_RANK(n: int):
+    def _fn(p: PanelData) -> pd.Series:
+        return ts_rank(p.close, n) / n
+    return _fn
+
+
+for _n in (5, 10, 20, 60):
+    register(AlphaSpec(
+        name=f"qlib_RANK{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day rank of close within window — relative position [0, 1]",
+        formula_text=f"ts_rank(close, {_n}) / {_n}",
+        compute=_make_RANK(_n),
+    ))
+
+
+# ----- CNTD: count diff (3 features) ----------------------------------------
+
+
+def _make_CNTD(n: int):
+    def _fn(p: PanelData) -> pd.Series:
+        up = (p.close > delay(p.close, 1)).astype(float)
+        dn = (p.close < delay(p.close, 1)).astype(float)
+        return (ts_sum(up, n) - ts_sum(dn, n)) / n
+    return _fn
+
+
+for _n in (5, 20, 60):
+    register(AlphaSpec(
+        name=f"qlib_CNTD{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day count diff (up - down) / n — net day-direction",
+        formula_text=f"(count_up - count_down) / {_n}",
+        compute=_make_CNTD(_n),
+    ))
+
+
+# ----- IMXD: argmax - argmin position diff (3 features) ----------------------
+
+
+def _make_IMXD(n: int):
+    def _fn(p: PanelData) -> pd.Series:
+        return (ts_argmax(p.high, n) - ts_argmin(p.low, n)) / n
+    return _fn
+
+
+for _n in (5, 10, 20):
+    register(AlphaSpec(
+        name=f"qlib_IMXD{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day argmax(high) − argmin(low) / n — high-low recency gap",
+        formula_text=f"(ts_argmax(high, {_n}) - ts_argmin(low, {_n})) / {_n}",
+        compute=_make_IMXD(_n),
     ))
