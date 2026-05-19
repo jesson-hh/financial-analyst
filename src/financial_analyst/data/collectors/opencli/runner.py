@@ -1,15 +1,24 @@
-"""Subprocess wrapper around `opencli`. Returns parsed JSON or raises.
+"""Subprocess wrapper around ``opencli``. Returns parsed JSON or raises.
 
-Windows note: npm installs CLIs as ``.CMD`` batch wrappers. Python's
-``subprocess`` with ``shell=False`` can't invoke them directly. We resolve the
-full path via ``shutil.which`` and ``shell=True`` on Windows ``.cmd``/``.bat``.
+Windows note: npm installs CLIs as ``.CMD`` shim batch files (e.g.
+``opencli.CMD`` → ``node main.js %*``). Routing through ``cmd.exe`` via
+``shell=True`` transcodes the node child's utf-8 stdout through the active
+console code page (GBK / cp936 on a Chinese Windows), shredding non-ASCII
+content even when Python is told to decode as utf-8.
+
+The workaround: parse the .CMD shim to recover the underlying ``main.js``
+path, then call ``node <main.js> ...`` directly with ``shell=False``. cmd.exe
+is out of the loop and node's utf-8 bytes reach Python intact. Non-Windows
+platforms invoke ``opencli`` directly as before.
 """
 from __future__ import annotations
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 
 def is_opencli_available() -> bool:
@@ -25,6 +34,40 @@ def _is_windows_batch(path: str) -> bool:
     return p.endswith(".cmd") or p.endswith(".bat")
 
 
+_NPM_SHIM_JS_RE = re.compile(
+    r'"%_prog%"\s*"?([^"]+\.js)"?\s*%\*',
+    re.IGNORECASE,
+)
+
+
+def _resolve_npm_shim(cmd_path: str) -> Optional[Tuple[str, str]]:
+    """Read an npm-style .CMD shim and return (node_exe, main_js_path).
+
+    Returns None if the file is not a recognizable npm shim. Resolves the
+    ``%dp0%`` placeholder npm writes against the .CMD's own directory so the
+    js path comes out absolute.
+    """
+    try:
+        with open(cmd_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except OSError:
+        return None
+
+    m = _NPM_SHIM_JS_RE.search(content)
+    if not m:
+        return None
+    js_rel = m.group(1)
+    # npm shim uses %dp0% (the .CMD's directory, with trailing backslash) as
+    # the anchor. Substitute it before resolving.
+    dp0 = os.path.dirname(cmd_path) + os.sep
+    js_path = js_rel.replace("%dp0%\\", dp0).replace("%dp0%", dp0)
+    js_path = os.path.normpath(js_path)
+    if not os.path.exists(js_path):
+        return None
+    node_exe = shutil.which("node") or "node"
+    return node_exe, js_path
+
+
 def run_opencli(
     *args: str,
     timeout: int = 60,
@@ -33,7 +76,8 @@ def run_opencli(
     """Run an opencli command and parse JSON output.
 
     Args:
-        *args: command parts, e.g. ("eastmoney", "kuaixun") or ("eastmoney", "holders", "600519")
+        *args: command parts, e.g. ("eastmoney", "kuaixun") or
+            ("eastmoney", "holders", "600519")
         timeout: seconds before kill (default 60)
         fmt: output format flag (default "json")
 
@@ -46,39 +90,56 @@ def run_opencli(
             "opencli not found on PATH. Install: npm install -g @jackwener/opencli"
         )
 
-    full_cmd = [exe, *args, "--format", fmt]
+    cli_args = [*args, "--format", fmt]
+
+    # On Windows, bypass cmd.exe by parsing the .CMD shim and calling node
+    # directly. This is the only reliable way to keep utf-8 stdout intact
+    # under a GBK console code page.
+    invoke: List[str]
+    if _is_windows_batch(exe):
+        shim = _resolve_npm_shim(exe)
+        if shim is not None:
+            node_exe, js_path = shim
+            invoke = [node_exe, js_path, *cli_args]
+        else:
+            # Unrecognized shim — fall back to shell=True. Mojibake risk but
+            # at least we don't fail outright.
+            invoke = [exe, *cli_args]
+    else:
+        invoke = [exe, *cli_args]
 
     try:
-        if _is_windows_batch(exe):
-            # Windows .cmd files need cmd.exe — pass as a string with quoting
-            quoted = " ".join(
-                f'"{a}"' if (" " in str(a) or any(c in str(a) for c in "&|<>^"))
-                else str(a)
-                for a in full_cmd
-            )
-            result = subprocess.run(
-                quoted, shell=True, capture_output=True, text=True,
-                timeout=timeout, encoding="utf-8", errors="replace",
-            )
-        else:
-            result = subprocess.run(
-                full_cmd, capture_output=True, text=True,
-                timeout=timeout, encoding="utf-8", errors="replace",
-            )
+        # capture_output=True with no text/encoding → raw bytes. Decode
+        # ourselves so we never inherit the parent shell's code page.
+        result = subprocess.run(
+            invoke,
+            capture_output=True,
+            timeout=timeout,
+            shell=False,
+        )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"opencli timeout after {timeout}s: {' '.join(map(str, full_cmd))}") from exc
+        raise RuntimeError(
+            f"opencli timeout after {timeout}s: {' '.join(map(str, invoke))}"
+        ) from exc
     except FileNotFoundError as exc:
         raise RuntimeError(
             f"opencli could not be launched: {exc}. "
-            f"Resolved path: {exe}. On Windows ensure npm's prefix is on PATH and the .cmd is intact."
+            f"Resolved path: {exe}. On Windows ensure npm's prefix is on PATH "
+            f"and the .cmd shim points at an existing main.js."
         ) from exc
 
+    stdout_bytes: bytes = result.stdout or b""
+    stderr_bytes: bytes = result.stderr or b""
+    stdout_str = stdout_bytes.decode("utf-8", errors="replace")
+    stderr_str = stderr_bytes.decode("utf-8", errors="replace")
+
     if result.returncode != 0:
-        stderr_tail = (result.stderr or "")[-500:]
+        stderr_tail = stderr_str[-500:]
         raise RuntimeError(f"opencli exit {result.returncode}: {stderr_tail}")
 
-    # opencli sometimes prints undici warnings to stdout — strip non-JSON prefix lines
-    stdout = (result.stdout or "").strip()
+    # opencli sometimes prints undici warnings to stdout — strip non-JSON
+    # prefix lines.
+    stdout = stdout_str.strip()
     if not stdout:
         return []
 
@@ -94,4 +155,6 @@ def run_opencli(
     try:
         return json.loads(stdout[json_start:])
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"opencli: JSON decode failed: {exc} -- output: {stdout[:500]}") from exc
+        raise RuntimeError(
+            f"opencli: JSON decode failed: {exc} -- output: {stdout[:500]}"
+        ) from exc
