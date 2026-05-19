@@ -1,5 +1,94 @@
 # Changelog
 
+## v1.4.0 — 2026-05-19
+
+### Added — Industry classifier loader + IndNeutralize alphas
+v1.4.0 is the third pillar of the zoo: industry-neutralisation.
+Previously stubbed, now wired end-to-end.
+
+**`financial_analyst.data.loaders.industry.IndustryLoader`**:
+- Pulls 申万 (Shenwan) level-1 industry classifications from Tushare
+  `stock_basic(fields='ts_code,name,industry')` via the raw POST endpoint
+  (bypassing the official `tushare` package's flaky round-robin).
+- Caches to `~/.financial-analyst/cache/industry_map.parquet`. One
+  refresh covers ~5500 A-share codes across ~110 industries.
+- API: `get(code)`, `get_map(codes)`, `refresh_from_tushare()`, `stats()`.
+- New CLI: `financial-analyst industry refresh / show / stats`.
+
+**`PanelData.from_loader(..., industry_loader=...)`**:
+- Optional kwarg. When provided, the panel carries an `industry` column
+  indexed by (date, code).
+- `panel.industry` property exposes the Series; falls back to `"未知"`
+  when no loader is attached so old alphas don't crash.
+
+**`indneutralize(x, group)` operator now actually used**:
+- Already shipped as a stub in v1.3.0. v1.4.0 finally has data to feed
+  it: alpha101 IndNeutralize alphas pass `panel.industry`.
+- Verified: within any (date, industry) group, demean produces ~0 mean
+  to floating-point precision.
+
+**Alpha bench and snapshot CLI auto-load IndustryLoader** when the
+cache exists (silent skip when absent).
+
+### Added — alpha101 +19 → 98/101 (97%)
+Final batch of IndClass-dependent alphas now operable:
+- 048 (250d delta-corr, industry-demean)
+- 058, 059 (IndNeutralize VWAP × volume corr)
+- 063 (industry-neutral close-momentum vs blend-ADV180)
+- 067 (IndNeutralize VWAP-ADV20 corr exponent)
+- 069 (IndNeutralize VWAP-delta × blend-ADV20)
+- 070 (IndNeutralize close × ADV50 long-corr)
+- 076 (IndNeutralize low × ADV81 multi-decay)
+- 079 (IndNeutralize blend-delta vs VWAP-ADV150)
+- 080 (IndNeutralize open-high blend sign-delta)
+- 082 (IndNeutralize volume × open corr)
+- 087 (IndNeutralize ADV81 × close corr decay)
+- 089 (IndNeutralize VWAP-delta vs low-ADV10 ts-rank)
+- 090 (IndNeutralize ADV40-low corr)
+- 091 (IndNeutralize close × volume long-decay)
+- 093 (IndNeutralize VWAP × ADV81 corr)
+- 095 (boolean composite on long-window corr)
+- 097 (IndNeutralize blend-delta vs low-ADV60 ts-rank)
+- 100 (IndNeutralize MFI-volume composite)
+
+Zoo: **383 alphas** across 3 families.
+
+### Real-world signal on sample30
+14 of 19 new IndNeutralize alphas produce real signals (5 need >144
+trading days to warm up due to 250d / adv150 / adv180 windows):
+
+```
+alpha089  rank_IR=-0.324  (industry-neutral VWAP-delta vs low-ADV10)
+alpha091  rank_IR=-0.194  (IndNeutralize close × vol long-decay)
+alpha067  rank_IR=+0.171  (IndNeutralize VWAP-ADV20 corr)
+alpha069  rank_IR=-0.067  (IndNeutralize VWAP × ADV20 blend)
+alpha080  rank_IR=-0.100  (IndNeutralize open-high blend)
+```
+
+### Tests
+- New: `test_indneutralize_demean_per_industry` — verifies the
+  per-(date, industry) demean invariant on hand-built groups.
+- New: `test_industry_loader_round_trip` — IndustryLoader cache I/O
+  without touching Tushare.
+- New: `test_panel_carries_industry_when_loader_supplied` — wiring test
+  for the new `industry_loader` kwarg.
+- 18 zoo tests pass total.
+- Baselines bumped (alpha101 ≥ 98).
+
+### Remaining (v1.4.x+)
+- alpha101: 3 left — 033 (?), 056 (uses cap = market cap), 071/073
+  (very complex nested ts-rank chains).
+- gtja191: 33 left (recursive SELF, benchmark-relative, exotic SUMIF).
+- qlib158: 31 left (low-marginal-value window variants).
+
+### Upgrade note
+After upgrading, run:
+```bash
+financial-analyst industry refresh
+```
+once to populate the industry cache. From then on, every `alpha bench`
+and `alpha snapshot` call automatically uses it.
+
 ## v1.3.6 — 2026-05-19
 
 ### Added — +74 alphas (zoo: 290 → 364)

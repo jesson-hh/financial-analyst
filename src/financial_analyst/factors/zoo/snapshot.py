@@ -59,6 +59,7 @@ def build_snapshot(
     asof: str,
     names: Optional[Sequence[str]] = None,
     lookback_days: int = 365,
+    industry_loader=None,
 ) -> pd.DataFrame:
     """Compute the latest-bar value of each alpha for every stock in the
     universe at ``asof``. ``rank_pct`` is the cross-sectional percentile
@@ -80,6 +81,7 @@ def build_snapshot(
     panel = PanelData.from_loader(
         loader, list(universe_codes),
         start_dt.strftime("%Y-%m-%d"), asof, freq="day",
+        industry_loader=industry_loader,
     )
 
     rows: list[dict] = []

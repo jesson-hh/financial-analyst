@@ -67,11 +67,12 @@ def test_registry_list_filtered_by_family():
     # v1.3.3: +11 alpha101, +6 gtja191, +21 qlib158 = 142
     # v1.3.5: +37 alpha101, +65 gtja191, +46 qlib158 = 290
     # v1.3.6: +49 gtja191, +25 qlib158 = 364
+    # v1.4.0: +19 alpha101 (IndNeutralize) = 383
     # Lower bounds prevent silent regressions; expect counts to tick up
     # monotonically with future patch releases.
-    assert len(a101) >= 79, f"alpha101 dropped below v1.3.6 baseline: {len(a101)}"
-    assert len(gtja) >= 158, f"gtja191 dropped below v1.3.6 baseline: {len(gtja)}"
-    assert len(qlib) >= 127, f"qlib158 dropped below v1.3.6 baseline: {len(qlib)}"
+    assert len(a101) >= 98, f"alpha101 dropped below v1.4.0 baseline: {len(a101)}"
+    assert len(gtja) >= 158, f"gtja191 dropped below v1.4.0 baseline: {len(gtja)}"
+    assert len(qlib) >= 127, f"qlib158 dropped below v1.4.0 baseline: {len(qlib)}"
     assert all(s.family == "alpha101" for s in a101)
     assert all(s.family == "gtja191" for s in gtja)
     assert all(s.family == "qlib158" for s in qlib)
@@ -222,6 +223,102 @@ def test_run_bench_unknown_family_raises():
     panel = _make_panel(n_codes=3, n_dates=20)
     with pytest.raises(ValueError, match="no alphas to run"):
         run_bench(panel, family="nonexistent_family", fwd_days=5)
+
+
+def test_indneutralize_demean_per_industry(tmp_path):
+    """v1.4.0: confirm indneutralize zeros the cross-sectional mean within
+    each (date, industry) group. This is the core guarantee that lets the
+    alpha101 IndNeutralize alphas produce industry-relative signals."""
+    from financial_analyst.factors.zoo.operators import indneutralize
+
+    dates = pd.date_range("2024-01-01", periods=3, freq="B")
+    codes = ["SH600519", "SZ000858", "SH600036", "SH601318", "SZ300750"]
+    industries = {
+        "SH600519": "白酒", "SZ000858": "白酒",
+        "SH600036": "银行", "SH601318": "保险",
+        "SZ300750": "电气设备",
+    }
+    idx = pd.MultiIndex.from_product([dates, codes], names=["datetime", "code"])
+    np.random.seed(0)
+    x = pd.Series(np.random.randn(len(idx)) * 10 + 100, index=idx)
+    g = pd.Series([industries[c] for _, c in idx], index=idx)
+
+    y = indneutralize(x, g)
+
+    # Per (date, industry), mean should be ~0
+    for d in dates:
+        for ind in set(industries.values()):
+            members = [c for c, i in industries.items() if i == ind]
+            if len(members) < 2:
+                continue  # singleton group → y = 0 by definition
+            vals = y.loc[(d, members)]
+            assert abs(vals.mean()) < 1e-9, (
+                f"indneutralize failed for ({d}, {ind}): mean={vals.mean()}"
+            )
+
+
+def test_industry_loader_round_trip(tmp_path, monkeypatch):
+    """v1.4.0: IndustryLoader cache round-trip. Doesn't touch Tushare —
+    writes a synthetic parquet, reads via get / get_map / stats."""
+    from financial_analyst.data.loaders import industry as ind_mod
+    monkeypatch.setattr(ind_mod, "_cache_dir", lambda: tmp_path)
+
+    seed = pd.DataFrame([
+        {"code": "SH600519", "industry": "白酒", "name": "贵州茅台", "refreshed_at": "2026-05-19"},
+        {"code": "SZ000858", "industry": "白酒", "name": "五粮液",   "refreshed_at": "2026-05-19"},
+        {"code": "SH600036", "industry": "银行", "name": "招商银行", "refreshed_at": "2026-05-19"},
+    ])
+    seed.to_parquet(tmp_path / "industry_map.parquet", index=False)
+
+    loader = ind_mod.IndustryLoader()
+    assert loader.get("SH600519") == "白酒"
+    assert loader.get("SH999999") == loader.UNKNOWN_INDUSTRY
+    m = loader.get_map(["SH600519", "SZ000858", "SH600036", "SH999999"])
+    assert m == {"SH600519": "白酒", "SZ000858": "白酒",
+                 "SH600036": "银行", "SH999999": loader.UNKNOWN_INDUSTRY}
+    s = loader.stats()
+    assert s["n_codes"] == 3
+    assert s["n_industries"] == 2
+
+
+def test_panel_carries_industry_when_loader_supplied():
+    """from_loader(..., industry_loader=...) should inject an ``industry``
+    column into the panel so alphas can call panel.industry."""
+    from financial_analyst.factors.zoo import PanelData
+
+    class StubLoader:
+        def fetch_quote(self, code, start, end, freq="day"):
+            np.random.seed(hash(code) & 0xFFFF)
+            dates = pd.date_range(start, end, freq="B")[:10]
+            n = len(dates)
+            base = 50 + (hash(code) % 50)
+            close = base * np.exp(np.cumsum(np.random.randn(n) * 0.02))
+            df = pd.DataFrame({
+                "trade_date": dates,
+                "open": close, "high": close * 1.01, "low": close * 0.99,
+                "close": close, "vol": np.full(n, 1e6),
+            }).set_index("trade_date")
+            df.index.name = "datetime"
+            return df
+
+    class StubIndLoader:
+        UNKNOWN_INDUSTRY = "未知"
+        def get_map(self, codes):
+            mapping = {"SH600519": "白酒", "SZ000858": "白酒", "SH600036": "银行"}
+            return {c: mapping.get(c, self.UNKNOWN_INDUSTRY) for c in codes}
+
+    panel = PanelData.from_loader(
+        StubLoader(),
+        ["SH600519", "SZ000858", "SH600036", "SH999999"],
+        "2024-01-01", "2024-01-15",
+        industry_loader=StubIndLoader(),
+    )
+    assert "industry" in panel.df.columns
+    # Each code maps to its expected industry, repeated across dates
+    by_code = panel.industry.groupby(level="code").first()
+    assert by_code["SH600519"] == "白酒"
+    assert by_code["SH600036"] == "银行"
+    assert by_code["SH999999"] == "未知"
 
 
 def test_snapshot_round_trip(tmp_path, monkeypatch):

@@ -14,7 +14,7 @@ from financial_analyst.factors.zoo.registry import AlphaSpec, register
 from financial_analyst.factors.zoo.operators import (
     rank, ts_argmax, ts_argmin, ts_max, ts_min, ts_sum, ts_rank, ts_mean,
     delta, delay, correlation, covariance, decay_linear, stddev,
-    signedpower, scale, log, sign, abs_, product,
+    signedpower, scale, log, sign, abs_, product, indneutralize,
 )
 
 FAMILY = "alpha101"
@@ -1274,4 +1274,339 @@ register(AlphaSpec(
     description="Intraday body / range — the classic close-position indicator, sister to qlib_KMID2",
     formula_text="(close - open) / (high - low + 0.001)",
     compute=_a101,
+))
+
+
+# ----- v1.4.0 batch: IndNeutralize alphas (require panel.industry) ----------
+# The IndClass.{sector,industry,subindustry} placeholders in the paper all
+# map to our single 申万-level industry column. Sector is a coarser level we
+# don't model; sub-industry would need a hierarchical mapping. Treating all
+# three as "industry" is a reasonable approximation — the alphas still
+# industry-demean correctly, just at one granularity instead of three.
+
+def _a048(p: PanelData) -> pd.Series:
+    """indneutralize((correlation(delta(close,1), delta(delay(close,1),1), 250) * delta(close,1) / close), IndClass.subindustry)
+       / sum((delta(close,1)/delay(close,1))^2, 250)"""
+    base = (correlation(delta(p.close, 1), delta(delay(p.close, 1), 1), 250)
+            * delta(p.close, 1) / p.close.replace(0, np.nan))
+    num = indneutralize(base, p.industry)
+    den_term = np.power(delta(p.close, 1) / delay(p.close, 1).replace(0, np.nan), 2)
+    return num / ts_sum(den_term, 250).replace(0, np.nan)
+
+
+register(AlphaSpec(
+    name="alpha048", family=FAMILY, paper=_PAPER,
+    description="Industry-neutral 250d delta-corr × delta(close) divided by 250d squared returns",
+    formula_text="indneutralize(correlation(delta(close,1), delta(delay(close,1),1), 250) * delta(close,1)/close, industry) / sum((delta(close,1)/delay(close,1))^2, 250)",
+    compute=_a048,
+))
+
+
+def _a058(p: PanelData) -> pd.Series:
+    """-1 * Ts_Rank(decay_linear(correlation(IndNeutralize(vwap, IndClass.sector), volume, 4), 8), 6)"""
+    inner = correlation(indneutralize(p.vwap, p.industry), p.volume, 4)
+    return -1.0 * ts_rank(decay_linear(inner, 8), 6)
+
+
+register(AlphaSpec(
+    name="alpha058", family=FAMILY, paper=_PAPER,
+    description="Negative ts-rank of decayed corr between industry-neutral VWAP and volume",
+    formula_text="-Ts_Rank(decay_linear(correlation(IndNeutralize(vwap, industry), volume, 4), 8), 6)",
+    compute=_a058,
+))
+
+
+def _a059(p: PanelData) -> pd.Series:
+    """-1 * Ts_Rank(decay_linear(correlation(IndNeutralize(vwap*0.728 + vwap*0.272, industry), volume, 4), 16), 8)"""
+    # The blend simplifies to vwap × (0.728 + 0.272) = vwap — keep the form
+    inner = correlation(indneutralize(p.vwap, p.industry), p.volume, 4)
+    return -1.0 * ts_rank(decay_linear(inner, 16), 8)
+
+
+register(AlphaSpec(
+    name="alpha059", family=FAMILY, paper=_PAPER,
+    description="Longer-decay sister of alpha058 — industry-neutral VWAP × volume corr",
+    formula_text="-Ts_Rank(decay_linear(correlation(IndNeutralize(vwap, industry), volume, 4), 16), 8)",
+    compute=_a059,
+))
+
+
+def _a063(p: PanelData) -> pd.Series:
+    """(rank(decay_linear(delta(IndNeutralize(close, IndClass.industry), 2), 8))
+        - rank(decay_linear(correlation(((vwap*0.318)+(open*0.682)), sum(adv180,37), 13), 12))) * -1"""
+    adv180 = ts_mean(p.volume, 180)
+    blend = p.vwap * 0.318 + p.open * 0.682
+    t1 = rank(decay_linear(delta(indneutralize(p.close, p.industry), 2), 8))
+    t2 = rank(decay_linear(correlation(blend, ts_sum(adv180, 37), 13), 12))
+    return -1.0 * (t1 - t2)
+
+
+register(AlphaSpec(
+    name="alpha063", family=FAMILY, paper=_PAPER,
+    description="Industry-neutral close-momentum rank minus VWAP-open blend × ADV180 corr rank",
+    formula_text="-(rank(decay_linear(delta(IndNeutralize(close, industry), 2), 8)) - rank(decay_linear(correlation(blend, sum(adv180,37), 13), 12)))",
+    compute=_a063,
+))
+
+
+def _a067(p: PanelData) -> pd.Series:
+    """(rank((high - ts_min(high, 2)))^rank(correlation(IndNeutralize(vwap, IndClass.sector), IndNeutralize(adv20, IndClass.subindustry), 6))) * -1"""
+    adv20 = ts_mean(p.volume, 20)
+    base = rank(p.high - ts_min(p.high, 2)).clip(lower=1e-9)
+    expo = rank(correlation(indneutralize(p.vwap, p.industry), indneutralize(adv20, p.industry), 6))
+    return -1.0 * np.power(base, expo.clip(lower=-4, upper=4))
+
+
+register(AlphaSpec(
+    name="alpha067", family=FAMILY, paper=_PAPER,
+    description="High-floor rank exponentiated by industry-neutral VWAP-ADV20 corr",
+    formula_text="-(rank(high - ts_min(high, 2)) ^ rank(correlation(IndNeutralize(vwap, ind), IndNeutralize(adv20, ind), 6)))",
+    compute=_a067,
+))
+
+
+def _a069(p: PanelData) -> pd.Series:
+    """(rank(ts_max(delta(IndNeutralize(vwap, IndClass.industry), 3), 5))
+        ^ Ts_Rank(correlation((close*0.491 + vwap*0.509), adv20, 4), 9)) * -1"""
+    adv20 = ts_mean(p.volume, 20)
+    blend = p.close * 0.491 + p.vwap * 0.509
+    base = rank(ts_max(delta(indneutralize(p.vwap, p.industry), 3), 5)).clip(lower=1e-9)
+    expo = ts_rank(correlation(blend, adv20, 4), 9)
+    return -1.0 * np.power(base, expo.clip(lower=-4, upper=4))
+
+
+register(AlphaSpec(
+    name="alpha069", family=FAMILY, paper=_PAPER,
+    description="Industry-neutral VWAP-delta max rank exp by close-VWAP blend × ADV20 corr",
+    formula_text="-(rank(ts_max(delta(IndNeutralize(vwap, ind), 3), 5)) ^ Ts_Rank(correlation(blend, adv20, 4), 9))",
+    compute=_a069,
+))
+
+
+def _a070(p: PanelData) -> pd.Series:
+    """(rank(delta(vwap, 1)) ^ Ts_Rank(correlation(IndNeutralize(close, IndClass.industry), adv50, 17), 17)) * -1"""
+    adv50 = ts_mean(p.volume, 50)
+    base = rank(delta(p.vwap, 1)).clip(lower=1e-9)
+    expo = ts_rank(correlation(indneutralize(p.close, p.industry), adv50, 17), 17)
+    return -1.0 * np.power(base, expo.clip(lower=-4, upper=4))
+
+
+register(AlphaSpec(
+    name="alpha070", family=FAMILY, paper=_PAPER,
+    description="VWAP-delta rank exp by industry-neutral close × ADV50 long-corr ts-rank",
+    formula_text="-(rank(delta(vwap,1)) ^ Ts_Rank(correlation(IndNeutralize(close, ind), adv50, 17), 17))",
+    compute=_a070,
+))
+
+
+def _a076(p: PanelData) -> pd.Series:
+    """max(rank(decay_linear(delta(vwap, 1), 11)),
+           Ts_Rank(decay_linear(Ts_Rank(correlation(IndNeutralize(low, IndClass.sector), adv81, 8), 19), 17), 19)) * -1"""
+    adv81 = ts_mean(p.volume, 81)
+    t1 = rank(decay_linear(delta(p.vwap, 1), 11))
+    inner = correlation(indneutralize(p.low, p.industry), adv81, 8)
+    t2 = ts_rank(decay_linear(ts_rank(inner, 19), 17), 19)
+    return -1.0 * np.maximum(t1, t2)
+
+
+register(AlphaSpec(
+    name="alpha076", family=FAMILY, paper=_PAPER,
+    description="Negative max of VWAP-momentum decay vs industry-neutral low × ADV81 long-corr",
+    formula_text="-max(rank(decay_linear(delta(vwap,1),11)), Ts_Rank(decay_linear(Ts_Rank(correlation(IndNeutralize(low,ind), adv81, 8), 19), 17), 19))",
+    compute=_a076,
+))
+
+
+def _a079(p: PanelData) -> pd.Series:
+    """(rank(delta(IndNeutralize(close*0.607 + open*0.393, IndClass.sector), 1))
+        < rank(correlation(Ts_Rank(vwap, 3), Ts_Rank(adv150, 9), 14))) * 1.0"""
+    adv150 = ts_mean(p.volume, 150)
+    blend = p.close * 0.607 + p.open * 0.393
+    t1 = rank(delta(indneutralize(blend, p.industry), 1))
+    t2 = rank(correlation(ts_rank(p.vwap, 3), ts_rank(adv150, 9), 14))
+    return (t1 < t2).astype(float)
+
+
+register(AlphaSpec(
+    name="alpha079", family=FAMILY, paper=_PAPER,
+    description="Boolean: industry-neutral blend delta rank vs ts-ranked VWAP/ADV150 corr rank",
+    formula_text="rank(delta(IndNeutralize(blend, ind), 1)) < rank(correlation(ts_rank(vwap,3), ts_rank(adv150,9), 14))",
+    compute=_a079,
+))
+
+
+def _a080(p: PanelData) -> pd.Series:
+    """(rank(sign(delta(IndNeutralize(open*0.868 + high*0.132, IndClass.subindustry), 4)))
+        ^ Ts_Rank(correlation(high, adv10, 5), 5)) * -1"""
+    adv10 = ts_mean(p.volume, 10)
+    blend = p.open * 0.868 + p.high * 0.132
+    base = rank(sign(delta(indneutralize(blend, p.industry), 4))).clip(lower=1e-9)
+    expo = ts_rank(correlation(p.high, adv10, 5), 5)
+    return -1.0 * np.power(base, expo.clip(lower=-4, upper=4))
+
+
+register(AlphaSpec(
+    name="alpha080", family=FAMILY, paper=_PAPER,
+    description="Industry-neutral open-high blend sign-delta rank exp by high-ADV10 corr",
+    formula_text="-(rank(sign(delta(IndNeutralize(blend, ind), 4))) ^ Ts_Rank(correlation(high, adv10, 5), 5))",
+    compute=_a080,
+))
+
+
+def _a082(p: PanelData) -> pd.Series:
+    """min(rank(decay_linear(delta(open, 1), 14)),
+            Ts_Rank(decay_linear(correlation(IndNeutralize(volume, IndClass.sector),
+                                              open, 17), 6), 13)) * -1"""
+    t1 = rank(decay_linear(delta(p.open, 1), 14))
+    t2 = ts_rank(decay_linear(correlation(indneutralize(p.volume, p.industry), p.open, 17), 6), 13)
+    return -1.0 * np.minimum(t1, t2)
+
+
+register(AlphaSpec(
+    name="alpha082", family=FAMILY, paper=_PAPER,
+    description="Negative min of open-momentum decay vs industry-neutral volume-open corr decay",
+    formula_text="-min(rank(decay_linear(delta(open,1),14)), Ts_Rank(decay_linear(correlation(IndNeutralize(volume, ind), open, 17), 6), 13))",
+    compute=_a082,
+))
+
+
+def _a087(p: PanelData) -> pd.Series:
+    """max(rank(decay_linear(delta(close*0.370 + vwap*0.630, 1), 2)),
+           Ts_Rank(decay_linear(abs(correlation(IndNeutralize(adv81, IndClass.industry), close, 13)), 4), 14)) * -1"""
+    adv81 = ts_mean(p.volume, 81)
+    blend = p.close * 0.370 + p.vwap * 0.630
+    t1 = rank(decay_linear(delta(blend, 1), 2))
+    t2 = ts_rank(decay_linear(correlation(indneutralize(adv81, p.industry), p.close, 13).abs(), 4), 14)
+    return -1.0 * np.maximum(t1, t2)
+
+
+register(AlphaSpec(
+    name="alpha087", family=FAMILY, paper=_PAPER,
+    description="Negative max of blend-delta decay rank vs industry-neutral ADV81 × close corr decay",
+    formula_text="-max(rank(decay_linear(delta(blend,1),2)), Ts_Rank(decay_linear(|correlation(IndNeutralize(adv81, ind), close, 13)|, 4), 14))",
+    compute=_a087,
+))
+
+
+def _a089(p: PanelData) -> pd.Series:
+    """Ts_Rank(decay_linear(correlation(low, adv10, 6), 5), 3)
+       - Ts_Rank(decay_linear(delta(IndNeutralize(vwap, IndClass.industry), 3), 10), 15)"""
+    adv10 = ts_mean(p.volume, 10)
+    t1 = ts_rank(decay_linear(correlation(p.low, adv10, 6), 5), 3)
+    t2 = ts_rank(decay_linear(delta(indneutralize(p.vwap, p.industry), 3), 10), 15)
+    return t1 - t2
+
+
+register(AlphaSpec(
+    name="alpha089", family=FAMILY, paper=_PAPER,
+    description="Low-ADV10 corr decay ts-rank minus industry-neutral VWAP-delta decay ts-rank",
+    formula_text="Ts_Rank(decay_linear(correlation(low, adv10, 6), 5), 3) - Ts_Rank(decay_linear(delta(IndNeutralize(vwap, ind), 3), 10), 15)",
+    compute=_a089,
+))
+
+
+def _a090(p: PanelData) -> pd.Series:
+    """(rank((close - ts_max(close, 4))) ^ Ts_Rank(correlation(IndNeutralize(adv40, IndClass.subindustry), low, 5), 3)) * -1"""
+    adv40 = ts_mean(p.volume, 40)
+    base = rank(p.close - ts_max(p.close, 4)).clip(lower=1e-9)
+    expo = ts_rank(correlation(indneutralize(adv40, p.industry), p.low, 5), 3)
+    return -1.0 * np.power(base, expo.clip(lower=-4, upper=4))
+
+
+register(AlphaSpec(
+    name="alpha090", family=FAMILY, paper=_PAPER,
+    description="Negative close-ceiling rank exp by industry-neutral ADV40-low corr",
+    formula_text="-(rank(close - ts_max(close, 4)) ^ Ts_Rank(correlation(IndNeutralize(adv40, ind), low, 5), 3))",
+    compute=_a090,
+))
+
+
+def _a091(p: PanelData) -> pd.Series:
+    """(Ts_Rank(decay_linear(decay_linear(correlation(IndNeutralize(close, IndClass.industry), volume, 9), 16), 3), 4)
+        - rank(decay_linear(correlation(vwap, adv30, 4), 3))) * -1"""
+    adv30 = ts_mean(p.volume, 30)
+    t1 = ts_rank(decay_linear(decay_linear(correlation(indneutralize(p.close, p.industry), p.volume, 9), 16), 3), 4)
+    t2 = rank(decay_linear(correlation(p.vwap, adv30, 4), 3))
+    return -1.0 * (t1 - t2)
+
+
+register(AlphaSpec(
+    name="alpha091", family=FAMILY, paper=_PAPER,
+    description="Negative gap: industry-neutral close × vol corr long-decay ts-rank vs VWAP × ADV30 decay rank",
+    formula_text="-(Ts_Rank(decay_linear(decay_linear(correlation(IndNeutralize(close, ind), volume, 9), 16), 3), 4) - rank(decay_linear(correlation(vwap, adv30, 4), 3)))",
+    compute=_a091,
+))
+
+
+def _a093(p: PanelData) -> pd.Series:
+    """Ts_Rank(decay_linear(correlation(IndNeutralize(vwap, IndClass.industry), adv81, 17), 19), 7)
+        / rank(decay_linear(delta(close*0.524 + vwap*0.476, 2), 16))"""
+    adv81 = ts_mean(p.volume, 81)
+    blend = p.close * 0.524 + p.vwap * 0.476
+    num = ts_rank(decay_linear(correlation(indneutralize(p.vwap, p.industry), adv81, 17), 19), 7)
+    den = rank(decay_linear(delta(blend, 2), 16))
+    return num / den.replace(0, np.nan)
+
+
+register(AlphaSpec(
+    name="alpha093", family=FAMILY, paper=_PAPER,
+    description="Industry-neutral VWAP-ADV81 corr decay ts-rank divided by blend-delta decay rank",
+    formula_text="Ts_Rank(decay_linear(correlation(IndNeutralize(vwap, ind), adv81, 17), 19), 7) / rank(decay_linear(delta(blend, 2), 16))",
+    compute=_a093,
+))
+
+
+def _a095(p: PanelData) -> pd.Series:
+    """(rank(open - ts_min(open, 12)) < Ts_Rank(rank(correlation(sum((high+low)/2, 19), sum(adv40, 19), 12))^5, 11)) * 1.0"""
+    adv40 = ts_mean(p.volume, 40)
+    mid = (p.high + p.low) / 2.0
+    inner = correlation(ts_sum(mid, 19), ts_sum(adv40, 19), 12)
+    t1 = rank(p.open - ts_min(p.open, 12))
+    t2 = ts_rank(np.power(rank(inner).clip(lower=1e-6), 5), 11)
+    return (t1 < t2).astype(float)
+
+
+register(AlphaSpec(
+    name="alpha095", family=FAMILY, paper=_PAPER,
+    description="Boolean: open-floor rank vs quintic-rank mid-ADV40 corr ts-rank",
+    formula_text="rank(open - ts_min(open, 12)) < Ts_Rank(rank(correlation(sum(mid,19), sum(adv40,19), 12))^5, 11)",
+    compute=_a095,
+))
+
+
+def _a097(p: PanelData) -> pd.Series:
+    """(rank(decay_linear(delta(IndNeutralize(low*0.721 + vwap*0.279, IndClass.industry), 3), 20))
+        - Ts_Rank(decay_linear(Ts_Rank(correlation(Ts_Rank(low, 8), Ts_Rank(adv60, 17), 5), 19), 16), 7)) * -1"""
+    adv60 = ts_mean(p.volume, 60)
+    blend = p.low * 0.721 + p.vwap * 0.279
+    t1 = rank(decay_linear(delta(indneutralize(blend, p.industry), 3), 20))
+    inner = correlation(ts_rank(p.low, 8), ts_rank(adv60, 17), 5)
+    t2 = ts_rank(decay_linear(ts_rank(inner, 19), 16), 7)
+    return -1.0 * (t1 - t2)
+
+
+register(AlphaSpec(
+    name="alpha097", family=FAMILY, paper=_PAPER,
+    description="Negative: industry-neutral blend-delta decay rank minus low-ADV60 ts-rank composite",
+    formula_text="-(rank(decay_linear(delta(IndNeutralize(blend, ind), 3), 20)) - Ts_Rank(decay_linear(Ts_Rank(correlation(Ts_Rank(low, 8), Ts_Rank(adv60, 17), 5), 19), 16), 7))",
+    compute=_a097,
+))
+
+
+def _a100(p: PanelData) -> pd.Series:
+    """0 - (1 * (1.5 * scale(IndNeutralize(IndNeutralize(rank(((((close - low) - (high - close)) / (high - low)) * volume)), IndClass.subindustry), IndClass.subindustry))
+                 - scale(IndNeutralize((correlation(close, rank(adv20), 5) - rank(ts_argmin(close, 30))), IndClass.subindustry))))"""
+    adv20 = ts_mean(p.volume, 20)
+    rng = (p.high - p.low).replace(0, np.nan)
+    mfm = ((p.close - p.low) - (p.high - p.close)) / rng * p.volume
+    t1 = 1.5 * scale(indneutralize(rank(mfm), p.industry))
+    t2 = scale(indneutralize(correlation(p.close, rank(adv20), 5) - rank(ts_argmin(p.close, 30)), p.industry))
+    return -1.0 * (t1 - t2)
+
+
+register(AlphaSpec(
+    name="alpha100", family=FAMILY, paper=_PAPER,
+    description="Industry-neutral MFI-position scaled vs close-ADV20 corr / argmin-rank composite",
+    formula_text="-(1.5*scale(IndNeutralize(rank(mfm*volume), ind)) - scale(IndNeutralize(correlation(close, rank(adv20), 5) - rank(ts_argmin(close, 30)), ind)))",
+    compute=_a100,
 ))

@@ -75,6 +75,16 @@ class PanelData:
         return self.df["amount"]
 
     @property
+    def industry(self) -> pd.Series:
+        """Industry classification per (date, code). Returns a Series of
+        ``"未知"`` (unknown) for every cell if no IndustryLoader was passed
+        in. Used by ``indneutralize`` for cross-sectional industry-demean.
+        """
+        if "industry" in self.df.columns:
+            return self.df["industry"]
+        return pd.Series("未知", index=self.df.index, dtype=str)
+
+    @property
     def returns(self) -> pd.Series:
         """One-period returns, computed per-code so we don't bleed across stocks.
 
@@ -111,11 +121,18 @@ class PanelData:
         start: str,
         end: str,
         freq: str = "day",
+        industry_loader=None,
     ) -> "PanelData":
         """Pull each code's quote panel from a BaseLoader and stitch into
         a single MultiIndex DataFrame. Codes that fail are skipped with a
         warning rather than raising — alpha bench should tolerate partial
         universes.
+
+        When ``industry_loader`` is supplied (an ``IndustryLoader``
+        instance), the panel additionally carries an ``industry`` column
+        mapping every (date, code) pair to the stock's industry. This
+        enables the ``indneutralize`` operator and the alpha101 alphas
+        that consume it.
         """
         frames = []
         skipped: list[tuple[str, str]] = []
@@ -148,4 +165,12 @@ class PanelData:
                 "PanelData.from_loader skipped %d/%d codes; first: %s",
                 len(skipped), len(codes), skipped[:3],
             )
+
+        if industry_loader is not None:
+            ind_map = industry_loader.get_map(codes)
+            # Map per (date, code) — industry repeats across dates for each code
+            panel["industry"] = panel.index.get_level_values("code").map(ind_map).fillna(
+                industry_loader.UNKNOWN_INDUSTRY
+            )
+
         return cls(panel)

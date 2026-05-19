@@ -630,6 +630,45 @@ def doctor():
     typer.echo("\n=== done ===")
 
 
+@app.command(name="industry")
+def industry_cmd(
+    action: str = typer.Argument(..., help="One of: refresh | show | stats"),
+    code: Optional[str] = typer.Argument(None, help="For show: stock code, e.g. SH600519"),
+):
+    """Manage the industry classifier cache.
+
+    Examples:
+      financial-analyst industry refresh        # pull from Tushare, write parquet
+      financial-analyst industry show SH600519  # debug one code
+      financial-analyst industry stats          # cache overview
+    """
+    from financial_analyst.data.loaders.industry import IndustryLoader
+    loader = IndustryLoader()
+
+    if action == "refresh":
+        typer.echo("Refreshing industry classifier from Tushare stock_basic...")
+        n = loader.refresh_from_tushare()
+        typer.echo(f"Wrote {n} codes.")
+        typer.echo(f"Stats: {loader.stats()}")
+        return
+
+    if action == "show":
+        if not code:
+            typer.echo("industry show requires a stock code (e.g. SH600519)")
+            raise typer.Exit(1)
+        typer.echo(f"{code}: {loader.get(code)}")
+        return
+
+    if action == "stats":
+        typer.echo(f"Cache path: {loader._cache_path}")
+        for k, v in loader.stats().items():
+            typer.echo(f"  {k}: {v}")
+        return
+
+    typer.echo(f"Unknown action {action!r}; use refresh / show / stats")
+    raise typer.Exit(1)
+
+
 @app.command(name="alpha")
 def alpha_cmd(
     action: str = typer.Argument(..., help="One of: list | show | bench"),
@@ -695,16 +734,18 @@ def alpha_cmd(
         asof = until  # reuse --until as the snapshot anchor date
         typer.echo(f"Building snapshot: universe={universe!r} ({len(codes)} codes), asof={asof}")
         from financial_analyst.data.loader_factory import get_default_loader
+        from financial_analyst.data.loaders.industry import IndustryLoader, industry_map_path
         from financial_analyst.factors.zoo.snapshot import (
             build_snapshot, snapshot_path, PRODUCTION_TOP10,
         )
         loader = get_default_loader()
+        ind_loader = IndustryLoader() if industry_map_path().exists() else None
         names = None if target in (None, "top10", "default") else (target.split(",") if "," in target else None)
         if names is None:
             typer.echo(f"Using PRODUCTION_TOP10 ({len(PRODUCTION_TOP10)} alphas): {', '.join(PRODUCTION_TOP10)}")
         else:
             typer.echo(f"Using custom alpha set ({len(names)} alphas): {', '.join(names)}")
-        df = build_snapshot(loader, codes, asof, names=names)
+        df = build_snapshot(loader, codes, asof, names=names, industry_loader=ind_loader)
         out_path = snapshot_path(universe, asof)
         df.to_parquet(out_path, index=False)
         typer.echo(f"Wrote {out_path} ({len(df)} rows)")
@@ -727,7 +768,14 @@ def alpha_cmd(
         from financial_analyst.factors.zoo import PanelData
         from financial_analyst.factors.zoo.bench_runner import run_bench
         loader = get_default_loader()
-        panel = PanelData.from_loader(loader, codes, since, until, freq="day")
+        # v1.4.0: auto-load IndustryLoader so IndNeutralize alphas work
+        from financial_analyst.data.loaders.industry import IndustryLoader, industry_map_path
+        ind_loader = IndustryLoader() if industry_map_path().exists() else None
+        if ind_loader:
+            typer.echo("Industry classifier cache found — IndNeutralize alphas will use it.")
+        else:
+            typer.echo("No industry cache (run `industry refresh`); IndNeutralize alphas will demean to 0.")
+        panel = PanelData.from_loader(loader, codes, since, until, freq="day", industry_loader=ind_loader)
         typer.echo(f"Panel ready: {panel}")
         typer.echo(f"Benching family={target or '<all>'}, fwd_days={fwd_days}...")
         results = run_bench(panel, family=target, fwd_days=fwd_days)
