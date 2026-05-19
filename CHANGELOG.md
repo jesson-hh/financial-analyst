@@ -1,5 +1,66 @@
 # Changelog
 
+## v1.3.3 — 2026-05-19
+
+### Added — regression operators (regbeta / regresi / rsqr / sequence / wma)
+- `regbeta(y, x, n)` — rolling OLS β over the last n bars per code
+- `regresi(y, x, n)` — rolling OLS residual `y - (βx + α)`
+- `rsqr(y, x, n)` — rolling OLS R², in [0, 1]
+- `sequence(panel_template, n)` — synthetic time-index series (1, 2, 3, ...
+  per code), so `regbeta(close, sequence, N)` computes the slope of close
+  against time. Matches GTJA-191's `SEQUENCE(N)` notation.
+- `wma(x, n)` — linear-weighted MA (alias of `decay_linear` for formula
+  fidelity)
+- `max_pair / min_pair` — element-wise max/min, named to disambiguate
+  from `ts_max / ts_min` (time-series ops)
+
+These unlock the regression-based half of all three families.
+
+### Added — 38 more alphas (zoo: 104 → 142)
+- **alpha101 +11 → 42**: `041` (sqrt(high·low) - vwap), `042` (rank-skew
+  on VWAP), `043` (vol-rank × neg-momentum rank), `044`, `045`, `049`
+  (slope-reversal regime switch), `050`, `052`, `053`, `054`, `055`.
+- **gtja191 +6 → 44**: `gtja021` (slope of MA6 via REGBETA), `gtja027`
+  (WMA of 3d+6d returns), `gtja076` (CV of return-per-volume), `gtja095`
+  (20d std of dollar volume), `gtja128` (MFI-style typical-price volume
+  ratio), `gtja160` (down-day-only volatility EWMA).
+- **qlib158 +21 → 56**:
+  - BETA/RSQR/RESI × {5,10,20,60} = 12 new trend-regression features
+  - VMA/VSTD/VSUMP × {5,20,60} = 9 new volume statistics
+
+### Top signals on sample30 (2024-06 to 2024-12, fwd_5d)
+The v1.3.3 regression operators paid off — 3 of the top 7 are new:
+
+```
+qlib_CNTP60  rank_IR=-0.605  (60d up-day count, reversal)
+qlib_ROC60   rank_IR=+0.592
+qlib_CNTN60  rank_IR=+0.531
+qlib_RSQR60  rank_IR=-0.508  ← new (60d trend linearity)
+qlib_BETA60  rank_IR=-0.431  ← new (60d trend slope)
+gtja076      rank_IR=-0.330
+qlib_RESI60  rank_IR=+0.278  ← new (60d trend-residual)
+```
+
+The clean interpretation: in 2024-H2 on A-share large caps, **strong
+linear 60-day trends predicted reversal**. RSQR60 and BETA60 both
+negative-rank-IR confirms this from two angles (R² magnitude, slope
+magnitude), and RESI60 positive-rank-IR is its complement (large
+residuals = away-from-trend = mean-revert toward trend).
+
+### Tests
+- Count baselines bumped to v1.3.3 (alpha101 ≥ 42, gtja191 ≥ 44,
+  qlib158 ≥ 56). 14 zoo tests pass unchanged.
+
+### Roadmap
+- alpha101 remaining: 59 alphas. The next batch needs *industry
+  neutralisation* (`indneutralize`) — `alpha48`, `56`, `58`, `59`, `63`,
+  `67`, `69`, `70`, `76`, `79`, `80`, `82`, `87`, `89`, `90`, `91`, `93`,
+  `97`, `100`, `101` all use `IndNeutralize(...)`. Industry classifier
+  loader is the v1.3.4 prerequisite.
+- gtja191 remaining: 147 alphas.
+- qlib158 remaining: 102 alphas (mostly WVMA / SUMD-style which are
+  doable with existing ops).
+
 ## v1.3.2 — 2026-05-19
 
 ### Added — qlib158 family (35 first-batch alphas)

@@ -15,6 +15,7 @@ from financial_analyst.factors.zoo.registry import AlphaSpec, register
 from financial_analyst.factors.zoo.operators import (
     rank, ts_max, ts_min, ts_sum, ts_mean, ts_rank, ts_argmax, ts_argmin,
     delta, delay, correlation, stddev, sign,
+    regbeta, regresi, rsqr, sequence,
 )
 
 FAMILY = "qlib158"
@@ -234,4 +235,92 @@ for _n in (5, 20):
         description=f"{_n}-day rolling correlation(close, log(volume)) — confirmation strength",
         formula_text=f"correlation(close, log(volume), {_n})",
         compute=_make_CORR(_n),
+    ))
+
+
+# ----- rolling OLS regression of close vs time (3N features) ----------------
+
+
+def _make_BETA(n: int):
+    def _fn(p: PanelData) -> pd.Series:
+        seq = sequence(p.close, n)
+        return regbeta(p.close, seq, n) / p.close.replace(0, np.nan)
+    return _fn
+
+
+def _make_RSQR(n: int):
+    def _fn(p: PanelData) -> pd.Series:
+        seq = sequence(p.close, n)
+        return rsqr(p.close, seq, n)
+    return _fn
+
+
+def _make_RESI(n: int):
+    def _fn(p: PanelData) -> pd.Series:
+        seq = sequence(p.close, n)
+        return regresi(p.close, seq, n) / p.close.replace(0, np.nan)
+    return _fn
+
+
+for _n in (5, 10, 20, 60):
+    register(AlphaSpec(
+        name=f"qlib_BETA{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day OLS slope of close vs time / close — normalised trend strength",
+        formula_text=f"regbeta(close, sequence, {_n}) / close",
+        compute=_make_BETA(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_RSQR{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day OLS R² of close vs time — trend linearity in [0, 1]",
+        formula_text=f"rsqr(close, sequence, {_n})",
+        compute=_make_RSQR(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_RESI{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day OLS residual of close vs time / close — deviation from trend line",
+        formula_text=f"regresi(close, sequence, {_n}) / close",
+        compute=_make_RESI(_n),
+    ))
+
+
+# ----- volume statistics (3N features) ---------------------------------------
+
+
+def _make_VMA(n: int):
+    def _fn(p: PanelData) -> pd.Series:
+        return ts_mean(p.volume, n) / p.volume.replace(0, np.nan)
+    return _fn
+
+
+def _make_VSTD(n: int):
+    def _fn(p: PanelData) -> pd.Series:
+        return stddev(p.volume, n) / p.volume.replace(0, np.nan)
+    return _fn
+
+
+def _make_VSUMP(n: int):
+    def _fn(p: PanelData) -> pd.Series:
+        d = delta(p.volume, 1)
+        return ts_sum(d.clip(lower=0), n) / ts_sum(d.abs(), n).replace(0, np.nan)
+    return _fn
+
+
+for _n in (5, 20, 60):
+    register(AlphaSpec(
+        name=f"qlib_VMA{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day volume MA / current volume — relative-volume gauge",
+        formula_text=f"mean(volume, {_n}) / volume",
+        compute=_make_VMA(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_VSTD{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day volume stddev / current volume — volume-volatility ratio",
+        formula_text=f"stddev(volume, {_n}) / volume",
+        compute=_make_VSTD(_n),
+    ))
+    register(AlphaSpec(
+        name=f"qlib_VSUMP{_n}", family=FAMILY, paper=_PAPER,
+        description=f"{_n}-day fraction of volume increases — positive-flow direction",
+        formula_text=f"sum(max(delta(volume,1), 0), {_n}) / sum(|delta(volume,1)|, {_n})",
+        compute=_make_VSUMP(_n),
     ))

@@ -466,3 +466,161 @@ register(AlphaSpec(
     formula_text="(-1*rank(stddev(high,10))) * correlation(high,volume,10)",
     compute=_a040,
 ))
+
+
+def _a041(p: PanelData) -> pd.Series:
+    """((high * low)^0.5) - vwap"""
+    return np.sqrt(p.high * p.low) - p.vwap
+
+
+register(AlphaSpec(
+    name="alpha041", family=FAMILY, paper=_PAPER,
+    description="Geometric mean of high+low minus VWAP — sister to gtja013",
+    formula_text="sqrt(high*low) - vwap",
+    compute=_a041,
+))
+
+
+def _a042(p: PanelData) -> pd.Series:
+    """rank(vwap - close) / rank(vwap + close)"""
+    return rank(p.vwap - p.close) / rank(p.vwap + p.close).replace(0, np.nan)
+
+
+register(AlphaSpec(
+    name="alpha042", family=FAMILY, paper=_PAPER,
+    description="VWAP-close gap rank divided by VWAP+close rank — close-out skew",
+    formula_text="rank(vwap-close) / rank(vwap+close)",
+    compute=_a042,
+))
+
+
+def _a043(p: PanelData) -> pd.Series:
+    """ts_rank(volume/adv20, 20) * ts_rank((-1*delta(close,7)), 8)"""
+    adv20 = ts_sum(p.volume, 20) / 20.0
+    return ts_rank(p.volume / adv20.replace(0, np.nan), 20) * ts_rank(-1.0 * delta(p.close, 7), 8)
+
+
+register(AlphaSpec(
+    name="alpha043", family=FAMILY, paper=_PAPER,
+    description="High recent volume × reversed 7d close change — high-volume reversal",
+    formula_text="ts_rank(volume/adv20, 20) * ts_rank(-1*delta(close,7), 8)",
+    compute=_a043,
+))
+
+
+def _a044(p: PanelData) -> pd.Series:
+    """-1 * correlation(high, rank(volume), 5)"""
+    return -1.0 * correlation(p.high, rank(p.volume), 5)
+
+
+register(AlphaSpec(
+    name="alpha044", family=FAMILY, paper=_PAPER,
+    description="Negative 5d correlation of price highs with volume rank — fades crowd-on-highs",
+    formula_text="-1 * correlation(high, rank(volume), 5)",
+    compute=_a044,
+))
+
+
+def _a045(p: PanelData) -> pd.Series:
+    """-1 * (rank(sum(delay(close,5),20)/20) * correlation(close, volume, 2)
+              * rank(correlation(sum(close,5), sum(close,20), 2)))"""
+    delayed_sma = ts_sum(delay(p.close, 5), 20) / 20.0
+    return -1.0 * (rank(delayed_sma)
+                   * correlation(p.close, p.volume, 2)
+                   * rank(correlation(ts_sum(p.close, 5), ts_sum(p.close, 20), 2)))
+
+
+register(AlphaSpec(
+    name="alpha045", family=FAMILY, paper=_PAPER,
+    description="Triple combo: delayed-SMA rank × short corr × MA-MA corr — penalises trend-aligned crowding",
+    formula_text="-1 * (rank(sum(delay(close,5),20)/20) * correlation(close,volume,2) * rank(correlation(sum(close,5),sum(close,20),2)))",
+    compute=_a045,
+))
+
+
+def _a049(p: PanelData) -> pd.Series:
+    """(((delay(close,20) - delay(close,10)) / 10 - (delay(close,10) - close)/10) < -0.1) ? 1 : -1*(close-delay(close,1))"""
+    slope_long = (delay(p.close, 20) - delay(p.close, 10)) / 10.0
+    slope_short = (delay(p.close, 10) - p.close) / 10.0
+    cond = (slope_long - slope_short) < -0.1
+    return pd.Series(1.0, index=p.close.index).where(cond, -1.0 * delta(p.close, 1))
+
+
+register(AlphaSpec(
+    name="alpha049", family=FAMILY, paper=_PAPER,
+    description="Long-flat when 20-vs-10 slope reversal sharp; else fade 1d delta — regime switch",
+    formula_text="(slope_diff < -0.1) ? 1 : -delta(close,1)",
+    compute=_a049,
+))
+
+
+def _a050(p: PanelData) -> pd.Series:
+    """-1 * ts_max(rank(correlation(rank(volume), rank(vwap), 5)), 5)"""
+    return -1.0 * ts_max(rank(correlation(rank(p.volume), rank(p.vwap), 5)), 5)
+
+
+register(AlphaSpec(
+    name="alpha050", family=FAMILY, paper=_PAPER,
+    description="Negative recent peak of vol-vwap rank correlation — fades crowded VWAP names",
+    formula_text="-1 * ts_max(rank(correlation(rank(volume), rank(vwap), 5)), 5)",
+    compute=_a050,
+))
+
+
+def _a052(p: PanelData) -> pd.Series:
+    """(((-1 * ts_min(low,5)) + delay(ts_min(low,5),5)) * rank((sum(returns,240)-sum(returns,20))/220)) * ts_rank(volume,5)"""
+    tmin5 = ts_min(p.low, 5)
+    long_ret = (ts_sum(p.returns, 240) - ts_sum(p.returns, 20)) / 220.0
+    return ((-1.0 * tmin5 + delay(tmin5, 5)) * rank(long_ret)) * ts_rank(p.volume, 5)
+
+
+register(AlphaSpec(
+    name="alpha052", family=FAMILY, paper=_PAPER,
+    description="Floor-shift × long-term return rank × recent volume — multi-horizon composite",
+    formula_text="((-ts_min(low,5) + delay(ts_min(low,5),5)) * rank((sum(returns,240)-sum(returns,20))/220)) * ts_rank(volume,5)",
+    compute=_a052,
+))
+
+
+def _a053(p: PanelData) -> pd.Series:
+    """-1 * delta(((close-low)-(high-close))/(close-low), 9)"""
+    spread = (p.close - p.low).replace(0, np.nan)
+    moneyflow = ((p.close - p.low) - (p.high - p.close)) / spread
+    return -1.0 * delta(moneyflow, 9)
+
+
+register(AlphaSpec(
+    name="alpha053", family=FAMILY, paper=_PAPER,
+    description="Negative 9d change in close-relative money-flow — medium-horizon reversal",
+    formula_text="-1 * delta(((close-low)-(high-close))/(close-low), 9)",
+    compute=_a053,
+))
+
+
+def _a054(p: PanelData) -> pd.Series:
+    """((-1 * (low - close) * open^5) / ((low - high) * close^5))"""
+    return ((-1.0 * (p.low - p.close) * np.power(p.open, 5))
+            / ((p.low - p.high).replace(0, np.nan) * np.power(p.close, 5)))
+
+
+register(AlphaSpec(
+    name="alpha054", family=FAMILY, paper=_PAPER,
+    description="(close-low) × (open/close)^5 inverted on range — non-linear close-position indicator",
+    formula_text="-(low-close) * open^5 / ((low-high) * close^5)",
+    compute=_a054,
+))
+
+
+def _a055(p: PanelData) -> pd.Series:
+    """-1 * correlation(rank((close - ts_min(low,12)) / (ts_max(high,12) - ts_min(low,12))), rank(volume), 6)"""
+    rng = (ts_max(p.high, 12) - ts_min(p.low, 12)).replace(0, np.nan)
+    raw_rsv = (p.close - ts_min(p.low, 12)) / rng
+    return -1.0 * correlation(rank(raw_rsv), rank(p.volume), 6)
+
+
+register(AlphaSpec(
+    name="alpha055", family=FAMILY, paper=_PAPER,
+    description="Negative correlation of stochastic %K rank with volume rank — fades %K-based crowd",
+    formula_text="-1 * correlation(rank(rsv_12), rank(volume), 6)",
+    compute=_a055,
+))

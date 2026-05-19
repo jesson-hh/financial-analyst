@@ -14,6 +14,7 @@ from financial_analyst.factors.zoo.operators import (
     rank, ts_argmax, ts_argmin, ts_max, ts_min, ts_sum, ts_rank, ts_mean,
     delta, delay, correlation, covariance, decay_linear, stddev,
     signedpower, scale, log, sign, abs_, sma,
+    regbeta, regresi, rsqr, sequence, wma,
 )
 
 FAMILY = "gtja191"
@@ -588,4 +589,94 @@ register(AlphaSpec(
     description="6d MA / close ratio — shorter-horizon sister to gtja034",
     formula_text="MEAN(CLOSE,6) / CLOSE",
     compute=_a065,
+))
+
+
+def _a021(p: PanelData) -> pd.Series:
+    """REGBETA(MEAN(CLOSE,6), SEQUENCE(6))"""
+    return regbeta(ts_mean(p.close, 6), sequence(p.close, 6), 6)
+
+
+register(AlphaSpec(
+    name="gtja021", family=FAMILY, paper=_PAPER,
+    description="Slope of 6d MA vs time index — trend strength of the moving average itself",
+    formula_text="REGBETA(MEAN(CLOSE,6), SEQUENCE(6))",
+    compute=_a021,
+))
+
+
+def _a027(p: PanelData) -> pd.Series:
+    """WMA((CLOSE-DELAY(CLOSE,3))/DELAY(CLOSE,3)*100
+            + (CLOSE-DELAY(CLOSE,6))/DELAY(CLOSE,6)*100, 12)"""
+    r3 = (p.close - delay(p.close, 3)) / delay(p.close, 3).replace(0, np.nan) * 100.0
+    r6 = (p.close - delay(p.close, 6)) / delay(p.close, 6).replace(0, np.nan) * 100.0
+    return wma(r3 + r6, 12)
+
+
+register(AlphaSpec(
+    name="gtja027", family=FAMILY, paper=_PAPER,
+    description="WMA of (3d + 6d % returns) — smoothed multi-horizon momentum",
+    formula_text="WMA((CLOSE-DELAY(CLOSE,3))/DELAY(CLOSE,3)*100 + (CLOSE-DELAY(CLOSE,6))/DELAY(CLOSE,6)*100, 12)",
+    compute=_a027,
+))
+
+
+def _a076(p: PanelData) -> pd.Series:
+    """STDDEV(ABS(CLOSE/DELAY(CLOSE,1)-1)/VOLUME, 20)
+       / MEAN(ABS(CLOSE/DELAY(CLOSE,1)-1)/VOLUME, 20)"""
+    raw = (p.close / delay(p.close, 1).replace(0, np.nan) - 1.0).abs() / p.volume.replace(0, np.nan)
+    return stddev(raw, 20) / ts_mean(raw, 20).replace(0, np.nan)
+
+
+register(AlphaSpec(
+    name="gtja076", family=FAMILY, paper=_PAPER,
+    description="Coefficient of variation of return-per-volume — efficiency volatility",
+    formula_text="STDDEV(|CLOSE/DELAY(CLOSE,1)-1|/VOLUME, 20) / MEAN(...same..., 20)",
+    compute=_a076,
+))
+
+
+def _a095(p: PanelData) -> pd.Series:
+    """STD(AMOUNT, 20)"""
+    return stddev(p.amount, 20)
+
+
+register(AlphaSpec(
+    name="gtja095", family=FAMILY, paper=_PAPER,
+    description="20d std of dollar volume — turnover volatility",
+    formula_text="STD(AMOUNT, 20)",
+    compute=_a095,
+))
+
+
+def _a128(p: PanelData) -> pd.Series:
+    """100 - 100 / (1 + sum(typical*vol where typical>prev_typical, 14)
+                         / sum(typical*vol where typical<prev_typical, 14))"""
+    typical = (p.high + p.low + p.close) / 3.0
+    prev_typical = delay(typical, 1)
+    up_mass = (typical * p.volume).where(typical > prev_typical, 0.0)
+    dn_mass = (typical * p.volume).where(typical < prev_typical, 0.0)
+    ratio = ts_sum(up_mass, 14) / ts_sum(dn_mass, 14).replace(0, np.nan)
+    return 100.0 - 100.0 / (1.0 + ratio)
+
+
+register(AlphaSpec(
+    name="gtja128", family=FAMILY, paper=_PAPER,
+    description="Money-Flow Index style: 14d volume-weighted up/down typical-price ratio",
+    formula_text="100 - 100/(1 + SUM(typical*vol_up,14)/SUM(typical*vol_down,14))",
+    compute=_a128,
+))
+
+
+def _a160(p: PanelData) -> pd.Series:
+    """SMA((CLOSE<=DELAY(CLOSE,1) ? STD(CLOSE,20) : 0), 20, 1)"""
+    raw = stddev(p.close, 20).where(p.close <= delay(p.close, 1), 0.0)
+    return sma(raw, 20, 1)
+
+
+register(AlphaSpec(
+    name="gtja160", family=FAMILY, paper=_PAPER,
+    description="EWMA of down-day volatility — downside-only risk gauge",
+    formula_text="SMA((CLOSE<=DELAY(CLOSE,1) ? STD(CLOSE,20) : 0), 20, 1)",
+    compute=_a160,
 ))

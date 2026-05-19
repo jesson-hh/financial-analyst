@@ -205,3 +205,112 @@ def product(x: pd.Series, n: int) -> pd.Series:
 
 def power(x: pd.Series, p: float) -> pd.Series:
     return np.power(x, p)
+
+
+# ----- rolling OLS regression -----------------------------------------------
+
+
+def regbeta(y: pd.Series, x: pd.Series, n: int) -> pd.Series:
+    """Rolling OLS β of y on x over the last n bars per code.
+
+    Formula: β = cov(y, x, n) / var(x, n). NaN when var(x, n) == 0
+    (a constant predictor) or when the window has missing data.
+
+    Used by gtja021 (slope of MA6 vs time), alpha101 regression alphas,
+    qlib158 BETA features.
+    """
+    pair = pd.concat([y.rename("y"), x.rename("x")], axis=1)
+
+    def _beta(df: pd.DataFrame) -> pd.Series:
+        cov = df["y"].rolling(window=n, min_periods=n).cov(df["x"])
+        var = df["x"].rolling(window=n, min_periods=n).var()
+        return cov / var.where(var > 0)
+
+    out = pair.groupby(level="code", group_keys=False).apply(_beta)
+    return out.reindex(y.index)
+
+
+def regresi(y: pd.Series, x: pd.Series, n: int) -> pd.Series:
+    """Rolling OLS residual y - (β x + α) over the last n bars per code.
+
+    Used by qlib158 RESI features, gtja regression alphas, alpha101 #29.
+    """
+    pair = pd.concat([y.rename("y"), x.rename("x")], axis=1)
+
+    def _resi(df: pd.DataFrame) -> pd.Series:
+        ym = df["y"].rolling(window=n, min_periods=n).mean()
+        xm = df["x"].rolling(window=n, min_periods=n).mean()
+        cov = df["y"].rolling(window=n, min_periods=n).cov(df["x"])
+        var = df["x"].rolling(window=n, min_periods=n).var()
+        beta = cov / var.where(var > 0)
+        alpha = ym - beta * xm
+        # residual at the latest point of the window: y_t - (beta * x_t + alpha)
+        return df["y"] - (beta * df["x"] + alpha)
+
+    out = pair.groupby(level="code", group_keys=False).apply(_resi)
+    return out.reindex(y.index)
+
+
+def rsqr(y: pd.Series, x: pd.Series, n: int) -> pd.Series:
+    """Rolling OLS R² over the last n bars per code. In [0, 1] when well-
+    defined; NaN when var(x) == 0 or var(y) == 0.
+    """
+    pair = pd.concat([y.rename("y"), x.rename("x")], axis=1)
+
+    def _rsq(df: pd.DataFrame) -> pd.Series:
+        cov = df["y"].rolling(window=n, min_periods=n).cov(df["x"])
+        var_x = df["x"].rolling(window=n, min_periods=n).var()
+        var_y = df["y"].rolling(window=n, min_periods=n).var()
+        denom = (var_x * var_y).where((var_x > 0) & (var_y > 0))
+        return (cov * cov) / denom
+
+    out = pair.groupby(level="code", group_keys=False).apply(_rsq)
+    return out.reindex(y.index)
+
+
+def sequence(template: pd.Series, n: int) -> pd.Series:
+    """Return a Series same-shape as ``template`` whose value at each
+    (date, code) is the position within the trailing n-bar window
+    (1, 2, ..., n). Used as a synthetic time index in regression alphas
+    (e.g., GTJA-191 #021: ``REGBETA(MEAN(CLOSE,6), SEQUENCE(6))``).
+
+    Because the value is constant for every code, this is mostly useful
+    as the ``x`` argument to ``regbeta`` — the resulting β is the slope
+    of ``y`` against time.
+    """
+    # Use the per-code position within the panel as the time index — for
+    # rolling-window regression, only the LAST n positions matter, so any
+    # monotonic series works as long as deltas are constant. We use
+    # cumulative count within code.
+    counts = template.groupby(level="code").cumcount() + 1
+    return counts.astype(float)
+
+
+# ----- weighted moving average ----------------------------------------------
+
+
+def wma(x: pd.Series, n: int) -> pd.Series:
+    """Linear-weighted moving average with weights 1, 2, ..., n.
+
+    Differs from ``decay_linear`` only in weight normalisation:
+    ``wma`` divides by ``sum(weights)`` (= n*(n+1)/2); the older operator
+    ``decay_linear`` already does this too. Provided under both names so
+    formulas porting from gtja191 / alpha101 don't need to be rewritten.
+    """
+    return decay_linear(x, n)
+
+
+# ----- element-wise max/min pair --------------------------------------------
+
+
+def max_pair(a, b):
+    """Element-wise max of two scalars or Series. ``np.maximum`` already
+    does this; the alias exists so formulas can write ``max_pair(...)``
+    matching paper notation ``MAX(a, b)`` without ambiguity vs the
+    time-series ``ts_max(x, n)``.
+    """
+    return np.maximum(a, b)
+
+
+def min_pair(a, b):
+    return np.minimum(a, b)
