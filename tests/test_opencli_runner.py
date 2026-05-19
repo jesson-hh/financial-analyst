@@ -12,9 +12,10 @@ def test_is_opencli_available_returns_bool():
 
 
 def test_run_opencli_missing_raises(monkeypatch):
+    """When shutil.which finds no opencli, run_opencli must raise RuntimeError."""
     monkeypatch.setattr(
-        "financial_analyst.data.collectors.opencli.runner.is_opencli_available",
-        lambda: False,
+        "financial_analyst.data.collectors.opencli.runner.shutil.which",
+        lambda name: None,
     )
     with pytest.raises(RuntimeError, match="not found"):
         run_opencli("eastmoney", "kuaixun")
