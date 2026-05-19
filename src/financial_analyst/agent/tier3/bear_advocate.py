@@ -35,6 +35,13 @@ Build the strongest bear case in 3-5 bullets. Anchor each to F1-F14 failure mode
 - F14: lagging signal trap (limit-up breadth as confirmation)
 
 Provide target_price_low + downside_pct.
+
+If a `# 上次研报时间线` block is supplied at the end of the user message, you
+MUST reconcile your bear case with it: cite the most recent prior judgement
+(rating + date), and at least one bullet should reference what's changed
+or confirmed since the prior analysis. Treat the timeline as the user's
+accumulated research on this stock.
+
 Output JSON only. No free text."""
 
 
@@ -44,12 +51,15 @@ class BearAdvocate(SubAgent[BearOutput]):
 
     async def _execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         client = LLMClient.for_agent(self.NAME)
+        factor = inputs.get("factor-computer", {}) or {}
         upstream = json.dumps({
             "fundamental": inputs.get("fundamental-analyst", {}),
             "technical": inputs.get("technical-analyst", {}),
             "whale": inputs.get("whale-analyst", {}),
             "quant": inputs.get("quant-analyst", {}),
         }, default=str, ensure_ascii=False)
+        timeline = (factor.get("stock_timeline") or "").strip()
+        timeline_block = f"\n\n# 上次研报时间线 (必读)\n{timeline}" if timeline else ""
 
         # Use FTS5 retrieval when an index is available; fall back to full load
         if self.memory.index is not None:
@@ -64,7 +74,7 @@ class BearAdvocate(SubAgent[BearOutput]):
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT + "\n\n# Memory\n" + memory_text},
-            {"role": "user", "content": f"Upstream:\n{upstream}\n\nReturn JSON per schema."},
+            {"role": "user", "content": f"Upstream:\n{upstream}{timeline_block}\n\nReturn JSON per schema."},
         ]
         response = await client.chat(
             messages=messages,

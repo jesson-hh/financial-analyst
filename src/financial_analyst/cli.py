@@ -738,6 +738,74 @@ def doctor():
     typer.echo("\n=== done ===")
 
 
+@app.command(name="stocks")
+def stocks_cmd(
+    action: str = typer.Argument(..., help="One of: list | show | import | stats"),
+    target: Optional[str] = typer.Argument(None, help="For show: stock code. For import: source directory."),
+    overwrite: bool = typer.Option(False, "--overwrite", help="import: overwrite existing files"),
+    tail: int = typer.Option(4000, "--tail", help="show: max chars to display (default 4000)"),
+):
+    """Manage per-stock research timeline files (~/.financial-analyst/memories/stocks/).
+
+    Examples:
+      financial-analyst stocks list
+      financial-analyst stocks show SH600519
+      financial-analyst stocks import G:/stocks/strategy/stocks
+      financial-analyst stocks stats
+    """
+    from financial_analyst.data.loaders.stock_timeline import StockTimelineLoader
+    loader = StockTimelineLoader()
+
+    if action == "list":
+        codes = loader.list_codes()
+        if not codes:
+            typer.echo(f"No timelines found under {loader.root}.")
+            typer.echo("Run `stocks import <source-dir>` to bulk import per-stock markdown files.")
+            return
+        typer.echo(f"{len(codes)} stocks with timelines under {loader.root}:")
+        for c in codes:
+            size = loader.path_for(c).stat().st_size
+            typer.echo(f"  {c}  ({size:,} bytes)")
+        return
+
+    if action == "show":
+        if not target:
+            typer.echo("stocks show requires a stock code (e.g. SH600519)")
+            raise typer.Exit(1)
+        text = loader.load_tail(target, max_chars=tail)
+        if text is None:
+            typer.echo(f"No timeline for {target} under {loader.root}.")
+            raise typer.Exit(1)
+        typer.echo(text)
+        return
+
+    if action == "import":
+        if not target:
+            typer.echo("stocks import requires a source directory path.")
+            raise typer.Exit(1)
+        from pathlib import Path as _P
+        try:
+            n = loader.import_from(_P(target), overwrite=overwrite)
+        except FileNotFoundError as e:
+            typer.echo(str(e))
+            raise typer.Exit(1)
+        existing = len(loader.list_codes())
+        typer.echo(f"Imported {n} new stock timelines from {target} → {loader.root}")
+        typer.echo(f"Total now: {existing} codes")
+        if not overwrite:
+            typer.echo("(use --overwrite to replace existing files)")
+        return
+
+    if action == "stats":
+        s = loader.stats()
+        for k, v in s.items():
+            typer.echo(f"  {k}: {v}")
+        return
+
+    typer.echo(f"Unknown action {action!r}; use list / show / import / stats")
+    raise typer.Exit(1)
+
+
 @app.command(name="industry")
 def industry_cmd(
     action: str = typer.Argument(..., help="One of: refresh | show | stats"),

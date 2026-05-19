@@ -18,6 +18,7 @@ class FactorOutput(BaseModel):
     board_score: Dict[str, Any]
     vol_regime: Dict[str, Any]
     zoo_signals: Dict[str, Any] = {}  # v1.3.4: latest snapshot lookup, optional
+    stock_timeline: str = ""  # v1.4.4: prior research markdown for this code, optional
 
 
 class FactorComputer(SubAgent[FactorOutput]):
@@ -95,6 +96,18 @@ class FactorComputer(SubAgent[FactorOutput]):
             bars_5m_last_day=bars_5m_last_day,
         )
 
+        # v1.4.4: look up per-stock research timeline (best-effort, silent on miss).
+        # Convention: newest entries at bottom of the file, so we serve the tail.
+        stock_timeline = ""
+        try:
+            from financial_analyst.data.loaders.stock_timeline import StockTimelineLoader
+            tl_loader = StockTimelineLoader()
+            tail = tl_loader.load_tail(code, max_chars=4000)
+            if tail:
+                stock_timeline = tail
+        except Exception:
+            pass
+
         # v1.3.4: look up most-recent zoo snapshot (best-effort, silent on miss)
         zoo_signals: Dict[str, Any] = {}
         try:
@@ -126,4 +139,5 @@ class FactorComputer(SubAgent[FactorOutput]):
             "board_score": board,
             "vol_regime": regime,
             "zoo_signals": zoo_signals,
+            "stock_timeline": stock_timeline,
         }

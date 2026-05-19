@@ -36,6 +36,12 @@ Anchor each bullet to V1-V9 from the analyst playbook in memory:
 Provide target_price_high (bull case) and target_price_base (most likely).
 List disproof_signals — what data would invalidate this thesis.
 
+If a `# 上次研报时间线` block is supplied at the end of the user message, you
+MUST reconcile your bull case with it: cite the most recent prior judgement
+(rating + date), note whether the prior call was right or wrong if outcomes
+appear, and at least one bullet should mention what's changed vs the prior
+analysis. Treat the timeline as the user's accumulated research on this stock.
+
 Output JSON only. No free text."""
 
 
@@ -45,15 +51,18 @@ class BullAdvocate(SubAgent[BullOutput]):
 
     async def _execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         client = LLMClient.for_agent(self.NAME)
+        factor = inputs.get("factor-computer", {}) or {}
         upstream = json.dumps({
             "fundamental": inputs.get("fundamental-analyst", {}),
             "technical": inputs.get("technical-analyst", {}),
             "whale": inputs.get("whale-analyst", {}),
             "quant": inputs.get("quant-analyst", {}),
         }, default=str, ensure_ascii=False)
+        timeline = (factor.get("stock_timeline") or "").strip()
+        timeline_block = f"\n\n# 上次研报时间线 (必读)\n{timeline}" if timeline else ""
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT + "\n\n# Memory\n" + self.memory.load_all()},
-            {"role": "user", "content": f"Upstream analyses:\n{upstream}\n\nReturn JSON per schema."},
+            {"role": "user", "content": f"Upstream analyses:\n{upstream}{timeline_block}\n\nReturn JSON per schema."},
         ]
         response = await client.chat(
             messages=messages,

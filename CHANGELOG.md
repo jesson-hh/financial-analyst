@@ -1,5 +1,88 @@
 # Changelog
 
+## v1.4.4 — 2026-05-19
+
+### Added — Per-stock research timeline injection
+
+The biggest knowledge-import gap from `G:\stocks` is closed. Each
+stock now gets its accumulated research timeline injected into every
+new report on that code, so the Bull / Bear / Risk-officer / Report-
+writer agents see prior judgements, prior ratings, prior mistakes,
+and explicit lessons — instead of starting cold every time.
+
+**New module: `financial_analyst.data.loaders.stock_timeline`**
+- `StockTimelineLoader` — reads `~/.financial-analyst/memories/stocks/<CODE>.md`.
+- Override path via `FA_STOCK_TIMELINE_DIR` env var or ctor arg.
+- API: `load(code)`, `load_tail(code, max_chars=4000)`, `list_codes()`,
+  `import_from(source_dir, overwrite=False)`, `stats()`.
+- Tail-mode loading caps at ~4 KB per stock to keep prompts bounded
+  even when timelines reach 50 KB+.
+
+**`factor-computer` now emits `stock_timeline`** (silent skip if no
+file). The field carries the tail of the user's research markdown for
+this code.
+
+**Tier-3 agents now mandated to use it**:
+- `bull-advocate`: SYSTEM_PROMPT requires citing prior rating + date
+  and noting what's changed. User-message gets a `# 上次研报时间线
+  (必读)` block.
+- `bear-advocate`: same discipline; bear case must reconcile with
+  prior judgements.
+- `risk-officer`: SYSTEM_PROMPT extended to use the timeline
+  specifically to catch **repeating prior mistakes** — if a trigger
+  matches a previously-wrong call, emit
+  `anti_signals="timeline_lesson_ignored:<reason>"`.
+- `report-writer`: SYSTEM_PROMPT now requires a "上次回顾" section
+  at the top of §一 综合评级 in `markdown_body`. The stock_timeline
+  is stripped from the JSON dump and surfaced as its own block so
+  the markdown body can cite the prior call directly.
+
+### Added — `stocks` CLI
+
+```bash
+financial-analyst stocks list                                    # what's loaded
+financial-analyst stocks show SH600100 [--tail 4000]             # show timeline
+financial-analyst stocks import G:/stocks/strategy/stocks        # bulk copy
+financial-analyst stocks import G:/stocks/strategy/stocks --overwrite
+financial-analyst stocks stats                                   # n_codes + sizes
+```
+
+`import` filters non-stock files (skips `INDEX.md`, `missed_bulls_*.md`,
+etc — only copies files whose stem matches `^(SH|SZ|BJ)\d+$`).
+
+### Verified
+
+```
+$ financial-analyst stocks import G:/stocks/strategy/stocks
+Imported 187 new stock timelines from G:/stocks/strategy/stocks
+Total now: 187 codes
+```
+
+187 stocks × ~1.2 KB each = ~236 KB of accumulated research now
+reachable by every relevant report. Each report on a code with a
+timeline sees `<= 4 KB` of the latest entries in its Bull / Bear /
+Risk / Report-writer prompts.
+
+### Tests
+- 10 new in `tests/test_stock_timeline.py` (default path /
+  env-override / has-load-tail / short-file-no-truncation / unknown
+  code / list-sorted / import-from / import-overwrite / missing-src /
+  stats).
+
+### Why this matters
+
+CLAUDE.md (G:\stocks project) explicitly says:
+> 经验 → 产出接通点: report_v2.py 生成研报时自动把 pitfalls /
+> factor_insights / rating_system / stocks/{CODE}.md 的上次时间线
+> 塞进 _agent_ctx/{CODE}.json 的 knowledge_pack 字段, agent_prompts.py
+> 强制 sub-agent 必读.
+
+The first three (`pitfalls / factor_insights / rating_system`) have
+been in agent memories since v0.1. The per-stock timeline was the
+missing piece — different per code, can't be embedded in a single
+per-agent memory file. v1.4.4 closes it via factor-computer
+injection + prompt mandates.
+
 ## v1.4.3 — 2026-05-19
 
 ### Added — `dream review / accept / reject` subcommands

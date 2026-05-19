@@ -44,6 +44,15 @@ Apply HARD RULES from memory — these CANNOT be overridden by bull/bear opinion
 
 Identify blind_spots — risks neither Bull nor Bear flagged.
 
+If a `# 上次研报时间线` block is supplied at the end of the user message, it
+contains the user's prior analyses on this stock — INCLUDING calls that
+turned out wrong. Use it specifically to detect:
+- repeating prior mistakes (same trigger as a wrong call last time)
+- ignoring lessons explicitly noted in the timeline
+- failing to update on changed fundamentals since prior call
+If you spot any of these, add to `anti_signals` as
+"timeline_lesson_ignored:<short reason>".
+
 Output JSON only. No free text."""
 
 
@@ -53,13 +62,19 @@ class RiskOfficer(SubAgent[RiskOutput]):
 
     async def _execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         client = LLMClient.for_agent(self.NAME)
+        factor_full = inputs.get("factor-computer", {}) or {}
+        # Strip the heavy stock_timeline from the JSON dump — surface it
+        # separately so the LLM can find it as a structured block.
+        factor_no_tl = {k: v for k, v in factor_full.items() if k != "stock_timeline"}
         upstream = json.dumps({
             "bull": inputs.get("bull-advocate", {}),
             "bear": inputs.get("bear-advocate", {}),
             "news": inputs.get("news-reader", {}),
             "f10": inputs.get("f10-reader", {}),
-            "factor": inputs.get("factor-computer", {}),
+            "factor": factor_no_tl,
         }, default=str, ensure_ascii=False)
+        timeline = (factor_full.get("stock_timeline") or "").strip()
+        timeline_block = f"\n\n# 上次研报时间线 (必读 — 含过去错判教训)\n{timeline}" if timeline else ""
 
         # Use FTS5 retrieval when an index is available; fall back to full load
         if self.memory.index is not None:
@@ -74,7 +89,7 @@ class RiskOfficer(SubAgent[RiskOutput]):
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT + "\n\n# Memory\n" + memory_text},
-            {"role": "user", "content": f"Upstream:\n{upstream}\n\nReturn JSON per schema."},
+            {"role": "user", "content": f"Upstream:\n{upstream}{timeline_block}\n\nReturn JSON per schema."},
         ]
         response = await client.chat(
             messages=messages, response_format={"type": "json_object"}, temperature=0.1,

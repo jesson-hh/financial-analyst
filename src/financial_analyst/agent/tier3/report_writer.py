@@ -55,6 +55,12 @@ Then provide a structured payload that the writer will save to BOTH .md and .jso
 
 Output JSON only. The actual file writing happens in Python after LLM returns.
 
+If a `# 上次研报时间线` block is supplied at the end of the user message, you
+MUST surface it in the report's markdown_body — typically as a short
+"上次回顾" section at the top of §一 综合评级, mentioning the prior
+rating + date + the bullet that changed most. The user has years of
+research on this stock; ignoring the timeline is a critical failure.
+
 After your structured analysis, return JSON with these top-level fields:
 - "markdown_body": full markdown report (use the template from memory)
 - "rating_overall": int
@@ -83,10 +89,18 @@ class ReportWriter(SubAgent[ReportOutput]):
             "fundamental-analyst", "technical-analyst", "whale-analyst", "quant-analyst",
             "bull-advocate", "bear-advocate", "risk-officer",
         ]}
+        # Surface the stock_timeline as its own block so the markdown body
+        # can cite the prior call directly (rather than inheriting it from
+        # a buried JSON field).
+        factor_full = inputs.get("factor-computer", {}) or {}
+        timeline = (factor_full.get("stock_timeline") or "").strip()
+        if timeline and "factor-computer" in upstream:
+            upstream["factor-computer"] = {k: v for k, v in upstream["factor-computer"].items() if k != "stock_timeline"}
         upstream_json = json.dumps(upstream, default=str, ensure_ascii=False, indent=2)
+        timeline_block = f"\n\n# 上次研报时间线 (必读 — 用户多年研究, 写入 markdown_body §一 顶部)\n{timeline}" if timeline else ""
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT + "\n\n# Memory\n" + self.memory.load_all()},
-            {"role": "user", "content": f"Code: {code}\nAs-of: {asof}\n\nUpstream:\n{upstream_json}\n\nReturn JSON."},
+            {"role": "user", "content": f"Code: {code}\nAs-of: {asof}\n\nUpstream:\n{upstream_json}{timeline_block}\n\nReturn JSON."},
         ]
         response = await client.chat(
             messages=messages, response_format={"type": "json_object"}, temperature=0.3,
