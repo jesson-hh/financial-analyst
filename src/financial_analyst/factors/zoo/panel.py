@@ -76,8 +76,12 @@ class PanelData:
 
     @property
     def returns(self) -> pd.Series:
-        """One-period returns, computed per-code so we don't bleed across stocks."""
-        return self.df["close"].groupby(level="code").pct_change()
+        """One-period returns, computed per-code so we don't bleed across stocks.
+
+        ``fill_method=None`` keeps NaNs from forward-filling across gaps — a
+        suspended trading day must not pretend to be a zero-return day.
+        """
+        return self.df["close"].groupby(level="code").pct_change(fill_method=None)
 
     # --- panel meta --------------------------------------------------------
     def codes(self) -> pd.Index:

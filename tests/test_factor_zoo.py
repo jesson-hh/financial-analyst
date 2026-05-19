@@ -58,8 +58,11 @@ def test_registry_contains_shipped_families():
 def test_registry_list_filtered_by_family():
     a101 = list_alphas(family="alpha101")
     gtja = list_alphas(family="gtja191")
-    assert len(a101) >= 10
-    assert len(gtja) >= 10
+    # v1.3.0 shipped 10 + 12 = 22 alphas; v1.3.1 added 12 + 15 = 27 more
+    # (49 total). Lower bounds prevent silent regressions; expect counts to
+    # tick up monotonically with future patch releases.
+    assert len(a101) >= 22, f"alpha101 dropped below v1.3.1 baseline: {len(a101)}"
+    assert len(gtja) >= 27, f"gtja191 dropped below v1.3.1 baseline: {len(gtja)}"
     assert all(s.family == "alpha101" for s in a101)
     assert all(s.family == "gtja191" for s in gtja)
 
@@ -187,16 +190,22 @@ def test_bench_one_handles_compute_error():
 
 
 def test_run_bench_end_to_end():
-    """Run real shipped alphas on a small synthetic panel; expect every alpha
-    to score and the output to be sorted by |rank_IR| descending."""
-    panel = _make_panel(n_codes=10, n_dates=60)
+    """Run real shipped alphas on a synthetic panel long enough to cover
+    even the deep-history alphas (gtja025 uses sum(returns,250); alpha019
+    and alpha024 reach back 100-250 days). Expect every alpha to score
+    and the output to be sorted by |rank_IR| descending."""
+    panel = _make_panel(n_codes=10, n_dates=300)
     result = run_bench(panel, family="gtja191", fwd_days=5)
-    assert len(result) >= 10
+    assert len(result) >= 12
     assert {"name", "family", "ic", "rank_ic", "ir", "rank_ir", "hit_rate"}.issubset(result.columns)
     # Status should be ok everywhere on this clean synthetic panel
     assert (result["status"] == "ok").all()
-    # n_dates non-zero for every row (window is at most ~12 days)
-    assert (result["n_dates"] > 0).all()
+    # n_dates non-zero for every row — with 300 days even 250-day alphas have
+    # ~45 valid forward-return cells
+    assert (result["n_dates"] > 0).all(), (
+        f"Some alphas produced 0 valid IC dates even on a 300-day panel: "
+        f"{result[result['n_dates'] == 0]['name'].tolist()}"
+    )
 
 
 def test_run_bench_unknown_family_raises():

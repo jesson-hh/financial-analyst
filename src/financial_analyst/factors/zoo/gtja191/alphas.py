@@ -200,3 +200,237 @@ register(AlphaSpec(
     formula_text="COUNT(CLOSE>DELAY(CLOSE,1),12)/12*100",
     compute=_a053,
 ))
+
+
+def _a006(p: PanelData) -> pd.Series:
+    """rank(sign(delta(((OPEN*0.85)+(HIGH*0.15)),4))) * -1"""
+    base = p.open * 0.85 + p.high * 0.15
+    return -1.0 * rank(sign(delta(base, 4)))
+
+
+register(AlphaSpec(
+    name="gtja006", family=FAMILY, paper=_PAPER,
+    description="Negative rank of 4-day signed change in weighted open/high — fades upward bias",
+    formula_text="-1 * rank(sign(delta((OPEN*0.85+HIGH*0.15),4)))",
+    compute=_a006,
+))
+
+
+def _a008(p: PanelData) -> pd.Series:
+    """rank(delta(((HIGH+LOW)/2*0.2)+(VWAP*0.8), 4)) * -1"""
+    base = (p.high + p.low) / 2.0 * 0.2 + p.vwap * 0.8
+    return -1.0 * rank(delta(base, 4))
+
+
+register(AlphaSpec(
+    name="gtja008", family=FAMILY, paper=_PAPER,
+    description="Negative 4-day rank of midpoint+VWAP blend change — fades short-term price extension",
+    formula_text="-1 * rank(delta((HIGH+LOW)/2*0.2 + VWAP*0.8, 4))",
+    compute=_a008,
+))
+
+
+def _a010(p: PanelData) -> pd.Series:
+    """rank(max(((returns < 0) ? stddev(returns,20) : close)^2, 5))"""
+    r = p.returns
+    base = stddev(r, 20).where(r < 0, p.close)
+    return rank(ts_max(base * base, 5))
+
+
+register(AlphaSpec(
+    name="gtja010", family=FAMILY, paper=_PAPER,
+    description="Recent peak of conditional vol²/close² — risk-spike detector",
+    formula_text="rank(max(((returns<0) ? stddev(returns,20) : close)^2, 5))",
+    compute=_a010,
+))
+
+
+def _a011(p: PanelData) -> pd.Series:
+    """SUM(((CLOSE-LOW)-(HIGH-CLOSE))/(HIGH-LOW)*VOLUME, 6)"""
+    spread = (p.high - p.low).replace(0, np.nan)
+    moneyflow = ((p.close - p.low) - (p.high - p.close)) / spread
+    return ts_sum(moneyflow * p.volume, 6)
+
+
+register(AlphaSpec(
+    name="gtja011", family=FAMILY, paper=_PAPER,
+    description="6-day cumulative volume-weighted money-flow position — accumulation gauge",
+    formula_text="SUM(((CLOSE-LOW)-(HIGH-CLOSE))/(HIGH-LOW)*VOLUME, 6)",
+    compute=_a011,
+))
+
+
+def _a013(p: PanelData) -> pd.Series:
+    """((HIGH*LOW)^0.5) - VWAP"""
+    return np.sqrt(p.high * p.low) - p.vwap
+
+
+register(AlphaSpec(
+    name="gtja013", family=FAMILY, paper=_PAPER,
+    description="Geometric mean of high+low minus VWAP — VWAP-relative range bias",
+    formula_text="sqrt(HIGH*LOW) - VWAP",
+    compute=_a013,
+))
+
+
+def _a017(p: PanelData) -> pd.Series:
+    """rank((VWAP - max(VWAP, 15)))^delta(CLOSE,5)"""
+    spread = rank(p.vwap - ts_max(p.vwap, 15))
+    # spread is in [0,1]; raising to a varying power yields a soft monotone transform
+    exponent = delta(p.close, 5)
+    return np.power(spread, exponent.clip(lower=-4, upper=4))
+
+
+register(AlphaSpec(
+    name="gtja017", family=FAMILY, paper=_PAPER,
+    description="VWAP exhaustion vs 15d max, exponentiated by 5d close change — non-linear momentum",
+    formula_text="rank(VWAP - max(VWAP,15))^delta(CLOSE,5)",
+    compute=_a017,
+))
+
+
+def _a019(p: PanelData) -> pd.Series:
+    """(CLOSE<DELAY(CLOSE,5)) ? (CLOSE-DELAY(CLOSE,5))/DELAY(CLOSE,5)
+       : ((CLOSE==DELAY(CLOSE,5)) ? 0 : (CLOSE-DELAY(CLOSE,5))/CLOSE)"""
+    prev = delay(p.close, 5)
+    diff = p.close - prev
+    # left branch: diff/prev when close<prev; right branch: diff/close otherwise; 0 when equal
+    out = diff / p.close.replace(0, np.nan)
+    out = out.where(p.close > prev, diff / prev.replace(0, np.nan))
+    out = out.where(p.close != prev, 0.0)
+    return out
+
+
+register(AlphaSpec(
+    name="gtja019", family=FAMILY, paper=_PAPER,
+    description="5-day asymmetric return — denominator switches on direction to capture skewed move sizes",
+    formula_text="asymmetric 5-day return (see paper)",
+    compute=_a019,
+))
+
+
+def _a020(p: PanelData) -> pd.Series:
+    """(CLOSE - DELAY(CLOSE,6)) / DELAY(CLOSE,6) * 100"""
+    prev = delay(p.close, 6)
+    return (p.close - prev) / prev.replace(0, np.nan) * 100.0
+
+
+register(AlphaSpec(
+    name="gtja020", family=FAMILY, paper=_PAPER,
+    description="6-day percentage return — classic short-horizon momentum",
+    formula_text="(CLOSE - DELAY(CLOSE,6)) / DELAY(CLOSE,6) * 100",
+    compute=_a020,
+))
+
+
+def _a025(p: PanelData) -> pd.Series:
+    """((-1*rank(delta(CLOSE,7)*(1-rank(decay_linear(VOLUME/mean(VOLUME,20),9)))))
+       * (1+rank(sum(returns,250))))"""
+    adv20 = ts_mean(p.volume, 20)
+    vol_ratio = p.volume / adv20.replace(0, np.nan)
+    decayed_vol = decay_linear(vol_ratio, 9)
+    inner = delta(p.close, 7) * (1.0 - rank(decayed_vol))
+    long_term = 1.0 + rank(ts_sum(p.returns, 250))
+    return (-1.0 * rank(inner)) * long_term
+
+
+register(AlphaSpec(
+    name="gtja025", family=FAMILY, paper=_PAPER,
+    description="7d momentum × volume-decay rank × 250d return rank — multi-horizon composite",
+    formula_text="(-1*rank(delta(CLOSE,7) * (1-rank(decay_linear(VOLUME/mean(VOLUME,20),9))))) * (1+rank(sum(returns,250)))",
+    compute=_a025,
+))
+
+
+def _a028(p: PanelData) -> pd.Series:
+    """3*SMA((CLOSE-MIN(LOW,9))/(MAX(HIGH,9)-MIN(LOW,9))*100, 3, 1)
+       - 2*SMA(SMA((CLOSE-MIN(LOW,9))/(MAX(HIGH,9)-MIN(LOW,9))*100, 3, 1), 3, 1)"""
+    rng = (ts_max(p.high, 9) - ts_min(p.low, 9)).replace(0, np.nan)
+    raw = (p.close - ts_min(p.low, 9)) / rng * 100.0
+    sma_3 = sma(raw, 3, 1)
+    return 3.0 * sma_3 - 2.0 * sma(sma_3, 3, 1)
+
+
+register(AlphaSpec(
+    name="gtja028", family=FAMILY, paper=_PAPER,
+    description="Stochastic Oscillator (KDJ-style) hand-rolled — 9d range, double-smoothed",
+    formula_text="3*SMA(KDJ_raw, 3, 1) - 2*SMA(SMA(KDJ_raw, 3, 1), 3, 1)",
+    compute=_a028,
+))
+
+
+def _a037(p: PanelData) -> pd.Series:
+    """-1 * rank(((sum(OPEN, 5) * sum(returns, 5))
+                  - delay((sum(OPEN, 5) * sum(returns, 5)), 10)))"""
+    base = ts_sum(p.open, 5) * ts_sum(p.returns, 5)
+    return -1.0 * rank(base - delay(base, 10))
+
+
+register(AlphaSpec(
+    name="gtja037", family=FAMILY, paper=_PAPER,
+    description="Open-sum × return-sum 10d change — sister to alpha101#008 on A-share",
+    formula_text="-1 * rank(sum(OPEN,5)*sum(returns,5) - delay(sum(OPEN,5)*sum(returns,5), 10))",
+    compute=_a037,
+))
+
+
+def _a047(p: PanelData) -> pd.Series:
+    """SMA((MAX(HIGH,6)-CLOSE)/(MAX(HIGH,6)-MIN(LOW,6))*100, 9, 1)"""
+    rng = (ts_max(p.high, 6) - ts_min(p.low, 6)).replace(0, np.nan)
+    raw = (ts_max(p.high, 6) - p.close) / rng * 100.0
+    return sma(raw, 9, 1)
+
+
+register(AlphaSpec(
+    name="gtja047", family=FAMILY, paper=_PAPER,
+    description="Williams %R style ceiling-pressure indicator over 6d, EWMA-smoothed",
+    formula_text="SMA((MAX(HIGH,6)-CLOSE) / (MAX(HIGH,6)-MIN(LOW,6)) * 100, 9, 1)",
+    compute=_a047,
+))
+
+
+def _a052(p: PanelData) -> pd.Series:
+    """SUM(MAX(0,HIGH-DELAY((HIGH+LOW+CLOSE)/3,1)),26) /
+       SUM(MAX(0,DELAY((HIGH+LOW+CLOSE)/3,1)-LOW),26) * 100"""
+    typical = delay((p.high + p.low + p.close) / 3.0, 1)
+    pos = (p.high - typical).clip(lower=0)
+    neg = (typical - p.low).clip(lower=0)
+    return ts_sum(pos, 26) / ts_sum(neg, 26).replace(0, np.nan) * 100.0
+
+
+register(AlphaSpec(
+    name="gtja052", family=FAMILY, paper=_PAPER,
+    description="26d cumulative upper/lower wick ratio relative to typical price — accumulation/distribution",
+    formula_text="SUM(MAX(0, HIGH-typical), 26) / SUM(MAX(0, typical-LOW), 26) * 100",
+    compute=_a052,
+))
+
+
+def _a058(p: PanelData) -> pd.Series:
+    """COUNT(CLOSE>DELAY(CLOSE,1),20) / 20 * 100"""
+    up_days = (p.close > delay(p.close, 1)).astype(float)
+    return ts_sum(up_days, 20) / 20.0 * 100.0
+
+
+register(AlphaSpec(
+    name="gtja058", family=FAMILY, paper=_PAPER,
+    description="20d up-day percentage — longer-window sister to gtja053",
+    formula_text="COUNT(CLOSE>DELAY(CLOSE,1),20) / 20 * 100",
+    compute=_a058,
+))
+
+
+def _a068(p: PanelData) -> pd.Series:
+    """SMA(((HIGH+LOW)/2-(DELAY(HIGH,1)+DELAY(LOW,1))/2)*(HIGH-LOW)/VOLUME, 15, 2)"""
+    mid = (p.high + p.low) / 2.0
+    prev_mid = (delay(p.high, 1) + delay(p.low, 1)) / 2.0
+    raw = (mid - prev_mid) * (p.high - p.low) / p.volume.replace(0, np.nan)
+    return sma(raw, n=15, m=2)
+
+
+register(AlphaSpec(
+    name="gtja068", family=FAMILY, paper=_PAPER,
+    description="Long-window EWMA of midpoint-shift × range / volume — sister to gtja009 with n=15",
+    formula_text="SMA(((HIGH+LOW)/2 - delay((HIGH+LOW)/2,1)) * (HIGH-LOW)/VOLUME, 15, 2)",
+    compute=_a068,
+))

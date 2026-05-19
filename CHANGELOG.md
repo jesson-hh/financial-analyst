@@ -1,5 +1,41 @@
 # Changelog
 
+## v1.3.1 — 2026-05-19
+
+### Added — 27 more alpha ports
+- **alpha101**: +12 → 22 total. Added `alpha005`, `008-011`, `016`, `018-020`,
+  `022`, `024`, `025`. The new strongest signal on `sample30` (2024-06 to
+  2024-12) is `alpha005` with `|rank_IR|=0.262` (open vs 10d-VWAP rank
+  weighted by negative `|close-VWAP rank|`).
+- **gtja191**: +15 → 27 total. Added `gtja006`, `008`, `010`, `011`, `013`,
+  `017`, `019`, `020`, `025`, `028`, `037`, `047`, `052`, `058`, `068`.
+  `gtja008` (mid+VWAP blend 4-day rank-change) jumps to `|rank_IR|=0.233`,
+  second-strongest in the entire zoo.
+
+Zoo now ships **49 alphas total** (was 22 in v1.3.0).
+
+### Changed — cleaner bench output
+- `bench_runner` traps `numpy.RuntimeWarning: invalid value encountered in
+  divide` (raised by `numpy.corrcoef` whenever a rolling window has zero
+  variance, which is expected behaviour on quiet days) so the CLI table is
+  no longer drowned in noise.
+- `PanelData.returns` now passes `fill_method=None` to silence pandas
+  `pct_change` `FutureWarning` (also a correctness improvement: a
+  suspended trading day no longer forward-fills as a zero-return day).
+
+### Tests
+- Synthetic bench panel extended from 60 → 300 days to cover the deep-
+  history alphas (`alpha019`, `alpha024`, `gtja025` reach back 100-250 days).
+- New count assertions lock the v1.3.1 baseline so future patches must
+  preserve at least 22 alpha101 / 27 gtja191.
+
+### Notes for v1.3.x roadmap
+- Remaining: 79 alpha101 + 164 gtja191 (formula text confirmed; just
+  ports). Patch releases will bring 15-20 alphas at a time.
+- `qlib158` family stub deferred to v1.3.x — direct Qlib `Alpha158`
+  re-export needs `D.features()` semantics that don't fit our `PanelData`
+  yet. Working on a thin adapter.
+
 ## v1.3.0 — 2026-05-19
 
 ### Added — Alpha Zoo (inspired by HKUDS/Vibe-Trading)

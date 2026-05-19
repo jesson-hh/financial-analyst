@@ -11,8 +11,14 @@ Usage::
 The runner is deliberately synchronous and panel-once: alphas re-using
 the same operators benefit from pandas vectorisation, and bench scans
 of 100+ alphas across 300+ stocks × 200+ dates finish in seconds.
+
+Numpy correlation emits noisy ``RuntimeWarning: invalid value
+encountered in divide`` whenever a window has zero variance — that's
+expected for low-activity stocks on a quiet day, not a bug. We trap
+those warnings inside the bench loop so the CLI stays readable.
 """
 from __future__ import annotations
+import warnings
 from typing import List, Optional
 
 import numpy as np
@@ -132,7 +138,14 @@ def run_bench(
         )
 
     fwd = _forward_returns(panel, fwd_days)
-    rows = [bench_one(spec, panel, fwd) for spec in specs]
+    with warnings.catch_warnings(), np.errstate(invalid="ignore", divide="ignore"):
+        warnings.filterwarnings("ignore", category=RuntimeWarning,
+                                message="invalid value encountered")
+        warnings.filterwarnings("ignore", category=RuntimeWarning,
+                                message="Mean of empty slice")
+        warnings.filterwarnings("ignore", category=RuntimeWarning,
+                                message="Degrees of freedom <= 0")
+        rows = [bench_one(spec, panel, fwd) for spec in specs]
     out = pd.DataFrame(rows)
     out = out.sort_values("rank_ir", key=lambda s: s.abs(), ascending=False, na_position="last").reset_index(drop=True)
     return out
