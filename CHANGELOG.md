@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.2.1 — 2026-05-19
+
+### Fixed
+- **Windows utf-8 mojibake** in NewsDB. Calling `opencli.CMD` via `subprocess`
+  + `shell=True` routed the node child's stdout through `cmd.exe`, which
+  transcoded utf-8 → the active console code page (GBK / cp936 on a Chinese
+  Windows). Result: all Chinese characters in collected news / 龙虎榜 / 十大股东
+  were stored as `���` mojibake.
+- Fix: parse the npm-generated `.CMD` shim to recover the underlying
+  `main.js` path, then call `node <main.js> ...` directly with `shell=False`.
+  cmd.exe is no longer in the loop and utf-8 reaches Python unchanged.
+- New regression tests: `test_run_opencli_decodes_utf8_chinese` round-trips
+  Chinese through the bytes-mode pipe, and `test_resolve_npm_shim_parses_main_js`
+  locks in the .CMD parser against the actual npm-generated wrapper format.
+
+If you were on v1.1.0 / v1.2.0 on Windows, **rebuild your NewsDB**:
+```bash
+python -c "from financial_analyst.data.news_db import NewsDB; \
+db=NewsDB(); c=db.conn; [c.execute(f'DELETE FROM {t}') for t in \
+['news','lhb','holders','social_posts','hot_stocks','earnings_dates']]; \
+c.commit(); db.close()"
+financial-analyst news-collect --sources kuaixun,longhu,sinafinance --limit 500
+```
+Linux / macOS users were not affected.
+
 ## v1.2.0 — 2026-05-18
 
 ### Added
