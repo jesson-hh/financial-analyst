@@ -14,6 +14,19 @@
 - Fix: extend the post_id fallback chain to consult `url` (xueqiu's
   unique per-post URL) and `created_at`. Also map `replies` →
   `comments_count` to match xueqiu's field name.
+- **whale-analyst dropped all retail-sentiment insight**. SYSTEM_PROMPT
+  enumerated the policy (14 S/SS signals, score aggregation rules) but
+  never listed the WhaleOutput JSON schema. The LLM hallucinated its own
+  keys (`ticker`, `whale_judge`, `analyst_note`, `playbook_v_anchors`
+  etc); pydantic silently dropped them and used defaults, so the
+  `bull_points` / `bear_points` / `alerts` lists arrived at
+  `report-writer` empty even when the LLM had read 雪球 posts and
+  formed an opinion on them.
+- Fix: spell out the exact JSON schema in SYSTEM_PROMPT with hard rules
+  ("Use the EXACT keys", "If 雪球 social posts are supplied, you MUST
+  surface their signal in bull/bear or alerts"). Verified that the
+  WhaleAnalyst paragraph in the SH600519 report now reads e.g.
+  「雪球高赞帖文（102赞/86评）集中引用段永平长期持有框架」.
 
 ### Changed
 - `whale-analyst` social_posts lookback widened from 7 → 30 days.
