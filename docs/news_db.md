@@ -69,3 +69,25 @@ No changes needed in sub-agent calls — augmentation is transparent.
 ## Privacy
 
 Everything is local. No data sent anywhere. The SQLite file lives in your home dir under `~/.financial-analyst/data/`.
+
+## Windows encoding gotcha (fixed in v1.2.1)
+
+On v1.1.0 / v1.2.0, Windows users on a Chinese (GBK / cp936) console saw
+mojibake (`���` etc) for all Chinese content in NewsDB. This was because
+`subprocess` with `shell=True` ran the npm-installed `opencli.CMD` through
+`cmd.exe`, which transcoded node's utf-8 stdout through the active console
+code page before handing it back to Python.
+
+v1.2.1 bypasses `cmd.exe` by calling `node <main.js>` directly, so utf-8
+reaches Python untouched.
+
+If you upgraded from an affected version, rebuild your NewsDB:
+```bash
+python -c "from financial_analyst.data.news_db import NewsDB; \
+db=NewsDB(); c=db.conn; [c.execute(f'DELETE FROM {t}') for t in \
+['news','lhb','holders','social_posts','hot_stocks','earnings_dates']]; \
+c.commit(); db.close()"
+financial-analyst news-collect --sources kuaixun,longhu,sinafinance --limit 500
+```
+
+Linux / macOS users were never affected.
