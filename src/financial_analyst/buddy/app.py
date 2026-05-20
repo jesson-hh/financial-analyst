@@ -191,8 +191,30 @@ class BuddyApp:
             ),
             filter=Condition(lambda: self.spinner_visible),
         )
+        # v1.6.3: persistent queue indicator. Visible whenever
+        # ``queued_input`` is set, so the user always knows what will
+        # run next (and can decide to ESC if they typed something
+        # they no longer want).
+        queue_window = ConditionalContainer(
+            Window(
+                content=FormattedTextControl(
+                    text=self._get_queue_ansi,
+                    focusable=False,
+                    show_cursor=False,
+                ),
+                height=Dimension(min=1, max=1),
+                wrap_lines=False,
+                always_hide_cursor=True,
+            ),
+            filter=Condition(lambda: self.queued_input is not None),
+        )
         layout = Layout(
-            HSplit([transcript_window, spinner_window, self.input_field]),
+            HSplit([
+                transcript_window,
+                spinner_window,
+                queue_window,
+                self.input_field,
+            ]),
             focused_element=self.input_field,
         )
 
@@ -254,6 +276,16 @@ class BuddyApp:
     def _get_spinner_ansi(self):
         return ANSI(_rich_to_ansi(self.spinner.render(), width=80))
 
+    def _get_queue_ansi(self):
+        """Persistent queue indicator (1 line above input)."""
+        q = self.queued_input or ""
+        # Truncate so it doesn't wrap
+        if len(q) > 80:
+            q = q[:77] + "…"
+        return ANSI(_rich_to_ansi(
+            f"  [yellow]⏳ 排队中[/] [dim]→[/] [italic]{_escape_markup(q)}[/]   [dim](再按 ESC 也可取消)[/]"
+        ))
+
     # ----- submission / queueing -----------------------------------------
 
     def _on_submit(self, buf) -> bool:  # noqa: ARG002
@@ -286,9 +318,17 @@ class BuddyApp:
         self._append_rich(f"[bold cyan]❯[/] {_escape_markup(text)}")
 
         if self._has_active_turn():
+            # If something was already queued, warn that it's being replaced
+            # so the user doesn't lose track.
+            prior = self.queued_input
+            if prior is not None and prior != text:
+                short = (prior[:40] + "…") if len(prior) > 40 else prior
+                self._append_rich(
+                    f"  [yellow]⚠ 之前排队的 [italic]{_escape_markup(short)}[/] 被替换为新输入[/]"
+                )
             self.queued_input = text
             self._append_rich(
-                "  [yellow]…已排队 (当前 turn 结束后自动执行)[/]"
+                "  [yellow]…已排队 (输入框上方有 ⏳ 提示)[/]"
             )
         else:
             self._start_turn(text)
@@ -325,29 +365,62 @@ class BuddyApp:
         self.spinner.set_status(STATUS_THINKING)
         if self.application is not None:
             self.application.invalidate()
+
+        # v1.6.3: track stats so we can warn when the LLM did work but
+        # produced no narrative summary (common failure mode — agent
+        # chained tool calls without ever writing closing text).
+        text_count = 0
+        tool_count = 0
+        error_count = 0
+        cancelled = False
+
         try:
             async for evt in self.agent.run_turn(text, confirm_callback=self._confirm):
                 self._handle_event(evt)
+                if evt.kind == "text" and evt.payload:
+                    text_count += 1
+                elif evt.kind == "tool_call":
+                    tool_count += 1
+                elif evt.kind == "error":
+                    error_count += 1
                 if self.application is not None:
                     self.application.invalidate()
         except asyncio.CancelledError:
+            cancelled = True
             self._append_rich("[yellow]✗ 已取消[/]")
-            # Re-raise so callers see CancelledError if they await us.
             raise
         finally:
             self.spinner_visible = False
+
+            # v1.6.3: clear "done" marker so the user knows the turn ended.
+            if not cancelled:
+                if text_count == 0 and tool_count > 0:
+                    # Worked but never wrote a summary — common when the
+                    # LLM hits max_tool_iters in a tool-call loop without
+                    # closing text. Surface this loud and clear.
+                    self._append_rich(
+                        f"[yellow]⚠ 完成 (调了 {tool_count} 个 tool 但没文字总结) — "
+                        f"试试再问一句 '前面的结果总结一下' 让 LLM 再补输出[/]"
+                    )
+                elif text_count == 0 and tool_count == 0 and error_count == 0:
+                    # LLM returned empty — rare but possible
+                    self._append_rich(
+                        "[yellow]⚠ 完成 (LLM 返回空响应) — 可能 prompt 太抽象, 换个具体问法?[/]"
+                    )
+                else:
+                    self._append_rich("[green]✓ 完成[/]")
+
             if self.application is not None:
                 self.application.invalidate()
+
             # Run any queued prompt.
             if self.queued_input is not None:
                 queued = self.queued_input
                 self.queued_input = None
-                self._append_rich(f"[dim]→ 处理排队的输入[/]")
-                # Don't await — start as fire-and-forget task so this
-                # coroutine can return cleanly. We assign to current_turn
-                # so submit() sees it as active. We MUST be inside a
-                # running loop here (we're called from inside _run_turn
-                # which is itself a task on the loop).
+                self._append_rich(f"[dim]→ 处理排队的输入: [italic]{_escape_markup(queued)}[/][/]")
+                # Don't await — start as fire-and-forget task. We MUST
+                # be inside a running loop here (this coroutine is
+                # itself a Task on the loop).
                 self._start_turn(queued)
 
     def _handle_event(self, evt: TurnEvent) -> None:

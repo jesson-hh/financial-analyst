@@ -1,5 +1,63 @@
 # Changelog
 
+## v1.6.3 — 2026-05-20
+
+### Fixed — three real UX issues found during user testing
+
+**1. Persistent queue indicator above input.**
+Previously the "已排队" notice only fired once into the scrolling
+transcript. Once scrolled off-screen or after multiple submissions,
+the user had no idea what was queued. v1.6.3 adds a permanent 1-row
+indicator just above the input field:
+
+```
+  ⏳ 排队中 → 顺便看下五粮液行业   (再按 ESC 也可取消)
+❯ █
+```
+
+Visible only when `queued_input` is set — disappears as soon as the
+queued turn picks up or the user ESCs it away.
+
+**2. Queue replacement notice.**
+Submitting a second time while another prompt is already queued used
+to silently overwrite the first one. v1.6.3 now prints a warning
+into the transcript: `⚠ 之前排队的 <first> 被替换为新输入`.
+
+**3. Turn completion signal + no-text-output warning.**
+The biggest one. Previously when a turn ended, the spinner just
+disappeared — no clear "done" marker. Worse, if the LLM kept calling
+tools without writing closing narrative (which happens when it hits
+`max_tool_iters=8`), the user saw lots of `▶/✓` tool lines but no
+summary, and no indication that the turn ended at all.
+
+v1.6.3 adds three explicit end-of-turn markers:
+
+- `[green]✓ 完成[/]` — normal completion with text response.
+- `[yellow]⚠ 完成 (调了 N 个 tool 但没文字总结) — 试试再问一句
+  '前面的结果总结一下'[/]` — when text_count=0 but tools ran.
+- `[yellow]⚠ 完成 (LLM 返回空响应) — 可能 prompt 太抽象, 换个具体
+  问法?[/]` — empty response.
+
+The agent's `_run_turn` finally block tracks text/tool/error counts
+and picks the right marker. Cancelled turns still show
+`[yellow]✗ 已取消[/]` as before (no spurious "完成" added).
+
+### Architecture
+
+- New layout row: `HSplit([transcript, spinner, queue, input])` where
+  the queue row is also a `ConditionalContainer` (visible only when
+  `queued_input is not None`).
+- `_get_queue_ansi()` renders the indicator text with truncation at
+  80 chars so it never wraps.
+
+### Tests
+- `test_queue_indicator_renders_queued_text`: queue row shows truncated text
+- `test_queue_replacement_notice`: 2nd queue submission notes the swap
+- `test_done_marker_on_successful_turn`: normal text turn → `完成`
+- `test_warning_when_tools_but_no_text`: tools-only turn → tool-count warning
+
+18 BuddyApp tests pass total. 36 buddy tests across the three suites.
+
 ## v1.6.2 — 2026-05-20
 
 ### Changed — ESC now peels off one layer per press (Claude Code-style)

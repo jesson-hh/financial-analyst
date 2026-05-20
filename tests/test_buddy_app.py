@@ -231,6 +231,112 @@ async def test_esc_peels_off_one_layer_at_a_time():
     assert not app.has_active_turn(), "everything stopped after 2nd ESC"
 
 
+# ----- v1.6.3: queue indicator + done marker + no-text warning ------------
+
+
+@pytest.mark.asyncio
+async def test_queue_indicator_renders_queued_text():
+    """When queued_input is set, _get_queue_ansi should include the text."""
+    app = BuddyApp()
+
+    async def _hang(text, confirm_callback=None):
+        await asyncio.Future()
+        yield  # pragma: no cover
+    app.agent.run_turn = _hang
+    app._start_turn("first")
+    await asyncio.sleep(0)
+    app.submit("five-liang-ye sector breakdown")
+
+    # Queue indicator should show the queued text
+    ansi = app._get_queue_ansi()
+    plain = ansi.value if hasattr(ansi, "value") else str(ansi)
+    assert "five-liang-ye" in plain
+    assert "排队" in plain
+
+    # Cleanup
+    app.current_turn_task.cancel()
+    try:
+        await app.current_turn_task
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_queue_replacement_notice():
+    """Submitting a 2nd time while a 1st is queued should produce a clear
+    'replaced' notice in the transcript so the user doesn't lose track."""
+    app = BuddyApp()
+
+    async def _hang(text, confirm_callback=None):
+        await asyncio.Future()
+        yield  # pragma: no cover
+    app.agent.run_turn = _hang
+    app._start_turn("running")
+    await asyncio.sleep(0)
+
+    app.submit("queued one")
+    app.submit("queued two")  # replaces 'queued one'
+
+    txt = app.transcript_text()
+    assert "queued one" in txt
+    assert "queued two" in txt
+    assert "替换" in txt or "replaced" in txt.lower()
+    # The active queue is the latest one
+    assert app.queued_input == "queued two"
+
+    app.current_turn_task.cancel()
+    try:
+        await app.current_turn_task
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_done_marker_on_successful_turn():
+    """After a turn with at least one text event, the transcript should
+    show '✓ 完成' so the user knows it ended."""
+    app = BuddyApp()
+
+    async def _good_run(text, confirm_callback=None):
+        from financial_analyst.buddy.agent import TurnEvent
+        yield TurnEvent("text", "你好.")
+        yield TurnEvent("done", None)
+
+    app.agent.run_turn = _good_run
+    app._start_turn("hi")
+    try:
+        await app.current_turn_task
+    except (asyncio.CancelledError, Exception):
+        pass
+
+    assert "完成" in app.transcript_text()
+
+
+@pytest.mark.asyncio
+async def test_warning_when_tools_but_no_text():
+    """If the LLM called tools but never wrote final text, the user should
+    see a warning suggesting they re-prompt for a summary."""
+    app = BuddyApp()
+
+    async def _tool_only(text, confirm_callback=None):
+        from financial_analyst.buddy.agent import TurnEvent
+        yield TurnEvent("tool_call", {"name": "industry_show", "args": {"code": "SH600519"}})
+        yield TurnEvent("tool_result", {"name": "industry_show", "content": "白酒", "is_error": False})
+        yield TurnEvent("tool_call", {"name": "industry_show", "args": {"code": "SZ000858"}})
+        yield TurnEvent("tool_result", {"name": "industry_show", "content": "白酒", "is_error": False})
+        yield TurnEvent("done", None)
+
+    app.agent.run_turn = _tool_only
+    app._start_turn("compare maotai and wuliangye industry")
+    try:
+        await app.current_turn_task
+    except (asyncio.CancelledError, Exception):
+        pass
+
+    txt = app.transcript_text()
+    assert "没文字总结" in txt or "tool" in txt.lower()
+
+
 @pytest.mark.asyncio
 async def test_esc_at_idle_clears_lingering_queue():
     """If somehow queued_input is set but no turn is active, ESC should
