@@ -104,6 +104,29 @@ def _tool_report(code: str, asof: Optional[str] = None) -> ToolResult:
     )
 
 
+def _tool_news_collect(sources: str = "kuaixun,longhu,sinafinance",
+                       limit: int = 200,
+                       code: Optional[str] = None) -> ToolResult:
+    """Fetch fresh news from upstream sources into the local DB.
+
+    ``sources`` is comma-separated. Public ones (no cookie): kuaixun /
+    longhu / sinafinance / shareholders. Cookie-required (need Chrome
+    extension): xueqiu-comments (needs code) / xueqiu-hot / xueqiu-earnings.
+    """
+    cmd = ["financial-analyst", "news-collect",
+           "--sources", sources, "--limit", str(limit)]
+    if code:
+        cmd += ["--code", code]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=300)
+    except subprocess.TimeoutExpired:
+        return ToolResult("news-collect timed out (5 min limit).", is_error=True)
+    if proc.returncode != 0:
+        return ToolResult(f"news-collect failed: {proc.stderr[-500:]}", is_error=True)
+    return ToolResult(proc.stdout[-2000:])
+
+
 def _tool_news_query(code: Optional[str] = None, days: int = 7,
                      fts: Optional[str] = None, limit: int = 10) -> ToolResult:
     """Query the local news DB. Either by stock code, by FTS keyword, or both."""
@@ -115,7 +138,10 @@ def _tool_news_query(code: Optional[str] = None, days: int = 7,
         rows = db.query_news(code=code, since_days=days, limit=limit)
     db.close()
     if not rows:
-        return ToolResult(f"No news matching code={code!r} days={days} fts={fts!r}.")
+        return ToolResult(
+            f"No news matching code={code!r} days={days} fts={fts!r}. "
+            f"Database may be empty for this filter — run `news_collect` first to refresh."
+        )
     lines = [f"Found {len(rows)} news entries:"]
     for r in rows:
         ts = r.get("ts", "")
@@ -367,7 +393,9 @@ TOOL_REGISTRY: List[Tool] = [
         description=(
             "Query the local news database (SQLite + FTS5). "
             "Can filter by stock code, by FTS keyword, or both. "
-            "Use when the user asks about recent news for a stock or theme."
+            "Use when the user asks about recent news for a stock or theme. "
+            "If results are empty, call `news_collect` FIRST to refresh the DB, "
+            "THEN query again."
         ),
         input_schema={
             "type": "object",
@@ -379,6 +407,31 @@ TOOL_REGISTRY: List[Tool] = [
             },
         },
         run=_tool_news_query,
+    ),
+    Tool(
+        name="news_collect",
+        description=(
+            "Pull fresh news from upstream into the local DB. "
+            "Use when `news_query` returns empty, or when user explicitly "
+            "asks for 最新 / 今日 / 今天 news, or wants 雪球 sentiment. "
+            "Sources: kuaixun (东方财富快讯) / longhu (龙虎榜) / sinafinance / "
+            "shareholders / xueqiu-comments (per-stock retail sentiment, needs code) / "
+            "xueqiu-hot (hot-stock board) / xueqiu-earnings. Takes 30-120s."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "sources": {
+                    "type": "string",
+                    "description": "Comma-separated source list. Public (no auth): kuaixun,longhu,sinafinance,shareholders. Cookie-mode (needs Chrome ext): xueqiu-comments,xueqiu-hot,xueqiu-earnings.",
+                    "default": "kuaixun,longhu,sinafinance",
+                },
+                "limit": {"type": "integer", "default": 200, "description": "Max items per source"},
+                "code": {"type": "string", "description": "Required only for xueqiu-comments (per-stock)."},
+            },
+        },
+        run=_tool_news_collect,
+        cost_hint="seconds",
     ),
     Tool(
         name="alpha_bench",

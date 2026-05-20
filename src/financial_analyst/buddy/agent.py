@@ -62,6 +62,17 @@ Behaviour rules:
 10. End each turn with a brief next-step suggestion when appropriate
     (e.g. "需要我跑完整研报吗?").
 
+# News / sentiment workflow (v1.5.4 hint)
+When user asks about 新闻 / 情绪 / 雪球评论 / 今日动态:
+- FIRST call `news_query` with the requested filter to see what's already cached.
+- If results are empty/stale ("No news matching..."), call `news_collect` to refresh:
+  - General market news → sources="kuaixun,longhu,sinafinance"
+  - 雪球 retail sentiment for one stock → sources="xueqiu-comments" + code=SH...
+  - 雪球 hot board (no specific stock) → sources="xueqiu-hot"
+- THEN call `news_query` again to read the freshly-collected data.
+- Do NOT use `morning_brief` for ad-hoc news/sentiment queries — that's
+  a full pre-market market-scan agent (slow, scope-wide).
+
 Tool-use guidance:
 - Multi-step queries: emit multiple tool calls in sequence over turns. Don't try to do
   everything in one call.
@@ -248,8 +259,15 @@ class BuddyAgent:
                         })
                         continue
 
+                # v1.5.4: run synchronous tool callables on a worker thread
+                # so subprocess-based tools (run_report, alpha_bench,
+                # mainline_radar, morning_brief — minutes-long) don't block
+                # the asyncio event loop. While they run, the K-line
+                # animator task keeps ticking the spinner so the user can
+                # see something IS happening.
+                import asyncio as _asyncio
                 try:
-                    result = tool.run(**args)
+                    result = await _asyncio.to_thread(tool.run, **args)
                 except TypeError as e:
                     result = ToolResult(f"Tool argument error: {e}", is_error=True)
                 except Exception as e:

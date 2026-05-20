@@ -1,5 +1,50 @@
 # Changelog
 
+## v1.5.4 — 2026-05-20
+
+### Fixed — spinner freezes during long tools (event-loop block)
+
+The K-line spinner animator ran on the asyncio event loop. When a tool
+shelled out via `subprocess.run()` (run_report / alpha_bench /
+mainline_radar / morning_brief / news_collect), the synchronous call
+**blocked the entire event loop**, freezing both the spinner and the
+agent's ability to process new events.
+
+Symptom: bar counter (`#NNN`) stops incrementing in the middle of a
+long tool, looks stuck even though the underlying subprocess is
+working fine.
+
+Fix: in `BuddyAgent.run_turn`, all tool calls now go through
+`asyncio.to_thread(tool.run, **args)` so they execute on a worker
+thread. The event loop stays free; the spinner keeps animating.
+
+### Added — `news_collect` tool
+
+The buddy registry was missing a way to refresh the news database, so
+the LLM was forced to pick the wrong tool (e.g. `morning_brief`) when
+users asked about 今日新闻 / 雪球情绪. New tool:
+
+```python
+news_collect(sources="kuaixun,longhu,sinafinance", limit=200, code=None)
+```
+
+Wraps `financial-analyst news-collect`. Supports public sources
+(`kuaixun`, `longhu`, `sinafinance`, `shareholders`) and cookie-mode
+sources (`xueqiu-comments`, `xueqiu-hot`, `xueqiu-earnings`).
+
+### Changed — SYSTEM_PROMPT teaches the right news/sentiment flow
+
+LLM now knows the correct chain when user asks about news/sentiment:
+
+  1. `news_query` first to see what's cached
+  2. If empty → `news_collect` to refresh the right sources
+  3. `news_query` again to read freshly-collected data
+  4. **Don't** use `morning_brief` for ad-hoc news (it's market-wide).
+
+Tool registry: 13 → 14 tools. All 18 buddy tests still pass (no
+behaviour change in tool-use loop logic — the to_thread wrap is
+transparent).
+
 ## v1.5.3 — 2026-05-20
 
 ### Changed — K-line spinner compressed to inline sparkline
