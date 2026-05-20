@@ -71,12 +71,16 @@ def test_banner_is_in_transcript_at_startup():
 # ----- submit / queue -------------------------------------------------------
 
 
-def test_submit_starts_turn_when_idle():
-    """First submit while idle should start a turn (current_turn_task set)."""
+@pytest.mark.asyncio
+async def test_submit_starts_turn_when_idle():
+    """First submit while idle should start a turn (current_turn_task set).
+
+    v1.6.1: submit() now requires a running asyncio loop (it uses
+    get_running_loop().create_task instead of ensure_future). Test
+    therefore runs inside @asyncio mark.
+    """
     app = BuddyApp()
-    # Patch the agent's run_turn so it doesn't actually call the LLM
     async def _fake_run_turn(text, confirm_callback=None):
-        # Yield no events (immediate done)
         return
         yield  # pragma: no cover (unreachable)
     app.agent.run_turn = _fake_run_turn
@@ -87,38 +91,30 @@ def test_submit_starts_turn_when_idle():
     assert "hello" in app.transcript_text()
 
 
-def test_submit_while_running_queues():
+@pytest.mark.asyncio
+async def test_submit_while_running_queues():
     """Submit while a turn is active should queue, not start a new task."""
     app = BuddyApp()
 
-    # Manufacture an "active" turn task by wrapping a never-completing future.
-    loop = asyncio.new_event_loop()
+    # Manufacture an "active" turn task by spawning a hanging coroutine.
+    async def _hang():
+        await asyncio.Future()
+
+    app.current_turn_task = asyncio.create_task(_hang())
+    await asyncio.sleep(0)  # let the task start
+
+    app.submit("second prompt")
+    assert app.queued_input == "second prompt"
+    txt = app.transcript_text()
+    assert "second prompt" in txt
+    assert "排队" in txt
+
+    # Cleanup
+    app.current_turn_task.cancel()
     try:
-        future = loop.create_future()  # never completes
-        # Wrap as a Task that the loop owns
-        app.current_turn_task = loop.create_task(_await(future))
-        # Drain a tick so the task actually starts
-        loop.run_until_complete(asyncio.sleep(0))
-
-        app.submit("second prompt")
-        assert app.queued_input == "second prompt"
-        # Transcript echoes the user line + the queued marker
-        txt = app.transcript_text()
-        assert "second prompt" in txt
-        assert "排队" in txt
-    finally:
-        # Clean up the loop
-        if not app.current_turn_task.done():
-            app.current_turn_task.cancel()
-            try:
-                loop.run_until_complete(app.current_turn_task)
-            except (asyncio.CancelledError, Exception):
-                pass
-        loop.close()
-
-
-async def _await(awaitable):
-    return await awaitable
+        await app.current_turn_task
+    except (asyncio.CancelledError, Exception):
+        pass
 
 
 # ----- slash commands -------------------------------------------------------
@@ -188,6 +184,42 @@ async def test_cancel_current_turn_cancels_running_task():
 
     assert not app.has_active_turn()
     assert "已取消" in app.transcript_text() or "取消" in app.transcript_text()
+
+
+@pytest.mark.asyncio
+async def test_cancel_clears_queued_input_too():
+    """v1.6.1: ESC should abort both the current turn AND the queued
+    input. Otherwise the queue would silently fire after cancel —
+    surprising the user who wanted "stop everything"."""
+    app = BuddyApp()
+
+    async def _hanging_run(text, confirm_callback=None):
+        await asyncio.Future()
+        yield  # pragma: no cover
+
+    app.agent.run_turn = _hanging_run
+
+    # Start a turn (it hangs)
+    app._start_turn("first")
+    await asyncio.sleep(0)
+    assert app.has_active_turn()
+
+    # Queue a second prompt
+    app.submit("second")
+    assert app.queued_input == "second"
+
+    # ESC: should cancel current AND drop the queue
+    app._cancel_current_turn(reason="ESC")
+    if app.current_turn_task is not None:
+        try:
+            await app.current_turn_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    assert app.queued_input is None, "queued_input should be cleared after ESC"
+    assert not app.has_active_turn(), "no follow-up task should be running"
+    txt = app.transcript_text()
+    assert "排队的输入已清空" in txt or "已取消" in txt
 
 
 # ----- queued input drains after current turn finishes ---------------------

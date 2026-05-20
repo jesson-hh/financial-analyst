@@ -300,7 +300,23 @@ class BuddyApp:
         )
 
     def _start_turn(self, text: str) -> None:
-        self.current_turn_task = asyncio.ensure_future(self._run_turn(text))
+        """Schedule the agent turn on the running event loop.
+
+        In production this is called from prompt_toolkit's accept_handler,
+        which always runs inside Application.run_async() — so a loop
+        exists. In tests / standalone scripts that poke ``submit()``
+        without an asyncio context, we catch the missing-loop error and
+        surface it to the transcript instead of crashing.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._append_rich(
+                "[red]Cannot start turn — no running asyncio loop. "
+                "Did you call submit() outside of run()?[/]"
+            )
+            return
+        self.current_turn_task = loop.create_task(self._run_turn(text))
 
     async def _run_turn(self, text: str) -> None:
         """Drive the BuddyAgent for one turn, mirroring events into the
@@ -329,7 +345,9 @@ class BuddyApp:
                 self._append_rich(f"[dim]→ 处理排队的输入[/]")
                 # Don't await — start as fire-and-forget task so this
                 # coroutine can return cleanly. We assign to current_turn
-                # so submit() sees it as active.
+                # so submit() sees it as active. We MUST be inside a
+                # running loop here (we're called from inside _run_turn
+                # which is itself a task on the loop).
                 self._start_turn(queued)
 
     def _handle_event(self, evt: TurnEvent) -> None:
@@ -364,6 +382,15 @@ class BuddyApp:
     # ----- cancellation ---------------------------------------------------
 
     def _cancel_current_turn(self, reason: str = "") -> None:
+        """ESC / Ctrl+C handler: cancel current turn AND clear any queued
+        input. The user wants "stop everything", not "stop now then run
+        the queued thing next" — that would be surprising.
+        """
+        had_queue = self.queued_input is not None
+        self.queued_input = None
+        if had_queue:
+            self._append_rich("[dim]排队的输入已清空[/]")
+
         if not self._has_active_turn():
             return
         task = self.current_turn_task

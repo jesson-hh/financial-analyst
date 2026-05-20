@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.6.1 — 2026-05-20
+
+### Fixed — ESC now clears queued input too
+
+Found during self-test of v1.6.0: if the user queued a second prompt
+during a running turn, then pressed ESC, the queue would silently
+fire after the cancel. Surprising — ESC should mean "stop
+everything", not "skip current and run the queued thing".
+
+Fix: `_cancel_current_turn` now clears `queued_input` BEFORE cancelling
+the task, and prints `排队的输入已清空` to the transcript when there
+was something to drop.
+
+New test: `test_cancel_clears_queued_input_too` exercises the full
+sequence (start turn → queue second → ESC → expect both gone).
+
+13 BuddyApp tests pass (12 + 1 new). 31 buddy tests total (11 agent +
+7 animation + 13 app).
+
 ## v1.6.0 — 2026-05-20
 
 ### Added — Full-TUI BuddyApp (Claude Code-style layout)
