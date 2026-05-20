@@ -1091,7 +1091,18 @@ def alpha_cmd(
             typer.echo("Industry classifier cache found — IndNeutralize alphas will use it.")
         else:
             typer.echo("No industry cache (run `industry refresh`); IndNeutralize alphas will demean to 0.")
-        panel = PanelData.from_loader(loader, codes, since, until, freq="day", industry_loader=ind_loader)
+        # v1.4.6: auto-load BenchmarkLoader so gtja149 (downside beta) works
+        from financial_analyst.data.loaders.benchmark import BenchmarkLoader
+        try:
+            bench_loader = BenchmarkLoader(loader=loader)  # csi300 default
+            typer.echo(f"Benchmark loader: {bench_loader.benchmark_key} ({bench_loader.benchmark_code}) — gtja149 enabled.")
+        except Exception as e:
+            bench_loader = None
+            typer.echo(f"BenchmarkLoader not available ({e}); gtja149 will return NaN.")
+        panel = PanelData.from_loader(
+            loader, codes, since, until, freq="day",
+            industry_loader=ind_loader, benchmark_loader=bench_loader,
+        )
         typer.echo(f"Panel ready: {panel}")
         typer.echo(f"Benching family={target or '<all>'}, fwd_days={fwd_days}...")
         results = run_bench(panel, family=target, fwd_days=fwd_days)

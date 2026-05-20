@@ -70,11 +70,13 @@ def test_registry_list_filtered_by_family():
     # v1.4.0: +19 alpha101 (IndNeutralize) = 383
     # v1.4.1: +3 alpha101 (now 101/101), +31 gtja191 (now 189/191),
     #         +23 qlib158 (now 150/158) = 440 total
+    # v1.4.6: gtja143 (cumprod reduction of recursive SELF) + gtja149
+    #         (downside beta via BenchmarkLoader) → gtja191 100% = 191/191.
     # Lower bounds prevent silent regressions; expect counts to tick up
     # monotonically with future patch releases.
-    assert len(a101) >= 101, f"alpha101 dropped below v1.4.1 baseline: {len(a101)}"
-    assert len(gtja) >= 189, f"gtja191 dropped below v1.4.1 baseline: {len(gtja)}"
-    assert len(qlib) >= 150, f"qlib158 dropped below v1.4.1 baseline: {len(qlib)}"
+    assert len(a101) >= 101, f"alpha101 dropped below v1.4.6 baseline: {len(a101)}"
+    assert len(gtja) >= 191, f"gtja191 dropped below v1.4.6 baseline: {len(gtja)}"
+    assert len(qlib) >= 150, f"qlib158 dropped below v1.4.6 baseline: {len(qlib)}"
     assert all(s.family == "alpha101" for s in a101)
     assert all(s.family == "gtja191" for s in gtja)
     assert all(s.family == "qlib158" for s in qlib)
@@ -214,10 +216,13 @@ def test_run_bench_end_to_end():
     # Status should be ok everywhere on this clean synthetic panel
     assert (result["status"] == "ok").all()
     # n_dates non-zero for every row — with 300 days even 250-day alphas have
-    # ~45 valid forward-return cells
-    assert (result["n_dates"] > 0).all(), (
+    # ~45 valid forward-return cells. EXCEPT gtja149 (downside beta) which
+    # legitimately returns all-NaN when no benchmark column is supplied —
+    # the synthetic _make_panel doesn't inject one.
+    no_dates = result[(result["n_dates"] == 0) & (result["name"] != "gtja149")]
+    assert no_dates.empty, (
         f"Some alphas produced 0 valid IC dates even on a 300-day panel: "
-        f"{result[result['n_dates'] == 0]['name'].tolist()}"
+        f"{no_dates['name'].tolist()}"
     )
 
 
@@ -371,6 +376,167 @@ def test_alpha_metadata_from_bench():
     assert meta["a1"]["bench_rank_ic"] == pytest.approx(0.05)
     assert meta["a2"]["bench_hit_rate"] == pytest.approx(0.48)
     assert meta["a_missing"]["bench_rank_ic"] is None
+
+
+def test_gtja143_cumprod_reduction():
+    """v1.4.6: gtja143 recursive SELF reduces to cumprod of per-bar
+    multiplier. Each up-day multiplies; down/flat days keep prior value."""
+    from financial_analyst.factors.zoo.registry import get
+
+    # Hand-built panel: 5 dates, 2 codes. Stock A: up, up, down, up, flat.
+    dates = pd.date_range("2024-01-01", periods=5, freq="B")
+    idx = pd.MultiIndex.from_product([dates, ["A"]], names=["datetime", "code"])
+    closes = [100.0, 105.0, 110.25, 100.0, 102.0, 102.0]  # 6 values for ref+5
+    # Actually use 5: prev + 4 transitions
+    closes = [100.0, 105.0, 110.25, 105.0, 110.0]  # up, up, down, up
+    df = pd.DataFrame({
+        "open":  closes, "high": [c * 1.01 for c in closes],
+        "low":   [c * 0.99 for c in closes], "close": closes,
+        "volume": [1e6] * 5,
+    }, index=idx)
+    panel = PanelData(df)
+
+    g143 = get("gtja143").compute(panel)
+    series = g143.xs("A", level="code")
+    # Day 0 (no prior): up condition is NaN/False, multiplier=1.0 → cumprod=1.0
+    assert series.iloc[0] == pytest.approx(1.0)
+    # Day 1: 105/100 = 1.05 up-day → cumprod = 1.05
+    assert series.iloc[1] == pytest.approx(1.05)
+    # Day 2: 110.25/105 = 1.05 up-day → cumprod = 1.05 * 1.05 = 1.1025
+    assert series.iloc[2] == pytest.approx(1.1025)
+    # Day 3: 105/110.25 = down-day → cumprod stays 1.1025
+    assert series.iloc[3] == pytest.approx(1.1025)
+    # Day 4: 110/105 = 1.04762 up-day → cumprod = 1.1025 * 1.04762 ≈ 1.155
+    assert series.iloc[4] == pytest.approx(1.1025 * (110 / 105), rel=1e-4)
+
+
+def test_gtja149_downside_beta_returns_nan_without_benchmark():
+    """When no benchmark column is supplied, gtja149 should silently
+    return all-NaN — not crash."""
+    from financial_analyst.factors.zoo.registry import get
+    panel = _make_panel(n_codes=3, n_dates=300)  # no benchmark_close
+    g149 = get("gtja149").compute(panel)
+    assert g149.isna().all(), "gtja149 should be all NaN without benchmark"
+
+
+def test_gtja149_with_benchmark_produces_betas():
+    """With a synthetic benchmark column on a 300-day panel, gtja149
+    should emit a meaningful downside-beta series."""
+    from financial_analyst.factors.zoo.registry import get
+    np.random.seed(7)
+    panel = _make_panel(n_codes=3, n_dates=300)
+
+    # Inject a synthetic benchmark close — random walk
+    dates = panel.dates()
+    bench_rets = np.random.randn(len(dates)) * 0.012
+    bench_close = 3000.0 * np.exp(np.cumsum(bench_rets))
+    bench_map = dict(zip(dates, bench_close))
+    panel.df["benchmark_close"] = (
+        panel.df.index.get_level_values("datetime").map(bench_map)
+    )
+
+    g149 = get("gtja149").compute(panel)
+    n_valid = g149.notna().sum()
+    # 252-day window + 50-day min_periods → expect ~50+ valid points
+    assert n_valid > 50, f"too few valid betas: {n_valid}"
+    # Should produce finite, real betas (not all 0)
+    valid = g149[g149.notna()]
+    assert valid.abs().mean() > 0.001, "betas suspiciously small (near zero)"
+
+
+def test_filter_where_masks_to_nan():
+    from financial_analyst.factors.zoo.operators import filter_where
+
+    s = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
+    mask = pd.Series([True, False, True, False, True])
+    out = filter_where(s, mask)
+    assert out.tolist()[0] == 1.0
+    assert pd.isna(out.iloc[1])
+    assert out.iloc[2] == 3.0
+    assert pd.isna(out.iloc[3])
+    assert out.iloc[4] == 5.0
+
+
+def test_benchmark_loader_broadcast_to_panel_index(tmp_path):
+    """BenchmarkLoader.broadcast_to_panel_index repeats the close at each
+    date across every code in the panel."""
+    from financial_analyst.data.loaders.benchmark import BenchmarkLoader
+
+    class StubLoader:
+        def fetch_quote(self, code, start, end, freq="day"):
+            dates = pd.date_range(start, periods=5, freq="B")
+            return pd.DataFrame({
+                "open":  [1.0]*5, "high": [1.0]*5, "low": [1.0]*5,
+                "close": [100.0, 101.0, 102.0, 101.5, 103.0],
+                "volume": [1.0]*5,
+            }, index=dates)
+
+    bench = BenchmarkLoader(loader=StubLoader(), benchmark="csi300")
+    assert bench.benchmark_code == "SH000300"
+    close = bench.fetch_close("2024-01-01", "2024-01-05")
+    assert len(close) == 5
+
+    # Build a 2-code panel index
+    dates = pd.date_range("2024-01-01", periods=5, freq="B")
+    panel_idx = pd.MultiIndex.from_product([dates, ["A", "B"]],
+                                            names=["datetime", "code"])
+    broadcasted = bench.broadcast_to_panel_index(close, panel_idx)
+    # Each (date, code) gets the same close as the date's underlying value
+    assert broadcasted.loc[(dates[0], "A")] == 100.0
+    assert broadcasted.loc[(dates[0], "B")] == 100.0
+    assert broadcasted.loc[(dates[3], "A")] == 101.5
+    assert broadcasted.loc[(dates[3], "B")] == 101.5
+
+
+def test_benchmark_loader_env_override(monkeypatch):
+    """FA_BENCHMARK env var overrides default 'csi300'."""
+    from financial_analyst.data.loaders.benchmark import BenchmarkLoader
+
+    class StubLoader:
+        def fetch_quote(self, *a, **k):
+            return pd.DataFrame({"close": [1.0]})
+
+    monkeypatch.setenv("FA_BENCHMARK", "zz500")
+    bench = BenchmarkLoader(loader=StubLoader())
+    assert bench.benchmark_key == "zz500"
+    assert bench.benchmark_code == "SH000905"
+
+
+def test_regbeta_min_periods_relaxed_for_filtered_input():
+    """regbeta(..., min_periods=k) should emit betas even when the
+    rolling window has many NaNs (k << n)."""
+    from financial_analyst.factors.zoo.operators import regbeta
+
+    np.random.seed(13)
+    # Use 2 codes to avoid the pandas single-group .apply quirk where
+    # groupby returns a DataFrame instead of Series.
+    codes = ["A", "B"]
+    dates = pd.date_range("2024-01-01", periods=300, freq="B")
+    idx = pd.MultiIndex.from_product([dates, codes], names=["datetime", "code"])
+    n_total = 300 * 2
+    base = np.random.randn(n_total)
+    x = pd.Series(base, index=idx)
+    y = pd.Series(0.7 * base + 0.3 * np.random.randn(n_total), index=idx)
+    mask = pd.Series([i % 2 == 0 for i in range(n_total)], index=idx)
+    x_masked = x.where(mask)
+    y_masked = y.where(mask)
+
+    # Default min_periods=n: pandas' rolling.cov uses skipna internally
+    # so the half-NaN windows still produce betas after warm-up (~49 valid).
+    # The relaxed min_periods=50 should give MORE valid betas (~300+ — the
+    # 252-row window has 126 valid obs once warmed, well over 50).
+    b_strict = regbeta(y_masked, x_masked, 252)
+    b_relaxed = regbeta(y_masked, x_masked, 252, min_periods=50)
+    n_strict = int(b_strict.notna().to_numpy().sum())
+    n_relaxed = int(b_relaxed.notna().to_numpy().sum())
+    assert n_relaxed >= n_strict, (
+        f"relaxed should produce >= valid betas: strict={n_strict} relaxed={n_relaxed}"
+    )
+    assert n_relaxed > 50, f"relaxed too few: {n_relaxed}"
+    # The beta should be near 0.7 (positive correlation by construction)
+    valid = b_relaxed[b_relaxed.notna()]
+    mean_b = float(valid.to_numpy().mean())
+    assert 0.4 < mean_b < 1.0, f"mean beta off: {mean_b}"
 
 
 def test_snapshot_round_trip(tmp_path, monkeypatch):

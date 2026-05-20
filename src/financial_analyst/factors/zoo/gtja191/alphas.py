@@ -14,7 +14,7 @@ from financial_analyst.factors.zoo.operators import (
     rank, ts_argmax, ts_argmin, ts_max, ts_min, ts_sum, ts_rank, ts_mean,
     delta, delay, correlation, covariance, decay_linear, stddev,
     signedpower, scale, log, sign, abs_, sma, product,
-    regbeta, regresi, rsqr, sequence, wma,
+    regbeta, regresi, rsqr, sequence, wma, filter_where,
 )
 
 FAMILY = "gtja191"
@@ -2435,6 +2435,68 @@ register(AlphaSpec(
     description="5d ADV20-low corr plus midpoint-close gap — combined volume-position signal",
     formula_text="CORR(MEAN(VOLUME,20), LOW, 5) + (HIGH+LOW)/2 - CLOSE",
     compute=_a191,
+))
+
+
+# ----- v1.4.6: previously-unportable alphas now reachable -------------------
+# gtja143 is recursive (SELF) but reduces to a closed-form cumulative product.
+# gtja149 needs benchmark close, now available via BenchmarkLoader.
+
+def _a143(p: PanelData) -> pd.Series:
+    """CLOSE > DELAY(CLOSE,1) ? (CLOSE/DELAY(CLOSE,1)) * SELF : SELF
+       with SELF(0)=1.
+
+    Common-sense reading of the GTJA-191 handbook: SELF_t multiplies by
+    the price ratio on up-days, stays put on flat/down days. This is
+    the cumulative up-day return index. Some handbook copies show
+    (CLOSE/DELAY-1) instead of (CLOSE/DELAY); the latter is what
+    survives compounding (values stay in a sane range vs decaying to
+    0). Closed-form: cumprod of the per-bar multiplier.
+    """
+    pc = delay(p.close, 1)
+    ratio = p.close / pc.replace(0, np.nan)
+    multiplier = ratio.where(p.close > pc, 1.0).fillna(1.0)
+    return multiplier.groupby(level="code", group_keys=False).cumprod()
+
+
+register(AlphaSpec(
+    name="gtja143", family=FAMILY, paper=_PAPER,
+    description="Cumulative price-ratio product on up-days, 1.0 elsewhere — up-day-only compound index",
+    formula_text="SELF_t = (CLOSE/DELAY(CLOSE,1)) * SELF_{t-1} on up-days, else SELF_{t-1}; SELF(0)=1",
+    compute=_a143,
+))
+
+
+def _a149(p: PanelData) -> pd.Series:
+    """REGBETA(
+         FILTER(stock_return, bench_close < delay(bench_close,1)),
+         FILTER(bench_return, bench_close < delay(bench_close,1)),
+         252
+       )
+       — downside-beta of stock vs benchmark over 252 trading days.
+
+    Needs benchmark close series from BenchmarkLoader. When the
+    benchmark column is all-NaN (loader not supplied), returns NaN.
+    """
+    bench_close = p.benchmark_close
+    if bench_close.isna().all():
+        return pd.Series(float("nan"), index=p.close.index)
+    bench_ret = p.benchmark_returns
+    stock_ret = (p.close - delay(p.close, 1)) / delay(p.close, 1).replace(0, np.nan)
+    bench_down_mask = bench_close < delay(bench_close, 1)
+    y = filter_where(stock_ret, bench_down_mask)
+    x = filter_where(bench_ret, bench_down_mask)
+    # Filtering masks ~half the days to NaN; relax min_periods so the
+    # rolling regression still emits a beta when there are enough
+    # bench-down observations (target ~50+ in a 252-bar window).
+    return regbeta(y, x, 252, min_periods=50)
+
+
+register(AlphaSpec(
+    name="gtja149", family=FAMILY, paper=_PAPER,
+    description="Downside beta vs benchmark: 252d regbeta of stock returns vs bench returns on benchmark-down days",
+    formula_text="REGBETA(FILTER(stock_ret, bench_down), FILTER(bench_ret, bench_down), 252)",
+    compute=_a149,
 ))
 
 

@@ -85,6 +85,23 @@ class PanelData:
         return pd.Series("未知", index=self.df.index, dtype=str)
 
     @property
+    def benchmark_close(self) -> pd.Series:
+        """Benchmark-index close per (date, code), repeating the same
+        value across codes at each date. Used by ``gtja149`` and other
+        benchmark-relative alphas. Returns NaN-filled series when no
+        BenchmarkLoader was passed to ``from_loader``.
+        """
+        if "benchmark_close" in self.df.columns:
+            return self.df["benchmark_close"]
+        return pd.Series(float("nan"), index=self.df.index, dtype=float)
+
+    @property
+    def benchmark_returns(self) -> pd.Series:
+        """1-period benchmark returns. Same value across codes at each date."""
+        bc = self.benchmark_close
+        return bc.groupby(level="code", group_keys=False).pct_change(fill_method=None)
+
+    @property
     def returns(self) -> pd.Series:
         """One-period returns, computed per-code so we don't bleed across stocks.
 
@@ -122,6 +139,7 @@ class PanelData:
         end: str,
         freq: str = "day",
         industry_loader=None,
+        benchmark_loader=None,
     ) -> "PanelData":
         """Pull each code's quote panel from a BaseLoader and stitch into
         a single MultiIndex DataFrame. Codes that fail are skipped with a
@@ -172,5 +190,17 @@ class PanelData:
             panel["industry"] = panel.index.get_level_values("code").map(ind_map).fillna(
                 industry_loader.UNKNOWN_INDUSTRY
             )
+
+        if benchmark_loader is not None:
+            try:
+                close = benchmark_loader.fetch_close(start, end)
+                panel["benchmark_close"] = benchmark_loader.broadcast_to_panel_index(
+                    close, panel.index,
+                )
+            except Exception as e:
+                import logging
+                logging.getLogger("financial_analyst.zoo").warning(
+                    "BenchmarkLoader failed (skipping benchmark column): %s", e,
+                )
 
         return cls(panel)

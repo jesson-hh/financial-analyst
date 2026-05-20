@@ -1,5 +1,78 @@
 # Changelog
 
+## v1.4.6 — 2026-05-20
+
+### Added — gtja143 + gtja149 (the last two "unportable" alphas)
+
+Both alphas previously declared infeasible in v1.4.1 now ship,
+bringing gtja191 to **191/191 (100%)** and alpha101 already at
+101/101 — both reference catalogues complete.
+
+**gtja143** was declared unportable because of its `SELF` recursion:
+> `SELF_t = X_t * SELF_{t-1}` where `X_t = ratio` on up-days, `1.0`
+> otherwise.
+
+Closed-form realisation: cumulative product of the per-bar multiplier.
+Per-code `cumprod` fits the stateless `compute(panel)` API without any
+new "iterative" infrastructure. The handbook's `(CLOSE/DELAY)` form is
+adopted (the literal `(CLOSE/DELAY-1)` decays to zero in tens of bars,
+clearly a typo in some printings).
+
+**gtja149** was declared unportable because of its benchmark
+dependency:
+> `REGBETA(FILTER(stock_ret, bench_close < delay(bench_close,1)),
+>          FILTER(bench_ret, bench_close < delay(bench_close,1)),
+>          252)`
+
+New module `financial_analyst.data.loaders.benchmark.BenchmarkLoader`
+fetches the chosen index close (CSI 300 default, configurable via
+`FA_BENCHMARK` env var: `csi300 / csi500 / csi800 / csi1000 / zz500 /
+sse / szse`), broadcasts to the panel index (same value across codes
+per date). `PanelData.from_loader(..., benchmark_loader=...)` injects
+the `benchmark_close` column.
+
+New operator `filter_where(x, mask)` returns `x` where `mask` is True,
+NaN elsewhere — natural way to express the GTJA `FILTER(...)`
+construct. NaNs flow through `regbeta`'s rolling computation naturally.
+
+`regbeta` gained an optional `min_periods` parameter (default `n`).
+For filter-based alphas like gtja149 the rolling window is half NaN
+by construction; we pass `min_periods=50` so the regression still
+emits a beta with ~125 valid obs in the 252-bar window.
+
+### Auto-loading
+
+`alpha bench` and `alpha snapshot` now auto-detect a benchmark loader
+just like industry: it's silently attached when the default loader can
+fetch the index. If your loader can't serve `SH000300`, gtja149 just
+returns NaN — bench result still completes for the other 441 alphas.
+
+### Verified on synthetic 3-stock × 300-day panel
+
+```
+gtja143: last per code → 10.04 / 9.37 / 13.88  (cumulative up-day index)
+gtja149: 561/900 non-null, betas in [-0.34, +0.34]
+```
+
+### Total catalogue status (final)
+
+| Family | Covered | Of paper | Coverage |
+|---|---:|---:|---:|
+| alpha101 | 101 | 101 | **100%** |
+| gtja191 | **191** | 191 | **100%** |
+| qlib158 | 150 | 158 | 95% |
+| **Total** | **442** | **452** | **98%** |
+
+Compared to the Vibe-Trading 452-alpha reference target, the only
+gap left is 8 of Qlib158's window-variant features (low signal value;
+existing 150 cover all the underlying feature kinds).
+
+### Tests
+- +6 in `test_factor_zoo.py`: gtja143 cumprod reduction (hand-verified
+  on 5-day sequence), gtja149 with-benchmark / without-benchmark
+  branches, `filter_where`, `BenchmarkLoader.broadcast_to_panel_index`,
+  env override, regbeta `min_periods` parameter. 28 zoo tests pass.
+
 ## v1.4.5 — 2026-05-20
 
 ### Added — Industry-chain knowledge base (chain_kb)

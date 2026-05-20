@@ -16,7 +16,7 @@ Lookahead protection: every ``ts_*`` op uses ``min_periods=window`` so
 rows before the window has filled out emit NaN, never a partial signal.
 """
 from __future__ import annotations
-from typing import Union
+from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -210,20 +210,28 @@ def power(x: pd.Series, p: float) -> pd.Series:
 # ----- rolling OLS regression -----------------------------------------------
 
 
-def regbeta(y: pd.Series, x: pd.Series, n: int) -> pd.Series:
+def regbeta(y: pd.Series, x: pd.Series, n: int, min_periods: Optional[int] = None) -> pd.Series:
     """Rolling OLS β of y on x over the last n bars per code.
 
-    Formula: β = cov(y, x, n) / var(x, n). NaN when var(x, n) == 0
-    (a constant predictor) or when the window has missing data.
+    Formula: β = cov(y, x, n) / var(x, n).
+
+    ``min_periods`` controls how many non-NaN observations are required
+    inside the n-bar window before a beta is emitted. Default is ``n``
+    (strict, full window). For alphas that filter the input series
+    (e.g. ``gtja149`` keeps only benchmark-down days), pass a smaller
+    threshold like ``n // 4`` so the half-NaN windows still produce a
+    valid regression.
 
     Used by gtja021 (slope of MA6 vs time), alpha101 regression alphas,
-    qlib158 BETA features.
+    qlib158 BETA features, gtja149 downside beta.
     """
+    if min_periods is None:
+        min_periods = n
     pair = pd.concat([y.rename("y"), x.rename("x")], axis=1)
 
     def _beta(df: pd.DataFrame) -> pd.Series:
-        cov = df["y"].rolling(window=n, min_periods=n).cov(df["x"])
-        var = df["x"].rolling(window=n, min_periods=n).var()
+        cov = df["y"].rolling(window=n, min_periods=min_periods).cov(df["x"])
+        var = df["x"].rolling(window=n, min_periods=min_periods).var()
         return cov / var.where(var > 0)
 
     out = pair.groupby(level="code", group_keys=False).apply(_beta)
@@ -314,3 +322,19 @@ def max_pair(a, b):
 
 def min_pair(a, b):
     return np.minimum(a, b)
+
+
+def filter_where(x: pd.Series, mask) -> pd.Series:
+    """Keep ``x`` where ``mask`` is True; replace the rest with NaN.
+
+    Used by GTJA-style ``FILTER(series, condition)`` constructs, e.g.
+    gtja149's "regress stock returns vs bench returns ON DAYS WHERE
+    benchmark fell" — feed regbeta inputs through filter_where to
+    drop the unwanted days before the rolling regression.
+
+    NaNs propagate naturally through ``regbeta`` (variance/cov skip them
+    in pandas .rolling), so masked-out days simply don't influence the
+    slope. Window size n still counts those bars but they contribute 0
+    weight — close enough for the GTJA convention.
+    """
+    return x.where(mask)
