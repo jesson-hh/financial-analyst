@@ -24,6 +24,7 @@ across Anthropic / OpenAI / Qwen. Tool definitions are passed as the
 Anthropic-style ``input_schema`` form; LiteLLM converts when needed.
 """
 from __future__ import annotations
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -129,10 +130,23 @@ class BuddyAgent:
     AGENT_NAME = "buddy"
 
     def __init__(self, system_prompt: Optional[str] = None,
-                 max_tool_iters: int = 8):
+                 max_tool_iters: int = 15,
+                 max_llm_retries: int = 2):
+        """
+        Args:
+            max_tool_iters: Cap on tool-use rounds per turn. Bumped from
+                8 → 15 in v1.6.4 after observing complex multi-step
+                queries (cross-stock comparisons, chained news →
+                summary) hitting the old ceiling without producing
+                final text.
+            max_llm_retries: Auto-retry the LLM call this many times
+                on transient network failures (SSL, timeout, 5xx).
+                Default 2. Set to 0 to disable retries.
+        """
         self._system = system_prompt or _build_system_prompt()
         self.messages: List[Message] = []
         self.max_tool_iters = max_tool_iters
+        self.max_llm_retries = max_llm_retries
         self._client = LLMClient.for_agent(self.AGENT_NAME)
 
     def reset(self) -> None:
@@ -161,15 +175,42 @@ class BuddyAgent:
         self.add_user(user_text)
 
         for iteration in range(self.max_tool_iters):
-            try:
-                response = await self._client.chat(
-                    messages=[{"role": "system", "content": self._system}]
-                    + [m.to_litellm() for m in self.messages],
-                    tools=self._tool_schemas(),
-                    temperature=0.2,
-                )
-            except Exception as e:
-                yield TurnEvent("error", f"LLM call failed: {e}")
+            # v1.6.4: retry transient LLM failures (SSL hiccups, 5xx,
+            # DashScope rate-limit blips) before giving up. Exponential
+            # backoff: 0.8s, 2.4s.
+            response = None
+            last_exc: Optional[Exception] = None
+            for attempt in range(self.max_llm_retries + 1):
+                try:
+                    response = await self._client.chat(
+                        messages=[{"role": "system", "content": self._system}]
+                        + [m.to_litellm() for m in self.messages],
+                        tools=self._tool_schemas(),
+                        temperature=0.2,
+                    )
+                    break
+                except Exception as e:
+                    last_exc = e
+                    if attempt >= self.max_llm_retries:
+                        break
+                    # Don't retry on cancellation
+                    if isinstance(e, asyncio.CancelledError):
+                        raise
+                    backoff = 0.8 * (3 ** attempt)
+                    log.warning(
+                        "LLM call attempt %d failed: %s — retrying in %.1fs",
+                        attempt + 1, e, backoff,
+                    )
+                    await asyncio.sleep(backoff)
+
+            if response is None:
+                # All retries exhausted — emit a clear error AND a done
+                # event so the REPL's finalizer can print its end-of-turn
+                # marker correctly (v1.6.3 done marker logic uses
+                # error_count to pick the right message).
+                err = f"LLM 调用失败 (重试 {self.max_llm_retries} 次): {type(last_exc).__name__}: {last_exc}"
+                yield TurnEvent("error", err)
+                yield TurnEvent("done", None)
                 return
 
             # LiteLLM returns OpenAI-compat envelope; the message has
@@ -290,8 +331,10 @@ class BuddyAgent:
 
         # Loop exhausted — too many tool iterations.
         yield TurnEvent("error",
-                        f"Hit max tool-use iterations ({self.max_tool_iters}). "
-                        "Possibly stuck in a loop; rephrase your question.")
+                        f"达到 tool 调用上限 ({self.max_tool_iters} 次). "
+                        f"LLM 在工具循环里转圈, 没收敛到答案. "
+                        f"建议: 再问一句 '前面的结果总结一下' 让它写正文, "
+                        f"或换更具体的 prompt.")
         yield TurnEvent("done", None)
 
 

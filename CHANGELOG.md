@@ -1,5 +1,84 @@
 # Changelog
 
+## v1.6.4 — 2026-05-20
+
+### Fixed — "思考着思考着就断了" (silent mid-turn drop-outs)
+
+User reported turns ending unexpectedly with no clear reason and no
+output text. v1.6.4 diagnoses + fixes the three actual root causes:
+
+**1. Transient LLM-call failures killed the turn instantly.**
+A single SSL hiccup / DashScope rate-limit blip / network burp would
+raise an exception, the agent's `except Exception` block would yield
+one `error` event and immediately `return` — the turn vanished and
+the user only saw the error briefly before it scrolled away.
+
+Fix: `BuddyAgent.run_turn` now retries the LLM call up to
+`max_llm_retries=2` times with exponential backoff (0.8s, 2.4s). The
+inner `for attempt in range(retries + 1)` loop catches transient
+exceptions and tries again. CancelledError is re-raised so ESC still
+works mid-retry.
+
+If all retries are exhausted, the agent yields BOTH an `error` event
+AND a `done` event so the BuddyApp finalizer can pick the right
+end-of-turn marker:
+
+```
+✗ LLM 网络/API 错误 — 上面有详情. 检查: DASHSCOPE_API_KEY 是否
+有效 / 网络是否通畅 / DashScope 服务是否正常.
+```
+
+Before v1.6.4 the agent would `return` without `done`, leaving the
+BuddyApp's done-marker logic confused — usually emitting the
+misleading "LLM 返回空响应" warning even when the real cause was a
+network failure.
+
+**2. `max_tool_iters=8` was too tight for complex queries.**
+Cross-stock comparisons, chained `news_collect → news_query → summary`
+flows, or "list peers and report each one's PE" routinely hit the
+ceiling without producing closing text. The transcript filled with
+tool calls then the turn ended silently.
+
+Fix: default bumped from 8 → 15. The exhaustion message is also
+clearer now (Chinese, names the actual remediation):
+
+```
+达到 tool 调用上限 (15 次). LLM 在工具循环里转圈, 没收敛到答案.
+建议: 再问一句 '前面的结果总结一下' 让它写正文, 或换更具体的 prompt.
+```
+
+**3. End-of-turn markers now distinguish error categories.**
+v1.6.3 lumped LLM-call-failed and LLM-said-nothing under "空响应".
+v1.6.4 separates them:
+
+- LLM call exhausted retries → ✗ LLM 网络/API 错误 (different fix)
+- Hit max_tool_iters → ✗ 达上限退出 (different fix)
+- LLM ran tools but no text → ⚠ 调了 N 个 tool 但没文字总结
+- LLM truly empty response → ⚠ 完成 (LLM 返回空响应)
+- Normal → ✓ 完成
+
+BuddyApp's `_run_turn` finally block now tracks `last_error_msg` and
+keys off substring matches to pick the marker.
+
+### Tests
+- `test_llm_failure_retries_then_yields_error_and_done`: 2 retries
+  → 3 total LLM calls → both error and done events emitted.
+- `test_llm_recovers_on_second_attempt`: 1st call fails, 2nd
+  succeeds → no error event, normal completion.
+- Existing `test_max_tool_iters_guard_breaks_infinite_loop` updated
+  to match the new Chinese error message.
+
+38 buddy tests pass total (13 agent + 18 app + 7 animation).
+
+### API changes (backward compatible)
+
+`BuddyAgent.__init__` adds:
+- `max_tool_iters: int = 15` (was 8)
+- `max_llm_retries: int = 2` (new)
+
+Both are constructor args; existing callers pass 0 args or just
+`max_tool_iters=N` and get the new defaults / can opt out of retries.
+
 ## v1.6.3 — 2026-05-20
 
 ### Fixed — three real UX issues found during user testing

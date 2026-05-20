@@ -366,13 +366,14 @@ class BuddyApp:
         if self.application is not None:
             self.application.invalidate()
 
-        # v1.6.3: track stats so we can warn when the LLM did work but
-        # produced no narrative summary (common failure mode — agent
-        # chained tool calls without ever writing closing text).
+        # v1.6.3+: track per-event counts so the end-of-turn marker can
+        # discriminate between (a) LLM call failed, (b) LLM said nothing,
+        # (c) LLM chained tools but never wrote a summary, (d) normal.
         text_count = 0
         tool_count = 0
         error_count = 0
         cancelled = False
+        last_error_msg: Optional[str] = None
 
         try:
             async for evt in self.agent.run_turn(text, confirm_callback=self._confirm):
@@ -383,6 +384,7 @@ class BuddyApp:
                     tool_count += 1
                 elif evt.kind == "error":
                     error_count += 1
+                    last_error_msg = str(evt.payload or "")
                 if self.application is not None:
                     self.application.invalidate()
         except asyncio.CancelledError:
@@ -392,18 +394,28 @@ class BuddyApp:
         finally:
             self.spinner_visible = False
 
-            # v1.6.3: clear "done" marker so the user knows the turn ended.
+            # Clear marker so the user knows the turn ended + why.
             if not cancelled:
-                if text_count == 0 and tool_count > 0:
-                    # Worked but never wrote a summary — common when the
-                    # LLM hits max_tool_iters in a tool-call loop without
-                    # closing text. Surface this loud and clear.
+                if error_count > 0 and last_error_msg and "LLM 调用失败" in last_error_msg:
+                    # v1.6.4: LLM API call exhausted retries — distinct
+                    # from "LLM said nothing", needs different fix
+                    # (network / API key / DashScope status).
+                    self._append_rich(
+                        f"[red]✗ LLM 网络/API 错误 — 上面有详情. "
+                        f"检查: DASHSCOPE_API_KEY 是否有效 / 网络是否通畅 / "
+                        f"DashScope 服务是否正常.[/]"
+                    )
+                elif error_count > 0 and last_error_msg and "tool 调用上限" in last_error_msg:
+                    # Already showed clear remediation in the error itself
+                    self._append_rich(
+                        "[yellow]✗ 达上限退出 — 见上面提示, 可再问一句让 LLM 补总结[/]"
+                    )
+                elif text_count == 0 and tool_count > 0:
                     self._append_rich(
                         f"[yellow]⚠ 完成 (调了 {tool_count} 个 tool 但没文字总结) — "
                         f"试试再问一句 '前面的结果总结一下' 让 LLM 再补输出[/]"
                     )
                 elif text_count == 0 and tool_count == 0 and error_count == 0:
-                    # LLM returned empty — rare but possible
                     self._append_rich(
                         "[yellow]⚠ 完成 (LLM 返回空响应) — 可能 prompt 太抽象, 换个具体问法?[/]"
                     )

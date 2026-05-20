@@ -256,7 +256,8 @@ async def test_unknown_tool_name_emits_error_and_continues():
 @pytest.mark.asyncio
 async def test_max_tool_iters_guard_breaks_infinite_loop():
     """If LLM keeps requesting tools forever, the loop should bail out."""
-    agent = BuddyAgent(max_tool_iters=3)
+    # v1.6.4: default max_tool_iters bumped to 15; pass 3 explicitly here.
+    agent = BuddyAgent(max_tool_iters=3, max_llm_retries=0)
     industry_tool = get_tool("industry_show")
     industry_tool.run = lambda code: ToolResult("ok")
 
@@ -274,10 +275,80 @@ async def test_max_tool_iters_guard_breaks_infinite_loop():
             events.append(evt)
 
     err_events = [e for e in events if e.kind == "error"]
-    assert any("max tool-use iterations" in (e.payload or "") for e in err_events)
+    # v1.6.4: error message is in Chinese now ("tool 调用上限")
+    assert any(
+        "tool 调用上限" in (e.payload or "") or "max tool-use iterations" in (e.payload or "")
+        for e in err_events
+    )
 
 
 # ----- agent: conversation state persists across turns ----------------------
+
+
+@pytest.mark.asyncio
+async def test_llm_failure_retries_then_yields_error_and_done():
+    """v1.6.4: transient LLM failures should retry max_llm_retries times,
+    then yield BOTH an error event AND a done event so the BuddyApp's
+    end-of-turn finalizer prints the right marker."""
+    import asyncio as _a
+    agent = BuddyAgent(max_tool_iters=2, max_llm_retries=2)
+    industry_tool = get_tool("industry_show")
+    industry_tool.run = lambda code: ToolResult("ok")
+
+    call_count = [0]
+    async def _flaky_chat(*args, **kwargs):
+        call_count[0] += 1
+        raise RuntimeError(f"synthetic network error #{call_count[0]}")
+
+    with patch("financial_analyst.buddy.agent.LLMClient.for_agent") as mock_factory:
+        client = AsyncMock()
+        client.chat = AsyncMock(side_effect=_flaky_chat)
+        mock_factory.return_value = client
+        agent._client = client
+
+        events = []
+        async for evt in agent.run_turn("test"):
+            events.append(evt)
+
+    # max_llm_retries=2 → 1 initial + 2 retries = 3 total calls
+    assert call_count[0] == 3, f"expected 3 LLM calls, got {call_count[0]}"
+    # Yields exactly one error then one done — no more iterations attempted
+    err_events = [e for e in events if e.kind == "error"]
+    done_events = [e for e in events if e.kind == "done"]
+    assert len(err_events) == 1
+    assert "LLM 调用失败" in err_events[0].payload
+    assert "synthetic network error" in err_events[0].payload
+    assert len(done_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_llm_recovers_on_second_attempt():
+    """If LLM fails once then succeeds, the agent should NOT yield an error."""
+    agent = BuddyAgent(max_tool_iters=2, max_llm_retries=2)
+
+    attempts = [0]
+    fake_ok = _make_llm_response(text="ok")
+    async def _flaky_then_ok(*args, **kwargs):
+        attempts[0] += 1
+        if attempts[0] == 1:
+            raise RuntimeError("first try fails")
+        return fake_ok
+
+    with patch("financial_analyst.buddy.agent.LLMClient.for_agent") as mock_factory:
+        client = AsyncMock()
+        client.chat = AsyncMock(side_effect=_flaky_then_ok)
+        mock_factory.return_value = client
+        agent._client = client
+
+        events = []
+        async for evt in agent.run_turn("test"):
+            events.append(evt)
+
+    assert attempts[0] == 2, "should have retried once and succeeded"
+    err_events = [e for e in events if e.kind == "error"]
+    text_events = [e for e in events if e.kind == "text"]
+    assert len(err_events) == 0
+    assert any("ok" in (e.payload or "") for e in text_events)
 
 
 @pytest.mark.asyncio
