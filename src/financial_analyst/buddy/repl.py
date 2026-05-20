@@ -36,6 +36,7 @@ BANNER = f"""\
 [bold cyan]金融助手[/]  v{_FA_VERSION} — A-share research conversational agent
 
 Type natural language. The agent picks tools automatically.
+Press [bold]ESC[/] (or Ctrl+C) any time to cancel a running tool.
 Slash commands: /help /reset /quit /tools /save"""
 
 
@@ -142,9 +143,13 @@ async def run_repl() -> None:
 
         # --- run agent turn with animated K-line spinner ----------------
         try:
-            await _run_turn_with_spinner(console, agent, user_input, confirm)
+            completed = await _run_turn_with_spinner(
+                console, agent, user_input, confirm
+            )
+            if not completed:
+                console.print("[yellow]✗ 已取消 (ESC). 继续输入下一个 prompt 或 /quit.[/]")
         except KeyboardInterrupt:
-            console.print("[yellow]Interrupted. Type a new prompt or /quit.[/]")
+            console.print("[yellow]✗ 已中断 (Ctrl+C). 继续输入下一个 prompt 或 /quit.[/]")
             continue
         console.print()  # blank line between turns
 
@@ -154,18 +159,29 @@ async def _run_turn_with_spinner(
     agent: "BuddyAgent",
     user_input: str,
     confirm_callback,
-) -> None:
+) -> bool:
     """Run one agent turn, animating a K-line spinner during waits.
 
-    The spinner lives in a transient Rich Live region at the bottom; each
-    TurnEvent is printed ABOVE it (so it scrolls into the transcript as
-    a normal message), and the spinner status updates to reflect what
-    the agent is currently doing.
+    Returns True if the turn ran to completion, False if the user
+    cancelled via ESC (or Ctrl+C). The caller (REPL loop) uses the
+    return value to print a cancellation marker before re-prompting.
+
+    Three concurrent tasks during a turn (v1.5.5+):
+      1. agent_task   — drives the LLM tool-use loop, yields TurnEvents
+      2. animator     — ticks the K-line spinner ~8 fps
+      3. esc_watcher  — polls keyboard for ESC (Windows: msvcrt) so the
+                        user can cancel a long-running tool mid-flight
+
+    Cancellation chain:
+      ESC pressed → esc_watcher completes → main coroutine cancels
+      agent_task → BuddyAgent.run_turn's awaits raise CancelledError →
+      the async-for generator exits → finally block tears down the
+      animator → Live region closes → REPL prints "已取消" and re-prompts.
     """
     spinner = KLineSpinner()
+    cancel_event = asyncio.Event()
 
     async def _animate(live: Live) -> None:
-        """Background task: tick the spinner ~8 fps."""
         try:
             while True:
                 await asyncio.sleep(0.12)
@@ -174,6 +190,46 @@ async def _run_turn_with_spinner(
         except asyncio.CancelledError:
             pass
 
+    async def _watch_for_esc() -> None:
+        """Poll the keyboard for ESC. Windows-only via msvcrt; on other
+        platforms this task just sleeps forever (Ctrl+C still works)."""
+        try:
+            import msvcrt  # Windows-only
+        except ImportError:
+            await asyncio.Event().wait()  # hang forever; only Ctrl+C interrupts
+            return
+        try:
+            while not cancel_event.is_set():
+                # Poll every 60 ms so the keystroke feels responsive but we
+                # don't burn CPU.
+                await asyncio.sleep(0.06)
+                while msvcrt.kbhit():
+                    ch = msvcrt.getch()
+                    if ch == b"\x1b":  # ESC
+                        cancel_event.set()
+                        return
+                    # Any other key is silently consumed for now; queue-while-
+                    # thinking is a v1.6 feature requiring a full TUI rewrite.
+        except asyncio.CancelledError:
+            pass
+
+    async def _drive_agent(live: Live) -> None:
+        spinner.set_status(STATUS_THINKING)
+        async for evt in agent.run_turn(user_input, confirm_callback=confirm_callback):
+            _render_above_live(live, evt)
+            if evt.kind == "tool_call":
+                spinner.set_status(
+                    STATUS_TOOL_CALLING.format(tool=evt.payload["name"])
+                )
+            elif evt.kind == "tool_result":
+                spinner.set_status(STATUS_TOOL_FINISHED)
+            elif evt.kind == "text":
+                spinner.set_status(STATUS_THINKING)
+            elif evt.kind == "done":
+                break
+            live.update(spinner.render())
+
+    cancelled = False
     with Live(
         spinner.render(),
         console=console,
@@ -181,30 +237,43 @@ async def _run_turn_with_spinner(
         transient=True,
     ) as live:
         animator = asyncio.create_task(_animate(live))
+        esc_watcher = asyncio.create_task(_watch_for_esc())
+        agent_task = asyncio.create_task(_drive_agent(live))
+
         try:
-            spinner.set_status(STATUS_THINKING)
-            async for evt in agent.run_turn(user_input, confirm_callback=confirm_callback):
-                # Render the event above the live region.
-                _render_above_live(live, evt)
-                # Adjust spinner status for the next wait.
-                if evt.kind == "tool_call":
-                    spinner.set_status(
-                        STATUS_TOOL_CALLING.format(tool=evt.payload["name"])
-                    )
-                elif evt.kind == "tool_result":
-                    spinner.set_status(STATUS_TOOL_FINISHED)
-                elif evt.kind == "text":
-                    spinner.set_status(STATUS_THINKING)
-                elif evt.kind == "done":
-                    break
-                # Refresh the live region immediately so the new status is visible.
-                live.update(spinner.render())
-        finally:
-            animator.cancel()
+            # Wait for either the agent to finish OR ESC to be pressed.
+            done, pending = await asyncio.wait(
+                {agent_task, esc_watcher},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if esc_watcher in done and not agent_task.done():
+                cancelled = True
+                agent_task.cancel()
+                try:
+                    await agent_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            else:
+                # Agent finished first — surface any error it raised
+                if agent_task.done() and agent_task.exception() is not None:
+                    raise agent_task.exception()
+        except KeyboardInterrupt:
+            cancelled = True
+            agent_task.cancel()
             try:
-                await animator
-            except asyncio.CancelledError:
+                await agent_task
+            except (asyncio.CancelledError, Exception):
                 pass
+        finally:
+            for t in (animator, esc_watcher, agent_task):
+                if not t.done():
+                    t.cancel()
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+    return not cancelled
 
 
 def _render_above_live(live: Live, evt: TurnEvent) -> None:

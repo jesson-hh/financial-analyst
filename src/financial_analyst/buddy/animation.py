@@ -143,6 +143,8 @@ class KLineSpinner:
         line.append(" ")
         line.append(self.status, style="cyan")
         line.append("  ")
+        # Hint cancellation key in dim style so it's always visible during waits
+        line.append("[ESC 取消] ", style="dim")
 
         # Sparkline candles — color encodes direction, char encodes level
         for c in self.candles:

@@ -1,5 +1,57 @@
 # Changelog
 
+## v1.5.5 — 2026-05-20
+
+### Added — ESC to cancel a running turn (Claude Code-style)
+
+Pressing ESC during agent thinking / tool execution now cancels the
+current turn cleanly and returns to the prompt. Ctrl+C does the same
+thing.
+
+```
+❯ 跑一份 csi500 全因子 bench
+⠋ 调用 alpha_bench…  [ESC 取消] ▇▃▄▇▂   -1.34%   #032
+                                                       ← ESC pressed
+✗ 已取消 (ESC). 继续输入下一个 prompt 或 /quit.
+
+❯ 算了, 看下茅台行业就好          ← immediately type next prompt
+⠋ 调用 industry_show…  ▆▃▅▇▂   +0.8%   #002
+```
+
+**Architecture**: `_run_turn_with_spinner` now spawns three concurrent
+asyncio tasks per turn — the agent driver, the K-line animator, and
+an ESC watcher (Windows uses `msvcrt.kbhit()` for non-blocking
+keystroke polling at 60 ms cadence). `asyncio.wait(...,
+FIRST_COMPLETED)` returns as soon as either the agent finishes or ESC
+fires; on ESC we cancel the agent task, which propagates
+`CancelledError` through the LLM call and tool dispatch chain.
+
+Subprocess-based tools that started before ESC cannot be killed
+mid-flight (subprocess.run is uninterruptible), but the result will
+be discarded and the user is back at the prompt immediately. The
+subprocess finishes in the background.
+
+### Changed — spinner shows `[ESC 取消]` hint
+
+The inline ticker line now reads:
+
+```
+⠋ 调用 chain_for…  [ESC 取消] ▇▃▄▇▂   -1.34%   #032
+```
+
+The hint is in `dim` style so it's permanently visible but doesn't
+draw the eye.
+
+Banner also mentions ESC + Ctrl+C as cancellation keys.
+
+### Not done — input box visible during thinking (v1.6 planned)
+
+Claude Code-style "you can keep typing while the agent thinks" still
+requires a full prompt_toolkit `Application` rewrite — that's
+substantial and slated for v1.6. For now, ESC gets you out instantly
+and you can type the next prompt. Other keys pressed during a turn
+are silently consumed.
+
 ## v1.5.4 — 2026-05-20
 
 ### Fixed — spinner freezes during long tools (event-loop block)
