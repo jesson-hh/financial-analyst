@@ -1,5 +1,38 @@
 # Changelog
 
+## v1.6.5 — 2026-05-20
+
+### Fixed — transcript pinned at top, never followed new appends
+
+User report: "思考过程并没有继续滑动 就停了留在顶行了" — the
+transcript window stayed showing the opening banner forever while the
+spinner kept ticking and (presumably) new events appended invisibly
+below the viewport.
+
+Root cause: the prompt_toolkit `Window` containing the transcript had
+no `get_vertical_scroll` callback, so the default behaviour kept the
+scroll position at 0 (top). Every `_append_chunk` extended the
+content but the viewport never moved.
+
+Fix: added `_scroll_to_bottom(window)` callback computing
+`max(0, content_height - window_height)` from the window's
+`render_info`. Wired via `Window(..., get_vertical_scroll=_scroll_to_bottom)`.
+prompt_toolkit calls it on every render; the result places the last
+line of content on the bottom row of the viewport.
+
+Edge cases handled:
+- First render (`render_info is None`) → return 0, no crash
+- Content fits window → return 0, no needless scroll
+- Content exceeds window → return overflow amount
+
+### Tests
+- `test_scroll_to_bottom_returns_zero_when_no_render_info`
+- `test_scroll_to_bottom_returns_zero_when_content_fits_window`
+- `test_scroll_to_bottom_returns_offset_when_content_overflows`
+
+21 BuddyApp tests pass; 39 buddy tests total (13 agent + 21 app +
+7 animation).
+
 ## v1.6.4 — 2026-05-20
 
 ### Fixed — "思考着思考着就断了" (silent mid-turn drop-outs)

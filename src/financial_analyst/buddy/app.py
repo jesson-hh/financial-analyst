@@ -177,6 +177,11 @@ class BuddyApp:
             wrap_lines=True,
             always_hide_cursor=True,
             ignore_content_height=False,
+            # v1.6.5: auto-scroll to bottom. Without this the window
+            # stays pinned at the top and new appends disappear off
+            # the bottom edge — visible to the user as "transcript
+            # frozen on opening banner while spinner keeps ticking".
+            get_vertical_scroll=_scroll_to_bottom,
         )
         spinner_window = ConditionalContainer(
             Window(
@@ -583,6 +588,23 @@ def _escape_markup(text: str) -> str:
     """Escape Rich markup brackets in user-supplied / tool-output text
     so that `[anything]` doesn't get interpreted as a style tag."""
     return text.replace("[", r"\[")
+
+
+def _scroll_to_bottom(window) -> int:
+    """Window.get_vertical_scroll callback: compute the scroll offset that
+    keeps the LAST line of content visible at the bottom of the viewport.
+
+    prompt_toolkit calls this on every render. The first render's
+    ``render_info`` may be ``None`` (no dimensions yet) — return 0 in
+    that case; subsequent renders have valid info and we can compute
+    ``content_height - window_height``.
+    """
+    info = window.render_info
+    if info is None:
+        return 0
+    content_height = info.content_height
+    window_height = info.window_height
+    return max(0, content_height - window_height)
 
 
 async def run_app() -> None:

@@ -12,7 +12,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from financial_analyst.buddy.app import BuddyApp, _rich_to_ansi, _escape_markup
+from financial_analyst.buddy.app import (
+    BuddyApp, _rich_to_ansi, _escape_markup, _scroll_to_bottom,
+)
 from financial_analyst.buddy.tools import ToolResult, get_tool
 
 
@@ -229,6 +231,38 @@ async def test_esc_peels_off_one_layer_at_a_time():
     except (asyncio.CancelledError, Exception):
         pass
     assert not app.has_active_turn(), "everything stopped after 2nd ESC"
+
+
+# ----- v1.6.5: transcript auto-scroll -------------------------------------
+
+
+def test_scroll_to_bottom_returns_zero_when_no_render_info():
+    """First render: render_info is None. Scroll callback returns 0 so
+    we don't crash."""
+    class FakeWindow:
+        render_info = None
+    assert _scroll_to_bottom(FakeWindow()) == 0
+
+
+def test_scroll_to_bottom_returns_zero_when_content_fits_window():
+    """If content fits, no scroll needed."""
+    class FakeInfo:
+        content_height = 10
+        window_height = 20
+    class FakeWindow:
+        render_info = FakeInfo()
+    assert _scroll_to_bottom(FakeWindow()) == 0
+
+
+def test_scroll_to_bottom_returns_offset_when_content_overflows():
+    """When content exceeds window, scroll offset = overflow amount."""
+    class FakeInfo:
+        content_height = 100
+        window_height = 30
+    class FakeWindow:
+        render_info = FakeInfo()
+    # Should scroll so last 30 lines are visible: offset = 100 - 30 = 70
+    assert _scroll_to_bottom(FakeWindow()) == 70
 
 
 # ----- v1.6.3: queue indicator + done marker + no-text warning ------------
