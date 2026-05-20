@@ -187,10 +187,11 @@ async def test_cancel_current_turn_cancels_running_task():
 
 
 @pytest.mark.asyncio
-async def test_cancel_clears_queued_input_too():
-    """v1.6.1: ESC should abort both the current turn AND the queued
-    input. Otherwise the queue would silently fire after cancel —
-    surprising the user who wanted "stop everything"."""
+async def test_esc_peels_off_one_layer_at_a_time():
+    """v1.6.2: ESC cancels ONLY the current turn. Queued input still
+    runs after the cancellation finishes; second ESC cancels that one.
+    Lets the user "back out" gradually with multiple presses, matching
+    Claude Code's step-back UX."""
     app = BuddyApp()
 
     async def _hanging_run(text, confirm_callback=None):
@@ -199,27 +200,48 @@ async def test_cancel_clears_queued_input_too():
 
     app.agent.run_turn = _hanging_run
 
-    # Start a turn (it hangs)
+    # Start first turn (hangs) + queue second
     app._start_turn("first")
     await asyncio.sleep(0)
     assert app.has_active_turn()
-
-    # Queue a second prompt
     app.submit("second")
     assert app.queued_input == "second"
 
-    # ESC: should cancel current AND drop the queue
-    app._cancel_current_turn(reason="ESC")
+    # First ESC: cancel current. queued_input still set; finally block
+    # of the cancelled turn starts the queued turn.
+    app._cancel_current_turn(reason="ESC#1")
     if app.current_turn_task is not None:
         try:
             await app.current_turn_task
         except (asyncio.CancelledError, Exception):
             pass
+    # Let any post-cancel queue-starter scheduling run
+    await asyncio.sleep(0)
 
-    assert app.queued_input is None, "queued_input should be cleared after ESC"
-    assert not app.has_active_turn(), "no follow-up task should be running"
-    txt = app.transcript_text()
-    assert "排队的输入已清空" in txt or "已取消" in txt
+    # After 1st ESC: a NEW turn (for the queued input) should now be active
+    assert app.queued_input is None, "queue should have been consumed"
+    assert app.has_active_turn(), "queued turn should have started after 1st ESC"
+
+    # 2nd ESC: cancel that one too
+    app._cancel_current_turn(reason="ESC#2")
+    try:
+        await app.current_turn_task
+    except (asyncio.CancelledError, Exception):
+        pass
+    assert not app.has_active_turn(), "everything stopped after 2nd ESC"
+
+
+@pytest.mark.asyncio
+async def test_esc_at_idle_clears_lingering_queue():
+    """If somehow queued_input is set but no turn is active, ESC should
+    still drop the queue (defensive — prevents a stale prompt from
+    firing on the next event-loop tick)."""
+    app = BuddyApp()
+    app.queued_input = "stale prompt"
+    assert not app.has_active_turn()
+    app._cancel_current_turn(reason="ESC at idle")
+    assert app.queued_input is None
+    assert "排队的输入已清空" in app.transcript_text()
 
 
 # ----- queued input drains after current turn finishes ---------------------

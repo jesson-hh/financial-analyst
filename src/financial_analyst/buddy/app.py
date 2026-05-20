@@ -382,21 +382,31 @@ class BuddyApp:
     # ----- cancellation ---------------------------------------------------
 
     def _cancel_current_turn(self, reason: str = "") -> None:
-        """ESC / Ctrl+C handler: cancel current turn AND clear any queued
-        input. The user wants "stop everything", not "stop now then run
-        the queued thing next" — that would be surprising.
-        """
-        had_queue = self.queued_input is not None
-        self.queued_input = None
-        if had_queue:
-            self._append_rich("[dim]排队的输入已清空[/]")
+        """ESC / Ctrl+C handler: cancel ONLY the currently running turn.
 
+        Peel-off semantics (v1.6.2+): each ESC press cancels exactly
+        one layer. If you have a turn running plus a queued prompt:
+          - 1st ESC → cancel current; queued starts next
+          - 2nd ESC → cancel the now-running queued turn
+        Press ESC repeatedly to back out to a clean state.
+
+        This matches Claude Code's "step back one level" behaviour and
+        keeps the type-while-thinking workflow snappy — the user can
+        type, ESC the current, let theirs run, and ESC that too if
+        they change their mind mid-execution.
+        """
         if not self._has_active_turn():
+            # No turn active, but maybe we have a queue lingering — drop it
+            # so a stale prompt doesn't suddenly fire on the next loop tick.
+            if self.queued_input is not None:
+                self.queued_input = None
+                self._append_rich("[dim]排队的输入已清空[/]")
             return
         task = self.current_turn_task
         if task is not None and not task.done():
             task.cancel()
-        # The _run_turn finally block will write the "已取消" marker.
+        # The _run_turn finally block writes the "已取消" marker and
+        # drains queued_input (if any) by starting the next turn.
 
     async def _confirm(self, tool_name: str, args: dict) -> bool:  # noqa: ARG002
         """Confirmation callback for confirm-required tools.

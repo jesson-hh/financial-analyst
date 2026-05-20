@@ -1,5 +1,39 @@
 # Changelog
 
+## v1.6.2 — 2026-05-20
+
+### Changed — ESC now peels off one layer per press (Claude Code-style)
+
+User feedback on v1.6.1's "ESC clears everything" behaviour: too
+aggressive. The preferred UX is "press ESC to back out one step at a
+time", matching Claude Code's step-back semantics:
+
+  - 1st ESC: cancel the currently running turn. The finally block
+    drains the queue, so a queued prompt **does** start next.
+  - 2nd ESC: cancel that newly-started turn too.
+  - ESC repeatedly = peel off layers until you're at a clean prompt.
+
+Why this is better than the v1.6.1 "stop everything" model:
+
+- When typing during a long-running tool, the user is usually queuing
+  a *follow-up* they want — cancelling the current to make space for
+  the queued one is the natural intent.
+- If they truly want to nuke the queue too, two ESC presses takes
+  ~200 ms and is muscle-memory consistent with Claude Code.
+
+Code change: `_cancel_current_turn` no longer touches `queued_input`
+when a turn is active. Idle-state ESC still drops the queue
+defensively (covers the case where queue was set but no task got
+started for some reason).
+
+### Tests
+- `test_esc_peels_off_one_layer_at_a_time`: start + queue + ESC →
+  queued auto-runs; second ESC stops that too.
+- `test_esc_at_idle_clears_lingering_queue`: idle + stale queue + ESC
+  → queue dropped, no task started.
+- The v1.6.1 `test_cancel_clears_queued_input_too` is replaced by
+  these two; net 32 buddy tests pass.
+
 ## v1.6.1 — 2026-05-20
 
 ### Fixed — ESC now clears queued input too
