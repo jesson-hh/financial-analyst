@@ -19,6 +19,7 @@ class FactorOutput(BaseModel):
     vol_regime: Dict[str, Any]
     zoo_signals: Dict[str, Any] = {}  # v1.3.4: latest snapshot lookup, optional
     stock_timeline: str = ""  # v1.4.4: prior research markdown for this code, optional
+    chain_context: Dict[str, Any] = {}  # v1.4.5: industry-chain product + peers + catalyst
 
 
 class FactorComputer(SubAgent[FactorOutput]):
@@ -96,6 +97,17 @@ class FactorComputer(SubAgent[FactorOutput]):
             bars_5m_last_day=bars_5m_last_day,
         )
 
+        # v1.4.5: look up industry-chain context (best-effort, silent on miss).
+        chain_context: Dict[str, Any] = {}
+        try:
+            from financial_analyst.data.loaders.chain_kb import ChainKBLoader
+            ckb = ChainKBLoader()
+            ctx = ckb.chain_context(code, max_peers=6, body_chars=1500)
+            if ctx:
+                chain_context = ctx
+        except Exception:
+            pass
+
         # v1.4.4: look up per-stock research timeline (best-effort, silent on miss).
         # Convention: newest entries at bottom of the file, so we serve the tail.
         stock_timeline = ""
@@ -140,4 +152,5 @@ class FactorComputer(SubAgent[FactorOutput]):
             "vol_regime": regime,
             "zoo_signals": zoo_signals,
             "stock_timeline": stock_timeline,
+            "chain_context": chain_context,
         }

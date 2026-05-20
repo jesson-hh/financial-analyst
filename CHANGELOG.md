@@ -1,5 +1,85 @@
 # Changelog
 
+## v1.4.5 — 2026-05-20
+
+### Added — Industry-chain knowledge base (chain_kb)
+
+The last big knowledge-import gap from `G:\stocks` closes. Every report
+on a stock that's in a known industry chain now sees: chain position,
+upstream/downstream products, peer codes, role (anchor / data_supported /
+llm_inferred) + weight, and the chain catalyst — fed directly into the
+`fundamental-analyst` prompt.
+
+**New module: `financial_analyst.data.loaders.chain_kb`**
+- `ChainKBLoader` reads `~/.financial-analyst/memories/chain_kb/products/*.md`
+  (override via `FA_CHAIN_KB_DIR`).
+- Parses YAML frontmatter into `Product` dataclass: `node_id`,
+  `display_name`, `category` (chain slug), `layer` (upstream/mid/down),
+  `related_codes` (with role + weight), `upstream_products` /
+  `downstream_products` graph edges, plus the markdown body for catalyst
+  text.
+- Builds a reverse code → products index on first load. Cached in memory;
+  call `loader.reload()` to pick up changes.
+- `chain_context(code)` returns a compact dict suitable for LLM injection:
+  primary product (ranked by role-priority then weight), all products
+  mentioning the code, upstream/downstream graph, top-N peer codes, and
+  the "催化逻辑" tail of the primary product body.
+
+**`factor-computer.chain_context`** (Dict, default empty): lookup
+happens at report time. Silent skip if no chain file exists for the
+code.
+
+**`fundamental-analyst` prompt mandates**: when chain context is
+present, must frame at least one bull/bear point around the chain
+role, cite at least one peer code + the chain catalyst, and flag
+`llm_inferred` chain links with weight < 0.5 as
+`red_flags="chain_link_inferred_only"`.
+
+### Added — `chain` CLI
+
+```bash
+financial-analyst chain list                            # 72 products across 6 chains
+financial-analyst chain show AI_chip_GPU                # full content + frontmatter
+financial-analyst chain for SH688256                    # which products + peers
+financial-analyst chain import G:/stocks/strategy/chain_kb/products
+financial-analyst chain stats
+```
+
+`import` filters: only files with `node_type: product` in the frontmatter
+are copied; `_template.md`, `theme.md`, plain README's are skipped.
+
+### Verified end-to-end
+
+Bulk-imported 72 products × 6 chains × 158 unique stock codes from
+`G:/stocks/strategy/chain_kb/products`. Example for SH688256 (寒武纪):
+
+```
+Stock SH688256 → primary product: AI_chip_GPU (AI 加速 GPU/DCU)
+  Chain: compute_chain  layer=upstream
+  Role: anchor weight=+1.00
+  Upstream:   ['wafer_foundry_advanced', 'HBM_storage', 'advanced_packaging']
+  Downstream: ['AI_server']
+  Peer codes: 海光信息 / 景嘉微 / 国芯科技 / 紫光国微 / 芯原股份 / 龙芯中科
+  Catalyst: NVDA GPU 发布周期 + BIS 出口管制 + 互联网云厂订单 ~10 万卡
+```
+
+### Knowledge-import status now (final)
+
+| Source | Local destination | Status |
+|---|---|---|
+| `rating_system.md / pitfalls.md / factor_insights.md` | per-agent `memories/` | ✅ v0.x |
+| `playbook_V1_V10 / R7-R20 / hard_rules` | per-agent `memories/` | ✅ v1.x |
+| `stocks/{CODE}.md` (187 stocks) | `memories/stocks/<CODE>.md` | ✅ v1.4.4 |
+| **`chain_kb/products/*.md` (72 products)** | `memories/chain_kb/products/` | ✅ **v1.4.5** |
+
+All "经验 → 产出接通点" items from G:\stocks CLAUDE.md are now wired
+into the financial-analyst report pipeline.
+
+### Tests
+- 13 new chain_kb tests: default path / env override / parsing / multi-product
+  membership / anchor-rank priority / peer filtering / catalyst extraction /
+  unknown code / list categories / import filters / reload / stats.
+
 ## v1.4.4 — 2026-05-19
 
 ### Added — Per-stock research timeline injection

@@ -738,6 +738,117 @@ def doctor():
     typer.echo("\n=== done ===")
 
 
+@app.command(name="chain")
+def chain_cmd(
+    action: str = typer.Argument(..., help="One of: list | show | for | import | stats"),
+    target: Optional[str] = typer.Argument(None, help="For show: product_id. For `for`: stock code. For import: source dir."),
+    overwrite: bool = typer.Option(False, "--overwrite", help="import: overwrite existing files"),
+):
+    """Industry-chain knowledge base — query product graph + stock memberships.
+
+    Examples:
+      financial-analyst chain list                              # all product node_ids
+      financial-analyst chain show AI_chip_GPU                  # one product's full content
+      financial-analyst chain for SH688256                      # which products this stock is in
+      financial-analyst chain import G:/stocks/strategy/chain_kb/products
+      financial-analyst chain stats
+    """
+    from financial_analyst.data.loaders.chain_kb import ChainKBLoader
+    loader = ChainKBLoader()
+
+    if action == "list":
+        products = loader.list_products()
+        if not products:
+            typer.echo(f"No products found under {loader.root}.")
+            typer.echo("Run `chain import <source-dir>` first.")
+            return
+        cats = loader.list_categories()
+        typer.echo(f"{len(products)} products across {len(cats)} categories under {loader.root}:\n")
+        for cat in cats:
+            cat_products = [p for p in products if (loader.get(p) and loader.get(p).category == cat)]
+            typer.echo(f"  [{cat}] ({len(cat_products)})")
+            for pid in cat_products:
+                p = loader.get(pid)
+                typer.echo(f"    - {pid:35s}  {p.display_name}  ({len(p.related_codes)} codes, layer={p.layer})")
+            typer.echo("")
+        return
+
+    if action == "show":
+        if not target:
+            typer.echo("chain show requires a product_id (e.g. AI_chip_GPU)")
+            raise typer.Exit(1)
+        prod = loader.get(target)
+        if prod is None:
+            typer.echo(f"Product {target!r} not found. Run `chain list` to see options.")
+            raise typer.Exit(1)
+        typer.echo(f"# {prod.node_id}  ({prod.display_name})\n")
+        typer.echo(f"category: {prod.category}")
+        typer.echo(f"layer:    {prod.layer}")
+        typer.echo(f"summary:  {prod.summary}\n")
+        typer.echo(f"upstream:   {prod.upstream_products}")
+        typer.echo(f"downstream: {prod.downstream_products}\n")
+        typer.echo(f"related_codes ({len(prod.related_codes)}):")
+        for r in prod.related_codes:
+            typer.echo(f"  {r.code:10s} {r.name:12s} {r.role:18s} weight={r.weight:+.2f}  {r.note}")
+        if prod.body_md:
+            typer.echo(f"\n--- body ---\n{prod.body_md[:1500]}")
+        return
+
+    if action == "for":
+        if not target:
+            typer.echo("chain for requires a stock code (e.g. SH688256)")
+            raise typer.Exit(1)
+        ctx = loader.chain_context(target)
+        if ctx is None:
+            typer.echo(f"No chain membership found for {target}.")
+            raise typer.Exit(1)
+        pp = ctx["primary_product"]
+        typer.echo(f"Stock {target} → primary product: {pp['id']} ({pp['display_name']})")
+        typer.echo(f"  Chain: {pp['category']}  layer={pp['layer']}")
+        typer.echo(f"  Role: {pp['role_for_stock']} weight={pp['weight_for_stock']:+.2f}")
+        typer.echo(f"  Summary: {pp['summary']}\n")
+        if len(ctx["all_products"]) > 1:
+            typer.echo(f"Also appears in:")
+            for p in ctx["all_products"][1:]:
+                typer.echo(f"  - {p['id']:30s} {p['display_name']:20s} ({p['role_for_stock']}, w={p['weight_for_stock']:+.2f})")
+            typer.echo("")
+        typer.echo(f"Upstream products:   {ctx['upstream_products']}")
+        typer.echo(f"Downstream products: {ctx['downstream_products']}\n")
+        typer.echo(f"Peer codes in {pp['id']} ({len(ctx['peer_codes'])}):")
+        for r in ctx["peer_codes"]:
+            typer.echo(f"  {r['code']:10s} {r['name']:12s} {r['role']:18s} weight={r['weight']:+.2f}")
+        if ctx["catalyst_md"]:
+            typer.echo(f"\n--- catalyst ---\n{ctx['catalyst_md'][:800]}")
+        return
+
+    if action == "import":
+        if not target:
+            typer.echo("chain import requires a source directory path.")
+            raise typer.Exit(1)
+        from pathlib import Path as _P
+        try:
+            n = loader.import_from(_P(target), overwrite=overwrite)
+        except FileNotFoundError as e:
+            typer.echo(str(e))
+            raise typer.Exit(1)
+        loader.reload()
+        total = len(loader.list_products())
+        typer.echo(f"Imported {n} new chain products from {target} → {loader.root}")
+        typer.echo(f"Total now: {total} products across {len(loader.list_categories())} categories")
+        if not overwrite:
+            typer.echo("(use --overwrite to replace existing files)")
+        return
+
+    if action == "stats":
+        s = loader.stats()
+        for k, v in s.items():
+            typer.echo(f"  {k}: {v}")
+        return
+
+    typer.echo(f"Unknown action {action!r}; use list / show / for / import / stats")
+    raise typer.Exit(1)
+
+
 @app.command(name="stocks")
 def stocks_cmd(
     action: str = typer.Argument(..., help="One of: list | show | import | stats"),

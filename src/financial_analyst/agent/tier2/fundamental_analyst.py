@@ -38,6 +38,17 @@ Apply the market-cap-tiered rating from memory:
 Set mv_tier to one of: "large", "mid", "small".
 Identify red_flags (e.g. game-capital pattern, valuation extreme, financial weakness).
 List bull/bear points (2-4 each, cite specific numbers).
+
+If a `# 产业链上下文 (必读)` block is supplied at the end of the user message, you MUST:
+- Frame at least one bull or bear point around the stock's role in the chain
+  (anchor / data_supported / llm_inferred) and weight.
+- Cite at least one peer code by name + the catalyst from the product's
+  "催化逻辑" section.
+- For anchor-role stocks, treat the chain catalyst as structural support.
+- For llm_inferred role stocks with weight < 0.5, flag that the chain link
+  is hypothesised (not data-confirmed) — add to red_flags as
+  "chain_link_inferred_only".
+
 Output strictly JSON conforming to schema. No free text."""
 
 
@@ -48,9 +59,20 @@ class FundamentalAnalyst(SubAgent[FundamentalOutput]):
     async def _execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         client = LLMClient.for_agent(self.NAME)
         upstream = json.dumps(inputs.get("quote-fetcher", {}), default=str, ensure_ascii=False)
+
+        # v1.4.5: industry-chain context injection (best-effort, silent skip when absent)
+        factor = inputs.get("factor-computer", {}) or {}
+        chain_ctx = factor.get("chain_context") or {}
+        chain_block = ""
+        if chain_ctx and chain_ctx.get("primary_product"):
+            chain_block = (
+                "\n\n# 产业链上下文 (必读)\n"
+                + json.dumps(chain_ctx, ensure_ascii=False, indent=2)
+            )
+
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT + "\n\n# Memory\n" + self.memory.load_all()},
-            {"role": "user", "content": f"Upstream quote data:\n{upstream}\n\nReturn JSON per schema."},
+            {"role": "user", "content": f"Upstream quote data:\n{upstream}{chain_block}\n\nReturn JSON per schema."},
         ]
         response = await client.chat(
             messages=messages,
