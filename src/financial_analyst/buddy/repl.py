@@ -18,11 +18,16 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.styles import Style
 from rich.console import Console
+from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
 from financial_analyst.buddy.agent import BuddyAgent, TurnEvent
+from financial_analyst.buddy.animation import (
+    KLineSpinner, STATUS_THINKING, STATUS_TOOL_CALLING,
+    STATUS_TOOL_PARSING, STATUS_TOOL_FINISHED,
+)
 
 
 BANNER = """\
@@ -133,18 +138,81 @@ async def run_repl() -> None:
             console.print(f"[red]Unknown slash command: {cmd}. Try /help.[/]")
             continue
 
-        # --- run agent turn ---------------------------------------------
+        # --- run agent turn with animated K-line spinner ----------------
         try:
-            async for evt in agent.run_turn(user_input, confirm_callback=confirm):
-                _render(console, evt)
+            await _run_turn_with_spinner(console, agent, user_input, confirm)
         except KeyboardInterrupt:
             console.print("[yellow]Interrupted. Type a new prompt or /quit.[/]")
             continue
         console.print()  # blank line between turns
 
 
-def _render(console: Console, evt: TurnEvent) -> None:
-    """Render one TurnEvent."""
+async def _run_turn_with_spinner(
+    console: Console,
+    agent: "BuddyAgent",
+    user_input: str,
+    confirm_callback,
+) -> None:
+    """Run one agent turn, animating a K-line spinner during waits.
+
+    The spinner lives in a transient Rich Live region at the bottom; each
+    TurnEvent is printed ABOVE it (so it scrolls into the transcript as
+    a normal message), and the spinner status updates to reflect what
+    the agent is currently doing.
+    """
+    spinner = KLineSpinner()
+
+    async def _animate(live: Live) -> None:
+        """Background task: tick the spinner ~8 fps."""
+        try:
+            while True:
+                await asyncio.sleep(0.12)
+                spinner.tick()
+                live.update(spinner.render())
+        except asyncio.CancelledError:
+            pass
+
+    with Live(
+        spinner.render(),
+        console=console,
+        refresh_per_second=10,
+        transient=True,
+    ) as live:
+        animator = asyncio.create_task(_animate(live))
+        try:
+            spinner.set_status(STATUS_THINKING)
+            async for evt in agent.run_turn(user_input, confirm_callback=confirm_callback):
+                # Render the event above the live region.
+                _render_above_live(live, evt)
+                # Adjust spinner status for the next wait.
+                if evt.kind == "tool_call":
+                    spinner.set_status(
+                        STATUS_TOOL_CALLING.format(tool=evt.payload["name"])
+                    )
+                elif evt.kind == "tool_result":
+                    spinner.set_status(STATUS_TOOL_FINISHED)
+                elif evt.kind == "text":
+                    spinner.set_status(STATUS_THINKING)
+                elif evt.kind == "done":
+                    break
+                # Refresh the live region immediately so the new status is visible.
+                live.update(spinner.render())
+        finally:
+            animator.cancel()
+            try:
+                await animator
+            except asyncio.CancelledError:
+                pass
+
+
+def _render_above_live(live: Live, evt: TurnEvent) -> None:
+    """Render a TurnEvent above the Live region — Rich handles the scroll.
+
+    ``live.console.print`` writes to the transcript ABOVE the spinner,
+    so each event becomes a permanent line while the K-line keeps
+    animating below.
+    """
+    console = live.console
     if evt.kind == "text":
         if evt.payload:
             console.print(Markdown(evt.payload))
@@ -158,7 +226,6 @@ def _render(console: Console, evt: TurnEvent) -> None:
         is_err = evt.payload["is_error"]
         prefix = "[red]✗" if is_err else "[green]✓"
         console.print(f"{prefix} {name}[/]")
-        # Truncate long results in the REPL (LLM still gets the full thing)
         if len(content) > 800:
             console.print(f"  [dim]{content[:600]}[/]")
             console.print(f"  [dim]... ({len(content) - 600} more chars sent to LLM)[/]")
@@ -166,8 +233,7 @@ def _render(console: Console, evt: TurnEvent) -> None:
             console.print(f"  [dim]{content}[/]")
     elif evt.kind == "error":
         console.print(f"[red]Error: {evt.payload}[/]")
-    elif evt.kind == "done":
-        pass  # nothing to render
+    # 'done' is silent — Live exit handles cleanup.
 
 
 def _save_conversation(agent: BuddyAgent, path: Path) -> None:

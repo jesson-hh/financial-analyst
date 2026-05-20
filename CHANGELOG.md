@@ -1,5 +1,57 @@
 # Changelog
 
+## v1.5.1 — 2026-05-20
+
+### Added — K-line thinking animation
+
+The buddy REPL was silent during LLM thinking and tool execution.
+v1.5.1 adds a finance-themed animated K-line chart that runs in a
+Rich `Live` region at the bottom of the screen while the agent works:
+
+```
+█ █                                
+█ █ ━ ━ ━ █                        
+        │ █ ━ █   █ █              
+              █ ━ █ █ ━ ━ █   █ ━ ━
+                        │ █ ━ █ │  
+  +1.59%   bar #005
+  ▸ 调用 chain_for...
+```
+
+- 18-candle window, ~8 fps (one new candle every 120 ms)
+- Bounded random walk with occasional shocks; up candles bright_green,
+  down candles bright_red, doji as `━`
+- Percentile-trimmed y-axis so a single big shock doesn't compress all
+  other candles into doji-height
+- Live status line: `思考中…` / `调用 <tool>…` / `整合中…`
+- Live delta indicator: `+/-N.NN%   bar #NNN`
+- Transient: clears when the agent finishes (no scrollback clutter)
+
+**Architecture**: `KLineSpinner` (in `buddy/animation.py`) is a pure
+state machine — `tick()` advances one bar, `render()` returns a Rich
+`Group` of 5 chart rows + 1 delta row + 1 status row. The REPL wraps
+the agent's turn in `rich.live.Live`, spawns an asyncio task that ticks
+the spinner every 120 ms, and prints each `TurnEvent` ABOVE the live
+region so the transcript scrolls normally while the spinner stays
+pinned at the bottom.
+
+### Refactored — repl.py
+
+- Removed unused `_render()` (dead since the Live-region rewrite)
+- Added `_run_turn_with_spinner()` and `_render_above_live()`
+- Status transitions per event kind:
+  - `text` → `思考中…`
+  - `tool_call` → `调用 {tool}…`
+  - `tool_result` → `整合中…`
+  - `done` → exit
+
+### Tests
+- 7 new in `tests/test_buddy_animation.py`: init window size,
+  group-renderable count, no-candles safety, tick continuity (new open
+  == prior close), status persistence, status constants non-empty,
+  red/green colouring on deterministic up/down candles.
+- 18 tests total in `test_buddy*` (11 agent + 7 animation), all pass.
+
 ## v1.5.0 — 2026-05-20
 
 ### Added — Conversational front-end (Buddy)
