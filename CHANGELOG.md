@@ -1,5 +1,94 @@
 # Changelog
 
+## v1.6.0 — 2026-05-20
+
+### Added — Full-TUI BuddyApp (Claude Code-style layout)
+
+`financial-analyst chat` now launches a full-screen prompt_toolkit
+Application with a persistent input field. You can type the next
+prompt while the agent is still thinking — it queues and runs after
+the current turn finishes.
+
+```
+┌────────────────────────────────────────────────┐
+│ Transcript (scrollable)                         │
+│                                                  │
+│ ❯ 茅台多少钱                                    │
+│ ▶ quote_lookup({'code': 'SH600519'})            │
+│ ✓ quote_lookup                                  │
+│   SH600519: close=1280, PE=20.14...             │
+│ 贵州茅台 现价 1280 元...                         │
+├────────────────────────────────────────────────┤
+│ ⠋ 调用 chain_for…  [ESC 取消] ▇▃▄▇▂ +0.8% #023  │ ← spinner row
+├────────────────────────────────────────────────┤   (only when running)
+│ ❯ 顺便看看比亚迪█                                │ ← persistent input
+└────────────────────────────────────────────────┘
+```
+
+Behaviour:
+- **Type any time**: the input field is always focused, even while the
+  spinner animates. Press Enter to submit.
+- **Submission queue**: if a turn is already running, your new submit
+  is queued (single slot — newest replaces older). The agent picks it
+  up automatically after the current turn finishes.
+- **ESC anywhere**: cancels the running turn cleanly. The transcript
+  shows a `✗ 已取消` marker; you stay at the input ready for the next
+  prompt. (Ctrl+C does the same.)
+- **Slash commands**: `/help /reset /tools /save <path> /quit` —
+  identical to v1.5 simple mode.
+- **Auto-confirmed costly tools**: `run_report` / `alpha_bench` no
+  longer block on a `(y/N)` prompt; the transcript shows a
+  `⚠ 启动耗时工具 — 按 ESC 随时取消` notice and proceeds. You can
+  ESC out if you change your mind.
+
+### Architecture
+
+New module `financial_analyst.buddy.app`:
+- `BuddyApp` class wraps a prompt_toolkit `Application` with
+  `HSplit([transcript, conditional_spinner, input])` layout
+- Rich → ANSI bridge: every transcript chunk goes through
+  `_rich_to_ansi()` so existing `[bold]...[/]` markup still works
+- Lazy `_build_application()`: state init is decoupled from terminal
+  init, so tests can poke at state (submit/queue/cancel) without
+  needing a real console
+- Async animator task ticks the K-line spinner every 120 ms and calls
+  `application.invalidate()` to schedule redraws
+- ESC / Ctrl+C key bindings cancel `current_turn_task`; the task's
+  finally block drains the queue and starts the next turn if any
+
+### Migration
+
+| Mode | Command | When |
+|---|---|---|
+| **v1.6 full TUI** (default) | `financial-analyst chat` | Default new UX |
+| v1.5 simple REPL | `financial-analyst chat --simple` | If full TUI misbehaves |
+| v0.x legacy slash | `financial-analyst chat --legacy` | Old slash-only TUI |
+
+The `financial-analyst buddy` alias also now uses the v1.6 app.
+
+### Tests
+
+12 new tests in `tests/test_buddy_app.py`:
+- Rich→ANSI bridge
+- transcript growth on `_append_rich`
+- banner present at startup
+- submit-while-idle starts a turn
+- submit-while-running queues (not starts)
+- slash command handling (`/help`, `/reset`, `/tools`, `/save`)
+- ESC cancels the current turn task
+- queued input runs after current finishes
+
+30 buddy tests pass total (11 agent + 7 animation + 12 app).
+
+### Known limitations
+
+- Tool confirmation modal: auto-accepts with an ESC-hint notice.
+  Future: proper modal dialog.
+- Mouse not enabled (`mouse_support=False`) since it conflicted with
+  Windows terminal scroll. Use keyboard / PageUp / PageDown.
+- The input field is single-line. Multi-line input via Shift+Enter is
+  on the v1.6.x roadmap.
+
 ## v1.5.5 — 2026-05-20
 
 ### Added — ESC to cancel a running turn (Claude Code-style)

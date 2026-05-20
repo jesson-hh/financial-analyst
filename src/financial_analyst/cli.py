@@ -75,37 +75,44 @@ def report(
 @app.command()
 def chat(
     legacy: bool = typer.Option(False, "--legacy",
-                                 help="Use the old slash-command TUI instead of conversational buddy."),
+                                 help="Use the old slash-command TUI."),
+    simple: bool = typer.Option(False, "--simple",
+                                 help="Use the v1.5 simple line-by-line REPL (no full-screen TUI)."),
 ):
     """Conversational chat — natural language drives the whole stack.
 
-    The buddy agent (v1.5.0+) takes natural-language prompts, picks tools
-    autonomously from the 13-tool registry, executes them, and streams the
-    result. Examples:
+    Default (v1.6+) launches the full-TUI BuddyApp:
+      - Persistent input box (type during agent thinking — queued)
+      - Animated K-line spinner above the input
+      - ESC cancels the running turn cleanly
+      - Scrollable transcript
 
+    Use --simple for the v1.5 line-by-line REPL (no full-screen).
+    Use --legacy for the original slash-command TUI.
+
+    Examples:
       ❯ 茅台现在多少钱
       ❯ csi300 里 PE<20 + 股息率>3% 的
-      ❯ 跑一份寒武纪的研报
-      ❯ 我之前怎么看 SH600100
       ❯ AI 算力链最近怎么样
 
     Slash commands: /help /reset /tools /save /quit.
-
-    Use --legacy for the old slash-command-only TUI.
     """
     if legacy:
         from financial_analyst.tui import run_tui
         asyncio.run(run_tui())
-    else:
+    elif simple:
         from financial_analyst.buddy import run_chat
         asyncio.run(run_chat())
+    else:
+        from financial_analyst.buddy.app import run_app
+        asyncio.run(run_app())
 
 
 @app.command()
 def buddy():
-    """Alias for `chat` — conversational front-end."""
-    from financial_analyst.buddy import run_chat
-    asyncio.run(run_chat())
+    """Alias for `chat` — conversational front-end (full TUI)."""
+    from financial_analyst.buddy.app import run_app
+    asyncio.run(run_app())
 
 
 @app.command()
