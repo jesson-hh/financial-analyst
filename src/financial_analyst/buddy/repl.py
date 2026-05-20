@@ -30,8 +30,10 @@ from financial_analyst.buddy.animation import (
 )
 
 
-BANNER = """\
-[bold cyan]金融助手[/]  v1.5.0 — A-share research conversational agent
+from financial_analyst import __version__ as _FA_VERSION
+
+BANNER = f"""\
+[bold cyan]金融助手[/]  v{_FA_VERSION} — A-share research conversational agent
 
 Type natural language. The agent picks tools automatically.
 Slash commands: /help /reset /quit /tools /save"""

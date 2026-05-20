@@ -1,5 +1,51 @@
 # Changelog
 
+## v1.5.2 — 2026-05-20
+
+### Fixed — config file not found in pip-installed wheels (HOTFIX)
+
+`financial-analyst chat` crashed on first run from a fresh `.venv` with:
+
+```
+FileNotFoundError: 'G:\\...\\.venv\\Lib\\config\\llm.yaml'
+```
+
+**Root cause**: `LLMClient`, `loader_factory`, and `plugins` resolved
+their config paths as `Path(__file__).parents[N] / "config" / *.yaml`,
+which works in dev mode (repo root has `config/`) but breaks for
+pip-installed wheels — the wheel never included the `config/` directory.
+
+**Fix**: bundled all five config files into the package at
+`financial_analyst/_resources/config/` and replaced the three
+hard-coded paths with a shared `financial_analyst._config.find_config()`
+lookup chain:
+
+  1. Explicit `path=` argument
+  2. `$FA_CONFIG_DIR/<name>` env override
+  3. `~/.financial-analyst/config/<name>` user override
+  4. `<cwd>/config/<name>` dev mode (repo root)
+  5. Bundled `_resources/config/<name>` shipped default
+
+Pip-installed users now Just Work without copying configs anywhere.
+Dev-mode (`pip install -e .` from repo) still resolves the repo's
+`config/` directory first, so live edits to `config/llm.yaml` take
+effect immediately.
+
+### Changed
+- Wheel build now explicitly includes `src/financial_analyst/_resources/**/*`
+  via hatch's `[tool.hatch.build.targets.wheel].include`. Confirmed via
+  `zipfile.ZipFile.namelist()`: 5 yaml files present in the wheel.
+- `buddy/repl.py` banner now reads `__version__` dynamically instead
+  of hardcoding "v1.5.0".
+
+### Migration note
+
+If you previously copied `config/llm.yaml` to some custom location and
+relied on the old `Path(__file__).parents[3]` lookup, that still works
+via the cwd/config branch as long as you run the CLI from a directory
+that has `./config/llm.yaml`. Cleaner: move your overrides to
+`~/.financial-analyst/config/llm.yaml`.
+
 ## v1.5.1 — 2026-05-20
 
 ### Added — K-line thinking animation

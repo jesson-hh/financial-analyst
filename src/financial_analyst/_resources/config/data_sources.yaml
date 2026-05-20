@@ -1,0 +1,37 @@
+# config/data_sources.yaml
+#
+# Define one or more named data sources here. Run via:
+#   financial-analyst ingest --source <name>
+#
+# After ingest, point loaders.yaml at the target provider_uri:
+#   qlib_binary:
+#     provider_uri:
+#       day: ~/.financial-analyst/data/<name>
+
+sources:
+  - name: example_csv
+    type: csv
+    path: G:/my_csv_data/*.csv          # glob supported
+    code_col: ts_code                    # required unless per_code_filenames: true
+    date_col: trade_date                 # required
+    date_format: null                    # optional, e.g. "%Y%m%d"
+    per_code_filenames: false            # set true if one csv per code, filename = code
+    ohlcv_map:                           # our_field: csv_column_name
+      open: open
+      high: high
+      low: low
+      close: close
+      vol: volume
+      amount: amount
+    target: ~/.financial-analyst/data/example_csv
+
+  # Reserved (v0.4):
+  # - name: akshare_a_share
+  #   type: akshare
+  #   market: a_share
+  #   target: ~/.financial-analyst/data/akshare_a
+  #
+  # - name: yfinance_us
+  #   type: yfinance
+  #   tickers: [AAPL, NVDA]
+  #   target: ~/.financial-analyst/data/yf_us

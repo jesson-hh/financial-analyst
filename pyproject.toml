@@ -1,6 +1,6 @@
 [project]
 name = "financial-analyst"
-version = "1.5.1"
+version = "1.5.2"
 description = "A-share single-stock deep-dive multi-agent research workstation with three-tier trust isolation, FTS5 memory retrieval, dream loop introspection, and BYOM extensibility."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -88,6 +88,12 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/financial_analyst"]
+# Include bundled config files + any other non-Python resources so pip
+# installs ship the defaults (config/llm.yaml etc.) inside the wheel.
+include = [
+    "src/financial_analyst/**/*.py",
+    "src/financial_analyst/_resources/**/*",
+]
 
 [tool.hatch.build.targets.sdist]
 # Keep code, tests, docs, configs, examples, memories — exclude dev-meta only

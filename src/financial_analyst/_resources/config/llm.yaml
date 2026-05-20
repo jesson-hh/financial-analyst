@@ -1,0 +1,46 @@
+default_provider: qwen
+default_model: qwen3.5-plus
+
+providers:
+  qwen:
+    api_key_env: DASHSCOPE_API_KEY
+    base_url: https://coding.dashscope.aliyuncs.com/v1
+    models: [qwen3.5-plus, qwen3-max, qwen3.5-flash, qwen3-coder-plus]
+  anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+    models: [claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5]
+  openai:
+    api_key_env: OPENAI_API_KEY
+    models: [gpt-4o, gpt-4-turbo]
+  deepseek:
+    api_key_env: DEEPSEEK_API_KEY
+    models: [deepseek-chat]
+
+agent_overrides:
+  report-writer:
+    provider: qwen
+    model: qwen3.5-plus
+  news-reader:
+    provider: qwen
+    model: qwen3.5-plus
+  f10-reader:
+    provider: qwen
+    model: qwen3.5-plus
+  ask:
+    provider: qwen
+    model: qwen3.5-plus
+  mainline-classifier:
+    provider: qwen
+    model: qwen3.5-plus     # actually no LLM call but for consistency
+  mainline-writer:
+    provider: qwen
+    model: qwen3.5-plus
+  market-scanner:
+    provider: qwen
+    model: qwen3.5-plus
+  morning-brief-writer:
+    provider: qwen
+    model: qwen3.5-plus
+  intraday-reviewer:
+    provider: qwen
+    model: qwen3.5-plus

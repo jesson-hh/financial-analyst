@@ -21,7 +21,7 @@ import yaml
 
 log = logging.getLogger(__name__)
 
-DEFAULT_CONFIG_PATH = Path("config/plugins.yaml")
+from financial_analyst._config import find_config
 
 
 def load_plugins(config_path: Optional[Path] = None) -> List[str]:
@@ -31,8 +31,9 @@ def load_plugins(config_path: Optional[Path] = None) -> List[str]:
     Failures are logged but do NOT raise (a broken user plugin should not
     prevent the rest of the CLI from working).
     """
-    cfg_path = config_path or DEFAULT_CONFIG_PATH
-    if not cfg_path.exists():
+    try:
+        cfg_path = find_config("plugins.yaml", explicit=config_path)
+    except FileNotFoundError:
         return []
     try:
         cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}

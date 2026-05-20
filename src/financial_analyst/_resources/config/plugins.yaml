@@ -1,0 +1,10 @@
+# Plugin discovery — list Python files to import at startup.
+# Each file typically calls ModelRegistry.register / SubAgentRegistry.register / etc.
+# Paths can be absolute or relative to the repo root. `~` is expanded.
+#
+# Example: load your private FM cluster checkpoint
+# load_at_startup:
+#   - G:/my_private_code/fm_cluster.py
+#   - ~/quant_lab/custom_loaders.py
+
+load_at_startup: []

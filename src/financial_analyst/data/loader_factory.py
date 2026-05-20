@@ -30,15 +30,13 @@ from financial_analyst.data.loaders.tushare import TushareLoader
 from financial_analyst.data.loaders.qlib_binary import QlibBinaryLoader
 
 
-# Resolve relative to package root: src/financial_analyst/data/loader_factory.py
-# → go up 3 levels to reach the project root → config/loaders.yaml
-_PACKAGE_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_CONFIG_PATH = _PACKAGE_ROOT / "config" / "loaders.yaml"
+from financial_analyst._config import find_config
 
 
 def _load_config(path: Optional[Path] = None) -> dict:
-    cfg_path = path or DEFAULT_CONFIG_PATH
-    if not cfg_path.exists():
+    try:
+        cfg_path = find_config("loaders.yaml", explicit=path)
+    except FileNotFoundError:
         return {"default": "tushare", "loaders": {"tushare": {}}}
     with open(cfg_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}

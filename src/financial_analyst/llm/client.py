@@ -5,11 +5,16 @@ from typing import Any, Dict, List, Optional
 import yaml
 from litellm import acompletion
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "llm.yaml"
+from financial_analyst._config import find_config
 
 
 def load_llm_config(path: Optional[Path] = None) -> Dict[str, Any]:
-    cfg_path = path or DEFAULT_CONFIG_PATH
+    """Load llm.yaml from the standard lookup chain.
+
+    See ``financial_analyst._config.find_config`` for the search order
+    (user override → cwd/config → bundled default).
+    """
+    cfg_path = find_config("llm.yaml", explicit=path)
     with open(cfg_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
