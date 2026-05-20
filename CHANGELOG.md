@@ -1,5 +1,40 @@
 # Changelog
 
+## v1.5.3 — 2026-05-20
+
+### Changed — K-line spinner compressed to inline sparkline
+
+User feedback: the v1.5.1 6-row K-line block was too big and sat flush
+against the previous text. v1.5.3 redesigns it as a single-line
+sparkline ticker:
+
+```
+  ⠋ 整合中…  ▇▃▄▇▂   -3.12%   #000
+  ⠙ 整合中…  ▄▄▇▃▂   -0.67%   #001
+  ⠹ 整合中…  ▄▇▃▂▄   +1.47%   #002
+  ⠸ 整合中…  ▇▃▂▄▂   -1.63%   #003
+```
+
+- **5 candles** (down from 18); each is one sparkline character
+  (`▁▂▃▄▅▆▇█`) whose vertical fill encodes the close-price level within
+  the visible window
+- **1 row** of chart (down from 5), totalling **2 rows** with the
+  blank padding above
+- **Braille spinner** (`⠋⠙⠹⠸⠼⠴⠦⠧`) cycles every frame so motion is
+  visible even when the sparkline hasn't shifted yet
+- Up candles bright_green, down candles bright_red (unchanged)
+- Live delta % + frame counter on the right
+- One blank padding line above so the indicator doesn't slam against
+  prior text
+
+The animation is now ~30-40 columns wide, fits in a single visual
+breath, and feels more "ticker-like" than the old chart-style block.
+
+### Tests
+
+7 animation tests updated to reflect the new 2-row layout (was 7-row).
+All buddy tests (11 agent + 7 animation = 18) pass.
+
 ## v1.5.2 — 2026-05-20
 
 ### Fixed — config file not found in pip-installed wheels (HOTFIX)

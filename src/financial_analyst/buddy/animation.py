@@ -1,21 +1,24 @@
 """K-line spinner — finance-themed thinking animation for the buddy REPL.
 
-Renders an animated candlestick chart that updates ~8 fps while the LLM is
-thinking or a tool is running. The candles do a bounded random walk; each
-new tick shifts the chart left by one and appends a fresh candle on the
-right. Up-days render green, down-days red, doji as a horizontal bar.
+Single-line sparkline format::
 
-The status line below the chart shows what the agent is doing
-("思考中...", "调用 chain_for...", "等待 LLM..."), and a delta line shows
-the close-vs-open % of the most recent candle so the animation feels
-like a tiny live ticker.
+    ⠿ 整合中…  ▂▅▁▇▃   -1.34%   #167
+
+- 5 candles wide (sparkline-style, 1 character per candle)
+- Each candle's vertical char (▁▂▃▄▅▆▇█) encodes the close price within
+  the window range; the colour encodes direction (green=up, red=down).
+- Braille spinner dot on the left cycles every frame for a constant
+  "alive" pulse even when candles haven't shifted yet.
+- Live delta % + frame counter on the right.
+- One blank padding row above so the spinner doesn't slam against the
+  previous text.
 
 Usage::
 
     spinner = KLineSpinner()
-    with Live(spinner.render(), refresh_per_second=8, transient=True) as live:
+    with Live(spinner.render(), refresh_per_second=10, transient=True) as live:
         # spawn an asyncio task that calls spinner.tick() + live.update(spinner.render())
-        # every ~120ms; the spinner is transient so it disappears when Live exits.
+        # every ~100 ms; the spinner is transient so it disappears when Live exits.
 """
 from __future__ import annotations
 import random
@@ -24,6 +27,13 @@ from typing import List
 
 from rich.console import Group
 from rich.text import Text
+
+
+# 8 vertical-fill levels for the sparkline (lowest → highest)
+_LEVELS = "▁▂▃▄▅▆▇█"
+
+# Braille spinner — 8 frames give a smooth rotating-dots feel at 10 fps
+_SPINNER_DOTS = "⠋⠙⠹⠸⠼⠴⠦⠧"
 
 
 @dataclass
@@ -40,11 +50,20 @@ class _Candle:
 
 @dataclass
 class KLineSpinner:
-    """Animated K-line chart for the chat thinking indicator."""
+    """Compact sparkline K-line for the chat thinking indicator.
 
-    n_candles: int = 18
-    height: int = 5
-    status: str = "思考中..."
+    Default render is one line of text, padded above by a blank line so
+    it doesn't sit flush against the previous output. The visual budget
+    is roughly:
+
+        "  "  + braille dot + " " + status + "  "
+            + 5 candle chars + "   " + ±delta% + "   " + #frame
+
+    ≈ 30-40 columns; safe on any terminal ≥ 60 chars wide.
+    """
+
+    n_candles: int = 5
+    status: str = "思考中…"
     candles: List[_Candle] = field(default_factory=list)
     _last_close: float = 100.0
     _frame: int = 0
@@ -85,71 +104,57 @@ class KLineSpinner:
     # ----- render ------------------------------------------------------------
 
     def render(self) -> Group:
-        """Return a Rich Group: 5 chart rows + delta row + status row."""
-        if not self.candles:
-            return Group(Text("(initialising)", style="dim"))
+        """Return a Rich Group: one blank padding row + one inline ticker row.
 
-        # Y-scale: use 10th/90th percentile of opens+closes so a rare outlier
-        # candle doesn't compress every other candle into doji-height.
-        bodies = sorted(p for c in self.candles for p in (c.o, c.c))
-        n = len(bodies)
-        lo_body = bodies[max(0, n // 10)]
-        hi_body = bodies[min(n - 1, n - 1 - n // 10)]
-        # Add some headroom for wicks
-        wick_pad = (hi_body - lo_body) * 0.15 if hi_body > lo_body else 1.0
-        lo = lo_body - wick_pad
-        hi = hi_body + wick_pad
+        Inline row layout (left to right):
+            "  "  + spinner dot + " " + status text + "  "
+            + 5 colored sparkline chars + "   " + ±delta% + "   " + #frame
+        """
+        if not self.candles:
+            return Group(Text(""), Text("  (initialising)", style="dim"))
+
+        # Y-scale across the visible closes; pad ±20% so the chars never
+        # all stick to the extremes when the walk is monotonic.
+        closes = [c.c for c in self.candles]
+        lo = min(closes)
+        hi = max(closes)
+        pad = (hi - lo) * 0.2 if hi > lo else max(lo * 0.01, 1.0)
+        lo -= pad
+        hi += pad
         span = max(hi - lo, 1e-9)
 
-        def y_of(price: float) -> int:
-            """0 = top row, height-1 = bottom row.
-            Clamps prices outside the trimmed range to the edges."""
+        def level_char(price: float) -> str:
+            """Pick one of 8 vertical-fill chars based on price within [lo, hi]."""
             v = (price - lo) / span
-            row = int(round((self.height - 1) * (1.0 - v)))
-            return max(0, min(self.height - 1, row))
+            idx = min(len(_LEVELS) - 1, max(0, int(v * len(_LEVELS))))
+            return _LEVELS[idx]
 
-        chart_rows: List[Text] = [Text() for _ in range(self.height)]
+        # Spinner: rotate one frame per tick so the dot is alive even when
+        # candles haven't materially changed yet.
+        dot = _SPINNER_DOTS[self._frame % len(_SPINNER_DOTS)]
 
-        for candle in self.candles:
-            color = "bright_green" if candle.is_up else "bright_red"
-            y_h = y_of(candle.h)
-            y_l = y_of(candle.l)
-            y_o = y_of(candle.o)
-            y_c = y_of(candle.c)
-            body_top, body_bot = min(y_o, y_c), max(y_o, y_c)
-
-            for row_idx in range(self.height):
-                if body_top == body_bot and row_idx == body_top:
-                    ch, style = "━", color  # doji
-                elif body_top <= row_idx <= body_bot:
-                    ch, style = "█", color  # body
-                elif y_h <= row_idx < body_top:
-                    ch, style = "│", color  # upper wick
-                elif body_bot < row_idx <= y_l:
-                    ch, style = "│", color  # lower wick
-                else:
-                    ch, style = " ", None
-
-                chart_rows[row_idx].append(ch, style=style)
-                chart_rows[row_idx].append(" ")  # 1-space gutter
-
-        # Bottom line: delta % of most recent candle (single +/- sign)
+        # Last-candle stats for the right-side ticker
         last = self.candles[-1]
         delta_pct = (last.c - last.o) / last.o * 100.0 if last.o else 0.0
         delta_color = "bright_green" if delta_pct >= 0 else "bright_red"
-        delta_line = Text()
-        delta_line.append("  ", style="")
-        delta_line.append(
-            f"{delta_pct:+5.2f}%", style=f"{delta_color} bold"
-        )
-        delta_line.append(f"   bar #{self._frame:03d}", style="dim")
 
-        # Status line
-        status_line = Text()
-        status_line.append("  ▸ ", style="cyan bold")
-        status_line.append(self.status, style="cyan")
+        line = Text("  ")
+        line.append(dot, style="cyan bold")
+        line.append(" ")
+        line.append(self.status, style="cyan")
+        line.append("  ")
 
-        return Group(*chart_rows, delta_line, status_line)
+        # Sparkline candles — color encodes direction, char encodes level
+        for c in self.candles:
+            color = "bright_green" if c.is_up else "bright_red"
+            line.append(level_char(c.c), style=f"{color} bold")
+
+        line.append(f"   {delta_pct:+5.2f}%", style=f"{delta_color} bold")
+        line.append(f"   #{self._frame:03d}", style="dim")
+
+        # Blank padding row above so the spinner doesn't slam against
+        # the previous output.
+        return Group(Text(""), line)
 
 
 # Status string presets used by the REPL --------------------------------------
