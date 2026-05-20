@@ -1,5 +1,74 @@
 # Changelog
 
+## v1.5.0 — 2026-05-20
+
+### Added — Conversational front-end (Buddy)
+
+A Claude Code-style conversational REPL: natural-language prompts in,
+LLM autonomously picks tools, results stream back. Replaces the old
+slash-command-only TUI as the default entry point for `chat`.
+
+**Workflow**:
+```
+❯ financial-analyst chat
+❯ 茅台是什么行业
+[CALL] industry_show({'code': 'SH600519'})
+[RESULT] SH600519: 白酒
+贵州茅台（SH600519）属于白酒行业。需要我查看产业链或最新研报吗?
+
+❯ 寒武纪在产业链什么位置 它有哪些同行
+[CALL] chain_for({'code': 'SH688256'})
+[RESULT] SH688256 → AI_chip_GPU (anchor, compute_chain upstream)
+寒武纪（SH688256）核心产品: AI 加速 GPU/DCU
+上游: 先进晶圆代工 / HBM 存储 / 先进封装
+同行: 海光信息 / 景嘉微 / 国芯科技 / 紫光国微 / 芯原股份 / 龙芯中科
+催化: NVDA GPU 发布周期 + BIS 出口管制 + 互联网云厂订单...
+```
+
+**13 tools auto-callable**:
+- `run_report` (full deep-dive, confirm required)
+- `quote_lookup`, `news_query`, `industry_show`
+- `alpha_bench` (confirm required), `alpha_snapshot`, `alpha_list`, `alpha_show`
+- `chain_for`, `stocks_show`
+- `mainline_radar`, `morning_brief`, `dream_review`
+
+Each tool's `description` is bilingual so the LLM matches Chinese
+prompts. Costly tools (`run_report`, `alpha_bench`) gate behind a
+confirmation callback — the REPL asks the user "(y/N)" before running.
+
+**New module**: `financial_analyst.buddy/`
+- `tools.py` — 13-tool registry with `Tool` dataclass, JSON schemas, run callable. Both Anthropic and OpenAI/Qwen function-call shapes via `to_anthropic_schema()` / `to_openai_schema()`.
+- `agent.py` — `BuddyAgent` class with tool-use loop driven by LiteLLM. Yields `TurnEvent` (kind={text, tool_call, tool_result, error, done}) so the REPL can render as the agent thinks.
+- `repl.py` — prompt_toolkit + Rich REPL. Slash commands: `/help /reset /quit /tools /save <path>`.
+
+**Safety features**:
+- Confirmation gate on costly tools (`run_report` ~5min, `alpha_bench` ~3min)
+- `max_tool_iters=8` loop guard prevents infinite tool-call loops
+- Tool errors surface verbatim to user + LLM (so it can recover)
+- Conversation history persists across turns; `/reset` clears
+
+**CLI**:
+- `financial-analyst chat` — default → buddy
+- `financial-analyst chat --legacy` — old slash-command TUI
+- `financial-analyst buddy` — explicit alias
+
+### Tests
+- 11 new in `test_buddy.py`: registry sanity / schema well-formedness /
+  confirm-required gating / single-turn text-only / single tool call /
+  tool error recovery / declined confirmation / unknown tool name /
+  max-iter loop guard / conversation state persistence.
+- All 11 pass with mock LLM.
+- Real LLM smoke tests (Qwen via DashScope) verify:
+  - "茅台是什么行业" → industry_show → "白酒"
+  - "寒武纪在产业链什么位置 它有哪些同行" → chain_for → upstream/peers/catalyst
+
+### Migration note
+
+The legacy slash-command TUI still ships (`chat --legacy`). New users
+land on buddy automatically. No data migration needed — buddy stores
+nothing persistent beyond `~/.financial-analyst/buddy_history.txt`
+(prompt-toolkit input history).
+
 ## v1.4.6 — 2026-05-20
 
 ### Added — gtja143 + gtja149 (the last two "unportable" alphas)

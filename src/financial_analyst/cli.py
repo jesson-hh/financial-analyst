@@ -73,10 +73,39 @@ def report(
 
 
 @app.command()
-def chat():
-    """Drop into interactive TUI."""
-    from financial_analyst.tui import run_tui
-    asyncio.run(run_tui())
+def chat(
+    legacy: bool = typer.Option(False, "--legacy",
+                                 help="Use the old slash-command TUI instead of conversational buddy."),
+):
+    """Conversational chat — natural language drives the whole stack.
+
+    The buddy agent (v1.5.0+) takes natural-language prompts, picks tools
+    autonomously from the 13-tool registry, executes them, and streams the
+    result. Examples:
+
+      ❯ 茅台现在多少钱
+      ❯ csi300 里 PE<20 + 股息率>3% 的
+      ❯ 跑一份寒武纪的研报
+      ❯ 我之前怎么看 SH600100
+      ❯ AI 算力链最近怎么样
+
+    Slash commands: /help /reset /tools /save /quit.
+
+    Use --legacy for the old slash-command-only TUI.
+    """
+    if legacy:
+        from financial_analyst.tui import run_tui
+        asyncio.run(run_tui())
+    else:
+        from financial_analyst.buddy import run_chat
+        asyncio.run(run_chat())
+
+
+@app.command()
+def buddy():
+    """Alias for `chat` — conversational front-end."""
+    from financial_analyst.buddy import run_chat
+    asyncio.run(run_chat())
 
 
 @app.command()
