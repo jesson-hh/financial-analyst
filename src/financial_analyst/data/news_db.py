@@ -106,6 +106,103 @@ CREATE TABLE IF NOT EXISTS earnings_dates (
     captured_at TEXT,
     PRIMARY KEY (code, report_date)
 );
+
+-- v1.7.1: xueqiu personal account snapshots
+CREATE TABLE IF NOT EXISTS user_watchlists (
+    snapshot_date TEXT NOT NULL,
+    group_pid TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    name TEXT,
+    price REAL,
+    change_percent REAL,
+    url TEXT,
+    raw TEXT,
+    PRIMARY KEY (snapshot_date, group_pid, symbol)
+);
+CREATE INDEX IF NOT EXISTS watchlist_symbol_idx ON user_watchlists(symbol);
+
+CREATE TABLE IF NOT EXISTS user_groups (
+    snapshot_date TEXT NOT NULL,
+    pid TEXT NOT NULL,
+    name TEXT,
+    count INTEGER,
+    PRIMARY KEY (snapshot_date, pid)
+);
+
+CREATE TABLE IF NOT EXISTS fund_snapshots (
+    snapshot_date TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    account_name TEXT,
+    total_assets REAL,
+    available_cash REAL,
+    daily_gain REAL,
+    hold_gain REAL,
+    raw TEXT,
+    PRIMARY KEY (snapshot_date, account_id)
+);
+
+CREATE TABLE IF NOT EXISTS fund_holdings (
+    snapshot_date TEXT NOT NULL,
+    account_name TEXT NOT NULL,
+    fd_code TEXT NOT NULL,
+    fd_name TEXT,
+    market_value REAL,
+    volume REAL,
+    daily_gain REAL,
+    hold_gain REAL,
+    hold_gain_rate REAL,
+    market_percent REAL,
+    raw TEXT,
+    PRIMARY KEY (snapshot_date, account_name, fd_code)
+);
+
+-- v1.7.2: 同花顺 (ths-extra opencli plugin) tables
+CREATE TABLE IF NOT EXISTS iwencai_results (
+    snapshot_ts TEXT NOT NULL,
+    question TEXT NOT NULL,
+    row_index INTEGER NOT NULL,
+    columns TEXT,
+    cells TEXT,
+    PRIMARY KEY (snapshot_ts, question, row_index)
+);
+
+CREATE TABLE IF NOT EXISTS ths_fund_flow (
+    snapshot_ts TEXT NOT NULL,
+    target TEXT NOT NULL DEFAULT 'gegu',
+    code TEXT NOT NULL,
+    name TEXT,
+    price TEXT,
+    change_pct TEXT,
+    turnover_pct TEXT,
+    inflow TEXT,
+    outflow TEXT,
+    main_net TEXT,
+    total_amount TEXT,
+    num_stocks TEXT,
+    leader TEXT,
+    trade_time TEXT,
+    direction TEXT,
+    volume TEXT,
+    url TEXT,
+    raw_cells TEXT,
+    PRIMARY KEY (snapshot_ts, target, code, name)
+);
+CREATE INDEX IF NOT EXISTS ths_fund_flow_code_idx ON ths_fund_flow(code);
+-- ths_fund_flow_target_idx is created inside _migrate after ensuring
+-- the target column exists (legacy DBs predate v1.7.3 schema).
+
+CREATE TABLE IF NOT EXISTS ths_concept_boards (
+    snapshot_ts TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    board_code TEXT NOT NULL,
+    board_name TEXT,
+    release_date TEXT,
+    num_stocks TEXT,
+    change_pct TEXT,
+    board_url TEXT,
+    raw_cells TEXT,
+    PRIMARY KEY (snapshot_ts, mode, board_code, board_name)
+);
 """
 
 
@@ -118,7 +215,41 @@ class NewsDB:
         self.conn = sqlite3.connect(str(self.path))
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns to existing tables for forward-compat. SQLite's
+        ``CREATE TABLE IF NOT EXISTS`` doesn't alter on schema change,
+        so we ALTER TABLE in place for any new columns we expect."""
+        # v1.7.3: ths_fund_flow gained target + num_stocks + leader +
+        # trade_time + direction + volume + url + raw_cells. Add any
+        # missing columns to the live table.
+        wanted = [
+            ("target", "TEXT NOT NULL DEFAULT 'gegu'"),
+            ("num_stocks", "TEXT"),
+            ("leader", "TEXT"),
+            ("trade_time", "TEXT"),
+            ("direction", "TEXT"),
+            ("volume", "TEXT"),
+            ("url", "TEXT"),
+            ("raw_cells", "TEXT"),
+        ]
+        cur = self.conn.execute("PRAGMA table_info(ths_fund_flow)")
+        existing = {row[1] for row in cur.fetchall()}
+        for col, typ in wanted:
+            if col not in existing:
+                try:
+                    self.conn.execute(f"ALTER TABLE ths_fund_flow ADD COLUMN {col} {typ}")
+                except sqlite3.OperationalError:
+                    pass
+        # Now safe to create the target index (column guaranteed present)
+        try:
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS ths_fund_flow_target_idx ON ths_fund_flow(target)"
+            )
+        except sqlite3.OperationalError:
+            pass
 
     def close(self) -> None:
         self.conn.close()
@@ -411,6 +542,271 @@ class NewsDB:
         cur = self.conn.execute(sql, params)
         return [dict(row) for row in cur.fetchall()]
 
+    # ---- user_watchlists / user_groups (v1.7.1 — xueqiu personal) ----
+
+    def upsert_watchlist(self, items: Iterable[Dict[str, Any]], group_pid: str = "-1",
+                          snapshot_date: Optional[str] = None) -> int:
+        snapshot = snapshot_date or datetime.now().strftime("%Y-%m-%d")
+        n = 0
+        for it in items:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO user_watchlists (snapshot_date, group_pid, symbol, "
+                "name, price, change_percent, url, raw) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    snapshot, group_pid,
+                    str(it.get("symbol") or it.get("code") or "").upper(),
+                    it.get("name"),
+                    it.get("price"),
+                    it.get("changePercent") or it.get("change_percent"),
+                    it.get("url"),
+                    json.dumps(it, ensure_ascii=False, default=str),
+                ),
+            )
+            n += 1
+        self.conn.commit()
+        return n
+
+    def upsert_groups(self, items: Iterable[Dict[str, Any]],
+                       snapshot_date: Optional[str] = None) -> int:
+        snapshot = snapshot_date or datetime.now().strftime("%Y-%m-%d")
+        n = 0
+        for it in items:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO user_groups (snapshot_date, pid, name, count) "
+                "VALUES (?, ?, ?, ?)",
+                (snapshot, str(it.get("pid")), it.get("name"), it.get("count") or 0),
+            )
+            n += 1
+        self.conn.commit()
+        return n
+
+    def query_watchlist(self, group_pid: str = "-1", snapshot_date: Optional[str] = None
+                         ) -> List[Dict[str, Any]]:
+        """Latest watchlist for a group. Defaults to today's snapshot."""
+        if snapshot_date:
+            cur = self.conn.execute(
+                "SELECT * FROM user_watchlists WHERE snapshot_date=? AND group_pid=? ORDER BY symbol",
+                (snapshot_date, group_pid),
+            )
+        else:
+            # Latest available snapshot
+            cur = self.conn.execute(
+                "SELECT * FROM user_watchlists WHERE group_pid=? AND snapshot_date="
+                "(SELECT MAX(snapshot_date) FROM user_watchlists WHERE group_pid=?) ORDER BY symbol",
+                (group_pid, group_pid),
+            )
+        return [dict(row) for row in cur.fetchall()]
+
+    def query_groups(self, snapshot_date: Optional[str] = None) -> List[Dict[str, Any]]:
+        if snapshot_date:
+            cur = self.conn.execute(
+                "SELECT * FROM user_groups WHERE snapshot_date=? ORDER BY pid",
+                (snapshot_date,),
+            )
+        else:
+            cur = self.conn.execute(
+                "SELECT * FROM user_groups WHERE snapshot_date="
+                "(SELECT MAX(snapshot_date) FROM user_groups) ORDER BY pid",
+            )
+        return [dict(row) for row in cur.fetchall()]
+
+    # ---- fund_snapshots / fund_holdings (v1.7.1 — danjuanfunds personal) ----
+
+    def upsert_fund_snapshot(self, accounts: Iterable[Dict[str, Any]],
+                              snapshot_date: Optional[str] = None) -> int:
+        snapshot = snapshot_date or datetime.now().strftime("%Y-%m-%d")
+        n = 0
+        for it in accounts:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO fund_snapshots (snapshot_date, account_id, account_name, "
+                "total_assets, available_cash, daily_gain, hold_gain, raw) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    snapshot,
+                    str(it.get("accountId") or it.get("account_id") or it.get("accountName") or "default"),
+                    it.get("accountName") or it.get("account_name"),
+                    it.get("totalAssets") or it.get("total_assets"),
+                    it.get("availableCash") or it.get("available_cash"),
+                    it.get("dailyGain") or it.get("daily_gain"),
+                    it.get("holdGain") or it.get("hold_gain"),
+                    json.dumps(it, ensure_ascii=False, default=str),
+                ),
+            )
+            n += 1
+        self.conn.commit()
+        return n
+
+    def upsert_fund_holdings(self, items: Iterable[Dict[str, Any]],
+                              snapshot_date: Optional[str] = None) -> int:
+        snapshot = snapshot_date or datetime.now().strftime("%Y-%m-%d")
+        n = 0
+        for it in items:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO fund_holdings (snapshot_date, account_name, fd_code, fd_name, "
+                "market_value, volume, daily_gain, hold_gain, hold_gain_rate, market_percent, raw) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    snapshot,
+                    it.get("accountName") or it.get("account_name") or "default",
+                    str(it.get("fdCode") or it.get("fd_code") or ""),
+                    it.get("fdName") or it.get("fd_name"),
+                    it.get("marketValue") or it.get("market_value"),
+                    it.get("volume"),
+                    it.get("dailyGain") or it.get("daily_gain"),
+                    it.get("holdGain") or it.get("hold_gain"),
+                    it.get("holdGainRate") or it.get("hold_gain_rate"),
+                    it.get("marketPercent") or it.get("market_percent"),
+                    json.dumps(it, ensure_ascii=False, default=str),
+                ),
+            )
+            n += 1
+        self.conn.commit()
+        return n
+
+    def query_fund_snapshot(self, snapshot_date: Optional[str] = None) -> List[Dict[str, Any]]:
+        if snapshot_date:
+            cur = self.conn.execute(
+                "SELECT * FROM fund_snapshots WHERE snapshot_date=?", (snapshot_date,),
+            )
+        else:
+            cur = self.conn.execute(
+                "SELECT * FROM fund_snapshots WHERE snapshot_date="
+                "(SELECT MAX(snapshot_date) FROM fund_snapshots)",
+            )
+        return [dict(row) for row in cur.fetchall()]
+
+    def query_fund_holdings(self, account_name: str = "",
+                             snapshot_date: Optional[str] = None) -> List[Dict[str, Any]]:
+        if snapshot_date is None:
+            row = self.conn.execute(
+                "SELECT MAX(snapshot_date) FROM fund_holdings"
+            ).fetchone()
+            snapshot_date = row[0] if row and row[0] else None
+        if snapshot_date is None:
+            return []
+        if account_name:
+            cur = self.conn.execute(
+                "SELECT * FROM fund_holdings WHERE snapshot_date=? AND account_name=? ORDER BY market_value DESC",
+                (snapshot_date, account_name),
+            )
+        else:
+            cur = self.conn.execute(
+                "SELECT * FROM fund_holdings WHERE snapshot_date=? ORDER BY market_value DESC",
+                (snapshot_date,),
+            )
+        return [dict(row) for row in cur.fetchall()]
+
+    # ---- ths-extra: iwencai_results / ths_fund_flow / ths_concept_boards (v1.7.2) ----
+
+    def upsert_iwencai(self, items: Iterable[Dict[str, Any]]) -> int:
+        n = 0
+        for it in items:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO iwencai_results "
+                "(snapshot_ts, question, row_index, columns, cells) VALUES (?, ?, ?, ?, ?)",
+                (
+                    it.get("snapshot_ts") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    it.get("question"),
+                    it.get("row_index", 0),
+                    it.get("columns") or "",
+                    it.get("cells") or "",
+                ),
+            )
+            n += 1
+        self.conn.commit()
+        return n
+
+    def query_iwencai(self, question: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """Return the latest snapshot for a question (most recent timestamp)."""
+        cur = self.conn.execute(
+            "SELECT * FROM iwencai_results WHERE question=? AND snapshot_ts="
+            "(SELECT MAX(snapshot_ts) FROM iwencai_results WHERE question=?) "
+            "ORDER BY row_index LIMIT ?",
+            (question, question, limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def upsert_ths_fund_flow(self, items: Iterable[Dict[str, Any]]) -> int:
+        n = 0
+        for it in items:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO ths_fund_flow "
+                "(snapshot_ts, target, code, name, price, change_pct, turnover_pct, "
+                "inflow, outflow, main_net, total_amount, num_stocks, leader, "
+                "trade_time, direction, volume, url, raw_cells) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    it.get("snapshot_ts") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    it.get("target") or "gegu",
+                    it.get("code") or "",
+                    it.get("name") or "",
+                    it.get("price"), it.get("change_pct"), it.get("turnover_pct"),
+                    it.get("inflow"), it.get("outflow"),
+                    it.get("main_net"), it.get("total_amount"),
+                    it.get("num_stocks"), it.get("leader"),
+                    it.get("trade_time"), it.get("direction"),
+                    it.get("volume"), it.get("url"), it.get("raw_cells"),
+                ),
+            )
+            n += 1
+        self.conn.commit()
+        return n
+
+    def query_ths_fund_flow(self, target: str = "gegu",
+                             limit: int = 30) -> List[Dict[str, Any]]:
+        cur = self.conn.execute(
+            "SELECT * FROM ths_fund_flow WHERE target=? AND snapshot_ts="
+            "(SELECT MAX(snapshot_ts) FROM ths_fund_flow WHERE target=?) "
+            "ORDER BY rowid LIMIT ?",
+            (target, target, limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def query_ths_fund_flow_history(self, code: str, target: str = "gegu",
+                                     limit: int = 10) -> List[Dict[str, Any]]:
+        """All snapshots of one code on a leaderboard, newest first.
+        Used by the cross-day fund-flow diff tool."""
+        cur = self.conn.execute(
+            "SELECT * FROM ths_fund_flow WHERE code=? AND target=? "
+            "ORDER BY snapshot_ts DESC LIMIT ?",
+            (code, target, limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def upsert_ths_concept_boards(self, items: Iterable[Dict[str, Any]]) -> int:
+        n = 0
+        for it in items:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO ths_concept_boards "
+                "(snapshot_ts, mode, board_code, board_name, release_date, "
+                "num_stocks, change_pct, board_url, raw_cells) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    it.get("snapshot_ts") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    it.get("mode", "new"),
+                    it.get("board_code") or "",
+                    it.get("board_name") or "",
+                    it.get("release_date") or "",
+                    it.get("num_stocks") or "",
+                    it.get("change_pct") or "",
+                    it.get("board_url") or "",
+                    it.get("raw_cells") or "",
+                ),
+            )
+            n += 1
+        self.conn.commit()
+        return n
+
+    def query_ths_concept_boards(self, mode: str = "new",
+                                  limit: int = 30) -> List[Dict[str, Any]]:
+        cur = self.conn.execute(
+            "SELECT * FROM ths_concept_boards WHERE mode=? AND snapshot_ts="
+            "(SELECT MAX(snapshot_ts) FROM ths_concept_boards WHERE mode=?) "
+            "ORDER BY rowid LIMIT ?",
+            (mode, mode, limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
     def stats(self) -> Dict[str, int]:
         return {
             "news": self.conn.execute("SELECT COUNT(*) FROM news").fetchone()[0],
@@ -419,4 +815,11 @@ class NewsDB:
             "social_posts": self.conn.execute("SELECT COUNT(*) FROM social_posts").fetchone()[0],
             "hot_stocks": self.conn.execute("SELECT COUNT(*) FROM hot_stocks").fetchone()[0],
             "earnings_dates": self.conn.execute("SELECT COUNT(*) FROM earnings_dates").fetchone()[0],
+            "user_watchlists": self.conn.execute("SELECT COUNT(*) FROM user_watchlists").fetchone()[0],
+            "user_groups": self.conn.execute("SELECT COUNT(*) FROM user_groups").fetchone()[0],
+            "fund_snapshots": self.conn.execute("SELECT COUNT(*) FROM fund_snapshots").fetchone()[0],
+            "fund_holdings": self.conn.execute("SELECT COUNT(*) FROM fund_holdings").fetchone()[0],
+            "iwencai_results": self.conn.execute("SELECT COUNT(*) FROM iwencai_results").fetchone()[0],
+            "ths_fund_flow": self.conn.execute("SELECT COUNT(*) FROM ths_fund_flow").fetchone()[0],
+            "ths_concept_boards": self.conn.execute("SELECT COUNT(*) FROM ths_concept_boards").fetchone()[0],
         }

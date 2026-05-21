@@ -24,6 +24,15 @@ class LLMClient:
         self.provider = provider
         self.model = model
         self.config = config
+        # v1.7.5: cumulative token accounting for the buddy status line.
+        # Carried across /model switches via with_overrides().
+        self.total_prompt_tokens: int = 0
+        self.total_completion_tokens: int = 0
+        self.n_calls: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.total_prompt_tokens + self.total_completion_tokens
 
     @classmethod
     def for_agent(cls, agent_name: str, config_path: Optional[Path] = None) -> "LLMClient":
@@ -32,6 +41,32 @@ class LLMClient:
         provider = override.get("provider", config["default_provider"])
         model = override.get("model", config["default_model"])
         return cls(provider=provider, model=model, config=config)
+
+    def with_overrides(self, provider: Optional[str] = None,
+                        model: Optional[str] = None) -> "LLMClient":
+        """Return a new LLMClient with the same config but a different
+        provider/model. Used by the buddy ``/model`` slash command to
+        live-switch the LLM without reloading config from disk.
+
+        Cumulative token counters carry over so the session total spans
+        model switches."""
+        new = LLMClient(
+            provider=provider or self.provider,
+            model=model or self.model,
+            config=self.config,
+        )
+        new.total_prompt_tokens = self.total_prompt_tokens
+        new.total_completion_tokens = self.total_completion_tokens
+        new.n_calls = self.n_calls
+        return new
+
+    def list_models(self) -> Dict[str, List[str]]:
+        """Return ``{provider: [model, ...]}`` from the loaded config.
+        Source of truth for the ``/model`` picker."""
+        out: Dict[str, List[str]] = {}
+        for prov, cfg in (self.config.get("providers") or {}).items():
+            out[prov] = list(cfg.get("models") or [])
+        return out
 
     def _model_string(self) -> str:
         if self.provider == "anthropic":
@@ -70,4 +105,22 @@ class LLMClient:
             if api_key:
                 kwargs["api_key"] = api_key
 
-        return await acompletion(**kwargs)
+        response = await acompletion(**kwargs)
+        # v1.7.5: accumulate token usage for the buddy status line.
+        try:
+            usage = None
+            if isinstance(response, dict):
+                usage = response.get("usage")
+            else:
+                usage = getattr(response, "usage", None)
+            if usage is not None:
+                get = (lambda k: usage.get(k) if isinstance(usage, dict)
+                       else getattr(usage, k, None))
+                pt = get("prompt_tokens") or 0
+                ct = get("completion_tokens") or 0
+                self.total_prompt_tokens += int(pt)
+                self.total_completion_tokens += int(ct)
+                self.n_calls += 1
+        except Exception:
+            pass
+        return response

@@ -593,7 +593,7 @@ async def _run_intraday(codes: str, asof: Optional[str], out_dir: Path):
 def news_collect_cmd(
     sources: str = typer.Option(
         "kuaixun,longhu", "--sources",
-        help="Comma list: kuaixun, longhu, holders, sinafinance, xueqiu-comments, xueqiu-hot, xueqiu-earnings",
+        help="Comma list: kuaixun, longhu, holders, sinafinance, xueqiu-comments, xueqiu-hot, xueqiu-earnings, xueqiu-feed, xueqiu-hot-posts, xueqiu-watchlist, xueqiu-groups, xueqiu-fund, ths-hot, ths-fund-flow, ths-concept-fund, ths-industry-fund, ths-large-orders, ths-concept-board",
     ),
     code: str = typer.Option("", "--code", help="Filter to one stock (for holders/xueqiu-comments/xueqiu-earnings, required)"),
     limit: int = typer.Option(200, "--limit", help="Max items per source"),
@@ -604,6 +604,11 @@ def news_collect_cmd(
         is_opencli_available, EastmoneyKuaixunCollector, EastmoneyLonghuCollector,
         EastmoneyHoldersCollector, SinafinanceNewsCollector,
         XueqiuCommentsCollector, XueqiuHotStockCollector, XueqiuEarningsCollector,
+        XueqiuFeedCollector, XueqiuHotPostsCollector,
+        XueqiuWatchlistCollector, XueqiuGroupsCollector,
+        XueqiuFundSnapshotCollector, XueqiuFundHoldingsCollector,
+        THSHotRankCollector,
+        THSFundFlowCollector, THSConceptBoardCollector,
     )
     if not is_opencli_available():
         typer.echo("opencli not on PATH. Install: npm install -g @jackwener/opencli")
@@ -651,8 +656,62 @@ def news_collect_cmd(
                 items = XueqiuEarningsCollector().fetch(code)
                 n = db.upsert_earnings_dates(items, source="xueqiu_earnings")
                 totals[f"xueqiu_earnings_{code}"] = n
+            elif src == "ths-hot":
+                items = THSHotRankCollector().fetch(limit=limit)
+                n = db.upsert_hot_stocks(items, source="ths_hot_rank")
+                totals["ths_hot_rank"] = n
+            elif src == "xueqiu-feed":
+                items = XueqiuFeedCollector().fetch(limit=limit)
+                n = db.upsert_news(items, source="xueqiu_feed")
+                totals["xueqiu_feed"] = n
+            elif src == "xueqiu-hot-posts":
+                items = XueqiuHotPostsCollector().fetch(limit=limit)
+                n = db.upsert_news(items, source="xueqiu_hot_posts")
+                totals["xueqiu_hot_posts"] = n
+            elif src == "xueqiu-watchlist":
+                # Defaults to -1 (all groups). For a specific group pass
+                # the pid in --code, e.g. `--code -5` for 沪深 only.
+                pid = code if code and code.lstrip("-").isdigit() else "-1"
+                items = XueqiuWatchlistCollector().fetch(pid=pid, limit=limit)
+                n = db.upsert_watchlist(items, group_pid=pid)
+                totals[f"xueqiu_watchlist_pid{pid}"] = n
+            elif src == "xueqiu-groups":
+                items = XueqiuGroupsCollector().fetch()
+                n = db.upsert_groups(items)
+                totals["xueqiu_groups"] = n
+            elif src == "xueqiu-fund":
+                # Combined: snapshot + holdings in one call. Both endpoints
+                # need danjuan login; report the underlying error cleanly.
+                try:
+                    snap = XueqiuFundSnapshotCollector().fetch()
+                    totals["xueqiu_fund_snapshot"] = db.upsert_fund_snapshot(snap)
+                except Exception as exc:
+                    typer.echo(f"[xueqiu-fund snapshot] {exc} (hint: log in to danjuanfunds.com)")
+                try:
+                    hold = XueqiuFundHoldingsCollector().fetch()
+                    totals["xueqiu_fund_holdings"] = db.upsert_fund_holdings(hold)
+                except Exception as exc:
+                    typer.echo(f"[xueqiu-fund holdings] {exc} (hint: log in to danjuanfunds.com)")
+            elif src == "ths-fund-flow":
+                items = THSFundFlowCollector().fetch(target="gegu", limit=limit)
+                totals["ths_fund_flow_gegu"] = db.upsert_ths_fund_flow(items)
+            elif src == "ths-concept-fund":
+                items = THSFundFlowCollector().fetch(target="gainian", limit=limit)
+                totals["ths_fund_flow_gainian"] = db.upsert_ths_fund_flow(items)
+            elif src == "ths-industry-fund":
+                items = THSFundFlowCollector().fetch(target="hangye", limit=limit)
+                totals["ths_fund_flow_hangye"] = db.upsert_ths_fund_flow(items)
+            elif src == "ths-large-orders":
+                items = THSFundFlowCollector().fetch(target="ddzz", limit=limit)
+                totals["ths_fund_flow_ddzz"] = db.upsert_ths_fund_flow(items)
+            elif src == "ths-concept-board":
+                # Default mode=new (newly minted concepts). Pass --code "rank"
+                # to switch to the ranked leaderboard (URL not fully verified).
+                mode = code if code in ("new", "rank") else "new"
+                items = THSConceptBoardCollector().fetch(mode=mode, limit=limit)
+                totals[f"ths_concept_boards_{mode}"] = db.upsert_ths_concept_boards(items)
             else:
-                typer.echo(f"Unknown source: {src} (try kuaixun/longhu/holders/sinafinance/xueqiu-comments/xueqiu-hot/xueqiu-earnings)")
+                typer.echo(f"Unknown source: {src} (try kuaixun/longhu/holders/sinafinance/xueqiu-comments/xueqiu-hot/xueqiu-earnings/xueqiu-feed/xueqiu-hot-posts/xueqiu-watchlist/xueqiu-groups/xueqiu-fund/ths-hot)")
         except Exception as exc:
             typer.echo(f"[{src}] failed: {exc}")
     db.close()

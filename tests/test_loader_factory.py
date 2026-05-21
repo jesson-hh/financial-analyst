@@ -69,6 +69,17 @@ def test_factory_qlib_binary_missing_uri_raises(tmp_path):
 
 def test_factory_missing_config_falls_back_to_tushare(tmp_path, monkeypatch):
     monkeypatch.setenv("TUSHARE_TOKEN", "fake")
+    # Since v1.5.2, find_config() walks a 5-level lookup chain that always
+    # resolves to the bundled config/loaders.yaml — so an explicit missing
+    # path no longer means "no config anywhere". To exercise the genuine
+    # last-resort fallback (the except FileNotFoundError branch in
+    # _load_config), simulate find_config finding nothing.
+    import financial_analyst.data.loader_factory as lf
+
+    def _raise(*a, **kw):
+        raise FileNotFoundError("no loaders.yaml anywhere")
+
+    monkeypatch.setattr(lf, "find_config", _raise)
     loader = get_default_loader(config_path=tmp_path / "nonexistent.yaml")
     assert isinstance(loader, TushareLoader)
 

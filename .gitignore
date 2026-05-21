@@ -7,6 +7,10 @@ build/
 dist/
 .env
 out/
+# opencli plugin deps — installed locally via `opencli plugin install`,
+# never committed (only the .js adapters + manifest are source).
+opencli-plugin-ths-extra/node_modules/
+node_modules/
 news/**/*.txt
 news/**/*.html
 news/**/*.pdf

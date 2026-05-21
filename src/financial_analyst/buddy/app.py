@@ -28,6 +28,9 @@ Key features vs. the v1.5 simple REPL:
 - Rich markdown / colours bridge into prompt_toolkit's renderer via
   Rich → ANSI → prompt_toolkit ANSI() — keeps the existing colour
   conventions used by all the v1.5 event handlers.
+- v1.6.7 follow-tail state machine: PageUp pauses auto-scroll so you
+  can read history; End / Ctrl-↓ jumps back to latest. New appends
+  don't snatch the viewport from underneath you while you're paused.
 
 The transcript buffer is append-only; we never rewrite history. The
 spinner is a separate `KLineSpinner` instance ticking on a background
@@ -48,8 +51,10 @@ from prompt_toolkit.layout import Layout
 from prompt_toolkit.layout.containers import (
     ConditionalContainer, HSplit, Window,
 )
+from prompt_toolkit.data_structures import Point
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
+from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
 from prompt_toolkit.widgets import TextArea
 
 from rich.console import Console
@@ -99,25 +104,41 @@ _BANNER = f"""\
 [bold cyan]金融助手[/]  v{_FA_VERSION} — A-share research conversational agent
 
 Type natural language. The agent picks tools automatically.
-[bold]ESC[/] cancel running turn · Enter submit · type while agent thinks (queues)
-Slash: [cyan]/help /reset /tools /save /quit[/]
+[bold]ESC[/] cancel · Enter submit · [bold]PageUp[/] 翻历史 · [bold]End[/] 回到最新
+[bold]/mode[/] safe/default/auto · [bold]/model[/] switch LLM · [bold]/help[/] more
 [dim]──────────────────────────────────────────────────────────────[/]
 """
 
 
 _HELP = """[bold]Slash commands:[/]
 
-  /help           Show this message
-  /reset          Clear conversation history
-  /quit  /exit    Leave the app
-  /tools          List 14 available tools
-  /save <path>    Dump transcript to a markdown file
+  /help                  Show this message
+  /reset                 Clear conversation history
+  /quit  /exit           Leave the app
+  /tools                 List available tools
+  /save <path>           Dump transcript to a markdown file
+  /mode [default|safe|auto]
+                         Show or set permission mode (see below)
+  /model [<name>]        Show available models or switch to one
+  /watch [on [min] [sources] | off]
+                         Background 盯盘: evaluate price alerts every
+                         N min (+ optional auto-collect), fire matches
+                         into the transcript. Add alerts with natural
+                         language ("茅台跌破1200提醒我").
+
+[bold]Permission modes:[/]
+  default   Auto-run instant/seconds tools; ASK before minutes-level
+            ones (run_report, alpha_bench). Recommended for daily use.
+  safe      ASK before EVERY tool call. Every step requires y/n.
+            Use when reviewing the agent's behaviour.
+  auto      Auto-run EVERYTHING including minutes-level tools.
+            No prompts. Use only when you trust the prompt + model.
 
 [bold]Examples:[/]
   "茅台现在多少钱"
   "csi300 里 PE<20 + 股息率>3% 的"
   "AI 算力链最近怎么样"
-  "跑一份寒武纪的研报"     [dim](会问 y/N 因为耗时长)[/]
+  "跑一份寒武纪的研报"     [dim](default 模式下会问 y/n)[/]
 """
 
 
@@ -142,6 +163,51 @@ class BuddyApp:
         self.queued_input: Optional[str] = None
         self.current_turn_task: Optional[asyncio.Task] = None
         self.animator_task: Optional[asyncio.Task] = None
+
+        # v1.6.7: scroll state machine.
+        # follow_tail=True (default): new appends auto-scroll into view.
+        # follow_tail=False: user has paged up and is browsing history.
+        #   ``top_line`` is the row index that should sit at the top of
+        #   the transcript viewport. Press End / PageDown-at-bottom to
+        #   return to follow-tail mode.
+        self.follow_tail: bool = True
+        self.top_line: int = 0
+        # Fallback step when render_info isn't yet available (very first
+        # PageUp before the first render). 10 rows is the conventional
+        # half-screen jump.
+        self._scroll_fallback_step: int = 10
+
+        # v1.7.4: Claude-Code-style permission gating + model picker.
+        # permission_mode controls when the agent asks the user before
+        # running a tool. ``_pending_confirm`` is the future the agent
+        # awaits while we collect y/n from the input box.
+        # ``_auto_approved`` accumulates tool names the user said
+        # "always" to during this session.
+        self.permission_mode: str = "default"  # default | safe | auto
+        self._pending_confirm: Optional[asyncio.Future] = None
+        self._pending_confirm_tool: Optional[str] = None
+        self._auto_approved: set[str] = set()
+
+        # Model picker — initial selection comes from the agent's
+        # LLMClient which reads agent_overrides / default_model from
+        # llm.yaml. Both fields kept so /model can switch live.
+        client = self.agent._client
+        self.provider: str = client.provider
+        self.model: str = client.model
+
+        # v1.8.0: background 盯盘 (watch) loop state. Off by default.
+        # /watch on starts a task that every ``watch_interval`` seconds
+        # (optionally re-collects ``watch_sources`` then) evaluates the
+        # alert store and fires matched rules into the transcript.
+        self.watch_enabled: bool = False
+        self.watch_interval: int = 300  # seconds
+        self.watch_sources: Optional[str] = None
+        self.watch_task: Optional[asyncio.Task] = None
+
+        # v1.7.5: restore persisted prefs (permission_mode + model) from
+        # ~/.financial-analyst/buddy.yaml so the user doesn't re-set them
+        # every launch. Applied AFTER reading defaults above.
+        self._apply_saved_prefs()
 
         # Banner goes into the transcript even before the Application exists,
         # so it's visible on first render.
@@ -173,15 +239,18 @@ class BuddyApp:
                 text=self._get_transcript_ansi,
                 focusable=False,
                 show_cursor=False,
+                # v1.6.6: pin an invisible cursor to the last rendered
+                # line. prompt_toolkit's Window.do_scroll() resets
+                # vertical_scroll back to cursor_pos on every render,
+                # so v1.6.5's get_vertical_scroll callback was being
+                # immediately undone. Pinning the cursor to the bottom
+                # lets do_scroll's "scroll down to keep cursor visible"
+                # branch do the right thing for us.
+                get_cursor_position=self._get_cursor_at_bottom,
             ),
             wrap_lines=True,
             always_hide_cursor=True,
             ignore_content_height=False,
-            # v1.6.5: auto-scroll to bottom. Without this the window
-            # stays pinned at the top and new appends disappear off
-            # the bottom edge — visible to the user as "transcript
-            # frozen on opening banner while spinner keeps ticking".
-            get_vertical_scroll=_scroll_to_bottom,
         )
         spinner_window = ConditionalContainer(
             Window(
@@ -213,11 +282,49 @@ class BuddyApp:
             ),
             filter=Condition(lambda: self.queued_input is not None),
         )
+        # Keep a reference to the transcript window so the scroll key
+        # handlers (v1.6.7) can read render_info to compute window-sized
+        # PageUp/PageDown steps.
+        self._transcript_window = transcript_window
+
+        # v1.6.7: history-browse hint, shows when follow_tail=False so
+        # the user sees they're paused, with the key that returns to
+        # latest output.
+        history_hint = ConditionalContainer(
+            Window(
+                content=FormattedTextControl(
+                    text=lambda: ANSI(_rich_to_ansi(
+                        "  [yellow]📜 浏览历史[/] [dim]按 End / Ctrl-↓ 回到最新输出[/]"
+                    )),
+                    focusable=False, show_cursor=False,
+                ),
+                height=Dimension(min=1, max=1),
+                wrap_lines=False,
+                always_hide_cursor=True,
+            ),
+            filter=Condition(lambda: not self.follow_tail),
+        )
+
+        # v1.7.4: persistent status line above the input — current
+        # permission_mode + model. Always visible so the user knows
+        # exactly which mode they're in before sending a prompt.
+        status_line = Window(
+            content=FormattedTextControl(
+                text=self._get_status_ansi,
+                focusable=False, show_cursor=False,
+            ),
+            height=Dimension(min=1, max=1),
+            wrap_lines=False,
+            always_hide_cursor=True,
+        )
+
         layout = Layout(
             HSplit([
                 transcript_window,
                 spinner_window,
                 queue_window,
+                history_hint,
+                status_line,
                 self.input_field,
             ]),
             focused_element=self.input_field,
@@ -240,13 +347,101 @@ class BuddyApp:
         def _ctrld(event):
             event.app.exit()
 
+        # v1.6.7: transcript scrolling. Single-line TextArea doesn't use
+        # PageUp/PageDown so these are safe to bind globally. End / Ctrl-↓
+        # are the "resume follow-tail" keys.
+        @kb.add("pageup")
+        def _pageup(event):  # noqa: ARG001
+            self._scroll_history(direction=-1)
+
+        @kb.add("pagedown")
+        def _pagedown(event):  # noqa: ARG001
+            self._scroll_history(direction=+1)
+
+        @kb.add("end")
+        def _end(event):  # noqa: ARG001
+            self._jump_to_tail()
+
+        @kb.add("c-down")
+        def _ctrl_down(event):  # noqa: ARG001
+            self._jump_to_tail()
+
+        # v1.6.8: wire mouse wheel to transcript scroll.
+        # Without this, Windows Terminal / cmd.exe in alt-screen mode
+        # remap wheel events to Up/Down keys, which the single-line
+        # TextArea then interprets as "browse input history" — that's
+        # why the user only ever saw their own prompts when scrolling.
+        # Window._mouse_handler is normally a no-op for FormattedTextControl
+        # (no .move_cursor_up()), so we replace it on the instance.
+        import types as _types
+        transcript_window._mouse_handler = _types.MethodType(
+            lambda _win, ev: self._on_mouse_event(ev), transcript_window,
+        )
+
         self.application = Application(
             layout=layout,
             key_bindings=kb,
             full_screen=True,
-            mouse_support=False,
+            # v1.6.8: mouse_support=True is required for SCROLL_UP/DOWN
+            # to reach our handler. Trade-off: native click-drag selection
+            # is intercepted; Windows Terminal users can still hold Shift
+            # while dragging to copy text, and we expose /save to dump
+            # the transcript to a file.
+            mouse_support=True,
             refresh_interval=0.1,
         )
+
+    # ----- preferences persistence (v1.7.5) ------------------------------
+
+    @staticmethod
+    def _prefs_path() -> Path:
+        return Path.home() / ".financial-analyst" / "buddy.yaml"
+
+    def _apply_saved_prefs(self) -> None:
+        """Load permission_mode + provider/model from buddy.yaml if present.
+        Silent no-op on any error (missing file, bad yaml) — defaults stand."""
+        path = self._prefs_path()
+        if not path.exists():
+            return
+        try:
+            import yaml
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            return
+        mode = data.get("permission_mode")
+        if mode in ("default", "safe", "auto"):
+            self.permission_mode = mode
+        prov = data.get("provider")
+        model = data.get("model")
+        if prov and model:
+            # Validate against available models before applying
+            try:
+                available = self.agent._client.list_models()
+            except Exception:
+                available = {}
+            if prov in available and model in available.get(prov, []):
+                self.provider = prov
+                self.model = model
+                self.agent._client = self.agent._client.with_overrides(
+                    provider=prov, model=model,
+                )
+
+    def _save_prefs(self) -> None:
+        """Persist current permission_mode + provider/model. Best-effort."""
+        path = self._prefs_path()
+        try:
+            import yaml
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                yaml.safe_dump({
+                    "permission_mode": self.permission_mode,
+                    "provider": self.provider,
+                    "model": self.model,
+                }, allow_unicode=True),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
 
     # ----- public read-only helpers (used by tests + /save) --------------
 
@@ -275,8 +470,200 @@ class BuddyApp:
     def _append_rich(self, renderable: Any, width: int = 120) -> None:
         self._append_chunk(_rich_to_ansi(renderable, width=width))
 
+    # ----- v1.6.7: history-browse scrolling ------------------------------
+
+    def _viewport_step(self) -> int:
+        """Page step in rendered lines. Falls back to a fixed value if
+        the transcript window hasn't been rendered yet (e.g. user hits
+        PageUp before any output)."""
+        win = getattr(self, "_transcript_window", None)
+        if win is None:
+            return self._scroll_fallback_step
+        info = getattr(win, "render_info", None)
+        if info is None:
+            return self._scroll_fallback_step
+        return max(1, info.window_height - 1)  # leave 1 line of context
+
+    def _n_lines(self) -> int:
+        return self.transcript_text().count("\n")
+
+    def _scroll_history(self, direction: int, step: Optional[int] = None) -> None:
+        """direction = -1 (back/PageUp) | +1 (forward/PageDown).
+
+        ``step`` overrides the line count (default = one viewport).
+        Mouse wheel passes 3 — a notch shouldn't jump a whole page.
+
+        Entering history mode pins ``top_line`` at the current viewport
+        top so the user's chosen position survives subsequent appends.
+        Scrolling forward past the tail returns to follow-tail mode.
+        """
+        if step is None:
+            step = self._viewport_step()
+        n_lines = self._n_lines()
+        win = getattr(self, "_transcript_window", None)
+        viewport_h = max(1, getattr(getattr(win, "render_info", None), "window_height", 0) or self._viewport_step())
+
+        if self.follow_tail and direction < 0:
+            # First scroll-up from tail: capture current top
+            self.top_line = max(0, n_lines - viewport_h)
+            self.follow_tail = False
+
+        if direction < 0:
+            self.top_line = max(0, self.top_line - step)
+        else:
+            self.top_line += step
+            # If we've scrolled forward to/past the tail, resume follow_tail
+            if self.top_line + viewport_h >= n_lines:
+                self._jump_to_tail()
+                return
+
+        app = getattr(self, "application", None)
+        if app is not None:
+            try:
+                app.invalidate()
+            except Exception:
+                pass
+
+    def _jump_to_tail(self) -> None:
+        """End / Ctrl-↓ handler: snap back to latest output and resume
+        auto-follow."""
+        self.follow_tail = True
+        self.top_line = 0
+        app = getattr(self, "application", None)
+        if app is not None:
+            try:
+                app.invalidate()
+            except Exception:
+                pass
+
+    # ----- v1.8.0: background 盯盘 (watch) loop --------------------------
+
+    def _eval_alerts(self):
+        """Sync alert evaluation (runs on a worker thread). Returns the
+        list of fired (rule, quote) pairs."""
+        from financial_analyst.buddy.alerts import AlertStore, evaluate
+        from financial_analyst.data.collectors.opencli.xueqiu_stock import (
+            XueqiuStockCollector,
+        )
+        store = AlertStore()
+        if len(store) == 0:
+            return []
+        coll = XueqiuStockCollector()
+        return evaluate(store, coll.fetch, cooldown_min=30.0)
+
+    def _run_watch_collect(self) -> None:
+        """Sync data refresh (worker thread) for the configured sources."""
+        if not self.watch_sources:
+            return
+        import subprocess
+        from financial_analyst.buddy.tools import _project_root
+        try:
+            subprocess.run(
+                ["financial-analyst", "news-collect",
+                 "--sources", self.watch_sources, "--limit", "100"],
+                cwd=str(_project_root()),
+                capture_output=True, timeout=300,
+            )
+        except Exception:
+            pass
+
+    async def _watch_loop(self) -> None:
+        """Background ticker: every ``watch_interval`` s, optionally
+        refresh data, then evaluate alerts and fire matched rules into
+        the transcript. Cancelled by /watch off."""
+        from financial_analyst.buddy.alerts import market_session
+        try:
+            while self.watch_enabled:
+                await asyncio.sleep(self.watch_interval)
+                if not self.watch_enabled:
+                    break
+                # v1.8.1: skip evaluation outside A-share trading hours —
+                # off-hours prices are stale (would mis-fire) and hitting
+                # opencli every 5 min on a weekend is pure waste.
+                if market_session() != "open":
+                    continue
+                if self.watch_sources:
+                    await asyncio.to_thread(self._run_watch_collect)
+                try:
+                    fired = await asyncio.to_thread(self._eval_alerts)
+                except Exception:
+                    fired = []
+                for rule, quote in fired:
+                    self._append_rich(
+                        f"[bold red]🔔 盯盘提醒[/] [bold]{rule.describe()}[/]\n"
+                        f"  现价 {quote.get('price','?')} "
+                        f"({quote.get('changePercent','?')}) "
+                        f"[{quote.get('market_status','?')}]"
+                    )
+                if self.application is not None:
+                    try:
+                        self.application.invalidate()
+                    except Exception:
+                        pass
+        except asyncio.CancelledError:
+            pass
+
+    def _start_watch(self) -> bool:
+        """Spawn the watch task on the running loop. Returns False if no
+        loop (test/standalone context)."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        if self.watch_task is not None and not self.watch_task.done():
+            self.watch_task.cancel()
+        self.watch_task = loop.create_task(self._watch_loop())
+        return True
+
+    def _stop_watch(self) -> None:
+        self.watch_enabled = False
+        if self.watch_task is not None and not self.watch_task.done():
+            self.watch_task.cancel()
+        self.watch_task = None
+
+    def _on_mouse_event(self, mouse_event: MouseEvent):
+        """Mouse handler attached to the transcript window. Returns
+        ``None`` if the event was consumed, ``NotImplemented`` otherwise
+        so prompt_toolkit's default behaviour kicks in.
+
+        Wheel up/down → ``_scroll_history``. The actual scroll step is
+        roughly half a viewport per wheel notch (a smaller step makes
+        wheel scrolling feel jumpy on long transcripts).
+        """
+        if mouse_event.event_type == MouseEventType.SCROLL_UP:
+            self._scroll_history(direction=-1, step=3)
+            return None
+        if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
+            self._scroll_history(direction=+1, step=3)
+            return None
+        return NotImplemented
+
     def _get_transcript_ansi(self):
         return ANSI(self.transcript_text())
+
+    def _get_cursor_at_bottom(self) -> Point:
+        """Position the (invisible) cursor so do_scroll() picks the
+        right viewport.
+
+        prompt_toolkit's scrolling algorithm normalises vertical_scroll
+        against cursor_pos every render. We exploit that by placing
+        the cursor wherever we want the viewport to be:
+
+        - ``follow_tail=True`` (default): cursor at the last line →
+          do_scroll lays the viewport flush against the bottom, so
+          new appends are always visible.
+        - ``follow_tail=False`` (user paged up): cursor at
+          ``self.top_line`` → do_scroll aligns the viewport's TOP row
+          with the cursor, keeping the user's chosen scroll position
+          stable even while the agent appends new content underneath.
+        """
+        text = self.transcript_text()
+        n_lines = text.count("\n")
+        if self.follow_tail:
+            return Point(x=0, y=max(0, n_lines - 1))
+        # browsing history: clamp top_line into range and use it
+        self.top_line = max(0, min(self.top_line, max(0, n_lines - 1)))
+        return Point(x=0, y=self.top_line)
 
     def _get_spinner_ansi(self):
         return ANSI(_rich_to_ansi(self.spinner.render(), width=80))
@@ -291,6 +678,46 @@ class BuddyApp:
             f"  [yellow]⏳ 排队中[/] [dim]→[/] [italic]{_escape_markup(q)}[/]   [dim](再按 ESC 也可取消)[/]"
         ))
 
+    def _get_status_ansi(self):
+        """Persistent mode + model + token-usage status line."""
+        icons = {"default": "🛡", "safe": "🚦", "auto": "⚡"}
+        colors = {"default": "cyan", "safe": "yellow", "auto": "magenta"}
+        icon = icons.get(self.permission_mode, "❓")
+        color = colors.get(self.permission_mode, "white")
+        approved = ""
+        if self._auto_approved:
+            approved = (
+                f"  [dim]·[/] [dim]auto-approved: "
+                f"{', '.join(sorted(self._auto_approved))}[/]"
+            )
+        # v1.7.5: session token usage (carried across model switches)
+        tokens = ""
+        client = getattr(self.agent, "_client", None)
+        if client is not None and getattr(client, "n_calls", 0) > 0:
+            total = client.total_tokens
+            disp = f"{total/1000:.1f}k" if total >= 1000 else str(total)
+            tokens = (
+                f"  [dim]·[/] [dim]🪙 {disp} tok "
+                f"(↑{client.total_prompt_tokens} ↓{client.total_completion_tokens}, "
+                f"{client.n_calls} calls)[/]"
+            )
+        watch = ""
+        if self.watch_enabled:
+            from financial_analyst.buddy.alerts import market_session
+            sess = market_session()
+            sess_label = {"open": "交易中", "lunch": "午休",
+                          "closed": "已收盘", "weekend": "休市"}.get(sess, sess)
+            sess_color = "green" if sess == "open" else "dim"
+            watch = (
+                f"  [dim]·[/] [green]👁 盯盘 {self.watch_interval // 60}m[/] "
+                f"[{sess_color}]({sess_label})[/]"
+            )
+        return ANSI(_rich_to_ansi(
+            f"  [{color}]{icon} {self.permission_mode}[/] "
+            f"[dim]·[/] [bold]{self.model}[/] [dim]({self.provider})[/]"
+            f"{watch}{tokens}{approved}"
+        ))
+
     # ----- submission / queueing -----------------------------------------
 
     def _on_submit(self, buf) -> bool:  # noqa: ARG002
@@ -302,8 +729,53 @@ class BuddyApp:
             self.input_field.text = ""
         if not text:
             return False
+        # v1.7.4: when a confirm modal is pending, the user's input is
+        # interpreted as the y/n/a response instead of a new prompt.
+        if self._pending_confirm is not None and not self._pending_confirm.done():
+            self._handle_confirm_response(text)
+            return False
         self.submit(text)
         return False
+
+    def _handle_confirm_response(self, text: str) -> None:
+        """Resolve the pending tool-confirmation future from a y/n/a reply.
+
+        Acceptance grammar (case-insensitive):
+          y / yes / 是 / 同意   → True
+          n / no  / 否 / 取消   → False
+          a / always / 总是     → True + remember tool name for session
+        Anything else → re-prompt (don't resolve the future).
+        """
+        ans = text.lower().strip()
+        future = self._pending_confirm
+        tool_name = self._pending_confirm_tool or ""
+        if future is None or future.done():
+            return
+        if ans in ("y", "yes", "是", "同意"):
+            self._pending_confirm = None
+            self._pending_confirm_tool = None
+            self._append_rich(f"[green]✓ 已同意[/] {tool_name}")
+            future.set_result(True)
+        elif ans in ("n", "no", "否", "取消"):
+            self._pending_confirm = None
+            self._pending_confirm_tool = None
+            self._append_rich(f"[red]✗ 已拒绝[/] {tool_name}")
+            future.set_result(False)
+        elif ans in ("a", "always", "总是"):
+            if tool_name:
+                self._auto_approved.add(tool_name)
+            self._pending_confirm = None
+            self._pending_confirm_tool = None
+            self._append_rich(
+                f"[green]✓ 已同意 + 本会话内 [italic]{tool_name}[/] 自动通过[/]"
+            )
+            future.set_result(True)
+        else:
+            # Unrecognised response — keep waiting; re-print the prompt
+            self._append_rich(
+                f"[yellow]请输入 y(es) / n(o) / a(lways), 你输入的是: "
+                f"[italic]{_escape_markup(text)}[/][/]"
+            )
 
     def submit(self, text: str) -> None:
         """Submit a user prompt (programmatic or via accept_handler).
@@ -492,23 +964,90 @@ class BuddyApp:
                 self.queued_input = None
                 self._append_rich("[dim]排队的输入已清空[/]")
             return
+        # If a confirm prompt is open, cancel its future first so
+        # _confirm() raises CancelledError and the turn unwinds cleanly.
+        if self._pending_confirm is not None and not self._pending_confirm.done():
+            self._pending_confirm.cancel()
+            self._pending_confirm = None
+            self._pending_confirm_tool = None
         task = self.current_turn_task
         if task is not None and not task.done():
             task.cancel()
         # The _run_turn finally block writes the "已取消" marker and
         # drains queued_input (if any) by starting the next turn.
 
-    async def _confirm(self, tool_name: str, args: dict) -> bool:  # noqa: ARG002
-        """Confirmation callback for confirm-required tools.
+    async def _confirm(self, tool_name: str, args: dict) -> bool:
+        """Permission gate for tool execution.
 
-        v1.6: auto-accept and surface a hint in the transcript. The user
-        can press ESC to cancel mid-flight if they regret it. A proper
-        modal dialog is a future polish item.
+        Behaviour depends on ``self.permission_mode``:
+          - ``auto``: no prompt, always run
+          - ``default``: run instant/seconds tools; ask before minutes-level
+          - ``safe``: ask before EVERY tool
+
+        Independent of mode, a tool the user previously said "always"
+        for in this session passes through silently.
+
+        The actual y/n prompt lives in the input field — we set
+        ``_pending_confirm`` to an asyncio.Future, append a prompt to
+        the transcript, and return when the user types one of
+        y/n/a. ESC during the wait cancels the whole turn (the future
+        gets a CancelledError which we surface as False).
         """
+        # Session-wide "always" passthrough
+        if tool_name in self._auto_approved:
+            return True
+
+        if self.permission_mode == "auto":
+            return True
+
+        tool = None
+        try:
+            from financial_analyst.buddy.tools import get_tool
+            tool = get_tool(tool_name)
+        except Exception:
+            pass
+        cost = tool.cost_hint if tool else "?"
+
+        if self.permission_mode == "default":
+            # Only minutes-level tools need confirmation
+            if cost != "minutes" and not (tool and tool.confirm_required):
+                return True
+
+        # safe mode, or default + minutes-level → modal prompt
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No event loop (test path) — fall back to auto-approve so
+            # programmatic callers don't deadlock.
+            return True
+
+        # Format args concisely for the prompt
+        try:
+            args_short = json.dumps(args, ensure_ascii=False)
+        except Exception:
+            args_short = str(args)
+        if len(args_short) > 80:
+            args_short = args_short[:77] + "…"
+
+        self._pending_confirm = loop.create_future()
+        self._pending_confirm_tool = tool_name
         self._append_rich(
-            f"[yellow]⚠ 启动耗时工具 {tool_name} — 按 ESC 随时取消[/]"
+            f"[yellow]⚠ 工具确认 ({self.permission_mode} 模式 / cost={cost}):[/] "
+            f"[bold]{tool_name}[/]({_escape_markup(args_short)})\n"
+            f"  输入 [bold]y[/]同意 · [bold]n[/]拒绝 · [bold]a[/]同意并本会话内自动通过"
         )
-        return True
+        if self.application is not None:
+            try:
+                self.application.invalidate()
+            except Exception:
+                pass
+        try:
+            return await self._pending_confirm
+        except asyncio.CancelledError:
+            # ESC during wait — propagate so the turn cancels cleanly.
+            self._pending_confirm = None
+            self._pending_confirm_tool = None
+            raise
 
     # ----- slash commands -------------------------------------------------
 
@@ -535,12 +1074,182 @@ class BuddyApp:
                 lines.append(f"    [dim]{first_sentence}.[/]")
             self._append_rich("\n".join(lines))
             return True
+        if cmd == "/mode":
+            return self._handle_mode_cmd(rest)
+        if cmd == "/model":
+            return self._handle_model_cmd(rest)
+        if cmd == "/watch":
+            return self._handle_watch_cmd(rest)
         if cmd == "/save":
             target = (rest[0] if rest else "buddy_chat.md").strip()
             self._save_transcript(Path(target))
             self._append_rich(f"[dim]已保存到 {target}[/]")
             return True
         return False
+
+    def _handle_mode_cmd(self, rest: List[str]) -> bool:
+        """``/mode`` (show) or ``/mode <default|safe|auto>`` (set)."""
+        valid = ("default", "safe", "auto")
+        if not rest:
+            descriptions = {
+                "default": "Ask only before minutes-level tools (run_report, alpha_bench).",
+                "safe": "Ask before EVERY tool call. Step-by-step approval.",
+                "auto": "Run everything without prompting. No safety net.",
+            }
+            lines = [f"[bold]当前权限模式:[/] [cyan]{self.permission_mode}[/]"]
+            lines.append("可选:")
+            for m in valid:
+                marker = " [green]✓[/]" if m == self.permission_mode else ""
+                lines.append(f"  [cyan]{m}[/]{marker} — [dim]{descriptions[m]}[/]")
+            lines.append("[dim]用法: /mode default | safe | auto[/]")
+            self._append_rich("\n".join(lines))
+            return True
+        target = rest[0].strip().lower()
+        if target not in valid:
+            self._append_rich(
+                f"[red]未知模式: {_escape_markup(target)}[/] (合法: {', '.join(valid)})"
+            )
+            return True
+        if target == self.permission_mode:
+            self._append_rich(f"[dim]已是 {target} 模式[/]")
+            return True
+        prev = self.permission_mode
+        self.permission_mode = target
+        # auto mode resets manual approvals (they're redundant)
+        if target == "auto":
+            self._auto_approved.clear()
+        self._save_prefs()
+        self._append_rich(
+            f"[green]权限模式: {prev} → [bold]{target}[/][/] [dim](已保存)[/]"
+        )
+        return True
+
+    def _handle_watch_cmd(self, rest: List[str]) -> bool:
+        """``/watch`` (status) · ``/watch on [min] [sources]`` · ``/watch off``.
+
+        Examples:
+          /watch on              → 盯盘, 默认 5 分钟间隔, 不自动采集
+          /watch on 3            → 3 分钟间隔
+          /watch on 5 ths-fund-flow,xueqiu-hot
+                                 → 5 分钟间隔 + 每轮先采集这些源
+          /watch off
+        """
+        from financial_analyst.buddy.alerts import AlertStore
+        if not rest:
+            n_alerts = len(AlertStore())
+            if self.watch_enabled:
+                src = self.watch_sources or "(不自动采集)"
+                self._append_rich(
+                    f"[green]👁 盯盘中[/] · 间隔 {self.watch_interval // 60} 分钟 · "
+                    f"采集源: {src} · {n_alerts} 条提醒"
+                )
+            else:
+                self._append_rich(
+                    f"[dim]👁 盯盘未开. /watch on 开启. 当前 {n_alerts} 条提醒.[/]\n"
+                    f"[dim]用法: /watch on [分钟] [采集源]  ·  /watch off[/]"
+                )
+            return True
+        arg = rest[0].strip().lower()
+        tokens = rest[0].split()
+        sub = tokens[0].lower()
+        if sub == "off":
+            self._stop_watch()
+            self._append_rich("[yellow]👁 盯盘已关[/]")
+            return True
+        if sub == "on":
+            # parse optional interval (minutes) + sources
+            interval_min = 5
+            sources = None
+            if len(tokens) >= 2:
+                try:
+                    interval_min = max(1, int(tokens[1]))
+                except ValueError:
+                    sources = tokens[1]
+            if len(tokens) >= 3:
+                sources = tokens[2]
+            self.watch_interval = interval_min * 60
+            self.watch_sources = sources
+            self.watch_enabled = True
+            started = self._start_watch()
+            if not started:
+                self.watch_enabled = False
+                self._append_rich(
+                    "[red]无法启动盯盘 — 不在运行的 event loop 里 "
+                    "(需要在 chat 会话内 /watch on)[/]"
+                )
+                return True
+            n_alerts = len(AlertStore())
+            src = sources or "(不自动采集, 只评估已有数据)"
+            from financial_analyst.buddy.alerts import market_session
+            sess = market_session()
+            sess_note = ""
+            if sess != "open":
+                label = {"lunch": "午休", "closed": "已收盘",
+                         "weekend": "周末休市"}.get(sess, sess)
+                sess_note = (
+                    f"\n[yellow]⚠ 当前 {label}, 盯盘会等到开盘 (9:30-11:30 / 13:00-15:00) 才评估.[/]"
+                )
+            self._append_rich(
+                f"[green]👁 盯盘已开[/] · 间隔 {interval_min} 分钟 · "
+                f"采集源: {src} · 当前 {n_alerts} 条提醒\n"
+                f"[dim]触发的提醒会弹进这里. /watch off 关闭.[/]{sess_note}"
+            )
+            return True
+        self._append_rich(f"[red]未知 /watch 参数: {_escape_markup(arg)}[/] (on / off)")
+        return True
+
+    def _handle_model_cmd(self, rest: List[str]) -> bool:
+        """``/model`` (list) or ``/model <name>`` (switch).
+
+        Accepts either bare model name (e.g. ``qwen3-max``) or
+        ``provider/model`` form (``anthropic/claude-opus-4-7``). For
+        bare names we search the configured providers in order.
+        """
+        try:
+            available = self.agent._client.list_models()
+        except Exception as exc:
+            self._append_rich(f"[red]无法列出模型: {exc}[/]")
+            return True
+        if not rest:
+            lines = [f"[bold]当前模型:[/] [cyan]{self.model}[/] [dim]({self.provider})[/]"]
+            lines.append("可用:")
+            for prov, models in available.items():
+                lines.append(f"  [bold]{prov}[/]")
+                for m in models:
+                    marker = " [green]✓[/]" if (m == self.model and prov == self.provider) else ""
+                    lines.append(f"    [cyan]{m}[/]{marker}")
+            lines.append("[dim]用法: /model <name>  或  /model <provider>/<model>[/]")
+            self._append_rich("\n".join(lines))
+            return True
+        spec = rest[0].strip()
+        new_provider: Optional[str] = None
+        new_model: Optional[str] = None
+        if "/" in spec:
+            p, m = spec.split("/", 1)
+            if p in available and m in available[p]:
+                new_provider, new_model = p, m
+        else:
+            for p, models in available.items():
+                if spec in models:
+                    new_provider, new_model = p, spec
+                    break
+        if new_model is None:
+            self._append_rich(
+                f"[red]未找到模型 [italic]{_escape_markup(spec)}[/][/] — "
+                f"运行 /model 看可用列表"
+            )
+            return True
+        prev = f"{self.provider}/{self.model}"
+        self.provider = new_provider
+        self.model = new_model
+        self.agent._client = self.agent._client.with_overrides(
+            provider=new_provider, model=new_model,
+        )
+        self._save_prefs()
+        self._append_rich(
+            f"[green]切换模型: {prev} → [bold]{new_provider}/{new_model}[/][/] [dim](已保存)[/]"
+        )
+        return True
 
     def _save_transcript(self, path: Path) -> None:
         # Strip ANSI codes for the markdown file.
@@ -582,29 +1291,19 @@ class BuddyApp:
                     await self.animator_task
                 except (asyncio.CancelledError, Exception):
                     pass
+            # v1.8.0: tear down the watch loop on exit
+            if self.watch_task is not None and not self.watch_task.done():
+                self.watch_task.cancel()
+                try:
+                    await self.watch_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
 
 def _escape_markup(text: str) -> str:
     """Escape Rich markup brackets in user-supplied / tool-output text
     so that `[anything]` doesn't get interpreted as a style tag."""
     return text.replace("[", r"\[")
-
-
-def _scroll_to_bottom(window) -> int:
-    """Window.get_vertical_scroll callback: compute the scroll offset that
-    keeps the LAST line of content visible at the bottom of the viewport.
-
-    prompt_toolkit calls this on every render. The first render's
-    ``render_info`` may be ``None`` (no dimensions yet) — return 0 in
-    that case; subsequent renders have valid info and we can compute
-    ``content_height - window_height``.
-    """
-    info = window.render_info
-    if info is None:
-        return 0
-    content_height = info.content_height
-    window_height = info.window_height
-    return max(0, content_height - window_height)
 
 
 async def run_app() -> None:

@@ -1,0 +1,9 @@
+{
+  "name": "opencli-plugin-ths-extra",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Extra THS commands: iwencai search, fund-flow, concept-board, stockbar-comments",
+  "peerDependencies": {
+    "@jackwener/opencli": ">=1.7.22"
+  }
+}

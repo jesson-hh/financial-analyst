@@ -1,5 +1,653 @@
 # Changelog
 
+## v1.8.1 — 2026-05-21
+
+### Fixed/Improved — 把现有功能打磨到位 (质量/正确性/卫生)
+
+**1. system prompt 工具引导更新 (最高 ROI)**
+`agent.py` 的行为引导停在 v1.5.4 (13 tools), 现在 26 tools 但 LLM 缺
+"何时用哪个" 的引导. 重写:
+- 加 **tool routing cheat-sheet** (表格): 宽泛问题 → `stock_brief` (不再手动串 5 个);
+  盘中价 → `realtime_quote`; 日线估值 → `quote_lookup`; 盯盘 → `alert_add`;
+  资金流/概念/行业/大单 → `ths_fund_flow` 各 target; 选股 → `iwencai_search`; ...
+- 加 **数据时效响应**: 看到 "⚠ 数据偏旧" 提示用户先刷新
+- news workflow 加 ths-hot / xueqiu-hot-posts / xueqiu-feed
+- tool_list 仍动态枚举全 registry
+直接修工具选择质量 — 之前 LLM 不知道 stock_brief 存在, "看下茅台怎么样"
+还在串 quote+chain+news 打 max_tool_iters 上限.
+
+**2. 盯盘交易时段感知** (`market_session()`)
+A 股时段分类 (open/lunch/closed/weekend). watch loop 非交易时段跳过评估
+(收盘后/周末不空跑, 不拿收盘价误报, 省 opencli 调用). status line 显示
+`👁 盯盘 5m (交易中/午休/已收盘/休市)`. `/watch on` 在非交易时段提示会
+等到开盘. (节假日不建模, 靠实时 market_status 兜底.)
+
+**3. 修预存失败 test_loader_factory**
+`test_factory_missing_config_falls_back_to_tushare` 从 v0.2.1 起红 — 根因是
+v1.5.2 的 find_config 5 级 fallback 让"explicit path 不存在"仍能找到 bundled
+config (default: qlib_binary), 推翻了 test 的前提. 改 test 用 monkeypatch 让
+find_config 抛 FileNotFoundError, 验证真正的 last-resort tushare fallback.
+**整个 repo 测试现在全绿.**
+
+### Tests
+- system prompt × 4 (routing/cheatsheet/staleness/full-list)
+- market_session × 8 (weekend/open/lunch/closed/before-open/is_trading/status-line)
+- loader_factory 修复后 6/6 过
+
+全 repo 测试通过 (之前唯一的预存 fail 已修).
+
+## v1.8.0 — 2026-05-21
+
+### Added — 盯盘提醒 (price alerts) + 实时行情 + 后台 watch loop
+
+chat 里现在能盯盘了. 加 alert → /watch on → 后台每 N 分钟评估 → 触发的
+弹进对话流.
+
+#### 实时行情 (`realtime_quote` tool + XueqiuStockCollector)
+
+`opencli xueqiu stock <code>` 拿盘中实时价/涨跌幅/OHLC/量额/换手/市值/
+盘口状态 (交易中/已收盘). 区别于 `quote_lookup` (Tushare/Qlib 日线 EOD).
+也是 alert 引擎的 price provider.
+
+#### Alert 引擎 (`buddy/alerts.py`)
+
+纯 Python, 规则存 `~/.financial-analyst/alerts.yaml`:
+
+| kind | 触发条件 |
+|---|---|
+| `price_below` | 现价 ≤ 阈值 (止损位/抄底位) |
+| `price_above` | 现价 ≥ 阈值 (止盈位/突破位) |
+| `pct_above` | 当日涨幅 ≥ 阈值 (如 +5%) |
+| `pct_below` | 当日跌幅 ≤ 阈值 (如 -5%) |
+
+- 自然键 `{code}:{kind}` — 同 code 同 kind 再加就更新阈值, 不重复
+- cooldown 30 分钟防抖 — 卡在阈值边的票不会每 tick 刷屏
+- `evaluate(store, quote_provider, cooldown_min)` 注入式 price provider, 可测
+
+#### Alert buddy tools (3 个)
+
+- `alert_add(code, kind, threshold, note)` — LLM 听懂 "茅台跌破1200提醒我" → `alert_add(SH600519, price_below, 1200)`
+- `alert_list()` — 列所有提醒
+- `alert_remove(rule_id)` — 删 (支持 `SH600519:price_below` 或只给 `SH600519` 删该股全部)
+
+#### 后台 watch loop + `/watch`
+
+```
+/watch                          # 状态
+/watch on                       # 盯盘, 默认 5 分钟间隔
+/watch on 3                     # 3 分钟间隔
+/watch on 5 ths-fund-flow,xueqiu-hot
+                                # 5 分钟 + 每轮先采集这些源 (数据保鲜)
+/watch off
+```
+
+- 后台 asyncio task, 每 `watch_interval` 秒: (可选采集 sources) → 评估
+  alert → 触发的 `🔔 盯盘提醒` 弹进 transcript
+- 实时价抓取 + 评估都走 `asyncio.to_thread`, 不阻塞 UI / 输入
+- status line 显示 `👁 盯盘 5m`
+- chat 退出时自动 teardown watch task
+
+**这同时覆盖了 scheduled-collect**: `/watch on 5 <sources>` 让数据每 5
+分钟自动刷新, 配合 v1.7.5 的时效警告, 数据 always fresh.
+
+### Tests (35 in test_alerts.py, 147 buddy total)
+
+parse_pct · 4 种 rule check · store CRUD + 自然键 upsert + 持久化 +
+跳过非法条目 · evaluate 触发/不触发/cooldown/provider 失败/none quote ·
+3 alert tools + realtime_quote 注册 · watch off-by-default / status /
+无 loop 报错 / on 解析 interval+sources / status line / _eval_alerts 接线
+
+### Smoke (真跑)
+```
+realtime_quote SH600519 → 贵州茅台 1311 -0.30% [已收盘]
+alert: SH600519 跌破 99999 → 触发, quote price=1311
+```
+
+## v1.7.5 — 2026-05-21
+
+### Improved — 6 项接口体验补强 (按 ROI 全做)
+
+针对 v1.7.4 review 列出的缺口, 一次补齐:
+
+**1. 数据时效警告** (`_news_staleness_note`)
+`news_query` 返回前检查最新一条 ts, 超 18h 在结果顶部插
+`⚠ 数据偏旧: 最新一条是 ... (N 小时前)`. LLM 不会再拿隔夜情绪当今日动态.
+
+**2. `/mode` + `/model` 持久化**
+permission_mode + provider/model 存 `~/.financial-analyst/buddy.yaml`,
+启动自动恢复. 切换时即时落盘 (提示 "已保存"). 失效 model 自动忽略.
+测试用 conftest autouse fixture 把 prefs path 重定向到 tmp, 不污染真实环境.
+
+**3. ths-extra plugin 友好安装提示** (`ThsExtraNotInstalled`)
+iwencai / fund-flow / concept-board 在 plugin 未装时, 抛带可复制命令的
+异常: `opencli plugin install file://<bundled path>`. 区分 "opencli 没装"
+(给 npm 命令) vs "plugin 没装" (给 install 命令) vs 其他运行时错误 (原样透出).
+
+**4. LLM token 累计 + status 显示**
+`LLMClient.chat` 累加 `usage.prompt_tokens/completion_tokens`,
+`with_overrides()` 切模型时计数延续. status line 显示
+`🪙 2.3k tok (↑1800 ↓500, 4 calls)`. 切到 claude-opus 后知道烧了多少.
+
+**5. fund-flow 跨日 diff** (`fund_flow_change` tool)
+比较一只股/板块在多个 snapshot 的主力净流入变化. `_parse_cn_amount`
+解析 "1.69亿"/"−3254万" → float, 算最近两点 delta + 趋势箭头 (↑增/↓减).
+需先多次采集积累快照.
+
+**6. `stock_brief` 统一视角 tool** (高频入口)
+一次返回 行情+行业+产业链+近期新闻+雪球情绪+资金流+上次研报. 用户问
+"看下 X 怎么样" 这种宽泛问题时优先用它, 省掉 5 个 tool round-trip,
+避免打 max_tool_iters 上限. 全读本地 cache + 快 loader, 每段独立 try
+(一个源挂不影响整体). 注册在 quote_lookup 之后, prompt 引导 LLM 优先选.
+
+### Tests (23 new in `test_buddy_improvements.py`, 550 passing total)
+
+staleness × 5 · 持久化 × 4 · token × 4 · fund-flow diff × 7 · stock_brief × 3
++ ths-extra install hints × 4 (in test_ths_extra.py)
+
+(唯一失败的 `test_loader_factory` 是 v0.2.1 起的预存失败, 与本次无关.)
+
+## v1.7.4 — 2026-05-21
+
+### Added — permission modes + model picker (Claude-Code-style)
+
+参考 Claude Code 的 `/model` + permission modes, 给 buddy 加上三档安全
+模式和 LLM 切换. 现在 chat 启动后输入框上方有一行 status:
+
+```
+  🛡 default · qwen3.5-plus (qwen)
+```
+
+或处于 safe / auto 时:
+
+```
+  🚦 safe · qwen3-max (qwen)
+  ⚡ auto · claude-opus-4-7 (anthropic)
+```
+
+#### Permission modes (`/mode`)
+
+| Mode | 行为 |
+|---|---|
+| `default` (默认) | instant/seconds 级工具自动跑, **minutes 级** (`run_report` / `alpha_bench`) 弹 y/n |
+| `safe` | **每个工具调用前都问 y/n** — 适合审计 agent 行为 / 评估新 prompt |
+| `auto` | 全部自动通过, 不弹任何提示 — 用于完全信任 prompt+model 时 |
+
+切换: `/mode safe` / `/mode auto` / `/mode default`. 无参 `/mode` 列
+当前 + 说明.
+
+#### Y/N modal
+
+工具确认时输入框临时切换为 y/n 输入. 接受:
+- `y` / `yes` / `是` / `同意` → 同意
+- `n` / `no` / `否` / `取消` → 拒绝
+- `a` / `always` / `总是` → 同意 + **本会话内该工具自动通过** (累积进 `_auto_approved` set)
+
+未识别响应 (e.g. `maybe`) → 不消费 future, 重新提示. 期间按 ESC → cancel
+future, agent turn 整体回退.
+
+#### Model picker (`/model`)
+
+切 LLM provider / model 无需重启:
+
+```
+/model                           # list available
+/model qwen3-max                 # bare name (lookup across providers)
+/model anthropic/claude-opus-4-7 # explicit provider/model
+```
+
+底层调 `LLMClient.with_overrides()` 重建 client (config 不重新加载, 只换
+provider+model 字段). 当前活跃 agent (`BuddyApp.agent`) 立即用新 client.
+
+#### LLMClient API
+
+- `LLMClient.with_overrides(provider=None, model=None) → LLMClient` —
+  return a new client sharing the same config but with different
+  provider/model.
+- `LLMClient.list_models() → Dict[str, List[str]]` — `{provider: [models]}`
+  taken from `llm.yaml`'s `providers.*.models`.
+
+### Tests (20 new in `test_buddy_modes.py`, 132 total)
+
+- mode default / show / switch / reject-unknown / auto-clears-approvals
+- model show / switch (bare name + provider/model) / reject-unknown
+- `_confirm` × 6: auto bypass / default-instant passes / default-minutes prompts /
+  safe-instant prompts / `a` caches in `_auto_approved` /
+  unrecognised response keeps future pending / ESC cancels future
+- `_on_submit` routes to confirm handler when pending
+- status line includes mode + model + auto-approved tools
+
+### UX details
+
+- Banner advertises `/mode` and `/model` next to slash commands
+- `/help` shows full mode descriptions
+- Status line uses different icon+color per mode (🛡 cyan / 🚦 yellow /
+  ⚡ magenta) so it's eyeball-distinguishable
+
+## v1.7.3 — 2026-05-21
+
+### Added — 同花顺资金流补全 (3 个 target + reusable adapter)
+
+`ths-extra fund-flow` 重写为 header-driven, 用一个 adapter 覆盖 4 个
+leaderboard:
+
+| `--target` | URL | 数据 |
+|---|---|---|
+| `gegu` (默认) | `/funds/ggzjl/` | 个股资金流 (主力净流入排行) |
+| `gainian` | `/funds/gnzjl/` | **概念板块涨幅+资金流** (替代之前的 concept-board rank) |
+| `hangye` | `/funds/hyzjl/` | **行业板块涨幅+资金流** |
+| `ddzz` | `/funds/ddzz/` | **大单追踪** (实时大额成交流水, 时间/方向/价/量) |
+
+Adapter 改用 thead 表头 + alias 表识别列, 而不是 hardcoded 索引 — 不同
+target 列数 / 顺序差异自动适配:
+
+```js
+const codeIdx = idxOf('代码', '板块代码');
+const nameIdx = idxOf('简称', '名称', '行业', '概念', '板块');
+const priceIdx = idxOf('最新价', '现价', '指数', '当前价', '成交价格', '价格');
+// ...
+```
+
+`gainian`/`hangye` 列里没显式 board code, 从 row anchor href
+(`.../code/309152/`) 提取. ``--`` placeholder 行自动 drop.
+
+### Python 侧
+
+- `THSFundFlowCollector.fetch(target=...)` 接受 4 个 target. ValueError on invalid.
+- DB schema migration (`_migrate()` in `NewsDB.__init__`): legacy
+  `ths_fund_flow` 表自动 `ALTER TABLE ADD COLUMN` 加 target / num_stocks /
+  leader / trade_time / direction / volume / url / raw_cells. 新 PK 是
+  `(snapshot_ts, target, code, name)` 让 4 个 target 数据不互相覆盖.
+- `query_ths_fund_flow(target=...)` filters by leaderboard kind.
+
+### CLI sources (4)
+
+```powershell
+financial-analyst news-collect --sources ths-fund-flow      # gegu
+financial-analyst news-collect --sources ths-concept-fund   # gainian
+financial-analyst news-collect --sources ths-industry-fund  # hangye
+financial-analyst news-collect --sources ths-large-orders   # ddzz
+```
+
+### Buddy tool
+
+`ths_fund_flow(target, limit, refresh)` — LLM 可按问题语义自动选 target:
+- "今天主力买什么" → `gegu`
+- "概念主线在哪" → `gainian`
+- "行业涨幅排行" → `hangye`
+- "盘中大单方向" → `ddzz`
+
+Per-target output format (列宽 / 显示字段) 区分.
+
+### Tests (7 new in `test_ths_extra.py`, 112 total)
+- `test_fund_flow_target_passes_through` (parametrised 4 targets)
+- `test_fund_flow_target_rejects_invalid`
+- `test_fund_flow_gainian_drops_placeholder` (`--` sentinel handling)
+- `test_upsert_ths_fund_flow_target_partition` (4 target rows 不互相覆盖)
+
+### Smoke
+
+```
+news-collect --sources ths-fund-flow,ths-concept-fund,ths-industry-fund,ths-large-orders
+→ 各 5 行入库
+LIVE:
+  gegu: 龙腾光电 +20% 主力净流出 -3254万
+  gainian: AI眼镜 +0.21% 主力净流出 -64.07亿 公司家数 186 领涨股 纬达光电
+  hangye: 化学制药 +2.48% 主力净流出 -61.16亿
+  ddzz: [11:29:59] 中芯国际 卖盘 3800股 50.55万
+```
+
+### 仍 backlog
+- `concept-board mode=rank` — 之前的 URL 路由 placeholder, 现在 gainian
+  替代它, 这个 backlog 可以正式 drop
+- 股吧评论 — 同花顺已无, drop
+- ggzjl 默认页超大单/大单/中单/小单细分 — 同花顺没在排行页提供, 在个股详情页有, 后续如需可加
+
+## v1.7.2 — 2026-05-21
+
+### Added — 同花顺扩展接口 (ths-extra opencli plugin)
+
+opencli upstream 的 `ths` site adapter 只有 `hot-rank` 一个命令. 本仓库
+新增 `opencli-plugin-ths-extra/` 自带 plugin, 用户一次 install 后获得
+三个额外命令:
+
+- `ths-extra iwencai <question>` — 问财自然语言选股
+- `ths-extra fund-flow` — 个股资金流主力净流入排行
+- `ths-extra concept-board --mode new` — 新概念发布表 (日期+股票数)
+- (`--mode rank` 涨幅榜 URL 待验证, 留 backlog)
+
+**安装**:
+```powershell
+opencli plugin install file://G:\financial-analyst\opencli-plugin-ths-extra
+opencli plugin list   # confirms ths-extra registered
+```
+
+### Python 接入
+
+新 collectors (`data/collectors/opencli/ths_extra.py`):
+- `IWencaiCollector(question, limit)`
+- `THSFundFlowCollector(page_no, limit)`
+- `THSConceptBoardCollector(mode, limit, page_no)`
+
+新 NewsDB 表 + upsert / query:
+- `iwencai_results(snapshot_ts, question, row_index, columns, cells)` — 问财结果, schema 动态所以 cells 用 pipe-join 存
+- `ths_fund_flow(snapshot_ts, code, name, price, change_pct, turnover_pct, inflow, outflow, main_net, total_amount)` — 主力资金流快照
+- `ths_concept_boards(snapshot_ts, mode, board_code, board_name, release_date, num_stocks, change_pct, board_url)` — 概念板块
+
+新 CLI sources: `ths-fund-flow`, `ths-concept-board` (后者 `--code rank` 切涨幅榜模式).
+
+新 buddy tools (3 个, 已注册到 TOOL_REGISTRY):
+- `iwencai_search(question, limit, use_cache)`
+- `ths_fund_flow(limit, refresh)`
+- `ths_concept_board(mode, limit, refresh)`
+
+### 同花顺股吧不接 (路径死胡同确认)
+
+`t.10jqka.com.cn/list/{code}/` 返回 404 — **同花顺现已无股吧功能**.
+A 股股吧只剩东方财富 (`guba.eastmoney.com`). 暂不接入, 散户情绪走
+xueqiu-comments 覆盖.
+
+### Tests (13 in test_ths_extra.py, 105 total)
+- collectors 正常解析 / 缺 code 过滤 / 参数传递
+- 入库 + 查询 + latest-snapshot 语义
+- buddy tools 缺 plugin 时 graceful error + use_cache 跳过 opencli
+
+### Smoke
+```
+news-collect --sources ths-fund-flow,ths-concept-board → 各 5 行入库
+LIVE: 龙腾光电 +20.04% 主力净流出 -3210万 (游资行情)
+LIVE: 2026一季报预增 / AI应用 / 雅下水电概念 等新概念
+```
+
+### Known limitations
+- iwencai 结果表用 div 不用 thead, 我们的 columns 字段经常为空, 但 cells 完整
+- concept-board mode=rank URL 不正确 (返回 placeholder), 留待 q.10jqka.com.cn 改版后 re-probe
+- fund-flow 默认页只有 10 列简版, 没有超大单/大单/中单/小单细分 (在 /funds/zlls/ 上, 后续可加)
+
+## v1.7.1 — 2026-05-21
+
+### Added — 全面接入雪球 (opencli 12 个命令里的剩余 9 个之 6)
+
+**批 1 — 资讯/情绪 (2 个)**:
+- `xueqiu-feed` — 关注用户的时间线动态 → `news` 表, source=`xueqiu_feed`
+- `xueqiu-hot-posts` — 雪球平台热门帖子 (不同于 hot-stock 是热门标的) → `news` 表, source=`xueqiu_hot_posts`
+
+帖子里的 `$名字(SH600519)$` 现金标签会被 regex 解析到 `related_codes`,
+所以 `news_query --code SH600519` 能搜出 mention 茅台的帖子.
+
+**批 2 — 个人账户 (4 个 collector, 3 个 buddy tool)**:
+
+新 4 张表 (schema 在 news_db.py 顶部):
+- `user_watchlists(snapshot_date, group_pid, symbol, name, price, change_percent, url)`
+- `user_groups(snapshot_date, pid, name, count)`
+- `fund_snapshots(snapshot_date, account_id, account_name, total_assets, available_cash, daily_gain, hold_gain)`
+- `fund_holdings(snapshot_date, account_name, fd_code, fd_name, market_value, volume, daily_gain, hold_gain, hold_gain_rate, market_percent)`
+
+新 CLI sources:
+- `xueqiu-watchlist` (默认 pid=-1 全部, `--code -5` 切沪深 / `--code -7` 港股 / `--code -4` 模拟)
+- `xueqiu-groups` — 分组结构
+- `xueqiu-fund` — 一次拉 snapshot + holdings (需要蛋卷 cookie, 失败时给清晰提示)
+
+新 buddy tools:
+- `watchlist_show(pid, refresh)` — 看自选股
+- `fund_snapshot(refresh)` — 看蛋卷总资产
+- `fund_holdings(account, refresh)` — 看蛋卷持仓明细
+
+### Tests
+- 12 in `test_xueqiu_feed_hot.py` — feed/hot collectors + cashtag regex
+- 16 in `test_xueqiu_watchlist_fund.py` — watchlist / groups / fund-snapshot / fund-holdings + 入库 + 查询 + buddy-tool empty-cache + graceful-error paths
+
+92 buddy/collector tests pass total.
+
+### Smoke-tested 真跑
+```
+news-collect --sources xueqiu-feed,xueqiu-hot-posts → 各 5 行入 news 表
+news-collect --sources xueqiu-watchlist,xueqiu-groups → 6 + 6 行入新表
+news-collect --sources xueqiu-fund → 给出 "log in to danjuanfunds.com" 提示 (用户未登)
+```
+
+### 同花顺现状
+
+opencli `ths` adapter 当前只有 `hot-rank` 一个命令 — 已在 v1.7.0 接入.
+深度接入 (问财 / F10 / 概念板块 / 资金流) 需要走自写 collector 路线,
+等用户拍板再做.
+
+## v1.7.0 — 2026-05-21
+
+### Added — 同花顺 hot-rank data source
+
+New collector `THSHotRankCollector` wraps opencli's `ths hot-rank`
+adapter (browser bridge against `eq.10jqka.com.cn`). Public — no
+cookie, no Chrome extension required. Pulls the 同花顺 retail-heat
+leaderboard with rank, name, changePercent, heat, and tag string
+("3天2板,光伏概念,固态电池" — useful sentiment signal that xueqiu-hot
+doesn't carry).
+
+**Caveat**: THS frontend renders by name only; the JSON has no
+explicit `code` field. We best-effort extract the 6-digit code from
+the leading position of `tags` (occurs on ~60% of rows in observed
+samples). Rows without a code-prefixed tag still land in the DB
+(name + heat suffice for downstream lookup).
+
+### Wired into
+
+- CLI: `financial-analyst news-collect --sources ths-hot --limit N`
+  → writes to `hot_stocks` table with `source='ths_hot_rank'`
+- Buddy tool: `news_collect` description now mentions `ths-hot` as a
+  public no-cookie option; LLM can pick it autonomously when the user
+  asks 同花顺 / 热股榜 / retail heat
+- `data/collectors/opencli/__init__.py` exports `THSHotRankCollector`
+
+### Tests (9 in tests/test_ths_hot_rank.py, 64 total)
+- Code extraction edge cases (leading whitespace, missing, partial digits)
+- JSON normalisation (opencli raw → {rank, code, name, ...})
+- Empty / None opencli response handling
+- Schema contract with `NewsDB.upsert_hot_stocks`
+
+### Smoke-tested
+
+```
+> financial-analyst news-collect --sources ths-hot --limit 10
+Collected:
+  ths_hot_rank: 10 rows
+```
+Verified 10 rows written to `hot_stocks` with `source='ths_hot_rank'`,
+6/10 had codes extracted from tags.
+
+## v1.6.9 — 2026-05-21
+
+### Fixed — `run_report` and other CLI tools crashed with WinError 3
+
+User report: ran `run_report SH600666` from `chat`, got
+`FileNotFoundError: [WinError 3] 系统找不到指定的路径: 'memories'`.
+
+**Root cause**: every buddy tool that wraps a CLI command via
+`subprocess.run([...])` was inheriting the chat session's cwd. The
+CLI was originally designed to run from inside the project checkout
+where `memories/`, `out/`, `config/` live as siblings of `src/` — so
+its internal `Path("memories")` lookups crashed when launched from
+any other directory.
+
+**Fix**: added `_project_root()` helper in `buddy/tools.py` that
+locates the repo root via:
+1. `$FINANCIAL_ANALYST_HOME` env var if set
+2. Parent of `src/` (works for editable installs — the common case)
+3. Cwd as last-resort fallback
+
+All six subprocess-wrapping tools (`run_report`, `news_collect`,
+`alpha_bench`, `alpha_snapshot`, `mainline_radar`, `morning_brief`)
+now pass `cwd=str(_project_root())` to `subprocess.run`. The output
+path glob `Path("out").glob(...)` in `_tool_report` is now also
+rooted at `_project_root()`.
+
+In-process `_tool_dream_review` had the same bug at its own level
+(`Path("memories") / "_proposed"`) — now `_project_root() / "memories" / "_proposed"`.
+
+Other in-process loaders (`ChainKBLoader`, `StockTimelineLoader`,
+`IndustryLoader`, `NewsDB`) already used `Path.home() / ".financial-analyst" / ...`
+so they were unaffected.
+
+### Tests (10 new in test_buddy_cwd.py, 65 buddy tests total)
+- `test_project_root_resolves_to_repo_root_in_editable_install`
+- `test_project_root_uses_env_override`
+- `test_project_root_falls_back_to_cwd_when_no_markers`
+- `test_report_subprocess_uses_project_root_as_cwd`
+- `test_other_subprocess_tools_also_set_cwd` (parametrised over 5 tools)
+- `test_dream_review_uses_absolute_memories_path`
+
+## v1.6.8 — 2026-05-21
+
+### Fixed — mouse wheel showed input history, not transcript
+
+User report: "我看不了之前回复的内容 转鼠标滚轮只有我发消息的历史记录"
+— turning the mouse wheel cycled through previously-submitted prompts
+instead of scrolling the LLM's earlier responses.
+
+**Root cause**: Windows Terminal / cmd.exe (in prompt_toolkit's
+alt-screen / full_screen mode) remaps wheel events to Up/Down keys
+when no application-level mouse support is enabled. The keyboard focus
+sits on the single-line TextArea, whose default behaviour for Up/Down
+is `FileHistory.previous` / `.next` — so wheel scroll = browse input
+history. PageUp/PageDown (added in v1.6.7) worked correctly but most
+users instinctively reach for the wheel.
+
+**Fix**: enable `mouse_support=True` on the Application and attach a
+custom `_mouse_handler` to the transcript window that routes
+SCROLL_UP/SCROLL_DOWN into `_scroll_history`. Default Window scroll
+behaviour (`Window._mouse_handler`) calls `content.move_cursor_up()`
+which `FormattedTextControl` doesn't implement, so it's a no-op
+without this override.
+
+Wheel step is 3 lines/notch (smaller than PageUp's full-viewport
+step) so single notches feel responsive on long transcripts.
+
+**Trade-off**: native click-drag selection is now intercepted by
+prompt_toolkit. Windows Terminal users can still hold Shift while
+dragging to copy text (Shift bypasses application mouse capture and
+goes straight to the OS), and `/save <path>` dumps the transcript to
+a plain markdown file.
+
+### Self-tested (the user explicitly demanded this)
+
+`selftest_v168.py` builds the real prompt_toolkit Application using
+`create_pipe_input()` + `DummyOutput()` (so it runs headless), then
+synthesises `MouseEvent(SCROLL_UP / SCROLL_DOWN)` and walks the full
+state machine:
+- mouse_support filter resolves to `Always` ✓
+- transcript_window._mouse_handler is bound ✓
+- SCROLL_UP returns `None` (consumed), enters history-browse ✓
+- agent appends during browse don't shift top_line ✓
+- SCROLL_DOWN past tail resumes follow_tail ✓
+
+### Tests (4 new in test_buddy_app.py, 55 total buddy tests)
+- `test_on_mouse_event_scroll_up_enters_history_browse`
+- `test_on_mouse_event_scroll_down_eventually_returns_to_tail`
+- `test_on_mouse_event_ignores_non_scroll_events`
+- `test_wheel_step_is_smaller_than_pageup_step`
+
+## v1.6.7 — 2026-05-20
+
+### Fixed — auto-scroll worked, but user couldn't browse history
+
+User report: "现在只能翻看历史对话 但是看不了 LLM 输出的内容了 这是一个大 bug"
+— v1.6.6's fix made the transcript follow new appends correctly, but
+the cursor was hard-pinned to the last line on every render. Pressing
+PageUp / arrow keys snapped the viewport right back to the bottom,
+making it impossible to read earlier output.
+
+**Root cause**: pinning the cursor to `n_lines - 1` unconditionally
+gave `do_scroll` no chance to honour user-initiated scroll moves. Any
+keystroke that tried to change `vertical_scroll` was overruled by the
+next render's cursor-driven snap-to-tail.
+
+**Fix — follow-tail state machine.**
+
+- `BuddyApp.follow_tail: bool = True` (default): cursor still pins to
+  the last line so new content auto-scrolls in.
+- `BuddyApp.follow_tail = False`: cursor pins to `top_line` instead;
+  do_scroll aligns the viewport top with the cursor, so new appends
+  below the viewport don't yank the user's scroll position.
+
+**Keys (transcript window, single-line input box is unaffected)**:
+
+| Key            | Action                                          |
+|----------------|-------------------------------------------------|
+| PageUp         | Scroll up one viewport; enter history-browse    |
+| PageDown       | Scroll down; resume follow-tail past the end    |
+| End / Ctrl-↓   | Jump to latest, resume follow-tail              |
+
+When `follow_tail=False` a yellow `📜 浏览历史 (按 End / Ctrl-↓ 回到最新输出)`
+hint shows above the input box so the user knows they're paused.
+
+### Tests (7 new in test_buddy_app.py)
+- `test_follow_tail_is_default`
+- `test_pageup_drops_out_of_follow_tail_and_pins_top_line`
+- `test_cursor_uses_top_line_when_not_following_tail`
+- `test_appends_during_history_browse_do_not_change_top_line` (the
+  exact bug — append must NOT yank top_line while user is browsing)
+- `test_end_jumps_back_to_tail_and_resumes_follow`
+- `test_pagedown_past_tail_resumes_follow`
+- `test_history_browse_hint_visibility_state`
+
+51 buddy tests pass total (28 app + 13 agent + 7 animation + 3 repro).
+
+## v1.6.6 — 2026-05-20
+
+### Fixed — v1.6.5 auto-scroll didn't actually work
+
+User report: "还是没有了 也没滑动" — even after v1.6.5 shipped its
+`get_vertical_scroll` callback, the transcript still stayed pinned at
+the top. The `news_collect → news_query → (no LLM summary)` flow
+ended with the `⚠ 完成 (调了 N tool 但没文字总结)` marker writing
+into the transcript correctly, but the user never saw it.
+
+**Root cause (the v1.6.5 fix was wrong)**: `prompt_toolkit.Window`
+calls `get_vertical_scroll` *and then* runs `do_scroll()`, which
+normalises `vertical_scroll` against `cursor_pos`. Since our
+`FormattedTextControl` had `show_cursor=False` and no `get_cursor_position`,
+the cursor sat at y=0, so `do_scroll`'s "scroll up if cursor is before
+visible part" branch reset `vertical_scroll` from our returned offset
+(say 80) back down to 0 every render. The callback fired; its return
+value was silently overwritten.
+
+(Verified by reading prompt_toolkit 3.0.52 `Window._scroll_when_linewrapping`
+at lines 1107-1109: `if current_scroll > cursor_pos - scroll_offset_start: current_scroll = max(0, cursor_pos - scroll_offset_start)`.)
+
+**Fix**: drop `get_vertical_scroll` entirely; instead pin an invisible
+cursor to the last rendered line via
+`FormattedTextControl(get_cursor_position=self._get_cursor_at_bottom)`.
+`_get_cursor_at_bottom` returns `Point(0, transcript.count('\n') - 1)`.
+`do_scroll`'s natural "scroll down to keep cursor visible" branch then
+drives the viewport to follow new content automatically — no fighting
+with the framework.
+
+### Verified via integration self-test
+
+`tests/test_buddy_v165_reproduce.py` reproduces the exact user scenario:
+- LLM emits `news_collect` → `news_query` → empty content with no tool_calls
+- Confirms the "调了 2 个 tool 但没文字总结" marker IS written to transcript
+  (so v1.6.3's marker logic was always correct)
+- Confirms `_get_cursor_at_bottom().y` advances with each append (so
+  do_scroll will keep new content in view)
+
+### Tests
+- `test_cursor_pinned_to_last_line_empty_transcript`
+- `test_cursor_pinned_advances_as_transcript_grows`
+- `test_cursor_pinned_handles_multiline_chunks`
+- `test_user_scenario_news_collect_then_query_then_no_summary`
+- `test_cursor_position_tracks_transcript_bottom`
+- `test_full_scenario_with_summary_works_too` (baseline sanity)
+
+24 BuddyApp + repro tests pass (425/426 total tests; unrelated
+loader-factory test still fails).
+
+### Process note
+Earlier iterations (1.6.0 → 1.6.5) shipped fixes without integration
+tests that exercised the real prompt_toolkit rendering path. v1.6.5
+"passed unit tests" because the unit test only verified arithmetic,
+not whether the callback's return value survived `do_scroll`. v1.6.6
+adds a test that watches the actual Point coordinate so the next bug
+of the same shape would surface immediately.
+
 ## v1.6.5 — 2026-05-20
 
 ### Fixed — transcript pinned at top, never followed new appends
