@@ -35,6 +35,8 @@ class RunReq(BaseModel):
     query: str
     mode: str = "default"
     context: Optional[Dict[str, Any]] = None
+    session_id: Optional[str] = None   # v1.9.3: multi-turn history key
+    model: Optional[str] = None        # v1.9.3: switch backend model
 
 
 class ConfirmReq(BaseModel):
@@ -74,6 +76,34 @@ def build_app():
     # turn_id -> asyncio.Future awaiting the user's y/n/a choice
     pending_confirms: Dict[str, "asyncio.Future[str]"] = {}
 
+    # v1.9.3: session_id -> BuddyAgent, reused across /run so追问 keeps
+    # conversation history. Bounded LRU so memory doesn't grow forever.
+    from collections import OrderedDict
+    sessions: "OrderedDict[str, BuddyAgent]" = OrderedDict()
+    MAX_SESSIONS = 24
+
+    def _agent_for(session_id: Optional[str], model: Optional[str]) -> BuddyAgent:
+        if not session_id:
+            agent = BuddyAgent()  # stateless one-off
+        elif session_id in sessions:
+            agent = sessions.pop(session_id)
+            sessions[session_id] = agent  # move to MRU end
+        else:
+            agent = BuddyAgent()
+            sessions[session_id] = agent
+            while len(sessions) > MAX_SESSIONS:
+                sessions.popitem(last=False)  # evict LRU
+        # optional live model switch
+        if model:
+            try:
+                avail = agent._client.list_models()
+                prov = next((p for p, ms in avail.items() if model in ms), None)
+                if prov:
+                    agent._client = agent._client.with_overrides(provider=prov, model=model)
+            except Exception:
+                pass
+        return agent
+
     def _should_confirm(tool_name: str, mode: str) -> bool:
         if mode == "auto":
             return False
@@ -108,7 +138,7 @@ def build_app():
 
         async def produce():
             try:
-                agent = BuddyAgent()
+                agent = _agent_for(body.session_id, body.model)
                 intent = classify(query)
                 await q.put(("plan", {"turn_id": turn_id, "intent": intent,
                                       "label": label_for(intent)}))
@@ -196,6 +226,51 @@ def build_app():
         except Exception as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
         return JSONResponse({"ok": True, "quotes": data})
+
+    @app.get("/models")
+    async def models():
+        """Available LLM models (for the front-end model picker)."""
+        try:
+            from financial_analyst.llm.client import LLMClient
+            avail = LLMClient.for_agent("buddy").list_models()
+        except Exception as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return JSONResponse({"ok": True, "models": avail})
+
+    @app.get("/alerts")
+    async def alerts():
+        """Current price-alert rules (for the UI 盯盘 list — reads alerts.yaml)."""
+        from financial_analyst.buddy.alerts import AlertStore
+        store = AlertStore()
+        return JSONResponse({"ok": True, "alerts": [
+            {"id": r.id, "code": r.code, "kind": r.kind, "threshold": r.threshold,
+             "note": r.note, "desc": r.describe(), "last_fired": r.last_fired}
+            for r in store.list()
+        ]})
+
+    @app.get("/alerts/check")
+    async def alerts_check():
+        """Evaluate all alerts once (Tencent batch) and return any that
+        fired. The UI polls this every N seconds → real toast on trigger.
+        Honours交易时段 (off-hours returns empty)."""
+        from financial_analyst.buddy.alerts import (
+            AlertStore, evaluate_batch, market_session,
+        )
+        from financial_analyst.data.collectors.tencent_quote import TencentQuoteCollector
+        store = AlertStore()
+        if len(store) == 0:
+            return JSONResponse({"ok": True, "session": market_session(), "fired": []})
+        if market_session() != "open":
+            return JSONResponse({"ok": True, "session": market_session(),
+                                 "fired": [], "note": "非交易时段, 不评估"})
+        coll = TencentQuoteCollector()
+        fired = await asyncio.to_thread(evaluate_batch, store, coll.fetch)
+        return JSONResponse({"ok": True, "session": "open", "fired": [
+            {"id": r.id, "desc": r.describe(), "code": r.code,
+             "price": q.get("price"), "changePercent": q.get("changePercent"),
+             "name": q.get("name")}
+            for r, q in fired
+        ]})
 
     return app
 

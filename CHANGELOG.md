@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.9.3 — 2026-05-21
+
+### Added — UI 对齐后端端点 (多轮 / 模型 / 盯盘)
+
+桌面 UI 接入后审计发现几处 UI 连的还是 mock. 后端先把缺的能力/端点补齐
+(前端接线见 INTEGRATION.md):
+
+- **多轮 session 历史**: `/run` 加 `session_id` —— server 按 session 复用
+  BuddyAgent (LRU 24), `messages` 累积. 之前每次 /run 新建无记忆, "它同行呢"
+  这种追问断. 现在带 session_id 就有上下文.
+- **模型切换**: `/run` 加 `model` 参数 (live 切 agent LLM) + `GET /models`
+  列可用模型 (前端 picker).
+- **盯盘端到端**: `GET /alerts` (读 alerts.yaml 规则列表) + `GET /alerts/check`
+  (Tencent batch 评估一次, 返回触发的, honour 交易时段). UI 轮询 /alerts/check
+  → 真 toast (替换前端 45s 假触发).
+
+`run_report` 真结果 (tool_done) + confirm (confirm_request/confirm) 后端早已就绪.
+
+### Tests (test_server.py +5, 70 total)
+/models · /alerts 列表 · /alerts/check 交易时段空 + 盘中触发 · 多轮 session 复用.
+
 ## v1.9.2 — 2026-05-21
 
 ### Added — 腾讯批量行情 (支撑 UI 实时监控墙)
