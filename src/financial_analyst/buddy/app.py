@@ -561,18 +561,31 @@ class BuddyApp:
 
     # ----- v1.8.0: background 盯盘 (watch) loop --------------------------
 
+    WATCH_MAX_CODES = 8  # opencli is 2-5s/股; cap distinct codes per round
+
     def _eval_alerts(self):
         """Sync alert evaluation (runs on a worker thread). Returns the
-        list of fired (rule, quote) pairs."""
-        from financial_analyst.buddy.alerts import AlertStore, evaluate
+        list of fired (rule, quote) pairs. Caps distinct codes per round
+        so a big alert list doesn't melt the Chrome bridge."""
+        from financial_analyst.buddy.alerts import AlertStore, evaluate, distinct_codes
         from financial_analyst.data.collectors.opencli.xueqiu_stock import (
             XueqiuStockCollector,
         )
         store = AlertStore()
         if len(store) == 0:
             return []
+        # one-time over-limit warning (not every round)
+        n_codes = len(distinct_codes(store))
+        if n_codes > self.WATCH_MAX_CODES and not getattr(self, "_watch_warned", False):
+            self._watch_warned = True
+            self._append_rich(
+                f"[yellow]⚠ 盯盘标的 {n_codes} 只 > 上限 {self.WATCH_MAX_CODES} — "
+                f"opencli 单只 2-5 秒, 本轮只评估前 {self.WATCH_MAX_CODES} 只. "
+                f"减少 alert 或等批量行情接口 (更快).[/]"
+            )
         coll = XueqiuStockCollector()
-        return evaluate(store, coll.fetch, cooldown_min=30.0)
+        return evaluate(store, coll.fetch, cooldown_min=30.0,
+                        max_codes=self.WATCH_MAX_CODES)
 
     def _run_watch_collect(self) -> None:
         """Sync data refresh (worker thread) for the configured sources."""

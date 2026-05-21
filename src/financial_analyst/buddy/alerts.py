@@ -200,26 +200,50 @@ class AlertStore:
         return len(self._rules)
 
 
+def distinct_codes(store: AlertStore) -> List[str]:
+    """Unique stock codes across all rules, in first-seen order."""
+    seen: List[str] = []
+    for r in store.list():
+        if r.code not in seen:
+            seen.append(r.code)
+    return seen
+
+
 def evaluate(
     store: AlertStore,
     quote_provider: Callable[[str], Optional[Dict[str, Any]]],
     cooldown_min: float = 30.0,
+    max_codes: int = 8,
 ) -> List[Tuple[AlertRule, Dict[str, Any]]]:
-    """Check every rule against a fresh quote. Returns the list of fired
-    (rule, quote) pairs and stamps ``last_fired`` on each.
+    """Check every rule against a fresh quote. Returns fired (rule, quote)
+    pairs and stamps ``last_fired`` on each.
 
-    ``quote_provider(code)`` must return a dict with at least ``price``
-    and ``changePercent`` (the XueqiuStockCollector shape), or None.
+    ``quote_provider(code)`` returns a dict with at least ``price`` and
+    ``changePercent`` (XueqiuStockCollector shape), or None.
+
+    Cost protection (v1.9.1): the provider is the slow path (opencli =
+    2-5 s/股, Chrome). Two guards:
+      - **same-code dedup**: each distinct code is fetched ONCE per round
+        even if several rules watch it (price_below + price_above 同股).
+      - **max_codes cap**: at most ``max_codes`` distinct codes are
+        evaluated per round, so a user with 50 alerts doesn't melt Chrome.
+        Codes beyond the cap are skipped this round (caller can warn).
     """
     fired: List[Tuple[AlertRule, Dict[str, Any]]] = []
     dirty = False
+    active = set(distinct_codes(store)[:max_codes])
+    quote_cache: Dict[str, Optional[Dict[str, Any]]] = {}
     for rule in store.list():
+        if rule.code not in active:
+            continue
         if rule._fired_recently(cooldown_min):
             continue
-        try:
-            quote = quote_provider(rule.code)
-        except Exception:
-            quote = None
+        if rule.code not in quote_cache:
+            try:
+                quote_cache[rule.code] = quote_provider(rule.code)
+            except Exception:
+                quote_cache[rule.code] = None
+        quote = quote_cache[rule.code]
         if not quote:
             continue
         price = quote.get("price")

@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.9.1 — 2026-05-21
+
+### Fixed — 盯盘成本防御 (防 opencli/Chrome 被拖垮)
+
+opencli 抓单只实时价 2-5 秒 (Chrome 导航). 用户 alert 设多了, watch loop
+一轮串行抓 N 只会很慢甚至打爆 Chrome session. 加两道防护:
+
+- **同 code 去重**: `evaluate` 一轮内每个 distinct code 只调一次
+  quote_provider — 同股多条规则 (price_below + price_above) 复用一次抓取.
+- **distinct code 上限** (`max_codes=8`): 一轮最多评估 8 只不同股, 超出本轮跳过.
+  watch loop 超限时 transcript 一次性提示 (不每轮刷屏).
+
+`distinct_codes(store)` 辅助函数. 这是纯防御, 不引入新数据源 —— 大量实时
+监控的正解 (批量行情 API) 见 backlog.
+
+### Tests (3 new in test_alerts.py, 46 total)
+同 code 去重只抓一次 / 12 alert 截到 8 / distinct_codes 去重.
+
 ## v1.9.0 — 2026-05-21
 
 ### Added — 桌面 UI 接入 (觀瀾 Tauri app) via HTTP/SSE 桥

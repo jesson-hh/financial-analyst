@@ -204,6 +204,51 @@ def test_evaluate_pct_alert(store):
     assert len(fired) == 1
 
 
+# ----- v1.9.1: cost protection (dedup + max_codes) --------------------------
+
+
+def test_evaluate_dedupes_same_code(store):
+    """Two rules on the same code → provider called ONCE."""
+    store.add("SH600519", "price_below", 1200)
+    store.add("SH600519", "price_above", 2000)  # both on 茅台
+    calls = []
+
+    def provider(code):
+        calls.append(code)
+        return {"price": 1190, "changePercent": "-1%"}  # triggers price_below only
+
+    fired = evaluate(store, provider)
+    assert calls == ["SH600519"]            # fetched once, not twice
+    assert len(fired) == 1                  # only price_below fires
+    assert fired[0][0].kind == "price_below"
+
+
+def test_evaluate_caps_distinct_codes(store):
+    for i in range(12):
+        store.add(f"SH60000{i}" if i < 10 else f"SH6000{i}", "price_below", 9999)
+    calls = []
+
+    def provider(code):
+        calls.append(code)
+        return {"price": 1, "changePercent": "0%"}  # always triggers price_below 9999
+
+    fired = evaluate(store, provider, max_codes=8)
+    # only 8 distinct codes fetched despite 12 alerts
+    assert len(calls) == 8
+    assert len(fired) == 8
+
+
+def test_distinct_codes_dedup():
+    from financial_analyst.buddy.alerts import distinct_codes
+    import tempfile, pathlib
+    with tempfile.TemporaryDirectory() as d:
+        s = AlertStore(path=pathlib.Path(d) / "a.yaml")
+        s.add("SH600519", "price_below", 1)
+        s.add("SH600519", "price_above", 2)
+        s.add("SZ300750", "price_below", 1)
+        assert distinct_codes(s) == ["SH600519", "SZ300750"]
+
+
 # ----- buddy tool plumbing --------------------------------------------------
 
 
