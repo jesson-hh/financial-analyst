@@ -1,5 +1,38 @@
 # Changelog
 
+## v1.9.2 — 2026-05-21
+
+### Added — 腾讯批量行情 (支撑 UI 实时监控墙)
+
+opencli (浏览器) 抓单只 2-5 秒, 撑不住大量实时监控. 加轻量行情源:
+`TencentQuoteCollector` (qt.gtimg.cn) —— 一次 HTTP 拉几十只, **实测 ~120ms**,
+GBK 解码, 无需 cookie. 解析 18 个字段 (price/change/pe/pb/量比/换手/振幅/
+流通+总市值…).
+
+#### 新增/改造
+- `data/collectors/tencent_quote.py` — 批量行情, code 三格式兼容 (600519/
+  SH600519/sz000858) + 输入 code 别名 (调用方任意格式都查得到)
+- `quote_batch(codes)` buddy tool — 逗号分隔批量, 给"看这几只"/对比/监控墙
+- `realtime_quote` 改: **优先腾讯** (无 cookie, 快 30×), 失败 fallback 雪球
+- `brief_data` 改: 速览卡主源换腾讯 —— 没 cookie 也能填满
+  price/pe/pb/量比/换手/振幅/市值 (之前要雪球 cookie)
+- **盯盘 watch loop 批量化**: `evaluate_batch` 一次拉所有 alert 的 code
+  (~120ms), 不再受 v1.9.1 的 8 只上限 / opencli 单只瓶颈
+- SSE 服务加 `GET /quotes?codes=...` — UI 监控墙轮询端点
+
+#### 实时监控能力 (现在)
+- UI 监控墙 / 盯盘 / 多股对比 → 腾讯批量, 几十只 120ms, 高频可刷
+- 深度数据 (选股/评论/资金流榜/研报/F10) → opencli (低频, 几秒可接受)
+
+### Tests (test_tencent_quote.py 13 + 更新 server/alerts/brief, 117 total)
+字段解析 / code 转换 / 输入别名 / evaluate_batch 单次拉全 / /quotes 端点.
+
+### Smoke (真跑)
+```
+GET /quotes?codes=SH600519,300750,sz000858 → ok, 120ms
+  茅台 1311 -0.3% PE19.85 量比0.77 · 宁德 411.63 PE24.11 · 五粮液 85.35
+```
+
 ## v1.9.1 — 2026-05-21
 
 ### Fixed — 盯盘成本防御 (防 opencli/Chrome 被拖垮)

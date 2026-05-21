@@ -85,3 +85,22 @@ def test_auto_mode_no_confirm(client):
 def test_confirm_endpoint_404_when_no_pending(client):
     r = client.post("/confirm", json={"turn_id": "nonexistent", "choice": "y"})
     assert r.status_code == 404
+
+
+def test_quotes_endpoint(client, monkeypatch):
+    """GET /quotes batch endpoint for the UI monitoring wall."""
+    fake = {"SH600519": {"code": "SH600519", "name": "贵州茅台", "price": 1311.0}}
+    monkeypatch.setattr(
+        "financial_analyst.data.collectors.tencent_quote.TencentQuoteCollector.fetch",
+        lambda self, codes, **kw: fake,
+    )
+    r = client.get("/quotes?codes=SH600519,SZ300750")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["quotes"]["SH600519"]["name"] == "贵州茅台"
+
+
+def test_quotes_endpoint_no_codes(client):
+    r = client.get("/quotes?codes=")
+    assert r.status_code == 400

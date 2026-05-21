@@ -95,21 +95,31 @@ def brief_data(code: str) -> Dict[str, Any]:
     }
     d["market"] = {"SH": "沪", "SZ": "深", "BJ": "北"}.get(norm[:2], "") + "市"
 
-    # --- real-time quote (primary) ---
+    # --- real-time quote (primary): Tencent — no cookie, fills most card
+    #     fields (price/change/pe/pb/vol_ratio/turn/amp/mc) in ~120ms ---
     try:
-        from financial_analyst.data.collectors.opencli.xueqiu_stock import (
-            XueqiuStockCollector,
-        )
-        q = XueqiuStockCollector().fetch(norm)
+        from financial_analyst.data.collectors.tencent_quote import TencentQuoteCollector
+        q = TencentQuoteCollector().quote(norm)
         if q:
             d["name"] = q.get("name")
             d["price"] = q.get("price")
             d["change"] = q.get("change")
-            d["deltaPct"] = _pct_to_num(q.get("changePercent"))
+            d["deltaPct"] = q.get("changePercent")
+            d["vol_ratio"] = q.get("vol_ratio")
             d["turn"] = q.get("turnover_rate")
             d["amp"] = q.get("amplitude")
-            d["mc"] = q.get("marketCap")
-            d["market_status"] = q.get("market_status")
+            d["pe"] = q.get("pe")
+            d["pb"] = q.get("pb")
+            if q.get("total_mv"):
+                d["mc"] = f"{q['total_mv']:.0f}亿"
+    except Exception:
+        pass
+    # market session (Tencent has no status field)
+    try:
+        from financial_analyst.buddy.alerts import market_session
+        d["market_status"] = {"open": "交易中", "lunch": "午休",
+                              "closed": "已收盘", "weekend": "休市"}.get(
+            market_session(), None)
     except Exception:
         pass
 
@@ -879,15 +889,31 @@ def _tool_ask_quote(code: str) -> ToolResult:
 
 
 def _tool_realtime_quote(code: str) -> ToolResult:
-    """实时行情 (雪球). 不同于 quote_lookup (日线/EOD), 这是盘中实时价.
-    需要雪球 cookie (Chrome ext)."""
+    """实时行情. 优先腾讯 (无需 cookie, ~120ms), 失败 fallback 雪球.
+    不同于 quote_lookup (日线/EOD), 这是盘中实时价."""
+    # Tencent first — no cookie, fast, has 量比/PE/PB/市值
+    try:
+        from financial_analyst.data.collectors.tencent_quote import TencentQuoteCollector
+        t = TencentQuoteCollector().quote(code)
+        if t and t.get("price") is not None:
+            return ToolResult(
+                f"{t.get('name','?')} ({t.get('code', code)})\n"
+                f"  现价 {t.get('price')}  涨跌 {t.get('change')} ({t.get('changePercent')}%)\n"
+                f"  开 {t.get('open')} 高 {t.get('high')} 低 {t.get('low')} 昨收 {t.get('prevClose')}\n"
+                f"  量比 {t.get('vol_ratio')}  换手 {t.get('turnover_rate')}%  振幅 {t.get('amplitude')}%\n"
+                f"  PE {t.get('pe')}  PB {t.get('pb')}  总市值 {t.get('total_mv')}亿  成交额 {t.get('amount')}万",
+                side_effect={"quote": t},
+            )
+    except Exception:
+        pass
+    # fallback: xueqiu (needs cookie, but has market_status + 盘口)
     from financial_analyst.data.collectors.opencli.xueqiu_stock import XueqiuStockCollector
     try:
         d = XueqiuStockCollector().fetch(code)
     except Exception as exc:
         return ToolResult(f"实时行情抓取失败: {exc}", is_error=True)
     if not d:
-        return ToolResult(f"无 {code} 实时行情 (代码错误 或 雪球 cookie 失效?)", is_error=True)
+        return ToolResult(f"无 {code} 实时行情 (代码错误?)", is_error=True)
     return ToolResult(
         f"{d.get('name','?')} ({d.get('symbol', code)}) [{d.get('market_status','?')}]\n"
         f"  现价 {d.get('price','?')}  涨跌 {d.get('change','?')} ({d.get('changePercent','?')})\n"
@@ -895,6 +921,35 @@ def _tool_realtime_quote(code: str) -> ToolResult:
         f"  量 {d.get('volume','?')}  额 {d.get('amount','?')}  换手 {d.get('turnover_rate','?')}\n"
         f"  市值 {d.get('marketCap','?')}  振幅 {d.get('amplitude','?')}  时间 {d.get('time','?')}"
     )
+
+
+def _tool_quote_batch(codes: str) -> ToolResult:
+    """批量实时行情 (腾讯, 无需 cookie, 一次拉几十只 ~120ms). 用于监控墙/
+    多股对比. ``codes`` 逗号分隔 (如 'SH600519,SZ300750,002594')."""
+    from financial_analyst.data.collectors.tencent_quote import TencentQuoteCollector
+    code_list = [c.strip() for c in str(codes).replace("，", ",").split(",") if c.strip()]
+    if not code_list:
+        return ToolResult("没给股票代码", is_error=True)
+    try:
+        data = TencentQuoteCollector().fetch(code_list)
+    except Exception as exc:
+        return ToolResult(f"批量行情抓取失败: {exc}", is_error=True)
+    if not data:
+        return ToolResult("批量行情返回空 (代码可能无效)", is_error=True)
+    lines = [f"批量行情 ({len(data)} 只):"]
+    lines.append(f"  {_pad('代码', 10)}{_pad('名称', 12)}{_pad('现价', 9)}"
+                 f"{_pad('涨跌幅', 9)}{_pad('量比', 7)}{_pad('换手', 7)}{_pad('PE', 8)}")
+    for v in data.values():
+        chg = v.get("changePercent")
+        chg_s = f"{chg:+.2f}%" if chg is not None else "-"
+        lines.append(
+            f"  {_pad(v.get('code') or '-', 10)}{_pad(v.get('name') or '-', 12)}"
+            f"{_pad(v.get('price') if v.get('price') is not None else '-', 9)}"
+            f"{_pad(chg_s, 9)}{_pad(v.get('vol_ratio') if v.get('vol_ratio') is not None else '-', 7)}"
+            f"{_pad((str(v.get('turnover_rate')) + '%') if v.get('turnover_rate') is not None else '-', 7)}"
+            f"{_pad(v.get('pe') if v.get('pe') is not None else '-', 8)}"
+        )
+    return ToolResult("\n".join(lines), side_effect={"quotes": data})
 
 
 def _tool_alert_add(code: str, kind: str, threshold: float, note: str = "") -> ToolResult:
@@ -1435,6 +1490,22 @@ TOOL_REGISTRY: List[Tool] = [
             "required": ["code"],
         },
         run=_tool_realtime_quote,
+        cost_hint="seconds",
+    ),
+    Tool(
+        name="quote_batch",
+        description=(
+            "批量实时行情 (腾讯, 无 cookie, 一次几十只 ~120ms). 用于多股对比 / "
+            "自选股监控墙 / '看下这几只'. codes 逗号分隔. 比逐只 realtime_quote 快得多."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "codes": {"type": "string", "description": "逗号分隔代码, 如 SH600519,SZ300750,002594"},
+            },
+            "required": ["codes"],
+        },
+        run=_tool_quote_batch,
         cost_hint="seconds",
     ),
     Tool(

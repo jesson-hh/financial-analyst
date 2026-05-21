@@ -181,6 +181,22 @@ def build_app():
             for t in TOOL_REGISTRY
         ])
 
+    @app.get("/quotes")
+    async def quotes(codes: str):
+        """Batch real-time quotes for the UI monitoring wall. ~120ms for
+        dozens, no cookie. Poll this every few seconds.
+        ``GET /quotes?codes=SH600519,SZ300750,002594``"""
+        from financial_analyst.data.collectors.tencent_quote import TencentQuoteCollector
+        code_list = [c.strip() for c in codes.replace("，", ",").split(",") if c.strip()]
+        if not code_list:
+            return JSONResponse({"ok": False, "error": "no codes"}, status_code=400)
+        try:
+            # offload sync HTTP to a thread so we don't block the loop
+            data = await asyncio.to_thread(TencentQuoteCollector().fetch, code_list)
+        except Exception as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+        return JSONResponse({"ok": True, "quotes": data})
+
     return app
 
 

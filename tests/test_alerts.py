@@ -402,15 +402,14 @@ def test_watch_status_line_shows_session(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_eval_alerts_uses_store_and_provider(tmp_path, monkeypatch):
-    """_eval_alerts wires AlertStore + XueqiuStockCollector together."""
+    """_eval_alerts wires AlertStore + TencentQuoteCollector batch together (v1.9.2)."""
     monkeypatch.setattr("financial_analyst.buddy.alerts.Path.home", lambda: tmp_path)
-    # Seed an alert
     from financial_analyst.buddy.alerts import AlertStore
     AlertStore().add("SH600519", "price_below", 1200)
-    # Stub the realtime quote provider to a triggering price
+    # Stub the Tencent batch provider to a triggering price
     monkeypatch.setattr(
-        "financial_analyst.data.collectors.opencli.xueqiu_stock.XueqiuStockCollector.fetch",
-        lambda self, code: {"price": 1190, "changePercent": "-1%", "market_status": "交易中"},
+        "financial_analyst.data.collectors.tencent_quote.TencentQuoteCollector.fetch",
+        lambda self, codes, **kw: {"SH600519": {"price": 1190, "changePercent": -1}},
     )
     app = BuddyApp()
     fired = app._eval_alerts()

@@ -215,35 +215,51 @@ def evaluate(
     cooldown_min: float = 30.0,
     max_codes: int = 8,
 ) -> List[Tuple[AlertRule, Dict[str, Any]]]:
-    """Check every rule against a fresh quote. Returns fired (rule, quote)
-    pairs and stamps ``last_fired`` on each.
+    """Per-code provider variant (opencli path). See ``evaluate_batch`` for
+    the fast batch path (Tencent). Kept for back-compat / single-source.
 
-    ``quote_provider(code)`` returns a dict with at least ``price`` and
-    ``changePercent`` (XueqiuStockCollector shape), or None.
+    Cost protection: same-code dedup + max_codes cap (opencli = 2-5 s/股).
+    """
+    def _batch(codes: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+        out: Dict[str, Optional[Dict[str, Any]]] = {}
+        for c in codes[:max_codes]:
+            try:
+                out[c] = quote_provider(c)
+            except Exception:
+                out[c] = None
+        return out
+    return evaluate_batch(store, _batch, cooldown_min=cooldown_min)
 
-    Cost protection (v1.9.1): the provider is the slow path (opencli =
-    2-5 s/股, Chrome). Two guards:
-      - **same-code dedup**: each distinct code is fetched ONCE per round
-        even if several rules watch it (price_below + price_above 同股).
-      - **max_codes cap**: at most ``max_codes`` distinct codes are
-        evaluated per round, so a user with 50 alerts doesn't melt Chrome.
-        Codes beyond the cap are skipped this round (caller can warn).
+
+def evaluate_batch(
+    store: AlertStore,
+    batch_provider: Callable[[List[str]], Dict[str, Optional[Dict[str, Any]]]],
+    cooldown_min: float = 30.0,
+) -> List[Tuple[AlertRule, Dict[str, Any]]]:
+    """Fast path: fetch ALL distinct codes in one call (Tencent batch,
+    ~120ms for dozens). No max_codes cap needed — batch is cheap.
+
+    ``batch_provider(codes)`` returns ``{code: quote_dict_or_None}``.
     """
     fired: List[Tuple[AlertRule, Dict[str, Any]]] = []
     dirty = False
-    active = set(distinct_codes(store)[:max_codes])
-    quote_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    # only fetch codes that have a non-cooldown rule
+    want: List[str] = []
     for rule in store.list():
-        if rule.code not in active:
-            continue
         if rule._fired_recently(cooldown_min):
             continue
-        if rule.code not in quote_cache:
-            try:
-                quote_cache[rule.code] = quote_provider(rule.code)
-            except Exception:
-                quote_cache[rule.code] = None
-        quote = quote_cache[rule.code]
+        if rule.code not in want:
+            want.append(rule.code)
+    if not want:
+        return []
+    try:
+        quotes = batch_provider(want) or {}
+    except Exception:
+        quotes = {}
+    for rule in store.list():
+        if rule._fired_recently(cooldown_min):
+            continue
+        quote = quotes.get(rule.code)
         if not quote:
             continue
         price = quote.get("price")

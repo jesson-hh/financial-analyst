@@ -39,8 +39,8 @@ def test_pct_to_num():
 def test_brief_data_has_all_card_fields():
     """Even with every source failing, the dict must have the full schema
     so the UI card never KeyErrors."""
-    with patch("financial_analyst.data.collectors.opencli.xueqiu_stock."
-               "XueqiuStockCollector.fetch", side_effect=Exception("no cookie")):
+    with patch("financial_analyst.data.collectors.tencent_quote."
+               "TencentQuoteCollector.quote", side_effect=Exception("net down")):
         d = brief_data("300750")
     for field in ("code", "name", "market", "industry", "mc", "price",
                   "change", "deltaPct", "vol_ratio", "turn", "amp",
@@ -53,13 +53,14 @@ def test_brief_data_has_all_card_fields():
 
 
 def test_brief_data_fills_from_realtime():
+    # Tencent quote shape (numeric fields, no '%' suffix)
     fake_q = {
         "name": "宁德时代", "price": 325.1, "change": 7.04,
-        "changePercent": "+2.21%", "turnover_rate": "2.18%",
-        "amplitude": "3.84%", "marketCap": "14206亿", "market_status": "交易中",
+        "changePercent": 2.21, "turnover_rate": 2.18, "amplitude": 3.84,
+        "total_mv": 14206, "pe": 21.4, "pb": 4.6, "vol_ratio": 1.42,
     }
-    with patch("financial_analyst.data.collectors.opencli.xueqiu_stock."
-               "XueqiuStockCollector.fetch", return_value=fake_q), \
+    with patch("financial_analyst.data.collectors.tencent_quote."
+               "TencentQuoteCollector.quote", return_value=fake_q), \
          patch("financial_analyst.buddy.tools._tool_industry_show",
                side_effect=Exception("skip")), \
          patch("financial_analyst.data.loader_factory.get_default_loader",
@@ -68,8 +69,10 @@ def test_brief_data_fills_from_realtime():
     assert d["name"] == "宁德时代"
     assert d["price"] == 325.1
     assert d["deltaPct"] == 2.21
-    assert d["turn"] == "2.18%"
-    assert d["market_status"] == "交易中"
+    assert d["vol_ratio"] == 1.42
+    assert d["turn"] == 2.18
+    assert d["pe"] == 21.4
+    assert d["mc"] == "14206亿"
 
 
 def test_stock_brief_attaches_structured_side_effect():
