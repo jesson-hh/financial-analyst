@@ -305,6 +305,28 @@ class BuddyApp:
             filter=Condition(lambda: not self.follow_tail),
         )
 
+        # v1.8.2: persistent confirm indicator. When a tool-confirm modal
+        # is pending, this red bar stays above the input so the user never
+        # loses track of "I'm being asked y/n" even if a background watch
+        # alert or scrolling pushes the transcript prompt out of view.
+        # (Mirrors the v1.6.3 queue-indicator fix — the confirm modal added
+        # in v1.7.4 had no such indicator, a gap caught by selftest_tui.)
+        confirm_window = ConditionalContainer(
+            Window(
+                content=FormattedTextControl(
+                    text=self._get_confirm_ansi,
+                    focusable=False, show_cursor=False,
+                ),
+                height=Dimension(min=1, max=1),
+                wrap_lines=False,
+                always_hide_cursor=True,
+            ),
+            filter=Condition(
+                lambda: self._pending_confirm is not None
+                and not self._pending_confirm.done()
+            ),
+        )
+
         # v1.7.4: persistent status line above the input — current
         # permission_mode + model. Always visible so the user knows
         # exactly which mode they're in before sending a prompt.
@@ -323,6 +345,7 @@ class BuddyApp:
                 transcript_window,
                 spinner_window,
                 queue_window,
+                confirm_window,
                 history_hint,
                 status_line,
                 self.input_field,
@@ -678,6 +701,16 @@ class BuddyApp:
             f"  [yellow]⏳ 排队中[/] [dim]→[/] [italic]{_escape_markup(q)}[/]   [dim](再按 ESC 也可取消)[/]"
         ))
 
+    def _get_confirm_ansi(self):
+        """Persistent confirm indicator (shown only while a tool-confirm
+        modal is pending). Keeps the y/n ask visible above the input even
+        if the transcript scrolls or a watch alert fires."""
+        tool = self._pending_confirm_tool or "?"
+        return ANSI(_rich_to_ansi(
+            f"  [bold red]⚠ 等待工具确认[/] [bold]{_escape_markup(tool)}[/] — "
+            f"[bold]y[/]同意 · [bold]n[/]拒绝 · [bold]a[/]总是 · [bold]ESC[/]取消"
+        ))
+
     def _get_status_ansi(self):
         """Persistent mode + model + token-usage status line."""
         icons = {"default": "🛡", "safe": "🚦", "auto": "⚡"}
@@ -771,9 +804,12 @@ class BuddyApp:
             )
             future.set_result(True)
         else:
-            # Unrecognised response — keep waiting; re-print the prompt
+            # Unrecognised response — keep waiting; re-print the prompt.
+            # (Input during a pending confirm is interpreted as the y/n/a
+            # answer, NOT queued as a new prompt — answer or ESC first.)
             self._append_rich(
-                f"[yellow]请输入 y(es) / n(o) / a(lways), 你输入的是: "
+                f"[yellow]正在等待工具确认 — 请输入 [bold]y[/]同意 / [bold]n[/]拒绝 / "
+                f"[bold]a[/]总是, 或按 [bold]ESC[/] 取消. 你输入的是: "
                 f"[italic]{_escape_markup(text)}[/][/]"
             )
 

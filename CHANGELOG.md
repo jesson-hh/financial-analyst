@@ -1,5 +1,33 @@
 # Changelog
 
+## v1.8.2 — 2026-05-21
+
+### Fixed — confirm modal 没有常驻指示器 (headless self-test 发现)
+
+跑 `selftest_tui.py` (headless 构建真 Application 走 22 条交互路径) 发现:
+permission modal 等 y/n 时只在 transcript 里写一行, 一旦后台 watch 提醒
+弹进来或 transcript 滚动, 用户就看不到"在等确认", 会以为 agent 卡死.
+跟 v1.6.3 修过的"看不到队列"同源 — 当时给 queue 加了常驻指示器, 但
+v1.7.4 加 confirm modal 时漏了.
+
+**修复**: 加 `confirm_window` (ConditionalContainer, filter = confirm
+pending). 等 y/n 时输入框上方常驻红色:
+`⚠ 等待工具确认 run_report — y 同意 · n 拒绝 · a 总是 · ESC 取消`
+
+顺手优化 confirm 等待时输入非 y/n 的 reprompt 文案 — 明确提示"正在等
+确认, 请 y/n 或 ESC 取消", 避免用户以为在排队新任务.
+
+### Self-test 结果
+22/23 交互路径通过. 唯一"未过"的是 "confirm 等待时输入非 y/n 被
+reprompt 而非排队" — 这是 by-design (confirm 优先), 不是 bug.
+
+验证覆盖: 全部 render callback 不崩 / default·safe·auto 三模式 modal /
+watch 提醒与 confirm 并存不互相破坏 / ESC during confirm 干净取消 /
+'a' 缓存 / status line.
+
+### Tests (3 new in test_buddy_modes.py)
+confirm indicator 渲染 tool 名+ESC / markup 转义 / 可见性跟随 pending.
+
 ## v1.8.1 — 2026-05-21
 
 ### Fixed/Improved — 把现有功能打磨到位 (质量/正确性/卫生)

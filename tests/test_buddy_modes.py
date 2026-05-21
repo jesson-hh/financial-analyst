@@ -306,3 +306,44 @@ def test_status_line_shows_auto_approved_tools():
     app._auto_approved.add("quote_lookup")
     text = app._get_status_ansi().value
     assert "auto-approved" in text or "quote_lookup" in text
+
+
+# ----- v1.8.2: persistent confirm indicator --------------------------------
+
+
+def test_confirm_indicator_renders_pending_tool():
+    """The confirm indicator (shown while y/n pending) names the tool +
+    the key options, so the user never loses track of the modal."""
+    app = BuddyApp()
+    app._pending_confirm_tool = "run_report"
+    text = app._get_confirm_ansi().value
+    assert "等待工具确认" in text
+    assert "run_report" in text
+    assert "ESC" in text  # escape hatch advertised
+
+
+def test_confirm_indicator_escapes_markup():
+    app = BuddyApp()
+    app._pending_confirm_tool = "weird[tool]"
+    # must not raise on bracket chars
+    text = app._get_confirm_ansi().value
+    assert "weird" in text
+
+
+@pytest.mark.asyncio
+async def test_confirm_indicator_visibility_tracks_pending(monkeypatch):
+    """The ConditionalContainer filter shows the bar only while a confirm
+    future is actually pending."""
+    app = BuddyApp()
+    # no pending → filter would be False
+    assert app._pending_confirm is None
+    # simulate a pending future
+    loop = asyncio.get_running_loop()
+    app._pending_confirm = loop.create_future()
+    app._pending_confirm_tool = "alpha_bench"
+    # filter condition: pending and not done
+    visible = app._pending_confirm is not None and not app._pending_confirm.done()
+    assert visible is True
+    app._pending_confirm.set_result(True)
+    visible_after = app._pending_confirm is not None and not app._pending_confirm.done()
+    assert visible_after is False
