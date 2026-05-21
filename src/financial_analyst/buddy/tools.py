@@ -39,6 +39,124 @@ def _pad(s: Any, width: int) -> str:
     return s + " " * max(0, width - _disp_w(s))
 
 
+def normalize_code(code: Any) -> str:
+    """Normalise a stock code to the SH/SZ/BJ-prefixed form the loaders
+    expect. Accepts bare 6-digit (300750), prefixed (SZ300750), or
+    suffixed (300750.SZ). Used by the desktop UI bridge which sends bare
+    6-digit codes."""
+    c = str(code).upper().strip()
+    if "." in c:  # tushare suffix form 300750.SZ
+        num, _, suf = c.partition(".")
+        if suf in ("SH", "SZ", "BJ") and num.isdigit():
+            return suf + num
+        c = num
+    if c[:2] in ("SH", "SZ", "BJ"):
+        return c
+    if c.isdigit() and len(c) == 6:
+        if c[0] == "6":
+            return "SH" + c
+        if c[0] in "03":
+            return "SZ" + c
+        if c[0] in "84":
+            return "BJ" + c
+    return c
+
+
+def _pct_to_num(s: Any) -> Optional[float]:
+    """'-0.30%' → -0.30 · 1.5 → 1.5 · '' → None."""
+    if s is None:
+        return None
+    if isinstance(s, (int, float)):
+        return float(s)
+    t = str(s).strip().replace("%", "").replace(",", "")
+    if not t or t == "-":
+        return None
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+def brief_data(code: str) -> Dict[str, Any]:
+    """Structured one-stock snapshot for the desktop UI's 速览 card.
+
+    Best-effort: every field is independently guarded, missing ones stay
+    ``None``. Real-time quote (xueqiu) is the primary source; falls back
+    to nothing if the cookie is absent (UI shows what it can).
+    """
+    norm = normalize_code(code)
+    d: Dict[str, Any] = {
+        "code": norm, "name": None, "market": None, "industry": None, "mc": None,
+        "price": None, "change": None, "deltaPct": None,
+        "vol_ratio": None, "turn": None, "amp": None,
+        "pe": None, "pb": None, "roe": None,
+        "main_in": None, "prev_main_in": None,
+        "market_status": None, "xq_bull": None,
+    }
+    d["market"] = {"SH": "沪", "SZ": "深", "BJ": "北"}.get(norm[:2], "") + "市"
+
+    # --- real-time quote (primary) ---
+    try:
+        from financial_analyst.data.collectors.opencli.xueqiu_stock import (
+            XueqiuStockCollector,
+        )
+        q = XueqiuStockCollector().fetch(norm)
+        if q:
+            d["name"] = q.get("name")
+            d["price"] = q.get("price")
+            d["change"] = q.get("change")
+            d["deltaPct"] = _pct_to_num(q.get("changePercent"))
+            d["turn"] = q.get("turnover_rate")
+            d["amp"] = q.get("amplitude")
+            d["mc"] = q.get("marketCap")
+            d["market_status"] = q.get("market_status")
+    except Exception:
+        pass
+
+    # --- industry ---
+    try:
+        ind = _tool_industry_show(norm)
+        if not ind.is_error and ":" in ind.content:
+            d["industry"] = ind.content.split(":", 1)[1].strip()
+    except Exception:
+        pass
+
+    # --- PE / PB from daily basic ---
+    try:
+        from financial_analyst.data.loader_factory import get_default_loader
+        import pandas as pd
+        loader = get_default_loader()
+        today = pd.Timestamp.now().strftime("%Y-%m-%d")
+        start = (pd.Timestamp.now() - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
+        db = loader.fetch_daily_basic(norm, start, today)
+        if db is not None and not db.empty:
+            b = db.iloc[-1]
+            d["pe"] = b.get("pe_ttm")
+            d["pb"] = b.get("pb")
+            if d["mc"] is None and b.get("total_mv"):
+                d["mc"] = f"{b.get('total_mv', 0) / 10000:.0f}亿"
+    except Exception:
+        pass
+
+    # --- main fund flow (latest + previous snapshot) ---
+    try:
+        from financial_analyst.data.news_db import NewsDB
+        ndb = NewsDB()
+        hist = ndb.query_ths_fund_flow_history(norm, target="gegu", limit=2)
+        ndb.close()
+        if hist:
+            d["main_in"] = _parse_cn_amount(hist[0].get("main_net"))
+            if d["main_in"] is not None:
+                d["main_in"] = round(d["main_in"] / 1e8, 2)  # → 亿
+        if len(hist) > 1:
+            pv = _parse_cn_amount(hist[1].get("main_net"))
+            d["prev_main_in"] = round(pv / 1e8, 2) if pv is not None else None
+    except Exception:
+        pass
+
+    return d
+
+
 @functools.lru_cache(maxsize=1)
 def _project_root() -> Path:
     """Locate the financial-analyst project root.
@@ -899,7 +1017,16 @@ def _tool_stock_brief(code: str, news_days: int = 7) -> ToolResult:
     lines.append(
         "\n[dim]需要深度研报跑 run_report; 需要刷新新闻跑 news_collect[/dim]"
     )
-    return ToolResult("\n".join(lines))
+    # v1.9.0: attach structured snapshot in side_effect for the desktop
+    # UI's 速览 card (the LLM only reads .content; the server reads
+    # .side_effect["brief"]).
+    structured = None
+    try:
+        structured = brief_data(code)
+    except Exception:
+        pass
+    return ToolResult("\n".join(lines),
+                      side_effect={"brief": structured} if structured else None)
 
 
 def _tool_alpha_list(family: Optional[str] = None) -> ToolResult:

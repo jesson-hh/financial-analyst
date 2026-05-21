@@ -1,5 +1,51 @@
 # Changelog
 
+## v1.9.0 — 2026-05-21
+
+### Added — 桌面 UI 接入 (觀瀾 Tauri app) via HTTP/SSE 桥
+
+把 buddy agent 包成 SSE 服务, 让觀瀾桌面前端 (用户用 claude design 做的
+Tauri+JSX 原型) 能驱动真 agent 而非 mock. 接入 gap 分析见
+`docs/UI_INTEGRATION_GAP.md` (用户审核后选定方案: 加 B2/B3/B4, B1/B5/B6 降级).
+
+#### A1: `financial-analyst serve` SSE 服务 (`buddy/server.py`)
+FastAPI `/run` 把 `BuddyAgent.run_turn` 事件流映射成 SSE:
+`plan` / `tool_start` / `tool_done` / `brief` / `answer_progress` /
+`confirm_request` / `done` / `error`. `/confirm` 双向解决 permission
+future (mode=default/safe 时). `/health` `/tools` 辅助端点. CORS allow-all.
+依赖 fastapi+uvicorn 放 optional `[serve]` (lazy import, 不污染核心).
+
+CLI: `financial-analyst serve --port 9999`.
+
+#### B2: 规则意图分类 (`buddy/intent.py`)
+8 类 (brief/fundflow/why_move/compare/technical/alert/news/screen) 纯正则,
+给 UI 每轮工具链一个中文标题 (资金流扫描/驱动归因…). 纯展示, 不影响 LLM 选工具.
+
+#### B3: stock_brief 结构化输出 (`brief_data()`)
+速览卡需要 JSON 字段 (price/change/deltaPct/pe/pb/turn/amp/mc/industry/
+main_in/prev_main_in…). `stock_brief` 现在把结构化 dict 放进
+`ToolResult.side_effect["brief"]`, server 转成 `brief` SSE event.
+`normalize_code()` 处理桌面端的裸 6 位代码 (300750→SZ300750).
+主力分解/xq_bull 留空 (B6 跳过).
+
+#### B4: §N 引用标注
+system prompt 要求 LLM 总结时关键数据点后标 `[§N]` 对应本轮第 N 个工具,
+前端渲染成印章脚注. `run_turn` 的 tool_result event 现在带 side_effect.
+
+### 接入降级 (用户审核 = 不做的部分)
+- B1 预规划整链 → 边跑边 append (后端流式忠实, 前端 reducer 动态增长 chain)
+- B5 run_report 真进度 → 前端假进度条
+- B6 雪球多头% → 卡片字段留空
+
+### 前端改动 (在 finance_analyst_integrated.zip)
+`agent-adapter.jsx` 加 `_runBackend` (fetch SSE + 回退 mock);
+`app.jsx` reducer 动态 append chain; `index.html` 加 `window.GUANLAN_BACKEND`
+开关. 详见包内 `INTEGRATION.md`.
+
+### Tests (test_server.py 7 + test_brief_data.py 7, 156 buddy total)
+SSE 全流程 / 意图分类 / confirm gating / 健康检查 · code 规范化 /
+结构化字段 schema / side_effect 挂载.
+
 ## v1.8.3 — 2026-05-21
 
 ### Fixed — 中文表格列错位 (CJK 宽字符对齐)

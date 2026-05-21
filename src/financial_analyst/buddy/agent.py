@@ -52,6 +52,9 @@ Behaviour rules:
 4. If a tool errors, surface the error message verbatim and suggest a fix.
 5. After tool execution, summarise in plain Chinese — DO NOT dump raw JSON or full
    markdown. Pick the 3-5 most important lines.
+   - **引用标注 (§N)**: 关键数据点后紧跟 `[§N]` 标注它来自本轮第 N 个工具调用
+     (N 从 1 开始, 按工具调用顺序). 例: "主力净流入 +4.8 亿[§2], 同行毛利率第一[§4]".
+     不要在结尾集中列引用; 没有对应工具支撑的判断不标. 这让前端能把数据挂回来源.
 6. When the user names a stock in Chinese, map to its code from common knowledge
    (茅台=SH600519, 五粮液=SZ000858, 比亚迪=SZ002594, 宁德时代=SZ300750), or ask.
 7. For follow-ups, reuse prior tool results from history instead of re-fetching.
@@ -333,6 +336,9 @@ class BuddyAgent:
                 yield TurnEvent("tool_result", {
                     "name": name, "content": result.content,
                     "is_error": result.is_error,
+                    # v1.9.0: forward structured side_effect (e.g. stock_brief's
+                    # 速览 card dict) so the SSE server can relay it to the UI.
+                    "side_effect": result.side_effect,
                 })
                 tool_result_messages.append({
                     "role": "tool",

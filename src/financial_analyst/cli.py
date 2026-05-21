@@ -109,6 +109,24 @@ def chat(
 
 
 @app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address."),
+    port: int = typer.Option(9999, "--port", help="Port."),
+):
+    """Run the HTTP/SSE bridge for the desktop UI (觀瀾 Tauri app).
+
+    Exposes the buddy agent over Server-Sent Events so the desktop
+    front-end can drive the real tools instead of its mock.
+
+    Endpoints: POST /run (SSE), POST /confirm, GET /health, GET /tools.
+
+    Needs the [serve] extra:  pip install financial-analyst[serve]
+    """
+    from financial_analyst.buddy.server import serve as _serve
+    _serve(host=host, port=port)
+
+
+@app.command()
 def buddy():
     """Alias for `chat` — conversational front-end (full TUI)."""
     from financial_analyst.buddy.app import run_app
