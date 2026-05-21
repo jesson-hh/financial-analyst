@@ -18,9 +18,25 @@ import functools
 import json
 import os
 import subprocess
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
+
+def _disp_w(s: Any) -> int:
+    """Terminal display width — CJK / fullwidth glyphs count as 2 columns.
+    Python's f-string ``:<N`` aligns by character count, which mis-aligns
+    Chinese tables (每个汉字占 2 列但算 1 字符). Use this for any tabular
+    output that mixes Chinese names with numeric columns."""
+    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1
+               for c in str(s))
+
+
+def _pad(s: Any, width: int) -> str:
+    """Left-align ``s`` to a display width of ``width`` columns (CJK-aware)."""
+    s = str(s)
+    return s + " " * max(0, width - _disp_w(s))
 
 
 @functools.lru_cache(maxsize=1)
@@ -254,8 +270,8 @@ def _tool_watchlist_show(pid: str = "-1", refresh: bool = False) -> ToolResult:
     lines = [f"自选股 (group_pid={pid}, snapshot={snapshot_date}, n={len(rows)}):"]
     for r in rows:
         lines.append(
-            f"  {r.get('symbol'):<10} {r.get('name', '?'):<8} "
-            f"price={r.get('price') or '-':<8} "
+            f"  {_pad(r.get('symbol'), 10)} {_pad(r.get('name', '?'), 10)} "
+            f"price={_pad(r.get('price') or '-', 8)} "
             f"chg={r.get('change_percent') or '-'}"
         )
     return ToolResult("\n".join(lines))
@@ -331,9 +347,9 @@ def _tool_fund_holdings(account: str = "", refresh: bool = False) -> ToolResult:
     lines = [f"蛋卷持仓 ({len(rows)} funds, sorted by market value):"]
     for r in rows:
         lines.append(
-            f"  {r.get('fd_code'):<8} {r.get('fd_name', '?'):<20} "
-            f"市值={r.get('market_value') or '-':<10} "
-            f"占比={r.get('market_percent') or '-':<6} "
+            f"  {_pad(r.get('fd_code'), 8)} {_pad(r.get('fd_name', '?'), 22)} "
+            f"市值={_pad(r.get('market_value') or '-', 10)} "
+            f"占比={_pad(r.get('market_percent') or '-', 6)} "
             f"当日={r.get('daily_gain') or '-'}  "
             f"累计={r.get('hold_gain') or '-'} ({r.get('hold_gain_rate') or '-'})"
         )
@@ -419,33 +435,39 @@ def _tool_ths_fund_flow(target: str = "gegu", limit: int = 30,
     title = titles.get(target, target)
     lines = [f"同花顺 — {title} (snapshot={snap}, top {len(rows)}):"]
     if target == "gegu":
-        lines.append(f"  {'代码':<8}{'名称':<10}{'现价':<8}{'涨跌幅':<8}"
-                     f"{'换手率':<8}{'主力净流入':<12}{'成交额':<10}")
+        lines.append(
+            f"  {_pad('代码', 8)}{_pad('名称', 12)}{_pad('现价', 8)}{_pad('涨跌幅', 9)}"
+            f"{_pad('换手率', 9)}{_pad('主力净流入', 13)}{_pad('成交额', 10)}"
+        )
         for r in rows:
             lines.append(
-                f"  {(r.get('code') or '-'):<8}{(r.get('name') or '-'):<10}"
-                f"{(r.get('price') or '-'):<8}{(r.get('change_pct') or '-'):<8}"
-                f"{(r.get('turnover_pct') or '-'):<8}{(r.get('main_net') or '-'):<12}"
-                f"{(r.get('total_amount') or '-'):<10}"
+                f"  {_pad(r.get('code') or '-', 8)}{_pad(r.get('name') or '-', 12)}"
+                f"{_pad(r.get('price') or '-', 8)}{_pad(r.get('change_pct') or '-', 9)}"
+                f"{_pad(r.get('turnover_pct') or '-', 9)}{_pad(r.get('main_net') or '-', 13)}"
+                f"{_pad(r.get('total_amount') or '-', 10)}"
             )
     elif target in ("gainian", "hangye"):
-        lines.append(f"  {'板块代码':<10}{'名称':<14}{'涨跌幅':<8}"
-                     f"{'主力净额(亿)':<14}{'股数':<6}{'领涨股':<10}")
+        lines.append(
+            f"  {_pad('板块代码', 10)}{_pad('名称', 16)}{_pad('涨跌幅', 9)}"
+            f"{_pad('主力净额(亿)', 14)}{_pad('股数', 6)}{_pad('领涨股', 12)}"
+        )
         for r in rows:
             lines.append(
-                f"  {(r.get('code') or '-'):<10}{(r.get('name') or '-'):<14}"
-                f"{(r.get('change_pct') or '-'):<8}{(r.get('main_net') or '-'):<14}"
-                f"{(r.get('num_stocks') or '-'):<6}{(r.get('leader') or '-'):<10}"
+                f"  {_pad(r.get('code') or '-', 10)}{_pad(r.get('name') or '-', 16)}"
+                f"{_pad(r.get('change_pct') or '-', 9)}{_pad(r.get('main_net') or '-', 14)}"
+                f"{_pad(r.get('num_stocks') or '-', 6)}{_pad(r.get('leader') or '-', 12)}"
             )
     elif target == "ddzz":
-        lines.append(f"  {'时间':<20}{'代码':<8}{'名称':<10}"
-                     f"{'价':<8}{'量':<8}{'额(万)':<10}{'性质':<6}{'涨幅':<8}")
+        lines.append(
+            f"  {_pad('时间', 20)}{_pad('代码', 8)}{_pad('名称', 12)}"
+            f"{_pad('价', 8)}{_pad('量', 8)}{_pad('额(万)', 10)}{_pad('性质', 6)}{_pad('涨幅', 8)}"
+        )
         for r in rows:
             lines.append(
-                f"  {(r.get('trade_time') or '-'):<20}{(r.get('code') or '-'):<8}"
-                f"{(r.get('name') or '-'):<10}{(r.get('price') or '-'):<8}"
-                f"{(r.get('volume') or '-'):<8}{(r.get('total_amount') or '-'):<10}"
-                f"{(r.get('direction') or '-'):<6}{(r.get('change_pct') or '-'):<8}"
+                f"  {_pad(r.get('trade_time') or '-', 20)}{_pad(r.get('code') or '-', 8)}"
+                f"{_pad(r.get('name') or '-', 12)}{_pad(r.get('price') or '-', 8)}"
+                f"{_pad(r.get('volume') or '-', 8)}{_pad(r.get('total_amount') or '-', 10)}"
+                f"{_pad(r.get('direction') or '-', 6)}{_pad(r.get('change_pct') or '-', 8)}"
             )
     return ToolResult("\n".join(lines))
 
@@ -561,8 +583,8 @@ def _tool_ths_concept_board(mode: str = "new", limit: int = 30,
             )
         else:
             lines.append(
-                f"  {r.get('board_code', '?'):<8}{r.get('board_name', '?'):<10}"
-                f"{r.get('change_pct', '?'):<8}"
+                f"  {_pad(r.get('board_code', '?'), 8)}{_pad(r.get('board_name', '?'), 14)}"
+                f"{_pad(r.get('change_pct', '?'), 8)}"
             )
     return ToolResult("\n".join(lines))
 

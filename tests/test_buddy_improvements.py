@@ -367,3 +367,39 @@ def test_system_prompt_lists_all_tools():
     # every registered tool name should appear in the rendered prompt
     for t in TOOL_REGISTRY:
         assert t.name in p
+
+
+# ===== v1.8.3: CJK-aware table alignment ====================================
+
+from financial_analyst.buddy.tools import _disp_w, _pad
+
+
+def test_disp_w_counts_cjk_as_two():
+    assert _disp_w("茅台") == 4          # 2 hanzi × 2 cols
+    assert _disp_w("ABC") == 3           # ascii = 1 col each
+    assert _disp_w("茅台A") == 5         # 2+2+1
+    assert _disp_w("") == 0
+    assert _disp_w(123) == 3             # non-str coerced
+
+
+def test_pad_aligns_to_display_width():
+    # "茅台" is 4 display cols → pad to 8 means +4 spaces
+    out = _pad("茅台", 8)
+    assert _disp_w(out) == 8
+    assert out == "茅台    "
+    # ascii pads by char count == display width
+    assert _pad("ABCDEF", 8) == "ABCDEF  "
+
+
+def test_pad_no_truncate_when_too_long():
+    # over-width input is left as-is (never cut)
+    out = _pad("超长板块名称示例", 4)
+    assert "超长板块名称示例" in out
+
+
+def test_pad_columns_line_up_mixed():
+    """A Chinese name column and an ascii code column padded to the same
+    display width must produce equal-width cells."""
+    cell_cn = _pad("贵州茅台", 12)
+    cell_en = _pad("SH600519", 12)
+    assert _disp_w(cell_cn) == _disp_w(cell_en) == 12

@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.8.3 — 2026-05-21
+
+### Fixed — 中文表格列错位 (CJK 宽字符对齐)
+
+buddy tool 的表格输出 (ths_fund_flow 4 target / watchlist / fund_holdings /
+concept_board rank) 用 f-string `:<N` 按**字符数**补齐, 但中文每字占 2
+显示列、算 1 字符 — 导致中文名列和数字列混排时下一列起始位错位 (名字
+长度不同的行尤其乱).
+
+**修复**: 加 `_disp_w()` (CJK/全角算 2 列) + `_pad()` (按显示宽度左对齐),
+替换全部 6 处表格的 `:<N`. 验证: 三行不同长度中文名的列边界显示位置
+完全一致 `[8, 20, 28, 37]`.
+
+### Tests (4 new in test_buddy_improvements.py)
+_disp_w CJK 计数 / _pad 显示宽度对齐 / 不截断超长 / 中英混排等宽.
+
+114 buddy/collector/alert tests pass.
+
 ## v1.8.2 — 2026-05-21
 
 ### Fixed — confirm modal 没有常驻指示器 (headless self-test 发现)
