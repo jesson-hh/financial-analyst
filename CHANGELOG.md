@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.9.4 — 2026-05-22
+
+### Fixed — /models 返回扁平数组 (校对桌面 UI 接线发现)
+
+校对 design 接好的前端时发现: `/models` 返回 `{provider: [models]}` 对象,
+但前端模型 picker 期望扁平数组 → picker 列表空. 改 `/models` 返回
+`models: [{id, name, provider}]` (扁平) + `by_provider` (保留分组).
+
+(配套前端修复: adapter `_runBackend` 之前漏传 `model` 字段, 已在前端补上.)
+
+### Tests
+test_models_endpoint 改验证扁平数组 + by_provider.
+
 ## v1.9.3 — 2026-05-21
 
 ### Added — UI 对齐后端端点 (多轮 / 模型 / 盯盘)

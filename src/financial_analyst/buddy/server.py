@@ -229,13 +229,20 @@ def build_app():
 
     @app.get("/models")
     async def models():
-        """Available LLM models (for the front-end model picker)."""
+        """Available LLM models (for the front-end model picker).
+
+        ``models`` is a FLAT array [{id, name, provider}] so the UI can
+        render a picker directly; ``by_provider`` keeps the grouped form
+        for anyone who wants it.
+        """
         try:
             from financial_analyst.llm.client import LLMClient
-            avail = LLMClient.for_agent("buddy").list_models()
+            by_prov = LLMClient.for_agent("buddy").list_models()
         except Exception as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
-        return JSONResponse({"ok": True, "models": avail})
+        flat = [{"id": m, "name": m, "provider": p}
+                for p, ms in by_prov.items() for m in ms]
+        return JSONResponse({"ok": True, "models": flat, "by_provider": by_prov})
 
     @app.get("/alerts")
     async def alerts():

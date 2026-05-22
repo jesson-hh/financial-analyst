@@ -114,7 +114,12 @@ def test_models_endpoint(client):
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
-    assert "qwen" in body["models"]
+    # v1.9.4: models is a FLAT array [{id, name, provider}] for the picker
+    assert isinstance(body["models"], list)
+    assert any(m["provider"] == "qwen" for m in body["models"])
+    assert all("id" in m and "name" in m for m in body["models"])
+    # grouped form still available
+    assert "qwen" in body["by_provider"]
 
 
 def test_alerts_endpoint_lists_rules(client, tmp_path, monkeypatch):
