@@ -218,18 +218,24 @@ def dream(
 
     Subcommands:
       dream run                              — collect outcomes + propose memory updates (default)
+      dream aggregate                        — cluster Tier-4 introspector pending proposals (>= 3 cases) → _proposed/
       dream review                           — list pending proposals under memories/_proposed/
       dream accept <agent>/<slug>            — promote a proposal into the agent's permanent memory
       dream reject <agent>/<slug>            — delete a proposal
 
     Examples:
       financial-analyst dream                                            # same as `dream run`
+      financial-analyst dream aggregate                                  # 把 _pending_introspections/ 聚类升级
+      financial-analyst dream aggregate --dry-run                        # 只看结果不写盘
       financial-analyst dream review
       financial-analyst dream accept whale-analyst/dont-trust-VR-without-OBV
       financial-analyst dream reject whale-analyst/dont-trust-VR-without-OBV
     """
     if action == "run":
         asyncio.run(_run_dream(since=since, dry_run=dry_run, out_dir=out_dir))
+        return
+    if action == "aggregate":
+        _dream_aggregate(dry_run=dry_run)
         return
     if action == "review":
         _dream_review()
@@ -246,8 +252,37 @@ def dream(
             raise typer.Exit(1)
         _dream_promote(target, action="reject")
         return
-    typer.echo(f"Unknown dream action {action!r}; use run | review | accept | reject")
+    typer.echo(f"Unknown dream action {action!r}; "
+               "use run | aggregate | review | accept | reject")
     raise typer.Exit(1)
+
+
+def _dream_aggregate(dry_run: bool = False) -> None:
+    """Tier-4 introspector pending → _proposed/ via Jaccard clustering.
+
+    扫 memories/_pending_introspections/*.json, 把同 (target_agent + 相似 pattern)
+    重复 >= 3 次的 cluster 升级到 memories/_proposed/<agent>/<date>_<slug>.md.
+    """
+    from financial_analyst.dream.aggregator import aggregate_pending
+    written, stats = aggregate_pending(
+        memory_root=Path("memories"), min_count=3, threshold=0.4,
+        dry_run=dry_run,
+    )
+    typer.echo(f"扫 _pending_introspections/: "
+               f"{stats.get('n_pending_files', 0)} 份, "
+               f"{stats.get('n_proposals_total', 0)} 个 proposal")
+    typer.echo(f"聚类: {stats.get('clusters_total', 0)} cluster 总数, "
+               f"{stats.get('clusters_promoted', 0)} 升级 (>= 3 cases)")
+    if stats.get("promoted_breakdown"):
+        typer.echo("升级 breakdown:")
+        for slug, info in stats["promoted_breakdown"].items():
+            typer.echo(f"  [{info['confidence']:>4}] {info['agent']}/{slug} "
+                       f"({info['n_cases']} cases)")
+    if dry_run:
+        typer.echo("(dry-run, 未写盘)")
+    else:
+        typer.echo(f"\n写到 memories/_proposed/ ({len(written)} 份)")
+        typer.echo("下一步: fa dream review  →  fa dream accept <agent>/<slug>")
 
 
 def _dream_review() -> None:

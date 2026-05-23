@@ -1,0 +1,141 @@
+name: Release (Tauri desktop bundle)
+
+# Triggered by pushing a tag like v1.9.5, or manually via workflow_dispatch.
+# Builds .msi (Windows) + .dmg (macOS) + .AppImage (Linux) and uploads to GitHub Release.
+#
+# NOT triggered: code signing (no certs in P2). Users get an unsigned bundle that
+# triggers SmartScreen/Gatekeeper warnings on first run. P4 adds certs + notarization.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Manual version tag (e.g. v1.9.5-test)"
+        required: true
+        default: "v0.0.0-manual"
+
+jobs:
+  build:
+    name: Bundle (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-latest
+            target_triple: x86_64-unknown-linux-gnu
+            sidecar_name: financial-analyst
+            artifact_glob: "src-tauri/target/release/bundle/{appimage,deb}/*"
+          - platform: macos-14
+            target_triple: aarch64-apple-darwin
+            sidecar_name: financial-analyst
+            artifact_glob: "src-tauri/target/release/bundle/{dmg,macos}/*"
+          - platform: macos-13
+            target_triple: x86_64-apple-darwin
+            sidecar_name: financial-analyst
+            artifact_glob: "src-tauri/target/release/bundle/{dmg,macos}/*"
+          - platform: windows-latest
+            target_triple: x86_64-pc-windows-msvc
+            sidecar_name: financial-analyst.exe
+            artifact_glob: "src-tauri/target/release/bundle/{msi,nsis}/*"
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target_triple }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "packaging/src-tauri -> target"
+
+      - name: Linux deps (webkit2gtk)
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install Python + pyinstaller
+        run: |
+          pip install -e .[serve]
+          pip install pyinstaller
+
+      - name: Build PyInstaller single-file
+        shell: bash
+        run: |
+          pyinstaller packaging/pyinstaller/financial-analyst.spec \
+              --distpath packaging/dist \
+              --workpath packaging/build \
+              --noconfirm
+
+      - name: Copy sidecar to Tauri-expected name
+        shell: bash
+        run: |
+          mkdir -p packaging/src-tauri/binaries
+          cp packaging/dist/${{ matrix.sidecar_name }} \
+             packaging/src-tauri/binaries/financial-analyst-${{ matrix.target_triple }}${{ matrix.platform == 'windows-latest' && '.exe' || '' }}
+
+      - name: Build Tauri bundle
+        working-directory: packaging/src-tauri
+        run: cargo tauri build --target ${{ matrix.target_triple }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: financial-analyst-${{ matrix.target_triple }}
+          path: |
+            packaging/src-tauri/target/${{ matrix.target_triple }}/release/bundle/msi/*.msi
+            packaging/src-tauri/target/${{ matrix.target_triple }}/release/bundle/nsis/*.exe
+            packaging/src-tauri/target/${{ matrix.target_triple }}/release/bundle/dmg/*.dmg
+            packaging/src-tauri/target/${{ matrix.target_triple }}/release/bundle/appimage/*.AppImage
+            packaging/src-tauri/target/${{ matrix.target_triple }}/release/bundle/deb/*.deb
+          if-no-files-found: warn
+
+  # ────────────────────── Aggregate + publish GitHub Release ──────────────────────
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Display artifact tree
+        run: find dist -type f
+
+      - name: Generate release notes from CHANGELOG.md
+        id: notes
+        run: |
+          # Pull the most recent ## v... section from CHANGELOG.md
+          awk '/^## v/{if(p)exit; p=1}p' CHANGELOG.md > release_notes.md
+          echo "Release notes preview:"
+          head -40 release_notes.md
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body_path: release_notes.md
+          draft: true   # 默认建草稿, 人工 review 后发布
+          prerelease: false
+          files: |
+            dist/**/*.msi
+            dist/**/*.exe
+            dist/**/*.dmg
+            dist/**/*.AppImage
+            dist/**/*.deb
+          fail_on_unmatched_files: false

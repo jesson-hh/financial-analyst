@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ────────────────────── Unit + integration tests (mocked LLM) ──────────────────────
+  test:
+    name: pytest (py${{ matrix.python }}-${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev,serve]
+
+      - name: Lint (ruff, non-blocking)
+        run: ruff check src/ tests/ || true
+
+      - name: Pytest (unit + integration, mocked)
+        env:
+          # Force pytest to skip the real-API E2E test
+          FA_E2E: "0"
+        run: |
+          pytest tests/ -q --tb=short --maxfail=10
+
+  # ────────────────────── CLI smoke (verify all subcommands import) ──────────────────────
+  cli-smoke:
+    name: CLI smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -e .[serve]
+
+      - name: Verify CLI subcommands surface
+        run: |
+          financial-analyst --help
+          financial-analyst version
+          financial-analyst agents
+          financial-analyst loaders
+          financial-analyst data --help
+          financial-analyst data status || true   # 没 data 时 status 会报错, OK
+          financial-analyst init --help
+          financial-analyst dream --help
+
+      - name: Verify import chain (no circular / missing deps)
+        run: |
+          python -c "from financial_analyst import cli; print('cli OK')"
+          python -c "from financial_analyst.data.updaters.pytdx_pool import PytdxClient; print('pytdx pool OK')"
+          python -c "from financial_analyst.data.updaters.pytdx_kline import fetch_daily, update_daily; print('pytdx kline OK')"
+          python -c "from financial_analyst.data.updaters.tencent_basic import update_daily_basic_today; print('tencent basic OK')"
+          python -c "from financial_analyst.dream.aggregator import aggregate_pending; print('dream aggregator OK')"
+
+  # ────────────────────── Build verification (sanity, no upload) ──────────────────────
+  pyinstaller-smoke:
+    name: PyInstaller build smoke
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install + pyinstaller
+        run: |
+          pip install -e .[serve]
+          pip install pyinstaller
+
+      - name: Build single-file exe (smoke, dist not uploaded)
+        run: |
+          pyinstaller packaging/pyinstaller/financial-analyst.spec \
+              --distpath packaging/dist \
+              --workpath packaging/build \
+              --noconfirm
+
+      - name: Verify exe runs (version + help only — no network)
+        shell: bash
+        run: |
+          ls -la packaging/dist/
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            packaging/dist/financial-analyst.exe version
+          else
+            packaging/dist/financial-analyst version
+          fi

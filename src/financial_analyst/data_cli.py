@@ -221,16 +221,68 @@ def update_cmd(
 
 @data_app.command("bootstrap")
 def bootstrap_cmd(
-    package: str = typer.Option(
-        "demo", help="演示包: demo (csi300×1y, ~500MB) / lite (csi800×3y, ~5GB) / full (~50GB)"),
+    preset: str = typer.Option(
+        "demo", "--preset",
+        help="数据包预设: demo (~500MB csi300 hist) / lite (~5GB csi800+5min) / full (~50GB)"),
     target: Optional[Path] = typer.Option(
-        None, help="数据目标目录, 默认 ~/.financial-analyst/data/"),
+        None, "--target",
+        help="数据目标目录, 默认 ~/.financial-analyst/data/"),
+    force: bool = typer.Option(
+        False, "--force", help="目标目录已有数据时强制覆盖"),
 ):
-    """从 HuggingFace 下载历史数据包.
+    """从 HuggingFace 下载历史数据包 (一次性 bootstrap).
 
-    [P1 待实现] 现在只是 stub. 完整实现见 docs/research/2026-05-23-direct-data-stability.md.
+    例:
+      fa data bootstrap                    # 演示包 ~500MB 到默认路径
+      fa data bootstrap --preset lite      # ~5GB csi800+5min
+      fa data bootstrap --target D:/data   # 自定义路径
+
+    之后每日增量走 ``fa data update`` (pytdx 主站直连, 无 token).
     """
-    typer.echo("[stub] fa data bootstrap 尚未实现 — 见 P1 roadmap.")
-    typer.echo("       临时: 手工 copy G:/stocks/stock_data 到 ~/.financial-analyst/data/")
-    typer.echo("       或编辑 config/loaders.yaml 把 provider_uri 指向已有目录.")
-    raise typer.Exit(2)
+    from financial_analyst.init_cli import HF_PACKAGES, _download_package, _write_loaders_config
+
+    if preset not in HF_PACKAGES:
+        typer.echo(f"未知 preset {preset!r}. 可选: {list(HF_PACKAGES)}")
+        raise typer.Exit(1)
+
+    pkg = HF_PACKAGES[preset]
+    target_dir = target or (Path.home() / ".financial-analyst" / "data")
+    target_dir = Path(target_dir).expanduser().resolve()
+
+    # 检测已有数据
+    if (target_dir / "cn_data" / "instruments" / "all.txt").exists() and not force:
+        from financial_analyst.data.bin_writer import load_instruments
+        existing = load_instruments(str(target_dir / "cn_data"), market="all")
+        typer.echo(f"⚠ {target_dir} 已经有 {len(existing)} 只 instruments.")
+        typer.echo(f"  跳过下载. 加 --force 覆盖, 或换 --target 路径.")
+        raise typer.Exit(0)
+
+    typer.echo(f"=== fa data bootstrap — preset={preset} ===")
+    typer.echo(f"  HF repo:   {pkg['repo_id']}")
+    typer.echo(f"  目标目录:  {target_dir}")
+    typer.echo(f"  约大小:    {pkg['size_hint']}")
+    typer.echo()
+
+    ok = _download_package(preset, target_dir)
+    if not ok:
+        typer.echo()
+        typer.echo("✗ 下载失败. 可能原因:")
+        typer.echo("  1. HF dataset 还没 publish (maintainer 跑 publish_hf_dataset.py 上传, 见")
+        typer.echo("     docs/setup/hf_publish_guide.md)")
+        typer.echo("  2. 网络不稳定, 重试一次")
+        typer.echo("  3. 国内 HF CDN 偶尔需要 HTTPS_PROXY")
+        typer.echo()
+        typer.echo("临时替代: 手工 copy 任意 Qlib 数据目录到 ~/.financial-analyst/data/cn_data/,")
+        typer.echo("         或编辑 config/loaders.yaml 把 provider_uri 指向已有目录.")
+        raise typer.Exit(2)
+
+    # 写 config/loaders.yaml 指向新目录
+    config_path = Path(__file__).resolve().parent.parent.parent / "config" / "loaders.yaml"
+    if config_path.parent.exists():
+        _write_loaders_config(target_dir, config_path)
+
+    typer.echo()
+    typer.echo("✓ bootstrap 完成. 下一步:")
+    typer.echo("  fa data status                — 看数据状态")
+    typer.echo("  fa report SH600519            — 跑第一份研报")
+    typer.echo("  fa data update                — 每日增量更新 (pytdx 直连)")
