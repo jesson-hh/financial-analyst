@@ -55,8 +55,17 @@ def report(
     out_dir: Path = typer.Option(Path("./out"), help="Output directory"),
     file: Optional[Path] = typer.Option(None, "--file", "-f", help="Read codes from file (one per line) for batch"),
     trace: bool = typer.Option(False, "--trace", help="Print per-agent timing table after run"),
+    no_auto_aggregate: bool = typer.Option(
+        False, "--no-auto-aggregate",
+        help="Skip dream aggregate after batch finishes (default: auto-run when ≥5 new introspections)"),
 ):
-    """Generate single-stock deep-dive report (one-shot)."""
+    """Generate single-stock deep-dive report (one-shot).
+
+    Batch mode (``-f file``): after all reports finish, automatically runs
+    ``fa dream aggregate`` if ≥5 new introspections landed in
+    ``memories/_pending_introspections/`` during this batch. Disable with
+    ``--no-auto-aggregate``.
+    """
     from financial_analyst.tui import run_report_oneshot
 
     codes: list[str] = []
@@ -72,12 +81,46 @@ def report(
         typer.echo("Error: provide a code as argument or use -f <file>")
         raise typer.Exit(code=1)
 
+    # 跑前快照 _pending_introspections/ 数量 (用于 auto-aggregate 判定)
+    pending_dir = Path("memories") / "_pending_introspections"
+    n_before = len(list(pending_dir.glob("*.json"))) if pending_dir.exists() else 0
+
+    completed = 0
     for c in codes:
         try:
             asyncio.run(run_report_oneshot(code=c, asof=asof, out_dir=out_dir, trace=trace))
+            completed += 1
         except KeyboardInterrupt:
             typer.echo(f"\n[interrupted] cancelled report for {c}")
             break
+
+    # Auto-aggregate hook: batch ≥ 5 完成 + 新增 introspections ≥ 5 时跑
+    if not no_auto_aggregate and len(codes) >= 5 and completed >= 5:
+        n_after = len(list(pending_dir.glob("*.json"))) if pending_dir.exists() else 0
+        delta = n_after - n_before
+        if delta >= 5:
+            typer.echo(f"\n──────────────────────────────────────────────────")
+            typer.echo(f"  本次 batch 新增 {delta} 份 introspection, "
+                       f"自动跑 dream aggregate")
+            typer.echo(f"──────────────────────────────────────────────────")
+            try:
+                from financial_analyst.dream.aggregator import aggregate_pending
+                written, stats = aggregate_pending(
+                    memory_root=Path("memories"), min_count=3,
+                    threshold=0.4, dry_run=False,
+                )
+                typer.echo(f"  扫 {stats.get('n_pending_files', 0)} 份 → "
+                           f"{stats.get('clusters_promoted', 0)} 个 cluster 升级到 _proposed/")
+                if stats.get("promoted_breakdown"):
+                    for slug, info in stats["promoted_breakdown"].items():
+                        typer.echo(f"    [{info['confidence']:>4}] {info['agent']}/{slug} "
+                                   f"({info['n_cases']} cases)")
+                if written:
+                    typer.echo(f"\n  下一步: fa dream review  →  fa dream accept <agent>/<slug>")
+            except Exception as e:
+                typer.echo(f"  ⚠ auto-aggregate 失败 (不影响 batch 结果): "
+                           f"{type(e).__name__}: {e}")
+                typer.echo(f"  手动跑: fa dream aggregate")
 
 
 @app.command()
@@ -286,36 +329,77 @@ def _dream_aggregate(dry_run: bool = False) -> None:
 
 
 def _dream_review() -> None:
-    """List all proposals under memories/_proposed/ with metadata + diff preview."""
+    """List all proposals under memories/_proposed/ with frontmatter, supporting
+    cases preview, and lesson_md head. Sorted by confidence high→med→low.
+    """
     import yaml
     proposed_root = Path("memories") / "_proposed"
     if not proposed_root.exists():
-        typer.echo(f"No proposals directory at {proposed_root}. Run `dream run` first to generate some.")
+        typer.echo(f"No proposals directory at {proposed_root}. "
+                   f"Run `dream run` 或 `dream aggregate` 先生成些 proposals.")
         return
     files = sorted(proposed_root.rglob("*.md"))
     if not files:
-        typer.echo(f"{proposed_root} is empty. Run `dream run` after accumulating a few reports.")
+        typer.echo(f"{proposed_root} is empty. Run `dream run` or `dream aggregate` "
+                   f"after accumulating a few reports.")
         return
-    typer.echo(f"Pending proposals under {proposed_root} ({len(files)} total):\n")
+
+    # 解析每份, 收集 (confidence_rank, agent, slug, fm, body_preview, path)
+    parsed = []
     for f in files:
         try:
             text = f.read_text(encoding="utf-8")
             fm: dict = {}
+            body = text
             if text.startswith("---\n"):
                 end = text.find("\n---\n", 4)
                 if end > 0:
                     fm = yaml.safe_load(text[4:end]) or {}
+                    body = text[end + 5:].lstrip()
             agent = f.parent.name
             slug = f.stem.split("_", 1)[1] if "_" in f.stem else f.stem
-            conf = fm.get("confidence", "?")
-            title = fm.get("title", "(no title)")
-            n_cases = len(fm.get("supporting_cases", []))
-            typer.echo(f"  [{conf:>4}] {agent}/{slug}  ({n_cases} cases)")
-            typer.echo(f"         {title}")
-            typer.echo(f"         file: {f}")
+            conf = fm.get("confidence", "low")
+            # 排序权重: high=3, med=2, low=1, other=0
+            conf_rank = {"high": 3, "med": 2, "low": 1}.get(conf, 0)
+            # body preview: 跳过 # title 行, 抽前 3 行有效内容
+            body_lines = [l for l in body.split("\n")
+                          if l.strip() and not l.strip().startswith("#") and l.strip() != "---"]
+            body_preview = "\n".join(body_lines[:3])[:280]
+            parsed.append({
+                "rank": conf_rank, "conf": conf, "agent": agent, "slug": slug,
+                "fm": fm, "body_preview": body_preview, "path": f,
+            })
         except Exception as e:
             typer.echo(f"  [err]  {f}: {e}")
-    typer.echo("")
+
+    # 按 confidence high→med→low 排
+    parsed.sort(key=lambda x: (-x["rank"], x["agent"], x["slug"]))
+
+    typer.echo(f"Pending proposals under {proposed_root} ({len(parsed)} total):\n")
+    typer.echo(f"{'─' * 80}")
+
+    for p in parsed:
+        fm = p["fm"]
+        title = fm.get("title", "(no title)")[:120]
+        n_cases = len(fm.get("supporting_cases", []))
+        # supporting cases preview (前 3)
+        cases = fm.get("supporting_cases", [])[:3]
+        cases_str = ", ".join(cases)
+        if len(fm.get("supporting_cases", [])) > 3:
+            cases_str += f", ... (+{len(fm.get('supporting_cases', [])) - 3} more)"
+
+        typer.echo(f"  [{p['conf']:>4}] {p['agent']}/{p['slug']}  ({n_cases} cases)")
+        typer.echo(f"         title:    {title}")
+        if cases_str:
+            typer.echo(f"         cases:    {cases_str}")
+        if p["body_preview"]:
+            for line in p["body_preview"].split("\n")[:3]:
+                if line.strip():
+                    typer.echo(f"         preview:  {line[:100]}")
+        typer.echo(f"         file:     {p['path']}")
+        typer.echo("")
+
+    typer.echo(f"{'─' * 80}")
     typer.echo("To promote one:  financial-analyst dream accept <agent>/<slug>")
     typer.echo("To discard one:  financial-analyst dream reject <agent>/<slug>")
 

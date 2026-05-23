@@ -251,7 +251,7 @@ jobs:
 1. **真实 build 通过** — 需要先装 Rust toolchain (用户机器没装)
 2. **代码签名证书** — $300/yr, 个人项目 P3 再说
 3. **CI 自动 build matrix** — 三平台并行, 等代码稳定再加
-4. **GuanLan UI 内嵌 vs 引用 G:/stocks/fa_ui_ready** — 当前 `frontendDist` 指向 G:/stocks 目录, 不利于分发. 应该 copy fa_ui_ready 进 packaging/src-tauri/ 子目录
+4. ~~**GuanLan UI 内嵌 vs 引用 G:/stocks/fa_ui_ready**~~ ✅ 已完成 — fa_ui_ready 已 copy 到 `packaging/src-tauri/ui/`, `frontendDist` 改成 `../ui` 相对路径. 同步策略见 `ui/README.md`.
 5. **自动 update endpoint** — Tauri updater 配 HF / GitHub Releases
 
 ## 十二、状态 checkpoint

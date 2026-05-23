@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.jesson-hh.financial-analyst",
   "build": {
-    "frontendDist": "../../../stocks/fa_ui_ready",
+    "frontendDist": "../ui",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "cd ../../../stocks/fa_ui_ready && python -m http.server 5173",
+    "beforeDevCommand": "cd ../ui && python -m http.server 5173",
     "beforeBuildCommand": ""
   },
   "app": {

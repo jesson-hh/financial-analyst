@@ -48,24 +48,27 @@ from financial_analyst.data.bin_writer import (
 PRESETS = {
     "demo": {
         "size_hint":  "~500 MB",
-        "market":     "csi300",   # 读 instruments/csi300.txt
-        "n_codes":    300,        # 期望的代码数 (verification)
+        "method":     "top-mv",   # 用 Tencent 实时拉当前 mv top N
+        "n_codes":    300,        # 真当前 csi300 (而非 Qlib 历史累积 939)
+        "market":     "all",      # universe pool: instruments/all.txt
         "include_5min": False,
-        "description": "csi300 单股研报演示包. 全历史日线 + daily_basic 快照, 无 5min.",
+        "description": "当前 mv top-300 演示包 (真 csi300 当前成份). 全历史日线 + daily_basic 快照, 无 5min.",
     },
     "lite": {
         "size_hint":  "~5 GB",
-        "market":     "csi800",   # instruments/csi800.txt
-        "n_codes":    800,
+        "method":     "top-mv",
+        "n_codes":    800,        # 当前 mv top-800 ≈ csi800
+        "market":     "all",
         "include_5min": True,
-        "description": "csi800 半技术用户包. 全历史日线 + 5min ~7天 + financials.",
+        "description": "当前 mv top-800 半技术用户包. 全历史日线 + 5min ~7天 + financials.",
     },
     "full": {
         "size_hint":  "~50 GB",
-        "market":     "all",      # instruments/all.txt
-        "n_codes":    None,       # 全部 5500+
+        "method":     "instruments",  # 全 5500+ 用 instruments 文件
+        "market":     "all",
+        "n_codes":    None,
         "include_5min": True,
-        "description": "全 A 股完整包. 量化研究员 / 重度用户用.",
+        "description": "全 A 股完整包 (含历史退市股). 量化研究员 / 重度用户用.",
     },
 }
 
@@ -73,17 +76,70 @@ PRESETS = {
 # ──────────────────────── universe 解析 ────────────────────────
 
 
+def _resolve_universe_by_top_mv(source_uri: str, market: str, top_n: int) -> List[str]:
+    """从 instruments/{market}.txt 池里抽 N 只当前 mv 最大的 (走 Tencent 实时).
+
+    几千只股票一次 80 只一批, 总 ~70 batch ~ 14s. 比走过期的 csi300 历史累积准确.
+    """
+    sys.path.insert(0, "G:/financial-analyst/src")
+    from financial_analyst.data.collectors.tencent_quote import TencentQuoteCollector
+
+    inst = load_instruments(source_uri, market=market)
+    all_codes = sorted(inst.keys())
+    if not all_codes:
+        raise SystemExit(f"instruments/{market}.txt 是空")
+
+    print(f"  从 {len(all_codes)} 只池里拉 Tencent 实时 mv (chunk 80, ~14s)...")
+    collector = TencentQuoteCollector()
+    code_mv: List[tuple] = []
+    chunk_size = 80
+    for i in range(0, len(all_codes), chunk_size):
+        chunk = all_codes[i: i + chunk_size]
+        try:
+            quotes = collector.fetch(chunk, timeout=10.0)
+            for code in chunk:
+                q = quotes.get(code)
+                if q and q.get("total_mv"):
+                    code_mv.append((code, float(q["total_mv"])))
+        except Exception as e:
+            print(f"    ⚠ chunk {i}-{i+chunk_size} 失败: {e}")
+
+    code_mv.sort(key=lambda x: -x[1])   # mv 降序
+    selected = code_mv[:top_n]
+    print(f"  抽出 top {len(selected)} 只 (preview):")
+    sample_ranks = [1, 5, 50, 100, 300]
+    for rank in sample_ranks:
+        if rank <= len(selected):
+            code, mv = selected[rank - 1]
+            print(f"    #{rank:>4}: {code}  ¥{mv:>10.0f}亿")
+    if selected[-1] != (selected[sample_ranks[-1] - 1] if sample_ranks[-1] <= len(selected) else None):
+        print(f"    #{len(selected):>4}: {selected[-1][0]}  ¥{selected[-1][1]:>10.0f}亿  (tail)")
+    return [c for c, _ in selected]
+
+
 def _resolve_universe(args, source_uri: str) -> List[str]:
     """根据 args 选 universe 代码列表.
 
-    优先级: --codes-file > --preset (走 instruments/{market}.txt)
+    优先级: --codes-file > --top-mv-n > --preset (走 instruments 或 top-mv)
     """
     if args.codes_file:
         return [line.strip().upper() for line in Path(args.codes_file).read_text(
             encoding="utf-8").splitlines() if line.strip() and not line.startswith("#")]
 
+    if args.top_mv_n is not None:
+        market = args.market or "all"
+        return _resolve_universe_by_top_mv(source_uri, market, args.top_mv_n)
+
     if args.preset:
         preset = PRESETS[args.preset]
+        method = preset.get("method", "instruments")
+
+        if method == "top-mv":
+            return _resolve_universe_by_top_mv(
+                source_uri, preset["market"], preset["n_codes"]
+            )
+
+        # method == "instruments" (legacy)
         market = preset["market"]
         inst = load_instruments(source_uri, market=market)
         if not inst:
@@ -97,7 +153,7 @@ def _resolve_universe(args, source_uri: str) -> List[str]:
             print(f"  ⚠ {market}.txt 有 {len(codes)} 只, 预期 {expected}. 继续.")
         return codes
 
-    raise SystemExit("Need --preset {demo|lite|full} or --codes-file FILE")
+    raise SystemExit("Need --preset {demo|lite|full} or --codes-file FILE or --top-mv-n N")
 
 
 # ──────────────────────── staging 打包 ────────────────────────
@@ -361,6 +417,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--preset", choices=list(PRESETS), help="预设包")
     ap.add_argument("--codes-file", help="自定义 universe (一行一个 code, # 注释)")
+    ap.add_argument("--top-mv-n", type=int, default=None,
+                    help="从 instruments/all.txt 池里走 Tencent 实时 mv 选 top-N. "
+                         "覆盖 --preset 的 universe 解析.")
+    ap.add_argument("--market", default=None,
+                    help="--top-mv-n 用的 universe pool, 默认 all")
     ap.add_argument("--source-day", default="G:/stocks/stock_data/cn_data",
                     help="日线源目录")
     ap.add_argument("--source-5min", default="G:/stocks/stock_data/cn_data_5min",
@@ -376,8 +437,8 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="只 stage, 不上传")
     args = ap.parse_args()
 
-    if not args.preset and not args.codes_file:
-        ap.error("--preset OR --codes-file required")
+    if not args.preset and not args.codes_file and args.top_mv_n is None:
+        ap.error("--preset OR --codes-file OR --top-mv-n required")
     if not args.dry_run and not args.repo:
         ap.error("--repo required unless --dry-run")
     if not args.dry_run and not args.token:
