@@ -32,16 +32,18 @@ def test_loaders_list(tmp_path, monkeypatch):
 
 
 def test_agents_list():
-    # Clear the registry first so _ensure_registered() re-populates all 13 built-ins
+    # Clear the registry first so _ensure_registered() re-populates all 14 built-ins
     # regardless of what other tests (test_agent_registry.py) may have left behind.
+    # (v1.9.4: added Tier-4 introspector → 14 single-stock agents total)
     from financial_analyst.agent.registry import SubAgentRegistry
     SubAgentRegistry.clear()
 
     runner = CliRunner()
     result = runner.invoke(app, ["agents", "list"])
     assert result.exit_code == 0
-    # All 13 built-in agents should show
-    for name in ["quote-fetcher", "fundamental-analyst", "bull-advocate", "report-writer"]:
+    # All 14 built-in agents should show
+    for name in ["quote-fetcher", "fundamental-analyst", "bull-advocate",
+                 "report-writer", "introspector"]:
         assert name in result.stdout
 
 

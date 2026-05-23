@@ -1,0 +1,22 @@
+{
+  "quality_flags": [
+    "action_target_price_mismatch: action='sell' but target_price=85.0 > current_price=82.57",
+    "bull_bear_divergence_unresolved: technical='strong_long' vs quant='weak_short', writer outputs 'sell' with bullish target and 0 rating, failing to resolve factor conflict"
+  ],
+  "proposals": [
+    {
+      "target_agent": "risk-officer",
+      "pattern": "mv_tier=large AND valuation_metrics_null AND technical_score>0 AND quant_score<=0",
+      "proposed_rule": "当大盘股缺失PE/PB等核心估值数据时，CRO必须强制触发veto_flags=['fundamental_anchor_missing']，将action覆写为'avoid'，并将target_price置空。技术面信号不得单独作为大盘股买入/持有依据。",
+      "confidence": "low",
+      "rationale": "本单显示写手在基本面数据缺失时仍保留看多目标价(85.0)，却给出卖出动作，导致输出自相矛盾。挂接CRO veto可切断技术面单腿逻辑，符合V4/V6对大盘股基本面安全垫的要求，且比削弱分析师更安全。"
+    },
+    {
+      "target_agent": "writer",
+      "pattern": "action='sell' AND target_price > current_price",
+      "proposed_rule": "生成前校验语义一致性：若action为sell/short，target_price必须<current_price；若为buy/hold，必须>current_price。不匹配时自动修正或阻断输出。",
+      "confidence": "low",
+      "rationale": "本单action与target_price方向完全相反，暴露出多模块拼接时的逻辑断层。此规则可防止下游执行端误读信号。"
+    }
+  ]
+}

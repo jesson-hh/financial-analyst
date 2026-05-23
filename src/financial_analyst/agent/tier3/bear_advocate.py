@@ -42,6 +42,12 @@ MUST reconcile your bear case with it: cite the most recent prior judgement
 or confirmed since the prior analysis. Treat the timeline as the user's
 accumulated research on this stock.
 
+# REQUIRED OUTPUT CONSTRAINTS (强制)
+- `thesis_bullets` 必须有**至少 2 条**, 每条以 `[F#]` 锚点开头 (如 `[F4] 游资博弈票...`, `[F8] super_distr...`).
+- 即使整体看多, 也必须找出 2 条潜在风险 (估值过热 / 板块拥挤 / 信号衰减 / 政策风险). 空数组 = 输出无效.
+- `f_anchors` 数组列出本次用到的 F# (如 `["F2", "F8"]`), 不能空.
+- `target_price_low` 给数字 (即使弱空, 给可达低点); `downside_pct` 为负值百分比 (如 -0.15).
+
 Output JSON only. No free text."""
 
 
@@ -76,9 +82,30 @@ class BearAdvocate(SubAgent[BearOutput]):
             {"role": "system", "content": SYSTEM_PROMPT + "\n\n# Memory\n" + memory_text},
             {"role": "user", "content": f"Upstream:\n{upstream}{timeline_block}\n\nReturn JSON per schema."},
         ]
-        response = await client.chat(
-            messages=messages,
-            response_format={"type": "json_object"},
-            temperature=0.3,
-        )
-        return json.loads(response["choices"][0]["message"]["content"])
+        # 同 bull-advocate: 若 thesis_bullets 空, 一次激进 retry; 仍空才占位 (introspector 踩坑反推)
+        raw: Dict[str, Any] = {}
+        for attempt in range(2):
+            response = await client.chat(
+                messages=messages,
+                response_format={"type": "json_object"},
+                temperature=0.3 + attempt * 0.2,
+            )
+            content = response["choices"][0]["message"]["content"]
+            try:
+                raw = json.loads(content)
+            except json.JSONDecodeError:
+                raw = {}
+            bullets = raw.get("thesis_bullets") or []
+            if len(bullets) >= 2:
+                return raw
+            if attempt == 0:
+                messages.append({"role": "assistant", "content": content})
+                messages.append({"role": "user", "content":
+                    "你刚才返回的 thesis_bullets 是空 / 只有 1 条, 不符合要求. "
+                    "即便整体看多, 也必须给出 ≥2 条看空 bullet (例如 [F2] 游资博弈票, 模型失效 / "
+                    "[F8] super_distr 量能特征 / [F12] 估值已透支基本面). 每条以 [F#] 开头. 重新输出完整 JSON."
+                })
+                continue
+            raw.setdefault("thesis_bullets", ["[F0] (LLM 未能给出明确看空论点, 上游信号偏多, 建议参考 bull 视角)"])
+            raw.setdefault("f_anchors", ["F0"])
+        return raw

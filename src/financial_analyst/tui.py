@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import sys
 from dataclasses import dataclass
@@ -200,6 +201,7 @@ def _ensure_registered() -> None:
     from financial_analyst.agent.tier3.bear_advocate import BearAdvocate
     from financial_analyst.agent.tier3.risk_officer import RiskOfficer
     from financial_analyst.agent.tier3.report_writer import ReportWriter
+    from financial_analyst.agent.tier3.introspector import Introspector
     from financial_analyst.agent.mainline.mainline_classifier import MainlineClassifier
     from financial_analyst.agent.mainline.mainline_writer import MainlineWriter
     from financial_analyst.agent.market.market_scanner import MarketScanner
@@ -220,6 +222,7 @@ def _ensure_registered() -> None:
         ("bear-advocate", BearAdvocate),
         ("risk-officer", RiskOfficer),
         ("report-writer", ReportWriter),
+        ("introspector", Introspector),
         ("mainline-classifier", MainlineClassifier),
         ("mainline-writer", MainlineWriter),
         ("market-scanner", MarketScanner),
@@ -655,6 +658,29 @@ async def run_report_oneshot(code: str, asof, out_dir: Path, trace: bool = False
             tbl.add_row(name, f"[{color}]{s['state']}[/{color}]", f"{s['elapsed']:.1f}s")
         return tbl
 
+    # 进度状态文件 — GuanLan UI 通过 /report-progress?code=X 端点轮询读这个
+    import time as _t
+    progress_path = out_dir / f"{code}_progress.json"
+
+    def _write_progress(extra: dict = None) -> None:
+        snapshot = {
+            "code": code, "asof": asof, "ts": _t.time(),
+            "total": len(status),
+            "done":    sum(1 for s in status.values() if s["state"] == "done"),
+            "fail":    sum(1 for s in status.values() if s["state"] == "fail"),
+            "running": sum(1 for s in status.values() if s["state"] == "running"),
+            "pending": sum(1 for s in status.values() if s["state"] == "pending"),
+            "agents":  {n: {"state": s["state"], "elapsed": s["elapsed"]} for n, s in status.items()},
+        }
+        if extra:
+            snapshot.update(extra)
+        try:
+            progress_path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+    _write_progress({"started": _t.time()})  # 初始: 全 pending
+
     cancelled = False
     results: dict = {}
     try:
@@ -667,6 +693,7 @@ async def run_report_oneshot(code: str, asof, out_dir: Path, trace: bool = False
                     status[data["agent"]]["state"] = "done" if data["ok"] else "fail"
                     status[data["agent"]]["elapsed"] = data["elapsed"]
                 live.update(make_table())
+                _write_progress()  # 每个事件后同步状态到文件给前端轮询
 
             orch = Orchestrator(nodes, on_event=on_event)
             console.print(f"[bold]Running stock-deep-dive for {code} (asof={asof})…[/bold]")

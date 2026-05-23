@@ -1,0 +1,31 @@
+{
+  "quality_flags": [
+    "quant module uses stale data (snapshot 2024-12-31 vs report 2026-05-23), invalidating lgb_momentum/rev_10 signals",
+    "Bull misapplies V4-信维模式 (capacity expansion) to consumer staple; semantic anchor mismatch",
+    "Whale module internal conflict: chip_judge='dispersed' vs whale_judge='accumulating' unresolved by writer",
+    "Action 'sell' with position_pct=0.0 contradicts risk_officer position_sizing_advice '1-3%'"
+  ],
+  "proposals": [
+    {
+      "target_agent": "risk-officer",
+      "pattern": "Core factor snapshot age > 90 days relative to report date",
+      "proposed_rule": "Auto-downgrade quant_score to -2 and set conviction_level to 'none' if any upstream factor snapshot is >90 days stale. Flag as hard_rule_trigger.",
+      "confidence": "low",
+      "rationale": "Single case shows pipeline data staleness (2024-12-31 vs 2026-05-23) directly corrupted quant signals (lgb_momentum, rev_10), leading to misleading strong_short consensus. CRO veto/flag prevents stale-data-driven trades."
+    },
+    {
+      "target_agent": "risk-officer",
+      "pattern": "V-anchor semantic mismatch (e.g., capacity/manufacturing modes applied to consumer/staple sectors)",
+      "proposed_rule": "Cross-check V-anchor domain against stock industry classification. If mismatch, strip anchor from bull_points and add blind_spot warning.",
+      "confidence": "low",
+      "rationale": "Bull used '信维模式' (capacity expansion payoff) for a consumer stock, violating playbook V4 definitions. Risk officer should enforce domain-semantic alignment to prevent narrative drift."
+    },
+    {
+      "target_agent": "bear-advocate",
+      "pattern": "Conflicting whale signals (chip_judge vs whale_judge) without synthesis",
+      "proposed_rule": "When chip_judge and whale_judge diverge, bear must explicitly model distribution risk and require writer to resolve before final rating.",
+      "confidence": "low",
+      "rationale": "Report showed 'dispersed' chips vs 'accumulating' whale judgment. Unresolved conflict masks true micro-structure risk. Bear should force explicit distribution/accumulation arbitration."
+    }
+  ]
+}

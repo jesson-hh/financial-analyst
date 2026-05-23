@@ -1,0 +1,23 @@
+{
+  "quality_flags": [
+    "risk-officer veto_flags contains 'game_capital_speculation' but writer.action is 'sell' instead of 'avoid'",
+    "bull.thesis_bullets contains internal contradiction: advises waiting for MA60(5.23) support confirmation yet recommends left-side entry at 5.70-5.80 zone (~10% above support)",
+    "bear.thesis_bullets cites F7 'super_distr' regime while whale.vol_regime_label is explicitly 'neutral', creating a data conflict"
+  ],
+  "proposals": [
+    {
+      "target_agent": "risk-officer",
+      "pattern": "veto_flags non-empty (e.g., game_capital_speculation) on small-cap/high-momentum tickers with missing fundamentals",
+      "proposed_rule": "If veto_flags is populated, writer.action MUST be 'avoid' and position_pct MUST be 0.0. Suppress target_price/stop_loss generation to prevent actionable trading signals on vetoed names.",
+      "confidence": "low",
+      "rationale": "The report assigned 'sell' with a target price despite a clear CRO veto. This violates the veto's purpose. Enforcing 'avoid' + 0% position eliminates execution ambiguity for speculative traps."
+    },
+    {
+      "target_agent": "bear-advocate",
+      "pattern": "Bear cites regime-specific F-anchors (e.g., F7 super_distr) while whale.vol_regime_label is 'neutral'",
+      "proposed_rule": "Cross-validate regime labels against whale/quant data before citing F-anchors. If data says 'neutral', avoid regime-specific bear arguments; use generic technical/fundamental anchors instead.",
+      "confidence": "low",
+      "rationale": "Bear's F7 argument relied on a 'super_distr' regime that contradicted the explicit 'neutral' label in the payload. This hallucination weakens the bear case and risks misleading the synthesizer."
+    }
+  ]
+}

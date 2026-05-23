@@ -1,0 +1,12 @@
+{
+  "quality_flags": [],
+  "proposals": [
+    {
+      "target_agent": "risk-officer",
+      "pattern": "mv_tier == 'large' AND (fundamental valuation fields null/stale OR quant anti_signals contain 'zoo_snapshot_stale') AND conviction_level == 'low'",
+      "proposed_rule": "Auto-set position_sizing_advice to '0%' and inject hard_rule_trigger 'large_cap_data_gap'. Block any non-zero position approval unless fresh fundamental data (PE/PB) or institutional/northbound flow confirmation is provided, overriding technical bounce setups.",
+      "confidence": "low",
+      "rationale": "The report correctly defaulted to 0% position for a large-cap with missing valuation data and low quant conviction, despite a technical bounce regime. Large-cap alpha relies on fundamental anchors and institutional flows; technical signals alone are insufficient. Codifying this as a CRO hard rule prevents future misalignment where writers might chase bounces on data-deficient large-caps."
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 name: stock-deep-dive
-description: A-share single-stock deep-dive research (13 agents, 3 tiers)
+description: A-share single-stock deep-dive research (14 agents, 4 tiers — introspector is Tier-4 post-mortem)
 variables:
   - name: code
     type: string
@@ -60,3 +60,14 @@ agents:
     input_keys: [quote-fetcher, factor-computer, model-predictor,
                  fundamental-analyst, technical-analyst, whale-analyst, quant-analyst,
                  bull-advocate, bear-advocate, risk-officer, code, asof_date, out_dir]
+
+  # Tier 4 — post-mortem: 复盘本次研报, 给出 quality_flags + proposals 待 review
+  # 不阻塞研报输出 (report-writer 已落盘), 失败也不影响主流程; 提议写到
+  # memories/_pending_introspections/YYYY-MM-DD_CODE.json, 人工 review 后再决定
+  # 是否 patch 进 memories/<agent>/.
+  - name: introspector
+    deps: [report-writer, bull-advocate, bear-advocate, risk-officer,
+           fundamental-analyst, technical-analyst, whale-analyst, quant-analyst]
+    input_keys: [report-writer, bull-advocate, bear-advocate, risk-officer,
+                 fundamental-analyst, technical-analyst, whale-analyst, quant-analyst]
+    memory_mode: full   # introspector_rules.md 很小, 全读即可
