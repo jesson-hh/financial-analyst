@@ -128,11 +128,35 @@ def _format_tool_list() -> str:
     return "\n".join(lines)
 
 
+def _load_conversation_lessons() -> str:
+    """用户通过 `/lesson <text>` 沉淀的累计经验. 每次 build prompt 时实时读, 所以
+    新增 lesson 后**下次提问**就生效 (不用重启 buddy)."""
+    try:
+        from pathlib import Path
+        # parents[0]=buddy [1]=financial_analyst [2]=src [3]=<repo-root>
+        f = Path(__file__).resolve().parents[3] / "memories" / "_shared" / "conversation_lessons.md"
+        if f.exists():
+            txt = f.read_text(encoding="utf-8").strip()
+            # 去掉文件 header (第一行 # + 说明段), 只保留实际 lesson 行
+            lines = [l for l in txt.splitlines() if l.startswith("- [")]
+            if lines:
+                return "\n".join(lines)
+    except Exception:
+        pass
+    return ""
+
+
 def _build_system_prompt() -> str:
-    return SYSTEM_PROMPT.format(
+    base = SYSTEM_PROMPT.format(
         n_tools=len(TOOL_REGISTRY),
         tool_list=_format_tool_list(),
     )
+    lessons = _load_conversation_lessons()
+    if lessons:
+        base += ("\n\n# 累计经验 (用户通过 /lesson 沉淀, 最新在最后)\n"
+                 "对话开始前必读. 与历史 lesson 冲突的判断必须显式说明 \"为什么这次不同\".\n"
+                 f"{lessons}\n")
+    return base
 
 
 @dataclass
@@ -170,6 +194,49 @@ class BuddyAgent:
 
     def reset(self) -> None:
         self.messages.clear()
+
+    async def compact(self, transcript: Optional[str] = None) -> str:
+        """Summarize the conversation into a short digest and replace history.
+
+        Frees up context while keeping the gist (stocks discussed, conclusions,
+        user preferences, open TODOs). If ``transcript`` is given (e.g. the
+        frontend's rendered conversation) it is summarized instead of the
+        in-memory message list — useful when the server was restarted and lost
+        in-memory history. Returns the summary text ("" if nothing to compact).
+        """
+        if transcript and transcript.strip():
+            convo = transcript.strip()
+        elif self.messages:
+            convo = "\n\n".join(
+                f"[{m.role}] {m.content}" for m in self.messages if m.content
+            )
+        else:
+            return ""
+        convo = convo[:12000]  # cap prompt size
+        resp = await self._client.chat(
+            messages=[
+                {"role": "system", "content": (
+                    "你是对话压缩器。把下面这段 A 股研究对话压缩成简短中文摘要，"
+                    "保留：讨论过的股票/板块及代码、关键结论与评级、用户偏好与约束、"
+                    "未完成的待办。去掉寒暄与重复，直接输出摘要，不要前缀。"
+                )},
+                {"role": "user", "content": convo},
+            ],
+            temperature=0.2,
+        )
+        try:
+            choice = resp["choices"][0]["message"]
+            summary = (choice.get("content") if isinstance(choice, dict)
+                       else getattr(choice, "content", "")) or ""
+        except Exception:
+            summary = ""
+        summary = summary.strip()
+        if summary:
+            self.messages = [Message(
+                role="user",
+                content=f"（前情摘要，仅供延续对话参考）\n{summary}",
+            )]
+        return summary
 
     def add_user(self, text: str) -> None:
         self.messages.append(Message(role="user", content=text))

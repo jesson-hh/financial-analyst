@@ -90,8 +90,10 @@ def brief_data(code: str) -> Dict[str, Any]:
         "price": None, "change": None, "deltaPct": None,
         "vol_ratio": None, "turn": None, "amp": None,
         "pe": None, "pb": None, "roe": None,
-        "main_in": None, "prev_main_in": None,
+        "main_in": None, "prev_main_in": None, "inflow": None, "outflow": None,
         "market_status": None, "xq_bull": None,
+        "news": [],
+        "comments": [],   # 雪球社区评论 (本地已存; 实时刷新走 /comments)
     }
     d["market"] = {"SH": "沪", "SZ": "深", "BJ": "北"}.get(norm[:2], "") + "市"
 
@@ -158,13 +160,63 @@ def brief_data(code: str) -> Dict[str, Any]:
             d["main_in"] = _parse_cn_amount(hist[0].get("main_net"))
             if d["main_in"] is not None:
                 d["main_in"] = round(d["main_in"] / 1e8, 2)  # → 亿
+            inf = _parse_cn_amount(hist[0].get("inflow"))
+            outf = _parse_cn_amount(hist[0].get("outflow"))
+            d["inflow"] = round(inf / 1e8, 2) if inf is not None else None
+            d["outflow"] = round(outf / 1e8, 2) if outf is not None else None
         if len(hist) > 1:
             pv = _parse_cn_amount(hist[1].get("main_net"))
             d["prev_main_in"] = round(pv / 1e8, 2) if pv is not None else None
     except Exception:
         pass
 
+    # --- recent news (top 3, real from local news DB) ---
+    try:
+        from financial_analyst.data.news_db import NewsDB
+        ndb = NewsDB()
+        rows = ndb.query_news(code=norm, since_days=7, limit=3)
+        ndb.close()
+        for r in rows:
+            ts = (r.get("ts") or "")[:10]
+            src = (r.get("source") or "").strip()
+            title = (r.get("title") or "").strip()
+            if title:
+                d["news"].append({"t": title, "s": f"{src} · {ts}".strip(" ·")})
+    except Exception:
+        pass
+
+    # --- 雪球社区评论 (本地已存的, 秒出; 想要最新走 /comments?refresh=1) ---
+    try:
+        from financial_analyst.data.news_db import NewsDB
+        ndb = NewsDB()
+        posts = ndb.query_social_posts(norm, since_days=365, limit=5)
+        ndb.close()
+        d["comments"] = _format_social_posts(posts)
+    except Exception:
+        pass
+
     return d
+
+
+def _format_social_posts(posts) -> list:
+    """Map stored social_posts rows → UI comment items {author,text,likes,replies,url,ts}."""
+    import json as _json
+    out = []
+    for p in posts or []:
+        url = ""
+        try:
+            url = (_json.loads(p.get("raw") or "{}") or {}).get("url", "") or ""
+        except Exception:
+            pass
+        out.append({
+            "author": p.get("author") or "",
+            "text": (p.get("content") or "").strip(),
+            "likes": p.get("likes") or 0,
+            "replies": p.get("comments_count") or 0,
+            "url": url,
+            "ts": (p.get("ts") or "")[:10],
+        })
+    return out
 
 
 @functools.lru_cache(maxsize=1)
@@ -238,6 +290,45 @@ class Tool:
 # ---------------------------------------------------------------------------
 # Tool implementations — each wraps a CLI helper
 # ---------------------------------------------------------------------------
+
+
+def _tool_update_data(codes: Optional[str] = None, mode: str = "quick") -> ToolResult:
+    """直连增量更新数据. 包装 ``financial-analyst data update`` CLI.
+
+    默认 quick: 跳 5min + daily_basic, 只更日线. 极快 (~50ms/只).
+    full: 日线 + 5min + 当日 daily_basic 全部, ~120ms/只.
+
+    codes 控制范围:
+      - None: 所有 instruments (慢, 5500 只 ~5 min)
+      - "SH600519,SZ300750": 指定列表
+      - "all": 明确要求全市场 (同 None, 显式)
+    """
+    cmd = ["financial-analyst", "data", "update"]
+    if codes and codes.strip().lower() != "all":
+        cmd += ["--codes", codes.strip()]
+    if mode == "quick":
+        cmd += ["--skip-5min", "--skip-basic"]
+    root = _project_root()
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=900,
+                              cwd=str(root))
+    except subprocess.TimeoutExpired:
+        return ToolResult("数据更新超时 (15min). 试试限定 codes 缩小范围.", is_error=True)
+    if proc.returncode != 0:
+        return ToolResult(
+            f"fa data update 失败 (exit {proc.returncode}):\n{proc.stderr[-500:]}",
+            is_error=True,
+        )
+    # 输出 LLM 友好版的总结
+    stdout = proc.stdout.strip()
+    lines = stdout.splitlines()
+    # 抽取 [日线 ✓] / [5min ✓] / [daily_basic ✓] 几行 + 末行总耗时
+    keep = [l for l in lines if any(k in l for k in
+                                     ("[日线", "[5min", "[daily_basic", "完成"))]
+    summary = "\n".join(keep) if keep else stdout[-400:]
+    return ToolResult(f"数据更新完成:\n{summary}",
+                      side_effect={"cmd": " ".join(cmd)})
 
 
 def _tool_report(code: str, asof: Optional[str] = None) -> ToolResult:
@@ -1009,10 +1100,24 @@ def _tool_stock_brief(code: str, news_days: int = 7) -> ToolResult:
     """
     lines = [f"# {code} 速览 (stock_brief)"]
 
-    # --- 行情 ---
+    # --- 行情 (实时优先: Tencent, 与 UI 速览卡同源, 避免 LLM 文字报 EOD 旧价) ---
     try:
-        q = _tool_ask_quote(code)
-        lines.append(f"\n## 行情\n{q.content}")
+        rt = None
+        try:
+            from financial_analyst.data.collectors.tencent_quote import TencentQuoteCollector
+            rt = TencentQuoteCollector().quote(normalize_code(code))
+        except Exception:
+            rt = None
+        if rt and rt.get("price") is not None:
+            lines.append(
+                f"\n## 行情 (实时)\n{code}: 现价={rt['price']} "
+                f"涨跌={rt.get('changePercent')}% 量比={rt.get('vol_ratio')} "
+                f"换手={rt.get('turnover_rate')}% 振幅={rt.get('amplitude')}% "
+                f"PE={rt.get('pe')} PB={rt.get('pb')}"
+            )
+        else:
+            q = _tool_ask_quote(code)
+            lines.append(f"\n## 行情 (EOD)\n{q.content}")
     except Exception as exc:
         lines.append(f"\n## 行情\n  (取价失败: {exc})")
 
@@ -1109,6 +1214,204 @@ def _tool_alpha_show(name: str) -> ToolResult:
         f"Description: {spec.description}\n"
         f"Formula: {spec.formula_text}"
     )
+
+
+def _resolve_universe_codes(universe: str) -> list:
+    """命名 universe (或文件路径) → 代码列表。镜像 cli._resolve_universe, 不引入重 cli 模块。"""
+    from pathlib import Path
+    p = Path(universe)
+    cands = [p] if p.exists() else [
+        Path.home() / ".financial-analyst" / "universes" / f"{universe}.txt",
+        _project_root() / "config" / "universes" / f"{universe}.txt",
+    ]
+    for c in cands:
+        try:
+            if c.exists():
+                out = []
+                for line in c.read_text(encoding="utf-8").splitlines():
+                    line = line.strip().split("#", 1)[0].strip()
+                    if line:
+                        out.append(line)
+                return out
+        except Exception:
+            continue
+    return []
+
+
+_FACTOR_VOCAB = (
+    "字段: close open high low volume vwap amount returns industry | "
+    "算子: rank ts_rank delta delay ts_mean ts_sum ts_max ts_min ts_argmax ts_argmin "
+    "stddev correlation(x,y,n) covariance decay_linear sma wma signedpower(x,p) "
+    "log sign abs power(x,p) scale indneutralize(x,industry) max_pair min_pair filter_where | "
+    "运算: + - * / ** 比较 ()"
+)
+
+
+def _factor_compute(expr: str):
+    """构造 PanelData->Series 的 compute, eval 白名单表达式 (无 builtins)。"""
+    from financial_analyst.factors.zoo import operators as _ops
+
+    def compute(p):
+        ns = {
+            "close": p.close, "open": p.open, "high": p.high, "low": p.low,
+            "volume": p.volume, "vwap": p.vwap, "amount": p.amount,
+            "returns": p.returns, "industry": p.industry,
+            "rank": _ops.rank, "scale": _ops.scale, "ts_sum": _ops.ts_sum,
+            "ts_mean": _ops.ts_mean, "stddev": _ops.stddev, "ts_max": _ops.ts_max,
+            "ts_min": _ops.ts_min, "ts_argmax": _ops.ts_argmax, "ts_argmin": _ops.ts_argmin,
+            "ts_rank": _ops.ts_rank, "delta": _ops.delta, "delay": _ops.delay,
+            "correlation": _ops.correlation, "covariance": _ops.covariance,
+            "decay_linear": _ops.decay_linear, "sma": _ops.sma, "wma": _ops.wma,
+            "signedpower": _ops.signedpower, "log": _ops.log, "sign": _ops.sign,
+            "abs": _ops.abs_, "abs_": _ops.abs_, "product": _ops.product,
+            "power": _ops.power, "indneutralize": _ops.indneutralize,
+            "max_pair": _ops.max_pair, "min_pair": _ops.min_pair,
+            "filter_where": _ops.filter_where,
+        }
+        return eval(expr, {"__builtins__": {}}, ns)  # 受限命名空间
+    return compute
+
+
+def _tool_factor_test(expr: str, universe: str = "csi300_active",
+                      since: str = "2024-01-01", until: str = "2024-12-31",
+                      fwd_days: int = 5, max_codes: int = 120) -> ToolResult:
+    """现搭现测自定义因子表达式 — 真算 RankIC / ICIR / IC / 命中率 (复用 alpha-zoo IC 引擎)。"""
+    import math
+    expr = (expr or "").strip()
+    if not expr:
+        return ToolResult("factor_test: 缺少 expr (因子表达式)。", is_error=True)
+    if "__" in expr or "import" in expr or "lambda" in expr:
+        return ToolResult("factor_test: 表达式含非法 token (__ / import / lambda)。", is_error=True)
+    try:
+        import warnings
+        import numpy as np
+        from financial_analyst.data.loader_factory import get_default_loader
+        from financial_analyst.factors.zoo.panel import PanelData
+        from financial_analyst.factors.zoo.bench_runner import _forward_returns, bench_one
+        from financial_analyst.factors.zoo.registry import AlphaSpec
+
+        codes = _resolve_universe_codes(universe)
+        if not codes:
+            return ToolResult(f"factor_test: 找不到 universe '{universe}' (可试 csi300 / csi500 / csi300_active)。", is_error=True)
+        codes = codes[: max(20, min(int(max_codes), len(codes)))]
+
+        loader = get_default_loader()
+        try:
+            from financial_analyst.data.loaders.industry import IndustryLoader, industry_map_path
+            ind_loader = IndustryLoader() if industry_map_path().exists() else None
+        except Exception:
+            ind_loader = None
+
+        panel = PanelData.from_loader(loader, codes, since, until, freq="day",
+                                      industry_loader=ind_loader)
+        spec = AlphaSpec(name="__custom__", family="custom",
+                         description="user custom factor", formula_text=expr,
+                         compute=_factor_compute(expr))
+        fwd = _forward_returns(panel, int(fwd_days))
+        with warnings.catch_warnings(), np.errstate(invalid="ignore", divide="ignore"):
+            warnings.simplefilter("ignore")
+            res = bench_one(spec, panel, fwd)
+    except Exception as e:
+        return ToolResult(f"factor_test 失败: {type(e).__name__}: {e}\n可用 {_FACTOR_VOCAB}", is_error=True)
+
+    if res.get("status") != "ok":
+        return ToolResult(
+            f"因子表达式无法计算 (status={res.get('status')}):\n  {res.get('error')}\n\n可用 {_FACTOR_VOCAB}",
+            is_error=True)
+
+    def fmt(x, d=4):
+        return "—" if x is None or (isinstance(x, float) and math.isnan(x)) else f"{x:+.{d}f}"
+
+    rank_ic, rank_ir = res["rank_ic"], res["rank_ir"]
+    state = res.get("state", "无数据")   # 有效/一般/偏弱/失效 (健康分类, 同 alpha_bench)
+    direction = "正向 (因子值高→未来涨)" if (rank_ic or 0) > 0 else "反向 (因子值高→未来跌)"
+    hit = res.get("hit_rate")
+    hit_s = f"{hit*100:.1f}%" if (hit is not None and hit == hit) else "—"
+    return ToolResult(
+        f"# 自定义因子测试\n"
+        f"表达式: {expr}\n"
+        f"universe: {universe} ({len(codes)} 只) · {since}~{until} · fwd={fwd_days}d · 面板 {panel.n_dates()} 天\n\n"
+        f"RankIC = {fmt(rank_ic)} | RankICIR = {fmt(rank_ir, 3)} | IC = {fmt(res['ic'])} | ICIR = {fmt(res['ir'], 3)}\n"
+        f"命中率 = {hit_s} | 有效天数 = {res['n_dates']} | 样本 = {res['n_obs']}\n\n"
+        f"健康分类: 【{state}】 · 方向 {direction}\n"
+        f"(分类口径: |RankICIR|≥0.5 且 |RankIC|≥0.02 = 有效; 0.3-0.5 = 一般; 0.15-0.3 = 偏弱; <0.15 = 失效)\n"
+        f"注: 这是 {len(codes)} 只样本的快测, 严肃结论需扩 universe + 多窗口稳健性检验。"
+    )
+
+
+def _tool_alpha_compare(items, universe: str = "csi300_active",
+                        since: str = "2024-01-01", until: str = "2024-12-31",
+                        fwd_days: int = 5, max_codes: int = 120) -> ToolResult:
+    """并排对比多个因子 (已注册名 如 alpha019 / 或自定义表达式) 的 IC/ICIR/命中率/健康分类。"""
+    import re as _re
+    import math
+    if isinstance(items, str):
+        items = [x.strip() for x in _re.split(r"[;\n]+", items) if x.strip()]
+    items = [str(x).strip() for x in (items or []) if str(x).strip()]
+    if len(items) < 2:
+        return ToolResult("alpha_compare: 至少给 2 个因子 (已注册名如 alpha019, 或表达式如 rank(-delta(close,5)))。", is_error=True)
+    items = items[:8]
+    try:
+        import warnings
+        import numpy as np
+        from financial_analyst.data.loader_factory import get_default_loader
+        from financial_analyst.factors.zoo.panel import PanelData
+        from financial_analyst.factors.zoo.bench_runner import _forward_returns, bench_one
+        from financial_analyst.factors.zoo.registry import AlphaSpec, get as _get_alpha
+
+        codes = _resolve_universe_codes(universe)
+        if not codes:
+            return ToolResult(f"alpha_compare: 找不到 universe '{universe}'。", is_error=True)
+        codes = codes[: max(20, min(int(max_codes), len(codes)))]
+        loader = get_default_loader()
+        try:
+            from financial_analyst.data.loaders.industry import IndustryLoader, industry_map_path
+            ind_loader = IndustryLoader() if industry_map_path().exists() else None
+        except Exception:
+            ind_loader = None
+        panel = PanelData.from_loader(loader, codes, since, until, freq="day", industry_loader=ind_loader)
+        fwd = _forward_returns(panel, int(fwd_days))
+        rows = []
+        with warnings.catch_warnings(), np.errstate(invalid="ignore", divide="ignore"):
+            warnings.simplefilter("ignore")
+            for it in items:
+                try:
+                    spec = _get_alpha(it); label = it
+                except KeyError:
+                    if "__" in it or "import" in it or "lambda" in it:
+                        rows.append({"label": it[:36], "bad": "非法表达式"}); continue
+                    spec = AlphaSpec(name="__c__", family="custom", description="", formula_text=it, compute=_factor_compute(it))
+                    label = it[:40]
+                r = bench_one(spec, panel, fwd); r["label"] = label
+                rows.append(r)
+    except Exception as e:
+        return ToolResult(f"alpha_compare 失败: {type(e).__name__}: {e}\n可用 {_FACTOR_VOCAB}", is_error=True)
+
+    def fmt(x, d=4):
+        return "—" if x is None or (isinstance(x, float) and math.isnan(x)) else f"{x:+.{d}f}"
+
+    def keyf(r):
+        v = r.get("rank_ir")
+        return abs(v) if (v is not None and v == v) else -1.0
+
+    ok = [r for r in rows if "bad" not in r]
+    ok.sort(key=keyf, reverse=True)
+    lines = [f"# 因子对比 · {universe} ({len(codes)} 只) · {since}~{until} · fwd={fwd_days}d · 面板 {panel.n_dates()} 天", ""]
+    for r in ok:
+        if r.get("status") != "ok":
+            lines.append(f"· {r['label']} — 无法计算: {r.get('error', '')[:50]}")
+            continue
+        hit = r.get("hit_rate")
+        hs = f"{hit*100:.0f}%" if (hit is not None and hit == hit) else "—"
+        lines.append(f"· {r['label']}\n    RankIC={fmt(r['rank_ic'])} · RankICIR={fmt(r['rank_ir'],2)} · 命中={hs} · 状态【{r.get('state','')}】")
+    for r in rows:
+        if "bad" in r:
+            lines.append(f"· {r['label']} — ⛔ {r['bad']}")
+    if ok and ok[0].get("status") == "ok":
+        b = ok[0]
+        lines.append("")
+        lines.append(f"→ 本组最强: {b['label']} (RankICIR={fmt(b['rank_ir'],2)}, 状态【{b.get('state')}】)")
+    return ToolResult("\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -1274,6 +1577,60 @@ TOOL_REGISTRY: List[Tool] = [
             "required": ["name"],
         },
         run=_tool_alpha_show,
+    ),
+    Tool(
+        name="factor_test",
+        description=(
+            "现搭现测一个【自定义因子表达式】, 真算它的横截面 RankIC / ICIR / IC / 命中率 "
+            "(复用 alpha-zoo 的 PanelData + IC 引擎, 不是估算)。用于用户说「帮我做/测一个新因子」、"
+            "「xx 这个想法的 IC 怎么样」等。expr 必须用下面的字段+算子拼 (Python 语法), 例如:\n"
+            "  rank(-delta(close,5))                     # 5日反转\n"
+            "  rank(-delta(close,5)) * (volume/ts_mean(volume,5))   # 5日反转×量比\n"
+            "  -1*correlation(rank(volume), rank(returns), 10)\n"
+            "可用 — " + _FACTOR_VOCAB + "\n"
+            "默认在 csi300_active 取前 120 只 (~30-60s); 想更全可调 max_codes / universe / 时间窗。"
+            "结果是某一段历史的快测, 严肃结论需多窗口稳健性检验。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "expr": {"type": "string", "description": "因子表达式, 用 close/volume/rank/delta 等拼, 如 rank(-delta(close,5))"},
+                "universe": {"type": "string", "default": "csi300_active"},
+                "since": {"type": "string", "default": "2024-01-01"},
+                "until": {"type": "string", "default": "2024-12-31"},
+                "fwd_days": {"type": "integer", "default": 5, "description": "未来 N 日收益做标签"},
+                "max_codes": {"type": "integer", "default": 120, "description": "取样股票数上限 (越大越准越慢)"},
+            },
+            "required": ["expr"],
+        },
+        run=_tool_factor_test,
+        cost_hint="minutes",
+        confirm_required=True,
+    ),
+    Tool(
+        name="alpha_compare",
+        description=(
+            "并排对比 2-8 个因子的 RankIC / ICIR / 命中率 / 健康分类(有效/一般/偏弱/失效), "
+            "在同一 universe+时间窗上一次性算完。items 每项可以是【已注册因子名】(如 alpha019, gtja074) "
+            "或【自定义表达式】(如 rank(-delta(close,5)))。用于用户问「A 因子和 B 因子哪个强」、"
+            "「我这几个想法对比一下」。比逐个 factor_test 更省事 (共享一次面板加载)。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "items": {"type": "array", "items": {"type": "string"},
+                          "description": "因子列表, 每项为已注册名或表达式, 如 [\"alpha019\", \"rank(-delta(close,5))\"]"},
+                "universe": {"type": "string", "default": "csi300_active"},
+                "since": {"type": "string", "default": "2024-01-01"},
+                "until": {"type": "string", "default": "2024-12-31"},
+                "fwd_days": {"type": "integer", "default": 5},
+                "max_codes": {"type": "integer", "default": 120},
+            },
+            "required": ["items"],
+        },
+        run=_tool_alpha_compare,
+        cost_hint="minutes",
+        confirm_required=True,
     ),
     Tool(
         name="chain_for",
@@ -1507,6 +1864,39 @@ TOOL_REGISTRY: List[Tool] = [
         },
         run=_tool_quote_batch,
         cost_hint="seconds",
+    ),
+    Tool(
+        name="update_data",
+        description=(
+            "增量更新行情数据 (pytdx 主站直连 + 腾讯实时, 不需要 Tushare token). "
+            "当用户说 '更新数据' / '拉昨天' / '同步行情' / '把 X 数据补到最新' 时调用. "
+            "默认 quick 模式只更日线 (省时), full 模式含 5min + daily_basic. "
+            "codes 可以是 'SH600519,SZ300750' / 'all' (全市场) / None (LLM 从上下文挑)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "codes": {
+                    "type": "string",
+                    "description": (
+                        "逗号分隔的股票代码, e.g. 'SH600519,SZ300750'. "
+                        "用 'all' 表示全市场 (5500+ 只, 5-10 min). "
+                        "不传则更新所有 instruments."
+                    ),
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["quick", "full"],
+                    "description": (
+                        "quick=只更日线 (~10s/百只), full=日线+5min+daily_basic (~30s/百只). 默认 quick."
+                    ),
+                },
+            },
+            "required": [],
+        },
+        run=lambda codes=None, mode="quick": _tool_update_data(codes, mode),
+        cost_hint="seconds",   # quick 模式秒级; full 才 minutes 但默认是 quick
+        confirm_required=False,
     ),
     Tool(
         name="alert_add",
