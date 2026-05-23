@@ -108,6 +108,18 @@ def run_opencli(
     else:
         invoke = [exe, *cli_args]
 
+    # opencli (node/undici) fetches DOMESTIC sites (xueqiu/同花顺/东财) + talks to
+    # the local Chrome bridge — none of which should go through the user's
+    # international proxy (Clash). If the server inherited HTTP_PROXY/HTTPS_PROXY,
+    # node's EnvHttpProxyAgent routes xueqiu through it and the fetch fails
+    # (opencli exit 2/66). Strip proxy env for the subprocess so it connects直连.
+    child_env = dict(os.environ)
+    for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+               "ALL_PROXY", "all_proxy"):
+        child_env.pop(_k, None)
+    child_env["NO_PROXY"] = "*"
+    child_env["no_proxy"] = "*"
+
     try:
         # capture_output=True with no text/encoding → raw bytes. Decode
         # ourselves so we never inherit the parent shell's code page.
@@ -116,6 +128,7 @@ def run_opencli(
             capture_output=True,
             timeout=timeout,
             shell=False,
+            env=child_env,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(

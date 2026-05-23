@@ -4,11 +4,13 @@ from pathlib import Path
 from typing import List
 from financial_analyst.data.collectors.news.base import BaseNewsCollector
 from financial_analyst.data.collectors.opencli.runner import run_opencli
+from financial_analyst.data.net import rate_limited
 
 
 class SinafinanceNewsCollector(BaseNewsCollector):
     """Pull 7x24 快讯 from sinafinance. Public."""
 
+    @rate_limited("sinafinance", cache_key=lambda self, limit=50: f"sina:{int(limit)}")
     def fetch(self, limit: int = 50) -> List[dict]:
         return run_opencli("sinafinance", "news", "--limit", str(limit))
 

@@ -33,6 +33,14 @@ app = typer.Typer(
     no_args_is_help=False,
 )
 
+# ``fa data <subcommand>`` — 直连增量数据更新 (pytdx 主站 + 腾讯实时)
+from financial_analyst.data_cli import data_app
+app.add_typer(data_app, name="data")
+
+# ``fa init`` — 首次启动向导
+from financial_analyst.init_cli import init_cmd
+app.command(name="init", help="首次启动引导 — 配 LLM key + 选数据包 + 验证.")(init_cmd)
+
 
 @app.command()
 def version():
@@ -1217,12 +1225,22 @@ def alpha_cmd(
             industry_loader=ind_loader, benchmark_loader=bench_loader,
         )
         typer.echo(f"Panel ready: {panel}")
+        # 上次 bench (若有) → run_bench 据此标 reversed (rank_ic 翻号)
+        prev_bench = None
+        try:
+            from financial_analyst.factors.zoo.selector import bench_csv_path
+            _pp = bench_csv_path(universe)
+            if _pp.exists():
+                prev_bench = pd.read_csv(_pp)
+                typer.echo(f"Prev bench found ({_pp.name}) — will flag 反向(reversed) on rank_ic sign flips.")
+        except Exception:
+            prev_bench = None
         typer.echo(f"Benching family={target or '<all>'}, fwd_days={fwd_days}...")
-        results = run_bench(panel, family=target, fwd_days=fwd_days)
+        results = run_bench(panel, family=target, fwd_days=fwd_days, prev_bench=prev_bench)
 
         table = Table(title=f"Alpha Bench — {target or 'all'} / fwd_{fwd_days}d / {len(codes)} codes")
-        for c in ["name", "family", "ic", "rank_ic", "ir", "rank_ir", "hit_rate", "n_dates"]:
-            table.add_column(c, justify="right" if c not in ("name", "family") else "left",
+        for c in ["name", "family", "ic", "rank_ic", "ir", "rank_ir", "hit_rate", "n_dates", "state"]:
+            table.add_column(c, justify="right" if c not in ("name", "family", "state") else "left",
                              style="cyan" if c == "name" else "green" if c == "family" else "")
         for _, row in results.head(top).iterrows():
             table.add_row(
@@ -1233,6 +1251,7 @@ def alpha_cmd(
                 f"{row['rank_ir']:+.3f}" if pd.notna(row["rank_ir"]) else "—",
                 f"{row['hit_rate']:.1%}" if pd.notna(row["hit_rate"]) else "—",
                 str(int(row["n_dates"])),
+                str(row.get("state", "")),
             )
         console.print(table)
 

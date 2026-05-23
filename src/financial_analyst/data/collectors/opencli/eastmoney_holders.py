@@ -4,11 +4,13 @@ from pathlib import Path
 from typing import List
 from financial_analyst.data.collectors.f10.base import BaseF10Collector
 from financial_analyst.data.collectors.opencli.runner import run_opencli
+from financial_analyst.data.net import rate_limited
 
 
 class EastmoneyHoldersCollector(BaseF10Collector):
     """Pull 十大流通股东 from eastmoney. Public."""
 
+    @rate_limited("eastmoney_holders", cache_key=lambda self, code, limit=10: f"holders:{str(code).upper()}:{int(limit)}")
     def fetch(self, code: str, limit: int = 10) -> List[dict]:
         """Return list of {rank, reportDate, name, holdNum, floatRatio, change}."""
         short = code.replace("SH", "").replace("SZ", "").replace("BJ", "")

@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 from typing import List
 from financial_analyst.data.collectors.opencli.runner import run_opencli
+from financial_analyst.data.net import rate_limited
 
 
 _CODE_RE = re.compile(r"^\s*(\d{6})\b")
@@ -37,6 +38,7 @@ class THSHotRankCollector:
     consumes it without schema gymnastics.
     """
 
+    @rate_limited("ths_hot", cache_key=lambda self, limit=20: f"ths_hot:{int(limit)}")
     def fetch(self, limit: int = 20) -> List[dict]:
         raw = run_opencli(
             "ths", "hot-rank",

@@ -1,0 +1,27 @@
+[package]
+name = "financial-analyst-tauri"
+version = "0.1.0"
+description = "觀瀾 desktop UI for financial-analyst (Tauri shell)"
+authors = ["jesson-hh <xuyi1030@proton.me>"]
+license = "Apache-2.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "financial_analyst_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# 默认 release 不需要 webview2 安装 (Windows 7+ 自带 Edge)
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

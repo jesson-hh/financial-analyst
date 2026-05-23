@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import List
 from financial_analyst.data.collectors.news.base import BaseNewsCollector
 from financial_analyst.data.collectors.opencli.runner import run_opencli
+from financial_analyst.data.net import rate_limited
 
 
 class EastmoneyKuaixunCollector(BaseNewsCollector):
@@ -13,6 +14,7 @@ class EastmoneyKuaixunCollector(BaseNewsCollector):
     `stocks` is a comma-joined string of "marketCode.symbol" identifiers, e.g. "1.600030, 116.06030".
     """
 
+    @rate_limited("eastmoney_kuaixun", cache_key=lambda self, limit=50: f"kuaixun:{int(limit)}")
     def fetch(self, limit: int = 50) -> List[dict]:
         """Return raw list of 快讯 dicts."""
         return run_opencli("eastmoney", "kuaixun", "--limit", str(limit))

@@ -4,11 +4,13 @@ from pathlib import Path
 from typing import List
 from financial_analyst.data.collectors.f10.base import BaseF10Collector
 from financial_analyst.data.collectors.opencli.runner import run_opencli
+from financial_analyst.data.net import rate_limited
 
 
 class EastmoneyLonghuCollector(BaseF10Collector):
     """Pull 龙虎榜 from eastmoney. Public — no login."""
 
+    @rate_limited("eastmoney_longhu", cache_key=lambda self, date="": f"longhu:{date or 'today'}")
     def fetch(self, date: str = "") -> List[dict]:
         """Return raw 龙虎榜 list. If date empty, today's."""
         args = ["eastmoney", "longhu"]

@@ -6,7 +6,12 @@ __pycache__/
 build/
 dist/
 .env
+.env.bak*
+.env.local
+.staging_hf/
+test_data/
 out/
+.run/
 # opencli plugin deps — installed locally via `opencli plugin install`,
 # never committed (only the .js adapters + manifest are source).
 opencli-plugin-ths-extra/node_modules/

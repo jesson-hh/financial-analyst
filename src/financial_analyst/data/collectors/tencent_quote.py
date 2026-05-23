@@ -16,6 +16,8 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
 
+from financial_analyst.data.net import rate_limited
+
 _TENCENT_BASE = "http://qt.gtimg.cn/q="
 
 
@@ -57,6 +59,9 @@ def _f(v: Any) -> Optional[float]:
 class TencentQuoteCollector:
     """Batch real-time quotes. ``fetch(codes)`` → ``{SH600519: {...}, ...}``."""
 
+    @rate_limited("tencent_quote",
+                  cache_key=lambda self, codes, timeout=6.0:
+                  tuple(sorted({str(c).upper() for c in codes})))
     def fetch(self, codes: List[str], timeout: float = 6.0) -> Dict[str, Dict[str, Any]]:
         if not codes:
             return {}
