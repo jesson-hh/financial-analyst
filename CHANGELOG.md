@@ -1,5 +1,89 @@
 # Changelog
 
+## v1.9.5 — 2026-05-23
+
+### Added — Tier-4 Introspector + 14-agent 升级
+
+- **新增 Tier-4 `introspector` agent** (单 agent 单 tier, `agent/tier3/introspector.py`):
+  在 report-writer 落盘后启动, 跨上游做 post-mortem 自检. 输出 `quality_flags`
+  (本份报告立即可见的问题) + `proposals` (跨案例归纳的规则提议, 写到
+  `memories/_pending_introspections/<date>_<code>.json`, 人工 review 后落盘).
+  **不自动 patch memory** (LLM 静默改 agent 规则书风险太大).
+- `config/swarm/stock-deep-dive.yaml` 升级 13→14 agents, 4 tiers; introspector deps
+  覆盖 report-writer + 全 Tier-2 + bull + bear + risk-officer.
+- 配套 `tui.py` 注册 introspector; `_ensure_registered()` 现在返回 14 个.
+- 单测同步: `test_preset_loading.py::test_load_stock_deep_dive` 改 assert 14;
+  `test_cli_list_commands.py::test_agents_list` 加 introspector 名字检查.
+
+### Added — API 稳定性深度探活 / 实时进度 / 经验沉淀 闭环
+
+- `POST /lesson {text}` — 用户通过 buddy `/lesson <text>` 沉淀经验, 追加到
+  `memories/_shared/conversation_lessons.md`. **下次 buddy build prompt 时自动
+  prepend** (`buddy/agent.py::_load_conversation_lessons` hot reload, 不需重启).
+- `GET /diag?quick=0/1` — 并行探 5 源 + LLM (~20s 全 / ~2s quick), 返回每源
+  `ok/latency/detail` + `rate_limit_stats` (累计 calls/retries/cache_hits/throttled).
+  前端 🩺 探活按钮一目了然哪源红.
+- `GET /report-progress?code=X` — 前端轮询 deep-report 14-agent 实时状态
+  (state ∈ pending/running/done/fail + elapsed). `tui.run_report_oneshot` 在
+  orchestrator `on_event` 里写 `out/<CODE>_progress.json`.
+
+### Added — 限速/重试/缓存基础设施 (`data/net.py`)
+
+新模块统一处理国内/海外接口稳定性:
+
+- `domestic_session()` — `trust_env=False`, 直连. 翻墙环境也不走 Clash
+  (Clash 拦 A 股域名常导致 ERR_TIMED_OUT / WAF 拒签).
+- `intl_session()` — `trust_env=True`, 走系统代理.
+- `@rate_limited(source, cache_key=...)` 装饰器 — per-source QPS 限制 +
+  指数退避重试 + TTL 缓存. 线程安全 (`threading.Lock`).
+- 预注册 8 个 source: xueqiu / xueqiu_hot / tencent_quote / tushare /
+  eastmoney_kuaixun / eastmoney_longhu / sinafinance / ths_hot.
+- `source_stats()` 返回累计统计 (在 `/diag` 响应里).
+
+### Changed — 雪球 collectors 切直连
+
+`xueqiu_comments.py` + `xueqiu_hot_stock.py` 从 opencli browser-bridge 改为
+Python 直连 HTTP (`domestic_session` + `@rate_limited`). Chrome 内 fetch 走系统
+代理被 Aliyun WAF anti-bot 拦截的问题彻底解决.
+
+### Fixed — SSE NaN/Inf 静默吞包
+
+`_safe_json_dumps()` 递归把 `float('nan') / inf / -inf` 替换成 `None`. 浏览器
+`JSON.parse('NaN')` 抛 SyntaxError → 整个 SSE event 被吞 → 立昂微 SH605358 速览
+卡永不渲染 (pe=NaN). 现在 NaN-safe, brief 卡稳定出来.
+
+### Fixed — bull/bear 空 thesis_bullets
+
+`BullOutput.thesis_bullets: List[str] = []` + 无 prompt 最低约束 → LLM 弱多/弱空
+案例诚实地返回空数组 → Pydantic 接受 → 报告里两段全空. 修法:
+
+- prompt 加 `# REQUIRED OUTPUT CONSTRAINTS` 段, 强制 ≥2 条且 `[V#]/[F#]` 锚点开头
+- `_execute()` 加 retry loop: 检测空 → 一次激进重发 (温度 +0.2 + explicit feedback) →
+  仍空才 `[V0]/[F0]` 占位兜底
+- 验证: 茅台 (综合 -1 看空) bull 也给出 3 条 `[V4/V1/V9]` 逆向 bullet, 不再空
+
+### Docs — 大规模整理
+
+新增:
+- `docs/architecture/14_agents.md` — 4 tier × 14 agent 完整 DAG + I/O schemas
+- `docs/api/sse_endpoints.md` — buddy SSE bridge 全部 21 endpoint 详解
+- `docs/setup/zero_to_report.md` — 从零到第一份研报 60 min walkthrough
+- `docs/setup/data_pipeline.md` — G:/stocks 数据流 + 单一入口原则
+- `docs/ui/guanlan_user_guide.md` — GuanLan UI 用户手册
+- `start.bat` / `start.sh` / `stop.bat` / `stop.sh` — 一键启动后端 + 前端
+
+更新:
+- `README.md` — 13 agent 三 tier → 14 agent 四 tier
+- `docs/architecture.md` — 头部加 redirect 指向 14_agents.md
+- `docs/byom.md` — 13 built-in → 14 built-in
+
+### Audit
+- 全仓库 grep `"13 sub-agents" / "13 built-in" / "13 single-stock" / "13 agents"`
+  统一改 14 (生产代码 / 文档 / 测试). 历史 CHANGELOG / journey 描述特定版本的
+  保留 13 不动.
+
+---
+
 ## v1.9.4 — 2026-05-22
 
 ### Fixed — /models 返回扁平数组 (校对桌面 UI 接线发现)

@@ -11,13 +11,15 @@
 
 📖 New here? Read the [build journey & architecture overview](docs/journey.md) (中英双语 / bilingual) — a two-week retrospective from empty repo to 440 alphas + 21 sub-agents.
 
-**13 sub-agents in three trust tiers** — five Tier-1 data fetchers (two of which read untrusted news/F10 with JSON-schema-locked output), four Tier-2 analysts (fundamental, technical, whale-sentiment, quant), four Tier-3 decision agents (bull, bear, risk officer, report writer). Only the report writer can write files. Memory is pluggable per-agent (`memories/<agent>/*.md`) — edit a markdown, the next report uses it. FTS5-backed retrieval keeps prompt costs ~60% lower than naive full-injection.
+**14 sub-agents in four trust tiers** — five Tier-1 data fetchers (two of which read untrusted news/F10 with JSON-schema-locked output), four Tier-2 analysts (fundamental, technical, whale-sentiment, quant), four Tier-3 decision agents (bull, bear, risk officer, report writer), and one Tier-4 post-mortem introspector that runs after the writer to self-audit and propose memory updates for human review. Only the report writer can write report files. Memory is pluggable per-agent (`memories/<agent>/*.md`) — edit a markdown, the next report uses it. FTS5-backed retrieval keeps prompt costs ~60% lower than naive full-injection.
+
+See [docs/architecture/14_agents.md](docs/architecture/14_agents.md) for the full DAG + I/O schemas.
 
 Inspired by [Anthropic's financial-services](https://github.com/anthropics/financial-services) (3-tier trust isolation, single-writer pattern) and [HKUDS/Vibe-Trading](https://github.com/HKUDS/Vibe-Trading) (YAML swarm presets, multi-provider LLM).
 
 ## What's in v1.0
 
-- **20 agents total**: 13 single-stock (data → analyst → decision) + 5 market-level + 2 meta (introspector + ask)
+- **20 agents total**: 14 single-stock (data → analyst → decision → introspector, see `config/swarm/stock-deep-dive.yaml`) + 5 market-level + 1 meta (ask)
 - **7 swarm presets**: stock-deep-dive, mainline-radar, morning-brief, intraday-review, dream + more
 - **QlibBinaryLoader** (day + 5min) + **TushareLoader** (HTTP + ParquetCache) + **CSV ingester**
 - **R7-R20 sentiment signals** (board_scorer v5, volume_regime super_distr/tail_surge, whale signals)

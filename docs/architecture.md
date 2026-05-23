@@ -1,5 +1,11 @@
 # Architecture
 
+> ⚠ This doc covers the legacy **3-tier / 13-agent** layout. As of v1.9.4 we run
+> **4 tiers + 14 agents** (added Tier-4 `introspector` for post-mortem). See
+> [**`architecture/14_agents.md`**](architecture/14_agents.md) for the current DAG,
+> full I/O schemas, trust model, and Tier-4 self-audit flow. The 3-tier diagram
+> below still reflects the data + analyst + decision core; Tier-4 is additive.
+
 ## Three Trust Tiers
 
 | Tier | Agents | Trust | Write? |
@@ -51,6 +57,6 @@ Each agent loads its own `memories/<name>/*.md` + `memories/_shared/*.md` at ins
 | Data loader | `BaseLoader` | TushareLoader | Implement `BaseLoader`, register in `config/loaders.yaml` |
 | Model | `BaseModel` | LGBMomentumModel | Implement `BaseModel`, register via `ModelRegistry.register()` |
 | KB | `KnowledgeBase` | LocalMarkdownKB | Implement, inject into sub-agent |
-| Sub-agent | `SubAgent` | 13 built-in | Implement, register, add to preset yaml |
+| Sub-agent | `SubAgent` | 14 built-in (4 tiers, see [`architecture/14_agents.md`](architecture/14_agents.md)) | Implement, register, add to preset yaml |
 | Swarm preset | YAML | stock-deep-dive | Drop new yaml into `config/swarm/` |
 | Memory mode | per-agent `memory_mode` yaml key | full | Set `retrieval` to switch to FTS5 top-K retrieval (cuts prompt tokens) |

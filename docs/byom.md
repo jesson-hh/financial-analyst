@@ -1,6 +1,6 @@
 # Bring Your Own Models (BYOM)
 
-`financial-analyst` is designed as a **framework**, not a fixed product. The 13 built-in sub-agents + LGB momentum model + Tushare loader are reference implementations. Anywhere you see a `Base*` ABC, you can plug in your own implementation.
+`financial-analyst` is designed as a **framework**, not a fixed product. The 14 built-in sub-agents (Tier 1-4, see [`architecture/14_agents.md`](architecture/14_agents.md)) + LGB momentum model + Tushare loader are reference implementations. Anywhere you see a `Base*` ABC, you can plug in your own implementation.
 
 ## Five extension points
 
