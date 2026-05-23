@@ -1,20 +1,77 @@
-# docker compose up    # interactive TUI
-# docker compose run --rm fa report SH600519
-# docker compose run --rm fa ask "PE of SH600519"
+# financial-analyst — Docker Compose
+#
+# 三个 service:
+#   fa     — 一次性 CLI 用 (docker compose run --rm fa report SH600519)
+#   serve  — 长期跑 SSE bridge 给 GuanLan UI / API client 用 (background)
+#   ui     — 静态文件服务前端 (可选, 跟 serve 一起用)
+#
+# .env 文件在 repo 根目录 (gitignored), 填:
+#   DASHSCOPE_API_KEY=sk-...   # 必须
+#   TUSHARE_TOKEN=...          # 可选 (没填走 pytdx 直连)
 
 services:
+  # ────────── CLI (interactive / one-shot) ──────────
   fa:
-    build: .
+    build:
+      context: .
+      target: base
     image: financial-analyst:latest
-    # Environment from .env file in compose dir (NOT committed)
     env_file:
       - .env
-    # Volumes — your data + reports persist on host
     volumes:
-      - ./out:/app/out                    # generated reports
-      - ./news:/app/news                  # news drop-zone
-      - ./f10:/app/f10                    # F10 drop-zone
-      - ./memories:/app/memories           # your edited memory files
-      - ~/.financial-analyst/cache:/root/.financial-analyst/cache   # FTS5 index + parquet cache
+      - ./out:/app/out                       # 研报 + progress.json 落盘
+      - ./news:/app/news
+      - ./f10:/app/f10
+      - ./memories:/app/memories             # 用户经验沉淀
+      - ${FA_DATA_DIR:-./data}:/data         # Qlib bin 数据 (可 override)
+      - fa_cache:/root/.financial-analyst/cache
     stdin_open: true
     tty: true
+    # Usage:
+    #   docker compose run --rm fa report SH600519
+    #   docker compose run --rm fa data update
+    #   docker compose run --rm fa ask "PE of SH600519"
+    profiles: ["cli"]   # 默认不启动, 显式 run
+
+  # ────────── SSE Bridge (background, for GuanLan UI) ──────────
+  serve:
+    build:
+      context: .
+      target: serve
+    image: financial-analyst:serve
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:9999:9999"   # 只 bind localhost, 公网走 Caddy/nginx 反代
+    volumes:
+      - ./out:/app/out
+      - ./memories:/app/memories
+      - ${FA_DATA_DIR:-./data}:/data:ro      # data 只读
+      - fa_cache:/root/.financial-analyst/cache
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9999/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ────────── Frontend (静态文件 server) ──────────
+  ui:
+    image: python:3.11-slim
+    working_dir: /ui
+    command: ["python", "-m", "http.server", "5173"]
+    ports:
+      - "127.0.0.1:5173:5173"
+    volumes:
+      # 优先用 packaging/src-tauri/ui (跟 Tauri 同源), 否则 G:/stocks/fa_ui_ready
+      - ${FA_UI_DIR:-./packaging/src-tauri/ui}:/ui:ro
+    depends_on:
+      serve:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles: ["ui"]   # 显式 --profile ui 启动 (有人想用桌面 Tauri 不需要 web)
+
+volumes:
+  fa_cache:
+    # Persistent FTS5 index + parquet cache across container restarts.

@@ -56,9 +56,13 @@ dependencies = [
     "pyarrow>=15",
     "lightgbm>=4",
     "tushare>=1.4",
+    "pytdx>=1.72",      # 主站直连日线/5min/F10 (替代 Tushare token 路径)
     "pyyaml>=6",
     "anyio>=4",
     "mcp>=1.0",
+    "huggingface-hub>=0.20",   # fa init wizard 下数据包
+    "httpx>=0.27",             # buddy + tencent_quote
+    "requests>=2.31",          # collectors / tushare HTTP
 ]
 
 [project.optional-dependencies]

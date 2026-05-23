@@ -138,6 +138,27 @@ async def _tool_dream(since: int = 30, dry_run: bool = True) -> Dict[str, Any]:
     return {"since_days": since, "dry_run": dry_run, "see": "memories/_proposed/"}
 
 
+async def _tool_dream_aggregate(min_count: int = 3, threshold: float = 0.4,
+                                 dry_run: bool = False) -> Dict[str, Any]:
+    """Aggregate Tier-4 introspector pending proposals via Jaccard clustering.
+
+    与 ``dream`` 不同: 那个跑 OutcomeTracker + Introspector (基于 T+5d 实际价格反推),
+    这个聚类已经写到 _pending_introspections/ 的 Tier-4 提案 (重复 ≥ min_count 升级到 _proposed/).
+    """
+    from financial_analyst.dream.aggregator import aggregate_pending
+    written, stats = aggregate_pending(
+        memory_root=Path("memories"),
+        min_count=min_count,
+        threshold=threshold,
+        dry_run=dry_run,
+    )
+    return {
+        "stats": stats,
+        "promoted_files": [str(p) for p in written],
+        "see": "memories/_proposed/  → run `fa dream review` to inspect",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tool registry — name → {handler, description, schema}
 # ---------------------------------------------------------------------------
@@ -287,6 +308,26 @@ TOOLS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "since": {"type": "integer", "default": 30},
                 "dry_run": {"type": "boolean", "default": True},
+            },
+        },
+    },
+    "dream_aggregate": {
+        "handler": _tool_dream_aggregate,
+        "description": (
+            "Aggregate Tier-4 introspector pending proposals (memories/_pending_introspections/) "
+            "via Jaccard token clustering. Cluster size >= min_count (default 3) gets promoted to "
+            "memories/_proposed/<agent>/<slug>.md with confidence by case count (3-5=med, 6+=high). "
+            "Distinct from `dream` which runs OutcomeTracker based on T+5d real prices."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "min_count": {"type": "integer", "default": 3,
+                              "description": "最少出现次数才升级到 _proposed/"},
+                "threshold": {"type": "number", "default": 0.4,
+                              "description": "Jaccard 相似度阈值 (boost-only 关键词主导)"},
+                "dry_run": {"type": "boolean", "default": False,
+                            "description": "True 只打印聚类结果不写盘"},
             },
         },
     },

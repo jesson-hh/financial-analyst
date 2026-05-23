@@ -1,14 +1,69 @@
-.venv/
-.venv-pypi/
-.git/
-.pytest_cache/
-.ruff_cache/
+# 排除 dev/test/build artifacts 防止镜像爆炸
+
+# Python build artifacts
 __pycache__/
 *.pyc
-out/
-news/**/*
-f10/**/*
-dist/
+*.pyo
 *.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+.venv-pypi/
+venv/
+env/
+
+# Build / dist
+build/
+dist/
 test_install_venv/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local data + secrets
 .env
+.env.local
+.env.bak*
+out/
+news/
+f10/
+kb/
+test_data/
+.staging_hf/
+.run/
+
+# Git
+.git/
+.gitignore
+.github/
+
+# Packaging artifacts (Docker image 不需要)
+packaging/build/
+packaging/dist/
+packaging/src-tauri/target/
+packaging/src-tauri/gen/
+packaging/src-tauri/binaries/
+packaging/src-tauri/ui/   # UI 前端独立 mount
+
+# Pending experimental data — runtime artifacts, not source
+memories/_pending_introspections/
+memories/_proposed/
+
+# OpenCLI plugin local deps
+opencli-plugin-ths-extra/node_modules/
+node_modules/
+
+# Misc
+*.log
+*.tmp
+*.bak
+RELEASE_NOTES_v*.md
+CLAUDE.md
+AGENTS.md
+GEMINI.md
