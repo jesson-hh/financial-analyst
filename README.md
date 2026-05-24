@@ -22,8 +22,8 @@ Inspired by [Anthropic's financial-services](https://github.com/anthropics/finan
 
 ## What's in v1.0
 
-- **20 agents total**: 14 single-stock (data → analyst → decision → introspector, see `config/swarm/stock-deep-dive.yaml`) + 5 market-level + 1 meta (ask)
-- **7 swarm presets**: stock-deep-dive, mainline-radar, morning-brief, intraday-review, dream + more
+- **25 agents total** (v1.9.7): 14 single-stock (data → analyst → decision → introspector, see `config/swarm/stock-deep-dive.yaml`) + 10 market-level (incl. morning-brief v2 with overseas/catalyst/rotation + new overseas-radar with global news/macro impact) + 1 meta (ask)
+- **8 swarm presets**: stock-deep-dive, morning-brief (5-agent v2), overseas-radar (new), mainline-radar, intraday-review, dream + more
 - **QlibBinaryLoader** (day + 5min) + **TushareLoader** (HTTP + ParquetCache) + **CSV ingester**
 - **R7-R20 sentiment signals** (board_scorer v5, volume_regime super_distr/tail_surge, whale signals)
 - **Pluggable memory** with FTS5 retrieval + always_include white-list + `_shared/` cross-agent playbook

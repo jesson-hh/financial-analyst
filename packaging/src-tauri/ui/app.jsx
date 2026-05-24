@@ -163,6 +163,7 @@ function makeInitialState() {
     currentSessionId: first.id,
     status: 'idle', activeRound: null, queuedInput: '',
     confirm: null, toast: null, reportDrawer: null,
+    lastLLMError: null,   // v1.9.6: {msg, ts} — agent SSE 'error' event 设上, 状态栏显示
   };
 }
 
@@ -188,7 +189,9 @@ function updateSessionById(state, sid, updater) {
 function reducer(s, a) {
   switch (a.type) {
     case 'set_mode':         return { ...s, mode: a.mode };
-    case 'set_use_llm':      return { ...s, useRealLLM: a.value };
+    case 'set_use_llm':      return { ...s, useRealLLM: a.value, lastLLMError: null };
+    case 'set_llm_error':    return { ...s, lastLLMError: { msg: a.msg, ts: Date.now() } };
+    case 'clear_llm_error':  return { ...s, lastLLMError: null };
     case 'set_watch':        return { ...s, watch: { ...s.watch, ...a.watch } };
     case 'rename_session':   return updateCurrentSession(s, () => ({ title: (a.title || '').trim() || '新对话' }));
     case 'toggle_theme':     return { ...s, theme: s.theme === 'dark' ? 'light' : 'dark' };
@@ -206,7 +209,7 @@ function reducer(s, a) {
     case 'set_indices':      return { ...s, indices: a.quotes };
     case 'set_tokens':       return { ...s, tokens: a.tokens };
     case 'set_models':       return { ...s, models: a.models, backendModel: s.backendModel || (a.models?.[0]?.id) || null };
-    case 'set_backend_model':return { ...s, backendModel: a.model };
+    case 'set_backend_model':return { ...s, backendModel: a.model, lastLLMError: null };
     case 'open_report':    return { ...s, reportDrawer: { sym: a.sym, status: a.text ? 'done' : 'running', step: REPORT_STEPS.length, text: a.text || '', startedAt: a.text ? null : (a.startedAt || Date.now()) } };
     case 'advance_report': return s.reportDrawer ? { ...s, reportDrawer: { ...s.reportDrawer, ...a.patch } } : s;
     case 'close_report':   return { ...s, reportDrawer: null };
@@ -582,6 +585,8 @@ function ObservatoryApp() {
       },
       onError: (err) => {
         console.error('Agent error:', err);
+        const msg = (err && (err.message || String(err))) || 'agent error';
+        dispatch({ type: 'set_llm_error', msg });
         dispatch({ type: 'agent_done', sid });
         if (agentRef.current === agent) agentRef.current = null;
       },
@@ -2137,11 +2142,20 @@ function StatusBar({ s, dispatch, onCmdK }) {
       )}
       <span
         onClick={() => dispatch({ type: 'set_use_llm', value: !s.useRealLLM })}
-        title="切换 mock 数据 / 真 Claude 生成回复"
+        title="切换 mock 数据 / 真 LLM 生成回复"
         className="hover-pill"
-        style={{ padding: '1px 5px', border: '1px solid ' + (s.useRealLLM ? 'var(--yin)' : 'var(--line)'), color: s.useRealLLM ? 'var(--yin)' : 'var(--ink-2)', cursor: 'pointer' }}>
-        {s.useRealLLM ? '● 真 LLM' : '○ 切真 LLM'}
+        style={{ padding: '1px 5px', border: '1px solid ' + (s.lastLLMError ? '#c0392b' : (s.useRealLLM ? 'var(--yin)' : 'var(--line)')), color: s.lastLLMError ? '#c0392b' : (s.useRealLLM ? 'var(--yin)' : 'var(--ink-2)'), cursor: 'pointer' }}>
+        {s.lastLLMError ? '⚠ LLM 失败' : (s.useRealLLM ? '● 真 LLM' : '○ 切真 LLM')}
       </span>
+      {s.lastLLMError && (
+        <span
+          onClick={() => dispatch({ type: 'clear_llm_error' })}
+          title={s.lastLLMError.msg}
+          className="hover-pill"
+          style={{ padding: '1px 6px', color: '#c0392b', cursor: 'pointer', fontSize: 11, maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {(s.lastLLMError.msg || '').slice(0, 50)}{(s.lastLLMError.msg || '').length > 50 ? '…' : ''} <span style={{ color: 'var(--ink-3)' }}>(点击清除)</span>
+        </span>
+      )}
       <Sep />
       <span><span style={{ color: 'var(--ink-3)' }}>token</span> <span style={{ color: 'var(--ink-1)' }}>{(s.tokens / 1000).toFixed(1)}k</span></span>
       <Sep />

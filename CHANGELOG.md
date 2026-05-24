@@ -1,5 +1,89 @@
 # Changelog
 
+## v1.9.7 — 2026-05-24 (晚)
+
+### Added — overseas-radar swarm + morning-brief v2 (国际市场传导)
+
+**5 new agents** (总 agent 数 20 → 25), 填补"国际市场 / 海外新闻传导"的 gap.
+audit 发现之前 14-agent 全部聚焦个股, 没有任何 agent 处理隔夜美股 / 港股 /
+VIX / Fed 政策 / 大宗商品对 A 股的传导.
+
+- **`overseas-market-scanner`** (无 LLM, ~10s) — 拉 tencent qt.gtimg.cn 6
+  个核心国际指数 (DJI/IXIC/INX/VIX/HSI/HSTECH), 算 risk_tone
+  (risk_on/off/mixed) + detail. 国内 endpoint 不撞 Clash MITM (yfinance
+  用 curl_cffi 1.5 跟 Clash 冲突, 弃用).
+- **`global-news-aggregator`** (LLM, ~30s) — 基于 overseas-market-scanner
+  价格 + memory 中的传导规则, LLM 写"全球格局 narrative" + 6 大 channel
+  分类 (us_equity / fed_policy / geopolitical / commodity / china_specific /
+  fx_rates) + 受影响 A 股板块.
+- **`macro-impact-analyzer`** (LLM, ~15s) — 融合 overseas + global-news +
+  当日 A 股 scanner, 判读 A 股 vs 海外 follow-through + 给 3-5 个明日
+  actionable signals. 落盘 `out/overseas_radar_<date>.md`.
+- **`catalyst-extractor`** (LLM, ~30s) — 对 market-scanner 输出的异动股
+  (top_gainers/losers/volume_anomalies top-5), 拉 NewsDB 48h 新闻,
+  LLM 一次性提取每股催化类型 + bullish/bearish 判读 + cited news.
+  Catalyst 类型: policy / earnings / product / M&A / macro / rumor /
+  technical / none.
+- **`sector-rotation-analyzer`** (无 LLM, ~5s) — 用 `parquet/tushare_stock_basic.parquet`
+  把异动股聚合到行业, 算今日板块 leaders / laggards + 一句话 rotation_signal.
+
+### Changed — 3 swarm yaml + writer + 3 个 Tier-2 prompt 升级
+
+- **`config/swarm/morning-brief.yaml`** 2 → **5 agents**: scanner +
+  overseas-market-scanner (并行) + catalyst-extractor + sector-rotation-analyzer
+  (并行依赖 scanner) → morning-brief-writer (依赖前 4 个).
+- **`config/swarm/overseas-radar.yaml`** 新 swarm 3 agents: overseas-market-scanner +
+  global-news-aggregator + market-scanner (并行) → macro-impact-analyzer (融合 3 个).
+- **`morning_brief_writer.py`** prompt + `_execute` 接 4 个 upstream input
+  (scanner + overseas + catalyst + rotation), 写 8 section markdown brief
+  (头部 + 隔夜海外 + 大盘 + 板块轮动 + 领涨/跌/量能/watchlist).
+- **`config/swarm/stock-deep-dive.yaml`** 14 → **16 agents**: Tier-1 加
+  overseas-market-scanner + sector-rotation-analyzer (并行跟 quote-fetcher
+  等). Tier-2: fundamental-analyst 接 overseas (估值锚 + 高 VIX 调整);
+  technical-analyst 接 overseas + rotation (momentum 判读 + 行业顺势);
+  quant-analyst 接 rotation (cross-sectional 信号 ±0.3 因子加权).
+- **3 个 Tier-2 agent prompt 升级** — 显式声明新 input + memory 规则
+  (海外 risk_tone 用法 / 板块轮动加减分逻辑).
+
+### Data layer
+
+- **`data/collectors/tencent_global.py`** 新 collector — 跟 `tencent_quote.py`
+  同模式 (HTTP GBK 国内 endpoint, `net.py.domestic_session`), 但字段 layout
+  不同: 国际指数 `[3]=price, [4]=prev, [5]=open, [31]=change, [32]=changePct,
+  [33]=high, [34]=low` (A 股 changePct 在 [32], 但 [4]=prev, [31] 是其他东西).
+  注册 `tencent_global` source @rate_limited (qps=2, cache_ttl=30s).
+- **`llm.yaml`** 两份 (bundled + cwd) 加 5 个新 agent overrides (默认 qwen3.5-plus).
+
+### Test
+
+- `tests/test_overseas_radar.py` 7 个 smoke test: parser / risk_tone 双向
+  (risk_on / risk_off) / sector aggregation / catalyst LLM mock /
+  global-news LLM mock / macro-impact markdown 落盘.
+
+### Memory
+
+- `memories/overseas-market-scanner/thresholds.md` — 风险偏好阈值 + 传导经验
+- `memories/global-news-aggregator/channels.md` — 6 个 channel 速查 + 经验规则
+- `memories/macro-impact-analyzer/playbook.md` — 4 种典型场景 + 操作手册
+- `memories/catalyst-extractor/rules.md` — 催化类型判定优先级 + 输出约束
+- `memories/sector-rotation-analyzer/rules.md` — 行业分类源 + 5 种轮动模式
+
+### TUI
+
+- `tui.py::_ensure_registered` 现在注册 24 个 sub-agent (was 19).
+
+### Fixed — v1.9.6 收尾 (用户测试反馈)
+
+- **`buddy/server.py::/models`** 过滤掉没 `*_API_KEY` 的 provider, 返回
+  `disabled_providers` 列 reason. UI picker 只显示能用的, 避免用户切到坏模型.
+- **`config/llm.yaml`** qwen models 列表减为 `[qwen3.5-plus, qwen3-coder-plus]` —
+  dashscope coding 端点不认 `qwen3-max` / `qwen3.5-flash` (返 400 invalid_parameter_error,
+  用户实测). 通用 qwen 模型需要换通用 dashscope key + base_url, yaml 注释说明.
+- **UI runtime LLM error 指示**: `app.jsx` 加 `lastLLMError` state + reducer,
+  SSE error event 时 status bar `● 真 LLM` 变 **`⚠ LLM 失败`** 红色 + 错误消息条
+  (点击 / 切模型 / 切真 LLM toggle 自动清除). cache-buster `?v=20260524-3`.
+- `packaging/src-tauri/ui/` 同步.
+
 ## v1.9.6 — 2026-05-24
 
 ### Changed — LLM 路由架构重构 (multi-provider direct, 替代 litellm)

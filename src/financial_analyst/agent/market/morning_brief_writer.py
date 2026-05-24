@@ -16,26 +16,29 @@ class MorningBriefOutput(BaseModel):
     hot_themes: List[str] = []        # market themes detected
 
 
-SYSTEM_PROMPT = """You are the A-share morning brief writer.
+SYSTEM_PROMPT = """You are the A-share morning brief writer (v1.9.7 — bilingual ZH brief).
 
-You receive:
-- as_of date
-- n_scanned / n_flagged (scope)
-- top_gainers / top_losers (20 each, with code/pct_chg/mv_tier/flagged_by)
-- volume_anomalies (top 20 by vol_ratio)
-- index_snapshot (SH000300 etc)
+You receive 4 upstream agent outputs:
+- **market-scanner**: A 股异动数据 (top_gainers/losers/volume_anomalies + index_snapshot)
+- **overseas-market-scanner** (新): 隔夜美股 + 港股 + VIX + risk_tone
+- **catalyst-extractor** (新): 异动股的催化因素 + 利好/利空判读
+- **sector-rotation-analyzer** (新): 今日板块 leaders/laggards + 轮动 signal
 
-Produce a markdown brief WITHOUT fabricating fundamental data — you only have prices/volume. Write:
+写一份 markdown brief, sections:
 
-1. **Headline** — one sentence: today's market regime + 2-3 notable themes
-2. **大盘速览** — index move + breadth (n_flagged / n_scanned ratio)
-3. **领涨 top 10** — table: code | pct | mv_tier | flagged_by
-4. **领跌 top 10** — same table
-5. **量能异动 top 10** — vol_ratio anomalies
-6. **主题猜想** — based on which mv_tiers led / which sector codes (you can infer 'AI/半导体' from SH/SZ + code patterns ONLY if pattern is clear, otherwise say "需进一步核实")
-7. **今日关注 watchlist** — 3-5 codes worth a full deep-dive (suggest `financial-analyst report <code>`)
+1. **Headline** — 一句话: 今日大盘 + 海外格局 + 2-3 个关键主题
+2. **隔夜海外** — risk_tone + 美股 4 指数 + 港股 2 指数 + VIX. 一段话总结隔夜事件
+3. **大盘速览** — 指数 + breadth (n_flagged / n_scanned)
+4. **板块轮动** — 用 sector-rotation 输出: leaders top 3 + laggards top 3 + 一句话 rotation_signal
+5. **领涨 top 10** — table: code | name | pct | mv_tier. **如果 catalyst-extractor 给了催化, 在备注列加上**
+6. **领跌 top 10** — 同上
+7. **量能异动 top 10** — vol_ratio anomalies
+8. **今日关注 watchlist** — 3-5 codes worth deep-dive (建议 `fa report <code>`)
 
-DO NOT make up news / catalysts you don't see in the data. If you don't know why something moved, say so.
+规则:
+- catalyst-extractor 没说的事别编故事
+- 海外联动判读用 overseas-market-scanner 的 risk_tone, 别自己 hallucinate Fed 决议时间
+- 板块轮动用 sector-rotation-analyzer 的 leaders, 别自己分类
 
 Return JSON:
 {
@@ -53,16 +56,33 @@ class MorningBriefWriter(SubAgent[MorningBriefOutput]):
     OUTPUT_SCHEMA = MorningBriefOutput
 
     async def _execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
-        scanner = inputs.get("market-scanner", {})
-        as_of = scanner.get("as_of", "unknown")
+        scanner = inputs.get("market-scanner", {}) or {}
+        # v1.9.7: 新加 3 个 upstream agent (overseas + catalyst + rotation).
+        # 老的 morning-brief.yaml 只有 scanner, 兼容 — 缺哪个都接 {} 不挂.
+        overseas = inputs.get("overseas-market-scanner", {}) or {}
+        catalyst = inputs.get("catalyst-extractor", {}) or {}
+        rotation = inputs.get("sector-rotation-analyzer", {}) or {}
+        as_of = scanner.get("as_of") or overseas.get("as_of") or "unknown"
         out_dir = Path(inputs.get("out_dir", "./out"))
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        # 把 4 个 upstream 整合到一个 user prompt, 各自加 section 头
+        bundle = {
+            "as_of": as_of,
+            "market_scanner": scanner,
+            "overseas": overseas,
+            "catalysts": catalyst.get("catalysts") or [],
+            "sector_rotation": {
+                "leaders": rotation.get("today_leaders") or [],
+                "laggards": rotation.get("today_laggards") or [],
+                "signal": rotation.get("rotation_signal", ""),
+            },
+        }
         client = LLMClient.for_agent(self.NAME)
-        upstream_json = json.dumps(scanner, default=str, ensure_ascii=False, indent=2)
+        upstream_json = json.dumps(bundle, default=str, ensure_ascii=False, indent=2)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT + "\n\n# Memory\n" + self.memory.load_all()},
-            {"role": "user", "content": f"As of: {as_of}\n\nScanner output:\n{upstream_json[:12000]}\n\nReturn JSON."},
+            {"role": "user", "content": f"As of: {as_of}\n\n4 upstream agent outputs:\n{upstream_json[:14000]}\n\nReturn JSON."},
         ]
         response = await client.chat(
             messages=messages, response_format={"type": "json_object"}, temperature=0.2,

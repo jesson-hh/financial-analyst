@@ -637,18 +637,43 @@ def build_app():
     async def models():
         """Available LLM models (for the front-end model picker).
 
-        ``models`` is a FLAT array [{id, name, provider}] so the UI can
-        render a picker directly; ``by_provider`` keeps the grouped form
-        for anyone who wants it.
+        v1.9.6 改动: **过滤掉没 API key 的 provider** — 用户没配 key 的
+        模型不该出现在 picker 里 (避免切完发现不能用). per provider 的
+        ``api_key_env`` 在 ``os.environ`` 是空就跳过该 provider 全部 models.
+
+        Returns:
+            ``models`` flat array [{id, name, provider}]
+            ``by_provider`` grouped
+            ``disabled_providers`` [{name, reason}] 列举跳过的 + 原因
         """
+        import os
         try:
             from financial_analyst.llm.client import LLMClient
-            by_prov = LLMClient.for_agent("buddy").list_models()
+            client = LLMClient.for_agent("buddy")
+            providers_cfg = client.config.get("providers", {}) or {}
+            by_prov_all = client.list_models()
         except Exception as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+        by_prov: Dict[str, list] = {}
+        disabled = []
+        for prov, models_list in by_prov_all.items():
+            api_key_env = (providers_cfg.get(prov) or {}).get("api_key_env", "")
+            if not api_key_env:
+                # provider 没 api_key_env 字段 (异常配置), 跳过
+                disabled.append({"name": prov, "reason": "no api_key_env in llm.yaml"})
+                continue
+            if not os.environ.get(api_key_env, "").strip():
+                disabled.append({"name": prov,
+                                  "reason": f"{api_key_env} not set in env"})
+                continue
+            by_prov[prov] = models_list
+
         flat = [{"id": m, "name": m, "provider": p}
                 for p, ms in by_prov.items() for m in ms]
-        return JSONResponse({"ok": True, "models": flat, "by_provider": by_prov})
+        return JSONResponse({"ok": True, "models": flat,
+                              "by_provider": by_prov,
+                              "disabled_providers": disabled})
 
     @app.get("/alerts")
     async def alerts():

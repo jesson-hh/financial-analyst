@@ -70,9 +70,30 @@ class FundamentalAnalyst(SubAgent[FundamentalOutput]):
                 + json.dumps(chain_ctx, ensure_ascii=False, indent=2)
             )
 
+        # v1.9.7: optional overseas context (新 Tier-1 agent)
+        overseas = inputs.get("overseas-market-scanner") or {}
+        overseas_block = ""
+        sys_prompt = SYSTEM_PROMPT + "\n\n# Memory\n" + self.memory.load_all()
+        if overseas:
+            overseas_block = (
+                "\n\n# v1.9.7 海外宏观快照 (optional context)\n"
+                + json.dumps({
+                    "risk_tone": overseas.get("risk_tone"),
+                    "risk_tone_detail": overseas.get("risk_tone_detail"),
+                    "vix": overseas.get("vix_level"),
+                }, ensure_ascii=False, indent=2)
+            )
+            sys_prompt += (
+                "\n\n# v1.9.7 海外 context 用法\n"
+                "如果 user 段含 `# v1.9.7 海外宏观快照` 块, 在估值判读时考虑全球流动性:\n"
+                "- risk_off + 高 VIX → 大盘估值锚 (PE/PB) 承压, 估值评分扣 0.5\n"
+                "- risk_on + 低 VIX → 估值锚抬升, 加 0.5 (但 mega-cap 仍归 0)\n"
+                "- 该股出口 / 海外业务占比高 + 美元强 → bear point 加 1 条"
+            )
+
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT + "\n\n# Memory\n" + self.memory.load_all()},
-            {"role": "user", "content": f"Upstream quote data:\n{upstream}{chain_block}\n\nReturn JSON per schema."},
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": f"Upstream quote data:\n{upstream}{chain_block}{overseas_block}\n\nReturn JSON per schema."},
         ]
         response = await client.chat(
             messages=messages,

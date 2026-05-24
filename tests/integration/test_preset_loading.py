@@ -4,8 +4,10 @@ from financial_analyst.swarm import load_preset
 
 
 def test_load_stock_deep_dive(tmp_path):
-    # depends on Task 34 yaml + all 14 agents registered in tui._ensure_registered
-    # (4 tiers: 5 data + 4 analyst + 4 decision + 1 introspector post-mortem)
+    # v1.9.7: 16 agents (was 14) — added overseas-market-scanner +
+    # sector-rotation-analyzer to Tier-1, Tier-2 analysts 接 them as
+    # optional macro/sector context.
+    # (4 tiers: 7 data + 4 analyst + 4 decision + 1 introspector post-mortem)
     from financial_analyst.tui import _ensure_registered
     _ensure_registered()
     nodes = load_preset("stock-deep-dive", memory_root=tmp_path)
@@ -13,7 +15,9 @@ def test_load_stock_deep_dive(tmp_path):
     assert "quote-fetcher" in names
     assert "report-writer" in names
     assert "introspector" in names    # Tier-4 added in v1.9.4
-    assert len(names) == 14
+    assert "overseas-market-scanner" in names     # v1.9.7 added
+    assert "sector-rotation-analyzer" in names    # v1.9.7 added
+    assert len(names) == 16
 
 
 def test_deps_correctly_wired(tmp_path):

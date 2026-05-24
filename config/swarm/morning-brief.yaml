@@ -1,5 +1,5 @@
 name: morning-brief
-description: Daily A-share market-wide morning brief — scan 异动 + write summary
+description: Daily A-share market-wide morning brief — scan 异动 + 隔夜美股 + 催化提取 + 板块轮动 + 综合 brief (v1.9.7 升级 5 agent)
 variables:
   - name: asof_date
     type: string
@@ -9,9 +9,31 @@ variables:
     default: all
 
 agents:
+  # Tier 1 (并行) — 数据扫描
   - name: market-scanner
     deps: []
     input_keys: [asof_date, universe]
-  - name: morning-brief-writer
+
+  - name: overseas-market-scanner
+    deps: []
+    input_keys: [asof_date]
+
+  # Tier 2 (并行) — 异动股分析 + 板块轮动 (都依赖 scanner)
+  - name: catalyst-extractor
     deps: [market-scanner]
-    input_keys: [market-scanner, asof_date, out_dir]
+    input_keys: [market-scanner, asof_date]
+
+  - name: sector-rotation-analyzer
+    deps: [market-scanner]
+    input_keys: [market-scanner, asof_date]
+
+  # Tier 3 — 综合写 brief (依赖前 4 个)
+  - name: morning-brief-writer
+    deps: [market-scanner, overseas-market-scanner, catalyst-extractor, sector-rotation-analyzer]
+    input_keys:
+      - market-scanner
+      - overseas-market-scanner
+      - catalyst-extractor
+      - sector-rotation-analyzer
+      - asof_date
+      - out_dir

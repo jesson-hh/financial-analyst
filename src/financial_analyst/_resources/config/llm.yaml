@@ -4,9 +4,13 @@ default_model: qwen3.5-plus
 providers:
   qwen:
     api_key_env: DASHSCOPE_API_KEY
+    # ⚠ coding.dashscope 是编程子端点, 只接受 qwen3.5-plus / qwen3-coder-plus.
+    # qwen-max / qwen-turbo / qwen-flash 等需要通用端点 + 通用 key:
+    #   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    # 通用 key 在 bailian 控制台 → AccessKey 管理 申请.
     base_url: https://coding.dashscope.aliyuncs.com/v1
     network_profile: domestic   # aliyun, 必直连 (Clash fake-ip 接管会走海外节点)
-    models: [qwen3.5-plus, qwen3-max, qwen3.5-flash, qwen3-coder-plus]
+    models: [qwen3.5-plus, qwen3-coder-plus]
   anthropic:
     api_key_env: ANTHROPIC_API_KEY
     network_profile: intl_clash   # 走 litellm fallback, 这字段仅占位
@@ -48,5 +52,21 @@ agent_overrides:
     provider: qwen
     model: qwen3.5-plus
   intraday-reviewer:
+    provider: qwen
+    model: qwen3.5-plus
+  # v1.9.7 新增 5 个 morning-brief / overseas-radar agent
+  catalyst-extractor:
+    provider: qwen
+    model: qwen3.5-plus
+  sector-rotation-analyzer:
+    provider: qwen
+    model: qwen3.5-plus
+  overseas-market-scanner:
+    provider: qwen
+    model: qwen3.5-plus
+  global-news-aggregator:
+    provider: qwen
+    model: qwen3.5-plus
+  macro-impact-analyzer:
     provider: qwen
     model: qwen3.5-plus

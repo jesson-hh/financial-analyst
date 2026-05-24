@@ -30,8 +30,8 @@
 
 ## v1.0 核心能力
 
-- **20 个 agent**: 14 个个股研究 (data → analyst → decision → introspector, 见 `config/swarm/stock-deep-dive.yaml`) + 5 个市场级 + 1 个 meta (ask)
-- **7 个 swarm 预设**: stock-deep-dive / mainline-radar / morning-brief / intraday-review / dream 等
+- **25 个 agent** (v1.9.7): 14 个个股研究 (data → analyst → decision → introspector, 见 `config/swarm/stock-deep-dive.yaml`) + 10 个市场级 (含 morning-brief v2 五件套 + 新 overseas-radar 国际雷达三件套) + 1 个 meta (ask)
+- **8 个 swarm 预设**: stock-deep-dive / morning-brief (5-agent v2) / **overseas-radar** (新, 国际市场传导) / mainline-radar / intraday-review / dream 等
 - **QlibBinaryLoader** (day + 5min) + **TushareLoader** (HTTP + ParquetCache) + **CSV ingester**
 - **R7-R20 情绪信号**: board_scorer v5 / volume_regime (super_distr / tail_surge) / whale 信号
 - **可插拔记忆系统** — FTS5 检索 + `always_include` 白名单 + `_shared/` 跨 agent playbook

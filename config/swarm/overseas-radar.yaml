@@ -1,0 +1,31 @@
+name: overseas-radar
+description: 国际市场 + 海外新闻传导雷达 — 隔夜美股/港股/VIX 快照 + 全球格局判读 + A 股传导效率分析 + 明日可执行信号 (v1.9.7 新增 swarm)
+variables:
+  - name: asof_date
+    type: string
+    default: today
+
+agents:
+  # Tier 1 — 海外数据扫描 (无 LLM)
+  - name: overseas-market-scanner
+    deps: []
+    input_keys: [asof_date]
+
+  # Tier 2 — 海外格局判读 (LLM, 用 scanner 的价格数据 + memory 传导规则)
+  - name: global-news-aggregator
+    deps: [overseas-market-scanner]
+    input_keys: [overseas-market-scanner, asof_date]
+
+  # Tier 3 — 融合 海外 + A 股 scanner, 写宏观影响报告 (LLM)
+  - name: market-scanner
+    deps: []
+    input_keys: [asof_date]
+
+  - name: macro-impact-analyzer
+    deps: [overseas-market-scanner, global-news-aggregator, market-scanner]
+    input_keys:
+      - overseas-market-scanner
+      - global-news-aggregator
+      - market-scanner
+      - asof_date
+      - out_dir

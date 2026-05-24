@@ -185,7 +185,13 @@ def render_banner() -> None:
 # ---------------------------------------------------------------------------
 
 def _ensure_registered() -> None:
-    """Register all 15 sub-agents into SubAgentRegistry (idempotent)."""
+    """Register all 24 sub-agents into SubAgentRegistry (idempotent).
+
+    14 single-stock (stock-deep-dive) + 5 market + 2 mainline + ...
+    v1.9.7: +5 international/morning-brief agents (overseas-market-scanner,
+    global-news-aggregator, macro-impact-analyzer, catalyst-extractor,
+    sector-rotation-analyzer).
+    """
     from financial_analyst.agent.registry import SubAgentRegistry
 
     from financial_analyst.agent.tier1.quote_fetcher import QuoteFetcher
@@ -207,6 +213,11 @@ def _ensure_registered() -> None:
     from financial_analyst.agent.market.market_scanner import MarketScanner
     from financial_analyst.agent.market.morning_brief_writer import MorningBriefWriter
     from financial_analyst.agent.market.intraday_reviewer import IntradayReviewer
+    from financial_analyst.agent.market.overseas_market_scanner import OverseasMarketScanner
+    from financial_analyst.agent.market.catalyst_extractor import CatalystExtractor
+    from financial_analyst.agent.market.sector_rotation_analyzer import SectorRotationAnalyzer
+    from financial_analyst.agent.market.global_news_aggregator import GlobalNewsAggregator
+    from financial_analyst.agent.market.macro_impact_analyzer import MacroImpactAnalyzer
 
     for name, cls in [
         ("quote-fetcher", QuoteFetcher),
@@ -228,6 +239,11 @@ def _ensure_registered() -> None:
         ("market-scanner", MarketScanner),
         ("morning-brief-writer", MorningBriefWriter),
         ("intraday-reviewer", IntradayReviewer),
+        ("overseas-market-scanner", OverseasMarketScanner),
+        ("catalyst-extractor", CatalystExtractor),
+        ("sector-rotation-analyzer", SectorRotationAnalyzer),
+        ("global-news-aggregator", GlobalNewsAggregator),
+        ("macro-impact-analyzer", MacroImpactAnalyzer),
     ]:
         if name not in SubAgentRegistry.names():
             SubAgentRegistry.register(name, cls)

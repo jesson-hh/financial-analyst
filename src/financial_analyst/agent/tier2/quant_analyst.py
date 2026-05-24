@@ -93,13 +93,32 @@ class QuantAnalyst(SubAgent[QuantOutput]):
     async def _execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         client = LLMClient.for_agent(self.NAME)
         factor = inputs.get("factor-computer", {}) or {}
-        upstream = json.dumps({
+        bundle: Dict[str, Any] = {
             "model_predictor": inputs.get("model-predictor", {}),
             "factor_scores": factor.get("factor_scores", {}),
             "zoo_signals": factor.get("zoo_signals", {}),  # v1.3.4+
-        }, default=str, ensure_ascii=False)
+        }
+        # v1.9.7: 行业轮动信号 (新 Tier-1 agent)
+        rotation = inputs.get("sector-rotation-analyzer") or {}
+        sys_prompt = SYSTEM_PROMPT + "\n\n# Memory\n" + self.memory.load_all()
+        if rotation:
+            bundle["sector_rotation"] = {
+                "leaders": [{"sector": s.get("sector"), "avg_pct": s.get("avg_pct_chg")}
+                            for s in (rotation.get("today_leaders") or [])[:3]],
+                "laggards": [{"sector": s.get("sector"), "avg_pct": s.get("avg_pct_chg")}
+                             for s in (rotation.get("today_laggards") or [])[:3]],
+                "signal": rotation.get("rotation_signal", ""),
+            }
+            sys_prompt += (
+                "\n\n# v1.9.7 板块轮动 context\n"
+                "如果 upstream 含 sector_rotation, 在 quant 信号融合时考虑:\n"
+                "- 该股所属行业在 leaders → 因子打分 + 0.3\n"
+                "- 在 laggards → 因子打分 - 0.3\n"
+                "- 行业不明 → 不动. 行业轮动属于 cross-sectional 信号, 是因子之外的补充."
+            )
+        upstream = json.dumps(bundle, default=str, ensure_ascii=False)
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT + "\n\n# Memory\n" + self.memory.load_all()},
+            {"role": "system", "content": sys_prompt},
             {"role": "user", "content": f"Upstream:\n{upstream}\n\nReturn JSON."},
         ]
         response = await client.chat(

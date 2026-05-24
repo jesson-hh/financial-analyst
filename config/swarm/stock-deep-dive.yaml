@@ -1,5 +1,5 @@
 name: stock-deep-dive
-description: A-share single-stock deep-dive research (14 agents, 4 tiers — introspector is Tier-4 post-mortem)
+description: A-share single-stock deep-dive research (16 agents, 4 tiers — v1.9.7 加 overseas-market-scanner + sector-rotation-analyzer 到 Tier-1, 喂宏观/行业 context 给 Tier-2)
 variables:
   - name: code
     type: string
@@ -25,20 +25,27 @@ agents:
   - name: f10-reader
     deps: []
     input_keys: [code, asof_date]
+  # v1.9.7: 加海外宏观快照 + 行业轮动信号 (跟其它 Tier-1 并行, ~10s)
+  - name: overseas-market-scanner
+    deps: []
+    input_keys: [asof_date]
+  - name: sector-rotation-analyzer
+    deps: []
+    input_keys: [asof_date]
 
-  # Tier 2 — parallel after Tier 1
+  # Tier 2 — parallel after Tier 1. v1.9.7: 3 个 analyst 接 overseas + rotation 作为辅助 context
   - name: fundamental-analyst
-    deps: [quote-fetcher]
-    input_keys: [quote-fetcher]
+    deps: [quote-fetcher, overseas-market-scanner]
+    input_keys: [quote-fetcher, overseas-market-scanner]
   - name: technical-analyst
-    deps: [quote-fetcher, factor-computer]
-    input_keys: [quote-fetcher, factor-computer]
+    deps: [quote-fetcher, factor-computer, overseas-market-scanner, sector-rotation-analyzer]
+    input_keys: [quote-fetcher, factor-computer, overseas-market-scanner, sector-rotation-analyzer]
   - name: whale-analyst
     deps: [quote-fetcher, factor-computer]
     input_keys: [quote-fetcher, factor-computer]
   - name: quant-analyst
-    deps: [model-predictor, factor-computer]
-    input_keys: [model-predictor, factor-computer]
+    deps: [model-predictor, factor-computer, sector-rotation-analyzer]
+    input_keys: [model-predictor, factor-computer, sector-rotation-analyzer]
 
   # Tier 3 — bull/bear parallel, then CRO, then writer
   - name: bull-advocate

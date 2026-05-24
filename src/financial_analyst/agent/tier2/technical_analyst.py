@@ -56,9 +56,36 @@ class TechnicalAnalyst(SubAgent[TechnicalOutput]):
         client = LLMClient.for_agent(self.NAME)
         quote = inputs.get("quote-fetcher", {})
         factors = inputs.get("factor-computer", {})
-        upstream = json.dumps({"quote": quote, "factors": factors}, default=str, ensure_ascii=False)
+        # v1.9.7: 可选辅助 context — overseas + sector rotation (新 Tier-1 agent)
+        overseas = inputs.get("overseas-market-scanner") or {}
+        rotation = inputs.get("sector-rotation-analyzer") or {}
+        bundle: Dict[str, Any] = {"quote": quote, "factors": factors}
+        if overseas:
+            bundle["overseas_context"] = {
+                "risk_tone": overseas.get("risk_tone"),
+                "risk_tone_detail": overseas.get("risk_tone_detail"),
+                "vix": overseas.get("vix_level"),
+            }
+        if rotation:
+            bundle["sector_rotation"] = {
+                "today_leaders_top3": [{"sector": s.get("sector"), "avg_pct": s.get("avg_pct_chg")}
+                                       for s in (rotation.get("today_leaders") or [])[:3]],
+                "today_laggards_top3": [{"sector": s.get("sector"), "avg_pct": s.get("avg_pct_chg")}
+                                        for s in (rotation.get("today_laggards") or [])[:3]],
+                "signal": rotation.get("rotation_signal", ""),
+            }
+        upstream = json.dumps(bundle, default=str, ensure_ascii=False)
+        sys_prompt = SYSTEM_PROMPT + "\n\n# Memory\n" + self.memory.load_all()
+        if overseas or rotation:
+            sys_prompt += (
+                "\n\n# v1.9.7 辅助 context (optional)\n"
+                "- overseas_context: 隔夜美股 + 港股 risk_tone (risk_on/off/mixed) + VIX. "
+                "判读 momentum 时考虑 — risk_off 状态 + 该股贝塔高的话减分.\n"
+                "- sector_rotation: 今日板块 leaders / laggards / rotation_signal. "
+                "如果该股所属行业在 leaders → 顺势加分, 在 laggards → 警惕."
+            )
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT + "\n\n# Memory\n" + self.memory.load_all()},
+            {"role": "system", "content": sys_prompt},
             {"role": "user", "content": f"Upstream:\n{upstream}\n\nReturn JSON."},
         ]
         response = await client.chat(
