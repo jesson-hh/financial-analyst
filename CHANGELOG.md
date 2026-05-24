@@ -1,5 +1,77 @@
 # Changelog
 
+## v1.9.6 — 2026-05-24
+
+### Changed — LLM 路由架构重构 (multi-provider direct, 替代 litellm)
+
+- **`llm/client.py` 重写**: 砍掉 litellm 单 client, 改为按 `network_profile`
+  分桶的多 provider AsyncOpenAI client. 3 档: `domestic` (trust_env=False,
+  国内站直连), `intl_clash` (proxy=HTTPS_PROXY or 127.0.0.1:7890, verify=False
+  Clash MITM), `intl_system` (trust_env=True 系统代理).
+- **`_resources/config/llm.yaml` + `config/llm.yaml`** 每个 provider 加
+  `network_profile`. `qwen` → `domestic` (避免 Clash fake-ip 把 aliyuncs.com
+  接管走海外节点 10s timeout, **修了 14 agent 默认 LLM 路径**);
+  `deepseek`/`openai` → `intl_clash`. `deepseek` 加 `deepseek-reasoner`.
+- **OpenAI-compat provider** (qwen/deepseek/openai/openrouter) 走
+  `_chat_openai_compat` → `AsyncOpenAI(http_client=...)`. `anthropic`
+  保留 litellm fallback (API 格式不兼容 OpenAI).
+- **返回 dict**: `_chat_openai_compat` 末尾 `response.model_dump()`. 21+
+  caller 用 `response['choices'][0]['message']['content']` dict-style 访问,
+  AsyncOpenAI ChatCompletion 是 pydantic 不 subscriptable, dump 兼容.
+- **probe 实测**: qwen domestic direct 13s (qwen 自己啰嗦 675 token);
+  deepseek-chat intl_clash 612ms; deepseek-reasoner intl_clash 1017ms.
+- **buddy UI 端到端验证通过**: `/model deepseek-chat` 切换, "你好" 一句
+  问 → DeepSeek 自报身份 "底层由 DeepSeek 驱动", token 0→7.1k.
+
+### Changed — 数据出口收尾 (`data/net.py` 治理)
+
+- **`data/loaders/tushare.py::_query`** 改 `domestic_session()` + 加
+  `@rate_limited("tushare", cache_key=...)`. Tushare token 自有 200/min
+  限速, 客户端再限一遍防 burst. `__init__` 删全局
+  `os.environ['NO_PROXY']='*'` 污染.
+- **`data/loaders/industry.py::refresh_from_tushare`** 同上, 改
+  `domestic_session()`.
+- **`data/collectors/tencent_quote.py`** 删 `os.environ.setdefault('NO_PROXY','*')`
+  全局污染. httpx `trust_env=False` 已局部隔离.
+- **6 个 xueqiu opencli collector 加 `@rate_limited("xueqiu", cache_key=...)`**:
+  `xueqiu_earnings`, `xueqiu_feed`, `xueqiu_hot_posts`, `xueqiu_watchlist`
+  (含 `XueqiuGroupsCollector`), `xueqiu_fund` (含 2 子类), `xueqiu_stock`.
+  之前 UI 侧边栏连点 / agent 突发轮询会触 Aliyun WAF, 累及所有 xueqiu
+  collector (含已限速的 comments/hot_stock); 现在全部 1qps + 30s cache.
+
+### Added — 实时行情多源 Fallback (vibe-trading 借鉴)
+
+- **`src/financial_analyst/data/quote_fallback.py`** 新增 (~110 行): 通用
+  fallback chain helper. `fetch_realtime_quote(code)` 顺序 tencent → xueqiu,
+  第一个 valid (有 price 或 current) 就返 `(source_name, quote_dict)`,
+  全失败抛 `RuntimeError` + 每源错误明细. `fetch_realtime_quotes(codes)`
+  批量版同理.
+- **`buddy/tools.py::_tool_realtime_quote` 重构**: 之前手写 tencent → xueqiu
+  fallback (2 处 try/except), 现统一走 helper. side_effect 加 `source` 字段
+  让 caller 知道实际拿哪源数据.
+- **`buddy/tools.py::_tool_quote_batch` 加 fallback**: 之前只 tencent 单源,
+  挂了直接 fail. 现走 helper, tencent → xueqiu (xueqiu 退化为循环单股).
+- **设计**: fallback 层只做 routing 不做 cache, 各 source 内部 `@rate_limited`
+  已有 cache (tencent 2s / xueqiu 30s). 不重复.
+- **vibe-trading 对比**: 它按 symbol 格式 dispatch loader (`.US`→yfinance,
+  `.HK`→yfinance, A 股→tushare), 无 fallback. 我们用 fallback chain 在同市
+  场内增稳定性. HK/US/crypto 不在我们 product scope. 其它 vibe-trading
+  设计 (Loader 抽象 / Tool registry / Network 治理) 我们 v1.9.6 已有或更强,
+  不再借鉴.
+- 测试: `tests/test_quote_fallback.py` 15 个 (单/批 × short-circuit / 链式
+  fallback / 异常 fallback / 全失败 + details / default chain 顺序).
+
+### Test 兼容
+
+- `tests/test_buddy_improvements.py::_client()` 改用 `anthropic` provider,
+  litellm fallback 路径 mock `acompletion` 仍生效. qwen/deepseek/openai/
+  openrouter 改走 AsyncOpenAI 后, mock `acompletion` 对它们已无效.
+- `tests/conftest.py` 加 `_clear_net_caches` autouse fixture, 每个 test
+  前清 `net.py @rate_limited` source cache. 避免同 args 调同 collector
+  从前一 test cache 拿 stale value 导致 mock 不生效.
+- `tests/test_loaders.py` 4 个 tushare test 改 mock target `requests.post`
+  → `domestic_session()` (v1.9.6 tushare._query 改用 net.py session).
+
 ## v1.9.5 — 2026-05-23
 
 ### Added — Tier-4 Introspector + 14-agent 升级

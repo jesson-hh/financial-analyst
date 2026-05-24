@@ -9,9 +9,16 @@ dist/
 .env.bak*
 .env.local
 .staging_hf/
+.staging_*
 test_data/
 out/
 .run/
+# debug / one-off probe scripts (not part of supported tooling)
+scripts/probe_*.py
+# raw repro dumps
+transcript_repro.txt
+# agent-self introspector proposals — local review only, not source
+memories/_pending_introspections/
 # opencli plugin deps — installed locally via `opencli plugin install`,
 # never committed (only the .js adapters + manifest are source).
 opencli-plugin-ths-extra/node_modules/

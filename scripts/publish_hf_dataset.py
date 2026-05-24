@@ -45,30 +45,69 @@ from financial_analyst.data.bin_writer import (
 # ──────────────────────── 预设 universe ────────────────────────
 
 
+# 各档 parquet 白名单. demo 只挑轻量 schema (KB-MB), lite 加财务 (~750MB),
+# full 加 TDX 历年财务原始 zip (~257MB). 路径相对 stock_data/parquet/ 根
+# (tdx_finance/ 是 stock_data 同级, 单独走 _stage_tdx_finance).
+_PARQUET_DEMO = [
+    "industry_boards.parquet",        # 同花顺行业 (~39KB / 496 行)
+    "concept_ths_constituent.parquet", # 概念-成份映射
+    "concept_ths_index.parquet",      # 概念索引 (~13KB / 536 行)
+    "index_constituents.parquet",     # CSI300/500 成份 (~83KB / 2600 行)
+    "tdx_f10_index.parquet",          # F10 索引 (~263KB / 5122 行)
+    "tdx_f10_warnings_latest.parquet", # 最新负向预警 (~7KB / 66 行)
+    "tushare_stock_basic.parquet",    # 股票基本 (~129KB / 5502 行)
+    "northbound_holding.parquet",     # 北向资金 (~192KB / 2767 行)
+    "instruments.parquet",            # 仪表 universe
+    "ipo_info.parquet",               # IPO
+    "fincast_daily_pred.parquet",     # FinCast 模型预测 (research artifact)
+    "events/",                        # 公司事件 (~0.3MB)
+    "institutional/",                 # 机构持仓 (~1.8MB)
+    "blocks/",                        # 板块映射 (~6.1MB)
+    "xdxr/",                          # 分红除权 (~3.4MB)
+]
+_PARQUET_LITE = _PARQUET_DEMO + [
+    "financial/",                     # 全部财报 (~735MB) — 研报必需
+]
+_PARQUET_FULL = _PARQUET_LITE + [
+    # news 当前几乎空 (0 MB), 跳过. 未来填充再加.
+]
+
 PRESETS = {
     "demo": {
-        "size_hint":  "~500 MB",
+        "size_hint":  "~515 MB",
         "method":     "top-mv",   # 用 Tencent 实时拉当前 mv top N
         "n_codes":    300,        # 真当前 csi300 (而非 Qlib 历史累积 939)
         "market":     "all",      # universe pool: instruments/all.txt
         "include_5min": False,
-        "description": "当前 mv top-300 演示包 (真 csi300 当前成份). 全历史日线 + daily_basic 快照, 无 5min.",
+        "parquet_include": _PARQUET_DEMO,
+        "tdx_finance_zip": False,
+        "description": "当前 mv top-300 演示包. 全历史日线 + 估值 + 行业/概念/F10/北向 "
+                       "等核心 parquet (~15MB). 无 5min, 无完整财务报表. 上手试用.",
     },
     "lite": {
-        "size_hint":  "~5 GB",
+        "size_hint":  "~6 GB",
         "method":     "top-mv",
         "n_codes":    800,        # 当前 mv top-800 ≈ csi800
         "market":     "all",
         "include_5min": True,
-        "description": "当前 mv top-800 半技术用户包. 全历史日线 + 5min ~7天 + financials.",
+        "parquet_include": _PARQUET_LITE,
+        "tdx_finance_zip": False,
+        "tdx_f10_text": True,     # 加 news_data/tdx_f10/ 全 296MB F10 原始文本
+        "description": "当前 mv top-800 半技术用户包. demo 全 + 5min ~7天 + 完整财务报表 "
+                       "(~735MB) + F10 原始文本 (~296MB). 适合跑 fa report 跨多股研报.",
     },
     "full": {
-        "size_hint":  "~50 GB",
+        "size_hint":  "~14 GB",
         "method":     "instruments",  # 全 5500+ 用 instruments 文件
         "market":     "all",
         "n_codes":    None,
         "include_5min": True,
-        "description": "全 A 股完整包 (含历史退市股). 量化研究员 / 重度用户用.",
+        "parquet_include": _PARQUET_FULL,
+        "tdx_finance_zip": True,      # 加 TDX 历年财报原始 (~257MB zip)
+        "tdx_f10_text": True,         # 加 news_data/tdx_f10/ 全 296MB F10 原始文本
+        "description": "全 A 股完整包 (含历史退市股). 量化研究员 / 重度用户. "
+                       "lite 全 + TDX 历年财报原始 zip (用户跑 import_tdx_financial.py 解) "
+                       "+ F10 原始文本 (公司大事/龙虎榜/主力追踪/最新提示 .txt).",
     },
 }
 
@@ -249,23 +288,109 @@ def _stage_dataset(source_day: str, source_5min: Optional[str],
     return stats
 
 
+# ──────────────────────── parquet 子集打包 ────────────────────────
+
+
+def _stage_parquet(parquet_root: str, items: List[str], staging: Path) -> dict:
+    """copy 指定 parquet 文件/子目录 到 staging/parquet/.
+
+    items 元素是相对 ``parquet_root`` 的路径, 末尾 ``/`` 表示子目录.
+    路径里的层级在 staging 端原样保留.
+    """
+    stats = {"parquet_files": 0, "parquet_bytes": 0, "skipped": []}
+    src_root = Path(parquet_root)
+    pq_dst = staging / "parquet"
+    pq_dst.mkdir(parents=True, exist_ok=True)
+
+    for item in items:
+        src = src_root / item.rstrip("/")
+        if not src.exists():
+            stats["skipped"].append(item)
+            continue
+        dst = pq_dst / item.rstrip("/")
+        if src.is_dir():
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+            for f in dst.rglob("*"):
+                if f.is_file():
+                    stats["parquet_files"] += 1
+                    stats["parquet_bytes"] += f.stat().st_size
+        else:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            stats["parquet_files"] += 1
+            stats["parquet_bytes"] += src.stat().st_size
+    return stats
+
+
+def _stage_tdx_finance(tdx_finance_root: str, staging: Path) -> dict:
+    """copy 117 个 TDX 历年财报 zip 到 staging/tdx_finance/.
+    Full preset 才用. 用户解包用 import_tdx_financial.py."""
+    stats = {"tdx_zip_files": 0, "tdx_zip_bytes": 0}
+    src_root = Path(tdx_finance_root)
+    if not src_root.exists():
+        return stats
+    dst = staging / "tdx_finance"
+    dst.mkdir(parents=True, exist_ok=True)
+    for zf in src_root.glob("*.zip"):
+        shutil.copy2(zf, dst / zf.name)
+        stats["tdx_zip_files"] += 1
+        stats["tdx_zip_bytes"] += zf.stat().st_size
+    return stats
+
+
+def _stage_tdx_f10(tdx_f10_root: str, staging: Path) -> dict:
+    """copy news_data/tdx_f10/{code}/ 全 296MB F10 原始文本到 staging/news_data/tdx_f10/.
+
+    Lite/Full 都用. 每只股票一目录, 含 公司大事/龙虎榜单/主力追踪/最新提示 等 .txt.
+    跟 parquet 里 tdx_f10_index.parquet (索引) 配合, agent 拿事件 metadata 后
+    可读 .txt 内容做详细分析.
+    """
+    stats = {"tdx_f10_files": 0, "tdx_f10_bytes": 0}
+    src_root = Path(tdx_f10_root)
+    if not src_root.exists():
+        print(f"  ⚠ tdx_f10 src 不存在: {src_root}, skip")
+        return stats
+    dst = staging / "news_data" / "tdx_f10"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src_root, dst, dirs_exist_ok=True)
+    for f in dst.rglob("*"):
+        if f.is_file():
+            stats["tdx_f10_files"] += 1
+            stats["tdx_f10_bytes"] += f.stat().st_size
+    return stats
+
+
 # ──────────────────────── dataset card ────────────────────────
 
 
 def _gen_dataset_card(preset_name: Optional[str], codes: List[str],
                       stats: dict, day_cal: List[str], freq_5min: bool) -> str:
-    """生成 README.md (HF dataset card)."""
+    """生成 README.md (HF dataset card) — 中英双语."""
     today = _date.today().isoformat()
     preset_info = PRESETS.get(preset_name, {})
 
     day_range = (f"{day_cal[0]} → {day_cal[-1]}" if day_cal else "?")
     n_days = len(day_cal)
-    total_gb = (stats["day_bytes"] + stats["5min_bytes"]) / 1e9
+    pq_bytes = stats.get("parquet_bytes", 0)
+    pq_files = stats.get("parquet_files", 0)
+    tdx_bytes = stats.get("tdx_zip_bytes", 0)
+    tdx_files = stats.get("tdx_zip_files", 0)
+    f10_bytes = stats.get("tdx_f10_bytes", 0)
+    f10_files = stats.get("tdx_f10_files", 0)
+    total_gb = (stats["day_bytes"] + stats["5min_bytes"] + pq_bytes
+                + tdx_bytes + f10_bytes) / 1e9
+
+    has_5min = "✅" if freq_5min else "❌"
+    has_fin = "✅" if pq_bytes > 100e6 else "❌"
+    has_f10 = "✅" if f10_bytes > 0 else "❌"
+    has_tdx_zip = "✅" if tdx_bytes > 0 else "❌"
+    repo_suffix = ('-' + preset_name) if preset_name else ''
 
     return f"""---
 license: apache-2.0
 language:
 - zh
+- en
 size_categories:
 - 1K<n<10K
 task_categories:
@@ -277,108 +402,241 @@ tags:
 - chinese-stocks
 - qlib
 - quantitative-trading
+- bilingual
+pretty_name: "financial-analyst-data-{preset_name or 'custom'}"
 ---
 
-# financial-analyst-data{('-' + preset_name) if preset_name else ''}
+# financial-analyst-data{repo_suffix}
 
-A-share historical price + valuation data **packaged for [financial-analyst](https://github.com/jesson-hh/financial-analyst)** —
-the 14-agent single-stock deep-dive research workstation.
+> **EN**: A-share historical OHLCV + valuation + financials + TDX F10 events, packaged in Qlib binary + Parquet formats. Companion dataset for [**financial-analyst**](https://github.com/jesson-hh/financial-analyst) — a 14-agent single-stock deep-dive research workstation.
+>
+> **中文**: A 股历史行情 + 估值 + 财报 + TDX F10 事件数据集, Qlib 二进制 + Parquet 双格式打包. 配套 [**financial-analyst**](https://github.com/jesson-hh/financial-analyst) — 14 Agent 个股深度研究工作站使用.
 
-**Published**: {today}
-**Preset**: `{preset_name or 'custom'}` — {preset_info.get('description', '')}
-**Size**: ~{total_gb:.1f} GB
+**Published / 发布**: {today}  · **Size / 体量**: ~{total_gb:.2f} GB  · **License**: Apache 2.0
 
-## What's included
+---
 
-- **{stats['day_codes']} stocks** daily OHLCV + 7 valuation fields (PE/PB/PS/DV/MV/CIRC_MV/turnover_rate)
+## 📊 Three Preset Tiers / 三档预设
+
+Pick the tier that fits your use case. / 按需选择合适档位.
+
+| | **demo** | **lite** | **full** |
+|---|---|---|---|
+| Size / 体量 | ~155 MB | ~3 GB | ~14 GB |
+| Stocks / 股票池 | 300 (current CSI300 by mv) | 800 (CSI800 ≈) | 5500+ (all A-share incl. delisted) |
+| Daily OHLCV+估值 | ✅ | ✅ | ✅ |
+| 5min OHLCV | ❌ | ✅ (~7 days) | ✅ |
+| Financial reports / 财务报表 | ❌ | ✅ (735 MB) | ✅ |
+| F10 text / F10 原始文本 | ❌ | ✅ (1323 codes) | ✅ |
+| TDX 历年财报 zip | ❌ | ❌ | ✅ (257 MB) |
+| Best for / 适合 | 试用 / try-out | `fa report` 研报 / multi-stock research | 量化研究 / quant research |
+| HF Repo | [data-demo](https://huggingface.co/datasets/yifishbossman/financial-analyst-data-demo) | [data-lite](https://huggingface.co/datasets/yifishbossman/financial-analyst-data-lite) | [data-full](https://huggingface.co/datasets/yifishbossman/financial-analyst-data-full) |
+
+**This repo is the `{preset_name or 'custom'}` tier.** / **此 repo 是 `{preset_name or 'custom'}` 档.**
+
+---
+
+## 📦 What's Included / 数据清单
+
+### English
+
+- **{stats['day_codes']} stocks** daily OHLCV + 7 valuation fields (PE / PB / PS / DV / MV / CIRC_MV / turnover_rate)
 - **Date range (daily)**: {day_range} ({n_days} trading days)
-{'- **5min OHLCV** for the same stocks (rolling ~7-100 days)' if freq_5min else ''}
-- Qlib binary format (`.bin` files, `[4-byte float32 start_idx] + [float32 array]`)
-- Compatible with [Microsoft Qlib](https://github.com/microsoft/qlib) and financial-analyst loaders
+- **5min OHLCV** {has_5min}  ({stats['5min_codes']} stocks, {stats['5min_bytes']/1e9:.2f} GB)
+- **Financial reports** (parquet/financial/) {has_fin}  ({pq_files} parquet files total, {pq_bytes/1e6:.1f} MB including all parquet)
+- **F10 text** (news_data/tdx_f10/) {has_f10}  ({f10_files} .txt files, {f10_bytes/1e6:.1f} MB)
+- **TDX historical financial zip** (tdx_finance/) {has_tdx_zip}  ({tdx_files} zip files, {tdx_bytes/1e6:.1f} MB)
 
-## Directory layout
+### 中文
+
+- **{stats['day_codes']} 只股票** 日线 OHLCV + 7 个估值字段 (市盈率/市净率/市销率/股息率/总市值/流通市值/换手率)
+- **日线日期范围**: {day_range} ({n_days} 个交易日)
+- **5min 行情** {has_5min}  ({stats['5min_codes']} 只, {stats['5min_bytes']/1e9:.2f} GB)
+- **完整财务报表** (parquet/financial/) {has_fin}  ({pq_files} 个 parquet, 共 {pq_bytes/1e6:.1f} MB)
+- **F10 原始文本** (news_data/tdx_f10/) {has_f10}  ({f10_files} 个 .txt, {f10_bytes/1e6:.1f} MB) — 公司大事 / 龙虎榜单 / 主力追踪 / 最新提示
+- **TDX 历年财报 zip** (tdx_finance/) {has_tdx_zip}  ({tdx_files} 个 zip, {tdx_bytes/1e6:.1f} MB) — 用 `scripts/import_tdx_financial.py` 解
+
+---
+
+## 🗂 Directory Layout / 目录布局
 
 ```
-cn_data/                          # daily
-  calendars/day.txt
+cn_data/                          # daily — Qlib binary
+  calendars/day.txt               # trading calendar / 交易日历
   instruments/all.txt             # {stats['day_codes']} codes
-  features/{{code}}/              # e.g. sh600519/
-    open.day.bin
+  features/{{code}}/              # one dir per stock, e.g. sh600519/
+    open.day.bin                  # [4-byte float32 start_idx] + [float32 array]
     high.day.bin
     low.day.bin
-    close.day.bin
-    volume.day.bin
-    amount.day.bin
-    pe_ttm.day.bin
+    close.day.bin                 # 不复权收盘 / unadjusted close
+    volume.day.bin                # 手 / lots (= 100 shares)
+    amount.day.bin                # 元 / CNY
+    pe_ttm.day.bin                # TTM PE ratio
     pb.day.bin
-    ps_ttm.day.bin (may be NaN if Tushare-free source)
-    dv_ttm.day.bin (may be NaN)
-    total_mv.day.bin (单位: 万元)
-    circ_mv.day.bin (单位: 万元)
-    turnover_rate.day.bin (单位: %)
-{'cn_data_5min/                     # 5-minute, similar layout' if freq_5min else ''}
+    ps_ttm.day.bin                # may be NaN for some history
+    dv_ttm.day.bin                # dividend yield %, may be NaN
+    total_mv.day.bin              # 万元 / 10K CNY
+    circ_mv.day.bin               # 流通市值万元 / circulating mv (10K CNY)
+    turnover_rate.day.bin         # %
+{'cn_data_5min/                     # 5-minute — same Qlib binary layout, rolling ~7 days' if freq_5min else ''}
+parquet/                          # 非时序结构化数据 / non-time-series structured data
+  industry_boards.parquet         # 同花顺一级行业 / 10jqka level-1 industry
+  index_constituents.parquet      # CSI300 / CSI500 成份 / constituents
+  tdx_f10_index.parquet           # F10 事件索引 (公司大事/龙虎榜/研报)
+  tdx_f10_warnings_latest.parquet # 最新负向预警 / latest warning events
+  northbound_holding.parquet      # 北向资金持仓 / northbound stake
+  tushare_stock_basic.parquet     # 股票基本信息 / basic listing info
+  concept_ths_*.parquet           # 同花顺概念 / 10jqka concept boards
+  events/                         # 公司公告 / company filings
+  institutional/                  # 机构持仓 / institutional holders
+  blocks/                         # 板块映射 / sector mappings
+  xdxr/                           # 分红除权 / dividends + splits
+{'  financial/                      # 完整财务报表 (~735MB) — 资产/负债/利润/现金流/指标' if pq_bytes > 100e6 else ''}
+{'tdx_finance/                      # TDX 历年财报原始 zip (用户解压用 scripts/import_tdx_financial.py)' if tdx_bytes > 0 else ''}
+{'news_data/tdx_f10/{{code}}/         # F10 原始 .txt — 跟 tdx_f10_index 配合用' if f10_bytes > 0 else ''}
 ```
 
-## Usage
+---
 
-### Option 1 — via `financial-analyst` CLI (recommended)
+## 🚀 Usage / 使用方法
+
+### Option 1 — via `financial-analyst` CLI (recommended / 推荐)
+
+**EN**: Easiest. The CLI handles download, path setup, and integration.
+
+**中文**: 最简. CLI 自动下载、配置路径、衔接 agent.
 
 ```bash
 pip install financial-analyst
-fa init  # interactive wizard, picks up this dataset
+
+# Interactive wizard, picks this dataset / 交互向导自动用本数据集
+fa init
+
+# Generate a deep-dive research report on 茅台 / 跑研报
 fa report SH600519
 ```
 
-### Option 2 — direct download + Qlib
+### Option 2 — Direct download + Qlib
+
+**EN**: Pull the dataset with `huggingface_hub`, then use Qlib's `D.features()` API.
+
+**中文**: 用 `huggingface_hub` 下载, 用 Qlib `D.features()` API 读数据.
 
 ```python
 from huggingface_hub import snapshot_download
+
 local_dir = snapshot_download(
-    repo_id="jesson-hh/financial-analyst-data{('-' + preset_name) if preset_name else ''}",
+    repo_id="yifishbossman/financial-analyst-data{repo_suffix}",
     repo_type="dataset",
     local_dir="~/.financial-analyst/data",
 )
 
 import qlib
-qlib.init(provider_uri="~/.financial-analyst/data/cn_data", region="cn")
 from qlib.data import D
-df = D.features(["SH600519"], ["$close", "$volume"],
-                start_time="2024-01-01", end_time="2026-05-30", freq="day")
+qlib.init(provider_uri=f"{{local_dir}}/cn_data", region="cn")
+
+df = D.features(
+    ["SH600519"], ["$close", "$volume", "$pe_ttm", "$total_mv"],
+    start_time="2024-01-01", end_time="2026-05-31", freq="day",
+)
+print(df.tail())
 ```
 
-## Units & conventions
+### Option 3 — Read Parquet directly with pandas
 
-| Field | Unit | Notes |
-|-------|------|-------|
-| open / high / low / close | 元 (CNY) | not adjusted (前复权) — adjustment factor not included |
-| volume | 手 (= 100 股) | Tushare convention; **NOT** pytdx convention (股) |
-| amount | 元 | 成交额 |
-| pe_ttm / pb / ps_ttm | (无单位) | TTM ratios |
-| dv_ttm | % | dividend yield TTM |
-| total_mv / circ_mv | 万元 | total / circulating market cap |
-| turnover_rate | % | daily turnover ratio |
+**EN**: Non-time-series data (financials / industry / F10 / events) is plain Parquet.
 
-## Data sources & lineage
+**中文**: 非时序数据 (财报 / 行业 / F10 / 事件) 是普通 Parquet, pandas 直接读.
 
-- **OHLCV + financials**: Tushare Pro (`pro.daily` + `daily_basic`), HTTP endpoint
-- **5min OHLCV**: TDX main sites via pytdx
-- **For daily updates** (post-download): users run `fa data update` which pulls from
-  pytdx main sites (free, no token) + Tencent qt.gtimg.cn realtime (free, no cookie).
-  See [docs/research/2026-05-23-direct-data-stability.md](https://github.com/jesson-hh/financial-analyst/blob/main/docs/research/2026-05-23-direct-data-stability.md).
+```python
+import pandas as pd
 
-## Disclaimer
+# Industry classification for all listed stocks / 全市场行业分类
+ind = pd.read_parquet(f"{{local_dir}}/parquet/tushare_stock_basic.parquet")
 
-This dataset is for **research and educational purposes only**. Data accuracy not
-guaranteed; do not use for trading without independent verification. See
-[Tushare ToS](https://tushare.pro) for redistribution terms.
+# Latest TDX F10 negative warnings (last 7 days) / TDX F10 最新 7 天负向事件
+warn = pd.read_parquet(f"{{local_dir}}/parquet/tdx_f10_warnings_latest.parquet")
 
-## License
-
-Apache 2.0 (code) — refer to original sources (Tushare / TDX) for data licensing.
+# CSI300 / 500 constituents / 沪深 300/500 成份
+idx = pd.read_parquet(f"{{local_dir}}/parquet/index_constituents.parquet")
+```
 
 ---
 
-Generated by `scripts/publish_hf_dataset.py` v1.
+## 📐 Units & Conventions / 单位与约定
+
+| Field / 字段 | Unit / 单位 | Notes / 说明 |
+|---|---|---|
+| open / high / low / close | 元 / CNY | not adjusted / 不复权 — adjustment factor not included |
+| volume | 手 (= 100 股) / lots | Tushare convention; **NOT** pytdx convention (股 / shares) |
+| amount | 元 / CNY | 成交额 / turnover value |
+| pe_ttm / pb / ps_ttm | (无单位) / dimensionless | TTM ratios / 滚动 12 月 |
+| dv_ttm | % | dividend yield TTM / 股息率 |
+| total_mv / circ_mv | 万元 / 10K CNY | total / circulating market cap / 总/流通市值 |
+| turnover_rate | % | daily turnover ratio / 换手率 |
+
+---
+
+## 🔗 Data Sources & Lineage / 数据来源
+
+### English
+
+- **OHLCV + valuation**: Tushare Pro (`pro.daily` + `daily_basic`), HTTP endpoint, ~5500 A-share tickers
+- **5min OHLCV**: TDX main sites via `pytdx` (free, no token required for historical 5min)
+- **Financial reports**: Tushare Pro (`fina_indicator`, `income`, `balancesheet`, `cashflow`)
+- **TDX F10 events**: `pytdx` direct connection to broker hosts (招商证券/东兴/华泰 etc.), parsed company events / 龙虎榜 / institutional flows
+- **For daily updates** (post-download): users run `fa data update` which pulls from pytdx main sites (free, no token) + Tencent `qt.gtimg.cn` realtime (free, no cookie). See [direct-data-stability research](https://github.com/jesson-hh/financial-analyst/blob/main/docs/research/2026-05-23-direct-data-stability.md).
+
+### 中文
+
+- **日线 OHLCV + 估值**: Tushare Pro (`pro.daily` + `daily_basic`) HTTP 接口, 覆盖全 A 股约 5500 只
+- **5min 行情**: TDX 主站经 `pytdx` 拉取 (零成本, 历史 5min 不需 token)
+- **财务报表**: Tushare Pro (`fina_indicator`, `income`, `balancesheet`, `cashflow`)
+- **TDX F10 事件**: `pytdx` 直连券商主站 (招商证券/东兴/华泰 等), 解析公司大事 / 龙虎榜 / 主力追踪
+- **下载后日常更新**: 用户跑 `fa data update`, 走 pytdx 主站 (免 token) + 腾讯 `qt.gtimg.cn` 实时 (免 cookie). 详见 [直连数据稳定性研究](https://github.com/jesson-hh/financial-analyst/blob/main/docs/research/2026-05-23-direct-data-stability.md).
+
+---
+
+## ⚠️ Disclaimer / 免责声明
+
+**EN**: This dataset is provided strictly for **research and educational purposes**. Data accuracy is not guaranteed; verify independently before any trading decision. The publisher assumes no liability for losses incurred from use of this data. Redistribution must comply with original source terms — see [Tushare ToS](https://tushare.pro).
+
+**中文**: 本数据集仅供**学术研究 / 教学使用**, 不保证数据准确性. 任何投资决策须自行独立验证, 因使用本数据造成的损失发布方概不负责. 二次分发须遵守原始数据源条款 — 参考 [Tushare 服务协议](https://tushare.pro).
+
+---
+
+## 📄 License / 许可
+
+- **Code / 工具脚本**: Apache 2.0 (financial-analyst toolchain)
+- **Data / 数据本体**: 遵从原始数据源 (Tushare / TDX) 各自的使用条款 / refer to original sources
+- **Citation / 引用**: If you use this dataset in a paper, please cite [financial-analyst](https://github.com/jesson-hh/financial-analyst) / 论文引用请标注 [financial-analyst](https://github.com/jesson-hh/financial-analyst)
+
+---
+
+## 🔄 Updating This Dataset / 数据更新
+
+**EN**: This snapshot is static. For incremental daily updates (post-market each day), install the `financial-analyst` package locally:
+
+**中文**: HF 上的快照是静态的. 每天盘后增量更新, 本地装 `financial-analyst` 包:
+
+```bash
+pip install financial-analyst
+fa data update           # incremental day OHLCV + valuation via pytdx (free)
+fa data update --5min    # incremental 5min via TDX local client
+fa data update --f10     # refresh TDX F10 events for watched stocks
+```
+
+---
+
+## 🤝 Contributing / 贡献
+
+**EN**: Issues / PRs welcome on the [main repo](https://github.com/jesson-hh/financial-analyst). For dataset-specific issues (missing codes, schema questions), file an issue tagged `dataset`.
+
+**中文**: Bug 反馈 / 功能建议请去 [主仓库](https://github.com/jesson-hh/financial-analyst). 数据集相关问题 (代码缺失 / schema 问题) 请加 `dataset` 标签.
+
+---
+
+<sub>Generated by `scripts/publish_hf_dataset.py` on {today} · v1.9.6 · bilingual zh/en</sub>
 """
 
 
@@ -397,14 +655,17 @@ def _upload(staging: Path, repo_id: str, token: str, dry_run: bool) -> None:
     print(f"\n  HF: create_repo {repo_id} (dataset)")
     api.create_repo(repo_id, repo_type="dataset", exist_ok=True, private=False)
 
-    print(f"  HF: upload_folder {staging} → {repo_id}")
+    # upload_large_folder: chunked commits + resume. demo 155MB ~10K bin files
+    # 用 upload_folder 单次 create_commit 在 ~60s httpx ReadTimeout 出错.
+    # upload_large_folder 内部 batch ~25 files/commit, 失败可 resume.
+    print(f"  HF: upload_large_folder {staging} → {repo_id}")
     t = time.time()
-    api.upload_folder(
+    api.upload_large_folder(
         folder_path=str(staging),
         repo_id=repo_id,
         repo_type="dataset",
-        commit_message=f"Publish {staging.name} ({_date.today().isoformat()})",
         ignore_patterns=["__pycache__", "*.pyc", ".DS_Store"],
+        print_report=False,  # 默认每 60s 打报告太吵
     )
     print(f"  HF: upload done ({time.time() - t:.1f}s)")
     print(f"\n  ✓ Dataset live at https://huggingface.co/datasets/{repo_id}")
@@ -426,9 +687,17 @@ def main():
                     help="日线源目录")
     ap.add_argument("--source-5min", default="G:/stocks/stock_data/cn_data_5min",
                     help="5min 源目录")
+    ap.add_argument("--source-parquet", default="G:/stocks/stock_data/parquet",
+                    help="parquet 源目录")
+    ap.add_argument("--source-tdx-finance", default="G:/stocks/stock_data/tdx_finance",
+                    help="TDX 历年财报 zip 源目录 (full 用)")
+    ap.add_argument("--source-tdx-f10", default="G:/stocks/news_data/tdx_f10",
+                    help="TDX F10 原始文本目录 (lite/full 用)")
     ap.add_argument("--include-5min", action="store_true",
                     help="包含 5min (preset 内置, 自定义需指定)")
     ap.add_argument("--no-5min", action="store_true", help="禁用 5min (覆盖 preset)")
+    ap.add_argument("--no-parquet", action="store_true",
+                    help="禁用 parquet 部分 (覆盖 preset, 只发 bin)")
     ap.add_argument("--staging", default="G:/financial-analyst/.staging_hf",
                     help="临时打包目录")
     ap.add_argument("--repo", help="HuggingFace repo_id, e.g. jesson-hh/fa-data-demo")
@@ -477,7 +746,7 @@ def main():
     stats = _stage_dataset(args.source_day,
                             args.source_5min if include_5min else None,
                             codes, staging, include_5min)
-    print(f"\n  staged in {time.time() - t0:.1f}s:")
+    print(f"\n  staged bin in {time.time() - t0:.1f}s:")
     print(f"    day:  {stats['day_codes']} codes, {stats['day_files']} bin files, "
           f"{stats['day_bytes']/1e9:.2f} GB")
     if include_5min:
@@ -485,6 +754,40 @@ def main():
               f"{stats['5min_bytes']/1e9:.2f} GB")
     if stats["skipped"]:
         print(f"    skipped {len(stats['skipped'])} codes (not in source instruments)")
+
+    # 3b. parquet (preset 内置 white-list, 可 --no-parquet 关掉)
+    stats["parquet_files"] = 0
+    stats["parquet_bytes"] = 0
+    stats["tdx_zip_files"] = 0
+    stats["tdx_zip_bytes"] = 0
+    if args.no_parquet:
+        print("  parquet: skipped (--no-parquet)")
+    elif args.preset:
+        preset = PRESETS[args.preset]
+        pq_items = preset.get("parquet_include", [])
+        if pq_items:
+            t1 = time.time()
+            pq_stats = _stage_parquet(args.source_parquet, pq_items, staging)
+            stats["parquet_files"] = pq_stats["parquet_files"]
+            stats["parquet_bytes"] = pq_stats["parquet_bytes"]
+            print(f"  staged parquet in {time.time() - t1:.1f}s: "
+                  f"{pq_stats['parquet_files']} files, {pq_stats['parquet_bytes']/1e6:.1f} MB")
+            if pq_stats["skipped"]:
+                print(f"    skipped (missing): {pq_stats['skipped']}")
+        if preset.get("tdx_finance_zip"):
+            t2 = time.time()
+            tx_stats = _stage_tdx_finance(args.source_tdx_finance, staging)
+            stats["tdx_zip_files"] = tx_stats["tdx_zip_files"]
+            stats["tdx_zip_bytes"] = tx_stats["tdx_zip_bytes"]
+            print(f"  staged tdx_finance in {time.time() - t2:.1f}s: "
+                  f"{tx_stats['tdx_zip_files']} zips, {tx_stats['tdx_zip_bytes']/1e6:.1f} MB")
+        if preset.get("tdx_f10_text"):
+            t3 = time.time()
+            f10_stats = _stage_tdx_f10(args.source_tdx_f10, staging)
+            stats["tdx_f10_files"] = f10_stats["tdx_f10_files"]
+            stats["tdx_f10_bytes"] = f10_stats["tdx_f10_bytes"]
+            print(f"  staged tdx_f10 text in {time.time() - t3:.1f}s: "
+                  f"{f10_stats['tdx_f10_files']} files, {f10_stats['tdx_f10_bytes']/1e6:.1f} MB")
 
     # 4. dataset card
     day_cal = load_calendar(args.source_day, freq="day")
