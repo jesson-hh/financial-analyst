@@ -1,0 +1,93 @@
+name: 🐛 Bug Report / Bug 报告
+description: Report a bug in financial-analyst / 报告 financial-analyst 的 bug
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! 中英文都接受 (English / 中文 both accepted).
+
+  - type: input
+    id: version
+    attributes:
+      label: financial-analyst version
+      description: "Run `pip show financial-analyst | grep Version` or `financial-analyst --version`"
+      placeholder: "e.g. 1.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Install method / 安装方式
+      options:
+        - pip install (PyPI)
+        - Docker
+        - Source (git clone + pip install -e .)
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: "3.11.5 / 3.12.0 / 3.13.0"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS / 操作系统
+      placeholder: "Windows 11 / Ubuntu 24.04 / macOS 14"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description / 描述
+      description: What happened? / 发生了什么?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce / 复现步骤
+      placeholder: |
+        1. Run `financial-analyst report SH600519 --asof 2026-05-15`
+        2. ...
+        3. See error
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior / 期望行为
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual output / 实际输出 (含完整 traceback)
+      render: shell
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope / 涉及范围
+      options:
+        - label: Sub-agent (Tier 1/2/3/4 or market-level)
+        - label: LLM routing (qwen / deepseek / anthropic / openai)
+        - label: Data layer (tushare / pytdx / tencent / xueqiu / opencli)
+        - label: CLI / TUI
+        - label: MCP server
+        - label: Docker / packaging
+        - label: Documentation only

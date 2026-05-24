@@ -1,5 +1,45 @@
 # Changelog
 
+All notable changes to this project follow [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning 2.0.0](https://semver.org/).
+
+## [1.0.0] — 2026-05-25  · **First public release**
+
+> **Lineage**: This is the **first publicly released version** of the project formerly known as `financial-analyst` (internal `v1.9.x` preview series). All features from internal `v1.9.7` are at GA quality and shipped as `1.0.0`. The internal versioning is preserved in the [Pre-1.0 history (internal preview)](#pre-10-history-internal-preview) appendix below.
+>
+> **Why 1.0.0 < 1.9.7?** This is a public stable baseline, not a regression. PyPI project was wiped and re-registered to establish a clean public versioning baseline. See [VERSIONING.md](VERSIONING.md) for the LTS policy going forward.
+
+### Highlights of 1.0.0 (vs internal v1.9.7)
+
+- **25 sub-agents** across 4 trust tiers + market-level swarms (stock-deep-dive / morning-brief / overseas-radar / mainline-radar / intraday-review / dream).
+- **Multi-provider LLM routing** with `network_profile` (domestic / intl_clash / intl_system) — qwen direct, deepseek + openai via Clash + verify=False MITM.
+- **Quote fallback chain** (tencent → xueqiu) for production resilience.
+- **HF dataset bundles** (demo 155MB / lite ~3GB / full ~14GB) — `fa init` auto-pulls.
+- **712 tests passing**, full Apache-2.0, bilingual README (zh/en).
+
+### Initial release stability commitments
+
+- **Public API** in `financial_analyst.agent.*`, `financial_analyst.llm.*`, `financial_analyst.data.*` is now under SemVer.
+- **Breaking changes** require a major version bump (2.0). 1.x guaranteed backward-compatible.
+- See [VERSIONING.md](VERSIONING.md) for N-2 LTS support (current + 2 prior minors).
+
+### Migration from internal `financial-analyst` v1.9.x
+
+```bash
+# Old (internal preview, will fail after PyPI delete on 2026-05-25):
+pip install financial-analyst==1.9.7
+
+# New (public v1.0.0):
+pip install financial-analyst==1.0.0
+```
+
+The Python import path is unchanged (`import financial_analyst`). All 25 sub-agents, CLI commands, MCP server, and swarm YAMLs are 100% compatible.
+
+---
+
+## Pre-1.0 history (internal preview)
+
+> The following entries are from the internal `v1.9.x` development series, preserved for transparency. **They predate the public release**. Internal versioning followed an inverted scheme (`1.9.x` ascending) before being collapsed to public `1.0.0`.
+
 ## v1.9.7 — 2026-05-24 (晚)
 
 ### Added — overseas-radar swarm + morning-brief v2 (国际市场传导)

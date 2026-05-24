@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+title: "financial-analyst: A-share Single-stock Deep-dive Multi-agent Research Workstation"
+message: "If you use this software in your research, please cite it as below."
+type: software
+authors:
+  - given-names: "Jesson"
+    family-names: "Hu"
+    email: xuyi1030@proton.me
+    orcid: ""
+repository-code: "https://github.com/jesson-hh/financial-analyst"
+url: "https://github.com/jesson-hh/financial-analyst"
+license: Apache-2.0
+version: "1.0.0"
+date-released: "2026-05-25"
+keywords:
+  - "A-share"
+  - "Chinese stocks"
+  - "multi-agent"
+  - "LLM"
+  - "quantitative-finance"
+  - "research-workstation"
+  - "Qlib"
+abstract: >-
+  financial-analyst is a 14-tier-based multi-agent research workstation for
+  A-share (Chinese stock market) single-stock deep-dive analysis. It combines
+  25 specialized sub-agents (data fetchers, analysts, decision-makers,
+  post-mortem introspector) with pluggable memory, FTS5-backed retrieval,
+  multi-LLM provider routing (qwen / deepseek / openai / anthropic), and
+  3-tier trust isolation for handling untrusted news / F10 sources.

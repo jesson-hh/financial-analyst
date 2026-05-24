@@ -4,13 +4,16 @@
 
 [![PyPI](https://img.shields.io/pypi/v/financial-analyst.svg)](https://pypi.org/project/financial-analyst/)
 [![Python](https://img.shields.io/pypi/pyversions/financial-analyst.svg)](https://pypi.org/project/financial-analyst/)
-[![tests](https://img.shields.io/badge/tests-705_passed-brightgreen)](https://github.com/jesson-hh/financial-analyst/actions)
+[![tests](https://img.shields.io/badge/tests-712_passed-brightgreen)](https://github.com/jesson-hh/financial-analyst/actions)
 [![license](https://img.shields.io/badge/license-Apache_2.0-green)](LICENSE)
-[![status](https://img.shields.io/badge/status-stable_1.9.6-success)](https://github.com/jesson-hh/financial-analyst/releases)
+[![status](https://img.shields.io/badge/release-v1.0.0-success)](https://github.com/jesson-hh/financial-analyst/releases)
 [![alphas](https://img.shields.io/badge/alphas-440-blue)](docs/journey.md)
 [![dataset](https://img.shields.io/badge/data-HF_Hub-yellow)](https://huggingface.co/yifishbossman)
+[![agents](https://img.shields.io/badge/agents-25-blueviolet)](docs/architecture/14_agents.md)
 
 **A 股个股深度研究 · 多 Agent 工作站.**
+
+> **🎉 v1.0.0 — 首次公开发布** (2026-05-25). 经过内部 `v1.9.x` 预览迭代, 这是项目首个公开稳定版. 历史见 [CHANGELOG.md](CHANGELOG.md#100--2026-05-25--first-public-release), 后续 LTS 政策见 [VERSIONING.md](VERSIONING.md).
 
 📖 第一次来? 推荐先读 [构建历程与架构总览](docs/journey.md) (中英双语) — 从空仓库到 440 因子 + 21 个 sub-agent 的两周复盘.
 

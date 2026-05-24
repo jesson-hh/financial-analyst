@@ -1,0 +1,107 @@
+name: PyPI Release (OIDC)
+
+# 触发: 推 v*.*.* tag (例 v1.0.0)
+# 自动: build sdist+wheel → PyPI publish (OIDC, 无 API token) → GitHub Release 草稿
+#
+# 前置 (一次性配置):
+# PyPI Settings → Publishing → Add Trusted Publisher:
+#   - Publisher: GitHub
+#   - Owner: jesson-hh
+#   - Repository: financial-analyst
+#   - Workflow: pypi-release.yml
+#   - Environment: pypi
+#
+# Tauri 桌面包 build 走另一个 workflow (release.yml), 跟 PyPI 解耦.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write     # 创建 GitHub Release
+  id-token: write     # OIDC token 给 PyPI
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build
+        run: python -m pip install --upgrade pip build
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Inspect dist/
+        run: ls -lh dist/
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/
+
+  publish:
+    name: Publish to PyPI (OIDC)
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/financial-analyst/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/
+
+      - name: Publish to PyPI via OIDC
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # No api-token needed — Trusted Publisher 走 OIDC short-lived token
+
+  github-release:
+    name: Create GitHub Release (draft)
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/
+
+      - name: Extract CHANGELOG for this tag
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" || $0 ~ "^## v" ver { found=1; print; next }
+            found && /^## [\[v]/ { exit }
+            found { print }
+          ' CHANGELOG.md > release_notes.md
+          echo "--- release_notes.md ---"
+          cat release_notes.md
+
+      - name: Create draft GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          files: dist/*
+          draft: true       # 草稿, 人工 review 后 publish
+          prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
+          generate_release_notes: false
+          name: ${{ github.ref_name }}

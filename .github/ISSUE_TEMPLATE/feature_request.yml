@@ -1,0 +1,39 @@
+name: 💡 Feature Request / 功能建议
+description: Suggest a new feature / 建议新功能
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / 问题
+      description: What pain point does this solve? / 解决什么痛点?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution / 建议方案
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered / 考虑过的替代方案
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope / 涉及范围
+      options:
+        - New sub-agent / 新 agent
+        - New LLM provider / 新 LLM 厂商
+        - New data source / 新数据源
+        - New swarm preset / 新 swarm 预设
+        - CLI / TUI enhancement
+        - MCP server
+        - Documentation
+        - Other
+    validations:
+      required: true

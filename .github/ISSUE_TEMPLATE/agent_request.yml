@@ -1,0 +1,71 @@
+name: 🤖 New Sub-Agent Request / 新 Sub-Agent 需求
+description: Request a new sub-agent / 请求新增一个 sub-agent
+labels: ["agent-request", "enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to request a new sub-agent (e.g. options-analyst, hk-link-analyzer, esg-screener).
+        请用此模板请求新 sub-agent (例: 期权分析 / 沪港通分析 / ESG 筛选 等).
+
+  - type: input
+    id: agent-name
+    attributes:
+      label: Proposed agent name / 建议 agent 名
+      placeholder: "options-analyst, hk-link-analyzer, etc."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: tier
+    attributes:
+      label: Tier
+      options:
+        - Tier 1 (data fetcher)
+        - Tier 2 (analyst)
+        - Tier 3 (decision)
+        - Tier 4 (post-mortem)
+        - Market-level
+        - Meta
+    validations:
+      required: true
+
+  - type: textarea
+    id: purpose
+    attributes:
+      label: Purpose / 用途
+      description: What does it do? / 这个 agent 做什么?
+    validations:
+      required: true
+
+  - type: textarea
+    id: inputs
+    attributes:
+      label: Input dependencies / 输入依赖
+      description: Which existing agents does it consume? / 消费哪些已有 agent 的输出?
+      placeholder: "e.g. quote-fetcher, news-reader, factor-computer"
+    validations:
+      required: true
+
+  - type: textarea
+    id: outputs
+    attributes:
+      label: Output schema / 输出 schema
+      description: List the key fields the agent produces / 列出 agent 输出的关键字段
+      render: yaml
+
+  - type: dropdown
+    id: needs-llm
+    attributes:
+      label: Needs LLM call? / 需要调用 LLM?
+      options:
+        - Yes
+        - No (pure Python)
+    validations:
+      required: true
+
+  - type: textarea
+    id: swarm
+    attributes:
+      label: Which swarm(s) should it join? / 该接入哪个 swarm?
+      placeholder: "stock-deep-dive / morning-brief / overseas-radar / new-swarm"

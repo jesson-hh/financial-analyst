@@ -4,13 +4,16 @@
 
 [![PyPI](https://img.shields.io/pypi/v/financial-analyst.svg)](https://pypi.org/project/financial-analyst/)
 [![Python](https://img.shields.io/pypi/pyversions/financial-analyst.svg)](https://pypi.org/project/financial-analyst/)
-[![tests](https://img.shields.io/badge/tests-705_passed-brightgreen)](https://github.com/jesson-hh/financial-analyst/actions)
+[![tests](https://img.shields.io/badge/tests-712_passed-brightgreen)](https://github.com/jesson-hh/financial-analyst/actions)
 [![license](https://img.shields.io/badge/license-Apache_2.0-green)](LICENSE)
-[![status](https://img.shields.io/badge/status-stable_1.9.6-success)](https://github.com/jesson-hh/financial-analyst/releases)
+[![status](https://img.shields.io/badge/release-v1.0.0-success)](https://github.com/jesson-hh/financial-analyst/releases)
 [![alphas](https://img.shields.io/badge/alphas-440-blue)](docs/journey.md)
 [![dataset](https://img.shields.io/badge/data-HF_Hub-yellow)](https://huggingface.co/yifishbossman)
+[![agents](https://img.shields.io/badge/agents-25-blueviolet)](docs/architecture/14_agents.md)
 
 **A-share single-stock deep-dive multi-agent research workstation.**
+
+> **🎉 v1.0.0 — First public release** (2026-05-25). Following an internal preview series (`v1.9.x`), this is the first publicly stable version. See [CHANGELOG.md](CHANGELOG.md#100--2026-05-25--first-public-release) for the lineage and [VERSIONING.md](VERSIONING.md) for the LTS policy.
 
 📖 New here? Read the [build journey & architecture overview](docs/journey.md) (中英双语 / bilingual) — a two-week retrospective from empty repo to 440 alphas + 21 sub-agents.
 
