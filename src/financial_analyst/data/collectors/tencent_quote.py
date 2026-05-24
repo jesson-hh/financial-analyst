@@ -65,9 +65,8 @@ class TencentQuoteCollector:
     def fetch(self, codes: List[str], timeout: float = 6.0) -> Dict[str, Dict[str, Any]]:
         if not codes:
             return {}
-        # bypass any system proxy (project convention — Clash intercepts)
-        os.environ.setdefault("NO_PROXY", "*")
-        os.environ.setdefault("no_proxy", "*")
+        # httpx.Client(trust_env=False) 已经局部隔离 — 不要再 setdefault 全局
+        # NO_PROXY 污染 (会影响 huggingface / litellm 海外路径)
         import httpx
         tc = [_to_tencent(c) for c in codes]
         url = _TENCENT_BASE + ",".join(tc)

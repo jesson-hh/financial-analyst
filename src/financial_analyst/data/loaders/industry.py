@@ -82,15 +82,15 @@ class IndustryLoader:
 
         Returns the number of codes written.
         """
-        import requests
+        from financial_analyst.data.net import domestic_session
         token = os.environ.get("TUSHARE_TOKEN", "")
         if not token:
             raise RuntimeError(
                 "TUSHARE_TOKEN not set. Add it to .env or env var first."
             )
 
-        # Use the raw HTTP endpoint that the existing TushareLoader uses (the
-        # round-robin in the official `tushare` package times out on Windows).
+        # net.py.domestic_session 局部 trust_env=False, 绕开 Clash fake-ip
+        # 接管 api.tushare.pro. 不再依赖全局 NO_PROXY 污染.
         url = "http://api.tushare.pro"
         payload = {
             "api_name": "stock_basic",
@@ -101,7 +101,8 @@ class IndustryLoader:
             },
             "fields": "ts_code,name,industry,market,list_date",
         }
-        resp = requests.post(url, json=payload, timeout=60)
+        sess = domestic_session()
+        resp = sess.post(url, json=payload, timeout=60)
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 0:

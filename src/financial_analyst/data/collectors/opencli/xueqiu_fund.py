@@ -10,6 +10,7 @@ our ``run_opencli`` wrapper. Catch it at the call site to give a clean
 from __future__ import annotations
 from typing import Any, Dict, List
 from financial_analyst.data.collectors.opencli.runner import run_opencli
+from financial_analyst.data.net import rate_limited
 
 
 class XueqiuFundSnapshotCollector:
@@ -21,6 +22,7 @@ class XueqiuFundSnapshotCollector:
     let that method handle the OpenAPI-style camelCase fields.
     """
 
+    @rate_limited("xueqiu", cache_key=lambda self: "fund_snap")
     def fetch(self) -> List[Dict[str, Any]]:
         out = run_opencli("xueqiu", "fund-snapshot", timeout=60)
         # opencli sometimes wraps in {accounts: [...]} on this endpoint;
@@ -38,6 +40,7 @@ class XueqiuFundHoldingsCollector:
     ``account`` filters to one sub-account (by name or id); empty = all.
     """
 
+    @rate_limited("xueqiu", cache_key=lambda self, account="": f"fund_hold:{account}")
     def fetch(self, account: str = "") -> List[Dict[str, Any]]:
         args = ["xueqiu", "fund-holdings"]
         if account:

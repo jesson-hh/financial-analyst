@@ -14,11 +14,13 @@ from datetime import datetime
 from typing import List
 from financial_analyst.data.collectors.opencli.runner import run_opencli
 from financial_analyst.data.collectors.opencli.xueqiu_feed import _extract_mentions
+from financial_analyst.data.net import rate_limited
 
 
 class XueqiuHotPostsCollector:
     """Pull xueqiu site-wide hot posts. Returns shape ready for upsert_news."""
 
+    @rate_limited("xueqiu", cache_key=lambda self, limit=20: f"hot_posts:{int(limit)}")
     def fetch(self, limit: int = 20) -> List[dict]:
         raw = run_opencli(
             "xueqiu", "hot",

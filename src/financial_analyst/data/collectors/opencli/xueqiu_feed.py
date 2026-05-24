@@ -13,6 +13,7 @@ import re
 from datetime import datetime
 from typing import List
 from financial_analyst.data.collectors.opencli.runner import run_opencli
+from financial_analyst.data.net import rate_limited
 
 
 # Match Chinese-name + code cashtags, e.g. "$贵州茅台(SH600519)$" or
@@ -63,6 +64,7 @@ class XueqiuFeedCollector:
     in the opencli output.
     """
 
+    @rate_limited("xueqiu", cache_key=lambda self, limit=20, page=1: f"feed:{int(limit)}:{int(page)}")
     def fetch(self, limit: int = 20, page: int = 1) -> List[dict]:
         raw = run_opencli(
             "xueqiu", "feed",

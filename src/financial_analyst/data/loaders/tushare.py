@@ -3,9 +3,9 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional
 import pandas as pd
-import requests
 from financial_analyst.data.cache import ParquetCache
 from financial_analyst.data.loaders.base import BaseLoader
+from financial_analyst.data.net import domestic_session, rate_limited
 
 TUSHARE_URL = "http://api.tushare.pro"
 
@@ -29,8 +29,8 @@ class TushareLoader(BaseLoader):
         cache_ttl: int = 86400,
         enable_cache: bool = True,
     ) -> None:
-        os.environ["NO_PROXY"] = "*"
-        os.environ["no_proxy"] = "*"
+        # 不再设全局 NO_PROXY=* (会污染 huggingface/litellm 海外路径).
+        # _query 改用 net.py.domestic_session(trust_env=False) 局部隔离.
         token = token or os.environ.get("TUSHARE_TOKEN")
         if not token:
             raise ValueError("TUSHARE_TOKEN missing (env or constructor)")
@@ -47,11 +47,19 @@ class TushareLoader(BaseLoader):
         else:
             self._cache = None
 
+    @rate_limited(
+        "tushare",
+        cache_key=lambda self, api_name, fields="", **params:
+        (api_name, fields, tuple(sorted(params.items()))),
+    )
     def _query(self, api_name: str, fields: str = "", **params) -> pd.DataFrame:
+        # Tushare token 自有 200次/分限速; @rate_limited 客户端再限一遍防 burst.
+        # domestic_session 局部 trust_env=False, 绕开 Clash fake-ip 接管.
         req = {"api_name": api_name, "token": self._token, "params": params}
         if fields:
             req["fields"] = fields
-        r = requests.post(self._url, json=req, timeout=self._timeout)
+        sess = domestic_session()
+        r = sess.post(self._url, json=req, timeout=self._timeout)
         d = r.json()
         if d.get("code") != 0:
             raise Exception(f"tushare {api_name} failed: {d.get('msg', '')}")

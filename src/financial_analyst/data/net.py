@@ -240,6 +240,17 @@ def rate_limited(source_name: str,
     return deco
 
 
+def _clear_all_caches() -> None:
+    """Test helper: drop the per-source response cache.
+
+    Called by conftest autouse fixture between tests so a cached value
+    from one test doesn't leak into another (when both call the same
+    collector with the same args)."""
+    for src in _SOURCES.values():
+        with src._cache_lock:
+            src._cache.clear()
+
+
 def source_stats() -> Dict[str, Dict[str, Any]]:
     """所有已注册 source 的累计统计. 给 /diag 序列化用."""
     now = time.time()

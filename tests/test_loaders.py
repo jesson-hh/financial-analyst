@@ -25,6 +25,17 @@ def test_tushare_loader_supports_a_share():
     assert loader.supports("us") is False
 
 
+def _mock_tushare_session(fake_response):
+    """v1.9.6: tushare 改走 net.py.domestic_session() 而非裸 requests.post.
+    Mock the session factory so HTTP never actually fires."""
+    fake_session = MagicMock()
+    fake_session.post.return_value = MagicMock(json=lambda: fake_response)
+    return patch(
+        "financial_analyst.data.loaders.tushare.domestic_session",
+        return_value=fake_session,
+    ), fake_session
+
+
 def test_tushare_fetch_quote_calls_pro_api():
     loader = TushareLoader(token="fake", enable_cache=False)
     fake_response = {
@@ -37,12 +48,12 @@ def test_tushare_fetch_quote_calls_pro_api():
             ],
         },
     }
-    with patch("financial_analyst.data.loaders.tushare.requests.post") as mock_post:
-        mock_post.return_value = MagicMock(json=lambda: fake_response)
+    cm, fake_session = _mock_tushare_session(fake_response)
+    with cm:
         df = loader.fetch_quote("SH600519", "2026-05-15", "2026-05-16")
-        mock_post.assert_called_once()
+        fake_session.post.assert_called_once()
         # Verify the request payload uses the daily api_name + ts_code conversion
-        sent = mock_post.call_args.kwargs["json"]
+        sent = fake_session.post.call_args.kwargs["json"]
         assert sent["api_name"] == "daily"
         assert sent["params"]["ts_code"] == "600519.SH"
         assert sent["params"]["start_date"] == "20260515"
@@ -61,12 +72,12 @@ def test_tushare_cache_hit_skips_api(tmp_path):
             "items": [["20260515", 1700.0, 1720.0, 1690.0, 1715.0, 10000, 17150000.0]],
         },
     }
-    with patch("financial_analyst.data.loaders.tushare.requests.post") as mock_post:
-        mock_post.return_value = MagicMock(json=lambda: fake_response)
+    cm, fake_session = _mock_tushare_session(fake_response)
+    with cm:
         df1 = loader.fetch_quote("SH600519", "2026-05-01", "2026-05-15")
-        assert mock_post.call_count == 1
+        assert fake_session.post.call_count == 1
         df2 = loader.fetch_quote("SH600519", "2026-05-01", "2026-05-15")
-        assert mock_post.call_count == 1   # cache hit — no second network call
+        assert fake_session.post.call_count == 1   # cache hit — no second network call
         assert len(df2) == 1
         assert df2["close"].iloc[0] == pytest.approx(1715.0)
 
@@ -81,11 +92,11 @@ def test_tushare_cache_disabled_always_calls_api(tmp_path):
             "items": [["20260515", 100.0]],
         },
     }
-    with patch("financial_analyst.data.loaders.tushare.requests.post") as mock_post:
-        mock_post.return_value = MagicMock(json=lambda: fake_response)
+    cm, fake_session = _mock_tushare_session(fake_response)
+    with cm:
         loader.fetch_quote("SH600519", "2026-05-01", "2026-05-15")
         loader.fetch_quote("SH600519", "2026-05-01", "2026-05-15")
-        assert mock_post.call_count == 2
+        assert fake_session.post.call_count == 2
 
 
 def test_tushare_daily_basic_cache_hit(tmp_path):
@@ -99,9 +110,9 @@ def test_tushare_daily_basic_cache_hit(tmp_path):
             "items": [["600519.SH", "20260515", 30.0, 8.0, 10.0, 1.5, 2e6, 1.5e6, 2.5]],
         },
     }
-    with patch("financial_analyst.data.loaders.tushare.requests.post") as mock_post:
-        mock_post.return_value = MagicMock(json=lambda: fake_response)
+    cm, fake_session = _mock_tushare_session(fake_response)
+    with cm:
         loader.fetch_daily_basic("SH600519", "2026-05-01", "2026-05-15")
-        assert mock_post.call_count == 1
+        assert fake_session.post.call_count == 1
         loader.fetch_daily_basic("SH600519", "2026-05-01", "2026-05-15")
-        assert mock_post.call_count == 1   # cache hit
+        assert fake_session.post.call_count == 1   # cache hit

@@ -2,6 +2,7 @@
 from __future__ import annotations
 from typing import List
 from financial_analyst.data.collectors.opencli.runner import run_opencli
+from financial_analyst.data.net import rate_limited
 
 
 class XueqiuWatchlistCollector:
@@ -13,6 +14,7 @@ class XueqiuWatchlistCollector:
     or any positive integer (user-created group, from ``XueqiuGroupsCollector``).
     """
 
+    @rate_limited("xueqiu", cache_key=lambda self, pid="-1", limit=100: f"watch:{str(pid)}:{int(limit)}")
     def fetch(self, pid: str = "-1", limit: int = 100) -> List[dict]:
         return run_opencli(
             "xueqiu", "watchlist",
@@ -26,5 +28,6 @@ class XueqiuGroupsCollector:
     """Pull the user's group structure: ``list[{pid, name, count}]``.
     Builtin pids: -1 全部 / -4 模拟 / -5 沪深 / -6 美股 / -7 港股 / -10 实盘."""
 
+    @rate_limited("xueqiu", cache_key=lambda self: "groups")
     def fetch(self) -> List[dict]:
         return run_opencli("xueqiu", "groups", timeout=60) or []

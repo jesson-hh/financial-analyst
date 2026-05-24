@@ -11,12 +11,14 @@ which reads end-of-day Tushare/Qlib data.
 from __future__ import annotations
 from typing import Any, Dict, Optional
 from financial_analyst.data.collectors.opencli.runner import run_opencli
+from financial_analyst.data.net import rate_limited
 
 
 class XueqiuStockCollector:
     """Pull one stock's real-time quote. Returns a dict (or None if the
     symbol isn't found / market data unavailable)."""
 
+    @rate_limited("xueqiu", cache_key=lambda self, code: f"stock:{str(code).upper()}")
     def fetch(self, code: str) -> Optional[Dict[str, Any]]:
         raw = run_opencli("xueqiu", "stock", code, timeout=45)
         # opencli returns a list with one element for this endpoint.

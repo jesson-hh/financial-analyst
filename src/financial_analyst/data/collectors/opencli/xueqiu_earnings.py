@@ -2,11 +2,13 @@
 from __future__ import annotations
 from typing import List
 from financial_analyst.data.collectors.opencli.runner import run_opencli
+from financial_analyst.data.net import rate_limited
 
 
 class XueqiuEarningsCollector:
     """Pull expected earnings release dates for a stock from xueqiu."""
 
+    @rate_limited("xueqiu", cache_key=lambda self, code: f"earnings:{str(code).upper()}")
     def fetch(self, code: str) -> List[dict]:
         """Returns list[{code, report_date, quarter}]."""
         short = code.replace("SH", "").replace("SZ", "").replace("BJ", "")
