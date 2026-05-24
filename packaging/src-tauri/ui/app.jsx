@@ -890,9 +890,7 @@ function LeftRail({ s, dispatch, startAgent }) {
           )}
           {alerts.map((a) => (
             <div key={a.id} className="alert-row"
-                 style={{ padding: '7px 20px', display: 'flex', alignItems: 'center', gap: 8, position: 'relative' }}
-                 onMouseEnter={(e) => { const x = e.currentTarget.querySelector('.alert-del'); if (x) x.style.opacity = 1; }}
-                 onMouseLeave={(e) => { const x = e.currentTarget.querySelector('.alert-del'); if (x) x.style.opacity = 0; }}>
+                 style={{ padding: '7px 20px', display: 'flex', alignItems: 'center', gap: 8, position: 'relative' }}>
               <span style={{ width: 6, height: 6, background: a.hot ? 'var(--yin)' : 'var(--ink-3)', flexShrink: 0, borderRadius: a.hot ? 0 : '50%' }} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div className="serif" style={{ fontSize: 12, color: 'var(--ink-1)' }}>{a.name}</div>
@@ -902,8 +900,8 @@ function LeftRail({ s, dispatch, startAgent }) {
               {s.backendUrl && (a.id || a.code) && (
                 <span className="alert-del"
                       title="删除此盯盘"
-                      style={{ opacity: 0, transition: 'opacity 0.15s', cursor: 'pointer',
-                               color: 'var(--ink-3)', fontSize: 14, marginLeft: 4, lineHeight: 1 }}
+                      style={{ cursor: 'pointer', color: 'var(--ink-3)',
+                               fontSize: 14, marginLeft: 4, lineHeight: 1, padding: '0 4px' }}
                       onClick={async (e) => {
                         e.stopPropagation();
                         if (!confirm(`删除盯盘 "${a.name || a.code}" ?`)) return;
@@ -2283,8 +2281,6 @@ function RightRail({ s, session, dispatch, startAgent }) {
           )}
           {alerts.map((a, i) => (
             <div key={a.id} className="alert-row-aside"
-                 onMouseEnter={(e) => { const x = e.currentTarget.querySelector('.alert-del-aside'); if (x) x.style.opacity = 1; }}
-                 onMouseLeave={(e) => { const x = e.currentTarget.querySelector('.alert-del-aside'); if (x) x.style.opacity = 0; }}
                  style={{ padding: '10px 0', borderTop: i ? '1px solid var(--line-soft)' : 'none', position: 'relative' }}>
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginBottom: 4 }}>
                 <span className="serif" style={{ fontSize: 12.5, color: 'var(--ink)' }}>{a.name}</span>
@@ -2294,8 +2290,8 @@ function RightRail({ s, session, dispatch, startAgent }) {
                 {s.backendUrl && (a.id || a.code) && (
                   <span className="alert-del-aside"
                         title="删除此盯盘"
-                        style={{ opacity: 0, transition: 'opacity 0.15s', cursor: 'pointer',
-                                 color: 'var(--ink-3)', fontSize: 13, marginLeft: 4, lineHeight: 1 }}
+                        style={{ cursor: 'pointer', color: 'var(--ink-3)',
+                                 fontSize: 13, marginLeft: 4, lineHeight: 1, padding: '0 4px' }}
                         onClick={async (e) => {
                           e.stopPropagation();
                           if (!confirm(`删除盯盘 "${a.name || a.code}"?`)) return;
