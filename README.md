@@ -1,11 +1,14 @@
 # Financial Analyst
 
+**English** | [中文](README_zh.md)
+
 [![PyPI](https://img.shields.io/pypi/v/financial-analyst.svg)](https://pypi.org/project/financial-analyst/)
 [![Python](https://img.shields.io/pypi/pyversions/financial-analyst.svg)](https://pypi.org/project/financial-analyst/)
-[![tests](https://img.shields.io/badge/tests-350+_passed-brightgreen)](https://github.com/jesson-hh/financial-analyst/actions)
+[![tests](https://img.shields.io/badge/tests-705_passed-brightgreen)](https://github.com/jesson-hh/financial-analyst/actions)
 [![license](https://img.shields.io/badge/license-Apache_2.0-green)](LICENSE)
-[![status](https://img.shields.io/badge/status-stable_1.4-success)](https://github.com/jesson-hh/financial-analyst/releases)
+[![status](https://img.shields.io/badge/status-stable_1.9.6-success)](https://github.com/jesson-hh/financial-analyst/releases)
 [![alphas](https://img.shields.io/badge/alphas-440-blue)](docs/journey.md)
+[![dataset](https://img.shields.io/badge/data-HF_Hub-yellow)](https://huggingface.co/yifishbossman)
 
 **A-share single-stock deep-dive multi-agent research workstation.**
 
