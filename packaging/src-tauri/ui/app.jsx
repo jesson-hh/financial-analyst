@@ -1511,14 +1511,18 @@ function ToolChain({ msg, backendUrl }) {
   const done = msg.chain.filter(c => c.status === 'done').length;
   const total = msg.chain.length;
   const elapsed = msg.chain.filter(c => c.status === 'done').reduce((s, c) => s + (c.t || 0), 0);
-  const [expanded, setExpanded] = useState(true);
+  const hasRunning = msg.chain.some(c => c.status === 'running');
+  const allDone = total > 0 && done === total;
+  // 默认 collapsed; 有 running 时展开; 全 done 后自动 collapse 不占视觉
+  const [userExpanded, setUserExpanded] = useState(null);  // null = 自动, true/false = 用户覆盖
+  const expanded = userExpanded !== null ? userExpanded : (hasRunning && !allDone);
 
   if (total === 0 && msg.kindKey === 'planning') {
     return (
       <div style={{ display: 'flex', gap: 14, animation: 'fadeIn 200ms ease-out' }}>
         <AiAvatar />
-        <div style={{ flex: 1, minWidth: 0, padding: '10px 16px', background: 'rgba(255,255,255,0.5)', border: '1px solid var(--line-soft)' }}>
-          <div className="serif" style={{ fontSize: 13, color: 'var(--ink-2)', fontStyle: 'italic' }}>
+        <div style={{ flex: 1, minWidth: 0, padding: '10px 16px' }}>
+          <div className="serif" style={{ fontSize: 13, color: 'var(--ink-3)', fontStyle: 'italic' }}>
             <span className="mono" style={{ color: 'var(--yin)', marginRight: 6 }}>⠋</span>
             研究计划生成中…
           </div>
@@ -1531,16 +1535,20 @@ function ToolChain({ msg, backendUrl }) {
     <div style={{ display: 'flex', gap: 14, animation: 'fadeIn 200ms ease-out' }}>
       <AiAvatar />
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ background: 'rgba(255,255,255,0.5)', border: '1px solid var(--line-soft)' }}>
-          <div onClick={() => setExpanded(!expanded)} style={{ padding: '10px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: expanded ? '1px solid var(--line-soft)' : 'none', cursor: 'pointer' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <span className="serif" style={{ fontSize: 13, color: 'var(--ink)', fontWeight: 500 }}>研究链 · {msg.kindLabel}</span>
-              <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>{total} 个工具 · {done} / {total} · {elapsed.toFixed(1)}s</span>
-            </div>
-            <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>{expanded ? '收起 ▴' : '展开 ▾'}</span>
+        {/* 透明背景, 无边框 — 跟用户聊天上下文融为一体 */}
+        <div>
+          <div onClick={() => setUserExpanded(!expanded)}
+               style={{ padding: '4px 0', display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer',
+                        color: 'var(--ink-3)', userSelect: 'none' }}>
+            <span className="mono" style={{ fontSize: 10, color: allDone ? 'var(--ink-3)' : 'var(--yin)' }}>
+              {expanded ? '▾' : '▸'}
+            </span>
+            <span className="mono" style={{ fontSize: 11, color: allDone ? 'var(--ink-3)' : 'var(--ink-2)' }}>
+              {allDone ? `已用 ${total} 个工具 · ${elapsed.toFixed(1)}s` : `${msg.kindLabel} · ${done}/${total} · ${elapsed.toFixed(1)}s`}
+            </span>
           </div>
           {expanded && (
-            <div style={{ padding: '4px 0' }}>
+            <div style={{ padding: '2px 0 4px', borderLeft: '1px dashed var(--line)', marginLeft: 6, paddingLeft: 10 }}>
               {msg.chain.map((tl, i) => (
                 <ToolRow key={i} i={i + 1} {...tl} last={i === msg.chain.length - 1} backendUrl={backendUrl} />
               ))}
@@ -2032,16 +2040,17 @@ function Composer({ s, context, dispatch, startAgent, onCmdK }) {
       <div style={{ border: '1px solid var(--ink-2)', background: 'var(--paper)' }}>
         <div style={{ padding: '6px 14px', borderBottom: '1px dashed var(--line)', display: 'flex', alignItems: 'center', gap: 10 }}>
           <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>提示</span>
-          {['/ 命令', '@ 引用此股', '⌗ 板块', '↑ 上一题', '⌘K 工具面板'].map((x, i) => (
+          {['/ 命令', '@ 引用此股'].map((x, i) => (
             <span key={i} className="mono" style={{ fontSize: 10, color: 'var(--ink-2)' }}>{x}</span>
           ))}
           <span style={{ flex: 1 }} />
-          <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>
-            {s.status === 'idle' ? '盘中 · 优先选用实时工具'
-              : s.status === 'streaming' ? '生成中 · 回车进入排队'
-              : s.status === 'tool-running' ? '工具运行中 · 回车进入排队'
-              : '等待…'}
-          </span>
+          {s.status !== 'idle' && (
+            <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>
+              {s.status === 'streaming' ? '生成中 · 回车进入排队'
+                : s.status === 'tool-running' ? '工具运行中 · 回车进入排队'
+                : '等待…'}
+            </span>
+          )}
         </div>
         <div style={{ padding: '10px 14px 8px', display: 'flex', alignItems: 'flex-start', gap: 8 }}>
           <span className="serif" style={{ fontSize: 14, color: 'var(--ink-2)', marginTop: 1 }}>❯</span>
@@ -2058,9 +2067,12 @@ function Composer({ s, context, dispatch, startAgent, onCmdK }) {
             ))}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>
-              {s.useRealLLM ? <span style={{ color: 'var(--yin)' }}>● Claude 实时</span> : `本地 · ${s.model}`}
-            </span>
+            {/* 仅 mock 模式才警示, 真模式 (useRealLLM=true) 不占位 */}
+            {!s.useRealLLM && (
+              <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>
+                本地 mock · {s.model}
+              </span>
+            )}
             <button onClick={send} style={{ background: 'var(--ink)', color: 'var(--paper)', border: 'none', padding: '5px 14px', fontFamily: 'var(--serif)', fontSize: 12, letterSpacing: '0.1em', cursor: 'pointer' }}>
               {s.status === 'idle' ? '发送 ↵' : '排队 ↵'}
             </button>
