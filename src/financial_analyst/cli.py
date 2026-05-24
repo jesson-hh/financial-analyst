@@ -703,6 +703,43 @@ async def _run_brief(asof, universe, universe_file, max_scan, out_dir):
                 typer.echo(f"{n}: {r.error}")
 
 
+@app.command(name="overseas-radar")
+def overseas_radar(
+    asof: str = typer.Option(None, "--asof", help="As-of date YYYY-MM-DD (default: today)"),
+    out_dir: Path = typer.Option(Path("out"), "--out", help="Output directory"),
+):
+    """v1.9.7: International market + global news transmission radar.
+
+    Pulls overnight US/HK indices via Tencent global, judges risk_tone,
+    aggregates global news impact, fuses with today's A-share scanner,
+    writes overseas_radar_<date>.md with actionable signals.
+    """
+    asyncio.run(_run_overseas_radar(asof=asof, out_dir=out_dir))
+
+
+async def _run_overseas_radar(asof, out_dir):
+    from financial_analyst.agent.orchestrator import Orchestrator
+    from financial_analyst.swarm import load_preset
+    from financial_analyst.tui import _ensure_registered
+
+    _ensure_registered()
+    nodes = load_preset("overseas-radar", memory_root=Path("memories"))
+    asof = asof or pd.Timestamp.today().strftime("%Y-%m-%d")
+    orch = Orchestrator(nodes)
+    typer.echo(f"Running overseas-radar for {asof}...")
+    results = await orch.run({"asof_date": asof, "out_dir": str(out_dir)})
+    impact = results.get("macro-impact-analyzer")
+    if impact and impact.ok:
+        typer.echo(f"Report: {impact.output.output_md_path}")
+        typer.echo(f"Headline: {impact.output.headline}")
+        for s in impact.output.actionable_signals[:3]:
+            typer.echo(f"  · {s.signal} ({s.confidence})")
+    else:
+        for n, r in results.items():
+            if not r.ok:
+                typer.echo(f"{n}: {r.error}")
+
+
 @app.command()
 def intraday(
     codes: str = typer.Option("", "--codes", help="Comma-separated codes (or empty to auto-detect from recent reports)"),

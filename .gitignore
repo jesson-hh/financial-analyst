@@ -19,6 +19,10 @@ scripts/probe_*.py
 transcript_repro.txt
 # agent-self introspector proposals — local review only, not source
 memories/_pending_introspections/
+# dream-loop aggregator staging — human reviews before promoting to source memory
+memories/_proposed/
+# user-generated /lesson entries — personal, not source
+memories/_shared/conversation_lessons.md
 # opencli plugin deps — installed locally via `opencli plugin install`,
 # never committed (only the .js adapters + manifest are source).
 opencli-plugin-ths-extra/node_modules/
@@ -29,6 +33,15 @@ news/**/*.pdf
 kb/**/*.parquet
 .venv/
 venv/
+
+# IDE / OS junk
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
 
 # Agent-runtime instructions — dev-only, kept locally if needed
 CLAUDE.md

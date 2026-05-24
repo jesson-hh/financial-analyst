@@ -954,6 +954,27 @@ def _tool_brief() -> ToolResult:
     return ToolResult(proc.stdout[-3000:])
 
 
+def _tool_overseas_radar() -> ToolResult:
+    """v1.9.7: 国际市场 + 海外新闻传导雷达.
+
+    3-agent swarm: overseas-market-scanner (隔夜美股/港股/VIX) +
+    global-news-aggregator (海外格局判读) + macro-impact-analyzer
+    (融合 + 写 actionable signals).
+    """
+    try:
+        proc = subprocess.run(
+            ["financial-analyst", "overseas-radar"],
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=600,
+            cwd=str(_project_root()),
+        )
+    except subprocess.TimeoutExpired:
+        return ToolResult("overseas-radar timed out.", is_error=True)
+    if proc.returncode != 0:
+        return ToolResult(f"overseas-radar failed: {proc.stderr[-500:]}", is_error=True)
+    return ToolResult(proc.stdout[-3000:])
+
+
 def _tool_ask_quote(code: str) -> ToolResult:
     """Quick price/PE/PB lookup for a stock (no full report)."""
     from financial_analyst.data.loader_factory import get_default_loader
@@ -1688,6 +1709,17 @@ TOOL_REGISTRY: List[Tool] = [
         description="Generate the pre-market morning brief (overnight moves + day's watchlist).",
         input_schema={"type": "object", "properties": {}},
         run=_tool_brief,
+        cost_hint="seconds",
+    ),
+    Tool(
+        name="overseas_radar",
+        description=(
+            "v1.9.7: 国际市场 + 海外新闻传导雷达. 拉隔夜美股/港股/VIX, "
+            "判读 risk_tone (risk_on/off/mixed), 写明日 A 股 actionable signals. "
+            "用户问海外 / 美股影响 / 港股 / 全球宏观 时调."
+        ),
+        input_schema={"type": "object", "properties": {}},
+        run=_tool_overseas_radar,
         cost_hint="seconds",
     ),
     Tool(
