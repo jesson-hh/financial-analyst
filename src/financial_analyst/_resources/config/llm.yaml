@@ -5,16 +5,22 @@ providers:
   qwen:
     api_key_env: DASHSCOPE_API_KEY
     base_url: https://coding.dashscope.aliyuncs.com/v1
+    network_profile: domestic   # aliyun, 必直连 (Clash fake-ip 接管会走海外节点)
     models: [qwen3.5-plus, qwen3-max, qwen3.5-flash, qwen3-coder-plus]
   anthropic:
     api_key_env: ANTHROPIC_API_KEY
+    network_profile: intl_clash   # 走 litellm fallback, 这字段仅占位
     models: [claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5]
   openai:
     api_key_env: OPENAI_API_KEY
+    base_url: https://api.openai.com/v1
+    network_profile: intl_clash
     models: [gpt-4o, gpt-4-turbo]
   deepseek:
     api_key_env: DEEPSEEK_API_KEY
-    models: [deepseek-chat]
+    base_url: https://api.deepseek.com/v1
+    network_profile: intl_clash   # Clash fake-ip + MITM, 必经 proxy + verify=False
+    models: [deepseek-chat, deepseek-reasoner]
 
 agent_overrides:
   report-writer:

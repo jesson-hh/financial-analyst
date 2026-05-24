@@ -109,7 +109,10 @@ from financial_analyst.llm.client import LLMClient
 
 
 def _client():
-    return LLMClient(provider="qwen", model="qwen3.5-plus", config={"providers": {}})
+    # v1.9.6: anthropic 是当前仅存的 litellm fallback provider, 这俩测试 mock
+    # acompletion 函数. qwen/deepseek/openai/openrouter 都改走 AsyncOpenAI
+    # 直连了 (绕 litellm), 用 qwen mock acompletion 不生效.
+    return LLMClient(provider="anthropic", model="claude-opus-4-7", config={"providers": {}})
 
 
 @pytest.mark.asyncio
