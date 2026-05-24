@@ -53,6 +53,14 @@ class LessonReq(BaseModel):
     text: str
 
 
+class AlertAddReq(BaseModel):
+    """添加盯盘规则. 来自 UI 侧边栏 "+ 添加" 按钮."""
+    code: str
+    kind: str = "price_below"   # price_below / price_above / pct_above / pct_below
+    threshold: float
+    note: str = ""
+
+
 class ConvReq(BaseModel):
     """A conversation to persist. Mirrors the frontend session shape;
     extra fields are allowed and round-tripped verbatim."""
@@ -650,6 +658,36 @@ def build_app():
              "note": r.note, "desc": r.describe(), "last_fired": r.last_fired}
             for r in store.list()
         ]})
+
+    @app.post("/alerts")
+    async def alert_add(body: AlertAddReq):
+        """添加一条盯盘规则 (UI 侧边栏 "+ 添加" 按钮调).
+
+        kind: ``price_below`` / ``price_above`` / ``pct_above`` / ``pct_below``.
+        重复同 (code, kind) 会**更新** threshold (AlertStore.add 内置 upsert).
+        """
+        from financial_analyst.buddy.alerts import AlertStore, VALID_KINDS
+        from financial_analyst.buddy.tools import normalize_code
+
+        if body.kind not in VALID_KINDS:
+            return JSONResponse(
+                {"ok": False, "reason": f"kind 必须是 {list(VALID_KINDS)}"},
+                status_code=400,
+            )
+        try:
+            code = normalize_code(body.code)
+            store = AlertStore()
+            rule = store.add(code, body.kind, body.threshold, note=body.note)
+            return JSONResponse({"ok": True, "rule": {
+                "id": rule.id, "code": rule.code, "kind": rule.kind,
+                "threshold": rule.threshold, "note": rule.note,
+                "desc": rule.describe(),
+            }})
+        except Exception as exc:
+            return JSONResponse(
+                {"ok": False, "reason": f"{type(exc).__name__}: {exc}"},
+                status_code=400,
+            )
 
     @app.delete("/alerts/{rule_id:path}")
     async def alert_remove(rule_id: str):

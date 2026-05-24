@@ -2234,18 +2234,74 @@ function RightRail({ s, session, dispatch, startAgent }) {
         <div style={{ padding: '8px 18px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
             <span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', letterSpacing: '0.2em' }}>活跃规则 · {alerts.length}{s.backendUrl ? ' · live' : ' · mock'}</span>
-            <span className="mono" style={{ fontSize: 10, color: 'var(--ink-2)', cursor: 'pointer' }}>+ 添加</span>
+            <span className="mono"
+              title="添加一条盯盘规则"
+              style={{ fontSize: 10, color: 'var(--yin)', cursor: 'pointer', fontWeight: 500 }}
+              onClick={async () => {
+                if (!s.backendUrl) { alert('未连后端 (mock 模式)'); return; }
+                const codeRaw = prompt('股票代码 (e.g. SH600519 或 600519):');
+                if (!codeRaw) return;
+                const kindLabel = prompt('类型? 输 1=跌破价 / 2=涨破价 / 3=涨幅% / 4=跌幅%', '1');
+                const kindMap = { '1': 'price_below', '2': 'price_above', '3': 'pct_above', '4': 'pct_below' };
+                const kind = kindMap[kindLabel] || 'price_below';
+                const thresholdStr = prompt(`阈值 (${kind} 的值):`);
+                if (!thresholdStr) return;
+                const threshold = parseFloat(thresholdStr);
+                if (isNaN(threshold)) { alert('阈值不是数字'); return; }
+                try {
+                  const r = await fetch(`${s.backendUrl}/alerts`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ code: codeRaw, kind, threshold }),
+                  });
+                  const j = await r.json();
+                  if (j.ok) {
+                    const ar = await fetch(`${s.backendUrl}/alerts`).then(r => r.json());
+                    if (ar && Array.isArray(ar.alerts)) dispatch({ type: 'set_alerts', alerts: ar.alerts });
+                  } else {
+                    alert(`添加失败: ${j.reason || 'unknown'}`);
+                  }
+                } catch (err) {
+                  alert(`添加失败: ${err.message}`);
+                }
+              }}>+ 添加</span>
           </div>
           {alerts.length === 0 && (
             <div className="serif" style={{ fontSize: 11, color: 'var(--ink-3)', padding: '4px 0' }}>暂无盯盘规则</div>
           )}
           {alerts.map((a, i) => (
-            <div key={a.id} style={{ padding: '10px 0', borderTop: i ? '1px solid var(--line-soft)' : 'none' }}>
+            <div key={a.id} className="alert-row-aside"
+                 onMouseEnter={(e) => { const x = e.currentTarget.querySelector('.alert-del-aside'); if (x) x.style.opacity = 1; }}
+                 onMouseLeave={(e) => { const x = e.currentTarget.querySelector('.alert-del-aside'); if (x) x.style.opacity = 0; }}
+                 style={{ padding: '10px 0', borderTop: i ? '1px solid var(--line-soft)' : 'none', position: 'relative' }}>
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginBottom: 4 }}>
                 <span className="serif" style={{ fontSize: 12.5, color: 'var(--ink)' }}>{a.name}</span>
                 <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>{a.rule}</span>
                 <span style={{ flex: 1 }} />
                 <span className="mono" style={{ fontSize: 11, color: 'var(--ink-1)' }}>{a.cur}</span>
+                {s.backendUrl && (a.id || a.code) && (
+                  <span className="alert-del-aside"
+                        title="删除此盯盘"
+                        style={{ opacity: 0, transition: 'opacity 0.15s', cursor: 'pointer',
+                                 color: 'var(--ink-3)', fontSize: 13, marginLeft: 4, lineHeight: 1 }}
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          if (!confirm(`删除盯盘 "${a.name || a.code}"?`)) return;
+                          const ruleId = a.id || a.code;
+                          try {
+                            const r = await fetch(`${s.backendUrl}/alerts/${encodeURIComponent(ruleId)}`, { method: 'DELETE' });
+                            const j = await r.json();
+                            if (j.ok) {
+                              const ar = await fetch(`${s.backendUrl}/alerts`).then(r => r.json());
+                              if (ar && Array.isArray(ar.alerts)) dispatch({ type: 'set_alerts', alerts: ar.alerts });
+                            } else {
+                              alert(`删除失败: ${j.reason || 'unknown'}`);
+                            }
+                          } catch (err) {
+                            alert(`删除失败: ${err.message}`);
+                          }
+                        }}>×</span>
+                )}
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <div style={{ flex: 1, height: 2, background: 'var(--paper-2)' }}>
