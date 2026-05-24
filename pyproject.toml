@@ -88,6 +88,7 @@ Documentation = "https://github.com/jesson-hh/financial-analyst/tree/main/docs"
 
 [project.scripts]
 financial-analyst = "financial_analyst.cli:main"
+fa = "financial_analyst.cli:main"
 financial-analyst-mcp = "financial_analyst.mcp_server:main"
 
 [build-system]
