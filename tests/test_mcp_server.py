@@ -13,6 +13,7 @@ def test_tools_registered():
         "ask", "quick_quote", "quick_factors", "memory_search",
         "list_past_reports", "read_past_report", "list_dream_proposals",
         "report", "mainline", "brief", "intraday", "dream",
+        "dream_aggregate",   # v1.9.5: Tier-4 introspections clustering
     }
     assert expected == set(TOOLS.keys())
 
@@ -57,8 +58,8 @@ def test_descriptions_are_informative():
 
 
 def test_tool_count():
-    """Exactly 12 tools should be registered."""
-    assert len(TOOLS) == 12
+    """Exactly 13 tools should be registered (v1.9.5: +dream_aggregate)."""
+    assert len(TOOLS) == 13
 
 
 def test_required_fields_in_schemas():
@@ -77,9 +78,9 @@ def test_ask_schema_has_query_required():
 
 
 def test_server_list_tools_returns_all():
-    """list_tools() decorator should surface all 12 tool names."""
+    """list_tools() decorator should surface all 13 tool names."""
     from financial_analyst.mcp_server import _build_server
     server = _build_server()
     # The decorated handler is stored internally; confirm server builds without error
     # and the TOOLS dict size matches expectations.
-    assert len(TOOLS) == 12
+    assert len(TOOLS) == 13

@@ -315,23 +315,8 @@ def build_app():
     async def conv_list():
         return JSONResponse({"ok": True, "conversations": conv_store.list()})
 
-    @app.get("/conversations/{cid}")
-    async def conv_get(cid: str):
-        conv = conv_store.load(cid)
-        if conv is None:
-            return JSONResponse({"ok": False, "reason": "not found"}, status_code=404)
-        return JSONResponse({"ok": True, "conversation": conv})
-
-    @app.delete("/conversations/{cid}")
-    async def conv_delete(cid: str, permanent: int = 0):
-        """**软删** 默认 — 移动到 ``_trash/`` 子目录, 30 天后自动 purge.
-        ``?permanent=1`` 立刻硬删 (跳过回收站, 不可恢复)."""
-        if permanent:
-            ok = conv_store.permanent_delete(cid)
-        else:
-            ok = conv_store.delete(cid)
-        return JSONResponse({"ok": ok, "permanent": bool(permanent)})
-
+    # ⚠ 静态路径 /conversations/trash 必须在动态 /conversations/{cid} 之前注册,
+    # 否则 FastAPI 会把 "trash" 当成 cid 走 conv_get 返 404 (踩坑 2026-05-24).
     @app.get("/conversations/trash")
     async def conv_list_trash():
         """回收站会话列表 (含 deletedAt). UI '已删除' 标签调这个."""
@@ -348,6 +333,23 @@ def build_app():
         trash_fn = (body or {}).get("trash_filename") if body else None
         ok = conv_store.restore(cid, trash_filename=trash_fn)
         return JSONResponse({"ok": ok})
+
+    @app.get("/conversations/{cid}")
+    async def conv_get(cid: str):
+        conv = conv_store.load(cid)
+        if conv is None:
+            return JSONResponse({"ok": False, "reason": "not found"}, status_code=404)
+        return JSONResponse({"ok": True, "conversation": conv})
+
+    @app.delete("/conversations/{cid}")
+    async def conv_delete(cid: str, permanent: int = 0):
+        """**软删** 默认 — 移动到 ``_trash/`` 子目录, 30 天后自动 purge.
+        ``?permanent=1`` 立刻硬删 (跳过回收站, 不可恢复)."""
+        if permanent:
+            ok = conv_store.permanent_delete(cid)
+        else:
+            ok = conv_store.delete(cid)
+        return JSONResponse({"ok": ok, "permanent": bool(permanent)})
 
     # ── 雪球社区: 个股评论 (本地秒出 / refresh 现拉) + 情绪聚合 ──
     @app.get("/comments")

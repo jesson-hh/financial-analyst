@@ -97,12 +97,16 @@ def test_collector_handles_none_opencli_response():
 
 def test_collector_output_satisfies_upsert_hot_stocks_schema():
     """upsert_hot_stocks reads {rank, code/symbol, name, price, changePercent, heat}.
-    Verify our collector's output has all the expected keys."""
+    Verify our collector's output has all the expected keys.
+
+    Note: 用 limit=999 (而非 default 20) 绕开 net.py @rate_limited cache —
+    cache key 含 limit, 用 unique 值确保 mock 真生效, 不会命中其他 test 跑过的 cached entry.
+    """
     fake_raw = [{"rank": "1", "name": "test", "changePercent": "+1%",
                  "heat": "100万", "tags": "000001,foo"}]
     with patch("financial_analyst.data.collectors.opencli.ths_hot_rank.run_opencli",
                return_value=fake_raw):
-        items = THSHotRankCollector().fetch()
+        items = THSHotRankCollector().fetch(limit=999)
     item = items[0]
     # Keys upsert_hot_stocks reads from the dict
     assert "rank" in item

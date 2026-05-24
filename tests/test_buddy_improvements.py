@@ -272,10 +272,21 @@ def test_stock_brief_registered():
 
 def test_stock_brief_aggregates_sections(monkeypatch):
     """stock_brief calls the underlying tool helpers and stitches their
-    output. We stub each helper to confirm aggregation + resilience."""
+    output. We stub each helper to confirm aggregation + resilience.
+
+    v1.9.4+ 注: stock_brief 优先调 TencentQuoteCollector (实时), 失败才 fallback
+    到 _tool_ask_quote (EOD). 测试必须 mock 两条路径都失败 + 让 EOD 走 mock.
+    """
     from financial_analyst.buddy import tools
     from financial_analyst.buddy.tools import ToolResult
 
+    # 强制 Tencent 实时路径不可用, 走 EOD fallback (_tool_ask_quote)
+    class _FailTencent:
+        def quote(self, code): return None    # 返 None → 走 fallback
+    monkeypatch.setattr(
+        "financial_analyst.data.collectors.tencent_quote.TencentQuoteCollector",
+        lambda: _FailTencent(),
+    )
     monkeypatch.setattr(tools, "_tool_ask_quote",
                         lambda code: ToolResult(f"{code}: close=1280"))
     monkeypatch.setattr(tools, "_tool_industry_show",
@@ -307,9 +318,20 @@ def test_stock_brief_aggregates_sections(monkeypatch):
 
 
 def test_stock_brief_resilient_to_section_failure(monkeypatch):
-    """If quote fails, the brief still returns other sections."""
+    """If quote fails, the brief still returns other sections.
+
+    v1.9.4+: 要让 Tencent 路径也挂, 才会走 _tool_ask_quote fallback.
+    """
     from financial_analyst.buddy import tools
     from financial_analyst.buddy.tools import ToolResult
+
+    # Tencent 抛错 (而非返 None) → 进 except → 输出 "取价失败"
+    class _BoomTencent:
+        def quote(self, code): raise RuntimeError("tencent down")
+    monkeypatch.setattr(
+        "financial_analyst.data.collectors.tencent_quote.TencentQuoteCollector",
+        lambda: _BoomTencent(),
+    )
 
     def boom(code): raise RuntimeError("loader down")
     monkeypatch.setattr(tools, "_tool_ask_quote", boom)
