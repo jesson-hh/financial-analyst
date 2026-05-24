@@ -1,0 +1,30 @@
+{
+  "quality_flags": [
+    "risk_officer.position_sizing_advice='0%' contradicts writer.action='hold'",
+    "VR metric discrepancy: Bull cites VR=1.57, raw factor shows vr_value=0.039",
+    "rating_overall (2) masks strong risk-officer caution (risk_score=-1, 0% position)"
+  ],
+  "proposals": [
+    {
+      "target_agent": "risk-officer",
+      "pattern": "bull/bear thesis cites a metric value that contradicts the raw factor output",
+      "proposed_rule": "Cross-validate all cited metric values against raw factor JSON before finalizing blind_spots. If discrepancy > 20% or sign flip, flag as 'data_pipeline_mismatch' and downgrade conviction to 'low' automatically.",
+      "confidence": "low",
+      "rationale": "VR discrepancy led to opposing accumulation vs distribution narratives. Catching this early prevents contradictory theses from reaching the writer."
+    },
+    {
+      "target_agent": "risk-officer",
+      "pattern": "risk_officer.position_sizing_advice is '0%' but writer.action is 'hold' or 'buy'",
+      "proposed_rule": "risk-officer must explicitly set veto_flags or hard_rule_triggers when position_sizing_advice='0%', forcing writer.action to 'avoid'. Do not rely on writer to infer zero-allocation from 'hold'.",
+      "confidence": "low",
+      "rationale": "Action labels must reflect risk constraints. 'hold' with 0% position advice creates execution ambiguity for traders. CRO veto ensures strict alignment."
+    },
+    {
+      "target_agent": "bear-advocate",
+      "pattern": "mv_tier='small' AND vol_regime='distr' AND valuation_score<=2",
+      "proposed_rule": "Mandate explicit catalyst validation (V7/F12) and mean-reversion quant triggers (F10) in every bear bullet. Do not rely solely on technical overbought signals; require narrative/valuation breakdown proof.",
+      "confidence": "low",
+      "rationale": "Small-cap distribution regimes are prone to liquidity vacuums. Bear thesis must anchor failure modes to specific catalyst misses or valuation voids to avoid generic 'overbought' warnings."
+    }
+  ]
+}

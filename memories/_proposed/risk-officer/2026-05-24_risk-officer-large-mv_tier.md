@@ -4,7 +4,7 @@ title: 'When mv_tier is large and conviction is low, automatically trigger hard_
   for ''factor_decay_large_cap'', set '
 target_agent: risk-officer
 confidence: med
-generated_at: '2026-05-23'
+generated_at: '2026-05-24'
 supporting_cases:
 - 2026-05-23_SH600030
 - 2026-05-23_SH600276

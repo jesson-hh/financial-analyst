@@ -1,0 +1,12 @@
+{
+  "quality_flags": [],
+  "proposals": [
+    {
+      "target_agent": "risk-officer",
+      "pattern": "bull cites relative liquidity metrics (VR, MFI, OBV slope) to support bounce/accumulation thesis while absolute turnover is structurally low",
+      "proposed_rule": "When bull arguments rely on relative volume/money flow indicators (e.g., VR > 2, MFI neutral, OBV divergence) to claim 'active participation' or 'bounce foundation', risk-officer must cross-check absolute liquidity metrics (turnover_60, amount_pct_60d). If absolute turnover falls below structural thresholds (e.g., turnover_60 < 0.05 or amount_pct_60d < p20), flag as 'liquidity illusion', override bounce thesis, and enforce stricter downside scenarios.",
+      "confidence": "low",
+      "rationale": "In this report, bull cited VR 2.375 as proof of active trading and bounce foundation, but risk-officer correctly identified turnover_60 of 0.033 as structural illiquidity. Relative metrics are highly misleading in low-volume regimes and frequently trap tactical bounce theses. Adding this explicit cross-check to risk-officer prevents false accumulation signals from overriding trend-following logic, especially for mid-cap stocks with neutral vol_regime."
+    }
+  ]
+}

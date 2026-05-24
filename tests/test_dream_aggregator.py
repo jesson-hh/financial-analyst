@@ -102,12 +102,16 @@ class TestClustering:
 
 
 class TestAggregateE2E:
-    def _setup(self, tmp_path: Path, payloads: list):
-        """tmp memory tree with N pending introspection files."""
+    def _setup(self, tmp_path: Path, payloads: list, offset: int = 0):
+        """tmp memory tree with N pending introspection files.
+
+        Args:
+            offset: 让多次调用 _setup 加新 case (而不是覆盖). 默认 0 = 覆盖.
+        """
         pending = tmp_path / "_pending_introspections"
-        pending.mkdir(parents=True)
+        pending.mkdir(parents=True, exist_ok=True)
         for i, p in enumerate(payloads):
-            (pending / f"2026-05-23_TEST{i:03d}.json").write_text(
+            (pending / f"2026-05-23_TEST{i + offset:03d}.json").write_text(
                 json.dumps(p), encoding="utf-8"
             )
 
@@ -176,3 +180,58 @@ class TestAggregateE2E:
         written, stats = aggregate_pending(tmp_path, dry_run=True)
         assert written == []
         assert "no _pending_introspections" in stats.get("reason", "")
+
+    def test_idempotent_skip_unchanged(self, tmp_path):
+        """二次跑 aggregate 同 cases 应该 skip, 不重复写文件."""
+        self._setup(tmp_path, [
+            {"proposals": [{"target_agent": "risk-officer",
+                            "pattern": "mv_tier large bounce factor",
+                            "proposed_rule": "veto large-cap factor bounce",
+                            "confidence": "low",
+                            "rationale": "..."}]} for _ in range(3)
+        ])
+        # 第一次写
+        written1, stats1 = aggregate_pending(tmp_path, min_count=3, dry_run=False)
+        assert stats1["clusters_promoted"] == 1
+        assert len(written1) == 1
+        first_file = written1[0]
+
+        # 第二次 — cases 没变, 应 skip
+        written2, stats2 = aggregate_pending(tmp_path, min_count=3, dry_run=False)
+        assert stats2["clusters_promoted"] == 0
+        assert stats2["skipped_unchanged"] == 1
+        assert written2 == []
+        # 旧文件还在
+        assert first_file.exists()
+
+    def test_idempotent_replace_on_new_cases(self, tmp_path):
+        """同 slug 但 cases 多了一份 → 删旧, 写新."""
+        # 第一次 3 cases
+        self._setup(tmp_path, [
+            {"proposals": [{"target_agent": "risk-officer",
+                            "pattern": "mv_tier large bounce factor",
+                            "proposed_rule": "veto",
+                            "confidence": "low",
+                            "rationale": "..."}]} for _ in range(3)
+        ])
+        written1, _ = aggregate_pending(tmp_path, min_count=3, dry_run=False)
+        assert len(written1) == 1
+        first_file = written1[0]
+
+        # 加第 4 份 introspection (offset=3 避免覆盖)
+        self._setup(tmp_path, [
+            {"proposals": [{"target_agent": "risk-officer",
+                            "pattern": "mv_tier large bounce factor",
+                            "proposed_rule": "veto",
+                            "confidence": "low",
+                            "rationale": "..."}]}
+        ], offset=3)
+        # 现在 4 cases (TEST000-003)
+        # 重跑 — supporting_cases 应该从 3 → 4 (changed), 应 promote replace
+        written2, stats2 = aggregate_pending(tmp_path, min_count=3, dry_run=False)
+        # 关键不变量: 不应有 2 个 _<slug>.md (旧的被删, 写新的)
+        proposed = list((tmp_path / "_proposed" / "risk-officer").glob("*.md"))
+        assert len(proposed) == 1, f"多版本 _proposed/<slug>.md 残留: {[p.name for p in proposed]}"
+        # 新文件应该含 4 cases
+        text = proposed[0].read_text(encoding="utf-8")
+        assert "TEST003" in text, f"新加 TEST003 case 应该在 supporting_cases 里"

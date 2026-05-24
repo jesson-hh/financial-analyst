@@ -202,6 +202,7 @@ def aggregate_pending(
     # 每桶聚类 + promote
     today = _date.today().isoformat()
     to_write: List[Proposal] = []
+    stats["skipped_unchanged"] = 0    # 已经 promote 过且 cases 没变 → 跳过
 
     for agent, idxs in by_agent.items():
         agent_props = [all_props[i] for i in idxs]
@@ -230,6 +231,39 @@ def aggregate_pending(
 
             # supporting cases
             cases = sorted({p["_case_id"] for p in members})
+
+            # ─── Idempotency: 检测 _proposed/<agent>/*_<slug>.md 已存在 ───
+            # 如果 supporting_cases 完全一致 → skip (无变化)
+            # 如果有新 cases → 删 stale, 写新的 (替换)
+            proposed_dir = memory_root / "_proposed" / agent
+            stale_files = list(proposed_dir.glob(f"*_{slug}.md")) if proposed_dir.exists() else []
+
+            unchanged = False
+            for stale in stale_files:
+                try:
+                    text = stale.read_text(encoding="utf-8")
+                    if text.startswith("---\n"):
+                        end = text.find("\n---\n", 4)
+                        if end > 0:
+                            import yaml as _yaml
+                            fm = _yaml.safe_load(text[4:end]) or {}
+                            existing_cases = sorted(fm.get("supporting_cases", []))
+                            if existing_cases == cases:
+                                unchanged = True
+                                break
+                except Exception:
+                    continue
+
+            if unchanged:
+                stats["skipped_unchanged"] += 1
+                continue   # 跳过, stale file 保留
+
+            # 删 stale (slug 同名但 cases 不同 → 升级)
+            for stale in stale_files:
+                try:
+                    stale.unlink()
+                except Exception:
+                    pass
 
             title = (rep.get("proposed_rule") or rep.get("pattern", ""))[:120]
             lesson_md = _build_lesson_md(agent, members, n)

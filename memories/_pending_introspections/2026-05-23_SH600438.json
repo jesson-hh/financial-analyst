@@ -1,0 +1,16 @@
+{
+  "quality_flags": [
+    "rating_overall=0 but action='sell' with 0% position indicates risk-officer override not reflected in rating scale",
+    "risk_officer veto active but writer action='sell' instead of 'avoid'",
+    "whale 'accumulating' label contradicts 'dispersed' chips & falling OBV (noted by risk_officer, but writer didn't resolve)"
+  ],
+  "proposals": [
+    {
+      "target_agent": "risk-officer",
+      "pattern": "mv_tier in ['mid', 'large'] AND sector_cycle in ['capacity_clearing', 'earnings_trough'] AND quant_model_consensus == 'strong_long' driven by reversal_factors (rsi<30, rev_20>0, close_to_high_20<-10%)",
+      "proposed_rule": "CRO must auto-flag 'mega_cap_factor_bounce_invalid' and enforce position_sizing=0%. Bull thesis citing V4/V1 oversold bounce must be downgraded to 'technical dead cat' unless explicit capacity-clearing catalyst timeline or fundamental inflection is present. Writer action must escalate to 'avoid' when CRO veto triggers.",
+      "confidence": "low",
+      "rationale": "Single-stock post-mortem shows risk-officer correctly identified that reversal-factor-driven quant consensus fails for mid/large-cap stocks in sector downtrends. This feature intersection (mv_tier + sector_cycle + quant_consensus) reliably kills oversold bounce theses. Adding a CRO rule prevents bull-advocate from over-indexing on technical mean-reversion and aligns writer output with risk constraints."
+    }
+  ]
+}

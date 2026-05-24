@@ -1,0 +1,31 @@
+{
+  "quality_flags": [
+    "risk-officer veto_flags present but action is 'sell' instead of 'avoid'",
+    "Bear cites 'super_distr regime' but payload vol_regime_label is 'neutral'",
+    "Bull applies '信维模式' (capacity expansion) to regulated airport utility; business model mismatch",
+    "Quant score remains positive (2) and consensus 'strong_long' despite explicit IC decay warning in quant bear points"
+  ],
+  "proposals": [
+    {
+      "target_agent": "risk-officer",
+      "pattern": "mv_tier='large'/'mega' + defensive/utility sector + technical mean-reversion signal (RSI/rev bounce)",
+      "proposed_rule": "Auto-flag 'mega_cap_factor_bounce_invalid' when cross-sectional factor signals suggest long bounce on mega-cap utility stocks. Factor IC decay neutralizes technical bounces; downgrade to neutral/avoid and enforce position_pct=0%.",
+      "confidence": "med",
+      "rationale": "Matches quant bear's explicit note on IC degradation and risk officer's veto. Large-cap utilities are driven by fundamentals/traffic, not short-term factor bounces. Adding this to CRO rules prevents false long signals."
+    },
+    {
+      "target_agent": "bear-advocate",
+      "pattern": "Thesis cites vol_regime or board labels that contradict payload fields",
+      "proposed_rule": "Strictly validate regime/label citations against payload. If vol_regime_label is 'neutral', forbid citing 'super_distr' or 'distr' in thesis bullets. Use exact payload values only.",
+      "confidence": "med",
+      "rationale": "Prevents hallucination of market regime data. The report's bear agent invented a regime label to support its thesis, weakening credibility and violating data-grounding principles."
+    },
+    {
+      "target_agent": "risk-officer",
+      "pattern": "Bull applies V4 playbook patterns to sectors with incompatible business models",
+      "proposed_rule": "Validate sector-business model alignment before accepting V4 pattern citations. If sector is regulated/utility/infrastructure, reject capacity expansion or tech leap patterns (信维/仕佳) as invalid. Require fundamental traffic/fee drivers instead.",
+      "confidence": "low",
+      "rationale": "Single case but critical. Playbook patterns are operational/equity-specific. Applying them to regulated assets causes fundamental mispricing. CRO should veto pattern misuse to protect against structural valuation errors."
+    }
+  ]
+}

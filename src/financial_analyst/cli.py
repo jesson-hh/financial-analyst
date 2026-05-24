@@ -316,6 +316,9 @@ def _dream_aggregate(dry_run: bool = False) -> None:
                f"{stats.get('n_proposals_total', 0)} 个 proposal")
     typer.echo(f"聚类: {stats.get('clusters_total', 0)} cluster 总数, "
                f"{stats.get('clusters_promoted', 0)} 升级 (>= 3 cases)")
+    skipped = stats.get("skipped_unchanged", 0)
+    if skipped:
+        typer.echo(f"  跳过: {skipped} cluster (_proposed/ 已有同 slug + 同 cases)")
     if stats.get("promoted_breakdown"):
         typer.echo("升级 breakdown:")
         for slug, info in stats["promoted_breakdown"].items():
