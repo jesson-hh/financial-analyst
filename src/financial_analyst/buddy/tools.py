@@ -980,50 +980,43 @@ def _tool_ask_quote(code: str) -> ToolResult:
 
 
 def _tool_realtime_quote(code: str) -> ToolResult:
-    """实时行情. 优先腾讯 (无需 cookie, ~120ms), 失败 fallback 雪球.
-    不同于 quote_lookup (日线/EOD), 这是盘中实时价."""
-    # Tencent first — no cookie, fast, has 量比/PE/PB/市值
+    """实时行情. 走 ``data/quote_fallback`` 多源链 (tencent → xueqiu),
+    第一个成功就返. 不同于 quote_lookup (日线/EOD), 这是盘中实时价."""
+    from financial_analyst.data.quote_fallback import fetch_realtime_quote
     try:
-        from financial_analyst.data.collectors.tencent_quote import TencentQuoteCollector
-        t = TencentQuoteCollector().quote(code)
-        if t and t.get("price") is not None:
-            return ToolResult(
-                f"{t.get('name','?')} ({t.get('code', code)})\n"
-                f"  现价 {t.get('price')}  涨跌 {t.get('change')} ({t.get('changePercent')}%)\n"
-                f"  开 {t.get('open')} 高 {t.get('high')} 低 {t.get('low')} 昨收 {t.get('prevClose')}\n"
-                f"  量比 {t.get('vol_ratio')}  换手 {t.get('turnover_rate')}%  振幅 {t.get('amplitude')}%\n"
-                f"  PE {t.get('pe')}  PB {t.get('pb')}  总市值 {t.get('total_mv')}亿  成交额 {t.get('amount')}万",
-                side_effect={"quote": t},
-            )
-    except Exception:
-        pass
-    # fallback: xueqiu (needs cookie, but has market_status + 盘口)
-    from financial_analyst.data.collectors.opencli.xueqiu_stock import XueqiuStockCollector
-    try:
-        d = XueqiuStockCollector().fetch(code)
-    except Exception as exc:
+        src, q = fetch_realtime_quote(code)
+    except RuntimeError as exc:
         return ToolResult(f"实时行情抓取失败: {exc}", is_error=True)
-    if not d:
-        return ToolResult(f"无 {code} 实时行情 (代码错误?)", is_error=True)
+    if src == "tencent":
+        return ToolResult(
+            f"{q.get('name','?')} ({q.get('code', code)})\n"
+            f"  现价 {q.get('price')}  涨跌 {q.get('change')} ({q.get('changePercent')}%)\n"
+            f"  开 {q.get('open')} 高 {q.get('high')} 低 {q.get('low')} 昨收 {q.get('prevClose')}\n"
+            f"  量比 {q.get('vol_ratio')}  换手 {q.get('turnover_rate')}%  振幅 {q.get('amplitude')}%\n"
+            f"  PE {q.get('pe')}  PB {q.get('pb')}  总市值 {q.get('total_mv')}亿  成交额 {q.get('amount')}万",
+            side_effect={"quote": q, "source": src},
+        )
+    # xueqiu shape
     return ToolResult(
-        f"{d.get('name','?')} ({d.get('symbol', code)}) [{d.get('market_status','?')}]\n"
-        f"  现价 {d.get('price','?')}  涨跌 {d.get('change','?')} ({d.get('changePercent','?')})\n"
-        f"  开 {d.get('open','?')} 高 {d.get('high','?')} 低 {d.get('low','?')} 昨收 {d.get('prevClose','?')}\n"
-        f"  量 {d.get('volume','?')}  额 {d.get('amount','?')}  换手 {d.get('turnover_rate','?')}\n"
-        f"  市值 {d.get('marketCap','?')}  振幅 {d.get('amplitude','?')}  时间 {d.get('time','?')}"
+        f"{q.get('name','?')} ({q.get('symbol', code)}) [{q.get('market_status','?')}]\n"
+        f"  现价 {q.get('price','?')}  涨跌 {q.get('change','?')} ({q.get('changePercent','?')})\n"
+        f"  开 {q.get('open','?')} 高 {q.get('high','?')} 低 {q.get('low','?')} 昨收 {q.get('prevClose','?')}\n"
+        f"  量 {q.get('volume','?')}  额 {q.get('amount','?')}  换手 {q.get('turnover_rate','?')}\n"
+        f"  市值 {q.get('marketCap','?')}  振幅 {q.get('amplitude','?')}  时间 {q.get('time','?')}",
+        side_effect={"quote": q, "source": src},
     )
 
 
 def _tool_quote_batch(codes: str) -> ToolResult:
-    """批量实时行情 (腾讯, 无需 cookie, 一次拉几十只 ~120ms). 用于监控墙/
-    多股对比. ``codes`` 逗号分隔 (如 'SH600519,SZ300750,002594')."""
-    from financial_analyst.data.collectors.tencent_quote import TencentQuoteCollector
+    """批量实时行情 (腾讯 → 雪球 fallback). 用于监控墙 / 多股对比.
+    ``codes`` 逗号分隔 (如 'SH600519,SZ300750,002594')."""
+    from financial_analyst.data.quote_fallback import fetch_realtime_quotes
     code_list = [c.strip() for c in str(codes).replace("，", ",").split(",") if c.strip()]
     if not code_list:
         return ToolResult("没给股票代码", is_error=True)
     try:
-        data = TencentQuoteCollector().fetch(code_list)
-    except Exception as exc:
+        src, data = fetch_realtime_quotes(code_list)
+    except RuntimeError as exc:
         return ToolResult(f"批量行情抓取失败: {exc}", is_error=True)
     if not data:
         return ToolResult("批量行情返回空 (代码可能无效)", is_error=True)
