@@ -1,58 +1,171 @@
-# Financial Analyst (观瀾)
+<p align="center">
+  <h1 align="center">觀瀾 · Financial Analyst</h1>
+</p>
 
-[English](README.md) | **中文**
+<p align="center">
+  <strong>一行命令. 25 个 AI Agent. A 股深度研究.</strong>
+</p>
 
-[![PyPI](https://img.shields.io/pypi/v/financial-analyst.svg)](https://pypi.org/project/financial-analyst/)
-[![Python](https://img.shields.io/pypi/pyversions/financial-analyst.svg)](https://pypi.org/project/financial-analyst/)
-[![tests](https://img.shields.io/badge/tests-712_passed-brightgreen)](https://github.com/jesson-hh/financial-analyst/actions)
-[![license](https://img.shields.io/badge/license-Apache_2.0-green)](LICENSE)
-[![status](https://img.shields.io/badge/release-v1.0.0-success)](https://github.com/jesson-hh/financial-analyst/releases)
-[![alphas](https://img.shields.io/badge/alphas-440-blue)](docs/journey.md)
-[![dataset](https://img.shields.io/badge/data-HF_Hub-yellow)](https://huggingface.co/yifishbossman)
-[![agents](https://img.shields.io/badge/agents-25-blueviolet)](docs/architecture/14_agents.md)
+<p align="center">
+  <em>给一个 6 位股票代码, 让 14 个 sub-agent 协作出一份研报 — 基本面 · 技术面 · 主力情绪 · 量化模型 · 多空风控辩论 — 约 10 分钟.</em>
+</p>
 
-**A 股个股深度研究 · 多 Agent 工作站.**
+<p align="center">
+  <a href="README.md">English</a> &nbsp;·&nbsp; <strong>中文</strong>
+</p>
 
-> **🎉 v1.0.0 — 首次公开发布** (2026-05-25). 经过内部 `v1.9.x` 预览迭代, 这是项目首个公开稳定版. 历史见 [CHANGELOG.md](CHANGELOG.md#100--2026-05-25--first-public-release), 后续 LTS 政策见 [VERSIONING.md](VERSIONING.md).
+<p align="center">
+  <a href="https://pypi.org/project/financial-analyst/"><img src="https://img.shields.io/pypi/v/financial-analyst.svg?style=flat&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
+  <img src="https://img.shields.io/pypi/pyversions/financial-analyst.svg?style=flat&logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/release-v1.0.0-success?style=flat" alt="Release">
+  <img src="https://img.shields.io/badge/tests-712_passed-brightgreen?style=flat" alt="Tests">
+  <img src="https://img.shields.io/badge/license-Apache_2.0-yellow?style=flat" alt="License">
+  <br>
+  <img src="https://img.shields.io/badge/agents-25-7C3AED?style=flat" alt="Agents">
+  <img src="https://img.shields.io/badge/swarm_预设-5-2563EB?style=flat" alt="Swarm">
+  <img src="https://img.shields.io/badge/buddy_工具-31-0F766E?style=flat" alt="Tools">
+  <img src="https://img.shields.io/badge/alpha_因子-440-FF6B6B?style=flat" alt="Alphas">
+  <a href="https://huggingface.co/yifishbossman"><img src="https://img.shields.io/badge/数据-HF_Hub-FFD21E?style=flat&logo=huggingface&logoColor=black" alt="HF Datasets"></a>
+</p>
 
-📖 第一次来? 推荐先读 [构建历程与架构总览](docs/journey.md) (中英双语) — 从空仓库到 440 因子 + 21 个 sub-agent 的两周复盘.
+<p align="center">
+  <a href="#-是什么">是什么</a> &nbsp;·&nbsp;
+  <a href="#-能干什么">能干什么</a> &nbsp;·&nbsp;
+  <a href="#-快速开始">快速开始</a> &nbsp;·&nbsp;
+  <a href="#-25-个-agent">Agent 阵容</a> &nbsp;·&nbsp;
+  <a href="#-可插拔记忆">记忆系统</a> &nbsp;·&nbsp;
+  <a href="#-数据集">数据集</a> &nbsp;·&nbsp;
+  <a href="#-llm-provider">LLM</a> &nbsp;·&nbsp;
+  <a href="CONTRIBUTING.md">贡献</a>
+</p>
 
-**14 个 sub-agent 分 4 层信任级** — 5 个 Tier-1 数据拉取 agent (其中 2 个读不可信新闻 / F10 用 JSON-schema 锁死输出), 4 个 Tier-2 分析师 (基本面 / 技术面 / 主力情绪 / 量化), 4 个 Tier-3 决策 agent (多头 / 空头 / 风控 / 报告撰写), 加 1 个 Tier-4 复盘 introspector — writer 落盘后自动自审, 提出经验更新建议人工 review. **只有 report-writer 能写报告文件**. 每个 agent 的记忆可插拔 (`memories/<agent>/*.md`) — 改 markdown, 下次研报立即生效. FTS5 检索让 prompt 成本比裸全量注入低约 60%.
+```bash
+pip install financial-analyst==1.0.0    # 1 分钟, 默认无需 token
+fa init                                  # 交互向导 — 自动拉 HF 数据
+fa report SH600519                       # 14-agent 深度研报 (~10 分钟)
+```
 
-完整 DAG + I/O schema: [docs/architecture/14_agents.md](docs/architecture/14_agents.md).
+---
 
-灵感来源: [Anthropic financial-services](https://github.com/anthropics/financial-services) (三层信任隔离 + 单写入者模式) 与 [HKUDS/Vibe-Trading](https://github.com/HKUDS/Vibe-Trading) (YAML swarm 编排 + 多 LLM provider).
+## 💡 是什么
 
-## v1.9.6 新增 (2026-05-24)
+**A 股研究工作站, 思维像买方分析师.**
 
-- **LLM 路由架构重构** — `AsyncOpenAI` 多 provider + per-provider `httpx.AsyncClient` + 3 档 `network_profile` (domestic / intl_clash / intl_system). 国内 qwen 直连阿里云不被 Clash fake-ip 接管走海外节点; deepseek/openai 走 Clash 代理 + verify=False 处理 MITM. 替代旧 litellm 单 client 路径.
-- **DeepSeek 接入** — `deepseek-chat` + `deepseek-reasoner` 全可用, UI 端到端验证 通过 (`/model deepseek-chat` 切换, agent 自报 "底层由 DeepSeek 驱动").
-- **Quote 多源 fallback** — 借鉴 vibe-trading 的多源 dispatch 思路. 新 `data/quote_fallback.py`, 实时行情 tencent → 雪球 自动 fallback, 不再让单源失败拖死整个 agent.
-- **数据出口治理** — tushare/industry 接入 `net.py.domestic_session` + `@rate_limited`; 6 个 opencli xueqiu collector 加限速 (防 Aliyun WAF); tencent_quote 删全局 `NO_PROXY=*` 污染.
-- **HF dataset 3 档发布** — demo (155MB) / lite (~3GB) / full (~14GB), 双语 README. 详见 [数据集](#-数据集-huggingface) 段.
+给一个股票代码, 14 个 sub-agent 分 4 个信任层并发跑:
 
-## v1.0 核心能力
+```
+Tier 1 (数据并行)         Tier 2 (分析师并行)        Tier 3 (决策串行)          Tier 4 (复盘)
+─────────────────       ──────────────────────     ────────────────────       ────────────
+quote · factors        基本面分析师                  多头 ─┐
+model · news           技术面分析师                  空头 ─┤───→ writer        introspector
+F10 · 海外宏观         主力情绪分析师                 风控 ─┘
+板块轮动                量化模型分析师                (单一写入者)
+```
 
-- **25 个 agent** (v1.9.7): 14 个个股研究 (data → analyst → decision → introspector, 见 `config/swarm/stock-deep-dive.yaml`) + 10 个市场级 (含 morning-brief v2 五件套 + 新 overseas-radar 国际雷达三件套) + 1 个 meta (ask)
-- **8 个 swarm 预设**: stock-deep-dive / morning-brief (5-agent v2) / **overseas-radar** (新, 国际市场传导) / mainline-radar / intraday-review / dream 等
-- **QlibBinaryLoader** (day + 5min) + **TushareLoader** (HTTP + ParquetCache) + **CSV ingester**
-- **R7-R20 情绪信号**: board_scorer v5 / volume_regime (super_distr / tail_surge) / whale 信号
-- **可插拔记忆系统** — FTS5 检索 + `always_include` 白名单 + `_shared/` 跨 agent playbook
-- **Dream loop** — agent 自迭代记忆 (OutcomeTracker + Introspector + `memories/_proposed/` 暂存 + 人工 accept/reject)
-- **BYOM** — registry-based 插件点 (models / loaders / collectors / sub-agents / KBs); `config/plugins.yaml` 启动时自动加载用户 `.py`
-- **12 个 MCP tool** — 接 Claude Desktop / Claude Code
-- **705 测试** (单元 + 集成, 全 mock LLM) + 1 个可选真实 E2E 测试
+输出: 一份 markdown 研报 — **打分 · 归因 · 可证伪**. 只有 `report-writer` 能落盘. 不可信新闻 / F10 在 Tier-1 用 JSON-schema 锁死 (杜绝 prompt 注入). 记忆是 markdown — 改 `.md`, 下次研报立即生效. FTS5 检索省 prompt 60%.
 
-## 快速开始
+**灵感来源**: [Anthropic financial-services](https://github.com/anthropics/financial-services) (三层信任隔离) + [HKUDS/Vibe-Trading](https://github.com/HKUDS/Vibe-Trading) (YAML swarm 编排).
 
-三条路径出首份研报:
+---
+
+## ✨ 能干什么
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### 🎯 14-agent 个股深度研报
+给 `SH600519` 一个代码, 10 分钟出完整研报 — 基本面 / 技术面 / 主力 / 量化 / 多空风控辩论 / 复盘自审. **只有 `report-writer` 能写文件**.
+
+```bash
+fa report SH600519
+```
+
+</td>
+<td width="50%" valign="top">
+
+### 🌅 晨会简报 (5-agent v2)
+盘前扫: 隔夜美股 + 港股 + VIX + A 股异动 + 催化提取 + 板块轮动 + LLM 综合一段中文 brief.
+
+```bash
+fa brief
+```
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### 🌍 海外雷达 (v1.9.7 新)
+国际传导分析: SPX/NDX/HSI/VIX/USDCNY → A 股 follow-through 判读 + 明日可执行信号.
+
+```bash
+fa overseas-radar
+```
+
+</td>
+<td width="50%" valign="top">
+
+### 📈 月级主线雷达
+5 状态产业链分类 (mainline / initiation / revival / decay / cold). 抓 `init → mainline` 金信号 (+5.54pp fwd_60d, 胜率 87%).
+
+```bash
+fa mainline
+```
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### 🧠 可插拔记忆
+24 个 per-agent 记忆目录, 全是 markdown. 改 `risk-officer/hard_rules.md`, 下次研报立即遵守. 不改代码. `_shared/playbook_V1_V10.md` 跨 agent 共享.
+
+</td>
+<td width="50%" valign="top">
+
+### 💤 Dream 闭环 (自迭代)
+每份研报后 `introspector` 自审, aggregator 聚类提案到 `_proposed/` 等人工 review. **不自动合并** (量化系统错误经验会复利亏损).
+
+```bash
+fa dream --since 30
+```
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### 🔌 4 provider LLM 路由
+`qwen` (国内直连) · `deepseek-chat/reasoner` (Clash + MITM 兼容) · `openai` · `anthropic`. 按 provider 配网络出口, 不被 fake-ip 接管.
+
+```bash
+financial-analyst  # /model deepseek-reasoner
+```
+
+</td>
+<td width="50%" valign="top">
+
+### 🧬 BYOM 扩展
+把私有模型 `.py` 写到 `config/plugins.yaml`, 自动进量化共识. **私有 checkpoint 永远不进开源仓库**.
+
+参考 [examples/](examples/) — FM cluster / CSV loader / TDX F10 等.
+
+</td>
+</tr>
+</table>
+
+---
+
+## ⚡ 快速开始
 
 ### A. PyPI 安装 (推荐, 1 分钟)
 
 ```bash
-pip install financial-analyst
-cp .env.example .env   # 编辑: TUSHARE_TOKEN + DASHSCOPE_API_KEY (+ 可选 DEEPSEEK_API_KEY)
-financial-analyst                  # 启 TUI
+pip install financial-analyst==1.0.0
+cp .env.example .env       # 加 DASHSCOPE_API_KEY (默认 qwen)
+fa init                    # 交互向导 — 拉 HF 数据
+fa report SH600519         # 首份深度研报
 ```
 
 ### B. Docker (零本地配置, 2 分钟)
@@ -60,14 +173,8 @@ financial-analyst                  # 启 TUI
 ```bash
 git clone https://github.com/jesson-hh/financial-analyst.git
 cd financial-analyst
-cp .env.example .env   # 编辑 key
-docker compose up      # → 交互式 TUI
-```
-
-容器内 one-shot:
-```bash
-docker compose run --rm fa report SH600519
-docker compose run --rm fa ask "SH600519 现在 PE 多少"
+cp .env.example .env
+docker compose up          # → 交互 TUI
 ```
 
 ### C. 源码 (开发)
@@ -75,131 +182,65 @@ docker compose run --rm fa ask "SH600519 现在 PE 多少"
 ```bash
 git clone https://github.com/jesson-hh/financial-analyst.git
 cd financial-analyst
-python -m venv .venv && .venv\Scripts\activate    # Windows; Linux/Mac: source .venv/bin/activate
-pip install -e .[dev]
-cp .env.example .env
-financial-analyst
+pip install -e ".[dev]"
+pytest tests/              # 712 测试, ~8 分钟
 ```
 
-## 首批命令
+---
 
-TUI 内:
-```
-> 看看 600519                         # 完整深度研报 (~10 分钟)
-> /ask SH600519 现在 PE 多少           # 秒级问答
-> /mainline                          # 月级主线雷达
-> /brief                             # 早盘异动扫描
-> /intraday                          # 午休复盘
-> /memory search 游资                 # 搜经验库
-> /dream --since 30                  # 经验自迭代
-> /sessions new my-project           # 多会话切换
-> /model deepseek-chat               # 切 LLM 模型
-> /quit
-```
+## 🤖 25 个 Agent
 
-One-shot:
-```bash
-financial-analyst report SH600519 --asof 2026-05-15
-financial-analyst ask -f question.txt
-financial-analyst report -f codes.txt --trace
-echo "SH600519 PE 多少" | financial-analyst ask
-```
+| Tier | Agents | 角色 |
+|---|---|---|
+| **Tier 1** (数据) | quote-fetcher · factor-computer · model-predictor · **news-reader** · **f10-reader** · overseas-market-scanner · sector-rotation-analyzer | 并行拉数据 + 算因子 + 读不可信源 (JSON-schema 锁) |
+| **Tier 2** (分析师) | fundamental · technical · whale · quant | 各视角结构化分析 |
+| **Tier 3** (决策) | bull-advocate · bear-advocate · risk-officer · **report-writer** | 辩论后综合 (单一写入者) |
+| **Tier 4** (复盘) | introspector | 自审 + 经验提案 |
+| **Market** | market-scanner · morning-brief-writer · catalyst-extractor (v1.9.7) · global-news-aggregator (v1.9.7) · macro-impact-analyzer (v1.9.7) · mainline-classifier · mainline-writer · intraday-reviewer | 跨股 + 宏观 pipeline |
+| **Meta** | ask | 自由问答, 走 31 个 buddy tool 链 |
 
-## 架构总览
+完整 DAG: [docs/architecture/14_agents.md](docs/architecture/14_agents.md)
+
+---
+
+## 🧠 可插拔记忆
 
 ```
-Orchestrator → Tier 1 (数据, 并行) → Tier 2 (分析师, 并行) → Tier 3 (决策, 串行) → Tier 4 (复盘)
-                  ↓                          ↓                        ↓                  ↓
-              拉数据 + 算因子              4 个分析师            多空 / 风控 / writer    introspector
-              + 读不可信源                 消费 Tier 1 JSON      消费 Tier 2 JSON       自审 + 提议
-              JSON schema 锁死
+memories/
+├── README.md                        # ← 目录索引, 必读
+├── risk-officer/
+│   ├── hard_rules.md                # ← 改这个, 下次研报遵守
+│   └── pitfalls.md                  # FTS5 检索 (大文件)
+├── technical-analyst/
+│   └── factor_insights.md
+└── _shared/
+    └── playbook_V1_V10.md           # 跨 agent 共享
 ```
 
-完整 DAG 与信任模型: [docs/architecture.md](docs/architecture.md).
-
-## LLM Provider 路由 (v1.9.6)
-
-支持 4 个 provider, 不同 provider 走不同网络出口策略:
-
-| Provider | 模型 | 网络出口 (network_profile) | 备注 |
-|---|---|---|---|
-| **qwen** (默认) | qwen3.5-plus / qwen3-max / qwen3.5-flash / qwen3-coder-plus | `domestic` 直连 aliyuncs.com | 国内最快最便宜 |
-| **deepseek** | deepseek-chat / deepseek-reasoner | `intl_clash` 走 Clash + verify=False | Clash fake-ip + MITM 环境 |
-| **openai** | gpt-4o / gpt-4-turbo | `intl_clash` | 同上 |
-| **anthropic** | claude-opus-4-7 / sonnet-4-6 / haiku-4-5 | litellm fallback | API 格式不兼容 OpenAI, 走 litellm |
-
-**切换方式**:
-- TUI 内 `/model deepseek-chat` (秒切, 不重启)
-- 启动时改 `config/llm.yaml::default_model`
-- 程序: `LLMClient.for_agent('ask').with_overrides(provider='deepseek', model='deepseek-reasoner').chat(...)`
-
-代码细节见 `src/financial_analyst/llm/client.py` 注释.
-
-## BYOM — 接入私有模型
-
-`financial-analyst` 是**框架**, 不是固定产品. 插入你自己的私有模型 / loader / collector:
-
-```python
-# G:/my_private_code/my_fm.py
-from financial_analyst.models import BaseModel, ModelRegistry
-
-class MyFMCluster(BaseModel):
-    def predict(self, code, asof):
-        return {"score": ..., "rank_pct": ..., "cluster": ...}
-    def metadata(self):
-        return {"name": "my_fm", "version": "W10"}
-
-ModelRegistry.register("my_fm", MyFMCluster)
-```
-
-```yaml
-# config/plugins.yaml
-load_at_startup:
-  - G:/my_private_code/my_fm.py
-```
-
-然后 `financial-analyst report SH600519` 会把你的模型纳入量化共识. **不需要把私有 checkpoint 推入开源仓库**.
-
-完整指南: [docs/byom.md](docs/byom.md). 示例 (FM cluster / CSV loader / Tushare news collector / pytdx F10 collector) 在 [`examples/`](examples/).
-
-## 数据接入
-
-如果没现成 Qlib 数据目录, 用 CSV ingester:
-
-```yaml
-# config/data_sources.yaml
-sources:
-  - name: my_csv
-    type: csv
-    path: G:/my_data/*.csv
-    code_col: ts_code
-    date_col: trade_date
-    target: ~/.financial-analyst/data/my_csv
-```
+**改 markdown → 下次 agent run 立即生效. 不重启, 不重 build.**
 
 ```bash
-financial-analyst ingest --source my_csv
-# 然后改 config/loaders.yaml 的 qlib_binary.provider_uri.day 指向 target
+# TUI 内沉淀经验:
+> /lesson 大盘股 PE>50 + 60d涨幅>30% 通常是博弈票, 模型信号失效
+
+# 或者直接改文件:
+vim memories/risk-officer/hard_rules.md
 ```
 
-详见 [docs/data_ingest.md](docs/data_ingest.md).
+详见 [memories/README.md](memories/README.md) — 24 个目录用途 + 设计原则.
 
-## 📦 数据集 (HuggingFace)
+---
 
-懒人方案: 我们已经把 A 股历史数据打包发到 HF Hub, `fa init` 自动下载. 三档:
+## 📊 数据集
 
-| 档 | 大小 | 股票池 | 5min | 财务报表 | F10 文本 | TDX 历年财报 | HF Repo |
+HuggingFace 三档预设, `fa init` 自动拉:
+
+| 档 | 大小 | 股票池 | 5min | 财务报表 | F10 文本 | TDX zip | Repo |
 |---|---|---|---|---|---|---|---|
-| **demo** | ~155 MB | 当前 mv top-300 (CSI300) | ❌ | ❌ | ❌ | ❌ | [data-demo](https://huggingface.co/datasets/yifishbossman/financial-analyst-data-demo) |
-| **lite** | ~3 GB | top-800 (CSI800 ≈) | ✅ ~7 天 | ✅ 735MB | ✅ 1323 codes | ❌ | [data-lite](https://huggingface.co/datasets/yifishbossman/financial-analyst-data-lite) |
-| **full** | ~14 GB | 全 5500+ (含退市) | ✅ | ✅ | ✅ | ✅ 257MB | [data-full](https://huggingface.co/datasets/yifishbossman/financial-analyst-data-full) |
+| **demo** | ~155 MB | 300 (CSI300) | ❌ | ❌ | ❌ | ❌ | [data-demo](https://huggingface.co/datasets/yifishbossman/financial-analyst-data-demo) |
+| **lite** | ~3 GB | 800 (CSI800) | ✅ ~7天 | ✅ 735 MB | ✅ 1323 codes | ❌ | [data-lite](https://huggingface.co/datasets/yifishbossman/financial-analyst-data-lite) |
+| **full** | ~14 GB | 5500+ (含退市) | ✅ | ✅ | ✅ | ✅ 257 MB | [data-full](https://huggingface.co/datasets/yifishbossman/financial-analyst-data-full) |
 
-下载:
-```bash
-fa init    # 交互向导, 选档 → 自动 snapshot_download
-```
-
-或手动 Python:
 ```python
 from huggingface_hub import snapshot_download
 snapshot_download(
@@ -209,54 +250,46 @@ snapshot_download(
 )
 ```
 
-发布脚本: `scripts/publish_hf_dataset.py --preset {demo|lite|full} --repo your-name/data-xxx`.
+**双二进制格式**: Qlib `.bin` (时序: `[4-byte float32 start_idx] + [float32 array]`, 给 OHLCV+因子); Parquet (列存, 给财报/事件/F10/行业). 兼容 [Microsoft Qlib](https://github.com/microsoft/qlib) 的 `D.features()` API 直接读.
 
-## 记忆系统
+---
 
-每个 sub-agent 有 `memories/<agent-name>/` 目录, 内含 markdown 文件. 文件在 runtime 被追加到 agent 的 system prompt. v0.2+: FTS5 检索让标记 `memory_mode: retrieval` 的 agent prompt 成本降下来. `memories/<agent>/always_include.txt` 列出的关键文件无条件加载.
+## 🔌 LLM Provider
 
-详见 [docs/memories.md](docs/memories.md) — 原则、文件组织建议、CLI 命令.
+| Provider | 模型 | 网络出口 | 适用场景 |
+|---|---|---|---|
+| **qwen** *(默认)* | `qwen3.5-plus` · `qwen3-coder-plus` | `domestic` (直连, 无 proxy) | 国内最快最便宜 |
+| **deepseek** | `deepseek-chat` · `deepseek-reasoner` | `intl_clash` (Clash + verify=False MITM) | 推理强, 成本低 |
+| **openai** | `gpt-4o` · `gpt-4-turbo` | `intl_clash` | 通用 fallback |
+| **anthropic** | `claude-opus-4-7` · `claude-sonnet-4-6` · `claude-haiku-4-5` | litellm fallback | 顶级质量 (美元定价) |
 
-## Dream Loop — Agent 经验自迭代
-
-跑 `/dream` (或 `financial-analyst dream`):
-1. 把历史研报跟 T+5d / T+20d 实际行情对比打分
-2. introspector sub-agent 找错预测的规律
-3. 把提议 stage 到 `memories/_proposed/<agent>/` 等人工 review
-4. `/memory accept` 合并, `/memory reject` 丢弃
-
-**故意不实现 auto-accept** — 错误的经验更新在量化系统里会复利亏损. 只走人工 review.
-
-详见 [docs/dream_loop.md](docs/dream_loop.md).
-
-## MCP Server
-
-从 Claude Desktop / Claude Code 经 MCP 调用 financial-analyst:
-
-```json
-{
-  "mcpServers": {
-    "financial-analyst": {
-      "command": "financial-analyst-mcp",
-      "env": {"TUSHARE_TOKEN": "...", "DASHSCOPE_API_KEY": "..."}
-    }
-  }
-}
-```
-
-暴露 12 个 tool: ask / quick_quote / quick_factors / memory_search / list_past_reports / read_past_report / list_dream_proposals / mainline / brief / intraday / report / dream. 详见 [docs/mcp.md](docs/mcp.md).
-
-## 测试
-
+TUI 内秒切:
 ```bash
-pytest tests/                                       # 705 个单元 + 集成测试 (mocked)
-FA_E2E=1 pytest tests/integration/test_end_to_end.py  # 真 Tushare + LLM round-trip
+> /model deepseek-reasoner    # 热切换, 不重启
 ```
 
-## 许可
+或改 `config/llm.yaml` 默认. 设计详见 [docs/llm_routing.md](docs/llm_routing.md).
 
-Apache 2.0.
+---
 
-## 免责声明
+## 🤝 贡献
 
-本工具为合格专业人士提供分析师层级的工作产物草案以供 review. 不构成投资建议, 不执行交易, 不写任何 ledger. 用户须自行遵守适用法律法规.
+欢迎 PR. 详见 [CONTRIBUTING.md](CONTRIBUTING.md):
+- 开发循环 (分支 / 测试 / lint / changelog / PR)
+- 新增 sub-agent (registry + memory + yaml + tests)
+- 新增数据源 (`net.py.domestic_session` + `@rate_limited`)
+- Conventional Commits ([angular 风格](https://www.conventionalcommits.org/))
+
+其它文档:
+- [VERSIONING.md](VERSIONING.md) — N-2 LTS, semver 政策
+- [SECURITY.md](SECURITY.md) — 漏洞上报 (private)
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — Contributor Covenant 2.1
+- [docs/journey.md](docs/journey.md) — 中英双语构建历程 (空仓库 → 440 因子 + 25 agent, 2 周)
+
+---
+
+## 📄 许可 + 免责声明
+
+Apache 2.0. **仅供研究 / 教学**. 草拟分析师级工作产物供合格专业人士 review. 不构成投资建议, 不执行交易, 不写任何 ledger. 用户须自行遵守适用法律法规.
+
+<sub>v1.0.0 · 2026-05-25 · made by [@jesson-hh](https://github.com/jesson-hh) · 中英双语</sub>

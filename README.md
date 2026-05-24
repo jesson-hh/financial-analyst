@@ -1,50 +1,171 @@
-# Financial Analyst
+<p align="center">
+  <h1 align="center">觀瀾 · Financial Analyst</h1>
+</p>
 
-**English** | [中文](README_zh.md)
+<p align="center">
+  <strong>One command. 25 AI agents. A 股深度研究.</strong>
+</p>
 
-[![PyPI](https://img.shields.io/pypi/v/financial-analyst.svg)](https://pypi.org/project/financial-analyst/)
-[![Python](https://img.shields.io/pypi/pyversions/financial-analyst.svg)](https://pypi.org/project/financial-analyst/)
-[![tests](https://img.shields.io/badge/tests-712_passed-brightgreen)](https://github.com/jesson-hh/financial-analyst/actions)
-[![license](https://img.shields.io/badge/license-Apache_2.0-green)](LICENSE)
-[![status](https://img.shields.io/badge/release-v1.0.0-success)](https://github.com/jesson-hh/financial-analyst/releases)
-[![alphas](https://img.shields.io/badge/alphas-440-blue)](docs/journey.md)
-[![dataset](https://img.shields.io/badge/data-HF_Hub-yellow)](https://huggingface.co/yifishbossman)
-[![agents](https://img.shields.io/badge/agents-25-blueviolet)](docs/architecture/14_agents.md)
+<p align="center">
+  <em>Turn a 6-digit stock code into a 14-agent deep-dive report — fundamentals · technicals · whale signals · quant scores · bull/bear/risk debate — in ~10 minutes.</em>
+</p>
 
-**A-share single-stock deep-dive multi-agent research workstation.**
+<p align="center">
+  <strong>English</strong> &nbsp;·&nbsp; <a href="README_zh.md">中文</a>
+</p>
 
-> **🎉 v1.0.0 — First public release** (2026-05-25). Following an internal preview series (`v1.9.x`), this is the first publicly stable version. See [CHANGELOG.md](CHANGELOG.md#100--2026-05-25--first-public-release) for the lineage and [VERSIONING.md](VERSIONING.md) for the LTS policy.
+<p align="center">
+  <a href="https://pypi.org/project/financial-analyst/"><img src="https://img.shields.io/pypi/v/financial-analyst.svg?style=flat&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
+  <img src="https://img.shields.io/pypi/pyversions/financial-analyst.svg?style=flat&logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/release-v1.0.0-success?style=flat" alt="Release">
+  <img src="https://img.shields.io/badge/tests-712_passed-brightgreen?style=flat" alt="Tests">
+  <img src="https://img.shields.io/badge/license-Apache_2.0-yellow?style=flat" alt="License">
+  <br>
+  <img src="https://img.shields.io/badge/agents-25-7C3AED?style=flat" alt="Agents">
+  <img src="https://img.shields.io/badge/swarm_presets-5-2563EB?style=flat" alt="Swarm">
+  <img src="https://img.shields.io/badge/buddy_tools-31-0F766E?style=flat" alt="Tools">
+  <img src="https://img.shields.io/badge/alpha_factors-440-FF6B6B?style=flat" alt="Alphas">
+  <a href="https://huggingface.co/yifishbossman"><img src="https://img.shields.io/badge/data-HF_Hub-FFD21E?style=flat&logo=huggingface&logoColor=black" alt="HF Datasets"></a>
+</p>
 
-📖 New here? Read the [build journey & architecture overview](docs/journey.md) (中英双语 / bilingual) — a two-week retrospective from empty repo to 440 alphas + 21 sub-agents.
-
-**14 sub-agents in four trust tiers** — five Tier-1 data fetchers (two of which read untrusted news/F10 with JSON-schema-locked output), four Tier-2 analysts (fundamental, technical, whale-sentiment, quant), four Tier-3 decision agents (bull, bear, risk officer, report writer), and one Tier-4 post-mortem introspector that runs after the writer to self-audit and propose memory updates for human review. Only the report writer can write report files. Memory is pluggable per-agent (`memories/<agent>/*.md`) — edit a markdown, the next report uses it. FTS5-backed retrieval keeps prompt costs ~60% lower than naive full-injection.
-
-See [docs/architecture/14_agents.md](docs/architecture/14_agents.md) for the full DAG + I/O schemas.
-
-Inspired by [Anthropic's financial-services](https://github.com/anthropics/financial-services) (3-tier trust isolation, single-writer pattern) and [HKUDS/Vibe-Trading](https://github.com/HKUDS/Vibe-Trading) (YAML swarm presets, multi-provider LLM).
-
-## What's in v1.0
-
-- **25 agents total** (v1.9.7): 14 single-stock (data → analyst → decision → introspector, see `config/swarm/stock-deep-dive.yaml`) + 10 market-level (incl. morning-brief v2 with overseas/catalyst/rotation + new overseas-radar with global news/macro impact) + 1 meta (ask)
-- **8 swarm presets**: stock-deep-dive, morning-brief (5-agent v2), overseas-radar (new), mainline-radar, intraday-review, dream + more
-- **QlibBinaryLoader** (day + 5min) + **TushareLoader** (HTTP + ParquetCache) + **CSV ingester**
-- **R7-R20 sentiment signals** (board_scorer v5, volume_regime super_distr/tail_surge, whale signals)
-- **Pluggable memory** with FTS5 retrieval + always_include white-list + `_shared/` cross-agent playbook
-- **Dream loop** — agent self-improving memory (OutcomeTracker + Introspector + `memories/_proposed/` staging + human accept/reject)
-- **BYOM** — registry-based plug-in points for models / loaders / collectors / sub-agents / KBs; `config/plugins.yaml` auto-loads user `.py` files at startup
-- **12 MCP tools** for Claude Desktop / Claude Code integration
-- **290 tests** unit + integration (mocked LLM) + 1 opt-in real E2E test
-
-## Quick Start
-
-Three paths to your first report:
-
-### A. PyPI install (recommended, 1 minute)
+<p align="center">
+  <a href="#-what-is-it">What is it</a> &nbsp;·&nbsp;
+  <a href="#-key-features">Features</a> &nbsp;·&nbsp;
+  <a href="#-quick-start">Quick Start</a> &nbsp;·&nbsp;
+  <a href="#-the-25-agents">Agents</a> &nbsp;·&nbsp;
+  <a href="#-pluggable-memory">Memory</a> &nbsp;·&nbsp;
+  <a href="#-datasets">Datasets</a> &nbsp;·&nbsp;
+  <a href="#-llm-providers">LLM</a> &nbsp;·&nbsp;
+  <a href="CONTRIBUTING.md">Contribute</a>
+</p>
 
 ```bash
-pip install financial-analyst
-cp .env.example .env   # edit: TUSHARE_TOKEN + DASHSCOPE_API_KEY
-financial-analyst                  # boot TUI
+pip install financial-analyst==1.0.0    # 1 minute, zero token required for default
+fa init                                  # interactive wizard — pulls HF dataset
+fa report SH600519                       # 14-agent deep-dive (~10 min)
+```
+
+---
+
+## 💡 What Is It
+
+**A-share research workstation that thinks like a buy-side analyst.**
+
+Hand it a stock code; 14 specialized AI sub-agents run in 4 trust tiers:
+
+```
+Tier 1 (data, parallel)  →  Tier 2 (analysts, parallel)  →  Tier 3 (decision, serial)  →  Tier 4 (post-mortem)
+─────────────────────       ─────────────────────────      ───────────────────────         ─────────────
+quote · factors             fundamental                    bull-advocate ─┐
+model · news                technical                      bear-advocate ─┤───→ writer    introspector
+F10 · overseas              whale-sentiment                risk-officer   ┘
+sector-rotation             quant                          (single writer)
+```
+
+Out comes a markdown research report — **rated, attributed, falsifiable**. The `report-writer` is the **only** agent allowed to write report files. Untrusted news/F10 sources are JSON-schema-locked at Tier-1 (no prompt injection). Memory is markdown — edit a `.md`, next report uses it. FTS5 retrieval cuts prompt cost ~60%.
+
+**Inspired by**: [Anthropic's financial-services](https://github.com/anthropics/financial-services) (3-tier trust isolation) and [HKUDS/Vibe-Trading](https://github.com/HKUDS/Vibe-Trading) (YAML swarm presets).
+
+---
+
+## ✨ Key Features
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### 🎯 14-agent stock deep-dive
+Hand it `SH600519`, get a full research report in ~10 min — fundamentals, technicals, whale signals, quant scores, bull/bear/risk debate, post-mortem self-audit. **Only `report-writer` writes files.**
+
+```bash
+fa report SH600519
+```
+
+</td>
+<td width="50%" valign="top">
+
+### 🌅 Morning brief (5-agent v2)
+Pre-market scan: overnight US + HK + VIX, A-share 异动, catalyst extraction, sector rotation, AI-written summary.
+
+```bash
+fa brief
+```
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### 🌍 Overseas radar (v1.9.7)
+International transmission analysis: SPX/NDX/HSI/VIX/USDCNY → A-share follow-through judgment + actionable signals for tomorrow.
+
+```bash
+fa overseas-radar
+```
+
+</td>
+<td width="50%" valign="top">
+
+### 📈 Monthly mainline radar
+5-state industry-chain classifier (mainline / initiation / revival / decay / cold). Catches `init → mainline` golden signal (+5.54pp fwd_60d, 87% win rate).
+
+```bash
+fa mainline
+```
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### 🧠 Pluggable memory
+24 per-agent memory dirs as markdown. Edit `risk-officer/hard_rules.md`, next report respects it. No code change. `_shared/playbook_V1_V10.md` cross-agent.
+
+</td>
+<td width="50%" valign="top">
+
+### 💤 Dream loop (self-improving)
+After each report, `introspector` flags quality issues. Aggregator clusters proposals → `_proposed/` for human review. **No auto-merge** (errors compound in quant).
+
+```bash
+fa dream --since 30
+```
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### 🔌 4-provider LLM routing
+`qwen` (domestic direct) · `deepseek-chat/reasoner` (Clash + MITM) · `openai` · `anthropic`. Per-provider network profile, no fake-ip hijack.
+
+```bash
+financial-analyst  # /model deepseek-reasoner
+```
+
+</td>
+<td width="50%" valign="top">
+
+### 🧬 BYOM extensibility
+Drop a `.py` into `config/plugins.yaml`. Your private model joins the quant consensus. **Your checkpoints never enter the open-source repo.**
+
+See [examples/](examples/) for FM cluster / CSV loader / TDX F10 patterns.
+
+</td>
+</tr>
+</table>
+
+---
+
+## ⚡ Quick Start
+
+### A. PyPI (recommended, 1 minute)
+
+```bash
+pip install financial-analyst==1.0.0
+cp .env.example .env       # add DASHSCOPE_API_KEY (qwen default)
+fa init                    # interactive wizard — pulls HF dataset
+fa report SH600519         # first deep-dive
 ```
 
 ### B. Docker (zero local setup, 2 minutes)
@@ -52,14 +173,8 @@ financial-analyst                  # boot TUI
 ```bash
 git clone https://github.com/jesson-hh/financial-analyst.git
 cd financial-analyst
-cp .env.example .env   # edit your keys
-docker compose up      # → interactive TUI
-```
-
-Run one-shot inside container:
-```bash
-docker compose run --rm fa report SH600519
-docker compose run --rm fa ask "PE of SH600519"
+cp .env.example .env
+docker compose up          # → interactive TUI
 ```
 
 ### C. Source (development)
@@ -67,142 +182,114 @@ docker compose run --rm fa ask "PE of SH600519"
 ```bash
 git clone https://github.com/jesson-hh/financial-analyst.git
 cd financial-analyst
-python -m venv .venv && .venv\Scripts\activate    # Windows; or `source .venv/bin/activate`
-pip install -e .[dev]
-cp .env.example .env
-financial-analyst
+pip install -e ".[dev]"
+pytest tests/              # 712 tests, ~8 min
 ```
 
-## First commands
+---
 
-In TUI:
+## 🤖 The 25 Agents
+
+| Tier | Agents | Role |
+|---|---|---|
+| **Tier 1** (data) | quote-fetcher · factor-computer · model-predictor · **news-reader** · **f10-reader** · overseas-market-scanner · sector-rotation-analyzer | Parallel fetch + factor + read untrusted (JSON-schema-locked) |
+| **Tier 2** (analysts) | fundamental · technical · whale · quant | Per-perspective structured analysis |
+| **Tier 3** (decision) | bull-advocate · bear-advocate · risk-officer · **report-writer** | Debate then synthesize (only writer can persist) |
+| **Tier 4** (audit) | introspector | Post-mortem self-audit + memory proposals |
+| **Market** | market-scanner · morning-brief-writer · catalyst-extractor (v1.9.7) · global-news-aggregator (v1.9.7) · macro-impact-analyzer (v1.9.7) · mainline-classifier · mainline-writer · intraday-reviewer | Cross-stock and macro pipelines |
+| **Meta** | ask | Free-form Q&A via tool chain (31 buddy tools) |
+
+Full DAG: [docs/architecture/14_agents.md](docs/architecture/14_agents.md)
+
+---
+
+## 🧠 Pluggable Memory
+
 ```
-> 看看 600519                         # 完整深度研报 (~10 min)
-> /ask SH600519 现在 PE 多少           # 秒级问答
-> /mainline                          # 月级主线雷达
-> /brief                             # 早盘异动扫描
-> /intraday                          # 午休复盘
-> /memory search 游资                 # 搜经验库
-> /dream --since 30                  # 经验自迭代
-> /sessions new my-project           # 多会话切换
-> /quit
+memories/
+├── README.md                        # ← directory index, must-read
+├── risk-officer/
+│   ├── hard_rules.md                # ← edit this → next report uses it
+│   └── pitfalls.md                  # FTS5-retrieved (large file)
+├── technical-analyst/
+│   └── factor_insights.md
+└── _shared/
+    └── playbook_V1_V10.md           # cross-agent shared
 ```
 
-One-shot:
+**Edit a markdown → next agent run picks it up. No restart, no rebuild.**
+
 ```bash
-financial-analyst report SH600519 --asof 2026-05-15
-financial-analyst ask -f question.txt
-financial-analyst report -f codes.txt --trace
-echo "SH600519 PE 多少" | financial-analyst ask
+# Persist a lesson via slash command in TUI:
+> /lesson Mega-cap PE>50 + 60d return>30% usually means liquidity-game stock
+
+# Or just write the file:
+vim memories/risk-officer/hard_rules.md
 ```
 
-## Architecture
+See [memories/README.md](memories/README.md) for the 24 dir index and design principles.
 
-```
-Orchestrator → Tier 1 (data, parallel) → Tier 2 (analysts, parallel) → Tier 3 (decision, serial)
-                  ↓                          ↓                              ↓
-              fetch + factor              4 analysts                  bull/bear/risk → writer
-              + read untrusted            consume tier 1 JSON         consume tier 2 JSON
-              with JSON schemas
-```
+---
 
-See [docs/architecture.md](docs/architecture.md) for the full DAG and trust model.
+## 📊 Datasets
 
-## Extending — Bring Your Own Models (BYOM)
+Three preset bundles on HuggingFace, `fa init` auto-pulls:
 
-`financial-analyst` is a **framework**, not a fixed product. Plug in your own private models / loaders / collectors:
+| Tier | Size | Stocks | 5min | Financials | F10 text | TDX zip | Repo |
+|---|---|---|---|---|---|---|---|
+| **demo** | ~155 MB | 300 (CSI300) | ❌ | ❌ | ❌ | ❌ | [data-demo](https://huggingface.co/datasets/yifishbossman/financial-analyst-data-demo) |
+| **lite** | ~3 GB | 800 (CSI800) | ✅ ~7d | ✅ 735 MB | ✅ 1323 codes | ❌ | [data-lite](https://huggingface.co/datasets/yifishbossman/financial-analyst-data-lite) |
+| **full** | ~14 GB | 5500+ (all A) | ✅ | ✅ | ✅ | ✅ 257 MB | [data-full](https://huggingface.co/datasets/yifishbossman/financial-analyst-data-full) |
 
 ```python
-# G:/my_private_code/my_fm.py
-from financial_analyst.models import BaseModel, ModelRegistry
-
-class MyFMCluster(BaseModel):
-    def predict(self, code, asof):
-        return {"score": ..., "rank_pct": ..., "cluster": ...}
-    def metadata(self):
-        return {"name": "my_fm", "version": "W10"}
-
-ModelRegistry.register("my_fm", MyFMCluster)
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id="yifishbossman/financial-analyst-data-lite",
+    repo_type="dataset",
+    local_dir="~/.financial-analyst/data",
+)
 ```
 
-```yaml
-# config/plugins.yaml
-load_at_startup:
-  - G:/my_private_code/my_fm.py
-```
+**Two binary formats**: Qlib `.bin` (time-series, `[4-byte float32 start_idx] + [float32 array]`) for OHLCV+factors; Parquet (columnar) for financials/events/F10/industry. Compatible with [Microsoft Qlib](https://github.com/microsoft/qlib) and `D.features()` API directly.
 
-Now `financial-analyst report SH600519` includes your model in the quant consensus. **No proprietary checkpoint enters the open-source repo.**
+---
 
-See [docs/byom.md](docs/byom.md) for the full guide. Examples for FM cluster / CSV loader / Tushare news collector / pytdx F10 collector are in [`examples/`](examples/).
+## 🔌 LLM Providers
 
-## Data Ingestion
+| Provider | Models | Network profile | Use case |
+|---|---|---|---|
+| **qwen** *(default)* | `qwen3.5-plus` · `qwen3-coder-plus` | `domestic` (direct, no proxy) | 国内最快最便宜 |
+| **deepseek** | `deepseek-chat` · `deepseek-reasoner` | `intl_clash` (Clash + verify=False MITM) | strong reasoning, low cost |
+| **openai** | `gpt-4o` · `gpt-4-turbo` | `intl_clash` | universal fallback |
+| **anthropic** | `claude-opus-4-7` · `claude-sonnet-4-6` · `claude-haiku-4-5` | litellm fallback | top quality (USD pricing) |
 
-If you don't have a Qlib data directory, ingest your CSVs:
-
-```yaml
-# config/data_sources.yaml
-sources:
-  - name: my_csv
-    type: csv
-    path: G:/my_data/*.csv
-    code_col: ts_code
-    date_col: trade_date
-    target: ~/.financial-analyst/data/my_csv
-```
-
+Switch live in TUI:
 ```bash
-financial-analyst ingest --source my_csv
-# Then point config/loaders.yaml `qlib_binary.provider_uri.day` at the target
+> /model deepseek-reasoner    # hot-swap, no restart
 ```
 
-See [docs/data_ingest.md](docs/data_ingest.md).
+Or set default in `config/llm.yaml`. See [docs/llm_routing.md](docs/llm_routing.md) for the network_profile design.
 
-## Memory System
+---
 
-Each sub-agent has `memories/<agent-name>/` with markdown files. Files are appended to the agent's system prompt at runtime. v0.2+: FTS5 retrieval keeps prompt cost down for agents marked `memory_mode: retrieval`. Critical files listed in `memories/<agent>/always_include.txt` are loaded unconditionally.
+## 🤝 Contributing
 
-See [docs/memories.md](docs/memories.md) for principles, file-organization advice, and CLI commands.
+PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for:
+- Development loop (branch / test / lint / changelog / PR)
+- Adding a new sub-agent (registry + memory + yaml + tests)
+- Adding a new data source (`net.py.domestic_session` + `@rate_limited`)
+- Conventional commits ([angular preset](https://www.conventionalcommits.org/))
 
-## Dream Loop — Agent Self-Improving Memory
+Other docs:
+- [VERSIONING.md](VERSIONING.md) — N-2 LTS, semver policy
+- [SECURITY.md](SECURITY.md) — vuln reporting (private)
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — Contributor Covenant 2.1
+- [docs/journey.md](docs/journey.md) — bilingual build journey (empty repo → 440 alphas + 25 agents, ~2 weeks)
 
-Run `/dream` (or `financial-analyst dream`) to:
-1. Score past reports against T+5d / T+20d actual prices.
-2. Have an introspector sub-agent identify patterns in wrong predictions.
-3. Stage proposals in `memories/_proposed/<agent>/` for human review.
-4. `/memory accept` merges; `/memory reject` discards.
+---
 
-**Auto-accept is intentionally NOT implemented** — incorrect memory updates compound losses in quant systems. Human review only.
+## 📄 License & Disclaimer
 
-See [docs/dream_loop.md](docs/dream_loop.md).
+Apache 2.0. **Research and educational purposes only**. Drafts analyst-grade work product for review by qualified professionals. Does not make investment recommendations, execute transactions, or post to any ledger. You are responsible for compliance with applicable laws.
 
-## MCP Server
-
-Use financial-analyst from Claude Desktop / Claude Code via MCP:
-
-```json
-{
-  "mcpServers": {
-    "financial-analyst": {
-      "command": "financial-analyst-mcp",
-      "env": {"TUSHARE_TOKEN": "...", "DASHSCOPE_API_KEY": "..."}
-    }
-  }
-}
-```
-
-12 tools exposed (ask / quick_quote / quick_factors / memory_search / list_past_reports / read_past_report / list_dream_proposals / mainline / brief / intraday / report / dream). See [docs/mcp.md](docs/mcp.md).
-
-## Tests
-
-```bash
-pytest tests/                                       # 291 unit + integration tests (mocked)
-FA_E2E=1 pytest tests/integration/test_end_to_end.py  # real Tushare + LLM round-trip
-```
-
-## License
-
-Apache 2.0.
-
-## Disclaimer
-
-Drafts analyst work product for review by qualified professionals. Does not make investment recommendations, execute transactions, or post to any ledger. You are responsible for compliance with applicable laws and regulations.
+<sub>v1.0.0 · 2026-05-25 · made by [@jesson-hh](https://github.com/jesson-hh) · bilingual zh/en</sub>
