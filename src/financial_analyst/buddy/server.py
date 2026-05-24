@@ -315,8 +315,31 @@ def build_app():
         return JSONResponse({"ok": True, "conversation": conv})
 
     @app.delete("/conversations/{cid}")
-    async def conv_delete(cid: str):
-        return JSONResponse({"ok": conv_store.delete(cid)})
+    async def conv_delete(cid: str, permanent: int = 0):
+        """**软删** 默认 — 移动到 ``_trash/`` 子目录, 30 天后自动 purge.
+        ``?permanent=1`` 立刻硬删 (跳过回收站, 不可恢复)."""
+        if permanent:
+            ok = conv_store.permanent_delete(cid)
+        else:
+            ok = conv_store.delete(cid)
+        return JSONResponse({"ok": ok, "permanent": bool(permanent)})
+
+    @app.get("/conversations/trash")
+    async def conv_list_trash():
+        """回收站会话列表 (含 deletedAt). UI '已删除' 标签调这个."""
+        # 列表时顺便 purge 老的 (>30 天)
+        purged = conv_store.purge_old_trash()
+        items = conv_store.list_trash()
+        return JSONResponse({"ok": True, "conversations": items,
+                             "purged": purged})
+
+    @app.post("/conversations/{cid}/restore")
+    async def conv_restore(cid: str, body: Optional[Dict[str, Any]] = None):
+        """从回收站恢复一份会话. Body 可选 ``{trash_filename: "..."}``
+        指定要恢复哪个副本 (多次删同 cid 时有多份副本)."""
+        trash_fn = (body or {}).get("trash_filename") if body else None
+        ok = conv_store.restore(cid, trash_filename=trash_fn)
+        return JSONResponse({"ok": ok})
 
     # ── 雪球社区: 个股评论 (本地秒出 / refresh 现拉) + 情绪聚合 ──
     @app.get("/comments")
@@ -627,6 +650,24 @@ def build_app():
              "note": r.note, "desc": r.describe(), "last_fired": r.last_fired}
             for r in store.list()
         ]})
+
+    @app.delete("/alerts/{rule_id:path}")
+    async def alert_remove(rule_id: str):
+        """删一条盯盘规则.
+
+        ``rule_id`` 形如 ``SH600519:price_below`` (来自 GET /alerts 返回的 ``id``),
+        或仅 ``SH600519`` 删该 code 全部规则.
+
+        UI 自选墙 / 盯盘列表的删除按钮调这个. 与 LLM 调 ``alert_remove`` tool 等价,
+        但前端不需要走对话.
+        """
+        from financial_analyst.buddy.alerts import AlertStore
+        store = AlertStore()
+        ok = store.remove(rule_id)
+        if not ok:
+            return JSONResponse({"ok": False, "rule_id": rule_id,
+                                 "reason": "rule not found"}, status_code=404)
+        return JSONResponse({"ok": True, "rule_id": rule_id})
 
     @app.get("/alerts/check")
     async def alerts_check():

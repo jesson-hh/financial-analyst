@@ -889,13 +889,40 @@ function LeftRail({ s, dispatch, startAgent }) {
             </div>
           )}
           {alerts.map((a) => (
-            <div key={a.id} style={{ padding: '7px 20px', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div key={a.id} className="alert-row"
+                 style={{ padding: '7px 20px', display: 'flex', alignItems: 'center', gap: 8, position: 'relative' }}
+                 onMouseEnter={(e) => { const x = e.currentTarget.querySelector('.alert-del'); if (x) x.style.opacity = 1; }}
+                 onMouseLeave={(e) => { const x = e.currentTarget.querySelector('.alert-del'); if (x) x.style.opacity = 0; }}>
               <span style={{ width: 6, height: 6, background: a.hot ? 'var(--yin)' : 'var(--ink-3)', flexShrink: 0, borderRadius: a.hot ? 0 : '50%' }} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div className="serif" style={{ fontSize: 12, color: 'var(--ink-1)' }}>{a.name}</div>
                 <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)' }}>{a.rule}</div>
               </div>
               <div className="mono" style={{ fontSize: 10, color: 'var(--ink-2)' }}>{a.cur}</div>
+              {s.backendUrl && (a.id || a.code) && (
+                <span className="alert-del"
+                      title="删除此盯盘"
+                      style={{ opacity: 0, transition: 'opacity 0.15s', cursor: 'pointer',
+                               color: 'var(--ink-3)', fontSize: 14, marginLeft: 4, lineHeight: 1 }}
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        if (!confirm(`删除盯盘 "${a.name || a.code}" ?`)) return;
+                        const ruleId = a.id || a.code;
+                        try {
+                          const r = await fetch(`${s.backendUrl}/alerts/${encodeURIComponent(ruleId)}`, { method: 'DELETE' });
+                          const j = await r.json();
+                          if (j.ok) {
+                            // 局部刷新: 拉新的 /alerts 列表
+                            const ar = await fetch(`${s.backendUrl}/alerts`).then(r => r.json());
+                            if (ar && Array.isArray(ar.alerts)) dispatch({ type: 'set_alerts', alerts: ar.alerts });
+                          } else {
+                            alert(`删除失败: ${j.reason || 'unknown'}`);
+                          }
+                        } catch (err) {
+                          alert(`删除失败: ${err.message}`);
+                        }
+                      }}>×</span>
+              )}
             </div>
           ))}
         </RailSection>
@@ -917,6 +944,8 @@ function LeftRail({ s, dispatch, startAgent }) {
             );
           })}
         </RailSection>
+
+        {s.backendUrl && <TrashSection backendUrl={s.backendUrl} dispatch={dispatch} sessions={s.sessions} />}
       </div>
       {mgrOpen && <WatchlistManager s={s} dispatch={dispatch} onClose={() => setMgrOpen(false)} />}
     </aside>
@@ -1035,6 +1064,123 @@ function timeAgo(ts) {
   if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前';
   if (diff < 86400) return Math.floor(diff / 3600) + ' 小时前';
   return Math.floor(diff / 86400) + ' 天前';
+}
+
+
+// "已删除会话" 折叠段 — 点开拉 /conversations/trash, 每条可 restore / 永久删
+function TrashSection({ backendUrl, dispatch, sessions }) {
+  const [open, setOpen] = useState(false);
+  const [items, setItems] = useState(null);  // null = 未拉; [] = 拉过但空
+  const [loading, setLoading] = useState(false);
+
+  const fetchTrash = async () => {
+    setLoading(true);
+    try {
+      const r = await fetch(`${backendUrl}/conversations/trash`).then(r => r.json());
+      setItems(Array.isArray(r.conversations) ? r.conversations : []);
+    } catch (e) {
+      console.warn('[guanlan] /conversations/trash 失败:', e);
+      setItems([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (next && items === null) fetchTrash();
+  };
+
+  const handleRestore = async (cid, trashFn) => {
+    try {
+      const r = await fetch(`${backendUrl}/conversations/${encodeURIComponent(cid)}/restore`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trash_filename: trashFn }),
+      }).then(r => r.json());
+      if (r.ok) {
+        // 拉回 live conv 数据 + dispatch merge
+        const conv = await fetch(`${backendUrl}/conversations/${encodeURIComponent(cid)}`).then(r => r.json());
+        if (conv && conv.ok) {
+          // 当前 sessions 里没有这个 cid → 加进去
+          const exists = sessions.find(x => x.id === cid);
+          if (!exists) {
+            dispatch({ type: 'merge_sessions', sessions: [conv.conversation] });
+          }
+        }
+        fetchTrash();   // 刷新回收站
+      } else {
+        alert('恢复失败');
+      }
+    } catch (err) {
+      alert(`恢复失败: ${err.message}`);
+    }
+  };
+
+  const handlePermDelete = async (cid) => {
+    if (!confirm('永久删除? 不可恢复.')) return;
+    try {
+      await fetch(`${backendUrl}/conversations/${encodeURIComponent(cid)}?permanent=1`, { method: 'DELETE' });
+      fetchTrash();
+    } catch (err) {
+      alert(`删除失败: ${err.message}`);
+    }
+  };
+
+  return (
+    <div style={{ paddingTop: 6, paddingBottom: 8 }}>
+      <div
+        onClick={toggle}
+        style={{ padding: '0 20px', cursor: 'pointer', display: 'flex', alignItems: 'center',
+                 justifyContent: 'space-between', userSelect: 'none' }}>
+        <div className="serif" style={{ fontSize: 10, color: 'var(--ink-3)', letterSpacing: 1 }}>
+          {open ? '▾' : '▸'} 已删除会话 {items !== null && `· ${items.length}`}
+        </div>
+        {open && items !== null && items.length > 0 && (
+          <span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)' }}>30 天后自动清</span>
+        )}
+      </div>
+      {open && (
+        <div style={{ marginTop: 4 }}>
+          {loading && <div className="serif" style={{ fontSize: 11, color: 'var(--ink-3)', padding: '6px 20px' }}>加载中...</div>}
+          {!loading && items !== null && items.length === 0 && (
+            <div className="serif" style={{ fontSize: 11, color: 'var(--ink-3)', padding: '6px 20px' }}>
+              回收站是空的
+            </div>
+          )}
+          {!loading && items && items.map((it) => (
+            <div key={it._trash_filename}
+                 className="hover-row"
+                 style={{ padding: '6px 20px', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="serif" style={{ fontSize: 12, color: 'var(--ink-1)',
+                                                  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {it.title || '(无标题)'}
+                </div>
+                <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)' }}>
+                  {(it.messages || []).length} 条 · 删于 {timeAgo(it.deletedAt || 0)}
+                </div>
+              </div>
+              <button
+                onClick={() => handleRestore(it.id, it._trash_filename)}
+                title="恢复"
+                style={{ background: 'transparent', border: 'none', color: 'var(--yin)',
+                         cursor: 'pointer', padding: 4, fontSize: 11 }}>
+                ↺
+              </button>
+              <button
+                onClick={() => handlePermDelete(it.id)}
+                title="永久删除"
+                style={{ background: 'transparent', border: 'none', color: 'var(--ink-3)',
+                         cursor: 'pointer', padding: 4, fontSize: 12, lineHeight: 1 }}>
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function RailSection({ label, right, children }) {

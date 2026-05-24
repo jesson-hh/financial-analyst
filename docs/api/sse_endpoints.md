@@ -41,8 +41,11 @@ curl http://127.0.0.1:9999/health
 | POST | `/conversations` | 保存会话 | <50ms |
 | GET | `/conversations` | 列出已保存会话 | <50ms |
 | GET | `/conversations/{cid}` | 读取一个会话 | <50ms |
-| DELETE | `/conversations/{cid}` | 删除一个会话 | <50ms |
+| DELETE | `/conversations/{cid}` | **软删** (移到 _trash/, 30 天自动 purge). `?permanent=1` 立刻硬删 | <50ms |
+| GET | `/conversations/trash` | 列出回收站会话 (含 deletedAt) | <50ms |
+| POST | `/conversations/{cid}/restore` | 从回收站恢复 (body 可选 `{trash_filename}` 指定副本) | <50ms |
 | GET | `/alerts` | 列出价格预警规则 | <50ms |
+| DELETE | `/alerts/{rule_id}` | 删一条盯盘规则 (UI ❌ 按钮) | <50ms |
 | GET | `/alerts/check` | 评估一次预警 (开盘内才评估) | ~500ms |
 
 ---
@@ -344,9 +347,11 @@ UI 自选股批量加用. 接受 6 位代码 / SH/SZ/BJ 前缀 / 名称.
 
 ---
 
-## /conversations CRUD — 多会话磁盘存储
+## /conversations CRUD + 回收站 — 多会话磁盘存储
 
-浏览器缓存清了也不丢. 存 `~/.financial-analyst/data/conversations/{cid}.json`.
+浏览器缓存清了也不丢. 存 `~/.financial-analyst/conversations/{cid}.json`.
+**v1.9.5 起 DELETE 默认软删** (move to `_trash/` 子目录), 30 天自动 purge, 支持
+restore.
 
 ```bash
 # 保存
@@ -354,39 +359,72 @@ curl -X POST http://127.0.0.1:9999/conversations \
   -H 'Content-Type: application/json' \
   -d '{"id": "abc", "title": "茅台研究", "messages": [...]}'
 
-# 列出
+# 列出 live
 curl http://127.0.0.1:9999/conversations
 # → {"ok": true, "conversations": [{"id": "abc", "title": "...", "updatedAt": ...}, ...]}
 
 # 读一条
 curl http://127.0.0.1:9999/conversations/abc
 
-# 删
+# 软删 (默认, 移到 _trash/)
 curl -X DELETE http://127.0.0.1:9999/conversations/abc
+# → {"ok": true, "permanent": false}
+
+# 列回收站
+curl http://127.0.0.1:9999/conversations/trash
+# → {"ok": true, "conversations": [{"id": "abc", "deletedAt": 1700000000000,
+#                                   "_trash_filename": "abc__1700000000000.json"}],
+#    "purged": 0}    ← 顺便清掉 >30 天的, 这次清了 0 个
+
+# 恢复 (默认挑最新副本)
+curl -X POST http://127.0.0.1:9999/conversations/abc/restore \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+# → {"ok": true}
+
+# 恢复指定副本 (多次删同 cid 时, 从 list_trash 拿 _trash_filename)
+curl -X POST http://127.0.0.1:9999/conversations/abc/restore \
+  -H 'Content-Type: application/json' \
+  -d '{"trash_filename": "abc__1700000000000.json"}'
+
+# 永久删 (跳过回收站, 不可恢复)
+curl -X DELETE 'http://127.0.0.1:9999/conversations/abc?permanent=1'
+# → {"ok": true, "permanent": true}
 ```
+
+回收站行为:
+- delete 默认 → 软删 (UI 上点 ❌ 用户期望可恢复)
+- 30 天后 list_trash 时自动 purge (`purge_old_trash(ttl_days=30)`)
+- restore 时如果 live 同 cid 已存在 (用户软删后又建同 cid 新会话), restore 自动加 `_restored_<ts>` 后缀避免覆盖
 
 ---
 
-## /alerts + /alerts/check — 盯盘价格预警
+## /alerts + /alerts/check + DELETE /alerts/{id} — 盯盘价格预警
 
-存 `~/.financial-analyst/alerts.yaml`. UI 自选股价格下添加 "跌破 X 提醒我" 调这个.
+存 `~/.financial-analyst/alerts.yaml`. UI 自选股价格下添加 "跌破 X 提醒我" 调 `/run`
+(走对话 add_alert tool), 列出走 `/alerts`, **删除走 `DELETE /alerts/{rule_id}`**.
 
 ```bash
 # 列规则
 curl http://127.0.0.1:9999/alerts
-# → {"ok": true, "alerts": [{"id": 1, "code": "SH600519", "kind": "below",
+# → {"ok": true, "alerts": [{"id": "SH600519:price_below", "code": "SH600519", "kind": "price_below",
 #                            "threshold": 1200, "note": "...", "desc": "茅台跌破1200"}]}
+
+# 删规则 (UI ❌ 按钮调这个, v1.9.5 新增)
+curl -X DELETE http://127.0.0.1:9999/alerts/SH600519:price_below
+# → {"ok": true, "rule_id": "SH600519:price_below"}
+# 删某 code 全部规则: DELETE /alerts/SH600519 (不带 :kind)
 
 # 评估一次 (开盘内才真评估, 否则空)
 curl http://127.0.0.1:9999/alerts/check
 # → {"ok": true, "session": "open", "fired": [
-#       {"id": 1, "desc": "茅台跌破1200", "price": 1195.00, ...}
+#       {"id": "SH600519:price_below", "desc": "茅台跌破1200", "price": 1195.00, ...}
 #   ]}
 # 非交易时段: {"ok": true, "session": "closed", "fired": [], "note": "非交易时段, 不评估"}
 ```
 
-> 当前**没有 POST/DELETE /alerts**, 规则通过 `buddy/agent.py` 的工具 `add_alert` / `remove_alert`
-> 在对话里加. UI 添加按钮也是发一条预制 prompt 到 `/run`. 未来要加 REST 直管理见 roadmap.
+添加规则**没有 POST /alerts** (避免单 REST 端点要复用 `add_alert` tool 的所有验证逻辑),
+通过 `/run` 走 `add_alert` tool 在对话里加.
 
 ---
 
