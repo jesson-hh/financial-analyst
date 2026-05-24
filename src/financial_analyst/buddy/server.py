@@ -54,7 +54,7 @@ class LessonReq(BaseModel):
 
 
 class AlertAddReq(BaseModel):
-    """添加盯盘规则. 来自 UI 侧边栏 "+ 添加" 按钮."""
+    """Add a price-watch rule. Invoked from the UI sidebar's "+ Add" button."""
     code: str
     kind: str = "price_below"   # price_below / price_above / pct_above / pct_below
     threshold: float
@@ -79,9 +79,10 @@ def _sse(event: str, **data: Any) -> str:
 
 
 def _safe_json_dumps(data) -> str:
-    """SSE JSON 序列化: 把 NaN/Inf 替换成 None (浏览器 JSON.parse 不认 'NaN'/'Infinity'
-    字面量, 否则整个 SSE 事件解析失败 — 立昂微速览卡曾因 pe=NaN 永不渲染过).
-    Python json.dumps 默认 allow_nan=True, 这是个静默坑."""
+    """SSE JSON serialization: replace NaN/Inf with None (browser JSON.parse does not
+    accept 'NaN'/'Infinity' literals, which breaks the entire SSE event — the LianAnWei
+    quick-view card once permanently failed to render because pe=NaN).
+    Python json.dumps defaults to allow_nan=True, which is a silent pitfall."""
     import math as _math
     def _clean(x):
         if isinstance(x, float) and not _math.isfinite(x):
@@ -104,10 +105,12 @@ async def _comments_sentiment(items: list) -> Optional[Dict[str, Any]]:
         return None
     try:
         from financial_analyst.llm.client import LLMClient
-        # 注: 试过换 qwen3.5-flash 但供应商不认这名 (BadRequestError model not supported);
-        # deepseek 连不上, anthropic 无 key. 只能用 qwen3.5-plus, 单次 ~10-20s.
-        # 前端已改为两次调用模式 (sentiment=0 先秒回评论, sentiment=1 后台拉情绪),
-        # 所以这里慢一些也不阻塞 UI.
+        # Note: tried switching to qwen3.5-flash but the provider does not accept that name
+        # (BadRequestError model not supported); deepseek is unreachable, anthropic has no
+        # key. Only qwen3.5-plus works, ~10-20s per call.
+        # The front-end has been switched to a two-call pattern (sentiment=0 returns comments
+        # instantly first, sentiment=1 fetches sentiment in the background), so the latency
+        # here no longer blocks the UI.
         client = LLMClient.for_agent("buddy")
         resp = await client.chat(
             messages=[
@@ -166,7 +169,7 @@ def build_app():
     # turn_id -> asyncio.Future awaiting the user's y/n/a choice
     pending_confirms: Dict[str, "asyncio.Future[str]"] = {}
 
-    # v1.9.3: session_id -> BuddyAgent, reused across /run so追问 keeps
+    # v1.9.3: session_id -> BuddyAgent, reused across /run so follow-up queries keep
     # conversation history. Bounded LRU so memory doesn't grow forever.
     from collections import OrderedDict
     sessions: "OrderedDict[str, BuddyAgent]" = OrderedDict()
@@ -315,12 +318,13 @@ def build_app():
     async def conv_list():
         return JSONResponse({"ok": True, "conversations": conv_store.list()})
 
-    # ⚠ 静态路径 /conversations/trash 必须在动态 /conversations/{cid} 之前注册,
-    # 否则 FastAPI 会把 "trash" 当成 cid 走 conv_get 返 404 (踩坑 2026-05-24).
+    # ⚠ The static path /conversations/trash MUST be registered before the dynamic
+    # /conversations/{cid}, otherwise FastAPI will treat "trash" as a cid and hit
+    # conv_get returning 404 (pitfall hit on 2026-05-24).
     @app.get("/conversations/trash")
     async def conv_list_trash():
-        """回收站会话列表 (含 deletedAt). UI '已删除' 标签调这个."""
-        # 列表时顺便 purge 老的 (>30 天)
+        """Trash conversation list (includes deletedAt). Called by the UI 'Deleted' tab."""
+        # While listing, also purge old ones (>30 days)
         purged = conv_store.purge_old_trash()
         items = conv_store.list_trash()
         return JSONResponse({"ok": True, "conversations": items,
@@ -328,8 +332,8 @@ def build_app():
 
     @app.post("/conversations/{cid}/restore")
     async def conv_restore(cid: str, body: Optional[Dict[str, Any]] = None):
-        """从回收站恢复一份会话. Body 可选 ``{trash_filename: "..."}``
-        指定要恢复哪个副本 (多次删同 cid 时有多份副本)."""
+        """Restore one conversation from the trash. Body optionally takes ``{trash_filename: "..."}``
+        to pick which copy to restore (multiple copies may exist when the same cid was deleted repeatedly)."""
         trash_fn = (body or {}).get("trash_filename") if body else None
         ok = conv_store.restore(cid, trash_filename=trash_fn)
         return JSONResponse({"ok": ok})
@@ -343,15 +347,15 @@ def build_app():
 
     @app.delete("/conversations/{cid}")
     async def conv_delete(cid: str, permanent: int = 0):
-        """**软删** 默认 — 移动到 ``_trash/`` 子目录, 30 天后自动 purge.
-        ``?permanent=1`` 立刻硬删 (跳过回收站, 不可恢复)."""
+        """**Soft delete** by default — move to the ``_trash/`` subdirectory and auto-purge after 30 days.
+        ``?permanent=1`` does an immediate hard delete (skips trash, unrecoverable)."""
         if permanent:
             ok = conv_store.permanent_delete(cid)
         else:
             ok = conv_store.delete(cid)
         return JSONResponse({"ok": ok, "permanent": bool(permanent)})
 
-    # ── 雪球社区: 个股评论 (本地秒出 / refresh 现拉) + 情绪聚合 ──
+    # ── Xueqiu community: per-stock comments (local instant / refresh live-pulls) + sentiment aggregation ──
     @app.get("/comments")
     async def comments(code: str, refresh: int = 0, limit: int = 8, sentiment: int = 0):
         from financial_analyst.buddy.tools import normalize_code, _format_social_posts
@@ -378,7 +382,7 @@ def build_app():
         return JSONResponse({"ok": err is None, "comments": items,
                              "sentiment": senti, "error": err})
 
-    # ── 雪球社区: 热股榜 / 关注时间线 (in-memory TTL cache, opencli 较慢) ──
+    # ── Xueqiu community: hot-stock ranking / watchlist feed (in-memory TTL cache, opencli is slow) ──
     _xq_cache: Dict[str, tuple] = {}
 
     async def _xq_cached(key: str, ttl: int, fn):
@@ -415,8 +419,8 @@ def build_app():
         except Exception as exc:
             return JSONResponse({"ok": False, "error": f"{type(exc).__name__}: {exc}", "posts": []})
 
-    # ── API 稳定性深度探活: 五源 + LLM 并行单次拉, 返回每源 ok/latency/detail ──
-    # 用法: GET /diag (全跑, ~20s 主要是 LLM); GET /diag?quick=1 (跳过 LLM, ~2s)
+    # ── API stability deep probe: 5 sources + LLM, single parallel pull, returns ok/latency/detail per source ──
+    # Usage: GET /diag (full run, ~20s mostly LLM); GET /diag?quick=1 (skip LLM, ~2s)
     @app.get("/diag")
     async def diag(quick: int = 0):
         import time as _t
@@ -502,16 +506,16 @@ def build_app():
             _make("news_db", _p_news_db)(),
             _p_llm(),
         )
-        # 限速/重试/缓存层的累计统计 (data/net.py)
+        # Cumulative stats from the rate-limit/retry/cache layer (data/net.py)
         from financial_analyst.data.net import source_stats
         return JSONResponse({"ok": all(r["ok"] for r in results),
                              "results": results,
                              "rate_limit_stats": source_stats()})
 
-    # /report-progress?code=X — 给前端轮询 financial-analyst report 跑到一半的状态.
-    # tui.run_report_oneshot 在 orchestrator on_event 里实时写 out/<CODE>_progress.json,
-    # 这个端点读出来. 用法: 前端在 run_report 工具跑起后每 1-2s 轮询一次, 出
-    # 14 个 agent 的 state (pending/running/done/fail) + elapsed.
+    # /report-progress?code=X — let the front-end poll the in-progress state of `financial-analyst report`.
+    # tui.run_report_oneshot writes out/<CODE>_progress.json live in the orchestrator on_event,
+    # this endpoint reads it back. Usage: the front-end polls every 1-2s after firing the run_report tool,
+    # surfacing per-agent state (pending/running/done/fail) + elapsed for all 14 agents.
     @app.get("/report-progress")
     async def report_progress(code: str):
         from financial_analyst.buddy.tools import _project_root
@@ -529,9 +533,10 @@ def build_app():
         except Exception as e:
             return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"})
 
-    # POST /lesson { text } — 用户通过 buddy slash command `/lesson <text>` 沉淀
-    # 一条经验. 写入 memories/_shared/conversation_lessons.md, 下次会话 buddy
-    # SYSTEM_PROMPT 自动 prepend 这些 lessons. 实现 "对话经验沉淀" 闭环.
+    # POST /lesson { text } — the user records one lesson via buddy slash command
+    # `/lesson <text>`. Written to memories/_shared/conversation_lessons.md; on the
+    # next session buddy automatically prepends these lessons to SYSTEM_PROMPT.
+    # Closes the "persist conversation experience" loop.
     @app.post("/lesson")
     async def lesson(body: LessonReq):
         text = (body.text or "").strip()
@@ -555,13 +560,13 @@ def build_app():
 
     @app.get("/resolve")
     async def resolve(q: str):
-        """把用户输入的「代码或名称」解析成 {code, name} — 自选批量添加用。"""
+        """Resolve user input ('code or name') into {code, name} — used for bulk-add to the watchlist."""
         import re as _re
         from financial_analyst.buddy.tools import normalize_code
         qq = (q or "").strip()
         if not qq:
             return JSONResponse({"ok": False})
-        # 代码: 6 位数字 (可带 SH/SZ/BJ 前缀)
+        # Code: 6 digits (optionally with SH/SZ/BJ prefix)
         if _re.match(r"^(SH|SZ|BJ)?\d{6}$", qq, _re.I):
             norm = normalize_code(qq)
             name = None
@@ -573,7 +578,7 @@ def build_app():
             except Exception:
                 pass
             return JSONResponse({"ok": True, "code": norm, "name": name or norm})
-        # 名称 → 代码 (industry 缓存有 code/name 列)
+        # Name → code (industry cache has code/name columns)
         try:
             from financial_analyst.data.loaders.industry import IndustryLoader
             df = IndustryLoader()._load_cache()
@@ -637,14 +642,16 @@ def build_app():
     async def models():
         """Available LLM models (for the front-end model picker).
 
-        v1.9.6 改动: **过滤掉没 API key 的 provider** — 用户没配 key 的
-        模型不该出现在 picker 里 (避免切完发现不能用). per provider 的
-        ``api_key_env`` 在 ``os.environ`` 是空就跳过该 provider 全部 models.
+        v1.9.6 change: **filter out providers without an API key** — models
+        whose key the user has not configured should not show up in the picker
+        (otherwise the user switches to one and discovers it does not work).
+        For each provider, if ``api_key_env`` is empty in ``os.environ``, skip
+        all of that provider's models.
 
         Returns:
             ``models`` flat array [{id, name, provider}]
             ``by_provider`` grouped
-            ``disabled_providers`` [{name, reason}] 列举跳过的 + 原因
+            ``disabled_providers`` [{name, reason}] lists the skipped + reason
         """
         import os
         try:
@@ -660,7 +667,7 @@ def build_app():
         for prov, models_list in by_prov_all.items():
             api_key_env = (providers_cfg.get(prov) or {}).get("api_key_env", "")
             if not api_key_env:
-                # provider 没 api_key_env 字段 (异常配置), 跳过
+                # provider has no api_key_env field (abnormal config), skip
                 disabled.append({"name": prov, "reason": "no api_key_env in llm.yaml"})
                 continue
             if not os.environ.get(api_key_env, "").strip():
@@ -677,7 +684,7 @@ def build_app():
 
     @app.get("/alerts")
     async def alerts():
-        """Current price-alert rules (for the UI 盯盘 list — reads alerts.yaml)."""
+        """Current price-alert rules (for the UI watch-list — reads alerts.yaml)."""
         from financial_analyst.buddy.alerts import AlertStore
         store = AlertStore()
         return JSONResponse({"ok": True, "alerts": [
@@ -688,10 +695,10 @@ def build_app():
 
     @app.post("/alerts")
     async def alert_add(body: AlertAddReq):
-        """添加一条盯盘规则 (UI 侧边栏 "+ 添加" 按钮调).
+        """Add a price-watch rule (called by the UI sidebar "+ Add" button).
 
         kind: ``price_below`` / ``price_above`` / ``pct_above`` / ``pct_below``.
-        重复同 (code, kind) 会**更新** threshold (AlertStore.add 内置 upsert).
+        Duplicate (code, kind) **updates** the threshold (AlertStore.add does upsert internally).
         """
         from financial_analyst.buddy.alerts import AlertStore, VALID_KINDS
         from financial_analyst.buddy.tools import normalize_code
@@ -718,13 +725,13 @@ def build_app():
 
     @app.delete("/alerts/{rule_id:path}")
     async def alert_remove(rule_id: str):
-        """删一条盯盘规则.
+        """Delete one price-watch rule.
 
-        ``rule_id`` 形如 ``SH600519:price_below`` (来自 GET /alerts 返回的 ``id``),
-        或仅 ``SH600519`` 删该 code 全部规则.
+        ``rule_id`` takes the shape ``SH600519:price_below`` (from the ``id`` returned by GET /alerts),
+        or just ``SH600519`` to delete all rules for that code.
 
-        UI 自选墙 / 盯盘列表的删除按钮调这个. 与 LLM 调 ``alert_remove`` tool 等价,
-        但前端不需要走对话.
+        Called by the delete button on the UI watchlist wall / monitoring list. Equivalent to
+        the LLM invoking the ``alert_remove`` tool, but the front-end doesn't need to go through chat.
         """
         from financial_analyst.buddy.alerts import AlertStore
         store = AlertStore()
@@ -738,7 +745,7 @@ def build_app():
     async def alerts_check():
         """Evaluate all alerts once (Tencent batch) and return any that
         fired. The UI polls this every N seconds → real toast on trigger.
-        Honours交易时段 (off-hours returns empty)."""
+        Honours trading hours (off-hours returns empty)."""
         from financial_analyst.buddy.alerts import (
             AlertStore, evaluate_batch, market_session,
         )

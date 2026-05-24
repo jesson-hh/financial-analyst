@@ -33,13 +33,17 @@ app = typer.Typer(
     no_args_is_help=False,
 )
 
-# ``fa data <subcommand>`` — 直连增量数据更新 (pytdx 主站 + 腾讯实时)
+# ``fa data <subcommand>`` — direct-connection incremental data update (pytdx main site + Tencent realtime)
 from financial_analyst.data_cli import data_app
 app.add_typer(data_app, name="data")
 
-# ``fa init`` — 首次启动向导
+# ``fa init`` — first-launch wizard
 from financial_analyst.init_cli import init_cmd
 app.command(name="init", help="首次启动引导 — 配 LLM key + 选数据包 + 验证.")(init_cmd)
+
+# ``fa launch`` — one-command: init wizard if needed + backend + UI + browser
+from financial_analyst.launch_cli import launch as _launch_cmd
+app.command(name="launch", help="一键启动: 检测配置 → init 引导 → 启 buddy + UI → 开浏览器.")(_launch_cmd)
 
 
 @app.command()
@@ -81,7 +85,7 @@ def report(
         typer.echo("Error: provide a code as argument or use -f <file>")
         raise typer.Exit(code=1)
 
-    # 跑前快照 _pending_introspections/ 数量 (用于 auto-aggregate 判定)
+    # Snapshot the _pending_introspections/ count before the run (used to decide auto-aggregate)
     pending_dir = Path("memories") / "_pending_introspections"
     n_before = len(list(pending_dir.glob("*.json"))) if pending_dir.exists() else 0
 
@@ -94,7 +98,7 @@ def report(
             typer.echo(f"\n[interrupted] cancelled report for {c}")
             break
 
-    # Auto-aggregate hook: batch ≥ 5 完成 + 新增 introspections ≥ 5 时跑
+    # Auto-aggregate hook: run when batch ≥ 5 completed + new introspections ≥ 5
     if not no_auto_aggregate and len(codes) >= 5 and completed >= 5:
         n_after = len(list(pending_dir.glob("*.json"))) if pending_dir.exists() else 0
         delta = n_after - n_before
@@ -141,10 +145,10 @@ def chat(
     Use --simple for the v1.5 line-by-line REPL (no full-screen).
     Use --legacy for the original slash-command TUI.
 
-    Examples:
-      ❯ 茅台现在多少钱
-      ❯ csi300 里 PE<20 + 股息率>3% 的
-      ❯ AI 算力链最近怎么样
+    Examples (input accepts Chinese natural language):
+      ❯ what's the current price of SH600519 (Moutai)
+      ❯ in csi300, which have PE<20 + dividend yield>3%
+      ❯ how is the AI compute chain doing lately
 
     Slash commands: /help /reset /tools /save /quit.
     """
@@ -268,8 +272,8 @@ def dream(
 
     Examples:
       financial-analyst dream                                            # same as `dream run`
-      financial-analyst dream aggregate                                  # 把 _pending_introspections/ 聚类升级
-      financial-analyst dream aggregate --dry-run                        # 只看结果不写盘
+      financial-analyst dream aggregate                                  # cluster + promote _pending_introspections/
+      financial-analyst dream aggregate --dry-run                        # preview only, no disk writes
       financial-analyst dream review
       financial-analyst dream accept whale-analyst/dont-trust-VR-without-OBV
       financial-analyst dream reject whale-analyst/dont-trust-VR-without-OBV
@@ -303,8 +307,9 @@ def dream(
 def _dream_aggregate(dry_run: bool = False) -> None:
     """Tier-4 introspector pending → _proposed/ via Jaccard clustering.
 
-    扫 memories/_pending_introspections/*.json, 把同 (target_agent + 相似 pattern)
-    重复 >= 3 次的 cluster 升级到 memories/_proposed/<agent>/<date>_<slug>.md.
+    Scan memories/_pending_introspections/*.json, promote clusters with the
+    same (target_agent + similar pattern) repeated >= 3 times to
+    memories/_proposed/<agent>/<date>_<slug>.md.
     """
     from financial_analyst.dream.aggregator import aggregate_pending
     written, stats = aggregate_pending(
@@ -347,7 +352,7 @@ def _dream_review() -> None:
                    f"after accumulating a few reports.")
         return
 
-    # 解析每份, 收集 (confidence_rank, agent, slug, fm, body_preview, path)
+    # Parse each one, collect (confidence_rank, agent, slug, fm, body_preview, path)
     parsed = []
     for f in files:
         try:
@@ -362,9 +367,9 @@ def _dream_review() -> None:
             agent = f.parent.name
             slug = f.stem.split("_", 1)[1] if "_" in f.stem else f.stem
             conf = fm.get("confidence", "low")
-            # 排序权重: high=3, med=2, low=1, other=0
+            # Sort weight: high=3, med=2, low=1, other=0
             conf_rank = {"high": 3, "med": 2, "low": 1}.get(conf, 0)
-            # body preview: 跳过 # title 行, 抽前 3 行有效内容
+            # body preview: skip the # title line, take the first 3 lines of real content
             body_lines = [l for l in body.split("\n")
                           if l.strip() and not l.strip().startswith("#") and l.strip() != "---"]
             body_preview = "\n".join(body_lines[:3])[:280]
@@ -375,7 +380,7 @@ def _dream_review() -> None:
         except Exception as e:
             typer.echo(f"  [err]  {f}: {e}")
 
-    # 按 confidence high→med→low 排
+    # Sort by confidence high→med→low
     parsed.sort(key=lambda x: (-x["rank"], x["agent"], x["slug"]))
 
     typer.echo(f"Pending proposals under {proposed_root} ({len(parsed)} total):\n")
@@ -385,7 +390,7 @@ def _dream_review() -> None:
         fm = p["fm"]
         title = fm.get("title", "(no title)")[:120]
         n_cases = len(fm.get("supporting_cases", []))
-        # supporting cases preview (前 3)
+        # supporting cases preview (first 3)
         cases = fm.get("supporting_cases", [])[:3]
         cases_str = ", ".join(cases)
         if len(fm.get("supporting_cases", [])) > 3:
@@ -665,7 +670,7 @@ def brief(
     max_scan: int = typer.Option(5000, "--max-scan", help="Cap on stocks scanned"),
     out_dir: Path = typer.Option(Path("out"), "--out", help="Output directory"),
 ):
-    """Generate daily A-share morning brief (market-wide 异动 scan)."""
+    """Generate daily A-share morning brief (market-wide anomaly scan)."""
     asyncio.run(_run_brief(asof=asof, universe=universe,
                             universe_file=universe_file, max_scan=max_scan, out_dir=out_dir))
 
@@ -746,7 +751,7 @@ def intraday(
     asof: str = typer.Option(None, "--asof", help="As-of date YYYY-MM-DD (default: today)"),
     out_dir: Path = typer.Option(Path("out"), "--out", help="Output directory"),
 ):
-    """Lunch-break intraday review: judge each stock OK / 警惕 / 撤离."""
+    """Lunch-break intraday review: judge each stock OK / Caution / Exit."""
     asyncio.run(_run_intraday(codes=codes, asof=asof, out_dir=out_dir))
 
 
@@ -855,7 +860,7 @@ def news_collect_cmd(
                 totals["xueqiu_hot_posts"] = n
             elif src == "xueqiu-watchlist":
                 # Defaults to -1 (all groups). For a specific group pass
-                # the pid in --code, e.g. `--code -5` for 沪深 only.
+                # the pid in --code, e.g. `--code -5` for Shanghai+Shenzhen (A-share) only.
                 pid = code if code and code.lstrip("-").isdigit() else "-1"
                 items = XueqiuWatchlistCollector().fetch(pid=pid, limit=limit)
                 n = db.upsert_watchlist(items, group_pid=pid)
@@ -1384,7 +1389,7 @@ def alpha_cmd(
             industry_loader=ind_loader, benchmark_loader=bench_loader,
         )
         typer.echo(f"Panel ready: {panel}")
-        # 上次 bench (若有) → run_bench 据此标 reversed (rank_ic 翻号)
+        # Previous bench (if any) → run_bench uses it to flag reversed (rank_ic sign flip)
         prev_bench = None
         try:
             from financial_analyst.factors.zoo.selector import bench_csv_path
@@ -1463,10 +1468,22 @@ def _resolve_universe(universe: str) -> list[str]:
 
 
 @app.callback(invoke_without_command=True)
-def _default(ctx: typer.Context):
+def _default(ctx: typer.Context,
+              tui: bool = typer.Option(False, "--tui",
+                                        help="Use the terminal TUI instead of the web UI launcher.")):
+    """Default behaviour with no subcommand: one-command web launcher.
+
+    Run ``financial-analyst`` (or ``fa``) bare → kicks off ``fa launch`` —
+    detects config, runs init wizard if needed, starts backend + UI, opens
+    browser. Drop into the terminal TUI with ``fa --tui`` instead.
+    """
     if ctx.invoked_subcommand is None:
-        from financial_analyst.tui import run_tui
-        asyncio.run(run_tui())
+        if tui:
+            from financial_analyst.tui import run_tui
+            asyncio.run(run_tui())
+        else:
+            from financial_analyst.launch_cli import launch as _launch_cmd
+            _launch_cmd()
 
 
 def main():

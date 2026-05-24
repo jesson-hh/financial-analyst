@@ -129,15 +129,16 @@ def _format_tool_list() -> str:
 
 
 def _load_conversation_lessons() -> str:
-    """用户通过 `/lesson <text>` 沉淀的累计经验. 每次 build prompt 时实时读, 所以
-    新增 lesson 后**下次提问**就生效 (不用重启 buddy)."""
+    """Cumulative lessons the user recorded via `/lesson <text>`. Read live every
+    time the prompt is built, so a newly added lesson takes effect on the **next question**
+    (no need to restart buddy)."""
     try:
         from pathlib import Path
         # parents[0]=buddy [1]=financial_analyst [2]=src [3]=<repo-root>
         f = Path(__file__).resolve().parents[3] / "memories" / "_shared" / "conversation_lessons.md"
         if f.exists():
             txt = f.read_text(encoding="utf-8").strip()
-            # 去掉文件 header (第一行 # + 说明段), 只保留实际 lesson 行
+            # Strip the file header (first line # + description block), keep only actual lesson lines
             lines = [l for l in txt.splitlines() if l.startswith("- [")]
             if lines:
                 return "\n".join(lines)
@@ -404,7 +405,7 @@ class BuddyAgent:
                     "name": name, "content": result.content,
                     "is_error": result.is_error,
                     # v1.9.0: forward structured side_effect (e.g. stock_brief's
-                    # 速览 card dict) so the SSE server can relay it to the UI.
+                    # quick-view card dict) so the SSE server can relay it to the UI.
                     "side_effect": result.side_effect,
                 })
                 tool_result_messages.append({

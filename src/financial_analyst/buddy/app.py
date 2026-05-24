@@ -195,7 +195,7 @@ class BuddyApp:
         self.provider: str = client.provider
         self.model: str = client.model
 
-        # v1.8.0: background 盯盘 (watch) loop state. Off by default.
+        # v1.8.0: background watch loop state. Off by default.
         # /watch on starts a task that every ``watch_interval`` seconds
         # (optionally re-collects ``watch_sources`` then) evaluates the
         # alert store and fires matched rules into the transcript.
@@ -559,7 +559,7 @@ class BuddyApp:
             except Exception:
                 pass
 
-    # ----- v1.8.0: background 盯盘 (watch) loop --------------------------
+    # ----- v1.8.0: background watch loop --------------------------
 
     def _eval_alerts(self):
         """Sync alert evaluation (runs on a worker thread). Uses the
@@ -773,7 +773,7 @@ class BuddyApp:
     def _handle_confirm_response(self, text: str) -> None:
         """Resolve the pending tool-confirmation future from a y/n/a reply.
 
-        Acceptance grammar (case-insensitive):
+        Acceptance grammar (case-insensitive; Chinese aliases also accepted):
           y / yes / 是 / 同意   → True
           n / no  / 否 / 取消   → False
           a / always / 总是     → True + remember tool name for session
@@ -1009,7 +1009,7 @@ class BuddyApp:
         task = self.current_turn_task
         if task is not None and not task.done():
             task.cancel()
-        # The _run_turn finally block writes the "已取消" marker and
+        # The _run_turn finally block writes the "Cancelled" marker and
         # drains queued_input (if any) by starting the next turn.
 
     async def _confirm(self, tool_name: str, args: dict) -> bool:
@@ -1164,10 +1164,10 @@ class BuddyApp:
         """``/watch`` (status) · ``/watch on [min] [sources]`` · ``/watch off``.
 
         Examples:
-          /watch on              → 盯盘, 默认 5 分钟间隔, 不自动采集
-          /watch on 3            → 3 分钟间隔
+          /watch on              → watch on, default 5-min interval, no auto-collect
+          /watch on 3            → 3-min interval
           /watch on 5 ths-fund-flow,xueqiu-hot
-                                 → 5 分钟间隔 + 每轮先采集这些源
+                                 → 5-min interval + collect these sources each tick
           /watch off
         """
         from financial_analyst.buddy.alerts import AlertStore

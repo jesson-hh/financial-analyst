@@ -1,19 +1,21 @@
-"""Overseas-market-scanner — 拉国际指数 + 算 risk tone (无 LLM).
+"""Overseas-market-scanner — pull international indices + compute risk tone (no LLM).
 
-v1 覆盖 6 个核心国际指数 (tencent qt.gtimg.cn 国内镜像):
-  美股: DJI / IXIC / INX (S&P500) / VIX
-  港股: HSI / HSTECH
+v1 covers 6 core overseas indices (tencent qt.gtimg.cn domestic mirror):
+  US: DJI / IXIC / INX (S&P 500) / VIX
+  HK: HSI / HSTECH
 
-为啥不用 yfinance: yfinance 1.4 用 curl_cffi 跟 Clash MITM 冲突 TLS 失败.
-tencent 是国内 endpoint, 跟 A 股 quote 同路径走 net.py.domestic, 不撞 Clash.
+Why not yfinance: yfinance 1.4 uses curl_cffi which clashes with Clash MITM,
+TLS fails. Tencent is a domestic endpoint, shares the same path as the A-share
+quote (net.py.domestic), no collision with Clash.
 
-风险偏好判读 (risk_tone) 基于多个国际指数的方向 + VIX 水平:
-  risk_on   — 美股 + 港股都涨 + VIX < 18 = 全球情绪好
-  risk_off  — 美股 + 港股都跌 / VIX > 22  = 避险
-  mixed     — 美股港股反向 / VIX 18-22   = 不明朗
+Risk-appetite judgement (risk_tone) is based on direction of several international
+indices + VIX level:
+  risk_on   — US + HK both up + VIX < 18 = global sentiment good
+  risk_off  — US + HK both down / VIX > 22 = risk-off
+  mixed     — US/HK diverge / VIX 18-22   = ambiguous
 
-A 股早盘开盘往往 follow 隔夜美股 + 港股早开. risk_off 状态下大盘大概率
-低开 + 防御性板块占优.
+A-share open often follows overnight US + early HK open. Under risk_off, the
+index is likely to gap down + defensive sectors lead.
 """
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
@@ -40,16 +42,16 @@ class OverseasMarketOutput(BaseModel):
     us_overnight: Dict[str, GlobalIndexSnapshot] = Field(default_factory=dict)
     hk_market: Dict[str, GlobalIndexSnapshot] = Field(default_factory=dict)
     risk_tone: str = "mixed"      # risk_on / risk_off / mixed
-    risk_tone_detail: str = ""    # 1-句话解释
+    risk_tone_detail: str = ""    # one-sentence explanation
     vix_level: Optional[float] = None
     n_indices: int = 0
 
 
 def _judge_risk_tone(us_snap: Dict[str, GlobalIndexSnapshot],
                       hk_snap: Dict[str, GlobalIndexSnapshot]) -> tuple[str, str]:
-    """根据 US + HK 指数方向 + VIX 水平判读 risk tone.
+    """Judge risk tone from US + HK index direction + VIX level.
 
-    返回 (tone, detail). tone ∈ {risk_on, risk_off, mixed}.
+    Returns (tone, detail). tone ∈ {risk_on, risk_off, mixed}.
     """
     def _pct(d: Dict[str, GlobalIndexSnapshot], code: str) -> Optional[float]:
         s = d.get(code)
@@ -102,7 +104,7 @@ def _judge_risk_tone(us_snap: Dict[str, GlobalIndexSnapshot],
 class OverseasMarketScanner(SubAgent[OverseasMarketOutput]):
     """Pull 6 core overseas indices via tencent_global + judge risk tone.
 
-    No LLM call. Used by morning-brief swarm (隔夜美股 + 港股早盘) and
+    No LLM call. Used by morning-brief swarm (overnight US + early HK open) and
     overseas-radar swarm (full international panorama).
     """
 

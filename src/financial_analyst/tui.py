@@ -674,7 +674,7 @@ async def run_report_oneshot(code: str, asof, out_dir: Path, trace: bool = False
             tbl.add_row(name, f"[{color}]{s['state']}[/{color}]", f"{s['elapsed']:.1f}s")
         return tbl
 
-    # 进度状态文件 — GuanLan UI 通过 /report-progress?code=X 端点轮询读这个
+    # Progress state file — GuanLan UI polls this via /report-progress?code=X
     import time as _t
     progress_path = out_dir / f"{code}_progress.json"
 
@@ -695,7 +695,7 @@ async def run_report_oneshot(code: str, asof, out_dir: Path, trace: bool = False
         except Exception:
             pass
 
-    _write_progress({"started": _t.time()})  # 初始: 全 pending
+    _write_progress({"started": _t.time()})  # initial: all pending
 
     cancelled = False
     results: dict = {}
@@ -709,7 +709,7 @@ async def run_report_oneshot(code: str, asof, out_dir: Path, trace: bool = False
                     status[data["agent"]]["state"] = "done" if data["ok"] else "fail"
                     status[data["agent"]]["elapsed"] = data["elapsed"]
                 live.update(make_table())
-                _write_progress()  # 每个事件后同步状态到文件给前端轮询
+                _write_progress()  # sync state to file after each event so the front-end can poll
 
             orch = Orchestrator(nodes, on_event=on_event)
             console.print(f"[bold]Running stock-deep-dive for {code} (asof={asof})…[/bold]")

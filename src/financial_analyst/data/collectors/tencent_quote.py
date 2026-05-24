@@ -3,14 +3,14 @@
 Lightweight HTTP — NOT opencli/browser. One request fetches dozens of
 stocks (comma-separated), ~120ms, GBK-encoded, no cookie. This is the
 right data source for high-frequency monitoring walls / alert sweeps,
-where opencli's 2-5s/股 browser bridge can't keep up.
+where opencli's 2-5s/code browser bridge can't keep up.
 
 Field layout of ``v_sh600519="1~贵州茅台~600519~1311~..."`` (~ split),
 verified against live data 2026-05:
-  1 name · 2 code · 3 price · 4 prevClose · 5 open · 6 volume(手)
-  31 change · 32 changePct · 33 high · 34 low · 37 amount(万) ·
-  38 turnover% · 39 pe · 43 amplitude% · 44 circ_mv(亿) ·
-  45 total_mv(亿) · 46 pb · 49 vol_ratio(量比)
+  1 name · 2 code · 3 price · 4 prevClose · 5 open · 6 volume(lots)
+  31 change · 32 changePct · 33 high · 34 low · 37 amount(10K yuan) ·
+  38 turnover% · 39 pe · 43 amplitude% · 44 circ_mv(100M yuan) ·
+  45 total_mv(100M yuan) · 46 pb · 49 vol_ratio (量比, volume ratio)
 """
 from __future__ import annotations
 import os
@@ -65,8 +65,8 @@ class TencentQuoteCollector:
     def fetch(self, codes: List[str], timeout: float = 6.0) -> Dict[str, Dict[str, Any]]:
         if not codes:
             return {}
-        # httpx.Client(trust_env=False) 已经局部隔离 — 不要再 setdefault 全局
-        # NO_PROXY 污染 (会影响 huggingface / litellm 海外路径)
+        # httpx.Client(trust_env=False) already isolates locally — do not
+        # setdefault NO_PROXY globally (would pollute the huggingface / litellm overseas path)
         import httpx
         tc = [_to_tencent(c) for c in codes]
         url = _TENCENT_BASE + ",".join(tc)
@@ -113,18 +113,18 @@ class TencentQuoteCollector:
                 "price": _f(f[3]),
                 "prevClose": _f(f[4]),
                 "open": _f(f[5]),
-                "volume": _f(f[6]),          # 手
+                "volume": _f(f[6]),          # lots (手)
                 "change": _f(f[31]),
                 "changePercent": _f(f[32]),  # %
                 "high": _f(f[33]),
                 "low": _f(f[34]),
-                "amount": _f(f[37]),         # 万
+                "amount": _f(f[37]),         # 10K yuan (万)
                 "turnover_rate": _f(f[38]),  # %
                 "pe": _f(f[39]),
                 "amplitude": _f(f[43]),      # %
-                "circ_mv": _f(f[44]),        # 亿
-                "total_mv": _f(f[45]),       # 亿
+                "circ_mv": _f(f[44]),        # 100M yuan (亿)
+                "total_mv": _f(f[45]),       # 100M yuan (亿)
                 "pb": _f(f[46]),
-                "vol_ratio": _f(f[49]),      # 量比
+                "vol_ratio": _f(f[49]),      # volume ratio (量比)
             }
         return out

@@ -1,13 +1,14 @@
-"""Macro impact analyzer — 融合海外 + A 股 scanner, 判读传导效率 (LLM).
+"""Macro impact analyzer — fuses overseas + A-share scanner, judges transmission efficiency (LLM).
 
-最终的 macro-impact agent. 给你:
-1. overseas-market-scanner: 海外价格 + risk_tone
-2. global-news-aggregator: 海外格局 narrative + impacts
-3. market-scanner (optional): 今日 A 股 异动 + 沪深300 涨跌
+Final macro-impact agent. Inputs:
+1. overseas-market-scanner: overseas prices + risk_tone
+2. global-news-aggregator: overseas-landscape narrative + impacts
+3. market-scanner (optional): today's A-share anomalies + CSI 300 move
 
-任务: 判读 "A 股今日跟随 / 背离海外的程度" + "明天传导预期" + "可执行 actionable signals".
+Task: judge "how closely A-shares followed / diverged from overseas today" +
+"tomorrow's transmission expectation" + "executable actionable signals".
 
-写一段总结 + 列 3-5 个明天可操作信号.
+Write one summary paragraph + list 3-5 tomorrow-actionable signals.
 """
 from __future__ import annotations
 import json
@@ -22,17 +23,17 @@ from financial_analyst.llm.client import LLMClient
 
 
 class ActionableSignal(BaseModel):
-    signal: str                                          # "明日大概率高开" / "防御板块抢筹" etc.
+    signal: str                                          # "明日大概率高开" / "防御板块抢筹" etc. — kept Chinese for LLM/user
     confidence: Literal["high", "medium", "low"] = "medium"
     affected_codes_or_sectors: List[str] = Field(default_factory=list)
 
 
 class MacroImpactOutput(BaseModel):
     as_of: str
-    headline: str = ""                                   # 一句话总结
-    follow_through_judgment: str = ""                    # A 股 vs 海外 follow-through 判读
+    headline: str = ""                                   # one-line summary
+    follow_through_judgment: str = ""                    # A-share vs overseas follow-through judgement
     actionable_signals: List[ActionableSignal] = Field(default_factory=list)
-    output_md_path: Optional[str] = None                 # 落盘 markdown
+    output_md_path: Optional[str] = None                 # markdown persisted to disk
 
 
 SYSTEM_PROMPT = """你是 A 股宏观影响分析助手. 给你今日海外格局 + 今日 A 股异动数据, 判读海外 → A 股的传导效率 + 给明天可执行信号.
@@ -64,7 +65,7 @@ actionable_signals 例子:
 
 
 class MacroImpactAnalyzer(SubAgent[MacroImpactOutput]):
-    """融合海外 + A 股, 写宏观影响报告. 1 个 LLM call. 落盘 markdown."""
+    """Fuse overseas + A-share, write a macro-impact report. 1 LLM call. Persists markdown to disk."""
 
     NAME = "macro-impact-analyzer"
     OUTPUT_SCHEMA = MacroImpactOutput
@@ -73,7 +74,7 @@ class MacroImpactAnalyzer(SubAgent[MacroImpactOutput]):
         as_of = inputs.get("asof_date") or datetime.today().strftime("%Y-%m-%d")
         overseas = inputs.get("overseas-market-scanner", {}) or {}
         news = inputs.get("global-news-aggregator", {}) or {}
-        scanner = inputs.get("market-scanner", {}) or {}  # 可选
+        scanner = inputs.get("market-scanner", {}) or {}  # optional
         out_dir = Path(inputs.get("out_dir", "./out"))
         out_dir.mkdir(parents=True, exist_ok=True)
 

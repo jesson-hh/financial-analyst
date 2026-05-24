@@ -40,9 +40,19 @@
 </p>
 
 ```bash
-pip install financial-analyst==1.0.0    # 1 分钟, 默认无需 token
-fa init                                  # 交互向导 — 自动拉 HF 数据
-fa report SH600519                       # 14-agent 深度研报 (~10 分钟)
+pip install financial-analyst==1.0.0    # 1 分钟
+financial-analyst                        # 零配置一键: 引导 + 后端 + Web UI + 浏览器自动开
+```
+
+第一次跑会: 检测配置 → 跑交互向导 (LLM key + 选 HF dataset 档) → 启 buddy backend (`:9999`) → 启 Web UI (`:5173`) → 自动开浏览器. Ctrl+C 停所有.
+
+高级用户可以分别用各子命令:
+
+```bash
+fa init                # 只跑引导 (LLM key + 数据包)
+fa report SH600519     # 一次性研报 (~10 分钟, 无 UI)
+fa launch              # 显式一键启动 (跟无 subcommand 行为相同)
+fa --tui               # 终端 TUI 而非 Web UI
 ```
 
 ---

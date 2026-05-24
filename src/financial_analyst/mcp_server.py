@@ -142,8 +142,9 @@ async def _tool_dream_aggregate(min_count: int = 3, threshold: float = 0.4,
                                  dry_run: bool = False) -> Dict[str, Any]:
     """Aggregate Tier-4 introspector pending proposals via Jaccard clustering.
 
-    与 ``dream`` 不同: 那个跑 OutcomeTracker + Introspector (基于 T+5d 实际价格反推),
-    这个聚类已经写到 _pending_introspections/ 的 Tier-4 提案 (重复 ≥ min_count 升级到 _proposed/).
+    Different from ``dream``: that one runs OutcomeTracker + Introspector (back-derived
+    from T+5d real prices); this one clusters Tier-4 proposals already written to
+    _pending_introspections/ (clusters with duplicates >= min_count get promoted to _proposed/).
     """
     from financial_analyst.dream.aggregator import aggregate_pending
     written, stats = aggregate_pending(

@@ -2,6 +2,41 @@
 
 All notable changes to this project follow [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning 2.0.0](https://semver.org/).
 
+## [1.0.1] — 2026-05-25  · One-command launcher + i18n
+
+### Added — Zero-config web launcher (`fa launch`)
+
+Single command boots the entire stack: detects config → runs the first-launch wizard if needed → starts the buddy SSE backend on `:9999` → starts the web UI http.server on `:5173` → polls both for readiness → opens the browser. Ctrl+C gracefully terminates both subprocesses.
+
+```bash
+pip install financial-analyst==1.0.1
+financial-analyst         # zero-config — wizard if needed, then web UI auto-opens
+```
+
+- New module: `src/financial_analyst/launch_cli.py` (~250 lines) — port checks, `httpx` health-polling, OS-aware subprocess signaling (Windows `CTRL_BREAK_EVENT` vs POSIX `SIGTERM`).
+- New CLI: `fa launch [--skip-init] [--no-browser] [--backend-port N] [--ui-port N]`.
+- Default behaviour change: bare `financial-analyst` (or `fa`) now invokes `launch`. Drop into the terminal TUI with `fa --tui`.
+- Web UI bundled into pip wheel: `src/financial_analyst/ui/` (5 files, ~216 KB). `pyproject.toml` `[tool.hatch.build.targets.wheel].include` ships `ui/**/*`. UI source remains at `packaging/src-tauri/ui/` for Tauri desktop bundle; `launch` searches both locations.
+- `fa init` HuggingFace dataset repo IDs updated to public `yifishbossman/financial-analyst-data-{demo,lite,full}`.
+
+### Changed — `.py` comments + docstrings translated to English
+
+Translated Chinese comments + docstrings to English across 30 high-value source files. **Strictly preserved** so the LLM stack keeps talking to Chinese users:
+
+- `SYSTEM_PROMPT` constants (4 agents)
+- `Tool(description="中文")` LLM-visible tool schemas
+- `Field(description="中文")` Pydantic schemas exposed to function-calling
+- `typer.echo("中文")` / `console.print("中文")` user-facing CLI output
+- `ToolResult("中文")` LLM response bodies
+- LLM `messages` bodies
+- `memories/<agent>/*.md` knowledge files (unchanged)
+
+712 tests passing.
+
+### Removed — third-party attribution references
+
+Removed external inspiration references across CHANGELOG, README, README_zh, docs, and source comments. The architecture is the team's own design.
+
 ## [1.0.0] — 2026-05-25  · **First public release**
 
 > **Lineage**: This is the **first publicly released version** of the project formerly known as `financial-analyst` (internal `v1.9.x` preview series). All features from internal `v1.9.7` are at GA quality and shipped as `1.0.0`. The internal versioning is preserved in the [Pre-1.0 history (internal preview)](#pre-10-history-internal-preview) appendix below.

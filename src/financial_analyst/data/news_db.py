@@ -2,8 +2,8 @@
 
 Schema:
     news          — eastmoney_kuaixun / sinafinance_news / etc
-    lhb           — 龙虎榜 daily entries
-    holders       — 十大流通股东 quarterly snapshots
+    lhb           — Dragon-Tiger list (龙虎榜) daily entries
+    holders       — top 10 tradable shareholders (十大流通股东) quarterly snapshots
     news_fts      — FTS5 virtual table over news.title || news.content
     social_posts  — xueqiu comments / weibo (retail sentiment)
     hot_stocks    — xueqiu/sinafinance heat rankings
@@ -156,7 +156,7 @@ CREATE TABLE IF NOT EXISTS fund_holdings (
     PRIMARY KEY (snapshot_date, account_name, fd_code)
 );
 
--- v1.7.2: 同花顺 (ths-extra opencli plugin) tables
+-- v1.7.2: Tonghuashun (ths-extra opencli plugin) tables
 CREATE TABLE IF NOT EXISTS iwencai_results (
     snapshot_ts TEXT NOT NULL,
     question TEXT NOT NULL,
@@ -207,7 +207,7 @@ CREATE TABLE IF NOT EXISTS ths_concept_boards (
 
 
 class NewsDB:
-    """SQLite-backed news / 龙虎榜 / 股东 store with FTS5 over news."""
+    """SQLite-backed news / dragon-tiger list (龙虎榜) / shareholders store with FTS5 over news."""
 
     def __init__(self, path: Optional[Path] = None):
         self.path = Path(path) if path else DEFAULT_DB_PATH

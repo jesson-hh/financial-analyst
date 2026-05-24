@@ -29,8 +29,8 @@ class TushareLoader(BaseLoader):
         cache_ttl: int = 86400,
         enable_cache: bool = True,
     ) -> None:
-        # 不再设全局 NO_PROXY=* (会污染 huggingface/litellm 海外路径).
-        # _query 改用 net.py.domestic_session(trust_env=False) 局部隔离.
+        # No longer sets global NO_PROXY=* (would pollute the huggingface/litellm overseas path).
+        # _query now uses net.py.domestic_session(trust_env=False) for local isolation.
         token = token or os.environ.get("TUSHARE_TOKEN")
         if not token:
             raise ValueError("TUSHARE_TOKEN missing (env or constructor)")
@@ -53,8 +53,8 @@ class TushareLoader(BaseLoader):
         (api_name, fields, tuple(sorted(params.items()))),
     )
     def _query(self, api_name: str, fields: str = "", **params) -> pd.DataFrame:
-        # Tushare token 自有 200次/分限速; @rate_limited 客户端再限一遍防 burst.
-        # domestic_session 局部 trust_env=False, 绕开 Clash fake-ip 接管.
+        # Tushare token has its own 200/min rate limit; @rate_limited adds a client-side limit too to prevent bursts.
+        # domestic_session locally sets trust_env=False to bypass Clash fake-ip hijack.
         req = {"api_name": api_name, "token": self._token, "params": params}
         if fields:
             req["fields"] = fields

@@ -1,6 +1,6 @@
 [project]
 name = "financial-analyst"
-version = "1.0.0"
+version = "1.0.1"
 description = "A-share single-stock deep-dive multi-agent research workstation with three-tier trust isolation, FTS5 memory retrieval, dream loop introspection, and BYOM extensibility."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -102,6 +102,7 @@ packages = ["src/financial_analyst"]
 include = [
     "src/financial_analyst/**/*.py",
     "src/financial_analyst/_resources/**/*",
+    "src/financial_analyst/ui/**/*",   # bundled web UI (jsx/html/css) for `fa launch`
 ]
 
 [tool.hatch.build.targets.sdist]

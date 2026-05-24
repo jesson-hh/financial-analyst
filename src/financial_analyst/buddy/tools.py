@@ -27,8 +27,8 @@ from typing import Any, Callable, Dict, List, Optional
 def _disp_w(s: Any) -> int:
     """Terminal display width — CJK / fullwidth glyphs count as 2 columns.
     Python's f-string ``:<N`` aligns by character count, which mis-aligns
-    Chinese tables (每个汉字占 2 列但算 1 字符). Use this for any tabular
-    output that mixes Chinese names with numeric columns."""
+    Chinese tables (each Han character takes 2 columns but counts as 1 character).
+    Use this for any tabular output that mixes Chinese names with numeric columns."""
     return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1
                for c in str(s))
 
@@ -78,7 +78,7 @@ def _pct_to_num(s: Any) -> Optional[float]:
 
 
 def brief_data(code: str) -> Dict[str, Any]:
-    """Structured one-stock snapshot for the desktop UI's 速览 card.
+    """Structured one-stock snapshot for the desktop UI's quick-view card.
 
     Best-effort: every field is independently guarded, missing ones stay
     ``None``. Real-time quote (xueqiu) is the primary source; falls back
@@ -93,7 +93,7 @@ def brief_data(code: str) -> Dict[str, Any]:
         "main_in": None, "prev_main_in": None, "inflow": None, "outflow": None,
         "market_status": None, "xq_bull": None,
         "news": [],
-        "comments": [],   # 雪球社区评论 (本地已存; 实时刷新走 /comments)
+        "comments": [],   # Xueqiu community comments (locally cached; live refresh via /comments)
     }
     d["market"] = {"SH": "沪", "SZ": "深", "BJ": "北"}.get(norm[:2], "") + "市"
 
@@ -185,7 +185,7 @@ def brief_data(code: str) -> Dict[str, Any]:
     except Exception:
         pass
 
-    # --- 雪球社区评论 (本地已存的, 秒出; 想要最新走 /comments?refresh=1) ---
+    # --- Xueqiu community comments (locally cached, instant; live via /comments?refresh=1) ---
     try:
         from financial_analyst.data.news_db import NewsDB
         ndb = NewsDB()
@@ -293,15 +293,15 @@ class Tool:
 
 
 def _tool_update_data(codes: Optional[str] = None, mode: str = "quick") -> ToolResult:
-    """直连增量更新数据. 包装 ``financial-analyst data update`` CLI.
+    """Direct-connection incremental data update. Wraps ``financial-analyst data update`` CLI.
 
-    默认 quick: 跳 5min + daily_basic, 只更日线. 极快 (~50ms/只).
-    full: 日线 + 5min + 当日 daily_basic 全部, ~120ms/只.
+    Default quick: skip 5min + daily_basic, update only daily OHLCV. Very fast (~50ms/code).
+    full: daily + 5min + today's daily_basic all together, ~120ms/code.
 
-    codes 控制范围:
-      - None: 所有 instruments (慢, 5500 只 ~5 min)
-      - "SH600519,SZ300750": 指定列表
-      - "all": 明确要求全市场 (同 None, 显式)
+    `codes` controls scope:
+      - None: all instruments (slow, ~5 min for 5500 codes)
+      - "SH600519,SZ300750": explicit list
+      - "all": explicitly request whole-market (same as None, just explicit)
     """
     cmd = ["financial-analyst", "data", "update"]
     if codes and codes.strip().lower() != "all":
@@ -320,10 +320,10 @@ def _tool_update_data(codes: Optional[str] = None, mode: str = "quick") -> ToolR
             f"fa data update 失败 (exit {proc.returncode}):\n{proc.stderr[-500:]}",
             is_error=True,
         )
-    # 输出 LLM 友好版的总结
+    # Output an LLM-friendly summary
     stdout = proc.stdout.strip()
     lines = stdout.splitlines()
-    # 抽取 [日线 ✓] / [5min ✓] / [daily_basic ✓] 几行 + 末行总耗时
+    # Extract the [日线 ✓] / [5min ✓] / [daily_basic ✓] lines + the final total-time line
     keep = [l for l in lines if any(k in l for k in
                                      ("[日线", "[5min", "[daily_basic", "完成"))]
     summary = "\n".join(keep) if keep else stdout[-400:]
@@ -356,7 +356,7 @@ def _tool_report(code: str, asof: Optional[str] = None) -> ToolResult:
         return ToolResult(f"Report finished but no markdown found for {code}.")
     md_path = md_files[-1]
     body = md_path.read_text(encoding="utf-8", errors="replace")
-    # Extract the executive summary (sections 一 + 八)
+    # Extract the executive summary (sections "一、综合评级" and "八、操作建议")
     import re
     summary_parts = []
     for sect in (r"## 一、综合评级.*?(?=## 二)", r"## 八、操作建议.*?(?=---|\Z)"):
@@ -497,7 +497,7 @@ def _tool_watchlist_show(pid: str = "-1", refresh: bool = False) -> ToolResult:
 
 
 def _tool_fund_snapshot(refresh: bool = False) -> ToolResult:
-    """Show the user's 蛋卷基金 (danjuanfunds.com) total-assets snapshot.
+    """Show the user's Danjuan Funds (蛋卷基金, danjuanfunds.com) total-assets snapshot.
 
     Needs danjuanfunds.com login via Chrome ext (separate cookie from xueqiu).
     Pass ``refresh=True`` to re-fetch."""
@@ -536,7 +536,7 @@ def _tool_fund_snapshot(refresh: bool = False) -> ToolResult:
 
 
 def _tool_fund_holdings(account: str = "", refresh: bool = False) -> ToolResult:
-    """Show the user's 蛋卷基金 持仓明细. ``account`` filters to a sub-account.
+    """Show the user's Danjuan Funds holdings detail. ``account`` filters to a sub-account.
 
     Needs danjuanfunds.com login via Chrome ext. Pass ``refresh=True``
     to re-fetch from upstream."""
@@ -577,8 +577,8 @@ def _tool_fund_holdings(account: str = "", refresh: bool = False) -> ToolResult:
 
 def _tool_iwencai_search(question: str, limit: int = 20,
                           use_cache: bool = False) -> ToolResult:
-    """问财自然语言选股. Pulls a result table via the ths-extra opencli
-    plugin. ``columns`` are dynamic per question — caller interprets cells.
+    """iwencai (问财) natural-language stock screener. Pulls a result table via the
+    ths-extra opencli plugin. ``columns`` are dynamic per question — caller interprets cells.
 
     Pass ``use_cache=True`` to read the most recent cached result for
     this question without hitting iwencai again.
@@ -626,7 +626,7 @@ def _format_iwencai(items: List[Dict[str, Any]], cached: bool) -> ToolResult:
 
 def _tool_ths_fund_flow(target: str = "gegu", limit: int = 30,
                           refresh: bool = True) -> ToolResult:
-    """同花顺资金流, target=gegu/gainian/hangye/ddzz."""
+    """Tonghuashun fund-flow, target=gegu/gainian/hangye/ddzz."""
     from financial_analyst.data.news_db import NewsDB
     from financial_analyst.data.collectors.opencli.ths_extra import THSFundFlowCollector
     db = NewsDB()
@@ -692,7 +692,7 @@ def _tool_ths_fund_flow(target: str = "gegu", limit: int = 30,
 
 
 def _parse_cn_amount(s: Optional[str]) -> Optional[float]:
-    """Parse 同花顺 amount strings to a float (in yuan).
+    """Parse Tonghuashun amount strings to a float (in yuan).
 
     '1.69亿' → 169000000.0 · '-3254.51万' → -32545100.0 · '100' → 100.0
     '' / '--' / None → None. Robust to stray spaces / % suffix.
@@ -714,7 +714,7 @@ def _parse_cn_amount(s: Optional[str]) -> Optional[float]:
 
 
 def _fmt_yi(v: Optional[float]) -> str:
-    """Format a yuan float back to a compact 亿/万 string."""
+    """Format a yuan float back to a compact 亿 (100M) / 万 (10K) string."""
     if v is None:
         return "?"
     av = abs(v)
@@ -727,10 +727,11 @@ def _fmt_yi(v: Optional[float]) -> str:
 
 def _tool_fund_flow_change(code: str, target: str = "gegu",
                             limit: int = 5) -> ToolResult:
-    """同花顺资金流跨快照对比. 看一只股/板块的主力净流入随时间变化.
+    """Tonghuashun fund-flow cross-snapshot comparison. Track how main-fund net inflow
+    on one stock/sector changes over time.
 
-    需要 ths_fund_flow 表里有该 code 的多个 snapshot (多次 collect 后才有
-    历史). target=gegu/gainian/hangye/ddzz."""
+    Requires multiple snapshots for this code in the ths_fund_flow table (only after
+    several collect runs). target=gegu/gainian/hangye/ddzz."""
     from financial_analyst.data.news_db import NewsDB
     db = NewsDB()
     rows = db.query_ths_fund_flow_history(code, target=target, limit=limit)
@@ -770,7 +771,7 @@ def _tool_fund_flow_change(code: str, target: str = "gegu",
 
 def _tool_ths_concept_board(mode: str = "new", limit: int = 30,
                               refresh: bool = True) -> ToolResult:
-    """同花顺概念板块. mode=new (新概念发布表, 默认) / rank (涨幅榜)."""
+    """Tonghuashun concept boards. mode=new (newly minted concepts, default) / rank (gain ranking)."""
     from financial_analyst.data.news_db import NewsDB
     from financial_analyst.data.collectors.opencli.ths_extra import (
         THSConceptBoardCollector,
@@ -1001,8 +1002,9 @@ def _tool_ask_quote(code: str) -> ToolResult:
 
 
 def _tool_realtime_quote(code: str) -> ToolResult:
-    """实时行情. 走 ``data/quote_fallback`` 多源链 (tencent → xueqiu),
-    第一个成功就返. 不同于 quote_lookup (日线/EOD), 这是盘中实时价."""
+    """Realtime quote. Goes through ``data/quote_fallback`` multi-source chain
+    (tencent → xueqiu), returning the first source that succeeds. Unlike
+    quote_lookup (daily/EOD), this is the intraday realtime price."""
     from financial_analyst.data.quote_fallback import fetch_realtime_quote
     try:
         src, q = fetch_realtime_quote(code)
@@ -1029,8 +1031,8 @@ def _tool_realtime_quote(code: str) -> ToolResult:
 
 
 def _tool_quote_batch(codes: str) -> ToolResult:
-    """批量实时行情 (腾讯 → 雪球 fallback). 用于监控墙 / 多股对比.
-    ``codes`` 逗号分隔 (如 'SH600519,SZ300750,002594')."""
+    """Batch realtime quotes (Tencent → Xueqiu fallback). For the monitoring wall /
+    multi-stock comparison. ``codes`` is comma-separated (e.g. 'SH600519,SZ300750,002594')."""
     from financial_analyst.data.quote_fallback import fetch_realtime_quotes
     code_list = [c.strip() for c in str(codes).replace("，", ",").split(",") if c.strip()]
     if not code_list:
@@ -1058,8 +1060,9 @@ def _tool_quote_batch(codes: str) -> ToolResult:
 
 
 def _tool_alert_add(code: str, kind: str, threshold: float, note: str = "") -> ToolResult:
-    """加一条盯盘提醒. kind: price_below(跌破)/price_above(涨破)/
-    pct_above(涨幅突破)/pct_below(跌幅突破). threshold 价格或百分比数值."""
+    """Add one price-watch alert. kind: price_below (falls through) /
+    price_above (rises above) / pct_above (gain breakout) / pct_below
+    (drop breakout). threshold is a price or percent value."""
     from financial_analyst.buddy.alerts import AlertStore, VALID_KINDS
     if kind not in VALID_KINDS:
         return ToolResult(
@@ -1077,7 +1080,7 @@ def _tool_alert_add(code: str, kind: str, threshold: float, note: str = "") -> T
 
 
 def _tool_alert_list() -> ToolResult:
-    """列出所有盯盘提醒."""
+    """List all price-watch alerts."""
     from financial_analyst.buddy.alerts import AlertStore
     store = AlertStore()
     rules = store.list()
@@ -1091,7 +1094,7 @@ def _tool_alert_list() -> ToolResult:
 
 
 def _tool_alert_remove(rule_id: str) -> ToolResult:
-    """删盯盘提醒. rule_id 可以是 'SH600519:price_below' 或只给 'SH600519' (删该股全部)."""
+    """Remove a price-watch alert. rule_id can be 'SH600519:price_below' or just 'SH600519' (deletes all rules for that stock)."""
     from financial_analyst.buddy.alerts import AlertStore
     store = AlertStore()
     ok = store.remove(rule_id)
@@ -1114,7 +1117,7 @@ def _tool_stock_brief(code: str, news_days: int = 7) -> ToolResult:
     """
     lines = [f"# {code} 速览 (stock_brief)"]
 
-    # --- 行情 (实时优先: Tencent, 与 UI 速览卡同源, 避免 LLM 文字报 EOD 旧价) ---
+    # --- Quote (realtime preferred: Tencent, same source as UI quick-view card; avoids LLM citing stale EOD price) ---
     try:
         rt = None
         try:
@@ -1135,7 +1138,7 @@ def _tool_stock_brief(code: str, news_days: int = 7) -> ToolResult:
     except Exception as exc:
         lines.append(f"\n## 行情\n  (取价失败: {exc})")
 
-    # --- 行业 + 产业链 ---
+    # --- Industry + supply chain ---
     try:
         ind = _tool_industry_show(code)
         lines.append(f"\n## 行业\n{ind.content}")
@@ -1149,7 +1152,7 @@ def _tool_stock_brief(code: str, news_days: int = 7) -> ToolResult:
     except Exception:
         pass
 
-    # --- 近期新闻 (cache only) + 时效 ---
+    # --- Recent news (cache only) + freshness check ---
     try:
         from financial_analyst.data.news_db import NewsDB
         db = NewsDB()
@@ -1179,7 +1182,7 @@ def _tool_stock_brief(code: str, news_days: int = 7) -> ToolResult:
             f"  主力净流入={r.get('main_net','?')} 涨跌幅={r.get('change_pct','?')}"
         )
 
-    # --- 上次研报时间线 ---
+    # --- Past report timeline ---
     try:
         tl = _tool_stocks_show(code, tail=600)
         if not tl.is_error and "No timeline" not in tl.content:
@@ -1192,7 +1195,7 @@ def _tool_stock_brief(code: str, news_days: int = 7) -> ToolResult:
         "\n[dim]需要深度研报跑 run_report; 需要刷新新闻跑 news_collect[/dim]"
     )
     # v1.9.0: attach structured snapshot in side_effect for the desktop
-    # UI's 速览 card (the LLM only reads .content; the server reads
+    # UI's quick-view card (the LLM only reads .content; the server reads
     # .side_effect["brief"]).
     structured = None
     try:
@@ -1231,7 +1234,7 @@ def _tool_alpha_show(name: str) -> ToolResult:
 
 
 def _resolve_universe_codes(universe: str) -> list:
-    """命名 universe (或文件路径) → 代码列表。镜像 cli._resolve_universe, 不引入重 cli 模块。"""
+    """Named universe (or file path) → list of stock codes. Mirrors cli._resolve_universe without pulling in the heavy cli module."""
     from pathlib import Path
     p = Path(universe)
     cands = [p] if p.exists() else [
@@ -1262,7 +1265,7 @@ _FACTOR_VOCAB = (
 
 
 def _factor_compute(expr: str):
-    """构造 PanelData->Series 的 compute, eval 白名单表达式 (无 builtins)。"""
+    """Build a PanelData->Series compute function, eval whitelisted expression (no builtins)."""
     from financial_analyst.factors.zoo import operators as _ops
 
     def compute(p):
@@ -1282,14 +1285,14 @@ def _factor_compute(expr: str):
             "max_pair": _ops.max_pair, "min_pair": _ops.min_pair,
             "filter_where": _ops.filter_where,
         }
-        return eval(expr, {"__builtins__": {}}, ns)  # 受限命名空间
+        return eval(expr, {"__builtins__": {}}, ns)  # restricted namespace
     return compute
 
 
 def _tool_factor_test(expr: str, universe: str = "csi300_active",
                       since: str = "2024-01-01", until: str = "2024-12-31",
                       fwd_days: int = 5, max_codes: int = 120) -> ToolResult:
-    """现搭现测自定义因子表达式 — 真算 RankIC / ICIR / IC / 命中率 (复用 alpha-zoo IC 引擎)。"""
+    """On-the-fly test of a custom factor expression — actually computes RankIC / ICIR / IC / hit rate (reuses the alpha-zoo IC engine)."""
     import math
     expr = (expr or "").strip()
     if not expr:
@@ -1337,7 +1340,7 @@ def _tool_factor_test(expr: str, universe: str = "csi300_active",
         return "—" if x is None or (isinstance(x, float) and math.isnan(x)) else f"{x:+.{d}f}"
 
     rank_ic, rank_ir = res["rank_ic"], res["rank_ir"]
-    state = res.get("state", "无数据")   # 有效/一般/偏弱/失效 (健康分类, 同 alpha_bench)
+    state = res.get("state", "无数据")   # values: effective / mediocre / weak / dead (health class, same as alpha_bench)
     direction = "正向 (因子值高→未来涨)" if (rank_ic or 0) > 0 else "反向 (因子值高→未来跌)"
     hit = res.get("hit_rate")
     hit_s = f"{hit*100:.1f}%" if (hit is not None and hit == hit) else "—"
@@ -1356,7 +1359,7 @@ def _tool_factor_test(expr: str, universe: str = "csi300_active",
 def _tool_alpha_compare(items, universe: str = "csi300_active",
                         since: str = "2024-01-01", until: str = "2024-12-31",
                         fwd_days: int = 5, max_codes: int = 120) -> ToolResult:
-    """并排对比多个因子 (已注册名 如 alpha019 / 或自定义表达式) 的 IC/ICIR/命中率/健康分类。"""
+    """Side-by-side comparison of multiple factors (registered names like alpha019 or custom expressions): IC/ICIR/hit-rate/health class."""
     import re as _re
     import math
     if isinstance(items, str):
@@ -1920,7 +1923,7 @@ TOOL_REGISTRY: List[Tool] = [
             "required": [],
         },
         run=lambda codes=None, mode="quick": _tool_update_data(codes, mode),
-        cost_hint="seconds",   # quick 模式秒级; full 才 minutes 但默认是 quick
+        cost_hint="seconds",   # quick mode: seconds; full mode: minutes — default is quick
         confirm_required=False,
     ),
     Tool(

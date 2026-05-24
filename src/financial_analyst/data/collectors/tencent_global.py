@@ -1,14 +1,15 @@
-"""Tencent global-index collector — 拉国际指数 (qt.gtimg.cn 国内镜像).
+"""Tencent global-index collector — pull international indices (qt.gtimg.cn domestic mirror).
 
-跟 tencent_quote.py 同路径 (HTTP GBK, 国内出口, 不撞 Clash MITM). 替代
-yfinance — yfinance 用 curl_cffi 跟 Clash MITM 冲突会 TLS 失败.
+Same path as tencent_quote.py (HTTP GBK, domestic egress, does not collide with Clash MITM).
+Replaces yfinance — yfinance uses curl_cffi which clashes with Clash MITM and fails TLS.
 
-支持 codes 命名:
-- 美股: usDJI (道指) / usIXIC (纳指) / usINX (标普500) / usVIX (恐慌指数)
-- 港股: hkHSI (恒生) / hkHSTECH (恒生科技)
-- (DXY / 商品 / 汇率 tencent 没, 后续接 sina finance)
+Supported code naming:
+- US: usDJI (Dow) / usIXIC (Nasdaq) / usINX (S&P 500) / usVIX (fear index)
+- HK: hkHSI (Hang Seng) / hkHSTECH (Hang Seng Tech)
+- (DXY / commodities / FX not provided by Tencent; later via sina finance)
 
-字段层级跟 tencent_quote 不同 — 国际指数没 PE/PB/换手率, 只有 OHLC + 涨跌:
+Field layout differs from tencent_quote — international indices have no PE/PB/turnover,
+only OHLC + change:
   1 name · 2 code · 3 price · 4 change · 5 changePercent · 6 high · 7 low ·
   8 open · 9 prevClose · ...
 """
@@ -18,21 +19,21 @@ from typing import Any, Dict, List, Optional
 
 from financial_analyst.data.net import rate_limited, register_source
 
-# 国际指数限速一档 — 早盘扫一次足够, 不需要高频
+# Rate-limit one tier for international indices — one pre-open scan is enough, no high frequency needed
 register_source("tencent_global", qps=2.0, max_retries=2, backoff_base=1.0, cache_ttl=30.0)
 
 _TENCENT_BASE = "http://qt.gtimg.cn/q="
 
-# 默认国际指数 universe (覆盖核心传导 channel)
+# Default international-index universe (covers the core transmission channels)
 DEFAULT_GLOBAL_INDICES = [
-    # 美股
-    "usDJI",     # 道琼斯工业
-    "usIXIC",    # 纳斯达克综合
-    "usINX",     # 标普 500
-    "usVIX",     # CBOE 波动率指数 (VIX, 风险偏好指标)
-    # 港股
-    "hkHSI",     # 恒生指数
-    "hkHSTECH",  # 恒生科技
+    # US
+    "usDJI",     # Dow Jones Industrial
+    "usIXIC",    # Nasdaq Composite
+    "usINX",     # S&P 500
+    "usVIX",     # CBOE Volatility Index (VIX, risk-appetite indicator)
+    # HK
+    "hkHSI",     # Hang Seng Index
+    "hkHSTECH",  # Hang Seng Tech
 ]
 
 
@@ -80,7 +81,7 @@ class TencentGlobalCollector:
                 continue
             f = inner.split("~")
             if len(f) < 35:
-                # 国际指数 layout 至少 35 个字段 (tencent qt.gtimg.cn); A股是 50+
+                # Global-index layout has at least 35 fields (tencent qt.gtimg.cn); A-share is 50+
                 continue
             # tencent key e.g. v_usDJI / v_hkHSI
             key = stmt.split("=", 1)[0].strip()
@@ -91,8 +92,8 @@ class TencentGlobalCollector:
                 "price": _f(f[3]),
                 "prevClose": _f(f[4]),
                 "open": _f(f[5]),
-                "change": _f(f[31]),          # ←国际指数 layout: change 在 [31]
-                "changePercent": _f(f[32]),   # changePercent 在 [32]
+                "change": _f(f[31]),          # ← global-index layout: change at [31]
+                "changePercent": _f(f[32]),   # changePercent at [32]
                 "high": _f(f[33]),
                 "low": _f(f[34]),
                 "ts": time.time(),

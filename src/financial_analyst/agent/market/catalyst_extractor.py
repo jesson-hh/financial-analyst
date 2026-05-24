@@ -1,8 +1,8 @@
-"""Catalyst extractor — 对 A 股异动股提取催化因素 (LLM, 一次 call).
+"""Catalyst extractor — extract catalysts for A-share anomaly stocks (LLM, single call).
 
-对 market-scanner 输出的 top_gainers / top_losers / volume_anomalies
-里的每只股, 拉过去 48h 新闻 (news_db), 用 LLM 一次性提取所有股的
-催化类型 + 利好/利空判读.
+For each stock in market-scanner's top_gainers / top_losers / volume_anomalies,
+pull past-48h news (news_db) and use one LLM call to extract every stock's
+catalyst type + bullish/bearish judgement at once.
 
 input: market-scanner output (top movers + volume anomalies)
 output: List[StockCatalyst] (one per anomaly stock)
@@ -19,14 +19,14 @@ from financial_analyst.llm.client import LLMClient
 
 
 CatalystType = Literal[
-    "policy",       # 政策催化 (产业政策, 监管, 补贴)
-    "earnings",     # 业绩/财报 (预增 预减 暴雷)
-    "product",      # 新产品/订单/技术突破
-    "M&A",          # 并购重组
-    "macro",        # 宏观联动 (美联储, 大宗, 国际)
-    "rumor",        # 传闻/小道
-    "technical",    # 纯技术面 (突破/超跌反弹)
-    "none",         # 无明确催化
+    "policy",       # policy catalyst (industrial policy, regulation, subsidy)
+    "earnings",     # earnings / financial report (positive preview, negative preview, blowup)
+    "product",      # new product / order / tech breakthrough
+    "M&A",          # M&A / restructuring
+    "macro",        # macro linkage (Fed, commodities, international)
+    "rumor",        # rumour / unconfirmed
+    "technical",    # pure technical (breakout / oversold rebound)
+    "none",         # no explicit catalyst
 ]
 
 
@@ -35,7 +35,7 @@ class StockCatalyst(BaseModel):
     name: Optional[str] = None
     pct_chg: Optional[float] = None
     catalyst_type: CatalystType = "none"
-    summary: str = ""                            # 1-2 句话讲发生了啥
+    summary: str = ""                            # 1-2 sentences describing what happened
     direction: Literal["bullish", "bearish", "neutral"] = "neutral"
     confidence: Literal["high", "medium", "low"] = "low"
     cited_news_titles: List[str] = Field(default_factory=list)
@@ -44,8 +44,8 @@ class StockCatalyst(BaseModel):
 class CatalystOutput(BaseModel):
     as_of: str
     catalysts: List[StockCatalyst] = Field(default_factory=list)
-    n_with_catalyst: int = 0          # 找到明确催化的股票数
-    n_no_news: int = 0                # news_db 里没找到新闻的
+    n_with_catalyst: int = 0          # count of stocks with an explicit catalyst
+    n_no_news: int = 0                # count of stocks with no news in news_db
 
 
 SYSTEM_PROMPT = """你是 A 股催化因素提取助手. 给你今日异动股 + 每只股过去 48h 的新闻摘要, 提取每只股的催化因素.
@@ -78,7 +78,7 @@ SYSTEM_PROMPT = """你是 A 股催化因素提取助手. 给你今日异动股 +
 
 def _fetch_recent_news_for_code(code: str, news_db, since_hours: int = 48,
                                   limit: int = 5) -> List[Dict[str, Any]]:
-    """从 NewsDB 拉某股近 since_hours 新闻 (title + ts only, 限 limit 条)."""
+    """Pull a stock's recent news from NewsDB (title + ts only, capped at `limit` rows)."""
     try:
         rows = news_db.query_news(code=code, since_days=max(1, since_hours // 24), limit=limit)
     except Exception:
@@ -90,7 +90,7 @@ def _fetch_recent_news_for_code(code: str, news_db, since_hours: int = 48,
 
 
 class CatalystExtractor(SubAgent[CatalystOutput]):
-    """对异动股提取催化. LLM 一次 call 处理 N 股 (节约 token)."""
+    """Extract catalysts for anomaly stocks. One LLM call handles N stocks (saves tokens)."""
 
     NAME = "catalyst-extractor"
     OUTPUT_SCHEMA = CatalystOutput

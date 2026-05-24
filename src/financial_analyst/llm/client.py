@@ -7,20 +7,22 @@ from litellm import acompletion
 
 from financial_analyst._config import find_config
 
-# v1.9.6: 统一 AsyncOpenAI 多 base_url 架构 (替代旧 litellm 单 client).
+# v1.9.6: unified AsyncOpenAI multi-base_url architecture (replaces the old litellm single client).
 #
-# 起因: Clash fake-ip 模式下 DNS 把 *.aliyuncs.com / api.deepseek.com 都解析到
-# 198.18.0.x 段, 走 litellm 默认 client 会被 Clash 接管走海外节点 → 10s timeout.
-# 修法: provider 按"网络出口策略"分桶, 每桶一个 httpx.AsyncClient.
+# Why: under Clash fake-ip mode, DNS resolves *.aliyuncs.com / api.deepseek.com all into
+# the 198.18.0.x range, so litellm's default client gets hijacked by Clash through overseas
+# nodes → 10s timeout. Fix: bucket providers by "network egress strategy", one
+# httpx.AsyncClient per bucket.
 #
-# 三种 network_profile:
-#   - domestic    : trust_env=False, 不走系统 proxy. 给国内站 (qwen/dashscope).
-#   - intl_clash  : 显式 proxy=HTTPS_PROXY (default 127.0.0.1:7890) + verify=False
-#                   (Clash MITM 替换 cert). 给 deepseek / openai / openrouter.
-#   - intl_system : trust_env=True, 让 httpx 自己读系统代理. 给少数无 MITM 环境.
+# Three network_profiles:
+#   - domestic    : trust_env=False, bypass system proxy. For domestic CN endpoints (qwen/dashscope).
+#   - intl_clash  : explicit proxy=HTTPS_PROXY (default 127.0.0.1:7890) + verify=False
+#                   (Clash MITM replaces the cert). For deepseek / openai / openrouter.
+#   - intl_system : trust_env=True, let httpx read the system proxy itself. For the rare no-MITM env.
 #
-# OpenAI 兼容 provider (qwen/deepseek/openai/openrouter) 全走 AsyncOpenAI + base_url
-# 切. 非兼容 provider (anthropic) 保留旧 litellm 路径.
+# OpenAI-compatible providers (qwen/deepseek/openai/openrouter) all go through
+# AsyncOpenAI + base_url switching. Non-compatible providers (anthropic) keep the
+# old litellm path.
 
 _OPENAI_COMPAT_PROVIDERS = {"qwen", "deepseek", "openai", "openrouter"}
 _PROVIDER_CLIENTS: Dict[str, Any] = {}  # cache: f"{provider}:{base_url}" -> AsyncOpenAI
@@ -191,8 +193,8 @@ class LLMClient:
         response = await client.chat.completions.create(**kwargs)
         self._accumulate_usage(response)
         # v1.9.6: 21+ callers do response["choices"][0]["message"]["content"]
-        # dict-style access — litellm.ModelResponse 是 dict-like, AsyncOpenAI
-        # ChatCompletion 是 pydantic 不 subscriptable. dump 成 dict 保持兼容.
+        # dict-style access — litellm.ModelResponse is dict-like, but AsyncOpenAI
+        # ChatCompletion is a pydantic model and not subscriptable. Dump to dict to keep compatibility.
         return response.model_dump()
 
     async def _chat_litellm(

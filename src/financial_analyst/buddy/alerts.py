@@ -1,4 +1,4 @@
-"""Price-alert engine for the buddy 盯盘 (watch) feature.
+"""Price-alert engine for the buddy watch feature.
 
 Pure-Python: rules are stored in ``~/.financial-analyst/alerts.yaml``,
 evaluated against a price provider injected by the caller (the buddy
@@ -7,10 +7,10 @@ whole thing is unit-testable without a terminal or network.
 
 Rule kinds
 ----------
-- ``price_below``  fire when price <= threshold     (止损位 / 抄底位)
-- ``price_above``  fire when price >= threshold     (止盈位 / 突破位)
-- ``pct_above``    fire when day change% >= threshold (涨幅突破, e.g. +5)
-- ``pct_below``    fire when day change% <= threshold (跌幅突破, e.g. -5)
+- ``price_below``  fire when price <= threshold     (stop-loss / dip-buying line)
+- ``price_above``  fire when price >= threshold     (take-profit / breakout line)
+- ``pct_above``    fire when day change% >= threshold (gain breakout, e.g. +5)
+- ``pct_below``    fire when day change% <= threshold (drop breakout, e.g. -5)
 
 Each rule has a composite natural key ``{code}:{kind}`` so re-adding the
 same code+kind updates the threshold instead of duplicating.
@@ -46,7 +46,7 @@ def market_session(now: Optional[_dt.datetime] = None) -> str:
 
     Returns one of:
       'open'    9:30-11:30 or 13:00-15:00 on a weekday
-      'lunch'   11:30-13:00 weekday (午休)
+      'lunch'   11:30-13:00 weekday (lunch break)
       'closed'  weekday outside trading hours
       'weekend' Sat/Sun
 
@@ -218,7 +218,7 @@ def evaluate(
     """Per-code provider variant (opencli path). See ``evaluate_batch`` for
     the fast batch path (Tencent). Kept for back-compat / single-source.
 
-    Cost protection: same-code dedup + max_codes cap (opencli = 2-5 s/股).
+    Cost protection: same-code dedup + max_codes cap (opencli = 2-5 s per stock).
     """
     def _batch(codes: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
         out: Dict[str, Optional[Dict[str, Any]]] = {}

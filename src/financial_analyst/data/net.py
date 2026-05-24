@@ -2,18 +2,23 @@
 
 Two architectural pieces:
 
-1. **国内/国外路由分流**: ``domestic_session()`` 绕开系统代理 (国内站必须直连,
-   不然走 Clash 的海外节点会卡); ``intl_session()`` 走系统代理 (国外站需要 VPN
-   时由 Clash 转发). **翻墙/不翻墙环境都适用** —— 直连国内站本来就该走 direct,
-   国外站在不翻墙环境下 trust_env=True 也只是 direct (够不到就够不到, 不是这一
-   层的问题).
+1. **Domestic vs. overseas route split**: ``domestic_session()`` bypasses the
+   system proxy (domestic sites MUST direct-connect, otherwise Clash routes them
+   via overseas nodes and stalls); ``intl_session()`` honours the system proxy
+   (overseas sites need Clash forwarding when VPN is required). **Works in both
+   VPN-on and VPN-off environments** — direct-connecting to domestic sites
+   should always be direct anyway, and overseas sites with trust_env=True in
+   VPN-off env still go direct (unreachable means unreachable, not this layer's
+   problem).
 
-2. **限速 + 重试 + 可选缓存**: ``@rate_limited("xueqiu")`` 给 collector.fetch
-   套上 QPS 上限 + 指数退避 + 可选短 TTL 缓存. 防止前端连点 / 后台轮询 / agent
-   突发调用把对端 WAF 触发. 每个 source 单独配置, 统计可由 ``source_stats()``
-   暴露给 ``/diag`` 监控.
+2. **Rate-limit + retry + optional cache**: ``@rate_limited("xueqiu")`` wraps
+   collector.fetch with a QPS cap + exponential backoff + optional short TTL
+   cache. Prevents front-end click-spam / background polling / agent burst calls
+   from triggering the upstream WAF. Configured per-source; stats surfaced via
+   ``source_stats()`` for ``/diag`` monitoring.
 
-整个模块**不依赖任何 collector**, 避免循环 import; collector 端只需:
+The whole module **depends on no collector** to avoid circular imports; the
+collector side only needs:
 
     from financial_analyst.data.net import domestic_session, rate_limited
 
@@ -23,7 +28,7 @@ Two architectural pieces:
             sess = domestic_session()
             ...
 
-See ``reference_guanlan_ui.md`` 头号守则 (API 稳定性) for the rules this enforces.
+See ``reference_guanlan_ui.md`` first principle (API stability) for the rules this enforces.
 """
 from __future__ import annotations
 
@@ -40,15 +45,15 @@ _DEFAULT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 _DEFAULT_LANG = "zh-CN,zh;q=0.9"
 
 
-# ──────────────────────── Sessions: 国内 / 国外 ────────────────────────
+# ──────────────────────── Sessions: domestic / overseas ────────────────────────
 
 
 def domestic_session(extra_headers: Optional[Dict[str, str]] = None) -> requests.Session:
-    """国内站点直连 (xueqiu / 腾讯 / Tushare / Aliyun / eastmoney 等).
+    """Direct-connect for domestic sites (xueqiu / Tencent / Tushare / Aliyun / eastmoney etc).
 
-    ``trust_env=False`` 让 ``requests`` 忽略 ``HTTP_PROXY/HTTPS_PROXY`` 环境变量,
-    避开 Clash 把国内流量错路由到海外节点. 翻墙环境必须用这个; 不翻墙环境用这个
-    也无害 (反正没有 proxy env).
+    ``trust_env=False`` makes ``requests`` ignore the ``HTTP_PROXY/HTTPS_PROXY`` env vars,
+    avoiding Clash mis-routing domestic traffic to overseas nodes. Required in VPN-on
+    environments; harmless in VPN-off environments (no proxy env to read anyway).
     """
     s = requests.Session()
     s.trust_env = False
@@ -62,10 +67,11 @@ def domestic_session(extra_headers: Optional[Dict[str, str]] = None) -> requests
 
 
 def intl_session(extra_headers: Optional[Dict[str, str]] = None) -> requests.Session:
-    """国外站点 (Anthropic / OpenAI / Hugging Face 等).
+    """Overseas sites (Anthropic / OpenAI / Hugging Face etc).
 
-    ``trust_env=True`` 让 ``requests`` 读 ``HTTP_PROXY/HTTPS_PROXY``. 翻墙环境
-    下走 Clash 出去; 不翻墙环境下走直连 (够得到就够得到, 够不到调用方自己处理).
+    ``trust_env=True`` lets ``requests`` read ``HTTP_PROXY/HTTPS_PROXY``. In VPN-on
+    environments it goes out via Clash; in VPN-off environments it direct-connects
+    (reachable or not is the caller's problem, not this layer's).
     """
     s = requests.Session()
     s.trust_env = True
@@ -82,10 +88,10 @@ def intl_session(extra_headers: Optional[Dict[str, str]] = None) -> requests.Ses
 
 @dataclass
 class _SourceStats:
-    """每个 source 的累计统计, 给 /diag 暴露."""
+    """Cumulative stats per source, surfaced to /diag."""
     calls_total: int = 0
     retries_total: int = 0
-    throttled_total: int = 0  # 被限速排队的次数
+    throttled_total: int = 0  # number of times the call was rate-limit queued
     cache_hits_total: int = 0
     last_call_ts: float = 0.0
     last_error: str = ""
@@ -93,9 +99,10 @@ class _SourceStats:
 
 
 class _MinIntervalLimiter:
-    """最简单可靠的限速: 两次调用最小间隔. 1/QPS 秒.
+    """Simplest reliable rate-limit: minimum interval between two calls. 1/QPS seconds.
 
-    线程安全 (collector 跑在 asyncio.to_thread 里); 实现为 sleep 等待, 不抛错."""
+    Thread-safe (collectors run inside asyncio.to_thread); implemented as a sleep
+    wait, never raises."""
 
     def __init__(self, min_interval: float):
         self.min_interval = max(0.0, float(min_interval))
@@ -103,7 +110,7 @@ class _MinIntervalLimiter:
         self._next_allowed: float = 0.0
 
     def acquire(self) -> float:
-        """阻塞直到允许调用. 返回实际等待秒数 (0 = 没排队)."""
+        """Block until the call is allowed. Returns actual wait seconds (0 = no queue)."""
         if self.min_interval <= 0:
             return 0.0
         with self._lock:
@@ -120,8 +127,8 @@ class _Source:
     name: str
     limiter: _MinIntervalLimiter
     max_retries: int
-    backoff_base: float  # 实际退避 = base * 2^attempt
-    cache_ttl: float = 0.0  # 0 = 不缓存
+    backoff_base: float  # actual backoff = base * 2^attempt
+    cache_ttl: float = 0.0  # 0 = no caching
     stats: _SourceStats = field(default_factory=_SourceStats)
     _cache: Dict[Any, tuple] = field(default_factory=dict)  # key → (ts, value)
     _cache_lock: threading.Lock = field(default_factory=threading.Lock)
@@ -133,15 +140,17 @@ _SOURCES: Dict[str, _Source] = {}
 def register_source(name: str, qps: float = 1.0,
                     max_retries: int = 2, backoff_base: float = 2.0,
                     cache_ttl: float = 0.0) -> None:
-    """注册一个 source 的策略. 幂等 (重复 register 会覆盖配置, 但保留 stats).
+    """Register the policy for one source. Idempotent (re-registering overrides
+    the config but keeps the stats).
 
     Args:
-        name: source 标识, 跟 ``@rate_limited(name)`` 对应.
-        qps: 每秒最多多少次. min_interval = 1/qps. 0 = 不限速.
-        max_retries: 失败后最多再试几次 (0 = 不重试).
-        backoff_base: 退避秒数基数. attempt n 等 base * 2^n 秒.
-        cache_ttl: 命中缓存的时间窗 (秒). 0 = 不缓存. 需要 ``@rate_limited``
-            的 ``cache_key`` 参数也给出, 否则缓存不生效.
+        name: source identifier, matches the ``@rate_limited(name)`` name.
+        qps: max calls per second. min_interval = 1/qps. 0 = no rate limit.
+        max_retries: max retries after failure (0 = no retry).
+        backoff_base: backoff base in seconds. attempt n waits base * 2^n seconds.
+        cache_ttl: cache hit window (seconds). 0 = no cache. The ``cache_key``
+            argument of ``@rate_limited`` must also be provided, otherwise the
+            cache does not kick in.
     """
     existing = _SOURCES.get(name)
     src = _Source(
@@ -156,7 +165,7 @@ def register_source(name: str, qps: float = 1.0,
 
 
 def _is_retryable(exc: BaseException) -> bool:
-    """识别可重试的故障: 限速 / 临时网络抖 / 服务侧 5xx / 空 list 静默限速."""
+    """Identify a retryable failure: rate-limit / transient network blip / server-side 5xx / empty-list silent throttle."""
     if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
         return True
     if isinstance(exc, requests.HTTPError):
@@ -173,17 +182,18 @@ def _is_retryable(exc: BaseException) -> bool:
 
 def rate_limited(source_name: str,
                  cache_key: Optional[Callable[..., Any]] = None):
-    """装饰 collector.fetch (或任何外部调用), 套上限速 / 退避 / 缓存.
+    """Decorate collector.fetch (or any external call) with rate-limit / backoff / cache.
 
     Args:
-        source_name: 必须先 ``register_source(source_name, ...)``. 未注册时
-            装饰器透传 (不限速, 不重试, 不缓存) — 保证 collector 在导入顺序
-            混乱时仍能工作, 出问题再补 register.
-        cache_key: 可选, ``fn(*args, **kwargs) -> hashable``. 配合 source 的
-            ``cache_ttl>0`` 才生效. ``self`` 也会传给 cache_key.
+        source_name: must call ``register_source(source_name, ...)`` first.
+            If unregistered, the decorator passes through (no limit, no retry, no cache)
+            — keeps collectors working even when import order is messed up;
+            register later when something breaks.
+        cache_key: optional, ``fn(*args, **kwargs) -> hashable``. Only effective
+            when the source's ``cache_ttl>0``. ``self`` is also passed to cache_key.
 
     Returns:
-        包装后的函数. 抛出原异常 (重试用完后).
+        The wrapped function. Raises the original exception (after retries exhausted).
     """
     def deco(fn):
         @wraps(fn)
@@ -198,7 +208,7 @@ def rate_limited(source_name: str,
                 try:
                     ck = cache_key(*args, **kwargs)
                 except Exception:
-                    ck = None  # cache_key 自己挂了不能拖死真请求
+                    ck = None  # if cache_key itself fails, don't drag down the real request
                 if ck is not None:
                     with src._cache_lock:
                         hit = src._cache.get(ck)
@@ -206,7 +216,7 @@ def rate_limited(source_name: str,
                         src.stats.cache_hits_total += 1
                         return hit[1]
 
-            # 2. rate limit (block 到允许)
+            # 2. rate limit (block until allowed)
             wait = src.limiter.acquire()
             if wait > 0:
                 src.stats.throttled_total += 1
@@ -218,7 +228,7 @@ def rate_limited(source_name: str,
                     src.stats.calls_total += 1
                     src.stats.last_call_ts = time.time()
                     result = fn(*args, **kwargs)
-                    # 缓存写入
+                    # cache write
                     if ck is not None and src.cache_ttl > 0:
                         with src._cache_lock:
                             src._cache[ck] = (time.time(), result)
@@ -232,7 +242,7 @@ def rate_limited(source_name: str,
                         time.sleep(src.backoff_base * (2 ** attempt))
                         continue
                     raise
-            # 理论不可达, 但 mypy 喜欢
+            # Theoretically unreachable, but mypy likes it
             if last_exc:
                 raise last_exc
             return None
@@ -252,7 +262,7 @@ def _clear_all_caches() -> None:
 
 
 def source_stats() -> Dict[str, Dict[str, Any]]:
-    """所有已注册 source 的累计统计. 给 /diag 序列化用."""
+    """Cumulative stats for all registered sources. Serialized into /diag."""
     now = time.time()
     out: Dict[str, Dict[str, Any]] = {}
     for name, src in _SOURCES.items():
@@ -271,15 +281,15 @@ def source_stats() -> Dict[str, Dict[str, Any]]:
     return out
 
 
-# ──────────────────────── 预注册已知 sources ────────────────────────
+# ──────────────────────── Pre-register known sources ────────────────────────
 #
-# QPS / 重试 / 缓存值是经验起点, 看 /diag 监控数据再调.
+# QPS / retry / cache values are empirical starting points; tune from /diag stats.
 #
-#   xueqiu        — Aliyun WAF 反爬较严格, 限到 1/s, 缓存 30s 避免连点
-#   xueqiu_hot    — 单独一档因为可以更宽松 (公共榜单, 不是 per-stock)
-#   tencent_quote — 国内, 宽松, 行情高频
-#   tushare       — 服务侧自有限速 (token 200次/分), 客户端再限一遍
-#   eastmoney     — opencli HTTP 源, 稳, 不限速 (qps=0 不限)
+#   xueqiu        — Aliyun WAF anti-scrape is strict, limit to 1/s, 30s cache to avoid click spam
+#   xueqiu_hot    — separate bucket since it can be looser (public ranking, not per-stock)
+#   tencent_quote — domestic, loose, high-frequency quotes
+#   tushare       — server-side rate limit (token 200/min), client side rate-limits as well
+#   eastmoney     — opencli HTTP source, stable, no rate-limit (qps=0 = unlimited)
 #
 register_source("xueqiu",             qps=1.0, max_retries=2, backoff_base=2.0, cache_ttl=30.0)
 register_source("xueqiu_hot",         qps=2.0, max_retries=2, backoff_base=2.0, cache_ttl=60.0)
@@ -289,5 +299,5 @@ register_source("eastmoney_kuaixun",  qps=2.0, max_retries=1, backoff_base=1.0, 
 register_source("eastmoney_longhu",   qps=1.0, max_retries=1, backoff_base=2.0, cache_ttl=600.0)
 register_source("eastmoney_holders",  qps=1.0, max_retries=1, backoff_base=2.0, cache_ttl=600.0)
 register_source("sinafinance",        qps=2.0, max_retries=1, backoff_base=2.0, cache_ttl=30.0)
-# ths_hot 还是 opencli browser-mode (跟旧 xueqiu 浏览器桥一样有反爬风险), 限严点
+# ths_hot is still opencli browser-mode (same anti-scrape risk as the old xueqiu browser bridge), keep it strict
 register_source("ths_hot",            qps=1.0, max_retries=2, backoff_base=3.0, cache_ttl=120.0)

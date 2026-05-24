@@ -92,13 +92,15 @@ def test_load_preset_with_index_uses_retrieval(tmp_path):
 
 
 def test_load_preset_without_index_works_unchanged(tmp_path):
-    """Omitting memory_index → all agents use full mode; 14 nodes returned (v1.9.4+: +introspector)."""
+    """Omitting memory_index → all agents use full mode.
+    v1.9.4: +introspector (Tier 4). v1.9.7: +overseas-market-scanner + sector-rotation-analyzer
+    (Tier 1). Current count: 16."""
     _ensure_registered()
     mem_root = tmp_path / "memories"
     mem_root.mkdir()
 
     nodes = load_preset("stock-deep-dive", memory_root=mem_root)  # no index arg
-    assert len(nodes) == 14
+    assert len(nodes) == 16
     for n in nodes:
         assert n.agent.memory.index is None, (
             f"{n.agent.NAME} should have memory.index=None when no index provided"

@@ -40,9 +40,18 @@
 </p>
 
 ```bash
-pip install financial-analyst==1.0.0    # 1 minute, zero token required for default
-fa init                                  # interactive wizard — pulls HF dataset
-fa report SH600519                       # 14-agent deep-dive (~10 min)
+pip install financial-analyst==1.0.0    # 1 minute
+financial-analyst                        # zero-config: wizard + backend + web UI + browser auto-opens
+```
+
+That's it. The first run: detects your config → runs the interactive wizard (LLM key + HF dataset pick) → starts the buddy backend on `:9999` → starts the web UI on `:5173` → opens your browser. Ctrl+C stops everything.
+
+Power users: `financial-analyst --tui` for the terminal UI, or pick specific commands:
+
+```bash
+fa init                # wizard only (LLM key + data pack)
+fa report SH600519     # one-shot deep-dive (~10 min, no UI)
+fa launch              # explicit one-command launcher
 ```
 
 ---
