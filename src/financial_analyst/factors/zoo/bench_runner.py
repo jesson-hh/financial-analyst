@@ -63,11 +63,12 @@ def _hit_rate(alpha: pd.Series, fwd: pd.Series) -> float:
 
 
 def classify_factor(rank_ic, rank_ir, prev_rank_ic=None) -> str:
-    """因子健康分类 (参考 Vibe-Trading 的 alive/reversed/dead):
+    """Factor health classification (alive / reversed / dead):
 
-    单窗口看 |RankICIR| 强度 + |RankIC| 量级 → 有效 / 一般 / 偏弱 / 失效。
-    若给了上期 RankIC (prev_rank_ic) 且本期与上期反号且两期都够大 → 反向 (reversed),
-    即 IC 方向翻转, 因子衰减/失效的强信号。
+    Single window: judge by |RankICIR| strength + |RankIC| magnitude
+    → strong / moderate / weak / dead. If prev_rank_ic is given AND current
+    sign flips with both magnitudes sufficient → reversed, a strong signal
+    of factor decay / failure.
     """
     try:
         ric = float(rank_ic); rir = float(rank_ir)

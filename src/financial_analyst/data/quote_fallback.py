@@ -1,7 +1,8 @@
 """Multi-source realtime quote with automatic fallback chain.
 
-v1.9.6 — vibe-trading 借鉴的唯一新增点: 数据接口多源 fallback. 实时行情 tencent
-失败时不该让 buddy / agent 直接 fail, 应该自动 fallback 雪球 (cookie 慢但活).
+v1.9.6 — multi-source data fallback. When tencent realtime quote fails, the
+agent / buddy should automatically fall back to xueqiu (slower with cookie,
+but more resilient) rather than failing the whole pipeline.
 
 设计:
 - 每条 source 是一个 ``(name, fetcher)`` 二元组. fetcher 返 dict 或 None.

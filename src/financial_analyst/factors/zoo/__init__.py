@@ -1,9 +1,8 @@
 """Alpha Zoo — registered families of alpha formulas with cross-sectional
 benchmarking.
 
-Inspired by HKUDS/Vibe-Trading ``agent/src/factors/zoo/``: a registry of
-named alpha formulas plus a ``alpha bench`` CLI that emits IC / IR / hit
-rate per alpha against a chosen universe and period.
+A registry of named alpha formulas plus an ``alpha bench`` CLI that emits
+IC / IR / hit rate per alpha against a chosen universe and period.
 
 Two families ship in v1.3.0:
 

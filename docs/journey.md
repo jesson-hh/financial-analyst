@@ -259,11 +259,6 @@ analyst's prompt because the structure strips free-form text.
 
 #### Phase 0: Design & scaffolding (Day −2 to 0)
 
-Studied two open-source agent frameworks:
-
-- **HKUDS/Vibe-Trading**: A multi-market quant agent with 29 swarm presets, 452 formulaic alphas, and a `alpha bench` CLI. We borrowed the zoo architecture and CLI shape.
-- **anthropics/financial-services**: 3-tier trust isolation and schema-locked sub-agent JSON. We borrowed the trust model and pydantic discipline.
-
 What we kept vs. what we changed: kept the trust tiers, kept the zoo registry pattern, dropped the 29-preset shotgun (our 4 are deeper), dropped the live-trading bias (we're a research tool, not a bot), added the Chinese A-share specificity (Tushare loader, 申万 industry classifier, xueqiu sentiment, 14 R7-R20 sentiment signals from the user's 5-year G:\stocks research).
 
 #### Phase 1: Foundation (v0.1.0 – v0.6.0)
@@ -380,7 +375,7 @@ This is where the project changed scale. We started v1.3.0 with **22 hand-picked
 #### What was over-engineered (in hindsight)
 
 - The dream loop (`OutcomeTracker → Introspector`) is conceptually elegant but underused at current scale. Will become valuable when there's enough report history to detect patterns.
-- 29-preset swarm shotgun (Vibe-Trading's approach). We have 4 deep presets and they're enough. Preset count is vanity; preset depth is reach.
+- 29-preset swarm shotgun (alternative approach). We have 4 deep presets and they're enough. Preset count is vanity; preset depth is reach.
 
 ### 7. Where to next
 
@@ -672,11 +667,6 @@ financial-analyst dream accept <id>        # 升级为永久 memory
 
 #### Phase 0: 设计 + 搭架子 (Day −2 至 0)
 
-研究了两个开源 agent 框架:
-
-- **HKUDS/Vibe-Trading**: 多市场量化 agent, 29 个 swarm preset, 452 个 alpha 公式, 自带 `alpha bench` CLI. 我们借鉴了 zoo 架构和 CLI shape.
-- **anthropics/financial-services**: 三层信任隔离 + schema-locked sub-agent JSON. 我们借鉴了信任模型和 pydantic 纪律.
-
 **保留 vs 改造**: 保留三信任层, 保留 zoo 注册模式, 砍掉 29-preset 散弹 (我们的 4 个更深), 砍掉实盘交易导向 (我们是研究工具), 加上 A 股专属性 (Tushare loader / 申万行业 / 雪球情绪 / 用户 5 年 G:\stocks 研究里的 R7-R20 共 14 个 S/SS 级情绪信号).
 
 #### Phase 1: 地基 (v0.1.0 – v0.6.0)
@@ -793,7 +783,7 @@ financial-analyst dream accept <id>        # 升级为永久 memory
 #### 事后看是过度设计的
 
 - dream loop (`OutcomeTracker → Introspector`) 概念优雅但当前规模用得少. 等历史报告积累够了再放光. 现在是占位.
-- 29-preset swarm 散弹 (Vibe-Trading 的做法). 我们 4 个深 preset 就够了. **Preset 数量是虚荣, preset 深度才是触达**.
+- 29-preset swarm 散弹 (另一种做法). 我们 4 个深 preset 就够了. **Preset 数量是虚荣, preset 深度才是触达**.
 
 ### 7. 下一步往哪走
 

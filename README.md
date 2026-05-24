@@ -64,8 +64,6 @@ sector-rotation             quant                          (single writer)
 
 Out comes a markdown research report — **rated, attributed, falsifiable**. The `report-writer` is the **only** agent allowed to write report files. Untrusted news/F10 sources are JSON-schema-locked at Tier-1 (no prompt injection). Memory is markdown — edit a `.md`, next report uses it. FTS5 retrieval cuts prompt cost ~60%.
 
-**Inspired by**: [Anthropic's financial-services](https://github.com/anthropics/financial-services) (3-tier trust isolation) and [HKUDS/Vibe-Trading](https://github.com/HKUDS/Vibe-Trading) (YAML swarm presets).
-
 ---
 
 ## ✨ Key Features

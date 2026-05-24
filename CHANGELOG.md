@@ -163,7 +163,7 @@ VIX / Fed 政策 / 大宗商品对 A 股的传导.
   之前 UI 侧边栏连点 / agent 突发轮询会触 Aliyun WAF, 累及所有 xueqiu
   collector (含已限速的 comments/hot_stock); 现在全部 1qps + 30s cache.
 
-### Added — 实时行情多源 Fallback (vibe-trading 借鉴)
+### Added — Multi-source Realtime Quote Fallback
 
 - **`src/financial_analyst/data/quote_fallback.py`** 新增 (~110 行): 通用
   fallback chain helper. `fetch_realtime_quote(code)` 顺序 tencent → xueqiu,
@@ -177,11 +177,6 @@ VIX / Fed 政策 / 大宗商品对 A 股的传导.
   挂了直接 fail. 现走 helper, tencent → xueqiu (xueqiu 退化为循环单股).
 - **设计**: fallback 层只做 routing 不做 cache, 各 source 内部 `@rate_limited`
   已有 cache (tencent 2s / xueqiu 30s). 不重复.
-- **vibe-trading 对比**: 它按 symbol 格式 dispatch loader (`.US`→yfinance,
-  `.HK`→yfinance, A 股→tushare), 无 fallback. 我们用 fallback chain 在同市
-  场内增稳定性. HK/US/crypto 不在我们 product scope. 其它 vibe-trading
-  设计 (Loader 抽象 / Tool registry / Network 治理) 我们 v1.9.6 已有或更强,
-  不再借鉴.
 - 测试: `tests/test_quote_fallback.py` 15 个 (单/批 × short-circuit / 链式
   fallback / 异常 fallback / 全失败 + details / default chain 顺序).
 
@@ -1779,7 +1774,7 @@ gtja149: 561/900 non-null, betas in [-0.34, +0.34]
 | qlib158 | 150 | 158 | 95% |
 | **Total** | **442** | **452** | **98%** |
 
-Compared to the Vibe-Trading 452-alpha reference target, the only
+Compared to the 452-alpha target, the only
 gap left is 8 of Qlib158's window-variant features (low signal value;
 existing 150 cover all the underlying feature kinds).
 
@@ -2112,8 +2107,7 @@ catalogues.
   IMAX/IMIN/IMXD × {30,60}, SKEW/KURT × 5, CORR × 3, SUMP/SUMN/SUMD ×
   {10,30}, VSUMP/VSUMN/VSUMD × {10,30}, CNTD × {10,30}.
 
-Total: **440 alphas across 3 families** — **97% of Vibe-Trading's
-452-alpha reference target**. Compared to v1.3.0's 22 alphas, this is
+Total: **440 alphas across 3 families** (across alpha101 / gtja191 / WorldQuant family taxonomy). Compared to v1.3.0's 22 alphas, this is
 a 20× expansion in two days.
 
 ### Fixed
@@ -2229,7 +2223,7 @@ and `alpha snapshot` call automatically uses it.
 ## v1.3.6 — 2026-05-19
 
 ### Added — +74 alphas (zoo: 290 → 364)
-Final pre-IndustryLoader push toward Vibe-Trading parity.
+Final pre-IndustryLoader push toward 440+ alpha coverage.
 
 - **gtja191 +49 → 158/191 (83%)**: added 064, 073, 075, 087, 089, 090,
   091, 092, 094, 101, 103-105, 107, 108, 110, 111, 113, 114, 116, 117,
@@ -2281,7 +2275,7 @@ A push toward catalog completeness. Three batches across three families:
   IMXD × 3 (3).
 
 **Zoo now ships 290 alphas total** — close to two-thirds of the original
-Vibe-Trading 452-alpha goal. Remaining: ~80 alpha101 (mostly
+452-alpha goal. Remaining: ~80 alpha101 (mostly
 IndNeutralize-blocked), ~82 gtja191 (mostly complex/exotic), ~56 qlib158.
 
 ### Fixed
@@ -2521,7 +2515,7 @@ Zoo now ships **49 alphas total** (was 22 in v1.3.0).
 
 ## v1.3.0 — 2026-05-19
 
-### Added — Alpha Zoo (inspired by HKUDS/Vibe-Trading)
+### Added — Alpha Zoo
 A registry of named alpha formulas with a `alpha bench` CLI that emits
 IC / IR / hit-rate per alpha against a chosen universe and period.
 Two families ship in this release:

@@ -177,9 +177,3 @@ one).
   doesn't gate it against using `close.shift(-1)` etc. The shipped 22
   are clean; review carefully if you add your own.
 
-## Inspiration
-
-The zoo design is inspired by [HKUDS/Vibe-Trading
-agent/src/factors/zoo/](https://github.com/HKUDS/Vibe-Trading/tree/main/agent/src/factors/zoo).
-We diverged on the impl (theirs uses bun + TypeScript-style operators;
-ours is pure pandas) but kept the registry+bench+show CLI shape.

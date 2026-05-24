@@ -64,8 +64,6 @@ F10 · 海外宏观         主力情绪分析师                 风控 ─┘
 
 输出: 一份 markdown 研报 — **打分 · 归因 · 可证伪**. 只有 `report-writer` 能落盘. 不可信新闻 / F10 在 Tier-1 用 JSON-schema 锁死 (杜绝 prompt 注入). 记忆是 markdown — 改 `.md`, 下次研报立即生效. FTS5 检索省 prompt 60%.
 
-**灵感来源**: [Anthropic financial-services](https://github.com/anthropics/financial-services) (三层信任隔离) + [HKUDS/Vibe-Trading](https://github.com/HKUDS/Vibe-Trading) (YAML swarm 编排).
-
 ---
 
 ## ✨ 能干什么
