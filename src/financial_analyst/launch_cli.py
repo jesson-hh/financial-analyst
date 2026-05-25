@@ -423,6 +423,42 @@ def _do_launch(
         console.print(f"[red]✗ {exc}[/red]")
         raise typer.Exit(3)
 
+    # ─── 2b. Preflight: fastapi/uvicorn importable? ───
+    # As of v1.0.3 they're core deps, so missing them = broken install
+    # (or, very rarely, an older fa pinned with the [serve]-extra split).
+    # We probe BEFORE spawning `fa serve` so the user gets a clean error
+    # in 1s instead of a confusing "Backend did not become ready in 30s"
+    # after watching a spinner.
+    missing_serve = []
+    for mod in ("fastapi", "uvicorn"):
+        try:
+            __import__(mod)
+        except ImportError:
+            missing_serve.append(mod)
+    if missing_serve:
+        names = " + ".join(missing_serve)
+        if lang == "zh":
+            console.print()
+            console.print(Panel(
+                f"[bold]后端组件缺失[/bold]: [red]{names}[/red] 没装上.\n\n"
+                f"修法 (二选一):\n"
+                f"  [cyan]pip install --force-reinstall financial-analyst[/cyan]\n"
+                f"  [cyan]pip install {' '.join(missing_serve)}[/cyan]",
+                title="[red]✗ 装包不完整[/red]",
+                border_style="red", padding=(0, 2),
+            ))
+        else:
+            console.print()
+            console.print(Panel(
+                f"[bold]Backend module missing[/bold]: [red]{names}[/red] not importable.\n\n"
+                f"Fix (either):\n"
+                f"  [cyan]pip install --force-reinstall financial-analyst[/cyan]\n"
+                f"  [cyan]pip install {' '.join(missing_serve)}[/cyan]",
+                title="[red]✗ Broken install[/red]",
+                border_style="red", padding=(0, 2),
+            ))
+        raise typer.Exit(7)
+
     # ─── 3. Port availability check ───
     if not _port_free(backend_port, backend_host):
         msg = (f"[red]✗ 后端端口 {backend_port} 被占用. 加 --backend-port <其他>"

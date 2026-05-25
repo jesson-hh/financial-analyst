@@ -58,6 +58,20 @@ Stock data is large (155 MB demo · 3 GB lite · 14 GB full + 5min + F10) and ma
 
 Route now returns a per-row `implemented` boolean and `stale_count` only counts implemented stale types. Items list still surfaces `financials` / `f10` for transparency so the user knows they exist; the front-end button title already wired the wording to "all implemented data types updated", so no UI change was needed.
 
+### Changed — `fastapi` + `uvicorn` promoted to core dependencies
+
+Before v1.0.3 they lived under `[serve]` extra, so `pip install financial-analyst` got a working CLI but `fa start` / `fa launch` (the headline zero-config web launcher) failed obscurely — the spawned `fa serve` subprocess died on `from fastapi import FastAPI`, while the parent process just waited 30 s for `/health` and reported "Backend did not become ready". Users had to dig through `.fa-launch-backend.log` to find the actual `pip install financial-analyst[serve]` hint.
+
+Since `fa start` IS the headline UX, the slim CLI-only install case is too rare to justify the trap. Moved both packages into `[project.dependencies]` and dropped the `[serve]` optional-dependencies block.
+
+- `pip install financial-analyst` now installs everything needed for the GuanLan UI backend — no extras flag required.
+- Old `pip install financial-analyst[serve]` invocations keep working (pip silently ignores unknown extras), so users with the old command in their notes / scripts won't break.
+- README + `docs/setup/install.md` + `docs/setup/zero_to_report.md` + `docs/setup/release_checklist.md` + `docs/setup/tauri_packaging.md` + `docs/api/sse_endpoints.md` updated to drop the `[serve]` suffix.
+
+### Added — Preflight check in `fa start` for broken installs
+
+`_do_launch()` now probes `import fastapi, uvicorn` before spawning `fa serve`. Missing modules → a clear red panel with the exact fix-command, exit code 7. Catches the obscure `pip install --no-deps` / corrupted-venv case in under a second instead of after the 30 s wait-for-`/health` timeout.
+
 ### Added — Orange "盘中" data refresh state
 
 When the A-share market is currently in session (Mon-Fri 09:30-15:00, lunch 11:30-13:00 inclusive) and the user has just refreshed, the data is "as fresh as possible" but today's full close hasn't happened yet. Showing the same ✓ green as a post-close fresh state hides this nuance.

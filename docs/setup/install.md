@@ -4,8 +4,8 @@
 
 | 我是 | 路径 | 一行命令 |
 |------|------|---------|
-| 个人用户 / 试用 | A. **pip from PyPI** | `pip install financial-analyst[serve]` |
-| 开发者 / 想改源码 | B. **pip editable from source** | `git clone ... && pip install -e .[dev,serve]` |
+| 个人用户 / 试用 | A. **pip from PyPI** | `pip install financial-analyst` |
+| 开发者 / 想改源码 | B. **pip editable from source** | `git clone ... && pip install -e .[dev]` |
 
 完成任一路径后, 跑 `fa init` 完成首启配置 (见 [`zero_to_report.md`](zero_to_report.md)).
 
@@ -21,8 +21,8 @@ python -m venv .venv
 .venv\Scripts\activate          # Windows
 source .venv/bin/activate       # macOS / Linux
 
-# 2. 装包 (含 GuanLan UI 后端的 fastapi / uvicorn)
-pip install financial-analyst[serve]
+# 2. 装包 (一行搞定, 所有运行时依赖含 GuanLan UI 后端的 fastapi/uvicorn 都自动拉)
+pip install financial-analyst
 
 # 3. 首启 wizard (引导 LLM key + 数据包 + 验证)
 fa init
@@ -31,19 +31,16 @@ fa init
 fa report SH600519
 ```
 
-`pip install financial-analyst[serve]` 自动拉:
-- **核心**: litellm / pydantic / pandas / numpy / pyarrow / lightgbm / tushare /
-  **pytdx** (主站直连, 无 token) / mcp / huggingface-hub
-- **[serve] extras**: fastapi / uvicorn (启 GuanLan UI 后端用)
+`pip install financial-analyst` 自动拉所有运行时依赖:
+- litellm / pydantic / pandas / numpy / pyarrow / lightgbm
+- tushare / **pytdx** (主站直连, 无 token) / mcp / huggingface-hub
+- **fastapi / uvicorn** (核心起 GuanLan UI 后端用, v1.0.3 起已并入 core)
 
-不带 `[serve]` 等价于只想 CLI:
-```bash
-pip install financial-analyst    # 不含 fastapi / uvicorn
-```
+> 历史包袱: v1.0.2 之前 `fastapi/uvicorn` 是 `[serve]` 可选 extra, 现在并入 core 后用户不需要再敲 `[serve]`. 老的 `pip install financial-analyst[serve]` 命令仍然能跑 (pip 忽略不存在的 extra), 但已没必要.
 
 ### 升级
 ```bash
-pip install -U financial-analyst[serve]
+pip install -U financial-analyst
 ```
 
 ### 验证
@@ -70,8 +67,8 @@ cd financial-analyst
 python -m venv .venv
 .venv\Scripts\activate
 
-# 3. editable install + dev extras (pytest, ruff, build, twine) + serve extras
-pip install -e .[dev,serve]
+# 3. editable install + dev extras (pytest, ruff, build, twine)
+pip install -e .[dev]
 
 # 4. 验证 (跑全部 pytest)
 pytest tests/ -q
@@ -86,8 +83,7 @@ fa report SH600519
 
 不想要 dev 工具 (例如 CI 镜像):
 ```bash
-pip install -e .[serve]    # 只 serve, 不带 dev
-pip install -e .           # 最小, 只 CLI
+pip install -e .           # 最小 editable, 不带 pytest/ruff/build/twine
 ```
 
 ### 用本地 wheel (CI / 离线安装)
@@ -100,7 +96,7 @@ pip install build
 python -m build --wheel --outdir dist/
 
 # 装本地 wheel (跟 PyPI 一致, 但来自本地)
-pip install dist/financial_analyst-*.whl[serve]
+pip install dist/financial_analyst-*.whl
 ```
 
 ---
@@ -145,16 +141,16 @@ pip install dist/financial_analyst-*.whl[serve]
 ### `financial-analyst-mcp` 命令不存在
 
 ```bash
-pip install --force-reinstall financial-analyst[serve]
+pip install --force-reinstall financial-analyst
 # 或在已激活的 venv 里:
-pip install --upgrade financial-analyst[serve]
+pip install --upgrade financial-analyst
 ```
 
 ### `import pytdx ModuleNotFoundError`
 
 只发生在用很旧的 wheel install (≤ 1.9.4 之前). 升级到 ≥ 1.9.5:
 ```bash
-pip install -U financial-analyst[serve]
+pip install -U financial-analyst
 ```
 (pytdx 在 1.9.5 加进 dependencies.)
 

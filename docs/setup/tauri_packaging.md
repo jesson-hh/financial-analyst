@@ -222,7 +222,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
       - uses: dtolnay/rust-toolchain@stable
-      - run: pip install pyinstaller && pip install -e .[serve]
+      - run: pip install pyinstaller && pip install -e .
       - run: pyinstaller packaging/pyinstaller/financial-analyst.spec --distpath packaging/dist
       - run: cp packaging/dist/financial-analyst* packaging/src-tauri/binaries/
       - uses: tauri-apps/tauri-action@v0

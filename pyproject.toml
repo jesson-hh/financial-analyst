@@ -63,6 +63,8 @@ dependencies = [
     "huggingface-hub>=0.20",   # fa init wizard 下数据包
     "httpx>=0.27",             # buddy + tencent_quote
     "requests>=2.31",          # collectors / tushare HTTP
+    "fastapi>=0.110",          # buddy SSE backend (fa serve / fa start)
+    "uvicorn>=0.29",           # ASGI server for buddy
 ]
 
 [project.optional-dependencies]
@@ -73,10 +75,6 @@ dev = [
     "ruff>=0.5",
     "build>=1.0",
     "twine>=5.0",
-]
-serve = [
-    "fastapi>=0.110",
-    "uvicorn>=0.29",
 ]
 
 [project.urls]

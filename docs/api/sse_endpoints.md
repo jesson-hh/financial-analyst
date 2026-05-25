@@ -17,7 +17,7 @@ curl http://127.0.0.1:9999/health
 # → {"ok": true, "version": "1.9.4", "tools": 22}
 ```
 
-需要 `fastapi + uvicorn`. 没装会报错引导到 `pip install financial-analyst[serve]`.
+`fastapi + uvicorn` 是核心依赖 (v1.0.3 起), `pip install financial-analyst` 即装. 如果导入失败说明安装损坏, 重装即可.
 
 ## Endpoint 概览
 

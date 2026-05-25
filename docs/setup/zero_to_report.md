@@ -62,8 +62,8 @@ python -m venv .venv
 # macOS / Linux
 source .venv/bin/activate
 
-pip install financial-analyst[serve]
-# [serve] 拉 fastapi + uvicorn, 起 GuanLan UI 后端需要
+pip install financial-analyst
+# 一行拉所有运行时依赖 (含 fastapi + uvicorn, 给 GuanLan UI 后端用)
 ```
 
 ### 路径 B — 源码 (开发 / 改 agent 源码)

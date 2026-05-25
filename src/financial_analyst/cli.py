@@ -179,9 +179,8 @@ def serve(
     Exposes the buddy agent over Server-Sent Events so the desktop
     front-end can drive the real tools instead of its mock.
 
-    Endpoints: POST /run (SSE), POST /confirm, GET /health, GET /tools.
-
-    Needs the [serve] extra:  pip install financial-analyst[serve]
+    Endpoints: POST /run (SSE), POST /confirm, GET /health, GET /tools,
+               GET /data/status, POST /data/refresh.
     """
     from financial_analyst.buddy.server import serve as _serve
     _serve(host=host, port=port)

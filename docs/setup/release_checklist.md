@@ -1,7 +1,7 @@
 # Release Checklist — v1.9.5
 
 > 这份 checklist 给 **maintainer** 用. 走完一遍把 v1.9.5 发布到 PyPI + DockerHub + HF.
-> 用户不需要看, 用户跑 `pip install -U financial-analyst[serve]` 即可.
+> 用户不需要看, 用户跑 `pip install -U financial-analyst` 即可.
 
 ## 0. 前置: 验证
 
@@ -73,9 +73,9 @@ twine upload dist/financial_analyst-1.9.5*
 
 ```
 现有用户升级:
-    pip install -U financial-analyst[serve]
+    pip install -U financial-analyst
 新用户:
-    pip install financial-analyst[serve]
+    pip install financial-analyst
     fa init
 ```
 
@@ -148,7 +148,7 @@ git push
 > - pytdx 主站直连, 不再需要 Tushare token
 > - dream loop 自动从 Tier-4 introspector 聚类升级规则
 > - 完整 Docker + MCP + 三平台 .msi/.dmg/.AppImage
-> - `pip install -U financial-analyst[serve]`
+> - `pip install -U financial-analyst`
 
 ---
 

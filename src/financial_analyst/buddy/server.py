@@ -18,9 +18,9 @@ Confirmation is bidirectional: when the agent hits a tool that needs
 approval (per ``mode``), the stream emits ``confirm_request`` and the
 agent blocks until the UI calls ``POST /confirm {turn_id, choice}``.
 
-This module imports fastapi/uvicorn lazily so the core package doesn't
-need them unless you actually run the server (``pip install
-financial-analyst[serve]``).
+fastapi / uvicorn are core dependencies as of v1.0.3, so ``pip install
+financial-analyst`` is enough — no extras needed. Imports here stay
+lazy anyway so importing this module never fails at install time.
 """
 from __future__ import annotations
 import asyncio
@@ -149,9 +149,11 @@ def build_app():
         from fastapi.responses import StreamingResponse, JSONResponse
         from fastapi.middleware.cors import CORSMiddleware
     except ImportError as exc:  # pragma: no cover
+        # fastapi/uvicorn are core deps as of v1.0.3, so an ImportError here
+        # means the install is corrupted. Suggest re-install.
         raise RuntimeError(
-            "serve mode needs fastapi + uvicorn. Install:\n"
-            "  pip install financial-analyst[serve]\n"
+            "fastapi import failed — the install looks broken.\n"
+            "  pip install --force-reinstall financial-analyst\n"
             "  (or: pip install fastapi uvicorn)"
         ) from exc
 
@@ -855,8 +857,10 @@ def serve(host: str = "127.0.0.1", port: int = 9999) -> None:
     try:
         import uvicorn
     except ImportError as exc:
+        # uvicorn is a core dep as of v1.0.3. Missing = broken install.
         raise RuntimeError(
-            "serve mode needs uvicorn. Install: pip install financial-analyst[serve]"
+            "uvicorn import failed — install looks broken.\n"
+            "  pip install --force-reinstall financial-analyst"
         ) from exc
     app = build_app()
     print(f"financial-analyst buddy SSE bridge → http://{host}:{port}")
