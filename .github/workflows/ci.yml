@@ -37,6 +37,13 @@ jobs:
         env:
           # Force pytest to skip the real-API E2E test
           FA_E2E: "0"
+          # Force Python UTF-8 mode (PEP 540) — without this, Windows runners
+          # default to cp1252 for file IO, which crashes tests that write
+          # Chinese text via Path.write_text() without an explicit encoding.
+          # Must be set as workflow env (pre-process-start) — `monkeypatch.setenv`
+          # in conftest doesn't help because Python already loaded.
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
         run: |
           pytest tests/ -q --tb=short --maxfail=10
 
@@ -81,6 +88,8 @@ jobs:
     name: PyInstaller build smoke
     runs-on: ${{ matrix.os }}
     strategy:
+      # Don't cancel ubuntu when windows fails — they're independent platforms.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
@@ -91,11 +100,16 @@ jobs:
           python-version: "3.12"
 
       - name: Install + pyinstaller
+        shell: bash
         run: |
           pip install -e .[serve]
           pip install pyinstaller
 
       - name: Build single-file exe (smoke, dist not uploaded)
+        # bash line-continuation `\` is not valid PowerShell syntax — Windows
+        # runners default to pwsh, which parses `--distpath` as a unary operator.
+        # Force bash so the same one-liner works on both platforms.
+        shell: bash
         run: |
           pyinstaller packaging/pyinstaller/financial-analyst.spec \
               --distpath packaging/dist \

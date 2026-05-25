@@ -15,7 +15,7 @@ async def test_news_reader_with_no_files(tmp_path):
 async def test_news_reader_parses_files(tmp_path):
     news_dir = tmp_path / "news" / "SH600519"
     news_dir.mkdir(parents=True)
-    (news_dir / "2026-05-10.txt").write_text("公司发布2026年Q1业绩, 营收同比增长12%, 净利润同比增长18%")
+    (news_dir / "2026-05-10.txt").write_text("公司发布2026年Q1业绩, 营收同比增长12%, 净利润同比增长18%", encoding="utf-8")
     fake_llm = {
         "choices": [{"message": {"content": '{"events":[{"date":"2026-05-10","category":"earnings","sentiment":"pos","summary":"Q1 revenue 12% YoY net profit 18% YoY","severity":0}],"numbers":[]}'}}]
     }
