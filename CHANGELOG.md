@@ -37,6 +37,27 @@ Translated Chinese comments + docstrings to English across 30 high-value source 
 
 Removed external inspiration references across CHANGELOG, README, README_zh, docs, and source comments. The architecture is the team's own design.
 
+### Added — Cross-repo data contract + unified path resolver
+
+Single source of truth for data layout, finally documented and codified:
+
+- New `docs/data_contract.md` — directory tree, 6 field tables (OHLCV / valuation / factors / whale signals / sentiment / TDX F10), units conventions, writer/reader matrix, common pitfalls. Cross-references `G:/stocks/CLAUDE.md` (research lab side).
+- New `src/financial_analyst/data/paths.py` — `DataPaths` dataclass + `get_data_paths()` resolver with 4-tier priority: env vars (`FA_QLIB_URI` / `FA_PARQUET_ROOT` / `FA_NEWS_DATA_ROOT`) → `config/loaders.yaml` → `~/.financial-analyst/data/` → dev fallback. All paths resolved independently; mixing sources is OK.
+- `config/loaders.yaml` + bundled `_resources/config/loaders.yaml` schema extended: `qlib_binary` block now carries `parquet_root` + `news_data_root` siblings to `provider_uri`.
+- `init_cli.py:_write_loaders_config()` writes the two new keys when `fa init` finishes a HuggingFace download — first-user no longer falls back to dev paths.
+- `agent/market/sector_rotation_analyzer.py` drops hardcoded `G:/stocks/stock_data/parquet`, now resolves via `get_data_paths().parquet_root`.
+- `buddy/tools.py` iwencai plugin path also goes via `_project_root()` helper instead of literal `G:/financial-analyst/...`.
+
+### Fixed — Agent count + Tauri shell version
+
+- `README.md` / `README_zh.md` agents badge `25 → 24` and tier-1 deep-dive description `14-agent → 16-agent` (post-v1.9.7 swarm now has 16 in the stock-deep-dive YAML).
+- `packaging/src-tauri/{tauri.conf.json,Cargo.toml}` version `0.1.0 → 1.0.1` for shell ↔ Python package parity. Shell shortDescription/longDescription updated to `16-agent`.
+- `scripts/publish_hf_dataset.py` dataset-card footer template `v1.9.6 → v1.0.1`, `--repo` example `jesson-hh → yifishbossman`, dataset description `14-agent → 16-agent`.
+
+### Tests
+
+718 passed / 1 skipped (was 712 — 6 new in `tests/test_data_paths.py` covering the 4-tier priority).
+
 ## [1.0.0] — 2026-05-25  · **First public release**
 
 > **Lineage**: This is the **first publicly released version** of the project formerly known as `financial-analyst` (internal `v1.9.x` preview series). All features from internal `v1.9.7` are at GA quality and shipped as `1.0.0`. The internal versioning is preserved in the [Pre-1.0 history (internal preview)](#pre-10-history-internal-preview) appendix below.
