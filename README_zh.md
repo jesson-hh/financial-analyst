@@ -38,6 +38,8 @@
   <a href="#-llm-provider">LLM</a>
 </p>
 
+> 🐣 **完全没用过 Python / 命令行?** 没事. 看 **[小白上手指南 →](docs/setup/beginner_zh.md)** (30 分钟从装 Python 开始, 一步一步把命令给你)
+
 ```bash
 pip install financial-analyst==1.0.3    # 1 分钟, 不用再加 [serve] 后缀
 fa start                                 # 零配置一键: 引导 + 后端 + Web UI + 浏览器自动开

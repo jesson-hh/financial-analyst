@@ -38,6 +38,8 @@
   <a href="#-llm-providers">LLM</a>
 </p>
 
+> 🐣 **Brand-new to Python / command line?** Step-by-step beginner guide (Chinese, 30 min from zero): **[小白上手指南 →](docs/setup/beginner_zh.md)**
+
 ```bash
 pip install financial-analyst==1.0.3    # 1 minute, no [serve] flag needed
 fa start                                 # zero-config: wizard + backend + web UI + browser auto-opens
