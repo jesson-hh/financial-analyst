@@ -254,19 +254,49 @@ snapshot_download(
 
 ## 🔌 LLM Provider
 
-| Provider | 模型 | 网络出口 | 适用场景 |
-|---|---|---|---|
-| **qwen** *(默认)* | `qwen3.5-plus` · `qwen3-coder-plus` | `domestic` (直连, 无 proxy) | 国内最快最便宜 |
-| **deepseek** | `deepseek-chat` · `deepseek-reasoner` | `intl_clash` (Clash + verify=False MITM) | 推理强, 成本低 |
-| **openai** | `gpt-4o` · `gpt-4-turbo` | `intl_clash` | 通用 fallback |
-| **anthropic** | `claude-opus-4-7` · `claude-sonnet-4-6` · `claude-haiku-4-5` | litellm fallback | 顶级质量 (美元定价) |
+financial-analyst 是个 **重工具调用的 24-agent 系统** — Tier-1 调 buddy tools, Tier-2 跨股 join 数据, Tier-3 写带 `[V#]/[F#]` 锚点的结构化研报, 全系统只有 `report-writer` 一个能落盘. **你选什么 LLM 直接决定 swarm 到底用工具还是凭训练记忆瞎编**.
 
-TUI 内秒切:
+### 环境变量
+
+`fa init` 向导会让你填一个 provider 的 `*_API_KEY` 到 `.env`. 默认值在 `config/llm.yaml`.
+
+| 变量 | 必填 | 说明 |
+|---|:---:|---|
+| `DASHSCOPE_API_KEY` | `qwen` 用 *(默认)* | 阿里云百炼 — qwen3.5-plus / qwen3-coder-plus |
+| `DEEPSEEK_API_KEY` | `deepseek` 用 | deepseek-chat / deepseek-reasoner |
+| `OPENAI_API_KEY` | `openai` 用 | gpt-4o / gpt-4-turbo |
+| `ANTHROPIC_API_KEY` | `anthropic` 用 | claude-opus / claude-sonnet / claude-haiku |
+| `TUSHARE_TOKEN` | 否 | A 股数据; 不填走 pytdx 主站 + 腾讯实时 (免 token, 免费) |
+
+### 🎯 模型推荐档位
+
+| 档 | 例 | 用场景 |
+|---|---|---|
+| **顶级** | `deepseek-reasoner` · `claude-opus-4-7` · `gpt-4o` · `qwen3-max` (需通用端点) | Tier-3 决策 agent (bull / bear / risk-officer / report-writer / introspector), 市场级 swarm (overseas-radar / mainline / morning-brief writer) |
+| **甜区** *(默认)* | `qwen3.5-plus` · `qwen3-coder-plus` · `deepseek-chat` | 日常驱动 — 工具调用稳, 成本低; Tier-1 数据 agent + Tier-2 分析师跑在这档 |
+| **不要用** | `claude-haiku-4-5` · `qwen-flash` · `qwen-turbo` · `*-mini` · 小/蒸馏型 | 工具调用不稳 — agent 会跳过 `D.features()` / TDX-F10 查询直接凭训练记忆瞎编因子分 |
+
+默认是 `qwen3.5-plus`. 阿里云百炼注册送 100 万 token credit — 大约 **150 份个股深度研报** 你才开始付钱.
+
+### 网络出口
+
+`network_profile` 决定每个 provider 怎么穿过国内网络环境 (Clash fake-ip / MITM 等):
+
+| Provider | profile | 细节 |
+|---|---|---|
+| **qwen** | `domestic` | `trust_env=False`, 直连 `aliyuncs.com` — 绕开 Clash fake-ip (否则被接管走海外节点 10s 超时) |
+| **deepseek** · **openai** · **openrouter** | `intl_clash` | 走 `HTTPS_PROXY` (默认 `127.0.0.1:7890`) + `verify=False` — Clash 用 root cert MITM HTTPS |
+| **anthropic** | litellm fallback | Anthropic SDK 不兼容 OpenAI 格式, 路由层 fallback 给 litellm |
+
+### 热切换
+
 ```bash
-> /model deepseek-reasoner    # 热切换, 不重启
+> /model deepseek-reasoner    # TUI 内, 不重启, 进行中会话保留
+> /model qwen3-coder-plus     # 裸名自动找 provider; 也可用 provider/model 显式
+> /model                      # 列已配置的模型
 ```
 
-或改 `config/llm.yaml` 默认. 设计详见 [docs/llm_routing.md](docs/llm_routing.md).
+或改 `config/llm.yaml` 的 `default_provider` / `default_model`. 多 provider AsyncOpenAI client 设计详见 [docs/llm_routing.md](docs/llm_routing.md).
 
 ---
 

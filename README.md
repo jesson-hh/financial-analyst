@@ -253,19 +253,49 @@ snapshot_download(
 
 ## 🔌 LLM Providers
 
-| Provider | Models | Network profile | Use case |
-|---|---|---|---|
-| **qwen** *(default)* | `qwen3.5-plus` · `qwen3-coder-plus` | `domestic` (direct, no proxy) | 国内最快最便宜 |
-| **deepseek** | `deepseek-chat` · `deepseek-reasoner` | `intl_clash` (Clash + verify=False MITM) | strong reasoning, low cost |
-| **openai** | `gpt-4o` · `gpt-4-turbo` | `intl_clash` | universal fallback |
-| **anthropic** | `claude-opus-4-7` · `claude-sonnet-4-6` · `claude-haiku-4-5` | litellm fallback | top quality (USD pricing) |
+financial-analyst is a **tool-heavy 24-agent system** — Tier-1 calls buddy tools, Tier-2 joins cross-stock data, Tier-3 writes structured reports with `[V#]/[F#]` anchors, and `report-writer` is the only agent allowed to touch disk. **Your LLM choice decides whether the swarm uses its tools or fabricates answers from training data.**
 
-Switch live in TUI:
+### Environment Variables
+
+Set one provider's `*_API_KEY` in `.env` (the `fa init` wizard prompts for it). Defaults are loaded from `config/llm.yaml`.
+
+| Variable | Required | Description |
+|---|:---:|---|
+| `DASHSCOPE_API_KEY` | for `qwen` *(default)* | Aliyun Bailian — qwen3.5-plus / qwen3-coder-plus |
+| `DEEPSEEK_API_KEY` | for `deepseek` | deepseek-chat / deepseek-reasoner |
+| `OPENAI_API_KEY` | for `openai` | gpt-4o / gpt-4-turbo |
+| `ANTHROPIC_API_KEY` | for `anthropic` | claude-opus / claude-sonnet / claude-haiku |
+| `TUSHARE_TOKEN` | No | A-share data; without it the system falls back to pytdx main-stations + Tencent realtime (free, no token) |
+
+### 🎯 Recommended Models
+
+| Tier | Examples | When to use |
+|---|---|---|
+| **Best** | `deepseek-reasoner` · `claude-opus-4-7` · `gpt-4o` · `qwen3-max` (requires general endpoint) | Tier-3 decision agents (bull / bear / risk-officer / report-writer / introspector), market-level swarms (overseas-radar / mainline / morning-brief writer) |
+| **Sweet spot** *(default)* | `qwen3.5-plus` · `qwen3-coder-plus` · `deepseek-chat` | Daily driver — reliable tool-calling at low cost; Tier-1 data agents + Tier-2 analysts run here |
+| **Avoid for agent use** | `claude-haiku-4-5` · `qwen-flash` · `qwen-turbo` · `*-mini` · small / distilled variants | Tool-calling unreliable — agents skip `D.features()` / TDX-F10 lookups and hallucinate factor scores from training data instead of loading them from disk |
+
+Default ships with `qwen3.5-plus`. Aliyun Bailian gives 1M free token credit on signup — roughly **150 stock-deep-dive reports** before you pay anything.
+
+### Network Profiles
+
+`network_profile` decides how each provider connects through Chinese network conditions (Clash fake-ip, MITM, etc.):
+
+| Provider | Profile | Detail |
+|---|---|---|
+| **qwen** | `domestic` | `trust_env=False`, direct to `aliyuncs.com` — bypasses Clash fake-ip (which routes to overseas nodes and 10s-timeouts) |
+| **deepseek** · **openai** · **openrouter** | `intl_clash` | Honours `HTTPS_PROXY` (default `127.0.0.1:7890`) with `verify=False` — Clash MITMs HTTPS via its root cert |
+| **anthropic** | litellm fallback | Anthropic SDK isn't OpenAI-compatible; the routing layer falls back to litellm |
+
+### Hot-Swap
+
 ```bash
-> /model deepseek-reasoner    # hot-swap, no restart
+> /model deepseek-reasoner    # in TUI, no restart, in-flight session preserved
+> /model qwen3-coder-plus     # bare name resolves provider; or use provider/model form
+> /model                      # list configured models
 ```
 
-Or set default in `config/llm.yaml`. See [docs/llm_routing.md](docs/llm_routing.md) for the network_profile design.
+Or change the `default_provider` / `default_model` in `config/llm.yaml`. See [docs/llm_routing.md](docs/llm_routing.md) for the multi-provider AsyncOpenAI client design.
 
 ---
 
