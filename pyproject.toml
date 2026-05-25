@@ -128,3 +128,6 @@ target-version = "py311"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "no_opencli_mock: skip the autouse shutil.which mock in test_opencli_runner (used by tests that intentionally exercise the missing-PATH error path)",
+]

@@ -6,11 +6,32 @@ from financial_analyst.data.collectors.opencli.runner import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _fake_opencli_on_path(monkeypatch, request):
+    """Most tests here exercise runner behaviour AFTER the PATH check passes
+    (JSON parsing, prefix stripping, subprocess invocation, etc.). On a CI
+    runner without `opencli` installed, the unmocked `shutil.which("opencli")`
+    call inside `run_opencli` short-circuits with RuntimeError before any of
+    the test's `subprocess.run` mock is reached.
+
+    Globally mock `shutil.which` so it returns a fake path — tests opt out
+    via `@pytest.mark.no_opencli_mock` (used by the test that specifically
+    verifies the "not found" error path).
+    """
+    if request.node.get_closest_marker("no_opencli_mock"):
+        return
+    monkeypatch.setattr(
+        "financial_analyst.data.collectors.opencli.runner.shutil.which",
+        lambda name: "/fake/opencli" if name == "opencli" else None,
+    )
+
+
 def test_is_opencli_available_returns_bool():
     # We don't care if it's installed in CI — just that it returns a bool
     assert isinstance(is_opencli_available(), bool)
 
 
+@pytest.mark.no_opencli_mock
 def test_run_opencli_missing_raises(monkeypatch):
     """When shutil.which finds no opencli, run_opencli must raise RuntimeError."""
     monkeypatch.setattr(
@@ -72,6 +93,11 @@ def test_run_opencli_decodes_utf8_chinese(monkeypatch):
     assert result[0]["summary"] == "幸福蓝海涨超14%"
 
 
+@pytest.mark.skipif(
+    __import__("sys").platform != "win32",
+    reason="npm .CMD shim parsing uses Windows backslash paths; resolved js path "
+           "won't match POSIX tmp dir layout on Linux/macOS runners",
+)
 def test_resolve_npm_shim_parses_main_js(tmp_path):
     """The .CMD shim parser should extract the main.js path from a real
     npm-generated wrapper so we can call node directly and avoid cmd.exe

@@ -7,6 +7,93 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _ci_safe_defaults(tmp_path_factory, monkeypatch):
+    """CI / fresh-machine safety net — applied to EVERY test.
+
+    Local dev has `DASHSCOPE_API_KEY` set, `G:/stocks/stock_data/` on disk,
+    and an interactive TTY. CI runners have none of these, which used to
+    break ~10 tests at random. Set sane defaults so tests are env-agnostic:
+
+    - `NO_COLOR=1` + `COLUMNS=200`: disable Rich ANSI rendering + widen the
+      virtual terminal so typer help text doesn't word-wrap. Fixes the
+      `assert "--source" in result.stdout` family of failures where rich
+      panel borders chop option names mid-string.
+    - `FA_QLIB_URI` -> tmp path: prevents `qlib.init(provider_uri=...)`
+      from trying the dev fallback `G:/stocks/stock_data/cn_data` on Linux
+      runners and raising `ValueError: provider_uri does not exist`.
+    - `DASHSCOPE_API_KEY=fake`: the `/models` SSE endpoint filters out
+      providers without `*_API_KEY` set. Tests that assert `qwen` appears
+      in the list would otherwise fail when run without local creds.
+
+    Individual tests can monkeypatch their own values on top — autouse
+    fixtures run before per-test fixtures.
+    """
+    import os
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setenv("FA_E2E", "0")
+
+    # Build a fake Qlib root (existing dir tree so QlibBinaryLoader's
+    # `provider_uri.exists()` check passes — see qlib_binary.py:112).
+    fake_qlib_root = tmp_path_factory.mktemp("ci_fake_qlib")
+    (fake_qlib_root / "calendars").mkdir()
+    (fake_qlib_root / "calendars" / "day.txt").write_text("2026-05-01\n", encoding="utf-8")
+    (fake_qlib_root / "instruments").mkdir()
+    (fake_qlib_root / "instruments" / "all.txt").write_text("", encoding="utf-8")
+    (fake_qlib_root / "features").mkdir()
+    # NOTE: deliberately NOT setting FA_QLIB_URI — env var would take priority
+    # over yaml in get_data_paths() and break tests that exercise yaml-based
+    # resolution. The find_config patch below routes loader_factory et al to
+    # the fake yaml; that's enough.
+
+    # Override `find_config("loaders.yaml")` so loader_factory + the dream CLI
+    # never resolve to the bundled default (which hardcodes G:/stocks/... and
+    # crashes Linux CI on QlibBinaryLoader init).
+    fake_cfg_dir = tmp_path_factory.mktemp("ci_fake_config")
+    fake_loaders_yaml = fake_cfg_dir / "loaders.yaml"
+    fake_loaders_yaml.write_text(
+        "default: qlib_binary\n"
+        "loaders:\n"
+        "  qlib_binary:\n"
+        f"    provider_uri:\n      day: {fake_qlib_root}\n"
+        f"    parquet_root: {fake_qlib_root}\n"
+        f"    news_data_root: {fake_qlib_root}\n",
+        encoding="utf-8",
+    )
+    try:
+        import financial_analyst._config as _cfg_mod
+        original_find = _cfg_mod.find_config
+
+        def _fake_find_config(name, explicit=None):
+            if explicit is not None:
+                return original_find(name, explicit=explicit)  # honour test-supplied path
+            if name == "loaders.yaml":
+                return fake_loaders_yaml
+            return original_find(name)
+
+        monkeypatch.setattr(_cfg_mod, "find_config", _fake_find_config)
+        # Also patch the binding inside loader_factory which imports `find_config`
+        # directly (the `from ... import find_config` binding is independent).
+        try:
+            import financial_analyst.data.loader_factory as _lf_mod
+            monkeypatch.setattr(_lf_mod, "find_config", _fake_find_config)
+        except Exception:
+            pass
+        try:
+            import financial_analyst.data.paths as _paths_mod
+            monkeypatch.setattr(_paths_mod, "find_config", _fake_find_config)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    for k in ("DASHSCOPE_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY"):
+        if not os.environ.get(k):
+            monkeypatch.setenv(k, "fake-for-tests")
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_buddy_prefs(tmp_path, monkeypatch):
     """v1.7.5: BuddyApp persists permission_mode + model to
     ~/.financial-analyst/buddy.yaml. Redirect that to a per-test tmp file
