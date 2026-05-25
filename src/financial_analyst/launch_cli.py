@@ -96,8 +96,20 @@ def _env_has_llm_key() -> bool:
 
 
 def _data_dir_ok() -> bool:
-    """Check whether the data dir has at least a calendar + instruments."""
-    candidates = [
+    """Check whether the data dir has at least a calendar + instruments.
+
+    Resolution order matches the rest of the package's path discovery:
+      1. Active workspace's data dir (honours FA_WORKSPACE / .workspace pointer)
+      2. ~/.financial-analyst/data/cn_data (legacy default workspace)
+      3. G:/stocks/stock_data/cn_data (dev fallback — maintainer's box only)
+    """
+    candidates = []
+    try:
+        from financial_analyst.workspace import data_dir as _ws_data_dir
+        candidates.append(_ws_data_dir() / "cn_data")
+    except Exception:
+        pass
+    candidates += [
         Path.home() / ".financial-analyst" / "data" / "cn_data",
         Path("G:/stocks/stock_data/cn_data"),
     ]
@@ -380,7 +392,8 @@ def _do_launch(
         if not skip_init:
             from financial_analyst.init_cli import init_cmd as _init_cmd
             try:
-                _init_cmd(yes=False, preset=None, target=None, lang=None)
+                _init_cmd(yes=False, preset=None, target=None,
+                          workspace=None, lang=None)
             except (typer.Exit, SystemExit):
                 pass
             if not _env_has_llm_key():
