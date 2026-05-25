@@ -652,6 +652,7 @@ def build_app():
         """
         import subprocess
         import sys
+        from pathlib import Path
         cmd = [sys.executable, "-m", "financial_analyst.cli",
                "data", "update"]
         if skip_5min:
