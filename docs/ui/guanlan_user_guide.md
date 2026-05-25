@@ -9,17 +9,17 @@
 
 ### 方式 A — 一键 (推荐)
 
-```cmd
-G:\financial-analyst\start.bat
+```bash
+fa launch
 ```
 
-脚本会:
-1. 检查 `.env` 存在
+`fa launch` 会:
+1. 检查 `.env` 存在 (没有就先跑 `fa init`)
 2. 后台启 `financial-analyst serve --port 9999`
-3. 启前端 `python -m http.server 5173` (`G:/stocks/fa_ui_ready/`)
+3. 启 Web UI `python -m http.server 5173`
 4. 自动开浏览器到 http://localhost:5173
 
-关闭: `G:\financial-analyst\stop.bat`.
+关闭: Ctrl+C 即可 (两个子进程都会被干净停掉).
 
 ### 方式 B — 手动
 

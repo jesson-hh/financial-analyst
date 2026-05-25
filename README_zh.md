@@ -35,8 +35,7 @@
   <a href="#-25-个-agent">Agent 阵容</a> &nbsp;·&nbsp;
   <a href="#-可插拔记忆">记忆系统</a> &nbsp;·&nbsp;
   <a href="#-数据集">数据集</a> &nbsp;·&nbsp;
-  <a href="#-llm-provider">LLM</a> &nbsp;·&nbsp;
-  <a href="CONTRIBUTING.md">贡献</a>
+  <a href="#-llm-provider">LLM</a>
 </p>
 
 ```bash
@@ -280,19 +279,13 @@ TUI 内秒切:
 
 ---
 
-## 🤝 贡献
+## 🤝 反馈 / Issue
 
-欢迎 PR. 详见 [CONTRIBUTING.md](CONTRIBUTING.md):
-- 开发循环 (分支 / 测试 / lint / changelog / PR)
-- 新增 sub-agent (registry + memory + yaml + tests)
-- 新增数据源 (`net.py.domestic_session` + `@rate_limited`)
-- Conventional Commits ([angular 风格](https://www.conventionalcommits.org/))
+个人项目, 单维护者. Issue 提交到
+[github.com/jesson-hh/financial-analyst/issues](https://github.com/jesson-hh/financial-analyst/issues).
 
-其它文档:
 - [VERSIONING.md](VERSIONING.md) — N-2 LTS, semver 政策
-- [SECURITY.md](SECURITY.md) — 漏洞上报 (private)
-- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — Contributor Covenant 2.1
-- [docs/journey.md](docs/journey.md) — 中英双语构建历程 (空仓库 → 440 因子 + 25 agent, 2 周)
+- [docs/journey.md](docs/journey.md) — 中英双语构建历程 (空仓库 → 440 因子 + 24 agent, 2 周)
 
 ---
 

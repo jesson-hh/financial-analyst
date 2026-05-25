@@ -35,8 +35,7 @@
   <a href="#-the-25-agents">Agents</a> &nbsp;·&nbsp;
   <a href="#-pluggable-memory">Memory</a> &nbsp;·&nbsp;
   <a href="#-datasets">Datasets</a> &nbsp;·&nbsp;
-  <a href="#-llm-providers">LLM</a> &nbsp;·&nbsp;
-  <a href="CONTRIBUTING.md">Contribute</a>
+  <a href="#-llm-providers">LLM</a>
 </p>
 
 ```bash
@@ -279,19 +278,13 @@ Or set default in `config/llm.yaml`. See [docs/llm_routing.md](docs/llm_routing.
 
 ---
 
-## 🤝 Contributing
+## 🤝 Issues & Feedback
 
-PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for:
-- Development loop (branch / test / lint / changelog / PR)
-- Adding a new sub-agent (registry + memory + yaml + tests)
-- Adding a new data source (`net.py.domestic_session` + `@rate_limited`)
-- Conventional commits ([angular preset](https://www.conventionalcommits.org/))
+Personal project, single maintainer. File issues at
+[github.com/jesson-hh/financial-analyst/issues](https://github.com/jesson-hh/financial-analyst/issues).
 
-Other docs:
 - [VERSIONING.md](VERSIONING.md) — N-2 LTS, semver policy
-- [SECURITY.md](SECURITY.md) — vuln reporting (private)
-- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — Contributor Covenant 2.1
-- [docs/journey.md](docs/journey.md) — bilingual build journey (empty repo → 440 alphas + 25 agents, ~2 weeks)
+- [docs/journey.md](docs/journey.md) — bilingual build journey (empty repo → 440 alphas + 24 agents, ~2 weeks)
 
 ---
 

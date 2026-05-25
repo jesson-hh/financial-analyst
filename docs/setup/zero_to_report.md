@@ -244,9 +244,9 @@ python -m http.server 5173
 # 在 index.html 第 64 行确保 window.GUANLAN_BACKEND = 'http://127.0.0.1:9999';
 ```
 
-或一键启动 (Windows):
-```cmd
-G:\financial-analyst\start.bat
+或一键启动:
+```bash
+fa launch
 ```
 
 详见 [`docs/ui/guanlan_user_guide.md`](../ui/guanlan_user_guide.md).
