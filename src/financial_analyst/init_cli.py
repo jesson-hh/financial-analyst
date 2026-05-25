@@ -169,6 +169,12 @@ _T = {
                                   "en": "[bold red](strongly recommended)[/bold red]"},
     "step1_prompt_optional":    {"zh": "[dim](可选, 回车跳过)[/dim]",
                                   "en": "[dim](optional, enter to skip)[/dim]"},
+    "step1_prompt_change":      {"zh": "[dim](回车保留, 粘贴新 key 替换, 输入 '-' 清空)[/dim]",
+                                  "en": "[dim](Enter to keep, paste new to replace, '-' to clear)[/dim]"},
+    "step1_kept":               {"zh": "保留原 key.", "en": "Kept existing key."},
+    "step1_replaced":           {"zh": "替换为新 key.", "en": "Replaced with new key."},
+    "step1_cleared":            {"zh": "已清空.", "en": "Cleared."},
+    "step1_current_label":      {"zh": "当前:", "en": "current:"},
     "step1_no_key_warn_title":  {"zh": "⚠ 注意", "en": "⚠ Heads up"},
     "step1_no_key_warn_body":   {
         "zh": "[yellow]没有任何 LLM key — agent 跑不起来.[/yellow]\n"
@@ -178,9 +184,28 @@ _T = {
     },
 
     "step2_title":        {"zh": "Tushare token", "en": "Tushare token"},
-    "step2_subtitle":     {"zh": "可选 · 不填走 pytdx + 腾讯直连免费",
-                           "en": "Optional · free pytdx + Tencent direct if blank"},
-    "step2_have_token":   {"zh": "已有 token, 跳过.", "en": "Token already set, skipping."},
+    "step2_subtitle":     {"zh": "不必填 · 默认走免费数据源",
+                           "en": "Optional · free data sources by default"},
+    "step2_explainer":    {
+        "zh": "[bold]Tushare 是个收费数据源, 你不需要它.[/bold]\n\n"
+              "财报 / 行情 / 估值数据 fa 已经做好免费路径:\n"
+              "  · 日线 / 5min → pytdx 主站直连 (免费, 国内可用, 数据更新更快)\n"
+              "  · 当日 PE/PB/换手 → 腾讯实时报价 (免费, 0 token)\n"
+              "  · 历史日线 + 财报 → HuggingFace 数据包 (fa init 下完就有)\n\n"
+              "[dim]什么时候才需要 Tushare?[/dim]\n"
+              "  你已经付费用 Tushare Pro Pro Max (≥5000 积分), 想拿\n"
+              "  ps_ttm / dv_ttm / 北向资金 的完整 5 年历史. [bold]新用户直接回车跳过.[/bold]",
+        "en": "[bold]Tushare is a paid data source. You don't need it.[/bold]\n\n"
+              "fa already wires up free alternatives for everything:\n"
+              "  · Daily / 5min OHLCV → pytdx main stations (free, CN-direct, fresher)\n"
+              "  · Today's PE/PB/turnover → Tencent realtime quotes (free, 0 token)\n"
+              "  · Historical daily + financials → HuggingFace data bundle (fa init pulls it)\n\n"
+              "[dim]When DO you need Tushare?[/dim]\n"
+              "  Only if you have a paid Tushare Pro Pro Max (≥5000 credits) and need\n"
+              "  ps_ttm / dv_ttm / northbound full 5-year history. [bold]Otherwise press Enter.[/bold]",
+    },
+    "step2_current":      {"zh": "当前已填:", "en": "Currently set:"},
+    "step2_kept":         {"zh": "保留原 token.", "en": "Kept existing token."},
     "step2_with_label":   {"zh": "[bold]填了[/bold]", "en": "[bold]With token[/bold]"},
     "step2_with_desc":    {"zh": "走完整 daily_basic 历史 (含 ps_ttm / dv_ttm / 北向资金)",
                            "en": "Full daily_basic history (incl. ps_ttm / dv_ttm / northbound)"},
@@ -207,18 +232,24 @@ _T = {
                            "en": "~{size} · ETA {eta} · progress streamed by huggingface_hub"},
     "dl_done":            {"zh": "下载完成", "en": "Download complete"},
     "dl_fail":            {"zh": "下载失败", "en": "Download failed"},
-    "dl_fail_hints":      {"zh": "可能原因: 1) 没网  2) HF 国内偶尔需要代理  3) repo 还没 publish",
-                           "en": "Possible causes: 1) no network  2) HF needs proxy in CN  3) repo not yet published"},
+    "dl_fail_hints":      {"zh": "可能原因: 1) 没网  2) HF 国内被墙 (set HF_ENDPOINT=https://hf-mirror.com 试镜像)  3) repo 还没 publish",
+                           "en": "Possible causes: 1) no network  2) HF blocked in CN (try HF_ENDPOINT=https://hf-mirror.com)  3) repo not yet published"},
     "dl_fail_panel_title": {"zh": "⚠ 数据下载失败", "en": "⚠ Data download failed"},
     "dl_fail_panel_body": {
-        "zh": "[yellow]数据包没下下来, 但 .env 仍会写.[/yellow]\n"
-              "[dim]之后可以再试:[/dim]\n"
-              "  [cyan]fa init --preset demo[/cyan]              # 重试整个 wizard\n"
-              "  [cyan]fa data bootstrap --preset demo[/cyan]    # 只重跑下载",
-        "en": "[yellow]Package not downloaded, but .env will still be written.[/yellow]\n"
-              "[dim]Retry later with:[/dim]\n"
-              "  [cyan]fa init --preset demo[/cyan]              # full wizard again\n"
-              "  [cyan]fa data bootstrap --preset demo[/cyan]    # download only",
+        "zh": "[yellow]数据包没下下来, 但 .env 仍会写.[/yellow]\n\n"
+              "[dim]国内用户备选: 从网盘下 (阿里云盘 / 夸克 — 不走 hf.co):[/dim]\n"
+              "  详细步骤见 [bold cyan]docs/setup/data_offline.md[/bold cyan]\n\n"
+              "[dim]或者再试 HF:[/dim]\n"
+              "  [cyan]set HF_ENDPOINT=https://hf-mirror.com[/cyan]   # 用 hf-mirror\n"
+              "  [cyan]fa init --preset demo[/cyan]                  # 重试整个 wizard\n"
+              "  [cyan]fa data bootstrap --preset demo[/cyan]        # 只重跑下载",
+        "en": "[yellow]Package not downloaded, but .env will still be written.[/yellow]\n\n"
+              "[dim]CN users alternative: download from a cloud drive (Aliyun / Quark — bypasses hf.co):[/dim]\n"
+              "  see [bold cyan]docs/setup/data_offline.md[/bold cyan]\n\n"
+              "[dim]Or retry HF with a mirror:[/dim]\n"
+              "  [cyan]set HF_ENDPOINT=https://hf-mirror.com[/cyan]   # use hf-mirror\n"
+              "  [cyan]fa init --preset demo[/cyan]                  # full wizard again\n"
+              "  [cyan]fa data bootstrap --preset demo[/cyan]        # download only",
     },
 
     "skip_msg":           {"zh": "⏭ 跳过数据包下载. 如已有数据, 编辑",
@@ -439,26 +470,33 @@ def _step_workspace(non_interactive: bool, override: Optional[Path],
 
 
 def _pick_language(env: dict, non_interactive: bool) -> str:
-    """Step 0 — pick UI language. Persists to .env as FA_LANG."""
-    # honour pre-existing FA_LANG / env var
-    pre = env.get("FA_LANG") or os.environ.get("FA_LANG", "")
-    if pre in ("zh", "en"):
-        return pre
+    """Step 0 — pick UI language. Persists to .env as FA_LANG.
+
+    Re-running ``fa init`` always shows the picker (so users can change
+    language), but the existing FA_LANG (if any) becomes the default —
+    pressing Enter keeps the current setting.
+    """
+    pre = (env.get("FA_LANG") or os.environ.get("FA_LANG", "")).strip().lower()
+    current = pre if pre in ("zh", "en") else "zh"
+
     if non_interactive:
-        return "zh"
+        return current
 
     console.print()
     body = Text.assemble(
-        ("  ", ""), ("1", "bold cyan"), ("  中文 ", "default"), ("(default)\n", "dim"),
-        ("  ", ""), ("2", "bold cyan"), ("  English", "default"),
+        ("  ", ""), ("1", "bold cyan"),
+        ("  中文" + ("  (current)" if current == "zh" else "") + "\n", "default"),
+        ("  ", ""), ("2", "bold cyan"),
+        ("  English" + ("  (current)" if current == "en" else ""), "default"),
     )
     console.print(Panel(body,
                         title="[bold]语言 · Language[/bold]",
                         border_style="cyan",
                         padding=(0, 4),
                         width=42))
+    default_choice = "1" if current == "zh" else "2"
     choice = Prompt.ask("  [bold]选择 · Choose[/bold]",
-                       default="1",
+                       default=default_choice,
                        choices=["1", "2"],
                        show_choices=False)
     lang = {"1": "zh", "2": "en"}[choice]
@@ -531,18 +569,39 @@ def _step_llm_keys(env: dict, non_interactive: bool, lang: str) -> dict:
         return env
 
     for env_var, prov, _desc, _color in _LLM_PROVIDERS:
-        if env.get(env_var):
-            continue
-        is_required_one = env_var == "DASHSCOPE_API_KEY" and not any(
-            env.get(k) for k, *_ in _LLM_PROVIDERS
-        )
-        suffix = " " + (_t("step1_prompt_recommended", lang)
-                        if is_required_one else _t("step1_prompt_optional", lang))
+        existing = env.get(env_var, "")
+        if existing:
+            # Already configured — show current, let user replace / keep / clear
+            console.print(
+                f"  [dim]{_t('step1_current_label', lang)}[/dim] "
+                f"[green]{_mask(existing)}[/green]")
+            suffix = " " + _t("step1_prompt_change", lang)
+        else:
+            # Empty slot — recommend or optional
+            is_required_one = env_var == "DASHSCOPE_API_KEY" and not any(
+                env.get(k) for k, *_ in _LLM_PROVIDERS
+            )
+            suffix = " " + (_t("step1_prompt_recommended", lang)
+                            if is_required_one else _t("step1_prompt_optional", lang))
+
         v = Prompt.ask(f"  [bold]{prov}[/bold] · {env_var}{suffix}",
                        default="", show_default=False, password=False)
-        if v.strip():
-            env[env_var] = v.strip()
-            console.print(f"   [green]✓[/green] {env_var} = [dim]{_mask(v.strip())}[/dim]")
+        s = v.strip()
+
+        if not s:
+            if existing:
+                console.print(f"   [dim]{_t('step1_kept', lang)}[/dim]")
+            # else: empty slot + skipped, no message
+        elif s == "-":
+            if existing:
+                env.pop(env_var, None)
+                console.print(f"   [yellow]✗[/yellow] {env_var} {_t('step1_cleared', lang)}")
+            # else: skipped (nothing to clear)
+        else:
+            env[env_var] = s
+            verb = _t("step1_replaced", lang) if existing else ""
+            console.print(f"   [green]✓[/green] {env_var} = [dim]{_mask(s)}[/dim] "
+                          f"[dim]{verb}[/dim]")
 
     has_any = any(env.get(k) for k, *_ in _LLM_PROVIDERS)
     if not has_any:
@@ -556,15 +615,22 @@ def _step_llm_keys(env: dict, non_interactive: bool, lang: str) -> dict:
 
 
 def _step_tushare(env: dict, non_interactive: bool, lang: str) -> dict:
+    """Step — Tushare token (always shown on re-run; existing token is the default)."""
     _step_header(3, 4,
                  _t("step2_title", lang),
                  _t("step2_subtitle", lang),
                  lang=lang)
 
-    if env.get("TUSHARE_TOKEN"):
-        console.print(f"  [green]✓[/green] TUSHARE_TOKEN [dim]= {_mask(env['TUSHARE_TOKEN'])}[/dim]")
-        console.print(f"  [dim]{_t('step2_have_token', lang)}[/dim]")
-        return env
+    # Always show the explainer block — re-run users may have forgotten
+    # what this token does, and the wording is the main reassurance that
+    # "no token = totally fine".
+    console.print(Panel(
+        _t("step2_explainer", lang),
+        border_style="dim cyan",
+        padding=(0, 2),
+        width=80,
+    ))
+    console.print()
 
     grid = Table.grid(padding=(0, 2))
     grid.add_column(justify="right", style="dim")
@@ -574,14 +640,22 @@ def _step_tushare(env: dict, non_interactive: bool, lang: str) -> dict:
     console.print(grid)
     console.print()
 
+    existing = env.get("TUSHARE_TOKEN", "")
+    if existing:
+        console.print(f"  [dim]{_t('step2_current', lang)}[/dim] [green]{_mask(existing)}[/green]")
+
     if non_interactive:
         return env
 
     v = Prompt.ask(f"  [bold]TUSHARE_TOKEN[/bold] {_t('step2_prompt', lang)}",
                    default="", show_default=False)
     if v.strip():
+        # User typed something — overwrite
         env["TUSHARE_TOKEN"] = v.strip()
         console.print(f"   [green]✓[/green] TUSHARE_TOKEN [dim]= {_mask(v.strip())}[/dim]")
+    elif existing:
+        # Enter on a re-run with existing token = keep it
+        console.print(f"   [dim]{_t('step2_kept', lang)}[/dim]")
     return env
 
 

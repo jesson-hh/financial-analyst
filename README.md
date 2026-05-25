@@ -264,6 +264,26 @@ snapshot_download(
 
 **Two binary formats**: Qlib `.bin` (time-series, `[4-byte float32 start_idx] + [float32 array]`) for OHLCV+factors; Parquet (columnar) for financials/events/F10/industry. Compatible with [Microsoft Qlib](https://github.com/microsoft/qlib) and `D.features()` API directly.
 
+### 🇨🇳 CN users: cloud-drive download (Aliyun / Quark)
+
+HuggingFace is slow / frequently breaks from mainland China. We provide cloud-drive mirrors (Aliyun Drive + Quark, same data, MD5-verified). Two-step setup:
+
+```cmd
+:: 1. Download zip from cloud drive (link below), extract to e.g. D:\fa-data
+:: 2. Wire it into your workspace:
+fa data link --src D:\fa-data
+```
+
+| Bundle | Size | Aliyun Drive | Quark |
+|--------|------|--------------|-------|
+| demo (CSI300) | ~155 MB | _[link TBD]_ | _[link TBD]_ |
+| lite (CSI800 + 5min) | ~3 GB | _[link TBD]_ | _[link TBD]_ |
+| full (all A-share + 5min + F10) | ~14 GB | _[link TBD]_ | _[link TBD]_ |
+
+`fa data link` writes `config/loaders.yaml` to point at your extracted directory — no copy, no symlink. Full walkthrough: **[docs/setup/data_offline.md](docs/setup/data_offline.md)**.
+
+Alternative: set `HF_ENDPOINT=https://hf-mirror.com` before `fa init` to use the [hf-mirror](https://hf-mirror.com) CN proxy (community-maintained, fast but occasional sync lag).
+
 ---
 
 ## 🔌 LLM Providers

@@ -130,7 +130,7 @@ Successfully installed financial-analyst-1.0.3 ...一大堆包名...
 ### 4.3 验证装好了
 
 ```cmd
-fa --version
+fa version
 ```
 
 应该看到:

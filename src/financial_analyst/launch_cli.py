@@ -430,7 +430,11 @@ def _do_launch(
     # ─── 1. First-time welcome vs returning ───
     is_first_time = not _env_has_llm_key()
     if is_first_time:
-        _show_first_time_welcome(lang)
+        # 第一帧用户连语言都没选, 强制英文 — 中文用户也能看懂 "Welcome",
+        # 反过来英文用户看不懂中文. 后续步骤由 init wizard 的 Step 0
+        # language picker 决定. 探测出来的 lang 只用于 returning + ready
+        # 这两种"用户已经走过 init"的场景.
+        _show_first_time_welcome("en")
         if not skip_init:
             from financial_analyst.init_cli import init_cmd as _init_cmd
             try:

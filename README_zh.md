@@ -264,6 +264,26 @@ snapshot_download(
 
 **双二进制格式**: Qlib `.bin` (时序: `[4-byte float32 start_idx] + [float32 array]`, 给 OHLCV+因子); Parquet (列存, 给财报/事件/F10/行业). 兼容 [Microsoft Qlib](https://github.com/microsoft/qlib) 的 `D.features()` API 直接读.
 
+### 🇨🇳 国内用户: 网盘下载 (阿里云盘 / 夸克)
+
+HuggingFace 国内访问慢 / 经常断 (TLS 干扰 + CDN 远). 我们做了**阿里云盘 + 夸克**镜像 (同源 + MD5 校验). 两步走:
+
+```cmd
+:: 1. 从下面表里的网盘下 zip, 解压到例如 D:\fa-data
+:: 2. 一行接入工作目录:
+fa data link --src D:\fa-data
+```
+
+| 数据包 | 体量 | 阿里云盘 | 夸克网盘 |
+|--------|------|---------|----------|
+| demo (CSI300, 演示) | ~155 MB | _[即将填入]_ | _[即将填入]_ |
+| lite (CSI800 + 5min, 日常) | ~3 GB | _[即将填入]_ | _[即将填入]_ |
+| full (全 A 股 + 5min + F10) | ~14 GB | _[即将填入]_ | _[即将填入]_ |
+
+`fa data link` 只改 `config/loaders.yaml` 指向你解压的目录 — 不 copy 不 symlink, 节省磁盘 + 速度最快. 详细流程见 **[docs/setup/data_offline.md](docs/setup/data_offline.md)**.
+
+**替代方案**: 跑 `fa init` 之前 `set HF_ENDPOINT=https://hf-mirror.com`, 走 [hf-mirror](https://hf-mirror.com) 国内代理 (社区维护, 快但偶尔同步延迟).
+
 ---
 
 ## 🔌 LLM Provider
