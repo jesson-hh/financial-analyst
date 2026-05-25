@@ -410,7 +410,7 @@ pretty_name: "financial-analyst-data-{preset_name or 'custom'}"
 
 > **EN**: A-share historical OHLCV + valuation + financials + TDX F10 events, packaged in Qlib binary + Parquet formats. Companion dataset for [**financial-analyst**](https://github.com/jesson-hh/financial-analyst) — a 16-agent single-stock deep-dive research workstation.
 >
-> **中文**: A 股历史行情 + 估值 + 财报 + TDX F10 事件数据集, Qlib 二进制 + Parquet 双格式打包. 配套 [**financial-analyst**](https://github.com/jesson-hh/financial-analyst) — 14 Agent 个股深度研究工作站使用.
+> **中文**: A 股历史行情 + 估值 + 财报 + TDX F10 事件数据集, Qlib 二进制 + Parquet 双格式打包. 配套 [**financial-analyst**](https://github.com/jesson-hh/financial-analyst) — 16 Agent 个股深度研究工作站使用.
 
 **Published / 发布**: {today}  · **Size / 体量**: ~{total_gb:.2f} GB  · **License**: Apache 2.0
 
