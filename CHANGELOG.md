@@ -2,6 +2,69 @@
 
 All notable changes to this project follow [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning 2.0.0](https://semver.org/).
 
+## [1.0.2] — 2026-05-25  · Data contract + scaffolding cleanup + LLM Providers rewrite
+
+### Added — Cross-repo data contract + unified path resolver
+
+Single source of truth for where data lives across the two-repo setup (`G:/stocks` research lab ↔ `G:/financial-analyst` public package), finally documented and codified:
+
+- New [`docs/data_contract.md`](docs/data_contract.md) (~280 lines) — directory tree across both layouts (dev vs first-user), 6 field tables (OHLCV / valuation / factors / whale signals / sentiment / TDX F10), units conventions, writer/reader matrix, 7 common pitfalls.
+- New `src/financial_analyst/data/paths.py` — `DataPaths` dataclass + `get_data_paths()` resolver with 4-tier priority: env vars (`FA_QLIB_URI` / `FA_PARQUET_ROOT` / `FA_NEWS_DATA_ROOT`) → `config/loaders.yaml` → `~/.financial-analyst/data/` (HF-populated) → dev fallback (`G:/stocks/stock_data/`). Each path resolves independently; mixing sources is supported.
+- `config/loaders.yaml` + bundled `_resources/config/loaders.yaml` schema extended: `qlib_binary` block now carries `parquet_root` + `news_data_root` siblings to `provider_uri`.
+- `init_cli.py:_write_loaders_config()` writes the two new keys after `fa init` finishes a HuggingFace dataset download.
+- `agent/market/sector_rotation_analyzer.py` drops hardcoded `G:/stocks/stock_data/parquet`, resolves via `get_data_paths().parquet_root`.
+- `buddy/tools.py` iwencai plugin-not-installed hint drops literal `G:/financial-analyst/...` for `_project_root()` helper.
+- New `tests/test_data_paths.py` — 6 smoke tests covering the 4-tier priority.
+
+### Changed — README LLM Providers section (tool-heavy-agent framing)
+
+Reorganized around the central insight: a 24-agent tool-heavy system is only as good as its model's tool-calling fidelity. A bad model skips `D.features()` / TDX-F10 lookups and hallucinates factor scores instead.
+
+New structure (both `README.md` + `README_zh.md`):
+
+1. Lead-in paragraph: tool-heavy 24-agent system, model choice decides tool-use vs hallucination.
+2. Environment Variables table (4 provider keys + `TUSHARE_TOKEN`, with no-token fallback noted).
+3. **Recommended Models** — 3-tier table:
+   - **Best**: `deepseek-reasoner` / `claude-opus-4-7` / `gpt-4o` / `qwen3-max` → Tier-3 decision agents + market-level swarms.
+   - **Sweet spot** *(default)*: `qwen3.5-plus` / `qwen3-coder-plus` / `deepseek-chat` → daily driver.
+   - **Avoid for agent use**: `*-haiku` / `*-flash` / `*-turbo` / `*-mini` / distilled → tool-calling unreliable, agents hallucinate.
+4. Aliyun free 1M token credit footnote (≈150 reports).
+5. Network Profiles table (`qwen` = `domestic` / `deepseek` + `openai` = `intl_clash` / `anthropic` = litellm fallback) with rationale.
+6. Hot-Swap examples for `/model` TUI command.
+
+### Fixed — accurate counts + FM checkpoint version + Tauri parity
+
+- README badge `25 agents` → `24` (actual count: 5 tier1 + 4 tier2 + 5 tier3 + 8 market + 2 mainline = 24).
+- README description `14-agent deep-dive` → `16-agent` (stock-deep-dive swarm yaml has 16 since v1.9.7 added overseas-market-scanner + sector-rotation-analyzer to Tier-1).
+- `packaging/src-tauri/{tauri.conf.json,Cargo.toml}` version `0.1.0 → 1.0.2` (shell ↔ Python package parity). `shortDescription`/`longDescription` `14-agent` → `16-agent`.
+- `scripts/publish_hf_dataset.py` dataset-card footer template `v1.9.6 → v1.0.2`, `--repo` example `jesson-hh/...` → `yifishbossman/...`, bilingual description `14-agent / 14 Agent` → `16-agent / 16 Agent`.
+
+### Removed — OSS-community scaffolding that doesn't fit solo-maintained
+
+Trimmed root directory from 22 → 10 files (only what serious users actually need):
+
+- Community boilerplate: `CONTRIBUTING.md` / `CODE_OF_CONDUCT.md` / `SECURITY.md` / `GOVERNANCE.md` / `CITATION.cff` — all assume an external contributor community that doesn't exist for a solo project.
+- Convenience scripts: `start.bat` / `start.sh` / `stop.bat` / `stop.sh` — replaced by `fa launch` (one-command, cross-platform).
+- Docker pipeline: `Dockerfile` / `docker-compose.yml` / `docs/setup/deployment.md` (425-line Docker-Compose-centric production guide).
+
+Rationale: `fa launch` (v1.0.1) already gives one-command zero-config startup, including the wizard, backend, web UI, and browser auto-open. Docker added deployment surface without proportional value for a single-maintainer project.
+
+`README.md` / `README_zh.md`: removed "B. Docker" install block, "Contribute" nav link, and `## Contributing` section (collapsed to a minimal Issues/Feedback pointer).
+
+`docs/setup/install.md`: removed "C. Docker" install section + the `deployment.md` link from the next-steps list.
+
+`docs/setup/release_checklist.md`: removed "## 2. DockerHub (可选)" section + dropped docker build/push lines from the Quick-Reference one-liner.
+
+`docs/ui/guanlan_user_guide.md` + `docs/setup/zero_to_report.md`: `start.bat` references replaced with `fa launch` + Ctrl+C.
+
+CHANGELOG keeps historical Docker mentions (v1.9.x era) — those describe what shipped at the time and stay immutable.
+
+### Tests
+
+718 passed / 1 skipped (was 712 — 6 new in `tests/test_data_paths.py` covering the 4-tier priority).
+
+---
+
 ## [1.0.1] — 2026-05-25  · One-command launcher + i18n
 
 ### Added — Zero-config web launcher (`fa launch`)
@@ -36,27 +99,6 @@ Translated Chinese comments + docstrings to English across 30 high-value source 
 ### Removed — third-party attribution references
 
 Removed external inspiration references across CHANGELOG, README, README_zh, docs, and source comments. The architecture is the team's own design.
-
-### Added — Cross-repo data contract + unified path resolver
-
-Single source of truth for data layout, finally documented and codified:
-
-- New `docs/data_contract.md` — directory tree, 6 field tables (OHLCV / valuation / factors / whale signals / sentiment / TDX F10), units conventions, writer/reader matrix, common pitfalls. Cross-references `G:/stocks/CLAUDE.md` (research lab side).
-- New `src/financial_analyst/data/paths.py` — `DataPaths` dataclass + `get_data_paths()` resolver with 4-tier priority: env vars (`FA_QLIB_URI` / `FA_PARQUET_ROOT` / `FA_NEWS_DATA_ROOT`) → `config/loaders.yaml` → `~/.financial-analyst/data/` → dev fallback. All paths resolved independently; mixing sources is OK.
-- `config/loaders.yaml` + bundled `_resources/config/loaders.yaml` schema extended: `qlib_binary` block now carries `parquet_root` + `news_data_root` siblings to `provider_uri`.
-- `init_cli.py:_write_loaders_config()` writes the two new keys when `fa init` finishes a HuggingFace download — first-user no longer falls back to dev paths.
-- `agent/market/sector_rotation_analyzer.py` drops hardcoded `G:/stocks/stock_data/parquet`, now resolves via `get_data_paths().parquet_root`.
-- `buddy/tools.py` iwencai plugin path also goes via `_project_root()` helper instead of literal `G:/financial-analyst/...`.
-
-### Fixed — Agent count + Tauri shell version
-
-- `README.md` / `README_zh.md` agents badge `25 → 24` and tier-1 deep-dive description `14-agent → 16-agent` (post-v1.9.7 swarm now has 16 in the stock-deep-dive YAML).
-- `packaging/src-tauri/{tauri.conf.json,Cargo.toml}` version `0.1.0 → 1.0.1` for shell ↔ Python package parity. Shell shortDescription/longDescription updated to `16-agent`.
-- `scripts/publish_hf_dataset.py` dataset-card footer template `v1.9.6 → v1.0.1`, `--repo` example `jesson-hh → yifishbossman`, dataset description `14-agent → 16-agent`.
-
-### Tests
-
-718 passed / 1 skipped (was 712 — 6 new in `tests/test_data_paths.py` covering the 4-tier priority).
 
 ## [1.0.0] — 2026-05-25  · **First public release**
 

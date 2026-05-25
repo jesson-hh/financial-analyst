@@ -17,7 +17,7 @@
 <p align="center">
   <a href="https://pypi.org/project/financial-analyst/"><img src="https://img.shields.io/pypi/v/financial-analyst.svg?style=flat&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
   <img src="https://img.shields.io/pypi/pyversions/financial-analyst.svg?style=flat&logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/release-v1.0.1-success?style=flat" alt="Release">
+  <img src="https://img.shields.io/badge/release-v1.0.2-success?style=flat" alt="Release">
   <img src="https://img.shields.io/badge/tests-712_passed-brightgreen?style=flat" alt="Tests">
   <img src="https://img.shields.io/badge/license-Apache_2.0-yellow?style=flat" alt="License">
   <br>
@@ -39,7 +39,7 @@
 </p>
 
 ```bash
-pip install financial-analyst==1.0.1    # 1 minute
+pip install financial-analyst==1.0.2    # 1 minute
 financial-analyst                        # zero-config: wizard + backend + web UI + browser auto-opens
 ```
 
@@ -168,7 +168,7 @@ See [examples/](examples/) for FM cluster / CSV loader / TDX F10 patterns.
 ### A. PyPI (recommended, 1 minute)
 
 ```bash
-pip install financial-analyst==1.0.1
+pip install financial-analyst==1.0.2
 cp .env.example .env       # add DASHSCOPE_API_KEY (qwen default)
 fa init                    # interactive wizard — pulls HF dataset
 fa report SH600519         # first deep-dive
@@ -313,4 +313,4 @@ Personal project, single maintainer. File issues at
 
 Apache 2.0. **Research and educational purposes only**. Drafts analyst-grade work product for review by qualified professionals. Does not make investment recommendations, execute transactions, or post to any ledger. You are responsible for compliance with applicable laws.
 
-<sub>v1.0.1 · 2026-05-25 · made by [@jesson-hh](https://github.com/jesson-hh) · bilingual zh/en</sub>
+<sub>v1.0.2 · 2026-05-25 · made by [@jesson-hh](https://github.com/jesson-hh) · bilingual zh/en</sub>

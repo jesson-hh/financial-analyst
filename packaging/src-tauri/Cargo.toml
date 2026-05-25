@@ -1,6 +1,6 @@
 [package]
 name = "financial-analyst-tauri"
-version = "1.0.1"
+version = "1.0.2"
 description = "觀瀾 desktop UI for financial-analyst (Tauri shell)"
 authors = ["jesson-hh <xuyi1030@proton.me>"]
 license = "Apache-2.0"

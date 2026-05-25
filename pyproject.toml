@@ -1,6 +1,6 @@
 [project]
 name = "financial-analyst"
-version = "1.0.1"
+version = "1.0.2"
 description = "A-share single-stock deep-dive multi-agent research workstation with three-tier trust isolation, FTS5 memory retrieval, dream loop introspection, and BYOM extensibility."
 readme = "README.md"
 license = {text = "Apache-2.0"}
