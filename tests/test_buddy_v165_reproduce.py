@@ -86,8 +86,6 @@ async def test_user_scenario_news_collect_then_query_then_no_summary():
     transcript = app.transcript_text()
     import re
     plain = re.sub(r"\x1b\[[0-9;]*m", "", transcript)
-    from pathlib import Path
-    Path("G:/financial-analyst/transcript_repro.txt").write_text(plain, encoding="utf-8")
 
     # H1 verification: did the "调了 N 个 tool 但没文字总结" marker fire?
     # Use Chinese chars directly — pytest assertion error display is gbk on Windows
