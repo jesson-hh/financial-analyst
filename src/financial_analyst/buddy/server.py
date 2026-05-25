@@ -623,10 +623,19 @@ def build_app():
         """
         try:
             from financial_analyst.data import last_update as _lu
+            implemented = set(_lu.IMPLEMENTED_TYPES)
             rows = []
             for dt, age, stale in _lu.status_summary():
-                rows.append({"type": dt, "age": age, "stale": stale})
-            stale_count = sum(1 for r in rows if r["stale"])
+                rows.append({
+                    "type":        dt,
+                    "age":         age,
+                    "stale":       stale,
+                    "implemented": dt in implemented,
+                })
+            # Only types we can actually refresh count towards the badge.
+            # financials/f10 have no updater yet — they'd otherwise show
+            # "never" forever and the red ⚠ would never clear.
+            stale_count = sum(1 for r in rows if r["stale"] and r["implemented"])
             return JSONResponse({
                 "ok": True,
                 "items": rows,

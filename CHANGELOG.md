@@ -52,6 +52,12 @@ Stock data is large (155 MB demo · 3 GB lite · 14 GB full + 5min + F10) and ma
 
 `Path.cwd()` was used in the `data_refresh` endpoint to compute the subprocess log path, but `pathlib.Path` wasn't in the function's scope (it was lazily imported only inside a sibling endpoint). The data refresh button in the UI silently failed with a 500 from the backend. Now imported alongside `subprocess` / `sys` at the top of the handler.
 
+### Fixed — Data refresh badge stuck red after a successful update
+
+`/data/status` previously counted all five `DATA_TYPES` toward `stale_count`. But only three (`day` / `5min` / `daily_basic`) have updaters wired up in this release — `financials` / `f10` show `"never"` forever, so `stale_count` would never drop below 2 even when every refreshable type was current. Result: the status-bar badge stayed red ⚠ no matter how often the user clicked refresh.
+
+Route now returns a per-row `implemented` boolean and `stale_count` only counts implemented stale types. Items list still surfaces `financials` / `f10` for transparency so the user knows they exist; the front-end button title already wired the wording to "all implemented data types updated", so no UI change was needed.
+
 ### Internal — `.gitignore` housekeeping
 
 Added patterns for files that `fa start` / `fa init` / codesearch generate but should never be committed: `.fa-launch-*.log`, `.fa-data-update.log`, `config/*.bak.*`, `.codesearch.db/`.
