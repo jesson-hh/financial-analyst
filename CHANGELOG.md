@@ -2,6 +2,62 @@
 
 All notable changes to this project follow [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning 2.0.0](https://semver.org/).
 
+## [1.0.3] — 2026-05-25  · Workspace pinning + data refresh button + fa start polish
+
+### Added — Workspace abstraction (`workspace.py`)
+
+Stock data is large (155 MB demo · 3 GB lite · 14 GB full + 5min + F10) and many Windows users can't fit it on the system drive. Users can now pin a workspace root once and every subsequent `fa` invocation honours it transparently:
+
+- New `src/financial_analyst/workspace.py` (~170 lines) — `get_workspace()` / `set_workspace()` / `clear_workspace()` plus convenience accessors (`data_dir`, `config_dir`, `out_dir`, `logs_dir`, `cache_dir`) and disk-free probe (`disk_free_gb`, `is_writable`).
+- 4-tier resolution: `--workspace` CLI flag → `$FA_WORKSPACE` env var → `~/.financial-analyst/.workspace` pointer file → legacy `~/.financial-analyst/` default. Pointer file lives at the legacy location even when the actual workspace is elsewhere (e.g. `D:\fa-workspace`).
+- Workspace-aware path resolution wired through `_config.py:config_candidates()`, `data/paths.py:_user_root()`, `data/news_db.py:_default_db_path()`, `data_cli.py:_resolve_provider_uri()`. Lazy imports avoid circular dependencies; falls back to `~/.financial-analyst/` on any import failure.
+
+### Added — Last-update tracker + smart `fa data refresh`
+
+- New `src/financial_analyst/data/last_update.py` — per-data-type ISO timestamps persisted to `<workspace>/.last-update.json`. Catalogue covers `day` / `5min` / `daily_basic` / `financials` / `f10`; `IMPLEMENTED_TYPES` subset (first three) is what `fa data refresh` actually drives. Staleness thresholds: 24h for daily/intraday, 30d for financials, 3d for F10.
+- `fa data update` now calls `_lu.mark_updated(...)` after each successful batch (day / 5min / daily_basic).
+- `fa data status` prints "上次更新" block with ✓/⚠ markers per data type.
+- New `fa data refresh` smart command: checks `last_update.stale_types()` and skips when everything is fresh (under 24h). `--force` to bypass; `--skip-5min` to ignore 5min staleness.
+
+### Added — `/data/status` + `/data/refresh` HTTP endpoints (buddy backend)
+
+- `GET /data/status` — returns `{items: [{type, age, stale}, ...], stale_count, any_stale}`. Drives the UI button state.
+- `POST /data/refresh` — spawns `python -m financial_analyst.cli data update` as a detached subprocess (stdout to `.fa-data-update.log`), returns `{ok, pid, log, hint}` immediately. UI polls `/data/status` to see timestamps move.
+
+### Added — UI data refresh button in status bar (`觀瀾`)
+
+`src/financial_analyst/ui/app.jsx` (and `packaging/src-tauri/ui/app.jsx` mirror) gains a `DataRefreshButton` between `token` and `盯盘` in the bottom status bar:
+
+- Polls `GET /data/status` every 60s when idle, 5s during a refresh.
+- Four states: `✓ 数据 N min ago` (fresh) / `⚠ 数据 N 类陈旧` (stale, red border) / `↻ 更新中…` (post-click) / `数据 ?` (no backend).
+- Click fires `POST /data/refresh`, locks button for up to 4 min (subprocess safety net).
+- jsx cache-buster bumped `20260524-3 → 20260525-1` so plain F5 picks up the new module.
+
+### Added — `fa start` / `fa update` / new wizard layout
+
+- `fa start` — primary user-facing name for the one-command launcher (`fa launch` kept as alias). Bilingual welcome (zh/en via `FA_LANG`), fast-path skips subprocess management if both backend (:9999) and UI (:5173) are already healthy, ready panel embeds a passive PyPI update banner and day-data staleness banner.
+- `fa update` — new module `src/financial_analyst/update_cli.py`. Probes PyPI's JSON API (httpx, `trust_env=True`), refuses editable installs (`pip install -e .` would be shadowed by PyPI release), runs `pip install -U financial-analyst==X` on confirmation. Background check is throttled to once per 24h via `~/.financial-analyst/.update_check.json`.
+- `fa init` overhaul: Step 0 language picker → Step 1 workspace picker (with disk-free probe + cramped-drive warning) → Step 2 LLM keys → Step 3 Tushare token → Step 4 data package. HF preset table now shows ETA (~3 min / ~30 min / 1-2 hours) + best-for column. Completion panel is two-column (paths summary + next-step commands).
+
+### Added — Release workflow design spec
+
+- `docs/superpowers/specs/2026-05-25-release-workflow-design.md` (~340 lines) — 8-phase ultrawork release workflow design: Preflight → Local Validation → Local Smoke → Changelog Gate → TestPyPI → PyPI → Tag + Push → HF Data Package. Phases 0-4 reversible, 5-8 irreversible. Not yet implemented (`release.workflow.mjs` to follow).
+
+### Fixed — Two regressions in `fa start` first-time path
+
+- `_init_cmd` called from launch_cli without `workspace=None` (line 393) — `workspace` defaulted to a `typer.OptionInfo` sentinel, which is truthy, so `_step_workspace` tried `Path(OptionInfo)` → `TypeError`. The wizard's try/except only caught `typer.Exit`/`SystemExit`, so the error propagated and crashed `fa start`. New users (no LLM key set) couldn't get past launch.
+- `_data_dir_ok()` hardcoded only `~/.financial-analyst/data/cn_data` and the maintainer's personal `G:/stocks/stock_data/cn_data`. Users with a pinned workspace (e.g. `D:\fa-workspace`) would always see "no data directory" warning even when data was present. Now probes `workspace.data_dir() / "cn_data"` first.
+
+### Fixed — `/data/refresh` NameError
+
+`Path.cwd()` was used in the `data_refresh` endpoint to compute the subprocess log path, but `pathlib.Path` wasn't in the function's scope (it was lazily imported only inside a sibling endpoint). The data refresh button in the UI silently failed with a 500 from the backend. Now imported alongside `subprocess` / `sys` at the top of the handler.
+
+### Internal — `.gitignore` housekeeping
+
+Added patterns for files that `fa start` / `fa init` / codesearch generate but should never be committed: `.fa-launch-*.log`, `.fa-data-update.log`, `config/*.bak.*`, `.codesearch.db/`.
+
+---
+
 ## [1.0.2] — 2026-05-25  · Data contract + scaffolding cleanup + LLM Providers rewrite
 
 ### Added — Cross-repo data contract + unified path resolver
