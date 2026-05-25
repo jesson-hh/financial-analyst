@@ -29,9 +29,40 @@ def _ci_safe_defaults(tmp_path_factory, monkeypatch):
     fixtures run before per-test fixtures.
     """
     import os
+    # Kill rich/typer's fancy panel rendering in CliRunner — without this,
+    # `--help` output gets wrapped in a Rich Panel whose option names land in
+    # truncated content cells, so `assert "--trace" in result.stdout` fails
+    # despite the option existing. We're aggressive about disabling it
+    # because rich/typer/click each look at different env vars:
+    #   - NO_COLOR (XDG-style, rich, modern click)
+    #   - TERM=dumb (legacy terminals — rich treats this as no-tty)
+    #   - CLICOLOR=0, CLICOLOR_FORCE=0, FORCE_COLOR=0 (click / colorama / rich)
+    #   - _TYPER_STANDARD_TRACEBACK=1 (typer-specific: plain tracebacks)
+    #   - COLUMNS=200 (rich/click panel width — wide enough to prevent wrap)
     monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("TERM", "dumb")
+    monkeypatch.setenv("CLICOLOR", "0")
+    monkeypatch.setenv("CLICOLOR_FORCE", "0")
+    monkeypatch.setenv("FORCE_COLOR", "0")
+    monkeypatch.setenv("_TYPER_STANDARD_TRACEBACK", "1")
     monkeypatch.setenv("COLUMNS", "200")
     monkeypatch.setenv("FA_E2E", "0")
+    # Force-disable rich's terminal detection at the lib level — covers the
+    # case where typer constructs its own Console with auto-detected width
+    # that doesn't honour the COLUMNS env var.
+    try:
+        import rich.console as _rich_console
+        original_init = _rich_console.Console.__init__
+
+        def _patched_init(self, *args, **kwargs):
+            kwargs.setdefault("force_terminal", False)
+            kwargs.setdefault("no_color", True)
+            kwargs.setdefault("width", 200)
+            return original_init(self, *args, **kwargs)
+
+        monkeypatch.setattr(_rich_console.Console, "__init__", _patched_init)
+    except Exception:
+        pass
 
     # Build a fake Qlib root (existing dir tree so QlibBinaryLoader's
     # `provider_uri.exists()` check passes — see qlib_binary.py:112).
