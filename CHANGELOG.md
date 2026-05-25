@@ -72,6 +72,12 @@ Since `fa start` IS the headline UX, the slim CLI-only install case is too rare 
 
 `_do_launch()` now probes `import fastapi, uvicorn` before spawning `fa serve`. Missing modules → a clear red panel with the exact fix-command, exit code 7. Catches the obscure `pip install --no-deps` / corrupted-venv case in under a second instead of after the 30 s wait-for-`/health` timeout.
 
+### Fixed — `_env_has_llm_key` / `_detect_lang` only probed `cwd/.env`
+
+Both helpers in `launch_cli.py` (plus `update_cli._lang`) only checked `Path.cwd() / ".env"`. The wizard writes `.env` to `_project_root() / ".env"` — workspace for pip installs, repo root for editable installs — neither of which is necessarily the user's cwd. Symptom: user finishes `fa init`, runs `fa start` from a different directory, gets re-prompted "no LLM key" and re-runs the wizard; or runs `fa update` from the wrong directory and gets default `zh` instead of their pinned `FA_LANG=en`.
+
+New `_candidate_env_paths()` helper returns the priority list (cwd → workspace → repo root, deduped). Both detectors iterate through it.
+
 ### Added — Orange "盘中" data refresh state
 
 When the A-share market is currently in session (Mon-Fri 09:30-15:00, lunch 11:30-13:00 inclusive) and the user has just refreshed, the data is "as fresh as possible" but today's full close hasn't happened yet. Showing the same ✓ green as a post-close fresh state hides this nuance.

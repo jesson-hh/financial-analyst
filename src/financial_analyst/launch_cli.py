@@ -75,23 +75,63 @@ def _ui_dir() -> Path:
     )
 
 
+_LLM_KEYS = ("DASHSCOPE_API_KEY", "DEEPSEEK_API_KEY",
+             "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
+
+
+def _candidate_env_paths() -> list:
+    """All places ``.env`` might live, in priority order — Path.cwd / workspace / repo.
+
+    Wizard writes to ``_project_root()/.env`` (which is the workspace for
+    pip installs, repo root for editable). We probe each so the launcher
+    finds the key regardless of which directory the user invoked
+    ``fa start`` from.
+    """
+    out = [Path.cwd() / ".env"]
+    try:
+        from financial_analyst.workspace import get_workspace
+        out.append(get_workspace() / ".env")
+    except Exception:
+        pass
+    try:
+        # Repo-root .env (editable installs) — picked up via _project_root
+        # if init_cli is importable.
+        from financial_analyst.init_cli import _project_root
+        out.append(_project_root() / ".env")
+    except Exception:
+        pass
+    # Dedupe while preserving order
+    seen = set()
+    uniq = []
+    for p in out:
+        rp = str(p.resolve()) if p.exists() else str(p)
+        if rp not in seen:
+            seen.add(rp)
+            uniq.append(p)
+    return uniq
+
+
+def _env_file_has_key(env_file: Path, keys: tuple) -> bool:
+    if not env_file.exists():
+        return False
+    for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        if key.strip() in keys and val.strip():
+            return True
+    return False
+
+
 def _env_has_llm_key() -> bool:
-    """Check whether at least one supported LLM provider key is set."""
-    for k in ("DASHSCOPE_API_KEY", "DEEPSEEK_API_KEY",
-              "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+    """At least one supported LLM provider key set in env vars OR any candidate .env."""
+    for k in _LLM_KEYS:
         if os.environ.get(k, "").strip():
             return True
-    env_file = Path.cwd() / ".env"
-    if env_file.exists():
-        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, val = line.split("=", 1)
-            if key.strip() in {"DASHSCOPE_API_KEY", "DEEPSEEK_API_KEY",
-                                "OPENAI_API_KEY", "ANTHROPIC_API_KEY"} \
-                    and val.strip():
-                return True
+    for p in _candidate_env_paths():
+        if _env_file_has_key(p, _LLM_KEYS):
+            return True
     return False
 
 
@@ -161,13 +201,15 @@ def _wait_url(url: str, timeout: float = 30.0,
 def _detect_lang() -> str:
     """Pick UI language for the welcome message.
 
-    Honour FA_LANG env var or .env entry, else fall back to zh.
+    Honour FA_LANG env var or any candidate ``.env`` entry (cwd / workspace
+    / repo root), else fall back to zh.
     """
     raw = os.environ.get("FA_LANG", "").strip().lower()
     if raw in ("zh", "en"):
         return raw
-    env_file = Path.cwd() / ".env"
-    if env_file.exists():
+    for env_file in _candidate_env_paths():
+        if not env_file.exists():
+            continue
         for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()
             if line.startswith("FA_LANG=") and "=" in line:

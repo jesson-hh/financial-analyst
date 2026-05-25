@@ -152,21 +152,17 @@ def check_for_updates(force: bool = False,
 
 
 def _lang() -> str:
+    """Pick UI language for update banners. Honours FA_LANG env var, else
+    delegates to launch_cli's multi-path .env probe (cwd / workspace / repo).
+    """
     raw = os.environ.get("FA_LANG", "").strip().lower()
     if raw in ("zh", "en"):
         return raw
-    env_file = Path.cwd() / ".env"
-    if env_file.exists():
-        try:
-            for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
-                line = line.strip()
-                if line.startswith("FA_LANG=") and "=" in line:
-                    v = line.split("=", 1)[1].strip().lower()
-                    if v in ("zh", "en"):
-                        return v
-        except Exception:
-            pass
-    return "zh"
+    try:
+        from financial_analyst.launch_cli import _detect_lang
+        return _detect_lang()
+    except Exception:
+        return "zh"
 
 
 # ──────────────────────── public banner (used by `fa start`) ────────────────────────
