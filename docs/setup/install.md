@@ -6,7 +6,6 @@
 |------|------|---------|
 | 个人用户 / 试用 | A. **pip from PyPI** | `pip install financial-analyst[serve]` |
 | 开发者 / 想改源码 | B. **pip editable from source** | `git clone ... && pip install -e .[dev,serve]` |
-| 团队 / 容器化部署 | C. **Docker** | `docker compose up serve` |
 
 完成任一路径后, 跑 `fa init` 完成首启配置 (见 [`zero_to_report.md`](zero_to_report.md)).
 
@@ -106,41 +105,6 @@ pip install dist/financial_analyst-*.whl[serve]
 
 ---
 
-## C. Docker (零本地依赖, 5 分钟)
-
-适合: **想隔离环境 / 多用户共享 / 部署到服务器**.
-
-```bash
-git clone https://github.com/jesson-hh/financial-analyst.git
-cd financial-analyst
-
-# 1. 配 .env
-cp .env.example .env
-vim .env   # 填 DASHSCOPE_API_KEY (可选: TUSHARE_TOKEN)
-
-# 2. build + 起 SSE bridge
-docker compose up -d serve
-
-# 3. 健康检查
-curl http://localhost:9999/health
-# → {"ok":true,"version":"1.9.4","tools":30}
-
-# 4. 一次性 CLI 用 (例如 fa report)
-docker compose run --rm fa report SH600519
-
-# 5. 完整 GuanLan UI (前端 + 后端)
-docker compose --profile ui up -d
-# 浏览器开 http://localhost:5173
-```
-
-Image 分两层:
-- `financial-analyst:base` — CLI only (~600MB, 含 lightgbm)
-- `financial-analyst:serve` — base + fastapi + uvicorn + healthcheck (用于 SSE bridge)
-
-详见 [`deployment.md`](deployment.md) 生产部署完整指南.
-
----
-
 ## 系统要求
 
 | 项 | 最低 | 推荐 |
@@ -227,6 +191,5 @@ chcp 65001
 装好后:
 - [zero_to_report.md](zero_to_report.md) — 0 到第一份研报 60min walkthrough
 - [data_pipeline.md](data_pipeline.md) — 数据流细节
-- [deployment.md](deployment.md) — 生产部署
-- [mcp.md](../mcp.md) — Claude Desktop / Claude Code 接入
+- [mcp.md](../mcp.md) — MCP integration (Claude Desktop / Claude Code 等)
 - [ui/guanlan_user_guide.md](../ui/guanlan_user_guide.md) — GuanLan UI 操作

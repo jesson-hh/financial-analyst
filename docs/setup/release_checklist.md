@@ -81,46 +81,7 @@ twine upload dist/financial_analyst-1.9.5*
 
 ---
 
-## 2. DockerHub (可选)
-
-### 2a. 装 docker login
-
-```bash
-docker login          # 输入 DockerHub 用户名 + access token
-```
-
-### 2b. Build + tag + push
-
-```bash
-cd G:/financial-analyst
-
-# Base + serve targets
-docker build --target base -t jessonhh/financial-analyst:1.9.5 .
-docker build --target base -t jessonhh/financial-analyst:latest .
-docker build --target serve -t jessonhh/financial-analyst:1.9.5-serve .
-docker build --target serve -t jessonhh/financial-analyst:serve .
-
-# Push
-docker push jessonhh/financial-analyst:1.9.5
-docker push jessonhh/financial-analyst:latest
-docker push jessonhh/financial-analyst:1.9.5-serve
-docker push jessonhh/financial-analyst:serve
-```
-
-### 2c. 测试 pull
-
-```bash
-docker run --rm jessonhh/financial-analyst:1.9.5 version
-# → financial-analyst 1.9.5
-
-docker run --rm -p 9999:9999 jessonhh/financial-analyst:serve &
-curl http://localhost:9999/health
-# → {"ok":true,"version":"1.9.5",...}
-```
-
----
-
-## 3. HuggingFace 数据包 (P1 工作, 一次性建)
+## 2. HuggingFace 数据包 (P1 工作, 一次性建)
 
 参考 [`hf_publish_guide.md`](hf_publish_guide.md). 3 档:
 
@@ -240,8 +201,6 @@ docker manifest rm jessonhh/financial-analyst:1.9.5
 pytest tests/ -q && \
     python -m build --wheel --sdist --outdir dist/ && \
     twine upload dist/financial_analyst-1.9.5* && \
-    docker build --target serve -t jessonhh/financial-analyst:1.9.5-serve . && \
-    docker push jessonhh/financial-analyst:1.9.5-serve && \
     git tag v1.9.5 && git push origin v1.9.5
 
 # DONE 🎉

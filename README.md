@@ -174,16 +174,7 @@ fa init                    # interactive wizard — pulls HF dataset
 fa report SH600519         # first deep-dive
 ```
 
-### B. Docker (zero local setup, 2 minutes)
-
-```bash
-git clone https://github.com/jesson-hh/financial-analyst.git
-cd financial-analyst
-cp .env.example .env
-docker compose up          # → interactive TUI
-```
-
-### C. Source (development)
+### B. Source (development)
 
 ```bash
 git clone https://github.com/jesson-hh/financial-analyst.git

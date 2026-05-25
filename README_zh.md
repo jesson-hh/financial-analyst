@@ -175,16 +175,7 @@ fa init                    # 交互向导 — 拉 HF 数据
 fa report SH600519         # 首份深度研报
 ```
 
-### B. Docker (零本地配置, 2 分钟)
-
-```bash
-git clone https://github.com/jesson-hh/financial-analyst.git
-cd financial-analyst
-cp .env.example .env
-docker compose up          # → 交互 TUI
-```
-
-### C. 源码 (开发)
+### B. 源码 (开发)
 
 ```bash
 git clone https://github.com/jesson-hh/financial-analyst.git
