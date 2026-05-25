@@ -58,6 +58,15 @@ Stock data is large (155 MB demo · 3 GB lite · 14 GB full + 5min + F10) and ma
 
 Route now returns a per-row `implemented` boolean and `stale_count` only counts implemented stale types. Items list still surfaces `financials` / `f10` for transparency so the user knows they exist; the front-end button title already wired the wording to "all implemented data types updated", so no UI change was needed.
 
+### Added — Orange "盘中" data refresh state
+
+When the A-share market is currently in session (Mon-Fri 09:30-15:00, lunch 11:30-13:00 inclusive) and the user has just refreshed, the data is "as fresh as possible" but today's full close hasn't happened yet. Showing the same ✓ green as a post-close fresh state hides this nuance.
+
+- `/data/status` now returns `market_session: 'open' | 'lunch' | 'closed' | 'weekend'` via existing `buddy.alerts.market_session()` helper.
+- `DataRefreshButton` adds a fourth state: ⏳ amber-600 (`#d97706`) `数据 N min ago · 盘中` when `stale_count == 0 && market_session in (open, lunch)`. Tooltip explains that today's complete close data lands after 15:00, and lunch-mode tooltip notes the 13:00 reopen.
+- Holiday handling intentionally omitted (matches the rest of the codebase) — falls back to "weekend"/"closed" semantics on CN public holidays, which is harmless.
+- jsx cache-buster bumped `20260525-1 → 20260525-2`.
+
 ### Internal — `.gitignore` housekeeping
 
 Added patterns for files that `fa start` / `fa init` / codesearch generate but should never be committed: `.fa-launch-*.log`, `.fa-data-update.log`, `config/*.bak.*`, `.codesearch.db/`.

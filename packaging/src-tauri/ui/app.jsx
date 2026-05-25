@@ -134,7 +134,8 @@ function makeInitialState() {
     //   stale_count:  number
     //   refreshing:   true 当点击按钮触发 /data/refresh 后, 子进程在跑
     //   lastError:    最近一次刷新错误信息
-    dataStatus: { items: [], stale_count: 0, refreshing: false, lastError: null },
+    //   market_session: 'open' / 'lunch' / 'closed' / 'weekend' (盘中 fresh 时按钮转橙)
+    dataStatus: { items: [], stale_count: 0, refreshing: false, lastError: null, market_session: 'closed' },
   };
   if (loaded && loaded.sessions && loaded.sessions.length > 0) {
     return {
@@ -205,6 +206,7 @@ function reducer(s, a) {
     case 'set_data_status':
       return { ...s, dataStatus: { ...s.dataStatus, items: a.items || [],
                                     stale_count: a.stale_count || 0,
+                                    market_session: a.market_session || 'closed',
                                     lastError: null } };
     case 'data_refreshing':
       return { ...s, dataStatus: { ...s.dataStatus, refreshing: !!a.on,
@@ -711,7 +713,8 @@ function ObservatoryApp() {
         const d = await r.json();
         if (cancelled || !d?.ok) return;
         dispatch({ type: 'set_data_status',
-                   items: d.items, stale_count: d.stale_count });
+                   items: d.items, stale_count: d.stale_count,
+                   market_session: d.market_session });
       } catch (e) {
         // network blip — ignore, next tick will retry
       }
@@ -2241,25 +2244,43 @@ function DataRefreshButton({ s, dispatch }) {
   const items = s.dataStatus?.items || [];
   const stale = s.dataStatus?.stale_count || 0;
   const refreshing = s.dataStatus?.refreshing;
+  const session = s.dataStatus?.market_session || 'closed';
+  const inSession = session === 'open' || session === 'lunch';
   const dayRow = items.find(it => it.type === 'day');
   const dayAge = dayRow?.age || 'never';
 
-  let label, color, title;
+  // 颜色规则:
+  //   ↻ 更新中     - 青  (cyan, working)
+  //   ✓ fresh + 盘后 - 朱  (vermillion, 全收, 静态)
+  //   ⏳ fresh + 盘中 - 橙  (orange, 数据是最新的, 但今日还在交易, 待收盘)
+  //   ⚠ stale     - 深红 (#c0392b, 真的旧了)
+  let label, color, title, border;
   if (refreshing) {
     label = '↻ 更新中…';
     color = 'var(--qing)';
+    border = 'var(--line)';
     title = '后端正在跑 fa data update 子进程, 5s 一查 /data/status, 完成后会自动转回 ✓';
+  } else if (stale === 0 && items.length > 0 && inSession) {
+    label = `⏳ 数据 ${dayAge} · 盘中`;
+    color = '#d97706';  // amber-600
+    border = '#d97706';
+    title = (session === 'lunch'
+      ? `日线已更新到目前可拉的最新 (${dayAge}), 但今日 13:00 后还有半场, 收盘后建议再点一次拉今日完整数据.`
+      : `日线已更新到目前可拉的最新 (${dayAge}), 但今日交易未结束, 收盘后 (15:00) 再点一次拉今日完整数据.`);
   } else if (stale === 0 && items.length > 0) {
     label = `✓ 数据 ${dayAge}`;
     color = 'var(--zhu)';
+    border = 'var(--line)';
     title = `日线 ${dayAge}, 所有实现的数据类型都已更新. 点击强制重拉.`;
   } else if (items.length === 0) {
     label = '数据 ?';
     color = 'var(--ink-3)';
+    border = 'var(--line)';
     title = '尚未拉到 /data/status. 点击刷新.';
   } else {
     label = `⚠ 数据 ${stale} 类陈旧`;
     color = '#c0392b';
+    border = '#c0392b';
     title = `${stale} 类数据 (含日线 ${dayAge}) 超过 24h 没更新. 点击拉新.`;
   }
 
@@ -2289,7 +2310,7 @@ function DataRefreshButton({ s, dispatch }) {
       onClick={onClick}
       title={title}
       className="hover-pill"
-      style={{ padding: '1px 6px', border: '1px solid ' + (stale > 0 && !refreshing ? '#c0392b' : 'var(--line)'),
+      style={{ padding: '1px 6px', border: '1px solid ' + border,
                color, cursor: refreshing ? 'wait' : 'pointer',
                opacity: refreshing ? 0.7 : 1 }}>
       {label}

@@ -623,6 +623,7 @@ def build_app():
         """
         try:
             from financial_analyst.data import last_update as _lu
+            from financial_analyst.buddy.alerts import market_session
             implemented = set(_lu.IMPLEMENTED_TYPES)
             rows = []
             for dt, age, stale in _lu.status_summary():
@@ -636,11 +637,16 @@ def build_app():
             # financials/f10 have no updater yet — they'd otherwise show
             # "never" forever and the red ⚠ would never clear.
             stale_count = sum(1 for r in rows if r["stale"] and r["implemented"])
+            # Market session — frontend uses this to render an orange
+            # "waiting for close" state when data is fresh but today's
+            # trading day isn't done yet ('open' / 'lunch' on weekdays).
+            session = market_session()
             return JSONResponse({
-                "ok": True,
-                "items": rows,
-                "stale_count": stale_count,
-                "any_stale": stale_count > 0,
+                "ok":             True,
+                "items":          rows,
+                "stale_count":    stale_count,
+                "any_stale":      stale_count > 0,
+                "market_session": session,  # 'open' / 'lunch' / 'closed' / 'weekend'
             })
         except Exception as exc:
             return JSONResponse(
