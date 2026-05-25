@@ -3,11 +3,11 @@
 </p>
 
 <p align="center">
-  <strong>One command. 25 AI agents. A 股深度研究.</strong>
+  <strong>One command. 24 AI agents. A 股深度研究.</strong>
 </p>
 
 <p align="center">
-  <em>Turn a 6-digit stock code into a 14-agent deep-dive report — fundamentals · technicals · whale signals · quant scores · bull/bear/risk debate — in ~10 minutes.</em>
+  <em>Turn a 6-digit stock code into a 16-agent deep-dive report — fundamentals · technicals · whale signals · quant scores · bull/bear/risk debate — in ~10 minutes.</em>
 </p>
 
 <p align="center">
@@ -17,11 +17,11 @@
 <p align="center">
   <a href="https://pypi.org/project/financial-analyst/"><img src="https://img.shields.io/pypi/v/financial-analyst.svg?style=flat&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
   <img src="https://img.shields.io/pypi/pyversions/financial-analyst.svg?style=flat&logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/release-v1.0.0-success?style=flat" alt="Release">
+  <img src="https://img.shields.io/badge/release-v1.0.1-success?style=flat" alt="Release">
   <img src="https://img.shields.io/badge/tests-712_passed-brightgreen?style=flat" alt="Tests">
   <img src="https://img.shields.io/badge/license-Apache_2.0-yellow?style=flat" alt="License">
   <br>
-  <img src="https://img.shields.io/badge/agents-25-7C3AED?style=flat" alt="Agents">
+  <img src="https://img.shields.io/badge/agents-24-7C3AED?style=flat" alt="Agents">
   <img src="https://img.shields.io/badge/swarm_presets-5-2563EB?style=flat" alt="Swarm">
   <img src="https://img.shields.io/badge/buddy_tools-31-0F766E?style=flat" alt="Tools">
   <img src="https://img.shields.io/badge/alpha_factors-440-FF6B6B?style=flat" alt="Alphas">
@@ -40,7 +40,7 @@
 </p>
 
 ```bash
-pip install financial-analyst==1.0.0    # 1 minute
+pip install financial-analyst==1.0.1    # 1 minute
 financial-analyst                        # zero-config: wizard + backend + web UI + browser auto-opens
 ```
 
@@ -81,7 +81,7 @@ Out comes a markdown research report — **rated, attributed, falsifiable**. The
 <tr>
 <td width="50%" valign="top">
 
-### 🎯 14-agent stock deep-dive
+### 🎯 16-agent stock deep-dive
 Hand it `SH600519`, get a full research report in ~10 min — fundamentals, technicals, whale signals, quant scores, bull/bear/risk debate, post-mortem self-audit. **Only `report-writer` writes files.**
 
 ```bash
@@ -169,7 +169,7 @@ See [examples/](examples/) for FM cluster / CSV loader / TDX F10 patterns.
 ### A. PyPI (recommended, 1 minute)
 
 ```bash
-pip install financial-analyst==1.0.0
+pip install financial-analyst==1.0.1
 cp .env.example .env       # add DASHSCOPE_API_KEY (qwen default)
 fa init                    # interactive wizard — pulls HF dataset
 fa report SH600519         # first deep-dive
@@ -299,4 +299,4 @@ Other docs:
 
 Apache 2.0. **Research and educational purposes only**. Drafts analyst-grade work product for review by qualified professionals. Does not make investment recommendations, execute transactions, or post to any ledger. You are responsible for compliance with applicable laws.
 
-<sub>v1.0.0 · 2026-05-25 · made by [@jesson-hh](https://github.com/jesson-hh) · bilingual zh/en</sub>
+<sub>v1.0.1 · 2026-05-25 · made by [@jesson-hh](https://github.com/jesson-hh) · bilingual zh/en</sub>

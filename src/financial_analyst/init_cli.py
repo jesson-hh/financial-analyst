@@ -232,6 +232,9 @@ loaders:
     provider_uri:
       day: {data_dir}/cn_data
       5min: {data_dir}/cn_data_5min
+    # Non-time-series data roots (read by financial_analyst.data.paths.get_data_paths)
+    parquet_root: {data_dir}/parquet
+    news_data_root: {data_dir}/news_data
 """
     config_path.write_text(text, encoding="utf-8")
     console.print(f"  ✓ 写 {config_path}")

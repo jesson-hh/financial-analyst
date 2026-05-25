@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>一行命令. 25 个 AI Agent. A 股深度研究.</strong>
+  <strong>一行命令. 24 个 AI Agent. A 股深度研究.</strong>
 </p>
 
 <p align="center">
@@ -17,11 +17,11 @@
 <p align="center">
   <a href="https://pypi.org/project/financial-analyst/"><img src="https://img.shields.io/pypi/v/financial-analyst.svg?style=flat&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
   <img src="https://img.shields.io/pypi/pyversions/financial-analyst.svg?style=flat&logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/release-v1.0.0-success?style=flat" alt="Release">
+  <img src="https://img.shields.io/badge/release-v1.0.1-success?style=flat" alt="Release">
   <img src="https://img.shields.io/badge/tests-712_passed-brightgreen?style=flat" alt="Tests">
   <img src="https://img.shields.io/badge/license-Apache_2.0-yellow?style=flat" alt="License">
   <br>
-  <img src="https://img.shields.io/badge/agents-25-7C3AED?style=flat" alt="Agents">
+  <img src="https://img.shields.io/badge/agents-24-7C3AED?style=flat" alt="Agents">
   <img src="https://img.shields.io/badge/swarm_预设-5-2563EB?style=flat" alt="Swarm">
   <img src="https://img.shields.io/badge/buddy_工具-31-0F766E?style=flat" alt="Tools">
   <img src="https://img.shields.io/badge/alpha_因子-440-FF6B6B?style=flat" alt="Alphas">
@@ -40,7 +40,7 @@
 </p>
 
 ```bash
-pip install financial-analyst==1.0.0    # 1 分钟
+pip install financial-analyst==1.0.1    # 1 分钟
 financial-analyst                        # 零配置一键: 引导 + 后端 + Web UI + 浏览器自动开
 ```
 
@@ -82,7 +82,7 @@ F10 · 海外宏观         主力情绪分析师                 风控 ─┘
 <tr>
 <td width="50%" valign="top">
 
-### 🎯 14-agent 个股深度研报
+### 🎯 16-agent 个股深度研报
 给 `SH600519` 一个代码, 10 分钟出完整研报 — 基本面 / 技术面 / 主力 / 量化 / 多空风控辩论 / 复盘自审. **只有 `report-writer` 能写文件**.
 
 ```bash
@@ -170,7 +170,7 @@ financial-analyst  # /model deepseek-reasoner
 ### A. PyPI 安装 (推荐, 1 分钟)
 
 ```bash
-pip install financial-analyst==1.0.0
+pip install financial-analyst==1.0.1
 cp .env.example .env       # 加 DASHSCOPE_API_KEY (默认 qwen)
 fa init                    # 交互向导 — 拉 HF 数据
 fa report SH600519         # 首份深度研报
@@ -196,7 +196,7 @@ pytest tests/              # 712 测试, ~8 分钟
 
 ---
 
-## 🤖 25 个 Agent
+## 🤖 24 个 Agent
 
 | Tier | Agents | 角色 |
 |---|---|---|
@@ -300,4 +300,4 @@ TUI 内秒切:
 
 Apache 2.0. **仅供研究 / 教学**. 草拟分析师级工作产物供合格专业人士 review. 不构成投资建议, 不执行交易, 不写任何 ledger. 用户须自行遵守适用法律法规.
 
-<sub>v1.0.0 · 2026-05-25 · made by [@jesson-hh](https://github.com/jesson-hh) · 中英双语</sub>
+<sub>v1.0.1 · 2026-05-25 · made by [@jesson-hh](https://github.com/jesson-hh) · 中英双语</sub>

@@ -12,3 +12,6 @@ loaders:
       day: G:/stocks/stock_data/cn_data
       5min: G:/stocks/stock_data/cn_data_5min
       # 1min: G:/stocks/stock_data/cn_data_1min   # uncomment if needed
+    # Non-time-series data roots (read by financial_analyst.data.paths.get_data_paths)
+    parquet_root: G:/stocks/stock_data/parquet
+    news_data_root: G:/stocks/news_data

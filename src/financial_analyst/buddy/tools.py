@@ -597,10 +597,11 @@ def _tool_iwencai_search(question: str, limit: int = 20,
         items = IWencaiCollector().fetch(question, limit=limit)
     except Exception as exc:
         db.close()
+        plugin_path = _project_root() / "opencli-plugin-ths-extra"
         return ToolResult(
             f"问财查询失败: {exc}\n"
             f"(Hint: 需要装 ths-extra plugin — "
-            f"opencli plugin install file://G:/financial-analyst/opencli-plugin-ths-extra)",
+            f"opencli plugin install file://{plugin_path.as_posix()})",
             is_error=True,
         )
     if not items:

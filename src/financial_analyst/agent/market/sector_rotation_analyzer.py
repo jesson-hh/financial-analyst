@@ -105,7 +105,10 @@ class SectorRotationAnalyzer(SubAgent[SectorRotationOutput]):
     def __init__(self, memory_root, parquet_root: Optional[Path] = None,
                  min_movers_per_sector: int = 2):
         super().__init__(memory_root=memory_root)
-        self._parquet_root = parquet_root or Path("G:/stocks/stock_data/parquet")
+        if parquet_root is None:
+            from financial_analyst.data.paths import get_data_paths
+            parquet_root = get_data_paths().parquet_root
+        self._parquet_root = Path(parquet_root)
         self._min_n = min_movers_per_sector
 
     async def _execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
