@@ -50,3 +50,14 @@ GEMINI.md
 
 # Historical release notes (CHANGELOG.md is the source of truth)
 RELEASE_NOTES_v*.md
+
+# fa launch / fa data update runtime logs
+.fa-launch-*.log
+.fa-data-update.log
+
+# config backups created by `fa init` when it rewrites loaders.yaml
+config/*.bak.*
+config/*.bak
+
+# codesearch local index (tooling cache, never source)
+.codesearch.db/

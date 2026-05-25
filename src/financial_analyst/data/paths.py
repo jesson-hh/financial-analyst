@@ -39,8 +39,19 @@ _DEV_ROOTS = {
     "news_data":  "G:/stocks/news_data",
 }
 
-# First-user fallback (after `fa init` downloads HF dataset)
-_USER_ROOT = Path.home() / ".financial-analyst" / "data"
+
+def _user_root() -> Path:
+    """First-user fallback — workspace-aware.
+
+    Returns ``<workspace>/data/`` (default ``~/.financial-analyst/data/``).
+    Recomputed on each call so workspace switches take effect without
+    restart.
+    """
+    try:
+        from financial_analyst.workspace import get_workspace
+        return get_workspace() / "data"
+    except Exception:
+        return Path.home() / ".financial-analyst" / "data"
 
 
 # ──────────────────────── data class ────────────────────────
@@ -108,9 +119,10 @@ def get_data_paths(config_path: Optional[Path] = None) -> DataPaths:
     cfg = _load_yaml(config_path)
     entry = (cfg.get("loaders") or {}).get("qlib_binary") or {}
 
-    user_qlib   = _USER_ROOT / "cn_data"
-    user_parquet = _USER_ROOT / "parquet"
-    user_news    = _USER_ROOT / "news_data"
+    _ur = _user_root()
+    user_qlib   = _ur / "cn_data"
+    user_parquet = _ur / "parquet"
+    user_news    = _ur / "news_data"
 
     # ---- qlib_uri ------------------------------------------------------
     env_qlib = os.getenv("FA_QLIB_URI")

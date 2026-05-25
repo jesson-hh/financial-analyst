@@ -61,10 +61,14 @@ def _resolve_provider_uri(freq: str = "day") -> str:
     except Exception:
         pass
 
-    # 4. 默认家目录
-    home = Path.home() / ".financial-analyst" / "data" / ("cn_data" if freq == "day"
-                                                          else f"cn_data_{freq}")
-    return str(home).replace("\\", "/")
+    # 4. 默认 workspace data dir (honours pinned workspace; falls back to HOME)
+    try:
+        from financial_analyst.workspace import get_workspace
+        ws = get_workspace()
+    except Exception:
+        ws = Path.home() / ".financial-analyst"
+    sub = "cn_data" if freq == "day" else f"cn_data_{freq}"
+    return str(ws / "data" / sub).replace("\\", "/")
 
 
 def _resolve_codes(codes_arg: Optional[str], provider_uri: str) -> List[str]:
@@ -134,6 +138,17 @@ def status_cmd():
     except Exception:
         pass
 
+    # 上次更新时间
+    typer.echo("")
+    typer.echo("  上次更新:")
+    from financial_analyst.data import last_update as _lu
+    for dt, age, stale in _lu.status_summary():
+        marker = "⚠" if stale else "✓"
+        typer.echo(f"    {marker} {dt:<13} {age}")
+    if any(s for _, _, s in _lu.status_summary()):
+        typer.echo("")
+        typer.echo("  ↻ 跑 fa data refresh 增量更新所有陈旧数据")
+
 
 # ───────────────────────── update ─────────────────────────
 
@@ -178,6 +193,7 @@ def update_cmd(
     from financial_analyst.data.updaters.tencent_basic import (
         update_daily_basic_today,
     )
+    from financial_analyst.data import last_update as _lu
 
     client = PytdxClient()
     typer.echo(f"  pytdx connected to {client.host or '(lazy)'}")
@@ -191,6 +207,8 @@ def update_cmd(
         typer.echo(f"\n[日线 ✓] {stats_daily['ok']}/{stats_daily['total']} OK "
                    f"({stats_daily['empty']} 空, {stats_daily['failed']} 失败) "
                    f"耗时 {time.time() - t0:.1f}s")
+        if stats_daily.get("ok", 0) > 0:
+            _lu.mark_updated("day")
 
         # 5min
         if not skip_5min:
@@ -200,6 +218,8 @@ def update_cmd(
             typer.echo(f"\n[5min ✓] {stats_5min['ok']}/{stats_5min['total']} OK "
                        f"({stats_5min['empty']} 空, {stats_5min['failed']} 失败) "
                        f"耗时 {time.time() - t0:.1f}s")
+            if stats_5min.get("ok", 0) > 0:
+                _lu.mark_updated("5min")
     finally:
         client.close()
 
@@ -212,8 +232,57 @@ def update_cmd(
                    f"(no_quote={stats_basic['no_quote']}, "
                    f"missing_pe={stats_basic['missing_pe']}) "
                    f"耗时 {time.time() - t0:.1f}s")
+        if stats_basic.get("ok", 0) > 0:
+            _lu.mark_updated("daily_basic")
 
     typer.echo(f"\n=== 完成. 总耗时 {time.time() - overall_t:.1f}s ===")
+
+
+# ───────────────────────── refresh (smart auto) ─────────────────────────
+
+
+@data_app.command("refresh")
+def refresh_cmd(
+    codes: Optional[str] = typer.Option(
+        None, "--codes",
+        help="限定代码 (逗号 / @file). 默认全 instruments."),
+    skip_5min: bool = typer.Option(
+        False, "--skip-5min", help="跳过 5min 更新, 更快."),
+    force: bool = typer.Option(
+        False, "--force", help="忽略 'recently updated' 检查, 全部重拉."),
+):
+    """智能增量刷新 — 自动判断哪些数据该更新, 然后跑.
+
+    跟 `fa data update` 区别:
+      * 默认查 last-update tracker, 24h 内更新过的数据类型跳过 (除非 --force)
+      * 跳过被 --skip-5min 排除的类型 (不算它陈旧)
+      * 写 last-update 时间戳, 供 `fa data status` + `fa start` banner 用
+    """
+    from financial_analyst.data import last_update as _lu
+
+    if not force:
+        # Only consider the types we're actually going to attempt.
+        # If the caller said --skip-5min, ignore 5min staleness.
+        relevant = [dt for dt in _lu.IMPLEMENTED_TYPES
+                    if not (skip_5min and dt == "5min")]
+        stale = [dt for dt in relevant if _lu.is_stale(dt)]
+        if not stale:
+            typer.echo("✓ 所有数据都在 24h 内更新过, 无事可做.")
+            typer.echo("  跑 fa data refresh --force 强制重拉, 或 fa data status 看详情.")
+            raise typer.Exit(0)
+        typer.echo(f"陈旧数据类型 ({len(stale)}): " + " · ".join(stale))
+    else:
+        typer.echo("--force 强制重拉所有")
+
+    # Delegate to update_cmd (calling the function directly since they're in same module)
+    return update_cmd(
+        codes=codes,
+        n_daily=30,
+        n_5min=240,
+        skip_5min=skip_5min,
+        skip_basic=False,
+        trade_date=None,
+    )
 
 
 # ───────────────────────── bootstrap (stub) ─────────────────────────

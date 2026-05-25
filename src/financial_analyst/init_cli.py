@@ -1,11 +1,16 @@
 """``fa init`` — first-launch wizard.
 
 After this step the user should be able to run ``fa report SH600519``. It covers:
-  1. Detect / collect LLM keys (DASHSCOPE required, OpenAI/Anthropic optional)
-  2. Optional Tushare token (with it: full daily_basic path; without it: direct connection)
-  3. Pick data package demo/lite/full/skip (downloaded from HuggingFace)
-  4. Write .env + config/loaders.yaml to the right place
-  5. Run fa data status to verify
+  0. Pick language (zh / en)
+  1. Pick **workspace root** — where to put data / .env / config / out.
+     Stock data is large (155 MB demo · 3 GB lite · 14 GB full), so we let
+     the user point this at e.g. ``D:\\fa-workspace`` instead of the
+     system drive.
+  2. Detect / collect LLM keys (DASHSCOPE recommended, OpenAI/Anthropic/DeepSeek optional)
+  3. Optional Tushare token (with it: full daily_basic path; without it: direct connection)
+  4. Pick data package demo/lite/full/skip (downloaded from HuggingFace)
+  5. Write .env + config/loaders.yaml into the workspace
+  6. Run fa data status to verify
 
 Design principles:
   - Any step can be skipped via enter (uses default)
@@ -23,10 +28,14 @@ from pathlib import Path
 from typing import Optional
 
 import typer
-from rich.console import Console
+from rich.align import Align
+from rich.columns import Columns
+from rich.console import Console, Group
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
+from rich.rule import Rule
 from rich.table import Table
+from rich.text import Text
 
 console = Console()
 
@@ -38,35 +47,249 @@ HF_PACKAGES = {
     "demo": {
         "repo_id":      "yifishbossman/financial-analyst-data-demo",
         "size_hint":    "~155 MB",
-        "n_stocks":     "300 (current CSI300 by mv)",
-        "description":  "演示包. 全历史日线 + 估值 + 核心 parquet (industry/F10/北向). 无 5min.",
+        "n_stocks":     {"zh": "300 (当前 CSI300 by mv)", "en": "300 (current CSI300 by mv)"},
+        "description":  {
+            "zh": "演示包. 全历史日线 + 估值 + 核心 parquet. 无 5min.",
+            "en": "Demo. Daily OHLCV + valuation + core parquet. No 5min.",
+        },
+        "eta":          "~3 min",
+        "best_for":     {"zh": "试用 · 看看流程", "en": "Try it out · see flow"},
+        "color":        "green",
     },
     "lite": {
         "repo_id":      "yifishbossman/financial-analyst-data-lite",
         "size_hint":    "~3 GB",
-        "n_stocks":     "800 (CSI800 ≈)",
-        "description":  "中等用户. 含 5min ~7 天 + 完整财务报表 (735 MB) + F10 文本 (1323 codes).",
+        "n_stocks":     {"zh": "800 (CSI800 ≈)", "en": "800 (CSI800 ≈)"},
+        "description":  {
+            "zh": "含 5min ~7 天 + 完整财务报表 (735 MB) + F10 文本.",
+            "en": "5min (~7d) + full financials (735 MB) + F10 text.",
+        },
+        "eta":          "~30 min",
+        "best_for":     {"zh": "日常 · 跑多股研报", "en": "Daily user · multi-stock"},
+        "color":        "cyan",
     },
     "full": {
         "repo_id":      "yifishbossman/financial-analyst-data-full",
         "size_hint":    "~14 GB",
-        "n_stocks":     "全 A 股 5500+ (含退市)",
-        "description":  "量化研究员 / 重度. 全 freq + 全 parquet + TDX 历年财报 zip (257 MB).",
+        "n_stocks":     {"zh": "全 A 股 5500+ (含退市)", "en": "5500+ all A-share (incl. delisted)"},
+        "description":  {
+            "zh": "量化研究员. 全 freq + 全 parquet + TDX 历年财报 zip (257 MB).",
+            "en": "Researcher. All freq + all parquet + TDX archive zip (257 MB).",
+        },
+        "eta":          "1-2 hours",
+        "best_for":     {"zh": "量化研究 · 因子挖掘", "en": "Quant research · factor mining"},
+        "color":        "magenta",
     },
 }
 
 
-# ──────────────────────── prompt helpers ────────────────────────
+_LLM_PROVIDERS = [
+    ("DASHSCOPE_API_KEY", "qwen", {
+        "zh": "[bold]推荐[/bold] · 注册送 100w token · 国内最快",
+        "en": "[bold]Recommended[/bold] · 1M free tokens on signup · fastest in CN",
+    }, "green"),
+    ("DEEPSEEK_API_KEY", "deepseek", {
+        "zh": "推理强 · `deepseek-reasoner` 1/10 价格",
+        "en": "Strong reasoning · `deepseek-reasoner` ~1/10 cost",
+    }, "cyan"),
+    ("OPENAI_API_KEY", "openai", {
+        "zh": "通用 fallback · gpt-4o",
+        "en": "Universal fallback · gpt-4o",
+    }, "yellow"),
+    ("ANTHROPIC_API_KEY", "anthropic", {
+        "zh": "顶级质量 · claude-opus-4-7 (海外计费)",
+        "en": "Top quality · claude-opus-4-7 (USD pricing)",
+    }, "magenta"),
+]
+
+
+# ──────────────────────── i18n text bundle ────────────────────────
+
+
+_T = {
+    "welcome_title":      {"zh": "觀瀾 · financial-analyst",
+                           "en": "GuanLan · financial-analyst"},
+    "welcome_tagline":    {"zh": "个股深度研究 · 24 agent · MCP-ready",
+                           "en": "Stock deep-dive research · 24 agents · MCP-ready"},
+    "welcome_intro":      {"zh": "这个向导会帮你做 3 件事:",
+                           "en": "This wizard will set up 3 things:"},
+    "welcome_s1":         {"zh": "LLM API key       ", "en": "LLM API key       "},
+    "welcome_s1_sub":     {"zh": "(必须 · 至少 1 个 provider)",
+                           "en": "(required · at least one provider)"},
+    "welcome_s2":         {"zh": "Tushare token     ", "en": "Tushare token     "},
+    "welcome_s2_sub":     {"zh": "(可选 · 不填走 pytdx 直连免费)",
+                           "en": "(optional · free pytdx fallback if blank)"},
+    "welcome_s3":         {"zh": "数据包预设         ", "en": "Data package      "},
+    "welcome_s3_sub":     {"zh": "(demo 155MB / lite 3GB / full 14GB)",
+                           "en": "(demo 155MB / lite 3GB / full 14GB)"},
+    "welcome_tail_pre":   {"zh": "走完后  ", "en": "After this, "},
+    "welcome_tail_cmd":   {"zh": "fa report SH600519",
+                           "en": "fa report SH600519"},
+    "welcome_tail_post":  {"zh": "  应能跑出第一份研报.",
+                           "en": "  should produce your first report."},
+    "paths_project":      {"zh": "项目根",       "en": "project root"},
+    "paths_env":          {"zh": ".env",         "en": ".env"},
+    "paths_loaders":      {"zh": "loaders.yaml", "en": "loaders.yaml"},
+    "paths_data":         {"zh": "data dir",     "en": "data dir"},
+
+    "step_word":          {"zh": "步骤", "en": "Step"},
+
+    "step_ws_title":      {"zh": "工作目录 (workspace)", "en": "Workspace location"},
+    "step_ws_subtitle":   {"zh": "数据可能 155 MB ~ 14 GB · 选个磁盘空间大的位置",
+                           "en": "Data is 155 MB ~ 14 GB · pick a disk with enough room"},
+    "step_ws_default":    {"zh": "默认位置 (HOME)", "en": "Default (HOME)"},
+    "step_ws_free":       {"zh": "剩余", "en": "free"},
+    "step_ws_warn_tight": {"zh": "偏紧 ⚠ — 14 GB full 包可能装不下",
+                           "en": "tight ⚠ — 14 GB full package may not fit"},
+    "step_ws_recommend":  {"zh": "建议自定义到 D:/E: 盘 (有更多空间)",
+                           "en": "Recommend customising to D:/E: drive (more room)"},
+    "step_ws_prompt":     {"zh": "[bold]工作目录路径[/bold] [dim](回车用默认)[/dim]",
+                           "en": "[bold]Workspace path[/bold] [dim](enter for default)[/dim]"},
+    "step_ws_not_writable": {"zh": "✗ 路径不可写, 用默认",
+                             "en": "✗ Path not writable, falling back to default"},
+    "step_ws_picked":     {"zh": "工作目录已选", "en": "Workspace pinned"},
+    "step_ws_kept_default": {"zh": "用默认 HOME 目录", "en": "Using default HOME"},
+    "step_ws_old_data_warn": {
+        "zh": "[dim]提示: 你旧默认位置可能有数据 (~/.financial-analyst/data/). "
+              "切到新 workspace 后, 老数据**不会自动迁移**, 需手动 move 或重新下.[/dim]",
+        "en": "[dim]Note: your old default may have data (~/.financial-analyst/data/). "
+              "Switching workspace does **not** auto-migrate it; move it manually or re-download.[/dim]",
+    },
+
+    "step1_title":        {"zh": "LLM API key", "en": "LLM API key"},
+    "step1_subtitle":     {"zh": "至少配一个 · 推荐 DashScope (阿里云百炼)",
+                           "en": "At least one · DashScope (Aliyun Bailian) recommended"},
+    "step1_col_provider": {"zh": "Provider", "en": "Provider"},
+    "step1_col_envvar":   {"zh": "Env var",  "en": "Env var"},
+    "step1_col_state":    {"zh": "状态",     "en": "Status"},
+    "step1_col_desc":     {"zh": "说明",     "en": "Notes"},
+    "step1_state_set":    {"zh": "已配置",   "en": "set"},
+    "step1_state_unset":  {"zh": "未设置",   "en": "unset"},
+    "step1_prompt_recommended": {"zh": "[bold red](强烈推荐填)[/bold red]",
+                                  "en": "[bold red](strongly recommended)[/bold red]"},
+    "step1_prompt_optional":    {"zh": "[dim](可选, 回车跳过)[/dim]",
+                                  "en": "[dim](optional, enter to skip)[/dim]"},
+    "step1_no_key_warn_title":  {"zh": "⚠ 注意", "en": "⚠ Heads up"},
+    "step1_no_key_warn_body":   {
+        "zh": "[yellow]没有任何 LLM key — agent 跑不起来.[/yellow]\n"
+              "[dim]你可以先跳过, 之后手动编辑 .env 加上再继续.[/dim]",
+        "en": "[yellow]No LLM key set — agents won't run.[/yellow]\n"
+              "[dim]You can skip now and edit .env manually later.[/dim]",
+    },
+
+    "step2_title":        {"zh": "Tushare token", "en": "Tushare token"},
+    "step2_subtitle":     {"zh": "可选 · 不填走 pytdx + 腾讯直连免费",
+                           "en": "Optional · free pytdx + Tencent direct if blank"},
+    "step2_have_token":   {"zh": "已有 token, 跳过.", "en": "Token already set, skipping."},
+    "step2_with_label":   {"zh": "[bold]填了[/bold]", "en": "[bold]With token[/bold]"},
+    "step2_with_desc":    {"zh": "走完整 daily_basic 历史 (含 ps_ttm / dv_ttm / 北向资金)",
+                           "en": "Full daily_basic history (incl. ps_ttm / dv_ttm / northbound)"},
+    "step2_without_label": {"zh": "[bold]不填[/bold]", "en": "[bold]Without[/bold]"},
+    "step2_without_desc": {"zh": "走 pytdx 主站 + 腾讯实时, 完全免费 0 配置",
+                           "en": "pytdx main + Tencent realtime, free + zero-config"},
+    "step2_prompt":       {"zh": "[dim](没有就回车跳过)[/dim]",
+                           "en": "[dim](enter to skip if you don't have one)[/dim]"},
+
+    "step3_title":        {"zh": "历史数据包", "en": "Historical data package"},
+    "step3_subtitle":     {"zh": "从 HuggingFace 拉一份 Qlib + Parquet 数据",
+                           "en": "Pull a Qlib + Parquet bundle from HuggingFace"},
+    "step3_col_preset":   {"zh": "预设",     "en": "Preset"},
+    "step3_col_size":     {"zh": "体量",     "en": "Size"},
+    "step3_col_stocks":   {"zh": "股票池",   "en": "Stocks"},
+    "step3_col_eta":      {"zh": "下载耗时", "en": "Download ETA"},
+    "step3_col_bestfor":  {"zh": "适合",     "en": "Best for"},
+    "step3_skip_desc":    {"zh": "已有数据 / 自己拉", "en": "Already have data / DIY"},
+    "step3_choose":       {"zh": "选择", "en": "Choose"},
+
+    "dl_panel_title":     {"zh": "📥 拉取 {preset} 数据包",
+                           "en": "📥 Pulling {preset} package"},
+    "dl_panel_eta":       {"zh": "约 {size} · 预计 {eta} · 进度由 huggingface_hub 输出",
+                           "en": "~{size} · ETA {eta} · progress streamed by huggingface_hub"},
+    "dl_done":            {"zh": "下载完成", "en": "Download complete"},
+    "dl_fail":            {"zh": "下载失败", "en": "Download failed"},
+    "dl_fail_hints":      {"zh": "可能原因: 1) 没网  2) HF 国内偶尔需要代理  3) repo 还没 publish",
+                           "en": "Possible causes: 1) no network  2) HF needs proxy in CN  3) repo not yet published"},
+    "dl_fail_panel_title": {"zh": "⚠ 数据下载失败", "en": "⚠ Data download failed"},
+    "dl_fail_panel_body": {
+        "zh": "[yellow]数据包没下下来, 但 .env 仍会写.[/yellow]\n"
+              "[dim]之后可以再试:[/dim]\n"
+              "  [cyan]fa init --preset demo[/cyan]              # 重试整个 wizard\n"
+              "  [cyan]fa data bootstrap --preset demo[/cyan]    # 只重跑下载",
+        "en": "[yellow]Package not downloaded, but .env will still be written.[/yellow]\n"
+              "[dim]Retry later with:[/dim]\n"
+              "  [cyan]fa init --preset demo[/cyan]              # full wizard again\n"
+              "  [cyan]fa data bootstrap --preset demo[/cyan]    # download only",
+    },
+
+    "skip_msg":           {"zh": "⏭ 跳过数据包下载. 如已有数据, 编辑",
+                           "en": "⏭ Skipping download. If you already have data, edit"},
+    "skip_msg_tail":      {"zh": "指向你的目录.",
+                           "en": "to point at your dir."},
+
+    "verify_title":       {"zh": "验证", "en": "Verify"},
+    "verify_fail":        {"zh": "验证失败", "en": "Verify failed"},
+    "verify_inst":        {"zh": "只 instruments", "en": "instruments"},
+    "verify_cal":         {"zh": "天日历",         "en": "calendar days"},
+    "verify_range":       {"zh": "日线范围", "en": "Daily range"},
+
+    "complete_left":      {"zh": "✓ 已配置", "en": "✓ Configured"},
+    "complete_right":     {"zh": "🚀 下一步", "en": "🚀 Next steps"},
+    "complete_envfile":   {"zh": "env file", "en": ".env"},
+    "complete_loaders":   {"zh": "loaders",  "en": "loaders"},
+    "complete_datadir":   {"zh": "data dir", "en": "data dir"},
+    "complete_dled":      {"zh": "downloaded", "en": "downloaded"},
+    "complete_dled_yes":  {"zh": "[green]✓ 已就绪[/green]", "en": "[green]✓ ready[/green]"},
+    "complete_dled_no":   {"zh": "[yellow]⏭ 跳过 (无数据)[/yellow]",
+                           "en": "[yellow]⏭ skipped (no data)[/yellow]"},
+    "complete_cmd_launch": {"zh": "→ 一键起后端 + UI + 开浏览器",
+                            "en": "→ One-command: backend + UI + open browser"},
+    "complete_cmd_report": {"zh": "→ 跑第一份个股研报",
+                            "en": "→ Generate your first stock deep-dive"},
+    "complete_cmd_status": {"zh": "→ 查数据当前状态", "en": "→ Show data status"},
+    "complete_cmd_update": {"zh": "→ 每日增量更新", "en": "→ Daily incremental update"},
+    "complete_cmd_tui":   {"zh": "→ 终端 TUI 模式", "en": "→ Terminal TUI mode"},
+    "complete_tail":      {"zh": "准备好了 · 期待你的第一份研报",
+                           "en": "All set · looking forward to your first report"},
+    "complete_keys":      {"zh": "{n} keys", "en": "{n} keys"},
+    "complete_write_env": {"zh": "写", "en": "wrote"},
+
+    "lang_panel_title":   {"zh": "语言 / Language", "en": "语言 / Language"},
+    "lang_prompt":        {"zh": "[bold]选择 · Choose[/bold]",
+                           "en": "[bold]选择 · Choose[/bold]"},
+}
+
+
+def _t(key: str, lang: str) -> str:
+    """Lookup a translated text string."""
+    entry = _T.get(key)
+    if entry is None:
+        return f"[missing:{key}]"
+    return entry.get(lang, entry.get("zh", f"[missing-lang:{key}]"))
+
+
+# ──────────────────────── helpers ────────────────────────
 
 
 def _project_root() -> Path:
-    """Heuristically locate the financial-analyst install root. dev: project root; pip install: user home dir."""
-    src = Path(__file__).resolve().parent.parent.parent   # …/src/financial_analyst → …
+    """Locate where to write .env / config/loaders.yaml.
+
+    Priority:
+      1. Editable install (dev): repo root — for the maintainer working
+         inside G:/financial-analyst, writes belong next to pyproject.toml.
+      2. Pip install: the active workspace (honours ``FA_WORKSPACE`` env
+         var / ``~/.financial-analyst/.workspace`` pointer file). This is
+         what lets users put .env / loaders.yaml on a different drive.
+      3. Pip install (no workspace pinned): ``~/.financial-analyst/``
+         (legacy default — preserves pre-v1.0.3 behaviour).
+    """
+    src = Path(__file__).resolve().parent.parent.parent
     if (src / "pyproject.toml").exists():
-        return src
-    home = Path.home() / ".financial-analyst"
-    home.mkdir(parents=True, exist_ok=True)
-    return home
+        return src   # dev install — use repo root
+    # pip install — honour the workspace
+    from financial_analyst.workspace import get_workspace
+    ws = get_workspace()
+    ws.mkdir(parents=True, exist_ok=True)
+    return ws
 
 
 def _backup_if_exists(path: Path) -> None:
@@ -75,7 +298,7 @@ def _backup_if_exists(path: Path) -> None:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup = path.with_suffix(path.suffix + f".bak.{ts}")
     shutil.copy2(path, backup)
-    console.print(f"  📦 backed up existing → [dim]{backup.name}[/dim]")
+    console.print(f"  [dim]📦 backed up →[/dim] [dim cyan]{backup.name}[/dim cyan]")
 
 
 def _read_env(path: Path) -> dict:
@@ -96,7 +319,7 @@ def _write_env(path: Path, env: dict) -> None:
     keys_order = [
         "DASHSCOPE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
         "DEEPSEEK_API_KEY", "TUSHARE_TOKEN", "HUGGINGFACE_TOKEN",
-        "FA_LOG_LEVEL", "FA_CACHE_DIR", "FA_DATA_DIR", "FA_MAINLINE_PANEL",
+        "FA_LANG", "FA_LOG_LEVEL", "FA_CACHE_DIR", "FA_DATA_DIR", "FA_MAINLINE_PANEL",
     ]
     lines = []
     written = set()
@@ -104,123 +327,357 @@ def _write_env(path: Path, env: dict) -> None:
         if k in env:
             lines.append(f"{k}={env[k]}")
             written.add(k)
-    # any keys not in order: append at end
     for k, v in env.items():
         if k not in written:
             lines.append(f"{k}={v}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _step_header(n: int, total: int, title: str, subtitle: str = "",
+                 lang: str = "zh") -> None:
+    """A consistent step banner across the wizard."""
+    console.print()
+    word = _t("step_word", lang)
+    badge = Text(f" {word} {n} / {total} ", style="bold reverse cyan")
+    label = Text(f"  {title}", style="bold")
+    console.print(Columns([badge, label], padding=(0, 1)))
+    if subtitle:
+        console.print(Text(f"   {subtitle}", style="dim"))
+    console.print(Rule(style="dim cyan"))
+
+
+def _mask(value: str, keep: int = 6) -> str:
+    """Truncate secrets for display: 'sk-abcdef1234' → 'sk-abc•••(len=12)'."""
+    if not value:
+        return ""
+    head = value[:keep]
+    return f"{head}•••(len={len(value)})"
+
+
 # ──────────────────────── steps ────────────────────────
 
 
-def _step_welcome() -> None:
-    console.print(Panel.fit(
-        "[bold cyan]financial-analyst 首次启动向导[/bold cyan]\n\n"
-        "这个向导会引导你完成 3 件事:\n"
-        "  1. 填 LLM API key (必须)\n"
-        "  2. 选数据包 (推荐) 或自己来 (高级)\n"
-        "  3. 写 .env + config/loaders.yaml\n\n"
-        "走完后 [bold]fa report SH600519[/bold] 应该能跑出第一份研报.",
-        title="🚀 fa init",
+def _step_workspace(non_interactive: bool, override: Optional[Path],
+                    lang: str) -> Path:
+    """Step 1: pick where data + config + out live.
+
+    Honours ``--workspace`` override if given. Otherwise shows a panel
+    with disk-free hints and lets the user paste an alternative path
+    (e.g. ``D:\\fa-workspace`` to escape a cramped system drive). Persists
+    via ``workspace.set_workspace(...)``.
+    """
+    from financial_analyst.workspace import (
+        DEFAULT_WORKSPACE, get_workspace, set_workspace,
+        disk_free_gb, is_writable,
+    )
+
+    _step_header(1, 4,
+                 _t("step_ws_title", lang),
+                 _t("step_ws_subtitle", lang),
+                 lang=lang)
+
+    if override:
+        # explicit --workspace flag wins
+        ws = set_workspace(override)
+        free = disk_free_gb(ws)
+        console.print(
+            f"  [green]✓[/green] {_t('step_ws_picked', lang)}: "
+            f"[cyan]{ws}[/cyan]  [dim]({_t('step_ws_free', lang)} {free:.0f} GB)[/dim]"
+        )
+        return ws
+
+    # Show default + free space
+    default_free = disk_free_gb(DEFAULT_WORKSPACE)
+    tight = default_free < 20.0
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="dim", justify="right")
+    grid.add_column()
+    free_text = f"{_t('step_ws_free', lang)} {default_free:.0f} GB"
+    if tight:
+        free_text += f"  [yellow]{_t('step_ws_warn_tight', lang)}[/yellow]"
+    else:
+        free_text = f"[dim]{free_text}[/dim]"
+    grid.add_row(_t("step_ws_default", lang),
+                 f"[cyan]{DEFAULT_WORKSPACE}[/cyan]  {free_text}")
+    if tight:
+        grid.add_row("", f"[yellow italic]{_t('step_ws_recommend', lang)}[/yellow italic]")
+    console.print(grid)
+    console.print()
+
+    if non_interactive:
+        ws = set_workspace(DEFAULT_WORKSPACE)
+        return ws
+
+    raw = Prompt.ask(_t("step_ws_prompt", lang),
+                     default="", show_default=False)
+    raw = raw.strip()
+
+    if not raw:
+        ws = set_workspace(DEFAULT_WORKSPACE)
+        console.print(f"  [dim]{_t('step_ws_kept_default', lang)}: "
+                      f"[cyan]{ws}[/cyan][/dim]")
+        return ws
+
+    target = Path(raw).expanduser()
+    if not is_writable(target):
+        console.print(f"  [red]{_t('step_ws_not_writable', lang)}[/red]: "
+                      f"[dim]{target}[/dim]")
+        ws = set_workspace(DEFAULT_WORKSPACE)
+        return ws
+
+    ws = set_workspace(target)
+    free = disk_free_gb(ws)
+    console.print(
+        f"  [green]✓[/green] {_t('step_ws_picked', lang)}: "
+        f"[cyan]{ws}[/cyan]  [dim]({_t('step_ws_free', lang)} {free:.0f} GB)[/dim]"
+    )
+    # Warn about non-migrated old data
+    legacy_data = DEFAULT_WORKSPACE / "data"
+    if ws != DEFAULT_WORKSPACE and legacy_data.exists() and any(legacy_data.iterdir()):
+        console.print(f"  {_t('step_ws_old_data_warn', lang)}")
+    return ws
+
+
+def _pick_language(env: dict, non_interactive: bool) -> str:
+    """Step 0 — pick UI language. Persists to .env as FA_LANG."""
+    # honour pre-existing FA_LANG / env var
+    pre = env.get("FA_LANG") or os.environ.get("FA_LANG", "")
+    if pre in ("zh", "en"):
+        return pre
+    if non_interactive:
+        return "zh"
+
+    console.print()
+    body = Text.assemble(
+        ("  ", ""), ("1", "bold cyan"), ("  中文 ", "default"), ("(default)\n", "dim"),
+        ("  ", ""), ("2", "bold cyan"), ("  English", "default"),
+    )
+    console.print(Panel(body,
+                        title="[bold]语言 · Language[/bold]",
+                        border_style="cyan",
+                        padding=(0, 4),
+                        width=42))
+    choice = Prompt.ask("  [bold]选择 · Choose[/bold]",
+                       default="1",
+                       choices=["1", "2"],
+                       show_choices=False)
+    lang = {"1": "zh", "2": "en"}[choice]
+    env["FA_LANG"] = lang
+    return lang
+
+
+def _step_welcome(env_path: Path, config_path: Path, data_dir: Path,
+                  lang: str) -> None:
+    title = Text(_t("welcome_title", lang), style="bold cyan", justify="center")
+    tagline = Text(_t("welcome_tagline", lang), style="dim italic", justify="center")
+    body = Text.assemble(
+        (_t("welcome_intro", lang) + "\n\n", "default"),
+        ("  ", ""), ("1.", "bold cyan"), ("  ", ""),
+        (_t("welcome_s1", lang), "default"),
+        (_t("welcome_s1_sub", lang) + "\n", "dim"),
+        ("  ", ""), ("2.", "bold cyan"), ("  ", ""),
+        (_t("welcome_s2", lang), "default"),
+        (_t("welcome_s2_sub", lang) + "\n", "dim"),
+        ("  ", ""), ("3.", "bold cyan"), ("  ", ""),
+        (_t("welcome_s3", lang), "default"),
+        (_t("welcome_s3_sub", lang) + "\n", "dim"),
+        ("\n", ""),
+        (_t("welcome_tail_pre", lang), "default"),
+        (_t("welcome_tail_cmd", lang), "bold yellow"),
+        (_t("welcome_tail_post", lang), "default"),
+    )
+    console.print(Panel(
+        Align.center(Group(title, tagline, Text(""), body)),
         border_style="cyan",
+        padding=(1, 4),
+        width=80,
     ))
 
+    paths_table = Table.grid(padding=(0, 2))
+    paths_table.add_column(style="dim", justify="right")
+    paths_table.add_column(style="cyan")
+    paths_table.add_row(_t("paths_project", lang), str(_project_root()))
+    paths_table.add_row(_t("paths_env", lang),     str(env_path))
+    paths_table.add_row(_t("paths_loaders", lang), str(config_path))
+    paths_table.add_row(_t("paths_data", lang),    str(data_dir))
+    console.print(Align.center(paths_table))
 
-def _step_llm_keys(env: dict, non_interactive: bool) -> dict:
-    console.print("\n[bold]Step 1/3 — LLM API key[/bold]")
-    console.print("[dim]至少填一个. 推荐 DashScope (阿里云百炼, 注册送 100w token).[/dim]")
-    if not non_interactive:
-        if not env.get("DASHSCOPE_API_KEY"):
-            v = Prompt.ask("  DASHSCOPE_API_KEY (回车跳过)", default="", show_default=False)
-            if v.strip():
-                env["DASHSCOPE_API_KEY"] = v.strip()
+
+def _step_llm_keys(env: dict, non_interactive: bool, lang: str) -> dict:
+    _step_header(2, 4,
+                 _t("step1_title", lang),
+                 _t("step1_subtitle", lang),
+                 lang=lang)
+
+    status = Table(show_header=True, header_style="bold", padding=(0, 1),
+                   box=None, expand=False)
+    status.add_column("", width=2)
+    status.add_column(_t("step1_col_provider", lang), style="bold")
+    status.add_column(_t("step1_col_envvar", lang), style="dim")
+    status.add_column(_t("step1_col_state", lang), justify="center")
+    status.add_column(_t("step1_col_desc", lang), style="dim")
+    for env_var, prov, desc_bundle, color in _LLM_PROVIDERS:
+        if env.get(env_var):
+            icon = Text("✓", style="green bold")
+            state = Text(_t("step1_state_set", lang), style="green")
         else:
-            console.print(f"  ✓ DASHSCOPE_API_KEY 已存在 ({env['DASHSCOPE_API_KEY'][:8]}...)")
-        if not env.get("OPENAI_API_KEY"):
-            v = Prompt.ask("  OPENAI_API_KEY (可选, 回车跳过)", default="", show_default=False)
-            if v.strip():
-                env["OPENAI_API_KEY"] = v.strip()
-        if not env.get("ANTHROPIC_API_KEY"):
-            v = Prompt.ask("  ANTHROPIC_API_KEY (可选, 回车跳过)", default="", show_default=False)
-            if v.strip():
-                env["ANTHROPIC_API_KEY"] = v.strip()
+            icon = Text("○", style="dim")
+            state = Text(_t("step1_state_unset", lang), style="yellow dim")
+        status.add_row(icon, Text(prov, style=color), env_var, state, desc_bundle[lang])
+    console.print(status)
+    console.print()
 
-    has_any = any(env.get(k) for k in ("DASHSCOPE_API_KEY", "OPENAI_API_KEY",
-                                       "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY"))
+    if non_interactive:
+        return env
+
+    for env_var, prov, _desc, _color in _LLM_PROVIDERS:
+        if env.get(env_var):
+            continue
+        is_required_one = env_var == "DASHSCOPE_API_KEY" and not any(
+            env.get(k) for k, *_ in _LLM_PROVIDERS
+        )
+        suffix = " " + (_t("step1_prompt_recommended", lang)
+                        if is_required_one else _t("step1_prompt_optional", lang))
+        v = Prompt.ask(f"  [bold]{prov}[/bold] · {env_var}{suffix}",
+                       default="", show_default=False, password=False)
+        if v.strip():
+            env[env_var] = v.strip()
+            console.print(f"   [green]✓[/green] {env_var} = [dim]{_mask(v.strip())}[/dim]")
+
+    has_any = any(env.get(k) for k, *_ in _LLM_PROVIDERS)
     if not has_any:
-        console.print("[red]⚠ 没有任何 LLM key. agent 跑不起来.[/red]")
-        console.print("[dim]  你可以现在跳过, 之后手动编辑 .env 再继续.[/dim]")
+        console.print(Panel(
+            _t("step1_no_key_warn_body", lang),
+            border_style="yellow",
+            title=f"[yellow]{_t('step1_no_key_warn_title', lang)}[/yellow]",
+            padding=(0, 2),
+        ))
     return env
 
 
-def _step_tushare(env: dict, non_interactive: bool) -> dict:
-    console.print("\n[bold]Step 2/3 — Tushare token (可选)[/bold]")
-    console.print("[dim]没填: 走 pytdx + 腾讯直连, 完全免费, 0 配置.[/dim]")
-    console.print("[dim]填了: 走完整 daily_basic 历史 (含 ps_ttm/dv_ttm).[/dim]")
-    if not non_interactive:
-        if not env.get("TUSHARE_TOKEN"):
-            v = Prompt.ask("  TUSHARE_TOKEN (没有就回车)", default="", show_default=False)
-            if v.strip():
-                env["TUSHARE_TOKEN"] = v.strip()
-        else:
-            console.print(f"  ✓ TUSHARE_TOKEN 已存在 ({env['TUSHARE_TOKEN'][:8]}...)")
+def _step_tushare(env: dict, non_interactive: bool, lang: str) -> dict:
+    _step_header(3, 4,
+                 _t("step2_title", lang),
+                 _t("step2_subtitle", lang),
+                 lang=lang)
+
+    if env.get("TUSHARE_TOKEN"):
+        console.print(f"  [green]✓[/green] TUSHARE_TOKEN [dim]= {_mask(env['TUSHARE_TOKEN'])}[/dim]")
+        console.print(f"  [dim]{_t('step2_have_token', lang)}[/dim]")
+        return env
+
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(justify="right", style="dim")
+    grid.add_column()
+    grid.add_row(_t("step2_with_label", lang),    _t("step2_with_desc", lang))
+    grid.add_row(_t("step2_without_label", lang), _t("step2_without_desc", lang))
+    console.print(grid)
+    console.print()
+
+    if non_interactive:
+        return env
+
+    v = Prompt.ask(f"  [bold]TUSHARE_TOKEN[/bold] {_t('step2_prompt', lang)}",
+                   default="", show_default=False)
+    if v.strip():
+        env["TUSHARE_TOKEN"] = v.strip()
+        console.print(f"   [green]✓[/green] TUSHARE_TOKEN [dim]= {_mask(v.strip())}[/dim]")
     return env
 
 
-def _step_pick_package(non_interactive: bool, preset: Optional[str]) -> Optional[str]:
-    console.print("\n[bold]Step 3/3 — 历史数据包[/bold]")
-    table = Table(show_header=True, header_style="bold cyan")
-    table.add_column("选项")
-    table.add_column("包名")
-    table.add_column("大小")
-    table.add_column("说明")
-    table.add_row("1", "demo", HF_PACKAGES["demo"]["size_hint"], HF_PACKAGES["demo"]["description"])
-    table.add_row("2", "lite", HF_PACKAGES["lite"]["size_hint"], HF_PACKAGES["lite"]["description"])
-    table.add_row("3", "full", HF_PACKAGES["full"]["size_hint"], HF_PACKAGES["full"]["description"])
-    table.add_row("4", "skip", "—", "已经有数据 / 自己跑 fa data update 从零拉")
+def _step_pick_package(non_interactive: bool, preset: Optional[str],
+                       lang: str) -> Optional[str]:
+    _step_header(4, 4,
+                 _t("step3_title", lang),
+                 _t("step3_subtitle", lang),
+                 lang=lang)
+
+    table = Table(show_header=True, header_style="bold cyan", padding=(0, 1),
+                  expand=False)
+    table.add_column("#", justify="center", style="bold", width=3)
+    table.add_column(_t("step3_col_preset", lang), style="bold")
+    table.add_column(_t("step3_col_size", lang),   justify="right", style="dim")
+    table.add_column(_t("step3_col_stocks", lang), style="dim")
+    table.add_column(_t("step3_col_eta", lang),    justify="right", style="dim")
+    table.add_column(_t("step3_col_bestfor", lang), style="dim italic")
+
+    for i, key in enumerate(("demo", "lite", "full"), start=1):
+        pkg = HF_PACKAGES[key]
+        table.add_row(
+            str(i),
+            Text(key, style=pkg["color"]),
+            pkg["size_hint"],
+            pkg["n_stocks"][lang],
+            pkg["eta"],
+            pkg["best_for"][lang],
+        )
+    table.add_row("4", Text("skip", style="dim"), "—", "—", "—",
+                  _t("step3_skip_desc", lang))
     console.print(table)
 
     if non_interactive:
         return preset
-
     if preset:
         return preset
 
-    choice = Prompt.ask("  选择 [1/2/3/4]", default="1", choices=["1", "2", "3", "4"])
+    console.print()
+    choice = Prompt.ask(f"  [bold]{_t('step3_choose', lang)}[/bold]",
+                        default="1",
+                        choices=["1", "2", "3", "4"],
+                        show_choices=True)
     return {"1": "demo", "2": "lite", "3": "full", "4": "skip"}[choice]
 
 
-def _download_package(preset: str, target: Path) -> bool:
-    """Download the data package from HuggingFace into target."""
+def _download_package(preset: str, target: Path, lang: str) -> bool:
+    """Download the data package from HuggingFace into target.
+
+    Note: we deliberately do NOT wrap snapshot_download in a Rich Progress.
+    huggingface_hub emits its own per-file tqdm output, and stacking two
+    progress UIs makes the screen look glitchy. We just print a header Panel
+    before, let HF's tqdm flow naturally, and print a done line after.
+    """
     pkg = HF_PACKAGES[preset]
-    console.print(f"\n  📥 下载 [cyan]{pkg['repo_id']}[/cyan] → {target}")
-    console.print(f"  [dim]大约 {pkg['size_hint']}, 看网速 1-30 min[/dim]")
+    console.print()
+    title = _t("dl_panel_title", lang).format(preset=preset)
+    eta_line = _t("dl_panel_eta", lang).format(size=pkg["size_hint"], eta=pkg["eta"])
+    console.print(Panel.fit(
+        f"[bold]{pkg['repo_id']}[/bold]  →  [cyan]{target}[/cyan]\n"
+        f"[dim]{eta_line}[/dim]",
+        title=f"[{pkg['color']}]{title}[/{pkg['color']}]",
+        border_style=pkg["color"],
+        padding=(0, 2),
+    ))
+    console.print()
 
     target.mkdir(parents=True, exist_ok=True)
     try:
         from huggingface_hub import snapshot_download
     except ImportError:
-        console.print("[red]✗ 没装 huggingface_hub. 跑: pip install huggingface_hub[/red]")
+        console.print("[red]✗ huggingface_hub missing. Run: pip install huggingface_hub[/red]")
         return False
 
     t0 = time.time()
     try:
+        # HF's tqdm progress streams to stderr/stdout natively. Don't wrap it.
         snapshot_download(
             repo_id=pkg["repo_id"],
             repo_type="dataset",
             local_dir=str(target),
             local_dir_use_symlinks=False,
         )
-        console.print(f"  ✓ 下载完成 ({time.time() - t0:.0f}s)")
-        return True
     except Exception as e:
-        console.print(f"[red]✗ 下载失败: {type(e).__name__}: {e}[/red]")
-        console.print("[dim]  可能原因: 1) 没网 2) HF 国内偶尔需要代理 3) repo 不存在 (我们还没 publish)[/dim]")
+        console.print()
+        console.print(f"  [red]✗ {_t('dl_fail', lang)}:[/red] [dim]{type(e).__name__}:[/dim] {e}")
+        console.print(f"  [dim]{_t('dl_fail_hints', lang)}[/dim]")
         return False
 
+    console.print()
+    console.print(f"  [green]✓[/green] {_t('dl_done', lang)} "
+                  f"[dim]({time.time() - t0:.0f}s)[/dim]")
+    return True
 
-def _write_loaders_config(data_dir: Path, config_path: Path) -> None:
+
+def _write_loaders_config(data_dir: Path, config_path: Path, lang: str) -> None:
     """Write config/loaders.yaml pointing at the downloaded directory."""
     _backup_if_exists(config_path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -237,12 +694,13 @@ loaders:
     news_data_root: {data_dir}/news_data
 """
     config_path.write_text(text, encoding="utf-8")
-    console.print(f"  ✓ 写 {config_path}")
+    console.print(f"  [green]✓[/green] [cyan]{config_path}[/cyan]")
 
 
-def _verify(data_dir: Path) -> bool:
-    """Run fa data status to verify the download is complete."""
-    console.print("\n[bold]验证[/bold]")
+def _verify(data_dir: Path, lang: str) -> bool:
+    """Verify the download is complete by sampling calendar + instruments."""
+    console.print()
+    console.print(Rule(f"[bold]{_t('verify_title', lang)}[/bold]", style="dim cyan"))
     try:
         from financial_analyst.data.bin_writer import (
             load_calendar, load_instruments,
@@ -251,14 +709,60 @@ def _verify(data_dir: Path) -> bool:
         inst = load_instruments(day_uri, market="all")
         cal = load_calendar(day_uri, freq="day")
         if not inst or not cal:
-            console.print(f"[red]✗ 验证失败 — instruments={len(inst)} calendar={len(cal)}[/red]")
+            console.print(f"  [red]✗[/red] {_t('verify_fail', lang)} — "
+                          f"instruments={len(inst)} calendar={len(cal)}")
             return False
-        console.print(f"  ✓ {len(inst)} 只 instruments, {len(cal)} 天日历")
-        console.print(f"  ✓ 日线范围: {cal[0]} → {cal[-1]}")
+        console.print(f"  [green]✓[/green] [bold]{len(inst):,}[/bold] "
+                      f"{_t('verify_inst', lang)}  ·  "
+                      f"[bold]{len(cal):,}[/bold] {_t('verify_cal', lang)}")
+        console.print(f"  [green]✓[/green] {_t('verify_range', lang)}: "
+                      f"[cyan]{cal[0]}[/cyan] → [cyan]{cal[-1]}[/cyan]")
         return True
     except Exception as e:
-        console.print(f"[red]✗ 验证报错: {type(e).__name__}: {e}[/red]")
+        console.print(f"  [red]✗[/red] {_t('verify_fail', lang)}: "
+                      f"[dim]{type(e).__name__}:[/dim] {e}")
         return False
+
+
+def _step_completion(env: dict, env_path: Path, config_path: Path,
+                     data_dir: Path, downloaded: bool, lang: str) -> None:
+    console.print()
+    console.print(Rule(style="dim cyan"))
+
+    cfg_lines = Table.grid(padding=(0, 2))
+    cfg_lines.add_column(style="dim", justify="right")
+    cfg_lines.add_column()
+    n_keys = sum(1 for k in env if env[k])
+    cfg_lines.add_row(_t("complete_envfile", lang),
+                      f"[cyan]{env_path}[/cyan]  [dim]({_t('complete_keys', lang).format(n=n_keys)})[/dim]")
+    cfg_lines.add_row(_t("complete_loaders", lang), f"[cyan]{config_path}[/cyan]")
+    cfg_lines.add_row(_t("complete_datadir", lang), f"[cyan]{data_dir}[/cyan]")
+    cfg_lines.add_row(_t("complete_dled", lang),
+                      _t("complete_dled_yes", lang) if downloaded else _t("complete_dled_no", lang))
+    left = Panel(cfg_lines,
+                 title=f"[green]{_t('complete_left', lang)}[/green]",
+                 border_style="green",
+                 padding=(1, 2), width=46)
+
+    next_cmds = Table.grid(padding=(0, 1))
+    next_cmds.add_column(style="bold cyan")
+    next_cmds.add_column(style="dim")
+    next_cmds.add_row("fa launch",         _t("complete_cmd_launch", lang))
+    next_cmds.add_row("fa report SH600519", _t("complete_cmd_report", lang))
+    next_cmds.add_row("fa data status",     _t("complete_cmd_status", lang))
+    next_cmds.add_row("fa data update",     _t("complete_cmd_update", lang))
+    next_cmds.add_row("fa --tui",           _t("complete_cmd_tui", lang))
+    right = Panel(next_cmds,
+                  title=f"[cyan]{_t('complete_right', lang)}[/cyan]",
+                  border_style="cyan",
+                  padding=(1, 2), width=46)
+
+    console.print(Columns([left, right], padding=(0, 1), equal=True, expand=False))
+    console.print()
+    console.print(Align.center(
+        Text(_t("complete_tail", lang), style="dim italic")
+    ))
+    console.print()
 
 
 # ──────────────────────── CLI entry point ────────────────────────
@@ -266,66 +770,100 @@ def _verify(data_dir: Path) -> bool:
 
 def init_cmd(
     yes: bool = typer.Option(False, "--yes", "-y",
-                             help="非交互模式, 走全部 default (跳过任何 prompt)"),
+                             help="Non-interactive mode, accept all defaults"),
     preset: Optional[str] = typer.Option(
         None, "--preset",
-        help="数据包预设 demo/lite/full/skip (非交互模式必填)"),
+        help="Data preset: demo / lite / full / skip (required with --yes)"),
     target: Optional[Path] = typer.Option(
         None, "--target",
-        help="数据目标目录 (默认 ~/.financial-analyst/data/)"),
+        help="Data target directory (overrides workspace/data/, kept for back-compat)"),
+    workspace: Optional[Path] = typer.Option(
+        None, "--workspace",
+        help="Workspace root — where .env / config / data / out live "
+             "(default: ~/.financial-analyst/, or set persistently via the wizard)"),
+    lang: Optional[str] = typer.Option(
+        None, "--lang",
+        help="UI language: zh / en (skips the picker)"),
 ):
-    """First-launch wizard — configure LLM + data + verify.
+    """First-launch wizard — configure workspace + LLM + data + verify.
 
     Examples:
-      fa init                                # interactive
-      fa init --yes --preset demo            # fully automated demo
-      fa init --target /mnt/data --preset full
+      fa init                                       # interactive
+      fa init --yes --preset demo                   # fully automated demo
+      fa init --workspace D:/fa-workspace --preset full   # data on D: drive
+      fa init --lang en                             # English wizard
     """
-    _step_welcome()
+    # Read existing env early so we can show pre-existing config in welcome
+    # NOTE: env_path / config_path / data_dir get re-resolved AFTER the
+    # workspace step in case the user repoints to a different root.
+    initial_env_path = _project_root() / ".env"
+    env = _read_env(initial_env_path)
 
+    # Step 0 — language
+    if lang in ("zh", "en"):
+        env["FA_LANG"] = lang
+        chosen_lang = lang
+    else:
+        chosen_lang = _pick_language(env, non_interactive=yes)
+
+    # Step 1 — workspace (NEW). Persists via workspace.set_workspace.
+    # After this call, _project_root() / data_dir / config_path will
+    # all resolve to the chosen workspace for pip-installed users.
+    _step_workspace(non_interactive=yes, override=workspace, lang=chosen_lang)
+
+    # Now re-resolve paths against the (possibly new) workspace
     root = _project_root()
     env_path = root / ".env"
     config_path = root / "config" / "loaders.yaml"
-    data_dir = target or (Path.home() / ".financial-analyst" / "data")
+    # Data dir: --target wins (back-compat), else workspace/data/
+    from financial_analyst.workspace import data_dir as _ws_data_dir
+    data_dir = target if target else _ws_data_dir()
 
-    console.print(f"\n[dim]项目根:  {root}[/dim]")
-    console.print(f"[dim].env:    {env_path}[/dim]")
-    console.print(f"[dim]loaders: {config_path}[/dim]")
-    console.print(f"[dim]data:    {data_dir}[/dim]")
+    # Re-read env if path moved
+    if env_path != initial_env_path:
+        existing = _read_env(env_path)
+        # Merge — workspace .env takes priority, but keep any keys the user
+        # entered in the workspace step (none yet, but be safe)
+        env = {**env, **existing}
 
-    # Read existing env
-    env = _read_env(env_path)
+    _step_welcome(env_path, config_path, data_dir, chosen_lang)
 
-    # Steps
-    env = _step_llm_keys(env, non_interactive=yes)
-    env = _step_tushare(env, non_interactive=yes)
+    # Steps 2-4
+    env = _step_llm_keys(env, non_interactive=yes, lang=chosen_lang)
+    env = _step_tushare(env, non_interactive=yes, lang=chosen_lang)
+    chosen_preset = _step_pick_package(non_interactive=yes, preset=preset,
+                                       lang=chosen_lang)
 
-    chosen_preset = _step_pick_package(non_interactive=yes, preset=preset)
-
+    downloaded = False
     if chosen_preset and chosen_preset != "skip":
-        ok = _download_package(chosen_preset, data_dir)
+        ok = _download_package(chosen_preset, data_dir, chosen_lang)
         if ok:
-            _write_loaders_config(data_dir, config_path)
-            _verify(data_dir)
+            _write_loaders_config(data_dir, config_path, chosen_lang)
+            _verify(data_dir, chosen_lang)
+            downloaded = True
         else:
-            console.print("[yellow]⚠ 数据包没下下来, 但 .env 仍会写. 你可以之后再:[/yellow]")
-            console.print("  fa init --preset demo  # 重试下载")
-            console.print("  fa data bootstrap --preset demo  # 单独跑下载")
+            console.print()
+            console.print(Panel(
+                _t("dl_fail_panel_body", chosen_lang),
+                border_style="yellow",
+                title=f"[yellow]{_t('dl_fail_panel_title', chosen_lang)}[/yellow]",
+                padding=(0, 2),
+            ))
     elif chosen_preset == "skip":
-        console.print("\n  ⏭ 跳过数据包下载. 如已有数据, 编辑 config/loaders.yaml 指向你的目录.")
+        console.print()
+        console.print(
+            f"  [dim]{_t('skip_msg', chosen_lang)}[/dim] "
+            f"[cyan]{config_path}[/cyan] [dim]{_t('skip_msg_tail', chosen_lang)}[/dim]"
+        )
+        _write_loaders_config(data_dir, config_path, chosen_lang)
 
-    # write .env
+    # Write .env (last, so all collected keys land)
+    console.print()
     _write_env(env_path, env)
-    console.print(f"\n  ✓ 写 .env ({len(env)} 个 key)")
+    n_keys = sum(1 for k in env if env[k])
+    write_word = _t("complete_write_env", chosen_lang)
+    keys_label = _t("complete_keys", chosen_lang).format(n=n_keys)
+    console.print(f"  [green]✓[/green] {write_word} [cyan]{env_path}[/cyan] "
+                  f"[dim]({keys_label})[/dim]")
 
-    # done
-    console.print(Panel.fit(
-        "[bold green]✓ fa init 完成[/bold green]\n\n"
-        "[bold]下一步:[/bold]\n"
-        "  [cyan]fa data status[/cyan]                 — 看数据当前状态\n"
-        "  [cyan]fa report SH600519[/cyan]             — 跑第一份研报\n"
-        "  [cyan]fa serve --port 9999[/cyan]           — 起 GuanLan UI 后端\n"
-        "  [cyan]fa data update[/cyan]                 — 每日增量更新数据",
-        title="🎉 完成",
-        border_style="green",
-    ))
+    _step_completion(env, env_path, config_path, data_dir, downloaded, chosen_lang)

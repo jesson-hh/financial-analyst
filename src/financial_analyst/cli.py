@@ -41,9 +41,15 @@ app.add_typer(data_app, name="data")
 from financial_analyst.init_cli import init_cmd
 app.command(name="init", help="首次启动引导 — 配 LLM key + 选数据包 + 验证.")(init_cmd)
 
-# ``fa launch`` — one-command: init wizard if needed + backend + UI + browser
+# ``fa start`` (primary) / ``fa launch`` (alias) — one-command workstation:
+# detect existing services → fast-path browser, else wizard if first time + start backend + UI.
 from financial_analyst.launch_cli import launch as _launch_cmd
-app.command(name="launch", help="一键启动: 检测配置 → init 引导 → 启 buddy + UI → 开浏览器.")(_launch_cmd)
+app.command(name="start", help="一键启动工作台 — 第一次进引导, 之后直接开浏览器.")(_launch_cmd)
+app.command(name="launch", help="`fa start` 的别名 (向后兼容).")(_launch_cmd)
+
+# ``fa update`` — check PyPI for a newer release + pip install -U
+from financial_analyst.update_cli import update_cmd as _update_cmd
+app.command(name="update", help="一键从 PyPI 升级 financial-analyst 到最新版.")(_update_cmd)
 
 
 @app.command()
@@ -1482,8 +1488,10 @@ def _default(ctx: typer.Context,
             from financial_analyst.tui import run_tui
             asyncio.run(run_tui())
         else:
-            from financial_analyst.launch_cli import launch as _launch_cmd
-            _launch_cmd()
+            # Use run_default() not launch() — the latter has typer.Option sentinels
+            # as defaults, which leak in when invoked outside the typer dispatcher.
+            from financial_analyst.launch_cli import run_default
+            run_default()
 
 
 def main():

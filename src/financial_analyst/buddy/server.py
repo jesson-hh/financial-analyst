@@ -614,6 +614,72 @@ def build_app():
         return JSONResponse({"ok": True, "version": __version__,
                              "tools": len(TOOL_REGISTRY)})
 
+    @app.get("/data/status")
+    async def data_status():
+        """Last-update timestamps + staleness flags for each data type.
+
+        UI uses this to render the data-refresh button state (e.g. badge
+        the button red if day data > 24h old).
+        """
+        try:
+            from financial_analyst.data import last_update as _lu
+            rows = []
+            for dt, age, stale in _lu.status_summary():
+                rows.append({"type": dt, "age": age, "stale": stale})
+            stale_count = sum(1 for r in rows if r["stale"])
+            return JSONResponse({
+                "ok": True,
+                "items": rows,
+                "stale_count": stale_count,
+                "any_stale": stale_count > 0,
+            })
+        except Exception as exc:
+            return JSONResponse(
+                {"ok": False, "error": f"{exc.__class__.__name__}: {exc}"},
+                status_code=500,
+            )
+
+    @app.post("/data/refresh")
+    async def data_refresh(skip_5min: bool = False):
+        """Trigger an incremental data refresh — equivalent to `fa data refresh`.
+
+        Spawns ``python -m financial_analyst.cli data update`` as a detached
+        subprocess so the request returns immediately. The UI polls
+        ``/data/status`` afterward to see when the timestamps move.
+
+        For long-running runs (full-universe day + 5min ≈ 5-20 min) this is
+        much better than holding the HTTP connection open.
+        """
+        import subprocess
+        import sys
+        cmd = [sys.executable, "-m", "financial_analyst.cli",
+               "data", "update"]
+        if skip_5min:
+            cmd.append("--skip-5min")
+        try:
+            # Detached: stdout/stderr go to /dev/null so we don't accumulate
+            # buffer in the buddy process. The CLI writes its own progress
+            # to .fa-data-update.log if the user wants to watch.
+            log_path = Path.cwd() / ".fa-data-update.log"
+            proc = subprocess.Popen(
+                cmd,
+                stdout=open(log_path, "w", encoding="utf-8"),
+                stderr=subprocess.STDOUT,
+                creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP
+                               if sys.platform == "win32" else 0),
+            )
+            return JSONResponse({
+                "ok": True,
+                "pid": proc.pid,
+                "log": str(log_path),
+                "hint": "Poll /data/status every 5-10s to see updated timestamps.",
+            })
+        except Exception as exc:
+            return JSONResponse(
+                {"ok": False, "error": f"{exc.__class__.__name__}: {exc}"},
+                status_code=500,
+            )
+
     @app.get("/tools")
     async def tools():
         from financial_analyst.buddy.tools import TOOL_REGISTRY

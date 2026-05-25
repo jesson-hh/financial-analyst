@@ -129,6 +129,12 @@ function makeInitialState() {
     lastFired: null,
     // 自选股清单 — 可增删, 持久化; 默认给一份起步清单
     watchlist: (loaded && Array.isArray(loaded.watchlist)) ? loaded.watchlist : WATCHLIST.map(w => ({ code: w.code, name: w.name })),
+    // 数据增量刷新状态 (来自 /data/status)
+    //   items:        [{type, age, stale}, ...]
+    //   stale_count:  number
+    //   refreshing:   true 当点击按钮触发 /data/refresh 后, 子进程在跑
+    //   lastError:    最近一次刷新错误信息
+    dataStatus: { items: [], stale_count: 0, refreshing: false, lastError: null },
   };
   if (loaded && loaded.sessions && loaded.sessions.length > 0) {
     return {
@@ -196,6 +202,13 @@ function reducer(s, a) {
     case 'rename_session':   return updateCurrentSession(s, () => ({ title: (a.title || '').trim() || '新对话' }));
     case 'toggle_theme':     return { ...s, theme: s.theme === 'dark' ? 'light' : 'dark' };
     case 'set_alerts':       return { ...s, liveAlerts: a.alerts };
+    case 'set_data_status':
+      return { ...s, dataStatus: { ...s.dataStatus, items: a.items || [],
+                                    stale_count: a.stale_count || 0,
+                                    lastError: null } };
+    case 'data_refreshing':
+      return { ...s, dataStatus: { ...s.dataStatus, refreshing: !!a.on,
+                                    lastError: a.error || null } };
     case 'set_live_quotes':  return { ...s, liveQuotes: a.quotes };
     // 自选股增删 (按 code 去重, 大小写/前缀归一化由调用方保证)
     case 'add_watch': {
@@ -663,6 +676,8 @@ function ObservatoryApp() {
       name: '中际旭创', code: '300308', rule: 'pct_above 4',
       cur: '+4.12%', price: 142.55, vol: '2.1', time: new Date().toTimeString().slice(0,5)
     }});
+    // (data status polling effect added separately below)
+
     const first = setTimeout(fire, 14000);
     const loop = setInterval(fire, 45000);
     return () => { clearTimeout(first); clearInterval(loop); };
@@ -685,6 +700,28 @@ function ObservatoryApp() {
       .catch(e => console.warn('[guanlan] /models 拉取失败:', e));
     return () => { cancelled = true; };
   }, [s.backendUrl]);
+
+  // ⑤b 拉 /data/status 给状态栏数据按钮; 触发后短间隔 poll 等子进程跑完
+  useEffect(() => {
+    if (!s.backendUrl) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const r = await fetch(`${s.backendUrl}/data/status`);
+        const d = await r.json();
+        if (cancelled || !d?.ok) return;
+        dispatch({ type: 'set_data_status',
+                   items: d.items, stale_count: d.stale_count });
+      } catch (e) {
+        // network blip — ignore, next tick will retry
+      }
+    };
+    tick();
+    // 如果正在 refresh, 5s 一刷直到 stale_count 归零或 day 转 ✓; 否则 60s 一刷
+    const interval = s.dataStatus.refreshing ? 5000 : 60000;
+    const id = setInterval(tick, interval);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [s.backendUrl, s.dataStatus.refreshing]);
 
   // ⑥ 自选股监控墙 — 4s 轮询 /quotes (清单来自 s.watchlist, 可增删)
   const watchCodes = (s.watchlist || []).map(w => w.code).join(',');
@@ -2159,6 +2196,9 @@ function StatusBar({ s, dispatch, onCmdK }) {
       <Sep />
       <span><span style={{ color: 'var(--ink-3)' }}>token</span> <span style={{ color: 'var(--ink-1)' }}>{(s.tokens / 1000).toFixed(1)}k</span></span>
       <Sep />
+      {/* 数据增量更新按钮 — 点击触发 /data/refresh, badge 显示陈旧数据数 */}
+      <DataRefreshButton s={s} dispatch={dispatch} />
+      <Sep />
       <span><span style={{ color: 'var(--ink-3)' }}>盯盘</span> <span style={{ color: 'var(--ink-1)' }}>{s.watch.interval} 分钟</span> <span style={{ color: clk.open ? 'var(--zhu)' : 'var(--ink-3)' }}>· {clk.label}</span></span>
       <Sep />
       <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -2189,6 +2229,73 @@ function StatusBar({ s, dispatch, onCmdK }) {
 }
 
 const Sep = () => <span style={{ color: 'var(--ink-3)' }}>·</span>;
+
+
+// 状态栏: 数据增量刷新按钮
+//   - 显示 ✓ 数据 N min ago / ⚠ 数据 N 类陈旧 / ↻ 更新中
+//   - 点击 → POST /data/refresh, 跳成 ↻ 更新中, 后台 5s 轮询 /data/status 等回正
+function DataRefreshButton({ s, dispatch }) {
+  if (!s.backendUrl) {
+    return <span style={{ color: 'var(--ink-3)' }}>数据 <span style={{ color: 'var(--ink-3)' }}>(后端未连)</span></span>;
+  }
+  const items = s.dataStatus?.items || [];
+  const stale = s.dataStatus?.stale_count || 0;
+  const refreshing = s.dataStatus?.refreshing;
+  const dayRow = items.find(it => it.type === 'day');
+  const dayAge = dayRow?.age || 'never';
+
+  let label, color, title;
+  if (refreshing) {
+    label = '↻ 更新中…';
+    color = 'var(--qing)';
+    title = '后端正在跑 fa data update 子进程, 5s 一查 /data/status, 完成后会自动转回 ✓';
+  } else if (stale === 0 && items.length > 0) {
+    label = `✓ 数据 ${dayAge}`;
+    color = 'var(--zhu)';
+    title = `日线 ${dayAge}, 所有实现的数据类型都已更新. 点击强制重拉.`;
+  } else if (items.length === 0) {
+    label = '数据 ?';
+    color = 'var(--ink-3)';
+    title = '尚未拉到 /data/status. 点击刷新.';
+  } else {
+    label = `⚠ 数据 ${stale} 类陈旧`;
+    color = '#c0392b';
+    title = `${stale} 类数据 (含日线 ${dayAge}) 超过 24h 没更新. 点击拉新.`;
+  }
+
+  const onClick = async (e) => {
+    e.preventDefault();
+    if (refreshing) return;  // already running
+    dispatch({ type: 'data_refreshing', on: true });
+    try {
+      const r = await fetch(`${s.backendUrl}/data/refresh`, { method: 'POST' });
+      const d = await r.json();
+      if (!d?.ok) {
+        dispatch({ type: 'data_refreshing', on: false,
+                   error: d?.error || 'refresh failed' });
+        return;
+      }
+      // refresh subprocess started; useEffect will poll /data/status every 5s
+      // and eventually flip stale_count to 0; we manually clear the flag after
+      // 4 minutes as a safety net (full-universe update can run ≤ 5min)
+      setTimeout(() => dispatch({ type: 'data_refreshing', on: false }), 4 * 60 * 1000);
+    } catch (err) {
+      dispatch({ type: 'data_refreshing', on: false, error: String(err) });
+    }
+  };
+
+  return (
+    <span
+      onClick={onClick}
+      title={title}
+      className="hover-pill"
+      style={{ padding: '1px 6px', border: '1px solid ' + (stale > 0 && !refreshing ? '#c0392b' : 'var(--line)'),
+               color, cursor: refreshing ? 'wait' : 'pointer',
+               opacity: refreshing ? 0.7 : 1 }}>
+      {label}
+    </span>
+  );
+}
 
 // ───────────────────────── 右栏 ─────────────────────────
 

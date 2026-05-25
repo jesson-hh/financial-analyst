@@ -45,14 +45,28 @@ def find_config(name: str, explicit: Optional[Path] = None) -> Path:
 
 
 def config_candidates(name: str, explicit: Optional[Path] = None) -> List[Path]:
-    """Return the list of candidate paths in lookup order, for diagnostics."""
+    """Return the list of candidate paths in lookup order, for diagnostics.
+
+    v1.0.3+: also probes ``<workspace>/config/<name>`` so a workspace pinned
+    to e.g. ``D:\\fa-data`` is honoured. Falls back to ``~/.financial-analyst/``
+    for users on the legacy default.
+    """
     candidates: List[Path] = []
     if explicit is not None:
         candidates.append(Path(explicit))
     env_dir = os.environ.get("FA_CONFIG_DIR", "").strip()
     if env_dir:
         candidates.append(Path(env_dir).expanduser() / name)
-    candidates.append(Path.home() / ".financial-analyst" / "config" / name)
+    # Workspace-aware lookup (honours user's pinned workspace pointer)
+    try:
+        from financial_analyst.workspace import get_workspace
+        ws = get_workspace()
+        candidates.append(ws / "config" / name)
+    except Exception:
+        pass
+    legacy = Path.home() / ".financial-analyst" / "config" / name
+    if legacy not in candidates:
+        candidates.append(legacy)
     candidates.append(Path.cwd() / "config" / name)
     candidates.append(_BUNDLED_CONFIG_DIR / name)
     return candidates

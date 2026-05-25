@@ -17,7 +17,19 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 
-DEFAULT_DB_PATH = Path.home() / ".financial-analyst" / "data" / "news.sqlite"
+def _default_db_path() -> Path:
+    """workspace-aware default; falls back to legacy HOME if workspace import fails."""
+    try:
+        from financial_analyst.workspace import get_workspace
+        return get_workspace() / "data" / "news.sqlite"
+    except Exception:
+        return Path.home() / ".financial-analyst" / "data" / "news.sqlite"
+
+
+# Kept for back-compat with any module-level imports.
+# Note: this is resolved at import time. Callers needing a workspace-fresh
+# value should call `_default_db_path()` directly.
+DEFAULT_DB_PATH = _default_db_path()
 
 
 SCHEMA = """
