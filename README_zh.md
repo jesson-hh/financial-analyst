@@ -17,7 +17,7 @@
 <p align="center">
   <a href="https://pypi.org/project/financial-analyst/"><img src="https://img.shields.io/pypi/v/financial-analyst.svg?style=flat&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
   <img src="https://img.shields.io/pypi/pyversions/financial-analyst.svg?style=flat&logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/release-v1.0.2-success?style=flat" alt="Release">
+  <img src="https://img.shields.io/badge/release-v1.0.3-success?style=flat" alt="Release">
   <img src="https://img.shields.io/badge/tests-712_passed-brightgreen?style=flat" alt="Tests">
   <img src="https://img.shields.io/badge/license-Apache_2.0-yellow?style=flat" alt="License">
   <br>
@@ -39,7 +39,7 @@
 </p>
 
 ```bash
-pip install financial-analyst==1.0.2    # 1 分钟
+pip install financial-analyst==1.0.3    # 1 分钟
 financial-analyst                        # 零配置一键: 引导 + 后端 + Web UI + 浏览器自动开
 ```
 
@@ -169,7 +169,7 @@ financial-analyst  # /model deepseek-reasoner
 ### A. PyPI 安装 (推荐, 1 分钟)
 
 ```bash
-pip install financial-analyst==1.0.2
+pip install financial-analyst==1.0.3
 cp .env.example .env       # 加 DASHSCOPE_API_KEY (默认 qwen)
 fa init                    # 交互向导 — 拉 HF 数据
 fa report SH600519         # 首份深度研报
@@ -314,4 +314,4 @@ financial-analyst 是个 **重工具调用的 24-agent 系统** — Tier-1 调 b
 
 Apache 2.0. **仅供研究 / 教学**. 草拟分析师级工作产物供合格专业人士 review. 不构成投资建议, 不执行交易, 不写任何 ledger. 用户须自行遵守适用法律法规.
 
-<sub>v1.0.2 · 2026-05-25 · made by [@jesson-hh](https://github.com/jesson-hh) · 中英双语</sub>
+<sub>v1.0.3 · 2026-05-25 · made by [@jesson-hh](https://github.com/jesson-hh) · 中英双语</sub>
