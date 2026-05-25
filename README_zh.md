@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <em>给一个 6 位股票代码, 让 14 个 sub-agent 协作出一份研报 — 基本面 · 技术面 · 主力情绪 · 量化模型 · 多空风控辩论 — 约 10 分钟.</em>
+  <em>给一个 6 位股票代码, 让 16 个 sub-agent 协作出一份研报 — 基本面 · 技术面 · 主力情绪 · 量化模型 · 多空风控辩论 — 约 10 分钟.</em>
 </p>
 
 <p align="center">
@@ -32,27 +32,38 @@
   <a href="#-是什么">是什么</a> &nbsp;·&nbsp;
   <a href="#-能干什么">能干什么</a> &nbsp;·&nbsp;
   <a href="#-快速开始">快速开始</a> &nbsp;·&nbsp;
-  <a href="#-25-个-agent">Agent 阵容</a> &nbsp;·&nbsp;
+  <a href="#-24-个-agent">Agent 阵容</a> &nbsp;·&nbsp;
   <a href="#-可插拔记忆">记忆系统</a> &nbsp;·&nbsp;
   <a href="#-数据集">数据集</a> &nbsp;·&nbsp;
   <a href="#-llm-provider">LLM</a>
 </p>
 
 ```bash
-pip install financial-analyst==1.0.3    # 1 分钟
-financial-analyst                        # 零配置一键: 引导 + 后端 + Web UI + 浏览器自动开
+pip install financial-analyst==1.0.3    # 1 分钟, 不用再加 [serve] 后缀
+fa start                                 # 零配置一键: 引导 + 后端 + Web UI + 浏览器自动开
 ```
 
-第一次跑会: 检测配置 → 跑交互向导 (LLM key + 选 HF dataset 档) → 启 buddy backend (`:9999`) → 启 Web UI (`:5173`) → 自动开浏览器. Ctrl+C 停所有.
+第一次跑会: 选语言 → 选 workspace (可挂 `D:\fa-workspace` 等任意盘, 不绑死系统盘) → 填 LLM key → 选 HF dataset → 启 buddy backend (`:9999`) → 启 Web UI (`:5173`) → 自动开浏览器. Ctrl+C 停所有. 第二次 `fa start` 自动 fast-path 跳到浏览器, 不重启子进程.
 
 高级用户可以分别用各子命令:
 
 ```bash
-fa init                # 只跑引导 (LLM key + 数据包)
+fa init                # 只跑引导 (workspace + LLM key + 数据包)
 fa report SH600519     # 一次性研报 (~10 分钟, 无 UI)
-fa launch              # 显式一键启动 (跟无 subcommand 行为相同)
+fa update              # 检查 PyPI + 自升级 (editable 安装会拒绝)
+fa data refresh        # 智能增量刷新 — 24h 内已更新自动跳过
 fa --tui               # 终端 TUI 而非 Web UI
 ```
+
+> **🆕 v1.0.3 亮点** *(2026-05-25)*
+>
+> - **零 extras 安装** — `pip install financial-analyst` 即装即用, fastapi + uvicorn 并入 core, 不再需要 `[serve]` 后缀
+> - **`fa start`** — 新的零配置启动入口 (`fa launch` 保留为别名). 二次启动自动 fast-path 跳到浏览器, 不重启子进程
+> - **Workspace pinning** — 数据可以挂到 `D:\fa-workspace` 等任意盘, 不再绑死系统盘. 通过 `fa init` 一次性配
+> - **数据刷新按钮** — 状态栏新增 `✓ / ⏳ 盘中 / ⚠ / ↻` 四态徽章, 一键拉日线 + 5min + 估值
+> - **`fa update`** + **`fa data refresh`** — PyPI 自升级 (editable 安装会拒绝) + 智能增量刷新 (24h 内已更新自动跳过)
+>
+> 完整变更见 [CHANGELOG](CHANGELOG.md).
 
 ---
 
@@ -60,7 +71,7 @@ fa --tui               # 终端 TUI 而非 Web UI
 
 **A 股研究工作站, 思维像买方分析师.**
 
-给一个股票代码, 14 个 sub-agent 分 4 个信任层并发跑:
+给一个股票代码, 16 个 sub-agent 分 4 个信任层并发跑:
 
 ```
 Tier 1 (数据并行)         Tier 2 (分析师并行)        Tier 3 (决策串行)          Tier 4 (复盘)
@@ -170,9 +181,10 @@ financial-analyst  # /model deepseek-reasoner
 
 ```bash
 pip install financial-analyst==1.0.3
-cp .env.example .env       # 加 DASHSCOPE_API_KEY (默认 qwen)
-fa init                    # 交互向导 — 拉 HF 数据
-fa report SH600519         # 首份深度研报
+fa start                   # 交互向导 (LLM key + workspace + HF 数据) + 自动开后端 / UI / 浏览器
+# 或非交互模式 (CI / 脚本):
+fa init --yes --preset demo --workspace D:/fa-workspace   # 一行配好
+fa report SH600519                                         # 首份深度研报 (~10 分钟)
 ```
 
 ### B. 源码 (开发)

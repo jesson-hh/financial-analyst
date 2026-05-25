@@ -32,26 +32,37 @@
   <a href="#-what-is-it">What is it</a> &nbsp;·&nbsp;
   <a href="#-key-features">Features</a> &nbsp;·&nbsp;
   <a href="#-quick-start">Quick Start</a> &nbsp;·&nbsp;
-  <a href="#-the-25-agents">Agents</a> &nbsp;·&nbsp;
+  <a href="#-the-24-agents">Agents</a> &nbsp;·&nbsp;
   <a href="#-pluggable-memory">Memory</a> &nbsp;·&nbsp;
   <a href="#-datasets">Datasets</a> &nbsp;·&nbsp;
   <a href="#-llm-providers">LLM</a>
 </p>
 
 ```bash
-pip install financial-analyst==1.0.3    # 1 minute
-financial-analyst                        # zero-config: wizard + backend + web UI + browser auto-opens
+pip install financial-analyst==1.0.3    # 1 minute, no [serve] flag needed
+fa start                                 # zero-config: wizard + backend + web UI + browser auto-opens
 ```
 
-That's it. The first run: detects your config → runs the interactive wizard (LLM key + HF dataset pick) → starts the buddy backend on `:9999` → starts the web UI on `:5173` → opens your browser. Ctrl+C stops everything.
+That's it. The first run: language picker → workspace picker (escape your system drive — point data at `D:\fa-workspace` or wherever) → LLM key → HF dataset pick → buddy backend on `:9999` → web UI on `:5173` → browser opens. Ctrl+C stops everything cleanly. Next `fa start` skips straight to the browser (services already healthy).
 
-Power users: `financial-analyst --tui` for the terminal UI, or pick specific commands:
+Power users: `fa --tui` for the terminal UI, or pick specific commands:
 
 ```bash
-fa init                # wizard only (LLM key + data pack)
+fa init                # wizard only (workspace + LLM key + data pack)
 fa report SH600519     # one-shot deep-dive (~10 min, no UI)
-fa launch              # explicit one-command launcher
+fa update              # check PyPI + pip install -U (refuses editable installs)
+fa data refresh        # smart refresh — skip if everything <24h fresh
 ```
+
+> **🆕 v1.0.3 highlights** *(2026-05-25)*
+>
+> - **零 extras 安装** — `pip install financial-analyst` 即装即用, fastapi + uvicorn 并入 core, 不再需要 `[serve]` 后缀
+> - **`fa start`** — 新的零配置启动入口 (`fa launch` 保留为别名). 二次启动自动 fast-path 跳到浏览器, 不重启子进程
+> - **Workspace pinning** — 数据可以挂到 `D:\fa-workspace` 等任意盘, 不再绑死系统盘. 通过 `fa init` 一次性配
+> - **数据刷新按钮** — 状态栏新增 `✓ / ⏳ 盘中 / ⚠ / ↻` 四态徽章, 一键拉日线 + 5min + 估值
+> - **`fa update`** + **`fa data refresh`** — PyPI 自升级 (editable 安装会拒绝) + 智能增量刷新 (24h 内已更新自动跳过)
+>
+> Full [CHANGELOG](CHANGELOG.md).
 
 ---
 
@@ -169,9 +180,11 @@ See [examples/](examples/) for FM cluster / CSV loader / TDX F10 patterns.
 
 ```bash
 pip install financial-analyst==1.0.3
-cp .env.example .env       # add DASHSCOPE_API_KEY (qwen default)
-fa init                    # interactive wizard — pulls HF dataset
-fa report SH600519         # first deep-dive
+fa start                   # interactive wizard (LLM key + workspace + HF dataset)
+                           # then auto-starts backend + UI + browser
+# or non-interactive:
+fa init --yes --preset demo --workspace D:/fa-workspace   # CI / scripted
+fa report SH600519                                         # first deep-dive (~10 min)
 ```
 
 ### B. Source (development)
@@ -185,7 +198,7 @@ pytest tests/              # 712 tests, ~8 min
 
 ---
 
-## 🤖 The 25 Agents
+## 🤖 The 24 Agents
 
 | Tier | Agents | Role |
 |---|---|---|
