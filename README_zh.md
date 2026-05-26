@@ -231,14 +231,6 @@ memories/
 
 **改 markdown → 下次 agent run 立即生效. 不重启, 不重 build.**
 
-```bash
-# TUI 内沉淀经验:
-> /lesson 大盘股 PE>50 + 60d涨幅>30% 通常是博弈票, 模型信号失效
-
-# 或者直接改文件:
-vim memories/risk-officer/hard_rules.md
-```
-
 详见 [memories/README.md](memories/README.md) — 24 个目录用途 + 设计原则.
 
 ---
