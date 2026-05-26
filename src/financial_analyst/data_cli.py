@@ -342,7 +342,7 @@ def update_cmd(
                         n_total = (stats_fin["income"] + stats_fin["balancesheet"]
                                    + stats_fin["cashflow"])
                         if n_total > 0:
-                            _lu.mark_updated("financial")
+                            _lu.mark_updated("financials")
                     except RuntimeError as e:
                         typer.echo(f"\n[financial ✗] {e}")
 

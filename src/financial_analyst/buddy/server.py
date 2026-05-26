@@ -657,15 +657,33 @@ def build_app():
             )
 
     @app.post("/data/refresh")
-    async def data_refresh(skip_5min: bool = False):
-        """Trigger an incremental data refresh — equivalent to `fa data refresh`.
+    async def data_refresh(
+        skip_5min: bool = False,
+        include_f10: bool = False,
+        f10_universe: str = "csi500",
+        include_concepts: bool = False,
+        include_financial: bool = False,
+        include_stock_basic: bool = False,
+    ):
+        """Trigger an incremental data refresh — equivalent to `fa data update`.
 
         Spawns ``python -m financial_analyst.cli data update`` as a detached
         subprocess so the request returns immediately. The UI polls
         ``/data/status`` afterward to see when the timestamps move.
 
-        For long-running runs (full-universe day + 5min ≈ 5-20 min) this is
-        much better than holding the HTTP connection open.
+        Query params mirror the CLI flags 1:1, so UI button rows can map
+        directly to ``fa data update`` invocations:
+
+          * ``skip_5min`` → ``--skip-5min`` (day-only, faster)
+          * ``include_f10`` → ``--include-f10`` (zero-token, ~30 min csi500)
+          * ``f10_universe`` → ``--f10-universe csi300|csi500|csi800|all``
+          * ``include_concepts`` → ``--include-concepts`` (needs adata pkg)
+          * ``include_financial`` → ``--include-financial`` (needs FA_TUSHARE_TOKEN env)
+          * ``include_stock_basic`` → ``--include-stock-basic`` (needs FA_TUSHARE_TOKEN env)
+
+        Tushare token is **not** accepted via query (would leak in URLs/logs).
+        The subprocess inherits ``FA_TUSHARE_TOKEN`` from the server env — set
+        it in ``.env`` or before launching ``fa start``.
         """
         import subprocess
         import sys
@@ -674,6 +692,14 @@ def build_app():
                "data", "update"]
         if skip_5min:
             cmd.append("--skip-5min")
+        if include_f10:
+            cmd.extend(["--include-f10", "--f10-universe", f10_universe])
+        if include_concepts:
+            cmd.append("--include-concepts")
+        if include_financial:
+            cmd.append("--include-financial")
+        if include_stock_basic:
+            cmd.append("--include-stock-basic")
         try:
             # Detached: stdout/stderr go to /dev/null so we don't accumulate
             # buffer in the buddy process. The CLI writes its own progress

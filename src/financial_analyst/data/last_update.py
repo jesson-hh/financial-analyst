@@ -33,8 +33,10 @@ DATA_TYPES = (
     "day",           # daily OHLCV (pytdx)
     "5min",          # 5min OHLCV (pytdx)
     "daily_basic",   # PE/PB/MV/turnover_rate (Tencent realtime)
-    "financials",    # income/balance/cashflow (Tushare or TDX local)
-    "f10",           # 公司大事 / 龙虎榜 / 主力追踪 (pytdx F10)
+    "financials",    # income/balance/cashflow (Tushare opt-in)
+    "f10",           # 公司大事 / 龙虎榜 / 主力追踪 (pytdx F10, zero token)
+    "concepts",      # 同花顺 concept stocks + constituents (adata, zero token)
+    "stock_basic",   # company master list (Tushare opt-in)
 )
 
 
@@ -45,6 +47,10 @@ IMPLEMENTED_TYPES = (
     "day",
     "5min",
     "daily_basic",
+    "f10",           # since v1.0.7 (fa data update --include-f10)
+    "concepts",      # since v1.0.7 (fa data update --include-concepts)
+    "financials",    # since v1.0.7 (fa data update --include-financial, Tushare opt-in)
+    "stock_basic",   # since v1.0.7 (fa data update --include-stock-basic, Tushare opt-in)
 )
 
 
@@ -55,6 +61,8 @@ STALE_THRESHOLD_HOURS = {
     "daily_basic": 24,
     "financials":  24 * 30,  # quarterly cadence
     "f10":         24 * 3,   # event-driven, weekly OK
+    "concepts":    24 * 7,   # weekly refresh sufficient
+    "stock_basic": 24 * 30,  # company master list, monthly OK
 }
 
 
