@@ -15,7 +15,34 @@ for stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-load_dotenv(override=True)  # populate os.environ from .env (overrides any existing shell vars)
+# Three-pass .env loading (order = priority, last write wins via override=True):
+#   1. cwd / parents — legacy behaviour, covers users running from a project dir
+#      that has a local .env (e.g. devs in G:\financial-analyst).
+#   2. canonical workspace location — where `fa init` actually writes for
+#      pip-installed users (~/.financial-analyst/.env by default, or a pinned
+#      D:\fa-workspace via the .workspace pointer file).
+#   3. _project_root() / .env — the editable-install equivalent of #2.
+#
+# Bug fixed: without pass #2 / #3, a pip-installed user running `fa start`
+# from C:\Users\<name> (default cmd cwd) would have load_dotenv() walk up
+# without finding ~/.financial-analyst/.env. Result: os.environ missing
+# DASHSCOPE_API_KEY / DEEPSEEK_API_KEY → /models returns 0 providers →
+# the UI model picker hides itself and the user can't switch models.
+load_dotenv(override=True)
+try:
+    from financial_analyst.workspace import get_workspace as _get_ws
+    _ws_env = _get_ws() / ".env"
+    if _ws_env.exists():
+        load_dotenv(dotenv_path=_ws_env, override=True)
+except Exception:
+    pass
+try:
+    from financial_analyst.init_cli import _project_root as _pr
+    _pr_env = _pr() / ".env"
+    if _pr_env.exists():
+        load_dotenv(dotenv_path=_pr_env, override=True)
+except Exception:
+    pass
 
 # Load user plugins (user-private .py files that call ModelRegistry.register etc.)
 # Errors here are non-fatal — a broken plugin won't prevent the CLI from working.
