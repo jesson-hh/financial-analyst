@@ -2284,12 +2284,30 @@ function DataRefreshButton({ s, dispatch }) {
     title = `${stale} 类数据 (含日线 ${dayAge}) 超过 24h 没更新. 点击拉新.`;
   }
 
+  // 默认勾选哪些数据类型 — Shift+Click 弹简单 prompt 让用户精挑.
+  //   普通 click  : 日线 + 5min + daily_basic + northbound (~5 min, 全零 token)
+  //   Shift+click : 全开 (+ F10 csi500 ~30min + concepts + financial + stock_basic;
+  //                 Tushare 那两项要 server 端有 FA_TUSHARE_TOKEN env 才会真跑)
+  // f10 csi500 跑 ~30min 故不进默认, 想要全开按 Shift.
   const onClick = async (e) => {
     e.preventDefault();
     if (refreshing) return;  // already running
+    const shiftHeld = e.shiftKey;
+    const params = new URLSearchParams();
+    params.set('include_northbound', 'true');   // ~20s, zero token, 安全默认
+    if (shiftHeld) {
+      params.set('include_f10', 'true');
+      params.set('f10_universe', 'csi500');     // csi500 ~30min; 改 csi300 ~10min
+      params.set('include_concepts', 'true');
+      params.set('include_financial', 'true');
+      params.set('include_stock_basic', 'true');
+    }
     dispatch({ type: 'data_refreshing', on: true });
     try {
-      const r = await fetch(`${s.backendUrl}/data/refresh`, { method: 'POST' });
+      const r = await fetch(
+        `${s.backendUrl}/data/refresh?${params.toString()}`,
+        { method: 'POST' },
+      );
       const d = await r.json();
       if (!d?.ok) {
         dispatch({ type: 'data_refreshing', on: false,
@@ -2297,18 +2315,24 @@ function DataRefreshButton({ s, dispatch }) {
         return;
       }
       // refresh subprocess started; useEffect will poll /data/status every 5s
-      // and eventually flip stale_count to 0; we manually clear the flag after
-      // 4 minutes as a safety net (full-universe update can run ≤ 5min)
-      setTimeout(() => dispatch({ type: 'data_refreshing', on: false }), 4 * 60 * 1000);
+      // and eventually flip stale_count to 0. Safety net: Shift+全开 可能 ~30min,
+      // 普通点击 ~5min — 用 8 min 作为统一保守值
+      setTimeout(() => dispatch({ type: 'data_refreshing', on: false }),
+                 (shiftHeld ? 35 : 8) * 60 * 1000);
     } catch (err) {
       dispatch({ type: 'data_refreshing', on: false, error: String(err) });
     }
   };
 
+  // 全开提示 — Shift+click 多刷 F10/concepts/financial/stock_basic
+  const titleWithHint = refreshing
+    ? title
+    : `${title}\n\n点击: 刷日线 + 5min + daily_basic + 北向 (~5min, 零 token)\nShift+点击: 全开 (+ F10 csi500 ~30min + 概念 + 财务 + 公司基本信息; 财务两项需 FA_TUSHARE_TOKEN env)`;
+
   return (
     <span
       onClick={onClick}
-      title={title}
+      title={titleWithHint}
       className="hover-pill"
       style={{ padding: '1px 6px', border: '1px solid ' + border,
                color, cursor: refreshing ? 'wait' : 'pointer',
