@@ -276,6 +276,25 @@ _T = {
               "[dim]Details (with Chrome ext + ths-extra plugin) in [bold]docs/setup/beginner_zh.md[/bold] Step 8.[/dim]",
     },
 
+    # ── Review screen (end-of-wizard summary + edit loop) ──
+    "review_title":           {"zh": " 配置总览 ", "en": " Review your setup "},
+    "review_help":            {"zh": "[dim]按数字改某步 / 按 [bold]c[/bold] 确认 / 按 [bold]q[/bold] 退出[/dim]",
+                                "en": "[dim]Number to edit a step / [bold]c[/bold] to confirm / [bold]q[/bold] to quit[/dim]"},
+    "review_prompt":          {"zh": "选择 [1/2/3/4/5/c/q]",
+                                "en": "Choose [1/2/3/4/5/c/q]"},
+    "review_col_step":        {"zh": "步骤", "en": "Step"},
+    "review_col_value":       {"zh": "当前值", "en": "Current value"},
+    "review_lang":            {"zh": "语言", "en": "Language"},
+    "review_ws":              {"zh": "工作目录", "en": "Workspace"},
+    "review_llm":             {"zh": "LLM keys", "en": "LLM keys"},
+    "review_tushare":         {"zh": "Tushare token", "en": "Tushare token"},
+    "review_tushare_none":    {"zh": "(未填 — 用免费数据源)", "en": "(none — using free data sources)"},
+    "review_package":         {"zh": "数据包", "en": "Data package"},
+    "review_package_skip":    {"zh": "跳过 (已有数据或自己拉)", "en": "skip (have your own data)"},
+    "review_package_unset":   {"zh": "(未选, 必填)", "en": "(unset, required)"},
+    "review_edit_hint":       {"zh": "回到第 {n} 步重选...", "en": "Re-running Step {n}..."},
+    "review_quit":            {"zh": "已取消配置, 没写任何东西.", "en": "Cancelled, nothing written."},
+
     "skip_msg":           {"zh": "⏭ 跳过数据包下载. 如已有数据, 编辑",
                            "en": "⏭ Skipping download. If you already have data, edit"},
     "skip_msg_tail":      {"zh": "指向你的目录.",
@@ -841,6 +860,71 @@ def _verify(data_dir: Path, lang: str) -> bool:
         return False
 
 
+def _show_review(lang: str, env: dict, chosen_preset: Optional[str]) -> None:
+    """End-of-wizard summary. User then picks a step to re-edit or confirms.
+
+    Mirrors the OpenCLI / npm-init / create-react-app style: walk-through then
+    review-then-edit-or-confirm, so users can fix any single setting without
+    starting the wizard from scratch.
+    """
+    from financial_analyst.workspace import get_workspace, disk_free_gb
+
+    console.print()
+    console.print(Rule(f"[bold cyan]{_t('review_title', lang)}[/bold cyan]",
+                       style="cyan"))
+    console.print()
+
+    table = Table(show_header=True, header_style="bold dim",
+                  box=None, padding=(0, 2), expand=False)
+    table.add_column("#", style="bold cyan", justify="right", width=3)
+    table.add_column(_t("review_col_step", lang), style="bold", width=14)
+    table.add_column(_t("review_col_value", lang))
+
+    # 1 — Language
+    cur_lang = env.get("FA_LANG", lang)
+    lang_disp = "中文 (zh)" if cur_lang == "zh" else "English (en)"
+    table.add_row("1", _t("review_lang", lang), lang_disp)
+
+    # 2 — Workspace
+    ws = get_workspace()
+    free = disk_free_gb(ws)
+    table.add_row("2", _t("review_ws", lang),
+                  f"[cyan]{ws}[/cyan]  [dim](free {free:.0f} GB)[/dim]")
+
+    # 3 — LLM keys
+    key_chips = []
+    for env_var, prov, _desc, color in _LLM_PROVIDERS:
+        if env.get(env_var):
+            key_chips.append(f"[{color} bold]{prov} ✓[/{color} bold]")
+        else:
+            key_chips.append(f"[dim]{prov} ○[/dim]")
+    table.add_row("3", _t("review_llm", lang), " · ".join(key_chips))
+
+    # 4 — Tushare
+    if env.get("TUSHARE_TOKEN"):
+        t_disp = f"[green]✓[/green] [dim]{_mask(env['TUSHARE_TOKEN'])}[/dim]"
+    else:
+        t_disp = f"[dim]{_t('review_tushare_none', lang)}[/dim]"
+    table.add_row("4", _t("review_tushare", lang), t_disp)
+
+    # 5 — Data package
+    if chosen_preset and chosen_preset != "skip":
+        pkg = HF_PACKAGES.get(chosen_preset, {})
+        size = pkg.get("size_hint", "?")
+        pkg_color = pkg.get("color", "cyan")
+        pkg_disp = f"[{pkg_color} bold]{chosen_preset}[/{pkg_color} bold]  [dim]({size})[/dim]"
+    elif chosen_preset == "skip":
+        pkg_disp = f"[dim]{_t('review_package_skip', lang)}[/dim]"
+    else:
+        pkg_disp = f"[yellow]{_t('review_package_unset', lang)}[/yellow]"
+    table.add_row("5", _t("review_package", lang), pkg_disp)
+
+    console.print(table)
+    console.print()
+    console.print(f"  {_t('review_help', lang)}")
+    console.print()
+
+
 def _step_opencli_check(lang: str) -> None:
     """Step 4.5 — Detect OpenCLI on PATH; print a friendly hint if missing.
 
@@ -972,12 +1056,65 @@ def init_cmd(
 
     _step_welcome(env_path, config_path, data_dir, chosen_lang)
 
-    # Steps 2-4
+    # ─── Linear walk-through of input steps (no commit yet) ───
     env = _step_llm_keys(env, non_interactive=yes, lang=chosen_lang)
     env = _step_tushare(env, non_interactive=yes, lang=chosen_lang)
     chosen_preset = _step_pick_package(non_interactive=yes, preset=preset,
                                        lang=chosen_lang)
 
+    # ─── Review + edit loop (interactive only) ───
+    # Walk through all steps once, then show a numbered summary; user can
+    # re-run any step before final commit. OpenCLI-style: type 1-5 to edit
+    # that step, 'c' to confirm, 'q' to quit with nothing written.
+    if not yes:
+        while True:
+            _show_review(chosen_lang, env, chosen_preset)
+            choice = Prompt.ask(
+                f"  [bold]{_t('review_prompt', chosen_lang)}[/bold]",
+                default="c",
+                choices=["c", "1", "2", "3", "4", "5", "q"],
+                show_choices=False,
+            ).strip().lower()
+
+            if choice == "c":
+                break
+            if choice == "q":
+                console.print()
+                console.print(f"  [yellow]{_t('review_quit', chosen_lang)}[/yellow]")
+                raise typer.Exit(0)
+
+            # Re-run a specific step. Display a small "going back" hint so the
+            # screen transition isn't jarring.
+            console.print(f"  [dim]{_t('review_edit_hint', chosen_lang).format(n=choice)}[/dim]")
+
+            if choice == "1":
+                # Force a fresh language pick (clear cached FA_LANG so picker shows)
+                prev = env.get("FA_LANG")
+                env.pop("FA_LANG", None)
+                new_lang = _pick_language(env, non_interactive=False)
+                # If language changed, all subsequent panels need to repaint
+                # in the new language. We just adopt it going forward.
+                chosen_lang = new_lang
+            elif choice == "2":
+                _step_workspace(non_interactive=False, override=None, lang=chosen_lang)
+                # Workspace may have moved — re-resolve dependent paths
+                root = _project_root()
+                env_path = root / ".env"
+                config_path = root / "config" / "loaders.yaml"
+                data_dir = target if target else _ws_data_dir()
+                # Re-merge .env from new workspace if exists
+                if env_path.exists():
+                    existing = _read_env(env_path)
+                    env = {**existing, **env}  # in-memory edits win over disk
+            elif choice == "3":
+                env = _step_llm_keys(env, non_interactive=False, lang=chosen_lang)
+            elif choice == "4":
+                env = _step_tushare(env, non_interactive=False, lang=chosen_lang)
+            elif choice == "5":
+                chosen_preset = _step_pick_package(
+                    non_interactive=False, preset=None, lang=chosen_lang)
+
+    # ─── Commit phase: download + write loaders + write .env ───
     downloaded = False
     if chosen_preset and chosen_preset != "skip":
         ok = _download_package(chosen_preset, data_dir, chosen_lang)
@@ -1001,7 +1138,7 @@ def init_cmd(
         )
         _write_loaders_config(data_dir, config_path, chosen_lang)
 
-    # Step 4.5 — OpenCLI detection (optional, non-blocking)
+    # Step 4.5 — OpenCLI detection (optional, non-blocking, post-data)
     _step_opencli_check(chosen_lang)
 
     # Write .env (last, so all collected keys land)
