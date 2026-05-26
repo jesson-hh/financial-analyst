@@ -45,7 +45,7 @@
 🐣 **没用过 Python / 命令行?** **[小白上手指南 (30 分钟从装 Python 开始) →](docs/setup/beginner_zh.md)**
 
 <p align="center">
-  <img src="docs/demo/install.svg" alt="$ pip install financial-analyst==1.0.6 ; fa start" width="820">
+  <img src="docs/demo/install.svg" alt="$ pip install financial-analyst ; fa init" width="540">
 </p>
 
 ```bash

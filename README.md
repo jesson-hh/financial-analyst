@@ -45,7 +45,7 @@
 🐣 **New to Python / CLI?** **[小白上手指南 (中文, 30 min) →](docs/setup/beginner_zh.md)**
 
 <p align="center">
-  <img src="docs/demo/install.svg" alt="$ pip install financial-analyst==1.0.6 ; fa start" width="820">
+  <img src="docs/demo/install.svg" alt="$ pip install financial-analyst ; fa init" width="540">
 </p>
 
 ```bash

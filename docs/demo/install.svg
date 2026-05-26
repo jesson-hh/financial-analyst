@@ -1,40 +1,38 @@
 <svg xmlns="http://www.w3.org/2000/svg"
-     viewBox="0 0 900 200"
+     viewBox="0 0 640 170"
      role="img"
-     aria-label="Demo: pip install financial-analyst==1.0.6 ; fa start"
+     aria-label="Demo: pip install financial-analyst ; fa init"
      font-family="'SF Mono','Cascadia Code','JetBrains Mono','Fira Code',Menlo,Consolas,monospace">
 
   <!-- =========================================================
-       Hand-crafted SVG terminal animation for the README hero.
+       Hand-crafted SVG terminal animation for the README.
        6-second loop, two typed commands, blinking cursor.
-       No external deps. Pure SMIL — GitHub renders it fine.
-       Edit "values" / "keyTimes" if you want different timing.
+       No external deps. Pure SMIL.
        ========================================================= -->
 
   <defs>
-    <!-- Drop-shadow for the terminal card -->
     <filter id="shadow" x="-5%" y="-5%" width="110%" height="120%">
-      <feGaussianBlur in="SourceAlpha" stdDeviation="6"/>
-      <feOffset dy="3"/>
+      <feGaussianBlur in="SourceAlpha" stdDeviation="5"/>
+      <feOffset dy="2"/>
       <feComponentTransfer><feFuncA type="linear" slope="0.35"/></feComponentTransfer>
       <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
 
-    <!-- Line 1: pip install ... (38 chars, width ~475 at 22px mono) -->
+    <!-- Line 1: "pip install financial-analyst" — 30 chars, ~370px wide -->
     <clipPath id="r1">
-      <rect x="76" y="64" width="0" height="36">
+      <rect x="62" y="56" width="0" height="30">
         <animate attributeName="width"
-                 values="0;     0;     475;   475;   475;   475"
+                 values="0;     0;     370;   370;   370;   370"
                  keyTimes="0;   0.04;  0.40;  0.50;  0.95;  1"
                  dur="6s" repeatCount="indefinite"/>
       </rect>
     </clipPath>
 
-    <!-- Line 2: fa start (8 chars, width ~100) -->
+    <!-- Line 2: "fa init" — 7 chars, ~88px wide -->
     <clipPath id="r2">
-      <rect x="76" y="118" width="0" height="36">
+      <rect x="62" y="100" width="0" height="30">
         <animate attributeName="width"
-                 values="0;     0;     0;     100;   100;   100"
+                 values="0;     0;     0;     88;    88;    88"
                  keyTimes="0;   0.50;  0.55;  0.65;  0.95;  1"
                  dur="6s" repeatCount="indefinite"/>
       </rect>
@@ -42,26 +40,24 @@
   </defs>
 
   <!-- ───── card background (GitHub Dark) ───── -->
-  <rect width="900" height="200" rx="10" fill="#0d1117" filter="url(#shadow)"/>
+  <rect width="640" height="170" rx="8" fill="#0d1117" filter="url(#shadow)"/>
 
   <!-- traffic-light window chrome -->
-  <circle cx="28" cy="24" r="5.5" fill="#ff5f56"/>
-  <circle cx="48" cy="24" r="5.5" fill="#ffbd2e"/>
-  <circle cx="68" cy="24" r="5.5" fill="#27c93f"/>
-  <text x="450" y="28" text-anchor="middle" font-size="11" fill="#6e7681">~ financial-analyst</text>
+  <circle cx="22" cy="20" r="5" fill="#ff5f56"/>
+  <circle cx="40" cy="20" r="5" fill="#ffbd2e"/>
+  <circle cx="58" cy="20" r="5" fill="#27c93f"/>
+  <text x="320" y="24" text-anchor="middle" font-size="10" fill="#6e7681">~ financial-analyst</text>
 
-  <!-- subtle separator under chrome -->
-  <line x1="0" y1="46" x2="900" y2="46" stroke="#21262d" stroke-width="1"/>
+  <line x1="0" y1="38" x2="640" y2="38" stroke="#21262d" stroke-width="1"/>
 
   <!-- ───── LINE 1 ───── -->
-  <text x="36" y="92" font-size="20" font-weight="700" fill="#7ee787">$</text>
+  <text x="28" y="78" font-size="17" font-weight="700" fill="#7ee787">$</text>
   <g clip-path="url(#r1)">
-    <text x="76" y="92" font-size="20" fill="#c9d1d9">pip install financial-analyst==1.0.6</text>
+    <text x="62" y="78" font-size="17" fill="#c9d1d9">pip install financial-analyst</text>
   </g>
 
   <!-- ───── LINE 2 ───── -->
-  <!-- prompt fades in only after line 1 is finished -->
-  <text x="36" y="146" font-size="20" font-weight="700" fill="#7ee787" opacity="0">
+  <text x="28" y="122" font-size="17" font-weight="700" fill="#7ee787" opacity="0">
     $
     <animate attributeName="opacity"
              values="0;     0;     1;     1"
@@ -69,19 +65,19 @@
              dur="6s" repeatCount="indefinite"/>
   </text>
   <g clip-path="url(#r2)">
-    <text x="76" y="146" font-size="20" fill="#c9d1d9">fa start</text>
+    <text x="62" y="122" font-size="17" fill="#c9d1d9">fa init</text>
   </g>
 
-  <!-- ───── blinking cursor (parked at end of "fa start" once typed) ───── -->
-  <rect x="178" y="128" width="10" height="22" fill="#c9d1d9">
+  <!-- ───── blinking cursor — parked at end of "fa init" ───── -->
+  <rect x="150" y="107" width="9" height="18" fill="#c9d1d9">
     <animate attributeName="opacity"
              values="0;     0;     1;     0;     1;     0;     1;     0;     1;     0;     0"
              keyTimes="0;   0.66;  0.68;  0.74;  0.76;  0.82;  0.84;  0.90;  0.92;  0.98;  1"
              dur="6s" repeatCount="indefinite"/>
   </rect>
 
-  <!-- ───── leading cursor on empty line 1 (only at very start) ───── -->
-  <rect x="76" y="74" width="10" height="22" fill="#c9d1d9">
+  <!-- ───── leading cursor on empty line 1 (start blink) ───── -->
+  <rect x="62" y="63" width="9" height="18" fill="#c9d1d9">
     <animate attributeName="opacity"
              values="1;     0;     1;     0;     0;     0"
              keyTimes="0;   0.015; 0.025; 0.04;  0.05;  1"
