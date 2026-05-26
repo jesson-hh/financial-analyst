@@ -42,7 +42,11 @@
   <a href="#-llm-provider">LLM</a>
 </p>
 
-> 🐣 **完全没用过 Python / 命令行?** 没事. 看 **[小白上手指南 →](docs/setup/beginner_zh.md)** (30 分钟从装 Python 开始, 一步一步把命令给你)
+🐣 **没用过 Python / 命令行?** **[小白上手指南 (30 分钟从装 Python 开始) →](docs/setup/beginner_zh.md)**
+
+<p align="center">
+  <img src="docs/demo/install.svg" alt="$ pip install financial-analyst==1.0.6 ; fa start" width="820">
+</p>
 
 ```bash
 pip install financial-analyst==1.0.6    # 1 分钟, 不用再加 [serve] 后缀
