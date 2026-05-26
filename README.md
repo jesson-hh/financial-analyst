@@ -42,32 +42,21 @@
   <a href="#-llm-providers">LLM</a>
 </p>
 
-> 🐣 **Brand-new to Python / command line?** Step-by-step beginner guide (Chinese, 30 min from zero): **[小白上手指南 →](docs/setup/beginner_zh.md)**
+🐣 **New to Python / CLI?** **[小白上手指南 (中文, 30 min) →](docs/setup/beginner_zh.md)**
 
 ```bash
 pip install financial-analyst==1.0.6    # 1 minute, no [serve] flag needed
 fa start                                 # zero-config: wizard + backend + web UI + browser auto-opens
 ```
 
-That's it. The first run: language picker → workspace picker (escape your system drive — point data at `D:\fa-workspace` or wherever) → LLM key → HF dataset pick → buddy backend on `:9999` → web UI on `:5173` → browser opens. Ctrl+C stops everything cleanly. Next `fa start` skips straight to the browser (services already healthy).
-
-Power users: `fa --tui` for the terminal UI, or pick specific commands:
-
-```bash
-fa init                # wizard only (workspace + LLM key + data pack)
-fa report SH600519     # one-shot deep-dive (~10 min, no UI)
-fa update              # check PyPI + pip install -U (refuses editable installs)
-fa data refresh        # smart refresh — skip if everything <24h fresh
-```
-
 > **🆕 v1.0.6 highlights** *(2026-05-26)*
 >
-> - **数据下载 3-10× 提速** — `fa init` 自动启用 [hf-mirror.com](https://hf-mirror.com) + `hf_transfer` Rust 多连接下载, CN 用户不再卡 HF. 海外用户 `FA_DATA_SOURCE=hf fa init` 强制走官方源
-> - **ModelScope (魔搭) 数据源** — `pip install 'financial-analyst[modelscope]'` 后 `FA_DATA_SOURCE=modelscope fa init`, 阿里 CN-CDN 30-100 MB/s, demo 数据已上传
-> - **`fa init` 向导可回退** — 任何一步按 `b` 回上一步, 末尾 review 屏幕可逐项 re-edit (v1.0.4 / v1.0.5)
-> - **零 extras 安装** — `pip install financial-analyst` 即装即用, fastapi + uvicorn 并入 core, 不再需要 `[serve]` 后缀
-> - **`fa start`** + **Workspace pinning** — 零配置一键启动 + 数据可挂 `D:\fa-workspace` 等任意盘, 二次启动自动 fast-path 跳浏览器
-> - **`fa update`** + **`fa data refresh`** — PyPI 自升级 (editable 安装会拒绝) + 智能增量刷新 (24h 内已更新自动跳过)
+> - **3–10× faster data downloads** — `fa init` auto-enables [hf-mirror.com](https://hf-mirror.com) + `hf_transfer` Rust multi-connection downloads; CN users no longer stuck on HF. Overseas users: `FA_DATA_SOURCE=hf fa init` forces the canonical source.
+> - **ModelScope (魔搭) data source** — `pip install 'financial-analyst[modelscope]'`, then `FA_DATA_SOURCE=modelscope fa init` — Aliyun CN-CDN 30–100 MB/s. Demo bundle uploaded.
+> - **`fa init` wizard navigation** — press `b` to step back at any point; the final review screen lets you re-edit any field (v1.0.4 / v1.0.5).
+> - **Zero-extras install** — `pip install financial-analyst` works out of the box. fastapi + uvicorn folded into core; no more `[serve]` suffix.
+> - **`fa start`** + **workspace pinning** — zero-config one-command launch + data can live on any drive (e.g. `D:\fa-workspace`). Second launch fast-paths straight to the browser.
+> - **`fa update`** + **`fa data refresh`** — PyPI self-upgrade (refuses editable installs) + smart incremental refresh (auto-skip if updated within 24h).
 >
 > Full [CHANGELOG](CHANGELOG.md).
 
@@ -94,7 +83,11 @@ Out comes a markdown research report — **rated, attributed, falsifiable**. The
 <td width="50%" valign="top">
 
 ### 🎯 16-agent stock deep-dive
-Hand it `SH600519`, get a full research report in ~10 min — fundamentals, technicals, whale signals, quant scores, bull/bear/risk debate, post-mortem self-audit. **Only `report-writer` writes files.**
+- Full research report in ~10 min
+- Fundamentals · technicals · whale · quant
+- Bull / bear / risk debate → `report-writer` synthesizes
+- Tier-4 introspector self-audits
+- **Only `report-writer` writes files**
 
 ```bash
 fa report SH600519
@@ -104,7 +97,10 @@ fa report SH600519
 <td width="50%" valign="top">
 
 ### 🌅 Morning brief (5-agent v2)
-Pre-market scan: overnight US + HK + VIX, A-share 异动, catalyst extraction, sector rotation, AI-written summary.
+- Overnight US + HK + VIX scan
+- A-share 异动 + catalyst extraction
+- Sector rotation
+- AI-written summary
 
 ```bash
 fa brief
@@ -116,7 +112,9 @@ fa brief
 <td width="50%" valign="top">
 
 ### 🌍 Overseas radar (v1.9.7)
-International transmission analysis: SPX/NDX/HSI/VIX/USDCNY → A-share follow-through judgment + actionable signals for tomorrow.
+- SPX / NDX / HSI / VIX / USDCNY transmission
+- → A-share follow-through judgment
+- Actionable signals for tomorrow
 
 ```bash
 fa overseas-radar
@@ -126,7 +124,9 @@ fa overseas-radar
 <td width="50%" valign="top">
 
 ### 📈 Monthly mainline radar
-5-state industry-chain classifier (mainline / initiation / revival / decay / cold). Catches `init → mainline` golden signal (+5.54pp fwd_60d, 87% win rate).
+- 5-state industry-chain classifier
+- mainline / initiation / revival / decay / cold
+- `init → mainline` golden: +5.54pp fwd_60d, 87% win
 
 ```bash
 fa mainline
@@ -138,13 +138,18 @@ fa mainline
 <td width="50%" valign="top">
 
 ### 🧠 Pluggable memory
-24 per-agent memory dirs as markdown. Edit `risk-officer/hard_rules.md`, next report respects it. No code change. `_shared/playbook_V1_V10.md` cross-agent.
+- 24 per-agent memory dirs as markdown
+- Edit `risk-officer/hard_rules.md` → next report respects it
+- No code change, no restart
+- `_shared/playbook_V1_V10.md` cross-agent
 
 </td>
 <td width="50%" valign="top">
 
 ### 💤 Dream loop (self-improving)
-After each report, `introspector` flags quality issues. Aggregator clusters proposals → `_proposed/` for human review. **No auto-merge** (errors compound in quant).
+- After each report, `introspector` flags issues
+- Aggregator clusters proposals → `_proposed/`
+- **No auto-merge** (errors compound in quant)
 
 ```bash
 fa dream --since 30
@@ -156,19 +161,23 @@ fa dream --since 30
 <td width="50%" valign="top">
 
 ### 🔌 4-provider LLM routing
-`qwen` (domestic direct) · `deepseek-chat/reasoner` (Clash + MITM) · `openai` · `anthropic`. Per-provider network profile, no fake-ip hijack.
+- `qwen` — domestic direct
+- `deepseek-chat / -reasoner` — Clash + MITM
+- `openai` · `anthropic`
+- Per-provider network profile, no fake-ip hijack
 
 ```bash
-financial-analyst  # /model deepseek-reasoner
+financial-analyst    # /model deepseek-reasoner
 ```
 
 </td>
 <td width="50%" valign="top">
 
 ### 🧬 BYOM extensibility
-Drop a `.py` into `config/plugins.yaml`. Your private model joins the quant consensus. **Your checkpoints never enter the open-source repo.**
-
-See [examples/](examples/) for FM cluster / CSV loader / TDX F10 patterns.
+- Drop a `.py` into `config/plugins.yaml`
+- Your private model joins the quant consensus
+- **Your checkpoints never enter the open-source repo**
+- See [examples/](examples/) — FM cluster / CSV loader / TDX F10
 
 </td>
 </tr>
@@ -230,14 +239,6 @@ memories/
 ```
 
 **Edit a markdown → next agent run picks it up. No restart, no rebuild.**
-
-```bash
-# Persist a lesson via slash command in TUI:
-> /lesson Mega-cap PE>50 + 60d return>30% usually means liquidity-game stock
-
-# Or just write the file:
-vim memories/risk-officer/hard_rules.md
-```
 
 See [memories/README.md](memories/README.md) for the 24 dir index and design principles.
 
