@@ -138,17 +138,18 @@ _T = {
     "step_ws_subtitle":   {"zh": "数据可能 155 MB ~ 14 GB · 选个磁盘空间大的位置",
                            "en": "Data is 155 MB ~ 14 GB · pick a disk with enough room"},
     "step_ws_default":    {"zh": "默认位置 (HOME)", "en": "Default (HOME)"},
+    "step_ws_current":    {"zh": "当前 workspace", "en": "Current workspace"},
     "step_ws_free":       {"zh": "剩余", "en": "free"},
     "step_ws_warn_tight": {"zh": "偏紧 ⚠ — 14 GB full 包可能装不下",
                            "en": "tight ⚠ — 14 GB full package may not fit"},
     "step_ws_recommend":  {"zh": "建议自定义到 D:/E: 盘 (有更多空间)",
                            "en": "Recommend customising to D:/E: drive (more room)"},
-    "step_ws_prompt":     {"zh": "[bold]工作目录路径[/bold] [dim](回车用默认)[/dim]",
-                           "en": "[bold]Workspace path[/bold] [dim](enter for default)[/dim]"},
-    "step_ws_not_writable": {"zh": "✗ 路径不可写, 用默认",
-                             "en": "✗ Path not writable, falling back to default"},
+    "step_ws_prompt":     {"zh": "[bold]工作目录路径[/bold] [dim](回车保留, 输新路径迁移)[/dim]",
+                           "en": "[bold]Workspace path[/bold] [dim](Enter to keep current, type new path to switch)[/dim]"},
+    "step_ws_not_writable": {"zh": "✗ 路径不可写, 保留原 workspace",
+                             "en": "✗ Path not writable, keeping current workspace"},
     "step_ws_picked":     {"zh": "工作目录已选", "en": "Workspace pinned"},
-    "step_ws_kept_default": {"zh": "用默认 HOME 目录", "en": "Using default HOME"},
+    "step_ws_kept_default": {"zh": "保留", "en": "Kept"},
     "step_ws_old_data_warn": {
         "zh": "[dim]提示: 你旧默认位置可能有数据 (~/.financial-analyst/data/). "
               "切到新 workspace 后, 老数据**不会自动迁移**, 需手动 move 或重新下.[/dim]",
@@ -431,7 +432,7 @@ def _step_workspace(non_interactive: bool, override: Optional[Path],
                  lang=lang)
 
     if override:
-        # explicit --workspace flag wins
+        # explicit --workspace flag wins, regardless of any prior pinned ws
         ws = set_workspace(override)
         free = disk_free_gb(ws)
         console.print(
@@ -440,7 +441,13 @@ def _step_workspace(non_interactive: bool, override: Optional[Path],
         )
         return ws
 
-    # Show default + free space
+    # Resolve the user's currently active workspace (honours pointer file +
+    # FA_WORKSPACE env). On a re-run this is whatever they picked last time;
+    # on a first run it's DEFAULT_WORKSPACE.
+    current_ws = get_workspace()
+    is_default = current_ws == DEFAULT_WORKSPACE
+
+    # Display block — show DEFAULT always, plus current if different (re-run)
     default_free = disk_free_gb(DEFAULT_WORKSPACE)
     tight = default_free < 20.0
     grid = Table.grid(padding=(0, 2))
@@ -453,13 +460,20 @@ def _step_workspace(non_interactive: bool, override: Optional[Path],
         free_text = f"[dim]{free_text}[/dim]"
     grid.add_row(_t("step_ws_default", lang),
                  f"[cyan]{DEFAULT_WORKSPACE}[/cyan]  {free_text}")
-    if tight:
+    if not is_default:
+        # Re-run on a non-default workspace — show what's currently pinned
+        cur_free = disk_free_gb(current_ws)
+        cur_free_text = f"[dim]{_t('step_ws_free', lang)} {cur_free:.0f} GB[/dim]"
+        grid.add_row(_t("step_ws_current", lang),
+                     f"[green]{current_ws}[/green]  {cur_free_text}")
+    if tight and is_default:
         grid.add_row("", f"[yellow italic]{_t('step_ws_recommend', lang)}[/yellow italic]")
     console.print(grid)
     console.print()
 
     if non_interactive:
-        ws = set_workspace(DEFAULT_WORKSPACE)
+        # Keep current (which is DEFAULT on first run, otherwise pinned)
+        ws = set_workspace(current_ws)
         return ws
 
     raw = Prompt.ask(_t("step_ws_prompt", lang),
@@ -467,16 +481,18 @@ def _step_workspace(non_interactive: bool, override: Optional[Path],
     raw = raw.strip()
 
     if not raw:
-        ws = set_workspace(DEFAULT_WORKSPACE)
-        console.print(f"  [dim]{_t('step_ws_kept_default', lang)}: "
-                      f"[cyan]{ws}[/cyan][/dim]")
+        # Enter → keep whatever's currently pinned (NOT reset to DEFAULT!)
+        ws = set_workspace(current_ws)
+        console.print(f"  [dim]{_t('step_ws_kept_default', lang)}:[/dim] "
+                      f"[cyan]{ws}[/cyan]")
         return ws
 
     target = Path(raw).expanduser()
     if not is_writable(target):
         console.print(f"  [red]{_t('step_ws_not_writable', lang)}[/red]: "
                       f"[dim]{target}[/dim]")
-        ws = set_workspace(DEFAULT_WORKSPACE)
+        # Don't silently fall back to DEFAULT — keep the current pinned ws
+        ws = set_workspace(current_ws)
         return ws
 
     ws = set_workspace(target)
@@ -485,10 +501,14 @@ def _step_workspace(non_interactive: bool, override: Optional[Path],
         f"  [green]✓[/green] {_t('step_ws_picked', lang)}: "
         f"[cyan]{ws}[/cyan]  [dim]({_t('step_ws_free', lang)} {free:.0f} GB)[/dim]"
     )
-    # Warn about non-migrated old data
-    legacy_data = DEFAULT_WORKSPACE / "data"
-    if ws != DEFAULT_WORKSPACE and legacy_data.exists() and any(legacy_data.iterdir()):
-        console.print(f"  {_t('step_ws_old_data_warn', lang)}")
+    # Warn about data left behind at the previous location (default or other)
+    for prev in {DEFAULT_WORKSPACE, current_ws}:
+        if prev == ws:
+            continue
+        legacy_data = prev / "data"
+        if legacy_data.exists() and any(legacy_data.iterdir()):
+            console.print(f"  {_t('step_ws_old_data_warn', lang)}")
+            break
     return ws
 
 
