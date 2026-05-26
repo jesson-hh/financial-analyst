@@ -166,13 +166,31 @@ def update_cmd(
     trade_date: Optional[str] = typer.Option(
         None, "--trade-date",
         help="daily_basic 写入的日期 YYYY-MM-DD, 默认今日"),
+    include_f10: bool = typer.Option(
+        False, "--include-f10",
+        help="附带刷新 TDX F10 事件 (公司大事/龙虎榜/研究报告/最新提示/主力追踪)"),
+    f10_universe: str = typer.Option(
+        "csi500", "--f10-universe",
+        help="F10 刷新范围: csi300 / csi500 / csi800 / all (默认 csi500 ~30 min)"),
+    include_concepts: bool = typer.Option(
+        False, "--include-concepts",
+        help="附带刷新同花顺概念股清单 + 成分股 (需要 adata 包)"),
+    concepts_max_age_days: int = typer.Option(
+        30, "--concepts-max-age",
+        help="概念成分股超过 N 日未刷的重拉 (默认 30)"),
 ):
     """直连增量更新所有数据 — 日线 + 5min + 当日 PE/PB/MV.
 
+    Optional (零 token 加成):
+      --include-f10           附带刷 TDX F10 事件 (公司大事/龙虎榜等)
+      --include-concepts      附带刷同花顺概念股 (需装 adata)
+
     Example:
-      fa data update                    # 全 instruments, 默认 N
-      fa data update --skip-5min        # 只日线
-      fa data update --codes @my.txt   # 只更新文件里的代码
+      fa data update                                  # 日线 + 5min + daily_basic
+      fa data update --skip-5min                      # 只日线
+      fa data update --codes @my.txt                  # 限定代码
+      fa data update --include-f10 --f10-universe csi300   # 附带 F10
+      fa data update --include-concepts               # 附带概念股
     """
     day_uri = _resolve_provider_uri("day")
     fivemin_uri = _resolve_provider_uri("5min")
@@ -235,6 +253,52 @@ def update_cmd(
                    f"耗时 {time.time() - t0:.1f}s")
         if stats_basic.get("ok", 0) > 0:
             _lu.mark_updated("daily_basic")
+
+    # F10 + concepts 走 paths resolver 拿 parquet_root + news_data_root
+    if include_f10 or include_concepts:
+        from financial_analyst.data.paths import get_data_paths
+        paths = get_data_paths()
+
+        if include_f10:
+            from financial_analyst.data.updaters.f10 import resolve_universe, update_f10
+            t0 = time.time()
+            try:
+                f10_codes = resolve_universe(paths.parquet_root, f10_universe)
+            except FileNotFoundError as e:
+                typer.echo(f"\n[F10 ✗] universe 解析失败: {e}")
+                f10_codes = []
+            if f10_codes:
+                typer.echo(f"\n[F10] 范围 {f10_universe} = {len(f10_codes)} 只, 拉取中...")
+                stats_f10 = update_f10(
+                    paths.news_data_root, paths.parquet_root,
+                    f10_codes, progress=True,
+                )
+                typer.echo(
+                    f"[F10 ✓] {stats_f10['ok']}/{stats_f10['total']} OK "
+                    f"(skip={stats_f10['skipped']}, fail={stats_f10['failed']}, "
+                    f"new_rows={stats_f10['new_rows']}) 耗时 {time.time() - t0:.1f}s"
+                )
+                if stats_f10.get("ok", 0) > 0:
+                    _lu.mark_updated("f10")
+
+        if include_concepts:
+            from financial_analyst.data.updaters.concepts import update_concepts
+            t0 = time.time()
+            try:
+                stats_con = update_concepts(
+                    paths.parquet_root,
+                    max_age_days=concepts_max_age_days,
+                    progress=True,
+                )
+                typer.echo(
+                    f"\n[concepts ✓] refreshed {stats_con['concepts_refreshed']} "
+                    f"/ {stats_con['concepts_total']} (failed={stats_con['failed']}, "
+                    f"parquet rows={stats_con['rows_written']}) 耗时 {time.time() - t0:.1f}s"
+                )
+                if stats_con.get("concepts_refreshed", 0) > 0:
+                    _lu.mark_updated("concepts")
+            except ImportError as e:
+                typer.echo(f"\n[concepts ✗] adata 包未装: {e}")
 
     typer.echo(f"\n=== 完成. 总耗时 {time.time() - overall_t:.1f}s ===")
 
