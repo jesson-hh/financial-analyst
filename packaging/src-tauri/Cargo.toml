@@ -8,9 +8,8 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[lib]
-name = "financial_analyst_tauri_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# NOTE: [lib] target removed — desktop-only build uses src/main.rs as binary.
+# Re-add with a real src/lib.rs when mobile (iOS staticlib / Android cdylib) is in scope.
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
