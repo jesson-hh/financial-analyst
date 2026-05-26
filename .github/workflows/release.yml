@@ -53,6 +53,11 @@ jobs:
         with:
           targets: ${{ matrix.target_triple }}
 
+      - name: Install tauri-cli (prebuilt v2)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli@2
+
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
