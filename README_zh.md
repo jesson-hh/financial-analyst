@@ -1,4 +1,8 @@
 <p align="center">
+  <img src="docs/brand/hero.png" alt="觀瀾 · Financial Analyst — AI 智能投研漫画概览" width="900">
+</p>
+
+<p align="center">
   <h1 align="center">觀瀾 · Financial Analyst</h1>
 </p>
 
@@ -76,14 +80,9 @@ fa --tui               # 终端 TUI 而非 Web UI
 
 给一个股票代码, 16 个 sub-agent 分 4 个信任层并发跑:
 
-```
-Tier 1 (数据并行)         Tier 2 (分析师并行)        Tier 3 (决策串行)          Tier 4 (复盘)
-─────────────────       ──────────────────────     ────────────────────       ────────────
-quote · factors        基本面分析师                  多头 ─┐
-model · news           技术面分析师                  空头 ─┤───→ writer        introspector
-F10 · 海外宏观         主力情绪分析师                 风控 ─┘
-板块轮动                量化模型分析师                (单一写入者)
-```
+<p align="center">
+  <img src="docs/architecture/architecture.png" alt="觀瀾 · Agent 架构 — 4 层信任架构, 24 个 agent" width="900">
+</p>
 
 输出: 一份 markdown 研报 — **打分 · 归因 · 可证伪**. 只有 `report-writer` 能落盘. 不可信新闻 / F10 在 Tier-1 用 JSON-schema 锁死 (杜绝 prompt 注入). 记忆是 markdown — 改 `.md`, 下次研报立即生效. FTS5 检索省 prompt 60%.
 

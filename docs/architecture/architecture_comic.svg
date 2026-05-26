@@ -1,0 +1,419 @@
+<svg class="diagram" viewBox="0 0 1800 1160" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Guānlán — comic-style architecture diagram">
+<style>
+  .ink-fill { fill: #181410; }
+  .ink-stroke { stroke: #181410; }
+  .soft-fill { fill: #4A453E; }
+  .muted-fill { fill: #8A8275; }
+  .hair-stroke { stroke: #C9C2AE; }
+  .bg-fill { fill: #FAF7EE; }
+  .paper-stroke { stroke: #E8E3D2; }
+  .memory-fill { fill: #EDE6D2; }
+  .memory-stroke { stroke: #C9BE9A; }
+  .t1-fill { fill: #4A6FA5; }
+  .t2-fill { fill: #6B8E7A; }
+  .t3-fill { fill: #9E3E3C; }
+  .t4-fill { fill: #7A6A4F; }
+  .amber-fill { fill: #C97A1A; }
+  .amber-stroke { stroke: #C97A1A; }
+  .cinnabar-fill { fill: #9E3E3C; }
+  .cinnabar-stroke { stroke: #9E3E3C; }
+  .cinnabar-deep-fill { fill: #8A2E2C; }
+  .hand { font-family: 'Patrick Hand', 'Caveat', cursive; }
+  .ser  { font-family: 'IBM Plex Serif', 'Source Serif Pro', serif; }
+  .mono { font-family: 'IBM Plex Mono', 'JetBrains Mono', monospace; }
+  .sans { font-family: 'IBM Plex Sans', 'Inter', sans-serif; }
+</style>
+  <defs>
+    <!-- Hand-drawn wobble for ink lines -->
+    <filter id="ink" x="-2%" y="-2%" width="104%" height="104%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.025" numOctaves="2" seed="4"/>
+      <feDisplacementMap in="SourceGraphic" scale="1.6"/>
+    </filter>
+    <filter id="ink-soft" x="-2%" y="-2%" width="104%" height="104%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.04" numOctaves="2" seed="9"/>
+      <feDisplacementMap in="SourceGraphic" scale="0.9"/>
+    </filter>
+
+    <!-- Halftone dot pattern (cinnabar) for the splash panel accent -->
+    <pattern id="halftone-cinnabar" x="0" y="0" width="10" height="10" patternUnits="userSpaceOnUse">
+      <circle cx="5" cy="5" r="1.4" class="cinnabar-fill" opacity="0.55"/>
+    </pattern>
+
+    <!-- Paper rule lines -->
+    <pattern id="paper" x="0" y="0" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="0.6" fill="#E8E3D2"/>
+    </pattern>
+
+    <!-- Action lines starburst -->
+    <radialGradient id="cinnabar-glow" cx="50%" cy="50%" r="55%">
+      <stop offset="0%" stop-color="#9E3E3C" stop-opacity="0.18"/>
+      <stop offset="60%" stop-color="#9E3E3C" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#9E3E3C" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- arrowheads -->
+    <marker id="ah-ink" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" class="ink-fill"/>
+    </marker>
+    <marker id="ah-cinnabar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" class="cinnabar-fill"/>
+    </marker>
+    <marker id="ah-muted" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" class="muted-fill"/>
+    </marker>
+  </defs>
+
+  <!-- Background paper + dotgrid -->
+  <rect x="0" y="0" width="1800" height="1180" class="bg-fill"/>
+  <rect x="0" y="0" width="1800" height="1180" fill="url(#paper)"/>
+
+  <!-- ═════════════════ TITLE ═════════════════ -->
+  <g>
+    <text x="80" y="86" class="ser ink-fill" font-size="48" font-weight="600">觀瀾 · how it works</text>
+    <text x="80" y="120" class="hand soft-fill" font-size="22">24 agents. 4 tiers of trust. One pen. ~10 minutes.</text>
+    <g transform="translate(80 140)">
+      <rect x="0" y="0" width="220" height="30" rx="15" ry="15" filter="url(#ink-soft)" fill="#FAF7EE" class="ink-stroke" stroke-width="2"/>
+      <text x="14" y="20" class="mono ink-fill" font-size="13">$ fa report SH600519</text>
+    </g>
+  </g>
+
+  <!-- ═════════════════ 4 TIER PANELS ═════════════════
+       y=210, h=320, panel w=380, gaps=24, x: 80, 484, 888, 1292
+  -->
+
+  <!-- ── PANEL 1 · TIER 1 DATA ── -->
+  <g>
+    <!-- panel shadow -->
+    <rect x="86" y="216" width="380" height="320" rx="10" ry="10" filter="url(#ink-soft)" class="ink-fill" opacity="0.92"/>
+    <!-- panel body -->
+    <rect x="80" y="210" width="380" height="320" rx="10" ry="10" filter="url(#ink)" fill="#FAF7EE" class="ink-stroke" stroke-width="3"/>
+    <!-- color header strip -->
+    <path d="M 80 210 h 380 v 36 q 0 -8 -8 -8 h -364 q -8 0 -8 8 z" filter="url(#ink)" class="t1-fill"/>
+    <text x="100" y="234" class="sans" fill="#fff" font-size="15" font-weight="700" letter-spacing="2">TIER 1  ·  DATA</text>
+    <text x="442" y="234" text-anchor="end" class="mono" fill="#fff" font-size="12" opacity="0.95">n=7 · parallel</text>
+
+    <!-- handwriting blurb -->
+    <text x="104" y="280" class="hand ink-fill" font-size="22">7 scouts run out and</text>
+    <text x="104" y="306" class="hand ink-fill" font-size="22">grab the raw numbers.</text>
+
+    <!-- 7 little "scout" dots in a row, 2 of them locked -->
+    <g transform="translate(104 332)">
+      <!-- 5 normal -->
+      <g class="t1-fill">
+        <circle cx="0"  cy="0" r="9"/>
+        <circle cx="26" cy="0" r="9"/>
+        <circle cx="52" cy="0" r="9"/>
+        <circle cx="156" cy="0" r="9"/>
+        <circle cx="182" cy="0" r="9"/>
+      </g>
+      <!-- 2 with lock halo -->
+      <g>
+        <circle cx="92"  cy="0" r="14" fill="none" class="amber-stroke" stroke-width="1.5" stroke-dasharray="2 2"/>
+        <circle cx="92"  cy="0" r="9" class="t1-fill"/>
+        <text  x="92"  y="5" text-anchor="middle" font-size="11">🔒</text>
+        <circle cx="118" cy="0" r="14" fill="none" class="amber-stroke" stroke-width="1.5" stroke-dasharray="2 2"/>
+        <circle cx="118" cy="0" r="9" class="t1-fill"/>
+        <text  x="118" y="5" text-anchor="middle" font-size="11">🔒</text>
+      </g>
+    </g>
+
+    <!-- callout to locked -->
+    <path d="M 130 358 q -10 30 40 40" fill="none" class="amber-stroke" stroke-width="1.6"/>
+    <text x="180" y="408" class="hand amber-fill" font-size="18">news + F10:</text>
+    <text x="180" y="430" class="hand amber-fill" font-size="18">talk through a JSON</text>
+    <text x="180" y="452" class="hand amber-fill" font-size="18">airlock 🔒</text>
+
+    <!-- bottom code chip -->
+    <text x="104" y="500" class="mono muted-fill" font-size="11">quote · factor · model · news · f10 · overseas · sector</text>
+  </g>
+
+  <!-- arrow P1 → P2 -->
+  <path d="M 462 372 q 12 -6 22 0" fill="none" class="ink-stroke" stroke-width="2.5" marker-end="url(#ah-ink)" filter="url(#ink-soft)"/>
+
+  <!-- ── PANEL 2 · TIER 2 ANALYSIS ── -->
+  <g>
+    <rect x="490" y="216" width="380" height="320" rx="10" ry="10" filter="url(#ink-soft)" class="ink-fill" opacity="0.92"/>
+    <rect x="484" y="210" width="380" height="320" rx="10" ry="10" filter="url(#ink)" fill="#FAF7EE" class="ink-stroke" stroke-width="3"/>
+    <path d="M 484 210 h 380 v 36 q 0 -8 -8 -8 h -364 q -8 0 -8 8 z" filter="url(#ink)" class="t2-fill"/>
+    <text x="504" y="234" class="sans" fill="#fff" font-size="15" font-weight="700" letter-spacing="2">TIER 2  ·  ANALYSIS</text>
+    <text x="846" y="234" text-anchor="end" class="mono" fill="#fff" font-size="12" opacity="0.95">n=4 · parallel</text>
+
+    <text x="508" y="280" class="hand ink-fill" font-size="22">4 analysts pull it</text>
+    <text x="508" y="306" class="hand ink-fill" font-size="22">apart, each their</text>
+    <text x="508" y="332" class="hand ink-fill" font-size="22">own way.</text>
+
+    <!-- four labeled chips -->
+    <g transform="translate(508 360)" class="hand ink-fill" font-size="18">
+      <g>
+        <rect x="0"   y="0" width="160" height="32" rx="16" ry="16" filter="url(#ink-soft)" fill="#FAF7EE" class="ink-stroke" stroke-width="2"/>
+        <circle cx="14" cy="16" r="5" class="t2-fill"/>
+        <text x="26" y="22">fundamental</text>
+      </g>
+      <g transform="translate(176 0)">
+        <rect x="0"   y="0" width="160" height="32" rx="16" ry="16" filter="url(#ink-soft)" fill="#FAF7EE" class="ink-stroke" stroke-width="2"/>
+        <circle cx="14" cy="16" r="5" class="t2-fill"/>
+        <text x="26" y="22">technical</text>
+      </g>
+      <g transform="translate(0 42)">
+        <rect x="0"   y="0" width="160" height="32" rx="16" ry="16" filter="url(#ink-soft)" fill="#FAF7EE" class="ink-stroke" stroke-width="2"/>
+        <circle cx="14" cy="16" r="5" class="t2-fill"/>
+        <text x="26" y="22">whale-sentiment</text>
+      </g>
+      <g transform="translate(176 42)">
+        <rect x="0"   y="0" width="160" height="32" rx="16" ry="16" filter="url(#ink-soft)" fill="#FAF7EE" class="ink-stroke" stroke-width="2"/>
+        <circle cx="14" cy="16" r="5" class="t2-fill"/>
+        <text x="26" y="22">quant</text>
+      </g>
+    </g>
+
+    <text x="508" y="500" class="mono muted-fill" font-size="11">read-only · all in parallel</text>
+  </g>
+
+  <!-- arrow P2 → P3 -->
+  <path d="M 866 372 q 12 -6 22 0" fill="none" class="ink-stroke" stroke-width="2.5" marker-end="url(#ah-ink)" filter="url(#ink-soft)"/>
+
+  <!-- ── PANEL 3 · TIER 3 DECISION ── -->
+  <g>
+    <rect x="894" y="216" width="380" height="320" rx="10" ry="10" filter="url(#ink-soft)" class="ink-fill" opacity="0.92"/>
+    <rect x="888" y="210" width="380" height="320" rx="10" ry="10" filter="url(#ink)" fill="#FAF7EE" class="ink-stroke" stroke-width="3"/>
+    <path d="M 888 210 h 380 v 36 q 0 -8 -8 -8 h -364 q -8 0 -8 8 z" filter="url(#ink)" class="t3-fill"/>
+    <text x="908" y="234" class="sans" fill="#fff" font-size="15" font-weight="700" letter-spacing="2">TIER 3  ·  DECISION</text>
+    <text x="1250" y="234" text-anchor="end" class="mono" fill="#fff" font-size="12" opacity="0.95">n=4 · serial</text>
+
+    <text x="912" y="280" class="hand ink-fill" font-size="22">Three voices argue.</text>
+    <text x="912" y="306" class="hand ink-fill" font-size="22">One takes the pen.</text>
+
+    <!-- bull / bear / risk → writer (visual converge) -->
+    <g transform="translate(912 330)">
+      <!-- three speech labels stacked -->
+      <g class="hand ink-fill" font-size="18">
+        <g>
+          <rect x="0"  y="0"  width="120" height="28" rx="14" ry="14" filter="url(#ink-soft)" fill="#FAF7EE" class="ink-stroke" stroke-width="2"/>
+          <text x="12" y="19">🐂 bull</text>
+        </g>
+        <g transform="translate(0 36)">
+          <rect x="0"  y="0"  width="120" height="28" rx="14" ry="14" filter="url(#ink-soft)" fill="#FAF7EE" class="ink-stroke" stroke-width="2"/>
+          <text x="12" y="19">🐻 bear</text>
+        </g>
+        <g transform="translate(0 72)">
+          <rect x="0"  y="0"  width="120" height="28" rx="14" ry="14" filter="url(#ink-soft)" fill="#FAF7EE" class="ink-stroke" stroke-width="2"/>
+          <text x="12" y="19">⚖ risk</text>
+        </g>
+      </g>
+      <!-- converging fan arrows -->
+      <g fill="none" class="t3-fill" >
+        <path d="M 124 14 C 180 14, 200 50, 240 64"  stroke="#9E3E3C" stroke-width="1.8" stroke-linecap="round"/>
+        <path d="M 124 50 C 180 50, 210 56, 240 64"  stroke="#9E3E3C" stroke-width="1.8" stroke-linecap="round"/>
+        <path d="M 124 86 C 180 86, 210 76, 240 64"  stroke="#9E3E3C" stroke-width="1.8" stroke-linecap="round"/>
+      </g>
+      <!-- the writer chip (focal) -->
+      <g transform="translate(240 44)">
+        <rect x="0" y="0" width="120" height="40" rx="20" ry="20" filter="url(#ink)" fill="#FAF7EE" stroke="#9E3E3C" stroke-width="4"/>
+        <text x="60" y="26" text-anchor="middle" class="mono cinnabar-fill" font-size="13" font-weight="700">✏ writer</text>
+      </g>
+    </g>
+
+    <text x="912" y="500" class="mono muted-fill" font-size="11">bull · bear · risk · report-writer</text>
+  </g>
+
+  <!-- arrow P3 → P4 -->
+  <path d="M 1270 372 q 12 -6 22 0" fill="none" class="ink-stroke" stroke-width="2.5" marker-end="url(#ah-ink)" filter="url(#ink-soft)"/>
+
+  <!-- ── PANEL 4 · TIER 4 AUDIT ── -->
+  <g>
+    <rect x="1298" y="216" width="380" height="320" rx="10" ry="10" filter="url(#ink-soft)" class="ink-fill" opacity="0.92"/>
+    <rect x="1292" y="210" width="380" height="320" rx="10" ry="10" filter="url(#ink)" fill="#FAF7EE" class="ink-stroke" stroke-width="3"/>
+    <path d="M 1292 210 h 380 v 36 q 0 -8 -8 -8 h -364 q -8 0 -8 8 z" filter="url(#ink)" class="t4-fill"/>
+    <text x="1312" y="234" class="sans" fill="#fff" font-size="15" font-weight="700" letter-spacing="2">TIER 4  ·  AUDIT</text>
+    <text x="1654" y="234" text-anchor="end" class="mono" fill="#fff" font-size="12" opacity="0.95">n=1 · post-mortem</text>
+
+    <text x="1316" y="280" class="hand ink-fill" font-size="22">After hours,</text>
+    <text x="1316" y="306" class="hand ink-fill" font-size="22">the introspector</text>
+    <text x="1316" y="332" class="hand ink-fill" font-size="22">dreams up edits</text>
+    <text x="1316" y="358" class="hand ink-fill" font-size="22">to memory.</text>
+
+
+
+    <!-- introspector chip -->
+    <g transform="translate(1316 400)">
+      <rect x="0" y="0" width="180" height="34" rx="17" ry="17" filter="url(#ink-soft)" fill="#FAF7EE" class="ink-stroke" stroke-width="2"/>
+      <circle cx="16" cy="17" r="5" class="t4-fill"/>
+      <text x="28" y="23" class="mono ink-fill" font-size="13">introspector</text>
+    </g>
+
+    <text x="1316" y="500" class="mono muted-fill" font-size="11">proposes → _proposed/  ·  human approves</text>
+  </g>
+
+  <!-- ═════════════════ THE SPLASH MOMENT ═════════════════ -->
+  <!-- Big horizontal panel at y=580, w=full, h=240 -->
+  <g transform="translate(0 0)">
+    <!-- shadow -->
+    <rect x="86" y="586" width="1554" height="240" rx="12" ry="12" filter="url(#ink-soft)" class="ink-fill" opacity="0.92"/>
+    <!-- body -->
+    <rect x="80" y="580" width="1554" height="240" rx="12" ry="12" filter="url(#ink)" fill="#FAF7EE" class="ink-stroke" stroke-width="3.5"/>
+
+    <!-- starburst glow behind writer -->
+    <circle cx="380" cy="700" r="160" fill="url(#cinnabar-glow)"/>
+    <!-- subtle radial action lines -->
+    <g class="cinnabar-stroke" stroke-width="1.2" opacity="0.35" fill="none">
+      <line x1="380" y1="700" x2="180" y2="580"/>
+      <line x1="380" y1="700" x2="200" y2="820"/>
+      <line x1="380" y1="700" x2="580" y2="610"/>
+      <line x1="380" y1="700" x2="600" y2="820"/>
+      <line x1="380" y1="700" x2="380" y2="540"/>
+    </g>
+
+    <!-- 24 little dots representing every agent, ONE is the cinnabar pen -->
+    <g transform="translate(120 612)">
+      <!-- 6 cols × 4 rows = 24 -->
+      <g>
+        <!-- generate manually -->
+      </g>
+      <!-- row 0 -->
+      <circle cx="0"   cy="0" r="6" class="muted-fill" opacity="0.45"/>
+      <circle cx="22"  cy="0" r="6" class="muted-fill" opacity="0.45"/>
+      <circle cx="44"  cy="0" r="6" class="muted-fill" opacity="0.45"/>
+      <circle cx="66"  cy="0" r="6" class="muted-fill" opacity="0.45"/>
+      <circle cx="88"  cy="0" r="6" class="muted-fill" opacity="0.45"/>
+      <circle cx="110" cy="0" r="6" class="muted-fill" opacity="0.45"/>
+      <!-- row 1 -->
+      <circle cx="0"   cy="22" r="6" class="muted-fill" opacity="0.45"/>
+      <circle cx="22"  cy="22" r="6" class="muted-fill" opacity="0.45"/>
+      <circle cx="44"  cy="22" r="6" class="muted-fill" opacity="0.45"/>
+      <circle cx="66"  cy="22" r="6" class="muted-fill" opacity="0.45"/>
+      <circle cx="88"  cy="22" r="6" class="muted-fill" opacity="0.45"/>
+      <circle cx="110" cy="22" r="6" class="muted-fill" opacity="0.45"/>
+      <!-- row 2 — the cinnabar writer in the middle -->
+      <circle cx="0"   cy="44" r="6" class="muted-fill" opacity="0.45"/>
+      <circle cx="22"  cy="44" r="6" class="muted-fill" opacity="0.45"/>
+      <circle cx="44"  cy="44" r="13" fill="none" class="cinnabar-stroke" stroke-width="2.5"/>
+      <circle cx="44"  cy="44" r="7" class="cinnabar-fill"/>
+      <circle cx="66"  cy="44" r="6" class="muted-fill" opacity="0.45"/>
+      <circle cx="88"  cy="44" r="6" class="muted-fill" opacity="0.45"/>
+      <circle cx="110" cy="44" r="6" class="muted-fill" opacity="0.45"/>
+      <!-- row 3 -->
+      <circle cx="0"   cy="66" r="6" class="muted-fill" opacity="0.45"/>
+      <circle cx="22"  cy="66" r="6" class="muted-fill" opacity="0.45"/>
+      <circle cx="44"  cy="66" r="6" class="muted-fill" opacity="0.45"/>
+      <circle cx="66"  cy="66" r="6" class="muted-fill" opacity="0.45"/>
+      <circle cx="88"  cy="66" r="6" class="muted-fill" opacity="0.45"/>
+      <circle cx="110" cy="66" r="6" class="muted-fill" opacity="0.45"/>
+
+      <!-- ✏ glyph on the writer dot -->
+      <text x="44" y="49" text-anchor="middle" font-size="10" fill="#fff">✏</text>
+
+      <!-- pointing line to the writer -->
+      <path d="M 44 60 q 0 30 -10 40" fill="none" class="cinnabar-stroke" stroke-width="1.8"/>
+    </g>
+
+    <!-- big speech bubble next to the writer -->
+    <g transform="translate(320 612)">
+      <path d="M 0 18 q 0 -18 20 -18 h 260 q 20 0 20 18 v 50 q 0 18 -20 18 h -40 l -20 24 l -6 -24 h -194 q -20 0 -20 -18 z"
+            filter="url(#ink)" fill="#FAF7EE" class="ink-stroke" stroke-width="3"/>
+      <text x="20" y="36" class="hand ink-fill" font-size="26">Out of all 24 agents,</text>
+      <text x="20" y="66" class="hand cinnabar-fill" font-size="28" font-weight="700">only I hold a pen.</text>
+    </g>
+
+    <!-- THE write edge -->
+    <g>
+      <text x="700" y="690" class="hand soft-fill" font-size="20" font-style="italic">— writes once —</text>
+      <path d="M 680 720 C 880 720, 1040 720, 1220 720"
+            fill="none" class="cinnabar-stroke" stroke-width="5" stroke-linecap="round"
+            marker-end="url(#ah-cinnabar)"/>
+      <g class="cinnabar-stroke" stroke-width="1.6" stroke-linecap="round" opacity="0.55">
+        <line x1="780" y1="700" x2="800" y2="700"/>
+        <line x1="900" y1="700" x2="940" y2="700"/>
+        <line x1="1020" y1="704" x2="1060" y2="704"/>
+        <line x1="780" y1="740" x2="820" y2="740"/>
+        <line x1="940" y1="744" x2="980" y2="744"/>
+      </g>
+    </g>
+
+    <!-- report.md doc icon at far right -->
+    <g transform="translate(1240 608)">
+      <path d="M 0 0 L 120 0 L 152 30 L 152 156 L 0 156 Z" filter="url(#ink)"
+            fill="#FAF7EE" class="ink-stroke" stroke-width="3"/>
+      <path d="M 120 0 L 120 30 L 152 30" fill="none" class="ink-stroke" stroke-width="3"/>
+      <!-- mock content lines -->
+      <g class="cinnabar-stroke" stroke-width="2.2" stroke-linecap="round" opacity="0.7" fill="none">
+        <line x1="18" y1="56" x2="120" y2="56"/>
+        <line x1="18" y1="74" x2="134" y2="74"/>
+        <line x1="18" y1="92" x2="100" y2="92"/>
+        <line x1="18" y1="110" x2="134" y2="110"/>
+        <line x1="18" y1="128" x2="80" y2="128"/>
+      </g>
+      <text x="76" y="184" text-anchor="middle" class="mono cinnabar-fill" font-size="15" font-weight="700">report.md</text>
+    </g>
+
+    <!-- Memory feedback indicator (top-right of splash, clear of icon) -->
+    <text x="1610" y="612" text-anchor="end" class="hand soft-fill" font-size="18" font-style="italic">… everything else just reads.</text>
+  </g>
+
+  <!-- ═════════════════ MEMORY SUBSTRATE ═════════════════ -->
+  <g transform="translate(0 0)">
+    <!-- shadow -->
+    <rect x="86" y="876" width="1240" height="120" rx="14" ry="14" filter="url(#ink-soft)" class="ink-fill" opacity="0.85"/>
+    <!-- body: paper-like memory -->
+    <rect x="80" y="870" width="1240" height="120" rx="14" ry="14" filter="url(#ink)"
+          class="memory-fill" stroke="#181410" stroke-width="3"/>
+    <!-- decorative ruled lines like a notebook -->
+    <g stroke="#C9BE9A" stroke-width="1" opacity="0.8">
+      <line x1="110" y1="904" x2="1280" y2="904"/>
+      <line x1="110" y1="924" x2="1280" y2="924"/>
+      <line x1="110" y1="944" x2="1280" y2="944"/>
+      <line x1="110" y1="964" x2="1280" y2="964"/>
+    </g>
+    <!-- label -->
+    <g transform="translate(108 894)">
+      <text x="0" y="0" class="sans ink-fill" font-size="13" font-weight="700" letter-spacing="2">MEMORY</text>
+      <text x="0" y="22" class="hand soft-fill" font-size="20">a shared notebook everyone reads from,</text>
+      <text x="0" y="48" class="hand soft-fill" font-size="20">but nobody edits directly — only proposes.</text>
+      <text x="0" y="74" class="mono muted-fill" font-size="11">24 markdown dirs · _shared/playbook_V1_V10.md · FTS5 index</text>
+    </g>
+
+    <!-- T4 dream-loop curve — routed around the splash panel on the right margin -->
+    <path d="M 1672 400 C 1760 400, 1770 720, 1320 880"
+          fill="none" stroke="#7A6A4F" stroke-width="2" stroke-dasharray="6 4"
+          marker-end="url(#ah-muted)" opacity="0.75"/>
+    <g transform="translate(1660 540)">
+      <text x="0" y="0" class="hand" font-size="18" font-style="italic" fill="#7A6A4F">dream loop</text>
+      <text x="0" y="22" class="mono" font-size="10" fill="#7A6A4F" opacity="0.85">propose →</text>
+      <text x="0" y="36" class="mono" font-size="10" fill="#7A6A4F" opacity="0.85">_proposed/</text>
+      <text x="0" y="54" class="mono" font-size="10" fill="#7A6A4F" opacity="0.55">no auto-merge</text>
+    </g>
+
+    <!-- 3 little retrieve hooks from above tiers down into memory -->
+    <g class="muted-fill hand" font-style="italic" font-size="14">
+      <path d="M 260 540 q 0 280 0 320" fill="none" stroke="#8A8275" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#ah-muted)"/>
+      <path d="M 660 540 q 0 280 0 320" fill="none" stroke="#8A8275" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#ah-muted)"/>
+      <path d="M 1060 540 q 0 280 0 320" fill="none" stroke="#8A8275" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#ah-muted)"/>
+      <text x="270" y="850" class="hand muted-fill" font-size="14" font-style="italic">retrieve</text>
+      <text x="670" y="850" class="hand muted-fill" font-size="14" font-style="italic">retrieve</text>
+      <text x="1070" y="850" class="hand muted-fill" font-size="14" font-style="italic">retrieve</text>
+    </g>
+  </g>
+
+  <!-- ═════════════════ FOOTER · invariants strip (handwritten) ═════════════════ -->
+  <g transform="translate(80 1040)" class="hand soft-fill" font-size="20">
+    <text x="0" y="0">
+      <tspan class="cinnabar-fill" font-weight="700">one writer</tspan>
+      <tspan dx="14">·</tspan>
+      <tspan dx="14" class="amber-fill" font-weight="700">JSON-locked ingress</tspan>
+      <tspan dx="14">·</tspan>
+      <tspan dx="14">debate then persist</tspan>
+      <tspan dx="14">·</tspan>
+      <tspan dx="14">human approves memory edits</tspan>
+    </text>
+  </g>
+
+  <!-- ═════════════════ SEAL · BRAND ANCHOR ═════════════════ -->
+  <g transform="translate(1668 1024)">
+    <!-- slightly rotated stamped seal -->
+    <g transform="rotate(-3 34 34)">
+      <rect x="0" y="0" width="68" height="68" rx="2" ry="2" filter="url(#ink)" class="cinnabar-deep-fill"/>
+      <text x="34" y="56" text-anchor="middle" font-family="'Noto Serif SC', serif" font-size="54" font-weight="700" fill="#FAF7EE">瀾</text>
+    </g>
+    <text x="-12" y="100" text-anchor="end" class="ser ink-fill" font-size="16" font-weight="600">觀瀾 · Financial Analyst</text>
+    <text x="-12" y="118" text-anchor="end" class="mono muted-fill" font-size="10">v1.0.6 · 2026</text>
+  </g>
+</svg>

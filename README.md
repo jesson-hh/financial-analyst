@@ -1,4 +1,8 @@
 <p align="center">
+  <img src="docs/brand/hero.png" alt="觀瀾 · Financial Analyst — AI 智能投研漫画概览" width="900">
+</p>
+
+<p align="center">
   <h1 align="center">觀瀾 · Financial Analyst</h1>
 </p>
 
@@ -75,14 +79,9 @@ fa data refresh        # smart refresh — skip if everything <24h fresh
 
 Hand it a stock code; 14 specialized AI sub-agents run in 4 trust tiers:
 
-```
-Tier 1 (data, parallel)  →  Tier 2 (analysts, parallel)  →  Tier 3 (decision, serial)  →  Tier 4 (post-mortem)
-─────────────────────       ─────────────────────────      ───────────────────────         ─────────────
-quote · factors             fundamental                    bull-advocate ─┐
-model · news                technical                      bear-advocate ─┤───→ writer    introspector
-F10 · overseas              whale-sentiment                risk-officer   ┘
-sector-rotation             quant                          (single writer)
-```
+<p align="center">
+  <img src="docs/architecture/architecture.png" alt="觀瀾 · Agent Architecture — 24 agents in 4 trust tiers" width="900">
+</p>
 
 Out comes a markdown research report — **rated, attributed, falsifiable**. The `report-writer` is the **only** agent allowed to write report files. Untrusted news/F10 sources are JSON-schema-locked at Tier-1 (no prompt injection). Memory is markdown — edit a `.md`, next report uses it. FTS5 retrieval cuts prompt cost ~60%.
 
