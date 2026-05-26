@@ -53,18 +53,6 @@ pip install financial-analyst==1.0.6    # 1 分钟, 不用再加 [serve] 后缀
 fa start                                 # 零配置一键: 引导 + 后端 + Web UI + 浏览器自动开
 ```
 
-第一次跑会: 选语言 → 选 workspace (可挂 `D:\fa-workspace` 等任意盘, 不绑死系统盘) → 填 LLM key → 选 HF dataset → 启 buddy backend (`:9999`) → 启 Web UI (`:5173`) → 自动开浏览器. Ctrl+C 停所有. 第二次 `fa start` 自动 fast-path 跳到浏览器, 不重启子进程.
-
-高级用户可以分别用各子命令:
-
-```bash
-fa init                # 只跑引导 (workspace + LLM key + 数据包)
-fa report SH600519     # 一次性研报 (~10 分钟, 无 UI)
-fa update              # 检查 PyPI + 自升级 (editable 安装会拒绝)
-fa data refresh        # 智能增量刷新 — 24h 内已更新自动跳过
-fa --tui               # 终端 TUI 而非 Web UI
-```
-
 > **🆕 v1.0.6 亮点** *(2026-05-26)*
 >
 > - **数据下载 3-10× 提速** — `fa init` 自动启用 [hf-mirror.com](https://hf-mirror.com) + `hf_transfer` Rust 多连接下载, CN 用户不再卡 HF. 海外用户 `FA_DATA_SOURCE=hf fa init` 强制走官方源
@@ -99,7 +87,11 @@ fa --tui               # 终端 TUI 而非 Web UI
 <td width="50%" valign="top">
 
 ### 🎯 16-agent 个股深度研报
-给 `SH600519` 一个代码, 10 分钟出完整研报 — 基本面 / 技术面 / 主力 / 量化 / 多空风控辩论 / 复盘自审. **只有 `report-writer` 能写文件**.
+- 10 分钟出完整研报
+- 基本面 · 技术面 · 主力 · 量化
+- 多空 / 风控辩论 → `report-writer` 落笔
+- Tier-4 introspector 复盘自审
+- **只有 `report-writer` 能写文件**
 
 ```bash
 fa report SH600519
@@ -109,7 +101,10 @@ fa report SH600519
 <td width="50%" valign="top">
 
 ### 🌅 晨会简报 (5-agent v2)
-盘前扫: 隔夜美股 + 港股 + VIX + A 股异动 + 催化提取 + 板块轮动 + LLM 综合一段中文 brief.
+- 隔夜美股 + 港股 + VIX
+- A 股异动 + 催化提取
+- 板块轮动
+- LLM 综合中文 brief
 
 ```bash
 fa brief
@@ -121,7 +116,9 @@ fa brief
 <td width="50%" valign="top">
 
 ### 🌍 海外雷达 (v1.9.7 新)
-国际传导分析: SPX/NDX/HSI/VIX/USDCNY → A 股 follow-through 判读 + 明日可执行信号.
+- SPX / NDX / HSI / VIX / USDCNY 传导
+- → A 股 follow-through 判读
+- 明日可执行信号
 
 ```bash
 fa overseas-radar
@@ -131,7 +128,9 @@ fa overseas-radar
 <td width="50%" valign="top">
 
 ### 📈 月级主线雷达
-5 状态产业链分类 (mainline / initiation / revival / decay / cold). 抓 `init → mainline` 金信号 (+5.54pp fwd_60d, 胜率 87%).
+- 5 状态产业链分类
+- mainline / initiation / revival / decay / cold
+- `init → mainline` 金信号: +5.54pp fwd_60d, 胜率 87%
 
 ```bash
 fa mainline
@@ -143,13 +142,18 @@ fa mainline
 <td width="50%" valign="top">
 
 ### 🧠 可插拔记忆
-24 个 per-agent 记忆目录, 全是 markdown. 改 `risk-officer/hard_rules.md`, 下次研报立即遵守. 不改代码. `_shared/playbook_V1_V10.md` 跨 agent 共享.
+- 24 个 per-agent 记忆目录, 全是 markdown
+- 改 `risk-officer/hard_rules.md` → 下次研报立即遵守
+- 不改代码, 不重启
+- `_shared/playbook_V1_V10.md` 跨 agent 共享
 
 </td>
 <td width="50%" valign="top">
 
 ### 💤 Dream 闭环 (自迭代)
-每份研报后 `introspector` 自审, aggregator 聚类提案到 `_proposed/` 等人工 review. **不自动合并** (量化系统错误经验会复利亏损).
+- 每份研报后 `introspector` 自审
+- aggregator 聚类提案 → `_proposed/`
+- **不自动合并** (错误经验会复利亏损)
 
 ```bash
 fa dream --since 30
@@ -161,19 +165,23 @@ fa dream --since 30
 <td width="50%" valign="top">
 
 ### 🔌 4 provider LLM 路由
-`qwen` (国内直连) · `deepseek-chat/reasoner` (Clash + MITM 兼容) · `openai` · `anthropic`. 按 provider 配网络出口, 不被 fake-ip 接管.
+- `qwen` — 国内直连
+- `deepseek-chat / -reasoner` — Clash + MITM
+- `openai` · `anthropic`
+- 按 provider 配网络出口, 不被 fake-ip 接管
 
 ```bash
-financial-analyst  # /model deepseek-reasoner
+financial-analyst    # /model deepseek-reasoner
 ```
 
 </td>
 <td width="50%" valign="top">
 
 ### 🧬 BYOM 扩展
-把私有模型 `.py` 写到 `config/plugins.yaml`, 自动进量化共识. **私有 checkpoint 永远不进开源仓库**.
-
-参考 [examples/](examples/) — FM cluster / CSV loader / TDX F10 等.
+- 把 `.py` 丢进 `config/plugins.yaml`
+- 私有模型自动进量化共识
+- **私有 checkpoint 永远不进开源仓库**
+- 参考 [examples/](examples/) — FM cluster / CSV loader / TDX F10
 
 </td>
 </tr>
