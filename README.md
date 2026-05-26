@@ -282,7 +282,9 @@ fa data link --src D:\fa-data
 
 `fa data link` writes `config/loaders.yaml` to point at your extracted directory — no copy, no symlink. Full walkthrough: **[docs/setup/data_offline.md](docs/setup/data_offline.md)**.
 
-Alternative: set `HF_ENDPOINT=https://hf-mirror.com` before `fa init` to use the [hf-mirror](https://hf-mirror.com) CN proxy (community-maintained, fast but occasional sync lag).
+**Auto-acceleration since v1.0.6**: `fa init` defaults `HF_ENDPOINT=https://hf-mirror.com` + enables `hf_transfer` multi-connection downloads (3-10× speedup) — no flag needed. Override either by setting your own env var. Power users outside CN: `FA_DATA_SOURCE=hf fa init` forces canonical hf.co.
+
+**Native ModelScope (魔搭) path**: if the maintainer has mirrored data there (check `HF_PACKAGES.*.modelscope_id`), use `FA_DATA_SOURCE=modelscope` + `pip install 'financial-analyst[modelscope]'` for full-speed CN CDN downloads.
 
 ---
 

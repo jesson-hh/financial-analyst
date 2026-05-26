@@ -224,4 +224,102 @@ fa init --preset demo
 
 ---
 
-> *Last updated 2026-05-25 · financial-analyst v1.0.3*
+## 9. 维护方: 把数据镜像到 ModelScope (魔搭)
+
+> 这部分给 **financial-analyst 维护者** 看. 终端用户不需要看这一节.
+
+从 v1.0.6 起, fa 支持 `FA_DATA_SOURCE=modelscope` 直接走魔搭的国内 CDN
+(满速 30-100 MB/s 常见). 但前提是数据已经镜像上去. 一次性步骤:
+
+### 9.1 注册账号 + 装 SDK
+
+```bash
+# 浏览器开 https://modelscope.cn, 用阿里云账号 / 国内手机号注册 (免费)
+# 完事来个 access token: 个人中心 → 访问令牌 → Git Token (复制)
+
+pip install modelscope
+modelscope login --token <你的-git-token>     # 一次性写到 ~/.modelscope/credentials
+```
+
+### 9.2 上传 3 个数据集
+
+我们的预设 (demo / lite / full) 对应 HF 上的 `yifishbossman/financial-analyst-data-{preset}`. 镜像到 ModelScope 时建议**同名**, 比如 `<你的-ms-用户名>/financial-analyst-data-demo`.
+
+```bash
+# 假设你 ModelScope 用户名 = jesson-hh
+# demo (155 MB, 几分钟):
+modelscope upload \
+  --repo-id jesson-hh/financial-analyst-data-demo \
+  --repo-type dataset \
+  --path ./local-data-demo/   # 你电脑上 HF 下载好的 demo 目录
+
+# lite (3 GB, 半小时):
+modelscope upload \
+  --repo-id jesson-hh/financial-analyst-data-lite \
+  --repo-type dataset \
+  --path ./local-data-lite/
+
+# full (14 GB, 1-2 小时):
+modelscope upload \
+  --repo-id jesson-hh/financial-analyst-data-full \
+  --repo-type dataset \
+  --path ./local-data-full/
+```
+
+或者用 Python:
+
+```python
+from modelscope.hub.api import HubApi
+api = HubApi()
+api.upload_folder(
+    repo_id='jesson-hh/financial-analyst-data-demo',
+    folder_path='./local-data-demo/',
+    repo_type='dataset',
+)
+```
+
+### 9.3 把 ModelScope repo id 填进代码
+
+`src/financial_analyst/init_cli.py` 的 `HF_PACKAGES` 字典, 每个 preset 的 `modelscope_id` 字段填上:
+
+```python
+"demo": {
+    "repo_id":       "yifishbossman/financial-analyst-data-demo",
+    "modelscope_id": "jesson-hh/financial-analyst-data-demo",  # ← 填这个
+    ...
+},
+```
+
+Commit, bump 个 patch 版 (例 1.0.6), tag + push, CI 自动发 PyPI.
+
+### 9.4 用户切换到 ModelScope
+
+```cmd
+:: 临时一次性
+set FA_DATA_SOURCE=modelscope
+fa init --preset demo
+
+:: 或永久写到 .env
+echo FA_DATA_SOURCE=modelscope >> %USERPROFILE%\.financial-analyst\.env
+```
+
+需要装 modelscope extra:
+
+```cmd
+pip install 'financial-analyst[modelscope]'
+```
+
+不装的话 fa 会自动 fallback 到 HF (with hf-mirror).
+
+### 9.5 后续数据更新
+
+每次本地数据有大更新 (新季度财报 / 新代码加入 / 5min 增量), 重传一遍即可:
+
+```bash
+modelscope upload --repo-id jesson-hh/financial-analyst-data-demo --repo-type dataset --path ./local-data-demo/
+# ModelScope 自动做差异同步, 没改过的文件不会重传
+```
+
+---
+
+> *Last updated 2026-05-26 · financial-analyst v1.0.6+*

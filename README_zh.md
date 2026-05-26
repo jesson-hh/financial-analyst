@@ -282,7 +282,9 @@ fa data link --src D:\fa-data
 
 `fa data link` 只改 `config/loaders.yaml` 指向你解压的目录 — 不 copy 不 symlink, 节省磁盘 + 速度最快. 详细流程见 **[docs/setup/data_offline.md](docs/setup/data_offline.md)**.
 
-**替代方案**: 跑 `fa init` 之前 `set HF_ENDPOINT=https://hf-mirror.com`, 走 [hf-mirror](https://hf-mirror.com) 国内代理 (社区维护, 快但偶尔同步延迟).
+**v1.0.6 起自动加速**: `fa init` 默认走 `HF_ENDPOINT=https://hf-mirror.com` + 开启 `hf_transfer` 多连接 (3-10× 提速) — 不需要任何配置. 想自己改 endpoint 设 env var 即可覆盖. 海外用户: `FA_DATA_SOURCE=hf fa init` 强制走 hf.co 官方源.
+
+**ModelScope (魔搭) 国内 CDN**: 维护者镜像数据到 ModelScope 之后 (查 `HF_PACKAGES.*.modelscope_id`), 用 `FA_DATA_SOURCE=modelscope` + `pip install 'financial-analyst[modelscope]'` 即可走满速国内 CDN.
 
 ---
 

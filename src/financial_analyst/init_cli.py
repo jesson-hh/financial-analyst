@@ -81,7 +81,10 @@ def _wizard_ask(prompt_text: str, *, default: str = "", choices=None,
 
 HF_PACKAGES = {
     "demo": {
-        "repo_id":      "yifishbossman/financial-analyst-data-demo",
+        "repo_id":         "yifishbossman/financial-analyst-data-demo",
+        # ModelScope mirror repo id (filled after maintainer uploads). When empty,
+        # we silently fall back to HF source. Same data, same SHAs.
+        "modelscope_id":   "",  # TODO: fill after upload to modelscope.cn
         "size_hint":    "~155 MB",
         "n_stocks":     {"zh": "300 (当前 CSI300 by mv)", "en": "300 (current CSI300 by mv)"},
         "description":  {
@@ -93,7 +96,8 @@ HF_PACKAGES = {
         "color":        "green",
     },
     "lite": {
-        "repo_id":      "yifishbossman/financial-analyst-data-lite",
+        "repo_id":         "yifishbossman/financial-analyst-data-lite",
+        "modelscope_id":   "",  # TODO
         "size_hint":    "~3 GB",
         "n_stocks":     {"zh": "800 (CSI800 ≈)", "en": "800 (CSI800 ≈)"},
         "description":  {
@@ -105,7 +109,8 @@ HF_PACKAGES = {
         "color":        "cyan",
     },
     "full": {
-        "repo_id":      "yifishbossman/financial-analyst-data-full",
+        "repo_id":         "yifishbossman/financial-analyst-data-full",
+        "modelscope_id":   "",  # TODO
         "size_hint":    "~14 GB",
         "n_stocks":     {"zh": "全 A 股 5500+ (含退市)", "en": "5500+ all A-share (incl. delisted)"},
         "description":  {
@@ -802,21 +807,110 @@ def _step_pick_package(non_interactive: bool, preset: Optional[str],
     return {"1": "demo", "2": "lite", "3": "full", "4": "skip"}[choice]
 
 
+def _resolve_data_source() -> str:
+    """Pick the data source for download.
+
+    Priority: ``FA_DATA_SOURCE`` env (``hf`` / ``hf-mirror`` / ``modelscope``)
+    → ``hf-mirror`` default (best for CN users + zero-config for everyone
+    else thanks to the mirror's global edge nodes).
+
+    A power user overseas who explicitly wants the canonical hf.co can set
+    ``FA_DATA_SOURCE=hf`` to bypass the mirror.
+    """
+    raw = os.environ.get("FA_DATA_SOURCE", "").strip().lower()
+    if raw in ("hf", "hf-mirror", "modelscope"):
+        return raw
+    return "hf-mirror"
+
+
+def _download_from_modelscope(preset: str, target: Path, lang: str) -> bool:
+    """Download from modelscope.cn (CN-native, free, full-speed CN CDN).
+
+    Requires `pip install 'financial-analyst[modelscope]'` because the
+    `modelscope` SDK pulls heavy ML deps we don't otherwise need.
+    """
+    pkg = HF_PACKAGES[preset]
+    ms_id = pkg.get("modelscope_id", "").strip()
+    if not ms_id:
+        console.print(
+            "  [yellow]⚠ ModelScope mirror not yet uploaded for this preset "
+            "(modelscope_id is empty in HF_PACKAGES).[/yellow]\n"
+            "  [dim]Falling back to HuggingFace source.[/dim]"
+        )
+        return False
+    try:
+        from modelscope.hub.snapshot_download import snapshot_download as ms_snapshot
+    except ImportError:
+        console.print(
+            "  [red]✗ ModelScope SDK not installed.[/red]\n"
+            "  [dim]Install: [cyan]pip install 'financial-analyst[modelscope]'[/cyan][/dim]"
+        )
+        return False
+    console.print(f"  [dim]via ModelScope · {ms_id}[/dim]")
+    target.mkdir(parents=True, exist_ok=True)
+    t0 = time.time()
+    try:
+        # ModelScope's snapshot_download returns the path it downloaded to;
+        # we pass cache_dir so the layout is predictable (cache_dir/<id>/...).
+        # For a clean unified target/cn_data/ layout matching HF, we then
+        # rsync-style copy from the cache subdir into target/.
+        ms_local = ms_snapshot(
+            ms_id,
+            repo_type="dataset",
+            cache_dir=str(target.parent / ".ms-cache"),
+        )
+        ms_local = Path(ms_local)
+        # Mirror contents to target/ (idempotent — overwrites)
+        import shutil as _shutil
+        for child in ms_local.iterdir():
+            dest = target / child.name
+            if child.is_dir():
+                if dest.exists():
+                    _shutil.rmtree(dest)
+                _shutil.copytree(child, dest)
+            else:
+                _shutil.copy2(child, dest)
+    except Exception as e:
+        console.print()
+        console.print(f"  [red]✗ {_t('dl_fail', lang)}:[/red] "
+                      f"[dim]{type(e).__name__}:[/dim] {e}")
+        return False
+    console.print()
+    console.print(f"  [green]✓[/green] {_t('dl_done', lang)} "
+                  f"[dim]({time.time() - t0:.0f}s · via ModelScope)[/dim]")
+    return True
+
+
 def _download_package(preset: str, target: Path, lang: str) -> bool:
-    """Download the data package from HuggingFace into target.
+    """Download the data package into target.
+
+    Source picked by ``_resolve_data_source()`` (``FA_DATA_SOURCE`` env).
+    Defaults to hf-mirror.com transparently — auto-sets two env vars
+    before calling ``huggingface_hub.snapshot_download``:
+
+      * ``HF_ENDPOINT=https://hf-mirror.com`` (CN community mirror, syncs
+        from HF in real time, multi-Gbps CN CDN)
+      * ``HF_HUB_ENABLE_HF_TRANSFER=1`` (uses the ``hf_transfer`` rust
+        helper for multi-connection downloads, 3-10x speedup observed)
+
+    Both use ``setdefault`` so power users who've set their own values
+    (e.g. ``HF_ENDPOINT=https://huggingface.co`` to force canonical hf.co
+    from a VPN) keep theirs.
 
     Note: we deliberately do NOT wrap snapshot_download in a Rich Progress.
     huggingface_hub emits its own per-file tqdm output, and stacking two
-    progress UIs makes the screen look glitchy. We just print a header Panel
-    before, let HF's tqdm flow naturally, and print a done line after.
+    progress UIs makes the screen look glitchy.
     """
     pkg = HF_PACKAGES[preset]
+    source = _resolve_data_source()
+
     console.print()
     title = _t("dl_panel_title", lang).format(preset=preset)
     eta_line = _t("dl_panel_eta", lang).format(size=pkg["size_hint"], eta=pkg["eta"])
+    src_repo_id = pkg["repo_id"] if source != "modelscope" else pkg.get("modelscope_id") or pkg["repo_id"]
     console.print(Panel.fit(
-        f"[bold]{pkg['repo_id']}[/bold]  →  [cyan]{target}[/cyan]\n"
-        f"[dim]{eta_line}[/dim]",
+        f"[bold]{src_repo_id}[/bold]  →  [cyan]{target}[/cyan]\n"
+        f"[dim]{eta_line}  ·  via [bold]{source}[/bold][/dim]",
         title=f"[{pkg['color']}]{title}[/{pkg['color']}]",
         border_style=pkg["color"],
         padding=(0, 2),
@@ -824,15 +918,29 @@ def _download_package(preset: str, target: Path, lang: str) -> bool:
     console.print()
 
     target.mkdir(parents=True, exist_ok=True)
+
+    # ── ModelScope path ──
+    if source == "modelscope":
+        ok = _download_from_modelscope(preset, target, lang)
+        if ok:
+            return True
+        console.print("  [dim]Falling through to HF source...[/dim]")
+        # fall through to HF as backup
+
+    # ── HF / hf-mirror path ──
     try:
         from huggingface_hub import snapshot_download
     except ImportError:
         console.print("[red]✗ huggingface_hub missing. Run: pip install huggingface_hub[/red]")
         return False
 
+    # Auto-config endpoint + multi-connection unless user has overridden
+    if source == "hf-mirror":
+        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+    os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+
     t0 = time.time()
     try:
-        # HF's tqdm progress streams to stderr/stdout natively. Don't wrap it.
         snapshot_download(
             repo_id=pkg["repo_id"],
             repo_type="dataset",
@@ -843,11 +951,28 @@ def _download_package(preset: str, target: Path, lang: str) -> bool:
         console.print()
         console.print(f"  [red]✗ {_t('dl_fail', lang)}:[/red] [dim]{type(e).__name__}:[/dim] {e}")
         console.print(f"  [dim]{_t('dl_fail_hints', lang)}[/dim]")
-        return False
+        # If hf_transfer is the trouble (occasionally crashes on flaky networks),
+        # retry once without it for resilience.
+        if "hf_transfer" in str(e) or "HF_HUB_ENABLE_HF_TRANSFER" in str(e):
+            console.print("  [dim]Retrying without hf_transfer multi-connection...[/dim]")
+            os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+            try:
+                snapshot_download(
+                    repo_id=pkg["repo_id"],
+                    repo_type="dataset",
+                    local_dir=str(target),
+                    local_dir_use_symlinks=False,
+                )
+            except Exception as e2:
+                console.print(f"  [red]✗ retry also failed:[/red] [dim]{type(e2).__name__}:[/dim] {e2}")
+                return False
+        else:
+            return False
 
     console.print()
+    src_label = source if source != "hf-mirror" else "hf-mirror.com"
     console.print(f"  [green]✓[/green] {_t('dl_done', lang)} "
-                  f"[dim]({time.time() - t0:.0f}s)[/dim]")
+                  f"[dim]({time.time() - t0:.0f}s · via {src_label})[/dim]")
     return True
 
 

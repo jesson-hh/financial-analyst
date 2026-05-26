@@ -65,6 +65,7 @@ dependencies = [
     "requests>=2.31",          # collectors / tushare HTTP
     "fastapi>=0.110",          # buddy SSE backend (fa serve / fa start)
     "uvicorn>=0.29",           # ASGI server for buddy
+    "hf-transfer>=0.1.6",      # multi-connection HF downloads (3-10x speedup for CN users on hf-mirror)
 ]
 
 [project.optional-dependencies]
@@ -75,6 +76,9 @@ dev = [
     "ruff>=0.5",
     "build>=1.0",
     "twine>=5.0",
+]
+modelscope = [
+    "modelscope>=1.21",        # CN-native alternative to HuggingFace
 ]
 
 [project.urls]
