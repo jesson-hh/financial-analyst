@@ -286,6 +286,39 @@ fa data link --src D:\fa-data
 
 ---
 
+## 🔧 可选组件 · OpenCLI (新闻 / 雪球 / 同花顺 F10)
+
+部分 sub-agent 跟 buddy tool 要去抓**需要浏览器 session 或反爬的站点**, 用 **OpenCLI** 做桥. 是个 Node.js 命令行: `npm install -g @jackwener/opencli`. 可选但推荐.
+
+| 功能 | 需要 OpenCLI? | 不装会怎样 |
+|------|:---:|------|
+| `fa report SH600519` 核心研报 (估值 / 技术 / 量化 / 多空辩论) | ❌ | 完整能跑 — 全用本地 Qlib bin + pytdx |
+| `fa report` 里的新闻段 | ✅ | 段落空 (不会崩) |
+| `fa news-collect` (东方财富 / 新浪 7×24 快讯) | ✅ | 直接报错给装包提示 |
+| `fa news-collect --sources xueqiu-*` (雪球散户情绪) | ✅ + Chrome 扩展 | 还要装 [OpenCLI Chrome 扩展](https://chromewebstore.google.com/detail/opencli/ildkmabpimmkaediidaifkhjpohdnifk) + 登陆雪球 |
+| UI 里 buddy tool: 雪球关注列表 / 资金流 / 同花顺 iwencai | ✅ | 工具返回"opencli 未安装"带命令提示 |
+
+```cmd
+:: 最低安装 (前置: nodejs.org 装 Node ≥ 21)
+npm install -g @jackwener/opencli
+opencli --version              :: 验证
+
+:: ths-extra 插件 (F10 / 资金流 / iwencai). 两条路:
+opencli plugin install https://github.com/jesson-hh/financial-analyst.git#main:opencli-plugin-ths-extra  :: pip 装的用这条
+opencli plugin install file:///G:/financial-analyst/opencli-plugin-ths-extra                              :: 源码 clone 的用这条
+
+:: Chrome 扩展 (要抓雪球才需要)
+:: https://chromewebstore.google.com/detail/opencli/ildkmabpimmkaediidaifkhjpohdnifk
+
+:: 第一次抓
+fa news-collect                :: 默认源, 约 200 条
+fa doctor                      :: 检查所有桥
+```
+
+详细步骤 (含 Node.js 装 / 镜像换源 / 常见坑): [`小白指南 Step 8`](docs/setup/beginner_zh.md#第-8-步-可选--装-opencli-解锁新闻--雪球--同花顺-5-10-分钟). 雪球 cookie-mode 配置: [`xueqiu_setup.md`](docs/xueqiu_setup.md).
+
+---
+
 ## 🔌 LLM Provider
 
 financial-analyst 是个 **重工具调用的 24-agent 系统** — Tier-1 调 buddy tools, Tier-2 跨股 join 数据, Tier-3 写带 `[V#]/[F#]` 锚点的结构化研报, 全系统只有 `report-writer` 一个能落盘. **你选什么 LLM 直接决定 swarm 到底用工具还是凭训练记忆瞎编**.

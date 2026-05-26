@@ -252,6 +252,29 @@ _T = {
               "  [cyan]fa data bootstrap --preset demo[/cyan]        # download only",
     },
 
+    "step_opencli_title":     {"zh": "可选: OpenCLI", "en": "Optional: OpenCLI"},
+    "step_opencli_subtitle":  {"zh": "装上才能搜雪球 / 同花顺 F10 / 新闻", "en": "Needed for xueqiu / THS / news collectors"},
+    "step_opencli_have":      {"zh": "[green]✓[/green] 已检测到 OpenCLI 在 PATH 上, 完整功能可用.",
+                                "en": "[green]✓[/green] OpenCLI detected on PATH — full features available."},
+    "step_opencli_missing":   {
+        "zh": "[yellow]未检测到 OpenCLI[/yellow] (这是个 Node.js 命令行, 给 agent 抓雪球 / 同花顺 / 新闻 用).\n\n"
+              "[bold]没装也可以现在跑[/bold] — 基本研报 (估值 / 技术 / 量化) 全都用本地数据, 不依赖 OpenCLI.\n"
+              "受影响的: 研报里的[bold]新闻段会空[/bold], `fa news-collect` 跑不起来, UI 里搜雪球 / F10 会报错.\n\n"
+              "[dim]想装的话 (5 分钟):[/dim]\n"
+              "  1. 装 Node.js ≥ 21:  [cyan]https://nodejs.org/en/download/[/cyan]\n"
+              "  2. 装 opencli:        [cyan]npm install -g @jackwener/opencli[/cyan]\n"
+              "  3. 验证:              [cyan]opencli --version[/cyan]\n\n"
+              "[dim]详细 (含 Chrome 扩展 + ths-extra 插件) 见 [bold]docs/setup/beginner_zh.md[/bold] Step 8.[/dim]",
+        "en": "[yellow]OpenCLI not detected[/yellow] (a Node.js CLI that lets agents fetch xueqiu / THS F10 / news).\n\n"
+              "[bold]You can run without it[/bold] — basic reports (valuation / technical / quant) use local data only.\n"
+              "What's affected: report [bold]news section will be empty[/bold], `fa news-collect` won't run, UI's xueqiu / F10 search will error.\n\n"
+              "[dim]To install later (5 min):[/dim]\n"
+              "  1. Node.js ≥ 21:    [cyan]https://nodejs.org/en/download/[/cyan]\n"
+              "  2. opencli:         [cyan]npm install -g @jackwener/opencli[/cyan]\n"
+              "  3. Verify:          [cyan]opencli --version[/cyan]\n\n"
+              "[dim]Details (with Chrome ext + ths-extra plugin) in [bold]docs/setup/beginner_zh.md[/bold] Step 8.[/dim]",
+    },
+
     "skip_msg":           {"zh": "⏭ 跳过数据包下载. 如已有数据, 编辑",
                            "en": "⏭ Skipping download. If you already have data, edit"},
     "skip_msg_tail":      {"zh": "指向你的目录.",
@@ -798,6 +821,33 @@ def _verify(data_dir: Path, lang: str) -> bool:
         return False
 
 
+def _step_opencli_check(lang: str) -> None:
+    """Step 4.5 — Detect OpenCLI on PATH; print a friendly hint if missing.
+
+    Non-blocking: never aborts wizard. Just informs the user whether they
+    have full vs basic capability after init.
+
+    Why this lives here (not as a `fa` subcommand or `doctor` check):
+    onboarding is the one moment the user is patient + reading carefully.
+    If they hit a missing-opencli error 3 days later when clicking "搜雪球",
+    they're frustrated.
+    """
+    import shutil as _shutil
+    _step_header(5, 5,
+                 _t("step_opencli_title", lang),
+                 _t("step_opencli_subtitle", lang),
+                 lang=lang)
+    if _shutil.which("opencli"):
+        console.print(f"  {_t('step_opencli_have', lang)}")
+    else:
+        console.print(Panel(
+            _t("step_opencli_missing", lang),
+            border_style="yellow",
+            padding=(0, 2),
+            width=88,
+        ))
+
+
 def _step_completion(env: dict, env_path: Path, config_path: Path,
                      data_dir: Path, downloaded: bool, lang: str) -> None:
     console.print()
@@ -930,6 +980,9 @@ def init_cmd(
             f"[cyan]{config_path}[/cyan] [dim]{_t('skip_msg_tail', chosen_lang)}[/dim]"
         )
         _write_loaders_config(data_dir, config_path, chosen_lang)
+
+    # Step 4.5 — OpenCLI detection (optional, non-blocking)
+    _step_opencli_check(chosen_lang)
 
     # Write .env (last, so all collected keys land)
     console.print()

@@ -290,6 +290,134 @@ http://127.0.0.1:5173/
 
 ---
 
+## 第 8 步 (可选) · 装 OpenCLI 解锁新闻 / 雪球 / 同花顺 (5-10 分钟)
+
+> **跳过会怎样**: 第 7 步那种研报照样跑, 但研报里**新闻 / F10 段会空**. UI 里"搜雪球"/"看龙虎榜"这种 agent 工具会报错 "opencli not found".
+>
+> **如果你只关心估值 / 技术 / 量化, 可以跳过这步.** 想要 agent 能自动搜公司新闻 / 雪球评论 / 龙虎榜 / 十大流通股东 / 同花顺 F10, 就装一下。
+
+### 8.1 装 Node.js (3 分钟)
+
+OpenCLI 是 Node.js 命令行工具, 所以先装 Node.
+
+浏览器开 **https://nodejs.org/zh-cn/download** , 选 **"LTS" (左边那个稳定版, 现在是 22.x)**, 下 Windows Installer (`.msi`).
+
+双击安装. 一路 Next 即可. 安装结束后**关掉所有黑窗口**, 重新开一个 (Win 键 + cmd 回车), 否则 PATH 没刷新。
+
+验证:
+
+```cmd
+node --version
+npm --version
+```
+
+应该看到类似:
+```
+v22.x.x
+10.x.x
+```
+
+### 8.2 (国内用户) 换 npm 镜像源
+
+npm 默认源在国外, 慢. 一行换淘宝镜像:
+
+```cmd
+npm config set registry https://registry.npmmirror.com
+```
+
+### 8.3 装 OpenCLI 本体
+
+```cmd
+npm install -g @jackwener/opencli
+```
+
+回车后 npm 会装一堆包. 看到 `added xxx packages` 就是成了. 验证:
+
+```cmd
+opencli --version
+```
+
+应该输出 OpenCLI 版本号. 输 "不是内部命令" 说明 npm 全局路径没在 PATH 里, **关黑窗口重新开**通常能修。
+
+### 8.4 装 ths-extra 插件 (同花顺 F10 / 资金流要这个)
+
+我们的仓库里自带这个插件 (位于 `opencli-plugin-ths-extra/` 下). 装方法**取决于你装 fa 的方式**:
+
+**A. pip 装的 (大多数情况):** 没有源码目录, 直接从 GitHub 拉:
+
+```cmd
+opencli plugin install https://github.com/jesson-hh/financial-analyst.git#main:opencli-plugin-ths-extra
+```
+
+**B. 源码 clone 的 (开发者):**
+
+```cmd
+:: 假设你 clone 到 G:\financial-analyst
+opencli plugin install file:///G:/financial-analyst/opencli-plugin-ths-extra
+```
+
+验证:
+
+```cmd
+opencli plugin list
+```
+
+应该能看到 `ths-extra` 出现在列表里。
+
+### 8.5 (可选, 但建议) Chrome 扩展 + 雪球登录
+
+雪球的数据 (评论 / 持仓 / 热门 / 关注列表) 要走**已登录的 Chrome session**. 装 Chrome 扩展才能用:
+
+1. 装扩展: [Chrome Web Store · OpenCLI](https://chromewebstore.google.com/detail/opencli/ildkmabpimmkaediidaifkhjpohdnifk) (一键 install)
+2. Chrome 里打开 https://xueqiu.com 用手机号 / 微信登录一次
+3. 验证桥通了:
+
+```cmd
+fa doctor
+```
+
+应该看到 `OpenCLI Chrome ext: ✓ connected · xueqiu cookie: ✓ logged in`.
+
+如果走 npm 镜像装的, doctor 可能还要补一个 `opencli login xueqiu` 跳出登录窗口, 跟着走就行。
+
+### 8.6 第一次抓数据
+
+```cmd
+:: 抓最近 200 条市场 7×24 快讯进本地新闻库
+fa news-collect
+
+:: 抓某只股的雪球评论
+fa news-collect --sources xueqiu-comments --code SH600519 --limit 50
+
+:: 看新闻库统计
+fa news-stats
+```
+
+跑完之后第 7 步的研报里 "新闻 / 主力情绪" 段就有内容了。
+
+### 8.7 常见问题
+
+**Q: `opencli` 命令报"不是内部或外部命令"**
+
+PATH 没刷. **关掉所有黑窗口**, Win 键 + cmd 重开一个. 还是不行检查 `npm root -g`, 把那个目录加进系统 PATH (右键我的电脑 → 高级系统设置 → 环境变量 → PATH 添加).
+
+**Q: `opencli plugin install` 卡住 / 报 git clone 失败**
+
+国内访问 github 慢. 加镜像:
+```cmd
+opencli plugin install https://ghproxy.com/https://github.com/jesson-hh/financial-analyst.git#main:opencli-plugin-ths-extra
+```
+
+**Q: `fa doctor` 显示 Chrome ext 没连**
+
+Chrome 扩展没装 / 没启用. 重新走 8.5 第 1 步, 或者打开 `chrome://extensions/` 看 OpenCLI 是不是被禁用了。
+
+**Q: 不想用雪球数据可以吗**
+
+可以. 8.5 直接跳过即可. 不影响新闻快讯 / F10 / 同花顺 — 那些**不需要 Chrome 扩展**, 走纯命令行。
+
+---
+
 ## 第二天怎么用
 
 电脑重启之后, 后端会停掉. 再开的步骤:

@@ -286,6 +286,39 @@ Alternative: set `HF_ENDPOINT=https://hf-mirror.com` before `fa init` to use the
 
 ---
 
+## 🔧 Optional · OpenCLI (news / xueqiu / THS F10)
+
+Some sub-agents and buddy tools fetch live data from sites that need a browser session or scraping bridge — **OpenCLI** is that bridge. It's a Node.js CLI: `npm install -g @jackwener/opencli`. Optional but recommended.
+
+| Feature | Needs OpenCLI? | What happens without it |
+|---------|:---:|------|
+| `fa report SH600519` core report (valuation / technical / quant / debate) | ❌ | Works fully — uses local Qlib bin data + pytdx |
+| News section in `fa report` | ✅ | Section renders empty (no crash) |
+| `fa news-collect` (eastmoney / sinafinance kuaixun) | ✅ | Errors with install hint |
+| `fa news-collect --sources xueqiu-*` (Xueqiu retail sentiment) | ✅ + Chrome ext | Needs the [OpenCLI Chrome extension](https://chromewebstore.google.com/detail/opencli/ildkmabpimmkaediidaifkhjpohdnifk) and a xueqiu.com login |
+| UI buddy tools: xueqiu watchlist / fund flow / THS iwencai | ✅ | Tool returns "opencli not installed" with install command |
+
+```bash
+# Bare minimum (Node ≥ 21 prerequisite from nodejs.org)
+npm install -g @jackwener/opencli
+opencli --version              # verify
+
+# THS-extra plugin (F10 / fund-flow / iwencai). Either path:
+opencli plugin install https://github.com/jesson-hh/financial-analyst.git#main:opencli-plugin-ths-extra  # for pip-installed users
+opencli plugin install file:///path/to/repo/opencli-plugin-ths-extra                                     # for source clones
+
+# Chrome extension for cookie-mode collectors (xueqiu)
+# https://chromewebstore.google.com/detail/opencli/ildkmabpimmkaediidaifkhjpohdnifk
+
+# First test
+fa news-collect                # default sources, ~200 items
+fa doctor                      # verify all bridges OK
+```
+
+Step-by-step zh guide: [`beginner_zh.md` Step 8](docs/setup/beginner_zh.md#第-8-步-可选--装-opencli-解锁新闻--雪球--同花顺-5-10-分钟). Xueqiu cookie-mode setup: [`xueqiu_setup.md`](docs/xueqiu_setup.md).
+
+---
+
 ## 🔌 LLM Providers
 
 financial-analyst is a **tool-heavy 24-agent system** — Tier-1 calls buddy tools, Tier-2 joins cross-stock data, Tier-3 writes structured reports with `[V#]/[F#]` anchors, and `report-writer` is the only agent allowed to touch disk. **Your LLM choice decides whether the swarm uses its tools or fabricates answers from training data.**
