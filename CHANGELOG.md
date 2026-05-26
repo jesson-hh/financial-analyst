@@ -2,6 +2,41 @@
 
 All notable changes to this project follow [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning 2.0.0](https://semver.org/).
 
+## [1.0.7] — 2026-05-26  · `fa data update` 5 new data types · UI alignment
+
+### Added — `fa data update` covers 5 new data types
+
+`fa data update` previously only refreshed day + 5min + daily_basic. v1.0.7 adds **five new** Parquet/text data sources, all gated behind opt-in flags so default behavior stays fast and zero-token:
+
+- **`--include-f10`** (zero token, pytdx 直连) — TDX 公司大事 / 龙虎榜单 / 研究报告 / 主力追踪 / 最新提示, 5 key categories. Companion `--f10-universe csi300|csi500|csi800|all` (default csi500 ~30 min).
+- **`--include-concepts`** (zero token, adata) — 同花顺 concept master list + per-concept constituents. Companion `--concepts-max-age` (default 30 days) skips fresh concepts. Requires `adata` package (optional extra).
+- **`--include-northbound`** (zero token, akshare) — 沪+深股通 daily net buy/sell history, ~4900 rows / 11 years. Source `stock_hsgt_hist_em` (the per-stock `stock_hsgt_hold_stock_em` is currently broken upstream pending akshare fix).
+- **`--include-financial`** (Tushare opt-in) — income / balancesheet / cashflow incremental by `ann_date`. Companion `--financial-days` (default 7).
+- **`--include-stock-basic`** (Tushare opt-in) — `tushare_stock_basic.parquet` company master list snapshot (~5500 rows).
+
+Tushare token reads `FA_TUSHARE_TOKEN` env or `--tushare-token` flag (never in CLI args / URL / logs). Get one free at https://tushare.pro/.
+
+### Added — UI data-refresh button maps 1:1 to CLI
+
+The status-bar **数据** button now passes query params to `POST /data/refresh`:
+
+- **Plain click** — day + 5min + daily_basic + northbound (~5 min, all zero token)
+- **Shift+click** — full sweep (adds F10 csi500 + concepts + Tushare two; the latter only really run if `FA_TUSHARE_TOKEN` is set server-side)
+
+Tooltip explains both modes. `cache-buster` bumped to `20260526-1`.
+
+### Added — `last_update.py` tracks 8 data types
+
+`DATA_TYPES` extended from 5 to 8 (adds `concepts`, `northbound`, `stock_basic`). `IMPLEMENTED_TYPES` upgraded from 3 to 8 — every type can now be refreshed without a manual cron. Staleness thresholds per type (e.g. financials = 30 days, F10 = 3 days, northbound = 2 days). UI button's red ⚠ badge now clears once you've actually refreshed all data types.
+
+### Internal
+
+- New modules `src/financial_analyst/data/updaters/{f10,concepts,northbound,financial,stock_basic}.py` — vendored core logic from `G:/stocks/...` (research-lab side) with all hardcoded paths replaced by `parquet_root` / `news_data_root` function parameters.
+- `buddy/server.py:POST /data/refresh` extended with 7 query params matching CLI flags. Subprocess inherits `FA_TUSHARE_TOKEN` env from server.
+- `data_cli.update_cmd` gains 7 typer options.
+
+---
+
 ## [1.0.6] — 2026-05-26  · HF auto-acceleration · ModelScope alternative source
 
 ### Added — Auto hf-mirror + hf_transfer multi-connection downloads

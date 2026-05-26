@@ -21,7 +21,7 @@
 <p align="center">
   <a href="https://pypi.org/project/financial-analyst/"><img src="https://img.shields.io/pypi/v/financial-analyst.svg?style=flat&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
   <img src="https://img.shields.io/pypi/pyversions/financial-analyst.svg?style=flat&logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/release-v1.0.6-success?style=flat" alt="Release">
+  <img src="https://img.shields.io/badge/release-v1.0.7-success?style=flat" alt="Release">
   <img src="https://img.shields.io/badge/tests-712_passed-brightgreen?style=flat" alt="Tests">
   <img src="https://img.shields.io/badge/license-Apache_2.0-yellow?style=flat" alt="License">
   <br>
@@ -49,18 +49,17 @@
 </p>
 
 ```bash
-pip install financial-analyst==1.0.6    # 1 minute, no [serve] flag needed
+pip install financial-analyst==1.0.7    # 1 minute, no [serve] flag needed
 fa start                                 # zero-config: wizard + backend + web UI + browser auto-opens
 ```
 
-> **🆕 v1.0.6 highlights** *(2026-05-26)*
+> **🆕 v1.0.7 highlights** *(2026-05-26)*
 >
-> - **3–10× faster data downloads** — `fa init` auto-enables [hf-mirror.com](https://hf-mirror.com) + `hf_transfer` Rust multi-connection downloads; CN users no longer stuck on HF. Overseas users: `FA_DATA_SOURCE=hf fa init` forces the canonical source.
-> - **ModelScope (魔搭) data source** — `pip install 'financial-analyst[modelscope]'`, then `FA_DATA_SOURCE=modelscope fa init` — Aliyun CN-CDN 30–100 MB/s. Demo bundle uploaded.
-> - **`fa init` wizard navigation** — press `b` to step back at any point; the final review screen lets you re-edit any field (v1.0.4 / v1.0.5).
-> - **Zero-extras install** — `pip install financial-analyst` works out of the box. fastapi + uvicorn folded into core; no more `[serve]` suffix.
-> - **`fa start`** + **workspace pinning** — zero-config one-command launch + data can live on any drive (e.g. `D:\fa-workspace`). Second launch fast-paths straight to the browser.
-> - **`fa update`** + **`fa data refresh`** — PyPI self-upgrade (refuses editable installs) + smart incremental refresh (auto-skip if updated within 24h).
+> - **`fa data update` 全开 5 种新数据** — `--include-f10` (TDX 公司大事/龙虎榜/研究报告, 零 token, pytdx 直连) · `--include-concepts` (同花顺概念股 + 成分股, 零 token, adata) · `--include-northbound` (沪+深股通历史资金流向, 零 token, akshare) · `--include-financial` (Tushare 财务三表, opt-in) · `--include-stock-basic` (Tushare 公司基本信息, opt-in)
+> - **UI 数据按钮 Shift+点击全开** — 普通点击 = 日线 + 5min + daily_basic + 北向 (~5 min 安全); Shift+点击 = 全开 (+ F10 csi500 ~30 min + 概念股 + Tushare 两项)
+> - **buddy `/data/refresh` 7 个 query 跟 CLI 一一对齐** — UI 一键映射 CLI flag, Tushare token 走 server env `FA_TUSHARE_TOKEN` 不在 URL 暴露
+> - **`last_update.py` 扩 8 个数据类型** — `/data/status` 现在追踪 day/5min/daily_basic/financials/f10/concepts/stock_basic/northbound 8 类 staleness
+> - **3–10× faster data downloads** (v1.0.6 起) + **ModelScope (魔搭) CN-CDN** (`FA_DATA_SOURCE=modelscope`)
 >
 > Full [CHANGELOG](CHANGELOG.md).
 
@@ -194,7 +193,7 @@ financial-analyst    # /model deepseek-reasoner
 ### A. PyPI (recommended, 1 minute)
 
 ```bash
-pip install financial-analyst==1.0.6
+pip install financial-analyst==1.0.7
 fa start                   # interactive wizard (LLM key + workspace + HF dataset)
                            # then auto-starts backend + UI + browser
 # or non-interactive:
@@ -388,4 +387,4 @@ Personal project, single maintainer. File issues at
 
 Apache 2.0. **Research and educational purposes only**. Drafts analyst-grade work product for review by qualified professionals. Does not make investment recommendations, execute transactions, or post to any ledger. You are responsible for compliance with applicable laws.
 
-<sub>v1.0.6 · 2026-05-26 · made by [@jesson-hh](https://github.com/jesson-hh) · bilingual zh/en</sub>
+<sub>v1.0.7 · 2026-05-26 · made by [@jesson-hh](https://github.com/jesson-hh) · bilingual zh/en</sub>
