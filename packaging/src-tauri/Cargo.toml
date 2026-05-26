@@ -19,6 +19,8 @@ tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# rustls (not native-tls) — pure Rust TLS, no OpenSSL system dep across 4 platforms
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
 [features]
 # 默认 release 不需要 webview2 安装 (Windows 7+ 自带 Edge)

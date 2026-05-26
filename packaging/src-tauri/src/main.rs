@@ -5,7 +5,6 @@
 //
 // 关闭时杀掉 sidecar.
 
-use tauri::Manager;
 use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
 
