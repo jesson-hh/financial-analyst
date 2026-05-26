@@ -178,6 +178,18 @@ def update_cmd(
     concepts_max_age_days: int = typer.Option(
         30, "--concepts-max-age",
         help="概念成分股超过 N 日未刷的重拉 (默认 30)"),
+    include_financial: bool = typer.Option(
+        False, "--include-financial",
+        help="附带刷新财务三表 (income/balancesheet/cashflow). 需 Tushare token."),
+    financial_days: int = typer.Option(
+        7, "--financial-days",
+        help="财务报表拉最近 N 天的 ann_date 公告 (默认 7)"),
+    include_stock_basic: bool = typer.Option(
+        False, "--include-stock-basic",
+        help="附带刷新 tushare_stock_basic (公司基本信息全表). 需 Tushare token."),
+    tushare_token: Optional[str] = typer.Option(
+        None, "--tushare-token",
+        help="Tushare API token. 默认读 FA_TUSHARE_TOKEN env (https://tushare.pro 免费注册)."),
 ):
     """直连增量更新所有数据 — 日线 + 5min + 当日 PE/PB/MV.
 
@@ -254,8 +266,8 @@ def update_cmd(
         if stats_basic.get("ok", 0) > 0:
             _lu.mark_updated("daily_basic")
 
-    # F10 + concepts 走 paths resolver 拿 parquet_root + news_data_root
-    if include_f10 or include_concepts:
+    # F10 / concepts / financial / stock_basic 走 paths resolver
+    if include_f10 or include_concepts or include_financial or include_stock_basic:
         from financial_analyst.data.paths import get_data_paths
         paths = get_data_paths()
 
@@ -299,6 +311,60 @@ def update_cmd(
                     _lu.mark_updated("concepts")
             except ImportError as e:
                 typer.echo(f"\n[concepts ✗] adata 包未装: {e}")
+
+        # Tushare opt-in: financial + stock_basic
+        if include_financial or include_stock_basic:
+            import os
+            token = tushare_token or os.environ.get("FA_TUSHARE_TOKEN", "").strip()
+            if not token:
+                typer.echo(
+                    "\n[Tushare ✗] 需要 token. 设 FA_TUSHARE_TOKEN env 或传 --tushare-token. "
+                    "免费注册 https://tushare.pro/"
+                )
+            else:
+                if include_financial:
+                    from financial_analyst.data.updaters.financial import update_financial
+                    t0 = time.time()
+                    try:
+                        stats_fin = update_financial(
+                            paths.parquet_root,
+                            tushare_token=token,
+                            days=financial_days,
+                            progress=True,
+                        )
+                        typer.echo(
+                            f"\n[financial ✓] income +{stats_fin['income']} "
+                            f"balancesheet +{stats_fin['balancesheet']} "
+                            f"cashflow +{stats_fin['cashflow']} "
+                            f"(失败 APIs: {len(stats_fin['failed_apis'])}) "
+                            f"耗时 {time.time() - t0:.1f}s"
+                        )
+                        n_total = (stats_fin["income"] + stats_fin["balancesheet"]
+                                   + stats_fin["cashflow"])
+                        if n_total > 0:
+                            _lu.mark_updated("financial")
+                    except RuntimeError as e:
+                        typer.echo(f"\n[financial ✗] {e}")
+
+                if include_stock_basic:
+                    from financial_analyst.data.updaters.stock_basic import update_stock_basic
+                    t0 = time.time()
+                    try:
+                        stats_sb = update_stock_basic(
+                            paths.parquet_root,
+                            tushare_token=token,
+                            progress=True,
+                        )
+                        if stats_sb["ok"]:
+                            typer.echo(
+                                f"\n[stock_basic ✓] {stats_sb['rows']:,} 行 "
+                                f"耗时 {time.time() - t0:.1f}s"
+                            )
+                            _lu.mark_updated("stock_basic")
+                        else:
+                            typer.echo(f"\n[stock_basic ✗] {stats_sb.get('error')}")
+                    except RuntimeError as e:
+                        typer.echo(f"\n[stock_basic ✗] {e}")
 
     typer.echo(f"\n=== 完成. 总耗时 {time.time() - overall_t:.1f}s ===")
 
