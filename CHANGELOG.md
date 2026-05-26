@@ -2,6 +2,34 @@
 
 All notable changes to this project follow [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning 2.0.0](https://semver.org/).
 
+## [1.0.5] — 2026-05-26  · Wizard navigation · model picker bug fix
+
+### Added — Review screen at end of `fa init`
+
+After the linear walk-through, the wizard now shows a numbered summary of every collected value (language, workspace + disk free, LLM provider chips, masked Tushare token, data preset) and prompts `[1/2/3/4/5/c/q]`. Digit re-runs that single step (existing "current value as default" UI applies); `c` confirms and triggers commit; `q` exits with **nothing written**. Implemented in `init_cli._show_review` + a new edit loop wrapping the commit phase. Data download was moved from inside the preset step to after confirm, so re-editing the preset doesn't re-download.
+
+### Added — `b` back-navigation during the linear walk
+
+Typing `b` (or `back`) at any prompt during steps 0-4 raises a `WizardBack` exception that the wizard driver catches, decrementing the step index. Mid-step state is preserved (the env dict is shared by reference), so on re-entry already-filled values reappear as defaults.
+
+- New `WizardBack` exception class + `_wizard_ask()` helper at top of `init_cli`. The helper intercepts back tokens BEFORE `Prompt.ask`'s choices-validation runs, so `b` isn't rejected as an invalid choice.
+- All 5 in-step `Prompt.ask` call sites swapped to `_wizard_ask`.
+- `init_cmd`'s linear phase refactored to a step-driver loop with `try/except WizardBack`. CLI `--workspace` / `--preset` overrides are "consumed" on first use so backing into those steps doesn't auto-re-pin to the CLI value.
+- Step 0 (language) catches `WizardBack` and re-prompts with a hint "(已在第一步, 无处可退 / already at first step)".
+- A one-time hint is printed after the welcome panel telling users about `b` and the review-screen edit option.
+
+### Fixed — UI model picker hidden when `.env` lives in workspace
+
+Reported bug: a pip-installed user filled both `DASHSCOPE_API_KEY` and `DEEPSEEK_API_KEY` via `fa init`, but the UI's bottom-bar model picker either hid entirely or showed only one option — they couldn't switch.
+
+Root cause: `cli.py:18` called `load_dotenv(override=True)` with no path argument, which only walks cwd → parents looking for `.env`. For a pip user running `fa start` from default cmd cwd `C:\Users\<name>`, the spawned `fa serve` subprocess inherits that cwd, and `load_dotenv()` never reaches `~/.financial-analyst/.env` (where `fa init` writes). With no API keys in `os.environ`, the `/models` endpoint's per-provider `os.environ.get(api_key_env)` check failed for both providers, all of them landed in `disabled_providers`, and the flat models list was empty. The frontend conditional `s.backendUrl && s.models && s.models.length > 0` then evaluated false, hiding the picker entirely.
+
+Fix: `load_dotenv` is now called three times at module import — once for cwd/parents (legacy), once for `workspace.get_workspace() / ".env"` (canonical pip path), once for `init_cli._project_root() / ".env"` (editable-install equivalent). All with `override=True` so the canonical workspace `.env` wins.
+
+Verified: restarted `fa serve` from a non-repo cwd; `/models` now returns 4 models across both qwen and deepseek; openai/anthropic show up in `disabled_providers` with explicit reason "*_API_KEY not set in env"; UI picker renders and switching works.
+
+---
+
 ## [1.0.4] — 2026-05-26  · Onboarding polish · OpenCLI surface · re-init preservation
 
 ### Added — OpenCLI onboarding wired into every entry point
