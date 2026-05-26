@@ -40,6 +40,42 @@ from rich.text import Text
 console = Console()
 
 
+# ──────────────────────── wizard back-navigation ────────────────────────
+
+
+class WizardBack(Exception):
+    """Raised when the user types ``b`` / ``back`` at a prompt — signals the
+    wizard driver to go to the previous step.
+
+    Mid-step state in the shared ``env`` dict is preserved because steps
+    write through to the same dict; on re-entry to a step, already-filled
+    values reappear as the "current" defaults.
+    """
+
+
+_BACK_TOKENS = {"b", "back", ":b", "B", "BACK"}
+
+
+def _wizard_ask(prompt_text: str, *, default: str = "", choices=None,
+                show_default: bool = False, password: bool = False) -> str:
+    """``Prompt.ask`` wrapper that supports back-navigation.
+
+    - Typing one of ``b`` / ``back`` raises :class:`WizardBack`.
+    - We deliberately do NOT pass ``choices`` to ``Prompt.ask`` so ``b``
+      isn't rejected by its built-in validation. Caller's ``choices``
+      arg is validated here AFTER the back-check.
+    """
+    while True:
+        v = Prompt.ask(prompt_text, default=default,
+                       show_default=show_default, password=password)
+        if v.strip() in _BACK_TOKENS:
+            raise WizardBack()
+        if choices is not None and v not in choices:
+            console.print(f"  [yellow]请输入 {'/'.join(choices)} 之一, 或 [bold]b[/bold] 退回上一步[/yellow]")
+            continue
+        return v
+
+
 # ──────────────────────── package presets (HF repo) ────────────────────────
 
 
@@ -276,6 +312,10 @@ _T = {
               "[dim]Details (with Chrome ext + ths-extra plugin) in [bold]docs/setup/beginner_zh.md[/bold] Step 8.[/dim]",
     },
 
+    # ── Back-navigation hint (shown once after welcome panel) ──
+    "back_hint":              {"zh": "💡 [bold]任何提示处输入 b 回车[/bold] = 退回上一步 · 走完后还能在总览里改任意一步",
+                                "en": "💡 [bold]Type b + Enter at any prompt[/bold] to step back · review screen at end lets you edit any step too"},
+
     # ── Review screen (end-of-wizard summary + edit loop) ──
     "review_title":           {"zh": " 配置总览 ", "en": " Review your setup "},
     "review_help":            {"zh": "[dim]按数字改某步 / 按 [bold]c[/bold] 确认 / 按 [bold]q[/bold] 退出[/dim]",
@@ -495,8 +535,8 @@ def _step_workspace(non_interactive: bool, override: Optional[Path],
         ws = set_workspace(current_ws)
         return ws
 
-    raw = Prompt.ask(_t("step_ws_prompt", lang),
-                     default="", show_default=False)
+    raw = _wizard_ask(_t("step_ws_prompt", lang),
+                      default="", show_default=False)
     raw = raw.strip()
 
     if not raw:
@@ -557,10 +597,9 @@ def _pick_language(env: dict, non_interactive: bool) -> str:
                         padding=(0, 4),
                         width=42))
     default_choice = "1" if current == "zh" else "2"
-    choice = Prompt.ask("  [bold]选择 · Choose[/bold]",
-                       default=default_choice,
-                       choices=["1", "2"],
-                       show_choices=False)
+    choice = _wizard_ask("  [bold]选择 · Choose[/bold]",
+                         default=default_choice,
+                         choices=["1", "2"])
     lang = {"1": "zh", "2": "en"}[choice]
     env["FA_LANG"] = lang
     return lang
@@ -646,8 +685,8 @@ def _step_llm_keys(env: dict, non_interactive: bool, lang: str) -> dict:
             suffix = " " + (_t("step1_prompt_recommended", lang)
                             if is_required_one else _t("step1_prompt_optional", lang))
 
-        v = Prompt.ask(f"  [bold]{prov}[/bold] · {env_var}{suffix}",
-                       default="", show_default=False, password=False)
+        v = _wizard_ask(f"  [bold]{prov}[/bold] · {env_var}{suffix}",
+                        default="", show_default=False, password=False)
         s = v.strip()
 
         if not s:
@@ -709,8 +748,8 @@ def _step_tushare(env: dict, non_interactive: bool, lang: str) -> dict:
     if non_interactive:
         return env
 
-    v = Prompt.ask(f"  [bold]TUSHARE_TOKEN[/bold] {_t('step2_prompt', lang)}",
-                   default="", show_default=False)
+    v = _wizard_ask(f"  [bold]TUSHARE_TOKEN[/bold] {_t('step2_prompt', lang)}",
+                    default="", show_default=False)
     if v.strip():
         # User typed something — overwrite
         env["TUSHARE_TOKEN"] = v.strip()
@@ -757,10 +796,9 @@ def _step_pick_package(non_interactive: bool, preset: Optional[str],
         return preset
 
     console.print()
-    choice = Prompt.ask(f"  [bold]{_t('step3_choose', lang)}[/bold]",
-                        default="1",
-                        choices=["1", "2", "3", "4"],
-                        show_choices=True)
+    choice = _wizard_ask(f"  [bold]{_t('step3_choose', lang)}[/bold]",
+                         default="1",
+                         choices=["1", "2", "3", "4"])
     return {"1": "demo", "2": "lite", "3": "full", "4": "skip"}[choice]
 
 
@@ -1027,40 +1065,100 @@ def init_cmd(
     initial_env_path = _project_root() / ".env"
     env = _read_env(initial_env_path)
 
-    # Step 0 — language
+    # Step 0 — language. "b" at this picker has nowhere to back to, so
+    # we catch WizardBack and just re-prompt.
     if lang in ("zh", "en"):
         env["FA_LANG"] = lang
         chosen_lang = lang
     else:
-        chosen_lang = _pick_language(env, non_interactive=yes)
+        while True:
+            try:
+                chosen_lang = _pick_language(env, non_interactive=yes)
+                break
+            except WizardBack:
+                console.print("  [dim](已在第一步, 无处可退 · already at first step)[/dim]")
 
-    # Step 1 — workspace (NEW). Persists via workspace.set_workspace.
-    # After this call, _project_root() / data_dir / config_path will
-    # all resolve to the chosen workspace for pip-installed users.
-    _step_workspace(non_interactive=yes, override=workspace, lang=chosen_lang)
-
-    # Now re-resolve paths against the (possibly new) workspace
+    # Initial path resolution against whatever workspace is currently
+    # pinned (or DEFAULT if first run). The workspace step in the back-
+    # loop below will re-resolve if the user changes it.
     root = _project_root()
     env_path = root / ".env"
     config_path = root / "config" / "loaders.yaml"
-    # Data dir: --target wins (back-compat), else workspace/data/
     from financial_analyst.workspace import data_dir as _ws_data_dir
     data_dir = target if target else _ws_data_dir()
-
-    # Re-read env if path moved
-    if env_path != initial_env_path:
+    if env_path != initial_env_path and env_path.exists():
         existing = _read_env(env_path)
-        # Merge — workspace .env takes priority, but keep any keys the user
-        # entered in the workspace step (none yet, but be safe)
         env = {**env, **existing}
 
     _step_welcome(env_path, config_path, data_dir, chosen_lang)
 
-    # ─── Linear walk-through of input steps (no commit yet) ───
-    env = _step_llm_keys(env, non_interactive=yes, lang=chosen_lang)
-    env = _step_tushare(env, non_interactive=yes, lang=chosen_lang)
-    chosen_preset = _step_pick_package(non_interactive=yes, preset=preset,
-                                       lang=chosen_lang)
+    # Hint shown once after welcome — tells the user they can type 'b' to
+    # back up at any prompt, and that the review screen at the end lets
+    # them edit any step.
+    if not yes:
+        console.print()
+        console.print(f"  {_t('back_hint', chosen_lang)}")
+
+    # ─── Linear walk-through of input steps with back-navigation ───
+    # Driver: each step is independent + idempotent. WizardBack from any
+    # Prompt rewinds to the previous step. ws_used / preset_used ensure
+    # CLI --workspace / --preset overrides fire only on the first visit
+    # (so re-entering after a back doesn't auto-pin to the CLI value).
+    chosen_preset: Optional[str] = None
+    ws_override_pending = workspace
+    preset_override_pending = preset
+
+    def _do_workspace():
+        nonlocal env_path, config_path, data_dir, env, ws_override_pending
+        _step_workspace(non_interactive=yes, override=ws_override_pending,
+                        lang=chosen_lang)
+        ws_override_pending = None  # consumed
+        # Workspace may have moved — re-resolve dependent paths
+        root2 = _project_root()
+        env_path = root2 / ".env"
+        config_path = root2 / "config" / "loaders.yaml"
+        data_dir = target if target else _ws_data_dir()
+        # Merge env from new workspace's .env if it exists (disk loses to
+        # in-memory edits, which the user just made)
+        if env_path.exists() and env_path != initial_env_path:
+            existing = _read_env(env_path)
+            env = {**existing, **env}
+
+    def _do_llm():
+        nonlocal env
+        env = _step_llm_keys(env, non_interactive=yes, lang=chosen_lang)
+
+    def _do_tushare():
+        nonlocal env
+        env = _step_tushare(env, non_interactive=yes, lang=chosen_lang)
+
+    def _do_package():
+        nonlocal chosen_preset, preset_override_pending
+        chosen_preset = _step_pick_package(non_interactive=yes,
+                                           preset=preset_override_pending,
+                                           lang=chosen_lang)
+        preset_override_pending = None
+
+    step_funcs = [_do_workspace, _do_llm, _do_tushare, _do_package]
+    if yes:
+        # Non-interactive: just run them in order; --yes path doesn't use
+        # WizardBack (no interactive prompts to type 'b' into).
+        # Workspace was already done above (Step 1) — skip re-doing it.
+        for fn in step_funcs[1:]:
+            fn()
+    else:
+        # ↓ Workspace already done as part of pre-step setup; back-loop
+        # starts from LLM keys. We DO want "b at LLM keys" to back into
+        # workspace, so workspace IS in the back-loop too.
+        i = 0
+        while i < len(step_funcs):
+            try:
+                step_funcs[i]()
+                i += 1
+            except WizardBack:
+                i = max(0, i - 1)
+                # Re-show review hint isn't useful mid-loop; the next step
+                # header will appear naturally.
 
     # ─── Review + edit loop (interactive only) ───
     # Walk through all steps once, then show a numbered summary; user can
