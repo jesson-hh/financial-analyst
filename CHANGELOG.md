@@ -2,6 +2,53 @@
 
 All notable changes to this project follow [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning 2.0.0](https://semver.org/).
 
+## [1.0.4] — 2026-05-26  · Onboarding polish · OpenCLI surface · re-init preservation
+
+### Added — OpenCLI onboarding wired into every entry point
+
+OpenCLI (Node.js CLI bridge for xueqiu / THS F10 / news collectors) was needed but its install was buried in `docs/news_db.md` / `docs/xueqiu_setup.md`. New users got empty news sections in `fa report` or hit "opencli not found" runtime errors with no proactive guidance. Three new touchpoints:
+
+- `fa init` Step 4.5 (`init_cli._step_opencli_check`): after data download, probes `shutil.which("opencli")`. If absent, renders a yellow Panel explaining what's affected, that basic reports still work, and the 3-step install (Node.js ≥ 21 + `npm install -g @jackwener/opencli` + verify). Bilingual zh/en, non-blocking.
+- `docs/setup/beginner_zh.md` Step 8 (~130 lines): step-by-step for non-devs — Node.js download from nodejs.org, npm mirror swap (`registry.npmmirror.com`), opencli package install, ths-extra plugin install (both pip-installed and source-clone paths), optional Chrome extension + xueqiu login, first `fa news-collect` test, 4-entry FAQ.
+- `README.md` + `README_zh.md`: new "🔧 Optional · OpenCLI" section between Datasets and LLM Providers — capability matrix (feature → needs opencli?), install snippet, links to beginner Step 8 + `xueqiu_setup.md`.
+
+### Added — Offline data path for CN users (cloud-drive bypass)
+
+HuggingFace direct downloads frequently fail or stall from mainland China (TLS interference + CDN distance). Even with VPN, throughput is bounded by VPN bandwidth. New path:
+
+- New `fa data link --src <path>` command (`data_cli.py`): wires a manually-downloaded data bundle into the workspace. Validates `cn_data/` structure (`calendars/day.txt` + `instruments/all.txt` must exist), writes `config/loaders.yaml` to point at the source dir directly (no copy, no symlink), marks `last-update` so the UI badge doesn't lie. Refuses to continue if `cn_data/` missing; warns + accepts with `--force` if optional `cn_data_5min/parquet/news_data` are missing.
+- New `docs/setup/data_offline.md` (~290 lines): full walkthrough — cloud-drive download → SHA256 verify via `certutil` → extract → `fa data link` → `fa data status` verify. URLs for Aliyun Drive + Quark left as placeholders.
+- `README.md` + `README_zh.md` Datasets section gains "🇨🇳 CN users: cloud-drive download" subsection.
+- `init_cli` HF download failure Panel now points at `data_offline.md` AND mentions `HF_ENDPOINT=https://hf-mirror.com` as the lighter alternative.
+
+### Added — Step-by-step beginner guide for non-developers
+
+`docs/setup/beginner_zh.md` (~510 lines total, including the new Step 8) targets stock traders who have never used a terminal. Covers: install Python with the "Add to PATH" gotcha explicitly flagged (#1 first-time failure), open cmd.exe via Windows search, switch pip to Tsinghua mirror, `pip install`, register a free DASHSCOPE_API_KEY at Aliyun Bailian (CN phone, no overseas card needed, 1M token free credit), walk through `fa start` wizard prompt-by-prompt with expected output, first report (`研报 SH600519`), then optional Step 8 for OpenCLI. Plus 10-item FAQ. README.md + README_zh.md both get a prominent 🐣 callout above Quick Start linking to it.
+
+### Changed — `fa init` re-run preserves all prior values
+
+Re-running `fa init` to change one setting (e.g. swap an LLM key) used to silently revert several **other** settings. Bugs fixed in this release:
+
+- **Language picker** (`_pick_language`): was auto-skipped if `FA_LANG` set. Now always shows picker; current language marked `(current)`, Enter keeps.
+- **Workspace step** (`_step_workspace`): pressing Enter was always writing `DEFAULT_WORKSPACE`, even on a re-run where the user had pinned `D:\fa-workspace`. Effect: data appeared to disappear because `loaders.yaml` quietly pointed back at HOME. Now reads `get_workspace()` at entry, displays both DEFAULT row and "Current workspace" row in green when they differ, Enter keeps current. `--workspace` CLI flag still overrides.
+- **LLM key step** (`_step_llm_keys`): each filled slot showed `✓` and silently moved on — no way to rotate a key without manual `.env` edit. Now each slot prints masked current value above the prompt; **Enter keeps**, paste new key replaces, single `-` clears.
+- **Tushare step** (`_step_tushare`): auto-skipped if `TUSHARE_TOKEN` already set. Now always shows the (new) explainer Panel and the prompt with existing token as default.
+
+### Changed — First-frame welcome panel forced to English
+
+`fa start`'s `_show_first_time_welcome(lang)` defaulted to `lang="zh"` via `_detect_lang()` fallback. So a user who hadn't picked a language yet saw a big Chinese welcome panel before the language picker — confusing for non-zh speakers, suggested zh-only. Now forced English for the pre-picker frame. Chinese kicks in once user picks it at Step 0.
+
+### Changed — Friendly Tushare explainer Panel
+
+The terse "可选 · 不填走 pytdx + 腾讯直连免费" subtitle made Tushare look like a peer alternative. Replaced with a Panel that explicitly says "**Tushare is a paid data source. You don't need it.**" and explains what's already wired (pytdx main + Tencent realtime + HF bundle). Plus a "When DO you need Tushare?" note for paid Pro Pro Max users. Bilingual.
+
+### Fixed — `fa version` doc + runtime logs gitignore
+
+- `docs/setup/beginner_zh.md`: `fa --version` (no such flag in typer) corrected to `fa version`.
+- `.gitignore`: added `.fa-restart.log`, `.fa-serve.log`, `docs/**/*.html` (Claude Code preview panel auto-renders HTML companions next to .md specs).
+
+---
+
 ## [1.0.3] — 2026-05-25  · Workspace pinning + data refresh button + fa start polish
 
 ### Added — Workspace abstraction (`workspace.py`)
