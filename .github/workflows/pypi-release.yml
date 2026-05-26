@@ -70,6 +70,8 @@ jobs:
       - name: Publish to PyPI via OIDC
         uses: pypa/gh-action-pypi-publish@release/v1
         # No api-token needed — Trusted Publisher 走 OIDC short-lived token
+        with:
+          skip-existing: true   # tag 重发时, 已存在版本静默跳过 (不 fail workflow)
 
   github-release:
     name: Create GitHub Release (draft)
