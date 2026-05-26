@@ -17,7 +17,7 @@
 <p align="center">
   <a href="https://pypi.org/project/financial-analyst/"><img src="https://img.shields.io/pypi/v/financial-analyst.svg?style=flat&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
   <img src="https://img.shields.io/pypi/pyversions/financial-analyst.svg?style=flat&logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/release-v1.0.3-success?style=flat" alt="Release">
+  <img src="https://img.shields.io/badge/release-v1.0.6-success?style=flat" alt="Release">
   <img src="https://img.shields.io/badge/tests-712_passed-brightgreen?style=flat" alt="Tests">
   <img src="https://img.shields.io/badge/license-Apache_2.0-yellow?style=flat" alt="License">
   <br>
@@ -41,7 +41,7 @@
 > 🐣 **完全没用过 Python / 命令行?** 没事. 看 **[小白上手指南 →](docs/setup/beginner_zh.md)** (30 分钟从装 Python 开始, 一步一步把命令给你)
 
 ```bash
-pip install financial-analyst==1.0.3    # 1 分钟, 不用再加 [serve] 后缀
+pip install financial-analyst==1.0.6    # 1 分钟, 不用再加 [serve] 后缀
 fa start                                 # 零配置一键: 引导 + 后端 + Web UI + 浏览器自动开
 ```
 
@@ -57,12 +57,13 @@ fa data refresh        # 智能增量刷新 — 24h 内已更新自动跳过
 fa --tui               # 终端 TUI 而非 Web UI
 ```
 
-> **🆕 v1.0.3 亮点** *(2026-05-25)*
+> **🆕 v1.0.6 亮点** *(2026-05-26)*
 >
+> - **数据下载 3-10× 提速** — `fa init` 自动启用 [hf-mirror.com](https://hf-mirror.com) + `hf_transfer` Rust 多连接下载, CN 用户不再卡 HF. 海外用户 `FA_DATA_SOURCE=hf fa init` 强制走官方源
+> - **ModelScope (魔搭) 数据源** — `pip install 'financial-analyst[modelscope]'` 后 `FA_DATA_SOURCE=modelscope fa init`, 阿里 CN-CDN 30-100 MB/s, demo 数据已上传
+> - **`fa init` 向导可回退** — 任何一步按 `b` 回上一步, 末尾 review 屏幕可逐项 re-edit (v1.0.4 / v1.0.5)
 > - **零 extras 安装** — `pip install financial-analyst` 即装即用, fastapi + uvicorn 并入 core, 不再需要 `[serve]` 后缀
-> - **`fa start`** — 新的零配置启动入口 (`fa launch` 保留为别名). 二次启动自动 fast-path 跳到浏览器, 不重启子进程
-> - **Workspace pinning** — 数据可以挂到 `D:\fa-workspace` 等任意盘, 不再绑死系统盘. 通过 `fa init` 一次性配
-> - **数据刷新按钮** — 状态栏新增 `✓ / ⏳ 盘中 / ⚠ / ↻` 四态徽章, 一键拉日线 + 5min + 估值
+> - **`fa start`** + **Workspace pinning** — 零配置一键启动 + 数据可挂 `D:\fa-workspace` 等任意盘, 二次启动自动 fast-path 跳浏览器
 > - **`fa update`** + **`fa data refresh`** — PyPI 自升级 (editable 安装会拒绝) + 智能增量刷新 (24h 内已更新自动跳过)
 >
 > 完整变更见 [CHANGELOG](CHANGELOG.md).
@@ -182,7 +183,7 @@ financial-analyst  # /model deepseek-reasoner
 ### A. PyPI 安装 (推荐, 1 分钟)
 
 ```bash
-pip install financial-analyst==1.0.3
+pip install financial-analyst==1.0.6
 fa start                   # 交互向导 (LLM key + workspace + HF 数据) + 自动开后端 / UI / 浏览器
 # 或非交互模式 (CI / 脚本):
 fa init --yes --preset demo --workspace D:/fa-workspace   # 一行配好
@@ -383,4 +384,4 @@ financial-analyst 是个 **重工具调用的 24-agent 系统** — Tier-1 调 b
 
 Apache 2.0. **仅供研究 / 教学**. 草拟分析师级工作产物供合格专业人士 review. 不构成投资建议, 不执行交易, 不写任何 ledger. 用户须自行遵守适用法律法规.
 
-<sub>v1.0.3 · 2026-05-25 · made by [@jesson-hh](https://github.com/jesson-hh) · 中英双语</sub>
+<sub>v1.0.6 · 2026-05-26 · made by [@jesson-hh](https://github.com/jesson-hh) · 中英双语</sub>

@@ -17,7 +17,7 @@
 <p align="center">
   <a href="https://pypi.org/project/financial-analyst/"><img src="https://img.shields.io/pypi/v/financial-analyst.svg?style=flat&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
   <img src="https://img.shields.io/pypi/pyversions/financial-analyst.svg?style=flat&logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/release-v1.0.3-success?style=flat" alt="Release">
+  <img src="https://img.shields.io/badge/release-v1.0.6-success?style=flat" alt="Release">
   <img src="https://img.shields.io/badge/tests-712_passed-brightgreen?style=flat" alt="Tests">
   <img src="https://img.shields.io/badge/license-Apache_2.0-yellow?style=flat" alt="License">
   <br>
@@ -41,7 +41,7 @@
 > 🐣 **Brand-new to Python / command line?** Step-by-step beginner guide (Chinese, 30 min from zero): **[小白上手指南 →](docs/setup/beginner_zh.md)**
 
 ```bash
-pip install financial-analyst==1.0.3    # 1 minute, no [serve] flag needed
+pip install financial-analyst==1.0.6    # 1 minute, no [serve] flag needed
 fa start                                 # zero-config: wizard + backend + web UI + browser auto-opens
 ```
 
@@ -56,12 +56,13 @@ fa update              # check PyPI + pip install -U (refuses editable installs)
 fa data refresh        # smart refresh — skip if everything <24h fresh
 ```
 
-> **🆕 v1.0.3 highlights** *(2026-05-25)*
+> **🆕 v1.0.6 highlights** *(2026-05-26)*
 >
+> - **数据下载 3-10× 提速** — `fa init` 自动启用 [hf-mirror.com](https://hf-mirror.com) + `hf_transfer` Rust 多连接下载, CN 用户不再卡 HF. 海外用户 `FA_DATA_SOURCE=hf fa init` 强制走官方源
+> - **ModelScope (魔搭) 数据源** — `pip install 'financial-analyst[modelscope]'` 后 `FA_DATA_SOURCE=modelscope fa init`, 阿里 CN-CDN 30-100 MB/s, demo 数据已上传
+> - **`fa init` 向导可回退** — 任何一步按 `b` 回上一步, 末尾 review 屏幕可逐项 re-edit (v1.0.4 / v1.0.5)
 > - **零 extras 安装** — `pip install financial-analyst` 即装即用, fastapi + uvicorn 并入 core, 不再需要 `[serve]` 后缀
-> - **`fa start`** — 新的零配置启动入口 (`fa launch` 保留为别名). 二次启动自动 fast-path 跳到浏览器, 不重启子进程
-> - **Workspace pinning** — 数据可以挂到 `D:\fa-workspace` 等任意盘, 不再绑死系统盘. 通过 `fa init` 一次性配
-> - **数据刷新按钮** — 状态栏新增 `✓ / ⏳ 盘中 / ⚠ / ↻` 四态徽章, 一键拉日线 + 5min + 估值
+> - **`fa start`** + **Workspace pinning** — 零配置一键启动 + 数据可挂 `D:\fa-workspace` 等任意盘, 二次启动自动 fast-path 跳浏览器
 > - **`fa update`** + **`fa data refresh`** — PyPI 自升级 (editable 安装会拒绝) + 智能增量刷新 (24h 内已更新自动跳过)
 >
 > Full [CHANGELOG](CHANGELOG.md).
@@ -181,7 +182,7 @@ See [examples/](examples/) for FM cluster / CSV loader / TDX F10 patterns.
 ### A. PyPI (recommended, 1 minute)
 
 ```bash
-pip install financial-analyst==1.0.3
+pip install financial-analyst==1.0.6
 fa start                   # interactive wizard (LLM key + workspace + HF dataset)
                            # then auto-starts backend + UI + browser
 # or non-interactive:
@@ -383,4 +384,4 @@ Personal project, single maintainer. File issues at
 
 Apache 2.0. **Research and educational purposes only**. Drafts analyst-grade work product for review by qualified professionals. Does not make investment recommendations, execute transactions, or post to any ledger. You are responsible for compliance with applicable laws.
 
-<sub>v1.0.3 · 2026-05-25 · made by [@jesson-hh](https://github.com/jesson-hh) · bilingual zh/en</sub>
+<sub>v1.0.6 · 2026-05-26 · made by [@jesson-hh](https://github.com/jesson-hh) · bilingual zh/en</sub>
