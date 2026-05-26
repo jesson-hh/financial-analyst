@@ -10,6 +10,8 @@ dist/
 .env.local
 .staging_hf/
 .staging_*
+# fa data last-update tracker — workspace-local state, not source
+.last-update.json
 test_data/
 out/
 .run/
