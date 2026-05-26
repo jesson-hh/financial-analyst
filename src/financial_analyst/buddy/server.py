@@ -664,6 +664,7 @@ def build_app():
         include_concepts: bool = False,
         include_financial: bool = False,
         include_stock_basic: bool = False,
+        include_northbound: bool = False,
     ):
         """Trigger an incremental data refresh — equivalent to `fa data update`.
 
@@ -700,6 +701,8 @@ def build_app():
             cmd.append("--include-financial")
         if include_stock_basic:
             cmd.append("--include-stock-basic")
+        if include_northbound:
+            cmd.append("--include-northbound")
         try:
             # Detached: stdout/stderr go to /dev/null so we don't accumulate
             # buffer in the buddy process. The CLI writes its own progress

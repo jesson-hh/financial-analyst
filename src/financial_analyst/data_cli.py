@@ -190,6 +190,9 @@ def update_cmd(
     tushare_token: Optional[str] = typer.Option(
         None, "--tushare-token",
         help="Tushare API token. 默认读 FA_TUSHARE_TOKEN env (https://tushare.pro 免费注册)."),
+    include_northbound: bool = typer.Option(
+        False, "--include-northbound",
+        help="附带刷新北向 (沪深股通) 当日持仓快照 (零 token, 需 akshare 包)"),
 ):
     """直连增量更新所有数据 — 日线 + 5min + 当日 PE/PB/MV.
 
@@ -266,8 +269,9 @@ def update_cmd(
         if stats_basic.get("ok", 0) > 0:
             _lu.mark_updated("daily_basic")
 
-    # F10 / concepts / financial / stock_basic 走 paths resolver
-    if include_f10 or include_concepts or include_financial or include_stock_basic:
+    # F10 / concepts / financial / stock_basic / northbound 走 paths resolver
+    if (include_f10 or include_concepts or include_financial
+            or include_stock_basic or include_northbound):
         from financial_analyst.data.paths import get_data_paths
         paths = get_data_paths()
 
@@ -365,6 +369,24 @@ def update_cmd(
                             typer.echo(f"\n[stock_basic ✗] {stats_sb.get('error')}")
                     except RuntimeError as e:
                         typer.echo(f"\n[stock_basic ✗] {e}")
+
+        # northbound 零 token (akshare 路线, 跟 Tushare 流程独立)
+        if include_northbound:
+            from financial_analyst.data.updaters.northbound import update_northbound
+            t0 = time.time()
+            try:
+                stats_nb = update_northbound(paths.parquet_root, progress=True)
+                if stats_nb["ok"]:
+                    typer.echo(
+                        f"\n[northbound ✓] new={stats_nb['rows_new']} "
+                        f"total={stats_nb['rows_total']} markets={stats_nb['markets']} "
+                        f"耗时 {time.time() - t0:.1f}s"
+                    )
+                    _lu.mark_updated("northbound")
+                else:
+                    typer.echo(f"\n[northbound ✗] errors={stats_nb.get('errors')}")
+            except ImportError as e:
+                typer.echo(f"\n[northbound ✗] akshare 包未装: {e}")
 
     typer.echo(f"\n=== 完成. 总耗时 {time.time() - overall_t:.1f}s ===")
 

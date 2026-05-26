@@ -37,6 +37,7 @@ DATA_TYPES = (
     "f10",           # 公司大事 / 龙虎榜 / 主力追踪 (pytdx F10, zero token)
     "concepts",      # 同花顺 concept stocks + constituents (adata, zero token)
     "stock_basic",   # company master list (Tushare opt-in)
+    "northbound",    # 沪深股通持仓快照 (akshare 东财, zero token)
 )
 
 
@@ -51,6 +52,7 @@ IMPLEMENTED_TYPES = (
     "concepts",      # since v1.0.7 (fa data update --include-concepts)
     "financials",    # since v1.0.7 (fa data update --include-financial, Tushare opt-in)
     "stock_basic",   # since v1.0.7 (fa data update --include-stock-basic, Tushare opt-in)
+    "northbound",    # since v1.0.7 (fa data update --include-northbound, zero token)
 )
 
 
@@ -63,6 +65,7 @@ STALE_THRESHOLD_HOURS = {
     "f10":         24 * 3,   # event-driven, weekly OK
     "concepts":    24 * 7,   # weekly refresh sufficient
     "stock_basic": 24 * 30,  # company master list, monthly OK
+    "northbound":  24 * 2,   # daily snapshot — stale after ~2 trading days
 }
 
 
