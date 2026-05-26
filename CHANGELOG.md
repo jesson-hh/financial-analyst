@@ -2,6 +2,28 @@
 
 All notable changes to this project follow [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning 2.0.0](https://semver.org/).
 
+## [1.0.6] — 2026-05-26  · HF auto-acceleration · ModelScope alternative source
+
+### Added — Auto hf-mirror + hf_transfer multi-connection downloads
+
+CN users were stuck on slow HF downloads (TLS interference + AWS-us-east CDN). `fa init` now silently defaults to the [hf-mirror.com](https://hf-mirror.com) community mirror and enables the `hf_transfer` Rust helper for multi-connection downloads (3-10× speedup measured). Both via `os.environ.setdefault` so power users with their own `HF_ENDPOINT` / `HF_HUB_ENABLE_HF_TRANSFER` config keep their overrides.
+
+- `hf-transfer>=0.1.6` added to core dependencies (~1 MB binary)
+- `init_cli._download_package` sets both env vars before `snapshot_download`; on the rare flaky-network crash where `hf_transfer` errors, automatic single-retry without it.
+- New `FA_DATA_SOURCE` env var: `hf` / `hf-mirror` (default) / `modelscope`. Overseas users on a VPN who explicitly want canonical hf.co: `FA_DATA_SOURCE=hf fa init`.
+
+### Added — ModelScope (魔搭) source for CN-native CDN
+
+For the absolute fastest CN downloads, fa now supports [ModelScope](https://modelscope.cn) — Alibaba's HF-equivalent, free for public datasets, hosted on CN OSS+CDN (30-100 MB/s common).
+
+- `HF_PACKAGES` schema gains `modelscope_id` field per preset (demo currently mirrored to `sahiouanjcdas/financial-analyst-data-demo`; lite + full pending upload — fall back to HF until filled).
+- New `_download_from_modelscope` helper with lazy `modelscope` SDK import. Falls back to HF gracefully if SDK not installed or `modelscope_id` empty.
+- `modelscope>=1.21` added as `[modelscope]` optional extra: `pip install 'financial-analyst[modelscope]'`. Kept optional because the SDK pulls heavy ML deps we don't otherwise need.
+- `docs/setup/data_offline.md` gains §9: full maintainer guide for uploading data to ModelScope (account setup, `modelscope upload` commands, `HF_PACKAGES` edits).
+- README + README_zh: data section explains the new defaults and how to opt into ModelScope.
+
+---
+
 ## [1.0.5] — 2026-05-26  · Wizard navigation · model picker bug fix
 
 ### Added — Review screen at end of `fa init`

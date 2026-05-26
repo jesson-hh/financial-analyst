@@ -82,9 +82,9 @@ def _wizard_ask(prompt_text: str, *, default: str = "", choices=None,
 HF_PACKAGES = {
     "demo": {
         "repo_id":         "yifishbossman/financial-analyst-data-demo",
-        # ModelScope mirror repo id (filled after maintainer uploads). When empty,
-        # we silently fall back to HF source. Same data, same SHAs.
-        "modelscope_id":   "",  # TODO: fill after upload to modelscope.cn
+        # ModelScope mirror — synced from the HF source; same staged bundle.
+        # Use FA_DATA_SOURCE=modelscope to download from here (CN-native CDN).
+        "modelscope_id":   "sahiouanjcdas/financial-analyst-data-demo",
         "size_hint":    "~155 MB",
         "n_stocks":     {"zh": "300 (当前 CSI300 by mv)", "en": "300 (current CSI300 by mv)"},
         "description":  {
