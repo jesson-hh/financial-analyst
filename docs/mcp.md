@@ -127,6 +127,86 @@ financial-analyst-mcp                            # 同上
 
 Tools should appear in the tool drawer / `/mcp` list.
 
+---
+
+## 3. Streamable HTTP transport (远程 IDE / JetBrains / 跨进程)
+
+如果你的 AI IDE 不会 spawn stdio 子进程 (典型: JetBrains 系全家桶) — 或者你想让多个 IDE / 脚本 / 远程进程共享同一份 fa, 可以走 **HTTP MCP**.
+
+### 0. Endpoint
+
+```
+http://127.0.0.1:9999/mcp
+```
+
+**前提**: `fa start` 已经跑起来 (会自动启 buddy backend on :9999). MCP 自动 mount 在 `/mcp` 子路径, 不需要额外起 server, 不需要 token. 默认只绑 127.0.0.1, 外网 reach 不到.
+
+### 3a. Claude Desktop / Claude Code (HTTP)
+
+跟 stdio 不同, 用 `url` 字段而不是 `command`:
+
+```json
+{
+  "mcpServers": {
+    "financial-analyst-http": {
+      "url": "http://127.0.0.1:9999/mcp"
+    }
+  }
+}
+```
+
+可以**同时**保留 §2 的 stdio 配置 (`financial-analyst` server) — 两个 server name 不冲突, 各走各的 transport, 暴露的 20 个 tool 完全相同.
+
+### 3b. Cursor
+
+`~/.cursor/mcp.json` (全局) 或 `<project>/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "financial-analyst-http": {
+      "url": "http://127.0.0.1:9999/mcp"
+    }
+  }
+}
+```
+
+### 3c. Codex CLI
+
+`~/.codex/config.toml`:
+
+```toml
+[mcp_servers.financial-analyst-http]
+url = "http://127.0.0.1:9999/mcp"
+```
+
+字段来自 [OpenAI Codex MCP 官方文档](https://developers.openai.com/codex/mcp): streamable HTTP server 用 `url` (required), 可选 `bearer_token_env_var` / `http_headers` / `enabled_tools` / `tool_timeout_sec` (本地 localhost 场景不需要).
+
+### 3d. JetBrains IDE (PyCharm / IntelliJ AI Assistant)
+
+任何支持 MCP HTTP 的 JetBrains AI 扩展 (例如 Junie 或第三方 MCP plugin), 配同样的 URL 即可. 具体注册路径看插件文档.
+
+### 长任务 (跟 §2 stdio 一样)
+
+HTTP transport **不改变** long-task 边界: `report` 5-10 min / `data_update` 3-30 min / `brief` 1-3 min 仍可能撞 client 端默认 5-min tool-call timeout. 解决方案 (跟 stdio 同):
+
+1. 让 Claude/Codex 调 `ask` 做轻问答
+2. 重活本地跑: `financial-analyst report SH600519`
+3. 然后 MCP 调 `read_past_report` 拿结果
+
+未来 spec 会加 MCP `notifications/progress` 让 long task 真 streaming, 本 release 暂不实现.
+
+### Troubleshooting (HTTP-specific)
+
+| Symptom | Fix |
+|---------|-----|
+| Client 报 406 / "Not Acceptable" | client 没发 `Accept: application/json, text/event-stream` header — 升级到支持 MCP streamable HTTP 的 client 版本 |
+| Connection refused | buddy 没跑. 先 `fa start` 或 `fa serve` |
+| Tools 同时出现两次 (一份 stdio + 一份 HTTP) | 预期行为 — 你两套都配了. 删掉一份, 或保留两份用不同 server name 区分 |
+| 想让 LAN 设备连 | 当前 spec 不支持. 后续 spec 会加 token auth 来开 0.0.0.0 binding (use case B) |
+
+---
+
 ## Available Tools
 
 | Tool | Speed | Use case |

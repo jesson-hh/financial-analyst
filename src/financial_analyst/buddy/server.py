@@ -161,7 +161,21 @@ def build_app():
     from financial_analyst.buddy.tools import get_tool
     from financial_analyst.buddy.intent import classify, label_for
 
-    app = FastAPI(title="financial-analyst buddy SSE bridge")
+    # MCP Streamable HTTP transport mounted at /mcp. The sub-app owns the
+    # session manager's lifespan, but Starlette/FastAPI does NOT propagate
+    # mounted sub-app lifespans automatically — we merge it into the parent
+    # FastAPI lifespan so manager.run() bookends uvicorn startup/shutdown.
+    from contextlib import asynccontextmanager
+    from financial_analyst.mcp_http import build_mcp_http_app
+    _mcp_app = build_mcp_http_app()
+
+    @asynccontextmanager
+    async def _lifespan(_app):
+        async with _mcp_app.router.lifespan_context(_mcp_app):
+            yield
+
+    app = FastAPI(title="financial-analyst buddy SSE bridge", lifespan=_lifespan)
+    app.mount("/mcp", _mcp_app)
     # Tauri webview / localhost dev — allow all origins.
     app.add_middleware(
         CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
