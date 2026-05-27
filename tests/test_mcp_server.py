@@ -108,27 +108,67 @@ def test_server_list_tools_returns_all():
 
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
+import time  # noqa: E402
 
 MCP_BIN = shutil.which("financial-analyst-mcp")
 
 
-def _run_frames(frames: list[dict], timeout_sec: int = 30) -> list[dict]:
-    """Pipe ``frames`` into a fresh MCP subprocess; return parsed stdout JSON."""
+def _run_frames(
+    frames: list[dict],
+    timeout_sec: int = 30,
+    process_wait_sec: float = 2.0,
+    # accepted for backwards compatibility; current impl uses a fixed
+    # ``process_wait_sec`` window instead — Windows pipes don't honor
+    # bufsize=1 so live line polling can't drive an early exit reliably.
+    expected_ids: set[int] | None = None,
+) -> list[dict]:
+    """Pipe ``frames`` into a fresh MCP subprocess; return parsed stdout JSON.
+
+    ``subprocess.run(input=...)`` closes stdin immediately after the write,
+    which on fast Linux CI runners races against the MCP server's frame
+    processing (server sees EOF and begins shutdown before frames 2+ are
+    handled, so only the initialize response comes back). Fix: keep stdin
+    open, sleep ``process_wait_sec`` to let the server process every frame,
+    then close stdin and ``communicate()`` to drain all buffered output.
+    """
+    del expected_ids  # unused; see docstring
     if not MCP_BIN:
         pytest.skip("financial-analyst-mcp not on PATH")
 
     payload = "\n".join(json.dumps(f) for f in frames) + "\n"
-    proc = subprocess.run(
+
+    proc = subprocess.Popen(
         [MCP_BIN],
-        input=payload,
-        capture_output=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        encoding="utf-8",      # MCP server emits UTF-8; Windows default is GBK
-        errors="replace",       # don't crash on stray bytes in stderr warnings
-        timeout=timeout_sec,
+        encoding="utf-8",       # MCP server emits UTF-8; Windows default is GBK
+        errors="replace",
     )
+    try:
+        proc.stdin.write(payload)
+        proc.stdin.flush()
+        time.sleep(process_wait_sec)  # let server dispatch every frame before EOF
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            stdout, _ = proc.communicate(timeout=timeout_sec)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, _ = proc.communicate()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+
     responses: list[dict] = []
-    for line in proc.stdout.splitlines():
+    for line in stdout.splitlines():
         line = line.strip()
         if not line.startswith("{"):
             continue
@@ -156,7 +196,7 @@ _INITIALIZED = {"jsonrpc": "2.0", "method": "notifications/initialized"}
 
 def test_smoke_initialize_handshake():
     """Subprocess responds to initialize with protocolVersion + serverInfo."""
-    responses = _run_frames([_INIT])
+    responses = _run_frames([_INIT], expected_ids={1})
     by_id = _by_id(responses)
     assert 1 in by_id, f"no response to initialize; stdout={responses}"
     result = by_id[1]["result"]
@@ -169,7 +209,7 @@ def test_smoke_tools_list_matches_expected_set():
     responses = _run_frames([
         _INIT, _INITIALIZED,
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
-    ])
+    ], expected_ids={1, 2})
     by_id = _by_id(responses)
     assert 2 in by_id, f"no response to tools/list; stdout={responses}"
     tools = by_id[2]["result"]["tools"]
@@ -190,7 +230,7 @@ def test_smoke_chain_lookup_roundtrip():
             "jsonrpc": "2.0", "id": 3, "method": "tools/call",
             "params": {"name": "chain_lookup", "arguments": {"code": "SH688256"}},
         },
-    ])
+    ], expected_ids={1, 3})
     by_id = _by_id(responses)
     assert 3 in by_id, f"no response to chain_lookup; stdout={responses}"
     call_result = by_id[3]["result"]
@@ -211,7 +251,7 @@ def test_smoke_accept_proposal_dry_run_no_side_effect():
                        "arguments": {"target": "nonexistent-agent/no-such-slug",
                                      "dry_run": True}},
         },
-    ])
+    ], expected_ids={1, 5})
     by_id = _by_id(responses)
     assert 5 in by_id, f"no response to accept_proposal; stdout={responses}"
     call_result = by_id[5]["result"]
@@ -233,7 +273,7 @@ def test_smoke_memory_search_hyphen_no_crash():
             "params": {"name": "memory_search",
                        "arguments": {"query": "game-capital", "top_k": 3}},
         },
-    ])
+    ], expected_ids={1, 4})
     by_id = _by_id(responses)
     assert 4 in by_id, f"no response to memory_search; stdout={responses}"
     text = by_id[4]["result"]["content"][0]["text"]
