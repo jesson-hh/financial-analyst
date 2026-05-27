@@ -86,3 +86,47 @@ def test_update_after_file_edit(tmp_path):
     idx.update_changed()
     hits = idx.search("Quokka123", top_k=5)
     assert len(hits) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Regression: FTS5 query sanitization (see docs/superpowers/specs/2026-05-27...)
+#
+# FTS5 treats `-` and `:` as syntactic operators inside the MATCH query string.
+# `_to_prefix_query` must normalize them to spaces in the natural-language
+# fallback path, otherwise a benign query like "game-capital" raises
+# `OperationalError: no such column: capital` when MATCH evaluates.
+# ---------------------------------------------------------------------------
+
+def test_search_handles_hyphenated_query(tmp_path):
+    """Regression: hyphen-containing query must not raise FTS5 column error."""
+    mem = _setup(tmp_path)
+    idx = MemoryIndex(memory_root=mem, db_path=tmp_path / "memory.fts5.db")
+    idx.rebuild()
+    # Pre-fix this raised: OperationalError: no such column: capital
+    hits = idx.search("game-capital", top_k=5)
+    # Hyphen normalized to space → AND-search of "game*" and "capital*"
+    # The pitfalls.md fixture contains "(game-capital)" — should match.
+    assert len(hits) >= 1
+    assert any("pitfalls" in h["filename"] for h in hits)
+
+
+def test_search_handles_colon_query(tmp_path):
+    """Regression: colon-containing query must not raise FTS5 column error."""
+    mem = _setup(tmp_path)
+    idx = MemoryIndex(memory_root=mem, db_path=tmp_path / "memory.fts5.db")
+    idx.rebuild()
+    # Pre-fix this raised: OperationalError: no such column: bar
+    # Post-fix: returns empty list (no doc matches "nonexistent" or "term") without error
+    hits = idx.search("nonexistent:term", top_k=5)
+    assert hits == []
+
+
+def test_search_phrase_quote_still_passes_through(tmp_path):
+    """Phrase syntax `"hyphen-term"` must still be preserved (not normalized)."""
+    mem = _setup(tmp_path)
+    idx = MemoryIndex(memory_root=mem, db_path=tmp_path / "memory.fts5.db")
+    idx.rebuild()
+    # Phrase quotes are an FTS5 operator → pass-through, FTS5 treats it as exact phrase.
+    hits = idx.search('"game-capital"', top_k=5)
+    # pitfalls.md has "(game-capital)" — phrase matches.
+    assert len(hits) >= 1

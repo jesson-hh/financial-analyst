@@ -182,11 +182,22 @@ class MemoryIndex:
         Terms that already end with ``*`` or contain FTS5 operators
         (quotes, parentheses, ``AND``/``OR``/``NOT``) are passed through
         unchanged so callers can still issue raw FTS5 expressions.
+
+        In the natural-language fallback, ``-`` and ``:`` are normalized
+        to spaces because FTS5 parses them as syntactic operators (NOT
+        prefix and column filter respectively) inside the MATCH string,
+        which would raise ``OperationalError: no such column: <term>``
+        for benign queries like ``"game-capital"``.
         """
         # If the query contains FTS5 operators, pass through as-is
         if any(op in query for op in ('"', '(', 'AND', 'OR', 'NOT')):
             return query
-        terms = query.split()
+        # Natural-language path: hyphen + colon are FTS5 operators, not literal
+        # bareword characters. Map them to whitespace so each side becomes its
+        # own prefix-matched term (matches the unicode61 tokenizer behaviour
+        # used when indexing the documents).
+        normalized = query.replace("-", " ").replace(":", " ")
+        terms = normalized.split()
         return " ".join(t if t.endswith("*") else t + "*" for t in terms)
 
     def search(
