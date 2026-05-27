@@ -168,14 +168,18 @@ async def _tool_data_update(
     include_f10: bool = False,
     include_concepts: bool = False,
     include_northbound: bool = False,
+    include_fund_flow: bool = False,
+    fund_flow_lmt: int = 120,
     timeout_sec: int = 600,
 ) -> Dict[str, Any]:
     """Trigger incremental data refresh via `fa data update` subprocess.
 
     Default scope: 日线 OHLCV + 5min + daily_basic (PE/PB/MV/turnover_rate).
-    With include_* flags, extends to F10 events / THS concepts / northbound flow.
+    With include_* flags, extends to F10 events / THS concepts / northbound flow /
+    per-stock 东财 fund flow (主力/大单/中单/小单/超大单).
 
-    Slow: ~3-5 min default; include_f10 adds ~30 min.
+    Slow: ~3-5 min default; include_f10 adds ~30 min; include_fund_flow scales
+    with N codes × fund_flow_lmt days.
     """
     cmd = ["financial-analyst", "data", "update"]
     if codes:
@@ -188,6 +192,8 @@ async def _tool_data_update(
         cmd += ["--include-concepts"]
     if include_northbound:
         cmd += ["--include-northbound"]
+    if include_fund_flow:
+        cmd += ["--include-fund-flow", "--fund-flow-lmt", str(fund_flow_lmt)]
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -422,6 +428,8 @@ TOOLS: Dict[str, Dict[str, Any]] = {
                 "include_f10": {"type": "boolean", "default": False, "description": "Also refresh TDX F10 events. Adds ~30 min."},
                 "include_concepts": {"type": "boolean", "default": False, "description": "Also refresh THS concept stocks (needs adata)."},
                 "include_northbound": {"type": "boolean", "default": False, "description": "Also refresh northbound flow (needs akshare)."},
+                "include_fund_flow": {"type": "boolean", "default": False, "description": "Also refresh per-stock 东财 fund flow (主力/大单/中单/小单/超大单, zero token)."},
+                "fund_flow_lmt": {"type": "integer", "default": 120, "description": "Fund-flow lookback in trading days (max ~120 upstream limit). Only used when include_fund_flow=true."},
                 "timeout_sec": {"type": "integer", "default": 600, "description": "Subprocess timeout in seconds"},
             },
         },
