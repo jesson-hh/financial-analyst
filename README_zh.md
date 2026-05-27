@@ -29,6 +29,7 @@
   <img src="https://img.shields.io/badge/swarm_预设-5-2563EB?style=flat" alt="Swarm">
   <img src="https://img.shields.io/badge/buddy_工具-31-0F766E?style=flat" alt="Tools">
   <img src="https://img.shields.io/badge/alpha_因子-440-FF6B6B?style=flat" alt="Alphas">
+  <img src="https://img.shields.io/badge/mcp_工具-20-FF6B35?style=flat" alt="MCP">
   <a href="https://huggingface.co/yifishbossman"><img src="https://img.shields.io/badge/数据-HF_Hub-FFD21E?style=flat&logo=huggingface&logoColor=black" alt="HF Datasets"></a>
 </p>
 
@@ -185,6 +186,18 @@ financial-analyst    # /model deepseek-reasoner
 </td>
 </tr>
 </table>
+
+---
+
+## 🔌 MCP 接入 (AI IDE 直连)
+
+**20 个 fa tool 暴露给任何会 [Model Context Protocol](https://modelcontextprotocol.io/) 的 AI IDE.**
+
+- **stdio** — `financial-analyst-mcp` console script (pip 自动装). 用于 Claude Desktop, Claude Code.
+- **HTTP streamable** — `fa start` 后自动 mount 在 `http://127.0.0.1:9999/mcp`. 用于 Cursor, Codex CLI, JetBrains AI 插件.
+- **同 20 tool, 两条 transport** — 读类 (`quick_quote` / `memory_search` / `read_past_report` / `chain_lookup` 等) <1s; 长任务 (`report` / `data_update`) 用 `read_past_report` workaround 取结果; **dream-loop 写入类** (`accept_proposal` / `revert_proposal`) 自动写 `~/.financial-analyst/audit.jsonl` + `git add`, 每条记忆改动可见可回滚.
+
+4 个 IDE 完整配置 → **[docs/mcp.md](docs/mcp.md)**
 
 ---
 

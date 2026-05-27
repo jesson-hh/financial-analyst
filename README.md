@@ -29,6 +29,7 @@
   <img src="https://img.shields.io/badge/swarm_presets-5-2563EB?style=flat" alt="Swarm">
   <img src="https://img.shields.io/badge/buddy_tools-31-0F766E?style=flat" alt="Tools">
   <img src="https://img.shields.io/badge/alpha_factors-440-FF6B6B?style=flat" alt="Alphas">
+  <img src="https://img.shields.io/badge/mcp_tools-20-FF6B35?style=flat" alt="MCP">
   <a href="https://huggingface.co/yifishbossman"><img src="https://img.shields.io/badge/data-HF_Hub-FFD21E?style=flat&logo=huggingface&logoColor=black" alt="HF Datasets"></a>
 </p>
 
@@ -185,6 +186,18 @@ financial-analyst    # /model deepseek-reasoner
 </td>
 </tr>
 </table>
+
+---
+
+## 🔌 MCP integration
+
+**20 fa tools accessible from any AI IDE that speaks the [Model Context Protocol](https://modelcontextprotocol.io/).**
+
+- **stdio** — `financial-analyst-mcp` console script auto-installed by pip. Works with Claude Desktop, Claude Code.
+- **HTTP streamable** — `fa start` auto-mounts the same tools at `http://127.0.0.1:9999/mcp`. Works with Cursor, Codex CLI, JetBrains AI plugins.
+- **Same 20 tools, two transports** — read (`quick_quote`, `memory_search`, `read_past_report`, `chain_lookup`, ...) <1s; long (`report`, `data_update`) covered by the `read_past_report` workaround; **dream-loop mutation tools** (`accept_proposal`, `revert_proposal`) write to `~/.financial-analyst/audit.jsonl` and `git add` the change so every memory edit is observable and reversible.
+
+Full client config for all 4 IDEs → **[docs/mcp.md](docs/mcp.md)**
 
 ---
 
