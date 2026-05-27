@@ -173,13 +173,18 @@ async def _tool_data_update(
     include_northbound: bool = False,
     include_fund_flow: bool = False,
     fund_flow_lmt: int = 120,
+    include_margin: bool = False,
+    include_lockup: bool = False,
+    include_corporate_actions: bool = False,
+    include_ths_hot: bool = False,
+    include_announcements: bool = False,
     timeout_sec: int = 600,
 ) -> Dict[str, Any]:
     """Trigger incremental data refresh via `fa data update` subprocess.
 
     Default scope: 日线 OHLCV + 5min + daily_basic (PE/PB/MV/turnover_rate).
     With include_* flags, extends to F10 events / THS concepts / northbound flow /
-    per-stock 东财 fund flow (主力/大单/中单/小单/超大单).
+    per-stock 东财 fund flow / 融资融券 / 限售解禁 / 公司行为 / 同花顺强势股 / 巨潮公告.
 
     Slow: ~3-5 min default; include_f10 adds ~30 min; include_fund_flow scales
     with N codes × fund_flow_lmt days.
@@ -197,6 +202,16 @@ async def _tool_data_update(
         cmd += ["--include-northbound"]
     if include_fund_flow:
         cmd += ["--include-fund-flow", "--fund-flow-lmt", str(fund_flow_lmt)]
+    if include_margin:
+        cmd += ["--include-margin"]
+    if include_lockup:
+        cmd += ["--include-lockup"]
+    if include_corporate_actions:
+        cmd += ["--include-corporate-actions"]
+    if include_ths_hot:
+        cmd += ["--include-ths-hot"]
+    if include_announcements:
+        cmd += ["--include-announcements"]
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -464,6 +479,11 @@ TOOLS: Dict[str, Dict[str, Any]] = {
                 "include_northbound": {"type": "boolean", "default": False, "description": "Also refresh northbound flow (needs akshare)."},
                 "include_fund_flow": {"type": "boolean", "default": False, "description": "Also refresh per-stock 东财 fund flow (主力/大单/中单/小单/超大单, zero token)."},
                 "fund_flow_lmt": {"type": "integer", "default": 120, "description": "Fund-flow lookback in trading days (max ~120 upstream limit). Only used when include_fund_flow=true."},
+                "include_margin": {"type": "boolean", "default": False, "description": "Also refresh 融资融券明细 daily (东财 datacenter, zero token)."},
+                "include_lockup": {"type": "boolean", "default": False, "description": "Also refresh 限售解禁 calendar + 90-day forward warning."},
+                "include_corporate_actions": {"type": "boolean", "default": False, "description": "Also refresh 公司行为: 股东户数 + 大宗交易 + 分红送转."},
+                "include_ths_hot": {"type": "boolean", "default": False, "description": "Also refresh 同花顺当日强势股 + 题材归因 (default on UI plain click)."},
+                "include_announcements": {"type": "boolean", "default": False, "description": "Also refresh 巨潮公告索引 (board-wide coverage)."},
                 "timeout_sec": {"type": "integer", "default": 600, "description": "Subprocess timeout in seconds"},
             },
         },
