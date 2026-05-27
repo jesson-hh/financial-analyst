@@ -88,21 +88,18 @@ fa start                                 # 零配置一键: 引导 + 后端 + We
 
 **💻 CLI** — `fa report SH600519` 端到端
 
-<video src="https://github.com/jesson-hh/financial-analyst/raw/main/docs/demo/cli.mp4" controls width="100%" muted></video>
+https://github.com/user-attachments/assets/b781ea90-8b09-48e1-8679-31fdc99aa0f2
 
 </td>
 <td width="50%" valign="top" align="center">
 
 **🖥 Web UI** — 觀瀾 看板交互
 
-<video src="https://github.com/jesson-hh/financial-analyst/raw/main/docs/demo/ui.mp4" controls width="100%" muted></video>
+https://github.com/user-attachments/assets/f117a465-0c0d-4a41-a816-b02e8de053cd
 
 </td>
 </tr>
 </table>
-
-> 视频不能内嵌播? 直接下:
-> [cli.mp4](docs/demo/cli.mp4) · [ui.mp4](docs/demo/ui.mp4)
 
 ---
 
