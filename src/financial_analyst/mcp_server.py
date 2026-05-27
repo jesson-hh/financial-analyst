@@ -1,9 +1,12 @@
-"""MCP server — expose financial-analyst capabilities to Claude Desktop / Claude Code / OpenClaw.
+"""MCP server — expose financial-analyst capabilities to Claude Desktop / Claude Code / Cursor / Codex CLI.
 
-Tools:
-  ask, quick_quote, quick_factors, memory_search, list_past_reports,
-  read_past_report, list_dream_proposals,
-  report (slow), mainline, brief, intraday, dream
+Tools (16):
+  Fast read (<1s):     quick_quote, quick_factors, memory_search,
+                       list_past_reports, read_past_report,
+                       list_dream_proposals, chain_lookup
+  Medium (~10s-3min):  ask, mainline, brief, intraday, dream,
+                       dream_aggregate, overseas_radar
+  Slow (3-30min):      report, data_update
 
 Wire into Claude Desktop with:
   ~/.config/claude/claude_desktop_config.json   (Linux/Mac)
@@ -136,6 +139,83 @@ async def _tool_dream(since: int = 30, dry_run: bool = True) -> Dict[str, Any]:
     out_dir = Path("./out")
     await _run_dream(since=since, dry_run=dry_run, out_dir=out_dir)
     return {"since_days": since, "dry_run": dry_run, "see": "memories/_proposed/"}
+
+
+async def _tool_overseas_radar(asof: Optional[str] = None) -> Dict[str, Any]:
+    """v1.9.7 global-market transmission radar. ~1-2 min."""
+    from financial_analyst.cli import _run_overseas_radar
+    out_dir = Path("./out")
+    await _run_overseas_radar(asof=asof, out_dir=out_dir)
+    json_candidates = sorted(out_dir.glob("overseas_radar_*.json"),
+                             key=lambda p: p.stat().st_mtime, reverse=True)
+    if json_candidates:
+        return json.loads(json_candidates[0].read_text(encoding="utf-8"))
+    md_candidates = sorted(out_dir.glob("overseas_radar_*.md"),
+                           key=lambda p: p.stat().st_mtime, reverse=True)
+    if md_candidates:
+        md = md_candidates[0]
+        return {
+            "asof": asof,
+            "_md_path": str(md),
+            "_md_excerpt": md.read_text(encoding="utf-8")[:3000],
+        }
+    return {"asof": asof, "error": "no overseas radar output file generated"}
+
+
+async def _tool_data_update(
+    codes: Optional[str] = None,
+    skip_5min: bool = False,
+    include_f10: bool = False,
+    include_concepts: bool = False,
+    include_northbound: bool = False,
+    timeout_sec: int = 600,
+) -> Dict[str, Any]:
+    """Trigger incremental data refresh via `fa data update` subprocess.
+
+    Default scope: 日线 OHLCV + 5min + daily_basic (PE/PB/MV/turnover_rate).
+    With include_* flags, extends to F10 events / THS concepts / northbound flow.
+
+    Slow: ~3-5 min default; include_f10 adds ~30 min.
+    """
+    cmd = ["financial-analyst", "data", "update"]
+    if codes:
+        cmd += ["--codes", codes]
+    if skip_5min:
+        cmd += ["--skip-5min"]
+    if include_f10:
+        cmd += ["--include-f10"]
+    if include_concepts:
+        cmd += ["--include-concepts"]
+    if include_northbound:
+        cmd += ["--include-northbound"]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
+    except asyncio.TimeoutError:
+        proc.kill()
+        return {"cmd": " ".join(cmd), "error": f"timeout >{timeout_sec}s"}
+
+    return {
+        "cmd": " ".join(cmd),
+        "returncode": proc.returncode,
+        "stdout_tail": stdout.decode("utf-8", errors="replace")[-2000:] if stdout else "",
+        "stderr_tail": stderr.decode("utf-8", errors="replace")[-1000:] if stderr else "",
+    }
+
+
+async def _tool_chain_lookup(code: str) -> Dict[str, Any]:
+    """Industry-chain context for a stock — primary product, peers, up/downstream. <1s."""
+    from financial_analyst.data.loaders.chain_kb import ChainKBLoader
+    loader = ChainKBLoader()
+    ctx = loader.chain_context(code)
+    if ctx is None:
+        return {"code": code, "error": "no chain membership found"}
+    return ctx
 
 
 async def _tool_dream_aggregate(min_count: int = 3, threshold: float = 0.4,
@@ -310,6 +390,54 @@ TOOLS: Dict[str, Dict[str, Any]] = {
                 "since": {"type": "integer", "default": 30},
                 "dry_run": {"type": "boolean", "default": True},
             },
+        },
+    },
+    "overseas_radar": {
+        "handler": _tool_overseas_radar,
+        "description": (
+            "v1.9.7 global-market transmission radar. Overnight US/HK indices + global news "
+            "→ A-share follow-through judgment + actionable signals. ~1-2 min."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {"asof": {"type": "string"}},
+        },
+    },
+    "data_update": {
+        "handler": _tool_data_update,
+        "description": (
+            "Trigger incremental data refresh (日线 OHLCV + 5min + daily_basic). "
+            "Default ~3-5 min, all instruments. Use codes to limit. include_f10 adds ~30 min "
+            "for TDX F10 events; include_concepts pulls THS concept stocks; include_northbound "
+            "pulls 沪深股通 flow. Returns subprocess stdout/stderr tail for diagnosis."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "codes": {
+                    "type": "string",
+                    "description": "Comma-separated codes (SH600519,SZ300750) or @file path; null = all instruments",
+                },
+                "skip_5min": {"type": "boolean", "default": False, "description": "Skip 5min update (only daily)"},
+                "include_f10": {"type": "boolean", "default": False, "description": "Also refresh TDX F10 events. Adds ~30 min."},
+                "include_concepts": {"type": "boolean", "default": False, "description": "Also refresh THS concept stocks (needs adata)."},
+                "include_northbound": {"type": "boolean", "default": False, "description": "Also refresh northbound flow (needs akshare)."},
+                "timeout_sec": {"type": "integer", "default": 600, "description": "Subprocess timeout in seconds"},
+            },
+        },
+    },
+    "chain_lookup": {
+        "handler": _tool_chain_lookup,
+        "description": (
+            "Industry-chain context for one stock — primary product node + peer codes + "
+            "upstream/downstream products + catalyst markdown excerpt. <1s, no LLM."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Stock code like SH688256"},
+            },
+            "required": ["code"],
         },
     },
     "dream_aggregate": {

@@ -1,6 +1,6 @@
 # MCP Server — Claude Desktop / Claude Code Integration
 
-`financial-analyst-mcp` exposes **13 tools** to Claude Desktop / Claude Code / OpenClaw via the [Model Context Protocol](https://modelcontextprotocol.io/).
+`financial-analyst-mcp` exposes **16 tools** to Claude Desktop / Claude Code / Cursor / Codex CLI via the [Model Context Protocol](https://modelcontextprotocol.io/).
 
 After this is set up, you can say in Claude Desktop / Claude Code:
 
@@ -144,6 +144,9 @@ Tools should appear in the tool drawer / `/mcp` list.
 | `intraday` | ~30-60s | "Lunch-break review of my positions" |
 | `dream` | ~30-60s | "Introspect my recent reports for biases" (T+5d outcome 反推) |
 | `dream_aggregate` | <5s | "Cluster Tier-4 introspector pending proposals (重复 ≥3 → 升级 _proposed/)" |
+| `overseas_radar` | 1-2min | "今天海外传导对 A 股影响?" — overnight US/HK + global news → A 股 follow-through |
+| `data_update` | 3-5min (基础); +30min `include_f10` | "Refresh data for SH600519 before research" — wraps `fa data update` subprocess |
+| `chain_lookup` | <1s | "What industry chain is SH688256 in?" — primary product + peers + 上下游 (ChainKBLoader) |
 
 ### About `report` timeout
 
