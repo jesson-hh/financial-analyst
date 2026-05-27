@@ -66,7 +66,54 @@ Or manually edit `~/.claude.json`:
 
 Then in any Claude Code session, the tools auto-appear (verify with `/mcp`).
 
-### 2c. Verify install
+### 2c. Configure Cursor (IDE)
+
+Cursor 用跟 Claude Desktop 同源的 JSON 配置, 路径:
+
+- **全局**: `~/.cursor/mcp.json` (Linux/Mac) · `%APPDATA%\Cursor\User\mcp.json` (Windows)
+- **项目级**: `<project-root>/.cursor/mcp.json` (覆盖全局)
+
+```json
+{
+  "mcpServers": {
+    "financial-analyst": {
+      "command": "financial-analyst-mcp",
+      "args": [],
+      "env": {
+        "DASHSCOPE_API_KEY": "your-aliyun-key"
+      }
+    }
+  }
+}
+```
+
+Restart Cursor. Composer / Chat 会自动发现工具, 用 `@financial-analyst` 提及触发, 或让 agent 自主调.
+
+### 2d. Configure Codex CLI
+
+OpenAI Codex CLI 用 TOML, 路径 `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.financial-analyst]
+command = "financial-analyst-mcp"
+args = []
+# 把本地 env var 安全转发给 server (推荐, key 不进 config 文件)
+env_vars = ["DASHSCOPE_API_KEY", "TUSHARE_TOKEN"]
+
+# 或者 hardcode 进配置 (需要时这样写, 不推荐):
+# [mcp_servers.financial-analyst.env]
+# DASHSCOPE_API_KEY = "your-key"
+```
+
+字段说明 (来自 OpenAI Codex 官方 [MCP doc](https://developers.openai.com/codex/mcp)):
+- `command` — 启动 server 的可执行文件
+- `args` — 传给可执行文件的参数数组
+- `env_vars` — 从本地 shell **转发** 这些 env var 给 server (推荐, secrets 不写盘)
+- `[mcp_servers.<name>.env]` — 直接 **set** env var 给 server (key 会写在 config 里, 慎用)
+
+重启 codex, `/mcp` list 看 `financial-analyst` 出现 + 13 个 tool 注册.
+
+### 2e. Verify install
 
 ```bash
 # 进任意 venv 后跑
