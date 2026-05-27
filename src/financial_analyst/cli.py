@@ -445,42 +445,39 @@ def _dream_review() -> None:
 
 
 def _dream_promote(target: str, action: str) -> None:
-    """Move (accept) or delete (reject) a proposal."""
-    if "/" not in target:
-        typer.echo(f"target must be <agent>/<slug>, got {target!r}.")
-        raise typer.Exit(1)
-    agent, slug = target.split("/", 1)
-    proposed_dir = Path("memories") / "_proposed" / agent
-    if not proposed_dir.exists():
-        typer.echo(f"No proposals for agent {agent!r}. Run `dream review` to see what's available.")
-        raise typer.Exit(1)
-    # Match either exact <slug>.md or <date>_<slug>.md
-    candidates = list(proposed_dir.glob(f"*{slug}*.md"))
-    matches = [c for c in candidates if c.stem == slug or c.stem.endswith(f"_{slug}")]
-    if not matches:
-        typer.echo(f"No proposal matching {slug!r} in {proposed_dir}.")
-        typer.echo(f"Available: {[c.name for c in candidates] or '(none)'}")
-        raise typer.Exit(1)
-    if len(matches) > 1:
-        typer.echo(f"Ambiguous — {len(matches)} files match {slug!r}: {[c.name for c in matches]}")
-        raise typer.Exit(1)
-    src = matches[0]
+    """Move (accept) or delete (reject) a proposal — delegates to ``memory_ops``.
 
-    if action == "reject":
-        src.unlink()
-        typer.echo(f"Rejected and deleted: {src}")
-        return
+    Every CLI accept/reject writes an audit entry with ``source="cli"`` to
+    ``~/.financial-analyst/audit.jsonl``, alongside MCP accepts (source="mcp")
+    and future UI accepts.
+    """
+    from financial_analyst.memory_ops import accept_proposal, reject_proposal
 
-    # accept: move src → memories/<agent>/<slug>.md, preserving frontmatter
-    dst_dir = Path("memories") / agent
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    dst = dst_dir / f"{slug}.md"
-    if dst.exists():
-        typer.echo(f"Refusing to overwrite existing {dst}. Move or rename manually.")
+    if action == "accept":
+        result = accept_proposal(target, source="cli", project_root=Path.cwd())
+    elif action == "reject":
+        result = reject_proposal(target, source="cli", project_root=Path.cwd())
+    else:
+        typer.echo(f"unknown action: {action!r}; expected 'accept' or 'reject'")
         raise typer.Exit(1)
-    src.rename(dst)
-    typer.echo(f"Accepted: {src} → {dst}")
-    typer.echo(f"Next `financial-analyst report` call will use this rule in agent {agent!r}.")
+
+    if "error" in result:
+        typer.echo(result["error"])
+        raise typer.Exit(1)
+
+    if action == "accept":
+        typer.echo(f"Accepted: {result['src']} → {result['dst']}")
+        typer.echo(f"Audit id: {result['id']}")
+        if not result.get("git_staged", False):
+            git_err = result.get("git_error") or "(no detail)"
+            typer.echo(f"(git stage skipped: {git_err})")
+        agent = target.split("/", 1)[0]
+        typer.echo(
+            f"Next `financial-analyst report` call will use this rule in agent {agent!r}."
+        )
+    else:
+        typer.echo(f"Rejected and deleted: {result['src']}")
+        typer.echo(f"Audit id: {result['id']}")
 
 
 async def _run_dream(since: int, dry_run: bool, out_dir: Path):

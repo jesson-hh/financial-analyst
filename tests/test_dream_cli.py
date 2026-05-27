@@ -2,8 +2,20 @@ import json
 from pathlib import Path
 from unittest.mock import patch, AsyncMock
 import pandas as pd
+import pytest
 from typer.testing import CliRunner
 from financial_analyst.cli import app
+
+
+@pytest.fixture(autouse=True)
+def _isolate_audit(tmp_path, monkeypatch):
+    """Redirect memory_ops.AUDIT_PATH to tmp dir — these tests exercise CLI
+    accept/reject which after retrofit writes audit; without isolation the
+    user's real ~/.financial-analyst/audit.jsonl would be polluted."""
+    from financial_analyst import memory_ops
+    monkeypatch.setattr(
+        memory_ops, "AUDIT_PATH", tmp_path / "_isolated_audit.jsonl",
+    )
 
 
 def test_cli_dream_no_reports(tmp_path, monkeypatch):
@@ -217,3 +229,21 @@ def test_cli_dream_accept_bad_target_format(tmp_path, monkeypatch):
     result = runner.invoke(app, ["dream", "accept", "no-slash"])
     assert result.exit_code != 0
     assert "<agent>/<slug>" in result.stdout
+
+
+def test_cli_dream_accept_writes_audit_with_source_cli(tmp_path, monkeypatch):
+    """After retrofit: CLI accept must write an audit entry with source='cli'."""
+    from financial_analyst import memory_ops
+    monkeypatch.chdir(tmp_path)
+    _make_synthetic_proposal(tmp_path, "whale-advocate", "audit-test")
+    runner = CliRunner()
+    result = runner.invoke(app, ["dream", "accept", "whale-advocate/audit-test"])
+    assert result.exit_code == 0, result.stdout
+    assert "Audit id:" in result.stdout
+    # AUDIT_PATH was redirected by the autouse _isolate_audit fixture
+    assert memory_ops.AUDIT_PATH.exists(), "audit log was not written"
+    entries = [json.loads(line) for line in memory_ops.AUDIT_PATH.read_text(encoding="utf-8").splitlines()]
+    assert len(entries) == 1
+    assert entries[0]["source"] == "cli"
+    assert entries[0]["action"] == "accept"
+    assert entries[0]["target"] == "whale-advocate/audit-test"

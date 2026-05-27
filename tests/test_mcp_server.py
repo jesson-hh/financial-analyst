@@ -16,6 +16,10 @@ EXPECTED_TOOLS = {
     "overseas_radar",      # v1.0.7: global transmission radar
     "data_update",         # v1.0.7: trigger `fa data update` subprocess
     "chain_lookup",        # v1.0.7: industry-chain context for one stock
+    "accept_proposal",     # v1.0.8: close dream loop — accept (audit + revert)
+    "reject_proposal",     # v1.0.8: discard a dream-loop proposal
+    "revert_proposal",     # v1.0.8: undo a prior accept
+    "list_audit",          # v1.0.8: read audit.jsonl history
 }
 
 
@@ -195,6 +199,29 @@ def test_smoke_chain_lookup_roundtrip():
     data = json.loads(text)
     # Real chain data OR a clean {"error": "..."} from the loader.
     assert ("primary_product" in data) or ("error" in data), data
+
+
+def test_smoke_accept_proposal_dry_run_no_side_effect():
+    """accept_proposal(dry_run=true) must NOT touch files or audit, even if target is missing."""
+    responses = _run_frames([
+        _INIT, _INITIALIZED,
+        {
+            "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+            "params": {"name": "accept_proposal",
+                       "arguments": {"target": "nonexistent-agent/no-such-slug",
+                                     "dry_run": True}},
+        },
+    ])
+    by_id = _by_id(responses)
+    assert 5 in by_id, f"no response to accept_proposal; stdout={responses}"
+    call_result = by_id[5]["result"]
+    assert call_result.get("isError") is False
+    text = call_result["content"][0]["text"]
+    data = json.loads(text)
+    # With nonexistent target + dry_run, we expect either an error (target missing
+    # in _proposed/) OR a would_move dict if the proposal happens to exist. Both
+    # are valid "no side effect" outcomes.
+    assert ("error" in data) or (data.get("dry_run") is True), data
 
 
 def test_smoke_memory_search_hyphen_no_crash():

@@ -1,12 +1,15 @@
 """MCP server — expose financial-analyst capabilities to Claude Desktop / Claude Code / Cursor / Codex CLI.
 
-Tools (16):
+Tools (20):
   Fast read (<1s):     quick_quote, quick_factors, memory_search,
                        list_past_reports, read_past_report,
-                       list_dream_proposals, chain_lookup
+                       list_dream_proposals, chain_lookup, list_audit
   Medium (~10s-3min):  ask, mainline, brief, intraday, dream,
                        dream_aggregate, overseas_radar
   Slow (3-30min):      report, data_update
+  Memory mutation:     accept_proposal, reject_proposal, revert_proposal
+                       (all audit-logged to ~/.financial-analyst/audit.jsonl
+                        with source='mcp'; reversible via revert_proposal)
 
 Wire into Claude Desktop with:
   ~/.config/claude/claude_desktop_config.json   (Linux/Mac)
@@ -222,6 +225,37 @@ async def _tool_chain_lookup(code: str) -> Dict[str, Any]:
     if ctx is None:
         return {"code": code, "error": "no chain membership found"}
     return ctx
+
+
+async def _tool_accept_proposal(target: str, dry_run: bool = False) -> Dict[str, Any]:
+    """Promote a dream-loop proposal to active agent memory.
+
+    SAFETY: every accept writes to ~/.financial-analyst/audit.jsonl with
+    source='mcp' and git-stages the file. Reversible via revert_proposal.
+    """
+    from financial_analyst.memory_ops import accept_proposal
+    return accept_proposal(target, source="mcp", dry_run=dry_run, project_root=Path.cwd())
+
+
+async def _tool_reject_proposal(target: str) -> Dict[str, Any]:
+    """Delete a dream-loop proposal without promoting. Audited as source='mcp'."""
+    from financial_analyst.memory_ops import reject_proposal
+    return reject_proposal(target, source="mcp", project_root=Path.cwd())
+
+
+async def _tool_revert_proposal(target: str) -> Dict[str, Any]:
+    """Undo a prior accept — move memories/<agent>/<slug>.md back to _proposed/.
+
+    Audit entry includes reverted_id pointing to the original accept's audit id.
+    """
+    from financial_analyst.memory_ops import revert_proposal
+    return revert_proposal(target, source="mcp", project_root=Path.cwd())
+
+
+async def _tool_list_audit(limit: int = 20) -> List[Dict[str, Any]]:
+    """Return the last N audit entries from ~/.financial-analyst/audit.jsonl (newest first)."""
+    from financial_analyst.memory_ops import list_audit
+    return list_audit(limit=limit)
 
 
 async def _tool_dream_aggregate(min_count: int = 3, threshold: float = 0.4,
@@ -446,6 +480,66 @@ TOOLS: Dict[str, Dict[str, Any]] = {
                 "code": {"type": "string", "description": "Stock code like SH688256"},
             },
             "required": ["code"],
+        },
+    },
+    "accept_proposal": {
+        "handler": _tool_accept_proposal,
+        "description": (
+            "Promote a dream-loop proposal (memories/_proposed/<agent>/<slug>.md) to "
+            "active agent memory. Writes audit entry (source='mcp') to "
+            "~/.financial-analyst/audit.jsonl and git-stages the file. "
+            "Use dry_run=true to preview without changes. Reversible via revert_proposal. "
+            "Refuses to overwrite existing memory files."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Proposal id, format '<agent>/<slug>' (e.g. 'bear-advocate/F15_new_pitfall')"},
+                "dry_run": {"type": "boolean", "default": False, "description": "If true, return {would_move, dry_run:true} without touching files or audit"},
+            },
+            "required": ["target"],
+        },
+    },
+    "reject_proposal": {
+        "handler": _tool_reject_proposal,
+        "description": (
+            "Delete a dream-loop proposal without promoting. Writes audit entry "
+            "(source='mcp') and irreversibly removes the file from _proposed/."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Proposal id, format '<agent>/<slug>'"},
+            },
+            "required": ["target"],
+        },
+    },
+    "revert_proposal": {
+        "handler": _tool_revert_proposal,
+        "description": (
+            "Undo a prior accept — moves memories/<agent>/<slug>.md back to _proposed/ "
+            "and git-stages the removal. Audit entry includes reverted_id pointing to "
+            "the original accept. Errors if the file is not in active memory."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Same '<agent>/<slug>' identifier that was accepted"},
+            },
+            "required": ["target"],
+        },
+    },
+    "list_audit": {
+        "handler": _tool_list_audit,
+        "description": (
+            "Return the last N entries from ~/.financial-analyst/audit.jsonl (newest first). "
+            "Covers all accept/reject/revert actions across CLI, MCP, and future UI."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 20, "description": "Max entries to return (default 20)"},
+            },
         },
     },
     "dream_aggregate": {

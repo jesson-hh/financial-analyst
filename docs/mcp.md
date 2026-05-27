@@ -1,6 +1,6 @@
 # MCP Server — Claude Desktop / Claude Code Integration
 
-`financial-analyst-mcp` exposes **16 tools** to Claude Desktop / Claude Code / Cursor / Codex CLI via the [Model Context Protocol](https://modelcontextprotocol.io/).
+`financial-analyst-mcp` exposes **20 tools** to Claude Desktop / Claude Code / Cursor / Codex CLI via the [Model Context Protocol](https://modelcontextprotocol.io/).
 
 After this is set up, you can say in Claude Desktop / Claude Code:
 
@@ -147,6 +147,10 @@ Tools should appear in the tool drawer / `/mcp` list.
 | `overseas_radar` | 1-2min | "今天海外传导对 A 股影响?" — overnight US/HK + global news → A 股 follow-through |
 | `data_update` | 3-5min (基础); +30min `include_f10` | "Refresh data for SH600519 before research" — wraps `fa data update` subprocess |
 | `chain_lookup` | <1s | "What industry chain is SH688256 in?" — primary product + peers + 上下游 (ChainKBLoader) |
+| `accept_proposal` | <1s | "Accept the bear-advocate/F15_new_pitfall proposal from the last dream loop" — promotes `_proposed/<agent>/<slug>.md` to active memory, audit + git stage. `dry_run=true` previews. |
+| `reject_proposal` | <1s | "Discard the whale-analyst/bad_signal proposal" — deletes file from `_proposed/`, writes audit. |
+| `revert_proposal` | <1s | "Undo my last accept of risk-officer/over_strict_rule" — moves the file back to `_proposed/`, audit links to original accept id. |
+| `list_audit` | <1s | "Show me the last 20 memory mutations" — newest-first entries from `~/.financial-analyst/audit.jsonl`. |
 
 ### About `report` timeout
 
@@ -163,7 +167,7 @@ The full 13-agent deep-dive can take 5-10 minutes. Most MCP clients (including C
 - Calls Tushare / LLM provider APIs using YOUR keys
 - Honors `config/plugins.yaml` (loads your private BYOM models)
 - Does NOT expose arbitrary shell command execution to Claude Desktop
-- Does NOT have write access to `memories/<agent>/` files directly (only via `accept` if user pre-stages a proposal)
+- **Writes to `memories/<agent>/` ONLY via `accept_proposal` (promotes from `_proposed/`) and `revert_proposal` (demotes back). Every accept/reject/revert is logged to `~/.financial-analyst/audit.jsonl` with source attribution (`cli` / `mcp` / future `buddy`). Cannot create arbitrary memory content — only promote LLM-vetted proposals from the dream loop. Git-stages every memory file change so `git diff` shows what changed before you commit.**
 
 Each tool is a Python function with a strict JSON schema for input — Claude cannot pass arbitrary code.
 
