@@ -38,6 +38,7 @@ DATA_TYPES = (
     "concepts",      # 同花顺 concept stocks + constituents (adata, zero token)
     "stock_basic",   # company master list (Tushare opt-in)
     "northbound",    # 沪深股通持仓快照 (akshare 东财, zero token)
+    "fund_flow",     # per-stock 主力/大单/中单/小单/超大单 (东财 push2, zero token)
 )
 
 
@@ -53,6 +54,7 @@ IMPLEMENTED_TYPES = (
     "financials",    # since v1.0.7 (fa data update --include-financial, Tushare opt-in)
     "stock_basic",   # since v1.0.7 (fa data update --include-stock-basic, Tushare opt-in)
     "northbound",    # since v1.0.7 (fa data update --include-northbound, zero token)
+    "fund_flow",     # since v1.0.8 (fa data update --include-fund-flow, zero token)
 )
 
 
@@ -66,6 +68,7 @@ STALE_THRESHOLD_HOURS = {
     "concepts":    24 * 7,   # weekly refresh sufficient
     "stock_basic": 24 * 30,  # company master list, monthly OK
     "northbound":  24 * 2,   # daily snapshot — stale after ~2 trading days
+    "fund_flow":   24,       # daily — refresh every overnight
 }
 
 

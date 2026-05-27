@@ -2301,6 +2301,8 @@ function DataRefreshButton({ s, dispatch }) {
       params.set('include_concepts', 'true');
       params.set('include_financial', 'true');
       params.set('include_stock_basic', 'true');
+      params.set('include_fund_flow', 'true');  // ~25min for csi all, 主力/大单/中单/小单
+      params.set('fund_flow_lmt', '120');
     }
     dispatch({ type: 'data_refreshing', on: true });
     try {
@@ -2327,7 +2329,7 @@ function DataRefreshButton({ s, dispatch }) {
   // 全开提示 — Shift+click 多刷 F10/concepts/financial/stock_basic
   const titleWithHint = refreshing
     ? title
-    : `${title}\n\n点击: 刷日线 + 5min + daily_basic + 北向 (~5min, 零 token)\nShift+点击: 全开 (+ F10 csi500 ~30min + 概念 + 财务 + 公司基本信息; 财务两项需 FA_TUSHARE_TOKEN env)`;
+    : `${title}\n\n点击: 刷日线 + 5min + daily_basic + 北向 (~5min, 零 token)\nShift+点击: 全开 (+ F10 csi500 ~30min + 概念 + 财务 + 公司基本信息 + 个股资金流; 财务两项需 FA_TUSHARE_TOKEN env)`;
 
   return (
     <span

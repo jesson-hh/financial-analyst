@@ -193,6 +193,12 @@ def update_cmd(
     include_northbound: bool = typer.Option(
         False, "--include-northbound",
         help="附带刷新北向 (沪深股通) 当日持仓快照 (零 token, 需 akshare 包)"),
+    include_fund_flow: bool = typer.Option(
+        False, "--include-fund-flow",
+        help="附带刷新个股资金流 (主力/大单/中单/小单/超大单日级 N 天, 零 token 走东财 push2)"),
+    fund_flow_lmt: int = typer.Option(
+        120, "--fund-flow-lmt",
+        help="资金流回看交易日数 (默认 120, 最大约 120 由 upstream 限制)"),
 ):
     """直连增量更新所有数据 — 日线 + 5min + 当日 PE/PB/MV.
 
@@ -269,9 +275,9 @@ def update_cmd(
         if stats_basic.get("ok", 0) > 0:
             _lu.mark_updated("daily_basic")
 
-    # F10 / concepts / financial / stock_basic / northbound 走 paths resolver
+    # F10 / concepts / financial / stock_basic / northbound / fund_flow 走 paths resolver
     if (include_f10 or include_concepts or include_financial
-            or include_stock_basic or include_northbound):
+            or include_stock_basic or include_northbound or include_fund_flow):
         from financial_analyst.data.paths import get_data_paths
         paths = get_data_paths()
 
@@ -387,6 +393,28 @@ def update_cmd(
                     typer.echo(f"\n[northbound ✗] errors={stats_nb.get('errors')}")
             except ImportError as e:
                 typer.echo(f"\n[northbound ✗] akshare 包未装: {e}")
+
+        # fund_flow 零 token (东财 push2 路线, per-stock, 用 codes_list)
+        if include_fund_flow:
+            from financial_analyst.data.updaters.fund_flow import update_fund_flow
+            t0 = time.time()
+            stats_ff = update_fund_flow(
+                paths.parquet_root, codes_list,
+                lmt=fund_flow_lmt, progress=True,
+            )
+            if stats_ff["ok"]:
+                typer.echo(
+                    f"\n[fund_flow ✓] codes ok={stats_ff['codes_ok']}/"
+                    f"{stats_ff['codes_total']} (fail={stats_ff['codes_failed']}) "
+                    f"rows={stats_ff['rows_total']} ({stats_ff['date_range']}) "
+                    f"耗时 {time.time() - t0:.1f}s"
+                )
+                _lu.mark_updated("fund_flow")
+            else:
+                typer.echo(
+                    f"\n[fund_flow ✗] codes ok={stats_ff['codes_ok']}/"
+                    f"{stats_ff['codes_total']} — all failed, see errors"
+                )
 
     typer.echo(f"\n=== 完成. 总耗时 {time.time() - overall_t:.1f}s ===")
 
