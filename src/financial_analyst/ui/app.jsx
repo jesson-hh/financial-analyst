@@ -2295,6 +2295,7 @@ function DataRefreshButton({ s, dispatch }) {
     const shiftHeld = e.shiftKey;
     const params = new URLSearchParams();
     params.set('include_northbound', 'true');   // ~20s, zero token, 安全默认
+    params.set('include_ths_hot', 'true');      // ~2s 当日 snapshot, 零 token, 安全默认
     if (shiftHeld) {
       params.set('include_f10', 'true');
       params.set('f10_universe', 'csi500');     // csi500 ~30min; 改 csi300 ~10min
@@ -2303,6 +2304,11 @@ function DataRefreshButton({ s, dispatch }) {
       params.set('include_stock_basic', 'true');
       params.set('include_fund_flow', 'true');  // ~25min for csi all, 主力/大单/中单/小单
       params.set('fund_flow_lmt', '120');
+      params.set('include_margin', 'true');     // ~15min 融资融券 daily
+      params.set('include_lockup', 'true');     // ~30min 解禁日历 (2 queries/stock)
+      params.set('include_corporate_actions', 'true');  // ~40min 户数+大宗+分红
+      params.set('include_announcements', 'true');      // ~2h 巨潮 (慢)
+      params.set('announcements_page_size', '30');
     }
     dispatch({ type: 'data_refreshing', on: true });
     try {
@@ -2329,7 +2335,7 @@ function DataRefreshButton({ s, dispatch }) {
   // 全开提示 — Shift+click 多刷 F10/concepts/financial/stock_basic
   const titleWithHint = refreshing
     ? title
-    : `${title}\n\n点击: 刷日线 + 5min + daily_basic + 北向 (~5min, 零 token)\nShift+点击: 全开 (+ F10 csi500 ~30min + 概念 + 财务 + 公司基本信息 + 个股资金流; 财务两项需 FA_TUSHARE_TOKEN env)`;
+    : `${title}\n\n点击: 刷日线 + 5min + daily_basic + 北向 + 同花顺热点 (~5min, 零 token)\nShift+点击: 全开 (+ F10 csi500 + 概念 + 财务 + 公司基本 + 资金流 + 融资融券 + 解禁 + 公司行为 + 公告; 财务两项需 FA_TUSHARE_TOKEN env, 共 ~3h)`;
 
   return (
     <span

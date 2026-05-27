@@ -667,6 +667,12 @@ def build_app():
         include_northbound: bool = False,
         include_fund_flow: bool = False,
         fund_flow_lmt: int = 120,
+        include_margin: bool = False,
+        include_lockup: bool = False,
+        include_corporate_actions: bool = False,
+        include_ths_hot: bool = False,
+        include_announcements: bool = False,
+        announcements_page_size: int = 30,
     ):
         """Trigger an incremental data refresh — equivalent to `fa data update`.
 
@@ -707,6 +713,17 @@ def build_app():
             cmd.append("--include-northbound")
         if include_fund_flow:
             cmd.extend(["--include-fund-flow", "--fund-flow-lmt", str(fund_flow_lmt)])
+        if include_margin:
+            cmd.append("--include-margin")
+        if include_lockup:
+            cmd.append("--include-lockup")
+        if include_corporate_actions:
+            cmd.append("--include-corporate-actions")
+        if include_ths_hot:
+            cmd.append("--include-ths-hot")
+        if include_announcements:
+            cmd.extend(["--include-announcements",
+                        "--announcements-page-size", str(announcements_page_size)])
         try:
             # Detached: stdout/stderr go to /dev/null so we don't accumulate
             # buffer in the buddy process. The CLI writes its own progress

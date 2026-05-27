@@ -39,6 +39,11 @@ DATA_TYPES = (
     "stock_basic",   # company master list (Tushare opt-in)
     "northbound",    # 沪深股通持仓快照 (akshare 东财, zero token)
     "fund_flow",     # per-stock 主力/大单/中单/小单/超大单 (东财 push2, zero token)
+    "margin",        # 融资融券明细 daily (东财 datacenter, zero token)
+    "lockup",        # 限售解禁日历 (东财 datacenter, zero token)
+    "corporate_actions",  # 股东户数 + 大宗交易 + 分红送转 (东财 datacenter, zero token)
+    "ths_hot",       # 同花顺当日强势股 + reason tags 题材归因 (zero token)
+    "announcements", # 巨潮公告索引 (zero token)
 )
 
 
@@ -55,6 +60,11 @@ IMPLEMENTED_TYPES = (
     "stock_basic",   # since v1.0.7 (fa data update --include-stock-basic, Tushare opt-in)
     "northbound",    # since v1.0.7 (fa data update --include-northbound, zero token)
     "fund_flow",     # since v1.0.8 (fa data update --include-fund-flow, zero token)
+    "margin",        # since v1.0.8 (fa data update --include-margin)
+    "lockup",        # since v1.0.8 (fa data update --include-lockup)
+    "corporate_actions",  # since v1.0.8 (fa data update --include-corporate-actions)
+    "ths_hot",       # since v1.0.8 (fa data update --include-ths-hot)
+    "announcements", # since v1.0.8 (fa data update --include-announcements)
 )
 
 
@@ -69,6 +79,11 @@ STALE_THRESHOLD_HOURS = {
     "stock_basic": 24 * 30,  # company master list, monthly OK
     "northbound":  24 * 2,   # daily snapshot — stale after ~2 trading days
     "fund_flow":   24,       # daily — refresh every overnight
+    "margin":      24,       # daily SHFE/SZSE publish
+    "lockup":      24 * 7,   # weekly check is enough (low-frequency events)
+    "corporate_actions": 24 * 7,   # quarterly/yearly events, weekly check fine
+    "ths_hot":     24,       # daily snapshot of strong-stock list
+    "announcements": 24 * 3, # event-driven, check every few days
 }
 
 

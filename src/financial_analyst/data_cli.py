@@ -199,6 +199,24 @@ def update_cmd(
     fund_flow_lmt: int = typer.Option(
         120, "--fund-flow-lmt",
         help="资金流回看交易日数 (默认 120, 最大约 120 由 upstream 限制)"),
+    include_margin: bool = typer.Option(
+        False, "--include-margin",
+        help="附带刷新融资融券明细 (日级, 零 token 走东财 datacenter)"),
+    include_lockup: bool = typer.Option(
+        False, "--include-lockup",
+        help="附带刷新限售解禁日历 (历史 + 90 天预警, 零 token 走东财 datacenter)"),
+    include_corporate_actions: bool = typer.Option(
+        False, "--include-corporate-actions",
+        help="附带刷新公司行为三件套 (股东户数 + 大宗交易 + 分红送转, 零 token 走东财 datacenter)"),
+    include_ths_hot: bool = typer.Option(
+        False, "--include-ths-hot",
+        help="附带刷新同花顺当日强势股 + 题材归因 reason tags (零 token, 不需要 codes)"),
+    include_announcements: bool = typer.Option(
+        False, "--include-announcements",
+        help="附带刷新巨潮公告索引 (每股最新 N 条标题/类型/链接, 零 token)"),
+    announcements_page_size: int = typer.Option(
+        30, "--announcements-page-size",
+        help="巨潮每只拉最新 N 条公告 (默认 30)"),
 ):
     """直连增量更新所有数据 — 日线 + 5min + 当日 PE/PB/MV.
 
@@ -275,9 +293,12 @@ def update_cmd(
         if stats_basic.get("ok", 0) > 0:
             _lu.mark_updated("daily_basic")
 
-    # F10 / concepts / financial / stock_basic / northbound / fund_flow 走 paths resolver
-    if (include_f10 or include_concepts or include_financial
-            or include_stock_basic or include_northbound or include_fund_flow):
+    # F10/concepts/financial/stock_basic/northbound/fund_flow/margin/lockup/corp/ths_hot/announce
+    _need_paths = (include_f10 or include_concepts or include_financial
+                   or include_stock_basic or include_northbound or include_fund_flow
+                   or include_margin or include_lockup or include_corporate_actions
+                   or include_ths_hot or include_announcements)
+    if _need_paths:
         from financial_analyst.data.paths import get_data_paths
         paths = get_data_paths()
 
@@ -415,6 +436,91 @@ def update_cmd(
                     f"\n[fund_flow ✗] codes ok={stats_ff['codes_ok']}/"
                     f"{stats_ff['codes_total']} — all failed, see errors"
                 )
+
+        # margin trading (东财 datacenter, per-stock)
+        if include_margin:
+            from financial_analyst.data.updaters.margin_trading import update_margin_trading
+            t0 = time.time()
+            stats_m = update_margin_trading(
+                paths.parquet_root, codes_list, progress=True,
+            )
+            typer.echo(
+                f"\n[margin ✓] ok={stats_m['codes_ok']}/{stats_m['codes_total']} "
+                f"rows={stats_m['rows_total']} ({stats_m.get('date_range', 'n/a')}) "
+                f"耗时 {time.time() - t0:.1f}s"
+            )
+            if stats_m["ok"]:
+                _lu.mark_updated("margin")
+
+        # lockup expiry (东财 datacenter, per-stock)
+        if include_lockup:
+            from financial_analyst.data.updaters.lockup_expiry import update_lockup_expiry
+            t0 = time.time()
+            stats_lk = update_lockup_expiry(
+                paths.parquet_root, codes_list, progress=True,
+            )
+            typer.echo(
+                f"\n[lockup ✓] with_data={stats_lk['codes_with_data']}/"
+                f"{stats_lk['codes_total']} rows={stats_lk['rows_total']} "
+                f"(upcoming={stats_lk['rows_upcoming']}) "
+                f"耗时 {time.time() - t0:.1f}s"
+            )
+            if stats_lk["ok"]:
+                _lu.mark_updated("lockup")
+
+        # corporate actions (holder + block + dividend, 三流并行)
+        if include_corporate_actions:
+            from financial_analyst.data.updaters.corporate_actions import (
+                update_corporate_actions,
+            )
+            t0 = time.time()
+            stats_ca = update_corporate_actions(
+                paths.parquet_root, codes_list, progress=True,
+            )
+            typer.echo(
+                f"\n[corp_actions ✓] streams={stats_ca['streams']} "
+                f"耗时 {time.time() - t0:.1f}s"
+            )
+            for k, v in stats_ca.get("results", {}).items():
+                typer.echo(f"  {k}: with_data={v['codes_with_data']} "
+                           f"rows={v['rows_total']}")
+            if stats_ca["ok"]:
+                _lu.mark_updated("corporate_actions")
+
+        # 同花顺热点 (零 token, 不需要 codes — market-wide snapshot)
+        if include_ths_hot:
+            from financial_analyst.data.updaters.ths_hot import update_ths_hot
+            t0 = time.time()
+            stats_th = update_ths_hot(paths.parquet_root, progress=True)
+            if stats_th["ok"]:
+                typer.echo(
+                    f"\n[ths_hot ✓] date={stats_th['date']} "
+                    f"new={stats_th['rows_new']} total={stats_th['rows_total']} "
+                    f"耗时 {time.time() - t0:.1f}s"
+                )
+                if stats_th.get("rows_new", 0) > 0:
+                    _lu.mark_updated("ths_hot")
+            else:
+                typer.echo(f"\n[ths_hot ✗] {stats_th.get('error', 'unknown')}")
+
+        # 巨潮公告索引 (零 token, per-stock)
+        if include_announcements:
+            from financial_analyst.data.updaters.announcements import (
+                update_announcements,
+            )
+            t0 = time.time()
+            stats_an = update_announcements(
+                paths.parquet_root, codes_list,
+                page_size=announcements_page_size, progress=True,
+            )
+            typer.echo(
+                f"\n[announcements ✓] ok={stats_an['codes_ok']}/"
+                f"{stats_an['codes_total']} rows={stats_an['rows_total']} "
+                f"({stats_an.get('date_range', 'n/a')}) "
+                f"耗时 {time.time() - t0:.1f}s"
+            )
+            if stats_an["ok"]:
+                _lu.mark_updated("announcements")
 
     typer.echo(f"\n=== 完成. 总耗时 {time.time() - overall_t:.1f}s ===")
 
