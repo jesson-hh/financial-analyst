@@ -80,6 +80,32 @@ Out comes a markdown research report — **rated, attributed, falsifiable**. The
 
 ---
 
+## 🎬 See it in action
+
+<table>
+<tr>
+<td width="50%" valign="top" align="center">
+
+**💻 CLI** — `fa report SH600519` end-to-end
+
+<video src="https://github.com/jesson-hh/financial-analyst/raw/main/docs/demo/cli.mp4" controls width="100%" muted></video>
+
+</td>
+<td width="50%" valign="top" align="center">
+
+**🖥 Web UI** — 觀瀾 dashboard interaction
+
+<video src="https://github.com/jesson-hh/financial-analyst/raw/main/docs/demo/ui.mp4" controls width="100%" muted></video>
+
+</td>
+</tr>
+</table>
+
+> Videos don't play in your viewer? Direct download:
+> [cli.mp4](docs/demo/cli.mp4) · [ui.mp4](docs/demo/ui.mp4)
+
+---
+
 ## ✨ Key Features
 
 <table>
