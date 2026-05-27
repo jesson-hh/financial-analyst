@@ -150,10 +150,9 @@ def _run_frames(
         proc.stdin.write(payload)
         proc.stdin.flush()
         time.sleep(process_wait_sec)  # let server dispatch every frame before EOF
-        try:
-            proc.stdin.close()
-        except Exception:
-            pass
+        # Let communicate() close stdin + drain stdout. Python 3.11's
+        # communicate() re-flushes stdin internally, so a manual close()
+        # here raises "I/O operation on closed file" (3.13 silently skips).
         try:
             stdout, _ = proc.communicate(timeout=timeout_sec)
         except subprocess.TimeoutExpired:
