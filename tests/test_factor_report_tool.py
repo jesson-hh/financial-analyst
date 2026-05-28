@@ -41,6 +41,6 @@ def test_factor_report_tool_bad_expr(monkeypatch):
 
 
 def test_factor_report_registered():
-    from financial_analyst.buddy.tools import TOOLS
-    names = {tool.name for tool in TOOLS}
+    from financial_analyst.buddy.tools import TOOL_REGISTRY
+    names = {tool.name for tool in TOOL_REGISTRY}
     assert "factor_report" in names

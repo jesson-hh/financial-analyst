@@ -2084,7 +2084,3 @@ def get_tool(name: str) -> Optional[Tool]:
 
 def list_tools() -> List[Tool]:
     return list(TOOL_REGISTRY)
-
-
-#: Alias for backwards-compat and tool tests.
-TOOLS = TOOL_REGISTRY
