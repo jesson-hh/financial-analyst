@@ -24,11 +24,16 @@ lazy anyway so importing this module never fails at install time.
 """
 from __future__ import annotations
 import asyncio
+import io
 import json
 import uuid
 from typing import Any, Dict, Optional
 
 from pydantic import BaseModel  # core dependency — safe at module level
+# fastapi is a core dependency too; UploadFile/File must be module-level so the
+# /upload route annotation resolves under ``from __future__ import annotations``
+# (forward refs are looked up in module globals, not build_app's local scope).
+from fastapi import UploadFile, File as FastAPIFile
 
 
 class RunReq(BaseModel):
@@ -817,6 +822,39 @@ def build_app():
         if boards is None:
             return JSONResponse({"available": False, "boards": []})
         return JSONResponse({"available": True, "boards": boards})
+
+    @app.post("/upload")
+    async def upload(file: UploadFile = FastAPIFile(...)):
+        """Extract text from an uploaded doc for the composer 上传 button.
+
+        csv/txt/md → utf-8 decode; pdf → pypdf page text. Caps raw size at
+        10 MB and extracted text at 20k chars. Returns {id, name, chars, truncated, text}.
+        """
+        MAX_BYTES = 10 * 1024 * 1024
+        MAX_CHARS = 20_000
+        name = file.filename or "upload"
+        ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
+        if ext not in (".txt", ".md", ".csv", ".pdf"):
+            return JSONResponse({"error": f"不支持的文件类型: {ext or '无扩展名'}"}, status_code=400)
+        raw = await file.read()
+        if len(raw) > MAX_BYTES:
+            return JSONResponse({"error": f"文件过大 (>{MAX_BYTES // 1024 // 1024}MB)"}, status_code=413)
+
+        def _extract():
+            if ext == ".pdf":
+                import pypdf
+                reader = pypdf.PdfReader(io.BytesIO(raw))
+                return "\n".join((p.extract_text() or "") for p in reader.pages)
+            return raw.decode("utf-8", errors="replace")
+
+        try:
+            text = await asyncio.to_thread(_extract)
+        except Exception as exc:
+            return JSONResponse({"error": f"解析失败: {exc}"}, status_code=422)
+        truncated = len(text) > MAX_CHARS
+        text = text[:MAX_CHARS]
+        return JSONResponse({"id": uuid.uuid4().hex, "name": name, "chars": len(text),
+                             "truncated": truncated, "text": text})
 
     @app.get("/models")
     async def models():
