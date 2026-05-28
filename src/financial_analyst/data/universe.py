@@ -27,6 +27,13 @@ def _f10_codes(universe: str) -> List[str]:
         from financial_analyst.data.paths import get_data_paths
         from financial_analyst.data.updaters.f10 import resolve_universe as _f10_resolve
         return list(_f10_resolve(get_data_paths().parquet_root, universe))
+    except FileNotFoundError:
+        import logging
+        logging.getLogger("financial_analyst.universe").info(
+            "universe %r needs index_constituents.parquet — run `fa data bootstrap` to enable "
+            "csi300/csi500/csi800/all factor universes.", universe,
+        )
+        return []
     except Exception:
         return []
 
@@ -40,9 +47,7 @@ def resolve_universe_codes(universe: str) -> List[str]:
     else:
         from financial_analyst._config import bundled_config_dir, find_config
         try:
-            fc = find_config(f"universes/{universe}.txt")
-            if fc is not None:
-                cands.append(Path(fc))
+            cands.append(Path(find_config(f"universes/{universe}.txt")))
         except Exception:
             pass
         cands.append(Path.home() / ".financial-analyst" / "universes" / f"{universe}.txt")

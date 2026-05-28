@@ -30,3 +30,15 @@ def test_unknown_returns_empty(monkeypatch):
     import financial_analyst.data.universe as uni
     monkeypatch.setattr(uni, "_f10_codes", lambda universe: [])
     assert resolve_universe_codes("totally_unknown_xyz") == []
+
+
+def test_txt_preferred_over_f10(monkeypatch):
+    """When a .txt universe resolves, the f10 fallback must NOT be consulted."""
+    import financial_analyst.data.universe as uni
+
+    def _boom(u):
+        raise AssertionError("f10 fallback should not be called when .txt resolves")
+
+    monkeypatch.setattr(uni, "_f10_codes", _boom)
+    codes = resolve_universe_codes("csi300_active")  # bundled .txt exists
+    assert isinstance(codes, list) and len(codes) > 0
