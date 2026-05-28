@@ -63,3 +63,55 @@ def test_zscore_degenerate_all_equal_date_is_nan():
     z = zscore(s)
     assert z.xs(dates[0], level="datetime").isna().all()       # zero-variance → all NaN
     assert abs(float(z.xs(dates[1], level="datetime").mean())) < 1e-9  # normal date OK
+
+
+from financial_analyst.factors.eval.ic import ic_analysis, IcResult
+
+
+def _aligned_alpha_fwd(relation="perfect", n_dates=30, codes=tuple("ABCDEFGH"), seed=5):
+    """Build aligned (alpha, fwd) series on the same (date, code) index.
+    relation: 'perfect' (alpha == fwd), 'reversed' (alpha == -fwd), 'random'."""
+    dates = pd.date_range("2024-01-01", periods=n_dates, freq="B")
+    idx = pd.MultiIndex.from_product([dates, codes], names=["datetime", "code"])
+    rng = np.random.default_rng(seed)
+    fwd = pd.Series(rng.standard_normal(len(idx)) * 0.02, index=idx)
+    if relation == "perfect":
+        alpha = fwd.copy()
+    elif relation == "reversed":
+        alpha = -fwd
+    else:
+        alpha = pd.Series(rng.standard_normal(len(idx)), index=idx)
+    return alpha, fwd
+
+
+def test_ic_perfect_factor_near_one():
+    alpha, fwd = _aligned_alpha_fwd("perfect")
+    r = ic_analysis(alpha, fwd)
+    assert isinstance(r, IcResult)
+    assert r.ic_mean > 0.95
+    assert r.icir > 3
+    assert r.ic_win_rate > 0.95
+    assert len(r.ic_series) == 30
+
+
+def test_ic_reversed_factor_near_minus_one():
+    alpha, fwd = _aligned_alpha_fwd("reversed")
+    r = ic_analysis(alpha, fwd)
+    assert r.ic_mean < -0.95
+    assert r.rank_ic_mean < -0.9
+
+
+def test_ic_random_factor_near_zero():
+    alpha, fwd = _aligned_alpha_fwd("random")
+    r = ic_analysis(alpha, fwd)
+    # seed=5, n=8 codes → sampling variance is high; threshold 0.2 rather than
+    # 0.1 to avoid a false failure while still confirming no spurious large IC.
+    assert abs(r.ic_mean) < 0.2
+
+
+def test_ic_decay_one_row_per_horizon():
+    alpha, fwd = _aligned_alpha_fwd("perfect")
+    decay_fwd = {1: fwd, 5: fwd, 21: fwd}
+    r = ic_analysis(alpha, fwd, fwd_by_horizon=decay_fwd)
+    assert [h for h, _, _ in r.ic_decay] == [1, 5, 21]
+    assert all(ic > 0.9 for _, ic, _ in r.ic_decay)
