@@ -167,7 +167,7 @@ from financial_analyst.factors.eval.portfolio import (
 def test_portfolio_stats_hand_computed():
     # 4 periods of +10% each, monthly (ppy=12)
     ls = pd.Series([0.1, 0.1, 0.1, 0.1],
-                   index=pd.date_range("2024-01-31", periods=4, freq="ME"))
+                   index=pd.to_datetime(["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30"]))
     st = portfolio_stats(ls, ppy=12)
     # nav_end = 1.1**4 = 1.4641; ann = 1.4641**(12/4) - 1
     assert st["ann_return"] == pytest.approx(1.4641 ** 3 - 1, rel=1e-6)
@@ -178,7 +178,7 @@ def test_portfolio_stats_hand_computed():
 
 def test_portfolio_stats_drawdown():
     ls = pd.Series([0.2, -0.5, 0.1],
-                   index=pd.date_range("2024-01-31", periods=3, freq="ME"))
+                   index=pd.to_datetime(["2024-01-31", "2024-02-29", "2024-03-31"]))
     st = portfolio_stats(ls, ppy=12)
     # nav = [1.2, 0.6, 0.66]; peak 1.2 → trough 0.6 → dd = 0.6/1.2 - 1 = -0.5
     assert st["max_drawdown"] == pytest.approx(-0.5, rel=1e-6)

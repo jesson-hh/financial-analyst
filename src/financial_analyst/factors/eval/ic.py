@@ -30,9 +30,10 @@ def _daily_corr(joined: pd.DataFrame, rank: bool) -> pd.Series:
     if rank:
         df = joined.groupby(level="datetime", group_keys=False).rank()
     with np.errstate(invalid="ignore", divide="ignore"):
-        return df.groupby(level="datetime").apply(
-            lambda d: d["a"].corr(d["f"]), include_groups=False
-        )
+        # group by the index level (not a column), so no grouping column is
+        # passed to the lambda — matches bench_runner._ic_series and stays
+        # portable across pandas 2.0–2.3 (avoids the 2.2-only include_groups kwarg).
+        return df.groupby(level="datetime").apply(lambda d: d["a"].corr(d["f"]))
 
 
 def ic_analysis(
