@@ -164,11 +164,11 @@ fa mainline
 <tr>
 <td width="50%" valign="top">
 
-### 🧠 可插拔记忆
-- 24 个 per-agent 记忆目录, 全是 markdown
-- 改 `risk-officer/hard_rules.md` → 下次研报立即遵守
-- 不改代码, 不重启
-- `_shared/playbook_V1_V10.md` 跨 agent 共享
+### 🧠 可插拔记忆 — 开箱自带
+- 24 个 agent **预装**一套策展 A 股知识库 (~4,300 行, 不是空目录)
+- V1–V10 框架 · 因子经验 · 情绪信号 · 市值分层评级
+- 改任意 `.md` → 下次研报立即遵守 (不重启, 不重 build)
+- 你的修改 + dream-loop 记忆升级不被覆盖 (seed 只填空目录)
 
 </td>
 <td width="50%" valign="top">
@@ -275,6 +275,8 @@ memories/
 └── _shared/
     └── playbook_V1_V10.md           # 跨 agent 共享
 ```
+
+**开箱自带.** 全新 `pip install` 会把 `~/.financial-analyst/memories` 用 24 个 agent 的策展规则/playbook 播种好 — 就是维护者自己跑的那套: 踩坑库 · 440 因子经验 · V1–V10 分析框架 · 情绪信号 · 市值分层评级 (~4,300 行). 装上即是一个能干活的分析师大脑, 不是空壳. 播种只填**空**目录, 所以你的修改和积累的 dream-loop 记忆升级时永不被覆盖.
 
 **改 markdown → 下次 agent run 立即生效. 不重启, 不重 build.**
 

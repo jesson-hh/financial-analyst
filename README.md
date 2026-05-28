@@ -164,11 +164,11 @@ fa mainline
 <tr>
 <td width="50%" valign="top">
 
-### 🧠 Pluggable memory
-- 24 per-agent memory dirs as markdown
-- Edit `risk-officer/hard_rules.md` → next report respects it
-- No code change, no restart
-- `_shared/playbook_V1_V10.md` cross-agent
+### 🧠 Pluggable memory — batteries included
+- 24 agents ship **pre-loaded** with a curated A-share playbook (~4,300 lines, not empty)
+- V1–V10 framework · factor insights · sentiment signals · cap-tiered rating
+- Edit any `.md` → next report respects it (no restart, no rebuild)
+- Your edits + dream-loop memory survive upgrades (seed only fills an empty dir)
 
 </td>
 <td width="50%" valign="top">
@@ -276,6 +276,8 @@ memories/
 └── _shared/
     └── playbook_V1_V10.md           # cross-agent shared
 ```
+
+**Batteries included.** A fresh `pip install` seeds `~/.financial-analyst/memories` with 24 agents' worth of curated rules/playbooks — the same knowledge the maintainer runs: pitfalls, 440-factor insights, the V1–V10 analyst framework, sentiment signals, and the market-cap-tiered rating system (~4,300 lines). A working analyst brain on day one, not an empty shell. Seeding only fills an *empty* dir, so your edits and accumulated dream-loop memory are never overwritten on upgrade.
 
 **Edit a markdown → next agent run picks it up. No restart, no rebuild.**
 
