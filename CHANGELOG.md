@@ -2,6 +2,31 @@
 
 All notable changes to this project follow [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning 2.0.0](https://semver.org/).
 
+## [1.0.10] — 2026-05-28  · Fix wisdom tools crash — module registered but never shipped
+
+### Fixed — `wisdom_search` / `wisdom_review` crashed on call (regression in v1.0.8 / v1.0.9)
+
+v1.0.8 / v1.0.9 registered two buddy tools (`wisdom_review`, `wisdom_search`) in `TOOL_REGISTRY`, but the `financial_analyst.wisdom` module they import was never committed — only the `buddy/tools.py` change landed in those releases. The tools were therefore visible to the agent but crashed the moment either was invoked:
+
+```
+ModuleNotFoundError: No module named 'financial_analyst.wisdom'
+```
+
+Because the tool functions use lazy (in-body) imports, buddy still started fine and every other tool worked — only actually calling `wisdom_search` / `wisdom_review` triggered the crash. (Same fresh-install class as #1 memories / #2 swarm presets, one layer over: code referencing an unshipped sibling.)
+
+**Fix:** ship the `financial_analyst/wisdom/` module so the registered tools resolve.
+
+### Added — video-wisdom MVP
+
+Turn video-blogger transcripts into structured, reviewable investment-wisdom cards:
+
+- `wisdom.card` (WisdomCard dataclass + markdown frontmatter), `wisdom.store` (status-machine: draft/approved/rejected dirs), `wisdom.extractor` (LLM extraction with quality gate + corroboration + JSON retry), `wisdom.prompts`, `wisdom.cli` (`extract`), `wisdom.migrate` (bilibili_notes → approved cards).
+- buddy `wisdom_review` (human gate: draft → approved) + `wisdom_search` (retrieve approved cards, reuses `LocalMarkdownKB`).
+- `WisdomStore` path resolution mirrors `memory_paths` (`$FINANCIAL_ANALYST_HOME` → `<cwd>` → `~/.financial-analyst`), so wisdom lives alongside memories under the same FA home.
+- 30 tests (all mock the LLM; no live API).
+
+---
+
 ## [1.0.9] — 2026-05-28  · Fix fresh-install crash #2 — swarm presets + universes not in wheel
 
 ### Fixed — `fa report` / MCP `run_report` still crashed right after v1.0.8
