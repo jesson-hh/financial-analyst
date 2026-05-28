@@ -17,7 +17,13 @@ class QuantileResult:
 
 
 def _assign_groups(a: pd.Series, n_groups: int) -> pd.Series:
-    """Per-date qcut into n_groups (label 0=lowest .. n-1=highest). Few-distinct → fewer bins."""
+    """Per-date qcut into n_groups buckets, label 0=lowest .. (k-1)=highest.
+
+    Uses ``duplicates="drop"``, so a date with fewer than n_groups distinct
+    factor values yields fewer buckets (k < n_groups) — on a normal index
+    universe (hundreds of names) all n_groups buckets always form. Degenerate
+    dates that can't be cut return NaN (caught), excluded downstream.
+    """
     def _q(s: pd.Series) -> pd.Series:
         try:
             return pd.qcut(s, n_groups, labels=False, duplicates="drop")
@@ -28,6 +34,15 @@ def _assign_groups(a: pd.Series, n_groups: int) -> pd.Series:
 
 def quantile_backtest(alpha: pd.Series, fwd: pd.Series,
                       n_groups: int = 10, ppy: int = 12) -> QuantileResult:
+    """Run quantile backtest: assign factor to n_groups buckets per date, compute group NAVs.
+
+    NOTE: ``group_ann_return`` / ``group_nav`` have one entry per bucket that
+    actually formed (index 0 = bottom, -1 = top). On a normal universe with
+    adequate cross-sectional dispersion this equals ``n_groups``; under low
+    dispersion (bins collapse) it can be fewer, and group-level stats become
+    less reliable — callers should ensure adequate breadth (the report layer
+    surfaces a low-coverage warning).
+    """
     joined = pd.concat([alpha.rename("a"), fwd.rename("f")], axis=1).dropna()
     if joined.empty:
         return QuantileResult(n_groups)
@@ -51,7 +66,7 @@ def quantile_backtest(alpha: pd.Series, fwd: pd.Series,
         nav = (1 + col).cumprod()
         group_nav.append([float(v) for v in nav.values])
         navend = float(nav.iloc[-1]) if nper else float("nan")
-        ann = navend ** (ppy / nper) - 1 if nper > 0 else float("nan")
+        ann = navend ** (ppy / nper) - 1 if (nper > 0 and navend > 0) else float("nan")
         group_ann.append(float(ann))
 
     if len(group_ann) >= 2:

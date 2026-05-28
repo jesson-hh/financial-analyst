@@ -135,6 +135,7 @@ def test_quantile_perfect_factor_monotonic():
     assert r.monotonicity > 0.9
     assert r.long_short_spread > 0
     assert len(r.group_nav) == len(r.group_ann_return)
+    assert len(r.group_ann_return) == r.n_groups  # 8 distinct values → 5 clean buckets
 
 
 def test_quantile_reversed_factor_negative_spread():
