@@ -1235,28 +1235,7 @@ def _tool_alpha_show(name: str) -> ToolResult:
     )
 
 
-def _resolve_universe_codes(universe: str) -> list:
-    """Named universe (or file path) → list of stock codes. Mirrors cli._resolve_universe without pulling in the heavy cli module."""
-    from pathlib import Path
-    p = Path(universe)
-    from financial_analyst._config import bundled_config_dir
-    cands = [p] if p.exists() else [
-        Path.home() / ".financial-analyst" / "universes" / f"{universe}.txt",
-        _project_root() / "config" / "universes" / f"{universe}.txt",
-        bundled_config_dir() / "universes" / f"{universe}.txt",
-    ]
-    for c in cands:
-        try:
-            if c.exists():
-                out = []
-                for line in c.read_text(encoding="utf-8").splitlines():
-                    line = line.strip().split("#", 1)[0].strip()
-                    if line:
-                        out.append(line)
-                return out
-        except Exception:
-            continue
-    return []
+from financial_analyst.data.universe import resolve_universe_codes as _resolve_universe_codes
 
 
 from financial_analyst.factors.zoo.expr import FACTOR_VOCAB as _FACTOR_VOCAB, compile_factor as _factor_compute
