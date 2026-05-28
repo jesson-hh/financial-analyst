@@ -1997,6 +1997,18 @@ function Composer({ s, context, dispatch, startAgent, onCmdK }) {
       .catch(() => setBoards([]));
   }, [popover, boards, s.backendUrl]);
   const [boardQ, setBoardQ] = useState('');
+  const [attachments, setAttachments] = useState([]); // [{id,name,chars,text}]
+  const onFilePicked = (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (!f || !s.backendUrl) return;
+    const fd = new FormData(); fd.append('file', f);
+    dispatch({ type: 'inject_message', message: { id: 'sys_'+Date.now(), role: 'ai', kind: 'answer', text: `⏳ 解析附件 ${f.name}…` } });
+    fetch(`${s.backendUrl}/upload`, { method: 'POST', body: fd })
+      .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.error || '上传失败'); return d; })
+      .then(d => setAttachments(a => [...a, { id: d.id, name: d.name, chars: d.chars, text: d.text }]))
+      .catch(err => dispatch({ type: 'inject_message', message: { id: 'sys_'+Date.now(), role: 'ai', kind: 'answer', text: `⚠ 附件失败: ${err.message}` } }));
+  };
 
   useEffect(() => { inputRef.current?.focus(); }, [s.currentSessionId]);
 
@@ -2068,10 +2080,13 @@ function Composer({ s, context, dispatch, startAgent, onCmdK }) {
       setVal('');
       return;
     }
-    if (s.status === 'idle') startAgent(text);
-    else dispatch({ type: 'queue', text });
+    const attachText = attachments.map(a => `【附件 ${a.name}】\n${a.text}`).join('\n\n');
+    const finalText = attachText ? `${attachText}\n\n${text}` : text;
+    if (s.status === 'idle') startAgent(finalText);
+    else dispatch({ type: 'queue', text: finalText });
+    setAttachments([]);
     setVal('');
-  }, [val, s.status, s.backendUrl, s.models, s.sessions, s.currentSessionId, dispatch, startAgent, onCmdK]);
+  }, [val, s.status, s.backendUrl, s.models, s.sessions, s.currentSessionId, attachments, dispatch, startAgent, onCmdK]);
 
   const onKey = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
@@ -2116,6 +2131,17 @@ function Composer({ s, context, dispatch, startAgent, onCmdK }) {
           onClose={() => { setPopover(null); setBoardQ(''); }} />
       )}
       <div style={{ border: '1px solid var(--ink-2)', background: 'var(--paper)' }}>
+        <input ref={fileInputRef} type="file" accept=".pdf,.csv,.txt,.md" onChange={onFilePicked} style={{ display: 'none' }} />
+        {attachments.length > 0 && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, padding: '6px 14px 0' }}>
+            {attachments.map(a => (
+              <span key={a.id} className="mono" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 10, padding: '2px 8px', border: '1px solid var(--yin)', color: 'var(--ink-1)', whiteSpace: 'nowrap' }}>
+                ⊟ {a.name} <span style={{ color: 'var(--ink-3)' }}>{a.chars}字</span>
+                <span onClick={() => setAttachments(x => x.filter(y => y.id !== a.id))} style={{ cursor: 'pointer', color: 'var(--yin)' }}>×</span>
+              </span>
+            ))}
+          </div>
+        )}
         <div style={{ padding: '6px 14px', borderBottom: '1px dashed var(--line)', display: 'flex', alignItems: 'center', gap: 10 }}>
           <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>提示</span>
           {['/ 命令', '@ 引用此股'].map((x, i) => (
