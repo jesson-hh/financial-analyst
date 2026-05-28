@@ -1316,7 +1316,7 @@ function TopBar({ s, session, dispatch }) {
   else sub = `${session?.messages.length} 条消息 · 等待追问`;
 
   return (
-    <header style={{ padding: '14px 32px 12px', borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 16, flexShrink: 0, background: 'rgba(241,234,217,0.4)' }}>
+    <header style={{ padding: '14px 32px 12px', borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 16, rowGap: 8, flexWrap: 'wrap', flexShrink: 0, background: 'rgba(241,234,217,0.4)' }}>
       <div style={{ flex: 1, minWidth: 0 }}>
         {editing ? (
           <input ref={titleRef} value={draft}
@@ -1338,9 +1338,9 @@ function TopBar({ s, session, dispatch }) {
               style={{ flexShrink: 0, fontSize: 11, color: 'var(--ink-3)', cursor: 'pointer', lineHeight: 1 }}>✎</span>
           </div>
         )}
-        <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', marginTop: 3 }}>{sub}</div>
+        <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', marginTop: 3, whiteSpace: 'nowrap' }}>{sub}</div>
       </div>
-      <div style={{ display: 'flex', gap: 18, fontFamily: 'var(--mono)', fontSize: 11 }}>
+      <div style={{ display: 'flex', gap: 18, fontFamily: 'var(--mono)', fontSize: 11, flexShrink: 0, flexWrap: 'wrap' }}>
         {INDICES.map((x, i) => {
           const q = idxOf(x.code);
           const v = q && q.price != null
@@ -1348,7 +1348,7 @@ function TopBar({ s, session, dispatch }) {
             : '—';
           const d = q && q.changePercent != null ? Number(q.changePercent) : null;
           return (
-            <div key={i} style={{ display: 'flex', alignItems: 'baseline', gap: 5 }} title={q ? '腾讯行情实时' : (s.backendUrl ? '等待行情…' : '未连后端')}>
+            <div key={i} style={{ display: 'flex', alignItems: 'baseline', gap: 5, whiteSpace: 'nowrap' }} title={q ? '腾讯行情实时' : (s.backendUrl ? '等待行情…' : '未连后端')}>
               <span style={{ color: 'var(--ink-3)', fontSize: 10 }}>{x.n}</span>
               <span style={{ color: 'var(--ink-1)' }}>{v}</span>
               {d != null
@@ -1359,7 +1359,7 @@ function TopBar({ s, session, dispatch }) {
         })}
       </div>
       <div style={{ width: 1, height: 22, background: 'var(--line)' }} />
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }} className="mono">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0, whiteSpace: 'nowrap' }} className="mono">
         {s.backendUrl ? (
           <>
             <span style={{ width: 5, height: 5, background: 'var(--zhu)', borderRadius: '50%' }} />
@@ -1384,7 +1384,7 @@ function TopBar({ s, session, dispatch }) {
       <div style={{ width: 1, height: 22, background: 'var(--line)' }} />
       <span onClick={runDiag} title="探活: xueqiu / 腾讯行情 / news_db / LLM / 各 opencli 源"
         className="hover-pill"
-        style={{ cursor: (diagLoading || !s.backendUrl) ? 'default' : 'pointer', fontSize: 11, padding: '4px 10px', border: '1px solid var(--line)', color: 'var(--ink-2)', fontFamily: 'var(--mono)', opacity: s.backendUrl ? 1 : 0.5 }}>
+        style={{ cursor: (diagLoading || !s.backendUrl) ? 'default' : 'pointer', fontSize: 11, padding: '4px 10px', border: '1px solid var(--line)', color: 'var(--ink-2)', fontFamily: 'var(--mono)', opacity: s.backendUrl ? 1 : 0.5, whiteSpace: 'nowrap', flexShrink: 0 }}>
         {diagLoading ? '⏳ 探活中…' : (diag ? (diag.ok ? '🩺 ✓' : '🩺 ✗') : '🩺 探活')}
       </span>
       {canExport && (
@@ -1393,7 +1393,7 @@ function TopBar({ s, session, dispatch }) {
           <button onClick={() => exportSessionToMd(session)}
             title="导出为 markdown"
             className="hover-pill"
-            style={{ background: 'transparent', border: '1px solid var(--line)', color: 'var(--ink-2)', padding: '4px 10px', fontFamily: 'var(--mono)', fontSize: 11, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5 }}>
+            style={{ background: 'transparent', border: '1px solid var(--line)', color: 'var(--ink-2)', padding: '4px 10px', fontFamily: 'var(--mono)', fontSize: 11, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5, whiteSpace: 'nowrap', flexShrink: 0 }}>
             <span>↧</span> <span>导出 .md</span>
           </button>
         </>
@@ -1668,9 +1668,9 @@ function ToolRow({ i, name, cn, args, t, status, result, last, backendUrl }) {
         {running && <div style={{ position: 'absolute', inset: -3, width: 28, height: 28, border: '1px solid var(--yin)', opacity: 0.5, animation: 'pulse 1.6s ease-in-out infinite' }} />}
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-          <code style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--ink)', fontWeight: 500 }}>{name}</code>
-          <span className="serif" style={{ fontSize: 12, color: 'var(--ink-2)' }}>{cn}</span>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+          <code style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--ink)', fontWeight: 500, whiteSpace: 'nowrap' }}>{name}</code>
+          <span className="serif" style={{ fontSize: 12, color: 'var(--ink-2)', whiteSpace: 'nowrap' }}>{cn}</span>
           <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', whiteSpace: 'nowrap', marginLeft: 'auto' }}>
             {running ? '⠋ 运行中…' : pending ? '— 等待' : cancelled ? '× 已取消' : `✓ ${t}s`}
           </span>
@@ -1986,6 +1986,9 @@ function Composer({ s, context, dispatch, startAgent, onCmdK }) {
   const [val, setVal] = useState('');
   const inputRef = useRef(null);
   const showSlash = val.startsWith('/');
+  const [popover, setPopover] = useState(null); // null | 'ref' | 'board'
+  const fileInputRef = useRef(null); // 上传按钮用; 实际 <input> 在后续任务渲染 (此前 .click() 安全 no-op)
+  const insertText = (t) => { setVal(v => (v ? v.replace(/\s*$/, '') + ' ' : '') + t + ' '); inputRef.current?.focus(); };
 
   useEffect(() => { inputRef.current?.focus(); }, [s.currentSessionId]);
 
@@ -2066,6 +2069,17 @@ function Composer({ s, context, dispatch, startAgent, onCmdK }) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
   };
 
+  // @引用 候选: 当前个股 (context) + 自选股 (watchlist) + 本轮工具结果 §N
+  const refItems = (() => {
+    const out = [];
+    if (context && context.code) out.push({ key: 'ctx', label: context.name, sub: context.code, onPick: () => insertText(`${context.name}（${context.code}）`) });
+    (s.watchlist || []).forEach(q => out.push({ key: 'w_' + q.code, label: q.name || q.code, sub: q.code, onPick: () => insertText(`${q.name || q.code}（${q.code}）`) }));
+    const sess = s.sessions.find(x => x.id === s.currentSessionId);
+    const chain = (sess?.messages || []).filter(m => m.kind === 'chain').flatMap(m => m.chain || []).filter(c => c.status === 'done');
+    chain.forEach((c, i) => out.push({ key: 'tool_' + i, label: `§${i + 1} ${c.name}`, sub: (c.cn || ''), onPick: () => insertText(`§${i + 1}`) }));
+    return out;
+  })();
+
   return (
     <div style={{ padding: '8px 56px 8px', flexShrink: 0, position: 'relative' }}>
       {context && (
@@ -2080,6 +2094,10 @@ function Composer({ s, context, dispatch, startAgent, onCmdK }) {
         </div>
       )}
       {showSlash && <SlashMenu val={val} onPick={(cmd) => { setVal('/' + cmd + ' '); inputRef.current?.focus(); }} />}
+      {popover === 'ref' && (
+        <ComposerPopover title="引用 · 当前股 / 自选 / 工具结果" items={refItems}
+          emptyHint="无可引用项 (先问一只股或加自选)" onClose={() => setPopover(null)} />
+      )}
       <div style={{ border: '1px solid var(--ink-2)', background: 'var(--paper)' }}>
         <div style={{ padding: '6px 14px', borderBottom: '1px dashed var(--line)', display: 'flex', alignItems: 'center', gap: 10 }}>
           <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>提示</span>
@@ -2105,9 +2123,13 @@ function Composer({ s, context, dispatch, startAgent, onCmdK }) {
         </div>
         <div style={{ padding: '6px 14px 8px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div style={{ display: 'flex', gap: 6 }} className="mono">
-            {['⊟ 上传', '@ 引用', '⌗ 板块'].map((x, i) => (
-              <span key={i} style={{ fontSize: 10, color: 'var(--ink-2)', padding: '3px 7px', border: '1px solid var(--line)', cursor: 'pointer' }}>{x}</span>
-            ))}
+            <span className="hover-pill" onClick={() => fileInputRef.current?.click()}
+              style={{ fontSize: 10, color: 'var(--ink-2)', padding: '3px 7px', border: '1px solid var(--line)', cursor: 'pointer' }}>⊟ 上传</span>
+            <span className="hover-pill" onClick={() => setPopover(popover === 'ref' ? null : 'ref')}
+              style={{ fontSize: 10, color: 'var(--ink-2)', padding: '3px 7px', border: '1px solid var(--line)', cursor: 'pointer' }}>@ 引用</span>
+            <span className="hover-pill" onClick={() => s.backendUrl && setPopover(popover === 'board' ? null : 'board')}
+              title={s.backendUrl ? '选概念板块' : '需连后端'}
+              style={{ fontSize: 10, color: 'var(--ink-2)', padding: '3px 7px', border: '1px solid var(--line)', cursor: 'pointer', opacity: s.backendUrl ? 1 : 0.5 }}>⌗ 板块</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             {/* 仅 mock 模式才警示, 真模式 (useRealLLM=true) 不占位 */}
@@ -2121,6 +2143,33 @@ function Composer({ s, context, dispatch, startAgent, onCmdK }) {
             </button>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// 复用的输入框上方小面板 (镜像 SlashMenu 的视觉). items: [{key,label,sub,onPick}]
+function ComposerPopover({ title, items, onClose, emptyHint }) {
+  useEffect(() => {
+    const h = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [onClose]);
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 70 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        position: 'absolute', left: 56, right: 56, bottom: 96, maxHeight: 280, overflowY: 'auto',
+        background: 'var(--paper)', border: '1px solid var(--ink)', boxShadow: '0 12px 40px rgba(0,0,0,0.2)'
+      }}>
+        <div className="mono" style={{ padding: '8px 14px', fontSize: 10, color: 'var(--ink-3)', letterSpacing: '0.2em', borderBottom: '1px solid var(--line-soft)' }}>{title}</div>
+        {items.length === 0 && <div className="serif" style={{ padding: 16, fontSize: 12, color: 'var(--ink-3)', fontStyle: 'italic' }}>{emptyHint || '暂无'}</div>}
+        {items.map((it) => (
+          <div key={it.key} className="hover-row" onClick={() => { it.onPick(); onClose(); }}
+            style={{ padding: '8px 14px', display: 'flex', alignItems: 'baseline', gap: 8, cursor: 'pointer', borderBottom: '1px solid var(--line-soft)', whiteSpace: 'nowrap' }}>
+            <span className="serif" style={{ fontSize: 13, color: 'var(--ink)' }}>{it.label}</span>
+            {it.sub && <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>{it.sub}</span>}
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -2156,7 +2205,7 @@ function StatusBar({ s, dispatch, onCmdK }) {
   const modeColor = s.mode === 'safe' ? 'var(--jin)' : s.mode === 'auto' ? 'var(--yin)' : 'var(--dai)';
   const modeBg    = s.mode === 'safe' ? 'rgba(138,111,63,0.12)' : s.mode === 'auto' ? 'rgba(168,57,45,0.12)' : 'rgba(74,107,92,0.12)';
   return (
-    <footer style={{ padding: '6px 32px 8px', borderTop: '1px solid var(--line-soft)', display: 'flex', alignItems: 'center', gap: 14, fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--ink-2)', flexShrink: 0, background: 'rgba(241,234,217,0.4)' }}>
+    <footer style={{ padding: '6px 32px 8px', borderTop: '1px solid var(--line-soft)', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', rowGap: 8, whiteSpace: 'nowrap', fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--ink-2)', flexShrink: 0, background: 'rgba(241,234,217,0.4)' }}>
       <select value={s.mode} onChange={(e) => dispatch({ type: 'set_mode', mode: e.target.value })}
         style={{ padding: '2px 6px', background: modeBg, color: modeColor, border: 'none', fontFamily: 'var(--mono)', fontSize: 10, fontWeight: 500, letterSpacing: '0.05em', cursor: 'pointer' }}>
         <option value="default">🛡 default</option>
