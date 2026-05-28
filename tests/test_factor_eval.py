@@ -215,3 +215,77 @@ def test_long_short_turnover_known_rotation():
     fwd = pd.Series(0.01, index=idx)  # arbitrary non-NaN; turnover is membership-only
     r = long_short_portfolio(alpha, fwd, n_groups=2, ppy=12, cost_bps=0.0)
     assert r.turnover == pytest.approx(0.3)
+
+
+from financial_analyst.factors.eval.report import (
+    build_report, FactorReport, factor_characteristics, rebalance_dates,
+    forward_simple_returns,
+)
+from financial_analyst.factors.zoo import PanelData
+from financial_analyst.factors.eval.config import EvalConfig
+
+
+def _signal_panel(n_dates=80, codes=tuple("ABCDEFGH"), seed=11):
+    """Synthetic daily price panel: per-code cumulative product of small lognormal
+    returns → a random-walk price series. Used to exercise build_report end-to-end."""
+    dates = pd.date_range("2023-01-02", periods=n_dates, freq="B")
+    idx = pd.MultiIndex.from_product([dates, codes], names=["datetime", "code"])
+    rng = np.random.default_rng(seed)
+    rets = pd.Series(rng.lognormal(0.0, 0.02, len(idx)), index=idx)
+    close = rets.groupby(level="code").cumprod() * 50 + 10
+    df = pd.DataFrame({
+        "open": close, "high": close * 1.01, "low": close * 0.99,
+        "close": close, "volume": pd.Series(1e6, index=idx),
+    })
+    return PanelData(df)
+
+
+def test_rebalance_dates_month():
+    dates = pd.date_range("2024-01-01", "2024-03-31", freq="B")
+    reb = rebalance_dates(list(dates), "month")
+    assert len(reb) == 3  # one per calendar month (last business day)
+
+
+def test_forward_simple_returns_basic():
+    p = _signal_panel(n_dates=10, codes=("A",))
+    fwd = forward_simple_returns(p, 1)
+    a = p.close.xs("A", level="code")
+    f = fwd.xs("A", level="code")
+    assert f.iloc[0] == pytest.approx(a.iloc[1] / a.iloc[0] - 1, rel=1e-9)
+    assert pd.isna(f.iloc[-1])
+
+
+def test_build_report_perfect_factor_ok():
+    p = _signal_panel(n_dates=80)
+    compute = lambda panel: panel.close.groupby(level="code").pct_change()  # 1d momentum
+    cfg = EvalConfig(freq="week", standardize=True)
+    rpt = build_report(p, compute, cfg, factor_label="mom1", family="custom")
+    assert isinstance(rpt, FactorReport)
+    assert rpt.status == "ok"
+    assert rpt.meta.factor == "mom1" and rpt.meta.freq == "week"
+    assert rpt.ic is not None and rpt.quantile is not None and rpt.portfolio is not None
+    assert 0.0 <= rpt.characteristics.coverage <= 1.0
+    assert rpt.portfolio.benchmark_nav is not None
+
+
+def test_build_report_compute_error_no_raise():
+    p = _signal_panel(n_dates=40)
+    def boom(panel):
+        raise RuntimeError("synthetic boom")
+    rpt = build_report(p, boom, EvalConfig(freq="week"), factor_label="boom", family="custom")
+    assert rpt.status == "compute_error"
+    assert "synthetic boom" in rpt.error
+
+
+def test_build_report_bad_output_status():
+    p = _signal_panel(n_dates=40)
+    rpt = build_report(p, lambda panel: 123, EvalConfig(freq="week"),
+                       factor_label="bad", family="custom")
+    assert rpt.status == "bad_output"
+
+
+def test_factor_characteristics_coverage():
+    p = _signal_panel(n_dates=30, codes=tuple("ABCDE"))
+    alpha = p.close.groupby(level="code").pct_change()
+    ch = factor_characteristics(alpha, n_codes=5)
+    assert 0.0 <= ch.coverage <= 1.0
