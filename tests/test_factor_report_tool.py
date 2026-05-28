@@ -30,14 +30,23 @@ def test_factor_report_tool_runs(monkeypatch):
 
     res = t._tool_factor_report(expr_or_name="rank(-delta(close,5))", universe="csi500", freq="week")
     assert res.is_error is False
-    assert "RankIC" in res.content or "IC" in res.content
-    assert "Sharpe" in res.content or "夏普" in res.content
+    assert "RankIC" in res.content
+    assert "Sharpe" in res.content
 
 
 def test_factor_report_tool_bad_expr(monkeypatch):
     from financial_analyst.buddy import tools as t
     res = t._tool_factor_report(expr_or_name="import os", universe="csi500", freq="week")
     assert res.is_error is True
+
+
+def test_factor_report_tool_empty_universe(monkeypatch):
+    """Non-ok status (empty universe) → is_error with the status surfaced."""
+    from financial_analyst.buddy import tools as t
+    monkeypatch.setattr("financial_analyst.data.universe.resolve_universe_codes", lambda u: [])
+    res = t._tool_factor_report(expr_or_name="rank(-delta(close,5))", universe="nonexistent_xyz", freq="week")
+    assert res.is_error is True
+    assert ("empty_universe" in res.content) or ("解析为空" in res.content)
 
 
 def test_factor_report_registered():

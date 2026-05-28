@@ -1414,7 +1414,7 @@ def _tool_factor_report(expr_or_name: str, universe: str = "csi500",
         f"RankIC = {f(ic.rank_ic_mean,4)} | RankICIR = {f(ic.rank_icir)}",
         f"十分位单调性 = {f(q.monotonicity,2)} | 多空价差(年化) = {f(q.long_short_spread,3)}",
         f"多空组合: 年化 = {f(pf.ann_return,3)} | Sharpe = {f(pf.sharpe,2)} | 最大回撤 = {f(pf.max_drawdown,3)} | 换手 = {f(pf.turnover,2)} | 胜率 = {f(pf.win_rate,2)}",
-        f"覆盖率 = {f(ch.coverage,2)} | 自相关 = {f(ch.autocorr_1,2)} | 半衰期 = {ch.half_life:.0f} 期",
+        f"覆盖率 = {f(ch.coverage,2)} | 自相关 = {f(ch.autocorr_1,2)} | 半衰期 = {'—' if ch.half_life < 0 else format(ch.half_life, '.0f')} 期",
     ]
     if rpt.warnings:
         lines.append("")
