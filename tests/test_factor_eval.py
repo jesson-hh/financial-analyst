@@ -145,6 +145,14 @@ def test_quantile_reversed_factor_negative_spread():
 
 
 def test_quantile_random_factor_flat():
-    alpha, fwd = _aligned_alpha_fwd("random", n_dates=60)
-    r = quantile_backtest(alpha, fwd, n_groups=5, ppy=12)
-    assert abs(r.monotonicity) < 0.7  # not strongly monotonic
+    # 5-group Spearman monotonicity is too coarse / high-variance to assert on a
+    # random factor (rank corr of 5 near-zero group means is ~uniformly random,
+    # regardless of sample size). Robust check instead: a random factor's
+    # long-short spread is far smaller than a perfect factor's on the same data.
+    codes = tuple(f"S{i:02d}" for i in range(60))
+    p_alpha, p_fwd = _aligned_alpha_fwd("perfect", n_dates=60, codes=codes)
+    r_alpha, r_fwd = _aligned_alpha_fwd("random", n_dates=60, codes=codes)
+    perfect = quantile_backtest(p_alpha, p_fwd, n_groups=5, ppy=12)
+    rand = quantile_backtest(r_alpha, r_fwd, n_groups=5, ppy=12)
+    assert abs(perfect.long_short_spread) > 0  # perfect factor separates groups
+    assert abs(rand.long_short_spread) < abs(perfect.long_short_spread) / 5
