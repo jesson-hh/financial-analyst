@@ -121,3 +121,30 @@ def test_ic_decay_one_row_per_horizon():
     r = ic_analysis(alpha, fwd, fwd_by_horizon=decay_fwd)
     assert [h for h, _, _ in r.ic_decay] == [1, 5, 21]
     assert all(ic > 0.9 for _, ic, _ in r.ic_decay)
+
+
+from financial_analyst.factors.eval.quantile import quantile_backtest, QuantileResult
+
+
+def test_quantile_perfect_factor_monotonic():
+    alpha, fwd = _aligned_alpha_fwd("perfect", n_dates=40)
+    r = quantile_backtest(alpha, fwd, n_groups=5, ppy=12)
+    assert isinstance(r, QuantileResult)
+    # group 0 = lowest factor = lowest return; group 4 = highest
+    assert r.group_ann_return[-1] > r.group_ann_return[0]
+    assert r.monotonicity > 0.9
+    assert r.long_short_spread > 0
+    assert len(r.group_nav) == len(r.group_ann_return)
+
+
+def test_quantile_reversed_factor_negative_spread():
+    alpha, fwd = _aligned_alpha_fwd("reversed", n_dates=40)
+    r = quantile_backtest(alpha, fwd, n_groups=5, ppy=12)
+    assert r.long_short_spread < 0
+    assert r.monotonicity < -0.9
+
+
+def test_quantile_random_factor_flat():
+    alpha, fwd = _aligned_alpha_fwd("random", n_dates=60)
+    r = quantile_backtest(alpha, fwd, n_groups=5, ppy=12)
+    assert abs(r.monotonicity) < 0.7  # not strongly monotonic
