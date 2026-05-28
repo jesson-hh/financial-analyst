@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import pandas as pd
 
+from financial_analyst.memory_paths import default_memory_root
+
 
 def list_past_reports(out_dir: Path = Path("out"), limit: int = 10) -> List[Dict[str, Any]]:
     """List recent report files in out/. Returns code/date/path/has_html."""
@@ -66,12 +68,14 @@ def read_past_report(code: str, date_str: Optional[str] = None,
 
 
 def search_memory(query: str, agent: Optional[str] = None, top_k: int = 5,
-                  memory_root: Path = Path("memories"),
+                  memory_root: Optional[Path] = None,
                   cache_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
     """FTS5 search across memories. Returns top-K hits with agent/file/snippet."""
     from financial_analyst.agent.memory_index import MemoryIndex
     from financial_analyst.settings import Settings
 
+    if memory_root is None:
+        memory_root = default_memory_root()
     if cache_dir is None:
         cache_dir = Path(Settings().cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -146,8 +150,10 @@ def quick_factors(code: str, asof: Optional[str] = None) -> Dict[str, Any]:
     }
 
 
-def list_dream_proposals(memory_root: Path = Path("memories")) -> List[Dict[str, Any]]:
+def list_dream_proposals(memory_root: Optional[Path] = None) -> List[Dict[str, Any]]:
     """List staged dream proposals in memories/_proposed/<agent>/."""
+    if memory_root is None:
+        memory_root = default_memory_root()
     proposed = Path(memory_root) / "_proposed"
     if not proposed.exists():
         return []

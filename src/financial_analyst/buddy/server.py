@@ -558,9 +558,9 @@ def build_app():
         text = (body.text or "").strip()
         if not text:
             return JSONResponse({"ok": False, "error": "empty text"})
-        from financial_analyst.buddy.tools import _project_root
+        from financial_analyst.memory_paths import default_memory_root
         import datetime as _dt
-        f = _project_root() / "memories" / "_shared" / "conversation_lessons.md"
+        f = default_memory_root() / "_shared" / "conversation_lessons.md"
         f.parent.mkdir(parents=True, exist_ok=True)
         if not f.exists():
             f.write_text(

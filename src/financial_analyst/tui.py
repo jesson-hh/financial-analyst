@@ -28,6 +28,7 @@ from rich.table import Table
 console = Console()
 
 from financial_analyst.sessions import SessionManager, SessionEvent
+from financial_analyst.memory_paths import default_memory_root
 
 session_mgr = SessionManager()   # auto-creates "default" session
 
@@ -453,7 +454,7 @@ async def handle_memory_cmd(args: List[str]) -> None:
         return
 
     sub = args[0]
-    mem_root = Path("memories")
+    mem_root = default_memory_root()
 
     def _get_index() -> MemoryIndex:
         settings = Settings()
@@ -646,12 +647,12 @@ async def run_report_oneshot(code: str, asof, out_dir: Path, trace: bool = False
     cache_dir = Path(settings.cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     mem_index = MemoryIndex(
-        memory_root=Path("memories"),
+        memory_root=default_memory_root(),
         db_path=cache_dir / "memory.fts5.db",
     )
     mem_index.update_changed()
 
-    nodes = load_preset("stock-deep-dive", memory_root=Path("memories"), memory_index=mem_index)
+    nodes = load_preset("stock-deep-dive", memory_root=default_memory_root(), memory_index=mem_index)
 
     status: dict[str, dict] = {
         n.agent.NAME: {"state": "pending", "elapsed": 0.0} for n in nodes

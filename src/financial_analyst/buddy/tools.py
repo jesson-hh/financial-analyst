@@ -898,7 +898,8 @@ def _tool_industry_show(code: str) -> ToolResult:
 def _tool_dream_review() -> ToolResult:
     """List pending memory proposals from the dream loop."""
     import yaml
-    proposed_root = _project_root() / "memories" / "_proposed"
+    from financial_analyst.memory_paths import default_memory_root
+    proposed_root = default_memory_root() / "_proposed"
     if not proposed_root.exists():
         return ToolResult("No pending proposals. Run `dream run` to generate some.")
     files = sorted(proposed_root.rglob("*.md"))
@@ -1430,6 +1431,64 @@ def _tool_alpha_compare(items, universe: str = "csi300_active",
         lines.append("")
         lines.append(f"→ 本组最强: {b['label']} (RankICIR={fmt(b['rank_ir'],2)}, 状态【{b.get('state')}】)")
     return ToolResult("\n".join(lines))
+
+
+def _wisdom_store():
+    """Resolve WisdomStore, honouring FA_WISDOM_ROOT (tests inject tmp)."""
+    from pathlib import Path
+    from financial_analyst.wisdom.store import WisdomStore
+    root = os.environ.get("FA_WISDOM_ROOT")
+    return WisdomStore(root=Path(root) if root else None)
+
+
+def _tool_wisdom_review(action: str, card_id: Optional[str] = None,
+                        reviewed_by: Optional[str] = None) -> ToolResult:
+    """审阅视频经验草稿卡. action: list | approve | reject.
+
+    - list: 列出待审 draft 卡 (按 quality_score 降序), 给出 id/标题/自评分/置信/互证.
+    - approve: 把指定卡移入正式知识库 (approved), 之后 wisdom_search 可命中.
+    - reject: 把指定卡移入 rejected (留痕防重复抽取).
+    """
+    store = _wisdom_store()
+    if action == "list":
+        drafts = sorted(store.list_by_status("draft"),
+                        key=lambda c: c.quality_score, reverse=True)
+        if not drafts:
+            return ToolResult("没有待审经验草稿.")
+        lines = [
+            f"- {c.id} | score={c.quality_score:.2f} | {c.confidence} | {c.title}"
+            f"{' | 互证 ' + ','.join(c.corroborates) if c.corroborates else ''}"
+            for c in drafts
+        ]
+        return ToolResult("待审经验草稿 (按自评分降序):\n" + "\n".join(lines))
+    if action in ("approve", "reject"):
+        if not card_id:
+            return ToolResult("approve/reject 需要 card_id", is_error=True)
+        new_status = "approved" if action == "approve" else "rejected"
+        try:
+            store.set_status(card_id, new_status, reviewed_by=reviewed_by)
+        except KeyError:
+            return ToolResult(f"找不到经验卡 {card_id}", is_error=True)
+        return ToolResult(f"{card_id} -> {new_status}")
+    return ToolResult(f"未知 action: {action} (应为 list/approve/reject)", is_error=True)
+
+
+def _tool_wisdom_search(query: str, tags: Optional[list] = None,
+                        top_k: int = 5) -> ToolResult:
+    """检索已沉淀的视频投资经验 (仅 approved). 返回相关经验卡正文供研判引用.
+
+    query: 关键词 (子串匹配); tags: 可选标签过滤; top_k: 返回条数.
+    """
+    from financial_analyst.knowledge.local_markdown import LocalMarkdownKB
+    store = _wisdom_store()
+    kb = LocalMarkdownKB(store.root / "approved")
+    hits = kb.query(query, top_k=top_k)
+    if tags:
+        hits = [h for h in hits if any(t in h["content"] for t in tags)]
+    if not hits:
+        return ToolResult(f"未找到匹配 {query!r} 的经验卡.")
+    blocks = [f"### {h['path']}\n{h['content']}" for h in hits]
+    return ToolResult("\n\n---\n\n".join(blocks))
 
 
 # ---------------------------------------------------------------------------
@@ -1968,6 +2027,38 @@ TOOL_REGISTRY: List[Tool] = [
             "required": ["rule_id"],
         },
         run=_tool_alert_remove,
+    ),
+    Tool(
+        name="wisdom_review",
+        description="审阅视频经验草稿卡 (list/approve/reject). approve 后进正式知识库.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "approve", "reject"]},
+                "card_id": {"type": "string", "description": "approve/reject 时必填, 如 EV-013"},
+                "reviewed_by": {"type": "string", "description": "审阅人, 可选"},
+            },
+            "required": ["action"],
+        },
+        run=_tool_wisdom_review,
+        cost_hint="seconds",
+        confirm_required=True,
+    ),
+    Tool(
+        name="wisdom_search",
+        description="检索已沉淀的视频投资经验 (仅已批准). 研判/研报引用 UP 主经验时用.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "top_k": {"type": "integer", "default": 5},
+            },
+            "required": ["query"],
+        },
+        run=_tool_wisdom_search,
+        cost_hint="seconds",
+        confirm_required=False,
     ),
 ]
 

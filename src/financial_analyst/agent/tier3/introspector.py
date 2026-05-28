@@ -112,8 +112,8 @@ class Introspector(SubAgent[IntrospectionOutput]):
         # 3. 非空 proposals 落盘待人工 review (NOT 自动 patch memory!)
         if raw.get("proposals"):
             try:
-                # repo-root: parents[0]=tier3 [1]=agent [2]=financial_analyst [3]=src [4]=repo
-                pending_dir = Path(__file__).resolve().parents[4] / "memories" / "_pending_introspections"
+                from financial_analyst.memory_paths import default_memory_root
+                pending_dir = default_memory_root() / "_pending_introspections"
                 pending_dir.mkdir(parents=True, exist_ok=True)
 
                 # 提取 code (从 writer 的 md_path 里抽, e.g. "out/SH600519_2026-05-23.md")

@@ -67,6 +67,10 @@ def test_cli_dream_dry_run_no_writes(tmp_path, monkeypatch):
 
 def test_cli_dream_writes_proposals(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    # Isolate the memory root to this tmp dir: post-fix, default_memory_root()
+    # falls back to ~/.financial-analyst/memories when cwd has no ./memories,
+    # which would otherwise read the developer's real proposals.
+    monkeypatch.setenv("FINANCIAL_ANALYST_HOME", str(tmp_path))
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     rpt = {"code": "SH600519", "rating_overall": -1, "action": "sell",
@@ -143,6 +147,10 @@ def _make_synthetic_proposal(root: Path, agent: str, slug: str, confidence: str 
 def test_cli_dream_review_empty(tmp_path, monkeypatch):
     """`dream review` with no proposals dir should report it clearly."""
     monkeypatch.chdir(tmp_path)
+    # Isolate memory root to tmp: post-fix the resolver falls back to
+    # ~/.financial-analyst/memories when cwd has no ./memories, which on a dev
+    # machine holds real proposals and would make "empty" assertions flaky.
+    monkeypatch.setenv("FINANCIAL_ANALYST_HOME", str(tmp_path))
     runner = CliRunner()
     result = runner.invoke(app, ["dream", "review"])
     assert result.exit_code == 0

@@ -28,6 +28,8 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+
+from financial_analyst.memory_paths import default_memory_root
 from typing import Any, Dict, List, Optional
 
 # Force UTF-8 stdio for Windows zh-CN PowerShell
@@ -283,7 +285,7 @@ async def _tool_dream_aggregate(min_count: int = 3, threshold: float = 0.4,
     """
     from financial_analyst.dream.aggregator import aggregate_pending
     written, stats = aggregate_pending(
-        memory_root=Path("memories"),
+        memory_root=default_memory_root(),
         min_count=min_count,
         threshold=threshold,
         dry_run=dry_run,

@@ -2,15 +2,18 @@
 from __future__ import annotations
 from datetime import date
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 import yaml
 from financial_analyst.dream.introspector import Proposal
+from financial_analyst.memory_paths import default_memory_root
 
 
-def write_proposals(proposals: List[Proposal], memory_root: Path = Path("memories")) -> List[Path]:
+def write_proposals(proposals: List[Proposal], memory_root: Optional[Path] = None) -> List[Path]:
     """Write each proposal to memories/_proposed/<agent>/<date>_<slug>.md with frontmatter.
     Returns list of written file paths.
     """
+    if memory_root is None:
+        memory_root = default_memory_root()
     written: List[Path] = []
     today = date.today().isoformat()
     for p in proposals:

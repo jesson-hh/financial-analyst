@@ -4,6 +4,7 @@ import sys
 import typer
 from pathlib import Path
 from typing import Optional
+from financial_analyst.memory_paths import default_memory_root
 from dotenv import load_dotenv
 import pandas as pd
 
@@ -119,7 +120,7 @@ def report(
         raise typer.Exit(code=1)
 
     # Snapshot the _pending_introspections/ count before the run (used to decide auto-aggregate)
-    pending_dir = Path("memories") / "_pending_introspections"
+    pending_dir = default_memory_root() / "_pending_introspections"
     n_before = len(list(pending_dir.glob("*.json"))) if pending_dir.exists() else 0
 
     completed = 0
@@ -143,7 +144,7 @@ def report(
             try:
                 from financial_analyst.dream.aggregator import aggregate_pending
                 written, stats = aggregate_pending(
-                    memory_root=Path("memories"), min_count=3,
+                    memory_root=default_memory_root(), min_count=3,
                     threshold=0.4, dry_run=False,
                 )
                 typer.echo(f"  扫 {stats.get('n_pending_files', 0)} 份 → "
@@ -345,7 +346,7 @@ def _dream_aggregate(dry_run: bool = False) -> None:
     """
     from financial_analyst.dream.aggregator import aggregate_pending
     written, stats = aggregate_pending(
-        memory_root=Path("memories"), min_count=3, threshold=0.4,
+        memory_root=default_memory_root(), min_count=3, threshold=0.4,
         dry_run=dry_run,
     )
     typer.echo(f"扫 _pending_introspections/: "
@@ -373,7 +374,7 @@ def _dream_review() -> None:
     cases preview, and lesson_md head. Sorted by confidence high→med→low.
     """
     import yaml
-    proposed_root = Path("memories") / "_proposed"
+    proposed_root = default_memory_root() / "_proposed"
     if not proposed_root.exists():
         typer.echo(f"No proposals directory at {proposed_root}. "
                    f"Run `dream run` 或 `dream aggregate` 先生成些 proposals.")
@@ -505,7 +506,7 @@ async def _run_dream(since: int, dry_run: bool, out_dir: Path):
         return
 
     typer.echo(f"Introspecting {len(wrong_or_partial)} wrong/partial cases (via LLM)...")
-    agent = Introspector(memory_root=Path("memories"))
+    agent = Introspector(memory_root=default_memory_root())
     result = await agent.run({"outcomes": [o.to_dict() for o in outcomes]})
 
     if not result.ok:
@@ -671,7 +672,7 @@ async def _run_mainline(asof: Optional[str], panel: Optional[str], out_dir: Path
     from financial_analyst.tui import _ensure_registered
 
     _ensure_registered()
-    nodes = load_preset("mainline-radar", memory_root=Path("memories"))
+    nodes = load_preset("mainline-radar", memory_root=default_memory_root())
     asof = asof or pd.Timestamp.today().strftime("%Y-%m-%d")
     base_inputs = {"asof_date": asof, "out_dir": str(out_dir)}
     if panel:
@@ -713,9 +714,9 @@ async def _run_brief(asof, universe, universe_file, max_scan, out_dir):
 
     _ensure_registered()
     # Build agents manually to pass universe_file + max_scan to scanner
-    scanner = MarketScanner(memory_root=Path("memories"),
+    scanner = MarketScanner(memory_root=default_memory_root(),
                              universe_file=universe_file, max_scan=max_scan)
-    writer = MorningBriefWriter(memory_root=Path("memories"))
+    writer = MorningBriefWriter(memory_root=default_memory_root())
     nodes = [
         DAGNode(agent=scanner, deps=[], input_keys=["asof_date", "universe"]),
         DAGNode(agent=writer, deps=["market-scanner"],
@@ -757,7 +758,7 @@ async def _run_overseas_radar(asof, out_dir):
     from financial_analyst.tui import _ensure_registered
 
     _ensure_registered()
-    nodes = load_preset("overseas-radar", memory_root=Path("memories"))
+    nodes = load_preset("overseas-radar", memory_root=default_memory_root())
     asof = asof or pd.Timestamp.today().strftime("%Y-%m-%d")
     orch = Orchestrator(nodes)
     typer.echo(f"Running overseas-radar for {asof}...")
@@ -789,7 +790,7 @@ async def _run_intraday(codes: str, asof: Optional[str], out_dir: Path):
     from financial_analyst.agent.market.intraday_reviewer import IntradayReviewer
     from financial_analyst.agent.orchestrator import DAGNode
 
-    agent = IntradayReviewer(memory_root=Path("memories"))
+    agent = IntradayReviewer(memory_root=default_memory_root())
     nodes = [DAGNode(agent=agent, deps=[], input_keys=["codes", "asof_date", "out_dir"])]
     asof = asof or pd.Timestamp.today().strftime("%Y-%m-%d")
     orch = Orchestrator(nodes)

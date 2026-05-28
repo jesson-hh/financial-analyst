@@ -2,6 +2,31 @@
 
 All notable changes to this project follow [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning 2.0.0](https://semver.org/).
 
+## [1.0.8] — 2026-05-28  · Fix fresh-install crash — `memories/` not shipped in wheel
+
+### Fixed — clean `pip install` crashed on `fa report` / MCP `run_report`
+
+A pip-installed user running any command that reads agent memory (report, brief, mainline, dream, ask) from a directory without a local `./memories` folder crashed with:
+
+```
+FileNotFoundError: [WinError 3] 系统找不到指定的路径。: 'memories'
+```
+
+**Root cause:** `memories/` is a sibling of `src/` at the repo root, so the hatch wheel target (which ships only `src/financial_analyst/**` + `_resources/**` + `ui/**`) never included it. Yet ~30 call sites resolved it as the bare relative `Path("memories")`, which only exists inside a source checkout — where the maintainer always runs, hiding the bug. On Python 3.13 `Path.iterdir()` is implemented via `os.scandir` and raises on a missing directory (pre-3.13 it silently yielded nothing), turning this into a hard crash for fresh installs.
+
+**Fix:**
+- New `financial_analyst.memory_paths.default_memory_root()` resolves, in order: `$FINANCIAL_ANALYST_HOME/memories` → `<cwd>/memories` (dev / source checkout) → `~/.financial-analyst/memories` (pip user). The last two are created and seeded on first use. Mirrors the existing `_config.py` pattern for bundled `config/`.
+- The git-tracked agent memories are now bundled in the wheel under `_resources/memories_seed/` and copied into `~/.financial-analyst/memories` on first run, so reports ship with the agent rules / playbooks instead of an empty memory store. The seed is generated from `git ls-files memories/` (via `scripts/sync_memories_seed.py`), which by construction excludes gitignored runtime/private state (`_proposed/`, `_pending_introspections/`, `_shared/conversation_lessons.md`).
+- `MemoryIndex` now degrades gracefully (no-op) on a missing root instead of crashing.
+- Routed every `Path("memories")` call site through the resolver: `cli`, `tui`, `mcp_server`, `ask/tools`, `dream/{aggregator,proposal_writer}`, `buddy/{tools,agent,server}`, `agent/tier3/introspector`, `memory_ops`.
+
+### Internal
+
+- New `tests/test_memory_paths.py` (6 tests, incl. a regression that reproduces the WinError 3 crash via `MemoryIndex` over a missing root).
+- New `scripts/sync_memories_seed.py` — regenerate the bundled seed from git-tracked `memories/` before cutting a release.
+
+---
+
 ## [1.0.7] — 2026-05-26  · `fa data update` 5 new data types · UI alignment
 
 ### Added — `fa data update` covers 5 new data types

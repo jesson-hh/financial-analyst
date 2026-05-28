@@ -133,9 +133,8 @@ def _load_conversation_lessons() -> str:
     time the prompt is built, so a newly added lesson takes effect on the **next question**
     (no need to restart buddy)."""
     try:
-        from pathlib import Path
-        # parents[0]=buddy [1]=financial_analyst [2]=src [3]=<repo-root>
-        f = Path(__file__).resolve().parents[3] / "memories" / "_shared" / "conversation_lessons.md"
+        from financial_analyst.memory_paths import default_memory_root
+        f = default_memory_root() / "_shared" / "conversation_lessons.md"
         if f.exists():
             txt = f.read_text(encoding="utf-8").strip()
             # Strip the file header (first line # + description block), keep only actual lesson lines

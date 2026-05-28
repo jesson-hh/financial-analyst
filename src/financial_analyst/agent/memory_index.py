@@ -86,6 +86,12 @@ class MemoryIndex:
 
     def _iter_md_files(self):
         """Yield (agent_name, md_path) for every *.md under memory_root."""
+        # Defense in depth: a missing root must degrade to "no files", never
+        # crash. On Python 3.13 Path.iterdir() raises FileNotFoundError (via
+        # os.scandir) on a missing dir — this guard keeps a misresolved or
+        # not-yet-seeded root from taking down report generation.
+        if not self.memory_root.is_dir():
+            return
         for agent_dir in sorted(self.memory_root.iterdir()):
             if not agent_dir.is_dir():
                 continue

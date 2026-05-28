@@ -19,10 +19,11 @@ import re
 from collections import Counter, defaultdict
 from datetime import date as _date
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from financial_analyst.dream.introspector import Proposal
 from financial_analyst.dream.proposal_writer import write_proposals
+from financial_analyst.memory_paths import default_memory_root
 
 
 # ──────────────────────── 关键词白名单 (boost) ────────────────────────
@@ -145,7 +146,7 @@ def _cluster_proposals(proposals: List[dict], threshold: float = 0.4) -> List[Li
 
 
 def aggregate_pending(
-    memory_root: Path = Path("memories"),
+    memory_root: Optional[Path] = None,
     min_count: int = 3,
     threshold: float = 0.4,
     dry_run: bool = False,
@@ -161,6 +162,8 @@ def aggregate_pending(
     Returns:
         (written_paths, stats_dict)
     """
+    if memory_root is None:
+        memory_root = default_memory_root()
     pending_dir = memory_root / "_pending_introspections"
     if not pending_dir.exists():
         return [], {"reason": "no _pending_introspections dir"}

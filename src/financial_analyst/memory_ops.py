@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from financial_analyst.memory_paths import default_memory_root
+
 
 AUDIT_PATH = Path.home() / ".financial-analyst" / "audit.jsonl"
 
@@ -153,7 +155,7 @@ def accept_proposal(
         On success: ``{id, action, target, src, dst, git_staged, [git_error]}``.
         On error: ``{"error": "..."}``.
     """
-    project_root = project_root or Path.cwd()
+    project_root = project_root or default_memory_root().parent
     try:
         agent, slug = _parse_target(target)
     except ValueError as exc:
@@ -236,7 +238,7 @@ def reject_proposal(
 
     Returns ``{id, action, target, src}`` or ``{"error": "..."}``.
     """
-    project_root = project_root or Path.cwd()
+    project_root = project_root or default_memory_root().parent
     try:
         agent, slug = _parse_target(target)
     except ValueError as exc:
@@ -293,7 +295,7 @@ def revert_proposal(
 
     Returns ``{id, action, target, src, dst, reverted_id, git_staged}`` or error.
     """
-    project_root = project_root or Path.cwd()
+    project_root = project_root or default_memory_root().parent
     try:
         agent, slug = _parse_target(target)
     except ValueError as exc:
