@@ -1989,6 +1989,14 @@ function Composer({ s, context, dispatch, startAgent, onCmdK }) {
   const [popover, setPopover] = useState(null); // null | 'ref' | 'board'
   const fileInputRef = useRef(null); // 上传按钮用; 实际 <input> 在后续任务渲染 (此前 .click() 安全 no-op)
   const insertText = (t) => { setVal(v => (v ? v.replace(/\s*$/, '') + ' ' : '') + t + ' '); inputRef.current?.focus(); };
+  const [boards, setBoards] = useState(null); // null=未取, []=空
+  useEffect(() => {
+    if (popover !== 'board' || boards !== null || !s.backendUrl) return;
+    fetch(`${s.backendUrl}/concepts`).then(r => r.json())
+      .then(d => setBoards(d.available ? (d.boards || []) : []))
+      .catch(() => setBoards([]));
+  }, [popover, boards, s.backendUrl]);
+  const [boardQ, setBoardQ] = useState('');
 
   useEffect(() => { inputRef.current?.focus(); }, [s.currentSessionId]);
 
@@ -2097,6 +2105,15 @@ function Composer({ s, context, dispatch, startAgent, onCmdK }) {
       {popover === 'ref' && (
         <ComposerPopover title="引用 · 当前股 / 自选 / 工具结果" items={refItems}
           emptyHint="无可引用项 (先问一只股或加自选)" onClose={() => setPopover(null)} />
+      )}
+      {popover === 'board' && (
+        <ComposerPopover title="概念板块 · 同花顺"
+          items={(boards || [])
+            .filter(b => !boardQ || b.name.includes(boardQ))
+            .slice(0, 60)
+            .map(b => ({ key: b.code || b.name, label: b.name, sub: b.code || '', onPick: () => insertText(`${b.name}板块`) }))}
+          emptyHint={boards === null ? '加载中…' : '无板块数据 (先跑 fa data update --include-concepts)'}
+          onClose={() => { setPopover(null); setBoardQ(''); }} />
       )}
       <div style={{ border: '1px solid var(--ink-2)', background: 'var(--paper)' }}>
         <div style={{ padding: '6px 14px', borderBottom: '1px dashed var(--line)', display: 'flex', alignItems: 'center', gap: 10 }}>
