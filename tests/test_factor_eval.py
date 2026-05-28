@@ -38,8 +38,9 @@ def test_winsorize_clamps_to_quantile_per_date():
     d0 = s.index.get_level_values("datetime")[0]
     s.loc[(d0, "A")] = 1e6
     w = winsorize(s, q=0.2)
+    others_max = float(s.drop((d0, "A")).xs(d0, level="datetime").max())
     assert w.loc[(d0, "A")] < 1e6
-    assert w.loc[(d0, "A")] <= s.drop((d0, "A")).xs(d0, level="datetime").max() + 1
+    assert w.loc[(d0, "A")] == pytest.approx(others_max)
 
 
 def test_zscore_per_date_mean0_std1():
@@ -53,3 +54,12 @@ def test_zscore_per_date_mean0_std1():
 def test_neutralize_is_stub():
     with pytest.raises(NotImplementedError):
         neutralize(_xs_series(), industry=None)
+
+
+def test_zscore_degenerate_all_equal_date_is_nan():
+    dates = pd.date_range("2024-01-01", periods=2, freq="B")
+    idx = pd.MultiIndex.from_product([dates, ["A", "B", "C"]], names=["datetime", "code"])
+    s = pd.Series([5.0, 5.0, 5.0, 1.0, 2.0, 3.0], index=idx)  # date0 all-equal, date1 varied
+    z = zscore(s)
+    assert z.xs(dates[0], level="datetime").isna().all()       # zero-variance → all NaN
+    assert abs(float(z.xs(dates[1], level="datetime").mean())) < 1e-9  # normal date OK
