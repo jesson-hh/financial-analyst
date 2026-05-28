@@ -786,6 +786,38 @@ def build_app():
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
         return JSONResponse({"ok": True, "quotes": data})
 
+    @app.get("/concepts")
+    async def concepts():
+        """List 同花顺 concept boards for the UI 板块 picker.
+
+        Reads ``concept_ths_index.parquet`` written by
+        ``fa data update --include-concepts``. Returns
+        ``{available: bool, boards: [{name, code}]}``.
+        """
+        def _load():
+            import pandas as pd
+            from financial_analyst.data.paths import get_data_paths
+            path = get_data_paths().parquet_root / "concept_ths_index.parquet"
+            if not path.exists():
+                return None
+            df = pd.read_parquet(path)
+            name_col = next((c for c in df.columns if "name" in c.lower()), df.columns[0])
+            code_col = next((c for c in df.columns if "code" in c.lower()), None)
+            out = []
+            for _, row in df.iterrows():
+                nm = str(row[name_col]).strip()
+                if nm and nm.lower() != "nan":
+                    out.append({"name": nm, "code": str(row[code_col]) if code_col else None})
+            return out
+
+        try:
+            boards = await asyncio.to_thread(_load)
+        except Exception as exc:
+            return JSONResponse({"available": False, "boards": [], "error": str(exc)}, status_code=200)
+        if boards is None:
+            return JSONResponse({"available": False, "boards": []})
+        return JSONResponse({"available": True, "boards": boards})
+
     @app.get("/models")
     async def models():
         """Available LLM models (for the front-end model picker).
