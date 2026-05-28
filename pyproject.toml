@@ -66,6 +66,8 @@ dependencies = [
     "fastapi>=0.110",          # buddy SSE backend (fa serve / fa start)
     "uvicorn>=0.29",           # ASGI server for buddy
     "hf-transfer>=0.1.6",      # multi-connection HF downloads (3-10x speedup for CN users on hf-mirror)
+    "pypdf>=4",                # composer 上传 button: PDF text extraction
+    "python-multipart>=0.0.9", # FastAPI multipart parsing for POST /upload
 ]
 
 [project.optional-dependencies]

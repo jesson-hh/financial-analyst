@@ -998,5 +998,5 @@ def serve(host: str = "127.0.0.1", port: int = 9999) -> None:
         ) from exc
     app = build_app()
     print(f"financial-analyst buddy SSE bridge → http://{host}:{port}")
-    print(f"  POST /run  ·  POST /confirm  ·  GET /health  ·  GET /tools")
+    print("  POST /run  ·  POST /confirm  ·  GET /health  ·  GET /tools")
     uvicorn.run(app, host=host, port=port, log_level="warning")
