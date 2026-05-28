@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, List, Optional
 
 import yaml
 
+from financial_analyst._config import find_config
 from financial_analyst.agent.orchestrator import DAGNode
 from financial_analyst.agent.registry import SubAgentRegistry
 
@@ -56,8 +57,14 @@ def load_preset(
     List[DAGNode]
         Ordered exactly as declared in the YAML ``agents`` list.
     """
-    pd = preset_dir or PRESET_DIR
-    path = pd / f"{name}.yaml"
+    if preset_dir is not None:
+        path = Path(preset_dir) / f"{name}.yaml"
+    else:
+        # Resolve through the bundled-config chain so pip installs work:
+        # <cwd>/config/swarm → ~/.financial-analyst/config/swarm → bundled
+        # _resources/config/swarm. PRESET_DIR (repo-root via parents[3]) only
+        # exists in a source checkout and lands in <python>/Lib on a wheel.
+        path = find_config(f"swarm/{name}.yaml")
     spec = yaml.safe_load(path.read_text(encoding="utf-8"))
 
     nodes: List[DAGNode] = []

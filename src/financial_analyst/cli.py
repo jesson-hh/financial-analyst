@@ -1481,9 +1481,11 @@ def _resolve_universe(universe: str) -> list[str]:
     if p.exists():
         candidate = p
     else:
+        from financial_analyst._config import bundled_config_dir
         home_path = Path.home() / ".financial-analyst" / "universes" / f"{universe}.txt"
         repo_path = Path(__file__).parent.parent.parent / "config" / "universes" / f"{universe}.txt"
-        for path in (home_path, repo_path):
+        bundled_path = bundled_config_dir() / "universes" / f"{universe}.txt"
+        for path in (home_path, repo_path, bundled_path):
             if path.exists():
                 candidate = path
                 break

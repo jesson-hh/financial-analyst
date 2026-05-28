@@ -2,6 +2,31 @@
 
 All notable changes to this project follow [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning 2.0.0](https://semver.org/).
 
+## [1.0.9] — 2026-05-28  · Fix fresh-install crash #2 — swarm presets + universes not in wheel
+
+### Fixed — `fa report` / MCP `run_report` still crashed right after v1.0.8
+
+The v1.0.8 memory fix cleared the first crash, but `run_report` immediately hit the **same bug class one layer down**: `load_preset("stock-deep-dive")` resolved its preset YAML via `Path(__file__).parents[3] / "config" / "swarm"`, which on a wheel install lands at `<python>/Lib/config/swarm/` and crashed with:
+
+```
+FileNotFoundError: [Errno 2] No such file or directory:
+'...\Python313\Lib\config\swarm\stock-deep-dive.yaml'
+```
+
+`config/swarm/*.yaml` (5 swarm presets) and `config/universes/*.txt` are siblings of `src/` and — like `memories/` — were never shipped in the wheel.
+
+**Fix:**
+- Bundle `config/swarm/` + `config/universes/` into `_resources/config/` (ships in the wheel; `scripts/sync_bundled_config.py` regenerates them from git-tracked sources).
+- `swarm.loader.load_preset` now resolves presets via `_config.find_config("swarm/<name>.yaml")` — the same chain the bundled `config/*.yaml` already use (`<cwd>/config` → `~/.financial-analyst/config` → bundled `_resources/config`), so both pip installs and user overrides work.
+- Universe resolution (`--universe csi300...` in `mainline` / `v4`) gains a bundled fallback, so a fresh install no longer silently resolves to an empty universe.
+
+### Internal
+
+- New `tests/test_bundled_config.py` — 4 tests: swarm presets + universes bundled, `find_config` resolves a preset from the bundle under pip-user isolation, and a `load_preset` regression that reproduces the `FileNotFoundError` when the repo-root `config/` is absent.
+- New `scripts/sync_bundled_config.py`.
+
+---
+
 ## [1.0.8] — 2026-05-28  · Fix fresh-install crash — `memories/` not shipped in wheel
 
 ### Fixed — clean `pip install` crashed on `fa report` / MCP `run_report`
