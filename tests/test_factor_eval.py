@@ -102,11 +102,15 @@ def test_ic_reversed_factor_near_minus_one():
 
 
 def test_ic_random_factor_near_zero():
-    alpha, fwd = _aligned_alpha_fwd("random")
+    # 60 codes → per-date IC has low sampling variance, so a truly random factor's
+    # mean IC sits tightly at 0. (8 codes was too noisy to assert < 0.1 — but the
+    # fix is more statistical power, NOT a looser bound: |IC|<0.2 would let a
+    # genuinely predictive factor pass as 'random'.)
+    codes = tuple(f"S{i:02d}" for i in range(60))
+    alpha, fwd = _aligned_alpha_fwd("random", n_dates=30, codes=codes)
     r = ic_analysis(alpha, fwd)
-    # seed=5, n=8 codes → sampling variance is high; threshold 0.2 rather than
-    # 0.1 to avoid a false failure while still confirming no spurious large IC.
-    assert abs(r.ic_mean) < 0.2
+    assert abs(r.ic_mean) < 0.1
+    assert abs(r.rank_ic_mean) < 0.1
 
 
 def test_ic_decay_one_row_per_horizon():
