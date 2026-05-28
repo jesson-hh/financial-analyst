@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 _FWD_BY_FREQ = {"day": 1, "week": 5, "month": 21}
