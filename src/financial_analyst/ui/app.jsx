@@ -1998,16 +1998,17 @@ function Composer({ s, context, dispatch, startAgent, onCmdK }) {
   }, [popover, boards, s.backendUrl]);
   const [boardQ, setBoardQ] = useState('');
   const [attachments, setAttachments] = useState([]); // [{id,name,chars,text}]
+  const [uploadMsg, setUploadMsg] = useState(null); // {kind:'loading'|'error', text} — transient inline status, NOT a transcript message
   const onFilePicked = (e) => {
     const f = e.target.files?.[0];
     e.target.value = '';
     if (!f || !s.backendUrl) return;
     const fd = new FormData(); fd.append('file', f);
-    dispatch({ type: 'inject_message', message: { id: 'sys_'+Date.now(), role: 'ai', kind: 'answer', text: `⏳ 解析附件 ${f.name}…` } });
+    setUploadMsg({ kind: 'loading', text: `解析附件 ${f.name}…` });
     fetch(`${s.backendUrl}/upload`, { method: 'POST', body: fd })
       .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.error || '上传失败'); return d; })
-      .then(d => setAttachments(a => [...a, { id: d.id, name: d.name, chars: d.chars, text: d.text }]))
-      .catch(err => dispatch({ type: 'inject_message', message: { id: 'sys_'+Date.now(), role: 'ai', kind: 'answer', text: `⚠ 附件失败: ${err.message}` } }));
+      .then(d => { setAttachments(a => [...a, { id: d.id, name: d.name, chars: d.chars, text: d.text }]); setUploadMsg(null); })
+      .catch(err => setUploadMsg({ kind: 'error', text: `附件失败: ${err.message}` }));
   };
 
   useEffect(() => { inputRef.current?.focus(); }, [s.currentSessionId]);
@@ -2140,6 +2141,12 @@ function Composer({ s, context, dispatch, startAgent, onCmdK }) {
                 <span onClick={() => setAttachments(x => x.filter(y => y.id !== a.id))} style={{ cursor: 'pointer', color: 'var(--yin)' }}>×</span>
               </span>
             ))}
+          </div>
+        )}
+        {uploadMsg && (
+          <div className="mono" onClick={() => setUploadMsg(null)}
+            style={{ padding: '4px 14px 0', fontSize: 10, cursor: 'pointer', color: uploadMsg.kind === 'error' ? 'var(--yin)' : 'var(--ink-3)' }}>
+            {uploadMsg.kind === 'error' ? '⚠ ' : '⏳ '}{uploadMsg.text}{uploadMsg.kind === 'error' ? ' (点击关闭)' : ''}
           </div>
         )}
         <div style={{ padding: '6px 14px', borderBottom: '1px dashed var(--line)', display: 'flex', alignItems: 'center', gap: 10 }}>
