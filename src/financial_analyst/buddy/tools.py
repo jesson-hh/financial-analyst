@@ -1383,6 +1383,45 @@ def _tool_alpha_compare(items, universe: str = "csi300_active",
     return ToolResult("\n".join(lines))
 
 
+def _tool_factor_report(expr_or_name: str, universe: str = "csi500",
+                        freq: str = "month", start: str = None, end: str = None) -> ToolResult:
+    """完整单因子评测报告: IC全套 + 十分位 + 多空组合净值/Sharpe/回撤 (复用 factors.eval 引擎)。"""
+    expr_or_name = (expr_or_name or "").strip()
+    if not expr_or_name:
+        return ToolResult("factor_report: 缺少 expr_or_name (因子名或表达式)。", is_error=True)
+    if "__" in expr_or_name or "import" in expr_or_name or "lambda" in expr_or_name:
+        return ToolResult("factor_report: 表达式含非法 token (__ / import / lambda)。", is_error=True)
+    try:
+        from financial_analyst.factors.eval import EvalConfig, factor_report
+        cfg = EvalConfig(universe=universe, freq=freq, start=start, end=end)
+        rpt = factor_report(expr_or_name, cfg)
+    except Exception as e:
+        return ToolResult(f"factor_report 失败: {type(e).__name__}: {e}", is_error=True)
+
+    if rpt.status != "ok":
+        return ToolResult(f"因子评测未完成 (status={rpt.status}): {rpt.error}", is_error=True)
+
+    import math
+    def f(x, d=3):
+        return "—" if x is None or (isinstance(x, float) and math.isnan(x)) else f"{x:+.{d}f}"
+
+    ic, q, pf, ch, m = rpt.ic, rpt.quantile, rpt.portfolio, rpt.characteristics, rpt.meta
+    lines = [
+        f"# 因子评测 · {m.factor}",
+        f"池 {m.universe} ({m.n_codes} 只) · {m.freq}频 · {m.start}~{m.end} · {m.n_dates} 期 · fwd={m.fwd_days}d",
+        "",
+        f"IC = {f(ic.ic_mean,4)} | ICIR = {f(ic.icir)} | t = {f(ic.ic_tstat,2)} | 命中 = {f(ic.ic_win_rate,2)}",
+        f"RankIC = {f(ic.rank_ic_mean,4)} | RankICIR = {f(ic.rank_icir)}",
+        f"十分位单调性 = {f(q.monotonicity,2)} | 多空价差(年化) = {f(q.long_short_spread,3)}",
+        f"多空组合: 年化 = {f(pf.ann_return,3)} | Sharpe = {f(pf.sharpe,2)} | 最大回撤 = {f(pf.max_drawdown,3)} | 换手 = {f(pf.turnover,2)} | 胜率 = {f(pf.win_rate,2)}",
+        f"覆盖率 = {f(ch.coverage,2)} | 自相关 = {f(ch.autocorr_1,2)} | 半衰期 = {ch.half_life:.0f} 期",
+    ]
+    if rpt.warnings:
+        lines.append("")
+        lines += [f"⚠ {w}" for w in rpt.warnings]
+    return ToolResult("\n".join(lines))
+
+
 def _wisdom_store():
     """Resolve WisdomStore, honouring FA_WISDOM_ROOT (tests inject tmp)."""
     from pathlib import Path
@@ -1656,6 +1695,29 @@ TOOL_REGISTRY: List[Tool] = [
             "required": ["items"],
         },
         run=_tool_alpha_compare,
+        cost_hint="minutes",
+        confirm_required=True,
+    ),
+    Tool(
+        name="factor_report",
+        description=(
+            "对一个因子 (已注册名如 alpha019, 或表达式如 rank(-delta(close,5))) 跑【完整单因子评测】: "
+            "IC/ICIR/t值/命中率 + IC衰减 + 十分位单调性 + 多空组合净值(年化/Sharpe/最大回撤/换手/胜率)。"
+            "比 factor_test 更全 (factor_test 只给 IC, 这个给组合回测)。用于「这因子到底行不行」「给我一份完整评测」。"
+            "默认 csi500 月频近 2 年。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "expr_or_name": {"type": "string", "description": "因子名或表达式, 如 alpha019 或 rank(-delta(close,5))"},
+                "universe": {"type": "string", "default": "csi500", "description": "csi300/csi500/csi800/all/csi300_active 或自选 .txt"},
+                "freq": {"type": "string", "enum": ["day", "week", "month"], "default": "month"},
+                "start": {"type": "string", "description": "起始日 YYYY-MM-DD, 缺省今天往前 2 年"},
+                "end": {"type": "string", "description": "结束日 YYYY-MM-DD, 缺省今天"},
+            },
+            "required": ["expr_or_name"],
+        },
+        run=_tool_factor_report,
         cost_hint="minutes",
         confirm_required=True,
     ),
@@ -2022,3 +2084,7 @@ def get_tool(name: str) -> Optional[Tool]:
 
 def list_tools() -> List[Tool]:
     return list(TOOL_REGISTRY)
+
+
+#: Alias for backwards-compat and tool tests.
+TOOLS = TOOL_REGISTRY
