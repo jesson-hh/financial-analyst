@@ -2099,7 +2099,7 @@ function Composer({ s, context, dispatch, startAgent, onCmdK }) {
     (s.watchlist || []).forEach(q => out.push({ key: 'w_' + q.code, label: q.name || q.code, sub: q.code, onPick: () => insertText(`${q.name || q.code}（${q.code}）`) }));
     const sess = s.sessions.find(x => x.id === s.currentSessionId);
     const chain = (sess?.messages || []).filter(m => m.kind === 'chain').flatMap(m => m.chain || []).filter(c => c.status === 'done');
-    chain.forEach((c, i) => out.push({ key: 'tool_' + i, label: `§${i + 1} ${c.name}`, sub: (c.cn || ''), onPick: () => insertText(`§${i + 1}`) }));
+    chain.forEach((c, i) => out.push({ key: 'tool_' + i, label: `§${i + 1} ${c.name}`, sub: (c.cn || ''), onPick: () => insertText(`[§${i + 1}]`) }));
     return out;
   })();
 

@@ -808,6 +808,8 @@ def build_app():
             df = pd.read_parquet(path)
             name_col = next((c for c in df.columns if "name" in c.lower()), df.columns[0])
             code_col = next((c for c in df.columns if "code" in c.lower()), None)
+            if code_col == name_col:  # no real name column → avoid echoing the code as the name
+                code_col = None
             out = []
             for _, row in df.iterrows():
                 nm = str(row[name_col]).strip()
@@ -836,6 +838,9 @@ def build_app():
         ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
         if ext not in (".txt", ".md", ".csv", ".pdf"):
             return JSONResponse({"error": f"不支持的文件类型: {ext or '无扩展名'}"}, status_code=400)
+        # pre-read gate: reject by the parsed part size before buffering the whole body
+        if file.size and file.size > MAX_BYTES:
+            return JSONResponse({"error": f"文件过大 (>{MAX_BYTES // 1024 // 1024}MB)"}, status_code=413)
         raw = await file.read()
         if len(raw) > MAX_BYTES:
             return JSONResponse({"error": f"文件过大 (>{MAX_BYTES // 1024 // 1024}MB)"}, status_code=413)
