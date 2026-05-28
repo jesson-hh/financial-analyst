@@ -116,6 +116,8 @@ def test_ic_random_factor_near_zero():
 def test_ic_decay_one_row_per_horizon():
     alpha, fwd = _aligned_alpha_fwd("perfect")
     decay_fwd = {1: fwd, 5: fwd, 21: fwd}
+    # NOTE: same fwd reused for every horizon → this asserts decay SHAPE + sign
+    # (one sorted (h, ic, rank_ic) row per horizon), not that IC actually decays.
     r = ic_analysis(alpha, fwd, fwd_by_horizon=decay_fwd)
     assert [h for h, _, _ in r.ic_decay] == [1, 5, 21]
     assert all(ic > 0.9 for _, ic, _ in r.ic_decay)

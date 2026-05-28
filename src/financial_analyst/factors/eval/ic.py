@@ -26,13 +26,13 @@ def _daily_corr(joined: pd.DataFrame, rank: bool) -> pd.Series:
 
     If rank=True, rank within each date first (Spearman via rank-then-Pearson).
     """
+    df = joined
     if rank:
         df = joined.groupby(level="datetime", group_keys=False).rank()
-    else:
-        df = joined
-    return df.groupby(level="datetime").apply(
-        lambda d: d["a"].corr(d["f"]), include_groups=False
-    )
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return df.groupby(level="datetime").apply(
+            lambda d: d["a"].corr(d["f"]), include_groups=False
+        )
 
 
 def ic_analysis(
@@ -69,14 +69,15 @@ def ic_analysis(
     n = len(ic)
     ic_mean = float(ic.mean()) if n else nan
     ic_std = float(ic.std()) if n else nan
-    icir = ic_mean / ic_std if (ic_std and ic_std > 0) else nan
-    ic_tstat = ic_mean / ic_std * np.sqrt(n) if (ic_std and ic_std > 0) else nan
-    ic_win = float((np.sign(ic) == np.sign(ic_mean)).mean()) if n else nan
+    icir = ic_mean / ic_std if (not np.isnan(ic_std) and ic_std > 0) else nan
+    ic_tstat = ic_mean / ic_std * np.sqrt(n) if (not np.isnan(ic_std) and ic_std > 0) else nan
+    _nz = ic[ic != 0]
+    ic_win = float((np.sign(_nz) == np.sign(ic_mean)).mean()) if len(_nz) else nan
 
     r_n = len(ric)
     rank_ic_mean = float(ric.mean()) if r_n else nan
     rank_ic_std = float(ric.std()) if r_n else nan
-    rank_icir = rank_ic_mean / rank_ic_std if (rank_ic_std and rank_ic_std > 0) else nan
+    rank_icir = rank_ic_mean / rank_ic_std if (not np.isnan(rank_ic_std) and rank_ic_std > 0) else nan
 
     ic_series = [(str(pd.Timestamp(d).date()), float(v)) for d, v in ic.items()]
 
