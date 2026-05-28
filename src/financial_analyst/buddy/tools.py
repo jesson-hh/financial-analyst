@@ -1259,38 +1259,7 @@ def _resolve_universe_codes(universe: str) -> list:
     return []
 
 
-_FACTOR_VOCAB = (
-    "字段: close open high low volume vwap amount returns industry | "
-    "算子: rank ts_rank delta delay ts_mean ts_sum ts_max ts_min ts_argmax ts_argmin "
-    "stddev correlation(x,y,n) covariance decay_linear sma wma signedpower(x,p) "
-    "log sign abs power(x,p) scale indneutralize(x,industry) max_pair min_pair filter_where | "
-    "运算: + - * / ** 比较 ()"
-)
-
-
-def _factor_compute(expr: str):
-    """Build a PanelData->Series compute function, eval whitelisted expression (no builtins)."""
-    from financial_analyst.factors.zoo import operators as _ops
-
-    def compute(p):
-        ns = {
-            "close": p.close, "open": p.open, "high": p.high, "low": p.low,
-            "volume": p.volume, "vwap": p.vwap, "amount": p.amount,
-            "returns": p.returns, "industry": p.industry,
-            "rank": _ops.rank, "scale": _ops.scale, "ts_sum": _ops.ts_sum,
-            "ts_mean": _ops.ts_mean, "stddev": _ops.stddev, "ts_max": _ops.ts_max,
-            "ts_min": _ops.ts_min, "ts_argmax": _ops.ts_argmax, "ts_argmin": _ops.ts_argmin,
-            "ts_rank": _ops.ts_rank, "delta": _ops.delta, "delay": _ops.delay,
-            "correlation": _ops.correlation, "covariance": _ops.covariance,
-            "decay_linear": _ops.decay_linear, "sma": _ops.sma, "wma": _ops.wma,
-            "signedpower": _ops.signedpower, "log": _ops.log, "sign": _ops.sign,
-            "abs": _ops.abs_, "abs_": _ops.abs_, "product": _ops.product,
-            "power": _ops.power, "indneutralize": _ops.indneutralize,
-            "max_pair": _ops.max_pair, "min_pair": _ops.min_pair,
-            "filter_where": _ops.filter_where,
-        }
-        return eval(expr, {"__builtins__": {}}, ns)  # restricted namespace
-    return compute
+from financial_analyst.factors.zoo.expr import FACTOR_VOCAB as _FACTOR_VOCAB, compile_factor as _factor_compute
 
 
 def _tool_factor_test(expr: str, universe: str = "csi300_active",
