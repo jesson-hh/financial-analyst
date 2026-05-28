@@ -49,11 +49,6 @@
   <img src="docs/demo/install.svg" alt="$ pip install financial-analyst ; fa init" width="540">
 </p>
 
-```bash
-pip install financial-analyst==1.0.7    # 1 minute, no [serve] flag needed
-fa start                                 # zero-config: wizard + backend + web UI + browser auto-opens
-```
-
 > **🆕 v1.0.7 highlights** *(2026-05-26)*
 >
 > - **`fa data update` 全开 5 种新数据** — `--include-f10` (TDX 公司大事/龙虎榜/研究报告, 零 token, pytdx 直连) · `--include-concepts` (同花顺概念股 + 成分股, 零 token, adata) · `--include-northbound` (沪+深股通历史资金流向, 零 token, akshare) · `--include-financial` (Tushare 财务三表, opt-in) · `--include-stock-basic` (Tushare 公司基本信息, opt-in)
