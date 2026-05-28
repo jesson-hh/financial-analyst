@@ -49,7 +49,7 @@ class FactorReport:
 
 
 def rebalance_dates(all_dates: List, freq: str) -> List:
-    """Resample a daily date list to rebalance dates (last calendar day per period)."""
+    """Resample a daily date list to rebalance dates: the last observed (trading) day in the panel for each week/month period (freq='day' returns all dates)."""
     s = pd.Series(1, index=pd.DatetimeIndex(sorted(pd.to_datetime(all_dates))))
     if freq == "day":
         return list(s.index)
@@ -99,10 +99,12 @@ def factor_characteristics(alpha: pd.Series, n_codes: int) -> FactorChar:
                 vals.append(c)
         return float(np.mean(vals)) if vals else float("nan")
 
-    autocorr_1 = _xs_autocorr(1)
     half_life = -1.0
+    autocorr_1 = float("nan")
     for lag in (1, 2, 3, 5, 8, 13, 21):
         ac = _xs_autocorr(lag)
+        if lag == 1:
+            autocorr_1 = ac
         if ac == ac and ac < 0.5:
             half_life = float(lag)
             break
@@ -181,15 +183,20 @@ def factor_report(spec_or_expr: str, config: Optional[EvalConfig] = None) -> Fac
     end = config.end or date.today().isoformat()
     start = config.start or (date.today() - timedelta(days=365 * 2)).isoformat()
 
-    from financial_analyst.data.loader_factory import get_default_loader
     from financial_analyst.factors.zoo.panel import PanelData
-    loader = get_default_loader()
     try:
-        from financial_analyst.data.loaders.industry import IndustryLoader, industry_map_path
-        ind_loader = IndustryLoader() if industry_map_path().exists() else None
-    except Exception:
-        ind_loader = None
-    panel = PanelData.from_loader(loader, codes, start, end, freq="day", industry_loader=ind_loader)
+        from financial_analyst.data.loader_factory import get_default_loader
+        loader = get_default_loader()
+        try:
+            from financial_analyst.data.loaders.industry import IndustryLoader, industry_map_path
+            ind_loader = IndustryLoader() if industry_map_path().exists() else None
+        except Exception:
+            ind_loader = None
+        panel = PanelData.from_loader(loader, codes, start, end, freq="day", industry_loader=ind_loader)
+    except Exception as e:
+        load_meta = ReportMeta(spec_or_expr, "?", config.universe, config.freq,
+                               start, end, 0, len(codes), config.effective_fwd_days())
+        return FactorReport(load_meta, status="load_error", error=f"{type(e).__name__}: {e}")
 
     from financial_analyst.factors.zoo.registry import get as _get_alpha
     from financial_analyst.factors.zoo.expr import compile_factor, validate_expr

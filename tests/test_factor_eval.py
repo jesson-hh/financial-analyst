@@ -289,3 +289,12 @@ def test_factor_characteristics_coverage():
     alpha = p.close.groupby(level="code").pct_change()
     ch = factor_characteristics(alpha, n_codes=5)
     assert 0.0 <= ch.coverage <= 1.0
+
+
+def test_build_report_neutralize_warns():
+    p = _signal_panel(n_dates=40)
+    cfg = EvalConfig(freq="week", neutralize=True)
+    rpt = build_report(p, lambda panel: panel.close.groupby(level="code").pct_change(),
+                       cfg, factor_label="x", family="custom")
+    assert rpt.status == "ok"
+    assert any(("中性化" in w) or ("neutralize" in w) for w in rpt.warnings)
