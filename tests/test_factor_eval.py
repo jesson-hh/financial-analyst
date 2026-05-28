@@ -200,3 +200,18 @@ def test_long_short_cost_reduces_return():
     net = long_short_portfolio(alpha, fwd, n_groups=5, ppy=12, cost_bps=50.0)
     assert net.ann_return <= gross.ann_return + 1e-9
     assert gross.turnover >= 0
+
+
+def test_long_short_turnover_known_rotation():
+    # date1: 4 codes, n_groups=2 → top(label1)={C,D}
+    # date2: 6 codes, n_groups=2 → top={D,E,F}  (qcut of [1..6] into 2 → bottom A,B,C / top D,E,F)
+    # symdiff({D,E,F},{C,D}) = {C,E,F} = 3 ; combined denom = 3+2 = 5 → turn=0.6
+    # mean turnover = (first=0 + 0.6)/2 = 0.3  (the OLD 2*max(len) denom would give 0.25)
+    d1, d2 = pd.Timestamp("2024-01-31"), pd.Timestamp("2024-02-29")
+    vals = {(d1, "A"): 1, (d1, "B"): 2, (d1, "C"): 3, (d1, "D"): 4,
+            (d2, "A"): 1, (d2, "B"): 2, (d2, "C"): 3, (d2, "D"): 4, (d2, "E"): 5, (d2, "F"): 6}
+    idx = pd.MultiIndex.from_tuples(list(vals), names=["datetime", "code"])
+    alpha = pd.Series([float(v) for v in vals.values()], index=idx)
+    fwd = pd.Series(0.01, index=idx)  # arbitrary non-NaN; turnover is membership-only
+    r = long_short_portfolio(alpha, fwd, n_groups=2, ppy=12, cost_bps=0.0)
+    assert r.turnover == pytest.approx(0.3)

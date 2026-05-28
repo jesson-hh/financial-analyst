@@ -23,7 +23,11 @@ class PortfolioResult:
 
 
 def portfolio_stats(ls: pd.Series, ppy: int) -> Dict[str, float]:
-    """Annualized stats from a per-period return series (chronological)."""
+    """Annualized stats from a per-period long-short return series (chronological).
+
+    Sharpe uses risk-free = 0 (a dollar-neutral long-short book is self-financing).
+    ann_return is geometric and NaN if the cumulative NAV goes non-positive.
+    """
     ls = ls.dropna()
     n = len(ls)
     nan = float("nan")
@@ -45,6 +49,12 @@ def portfolio_stats(ls: pd.Series, ppy: int) -> Dict[str, float]:
 def long_short_portfolio(alpha: pd.Series, fwd: pd.Series,
                          n_groups: int = 10, ppy: int = 12,
                          cost_bps: float = 0.0) -> PortfolioResult:
+    """Long the top group / short the bottom group (equal weight), per rebalance date.
+
+    Transaction cost model: ``cost_bps`` is charged on one-sided top-group turnover
+    and multiplied by 2 to proxy the (assumed-symmetric) short leg. The reported
+    ``turnover`` is the average one-sided top-group symmetric turnover in [0,1].
+    """
     joined = pd.concat([alpha.rename("a"), fwd.rename("f")], axis=1).dropna()
     if joined.empty:
         return PortfolioResult()
@@ -67,8 +77,11 @@ def long_short_portfolio(alpha: pd.Series, fwd: pd.Series,
             continue
         gross = float(top["f"].mean() - bot["f"].mean())
         top_codes = set(top.index)
+        # symmetric top-group turnover, normalized by combined size → bounded [0,1];
+        # first rebalance has no prior holdings (no entry cost charged).
         if prev_top:
-            turn = len(top_codes ^ prev_top) / (2 * max(len(top_codes), 1))
+            denom = len(top_codes) + len(prev_top)
+            turn = len(top_codes ^ prev_top) / denom if denom else 0.0
         else:
             turn = 0.0
         net = gross - turn * (cost_bps / 1e4) * 2
