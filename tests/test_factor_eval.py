@@ -157,3 +157,46 @@ def test_quantile_random_factor_flat():
     rand = quantile_backtest(r_alpha, r_fwd, n_groups=5, ppy=12)
     assert abs(perfect.long_short_spread) > 0  # perfect factor separates groups
     assert abs(rand.long_short_spread) < abs(perfect.long_short_spread) / 5
+
+
+from financial_analyst.factors.eval.portfolio import (
+    long_short_portfolio, portfolio_stats, PortfolioResult,
+)
+
+
+def test_portfolio_stats_hand_computed():
+    # 4 periods of +10% each, monthly (ppy=12)
+    ls = pd.Series([0.1, 0.1, 0.1, 0.1],
+                   index=pd.date_range("2024-01-31", periods=4, freq="ME"))
+    st = portfolio_stats(ls, ppy=12)
+    # nav_end = 1.1**4 = 1.4641; ann = 1.4641**(12/4) - 1
+    assert st["ann_return"] == pytest.approx(1.4641 ** 3 - 1, rel=1e-6)
+    assert st["max_drawdown"] == pytest.approx(0.0, abs=1e-9)  # monotonic up
+    assert st["win_rate"] == pytest.approx(1.0)
+    assert st["volatility"] == pytest.approx(0.0, abs=1e-9)  # zero variance
+
+
+def test_portfolio_stats_drawdown():
+    ls = pd.Series([0.2, -0.5, 0.1],
+                   index=pd.date_range("2024-01-31", periods=3, freq="ME"))
+    st = portfolio_stats(ls, ppy=12)
+    # nav = [1.2, 0.6, 0.66]; peak 1.2 → trough 0.6 → dd = 0.6/1.2 - 1 = -0.5
+    assert st["max_drawdown"] == pytest.approx(-0.5, rel=1e-6)
+    assert st["win_rate"] == pytest.approx(2 / 3, rel=1e-6)
+
+
+def test_long_short_perfect_factor_positive_sharpe():
+    alpha, fwd = _aligned_alpha_fwd("perfect", n_dates=40)
+    r = long_short_portfolio(alpha, fwd, n_groups=5, ppy=12, cost_bps=0.0)
+    assert isinstance(r, PortfolioResult)
+    assert r.ann_return > 0
+    assert r.sharpe > 0
+    assert len(r.nav_series) >= 1
+
+
+def test_long_short_cost_reduces_return():
+    alpha, fwd = _aligned_alpha_fwd("random", n_dates=60)
+    gross = long_short_portfolio(alpha, fwd, n_groups=5, ppy=12, cost_bps=0.0)
+    net = long_short_portfolio(alpha, fwd, n_groups=5, ppy=12, cost_bps=50.0)
+    assert net.ann_return <= gross.ann_return + 1e-9
+    assert gross.turnover >= 0
