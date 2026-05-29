@@ -592,13 +592,42 @@ function ComposeMode() {
   const [pool, setPool] = useState('csi300');
   const [trainFrac, setTrainFrac] = useState(0.6);
   const comp = useAsync();
+  const [goal, setGoal] = useState('');
+  const advise = useAsync();
+  const [recipeNote, setRecipeNote] = useState('');
+  const doAdvise = () => {
+    if (!goal.trim()) return;
+    advise.run(() => postJSON('/factor/compose/advise', { goal, universe: poolParam(pool) }).then(rec => {
+      if (rec && rec.status === 'ok') {
+        setMembers(rec.members || []);
+        if (rec.method) setMethod(rec.method);
+        if (rec.train_frac) setTrainFrac(rec.train_frac);
+        setRecipeNote(rec.rationale || '');
+      } else {
+        setRecipeNote('配方生成失败: ' + ((rec && rec.error) || '未知'));
+      }
+      return rec;
+    }));
+  };
   useEffect(() => { getJSON('/factor/list').then(d => setList(d || { registered: [], user: [] })).catch(() => {}); }, []);
   const allNames = [...new Set([...(list.registered || []).map(r => r.name), ...(list.user || []).map(u => u.name)])];
   const addMember = (m) => { if (m && !members.includes(m)) setMembers([...members, m]); };
-  const run = () => { if (members.length < 2) return; comp.run(() => postJSON('/factor/compose', { members, method, universe: poolParam(pool), train_frac: trainFrac })); };
+  const run = () => { if (members.length < 2) return; comp.run(() => postJSON('/factor/compose', { members, method, universe: poolParam(pool), train_frac: trainFrac, interpret: true })); };
   const res = comp.data;
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: 18, minWidth: 0 }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10, flexWrap: 'wrap' }}>
+        <input value={goal} onChange={e => setGoal(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') doAdvise(); }}
+          placeholder="🪄 一句话配方: 如 低回撤的动量+反转组合"
+          style={{ flex: '1 1 320px', padding: '6px 10px', border: '1px solid var(--jin)', fontFamily: 'var(--sans)', fontSize: 13, background: 'var(--paper)' }} />
+        <button onClick={doAdvise} disabled={advise.loading} className="hover-pill"
+          style={{ padding: '6px 14px', border: 'none', background: 'var(--jin)', color: 'var(--paper)', fontFamily: 'var(--serif)', fontSize: 12, cursor: 'pointer' }}>
+          {advise.loading ? '配方中…' : 'LLM 配方 🪄'}
+        </button>
+      </div>
+      {advise.error && <div style={{ marginBottom: 10 }}><ErrorBox error={advise.error} /></div>}
+      {recipeNote && <div className="serif" style={{ fontSize: 12, color: 'var(--ink-2)', marginBottom: 10, paddingLeft: 10, borderLeft: '2px solid var(--jin)' }}>{recipeNote}</div>}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
         <input list="members-dl" value={draft} onChange={e => setDraft(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') { addMember(draft.trim()); setDraft(''); } }}
@@ -649,6 +678,11 @@ function ComposeMode() {
             <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', margin: '4px 0 8px', letterSpacing: '0.16em' }}>综合分 OOS 评测</div>
             <FactorReportView report={res.composite} />
           </div>
+          {res.interpretation && (
+            <Panel title={<span>LLM 研判 <span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', marginLeft: 6 }}>compose interpreter</span></span>}>
+              <div className="serif" style={{ fontSize: 13, color: 'var(--ink-1)', lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{res.interpretation}</div>
+            </Panel>
+          )}
         </div>
       )}
     </div>
