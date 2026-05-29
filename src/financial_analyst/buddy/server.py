@@ -94,6 +94,12 @@ class ComposeReq(BaseModel):
     train_frac: float = 0.6
     archive: bool = True
     note: str = ""
+    interpret: bool = False
+
+
+class AdviseReq(BaseModel):
+    goal: str
+    universe: str = "csi300_active"
 
 
 class SaveReq(BaseModel):
@@ -1140,10 +1146,11 @@ def build_app():
             )
 
     @app.post("/factor/compose")
-    async def factor_compose_ep(req: ComposeReq):
+    def factor_compose_ep(req: ComposeReq):
         """多因子合成: N(>=2) 个成员 → 综合分, OOS 评测 + 成员对比 → verdict。
 
         ``method``: equal / ic_weighted / linear / lgbm。成员数 <2 → 400。
+        interpret=True 时附 LLM 研判 (interpret_compose 用 asyncio.run, 故端点为 sync def)。
         """
         if len(req.members) < 2:
             return JSONResponse(
@@ -1153,6 +1160,7 @@ def build_app():
         try:
             from financial_analyst.factors.eval import EvalConfig
             from financial_analyst.factors import compose as _compose_mod
+            from financial_analyst.factors.compose import advisor as _advisor_mod
             cfg = EvalConfig(universe=req.universe, freq=req.freq)
             res = _compose_mod.compose_factors(
                 req.members, cfg, method=req.method, train_frac=req.train_frac)
@@ -1163,7 +1171,29 @@ def build_app():
                     ResearchArchive().append(record_from_compose(res, note=req.note))
                 except Exception:
                     pass
-            return _jsonable(_asdict(res))
+            body = _jsonable(_asdict(res))
+            if req.interpret and getattr(res, "status", "") == "ok":
+                try:
+                    body["interpretation"] = _advisor_mod.interpret_compose(res)
+                except Exception:
+                    body["interpretation"] = ""
+            return body
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"{type(exc).__name__}: {exc}"},
+            )
+
+    @app.post("/factor/compose/advise")
+    def factor_compose_advise_ep(req: AdviseReq):
+        """输入顾问: 自然语言目标 → 合成配方 (成员表达式 + 方法 + 理由)。
+
+        sync def — compose_advisor 用 asyncio.run, 须脱离事件循环 (同 forge 端点)。
+        """
+        try:
+            from financial_analyst.factors.compose import advisor as _advisor_mod
+            rec = _advisor_mod.compose_advisor(req.goal)
+            return _jsonable(_asdict(rec))
         except Exception as exc:
             return JSONResponse(
                 status_code=500,

@@ -98,3 +98,39 @@ def test_interpret_compose_non_ok_returns_empty():
     class _Bad:
         status = "load_error"
     assert interpret_compose(_Bad(), complete_fn=lambda m: "should not be called") == ""
+
+
+from fastapi.testclient import TestClient
+from financial_analyst.buddy.server import build_app
+
+
+def test_rest_compose_advise(monkeypatch):
+    rec = ComposeRecipe(goal="低回撤", members=["rank(-delta(close,5))", "rank(close)"],
+                        method="linear", train_frac=0.6, rationale="反转+价位", status="ok")
+    monkeypatch.setattr("financial_analyst.factors.compose.advisor.compose_advisor",
+                        lambda goal, **kw: rec)
+    client = TestClient(build_app())
+    r = client.post("/factor/compose/advise", json={"goal": "低回撤"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["members"] == ["rank(-delta(close,5))", "rank(close)"]
+    assert body["method"] == "linear" and body["status"] == "ok"
+
+
+def test_rest_compose_interpret(monkeypatch):
+    from financial_analyst.factors.compose.compose import ComposeResult
+    fake = ComposeResult(method="equal", members=["a", "b"], weights={"a": 0.5, "b": 0.5},
+                         train_frac=0.6, n_train_dates=20, n_test_dates=12,
+                         composite=None, member_oos=[], verdict="增益", status="ok")
+    monkeypatch.setattr("financial_analyst.factors.compose.compose_factors",
+                        lambda *a, **k: fake)
+    monkeypatch.setattr("financial_analyst.factors.compose.advisor.interpret_compose",
+                        lambda res, **kw: "这是 LLM 研判")
+    client = TestClient(build_app())
+    r = client.post("/factor/compose", json={
+        "members": ["a", "b"], "method": "equal", "interpret": True})
+    assert r.status_code == 200
+    assert r.json().get("interpretation") == "这是 LLM 研判"
+    # interpret=false → 不调 LLM, 无 interpretation
+    r2 = client.post("/factor/compose", json={"members": ["a", "b"], "method": "equal"})
+    assert not r2.json().get("interpretation")
