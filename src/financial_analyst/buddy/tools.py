@@ -1478,8 +1478,12 @@ def _tool_user_factors(remove: str = "") -> ToolResult:
 
 
 def _tool_factor_report(expr_or_name: str, universe: str = "csi500",
-                        freq: str = "month", start: str = None, end: str = None) -> ToolResult:
-    """完整单因子评测报告: IC全套 + 十分位 + 多空组合净值/Sharpe/回撤 (复用 factors.eval 引擎)。"""
+                        freq: str = "month", start: str = None, end: str = None,
+                        archive: bool = False, note: str = "") -> ToolResult:
+    """完整单因子评测报告: IC全套 + 十分位 + 多空组合净值/Sharpe/回撤 (复用 factors.eval 引擎)。
+
+    archive=True 时把本次运行 opt-in 持久化到研究档案 (runs.jsonl), 供 research_log
+    看迭代趋势; note 是这次运行的备注。归档失败绝不拖垮报告主体。"""
     expr_or_name = (expr_or_name or "").strip()
     if not expr_or_name:
         return ToolResult("factor_report: 缺少 expr_or_name (因子名或表达式)。", is_error=True)
@@ -1513,6 +1517,14 @@ def _tool_factor_report(expr_or_name: str, universe: str = "csi500",
     if rpt.warnings:
         lines.append("")
         lines += [f"⚠ {w}" for w in rpt.warnings]
+
+    if archive:
+        try:
+            from financial_analyst.factors.research import ResearchArchive, record_from_report
+            rec = ResearchArchive().append(record_from_report(rpt, note=note))
+            lines.append(f"\n✓ 已归档 (id={rec.id})")
+        except Exception as e:
+            lines.append(f"\n⚠ 归档失败: {e}")
     return ToolResult("\n".join(lines))
 
 
@@ -1527,8 +1539,12 @@ _COMPOSE_METHOD_CN = {
 def _tool_factor_compose(members, method: str = "lgbm",
                          universe: str = "csi300_active", freq: str = "month",
                          since: str = None, until: str = None,
-                         train_frac: float = 0.6) -> ToolResult:
-    """把 N(>=2) 个因子合成一个综合打分, 样本外(OOS)评测综合分并和各成员对比 → 判断合成是否增益。"""
+                         train_frac: float = 0.6,
+                         archive: bool = False, note: str = "") -> ToolResult:
+    """把 N(>=2) 个因子合成一个综合打分, 样本外(OOS)评测综合分并和各成员对比 → 判断合成是否增益。
+
+    archive=True 时把本次合成运行 opt-in 持久化到研究档案 (runs.jsonl), 供 research_log
+    看迭代趋势; note 是备注。归档失败绝不拖垮报告主体。"""
     import math
     import re as _re
 
@@ -1602,6 +1618,111 @@ def _tool_factor_compose(members, method: str = "lgbm",
     if res.warnings:
         lines.append("")
         lines += [f"⚠ {w}" for w in res.warnings]
+
+    if archive:
+        try:
+            from financial_analyst.factors.research import ResearchArchive, record_from_compose
+            rec = ResearchArchive().append(record_from_compose(res, note=note))
+            lines.append(f"\n✓ 已归档 (id={rec.id})")
+        except Exception as e:
+            lines.append(f"\n⚠ 归档失败: {e}")
+    return ToolResult("\n".join(lines))
+
+
+# 研究档案渲染用的关键指标列 (扁平 metrics dict 里的键)。
+_RLOG_KEYS = ("rank_icir", "rank_ic_mean", "icir", "ic_mean", "sharpe", "ann_return")
+
+
+def _rlog_num(x, d: int = 3) -> str:
+    """metrics 数值 → 紧凑字符串。None/NaN/非数 → '—'。"""
+    import math
+    if x is None:
+        return "—"
+    if isinstance(x, bool):  # bool 是 int 子类, 不当数值。
+        return str(x)
+    if isinstance(x, (int, float)):
+        if isinstance(x, float) and math.isnan(x):
+            return "—"
+        return f"{x:+.{d}f}"
+    return str(x)
+
+
+def _rlog_metric_cells(metrics: dict) -> str:
+    """把 metrics 里出现的关键指标拼成一行 (k=v 串), 只取 _RLOG_KEYS 里有的。"""
+    cells = []
+    for k in _RLOG_KEYS:
+        if k in metrics:
+            cells.append(f"{k}={_rlog_num(metrics[k])}")
+    return " ".join(cells)
+
+
+def _tool_research_log(target: str = "", compare: str = "") -> ToolResult:
+    """列出/对比已归档的评测运行历史 (research archive), 看因子或合成模型迭代的指标趋势。
+
+    - compare='id_a,id_b' → 两次运行关键指标并排 + 指标 diff (b - a)。
+    - target=X (非空)     → X 标的的运行历史 (时间序, 看趋势)。
+    - 都空                → 最近 20 条运行 (id/kind/target/freq + 关键指标 + note)。
+    """
+    from financial_analyst.factors.research import ResearchArchive
+    arc = ResearchArchive()
+
+    # --- 对比两次运行 -------------------------------------------------------
+    if compare and "," in compare:
+        id_a, _, id_b = compare.partition(",")
+        id_a, id_b = id_a.strip(), id_b.strip()
+        out = arc.compare(id_a, id_b)
+        if "error" in out:
+            return ToolResult(f"无法对比: {out['error']}", is_error=True)
+        a, b = out["a"], out["b"]
+        ta, tb = out["targets"]
+        lines = [
+            f"# 运行对比: {a['id']} → {b['id']}",
+            f"  A [{a['id']}] {a['kind']} · {ta} · {a['freq']}",
+            f"  B [{b['id']}] {b['kind']} · {tb} · {b['freq']}",
+            "",
+            f"  {_pad('指标', 16)}{_pad('A (' + a['id'] + ')', 14)}{_pad('B (' + b['id'] + ')', 14)}{_pad('Δ (B-A)', 12)}",
+        ]
+        diffs = out["metric_diffs"]
+        am, bm = a["metrics"], b["metrics"]
+        # 展示所有有 diff 的数值键 (按 _RLOG_KEYS 优先, 再补其余)。
+        ordered = [k for k in _RLOG_KEYS if k in diffs]
+        ordered += [k for k in sorted(diffs) if k not in ordered]
+        for k in ordered:
+            lines.append(
+                f"  {_pad(k, 16)}{_pad(_rlog_num(am.get(k)), 14)}"
+                f"{_pad(_rlog_num(bm.get(k)), 14)}{_pad(_rlog_num(diffs[k]), 12)}"
+            )
+        if not ordered:
+            lines.append("  (两次运行无公共数值指标可对比)")
+        return ToolResult("\n".join(lines))
+
+    # --- 单标的历史 (时间序趋势) --------------------------------------------
+    if target:
+        recs = arc.history(target)
+        if not recs:
+            return ToolResult(f"无该标的的归档运行: {target!r}")
+        lines = [f"# 运行历史: {target} ({len(recs)} 次, 时间序)"]
+        for r in recs:
+            cells = _rlog_metric_cells(r.metrics)
+            ts = (r.timestamp or "")[:19]
+            note = f"  // {r.note}" if r.note else ""
+            lines.append(f"  [{r.id}] {ts} · {r.freq}  {cells}{note}")
+        return ToolResult("\n".join(lines))
+
+    # --- 最近 N 条 ----------------------------------------------------------
+    recs = arc.list()
+    if not recs:
+        return ToolResult(
+            "研究档案为空. 跑 factor_report / factor_compose 时带 archive=true 即可归档。"
+        )
+    recent = recs[-20:][::-1]  # 最近 20 条, 新→旧
+    lines = [f"# 研究档案 (共 {len(recs)} 次, 显示最近 {len(recent)} 次):"]
+    for r in recent:
+        cells = _rlog_metric_cells(r.metrics)
+        note = f"  // {r.note}" if r.note else ""
+        lines.append(
+            f"  [{r.id}] {_pad(r.kind, 8)}{_pad(r.target, 32)}{_pad(r.freq, 6)} {cells}{note}"
+        )
     return ToolResult("\n".join(lines))
 
 
@@ -1931,6 +2052,9 @@ TOOL_REGISTRY: List[Tool] = [
                 "freq": {"type": "string", "enum": ["day", "week", "month"], "default": "month"},
                 "start": {"type": "string", "description": "起始日 YYYY-MM-DD, 缺省今天往前 2 年"},
                 "end": {"type": "string", "description": "结束日 YYYY-MM-DD, 缺省今天"},
+                "archive": {"type": "boolean", "default": False,
+                            "description": "True=把本次评测归档到研究档案 (runs.jsonl), 供 research_log 看迭代趋势"},
+                "note": {"type": "string", "description": "归档时的备注 (这次为什么跑/想看什么)"},
             },
             "required": ["expr_or_name"],
         },
@@ -1967,12 +2091,35 @@ TOOL_REGISTRY: List[Tool] = [
                 "until": {"type": "string", "description": "结束日 YYYY-MM-DD, 缺省今天"},
                 "train_frac": {"type": "number", "default": 0.6,
                                "description": "训练段调仓日占比 (前段拟合权重, 余段 OOS 评测)"},
+                "archive": {"type": "boolean", "default": False,
+                            "description": "True=把本次合成归档到研究档案 (runs.jsonl), 供 research_log 看迭代趋势"},
+                "note": {"type": "string", "description": "归档时的备注 (这次为什么跑/想看什么)"},
             },
             "required": ["members"],
         },
         run=_tool_factor_compose,
         cost_hint="minutes",
         confirm_required=True,
+    ),
+    Tool(
+        name="research_log",
+        description=(
+            "列出/对比已归档的评测运行历史 (research archive), 看因子或合成模型迭代的指标趋势。"
+            "用于「看我的研究历史」「最近评测过哪些因子」「对比这两次评测」「这因子改了之后好了没」。"
+            "compare='id_a,id_b' → 两次运行关键指标并排 + diff; target=因子名/标的 → 该标的运行历史 (时间序); "
+            "都不给 → 列最近 20 次运行。归档由 factor_report / factor_compose 带 archive=true 写入。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string",
+                           "description": "标的 (因子名或合成 target), 看其运行历史趋势; 留空=列最近 20 次"},
+                "compare": {"type": "string",
+                            "description": "'id_a,id_b' 两个运行 id 逗号分隔, 出指标 diff (如 'r0001,r0002')"},
+            },
+        },
+        run=_tool_research_log,
+        cost_hint="fast",
     ),
     Tool(
         name="chain_for",
