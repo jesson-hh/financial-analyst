@@ -92,6 +92,14 @@ class ComposeReq(BaseModel):
     train_frac: float = 0.6
 
 
+class SaveReq(BaseModel):
+    name: str
+    expr: str
+    description: str = ""
+    parsed: list = []
+    kpis: dict = {}
+
+
 class ConfirmReq(BaseModel):
     turn_id: str
     choice: str = "n"
@@ -1205,6 +1213,21 @@ def build_app():
                           for s in list_alphas(family or None)]
             user = UserFactorStore().list()
             return {"registered": registered, "user": _jsonable(user)}
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"{type(exc).__name__}: {exc}"},
+            )
+
+    @app.post("/factor/save")
+    async def factor_save_ep(req: SaveReq):
+        """把炼出的因子入库 (持久化 + 注册，立即可被 /factor/report 评 + 出现在 /factor/list)。"""
+        try:
+            from financial_analyst.factors.forge import UserFactorStore
+            entry = UserFactorStore().add({
+                "name": req.name, "family": "user", "expr": req.expr,
+                "description": req.description, "parsed": req.parsed, "kpis": req.kpis})
+            return _jsonable(entry)
         except Exception as exc:
             return JSONResponse(
                 status_code=500,

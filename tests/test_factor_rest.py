@@ -353,3 +353,45 @@ def test_report_endpoint_500_on_internal_error(monkeypatch):
     assert "RuntimeError" in body["error"]
     # No traceback leak — just "Type: msg".
     assert "Traceback" not in body["error"]
+
+
+# ===========================================================================
+# 9. POST /factor/save — persist forged factor (UserFactorStore.add) + register.
+#    tmp $FINANCIAL_ANALYST_HOME isolates the store; unregister cleans the global
+#    registry afterward (lesson: never leak into the shared alpha registry).
+# ===========================================================================
+def test_save_endpoint_persists_and_registers(monkeypatch, tmp_path):
+    monkeypatch.setenv("FINANCIAL_ANALYST_HOME", str(tmp_path))
+    from financial_analyst.factors.zoo.registry import unregister
+    client = _client()
+    try:
+        r = client.post("/factor/save", json={
+            "name": "usr_rev5", "expr": "rank(-delta(close,5))",
+            "description": "5 日反转", "kpis": {"rank_ic": 0.021, "state": "一般"}})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["name"] == "usr_rev5"
+        assert body["expr"] == "rank(-delta(close,5))"
+        assert "created" in body
+        # 入库后出现在 /factor/list 的 user
+        lst = client.get("/factor/list").json()
+        assert any(u["name"] == "usr_rev5" for u in lst["user"])
+    finally:
+        unregister("usr_rev5")
+
+
+def test_save_endpoint_dedupes_name(monkeypatch, tmp_path):
+    monkeypatch.setenv("FINANCIAL_ANALYST_HOME", str(tmp_path))
+    from financial_analyst.factors.zoo.registry import unregister
+    client = _client()
+    a = b = None
+    try:
+        a = client.post("/factor/save", json={"name": "dup", "expr": "rank(close)"}).json()
+        b = client.post("/factor/save", json={"name": "dup", "expr": "rank(-delta(close,5))"}).json()
+        assert a["name"] == "dup"
+        assert b["name"] != "dup"   # 自动加后缀，不覆盖
+    finally:
+        if a:
+            unregister(a["name"])
+        if b:
+            unregister(b["name"])
