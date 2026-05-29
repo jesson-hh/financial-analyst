@@ -1099,7 +1099,10 @@ def build_app():
             )
 
     @app.post("/factor/forge")
-    async def factor_forge_ep(req: ForgeReq):
+    def factor_forge_ep(req: ForgeReq):
+        # 同步 path op (FastAPI 在线程池跑) — forge_factor 的默认 complete_fn 用
+        # asyncio.run()，必须脱离请求事件循环, 否则 "asyncio.run() cannot be
+        # called from a running event loop"。见 test_forge_endpoint_runs_off_event_loop。
         """炼因子: 自然语言想法 → 截面因子表达式 (+ 可选快测 IC)。
 
         ``forge_factor`` 永不抛 (失败落在 ForgeResult.error/compile_ok)。

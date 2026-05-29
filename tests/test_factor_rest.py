@@ -453,3 +453,24 @@ def test_compose_archive_failure_is_non_fatal(monkeypatch, tmp_path):
         "method": "equal", "archive": True})
     assert r.status_code == 200  # 归档炸了，报告主体仍返回
     assert r.json().get("status") == "ok"
+
+
+# ===========================================================================
+# 12. /factor/forge must run forge_factor OFF the request event loop — the real
+#     default complete_fn calls asyncio.run(), which raises inside a running loop.
+#     (The other forge tests stub forge_factor with a plain fn, so they miss this;
+#     here the stub itself calls asyncio.run to reproduce the real path.)
+# ===========================================================================
+def test_forge_endpoint_runs_off_event_loop(monkeypatch):
+    import asyncio
+
+    def fake_forge(idea):
+        async def _c():
+            return ForgeResult(idea=idea, expr="rank(close)", name="usr_x", compile_ok=True)
+        return asyncio.run(_c())  # mimics _default_complete's asyncio.run
+
+    monkeypatch.setattr("financial_analyst.factors.forge.forge_factor", fake_forge)
+    client = _client()
+    r = client.post("/factor/forge", json={"idea": "x", "quick_eval": False})
+    assert r.status_code == 200
+    assert r.json()["compile_ok"] is True
