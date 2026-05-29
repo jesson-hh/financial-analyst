@@ -1382,6 +1382,12 @@ function TopBar({ s, session, dispatch }) {
         )}
       </div>
       <div style={{ width: 1, height: 22, background: 'var(--line)' }} />
+      <a href="quant.html" title="量化研究工作台 · 因子评测 / 炼因子 / 合成 / 档案"
+        className="hover-pill"
+        style={{ fontSize: 11, padding: '4px 10px', border: '1px solid var(--line)', color: 'var(--ink-2)', fontFamily: 'var(--mono)', textDecoration: 'none', whiteSpace: 'nowrap', flexShrink: 0, cursor: 'pointer' }}>
+        🔬 量化工作台
+      </a>
+      <div style={{ width: 1, height: 22, background: 'var(--line)' }} />
       <span onClick={runDiag} title="探活: xueqiu / 腾讯行情 / news_db / LLM / 各 opencli 源"
         className="hover-pill"
         style={{ cursor: (diagLoading || !s.backendUrl) ? 'default' : 'pointer', fontSize: 11, padding: '4px 10px', border: '1px solid var(--line)', color: 'var(--ink-2)', fontFamily: 'var(--mono)', opacity: s.backendUrl ? 1 : 0.5, whiteSpace: 'nowrap', flexShrink: 0 }}>
