@@ -436,7 +436,9 @@ function LibraryMode() {
   }, []);
 
   const families = useMemo(() => {
-    const fams = [...new Set((list.registered || []).map(r => r.family))];
+    // 排除 'user' (入库后的 user 因子也在 registered 里, 会和下面的 我的 项撞 key);
+    // user 因子统一在 我的 tab 经 list.user 展示。
+    const fams = [...new Set((list.registered || []).map(r => r.family).filter(f => f && f !== 'user'))];
     return [...fams.map(f => ({ value: f, label: f })), { value: 'user', label: '我的' }];
   }, [list]);
 
@@ -494,7 +496,94 @@ function LibraryMode() {
     </div>
   );
 }
-function ForgeMode() { return <Empty label="炼因子 (待接 C.3)" />; }
+// 炼因子卡 — 复用设计稿 AlchemyCard 的视觉外壳, 真 /factor/forge 契约。
+function ForgeCard({ result, onSave, saved, saving }) {
+  if (!result) return null;
+  const { idea, expr, parsed, name, rationale, compile_ok, error, out_of_vocab, quick_ic } = result;
+  return (
+    <div style={{ background: 'var(--paper)', border: '1.5px solid var(--ink)', position: 'relative', boxShadow: '6px 6px 0 -2px var(--paper-3)', maxWidth: 640, width: '100%' }}>
+      <div style={{ position: 'absolute', top: -1, right: -1, width: 30, height: 30, background: 'var(--yin)', color: 'var(--paper)', fontFamily: 'var(--serif)', fontSize: 14, fontWeight: 500, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>炼</div>
+      <div style={{ padding: '10px 14px 8px', borderBottom: '1px solid var(--line-soft)', display: 'flex', alignItems: 'baseline', gap: 8, paddingRight: 38 }}>
+        <span className="serif" style={{ fontSize: 13, fontWeight: 500 }}>经验 → 因子</span>
+        <span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', letterSpacing: '0.18em' }}>α-FORGE</span>
+      </div>
+      <div style={{ padding: '12px 14px 10px' }}>
+        <div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', letterSpacing: '0.18em', marginBottom: 6 }}>原话 · 想法</div>
+        <div className="serif" style={{ fontSize: 13, color: 'var(--ink-1)', lineHeight: 1.72, fontStyle: 'italic', paddingLeft: 12, borderLeft: '2px solid var(--jin)' }}>{idea}</div>
+      </div>
+      {out_of_vocab && <div className="mono" style={{ padding: '0 14px 12px', fontSize: 11, color: 'var(--jin)' }}>当前只支持价量/估值/股息/规模/换手类因子；ROE/财报/事件暂不支持 (B.2)。</div>}
+      {!compile_ok && !out_of_vocab && <div style={{ padding: '0 14px 12px' }}><ErrorBox error={error || '生成失败'} /></div>}
+      {compile_ok && (
+        <>
+          {rationale && (
+            <div style={{ borderTop: '1px dashed var(--line)', padding: '10px 14px' }}>
+              <div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', letterSpacing: '0.18em', marginBottom: 6 }}>推理 · LLM</div>
+              <div className="serif" style={{ fontSize: 12, color: 'var(--ink-1)', lineHeight: 1.6 }}>{rationale}</div>
+            </div>
+          )}
+          <div style={{ borderTop: '1px dashed var(--line)', padding: '10px 14px', background: 'rgba(28,24,20,0.04)' }}>
+            <div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', letterSpacing: '0.18em', marginBottom: 6 }}>因子公式 · {name || 'usr_factor'}</div>
+            <pre style={{ margin: 0, fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--ink)', lineHeight: 1.7, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{expr}</pre>
+          </div>
+          <div style={{ borderTop: '1px dashed var(--line)', padding: '10px 14px' }}>
+            <div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', letterSpacing: '0.18em', marginBottom: 8 }}>速测 IC{quick_ic ? '' : ' · 跳过'}</div>
+            {quick_ic ? (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', border: '1px solid var(--line-soft)' }}>
+                <Kpi label="RankIC" value={n2(quick_ic.rank_ic, 4)} />
+                <Kpi label="RankICIR" value={n2(quick_ic.rank_ir, 2)} />
+                <Kpi label="判定" value={quick_ic.state || '—'} last />
+              </div>
+            ) : <span className="mono" style={{ fontSize: 11, color: 'var(--ink-3)' }}>无速测结果</span>}
+          </div>
+          <div style={{ borderTop: '1px solid var(--line)', padding: '8px 12px' }}>
+            <button onClick={() => onSave && onSave(result)} disabled={saved || saving} style={{
+              width: '100%', padding: '7px 10px', background: saved ? 'transparent' : 'var(--ink)', color: saved ? 'var(--dai)' : 'var(--paper)',
+              border: saved ? '1px solid var(--dai)' : 'none', fontFamily: 'var(--serif)', fontSize: 12, cursor: saved ? 'default' : 'pointer' }}>
+              {saved ? '✓ 已入库 · 可在因子库引用' : saving ? '入库中…' : '存入因子库 ↗'}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function ForgeMode() {
+  const [idea, setIdea] = useState('');
+  const [pool, setPool] = useState('csi300');
+  const forge = useAsync();
+  const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveErr, setSaveErr] = useState('');
+  const runForge = () => { if (!idea.trim()) return; setSaved(false); setSaveErr(''); forge.run(() => postJSON('/factor/forge', { idea, universe: poolParam(pool), quick_eval: true })); };
+  const save = async (r) => {
+    setSaving(true); setSaveErr('');
+    try { await postJSON('/factor/save', { name: r.name, expr: r.expr, description: r.rationale || '', parsed: r.parsed || [], kpis: r.quick_ic || {} }); setSaved(true); }
+    catch (e) { setSaveErr(e.message || String(e)); }
+    finally { setSaving(false); }
+  };
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: 24, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16 }}>
+      <div style={{ width: '100%', maxWidth: 640, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <textarea value={idea} onChange={e => setIdea(e.target.value)} rows={3}
+          placeholder="用一句话描述你的因子想法, 如: 5 日反转 / 量价背离 / 低换手高股息"
+          style={{ padding: '10px 12px', border: '1px solid var(--line)', fontFamily: 'var(--sans)', fontSize: 13, background: 'var(--paper)', resize: 'vertical' }} />
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <Segmented value={pool} onChange={setPool} options={POOLS.map(p => ({ value: p, label: p }))} />
+          <span style={{ flex: 1 }} />
+          <button onClick={runForge} disabled={forge.loading} className="hover-pill"
+            style={{ padding: '7px 16px', border: 'none', background: 'var(--ink)', color: 'var(--paper)', fontFamily: 'var(--serif)', fontSize: 12, cursor: 'pointer' }}>
+            {forge.loading ? '炼制中…' : '炼因子 ⚗'}
+          </button>
+        </div>
+      </div>
+      {forge.loading && <Loading label="LLM 炼因子 + 速测中…" />}
+      {forge.error && <ErrorBox error={forge.error} />}
+      {forge.data && <ForgeCard result={forge.data} onSave={save} saved={saved} saving={saving} />}
+      {saveErr && <ErrorBox error={'入库失败: ' + saveErr} />}
+    </div>
+  );
+}
 function ComposeMode() { return <Empty label="多因子合成 (待接 C.4a)" />; }
 function ArchiveMode() { return <Empty label="研究档案 (待接 C.4b)" />; }
 
