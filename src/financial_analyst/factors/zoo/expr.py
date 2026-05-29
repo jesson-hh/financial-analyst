@@ -6,7 +6,8 @@
 from __future__ import annotations
 
 FACTOR_VOCAB = (
-    "字段: close open high low volume vwap amount returns industry | "
+    "字段(价量): close open high low volume vwap amount returns industry | "
+    "字段(基本面,day频): pe_ttm pb ps_ttm dv_ttm(股息率%) total_mv circ_mv(总/流通市值,万元) turnover_rate(换手%) | "
     "算子: rank ts_rank delta delay ts_mean ts_sum ts_max ts_min ts_argmax ts_argmin "
     "stddev correlation(x,y,n) covariance decay_linear sma wma signedpower(x,p) "
     "log sign abs power(x,p) scale indneutralize(x,industry) max_pair min_pair filter_where | "
@@ -36,6 +37,8 @@ def compile_factor(expr: str):
             "close": p.close, "open": p.open, "high": p.high, "low": p.low,
             "volume": p.volume, "vwap": p.vwap, "amount": p.amount,
             "returns": p.returns, "industry": p.industry,
+            "pe_ttm": p.pe_ttm, "pb": p.pb, "ps_ttm": p.ps_ttm, "dv_ttm": p.dv_ttm,
+            "total_mv": p.total_mv, "circ_mv": p.circ_mv, "turnover_rate": p.turnover_rate,
             "rank": _ops.rank, "scale": _ops.scale, "ts_sum": _ops.ts_sum,
             "ts_mean": _ops.ts_mean, "stddev": _ops.stddev, "ts_max": _ops.ts_max,
             "ts_min": _ops.ts_min, "ts_argmax": _ops.ts_argmax, "ts_argmin": _ops.ts_argmin,

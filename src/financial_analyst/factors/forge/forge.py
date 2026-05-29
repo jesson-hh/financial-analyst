@@ -33,7 +33,8 @@ _SYSTEM = (
     "你是量化因子工程师。把用户的自然语言想法转成 **一个截面因子表达式**, "
     "只能用下列字段+算子 (Python 语法):\n" + FACTOR_VOCAB + "\n"
     "表达式对每个 (日期,股票) 返回一个打分, **高分=更看好** (反转类记得加负号)。\n"
-    "若想法需要表中没有的字段 (基本面 pe/pb/股息/ROE/市值, 或'连续/金叉/突破'这类事件条件), "
+    "估值(pe_ttm/pb/ps_ttm)、股息(dv_ttm)、规模(total_mv/circ_mv)、换手(turnover_rate) 已支持。"
+    "若想法需要表中没有的字段 (财报字段如 ROE/净利润/负债率, 需财报数据; 或'连续/金叉/突破'这类事件条件), "
     "把 out_of_vocab 设 true 并在 rationale 里说明缺什么, expr 留空。\n"
     "不要用 Python 内置函数 (abs/round/sum/min/max 等), 只用上面算子表里的算子 (如 abs_, max_pair, min_pair)。\n"
     '只输出 JSON: {"expr": "...", "parsed": [{"k":"触发","v":"..."}], '
@@ -48,6 +49,10 @@ _FEWSHOT = [
     {"role": "assistant", "content": json.dumps({"expr": "rank(delta(close,1)) * rank(volume / ts_mean(volume,20))",
         "parsed": [{"k": "价", "v": "当日上涨"}, {"k": "量", "v": "量比20日均"}], "name": "usr_volup",
         "rationale": "涨幅×相对放量", "out_of_vocab": False}, ensure_ascii=False)},
+    {"role": "user", "content": "高股息"},
+    {"role": "assistant", "content": json.dumps({"expr": "rank(dv_ttm)",
+        "parsed": [{"k": "方向", "v": "股息率高→看好"}], "name": "usr_divyield",
+        "rationale": "股息率排序", "out_of_vocab": False}, ensure_ascii=False)},
 ]
 
 
