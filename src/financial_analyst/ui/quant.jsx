@@ -366,7 +366,134 @@ function TopBar({ mode, onMode }) {
 }
 
 // ═════════════════════════ 模式占位 (Tasks 7-10 填充) ═════════════════════════
-function LibraryMode() { return <Empty label="因子库 & 详情 (待接 C.2)" />; }
+// FactorReport 渲染 (C.2 详情 + C.4a composite 共用)。两档分离: IC 体检 / 组合回测。
+function FactorReportView({ report }) {
+  if (!report) return null;
+  if (report.status && report.status !== 'ok') {
+    return <ErrorBox error={`评测未完成 · ${report.status}${report.error ? ' · ' + report.error : ''}`} />;
+  }
+  const ic = report.ic || {}, qt = report.quantile || {}, pf = report.portfolio || {}, ch = report.characteristics || {};
+  const icDates = (ic.ic_series || []).map(p => p[0]);
+  const icVals = (ic.ic_series || []).map(p => p[1]);
+  const navDates = (pf.nav_series || []).map(p => p[0]);
+  const navVals = (pf.nav_series || []).map(p => p[1]);
+  const benchVals = (pf.benchmark_nav || []).map(p => p[1]);
+  const decile = (qt.group_ann_return || []).map(v => v * 100);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {(report.warnings || []).length > 0 && (
+        <div className="mono" style={{ fontSize: 10, color: 'var(--jin)' }}>⚠ {report.warnings.join(' · ')}</div>
+      )}
+      <Panel title={<span>IC 体检 <span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', marginLeft: 6 }}>秒级 · 截面相关</span></span>}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', border: '1px solid var(--line-soft)' }}>
+          <Kpi label="IC 均值" value={n2(ic.ic_mean, 4)} />
+          <Kpi label="ICIR" value={n2(ic.icir, 2)} />
+          <Kpi label="RankIC" value={n2(ic.rank_ic_mean, 4)} />
+          <Kpi label="RankICIR" value={n2(ic.rank_icir, 2)} last />
+          <Kpi label="t-stat" value={n2(ic.ic_tstat, 2)} />
+          <Kpi label="IC 胜率" value={pct(ic.ic_win_rate)} />
+          <Kpi label="覆盖度" value={pct(ch.coverage)} />
+          <Kpi label="半衰期" value={ch.half_life >= 0 ? n2(ch.half_life, 0) : '—'} last />
+        </div>
+        <div style={{ marginTop: 10 }}><ICChart series={icVals} dates={icDates} /></div>
+      </Panel>
+      <Panel title={<span>组合回测 <span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', marginLeft: 6 }}>十分位等权多空 · 毛收益</span></span>}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', border: '1px solid var(--line-soft)' }}>
+          <Kpi label="年化" value={pct(pf.ann_return)} dir={pf.ann_return >= 0 ? 'up' : 'down'} />
+          <Kpi label="Sharpe" value={n2(pf.sharpe, 2)} />
+          <Kpi label="最大回撤" value={pct(pf.max_drawdown)} dir="down" />
+          <Kpi label="Calmar" value={n2(pf.calmar, 2)} last />
+          <Kpi label="波动率" value={pct(pf.volatility)} />
+          <Kpi label="换手" value={pct(pf.turnover)} />
+          <Kpi label="胜率" value={pct(pf.win_rate)} />
+          <Kpi label="多空价差" value={pct(qt.long_short_spread)} last />
+        </div>
+        <div style={{ display: 'flex', gap: 14, marginTop: 10, flexWrap: 'wrap' }}>
+          <div style={{ flex: '1 1 320px', minWidth: 0 }}><EquityChart series={navVals} dates={navDates} benchmark={benchVals} /></div>
+          <div style={{ flex: '1 1 320px', minWidth: 0 }}><DecileChart bars={decile} /></div>
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+function LibraryMode() {
+  const [list, setList] = useState({ registered: [], user: [] });
+  const [family, setFamily] = useState('');
+  const [benchRows, setBenchRows] = useState([]);
+  const [pool, setPool] = useState('csi300');
+  const [sel, setSel] = useState('');
+  const [expr, setExpr] = useState('');
+  const rpt = useAsync();
+  const benchA = useAsync();
+
+  useEffect(() => {
+    getJSON('/factor/list').then(d => {
+      setList(d || { registered: [], user: [] });
+      const fams = [...new Set(((d && d.registered) || []).map(r => r.family))];
+      setFamily(fams[0] || 'user');
+    }).catch(() => {});
+  }, []);
+
+  const families = useMemo(() => {
+    const fams = [...new Set((list.registered || []).map(r => r.family))];
+    return [...fams.map(f => ({ value: f, label: f })), { value: 'user', label: '我的' }];
+  }, [list]);
+
+  const factors = family === 'user' ? (list.user || []) : (list.registered || []).filter(r => r.family === family);
+  const icByName = {};
+  benchRows.forEach(r => { icByName[r.name] = r; });
+
+  const loadBench = () => benchA.run(() =>
+    getJSON(`/factor/bench?universe=${poolParam(pool)}&family=${family}`).then(b => { setBenchRows((b && b.rows) || []); return b; }));
+  const runReport = (target) => {
+    const t = target || expr.trim() || sel;
+    if (!t) return;
+    rpt.run(() => postJSON('/factor/report', { expr_or_name: t, universe: poolParam(pool) }));
+  };
+
+  return (
+    <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+      <aside style={{ width: 300, flexShrink: 0, borderRight: '1px solid var(--line)', display: 'flex', flexDirection: 'column', minHeight: 0, background: 'rgba(241,234,217,0.25)' }}>
+        <div style={{ padding: 12, borderBottom: '1px solid var(--line-soft)', display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+          {families.length > 0 && <Segmented value={family} onChange={setFamily} options={families} />}
+          <button onClick={loadBench} className="hover-pill" style={{ fontSize: 11, padding: '4px 8px', border: '1px solid var(--line)', background: 'transparent', cursor: 'pointer' }}>批量 IC ↻</button>
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {benchA.loading && <Loading label="批量 IC 计算中…" />}
+          {benchA.error && <ErrorBox error={benchA.error} />}
+          {factors.map(f => (
+            <div key={f.name} className="hover-row" onClick={() => { setSel(f.name); setExpr(''); runReport(f.name); }}
+              style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid var(--line-soft)', background: sel === f.name ? 'rgba(28,24,20,0.06)' : 'transparent' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 6 }}>
+                <code className="mono" style={{ fontSize: 12, color: 'var(--ink)' }}>{f.name}</code>
+                {icByName[f.name] && <span className={'mono ' + (icByName[f.name].rank_ic >= 0 ? 'up' : 'down')} style={{ fontSize: 10 }}>{n2(icByName[f.name].rank_ic, 3)}</span>}
+              </div>
+              <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.formula || f.expr || ''}</div>
+            </div>
+          ))}
+          {!factors.length && <Empty label="暂无因子" />}
+        </div>
+      </aside>
+      <div style={{ flex: 1, overflowY: 'auto', padding: 18, minWidth: 0 }}>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+          <input value={expr} onChange={e => setExpr(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') runReport(); }}
+            placeholder="输入白名单表达式, 如 rank(-delta(close,5))"
+            style={{ flex: '1 1 280px', padding: '6px 10px', border: '1px solid var(--line)', fontFamily: 'var(--mono)', fontSize: 12, background: 'var(--paper)' }} />
+          <Segmented value={pool} onChange={setPool} options={POOLS.map(p => ({ value: p, label: p }))} />
+          <button onClick={() => runReport()} disabled={rpt.loading} className="hover-pill"
+            style={{ padding: '6px 14px', border: 'none', background: 'var(--ink)', color: 'var(--paper)', fontFamily: 'var(--serif)', fontSize: 12, cursor: 'pointer' }}>
+            {rpt.loading ? '运行中…' : '运行评测'}
+          </button>
+        </div>
+        {rpt.loading && <Loading label="组合回测中 (小池秒级 / 大池分钟级)…" />}
+        {rpt.error && <ErrorBox error={rpt.error} />}
+        {rpt.data && <FactorReportView report={rpt.data} />}
+        {!rpt.data && !rpt.loading && !rpt.error && <Empty label="选左侧因子 / 输表达式 → 运行评测" />}
+      </div>
+    </div>
+  );
+}
 function ForgeMode() { return <Empty label="炼因子 (待接 C.3)" />; }
 function ComposeMode() { return <Empty label="多因子合成 (待接 C.4a)" />; }
 function ArchiveMode() { return <Empty label="研究档案 (待接 C.4b)" />; }
