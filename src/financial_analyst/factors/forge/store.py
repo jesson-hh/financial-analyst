@@ -1,5 +1,6 @@
 """用户炼出的因子库: 持久化 DSL 字符串, 加载时 compile_factor 重建并注册 (family='user')。"""
 from __future__ import annotations
+from datetime import date
 import json
 import logging
 import os
@@ -51,6 +52,7 @@ class UserFactorStore:
     def add(self, entry: dict) -> dict:
         entries = self.load()
         entry = dict(entry)
+        entry.setdefault("created", date.today().isoformat())
         entry["name"] = self._unique_name(entry.get("name", ""), {e["name"] for e in entries})
         entries.append(entry)
         self.save(entries)
@@ -66,15 +68,15 @@ class UserFactorStore:
         if len(kept) == len(entries):
             return False
         self.save(kept)
-        from financial_analyst.factors.zoo import registry as _reg
-        _reg._REGISTRY.pop(name, None)
+        from financial_analyst.factors.zoo.registry import unregister
+        unregister(name)
         return True
 
     def register_one(self, entry: dict) -> None:
         from financial_analyst.factors.zoo.expr import compile_factor
-        from financial_analyst.factors.zoo.registry import AlphaSpec, register, _REGISTRY
+        from financial_analyst.factors.zoo.registry import AlphaSpec, register, unregister
         name = entry["name"]
-        _REGISTRY.pop(name, None)  # replace: recompiled compute is a new fn (avoids frozen-collision raise)
+        unregister(name)  # replace: recompiled compute is a new fn (avoids frozen-collision raise)
         register(AlphaSpec(name=name, family="user",
                            description=entry.get("description", ""),
                            formula_text=entry.get("expr", ""),

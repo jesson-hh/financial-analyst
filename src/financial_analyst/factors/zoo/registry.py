@@ -59,6 +59,14 @@ def register(spec: AlphaSpec) -> AlphaSpec:
     return spec
 
 
+def unregister(name: str) -> bool:
+    """Remove an alpha from the registry. Returns True if it was present.
+
+    Needed for replace semantics (e.g. reloading a user factor whose recompiled
+    compute is a new fn object — register() would otherwise raise on collision)."""
+    return _REGISTRY.pop(name, None) is not None
+
+
 def get(name: str) -> AlphaSpec:
     """Look up an alpha by name. Raises KeyError if absent."""
     if name not in _REGISTRY:

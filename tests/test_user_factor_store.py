@@ -52,6 +52,8 @@ def test_remove(tmp_path):
     s = UserFactorStore(root=tmp_path)
     s.add({"name": "usr_x", "family": "user", "expr": "rank(close)", "description": "", "parsed": [], "kpis": {}})
     assert s.remove("usr_x") is True
+    with pytest.raises(KeyError):
+        reg_get("usr_x")  # also evicted from the live registry
     assert s.list() == []
     assert s.remove("usr_x") is False
 
@@ -60,3 +62,12 @@ def test_missing_file_is_empty(tmp_path):
     s = UserFactorStore(root=tmp_path / "nope")
     assert s.list() == []
     assert s.register_all() == 0
+
+
+def test_register_all_idempotent(tmp_path):
+    s = UserFactorStore(root=tmp_path)
+    s.add({"name": "usr_x", "family": "user", "expr": "rank(close)", "description": "", "parsed": [], "kpis": {}})
+    # registering again (e.g. a 2nd startup in the same process) must replace, not raise
+    assert s.register_all() == 1
+    assert s.register_all() == 1
+    assert reg_get("usr_x").family == "user"
