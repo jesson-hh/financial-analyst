@@ -654,7 +654,58 @@ function ComposeMode() {
     </div>
   );
 }
-function ArchiveMode() { return <Empty label="研究档案 (待接 C.4b)" />; }
+function ArchiveMode() {
+  const listA = useAsync();
+  const [target, setTarget] = useState('');
+  const [cmp, setCmp] = useState([]);
+  const cmpA = useAsync();
+  const load = (t) => listA.run(() => getJSON(t ? `/factor/archive?target=${encodeURIComponent(t)}` : '/factor/archive'));
+  useEffect(() => { load(''); }, []);
+  const rows = target ? ((listA.data && listA.data.history) || []) : ((listA.data && listA.data.runs) || []);
+  const loadTarget = (t) => { setTarget(t); setCmp([]); cmpA.reset(); load(t); };
+  const reset = () => { setTarget(''); setCmp([]); cmpA.reset(); load(''); };
+  const toggleCmp = (id) => {
+    const next = cmp.includes(id) ? cmp.filter(x => x !== id) : [...cmp, id].slice(-2);
+    setCmp(next);
+    if (next.length === 2) cmpA.run(() => getJSON(`/factor/archive?compare=${next[0]},${next[1]}`)); else cmpA.reset();
+  };
+  const diffs = cmpA.data && (cmpA.data.metric_diffs || cmpA.data);
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: 18, minWidth: 0 }}>
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
+        <span className="serif" style={{ fontSize: 14, color: 'var(--ink)' }}>研究档案 {target && <span className="mono" style={{ fontSize: 11, color: 'var(--ink-3)' }}>· {target} 历史</span>}</span>
+        {(target || cmp.length > 0) && <button onClick={reset} className="hover-pill" style={{ fontSize: 11, padding: '3px 8px', border: '1px solid var(--line)', background: 'transparent', cursor: 'pointer' }}>← 全部</button>}
+        <span style={{ flex: 1 }} />
+        <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>勾选 2 条对比 diff</span>
+      </div>
+      {listA.loading && <Loading />}
+      {listA.error && <ErrorBox error={listA.error} />}
+      {cmpA.loading && <Loading label="对比中…" />}
+      {diffs && (
+        <Panel title={`对比 diff · ${cmp.join(' → ')}`}>
+          <table style={{ width: '100%', fontSize: 11, borderCollapse: 'collapse' }}>
+            <tbody>{Object.entries(diffs).filter(([k, v]) => typeof v === 'number').map(([k, v]) => (
+              <tr key={k}><td className="mono" style={{ color: 'var(--ink-3)' }}>{k}</td><td className={'mono ' + (v >= 0 ? 'up' : 'down')} style={{ textAlign: 'right' }}>{v >= 0 ? '+' : ''}{n2(v, 4)}</td></tr>
+            ))}</tbody>
+          </table>
+        </Panel>
+      )}
+      {!listA.loading && !rows.length && <Empty label="研究档案为空 · 在因子库 / 合成里跑评测会自动归档" />}
+      <div style={{ marginTop: 12 }}>
+        {rows.map(r => (
+          <div key={r.id} className="hover-row" style={{ display: 'flex', gap: 10, alignItems: 'center', padding: '8px 10px', borderBottom: '1px solid var(--line-soft)' }}>
+            <input type="checkbox" checked={cmp.includes(r.id)} onChange={() => toggleCmp(r.id)} style={{ cursor: 'pointer' }} />
+            <code className="mono" style={{ fontSize: 11, color: 'var(--ink-3)', width: 54, flexShrink: 0 }}>{r.id}</code>
+            <span className="mono" style={{ fontSize: 9.5, padding: '1px 5px', background: r.kind === 'compose' ? 'var(--yin)' : 'var(--dai)', color: 'var(--paper)', flexShrink: 0 }}>{r.kind}</span>
+            <code className="mono hover-link" onClick={() => loadTarget(r.target)} style={{ fontSize: 12, color: 'var(--ink)', cursor: 'pointer', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.target}</code>
+            <span className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)', flex: 1, minWidth: 0 }}>{r.timestamp} · {r.universe}/{r.freq}{r.note ? ' · ' + r.note : ''}</span>
+            <span className="mono" style={{ fontSize: 9.5, color: 'var(--ink-2)', flexShrink: 0 }}>{Object.entries(r.metrics || {}).slice(0, 3).map(([k, v]) => `${k}=${n2(v, 3)}`).join('  ')}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 // ═════════════════════════ 入口 ═════════════════════════
 function QuantApp() {
