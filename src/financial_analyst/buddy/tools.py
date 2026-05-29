@@ -1516,6 +1516,95 @@ def _tool_factor_report(expr_or_name: str, universe: str = "csi500",
     return ToolResult("\n".join(lines))
 
 
+_COMPOSE_METHOD_CN = {
+    "equal": "等权",
+    "ic_weighted": "IC 加权",
+    "linear": "线性回归",
+    "lgbm": "LightGBM",
+}
+
+
+def _tool_factor_compose(members, method: str = "lgbm",
+                         universe: str = "csi300_active", freq: str = "month",
+                         since: str = None, until: str = None,
+                         train_frac: float = 0.6) -> ToolResult:
+    """把 N(>=2) 个因子合成一个综合打分, 样本外(OOS)评测综合分并和各成员对比 → 判断合成是否增益。"""
+    import math
+    import re as _re
+
+    # 1) 归一化 members (允许 list 或 ;/换行 分隔的字符串, 仿 alpha_compare)。
+    if isinstance(members, str):
+        members = [x.strip() for x in _re.split(r"[;\n]+", members) if x.strip()]
+    members = [str(x).strip() for x in (members or []) if str(x).strip()]
+    if len(members) < 2:
+        return ToolResult(
+            "factor_compose: 至少给 2 个因子 (已注册名如 alpha019, 或表达式如 rank(-delta(close,5)))。",
+            is_error=True,
+        )
+
+    # 2) 跑合成 (compose_factors 永不抛, 失败由 status/error 表达)。
+    try:
+        from financial_analyst.factors.compose import compose_factors
+        from financial_analyst.factors.eval import EvalConfig
+        cfg = EvalConfig(universe=universe, freq=freq, start=since, end=until)
+        res = compose_factors(members, config=cfg, method=method, train_frac=float(train_frac))
+    except Exception as e:
+        return ToolResult(f"factor_compose 失败: {type(e).__name__}: {e}", is_error=True)
+
+    if res.status != "ok":
+        _msg = {
+            "too_few_factors": "有效成员不足 2 个",
+            "empty_universe": f"universe '{universe}' 解析为空 (试 csi300_active / csi500)",
+            "load_error": "行情加载失败",
+            "fit_error": "权重拟合失败",
+        }.get(res.status, res.status)
+        body = f"因子合成未完成 ({_msg}): {res.error}"
+        if res.warnings:
+            body += "\n" + "\n".join(f"⚠ {w}" for w in res.warnings)
+        return ToolResult(body, is_error=True)
+
+    def f(x, d=3):
+        return "—" if x is None or (isinstance(x, float) and math.isnan(x)) else f"{x:+.{d}f}"
+
+    method_cn = _COMPOSE_METHOD_CN.get(res.method, res.method)
+    comp = res.composite
+    ic = comp.ic if comp is not None else None
+    pf = comp.portfolio if comp is not None else None
+
+    lines = [
+        f"# 多因子合成 · {method_cn}({res.method})",
+        f"成员 ({len(res.members)}): {', '.join(res.members)}",
+        f"池 {universe} · {freq}频 · train_frac={res.train_frac:.2f} "
+        f"(训练 {res.n_train_dates} 期 / OOS 测试 {res.n_test_dates} 期)",
+        "",
+        "## 权重 / 重要度",
+    ]
+    wlabel = "重要度" if res.method == "lgbm" else "权重"
+    for nm, w in res.weights.items():
+        lines.append(f"  {_pad(nm, 40)} {wlabel}={f(w, 3)}")
+
+    lines += [
+        "",
+        "## 综合分 OOS 表现",
+        f"  RankIC = {f(ic.rank_ic_mean if ic is not None else None, 4)} | "
+        f"RankICIR = {f(ic.rank_icir if ic is not None else None, 3)}",
+        f"  多空组合: Sharpe = {f(pf.sharpe if pf is not None else None, 2)} | "
+        f"年化 = {f(pf.ann_return if pf is not None else None, 3)} | "
+        f"最大回撤 = {f(pf.max_drawdown if pf is not None else None, 3)}",
+        "",
+        "## 成员同窗 OOS 对比",
+        f"  {_pad('因子', 40)}{_pad('RankIC', 12)}{_pad('Sharpe', 10)}",
+    ]
+    for m in res.member_oos:
+        lines.append(f"  {_pad(m.name, 40)}{_pad(f(m.rank_ic, 4), 12)}{_pad(f(m.sharpe, 2), 10)}")
+
+    lines += ["", f"→ 结论: {res.verdict}"]
+    if res.warnings:
+        lines.append("")
+        lines += [f"⚠ {w}" for w in res.warnings]
+    return ToolResult("\n".join(lines))
+
+
 def _wisdom_store():
     """Resolve WisdomStore, honouring FA_WISDOM_ROOT (tests inject tmp)."""
     from pathlib import Path
@@ -1846,6 +1935,42 @@ TOOL_REGISTRY: List[Tool] = [
             "required": ["expr_or_name"],
         },
         run=_tool_factor_report,
+        cost_hint="minutes",
+        confirm_required=True,
+    ),
+    Tool(
+        name="factor_compose",
+        description=(
+            "把 N(>=2) 个因子【合成】成一个综合打分模型, 在【样本外(OOS)】评测综合分 "
+            "(RankIC/ICIR/Sharpe/年化/最大回撤), 并和每个成员的同窗 OOS 指标对比, "
+            "回答「合成是否比单因子更强 / 有没有增益」。method 决定怎么组合: "
+            "equal=等权, ic_weighted=按训练段 IC 加权, linear=线性回归拟合, lgbm=LightGBM(默认, 非线性)。"
+            "用于用户说「把这几个因子合成」「做个多因子模型」「这几个因子组合起来效果如何」。"
+            "区别于 alpha_compare (只并排比单因子, 不合成)。默认 csi300_active 月频, 前 60% 调仓期训练。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "members": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "≥2 因子名或表达式, 如 [\"alpha019\", \"rank(-delta(close,5))\"]",
+                },
+                "method": {
+                    "type": "string",
+                    "enum": ["equal", "ic_weighted", "linear", "lgbm"],
+                    "default": "lgbm",
+                },
+                "universe": {"type": "string", "default": "csi300_active"},
+                "freq": {"type": "string", "enum": ["day", "week", "month"], "default": "month"},
+                "since": {"type": "string", "description": "起始日 YYYY-MM-DD, 缺省今天往前 2 年"},
+                "until": {"type": "string", "description": "结束日 YYYY-MM-DD, 缺省今天"},
+                "train_frac": {"type": "number", "default": 0.6,
+                               "description": "训练段调仓日占比 (前段拟合权重, 余段 OOS 评测)"},
+            },
+            "required": ["members"],
+        },
+        run=_tool_factor_compose,
         cost_hint="minutes",
         confirm_required=True,
     ),
