@@ -76,6 +76,8 @@ class ReportReq(BaseModel):
     freq: str = "month"
     start: Optional[str] = None
     end: Optional[str] = None
+    archive: bool = True
+    note: str = ""
 
 
 class ForgeReq(BaseModel):
@@ -1080,6 +1082,13 @@ def build_app():
             cfg = EvalConfig(universe=req.universe, freq=req.freq,
                              start=req.start, end=req.end)
             rpt = _eval_mod.factor_report(req.expr_or_name, cfg)
+            if req.archive and getattr(rpt, "status", "") == "ok":
+                try:
+                    from financial_analyst.factors.research import (
+                        ResearchArchive, record_from_report)
+                    ResearchArchive().append(record_from_report(rpt, note=req.note))
+                except Exception:
+                    pass  # 归档失败不拖垮报告主体
             return _jsonable(_asdict(rpt))
         except Exception as exc:
             return JSONResponse(

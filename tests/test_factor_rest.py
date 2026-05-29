@@ -395,3 +395,28 @@ def test_save_endpoint_dedupes_name(monkeypatch, tmp_path):
             unregister(a["name"])
         if b:
             unregister(b["name"])
+
+
+# ===========================================================================
+# 10. /factor/report archive — archive=true records a run to tmp archive;
+#     archive=false records nothing.
+# ===========================================================================
+def test_report_archive_records_run(monkeypatch, tmp_path):
+    monkeypatch.setenv("FINANCIAL_ANALYST_HOME", str(tmp_path))
+    _patch_data(monkeypatch)
+    client = _client()
+    client.post("/factor/report", json={
+        "expr_or_name": "rank(-delta(close,5))", "archive": True, "note": "t1"})
+    runs = client.get("/factor/archive").json()["runs"]
+    assert len(runs) == 1
+    assert runs[0]["kind"] == "report"
+    assert runs[0]["note"] == "t1"
+
+
+def test_report_archive_off_records_nothing(monkeypatch, tmp_path):
+    monkeypatch.setenv("FINANCIAL_ANALYST_HOME", str(tmp_path))
+    _patch_data(monkeypatch)
+    client = _client()
+    client.post("/factor/report", json={
+        "expr_or_name": "rank(-delta(close,5))", "archive": False})
+    assert client.get("/factor/archive").json()["runs"] == []
