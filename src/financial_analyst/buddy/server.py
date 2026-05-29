@@ -36,12 +36,60 @@ from pydantic import BaseModel  # core dependency — safe at module level
 from fastapi import UploadFile, File as FastAPIFile
 
 
+def _jsonable(obj):
+    """Recursively convert a dataclass-asdict structure to valid JSON:
+    NaN/Inf floats -> None (json.dumps allow_nan would emit invalid 'NaN').
+
+    SP-C.1 direct factor endpoints return ``dataclasses.asdict(result)`` run
+    through this so the browser's ``JSON.parse`` never chokes on a ``NaN``/
+    ``Infinity`` literal (same pitfall ``_safe_json_dumps`` guards for SSE).
+
+    Also coerces numpy scalars (np.float32/np.int64/np.bool_ — NOT Python
+    float/int subclasses) to native types: ``/factor/bench``'s ``df.to_dict``
+    can emit these, and Starlette's ``json.dumps(allow_nan=False)`` would 500
+    on them (pandas-version-dependent). Belt-and-suspenders for portability."""
+    import math
+    import numpy as np
+    if isinstance(obj, np.generic):  # numpy scalar → Python native first
+        obj = obj.item()
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
+    return obj
+
+
 class RunReq(BaseModel):
     query: str
     mode: str = "default"
     context: Optional[Dict[str, Any]] = None
     session_id: Optional[str] = None   # v1.9.3: multi-turn history key
     model: Optional[str] = None        # v1.9.3: switch backend model
+
+
+# ── SP-C.1 直连因子端点的请求模型 (universe 默认小池 csi300_active 求秒级返回) ──
+class ReportReq(BaseModel):
+    expr_or_name: str
+    universe: str = "csi300_active"
+    freq: str = "month"
+    start: Optional[str] = None
+    end: Optional[str] = None
+
+
+class ForgeReq(BaseModel):
+    idea: str
+    universe: str = "csi300_active"
+    quick_eval: bool = True
+
+
+class ComposeReq(BaseModel):
+    members: list
+    method: str = "lgbm"
+    universe: str = "csi300_active"
+    freq: str = "month"
+    train_frac: float = 0.6
 
 
 class ConfirmReq(BaseModel):
@@ -995,6 +1043,173 @@ def build_app():
              "name": q.get("name")}
             for r, q in fired
         ]})
+
+    # ════════════════════════════════════════════════════════════════════
+    # SP-C.1 直连因子 REST 端点 (不走 agent /run 循环, 给量化工作台 UI 直接喂数据)
+    #
+    # 共同纪律:
+    #   * 业务结构化失败 (status=empty_universe/load_error/compute_error/
+    #     fit_error/too_few_factors; forge compile_ok=False) → HTTP 200 + body
+    #     带 status/error (前端按 status 渲染, 与 agent 工具一致)。
+    #   * 内部未预期异常 → try/except → 500 + {error} (不泄栈)。
+    #   * 所有 dataclass 经 dataclasses.asdict → _jsonable (NaN/Inf→null) 再返回,
+    #     保证浏览器 JSON.parse 不挂。
+    #   * factor_report / forge_factor / compose_factors 都经各自 home 模块的
+    #     属性访问调用 (而非 from-import 绑定), 便于测试 monkeypatch。
+    # ════════════════════════════════════════════════════════════════════
+    from dataclasses import asdict as _asdict
+
+    @app.post("/factor/report")
+    async def factor_report_ep(req: ReportReq):
+        """单因子评测报告 (IC / 分位 / 多空组合 / 特征)。
+
+        ``expr_or_name`` 可以是注册 alpha 名 (如 alpha019) 或白名单表达式
+        (如 ``rank(-delta(close,5))``)。默认小池 csi300_active 求秒级。
+        """
+        try:
+            from financial_analyst.factors.eval import EvalConfig
+            from financial_analyst.factors import eval as _eval_mod
+            cfg = EvalConfig(universe=req.universe, freq=req.freq,
+                             start=req.start, end=req.end)
+            rpt = _eval_mod.factor_report(req.expr_or_name, cfg)
+            return _jsonable(_asdict(rpt))
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"{type(exc).__name__}: {exc}"},
+            )
+
+    @app.post("/factor/forge")
+    async def factor_forge_ep(req: ForgeReq):
+        """炼因子: 自然语言想法 → 截面因子表达式 (+ 可选快测 IC)。
+
+        ``forge_factor`` 永不抛 (失败落在 ForgeResult.error/compile_ok)。
+        当 compile_ok 且 quick_eval=True 时附带一个 quick IC dict
+        (任何快测异常 → quick_ic=None, 不影响主结果)。
+        """
+        try:
+            from financial_analyst.factors import forge as _forge_mod
+            fr = _forge_mod.forge_factor(req.idea)
+            body = _asdict(fr)
+            if fr.compile_ok and req.quick_eval:
+                try:
+                    from financial_analyst.buddy.tools import _quick_ic
+                    from financial_analyst.factors.zoo.expr import compile_factor
+                    body["quick_ic"] = _quick_ic(
+                        compile_factor(fr.expr), req.universe,
+                        "2024-01-01", "2024-12-31")
+                except Exception:
+                    body["quick_ic"] = None
+            return _jsonable(body)
+        except Exception as exc:  # forge_factor never raises; guard anyway
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"{type(exc).__name__}: {exc}"},
+            )
+
+    @app.post("/factor/compose")
+    async def factor_compose_ep(req: ComposeReq):
+        """多因子合成: N(>=2) 个成员 → 综合分, OOS 评测 + 成员对比 → verdict。
+
+        ``method``: equal / ic_weighted / linear / lgbm。成员数 <2 → 400。
+        """
+        if len(req.members) < 2:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "members 至少 2 个", "status": "too_few_factors"},
+            )
+        try:
+            from financial_analyst.factors.eval import EvalConfig
+            from financial_analyst.factors import compose as _compose_mod
+            cfg = EvalConfig(universe=req.universe, freq=req.freq)
+            res = _compose_mod.compose_factors(
+                req.members, cfg, method=req.method, train_frac=req.train_frac)
+            return _jsonable(_asdict(res))
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"{type(exc).__name__}: {exc}"},
+            )
+
+    @app.get("/factor/archive")
+    async def factor_archive_ep(target: str = "", compare: str = ""):
+        """研究档案 (评测运行日志)。
+
+          * ``?compare=r0001,r0002`` → 两次运行的指标 diff (dict)。
+          * ``?target=<因子名>``      → 该 target 的运行历史 (按时间序)。
+          * 无参数                     → 全部运行列表。
+        """
+        try:
+            from financial_analyst.factors.research import ResearchArchive
+            arch = ResearchArchive()
+            if "," in compare:
+                ids = compare.split(",", 1)
+                return _jsonable(arch.compare(ids[0].strip(), ids[1].strip()))
+            if target:
+                return {"history": [_jsonable(_asdict(r)) for r in arch.history(target)]}
+            return {"runs": [_jsonable(_asdict(r)) for r in arch.list()]}
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"{type(exc).__name__}: {exc}"},
+            )
+
+    @app.get("/factor/bench")
+    async def factor_bench_ep(universe: str = "csi300_active", family: str = "alpha101",
+                              since: str = "2024-01-01", until: str = "2024-12-31",
+                              max_codes: int = 120):
+        """批量跑一个 family 的全部 alpha 的截面 IC → 喂因子库横条。
+
+        ``rows`` 每行: name / family / ic / rank_ic / ir / rank_ir /
+        hit_rate / state。缺数据 → 空 rows。
+        """
+        try:
+            # 触发 zoo/__init__ 注册各 family 的 @register (alpha101 等)。
+            import financial_analyst.factors.zoo  # noqa: F401
+            from financial_analyst.data import universe as _univ_mod
+            from financial_analyst.data import loader_factory as _lf_mod
+            from financial_analyst.factors.zoo.panel import PanelData
+            from financial_analyst.factors.zoo.bench_runner import run_bench
+
+            codes = _univ_mod.resolve_universe_codes(universe) or []
+            codes = codes[: max(1, int(max_codes))]
+            if not codes:
+                return {"rows": []}
+            loader = _lf_mod.get_default_loader()
+            try:
+                from financial_analyst.data.loaders.industry import (
+                    IndustryLoader, industry_map_path)
+                ind = IndustryLoader() if industry_map_path().exists() else None
+            except Exception:
+                ind = None
+            panel = PanelData.from_loader(loader, codes, since, until,
+                                          freq="day", industry_loader=ind)
+            df = run_bench(panel, family=family, fwd_days=5)
+            return {"rows": _jsonable(df.to_dict(orient="records"))}
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"{type(exc).__name__}: {exc}"},
+            )
+
+    @app.get("/factor/list")
+    async def factor_list_ep(family: str = ""):
+        """列出可用因子: ``registered`` (内置 alpha) + ``user`` (炼因子入库)。"""
+        try:
+            # 触发 zoo/__init__ 注册各 family, 否则 list_alphas 可能为空。
+            import financial_analyst.factors.zoo  # noqa: F401
+            from financial_analyst.factors.zoo.registry import list_alphas
+            from financial_analyst.factors.forge import UserFactorStore
+            registered = [{"name": s.name, "family": s.family,
+                           "formula": s.formula_text}
+                          for s in list_alphas(family or None)]
+            user = UserFactorStore().list()
+            return {"registered": registered, "user": _jsonable(user)}
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"{type(exc).__name__}: {exc}"},
+            )
 
     return app
 
