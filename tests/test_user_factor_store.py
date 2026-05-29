@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 from financial_analyst.factors.forge.store import UserFactorStore
 from financial_analyst.factors.zoo import PanelData
-from financial_analyst.factors.zoo.registry import get as reg_get, _clear_registry_for_tests
+from financial_analyst.factors.zoo.registry import get as reg_get, unregister
 
 
 def _panel():
@@ -32,7 +32,7 @@ def test_add_persists_and_registers(tmp_path):
 def test_reload_register_all(tmp_path):
     UserFactorStore(root=tmp_path).add({"name": "usr_x", "family": "user",
         "expr": "rank(close)", "description": "", "parsed": [], "kpis": {}})
-    _clear_registry_for_tests()  # simulate fresh process
+    unregister("usr_x")  # simulate "not registered" WITHOUT nuking the shared registry (would break test_factor_zoo)
     with pytest.raises(KeyError):
         reg_get("usr_x")
     n = UserFactorStore(root=tmp_path).register_all()
