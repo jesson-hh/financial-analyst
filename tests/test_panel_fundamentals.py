@@ -97,3 +97,29 @@ def test_from_loader_intraday_skips_daily_basic():
             raise AssertionError("fetch_daily_basic must NOT be called for intraday freq")
     panel = PanelData.from_loader(StubIntraday(), ["SH600519"], "2024-01-02", "2024-01-03", freq="5min")
     assert "close" in panel.df.columns
+
+
+def test_from_loader_partial_daily_basic_coverage():
+    """Realistic case: some codes have daily_basic, some don't (new listing /
+    suspended). Covered codes get values; uncovered get NaN. Also exercises a
+    partial field set (only pe_ttm/dv_ttm present)."""
+    class StubPartial:
+        def fetch_quote(self, code, start, end, freq="day"):
+            dates = pd.date_range("2024-01-02", periods=20, freq="B")
+            close = np.full(len(dates), 50.0)
+            df = pd.DataFrame({"open": close, "high": close, "low": close,
+                               "close": close, "volume": np.full(len(dates), 1e6)}, index=dates)
+            df.index.name = "datetime"
+            return df
+        def fetch_daily_basic(self, code, start, end):
+            if code == "SH600519":
+                dates = pd.date_range("2024-01-02", periods=20, freq="B")
+                db = pd.DataFrame({"pe_ttm": np.linspace(10, 30, len(dates)),
+                                   "dv_ttm": np.linspace(1, 4, len(dates))}, index=dates)
+                db.index.name = "datetime"
+                return db
+            return pd.DataFrame()  # other code: no daily_basic
+    panel = PanelData.from_loader(StubPartial(), ["SH600519", "SZ000858"], "2024-01-01", "2024-02-01")
+    pe = panel.pe_ttm
+    assert pe.xs("SH600519", level="code").notna().any()   # covered code populated
+    assert pe.xs("SZ000858", level="code").isna().all()     # uncovered code NaN

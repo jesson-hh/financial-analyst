@@ -24,6 +24,7 @@ def _merge_daily_basic(panel: pd.DataFrame, loader, codes: list, start: str, end
     Robust to real-loader shape (trade_date column) and stub shape (datetime index).
     Guarded: missing data / a loader without it simply yields NaN columns."""
     frames = []
+    n_ok = 0
     for code in codes:
         try:
             db = loader.fetch_daily_basic(code, start, end)
@@ -44,10 +45,16 @@ def _merge_daily_basic(panel: pd.DataFrame, loader, codes: list, start: str, end
         keep = [c for c in _DAILY_BASIC_FIELDS if c in db.columns]
         if keep:
             frames.append(db[keep])
+            n_ok += 1
+    import logging
+    logging.getLogger("financial_analyst.zoo").debug(
+        "daily_basic merged for %d/%d codes", n_ok, len(codes),
+    )
     if not frames:
         return
     db_all = pd.concat(frames)
     db_all = db_all[~db_all.index.duplicated(keep="last")]
+    # align by (datetime, code); codes/dates absent from daily_basic become NaN
     for col in _DAILY_BASIC_FIELDS:
         if col in db_all.columns:
             panel[col] = db_all[col].reindex(panel.index)
@@ -146,14 +153,17 @@ class PanelData:
 
     @property
     def pe_ttm(self) -> pd.Series:
+        """市盈率 TTM. NaN when daily_basic absent."""
         return self._optional_col("pe_ttm")
 
     @property
     def pb(self) -> pd.Series:
+        """市净率. NaN when daily_basic absent."""
         return self._optional_col("pb")
 
     @property
     def ps_ttm(self) -> pd.Series:
+        """市销率 TTM. NaN when daily_basic absent."""
         return self._optional_col("ps_ttm")
 
     @property
