@@ -74,3 +74,15 @@ def test_forge_and_user_factors_registered():
     from financial_analyst.buddy.tools import TOOL_REGISTRY
     names = {x.name for x in TOOL_REGISTRY}
     assert "alpha_forge" in names and "user_factors" in names
+
+
+def test_user_factors_remove(tmp_path, monkeypatch):
+    from financial_analyst.buddy import tools as t
+    from financial_analyst.factors.forge import UserFactorStore
+    UserFactorStore(root=tmp_path / "factors").add({"name": "usr_del", "family": "user",
+        "expr": "rank(close)", "description": "", "parsed": [], "kpis": {}})
+    monkeypatch.setenv("FINANCIAL_ANALYST_HOME", str(tmp_path))
+    res = t._tool_user_factors(remove="usr_del")
+    assert res.is_error is False
+    assert "已删除" in res.content
+    assert t._tool_user_factors().content  # list path still works (now empty)

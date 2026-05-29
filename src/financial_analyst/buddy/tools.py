@@ -1388,7 +1388,6 @@ def _quick_ic(compute_fn, universe: str, since: str, until: str,
     """Quick cross-sectional IC of a compute fn (reuses factor_test's bench path)."""
     import warnings
     import numpy as np
-    from financial_analyst.data.loader_factory import get_default_loader
     from financial_analyst.factors.zoo.panel import PanelData
     from financial_analyst.factors.zoo.bench_runner import _forward_returns, bench_one
     from financial_analyst.factors.zoo.registry import AlphaSpec
@@ -1443,6 +1442,8 @@ def _tool_alpha_forge(idea: str, save: bool = False, universe: str = "csi300_act
                           f"RankICIR={f(kpis.get('rank_ir'))} 命中={kpis.get('hit_rate')} 【{kpis.get('state')}】"]
             else:
                 lines += ["", f"快测跳过 (universe={universe} 无法解析)"]
+        # quick-eval failure is non-fatal: the forged expression is valid even if
+        # the data load/IC eval fails — surface it inline, keep is_error=False.
         except Exception as e:
             lines += ["", f"快测失败: {type(e).__name__}: {e}"]
 
