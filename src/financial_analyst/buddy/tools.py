@@ -1789,6 +1789,48 @@ def _tool_wisdom_search(query: str, tags: Optional[list] = None,
 # ---------------------------------------------------------------------------
 
 
+def _tool_event_report(expr_or_name: str, universe: str = "csi300_active",
+                       start: str = None, end: str = None, horizons: str = "1,5,10,20") -> ToolResult:
+    """事件研究: 把触发表达式 (cross/比较/ts_* 求值为布尔信号) 当事件, 统计事件后
+    各 horizon 的前向收益 (原始+市场调整) / 胜率 / t值 / CAR / 逐年。截面因子请用 factor_report。"""
+    expr_or_name = (expr_or_name or "").strip()
+    if not expr_or_name:
+        return ToolResult("event_report: 缺少 expr_or_name (触发表达式或因子名)。", is_error=True)
+    if "__" in expr_or_name or "import" in expr_or_name or "lambda" in expr_or_name:
+        return ToolResult("event_report: 表达式含非法 token (__ / import / lambda)。", is_error=True)
+    try:
+        hs = tuple(int(x) for x in str(horizons).split(",") if x.strip())
+    except ValueError:
+        hs = (1, 5, 10, 20)
+    try:
+        from financial_analyst.factors.eval import EvalConfig, event_report
+        rpt = event_report(expr_or_name, EvalConfig(universe=universe, start=start, end=end),
+                           horizons=hs or (1, 5, 10, 20))
+    except Exception as e:
+        return ToolResult(f"event_report 失败: {type(e).__name__}: {e}", is_error=True)
+    if rpt.status != "ok":
+        return ToolResult(f"事件研究未完成 (status={rpt.status}): {rpt.error}", is_error=True)
+
+    import math
+
+    def f(x, d=3):
+        return "—" if x is None or (isinstance(x, float) and math.isnan(x)) else f"{x:+.{d}f}"
+
+    lines = [
+        f"# 事件研究 · {rpt.factor}",
+        f"池 {rpt.universe} ({rpt.n_codes} 只) · {rpt.start}~{rpt.end} · 事件数 {rpt.n_events} · 事件率 {rpt.event_rate:.1%}",
+        "",
+        "horizon | n | 平均收益 | 超额(减市场) | 胜率 | t值",
+    ]
+    for h in rpt.horizons:
+        lines.append(f"{h.h}d | {h.n} | {f(h.mean_ret)} | {f(h.mean_excess)} | {f(h.win_rate,2)} | {f(h.t_stat,2)}")
+    if rpt.by_year:
+        lines += ["", "逐年(主5d超额): " + " · ".join(f"{y}:{f(m)}({n})" for y, n, m in rpt.by_year)]
+    if rpt.warnings:
+        lines += [""] + [f"⚠ {w}" for w in rpt.warnings]
+    return ToolResult("\n".join(lines))
+
+
 TOOL_REGISTRY: List[Tool] = [
     Tool(
         name="run_report",
@@ -2059,6 +2101,29 @@ TOOL_REGISTRY: List[Tool] = [
             "required": ["expr_or_name"],
         },
         run=_tool_factor_report,
+        cost_hint="minutes",
+        confirm_required=True,
+    ),
+    Tool(
+        name="event_report",
+        description=(
+            "对一个【事件触发表达式】(用 cross/比较/ts_* 求值为布尔信号, 如 "
+            "cross(close, sma(close,20)) 突破20日线, 或 ts_min((close>delay(close,1))*1.0,3) 连续3天涨) "
+            "跑【事件研究】: 每次触发后 1/5/10/20 日的平均收益 + 市场调整超额 + 胜率 + t值 + 逐年。"
+            "事件型因子 (金叉/突破/连续/放量) 用这个; 连续打分因子用 factor_report。默认 csi300_active 近2年。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "expr_or_name": {"type": "string", "description": "触发表达式或注册名, 如 cross(close, sma(close,20))"},
+                "universe": {"type": "string", "default": "csi300_active", "description": "csi300/csi500/csi800/all/csi300_active"},
+                "start": {"type": "string", "description": "起始日 YYYY-MM-DD, 缺省今天往前 2 年"},
+                "end": {"type": "string", "description": "结束日 YYYY-MM-DD, 缺省今天"},
+                "horizons": {"type": "string", "default": "1,5,10,20", "description": "逗号分隔的前向天数"},
+            },
+            "required": ["expr_or_name"],
+        },
+        run=_tool_event_report,
         cost_hint="minutes",
         confirm_required=True,
     ),

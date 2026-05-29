@@ -125,3 +125,13 @@ def test_event_report_empty_universe(monkeypatch):
     monkeypatch.setattr("financial_analyst.data.universe.resolve_universe_codes", lambda u: [])
     rpt = event_report("cross(close, sma(close,20))", EvalConfig(universe="nope"))
     assert rpt.status == "empty_universe"
+
+
+def test_event_report_tool(monkeypatch):
+    from financial_analyst.buddy import tools as T
+    _patch_data(monkeypatch)
+    res = T._tool_event_report("cross(close, sma(close,20))", universe="csi300", horizons="1,5")
+    assert not res.is_error
+    assert "事件研究" in res.content
+    # 工具在 TOOL_REGISTRY 注册
+    assert any(getattr(t, "name", None) == "event_report" for t in T.TOOL_REGISTRY)

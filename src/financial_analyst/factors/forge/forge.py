@@ -34,7 +34,9 @@ _SYSTEM = (
     "只能用下列字段+算子 (Python 语法):\n" + FACTOR_VOCAB + "\n"
     "表达式对每个 (日期,股票) 返回一个打分, **高分=更看好** (反转类记得加负号)。\n"
     "估值(pe_ttm/pb/ps_ttm)、股息(dv_ttm)、规模(total_mv/circ_mv)、换手(turnover_rate) 已支持。"
-    "若想法需要表中没有的字段 (财报字段如 ROE/净利润/负债率, 需财报数据; 或'连续/金叉/突破'这类事件条件), "
+    "事件条件可表达: 金叉/突破用 cross(a,b), 连续N天用 ts_min((cond)*1.0,N), 放量用 volume>ts_mean(volume,N)*k。"
+    "(注: 事件触发因子应交给 event_report 工具做事件研究, 不是截面打分。) "
+    "若想法需要表中没有的字段 (财报字段如 ROE/净利润/负债率, 需财报数据), "
     "把 out_of_vocab 设 true 并在 rationale 里说明缺什么, expr 留空。\n"
     "不要用 Python 内置函数 (abs/round/sum/min/max 等), 只用上面算子表里的算子 (如 abs_, max_pair, min_pair)。\n"
     '只输出 JSON: {"expr": "...", "parsed": [{"k":"触发","v":"..."}], '
