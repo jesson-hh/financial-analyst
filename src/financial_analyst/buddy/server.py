@@ -180,6 +180,14 @@ def build_app():
             yield
 
     app = FastAPI(title="financial-analyst buddy SSE bridge", lifespan=_lifespan)
+
+    # SP-B: 重建注册已入库的 user 炼因子 (DSL 字符串 → compile → register family='user')
+    try:
+        from financial_analyst.factors.forge import UserFactorStore
+        UserFactorStore().register_all()
+    except Exception:
+        pass
+
     app.mount("/mcp", _mcp_app)
     # Tauri webview / localhost dev — allow all origins.
     app.add_middleware(

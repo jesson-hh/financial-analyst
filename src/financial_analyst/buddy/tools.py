@@ -1383,6 +1383,99 @@ def _tool_alpha_compare(items, universe: str = "csi300_active",
     return ToolResult("\n".join(lines))
 
 
+def _quick_ic(compute_fn, universe: str, since: str, until: str,
+              fwd_days: int = 5, max_codes: int = 120) -> dict:
+    """Quick cross-sectional IC of a compute fn (reuses factor_test's bench path)."""
+    import warnings
+    import numpy as np
+    from financial_analyst.data.loader_factory import get_default_loader
+    from financial_analyst.factors.zoo.panel import PanelData
+    from financial_analyst.factors.zoo.bench_runner import _forward_returns, bench_one
+    from financial_analyst.factors.zoo.registry import AlphaSpec
+    # Import resolve_universe_codes lazily so monkeypatching the module attr takes effect
+    from financial_analyst.data import universe as _univ_mod
+    codes = _univ_mod.resolve_universe_codes(universe)
+    if not codes:
+        return {"status": "no_universe"}
+    codes = codes[: max(20, min(int(max_codes), len(codes)))]
+    # Import get_default_loader lazily so monkeypatching the module attr takes effect
+    from financial_analyst.data import loader_factory as _lf_mod
+    loader = _lf_mod.get_default_loader()
+    try:
+        from financial_analyst.data.loaders.industry import IndustryLoader, industry_map_path
+        ind = IndustryLoader() if industry_map_path().exists() else None
+    except Exception:
+        ind = None
+    panel = PanelData.from_loader(loader, codes, since, until, freq="day", industry_loader=ind)
+    spec = AlphaSpec(name="__forge__", family="custom", description="", formula_text="", compute=compute_fn)
+    fwd = _forward_returns(panel, int(fwd_days))
+    with warnings.catch_warnings(), np.errstate(invalid="ignore", divide="ignore"):
+        warnings.simplefilter("ignore")
+        return bench_one(spec, panel, fwd)
+
+
+def _tool_alpha_forge(idea: str, save: bool = False, universe: str = "csi300_active",
+                      since: str = "2024-01-01", until: str = "2024-12-31",
+                      quick_eval: bool = True) -> ToolResult:
+    """炼因子: 自然语言想法 → 截面因子表达式 + 快测 IC, 可入库 (之后可被 factor_report 引用)。"""
+    import math
+    from financial_analyst.factors import forge as _forge_mod
+    fr = _forge_mod.forge_factor(idea)
+    if fr.out_of_vocab:
+        return ToolResult(f"这个想法当前价量 DSL 炼不了: {fr.error}\n"
+                          f"(基本面字段→SP-B.1b, 事件信号→SP-B.2)", is_error=True)
+    if not fr.compile_ok:
+        return ToolResult(f"炼因子失败: {fr.error}", is_error=True)
+
+    lines = [f"# 炼因子 · {fr.name}", f"原话: {idea}", "", "解析:"]
+    lines += [f"  · {p.get('k')}: {p.get('v')}" for p in fr.parsed]
+    lines += ["", f"公式: {fr.expr}", f"逻辑: {fr.rationale}"]
+
+    kpis: dict = {}
+    if quick_eval:
+        from financial_analyst.factors.zoo.expr import compile_factor
+        try:
+            kpis = _quick_ic(compile_factor(fr.expr), universe, since, until)
+            if kpis.get("status") == "ok":
+                def f(x):
+                    return "—" if x is None or (isinstance(x, float) and math.isnan(x)) else f"{x:+.4f}"
+                lines += ["", f"快测 IC ({universe}): RankIC={f(kpis.get('rank_ic'))} "
+                          f"RankICIR={f(kpis.get('rank_ir'))} 命中={kpis.get('hit_rate')} 【{kpis.get('state')}】"]
+            else:
+                lines += ["", f"快测跳过 (universe={universe} 无法解析)"]
+        except Exception as e:
+            lines += ["", f"快测失败: {type(e).__name__}: {e}"]
+
+    if save:
+        from financial_analyst.factors.forge import UserFactorStore
+        entry = UserFactorStore().add({"name": fr.name, "family": "user", "expr": fr.expr,
+                                       "description": fr.rationale[:60], "parsed": fr.parsed,
+                                       "kpis": kpis if kpis.get("status") == "ok" else {}})
+        lines += ["", f"✓ 已入库: {entry['name']} — 可 `factor_report {entry['name']}` 跑完整评测"]
+    else:
+        lines += ["", "(save=true 入库后可被 factor_report / alpha_compare 按名引用)"]
+    return ToolResult("\n".join(lines))
+
+
+def _tool_user_factors(remove: str = "") -> ToolResult:
+    """列出已入库的 user 因子; remove=<name> 删除一个。"""
+    from financial_analyst.factors.forge import UserFactorStore
+    store = UserFactorStore()
+    if remove:
+        ok = store.remove(remove)
+        return ToolResult(f"{'已删除' if ok else '未找到'} user 因子: {remove}")
+    rows = store.list()
+    if not rows:
+        return ToolResult("暂无已入库 user 因子。用 alpha_forge(idea=..., save=true) 炼一个。")
+    lines = [f"# 已入库 user 因子 ({len(rows)})"]
+    for e in rows:
+        k = e.get("kpis") or {}
+        ric = k.get("rank_ic")
+        lines.append(f"· {e['name']}  {e.get('expr','')}"
+                     + (f"  (RankIC={ric:+.4f})" if isinstance(ric, (int, float)) else ""))
+    return ToolResult("\n".join(lines))
+
+
 def _tool_factor_report(expr_or_name: str, universe: str = "csi500",
                         freq: str = "month", start: str = None, end: str = None) -> ToolResult:
     """完整单因子评测报告: IC全套 + 十分位 + 多空组合净值/Sharpe/回撤 (复用 factors.eval 引擎)。"""
@@ -1697,6 +1790,40 @@ TOOL_REGISTRY: List[Tool] = [
         run=_tool_alpha_compare,
         cost_hint="minutes",
         confirm_required=True,
+    ),
+    Tool(
+        name="alpha_forge",
+        description=(
+            "炼因子: 把一句【自然语言因子想法】炼成截面因子表达式 (用价量 DSL) + 快测它的 IC。"
+            "用于用户说「帮我把 xx 想法做成因子」「炼一个 yy 因子」。save=true 入库后该因子可被 "
+            "factor_report / alpha_compare 按名引用。注: 当前只支持价量类想法 (动量/反转/量价/波动); "
+            "基本面(股息/估值/市值)或事件型(连续/金叉/突破)暂不支持, 会提示。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "idea": {"type": "string", "description": "自然语言因子想法, 如 '5日反转' / '放量上涨' / '低波动'"},
+                "save": {"type": "boolean", "default": False, "description": "true=炼好入库 (可被 factor_report 引用)"},
+                "universe": {"type": "string", "default": "csi300_active"},
+                "since": {"type": "string", "default": "2024-01-01"},
+                "until": {"type": "string", "default": "2024-12-31"},
+                "quick_eval": {"type": "boolean", "default": True},
+            },
+            "required": ["idea"],
+        },
+        run=_tool_alpha_forge,
+        cost_hint="minutes",
+        confirm_required=True,
+    ),
+    Tool(
+        name="user_factors",
+        description="列出已入库的 user 因子 (名/表达式/IC); remove=<name> 删除一个。",
+        input_schema={
+            "type": "object",
+            "properties": {"remove": {"type": "string", "description": "要删除的 user 因子名 (留空=只列出)"}},
+        },
+        run=_tool_user_factors,
+        cost_hint="fast",
     ),
     Tool(
         name="factor_report",
