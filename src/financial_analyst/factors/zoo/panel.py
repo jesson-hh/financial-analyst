@@ -16,6 +16,42 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+_DAILY_BASIC_FIELDS = ("pe_ttm", "pb", "ps_ttm", "dv_ttm", "total_mv", "circ_mv", "turnover_rate")
+
+
+def _merge_daily_basic(panel: pd.DataFrame, loader, codes: list, start: str, end: str) -> None:
+    """Merge each code's daily_basic fields onto the (datetime, code) panel in place.
+    Robust to real-loader shape (trade_date column) and stub shape (datetime index).
+    Guarded: missing data / a loader without it simply yields NaN columns."""
+    frames = []
+    for code in codes:
+        try:
+            db = loader.fetch_daily_basic(code, start, end)
+        except Exception:
+            continue
+        if db is None or len(db) == 0:
+            continue
+        db = db.copy()
+        if "trade_date" in db.columns:
+            db = db.set_index("trade_date")
+        try:
+            db.index = pd.DatetimeIndex(db.index)
+        except Exception:
+            continue
+        db["code"] = code
+        db = db.set_index("code", append=True)
+        db.index = db.index.set_names(["datetime", "code"])
+        keep = [c for c in _DAILY_BASIC_FIELDS if c in db.columns]
+        if keep:
+            frames.append(db[keep])
+    if not frames:
+        return
+    db_all = pd.concat(frames)
+    db_all = db_all[~db_all.index.duplicated(keep="last")]
+    for col in _DAILY_BASIC_FIELDS:
+        if col in db_all.columns:
+            panel[col] = db_all[col].reindex(panel.index)
+
 
 class PanelData:
     def __init__(self, df: pd.DataFrame):
@@ -100,6 +136,45 @@ class PanelData:
         """1-period benchmark returns. Same value across codes at each date."""
         bc = self.benchmark_close
         return bc.groupby(level="code", group_keys=False).pct_change(fill_method=None)
+
+    def _optional_col(self, name: str) -> pd.Series:
+        """Return column ``name`` if present, else an all-NaN Series on the panel
+        index. Used by optional daily_basic fundamental fields."""
+        if name in self.df.columns:
+            return self.df[name]
+        return pd.Series(float("nan"), index=self.df.index, dtype=float)
+
+    @property
+    def pe_ttm(self) -> pd.Series:
+        return self._optional_col("pe_ttm")
+
+    @property
+    def pb(self) -> pd.Series:
+        return self._optional_col("pb")
+
+    @property
+    def ps_ttm(self) -> pd.Series:
+        return self._optional_col("ps_ttm")
+
+    @property
+    def dv_ttm(self) -> pd.Series:
+        """股息率 (%). NaN when daily_basic absent."""
+        return self._optional_col("dv_ttm")
+
+    @property
+    def total_mv(self) -> pd.Series:
+        """总市值 (万元)."""
+        return self._optional_col("total_mv")
+
+    @property
+    def circ_mv(self) -> pd.Series:
+        """流通市值 (万元)."""
+        return self._optional_col("circ_mv")
+
+    @property
+    def turnover_rate(self) -> pd.Series:
+        """换手率 (%)."""
+        return self._optional_col("turnover_rate")
 
     @property
     def returns(self) -> pd.Series:
@@ -202,5 +277,9 @@ class PanelData:
                 logging.getLogger("financial_analyst.zoo").warning(
                     "BenchmarkLoader failed (skipping benchmark column): %s", e,
                 )
+
+        # SP-B.1b: merge daily_basic fundamentals (day freq only — daily_basic is day-only)
+        if freq == "day":
+            _merge_daily_basic(panel, loader, codes, start, end)
 
         return cls(panel)
