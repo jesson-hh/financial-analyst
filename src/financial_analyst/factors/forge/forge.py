@@ -35,6 +35,7 @@ _SYSTEM = (
     "表达式对每个 (日期,股票) 返回一个打分, **高分=更看好** (反转类记得加负号)。\n"
     "若想法需要表中没有的字段 (基本面 pe/pb/股息/ROE/市值, 或'连续/金叉/突破'这类事件条件), "
     "把 out_of_vocab 设 true 并在 rationale 里说明缺什么, expr 留空。\n"
+    "不要用 Python 内置函数 (abs/round/sum/min/max 等), 只用上面算子表里的算子 (如 abs_, max_pair, min_pair)。\n"
     '只输出 JSON: {"expr": "...", "parsed": [{"k":"触发","v":"..."}], '
     '"name": "usr_xxx", "rationale": "...", "out_of_vocab": false}'
 )
@@ -51,14 +52,19 @@ _FEWSHOT = [
 
 
 def _build_messages(idea: str, repair_error: Optional[str] = None) -> List[dict]:
-    msgs = [{"role": "system", "content": _SYSTEM}] + _FEWSHOT + [{"role": "user", "content": idea}]
+    user_content = idea
     if repair_error:
-        msgs.append({"role": "user", "content":
-                     f"上一版表达式有问题: {repair_error}。请只用允许的字段+算子, 重出 JSON。"})
-    return msgs
+        user_content = (
+            f"{idea}\n\n(上一版表达式有问题: {repair_error}。"
+            f"请只用允许的字段+算子, 重出 JSON。)"
+        )
+    return [{"role": "system", "content": _SYSTEM}] + _FEWSHOT + [{"role": "user", "content": user_content}]
 
 
 def _default_complete(messages: List[dict]) -> str:
+    """Production LLM call. MUST be called from a synchronous context (no running
+    event loop) — buddy tools run on a worker thread via asyncio.to_thread, so
+    asyncio.run() is safe there; calling from an already-async context raises RuntimeError."""
     from financial_analyst.llm.client import LLMClient
     client = LLMClient.for_agent("buddy")
     resp = asyncio.run(client.chat(messages, response_format={"type": "json_object"}, temperature=0.2))
@@ -66,6 +72,7 @@ def _default_complete(messages: List[dict]) -> str:
 
 
 def _tiny_panel() -> PanelData:
+    # recreated each call; forge is latency-insensitive vs the LLM round-trip
     dates = pd.date_range("2024-01-01", periods=12, freq="B")
     idx = pd.MultiIndex.from_product([dates, ["A", "B", "C", "D"]], names=["datetime", "code"])
     rng = np.random.default_rng(0)
@@ -90,6 +97,7 @@ def forge_factor(idea: str, complete_fn: Optional[CompleteFn] = None) -> ForgeRe
     repair_error: Optional[str] = None
 
     for _attempt in range(2):
+        res.parsed, res.name, res.rationale, res.out_of_vocab = [], "", "", False
         try:
             content = complete(_build_messages(idea, repair_error))
         except Exception as e:
@@ -116,6 +124,7 @@ def forge_factor(idea: str, complete_fn: Optional[CompleteFn] = None) -> ForgeRe
             res.error = "未生成表达式"
             continue
         try:
+            # dry-run only checks compile + returns a Series; all-NaN output (e.g. window > 12d) is accepted as compile_ok
             validate_expr(expr)
             fn = compile_factor(expr)
             out = fn(_tiny_panel())

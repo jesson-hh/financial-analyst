@@ -25,6 +25,9 @@ def test_forge_happy_path():
     assert r.expr == "rank(-delta(close,5))"
     assert r.name == "usr_rev5"
     assert r.out_of_vocab is False
+    assert r.parsed == [{"k": "方向", "v": "反转"}]
+    assert r.rationale == "5日反转"
+    assert r.error == ""
 
 
 def test_forge_repair_then_succeed():
@@ -64,3 +67,14 @@ def test_forge_uncompilable_expr_after_retries():
     assert r.compile_ok is False
     assert r.expr == "close + nonexistent_field"  # surfaced for debugging
     assert r.error
+
+
+def test_forge_stale_metadata_cleared_on_second_attempt_failure():
+    import json
+    # attempt 1: valid JSON but bad expr (compiles-fails) → sets parsed/name; attempt 2: bad JSON
+    good_json_bad_expr = json.dumps({"expr": "close + nonexistent", "parsed": [{"k": "x", "v": "y"}],
+                                     "name": "usr_bad", "rationale": "r", "out_of_vocab": False})
+    r = forge_factor("怪", complete_fn=_fake(good_json_bad_expr, "not json"))
+    assert r.compile_ok is False
+    assert "JSON" in r.error  # final failure is the bad-JSON one
+    assert r.parsed == [] and r.name == ""  # NOT stale from attempt 1
