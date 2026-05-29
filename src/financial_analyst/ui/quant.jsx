@@ -584,7 +584,76 @@ function ForgeMode() {
     </div>
   );
 }
-function ComposeMode() { return <Empty label="多因子合成 (待接 C.4a)" />; }
+function ComposeMode() {
+  const [list, setList] = useState({ registered: [], user: [] });
+  const [members, setMembers] = useState([]);
+  const [draft, setDraft] = useState('');
+  const [method, setMethod] = useState('equal');
+  const [pool, setPool] = useState('csi300');
+  const [trainFrac, setTrainFrac] = useState(0.6);
+  const comp = useAsync();
+  useEffect(() => { getJSON('/factor/list').then(d => setList(d || { registered: [], user: [] })).catch(() => {}); }, []);
+  const allNames = [...new Set([...(list.registered || []).map(r => r.name), ...(list.user || []).map(u => u.name)])];
+  const addMember = (m) => { if (m && !members.includes(m)) setMembers([...members, m]); };
+  const run = () => { if (members.length < 2) return; comp.run(() => postJSON('/factor/compose', { members, method, universe: poolParam(pool), train_frac: trainFrac })); };
+  const res = comp.data;
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: 18, minWidth: 0 }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
+        <input list="members-dl" value={draft} onChange={e => setDraft(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') { addMember(draft.trim()); setDraft(''); } }}
+          placeholder="选/输因子名或表达式" style={{ flex: '1 1 240px', padding: '6px 10px', border: '1px solid var(--line)', fontFamily: 'var(--mono)', fontSize: 12, background: 'var(--paper)' }} />
+        <datalist id="members-dl">{allNames.map(n => <option key={n} value={n} />)}</datalist>
+        <button onClick={() => { addMember(draft.trim()); setDraft(''); }} className="hover-pill" style={{ padding: '6px 10px', border: '1px solid var(--line)', background: 'transparent', cursor: 'pointer', fontSize: 12 }}>+ 加成员</button>
+        <Segmented value={method} onChange={setMethod} options={[{ value: 'equal', label: '等权' }, { value: 'ic_weighted', label: 'IC加权' }, { value: 'linear', label: '线性' }, { value: 'lgbm', label: 'LGBM' }]} />
+        <Segmented value={pool} onChange={setPool} options={POOLS.map(p => ({ value: p, label: p }))} />
+        <button onClick={run} disabled={comp.loading || members.length < 2} className="hover-pill"
+          style={{ padding: '6px 14px', border: 'none', background: members.length < 2 ? 'var(--line)' : 'var(--ink)', color: 'var(--paper)', fontFamily: 'var(--serif)', fontSize: 12, cursor: members.length < 2 ? 'default' : 'pointer' }}>
+          {comp.loading ? '合成中…' : '合成评测'}
+        </button>
+      </div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14, alignItems: 'center' }}>
+        {members.map(m => (
+          <span key={m} className="mono" style={{ fontSize: 11, padding: '3px 8px', border: '1px solid var(--line)', display: 'flex', gap: 6, alignItems: 'center' }}>
+            {m}<span onClick={() => setMembers(members.filter(x => x !== m))} style={{ cursor: 'pointer', color: 'var(--yin)', opacity: 1, fontWeight: 600 }}>×</span>
+          </span>
+        ))}
+        {members.length < 2 && <span className="serif" style={{ fontSize: 12, color: 'var(--ink-3)' }}>至少选 2 个成员</span>}
+      </div>
+      {comp.loading && <Loading label="OOS 训练/测试中…" />}
+      {comp.error && <ErrorBox error={comp.error} />}
+      {res && res.status && res.status !== 'ok' && <ErrorBox error={`合成未完成 · ${res.status}${res.error ? ' · ' + res.error : ''}`} />}
+      {res && res.status === 'ok' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <Panel title={<span>合成结论 <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', marginLeft: 6 }}>{res.method} · train {res.n_train_dates} / test {res.n_test_dates}</span></span>}>
+            <div className="serif" style={{ fontSize: 13, color: 'var(--ink)', lineHeight: 1.6, marginBottom: 10 }}>{res.verdict}</div>
+            <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' }}>
+              <div style={{ flex: '1 1 200px' }}>
+                <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', marginBottom: 4, letterSpacing: '0.16em' }}>权重</div>
+                {Object.entries(res.weights || {}).map(([k, v]) => (
+                  <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, padding: '2px 0' }}><code className="mono" style={{ color: 'var(--ink-1)' }}>{k}</code><span className="mono">{n2(v, 3)}</span></div>
+                ))}
+              </div>
+              <div style={{ flex: '1 1 320px' }}>
+                <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', marginBottom: 4, letterSpacing: '0.16em' }}>成员 OOS 对比</div>
+                <table style={{ width: '100%', fontSize: 11, borderCollapse: 'collapse' }}>
+                  <thead><tr style={{ color: 'var(--ink-3)' }}><td style={{ textAlign: 'left' }}>成员</td><td style={{ textAlign: 'right' }}>RankIC</td><td style={{ textAlign: 'right' }}>Sharpe</td></tr></thead>
+                  <tbody>{(res.member_oos || []).map(m => (
+                    <tr key={m.name}><td><code className="mono" style={{ color: 'var(--ink-1)' }}>{m.name}</code></td><td className="mono" style={{ textAlign: 'right' }}>{n2(m.rank_ic, 3)}</td><td className="mono" style={{ textAlign: 'right' }}>{n2(m.sharpe, 2)}</td></tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            </div>
+          </Panel>
+          <div>
+            <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', margin: '4px 0 8px', letterSpacing: '0.16em' }}>综合分 OOS 评测</div>
+            <FactorReportView report={res.composite} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 function ArchiveMode() { return <Empty label="研究档案 (待接 C.4b)" />; }
 
 // ═════════════════════════ 入口 ═════════════════════════
