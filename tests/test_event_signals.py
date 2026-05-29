@@ -88,3 +88,40 @@ def test_build_event_report_compute_error():
         raise RuntimeError("synthetic boom")
     rpt = build_event_report(p, boom, EvalConfig(universe="test"))
     assert rpt.status == "compute_error" and "synthetic boom" in rpt.error
+
+
+def _stub_loader():
+    class StubLoader:
+        def fetch_quote(self, code, start, end, freq="day"):
+            dates = pd.date_range("2024-01-02", periods=120, freq="B")
+            rng = np.random.default_rng(abs(hash(code)) % 9999)
+            close = 50 * np.exp(np.cumsum(rng.standard_normal(len(dates)) * 0.02))
+            df = pd.DataFrame({"open": close, "high": close * 1.01, "low": close * 0.99,
+                               "close": close, "volume": np.full(len(dates), 1e6)}, index=dates)
+            df.index.name = "datetime"
+            return df
+
+        def fetch_daily_basic(self, code, start, end):
+            return pd.DataFrame()
+    return StubLoader()
+
+
+def _patch_data(monkeypatch, codes=("SH600519", "SZ000858", "SH600036", "SZ300750")):
+    monkeypatch.setattr("financial_analyst.data.universe.resolve_universe_codes", lambda u: list(codes))
+    monkeypatch.setattr("financial_analyst.data.loader_factory.get_default_loader", lambda: _stub_loader())
+
+
+def test_event_report_export_and_ok(monkeypatch):
+    from financial_analyst.factors.eval import event_report, EventReport  # 导出可见
+    _patch_data(monkeypatch)
+    rpt = event_report("cross(close, sma(close,20))", EvalConfig(universe="csi300"), horizons=(1, 5))
+    assert isinstance(rpt, EventReport)
+    assert rpt.status in ("ok", "no_events")   # stub 随机, 可能不触发
+    assert rpt.n_codes == 4
+
+
+def test_event_report_empty_universe(monkeypatch):
+    from financial_analyst.factors.eval import event_report
+    monkeypatch.setattr("financial_analyst.data.universe.resolve_universe_codes", lambda u: [])
+    rpt = event_report("cross(close, sma(close,20))", EvalConfig(universe="nope"))
+    assert rpt.status == "empty_universe"
