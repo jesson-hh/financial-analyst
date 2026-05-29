@@ -10,7 +10,7 @@ FACTOR_VOCAB = (
     "字段(基本面,day频): pe_ttm pb ps_ttm dv_ttm(股息率%) total_mv circ_mv(总/流通市值,万元) turnover_rate(换手%) | "
     "算子: rank ts_rank delta delay ts_mean ts_sum ts_max ts_min ts_argmax ts_argmin "
     "stddev correlation(x,y,n) covariance decay_linear sma wma signedpower(x,p) "
-    "log sign abs power(x,p) scale indneutralize(x,industry) max_pair min_pair filter_where | "
+    "log sign abs power(x,p) scale indneutralize(x,industry) max_pair min_pair filter_where cross(x,y) | "
     "运算: + - * / ** 比较 ()"
 )
 
@@ -49,7 +49,7 @@ def compile_factor(expr: str):
             "abs": _ops.abs_, "abs_": _ops.abs_, "product": _ops.product,
             "power": _ops.power, "indneutralize": _ops.indneutralize,
             "max_pair": _ops.max_pair, "min_pair": _ops.min_pair,
-            "filter_where": _ops.filter_where,
+            "filter_where": _ops.filter_where, "cross": _ops.cross,
         }
         return eval(expr, {"__builtins__": {}}, ns)  # restricted namespace
     return compute

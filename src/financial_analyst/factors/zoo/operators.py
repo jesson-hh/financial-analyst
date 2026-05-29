@@ -338,3 +338,15 @@ def filter_where(x: pd.Series, mask) -> pd.Series:
     weight — close enough for the GTJA convention.
     """
     return x.where(mask)
+
+
+def cross(a, b):
+    """a 上穿 b: a[t-1] <= b[t-1] 且 a[t] > b[t] → 1.0, 否则 0.0 (逐 code)。
+
+    金叉 = cross(dif, dea) / 突破均线 = cross(close, sma(close, 20)); 死叉 = cross(b, a)。
+    a, b 为同 panel 索引的 Series (delay 已逐 code shift)。
+    """
+    prev_a = delay(a, 1) if hasattr(a, "index") else a
+    prev_b = delay(b, 1) if hasattr(b, "index") else b
+    up = (a > b) & (prev_a <= prev_b)
+    return up.astype(float)
