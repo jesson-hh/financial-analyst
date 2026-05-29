@@ -104,6 +104,16 @@ class SaveReq(BaseModel):
     kpis: dict = {}
 
 
+class EventReq(BaseModel):
+    expr_or_name: str
+    universe: str = "csi300_active"
+    start: Optional[str] = None
+    end: Optional[str] = None
+    horizons: list = [1, 5, 10, 20]
+    archive: bool = False
+    note: str = ""
+
+
 class ConfirmReq(BaseModel):
     turn_id: str
     choice: str = "n"
@@ -1249,6 +1259,26 @@ def build_app():
                 "name": req.name, "family": "user", "expr": req.expr,
                 "description": req.description, "parsed": req.parsed, "kpis": req.kpis})
             return _jsonable(entry)
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"{type(exc).__name__}: {exc}"},
+            )
+
+    @app.post("/factor/event")
+    async def factor_event_ep(req: EventReq):
+        """事件研究: 触发表达式/名 → 事件后各 horizon 前向收益 (原始+市场调整) + CAR + 逐年。
+
+        触发型因子 (金叉/突破/连续/放量) 专用; 截面打分因子用 /factor/report。
+        archive 字段 v1 暂忽略 (档案 schema 是 report/compose; 事件 metrics 不同)。
+        """
+        try:
+            from financial_analyst.factors.eval import EvalConfig
+            from financial_analyst.factors import eval as _eval_mod
+            cfg = EvalConfig(universe=req.universe, start=req.start, end=req.end)
+            hs = tuple(int(x) for x in req.horizons) or (1, 5, 10, 20)
+            rpt = _eval_mod.event_report(req.expr_or_name, cfg, horizons=hs)
+            return _jsonable(_asdict(rpt))
         except Exception as exc:
             return JSONResponse(
                 status_code=500,

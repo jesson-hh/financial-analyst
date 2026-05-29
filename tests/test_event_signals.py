@@ -135,3 +135,19 @@ def test_event_report_tool(monkeypatch):
     assert "事件研究" in res.content
     # 工具在 TOOL_REGISTRY 注册
     assert any(getattr(t, "name", None) == "event_report" for t in T.TOOL_REGISTRY)
+
+
+from fastapi.testclient import TestClient
+from financial_analyst.buddy.server import build_app
+
+
+def test_rest_factor_event(monkeypatch):
+    _patch_data(monkeypatch)
+    client = TestClient(build_app())
+    r = client.post("/factor/event", json={
+        "expr_or_name": "cross(close, sma(close,20))", "universe": "csi300", "horizons": [1, 5]})
+    assert r.status_code == 200
+    assert "NaN" not in r.text and "Infinity" not in r.text   # _jsonable 生效
+    body = r.json()
+    assert "n_events" in body and "horizons" in body and "car_curve" in body
+    assert body["status"] in ("ok", "no_events")
