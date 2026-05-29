@@ -19,6 +19,9 @@ def _fund_panel():
         "pb": pd.Series(rng.uniform(0.8, 5, len(idx)), index=idx),
         "dv_ttm": pd.Series(rng.uniform(0, 5, len(idx)), index=idx),
         "total_mv": pd.Series(rng.uniform(1e6, 5e7, len(idx)), index=idx),
+        "ps_ttm": pd.Series(rng.uniform(1, 10, len(idx)), index=idx),
+        "circ_mv": pd.Series(rng.uniform(8e5, 4e7, len(idx)), index=idx),
+        "turnover_rate": pd.Series(rng.uniform(0.3, 8, len(idx)), index=idx),
     })
     return PanelData(df)
 
@@ -33,6 +36,9 @@ def test_vocab_lists_fundamentals():
     "rank(dv_ttm)",
     "rank(-total_mv)",
     "rank(-pb) * rank(dv_ttm)",
+    "rank(-ps_ttm)",        # all 7 fundamentals exercised through the compile ns
+    "rank(-circ_mv)",
+    "rank(turnover_rate)",
 ])
 def test_compile_fundamental_expr(expr):
     fn = compile_factor(expr)
