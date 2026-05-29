@@ -166,7 +166,8 @@ def test_factor_compose_registered():
     schema = t.input_schema
     assert "members" in schema["properties"]
     assert schema["properties"]["members"]["type"] == "array"
-    assert "members" in schema["required"]
+    assert schema["required"] == []  # SP-D.2: members 或 goal 二选一 (运行时校验, 非 schema 强制)
+    assert "goal" in schema["properties"]  # LLM 配方入口
     assert schema["properties"]["method"]["enum"] == ["equal", "ic_weighted", "linear", "lgbm"]
     assert schema["properties"]["method"]["default"] == "lgbm"
     # OpenAI + Anthropic schema render without error.

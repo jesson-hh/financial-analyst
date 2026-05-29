@@ -134,3 +134,25 @@ def test_rest_compose_interpret(monkeypatch):
     # interpret=false → 不调 LLM, 无 interpretation
     r2 = client.post("/factor/compose", json={"members": ["a", "b"], "method": "equal"})
     assert not r2.json().get("interpretation")
+
+
+def test_tool_factor_compose_goal_and_interpret(monkeypatch):
+    from financial_analyst.buddy import tools as T
+    from financial_analyst.factors.compose.compose import ComposeResult
+    fake = ComposeResult(method="lgbm", members=["rank(close)", "rank(volume)"],
+                         weights={"rank(close)": 0.6, "rank(volume)": 0.4},
+                         train_frac=0.6, n_train_dates=20, n_test_dates=12,
+                         composite=None, member_oos=[], verdict="增益", status="ok")
+    rec = ComposeRecipe(goal="动量", members=["rank(close)", "rank(volume)"],
+                        method="lgbm", train_frac=0.6, rationale="r", status="ok")
+    monkeypatch.setattr("financial_analyst.factors.compose.advisor.compose_advisor",
+                        lambda goal, **kw: rec)
+    monkeypatch.setattr("financial_analyst.factors.compose.compose_factors",
+                        lambda *a, **k: fake)
+    monkeypatch.setattr("financial_analyst.factors.compose.advisor.interpret_compose",
+                        lambda res, **kw: "LLM 研判: 注意过拟合")
+    # goal 路径 (无 members) → advise 出成员 → 跑 → 附研判
+    res = T._tool_factor_compose(members=None, goal="动量")
+    assert not res.is_error
+    assert "LLM 研判" in res.content
+    assert "rank(close)" in res.content

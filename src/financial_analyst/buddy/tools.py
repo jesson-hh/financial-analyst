@@ -1536,10 +1536,10 @@ _COMPOSE_METHOD_CN = {
 }
 
 
-def _tool_factor_compose(members, method: str = "lgbm",
+def _tool_factor_compose(members=None, method: str = "lgbm",
                          universe: str = "csi300_active", freq: str = "month",
                          since: str = None, until: str = None,
-                         train_frac: float = 0.6,
+                         train_frac: float = 0.6, goal: str = "",
                          archive: bool = False, note: str = "") -> ToolResult:
     """把 N(>=2) 个因子合成一个综合打分, 样本外(OOS)评测综合分并和各成员对比 → 判断合成是否增益。
 
@@ -1547,6 +1547,15 @@ def _tool_factor_compose(members, method: str = "lgbm",
     看迭代趋势; note 是备注。归档失败绝不拖垮报告主体。"""
     import math
     import re as _re
+
+    # 0) goal 给了 → 先 LLM 顾问出配方 (成员/方法)。
+    goal = (goal or "").strip()
+    if goal:
+        from financial_analyst.factors.compose import advisor as _advisor_mod
+        rec = _advisor_mod.compose_advisor(goal)
+        if rec.status != "ok":
+            return ToolResult(f"配方生成失败 (status={rec.status}): {rec.error}", is_error=True)
+        members, method, train_frac = rec.members, rec.method, rec.train_frac
 
     # 1) 归一化 members (允许 list 或 ;/换行 分隔的字符串, 仿 alpha_compare)。
     if isinstance(members, str):
@@ -1626,6 +1635,13 @@ def _tool_factor_compose(members, method: str = "lgbm",
             lines.append(f"\n✓ 已归档 (id={rec.id})")
         except Exception as e:
             lines.append(f"\n⚠ 归档失败: {e}")
+    try:
+        from financial_analyst.factors.compose import advisor as _advisor_mod
+        note_txt = _advisor_mod.interpret_compose(res)
+        if note_txt:
+            lines += ["", "## LLM 研判", note_txt]
+    except Exception:
+        pass
     return ToolResult("\n".join(lines))
 
 
@@ -2159,8 +2175,10 @@ TOOL_REGISTRY: List[Tool] = [
                 "archive": {"type": "boolean", "default": False,
                             "description": "True=把本次合成归档到研究档案 (runs.jsonl), 供 research_log 看迭代趋势"},
                 "note": {"type": "string", "description": "归档时的备注 (这次为什么跑/想看什么)"},
+                "goal": {"type": "string",
+                         "description": "自然语言目标 (如 '低回撤动量反转组合'); 给了就让 LLM 顾问自动配成员+方法, 可不传 members"},
             },
-            "required": ["members"],
+            "required": [],
         },
         run=_tool_factor_compose,
         cost_hint="minutes",
