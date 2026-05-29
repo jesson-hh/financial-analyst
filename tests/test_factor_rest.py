@@ -420,3 +420,36 @@ def test_report_archive_off_records_nothing(monkeypatch, tmp_path):
     client.post("/factor/report", json={
         "expr_or_name": "rank(-delta(close,5))", "archive": False})
     assert client.get("/factor/archive").json()["runs"] == []
+
+
+# ===========================================================================
+# 11. /factor/compose archive — records a compose run; a failing archive append
+#     is non-fatal (the report body still returns 200).
+# ===========================================================================
+def test_compose_archive_records_run(monkeypatch, tmp_path):
+    monkeypatch.setenv("FINANCIAL_ANALYST_HOME", str(tmp_path))
+    _patch_data(monkeypatch)
+    client = _client()
+    r = client.post("/factor/compose", json={
+        "members": ["rank(-delta(close,5))", "rank(close)"],
+        "method": "equal", "archive": True, "note": "c1"})
+    assert r.status_code == 200
+    runs = client.get("/factor/archive").json()["runs"]
+    assert any(x["kind"] == "compose" for x in runs)
+
+
+def test_compose_archive_failure_is_non_fatal(monkeypatch, tmp_path):
+    monkeypatch.setenv("FINANCIAL_ANALYST_HOME", str(tmp_path))
+    _patch_data(monkeypatch)
+
+    def _boom(*a, **k):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(
+        "financial_analyst.factors.research.ResearchArchive.append", _boom)
+    client = _client()
+    r = client.post("/factor/compose", json={
+        "members": ["rank(-delta(close,5))", "rank(close)"],
+        "method": "equal", "archive": True})
+    assert r.status_code == 200  # 归档炸了，报告主体仍返回
+    assert r.json().get("status") == "ok"

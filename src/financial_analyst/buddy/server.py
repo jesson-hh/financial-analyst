@@ -92,6 +92,8 @@ class ComposeReq(BaseModel):
     universe: str = "csi300_active"
     freq: str = "month"
     train_frac: float = 0.6
+    archive: bool = True
+    note: str = ""
 
 
 class SaveReq(BaseModel):
@@ -1141,6 +1143,13 @@ def build_app():
             cfg = EvalConfig(universe=req.universe, freq=req.freq)
             res = _compose_mod.compose_factors(
                 req.members, cfg, method=req.method, train_frac=req.train_frac)
+            if req.archive and getattr(res, "status", "") == "ok":
+                try:
+                    from financial_analyst.factors.research import (
+                        ResearchArchive, record_from_compose)
+                    ResearchArchive().append(record_from_compose(res, note=req.note))
+                except Exception:
+                    pass
             return _jsonable(_asdict(res))
         except Exception as exc:
             return JSONResponse(
