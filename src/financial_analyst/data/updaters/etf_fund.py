@@ -26,6 +26,7 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 import time
 from pathlib import Path
@@ -125,15 +126,21 @@ def _per_code(
     Sleep between calls to respect Tushare 200/min limit.
     Individual failures are silently skipped (delisted / no data).
     """
+    _log = logging.getLogger(__name__)
     frames = []
     for tc in _ts(codes):
         try:
             d = _fund_query(token, api, fields=fields, ts_code=tc)
             if d is not None and not d.empty:
                 frames.append(d)
-        except Exception:
-            pass
+        except Exception as e:
+            _log.debug("etf_fund %s %s failed: %s", api, tc, e)
         time.sleep(sleep)
+    if len(frames) < len(codes):
+        _log.warning(
+            "etf_fund %s: %d/%d codes returned data (%d failed/empty)",
+            api, len(frames), len(codes), len(codes) - len(frames),
+        )
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 

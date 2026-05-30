@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import os
 import shutil
 import time
 from datetime import date as _date, datetime
@@ -985,6 +986,9 @@ def update_etf_cmd(
     skip_spot: bool = typer.Option(
         False, "--skip-spot",
         help="跳过 ETF 实时快照 (IOPV/溢折价/规模/换手)"),
+    tushare_token: Optional[str] = typer.Option(
+        None, "--tushare-token",
+        help="Tushare API token. 默认读 FA_TUSHARE_TOKEN / TUSHARE_TOKEN env."),
 ):
     """增量更新 ETF 数据 — 日线价格 + 基金元数据 + 实时快照 (单进程).
 
@@ -1040,9 +1044,13 @@ def update_etf_cmd(
 
     # 4b. 基金元数据 (Tushare, 可跳过)
     if not skip_fund:
-        t0 = time.time()
-        etf_fund.update_all_fund(codes_list, str(p.parquet_root))
-        typer.echo(f"[etf_fund  ✓] 耗时 {time.time() - t0:.1f}s")
+        token = tushare_token or os.getenv("FA_TUSHARE_TOKEN") or os.getenv("TUSHARE_TOKEN")
+        if not token:
+            typer.echo("[etf_fund ✗] FA_TUSHARE_TOKEN missing; use --skip-fund or set the env var.")
+        else:
+            t0 = time.time()
+            etf_fund.update_all_fund(codes_list, str(p.parquet_root), token=token)
+            typer.echo(f"[etf_fund  ✓] 耗时 {time.time() - t0:.1f}s")
 
     # 4c. 实时快照 (akshare, 可跳过)
     if not skip_spot:

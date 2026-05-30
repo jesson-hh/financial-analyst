@@ -62,7 +62,7 @@ def test_flow_from_share_diff(tmp_path):
         {
             "ts_code": ["510300.SH"] * 2,
             "trade_date": ["20260528", "20260529"],
-            "fd_share": [1.0e10, 1.1e10],
+            "fd_share": [1.0e6, 1.1e6],  # realistic 万份 values
         }
     ).to_parquet(tmp_path / "etf_share.parquet", index=False)
     pd.DataFrame(
@@ -102,3 +102,27 @@ def test_tracking_error_no_data_returns_none(tmp_path):
     """fetch_tracking_error returns None gracefully when no nav/index data."""
     result = _ld(tmp_path).fetch_tracking_error("SH510300")
     assert result["tracking_error_annualized"] is None
+
+
+def test_tracking_error_date_joined(tmp_path):
+    """Date-join TE: nav has an extra leading date the index lacks.
+
+    With positional diff the misaligned windows inflate TE wildly (~16%).
+    With date-join the returns are aligned and TE is small (<0.5 annualised).
+    """
+    pd.DataFrame({"ts_code": ["510300.SH"], "name": ["x"], "m_fee": [0.1], "c_fee": [0.0],
+                  "benchmark": ["沪深300"], "index_code": ["000300.SH"], "fund_type": ["ETF"],
+                  "invest_type": ["被动"]}).to_parquet(tmp_path / "etf_basic.parquet", index=False)
+    # nav has an extra leading date (20260101) the index lacks -> positional diff would misalign
+    dates_nav = ["20260101", "20260102", "20260105", "20260106", "20260107", "20260108", "20260109"]
+    navs = [1.00, 1.01, 1.02, 1.011, 1.015, 1.02, 1.025]
+    pd.DataFrame({"ts_code": ["510300.SH"] * 7, "nav_date": dates_nav, "unit_nav": navs,
+                  "accum_nav": navs, "adj_nav": navs, "net_asset": [1] * 7}
+                 ).to_parquet(tmp_path / "etf_nav.parquet", index=False)
+    dates_idx = ["20260102", "20260105", "20260106", "20260107", "20260108", "20260109"]
+    closes = [4000, 4040, 4001, 4016, 4040, 4060]   # tracks nav closely on shared dates
+    pd.DataFrame({"ts_code": ["000300.SH"] * 6, "trade_date": dates_idx, "close": closes}
+                 ).to_parquet(tmp_path / "etf_index.parquet", index=False)
+    L = ETFLoader(parquet_root=tmp_path, etf_qlib_uri=tmp_path / "cn_data_etf")
+    te = L.fetch_tracking_error("SH510300", window=10)["tracking_error_annualized"]
+    assert te is not None and te < 0.5   # date-joined TE is small, not the inflated positional value

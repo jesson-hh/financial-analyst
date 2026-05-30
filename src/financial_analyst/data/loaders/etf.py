@@ -194,10 +194,12 @@ class ETFLoader:
         unit = None
         if not nav.empty and "unit_nav" in nav.columns:
             unit = float(nav.iloc[-1]["unit_nav"])
+        # AUM unit: fd_share is in 万份, unit_nav in 元 → product is 万元
         aum = float(shares[-1] * unit) if unit is not None else None
         return {
             "latest_share_change": change,
             "aum_latest": aum,
+            "aum_unit": "wan_yuan",
             "share_series": shares.tolist(),
         }
 
@@ -209,40 +211,31 @@ class ETFLoader:
 
         Returns ``{"tracking_error_annualized": None, "reason": <str>}``
         when any required data is unavailable.
+
+        Date-join is done by string key (both nav_date and trade_date are
+        Tushare YYYYMMDD strings) so that independent date sets in NAV and
+        index are aligned correctly before computing return differences.
         """
         meta = self.fetch_etf_meta(code)
         idx = meta.get("index_code")
         nav = self.fetch_etf_nav(code)
         if nav.empty or not idx:
-            return {
-                "tracking_error_annualized": None,
-                "reason": "no nav or index_code",
-            }
+            return {"tracking_error_annualized": None, "reason": "no nav or index_code"}
         ei = self._pq("etf_index")
         if ei.empty:
             return {"tracking_error_annualized": None, "reason": "no etf_index"}
-        ei = ei[ei["ts_code"] == idx].sort_values("trade_date")
+        ei = ei[ei["ts_code"] == idx]
         if ei.empty:
-            return {
-                "tracking_error_annualized": None,
-                "reason": "index not in etf_index",
-            }
-        nav_ret = (
-            nav.sort_values("nav_date")["unit_nav"]
-            .astype(float)
-            .pct_change()
-            .dropna()
-            .tail(window)
-        )
-        idx_ret = (
-            ei["close"].astype(float).pct_change().dropna().tail(window)
-        )
-        n = min(len(nav_ret), len(idx_ret))
-        if n < 5:
-            return {
-                "tracking_error_annualized": None,
-                "reason": "insufficient overlap",
-            }
-        diff = nav_ret.to_numpy()[-n:] - idx_ret.to_numpy()[-n:]
+            return {"tracking_error_annualized": None, "reason": "index not in etf_index"}
+        nav_s = nav.dropna(subset=["nav_date", "unit_nav"]).copy()
+        nav_s = nav_s.assign(_d=nav_s["nav_date"].astype(str)).set_index("_d")["unit_nav"].astype(float).sort_index()
+        idx_s = ei.dropna(subset=["trade_date", "close"]).copy()
+        idx_s = idx_s.assign(_d=idx_s["trade_date"].astype(str)).set_index("_d")["close"].astype(float).sort_index()
+        merged = pd.DataFrame({"nav": nav_s, "idx": idx_s}).dropna().sort_index().tail(window + 1)
+        if len(merged) < 6:
+            return {"tracking_error_annualized": None, "reason": "insufficient overlap"}
+        nav_ret = merged["nav"].pct_change().dropna().to_numpy()
+        idx_ret = merged["idx"].pct_change().dropna().to_numpy()
+        diff = nav_ret - idx_ret
         te = float(np.std(diff, ddof=1) * np.sqrt(252))
-        return {"tracking_error_annualized": te, "window": n}
+        return {"tracking_error_annualized": te, "window": int(len(diff))}
