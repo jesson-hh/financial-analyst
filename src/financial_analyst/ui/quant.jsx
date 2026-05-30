@@ -35,9 +35,9 @@ function useAsync() {
 const n2 = (v, d = 2) => (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) ? '—' : (typeof v === 'number' ? v.toFixed(d) : v);
 const pct = (v, d = 2) => (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) ? '—' : (v * 100).toFixed(d) + '%';
 
-const POOLS = ['csi300', 'csi500', 'csi800', 'all'];
+const POOLS = ['快测', 'csi300', 'csi500', 'csi800', 'all'];
 const POOL_DEFAULT = 'csi300_active';   // csi300 交互快档
-const poolParam = (p) => (p === 'csi300' ? POOL_DEFAULT : p);
+const poolParam = (p) => (p === '快测' ? 'csi_fast' : (p === 'csi300' ? POOL_DEFAULT : p));
 
 // ═════════════════════════ 三态小组件 ═════════════════════════
 function Loading({ label = '加载中…' }) {
@@ -438,7 +438,7 @@ function LibraryMode() {
   const [list, setList] = useState({ registered: [], user: [] });
   const [family, setFamily] = useState('');
   const [benchRows, setBenchRows] = useState([]);
-  const [pool, setPool] = useState('csi300');
+  const [pool, setPool] = useState('快测');
   const [sel, setSel] = useState('');
   const [expr, setExpr] = useState('');
   const rpt = useAsync();
@@ -567,7 +567,7 @@ function ForgeCard({ result, onSave, saved, saving }) {
 
 function ForgeMode() {
   const [idea, setIdea] = useState('');
-  const [pool, setPool] = useState('csi300');
+  const [pool, setPool] = useState('快测');
   const forge = useAsync();
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -606,7 +606,7 @@ function ComposeMode() {
   const [members, setMembers] = useState([]);
   const [draft, setDraft] = useState('');
   const [method, setMethod] = useState('equal');
-  const [pool, setPool] = useState('csi300');
+  const [pool, setPool] = useState('快测');
   const [trainFrac, setTrainFrac] = useState(0.6);
   const comp = useAsync();
   const [goal, setGoal] = useState('');

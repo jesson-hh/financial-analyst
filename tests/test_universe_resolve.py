@@ -42,3 +42,10 @@ def test_txt_preferred_over_f10(monkeypatch):
     monkeypatch.setattr(uni, "_f10_codes", _boom)
     codes = resolve_universe_codes("csi300_active")  # bundled .txt exists
     assert isinstance(codes, list) and len(codes) > 0
+
+
+def test_resolves_csi_fast_pool():
+    """快测池 csi_fast.txt (~100 大盘) 解析为带前缀真实码。"""
+    codes = resolve_universe_codes("csi_fast")
+    assert 80 <= len(codes) <= 100
+    assert all(c[:2] in ("SH", "SZ", "BJ") for c in codes)
