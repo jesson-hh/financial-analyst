@@ -252,6 +252,16 @@ class PanelData:
             if isinstance(df.index, pd.MultiIndex):
                 df = df.reset_index(level="code" if "code" in df.index.names else 0, drop=True)
             df = df.copy()
+            # Real loaders (e.g. QlibBinaryLoader) return a positional RangeIndex
+            # with the date held in a ``trade_date`` column. Promote it to the
+            # datetime index so the panel's datetime level carries real timestamps:
+            # cross-sectional alignment (ragged A-share calendars) and the
+            # daily_basic merge below both key on it. Stub loaders that already
+            # date-index (no trade_date column) are left untouched.
+            if "trade_date" in df.columns:
+                df = df.set_index("trade_date")
+                df.index = pd.DatetimeIndex(df.index)
+                df = df[~df.index.duplicated(keep="last")]
             df["code"] = code
             df = df.set_index("code", append=True)
             df.index = df.index.set_names(["datetime", "code"])
