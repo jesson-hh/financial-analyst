@@ -217,12 +217,32 @@ def update_cmd(
     announcements_page_size: int = typer.Option(
         30, "--announcements-page-size",
         help="巨潮每只拉最新 N 条公告 (默认 30)"),
+    include_xdxr: bool = typer.Option(
+        False, "--include-xdxr",
+        help="增量刷 XDXR 复权 (pytdx get_xdxr_info) → parquet/xdxr.parquet",
+    ),
+    include_watchlist: bool = typer.Option(
+        False, "--include-watchlist",
+        help="同步 TDX 自选股 (T0002/blocknew/*.blk) → parquet/watchlist.parquet",
+    ),
+    include_tick_history: bool = typer.Option(
+        False, "--include-tick-history",
+        help="拉历史 tick (pytdx get_history_transaction_data) → parquet/tick_history.parquet; 量级大, 默认 codes × 最近 30 日",
+    ),
+    include_index_intraday: bool = typer.Option(
+        False, "--include-index-intraday",
+        help="拉 5 大指数 1min K (pytdx get_index_bars cat=7) → parquet/index_intraday.parquet",
+    ),
 ):
     """直连增量更新所有数据 — 日线 + 5min + 当日 PE/PB/MV.
 
     Optional (零 token 加成):
-      --include-f10           附带刷 TDX F10 事件 (公司大事/龙虎榜等)
-      --include-concepts      附带刷同花顺概念股 (需装 adata)
+      --include-f10              附带刷 TDX F10 事件 (公司大事/龙虎榜等)
+      --include-concepts         附带刷同花顺概念股 (需装 adata)
+      --include-xdxr             附带刷 XDXR 复权因子
+      --include-watchlist        同步 TDX 自选股列表
+      --include-tick-history     拉历史 tick (量级大)
+      --include-index-intraday   拉 5 大指数 1min K
 
     Example:
       fa data update                                  # 日线 + 5min + daily_basic
@@ -230,6 +250,7 @@ def update_cmd(
       fa data update --codes @my.txt                  # 限定代码
       fa data update --include-f10 --f10-universe csi300   # 附带 F10
       fa data update --include-concepts               # 附带概念股
+      fa data update --include-xdxr --include-index-intraday  # 复权 + 指数 1min
     """
     day_uri = _resolve_provider_uri("day")
     fivemin_uri = _resolve_provider_uri("5min")
@@ -293,11 +314,13 @@ def update_cmd(
         if stats_basic.get("ok", 0) > 0:
             _lu.mark_updated("daily_basic")
 
-    # F10/concepts/financial/stock_basic/northbound/fund_flow/margin/lockup/corp/ths_hot/announce
+    # F10/concepts/financial/stock_basic/northbound/fund_flow/margin/lockup/corp/ths_hot/announce/xdxr/watchlist/tick/index
     _need_paths = (include_f10 or include_concepts or include_financial
                    or include_stock_basic or include_northbound or include_fund_flow
                    or include_margin or include_lockup or include_corporate_actions
-                   or include_ths_hot or include_announcements)
+                   or include_ths_hot or include_announcements
+                   or include_xdxr or include_watchlist or include_tick_history
+                   or include_index_intraday)
     if _need_paths:
         from financial_analyst.data.paths import get_data_paths
         paths = get_data_paths()
@@ -521,6 +544,75 @@ def update_cmd(
             )
             if stats_an["ok"]:
                 _lu.mark_updated("announcements")
+
+        # XDXR 复权 (pytdx get_xdxr_info, per-stock)
+        if include_xdxr:
+            from financial_analyst.data.updaters.xdxr import update_xdxr
+            t0 = time.time()
+            try:
+                stats_xdxr = update_xdxr(paths.parquet_root, codes_list, log_progress=True)
+                typer.echo(
+                    f"\n[xdxr ✓] ok={stats_xdxr['ok']}/{stats_xdxr['total']} "
+                    f"(fail={stats_xdxr['failed']}) new_rows={stats_xdxr['new_rows']} "
+                    f"耗时 {time.time() - t0:.1f}s"
+                )
+                if stats_xdxr.get("ok", 0) > 0:
+                    _lu.mark_updated("xdxr")
+            except Exception as e:
+                typer.echo(f"\n[xdxr ✗] {e}")
+
+        # TDX 自选股 (T0002/blocknew/*.blk)
+        if include_watchlist:
+            from financial_analyst.data.updaters.watchlist import update_watchlist
+            t0 = time.time()
+            try:
+                stats_wl = update_watchlist(paths.parquet_root, tdx_root=None, log_progress=True)
+                typer.echo(
+                    f"\n[watchlist ✓] ok={stats_wl['ok']}/{stats_wl['total']} "
+                    f"(fail={stats_wl['failed']}) new_rows={stats_wl['new_rows']} "
+                    f"sources={stats_wl.get('sources_found', [])} "
+                    f"耗时 {time.time() - t0:.1f}s"
+                )
+                if stats_wl.get("ok", 0) > 0:
+                    _lu.mark_updated("watchlist")
+            except Exception as e:
+                typer.echo(f"\n[watchlist ✗] {e}")
+
+        # 历史 tick (pytdx get_history_transaction_data, per-stock × 最近 30 日)
+        if include_tick_history:
+            from financial_analyst.data.updaters.tick_history import update_tick_history
+            t0 = time.time()
+            try:
+                stats_tick = update_tick_history(
+                    paths.parquet_root, codes_list, dates=None, log_progress=True
+                )
+                typer.echo(
+                    f"\n[tick_history ✓] ok={stats_tick['ok']}/{stats_tick['total']} "
+                    f"(fail={stats_tick['failed']}, skip={stats_tick['skipped']}) "
+                    f"new_rows={stats_tick['new_rows']} 耗时 {time.time() - t0:.1f}s"
+                )
+                if stats_tick.get("ok", 0) > 0:
+                    _lu.mark_updated("tick_history")
+            except Exception as e:
+                typer.echo(f"\n[tick_history ✗] {e}")
+
+        # 5 大指数 1min K (pytdx get_index_bars cat=7)
+        if include_index_intraday:
+            from financial_analyst.data.updaters.index_intraday import update_index_intraday
+            t0 = time.time()
+            try:
+                stats_idx = update_index_intraday(
+                    paths.parquet_root, indices=None, n_days=1, log_progress=True
+                )
+                typer.echo(
+                    f"\n[index_intraday ✓] ok={stats_idx['ok']}/{stats_idx['total']} "
+                    f"(fail={stats_idx['failed']}, skip={stats_idx['skipped']}) "
+                    f"new_rows={stats_idx['new_rows']} 耗时 {time.time() - t0:.1f}s"
+                )
+                if stats_idx.get("ok", 0) > 0:
+                    _lu.mark_updated("index_intraday")
+            except Exception as e:
+                typer.echo(f"\n[index_intraday ✗] {e}")
 
     typer.echo(f"\n=== 完成. 总耗时 {time.time() - overall_t:.1f}s ===")
 
