@@ -169,6 +169,10 @@ def update_cmd(
     include_f10: bool = typer.Option(
         False, "--include-f10",
         help="附带刷新 TDX F10 事件 (公司大事/龙虎榜/研究报告/最新提示/主力追踪)"),
+    include_f10_full: bool = typer.Option(
+        False, "--include-f10-full",
+        help="拓宽 F10 到全 15 类 (公司概况/财务分析/股东研究/股本结构/资本运作/业内点评/行业分析/经营分析/分红扩股/高层治理 + KEY 5 类). 与 --include-f10 互斥, 二选一.",
+    ),
     f10_universe: str = typer.Option(
         "csi500", "--f10-universe",
         help="F10 刷新范围: csi300 / csi500 / csi800 / all (默认 csi500 ~30 min)"),
@@ -237,7 +241,8 @@ def update_cmd(
     """直连增量更新所有数据 — 日线 + 5min + 当日 PE/PB/MV.
 
     Optional (零 token 加成):
-      --include-f10              附带刷 TDX F10 事件 (公司大事/龙虎榜等)
+      --include-f10              附带刷 TDX F10 事件 (公司大事/龙虎榜等, KEY 5 类)
+      --include-f10-full         附带刷 TDX F10 全 15 类 (含公司概况/财务分析等)
       --include-concepts         附带刷同花顺概念股 (需装 adata)
       --include-xdxr             附带刷 XDXR 复权因子
       --include-watchlist        同步 TDX 自选股列表
@@ -248,7 +253,8 @@ def update_cmd(
       fa data update                                  # 日线 + 5min + daily_basic
       fa data update --skip-5min                      # 只日线
       fa data update --codes @my.txt                  # 限定代码
-      fa data update --include-f10 --f10-universe csi300   # 附带 F10
+      fa data update --include-f10 --f10-universe csi300   # 附带 F10 (KEY 5 类)
+      fa data update --include-f10-full --f10-universe csi500  # 附带 F10 全 15 类
       fa data update --include-concepts               # 附带概念股
       fa data update --include-xdxr --include-index-intraday  # 复权 + 指数 1min
     """
@@ -315,7 +321,7 @@ def update_cmd(
             _lu.mark_updated("daily_basic")
 
     # F10/concepts/financial/stock_basic/northbound/fund_flow/margin/lockup/corp/ths_hot/announce/xdxr/watchlist/tick/index
-    _need_paths = (include_f10 or include_concepts or include_financial
+    _need_paths = (include_f10 or include_f10_full or include_concepts or include_financial
                    or include_stock_basic or include_northbound or include_fund_flow
                    or include_margin or include_lockup or include_corporate_actions
                    or include_ths_hot or include_announcements
@@ -325,7 +331,12 @@ def update_cmd(
         from financial_analyst.data.paths import get_data_paths
         paths = get_data_paths()
 
-        if include_f10:
+        # 互斥检查: --include-f10-full 是超集, 二选一时优先 full
+        _run_f10_key = include_f10 and not include_f10_full
+        if include_f10 and include_f10_full:
+            typer.echo("\n[F10] ⚠ --include-f10 与 --include-f10-full 同时传入, 使用 --include-f10-full (超集), 跳过 KEY-only 拉取.")
+
+        if _run_f10_key:
             from financial_analyst.data.updaters.f10 import resolve_universe, update_f10
             t0 = time.time()
             try:
@@ -346,6 +357,36 @@ def update_cmd(
                 )
                 if stats_f10.get("ok", 0) > 0:
                     _lu.mark_updated("f10")
+
+        if include_f10_full:
+            from financial_analyst.data.updaters.f10 import (
+                resolve_universe, update_f10, ALL_CATEGORIES,
+            )
+            t0 = time.time()
+            try:
+                f10_codes = resolve_universe(paths.parquet_root, f10_universe)
+            except FileNotFoundError as e:
+                typer.echo(f"\n[F10-full ✗] universe 解析失败: {e}")
+                f10_codes = []
+            if f10_codes:
+                typer.echo(
+                    f"\n[F10-full] 范围 {f10_universe} = {len(f10_codes)} 只, "
+                    f"全 {len(ALL_CATEGORIES)} 类, 拉取中..."
+                )
+                try:
+                    stats_f10f = update_f10(
+                        paths.news_data_root, paths.parquet_root,
+                        f10_codes, categories=ALL_CATEGORIES, progress=True,
+                    )
+                    typer.echo(
+                        f"[F10-full ✓] {stats_f10f['ok']}/{stats_f10f['total']} OK "
+                        f"(skip={stats_f10f['skipped']}, fail={stats_f10f['failed']}, "
+                        f"new_rows={stats_f10f['new_rows']}) 耗时 {time.time() - t0:.1f}s"
+                    )
+                    if stats_f10f.get("ok", 0) > 0:
+                        _lu.mark_updated("f10")
+                except Exception as e:
+                    typer.echo(f"\n[F10-full ✗] 拉取失败: {e}")
 
         if include_concepts:
             from financial_analyst.data.updaters.concepts import update_concepts
