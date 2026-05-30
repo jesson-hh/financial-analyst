@@ -1061,6 +1061,137 @@ def _tool_quote_batch(codes: str) -> ToolResult:
     return ToolResult("\n".join(lines), side_effect={"quotes": data})
 
 
+def _tool_run_preset(preset: str, variables: Optional[str] = None) -> ToolResult:
+    """Execute a named swarm preset (DAG of SubAgents) and return the combined output.
+
+    ``preset`` is the preset name (e.g. "mainline-radar", "wencai-corporate-action-screening").
+    ``variables`` is an optional JSON object string with preset variables
+    (e.g. '{"code": "SH600519", "asof_date": "2026-01-15"}').
+    """
+    import asyncio as _asyncio
+
+    preset = preset.strip()
+    vars_dict: Dict[str, Any] = {}
+    if variables and variables.strip():
+        try:
+            vars_dict = json.loads(variables)
+        except json.JSONDecodeError as e:
+            return ToolResult(f"variables JSON 解析失败: {e}", is_error=True)
+
+    async def _run():
+        from financial_analyst.agent.orchestrator import Orchestrator
+        from financial_analyst.swarm import load_preset
+        from financial_analyst.tui import _ensure_registered
+
+        _ensure_registered()
+        try:
+            nodes = load_preset(preset, memory_root=_project_root() / "memories")
+        except FileNotFoundError:
+            return ToolResult(
+                f"找不到 preset '{preset}'. 可用的 preset 列表见系统提示中的'可用技能'.",
+                is_error=True,
+            )
+        except Exception as e:
+            return ToolResult(f"加载 preset '{preset}' 失败: {e}", is_error=True)
+
+        orch = Orchestrator(nodes)
+        try:
+            results = await orch.run(vars_dict)
+        except Exception as e:
+            return ToolResult(f"Preset '{preset}' 运行失败: {e}", is_error=True)
+
+        # Record usage
+        try:
+            from financial_analyst.skill_gen.lifecycle import record_skill_usage
+            record_skill_usage(preset, "preset")
+        except Exception:
+            pass
+
+        # Format results for the LLM
+        lines = [f"# Preset: {preset}"]
+        for name, r in results.items():
+            if r.ok and r.output is not None:
+                lines.append(f"\n## {name} ✓ ({r.elapsed_seconds:.0f}s)")
+                output_str = _format_agent_output(r.output)
+                lines.append(output_str[:1500])
+            elif not r.ok:
+                lines.append(f"\n## {name} ✗ — {r.error}")
+        return ToolResult("\n".join(lines))
+
+    try:
+        return _asyncio.run(_run())
+    except Exception as e:
+        return ToolResult(f"run_preset 异常: {type(e).__name__}: {e}", is_error=True)
+
+
+def _format_agent_output(output: Any) -> str:
+    """Format a SubAgent output model into LLM-friendly text."""
+    if output is None:
+        return "(无输出)"
+    if isinstance(output, str):
+        return output
+    if hasattr(output, "model_dump"):
+        d = output.model_dump()
+    elif isinstance(output, dict):
+        d = output
+    else:
+        return str(output)
+
+    # Look for common markdown/text fields first
+    for key in ("output_md", "headline", "summary", "verdict", "brief_md", "report_md"):
+        val = d.get(key)
+        if val and isinstance(val, str) and len(val) > 20:
+            return val
+
+    # Fallback: dump key fields compactly
+    parts = []
+    for k, v in d.items():
+        if v is None or (isinstance(v, (list, dict)) and len(v) == 0):
+            continue
+        s = str(v)
+        if len(s) > 300:
+            s = s[:300] + "…"
+        parts.append(f"**{k}**: {s}")
+    return "\n".join(parts) if parts else str(d)
+
+
+def _tool_lookup_skill(query: str = "", limit: int = 5) -> ToolResult:
+    """Search available preset workflows by keyword. Call BEFORE run_preset
+    when you're unsure which skill matches the user's request, or when the
+    user asks 'what skills do you have for X'.
+
+    Returns matching presets with name + description + required variables.
+    """
+    try:
+        from financial_analyst.skill_gen.registry import search_presets
+    except Exception:
+        return ToolResult("lookup_skill: skill registry 不可用", is_error=True)
+
+    q = (query or "").strip()
+    matches = search_presets(q, limit=limit)
+    if not matches:
+        return ToolResult(
+            f"没有找到匹配 '{q}' 的技能。试试换关键词，或直接调用 run_preset "
+            f"并传入你知道的 preset 名称。\n"
+            f"提示：用 lookup_skill 不传 query 可以列出所有可用技能。"
+        )
+
+    lines = [f"# 技能搜索结果: {q or '(全部)'}", f"共 {len(matches)} 个匹配：\n"]
+    for i, m in enumerate(matches):
+        lines.append(f"## {i+1}. {m['name']}")
+        if m["description"]:
+            lines.append(f"  {m['description']}")
+        if m.get("variables"):
+            vars_desc = ", ".join(
+                v if isinstance(v, str) else v.get("name", str(v))
+                for v in m["variables"]
+            )
+            lines.append(f"  需要变量: {vars_desc}")
+        lines.append(f"  调用方式: run_preset(preset=\"{m['name']}\", variables=...))")
+        lines.append("")
+    return ToolResult("\n".join(lines))
+
+
 def _tool_alert_add(code: str, kind: str, threshold: float, note: str = "") -> ToolResult:
     """Add one price-watch alert. kind: price_below (falls through) /
     price_above (rises above) / pct_above (gain breakout) / pct_below
@@ -1788,6 +1919,56 @@ TOOL_REGISTRY: List[Tool] = [
         cost_hint="seconds",
     ),
     Tool(
+        name="lookup_skill",
+        description=(
+            "搜索可用的预构建分析技能 (swarm preset)。根据关键词匹配技能名称和描述，"
+            "返回最相关的技能及其所需变量。当你拿不准该用哪个技能、或用户问"
+            "'你有什么技能/能做什么' 时，先调这个再调 run_preset。"
+            "不传 query 可列出所有技能。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "default": "",
+                    "description": "搜索关键词，如 '晨会'、'海外'、'深度分析'、'日内'",
+                },
+                "limit": {"type": "integer", "default": 5},
+            },
+        },
+        run=_tool_lookup_skill,
+        cost_hint="instant",
+    ),
+    Tool(
+        name="run_preset",
+        description=(
+            "执行一个预设的多 Agent 分析工作流 (swarm preset). "
+            "先用 `lookup_skill` 搜索匹配的技能名称，再用本工具执行。"
+            "preset 参数是技能名称 (如 'mainline-radar', 'morning-brief', "
+            "'overseas-radar', 'stock-deep-dive'). "
+            "variables 参数是可选的 JSON 对象, 传入该 preset 需要的变量 "
+            "(如 '{\"code\": \"SH600519\"}'). "
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "preset": {
+                    "type": "string",
+                    "description": "技能/Preset 名称, 如 mainline-radar, morning-brief, stock-deep-dive, overseas-radar, intraday-review 或自定义技能名.",
+                },
+                "variables": {
+                    "type": "string",
+                    "description": "可选的 JSON 对象字符串, 如 '{\"code\": \"SH600519\", \"asof_date\": \"2026-01-15\"}'. 不传则用默认值.",
+                },
+            },
+            "required": ["preset"],
+        },
+        run=_tool_run_preset,
+        cost_hint="minutes",
+        confirm_required=True,
+    ),
+    Tool(
         name="watchlist_show",
         description=(
             "Show the user's xueqiu 自选股 (or 模拟组合). "
@@ -2074,3 +2255,66 @@ def get_tool(name: str) -> Optional[Tool]:
 
 def list_tools() -> List[Tool]:
     return list(TOOL_REGISTRY)
+
+
+def add_dynamic_tool(tool: Tool) -> None:
+    """Register a dynamically-generated tool at runtime.
+
+    Raises ValueError if a tool with the same name already exists.
+    Thread-safe: only appends to the list.
+    """
+    if get_tool(tool.name) is not None:
+        raise ValueError(f"Tool {tool.name} already exists in registry")
+    TOOL_REGISTRY.append(tool)
+
+
+def remove_dynamic_tool(name: str) -> bool:
+    """Remove a dynamically-registered tool by name. Returns True if removed."""
+    for i, t in enumerate(TOOL_REGISTRY):
+        if t.name == name:
+            TOOL_REGISTRY.pop(i)
+            return True
+    return False
+
+
+def _load_dynamic_tools(skills_root: Optional[Path] = None) -> int:
+    """Import all modules in skills_generation/tools/*.py and register their tools.
+
+    Called at startup. Returns the number of tools loaded.
+    """
+    import importlib.util
+    import sys
+
+    if skills_root is None:
+        from pathlib import Path as _Path
+        skills_root = _Path("skills_generation")
+    tools_dir = skills_root / "tools"
+    if not tools_dir.exists():
+        return 0
+
+    count = 0
+    for f in sorted(tools_dir.glob("*.py")):
+        if f.name.startswith("_"):
+            continue
+        mod_name = f"skills.tools.{f.stem}"
+        try:
+            if mod_name in sys.modules:
+                mod = sys.modules[mod_name]
+            else:
+                spec = importlib.util.spec_from_file_location(mod_name, str(f))
+                if spec is None or spec.loader is None:
+                    continue
+                mod = importlib.util.module_from_spec(spec)
+                sys.modules[mod_name] = mod
+                spec.loader.exec_module(mod)
+            if hasattr(mod, "register"):
+                tool = mod.register()
+                TOOL_REGISTRY.append(tool)
+                count += 1
+        except Exception:
+            pass
+    return count
+
+
+# ── One-shot: load dynamic tools from skills_generation/tools/*.py at import time ──
+_load_dynamic_tools()

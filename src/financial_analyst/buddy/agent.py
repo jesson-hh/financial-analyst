@@ -28,6 +28,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from financial_analyst.buddy.tools import (
@@ -83,6 +84,8 @@ Behaviour rules:
 | "之前怎么看 X" / "上次评级" | **stocks_show(code)** |
 | 板块/主线月度回顾 | **mainline_radar** |
 | 盘前晨会 | **morning_brief** (slow, 全市场扫描 — 不要拿来答临时问题) |
+| 预构建分析技能/工作流 | 先用 **lookup_skill(query)** 搜索匹配的技能，再用 **run_preset(name)** 执行 |
+| "你有什么技能" / "能做什么分析" | **lookup_skill** 列出所有可用技能 |
 
 # News / sentiment workflow
 When user asks 新闻 / 情绪 / 雪球 / 今日动态:
@@ -151,6 +154,15 @@ def _build_system_prompt() -> str:
         n_tools=len(TOOL_REGISTRY),
         tool_list=_format_tool_list(),
     )
+    # v1.10: inject deployed skill/preset index so the agent knows what
+    # specialised workflows are available beyond the basic tool list.
+    try:
+        from financial_analyst.skill_gen.registry import build_skill_index
+        skill_index = build_skill_index()
+        if skill_index:
+            base += skill_index
+    except Exception:
+        pass
     lessons = _load_conversation_lessons()
     if lessons:
         base += ("\n\n# 累计经验 (用户通过 /lesson 沉淀, 最新在最后)\n"
@@ -191,6 +203,11 @@ class BuddyAgent:
         self.max_tool_iters = max_tool_iters
         self.max_llm_retries = max_llm_retries
         self._client = LLMClient.for_agent(self.AGENT_NAME)
+
+        # v1.9.3: skill review moves down to agent so both TUI + SSE paths trigger it.
+        self.skill_mode: str = "manual"  # "auto" | "manual"
+        self._skill_review_interval: int = 10
+        self._turns_since_skill_review: int = 0
 
     def reset(self) -> None:
         self.messages.clear()
@@ -240,6 +257,52 @@ class BuddyAgent:
 
     def add_user(self, text: str) -> None:
         self.messages.append(Message(role="user", content=text))
+
+    # ----- v1.9.3: background skill review (agent-level, works for TUI + SSE) --
+
+    def _after_turn(self) -> None:
+        """Called at the end of every turn. Increments the counter and
+        triggers a background skill review every N turns."""
+        self._turns_since_skill_review += 1
+        if self._turns_since_skill_review >= self._skill_review_interval:
+            self._trigger_background_skill_review()
+
+    def _trigger_background_skill_review(self) -> None:
+        self._turns_since_skill_review = 0
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._run_background_skill_review())
+
+    async def _run_background_skill_review(self) -> None:
+        import logging
+        try:
+            from financial_analyst.skill_gen.review import BackgroundSkillReviewer
+
+            reviewer = BackgroundSkillReviewer(
+                memory_root=Path("memories"),
+                skills_root=Path("skills_generation"),
+                mode=self.skill_mode,
+            )
+            parts = []
+            for m in self.messages[-60:]:
+                content = (m.content or "")[:500]
+                if content:
+                    parts.append(f"[{m.role}] {content}")
+            snapshot = "\n\n".join(parts)
+            if len(snapshot) < 100:
+                return
+
+            result = await reviewer.review(conversation_snapshot=snapshot[:8000])
+        except Exception:
+            return
+
+        summary = result.get("summary", "")
+        if summary and "no actions needed" not in summary:
+            logging.getLogger("financial-analyst").info(
+                "Background skill review: %s", summary
+            )
 
     def _tool_schemas(self) -> List[Dict[str, Any]]:
         """LiteLLM normalises tool format internally, but the cleanest path
@@ -297,6 +360,7 @@ class BuddyAgent:
                 err = f"LLM 调用失败 (重试 {self.max_llm_retries} 次): {type(last_exc).__name__}: {last_exc}"
                 yield TurnEvent("error", err)
                 yield TurnEvent("done", None)
+                self._after_turn()
                 return
 
             # LiteLLM returns OpenAI-compat envelope; the message has
@@ -350,6 +414,7 @@ class BuddyAgent:
             if not normalised_calls:
                 # LLM done — no more tools wanted.
                 yield TurnEvent("done", None)
+                self._after_turn()
                 return
 
             # Execute each tool call.
@@ -419,6 +484,7 @@ class BuddyAgent:
                 self.messages.append(Message(role="tool", content=tr["content"], raw=tr))
 
         # Loop exhausted — too many tool iterations.
+        self._after_turn()
         yield TurnEvent("error",
                         f"达到 tool 调用上限 ({self.max_tool_iters} 次). "
                         f"LLM 在工具循环里转圈, 没收敛到答案. "
