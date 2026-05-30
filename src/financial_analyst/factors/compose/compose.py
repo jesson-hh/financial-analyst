@@ -161,7 +161,8 @@ def compose_factors(
             ind_loader = IndustryLoader() if industry_map_path().exists() else None
         except Exception:
             ind_loader = None
-        panel = PanelData.from_loader(
+        from financial_analyst.factors.zoo.panel_cache import load_panel_cached
+        panel = load_panel_cached(
             loader, codes, start, end, freq="day", industry_loader=ind_loader
         )
     except Exception as e:

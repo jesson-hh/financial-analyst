@@ -192,7 +192,8 @@ def factor_report(spec_or_expr: str, config: Optional[EvalConfig] = None) -> Fac
             ind_loader = IndustryLoader() if industry_map_path().exists() else None
         except Exception:
             ind_loader = None
-        panel = PanelData.from_loader(loader, codes, start, end, freq="day", industry_loader=ind_loader)
+        from financial_analyst.factors.zoo.panel_cache import load_panel_cached
+        panel = load_panel_cached(loader, codes, start, end, freq="day", industry_loader=ind_loader)
     except Exception as e:
         load_meta = ReportMeta(spec_or_expr, "?", config.universe, config.freq,
                                start, end, 0, len(codes), config.effective_fwd_days())

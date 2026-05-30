@@ -1251,8 +1251,9 @@ def build_app():
                 ind = IndustryLoader() if industry_map_path().exists() else None
             except Exception:
                 ind = None
-            panel = PanelData.from_loader(loader, codes, since, until,
-                                          freq="day", industry_loader=ind)
+            from financial_analyst.factors.zoo.panel_cache import load_panel_cached
+            panel = load_panel_cached(loader, codes, since, until,
+                                      freq="day", industry_loader=ind)
             df = run_bench(panel, family=family, fwd_days=5)
             return {"rows": _jsonable(df.to_dict(orient="records"))}
         except Exception as exc:

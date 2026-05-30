@@ -7,6 +7,17 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _clear_panel_cache():
+    """面板缓存是进程级 LRU。不同测试对相同 (codes, 窗口) 用不同 stub loader —
+    不清的话后一个测试会命中前一个的面板 (key 不含 loader)。生产是单一真实
+    数据 loader 故缓存正确; 测试需逐个隔离。"""
+    from financial_analyst.factors.zoo.panel_cache import clear_panel_cache
+    clear_panel_cache()
+    yield
+    clear_panel_cache()
+
+
+@pytest.fixture(autouse=True)
 def _ci_safe_defaults(tmp_path_factory, monkeypatch):
     """CI / fresh-machine safety net — applied to EVERY test.
 

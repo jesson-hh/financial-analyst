@@ -71,3 +71,20 @@ def test_concurrent_no_crash():
     with ThreadPoolExecutor(max_workers=8) as ex:
         res = list(ex.map(lambda _: load_panel_cached(loader, codes, "2024-01-01", "2024-02-01"), range(32)))
     assert all(r is not None for r in res)
+
+
+def test_factor_report_uses_cache(monkeypatch):
+    import financial_analyst.data.universe as univ
+    import financial_analyst.data.loader_factory as lf
+    from financial_analyst.factors.zoo.panel_cache import clear_panel_cache
+    from financial_analyst.factors.eval.report import factor_report
+    from financial_analyst.factors.eval.config import EvalConfig
+    clear_panel_cache()
+    cnt = {"n": 0}
+    monkeypatch.setattr(univ, "resolve_universe_codes", lambda u: ["SH600000", "SZ000001", "SH600036"])
+    monkeypatch.setattr(lf, "get_default_loader", lambda: _stub_loader(cnt))
+    cfg = EvalConfig(universe="x", freq="day", start="2024-01-01", end="2024-03-01")
+    factor_report("rank(close)", cfg)
+    n1 = cnt["n"]
+    factor_report("rank(-close)", cfg)   # 同池同窗, 不同因子 → 命中缓存
+    assert cnt["n"] == n1
