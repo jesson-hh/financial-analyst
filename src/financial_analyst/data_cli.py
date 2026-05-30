@@ -233,6 +233,10 @@ def update_cmd(
         False, "--include-tick-history",
         help="拉历史 tick (pytdx get_history_transaction_data) → parquet/tick_history.parquet; 量级大, 默认 codes × 最近 30 日",
     ),
+    include_tick_realtime: bool = typer.Option(
+        False, "--include-tick-realtime",
+        help="拉今日实时分笔 (pytdx get_transaction_data) → parquet/tick_realtime.parquet; 每次调用刷新今日数据",
+    ),
     include_index_intraday: bool = typer.Option(
         False, "--include-index-intraday",
         help="拉 5 大指数 1min K (pytdx get_index_bars cat=7) → parquet/index_intraday.parquet",
@@ -326,7 +330,7 @@ def update_cmd(
                    or include_margin or include_lockup or include_corporate_actions
                    or include_ths_hot or include_announcements
                    or include_xdxr or include_watchlist or include_tick_history
-                   or include_index_intraday)
+                   or include_tick_realtime or include_index_intraday)
     if _need_paths:
         from financial_analyst.data.paths import get_data_paths
         paths = get_data_paths()
@@ -636,6 +640,24 @@ def update_cmd(
                     _lu.mark_updated("tick_history")
             except Exception as e:
                 typer.echo(f"\n[tick_history ✗] {e}")
+
+        # 今日实时分笔 (pytdx get_transaction_data, per-stock, 刷新今日快照)
+        if include_tick_realtime:
+            from financial_analyst.data.updaters.tick_realtime import update_tick_realtime
+            t0 = time.time()
+            try:
+                stats_trt = update_tick_realtime(
+                    paths.parquet_root, codes_list, log_progress=True
+                )
+                typer.echo(
+                    f"\n[tick_realtime ✓] ok={stats_trt['ok']}/{stats_trt['total']} "
+                    f"(fail={stats_trt['failed']}) new_rows={stats_trt['new_rows']} "
+                    f"耗时 {time.time() - t0:.1f}s"
+                )
+                if stats_trt.get("ok", 0) > 0:
+                    _lu.mark_updated("tick_realtime")
+            except Exception as e:
+                typer.echo(f"\n[tick_realtime ✗] {e}")
 
         # 5 大指数 1min K (pytdx get_index_bars cat=7)
         if include_index_intraday:
