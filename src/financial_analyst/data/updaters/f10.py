@@ -328,16 +328,63 @@ _UNIVERSE_INDEX_CODE = {
     "csi300": "000300.SH",
     "csi500": "000905.SH",
     "csi800": "000906.SH",
+    "csi1000": "000852.SH",
 }
+
+# Constituent-code column candidates. The research-lab parquet (G:/stocks) ships
+# Chinese headers (成分券代码); a bootstrapped dataset bundle may use English
+# stock_code. Try known names in order, then a 6-digit-code heuristic.
+_CODE_COL_CANDIDATES = ("stock_code", "成分券代码", "con_code", "code", "ts_code")
+
+
+def _prefix_code(code: str) -> str:
+    """Normalise a constituent code to qlib form (SH/SZ/BJ + 6 digits).
+    Bare ``600000`` → ``SH600000``; already-prefixed codes pass through; an
+    unrecognised leading digit is returned normalised but unprefixed."""
+    c = str(code).strip().upper()
+    if c[:2] in ("SH", "SZ", "BJ"):
+        return c
+    digits = c.split(".")[0]
+    if not (len(digits) == 6 and digits.isdigit()):
+        return c
+    if digits[0] == "6":
+        return "SH" + digits
+    if digits[0] in ("0", "3"):
+        return "SZ" + digits
+    if digits[0] in ("4", "8"):
+        return "BJ" + digits
+    return c
+
+
+def _detect_code_col(df: pd.DataFrame) -> Optional[str]:
+    """Locate the constituent stock-code column across known schemas."""
+    for name in _CODE_COL_CANDIDATES:
+        if name in df.columns:
+            return name
+    best, best_n = None, -1  # heuristic: non-index col mostly 6-digit codes, max uniques
+    for col in df.columns:
+        if col in ("index_code", "index_name"):
+            continue
+        s = df[col].astype(str).str.strip()
+        if len(s) and s.str.fullmatch(r"\d{6}(\.\w+)?").mean() > 0.8:
+            n = s.nunique()
+            if n > best_n:
+                best, best_n = col, n
+    return best
 
 
 def resolve_universe(
     parquet_root: Union[str, Path],
     universe: str = "csi500",
 ) -> List[str]:
-    """Resolve a universe label to a list of qlib codes.
+    """Resolve a universe label to a list of qlib codes (SH/SZ/BJ-prefixed).
 
-    Supported labels: ``csi300`` / ``csi500`` / ``csi800`` / ``all``.
+    Supported labels: ``csi300`` / ``csi500`` / ``csi800`` / ``csi1000`` / ``all``.
+    Membership is matched on the parquet's ``index_name`` column (clean English
+    label) when present, else on ``index_code`` via ``_UNIVERSE_INDEX_CODE`` (with
+    or without exchange suffix). The constituent-code column is auto-detected
+    (Chinese 成分券代码 or English stock_code) and bare codes are exchange-prefixed.
+    ``all`` returns every distinct constituent across the indices in the parquet.
 
     Requires ``parquet_root / index_constituents.parquet`` to be present
     (populated during ``fa init`` from the dataset bundle). If missing,
@@ -353,21 +400,38 @@ def resolve_universe(
         )
     df = pd.read_parquet(idx_path)
 
-    if universe == "all":
-        col = "stock_code" if "stock_code" in df.columns else df.columns[0]
-        return sorted(df[col].astype(str).str.upper().unique().tolist())
+    code_col = _detect_code_col(df)
+    if code_col is None:
+        raise ValueError(
+            f"index_constituents.parquet: no constituent-code column found "
+            f"(looked for {_CODE_COL_CANDIDATES} + 6-digit heuristic), got {list(df.columns)}"
+        )
 
-    target = _UNIVERSE_INDEX_CODE.get(universe)
-    if not target:
-        raise ValueError(
-            f"Unknown universe '{universe}'. Supported: csi300 / csi500 / csi800 / all "
-            f"(or pass `--codes` directly)."
-        )
-    if "index_code" not in df.columns or "stock_code" not in df.columns:
-        raise ValueError(
-            f"index_constituents.parquet schema unexpected — needs columns "
-            f"['index_code', 'stock_code'], got {list(df.columns)}"
-        )
-    return sorted(
-        df[df["index_code"] == target]["stock_code"].astype(str).str.upper().unique().tolist()
-    )
+    if universe == "all":
+        codes = df[code_col]
+    else:
+        mask = None
+        if "index_name" in df.columns:
+            m = df["index_name"].astype(str).str.strip().str.lower() == universe.lower()
+            if m.any():
+                mask = m
+        if mask is None and "index_code" in df.columns:
+            target = _UNIVERSE_INDEX_CODE.get(universe)
+            if target:
+                ic = df["index_code"].astype(str).str.strip().str.upper()
+                m = (ic == target.upper()) | (ic == target.split(".")[0].upper())
+                if m.any():
+                    mask = m
+        if mask is None:
+            if universe not in _UNIVERSE_INDEX_CODE:
+                raise ValueError(
+                    f"Unknown universe '{universe}'. Supported: "
+                    f"{' / '.join(sorted(_UNIVERSE_INDEX_CODE))} / all (or pass `--codes` directly)."
+                )
+            return []  # known label but absent from this parquet
+        codes = df[mask][code_col]
+
+    return sorted({
+        _prefix_code(c) for c in codes.astype(str)
+        if str(c).strip() and str(c).strip().lower() != "nan"
+    })
