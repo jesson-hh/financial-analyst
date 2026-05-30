@@ -229,8 +229,10 @@ class ETFLoader:
             return {"tracking_error_annualized": None, "reason": "index not in etf_index"}
         nav_s = nav.dropna(subset=["nav_date", "unit_nav"]).copy()
         nav_s = nav_s.assign(_d=nav_s["nav_date"].astype(str)).set_index("_d")["unit_nav"].astype(float).sort_index()
+        nav_s = nav_s[~nav_s.index.duplicated(keep="last")]   # real fund_nav can repeat a date
         idx_s = ei.dropna(subset=["trade_date", "close"]).copy()
         idx_s = idx_s.assign(_d=idx_s["trade_date"].astype(str)).set_index("_d")["close"].astype(float).sort_index()
+        idx_s = idx_s[~idx_s.index.duplicated(keep="last")]
         merged = pd.DataFrame({"nav": nav_s, "idx": idx_s}).dropna().sort_index().tail(window + 1)
         if len(merged) < 6:
             return {"tracking_error_annualized": None, "reason": "insufficient overlap"}
