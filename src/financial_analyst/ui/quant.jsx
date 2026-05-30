@@ -41,7 +41,24 @@ const poolParam = (p) => (p === 'csi300' ? POOL_DEFAULT : p);
 
 // ═════════════════════════ 三态小组件 ═════════════════════════
 function Loading({ label = '加载中…' }) {
-  return <div className="mono" style={{ padding: 24, fontSize: 12, color: 'var(--ink-3)', textAlign: 'center' }}>⏳ {label}</div>;
+  const [secs, setSecs] = useState(0);
+  useEffect(() => {
+    const t0 = Date.now();
+    const id = setInterval(() => setSecs(Math.floor((Date.now() - t0) / 1000)), 250);
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, padding: 36, animation: 'fadeIn 0.3s ease' }}>
+      <div style={{
+        width: 26, height: 26, borderRadius: '50%', boxSizing: 'border-box',
+        border: '2.5px solid var(--line)', borderTopColor: 'var(--ink-1)',
+        animation: 'spin 0.8s linear infinite',
+      }} />
+      <div className="mono" style={{ fontSize: 12, color: 'var(--ink-3)', textAlign: 'center' }}>
+        {label}{secs >= 1 ? ' · ' + secs + 's' : ''}
+      </div>
+    </div>
+  );
 }
 function Empty({ label = '暂无数据' }) {
   return <div className="serif" style={{ padding: 24, fontSize: 13, color: 'var(--ink-3)', textAlign: 'center' }}>{label}</div>;
