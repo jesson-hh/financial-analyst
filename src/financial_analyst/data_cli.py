@@ -949,3 +949,112 @@ def bootstrap_cmd(
     typer.echo("  fa data status                — 看数据状态")
     typer.echo("  fa report SH600519            — 跑第一份研报")
     typer.echo("  fa data update                — 每日增量更新 (pytdx 直连)")
+
+
+# ───────────────────────── update-etf ─────────────────────────
+
+
+def _ensure_etf_calendar(etf_uri: str) -> None:
+    """ETF 专用 Qlib 目录缺 calendars/day.txt 时, 从日线目录复制过来.
+
+    ETF 与 A 股同交易日, 直接复用 cn_data/calendars/day.txt 即可.
+    """
+    from financial_analyst.data.paths import get_data_paths
+
+    cal_path = Path(etf_uri) / "calendars" / "day.txt"
+    if cal_path.exists():
+        return
+    cal_path.parent.mkdir(parents=True, exist_ok=True)
+    p = get_data_paths()
+    src_cal = p.qlib_day / "calendars" / "day.txt"
+    if src_cal.exists():
+        shutil.copy2(src_cal, cal_path)
+
+
+@data_app.command("update-etf")
+def update_etf_cmd(
+    codes: Optional[str] = typer.Option(
+        None, "--codes",
+        help="逗号分隔 ETF 代码 (SH510300,SZ159001) / @file 文件 / 留空=全 ETF universe"),
+    n_daily: int = typer.Option(
+        800, "--n-daily",
+        help="日线拉最近 N 根 (默认 800 全量; 增量用 30)"),
+    skip_fund: bool = typer.Option(
+        False, "--skip-fund",
+        help="跳过基金元数据 (NAV/份额/持仓/分红/基准, 需要 FA_TUSHARE_TOKEN)"),
+    skip_spot: bool = typer.Option(
+        False, "--skip-spot",
+        help="跳过 ETF 实时快照 (IOPV/溢折价/规模/换手)"),
+):
+    """增量更新 ETF 数据 — 日线价格 + 基金元数据 + 实时快照 (单进程).
+
+    三步顺序执行:
+      1. etf_price  — pytdx 日线 OHLCV (写 ETF 专用 qlib_etf 目录)
+      2. etf_fund   — Tushare ETF 基金元数据 (NAV/份额/持仓/分红/基准指数)
+                      需要 FA_TUSHARE_TOKEN; 设环境变量或用 --skip-fund 跳过
+      3. etf_spot   — akshare 当日实时快照 (IOPV/溢折价/规模)
+
+    Examples:
+      fa data update-etf                          # 全 ETF universe, 全三步
+      fa data update-etf --codes SH510300,SZ159001  # 指定代码
+      fa data update-etf --skip-fund              # 不需要 Tushare token
+      fa data update-etf --n-daily 30             # 增量模式 (只补最近 30 根)
+    """
+    import datetime
+
+    from financial_analyst.data import last_update as _lu
+    from financial_analyst.data.paths import get_data_paths
+    from financial_analyst.data.updaters import etf_price, etf_fund, etf_spot
+
+    # 1. 解析代码
+    if codes:
+        codes_list = [c.strip().upper() for c in codes.replace("，", ",").split(",") if c.strip()]
+    else:
+        from financial_analyst.data.universe import resolve_universe_codes
+        codes_list = resolve_universe_codes("etf")
+
+    if not codes_list:
+        typer.echo("✗ 没有 ETF 代码可更新. 传 --codes 或确认 ETF universe 有数据.")
+        raise typer.Exit(1)
+
+    typer.echo(f"=== fa data update-etf — {len(codes_list)} 只 ETF ===")
+
+    # 2. 解析 ETF qlib URI
+    p = get_data_paths()
+    etf_uri = str(p.qlib_etf)
+    typer.echo(f"ETF qlib_uri  → {etf_uri}")
+    typer.echo(f"parquet_root  → {p.parquet_root}")
+    typer.echo("")
+
+    # 3. 确保日历存在
+    _ensure_etf_calendar(etf_uri)
+
+    # 4a. ETF 日线价格
+    t0 = time.time()
+    stats = etf_price.update_etf_daily_batch(etf_uri, codes_list, n_bars=n_daily)
+    typer.echo(
+        f"[etf_price ✓] {stats['ok']}/{stats['total']} OK "
+        f"({stats['empty']} 空, {stats['failed']} 失败) "
+        f"耗时 {time.time() - t0:.1f}s"
+    )
+
+    # 4b. 基金元数据 (Tushare, 可跳过)
+    if not skip_fund:
+        t0 = time.time()
+        etf_fund.update_all_fund(codes_list, str(p.parquet_root))
+        typer.echo(f"[etf_fund  ✓] 耗时 {time.time() - t0:.1f}s")
+
+    # 4c. 实时快照 (akshare, 可跳过)
+    if not skip_spot:
+        t0 = time.time()
+        asof = datetime.date.today().isoformat()
+        etf_spot.update_etf_spot(codes_list, str(p.parquet_root), asof=asof)
+        typer.echo(f"[etf_spot  ✓] asof={asof} 耗时 {time.time() - t0:.1f}s")
+
+    # 5. 记录更新时间戳
+    try:
+        _lu.mark_updated("etf")
+    except Exception:
+        pass
+
+    typer.echo(f"\n=== 完成. {len(codes_list)} 只 ETF 更新完毕 ===")
