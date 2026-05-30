@@ -2,6 +2,14 @@
 
 All notable changes to this project follow [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning 2.0.0](https://semver.org/).
 
+## [Unreleased]
+
+### Added — TDX Phase 1: 4 new data updaters + CLI flags
+
+- feat(data/updaters): TDX Phase 1 接通 — 4 new updaters (xdxr / watchlist / tick_history / index_intraday) + 4 `--include-*` CLI flags. Closes the pytdx XDXR gap noted in `pytdx_kline.py:10-12`. Adds market-breadth (up_count/down_count) for 5 major indices via 1min intraday. Watchlist syncs T0002/blocknew/zxg.blk to give agents user-context awareness. See `docs/superpowers/specs/2026-05-30-tdx-phase1-接通-design.md`.
+
+---
+
 ## [1.0.10] — 2026-05-28  · Fix wisdom tools crash — module registered but never shipped
 
 ### Fixed — `wisdom_search` / `wisdom_review` crashed on call (regression in v1.0.8 / v1.0.9)
