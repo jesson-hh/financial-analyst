@@ -204,6 +204,10 @@ class BuddyApp:
         self.watch_sources: Optional[str] = None
         self.watch_task: Optional[asyncio.Task] = None
 
+        # v1.9.0: Hermes-style background skill review.
+        # v1.9.3: skill_mode is the source of truth; agent mirrors it.
+        self.skill_mode: str = "manual"  # "auto" | "manual"
+
         # v1.7.5: restore persisted prefs (permission_mode + model) from
         # ~/.financial-analyst/buddy.yaml so the user doesn't re-set them
         # every launch. Applied AFTER reading defaults above.
@@ -434,6 +438,10 @@ class BuddyApp:
         mode = data.get("permission_mode")
         if mode in ("default", "safe", "auto"):
             self.permission_mode = mode
+        skill_mode = data.get("skill_mode")
+        if skill_mode in ("auto", "manual"):
+            self.skill_mode = skill_mode
+            self.agent.skill_mode = skill_mode
         prov = data.get("provider")
         model = data.get("model")
         if prov and model:
@@ -460,6 +468,7 @@ class BuddyApp:
                     "permission_mode": self.permission_mode,
                     "provider": self.provider,
                     "model": self.model,
+                    "skill_mode": self.skill_mode,
                 }, allow_unicode=True),
                 encoding="utf-8",
             )
@@ -712,7 +721,7 @@ class BuddyApp:
         ))
 
     def _get_status_ansi(self):
-        """Persistent mode + model + token-usage status line."""
+        """Persistent mode + model + skill_mode + token-usage status line."""
         icons = {"default": "🛡", "safe": "🚦", "auto": "⚡"}
         colors = {"default": "cyan", "safe": "yellow", "auto": "magenta"}
         icon = icons.get(self.permission_mode, "❓")
@@ -745,10 +754,16 @@ class BuddyApp:
                 f"  [dim]·[/] [green]👁 盯盘 {self.watch_interval // 60}m[/] "
                 f"[{sess_color}]({sess_label})[/]"
             )
+        # v1.9.0: skill mode indicator
+        skill_mode_str = ""
+        if self.skill_mode == "auto":
+            skill_mode_str = "  [dim]·[/] [magenta]🔧 skill:auto[/]"
+        else:
+            skill_mode_str = "  [dim]·[/] [dim]🔧 skill:manual[/]"
         return ANSI(_rich_to_ansi(
             f"  [{color}]{icon} {self.permission_mode}[/] "
             f"[dim]·[/] [bold]{self.model}[/] [dim]({self.provider})[/]"
-            f"{watch}{tokens}{approved}"
+            f"{skill_mode_str}{watch}{tokens}{approved}"
         ))
 
     # ----- submission / queueing -----------------------------------------
@@ -938,6 +953,9 @@ class BuddyApp:
             if self.application is not None:
                 self.application.invalidate()
 
+            # v1.9.3: background skill review is now handled by BuddyAgent,
+            # which covers both TUI and SSE paths. See agent.py _after_turn().
+
             # Run any queued prompt.
             if self.queued_input is not None:
                 queued = self.queued_input
@@ -1121,6 +1139,8 @@ class BuddyApp:
             self._save_transcript(Path(target))
             self._append_rich(f"[dim]已保存到 {target}[/]")
             return True
+        if cmd == "/skill":
+            return self._handle_skill_cmd(rest)
         return False
 
     def _handle_mode_cmd(self, rest: List[str]) -> bool:
@@ -1234,6 +1254,162 @@ class BuddyApp:
         self._append_rich(f"[red]未知 /watch 参数: {_escape_markup(arg)}[/] (on / off)")
         return True
 
+    def _handle_skill_cmd(self, rest: List[str]) -> bool:
+        """``/skill`` — autonomous skill generation.
+
+        Subcommands:
+          /skill generate <desc>  → generate a new skill
+          /skill list             → show pending proposals
+          /skill review <t>/<n>   → show proposal code
+          /skill accept <t>/<n>   → deploy
+          /skill reject <t>/<n>   → delete
+          /skill config [auto|manual] → show/set skill mode
+        """
+        sub = rest[0] if rest else ""
+        if not sub:
+            auto_marker = " [green]✓[/]" if self.skill_mode == "auto" else ""
+            manual_marker = " [green]✓[/]" if self.skill_mode == "manual" else ""
+            self._append_rich(
+                "[bold]/skill[/] 自主技能生成\n"
+                "  [cyan]/skill generate <描述>[/] — 生成新技能\n"
+                "  [cyan]/skill list[/]             — 查看待审批提案\n"
+                "  [cyan]/skill review <类型>/<名称>[/] — 查看提案代码\n"
+                "  [cyan]/skill accept <类型>/<名称>[/] — 部署技能\n"
+                "  [cyan]/skill reject <类型>/<名称>[/] — 删除提案\n"
+                "  [cyan]/skill status[/]           — 统计提案\n"
+                "  [cyan]/skill config [auto|manual][/] — 技能生成模式\n"
+                f"    当前: auto{auto_marker}  manual{manual_marker}"
+            )
+            return True
+
+        if sub == "generate":
+            description = " ".join(rest[1:]) if len(rest) > 1 else ""
+            if not description:
+                self._append_rich("[red]用法: /skill generate <描述>[/]")
+                return True
+            self._append_rich(f"[dim]正在生成技能: {description[:40]}...[/]")
+            try:
+                from financial_analyst.skill_gen import SkillGenerator, save_proposal
+                import asyncio
+                loop = asyncio.get_event_loop()
+                gen = SkillGenerator()
+                proposal = loop.run_until_complete(gen.generate(description=description))
+                dest = save_proposal(proposal)
+                self._append_rich(
+                    f"[green]已生成 [{proposal.skill_type.value}] {proposal.name}[/]\n"
+                    f"  标题: {proposal.title}\n"
+                    f"  置信度: {proposal.confidence}\n"
+                    f"  [dim]审查: /skill review {proposal.skill_type.value}/{proposal.name}[/]"
+                )
+            except Exception as exc:
+                self._append_rich(f"[red]生成失败: {exc}[/]")
+            return True
+
+        if sub == "list":
+            from financial_analyst.skill_gen import list_proposals
+            proposals = list_proposals()
+            if not proposals:
+                self._append_rich("[dim]暂无待审批的技能提案[/]")
+                return True
+            lines = ["[bold]待审批技能提案:[/]"]
+            for p in proposals:
+                lines.append(f"  [{p.skill_type.value}] [cyan]{p.name}[/] — {p.title[:50]}")
+            self._append_rich("\n".join(lines))
+            return True
+
+        if sub in ("review", "accept", "reject"):
+            if len(rest) < 2:
+                self._append_rich(f"[red]用法: /skill {sub} <类型>/<名称>[/]")
+                return True
+            target = rest[1]
+            if "/" not in target:
+                self._append_rich("[red]参数格式: <类型>/<名称> (如 tool/convertible_bond)[/]")
+                return True
+            type_str, name = target.split("/", 1)
+            from financial_analyst.skill_gen import SkillType, load_proposal, accept_proposal, reject_proposal
+            try:
+                st = SkillType(type_str)
+            except ValueError:
+                self._append_rich(f"[red]未知类型: {type_str} (agent/tool/preset)[/]")
+                return True
+
+            if sub == "review":
+                proposal = load_proposal(name, st)
+                if proposal is None:
+                    self._append_rich(f"[yellow]未找到提案: {target}[/]")
+                    return True
+                lang = "yaml" if st.value == "preset" else "python"
+                self._append_rich(
+                    f"[bold]{proposal.title}[/] [{st.value}]\n"
+                    f"[dim]{proposal.description}[/]\n\n"
+                    f"```{lang}\n{proposal.generated_code[:3000]}\n```"
+                )
+                return True
+
+            if sub == "accept":
+                result = accept_proposal(name, st)
+                if "error" in result:
+                    self._append_rich(f"[red]Error: {result['error']}[/]")
+                else:
+                    self._append_rich(f"[green]已部署 {st.value}/{name}[/]")
+                return True
+
+            if sub == "reject":
+                result = reject_proposal(name, st)
+                if "error" in result:
+                    self._append_rich(f"[red]Error: {result['error']}[/]")
+                else:
+                    self._append_rich(f"[yellow]已删除提案 {st.value}/{name}[/]")
+                return True
+
+        if sub == "status":
+            from financial_analyst.skill_gen import list_proposals, SkillType
+            proposals = list_proposals()
+            if not proposals:
+                self._append_rich("[dim]暂无待审批的技能提案[/]")
+                return True
+            counts: dict[str, int] = {}
+            for p in proposals:
+                counts[p.skill_type.value] = counts.get(p.skill_type.value, 0) + 1
+            parts = [f"[bold]待审批提案: {len(proposals)}[/]"]
+            for st in SkillType:
+                n = counts.get(st.value, 0)
+                parts.append(f"  {st.value}: {n}")
+            self._append_rich("\n".join(parts))
+            return True
+
+        if sub == "config":
+            mode_arg = rest[1] if len(rest) > 1 else ""
+            if not mode_arg:
+                other = "auto" if self.skill_mode == "manual" else "manual"
+                self._append_rich(
+                    f"[bold]技能生成模式:[/] [cyan]{self.skill_mode}[/]\n"
+                    f"  auto   — 后台审查后自动部署，不需确认\n"
+                    f"  manual — 生成提案保存到 _proposed/，需人工审查\n"
+                    f"[dim]切换: /skill config {other}[/]"
+                )
+                return True
+            mode_arg = mode_arg.strip().lower()
+            if mode_arg not in ("auto", "manual"):
+                self._append_rich(f"[red]无效模式: {mode_arg}. 请用 auto 或 manual.[/]")
+                return True
+            prev = self.skill_mode
+            self.skill_mode = mode_arg
+            self.agent.skill_mode = mode_arg
+            self._save_prefs()
+            self._append_rich(
+                f"[green]技能生成模式: {prev} → [bold]{mode_arg}[/][/] [dim](已保存)[/]"
+            )
+            if mode_arg == "auto":
+                self._append_rich(
+                    "[yellow]⚠ auto 模式: 技能将由后台审查自动部署，不需确认.[/]\n"
+                    "[dim]审查记录: ~/.financial-analyst/audit.jsonl[/]"
+                )
+            return True
+
+        self._append_rich(f"[red]未知 /skill 参数: {sub}[/]")
+        return True
+
     def _handle_model_cmd(self, rest: List[str]) -> bool:
         """``/model`` (list) or ``/model <name>`` (switch).
 
@@ -1293,6 +1469,11 @@ class BuddyApp:
         ansi_re = re.compile(r"\x1b\[[0-9;]*m")
         plain = "".join(ansi_re.sub("", c) for c in self.transcript_chunks)
         path.write_text(plain, encoding="utf-8")
+
+    # ----- v1.9.3: background skill review moved to BuddyAgent --------------
+    # See agent.py _after_turn() / _run_background_skill_review().
+    # The agent handles both TUI and SSE paths, building its snapshot from
+    # self.messages instead of the Rich transcript.
 
     # ----- animator -------------------------------------------------------
 

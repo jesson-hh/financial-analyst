@@ -623,6 +623,28 @@ def build_app():
         except Exception as exc:
             return JSONResponse({"ok": False, "error": f"{exc.__class__.__name__}: {exc}"}, status_code=500)
 
+    # ── Skill mode (auto/manual) ──
+    @app.get("/skill-mode")
+    async def get_skill_mode():
+        from financial_analyst.skill_gen.lifecycle import get_skill_mode
+        try:
+            mode = get_skill_mode()
+            return JSONResponse({"ok": True, "mode": mode})
+        except Exception as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+    @app.post("/skill-mode")
+    async def set_skill_mode(body: Dict[str, Any]):
+        from financial_analyst.skill_gen.lifecycle import set_skill_mode
+        mode = (body or {}).get("mode", "").strip().lower()
+        if mode not in ("auto", "manual"):
+            return JSONResponse({"ok": False, "error": "mode must be 'auto' or 'manual'"}, status_code=400)
+        try:
+            set_skill_mode(mode)
+            return JSONResponse({"ok": True, "mode": mode})
+        except Exception as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
     @app.get("/health")
     async def health():
         from financial_analyst import __version__

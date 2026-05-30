@@ -416,6 +416,9 @@ async def handle_slash(cmd: str, args: List[str]) -> None:
                 "  /sessions delete <name> — delete (not 'default')"
             )
 
+    elif cmd == "skill":
+        await handle_skill_cmd(args)
+
     else:
         console.print(f"[red]unknown command: /{cmd}[/red]")
 
@@ -626,6 +629,152 @@ async def handle_memory_cmd(args: List[str]) -> None:
             "  /memory accept _proposed/<agent>/<file>.md\n"
             "  /memory reject _proposed/<agent>/<file>.md"
         )
+
+
+async def handle_skill_cmd(args: List[str]) -> None:
+    """Handle /skill subcommands.
+
+    Subcommands:
+      generate <desc>    — generate a new skill proposal (LLM auto-detects type)
+      list [--type T]    — list pending proposals
+      review <type>/<name> — print proposal code
+      accept <type>/<name> — deploy the skill
+      reject <type>/<name> — delete the proposal
+      status             — count pending per type
+    """
+    if not args:
+        console.print(
+            "[dim]usage:[/dim]\n"
+            "  /skill generate <description>\n"
+            "  /skill list [--type agent|tool|preset]\n"
+            "  /skill review <type>/<name>\n"
+            "  /skill accept <type>/<name>\n"
+            "  /skill reject <type>/<name>\n"
+            "  /skill status"
+        )
+        return
+
+    sub = args[0]
+
+    if sub == "generate":
+        description = " ".join(args[1:]).strip()
+        if not description:
+            console.print("[red]usage: /skill generate <description>[/red]")
+            return
+        from financial_analyst.skill_gen import SkillGenerator, save_proposal
+        with console.status(f"[cyan]正在生成技能: {description[:40]}...[/cyan]"):
+            gen = SkillGenerator()
+            proposal = asyncio.run(gen.generate(description=description))
+            dest = save_proposal(proposal)
+        console.print(
+            f"[green]✓[/green] 已生成 [{proposal.skill_type.value}] [bold]{proposal.name}[/bold]\n"
+            f"  标题: {proposal.title}\n"
+            f"  置信度: {proposal.confidence}\n"
+            f"  文件: {dest}\n"
+            f"\n  [dim]审查: /skill review {proposal.skill_type.value}/{proposal.name}[/]"
+        )
+
+    elif sub == "list":
+        from financial_analyst.skill_gen import list_proposals, SkillType
+        st = None
+        for a in args[1:]:
+            if a.startswith("--type="):
+                try:
+                    st = SkillType(a.split("=", 1)[1])
+                except ValueError:
+                    console.print(f"[red]unknown type: {a}[/red]")
+                    return
+        proposals = list_proposals(skill_type=st)
+        if not proposals:
+            console.print("[dim]No pending skill proposals.[/dim]")
+            return
+        tbl = Table(title="Pending Skill Proposals")
+        tbl.add_column("Type", style="cyan")
+        tbl.add_column("Name", style="green")
+        tbl.add_column("Title")
+        tbl.add_column("Confidence")
+        for p in proposals:
+            tbl.add_row(p.skill_type.value, p.name, p.title[:60], p.confidence)
+        console.print(tbl)
+
+    elif sub == "review":
+        if len(args) < 2:
+            console.print("[red]usage: /skill review <type>/<name>[/red]")
+            return
+        target = args[1]
+        if "/" not in target:
+            console.print("[red]target must be <type>/<name>[/red]")
+            return
+        type_str, name = target.split("/", 1)
+        from financial_analyst.skill_gen import SkillType, load_proposal
+        try:
+            st = SkillType(type_str)
+        except ValueError:
+            console.print(f"[red]unknown type: {type_str}[/red]")
+            return
+        proposal = load_proposal(name, st)
+        if proposal is None:
+            console.print(f"[yellow]proposal not found: {target}[/yellow]")
+            return
+        console.print(Panel.fit(
+            f"[bold]{proposal.title}[/bold]\n\n"
+            f"Type: {proposal.skill_type.value} | Name: {proposal.name} | Confidence: {proposal.confidence}\n"
+            f"Created: {proposal.created_at}\n\n"
+            f"[dim]{proposal.description}[/dim]",
+            title=f"Proposal: {st.value}/{name}"
+        ))
+        from rich.syntax import Syntax
+        if st.value == "preset":
+            syntax = Syntax(proposal.generated_code, "yaml", theme="monokai", line_numbers=True)
+        else:
+            syntax = Syntax(proposal.generated_code, "python", theme="monokai", line_numbers=True)
+        console.print(syntax)
+
+    elif sub in ("accept", "reject"):
+        if len(args) < 2:
+            console.print(f"[red]usage: /skill {sub} <type>/<name>[/red]")
+            return
+        target = args[1]
+        if "/" not in target:
+            console.print("[red]target must be <type>/<name>[/red]")
+            return
+        type_str, name = target.split("/", 1)
+        from financial_analyst.skill_gen import SkillType, accept_proposal, reject_proposal
+        try:
+            st = SkillType(type_str)
+        except ValueError:
+            console.print(f"[red]unknown type: {type_str}[/red]")
+            return
+        if sub == "accept":
+            result = accept_proposal(name, st)
+        else:
+            result = reject_proposal(name, st)
+        if "error" in result:
+            console.print(f"[red]Error: {result['error']}[/red]")
+        else:
+            console.print(f"[green]✓ {sub}ed {st.value}/{name}[/green]")
+            if "dst" in result:
+                console.print(f"  Deployed to: {result['dst']}")
+            if "id" in result:
+                console.print(f"  Audit: {result['id']}")
+
+    elif sub == "status":
+        from financial_analyst.skill_gen import list_proposals, SkillType
+        proposals = list_proposals()
+        if not proposals:
+            console.print("[dim]No pending skill proposals.[/dim]")
+            return
+        counts: dict[str, int] = {}
+        for p in proposals:
+            counts[p.skill_type.value] = counts.get(p.skill_type.value, 0) + 1
+        console.print(f"[bold]Pending: {len(proposals)}[/bold]")
+        for st in SkillType:
+            n = counts.get(st.value, 0)
+            icon = "✓" if n > 0 else "·"
+            console.print(f"  {icon} {st.value}: {n}")
+
+    else:
+        console.print(f"[red]unknown subcommand: {sub}[/red]")
 
 
 # ---------------------------------------------------------------------------

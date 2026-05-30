@@ -71,6 +71,7 @@ function savePersisted(state) {
     // 只保存可序列化部分
     const toSave = {
       mode: state.mode,
+      skillMode: state.skillMode,
       model: state.model,
       backendModel: state.backendModel,
       watch: state.watch,
@@ -141,6 +142,7 @@ function makeInitialState() {
     return {
       ...base,
       mode: loaded.mode || 'default',
+      skillMode: loaded.skillMode || 'manual',
       model: loaded.model || 'qwen3.5-plus',
       watch: loaded.watch || { on: true, interval: 5 },
       tokens: 0,
@@ -161,7 +163,7 @@ function makeInitialState() {
   const first = newSession();
   return {
     ...base,
-    mode: 'default', model: 'qwen3.5-plus',
+    mode: 'default', skillMode: 'manual', model: 'qwen3.5-plus',
     watch: { on: true, interval: 5 }, tokens: 0,
     autoApproved: ['news_query', 'quote_lookup'],
     useRealLLM: false,
@@ -196,6 +198,7 @@ function updateSessionById(state, sid, updater) {
 function reducer(s, a) {
   switch (a.type) {
     case 'set_mode':         return { ...s, mode: a.mode };
+    case 'set_skill_mode':   return { ...s, skillMode: a.mode };
     case 'set_use_llm':      return { ...s, useRealLLM: a.value, lastLLMError: null };
     case 'set_llm_error':    return { ...s, lastLLMError: { msg: a.msg, ts: Date.now() } };
     case 'clear_llm_error':  return { ...s, lastLLMError: null };
@@ -463,7 +466,7 @@ function ObservatoryApp() {
   useEffect(() => {
     clearTimeout(persistTimeout.current);
     persistTimeout.current = setTimeout(() => savePersisted(s), 300);
-  }, [s.sessions, s.currentSessionId, s.mode, s.model, s.autoApproved, s.useRealLLM, s.watch, s.theme, s.watchlist, s.backendModel]);
+  }, [s.sessions, s.currentSessionId, s.mode, s.skillMode, s.model, s.autoApproved, s.useRealLLM, s.watch, s.theme, s.watchlist, s.backendModel]);
 
   // 主题 -> body class
   useEffect(() => {
@@ -700,6 +703,22 @@ function ObservatoryApp() {
         dispatch({ type: 'set_models', models: norm });
       })
       .catch(e => console.warn('[guanlan] /models 拉取失败:', e));
+    return () => { cancelled = true; };
+  }, [s.backendUrl]);
+
+  // ⑤c 拉 /skill-mode — 获取后端 skill 模式
+  useEffect(() => {
+    if (!s.backendUrl) return;
+    let cancelled = false;
+    fetch(`${s.backendUrl}/skill-mode`)
+      .then(r => r.json())
+      .then(d => {
+        if (cancelled || !d?.ok) return;
+        if (d.mode && d.mode !== s.skillMode) {
+          dispatch({ type: 'set_skill_mode', mode: d.mode });
+        }
+      })
+      .catch(e => console.warn('[guanlan] /skill-mode 拉取失败:', e));
     return () => { cancelled = true; };
   }, [s.backendUrl]);
 
@@ -2202,6 +2221,8 @@ function StatusBar({ s, dispatch, onCmdK }) {
       {/* 数据增量更新按钮 — 点击触发 /data/refresh, badge 显示陈旧数据数 */}
       <DataRefreshButton s={s} dispatch={dispatch} />
       <Sep />
+      <SkillModeToggle s={s} dispatch={dispatch} />
+      <Sep />
       <span><span style={{ color: 'var(--ink-3)' }}>盯盘</span> <span style={{ color: 'var(--ink-1)' }}>{s.watch.interval} 分钟</span> <span style={{ color: clk.open ? 'var(--zhu)' : 'var(--ink-3)' }}>· {clk.label}</span></span>
       <Sep />
       <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -2232,6 +2253,41 @@ function StatusBar({ s, dispatch, onCmdK }) {
 }
 
 const Sep = () => <span style={{ color: 'var(--ink-3)' }}>·</span>;
+
+
+// 状态栏: skill 模式切换按钮 (auto / manual)
+function SkillModeToggle({ s, dispatch }) {
+  const isAuto = s.skillMode === 'auto';
+  const color = isAuto ? 'var(--yin)' : 'var(--ink-2)';
+  const bg   = isAuto ? 'rgba(168,57,45,0.12)' : 'rgba(74,107,92,0.12)';
+  const label = isAuto ? '🔧 skill:auto' : '🔧 skill:manual';
+
+  const toggle = async () => {
+    const next = isAuto ? 'manual' : 'auto';
+    dispatch({ type: 'set_skill_mode', mode: next });
+    if (s.backendUrl) {
+      try {
+        await fetch(`${s.backendUrl}/skill-mode`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: next }),
+        });
+      } catch (e) {
+        console.warn('[guanlan] /skill-mode 写入失败:', e);
+      }
+    }
+  };
+
+  return (
+    <span
+      onClick={toggle}
+      title={isAuto ? '技能自动生成：后台审查后自动部署新 skill' : '技能手动确认：新 skill 需人工审核才部署'}
+      className="hover-pill"
+      style={{ padding: '1px 6px', border: `1px solid ${color}`, color, background: bg, cursor: 'pointer', fontFamily: 'var(--mono)', fontSize: 10 }}>
+      {label}
+    </span>
+  );
+}
 
 
 // 状态栏: 数据增量刷新按钮

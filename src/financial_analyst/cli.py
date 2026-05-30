@@ -142,7 +142,7 @@ def report(
                        f"自动跑 dream aggregate")
             typer.echo(f"──────────────────────────────────────────────────")
             try:
-                from financial_analyst.dream.aggregator import aggregate_pending
+                from financial_analyst.dream.aggregator import aggregate_pending, aggregate_capability_gaps
                 written, stats = aggregate_pending(
                     memory_root=default_memory_root(), min_count=3,
                     threshold=0.4, dry_run=False,
@@ -155,6 +155,17 @@ def report(
                                    f"({info['n_cases']} cases)")
                 if written:
                     typer.echo(f"\n  下一步: fa dream review  →  fa dream accept <agent>/<slug>")
+
+                # Also aggregate capability gaps → skill proposals
+                skill_written, gap_stats = asyncio.run(aggregate_capability_gaps(
+                    memory_root=Path("memories"), skills_root=Path("skills_generation"),
+                    min_count=3, dry_run=False,
+                ))
+                if gap_stats.get("n_proposals_generated", 0) > 0:
+                    typer.echo(f"\n  🔧 自动生成 {gap_stats['n_proposals_generated']} 个 skill 提案:")
+                    for g in gap_stats.get("generated", []):
+                        typer.echo(f"    [{g['skill_type']}] {g['name']}: {g.get('title', '?')}")
+                    typer.echo(f"  下一步: fa skill list  →  fa skill review <type>/<name>")
             except Exception as e:
                 typer.echo(f"  ⚠ auto-aggregate 失败 (不影响 batch 结果): "
                            f"{type(e).__name__}: {e}")
@@ -343,8 +354,14 @@ def _dream_aggregate(dry_run: bool = False) -> None:
     Scan memories/_pending_introspections/*.json, promote clusters with the
     same (target_agent + similar pattern) repeated >= 3 times to
     memories/_proposed/<agent>/<date>_<slug>.md.
+
+    Also scans capability_gaps from introspections and auto-generates
+    skill proposals when gaps repeat ≥ 3 times.
     """
-    from financial_analyst.dream.aggregator import aggregate_pending
+    import asyncio
+    from financial_analyst.dream.aggregator import aggregate_pending, aggregate_capability_gaps
+
+    # ── memory proposals ──
     written, stats = aggregate_pending(
         memory_root=default_memory_root(), min_count=3, threshold=0.4,
         dry_run=dry_run,
@@ -367,6 +384,26 @@ def _dream_aggregate(dry_run: bool = False) -> None:
     else:
         typer.echo(f"\n写到 memories/_proposed/ ({len(written)} 份)")
         typer.echo("下一步: fa dream review  →  fa dream accept <agent>/<slug>")
+
+    # ── skill proposals from capability gaps ──
+    typer.echo("\n--- Capability Gap → Skill Proposal ---")
+    skill_written, gap_stats = asyncio.run(aggregate_capability_gaps(
+        memory_root=Path("memories"),
+        skills_root=Path("skills_generation"),
+        min_count=3,
+        dry_run=dry_run,
+    ))
+    typer.echo(f"Gaps found: {gap_stats.get('n_gaps_total', 0)}")
+    typer.echo(f"Qualified (≥3 cases): {gap_stats.get('n_gaps_qualified', 0)}")
+    typer.echo(f"Skill proposals generated: {gap_stats.get('n_proposals_generated', 0)}")
+    if gap_stats.get("generated"):
+        for g in gap_stats["generated"]:
+            typer.echo(f"  [{g['skill_type']}] {g['name']}: {g.get('title', '?')}")
+    if gap_stats.get("errors"):
+        for e in gap_stats["errors"]:
+            typer.echo(f"  ⚠ {e['gap']}: {e['error']}")
+    if skill_written:
+        typer.echo(f"\n下一步: fa skill list  →  fa skill review <type>/<name>  →  fa skill accept <type>/<name>")
 
 
 def _dream_review() -> None:
@@ -1466,6 +1503,282 @@ def alpha_cmd(
 
     typer.echo(f"Unknown action {action!r}; use list / show / bench")
     raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# fa skill — autonomous skill generation (agent / tool / preset)
+# ---------------------------------------------------------------------------
+
+@app.command()
+def skill(
+    action: str = typer.Argument("status", help="generate | list | review | accept | reject | status | config"),
+    target: Optional[str] = typer.Argument(None, help="For generate: description. For review/accept/reject: <type>/<name>. For config: auto|manual"),
+    skill_type: str = typer.Option("", "--type", "-t", help="Force skill type: agent | tool | preset"),
+    since: int = typer.Option(30, "--since", help="generate: days lookback for capacity gaps"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="generate: detect gaps only, don't write proposals"),
+):
+    """Autonomous skill generation — create new agents, tools, and swarm presets.
+
+    Subcommands:
+      skill generate <description>      — generate a new skill (LLM auto-detects type)
+      skill list [--type agent|tool|preset] — list pending proposals
+      skill review <type>/<name>        — show proposal details
+      skill accept <type>/<name>        — accept and deploy
+      skill reject <type>/<name>        — reject and delete
+      skill status                      — count pending proposals per type
+      skill config [auto|manual]        — show or set skill generation mode
+
+    Hermes-style modes:
+      auto   — background review auto-deploys skills without confirmation
+      manual — proposals go to _proposed/ for human review (default)
+
+    Examples:
+      fa skill generate "可转债分析工具，能查询转股溢价率"
+      fa skill list --type tool
+      fa skill review tool/convertible_bond
+      fa skill accept tool/convertible_bond
+      fa skill config auto              # enable autonomous skill deployment
+      fa skill config                   # show current mode
+    """
+    if action == "status":
+        _skill_status()
+        return
+    if action == "list":
+        _skill_list(skill_type)
+        return
+    if action in ("accept", "reject"):
+        if not target:
+            typer.echo(f"skill {action} requires <type>/<name>; run `skill list` to see options.")
+            raise typer.Exit(1)
+        _skill_promote(target, action=action)
+        return
+    if action == "review":
+        if not target:
+            typer.echo("skill review requires <type>/<name>; run `skill list` to see options.")
+            raise typer.Exit(1)
+        _skill_review(target)
+        return
+    if action == "generate":
+        if not target and not since:
+            typer.echo("skill generate requires a description or --since; "
+                       "e.g. fa skill generate \"可转债分析工具\"  or  fa skill generate --since 30")
+            raise typer.Exit(1)
+        if target:
+            typer.echo(f"Generating skill from description: {target}")
+        asyncio.run(_skill_generate(description=target or "", skill_type=skill_type, since=since, dry_run=dry_run))
+        return
+    if action == "config":
+        _skill_config(target)
+        return
+    typer.echo(f"Unknown skill action {action!r}; use generate | list | review | accept | reject | status | config")
+    raise typer.Exit(1)
+
+
+def _skill_config(target: Optional[str]) -> None:
+    """Show or set skill generation mode (auto/manual)."""
+    from financial_analyst.skill_gen import get_skill_mode, set_skill_mode
+
+    if not target:
+        mode = get_skill_mode()
+        other = "auto" if mode == "manual" else "manual"
+        typer.echo(f"Current skill mode: [bold]{mode}[/]")
+        typer.echo(f"  auto   — background review auto-deploys skills (no confirmation)")
+        typer.echo(f"  manual — proposals saved to _proposed/ for human review")
+        typer.echo(f"Switch: fa skill config {other}")
+        return
+
+    target = target.strip().lower()
+    if target not in ("auto", "manual"):
+        typer.echo(f"Invalid mode: {target!r}. Use 'auto' or 'manual'.")
+        raise typer.Exit(1)
+
+    set_skill_mode(target)
+    typer.echo(f"Skill mode set to: [bold]{target}[/]")
+    if target == "auto":
+        typer.echo("  Background review will auto-deploy skills without confirmation.")
+        typer.echo("  Review audit trail: ~/.financial-analyst/audit.jsonl")
+    else:
+        typer.echo("  Skill proposals will be saved to skills_generation/_proposed/ for review.")
+
+
+async def _skill_generate(description: str, skill_type: str, since: int, dry_run: bool) -> None:
+    from financial_analyst.dream.aggregator import aggregate_capability_gaps
+    from financial_analyst.skill_gen import SkillGenerator, SkillType, save_proposal
+    from financial_analyst.skill_gen.validator import validate_proposal
+
+    # ── since mode: auto-scan capability gaps from introspections ──
+    if since and not description:
+        typer.echo(f"Scanning capability gaps from last {since} days...")
+        written, stats = await aggregate_capability_gaps(
+            min_count=2,  # lower threshold for manual trigger
+            dry_run=dry_run,
+        )
+        typer.echo(f"\nGaps found: {stats.get('n_gaps_total', 0)}")
+        typer.echo(f"Qualified (≥2 cases): {stats.get('n_gaps_qualified', 0)}")
+        typer.echo(f"Proposals generated: {stats.get('n_proposals_generated', 0)}")
+        if dry_run and stats.get("generated"):
+            typer.echo("\nWould generate:")
+            for g in stats["generated"]:
+                typer.echo(f"  [{g['skill_type']}] {g['name']}: {g['gap'][:100]} (n={g['n_cases']})")
+        if written:
+            typer.echo(f"\nUse `fa skill list` to review proposals.")
+        if not written and not dry_run:
+            typer.echo("No new skill proposals generated. "
+                       "Try running `fa dream run --since 60` first to collect more outcome data.")
+        return
+
+    # ── description mode: user-provided description ──
+    if since and description:
+        typer.echo(f"(using memories + outcomes from last {since}d as context)")
+
+    st = None
+    if skill_type:
+        try:
+            st = SkillType(skill_type)
+        except ValueError:
+            typer.echo(f"Unknown skill type {skill_type!r}; use agent | tool | preset")
+            raise typer.Exit(1)
+
+    gen = SkillGenerator()
+    if since and description:
+        proposal = await gen.generate_from_gap(
+            gap_description=description,
+            skill_type=st or SkillType.TOOL,
+            since_days=since,
+        )
+    else:
+        proposal = await gen.generate(description=description, skill_type=st)
+
+    if dry_run:
+        typer.echo(f"\nDry-run proposal for [{proposal.skill_type.value}] {proposal.name}:")
+        typer.echo(f"  Title: {proposal.title}")
+        typer.echo(f"  Confidence: {proposal.confidence}")
+        typer.echo(f"  Description: {proposal.description[:200]}")
+        typer.echo("\n--- Generated Code (first 40 lines) ---")
+        for i, line in enumerate(proposal.generated_code.splitlines()[:40], 1):
+            typer.echo(f"  {i:3d} | {line}")
+        return
+
+    errors = validate_proposal(proposal)
+    if errors:
+        typer.echo("\n[Validation warnings]:")
+        for e in errors:
+            typer.echo(f"  ! {e}")
+
+    dest = save_proposal(proposal)
+    typer.echo(f"\nProposal saved: {dest}")
+    typer.echo(f"  Type: {proposal.skill_type.value}")
+    typer.echo(f"  Name: {proposal.name}")
+    typer.echo(f"  Title: {proposal.title}")
+    typer.echo(f"  Confidence: {proposal.confidence}")
+    if errors:
+        typer.echo(f"\nReview with: fa skill review {proposal.skill_type.value}/{proposal.name}")
+        typer.echo("Validation errors exist — review carefully before accepting.")
+    else:
+        typer.echo(f"\nReview with: fa skill review {proposal.skill_type.value}/{proposal.name}")
+        typer.echo(f"Accept with: fa skill accept {proposal.skill_type.value}/{proposal.name}")
+
+
+def _skill_list(skill_type: str) -> None:
+    from financial_analyst.skill_gen import SkillType, list_proposals
+
+    st = None
+    if skill_type:
+        try:
+            st = SkillType(skill_type)
+        except ValueError:
+            typer.echo(f"Unknown skill type {skill_type!r}; use agent | tool | preset")
+            raise typer.Exit(1)
+
+    proposals = list_proposals(skill_type=st)
+    if not proposals:
+        typer.echo("No pending skill proposals.")
+        return
+
+    typer.echo(f"{'Type':<8} {'Name':<30} {'Title':<50} {'Confidence':<10}")
+    typer.echo("-" * 100)
+    for p in proposals:
+        typer.echo(f"{p.skill_type.value:<8} {p.name:<30} {p.title[:48]:<50} {p.confidence:<10}")
+
+
+def _skill_review(target: str) -> None:
+    from financial_analyst.skill_gen import SkillType, load_proposal
+
+    if "/" not in target:
+        typer.echo("target must be <type>/<name> (e.g. tool/convertible_bond)")
+        raise typer.Exit(1)
+    type_str, name = target.split("/", 1)
+    try:
+        st = SkillType(type_str)
+    except ValueError:
+        typer.echo(f"Unknown skill type {type_str!r}; use agent | tool | preset")
+        raise typer.Exit(1)
+
+    proposal = load_proposal(name, st)
+    if proposal is None:
+        typer.echo(f"No proposal found: {target}")
+        raise typer.Exit(1)
+
+    typer.echo(f"=== Skill Proposal: {st.value}/{name} ===")
+    typer.echo(f"Title:       {proposal.title}")
+    typer.echo(f"Description: {proposal.description}")
+    typer.echo(f"Confidence:  {proposal.confidence}")
+    typer.echo(f"Trigger:     {proposal.trigger_source}")
+    typer.echo(f"Created:     {proposal.created_at}")
+    if proposal.supporting_cases:
+        typer.echo("\nSupporting cases:")
+        for case in proposal.supporting_cases:
+            typer.echo(f"  - {case[:120]}")
+    typer.echo("\n--- Generated Code ---")
+    typer.echo(proposal.generated_code)
+
+
+def _skill_promote(target: str, action: str) -> None:
+    from financial_analyst.skill_gen import SkillType, accept_proposal, reject_proposal
+
+    if "/" not in target:
+        typer.echo("target must be <type>/<name> (e.g. tool/convertible_bond)")
+        raise typer.Exit(1)
+    type_str, name = target.split("/", 1)
+    try:
+        st = SkillType(type_str)
+    except ValueError:
+        typer.echo(f"Unknown skill type {type_str!r}; use agent | tool | preset")
+        raise typer.Exit(1)
+
+    if action == "accept":
+        result = accept_proposal(name, st)
+    else:
+        result = reject_proposal(name, st)
+
+    if "error" in result:
+        typer.echo(f"[red]Error: {result['error']}[/]")
+        raise typer.Exit(1)
+
+    typer.echo(f"[green]{action.title()}ed {st.value}/{name}[/]")
+    if "dst" in result:
+        typer.echo(f"  Deployed to: {result['dst']}")
+    if "registered" in result:
+        typer.echo(f"  Registered: {result['registered']}")
+    if "id" in result:
+        typer.echo(f"  Audit ID: {result['id']}")
+
+
+def _skill_status() -> None:
+    from financial_analyst.skill_gen import SkillType, list_proposals
+
+    proposals = list_proposals()
+    if not proposals:
+        typer.echo("No pending skill proposals.")
+        return
+
+    counts: dict[str, int] = {}
+    for p in proposals:
+        counts[p.skill_type.value] = counts.get(p.skill_type.value, 0) + 1
+
+    typer.echo(f"Pending skill proposals: {len(proposals)}")
+    for st in SkillType:
+        typer.echo(f"  {st.value}: {counts.get(st.value, 0)}")
 
 
 def _resolve_universe(universe: str) -> list[str]:
