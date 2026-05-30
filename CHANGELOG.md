@@ -4,6 +4,10 @@ All notable changes to this project follow [Keep a Changelog 1.1.0](https://keep
 
 ## [Unreleased]
 
+### Added — TDX Phase 2: --include-f10-full + tick_realtime
+
+- feat(data/updaters): TDX Phase 2 — `--include-f10-full` exposes all 15 F10 categories (KEY 5 + remaining 10) via existing `f10.py` `ALL_CATEGORIES`. Mutually exclusive with `--include-f10`. New `tick_realtime.py` updater + `--include-tick-realtime` flag pulls today's intraday tick (5 fields incl. `num` 笔数) via `get_transaction_data`; separate `tick_realtime.parquet` with last-call-wins semantics for today.
+
 ### Added — TDX Phase 1: 4 new data updaters + CLI flags
 
 - feat(data/updaters): TDX Phase 1 接通 — 4 new updaters (xdxr / watchlist / tick_history / index_intraday) + 4 `--include-*` CLI flags. Closes the pytdx XDXR gap noted in `pytdx_kline.py:10-12`. Adds market-breadth (up_count/down_count) for 5 major indices via 1min intraday. Watchlist syncs T0002/blocknew/zxg.blk to give agents user-context awareness. See `docs/superpowers/specs/2026-05-30-tdx-phase1-接通-design.md`.
