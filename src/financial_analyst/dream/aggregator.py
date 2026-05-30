@@ -334,3 +334,160 @@ def _build_lesson_md(agent: str, members: List[dict], n: int) -> str:
         f"`fa dream reject {agent}/<slug>`.",
     ])
     return "\n".join(lines)
+
+
+# ──────────────────────── Capability Gap → Skill Proposal ────────────────────────
+# Hermes-style: LLM reviews collected gaps and decides what skills to create,
+# rather than deterministic Jaccard clustering with keyword whitelists.
+
+
+def _collect_capability_gaps(memory_root: Path) -> List[dict]:
+    """Scan _pending_introspections/*.json for capability_gaps entries.
+
+    Returns list of dicts: {gap_description, skill_type, evidence, suggested_name, _case_ids}.
+    """
+    pending_dir = memory_root / "_pending_introspections"
+    if not pending_dir.exists():
+        return []
+
+    gap_map: Dict[str, dict] = {}
+    for jf in sorted(pending_dir.glob("*.json")):
+        try:
+            data = json.loads(jf.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        case_id = jf.stem
+        for gap in data.get("capability_gaps", []):
+            desc = gap.get("gap_description", "")
+            if not desc:
+                continue
+            st = gap.get("skill_type", "tool")
+            sname = gap.get("suggested_name", "")
+            key = (st, sname) if sname else (st, desc[:40])
+            if key in gap_map:
+                gap_map[key]["evidence"].extend(gap.get("evidence", []))
+                gap_map[key]["_case_ids"].append(case_id)
+            else:
+                gap_map[key] = {
+                    "gap_description": desc,
+                    "skill_type": st,
+                    "suggested_name": sname,
+                    "evidence": list(gap.get("evidence", [])),
+                    "_case_ids": [case_id],
+                }
+    return list(gap_map.values())
+
+
+def _gaps_to_snapshot(gaps: List[dict], min_count: int) -> str:
+    """Build a conversation-like snapshot from capability gaps for the LLM reviewer."""
+    if not gaps:
+        return "(no capability gaps detected)"
+
+    # Count occurrences — gaps with more cases are more significant
+    qualified = [g for g in gaps if len(g["_case_ids"]) >= min_count]
+    others = [g for g in gaps if len(g["_case_ids"]) < min_count]
+
+    lines = [f"## Capability Gaps from Dream Loop Introspections\n"]
+    lines.append(f"### Qualified (≥{min_count} occurrences)\n")
+    if qualified:
+        for g in qualified:
+            st = g.get("skill_type", "tool")
+            sname = g.get("suggested_name", "")
+            n = len(g["_case_ids"])
+            desc = g["gap_description"][:300]
+            evidence = g.get("evidence", [])[:3]
+            name_hint = f" (suggested: {sname})" if sname else ""
+            lines.append(f"- [{st}]{name_hint} ({n} cases): {desc}")
+            for e in evidence:
+                lines.append(f"    Evidence: {e[:120]}")
+    else:
+        lines.append("  (none)")
+
+    if others:
+        lines.append(f"\n### Below Threshold ({len(others)} gaps with <{min_count} cases)\n")
+        for g in others:
+            st = g.get("skill_type", "tool")
+            desc = g["gap_description"][:150]
+            lines.append(f"  - [{st}] ({len(g['_case_ids'])} cases): {desc}")
+
+    return "\n".join(lines)
+
+
+async def aggregate_capability_gaps(
+    memory_root: Path = Path("memories"),
+    skills_root: Path = Path("skills_generation"),
+    min_count: int = 3,
+    dry_run: bool = False,
+) -> Tuple[List[Path], dict]:
+    """Hermes-style LLM-driven gap → skill pipeline.
+
+    Collects capability gaps from pending introspections, builds a context
+    snapshot, and asks the BackgroundSkillReviewer's LLM to decide what
+    skills to create/patch. No Jaccard clustering or keyword whitelists —
+    the LLM does all the reasoning.
+
+    Args:
+        memory_root: ``memories/`` root
+        skills_root: ``skills/`` root
+        min_count: minimum occurrences for a gap to be included in the prompt
+        dry_run: preview only
+
+    Returns:
+        (written_paths, stats_dict)
+    """
+    gaps = _collect_capability_gaps(memory_root)
+
+    stats = {
+        "n_gaps_total": len(gaps),
+        "n_gaps_qualified": sum(1 for g in gaps if len(g["_case_ids"]) >= min_count),
+        "n_proposals_generated": 0,
+        "skipped": 0,
+        "generated": [],
+    }
+
+    qualified = [g for g in gaps if len(g["_case_ids"]) >= min_count]
+    if not qualified:
+        return [], stats
+
+    if dry_run:
+        for g in qualified:
+            stats["generated"].append({
+                "name": g.get("suggested_name", "?"),
+                "skill_type": g.get("skill_type", "tool"),
+                "n_cases": len(g["_case_ids"]),
+                "gap": g["gap_description"][:120],
+            })
+        return [], stats
+
+    # Build snapshot and run LLM-driven review
+    snapshot = _gaps_to_snapshot(gaps, min_count)
+
+    from financial_analyst.skill_gen.review import BackgroundSkillReviewer
+    from financial_analyst.skill_gen.lifecycle import get_skill_mode
+
+    mode = get_skill_mode()
+    reviewer = BackgroundSkillReviewer(
+        memory_root=memory_root,
+        skills_root=skills_root,
+        mode=mode,
+    )
+
+    result = await reviewer.review(conversation_snapshot=snapshot)
+    written: List[Path] = []
+
+    for action in result.get("actions_taken", []):
+        outcome = action.get("outcome", {})
+        stats["n_proposals_generated"] += 1
+        stats["generated"].append({
+            "name": action.get("name", "?"),
+            "skill_type": action.get("skill_type", "?"),
+            "action": action.get("action", "?"),
+            "status": outcome.get("status", "?"),
+        })
+        if outcome.get("proposal_written"):
+            written.append(Path(outcome["proposal_written"]))
+
+    if result.get("errors"):
+        stats.setdefault("errors", []).extend(result["errors"])
+
+    return written, stats

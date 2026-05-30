@@ -20,8 +20,16 @@ class Proposal(BaseModel):
     reasoning: str = ""
 
 
+class CapabilityGap(BaseModel):
+    gap_description: str = ""
+    skill_type: str = "agent"
+    evidence: List[str] = []
+    suggested_name: str = ""
+
+
 class IntrospectionOutput(BaseModel):
     proposals: List[Proposal] = []
+    capability_gaps: List[CapabilityGap] = []
     summary: str = ""
 
 
@@ -56,6 +64,20 @@ The `lesson_md` field should be a markdown document following this template:
 ## How to apply
 <when this fires, what should change in the agent's reasoning>
 ```
+
+# Capability gaps
+Sometimes the system fails NOT because of a biased rule, but because it lacks an
+entire capability. If you see a pattern where 3+ wrong outcomes share a common
+missing dimension (e.g. "no biotech domain knowledge", "no convertible bond data",
+"no commodity price tracking"), output a CapabilityGap:
+
+- gap_description: one sentence describing the missing capability
+- skill_type: "agent" (new analysis perspective) | "tool" (new data/action) | "preset" (new workflow)
+- evidence: list of outcome snippets that show the gap
+- suggested_name: kebab-case name for the new skill
+
+Only report a gap if you see at least 3 cases showing the same missing dimension.
+Return 0-2 gaps maximum per run. Empty list if insufficient evidence.
 
 Return JSON ONLY. No prose, no commentary outside the JSON envelope.
 """
