@@ -73,6 +73,11 @@ class DataPaths:
     """Root directory for news + F10 raw text. Contains ``tdx_f10/{code}/``
     subdirectories of per-stock event files."""
 
+    qlib_etf_uri: Optional[str] = None
+    """Override for the ETF Qlib root. Set via ``FA_QLIB_ETF_URI`` env var or
+    ``loaders.yaml`` ``qlib_binary.provider_uri.etf``; else defaults to
+    ``cn_data_etf`` beside ``qlib_day``."""
+
     @property
     def qlib_day(self) -> Path:
         """Day-frequency Qlib data root (always resolvable)."""
@@ -86,6 +91,14 @@ class DataPaths:
         if isinstance(self.qlib_uri, dict) and "5min" in self.qlib_uri:
             return Path(self.qlib_uri["5min"])
         return None
+
+    @property
+    def qlib_etf(self) -> Path:
+        """ETF day-frequency Qlib root. Override via FA_QLIB_ETF_URI or
+        loaders.yaml provider_uri.etf; else cn_data_etf beside qlib_day."""
+        if self.qlib_etf_uri:
+            return Path(self.qlib_etf_uri)
+        return self.qlib_day.parent / "cn_data_etf"
 
     @property
     def tdx_f10_root(self) -> Path:
@@ -157,10 +170,17 @@ def get_data_paths(config_path: Optional[Path] = None) -> DataPaths:
     else:
         news_data_root = Path(_DEV_ROOTS["news_data"])
 
+    # ---- qlib_etf_uri --------------------------------------------------
+    env_etf = os.getenv("FA_QLIB_ETF_URI")
+    prov = entry.get("provider_uri")
+    yaml_etf = prov.get("etf") if isinstance(prov, dict) else None
+    etf_uri = env_etf or yaml_etf
+
     return DataPaths(
         qlib_uri=qlib_uri,
         parquet_root=parquet_root,
         news_data_root=news_data_root,
+        qlib_etf_uri=etf_uri,
     )
 
 
