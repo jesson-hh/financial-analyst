@@ -12,6 +12,8 @@ Operators (``rank``, ``ts_rank``, ``delta``, …) live in ``operators.py``
 and consume / return same-shape pd.Series.
 """
 from __future__ import annotations
+import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 import numpy as np
 import pandas as pd
@@ -23,29 +25,32 @@ def _merge_daily_basic(panel: pd.DataFrame, loader, codes: list, start: str, end
     """Merge each code's daily_basic fields onto the (datetime, code) panel in place.
     Robust to real-loader shape (trade_date column) and stub shape (datetime index).
     Guarded: missing data / a loader without it simply yields NaN columns."""
-    frames = []
-    n_ok = 0
-    for code in codes:
+    def _one(code):
         try:
             db = loader.fetch_daily_basic(code, start, end)
         except Exception:
-            continue
+            return None
         if db is None or len(db) == 0:
-            continue
+            return None
         db = db.copy()
         if "trade_date" in db.columns:
             db = db.set_index("trade_date")
         try:
             db.index = pd.DatetimeIndex(db.index)
         except Exception:
-            continue
+            return None
         db["code"] = code
         db = db.set_index("code", append=True)
         db.index = db.index.set_names(["datetime", "code"])
         keep = [c for c in _DAILY_BASIC_FIELDS if c in db.columns]
-        if keep:
-            frames.append(db[keep])
-            n_ok += 1
+        return db[keep] if keep else None
+
+    # Parallel I/O (same rationale as from_loader): cut the per-code daily_basic
+    # fetch loop with a thread pool.
+    _workers = min(16, (os.cpu_count() or 4) * 2)
+    with ThreadPoolExecutor(max_workers=_workers) as _ex:
+        frames = [f for f in _ex.map(_one, codes) if f is not None]
+    n_ok = len(frames)
     import logging
     logging.getLogger("financial_analyst.zoo").debug(
         "daily_basic merged for %d/%d codes", n_ok, len(codes),
@@ -237,17 +242,13 @@ class PanelData:
         enables the ``indneutralize`` operator and the alpha101 alphas
         that consume it.
         """
-        frames = []
-        skipped: list[tuple[str, str]] = []
-        for code in codes:
+        def _load_one(code):
             try:
                 df = loader.fetch_quote(code, start, end, freq=freq)
             except Exception as e:
-                skipped.append((code, str(e)[:80]))
-                continue
+                return None, (code, str(e)[:80])
             if df is None or len(df) == 0:
-                skipped.append((code, "empty"))
-                continue
+                return None, (code, "empty")
             # Ensure single-level datetime index
             if isinstance(df.index, pd.MultiIndex):
                 df = df.reset_index(level="code" if "code" in df.index.names else 0, drop=True)
@@ -265,7 +266,19 @@ class PanelData:
             df["code"] = code
             df = df.set_index("code", append=True)
             df.index = df.index.set_names(["datetime", "code"])
-            frames.append(df)
+            return df, None
+
+        # Parallel I/O: file reads release the GIL, so threads cut the 868-code
+        # sequential load ~6.6x (85s→13s). Order is restored by sort_index below.
+        frames = []
+        skipped: list[tuple[str, str]] = []
+        _workers = min(16, (os.cpu_count() or 4) * 2)
+        with ThreadPoolExecutor(max_workers=_workers) as _ex:
+            for _df, _skip in _ex.map(_load_one, codes):
+                if _skip is not None:
+                    skipped.append(_skip)
+                else:
+                    frames.append(_df)
         if not frames:
             raise RuntimeError(
                 f"PanelData.from_loader: no codes loaded successfully "

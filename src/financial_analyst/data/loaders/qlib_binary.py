@@ -117,28 +117,35 @@ class QlibBinaryLoader(BaseLoader):
         # (rotating window — only ~7 days retained).
 
         self._calendars: Dict[str, List[pd.Timestamp]] = {}
+        import threading
+        self._calendar_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _load_calendar(self, freq: str = "day") -> List[pd.Timestamp]:
-        """Return the calendar for *freq*, loading from disk on first call."""
-        if freq in self._calendars:
-            return self._calendars[freq]
-        if freq not in self._roots:
-            raise ValueError(
-                f"freq={freq!r} not configured in provider_uri "
-                f"(available: {list(self._roots)})"
-            )
-        cal_fname = _CALENDAR_FILE.get(freq)
-        if cal_fname is None:
-            raise ValueError(f"Unknown freq: {freq!r}")
-        cal_path = self._roots[freq] / "calendars" / cal_fname
-        with open(cal_path, "r", encoding="utf-8") as f:
-            stamps = [pd.Timestamp(line.strip()) for line in f if line.strip()]
-        self._calendars[freq] = stamps
-        return stamps
+        """Return the calendar for *freq*, loading from disk on first call (thread-safe)."""
+        cached = self._calendars.get(freq)
+        if cached is not None:
+            return cached
+        with self._calendar_lock:
+            cached = self._calendars.get(freq)   # 双重检查
+            if cached is not None:
+                return cached
+            if freq not in self._roots:
+                raise ValueError(
+                    f"freq={freq!r} not configured in provider_uri "
+                    f"(available: {list(self._roots)})"
+                )
+            cal_fname = _CALENDAR_FILE.get(freq)
+            if cal_fname is None:
+                raise ValueError(f"Unknown freq: {freq!r}")
+            cal_path = self._roots[freq] / "calendars" / cal_fname
+            with open(cal_path, "r", encoding="utf-8") as f:
+                stamps = [pd.Timestamp(line.strip()) for line in f if line.strip()]
+            self._calendars[freq] = stamps
+            return stamps
 
     @staticmethod
     def _code_to_dir(code: str) -> str:
