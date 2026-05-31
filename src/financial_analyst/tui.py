@@ -227,6 +227,8 @@ def _ensure_registered() -> None:
     from financial_analyst.agent.etf.valuation_analyst import EtfValuationAnalyst
     from financial_analyst.agent.etf.bull_advocate import EtfBullAdvocate
     from financial_analyst.agent.etf.bear_advocate import EtfBearAdvocate
+    from financial_analyst.agent.etf.risk_officer import EtfRiskOfficer
+    from financial_analyst.agent.etf.report_writer import EtfReportWriter
 
     for name, cls in [
         ("quote-fetcher", QuoteFetcher),
@@ -261,6 +263,8 @@ def _ensure_registered() -> None:
         ("etf-valuation-analyst", EtfValuationAnalyst),
         ("etf-bull-advocate", EtfBullAdvocate),
         ("etf-bear-advocate", EtfBearAdvocate),
+        ("etf-risk-officer", EtfRiskOfficer),
+        ("etf-report-writer", EtfReportWriter),
     ]:
         if name not in SubAgentRegistry.names():
             SubAgentRegistry.register(name, cls)
