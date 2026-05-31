@@ -25,7 +25,7 @@ agents:
 
   # Tier 2 — parallel after Tier 1
   - name: etf-holdings-analyst
-    deps: [etf-metrics-fetcher]
+    deps: [etf-metrics-fetcher, sector-rotation-analyzer]
     input_keys: [etf-metrics-fetcher, sector-rotation-analyzer]
   - name: etf-technical-analyst
     deps: [etf-quote-fetcher]
@@ -35,7 +35,7 @@ agents:
     input_keys: [etf-metrics-fetcher]
   - name: etf-valuation-analyst
     deps: [etf-metrics-fetcher]
-    input_keys: [etf-metrics-fetcher]
+    input_keys: [etf-metrics-fetcher, etf-quote-fetcher]
 
   # Tier 3 — bull/bear parallel, then CRO, then writer
   - name: etf-bull-advocate
@@ -43,7 +43,7 @@ agents:
     input_keys: [etf-holdings-analyst, etf-technical-analyst, etf-flow-analyst, etf-valuation-analyst, etf-quote-fetcher]
   - name: etf-bear-advocate
     deps: [etf-holdings-analyst, etf-technical-analyst, etf-flow-analyst, etf-valuation-analyst]
-    input_keys: [etf-holdings-analyst, etf-technical-analyst, etf-flow-analyst, etf-valuation-analyst]
+    input_keys: [etf-holdings-analyst, etf-technical-analyst, etf-flow-analyst, etf-valuation-analyst, etf-quote-fetcher]
     memory_mode: retrieval
   - name: etf-risk-officer
     deps: [etf-bull-advocate, etf-bear-advocate, etf-metrics-fetcher]

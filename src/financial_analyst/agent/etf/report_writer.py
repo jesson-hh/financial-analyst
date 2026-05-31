@@ -50,6 +50,8 @@ class EtfReportOutput(BaseModel):
     target_price: float = Field(..., gt=0)
     stop_loss: float = Field(..., ge=0)
     position_pct: float = Field(..., ge=0.0, le=0.10)
+    markdown_body: str = ""
+    summary_json: Dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _check_cross_field(self):
@@ -70,7 +72,7 @@ class EtfReportOutput(BaseModel):
 SYSTEM_PROMPT = """You are the chief analyst writing the final ETF research report.
 
 Synthesize all upstream:
-- etf-quote-fetcher:      price, premium_discount_pct, returns
+- etf-quote-fetcher:      close, premium_discount_pct, returns
 - etf-metrics-fetcher:    aum_cny, adv_cny, tracking_error, expense_ratio, holdings
 - etf-holdings-analyst:   holdings_score, top_holding_weight, sector_concentration_hhi
 - etf-technical-analyst:  technical_score, ma_state, rsi, trend_signals
@@ -168,13 +170,26 @@ class EtfReportWriter(SubAgent[EtfReportOutput]):
         rating_overall = int(parsed.get("rating_overall", 0))
         rating_dimensions: Dict[str, int] = parsed.get("rating_dimensions", {}) or {}
         position_pct = float(parsed.get("position_pct", 0.0))
+
+        # I-2: Override each rating dimension with the authoritative analyst value
+        # so the LLM cannot invent scores inconsistent with analyst outputs.
+        for dim, src_key, field in [
+            ("holdings", "etf-holdings-analyst", "holdings_score"),
+            ("technical", "etf-technical-analyst", "technical_score"),
+            ("flow", "etf-flow-analyst", "flow_score"),
+            ("valuation", "etf-valuation-analyst", "valuation_score"),
+            ("risk", "etf-risk-officer", "risk_score"),
+        ]:
+            v = (inputs.get(src_key) or {}).get(field)
+            if v is not None:
+                rating_dimensions[dim] = int(v)
         target_price = float(parsed.get("target_price", 0.0))
         stop_loss = float(parsed.get("stop_loss", 0.0))
 
         # Pull veto_flags from the risk-officer upstream (not just LLM output)
         veto_flags_from_risk = inputs.get("etf-risk-officer", {}).get("veto_flags", []) or []
         current_price = float(
-            (inputs.get("etf-quote-fetcher") or {}).get("price", 0.0) or 0.0
+            (inputs.get("etf-quote-fetcher") or {}).get("close", 0.0) or 0.0
         )
 
         sanity_notes = []

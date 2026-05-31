@@ -206,6 +206,60 @@ def test_writer_clamps_position_pct(monkeypatch, tmp_path):
     assert out["position_pct"] <= 0.10
 
 
+def test_writer_rating_dims_overridden_by_analyst_inputs(monkeypatch, tmp_path):
+    """I-2: analyst input scores must override LLM-generated rating_dimensions."""
+    import financial_analyst.agent.etf.report_writer as m
+    # LLM returns all-zero dims — analyst inputs have authoritative scores
+    payload = {
+        "rating_overall": 0,
+        "rating_dimensions": {
+            "holdings": 0,
+            "technical": 0,
+            "flow": 0,
+            "valuation": 0,
+            "risk": 0,
+        },
+        "action": "hold",
+        "target_price": 4.0,
+        "stop_loss": 3.5,
+        "position_pct": 0.0,
+        "markdown_body": "# Test",
+        "summary_json": {},
+    }
+    _patch(monkeypatch, m, payload)
+    inp = {
+        "code": "SH510300",
+        "asof_date": "2026-05-31",
+        "out_dir": str(tmp_path),
+        # Analyst inputs carry authoritative scores
+        "etf-holdings-analyst": {"holdings_score": 2},
+        "etf-technical-analyst": {"technical_score": 1},
+        "etf-flow-analyst": {"flow_score": 1},
+        "etf-valuation-analyst": {"valuation_score": 1},
+        "etf-risk-officer": {"risk_score": -1, "veto_flags": []},
+        "etf-bull-advocate": {},
+        "etf-bear-advocate": {},
+        "etf-quote-fetcher": {"close": 4.5},
+        "etf-metrics-fetcher": {},
+    }
+    out = _run(m.EtfReportWriter(memory_root=tmp_path)._execute(inp))
+
+    # Dims must be overridden from analyst inputs, not kept at LLM's zeros
+    assert out["rating_dimensions"]["holdings"] == 2, (
+        f"holdings dim should be 2 (from analyst), got {out['rating_dimensions']['holdings']}"
+    )
+    assert out["rating_dimensions"]["technical"] == 1
+    assert out["rating_dimensions"]["flow"] == 1
+    assert out["rating_dimensions"]["valuation"] == 1
+    assert out["rating_dimensions"]["risk"] == -1
+
+    # rating_overall must equal sum of overridden dims: 2+1+1+1+(-1) = 4
+    expected_sum = sum(out["rating_dimensions"].values())
+    assert out["rating_overall"] == expected_sum, (
+        f"rating_overall={out['rating_overall']} != sum(dims)={expected_sum}"
+    )
+
+
 def test_writer_files_contain_code(monkeypatch, tmp_path):
     """The written .md file should contain the ETF code somewhere."""
     import financial_analyst.agent.etf.report_writer as m
