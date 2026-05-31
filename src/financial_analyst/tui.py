@@ -186,9 +186,9 @@ def render_banner() -> None:
 # ---------------------------------------------------------------------------
 
 def _ensure_registered() -> None:
-    """Register all 24 sub-agents into SubAgentRegistry (idempotent).
+    """Register all 25 sub-agents into SubAgentRegistry (idempotent).
 
-    14 single-stock (stock-deep-dive) + 5 market + 2 mainline + ...
+    14 single-stock (stock-deep-dive) + 5 market + 2 mainline + 10 ETF + 1 etf-introspector ...
     v1.9.7: +5 international/morning-brief agents (overseas-market-scanner,
     global-news-aggregator, macro-impact-analyzer, catalyst-extractor,
     sector-rotation-analyzer).
@@ -229,6 +229,7 @@ def _ensure_registered() -> None:
     from financial_analyst.agent.etf.bear_advocate import EtfBearAdvocate
     from financial_analyst.agent.etf.risk_officer import EtfRiskOfficer
     from financial_analyst.agent.etf.report_writer import EtfReportWriter
+    from financial_analyst.agent.etf.introspector import EtfIntrospector
 
     for name, cls in [
         ("quote-fetcher", QuoteFetcher),
@@ -265,6 +266,7 @@ def _ensure_registered() -> None:
         ("etf-bear-advocate", EtfBearAdvocate),
         ("etf-risk-officer", EtfRiskOfficer),
         ("etf-report-writer", EtfReportWriter),
+        ("etf-introspector", EtfIntrospector),
     ]:
         if name not in SubAgentRegistry.names():
             SubAgentRegistry.register(name, cls)

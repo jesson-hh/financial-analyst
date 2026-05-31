@@ -1,0 +1,70 @@
+name: etf-deep-dive
+description: ETF single-fund deep-dive research (13 agents, 4 tiers — Tier-1 parallel data fetchers incl. overseas-market-scanner + sector-rotation-analyzer; Tier-2 four specialist analysts; Tier-3 bull/bear debate + CRO + report-writer; Tier-4 introspector post-mortem)
+variables:
+  - name: code
+    type: string
+    required: true
+  - name: asof_date
+    type: string
+    default: today
+
+agents:
+  # Tier 1 — parallel, no dependencies
+  - name: etf-quote-fetcher
+    deps: []
+    input_keys: [code, asof_date]
+  - name: etf-metrics-fetcher
+    deps: []
+    input_keys: [code, asof_date]
+  - name: overseas-market-scanner
+    deps: []
+    input_keys: [asof_date]
+  - name: sector-rotation-analyzer
+    deps: [overseas-market-scanner]
+    input_keys: [overseas-market-scanner]
+
+  # Tier 2 — parallel after Tier 1
+  - name: etf-holdings-analyst
+    deps: [etf-metrics-fetcher]
+    input_keys: [etf-metrics-fetcher, sector-rotation-analyzer]
+  - name: etf-technical-analyst
+    deps: [etf-quote-fetcher]
+    input_keys: [etf-quote-fetcher]
+  - name: etf-flow-analyst
+    deps: [etf-metrics-fetcher]
+    input_keys: [etf-metrics-fetcher]
+  - name: etf-valuation-analyst
+    deps: [etf-metrics-fetcher]
+    input_keys: [etf-metrics-fetcher]
+
+  # Tier 3 — bull/bear parallel, then CRO, then writer
+  - name: etf-bull-advocate
+    deps: [etf-holdings-analyst, etf-technical-analyst, etf-flow-analyst, etf-valuation-analyst]
+    input_keys: [etf-holdings-analyst, etf-technical-analyst, etf-flow-analyst, etf-valuation-analyst, etf-quote-fetcher]
+  - name: etf-bear-advocate
+    deps: [etf-holdings-analyst, etf-technical-analyst, etf-flow-analyst, etf-valuation-analyst]
+    input_keys: [etf-holdings-analyst, etf-technical-analyst, etf-flow-analyst, etf-valuation-analyst]
+    memory_mode: retrieval
+  - name: etf-risk-officer
+    deps: [etf-bull-advocate, etf-bear-advocate, etf-metrics-fetcher]
+    input_keys: [etf-bull-advocate, etf-bear-advocate, etf-metrics-fetcher]
+    memory_mode: retrieval
+    borrows_memory: [etf-bear-advocate]
+  - name: etf-report-writer
+    deps: [etf-quote-fetcher, etf-metrics-fetcher, etf-holdings-analyst,
+           etf-technical-analyst, etf-flow-analyst, etf-valuation-analyst,
+           etf-bull-advocate, etf-bear-advocate, etf-risk-officer]
+    input_keys: [etf-quote-fetcher, etf-metrics-fetcher, etf-holdings-analyst,
+                 etf-technical-analyst, etf-flow-analyst, etf-valuation-analyst,
+                 etf-bull-advocate, etf-bear-advocate, etf-risk-officer,
+                 code, asof_date, out_dir]
+
+  # Tier 4 — post-mortem: review this ETF report, propose quality rules; does not
+  # block report output (report-writer already written to disk); failures silently
+  # recorded; proposals written to memories/_pending_introspections/YYYY-MM-DD_*_etf.json
+  - name: etf-introspector
+    deps: [etf-report-writer, etf-holdings-analyst, etf-technical-analyst,
+           etf-flow-analyst, etf-valuation-analyst]
+    input_keys: [etf-report-writer, etf-holdings-analyst, etf-technical-analyst,
+                 etf-flow-analyst, etf-valuation-analyst]
+    memory_mode: full
