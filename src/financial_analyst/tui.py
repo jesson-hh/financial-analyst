@@ -219,6 +219,8 @@ def _ensure_registered() -> None:
     from financial_analyst.agent.market.sector_rotation_analyzer import SectorRotationAnalyzer
     from financial_analyst.agent.market.global_news_aggregator import GlobalNewsAggregator
     from financial_analyst.agent.market.macro_impact_analyzer import MacroImpactAnalyzer
+    from financial_analyst.agent.etf.quote_fetcher import EtfQuoteFetcher
+    from financial_analyst.agent.etf.metrics_fetcher import EtfMetricsFetcher
 
     for name, cls in [
         ("quote-fetcher", QuoteFetcher),
@@ -245,6 +247,8 @@ def _ensure_registered() -> None:
         ("sector-rotation-analyzer", SectorRotationAnalyzer),
         ("global-news-aggregator", GlobalNewsAggregator),
         ("macro-impact-analyzer", MacroImpactAnalyzer),
+        ("etf-quote-fetcher", EtfQuoteFetcher),
+        ("etf-metrics-fetcher", EtfMetricsFetcher),
     ]:
         if name not in SubAgentRegistry.names():
             SubAgentRegistry.register(name, cls)
