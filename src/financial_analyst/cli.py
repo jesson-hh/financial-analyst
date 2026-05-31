@@ -161,6 +161,38 @@ def report(
                 typer.echo(f"  手动跑: fa dream aggregate")
 
 
+@app.command("etf-report")
+def etf_report(
+    code: Optional[str] = typer.Argument(None, help="ETF code, e.g. SH510300 (or use -f for batch)"),
+    asof: str = typer.Option(None, help="As-of date YYYY-MM-DD (default: today)"),
+    out_dir: Path = typer.Option(Path("./out"), help="Output directory"),
+    file: Optional[Path] = typer.Option(None, "--file", "-f", help="Read codes from file (one per line) for batch"),
+    trace: bool = typer.Option(False, "--trace", help="Print per-agent timing table after run"),
+):
+    """Generate ETF deep-dive report (one-shot)."""
+    from financial_analyst.tui import run_etf_report_oneshot
+
+    codes: list[str] = []
+    if code:
+        codes.append(code)
+    if file:
+        text = file.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                codes.append(line)
+    if not codes:
+        typer.echo("Error: provide a code as argument or use -f <file>")
+        raise typer.Exit(code=1)
+
+    for c in codes:
+        try:
+            asyncio.run(run_etf_report_oneshot(code=c, asof=asof, out_dir=out_dir, trace=trace))
+        except KeyboardInterrupt:
+            typer.echo(f"\n[interrupted] cancelled etf-report for {c}")
+            break
+
+
 @app.command()
 def chat(
     legacy: bool = typer.Option(False, "--legacy",

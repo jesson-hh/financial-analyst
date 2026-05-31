@@ -791,6 +791,144 @@ async def run_report_oneshot(code: str, asof, out_dir: Path, trace: bool = False
 
 
 # ---------------------------------------------------------------------------
+# ETF one-shot driver
+# ---------------------------------------------------------------------------
+
+async def run_etf_report_oneshot(code: str, asof, out_dir: Path, trace: bool = False) -> None:
+    """One-shot ETF deep-dive report driver — mirrors run_report_oneshot for ETFs."""
+    _ensure_registered()
+
+    from financial_analyst.agent.memory_index import MemoryIndex
+    from financial_analyst.agent.orchestrator import Orchestrator
+    from financial_analyst.settings import Settings
+    from financial_analyst.swarm import load_preset
+
+    asof = asof or date.today().isoformat()
+
+    settings = Settings()
+    cache_dir = Path(settings.cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    mem_index = MemoryIndex(
+        memory_root=default_memory_root(),
+        db_path=cache_dir / "memory.fts5.db",
+    )
+    mem_index.update_changed()
+
+    nodes = load_preset("etf-deep-dive", memory_root=default_memory_root(), memory_index=mem_index)
+
+    status: dict[str, dict] = {
+        n.agent.NAME: {"state": "pending", "elapsed": 0.0} for n in nodes
+    }
+
+    def make_table() -> Table:
+        tbl = Table(title=f"DAG · {code} · {asof} [ETF]")
+        tbl.add_column("Agent")
+        tbl.add_column("Status")
+        tbl.add_column("Elapsed")
+        for n in nodes:
+            name = n.agent.NAME
+            s = status[name]
+            color = {
+                "pending": "white",
+                "running": "yellow",
+                "done": "green",
+                "fail": "red",
+            }[s["state"]]
+            tbl.add_row(name, f"[{color}]{s['state']}[/{color}]", f"{s['elapsed']:.1f}s")
+        return tbl
+
+    import time as _t
+    progress_path = out_dir / f"{code}_progress.json"
+
+    def _write_progress(extra: dict = None) -> None:
+        snapshot = {
+            "code": code, "asof": asof, "ts": _t.time(),
+            "total": len(status),
+            "done":    sum(1 for s in status.values() if s["state"] == "done"),
+            "fail":    sum(1 for s in status.values() if s["state"] == "fail"),
+            "running": sum(1 for s in status.values() if s["state"] == "running"),
+            "pending": sum(1 for s in status.values() if s["state"] == "pending"),
+            "agents":  {n: {"state": s["state"], "elapsed": s["elapsed"]} for n, s in status.items()},
+        }
+        if extra:
+            snapshot.update(extra)
+        try:
+            progress_path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+    _write_progress({"started": _t.time()})
+
+    cancelled = False
+    results: dict = {}
+    try:
+        with Live(make_table(), console=console, refresh_per_second=4) as live:
+            def on_event(evt: str, data: dict) -> None:
+                if evt == "wave_start":
+                    for n in data["agents"]:
+                        status[n]["state"] = "running"
+                elif evt == "agent_done":
+                    status[data["agent"]]["state"] = "done" if data["ok"] else "fail"
+                    status[data["agent"]]["elapsed"] = data["elapsed"]
+                live.update(make_table())
+                _write_progress()
+
+            orch = Orchestrator(nodes, on_event=on_event)
+            console.print(f"[bold]Running etf-deep-dive for {code} (asof={asof})…[/bold]")
+            results = await orch.run({"code": code, "asof_date": asof, "out_dir": str(out_dir)})
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        cancelled = True
+        console.print("\n[bold yellow]Cancelled by user.[/bold yellow]")
+
+    if trace:
+        ttbl = Table(title=f"Trace · {code} · {asof} [ETF]")
+        ttbl.add_column("Agent", style="cyan")
+        ttbl.add_column("Status")
+        ttbl.add_column("Elapsed", justify="right")
+        ttbl.add_column("Output bytes (rough token proxy)", justify="right")
+        total_elapsed = 0.0
+        for n in nodes:
+            name = n.agent.NAME
+            r = results.get(name)
+            ok = "✓" if (r and r.ok) else ("✗" if r else "—")
+            elapsed = r.elapsed_seconds if r else 0.0
+            total_elapsed += elapsed
+            output_size = 0
+            if r and r.ok and r.output is not None:
+                try:
+                    output_size = len(r.output.model_dump_json())
+                except Exception:
+                    output_size = 0
+            ttbl.add_row(name, ok, f"{elapsed:.1f}s", str(output_size))
+        ttbl.add_row("[bold]TOTAL[/bold]", "", f"[bold]{total_elapsed:.1f}s[/bold]", "")
+        console.print(ttbl)
+
+    if cancelled:
+        return
+
+    writer_result = results.get("etf-report-writer")
+    if writer_result and writer_result.ok:
+        md_path = Path(writer_result.output.output_md_path)
+        try:
+            html_path = render_report(md_path)
+            console.print(
+                f"\n[bold green]ETF Report rendered.[/bold green]\n"
+                f"  md:   {md_path}\n"
+                f"  html: [link={_to_file_url(html_path)}]{_to_file_url(html_path)}[/link]"
+            )
+        except Exception as exc:
+            console.print(
+                f"\n[bold green]ETF Report saved:[/bold green] {md_path}\n"
+                f"[yellow]inline render failed: {exc}[/yellow]"
+            )
+    else:
+        console.print("\n[bold red]ETF report failed.[/bold red]")
+        for n, r in results.items():
+            if r and not r.ok:
+                console.print(f"  [red]{n}: {r.error}[/red]")
+
+
+# ---------------------------------------------------------------------------
 # Interactive REPL
 # ---------------------------------------------------------------------------
 
