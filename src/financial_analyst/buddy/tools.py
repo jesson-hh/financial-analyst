@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from financial_analyst.data.code_norm import etf_exchange
+
 
 def _disp_w(s: Any) -> int:
     """Terminal display width — CJK / fullwidth glyphs count as 2 columns.
@@ -40,8 +42,8 @@ def _pad(s: Any, width: int) -> str:
 
 
 def normalize_code(code: Any) -> str:
-    """Normalise a stock code to the SH/SZ/BJ-prefixed form the loaders
-    expect. Accepts bare 6-digit (300750), prefixed (SZ300750), or
+    """Normalise a stock/ETF code to the SH/SZ/BJ-prefixed form the loaders
+    expect. Accepts bare 6-digit (300750/510300), prefixed (SZ300750), or
     suffixed (300750.SZ). Used by the desktop UI bridge which sends bare
     6-digit codes."""
     c = str(code).upper().strip()
@@ -53,6 +55,9 @@ def normalize_code(code: Any) -> str:
     if c[:2] in ("SH", "SZ", "BJ"):
         return c
     if c.isdigit() and len(c) == 6:
+        ex = etf_exchange(c)
+        if ex:
+            return ex + c
         if c[0] == "6":
             return "SH" + c
         if c[0] in "03":
