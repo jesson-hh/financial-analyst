@@ -17,6 +17,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 from financial_analyst.data.net import rate_limited
+from financial_analyst.data.code_norm import etf_exchange
 
 _TENCENT_BASE = "http://qt.gtimg.cn/q="
 
@@ -32,6 +33,9 @@ def _to_tencent(code: str) -> str:
     if c[:2] in ("SH", "SZ", "BJ"):
         return c[:2].lower() + c[2:]
     if c.isdigit() and len(c) == 6:
+        ex = etf_exchange(c)
+        if ex:
+            return ex.lower() + c
         if c[0] == "6":
             return "sh" + c
         if c[0] in "03":
