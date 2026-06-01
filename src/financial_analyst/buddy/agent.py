@@ -70,6 +70,7 @@ Behaviour rules:
 | "X 多少钱" / "X 现价" / 盘中实时 | **realtime_quote(code)** (盘中实时价/盘口) |
 | "X 的 PE/PB/市值" / 估值 (日线即可) | **quote_lookup(code)** (日线 EOD) |
 | "深度研报" / "完整分析" / "跑个研报" | **run_report(code)** (5-8 min, 贵, 会要确认) |
+| ETF "研报" / "分析 510300" / ETF 深度分析 (代码 5/15 开头) | **run_etf_report(code)** (ETF 专用 5-8 min, 会确认; 如 510300 / SH159915) |
 | "X 跌破 N 提醒我" / "涨到 N 告诉我" | **alert_add(code, kind, threshold)** — kind: price_below/price_above/pct_above/pct_below |
 | "我设了哪些提醒" / "取消提醒" | **alert_list** / **alert_remove** |
 | "主力今天买什么" / "资金流排行" | **ths_fund_flow(target='gegu')** |
