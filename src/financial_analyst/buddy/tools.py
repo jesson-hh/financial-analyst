@@ -375,6 +375,42 @@ def _tool_report(code: str, asof: Optional[str] = None) -> ToolResult:
     )
 
 
+def _tool_etf_report(code: str, asof: Optional[str] = None) -> ToolResult:
+    """Run a full ETF deep-dive report (13-agent etf-deep-dive swarm)."""
+    asof = asof or "today"  # CLI handles 'today' as None
+    cmd = ["financial-analyst", "etf-report", code]
+    if asof and asof != "today":
+        cmd += ["--asof", asof]
+    root = _project_root()
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=900,
+                              cwd=str(root))
+    except subprocess.TimeoutExpired:
+        return ToolResult("ETF report timed out after 15 minutes.", is_error=True)
+    if proc.returncode != 0:
+        return ToolResult(
+            f"ETF report failed (exit {proc.returncode}):\n{proc.stderr[-500:]}",
+            is_error=True,
+        )
+    md_files = sorted((root / "out").glob(f"{code}_*.md"))
+    if not md_files:
+        return ToolResult(f"ETF report finished but no markdown found for {code}.")
+    md_path = md_files[-1]
+    body = md_path.read_text(encoding="utf-8", errors="replace")
+    import re
+    summary_parts = []
+    for sect in (r"## 一、综合评级.*?(?=## 二)", r"## 八、操作建议.*?(?=---|\Z)"):
+        m = re.search(sect, body, re.DOTALL)
+        if m:
+            summary_parts.append(m.group(0).strip())
+    summary = "\n\n".join(summary_parts) or body[:1500]
+    return ToolResult(
+        f"ETF report written to {md_path}.\n\nExec summary:\n{summary}",
+        side_effect={"md_path": str(md_path)},
+    )
+
+
 def _tool_news_collect(sources: str = "kuaixun,longhu,sinafinance",
                        limit: int = 200,
                        code: Optional[str] = None) -> ToolResult:
@@ -1871,6 +1907,28 @@ TOOL_REGISTRY: List[Tool] = [
             "required": ["code"],
         },
         run=_tool_report,
+        cost_hint="minutes",
+        confirm_required=True,
+    ),
+    Tool(
+        name="run_etf_report",
+        description=(
+            "Run a complete ETF deep-dive research report (中文 ETF 研报). "
+            "Takes 5-8 minutes. Outputs a 5-dim rating (持仓/技术/资金流-申赎/"
+            "估值-折溢价/风控), target/stop, premium-discount, tracking error, "
+            "holdings concentration. Use ONLY for ETF codes (5/15 开头, e.g. "
+            "510300 / SH510300 / 159915). For stocks use run_report. "
+            "DO NOT use for a quick price quote (use realtime_quote)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "ETF code, e.g. 510300 / SH510300 / 159915 / SZ159915."},
+                "asof": {"type": "string", "description": "As-of date YYYY-MM-DD (default: today)."},
+            },
+            "required": ["code"],
+        },
+        run=_tool_etf_report,
         cost_hint="minutes",
         confirm_required=True,
     ),
