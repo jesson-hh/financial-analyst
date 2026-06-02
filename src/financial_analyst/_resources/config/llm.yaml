@@ -27,6 +27,16 @@ providers:
     models: [deepseek-chat, deepseek-reasoner]
 
 agent_overrides:
+  # 盘中盯盘实时 advisor — deepseek-only (用户硬约束: 不要qwen); chat 不用 reasoner
+  # (盘中事件触发要快/省). 走 intl_clash profile (proxy + verify=False).
+  watch-agent:
+    provider: deepseek
+    model: deepseek-chat
+  # Agent 回测决策 (backtest.decision.DecisionAgent) — 同 watch-agent: 快/便宜.
+  # mock 模式不调 LLM, real 模式逐日逐股调一次 chat.
+  backtest-agent:
+    provider: deepseek
+    model: deepseek-chat
   report-writer:
     provider: qwen
     model: qwen3.5-plus

@@ -356,6 +356,8 @@ function TopBar({ mode, onMode }) {
     { k: 'compose', l: '多因子合成' },
     { k: 'archive', l: '研究档案' },
     { k: 'workflow', l: '工作流实验室' },
+    { k: 'backtest', l: 'Agent 回测' },   // ← P5 新增
+    { k: 'watch', l: '实时盯盘' },
   ];
   return (
     <header style={{ padding: '12px 28px', borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 18, flexShrink: 0, background: 'rgba(241,234,217,0.5)', whiteSpace: 'nowrap' }}>
@@ -1744,6 +1746,693 @@ function WorkflowLab() {
   );
 }
 
+// ═════════════════════════ Agent 回测 (P5) ═════════════════════════
+function BacktestMode() {
+  const [start, setStart]   = useState('');
+  const [end, setEnd]       = useState('');
+  const [cash, setCash]     = useState(1000000);
+  const [topn, setTopn]     = useState(20);
+  const [mode, setMode]     = useState('mock');          // mock | real
+  const run = useAsync();
+  const [polling, setPolling] = useState(false);
+  const timer = useRef(null);
+
+  // 挂载: probe data_end (走 /data/status 的 day 时间戳 — 退而求其次用近 2 周),
+  // 填默认窗口, 不硬编码任何固定日期。失败则留空 (后端 None → 自动近窗口)。
+  useEffect(() => {
+    getJSON('/data/status').then(d => {
+      const today = new Date();
+      const iso = (dt) => dt.toISOString().slice(0, 10);
+      const past = new Date(today.getTime() - 14 * 864e5);
+      setStart(iso(past)); setEnd(iso(today));
+    }).catch(() => {});
+    return () => { if (timer.current) clearInterval(timer.current); };
+  }, []);
+
+  const start_run = () => {
+    if (timer.current) clearInterval(timer.current);
+    setPolling(true);
+    const maxPolls = mode === 'mock' ? 60 : 150;   // mock≈36s / real≈6min 兜底
+    run.run(async () => {
+      const r = await postJSON('/backtest/run', {
+        start: start || null, end: end || null,
+        init_cash: Number(cash), candidate_topn: Number(topn), mode,
+        match_freq: 'day',
+      });
+      const rid = r.run_id;
+      let polls = 0;
+      return await new Promise((resolve, reject) => {
+        timer.current = setInterval(async () => {
+          polls += 1;
+          if (polls > maxPolls) {
+            clearInterval(timer.current); setPolling(false);
+            reject(new Error('回测超时, 请重试或缩短窗口')); return;
+          }
+          try {
+            const res = await getJSON('/backtest/result/' + rid);
+            if (res.status === 'running') return;        // 继续轮询
+            clearInterval(timer.current); setPolling(false);
+            if (res.status === 'error') reject(new Error(res.error || '回测失败'));
+            else resolve(res);
+          } catch (e) { clearInterval(timer.current); setPolling(false); reject(e); }
+        }, mode === 'mock' ? 600 : 2500);
+      });
+    });
+  };
+
+  const d = run.data;
+  const navVals = d ? (d.nav && d.nav.series || []) : [];
+  const navDates = d ? (d.nav && d.nav.dates || []) : [];
+  const k = d ? (d.kpi || {}) : {};
+  const navOk = navVals.length >= 2;                     // 单点 → EquityChart 除 0
+  const dirOf = (v) => (v === null || v === undefined) ? undefined : (v >= 0 ? 'up' : 'down');
+  // 理由摘要: fill.reason 恒空 → 查 decisions[date] 里同 code 的 reason
+  const reasonFor = (t) => {
+    if (t.reason) return t.reason;
+    try {
+      const day = d && d.decisions && d.decisions[t.date];
+      const leg = day && (day.decisions || []).find(x => (x.code) === t.code);
+      return (leg && leg.reason) || '—';
+    } catch (e) { return '—'; }
+  };
+
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: 18, minWidth: 0 }}>
+      {/* 控件条 */}
+      <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 14 }}>
+        <label className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>起始日
+          <input value={start} onChange={e => setStart(e.target.value)} placeholder="YYYY-MM-DD"
+            style={{ display: 'block', marginTop: 3, padding: '5px 8px', border: '1px solid var(--line)', fontFamily: 'var(--mono)', fontSize: 12 }} /></label>
+        <label className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>结束日
+          <input value={end} onChange={e => setEnd(e.target.value)} placeholder="留空=data_end"
+            style={{ display: 'block', marginTop: 3, padding: '5px 8px', border: '1px solid var(--line)', fontFamily: 'var(--mono)', fontSize: 12 }} /></label>
+        <label className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>初始资金
+          <input type="number" value={cash} onChange={e => setCash(e.target.value)}
+            style={{ display: 'block', marginTop: 3, padding: '5px 8px', width: 120, border: '1px solid var(--line)', fontFamily: 'var(--mono)', fontSize: 12 }} /></label>
+        <label className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>候选 N
+          <input type="number" value={topn} onChange={e => setTopn(e.target.value)}
+            style={{ display: 'block', marginTop: 3, padding: '5px 8px', width: 70, border: '1px solid var(--line)', fontFamily: 'var(--mono)', fontSize: 12 }} /></label>
+        <Segmented value={mode} onChange={setMode}
+          options={[{ value: 'mock', label: 'Mock(秒级)' }, { value: 'real', label: '真 LLM(慢)' }]} />
+        <button onClick={start_run} disabled={run.loading || polling} className="hover-pill"
+          style={{ padding: '7px 16px', border: 'none', background: 'var(--ink)', color: 'var(--paper)', fontFamily: 'var(--serif)', fontSize: 12, cursor: 'pointer' }}>
+          {(run.loading || polling) ? '回测中…' : '起回测 ▶'}
+        </button>
+      </div>
+
+      {(run.loading || polling) && <Loading label={mode === 'mock' ? '跑确定性回测中…' : 'LLM 决策回测中(较慢)…'} />}
+      {run.error && <ErrorBox error={run.error} />}
+
+      {d && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {(d.warnings || []).length > 0 && <div className="mono" style={{ fontSize: 10, color: 'var(--jin)' }}>⚠ {d.warnings.join(' · ')}</div>}
+          <Panel title={<span>组合表现 <span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', marginLeft: 6 }}>{d.mode}·{d.params && d.params.start}~{d.params && d.params.end}·LLM {k.n_llm_calls} 次</span></span>}>
+            {/* 8 格, 对齐 FactorReportView 的组合回测格 */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', border: '1px solid var(--line-soft)' }}>
+              <Kpi label="年化"     value={pct(k.ann_return)} dir={dirOf(k.ann_return)} />
+              <Kpi label="Sharpe"   value={n2(k.sharpe, 2)} />
+              <Kpi label="最大回撤"  value={pct(k.max_drawdown)} dir={k.max_drawdown ? 'down' : undefined} />
+              <Kpi label="Calmar"   value={n2(k.calmar, 2)} last />
+              <Kpi label="波动率"    value={pct(k.volatility)} />
+              <Kpi label="换手"     value={pct(k.turnover)} />
+              <Kpi label="胜率(日)"  value={pct(k.win_rate)} />
+              <Kpi label="逐笔胜率"  value={pct(k.trade_win_rate)} last />
+            </div>
+            <div style={{ marginTop: 10 }}>
+              {navOk ? <EquityChart series={navVals} dates={navDates} benchmark={d.benchmark || undefined} />
+                     : <Empty label="窗口过短, 无足够净值点 (请选 ≥2 个交易日)" />}
+            </div>
+          </Panel>
+          <Panel title={<span>交易记录 <span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', marginLeft: 6 }}>{(d.trades || []).length} 笔 · 逐笔胜率 {pct(k.trade_win_rate)}</span></span>}>
+            {(!d.trades || !d.trades.length) ? <Empty label="窗口内无成交" /> : (
+              <div>
+                <div style={{ display: 'flex', gap: 10, padding: '6px 10px', borderBottom: '1px solid var(--line)' }}>
+                  {['日期', '动作', '代码', '成交价', '数量', '盈亏', '理由'].map((h, i) => (
+                    <span key={i} className="mono" style={{
+                      fontSize: 9.5, color: 'var(--ink-3)', letterSpacing: '0.1em',
+                      width: [78, 46, 84, 72, 64, 88, 0][i] || undefined, flex: i === 6 ? 1 : 'none', minWidth: i === 6 ? 0 : undefined
+                    }}>{h}</span>
+                  ))}
+                </div>
+                {d.trades.map((t, i) => (
+                  <div key={i} className="hover-row" style={{ display: 'flex', gap: 10, alignItems: 'baseline', padding: '7px 10px', borderBottom: '1px solid var(--line-soft)' }}>
+                    <span className="mono" style={{ fontSize: 11, color: 'var(--ink-2)', width: 78 }}>{t.date}</span>
+                    <span className="mono" style={{ fontSize: 10, width: 46, color: t.action === 'buy' ? 'var(--zhu)' : 'var(--dai)' }}>{t.action}</span>
+                    <code className="mono" style={{ fontSize: 11.5, color: 'var(--ink)', width: 84 }}>{t.code}</code>
+                    <span className="mono" style={{ fontSize: 11, color: 'var(--ink-1)', width: 72 }}>{n2(t.price, 2)}</span>
+                    <span className="mono" style={{ fontSize: 11, color: 'var(--ink-2)', width: 64 }}>{t.qty}</span>
+                    <span className={'mono ' + (t.pnl > 0 ? 'up' : t.pnl < 0 ? 'down' : '')} style={{ fontSize: 11, width: 88 }}>{t.action === 'sell' ? n2(t.pnl, 1) : '—'}</span>
+                    <span className="serif" style={{ fontSize: 11, color: 'var(--ink-2)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{reasonFor(t)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Panel>
+        </div>
+      )}
+      {!d && !run.loading && !polling && !run.error && <Empty label="设定窗口 + Mock 模式, 点「起回测」秒级出净值 + 交易 (Mock=单只反转买入持有 N 日后了结, 演示数据通路, 非盈利策略)" />}
+    </div>
+  );
+}
+
+// ═════════════════════════ 实时盯盘 (Task 8) ═════════════════════════
+//
+// 三栏: 左 自选列表 (EventSource /watch/stream 收 quote_update 驱动实时价 + ⚡触发标记,
+// 点选切换 sel); 中 <Candle code={sel}/> (最小 SVG 蜡烛 + MA); 右 推荐 feed
+// (收 recommendation 事件 unshift, 每条 [确认][忽略] -> POST /watch/ack)。
+// 顶部 开始/停止 -> POST /watch/start,/watch/stop; 初始 GET /watch/status。
+//
+// 后端契约 (buddy/server.py + watch/loop.py 已实现):
+//   GET  /watch/status  -> {ok, running, n_items, items:[{code,avg_cost,stop_loss}], tick_count, llm_calls_made}
+//   POST /watch/start   {items:[{code,avg_cost?,stop_loss?}], tick_seconds?} -> {ok, running, n_items}
+//   POST /watch/stop    -> {ok, running:false}
+//   GET  /watch/stream  (SSE) -> event: quote_update {code, ts, quote:{price,changePercent,high,low,...}}
+//                                event: recommendation {code, ts, rec:{code,action,reason,trigger_kind,target_price,stop_loss,confidence}}
+//   POST /watch/ack     {ts, code, user_action:'confirm'|'ignore'} -> {ok}
+
+// 动作 -> 中文 + 涨跌色向 (与 backtest.decision.DecisionLeg 五档一致)
+const ACTION_CN = { buy: '买入', add: '加仓', hold: '持有', reduce: '减仓', sell: '卖出' };
+const ACTION_DIR = { buy: 'up', add: 'up', hold: '', reduce: 'down', sell: 'down' };
+
+// 最小蜡烛图 — 静态渲染一段 bars (OHLC 或仅 close 点序列) + MA。空数据不白屏 (Empty)。
+// bars: [{open,high,low,close,ts?}] 或 [{close,ts?}] 或 [number]。maWindow 默认 5。
+function Candle({ code, bars, maWindow = 5 }) {
+  const w = 540, h = 260, pad = { l: 40, r: 12, t: 16, b: 24 };
+  // 归一化输入: 容忍纯数字 / 仅 close / 完整 OHLC。
+  const norm = (bars || []).map((b) => {
+    if (b === null || b === undefined) return null;
+    if (typeof b === 'number') return { o: b, h: b, l: b, c: b, ts: null };
+    const c = (b.close !== undefined ? b.close : b.c);
+    if (c === null || c === undefined || (typeof c === 'number' && isNaN(c))) return null;
+    const o = (b.open !== undefined ? b.open : (b.o !== undefined ? b.o : c));
+    const hi = (b.high !== undefined ? b.high : (b.h !== undefined ? b.h : Math.max(o, c)));
+    const lo = (b.low !== undefined ? b.low : (b.l !== undefined ? b.l : Math.min(o, c)));
+    return { o, h: hi, l: lo, c, ts: (b.ts || b.trade_date || b.datetime || null) };
+  }).filter(Boolean);
+
+  if (!code) return <Empty label="← 选择左侧自选股查看分时蜡烛" />;
+  if (!norm.length) return <Empty label="等待行情数据… (盯盘开始后实时累积)" />;
+
+  const lo = Math.min(...norm.map(b => b.l));
+  const hi = Math.max(...norm.map(b => b.h));
+  const span = (hi - lo) || (Math.abs(hi) * 0.02 + 0.01);   // 防 0 高度 (一字/单点)
+  const padV = span * 0.08;
+  const yMin = lo - padV, yMax = hi + padV;
+  const innerW = w - pad.l - pad.r, innerH = h - pad.t - pad.b;
+  const n = norm.length;
+  const slot = innerW / n;
+  const bw = Math.max(1.5, Math.min(14, slot * 0.6));
+  const xMid = (i) => pad.l + slot * (i + 0.5);
+  const yPx = (v) => pad.t + innerH * (1 - (v - yMin) / (yMax - yMin));
+
+  // MA(maWindow) over close
+  const ma = norm.map((_, i) => {
+    if (i < maWindow - 1) return null;
+    let s = 0;
+    for (let k = i - maWindow + 1; k <= i; k++) s += norm[k].c;
+    return s / maWindow;
+  });
+  const maPath = ma
+    .map((v, i) => (v === null ? null : `${i === 0 || ma[i - 1] === null ? 'M' : 'L'} ${xMid(i).toFixed(1)} ${yPx(v).toFixed(1)}`))
+    .filter(Boolean).join(' ');
+
+  const yTicks = 4;
+  const yLabels = Array.from({ length: yTicks + 1 }, (_, i) => yMin + (i * (yMax - yMin) / yTicks));
+  const lbl = (b, i) => (b.ts ? String(b.ts).slice(-8, -3) || String(b.ts).slice(0, 5) : '#' + (i + 1));
+  const tickIdxs = n > 1 ? [0, Math.floor(n / 2), n - 1] : [0];
+  const last = norm[n - 1];
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 6 }}>
+        <code className="mono" style={{ fontSize: 13, color: 'var(--ink)' }}>{code}</code>
+        <span className="mono" style={{ fontSize: 11, color: 'var(--ink-3)' }}>最新 {n2(last.c, 2)}</span>
+        <span style={{ flex: 1 }} />
+        <span className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)', letterSpacing: '0.14em' }}>MA{maWindow} · {n} 根</span>
+      </div>
+      <svg viewBox={`0 0 ${w} ${h}`} style={{ width: '100%', height: 270, display: 'block', border: '1px solid var(--line-soft)' }}>
+        {yLabels.map((v, i) => (
+          <g key={i}>
+            <line x1={pad.l} x2={w - pad.r} y1={yPx(v)} y2={yPx(v)} stroke="var(--line-soft)" strokeDasharray={i === 0 ? '0' : '2 3'} />
+            <text x={pad.l - 6} y={yPx(v) + 3} textAnchor="end" fontSize="9" fontFamily="var(--mono)" fill="var(--ink-3)">{v.toFixed(2)}</text>
+          </g>
+        ))}
+        {norm.map((b, i) => {
+          const up = b.c >= b.o;
+          const col = up ? 'var(--zhu)' : 'var(--dai)';
+          const x = xMid(i);
+          const yO = yPx(b.o), yC = yPx(b.c);
+          const top = Math.min(yO, yC);
+          const bodyH = Math.max(1, Math.abs(yC - yO));
+          return (
+            <g key={i}>
+              <line x1={x} x2={x} y1={yPx(b.h)} y2={yPx(b.l)} stroke={col} strokeWidth="1" />
+              <rect x={x - bw / 2} y={top} width={bw} height={bodyH} fill={col} opacity={up ? 0.85 : 0.95} />
+            </g>
+          );
+        })}
+        {maPath && <path d={maPath} stroke="var(--yin)" strokeWidth="1.3" fill="none" />}
+        {tickIdxs.map((di) => (
+          <text key={di} x={xMid(di)} y={h - 7} fontSize="9" fontFamily="var(--mono)" fill="var(--ink-3)" textAnchor="middle">{lbl(norm[di], di)}</text>
+        ))}
+      </svg>
+    </div>
+  );
+}
+
+// 一条推荐卡 (右栏 feed)。rec = {action, reason, trigger_kind, target_price, stop_loss, confidence}。
+function RecCard({ item, onAck }) {
+  const { code, ts, rec, ack } = item;
+  const r = rec || {};
+  const dir = ACTION_DIR[r.action] || '';
+  return (
+    <div style={{ border: '1px solid var(--line)', background: 'var(--paper)', marginBottom: 10 }}>
+      <div style={{ padding: '8px 11px', borderBottom: '1px solid var(--line-soft)', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <code className="mono" style={{ fontSize: 12, color: 'var(--ink)' }}>{code}</code>
+        <span className={'mono ' + dir} style={{ fontSize: 12, fontWeight: 600 }}>{ACTION_CN[r.action] || r.action || '—'}</span>
+        <span style={{ flex: 1 }} />
+        <span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', padding: '1px 5px', border: '1px solid var(--line-soft)' }}>{r.trigger_kind || '—'}</span>
+      </div>
+      <div style={{ padding: '9px 11px' }}>
+        <div className="serif" style={{ fontSize: 12.5, color: 'var(--ink-1)', lineHeight: 1.6 }}>{r.reason || (r.error ? '✗ ' + r.error : '无理由')}</div>
+        <div style={{ display: 'flex', gap: 14, marginTop: 7, flexWrap: 'wrap' }}>
+          {r.target_price > 0 && <span className="mono" style={{ fontSize: 10, color: 'var(--ink-2)' }}>目标 {n2(r.target_price, 2)}</span>}
+          {r.stop_loss > 0 && <span className="mono" style={{ fontSize: 10, color: 'var(--ink-2)' }}>止损 {n2(r.stop_loss, 2)}</span>}
+          {(r.confidence || r.confidence === 0) && <span className="mono" style={{ fontSize: 10, color: 'var(--ink-2)' }}>信心 {pct(r.confidence, 0)}</span>}
+          <span className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)' }}>{ts}</span>
+        </div>
+      </div>
+      <div style={{ borderTop: '1px solid var(--line-soft)', padding: '6px 9px', display: 'flex', gap: 8 }}>
+        {ack ? (
+          <span className="mono" style={{ fontSize: 11, color: ack === 'confirm' ? 'var(--zhu)' : 'var(--ink-3)' }}>
+            {ack === 'confirm' ? '✓ 已确认' : '— 已忽略'}
+          </span>
+        ) : (
+          <>
+            <button onClick={() => onAck(item, 'confirm')} className="hover-pill"
+              style={{ flex: 1, padding: '5px 8px', border: 'none', background: 'var(--ink)', color: 'var(--paper)', fontFamily: 'var(--serif)', fontSize: 11.5, cursor: 'pointer' }}>确认</button>
+            <button onClick={() => onAck(item, 'ignore')} className="hover-pill"
+              style={{ flex: 1, padding: '5px 8px', border: '1px solid var(--line)', background: 'transparent', color: 'var(--ink-2)', fontFamily: 'var(--serif)', fontSize: 11.5, cursor: 'pointer' }}>忽略</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// 复盘页 (C 复盘闭环): 命中率看板 (overall + by_trigger + by_action) + 推荐历史
+// (rec × outcome left-join, verdict/T+1/T+5)。盘后点「复盘回填」给到期推荐离线打分。
+function WatchReview({ hitrate, rows, busy, err, onBackfill, onReload }) {
+  const ov = (hitrate && hitrate.overall) ||
+    { n: 0, correct: 0, partial: 0, wrong: 0, win_rate: 0, avg_return_t1: 0, avg_return_t5: 0 };
+  const byTrig = (hitrate && hitrate.by_trigger) || {};
+  const byAct = (hitrate && hitrate.by_action) || {};
+  const pct = (x) => (x === undefined || x === null) ? '—' : (x * 100).toFixed(1) + '%';
+  const retCell = (x) => {
+    if (x === undefined || x === null) return <span className="mono" style={{ color: 'var(--ink-3)' }}>—</span>;
+    const d = x > 0 ? 'up' : x < 0 ? 'down' : '';
+    return <span className={'mono ' + d}>{(x > 0 ? '+' : '') + (x * 100).toFixed(2) + '%'}</span>;
+  };
+  const vColor = (v) => v === 'correct' ? 'var(--zhu)' : v === 'wrong' ? 'var(--dai)'
+    : v === 'partial' ? 'var(--jin)' : 'var(--ink-3)';
+  const vLabel = (v) => ({ correct: '✓ 命中', wrong: '✗ 错', partial: '~ 部分', pending: '… 待评' })[v] || v;
+  const StatRow = ({ k, s }) => (
+    <tr style={{ borderTop: '1px solid var(--line-soft)' }}>
+      <td style={{ padding: '5px 8px' }}><code className="mono" style={{ fontSize: 11 }}>{k}</code></td>
+      <td className="mono" style={{ padding: '5px 8px', textAlign: 'right' }}>{s.n}</td>
+      <td className="mono" style={{ padding: '5px 8px', textAlign: 'right', color: s.win_rate >= 0.5 ? 'var(--zhu)' : 'var(--dai)' }}>{pct(s.win_rate)}</td>
+      <td style={{ padding: '5px 8px', textAlign: 'right' }}>{retCell(s.avg_return_t5)}</td>
+    </tr>
+  );
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: 20, minWidth: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+        <span className="serif" style={{ fontSize: 15, color: 'var(--ink)', fontWeight: 500 }}>推荐复盘</span>
+        <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>盘后离线 · T+1/T+5 outcome 打分</span>
+        <span style={{ flex: 1 }} />
+        <button onClick={onReload} className="hover-pill" style={{ padding: '5px 11px', border: '1px solid var(--line)', background: 'transparent', cursor: 'pointer', fontSize: 11.5, fontFamily: 'var(--serif)' }}>↻ 刷新</button>
+        <button onClick={onBackfill} disabled={busy} className="hover-pill" style={{ padding: '5px 13px', border: 'none', background: busy ? 'var(--ink-3)' : 'var(--ink)', color: 'var(--paper)', cursor: busy ? 'default' : 'pointer', fontSize: 11.5, fontFamily: 'var(--serif)' }}>{busy ? '回填中…' : '⟳ 复盘回填'}</button>
+      </div>
+      {err && <div style={{ marginBottom: 12 }}><ErrorBox error={err} /></div>}
+
+      {/* overall 命中率 KPIs */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', border: '1px solid var(--line-soft)', marginBottom: 18 }}>
+        <Kpi label="已评样本" value={ov.n} />
+        <Kpi label="命中率" value={pct(ov.win_rate)} dir={ov.win_rate >= 0.5 ? 'up' : 'down'} />
+        <Kpi label="命中/部分/错" value={ov.correct + '/' + ov.partial + '/' + ov.wrong} />
+        <Kpi label="均 T+1" value={pct(ov.avg_return_t1)} dir={ov.avg_return_t1 >= 0 ? 'up' : 'down'} />
+        <Kpi label="均 T+5" value={pct(ov.avg_return_t5)} dir={ov.avg_return_t5 >= 0 ? 'up' : 'down'} last />
+      </div>
+
+      {/* by_trigger + by_action 两张表 */}
+      <div style={{ display: 'flex', gap: 18, marginBottom: 18, flexWrap: 'wrap' }}>
+        {[['按触发类型', byTrig], ['按操作', byAct]].map(([title, m]) => (
+          <div key={title} style={{ flex: 1, minWidth: 280 }}>
+            <Panel title={title}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11.5 }}>
+                <thead><tr style={{ color: 'var(--ink-3)', fontSize: 10 }}>
+                  <td style={{ padding: '4px 8px' }}>类型</td>
+                  <td style={{ padding: '4px 8px', textAlign: 'right' }}>样本</td>
+                  <td style={{ padding: '4px 8px', textAlign: 'right' }}>命中率</td>
+                  <td style={{ padding: '4px 8px', textAlign: 'right' }}>均 T+5</td>
+                </tr></thead>
+                <tbody>
+                  {Object.keys(m).length === 0 && <tr><td colSpan={4} style={{ padding: '10px 8px', color: 'var(--ink-3)', textAlign: 'center' }}>暂无数据</td></tr>}
+                  {Object.entries(m).map(([k, s]) => <StatRow key={k} k={k} s={s} />)}
+                </tbody>
+              </table>
+            </Panel>
+          </div>
+        ))}
+      </div>
+
+      {/* 推荐历史 */}
+      <Panel title={<span>推荐历史 <span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', marginLeft: 6 }}>{rows.length} 条 · 新→旧</span></span>}>
+        {!rows.length && <Empty label="暂无推荐历史 · 盯盘产生推荐后, 盘后点「复盘回填」打分" />}
+        {!!rows.length && (
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11.5 }}>
+            <thead><tr style={{ color: 'var(--ink-3)', fontSize: 10 }}>
+              <td style={{ padding: '5px 8px' }}>时间</td>
+              <td style={{ padding: '5px 8px' }}>代码</td>
+              <td style={{ padding: '5px 8px' }}>操作</td>
+              <td style={{ padding: '5px 8px' }}>触发</td>
+              <td style={{ padding: '5px 8px', textAlign: 'right' }}>T+1</td>
+              <td style={{ padding: '5px 8px', textAlign: 'right' }}>T+5</td>
+              <td style={{ padding: '5px 8px', textAlign: 'center' }}>评定</td>
+              <td style={{ padding: '5px 8px', textAlign: 'center' }}>人工</td>
+            </tr></thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={(r.ts || '') + '|' + (r.code || '') + '|' + i} style={{ borderTop: '1px solid var(--line-soft)' }}>
+                  <td className="mono" style={{ padding: '5px 8px', fontSize: 10, color: 'var(--ink-3)' }}>{String(r.ts || '').slice(5, 16)}</td>
+                  <td style={{ padding: '5px 8px' }}><code className="mono" style={{ fontSize: 11 }}>{r.code}</code></td>
+                  <td className="mono" style={{ padding: '5px 8px' }}>{r.action}</td>
+                  <td className="mono" style={{ padding: '5px 8px', fontSize: 10, color: 'var(--ink-3)' }}>{r.trigger_kind}</td>
+                  <td style={{ padding: '5px 8px', textAlign: 'right' }}>{retCell(r.return_t1)}</td>
+                  <td style={{ padding: '5px 8px', textAlign: 'right' }}>{retCell(r.return_t5)}</td>
+                  <td style={{ padding: '5px 8px', textAlign: 'center', color: vColor(r.verdict) }}>{vLabel(r.verdict)}</td>
+                  <td className="mono" style={{ padding: '5px 8px', textAlign: 'center', fontSize: 10, color: r.user_action === 'confirm' ? 'var(--zhu)' : r.user_action === 'ignore' ? 'var(--dai)' : 'var(--ink-3)' }}>{r.user_action === 'confirm' ? '✓确认' : r.user_action === 'ignore' ? '✗忽略' : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Panel>
+    </div>
+  );
+}
+
+function WatchMode() {
+  const [running, setRunning] = useState(false);
+  const [items, setItems] = useState([]);          // [{code, avg_cost, stop_loss}]
+  const [quotes, setQuotes] = useState({});        // {code: {price, changePercent, ...}}
+  const [series, setSeries] = useState({});        // {code: [{ts, close}]} — quote_update 累积的分时
+  const [history, setHistory] = useState({});      // {code: [{open,high,low,close,vol,trade_date}]} — /watch/bars 历史 5min K
+  const [fired, setFired] = useState({});          // {code: lastTriggerKind} ⚡ 标记
+  const [recs, setRecs] = useState([]);            // 推荐 feed (新的在前)
+  const [sel, setSel] = useState('');
+  const [draft, setDraft] = useState('');          // 新增 code 输入
+  const [conn, setConn] = useState('idle');        // idle | open | error
+  const [err, setErr] = useState('');
+  const [tickCount, setTickCount] = useState(0);
+  const esRef = useRef(null);
+  // 复盘 (C): 'live' 盯盘三栏 | 'review' 命中率看板+推荐历史
+  const [view, setView] = useState('live');
+  const [hitrate, setHitrate] = useState(null);    // {overall, by_trigger, by_action}
+  const [histRows, setHistRows] = useState([]);    // /watch/history rows (rec×outcome)
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [reviewErr, setReviewErr] = useState('');
+
+  // 初始 status
+  useEffect(() => {
+    getJSON('/watch/status').then(s => {
+      if (!s) return;
+      setRunning(!!s.running);
+      setItems(s.items || []);
+      setTickCount(s.tick_count || 0);
+      if (!sel && (s.items || []).length) setSel(s.items[0].code);
+    }).catch(() => {});
+  }, []);
+
+  // running 翻 true 时挂 SSE; 翻 false / 卸载时拆。
+  useEffect(() => {
+    if (!running) {
+      if (esRef.current) { esRef.current.close(); esRef.current = null; }
+      setConn('idle');
+      return;
+    }
+    const url = (window.GUANLAN_BACKEND || '') + '/watch/stream';
+    let es;
+    try { es = new EventSource(url); }
+    catch (e) { setConn('error'); setErr('EventSource 创建失败: ' + (e.message || e)); return; }
+    esRef.current = es;
+    es.onopen = () => { setConn('open'); setErr(''); };
+    es.addEventListener('quote_update', (ev) => {
+      let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+      const code = d.code; const qd = d.quote || {};
+      if (!code) return;
+      setQuotes(prev => ({ ...prev, [code]: qd }));
+      const px = (qd.price !== undefined ? qd.price : qd.now);
+      if (px !== undefined && px !== null && !(typeof px === 'number' && isNaN(px))) {
+        setSeries(prev => {
+          const arr = (prev[code] || []).concat([{ ts: d.ts, close: px }]);
+          if (arr.length > 240) arr.splice(0, arr.length - 240);   // 上限一日 5min 根数
+          return { ...prev, [code]: arr };
+        });
+      }
+    });
+    es.addEventListener('recommendation', (ev) => {
+      let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+      if (!d.code) return;
+      const key = (d.ts || '') + '|' + d.code;
+      setRecs(prev => [{ key, code: d.code, ts: d.ts, rec: d.rec || {}, ack: null }, ...prev].slice(0, 100));
+      setFired(prev => ({ ...prev, [d.code]: (d.rec && d.rec.trigger_kind) || 'signal' }));
+    });
+    es.onerror = () => { setConn('error'); };   // 浏览器会自动重连; 仅标红状态
+    return () => { es.close(); if (esRef.current === es) esRef.current = null; };
+  }, [running]);
+
+  // 选中股 → 拉一次历史 5min K (真 OHLC 蜡烛打底, 无需盯盘运行)。
+  useEffect(() => {
+    if (!sel || history[sel]) return;
+    let cancelled = false;
+    getJSON('/watch/bars?code=' + encodeURIComponent(sel) + '&n=240')
+      .then(r => { if (!cancelled && r && r.ok) setHistory(prev => ({ ...prev, [sel]: r.bars || [] })); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [sel]);
+
+  // 盯盘开始 → 刷新当前选中股的历史 K (拉到最新已收的 5min 根)。
+  useEffect(() => {
+    if (!running || !sel) return;
+    getJSON('/watch/bars?code=' + encodeURIComponent(sel) + '&n=240')
+      .then(r => { if (r && r.ok) setHistory(prev => ({ ...prev, [sel]: r.bars || [] })); })
+      .catch(() => {});
+  }, [running]);
+
+  const parseCodes = (raw) => String(raw || '').split(/[\s,，、]+/).map(s => s.trim()).filter(Boolean);
+
+  const start = async () => {
+    setErr('');
+    const codes = items.length ? items.map(it => it.code) : parseCodes(draft);
+    if (!codes.length) { setErr('请先添加至少一只股票'); return; }
+    try {
+      const body = { items: codes.map(c => ({ code: c })) };
+      const r = await postJSON('/watch/start', body);
+      if (r && r.ok) { setRunning(true); setDraft(''); }
+      else setErr((r && r.reason) || '启动失败');
+    } catch (e) { setErr(e.message || String(e)); }
+  };
+  const stop = async () => {
+    setErr('');
+    try { await postJSON('/watch/stop', {}); } catch (e) { setErr(e.message || String(e)); }
+    setRunning(false);
+  };
+
+  const addCode = async () => {
+    const codes = parseCodes(draft);
+    if (!codes.length) return;
+    setDraft('');
+    if (running) {
+      for (const c of codes) {
+        try {
+          const r = await postJSON('/watch/item', { op: 'add', code: c });
+          if (r && r.ok) setItems(r.items || ((prev) => prev));
+        } catch (e) { /* swallow per-code */ }
+      }
+      // status 回读权威清单
+      getJSON('/watch/status').then(s => { if (s) setItems(s.items || []); }).catch(() => {});
+    } else {
+      setItems(prev => {
+        const have = new Set(prev.map(it => it.code));
+        const add = codes.filter(c => !have.has(c)).map(c => ({ code: c }));
+        return [...prev, ...add];
+      });
+    }
+    if (!sel && codes.length) setSel(codes[0]);
+  };
+  const removeCode = async (code) => {
+    if (running) {
+      try { await postJSON('/watch/item', { op: 'remove', code }); } catch (e) { /* ignore */ }
+      getJSON('/watch/status').then(s => { if (s) setItems(s.items || []); }).catch(() => {});
+    } else {
+      setItems(prev => prev.filter(it => it.code !== code));
+    }
+    if (sel === code) setSel('');
+  };
+
+  const ack = async (item, action) => {
+    try {
+      await postJSON('/watch/ack', { ts: item.ts, code: item.code, user_action: action });
+    } catch (e) { /* still mark locally — UI optimistic */ }
+    setRecs(prev => prev.map(r => (r.key === item.key ? { ...r, ack: action } : r)));
+  };
+
+  // 复盘: 拉命中率 + 推荐历史 (rec×outcome left-join)。
+  const loadReview = async () => {
+    setReviewErr('');
+    try {
+      const [h, hist] = await Promise.all([
+        getJSON('/watch/hitrate'),
+        getJSON('/watch/history?n=200'),
+      ]);
+      setHitrate((h && h.ok) ? h : null);
+      setHistRows((hist && hist.ok && hist.rows) ? hist.rows : []);
+    } catch (e) { setReviewErr(e.message || String(e)); }
+  };
+  // 复盘回填: 盘后给到期推荐打 T+1/T+5 outcome 分, 再刷新看板。
+  const backfill = async () => {
+    setReviewBusy(true); setReviewErr('');
+    try {
+      const r = await postJSON('/watch/outcome/backfill', {});
+      if (!(r && r.ok)) setReviewErr((r && r.reason) || '回填失败');
+    } catch (e) { setReviewErr(e.message || String(e)); }
+    await loadReview();
+    setReviewBusy(false);
+  };
+  // 切到复盘页 → 首次自动拉一次。
+  useEffect(() => {
+    if (view === 'review' && hitrate === null) loadReview();
+  }, [view]);
+
+  const connDot = conn === 'open' ? 'var(--zhu)' : conn === 'error' ? 'var(--dai)' : 'var(--ink-3)';
+  const connTxt = conn === 'open' ? 'SSE 已连' : conn === 'error' ? 'SSE 断开 (重连中)' : '未连接';
+
+  // 中栏蜡烛: 历史 5min K (真 OHLC) 打底 + 实时分时 (close-only) 延伸到末根之后。
+  const histBars = (sel && history[sel]) || [];
+  const liveBars = (sel && series[sel]) || [];
+  const lastHistTs = histBars.length
+    ? String(histBars[histBars.length - 1].trade_date || histBars[histBars.length - 1].ts || '')
+    : '';
+  const liveTail = liveBars
+    .filter(p => !lastHistTs || String(p.ts || '') > lastHistTs)
+    .map(p => ({ close: p.close, ts: p.ts }));
+  const chartBars = histBars.length ? histBars.concat(liveTail) : liveBars;
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      {/* 顶部控制条 */}
+      <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', background: 'rgba(241,234,217,0.4)' }}>
+        {!running ? (
+          <button onClick={start} className="hover-pill"
+            style={{ padding: '6px 16px', border: 'none', background: 'var(--ink)', color: 'var(--paper)', fontFamily: 'var(--serif)', fontSize: 12.5, cursor: 'pointer' }}>▶ 开始盯盘</button>
+        ) : (
+          <button onClick={stop} className="hover-pill"
+            style={{ padding: '6px 16px', border: '1px solid var(--dai)', background: 'transparent', color: 'var(--yin)', fontFamily: 'var(--serif)', fontSize: 12.5, cursor: 'pointer' }}>■ 停止</button>
+        )}
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ width: 7, height: 7, borderRadius: '50%', background: connDot }} />
+          <span className="mono" style={{ fontSize: 10.5, color: 'var(--ink-3)' }}>{connTxt}</span>
+        </span>
+        <span className="mono" style={{ fontSize: 10.5, color: 'var(--ink-3)' }}>{items.length} 只 · tick {tickCount}</span>
+        <span style={{ display: 'inline-flex', border: '1px solid var(--line)', overflow: 'hidden' }}>
+          {[['live', '盯盘'], ['review', '复盘']].map(([v, lbl]) => (
+            <button key={v} onClick={() => setView(v)}
+              style={{ padding: '4px 13px', border: 'none', cursor: 'pointer', fontFamily: 'var(--serif)', fontSize: 11.5,
+                background: view === v ? 'var(--ink)' : 'transparent', color: view === v ? 'var(--paper)' : 'var(--ink-3)' }}>{lbl}</button>
+          ))}
+        </span>
+        <span style={{ flex: 1 }} />
+        <input value={draft} onChange={e => setDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addCode(); }}
+          placeholder="加股票代码 (600519 / SH600519, 逗号分隔)"
+          style={{ width: 240, padding: '5px 9px', border: '1px solid var(--line)', fontFamily: 'var(--mono)', fontSize: 11.5, background: 'var(--paper)' }} />
+        <button onClick={addCode} className="hover-pill" style={{ padding: '5px 11px', border: '1px solid var(--line)', background: 'transparent', cursor: 'pointer', fontSize: 11.5, fontFamily: 'var(--serif)' }}>+ 添加</button>
+      </div>
+      {err && <div style={{ padding: '8px 16px' }}><ErrorBox error={err} /></div>}
+
+      {/* 盯盘三栏 (view==='live') */}
+      {view === 'live' && (
+      <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+        {/* 左: 自选列表 */}
+        <aside style={{ width: 260, flexShrink: 0, borderRight: '1px solid var(--line)', overflowY: 'auto', background: 'rgba(241,234,217,0.25)' }}>
+          <div style={{ padding: '9px 12px', borderBottom: '1px solid var(--line-soft)' }}>
+            <span className="serif" style={{ fontSize: 12.5, color: 'var(--ink)', fontWeight: 500 }}>盯盘列表</span>
+          </div>
+          {!items.length && <Empty label="空 · 在上方添加股票后开始盯盘" />}
+          {items.map(it => {
+            const code = it.code;
+            const qd = quotes[code] || {};
+            const chg = (qd.changePercent !== undefined ? qd.changePercent : qd.changepercent);
+            const dir = (chg > 0) ? 'up' : (chg < 0) ? 'down' : '';
+            const px = (qd.price !== undefined ? qd.price : qd.now);
+            return (
+              <div key={code} className="hover-row" onClick={() => setSel(code)}
+                style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid var(--line-soft)', background: sel === code ? 'rgba(28,24,20,0.07)' : 'transparent', display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <code className="mono" style={{ fontSize: 12, color: 'var(--ink)' }}>{code}</code>
+                    {fired[code] && <span title={fired[code]} style={{ fontSize: 11, color: 'var(--jin)' }}>⚡</span>}
+                  </div>
+                  <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)' }}>{fired[code] || ''}</div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div className={'mono ' + dir} style={{ fontSize: 12 }}>{n2(px, 2)}</div>
+                  <div className={'mono ' + dir} style={{ fontSize: 10 }}>{(chg === undefined || chg === null) ? '—' : (chg > 0 ? '+' : '') + n2(chg, 2) + '%'}</div>
+                </div>
+                <span onClick={(e) => { e.stopPropagation(); removeCode(code); }} title="移除"
+                  style={{ cursor: 'pointer', color: 'var(--yin)', opacity: 1, fontWeight: 600, fontSize: 13, lineHeight: 1 }}>×</span>
+              </div>
+            );
+          })}
+        </aside>
+
+        {/* 中: 蜡烛 */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: 18, minWidth: 0 }}>
+          <Panel title={<span>5min 蜡烛 <span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', marginLeft: 6 }}>历史 K线 + 实时分时延伸</span></span>}>
+            <Candle code={sel} bars={chartBars} maWindow={5} />
+            {sel && quotes[sel] && (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', border: '1px solid var(--line-soft)', marginTop: 12 }}>
+                <Kpi label="现价" value={n2(quotes[sel].price !== undefined ? quotes[sel].price : quotes[sel].now, 2)} />
+                <Kpi label="涨跌%" value={n2(quotes[sel].changePercent, 2)} dir={(quotes[sel].changePercent > 0) ? 'up' : (quotes[sel].changePercent < 0) ? 'down' : ''} />
+                <Kpi label="最高" value={n2(quotes[sel].high, 2)} />
+                <Kpi label="最低" value={n2(quotes[sel].low, 2)} last />
+              </div>
+            )}
+          </Panel>
+        </div>
+
+        {/* 右: 推荐 feed */}
+        <aside style={{ width: 320, flexShrink: 0, borderLeft: '1px solid var(--line)', overflowY: 'auto', padding: 14, background: 'rgba(241,234,217,0.18)' }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 10 }}>
+            <span className="serif" style={{ fontSize: 12.5, color: 'var(--ink)', fontWeight: 500 }}>实时推荐</span>
+            <span className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)' }}>{recs.length}</span>
+          </div>
+          {!recs.length && <Empty label={running ? '盯盘中 · 触发关键点时推送' : '开始盯盘后, 触发信号会在此推送'} />}
+          {recs.map(item => <RecCard key={item.key} item={item} onAck={ack} />)}
+        </aside>
+      </div>
+      )}
+
+      {view === 'review' && (
+        <WatchReview hitrate={hitrate} rows={histRows} busy={reviewBusy}
+                     err={reviewErr} onBackfill={backfill} onReload={loadReview} />
+      )}
+    </div>
+  );
+}
+
+
+
 // ═════════════════════════ 入口 ═════════════════════════
 function QuantApp() {
   const [mode, setMode] = useState('lib');
@@ -1759,6 +2448,8 @@ function QuantApp() {
         {mode === 'compose' && <ComposeMode />}
         {mode === 'archive' && <ArchiveMode />}
         {mode === 'workflow' && <WorkflowLab />}
+        {mode === 'backtest' && <BacktestMode />}   {/* ← P5 新增 */}
+        {mode === 'watch' && <WatchMode />}
       </div>
     </div>
   );

@@ -167,6 +167,48 @@ class CopilotDraftReq(BaseModel):
     freq: str = "day"
 
 
+# ── Realtime Watch (盯盘) 端点请求模型 (Task 7) ──
+class WatchItemReq(BaseModel):
+    """One stock to watch. ``code`` accepts bare 6-digit / prefixed / suffixed
+    (normalize_code handles it). ``stop_loss`` enables the stop_break channel."""
+    code: str
+    avg_cost: Optional[float] = None
+    stop_loss: Optional[float] = None
+
+
+class WatchStartReq(BaseModel):
+    """Start the盯盘 loop over a list of items (+ optional loop tunables)."""
+    items: list = []                       # list[WatchItemReq]; validated per-item
+    tick_seconds: Optional[float] = None
+    cooldown_minutes: Optional[int] = None
+    global_llm_cap_per_session: Optional[int] = None
+
+
+class WatchAckReq(BaseModel):
+    """Acknowledge a recommendation (人工确认): writes user_action onto the rec."""
+    ts: str
+    code: str
+    user_action: str = "confirm"           # confirm / ignore
+
+
+class WatchItemOpReq(BaseModel):
+    """Add / remove one watched item on the *running* loop."""
+    op: str                                # "add" | "remove"
+    code: str
+    avg_cost: Optional[float] = None
+    stop_loss: Optional[float] = None
+
+
+# ── Backtest 端点请求模型 ──
+class BacktestRunReq(BaseModel):
+    start: Optional[str] = None         # 窗口起 (YYYY-MM-DD); None → 前端 probe 后填
+    end: Optional[str] = None           # 窗口止; None → runner 自动 cap 到 data_end
+    init_cash: float = 1_000_000.0      # 初始资金
+    candidate_topn: int = 20            # 候选池 Top-N (映射 CandidateConfig.topn)
+    mode: str = "mock"                  # "mock"(默认,确定性 stub agent) | "real"(真 LLM)
+    match_freq: str = "day"             # "day" | "5min" (第一版 UI 只暴露 day)
+
+
 def _sse(event: str, **data: Any) -> str:
     """Format one SSE frame."""
     return f"event: {event}\ndata: {_safe_json_dumps(data)}\n\n"
@@ -187,6 +229,54 @@ def _safe_json_dumps(data) -> str:
             return [_clean(v) for v in x]
         return x
     return json.dumps(_clean(data), ensure_ascii=False)
+
+
+# ──────────────────────── Realtime Watch (盯盘) singleton ────────────────────────
+#
+# A **module-level** single WatchLoop + its background asyncio.Task. Module-level
+# (not a build_app closure) so tests can inject a stub via ``server._watch_loop``
+# and so the loop survives across requests within one ``fa serve`` process. Only
+# one watcher runs at a time (the desktop UI has a single 盯盘 panel) — /watch/start
+# replaces any prior loop.
+_watch_loop: Any = None              # the live WatchLoop (or stub); None = stopped
+_watch_task: "Optional[asyncio.Task]" = None   # background loop.run() task
+
+
+def _watch_running() -> bool:
+    """True iff a watch loop is registered and not stopped."""
+    loop = _watch_loop
+    return loop is not None and not getattr(loop, "stopped", False)
+
+
+def _watch_items_view() -> list:
+    """Serialise the current loop's items to ``[{code, avg_cost, stop_loss}]``."""
+    loop = _watch_loop
+    if loop is None:
+        return []
+    out = []
+    for it in getattr(loop, "items", []) or []:
+        out.append({"code": getattr(it, "code", None),
+                    "avg_cost": getattr(it, "avg_cost", None),
+                    "stop_loss": getattr(it, "stop_loss", None)})
+    return out
+
+
+async def _watch_stop_current() -> None:
+    """Stop the live loop (if any) and cancel its background task. Idempotent."""
+    global _watch_loop, _watch_task
+    loop, task = _watch_loop, _watch_task
+    if loop is not None:
+        try:
+            loop.stop()
+        except Exception:  # noqa: BLE001 — stop must never raise
+            pass
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+    _watch_task = None
 
 
 async def _comments_sentiment(items: list) -> Optional[Dict[str, Any]]:
@@ -2097,6 +2187,467 @@ def build_app():
                 status_code=500,
                 content={"error": f"{type(exc).__name__}: {exc}"},
             )
+
+
+    # ════════════════════════════════════════════════════════════════════
+    # P5 Agent 回测 REST 端点 (跑 P2 BacktestRunner, PIT-safe; 仿 /factor/* 纪律)
+    #   * run() 全程仅 1 个 await(agent.decide), 其余是同步阻塞 bin 读, mock 的
+    #     decide 还无 await → 绝不能 asyncio.create_task 在事件循环里跑(会冻住
+    #     uvicorn, 饿死前端轮询 GET)。仿 /factor/forge: 工作线程内 asyncio.run。
+    #   * run_id → 进程内有界 dict (保留最近 _BT_MAX 条, 弹最旧 done/error)。
+    #     单进程内存存储 (uvicorn 无 --workers), 重启即丢, 不持久化, 不去重缓存。
+    #   * mock 模式注入确定性 stub agent (0 次 LLM, 不依赖 DASHSCOPE key)。
+    #   * real 模式包 asyncio.wait_for 总超时, 避免 hang 死在 running。
+    #   * 结果经 _jsonable(NaN/Inf→null) 再返回; 错误终态返 HTTP 200+status=error
+    #     (轮询语义里 error 是正常终态, 让前端 q() 读到中文 error)。
+    # ════════════════════════════════════════════════════════════════════
+    import uuid as _uuid
+    import time as _time
+    _BT_RUNS: "OrderedDict[str, dict]" = OrderedDict()  # run_id -> rec
+    _BT_MAX = 24                  # 注册表上限 (有界淘汰防内存泄漏)
+    _BT_MAX_RUNNING = 2           # 并发 running 软上限 (防线程/内存耗尽)
+    _BT_REAL_TIMEOUT = 600.0      # real 模式单 run 总超时 (秒)
+
+    def _bt_purge():
+        # 超上限时弹出最旧的非 running 项 (running 永不丢)
+        while len(_BT_RUNS) > _BT_MAX:
+            for k, v in list(_BT_RUNS.items()):
+                if v["status"] != "running":
+                    _BT_RUNS.pop(k, None)
+                    break
+            else:
+                break  # 全在 running, 不强删
+
+    @app.post("/backtest/run")
+    async def backtest_run_ep(req: BacktestRunReq):
+        # ---- 同步参数校验 (立即拒, 不进线程) ----
+        if req.mode not in ("mock", "real"):
+            return JSONResponse(status_code=400, content={
+                "error": f"mode must be mock|real, got {req.mode}",
+                "status": "bad_request"})
+        if req.init_cash <= 0:
+            return JSONResponse(status_code=400, content={
+                "error": "init_cash must be > 0", "status": "bad_request"})
+        if req.candidate_topn < 1:
+            return JSONResponse(status_code=400, content={
+                "error": "candidate_topn must be >= 1", "status": "bad_request"})
+        for label, val in (("start", req.start), ("end", req.end)):
+            if val is not None:
+                try:
+                    import pandas as _pd
+                    _pd.Timestamp(val)
+                except Exception:
+                    return JSONResponse(status_code=400, content={
+                        "error": f"invalid {label} date: {val}",
+                        "status": "bad_request"})
+        if req.start and req.end:
+            import pandas as _pd
+            if _pd.Timestamp(req.start) > _pd.Timestamp(req.end):
+                return JSONResponse(status_code=400, content={
+                    "error": "start > end", "status": "bad_request"})
+        n_running = sum(1 for r in _BT_RUNS.values() if r["status"] == "running")
+        if n_running >= _BT_MAX_RUNNING:
+            return JSONResponse(status_code=429, content={
+                "error": f"too many running backtests ({n_running})，请稍候",
+                "status": "too_many_running"})
+
+        run_id = "bt_" + _uuid.uuid4().hex[:8]
+        _BT_RUNS[run_id] = {"status": "running", "mode": req.mode,
+                            "result": None, "error": None,
+                            "params": req.model_dump(), "created_at": _time.time()}
+        _bt_purge()
+
+        def _run_sync():
+            # 工作线程: 脱离主事件循环跑 coroutine (同 /factor/forge 的 asyncio.run)
+            import asyncio as _aio
+            from financial_analyst.buddy.backtest_run import run_backtest
+            if req.mode == "real":
+                async def _capped():
+                    return await _aio.wait_for(run_backtest(req),
+                                               timeout=_BT_REAL_TIMEOUT)
+                return _aio.run(_capped())
+            return _aio.run(run_backtest(req))
+
+        async def _job():
+            try:
+                result = await asyncio.to_thread(_run_sync)   # 阻塞跑在线程池
+                _BT_RUNS[run_id]["result"] = result
+                _BT_RUNS[run_id]["status"] = "done"
+            except asyncio.TimeoutError:
+                _BT_RUNS[run_id]["error"] = "timeout: 回测超过总时长上限"
+                _BT_RUNS[run_id]["status"] = "error"
+            except Exception as exc:
+                _BT_RUNS[run_id]["error"] = f"{type(exc).__name__}: {exc}"
+                _BT_RUNS[run_id]["status"] = "error"
+
+        asyncio.create_task(_job())   # 只调度一个"await to_thread"的轻协程, 不冻循环
+        return {"run_id": run_id, "status": "running", "mode": req.mode}
+
+    @app.get("/backtest/result/{run_id}")
+    async def backtest_result_ep(run_id: str):
+        rec = _BT_RUNS.get(run_id)
+        if rec is None:
+            return JSONResponse(status_code=404, content={
+                "error": f"unknown run_id {run_id}", "status": "not_found"})
+        if rec["status"] == "running":
+            return {"status": "running", "run_id": run_id}
+        if rec["status"] == "error":
+            # 轮询语义: error 是正常终态 → HTTP 200, 让前端 q() 读到中文 error
+            return {"status": "error", "run_id": run_id,
+                    "error": rec["error"], "mode": rec["mode"]}
+        # done → 已是 _jsonable 后的 dict
+        body = dict(rec["result"])
+        body["status"] = "done"
+        body["run_id"] = run_id
+        return body
+
+    # ════════════════════════════════════════════════════════════════════
+    # Realtime Watch (盯盘) — start/stop/status + SSE stream + ack + item ops
+    #
+    # Drives the single module-level WatchLoop singleton (``server._watch_loop``).
+    # The loop runs as a background asyncio.Task (loop.run()); /watch/stream
+    # drains its event queue over SSE; /watch/ack flips a rec's user_action;
+    # /watch/item add/remove mutates the live watchlist. Only ONE watcher runs at
+    # a time (the UI has a single 盯盘 panel) — /watch/start replaces any prior.
+    # ════════════════════════════════════════════════════════════════════
+
+    def _watch_items_from_req(raw_items: list) -> list:
+        """Validate + normalize an incoming items list → list[WatchItem]."""
+        from financial_analyst.watch.models import WatchItem
+        from financial_analyst.buddy.tools import normalize_code
+        items = []
+        seen = set()
+        for raw in raw_items or []:
+            wi = raw if isinstance(raw, WatchItemReq) else WatchItemReq(**raw)
+            code = normalize_code(wi.code)
+            if code in seen:          # dedup within the start payload
+                continue
+            seen.add(code)
+            items.append(WatchItem(code=code, avg_cost=wi.avg_cost,
+                                   stop_loss=wi.stop_loss))
+        return items
+
+    @app.post("/watch/start")
+    async def watch_start(body: WatchStartReq):
+        """Start (or replace) the盯盘 loop over ``items``.
+
+        Builds a real :class:`WatchFeed` + :class:`WatchAgent` (lazy imports, no
+        network until the first tick) and a :class:`WatchLoop`, then launches
+        ``loop.run()`` as a background task. Any previously running loop is
+        stopped first. Returns ``{ok, running, n_items}``.
+        """
+        global _watch_loop, _watch_task
+        items = _watch_items_from_req(body.items)
+        if not items:
+            return JSONResponse({"ok": False, "reason": "items 不能为空"},
+                                status_code=400)
+        try:
+            # WatchLoop referenced via the module so tests can monkeypatch it.
+            from financial_analyst.watch import loop as _watch_mod
+            from financial_analyst.watch.loop import WatchLoopConfig
+            from financial_analyst.watch.feed import WatchFeed
+            from financial_analyst.watch.agent import WatchAgent
+
+            # stop any prior watcher before replacing it
+            await _watch_stop_current()
+
+            cfg_kw: Dict[str, Any] = {}
+            if body.tick_seconds is not None:
+                cfg_kw["tick_seconds"] = body.tick_seconds
+            if body.cooldown_minutes is not None:
+                cfg_kw["cooldown_minutes"] = body.cooldown_minutes
+            if body.global_llm_cap_per_session is not None:
+                cfg_kw["global_llm_cap_per_session"] = body.global_llm_cap_per_session
+            config = WatchLoopConfig(**cfg_kw) if cfg_kw else WatchLoopConfig()
+
+            # 实时新闻流 (用户选定的输入之一): eastmoney 7x24 快讯 → 按股票过滤.
+            # opencli 不可用时返回 None → 新闻通道静默关闭 (loop 照常跑行情+触发).
+            news_provider = None
+            try:
+                from financial_analyst.watch.news import make_default_news_provider
+                news_provider = make_default_news_provider()
+            except Exception:  # noqa: BLE001 — 新闻是增强通道, 绝不拖垮启动
+                news_provider = None
+            # 节假日感知交易日闸; 日历缺失时 loop 内部回退到周一~周五.
+            is_trading_day = None
+            try:
+                from financial_analyst.watch.calendar import make_market_open_check
+                is_trading_day = make_market_open_check()
+            except Exception:  # noqa: BLE001
+                is_trading_day = None
+
+            # 负向事件预警 (B1): 读 tdx_f10_warnings_latest.parquet; 缺文件→{} 静默关.
+            warnings_provider = None
+            try:
+                from financial_analyst.watch.signals import load_negative_warnings
+                warnings_provider = load_negative_warnings
+            except Exception:  # noqa: BLE001
+                warnings_provider = None
+
+            # 量能 regime (B2): RegimeProvider 读日线 close+换手 (loader, 缓存) 算
+            # super_distr/distr/tail_surge → 走 advisor. 构造失败→None 静默关.
+            regime_provider = None
+            try:
+                from financial_analyst.watch.signals import RegimeProvider
+                regime_provider = RegimeProvider()
+            except Exception:  # noqa: BLE001
+                regime_provider = None
+
+            loop = _watch_mod.WatchLoop(
+                items=items, feed=WatchFeed(), agent=WatchAgent(), config=config,
+                news_provider=news_provider, is_trading_day=is_trading_day,
+                warnings_provider=warnings_provider, regime_provider=regime_provider)
+            task = asyncio.create_task(loop.run())
+            _watch_loop = loop
+            _watch_task = task
+            return JSONResponse({"ok": True, "running": True,
+                                 "n_items": len(items)})
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse(
+                {"ok": False, "reason": f"{type(exc).__name__}: {exc}"},
+                status_code=500)
+
+    @app.post("/watch/stop")
+    async def watch_stop():
+        """Stop the running盯盘 loop (idempotent). Returns ``{ok, running: False}``."""
+        global _watch_loop
+        await _watch_stop_current()
+        _watch_loop = None
+        return JSONResponse({"ok": True, "running": False})
+
+    @app.get("/watch/status")
+    async def watch_status():
+        """Current盯盘 state: running flag, item list, tick/LLM counters."""
+        loop = _watch_loop
+        items = _watch_items_view()
+        return JSONResponse({
+            "ok": True,
+            "running": _watch_running(),
+            "n_items": len(items),
+            "items": items,
+            "tick_count": int(getattr(loop, "tick_count", 0)) if loop else 0,
+            "llm_calls_made": int(getattr(loop, "llm_calls_made", 0)) if loop else 0,
+        })
+
+    @app.get("/watch/bars")
+    async def watch_bars(code: str, n: int = 240):
+        """Historical 5min K线 for the realtime chart (蜡烛历史回放).
+
+        Reuses the running loop's :class:`WatchFeed` if present, else a transient
+        one (closed after). Any error → ``ok: False`` + empty bars (HTTP 200) so
+        the chart degrades to '等待数据' rather than throwing a 500 at the UI.
+        Returns ``{ok, code, n, bars:[{open,high,low,close,vol,trade_date}]}`` —
+        vol already in 手 (the feed converts pytdx 股 → 手).
+        """
+        from financial_analyst.buddy.tools import normalize_code
+        try:
+            c = normalize_code(code)
+        except Exception:  # noqa: BLE001
+            c = (code or "").strip().upper()
+        if not c:
+            return JSONResponse({"ok": False, "code": code, "bars": [],
+                                 "reason": "code 为空"})
+        n = max(1, min(int(n or 240), 480))
+
+        def _num(v: Any) -> Optional[float]:
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                return None
+            return None if f != f else f          # NaN → None
+
+        loop = _watch_loop
+        feed = getattr(loop, "feed", None)
+        transient = False
+        try:
+            if feed is None:
+                from financial_analyst.watch.feed import WatchFeed
+                feed = WatchFeed()
+                transient = True
+            df = await asyncio.to_thread(feed.bars5, c, n)
+            bars = []
+            if df is not None and len(df) > 0:
+                for rec in df.to_dict("records"):
+                    bars.append({
+                        "open": _num(rec.get("open")),
+                        "high": _num(rec.get("high")),
+                        "low": _num(rec.get("low")),
+                        "close": _num(rec.get("close")),
+                        "vol": _num(rec.get("vol")),
+                        "trade_date": (str(rec.get("trade_date"))
+                                       if rec.get("trade_date") is not None else None),
+                    })
+            return JSONResponse({"ok": True, "code": c, "n": len(bars), "bars": bars})
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"ok": False, "code": c, "bars": [],
+                                 "reason": f"{type(exc).__name__}: {exc}"})
+        finally:
+            if transient and feed is not None:
+                try:
+                    feed.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    @app.get("/watch/stream")
+    async def watch_stream(max_events: Optional[int] = None):
+        """SSE stream of live watch events (``quote_update`` / ``recommendation``).
+
+        Drains the loop's event queue and yields one SSE frame per event (the
+        frame's ``event:`` is the dict's ``type``). A periodic comment heartbeat
+        keeps the connection alive and makes the generator wake often enough that
+        a client disconnect (the ``with`` block closing) cancels it gracefully,
+        and that it stops on its own once the watcher is stopped. 404 if no
+        watcher is running.
+
+        ``max_events`` bounds the number of *data* frames emitted then returns —
+        used by tests (Starlette's ``TestClient`` cannot consume an unbounded
+        stream); production omits it for an open-ended stream.
+        """
+        loop = _watch_loop
+        if loop is None:
+            return JSONResponse({"ok": False, "reason": "watch not running"},
+                                status_code=404)
+        cap = int(max_events) if max_events is not None else None
+
+        async def stream():
+            sent = 0
+            # flush anything already queued (events emitted before subscribe).
+            for ev in loop.drain():
+                kind = ev.pop("type", "message")
+                yield _sse(kind, **ev)
+                sent += 1
+                if cap is not None and sent >= cap:
+                    return
+            try:
+                while True:
+                    try:
+                        ev = await asyncio.wait_for(loop._queue.get(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        # stop streaming once the loop is gone/stopped …
+                        if _watch_loop is not loop or getattr(loop, "stopped", False):
+                            break
+                        yield ": keepalive\n\n"   # … else SSE comment heartbeat
+                        continue
+                    kind = ev.pop("type", "message")
+                    yield _sse(kind, **ev)
+                    sent += 1
+                    if cap is not None and sent >= cap:
+                        return
+            except asyncio.CancelledError:  # client disconnected → exit quietly
+                raise
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
+
+    @app.post("/watch/ack")
+    async def watch_ack(body: WatchAckReq):
+        """人工确认一条推荐: stamp ``user_action`` onto the persisted rec.
+
+        ``user_action`` must be ``confirm`` or ``ignore``. Returns ``{ok}`` where
+        ``ok`` reflects whether a matching row was updated.
+        """
+        ua = (body.user_action or "").strip().lower()
+        if ua not in ("confirm", "ignore"):
+            return JSONResponse(
+                {"ok": False, "reason": "user_action 必须是 confirm / ignore"},
+                status_code=400)
+        try:
+            from financial_analyst.watch import store as _watch_store
+            from financial_analyst.buddy.tools import normalize_code
+            code = normalize_code(body.code)
+            ok = _watch_store.ack_rec(None, ts=body.ts, code=code, user_action=ua)
+            return JSONResponse({"ok": bool(ok), "ts": body.ts, "code": code,
+                                 "user_action": ua})
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse(
+                {"ok": False, "reason": f"{type(exc).__name__}: {exc}"},
+                status_code=500)
+
+    @app.post("/watch/item")
+    async def watch_item(body: WatchItemOpReq):
+        """Add / remove one watched item on the *running* loop.
+
+        ``op`` = ``add`` (idempotent — duplicate code is a no-op) or ``remove``.
+        400 if no watcher is running or ``op`` is invalid. Returns ``{ok, n_items}``.
+        """
+        op = (body.op or "").strip().lower()
+        if op not in ("add", "remove"):
+            return JSONResponse({"ok": False, "reason": "op 必须是 add / remove"},
+                                status_code=400)
+        loop = _watch_loop
+        if loop is None:
+            return JSONResponse({"ok": False, "reason": "watch not running"},
+                                status_code=400)
+        from financial_analyst.watch.models import WatchItem
+        from financial_analyst.buddy.tools import normalize_code
+        code = normalize_code(body.code)
+        items = list(getattr(loop, "items", []) or [])
+        if op == "add":
+            if not any(getattr(it, "code", None) == code for it in items):
+                items.append(WatchItem(code=code, avg_cost=body.avg_cost,
+                                       stop_loss=body.stop_loss))
+        else:  # remove
+            items = [it for it in items if getattr(it, "code", None) != code]
+        loop.items = items
+        return JSONResponse({"ok": True, "op": op, "code": code,
+                             "n_items": len(items)})
+
+    @app.post("/watch/outcome/backfill")
+    async def watch_outcome_backfill():
+        """复盘回填: 给到期推荐打 T+1/T+5 outcome 分 (盘后批量, 离线).
+
+        Runs :func:`watch.outcome.backfill_outcomes` in a thread (reads the rec log
+        + day bins, re-scores new/pending recs). Returns ``{ok, n_total, n_scored,
+        n_pending}``. 500 on error (loader / parquet failure).
+        """
+        try:
+            from financial_analyst.watch.outcome import backfill_outcomes
+            df = await asyncio.to_thread(backfill_outcomes)
+            n_total = int(len(df))
+            if n_total:
+                final = df["verdict"].astype(str).isin(("correct", "partial", "wrong"))
+                n_scored = int(final.sum())
+            else:
+                n_scored = 0
+            return JSONResponse({"ok": True, "n_total": n_total, "n_scored": n_scored,
+                                 "n_pending": n_total - n_scored})
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"ok": False, "reason": f"{type(exc).__name__}: {exc}"},
+                                status_code=500)
+
+    @app.get("/watch/hitrate")
+    async def watch_hitrate():
+        """命中率看板: aggregate the outcome log → overall + per-trigger + per-action.
+
+        Returns ``{ok, overall, by_trigger, by_action}`` (each bucket: n / correct /
+        partial / wrong / win_rate / avg_return_t1 / avg_return_t5). pending excluded.
+        """
+        try:
+            from financial_analyst.watch.outcome import compute_hitrate, load_outcomes
+            df = await asyncio.to_thread(load_outcomes)
+            h = compute_hitrate(df)
+            return JSONResponse({"ok": True, **h})
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"ok": False, "reason": f"{type(exc).__name__}: {exc}"},
+                                status_code=500)
+
+    @app.get("/watch/history")
+    async def watch_history(day: Optional[str] = None, n: int = 100):
+        """推荐历史: rec 日志 left-join outcome (verdict/T+1/T+5) → newest-first.
+
+        ``day`` optional ``YYYY-MM-DD`` filter; ``n`` caps rows (1..500). Degrades to
+        ``ok:False`` + empty rows (HTTP 200) on error so the history page never 500s.
+        """
+        try:
+            from financial_analyst.watch.outcome import join_history, load_outcomes
+            from financial_analyst.watch.store import load_recs
+            cap = max(1, min(int(n or 100), 500))
+            recs = await asyncio.to_thread(load_recs, None, day)
+            outs = await asyncio.to_thread(load_outcomes)
+            rows = join_history(recs, outs, cap)
+            return JSONResponse({"ok": True, "n": len(rows), "rows": rows})
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"ok": False, "reason": f"{type(exc).__name__}: {exc}",
+                                 "rows": []})
 
     return app
 
