@@ -71,10 +71,23 @@ def search_cmd(
         None, "--index-root", help="Override chroma store root."
     ),
     preview: int = typer.Option(240, "--preview", help="Chars of chunk text to show inline."),
+    json_out: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON array to stdout (for programmatic callers)."
+    ),
 ):
     """Search the index. Returns top-K matching chunks with scores."""
     idx = _build_index(strategy_root, index_root)
     results = idx.search(query, k=k)
+    if json_out:
+        import json as _json
+        # 纯 JSON 到 stdout — 调用方 (stocks report_v2) json.loads 解析.
+        # 警告/日志走 stderr (BgeEmbedder FutureWarning 等), 不污染 stdout.
+        typer.echo(_json.dumps(
+            [{"source": r.source, "section": r.section, "text": r.text, "score": r.score}
+             for r in results],
+            ensure_ascii=False,
+        ))
+        return
     if not results:
         typer.echo("(no results — try `fa knowledge build` first, or rephrase the query)")
         return

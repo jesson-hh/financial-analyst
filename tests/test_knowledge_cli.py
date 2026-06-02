@@ -148,3 +148,26 @@ def test_help_text_lists_commands():
     assert "build" in result.stdout
     assert "search" in result.stdout
     assert "stats" in result.stdout
+
+
+def test_search_json_output_is_clean_json(tmp_path: Path):
+    """--json 输出必须是可解析的纯 JSON 数组 (stdout 不含警告/人类可读文本)."""
+    import json
+    strat = tmp_path / "strategy"
+    strat.mkdir()
+    (strat / "factor_insights.md").write_text(
+        "## 反转因子\nrev_20 是 A 股最强 alpha, ICIR 0.51.\n", encoding="utf-8")
+    idx_root = tmp_path / "idx"
+    runner = CliRunner()
+    rb = runner.invoke(knowledge_app, ["build", "--strategy-root", str(strat),
+                                       "--index-root", str(idx_root)])
+    assert rb.exit_code == 0, rb.output
+    rs = runner.invoke(knowledge_app, ["search", "反转因子", "--k", "3", "--json",
+                                       "--strategy-root", str(strat),
+                                       "--index-root", str(idx_root)])
+    assert rs.exit_code == 0, rs.output
+    data = json.loads(rs.stdout.strip())
+    assert isinstance(data, list)
+    assert len(data) >= 1
+    assert set(data[0].keys()) == {"source", "section", "text", "score"}
+    assert "反转因子" in data[0]["section"] or "反转" in data[0]["text"]
