@@ -154,6 +154,12 @@ class ConvReq(BaseModel):
     messages: Optional[list] = None
 
 
+# ── QuantFlow Phase 2: workflow REST request shapes ─────────────────────
+# Workflow create accepts an arbitrary dict that gets Workflow.model_validate()-ed
+# (full Pydantic shape lives in financial_analyst.workflow.schema). We don't
+# redeclare it here — keep the schema single-source.
+
+
 def _sse(event: str, **data: Any) -> str:
     """Format one SSE frame."""
     return f"event: {event}\ndata: {_safe_json_dumps(data)}\n\n"
@@ -270,6 +276,70 @@ def build_app():
         UserFactorStore().register_all()
     except Exception:
         pass
+
+    # ─── QuantFlow Phase 2: workflow store + run_log_root + demo seed ───
+    # 共享 ArtifactStore + run_log_root 给所有 /workflow/* 端点用. 路径解析走
+    # DataPaths (env var > yaml > user_dir > dev fallback), 测试通过设置
+    # FA_WORKFLOW_DEFS_ROOT / FA_PARQUET_ROOT 注入 tmp 路径.
+    #
+    # 触发 @node 注册: import mock_nodes 让 NodeRegistry 看到 3 个 mock 节点
+    # (data.constant_universe / factor.zeros / eval.row_count). 这是 demo
+    # workflow seed + GET /workflow/nodes 能返非空列表的前置条件.
+    try:
+        from financial_analyst.data.paths import get_data_paths
+        from financial_analyst.workflow import mock_nodes  # noqa: F401 — side-effect register
+        from financial_analyst.workflow.artifacts import ArtifactStore
+
+        _dp = get_data_paths()
+        _workflow_defs_root = _dp.workflow_defs_root
+        # workflow_runs/ 落在 parquet_root.parent 旁边 (跟 workflow_defs_root 同级),
+        # 让 fa init / 备份能一并整目录拷.
+        _workflow_runs_root = _dp.parquet_root.parent / "workflow_store"
+        _workflow_defs_root.mkdir(parents=True, exist_ok=True)
+        _workflow_runs_root.mkdir(parents=True, exist_ok=True)
+        _workflow_store = ArtifactStore(root=_workflow_runs_root)
+        _workflow_run_log_root = _workflow_runs_root
+
+        # demo seed: workflow_defs/ 下无文件时落 1 个 demo workflow.
+        # 形状对齐 mock_nodes 的 inputs 约定 (Node.inputs 串"universe.output" 形式),
+        # **不**用 spec 里的 from_node/to_node 风格 — schema.Edge 是 alias from/to,
+        # 但我们这里走更简单的 Node.inputs (e2e 测试也用这条路径).
+        _demo_files = list(_workflow_defs_root.glob("*.json"))
+        if not _demo_files:
+            _demo_seed = {
+                "id": "demo-mock-3-nodes",
+                "name": "Demo: 3 mock 节点链路",
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "universe",
+                        "type": "data.constant_universe",
+                        "params": {"codes": ["SH600519", "SH600036"]},
+                    },
+                    {
+                        "id": "zeros",
+                        "type": "factor.zeros",
+                        "inputs": {"universe": "universe.output"},
+                    },
+                    {
+                        "id": "rowcount",
+                        "type": "eval.row_count",
+                        "inputs": {"frame": "zeros.output"},
+                    },
+                ],
+                "edges": [],
+                "meta": {"seed": True, "description": "首次启动写入的 demo, 点 Run 即跑完."},
+            }
+            (_workflow_defs_root / "demo-mock-3-nodes.json").write_text(
+                json.dumps(_demo_seed, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+    except Exception:
+        # 任何初始化失败不阻断 server 起飞; /workflow/* 端点自己再 raise.
+        _workflow_defs_root = None  # type: ignore[assignment]
+        _workflow_runs_root = None  # type: ignore[assignment]
+        _workflow_store = None  # type: ignore[assignment]
+        _workflow_run_log_root = None  # type: ignore[assignment]
 
     app.mount("/mcp", _mcp_app)
     # Tauri webview / localhost dev — allow all origins.
@@ -1336,6 +1406,497 @@ def build_app():
             hs = tuple(int(x) for x in req.horizons) or (1, 5, 10, 20)
             rpt = _eval_mod.event_report(req.expr_or_name, cfg, horizons=hs)
             return _jsonable(_asdict(rpt))
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"{type(exc).__name__}: {exc}"},
+            )
+
+    # ════════════════════════════════════════════════════════════════════
+    # QuantFlow Phase 2 — Workflow Lab REST endpoints
+    #
+    # 9 个端点 + SSE 流, 给前端 (quant.jsx Workflow Lab) 直接调.
+    # 共享 _workflow_store (ArtifactStore) + _workflow_run_log_root + DataPaths
+    # 解析的 _workflow_defs_root, 在 build_app 顶部已初始化 + demo seed.
+    #
+    # 错误纪律 (同 /factor/* 端点):
+    #   * 业务错误 (wf_id 找不到, run_id 找不到) → 404 + {error}
+    #   * Pydantic 校验失败 → 422 (FastAPI 自动)
+    #   * 内部异常 → 500 + {error} (不泄栈)
+    #
+    # 工作流初始化失败 (_workflow_store is None) → 503 不能用.
+    # ════════════════════════════════════════════════════════════════════
+    def _workflow_unavailable() -> Any:
+        """Workflow 子系统未初始化时返 503."""
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Workflow subsystem not initialized (DataPaths / NodeRegistry 失败), 检查 server 启动日志"},
+        )
+
+    @app.get("/workflow/nodes")
+    async def workflow_nodes_ep():
+        """列 NodeRegistry 全部节点 + 每节点的 params_model JSON Schema.
+
+        前端用这个构造工具栏 + 参数表单 (AutoForm 读 params_schema 渲染 input).
+        """
+        if _workflow_store is None:
+            return _workflow_unavailable()
+        try:
+            from financial_analyst.workflow.registry import NodeRegistry
+            nodes = []
+            for type_key, reg in NodeRegistry.list().items():
+                schema = {}
+                if reg.params_model is not None:
+                    try:
+                        schema = reg.params_model.model_json_schema()
+                    except Exception:
+                        schema = {}
+                outputs_schema = {}
+                if reg.outputs_model is not None:
+                    try:
+                        outputs_schema = reg.outputs_model.model_json_schema()
+                    except Exception:
+                        outputs_schema = {}
+                nodes.append({
+                    "type": type_key,
+                    "description": (reg.meta or {}).get("description", ""),
+                    "params_schema": schema,
+                    "outputs_schema": outputs_schema,
+                    "risk": reg.risk,
+                    "pit": reg.pit,
+                })
+            # 类型名按字典序排, 让 UI 排列稳定 (不影响功能, 只是用户体验).
+            nodes.sort(key=lambda n: n["type"])
+            return {"nodes": _jsonable(nodes)}
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"{type(exc).__name__}: {exc}"},
+            )
+
+    @app.post("/workflow/create")
+    async def workflow_create_ep(req: Dict[str, Any]):
+        """校验 + 落盘新 workflow JSON, 返 wf_id.
+
+        请求体 = Workflow 字段 dict (id 可缺省, 服务端自动塞 wf_id). 服务端用
+        Workflow.model_validate(req) 强 schema 校验; 失败 → 422.
+        """
+        if _workflow_store is None or _workflow_defs_root is None:
+            return _workflow_unavailable()
+        try:
+            from financial_analyst.workflow.schema import Workflow
+
+            # wf_id: uuid4 前 12 字符. 用户可能传 id, 我们一律覆盖, 防客户端伪造冲突.
+            wf_id = uuid.uuid4().hex[:12]
+            body = dict(req or {})
+            body["id"] = wf_id
+            # name 缺省 → 同 id (Workflow.name min_length=1)
+            if not body.get("name"):
+                body["name"] = wf_id
+            wf = Workflow.model_validate(body)
+            # 落盘 (model_dump_json 让 Enum / NaN 都规范)
+            (_workflow_defs_root / f"{wf_id}.json").write_text(
+                wf.model_dump_json(indent=2), encoding="utf-8",
+            )
+            return {"wf_id": wf_id}
+        except Exception as exc:
+            # Pydantic ValidationError 不是 4xx (return 直接), 但用户体验上"参数错"
+            # 应是 400/422. FastAPI 自动 handler 只挂请求体 = Pydantic model 的情况;
+            # 我们这里入参是 Dict[str, Any], 错只能手抓.
+            from pydantic import ValidationError
+            if isinstance(exc, ValidationError):
+                return JSONResponse(
+                    status_code=422,
+                    content={"error": f"Workflow schema 校验失败: {exc}"},
+                )
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"{type(exc).__name__}: {exc}"},
+            )
+
+    @app.get("/workflow")
+    async def workflow_list_ep():
+        """列所有 workflow defs, mtime desc, 返 {workflows: [{wf_id, name, mtime, node_count}]}."""
+        if _workflow_defs_root is None:
+            return _workflow_unavailable()
+        try:
+            out: list[dict] = []
+            for p in _workflow_defs_root.glob("*.json"):
+                try:
+                    body = json.loads(p.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                out.append({
+                    "wf_id": body.get("id", p.stem),
+                    "name": body.get("name", p.stem),
+                    "mtime": p.stat().st_mtime,
+                    "node_count": len(body.get("nodes", []) or []),
+                })
+            out.sort(key=lambda x: x["mtime"], reverse=True)
+            return {"workflows": _jsonable(out)}
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"{type(exc).__name__}: {exc}"},
+            )
+
+    @app.post("/workflow/{wf_id}/run")
+    async def workflow_run_ep(wf_id: str):
+        """异步启 WorkflowRunner (asyncio.to_thread), 返 {run_id}.
+
+        实际执行由 WorkflowRunner 同步跑 (节点已是同步函数), 在 thread pool 跑
+        让 FastAPI 事件循环不被堵. SSE 流由独立端点 /workflow/runs/{run_id}/stream
+        提供 (浏览器 EventSource 是 GET, 不能 POST).
+        """
+        if _workflow_store is None or _workflow_run_log_root is None or _workflow_defs_root is None:
+            return _workflow_unavailable()
+        if "/" in wf_id or ".." in wf_id:
+            return JSONResponse(status_code=400, content={"error": "非法 wf_id"})
+        wf_path = _workflow_defs_root / f"{wf_id}.json"
+        if not wf_path.is_file():
+            return JSONResponse(
+                status_code=404,
+                content={"error": f"Workflow {wf_id!r} 不存在"},
+            )
+        try:
+            from financial_analyst.workflow.runner import WorkflowRunner
+            from financial_analyst.workflow.schema import Workflow
+
+            wf_dict = json.loads(wf_path.read_text(encoding="utf-8"))
+            workflow = Workflow.model_validate(wf_dict)
+            run_id = uuid.uuid4().hex[:12]
+
+            runner = WorkflowRunner(
+                store=_workflow_store, run_log_root=_workflow_run_log_root,
+            )
+
+            # 起 background task. asyncio.to_thread 让同步 runner.run() 跑在线程池里,
+            # 不堵当前请求事件循环 (SSE 端点用 tail polling 看 run_log.jsonl).
+            # 不需要 await 拿结果 — 客户端去 SSE 流看进度.
+            asyncio.create_task(asyncio.to_thread(runner.run, workflow, run_id=run_id))
+            return {"run_id": run_id}
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"{type(exc).__name__}: {exc}"},
+            )
+
+    @app.get("/workflow/runs/{run_id}/stream")
+    async def workflow_run_stream_ep(run_id: str):
+        """SSE 流: tail run_log.jsonl, 推 node_start / node_done / workflow_done 事件.
+
+        实现: 每 200ms 比 os.path.getsize, 文件长大则 seek 读新行解析 NodeRun,
+        翻译成前端期望的事件形状. NodeRun.status (RUNNING / SUCCESS / FAILED /
+        SKIPPED) → node_start (RUNNING) / node_done (SUCCESS/FAILED/SKIPPED).
+
+        终止条件: 等到 workflow_done 事件 (聚合所有节点最终态后推) 或 30 秒无新事件 + 已有节点 done 推过.
+        """
+        if _workflow_run_log_root is None:
+            return _workflow_unavailable()
+        if "/" in run_id or ".." in run_id:
+            return JSONResponse(status_code=400, content={"error": "非法 run_id"})
+
+        log_path = _workflow_run_log_root / "workflow_runs" / run_id / "run_log.jsonl"
+        wf_json_path = _workflow_run_log_root / "workflow_runs" / run_id / "workflow.json"
+
+        async def stream():
+            from financial_analyst.workflow.schema import NodeStatus
+            import time as _time
+            last_size = 0
+            offset = 0
+            sent_workflow_done = False
+            # 节点状态跟踪: 推过 done 的 node_id 集合; 收齐时合成 workflow_done
+            done_status: dict[str, str] = {}
+            # 期望节点数 — 从 workflow.json 读 (若已落盘)
+            n_expected: Optional[int] = None
+            # SSE 心跳: 防客户端代理超时切连. 用 keep-alive 注释 frame.
+            last_heartbeat = _time.monotonic()
+            # 整体超时上限 (秒): workflow.json 都没落盘 + 5s 内还没 run_log → 放弃
+            start_wall = _time.monotonic()
+            max_wall = 60.0
+            # node_start 索引顺序追踪 (前端要 idx, n)
+            seen_start: list[str] = []
+
+            while True:
+                # workflow.json 落盘后才能知道 n_expected; runner 启动时立刻写, 故几乎瞬间可见.
+                if n_expected is None and wf_json_path.exists():
+                    try:
+                        wf_doc = json.loads(wf_json_path.read_text(encoding="utf-8"))
+                        n_expected = len(wf_doc.get("nodes") or [])
+                    except Exception:
+                        n_expected = None
+
+                # run_log.jsonl tail 实现 — 比 size, 长大则 seek + 读后缀
+                if log_path.exists():
+                    try:
+                        size = log_path.stat().st_size
+                        if size > last_size:
+                            with log_path.open("rb") as fh:
+                                fh.seek(last_size)
+                                chunk = fh.read(size - last_size)
+                            last_size = size
+                            # 解析新增的 JSONL 行 (可能包含 partial 最后一行 — 简单忽略,
+                            # 下次轮询补上). Phase 0 一次 append 一行 + flush, 实际不会 partial.
+                            text = chunk.decode("utf-8", errors="replace")
+                            for line in text.splitlines():
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                try:
+                                    rec = json.loads(line)
+                                except Exception:
+                                    continue
+                                status = rec.get("status", "")
+                                node_id = rec.get("node_id", "")
+                                node_type = rec.get("node_type", "")
+                                if status == NodeStatus.RUNNING.value:
+                                    if node_id not in seen_start:
+                                        seen_start.append(node_id)
+                                    idx = seen_start.index(node_id)
+                                    yield _sse(
+                                        "node_start",
+                                        node_id=node_id, type=node_type,
+                                        idx=idx, n=(n_expected or 0),
+                                    )
+                                elif status in (
+                                    NodeStatus.SUCCESS.value,
+                                    NodeStatus.FAILED.value,
+                                    NodeStatus.SKIPPED.value,
+                                ):
+                                    done_status[node_id] = status
+                                    yield _sse(
+                                        "node_done",
+                                        node_id=node_id,
+                                        status=status,
+                                        duration_ms=rec.get("duration_ms"),
+                                        artifact_uri=rec.get("output_artifact_uri"),
+                                    )
+                            last_heartbeat = _time.monotonic()
+                    except (OSError, IOError):
+                        pass  # 文件被改名 / 一瞬间不可读 — 下次再试
+
+                # 收齐所有节点终态 → 合成 workflow_done + 退出
+                if (
+                    not sent_workflow_done
+                    and n_expected is not None
+                    and len(done_status) >= n_expected
+                ):
+                    n_success = sum(1 for v in done_status.values() if v == "success")
+                    n_failed = sum(1 for v in done_status.values() if v == "failed")
+                    n_skipped = sum(1 for v in done_status.values() if v == "skipped")
+                    overall = "success" if n_failed == 0 and n_skipped == 0 else "failed"
+                    yield _sse(
+                        "workflow_done",
+                        run_id=run_id, status=overall,
+                        n_success=n_success, n_failed=n_failed, n_skipped=n_skipped,
+                    )
+                    sent_workflow_done = True
+                    return  # 显式 return — generator 收尾
+
+                # 心跳 — 每 15s 一个 SSE 注释帧 (": keepalive\n\n"), 客户端无副作用
+                now = _time.monotonic()
+                if now - last_heartbeat >= 15.0:
+                    yield ": keepalive\n\n"
+                    last_heartbeat = now
+
+                # 整体超时兜底 (workflow.json 都没出现 = runner 没起来)
+                if now - start_wall >= max_wall and not sent_workflow_done:
+                    yield _sse(
+                        "error",
+                        message=f"等待 run_id={run_id!r} 超时 ({max_wall}s)",
+                    )
+                    return
+
+                await asyncio.sleep(0.2)
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
+
+    @app.get("/workflow/runs/{run_id}")
+    async def workflow_run_status_ep(run_id: str):
+        """状态摘要 — 聚合 run_log.jsonl. 缺失 → 404."""
+        if _workflow_run_log_root is None:
+            return _workflow_unavailable()
+        if "/" in run_id or ".." in run_id:
+            return JSONResponse(status_code=400, content={"error": "非法 run_id"})
+        run_dir = _workflow_run_log_root / "workflow_runs" / run_id
+        log_path = run_dir / "run_log.jsonl"
+        wf_path = run_dir / "workflow.json"
+        if not run_dir.is_dir():
+            return JSONResponse(
+                status_code=404,
+                content={"error": f"Run {run_id!r} 不存在"},
+            )
+        try:
+            from financial_analyst.workflow.run_log import RunLog
+            from financial_analyst.workflow.schema import NodeStatus
+            log = RunLog(log_path)
+            runs = log.read_all()
+            # 取每个 node_id 的最末态 (用 latest_status 的等效逻辑 — 反向首遇)
+            seen: dict[str, str] = {}
+            for r in reversed(runs):
+                if r.node_id not in seen:
+                    seen[r.node_id] = r.status.value
+            n_success = sum(1 for v in seen.values() if v == NodeStatus.SUCCESS.value)
+            n_failed = sum(1 for v in seen.values() if v == NodeStatus.FAILED.value)
+            n_skipped = sum(1 for v in seen.values() if v == NodeStatus.SKIPPED.value)
+            wf_id = ""
+            if wf_path.exists():
+                try:
+                    wf_id = json.loads(wf_path.read_text(encoding="utf-8")).get("id", "")
+                except Exception:
+                    pass
+            # 状态: 若所有节点都已 final 且 n_failed=0 + n_skipped=0 → ok, 否则若仍 RUNNING → running.
+            # n_total 取 workflow.json 里 nodes 长度 (落后 final 时 seen 可能 < n_total).
+            n_total = len(seen)
+            if wf_path.exists():
+                try:
+                    n_total = len(json.loads(wf_path.read_text(encoding="utf-8")).get("nodes", []) or [])
+                except Exception:
+                    pass
+            if n_success == n_total and n_failed == 0 and n_skipped == 0 and n_total > 0:
+                overall = "ok"
+            elif n_failed > 0:
+                overall = "failed"
+            elif n_skipped > 0:
+                overall = "partial"
+            elif runs:
+                # 有 RUNNING 但没 final → still running
+                overall = "running"
+            else:
+                overall = "pending"
+            started_at = runs[0].started_at if runs else None
+            ended_at = runs[-1].ended_at if runs else None
+            return {
+                "run_id": run_id,
+                "wf_id": wf_id,
+                "status": overall,
+                "started_at": started_at,
+                "ended_at": ended_at,
+                "n_total": n_total,
+                "n_success": n_success,
+                "n_failed": n_failed,
+                "n_skipped": n_skipped,
+            }
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"{type(exc).__name__}: {exc}"},
+            )
+
+    @app.get("/workflow/runs/{run_id}/logs")
+    async def workflow_run_logs_ep(run_id: str):
+        """返回 run_log.jsonl 全部 NodeRun 条目 (list, 写入顺序)."""
+        if _workflow_run_log_root is None:
+            return _workflow_unavailable()
+        if "/" in run_id or ".." in run_id:
+            return JSONResponse(status_code=400, content={"error": "非法 run_id"})
+        log_path = _workflow_run_log_root / "workflow_runs" / run_id / "run_log.jsonl"
+        if not log_path.exists():
+            return JSONResponse(
+                status_code=404,
+                content={"error": f"Run {run_id!r} 不存在 (run_log.jsonl 缺)"},
+            )
+        try:
+            from financial_analyst.workflow.run_log import RunLog
+            log = RunLog(log_path)
+            return {"logs": _jsonable([r.model_dump(mode="json") for r in log.read_all()])}
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"{type(exc).__name__}: {exc}"},
+            )
+
+    @app.get("/workflow/runs/{run_id}/artifacts/{node_id}")
+    async def workflow_run_artifact_ep(run_id: str, node_id: str):
+        """ArtifactStore.read(run_id, node_id, 'output') → JSON.
+
+        DataFrame 输出走 ``df.to_dict(orient='records')`` → list of dict, NaN/Inf
+        经 ``_jsonable`` 转 null. 缺失 → 404.
+        """
+        if _workflow_store is None:
+            return _workflow_unavailable()
+        if "/" in run_id or ".." in run_id or "/" in node_id or ".." in node_id:
+            return JSONResponse(status_code=400, content={"error": "非法 run_id / node_id"})
+        try:
+            import pandas as _pd
+            payload = _workflow_store.read(run_id, node_id, "output")
+            if isinstance(payload, _pd.DataFrame):
+                # to_dict(records) 让前端能直接 map 渲染 (而非 columnar dict).
+                # NaN/Inf → None 走 _jsonable.
+                return {
+                    "kind": "dataframe",
+                    "shape": [int(payload.shape[0]), int(payload.shape[1])],
+                    "columns": list(payload.columns),
+                    "records": _jsonable(payload.to_dict(orient="records")),
+                }
+            return {"kind": "json", "value": _jsonable(payload)}
+        except FileNotFoundError as exc:
+            return JSONResponse(
+                status_code=404,
+                content={"error": f"Artifact ({run_id!r}, {node_id!r}) 不存在: {exc}"},
+            )
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"{type(exc).__name__}: {exc}"},
+            )
+
+    @app.get("/workflow/runs")
+    async def workflow_runs_list_ep(limit: int = 20):
+        """列最近 N (默认 20) runs, 扫 workflow_runs/*/ 按 mtime desc."""
+        if _workflow_run_log_root is None:
+            return _workflow_unavailable()
+        try:
+            runs_dir = _workflow_run_log_root / "workflow_runs"
+            if not runs_dir.is_dir():
+                return {"runs": []}
+            out: list[dict] = []
+            for p in runs_dir.iterdir():
+                if not p.is_dir():
+                    continue
+                wf_path = p / "workflow.json"
+                log_path = p / "run_log.jsonl"
+                wf_id = ""
+                if wf_path.exists():
+                    try:
+                        wf_id = json.loads(wf_path.read_text(encoding="utf-8")).get("id", "")
+                    except Exception:
+                        pass
+                out.append({
+                    "run_id": p.name,
+                    "wf_id": wf_id,
+                    "mtime": p.stat().st_mtime,
+                    "has_logs": log_path.exists(),
+                })
+            out.sort(key=lambda x: x["mtime"], reverse=True)
+            limit = max(1, min(int(limit), 200))
+            return {"runs": _jsonable(out[:limit])}
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"{type(exc).__name__}: {exc}"},
+            )
+
+    # 路由顺序注意: /workflow/{wf_id} 是 catch-all, 必须放在 /workflow/runs +
+    # /workflow/runs/* 之后, 否则 FastAPI 会把 "runs" 当 wf_id 匹配, /workflow/runs
+    # 永远 404. 同样 /workflow/{wf_id}/run + /workflow/runs/{run_id}/... 也必须排在
+    # 这个 catch-all 前 (FastAPI 是按注册顺序匹配, 不是最长前缀).
+    @app.get("/workflow/{wf_id}")
+    async def workflow_get_ep(wf_id: str):
+        """按 wf_id 读回 workflow JSON. 缺失 → 404."""
+        if _workflow_defs_root is None:
+            return _workflow_unavailable()
+        # 路径形状校验防穿越 (uuid4 前 12 字符是 hex, 不应含 / 或 ..)
+        if "/" in wf_id or ".." in wf_id or wf_id in ("", "."):
+            return JSONResponse(status_code=400, content={"error": "非法 wf_id"})
+        path = _workflow_defs_root / f"{wf_id}.json"
+        if not path.is_file():
+            return JSONResponse(
+                status_code=404,
+                content={"error": f"Workflow {wf_id!r} 不存在"},
+            )
+        try:
+            return _jsonable(json.loads(path.read_text(encoding="utf-8")))
         except Exception as exc:
             return JSONResponse(
                 status_code=500,

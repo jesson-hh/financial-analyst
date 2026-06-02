@@ -90,6 +90,12 @@ class DataPaths:
     defaults to ``parquet_root.parent / "knowledge_index"`` (i.e. sibling of
     the parquet store so it lives on the same shared data disk)."""
 
+    workflow_defs_root_override: Optional[Path] = None
+    """Override for the workflow-defs store directory (QuantFlow Phase 2
+    workflow JSON files, ``{wf_id}.json``). Set via ``FA_WORKFLOW_DEFS_ROOT``
+    env var; else defaults to ``parquet_root.parent / "workflow_defs"`` (so
+    workflow defs live beside parquet on the same shared data disk)."""
+
     @property
     def qlib_day(self) -> Path:
         """Day-frequency Qlib data root (always resolvable)."""
@@ -138,6 +144,17 @@ class DataPaths:
         if self.knowledge_index_root_override is not None:
             return self.knowledge_index_root_override
         return self.parquet_root.parent / "knowledge_index"
+
+    @property
+    def workflow_defs_root(self) -> Path:
+        """Workflow-defs store root (QuantFlow Phase 2 ``{wf_id}.json`` files).
+
+        Override priority: ``workflow_defs_root_override`` (env / explicit)
+        → derived from ``parquet_root`` (``parquet_root.parent /
+        "workflow_defs"``, sibling of the parquet store)."""
+        if self.workflow_defs_root_override is not None:
+            return self.workflow_defs_root_override
+        return self.parquet_root.parent / "workflow_defs"
 
 
 # ──────────────────────── resolver ────────────────────────
@@ -218,6 +235,10 @@ def get_data_paths(config_path: Optional[Path] = None) -> DataPaths:
     env_ki = os.getenv("FA_KNOWLEDGE_INDEX_ROOT")
     ki_override = Path(env_ki) if env_ki else None
 
+    # ---- workflow_defs_root_override -----------------------------------
+    env_wf = os.getenv("FA_WORKFLOW_DEFS_ROOT")
+    wf_override = Path(env_wf) if env_wf else None
+
     return DataPaths(
         qlib_uri=qlib_uri,
         parquet_root=parquet_root,
@@ -225,6 +246,7 @@ def get_data_paths(config_path: Optional[Path] = None) -> DataPaths:
         qlib_etf_uri=etf_uri,
         strategy_root_override=strategy_override,
         knowledge_index_root_override=ki_override,
+        workflow_defs_root_override=wf_override,
     )
 
 
