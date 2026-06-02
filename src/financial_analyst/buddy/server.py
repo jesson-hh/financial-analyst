@@ -208,9 +208,16 @@ class BacktestRunReq(BaseModel):
     mode: str = "mock"                  # "mock"(默认,确定性 stub agent) | "real"(真 LLM)
     match_freq: str = "day"             # "day" | "5min" (第一版 UI 只暴露 day)
     # P2 扩字段 ↓
-    pool: str = Field(default="csi300", description="csi300|csi_fast|csi500|csi800")
+    # pool / factor_name 用 Field(pattern=) 在 body 解析期拒非白名单 (B-I-1 review fix);
+    # 不用 typing.Literal — server.py 头部 `from __future__ import annotations` 会让
+    # Literal 被 stringify, Pydantic v2 + FastAPI TypeAdapter 解析失败 (PydanticUserError
+    # "TypeAdapter ... is not fully defined"). regex pattern 不依赖 forward ref 解析,
+    # 行为等价 (Pydantic 解析 body 时同样拒非白名单, 返 422).
+    pool: str = Field(default="csi300", pattern=r"^(csi300|csi_fast|csi500|csi800)$",
+                      description="候选池 (regex 白名单, 非匹配返 422)")
     hold_days: int = Field(default=3, ge=1, le=60, description="mock 持有期 (1-60)")
-    factor_name: str = Field(default="rev_20", description="候选排序因子, 第一版只 rev_20")
+    factor_name: str = Field(default="rev_20", pattern=r"^rev_20$",
+                             description="候选排序因子 (第一版 regex 限定 rev_20, 后续放开)")
     stop_loss_pct: Optional[float] = Field(default=None, gt=0, le=0.5,
                                             description="持仓亏损止损阈, None=不触发")
     take_profit_pct: Optional[float] = Field(default=None, gt=0, le=2.0,
@@ -2239,14 +2246,8 @@ def build_app():
         if req.candidate_topn < 1:
             return JSONResponse(status_code=400, content={
                 "error": "candidate_topn must be >= 1", "status": "bad_request"})
-        if req.pool not in ("csi300", "csi_fast", "csi500", "csi800"):
-            return JSONResponse(status_code=400, content={
-                "error": f"pool 不支持 '{req.pool}', 可选 csi300|csi_fast|csi500|csi800 (全市场池请用 csi800 替代)",
-                "status": "bad_request"})
-        if req.factor_name != "rev_20":
-            return JSONResponse(status_code=400, content={
-                "error": f"factor_name 第一版只支持 'rev_20', 收到 '{req.factor_name}' (其它因子下轮接 /factor/list)",
-                "status": "bad_request"})
+        # pool / factor_name 白名单由 BacktestRunReq Field(pattern=) 在 body 解析期拦 → 422
+        # (旧版本曾在此处 if-block 校验返 400, 现已下沉到 model 层)
         for label, val in (("start", req.start), ("end", req.end)):
             if val is not None:
                 try:

@@ -51,6 +51,17 @@ class TestBacktestRunReqExtended:
         with pytest.raises(ValidationError):
             BacktestRunReq(take_profit_pct=2.1)
 
+    # B-I-1 fix: pool/factor_name 在 model 层就拒 (不靠 endpoint if-block)
+    def test_pool_literal_rejects_non_whitelist_at_model_level(self):
+        for bad in ("all", "csiall", "csi1000", "", "CSI300"):
+            with pytest.raises(ValidationError):
+                BacktestRunReq(pool=bad)
+
+    def test_factor_name_literal_rejects_non_rev_20_at_model_level(self):
+        for bad in ("mom_20", "vol_60", "rev_10", ""):
+            with pytest.raises(ValidationError):
+                BacktestRunReq(factor_name=bad)
+
 
 from fastapi.testclient import TestClient
 from financial_analyst.buddy.server import build_app
@@ -62,14 +73,21 @@ class TestEndpointValidation:
         self.client = TestClient(app)
 
     def test_rejects_pool_all(self):
+        # B-I-1: Pydantic Literal 在 body 解析期拦, FastAPI 返 422 (不再走 endpoint 自定义 400)
         r = self.client.post("/backtest/run", json={"pool": "all", "mode": "mock"})
-        assert r.status_code == 400
-        assert "csi800" in r.json()["error"]
+        assert r.status_code == 422
+        # FastAPI 默认 ValidationError body: {"detail":[{"loc":["body","pool"],...,"msg":"..."}]}
+        body = r.json()
+        assert "detail" in body
+        assert any("pool" in str(e.get("loc", [])) for e in body["detail"])
 
     def test_rejects_non_whitelist_factor(self):
+        # B-I-1: factor_name Literal 拒, 同上 422
         r = self.client.post("/backtest/run", json={"factor_name": "mom_20", "mode": "mock"})
-        assert r.status_code == 400
-        assert "rev_20" in r.json()["error"]
+        assert r.status_code == 422
+        body = r.json()
+        assert "detail" in body
+        assert any("factor_name" in str(e.get("loc", [])) for e in body["detail"])
 
     def test_accepts_full_p2_payload(self):
         r = self.client.post("/backtest/run", json={
