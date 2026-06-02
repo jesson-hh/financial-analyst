@@ -239,24 +239,49 @@ class BacktestRunReq(BaseModel):
 4. `req.stop_loss_pct / take_profit_pct` → 传给 `_MockAgent`. 第一版**仅在 mock agent 内部判定** (`decide()` 拿持仓的 `inp.holdings[code].unrealized_pct` 判断是否触发), 不动 broker.py. 如 broker.py 已有 EOD stop_loss 支持, implementer 可选透传; 没有就只 mock agent 实现, 真 LLM 模式不触发止盈止损 (由 LLM 自己决定动作).
 5. `_MockAgent` 决策优先级: 持仓收益 ≥ take_profit_pct → sell ▷ 持仓收益 ≤ -stop_loss_pct → sell ▷ 持有 ≥ hold_days → sell ▷ 否则 hold/buy
 
-### P2.3 候选池 `CandidateConfig.pool` 字段
+### P2.3 候选池 `CandidateConfig.pool` 字段 (语义切换)
 
-`backtest/candidate.py` 改动:
+**现状**: `backtest/candidate.py:select_candidates()` base universe = `holdings ∪ watchlist`, 在 base 上算 rev_20, 取 Top-N. 注释明确 "deliberately does NOT run the full 5000+ market". 这是 watchlist-driven 设计, 适合实盘盯盘但**不适合回测**: 回测时 watchlist 可能为空或与目标池子不相关, 候选池会被砍光.
+
+**改造** (语义切换, 不破坏老调用方):
+
 ```python
 @dataclass
 class CandidateConfig:
     topn: int = 20
-    pool: str = "csi300"   # 新增, 同 universe.py 解析
+    pool: Optional[str] = None     # 新增. None=旧语义(holdings∪watchlist); 非空=base 改为池子成分股, watchlist 不参与
+    rev20_lookback_tradedays: int = 30
+    rev20_pick: str = "low"
+    include_holdings: bool = True
+    include_watchlist: bool = True   # pool 非空时此字段被忽略
+    watchlist_path: Optional[Path] = None
+    sentinel_codes: tuple = ("SH999999",)
 
-    def build_candidates(self, as_of: pd.Timestamp, paths: DataPaths) -> list[str]:
-        # 1. 加载池子成分股 (调 financial_analyst.data.universe.resolve_universe_codes)
-        codes = resolve_universe_codes(self.pool, as_of, paths)
-        # 2. 过滤停牌/ST/上市不满 60 日 (现已实现)
-        # 3. 按 rev_20 升序取 Top-N
-        ...
+def select_candidates(date, holdings, reader, cfg):
+    if cfg.pool:
+        # 池子模式: base = resolve_universe_codes(cfg.pool), watchlist 不参与
+        from financial_analyst.data.universe import resolve_universe_codes
+        pool_codes = resolve_universe_codes(cfg.pool)
+        if not pool_codes:
+            raise ValueError(f"pool '{cfg.pool}' resolved to 0 codes (缺 index_constituents.parquet?)")
+        base = list(dict.fromkeys([*(holdings if cfg.include_holdings else []), *pool_codes]))
+        universe_source_default = "pool"
+    else:
+        # 旧语义 (向后兼容): base = holdings ∪ watchlist
+        watch = _load_watchlist_codes(cfg)
+        base = list(dict.fromkeys([*(holdings if cfg.include_holdings else []), *watch]))
+        universe_source_default = "watchlist"
+    # 后续 rev_20 计算 + Top-N 取法不变
+    ...
+    # universe_source 标签: holding/rev20_top/pool 或 holding/rev20_top/watchlist
 ```
 
-复用 `data/universe.py:resolve_universe_codes` (P1.6 整合后已统一入口), 不重复实现.
+**兼容性**:
+- `CandidateConfig()` 无参 (老调用) → `pool=None` → 走旧路径 (holdings∪watchlist), 100% 向后兼容
+- `BacktestRunReq.pool` server-side default = `"csi300"` → backtest 调用 → 走新池子路径
+- `WatchLoop` 调 candidate (实盘盯盘) → 仍传 `pool=None` → 老语义保留
+
+**性能**: pool=csi_fast (~100 只) 跑 5 日窗口 = 500 次 `reader.fetch_quote_leq_prev` (每次单只 30 日历史, QlibBinaryLoader). 实测应 < 30s.
 
 ### P2.4 前端控件扩展
 
