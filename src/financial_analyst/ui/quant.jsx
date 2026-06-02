@@ -94,10 +94,12 @@ function Segmented({ value, onChange, options }) {
   );
 }
 
-function Kpi({ label, value, hint, dir, last }) {
+function Kpi({ label, value, hint, dir, last, tooltip }) {
   return (
-    <div style={{ padding: '12px 14px', borderRight: last ? 'none' : '1px solid var(--line-soft)', background: 'rgba(255,255,255,0.4)' }}>
-      <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', letterSpacing: '0.16em' }}>{label}</div>
+    <div title={tooltip} style={{ padding: '12px 14px', borderRight: last ? 'none' : '1px solid var(--line-soft)', background: 'rgba(255,255,255,0.4)' }}>
+      <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', letterSpacing: '0.16em' }}>
+        {label}{tooltip && <span style={{ fontSize: 8, color: 'var(--ink-3)', marginLeft: 2 }}>ⓘ</span>}
+      </div>
       <div className={'mono ' + (dir === 'up' ? 'up' : dir === 'down' ? 'down' : '')}
         style={{ fontSize: 17, fontWeight: 500, color: dir ? undefined : 'var(--ink)', marginTop: 4 }}>{value}</div>
       {hint && <div className="serif" style={{ fontSize: 10, color: 'var(--ink-2)', marginTop: 2 }}>{hint}</div>}
@@ -1746,6 +1748,219 @@ function WorkflowLab() {
   );
 }
 
+// ─────── BacktestStrategyBanner — Mock vs Real 说清楚回测什么 (P0.1) ───────
+function BacktestStrategyBanner({ mode }) {
+  if (mode === 'mock') {
+    return (
+      <div style={{
+        padding: '12px 16px', marginBottom: 12,
+        border: '1px solid var(--line)', background: 'var(--paper-1)',
+        borderLeft: '3px solid var(--dai)', fontSize: 12,
+      }}>
+        <div className="serif" style={{ fontSize: 13, color: 'var(--ink)', marginBottom: 6 }}>
+          📊 <strong>Mock 模式</strong> · 演示数据通路, <span style={{ color: 'var(--dai)' }}>⚠ 不是盈利策略</span>
+        </div>
+        <div style={{ color: 'var(--ink-2)', lineHeight: 1.7 }}>
+          每次空仓时买入候选池中 <code className="mono">rev_20</code> 分位最低 (跌得最惨) 的 1 只,
+          持有 <code className="mono">N</code> 个交易日后无条件了结. 0 次 LLM 调用, 确定性, 可手算核对.
+        </div>
+        <div style={{ color: 'var(--ink-3)', fontSize: 11, marginTop: 6 }}>
+          用途: 验证 数据→决策→撮合→净值 链路通畅. 真实策略请切 <strong>Real LLM</strong> 模式.
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div style={{
+      padding: '12px 16px', marginBottom: 12,
+      border: '1px solid var(--line)', background: 'var(--paper-1)',
+      borderLeft: '3px solid var(--zhu)', fontSize: 12,
+    }}>
+      <div className="serif" style={{ fontSize: 13, color: 'var(--ink)', marginBottom: 6 }}>
+        🤖 <strong>Real LLM</strong> · 真实策略回测 (慢, 单日窗口 ~6min)
+      </div>
+      <div style={{ color: 'var(--ink-2)', lineHeight: 1.7 }}>
+        每日盘前调用 qwen3.5-plus, 输入: 候选池 Top-N · 当前持仓 · rev_20 分位 · 当日新闻 + 事件摘要 (PIT-safe).
+        输出 5 档动作 (buy/add/hold/reduce/sell), 每条带 reason.
+      </div>
+      <div style={{ color: 'var(--ink-3)', fontSize: 11, marginTop: 6 }}>
+        决策被 prompt 哈希缓存 — 同样输入只调一次 LLM (<code className="mono">.fa/decision_cache</code>).
+      </div>
+    </div>
+  );
+}
+
+// ─────── BacktestSummaryChips — 候选池+因子+窗口+持有期 一行 chip 串 (P0.2) ───────
+function BacktestSummaryChips({ d, onPoolClick }) {
+  const p = d.params || {};
+  const tradeDays = d.nav && d.nav.dates ? d.nav.dates.length : '?';
+  const factorLabel = p.factor_name || 'rev_20';
+  const poolLabel = p.pool || '(旧 watchlist 模式)';
+  const modeLabel = p.mode === 'mock' ? 'Mock' : 'Real LLM';
+  return (
+    <div style={{
+      padding: '10px 14px', marginBottom: 14,
+      border: '1px solid var(--line-soft)', background: 'var(--paper-2)',
+      display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 12,
+      fontSize: 11, fontFamily: 'var(--mono)',
+    }}>
+      <span style={{ color: 'var(--ink-2)' }}>候选 N=<strong>{p.candidate_topn}</strong></span>
+      <span style={{ color: 'var(--ink-3)' }}>◀</span>
+      <span onClick={onPoolClick} style={{
+        cursor: 'pointer', textDecoration: 'underline dotted', color: 'var(--ink)',
+      }} title="点开看候选池过滤逻辑">
+        池: <strong>{poolLabel}</strong>
+      </span>
+      <span style={{ color: 'var(--ink-3)' }}>◀</span>
+      <span style={{ color: 'var(--ink-2)' }}>排序: <code>{factorLabel}</code> ↑</span>
+      <span style={{ color: 'var(--ink-3)' }}>·</span>
+      <span style={{ color: 'var(--ink-2)' }}>窗口: <strong>{p.start}</strong> → <strong>{p.end}</strong> ({tradeDays} 个交易日)</span>
+      <span style={{ color: 'var(--ink-3)' }}>·</span>
+      <span style={{ color: 'var(--ink-2)' }}>模式: <strong>{modeLabel}</strong></span>
+      <span style={{ color: 'var(--ink-3)' }}>·</span>
+      <span style={{ color: 'var(--ink-2)' }}>持有: <strong>{p.hold_days || 3} 日</strong></span>
+      <span style={{ color: 'var(--ink-3)' }}>·</span>
+      <span style={{ color: 'var(--ink-2)' }}>撮合: <strong>{p.match_freq}</strong></span>
+    </div>
+  );
+}
+
+// ─────── PoolFilterPopover — 池过滤逻辑浮层 (P1.3) ───────
+function PoolFilterPopover({ pool, topn, onClose }) {
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, background: 'rgba(20,20,20,0.4)', zIndex: 100,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        maxWidth: 540, padding: 24, background: 'var(--paper)', border: '1px solid var(--line)',
+      }}>
+        <div className="serif" style={{ fontSize: 14, marginBottom: 12 }}>
+          候选池构造流程 · 当前 <code className="mono">{pool}</code>
+        </div>
+        <ol className="mono" style={{ fontSize: 11.5, lineHeight: 1.9, color: 'var(--ink-2)', paddingLeft: 22 }}>
+          <li>全 <strong>{pool}</strong> 成分股 (来自 <code>stock_data/parquet/index_constituents.parquet</code>)</li>
+          <li>叠加当前持仓 (避免持仓掉出候选导致无法平仓)</li>
+          <li>排除 sentinel (SH999999 等占位代码)</li>
+          <li>对每只在 ≤T-1 close 上算 <code>rev_20 = close[T-1]/close[T-21] - 1</code></li>
+          <li>按 rev_20 <strong>升序</strong> 排列 (跌得最惨的优先)</li>
+          <li>取前 N=<strong>{topn}</strong> 作为候选池</li>
+        </ol>
+        <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', marginTop: 12 }}>
+          注: 池子模式 (pool 非空) 不引入 watchlist; 老 WatchLoop 实盘盯盘仍走 holdings∪watchlist 路径.
+        </div>
+        <button onClick={onClose} style={{
+          marginTop: 16, padding: '6px 14px', background: 'var(--ink)', color: 'var(--paper)',
+          border: 'none', fontSize: 11, cursor: 'pointer', fontFamily: 'var(--serif)',
+        }}>关闭</button>
+      </div>
+    </div>
+  );
+}
+
+// ─────── Section — modal 小标题 + 分隔线 ───────
+function BacktestModalSection({ title, children }) {
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div className="mono" style={{
+        fontSize: 9.5, color: 'var(--ink-3)', letterSpacing: '0.15em',
+        textTransform: 'uppercase', marginBottom: 6, paddingBottom: 4, borderBottom: '1px solid var(--line-soft)',
+      }}>{title}</div>
+      <div>{children}</div>
+    </div>
+  );
+}
+
+// ─────── TradeReasonModal — 交易理由可点击展开 (P0.3 + P1.2) ───────
+function TradeReasonModal({ trade, d, onClose }) {
+  const [rawExpanded, setRawExpanded] = useState(false);
+  if (!trade || !d) return null;
+  const day = (d.decisions && d.decisions[trade.date]) || {};
+  const legs = day.decisions || [];
+  const marketView = day.market_view || '—';
+  const raw = day.raw || null;
+  const warnings = day.warnings || [];
+  const isMock = (d.mode || (d.params && d.params.mode)) === 'mock';
+  const rawStr = raw ? JSON.stringify(raw, null, 2) : null;
+  const rawPreview = rawStr && rawStr.length > 200 ? rawStr.slice(0, 200) + '…' : rawStr;
+  const rawHasError = raw && raw._error === 'json';
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, background: 'rgba(20,20,20,0.5)', zIndex: 100,
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        maxWidth: 680, width: '100%', maxHeight: '85vh', overflow: 'auto',
+        padding: 22, background: 'var(--paper)', border: '1px solid var(--line)',
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 14 }}>
+          <span className="serif" style={{ fontSize: 14 }}>
+            {trade.date} · <code className="mono">{trade.code}</code> · <span style={{
+              color: trade.action === 'buy' ? 'var(--zhu)' : 'var(--dai)',
+            }}>{trade.action}</span>
+          </span>
+          <button onClick={onClose} style={{
+            border: 'none', background: 'transparent', fontSize: 18, cursor: 'pointer', color: 'var(--ink-3)',
+          }}>×</button>
+        </div>
+
+        {rawHasError && (
+          <div style={{ padding: 8, marginBottom: 12, background: '#fff5e6', border: '1px solid var(--jin)', fontSize: 11 }}>
+            ⚠ LLM 输出非合法 JSON, 已 fallback (原始文本见 <code>raw._raw</code>)
+          </div>
+        )}
+
+        <BacktestModalSection title="当日 market_view">
+          <div className="serif" style={{ fontSize: 12, color: 'var(--ink-1)', lineHeight: 1.7 }}>{marketView}</div>
+        </BacktestModalSection>
+
+        <BacktestModalSection title="本笔 reason">
+          <div className="serif" style={{ fontSize: 12, color: 'var(--ink-1)', lineHeight: 1.7 }}>
+            {trade.reason || (legs.find(l => l.code === trade.code) || {}).reason || '—'}
+          </div>
+        </BacktestModalSection>
+
+        <BacktestModalSection title={`当日全部决策 (${legs.length} 条)`}>
+          {legs.length === 0 ? <span style={{ color: 'var(--ink-3)', fontSize: 11 }}>—</span> : (
+            <ol style={{ paddingLeft: 18, margin: 0 }}>
+              {legs.map((l, i) => (
+                <li key={i} className="mono" style={{ fontSize: 11, color: 'var(--ink-2)', marginBottom: 4 }}>
+                  [{i + 1}] <span style={{ color: l.action === 'buy' ? 'var(--zhu)' : 'var(--dai)' }}>{l.action}</span>
+                  {' '}<code>{l.code}</code> {l.weight_pct ? `${l.weight_pct}%` : ''} stop={l.stop_loss}
+                  <div style={{ paddingLeft: 18, color: 'var(--ink-3)', fontFamily: 'var(--serif)' }}>{l.reason}</div>
+                </li>
+              ))}
+            </ol>
+          )}
+        </BacktestModalSection>
+
+        {!isMock && rawStr && (
+          <BacktestModalSection title="LLM 返回原文 (raw JSON)">
+            <pre className="mono" style={{
+              fontSize: 10.5, padding: 10, background: 'var(--paper-2)', border: '1px solid var(--line-soft)',
+              whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0,
+            }}>{rawExpanded ? rawStr : rawPreview}</pre>
+            {rawStr.length > 200 && (
+              <button onClick={() => setRawExpanded(!rawExpanded)} style={{
+                marginTop: 6, border: 'none', background: 'transparent', color: 'var(--zhu)',
+                fontSize: 10.5, cursor: 'pointer', fontFamily: 'var(--mono)',
+              }}>{rawExpanded ? '收起 ▴' : '展开看全文 ▾'}</button>
+            )}
+          </BacktestModalSection>
+        )}
+
+        {warnings.length > 0 && (
+          <BacktestModalSection title="当日警告">
+            <ul style={{ paddingLeft: 18, fontSize: 11, color: 'var(--jin)' }}>
+              {warnings.map((w, i) => <li key={i}>{w}</li>)}
+            </ul>
+          </BacktestModalSection>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ═════════════════════════ Agent 回测 (P5) ═════════════════════════
 function BacktestMode() {
   const [start, setStart]   = useState('');
@@ -1756,6 +1971,17 @@ function BacktestMode() {
   const run = useAsync();
   const [polling, setPolling] = useState(false);
   const timer = useRef(null);
+  // P0/P1/P2: 新增 UI state (modal + popover + 高级控件)
+  const [showPoolPopover, setShowPoolPopover] = useState(false);
+  const [selectedTrade, setSelectedTrade] = useState(null);
+  const [showAdv, setShowAdv] = useState(false);
+  const [pool, setPool] = useState('csi300');
+  const [holdDays, setHoldDays] = useState(3);
+  const [factorName, setFactorName] = useState('rev_20');
+  const [stopLossEnabled, setStopLossEnabled] = useState(false);
+  const [stopLossPct, setStopLossPct] = useState(0.05);
+  const [takeProfitEnabled, setTakeProfitEnabled] = useState(false);
+  const [takeProfitPct, setTakeProfitPct] = useState(0.1);
 
   // 挂载: probe data_end (走 /data/status 的 day 时间戳 — 退而求其次用近 2 周),
   // 填默认窗口, 不硬编码任何固定日期。失败则留空 (后端 None → 自动近窗口)。
@@ -1778,6 +2004,10 @@ function BacktestMode() {
         start: start || null, end: end || null,
         init_cash: Number(cash), candidate_topn: Number(topn), mode,
         match_freq: 'day',
+        // P2 ↓ 新增字段
+        pool, hold_days: Number(holdDays), factor_name: factorName,
+        stop_loss_pct: stopLossEnabled ? stopLossPct : null,
+        take_profit_pct: takeProfitEnabled ? takeProfitPct : null,
       });
       const rid = r.run_id;
       let polls = 0;
@@ -1838,7 +2068,62 @@ function BacktestMode() {
           style={{ padding: '7px 16px', border: 'none', background: 'var(--ink)', color: 'var(--paper)', fontFamily: 'var(--serif)', fontSize: 12, cursor: 'pointer' }}>
           {(run.loading || polling) ? '回测中…' : '起回测 ▶'}
         </button>
+        <button onClick={() => setShowAdv(!showAdv)} className="hover-pill"
+          style={{ padding: '6px 12px', border: '1px solid var(--line)', background: 'transparent',
+                   fontFamily: 'var(--serif)', fontSize: 11, cursor: 'pointer' }}>
+          高级 {showAdv ? '▴' : '▾'}
+        </button>
       </div>
+
+      {showAdv && (
+        <div style={{
+          display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap',
+          padding: '10px 12px', marginBottom: 12, border: '1px solid var(--line-soft)', background: 'var(--paper-1)',
+        }}>
+          <label className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>候选池
+            <select value={pool} onChange={e => setPool(e.target.value)}
+              style={{ display: 'block', marginTop: 3, padding: '5px 8px', border: '1px solid var(--line)',
+                       fontFamily: 'var(--mono)', fontSize: 12 }}>
+              <option value="csi300">csi300 (300 只)</option>
+              <option value="csi_fast">csi_fast (~100 大盘)</option>
+              <option value="csi500">csi500 (500 只)</option>
+              <option value="csi800">csi800 (800 只)</option>
+            </select></label>
+          <label className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>持有期 (日)
+            <input type="number" min={1} max={60} value={holdDays}
+              onChange={e => setHoldDays(Number(e.target.value))}
+              style={{ display: 'block', marginTop: 3, padding: '5px 8px', width: 70,
+                       border: '1px solid var(--line)', fontFamily: 'var(--mono)', fontSize: 12 }} /></label>
+          <label className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}
+                 title="第一版只支持 rev_20, 其它因子下轮接 /factor/list">
+            排序因子
+            <select value={factorName} disabled
+              style={{ display: 'block', marginTop: 3, padding: '5px 8px', border: '1px solid var(--line)',
+                       fontFamily: 'var(--mono)', fontSize: 12, opacity: 0.6 }}>
+              <option value="rev_20">rev_20 (反转)</option>
+            </select></label>
+          <label className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input type="checkbox" checked={stopLossEnabled} onChange={e => setStopLossEnabled(e.target.checked)} />
+            止损 %
+            <input type="number" min={1} max={50} step={1} disabled={!stopLossEnabled}
+              value={Math.round(stopLossPct * 100)}
+              onChange={e => setStopLossPct(Number(e.target.value) / 100)}
+              style={{ width: 50, padding: '4px 6px', border: '1px solid var(--line)',
+                       fontFamily: 'var(--mono)', fontSize: 11, opacity: stopLossEnabled ? 1 : 0.4 }} />
+          </label>
+          <label className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input type="checkbox" checked={takeProfitEnabled} onChange={e => setTakeProfitEnabled(e.target.checked)} />
+            止盈 %
+            <input type="number" min={1} max={200} step={1} disabled={!takeProfitEnabled}
+              value={Math.round(takeProfitPct * 100)}
+              onChange={e => setTakeProfitPct(Number(e.target.value) / 100)}
+              style={{ width: 50, padding: '4px 6px', border: '1px solid var(--line)',
+                       fontFamily: 'var(--mono)', fontSize: 11, opacity: takeProfitEnabled ? 1 : 0.4 }} />
+          </label>
+        </div>
+      )}
+
+      <BacktestStrategyBanner mode={mode} />
 
       {(run.loading || polling) && <Loading label={mode === 'mock' ? '跑确定性回测中…' : 'LLM 决策回测中(较慢)…'} />}
       {run.error && <ErrorBox error={run.error} />}
@@ -1846,17 +2131,26 @@ function BacktestMode() {
       {d && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           {(d.warnings || []).length > 0 && <div className="mono" style={{ fontSize: 10, color: 'var(--jin)' }}>⚠ {d.warnings.join(' · ')}</div>}
+          <BacktestSummaryChips d={d} onPoolClick={() => setShowPoolPopover(true)} />
           <Panel title={<span>组合表现 <span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', marginLeft: 6 }}>{d.mode}·{d.params && d.params.start}~{d.params && d.params.end}·LLM {k.n_llm_calls} 次</span></span>}>
             {/* 8 格, 对齐 FactorReportView 的组合回测格 */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', border: '1px solid var(--line-soft)' }}>
-              <Kpi label="年化"     value={pct(k.ann_return)} dir={dirOf(k.ann_return)} />
-              <Kpi label="Sharpe"   value={n2(k.sharpe, 2)} />
-              <Kpi label="最大回撤"  value={pct(k.max_drawdown)} dir={k.max_drawdown ? 'down' : undefined} />
-              <Kpi label="Calmar"   value={n2(k.calmar, 2)} last />
-              <Kpi label="波动率"    value={pct(k.volatility)} />
-              <Kpi label="换手"     value={pct(k.turnover)} />
-              <Kpi label="胜率(日)"  value={pct(k.win_rate)} />
-              <Kpi label="逐笔胜率"  value={pct(k.trade_win_rate)} last />
+              <Kpi label="年化"     value={pct(k.ann_return)} dir={dirOf(k.ann_return)}
+                   tooltip="年化收益率 = (1 + 区间总收益)^(250/区间交易日) − 1" />
+              <Kpi label="Sharpe"   value={n2(k.sharpe, 2)}
+                   tooltip="夏普比率 = 年化收益 / 年化波动率 (无风险=0)" />
+              <Kpi label="最大回撤"  value={pct(k.max_drawdown)} dir={k.max_drawdown ? 'down' : undefined}
+                   tooltip="最大回撤 = max((peak − trough) / peak), 滚动统计" />
+              <Kpi label="Calmar"   value={n2(k.calmar, 2)} last
+                   tooltip="年化收益 / |最大回撤| · 抗回撤能力指标" />
+              <Kpi label="波动率"    value={pct(k.volatility)}
+                   tooltip="年化波动率 = std(日收益) × √250" />
+              <Kpi label="换手"     value={pct(k.turnover)}
+                   tooltip="区间总成交额 / 期末总资产 / 年化系数 (来自 portfolio.py)" />
+              <Kpi label="胜率(日)"  value={pct(k.win_rate)}
+                   tooltip="净值正收益日数 / 总交易日数" />
+              <Kpi label="逐笔胜率"  value={pct(k.trade_win_rate)} last
+                   tooltip="盈利卖单 / 总卖单 (action='sell' 且 pnl > 0)" />
             </div>
             <div style={{ marginTop: 10 }}>
               {navOk ? <EquityChart series={navVals} dates={navDates} benchmark={d.benchmark || undefined} />
@@ -1875,14 +2169,16 @@ function BacktestMode() {
                   ))}
                 </div>
                 {d.trades.map((t, i) => (
-                  <div key={i} className="hover-row" style={{ display: 'flex', gap: 10, alignItems: 'baseline', padding: '7px 10px', borderBottom: '1px solid var(--line-soft)' }}>
+                  <div key={i} className="hover-row"
+                    onClick={() => setSelectedTrade(t)}
+                    style={{ display: 'flex', gap: 10, alignItems: 'baseline', padding: '7px 10px', borderBottom: '1px solid var(--line-soft)', cursor: 'pointer' }}>
                     <span className="mono" style={{ fontSize: 11, color: 'var(--ink-2)', width: 78 }}>{t.date}</span>
                     <span className="mono" style={{ fontSize: 10, width: 46, color: t.action === 'buy' ? 'var(--zhu)' : 'var(--dai)' }}>{t.action}</span>
                     <code className="mono" style={{ fontSize: 11.5, color: 'var(--ink)', width: 84 }}>{t.code}</code>
                     <span className="mono" style={{ fontSize: 11, color: 'var(--ink-1)', width: 72 }}>{n2(t.price, 2)}</span>
                     <span className="mono" style={{ fontSize: 11, color: 'var(--ink-2)', width: 64 }}>{t.qty}</span>
                     <span className={'mono ' + (t.pnl > 0 ? 'up' : t.pnl < 0 ? 'down' : '')} style={{ fontSize: 11, width: 88 }}>{t.action === 'sell' ? n2(t.pnl, 1) : '—'}</span>
-                    <span className="serif" style={{ fontSize: 11, color: 'var(--ink-2)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{reasonFor(t)}</span>
+                    <span className="serif" style={{ fontSize: 11, color: 'var(--ink-2)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{reasonFor(t)} <span style={{ color: 'var(--ink-3)', fontSize: 9 }}>🔍</span></span>
                   </div>
                 ))}
               </div>
@@ -1891,6 +2187,13 @@ function BacktestMode() {
         </div>
       )}
       {!d && !run.loading && !polling && !run.error && <Empty label="设定窗口 + Mock 模式, 点「起回测」秒级出净值 + 交易 (Mock=单只反转买入持有 N 日后了结, 演示数据通路, 非盈利策略)" />}
+      {showPoolPopover && d && (
+        <PoolFilterPopover
+          pool={(d.params && d.params.pool) || 'csi300'}
+          topn={(d.params && d.params.candidate_topn) || 20}
+          onClose={() => setShowPoolPopover(false)} />
+      )}
+      {selectedTrade && <TradeReasonModal trade={selectedTrade} d={d} onClose={() => setSelectedTrade(null)} />}
     </div>
   );
 }
