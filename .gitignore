@@ -56,8 +56,11 @@ RELEASE_NOTES_v*.md
 # fa launch / fa data update / fa serve runtime logs
 .fa-launch-*.log
 .fa-data-update.log
-.fa-restart.log
+.fa-restart.*
 .fa-serve.log
+
+# runtime workspace data (news.sqlite etc.) — root-level only, not source (keeps tests/data/ tracked)
+/data/
 
 # Claude Code preview panel auto-renders (HTML companions to .md specs)
 docs/**/*.html
