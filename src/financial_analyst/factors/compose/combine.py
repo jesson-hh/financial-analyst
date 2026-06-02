@@ -171,6 +171,11 @@ def _combine_lgbm(
     X_test = test_matrix.fillna(0.0).to_numpy(dtype="float64")
     if X_test.shape[0] > 0:
         composite.loc[test_mask] = model.predict(X_test)
+    # SP-3 SHAP: 把训好的模型挂在 composite Series 的 attrs 上, compose.py 可
+    # 按 method=='lgbm' 取出做 SHAP 分解. 不污染返回签名 (老调用方拿到的还是
+    # (Series, dict)), 缺失/非 lgbm 时下游守卫即可.
+    composite.attrs["_lgbm_model"] = model
+    composite.attrs["_lgbm_feature_names"] = feat_names
     return composite, weights
 
 

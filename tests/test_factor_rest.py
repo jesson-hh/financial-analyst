@@ -309,6 +309,18 @@ def test_bench_endpoint(monkeypatch):
         for row in rows:
             assert "name" in row
             assert "rank_ic" in row
+            # SP-2: every row carries FDR fields (p_value / fdr_q / is_significant);
+            # _jsonable should have rendered NaN → None and np.bool_ → Python bool.
+            assert "p_value" in row
+            assert "fdr_q" in row
+            assert "is_significant" in row
+            assert row["p_value"] is None or isinstance(row["p_value"], (int, float))
+            assert row["fdr_q"] is None or isinstance(row["fdr_q"], (int, float))
+            assert isinstance(row["is_significant"], bool)
+        # Also verify the raw response body is valid JSON (no NaN literal leaked) —
+        # if _jsonable missed any NaN, Starlette's allow_nan=False would have 500'd
+        # already, but defensive check anyway.
+        assert "NaN" not in r.text and "Infinity" not in r.text
 
 
 def test_bench_empty_universe(monkeypatch):

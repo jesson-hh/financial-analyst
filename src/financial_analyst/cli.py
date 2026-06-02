@@ -65,6 +65,10 @@ app = typer.Typer(
 from financial_analyst.data_cli import data_app
 app.add_typer(data_app, name="data")
 
+# ``fa knowledge <subcommand>`` — semantic knowledge index over strategy/ markdown
+from financial_analyst.data.knowledge_index.cli import app as knowledge_app
+app.add_typer(knowledge_app, name="knowledge")
+
 # ``fa init`` — first-launch wizard
 from financial_analyst.init_cli import init_cmd
 app.command(name="init", help="首次启动引导 — 配 LLM key + 选数据包 + 验证.")(init_cmd)

@@ -278,3 +278,50 @@ def test_compose_factors_predictive_members_positive_ic(monkeypatch):
     ric = res.composite.ic.rank_ic_mean
     assert ric == ric, "rank_ic_mean is NaN"
     assert ric > 0.3, f"expected strong positive OOS rank_ic, got {ric}"
+
+
+# ---------------------------------------------------------------------------
+# SP-3: method='lgbm' 必含 composite_shap_top5; 其它方法应为 None.
+# ---------------------------------------------------------------------------
+def test_lgbm_composite_has_shap_top5(monkeypatch):
+    """method='lgbm' 跑完后, ComposeResult.composite_shap_top5:
+    - 不是 None
+    - 是 dict
+    - 每个 code 列表长度 <= 5
+    - 每项 (factor_name_str, signed_contrib_float).
+    """
+    _patch(monkeypatch, _random_walk_loader())
+    cfg = EvalConfig(universe="csi500", freq="week")
+    res = compose_factors(
+        ["rank(-delta(close,5))", "rank(close)", "rank(ts_mean(returns,5))"],
+        config=cfg,
+        method="lgbm",
+        train_frac=0.6,
+    )
+    assert res.status == "ok", f"unexpected status: {res.status} / {res.error}"
+    assert res.composite_shap_top5 is not None, "lgbm 应填充 composite_shap_top5"
+    assert isinstance(res.composite_shap_top5, dict)
+    assert len(res.composite_shap_top5) > 0
+    for code, contribs in res.composite_shap_top5.items():
+        assert isinstance(code, str)
+        assert isinstance(contribs, list)
+        assert len(contribs) <= 5
+        for item in contribs:
+            assert isinstance(item, tuple)
+            assert len(item) == 2
+            assert isinstance(item[0], str)
+            assert isinstance(item[1], float)
+
+
+def test_non_lgbm_compose_shap_top5_is_none(monkeypatch):
+    """method != 'lgbm' (equal/ic_weighted/linear) → composite_shap_top5 应为 None."""
+    _patch(monkeypatch, _random_walk_loader())
+    cfg = EvalConfig(universe="csi500", freq="week")
+    res = compose_factors(
+        ["rank(-delta(close,5))", "rank(close)"],
+        config=cfg,
+        method="equal",
+        train_frac=0.6,
+    )
+    assert res.status == "ok"
+    assert res.composite_shap_top5 is None

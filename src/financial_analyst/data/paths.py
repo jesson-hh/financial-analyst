@@ -78,6 +78,18 @@ class DataPaths:
     ``loaders.yaml`` ``qlib_binary.provider_uri.etf``; else defaults to
     ``cn_data_etf`` beside ``qlib_day``."""
 
+    strategy_root_override: Optional[Path] = None
+    """Override for the strategy markdown root (where research / wisdom /
+    stocks / pitfalls etc live). Set via ``FA_STRATEGY_ROOT`` env var; else
+    defaults to ``parquet_root.parent.parent / "strategy"`` (i.e.
+    ``G:/stocks/strategy/`` when ``parquet_root`` is the dev fallback)."""
+
+    knowledge_index_root_override: Optional[Path] = None
+    """Override for the knowledge-index store directory (Chroma persistent
+    client root). Set via ``FA_KNOWLEDGE_INDEX_ROOT`` env var; else
+    defaults to ``parquet_root.parent / "knowledge_index"`` (i.e. sibling of
+    the parquet store so it lives on the same shared data disk)."""
+
     @property
     def qlib_day(self) -> Path:
         """Day-frequency Qlib data root (always resolvable)."""
@@ -104,6 +116,28 @@ class DataPaths:
     def tdx_f10_root(self) -> Path:
         """Convenience accessor for ``news_data_root / "tdx_f10"``."""
         return self.news_data_root / "tdx_f10"
+
+    @property
+    def strategy_root(self) -> Path:
+        """Strategy markdown root (knowledge sources for the vector index).
+
+        Override priority: ``strategy_root_override`` (env / explicit) →
+        derived from ``parquet_root`` (``parquet_root.parent.parent /
+        "strategy"``, i.e. ``G:/stocks/strategy/`` on the dev box)."""
+        if self.strategy_root_override is not None:
+            return self.strategy_root_override
+        return self.parquet_root.parent.parent / "strategy"
+
+    @property
+    def knowledge_index_root(self) -> Path:
+        """Knowledge-index store root (Chroma persistent client directory).
+
+        Override priority: ``knowledge_index_root_override`` (env / explicit)
+        → derived from ``parquet_root`` (``parquet_root.parent /
+        "knowledge_index"``, so it lives on the same data disk as parquet)."""
+        if self.knowledge_index_root_override is not None:
+            return self.knowledge_index_root_override
+        return self.parquet_root.parent / "knowledge_index"
 
 
 # ──────────────────────── resolver ────────────────────────
@@ -176,11 +210,21 @@ def get_data_paths(config_path: Optional[Path] = None) -> DataPaths:
     yaml_etf = prov.get("etf") if isinstance(prov, dict) else None
     etf_uri = env_etf or yaml_etf
 
+    # ---- strategy_root_override ---------------------------------------
+    env_strategy = os.getenv("FA_STRATEGY_ROOT")
+    strategy_override = Path(env_strategy) if env_strategy else None
+
+    # ---- knowledge_index_root_override ---------------------------------
+    env_ki = os.getenv("FA_KNOWLEDGE_INDEX_ROOT")
+    ki_override = Path(env_ki) if env_ki else None
+
     return DataPaths(
         qlib_uri=qlib_uri,
         parquet_root=parquet_root,
         news_data_root=news_data_root,
         qlib_etf_uri=etf_uri,
+        strategy_root_override=strategy_override,
+        knowledge_index_root_override=ki_override,
     )
 
 

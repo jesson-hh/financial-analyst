@@ -1,4 +1,11 @@
-"""IC 分析: 截面 Pearson/Spearman IC, ICIR, t值, 命中率, IC 序列, IC 衰减。"""
+"""IC 分析: 截面 Pearson/Spearman IC, ICIR, t值, 命中率, IC 序列, IC 衰减。
+
+SP-2 加 FDR 多重检验校正字段:
+- ``p_value``: 单因子 IC t-test 双尾 p (基于 ic_mean / (ic_std / sqrt(n_dates))).
+- ``fdr_q``: 批量校正后 q 值 (单因子模式留 None, 由 bench_runner.run_bench 在跑完
+  所有因子后回填). 用法: ``df[df.is_significant]`` 取 FDR-adjusted 通过子集.
+- ``is_significant``: bool, 校正后是否过阈值 (单因子模式恒 False, 等 bench 回填).
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -19,6 +26,10 @@ class IcResult:
     rank_icir: float
     ic_series: List[Tuple[str, float]] = field(default_factory=list)
     ic_decay: List[Tuple[int, float, float]] = field(default_factory=list)
+    # SP-2 FDR 多重检验校正字段 (向后兼容: 默认 None / False 不影响旧调用方)
+    p_value: Optional[float] = None
+    fdr_q: Optional[float] = None
+    is_significant: bool = False
 
 
 def _daily_corr(joined: pd.DataFrame, rank: bool) -> pd.Series:
@@ -95,6 +106,18 @@ def ic_analysis(
             rich = float(_daily_corr(jh, rank=True).mean())
             decay.append((int(h), ich, rich))
 
+    # SP-2: 单因子 IC t-test 双尾 p (大 n 时 t-dist → 正态; 用 scipy.stats.t 兼容小 n).
+    # 需要 n>=2 才有非零自由度; ic_std 必须正才能除. 否则 p_value=None (无法判定).
+    p_value: Optional[float] = None
+    if n >= 2 and not np.isnan(ic_std) and ic_std > 0:
+        try:
+            from scipy import stats as _scipy_stats
+            t_stat = ic_mean / (ic_std / np.sqrt(n))
+            # 双尾 p = 2 * P(T > |t_stat|), df = n - 1
+            p_value = float(2.0 * _scipy_stats.t.sf(abs(t_stat), df=n - 1))
+        except Exception:
+            p_value = None
+
     return IcResult(
         ic_mean,
         ic_std,
@@ -105,4 +128,7 @@ def ic_analysis(
         rank_icir,
         ic_series,
         decay,
+        p_value=p_value,
+        fdr_q=None,           # 单因子模式不批校正; 由 run_bench 回填
+        is_significant=False,  # 同上
     )

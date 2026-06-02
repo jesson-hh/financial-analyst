@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from math import floor
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -64,6 +65,10 @@ class ComposeResult:
     warnings: list = field(default_factory=list)
     status: str = "ok"
     error: str = ""
+    # SP-3 SHAP: 仅 method='lgbm' 时填充. 形如
+    # {code: [(factor, signed_contrib), ...]} 按 |contrib| 降序取 top-5.
+    # 测试集最后一日的横截面 (一只股一行) 上算 SHAP, 解释 LGB 当前的因子贡献.
+    composite_shap_top5: Optional[Dict[str, List[Tuple[str, float]]]] = field(default=None)
 
 
 def _resolve_member_compute(name: str):
@@ -238,6 +243,36 @@ def compose_factors(
             error=f"{type(e).__name__}: {e}",
         )
 
+    # 6.5) SP-3 SHAP: 仅 method='lgbm' 时, 从 combine 挂在 composite_series.attrs
+    #      上的训好模型 + 测试集最后一日横截面 (一只股一行) 算 top-5 因子贡献.
+    #      失败 (shap 缺失 / attrs 丢失 / 测试段空) 不影响主流程, 静默置 None.
+    composite_shap_top5: Optional[Dict[str, List[Tuple[str, float]]]] = None
+    if method == "lgbm":
+        try:
+            from financial_analyst.factors.eval.shap_explain import shap_top_k
+
+            lgb_model = composite_series.attrs.get("_lgbm_model")
+            if lgb_model is not None and n_test_dates > 0:
+                # 测试段最后一日横截面 — 解释当下时点 (最新调仓日) 每只股的因子贡献.
+                test_reb_dt = matrix_reb.index.get_level_values("datetime")[test_mask.to_numpy()]
+                if len(test_reb_dt) > 0:
+                    last_test_date = test_reb_dt.max()
+                    test_matrix_last = matrix_reb.loc[
+                        matrix_reb.index.get_level_values("datetime") == last_test_date,
+                        list(names),
+                    ].fillna(0.0)
+                    # index 切到只剩 code (datetime 层只剩一日, 直接 droplevel).
+                    test_matrix_last = test_matrix_last.copy()
+                    test_matrix_last.index = test_matrix_last.index.get_level_values("code").astype(str)
+                    # SHAP 按位置取贡献, 列名要复原成训练时的 f0/f1/... 保持与 model
+                    # feature_name 一致再调用; shap_top_k 内部用 columns 名做映射,
+                    # 这里直接传原 names (展示给用户的是因子表达式) — model 内部按
+                    # 位置匹配, shap_top_k 返回时把这个 names 列名带出去, 用户友好.
+                    composite_shap_top5 = shap_top_k(lgb_model, test_matrix_last, k=5)
+        except Exception as e:
+            warnings.append(f"SHAP 计算失败 (不影响主流程): {type(e).__name__}: {e}")
+            composite_shap_top5 = None
+
     # 7) 综合分 OOS 评测。把综合分 reindex 到整面板 index (缺失 → NaN), 这样
     #    build_report 计算自己的前瞻收益并限制到调仓日后 dropna, 只在我们写过值的
     #    测试调仓行有值 → 自然只评 OOS。
@@ -313,4 +348,5 @@ def compose_factors(
         warnings=warnings,
         status="ok",
         error="",
+        composite_shap_top5=composite_shap_top5,
     )

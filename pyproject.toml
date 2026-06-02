@@ -68,6 +68,11 @@ dependencies = [
     "hf-transfer>=0.1.6",      # multi-connection HF downloads (3-10x speedup for CN users on hf-mirror)
     "pypdf>=4",                # composer 上传 button: PDF text extraction
     "python-multipart>=0.0.9", # FastAPI multipart parsing for POST /upload
+    "chromadb>=0.5",           # SP-1: embedded vector store for knowledge_index
+    "sentence-transformers>=3.0",  # SP-1: BGE-zh embedder for knowledge_index
+    "statsmodels>=0.14",       # SP-2: FDR (Benjamini-Hochberg / Bonferroni) multipletests
+    "scipy>=1.10",             # SP-2: t-test p-value (already pandas-indirect; keep explicit)
+    "shap>=0.46",              # SP-3: per-stock SHAP factor contribution decomposition for LGB composites
 ]
 
 [project.optional-dependencies]
@@ -134,4 +139,6 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "no_opencli_mock: skip the autouse shutil.which mock in test_opencli_runner (used by tests that intentionally exercise the missing-PATH error path)",
+    "slow: tests that need real model downloads / network calls (skipped by default; run with `pytest -m slow`)",
 ]
+addopts = "-m 'not slow'"
