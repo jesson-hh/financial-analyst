@@ -319,8 +319,8 @@ def test_logs_404(isolated_workflow_env):
 # ===========================================================================
 def test_list_workflows(isolated_workflow_env):
     client = _client()
-    # Build app already wrote a demo seed (demo-mock-3-nodes.json), so this list
-    # is non-empty even before we add anything.
+    # SP-W2C: GET /workflow lazily writes a demo seed (demo-mock-3-nodes.json) on
+    # first access, so this list is non-empty after the first call.
     r0 = client.get("/workflow")
     assert r0.status_code == 200
     initial = r0.json()["workflows"]
@@ -382,10 +382,15 @@ def test_list_runs_with_limit(isolated_workflow_env):
 
 
 # ===========================================================================
-# 7. Demo seed — first build_app() writes demo-mock-3-nodes.json.
+# 7. Demo seed — SP-W2C: lazy seed at first /workflow{,/{wf_id}} access.
+# build_app() 不再 eager 写盘 (节省冷启动), 首次访问端点才落 demo-mock-3-nodes.json.
 # ===========================================================================
 def test_demo_seed_present(isolated_workflow_env):
-    """When workflow_defs_root is empty, build_app() seeds demo-mock-3-nodes."""
+    """When workflow_defs_root is empty, first GET /workflow/{wf_id} seeds demo.
+
+    SP-W2C: lazy seed. build_app() 不写; GET /workflow 或 GET /workflow/{wf_id}
+    第一次触发兜底种入. 这条测试覆盖 GET /workflow/{wf_id} 路径 (即使先没列过).
+    """
     client = _client()
     r = client.get("/workflow/demo-mock-3-nodes")
     assert r.status_code == 200
@@ -405,3 +410,38 @@ def test_demo_seed_present(isolated_workflow_env):
             return
         time.sleep(0.1)
     pytest.fail("Demo run did not finish")
+
+
+def test_demo_seed_lazy_not_written_at_build(isolated_workflow_env):
+    """SP-W2C: build_app() 自己**不**写 demo seed — defs_root 应是空的, 直到首请求.
+
+    冷启动加速保障: 启动期不碰 *.json 文件系统. 这条测试通过断言"build_app()
+    起飞后 defs_root 还是空目录"来锁死这个行为, 防回归.
+    """
+    from financial_analyst.buddy.server import build_app
+
+    defs_root = isolated_workflow_env["defs_root"]
+    # mkdir 由 build_app 做 (parents=True, exist_ok=True), 但内部不写任何 *.json
+    _ = build_app()
+    # build 后立即检查 — 还没有任何 HTTP 请求触发过 seed
+    assert defs_root.exists(), "build_app should mkdir the defs_root"
+    json_files = list(defs_root.glob("*.json"))
+    assert not json_files, (
+        f"build_app() 不应在 defs_root 写文件 (SP-W2C lazy seed), 实际找到: {json_files}"
+    )
+
+
+def test_demo_seed_after_list_endpoint(isolated_workflow_env):
+    """SP-W2C: 首次 GET /workflow (列表) 触发 demo seed 写盘."""
+    client = _client()
+    defs_root = isolated_workflow_env["defs_root"]
+    # build_app() 不写; /workflow 列表才触发
+    assert not list(defs_root.glob("*.json")), "未请求前不应有 seed"
+    r = client.get("/workflow")
+    assert r.status_code == 200
+    workflows = r.json()["workflows"]
+    assert any(w["wf_id"] == "demo-mock-3-nodes" for w in workflows), (
+        f"GET /workflow 应触发 demo seed, 实际 workflows={workflows}"
+    )
+    # 文件落盘
+    assert (defs_root / "demo-mock-3-nodes.json").is_file()
