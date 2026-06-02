@@ -65,8 +65,11 @@ class Chunk:
     strategy corpus is entirely zh-CN."""
 
 
-def _make_id(source_file: str, section_h2: str) -> str:
-    h = hashlib.sha256(f"{source_file}::{section_h2}".encode("utf-8")).hexdigest()
+def _make_id(source_file: str, section_h2: str, ordinal: int = 0) -> str:
+    # ordinal 保证同一文件内 (相同 H2 文字 或 无 H2 二次切块) 的多 chunk id 唯一,
+    # 否则 chromadb upsert 同批重复 id 会 DuplicateIDError. source_file + ordinal
+    # 组合稳定 → 跨 rebuild id 不变 (mtime 驱动 re-embed, 不是 id).
+    h = hashlib.sha256(f"{source_file}::{section_h2}::{ordinal}".encode("utf-8")).hexdigest()
     return h[:16]
 
 
@@ -138,7 +141,7 @@ def chunk_markdown(
             continue
         chunks.append(
             Chunk(
-                id=_make_id(src, section),
+                id=_make_id(src, section, i),
                 source_file=src,
                 section_h2=section,
                 text=text,
