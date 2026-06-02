@@ -52,6 +52,9 @@ class UniverseOutput(BaseModel):
     outputs_model=UniverseOutput,
     risk="normal",
     pit=False,
+    group="demo",
+    tag=["data", "demo"],
+    description="返回常量股票池 (Phase 0 mock 节点, seed demo 用).",
 )
 def constant_universe(params: dict, inputs: dict) -> dict:
     """返回 ``{"codes": params['codes'], "n": len(params['codes'])}``.
@@ -78,6 +81,9 @@ class ZerosParams(BaseModel):
     type="factor.zeros",
     params_model=ZerosParams,
     risk="normal",
+    group="demo",
+    tag=["factor", "demo"],
+    description="对每只 code 返 0.0 因子值 DataFrame (Phase 0 mock 节点).",
 )
 def factor_zeros(params: dict, inputs: dict) -> pd.DataFrame:
     """构造 ``DataFrame({"code": codes, "value": [0.0] * n})``.
@@ -109,6 +115,9 @@ class RowCountOutput(BaseModel):
     type="eval.row_count",
     outputs_model=RowCountOutput,
     risk="normal",
+    group="demo",
+    tag=["eval", "demo"],
+    description="对上游 DataFrame 数行列 (Phase 0 mock 节点).",
 )
 def row_count(params: dict, inputs: dict) -> dict:
     """返回 ``{"rows": len(df), "cols": df.shape[1]}``.

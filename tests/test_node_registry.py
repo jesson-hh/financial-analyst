@@ -76,7 +76,9 @@ def test_node_decorator_passes_meta_kwargs(isolated_types: list[str]) -> None:
     class O(BaseModel):
         rows: int
 
-    @node(type=t, params_model=P, outputs_model=O, risk="advice", pit=True, owner="alice", tag="x")
+    # SP-W2A: ``tag`` 升级成显式 list[str] 字段, 不再走 **meta. 这里用一个
+    # 未占用的关键字 ``owner`` 验 **meta 仍然透传到 ``meta`` dict.
+    @node(type=t, params_model=P, outputs_model=O, risk="advice", pit=True, owner="alice", role="x")
     def compute(params: dict, inputs: dict) -> dict:
         return {"rows": 0}
 
@@ -85,7 +87,7 @@ def test_node_decorator_passes_meta_kwargs(isolated_types: list[str]) -> None:
     assert got.outputs_model is O
     assert got.risk == "advice"
     assert got.pit is True
-    assert got.meta == {"owner": "alice", "tag": "x"}
+    assert got.meta == {"owner": "alice", "role": "x"}
 
 
 # ---------------------------------------------------------------------------

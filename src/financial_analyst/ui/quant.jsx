@@ -492,7 +492,14 @@ function LibraryMode() {
               <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.formula || f.expr || ''}</div>
             </div>
           ))}
-          {!factors.length && <Empty label="暂无因子" />}
+          {!factors.length && (
+            <div style={{ padding: 24 }}>
+              <Empty label="暂无因子" />
+              <div className="serif" style={{ fontSize: 11, color: 'var(--ink-3)', textAlign: 'center', marginTop: 12, lineHeight: 1.6 }}>
+                {family === 'user' ? <>切到 ⚒️ <span style={{ color: 'var(--ink-1)' }}>炼因子</span> tab 用 DSL 炼一个自己的</> : <>试试其它 family · 或切到 ⚒️ <span style={{ color: 'var(--ink-1)' }}>炼因子</span> 炼一个 user 因子</>}
+              </div>
+            </div>
+          )}
         </div>
       </aside>
       <div style={{ flex: 1, overflowY: 'auto', padding: 18, minWidth: 0 }}>
@@ -911,6 +918,269 @@ function InputsEditor({ inputs, upstreamIds, onChange }) {
   );
 }
 
+// ═════════════════════════ SP-W2C 节点 Tooltip ═════════════════════════
+// 悬停工具栏节点 → 浮层显示完整 metadata (description / inputs / outputs / risk / pit / tag).
+// 不弹 modal, 不蹦走鼠标点击 — onMouseEnter/Leave 控显隐, position:fixed 跟鼠标走.
+// 防截屏遮挡: 右侧空间不够时翻到左侧 (依 anchor.right < window.innerWidth - 380).
+function NodeTooltip({ node, anchor }) {
+  if (!node) return null;
+  // 选位置: anchor 右侧 +8px, 顶端对齐 anchor.top, 若右侧空间不够则反弹到左侧
+  const winW = (typeof window !== 'undefined') ? window.innerWidth : 1400;
+  const w = 360;
+  const left = (anchor && (anchor.right + 8 + w < winW)) ? anchor.right + 8 : (anchor ? Math.max(8, anchor.left - w - 8) : 8);
+  const top = anchor ? Math.max(8, anchor.top) : 60;
+  const inputsSchema = node.params_schema || {};
+  const inputProps = inputsSchema.properties || {};
+  const inputRequired = new Set(inputsSchema.required || []);
+  const outputsSchema = node.outputs_schema || {};
+  const outputProps = outputsSchema.properties || {};
+  return (
+    <div style={{
+      position: 'fixed', left, top, width: w, maxHeight: '70vh', overflowY: 'auto', zIndex: 50,
+      padding: '12px 14px', background: 'var(--paper)', border: '1px solid var(--ink-3)',
+      boxShadow: '0 4px 16px rgba(28,24,20,0.12)', pointerEvents: 'none',
+      fontFamily: 'var(--serif)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 6 }}>
+        <code className="mono" style={{ fontSize: 13, color: 'var(--ink)' }}>{node.type}</code>
+        <span style={{ flex: 1 }} />
+        <span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', letterSpacing: '0.14em' }}>{(node.group || 'misc').toUpperCase()}</span>
+      </div>
+      {node.description && (
+        <div className="serif" style={{ fontSize: 11.5, color: 'var(--ink-1)', lineHeight: 1.55, marginBottom: 8 }}>{node.description}</div>
+      )}
+      {/* meta strip: risk / pit / tag */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+        {node.risk && node.risk !== 'normal' && (
+          <span className="mono" style={{ fontSize: 9, padding: '2px 6px', background: 'rgba(180,80,60,0.08)', color: 'var(--yin)', border: '1px solid rgba(180,80,60,0.18)', letterSpacing: '0.1em' }}>RISK: {node.risk}</span>
+        )}
+        {node.pit && (
+          <span className="mono" style={{ fontSize: 9, padding: '2px 6px', background: 'rgba(180,140,60,0.08)', color: 'var(--jin)', border: '1px solid rgba(180,140,60,0.18)', letterSpacing: '0.1em' }}>PIT</span>
+        )}
+        {(node.tag || []).map(t => (
+          <span key={t} className="mono" style={{ fontSize: 9, padding: '2px 6px', background: 'rgba(28,24,20,0.04)', color: 'var(--ink-2)', border: '1px solid var(--line-soft)', letterSpacing: '0.1em' }}>#{t}</span>
+        ))}
+      </div>
+      {/* params schema summary */}
+      {Object.keys(inputProps).length > 0 && (
+        <div style={{ marginBottom: 8 }}>
+          <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', letterSpacing: '0.14em', marginBottom: 4 }}>PARAMS</div>
+          {Object.entries(inputProps).map(([k, v]) => (
+            <div key={k} className="mono" style={{ fontSize: 11, color: 'var(--ink-1)', marginBottom: 2 }}>
+              <span style={{ color: 'var(--ink)' }}>{k}</span>
+              <span style={{ color: 'var(--ink-3)' }}>: {v.type || 'any'}</span>
+              {inputRequired.has(k) && <span style={{ color: 'var(--yin)', marginLeft: 4 }}>*</span>}
+              {v.default !== undefined && <span style={{ color: 'var(--ink-3)' }}> = {JSON.stringify(v.default)}</span>}
+              {v.description && <div className="serif" style={{ fontSize: 10, color: 'var(--ink-3)', marginLeft: 12, marginTop: 1, lineHeight: 1.45 }}>{v.description}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+      {Object.keys(inputProps).length === 0 && (
+        <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', marginBottom: 8 }}>无 params</div>
+      )}
+      {/* outputs schema summary */}
+      {Object.keys(outputProps).length > 0 && (
+        <div>
+          <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', letterSpacing: '0.14em', marginBottom: 4 }}>OUTPUTS</div>
+          {Object.entries(outputProps).map(([k, v]) => (
+            <div key={k} className="mono" style={{ fontSize: 11, color: 'var(--ink-1)', marginBottom: 2 }}>
+              <span style={{ color: 'var(--ink)' }}>{k}</span>
+              <span style={{ color: 'var(--ink-3)' }}>: {v.type || 'any'}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═════════════════════════ SP-W2B Copilot 栏 ═════════════════════════
+// 输入自然语言 → POST /workflow/copilot/draft (SSE) → 展示 thought/draft → 点 [✓ 用这个] 加载到画板
+//
+// SSE on POST: EventSource 只支持 GET, 这里用 fetch + ReadableStream.getReader 手动解析 SSE 帧.
+// 协议: event: <name>\ndata: <json>\n\n
+function CopilotBar({ onDraftAccept }) {
+  const [goal, setGoal] = useState('');
+  const [universe, setUniverse] = useState('csi300_active');
+  const [running, setRunning] = useState(false);
+  const [thoughts, setThoughts] = useState([]);    // [{text}]
+  const [draft, setDraft] = useState(null);        // {workflow_json, cited_experiences, risk_flags, used_factors}
+  const [error, setError] = useState('');
+  const abortRef = useRef(null);
+
+  // 解 SSE 流 — fetch ReadableStream → 行分块 → {event, data} 数组
+  // 复用最简单实现: buffer 行, 见 \n\n 切帧
+  const consumeSSE = async (resp, onEvent) => {
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf('\n\n')) >= 0) {
+        const frame = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        if (!frame.trim() || frame.startsWith(':')) continue;
+        const evMatch = frame.match(/^event:\s*(.+)$/m);
+        const dtMatch = frame.match(/^data:\s*(.+)$/m);
+        if (!evMatch || !dtMatch) continue;
+        let data = null;
+        try { data = JSON.parse(dtMatch[1]); } catch (e) { data = { _raw: dtMatch[1] }; }
+        onEvent(evMatch[1].trim(), data);
+      }
+    }
+  };
+
+  const go = async () => {
+    if (!goal.trim() || running) return;
+    // 关上一个 (复点 [Go] 时)
+    if (abortRef.current) { try { abortRef.current.abort(); } catch (e) {} }
+    setRunning(true); setThoughts([]); setDraft(null); setError('');
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    try {
+      const resp = await fetch(API + '/workflow/copilot/draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ goal, universe, freq: 'day' }),
+        signal: ctrl.signal,
+      });
+      if (!resp.ok) {
+        setError('HTTP ' + resp.status);
+        setRunning(false);
+        return;
+      }
+      await consumeSSE(resp, (event, data) => {
+        if (event === 'thought') {
+          setThoughts(ts => [...ts, { text: data.text || '' }]);
+        } else if (event === 'draft') {
+          setDraft(data);
+        } else if (event === 'error') {
+          setError(data.message || 'Copilot 出错');
+        } else if (event === 'done') {
+          // 流终止
+        }
+      });
+    } catch (e) {
+      if (e.name !== 'AbortError') setError(e.message || String(e));
+    } finally {
+      setRunning(false);
+      abortRef.current = null;
+    }
+  };
+
+  const accept = () => {
+    if (!draft || !draft.workflow_json) return;
+    onDraftAccept(draft);
+    // 清空草稿区, 保留 thoughts 给用户回顾
+    setDraft(null);
+  };
+
+  const reset = () => {
+    if (abortRef.current) { try { abortRef.current.abort(); } catch (e) {} abortRef.current = null; }
+    setRunning(false); setThoughts([]); setDraft(null); setError('');
+  };
+
+  // 卸载清理
+  useEffect(() => () => { if (abortRef.current) { try { abortRef.current.abort(); } catch (e) {} } }, []);
+
+  return (
+    <div style={{ borderBottom: '1px solid var(--line)', background: 'rgba(255,247,225,0.55)' }}>
+      {/* 输入栏 */}
+      <div style={{ padding: '10px 18px 8px', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <span className="mono" style={{ fontSize: 10, color: 'var(--ink-2)', letterSpacing: '0.14em' }}>AI 代搭</span>
+        <input type="text" value={goal} onChange={e => setGoal(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && !running) go(); }}
+          placeholder="让 AI 代搭, 例: 用反转因子在 csi300 跑 IC"
+          style={{ flex: 1, minWidth: 280, padding: '6px 10px', border: '1px solid var(--line)', fontFamily: 'var(--serif)', fontSize: 13, background: 'var(--paper)' }} />
+        <select value={universe} onChange={e => setUniverse(e.target.value)}
+          style={{ padding: '5px 8px', border: '1px solid var(--line)', fontFamily: 'var(--mono)', fontSize: 11, background: 'var(--paper)' }}>
+          <option value="csi_fast">快测(~100)</option>
+          <option value="csi300_active">csi300_active</option>
+          <option value="csi500">csi500</option>
+          <option value="csi800">csi800</option>
+          <option value="all">all</option>
+        </select>
+        <button onClick={go} disabled={!goal.trim() || running}
+          className="hover-pill" style={{ padding: '6px 16px', border: 'none', background: (!goal.trim() || running) ? 'var(--line)' : 'var(--ink)', color: 'var(--paper)', fontFamily: 'var(--serif)', fontSize: 12, cursor: (!goal.trim() || running) ? 'default' : 'pointer' }}>
+          {running ? '思考中…' : 'Go ▶'}
+        </button>
+        {(thoughts.length > 0 || draft || error) && (
+          <button onClick={reset} className="hover-pill" style={{ padding: '4px 10px', border: '1px solid var(--line)', background: 'transparent', cursor: 'pointer', fontFamily: 'var(--serif)', fontSize: 11 }}>清空</button>
+        )}
+      </div>
+
+      {/* 推理流 panel (有事件才显示) */}
+      {(thoughts.length > 0 || draft || error || running) && (
+        <div style={{ padding: '4px 18px 12px', display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+          {/* 左: thoughts 流 */}
+          <div style={{ flex: 1, minWidth: 0, maxHeight: 200, overflowY: 'auto', padding: '8px 12px', background: 'rgba(28,24,20,0.04)', border: '1px solid var(--line-soft)' }}>
+            <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', letterSpacing: '0.14em', marginBottom: 4 }}>RECONSTRUCT · {thoughts.length} 段思考</div>
+            {thoughts.length === 0 && running && <span className="serif" style={{ color: 'var(--ink-3)', fontSize: 12 }}>等 LLM…</span>}
+            {thoughts.map((t, i) => (
+              <div key={i} className="serif" style={{ fontSize: 11.5, color: 'var(--ink-1)', marginBottom: 4, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{t.text}</div>
+            ))}
+            {error && <div style={{ marginTop: 6 }}><ErrorBox error={error} /></div>}
+          </div>
+
+          {/* 右: draft 卡 */}
+          {draft && draft.workflow_json && (
+            <div style={{ flex: '0 0 360px', padding: '10px 14px', background: 'var(--paper)', border: '1px solid var(--ink-3)', boxShadow: '0 2px 8px rgba(28,24,20,0.06)' }}>
+              <div className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', letterSpacing: '0.14em', marginBottom: 6 }}>DRAFT · {(draft.workflow_json.nodes || []).length} 节点</div>
+              <div className="serif" style={{ fontSize: 12, color: 'var(--ink)', fontWeight: 500, marginBottom: 6 }}>{draft.workflow_json.name || '未命名'}</div>
+              {/* 节点链 */}
+              <div className="mono" style={{ fontSize: 10.5, color: 'var(--ink-1)', marginBottom: 6, lineHeight: 1.7 }}>
+                {(draft.workflow_json.nodes || []).map((n, i) => (
+                  <div key={i}>{i + 1}. <span style={{ color: 'var(--ink)' }}>{n.id}</span> <span style={{ color: 'var(--ink-3)' }}>({n.type})</span></div>
+                ))}
+              </div>
+              {/* 引用经验 */}
+              {(draft.cited_experiences || []).length > 0 && (
+                <div style={{ marginTop: 8, paddingTop: 6, borderTop: '1px solid var(--line-soft)' }}>
+                  <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', letterSpacing: '0.14em' }}>引用经验</div>
+                  {draft.cited_experiences.map((c, i) => (
+                    <div key={i} className="serif" style={{ fontSize: 10.5, color: 'var(--ink-2)', marginTop: 2 }}>· {c.source}{c.section ? ' § ' + c.section : ''}</div>
+                  ))}
+                </div>
+              )}
+              {/* 风险提示 */}
+              {(draft.risk_flags || []).length > 0 && (
+                <div style={{ marginTop: 8, paddingTop: 6, borderTop: '1px solid var(--line-soft)' }}>
+                  <div className="mono" style={{ fontSize: 9, color: 'var(--yin)', letterSpacing: '0.14em' }}>风险</div>
+                  {draft.risk_flags.map((r, i) => (
+                    <div key={i} className="serif" style={{ fontSize: 10.5, color: 'var(--yin)', marginTop: 2 }}>! {r}</div>
+                  ))}
+                </div>
+              )}
+              {/* used_factors */}
+              {(draft.used_factors || []).length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', letterSpacing: '0.14em' }}>用到因子</div>
+                  <div className="mono" style={{ fontSize: 10.5, color: 'var(--ink-1)', marginTop: 2 }}>{draft.used_factors.join(', ')}</div>
+                </div>
+              )}
+              {/* Actions */}
+              <div style={{ marginTop: 10, display: 'flex', gap: 8 }}>
+                <button onClick={accept} className="hover-pill"
+                  style={{ flex: 1, padding: '6px 12px', border: 'none', background: 'var(--ink)', color: 'var(--paper)', fontFamily: 'var(--serif)', fontSize: 11, cursor: 'pointer' }}>
+                  ✓ 用这个
+                </button>
+                <button onClick={() => setDraft(null)} className="hover-pill"
+                  style={{ padding: '6px 12px', border: '1px solid var(--line)', background: 'transparent', cursor: 'pointer', fontFamily: 'var(--serif)', fontSize: 11, color: 'var(--ink-2)' }}>
+                  ✗ 重来
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function WorkflowLab() {
   const [nodes, setNodes] = useState([]);                      // 工具栏可用节点
   const [nodesErr, setNodesErr] = useState('');
@@ -929,6 +1199,11 @@ function WorkflowLab() {
   const [saveErr, setSaveErr] = useState('');
   const [artifactView, setArtifactView] = useState(null);      // {node_id, kind, ...}
   const [artifactErr, setArtifactErr] = useState('');
+  // SP-W2C: hover tooltip 显示节点 schema 详情 (描述 + inputs + outputs + risk/pit/tag)
+  const [hoverNode, setHoverNode] = useState(null);             // RegisteredNode payload (or null)
+  const [hoverAnchor, setHoverAnchor] = useState(null);         // DOMRect of hovered toolbar row
+  // SP-W2C: node_done 事件累 artifact_uri 给 step list 行的 "查看输出" 按钮显示判定
+  const [nodeArtifacts, setNodeArtifacts] = useState({});       // {node_id: 1}  存在 = 有 artifact
   const esRef = useRef(null);
   const logEndRef = useRef(null);
 
@@ -1052,6 +1327,27 @@ function WorkflowLab() {
     }
   };
 
+  // SP-W2B: Copilot 草稿 → 加到画板. draft.workflow_json 是 {name, nodes, edges?, meta?}
+  // 直接拼进 currentWorkflow, wf_id 留 null (用户得点 Save 才落盘)
+  const loadDraftToCanvas = (draft) => {
+    const wf = (draft && draft.workflow_json) || {};
+    setCurrentWorkflow({
+      wf_id: null,
+      name: wf.name || 'AI 草案',
+      nodes: wf.nodes || [],
+      edges: wf.edges || [],
+      meta: wf.meta || {},
+    });
+    setSelectedNodeIdx(null);
+    setNodeRunStatus({});
+    setNodeArtifacts({});
+    setRunEvents([]);
+    setRunId(null);
+    setRunStatus('idle');
+    setArtifactView(null);
+    setSaveErr('');
+  };
+
   // 加载历史 workflow
   const loadWorkflow = async (wf_id) => {
     try {
@@ -1065,6 +1361,7 @@ function WorkflowLab() {
       });
       setSelectedNodeIdx(null);
       setNodeRunStatus({});
+      setNodeArtifacts({});
       setRunEvents([]);
       setRunId(null);
       setRunStatus('idle');
@@ -1079,7 +1376,7 @@ function WorkflowLab() {
     if (!currentWorkflow.wf_id) { setSaveErr('请先 Save'); return; }
     // 关上一个 stream
     if (esRef.current) { try { esRef.current.close(); } catch (e) {} esRef.current = null; }
-    setRunEvents([]); setNodeRunStatus({}); setRunStatus('running'); setArtifactView(null); setSaveErr('');
+    setRunEvents([]); setNodeRunStatus({}); setNodeArtifacts({}); setRunStatus('running'); setArtifactView(null); setSaveErr('');
     try {
       const d = await postJSON('/workflow/' + encodeURIComponent(currentWorkflow.wf_id) + '/run', {});
       const newRunId = d && d.run_id;
@@ -1099,6 +1396,10 @@ function WorkflowLab() {
           const data = JSON.parse(e.data);
           setRunEvents(evts => [...evts, { kind: 'node_done', ts: Date.now(), ...data }]);
           setNodeRunStatus(s => ({ ...s, [data.node_id]: data.status }));
+          // SP-W2C: 记 artifact_uri 存在, step list 行才显示 "查看输出"
+          if (data.artifact_uri) {
+            setNodeArtifacts(a => ({ ...a, [data.node_id]: data.artifact_uri }));
+          }
         } catch (err) { /* swallow */ }
       });
       es.addEventListener('workflow_done', (e) => {
@@ -1155,6 +1456,9 @@ function WorkflowLab() {
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0 }}>
+      {/* SP-W2B Copilot 栏 — AI 代搭工作流 (固定在顶部, 工具条之上) */}
+      <CopilotBar onDraftAccept={loadDraftToCanvas} />
+
       {/* 顶部工具条 — name + 历史选择 + reload */}
       <div style={{ padding: '10px 18px 8px', borderBottom: '1px solid var(--line-soft)', display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', background: 'rgba(241,234,217,0.35)' }}>
         <span className="serif" style={{ fontSize: 13, color: 'var(--ink)', fontWeight: 500 }}>工作流</span>
@@ -1169,7 +1473,7 @@ function WorkflowLab() {
           {savedList.map(w => <option key={w.wf_id} value={w.wf_id}>{w.name} · {w.node_count} 节点</option>)}
         </select>
         <button onClick={reloadAll} className="hover-pill" style={{ padding: '4px 10px', border: '1px solid var(--line)', background: 'transparent', cursor: 'pointer', fontFamily: 'var(--serif)', fontSize: 11 }}>刷新 ↻</button>
-        <button onClick={() => { setCurrentWorkflow({ wf_id: null, name: '未命名工作流', nodes: [], edges: [], meta: {} }); setSelectedNodeIdx(null); setRunEvents([]); setNodeRunStatus({}); setRunId(null); setRunStatus('idle'); setArtifactView(null); }}
+        <button onClick={() => { setCurrentWorkflow({ wf_id: null, name: '未命名工作流', nodes: [], edges: [], meta: {} }); setSelectedNodeIdx(null); setRunEvents([]); setNodeRunStatus({}); setNodeArtifacts({}); setRunId(null); setRunStatus('idle'); setArtifactView(null); }}
           className="hover-pill" style={{ padding: '4px 10px', border: '1px solid var(--line)', background: 'transparent', cursor: 'pointer', fontFamily: 'var(--serif)', fontSize: 11 }}>新建</button>
       </div>
 
@@ -1184,18 +1488,26 @@ function WorkflowLab() {
           {!nodesErr && nodes.length === 0 && <Empty label="加载中…" />}
           {Object.keys(groupedNodes).sort().map(grp => (
             <div key={grp} style={{ borderBottom: '1px solid var(--line-soft)' }}>
-              <div className="mono" style={{ fontSize: 10, padding: '6px 12px 4px', color: 'var(--ink-2)', letterSpacing: '0.14em', background: 'rgba(28,24,20,0.04)' }}>{grp.toUpperCase()}</div>
+              <div className="mono" style={{ fontSize: 10, padding: '6px 12px 4px', color: 'var(--ink-2)', letterSpacing: '0.14em', background: 'rgba(28,24,20,0.04)' }}>{grp.toUpperCase()} <span style={{ color: 'var(--ink-3)' }}>· {groupedNodes[grp].length}</span></div>
               {groupedNodes[grp].map(n => (
                 <div key={n.type} className="hover-row" onClick={() => addNode(n)}
-                  title={n.description || '点击加到 step list'}
+                  data-node-type={n.type}
+                  onMouseEnter={e => { setHoverNode(n); setHoverAnchor(e.currentTarget.getBoundingClientRect()); }}
+                  onMouseLeave={() => { setHoverNode(null); setHoverAnchor(null); }}
                   style={{ padding: '7px 12px', cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  <code className="mono" style={{ fontSize: 11.5, color: 'var(--ink)' }}>{(n.type.split('.')[1] || n.type)}</code>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+                    <code className="mono" style={{ fontSize: 11.5, color: 'var(--ink)' }}>{(n.type.split('.')[1] || n.type)}</code>
+                    {n.risk && n.risk !== 'normal' && <span className="mono" style={{ fontSize: 8.5, color: 'var(--yin)', letterSpacing: '0.1em' }}>RISK</span>}
+                    {n.pit && <span className="mono" style={{ fontSize: 8.5, color: 'var(--jin)', letterSpacing: '0.1em' }}>PIT</span>}
+                  </div>
                   <div className="serif" style={{ fontSize: 10, color: 'var(--ink-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{n.description || '—'}</div>
                 </div>
               ))}
             </div>
           ))}
         </aside>
+        {/* SP-W2C: 节点 hover tooltip — position:fixed 跟随鼠标 anchor */}
+        {hoverNode && hoverAnchor && <NodeTooltip node={hoverNode} anchor={hoverAnchor} />}
 
         {/* ── 列 2: Step List ── */}
         <main style={{ borderRight: '1px solid var(--line)', overflowY: 'auto', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
@@ -1212,8 +1524,23 @@ function WorkflowLab() {
             </button>
           </div>
           {saveErr && <div style={{ padding: '8px 12px' }}><ErrorBox error={saveErr} /></div>}
+          {/* SP-W2C: 工作流描述 (meta.description) — demo seed 用 */}
+          {currentWorkflow.meta && currentWorkflow.meta.description && (
+            <div className="serif" style={{ padding: '8px 14px', fontSize: 11, color: 'var(--ink-3)', background: 'rgba(255,247,225,0.4)', borderBottom: '1px solid var(--line-soft)', lineHeight: 1.5 }}>
+              <span className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', letterSpacing: '0.14em' }}>DESC </span>
+              {currentWorkflow.meta.description}
+            </div>
+          )}
           <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0', minHeight: 0 }}>
-            {!currentWorkflow.nodes.length && <Empty label="左侧点击节点 → 加到此处" />}
+            {!currentWorkflow.nodes.length && (
+              <div style={{ padding: 24 }}>
+                <Empty label="未添加节点" />
+                <div className="serif" style={{ fontSize: 11, color: 'var(--ink-3)', textAlign: 'center', marginTop: 12, lineHeight: 1.6 }}>
+                  👈 从左侧工具栏点节点添加<br />
+                  🤖 或上方 <span style={{ color: 'var(--ink-1)' }}>AI 代搭</span> 描述目标让 Copilot 出草案
+                </div>
+              </div>
+            )}
             {currentWorkflow.nodes.map((n, i) => {
               const status = nodeRunStatus[n.id];
               const isSel = selectedNodeIdx === i;
@@ -1235,9 +1562,13 @@ function WorkflowLab() {
                         </div>
                       )}
                     </div>
-                    {status && status !== 'running' && (
+                    {status && status !== 'running' && nodeArtifacts[n.id] && (
                       <button onClick={e => { e.stopPropagation(); viewArtifact(n.id); }}
-                        className="hover-pill" style={{ padding: '2px 7px', border: '1px solid var(--line)', background: 'transparent', cursor: 'pointer', fontSize: 10, color: 'var(--ink-2)' }}>artifact</button>
+                        title={'artifact_uri: ' + nodeArtifacts[n.id]}
+                        className="hover-pill" style={{ padding: '2px 8px', border: '1px solid var(--line)', background: 'transparent', cursor: 'pointer', fontSize: 10.5, color: 'var(--ink-1)' }}>📊 查看输出</button>
+                    )}
+                    {status && status !== 'running' && !nodeArtifacts[n.id] && (
+                      <span className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)' }} title="该节点无输出 artifact">—</span>
                     )}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                       <button onClick={e => { e.stopPropagation(); moveNode(i, -1); }} disabled={i === 0}
@@ -1259,9 +1590,41 @@ function WorkflowLab() {
           <div style={{ padding: '10px 14px 8px', borderBottom: '1px solid var(--line-soft)' }}>
             <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', letterSpacing: '0.18em' }}>NODE INSPECTOR</div>
           </div>
-          {!selectedNode && <Empty label="选中 Step List 节点编辑参数" />}
+          {!selectedNode && (
+            <div style={{ padding: 24 }}>
+              <Empty label="选中 Step List 节点编辑参数" />
+              {currentWorkflow.nodes.length === 0 && (
+                <div className="serif" style={{ fontSize: 11, color: 'var(--ink-3)', textAlign: 'center', marginTop: 12, lineHeight: 1.6 }}>
+                  暂无节点 · 从左侧工具栏点节点添加, 或上方 <span style={{ color: 'var(--ink-1)' }}>AI 代搭</span> 让 Copilot 出草案
+                </div>
+              )}
+            </div>
+          )}
           {selectedNode && (
             <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {/* SP-W2C: 节点 metadata 横条 (type / group / tag / risk / pit) — 跟工具栏分组对齐 */}
+              {selectedNodeMeta && (
+                <div style={{ padding: '8px 10px', background: 'rgba(28,24,20,0.04)', border: '1px solid var(--line-soft)', display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                  <span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', letterSpacing: '0.14em' }}>TYPE</span>
+                  <code className="mono" style={{ fontSize: 11, color: 'var(--ink)' }}>{selectedNodeMeta.type}</code>
+                  <span style={{ flex: 1 }} />
+                  <span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', letterSpacing: '0.14em' }}>GROUP</span>
+                  <span className="mono" style={{ fontSize: 10, padding: '1px 6px', color: 'var(--ink-1)', background: 'var(--paper)', border: '1px solid var(--line-soft)' }}>{selectedNodeMeta.group || 'misc'}</span>
+                  {selectedNodeMeta.risk && selectedNodeMeta.risk !== 'normal' && (
+                    <span className="mono" style={{ fontSize: 9, padding: '1px 5px', color: 'var(--yin)', background: 'rgba(180,80,60,0.06)', border: '1px solid rgba(180,80,60,0.18)' }}>RISK: {selectedNodeMeta.risk}</span>
+                  )}
+                  {selectedNodeMeta.pit && (
+                    <span className="mono" style={{ fontSize: 9, padding: '1px 5px', color: 'var(--jin)', background: 'rgba(180,140,60,0.06)', border: '1px solid rgba(180,140,60,0.18)' }}>PIT</span>
+                  )}
+                  {(selectedNodeMeta.tag || []).length > 0 && (
+                    <div style={{ width: '100%', display: 'flex', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
+                      {(selectedNodeMeta.tag || []).map(t => (
+                        <span key={t} className="mono" style={{ fontSize: 9, padding: '1px 5px', color: 'var(--ink-2)', background: 'var(--paper)', border: '1px solid var(--line-soft)' }}>#{t}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
               <div>
                 <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', letterSpacing: '0.14em' }}>ID <span style={{ color: 'var(--ink-3)' }}>(失焦提交)</span></div>
                 <input type="text" key={selectedNode.id + '_idinput'} defaultValue={selectedNode.id}

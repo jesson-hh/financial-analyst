@@ -31,6 +31,9 @@ class RegisteredNode:
     Frozen dataclass = 注册后形状不可变 (字段值通过 dict 缓存间接可修改, 但顶层
     ``type`` / ``compute`` 等替换被禁止). 这让 ``NodeRegistry.get()`` 返回的
     对象语义稳定。
+
+    SP-W2A 加 ``group`` / ``tag`` 两字段 — 前端工具栏按 ``group`` 分组, Copilot 按
+    ``tag`` 过滤候选节点 (借 PandaAI FeatureTag 思路, 但用 list 支持多 tag).
     """
 
     type: str  # 字符串身份, e.g. "data.constant_universe"
@@ -39,6 +42,8 @@ class RegisteredNode:
     outputs_model: type[BaseModel] | None = None  # 输出形状校验
     risk: str = "normal"  # "normal" | "intraday" | "advice" | "live"
     pit: bool = False  # 是否要求 PIT 输入 (Phase 0 仅记录)
+    group: str = "misc"  # 'data' | 'factor' | 'eval' | 'agent' | 'risk' | 'execution' | 'review' | 'demo' | 'misc'
+    tag: list[str] = field(default_factory=list)  # e.g. ['backtest','factor','signal','trade']
     meta: dict[str, Any] = field(default_factory=dict)
 
 
@@ -93,6 +98,24 @@ class NodeRegistry:
     def all(cls) -> dict[str, RegisteredNode]:
         return cls.list()
 
+    # ------------------------------------------------------------------
+    # SP-W2A: 按 group / tag 过滤
+    # ------------------------------------------------------------------
+    @classmethod
+    def list_by_group(cls, group: str) -> list[RegisteredNode]:
+        """返回 ``group`` 字段精确匹配的节点列表 (按 type 字典序排)."""
+        out = [r for r in cls._registry.values() if r.group == group]
+        return sorted(out, key=lambda r: r.type)
+
+    @classmethod
+    def list_by_tag(cls, tag: str) -> list[RegisteredNode]:
+        """返回 ``tag`` 在该节点 tag list 中的节点列表 (按 type 字典序排).
+
+        允许多 tag 节点同时出现在多个 tag 过滤结果中.
+        """
+        out = [r for r in cls._registry.values() if tag in (r.tag or [])]
+        return sorted(out, key=lambda r: r.type)
+
 
 def node(
     type: str,
@@ -101,6 +124,8 @@ def node(
     outputs_model: type[BaseModel] | None = None,
     risk: str = "normal",
     pit: bool = False,
+    group: str = "misc",
+    tag: list[str] | None = None,
     description: str = "",
     **meta: Any,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -117,10 +142,15 @@ def node(
       runner 会用它校验形状)
     - ``description``: 人类可读的节点说明, 落到 ``RegisteredNode.meta['description']``,
       UI / 文档可展示。
+    - ``group``: 工具栏分组 (SP-W2A). 'data' | 'factor' | 'eval' | 'agent' | 'risk'
+      | 'execution' | 'review' | 'demo' | 'misc'. 默认 'misc'.
+    - ``tag``: feature tag 列表 (SP-W2A). 多 tag 允许同节点出现在多个过滤结果中.
+      默认空列表 (向后兼容已注册节点).
 
     Examples
     --------
-    >>> @node("data.constant_universe", params_model=UniverseParams)
+    >>> @node("data.constant_universe", params_model=UniverseParams,
+    ...       group="data", tag=["data"])
     ... def constant_universe(params, inputs):
     ...     return {"codes": params["codes"], "n": len(params["codes"])}
 
@@ -143,6 +173,9 @@ def node(
     if description:
         meta_dict["description"] = description
 
+    # tag 默认空列表 — 不用可变默认参数 (Python 经典坑)
+    tag_list: list[str] = list(tag) if tag else []
+
     def _decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         registered = RegisteredNode(
             type=type_key,
@@ -151,6 +184,8 @@ def node(
             outputs_model=outputs_model,
             risk=risk,
             pit=pit,
+            group=group,
+            tag=tag_list,
             meta=meta_dict,
         )
         NodeRegistry.register(registered)

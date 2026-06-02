@@ -160,6 +160,13 @@ class ConvReq(BaseModel):
 # redeclare it here — keep the schema single-source.
 
 
+class CopilotDraftReq(BaseModel):
+    """SP-W2B Workflow Copilot 请求: 自然语言目标 + 默认 universe/freq."""
+    goal: str
+    universe: str = "csi300_active"
+    freq: str = "day"
+
+
 def _sse(event: str, **data: Any) -> str:
     """Format one SSE frame."""
     return f"event: {event}\ndata: {_safe_json_dumps(data)}\n\n"
@@ -236,6 +243,88 @@ _ETF_BOARD_CACHE = {"ts": 0.0, "payload": None}
 _ETF_BOARD_TTL = 30.0
 
 
+# SP-W2C 冷启动修复: workflow 节点 import 走 lazy. 首次 GET /workflow/nodes
+# 才触发 mock_nodes (3) + factors.workflow_nodes (5 真节点) 的 @node side-effect.
+# build_app() 起飞期不卡 (factor zoo 完整 import 含 442 alpha 需 ~5s).
+_WORKFLOW_NODES_LOADED = False
+# 同样的 lazy: demo seed 写盘 (glob + json.dump) 也搬到首次 GET /workflow 列表时,
+# 让 build_app() 完全不碰文件系统 (除了 mkdir 兜底). 用路径集合 (而非单 bool)
+# 让测试 (每 case 新 tmp_path) 能各自 seed 自己的 defs_root.
+_WORKFLOW_DEMO_SEEDED_ROOTS: "set[str]" = set()
+
+
+def _ensure_workflow_nodes_loaded() -> None:
+    """触发 mock_nodes + factors.workflow_nodes 的注册 side-effect.
+
+    幂等: 多次调用只第一次真 import. 进程内单飞.
+    """
+    global _WORKFLOW_NODES_LOADED
+    if _WORKFLOW_NODES_LOADED:
+        return
+    try:
+        from financial_analyst.workflow import mock_nodes  # noqa: F401
+    except Exception:
+        pass
+    try:
+        from financial_analyst.factors import workflow_nodes  # noqa: F401
+    except Exception:
+        pass
+    _WORKFLOW_NODES_LOADED = True
+
+
+def _ensure_demo_seed(workflow_defs_root) -> None:
+    """首次访问 ``/workflow`` 列表时检查并写 demo seed.
+
+    幂等: 进程内按 root 单飞 + 文件系统层 ``if list(*.json)`` 双兜底.
+    任何异常静默吞 (server 已起飞, 不让 demo seed 失败拖死端点).
+
+    注: 测试每 case 新 tmp_path → 用 set 记 seeded 的 root, 让多 build_app() 实例
+    各自能 seed 自己的 defs_root.
+    """
+    if workflow_defs_root is None:
+        return
+    root_key = str(workflow_defs_root)
+    if root_key in _WORKFLOW_DEMO_SEEDED_ROOTS:
+        return
+    try:
+        _demo_files = list(workflow_defs_root.glob("*.json"))
+        if not _demo_files:
+            _demo_seed = {
+                "id": "demo-mock-3-nodes",
+                "name": "Demo: 3 mock 节点链路",
+                "version": 1,
+                "nodes": [
+                    {
+                        "id": "universe",
+                        "type": "data.constant_universe",
+                        "params": {"codes": ["SH600519", "SH600036"]},
+                    },
+                    {
+                        "id": "zeros",
+                        "type": "factor.zeros",
+                        "inputs": {"universe": "universe.output"},
+                    },
+                    {
+                        "id": "rowcount",
+                        "type": "eval.row_count",
+                        "inputs": {"frame": "zeros.output"},
+                    },
+                ],
+                "edges": [],
+                "meta": {
+                    "seed": True,
+                    "description": "首次启动写入的 demo, 点 Run 即跑完. (3 mock 节点不接真数据, 演示用.)",
+                },
+            }
+            (workflow_defs_root / "demo-mock-3-nodes.json").write_text(
+                json.dumps(_demo_seed, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+    except Exception:
+        pass
+    _WORKFLOW_DEMO_SEEDED_ROOTS.add(root_key)
+
+
 def build_app():
     """Construct the FastAPI app. Imported lazily by ``serve``."""
     try:
@@ -282,12 +371,11 @@ def build_app():
     # DataPaths (env var > yaml > user_dir > dev fallback), 测试通过设置
     # FA_WORKFLOW_DEFS_ROOT / FA_PARQUET_ROOT 注入 tmp 路径.
     #
-    # 触发 @node 注册: import mock_nodes 让 NodeRegistry 看到 3 个 mock 节点
-    # (data.constant_universe / factor.zeros / eval.row_count). 这是 demo
-    # workflow seed + GET /workflow/nodes 能返非空列表的前置条件.
+    # SP-W2C 冷启动修复: 节点 import (mock_nodes + workflow_nodes 真节点) 走 lazy
+    # path, 第一次 /workflow/nodes 才触发, build_app() 起飞期不卡. 见下方
+    # ``_ensure_workflow_nodes_loaded()`` + ``_MOCK_NODES_LOADED`` 模块级 flag.
     try:
         from financial_analyst.data.paths import get_data_paths
-        from financial_analyst.workflow import mock_nodes  # noqa: F401 — side-effect register
         from financial_analyst.workflow.artifacts import ArtifactStore
 
         _dp = get_data_paths()
@@ -300,40 +388,9 @@ def build_app():
         _workflow_store = ArtifactStore(root=_workflow_runs_root)
         _workflow_run_log_root = _workflow_runs_root
 
-        # demo seed: workflow_defs/ 下无文件时落 1 个 demo workflow.
-        # 形状对齐 mock_nodes 的 inputs 约定 (Node.inputs 串"universe.output" 形式),
-        # **不**用 spec 里的 from_node/to_node 风格 — schema.Edge 是 alias from/to,
-        # 但我们这里走更简单的 Node.inputs (e2e 测试也用这条路径).
-        _demo_files = list(_workflow_defs_root.glob("*.json"))
-        if not _demo_files:
-            _demo_seed = {
-                "id": "demo-mock-3-nodes",
-                "name": "Demo: 3 mock 节点链路",
-                "version": 1,
-                "nodes": [
-                    {
-                        "id": "universe",
-                        "type": "data.constant_universe",
-                        "params": {"codes": ["SH600519", "SH600036"]},
-                    },
-                    {
-                        "id": "zeros",
-                        "type": "factor.zeros",
-                        "inputs": {"universe": "universe.output"},
-                    },
-                    {
-                        "id": "rowcount",
-                        "type": "eval.row_count",
-                        "inputs": {"frame": "zeros.output"},
-                    },
-                ],
-                "edges": [],
-                "meta": {"seed": True, "description": "首次启动写入的 demo, 点 Run 即跑完."},
-            }
-            (_workflow_defs_root / "demo-mock-3-nodes.json").write_text(
-                json.dumps(_demo_seed, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
+        # SP-W2C 冷启动: demo seed 写盘搬到首次 GET /workflow 列表时 (见
+        # ``_ensure_demo_seed`` + workflow_list_ep). build_app() 不碰 *.json
+        # 文件系统, 让 server 起飞更快.
     except Exception:
         # 任何初始化失败不阻断 server 起飞; /workflow/* 端点自己再 raise.
         _workflow_defs_root = None  # type: ignore[assignment]
@@ -1438,10 +1495,16 @@ def build_app():
         """列 NodeRegistry 全部节点 + 每节点的 params_model JSON Schema.
 
         前端用这个构造工具栏 + 参数表单 (AutoForm 读 params_schema 渲染 input).
+        SP-W2A 额外返 ``group`` + ``tag`` 字段 (前端按 group 分组工具栏, Copilot
+        按 tag 过滤候选).
+
+        SP-W2C: lazy import workflow 节点 — 首次访问才触发 ``mock_nodes`` +
+        ``factors.workflow_nodes`` 注册 side-effect, build_app() 起飞期不卡.
         """
         if _workflow_store is None:
             return _workflow_unavailable()
         try:
+            _ensure_workflow_nodes_loaded()
             from financial_analyst.workflow.registry import NodeRegistry
             nodes = []
             for type_key, reg in NodeRegistry.list().items():
@@ -1464,6 +1527,8 @@ def build_app():
                     "outputs_schema": outputs_schema,
                     "risk": reg.risk,
                     "pit": reg.pit,
+                    "group": reg.group,
+                    "tag": list(reg.tag or []),
                 })
             # 类型名按字典序排, 让 UI 排列稳定 (不影响功能, 只是用户体验).
             nodes.sort(key=lambda n: n["type"])
@@ -1473,6 +1538,123 @@ def build_app():
                 status_code=500,
                 content={"error": f"{type(exc).__name__}: {exc}"},
             )
+
+    @app.get("/workflow/nodes/by-group")
+    async def workflow_nodes_by_group_ep(group: str = ""):
+        """按 group 过滤节点 (前端工具栏分组用).
+
+        SP-W2A: group 为空时返全部节点. group='factor' 只返 factor.* 系列等.
+        """
+        if _workflow_store is None:
+            return _workflow_unavailable()
+        try:
+            _ensure_workflow_nodes_loaded()
+            from financial_analyst.workflow.registry import NodeRegistry
+            regs = (NodeRegistry.list_by_group(group)
+                    if group else list(NodeRegistry.list().values()))
+            nodes = []
+            for reg in regs:
+                schema = {}
+                if reg.params_model is not None:
+                    try:
+                        schema = reg.params_model.model_json_schema()
+                    except Exception:
+                        schema = {}
+                outputs_schema = {}
+                if reg.outputs_model is not None:
+                    try:
+                        outputs_schema = reg.outputs_model.model_json_schema()
+                    except Exception:
+                        outputs_schema = {}
+                nodes.append({
+                    "type": reg.type,
+                    "description": (reg.meta or {}).get("description", ""),
+                    "params_schema": schema,
+                    "outputs_schema": outputs_schema,
+                    "risk": reg.risk,
+                    "pit": reg.pit,
+                    "group": reg.group,
+                    "tag": list(reg.tag or []),
+                })
+            nodes.sort(key=lambda n: n["type"])
+            return {"nodes": _jsonable(nodes), "group": group}
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"{type(exc).__name__}: {exc}"},
+            )
+
+    @app.get("/workflow/factors/registry")
+    async def workflow_factors_registry_ep():
+        """442 内置 alpha + user_xxx 炼因子的名/简介索引.
+
+        SP-W2A: 给 Copilot 上下文 + UI 下拉用. 返
+        ``{registered: [...], user: [...]}`` 结构与 /factor/list 兼容,
+        但每条多带 ``description`` (供 Copilot 引用).
+        """
+        try:
+            import financial_analyst.factors.zoo  # noqa: F401 — trigger registration
+            from financial_analyst.factors.zoo.registry import list_alphas
+            from financial_analyst.factors.forge import UserFactorStore
+
+            registered = []
+            for s in list_alphas(None):
+                registered.append({
+                    "name": s.name,
+                    "family": s.family,
+                    "description": s.description,
+                    "formula": s.formula_text,
+                })
+            user = UserFactorStore().list()
+            return {"registered": _jsonable(registered), "user": _jsonable(user)}
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"{type(exc).__name__}: {exc}"},
+            )
+
+    # ════════════════════════════════════════════════════════════════════
+    # SP-W2B Workflow Copilot — NL → workflow JSON 草案 (SSE 流)
+    # ════════════════════════════════════════════════════════════════════
+    @app.post("/workflow/copilot/draft")
+    async def workflow_copilot_draft_ep(req: CopilotDraftReq):
+        """SSE 流: 收上下文 + 调 LLM + 推 thought/draft/done/error 事件.
+
+        事件协议:
+          - ``thought {text}`` — LLM 推理过程片段 (v1 一次性吐完 raw response)
+          - ``draft {workflow_json, cited_experiences, risk_flags, used_factors}``
+          - ``done {}``  — 终止
+          - ``error {message}`` — 任意阶段异常
+
+        前端 Copilot 栏调这个: 用户点 [Go] → fetch POST 拿 stream → 监听事件 →
+        ``draft`` 来了后给 [✓ 用这个] 按钮, 点了把 workflow_json 加到画板 currentWorkflow.
+        """
+        if _workflow_store is None:
+            return _workflow_unavailable()
+        # 触发节点注册 side-effect, 让 collect_context 能拿到 NodeRegistry 全表
+        _ensure_workflow_nodes_loaded()
+        try:
+            from financial_analyst.workflow.copilot import stream_draft
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"copilot import 失败: {type(exc).__name__}: {exc}"},
+            )
+
+        async def stream():
+            try:
+                q = await stream_draft(
+                    goal=req.goal, universe=req.universe, freq=req.freq,
+                )
+                while True:
+                    kind, data = await q.get()
+                    if kind == "__end__":
+                        break
+                    yield _sse(kind, **data)
+            except Exception as e:
+                yield _sse("error", message=f"{type(e).__name__}: {e}")
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
 
     @app.post("/workflow/create")
     async def workflow_create_ep(req: Dict[str, Any]):
@@ -1516,10 +1698,14 @@ def build_app():
 
     @app.get("/workflow")
     async def workflow_list_ep():
-        """列所有 workflow defs, mtime desc, 返 {workflows: [{wf_id, name, mtime, node_count}]}."""
+        """列所有 workflow defs, mtime desc, 返 {workflows: [{wf_id, name, mtime, node_count}]}.
+
+        SP-W2C: 首次访问触发 demo seed 写盘 (从 build_app 搬过来, 让 server 起飞期不碰盘).
+        """
         if _workflow_defs_root is None:
             return _workflow_unavailable()
         try:
+            _ensure_demo_seed(_workflow_defs_root)
             out: list[dict] = []
             for p in _workflow_defs_root.glob("*.json"):
                 try:
@@ -1559,6 +1745,10 @@ def build_app():
                 content={"error": f"Workflow {wf_id!r} 不存在"},
             )
         try:
+            # SP-W2C 冷启动: 保证 mock_nodes + workflow_nodes 真节点都已注册,
+            # 否则 runner.run() 会因 NodeRegistry.get(n.type) miss 抛 NodeNotFoundError.
+            _ensure_workflow_nodes_loaded()
+
             from financial_analyst.workflow.runner import WorkflowRunner
             from financial_analyst.workflow.schema import Workflow
 
@@ -1883,12 +2073,17 @@ def build_app():
     # 这个 catch-all 前 (FastAPI 是按注册顺序匹配, 不是最长前缀).
     @app.get("/workflow/{wf_id}")
     async def workflow_get_ep(wf_id: str):
-        """按 wf_id 读回 workflow JSON. 缺失 → 404."""
+        """按 wf_id 读回 workflow JSON. 缺失 → 404.
+
+        SP-W2C: demo seed 也走 lazy path — 直接 GET /workflow/demo-mock-3-nodes
+        在还没列过 /workflow 时也应能拿到, 这里兜底触发一次 ``_ensure_demo_seed``.
+        """
         if _workflow_defs_root is None:
             return _workflow_unavailable()
         # 路径形状校验防穿越 (uuid4 前 12 字符是 hex, 不应含 / 或 ..)
         if "/" in wf_id or ".." in wf_id or wf_id in ("", "."):
             return JSONResponse(status_code=400, content={"error": "非法 wf_id"})
+        _ensure_demo_seed(_workflow_defs_root)
         path = _workflow_defs_root / f"{wf_id}.json"
         if not path.is_file():
             return JSONResponse(
