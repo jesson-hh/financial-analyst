@@ -21,12 +21,18 @@ from financial_analyst.backtest.decision import Decision, DecisionLeg
 
 
 def _patch_toy(monkeypatch):
-    """让 run_backtest 内的 PitReader() 换成 toy reader (无真实数据)。"""
+    """让 run_backtest 内的 PitReader() 换成 toy reader (无真实数据)。
+    同时 patch resolve_universe_codes — BacktestRunReq P2 默认 pool='csi300', CI conftest
+    rewires find_config 让 csi300 resolve 到 [] → CandidateConfig 会抛 ValueError, 拿不到
+    toy 闭环。这里把 universe 钉成 toy 唯一的 SH600001, 让 pool 模式有最少 1 个代码可走。"""
     loader = _ToyLoader()
     reader = _ToyReader(loader)
     monkeypatch.setattr(
         "financial_analyst.backtest.pit_reader.PitReader",
         lambda *a, **k: reader)
+    monkeypatch.setattr(
+        "financial_analyst.data.universe.resolve_universe_codes",
+        lambda name: ["SH600001"])
     return reader, loader
 
 
@@ -101,8 +107,10 @@ def test_mock_does_not_touch_llm(monkeypatch):
 # ---- trades + reason 回退覆盖 (engine 的 _StubAgent raw={} 测不了; 用真 raw) ----
 class _BuyThenSellAgent:
     """day1 buy (raw 带结构化 decisions), day3 sell → 强制产生 ≥1 笔成交,
-    覆盖 _fills_to_trades + 前端 reasonFor 的 decisions 回退契约。"""
-    def __init__(self):
+    覆盖 _fills_to_trades + 前端 reasonFor 的 decisions 回退契约。
+    接 hold_days/take_profit_pct/stop_loss_pct kwargs 以兼容 run_backtest 的新 _MockAgent
+    构造签名 (P2)."""
+    def __init__(self, hold_days: int = 3, take_profit_pct=None, stop_loss_pct=None):
         self._n = 0
 
     @property

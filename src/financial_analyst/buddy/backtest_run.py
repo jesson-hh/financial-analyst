@@ -20,20 +20,25 @@ from financial_analyst.backtest.candidate import CandidateConfig
 from financial_analyst.backtest.engine import BacktestRunner, RunConfig
 
 
-# mock 定期卖出窗口: 买入后持有这么多个"决策日"再无条件卖出 (T+1 已满足, 演示
-# 能跑出真实 buy→sell 回合 + 非空 trade_stats)。stop_loss 仍传 0 (不触发 broker
-# EOD stop), 卖出完全由这条规则驱动 → 可手算核对、确定性。
-_MOCK_HOLD_DAYS = 3
-
-
 class _MockAgent:
     """确定性盘前决策 (0 次 LLM, 不依赖 DASHSCOPE key):
-      * 空仓 → 对候选池里 rev20 分位最低(跌最多)的 1 只挂 buy(反转逻辑);
-      * 已持有且持有满 _MOCK_HOLD_DAYS 个决策日 → 卖出(演示一个完整回合);
-      * 否则 hold。
-    raw 写成结构化 dict (含 decisions 列表), 以便前端理由回退能取到。"""
-    def __init__(self):
+
+    决策优先级 (高 → 低):
+      1. 持仓收益 ≥ take_profit_pct → sell (止盈)
+      2. 持仓收益 ≤ -stop_loss_pct  → sell (止损)
+      3. 持有 ≥ hold_days           → sell (定时了结)
+      4. 空仓 + 有候选              → 对 rev20 分位最低 (跌最多) 的 1 只 buy 50%
+      5. 否则                       → hold
+
+    raw 写成结构化 dict (含 decisions 列表), 以便前端理由回退能取到。
+    """
+    def __init__(self, hold_days: int = 3,
+                 take_profit_pct: Optional[float] = None,
+                 stop_loss_pct: Optional[float] = None):
         self._n = 0
+        self._hold_days = hold_days
+        self._take_profit_pct = take_profit_pct
+        self._stop_loss_pct = stop_loss_pct
         self._held_since: dict = {}   # code -> 已持有的决策日计数
 
     @property
@@ -43,6 +48,8 @@ class _MockAgent:
     async def decide(self, inp) -> Decision:
         legs: List[DecisionLeg] = []
         holdings = inp.holdings or {}
+        unrealized = getattr(inp, "unrealized_pct", {}) or {}
+
         # 推进持有计数
         for code in list(self._held_since):
             if code in holdings:
@@ -50,18 +57,31 @@ class _MockAgent:
             else:
                 self._held_since.pop(code, None)
 
-        if not holdings and inp.candidates:
+        # 优先级 1+2+3: 检查所有持仓的止盈/止损/到期
+        for code in list(holdings):
+            pct = unrealized.get(code, 0.0)
+            if self._take_profit_pct is not None and pct >= self._take_profit_pct:
+                legs.append(DecisionLeg(code=code, action="sell",
+                    reason=f"mock: 止盈 (收益 {pct:+.1%} ≥ {self._take_profit_pct:.1%})"))
+                continue
+            if self._stop_loss_pct is not None and pct <= -self._stop_loss_pct:
+                legs.append(DecisionLeg(code=code, action="sell",
+                    reason=f"mock: 止损 (收益 {pct:+.1%} ≤ -{self._stop_loss_pct:.1%})"))
+                continue
+            n = self._held_since.get(code, 0)
+            if n >= self._hold_days:
+                legs.append(DecisionLeg(code=code, action="sell",
+                    reason=f"mock: 持有满 {n} 日 (阈值 {self._hold_days}), 了结"))
+
+        # 优先级 4: 空仓 + 有候选 + 本轮没产 sell → buy 最低 rev20
+        if not holdings and inp.candidates and not legs:
             top = sorted(inp.candidates,
                          key=lambda c: inp.rev20_rank.get(c, 1.0))[0]
             legs = [DecisionLeg(code=top, action="buy", weight_pct=50.0,
                                 stop_loss=0.0,
                                 reason=f"mock: rev20 分位最低({top}), 反转介入")]
             self._held_since[top] = 0
-        else:
-            for code, n in list(self._held_since.items()):
-                if n >= _MOCK_HOLD_DAYS and code in holdings:
-                    legs.append(DecisionLeg(code=code, action="sell",
-                                            reason=f"mock: 持有满 {n} 日, 了结"))
+
         raw = {"market_view": "mock 决策(确定性)",
                "decisions": [asdict(l) for l in legs], "warnings": []}
         return Decision(market_view=raw["market_view"], decisions=legs,
@@ -106,7 +126,11 @@ async def run_backtest(req) -> dict:
     start, end = _default_window(reader, req.start, req.end)
 
     if req.mode == "mock":
-        agent = _MockAgent()
+        agent = _MockAgent(
+            hold_days=req.hold_days,
+            take_profit_pct=req.take_profit_pct,
+            stop_loss_pct=req.stop_loss_pct,
+        )
         cache_dir = None
     else:
         cache_dir = None                       # real 可选挂 DecisionCache 断点续跑
@@ -116,7 +140,10 @@ async def run_backtest(req) -> dict:
     cfg = RunConfig(
         start=start, end=end, init_cash=req.init_cash,
         benchmark=None, match_freq=req.match_freq,
-        candidate=CandidateConfig(topn=req.candidate_topn),
+        candidate=CandidateConfig(
+            topn=req.candidate_topn,
+            pool=req.pool,        # P2: 池子模式
+        ),
         cache_dir=cache_dir)
     runner = BacktestRunner(reader=reader, agent=agent, cfg=cfg)
     result = await runner.run()

@@ -23,10 +23,11 @@ import pandas as pd
 @dataclass
 class CandidateConfig:
     topn: int = 20
+    pool: Optional[str] = None           # P2 新增 — None=旧 watchlist 路径, 非空=池子模式
     rev20_lookback_tradedays: int = 30   # trading-day rollback (≥21 points)
     rev20_pick: str = "low"              # "low"=nsmallest (reversal); "high"=nlargest
     include_holdings: bool = True
-    include_watchlist: bool = True
+    include_watchlist: bool = True       # pool 非空时此字段被忽略
     watchlist_path: Optional[Path] = None
     sentinel_codes: tuple = ("SH999999",)
 
@@ -63,16 +64,33 @@ def _load_watchlist_codes(cfg: CandidateConfig) -> List[str]:
 
 def select_candidates(date: str, holdings: List[str], reader,
                       cfg: CandidateConfig = CandidateConfig()) -> CandidateResult:
-    """Build the candidate pool for ``date`` using only ≤T-1 data."""
+    """Build the candidate pool for ``date`` using only ≤T-1 data.
+
+    Two modes (cfg.pool):
+    * None  → 旧 watchlist 路径: base = holdings ∪ watchlist (WatchLoop 实盘盯盘场景)
+    * 非空  → 池子模式: base = holdings ∪ resolve_universe_codes(pool), watchlist 不参与
+              (BacktestRunner 回测场景, 在固定池子内 rev_20 选股)
+    """
     date = str(date)
     prev = reader.prev_trade_date(date)
 
     holdings = list(dict.fromkeys(holdings)) if cfg.include_holdings else []
     sentinels = set(cfg.sentinel_codes)
-    watch = [c for c in _load_watchlist_codes(cfg) if c not in sentinels]
 
-    # base universe for rev_20 = holdings ∪ watchlist (deduped)
-    base: List[str] = list(dict.fromkeys([*holdings, *watch]))
+    if cfg.pool:
+        # 池子模式
+        from financial_analyst.data.universe import resolve_universe_codes
+        pool_codes = [c for c in resolve_universe_codes(cfg.pool) if c not in sentinels]
+        if not pool_codes:
+            raise ValueError(
+                f"pool '{cfg.pool}' resolved to 0 codes "
+                f"(缺 index_constituents.parquet? 跑 `fa data bootstrap`)")
+        base: List[str] = list(dict.fromkeys([*holdings, *pool_codes]))
+        watch = []   # 池子模式下 watchlist 不参与
+    else:
+        # 旧 watchlist 路径
+        watch = [c for c in _load_watchlist_codes(cfg) if c not in sentinels]
+        base = list(dict.fromkeys([*holdings, *watch]))
 
     raw_rev20: Dict[str, float] = {}
     for code in base:
@@ -95,7 +113,7 @@ def select_candidates(date: str, holdings: List[str], reader,
                   else s.nlargest(cfg.topn))
         rev20_top = list(picked.index)
 
-    # union, holdings first, then rev20_top, then remaining watchlist
+    # union, holdings first, then rev20_top, then remaining watchlist (老路径才填)
     ordered: List[str] = []
     source: Dict[str, str] = {}
     for c in holdings:
@@ -106,10 +124,11 @@ def select_candidates(date: str, holdings: List[str], reader,
         if c not in source:
             ordered.append(c)
             source[c] = "rev20_top"
-    for c in watch:
-        if c not in source:
-            ordered.append(c)
-            source[c] = "watchlist"
+    if not cfg.pool:
+        for c in watch:
+            if c not in source:
+                ordered.append(c)
+                source[c] = "watchlist"
 
     return CandidateResult(
         codes=ordered, rev20_rank=rev20_rank, universe_source=source,

@@ -29,7 +29,7 @@ import json
 import uuid
 from typing import Any, Dict, Optional
 
-from pydantic import BaseModel  # core dependency — safe at module level
+from pydantic import BaseModel, Field  # core dependency — safe at module level
 # fastapi is a core dependency too; UploadFile/File must be module-level so the
 # /upload route annotation resolves under ``from __future__ import annotations``
 # (forward refs are looked up in module globals, not build_app's local scope).
@@ -207,6 +207,14 @@ class BacktestRunReq(BaseModel):
     candidate_topn: int = 20            # 候选池 Top-N (映射 CandidateConfig.topn)
     mode: str = "mock"                  # "mock"(默认,确定性 stub agent) | "real"(真 LLM)
     match_freq: str = "day"             # "day" | "5min" (第一版 UI 只暴露 day)
+    # P2 扩字段 ↓
+    pool: str = Field(default="csi300", description="csi300|csi_fast|csi500|csi800")
+    hold_days: int = Field(default=3, ge=1, le=60, description="mock 持有期 (1-60)")
+    factor_name: str = Field(default="rev_20", description="候选排序因子, 第一版只 rev_20")
+    stop_loss_pct: Optional[float] = Field(default=None, gt=0, le=0.5,
+                                            description="持仓亏损止损阈, None=不触发")
+    take_profit_pct: Optional[float] = Field(default=None, gt=0, le=2.0,
+                                              description="持仓盈利止盈阈, None=不触发")
 
 
 def _sse(event: str, **data: Any) -> str:
@@ -2231,6 +2239,14 @@ def build_app():
         if req.candidate_topn < 1:
             return JSONResponse(status_code=400, content={
                 "error": "candidate_topn must be >= 1", "status": "bad_request"})
+        if req.pool not in ("csi300", "csi_fast", "csi500", "csi800"):
+            return JSONResponse(status_code=400, content={
+                "error": f"pool 不支持 '{req.pool}', 可选 csi300|csi_fast|csi500|csi800 (全市场池请用 csi800 替代)",
+                "status": "bad_request"})
+        if req.factor_name != "rev_20":
+            return JSONResponse(status_code=400, content={
+                "error": f"factor_name 第一版只支持 'rev_20', 收到 '{req.factor_name}' (其它因子下轮接 /factor/list)",
+                "status": "bad_request"})
         for label, val in (("start", req.start), ("end", req.end)):
             if val is not None:
                 try:
