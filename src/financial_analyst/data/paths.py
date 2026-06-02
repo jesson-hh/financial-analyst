@@ -37,6 +37,7 @@ _DEV_ROOTS = {
     "qlib_5min":  "G:/stocks/stock_data/cn_data_5min",
     "parquet":    "G:/stocks/stock_data/parquet",
     "news_data":  "G:/stocks/news_data",
+    "pit_store":  "G:/stocks/stock_data/pit_store",
 }
 
 
@@ -95,6 +96,14 @@ class DataPaths:
     workflow JSON files, ``{wf_id}.json``). Set via ``FA_WORKFLOW_DEFS_ROOT``
     env var; else defaults to ``parquet_root.parent / "workflow_defs"`` (so
     workflow defs live beside parquet on the same shared data disk)."""
+
+    pit_store_root_override: Optional[Path] = None
+    """Override for the agent-backtest point-in-time store. Contains
+    ``{YYYY-MM-DD}/{news,events}.jsonl`` + per-day ``_build.json`` + global
+    ``_meta.json``. Written by stocks' ``scripts/build_pit_store.py``; read by
+    the fa backtest engine + watch module. Set via ``FA_PIT_STORE_ROOT`` env
+    var; else defaults to ``parquet_root.parent / "pit_store"`` (sibling of
+    parquet, on the same data disk)."""
 
     @property
     def qlib_day(self) -> Path:
@@ -155,6 +164,17 @@ class DataPaths:
         if self.workflow_defs_root_override is not None:
             return self.workflow_defs_root_override
         return self.parquet_root.parent / "workflow_defs"
+
+    @property
+    def pit_store_root(self) -> Path:
+        """Agent-backtest point-in-time store root.
+
+        Override priority: ``pit_store_root_override`` (env / explicit) →
+        derived from ``parquet_root`` (``parquet_root.parent / "pit_store"``,
+        sibling of the parquet store)."""
+        if self.pit_store_root_override is not None:
+            return self.pit_store_root_override
+        return self.parquet_root.parent / "pit_store"
 
 
 # ──────────────────────── resolver ────────────────────────
@@ -239,6 +259,10 @@ def get_data_paths(config_path: Optional[Path] = None) -> DataPaths:
     env_wf = os.getenv("FA_WORKFLOW_DEFS_ROOT")
     wf_override = Path(env_wf) if env_wf else None
 
+    # ---- pit_store_root_override ---------------------------------------
+    env_pit = os.getenv("FA_PIT_STORE_ROOT")
+    pit_override = Path(env_pit) if env_pit else None
+
     return DataPaths(
         qlib_uri=qlib_uri,
         parquet_root=parquet_root,
@@ -247,6 +271,7 @@ def get_data_paths(config_path: Optional[Path] = None) -> DataPaths:
         strategy_root_override=strategy_override,
         knowledge_index_root_override=ki_override,
         workflow_defs_root_override=wf_override,
+        pit_store_root_override=pit_override,
     )
 
 
