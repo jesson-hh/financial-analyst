@@ -223,6 +223,13 @@ async def _comments_sentiment(items: list) -> Optional[Dict[str, Any]]:
         return None
 
 
+# /etf/board snapshot cache (sina whole-market ETF list). Short TTL: the board
+# is a browse/rank surface, not a tick stream — 30s avoids refetching on every
+# tab open while staying fresh enough.
+_ETF_BOARD_CACHE = {"ts": 0.0, "payload": None}
+_ETF_BOARD_TTL = 30.0
+
+
 def build_app():
     """Construct the FastAPI app. Imported lazily by ``serve``."""
     try:
@@ -874,6 +881,25 @@ def build_app():
         except Exception as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
         return JSONResponse({"ok": True, "quotes": data})
+
+    @app.get("/etf/board")
+    async def etf_board():
+        """Whole-market ETF ranking board (sina source, 30s TTL cache).
+        Rows: {code, name, price, change_pct, amount(元), volume(股)} desc by amount."""
+        import time as _t
+        import financial_analyst.data.etf_board as _eb
+        now = _t.monotonic()
+        cached = _ETF_BOARD_CACHE["payload"]
+        if cached is not None and (now - _ETF_BOARD_CACHE["ts"]) < _ETF_BOARD_TTL:
+            return JSONResponse(cached)
+        try:
+            rows = await asyncio.to_thread(_eb.etf_market_board)
+        except Exception as exc:  # noqa
+            return JSONResponse({"ok": False, "error": f"{exc.__class__.__name__}: {exc}"})
+        payload = {"ok": True, "n": len(rows), "rows": rows}
+        _ETF_BOARD_CACHE["ts"] = now
+        _ETF_BOARD_CACHE["payload"] = payload
+        return JSONResponse(payload)
 
     @app.get("/concepts")
     async def concepts():

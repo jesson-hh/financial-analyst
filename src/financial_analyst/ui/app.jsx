@@ -156,6 +156,7 @@ function makeInitialState() {
       confirm: null,
       toast: null,
       reportDrawer: null,
+      view: 'chat',   // 'chat' (default) | 'etf' — top-level view toggle
     };
   }
   const first = newSession();
@@ -170,6 +171,7 @@ function makeInitialState() {
     currentSessionId: first.id,
     status: 'idle', activeRound: null, queuedInput: '',
     confirm: null, toast: null, reportDrawer: null,
+    view: 'chat',   // 'chat' (default) | 'etf' — top-level view toggle
     lastLLMError: null,   // v1.9.6: {msg, ts} — agent SSE 'error' event 设上, 状态栏显示
   };
 }
@@ -225,6 +227,7 @@ function reducer(s, a) {
     case 'set_tokens':       return { ...s, tokens: a.tokens };
     case 'set_models':       return { ...s, models: a.models, backendModel: s.backendModel || (a.models?.[0]?.id) || null };
     case 'set_backend_model':return { ...s, backendModel: a.model, lastLLMError: null };
+    case 'set_view':         return { ...s, view: a.view };
     case 'open_report':    return { ...s, reportDrawer: { sym: a.sym, status: a.text ? 'done' : 'running', step: REPORT_STEPS.length, text: a.text || '', startedAt: a.text ? null : (a.startedAt || Date.now()) } };
     case 'advance_report': return s.reportDrawer ? { ...s, reportDrawer: { ...s.reportDrawer, ...a.patch } } : s;
     case 'close_report':   return { ...s, reportDrawer: null };
@@ -820,10 +823,16 @@ function ObservatoryApp() {
     }}>
       <LeftRail s={s} dispatch={dispatch} startAgent={startAgent} />
       <main style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, borderRight: '1px solid var(--line)' }}>
-        <TopBar s={s} session={currentSession} dispatch={dispatch} />
-        <Transcript s={s} messages={messages} dispatch={dispatch} startAgent={startAgent} />
-        <Composer s={s} context={context} dispatch={dispatch} startAgent={startAgent} onCmdK={() => setShowCmdK(true)} />
-        <StatusBar s={s} dispatch={dispatch} onCmdK={() => setShowCmdK(true)} />
+        {s.view === 'etf' ? (
+          <EtfBoard s={s} dispatch={dispatch} startAgent={startAgent} />
+        ) : (
+          <>
+            <TopBar s={s} session={currentSession} dispatch={dispatch} />
+            <Transcript s={s} messages={messages} dispatch={dispatch} startAgent={startAgent} />
+            <Composer s={s} context={context} dispatch={dispatch} startAgent={startAgent} onCmdK={() => setShowCmdK(true)} />
+            <StatusBar s={s} dispatch={dispatch} onCmdK={() => setShowCmdK(true)} />
+          </>
+        )}
       </main>
       <RightRail s={s} session={currentSession} dispatch={dispatch} startAgent={startAgent} />
 
@@ -831,6 +840,119 @@ function ObservatoryApp() {
       {showCmdK && <CmdKPalette onClose={() => setShowCmdK(false)} startAgent={startAgent} dispatch={dispatch} />}
       {s.toast && <AlertToast toast={s.toast} dispatch={dispatch} startAgent={startAgent} />}
       {s.reportDrawer && <ReportDrawer drawer={s.reportDrawer} dispatch={dispatch} backendUrl={s.backendUrl} />}
+    </div>
+  );
+}
+
+// ───────────────────────── ETF 看板 ─────────────────────────
+function EtfBoard({ s, dispatch, startAgent }) {
+  const [rows, setRows] = useState(null);   // null = loading
+  const [err, setErr] = useState(null);
+  const [q, setQ] = useState('');
+  const [sortKey, setSortKey] = useState('amount');
+  const [sortDir, setSortDir] = useState('desc');
+
+  const load = useCallback(() => {
+    setErr(null); setRows(null);
+    fetch((s.backendUrl || '') + '/etf/board')
+      .then(r => r.json())
+      .then(d => { if (d && d.ok) setRows(d.rows || []); else setErr((d && d.error) || '加载失败'); })
+      .catch(e => setErr(String(e)));
+  }, [s.backendUrl]);
+  useEffect(() => { load(); }, [load]);
+
+  const setSort = (k) => {
+    if (sortKey === k) setSortDir(d => (d === 'desc' ? 'asc' : 'desc'));
+    else { setSortKey(k); setSortDir('desc'); }
+  };
+
+  const view = useMemo(() => {
+    let xs = rows || [];
+    const k = q.trim().toLowerCase();
+    if (k) xs = xs.filter(r => (r.name || '').toLowerCase().includes(k) || (r.code || '').toLowerCase().includes(k));
+    const dir = sortDir === 'desc' ? -1 : 1;
+    return [...xs].sort((a, b) => {
+      const va = a[sortKey], vb = b[sortKey];
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      if (typeof va === 'string') return va.localeCompare(vb) * dir;
+      return (va - vb) * dir;
+    });
+  }, [rows, q, sortKey, sortDir]);
+
+  const onReport = (r) => { dispatch({ type: 'set_view', view: 'chat' }); startAgent('分析 ' + r.code); };
+  const onWatch = (r) => dispatch({ type: 'add_watch', items: [{ code: r.code, name: r.name }] });
+
+  const cols = [
+    { k: 'name', label: '名称', align: 'left' },
+    { k: 'code', label: '代码', align: 'left' },
+    { k: 'price', label: '现价', align: 'right' },
+    { k: 'change_pct', label: '涨跌幅%', align: 'right' },
+    { k: 'amount', label: '成交额(亿)', align: 'right' },
+  ];
+  const fmt = (k, v) => {
+    if (v == null) return '—';
+    if (k === 'amount') return (v / 1e8).toFixed(2);
+    if (k === 'price') return Number(v).toFixed(3);
+    if (k === 'change_pct') return (v >= 0 ? '+' : '') + Number(v).toFixed(2);
+    return v;
+  };
+  const deltaColor = (v) => v == null ? 'var(--ink)' : (v >= 0 ? '#c0392b' : '#27866b');
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden' }}>
+      <div style={{ padding: '14px 28px', borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 14, background: 'rgba(241,234,217,0.4)' }}>
+        <span className="serif" style={{ fontSize: 16, fontWeight: 600 }}>ETF 看板</span>
+        <span className="mono" style={{ fontSize: 11, opacity: 0.5 }}>{rows ? `${view.length}/${rows.length} 只` : ''}</span>
+        <input value={q} onChange={e => setQ(e.target.value)} placeholder="搜索名称/代码…" style={{
+          marginLeft: 'auto', width: 200, padding: '6px 10px', fontSize: 12,
+          border: '1px solid var(--line)', background: 'var(--paper)', color: 'var(--ink)',
+        }} />
+        <button onClick={load} style={{ padding: '6px 12px', fontSize: 12, cursor: 'pointer', border: '1px solid var(--line)', background: 'transparent', color: 'var(--ink)' }}>刷新</button>
+      </div>
+
+      <div style={{ flex: 1, overflow: 'auto' }}>
+        {err ? (
+          <div style={{ padding: 40, textAlign: 'center', color: 'var(--ink)' }}>
+            数据拉取失败 · {err}<br /><button onClick={load} style={{ marginTop: 12, padding: '6px 16px', cursor: 'pointer' }}>重试</button>
+          </div>
+        ) : rows == null ? (
+          <div style={{ padding: 40, textAlign: 'center', opacity: 0.6 }}>加载中…</div>
+        ) : view.length === 0 ? (
+          <div style={{ padding: 40, textAlign: 'center', opacity: 0.6 }}>暂无数据</div>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <thead>
+              <tr style={{ position: 'sticky', top: 0, background: 'var(--paper)', borderBottom: '1px solid var(--line)' }}>
+                {cols.map(c => (
+                  <th key={c.k} onClick={() => setSort(c.k)} style={{
+                    textAlign: c.align, padding: '10px 16px', cursor: 'pointer', userSelect: 'none',
+                    fontFamily: 'var(--serif)', fontWeight: 500, whiteSpace: 'nowrap',
+                  }}>{c.label}{sortKey === c.k ? (sortDir === 'desc' ? ' ↓' : ' ↑') : ''}</th>
+                ))}
+                <th style={{ padding: '10px 16px' }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {view.map(r => (
+                <tr key={r.code} className="hover-row" style={{ borderBottom: '1px solid var(--line)' }}>
+                  {cols.map(c => (
+                    <td key={c.k} style={{
+                      textAlign: c.align, padding: '8px 16px', whiteSpace: 'nowrap',
+                      color: c.k === 'change_pct' ? deltaColor(r.change_pct) : 'var(--ink)',
+                      fontFamily: c.align === 'right' ? 'var(--mono)' : 'inherit',
+                    }}>{fmt(c.k, r[c.k])}</td>
+                  ))}
+                  <td style={{ padding: '8px 16px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    <button onClick={() => onReport(r)} style={{ marginRight: 8, fontSize: 11, padding: '4px 8px', cursor: 'pointer', border: '1px solid var(--line)', background: 'transparent', color: 'var(--ink)' }}>深度研报</button>
+                    <button onClick={() => onWatch(r)} style={{ fontSize: 11, padding: '4px 8px', cursor: 'pointer', border: '1px solid var(--line)', background: 'transparent', color: 'var(--ink)' }}>加盯盘</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }
@@ -892,6 +1014,18 @@ function LeftRail({ s, dispatch, startAgent }) {
           <span>＋ 新对话</span>
           <span className="mono" style={{ fontSize: 10, opacity: 0.5 }}>⌘ N</span>
         </button>
+      </div>
+      <div style={{ padding: '0 20px 14px', flexShrink: 0, display: 'flex', gap: 8 }}>
+        <button onClick={() => dispatch({ type: 'set_view', view: 'chat' })} style={{
+          flex: 1, padding: '7px 0', fontFamily: 'var(--serif)', fontSize: 12, cursor: 'pointer',
+          border: '1px solid var(--line)', background: s.view !== 'etf' ? 'var(--ink)' : 'transparent',
+          color: s.view !== 'etf' ? 'var(--paper)' : 'var(--ink)',
+        }}>对话</button>
+        <button onClick={() => dispatch({ type: 'set_view', view: 'etf' })} style={{
+          flex: 1, padding: '7px 0', fontFamily: 'var(--serif)', fontSize: 12, cursor: 'pointer',
+          border: '1px solid var(--line)', background: s.view === 'etf' ? 'var(--ink)' : 'transparent',
+          color: s.view === 'etf' ? 'var(--paper)' : 'var(--ink)',
+        }}>ETF 看板</button>
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
