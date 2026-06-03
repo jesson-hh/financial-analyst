@@ -27,9 +27,10 @@ import asyncio
 import io
 import json
 import uuid
-from typing import Any, Dict, Optional
+import re
+from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field  # core dependency — safe at module level
+from pydantic import BaseModel, Field, field_validator  # core dependency — safe at module level
 # fastapi is a core dependency too; UploadFile/File must be module-level so the
 # /upload route annotation resolves under ``from __future__ import annotations``
 # (forward refs are looked up in module globals, not build_app's local scope).
@@ -215,6 +216,11 @@ class BacktestRunReq(BaseModel):
     # 行为等价 (Pydantic 解析 body 时同样拒非白名单, 返 422).
     pool: str = Field(default="csi300", pattern=r"^(csi300|csi_fast|csi500|csi800)$",
                       description="候选池 (regex 白名单, 非匹配返 422)")
+    # codes 模式 (2026-06-03): 用户指定代码 (单股 / 自定义 watchlist).
+    # 非空时覆盖 pool 走 codes 路径, 见 CandidateConfig.codes / select_candidates 分支.
+    # 不用 Field(pattern=...) 因为 pattern 只作用于 str, 列表元素要逐个校验 → field_validator.
+    codes: Optional[List[str]] = Field(default=None, max_length=50,
+                                       description="自定义候选代码 (单股/watchlist 模式, 非空则覆盖 pool, ≤50 只)")
     hold_days: int = Field(default=3, ge=1, le=60, description="mock 持有期 (1-60)")
     factor_name: str = Field(default="rev_20", pattern=r"^rev_20$",
                              description="候选排序因子 (第一版 regex 限定 rev_20, 后续放开)")
@@ -222,6 +228,20 @@ class BacktestRunReq(BaseModel):
                                             description="持仓亏损止损阈, None=不触发")
     take_profit_pct: Optional[float] = Field(default=None, gt=0, le=2.0,
                                               description="持仓盈利止盈阈, None=不触发")
+
+    @field_validator("codes")
+    @classmethod
+    def _codes_format(cls, v):
+        """每个元素必须 ^(SH|SZ|BJ)\\d{6}$ — 兜底前端 (前端只做"非空"校验)."""
+        if v is None:
+            return v
+        pat = re.compile(r"^(SH|SZ|BJ)\d{6}$")
+        bad = [c for c in v if not (isinstance(c, str) and pat.match(c))]
+        if bad:
+            raise ValueError(
+                f"codes 含非法格式 (要求 ^(SH|SZ|BJ)\\d{{6}}$): {bad[:5]}"
+                f"{' ...' if len(bad) > 5 else ''}")
+        return v
 
 
 def _sse(event: str, **data: Any) -> str:

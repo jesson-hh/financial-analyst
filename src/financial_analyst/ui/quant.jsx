@@ -1806,7 +1806,11 @@ function BacktestSummaryChips({ d, onPoolClick }) {
   const p = d.params || {};
   const tradeDays = d.nav && d.nav.dates ? d.nav.dates.length : '?';
   const factorLabel = p.factor_name || 'rev_20';
-  const poolLabel = p.pool || '(旧 watchlist 模式)';
+  // codes 模式 (2026-06-03): 显示 "指定代码 (N 只: code1, code2, ...)" 替代 "池: csi300"
+  const isCodesMode = Array.isArray(p.codes) && p.codes.length > 0;
+  const poolLabel = isCodesMode
+    ? `指定代码 (${p.codes.length} 只: ${p.codes.slice(0, 3).join(', ')}${p.codes.length > 3 ? '...' : ''})`
+    : (p.pool || '(旧 watchlist 模式)');
   const modeLabel = p.mode === 'mock' ? 'Mock' : 'Real LLM';
   return (
     <div style={{
@@ -1819,8 +1823,8 @@ function BacktestSummaryChips({ d, onPoolClick }) {
       <span style={{ color: 'var(--ink-3)' }}>◀</span>
       <span onClick={onPoolClick} style={{
         cursor: 'pointer', textDecoration: 'underline dotted', color: 'var(--ink)',
-      }} title="点开看候选池过滤逻辑">
-        池: <strong>{poolLabel}</strong>
+      }} title={isCodesMode ? '点开看用户指定 codes 详情' : '点开看候选池过滤逻辑'}>
+        {isCodesMode ? '候选' : '池'}: <strong>{poolLabel}</strong>
       </span>
       <span style={{ color: 'var(--ink-3)' }}>◀</span>
       <span style={{ color: 'var(--ink-2)' }}>排序: <code>{factorLabel}</code> ↑</span>
@@ -1839,7 +1843,9 @@ function BacktestSummaryChips({ d, onPoolClick }) {
 // ─────── PoolFilterPopover — 池过滤逻辑浮层 (P1.3) ───────
 // stats: { n_pool, n_holdings, n_base, n_rev20_computable, n_final } 来自后端
 // CandidateResult.filter_stats (末日快照). 缺则显示 '?', n_final 退 topn.
-function PoolFilterPopover({ pool, topn, stats, onClose }) {
+// codes 模式 (2026-06-03): 传 codes 非空时切 5 行 codes 流程 (不走池子过滤).
+function PoolFilterPopover({ pool, codes, topn, stats, onClose }) {
+  const isCodesMode = Array.isArray(codes) && codes.length > 0;
   return (
     <div onClick={onClose} style={{
       position: 'fixed', inset: 0, background: 'rgba(20,20,20,0.4)', zIndex: 100,
@@ -1849,21 +1855,38 @@ function PoolFilterPopover({ pool, topn, stats, onClose }) {
         maxWidth: 540, padding: 24, background: 'var(--paper)', border: '1px solid var(--line)',
       }}>
         <div className="serif" style={{ fontSize: 14, marginBottom: 12 }}>
-          候选池构造流程 · 当前 <code className="mono">{pool}</code>
+          {isCodesMode ? (
+            <>用户指定候选构造流程 · <code className="mono">codes ({codes.length} 只)</code></>
+          ) : (
+            <>候选池构造流程 · 当前 <code className="mono">{pool}</code></>
+          )}
         </div>
-        <ol className="mono" style={{ fontSize: 11.5, lineHeight: 1.9, color: 'var(--ink-2)', paddingLeft: 22 }}>
-          <li>全 <strong>{pool}</strong> 成分股 ({stats?.n_pool ?? '?'} 只, 来自 <code>stock_data/parquet/index_constituents.parquet</code>)</li>
-          <li>叠加当前持仓 ({stats?.n_holdings ?? 0} 只, 避免持仓掉出候选导致无法平仓)</li>
-          <li>排除 sentinel (SH999999 等占位代码)</li>
-          <li>合并去重 → base universe ({stats?.n_base ?? '?'} 只)</li>
-          <li>对每只在 ≤T-1 close 上算 <code>rev_20 = close[T-1]/close[T-21] - 1</code> (要求 ≥21 close 点, 满足 <strong>{stats?.n_rev20_computable ?? '?'}</strong> 只)</li>
-          <li>按 rev_20 <strong>升序</strong> 取前 N=<strong>{topn}</strong> (跌得最惨的优先)</li>
-        </ol>
+        {isCodesMode ? (
+          <ol className="mono" style={{ fontSize: 11.5, lineHeight: 1.9, color: 'var(--ink-2)', paddingLeft: 22 }}>
+            <li>用户指定 codes (<strong>{codes.length}</strong> 只): <code style={{ fontSize: 11 }}>{codes.slice(0, 5).join(', ')}{codes.length > 5 ? ` ... +${codes.length - 5}` : ''}</code></li>
+            <li>叠加当前持仓 ({stats?.n_holdings ?? 0} 只, 避免持仓掉出候选导致无法平仓)</li>
+            <li>合并去重 → base universe ({stats?.n_base ?? '?'} 只)</li>
+            <li>对每只在 ≤T-1 close 上算 <code>rev_20</code> 排名信息 (可算 <strong>{stats?.n_rev20_computable ?? '?'}</strong> 只)</li>
+            <li>不走池子过滤, 用户 codes 全部入选 (实际 <strong>{stats?.n_final ?? codes.length}</strong> 只)</li>
+          </ol>
+        ) : (
+          <ol className="mono" style={{ fontSize: 11.5, lineHeight: 1.9, color: 'var(--ink-2)', paddingLeft: 22 }}>
+            <li>全 <strong>{pool}</strong> 成分股 ({stats?.n_pool ?? '?'} 只, 来自 <code>stock_data/parquet/index_constituents.parquet</code>)</li>
+            <li>叠加当前持仓 ({stats?.n_holdings ?? 0} 只, 避免持仓掉出候选导致无法平仓)</li>
+            <li>排除 sentinel (SH999999 等占位代码)</li>
+            <li>合并去重 → base universe ({stats?.n_base ?? '?'} 只)</li>
+            <li>对每只在 ≤T-1 close 上算 <code>rev_20 = close[T-1]/close[T-21] - 1</code> (要求 ≥21 close 点, 满足 <strong>{stats?.n_rev20_computable ?? '?'}</strong> 只)</li>
+            <li>按 rev_20 <strong>升序</strong> 取前 N=<strong>{topn}</strong> (跌得最惨的优先)</li>
+          </ol>
+        )}
         <div className="mono" style={{ fontSize: 11.5, marginTop: 10, color: 'var(--ink-1)' }}>
-          实际入选 <strong>{stats?.n_final ?? topn}</strong> 只 (rev_20 Top-N ∪ 持仓, 去重)
+          实际入选 <strong>{stats?.n_final ?? (isCodesMode ? codes.length : topn)}</strong> 只
+          {isCodesMode ? ' (用户 codes ∪ 持仓, 去重)' : ' (rev_20 Top-N ∪ 持仓, 去重)'}
         </div>
         <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', marginTop: 12 }}>
-          注: 池子模式 (pool 非空) 不引入 watchlist; 老 WatchLoop 实盘盯盘仍走 holdings∪watchlist 路径. 数字为窗口末日快照.
+          {isCodesMode
+            ? '注: codes 模式 (用户指定代码) 不走池子过滤, 也不引入 watchlist; 优先级 codes > pool > watchlist. 数字为窗口末日快照.'
+            : '注: 池子模式 (pool 非空) 不引入 watchlist; 老 WatchLoop 实盘盯盘仍走 holdings∪watchlist 路径. 数字为窗口末日快照.'}
         </div>
         <button onClick={onClose} style={{
           marginTop: 16, padding: '6px 14px', background: 'var(--ink)', color: 'var(--paper)',
@@ -1998,6 +2021,9 @@ function BacktestMode() {
   const [stopLossPct, setStopLossPct] = useState(0.05);
   const [takeProfitEnabled, setTakeProfitEnabled] = useState(false);
   const [takeProfitPct, setTakeProfitPct] = useState(0.1);
+  // codes 模式 (2026-06-03): 候选模式切换 — 'pool' (现有) | 'codes' (单股/watchlist)
+  const [candidateMode, setCandidateMode] = useState('pool');
+  const [codesInput, setCodesInput] = useState('');
 
   // 挂载: probe data_end (走 /data/status 的 day 时间戳 — 退而求其次用近 2 周),
   // 填默认窗口, 不硬编码任何固定日期。失败则留空 (后端 None → 自动近窗口)。
@@ -2015,15 +2041,24 @@ function BacktestMode() {
     if (timer.current) clearInterval(timer.current);
     setPolling(true);
     const maxPolls = mode === 'mock' ? 60 : 150;   // mock≈36s / real≈6min 兜底
+    // codes 模式 (2026-06-03): 解析逗号/空格/中文逗号/顿号分隔的 codes, trim+大写+去空
+    // 非空时透传 codes 并自动 topn=len(codes); pool 仍传默认占位但后端忽略
+    const codesList = candidateMode === 'codes'
+      ? codesInput.split(/[\s,，、]+/).map(s => s.trim().toUpperCase()).filter(Boolean)
+      : null;
     run.run(async () => {
       const r = await postJSON('/backtest/run', {
         start: start || null, end: end || null,
-        init_cash: Number(cash), candidate_topn: Number(topn), mode,
+        init_cash: Number(cash),
+        candidate_topn: (codesList && codesList.length) ? codesList.length : Number(topn),
+        mode,
         match_freq: 'day',
         // P2 ↓ 新增字段
         pool, hold_days: Number(holdDays), factor_name: factorName,
         stop_loss_pct: stopLossEnabled ? stopLossPct : null,
         take_profit_pct: takeProfitEnabled ? takeProfitPct : null,
+        // codes 模式 (2026-06-03)
+        codes: (codesList && codesList.length) ? codesList : null,
       });
       const rid = r.run_id;
       let polls = 0;
@@ -2075,9 +2110,13 @@ function BacktestMode() {
         <label className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>初始资金
           <input type="number" value={cash} onChange={e => setCash(e.target.value)}
             style={{ display: 'block', marginTop: 3, padding: '5px 8px', width: 120, border: '1px solid var(--line)', fontFamily: 'var(--mono)', fontSize: 12 }} /></label>
-        <label className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>候选 N
+        <label className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}
+               title={candidateMode === 'codes' ? '代码模式: N 自动 = len(codes)' : '候选池 Top-N'}>候选 N
           <input type="number" value={topn} onChange={e => setTopn(e.target.value)}
-            style={{ display: 'block', marginTop: 3, padding: '5px 8px', width: 70, border: '1px solid var(--line)', fontFamily: 'var(--mono)', fontSize: 12 }} /></label>
+            disabled={candidateMode === 'codes'}
+            style={{ display: 'block', marginTop: 3, padding: '5px 8px', width: 70, border: '1px solid var(--line)',
+                     fontFamily: 'var(--mono)', fontSize: 12,
+                     opacity: candidateMode === 'codes' ? 0.4 : 1 }} /></label>
         <Segmented value={mode} onChange={setMode}
           options={[{ value: 'mock', label: 'Mock(秒级)' }, { value: 'real', label: '真 LLM(慢)' }]} />
         <button onClick={start_run} disabled={run.loading || polling} className="hover-pill"
@@ -2096,15 +2135,33 @@ function BacktestMode() {
           display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap',
           padding: '10px 12px', marginBottom: 12, border: '1px solid var(--line-soft)', background: 'var(--paper-1)',
         }}>
-          <label className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>候选池
-            <select value={pool} onChange={e => setPool(e.target.value)}
-              style={{ display: 'block', marginTop: 3, padding: '5px 8px', border: '1px solid var(--line)',
-                       fontFamily: 'var(--mono)', fontSize: 12 }}>
-              <option value="csi300">csi300 (300 只)</option>
-              <option value="csi_fast">csi_fast (~100 大盘)</option>
-              <option value="csi500">csi500 (500 只)</option>
-              <option value="csi800">csi800 (800 只)</option>
-            </select></label>
+          {/* codes 模式 (2026-06-03): 候选模式切换 — 池子 (现有) | 指定代码 (单股/watchlist) */}
+          <label className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>候选模式
+            <div style={{ marginTop: 3 }}>
+              <Segmented value={candidateMode} onChange={setCandidateMode}
+                options={[{ value: 'pool', label: '池子' }, { value: 'codes', label: '指定代码' }]} />
+            </div>
+          </label>
+          {candidateMode === 'codes' ? (
+            <label className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', flex: 1, minWidth: 280 }}
+                   title="逗号/空格分隔, 格式 ^(SH|SZ|BJ)\d{6}$, ≤50 只">
+              候选代码 (逗号/空格分隔, topn 自动)
+              <input value={codesInput} onChange={e => setCodesInput(e.target.value)}
+                placeholder="SH600519, SZ002594, SH601318"
+                style={{ display: 'block', marginTop: 3, padding: '5px 8px', width: '100%',
+                         border: '1px solid var(--line)', fontFamily: 'var(--mono)', fontSize: 12 }} />
+            </label>
+          ) : (
+            <label className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>候选池
+              <select value={pool} onChange={e => setPool(e.target.value)}
+                style={{ display: 'block', marginTop: 3, padding: '5px 8px', border: '1px solid var(--line)',
+                         fontFamily: 'var(--mono)', fontSize: 12 }}>
+                <option value="csi300">csi300 (300 只)</option>
+                <option value="csi_fast">csi_fast (~100 大盘)</option>
+                <option value="csi500">csi500 (500 只)</option>
+                <option value="csi800">csi800 (800 只)</option>
+              </select></label>
+          )}
           <label className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>持有期 (日)
             <input type="number" min={1} max={60} value={holdDays}
               onChange={e => setHoldDays(Number(e.target.value))}
@@ -2234,6 +2291,7 @@ function BacktestMode() {
       {showPoolPopover && d && (
         <PoolFilterPopover
           pool={(d.params && d.params.pool) || 'csi300'}
+          codes={(d.params && d.params.codes) || null}
           topn={(d.params && d.params.candidate_topn) || 20}
           stats={d.candidate_filter_stats}
           onClose={() => setShowPoolPopover(false)} />

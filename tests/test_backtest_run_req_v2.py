@@ -62,6 +62,34 @@ class TestBacktestRunReqExtended:
             with pytest.raises(ValidationError):
                 BacktestRunReq(factor_name=bad)
 
+    # codes 模式 (2026-06-03): 单股 / 自定义 watchlist 候选
+    def test_default_codes_is_none(self):
+        req = BacktestRunReq()
+        assert req.codes is None
+
+    def test_codes_field_accepts_valid_list(self):
+        req = BacktestRunReq(codes=["SH600519", "SZ002594"])
+        assert req.codes == ["SH600519", "SZ002594"]
+        # 单股
+        req = BacktestRunReq(codes=["SH600519"])
+        assert req.codes == ["SH600519"]
+        # 三市前缀都接受
+        req = BacktestRunReq(codes=["SH600519", "SZ002594", "BJ430047"])
+        assert req.codes == ["SH600519", "SZ002594", "BJ430047"]
+
+    def test_codes_field_rejects_bad_format(self):
+        # 前端可能跳格式校验, 后端 model 兜底
+        with pytest.raises(ValidationError):
+            BacktestRunReq(codes=["bad_format", "SH600519"])
+        with pytest.raises(ValidationError):
+            BacktestRunReq(codes=["600519"])  # 缺前缀
+        with pytest.raises(ValidationError):
+            BacktestRunReq(codes=["sh600519"])  # 小写
+        with pytest.raises(ValidationError):
+            BacktestRunReq(codes=["SH60051"])  # 位数不够
+        with pytest.raises(ValidationError):
+            BacktestRunReq(codes=["US600519"])  # 非 SH/SZ/BJ 前缀
+
 
 from fastapi.testclient import TestClient
 from financial_analyst.buddy.server import build_app

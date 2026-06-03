@@ -137,12 +137,16 @@ async def run_backtest(req) -> dict:
         agent = DecisionAgent(client=None,     # 懒初始化 LLMClient.for_agent
                               cache=DecisionCache(cache_dir) if cache_dir else None)
 
+    # codes 模式 (2026-06-03): user 指定代码时 topn 自动设 = len(codes), 不被截断,
+    # 让 agent 看到所有指定代码 (1 只 → topn=1 单股回测, N 只 → topn=N watchlist).
+    effective_topn = len(req.codes) if req.codes else req.candidate_topn
     cfg = RunConfig(
         start=start, end=end, init_cash=req.init_cash,
         benchmark=None, match_freq=req.match_freq,
         candidate=CandidateConfig(
-            topn=req.candidate_topn,
+            topn=effective_topn,
             pool=req.pool,        # P2: 池子模式
+            codes=req.codes,      # codes 模式 (优先级最高)
         ),
         cache_dir=cache_dir)
     runner = BacktestRunner(reader=reader, agent=agent, cfg=cfg)

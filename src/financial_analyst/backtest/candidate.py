@@ -24,6 +24,9 @@ import pandas as pd
 class CandidateConfig:
     topn: int = 20
     pool: Optional[str] = None           # P2 新增 — None=旧 watchlist 路径, 非空=池子模式
+    # codes 模式 (2026-06-03): 用户指定代码 (单股/watchlist), 非空时优先级最高.
+    # 优先级: codes > pool > 旧 watchlist 路径. 见 select_candidates 三分支.
+    codes: Optional[List[str]] = None
     rev20_lookback_tradedays: int = 30   # trading-day rollback (≥21 points)
     rev20_pick: str = "low"              # "low"=nsmallest (reversal); "high"=nlargest
     include_holdings: bool = True
@@ -73,10 +76,16 @@ def select_candidates(date: str, holdings: List[str], reader,
                       cfg: CandidateConfig = CandidateConfig()) -> CandidateResult:
     """Build the candidate pool for ``date`` using only ≤T-1 data.
 
-    Two modes (cfg.pool):
-    * None  → 旧 watchlist 路径: base = holdings ∪ watchlist (WatchLoop 实盘盯盘场景)
-    * 非空  → 池子模式: base = holdings ∪ resolve_universe_codes(pool), watchlist 不参与
-              (BacktestRunner 回测场景, 在固定池子内 rev_20 选股)
+    Three modes (优先级 codes > pool > watchlist):
+    * cfg.codes 非空 → codes 模式 (2026-06-03 新增): base = holdings ∪ user codes,
+        不解析 pool/watchlist. 单股回测 (1 只) 或自定义 watchlist 回测 (N 只).
+    * cfg.pool 非空  → 池子模式: base = holdings ∪ resolve_universe_codes(pool),
+        watchlist 不参与 (BacktestRunner 回测场景, 在固定池子内 rev_20 选股).
+    * 否则           → 旧 watchlist 路径: base = holdings ∪ watchlist
+        (WatchLoop 实盘盯盘场景).
+
+    filter_stats.n_pool 语义随模式变:
+        codes 模式 → len(cfg.codes); pool 模式 → len(pool_codes); 老路径 → len(watch).
     """
     date = str(date)
     prev = reader.prev_trade_date(date)
@@ -84,7 +93,13 @@ def select_candidates(date: str, holdings: List[str], reader,
     holdings = list(dict.fromkeys(holdings)) if cfg.include_holdings else []
     sentinels = set(cfg.sentinel_codes)
 
-    if cfg.pool:
+    if cfg.codes:
+        # codes 模式 (优先级最高): 用户指定代码, 跳过 pool/watchlist 解析
+        user_codes = [c for c in cfg.codes if c not in sentinels]
+        base: List[str] = list(dict.fromkeys([*holdings, *user_codes]))
+        watch = []   # codes 模式下 watchlist 不参与
+        n_pool = len(user_codes)  # "候选输入规模" — 此处含义为 codes 长度
+    elif cfg.pool:
         # 池子模式
         from financial_analyst.data.universe import resolve_universe_codes
         pool_codes = [c for c in resolve_universe_codes(cfg.pool) if c not in sentinels]
@@ -92,7 +107,7 @@ def select_candidates(date: str, holdings: List[str], reader,
             raise ValueError(
                 f"pool '{cfg.pool}' resolved to 0 codes "
                 f"(缺 index_constituents.parquet? 跑 `fa data bootstrap`)")
-        base: List[str] = list(dict.fromkeys([*holdings, *pool_codes]))
+        base = list(dict.fromkeys([*holdings, *pool_codes]))
         watch = []   # 池子模式下 watchlist 不参与
         n_pool = len(pool_codes)
     else:
@@ -133,6 +148,8 @@ def select_candidates(date: str, holdings: List[str], reader,
         rev20_top = list(picked.index)
 
     # union, holdings first, then rev20_top, then remaining watchlist (老路径才填)
+    # codes 模式: 用户指定代码强制入选 (在 rev20_top 之后补齐), 不被 topn 截断 —
+    # 用户既然指定了就要看到, rev20 排名仅作信息字段供前端展示.
     ordered: List[str] = []
     source: Dict[str, str] = {}
     for c in holdings:
@@ -143,7 +160,12 @@ def select_candidates(date: str, holdings: List[str], reader,
         if c not in source:
             ordered.append(c)
             source[c] = "rev20_top"
-    if not cfg.pool:
+    if cfg.codes:
+        for c in cfg.codes:
+            if c not in source and c not in sentinels:
+                ordered.append(c)
+                source[c] = "user_codes"
+    if not cfg.pool and not cfg.codes:
         for c in watch:
             if c not in source:
                 ordered.append(c)
