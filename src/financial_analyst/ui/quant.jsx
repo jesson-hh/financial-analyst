@@ -1826,7 +1826,9 @@ function BacktestSummaryChips({ d, onPoolClick }) {
 }
 
 // ─────── PoolFilterPopover — 池过滤逻辑浮层 (P1.3) ───────
-function PoolFilterPopover({ pool, topn, onClose }) {
+// stats: { n_pool, n_holdings, n_base, n_rev20_computable, n_final } 来自后端
+// CandidateResult.filter_stats (末日快照). 缺则显示 '?', n_final 退 topn.
+function PoolFilterPopover({ pool, topn, stats, onClose }) {
   return (
     <div onClick={onClose} style={{
       position: 'fixed', inset: 0, background: 'rgba(20,20,20,0.4)', zIndex: 100,
@@ -1839,15 +1841,18 @@ function PoolFilterPopover({ pool, topn, onClose }) {
           候选池构造流程 · 当前 <code className="mono">{pool}</code>
         </div>
         <ol className="mono" style={{ fontSize: 11.5, lineHeight: 1.9, color: 'var(--ink-2)', paddingLeft: 22 }}>
-          <li>全 <strong>{pool}</strong> 成分股 (来自 <code>stock_data/parquet/index_constituents.parquet</code>)</li>
-          <li>叠加当前持仓 (避免持仓掉出候选导致无法平仓)</li>
+          <li>全 <strong>{pool}</strong> 成分股 ({stats?.n_pool ?? '?'} 只, 来自 <code>stock_data/parquet/index_constituents.parquet</code>)</li>
+          <li>叠加当前持仓 ({stats?.n_holdings ?? 0} 只, 避免持仓掉出候选导致无法平仓)</li>
           <li>排除 sentinel (SH999999 等占位代码)</li>
-          <li>对每只在 ≤T-1 close 上算 <code>rev_20 = close[T-1]/close[T-21] - 1</code></li>
-          <li>按 rev_20 <strong>升序</strong> 排列 (跌得最惨的优先)</li>
-          <li>取前 N=<strong>{topn}</strong> 作为候选池</li>
+          <li>合并去重 → base universe ({stats?.n_base ?? '?'} 只)</li>
+          <li>对每只在 ≤T-1 close 上算 <code>rev_20 = close[T-1]/close[T-21] - 1</code> (要求 ≥21 close 点, 满足 <strong>{stats?.n_rev20_computable ?? '?'}</strong> 只)</li>
+          <li>按 rev_20 <strong>升序</strong> 取前 N=<strong>{topn}</strong> (跌得最惨的优先)</li>
         </ol>
+        <div className="mono" style={{ fontSize: 11.5, marginTop: 10, color: 'var(--ink-1)' }}>
+          实际入选 <strong>{stats?.n_final ?? topn}</strong> 只 (rev_20 Top-N ∪ 持仓, 去重)
+        </div>
         <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', marginTop: 12 }}>
-          注: 池子模式 (pool 非空) 不引入 watchlist; 老 WatchLoop 实盘盯盘仍走 holdings∪watchlist 路径.
+          注: 池子模式 (pool 非空) 不引入 watchlist; 老 WatchLoop 实盘盯盘仍走 holdings∪watchlist 路径. 数字为窗口末日快照.
         </div>
         <button onClick={onClose} style={{
           marginTop: 16, padding: '6px 14px', background: 'var(--ink)', color: 'var(--paper)',
@@ -2191,6 +2196,7 @@ function BacktestMode() {
         <PoolFilterPopover
           pool={(d.params && d.params.pool) || 'csi300'}
           topn={(d.params && d.params.candidate_topn) || 20}
+          stats={d.candidate_filter_stats}
           onClose={() => setShowPoolPopover(false)} />
       )}
       {selectedTrade && <TradeReasonModal trade={selectedTrade} d={d} onClose={() => setSelectedTrade(null)} />}

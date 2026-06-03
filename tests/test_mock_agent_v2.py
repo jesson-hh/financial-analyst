@@ -83,3 +83,14 @@ class TestMockAgentDecisionPriority:
                                       holdings={"SH600000": 1000},
                                       unrealized={"SH600000": 0.10})))
         assert any("止盈" in l.reason for l in d2.decisions if l.action == "sell")
+
+    def test_stop_loss_fires_when_take_profit_threshold_not_reached(self):
+        """配齐 take_profit=10% + stop_loss=5%, 持仓亏损 6% → 触发 stop_loss (而非 take_profit)."""
+        ag = _MockAgent(hold_days=10, take_profit_pct=0.10, stop_loss_pct=0.05)
+        _run(ag.decide(_StubInp(candidates=["SH600000"], rev20={"SH600000": 0.1})))
+        d2 = _run(ag.decide(_StubInp(candidates=[],
+                                      holdings={"SH600000": 1000},
+                                      unrealized={"SH600000": -0.06})))
+        sells = [l for l in d2.decisions if l.action == "sell"]
+        assert len(sells) == 1
+        assert "止损" in sells[0].reason, f"应触发止损, 实际: {sells[0].reason!r}"

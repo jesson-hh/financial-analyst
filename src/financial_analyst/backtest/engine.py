@@ -75,6 +75,9 @@ class BacktestResult:
     n_llm_calls: int
     trade_stats: Dict[str, float]
     warnings: List[str]
+    # P1.3 — last day's CandidateResult.filter_stats (for UI PoolFilterPopover).
+    # Picks last day's stats as the representative end-of-window state.
+    candidate_filter_stats: Dict[str, int] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------
@@ -291,11 +294,13 @@ class BacktestRunner:
         broker = Broker(cost_model=cfg.cost)
         log = TradeLog()
         decisions: Dict[str, dict] = {}
+        last_filter_stats: Dict[str, int] = {}    # P1.3: 末日 CandidateResult.filter_stats
 
         for T in days:
             self.trigger.reset_day()              # P3: clear dedup/counters per day
             holdings = list(p.positions.keys())
             cand = select_candidates(T, holdings, reader, cfg.candidate)
+            last_filter_stats = cand.filter_stats
             visible = reader.get_visible_info(T, codes=cand.codes, as_of=cfg.as_of)
 
             inp = DecisionInput(
@@ -353,7 +358,7 @@ class BacktestRunner:
             portfolio_result=res, trade_log=log, decisions_by_date=decisions,
             nav_history=p.nav_history, benchmark_nav=bench_nav,
             n_llm_calls=agent.n_calls, trade_stats=log.trade_stats(),
-            warnings=warnings)
+            warnings=warnings, candidate_filter_stats=last_filter_stats)
 
     # ======================================================================
     # P3 — intraday key-point re-decision (only entered when intraday.enabled)

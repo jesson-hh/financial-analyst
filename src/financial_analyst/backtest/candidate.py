@@ -38,6 +38,13 @@ class CandidateResult:
     rev20_rank: Dict[str, float]         # code -> cross-sectional pct rank (0..1)
     universe_source: Dict[str, str]      # code -> 'holding'|'watchlist'|'rev20_top'
     asof_prev: str                       # the ≤T-1 cut date (= prev_trade_date)
+    filter_stats: Dict[str, int] = field(default_factory=dict)
+    # P1.3 数字化: {n_pool, n_holdings, n_base, n_rev20_computable, n_final}
+    # n_pool: 池子成分股数 (pool mode) or len(watchlist) (watchlist mode)
+    # n_holdings: 当前持仓数
+    # n_base: 合并去重 (holdings ∪ pool/watchlist)
+    # n_rev20_computable: 有 ≥21 个 close 点能算 rev_20 的数
+    # n_final: 实际入选 (rev20_top + holdings, deduped)
 
 
 def _load_watchlist_codes(cfg: CandidateConfig) -> List[str]:
@@ -87,10 +94,21 @@ def select_candidates(date: str, holdings: List[str], reader,
                 f"(缺 index_constituents.parquet? 跑 `fa data bootstrap`)")
         base: List[str] = list(dict.fromkeys([*holdings, *pool_codes]))
         watch = []   # 池子模式下 watchlist 不参与
+        n_pool = len(pool_codes)
     else:
         # 旧 watchlist 路径
         watch = [c for c in _load_watchlist_codes(cfg) if c not in sentinels]
         base = list(dict.fromkeys([*holdings, *watch]))
+        n_pool = len(watch)
+
+    # P1.3 数字化 — 前端 PoolFilterPopover 显示真数字
+    filter_stats: Dict[str, int] = {
+        "n_pool": n_pool,
+        "n_holdings": len(holdings),
+        "n_base": len(base),
+        "n_rev20_computable": 0,  # filled after loop
+        "n_final": 0,             # filled after ordered built
+    }
 
     raw_rev20: Dict[str, float] = {}
     for code in base:
@@ -103,6 +121,7 @@ def select_candidates(date: str, holdings: List[str], reader,
         close = df["close"].dropna()
         if len(close) >= 21:
             raw_rev20[code] = float(close.iloc[-1] / close.iloc[-21] - 1.0)
+    filter_stats["n_rev20_computable"] = len(raw_rev20)
 
     rev20_rank: Dict[str, float] = {}
     rev20_top: List[str] = []
@@ -130,7 +149,10 @@ def select_candidates(date: str, holdings: List[str], reader,
                 ordered.append(c)
                 source[c] = "watchlist"
 
+    filter_stats["n_final"] = len(ordered)
+
     return CandidateResult(
         codes=ordered, rev20_rank=rev20_rank, universe_source=source,
         asof_prev=prev if prev is not None else "",
+        filter_stats=filter_stats,
     )

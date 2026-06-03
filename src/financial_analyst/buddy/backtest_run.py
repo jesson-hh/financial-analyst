@@ -180,5 +180,7 @@ async def run_backtest(req) -> dict:
         "trades": _fills_to_trades(result.trade_log),
         "decisions": result.decisions_by_date,
         "warnings": warnings,
+        # P1.3: 末日 CandidateResult.filter_stats → 前端 PoolFilterPopover 显示真数字
+        "candidate_filter_stats": result.candidate_filter_stats,
     }
     return _jsonable(body)     # NaN/Inf→null, numpy 标量→native (最外层统一洗)
