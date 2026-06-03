@@ -3278,6 +3278,20 @@ function WatchMode() {
 // ═════════════════════════ 入口 ═════════════════════════
 function QuantApp() {
   const [mode, setMode] = useState('lib');
+  // 切 tab 用 display:none 而不是 mount/unmount, 后台 polling/timer/state 全保留
+  // (修了 backtest "切走再切回回测就没了" + watch "切走再切回 items/SSE 丢" 两个 bug)
+  // Lazy mount: 首次切到该 tab 才 mount, 之后保留. 避免启动时 7 tab 全 mount.
+  const [mounted, setMounted] = useState(new Set(['lib']));
+  useEffect(() => { setMounted(prev => prev.has(mode) ? prev : new Set([...prev, mode])); }, [mode]);
+  const TABS = [
+    ['lib', <LibraryMode />],
+    ['forge', <ForgeMode />],
+    ['compose', <ComposeMode />],
+    ['archive', <ArchiveMode />],
+    ['workflow', <WorkflowLab />],
+    ['backtest', <BacktestMode />],
+    ['watch', <WatchMode />],
+  ];
   return (
     <div className="paper-bg" style={{
       width: '100%', height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden',
@@ -3285,13 +3299,15 @@ function QuantApp() {
     }}>
       <TopBar mode={mode} onMode={setMode} />
       <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
-        {mode === 'lib' && <LibraryMode />}
-        {mode === 'forge' && <ForgeMode />}
-        {mode === 'compose' && <ComposeMode />}
-        {mode === 'archive' && <ArchiveMode />}
-        {mode === 'workflow' && <WorkflowLab />}
-        {mode === 'backtest' && <BacktestMode />}   {/* ← P5 新增 */}
-        {mode === 'watch' && <WatchMode />}
+        {TABS.map(([key, el]) => (
+          mounted.has(key) ? (
+            <div key={key} style={{
+              flex: mode === key ? 1 : 'none',
+              display: mode === key ? 'flex' : 'none',
+              minWidth: 0, minHeight: 0, overflow: 'hidden',
+            }}>{el}</div>
+          ) : null
+        ))}
       </div>
     </div>
   );
