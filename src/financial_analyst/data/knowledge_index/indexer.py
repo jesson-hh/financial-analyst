@@ -29,10 +29,11 @@ from .store import ChromaStore
 # Glob patterns we scan. Relative to ``strategy_root``. Order is informational
 # only — chunk ids are content-derived.
 DEFAULT_GLOBS = (
-    "*.md",
-    "research/*.md",
-    "wisdom/*.md",
-    "stocks/*.md",
+    "*.md",          # 经验主源: pitfalls / factor_insights / rating_system / rules_learned / analyst_playbook
+    "wisdom/*.md",   # 视频博主经验 (bilibili_notes 等)
+    # 刻意不含 research/ (过程记录: DFM 实验/会议笔记, 非沉淀经验) 和 stocks/ (个股 timeline,
+    # 已由 report_v2 previous_history 单独注入). 二者占旧索引 93%, 会稀释"经验"语义检索的信噪比.
+    # 需检索研究过程/个股历史时, 用独立 collection 或 source_filter (Phase 2).
 )
 
 

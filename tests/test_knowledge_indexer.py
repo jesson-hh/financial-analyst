@@ -26,9 +26,9 @@ def _make_strategy_tree(root: Path) -> dict:
         "追涨在 A 股容易翻车。\n",
         encoding="utf-8",
     )
-    research = root / "research"
-    research.mkdir()
-    f2 = research / "2026-05-30-sample.md"
+    wisdom = root / "wisdom"            # research/ no longer indexed by DEFAULT_GLOBS; wisdom/ still is
+    wisdom.mkdir()
+    f2 = wisdom / "2026-05-30-sample.md"
     f2.write_text(
         "## 实验背景\n"
         "测试 PCA 残差。\n\n"
@@ -103,6 +103,12 @@ def test_build_incremental_skips_unchanged(tmp_path: Path):
     idx = KnowledgeIndexer(strategy_root=tmp_path, store=store, embedder=StubEmbedder(dim=8))
     s1 = idx.build()
     assert s1.chunks_embedded == 4
+
+    # Give ChromaDB's PersistentClient time to flush its SQLite write-ahead log
+    # so get_by_ids() on the second build sees the stored mtime metadata.
+    # Without this, rapid back-to-back builds on Windows can have get() return
+    # empty metadatas before the first upsert is fully persisted.
+    time.sleep(0.1)
 
     # Second build with no file changes → everything skipped.
     s2 = idx.build()
