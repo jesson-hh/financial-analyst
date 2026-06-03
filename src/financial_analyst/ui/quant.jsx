@@ -2001,6 +2001,29 @@ function TradeReasonModal({ trade, d, onClose }) {
 }
 
 // ═════════════════════════ Agent 回测 (P5) ═════════════════════════
+// 状态条: 显示当前后台 N 个 backtest + "取消所有" 按钮 (释放 cap).
+// 用户关浏览器后回测还在 _BT_RUNS 占槽 → 真 LLM 那种 6min 跑完前会顶到 429,
+// 这个 chip 是逃生通道.
+function RunningBacktestsChip({ runs, onCancelAll }) {
+  if (!runs || runs.n_running === 0) return null;
+  return (
+    <div style={{
+      padding: '8px 14px', marginBottom: 10,
+      border: '1px solid var(--jin)', background: '#fff5e6',
+      display: 'flex', alignItems: 'center', gap: 12,
+      fontSize: 11.5, fontFamily: 'var(--mono)',
+    }}>
+      <span>▶ 后台 <strong>{runs.n_running}</strong> 个回测跑着 (cap {runs.max_running})</span>
+      <span style={{ flex: 1 }} />
+      <button onClick={onCancelAll} className="hover-pill"
+        style={{ padding: '4px 12px', border: '1px solid var(--dai)', background: 'transparent',
+                 color: 'var(--dai)', fontFamily: 'var(--serif)', fontSize: 11, cursor: 'pointer' }}>
+        × 取消所有
+      </button>
+    </div>
+  );
+}
+
 function BacktestMode() {
   const [start, setStart]   = useState('');
   const [end, setEnd]       = useState('');
@@ -2024,6 +2047,8 @@ function BacktestMode() {
   // codes 模式 (2026-06-03): 候选模式切换 — 'pool' (现有) | 'codes' (单股/watchlist)
   const [candidateMode, setCandidateMode] = useState('pool');
   const [codesInput, setCodesInput] = useState('');
+  // running backtests 透明度 (2026-06-03): 5s 节奏 poll /backtest/runs
+  const [runsStatus, setRunsStatus] = useState(null);
 
   // 挂载: probe data_end (走 /data/status 的 day 时间戳 — 退而求其次用近 2 周),
   // 填默认窗口, 不硬编码任何固定日期。失败则留空 (后端 None → 自动近窗口)。
@@ -2036,6 +2061,19 @@ function BacktestMode() {
     }).catch(() => {});
     return () => { if (timer.current) clearInterval(timer.current); };
   }, []);
+
+  // running backtests poll: 5s 一次, 一直跑 (BacktestMode 现在常驻挂载)
+  useEffect(() => {
+    const refresh = () => getJSON('/backtest/runs').then(setRunsStatus).catch(() => {});
+    refresh();
+    const id = setInterval(refresh, 5000);
+    return () => clearInterval(id);
+  }, []);
+
+  const onCancelAllRuns = async () => {
+    try { await postJSON('/backtest/cancel-all', {}); } catch (e) {}
+    getJSON('/backtest/runs').then(setRunsStatus).catch(() => {});
+  };
 
   const start_run = () => {
     if (timer.current) clearInterval(timer.current);
@@ -2195,6 +2233,8 @@ function BacktestMode() {
           </label>
         </div>
       )}
+
+      <RunningBacktestsChip runs={runsStatus} onCancelAll={onCancelAllRuns} />
 
       <BacktestStrategyBanner mode={mode} />
 

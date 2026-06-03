@@ -2308,17 +2308,95 @@ def build_app():
         async def _job():
             try:
                 result = await asyncio.to_thread(_run_sync)   # 阻塞跑在线程池
+                # cancel 后 status 已被改 'cancelled', 不要覆盖 (worker 线程
+                # Python 杀不掉, 跑完了 result 也要丢弃 — UX 上等于已停)
+                if _BT_RUNS.get(run_id, {}).get("status") == "cancelled":
+                    return
                 _BT_RUNS[run_id]["result"] = result
                 _BT_RUNS[run_id]["status"] = "done"
+            except asyncio.CancelledError:
+                # asyncio task.cancel() 触发. worker thread 仍跑 (Python 无法停),
+                # 但我们丢弃 result, status 直接钉 cancelled.
+                _BT_RUNS[run_id]["status"] = "cancelled"
+                _BT_RUNS[run_id]["error"] = "asyncio CancelledError"
             except asyncio.TimeoutError:
+                if _BT_RUNS.get(run_id, {}).get("status") == "cancelled":
+                    return
                 _BT_RUNS[run_id]["error"] = "timeout: 回测超过总时长上限"
                 _BT_RUNS[run_id]["status"] = "error"
             except Exception as exc:
+                if _BT_RUNS.get(run_id, {}).get("status") == "cancelled":
+                    return
                 _BT_RUNS[run_id]["error"] = f"{type(exc).__name__}: {exc}"
                 _BT_RUNS[run_id]["status"] = "error"
 
-        asyncio.create_task(_job())   # 只调度一个"await to_thread"的轻协程, 不冻循环
+        task = asyncio.create_task(_job())   # 只调度一个"await to_thread"的轻协程, 不冻循环
+        _BT_RUNS[run_id]["_task"] = task     # 保存 task ref 供 cancel 用
         return {"run_id": run_id, "status": "running", "mode": req.mode}
+
+    # ---- 回测注册表透出 + 手动取消 (UX 释放 cap, 浏览器关了也能从面板清) ----
+    @app.get("/backtest/runs")
+    async def backtest_runs_ep():
+        """列出 _BT_RUNS 全部条目 (插入序). 前端按 5s 节奏轮询显示 N running.
+
+        ⚠ worker thread caveat: Python 不能强停 native thread, cancel 仅标 status
+        + 丢弃 result; LLM/计算可能继续浪费 token, 但 cap 槽位被释放.
+        """
+        out = []
+        for rid, rec in _BT_RUNS.items():
+            out.append({
+                "run_id": rid,
+                "status": rec["status"],   # 'running' | 'done' | 'error' | 'cancelled'
+                "mode": rec.get("mode"),
+                "created_at": rec.get("created_at"),
+                "params": rec.get("params", {}),  # UI 显示"正在跑什么"
+            })
+        n_running = sum(1 for r in out if r["status"] == "running")
+        return {"ok": True, "n_running": n_running,
+                "max_running": _BT_MAX_RUNNING, "runs": out}
+
+    @app.post("/backtest/cancel/{run_id}")
+    async def backtest_cancel_ep(run_id: str):
+        """取消单个 running 回测. 返 404 (未知) / {already: status} (已终态) /
+        {status: cancelled} (新取消).
+
+        ⚠ worker thread caveat: asyncio task.cancel() 只能停 await chain,
+        to_thread 的 worker 还会继续跑完 (Python 不能强停 native thread). 我们
+        把 status 钉成 cancelled 并丢弃 result, cap 槽位立即释放; 但底层 LLM
+        调用如果在飞会继续走完 (token 浪费, 但不阻塞).
+        """
+        rec = _BT_RUNS.get(run_id)
+        if rec is None:
+            return JSONResponse(status_code=404, content={
+                "ok": False, "error": f"unknown run_id {run_id}"})
+        if rec["status"] != "running":
+            return {"ok": True, "already": rec["status"]}
+        rec["status"] = "cancelled"
+        rec["error"] = "用户取消 (worker thread 可能继续跑到结束, 但 result 会被丢弃)"
+        task = rec.get("_task")
+        if task is not None:
+            try:
+                task.cancel()
+            except Exception:
+                pass
+        return {"ok": True, "run_id": run_id, "status": "cancelled"}
+
+    @app.post("/backtest/cancel-all")
+    async def backtest_cancel_all_ep():
+        """批量取消所有 running 回测. 同 cancel_ep 的线程 caveat 适用."""
+        cancelled = []
+        for rid, rec in _BT_RUNS.items():
+            if rec["status"] == "running":
+                rec["status"] = "cancelled"
+                rec["error"] = "用户取消 (cancel-all)"
+                task = rec.get("_task")
+                if task is not None:
+                    try:
+                        task.cancel()
+                    except Exception:
+                        pass
+                cancelled.append(rid)
+        return {"ok": True, "n_cancelled": len(cancelled), "run_ids": cancelled}
 
     @app.get("/backtest/result/{run_id}")
     async def backtest_result_ep(run_id: str):
@@ -2332,6 +2410,10 @@ def build_app():
             # 轮询语义: error 是正常终态 → HTTP 200, 让前端 q() 读到中文 error
             return {"status": "error", "run_id": run_id,
                     "error": rec["error"], "mode": rec["mode"]}
+        if rec["status"] == "cancelled":
+            # cancel 后 result 为 None, 不能进 dict() 路径; 给前端一个明确终态
+            return {"status": "cancelled", "run_id": run_id,
+                    "error": rec.get("error") or "用户取消", "mode": rec.get("mode")}
         # done → 已是 _jsonable 后的 dict
         body = dict(rec["result"])
         body["status"] = "done"
