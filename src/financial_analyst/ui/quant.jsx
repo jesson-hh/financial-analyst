@@ -35,6 +35,17 @@ function useAsync() {
 const n2 = (v, d = 2) => (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) ? '—' : (typeof v === 'number' ? v.toFixed(d) : v);
 const pct = (v, d = 2) => (v === null || v === undefined || (typeof v === 'number' && isNaN(v))) ? '—' : (v * 100).toFixed(d) + '%';
 
+// 短窗口判定 (<30 交易日 KPI 年化放大失真) + 区间总收益替代年化
+function _isShort(d) {
+  return !!(d && d.nav && d.nav.dates && d.nav.dates.length < 30);
+}
+function _intervalRet(series) {
+  if (!series || series.length < 2) return null;
+  const a = series[0], b = series[series.length - 1];
+  if (typeof a !== 'number' || typeof b !== 'number' || a === 0) return null;
+  return (b - a) / a;
+}
+
 const POOLS = ['快测', 'csi300', 'csi500', 'csi800', 'all'];
 const POOL_DEFAULT = 'csi300_active';   // csi300 交互快档
 const poolParam = (p) => (p === '快测' ? 'csi_fast' : (p === 'csi300' ? POOL_DEFAULT : p));
@@ -2136,26 +2147,54 @@ function BacktestMode() {
       {d && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           {(d.warnings || []).length > 0 && <div className="mono" style={{ fontSize: 10, color: 'var(--jin)' }}>⚠ {d.warnings.join(' · ')}</div>}
+          {_isShort(d) && (
+            <div style={{
+              padding: '10px 14px',
+              border: '1px solid var(--jin)', background: '#fff5e6',
+              fontSize: 11.5, color: 'var(--ink-1)',
+            }}>
+              <strong>⚠ 样本 {d.nav.dates.length} 个交易日 &lt; 30, KPI 仅参考</strong> ·
+              年化 / Sharpe / Calmar / 波动率 都对短窗口做了 √250 或 ^(250/N) 放大, 噪声会被放大数十倍.
+              要看真实策略表现请跑 60+ 交易日窗口.
+            </div>
+          )}
           <BacktestSummaryChips d={d} onPoolClick={() => setShowPoolPopover(true)} />
           <Panel title={<span>组合表现 <span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', marginLeft: 6 }}>{d.mode}·{d.params && d.params.start}~{d.params && d.params.end}·LLM {k.n_llm_calls} 次</span></span>}>
             {/* 8 格, 对齐 FactorReportView 的组合回测格 */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', border: '1px solid var(--line-soft)' }}>
-              <Kpi label="年化"     value={pct(k.ann_return)} dir={dirOf(k.ann_return)}
-                   tooltip="年化收益率 = (1 + 区间总收益)^(250/区间交易日) − 1" />
-              <Kpi label="Sharpe"   value={n2(k.sharpe, 2)}
+              {_isShort(d) ? (
+                <Kpi label={<span>区间收益<span style={{ color: 'var(--jin)', marginLeft: 3 }}>⚠</span></span>}
+                     value={pct(_intervalRet(d.nav.series))}
+                     dir={dirOf(_intervalRet(d.nav.series))}
+                     tooltip={`样本 ${d.nav.dates.length} 日 < 30, 显示区间总收益替代年化 (年化放大失真). 公式: (末值 − 首值) / 首值`} />
+              ) : (
+                <Kpi label="年化"     value={pct(k.ann_return)} dir={dirOf(k.ann_return)}
+                     tooltip="年化收益率 = (1 + 区间总收益)^(250/区间交易日) − 1" />
+              )}
+              <Kpi label={<>Sharpe{_isShort(d) && <span style={{ color: 'var(--jin)', marginLeft: 3, fontSize: 10 }}>⚠</span>}</>}
+                   value={n2(k.sharpe, 2)}
                    tooltip="夏普比率 = 年化收益 / 年化波动率 (无风险=0)" />
               <Kpi label="最大回撤"  value={pct(k.max_drawdown)} dir={k.max_drawdown ? 'down' : undefined}
                    tooltip="最大回撤 = max((peak − trough) / peak), 滚动统计" />
-              <Kpi label="Calmar"   value={n2(k.calmar, 2)} last
+              <Kpi label={<>Calmar{_isShort(d) && <span style={{ color: 'var(--jin)', marginLeft: 3, fontSize: 10 }}>⚠</span>}</>}
+                   value={n2(k.calmar, 2)} last
                    tooltip="年化收益 / |最大回撤| · 抗回撤能力指标" />
-              <Kpi label="波动率"    value={pct(k.volatility)}
+              <Kpi label={<>波动率{_isShort(d) && <span style={{ color: 'var(--jin)', marginLeft: 3, fontSize: 10 }}>⚠</span>}</>}
+                   value={pct(k.volatility)}
                    tooltip="年化波动率 = std(日收益) × √250" />
               <Kpi label="换手"     value={pct(k.turnover)}
                    tooltip="区间总成交额 / 期末总资产 / 年化系数 (来自 portfolio.py)" />
               <Kpi label="胜率(日)"  value={pct(k.win_rate)}
                    tooltip="净值正收益日数 / 总交易日数" />
-              <Kpi label="逐笔胜率"  value={pct(k.trade_win_rate)} last
-                   tooltip="盈利卖单 / 总卖单 (action='sell' 且 pnl > 0)" />
+              {(() => {
+                const nSells = (d.trades || []).filter(t => t.action === 'sell').length;
+                if (nSells === 0) {
+                  return <Kpi label="逐笔胜率" value="—" last
+                              tooltip="窗口内无 sell 完成 (LLM 一直 hold 或 mock buy 后没等到 hold_days), 无法计算逐笔胜率" />;
+                }
+                return <Kpi label="逐笔胜率" value={pct(k.trade_win_rate)} last
+                            tooltip={`${nSells} 笔 sell · 盈利卖单 / 总卖单 (action='sell' 且 pnl > 0)`} />;
+              })()}
             </div>
             <div style={{ marginTop: 10 }}>
               {navOk ? <EquityChart series={navVals} dates={navDates} benchmark={d.benchmark || undefined} />
