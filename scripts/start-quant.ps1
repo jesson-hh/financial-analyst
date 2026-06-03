@@ -1,4 +1,4 @@
-# start-quant.ps1
+﻿# start-quant.ps1
 #
 # 一键启动量化工作台 (財經分析觀瀾 quant.html):
 #   1. fa serve 后端 (port 9999)
@@ -73,7 +73,9 @@ $backendOk = $false
 try {
     $r = Invoke-WebRequest -Uri "http://localhost:$BackendPort/openapi.json" -TimeoutSec 5 -UseBasicParsing
     if ($r.StatusCode -eq 200) { $backendOk = $true }
-} catch {}
+} catch {
+    $backendOk = $false
+}
 
 if ($backendOk) {
     Write-Host ""
@@ -83,7 +85,7 @@ if ($backendOk) {
     Write-Warning "  后端 probe 失败 (可能还在 cold start) — 等几秒后浏览器刷新"
 }
 
-$Url = "http://localhost:$UiPort/quant.html?v=20260603c"
+$Url = "http://localhost:$UiPort/quant.html"   # 不带 ?v= — html 内嵌的 jsx 路径自带最新 cache-buster
 
 if (-not $NoOpen) {
     Write-Host ""
