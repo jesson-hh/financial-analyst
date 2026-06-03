@@ -2434,9 +2434,10 @@ def build_app():
 
     @app.get("/watch/status")
     async def watch_status():
-        """Current盯盘 state: running flag, item list, tick/LLM counters."""
+        """Current盯盘 state: running flag, item list, tick/LLM counters + 当前 cfg."""
         loop = _watch_loop
         items = _watch_items_view()
+        cfg = getattr(loop, "cfg", None) if loop else None
         return JSONResponse({
             "ok": True,
             "running": _watch_running(),
@@ -2444,6 +2445,10 @@ def build_app():
             "items": items,
             "tick_count": int(getattr(loop, "tick_count", 0)) if loop else 0,
             "llm_calls_made": int(getattr(loop, "llm_calls_made", 0)) if loop else 0,
+            # P0.2 新增 (让前端显示当前 cfg, 不只默认值)
+            "tick_seconds": float(getattr(cfg, "tick_seconds", 60)) if cfg else 60.0,
+            "cooldown_minutes": int(getattr(cfg, "cooldown_minutes", 15)) if cfg else 15,
+            "global_llm_cap_per_session": int(getattr(cfg, "global_llm_cap_per_session", 20)) if cfg else 20,
         })
 
     @app.get("/watch/bars")
