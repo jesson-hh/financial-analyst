@@ -1,0 +1,60 @@
+{
+  "id": "wfa24e1cf06c6",
+  "name": "P2·大盘共振强度R²-时序IC(立昂微)",
+  "ts": 1781011072389,
+  "graph": {
+    "nodes": [
+      {
+        "id": "n153",
+        "type": "source",
+        "x": 60,
+        "y": 210,
+        "params": {
+          "scope": "自选",
+          "codes": "605358",
+          "benchmark": "csi300"
+        }
+      },
+      {
+        "id": "n154",
+        "type": "formula",
+        "x": 60,
+        "y": 110,
+        "params": {
+          "expr": "rsqr(returns,idx_ret,60)"
+        }
+      },
+      {
+        "id": "n155",
+        "type": "tsic",
+        "x": 342,
+        "y": 160,
+        "params": {
+          "fwd_days": 10
+        }
+      }
+    ],
+    "edges": [
+      {
+        "from": [
+          "n153",
+          "data"
+        ],
+        "to": [
+          "n155",
+          "src"
+        ]
+      },
+      {
+        "from": [
+          "n154",
+          "out"
+        ],
+        "to": [
+          "n155",
+          "factor"
+        ]
+      }
+    ]
+  }
+}

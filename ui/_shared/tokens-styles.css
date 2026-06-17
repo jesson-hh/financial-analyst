@@ -1,0 +1,39 @@
+/* 极客风（geek）— 暖色暗调终端 */
+:root, .geek-scope {
+  --g-bg:        #0e0c08;
+  --g-surface:   #15110a;
+  --g-line:      #2a2418;
+  --g-line-2:    #3d3422;
+  --g-ink:       #e8dfc4;
+  --g-ink-2:     #b8ad8c;
+  --g-ink-3:     #6f6651;
+  --g-amber:     #d9a25c;          /* 主强调 */
+  --g-amber-d:   #f0c075;
+  --g-cyan:      #6fc2d1;          /* AI / 系统 */
+  --g-mag:       #c97c8c;          /* 警示弱 */
+  --g-up:        #e26b58;          /* 涨（朱砂感） */
+  --g-down:      #6db092;          /* 跌 */
+  --g-yin:       #c93f3f;          /* 警铃 */
+}
+
+/* 科技风（tech）— 深空玻璃 HUD */
+.tech-scope {
+  --t-bg:        #07090f;
+  --t-bg-2:      #0c1018;
+  --t-surface:   rgba(255,255,255,0.035);
+  --t-surface-2: rgba(255,255,255,0.06);
+  --t-line:      rgba(140,170,210,0.12);
+  --t-line-2:    rgba(140,170,210,0.22);
+  --t-ink:       #e8eef8;
+  --t-ink-2:     #9aa6b8;
+  --t-ink-3:     #5b6477;
+  --t-cyan:      #4dd5ff;
+  --t-cyan-d:    #7ee0ff;
+  --t-magenta:   #ff5e9a;
+  --t-up:        #ff5b6e;
+  --t-down:      #2bd4a8;
+  --t-amber:     #ffc857;
+}
+
+/* 通用 mono 字 */
+.geek-scope, .tech-scope { font-feature-settings: "ss01","ss02","cv11"; }

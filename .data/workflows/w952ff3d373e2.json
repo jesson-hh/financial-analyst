@@ -1,0 +1,115 @@
+{
+  "id": "w952ff3d373e2",
+  "name": "质量价值现金流·ICIR三因子·csi800(AI生成)",
+  "ts": 1780900055496,
+  "graph": {
+    "nodes": [
+      {
+        "id": "s",
+        "type": "source",
+        "x": 60,
+        "y": 300,
+        "params": {
+          "universe": "csi800"
+        }
+      },
+      {
+        "id": "f1",
+        "type": "formula",
+        "x": 60,
+        "y": 120,
+        "params": {
+          "expr": "rank(roe)"
+        }
+      },
+      {
+        "id": "f2",
+        "type": "formula",
+        "x": 60,
+        "y": 210,
+        "params": {
+          "expr": "rank(total_equity/total_mv)"
+        }
+      },
+      {
+        "id": "f3",
+        "type": "formula",
+        "x": 60,
+        "y": 390,
+        "params": {
+          "expr": "rank(cfo/net_income)"
+        }
+      },
+      {
+        "id": "fe",
+        "type": "feature",
+        "x": 342,
+        "y": 120,
+        "params": {
+          "tag": "IC"
+        }
+      },
+      {
+        "id": "mf",
+        "type": "mf",
+        "x": 624,
+        "y": 200,
+        "params": {
+          "combine": "icir"
+        }
+      },
+      {
+        "id": "an",
+        "type": "analysis",
+        "x": 906,
+        "y": 200,
+        "params": {
+          "rebal": "month",
+          "groups": 10
+        }
+      }
+    ],
+    "edges": [
+      {
+        "from": [
+          "s",
+          "data"
+        ],
+        "to": [
+          "fe",
+          "src"
+        ]
+      },
+      {
+        "from": [
+          "f1",
+          "out"
+        ],
+        "to": [
+          "fe",
+          "feat"
+        ]
+      },
+      {
+        "from": [
+          "fe",
+          "fe"
+        ],
+        "to": [
+          "mf",
+          "f1"
+        ]
+      },
+      {
+        "from": [
+          "mf",
+          "factor"
+        ],
+        "to": [
+          "an",
+          "factor"
+        ]
+      }
+    ]
+  }
+}

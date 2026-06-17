@@ -1,0 +1,10 @@
+[
+  {
+    "name": "mined_distress_combined",
+    "family": "library_mined",
+    "expr": "(delay(close,10)/close-1)*ts_mean(turnover_rate,5)/(ts_mean(turnover_rate,20)+1e-8)+stddev(close/delay(close,1)-1,20)/(ts_mean(amount,20)+1e-8)*1e9",
+    "description": "占位样例(自挖落点):困境组合 = 下跌高换手 + 高波动低额。来自 stocks 滚动 top30。",
+    "source": "stocks/results/factor_mining/rolling_top30_factors.txt#distress_combined",
+    "qlib_src": "(Ref($close,10)/$close-1)*Mean($turnover_rate,5)/(Mean($turnover_rate,20)+1e-8)+Std($close/Ref($close,1)-1,20)/(Mean($amount,20)+1e-8)*1e9"
+  }
+]

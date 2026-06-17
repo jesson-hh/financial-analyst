@@ -1,0 +1,17 @@
+name: mainline-radar
+description: Monthly market-structure scan — 5-state sector classification + golden signal detection
+variables:
+  - name: asof_date
+    type: string
+    default: today
+  - name: panel_path
+    type: string
+    default: ""
+
+agents:
+  - name: mainline-classifier
+    deps: []
+    input_keys: [asof_date, panel_path]
+  - name: mainline-writer
+    deps: [mainline-classifier]
+    input_keys: [mainline-classifier, asof_date, out_dir]

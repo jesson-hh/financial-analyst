@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>观澜 · 帷幄 — 设计稿 mockup(非实现)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&family=Noto+Serif+SC:wght@400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&display=swap" />
+<link rel="stylesheet" href="../_shared/tokens.css" />
+<style>
+  html, body { height: 100%; margin: 0; }
+  body { font-family: var(--sans); color: var(--ink); background: var(--paper); overflow: hidden; }
+  .num { font-variant-numeric: tabular-nums; }
+  *::-webkit-scrollbar { width: 8px; height: 8px; }
+  *::-webkit-scrollbar-thumb { background: rgba(28,24,20,0.16); border-radius: 4px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
+  @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+
+  .shell { display: grid; grid-template-rows: 52px 1fr; height: 100vh; min-width: 1280px; }
+  /* 工作台优先:右栏(现有页原样嵌入)是主面积,对话是侧栏 */
+  .cols { display: grid; grid-template-columns: 264px 460px 1fr; min-height: 0; }
+  /* ⇋ 对话优先:读长回答时对话吃宽,工作台收到 560px */
+  .cols.chatwide { grid-template-columns: 264px 1fr 560px; }
+  /* 无产物 / ✕ 收起:右栏整个不存在,只有对话(开局默认态) */
+  .cols.solo { grid-template-columns: 264px 1fr; }
+  .cols.solo .bench { display: none; }
+  .grip { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 8; }
+  .grip::after { content: "⋮"; position: absolute; top: 50%; left: 1px; color: var(--ink-3); font-size: 14px; }
+
+  /* ── 顶栏 masthead ── */
+  .mast { display: flex; align-items: center; gap: 14px; padding: 0 18px;
+          border-bottom: 2px solid var(--ink); background: var(--paper); }
+  .mast .title { font-family: var(--serif); font-size: 17px; font-weight: 600; letter-spacing: 2px; }
+  .mast .sub { font-size: 11px; color: var(--ink-3); letter-spacing: 1px; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; font-size: 11px;
+          border: 1px solid var(--line); color: var(--ink-2); background: var(--paper-2); border-radius: 2px; }
+  .chip b { color: var(--ink-1); font-weight: 600; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+
+  /* ── 左栏:任务 + 会话 ── */
+  .rail { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; background: var(--paper); }
+  .rail .newchat { margin: 12px 12px 4px; padding: 9px 0; text-align: center; font-family: var(--serif);
+                   font-size: 13px; letter-spacing: 4px; border: 1.5px solid var(--ink); cursor: pointer;
+                   background: var(--paper-2); }
+  .rail h3 { font-family: var(--serif); font-size: 11px; font-weight: 600; letter-spacing: 3px;
+             color: var(--ink-2); margin: 16px 14px 6px; display: flex; align-items: center; gap: 8px; }
+  .rail h3::after { content: ""; flex: 1; border-top: 1px solid var(--line-soft); }
+  .task { margin: 0 10px 6px; padding: 8px 10px; border: 1px solid var(--line-soft); background: var(--paper-2);
+          font-size: 12px; cursor: pointer; }
+  .task .t { display: flex; align-items: center; gap: 7px; color: var(--ink-1); }
+  .task .m { margin-top: 3px; font-size: 10.5px; color: var(--ink-3); padding-left: 13px; }
+  .task .bar { margin: 6px 0 1px 13px; height: 3px; background: var(--line-soft); position: relative; }
+  .task .bar i { position: absolute; left: 0; top: 0; bottom: 0; width: 62%; background: var(--jin); }
+  .sess { margin: 0 10px 4px; padding: 7px 10px; font-size: 12.5px; color: var(--ink-1); cursor: pointer;
+          border-left: 2px solid transparent; display: flex; justify-content: space-between; gap: 6px; }
+  .sess:hover { background: rgba(28,24,20,0.04); }
+  .sess.on { border-left-color: var(--yin); background: var(--paper-2); font-weight: 500; }
+  .sess .when { color: var(--ink-3); font-size: 10.5px; white-space: nowrap; }
+  .railfoot { margin-top: auto; padding: 10px 14px; border-top: 1px solid var(--line-soft);
+              font-size: 11px; color: var(--ink-3); display: flex; gap: 12px; }
+
+  /* ── 中栏:对话 ── */
+  .stage { display: flex; flex-direction: column; min-height: 0; min-width: 0;
+           background:
+             radial-gradient(120% 80% at 10% 0%, rgba(212,201,171,0.18) 0%, transparent 50%),
+             radial-gradient(100% 60% at 90% 100%, rgba(184,165,123,0.12) 0%, transparent 60%),
+             var(--paper); }
+  .scroll { flex: 1; overflow-y: auto; padding: 22px 0 8px; }
+  .thread { max-width: 780px; margin: 0 auto; padding: 0 28px; display: flex; flex-direction: column; gap: 16px; }
+
+  .msg-u { align-self: flex-end; max-width: 78%; background: var(--paper-2); border: 1px solid var(--line);
+           padding: 10px 14px; font-size: 13.5px; line-height: 1.7; }
+  .msg-a { display: flex; gap: 12px; }
+  .msg-a .seal { width: 28px; height: 28px; flex: none; font-size: 13px; margin-top: 2px; }
+  .msg-a .body { font-size: 13.5px; line-height: 1.85; color: var(--ink-1); min-width: 0; }
+  .msg-a .body p { margin: 0 0 8px; }
+
+  /* 计划块(agent 的任务清单,持久可见) */
+  .plan { border: 1px solid var(--line); background: var(--paper-2); margin: 2px 0 8px; }
+  .plan .ph { display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-bottom: 1px solid var(--line-soft);
+              font-family: var(--serif); font-size: 12px; letter-spacing: 2px; color: var(--ink-2); }
+  .plan .ph .badge { margin-left: auto; font-size: 10.5px; color: var(--jin); letter-spacing: 0; }
+  .plan ul { list-style: none; margin: 0; padding: 8px 12px; display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; }
+  .plan li { display: flex; gap: 8px; align-items: baseline; color: var(--ink-1); }
+  .plan li.done { color: var(--ink-3); }
+  .plan li.done .k { color: var(--dai); }
+  .plan li.run .k { color: var(--zhu); animation: pulse 1.6s infinite; }
+  .plan li .k { font-family: var(--mono); font-size: 11px; width: 14px; flex: none; }
+
+  /* 工具调用卡(可折叠) */
+  .tool { border: 1px solid var(--line); border-left: 3px solid var(--jin); background: var(--paper-2);
+          margin: 2px 0 8px; font-size: 12px; }
+  .tool .th { display: flex; align-items: center; gap: 9px; padding: 7px 12px; cursor: pointer; }
+  .tool .th .fn { font-family: var(--mono); font-size: 11.5px; color: var(--ink-1); }
+  .tool .th .arg { color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tool .th .st { margin-left: auto; white-space: nowrap; font-size: 11px; }
+  .tool .th .st.ok { color: var(--dai); }
+  .tool .res { border-top: 1px dashed var(--line-soft); padding: 7px 12px; display: flex; gap: 16px; align-items: center;
+               color: var(--ink-2); }
+  .tool .res .view { margin-left: auto; color: var(--yin); cursor: pointer; font-size: 11.5px; white-space: nowrap; }
+  .cursor { display: inline-block; width: 8px; background: var(--ink); animation: blink 1s infinite; }
+
+  /* 输入坞 */
+  .dock { padding: 10px 28px 16px; }
+  .dockin { max-width: 780px; margin: 0 auto; border: 1.5px solid var(--ink); background: var(--paper); }
+  .dockin textarea { width: 100%; border: 0; outline: 0; resize: none; background: transparent; color: var(--ink);
+                     font-family: var(--sans); font-size: 13.5px; line-height: 1.6; padding: 12px 14px 4px; height: 54px; }
+  .dockrow { display: flex; align-items: center; gap: 8px; padding: 6px 10px 8px; }
+  .dockrow .hint { font-size: 11px; color: var(--ink-3); display: inline-flex; gap: 4px; align-items: center;
+                   padding: 2px 8px; border: 1px solid var(--line-soft); background: var(--paper-2); cursor: pointer; }
+  .send { margin-left: auto; width: 34px; height: 34px; background: var(--yin); color: var(--paper);
+          font-family: var(--serif); font-size: 15px; display: flex; align-items: center; justify-content: center;
+          cursor: pointer; }
+
+  /* ── 右栏:功能栏(工作台) ── */
+  .bench { border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; background: var(--paper); }
+  .tabs { display: flex; align-items: center; border-bottom: 1px solid var(--line); padding: 0 8px; }
+  .tab { padding: 10px 11px 8px; font-size: 12px; color: var(--ink-3); cursor: pointer; letter-spacing: 1px;
+         border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
+  .tab.on { color: var(--ink); border-bottom-color: var(--yin); font-weight: 500; }
+  .tabact { margin-left: auto; display: flex; gap: 8px; padding-right: 4px; }
+  .tabact span { font-size: 11px; color: var(--ink-3); cursor: pointer; }
+  .benchbody { flex: 1; overflow-y: auto; padding: 14px; }
+  /* 融合宿主:现有页 iframe 原样嵌入 */
+  .benchbody.host { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+  .embedbar { font-size: 10.5px; color: var(--ink-3); padding: 5px 14px; border-bottom: 1px dashed var(--line-soft);
+              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .embedwrap { flex: 1; position: relative; overflow: hidden; }
+  /* top 负偏移 = 裁掉内页重复的导航条+页头,示意 embed=1 的效果(实现期按元素隐藏,功能按钮保留) */
+  .embedwrap iframe { position: absolute; top: -60px; left: 0; border: 0; background: var(--paper);
+                      width: 152%; height: calc(152% + 92px); transform: scale(0.658); transform-origin: 0 0; }
+  .bh { font-family: var(--serif); font-size: 13px; font-weight: 600; letter-spacing: 1px; margin: 0 0 2px; }
+  .bsub { font-size: 11px; color: var(--ink-3); margin-bottom: 10px; }
+  table.mini { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.mini th { text-align: left; font-weight: 500; color: var(--ink-3); font-size: 10.5px; letter-spacing: 1px;
+                  border-bottom: 1px solid var(--line); padding: 4px 6px; }
+  table.mini td { padding: 6px; border-bottom: 1px solid var(--line-soft); color: var(--ink-1); }
+  table.mini td.num { font-family: var(--mono); font-size: 11.5px; }
+  .star { color: var(--jin); font-size: 11px; letter-spacing: 1px; }
+  .benchcta { display: flex; gap: 8px; margin-top: 12px; }
+  .benchcta .b1 { flex: 1; text-align: center; padding: 8px 0; border: 1.5px solid var(--ink); font-family: var(--serif);
+                  letter-spacing: 3px; font-size: 12.5px; cursor: pointer; background: var(--paper-2); }
+  .benchcta .b2 { flex: 1; text-align: center; padding: 8px 0; border: 1px solid var(--line); font-size: 12px;
+                  color: var(--ink-2); cursor: pointer; }
+  .arthist { border-top: 1px solid var(--line); padding: 10px 14px; }
+  .arthist h4 { font-size: 10.5px; letter-spacing: 2px; color: var(--ink-3); font-weight: 500; margin: 0 0 8px;
+                font-family: var(--serif); }
+  .artchips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .artchip { font-size: 11px; padding: 3px 9px; border: 1px solid var(--line-soft); background: var(--paper-2);
+             color: var(--ink-2); cursor: pointer; }
+
+  /* 设计标注(① 红圈,仅 mockup 用) */
+  .note { position: absolute; width: 18px; height: 18px; border-radius: 50%; background: var(--yin); color: var(--paper);
+          font-size: 11px; display: flex; align-items: center; justify-content: center; z-index: 9;
+          box-shadow: 0 1px 4px rgba(0,0,0,0.25); font-family: var(--mono); }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- 顶栏 -->
+  <div class="mast">
+    <span class="seal" style="font-size:13px">帷</span>
+    <span class="title">观澜 · 帷幄</span>
+    <span class="sub">一席对话 · 总揽全局</span>
+    <span style="flex:1"></span>
+    <span class="chip"><span class="dot" style="background:var(--dai)"></span>引擎 <b>在线</b></span>
+    <span class="chip">数据 <b class="num">06-09</b></span>
+    <span class="chip">体检 IC <b class="num" style="color:var(--zhu)">0.041↗</b></span>
+    <span class="chip">工具 <b class="num">24</b></span>
+    <span class="chip" title="跳到原各分页">分页 ▾</span>
+  </div>
+
+  <div class="cols">
+
+    <!-- ① 左:任务栏 -->
+    <div class="rail" style="position:relative">
+      <span class="note" style="top:10px; left:10px">1</span>
+      <div class="newchat">新 对 话</div>
+
+      <h3>进行中任务</h3>
+      <div class="task">
+        <div class="t"><span class="dot" style="background:var(--zhu); animation:pulse 1.4s infinite"></span>回测 · 动量+低波 组合</div>
+        <div class="m">csi300 · 2y · 第 3/5 步 · 已 92s</div>
+        <div class="bar"><i></i></div>
+      </div>
+      <div class="task">
+        <div class="t"><span class="dot" style="background:var(--jin)"></span>研报 · 宁德时代 300750</div>
+        <div class="m">排队 · 等回测完成后自动开跑</div>
+      </div>
+
+      <h3>今日已完成</h3>
+      <div class="task" style="opacity:0.75">
+        <div class="t"><span class="dot" style="background:var(--dai)"></span>选股 · 九视角混排 12 票</div>
+        <div class="m">14:02 · 产物在右栏 · 已入盯盘池 2 只</div>
+      </div>
+      <div class="task" style="opacity:0.75">
+        <div class="t"><span class="dot" style="background:var(--dai)"></span>经验卡 · EV-014 已沉淀</div>
+        <div class="m">13:47 · 工作流 IC -0.031 · draft</div>
+      </div>
+
+      <h3>会话</h3>
+      <div class="sess on"><span>动量策略全流程</span><span class="when">现在</span></div>
+      <div class="sess"><span>沪深300基准补源探讨</span><span class="when">昨天</span></div>
+      <div class="sess"><span>立昂微 研报+研判</span><span class="when">06-09</span></div>
+      <div class="sess"><span>财务因子族验证</span><span class="when">06-08</span></div>
+
+      <div class="railfoot"><span>记忆 12 条</span><span>档案 47 件</span><span style="margin-left:auto">⚙</span></div>
+    </div>
+
+    <!-- ② 中:对话 -->
+    <div class="stage" style="position:relative">
+      <span class="note" style="top:10px; left:50%">2</span>
+      <div class="scroll">
+        <div class="thread">
+
+          <div class="msg-u">帮我做一套动量+低波的组合策略:先搭工作流验证因子,回测过了就去选股池里混排,挑出来的票放进盯盘,最后给前两名各写一份研报。</div>
+
+          <div class="msg-a">
+            <span class="seal">觀</span>
+            <div class="body">
+              <p>收到。这是一条全链路任务,我拆成五步,先逐步执行,完成的会实时勾掉:</p>
+
+              <div class="plan">
+                <div class="ph">⊟ 任务计划 <span class="badge">挂在左栏 · 跨会话可恢复</span></div>
+                <ul>
+                  <li class="done"><span class="k">✓</span>工作流验证:动量 rank(-delta(close,20)) + 低波 −std(returns,20),csi300 截面 IC</li>
+                  <li class="done"><span class="k">✓</span>icir 加权合成,样本外占比 30% 体检</li>
+                  <li class="run"><span class="k">▶</span>组合回测 2y(equal vs inv_vol 双口径)——运行中</li>
+                  <li><span class="k">○</span>选股九视角混排(α=0.6)取 top20,前 2 名入盯盘池</li>
+                  <li><span class="k">○</span>对前 2 名各跑一份深度研报,回写个股时间线</li>
+                </ul>
+              </div>
+
+              <div class="tool">
+                <div class="th"><span>⚙</span><span class="fn">workflow.run</span><span class="arg">动量+低波 · icir 加权 · csi300 · oos 0.3</span><span class="st ok">✓ 14.2s</span></div>
+                <div class="res"><span>复合 RankIC <b class="num" style="color:var(--zhu)">0.052</b></span><span>ICIR <b class="num">0.31</b></span><span>PBO <b class="num">2.9%</b></span><span class="view">右栏查看 ↗</span></div>
+              </div>
+
+              <p>两腿因子样本外都站得住,icir 加权后 PBO 仅 2.9%,过拟合风险低。回测我同时跑等权与反波动率两个口径,正在第 3/5 步——左栏可以看到进度,你随时可以打断我或追加要求。</p>
+
+              <div class="tool">
+                <div class="th"><span>⚙</span><span class="fn">backtest.vector</span><span class="arg">topN=30 · 分腿成本 · equal + inv_vol</span><span class="st" style="color:var(--zhu)">▶ 运行中 92s</span></div>
+              </div>
+
+              <p>回测完成后我会把净值与回撤贴在右栏对比<span class="cursor">&nbsp;</span></p>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ④ 输入坞 -->
+      <div class="dock" style="position:relative">
+        <span class="note" style="top:-2px; left:28px">4</span>
+        <div class="dockin">
+          <textarea placeholder="对观澜下令——选股、回测、研报、盯盘、经验沉淀,一句话即可。Shift+Enter 换行"></textarea>
+          <div class="dockrow">
+            <span class="hint">/ 快捷令</span>
+            <span class="hint">@ 引物料</span>
+            <span class="hint">深度研判 ◯</span>
+            <div class="send">令</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ③ 右:功能栏(工作台) -->
+    <div class="bench" style="position:relative">
+      <span class="note" style="top:10px; right:10px">3</span>
+      <span class="note" style="top:50%; left:-9px" title="分隔条可拖宽,宽度记忆">5</span>
+      <div class="grip" title="拖动调宽(实现期:宽度存 localStorage)"></div>
+      <div class="tabs">
+        <span class="tab on">选股</span>
+        <span class="tab" style="opacity:0.45" title="本会话尚未激活(agent 调过该页工具才出现)">工作流</span>
+        <div class="tabact">
+          <span title="agent 产出新产物时不再自动切换">⌖ 钉住</span>
+          <span title="读长回答时让对话吃宽,工作台收窄" onclick="document.querySelector('.cols').classList.toggle('chatwide'); this.textContent = document.querySelector('.cols').classList.contains('chatwide') ? '⇋ 工作台优先' : '⇋ 对话优先';">⇋ 对话优先</span>
+          <span title="在原独立页全宽打开">↗</span>
+          <span title="收起工作台,只留对话(下个产物到来时自动滑出)" onclick="document.querySelector('.cols').classList.add('solo')">✕</span>
+        </div>
+      </div>
+      <div class="benchbody host">
+        <div class="embedbar">现有选股页原样活嵌 · embed=1 已示意:内页导航/重复页头/各页 agent 窗口隐藏,手动调整按钮保留 · agent 经 handoff 驱动刷新</div>
+        <div class="embedwrap"><iframe src="../screen/观澜 · 选股.html"></iframe></div>
+      </div>
+      <div class="arthist">
+        <h4>本会话产物</h4>
+        <div class="artchips">
+          <span class="artchip">IC 时序 · 动量+低波</span>
+          <span class="artchip">合成权重卡</span>
+          <span class="artchip">选股 top20(当前)</span>
+          <span class="artchip" style="opacity:0.5">净值对比(回测中…)</span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# 密钥 / 环境 — 绝不入库 (用 .env.example 作模板)
+.env
+.env.local
+.env.*.local
+
+# 引擎运行产物
+out/
+.fa-data-update.log
+.engine-verify*.log
+.report-verify*.log
+.verify*.log
+# 验证期临时 boot/run 日志 (P3/P4/P5 控制端起 :9999 的散落 stdout/stderr) — 进程退出后可删
+_*boot*.log
+_*.out.log
+_*.err.log
+# agent 记忆: 模板/规则 (.md) 入库; dream-loop / 复盘 / buddy 对话沉淀的可变写入忽略
+memories/_pending_introspections/
+memories/_proposed/
+# buddy /lesson 个人对话经验 — 不入公开 fork. 新落点 _buddy/(2026-06-15 从 _shared 迁出),
+# 旧落点 _shared/conversation_lessons.md 一并兜底(防迁移前残留被提交)
+memories/_buddy/
+memories/_shared/conversation_lessons.md
+
+# 数据本体留在 G:/stocks (经 get_data_paths 只读引用) — 防误拷进仓库
+stock_data/
+news_data/
+
+# guanlan 自包含市场状态生成物 (guanlan_v2/strategy/market_status.py 写, 每日刷新; 数据非源码)
+data/market_status.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+
+# === 发布排除(公开仓 jesson-hh/financial-analyst)===
+# 运行态:研判记录 / 台账 / 验证截图 — 非源码,不入库
+var/
+.verify_tmp/
+# 大数据 artifacts(parquet,行情/主线)— 数据非源码,留本地
+guanlan_v2/strategy/vendor/artifacts/
+# 本地 agent / 编辑器配置
+.claude/
+# 散落服务 stdout/stderr 转储
+_srv.*
+# 临时截图 / 截屏(根)
+/*.png
+# playwright MCP 浏览器自动化控制台日志(运行态)
+.playwright-mcp/
+# 生成的研报产物(运行态数据,非源码)
+guanlan_v2/reports/store/

@@ -1,0 +1,84 @@
+name: stock-deep-dive
+description: A-share single-stock deep-dive research (16 agents, 4 tiers — v1.9.7 加 overseas-market-scanner + sector-rotation-analyzer 到 Tier-1, 喂宏观/行业 context 给 Tier-2)
+variables:
+  - name: code
+    type: string
+    required: true
+  - name: asof_date
+    type: string
+    default: today
+
+agents:
+  # Tier 1 — parallel, no dependencies
+  - name: quote-fetcher
+    deps: []
+    input_keys: [code, asof_date]
+  - name: factor-computer
+    deps: []
+    input_keys: [code, asof_date]
+  - name: model-predictor
+    deps: []
+    input_keys: [code, asof_date]
+  - name: news-reader
+    deps: []
+    input_keys: [code, asof_date]
+  - name: f10-reader
+    deps: []
+    input_keys: [code, asof_date]
+  # v1.9.7: 加海外宏观快照 + 行业轮动信号 (跟其它 Tier-1 并行, ~10s)
+  - name: overseas-market-scanner
+    deps: []
+    input_keys: [asof_date]
+  - name: sector-rotation-analyzer
+    deps: []
+    input_keys: [asof_date]
+  - name: news-sentiment            # 实时新闻情绪(大盘 market_read + 本票 tag)
+    deps: []
+    input_keys: [code, asof_date]
+
+  # Tier 2 — parallel after Tier 1. v1.9.7: 3 个 analyst 接 overseas + rotation 作为辅助 context
+  - name: fundamental-analyst
+    deps: [quote-fetcher, overseas-market-scanner]
+    input_keys: [quote-fetcher, overseas-market-scanner]
+  - name: technical-analyst
+    deps: [quote-fetcher, factor-computer, overseas-market-scanner, sector-rotation-analyzer]
+    input_keys: [quote-fetcher, factor-computer, overseas-market-scanner, sector-rotation-analyzer]
+  - name: whale-analyst
+    deps: [quote-fetcher, factor-computer]
+    input_keys: [quote-fetcher, factor-computer]
+  - name: quant-analyst
+    deps: [model-predictor, factor-computer, sector-rotation-analyzer]
+    input_keys: [model-predictor, factor-computer, sector-rotation-analyzer]
+
+  # Tier 3 — bull/bear parallel, then CRO, then writer
+  - name: bull-advocate
+    deps: [fundamental-analyst, technical-analyst, whale-analyst, quant-analyst]
+    input_keys: [fundamental-analyst, technical-analyst, whale-analyst, quant-analyst]
+  - name: bear-advocate
+    deps: [fundamental-analyst, technical-analyst, whale-analyst, quant-analyst]
+    input_keys: [fundamental-analyst, technical-analyst, whale-analyst, quant-analyst]
+    memory_mode: retrieval    # large pitfalls.md, F1-F14 — better retrieved
+  - name: risk-officer
+    deps: [bull-advocate, bear-advocate, news-reader, f10-reader, factor-computer]
+    input_keys: [bull-advocate, bear-advocate, news-reader, f10-reader, factor-computer]
+    borrows_memory: [bear-advocate]
+    memory_mode: retrieval    # 3 memory files + borrowed — better retrieved
+  - name: report-writer
+    deps: [quote-fetcher, factor-computer, model-predictor, fundamental-analyst,
+           technical-analyst, whale-analyst, quant-analyst,
+           bull-advocate, bear-advocate, risk-officer, news-sentiment]
+    input_keys: [quote-fetcher, factor-computer, model-predictor,
+                 fundamental-analyst, technical-analyst, whale-analyst, quant-analyst,
+                 bull-advocate, bear-advocate, risk-officer, news-sentiment,
+                 code, asof_date, out_dir]
+
+  # Tier 4 — post-mortem: 复盘本次研报, 给出 quality_flags + proposals 待 review
+  # 不阻塞研报输出 (report-writer 已落盘), 失败也不影响主流程; 提议写到
+  # memories/_pending_introspections/YYYY-MM-DD_CODE.json, 人工 review 后再决定
+  # 是否 patch 进 memories/<agent>/.
+  - name: introspector
+    deps: [report-writer, bull-advocate, bear-advocate, risk-officer,
+           fundamental-analyst, technical-analyst, whale-analyst, quant-analyst]
+    input_keys: [report-writer, bull-advocate, bear-advocate, risk-officer,
+                 fundamental-analyst, technical-analyst, whale-analyst, quant-analyst]
+    memory_mode: full   # introspector_rules.md 很小, 全读即可

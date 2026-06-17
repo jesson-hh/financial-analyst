@@ -1,0 +1,17 @@
+# config/loaders.yaml
+# Change `default` to switch the data source used by all sub-agents.
+default: qlib_binary
+
+loaders:
+  tushare:
+    cache_enabled: true
+    cache_ttl_seconds: 86400   # 1 day
+
+  qlib_binary:
+    provider_uri:
+      day: G:/stocks/stock_data/cn_data
+      5min: G:/stocks/stock_data/cn_data_5min
+      # 1min: G:/stocks/stock_data/cn_data_1min   # uncomment if needed
+    # Non-time-series data roots (read by financial_analyst.data.paths.get_data_paths)
+    parquet_root: G:/stocks/stock_data/parquet
+    news_data_root: G:/stocks/news_data

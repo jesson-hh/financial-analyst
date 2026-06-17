@@ -1,0 +1,22 @@
+[
+  {"name": "ta_macd_dif", "family": "ta", "expr": "sma(close,13,2) - sma(close,27,2)", "description": "MACD DIF:EMA12−EMA26(EMA(P)=sma(x,P+1,2))", "source": "ta-textbook/macd"},
+  {"name": "ta_macd_dea", "family": "ta", "expr": "sma(sma(close,13,2) - sma(close,27,2),10,2)", "description": "MACD DEA:DIF 的 9 日 EMA", "source": "ta-textbook/macd"},
+  {"name": "ta_macd_hist", "family": "ta", "expr": "2*((sma(close,13,2) - sma(close,27,2)) - sma(sma(close,13,2) - sma(close,27,2),10,2))", "description": "MACD 柱:2×(DIF−DEA)", "source": "ta-textbook/macd"},
+  {"name": "ta_macd_golden_cross", "family": "ta", "expr": "cross(sma(close,13,2) - sma(close,27,2), sma(sma(close,13,2) - sma(close,27,2),10,2))", "description": "MACD 金叉:DIF 上穿 DEA(0/1)", "source": "ta-textbook/macd"},
+  {"name": "ta_macd_dead_cross", "family": "ta", "expr": "cross(sma(sma(close,13,2) - sma(close,27,2),10,2), sma(close,13,2) - sma(close,27,2))", "description": "MACD 死叉:DEA 上穿 DIF(0/1)", "source": "ta-textbook/macd"},
+  {"name": "ta_rsi6", "family": "ta", "expr": "100*sma(max_pair(delta(close,1),0),6,1)/(sma(max_pair(delta(close,1),0),6,1)+sma(max_pair(-delta(close,1),0),6,1)+1e-8)", "description": "RSI(6):Wilder 平滑相对强弱", "source": "ta-textbook/rsi"},
+  {"name": "ta_rsi12", "family": "ta", "expr": "100*sma(max_pair(delta(close,1),0),12,1)/(sma(max_pair(delta(close,1),0),12,1)+sma(max_pair(-delta(close,1),0),12,1)+1e-8)", "description": "RSI(12)", "source": "ta-textbook/rsi"},
+  {"name": "ta_rsi14", "family": "ta", "expr": "100*sma(max_pair(delta(close,1),0),14,1)/(sma(max_pair(delta(close,1),0),14,1)+sma(max_pair(-delta(close,1),0),14,1)+1e-8)", "description": "RSI(14)", "source": "ta-textbook/rsi"},
+  {"name": "ta_rsi24", "family": "ta", "expr": "100*sma(max_pair(delta(close,1),0),24,1)/(sma(max_pair(delta(close,1),0),24,1)+sma(max_pair(-delta(close,1),0),24,1)+1e-8)", "description": "RSI(24)", "source": "ta-textbook/rsi"},
+  {"name": "ta_kdj_k", "family": "ta", "expr": "sma((close-ts_min(low,9))/(ts_max(high,9)-ts_min(low,9)+1e-8)*100,3,1)", "description": "KDJ-K:RSV 的 3 日平滑", "source": "ta-textbook/kdj"},
+  {"name": "ta_kdj_d", "family": "ta", "expr": "sma(sma((close-ts_min(low,9))/(ts_max(high,9)-ts_min(low,9)+1e-8)*100,3,1),3,1)", "description": "KDJ-D:K 的 3 日平滑", "source": "ta-textbook/kdj"},
+  {"name": "ta_kdj_j", "family": "ta", "expr": "3*sma((close-ts_min(low,9))/(ts_max(high,9)-ts_min(low,9)+1e-8)*100,3,1)-2*sma(sma((close-ts_min(low,9))/(ts_max(high,9)-ts_min(low,9)+1e-8)*100,3,1),3,1)", "description": "KDJ-J:3K−2D", "source": "ta-textbook/kdj"},
+  {"name": "ta_kdj_golden_cross", "family": "ta", "expr": "cross(sma((close-ts_min(low,9))/(ts_max(high,9)-ts_min(low,9)+1e-8)*100,3,1), sma(sma((close-ts_min(low,9))/(ts_max(high,9)-ts_min(low,9)+1e-8)*100,3,1),3,1))", "description": "KDJ 金叉:K 上穿 D(0/1)", "source": "ta-textbook/kdj"},
+  {"name": "ta_boll_pctb", "family": "ta", "expr": "(close - ts_mean(close,20) + 2*stddev(close,20))/(4*stddev(close,20)+1e-8)", "description": "布林 %B:close 在(下轨,上轨)内位置", "source": "ta-textbook/boll"},
+  {"name": "ta_boll_bandwidth", "family": "ta", "expr": "(4*stddev(close,20))/(ts_mean(close,20)+1e-8)", "description": "布林带宽:(上轨−下轨)/中轨", "source": "ta-textbook/boll"},
+  {"name": "ta_boll_upper_break", "family": "ta", "expr": "cross(close, ts_mean(close,20)+2*stddev(close,20))", "description": "上穿布林上轨(0/1)", "source": "ta-textbook/boll"},
+  {"name": "ta_wr14", "family": "ta", "expr": "-100*(ts_max(high,14)-close)/(ts_max(high,14)-ts_min(low,14)+1e-8)", "description": "威廉 %R(14):0~−100,越接近 0 越强", "source": "ta-textbook/wr"},
+  {"name": "ta_bias20", "family": "ta", "expr": "(close-ts_mean(close,20))/(ts_mean(close,20)+1e-8)", "description": "乖离率(20):close 偏离 MA20 的比例", "source": "ta-textbook/bias"},
+  {"name": "ta_roc20", "family": "ta", "expr": "close/(delay(close,20)+1e-8) - 1", "description": "变动率(20):20 日涨跌幅", "source": "ta-textbook/roc"},
+  {"name": "ta_atr14", "family": "ta", "expr": "ts_mean(max_pair(max_pair(high-low, abs(high-delay(close,1))), abs(low-delay(close,1))),14)", "description": "平均真实波幅(14)", "source": "ta-textbook/atr"}
+]

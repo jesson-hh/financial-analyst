@@ -1,0 +1,1068 @@
+"""``fa data`` subcommand group — 直连数据增量更新.
+
+子命令:
+  fa data status              — 看当前 bin 数据范围 + instruments 数 + 磁盘
+  fa data update              — pytdx 日线 + 5min + 腾讯 daily_basic 增量
+  fa data update --skip-5min  — 只更新日线 (更快)
+  fa data update --since 20260501 — 指定起始日
+  fa data update --codes SH600519,SZ300750 — 限定代码
+
+无需 Tushare token. 主站直连 + 多 host failover.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import time
+from datetime import date as _date, datetime
+from pathlib import Path
+from typing import List, Optional
+
+import typer
+
+data_app = typer.Typer(
+    name="data",
+    help="直连数据增量更新 (pytdx 主站 + 腾讯实时, 不需要 Tushare token).",
+    no_args_is_help=True,
+)
+
+
+def _resolve_provider_uri(freq: str = "day") -> str:
+    """解析 provider_uri (按频率).
+
+    优先级 (从高到低):
+      1. ``FA_DATA_DIR`` 环境变量 — 指向**父目录**, 自动拼 cn_data / cn_data_5min
+      2. ``FA_DATA_DAY_URI`` / ``FA_DATA_5MIN_URI`` — per-freq 显式 override
+      3. ``config/loaders.yaml`` 的 ``qlib_binary.provider_uri.{freq}``
+      4. ``~/.financial-analyst/data/cn_data{,_5min}`` (默认)
+    """
+    import os
+
+    # 1. per-freq override
+    per_freq = os.environ.get(f"FA_DATA_{freq.upper()}_URI")
+    if per_freq:
+        return per_freq
+
+    # 2. 父目录 override
+    env_parent = os.environ.get("FA_DATA_DIR")
+    if env_parent:
+        sub = "cn_data" if freq == "day" else f"cn_data_{freq}"
+        return os.path.join(env_parent, sub).replace("\\", "/")
+
+    # 3. config/loaders.yaml
+    try:
+        from financial_analyst.data.loader_factory import _load_config
+        cfg = _load_config()
+        loaders = cfg.get("loaders", {}) or {}
+        qb = loaders.get("qlib_binary", {}) or {}
+        provider = qb.get("provider_uri", {})
+        if isinstance(provider, dict) and provider.get(freq):
+            return provider[freq]
+        if isinstance(provider, str):
+            return provider   # legacy 单值, 视为 day
+    except Exception:
+        pass
+
+    # 4. 默认 workspace data dir (honours pinned workspace; falls back to HOME)
+    try:
+        from financial_analyst.workspace import get_workspace
+        ws = get_workspace()
+    except Exception:
+        ws = Path.home() / ".financial-analyst"
+    sub = "cn_data" if freq == "day" else f"cn_data_{freq}"
+    return str(ws / "data" / sub).replace("\\", "/")
+
+
+def _resolve_codes(codes_arg: Optional[str], provider_uri: str) -> List[str]:
+    """解析 codes 参数: None=所有 instruments; 逗号分隔的代码列表; @file=从文件读."""
+    from financial_analyst.data.bin_writer import load_instruments
+
+    if not codes_arg:
+        inst = load_instruments(provider_uri, market="all")
+        if not inst:
+            return []
+        return sorted(inst.keys())
+    if codes_arg.startswith("@"):
+        # 接受两种格式:
+        #   单列 "SH600519\n..."
+        #   instruments tab 格式 "SH600519\t2010-01-04\t2026-05-15"
+        out = []
+        for line in Path(codes_arg[1:]).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            out.append(line.split("\t")[0].split()[0].upper())
+        return out
+    return [c.strip().upper() for c in codes_arg.replace("，", ",").split(",") if c.strip()]
+
+
+# ───────────────────────── status ─────────────────────────
+
+
+@data_app.command("status")
+def status_cmd():
+    """看本机数据当前状态 (instruments 数 / 日线截止 / 5min 截止 / 磁盘)."""
+    from financial_analyst.data.bin_writer import (
+        load_calendar, load_instruments, get_bin_range,
+    )
+
+    day_uri = _resolve_provider_uri("day")
+    fivemin_uri = _resolve_provider_uri("5min")
+
+    typer.echo(f"日线 provider_uri:   {day_uri}")
+    typer.echo(f"5min provider_uri:   {fivemin_uri}")
+    typer.echo("")
+
+    # instruments
+    inst = load_instruments(day_uri, market="all")
+    typer.echo(f"  instruments (all):  {len(inst)} 只")
+
+    # 日历
+    cal_day = load_calendar(day_uri, freq="day")
+    cal_5min = load_calendar(fivemin_uri, freq="5min")
+    typer.echo(f"  日线日历:           {len(cal_day)} 天 "
+               f"({cal_day[0] if cal_day else '?'} → {cal_day[-1] if cal_day else '?'})")
+    typer.echo(f"  5min  日历:         {len(cal_5min)} bar "
+               f"({cal_5min[0] if cal_5min else '?'} → {cal_5min[-1] if cal_5min else '?'})")
+
+    # 抽样股票看 bin 范围
+    if inst:
+        sample_code = list(inst.keys())[0]
+        si, ei = get_bin_range(sample_code, "close", "day", day_uri)
+        typer.echo(f"  {sample_code} close.day.bin: range [{si}, {ei}] = "
+                   f"{ei - si + 1 if ei >= si else 0} 天")
+
+    # 磁盘
+    try:
+        import shutil
+        total, used, free = shutil.disk_usage(day_uri)
+        typer.echo(f"  磁盘 (day uri):     {free/1e9:.1f}GB 可用 / {total/1e9:.0f}GB 总")
+    except Exception:
+        pass
+
+    # 上次更新时间
+    typer.echo("")
+    typer.echo("  上次更新:")
+    from financial_analyst.data import last_update as _lu
+    for dt, age, stale in _lu.status_summary():
+        marker = "⚠" if stale else "✓"
+        typer.echo(f"    {marker} {dt:<13} {age}")
+    if any(s for _, _, s in _lu.status_summary()):
+        typer.echo("")
+        typer.echo("  ↻ 跑 fa data refresh 增量更新所有陈旧数据")
+
+
+# ───────────────────────── update ─────────────────────────
+
+
+@data_app.command("update")
+def update_cmd(
+    codes: Optional[str] = typer.Option(
+        None, "--codes",
+        help="逗号分隔代码 (SH600519,SZ300750) / @file 文件 / 留空=所有 instruments"),
+    n_daily: int = typer.Option(30, help="日线拉最近 N 根 (增量=30, 回补=800)"),
+    n_5min: int = typer.Option(240, help="5min 拉最近 N 根 (240≈5 个交易日)"),
+    skip_5min: bool = typer.Option(False, help="跳过 5min 更新 (只更日线)"),
+    skip_basic: bool = typer.Option(False, help="跳过 daily_basic (PE/PB/MV) 更新"),
+    trade_date: Optional[str] = typer.Option(
+        None, "--trade-date",
+        help="daily_basic 写入的日期 YYYY-MM-DD, 默认今日"),
+    include_f10: bool = typer.Option(
+        False, "--include-f10",
+        help="附带刷新 TDX F10 事件 (公司大事/龙虎榜/研究报告/最新提示/主力追踪)"),
+    include_f10_full: bool = typer.Option(
+        False, "--include-f10-full",
+        help="拓宽 F10 到全 15 类 (公司概况/财务分析/股东研究/股本结构/资本运作/业内点评/行业分析/经营分析/分红扩股/高层治理 + KEY 5 类). 与 --include-f10 互斥, 二选一.",
+    ),
+    f10_universe: str = typer.Option(
+        "csi500", "--f10-universe",
+        help="F10 刷新范围: csi300 / csi500 / csi800 / all (默认 csi500 ~30 min)"),
+    include_concepts: bool = typer.Option(
+        False, "--include-concepts",
+        help="附带刷新同花顺概念股清单 + 成分股 (需要 adata 包)"),
+    concepts_max_age_days: int = typer.Option(
+        30, "--concepts-max-age",
+        help="概念成分股超过 N 日未刷的重拉 (默认 30)"),
+    include_financial: bool = typer.Option(
+        False, "--include-financial",
+        help="附带刷新财务三表 (income/balancesheet/cashflow). 需 Tushare token."),
+    financial_days: int = typer.Option(
+        7, "--financial-days",
+        help="财务报表拉最近 N 天的 ann_date 公告 (默认 7)"),
+    include_stock_basic: bool = typer.Option(
+        False, "--include-stock-basic",
+        help="附带刷新 tushare_stock_basic (公司基本信息全表). 需 Tushare token."),
+    tushare_token: Optional[str] = typer.Option(
+        None, "--tushare-token",
+        help="Tushare API token. 默认读 FA_TUSHARE_TOKEN env (https://tushare.pro 免费注册)."),
+    include_northbound: bool = typer.Option(
+        False, "--include-northbound",
+        help="附带刷新北向 (沪深股通) 当日持仓快照 (零 token, 需 akshare 包)"),
+    include_fund_flow: bool = typer.Option(
+        False, "--include-fund-flow",
+        help="附带刷新个股资金流 (主力/大单/中单/小单/超大单日级 N 天, 零 token 走东财 push2)"),
+    fund_flow_lmt: int = typer.Option(
+        120, "--fund-flow-lmt",
+        help="资金流回看交易日数 (默认 120, 最大约 120 由 upstream 限制)"),
+    include_margin: bool = typer.Option(
+        False, "--include-margin",
+        help="附带刷新融资融券明细 (日级, 零 token 走东财 datacenter)"),
+    include_lockup: bool = typer.Option(
+        False, "--include-lockup",
+        help="附带刷新限售解禁日历 (历史 + 90 天预警, 零 token 走东财 datacenter)"),
+    include_corporate_actions: bool = typer.Option(
+        False, "--include-corporate-actions",
+        help="附带刷新公司行为三件套 (股东户数 + 大宗交易 + 分红送转, 零 token 走东财 datacenter)"),
+    include_ths_hot: bool = typer.Option(
+        False, "--include-ths-hot",
+        help="附带刷新同花顺当日强势股 + 题材归因 reason tags (零 token, 不需要 codes)"),
+    include_announcements: bool = typer.Option(
+        False, "--include-announcements",
+        help="附带刷新巨潮公告索引 (每股最新 N 条标题/类型/链接, 零 token)"),
+    announcements_page_size: int = typer.Option(
+        30, "--announcements-page-size",
+        help="巨潮每只拉最新 N 条公告 (默认 30)"),
+    include_xdxr: bool = typer.Option(
+        False, "--include-xdxr",
+        help="增量刷 XDXR 复权 (pytdx get_xdxr_info) → parquet/xdxr.parquet",
+    ),
+    include_watchlist: bool = typer.Option(
+        False, "--include-watchlist",
+        help="同步 TDX 自选股 (T0002/blocknew/*.blk) → parquet/watchlist.parquet",
+    ),
+    include_tick_history: bool = typer.Option(
+        False, "--include-tick-history",
+        help="拉历史 tick (pytdx get_history_transaction_data) → parquet/tick_history.parquet; 量级大, 默认 codes × 最近 30 日",
+    ),
+    include_tick_realtime: bool = typer.Option(
+        False, "--include-tick-realtime",
+        help="拉今日实时分笔 (pytdx get_transaction_data) → parquet/tick_realtime.parquet; 每次调用刷新今日数据",
+    ),
+    include_index_intraday: bool = typer.Option(
+        False, "--include-index-intraday",
+        help="拉 5 大指数 1min K (pytdx get_index_bars cat=7) → parquet/index_intraday.parquet",
+    ),
+):
+    """直连增量更新所有数据 — 日线 + 5min + 当日 PE/PB/MV.
+
+    Optional (零 token 加成):
+      --include-f10              附带刷 TDX F10 事件 (公司大事/龙虎榜等, KEY 5 类)
+      --include-f10-full         附带刷 TDX F10 全 15 类 (含公司概况/财务分析等)
+      --include-concepts         附带刷同花顺概念股 (需装 adata)
+      --include-xdxr             附带刷 XDXR 复权因子
+      --include-watchlist        同步 TDX 自选股列表
+      --include-tick-history     拉历史 tick (量级大)
+      --include-index-intraday   拉 5 大指数 1min K
+
+    Example:
+      fa data update                                  # 日线 + 5min + daily_basic
+      fa data update --skip-5min                      # 只日线
+      fa data update --codes @my.txt                  # 限定代码
+      fa data update --include-f10 --f10-universe csi300   # 附带 F10 (KEY 5 类)
+      fa data update --include-f10-full --f10-universe csi500  # 附带 F10 全 15 类
+      fa data update --include-concepts               # 附带概念股
+      fa data update --include-xdxr --include-index-intraday  # 复权 + 指数 1min
+    """
+    day_uri = _resolve_provider_uri("day")
+    fivemin_uri = _resolve_provider_uri("5min")
+    codes_list = _resolve_codes(codes, day_uri)
+
+    if not codes_list:
+        typer.echo("✗ 没有要更新的代码. instruments 是空? 先 fa data bootstrap 拉历史包.")
+        raise typer.Exit(1)
+
+    typer.echo(f"=== fa data update — {len(codes_list)} 只 ===")
+    typer.echo(f"日线 → {day_uri}")
+    typer.echo(f"5min → {fivemin_uri}")
+    typer.echo("")
+
+    from financial_analyst.data.updaters.pytdx_pool import PytdxClient
+    from financial_analyst.data.updaters.pytdx_kline import (
+        update_daily_batch, update_5min_batch,
+    )
+    from financial_analyst.data.updaters.tencent_basic import (
+        update_daily_basic_today,
+    )
+    from financial_analyst.data import last_update as _lu
+
+    client = PytdxClient()
+    typer.echo(f"  pytdx connected to {client.host or '(lazy)'}")
+
+    overall_t = time.time()
+    try:
+        # 日线
+        t0 = time.time()
+        stats_daily = update_daily_batch(day_uri, codes_list, n_bars=n_daily,
+                                          client=client, progress=True)
+        typer.echo(f"\n[日线 ✓] {stats_daily['ok']}/{stats_daily['total']} OK "
+                   f"({stats_daily['empty']} 空, {stats_daily['failed']} 失败) "
+                   f"耗时 {time.time() - t0:.1f}s")
+        if stats_daily.get("ok", 0) > 0:
+            _lu.mark_updated("day")
+
+        # 5min
+        if not skip_5min:
+            t0 = time.time()
+            stats_5min = update_5min_batch(fivemin_uri, codes_list, n_bars=n_5min,
+                                            client=client, progress=True)
+            typer.echo(f"\n[5min ✓] {stats_5min['ok']}/{stats_5min['total']} OK "
+                       f"({stats_5min['empty']} 空, {stats_5min['failed']} 失败) "
+                       f"耗时 {time.time() - t0:.1f}s")
+            if stats_5min.get("ok", 0) > 0:
+                _lu.mark_updated("5min")
+    finally:
+        client.close()
+
+    # daily_basic (走腾讯实时, 不用 pytdx)
+    if not skip_basic:
+        t0 = time.time()
+        stats_basic = update_daily_basic_today(day_uri, codes_list,
+                                                trade_date=trade_date)
+        typer.echo(f"\n[daily_basic ✓] {stats_basic['ok']}/{stats_basic['total']} OK "
+                   f"(no_quote={stats_basic['no_quote']}, "
+                   f"missing_pe={stats_basic['missing_pe']}) "
+                   f"耗时 {time.time() - t0:.1f}s")
+        if stats_basic.get("ok", 0) > 0:
+            _lu.mark_updated("daily_basic")
+
+    # F10/concepts/financial/stock_basic/northbound/fund_flow/margin/lockup/corp/ths_hot/announce/xdxr/watchlist/tick/index
+    _need_paths = (include_f10 or include_f10_full or include_concepts or include_financial
+                   or include_stock_basic or include_northbound or include_fund_flow
+                   or include_margin or include_lockup or include_corporate_actions
+                   or include_ths_hot or include_announcements
+                   or include_xdxr or include_watchlist or include_tick_history
+                   or include_tick_realtime or include_index_intraday)
+    if _need_paths:
+        from financial_analyst.data.paths import get_data_paths
+        paths = get_data_paths()
+
+        # 互斥检查: --include-f10-full 是超集, 二选一时优先 full
+        _run_f10_key = include_f10 and not include_f10_full
+        if include_f10 and include_f10_full:
+            typer.echo("\n[F10] ⚠ --include-f10 与 --include-f10-full 同时传入, 使用 --include-f10-full (超集), 跳过 KEY-only 拉取.")
+
+        if _run_f10_key:
+            from financial_analyst.data.updaters.f10 import resolve_universe, update_f10
+            t0 = time.time()
+            try:
+                f10_codes = resolve_universe(paths.parquet_root, f10_universe)
+            except FileNotFoundError as e:
+                typer.echo(f"\n[F10 ✗] universe 解析失败: {e}")
+                f10_codes = []
+            if f10_codes:
+                typer.echo(f"\n[F10] 范围 {f10_universe} = {len(f10_codes)} 只, 拉取中...")
+                stats_f10 = update_f10(
+                    paths.news_data_root, paths.parquet_root,
+                    f10_codes, progress=True,
+                )
+                typer.echo(
+                    f"[F10 ✓] {stats_f10['ok']}/{stats_f10['total']} OK "
+                    f"(skip={stats_f10['skipped']}, fail={stats_f10['failed']}, "
+                    f"new_rows={stats_f10['new_rows']}) 耗时 {time.time() - t0:.1f}s"
+                )
+                if stats_f10.get("ok", 0) > 0:
+                    _lu.mark_updated("f10")
+
+        if include_f10_full:
+            from financial_analyst.data.updaters.f10 import (
+                resolve_universe, update_f10, ALL_CATEGORIES,
+            )
+            t0 = time.time()
+            try:
+                f10_codes = resolve_universe(paths.parquet_root, f10_universe)
+            except FileNotFoundError as e:
+                typer.echo(f"\n[F10-full ✗] universe 解析失败: {e}")
+                f10_codes = []
+            if f10_codes:
+                typer.echo(
+                    f"\n[F10-full] 范围 {f10_universe} = {len(f10_codes)} 只, "
+                    f"全 {len(ALL_CATEGORIES)} 类, 拉取中..."
+                )
+                try:
+                    stats_f10f = update_f10(
+                        paths.news_data_root, paths.parquet_root,
+                        f10_codes, categories=ALL_CATEGORIES, progress=True,
+                    )
+                    typer.echo(
+                        f"[F10-full ✓] {stats_f10f['ok']}/{stats_f10f['total']} OK "
+                        f"(skip={stats_f10f['skipped']}, fail={stats_f10f['failed']}, "
+                        f"new_rows={stats_f10f['new_rows']}) 耗时 {time.time() - t0:.1f}s"
+                    )
+                    if stats_f10f.get("ok", 0) > 0:
+                        _lu.mark_updated("f10")
+                except Exception as e:
+                    typer.echo(f"\n[F10-full ✗] 拉取失败: {e}")
+
+        if include_concepts:
+            from financial_analyst.data.updaters.concepts import update_concepts
+            t0 = time.time()
+            try:
+                stats_con = update_concepts(
+                    paths.parquet_root,
+                    max_age_days=concepts_max_age_days,
+                    progress=True,
+                )
+                typer.echo(
+                    f"\n[concepts ✓] refreshed {stats_con['concepts_refreshed']} "
+                    f"/ {stats_con['concepts_total']} (failed={stats_con['failed']}, "
+                    f"parquet rows={stats_con['rows_written']}) 耗时 {time.time() - t0:.1f}s"
+                )
+                if stats_con.get("concepts_refreshed", 0) > 0:
+                    _lu.mark_updated("concepts")
+            except ImportError as e:
+                typer.echo(f"\n[concepts ✗] adata 包未装: {e}")
+
+        # Tushare opt-in: financial + stock_basic
+        if include_financial or include_stock_basic:
+            import os
+            token = tushare_token or os.environ.get("FA_TUSHARE_TOKEN", "").strip()
+            if not token:
+                typer.echo(
+                    "\n[Tushare ✗] 需要 token. 设 FA_TUSHARE_TOKEN env 或传 --tushare-token. "
+                    "免费注册 https://tushare.pro/"
+                )
+            else:
+                if include_financial:
+                    from financial_analyst.data.updaters.financial import update_financial
+                    t0 = time.time()
+                    try:
+                        stats_fin = update_financial(
+                            paths.parquet_root,
+                            tushare_token=token,
+                            days=financial_days,
+                            progress=True,
+                        )
+                        typer.echo(
+                            f"\n[financial ✓] income +{stats_fin['income']} "
+                            f"balancesheet +{stats_fin['balancesheet']} "
+                            f"cashflow +{stats_fin['cashflow']} "
+                            f"(失败 APIs: {len(stats_fin['failed_apis'])}) "
+                            f"耗时 {time.time() - t0:.1f}s"
+                        )
+                        n_total = (stats_fin["income"] + stats_fin["balancesheet"]
+                                   + stats_fin["cashflow"])
+                        if n_total > 0:
+                            _lu.mark_updated("financials")
+                    except RuntimeError as e:
+                        typer.echo(f"\n[financial ✗] {e}")
+
+                if include_stock_basic:
+                    from financial_analyst.data.updaters.stock_basic import update_stock_basic
+                    t0 = time.time()
+                    try:
+                        stats_sb = update_stock_basic(
+                            paths.parquet_root,
+                            tushare_token=token,
+                            progress=True,
+                        )
+                        if stats_sb["ok"]:
+                            typer.echo(
+                                f"\n[stock_basic ✓] {stats_sb['rows']:,} 行 "
+                                f"耗时 {time.time() - t0:.1f}s"
+                            )
+                            _lu.mark_updated("stock_basic")
+                        else:
+                            typer.echo(f"\n[stock_basic ✗] {stats_sb.get('error')}")
+                    except RuntimeError as e:
+                        typer.echo(f"\n[stock_basic ✗] {e}")
+
+        # northbound 零 token (akshare 路线, 跟 Tushare 流程独立)
+        if include_northbound:
+            from financial_analyst.data.updaters.northbound import update_northbound
+            t0 = time.time()
+            try:
+                stats_nb = update_northbound(paths.parquet_root, progress=True)
+                if stats_nb["ok"]:
+                    typer.echo(
+                        f"\n[northbound ✓] new={stats_nb['rows_new']} "
+                        f"total={stats_nb['rows_total']} markets={stats_nb['markets']} "
+                        f"耗时 {time.time() - t0:.1f}s"
+                    )
+                    _lu.mark_updated("northbound")
+                else:
+                    typer.echo(f"\n[northbound ✗] errors={stats_nb.get('errors')}")
+            except ImportError as e:
+                typer.echo(f"\n[northbound ✗] akshare 包未装: {e}")
+
+        # fund_flow 零 token (东财 push2 路线, per-stock, 用 codes_list)
+        if include_fund_flow:
+            from financial_analyst.data.updaters.fund_flow import update_fund_flow
+            t0 = time.time()
+            stats_ff = update_fund_flow(
+                paths.parquet_root, codes_list,
+                lmt=fund_flow_lmt, progress=True,
+            )
+            if stats_ff["ok"]:
+                typer.echo(
+                    f"\n[fund_flow ✓] codes ok={stats_ff['codes_ok']}/"
+                    f"{stats_ff['codes_total']} (fail={stats_ff['codes_failed']}) "
+                    f"rows={stats_ff['rows_total']} ({stats_ff['date_range']}) "
+                    f"耗时 {time.time() - t0:.1f}s"
+                )
+                _lu.mark_updated("fund_flow")
+            else:
+                typer.echo(
+                    f"\n[fund_flow ✗] codes ok={stats_ff['codes_ok']}/"
+                    f"{stats_ff['codes_total']} — all failed, see errors"
+                )
+
+        # margin trading (东财 datacenter, per-stock)
+        if include_margin:
+            from financial_analyst.data.updaters.margin_trading import update_margin_trading
+            t0 = time.time()
+            stats_m = update_margin_trading(
+                paths.parquet_root, codes_list, progress=True,
+            )
+            typer.echo(
+                f"\n[margin ✓] ok={stats_m['codes_ok']}/{stats_m['codes_total']} "
+                f"rows={stats_m['rows_total']} ({stats_m.get('date_range', 'n/a')}) "
+                f"耗时 {time.time() - t0:.1f}s"
+            )
+            if stats_m["ok"]:
+                _lu.mark_updated("margin")
+
+        # lockup expiry (东财 datacenter, per-stock)
+        if include_lockup:
+            from financial_analyst.data.updaters.lockup_expiry import update_lockup_expiry
+            t0 = time.time()
+            stats_lk = update_lockup_expiry(
+                paths.parquet_root, codes_list, progress=True,
+            )
+            typer.echo(
+                f"\n[lockup ✓] with_data={stats_lk['codes_with_data']}/"
+                f"{stats_lk['codes_total']} rows={stats_lk['rows_total']} "
+                f"(upcoming={stats_lk['rows_upcoming']}) "
+                f"耗时 {time.time() - t0:.1f}s"
+            )
+            if stats_lk["ok"]:
+                _lu.mark_updated("lockup")
+
+        # corporate actions (holder + block + dividend, 三流并行)
+        if include_corporate_actions:
+            from financial_analyst.data.updaters.corporate_actions import (
+                update_corporate_actions,
+            )
+            t0 = time.time()
+            stats_ca = update_corporate_actions(
+                paths.parquet_root, codes_list, progress=True,
+            )
+            typer.echo(
+                f"\n[corp_actions ✓] streams={stats_ca['streams']} "
+                f"耗时 {time.time() - t0:.1f}s"
+            )
+            for k, v in stats_ca.get("results", {}).items():
+                typer.echo(f"  {k}: with_data={v['codes_with_data']} "
+                           f"rows={v['rows_total']}")
+            if stats_ca["ok"]:
+                _lu.mark_updated("corporate_actions")
+
+        # 同花顺热点 (零 token, 不需要 codes — market-wide snapshot)
+        if include_ths_hot:
+            from financial_analyst.data.updaters.ths_hot import update_ths_hot
+            t0 = time.time()
+            stats_th = update_ths_hot(paths.parquet_root, progress=True)
+            if stats_th["ok"]:
+                typer.echo(
+                    f"\n[ths_hot ✓] date={stats_th['date']} "
+                    f"new={stats_th['rows_new']} total={stats_th['rows_total']} "
+                    f"耗时 {time.time() - t0:.1f}s"
+                )
+                if stats_th.get("rows_new", 0) > 0:
+                    _lu.mark_updated("ths_hot")
+            else:
+                typer.echo(f"\n[ths_hot ✗] {stats_th.get('error', 'unknown')}")
+
+        # 巨潮公告索引 (零 token, per-stock)
+        if include_announcements:
+            from financial_analyst.data.updaters.announcements import (
+                update_announcements,
+            )
+            t0 = time.time()
+            stats_an = update_announcements(
+                paths.parquet_root, codes_list,
+                page_size=announcements_page_size, progress=True,
+            )
+            typer.echo(
+                f"\n[announcements ✓] ok={stats_an['codes_ok']}/"
+                f"{stats_an['codes_total']} rows={stats_an['rows_total']} "
+                f"({stats_an.get('date_range', 'n/a')}) "
+                f"耗时 {time.time() - t0:.1f}s"
+            )
+            if stats_an["ok"]:
+                _lu.mark_updated("announcements")
+
+        # XDXR 复权 (pytdx get_xdxr_info, per-stock)
+        if include_xdxr:
+            from financial_analyst.data.updaters.xdxr import update_xdxr
+            t0 = time.time()
+            try:
+                stats_xdxr = update_xdxr(paths.parquet_root, codes_list, log_progress=True)
+                typer.echo(
+                    f"\n[xdxr ✓] ok={stats_xdxr['ok']}/{stats_xdxr['total']} "
+                    f"(fail={stats_xdxr['failed']}) new_rows={stats_xdxr['new_rows']} "
+                    f"耗时 {time.time() - t0:.1f}s"
+                )
+                if stats_xdxr.get("ok", 0) > 0:
+                    _lu.mark_updated("xdxr")
+            except Exception as e:
+                typer.echo(f"\n[xdxr ✗] {e}")
+
+        # TDX 自选股 (T0002/blocknew/*.blk)
+        if include_watchlist:
+            from financial_analyst.data.updaters.watchlist import update_watchlist
+            t0 = time.time()
+            try:
+                stats_wl = update_watchlist(paths.parquet_root, tdx_root=None, log_progress=True)
+                typer.echo(
+                    f"\n[watchlist ✓] ok={stats_wl['ok']}/{stats_wl['total']} "
+                    f"(fail={stats_wl['failed']}) new_rows={stats_wl['new_rows']} "
+                    f"sources={stats_wl.get('sources_found', [])} "
+                    f"耗时 {time.time() - t0:.1f}s"
+                )
+                if stats_wl.get("ok", 0) > 0:
+                    _lu.mark_updated("watchlist")
+            except Exception as e:
+                typer.echo(f"\n[watchlist ✗] {e}")
+
+        # 历史 tick (pytdx get_history_transaction_data, per-stock × 最近 30 日)
+        if include_tick_history:
+            from financial_analyst.data.updaters.tick_history import update_tick_history
+            t0 = time.time()
+            try:
+                stats_tick = update_tick_history(
+                    paths.parquet_root, codes_list, dates=None, log_progress=True
+                )
+                typer.echo(
+                    f"\n[tick_history ✓] ok={stats_tick['ok']}/{stats_tick['total']} "
+                    f"(fail={stats_tick['failed']}, skip={stats_tick['skipped']}) "
+                    f"new_rows={stats_tick['new_rows']} 耗时 {time.time() - t0:.1f}s"
+                )
+                if stats_tick.get("ok", 0) > 0:
+                    _lu.mark_updated("tick_history")
+            except Exception as e:
+                typer.echo(f"\n[tick_history ✗] {e}")
+
+        # 今日实时分笔 (pytdx get_transaction_data, per-stock, 刷新今日快照)
+        if include_tick_realtime:
+            from financial_analyst.data.updaters.tick_realtime import update_tick_realtime
+            t0 = time.time()
+            try:
+                stats_trt = update_tick_realtime(
+                    paths.parquet_root, codes_list, log_progress=True
+                )
+                typer.echo(
+                    f"\n[tick_realtime ✓] ok={stats_trt['ok']}/{stats_trt['total']} "
+                    f"(fail={stats_trt['failed']}) new_rows={stats_trt['new_rows']} "
+                    f"耗时 {time.time() - t0:.1f}s"
+                )
+                if stats_trt.get("ok", 0) > 0:
+                    _lu.mark_updated("tick_realtime")
+            except Exception as e:
+                typer.echo(f"\n[tick_realtime ✗] {e}")
+
+        # 5 大指数 1min K (pytdx get_index_bars cat=7)
+        if include_index_intraday:
+            from financial_analyst.data.updaters.index_intraday import update_index_intraday
+            t0 = time.time()
+            try:
+                stats_idx = update_index_intraday(
+                    paths.parquet_root, indices=None, n_days=1, log_progress=True
+                )
+                typer.echo(
+                    f"\n[index_intraday ✓] ok={stats_idx['ok']}/{stats_idx['total']} "
+                    f"(fail={stats_idx['failed']}, skip={stats_idx['skipped']}) "
+                    f"new_rows={stats_idx['new_rows']} 耗时 {time.time() - t0:.1f}s"
+                )
+                if stats_idx.get("ok", 0) > 0:
+                    _lu.mark_updated("index_intraday")
+            except Exception as e:
+                typer.echo(f"\n[index_intraday ✗] {e}")
+
+    typer.echo(f"\n=== 完成. 总耗时 {time.time() - overall_t:.1f}s ===")
+
+
+# ───────────────────────── refresh (smart auto) ─────────────────────────
+
+
+@data_app.command("refresh")
+def refresh_cmd(
+    codes: Optional[str] = typer.Option(
+        None, "--codes",
+        help="限定代码 (逗号 / @file). 默认全 instruments."),
+    skip_5min: bool = typer.Option(
+        False, "--skip-5min", help="跳过 5min 更新, 更快."),
+    force: bool = typer.Option(
+        False, "--force", help="忽略 'recently updated' 检查, 全部重拉."),
+):
+    """智能增量刷新 — 自动判断哪些数据该更新, 然后跑.
+
+    跟 `fa data update` 区别:
+      * 默认查 last-update tracker, 24h 内更新过的数据类型跳过 (除非 --force)
+      * 跳过被 --skip-5min 排除的类型 (不算它陈旧)
+      * 写 last-update 时间戳, 供 `fa data status` + `fa start` banner 用
+    """
+    from financial_analyst.data import last_update as _lu
+
+    if not force:
+        # Only consider the types we're actually going to attempt.
+        # If the caller said --skip-5min, ignore 5min staleness.
+        relevant = [dt for dt in _lu.IMPLEMENTED_TYPES
+                    if not (skip_5min and dt == "5min")]
+        stale = [dt for dt in relevant if _lu.is_stale(dt)]
+        if not stale:
+            typer.echo("✓ 所有数据都在 24h 内更新过, 无事可做.")
+            typer.echo("  跑 fa data refresh --force 强制重拉, 或 fa data status 看详情.")
+            raise typer.Exit(0)
+        typer.echo(f"陈旧数据类型 ({len(stale)}): " + " · ".join(stale))
+    else:
+        typer.echo("--force 强制重拉所有")
+
+    # Delegate to update_cmd (calling the function directly since they're in same module)
+    return update_cmd(
+        codes=codes,
+        n_daily=30,
+        n_5min=240,
+        skip_5min=skip_5min,
+        skip_basic=False,
+        trade_date=None,
+    )
+
+
+# ───────────────────────── link (offline data wiring) ─────────────────────────
+
+
+@data_app.command("link")
+def link_cmd(
+    src: Path = typer.Option(
+        ..., "--src",
+        help="本地数据目录 (含 cn_data / cn_data_5min / parquet 子目录), "
+             "例如手动从网盘下载解压后的位置."),
+    force: bool = typer.Option(
+        False, "--force",
+        help="即使 src 缺 5min / parquet 也继续 link (默认要求齐全)"),
+):
+    """把手动下载的数据接入工作目录 — HF 太慢时的网盘替代方案.
+
+    流程:
+      1. 你从网盘 (阿里云盘 / 夸克) 把对应数据包下载到本地任意目录
+      2. 解压, 保证目录结构是 <src>/cn_data/, <src>/cn_data_5min/, <src>/parquet/
+      3. fa data link --src <你解压的路径>
+      4. fa data status 验证 instruments / 日历看得到
+
+    本质: 把 config/loaders.yaml 的 provider_uri 指向你的目录,
+    不 copy 不 symlink, 直接读. 节省磁盘 + 速度最快.
+
+    Examples:
+      fa data link --src D:/fa-data
+      fa data link --src C:/Users/me/Downloads/fa-lite-extracted --force
+    """
+    from financial_analyst.workspace import config_dir as _ws_config_dir
+
+    src_abs = src.expanduser().resolve()
+    if not src_abs.exists():
+        typer.echo(f"✗ 目录不存在: {src_abs}")
+        raise typer.Exit(1)
+    if not src_abs.is_dir():
+        typer.echo(f"✗ 不是目录: {src_abs}")
+        raise typer.Exit(1)
+
+    # ── 1. Probe expected subdirs ──
+    required = ["cn_data"]
+    optional = ["cn_data_5min", "parquet", "news_data"]
+    have = {}
+    for name in required + optional:
+        p = src_abs / name
+        have[name] = p.exists() and p.is_dir()
+
+    missing_required = [n for n in required if not have[n]]
+    missing_optional = [n for n in optional if not have[n]]
+
+    typer.echo(f"=== fa data link ===")
+    typer.echo(f"  源目录: {src_abs}")
+    typer.echo("")
+    typer.echo(f"  目录扫描:")
+    for name in required + optional:
+        marker = "✓" if have[name] else "✗"
+        kind = "(必需)" if name in required else "(可选)"
+        size = ""
+        if have[name]:
+            try:
+                # rough size — count files only, no recursive du
+                n_files = sum(1 for _ in (src_abs / name).rglob("*") if _.is_file())
+                size = f" [{n_files:,} files]"
+            except Exception:
+                pass
+        typer.echo(f"    {marker} {name:<15} {kind}{size}")
+    typer.echo("")
+
+    if missing_required:
+        typer.echo(f"✗ 缺少必需子目录: {missing_required}")
+        typer.echo(f"  请确认 {src_abs} 下有 cn_data/ (含 calendars/ + instruments/ + features/)")
+        raise typer.Exit(2)
+
+    if missing_optional and not force:
+        typer.echo(f"⚠ 缺少可选子目录: {missing_optional}")
+        typer.echo(f"  这些功能受影响: " + (
+            "5min K 线 " if 'cn_data_5min' in missing_optional else "") + (
+            "财报 / F10 " if 'parquet' in missing_optional else "") + (
+            "新闻 " if 'news_data' in missing_optional else ""))
+        typer.echo(f"  加 --force 接受不完整 link, 或补全后重跑.")
+        raise typer.Exit(3)
+
+    # ── 2. Validate cn_data/ structure ──
+    cn_data = src_abs / "cn_data"
+    cal_file = cn_data / "calendars" / "day.txt"
+    inst_file = cn_data / "instruments" / "all.txt"
+    if not cal_file.exists() or not inst_file.exists():
+        typer.echo(f"✗ cn_data/ 目录结构错: 没找到 calendars/day.txt 或 instruments/all.txt")
+        typer.echo(f"  你可能解压错了, 看看是不是多套了一层目录?")
+        raise typer.Exit(4)
+
+    try:
+        n_inst = sum(1 for _ in inst_file.read_text(encoding="utf-8").splitlines() if _.strip())
+        n_days = sum(1 for _ in cal_file.read_text(encoding="utf-8").splitlines() if _.strip())
+        typer.echo(f"  ✓ cn_data 校验通过: {n_inst:,} 只 instruments, {n_days:,} 天日历")
+    except Exception as e:
+        typer.echo(f"⚠ cn_data 校验时 IO 错误 (但 link 仍会继续): {e}")
+    typer.echo("")
+
+    # ── 3. Write loaders.yaml ──
+    config_path = _ws_config_dir() / "loaders.yaml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    src_posix = str(src_abs).replace("\\", "/")
+    yaml_text = (
+        f"# Auto-generated by `fa data link` {datetime.now():%Y-%m-%d %H:%M}\n"
+        f"# Source: {src_abs}\n"
+        f"default: qlib_binary\n"
+        f"\n"
+        f"loaders:\n"
+        f"  qlib_binary:\n"
+        f"    provider_uri:\n"
+        f"      day: {src_posix}/cn_data\n"
+    )
+    if have["cn_data_5min"]:
+        yaml_text += f"      5min: {src_posix}/cn_data_5min\n"
+    if have["parquet"]:
+        yaml_text += f"    parquet_root: {src_posix}/parquet\n"
+    if have["news_data"]:
+        yaml_text += f"    news_data_root: {src_posix}/news_data\n"
+
+    # Backup existing
+    if config_path.exists():
+        bak = config_path.with_suffix(config_path.suffix
+                                       + f".bak.{datetime.now():%Y%m%d_%H%M%S}")
+        try:
+            shutil.copy2(config_path, bak)
+            typer.echo(f"  📦 备份旧配置 → {bak.name}")
+        except Exception:
+            pass
+
+    config_path.write_text(yaml_text, encoding="utf-8")
+    typer.echo(f"  ✓ 写入 {config_path}")
+    typer.echo("")
+
+    # ── 4. Mark last-update so the UI badge doesn't lie ──
+    try:
+        from financial_analyst.data import last_update as _lu
+        marks = ["day"]
+        if have["cn_data_5min"]:
+            marks.append("5min")
+        _lu.mark_many(marks)
+        typer.echo(f"  ✓ last-update 时间戳已写 ({', '.join(marks)})")
+    except Exception as e:
+        typer.echo(f"  ⚠ 写 last-update 失败 (不影响功能): {e}")
+
+    typer.echo("")
+    typer.echo(f"=== Link 完成 ===")
+    typer.echo(f"  下一步:")
+    typer.echo(f"    fa data status      # 验证数据接通")
+    typer.echo(f"    fa report SH600519  # 跑第一份研报")
+
+
+# ───────────────────────── bootstrap (stub) ─────────────────────────
+
+
+@data_app.command("bootstrap")
+def bootstrap_cmd(
+    preset: str = typer.Option(
+        "demo", "--preset",
+        help="数据包预设: demo (~500MB csi300 hist) / lite (~5GB csi800+5min) / full (~50GB)"),
+    target: Optional[Path] = typer.Option(
+        None, "--target",
+        help="数据目标目录, 默认 ~/.financial-analyst/data/"),
+    force: bool = typer.Option(
+        False, "--force", help="目标目录已有数据时强制覆盖"),
+):
+    """从 HuggingFace 下载历史数据包 (一次性 bootstrap).
+
+    例:
+      fa data bootstrap                    # 演示包 ~500MB 到默认路径
+      fa data bootstrap --preset lite      # ~5GB csi800+5min
+      fa data bootstrap --target D:/data   # 自定义路径
+
+    之后每日增量走 ``fa data update`` (pytdx 主站直连, 无 token).
+    """
+    from financial_analyst.init_cli import HF_PACKAGES, _download_package, _write_loaders_config
+
+    if preset not in HF_PACKAGES:
+        typer.echo(f"未知 preset {preset!r}. 可选: {list(HF_PACKAGES)}")
+        raise typer.Exit(1)
+
+    pkg = HF_PACKAGES[preset]
+    target_dir = target or (Path.home() / ".financial-analyst" / "data")
+    target_dir = Path(target_dir).expanduser().resolve()
+
+    # 检测已有数据
+    if (target_dir / "cn_data" / "instruments" / "all.txt").exists() and not force:
+        from financial_analyst.data.bin_writer import load_instruments
+        existing = load_instruments(str(target_dir / "cn_data"), market="all")
+        typer.echo(f"⚠ {target_dir} 已经有 {len(existing)} 只 instruments.")
+        typer.echo(f"  跳过下载. 加 --force 覆盖, 或换 --target 路径.")
+        raise typer.Exit(0)
+
+    typer.echo(f"=== fa data bootstrap — preset={preset} ===")
+    typer.echo(f"  HF repo:   {pkg['repo_id']}")
+    typer.echo(f"  目标目录:  {target_dir}")
+    typer.echo(f"  约大小:    {pkg['size_hint']}")
+    typer.echo()
+
+    ok = _download_package(preset, target_dir)
+    if not ok:
+        typer.echo()
+        typer.echo("✗ 下载失败. 可能原因:")
+        typer.echo("  1. HF dataset 还没 publish (maintainer 跑 publish_hf_dataset.py 上传, 见")
+        typer.echo("     docs/setup/hf_publish_guide.md)")
+        typer.echo("  2. 网络不稳定, 重试一次")
+        typer.echo("  3. 国内 HF CDN 偶尔需要 HTTPS_PROXY")
+        typer.echo()
+        typer.echo("临时替代: 手工 copy 任意 Qlib 数据目录到 ~/.financial-analyst/data/cn_data/,")
+        typer.echo("         或编辑 config/loaders.yaml 把 provider_uri 指向已有目录.")
+        raise typer.Exit(2)
+
+    # 写 config/loaders.yaml 指向新目录
+    config_path = Path(__file__).resolve().parent.parent.parent / "config" / "loaders.yaml"
+    if config_path.parent.exists():
+        _write_loaders_config(target_dir, config_path)
+
+    typer.echo()
+    typer.echo("✓ bootstrap 完成. 下一步:")
+    typer.echo("  fa data status                — 看数据状态")
+    typer.echo("  fa report SH600519            — 跑第一份研报")
+    typer.echo("  fa data update                — 每日增量更新 (pytdx 直连)")
+
+
+# ───────────────────────── update-etf ─────────────────────────
+
+
+def _ensure_etf_calendar(etf_uri: str) -> None:
+    """ETF 专用 Qlib 目录缺 calendars/day.txt 时, 从日线目录复制过来.
+
+    ETF 与 A 股同交易日, 直接复用 cn_data/calendars/day.txt 即可.
+    """
+    from financial_analyst.data.paths import get_data_paths
+
+    cal_path = Path(etf_uri) / "calendars" / "day.txt"
+    if cal_path.exists():
+        return
+    cal_path.parent.mkdir(parents=True, exist_ok=True)
+    p = get_data_paths()
+    src_cal = p.qlib_day / "calendars" / "day.txt"
+    if src_cal.exists():
+        shutil.copy2(src_cal, cal_path)
+
+
+@data_app.command("update-etf")
+def update_etf_cmd(
+    codes: Optional[str] = typer.Option(
+        None, "--codes",
+        help="逗号分隔 ETF 代码 (SH510300,SZ159001) / @file 文件 / 留空=全 ETF universe"),
+    n_daily: int = typer.Option(
+        800, "--n-daily",
+        help="日线拉最近 N 根 (默认 800 全量; 增量用 30)"),
+    skip_fund: bool = typer.Option(
+        False, "--skip-fund",
+        help="跳过基金元数据 (NAV/份额/持仓/分红/基准, 需要 FA_TUSHARE_TOKEN)"),
+    skip_spot: bool = typer.Option(
+        False, "--skip-spot",
+        help="跳过 ETF 实时快照 (IOPV/溢折价/规模/换手)"),
+    tushare_token: Optional[str] = typer.Option(
+        None, "--tushare-token",
+        help="Tushare API token. 默认读 FA_TUSHARE_TOKEN / TUSHARE_TOKEN env."),
+):
+    """增量更新 ETF 数据 — 日线价格 + 基金元数据 + 实时快照 (单进程).
+
+    三步顺序执行:
+      1. etf_price  — pytdx 日线 OHLCV (写 ETF 专用 qlib_etf 目录)
+      2. etf_fund   — Tushare ETF 基金元数据 (NAV/份额/持仓/分红/基准指数)
+                      需要 FA_TUSHARE_TOKEN; 设环境变量或用 --skip-fund 跳过
+      3. etf_spot   — akshare 当日实时快照 (IOPV/溢折价/规模)
+
+    Examples:
+      fa data update-etf                          # 全 ETF universe, 全三步
+      fa data update-etf --codes SH510300,SZ159001  # 指定代码
+      fa data update-etf --skip-fund              # 不需要 Tushare token
+      fa data update-etf --n-daily 30             # 增量模式 (只补最近 30 根)
+    """
+    import datetime
+
+    from financial_analyst.data import last_update as _lu
+    from financial_analyst.data.paths import get_data_paths
+    from financial_analyst.data.updaters import etf_price, etf_fund, etf_spot
+
+    # 1. 解析代码
+    if codes:
+        codes_list = [c.strip().upper() for c in codes.replace("，", ",").split(",") if c.strip()]
+    else:
+        from financial_analyst.data.universe import resolve_universe_codes
+        codes_list = resolve_universe_codes("etf")
+
+    if not codes_list:
+        typer.echo("✗ 没有 ETF 代码可更新. 传 --codes 或确认 ETF universe 有数据.")
+        raise typer.Exit(1)
+
+    typer.echo(f"=== fa data update-etf — {len(codes_list)} 只 ETF ===")
+
+    # 2. 解析 ETF qlib URI
+    p = get_data_paths()
+    etf_uri = str(p.qlib_etf)
+    typer.echo(f"ETF qlib_uri  → {etf_uri}")
+    typer.echo(f"parquet_root  → {p.parquet_root}")
+    typer.echo("")
+
+    # 3. 确保日历存在
+    _ensure_etf_calendar(etf_uri)
+
+    # 4a. ETF 日线价格
+    t0 = time.time()
+    stats = etf_price.update_etf_daily_batch(etf_uri, codes_list, n_bars=n_daily)
+    typer.echo(
+        f"[etf_price ✓] {stats['ok']}/{stats['total']} OK "
+        f"({stats['empty']} 空, {stats['failed']} 失败) "
+        f"耗时 {time.time() - t0:.1f}s"
+    )
+
+    # 4b. 基金元数据 (Tushare, 可跳过)
+    if not skip_fund:
+        token = tushare_token or os.getenv("FA_TUSHARE_TOKEN") or os.getenv("TUSHARE_TOKEN")
+        if not token:
+            typer.echo("[etf_fund ✗] FA_TUSHARE_TOKEN missing; use --skip-fund or set the env var.")
+        else:
+            t0 = time.time()
+            etf_fund.update_all_fund(codes_list, str(p.parquet_root), token=token)
+            typer.echo(f"[etf_fund  ✓] 耗时 {time.time() - t0:.1f}s")
+
+    # 4c. 实时快照 (akshare, 可跳过)
+    if not skip_spot:
+        t0 = time.time()
+        asof = datetime.date.today().isoformat()
+        etf_spot.update_etf_spot(codes_list, str(p.parquet_root), asof=asof)
+        typer.echo(f"[etf_spot  ✓] asof={asof} 耗时 {time.time() - t0:.1f}s")
+
+    # 5. 记录更新时间戳
+    try:
+        _lu.mark_updated("etf")
+    except Exception:
+        pass
+
+    typer.echo(f"\n=== 完成. {len(codes_list)} 只 ETF 更新完毕 ===")

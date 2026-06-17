@@ -1,0 +1,7 @@
+enabled:
+  - lgb_momentum
+
+models:
+  lgb_momentum:
+    class: financial_analyst.models.lgb_momentum.LGBMomentumModel
+    init_args: {}

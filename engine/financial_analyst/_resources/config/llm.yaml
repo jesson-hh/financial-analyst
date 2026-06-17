@@ -1,0 +1,77 @@
+default_provider: qwen
+default_model: qwen3.5-plus
+
+providers:
+  qwen:
+    api_key_env: DASHSCOPE_API_KEY
+    # ⚠ coding.dashscope 是编程子端点, 只接受 qwen3.5-plus / qwen3-coder-plus.
+    # qwen-max / qwen-turbo / qwen-flash 等需要通用端点 + 通用 key:
+    #   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    # 通用 key 在 bailian 控制台 → AccessKey 管理 申请.
+    base_url: https://coding.dashscope.aliyuncs.com/v1
+    network_profile: domestic   # aliyun, 必直连 (Clash fake-ip 接管会走海外节点)
+    models: [qwen3.5-plus, qwen3-coder-plus]
+  anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+    network_profile: intl_clash   # 走 litellm fallback, 这字段仅占位
+    models: [claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5]
+  openai:
+    api_key_env: OPENAI_API_KEY
+    base_url: https://api.openai.com/v1
+    network_profile: intl_clash
+    models: [gpt-4o, gpt-4-turbo]
+  deepseek:
+    api_key_env: DEEPSEEK_API_KEY
+    base_url: https://api.deepseek.com/v1
+    network_profile: intl_clash   # Clash fake-ip + MITM, 必经 proxy + verify=False
+    models: [deepseek-chat, deepseek-reasoner]
+
+agent_overrides:
+  # 盘中盯盘实时 advisor — deepseek-only (用户硬约束: 不要qwen); 用 chat 不用 reasoner
+  # (盘中事件触发要快/省, reasoner 延迟高). 经 intl_clash profile 走代理.
+  watch-agent:
+    provider: deepseek
+    model: deepseek-chat
+  report-writer:
+    provider: qwen
+    model: qwen3.5-plus
+  news-reader:
+    provider: qwen
+    model: qwen3.5-plus
+  f10-reader:
+    provider: qwen
+    model: qwen3.5-plus
+  ask:
+    provider: qwen
+    model: qwen3.5-plus
+  mainline-classifier:
+    provider: qwen
+    model: qwen3.5-plus     # actually no LLM call but for consistency
+  mainline-writer:
+    provider: qwen
+    model: qwen3.5-plus
+  market-scanner:
+    provider: qwen
+    model: qwen3.5-plus
+  morning-brief-writer:
+    provider: qwen
+    model: qwen3.5-plus
+  intraday-reviewer:
+    provider: qwen
+    model: qwen3.5-plus
+  # v1.9.7 新增 5 个 morning-brief / overseas-radar agent
+  catalyst-extractor:
+    provider: qwen
+    model: qwen3.5-plus
+  sector-rotation-analyzer:
+    provider: qwen
+    model: qwen3.5-plus
+  overseas-market-scanner:
+    provider: qwen
+    model: qwen3.5-plus
+  global-news-aggregator:
+    provider: qwen
+    model: qwen3.5-plus
+  macro-impact-analyzer:
+    provider: qwen
+    model: qwen3.5-plus

@@ -1,0 +1,14 @@
+name: intraday-review
+description: Lunch-break per-stock verdict — OK / 警惕 / 撤离 三档
+variables:
+  - name: codes
+    type: string
+    default: ""
+  - name: asof_date
+    type: string
+    default: today
+
+agents:
+  - name: intraday-reviewer
+    deps: []
+    input_keys: [codes, asof_date, out_dir]

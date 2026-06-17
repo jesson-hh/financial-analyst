@@ -1,0 +1,126 @@
+{
+  "id": "wc63e065c6c7b",
+  "name": "质量价值成长·ICIR三因子合成·csi800",
+  "ts": 1780895053856,
+  "graph": {
+    "nodes": [
+      {
+        "id": "s3",
+        "type": "source",
+        "x": 60,
+        "y": 260,
+        "params": {
+          "scope": "小池",
+          "code": "600519",
+          "codes": "",
+          "benchmark": "",
+          "leader": "",
+          "universe": "csi800",
+          "start": "2022-06-08",
+          "end": "2026-06-05",
+          "freq": "day",
+          "oos_frac": "0.3",
+          "wf_refit": "否"
+        }
+      },
+      {
+        "id": "q1",
+        "type": "formula",
+        "x": 342,
+        "y": 120,
+        "params": {
+          "expr": "rank(roe)"
+        }
+      },
+      {
+        "id": "q2",
+        "type": "formula",
+        "x": 342,
+        "y": 230,
+        "params": {
+          "expr": "rank(total_equity/total_mv)"
+        }
+      },
+      {
+        "id": "q3",
+        "type": "formula",
+        "x": 342,
+        "y": 340,
+        "params": {
+          "expr": "rank(np_yoy)"
+        }
+      },
+      {
+        "id": "e3",
+        "type": "feature",
+        "x": 624,
+        "y": 120,
+        "params": {
+          "tag": "IC"
+        }
+      },
+      {
+        "id": "m3",
+        "type": "mf",
+        "x": 906,
+        "y": 200,
+        "params": {
+          "combine": "icir"
+        }
+      },
+      {
+        "id": "a3",
+        "type": "analysis",
+        "x": 1180,
+        "y": 200,
+        "params": {
+          "rebal": "month",
+          "groups": 10,
+          "dir": "0"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "from": [
+          "q1",
+          "out"
+        ],
+        "to": [
+          "e3",
+          "feat"
+        ]
+      },
+      {
+        "from": [
+          "e3",
+          "fe"
+        ],
+        "to": [
+          "m3",
+          "f1"
+        ]
+      },
+      {
+        "from": [
+          "m3",
+          "factor"
+        ],
+        "to": [
+          "a3",
+          "factor"
+        ]
+      },
+      {
+        "from": [
+          "s3",
+          "data"
+        ],
+        "to": [
+          "e3",
+          "src"
+        ]
+      }
+    ]
+  }
+}

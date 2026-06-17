@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>观澜 · A 股 AI 助手 — 界面探索</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&family=Noto+Serif+SC:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&display=swap" />
+<link rel="stylesheet" href="../_shared/tokens.css" />
+<link rel="stylesheet" href="../_shared/tokens-styles.css" />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" />
+<style>
+  @keyframes pulse {
+    0%, 100% { transform: scale(1); opacity: 0.4; }
+    50% { transform: scale(1.4); opacity: 0; }
+  }
+  /* Post-it overrides — use serif sticker for design notes */
+  .design-canvas { font-family: var(--sans) !important; }
+</style>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="../_shared/shared.jsx"></script>
+<script type="text/babel" src="variant-stream.jsx"></script>
+<script type="text/babel" src="variant-report.jsx"></script>
+<script type="text/babel" src="variant-pavilion.jsx"></script>
+<script type="text/babel" src="variant-stream-v2.jsx"></script>
+<script type="text/babel" src="variant-stream-geek.jsx"></script>
+<script type="text/babel" src="variant-stream-tech.jsx"></script>
+<script type="text/babel" data-presets="env,react">
+  const App = () => (
+    <DesignCanvas>
+      <DCSection
+        id="intro"
+        title="觀瀾 · financial-analyst 可视化界面 · 甲套三风格"
+        subtitle="针对 v1.8.3 的完整功能定制：26 工具 / 多轮工具链 / 三档权限 / 后台盯盘 / 斗量级token 可见。同一任务「看下宁德时代」三种视觉表达。"
+      >
+      </DCSection>
+
+      <DCSection
+        id="stream-styles"
+        title="甲 · 流 — 三种视觉风格"
+        subtitle="基于你 financial-analyst v1.8.3 的 26 个工具 / 状态机 / 三档权限定制。同一时刻：用户问「看下宁德时代怎么样」，agent 正在跑 stock_brief（5/5 步），第 5 步未完，回复正在流式输出。"
+      >
+        <DCArtboard id="s1-ink" label="中式克制 · 宣纸浓墨 / 印章引用" width={1440} height={1300}>
+          <StreamV2 />
+        </DCArtboard>
+
+        <DCArtboard id="s2-geek" label="极客风 · 暖色 TUI / 全 mono / ASCII" width={1440} height={1300}>
+          <GeekStream />
+        </DCArtboard>
+
+        <DCArtboard id="s3-tech" label="科技风 · 深空玻璃 / HUD / 青色辉光" width={1440} height={1300}>
+          <TechStream />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection
+        id="variants"
+        title="参考：另外两种布局骨架（密度对比）"
+        subtitle="上一轮做的「乙 · 报」「丙 · 阁」两种排版骨架仍留作对比。点击任一画板进入聚焦预览。"
+      >
+        <DCArtboard id="a-stream" label="甲 · 流 v1 · 旧版（已被上方三套替代）" width={1440} height={900}>
+          <VariantStream />
+        </DCArtboard>
+
+        <DCArtboard id="b-report" label="乙 · 报  —  任务报告（密度高）" width={1440} height={900}>
+          <VariantReport />
+        </DCArtboard>
+
+        <DCArtboard id="c-pavilion" label="丙 · 阁  —  多面板工作台（密度最高）" width={1440} height={900}>
+          <VariantPavilion />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection
+        id="design-notes"
+        title="设计说明"
+        subtitle="三套各自的核心差异与亮点"
+      >
+        <DCArtboard id="notes" label="说明" width={1440} height={520}>
+          <div style={{ width: '100%', height: '100%', padding: '48px 56px', fontFamily: 'var(--sans)', background: 'var(--paper)', color: 'var(--ink)', display: 'flex', flexDirection: 'column', gap: 28 }} className="paper-bg">
+
+            <div style={{ display: 'flex', alignItems: 'flex-end', gap: 18, paddingBottom: 18, borderBottom: '2px solid var(--ink)' }}>
+              <span className="seal" style={{ width: 36, height: 36, fontSize: 20 }}>觀</span>
+              <div>
+                <div style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--ink-3)', letterSpacing: '0.25em', marginBottom: 4 }}>DESIGN  NOTES</div>
+                <h1 style={{ fontFamily: 'var(--serif)', fontSize: 28, fontWeight: 500, margin: 0, letterSpacing: '-0.005em' }}>三套界面的取舍</h1>
+              </div>
+              <span style={{ flex: 1 }} />
+              <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--ink-3)', letterSpacing: '0.1em' }}>v0.1 · 2026-05-21</div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 28, flex: 1 }}>
+              {[
+                {
+                  n: '甲', t: '流', sub: '对话流',
+                  pros: ['学习成本最低，类 ChatGPT', 'AI 推理步骤可折叠，过程透明', '富媒体卡片让结论可视化'],
+                  cons: ['一屏信息量有限', '不适合长时间盯盘'],
+                  fit: '小白用户首次接触；移动端可同套设计',
+                  spot: '研究步骤的「墨痕计时」——动态印记+耗时',
+                  density: '密度 ●●○',
+                  c: 'var(--zhu)',
+                },
+                {
+                  n: '乙', t: '报', sub: '任务→报告',
+                  pros: ['真正像研究产品而非聊天玩具', '右侧引用源建立可信度，可点验真', '导出 PDF/分享易实现'],
+                  cons: ['一次任务执行较长（建议异步通知）', '初学者需要先理解"任务"概念'],
+                  fit: '进阶用户、机构、做研究复盘',
+                  spot: '右侧「印章式」引用脚注，可点击高亮原文',
+                  density: '密度 ●●●',
+                  c: 'var(--yin)',
+                },
+                {
+                  n: '丙', t: '阁', sub: '多面板工作台',
+                  pros: ['一屏盯盘+对话+自选+新闻', '老手熟悉的多面板范式', '可拖拽改面板布局'],
+                  cons: ['认知负担最高', 'AI 对话被压缩到一角'],
+                  fit: '盘中实时使用、有持仓的活跃用户',
+                  spot: 'K 线右轴毛笔笔触刻度，与字体气质呼应',
+                  density: '密度 ●●●●',
+                  c: 'var(--dai)',
+                },
+              ].map((v, i) => (
+                <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, paddingBottom: 10, borderBottom: '1px solid var(--line)' }}>
+                    <span style={{ width: 32, height: 32, background: v.c, color: 'var(--paper)', fontFamily: 'var(--serif)', fontSize: 18, fontWeight: 500, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{v.n}</span>
+                    <span style={{ fontFamily: 'var(--serif)', fontSize: 22, fontWeight: 500 }}>{v.t}</span>
+                    <span style={{ fontFamily: 'var(--serif)', fontSize: 14, color: 'var(--ink-2)' }}>{v.sub}</span>
+                    <span style={{ flex: 1 }} />
+                    <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--ink-3)', letterSpacing: '0.05em' }}>{v.density}</span>
+                  </div>
+
+                  <div>
+                    <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--ink-3)', letterSpacing: '0.2em', marginBottom: 6 }}>优势</div>
+                    {v.pros.map((p, j) => (
+                      <div key={j} style={{ fontFamily: 'var(--serif)', fontSize: 13, color: 'var(--ink-1)', lineHeight: 1.7, display: 'flex', gap: 8 }}>
+                        <span style={{ color: v.c }}>·</span> {p}
+                      </div>
+                    ))}
+                  </div>
+
+                  <div>
+                    <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--ink-3)', letterSpacing: '0.2em', marginBottom: 6 }}>权衡</div>
+                    {v.cons.map((p, j) => (
+                      <div key={j} style={{ fontFamily: 'var(--serif)', fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.7, display: 'flex', gap: 8 }}>
+                        <span style={{ color: 'var(--ink-3)' }}>·</span> {p}
+                      </div>
+                    ))}
+                  </div>
+
+                  <div style={{ marginTop: 'auto', paddingTop: 12, borderTop: '1px solid var(--line-soft)' }}>
+                    <div style={{ display: 'flex', gap: 10, fontSize: 11, color: 'var(--ink-2)', marginBottom: 4 }}>
+                      <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--ink-3)', letterSpacing: '0.2em', width: 32, flexShrink: 0, marginTop: 2 }}>适合</span>
+                      <span style={{ fontFamily: 'var(--serif)', fontSize: 12.5 }}>{v.fit}</span>
+                    </div>
+                    <div style={{ display: 'flex', gap: 10, fontSize: 11, color: 'var(--ink-2)' }}>
+                      <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: v.c, letterSpacing: '0.2em', width: 32, flexShrink: 0, marginTop: 2 }}>亮点</span>
+                      <span style={{ fontFamily: 'var(--serif)', fontSize: 12.5, color: 'var(--ink-1)' }}>{v.spot}</span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </DCArtboard>
+      </DCSection>
+    </DesignCanvas>
+  );
+
+  ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

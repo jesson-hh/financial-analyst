@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>观澜 · 落子</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&family=Noto+Serif+SC:wght@400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&display=swap" />
+<link rel="stylesheet" href="../_shared/tokens.css" />
+<style>
+  html, body, #root { height: 100%; margin: 0; }
+  body { font-family: var(--sans); color: var(--ink); background: var(--paper); overflow-x: auto; overflow-y: hidden; }
+  #root { min-width: 1280px; height: 100%; }
+  .num, .mono { font-variant-numeric: tabular-nums; }
+  *::-webkit-scrollbar { width: 8px; height: 8px; }
+  *::-webkit-scrollbar-thumb { background: rgba(28,24,20,0.16); border-radius: 4px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+  body.dark *::-webkit-scrollbar-thumb { background: rgba(237,228,204,0.18); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+  @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.3; transform: scale(0.7); } }
+  @keyframes pop { 0% { opacity: 0; } 60% { opacity: 1; } 100% { opacity: 1; } }
+  @keyframes lzGlow { 0%,100% { box-shadow: 0 0 0 rgba(168,57,45,0); } 50% { box-shadow: 0 0 14px rgba(168,57,45,0.32); } }
+  @keyframes lzSeal { 0% { opacity: 0; transform: scale(0.8) rotate(-7deg); } 70% { transform: scale(1.07) rotate(2deg); } 100% { opacity: 1; transform: scale(1) rotate(0); } }
+  .hover-row:hover { background: rgba(28,24,20,0.04) !important; }
+  body.dark .hover-row:hover { background: rgba(237,228,204,0.05) !important; }
+  select { appearance: none; -webkit-appearance: none; }
+  input[type=range] { height: 4px; }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+<script src="../_shared/guanlan-bus.js?v=4"></script>
+<script src="../_shared/guanlan-nav.js"></script>
+<script>
+  // 观澜 后端开关 — 默认同源（本页由 guanlan_v2/server.py 在 9999 服务，同源即真后端引擎）。
+  //   http(s) 打开（经薄壳服务）→ 连真 /seats/daily，K线显示 stock_data 真日K。
+  //   file:// 直接打开（无后端）→ 留 null，luozi-data 回退合成样例（诚实降级）。
+  window.GUANLAN_BACKEND =
+    (location.protocol === 'http:' || location.protocol === 'https:') ? location.origin : null;
+</script>
+<!-- 顺序：数据内核(纯JS,先) → 图表(声明 hooks) → 面板 → 舰队 → 主壳 -->
+<script type="text/babel" data-presets="env,react" src="luozi-data.jsx?v=20260615h"></script>
+<script type="text/babel" data-presets="env,react" src="luozi-chart.jsx?v=20260613m"></script>
+<script type="text/babel" data-presets="env,react" src="luozi-panels.jsx?v=20260615h"></script>
+<script type="text/babel" data-presets="env,react" src="luozi-fleet.jsx?v=20260615j"></script>
+<script type="text/babel" data-presets="env,react" src="luozi-foundry.jsx?v=20260614i"></script>
+<script type="text/babel" data-presets="env,react" src="luozi-app.jsx?v=20260615i"></script>
+<script type="text/babel" data-presets="env,react">
+  ReactDOM.createRoot(document.getElementById('root')).render(<LuoziApp />);
+</script>
+</body>
+</html>

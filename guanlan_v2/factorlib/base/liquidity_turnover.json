@@ -1,0 +1,50 @@
+[
+  {
+    "name": "lib_turnover_cv20",
+    "family": "library",
+    "expr": "stddev(turnover_rate,20)/(ts_mean(turnover_rate,20)+1e-8)",
+    "description": "20日换手率变异系数(换手稳定性,越高越躁动)。",
+    "source": "stocks/results/factor_mining/rolling_top30_factors.txt#turnover_cv20",
+    "qlib_src": "Std($turnover_rate,20)/(Mean($turnover_rate,20)+1e-8)"
+  },
+  {
+    "name": "lib_turnover_jump_ratio",
+    "family": "library",
+    "expr": "turnover_rate/(ts_mean(turnover_rate,20)+1e-8)",
+    "description": "换手跳升比:当日换手 / 20日均换手。",
+    "source": "stocks/results/factor_mining/rolling_top30_factors.txt#turnover_jump_ratio",
+    "qlib_src": "$turnover_rate/(Mean($turnover_rate,20)+1e-8)"
+  },
+  {
+    "name": "lib_amount_surge_3d_20d",
+    "family": "library",
+    "expr": "ts_mean(amount,3)/(ts_mean(amount,20)+1e-8)",
+    "description": "成交额放量:3日均额 / 20日均额。",
+    "source": "stocks/results/factor_mining/rolling_top30_factors.txt#amount_surge_3d_20d",
+    "qlib_src": "Mean($amount,3)/(Mean($amount,20)+1e-8)"
+  },
+  {
+    "name": "lib_amount_share_5d_60d",
+    "family": "library",
+    "expr": "ts_sum(amount,5)/(ts_sum(amount,60)+1e-8)",
+    "description": "成交额占比:近5日额 / 近60日额(放量集中度)。",
+    "source": "stocks/results/factor_mining/rolling_top30_factors.txt#amount_share_5d_60d",
+    "qlib_src": "Sum($amount,5)/(Sum($amount,60)+1e-8)"
+  },
+  {
+    "name": "lib_amt_concentration_5v20",
+    "family": "library",
+    "expr": "ts_sum(amount,5)/(ts_sum(amount,20)+1e-8)",
+    "description": "成交额集中度:近5日额 / 近20日额。",
+    "source": "stocks/results/factor_mining/rolling_top30_factors.txt#amt_concentration_5v20",
+    "qlib_src": "Sum($amount,5)/(Sum($amount,20)+1e-8)"
+  },
+  {
+    "name": "lib_amt_weighted_ret20",
+    "family": "library",
+    "expr": "ts_mean(amount*(close/open-1),20)/(ts_mean(amount,20)+1e-8)",
+    "description": "成交额加权日内收益(20日):资金真实驱动的日内涨跌。",
+    "source": "stocks/results/factor_mining/rolling_top30_factors.txt#amt_weighted_ret20",
+    "qlib_src": "Mean($amount*($close/$open-1),20)/(Mean($amount,20)+1e-8)"
+  }
+]

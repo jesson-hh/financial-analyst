@@ -1,0 +1,94 @@
+{
+  "id": "w70957c2e2877",
+  "name": "反转·csi500·方向修正(月频市值加权回测)",
+  "ts": 1780895053853,
+  "graph": {
+    "nodes": [
+      {
+        "id": "s2",
+        "type": "source",
+        "x": 60,
+        "y": 230,
+        "params": {
+          "scope": "小池",
+          "code": "600519",
+          "codes": "",
+          "benchmark": "",
+          "leader": "",
+          "universe": "csi500",
+          "start": "2022-06-08",
+          "end": "2026-06-05",
+          "freq": "day",
+          "oos_frac": "0.3",
+          "wf_refit": "否"
+        }
+      },
+      {
+        "id": "f2",
+        "type": "formula",
+        "x": 342,
+        "y": 179,
+        "params": {
+          "expr": "rank(-ts_sum(returns,20))"
+        }
+      },
+      {
+        "id": "e2",
+        "type": "feature",
+        "x": 624,
+        "y": 140,
+        "params": {
+          "tag": "fwd_ret"
+        }
+      },
+      {
+        "id": "b2",
+        "type": "backtest",
+        "x": 906,
+        "y": 140,
+        "params": {
+          "cash": "1000000",
+          "topn": 50,
+          "rebalance": "month",
+          "commission": 0.0003,
+          "stamp_tax": 0.0005,
+          "slippage": 5,
+          "combine": "equal",
+          "weighting": "mktcap"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "from": [
+          "f2",
+          "out"
+        ],
+        "to": [
+          "e2",
+          "feat"
+        ]
+      },
+      {
+        "from": [
+          "e2",
+          "fe"
+        ],
+        "to": [
+          "b2",
+          "factor"
+        ]
+      },
+      {
+        "from": [
+          "s2",
+          "data"
+        ],
+        "to": [
+          "e2",
+          "src"
+        ]
+      }
+    ]
+  }
+}

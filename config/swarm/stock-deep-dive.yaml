@@ -1,0 +1,94 @@
+name: stock-deep-dive
+description: >-
+  A-share single-stock deep-dive — 技术面/资金面(筹码集中/股东户数/主力成本/量价) +
+  市场环境(大盘 regime / 主线 / 早盘 / 海外 / 行业轮动)。
+  2026-06-04 剥离因子/量化:删 factor-computer / quant-analyst / model-predictor;
+  加 market-scanner(大盘) / mainline-classifier(主线) / morning-brief-writer(早盘)。
+variables:
+  - name: code
+    type: string
+    required: true
+  - name: asof_date
+    type: string
+    default: today
+
+agents:
+  # ── Tier 1 — 并行, 无依赖 ──
+  # 个股数据
+  - name: quote-fetcher
+    deps: []
+    input_keys: [code, asof_date]
+  - name: news-reader
+    deps: []
+    input_keys: [code, asof_date]
+  - name: f10-reader            # 股东户数 / F10 → 筹码集中度
+    deps: []
+    input_keys: [code, asof_date]
+  # 市场环境 (市场级, 自取数, 喂 Tier-2 + report-writer)
+  - name: market-scanner            # 大盘: regime / 涨停连板 breadth
+    deps: []
+    input_keys: [asof_date]
+  - name: mainline-classifier       # 主线: 产业链主线 5 态分级
+    deps: []
+    input_keys: [asof_date]
+  - name: morning-brief-writer      # 早盘: 隔夜变动 + 盘前 watchlist
+    deps: []
+    input_keys: [asof_date]
+  - name: overseas-market-scanner   # 海外宏观 (隔夜美股/港股/VIX)
+    deps: []
+    input_keys: [asof_date]
+  - name: sector-rotation-analyzer  # 行业轮动
+    deps: []
+    input_keys: [asof_date]
+  - name: news-sentiment            # 实时新闻情绪(大盘 market_read + 本票 tag)
+    deps: []
+    input_keys: [code, asof_date]
+
+  # ── Tier 2 — Tier 1 之后并行 ──
+  - name: fundamental-analyst
+    deps: [quote-fetcher, overseas-market-scanner]
+    input_keys: [quote-fetcher, overseas-market-scanner]
+    soft_deps: [overseas-market-scanner]   # 海外宏观=上下文,失败不应拖垮基本面分析
+  - name: technical-analyst         # 技术面: 均线/量价/支撑压力 + 大盘/主线 context (不再吃 factor-computer)
+    deps: [quote-fetcher, market-scanner, mainline-classifier, overseas-market-scanner, sector-rotation-analyzer]
+    input_keys: [quote-fetcher, market-scanner, mainline-classifier, overseas-market-scanner, sector-rotation-analyzer]
+    soft_deps: [market-scanner, mainline-classifier, overseas-market-scanner, sector-rotation-analyzer]   # 市场环境=上下文,失败则技术面降级(仍出)
+  - name: whale-analyst             # 主力行为 / 筹码集中 (价量 + 股东户数, 不再吃 factor-computer)
+    deps: [quote-fetcher, f10-reader]
+    input_keys: [quote-fetcher, f10-reader]
+
+  # ── Tier 3 — 多空 → 风控 → writer ──
+  - name: bull-advocate
+    deps: [fundamental-analyst, technical-analyst, whale-analyst]
+    input_keys: [fundamental-analyst, technical-analyst, whale-analyst]
+  - name: bear-advocate
+    deps: [fundamental-analyst, technical-analyst, whale-analyst]
+    input_keys: [fundamental-analyst, technical-analyst, whale-analyst]
+    memory_mode: retrieval    # large pitfalls.md, F1-F14 — better retrieved
+  - name: risk-officer
+    deps: [bull-advocate, bear-advocate, news-reader, f10-reader]
+    input_keys: [bull-advocate, bear-advocate, news-reader, f10-reader]
+    borrows_memory: [bear-advocate]
+    memory_mode: retrieval
+  - name: report-writer
+    deps: [quote-fetcher, fundamental-analyst, technical-analyst, whale-analyst,
+           market-scanner, mainline-classifier, morning-brief-writer,
+           overseas-market-scanner, sector-rotation-analyzer,
+           bull-advocate, bear-advocate, risk-officer, news-sentiment]
+    input_keys: [quote-fetcher, fundamental-analyst, technical-analyst, whale-analyst,
+                 market-scanner, mainline-classifier, morning-brief-writer,
+                 overseas-market-scanner, sector-rotation-analyzer,
+                 bull-advocate, bear-advocate, risk-officer, news-sentiment,
+                 code, asof_date, out_dir]
+    # 市场环境/新闻情绪类 agent 是上下文佐证,任一失败只让对应段落降级,不该让整份研报夭折。
+    # 核心链(quote/基本面/技术面/主力/多空/风控)仍是硬依赖,缺则研报不成立。
+    soft_deps: [market-scanner, mainline-classifier, morning-brief-writer,
+                overseas-market-scanner, sector-rotation-analyzer, news-sentiment]
+
+  # ── Tier 4 — 复盘 (不阻塞研报输出) ──
+  - name: introspector
+    deps: [report-writer, bull-advocate, bear-advocate, risk-officer,
+           fundamental-analyst, technical-analyst, whale-analyst]
+    input_keys: [report-writer, bull-advocate, bear-advocate, risk-officer,
+                 fundamental-analyst, technical-analyst, whale-analyst]
+    memory_mode: full

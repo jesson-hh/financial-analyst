@@ -1,0 +1,50 @@
+[
+  {
+    "name": "lib_vol_up_risk_appetite",
+    "family": "library",
+    "expr": "stddev(close/delay(close,1)-1,20) * (close/delay(close,20)-1)",
+    "description": "波动×动量:高波动且上涨的风险偏好态。",
+    "source": "stocks/results/factor_mining/rolling_top30_factors.txt#vol_up_risk_appetite",
+    "qlib_src": "Std($close/Ref($close,1)-1,20) * ($close/Ref($close,20)-1)"
+  },
+  {
+    "name": "lib_distress_highvol_lowamt",
+    "family": "library",
+    "expr": "stddev(close/delay(close,1)-1,20)/(ts_mean(amount,20)+1e-8)*1e9",
+    "description": "困境信号:高波动 / 低成交额(放大1e9量纲)。",
+    "source": "stocks/results/factor_mining/rolling_top30_factors.txt#distress_highvol_lowamt",
+    "qlib_src": "Std($close/Ref($close,1)-1,20)/(Mean($amount,20)+1e-8)*1e9"
+  },
+  {
+    "name": "lib_distress_drop_highturn",
+    "family": "library",
+    "expr": "(delay(close,10)/close-1)*ts_mean(turnover_rate,5)/(ts_mean(turnover_rate,20)+1e-8)",
+    "description": "困境下跌×高换手:10日跌幅 × 短期换手放大。",
+    "source": "stocks/results/factor_mining/rolling_top30_factors.txt#distress_drop_highturn",
+    "qlib_src": "(Ref($close,10)/$close-1)*Mean($turnover_rate,5)/(Mean($turnover_rate,20)+1e-8)"
+  },
+  {
+    "name": "lib_beta_volume_cross",
+    "family": "library",
+    "expr": "stddev(close/delay(close,1)-1,60) * (ts_mean(volume,5)/(ts_mean(volume,20)+1e-8))",
+    "description": "波动 × 放量:60日波动 × 短期量能放大。",
+    "source": "stocks/results/factor_mining/rolling_top30_factors.txt#beta_volume_cross",
+    "qlib_src": "Std($close/Ref($close,1)-1,60) * (Mean($volume,5)/(Mean($volume,20)+1e-8))"
+  },
+  {
+    "name": "lib_close_vwap_dev",
+    "family": "library",
+    "expr": "ts_mean(close/vwap-1,20)",
+    "description": "收盘相对VWAP偏离(20日均):收在均价之上/下的持续度。",
+    "source": "stocks/results/factor_mining/rolling_top30_factors.txt#close_vwap_dev",
+    "qlib_src": "Mean($close/$vwap-1,20)"
+  },
+  {
+    "name": "lib_ma_dev_composite",
+    "family": "library",
+    "expr": "(close/ts_mean(close,5)-1+close/ts_mean(close,10)-1+close/ts_mean(close,20)-1+close/ts_mean(close,60)-1)/4",
+    "description": "多周期均线偏离综合(5/10/20/60日)。",
+    "source": "stocks/results/factor_mining/rolling_top30_factors.txt#ma_dev_composite",
+    "qlib_src": "($close/Mean($close,5)-1+$close/Mean($close,10)-1+$close/Mean($close,20)-1+$close/Mean($close,60)-1)/4"
+  }
+]

@@ -1,0 +1,40 @@
+[project]
+name = "guanlan-v2"
+version = "0.0.1"
+description = "观澜 V2 — A 股研究闭环工作台 (5 模块共享档案库, 自包含引擎)"
+requires-python = ">=3.11"
+# 引擎 (financial_analyst) 已 fork 进本仓库 engine/ —— guanlan-v2 自包含。
+# 下列依赖 = 引擎 (原 financial-analyst 包) 的运行时依赖, 不再依赖外部 financial-analyst 包。
+# 数据仍外部: 经引擎 get_data_paths → config/loaders.yaml → G:/stocks (见 docs/data_contract.md)。
+dependencies = [
+    "fastapi>=0.110",          # buddy SSE 后端 + 薄壳
+    "uvicorn>=0.29",           # ASGI server
+    "litellm>=1.50",           # LLM 路由 (deepseek 等)
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "typer>=0.12",
+    "rich>=13",
+    "prompt-toolkit>=3.0",
+    "pandas>=2",
+    "numpy>=1.26",
+    "pyarrow>=15",             # parquet 读取
+    "lightgbm>=4",             # 因子 / 模型
+    "tushare>=1.4",
+    "pytdx>=1.72",
+    "pyyaml>=6",
+    "anyio>=4",
+    "mcp>=1.0",
+    "huggingface-hub>=0.20",
+    "httpx>=0.27",             # buddy + tencent_quote
+    "requests>=2.31",
+    "hf-transfer>=0.1.6",
+    "pypdf>=4",                # /upload PDF 抽取
+    "python-multipart>=0.0.9", # /upload multipart
+]
+
+[tool.guanlan]
+# 引擎源默认 = 仓库内 vendored 包 engine/ (见 guanlan_v2/server.py _FA_SRC_DEFAULT);
+# 经 GUANLAN_FA_SRC 覆盖 (如指回 G:/fa-watch-wt/src 与上游 A/B)。
+# 引擎配置默认 = 仓库内 config/ (server.py 经 FA_CONFIG_DIR 注入);
+# 数据经 get_data_paths → config/loaders.yaml → G:/stocks。
+fa_src_dev_fallback = "engine"

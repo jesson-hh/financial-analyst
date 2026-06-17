@@ -1,0 +1,89 @@
+{
+  "id": "w36b1f6dcfec9",
+  "name": "价值·账面市值比·csi800",
+  "ts": 1780895053850,
+  "graph": {
+    "nodes": [
+      {
+        "id": "s1",
+        "type": "source",
+        "x": 60,
+        "y": 230,
+        "params": {
+          "scope": "小池",
+          "code": "600519",
+          "codes": "",
+          "benchmark": "",
+          "leader": "",
+          "universe": "csi800",
+          "start": "2022-06-08",
+          "end": "2026-06-05",
+          "freq": "day",
+          "oos_frac": "0.3",
+          "wf_refit": "否"
+        }
+      },
+      {
+        "id": "f1",
+        "type": "formula",
+        "x": 342,
+        "y": 179,
+        "params": {
+          "expr": "rank(total_equity/total_mv)"
+        }
+      },
+      {
+        "id": "e1",
+        "type": "feature",
+        "x": 624,
+        "y": 140,
+        "params": {
+          "tag": "IC"
+        }
+      },
+      {
+        "id": "a1",
+        "type": "analysis",
+        "x": 906,
+        "y": 140,
+        "params": {
+          "rebal": "month",
+          "groups": 10,
+          "dir": "0"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "from": [
+          "f1",
+          "out"
+        ],
+        "to": [
+          "e1",
+          "feat"
+        ]
+      },
+      {
+        "from": [
+          "e1",
+          "fe"
+        ],
+        "to": [
+          "a1",
+          "factor"
+        ]
+      },
+      {
+        "from": [
+          "s1",
+          "data"
+        ],
+        "to": [
+          "e1",
+          "src"
+        ]
+      }
+    ]
+  }
+}

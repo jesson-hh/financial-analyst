@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>观澜 · 帷幄</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&family=Noto+Serif+SC:wght@400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&display=swap" />
+<link rel="stylesheet" href="../_shared/tokens.css" />
+<style>
+  html, body, #root { height: 100%; margin: 0; }
+  body { font-family: var(--sans); color: var(--ink); background: var(--paper); overflow: hidden; }
+  #root { min-width: 1280px; height: 100%; }
+  .num, .mono { font-variant-numeric: tabular-nums; }
+  *::-webkit-scrollbar { width: 8px; height: 8px; }
+  *::-webkit-scrollbar-thumb { background: rgba(28,24,20,0.16); border-radius: 4px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
+  @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+  @keyframes pulseRing { 0%,100% { transform: scale(1); opacity: 0.4; } 50% { transform: scale(1.4); opacity: 0; } }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes slideInRight { from { opacity: 0; transform: translateX(40px); } to { opacity: 1; transform: translateX(0); } }
+  .hover-row:hover { background: rgba(28,24,20,0.04); }
+  .ww-sess-act { opacity: 0; color: var(--ink-3); font-size: 11px; cursor: pointer; transition: opacity .12s; }
+  .ww-sess:hover .ww-sess-act { opacity: 1; }
+  .ww-sess-act:hover { color: var(--ink); }
+  .hover-link:hover { color: var(--ink) !important; text-decoration: underline; text-underline-offset: 3px; }
+  .hover-pill:hover { background: rgba(28,24,20,0.06); }
+  select { appearance: none; -webkit-appearance: none; }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+<script src="../_shared/guanlan-bus.js?v=4"></script>
+<script src="../_shared/guanlan-nav.js"></script>
+<script>
+  // 帷幄必须经 9999 同源服务(SSE/工具都在后端);file:// 直开诚实显示「需经服务打开」。
+  window.GUANLAN_BACKEND =
+    (location.protocol === 'http:' || location.protocol === 'https:') ? location.origin : null;
+</script>
+<script type="text/babel" data-presets="env,react" src="console-data.jsx?v=20260615c"></script>
+<script type="text/babel" data-presets="env,react" src="console-rail.jsx?v=20260613g"></script>
+<script type="text/babel" data-presets="env,react" src="console-thread.jsx?v=20260613n"></script>
+<script type="text/babel" data-presets="env,react" src="console-bench.jsx?v=20260615c"></script>
+<script type="text/babel" data-presets="env,react" src="console-drawer.jsx?v=20260613b"></script>
+<script type="text/babel" data-presets="env,react" src="console-app.jsx?v=20260615a"></script>
+<script type="text/babel" data-presets="env,react">
+  ReactDOM.createRoot(document.getElementById('root')).render(<WeiwoApp />);
+</script>
+</body>
+</html>

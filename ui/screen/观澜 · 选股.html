@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>观澜 · 选股</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&family=Noto+Serif+SC:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&display=swap" />
+<link rel="stylesheet" href="../_shared/tokens.css" />
+<style>
+  html, body { margin: 0; height: 100%; }
+  /* 锁定视口高度 + 关闭纵向页面滚动 → 让左栏/主列各自 overflowY:auto 独立滑动
+     (否则 guanlan-nav 的 min-height:100vh 会让高度链断裂,整页一起滚)。 */
+  body { overflow-x: auto; overflow-y: hidden; }
+  .paper-bg { background: var(--paper); }
+  .serif { font-family: var(--serif), serif; }
+  .mono  { font-family: var(--mono), monospace; }
+  .sans  { font-family: var(--sans), sans-serif; }
+  .seal  { background: var(--yin); color: var(--paper); font-family: var(--serif), serif; display: flex; align-items: center; justify-content: center; border-radius: 6px; }
+  .hover-row:hover { background: rgba(28,24,20,0.04); }
+  @keyframes pulse  { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+  *::-webkit-scrollbar { width: 8px; height: 8px; }
+  *::-webkit-scrollbar-thumb { background: rgba(28,24,20,0.14); }
+  select { appearance: none; -webkit-appearance: none; }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+  // 同源约定:9999 薄壳服务本页 → 自动连真后端 /screen/run;file:// 直开留空 → 本地合成预览。
+  window.GUANLAN_BACKEND = new URLSearchParams(location.search).get('backend')
+    || (location.protocol.indexOf('http') === 0 ? location.origin : '');
+</script>
+<script src="../_shared/guanlan-bus.js?v=4"></script>
+<script src="../_shared/guanlan-nav.js"></script>
+<script type="text/babel" data-presets="env,react" src="screen-data.jsx?v=20260610d"></script>
+<script type="text/babel" data-presets="env,react" src="screen-app.jsx?v=20260615c"></script>
+</body>
+</html>

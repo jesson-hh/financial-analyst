@@ -1,0 +1,99 @@
+/* 观澜 · 设计 tokens — 中式克制 */
+
+:root {
+  /* 纸 · 墨 */
+  --paper: #f1ead9;           /* 宣纸暖白 */
+  --paper-2: #ebe2cc;         /* 略深的宣纸（卡片底） */
+  --paper-3: #e3d8be;         /* 边线纸色 */
+  --ink: #1c1814;             /* 浓墨 */
+  --ink-1: #3a342c;           /* 行楷 */
+  --ink-2: #6e6557;           /* 灰墨 */
+  --ink-3: #9e9482;           /* 淡墨 */
+  --line: #cfc4ab;            /* 界线 */
+  --line-soft: #ddd2b9;       /* 弱界线 */
+
+  /* 色（克制使用） */
+  --zhu: #b94a3d;             /* 朱砂 · 涨 */
+  --zhu-soft: #d97a6d;
+  --dai: #4a6b5c;             /* 黛绿 · 跌 */
+  --dai-soft: #7a9285;
+  --jin: #8a6f3f;             /* 墨金 · 强调 */
+  --yin: #a8392d;             /* 印章红 */
+
+  /* 字 */
+  --serif: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", serif;
+  --sans:  "Noto Sans SC", "PingFang SC", "Helvetica Neue", system-ui, sans-serif;
+  --mono:  "JetBrains Mono", "Menlo", "Consolas", monospace;
+}
+
+/* 通用重置 */
+* { box-sizing: border-box; }
+body { margin: 0; }
+
+/* 数字使用 tabular-nums 等宽 */
+.num, .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.serif { font-family: var(--serif); }
+.sans  { font-family: var(--sans); }
+
+/* ───── 暗色 · 月夜 (body.dark) ───── */
+body.dark {
+  --paper:     #16110a;   /* 夜墨底 */
+  --paper-2:   #1f1810;
+  --paper-3:   #2a2218;
+  --ink:       #ede4cc;   /* 暖象牙 */
+  --ink-1:     #c9bfa3;
+  --ink-2:     #908768;
+  --ink-3:     #5e5640;
+  --line:      #3a3225;
+  --line-soft: #2a2218;
+  --zhu:       #e07466;   /* 朱砂 · 涨 (暗调下提亮) */
+  --zhu-soft:  #f29084;
+  --dai:       #7da08f;   /* 黛绿 · 跌 */
+  --dai-soft:  #9bbeae;
+  --jin:       #d4ad6f;   /* 墨金 */
+  --yin:       #d8584a;   /* 印章红 */
+}
+body.dark .paper-bg {
+  background:
+    radial-gradient(120% 80% at 10% 0%, rgba(212,173,111,0.06) 0%, transparent 50%),
+    radial-gradient(100% 60% at 90% 100%, rgba(216,88,74,0.05) 0%, transparent 60%),
+    var(--paper);
+}
+body.dark .seal { color: var(--paper-2); }
+
+/* 印章红方框 */
+.seal {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px;
+  background: var(--yin); color: var(--paper);
+  font-family: var(--serif); font-weight: 600;
+  letter-spacing: 0;
+}
+
+/* 纸纹背景 */
+.paper-bg {
+  background:
+    radial-gradient(120% 80% at 10% 0%, rgba(212,201,171,0.18) 0%, transparent 50%),
+    radial-gradient(100% 60% at 90% 100%, rgba(184,165,123,0.12) 0%, transparent 60%),
+    var(--paper);
+}
+
+/* 涨/跌色 */
+.up { color: var(--zhu); }
+.down { color: var(--dai); }
+.up-bg { background: var(--zhu); color: var(--paper); }
+.down-bg { background: var(--dai); color: var(--paper); }
+
+/* 细线 hr */
+hr.ink-rule {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 0;
+}
+hr.ink-rule.thick {
+  border-top: 2px solid var(--ink);
+}
+
+/* 折叠摘要 */
+details summary { cursor: pointer; list-style: none; }
+details summary::-webkit-details-marker { display: none; }

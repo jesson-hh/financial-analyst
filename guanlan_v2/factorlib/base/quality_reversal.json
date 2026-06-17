@@ -1,0 +1,50 @@
+[
+  {
+    "name": "lib_quality_v2",
+    "family": "library",
+    "expr": "delay(close,20)/close-1-stddev(close/delay(close,1)-1,20)*10-stddev(turnover_rate,20)/(ts_mean(turnover_rate,20)+1e-8)",
+    "description": "20日反转 - 波动惩罚 - 换手CV惩罚:低波低换手的超跌反转质量分。",
+    "source": "stocks/results/factor_mining/rolling_top30_factors.txt#quality_v2",
+    "qlib_src": "Ref($close,20)/$close-1-Std($close/Ref($close,1)-1,20)*10-Std($turnover_rate,20)/(Mean($turnover_rate,20)+1e-8)"
+  },
+  {
+    "name": "lib_quality_10d",
+    "family": "library",
+    "expr": "delay(close,10)/close-1-stddev(close/delay(close,1)-1,10)*10-ts_mean(turnover_rate,10)",
+    "description": "10日版质量反转:短窗反转 - 波动 - 平均换手。",
+    "source": "stocks/results/factor_mining/rolling_top30_factors.txt#quality_10d",
+    "qlib_src": "Ref($close,10)/$close-1-Std($close/Ref($close,1)-1,10)*10-Mean($turnover_rate,10)"
+  },
+  {
+    "name": "lib_quality_40d",
+    "family": "library",
+    "expr": "delay(close,40)/close-1-stddev(close/delay(close,1)-1,40)*10-ts_mean(turnover_rate,40)",
+    "description": "40日版质量反转(中周期)。",
+    "source": "stocks/results/factor_mining/rolling_top30_factors.txt#quality_40d",
+    "qlib_src": "Ref($close,40)/$close-1-Std($close/Ref($close,1)-1,40)*10-Mean($turnover_rate,40)"
+  },
+  {
+    "name": "lib_quality_60d",
+    "family": "library",
+    "expr": "delay(close,60)/close-1-stddev(close/delay(close,1)-1,60)*10-ts_mean(turnover_rate,60)",
+    "description": "60日版质量反转(季度周期)。",
+    "source": "stocks/results/factor_mining/rolling_top30_factors.txt#quality_60d",
+    "qlib_src": "Ref($close,60)/$close-1-Std($close/Ref($close,1)-1,60)*10-Mean($turnover_rate,60)"
+  },
+  {
+    "name": "lib_quality_4factor",
+    "family": "library",
+    "expr": "delay(close,20)/close-1-stddev(close/delay(close,1)-1,20)*10-ts_mean(turnover_rate,20)-correlation(close,volume,20)",
+    "description": "质量反转四因子:再减 量价相关(放量上涨惩罚)。",
+    "source": "stocks/results/factor_mining/rolling_top30_factors.txt#quality_4factor",
+    "qlib_src": "Ref($close,20)/$close-1-Std($close/Ref($close,1)-1,20)*10-Mean($turnover_rate,20)-Corr($close,$volume,20)"
+  },
+  {
+    "name": "lib_contrarian_sentiment",
+    "family": "library",
+    "expr": "(delay(close,20)/close-1)*(1-ts_mean(volume,5)/(ts_mean(volume,60)+1e-8))",
+    "description": "逆向情绪:20日反转 × 缩量程度(缩量超跌更强)。",
+    "source": "stocks/results/factor_mining/rolling_top30_factors.txt#contrarian_sentiment",
+    "qlib_src": "(Ref($close,20)/$close-1)*(1-Mean($volume,5)/(Mean($volume,60)+1e-8))"
+  }
+]

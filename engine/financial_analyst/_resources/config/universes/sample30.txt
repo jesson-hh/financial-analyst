@@ -1,0 +1,51 @@
+# Sample 30-stock universe — hand-picked A-share large caps for quick bench runs.
+# Replace with your own ``csi300.txt`` or ``csi500.txt`` for serious testing.
+# Format: one stock code per line, ``#`` starts a comment, blank lines ignored.
+
+# Consumer / liquor
+SH600519  # 贵州茅台
+SZ000858  # 五粮液 (Shenzhen, not Shanghai)
+SH600887  # 伊利股份
+SH603288  # 海天味业
+
+# Finance
+SH601318  # 中国平安
+SH600036  # 招商银行
+SH601398  # 工商银行
+SH601166  # 兴业银行
+
+# New energy / tech
+SZ300750  # 宁德时代
+SH600276  # 恒瑞医药
+SZ002594  # 比亚迪
+SH601012  # 隆基绿能
+SZ002475  # 立讯精密
+
+# Industrial / materials
+SH601899  # 紫金矿业
+SH600009  # 上海机场
+SH601800  # 中国交建
+SH600585  # 海螺水泥
+
+# Tech / internet equivalents
+SZ002415  # 海康威视
+SZ002230  # 科大讯飞
+SZ000063  # 中兴通讯
+SH600703  # 三安光电
+
+# Healthcare
+SH600196  # 复星医药
+SH600518  # 康美药业
+
+# Real estate / utilities
+SH600048  # 保利发展
+SH600028  # 中国石化
+SH601857  # 中国石油
+
+# Auto / consumer durable
+SH600104  # 上汽集团
+SZ000625  # 长安汽车
+
+# Tech / cloud
+SZ000938  # 紫光股份
+SH600588  # 用友网络
