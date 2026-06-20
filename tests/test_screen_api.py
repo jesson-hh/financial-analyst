@@ -116,3 +116,25 @@ def test_run_v4_path_no_unsupported_when_all_valid():
     j = _client().post("/screen/run", json={
         **_CFG, "blend": 0.5, "factors": [{"id": "fa_reversal", "w": 1.0}]}).json()
     assert j["ok"] is True and j.get("unsupported_factors") == []
+
+
+def test_run_uses_model_variant(monkeypatch):
+    # _screen_via_v4 调 `S.load_v4_ranking`(S = guanlan_v2.strategy 包级再导出绑定),
+    # 故 spy 必须打在包属性上,而非 ranking 子模块(那是另一个绑定,看不到)。
+    import guanlan_v2.strategy as S
+    calls, real = {}, S.load_v4_ranking
+
+    def spy(model_id=None):
+        calls["model_id"] = model_id
+        return real(model_id=model_id)
+
+    monkeypatch.setattr(S, "load_v4_ranking", spy)
+    j = _client().post("/screen/run", json={**_CFG, "model": "prod"}).json()
+    assert j["ok"] is True and calls.get("model_id") in (None, "prod")
+    assert j.get("model") == "prod"                             # 响应回报实际所跑模型
+
+
+def test_run_bad_model_falls_back():
+    j = _client().post("/screen/run", json={**_CFG, "model": "does_not_exist"}).json()
+    assert j["ok"] is True and j["source"] == "v4_ranking"      # 回落 prod,不 500
+    assert j.get("model") == "prod"                             # 变体缺失 → 诚实回落 prod

@@ -54,6 +54,7 @@ class ScreenIn(BaseModel):
     exclLimit: bool = True
     exclNew: bool = False
     universe: str = "csi_fast"
+    model: str = "prod"          # v4 模型:prod=生产 / 变体 id(读 models/<id>)
     start: Optional[str] = None
     end: Optional[str] = None
     freq: str = "day"
@@ -565,13 +566,17 @@ def _screen_via_v4(body: "ScreenIn"):
     """
     import math as _math
 
+    _mid = getattr(body, "model", "prod") or "prod"
     try:
         from guanlan_v2 import strategy as S
-        rank = S.load_v4_ranking()
+        try:
+            rank = S.load_v4_ranking(model_id=_mid)
+        except FileNotFoundError:
+            rank = S.load_v4_ranking(); _mid = "prod"        # 变体不可用 → 诚实回落 prod
     except Exception:  # noqa: BLE001  —— 产物缺失/读失败 → 回退
         return None
 
-    rdate = S.ranking_date()
+    rdate = S.ranking_date(model_id=_mid)
     nim = S.name_industry_map()
 
     # 股票池切换:指数成份(csi300/500/800/1000)→ 先把 v4 排名过滤到成份内。
@@ -795,6 +800,7 @@ def _screen_via_v4(body: "ScreenIn"):
     return JSONResponse({
         "ok": True,
         "source": "v4_ranking",
+        "model": _mid,              # 实际所跑 v4 模型(变体缺失已回落 prod)
         "date": rdate,
         "v4_provenance": _b3prov,   # #7 v4 排名口径:纯 LGB vs LGB+FinCast(w_fc)+look-ahead,诚实显形
         "chosen": chosen,
