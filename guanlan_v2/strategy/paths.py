@@ -7,6 +7,7 @@ from pathlib import Path
 _PKG = Path(__file__).resolve().parent
 VENDOR_DIR = _PKG / "vendor"
 ARTIFACTS_DIR = VENDOR_DIR / "artifacts"
+MODELS_DIR = ARTIFACTS_DIR / "models"
 KNOWLEDGE_DIR = VENDOR_DIR / "knowledge"
 PROVENANCE_JSON = _PKG / "_provenance.json"
 
