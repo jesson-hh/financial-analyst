@@ -16,3 +16,17 @@ def holdout_split(dates, ld, horizon: int = 5, k: int = 20) -> Tuple[pd.Timestam
     if len(labeled) <= k:
         return (labeled[-1] if labeled else (uniq[-1] if uniq else pd.Timestamp(ld))), []
     return labeled[-k - 1], labeled[-k:]
+
+
+NON_FEATURE = {"label", "pe_ttm", "pb", "total_mv", "ps_ttm_raw"}
+
+
+def resolve_feature_cols(available, base_features: List[str], factor_ids: List[str]) -> List[str]:
+    """最终训练特征列 = (选中基础 ∪ 选中库因子),必须在 available 且非 label/估值原始列。
+    顺序稳定(基础在前);全空 → ValueError(至少选 1 个)。"""
+    av = set(available)
+    picked = [c for c in base_features if c in av and c not in NON_FEATURE]
+    picked += [c for c in factor_ids if c in av and c not in picked]
+    if not picked:
+        raise ValueError("至少选 1 个可用因子(基础或库因子)")
+    return picked
