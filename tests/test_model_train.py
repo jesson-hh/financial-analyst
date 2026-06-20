@@ -25,6 +25,16 @@ def test_holdout_split_uses_trading_days_not_calendar_days():
     assert train_cut < min(holdout)
 
 
+def test_holdout_split_embargo_purges_horizon():
+    dates = pd.bdate_range("2026-01-01", periods=80)   # 80 个工作日,数据充足
+    ld = dates.max()
+    tc, hd = mt.holdout_split(dates, ld, horizon=5, k=10)
+    labeled = [d for d in dates if d <= ld][:-5]        # 有 label 的交易日
+    gap = labeled.index(min(hd)) - labeled.index(tc)    # train_cutoff 到留出最早日之间的交易日间隔
+    assert gap == 5 + 1                                  # purge 了 horizon(5)个交易日 + 本身的 1
+    assert tc < min(hd)
+
+
 def test_resolve_feature_cols():
     available = ["rev_20", "vol_20", "breakout_20", "log_mv", "label", "pe_ttm"]
     cols = mt.resolve_feature_cols(available, base_features=["rev_20", "vol_20"], factor_ids=["c_28f035"])

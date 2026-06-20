@@ -10,12 +10,15 @@ import pandas as pd
 
 def holdout_split(dates, ld, horizon: int = 5, k: int = 20) -> Tuple[pd.Timestamp, List[pd.Timestamp]]:
     """返回 (train_cutoff, holdout_dates)。label=未来 horizon 个【交易日】收益 → 最后 horizon 个交易日无 label;
-    有 label 的最近 k 个交易日留作 OOS,train 截止=这些留出日的前一交易日。数据太短→holdout 空。"""
+    有 label 的最近 k 个交易日留作 OOS;train 截止再向前 purge horizon 个交易日,使训练样本的 label 窗口不与留出期重叠。"""
     uniq = [d for d in sorted(pd.Index(pd.to_datetime(pd.Series(dates))).unique()) if d <= pd.Timestamp(ld)]
     labeled = uniq[:-horizon] if len(uniq) > horizon else []   # 排除末 horizon 个【交易日】(positional)
     if len(labeled) <= k:
         return (labeled[-1] if labeled else (uniq[-1] if uniq else pd.Timestamp(ld))), []
-    return labeled[-k - 1], labeled[-k:]
+    holdout = labeled[-k:]
+    cut_idx = len(labeled) - k - 1 - horizon          # purge:留出窗前再退 horizon 个交易日
+    train_cutoff = labeled[cut_idx] if cut_idx >= 0 else labeled[0]
+    return train_cutoff, holdout
 
 
 NON_FEATURE = {"label", "pe_ttm", "pb", "total_mv", "ps_ttm_raw"}
