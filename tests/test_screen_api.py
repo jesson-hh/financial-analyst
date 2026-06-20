@@ -152,6 +152,7 @@ def test_model_endpoints(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "_run_model_train_subprocess", lambda spec: None)
     assert c.post("/screen/model/train", json={"name":"t","factor_ids":[],"base_features":["rev_20"]}).json()["started"] is True
     assert c.post("/screen/model/train", json={"name":"t","factor_ids":[],"base_features":[]}).json()["ok"] is False
+    api._MODEL_STATE["running"] = False   # 桩 runner 不清 running,手动复位防跨测污染
     assert c.post("/screen/model/delete", json={"id":"prod"}).json()["ok"] is False
     assert c.post("/screen/model/delete", json={"id":"m_seed"}).json()["ok"] is True
     assert c.get("/screen/base_features").json()["ok"] is True

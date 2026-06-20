@@ -277,13 +277,13 @@ def _model_public_state() -> Dict[str, Any]:
 def _run_model_train_subprocess(spec: Dict[str, Any]) -> None:
     import os, sys as _sys, time as _t, json as _json, tempfile, subprocess
     from pathlib import Path as _P
-    repo = _P(__file__).resolve().parents[2]
-    sf = _P(tempfile.gettempdir()) / f"mtrain_{spec['variant_id']}.json"
-    sf.write_text(_json.dumps(spec, ensure_ascii=False), encoding="utf-8")
-    cmd = [_sys.executable, "-m", "guanlan_v2.strategy.compute.model_train", str(sf)]
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     rc, err = None, None
     try:
+        repo = _P(__file__).resolve().parents[2]
+        sf = _P(tempfile.gettempdir()) / f"mtrain_{spec['variant_id']}.json"
+        sf.write_text(_json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+        cmd = [_sys.executable, "-m", "guanlan_v2.strategy.compute.model_train", str(sf)]
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
         proc = subprocess.Popen(cmd, cwd=str(repo), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, encoding="utf-8", errors="replace", bufsize=1, env=env)
         for raw in proc.stdout:
