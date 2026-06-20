@@ -107,6 +107,7 @@ function ModelWorkshop({ API, models, reloadModels, flash, onPick, onClose }) {
     let r;
     try { r = await window.xgTrain(API, spec); } catch (e) { say('训练未启动', String((e && e.message) || e)); return; }
     if (!r || !r.ok) { say('训练未启动', (r && r.reason) || '失败'); return; }
+    const vid = r.variant_id;   // 训完按此 id 找回变体,核其 unsupported_factors → 诚实告知用户哪些因子被丢弃
     setTrain({ busy: true, phase: 'starting', label: '启动训练子进程…', step: 0, total: 3, elapsed: 0 });
     if (_poll.current) clearInterval(_poll.current);
     _poll.current = setInterval(async () => {
@@ -116,7 +117,17 @@ function ModelWorkshop({ API, models, reloadModels, flash, onPick, onClose }) {
       if (!s.running) {
         clearInterval(_poll.current); _poll.current = null;
         reloadModels();
-        say(s.ok ? '变体已训好' : '训练失败', s.ok ? 'OOS 见列表' : (s.error || ''));
+        if (s.ok) {
+          try {
+            const j = await window.xgModels(API);
+            const v = ((j && j.variants) || []).find(x => x.id === vid);
+            const unsup = (v && v.unsupported_factors) || [];
+            say(unsup.length ? '变体已训好(部分因子未用)' : '变体已训好',
+                unsup.length ? ('⚠ ' + unsup.length + ' 个因子无法求值已忽略:' + unsup.join(', ') + ' · 该变体未用这些因子') : 'OOS 见列表');
+          } catch (e) { say('变体已训好', 'OOS 见列表'); }
+        } else {
+          say('训练失败', s.error || '');
+        }
       }
     }, 2500);
   };
@@ -202,7 +213,13 @@ function ModelWorkshop({ API, models, reloadModels, flash, onPick, onClose }) {
         {variants.map(m => (
           <div key={m.id} className="hover-row" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 6px', borderRadius: 6, borderBottom: '1px solid var(--line-soft)' }}>
             <div style={{ flex: 1, minWidth: 0, cursor: 'pointer' }} onClick={() => { onPick && onPick(m.id); onClose && onClose(); }}>
-              <div className="serif" style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.name || m.id}</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span className="serif" style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>{m.name || m.id}</span>
+                {(m.unsupported_factors && m.unsupported_factors.length > 0) && (
+                  <span className="mono" title={'这些因子无法求值,未参与训练:' + m.unsupported_factors.join(', ')}
+                    style={{ fontSize: 8.5, color: 'var(--paper)', background: 'var(--yin)', borderRadius: 4, padding: '0 4px', marginLeft: 4, flexShrink: 0 }}>⚠ {m.unsupported_factors.length} 未用</span>
+                )}
+              </div>
               <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)' }}>
                 {(m.n_features != null ? m.n_features : '?') + '因子'} · 留出 OOS {m.oos_ic != null ? (m.oos_ic >= 0 ? '+' : '') + (+m.oos_ic).toFixed(3) : '—'}{m.asof ? ' · ' + m.asof : ''}
               </div>
