@@ -447,6 +447,10 @@ function XuanguApp() {
 // ───────── 顶栏 ─────────
 function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, models, model, actualModel, onModel, onWorkshop }) {
   const [q, setQ] = useState('');
+  // 变体口径:真正在用变体(actualModel 非 prod、未回落)时,顶栏「体检 IC / v4 provenance」两枚徽章
+  //   原读 prod 全局产物(model_health / v4_b3_provenance),对变体是误标 → 换成变体自身口径。
+  const isVariant = !!(actualModel && actualModel !== 'prod');
+  const vmeta = isVariant ? (models || []).find(m => m.id === actualModel) : null;
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '0 18px', height: 50, flexShrink: 0, borderBottom: '1px solid var(--line)', background: 'rgba(241,234,217,0.72)' }}>
       {!WW_EMBED && (<React.Fragment>
@@ -480,7 +484,7 @@ function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, mod
             return <span className="mono" title={'L4 V1 节奏 · 涨停残差60日分位 ' + (result.market.lu_pct60 ?? '—') + (stale ? ' · 口径较排名日旧' : '')}
               style={{ fontSize: 10, color: 'var(--paper)', background: stale ? 'var(--ink-3)' : 'var(--dai)', borderRadius: 5, padding: '2px 7px' }}>节奏 · {result.market.stage} @{result.market.as_of ?? '—'}{stale ? ' 旧' : ''}</span>;
           })()}
-          {result.model_health && (() => {
+          {!isVariant && result.model_health && (() => {
             const h = result.model_health;
             const vin = h.vintage && h.vintage.ready;       // 真OOS 积累≥10天 → 主口径切 vintage
             const icShow = vin ? h.vintage.ic_mean : h.recent20;
@@ -491,7 +495,32 @@ function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, mod
               style={{ fontSize: 10, color: h.alert ? 'var(--paper)' : 'var(--ink-2)', background: h.alert ? 'var(--yin)' : 'transparent', border: '1px solid ' + (h.alert ? 'var(--yin)' : 'var(--line)'), borderRadius: 5, padding: '2px 7px' }}>
               体检{vin ? '·OOS' : ''} IC {(icShow >= 0 ? '+' : '') + (+icShow).toFixed(3)} {h.trend}{h.alert ? ' ⚠衰减' : ''}</span>;
           })()}
-          {result.v4_provenance && (() => {
+          {isVariant && (() => {
+            // 变体「留出 OOS IC」徽章(替代 prod 回看体检 IC;变体无 model_health.parquet)
+            const oi = vmeta ? vmeta.oos_ic : null;
+            const tip = vmeta
+              ? ('变体「' + (vmeta.name || vmeta.id) + '」· 留出验证 OOS rank-IC '
+                  + (oi != null ? ((oi >= 0 ? '+' : '') + (+oi).toFixed(3)) : '—')
+                  + (vmeta.oos_icir != null ? ' · ICIR ' + (+vmeta.oos_icir).toFixed(2) : '')
+                  + ' · 留出 ' + (vmeta.n_holdout ?? '—') + ' 日 / ' + (vmeta.n_features ?? '—') + ' 特征'
+                  + ' · 留出 OOS,非未来实盘;prod 体检口径不适用变体')
+              : '变体口径(未取到该变体元信息,可能已删除)';
+            return <span key="v-oos" className="mono" title={tip}
+              style={{ fontSize: 10, color: 'var(--ink-2)', border: '1px solid var(--line)', borderRadius: 5, padding: '2px 7px' }}>
+              变体·留出OOS IC {oi != null ? ((oi >= 0 ? '+' : '') + (+oi).toFixed(3)) : '—'}</span>;
+          })()}
+          {isVariant && (() => {
+            // 变体 provenance:纯 LGB 自训(无 FinCast 集成、无 prod look-ahead 口径)+ 缺字段库因子告警
+            const uns = (vmeta && vmeta.unsupported_factors) || [];
+            const tip = '变体排名口径:纯 LGB(自选特征训练)· '
+              + ((vmeta && vmeta.n_features != null) ? vmeta.n_features : '—') + ' 特征'
+              + (uns.length ? ' · ⚠ ' + uns.length + ' 个库因子字段缺失未参与:' + uns.join('、') : '')
+              + ' · 不含 FinCast 集成,无 prod look-ahead 口径';
+            return <span key="v-prov" className="mono" title={tip}
+              style={{ fontSize: 10, color: 'var(--ink-1)', border: '1px dashed var(--zhu-soft)', borderRadius: 5, padding: '2px 7px' }}>
+              变体 · 纯 LGB{uns.length ? ' ⚠' + uns.length : ''}</span>;
+          })()}
+          {!isVariant && result.v4_provenance && (() => {
             const p = result.v4_provenance;       // #7 v4 排名口径:纯 LGB vs LGB+FinCast(B3 集成),诚实显形
             const la = p.lookahead === true;
             if (p.active) {
