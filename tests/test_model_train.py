@@ -39,3 +39,12 @@ def test_resolve_feature_cols_empty_raises():
     import pytest
     with pytest.raises(ValueError):
         mt.resolve_feature_cols(["rev_20", "label"], base_features=[], factor_ids=[])
+
+
+from guanlan_v2.strategy.compute.v4 import _select_mf
+
+
+def test_select_mf_default_unchanged():
+    cols = ["rev_20", "vol_20", "label", "pe_ttm", "pb", "total_mv", "ps_ttm_raw", "log_mv"]
+    assert set(_select_mf(cols, None)) == {"rev_20", "vol_20", "log_mv"}   # 旧语义
+    assert _select_mf(cols, ["rev_20", "log_mv"]) == ["rev_20", "log_mv"]  # 显式取交集保序

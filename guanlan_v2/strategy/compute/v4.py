@@ -215,10 +215,20 @@ def add_breadth_resid(data: pd.DataFrame, resid_path: Optional[Path] = None) -> 
     return data
 
 
+def _select_mf(columns, feature_cols=None):
+    """模型特征列。feature_cols=None → 旧语义(除 label/估值原始列外全列);否则=显式列表∩现有列(保序)。"""
+    if feature_cols is None:
+        return [x for x in columns if x not in ("label", "pe_ttm", "pb", "total_mv", "ps_ttm_raw")]
+    return [c for c in feature_cols if c in set(columns)]
+
+
 def build_v4(provider_uri: str, start: str = START_DEFAULT, end: str = "2026-06-05",
              codes: Optional[List[str]] = None, date_str: Optional[str] = None,
              health: Optional[dict] = None,
-             fincast_path: Optional[str] = None, b3: Optional[dict] = None) -> pd.DataFrame:
+             fincast_path: Optional[str] = None, b3: Optional[dict] = None,
+             feature_cols: Optional[List[str]] = None,
+             extra_factor_panel: Optional["pd.DataFrame"] = None,
+             holdout: Optional[dict] = None) -> pd.DataFrame:
     """引擎原生 v4 排名 → 7 列(== v4_ranking_latest.parquet)。
 
     ``health``(可选出参,模型体检):传入 dict 时,顺带用**刚训完的同一模型**对近 ~60 个
@@ -237,14 +247,22 @@ def build_v4(provider_uri: str, start: str = START_DEFAULT, end: str = "2026-06-
     data = add_ind_turnover(data, loader, codes, start, end)
     data = add_breadth_resid(data)
 
+    if extra_factor_panel is not None and len(extra_factor_panel.columns):
+        data = data.join(extra_factor_panel, how="left")
+
     name_map = _load_name_map()
 
-    mf = [x for x in data.columns if x not in ("label", "pe_ttm", "pb", "total_mv", "ps_ttm_raw")]
+    mf = _select_mf(list(data.columns), feature_cols)
     dates = data.index.get_level_values("datetime")
     ld = dates.max()
     from datetime import timedelta
+    _train_hi = ld - timedelta(days=5)
+    if holdout is not None:
+        from guanlan_v2.strategy.compute.model_train import holdout_split as _hs
+        _tc, _ = _hs(dates, ld, horizon=int(holdout.get("horizon", 5)), k=int(holdout.get("k", 20)))
+        _train_hi = min(_train_hi, _tc)
     train = data[(dates >= pd.Timestamp("2022-01-01")) &
-                 (dates <= ld - timedelta(days=5))].dropna(subset=["label"]).copy()
+                 (dates <= _train_hi)].dropna(subset=["label"]).copy()
     pred = data[dates == ld].copy()
     train[mf] = train[mf].fillna(0)
     pred[mf] = pred[mf].fillna(0)
@@ -286,6 +304,27 @@ def build_v4(provider_uri: str, start: str = START_DEFAULT, end: str = "2026-06-
             health["ic_series"] = ics[-60:]
         except Exception as e:  # noqa: BLE001
             health["error"] = f"{type(e).__name__}: {e}"
+
+    if holdout is not None:
+        try:
+            from guanlan_v2.strategy.compute.model_train import holdout_split
+            _tc, _hd = holdout_split(dates, ld, horizon=int(holdout.get("horizon", 5)),
+                                     k=int(holdout.get("k", 20)))
+            hd = data[dates.isin(_hd)].dropna(subset=["label"]).copy()
+            ics = []
+            if len(hd):
+                hd = hd.assign(_score=model.predict(hd[mf].fillna(0).values))
+                for _d, g in hd.groupby(level="datetime"):
+                    if len(g) >= 50:
+                        ic = g["_score"].rank().corr(g["label"].rank())
+                        if pd.notna(ic):
+                            ics.append(float(ic))
+            s = pd.Series(ics)
+            holdout["oos_ic"] = float(s.mean()) if len(ics) else None
+            holdout["oos_icir"] = float(s.mean() / s.std()) if len(ics) and s.std() > 0 else None
+            holdout["n_holdout"] = int(len(ics))
+        except Exception as e:  # noqa: BLE001
+            holdout["error"] = f"{type(e).__name__}: {e}"
 
     # 自适应因子择时(照搬)
     recent = sorted(dates[dates < ld].unique())[-20:]
