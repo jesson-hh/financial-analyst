@@ -19,7 +19,8 @@ def save_variant(vid, ranking_df, meta) -> None:
     pq = variant_ranking_path(vid); tmp = str(pq) + ".tmp"
     ranking_df.to_parquet(tmp, index=False); os.replace(tmp, str(pq))
     mp = d / "meta.json"; mtmp = str(mp) + ".tmp"
-    open(mtmp, "w", encoding="utf-8").write(json.dumps(meta, ensure_ascii=False, indent=1))
+    with open(mtmp, "w", encoding="utf-8") as f:
+        f.write(json.dumps(meta, ensure_ascii=False, indent=1))
     os.replace(mtmp, str(mp))
 
 
