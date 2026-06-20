@@ -216,9 +216,10 @@ def add_breadth_resid(data: pd.DataFrame, resid_path: Optional[Path] = None) -> 
 
 
 def _select_mf(columns, feature_cols=None):
-    """模型特征列。feature_cols=None → 旧语义(除 label/估值原始列外全列);否则=显式列表∩现有列(保序)。"""
+    """模型特征列。feature_cols=None → 旧语义(除 NON_FEATURE 外全列);否则=显式列表∩现有列(保序)。"""
     if feature_cols is None:
-        return [x for x in columns if x not in ("label", "pe_ttm", "pb", "total_mv", "ps_ttm_raw")]
+        from guanlan_v2.strategy.compute.model_train import NON_FEATURE
+        return [x for x in columns if x not in NON_FEATURE]
     return [c for c in feature_cols if c in set(columns)]
 
 
