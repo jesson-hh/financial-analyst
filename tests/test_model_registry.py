@@ -19,3 +19,12 @@ def test_delete_prod_refused(tmp_path, monkeypatch):
     monkeypatch.setattr(reg, "MODELS_DIR", tmp_path / "models")
     with pytest.raises(ValueError):
         reg.delete_variant("prod")
+
+def test_load_v4_ranking_by_model(tmp_path, monkeypatch):
+    from guanlan_v2.strategy import ranking as R
+    monkeypatch.setattr(reg, "MODELS_DIR", tmp_path / "models")
+    reg.save_variant("m_x", _DF, {"id": "m_x"})
+    assert list(R.load_v4_ranking(model_id="m_x")["code"]) == ["SH600519"]
+    assert R.ranking_date(model_id="m_x") == "2026-06-17"
+    with pytest.raises(FileNotFoundError):
+        R.load_v4_ranking(model_id="nope")

@@ -32,10 +32,18 @@ def ts_to_qlib(ts_code: str) -> str:
     return ts
 
 
-def load_v4_ranking():
-    """读 vendored v4 排名(全市场)。缺文件 → FileNotFoundError(诚实,不造数据)。"""
+def load_v4_ranking(model_id=None):
+    """读 v4 排名;model_id 缺省/"prod" → 生产老路径(vendored 全市场);否则
+    models/<id>/v4_ranking.parquet。缺文件 → FileNotFoundError(诚实,不造数据)。"""
     import pandas as pd
 
+    if model_id and model_id != "prod":
+        from guanlan_v2.screen.model_registry import variant_ranking_path
+
+        p = variant_ranking_path(model_id)
+        if not p.exists():
+            raise FileNotFoundError(f"v4 变体产物缺失: {p}")
+        return pd.read_parquet(p)
     if not V4_RANKING_PARQUET.exists():
         raise FileNotFoundError(
             f"v4 排名产物缺失: {V4_RANKING_PARQUET}(需在有 qlib 环境跑 v4_ranking 刷新)"
@@ -43,10 +51,10 @@ def load_v4_ranking():
     return pd.read_parquet(V4_RANKING_PARQUET)
 
 
-def ranking_date() -> str:
+def ranking_date(model_id=None) -> str:
     """产物内排名日期(YYYY-MM-DD);缺文件/缺列 → 空串。"""
     try:
-        df = load_v4_ranking()
+        df = load_v4_ranking(model_id=model_id)
     except FileNotFoundError:
         return ""
     if "date" in df.columns and len(df):
