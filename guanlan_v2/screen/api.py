@@ -22,7 +22,7 @@ import math
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -246,6 +246,62 @@ def _run_regen_subprocess(end: Optional[str]) -> None:
                 error=(err if err else (None if ok else f"再生子进程退出码 {rc}")),
                 new_date=(nd if ok else _REGEN_STATE.get("new_date")),
             )
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# 异步 v4 模型训练(「模型工坊」)—— UI 选因子/基础特征,一键训练新变体子进程。
+# 镜像上面的 regen 机器:单飞锁 + 可轮询进度 + 子进程隔离;finally 必清 running。
+# 子进程跑 ``python -m guanlan_v2.strategy.compute.model_train <spec.json>``(Task 5),
+# 训练完落 models/<variant_id>/{v4_ranking.parquet,meta.json}(registry 写),供选股页 model 选用。
+# ───────────────────────────────────────────────────────────────────────────
+_MODEL_LOCK = _threading.Lock()
+_MODEL_STATE: Dict[str, Any] = {"running": False, "phase": "idle", "label": "", "step": 0,
+    "total": 3, "started_at": None, "ended_at": None, "ok": None, "error": None,
+    "variant_id": None, "lines": []}
+
+
+def _time_iso() -> str:
+    import datetime
+    return datetime.datetime.now().isoformat(timespec="seconds")
+
+
+def _model_public_state() -> Dict[str, Any]:
+    import time as _t
+    with _MODEL_LOCK:
+        s = dict(_MODEL_STATE); s["lines"] = list(s.get("lines") or [])[-12:]
+    if s.get("started_at"):
+        s["elapsed_sec"] = int((s.get("ended_at") or _t.time()) - s["started_at"])
+    return s
+
+
+def _run_model_train_subprocess(spec: Dict[str, Any]) -> None:
+    import os, sys as _sys, time as _t, json as _json, tempfile, subprocess
+    from pathlib import Path as _P
+    repo = _P(__file__).resolve().parents[2]
+    sf = _P(tempfile.gettempdir()) / f"mtrain_{spec['variant_id']}.json"
+    sf.write_text(_json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+    cmd = [_sys.executable, "-m", "guanlan_v2.strategy.compute.model_train", str(sf)]
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    rc, err = None, None
+    try:
+        proc = subprocess.Popen(cmd, cwd=str(repo), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, encoding="utf-8", errors="replace", bufsize=1, env=env)
+        for raw in proc.stdout:
+            line = raw.rstrip("\r\n")
+            if not line:
+                continue
+            with _MODEL_LOCK:
+                _MODEL_STATE["lines"].append(line)
+                if "[model_train]" in line or "build_feature_panel" in line:
+                    _MODEL_STATE["phase"], _MODEL_STATE["label"], _MODEL_STATE["step"] = ("train", "训练中(LGB)", 2)
+        proc.wait(); rc = proc.returncode
+    except Exception as e:  # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+    finally:
+        with _MODEL_LOCK:
+            _MODEL_STATE.update({"running": False, "ended_at": _t.time(),
+                "ok": (rc == 0 and not err), "error": err or (None if rc == 0 else f"exit {rc}"),
+                "phase": "done", "step": 3})
 
 
 def _panel_enrich(codes, freq: str = "day", factors=None):
@@ -1197,6 +1253,52 @@ def build_screen_router() -> APIRouter:
     def screen_regen_status():
         """轮询再生进度/结果(前端「拉取最新数据」按钮用)。"""
         return JSONResponse({"ok": True, "state": _regen_public_state()})
+
+    @router.get("/models")
+    def screen_models():
+        from guanlan_v2.screen.model_registry import list_variants
+        return JSONResponse({"ok": True, "variants": list_variants()})
+
+    @router.get("/model/status")
+    def screen_model_status():
+        return JSONResponse({"ok": True, "state": _model_public_state()})
+
+    @router.get("/base_features")
+    def screen_base_features():
+        from guanlan_v2.strategy.compute.model_train import _base_feature_names
+        try:
+            return JSONResponse({"ok": True, "features": _base_feature_names()})
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "reason": f"{type(e).__name__}: {e}", "features": []})
+
+    @router.post("/model/train")
+    def screen_model_train(body: dict = Body(default={})):
+        """模型工坊一键训练:校验非空选择(因子/基础特征)→ 单飞抢锁 → 起子进程训练新变体,
+        立即返回(异步);完成后落 models/<variant_id>。空选择优先于运行锁拒绝(返回各自原因)。"""
+        import time as _t, uuid
+        name = str(body.get("name") or "").strip() or "未命名变体"
+        fids, base = list(body.get("factor_ids") or []), list(body.get("base_features") or [])
+        if not fids and not base:
+            return JSONResponse({"ok": False, "reason": "至少选 1 个因子"})
+        with _MODEL_LOCK:
+            if _MODEL_STATE["running"]:
+                return JSONResponse({"ok": False, "reason": "已有训练在跑", "state": _model_public_state()})
+            vid = "m_" + uuid.uuid4().hex[:10]
+            _MODEL_STATE.update({"running": True, "phase": "starting", "label": "启动训练子进程…",
+                "step": 0, "started_at": _t.time(), "ended_at": None, "ok": None, "error": None,
+                "variant_id": vid, "lines": []})
+        spec = {"variant_id": vid, "name": name, "factor_ids": fids, "base_features": base,
+                "universe": str(body.get("universe") or "all"), "created": _time_iso()}
+        _threading.Thread(target=lambda: _safe(lambda: _run_model_train_subprocess(spec)), daemon=True).start()
+        return JSONResponse({"ok": True, "started": True, "variant_id": vid, "state": _model_public_state()})
+
+    @router.post("/model/delete")
+    def screen_model_delete(body: dict = Body(default={})):
+        from guanlan_v2.screen.model_registry import delete_variant
+        try:
+            delete_variant(str(body.get("id") or "")); return JSONResponse({"ok": True})
+        except ValueError as e:
+            return JSONResponse({"ok": False, "reason": str(e)})
 
     # 启动即后台预热 financials 索引(get_default_loader 非单例 + 冷建 ~8s);
     # daemon 线程不阻塞启动/健康检查,首个 /screen/run 命中已建好的常驻索引。

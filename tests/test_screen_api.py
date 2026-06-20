@@ -138,3 +138,20 @@ def test_run_bad_model_falls_back():
     j = _client().post("/screen/run", json={**_CFG, "model": "does_not_exist"}).json()
     assert j["ok"] is True and j["source"] == "v4_ranking"      # 回落 prod,不 500
     assert j.get("model") == "prod"                             # 变体缺失 → 诚实回落 prod
+
+
+def test_model_endpoints(monkeypatch, tmp_path):
+    import pandas as pd, guanlan_v2.screen.api as api
+    from guanlan_v2.screen import model_registry as reg
+    monkeypatch.setattr(reg, "MODELS_DIR", tmp_path / "models")
+    reg.save_variant("m_seed", pd.DataFrame({"code":["SH600519"],"lgb_score":[1.0],"lgb_pct":[0.9],
+        "lgb_rank":[1],"v4_total":[5],"v4_layer":["大盘"],"date":["2026-06-17"]}),
+        {"id":"m_seed","name":"种子","oos_ic":0.03})
+    c = _client()
+    assert any(v["id"]=="m_seed" for v in c.get("/screen/models").json()["variants"])
+    monkeypatch.setattr(api, "_run_model_train_subprocess", lambda spec: None)
+    assert c.post("/screen/model/train", json={"name":"t","factor_ids":[],"base_features":["rev_20"]}).json()["started"] is True
+    assert c.post("/screen/model/train", json={"name":"t","factor_ids":[],"base_features":[]}).json()["ok"] is False
+    assert c.post("/screen/model/delete", json={"id":"prod"}).json()["ok"] is False
+    assert c.post("/screen/model/delete", json={"id":"m_seed"}).json()["ok"] is True
+    assert c.get("/screen/base_features").json()["ok"] is True
