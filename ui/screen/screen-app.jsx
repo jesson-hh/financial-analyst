@@ -43,6 +43,7 @@ function defaultCfg() {
     topN: 20,
     blend: 1.0,
     pool: 'all',
+    model: 'prod',
     mlStatus: ['mainline', 'initiation', 'revival', 'decay', 'cold', 'neutral'],  // 全选=不筛
     industryNeutral: true,
     indCap: 0.25,
@@ -101,7 +102,8 @@ function XuanguApp() {
         ...(c0.exclST != null ? { exclST: !!c0.exclST } : {}),
         ...(c0.exclHalt != null ? { exclHalt: !!c0.exclHalt } : {}),
         ...(c0.exclLimit != null ? { exclLimit: !!c0.exclLimit } : {}),
-        ...(c0.exclNew != null ? { exclNew: !!c0.exclNew } : {}) }));
+        ...(c0.exclNew != null ? { exclNew: !!c0.exclNew } : {}),
+        ...(c0.model ? { model: c0.model } : {}) }));
       flash('帷幄令到', '已按帷幄参数选股(α=' + (c0.blend != null ? c0.blend : '·') + ' · ' + (c0.pool || '') + ')');
       refresh();   // cfg 变化不自动重算(tick驱动),帷幄送参后主动触发一次
       return;   // cfg 路径与单因子路径互斥
@@ -150,6 +152,16 @@ function XuanguApp() {
     if (!API || !window.xgLoadCatalog) return;
     window.xgLoadCatalog(API).then(n => { if (n) setCatN(n); }).catch(() => {});
   }, []);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── v4 模型工坊:可选模型列表(生产 v4 + 训练出的变体)→ 顶栏模型选择器 ──
+  const [models, setModels] = useState([{ id: 'prod', name: '生产 v4', oos_ic: null }]);
+  const reloadModels = () => {
+    if (!API || !window.xgModels) return;
+    window.xgModels(API).then(j => {
+      if (j && j.ok) setModels([{ id: 'prod', name: '生产 v4', oos_ic: null }].concat(j.variants || []));
+    }).catch(() => {});
+  };
+  useEffect(reloadModels, []);  // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 「拉取最新数据」: 后台引擎原生再生(无 qlib)三产物 → 轮询进度 → 退0热加载缓存后自动重算 ──
   const [regen, setRegen] = useState({ busy: false, phase: 'idle', label: '', step: 0, total: 4, elapsed: 0 });
@@ -250,7 +262,8 @@ function XuanguApp() {
 
   return (
     <div className="paper-bg" style={{ height: '100vh', display: 'flex', flexDirection: 'column', minWidth: 1340 }}>
-      <TopBar cfg={cfg} result={result} onPhrase={runPhrase} onCommit={commit} dark={dark} setDark={setDark} committed={committed} />
+      <TopBar cfg={cfg} result={result} onPhrase={runPhrase} onCommit={commit} dark={dark} setDark={setDark} committed={committed}
+        models={models} model={cfg.model} actualModel={result.model} onModel={(v) => { setF({ model: v }); refresh(); }} />
       <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '400px 1fr', minHeight: 0 }}>
         <ConstraintRail cfg={cfg} setF={setF} toggleFactor={toggleFactor} setFactorW={setFactorW} onReset={reset} pickFactors={pickFactors} picking={picking} result={result} committed={committed} onClearCommit={() => setCommitted(null)} />
         <RankTable result={result} cfg={cfg} sort={sort} setSort={setSort} showBench={showBench} setShowBench={setShowBench} expanded={expanded} toggleExpand={toggleExpand} onRefresh={refresh} loading={loading} lastRun={lastRun} dirty={dirty} onRegen={regenData} regen={regen} />
@@ -266,7 +279,7 @@ function XuanguApp() {
 }
 
 // ───────── 顶栏 ─────────
-function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed }) {
+function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, models, model, actualModel, onModel }) {
   const [q, setQ] = useState('');
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '0 18px', height: 50, flexShrink: 0, borderBottom: '1px solid var(--line)', background: 'rgba(241,234,217,0.72)' }}>
@@ -279,6 +292,22 @@ function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed }) {
       {result.source === 'v4_ranking' ? (
         <>
           <span className="mono" style={{ fontSize: 11, color: 'var(--ink-2)' }}>评级池 <b style={{ fontFamily: 'var(--sans)', color: 'var(--ink)' }}>v4 · {result.scored.length}</b></span>
+          {models && models.length > 0 && (
+            <select value={model} onChange={e => onModel(e.target.value)}
+              title="选择 v4 模型:生产 / 训练的变体"
+              style={{ fontFamily: 'var(--mono)', fontSize: 10.5, color: 'var(--ink)', background: 'var(--paper)',
+                       border: '1px solid var(--line)', borderRadius: 6, padding: '2px 6px', marginLeft: 2, cursor: 'pointer' }}>
+              {models.map(m => (
+                <option key={m.id} value={m.id}>
+                  {m.name}{m.oos_ic != null ? ` · OOS ${(+m.oos_ic).toFixed(3)}` : ''}
+                </option>
+              ))}
+            </select>
+          )}
+          {actualModel && model && actualModel !== model && (
+            <span className="mono" title="所选变体不可用,已回落生产 v4"
+              style={{ fontSize: 9.5, color: 'var(--paper)', background: 'var(--yin)', borderRadius: 5, padding: '2px 7px' }}>⚠ 变体不可用·已用 {actualModel}</span>
+          )}
           <span className="mono" style={{ fontSize: 11, color: 'var(--ink-3)' }}>排名日 {result.date}{result.mainline_as_of ? ' · 主线 ' + result.mainline_as_of : ''}</span>
           {result.market && (() => {
             const stale = result.market.as_of && result.date && result.market.as_of < result.date;
