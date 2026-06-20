@@ -71,6 +71,151 @@ function parsePhrase(q, cfg) {
   return { cfg: c, hit };
 }
 
+// ───────── v4 模型工坊(右侧抽屉:选因子 → 训练命名变体 → 看进度 → 管理变体)─────────
+function ModelWorkshop({ API, models, reloadModels, flash, onPick, onClose }) {
+  const [baseFeats, setBaseFeats] = useState([]);
+  const [baseNote, setBaseNote] = useState('');
+  const [selBase, setSelBase] = useState(() => new Set());
+  const [selLib, setSelLib] = useState(() => new Set());
+  const [name, setName] = useState('');
+  const [train, setTrain] = useState({ busy: false, phase: 'idle', label: '', step: 0, total: 3, elapsed: 0 });
+  const _poll = useRef(null);
+  const say = flash || ((t, b) => { try { console.log('[工坊]', t, b); } catch (e) {} });
+
+  // 挂载拉 v4 基础特征 → 默认全选
+  useEffect(() => {
+    if (!API || !window.xgBaseFeatures) { setBaseNote('需连接 9999 后端'); return; }
+    window.xgBaseFeatures(API).then(j => {
+      const fs = (j && j.ok && Array.isArray(j.features)) ? j.features : [];
+      setBaseFeats(fs);
+      setSelBase(new Set(fs));   // 默认全选
+      if (!fs.length) setBaseNote('未取到基础特征');
+    }).catch(() => setBaseNote('基础特征拉取失败'));
+    return () => { if (_poll.current) { clearInterval(_poll.current); _poll.current = null; } };
+  }, []);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  const libFactors = (window.XG_FACTORS || []).filter(f => f && f.id);
+  const nSel = selBase.size + selLib.size;
+
+  const toggleSet = (setter, key) => setter(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
+  const allBase = baseFeats.length > 0 && selBase.size === baseFeats.length;
+  const toggleAllBase = () => setSelBase(allBase ? new Set() : new Set(baseFeats));
+
+  const doTrain = async () => {
+    if (!API || train.busy) return;
+    const spec = { name: name || '未命名变体', factor_ids: [...selLib], base_features: [...selBase], universe: 'all' };
+    let r;
+    try { r = await window.xgTrain(API, spec); } catch (e) { say('训练未启动', String((e && e.message) || e)); return; }
+    if (!r || !r.ok) { say('训练未启动', (r && r.reason) || '失败'); return; }
+    setTrain({ busy: true, phase: 'starting', label: '启动训练子进程…', step: 0, total: 3, elapsed: 0 });
+    if (_poll.current) clearInterval(_poll.current);
+    _poll.current = setInterval(async () => {
+      let s = {};
+      try { s = (await window.xgTrainStatus(API)).state || {}; } catch (e) { return; }
+      setTrain({ busy: !!s.running, phase: s.phase, label: s.label, step: s.step, total: s.total || 3, elapsed: s.elapsed_sec || 0 });
+      if (!s.running) {
+        clearInterval(_poll.current); _poll.current = null;
+        reloadModels();
+        say(s.ok ? '变体已训好' : '训练失败', s.ok ? 'OOS 见列表' : (s.error || ''));
+      }
+    }, 2500);
+  };
+
+  const variants = (models || []).filter(m => m && m.id !== 'prod');
+  const delVariant = async (id, nm) => {
+    if (!window.confirm('删除变体 ' + (nm || id) + '?')) return;
+    try { await window.xgDeleteModel(API, id); } catch (e) {}
+    reloadModels();
+  };
+
+  const cbStyle = { display: 'flex', alignItems: 'center', gap: 7, padding: '3px 4px', cursor: 'pointer', borderRadius: 5, fontSize: 11.5 };
+  const grpLabel = { fontSize: 9, letterSpacing: '.14em', color: 'var(--ink-3)', marginBottom: 8, fontFamily: 'var(--mono)' };
+
+  return (
+    <div style={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: 420, zIndex: 60, background: 'var(--paper)', borderLeft: '1px solid var(--line)', overflow: 'auto', boxShadow: '-8px 0 28px rgba(28,24,20,0.18)' }}>
+      {/* 头部 */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '13px 16px', borderBottom: '1px solid var(--line)', position: 'sticky', top: 0, background: 'var(--paper)', zIndex: 2 }}>
+        <span className="seal" style={{ width: 22, height: 22, fontSize: 12, borderRadius: 6 }}>瀾</span>
+        <span className="serif" style={{ fontSize: 14, fontWeight: 600, letterSpacing: '0.03em', flex: 1 }}>⚙ 模型工坊</span>
+        <span onClick={onClose} title="关闭" className="mono" style={{ fontSize: 14, color: 'var(--ink-3)', cursor: 'pointer', padding: '2px 6px' }}>✕</span>
+      </div>
+      <div className="serif" style={{ fontSize: 10.5, color: 'var(--ink-3)', padding: '7px 16px 0', lineHeight: 1.5 }}>训练 v4 变体 · 不动生产模型</div>
+
+      {/* 命名 + 训练 */}
+      <div style={{ padding: '11px 16px', display: 'flex', gap: 8, alignItems: 'center' }}>
+        <input value={name} onChange={e => setName(e.target.value)} placeholder="变体名,如 估值实验" className="serif"
+          style={{ flex: 1, boxSizing: 'border-box', border: '1px solid var(--line)', borderRadius: 7, padding: '7px 10px', fontSize: 12, color: 'var(--ink)', background: 'var(--paper)', outline: 'none' }} />
+        <span onClick={(nSel === 0 || train.busy) ? undefined : doTrain} className="serif"
+          title={nSel === 0 ? '至少选 1 个因子' : (train.busy ? '训练中…' : '训练 v4 变体')}
+          style={{ flexShrink: 0, fontSize: 12.5, color: 'var(--paper)', background: (nSel === 0 || train.busy) ? 'var(--ink-3)' : 'var(--yin)', borderRadius: 7, padding: '7px 14px', cursor: (nSel === 0 || train.busy) ? 'not-allowed' : 'pointer', opacity: (nSel === 0 || train.busy) ? 0.6 : 1 }}>
+          🔨 训练
+        </span>
+      </div>
+
+      {/* 训练进度 */}
+      {train.busy && (
+        <div style={{ margin: '0 16px 11px', padding: '9px 11px', border: '1px solid var(--zhu-soft)', borderRadius: 8, background: 'rgba(168,57,45,0.05)' }}>
+          <div className="mono" style={{ fontSize: 10.5, color: 'var(--yin)', display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ animation: 'pulse 1s infinite' }}>⟲</span>
+            {(train.label || '训练中') + ' (' + (train.step || 0) + '/' + (train.total || 3) + (train.elapsed ? ' · ' + train.elapsed + 's' : '') + ')'}
+          </div>
+          <div style={{ height: 5, background: 'rgba(28,24,20,0.07)', borderRadius: 3, overflow: 'hidden', marginTop: 7 }}>
+            <div style={{ width: Math.min(100, Math.round((train.step || 0) / (train.total || 3) * 100)) + '%', height: '100%', background: 'var(--yin)', opacity: 0.8, transition: 'width .3s' }} />
+          </div>
+        </div>
+      )}
+
+      {/* v4 基础特征 */}
+      <div style={{ padding: '11px 16px', borderTop: '1px solid var(--line-soft)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <span style={grpLabel}>〈v4 基础特征〉{baseFeats.length ? ' · ' + selBase.size + '/' + baseFeats.length : ''}</span>
+          {baseFeats.length > 0 && (
+            <span onClick={toggleAllBase} className="mono" style={{ fontSize: 9.5, color: 'var(--dai)', cursor: 'pointer', border: '1px solid var(--line)', borderRadius: 12, padding: '2px 9px' }}>{allBase ? '全不选' : '全选'}</span>
+          )}
+        </div>
+        {baseFeats.length === 0 && <div className="serif" style={{ fontSize: 10.5, color: 'var(--ink-3)' }}>{baseNote || '加载中…'}</div>}
+        {baseFeats.map(f => (
+          <label key={f} className="hover-row" style={cbStyle} onClick={() => toggleSet(setSelBase, f)}>
+            <input type="checkbox" readOnly checked={selBase.has(f)} style={{ accentColor: 'var(--dai)', cursor: 'pointer' }} />
+            <span className="mono" style={{ color: 'var(--ink-1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f}</span>
+          </label>
+        ))}
+      </div>
+
+      {/* 我的因子库 */}
+      <div style={{ padding: '11px 16px', borderTop: '1px solid var(--line-soft)' }}>
+        <div style={grpLabel}>〈我的因子库〉{libFactors.length ? ' · ' + selLib.size + ' 选中' : ''}</div>
+        {libFactors.length < 5 && <div className="serif" style={{ fontSize: 10, color: 'var(--ink-3)', marginBottom: 6 }}>因子目录加载中,稍候(从 /screen/factors 拉取)…</div>}
+        {libFactors.map(f => (
+          <label key={f.id} className="hover-row" style={cbStyle} onClick={() => toggleSet(setSelLib, f.id)} title={f.desc || ''}>
+            <input type="checkbox" readOnly checked={selLib.has(f.id)} style={{ accentColor: 'var(--yin)', cursor: 'pointer' }} />
+            <span className="serif" style={{ color: 'var(--ink-1)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.short || f.id}</span>
+            {f.ic != null && <span className="mono" style={{ fontSize: 9, color: f.ic >= 0 ? 'var(--zhu)' : 'var(--dai)', flexShrink: 0 }}>IC {(f.ic >= 0 ? '+' : '') + (+f.ic).toFixed(3)}</span>}
+          </label>
+        ))}
+      </div>
+
+      {/* 已训变体 */}
+      <div style={{ padding: '11px 16px', borderTop: '1px solid var(--line-soft)' }}>
+        <div style={grpLabel}>〈已训变体〉{variants.length ? ' · ' + variants.length : ''}</div>
+        {variants.length === 0 && <div className="serif" style={{ fontSize: 10.5, color: 'var(--ink-3)' }}>暂无变体 · 选因子后「🔨 训练」生成。</div>}
+        {variants.map(m => (
+          <div key={m.id} className="hover-row" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 6px', borderRadius: 6, borderBottom: '1px solid var(--line-soft)' }}>
+            <div style={{ flex: 1, minWidth: 0, cursor: 'pointer' }} onClick={() => { onPick && onPick(m.id); onClose && onClose(); }}>
+              <div className="serif" style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.name || m.id}</div>
+              <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)' }}>
+                {(m.n_features != null ? m.n_features : '?') + '因子'} · 留出 OOS {m.oos_ic != null ? (m.oos_ic >= 0 ? '+' : '') + (+m.oos_ic).toFixed(3) : '—'}{m.asof ? ' · ' + m.asof : ''}
+              </div>
+            </div>
+            <span onClick={() => delVariant(m.id, m.name)} title="删除变体" className="mono" style={{ fontSize: 12, color: 'var(--ink-3)', cursor: 'pointer', padding: '2px 6px', flexShrink: 0 }}>✕</span>
+          </div>
+        ))}
+        <div className="serif" style={{ fontSize: 9, color: 'var(--ink-3)', lineHeight: 1.5, marginTop: 8 }}>留出验证 OOS · 非未来实盘(时间留出,非向前 vintage)。</div>
+      </div>
+    </div>
+  );
+}
+
 // ───────── 主组件 ─────────
 function XuanguApp() {
   const [cfg, setCfg] = useState(defaultCfg);
@@ -81,6 +226,7 @@ function XuanguApp() {
   const [showBench, setShowBench] = useState(true);
   const [expanded, setExpanded] = useState({});
   const [picking, setPicking] = useState(false);
+  const [showWs, setShowWs] = useState(false);   // v4 模型工坊抽屉
 
   useEffect(() => { document.body.classList.toggle('dark', dark); }, [dark]);
 
@@ -263,11 +409,14 @@ function XuanguApp() {
   return (
     <div className="paper-bg" style={{ height: '100vh', display: 'flex', flexDirection: 'column', minWidth: 1340 }}>
       <TopBar cfg={cfg} result={result} onPhrase={runPhrase} onCommit={commit} dark={dark} setDark={setDark} committed={committed}
-        models={models} model={cfg.model} actualModel={result.model} onModel={(v) => { setF({ model: v }); refresh(); }} />
+        models={models} model={cfg.model} actualModel={result.model} onModel={(v) => { setF({ model: v }); refresh(); }}
+        onWorkshop={() => setShowWs(true)} />
       <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '400px 1fr', minHeight: 0 }}>
         <ConstraintRail cfg={cfg} setF={setF} toggleFactor={toggleFactor} setFactorW={setFactorW} onReset={reset} pickFactors={pickFactors} picking={picking} result={result} committed={committed} onClearCommit={() => setCommitted(null)} />
         <RankTable result={result} cfg={cfg} sort={sort} setSort={setSort} showBench={showBench} setShowBench={setShowBench} expanded={expanded} toggleExpand={toggleExpand} onRefresh={refresh} loading={loading} lastRun={lastRun} dirty={dirty} onRegen={regenData} regen={regen} />
       </div>
+      {showWs && <ModelWorkshop API={API} models={models} reloadModels={reloadModels} flash={flash}
+        onPick={(id) => { setF({ model: id }); refresh(); }} onClose={() => setShowWs(false)} />}
       {toast && (
         <div style={{ position: 'fixed', top: 60, left: '50%', transform: 'translateX(-50%)', zIndex: 50, display: 'flex', alignItems: 'center', gap: 10, background: 'var(--paper)', border: '1px solid var(--zhu-soft)', borderRadius: 11, padding: '10px 16px', boxShadow: '0 6px 24px rgba(28,24,20,0.16)', animation: 'fadeIn .3s ease', maxWidth: 600 }}>
           <span className="seal" style={{ width: 22, height: 22, fontSize: 12, borderRadius: 6 }}>瀾</span>
@@ -279,7 +428,7 @@ function XuanguApp() {
 }
 
 // ───────── 顶栏 ─────────
-function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, models, model, actualModel, onModel }) {
+function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, models, model, actualModel, onModel, onWorkshop }) {
   const [q, setQ] = useState('');
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '0 18px', height: 50, flexShrink: 0, borderBottom: '1px solid var(--line)', background: 'rgba(241,234,217,0.72)' }}>
@@ -360,6 +509,7 @@ function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, mod
           <span onClick={() => { onPhrase(q); setQ(''); }} style={{ background: 'var(--yin)', color: 'var(--paper)', borderRadius: 14, padding: '4px 11px', fontFamily: 'var(--serif)', fontSize: 11.5, cursor: 'pointer' }}>调 ↵</span>
         </div>
         )}
+        <span onClick={onWorkshop} title="v4 模型工坊 · 选因子训练命名变体" className="mono" style={{ fontSize: 11, color: 'var(--ink-1)', cursor: 'pointer', border: '1px solid var(--line)', borderRadius: 7, padding: '6px 10px' }}>⚙ 模型工坊</span>
         <span onClick={() => setDark(d => !d)} title="昼/夜" className="mono" style={{ fontSize: 11, color: 'var(--ink-3)', cursor: 'pointer', border: '1px solid var(--line)', borderRadius: 7, padding: '6px 9px' }}>{dark ? '☾' : '☀'}</span>
         <span onClick={onCommit} className="serif" style={{ display: 'flex', alignItems: 'center', gap: 7, background: 'var(--ink)', color: 'var(--paper)', borderRadius: 8, padding: '8px 15px', fontSize: 12.5, cursor: 'pointer' }}>
           <span style={{ fontSize: 13 }}>落</span> 据此落子 · {result.chosen.length} 只
