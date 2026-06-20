@@ -233,7 +233,8 @@ def screen_impl(factors: Optional[List[Any]] = None, pool: str = "all",
                 mlStatus: Optional[List[str]] = None,
                 industryNeutral: Optional[bool] = None, indCap: Optional[float] = None,
                 exclST: Optional[bool] = None, exclHalt: Optional[bool] = None,
-                exclLimit: Optional[bool] = None, exclNew: Optional[bool] = None) -> Dict[str, Any]:
+                exclLimit: Optional[bool] = None, exclNew: Optional[bool] = None,
+                model: Optional[str] = None) -> Dict[str, Any]:
     norm_factors: List[Dict[str, Any]] = []
     for i, f in enumerate(factors or []):
         if isinstance(f, str):
@@ -258,7 +259,7 @@ def screen_impl(factors: Optional[List[Any]] = None, pool: str = "all",
                            "topN": topN, "liqMin": liqMin}
     for _k, _v in (("mlStatus", mlStatus), ("industryNeutral", industryNeutral),
                    ("indCap", indCap), ("exclST", exclST), ("exclHalt", exclHalt),
-                   ("exclLimit", exclLimit), ("exclNew", exclNew)):
+                   ("exclLimit", exclLimit), ("exclNew", exclNew), ("model", model)):
         if _v is not None:
             cfg[_k] = _v
     try:
@@ -269,7 +270,14 @@ def screen_impl(factors: Optional[List[Any]] = None, pool: str = "all",
     _unsup = r.get("unsupported_factors") if isinstance(r, dict) else None
     _unsup_line = ("\n⚠ 未识别因子(已忽略,未参与混合): " + ", ".join(str(x) for x in _unsup)
                    + "(用 ww_screen_factors 查合法 id)") if _unsup else ""
-    return {"ok": bool(r.get("ok")), "content": summarize_screen(r) + _unsup_line,
+    # 诚实:回报实际所用 v4 模型;请求了变体却回落 prod(变体不可用)时显式告警,绝不假装用了变体
+    _used = r.get("model") if isinstance(r, dict) else None
+    _model_line = ""
+    if model and _used and str(_used) != str(model):
+        _model_line = f"\n⚠ 变体 {model} 不可用,已回落生产 v4(prod)"
+    elif _used and str(_used) != "prod":
+        _model_line = f"\n模型: 变体 {_used}"
+    return {"ok": bool(r.get("ok")), "content": summarize_screen(r) + _unsup_line + _model_line,
             "artifact": artifact("screen_result", page="screen", channel="screen",
                                  payload={"cfg": cfg}),
             "raw": r}
@@ -301,6 +309,62 @@ def screen_factors_impl(family: str = "", supported_only: bool = True) -> Dict[s
             + (f"·族「{fam}」" if fam else "") + ":\n")
     return {"ok": True, "content": head + "\n".join(lines), "artifact": None,
             "raw": {"n": len(rows), "ids": [f.get("id") for f in rows]}}
+
+
+def model_list_impl() -> Dict[str, Any]:
+    """列出已训练的 v4 变体(供 ww_screen_run 的 model 取 id;生产 v4 隐含=prod)。"""
+    try:
+        r = _self_get("/screen/models")
+    except Exception as e:
+        return {"ok": False, "content": f"变体列表拉取失败: {e}", "artifact": None}
+    vs = r.get("variants") or []
+    if not vs:
+        return {"ok": True, "artifact": None, "raw": {"n": 0},
+                "content": "暂无训练好的 v4 变体(生产 v4=model 省略或 prod)。"
+                           "用 ww_model_train 选基础特征+库因子训练一个。"}
+    lines = []
+    for m in vs:
+        oi = m.get("oos_ic")
+        oid = "" if oi is None else f" 留出OOS IC {float(oi):+.3f}"
+        uns = m.get("unsupported_factors") or []
+        unl = f" ⚠{len(uns)}未用" if uns else ""
+        lines.append(f"{m.get('id')}「{m.get('name')}」· {m.get('n_features', '—')}特征{oid}{unl}")
+    head = f"已训练 v4 变体 {len(vs)} 个(ww_screen_run 传 model=<id> 用其选股;省略=生产 prod):\n"
+    return {"ok": True, "content": head + "\n".join(lines), "artifact": None,
+            "raw": {"n": len(vs), "ids": [m.get("id") for m in vs]}}
+
+
+def model_train_impl(name: str = "", factor_ids: Optional[List[str]] = None,
+                     base_features: Optional[List[str]] = None,
+                     universe: str = "all") -> Dict[str, Any]:
+    """训练一个 v4 变体(选基础特征+库因子)。后台子进程 ~4min,完成后 ww_model_list 可见。
+    base_features 省略=默认全部基础特征(与工坊 UI 一致);要纯库因子模型显式传 base_features=[]。
+    生产 v4 全程不动。需用户确认。"""
+    nm = (name or "").strip()
+    if not nm:
+        return {"ok": False, "content": "请给变体起个名(name)", "artifact": None}
+    fids = [str(x) for x in (factor_ids or [])]
+    base = base_features
+    if base is None:                       # 省略 → 取全部基础特征(对齐工坊 UI 默认全勾)
+        try:
+            bf = _self_get("/screen/base_features")
+            base = (bf.get("features") or []) if isinstance(bf, dict) else []
+        except Exception as e:
+            return {"ok": False, "content": f"基础特征拉取失败: {e}", "artifact": None}
+    base = [str(x) for x in base]
+    if not fids and not base:
+        return {"ok": False, "content": "至少选 1 个库因子或基础特征", "artifact": None}
+    try:
+        r = _self_post("/screen/model/train",
+                       {"name": nm, "factor_ids": fids, "base_features": base, "universe": universe})
+    except Exception as e:
+        return {"ok": False, "content": f"训练启动失败: {e}", "artifact": None}
+    if not r.get("ok"):
+        return {"ok": False, "content": f"训练未启动: {r.get('reason')}", "artifact": None}
+    vid = r.get("variant_id")
+    return {"ok": True, "artifact": None, "raw": r,
+            "content": f"已启动训练变体「{nm}」(id={vid}·{len(base)}基础特征+{len(fids)}库因子)。"
+                       f"后台 ~4min,完成后 ww_model_list 查看、ww_screen_run model={vid} 选股。生产 v4 不受影响。"}
 
 
 def seats_decide_impl(code: str, name: str = "", creed: str = "",
@@ -985,6 +1049,7 @@ WW_TOOL_TABLE = [
      "description":
          "九视角选股(v4 模型 + 因子混合 α)+ 约束。运行后自动把选股界面弹到右栏,无需再调 ww_show_page。"
          "factors 的 id 用 ww_screen_factors 查目录(传错会被静默忽略);不确定就传空 factors 纯 v4 跑。"
+         "可选 model=变体 id(ww_model_list 查)用自训 v4 变体选股,省略=生产 prod。"
          "默认与选股页一致(pool=all·blend=1.0纯v4·topN=20·liqMin=5亿·剔ST/停牌/涨跌停·行业中性)。Stock screening.",
      "input_schema": {"type": "object", "properties": {
          "factors": {"type": "array", "items": {"type": "object", "properties": {
@@ -1002,7 +1067,8 @@ WW_TOOL_TABLE = [
          "exclST": {"type": "boolean", "description": "剔除 ST(默认 true)"},
          "exclHalt": {"type": "boolean", "description": "剔除停牌(默认 true)"},
          "exclLimit": {"type": "boolean", "description": "剔除涨跌停(默认 true)"},
-         "exclNew": {"type": "boolean", "description": "剔除次新(默认 false)"}}},
+         "exclNew": {"type": "boolean", "description": "剔除次新(默认 false)"},
+         "model": {"type": "string", "description": "用哪个 v4 模型:省略/prod=生产 v4;传变体 id(ww_model_list 查)=用该变体选股,不可用则回落 prod"}}},
      "impl": screen_impl, "cost": "seconds", "confirm": False,
      "reachable": ["/screen/run"]},
     {"name": "ww_screen_factors",
@@ -1013,6 +1079,28 @@ WW_TOOL_TABLE = [
          "family": {"type": "string", "description": "可选,只列某一族,如「动量反转」「估值」「成长」"}}},
      "impl": screen_factors_impl, "cost": "instant", "confirm": False,
      "reachable": ["/screen/factors"]},
+    {"name": "ww_model_list",
+     "description":
+         "列出已训练的 v4 模型变体(id+名称+留出OOS IC+特征数),供 ww_screen_run 的 model 取 id。"
+         "用户问『有哪些(自训)模型/变体』或要用变体选股前先调它查 id。生产 v4 隐含=prod 不在此列。",
+     "input_schema": {"type": "object", "properties": {}},
+     "impl": model_list_impl, "cost": "instant", "confirm": False,
+     "reachable": ["/screen/models"]},
+    {"name": "ww_model_train",
+     "description":
+         "训练一个新 v4 模型变体:选『基础特征 + 我的库因子』子集训练(后台子进程 ~4min,完成后 "
+         "ww_model_list 可见、ww_screen_run model=<id> 即用其选股)。生产 v4 全程不动。需用户确认。"
+         "factor_ids 用 ww_screen_factors 查(库因子族 id);base_features 省略=全部基础特征(同工坊默认)。Train v4 variant.",
+     "input_schema": {"type": "object", "properties": {
+         "name": {"type": "string", "description": "变体名,如「低波动量组」"},
+         "factor_ids": {"type": "array", "items": {"type": "string"},
+                        "description": "库因子 id 列表(ww_screen_factors 查;价量/技术类可训,财务字段类暂不支持会被标未用)"},
+         "base_features": {"type": "array", "items": {"type": "string"},
+                           "description": "基础特征名列表;省略=全部基础特征(同工坊默认全勾);传 [] = 纯库因子模型"},
+         "universe": {"type": "string", "default": "all", "description": "训练股票池,默认 all 全A"}},
+      "required": ["name"]},
+     "impl": model_train_impl, "cost": "minutes", "confirm": True,
+     "reachable": ["/screen/base_features", "/screen/model/train"]},
     {"name": "ww_seats_decide",
      "description":
          "触发落子席位研判(哨兵 agent,LLM 真研判并落盘 var/seats_decisions.jsonl)。需要用户确认。",

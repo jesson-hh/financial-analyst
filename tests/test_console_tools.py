@@ -224,6 +224,87 @@ def test_screen_impl_surfaces_unsupported_factors(monkeypatch):
     assert "ww_screen_factors" in res["content"]
 
 
+def test_screen_impl_passes_model_variant(monkeypatch):
+    """ww_screen_run 透传 model → 用变体选股;结果回报变体则诚实标注。"""
+    sent = {}
+    def fake_post(path, payload, timeout=120):
+        sent.update(payload); return {"ok": True, "chosen": [], "model": "m_x"}
+    monkeypatch.setattr(ct, "_self_post", fake_post)
+    res = ct.screen_impl(model="m_x")
+    assert res["ok"] is True and sent["model"] == "m_x"
+    assert "m_x" in res["content"]                      # 用了变体 → 文案标注
+    assert res["artifact"]["payload"]["cfg"]["model"] == "m_x"
+
+
+def test_screen_impl_warns_on_variant_fallback(monkeypatch):
+    """请求变体却回落 prod(变体不可用)→ 诚实告警,绝不假装用了变体。"""
+    monkeypatch.setattr(ct, "_self_post", lambda path, payload, timeout=120:
+                        {"ok": True, "chosen": [], "model": "prod"})
+    res = ct.screen_impl(model="m_gone")
+    assert res["ok"] is True and "回落" in res["content"] and "m_gone" in res["content"]
+
+
+def test_screen_impl_omits_model_when_prod(monkeypatch):
+    """省略 model → 不下送(后端默认 prod),文案不加模型行。"""
+    sent = {}
+    def fake_post(path, payload, timeout=120):
+        sent.update(payload); return {"ok": True, "chosen": [], "model": "prod"}
+    monkeypatch.setattr(ct, "_self_post", fake_post)
+    res = ct.screen_impl()
+    assert "model" not in sent and "变体" not in res["content"] and "回落" not in res["content"]
+
+
+def test_model_list_impl_lists_variants(monkeypatch):
+    fake = {"ok": True, "variants": [
+        {"id": "m_a", "name": "组A", "n_features": 40, "oos_ic": 0.012, "unsupported_factors": []},
+        {"id": "m_b", "name": "组B", "n_features": 41, "oos_ic": -0.02, "unsupported_factors": ["c_x"]}]}
+    monkeypatch.setattr(ct, "_self_get", lambda path, timeout=30: fake)
+    res = ct.model_list_impl()
+    assert res["ok"] is True
+    assert "m_a" in res["content"] and "m_b" in res["content"]
+    assert "⚠1未用" in res["content"]                   # m_b 有 1 个未支持库因子
+    assert res["raw"]["ids"] == ["m_a", "m_b"]
+
+
+def test_model_list_impl_empty(monkeypatch):
+    monkeypatch.setattr(ct, "_self_get", lambda path, timeout=30: {"ok": True, "variants": []})
+    res = ct.model_list_impl()
+    assert res["ok"] is True and "暂无" in res["content"] and res["raw"]["n"] == 0
+
+
+def test_model_train_impl_defaults_base_features(monkeypatch):
+    """base_features 省略 → 取后端全部基础特征(对齐工坊默认全勾)+ 透传所选库因子。"""
+    sent = {}
+    monkeypatch.setattr(ct, "_self_get", lambda path, timeout=30:
+                        {"ok": True, "features": ["close", "volume", "ind_turnover"]})
+    def fake_post(path, payload, timeout=120):
+        sent.update(payload); sent["__path"] = path; return {"ok": True, "variant_id": "m_new"}
+    monkeypatch.setattr(ct, "_self_post", fake_post)
+    res = ct.model_train_impl(name="组X", factor_ids=["lib_rev5"])
+    assert res["ok"] is True and "m_new" in res["content"]
+    assert sent["__path"] == "/screen/model/train"
+    assert sent["base_features"] == ["close", "volume", "ind_turnover"]
+    assert sent["factor_ids"] == ["lib_rev5"] and sent["name"] == "组X" and sent["universe"] == "all"
+
+
+def test_model_train_impl_explicit_empty_base(monkeypatch):
+    """显式 base_features=[] → 纯库因子模型,不去取默认基础特征。"""
+    sent = {}
+    def fake_get(path, timeout=30):
+        raise AssertionError("base_features=[] 时不应再取默认基础特征")
+    monkeypatch.setattr(ct, "_self_get", fake_get)
+    monkeypatch.setattr(ct, "_self_post", lambda path, payload, timeout=120:
+                        (sent.update(payload), {"ok": True, "variant_id": "m_lib"})[1])
+    res = ct.model_train_impl(name="纯因子", factor_ids=["lib_rev5"], base_features=[])
+    assert res["ok"] is True and sent["base_features"] == []
+
+
+def test_model_train_impl_rejects_empty(monkeypatch):
+    monkeypatch.setattr(ct, "_self_get", lambda path, timeout=30: {"ok": True, "features": []})
+    assert ct.model_train_impl(name="")["ok"] is False                       # 无名
+    assert ct.model_train_impl(name="X", factor_ids=[], base_features=[])["ok"] is False  # 全空
+
+
 def test_screen_factors_impl_lists_catalog(monkeypatch):
     fake = {"ok": True, "families": ["动量反转", "估值"], "factors": [
         {"id": "lib_rev5", "short": "缩量反转", "family": "动量反转", "supported": True, "ic": 0.043},
@@ -427,14 +508,14 @@ def test_engine_profile_excludes_ww_but_console_whitelist_resolves():
                           encoding="utf-8", errors="replace", timeout=180, env=env, cwd=str(repo))
     assert proc.returncode == 0, (proc.stderr or "")[-2000:]
     out = _json.loads(proc.stdout.strip().splitlines()[-1])
-    assert len(out["registered_ww"]) == 26                    # C 后:24 + 2(有效性守卫)
+    assert len(out["registered_ww"]) == 28                    # +2 模型工坊(ww_model_list/ww_model_train)
     # ① 非显式白名单路径(research / 缺省 / all)一律不外露 ww_*,且不再返回 None(None=完全不限制)
     assert out["research_is_none"] is False and out["research_ww"] == []
     assert out["default_is_none"] is False and out["default_ww"] == []
     assert out["all_is_none"] is False and out["all_ww"] == []
-    # ② console 显式白名单路径不受影响:44 名全部可解析,含 26 个 ww_(C 再加 2 ww_)
-    assert out["console_n"] == 44 and out["console_missing"] == []
-    assert out["explicit_n"] == 44 and out["explicit_ww_n"] == 26
+    # ② console 显式白名单路径不受影响:46 名全部可解析,含 28 个 ww_(+模型工坊 2)
+    assert out["console_n"] == 46 and out["console_missing"] == []
+    assert out["explicit_n"] == 46 and out["explicit_ww_n"] == 28
 
 
 def test_f10_impl_returns_structured_facts(monkeypatch):
@@ -898,9 +979,9 @@ def test_registry_derivation_consistent():
     """阶段0 重构守护:CONSOLE_ALLOWED 与 _WW_REACHABLE_ENDPOINTS 必须从声明表派生且与已知集合一致。"""
     import guanlan_v2.console.tools as ct
     ww_in_table = {t["name"] for t in ct.WW_TOOL_TABLE}
-    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 26
+    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 28
     assert ww_in_table == {n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")}
-    assert len(ct.CONSOLE_ALLOWED) == 44
+    assert len(ct.CONSOLE_ALLOWED) == 46
     assert {"/factorlib/save", "/workflow/compose", "/feature/build"} <= ct._WW_REACHABLE_ENDPOINTS
     assert ct._WW_REACHABLE_ENDPOINTS == {ep for t in ct.WW_TOOL_TABLE for ep in t.get("reachable", [])}
 
@@ -927,6 +1008,9 @@ def test_ww_reachable_endpoints_matches_expected():
         "/workflow/compose",  # ww_factor_compose(B)
         "/feature/build",     # ww_feature_build(B)
         "/openapi.json",      # ww_endpoints(C 本身)
+        "/screen/models",         # ww_model_list(模型工坊)
+        "/screen/base_features",  # ww_model_train(省略 base→取默认全部基础特征)
+        "/screen/model/train",    # ww_model_train(启动训练)
     }
     assert ct._WW_REACHABLE_ENDPOINTS == expected
 
