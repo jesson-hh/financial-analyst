@@ -215,4 +215,13 @@
     if (!j.ok) throw new Error(j.reason || 'screen 失败');
     return j;
   };
+
+  // ── v4 模型工坊:模型列表/基础特征/训练/状态/删除(薄 fetch 帮手) ──
+  window.xgModels = async (API) => (await (await fetch((API || '') + '/screen/models')).json());
+  window.xgBaseFeatures = async (API) => (await (await fetch((API || '') + '/screen/base_features')).json());
+  window.xgTrain = async (API, spec) => (await (await fetch((API || '') + '/screen/model/train',
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(spec) })).json());
+  window.xgTrainStatus = async (API) => (await (await fetch((API || '') + '/screen/model/status')).json());
+  window.xgDeleteModel = async (API, id) => (await (await fetch((API || '') + '/screen/model/delete',
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) })).json());
 })();
