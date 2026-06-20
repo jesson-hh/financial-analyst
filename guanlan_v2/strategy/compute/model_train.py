@@ -81,3 +81,66 @@ def evaluate_library_factors(codes, factor_ids, start, end):
     else:  # 兜底:未知索引名 → 按位置命名(2 级假定 instrument,datetime)
         out.index = out.index.set_names((["instrument", "datetime"])[: out.index.nlevels])
     return out, unsup
+
+
+DEFAULT_PROVIDER = "G:/stocks/stock_data/cn_data"
+
+
+def _build_v4(*a, **kw):
+    from guanlan_v2.strategy.compute.v4 import build_v4
+    return build_v4(*a, **kw)
+
+
+def _latest_date():
+    from guanlan_v2.strategy.compute.regen import _latest_trade_date
+    return _latest_trade_date(DEFAULT_PROVIDER)
+
+
+def _list_codes(universe):
+    if universe in ("all", "", None):
+        from guanlan_v2.strategy.compute.breadth import list_all_instruments
+        return list_all_instruments(DEFAULT_PROVIDER)
+    from financial_analyst.data.universe import resolve_universe_codes
+    return [str(c) for c in resolve_universe_codes(universe)]
+
+
+def _base_feature_names():
+    """v4 基础特征名(供前端〈v4 基础特征〉组)。小宇宙跑 build_feature_panel 取列名 + 注入列。"""
+    from guanlan_v2.strategy.compute.v4 import _select_mf, build_feature_panel
+    from financial_analyst.data.loaders.qlib_binary import QlibBinaryLoader
+    end = _latest_date()
+    start = (pd.Timestamp(end) - pd.Timedelta(days=400)).date().isoformat()
+    panel = build_feature_panel(QlibBinaryLoader(DEFAULT_PROVIDER),
+                                ["SH600519", "SZ000001", "SH600036"], start, end)
+    base = set(_select_mf(list(panel.columns), None)) | {"ind_turnover", "lu_resid_pct60", "amt_resid_pct60"}
+    return sorted(base)
+
+
+def train_variant(variant_id, name, factor_ids, base_features, universe="all",
+                  created="", holdout_k=20) -> dict:
+    from guanlan_v2.screen import model_registry as reg
+    end = _latest_date()
+    start = "2022-01-01"
+    codes = _list_codes(universe)
+    extra, unsup = evaluate_library_factors(codes, factor_ids, start, end)
+    feature_cols = resolve_feature_cols(
+        list(_base_feature_names()) + list(extra.columns), base_features, list(extra.columns))
+    hd = {"k": holdout_k, "horizon": 5}
+    df = _build_v4(DEFAULT_PROVIDER, start, end, codes=codes, feature_cols=feature_cols,
+                   extra_factor_panel=(extra if len(extra.columns) else None), holdout=hd)
+    meta = {"id": variant_id, "name": name, "factor_ids": list(factor_ids),
+            "base_features": list(base_features), "n_features": len(feature_cols),
+            "unsupported_factors": unsup, "universe": universe,
+            "oos_ic": hd.get("oos_ic"), "oos_icir": hd.get("oos_icir"), "n_holdout": hd.get("n_holdout"),
+            "asof": str(df["date"].iloc[0]) if len(df) else end, "created": created,
+            "train_rows": int(len(df)), "error": hd.get("error")}
+    reg.save_variant(variant_id, df, meta)
+    return {"ok": True, "variant_id": variant_id, "meta": meta}
+
+
+if __name__ == "__main__":   # 子进程入口:python -m ...model_train <spec.json>
+    import json, sys
+    spec = json.loads(open(sys.argv[1], encoding="utf-8").read())
+    print(f"[model_train] variant={spec['variant_id']} factors={len(spec.get('factor_ids', []))} ...", flush=True)
+    r = train_variant(**spec)
+    print(f"[model_train] done oos_ic={r['meta'].get('oos_ic')}", flush=True)

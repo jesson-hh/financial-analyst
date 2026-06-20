@@ -91,3 +91,25 @@ def test_evaluate_library_factors_normalizes_real_panel_index(monkeypatch):
     assert panel.index.names == ["instrument", "datetime"]                       # 归一成 instrument×datetime
     assert set(panel.index.get_level_values("instrument")) == {"SH600519", "SZ000001"}  # code 值进 instrument 级
     assert list(panel.columns) == ["c_aaa"]
+
+
+def test_train_variant_writes_product_and_meta(tmp_path, monkeypatch):
+    def fake_build_v4(provider_uri, start, end, codes=None, feature_cols=None,
+                      extra_factor_panel=None, holdout=None, **kw):
+        if holdout is not None:
+            holdout.update({"oos_ic": 0.04, "oos_icir": 0.8, "n_holdout": 15})
+        return pd.DataFrame({"code": ["SH600519"], "lgb_score": [1.0], "lgb_pct": [0.9],
+                             "lgb_rank": [1], "v4_total": [5], "v4_layer": ["大盘"], "date": ["2026-06-17"]})
+    monkeypatch.setattr(mt, "_build_v4", fake_build_v4)
+    monkeypatch.setattr(mt, "evaluate_library_factors", lambda c, f, s, e: (pd.DataFrame(), []))
+    monkeypatch.setattr(mt, "_base_feature_names", lambda: ["rev_20", "vol_20"])
+    monkeypatch.setattr(mt, "_list_codes", lambda uni: ["SH600519"])
+    monkeypatch.setattr(mt, "_latest_date", lambda: "2026-06-17")
+    from guanlan_v2.screen import model_registry as reg
+    monkeypatch.setattr(reg, "MODELS_DIR", tmp_path / "models")
+    res = mt.train_variant(variant_id="m_test1", name="测试变体", factor_ids=[],
+                           base_features=["rev_20"], universe="all", created="2026-06-17T10:00:00")
+    assert res["ok"] is True
+    meta = reg.variant_meta("m_test1")
+    assert meta["name"] == "测试变体" and meta["oos_ic"] == 0.04 and meta["n_holdout"] == 15
+    assert (tmp_path / "models" / "m_test1" / "v4_ranking.parquet").exists()
