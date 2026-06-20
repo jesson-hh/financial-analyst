@@ -73,5 +73,11 @@ def evaluate_library_factors(codes, factor_ids, start, end):
     if not cols:
         return pd.DataFrame(), unsup
     out = pd.DataFrame(cols)
-    out.index = out.index.set_names(["instrument", "datetime"])
+    # 引擎真实 PanelData 索引为 (datetime, code);build_v4 面板是 (instrument, datetime)。
+    # 按【级名】归一(不靠位置):code→instrument,再 reorder 成 (instrument, datetime) 便于 join。
+    out.index = out.index.set_names(["instrument" if n == "code" else n for n in out.index.names])
+    if set(out.index.names) == {"instrument", "datetime"}:
+        out = out.reorder_levels(["instrument", "datetime"]).sort_index()
+    else:  # 兜底:未知索引名 → 按位置命名(2 级假定 instrument,datetime)
+        out.index = out.index.set_names((["instrument", "datetime"])[: out.index.nlevels])
     return out, unsup

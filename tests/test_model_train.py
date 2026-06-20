@@ -75,3 +75,19 @@ def test_evaluate_library_factors(monkeypatch):
     assert list(panel.columns) == ["c_aaa"]
     assert set(unsup) == {"c_bad", "c_missing"}
     assert panel.index.names == ["instrument", "datetime"]
+
+
+def test_evaluate_library_factors_normalizes_real_panel_index(monkeypatch):
+    import numpy as np
+    real_idx = pd.MultiIndex.from_product(
+        [pd.to_datetime(["2026-01-05", "2026-01-06"]), ["SH600519", "SZ000001"]],
+        names=["datetime", "code"])                       # 引擎真实顺序/级名
+    monkeypatch.setattr(mt, "_factor_defs", lambda: {"c_aaa": {"expr": "rank(close)"}})
+    monkeypatch.setattr(mt, "_compile_factor", lambda expr: (lambda panel: pd.Series(
+        np.arange(len(real_idx), dtype=float), index=real_idx)))
+    monkeypatch.setattr(mt, "_load_panel", lambda codes, start, end: "PANEL")
+    panel, unsup = mt.evaluate_library_factors(["SH600519", "SZ000001"], ["c_aaa"],
+                                               "2026-01-01", "2026-01-06")
+    assert panel.index.names == ["instrument", "datetime"]                       # 归一成 instrument×datetime
+    assert set(panel.index.get_level_values("instrument")) == {"SH600519", "SZ000001"}  # code 值进 instrument 级
+    assert list(panel.columns) == ["c_aaa"]
