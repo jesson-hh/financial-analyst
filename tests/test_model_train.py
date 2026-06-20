@@ -58,3 +58,20 @@ def test_select_mf_default_unchanged():
     cols = ["rev_20", "vol_20", "label", "pe_ttm", "pb", "total_mv", "ps_ttm_raw", "log_mv"]
     assert set(_select_mf(cols, None)) == {"rev_20", "vol_20", "log_mv"}   # 旧语义
     assert _select_mf(cols, ["rev_20", "log_mv"]) == ["rev_20", "log_mv"]  # 显式取交集保序
+
+
+def test_evaluate_library_factors(monkeypatch):
+    import numpy as np
+    idx = pd.MultiIndex.from_product(
+        [["SH600519", "SZ000001"], pd.to_datetime(["2026-01-05", "2026-01-06"])],
+        names=["instrument", "datetime"])
+    fake_defs = {"c_aaa": {"expr": "rank(close)", "short": "甲"}, "c_bad": {"expr": ""}}
+    monkeypatch.setattr(mt, "_factor_defs", lambda: fake_defs)
+    monkeypatch.setattr(mt, "_compile_factor", lambda expr: (lambda panel: pd.Series(
+        np.arange(len(idx), dtype=float), index=idx)))
+    monkeypatch.setattr(mt, "_load_panel", lambda codes, start, end: "PANEL")
+    panel, unsup = mt.evaluate_library_factors(["SH600519", "SZ000001"],
+                                               ["c_aaa", "c_bad", "c_missing"], "2026-01-01", "2026-01-06")
+    assert list(panel.columns) == ["c_aaa"]
+    assert set(unsup) == {"c_bad", "c_missing"}
+    assert panel.index.names == ["instrument", "datetime"]

@@ -33,3 +33,45 @@ def resolve_feature_cols(available, base_features: List[str], factor_ids: List[s
     if not picked:
         raise ValueError("至少选 1 个可用因子(基础或库因子)")
     return picked
+
+
+def _factor_defs():
+    from guanlan_v2.screen.catalog import FACTOR_DEFS
+    return FACTOR_DEFS
+
+
+def _compile_factor(expr):
+    from financial_analyst.factors.zoo.expr import compile_factor
+    return compile_factor(expr)
+
+
+def _load_panel(codes, start, end):
+    from financial_analyst.data.loader_factory import get_default_loader
+    from financial_analyst.factors.zoo.panel_cache import load_panel_cached
+    return load_panel_cached(get_default_loader(), codes, start, end, freq="day")
+
+
+def evaluate_library_factors(codes, factor_ids, start, end):
+    """选中库因子 → (DataFrame[列=factor_id, index=instrument×datetime], unsupported列表)。
+    复用 factor_ic.py 同款 compile_factor;无 expr/不在目录/求值失败 → unsupported,诚实缺席。"""
+    defs = _factor_defs()
+    panel = None
+    cols, unsup = {}, []
+    for fid in factor_ids:
+        expr = (defs.get(fid) or {}).get("expr")
+        if not expr:
+            unsup.append(fid); continue
+        if panel is None:
+            panel = _load_panel([str(c) for c in codes], start, end)
+        try:
+            s = _compile_factor(expr)(panel)
+            if s is None or not hasattr(s, "index"):
+                unsup.append(fid); continue
+            cols[fid] = s
+        except Exception:  # noqa: BLE001
+            unsup.append(fid)
+    if not cols:
+        return pd.DataFrame(), unsup
+    out = pd.DataFrame(cols)
+    out.index = out.index.set_names(["instrument", "datetime"])
+    return out, unsup
