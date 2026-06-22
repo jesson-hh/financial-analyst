@@ -24,6 +24,7 @@ const SPECS = {
   source:   { title: '数据源', cat: 'io', inputs: [], outputs: [{ id: 'data', label: '数据', dt: 'series' }], params: [{ id: 'scope', label: '范围', type: 'select', value: '小池', options: ['个股', '自选', '小池', '全市场'] }, { id: 'code', label: '标的/池', type: 'text', value: '600519' }, { id: 'codes', label: '自选代码', type: 'text', value: '', hint: '自组股池:填股票代码(逗号/空格分隔,如 600519,000858,SH600036)。填了就用这批票(覆盖下面「股票池」);留空走股票池。⚠ 小池/单票的排名类截面因子会退化,单票更适合阶段B共振/时序。' }, { id: 'benchmark', label: '对标指数', type: 'select', value: '', options: [{ value: '', label: '不对标' }, { value: 'csi300', label: '沪深300(真实指数)' }], hint: '共振用:选了就给面板注入大盘日收益 idx_ret,公式可写 correlation(returns, idx_ret, 20)=个股与大盘20日共振。目前真实指数仅沪深300;其它宽基请用 csmean(returns) 在所选池上做等权代理大盘。' }, { id: 'leader', label: '龙头代码', type: 'text', value: '', hint: '共振用:填一只龙头股代码(如 600519),给面板注入它的日收益 ref_ret,公式可写 correlation(returns, ref_ret, 20)=个股跟随龙头的20日共振。留空则不注入。' }, { id: 'universe', label: '股票池', type: 'select', value: '自动', options: [{ value: '自动', label: '自动·按标的' }, { value: 'csi300', label: '沪深300' }, { value: 'csi500', label: '中证500' }, { value: 'csi800', label: '中证800' }, { value: 'csi1000', label: '中证1000' }, { value: 'all', label: '全市场A股' }, { value: 'csi_fast', label: '快速测试·100' }, { value: 'sample30', label: '样本30' }, { value: 'etf', label: 'ETF' }, { value: 'csi300_active', label: '沪深300·活跃' }, { value: 'csi300_2024h2', label: '沪深300·24H2' }] }, { id: 'start', label: '起始日', type: 'text', value: '' }, { id: 'end', label: '截止日', type: 'text', value: '' }, { id: 'freq', label: '频率', type: 'select', value: 'day', options: [{ value: 'day', label: '日线' }] }, { id: 'oos_frac', label: '样本外占比', type: 'select', value: '0', options: [{ value: '0', label: '不切(全样本)' }, { value: '0.2', label: '末20%留样本外' }, { value: '0.3', label: '末30%留样本外' }, { value: '0.4', label: '末40%留样本外' }], hint: 'W7 过拟合体检:把时间窗末段留作"样本外(OOS)"。下游因子分析/回测/模型会把样本内(IS)与样本外(OOS)的 RankIC/Sharpe 并排 + 衰减%;样本外塌缩=疑似过拟合(wiki:样本内≈样本外才算验证)。' }, { id: 'wf_refit', label: '滚动重训', type: 'select', value: '否', options: ['否', '是'], hint: 'W7 真滚动前进重训(仅 ML 节点):逐折 expanding-train 重训新模型→预测下一段样本外,拼接算整体 RankIC(真前进验证,非切片统计)。K× 训练成本,默认否。结果在抽屉脚注/警告显示「滚动重训(K折)」。' }] },
   formula:  { title: '公式输入', cat: 'io', inputs: [], outputs: [{ id: 'out', label: '公式', dt: 'series' }], params: [{ id: 'expr', label: '表达式', type: 'text', value: 'close' }] },
   factorlib:{ title: '因子库', cat: 'io', inputs: [], outputs: [{ id: 'out', label: '因子', dt: 'series' }], params: [{ id: 'name', label: '已选因子', type: 'text', value: '' }, { id: 'expr', label: '表达式', type: 'text', value: '' }] },
+  model:    { title: '模型(研究库)', cat: 'io', inputs: [], outputs: [{ id: 'out', label: '排名', dt: 'series' }], params: [{ id: 'model_id', label: '已选模型', type: 'text', value: '' }, { id: 'model_name', label: '模型名', type: 'text', value: '' }] },
   feature:  { title: '特征工程构建', cat: 'fe', inputs: [{ id: 'feat', label: '特征公式', dt: 'series' }, { id: 'label', label: '标签公式', dt: 'series' }, { id: 'src', label: '数据源(可选)', dt: 'series' }], outputs: [{ id: 'fe', label: '特征工程', dt: 'fe' }], params: [{ id: 'tag', label: '标签(默认收益)', type: 'text', value: 'IC', hint: '不连上面「标签公式」端口时的默认预测目标;IC / fwd_ret 都 = 未来收益,一般不用改。想自定义预测目标,就把一个「公式输入」连到「标签公式」端口。' }] },
   xgb:      { title: 'XGBoost 模型', cat: 'ml', inputs: [{ id: 'fe', label: '特征工程', dt: 'fe' }], outputs: [{ id: 'model', label: '模型', dt: 'model' }], params: [{ id: 'trees', label: '决策树数量', type: 'step', value: 100, step: 10 }, { id: 'depth', label: '最大深度', type: 'step', value: 3, step: 1 }, { id: 'lr', label: '学习率', type: 'step', value: 0.1, step: 0.01, dec: 2 }, { id: 'sub', label: '子样本比例', type: 'step', value: 1.0, step: 0.1, dec: 2 }] },
   lgbm:     { title: 'LightGBM 模型', cat: 'ml', inputs: [{ id: 'fe', label: '特征工程', dt: 'fe' }], outputs: [{ id: 'model', label: '模型', dt: 'model' }], params: [{ id: 'leaves', label: '叶子数', type: 'step', value: 31, step: 1 }, { id: 'lr', label: '学习率', type: 'step', value: 0.05, step: 0.01, dec: 2 }] },
@@ -48,7 +49,7 @@ const SPECS = {
 };
 
 const CATALOG = [
-  { g: '01 · 基础工具', items: ['source', 'formula', 'factorlib'] },
+  { g: '01 · 基础工具', items: ['source', 'formula', 'factorlib', 'model'] },
   { g: '02 · 特征工程', items: ['feature'] },
   { g: '03 · 机器学习', items: ['xgb', 'lgbm', 'svm', 'rf', 'nn', 'lstm'] },
   { g: '04 · 因子相关', items: ['pca', 'spearman', 'iccalc', 'mf', 'analysis', 'tsic', 'event', 'relstat'] },
@@ -330,6 +331,17 @@ const NODE_EXEC = {
     let hit = name ? (all.find(f => String(f.name).toLowerCase() === name) || all.find(f => String(f.name).toLowerCase().includes(name))) : null;
     if (!hit) throw new Error('因子库: 未选因子 —— 点节点里「浏览因子库」选一个');
     return { out: { __dt: 'series', expr: hit.expr, _label: hit.name, _factorName: hit.name, _matched: all.length } };
+  },
+  // —— 模型(研究库): 引用一个 registry 模型(prod/工坊/工作流变体)→ 拉其最新截面排名
+  //    GET /screen/model/ranking?id=<id> → {date, rows:[{code,score}]} → 输出 ranking 载荷
+  //    (code→score 字典作 series), 供下游(回测/组合/IC)消费。诚实失败: 未选 / 排名不可达 → 抛错。——
+  model: async (inputs, params, ctx) => {
+    const id = String(params.model_id || '').trim();
+    if (!id) throw new Error('模型节点: 未选模型 —— 点节点里「研究库」选一个');
+    const j = await _get('/screen/model/ranking?id=' + encodeURIComponent(id));
+    if (!j || !j.ok) throw new Error('模型节点: ' + ((j && j.reason) || '排名不可达 (/screen/model/ranking)'));
+    const rows = j.rows || [];
+    return { out: { __dt: 'series', kind: 'ranking', model_id: id, _label: String(params.model_name || '模型') || id, date: j.date, rows, series: Object.fromEntries(rows.map(r => [r.code, r.score])) } };
   },
   // —— 特征工程构建: 收上游 feat/label 表达式 + params.tag + ctx.universe → POST /feature/build,
   //    后端经 compile_factor→winsorize/zscore→forward_simple_returns 在 universe 面板物化真 X/y,
@@ -723,6 +735,48 @@ function _universeForNode(nodeId, nodes, edges) {
     frontier = next;
   }
   return { universe: null, start: '', end: '', codes: [], benchmark: '', leader: '', oos_frac: 0, wf_refit: false, wired: false };
+}
+
+// E3「存入模型库」: 从一个 ML 模型节点(xgb/lgbm/rf)的上游静态导出 recipe = {features,label,fwd_days,universe,params}。
+//   features: 上游每个「特征工程」节点的 feat 端口源(公式/因子库)表达式(zoo-DSL),保序去重;
+//   label   : 任一上游特征节点的 label 端口源表达式;无 label 公式且 tag∈{IC,fwd_ret,空}→ 前向收益(label=null);
+//   universe: 沿入边回溯到「数据源」(同 runGraph 口径);
+//   params  : 本节点超参按 hpMap 映射成后端超参名(与 _trainModel 同表)。
+//   后端 /model/promote 只读 recipe.features/label/fwd_days/universe/params;features 空 → 后端拒。
+const _PROMOTE_HPMAP = {
+  xgb: { n_estimators: 'trees', max_depth: 'depth', learning_rate: 'lr', subsample: 'sub' },
+  lgbm: { num_leaves: 'leaves', learning_rate: 'lr' },
+  rf: { n_estimators: 'trees' },
+};
+const _LABEL_FWD_TOKENS = { '': 1, ic: 1, fwd_ret: 1 };
+function deriveRecipeForNode(node, nodes, edges) {
+  const byId = id => nodes.find(n => n.id === id);
+  // 本 ML 节点的直接上游「特征工程」节点(经 fe 端口连入)。
+  const featNodes = edges.filter(e => e.to[0] === node.id && e.to[1] === 'fe').map(e => byId(e.from[0])).filter(n => n && n.type === 'feature');
+  const features = []; const seen = new Set();
+  let label = null;
+  for (const fn of featNodes) {
+    // 特征节点的 feat 端口源 → 表达式
+    edges.filter(e => e.to[0] === fn.id && e.to[1] === 'feat').forEach(e => {
+      const up = byId(e.from[0]);
+      const expr = up ? String((up.params && (up.params.expr)) || '').trim() : '';
+      if (expr && !seen.has(expr)) { seen.add(expr); features.push(expr); }
+    });
+    // label 端口源 → 公式标签(取首个非空);否则用 tag(IC/fwd_ret/空 → 前向收益 = label:null)
+    if (label == null) {
+      const le = edges.find(e => e.to[0] === fn.id && e.to[1] === 'label');
+      const lup = le ? byId(le.from[0]) : null;
+      const lexpr = lup ? String((lup.params && lup.params.expr) || '').trim() : '';
+      if (lexpr) label = lexpr;
+      else { const tag = String((fn.params && fn.params.tag) || '').trim().toLowerCase(); if (!_LABEL_FWD_TOKENS[tag]) label = (fn.params && fn.params.tag) || null; }
+    }
+  }
+  const u = _universeForNode(node.id, nodes, edges);
+  const universe = u.wired ? u.universe : 'csi_fast';
+  const hpMap = _PROMOTE_HPMAP[node.type] || {};
+  const params = {};
+  for (const k in hpMap) { const v = node.params[hpMap[k]]; if (v != null && v !== '') params[k] = (typeof v === 'string' && v.trim() !== '' && !isNaN(+v)) ? +v : v; }
+  return { features, label, fwd_days: 5, universe, params };
 }
 
 // hooks = { onState(id,'running'|'done'|'error'), onResult(report), onError(msg) }
@@ -1243,7 +1297,7 @@ function WorkflowApp() {
               {draft && (() => { const fn = nodeById(draft.fromNode); const a = portXY(fn, draft.fromPort, 'out'); return <path d={wirePath(a, { x: draft.x, y: draft.y })} fill="none" stroke="var(--zhu)" strokeWidth="1.8" strokeDasharray="5 4" />; })()}
             </svg>
             {nodes.map(n => (
-              <Node key={n.id} node={n} sel={sel === n.id} status={runState[n.id]}
+              <Node key={n.id} node={n} sel={sel === n.id} status={runState[n.id]} nodes={nodes} edges={edges} onNotify={flash}
                 onDrag={(e) => dragNode(n.id, e)} onStartWire={(pid, e) => startWire(n.id, pid, e)}
                 onParam={(pid, v) => setParam(n.id, pid, v)} onDel={() => delNode(n.id)} onSel={() => setSel(n.id)} />
             ))}
@@ -1542,10 +1596,16 @@ function FormulaPanel({ node, onParam }) {
 // ───────── 因子库浏览(W3)─────────
 // 全屏因子目录(portal 到 body, 避开画布缩放/裁剪)。两页: 研报精选(/factor/catalog, 中文名/
 // 大类/方向/说明)+ 全部因子(/factor/list 的 442 内置 + 39 仓内)。「用此因子」→ 写节点 name+expr。
-function FactorLibModal({ onPick, onClose }) {
+// 研究库弹窗:因子 tab(研报精选 / 全部因子)+ 模型 tab(registry 变体)。
+//   onPick(f)        → 因子节点回写 name/expr(factorlib 节点用)。
+//   onPickModel(m)   → 给定时显示「模型」tab(model 节点用),选中回写 model_id/model_name;
+//                      不给时仅因子 tab(行为如旧,factorlib 节点)。
+function FactorLibModal({ onPick, onClose, onPickModel, initialLibTab }) {
   const [cur, setCur] = useState(null);     // 研报精选目录
   const [full, setFull] = useState(null);   // 全部因子(registered+user)
+  const [models, setModels] = useState(null); // 研究库模型变体(/screen/models)
   const [err, setErr] = useState('');       // 加载失败显形(后端挂时不再伪装成「没有匹配的因子」空库)
+  const [libTab, setLibTab] = useState(initialLibTab === 'model' && onPickModel ? 'model' : 'factor'); // 顶层:因子 / 模型
   const [tab, setTab] = useState('curated');
   const [cat, setCat] = useState('全部');
   const [q, setQ] = useState('');
@@ -1566,44 +1626,81 @@ function FactorLibModal({ onPick, onClose }) {
       } catch (e) { setFull([]); setErr('因子清单加载失败 — 后端不可达或出错(检查 9999 是否在跑)'); }
     })();
   }, []);
+  // 模型 tab 首次切到时拉一次研究库变体(/screen/models)。仅 onPickModel 给定(model 节点)才会用到。
+  useEffect(() => {
+    if (libTab !== 'model' || models !== null) return;
+    _get('/screen/models').then(j => { setModels((j && j.ok) ? (j.variants || []) : []); }).catch(() => setModels([]));
+  }, [libTab]);
   const ql = q.trim().toLowerCase();
   let list = tab === 'curated' ? ((cur && cur.factors) || []) : (full || []);
   if (tab === 'curated' && cat !== '全部') list = list.filter(f => f.cat === cat);
   if (ql) list = list.filter(f => (f.name + ' ' + (f.expr || '') + ' ' + (f.desc || '') + ' ' + (f.cat || '')).toLowerCase().includes(ql));
+  let mlist = models || [];
+  if (ql) mlist = mlist.filter(m => ((m.name || '') + ' ' + (m.id || '') + ' ' + (m.kind || '') + ' ' + (m.source || '')).toLowerCase().includes(ql));
   const cats = ['全部', ...((cur && cur.cats) || [])];
   const tabSt = (on) => ({ fontSize: 12, padding: '5px 12px', borderRadius: 7, cursor: 'pointer', fontFamily: 'var(--serif)', color: on ? 'var(--paper)' : 'var(--ink-2)', background: on ? 'var(--yin)' : 'rgba(28,24,20,0.05)' });
+  const badge = (txt, c) => <span className="mono" style={{ fontSize: 8.5, color: c || 'var(--ink-3)', border: '1px solid var(--line)', borderRadius: 4, padding: '0 5px' }}>{txt}</span>;
   return ReactDOM.createPortal(
     <div onPointerDown={onClose} style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(28,24,20,0.32)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <div onPointerDown={e => e.stopPropagation()} style={{ width: 580, maxHeight: '82%', background: 'var(--paper)', border: '1px solid var(--ink)', borderRadius: 14, display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '0 12px 40px rgba(28,24,20,0.25)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '14px 18px 11px', borderBottom: '1px solid var(--line-soft)' }}>
-          <span className="serif" style={{ fontSize: 16, fontWeight: 600 }}>因子库</span>
-          <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>{tab === 'curated' ? (((cur && cur.factors) || []).length + ' 预置') : (full === null ? '加载中' : (full.length + ' 全部'))}</span>
+          <span className="serif" style={{ fontSize: 16, fontWeight: 600 }}>研究库</span>
+          <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>{libTab === 'model' ? (models === null ? '加载中' : (models.length + ' 模型')) : (tab === 'curated' ? (((cur && cur.factors) || []).length + ' 预置') : (full === null ? '加载中' : (full.length + ' 全部')))}</span>
           <span onClick={onClose} style={{ marginLeft: 'auto', fontSize: 17, color: 'var(--ink-3)', cursor: 'pointer' }}>✕</span>
         </div>
-        <div style={{ display: 'flex', gap: 7, padding: '11px 18px 0' }}>
-          <span onClick={() => setTab('curated')} style={tabSt(tab === 'curated')}>研报精选</span>
-          <span onClick={() => setTab('all')} style={tabSt(tab === 'all')}>全部因子</span>
-        </div>
+        {onPickModel && (
+          <div style={{ display: 'flex', gap: 7, padding: '11px 18px 0' }}>
+            <span onClick={() => setLibTab('factor')} style={tabSt(libTab === 'factor')}>因子</span>
+            <span onClick={() => setLibTab('model')} style={tabSt(libTab === 'model')}>模型</span>
+          </div>
+        )}
+        {libTab !== 'model' && (
+          <div style={{ display: 'flex', gap: 7, padding: '11px 18px 0' }}>
+            <span onClick={() => setTab('curated')} style={tabSt(tab === 'curated')}>研报精选</span>
+            <span onClick={() => setTab('all')} style={tabSt(tab === 'all')}>全部因子</span>
+          </div>
+        )}
         <div style={{ padding: '10px 18px' }}>
-          <input value={q} onChange={e => setQ(e.target.value)} placeholder="搜索因子名 / 公式 / 说明…" style={{ width: '100%', boxSizing: 'border-box', border: '1px solid var(--line)', borderRadius: 8, padding: '7px 11px', fontFamily: 'var(--sans)', fontSize: 12, background: 'var(--paper)', color: 'var(--ink)' }} />
-          {tab === 'curated' && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 8 }}>{cats.map(c => <span key={c} onClick={() => setCat(c)} style={{ fontSize: 10.5, padding: '2px 9px', borderRadius: 5, cursor: 'pointer', color: cat === c ? 'var(--paper)' : 'var(--ink-2)', background: cat === c ? 'var(--yin)' : 'rgba(28,24,20,0.04)' }}>{c}</span>)}</div>}
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder={libTab === 'model' ? '搜索模型名 / id / 类型…' : '搜索因子名 / 公式 / 说明…'} style={{ width: '100%', boxSizing: 'border-box', border: '1px solid var(--line)', borderRadius: 8, padding: '7px 11px', fontFamily: 'var(--sans)', fontSize: 12, background: 'var(--paper)', color: 'var(--ink)' }} />
+          {libTab !== 'model' && tab === 'curated' && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 8 }}>{cats.map(c => <span key={c} onClick={() => setCat(c)} style={{ fontSize: 10.5, padding: '2px 9px', borderRadius: 5, cursor: 'pointer', color: cat === c ? 'var(--paper)' : 'var(--ink-2)', background: cat === c ? 'var(--yin)' : 'rgba(28,24,20,0.04)' }}>{c}</span>)}</div>}
         </div>
         <div style={{ overflowY: 'auto', padding: '0 14px 14px' }}>
-          {err && <div className="mono" style={{ fontSize: 11, color: 'var(--zhu)', border: '1px solid var(--zhu)', borderRadius: 8, background: 'rgba(185,74,61,0.05)', padding: '10px 12px', margin: '4px 4px 10px' }}>⚠ {err}</div>}
-          {(tab === 'curated' ? cur === null : full === null) && <div className="mono" style={{ fontSize: 11, color: 'var(--ink-3)', textAlign: 'center', padding: '26px' }}>加载中…</div>}
-          {list.map((f, i) => (
-            <div key={(f.name || '') + i} style={{ border: '1px solid var(--line-soft)', borderRadius: 9, padding: '9px 11px', marginBottom: 7, background: 'rgba(255,255,255,0.5)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                <span className="serif" style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>{f.name}</span>
-                {f.cat && <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', border: '1px solid var(--line)', borderRadius: 4, padding: '0 5px' }}>{f.cat}</span>}
-                {f.dir && <span className="mono" style={{ fontSize: 8.5, color: f.dir === '正向' ? 'var(--dai)' : 'var(--zhu)' }}>{f.dir}</span>}
-                <span onClick={() => onPick(f)} className="serif" style={{ marginLeft: 'auto', fontSize: 11.5, color: 'var(--paper)', background: 'var(--yin)', borderRadius: 6, padding: '4px 12px', cursor: 'pointer' }}>用此因子</span>
-              </div>
-              {f.desc && <div className="serif" style={{ fontSize: 11, color: 'var(--ink-2)', margin: '5px 0 4px', lineHeight: 1.5 }}>{f.desc}</div>}
-              {f.expr && <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.expr}</div>}
-            </div>
-          ))}
-          {list.length === 0 && !err && (tab === 'curated' ? cur !== null : full !== null) && <div className="mono" style={{ fontSize: 11, color: 'var(--ink-3)', textAlign: 'center', padding: '26px' }}>没有匹配的因子</div>}
+          {err && libTab !== 'model' && <div className="mono" style={{ fontSize: 11, color: 'var(--zhu)', border: '1px solid var(--zhu)', borderRadius: 8, background: 'rgba(185,74,61,0.05)', padding: '10px 12px', margin: '4px 4px 10px' }}>⚠ {err}</div>}
+          {libTab === 'model' ? (
+            <React.Fragment>
+              {models === null && <div className="mono" style={{ fontSize: 11, color: 'var(--ink-3)', textAlign: 'center', padding: '26px' }}>加载中…</div>}
+              {mlist.map((m, i) => (
+                <div key={(m.id || '') + i} style={{ border: '1px solid var(--line-soft)', borderRadius: 9, padding: '9px 11px', marginBottom: 7, background: 'rgba(255,255,255,0.5)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                    <span className="serif" style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>{m.name || m.id}</span>
+                    {badge(m.source === 'workflow' ? '来自工作流' : '本工坊', m.source === 'workflow' ? 'var(--dai)' : 'var(--jin)')}
+                    {m.kind && badge(m.kind)}
+                    {m.oos_ic != null && badge('OOS IC ' + (+m.oos_ic).toFixed(4), (+m.oos_ic) >= 0 ? 'var(--dai)' : 'var(--zhu)')}
+                    <span onClick={() => onPickModel(m)} className="serif" style={{ marginLeft: 'auto', fontSize: 11.5, color: 'var(--paper)', background: 'var(--yin)', borderRadius: 6, padding: '4px 12px', cursor: 'pointer' }}>用此模型</span>
+                  </div>
+                  {m.id && <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 4 }}>{m.id}</div>}
+                </div>
+              ))}
+              {models !== null && mlist.length === 0 && <div className="mono" style={{ fontSize: 11, color: 'var(--ink-3)', textAlign: 'center', padding: '26px' }}>研究库暂无模型(在工坊训练或工作流「存入模型库」后出现)</div>}
+            </React.Fragment>
+          ) : (
+            <React.Fragment>
+              {(tab === 'curated' ? cur === null : full === null) && <div className="mono" style={{ fontSize: 11, color: 'var(--ink-3)', textAlign: 'center', padding: '26px' }}>加载中…</div>}
+              {list.map((f, i) => (
+                <div key={(f.name || '') + i} style={{ border: '1px solid var(--line-soft)', borderRadius: 9, padding: '9px 11px', marginBottom: 7, background: 'rgba(255,255,255,0.5)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                    <span className="serif" style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>{f.name}</span>
+                    {f.cat && <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', border: '1px solid var(--line)', borderRadius: 4, padding: '0 5px' }}>{f.cat}</span>}
+                    {f.dir && <span className="mono" style={{ fontSize: 8.5, color: f.dir === '正向' ? 'var(--dai)' : 'var(--zhu)' }}>{f.dir}</span>}
+                    <span onClick={() => onPick(f)} className="serif" style={{ marginLeft: 'auto', fontSize: 11.5, color: 'var(--paper)', background: 'var(--yin)', borderRadius: 6, padding: '4px 12px', cursor: 'pointer' }}>用此因子</span>
+                  </div>
+                  {f.desc && <div className="serif" style={{ fontSize: 11, color: 'var(--ink-2)', margin: '5px 0 4px', lineHeight: 1.5 }}>{f.desc}</div>}
+                  {f.expr && <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.expr}</div>}
+                </div>
+              ))}
+              {list.length === 0 && !err && (tab === 'curated' ? cur !== null : full !== null) && <div className="mono" style={{ fontSize: 11, color: 'var(--ink-3)', textAlign: 'center', padding: '26px' }}>没有匹配的因子</div>}
+            </React.Fragment>
+          )}
         </div>
       </div>
     </div>, document.body);
@@ -1620,6 +1717,65 @@ function FactorLibPanel({ node, onParam }) {
         ? <div style={{ marginTop: 5, fontSize: 10, color: 'var(--ink-2)' }}>已选:<b style={{ color: 'var(--ink)' }}>{picked}</b></div>
         : <div style={{ marginTop: 5, fontSize: 9.5, color: 'var(--ink-3)' }}>未选 —— 点上方按钮挑一个因子</div>}
       {open && <FactorLibModal onClose={() => setOpen(false)} onPick={f => { onParam('name', f.name); onParam('expr', f.expr); setOpen(false); }} />}
+    </div>
+  );
+}
+
+// 模型节点辅助面板:「研究库」按钮 → 弹研究库(默认「模型」tab); 选中显示已选模型。仅 model 节点渲染。
+// 写回机制与 FactorLibPanel 同源(onParam),区别仅写 model_id/model_name。
+function ModelLibPanel({ node, onParam }) {
+  const [open, setOpen] = useState(false);
+  const picked = String(node.params.model_name || '').trim();
+  const pid = String(node.params.model_id || '').trim();
+  return (
+    <div onPointerDown={e => e.stopPropagation()} style={{ marginTop: 6, paddingTop: 6, borderTop: '1px dashed var(--line)' }}>
+      <div onClick={e => { e.stopPropagation(); setOpen(true); }} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, height: 22, borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 500, color: 'var(--yin)', border: '1px solid var(--yin)', background: 'rgba(168,57,45,0.05)' }}>研究库 ✦</div>
+      {pid
+        ? <div style={{ marginTop: 5, fontSize: 10, color: 'var(--ink-2)' }}>已选:<b style={{ color: 'var(--ink)' }}>{picked || pid}</b></div>
+        : <div style={{ marginTop: 5, fontSize: 9.5, color: 'var(--ink-3)' }}>未选 —— 点上方按钮挑一个模型</div>}
+      {open && <FactorLibModal onClose={() => setOpen(false)} initialLibTab="model"
+        onPick={() => {}}
+        onPickModel={m => { onParam('model_id', m.id || ''); onParam('model_name', m.name || m.id || ''); setOpen(false); }} />}
+    </div>
+  );
+}
+
+// E3 ML 树模型节点(xgb/lgbm/rf)的「存入模型库」: 据上游静态导出 recipe → POST /model/promote
+// (后端起子进程生产重训, 异步) → 轮询 /model/promote/status 至 done。仅树模型节点渲染。
+const _PROMOTE_KIND = { lgbm: 'lightgbm', xgb: 'xgboost', rf: 'rf' };
+function PromoteModelPanel({ node, nodes, edges, onNotify }) {
+  const [busy, setBusy] = useState(false);
+  const timerRef = useRef(null);
+  useEffect(() => () => { if (timerRef.current) clearInterval(timerRef.current); }, []);
+  const notify = (t, b) => { if (onNotify) onNotify(t, b, 6500); };
+  const promote = async (e) => {
+    e.stopPropagation();
+    if (busy) return;
+    const kind = _PROMOTE_KIND[node.type];
+    if (!kind) { notify('存入模型库', '该模型类型暂不支持入库(首期树模型 lgbm/xgb/rf)'); return; }
+    const recipe = deriveRecipeForNode(node, nodes, edges);
+    if (!recipe.features || !recipe.features.length) { notify('存入模型库', '上游无特征表达式 —— 需「特征工程构建(接公式/因子库)」直连 fe 端口'); return; }
+    setBusy(true);
+    try {
+      const name = String((node.params && node.params.name) || '').trim() || (SPECS[node.type].title + '·入库');
+      const r = await _post('/model/promote', { name, kind, recipe });
+      if (!r || !r.ok) { setBusy(false); notify('存入失败', (r && r.reason) || '后端拒绝'); return; }
+      notify('已起生产重训(分钟级)', '完成后在研究库 / 工坊可见');
+      if (timerRef.current) clearInterval(timerRef.current);
+      timerRef.current = setInterval(async () => {
+        const s = (await _get('/model/promote/status')) || {};
+        const st = s.state || {};
+        if (!st.running && st.phase === 'done') {
+          clearInterval(timerRef.current); timerRef.current = null; setBusy(false);
+          notify(st.ok ? '入库完成 ✓' : '入库失败', st.ok ? ('变体 ' + (st.variant_id || '')) : (st.error || ''));
+        }
+      }, 3000);
+    } catch (err) { setBusy(false); notify('存入失败', String((err && err.message) || err)); }
+  };
+  return (
+    <div onPointerDown={e => e.stopPropagation()} style={{ marginTop: 6, paddingTop: 6, borderTop: '1px dashed var(--line)' }}>
+      <div onClick={promote} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, height: 22, borderRadius: 6, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.55 : 1, fontSize: 11, fontWeight: 500, color: 'var(--jin)', border: '1px solid var(--jin)', background: 'rgba(138,111,63,0.06)' }}>{busy ? '生产重训中…' : '存入模型库 ⤓'}</div>
+      <div style={{ marginTop: 5, fontSize: 9.5, color: 'var(--ink-3)', lineHeight: 1.4 }}>据上游特征 + 本节点超参,起全市场全窗口生产重训,落研究库(异步)。</div>
     </div>
   );
 }
@@ -1664,7 +1820,7 @@ function SourceProbe({ node }) {
   );
 }
 
-function Node({ node, sel, onDrag, onStartWire, onParam, onDel, onSel, status }) {
+function Node({ node, sel, onDrag, onStartWire, onParam, onDel, onSel, status, nodes, edges, onNotify }) {
   const spec = SPECS[node.type]; const cat = CAT[spec.cat]; const rows = rowsOf(spec);
   return (
     <div className="nodrag" onPointerDown={(e) => { e.stopPropagation(); onSel(); }}
@@ -1725,6 +1881,8 @@ function Node({ node, sel, onDrag, onStartWire, onParam, onDel, onSel, status })
         {node.type === 'source' ? <SourceProbe node={node} /> : null}
         {node.type === 'formula' ? <FormulaPanel node={node} onParam={onParam} /> : null}
         {node.type === 'factorlib' ? <FactorLibPanel node={node} onParam={onParam} /> : null}
+        {node.type === 'model' ? <ModelLibPanel node={node} onParam={onParam} /> : null}
+        {(node.type === 'xgb' || node.type === 'lgbm' || node.type === 'rf') ? <PromoteModelPanel node={node} nodes={nodes} edges={edges} onNotify={onNotify} /> : null}
         {node.type === 'analysis' ? <div title="单因子(直连公式 / 单特征 Spearman·PCA)→ 分组/调仓/方向 经壳内 /factor/report2 真生效;经多模型或多因子合成的复合因子,报告已在上游按其设置算好,此处透传(这三项对其不适用)。" style={{ marginTop: 6, paddingTop: 6, borderTop: '1px dashed var(--line)', fontSize: 9, color: 'var(--ink-3)', lineHeight: 1.4 }}>ⓘ 分组/调仓/方向:单因子时生效;多因子复合为透传</div> : null}
       </div>
     </div>
