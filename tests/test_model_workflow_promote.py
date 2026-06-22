@@ -1,0 +1,28 @@
+import pandas as pd
+import pytest
+from guanlan_v2.screen import model_registry as reg
+
+
+@pytest.mark.slow
+def test_train_promote_produces_ranking_and_saves(tmp_path, monkeypatch):
+    monkeypatch.setattr(reg, "MODELS_DIR", tmp_path)
+    from guanlan_v2.strategy.compute import model_workflow as mw
+    spec = {
+        "variant_id": "m_wf_test", "name": "工作流lgbm测试", "kind": "lightgbm",
+        "recipe": {
+            # Ref() is qlib syntax; this engine uses delay() — adapted accordingly
+            "features": ["close/delay(close,20)-1", "(close-delay(close,5))/delay(close,5)"],
+            "label": "fwd_ret", "fwd_days": 5,
+            "universe": "csi300", "start": "2024-01-01", "params": {"leaves": 31, "lr": 0.05},
+        },
+        "created": "2026-06-22T00:00:00",
+    }
+    out = mw.train_promote(spec)
+    assert out["ok"] is True
+    m = reg.variant_meta("m_wf_test")
+    assert m["source"] == "workflow" and m["kind"] == "lightgbm"
+    assert m["retrainable"] is True and m["recipe"]["features"]
+    rank = pd.read_parquet(reg.variant_ranking_path("m_wf_test"))
+    assert set(["code", "date", "lgb_pct"]).issubset(rank.columns)
+    assert rank["code"].nunique() >= 100
+    assert rank["lgb_pct"].between(0, 1).all()
