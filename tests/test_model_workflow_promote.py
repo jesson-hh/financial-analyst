@@ -63,3 +63,17 @@ def test_promote_starts_and_status(monkeypatch):
     assert s["ok"] is True
     assert s["state"]["variant_id"] == j["variant_id"]   # 状态机真的记录了本次入库
     assert s["state"]["running"] is True                  # stub 不重置 → 仍在跑
+
+
+def test_screen_models_returns_provenance(tmp_path, monkeypatch):
+    from guanlan_v2.screen import model_registry as reg
+    monkeypatch.setattr(reg, "MODELS_DIR", tmp_path)
+    df = pd.DataFrame({"code": [f"SZ{300000+i:06d}" for i in range(120)],
+                       "date": "2026-06-19", "lgb_pct": [i/119 for i in range(120)]})
+    reg.save_variant("m_wf2", df, {"id": "m_wf2", "name": "wf", "source": "workflow",
+                                   "kind": "rf", "recipe": {"features": ["x"]}, "retrainable": True})
+    from fastapi.testclient import TestClient
+    from guanlan_v2.server import app
+    j = TestClient(app).get("/screen/models").json()
+    wf = [v for v in j["variants"] if v["id"] == "m_wf2"][0]
+    assert wf["source"] == "workflow" and wf["kind"] == "rf" and wf["retrainable"] is True
