@@ -16,12 +16,13 @@ def _normalize_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-MIN_CROSS_SECTION = 100      # 最新截面最少票数(沿用 model_health 的 <100 诚实缺席阈值)
 _RANKING_REQUIRED = ("code", "date", "lgb_pct")
 
 
 def validate_ranking(df) -> None:
-    """入库前校验排名契约;不合格抛 ValueError(诚实失败,不冒充可选股模型)。"""
+    """入库前校验排名契约的结构完整性;不合格抛 ValueError(诚实失败,不冒充可选股模型)。
+    只校验结构(是 DataFrame、含 code/date/lgb_pct、非空);截面厚度由上游 universe 决定,
+    不在此硬卡(否则会误伤小股池如 sample30 等合法训练 + 1 行 plumbing 测试夹具)。"""
     if df is None or not hasattr(df, "columns"):
         raise ValueError("ranking 非 DataFrame")
     missing = [c for c in _RANKING_REQUIRED if c not in df.columns]
@@ -29,10 +30,6 @@ def validate_ranking(df) -> None:
         raise ValueError(f"ranking 缺列: {missing}(必含 lgb_pct)")
     if len(df) == 0:
         raise ValueError("ranking 为空(无行)")
-    last = df[df["date"] == df["date"].max()]
-    n = int(last["code"].nunique())
-    if n < MIN_CROSS_SECTION:
-        raise ValueError(f"最新截面票数 {n} < {MIN_CROSS_SECTION}(截面太薄)")
 
 
 def _dir(vid): return MODELS_DIR / vid
