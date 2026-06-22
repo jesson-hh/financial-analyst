@@ -174,24 +174,25 @@ def regen_all(provider_uri: str = DEFAULT_PROVIDER, end: Optional[str] = None) -
         #    顺带 health 出参:同模型近60有标签日逐日 rank-IC(体检回看,见 model_health.py 口径)
         print("[regen] v4 → v4_ranking_latest (含 LGB 训练,稍慢) ...", flush=True)
         _health: dict = {}
-        # #7 B3 集成:离线只读 var/v4_fincast_pred.parquet(GPU 批算产出)→ 有当日预测则混进 v4 score,
-        #    无则诚实退纯 LGB(文件现不存在 → 字节等价旧行为)。b3 provenance 落盘供 serving/UI 诚实徽章。
-        from pathlib import Path as _P
+        # DL 集成层:多源(Phase 1 仅 FinCast,沿用 var/v4_fincast_pred.parquet)。离线只读预测表混进 v4 score,
+        #   无则诚实退纯 LGB(字节等价旧行为)。provenance 落 v4_dl_provenance.json 供 serving/UI 诚实徽章。
+        from guanlan_v2.strategy.compute.dl_ensemble import default_dl_sources
         _b3: dict = {}
-        _fincast_p = _P(__file__).resolve().parents[3] / "var" / "v4_fincast_pred.parquet"
+        _dl_sources = default_dl_sources()
         v4out = build_v4(provider_uri, end=end, codes=codes, date_str=end,
-                         health=_health, fincast_path=str(_fincast_p), b3=_b3)
+                         health=_health, dl_sources=_dl_sources, b3=_b3)
         _write_atomic(v4out, V4_RANKING_PARQUET, index=False)
         out["v4"] = (len(v4out), str(V4_RANKING_PARQUET))
-        out["v4_b3"] = dict(_b3) if _b3 else {"active": False, "reason": "未启用"}
-        try:   # b3 provenance 旁路落盘(serving 读它判「纯 LGB」vs「FinCast 混合」+ look-ahead)
+        out["v4_dl"] = dict(_b3) if _b3 else {"active": False, "reason": "未启用"}
+        try:   # DL provenance 旁路落盘(serving 读它判 纯 LGB vs 多源混合 + 每源 look-ahead)
             import json as _json
-            _b3_side = V4_RANKING_PARQUET.parent / "v4_b3_provenance.json"
-            _b3_side.write_text(_json.dumps({"date": end, **(_b3 or {})}, ensure_ascii=False, indent=2), encoding="utf-8")
+            _dl_side = V4_RANKING_PARQUET.parent / "v4_dl_provenance.json"
+            _dl_side.write_text(_json.dumps({"date": end, **(_b3 or {})}, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as _e:  # noqa: BLE001 — provenance 落盘失败不阻断再生
-            print(f"  [warn] v4_b3 provenance 落盘失败: {type(_e).__name__}: {_e}", flush=True)
+            print(f"  [warn] v4_dl provenance 落盘失败: {type(_e).__name__}: {_e}", flush=True)
+        _act = _b3.get("active")
         print(f"  v4 {len(v4out)} 行 (顶200 v4_total notnull={int(v4out['v4_total'].notna().sum())}) "
-              f"· B3 {('混合 w_fc=%.2f' % _b3.get('w_fc', 0)) if _b3.get('active') else '纯 LGB'} -> {V4_RANKING_PARQUET}", flush=True)
+              f"· DL {('混合 ' + _b3.get('reason', '')) if _act else '纯 LGB'} -> {V4_RANKING_PARQUET}", flush=True)
 
         # 3.4) 模型体检:回看 IC 落盘 + 当日快照入档 + vintage 真 OOS 增量(失败不阻断)
         print("[regen] model_health → 体检回看 + 快照入档 + vintage ...", flush=True)
