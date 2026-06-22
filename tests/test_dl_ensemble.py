@@ -63,3 +63,58 @@ def test_all_sources_degrade_returns_pure_lgb():
     mixed, info = dl_mix_scores(lgb, {"thin": thin}, {"thin": 0.3}, min_match=50)
     assert info["active"] is False and info["w_lgb"] == 1.0
     assert np.allclose(mixed.values, lgb.values)   # 纯 LGB,原样
+
+
+def _write_pred(tmp_path, name, eval_date, codes, vals, score_col="pred_ret_5d"):
+    df = pd.DataFrame({"eval_date": pd.Timestamp(eval_date), "instrument": codes, score_col: vals})
+    p = tmp_path / name
+    df.to_parquet(p)
+    return str(p)
+
+
+def _mk_pred_frame(codes, scores):
+    idx = pd.MultiIndex.from_product([codes, [pd.Timestamp("2026-03-10")]],
+                                     names=["instrument", "datetime"])
+    return pd.DataFrame({"score": scores}, index=idx)
+
+
+def test_apply_dl_ensemble_single_source_writes_mixed(tmp_path):
+    from guanlan_v2.strategy.compute.dl_ensemble import apply_dl_ensemble, DLSource
+    codes = [f"SZ{300000 + i:06d}" for i in range(120)]
+    rng = np.random.RandomState(7)
+    pred = _mk_pred_frame(codes, rng.randn(120))
+    before = pred["score"].copy()
+    path = _write_pred(tmp_path, "dl_pred_fincast.parquet", "2026-03-10", codes, rng.randn(120))
+    src = DLSource(model_id="fincast", path=path, weight_mode="fixed", fixed_w=0.3)
+    info = apply_dl_ensemble(pred, pd.Timestamp("2026-03-10"), [src])
+    assert info["active"] is True
+    assert info["sources"][0]["model_id"] == "fincast" and info["sources"][0]["active"] is True
+    assert not np.allclose(pred["score"].values, before.values)   # score 被混合改写
+
+
+def test_apply_dl_ensemble_missing_file_pure_lgb(tmp_path):
+    from guanlan_v2.strategy.compute.dl_ensemble import apply_dl_ensemble, DLSource
+    codes = [f"SZ{300000 + i:06d}" for i in range(120)]
+    pred = _mk_pred_frame(codes, np.arange(120, dtype=float))
+    before = pred["score"].copy()
+    src = DLSource(model_id="fincast", path=str(tmp_path / "__nope__.parquet"))
+    info = apply_dl_ensemble(pred, pd.Timestamp("2026-03-10"), [src])
+    assert info["active"] is False
+    assert info["sources"][0]["active"] is False
+    assert np.allclose(pred["score"].values, before.values)   # 纯 LGB,原样
+
+
+def test_apply_dl_ensemble_equiv_to_apply_fincast(tmp_path):
+    # 单 fincast 源(fixed_w)经新层 == 旧 apply_fincast_ensemble(同 w)
+    from guanlan_v2.strategy.compute.dl_ensemble import apply_dl_ensemble, DLSource
+    from guanlan_v2.strategy.compute.v4_fincast import apply_fincast_ensemble, DEFAULT_W_FC
+    codes = [f"SZ{300000 + i:06d}" for i in range(120)]
+    rng = np.random.RandomState(11)
+    fcvals = rng.randn(120)
+    path = _write_pred(tmp_path, "v4_fincast_pred.parquet", "2026-03-10", codes, fcvals)
+    base = rng.randn(120)
+    p1 = _mk_pred_frame(codes, base.copy()); p2 = _mk_pred_frame(codes, base.copy())
+    apply_fincast_ensemble(p1, pd.Timestamp("2026-03-10"), path)   # 旧:无 data → DEFAULT_W_FC=0.4
+    apply_dl_ensemble(p2, pd.Timestamp("2026-03-10"),
+                      [DLSource(model_id="fincast", path=path, weight_mode="fixed", fixed_w=DEFAULT_W_FC)])
+    assert np.allclose(p1["score"].values, p2["score"].values, atol=1e-12)
