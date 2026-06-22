@@ -192,7 +192,9 @@ def _apply_fund_flow(panel: pd.DataFrame, ff_df) -> None:
     if ff_df is None or len(ff_df) == 0:
         return
     ff = ff_df.copy()
-    ff["__dt"] = pd.to_datetime(ff["trade_date"])
+    # .astype(str) 先字符串化:对 int 日期(20260617,Task 2 读 parquet 可能给)防被当
+    # 纳秒解析致整列错位全 NaN;对 datetime/str 列同样正确(20260617→'20260617'→日期)。
+    ff["__dt"] = pd.to_datetime(ff["trade_date"].astype(str))
     ff = ff.set_index(["__dt", "code"])
     ff.index = ff.index.set_names(["datetime", "code"])
     ff = ff[~ff.index.duplicated(keep="last")]

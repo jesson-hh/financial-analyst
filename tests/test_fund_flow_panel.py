@@ -62,3 +62,21 @@ def test_apply_preserves_index():
     before = panel.index.tolist()
     _apply_fund_flow(panel, pd.DataFrame())
     assert panel.index.tolist() == before
+
+
+def test_apply_dedup_keep_last():
+    panel = _mk_panel(["2026-06-17"], ["SH600000"])
+    ff = pd.DataFrame({
+        "code": ["SH600000", "SH600000"],
+        "trade_date": ["2026-06-17", "2026-06-17"],
+        "main_net_pct": [1.0, 9.0],
+    })
+    _apply_fund_flow(panel, ff)
+    assert panel.loc[(pd.Timestamp("2026-06-17"), "SH600000"), "main_net_pct"] == 9.0
+
+
+def test_apply_integer_trade_date_matches():
+    panel = _mk_panel(["2026-06-17"], ["SH600000"])
+    ff = pd.DataFrame({"code": ["SH600000"], "trade_date": [20260617], "main_net_pct": [2.5]})
+    _apply_fund_flow(panel, ff)
+    assert panel.loc[(pd.Timestamp("2026-06-17"), "SH600000"), "main_net_pct"] == 2.5
