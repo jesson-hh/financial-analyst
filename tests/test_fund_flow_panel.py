@@ -80,3 +80,40 @@ def test_apply_integer_trade_date_matches():
     ff = pd.DataFrame({"code": ["SH600000"], "trade_date": [20260617], "main_net_pct": [2.5]})
     _apply_fund_flow(panel, ff)
     assert panel.loc[(pd.Timestamp("2026-06-17"), "SH600000"), "main_net_pct"] == 2.5
+
+
+def test_load_reads_filters_and_maps_instrument(tmp_path):
+    from financial_analyst.factors.zoo.panel import _load_fund_flow_df
+    raw = pd.DataFrame({
+        "instrument": ["SH600000", "SH600000", "SZ000001"],
+        "code": ["600000", "600000", "000001"],
+        "trade_date": pd.to_datetime(["2026-06-17", "2026-06-10", "2026-06-17"]),
+        "main_net_pct": [1.0, 2.0, 3.0],
+        "main_net_amount": [10.0, 20.0, 30.0],
+    })
+    raw.to_parquet(tmp_path / "eastmoney_stock_fund_flow_daily.parquet")
+    out = _load_fund_flow_df(["SH600000"], "2026-06-15", "2026-06-18", parquet_root=tmp_path)
+    assert list(out["code"].unique()) == ["SH600000"]
+    assert len(out) == 1
+    assert float(out.iloc[0]["main_net_pct"]) == 1.0
+
+
+def test_load_missing_file_returns_empty(tmp_path):
+    from financial_analyst.factors.zoo.panel import _load_fund_flow_df
+    out = _load_fund_flow_df(["SH600000"], None, None, parquet_root=tmp_path)
+    assert len(out) == 0
+
+
+def test_merge_fund_flow_end_to_end(tmp_path):
+    from financial_analyst.factors.zoo.panel import _merge_fund_flow
+    raw = pd.DataFrame({
+        "instrument": ["SH600000"],
+        "code": ["600000"],
+        "trade_date": pd.to_datetime(["2026-06-17"]),
+        "main_net_pct": [1.5],
+    })
+    raw.to_parquet(tmp_path / "eastmoney_stock_fund_flow_daily.parquet")
+    panel = _mk_panel(["2026-06-17", "2026-06-18"], ["SH600000"])
+    _merge_fund_flow(panel, None, ["SH600000"], "2026-06-15", "2026-06-18", parquet_root=tmp_path)
+    assert panel.loc[(pd.Timestamp("2026-06-17"), "SH600000"), "main_net_pct"] == 1.5
+    assert np.isnan(panel.loc[(pd.Timestamp("2026-06-18"), "SH600000"), "main_net_pct"])

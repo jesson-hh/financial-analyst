@@ -203,6 +203,52 @@ def _apply_fund_flow(panel: pd.DataFrame, ff_df) -> None:
             panel[col] = ff[col].reindex(panel.index)
 
 
+def _load_fund_flow_df(codes, start, end, parquet_root=None):
+    """读东财五档资金流长表,过滤到 ``codes`` ∩ [start, end]。
+
+    返回列 [code, trade_date, *存在的 _FUND_FLOW_FIELDS],``code`` 为面板口径
+    (qlib instrument,如 'SH600000')。parquet 缺失 / 无关键列 / 读失败 → **空表**
+    (诚实无数据路径)。``parquet_root`` 缺省经 get_data_paths()。"""
+    if parquet_root is None:
+        try:
+            from financial_analyst.data.paths import get_data_paths
+            parquet_root = get_data_paths().parquet_root
+        except Exception:
+            return pd.DataFrame()
+    path = os.path.join(str(parquet_root), "eastmoney_stock_fund_flow_daily.parquet")
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    try:
+        df = pd.read_parquet(path)
+    except Exception:
+        return pd.DataFrame()
+    if "instrument" not in df.columns or "trade_date" not in df.columns:
+        return pd.DataFrame()
+    # 实际 parquet 同时含 instrument(qlib 口径)和 code(6 位数字):先删原始 code 再
+    # 把 instrument rename 成面板口径的 code,避免两列重名 duplicate-labels 报错。
+    if "code" in df.columns:
+        df = df.drop(columns=["code"])
+    df = df.rename(columns={"instrument": "code"})
+    df = df[df["code"].isin(set(codes))].copy()
+    if len(df) == 0:
+        return pd.DataFrame()
+    df["__dt"] = pd.to_datetime(df["trade_date"].astype(str))
+    if start is not None:
+        df = df[df["__dt"] >= pd.to_datetime(start)]
+    if end is not None:
+        df = df[df["__dt"] <= pd.to_datetime(end)]
+    keep = ["code", "trade_date"] + [c for c in _FUND_FLOW_FIELDS if c in df.columns]
+    return df[keep].copy()
+
+
+def _merge_fund_flow(panel: pd.DataFrame, loader, codes: list, start: str, end: str,
+                     parquet_root=None) -> None:
+    """把东财五档日频资金流合并到 (datetime, code) 面板(仅 day 频调用)。
+    ``loader`` 不用(留参以与 _merge_financials 等同形);文件缺 → 加 10 个 NaN 列。"""
+    ff = _load_fund_flow_df(codes, start, end, parquet_root=parquet_root)
+    _apply_fund_flow(panel, ff)
+
+
 class PanelData:
     def __init__(self, df: pd.DataFrame):
         if not isinstance(df.index, pd.MultiIndex) or df.index.nlevels != 2:
@@ -512,5 +558,7 @@ class PanelData:
             _merge_tech(panel, loader, codes, start, end)
             # W1b: merge financial-statement fields (quarterly, PIT as-of ann_date).
             _merge_financials(panel, loader, codes, start, end)
+            # 资金面:东财五档日频净流入(EOD PIT;缺即 NaN;对旧因子是 no-op 加列)。
+            _merge_fund_flow(panel, loader, codes, start, end)
 
         return cls(panel)
