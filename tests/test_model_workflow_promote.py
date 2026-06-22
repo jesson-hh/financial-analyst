@@ -38,3 +38,26 @@ def test_train_promote_rejects_empty_features():
     from guanlan_v2.strategy.compute import model_workflow as mw
     out = mw.train_promote({"variant_id": "x", "kind": "lightgbm", "recipe": {"features": []}})
     assert out["ok"] is False
+
+
+def test_promote_rejects_empty_recipe():
+    from fastapi.testclient import TestClient
+    from guanlan_v2.server import app
+    c = TestClient(app)
+    r = c.post("/model/promote", json={"name": "x", "kind": "lightgbm", "recipe": {"features": []}})
+    assert r.status_code == 200 and r.json()["ok"] is False
+
+
+def test_promote_starts_and_status(monkeypatch):
+    import guanlan_v2.workflow.api as wapi
+    monkeypatch.setattr(wapi, "_run_promote_subprocess", lambda spec: None)   # 桩掉子进程
+    from fastapi.testclient import TestClient
+    from guanlan_v2.server import app
+    c = TestClient(app)
+    r = c.post("/model/promote",
+               json={"name": "x", "kind": "lightgbm",
+                     "recipe": {"features": ["delay(close,5)"], "universe": "csi300"}})
+    j = r.json()
+    assert j["ok"] is True and j["variant_id"].startswith("m_")
+    s = c.get("/model/promote/status").json()
+    assert s["ok"] is True and "state" in s

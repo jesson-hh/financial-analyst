@@ -23,7 +23,9 @@ import math
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Union
 
-from fastapi import APIRouter
+import threading as _threading
+
+from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -36,6 +38,53 @@ _LABEL_FWD_TOKENS = {"", "ic", "fwd_ret", "fwd", "forward", "forward_return", "r
 
 _PREVIEW_CAP = 50          # preview_rows 上限
 _IC_DECAY_HORIZONS = (1, 3, 5, 10, 20)    # #2 截面 IC 衰减谱:因子对 1/3/5/10/20 日前向收益的 rank-IC 谱(判最优持有期)
+
+# ── P6 工作流模型「存入模型库」异步子进程状态机(镜像 screen/api.py _MODEL_STATE) ──────
+_PROMOTE_LOCK = _threading.Lock()
+_PROMOTE_STATE: Dict[str, Any] = {"running": False, "phase": "idle", "label": "", "step": 0,
+    "total": 3, "started_at": None, "ended_at": None, "ok": None, "error": None,
+    "variant_id": None, "lines": []}
+
+
+def _promote_public_state() -> Dict[str, Any]:
+    import time as _t
+    with _PROMOTE_LOCK:
+        s = dict(_PROMOTE_STATE); s["lines"] = list(s.get("lines") or [])[-12:]
+    if s.get("started_at"):
+        s["elapsed_sec"] = int((s.get("ended_at") or _t.time()) - s["started_at"])
+    return s
+
+
+def _run_promote_subprocess(spec: Dict[str, Any]) -> None:
+    import os, sys as _sys, time as _t, json as _json, tempfile, subprocess
+    from pathlib import Path as _P
+    rc, err = None, None
+    try:
+        repo = _P(__file__).resolve().parents[2]
+        sf = _P(tempfile.gettempdir()) / f"mpromote_{spec['variant_id']}.json"
+        sf.write_text(_json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+        cmd = [_sys.executable, "-m", "guanlan_v2.strategy.compute.model_workflow", str(sf)]
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        proc = subprocess.Popen(cmd, cwd=str(repo), stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                                errors="replace", bufsize=1, env=env)
+        for raw in proc.stdout:
+            line = raw.rstrip("\r\n")
+            if not line:
+                continue
+            with _PROMOTE_LOCK:
+                _PROMOTE_STATE["lines"].append(line)
+                if "[model_promote]" in line:
+                    _PROMOTE_STATE["phase"], _PROMOTE_STATE["label"], _PROMOTE_STATE["step"] = \
+                        ("train", "生产重训中…", 2)
+        proc.wait(); rc = proc.returncode
+    except Exception as e:  # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+    finally:
+        with _PROMOTE_LOCK:
+            _PROMOTE_STATE.update({"running": False, "ended_at": _t.time(),
+                "ok": (rc == 0 and not err), "error": err or (None if rc == 0 else f"exit {rc}"),
+                "phase": "done", "step": 3})
 
 
 class FeatureBuildIn(BaseModel):
@@ -6000,5 +6049,34 @@ def build_workflow_router() -> APIRouter:
             for (n, e, c, d, s) in _FACTOR_CATALOG
         ]
         return JSONResponse({"ok": True, "n": len(factors), "cats": _FACTOR_CATS, "factors": factors})
+
+    # ── P6 工作流模型「存入模型库」端点 ──────────────────────────────────────────
+    @router.post("/model/promote")
+    def model_promote(body: dict = Body(default={})):
+        """工作流模型「存入模型库」:校验 recipe → 单飞抢锁 → 起子进程生产重训(全市场全窗口)
+        → 落 models/<vid>(source=workflow)。立即返回(异步)。"""
+        import time as _t, uuid, datetime
+        kind = str(body.get("kind") or "").strip()
+        recipe = dict(body.get("recipe") or {})
+        if not recipe.get("features"):
+            return JSONResponse({"ok": False, "reason": "recipe.features 为空"})
+        if kind not in ("lightgbm", "xgboost", "rf"):
+            return JSONResponse({"ok": False, "reason": f"kind '{kind}' 首期不支持入库(树模型 lgbm/xgb/rf)"})
+        with _PROMOTE_LOCK:
+            if _PROMOTE_STATE["running"]:
+                return JSONResponse({"ok": False, "reason": "已有入库在跑", "state": _promote_public_state()})
+            vid = "m_" + uuid.uuid4().hex[:10]
+            _PROMOTE_STATE.update({"running": True, "phase": "starting", "label": "启动生产重训…",
+                "step": 0, "started_at": _t.time(), "ended_at": None, "ok": None, "error": None,
+                "variant_id": vid, "lines": []})
+        spec = {"variant_id": vid, "name": str(body.get("name") or "工作流模型"),
+                "kind": kind, "recipe": recipe,
+                "created": datetime.datetime.now().isoformat(timespec="seconds")}
+        _threading.Thread(target=lambda: _run_promote_subprocess(spec), daemon=True).start()
+        return JSONResponse({"ok": True, "started": True, "variant_id": vid, "state": _promote_public_state()})
+
+    @router.get("/model/promote/status")
+    def model_promote_status():
+        return JSONResponse({"ok": True, "state": _promote_public_state()})
 
     return router
