@@ -1268,7 +1268,9 @@ def build_screen_router() -> APIRouter:
         if not p.exists():
             return JSONResponse({"ok": False, "reason": "模型不存在"})
         df = pd.read_parquet(p)
-        last = df[df["date"] == df["date"].max()]
+        last = df[df["date"] == df["date"].max()] if "date" in df.columns and len(df) else df.iloc[0:0]
+        if last.empty:
+            return JSONResponse({"ok": False, "reason": "排名为空"})
         return JSONResponse({"ok": True, "date": str(last["date"].iloc[0]),
             "rows": [{"code": str(r.code), "score": float(r.lgb_pct)} for r in last.itertuples()]})
 
