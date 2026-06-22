@@ -15,6 +15,10 @@ FACTOR_VOCAB = (
     "字段(财务,季频·公告日PIT对齐): roe(净资产收益率) roa(总资产收益率) net_margin(净利率) "
     "rev_yoy(营收同比) np_yoy(净利同比) debt_ratio(资产负债率) eps(每股收益,元) "
     "net_income revenue total_equity cfo(净利/营收/净资产/经营现金流,元,原始量) | "
+    "字段(资金面,day频·EOD PIT·缺则NaN): main_net_amount main_net_pct "
+    "super_large_net_amount super_large_net_pct large_net_amount large_net_pct "
+    "medium_net_amount medium_net_pct small_net_amount small_net_pct "
+    "(主力/超大/大/中/小单净流入额与净占比) | "
     "字段(参照,壳注入,选配): idx_ret=对标宽基指数日收益(如沪深300) ref_ret=龙头股日收益 | "
     "算子: rank ts_rank delta delay ts_mean ts_sum ts_max ts_min ts_argmax ts_argmin "
     "stddev correlation(x,y,n) covariance regbeta(y,x,n)=滚动β(cov/var,共振/跟随弹性) "
@@ -42,6 +46,9 @@ _FIELD_NAMES = frozenset({
     "rsi_14", "macd_signal", "amihud_20", "mom_20", "mom_60", "mom_120",
     "roe", "roa", "net_margin", "rev_yoy", "np_yoy", "debt_ratio", "eps",
     "net_income", "revenue", "total_equity", "cfo",
+    "main_net_amount", "main_net_pct", "super_large_net_amount", "super_large_net_pct",
+    "large_net_amount", "large_net_pct", "medium_net_amount", "medium_net_pct",
+    "small_net_amount", "small_net_pct",  # 资金面(东财五档·day频·EOD PIT)
     "idx_ret", "ref_ret", "benchmark_close",  # 壳注入(选配)
 })
 _KNOWN_NAMES = _OP_NAMES | _FIELD_NAMES
