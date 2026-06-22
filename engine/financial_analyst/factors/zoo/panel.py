@@ -220,7 +220,11 @@ def _load_fund_flow_df(codes, start, end, parquet_root=None):
         return pd.DataFrame()
     try:
         df = pd.read_parquet(path)
-    except Exception:
+    except Exception as e:
+        import logging
+        logging.getLogger("financial_analyst.zoo").warning(
+            "fund-flow parquet unreadable (skipping, NaN columns): %s", e,
+        )
         return pd.DataFrame()
     if "instrument" not in df.columns or "trade_date" not in df.columns:
         return pd.DataFrame()

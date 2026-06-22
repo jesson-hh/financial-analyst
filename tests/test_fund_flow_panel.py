@@ -104,6 +104,14 @@ def test_load_missing_file_returns_empty(tmp_path):
     assert len(out) == 0
 
 
+def test_load_missing_instrument_column_returns_empty(tmp_path):
+    from financial_analyst.factors.zoo.panel import _load_fund_flow_df
+    raw = pd.DataFrame({"code": ["600000"], "trade_date": pd.to_datetime(["2026-06-17"]), "main_net_pct": [1.0]})
+    raw.to_parquet(tmp_path / "eastmoney_stock_fund_flow_daily.parquet")
+    out = _load_fund_flow_df(["SH600000"], None, None, parquet_root=tmp_path)
+    assert len(out) == 0
+
+
 def test_merge_fund_flow_end_to_end(tmp_path):
     from financial_analyst.factors.zoo.panel import _merge_fund_flow
     raw = pd.DataFrame({
