@@ -16,6 +16,22 @@ def _normalize_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+MIN_CROSS_SECTION = 100      # 最新截面最少票数(沿用 model_health 的 <100 诚实缺席阈值)
+_RANKING_REQUIRED = ("code", "date", "lgb_pct")
+
+
+def validate_ranking(df) -> None:
+    """入库前校验排名契约;不合格抛 ValueError(诚实失败,不冒充可选股模型)。"""
+    if df is None or not hasattr(df, "columns"):
+        raise ValueError("ranking 非 DataFrame")
+    missing = [c for c in _RANKING_REQUIRED if c not in df.columns]
+    if missing:
+        raise ValueError(f"ranking 缺列: {missing}(必含 lgb_pct)")
+    last = df[df["date"] == df["date"].max()]
+    if int(last["code"].nunique()) < MIN_CROSS_SECTION:
+        raise ValueError(f"最新截面票数 {last['code'].nunique()} < {MIN_CROSS_SECTION}(截面太薄)")
+
+
 def _dir(vid): return MODELS_DIR / vid
 def variant_ranking_path(vid): return _dir(vid) / RANKING_FILE
 
@@ -28,6 +44,7 @@ def variant_meta(vid) -> Dict[str, Any]:
 
 
 def save_variant(vid, ranking_df, meta) -> None:
+    validate_ranking(ranking_df)
     d = _dir(vid); d.mkdir(parents=True, exist_ok=True)
     pq = variant_ranking_path(vid); tmp = str(pq) + ".tmp"
     ranking_df.to_parquet(tmp, index=False); os.replace(tmp, str(pq))

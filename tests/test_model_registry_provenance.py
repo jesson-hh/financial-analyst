@@ -39,3 +39,18 @@ def test_list_variants_normalizes_old_meta(tmp_path, monkeypatch):
     rows = reg.list_variants()
     old = [r for r in rows if r["id"] == "m_old"][0]
     assert old["source"] == "workshop" and old["kind"] == "v4-lgb"
+
+
+def test_validate_ranking_rejects_missing_columns(tmp_path, monkeypatch):
+    monkeypatch.setattr(reg, "MODELS_DIR", tmp_path)
+    bad = pd.DataFrame({"code": ["SZ300001"], "date": ["2026-06-19"]})  # 缺 lgb_pct
+    with pytest.raises(ValueError, match="lgb_pct"):
+        reg.save_variant("m_bad", bad, {"id": "m_bad", "name": "坏"})
+
+
+def test_validate_ranking_rejects_thin_cross_section(tmp_path, monkeypatch):
+    monkeypatch.setattr(reg, "MODELS_DIR", tmp_path)
+    thin = pd.DataFrame({"code": ["SZ300001", "SZ300002"], "date": "2026-06-19",
+                         "lgb_pct": [0.1, 0.9]})  # 截面仅 2 票 < 阈值
+    with pytest.raises(ValueError, match="截面"):
+        reg.save_variant("m_thin", thin, {"id": "m_thin", "name": "薄"})
