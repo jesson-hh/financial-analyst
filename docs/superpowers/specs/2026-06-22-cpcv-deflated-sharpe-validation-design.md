@@ -1,7 +1,7 @@
 # CPCV + Deflated Sharpe 验证层 设计(MVP-A)
 
 - **日期**:2026-06-22
-- **状态**:设计已与用户逐节确认,待用户复审 spec → 转 writing-plans
+- **状态**:② 已实现并真机验证(feat/cpcv-validation);① 据此 reconcile(**见 §12,口径优先于上文 v4-only 措辞**)→ 转 writing-plans
 - **关联**:`[[v4-model-workshop]]`、`[[backtest-cards-design]]`、`[[quant-wiki-gap-audit]]`;记忆 `rl-for-stock-selection-research`(本功能是 RL 研究里"GPU/算力先用于严格验证"结论的第一步落地)
 - **背景研究**:工作流 run `wf_49c55fce-0c7`(RL 研究)、`wf_d146fcaf-b1b`(GPU 重估)
 
@@ -182,3 +182,20 @@ v4.train_predict_core(provider, feature_cols, extra_panel,
 3. 模型工坊「严格验证」按钮异步跑通 + 轮询进度;每变体显示 DSR/PBO 徽章;TopBar 体检卡显示分布。
 4. 全部单测(第 9 节)绿;`build_v4` 零变化守卫绿。
 5. 红线核验:purge 覆盖 5 日窗(单测证)、产物只读、不碰 `/screen` 信号、诚实缺席。
+
+---
+
+## 12. 与 ②(统一注册表)的衔接 —— 最新口径,优先于上文 v4-only 措辞
+
+② 已实现(`feat/cpcv-validation`):`model_registry` 带 provenance(`source/kind/recipe/retrainable`),工作流模型经 `/model/promote` 入库,`load_v4_ranking` 变体加载补齐 V4_COLUMNS。① 据此从"只验 v4"升级为"**验证任意 registry 模型**":
+
+- **验证对象** = 任意 registry 模型(prod v4 + 工坊 v4 变体 + 工作流 lightgbm/xgboost/rf),由 `model_id` 指定。
+- **两档边界 = `retrainable`(② 写入 meta):**
+  - **快速档**:适用任何**有冻结快照**的模型(读 `model_score_history`/`model_vintage_ic`)。现状:只有 prod v4 在 regen 时 `append_score_history` 积累快照;变体/工作流模型暂无逐日快照 → 对它们 `ready=False`(诚实"未积累快照",非 bug;让 regen 给选中变体也积累快照=挂账,不在 ①)。
+  - **严格档**:适用 `retrainable=True`(② 保证有 `recipe`)的模型。retrain 不再只 v4,改为 **`retrain_core(kind, recipe, train_mask, test_mask)` 按 kind 分派**:
+    - `kind="v4-lgb"`(prod/工坊变体)→ 抽出的 `v4.train_predict_core`(§5/§10)。
+    - `kind ∈ {lightgbm,xgboost,rf}`(工作流模型)→ 复用 `workflow.api._materialize_xy`(recipe→`ModelTrainIn`)+ `_build_model`,在 train_mask fit、test_mask predict → lgb_pct;**与 `compute/model_workflow.train_promote` 的 fit/predict 抽成共享 helper,避免两份**。
+    - `retrainable=False`(老变体无 recipe)→ 严格档诚实拒绝(`note="无 recipe,不可重训"`),只给快速档。
+- **端点**:`POST /model/validate {id, tier:"quick"|"strict", n_groups, k, purge, embargo}` + `GET /model/validate/status`;`id` 默认 prod。
+- **不变**:purge=5/embargo=5、N=6/k=2、指标(多头超额夏普+多空价差+RankIC+DSR+PBO)、DSR 试验数=registry 变体数、全部红线(PIT/产物只读/不碰选股算法/`build_v4` 零变化)沿用上文。
+- **并发**:① 实施在基于 `feat/cpcv-validation` 的独立 git worktree 做,不占主工作树(让给并发 dl-ensemble 会话)。
