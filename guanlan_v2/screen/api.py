@@ -848,8 +848,12 @@ def _screen_via_v4(body: "ScreenIn"):
     try:
         import json as _json
         from guanlan_v2.strategy.paths import V4_RANKING_PARQUET as _V4P
-        _b3p = _V4P.parent / "v4_b3_provenance.json"
-        _b3prov = _json.loads(_b3p.read_text(encoding="utf-8")) if _b3p.exists() else None
+        _dlp = _V4P.parent / "v4_dl_provenance.json"
+        if _dlp.exists():
+            _b3prov = _json.loads(_dlp.read_text(encoding="utf-8"))
+        else:   # 回退旧单源 FinCast provenance(过渡期 / regen 未重跑)
+            _b3p = _V4P.parent / "v4_b3_provenance.json"
+            _b3prov = _json.loads(_b3p.read_text(encoding="utf-8")) if _b3p.exists() else None
     except Exception:  # noqa: BLE001
         _b3prov = None
 
