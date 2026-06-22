@@ -521,19 +521,37 @@ function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, mod
               变体 · 纯 LGB{uns.length ? ' ⚠' + uns.length : ''}</span>;
           })()}
           {!isVariant && result.v4_provenance && (() => {
-            const p = result.v4_provenance;       // #7 v4 排名口径:纯 LGB vs LGB+FinCast(B3 集成),诚实显形
+            const p = result.v4_provenance;   // 多源 {active,w_lgb,sources:[...]} 或旧单源 {active,w_fc,...}
+            // 新多源 provenance
+            if (Array.isArray(p.sources)) {
+              const act = p.sources.filter(s => s.active);
+              if (!act.length) {
+                const why = (p.sources[0] && p.sources[0].reason) || '无当日 DL 预测';
+                return <span className="mono" title={'排名口径:纯 LGB(' + why + ')。混入 DL 需离线产出当日预测 parquet。'}
+                  style={{ fontSize: 10, color: 'var(--ink-3)', border: '1px dashed var(--line)', borderRadius: 5, padding: '2px 7px' }}>v4 · 纯 LGB</span>;
+              }
+              const anyLa = act.some(s => s.lookahead === true);
+              const tip = '排名口径:LGB + DL 多源混合 · w_LGB=' + (+p.w_lgb).toFixed(2)
+                + act.map(s => ' + ' + s.model_id + ' w=' + (+s.weight).toFixed(2)
+                    + '(' + s.n_has + ' 只匹配'
+                    + (s.fc_icir_recent != null ? '·ICIR ' + (+s.fc_icir_recent).toFixed(3) : '')
+                    + (s.lookahead === true ? '·⚠前视' : '') + ')').join('')
+                + (anyLa ? ' · ⚠ 含模型 look-ahead' : '');
+              return <span className="mono" title={tip}
+                style={{ fontSize: 10, color: 'var(--paper)', background: 'var(--yin)', borderRadius: 5, padding: '2px 7px' }}>
+                v4 · LGB+{act.map(s => s.model_id + '(' + (+s.weight).toFixed(2) + ')').join('+')}{anyLa ? ' ⚠前视' : ''}</span>;
+            }
+            // 回退:旧单源 FinCast provenance
             const la = p.lookahead === true;
             if (p.active) {
               const tip = '排名口径:LGB + FinCast 混合(B3 集成)· w_LGB=' + (+p.w_lgb).toFixed(2) + ' + w_FC=' + (+p.w_fc).toFixed(2)
                 + ' · ' + p.n_has_fc + '/' + p.n_total + ' 只匹配 FinCast 预测'
-                + (p.fc_icir_recent != null ? ' · FinCast 近期 ICIR ' + (+p.fc_icir_recent).toFixed(3) + '(权重按此自适应)' : '')
-                + (la ? ' · ⚠ 该日含模型 look-ahead(≤ckpt训练截止)' : ' · 零样本,无训练窗 look-ahead')
-                + (p.eval_date ? ' · 预测日 ' + p.eval_date : '');
+                + (la ? ' · ⚠ 该日含模型 look-ahead' : '');
               return <span className="mono" title={tip}
                 style={{ fontSize: 10, color: 'var(--paper)', background: 'var(--yin)', borderRadius: 5, padding: '2px 7px' }}>
                 v4 · LGB+FinCast w<sub style={{ fontSize: 7 }}>FC</sub>={(+p.w_fc).toFixed(2)}{la ? ' ⚠前视' : ''}</span>;
             }
-            return <span className="mono" title={'排名口径:纯 LGB(' + (p.reason || '无当日 FinCast 预测') + ')。混入 FinCast 需离线产出当日预测 parquet。'}
+            return <span className="mono" title={'排名口径:纯 LGB(' + (p.reason || '无当日 FinCast 预测') + ')'}
               style={{ fontSize: 10, color: 'var(--ink-3)', border: '1px dashed var(--line)', borderRadius: 5, padding: '2px 7px' }}>v4 · 纯 LGB</span>;
           })()}
           {result.panel_ok === false && (
