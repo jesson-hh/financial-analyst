@@ -29,6 +29,16 @@ _FINANCIAL_FIELDS = (
     "debt_ratio", "eps", "net_income", "revenue", "total_equity", "cfo",
 )
 
+# 资金面:东财五档日频净流入(主力/超大/大/中/小单的净额与净占比)。
+# day 频 EOD 可见(visible_ts = trade_date 23:59:59),与 volume/amount 同口径放置。
+_FUND_FLOW_FIELDS = (
+    "main_net_amount", "main_net_pct",
+    "super_large_net_amount", "super_large_net_pct",
+    "large_net_amount", "large_net_pct",
+    "medium_net_amount", "medium_net_pct",
+    "small_net_amount", "small_net_pct",
+)
+
 
 def _merge_daily_basic(panel: pd.DataFrame, loader, codes: list, start: str, end: str) -> None:
     """Merge each code's daily_basic fields onto the (datetime, code) panel in place.
@@ -168,6 +178,27 @@ def _merge_financials(panel: pd.DataFrame, loader, codes: list, start: str, end:
     for col in _FINANCIAL_FIELDS:
         if col in fin_all.columns:
             panel[col] = fin_all[col].reindex(panel.index)
+
+
+def _apply_fund_flow(panel: pd.DataFrame, ff_df) -> None:
+    """把长格式东财资金流 ``ff_df`` 精确合并到 (datetime, code) 面板,IN PLACE。
+
+    精确 (trade_date, code) 匹配 —— **不 ffill**(资金流是当日流量,缺失日保持
+    NaN,绝不沿用陈旧流量)。无论 ff_df 是否为空,10 个 ``_FUND_FLOW_FIELDS`` 列
+    都会建出(未匹配处 NaN),使 DSL 因子求值为 NaN 而非 NameError。PIT:数据当日
+    EOD 可见,与 volume/amount 放置口径一致,不看未来。"""
+    for col in _FUND_FLOW_FIELDS:
+        panel[col] = np.nan
+    if ff_df is None or len(ff_df) == 0:
+        return
+    ff = ff_df.copy()
+    ff["__dt"] = pd.to_datetime(ff["trade_date"])
+    ff = ff.set_index(["__dt", "code"])
+    ff.index = ff.index.set_names(["datetime", "code"])
+    ff = ff[~ff.index.duplicated(keep="last")]
+    for col in _FUND_FLOW_FIELDS:
+        if col in ff.columns:
+            panel[col] = ff[col].reindex(panel.index)
 
 
 class PanelData:
