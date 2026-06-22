@@ -26,3 +26,15 @@ def test_train_promote_produces_ranking_and_saves(tmp_path, monkeypatch):
     assert set(["code", "date", "lgb_pct"]).issubset(rank.columns)
     assert rank["code"].nunique() >= 100
     assert rank["lgb_pct"].between(0, 1).all()
+
+
+def test_train_promote_rejects_non_tree_kind():
+    from guanlan_v2.strategy.compute import model_workflow as mw
+    out = mw.train_promote({"variant_id": "x", "kind": "svm", "recipe": {"features": ["a"]}})
+    assert out["ok"] is False and "svm" in out["reason"]
+
+
+def test_train_promote_rejects_empty_features():
+    from guanlan_v2.strategy.compute import model_workflow as mw
+    out = mw.train_promote({"variant_id": "x", "kind": "lightgbm", "recipe": {"features": []}})
+    assert out["ok"] is False
