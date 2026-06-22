@@ -131,3 +131,13 @@ def _holdout_oos_ic(kind, params, fe_df, label_s, fwd_days=5, frac=0.2):
         return round(float(np.mean(ics)), 4) if ics else None
     except Exception:  # noqa: BLE001
         return None
+
+
+if __name__ == "__main__":   # python -m guanlan_v2.strategy.compute.model_workflow <spec.json>
+    import json, sys
+    spec = json.loads(open(sys.argv[1], encoding="utf-8").read())
+    print(f"[model_promote] variant={spec['variant_id']} kind={spec.get('kind')} ...", flush=True)
+    r = train_promote(spec)
+    print(f"[model_promote] done ok={r.get('ok')} oos_ic={r.get('oos_ic')} reason={r.get('reason')}",
+          flush=True)
+    sys.exit(0 if r.get("ok") else 1)     # 失败非零退出码(供父进程状态机判 ok)
