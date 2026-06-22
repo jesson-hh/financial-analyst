@@ -6061,7 +6061,7 @@ def build_workflow_router() -> APIRouter:
         if not recipe.get("features"):
             return JSONResponse({"ok": False, "reason": "recipe.features 为空"})
         if kind not in ("lightgbm", "xgboost", "rf"):
-            return JSONResponse({"ok": False, "reason": f"kind '{kind}' 首期不支持入库(树模型 lgbm/xgb/rf)"})
+            return JSONResponse({"ok": False, "reason": f"kind '{kind}' 首期不支持入库(树模型:lightgbm/xgboost/rf)"})
         with _PROMOTE_LOCK:
             if _PROMOTE_STATE["running"]:
                 return JSONResponse({"ok": False, "reason": "已有入库在跑", "state": _promote_public_state()})

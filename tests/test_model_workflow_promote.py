@@ -60,4 +60,6 @@ def test_promote_starts_and_status(monkeypatch):
     j = r.json()
     assert j["ok"] is True and j["variant_id"].startswith("m_")
     s = c.get("/model/promote/status").json()
-    assert s["ok"] is True and "state" in s
+    assert s["ok"] is True
+    assert s["state"]["variant_id"] == j["variant_id"]   # 状态机真的记录了本次入库
+    assert s["state"]["running"] is True                  # stub 不重置 → 仍在跑
