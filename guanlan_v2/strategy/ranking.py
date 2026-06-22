@@ -32,6 +32,25 @@ def ts_to_qlib(ts_code: str) -> str:
     return ts
 
 
+def _ensure_v4_columns(df):
+    """变体排名补齐 V4_COLUMNS:工作流模型只产 code/date/lgb_pct。
+    缺 v4_total/v4_layer → NaN/None(→ /screen 自然走 lgb_pct-only 分支,诚实按模型分位选股,不冒充五维评级);
+    缺 lgb_rank → 按 lgb_pct 降序派生;缺 lgb_score → NaN。已有列不动(v4 变体本就齐全 → no-op)。"""
+    import pandas as pd
+    if "lgb_pct" not in df.columns:
+        return df  # 结构异常 → 原样交给消费方/上游校验
+    out = df.copy()
+    if "lgb_rank" not in out.columns:
+        out["lgb_rank"] = out["lgb_pct"].rank(ascending=False, method="first").astype(int)
+    if "lgb_score" not in out.columns:
+        out["lgb_score"] = float("nan")
+    if "v4_total" not in out.columns:
+        out["v4_total"] = float("nan")
+    if "v4_layer" not in out.columns:
+        out["v4_layer"] = None
+    return out
+
+
 def load_v4_ranking(model_id=None):
     """读 v4 排名;model_id 缺省/"prod" → 生产老路径(vendored 全市场);否则
     models/<id>/v4_ranking.parquet。缺文件 → FileNotFoundError(诚实,不造数据)。"""
@@ -43,7 +62,7 @@ def load_v4_ranking(model_id=None):
         p = variant_ranking_path(model_id)
         if not p.exists():
             raise FileNotFoundError(f"v4 变体产物缺失: {p}")
-        return pd.read_parquet(p)
+        return _ensure_v4_columns(pd.read_parquet(p))
     if not V4_RANKING_PARQUET.exists():
         raise FileNotFoundError(
             f"v4 排名产物缺失: {V4_RANKING_PARQUET}(需在有 qlib 环境跑 v4_ranking 刷新)"

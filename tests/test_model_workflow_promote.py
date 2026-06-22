@@ -79,6 +79,23 @@ def test_screen_models_returns_provenance(tmp_path, monkeypatch):
     assert wf["source"] == "workflow" and wf["kind"] == "rf" and wf["retrainable"] is True
 
 
+def test_workflow_variant_ranking_padded_for_screen(tmp_path, monkeypatch):
+    # 工作流模型只产 3 列(code/date/lgb_pct);load_v4_ranking 须补齐 V4_COLUMNS,
+    # 使 /screen 的 _screen_via_v4 不再因缺 v4_total/lgb_rank 崩到 toy 回退。
+    from guanlan_v2.screen import model_registry as reg
+    from guanlan_v2.strategy import ranking as R
+    monkeypatch.setattr(reg, "MODELS_DIR", tmp_path)
+    df = pd.DataFrame({"code": [f"SZ{300000+i:06d}" for i in range(120)],
+                       "date": "2026-06-19", "lgb_pct": [i/119 for i in range(120)]})
+    reg.save_variant("m_wf3", df, {"id": "m_wf3", "name": "wf", "source": "workflow",
+                                   "kind": "lightgbm", "recipe": {"features": ["x"]}, "retrainable": True})
+    out = R.load_v4_ranking(model_id="m_wf3")
+    for c in R.V4_COLUMNS:
+        assert c in out.columns                  # 契约列补齐
+    assert out["v4_total"].isna().all()          # 工作流模型无五维 → 全 NaN(→ lgb_pct 分支)
+    assert out["lgb_rank"].notna().all() and int(out["lgb_rank"].min()) == 1  # 由 lgb_pct 派生
+
+
 def test_model_ranking_endpoint(tmp_path, monkeypatch):
     from guanlan_v2.screen import model_registry as reg
     monkeypatch.setattr(reg, "MODELS_DIR", tmp_path)
