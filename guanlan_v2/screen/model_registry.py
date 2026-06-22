@@ -27,9 +27,12 @@ def validate_ranking(df) -> None:
     missing = [c for c in _RANKING_REQUIRED if c not in df.columns]
     if missing:
         raise ValueError(f"ranking 缺列: {missing}(必含 lgb_pct)")
+    if len(df) == 0:
+        raise ValueError("ranking 为空(无行)")
     last = df[df["date"] == df["date"].max()]
-    if int(last["code"].nunique()) < MIN_CROSS_SECTION:
-        raise ValueError(f"最新截面票数 {last['code'].nunique()} < {MIN_CROSS_SECTION}(截面太薄)")
+    n = int(last["code"].nunique())
+    if n < MIN_CROSS_SECTION:
+        raise ValueError(f"最新截面票数 {n} < {MIN_CROSS_SECTION}(截面太薄)")
 
 
 def _dir(vid): return MODELS_DIR / vid
