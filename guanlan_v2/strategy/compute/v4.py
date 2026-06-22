@@ -227,6 +227,7 @@ def build_v4(provider_uri: str, start: str = START_DEFAULT, end: str = "2026-06-
              codes: Optional[List[str]] = None, date_str: Optional[str] = None,
              health: Optional[dict] = None,
              fincast_path: Optional[str] = None, b3: Optional[dict] = None,
+             dl_sources: Optional[list] = None,
              feature_cols: Optional[List[str]] = None,
              extra_factor_panel: Optional["pd.DataFrame"] = None,
              holdout: Optional[dict] = None) -> pd.DataFrame:
@@ -272,18 +273,28 @@ def build_v4(provider_uri: str, start: str = START_DEFAULT, end: str = "2026-06-
     model = lgb.train(LGB_PARAMS, dt_train, num_boost_round=500)
     pred["score"] = model.predict(pred[mf].values)
 
-    # ─── #7 B3 集成:LGB + FinCast(离线 GPU 批算产出的 parquet,只读;有当日预测且匹配≥50→z-score
-    #     加权混合进 score,无则诚实退纯 LGB)。同 vendor/v4_ranking.py:195-273 口径。**命门**:本处只
-    #     pd.read_parquet,绝不跑 GPU 模型;build_v4 由 regen 离线再生时调用(非请求路径)。
-    #     fincast_path=None(默认)→ 整块跳过 = 与「FinCast 默认关」字节等价(向后兼容)。
-    if fincast_path:
+    # ─── #7 DL 集成:优先 dl_sources(多源新层)→ 否则回退 fincast_path(单源旧路)→ 都无则跳过纯 LGB。
+    #     LGB + DL 离线批算 parquet,只读;有当日预测且匹配≥50 → z-score 加权混合进 score。
+    #     **命门**:本处只 pd.read_parquet,绝不跑 GPU 模型;build_v4 由 regen 离线再生时调用(非请求路径)。
+    #     dl_sources=None & fincast_path=None(默认)→ 整块跳过 = 与旧版字节等价(向后兼容)。
+    if dl_sources:
+        try:
+            from guanlan_v2.strategy.compute.dl_ensemble import apply_dl_ensemble
+            _b3info = apply_dl_ensemble(pred, ld, dl_sources, data=data)
+            if b3 is not None:
+                b3.update(_b3info)
+            print(f"[v4] DL集成: {_b3info.get('reason')}", flush=True)
+        except Exception as _e:  # noqa: BLE001 — DL 集成异常绝不拖垮排名,退纯 LGB
+            if b3 is not None:
+                b3.update({"active": False, "reason": f"DL 集成异常退纯 LGB:{type(_e).__name__}: {_e}"})
+    elif fincast_path:
         try:
             from guanlan_v2.strategy.compute.v4_fincast import apply_fincast_ensemble
             _b3info = apply_fincast_ensemble(pred, ld, fincast_path, data=data)
             if b3 is not None:
                 b3.update(_b3info)
             print(f"[v4] B3: {_b3info.get('reason')}", flush=True)
-        except Exception as _e:  # noqa: BLE001 — B3 异常绝不拖垮排名,退纯 LGB
+        except Exception as _e:  # noqa: BLE001
             if b3 is not None:
                 b3.update({"active": False, "reason": f"B3 异常退纯 LGB:{type(_e).__name__}: {_e}"})
 

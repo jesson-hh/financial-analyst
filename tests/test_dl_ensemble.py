@@ -118,3 +118,10 @@ def test_apply_dl_ensemble_equiv_to_apply_fincast(tmp_path):
     apply_dl_ensemble(p2, pd.Timestamp("2026-03-10"),
                       [DLSource(model_id="fincast", path=path, weight_mode="fixed", fixed_w=DEFAULT_W_FC)])
     assert np.allclose(p1["score"].values, p2["score"].values, atol=1e-12)
+
+
+def test_build_v4_signature_has_dl_sources():
+    import inspect
+    from guanlan_v2.strategy.compute import v4
+    sig = inspect.signature(v4.build_v4)
+    assert "dl_sources" in sig.parameters
