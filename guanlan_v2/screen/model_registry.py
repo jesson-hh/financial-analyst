@@ -22,8 +22,9 @@ def variant_ranking_path(vid): return _dir(vid) / RANKING_FILE
 
 def variant_meta(vid) -> Dict[str, Any]:
     p = _dir(vid) / "meta.json"
-    raw = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
-    return _normalize_meta(raw) if raw else {}
+    if not p.exists():
+        return {}
+    return _normalize_meta(json.loads(p.read_text(encoding="utf-8")))
 
 
 def save_variant(vid, ranking_df, meta) -> None:
