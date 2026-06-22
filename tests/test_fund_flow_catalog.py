@@ -37,3 +37,10 @@ def test_fund_flow_exprs_valid_and_whitelisted():
 def test_fund_flow_in_screen_family_order():
     from guanlan_v2.screen.catalog import FAMILY_ORDER
     assert "资金面" in FAMILY_ORDER
+
+
+def test_fund_flow_factors_surface_in_screen_catalog():
+    # 锁住 _KEEP_FAMILIES 闸:6 个资金面因子真出现在选股页 FACTOR_DEFS(不止 FAMILY_ORDER 列名)。
+    from guanlan_v2.screen.catalog import FACTOR_DEFS
+    ff = [v for v in FACTOR_DEFS.values() if v.get("family") == "资金面"]
+    assert len(ff) == 6
