@@ -77,3 +77,15 @@ def test_screen_models_returns_provenance(tmp_path, monkeypatch):
     j = TestClient(app).get("/screen/models").json()
     wf = [v for v in j["variants"] if v["id"] == "m_wf2"][0]
     assert wf["source"] == "workflow" and wf["kind"] == "rf" and wf["retrainable"] is True
+
+
+def test_model_ranking_endpoint(tmp_path, monkeypatch):
+    from guanlan_v2.screen import model_registry as reg
+    monkeypatch.setattr(reg, "MODELS_DIR", tmp_path)
+    df = pd.DataFrame({"code": [f"SZ{300000+i:06d}" for i in range(120)],
+                       "date": "2026-06-19", "lgb_pct": [i/119 for i in range(120)]})
+    reg.save_variant("m_r1", df, {"id": "m_r1", "name": "r"})
+    from fastapi.testclient import TestClient
+    from guanlan_v2.server import app
+    j = TestClient(app).get("/screen/model/ranking?id=m_r1").json()
+    assert j["ok"] is True and len(j["rows"]) == 120 and "score" in j["rows"][0]

@@ -1259,6 +1259,19 @@ def build_screen_router() -> APIRouter:
         from guanlan_v2.screen.model_registry import list_variants
         return JSONResponse({"ok": True, "variants": list_variants()})
 
+    @router.get("/model/ranking")
+    def screen_model_ranking(id: str):
+        """某 registry 模型最新截面 (code→lgb_pct),供工作流 model 节点下游求值/回测。"""
+        import pandas as pd
+        from guanlan_v2.screen.model_registry import variant_ranking_path
+        p = variant_ranking_path(id)
+        if not p.exists():
+            return JSONResponse({"ok": False, "reason": "模型不存在"})
+        df = pd.read_parquet(p)
+        last = df[df["date"] == df["date"].max()]
+        return JSONResponse({"ok": True, "date": str(last["date"].iloc[0]),
+            "rows": [{"code": str(r.code), "score": float(r.lgb_pct)} for r in last.itertuples()]})
+
     @router.get("/model/status")
     def screen_model_status():
         return JSONResponse({"ok": True, "state": _model_public_state()})
