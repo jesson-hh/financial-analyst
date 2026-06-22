@@ -215,6 +215,8 @@ function ModelWorkshop({ API, models, reloadModels, flash, onPick, onClose }) {
             <div style={{ flex: 1, minWidth: 0, cursor: 'pointer' }} onClick={() => { onPick && onPick(m.id); onClose && onClose(); }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                 <span className="serif" style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>{m.name || m.id}</span>
+                <span className="mono" style={{ fontSize: 8.5, color: 'var(--paper)', background: 'var(--ink-3)', borderRadius: 4, padding: '0 4px', flexShrink: 0 }}>{m.source === 'workflow' ? '来自工作流' : '本工坊'}</span>
+                {m.kind && m.kind !== 'v4-lgb' && <span className="mono" style={{ fontSize: 8.5, color: 'var(--paper)', background: 'var(--ink-3)', borderRadius: 4, padding: '0 4px', flexShrink: 0 }}>{m.kind}</span>}
                 {(m.unsupported_factors && m.unsupported_factors.length > 0) && (
                   <span className="mono" title={'这些因子无法求值,未参与训练:' + m.unsupported_factors.join(', ')}
                     style={{ fontSize: 8.5, color: 'var(--paper)', background: 'var(--yin)', borderRadius: 4, padding: '0 4px', marginLeft: 4, flexShrink: 0 }}>⚠ {m.unsupported_factors.length} 未用</span>
@@ -594,9 +596,11 @@ function Seg({ value, opts, onChange }) {
 }
 function RailSection({ label, hint, children }) {
   return (
-    <div style={{ padding: '13px 14px', borderBottom: '1px solid var(--line-soft)' }}>
-      <div className="mono" style={{ fontSize: 9, letterSpacing: '.14em', color: 'var(--ink-3)', marginBottom: 11, display: 'flex', justifyContent: 'space-between' }}>
-        <span>{label}</span>{hint && <span style={{ color: 'var(--ink-3)', opacity: 0.7 }}>{hint}</span>}
+    <div style={{ padding: '14px 14px 13px', borderBottom: '1px solid var(--line)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+        <span style={{ width: 3, height: 12, background: 'var(--yin)', borderRadius: 1, flexShrink: 0 }} />
+        <span className="serif" style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--ink)', letterSpacing: '.02em' }}>{label}</span>
+        {hint && <span className="mono" style={{ marginLeft: 'auto', fontSize: 9, color: 'var(--ink-3)', letterSpacing: '.04em' }}>{hint}</span>}
       </div>
       {children}
     </div>
@@ -907,6 +911,15 @@ function Row({ x, rank, accent, chosen, pctW, open, onToggle }) {
   const reason = x.excl && x.excl.length ? x.excl : (x.benchReason ? [x.benchReason] : []);
   const hasViews = x.views && x.views.length;
   const canExpand = hasViews;
+  const _ML = { mainline: ['主线', 'var(--yin)'], revival: ['二波', 'var(--zhu)'], initiation: ['启动', 'var(--jin)'], decay: ['退潮', 'var(--dai)'], cold: ['冷门', 'var(--ink-3)'] };
+  const _VR = { distr: '派发', super_distr: '超派', tail_surge: '尾盘冲', bounce: '反弹' };
+  const ml = (s.mainline && s.mainline !== 'neutral') ? (_ML[s.mainline] || [s.mainline, 'var(--ink-3)']) : null;
+  const _sub = [];
+  if (s.v4_total != null) _sub.push('v4 ' + (s.v4_total > 0 ? '+' : '') + s.v4_total);
+  if (s.v4_layer) _sub.push(s.v4_layer);
+  if (s.lgb_rank != null) _sub.push('LGB#' + s.lgb_rank);
+  if (s.vol_regime && _VR[s.vol_regime]) _sub.push(_VR[s.vol_regime]);
+  const subText = _sub.join(' · ');
   return (
     <>
       <div className="hover-row" onClick={canExpand ? onToggle : undefined} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 18px', borderBottom: open ? 'none' : '1px solid var(--line-soft)', opacity: chosen ? 1 : 0.5, cursor: canExpand ? 'pointer' : 'default' }}>
@@ -924,31 +937,19 @@ function Row({ x, rank, accent, chosen, pctW, open, onToggle }) {
             {s.limit === -1 && <span className="mono" title="排名日触跌停(板别阈值;开「剔除涨跌停」会剔)" style={{ fontSize: 8, color: 'var(--paper)', background: 'var(--dai)', borderRadius: 3, padding: '0 3px' }}>跌停</span>}
             {s.halt && <span className="mono" title="排名日无成交 bar(停牌或数据未入库)" style={{ fontSize: 8, color: 'var(--ink-2)', border: '1px solid var(--line)', borderRadius: 3, padding: '0 3px' }}>无成交</span>}
             {s.newish && <span className="mono" title="上市 < 60 个交易日(窗口口径)" style={{ fontSize: 8, color: 'var(--jin)', border: '1px solid var(--line)', borderRadius: 3, padding: '0 3px' }}>次新</span>}
-            {reason.map(r => <span key={r} className="mono" style={{ fontSize: 8, color: 'var(--ink-3)', background: 'rgba(28,24,20,0.05)', borderRadius: 3, padding: '1px 5px' }}>{r}</span>)}
-            {s.v4_total != null && <span className="mono" title="v4 五维评级总分" style={{ fontSize: 8, color: 'var(--paper)', background: 'var(--dai)', borderRadius: 3, padding: '0 4px' }}>v4 {s.v4_total > 0 ? '+' : ''}{s.v4_total}</span>}
-            {s.v4_layer && <span className="mono" title="市值分层" style={{ fontSize: 8, color: 'var(--ink-2)', border: '1px solid var(--line)', borderRadius: 3, padding: '0 4px' }}>{s.v4_layer}</span>}
-            {s.lgb_rank != null && <span className="mono" title="LGB 全市场排名" style={{ fontSize: 8, color: 'var(--ink-3)' }}>LGB#{s.lgb_rank}</span>}
-            {s.mainline && s.mainline !== 'neutral' && (() => {
-              const ML = { mainline: ['主线', 'var(--yin)'], revival: ['二波', 'var(--zhu)'], initiation: ['启动', 'var(--jin)'], decay: ['退潮', 'var(--dai)'], cold: ['冷门', 'var(--ink-3)'] };
-              const m = ML[s.mainline] || [s.mainline, 'var(--ink-3)'];
-              return <span className="mono" title="L2 主线雷达 · 行业月级状态" style={{ fontSize: 8, color: 'var(--paper)', background: m[1], borderRadius: 3, padding: '0 4px' }}>{s.mainline_golden ? '★ ' : ''}{m[0]}</span>;
-            })()}
-            {s.vol_regime && (() => {
-              const VR = { distr: ['派发', 'var(--jin)'], super_distr: ['超派', 'var(--yin)'], tail_surge: ['尾盘冲', 'var(--jin)'], bounce: ['反弹', 'var(--zhu)'] };
-              const v = VR[s.vol_regime] || [s.vol_regime, 'var(--ink-3)'];
-              return <span className="mono" title="L3 量能状态 · R16 vol_regime" style={{ fontSize: 8, color: 'var(--paper)', background: v[1], borderRadius: 3, padding: '0 4px' }}>{v[0]}</span>;
-            })()}
             {s.rating && (
-              <span className="mono" title={'L5 评级 · ' + (s.pos_band ? s.pos_band.tier + ' ' + s.pos_band.lo + '-' + s.pos_band.hi + '%' : '')}
-                style={{ fontSize: 9, color: s.stars >= 4 ? 'var(--jin)' : 'var(--ink-3)', letterSpacing: '-1px', fontWeight: 600 }}>{s.rating}</span>
+              <span className="mono" title={'L5 评级 · ' + (s.pos_band ? s.pos_band.tier + ' ' + s.pos_band.lo + '-' + s.pos_band.hi + '%' : '')} style={{ fontSize: 10, color: s.stars >= 4 ? 'var(--jin)' : 'var(--ink-3)', letterSpacing: '-1px', fontWeight: 600 }}>{s.rating}</span>
             )}
-            {(s.shields || []).map(sh => {
-              const st = SHIELD_STYLE[sh.id] || [sh.name, 'var(--ink-3)'];
-              return <span key={sh.id} className="mono" title={'护盾 ' + sh.id + ' · ' + sh.text}
-                style={{ fontSize: 8, color: 'var(--paper)', background: st[1], borderRadius: 3, padding: '0 4px' }}>{sh.level === 'exception' ? '例外·' : ''}{st[0]}</span>;
-            })}
-            {hasViews && <span className="mono" title="点击展开 L4 九视角" style={{ fontSize: 8, color: 'var(--ink-3)', marginLeft: 'auto', flexShrink: 0 }}>九视角 {open ? '▴' : '▾'}</span>}
+            {ml && <span className="mono" title="L2 主线雷达 · 行业月级状态" style={{ fontSize: 8.5, color: ml[1], border: '1px solid ' + ml[1], borderRadius: 3, padding: '0 5px', flexShrink: 0 }}>{s.mainline_golden ? '★ ' : ''}{ml[0]}</span>}
+            {hasViews && <span className="mono" title="点击展开 L4 九视角" style={{ fontSize: 8.5, color: 'var(--ink-3)', marginLeft: 'auto', flexShrink: 0 }}>九视角 {open ? '▴' : '▾'}</span>}
           </div>
+          {(subText || (s.shields || []).length > 0 || reason.length > 0) && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginTop: 3, flexWrap: 'wrap' }}>
+              {subText && <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', letterSpacing: '.02em' }}>{subText}</span>}
+              {(s.shields || []).map(sh => { const stl = SHIELD_STYLE[sh.id] || [sh.name, 'var(--ink-3)']; return <span key={sh.id} className="mono" title={'护盾 ' + sh.id + ' · ' + sh.text} style={{ fontSize: 8, color: stl[1] }}>{sh.level === 'exception' ? '例外·' : ''}{stl[0]}</span>; })}
+              {reason.map(r => <span key={r} className="mono" style={{ fontSize: 8, color: 'var(--ink-3)' }}>{r}</span>)}
+            </div>
+          )}
         </div>
         <div style={{ width: 80, flexShrink: 0 }} className="mono"><span style={{ fontSize: 10, color: 'var(--ink-2)' }}>{s.ind}</span></div>
         <div style={{ width: pctW, flexShrink: 0 }}><PctBar pct={x.pct} color={accent} /></div>
