@@ -366,8 +366,15 @@ _FACTOR_CATALOG = [
     ("领先滞后方向", "correlation(returns,delay(idx_ret,1),20)-correlation(delay(returns,1),idx_ret,20)", "跟随", "正向", ">0 该股跟随大盘 / <0 领先大盘(Granger 方向代理;需对标指数)"),
     ("龙头跟随弹性", "regbeta(returns,ref_ret,20)", "跟随", "正向", "对龙头的滚动β(跟随幅度;需龙头代码)"),
     ("跟随稳定度", "-stddev(correlation(returns,delay(idx_ret,1),20),60)", "跟随", "正向", "跟随相关的波动越小越稳定(适合事件跟随;需对标指数)"),
+    # —— 资金面(东财五档日频净流入·截面 rank·方向为假设待实测IC验真) ——
+    ("主力净流入强度", "rank(ts_mean(main_net_pct,5))", "资金面", "正向", "近5日主力净占比均值,主力持续流入(方向假设,IC验真)"),
+    ("超大单倾向", "rank(ts_mean(super_large_net_pct,5))", "资金面", "正向", "近5日超大单净占比,机构/大资金方向(方向假设)"),
+    ("主力净流入动量", "rank(ts_sum(main_net_pct,10))", "资金面", "正向", "近10日累计主力净占比(方向假设)"),
+    ("连续净流入", "rank(ts_sum(sign(main_net_amount),10))", "资金面", "正向", "近10日主力净流入天数(sign 计净流入日;方向假设)"),
+    ("资金集中度", "rank((super_large_net_pct+large_net_pct)-(medium_net_pct+small_net_pct))", "资金面", "正向", "大资金净流入 减 中小单净流入(大资金主导;方向假设)"),
+    ("散户出逃", "rank(-ts_mean(small_net_pct,5))", "资金面", "反向", "近5日小单净流出(常伴主力吸筹;方向假设)"),
 ]
-_FACTOR_CATS = ["动量反转", "估值", "财务质量", "成长", "波动率", "流动性", "技术", "规模", "情绪", "反弹", "消息面", "共振", "跟随"]
+_FACTOR_CATS = ["动量反转", "估值", "财务质量", "成长", "波动率", "流动性", "技术", "规模", "情绪", "反弹", "消息面", "共振", "跟随", "资金面"]
 
 
 class DataProbeIn(BaseModel):

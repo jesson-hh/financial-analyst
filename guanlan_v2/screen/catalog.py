@@ -6,7 +6,8 @@
   事件触发类(反弹/消息面,离散 0/1)不适合截面 z-复合,**不进**选股目录(workflow 事件研究节点用)。
 - **大盘因子**(共振/跟随族,表达式含 idx_ret)收进来:个股 vs 沪深300 的相关/β/R²/跟随,
   求值前由 `_panel_enrich` 注入 idx_ret 列(复用 workflow `_inject_market_refs`,真指数 399300.SZ)。
-  含 ref_ret(龙头)/indmean(行业列)的暂不收(选股页无龙头选择器/行业列)。
+  含 ref_ret(龙头)的暂不收(选股页无龙头选择器)；indmean 行业聚合可收，
+  因为 /screen/run 已加载 industry_loader。
 - 原 3 个幽灵因子(北向已停披/PEAD/消息面 expr=None,可勾选但无效=摆设)**直接除名**;
   旧配置里的这些 id 后端自然忽略、前端静态表兜底显示,不崩。
 - 每条: ``{short, family, expr, dir, ic, desc}``;**dir 恒 +1**(目录表达式已预定向,
@@ -24,10 +25,10 @@ from typing import Any, Dict
 # 选股目录收录的族(连续截面因子);事件类(反弹/消息面)排除。
 _KEEP_FAMILIES = {
     "动量反转", "估值", "财务质量", "成长", "波动率", "流动性",
-    "技术", "规模", "情绪", "共振", "跟随",
+    "技术", "规模", "情绪", "共振", "跟随", "资金面",
 }
 # 这些参照列选股页注入不了(无龙头选择器/面板无 industry 列),含之即跳过。
-_UNAVAILABLE_REFS = ("ref_ret", "indmean(")
+_UNAVAILABLE_REFS = ("ref_ret",)
 
 # legacy 两因子(保留旧 id,老保存配置/前端静态表兼容)。
 _LEGACY: Dict[str, Dict[str, Any]] = {
@@ -104,4 +105,4 @@ def refresh_factor_defs() -> int:
 
 # 族展示顺序(前端因子库分组用,/screen/factors 下发)。
 FAMILY_ORDER = ["动量反转", "技术", "估值", "财务质量", "成长", "波动率",
-                "流动性", "情绪", "规模", "共振", "跟随", "因子库"]
+                "流动性", "资金面", "情绪", "规模", "共振", "跟随", "因子库"]
