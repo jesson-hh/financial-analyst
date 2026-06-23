@@ -118,3 +118,71 @@ def deflated_sharpe(returns: List[float], n_trials: int, sharpes_std: Optional[f
     sr0 = v * ((1 - _EULER) * _norm_ppf(1 - 1.0 / N) + _EULER * _norm_ppf(1 - 1.0 / (N * math.e)))
     denom = math.sqrt(max(1e-12, 1 - g3 * sr + (g4 - 1) / 4.0 * sr * sr))
     return float(_norm_cdf((sr - sr0) * math.sqrt(T - 1) / denom))
+
+
+MIN_OOS_DAYS = 10
+
+
+def _fwd_returns_for_snapshots(hist: pd.DataFrame, horizon: int = 5) -> Dict[Tuple[str, str], float]:
+    """对快照 (date,code) 算真 horizon 日前向收益(引擎 close bins,PIT:只取已实现)。单测桩掉。"""
+    from financial_analyst.data.loaders.qlib_binary import QlibBinaryLoader
+    from guanlan_v2.strategy.compute.model_train import DEFAULT_PROVIDER
+    ld = QlibBinaryLoader(DEFAULT_PROVIDER)
+    probe = ld._read_bin("SH600519", "close")
+    if probe is None or probe.dropna().empty:
+        return {}
+    last = pd.Timestamp(probe.dropna().index[-1])
+    cal = pd.DatetimeIndex([d for d in ld._load_calendar("day") if pd.Timestamp(d) <= last])
+    by_code = {c: ld._read_bin(str(c), "close") for c in hist["code"].astype(str).unique()}
+    out: Dict[Tuple[str, str], float] = {}
+    for d in sorted(hist["date"].astype(str).unique()):
+        ts = pd.Timestamp(d); posn = cal.searchsorted(ts)
+        if posn >= len(cal) or cal[posn] != ts or posn + horizon >= len(cal):
+            continue
+        t1 = cal[posn + horizon]
+        for c in hist[hist["date"] == d]["code"].astype(str):
+            s = by_code.get(c)
+            if s is None:
+                continue
+            c0, c1 = s.get(ts), s.get(t1)
+            if c0 and c1 and pd.notna(c0) and pd.notna(c1) and float(c0) > 0:
+                out[(d, c)] = float(c1) / float(c0) - 1.0
+    return out
+
+
+def _registry_trials() -> int:
+    try:
+        from guanlan_v2.screen.model_registry import list_variants
+        return max(2, len(list_variants()))
+    except Exception:  # noqa: BLE001
+        return 2
+
+
+def quick_validate(model_id: Optional[str] = None, n_trials: Optional[int] = None) -> Dict[str, Any]:
+    """读 model_health 冻结快照 → 多头超额夏普 + DSR + RankIC 分布。秒级零看未来;不足→ready=False。
+    仅 prod 当前积累快照;变体暂无 → ready=False(诚实)。"""
+    from guanlan_v2.strategy import model_health as mh
+    if not mh.SCORE_HISTORY_PARQUET.exists():
+        return {"ready": False, "model_id": model_id or "prod",
+                "note": "证据不足:无快照(仅生产 v4 在 regen 时积累)"}
+    hist = pd.read_parquet(mh.SCORE_HISTORY_PARQUET)
+    fwd = _fwd_returns_for_snapshots(hist)
+    hist = hist.assign(fwd=[fwd.get((str(r.date), str(r.code))) for r in hist.itertuples()])
+    realized = hist.dropna(subset=["fwd"])
+    n_days = int(realized["date"].nunique())
+    if n_days < MIN_OOS_DAYS:
+        return {"ready": False, "model_id": model_id or "prod", "n_oos_days": n_days,
+                "note": f"证据不足:已实现 OOS 仅 {n_days} 天(<{MIN_OOS_DAYS}),随 regen 变厚"}
+    m = decile_metrics(realized)
+    n_trials = n_trials or _registry_trials()
+    ic_dist = m["rank_ic"]
+    if mh.VINTAGE_IC_PARQUET.exists():
+        v = pd.read_parquet(mh.VINTAGE_IC_PARQUET)
+        if len(v):
+            ic_dist = [float(x) for x in v["ic"].tolist()]
+    return {"ready": True, "model_id": model_id or "prod", "n_oos_days": n_days,
+            "sharpe": sharpe(m["long_excess_ret"]),
+            "dsr": deflated_sharpe(m["long_excess_ret"], n_trials=n_trials),
+            "ic_mean": (float(np.mean(ic_dist)) if ic_dist else None),
+            "ic_dist": [round(x, 4) for x in ic_dist], "n_trials": n_trials,
+            "note": "快速档:复用已积累真OOS快照(零看未来);PBO跨变体需严格档"}
