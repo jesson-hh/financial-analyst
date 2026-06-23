@@ -38,3 +38,34 @@ def make_splits(dates, n_groups: int = 6, k: int = 2, purge: int = 5, embargo: i
         train = [uniq[i] for i in range(n) if i not in drop]
         out.append((train, sorted(test)))
     return out
+
+
+def decile_metrics(panel: pd.DataFrame, decile: float = 0.1) -> Dict[str, Any]:
+    """panel: 长表 [date, code, lgb_pct, fwd](fwd=该 date 起未来5日收益,已 PIT)。
+    每换仓日:top/bottom decile 等权 → 多头超额(top−全域等权)、多空价差(top−bottom)、截面 rank-IC。
+    截面<20 跳过(诚实)。"""
+    le, ls, ics, used = [], [], [], []
+    for d, g in panel.dropna(subset=["lgb_pct", "fwd"]).groupby("date"):
+        if len(g) < 20:
+            continue
+        q_hi = g["lgb_pct"].quantile(1 - decile); q_lo = g["lgb_pct"].quantile(decile)
+        top = g[g["lgb_pct"] >= q_hi]["fwd"]; bot = g[g["lgb_pct"] <= q_lo]["fwd"]
+        if not len(top):
+            continue
+        le.append(float(top.mean() - g["fwd"].mean()))
+        if len(bot):
+            ls.append(float(top.mean() - bot.mean()))
+        ic = g["lgb_pct"].rank().corr(g["fwd"].rank())
+        if pd.notna(ic):
+            ics.append(float(ic))
+        used.append(pd.Timestamp(d))
+    return {"long_excess_ret": le, "long_short_ret": ls, "rank_ic": ics,
+            "rank_ic_mean": float(np.mean(ics)) if ics else None,
+            "dates": [str(x.date()) for x in used], "n": len(le)}
+
+
+def sharpe(returns: List[float], annualize: float = ANNUALIZE) -> Optional[float]:
+    r = np.asarray([x for x in returns if x == x], dtype="float64")
+    if len(r) < 3 or r.std(ddof=1) == 0:
+        return None
+    return float(r.mean() / r.std(ddof=1) * annualize)
