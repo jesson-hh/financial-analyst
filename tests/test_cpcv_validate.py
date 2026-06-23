@@ -58,3 +58,14 @@ def test_strict_validate_v4_real(monkeypatch, tmp_path):
     out = cpcv.strict_validate(model_id="prod", n_groups=6, k=2, universe="csi300", start="2024-06-01")
     assert out["ready"] is True and len(out["paths"]) == 15
     assert out["sharpe_dist"]["median"] is not None and "dsr" in out
+
+
+def test_write_load_cpcv(tmp_path, monkeypatch):
+    from guanlan_v2.strategy import model_health as mh
+    monkeypatch.setattr(mh, "CPCV_DIR", tmp_path, raising=False)
+    res = {"ready": True, "model_id": "prod", "dsr": 0.7,
+           "sharpe_dist": {"median": 1.2, "std": 0.3, "p05": 0.5, "p95": 1.9}, "n_trials": 10}
+    mh.write_cpcv("prod", res)
+    s = mh.load_cpcv_summary("prod")
+    assert s["ready"] is True and s["dsr"] == 0.7 and s["sharpe_dist"]["median"] == 1.2
+    assert mh.load_cpcv_summary("nope") is None

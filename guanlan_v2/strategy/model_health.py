@@ -121,6 +121,34 @@ def update_vintage_ic(provider_uri: str, horizon: int = 5) -> int:
     return len(rows)
 
 
+CPCV_DIR = ARTIFACTS_DIR     # cpcv 摘要与既有产物同目录(独立文件名,不碰三产物)
+
+
+def _cpcv_path(model_id: str):
+    return CPCV_DIR / f"model_cpcv_{model_id}.json"
+
+
+def write_cpcv(model_id: str, result: Dict[str, Any]) -> None:
+    """cpcv 结果落 model_cpcv_<id>.json(原子写)。只新写,绝不改三产物。"""
+    import json
+    p = _cpcv_path(model_id); tmp = str(p) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(json.dumps(result, ensure_ascii=False))
+    os.replace(tmp, str(p))
+
+
+def load_cpcv_summary(model_id: str) -> Optional[Dict[str, Any]]:
+    """读 cpcv 摘要;缺/坏 → None(诚实)。"""
+    import json
+    p = _cpcv_path(model_id)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # ───────────────────────────── serving 读取端 ─────────────────────────────
 
 def load_health_summary() -> Optional[Dict[str, Any]]:
