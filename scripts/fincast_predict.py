@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 
 _REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO))                                       # guanlan_v2 包(脚本直跑 sys.path[0]=scripts/)
 sys.path.insert(0, str(_REPO / "engine"))                            # financial_analyst
 sys.path.insert(0, str(_REPO / "vendor" / "fincast_repo" / "src"))  # tools/ffm/data_tools
 
