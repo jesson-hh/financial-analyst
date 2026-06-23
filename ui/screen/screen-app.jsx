@@ -139,6 +139,33 @@ function ModelWorkshop({ API, models, reloadModels, flash, onPick, onClose }) {
     reloadModels();
   };
 
+  // 快验/严格验证(CPCV)
+  const _valPoll = useRef(null);
+  const runValidate = async (id, tier) => {
+    if (!API) { say('验证', '需连接 9999 后端'); return; }
+    let r;
+    try {
+      const resp = await fetch(API + '/screen/model/validate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, tier }) });
+      r = await resp.json();
+    } catch (e) { say(tier === 'quick' ? '快验' : '严格验证', '请求失败'); return; }
+    if (tier === 'quick') {
+      if (r && r.ok) say('快验', 'DSR ' + (r.result && r.result.dsr != null ? r.result.dsr : '—') + ' · 夏普 ' + (r.result && r.result.sharpe != null ? r.result.sharpe : '—') + (r.result && !r.result.ready ? '(证据不足)' : ''));
+      else say('快验', '失败');
+      return;
+    }
+    if (!r || !r.ok) { say('严格验证', (r && r.reason) || '启动失败'); return; }
+    say('严格验证', '已起(~分钟级),完成回灌');
+    if (_valPoll.current) clearInterval(_valPoll.current);
+    _valPoll.current = setInterval(async () => {
+      let s = {};
+      try { const sr = await fetch(API + '/screen/model/validate/status'); s = ((await sr.json()).state) || {}; } catch (e) { return; }
+      if (!s.running && s.phase === 'done') {
+        clearInterval(_valPoll.current); _valPoll.current = null;
+        say('严格验证', s.ok ? ('完成 DSR ' + (s.result && s.result.dsr != null ? s.result.dsr : '—') + ' · 夏普中位 ' + (s.result && s.result.sharpe_dist && s.result.sharpe_dist.median != null ? s.result.sharpe_dist.median : '—')) : ('失败:' + (s.error || '')));
+      }
+    }, 4000);
+  };
+
   const cbStyle = { display: 'flex', alignItems: 'center', gap: 7, padding: '3px 4px', cursor: 'pointer', borderRadius: 5, fontSize: 11.5 };
   const grpLabel = { fontSize: 9, letterSpacing: '.14em', color: 'var(--ink-3)', marginBottom: 8, fontFamily: 'var(--mono)' };
 
@@ -226,6 +253,8 @@ function ModelWorkshop({ API, models, reloadModels, flash, onPick, onClose }) {
                 {(m.n_features != null ? m.n_features : '?') + '因子'} · 留出 OOS {m.oos_ic != null ? (m.oos_ic >= 0 ? '+' : '') + (+m.oos_ic).toFixed(3) : '—'}{m.asof ? ' · ' + m.asof : ''}
               </div>
             </div>
+            <span onClick={() => runValidate(m.id, 'quick')} title="快验:DSR + 夏普快速估算" className="mono" style={{ fontSize: 9.5, color: 'var(--dai)', cursor: 'pointer', border: '1px solid var(--line)', borderRadius: 5, padding: '2px 6px', flexShrink: 0 }}>快验</span>
+            <span onClick={() => runValidate(m.id, 'strict')} title="严格验证(CPCV ~分钟级):完成后回灌 DSR/夏普" className="mono" style={{ fontSize: 9.5, color: 'var(--ink-2)', cursor: 'pointer', border: '1px solid var(--line)', borderRadius: 5, padding: '2px 6px', flexShrink: 0 }}>严格验证</span>
             <span onClick={() => delVariant(m.id, m.name)} title="删除变体" className="mono" style={{ fontSize: 12, color: 'var(--ink-3)', cursor: 'pointer', padding: '2px 6px', flexShrink: 0 }}>✕</span>
           </div>
         ))}
