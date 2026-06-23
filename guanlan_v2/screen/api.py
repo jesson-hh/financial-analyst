@@ -304,6 +304,53 @@ def _run_model_train_subprocess(spec: Dict[str, Any]) -> None:
                 "phase": "done", "step": 3})
 
 
+# ───────────────────────────────────────────────────────────────────────────
+# 异步 CPCV 验证 —— UI 发起 quick(内联,秒级)或 strict(子进程,分钟级)验证。
+# 镜像 model-train 机器:单飞锁 + 可轮询进度 + 子进程隔离;finally 必清 running。
+# 子进程跑 ``python -m guanlan_v2.strategy.compute.cpcv <spec.json>``(CPCV __main__),
+# 完成后由 /model/validate/status 从 model_health.load_cpcv_summary 取摘要。
+# ───────────────────────────────────────────────────────────────────────────
+_VALIDATE_LOCK = _threading.Lock()
+_VALIDATE_STATE: Dict[str, Any] = {"running": False, "phase": "idle", "label": "", "step": 0,
+    "total": 15, "started_at": None, "ended_at": None, "ok": None, "error": None,
+    "model_id": None, "lines": []}
+
+
+def _validate_public_state() -> Dict[str, Any]:
+    import time as _t
+    with _VALIDATE_LOCK:
+        s = dict(_VALIDATE_STATE); s["lines"] = list(s.get("lines") or [])[-12:]
+    if s.get("started_at"):
+        s["elapsed_sec"] = int((s.get("ended_at") or _t.time()) - s["started_at"])
+    return s
+
+
+def _run_validate_subprocess(spec: Dict[str, Any]) -> None:
+    import os, sys as _sys, time as _t, json as _json, tempfile, subprocess
+    from pathlib import Path as _P
+    rc, err = None, None
+    try:
+        repo = _P(__file__).resolve().parents[2]
+        sf = _P(tempfile.gettempdir()) / f"cpcv_{spec['model_id']}.json"
+        sf.write_text(_json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+        proc = subprocess.Popen([_sys.executable, "-m", "guanlan_v2.strategy.compute.cpcv", str(sf)],
+            cwd=str(repo), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            encoding="utf-8", errors="replace", bufsize=1, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+        for raw in proc.stdout:
+            line = raw.rstrip("\r\n")
+            if line:
+                with _VALIDATE_LOCK:
+                    _VALIDATE_STATE["lines"].append(line)
+        proc.wait(); rc = proc.returncode
+    except Exception as e:  # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+    finally:
+        with _VALIDATE_LOCK:
+            _VALIDATE_STATE.update({"running": False, "ended_at": _t.time(),
+                "ok": (rc == 0 and not err), "error": err or (None if rc == 0 else f"exit {rc}"),
+                "phase": "done", "step": 15})
+
+
 def _panel_enrich(codes, freq: str = "day", factors=None):
     """引擎面板取 codes:最新截面 + 每股 L3 vol_regime + L4 位置指标(ret/RSI/位置)。
 
@@ -1314,6 +1361,32 @@ def build_screen_router() -> APIRouter:
             delete_variant(str(body.get("id") or "")); return JSONResponse({"ok": True})
         except ValueError as e:
             return JSONResponse({"ok": False, "reason": str(e)})
+
+    @router.post("/model/validate")
+    def screen_model_validate(body: dict = Body(default={})):
+        import time as _t
+        from guanlan_v2.strategy.compute import cpcv
+        mid = str(body.get("id") or "prod"); tier = str(body.get("tier") or "quick")
+        if tier == "quick":
+            return JSONResponse({"ok": True, "result": cpcv.quick_validate(model_id=mid)})
+        with _VALIDATE_LOCK:
+            if _VALIDATE_STATE["running"]:
+                return JSONResponse({"ok": False, "reason": "已有验证在跑", "state": _validate_public_state()})
+            _VALIDATE_STATE.update({"running": True, "phase": "starting", "label": "启动严格验证…",
+                "step": 0, "started_at": _t.time(), "ended_at": None, "ok": None, "error": None,
+                "model_id": mid, "lines": []})
+        spec = {"model_id": mid, "n_groups": int(body.get("n_groups") or 6), "k": int(body.get("k") or 2),
+                "purge": int(body.get("purge") or 5), "embargo": int(body.get("embargo") or 5)}
+        _threading.Thread(target=lambda: _run_validate_subprocess(spec), daemon=True).start()
+        return JSONResponse({"ok": True, "started": True, "model_id": mid, "state": _validate_public_state()})
+
+    @router.get("/model/validate/status")
+    def screen_model_validate_status():
+        from guanlan_v2.strategy import model_health as mh
+        st = _validate_public_state()
+        if not st["running"] and st.get("model_id"):
+            st["result"] = mh.load_cpcv_summary(st["model_id"])
+        return JSONResponse({"ok": True, "state": st})
 
     # 启动即后台预热 financials 索引(get_default_loader 非单例 + 冷建 ~8s);
     # daemon 线程不阻塞启动/健康检查,首个 /screen/run 命中已建好的常驻索引。

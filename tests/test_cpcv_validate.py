@@ -69,3 +69,24 @@ def test_write_load_cpcv(tmp_path, monkeypatch):
     s = mh.load_cpcv_summary("prod")
     assert s["ready"] is True and s["dsr"] == 0.7 and s["sharpe_dist"]["median"] == 1.2
     assert mh.load_cpcv_summary("nope") is None
+
+
+def test_validate_endpoint_quick(monkeypatch):
+    monkeypatch.setattr("guanlan_v2.strategy.compute.cpcv.quick_validate",
+                        lambda model_id=None: {"ready": True, "dsr": 0.6, "sharpe": 1.1, "model_id": model_id or "prod"})
+    from fastapi.testclient import TestClient
+    from guanlan_v2.server import app
+    j = TestClient(app).post("/screen/model/validate", json={"id": "prod", "tier": "quick"}).json()
+    assert j["ok"] is True and j["result"]["ready"] is True and j["result"]["dsr"] == 0.6
+
+
+def test_validate_endpoint_strict_starts(monkeypatch):
+    import guanlan_v2.screen.api as api
+    monkeypatch.setattr(api, "_run_validate_subprocess", lambda spec: None)
+    from fastapi.testclient import TestClient
+    from guanlan_v2.server import app
+    c = TestClient(app)
+    j = c.post("/screen/model/validate", json={"id": "prod", "tier": "strict"}).json()
+    assert j["ok"] is True and j["started"] is True
+    s = c.get("/screen/model/validate/status").json()
+    assert s["ok"] is True and "state" in s
