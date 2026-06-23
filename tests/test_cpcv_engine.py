@@ -34,3 +34,18 @@ def test_decile_metrics_long_excess_and_ic():
     assert m["rank_ic_mean"] > 0.9
     assert m["long_excess_ret"][0] > 0
     assert m["n"] == 3
+
+
+def test_dsr_basic_properties():
+    from guanlan_v2.strategy.compute import cpcv
+    import numpy as np
+    rng = np.random.default_rng(0)
+    good = list(rng.normal(0.02, 0.01, 60)); noise = list(rng.normal(0.0, 0.02, 60))
+    dg = cpcv.deflated_sharpe(good, n_trials=10); dn = cpcv.deflated_sharpe(noise, n_trials=10)
+    assert 0.0 <= dg <= 1.0 and 0.0 <= dn <= 1.0 and dg > dn
+    assert cpcv.deflated_sharpe(good, n_trials=1000) <= cpcv.deflated_sharpe(good, n_trials=2) + 1e-9
+
+
+def test_dsr_insufficient_returns_none():
+    from guanlan_v2.strategy.compute import cpcv
+    assert cpcv.deflated_sharpe([0.01, 0.02], n_trials=5) is None
