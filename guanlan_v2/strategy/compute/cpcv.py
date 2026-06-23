@@ -236,6 +236,8 @@ def _materialize_panel(model_id, universe, start, end):
                                                   ld, codes, start, end))
         if "label" not in data.columns:
             return kind, None
+        if "instrument" in (data.index.names or []) and "code" not in (data.index.names or []):
+            data = data.rename_axis(index={"instrument": "code"})
         mf = _select_mf(list(data.columns), None)
         return kind, {"_fe": data[mf], "_label": data["label"], "params": {}}
     recipe = meta.get("recipe") or {}
@@ -250,7 +252,11 @@ def _materialize_panel(model_id, universe, start, end):
     if not isinstance(mat, tuple):
         return kind, None
     _p, fe_df, label_s, _n = mat
-    return kind, {"_fe": fe_df, "_label": label_s.rename("label"), "params": dict(recipe.get("params") or {})}
+    label_s = label_s.rename("label")
+    if "instrument" in (fe_df.index.names or []) and "code" not in (fe_df.index.names or []):
+        fe_df = fe_df.rename_axis(index={"instrument": "code"})
+        label_s = label_s.rename_axis(index={"instrument": "code"})
+    return kind, {"_fe": fe_df, "_label": label_s, "params": dict(recipe.get("params") or {})}
 
 
 def strict_validate(model_id=None, n_groups=6, k=2, purge=5, embargo=5,
