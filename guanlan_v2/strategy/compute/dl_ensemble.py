@@ -68,7 +68,7 @@ def _load_dl_for_date(path: str, ld: pd.Timestamp, score_col: str = "pred_ret_5d
     """读 DL 预测 parquet → (当日 series[instrument→score], 全表 df, train_cutoff, reason_if_fail)。
     泛化 v4_fincast._load_fincast_for_date(列名 score_col 参数化)。缺文件/缺列/无当日/读失败 → None+reason。"""
     if not path or not os.path.exists(path):
-        return None, None, None, "预测文件不存在,退出(离线产出:见 scripts/sync_fincast.py 同款工具)"
+        return None, None, None, "预测文件不存在,退出(离线产出:见 scripts/fincast_predict.py 同款工具)"
     try:
         df = pd.read_parquet(path)
     except Exception as e:  # noqa: BLE001
