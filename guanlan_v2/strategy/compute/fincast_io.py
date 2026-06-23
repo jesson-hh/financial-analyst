@@ -36,7 +36,10 @@ def write_pred_rolling(out_path: str, eval_date, chosen: List[str], preds,
     """写 FinCast 预测表(扁平契约 eval_date/instrument/pred_ret_5d):同日覆盖 + 只保留最近 keep_days 日。
     返回写入后的全表 DataFrame。"""
     ed = pd.Timestamp(eval_date)
-    new_df = pd.DataFrame({"eval_date": ed, "instrument": list(chosen),
+    insts = list(chosen)
+    # 显式 [ed]*n 广播:pandas 2.1(conda stocks)不会把标量 Timestamp 在 dict 构造里广播到数组长度
+    # (报 "Shape of passed values is (1,N)"),新版会;显式列表跨 pandas 版本稳。
+    new_df = pd.DataFrame({"eval_date": [ed] * len(insts), "instrument": insts,
                            "pred_ret_5d": np.asarray(preds, dtype=np.float32)})
     if os.path.exists(out_path):
         old = pd.read_parquet(out_path)
@@ -54,5 +57,8 @@ def write_pred_rolling(out_path: str, eval_date, chosen: List[str], preds,
         combined = new_df
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     combined = combined.reset_index(drop=True)
+    # 强制 datetime64[ns]:标量 Timestamp 广播在 pandas 2.1/pyarrow22(conda stocks)会落 object 列,
+    # pyarrow 无法序列化("Expected bytes, got a 'Timestamp'");显式 to_datetime 跨 env 稳。
+    combined["eval_date"] = pd.to_datetime(combined["eval_date"])
     combined.to_parquet(out_path, index=False)
     return combined

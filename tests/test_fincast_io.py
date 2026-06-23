@@ -61,6 +61,8 @@ def test_write_pred_rolling_contract_and_overwrite(tmp_path):
     # 首写
     df1 = write_pred_rolling(p, "2026-06-20", ["SH600000", "SZ000001"], [0.01, -0.02], keep_days=60)
     assert list(df1.columns) == ["eval_date", "instrument", "pred_ret_5d"]   # 扁平契约
+    # on-disk eval_date 必须 datetime64(非 object Timestamp)— pyarrow22/conda stocks 否则崩
+    assert pd.api.types.is_datetime64_any_dtype(pd.read_parquet(p)["eval_date"])
     # 同日重写覆盖(不重复)
     write_pred_rolling(p, "2026-06-20", ["SH600000"], [0.05], keep_days=60)
     out = pd.read_parquet(p)
