@@ -90,3 +90,6 @@ def test_validate_endpoint_strict_starts(monkeypatch):
     assert j["ok"] is True and j["started"] is True
     s = c.get("/screen/model/validate/status").json()
     assert s["ok"] is True and "state" in s
+    # second strict while first still "running" must hit the guard fast (no reentrant-lock deadlock)
+    j2 = c.post("/screen/model/validate", json={"id": "prod", "tier": "strict"}).json()
+    assert j2["ok"] is False and "state" in j2

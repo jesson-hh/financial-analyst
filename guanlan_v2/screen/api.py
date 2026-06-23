@@ -1370,11 +1370,13 @@ def build_screen_router() -> APIRouter:
         if tier == "quick":
             return JSONResponse({"ok": True, "result": cpcv.quick_validate(model_id=mid)})
         with _VALIDATE_LOCK:
-            if _VALIDATE_STATE["running"]:
-                return JSONResponse({"ok": False, "reason": "已有验证在跑", "state": _validate_public_state()})
-            _VALIDATE_STATE.update({"running": True, "phase": "starting", "label": "启动严格验证…",
-                "step": 0, "started_at": _t.time(), "ended_at": None, "ok": None, "error": None,
-                "model_id": mid, "lines": []})
+            already = _VALIDATE_STATE["running"]
+            if not already:
+                _VALIDATE_STATE.update({"running": True, "phase": "starting", "label": "启动严格验证…",
+                    "step": 0, "started_at": _t.time(), "ended_at": None, "ok": None, "error": None,
+                    "model_id": mid, "lines": []})
+        if already:
+            return JSONResponse({"ok": False, "reason": "已有验证在跑", "state": _validate_public_state()})
         spec = {"model_id": mid, "n_groups": int(body.get("n_groups") or 6), "k": int(body.get("k") or 2),
                 "purge": int(body.get("purge") or 5), "embargo": int(body.get("embargo") or 5)}
         _threading.Thread(target=lambda: _run_validate_subprocess(spec), daemon=True).start()
