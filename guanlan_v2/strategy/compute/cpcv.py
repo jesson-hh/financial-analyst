@@ -186,3 +186,30 @@ def quick_validate(model_id: Optional[str] = None, n_trials: Optional[int] = Non
             "ic_mean": (float(np.mean(ic_dist)) if ic_dist else None),
             "ic_dist": [round(x, 4) for x in ic_dist], "n_trials": n_trials,
             "note": "快速档:复用已积累真OOS快照(零看未来);PBO跨变体需严格档"}
+
+
+def retrain_core(kind, panel_ctx, train_mask, test_dates):
+    """train_mask 行 fit、test_dates 行 predict → test 行预测分 Series(MultiIndex datetime,code)。
+    panel_ctx 含已物化 `_fe`(特征)+ `_label`;v4-lgb 用 LGB_PARAMS,tree 用 workflow._build_model。
+    不改 v4.py / model_workflow.py。"""
+    fe, label = panel_ctx["_fe"], panel_ctx["_label"]
+    Xtr = fe[train_mask].dropna()
+    ytr = label.reindex(Xtr.index).dropna()
+    Xtr = Xtr.reindex(ytr.index)
+    if len(Xtr) < 200:
+        return pd.Series(dtype="float64")
+    if kind == "v4-lgb":
+        import lightgbm as lgb
+        from guanlan_v2.strategy.compute.v4 import LGB_PARAMS
+        model = lgb.train(LGB_PARAMS, lgb.Dataset(Xtr.values, label=ytr.values), num_boost_round=500)
+        predict = model.predict
+    else:
+        from guanlan_v2.workflow.api import _build_model
+        model, _ = _build_model(kind, panel_ctx.get("params", {}))
+        model.fit(Xtr.values, ytr.values)
+        predict = model.predict
+    dts = fe.index.get_level_values("datetime")
+    Xte = fe[pd.Index(dts).isin(set(pd.to_datetime(test_dates)))].dropna()
+    if Xte.empty:
+        return pd.Series(dtype="float64")
+    return pd.Series(predict(Xte.values), index=Xte.index, name="pred")

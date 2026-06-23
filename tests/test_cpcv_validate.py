@@ -32,3 +32,21 @@ def test_quick_validate_insufficient_days(tmp_path, monkeypatch):
     monkeypatch.setattr(cpcv, "_fwd_returns_for_snapshots", lambda hist, horizon=5: {})
     out = cpcv.quick_validate(model_id="prod")
     assert out["ready"] is False and "证据不足" in out["note"]
+
+
+def test_retrain_core_tree_kind_predicts_test_rows():
+    from guanlan_v2.strategy.compute import cpcv
+    import numpy as np, pandas as pd
+    idx = pd.MultiIndex.from_product(
+        [pd.bdate_range("2022-01-03", periods=40), [f"C{i:02d}" for i in range(60)]],
+        names=["datetime", "code"])
+    rng = np.random.default_rng(0)
+    fe = pd.DataFrame({"f1": rng.normal(size=len(idx)), "f2": rng.normal(size=len(idx))}, index=idx)
+    label = pd.Series(fe["f1"].values * 0.5 + rng.normal(0, 0.1, len(idx)), index=idx, name="label")
+    dts = idx.get_level_values("datetime")
+    train_mask = pd.Index(dts).isin(set(dts[dts < pd.Timestamp("2022-02-01")]))
+    test_dates = sorted(set(dts[dts >= pd.Timestamp("2022-02-01")]))
+    pred = cpcv.retrain_core("lightgbm", {"_fe": fe, "_label": label, "params": {}},
+                             train_mask=train_mask, test_dates=test_dates)
+    assert isinstance(pred, pd.Series) and len(pred) > 0
+    assert set(pred.index.get_level_values("datetime")).issubset(set(test_dates))
