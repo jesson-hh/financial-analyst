@@ -50,3 +50,11 @@ def test_retrain_core_tree_kind_predicts_test_rows():
                              train_mask=train_mask, test_dates=test_dates)
     assert isinstance(pred, pd.Series) and len(pred) > 0
     assert set(pred.index.get_level_values("datetime")).issubset(set(test_dates))
+
+
+@pytest.mark.slow
+def test_strict_validate_v4_real(monkeypatch, tmp_path):
+    from guanlan_v2.strategy.compute import cpcv
+    out = cpcv.strict_validate(model_id="prod", n_groups=6, k=2, universe="csi300", start="2024-06-01")
+    assert out["ready"] is True and len(out["paths"]) == 15
+    assert out["sharpe_dist"]["median"] is not None and "dsr" in out

@@ -213,3 +213,104 @@ def retrain_core(kind, panel_ctx, train_mask, test_dates):
     if Xte.empty:
         return pd.Series(dtype="float64")
     return pd.Series(predict(Xte.values), index=Xte.index, name="pred")
+
+
+def _materialize_panel(model_id, universe, start, end):
+    """按模型 kind 物化一次面板(贵·复用所有路径)→ (kind, ctx{_fe,_label,params}) 或 (kind, None)。
+    v4-lgb:复用 v4 的 build_feature_panel+add_ind_turnover+add_breadth_resid(read-only,不改 v4)。
+    tree:复用 workflow._materialize_xy(recipe→ModelTrainIn)。"""
+    from guanlan_v2.screen.model_registry import variant_meta
+    meta = variant_meta(model_id) if (model_id and model_id != "prod") else {"kind": "v4-lgb", "recipe": {}}
+    kind = meta.get("kind", "v4-lgb")
+    if kind == "v4-lgb":
+        from financial_analyst.data.loaders.qlib_binary import QlibBinaryLoader
+        from financial_analyst.data.universe import resolve_universe_codes
+        from guanlan_v2.strategy.compute.model_train import DEFAULT_PROVIDER
+        from guanlan_v2.strategy.compute.breadth import list_all_instruments
+        from guanlan_v2.strategy.compute.v4 import (build_feature_panel, add_ind_turnover,
+                                                    add_breadth_resid, _select_mf)
+        ld = QlibBinaryLoader(DEFAULT_PROVIDER)
+        codes = ([str(c) for c in resolve_universe_codes(universe)]
+                 if universe not in ("all", "", None) else list_all_instruments(DEFAULT_PROVIDER))
+        data = add_breadth_resid(add_ind_turnover(build_feature_panel(ld, codes, start, end),
+                                                  ld, codes, start, end))
+        if "label" not in data.columns:
+            return kind, None
+        mf = _select_mf(list(data.columns), None)
+        return kind, {"_fe": data[mf], "_label": data["label"], "params": {}}
+    recipe = meta.get("recipe") or {}
+    if not recipe.get("features"):
+        return kind, None
+    from guanlan_v2.workflow.api import ModelTrainIn, _materialize_xy
+    body = ModelTrainIn(kind=kind, features=list(recipe["features"]), label=recipe.get("label") or "fwd_ret",
+                        fwd_days=int(recipe.get("fwd_days") or 5), universe=recipe.get("universe") or universe,
+                        start=recipe.get("start") or start, end=end,
+                        params=dict(recipe.get("params") or {}), winsorize=True, standardize=True)
+    mat = _materialize_xy(body, body.universe, body.features, body.start, body.end)
+    if not isinstance(mat, tuple):
+        return kind, None
+    _p, fe_df, label_s, _n = mat
+    return kind, {"_fe": fe_df, "_label": label_s.rename("label"), "params": dict(recipe.get("params") or {})}
+
+
+def strict_validate(model_id=None, n_groups=6, k=2, purge=5, embargo=5,
+                    universe="all", start="2022-01-01", horizon=5, n_trials=None, progress=None):
+    """全历史 retrain-CPCV:面板物化一次 → 15 路径各 retrain_core → 多头超额组合 → 分布+DSR。
+    retrainable=False / 物化失败 → ready=False(诚实)。"""
+    from guanlan_v2.screen.model_registry import variant_meta
+    mid = model_id or "prod"
+    if mid != "prod" and not variant_meta(mid).get("retrainable", False):
+        return {"ready": False, "model_id": mid, "note": "不可重训(无 recipe)→ 只可快速档"}
+    from guanlan_v2.strategy.compute.regen import _latest_trade_date
+    from guanlan_v2.strategy.compute.model_train import DEFAULT_PROVIDER
+    end = _latest_trade_date(DEFAULT_PROVIDER)
+    kind, ctx = _materialize_panel(mid, universe, start, end)
+    if ctx is None:
+        return {"ready": False, "model_id": mid, "note": "面板物化失败"}
+    fe, label = ctx["_fe"], ctx["_label"]
+    dts = pd.DatetimeIndex(sorted(set(fe.index.get_level_values("datetime"))))
+    splits = make_splits(dts, n_groups, k, purge, embargo)
+    if not splits:
+        return {"ready": False, "model_id": mid, "note": "交易日不足以切分"}
+    paths, all_excess = [], []
+    for i, (train_dates, test_dates) in enumerate(splits):
+        if progress:
+            progress(i + 1, len(splits))
+        train_mask = pd.Index(fe.index.get_level_values("datetime")).isin(set(train_dates))
+        pred = retrain_core(kind, ctx, train_mask, test_dates)
+        if pred.empty:
+            continue
+        panel = pd.DataFrame({"date": pred.index.get_level_values("datetime"),
+                              "code": pred.index.get_level_values("code"),
+                              "lgb_pct": pd.Series(pred.values).rank(pct=True).values,
+                              "fwd": label.reindex(pred.index).values})
+        rb = sorted(panel["date"].unique())[::horizon]            # 非重叠 5 日换仓
+        m = decile_metrics(panel[panel["date"].isin(rb)])
+        paths.append({"test_groups": i, "sharpe": sharpe(m["long_excess_ret"]),
+                      "ic": m["rank_ic_mean"], "n": m["n"]})
+        all_excess += m["long_excess_ret"]
+    sps = [p["sharpe"] for p in paths if p["sharpe"] is not None]
+    ics = [p["ic"] for p in paths if p["ic"] is not None]
+    n_trials = n_trials or _registry_trials()
+
+    def _dist(xs):
+        a = np.asarray(xs, dtype="float64")
+        return ({"median": float(np.median(a)), "std": float(a.std(ddof=1)) if len(a) > 1 else 0.0,
+                 "p05": float(np.percentile(a, 5)), "p95": float(np.percentile(a, 95))} if len(a) else None)
+    return {"ready": True, "model_id": mid, "kind": kind, "n_paths": len(paths), "paths": paths,
+            "sharpe_dist": _dist(sps), "ic_dist": _dist(ics),
+            "dsr": deflated_sharpe(all_excess, n_trials=n_trials,
+                                   sharpes_std=(float(np.std(sps, ddof=1)) if len(sps) > 1 else None)),
+            "n_trials": n_trials, "asof": str(end),
+            "note": "严格档:全历史 retrain-CPCV(purge+embargo);DSR 按 registry 变体数 deflate"}
+
+
+if __name__ == "__main__":   # python -m guanlan_v2.strategy.compute.cpcv <spec.json>(严格档子进程)
+    import json, sys
+    spec = json.loads(open(sys.argv[1], encoding="utf-8").read())
+    print(f"[cpcv] strict validate model={spec.get('model_id')} ...", flush=True)
+    res = strict_validate(**spec)
+    from guanlan_v2.strategy import model_health as mh
+    mh.write_cpcv(spec.get("model_id") or "prod", res)
+    print(f"[cpcv] done ready={res.get('ready')} dsr={res.get('dsr')}", flush=True)
+    sys.exit(0 if res.get("ready") else 1)
