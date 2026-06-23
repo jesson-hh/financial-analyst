@@ -105,7 +105,7 @@ _EULER = 0.5772156649015329
 
 def deflated_sharpe(returns: List[float], n_trials: int, sharpes_std: Optional[float] = None):
     """DSR = P(真夏普 > SR0),SR0 = N 次试验下期望最大夏普(噪声基准)。返回 [0,1];
-    样本<10 或零波动 → None。夏普口径=每周期(未年化)。sharpes_std=各试验夏普标准差(缺→1)。"""
+    样本<10 或零波动 → None。夏普口径=每周期(未年化)。sharpes_std=各试验夏普标准差(per-period;缺→用解析夏普标准误SE)。"""
     import math
     r = np.asarray([x for x in returns if x == x], dtype="float64")
     T = len(r)
@@ -114,9 +114,11 @@ def deflated_sharpe(returns: List[float], n_trials: int, sharpes_std: Optional[f
     sr = r.mean() / r.std(ddof=1)
     g3 = float(pd.Series(r).skew())
     g4 = float(pd.Series(r).kurtosis()) + 3.0          # pandas 超额峰度 → 普通峰度
-    N = max(2, int(n_trials)); v = sharpes_std if (sharpes_std and sharpes_std > 0) else 1.0
-    sr0 = v * ((1 - _EULER) * _norm_ppf(1 - 1.0 / N) + _EULER * _norm_ppf(1 - 1.0 / (N * math.e)))
+    N = max(2, int(n_trials))
     denom = math.sqrt(max(1e-12, 1 - g3 * sr + (g4 - 1) / 4.0 * sr * sr))
+    se = denom / math.sqrt(T - 1)   # 每周期夏普估计量的标准误:无显式多试验夏普时的默认噪声尺度(per-period 口径)
+    v = sharpes_std if (sharpes_std and sharpes_std > 0) else se
+    sr0 = v * ((1 - _EULER) * _norm_ppf(1 - 1.0 / N) + _EULER * _norm_ppf(1 - 1.0 / (N * math.e)))
     return float(_norm_cdf((sr - sr0) * math.sqrt(T - 1) / denom))
 
 
@@ -305,8 +307,7 @@ def strict_validate(model_id=None, n_groups=6, k=2, purge=5, embargo=5,
                  "p05": float(np.percentile(a, 5)), "p95": float(np.percentile(a, 95))} if len(a) else None)
     return {"ready": True, "model_id": mid, "kind": kind, "n_paths": len(paths), "paths": paths,
             "sharpe_dist": _dist(sps), "ic_dist": _dist(ics),
-            "dsr": deflated_sharpe(all_excess, n_trials=n_trials,
-                                   sharpes_std=(float(np.std(sps, ddof=1)) if len(sps) > 1 else None)),
+            "dsr": deflated_sharpe(all_excess, n_trials=n_trials),
             "n_trials": n_trials, "asof": str(end),
             "note": "严格档:全历史 retrain-CPCV(purge+embargo);DSR 按 registry 变体数 deflate"}
 
