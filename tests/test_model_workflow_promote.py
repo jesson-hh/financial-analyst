@@ -96,6 +96,29 @@ def test_workflow_variant_ranking_padded_for_screen(tmp_path, monkeypatch):
     assert out["lgb_rank"].notna().all() and int(out["lgb_rank"].min()) == 1  # 由 lgb_pct 派生
 
 
+def test_model_promote_second_concurrent_returns_busy(monkeypatch):
+    """Regression: second /model/promote while first is running must return ok:False immediately.
+    Pre-fix this deadlocked because _promote_public_state() re-acquired _PROMOTE_LOCK inside
+    the guard's `with _PROMOTE_LOCK:` block (non-reentrant lock → permanent self-deadlock)."""
+    import guanlan_v2.workflow.api as wapi
+    # Reset state so test is idempotent regardless of prior test ordering
+    wapi._PROMOTE_STATE.update({"running": False, "phase": "idle", "label": "", "step": 0,
+        "started_at": None, "ended_at": None, "ok": None, "error": None,
+        "variant_id": None, "lines": []})
+    monkeypatch.setattr(wapi, "_run_promote_subprocess", lambda spec: None)  # no-op: leaves running=True
+    from fastapi.testclient import TestClient
+    from guanlan_v2.server import app
+    c = TestClient(app)
+    body = {"name": "concurrent-test", "kind": "lightgbm",
+            "recipe": {"features": ["delay(close,5)"], "universe": "csi300"}}
+    j1 = c.post("/model/promote", json=body).json()
+    assert j1.get("ok") is True, f"first promote should start: {j1}"
+    # Second call: would deadlock pre-fix; must return ok:False fast
+    j2 = c.post("/model/promote", json=body).json()
+    assert j2.get("ok") is False, f"second concurrent promote should be rejected: {j2}"
+    assert "reason" in j2, "busy response must include reason"
+
+
 def test_model_ranking_endpoint(tmp_path, monkeypatch):
     from guanlan_v2.screen import model_registry as reg
     monkeypatch.setattr(reg, "MODELS_DIR", tmp_path)

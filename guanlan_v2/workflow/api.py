@@ -6063,12 +6063,15 @@ def build_workflow_router() -> APIRouter:
         if kind not in ("lightgbm", "xgboost", "rf"):
             return JSONResponse({"ok": False, "reason": f"kind '{kind}' 首期不支持入库(树模型:lightgbm/xgboost/rf)"})
         with _PROMOTE_LOCK:
-            if _PROMOTE_STATE["running"]:
-                return JSONResponse({"ok": False, "reason": "已有入库在跑", "state": _promote_public_state()})
-            vid = "m_" + uuid.uuid4().hex[:10]
-            _PROMOTE_STATE.update({"running": True, "phase": "starting", "label": "启动生产重训…",
-                "step": 0, "started_at": _t.time(), "ended_at": None, "ok": None, "error": None,
-                "variant_id": vid, "lines": []})
+            already = _PROMOTE_STATE["running"]
+            if not already:
+                vid = "m_" + uuid.uuid4().hex[:10]
+                _PROMOTE_STATE.update({"running": True, "phase": "starting", "label": "启动生产重训…",
+                    "step": 0, "started_at": _t.time(), "ended_at": None, "ok": None, "error": None,
+                    "variant_id": vid, "lines": []})
+        # NOTE: _promote_public_state() re-acquires _PROMOTE_LOCK — must NOT be called while lock is held
+        if already:
+            return JSONResponse({"ok": False, "reason": "已有入库在跑", "state": _promote_public_state()})
         spec = {"variant_id": vid, "name": str(body.get("name") or "工作流模型"),
                 "kind": kind, "recipe": recipe,
                 "created": datetime.datetime.now().isoformat(timespec="seconds")}
