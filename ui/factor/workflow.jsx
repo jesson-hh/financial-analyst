@@ -1909,6 +1909,7 @@ function Node({ node, sel, onDrag, onStartWire, onParam, onDel, onSel, status, n
         {node.type === 'formula' ? <FormulaPanel node={node} onParam={onParam} /> : null}
         {node.type === 'factorlib' ? <FactorLibPanel node={node} onParam={onParam} /> : null}
         {node.type === 'model' ? <ModelLibPanel node={node} onParam={onParam} /> : null}
+        {node.type === 'validate' ? <ModelLibPanel node={node} onParam={onParam} /> : null}
         {(node.type === 'xgb' || node.type === 'lgbm' || node.type === 'rf') ? <PromoteModelPanel node={node} nodes={nodes} edges={edges} onNotify={onNotify} /> : null}
         {node.type === 'analysis' ? <div title="单因子(直连公式 / 单特征 Spearman·PCA)→ 分组/调仓/方向 经壳内 /factor/report2 真生效;经多模型或多因子合成的复合因子,报告已在上游按其设置算好,此处透传(这三项对其不适用)。" style={{ marginTop: 6, paddingTop: 6, borderTop: '1px dashed var(--line)', fontSize: 9, color: 'var(--ink-3)', lineHeight: 1.4 }}>ⓘ 分组/调仓/方向:单因子时生效;多因子复合为透传</div> : null}
       </div>
