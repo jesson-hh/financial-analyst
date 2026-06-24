@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""#7 FinCast 桥接(离线·无 GPU)：把 qlib 侧 FinCast 预测 → guanlan 自有 parquet。
+"""[DEPRECATED 2026-06-23 · Spec 2] FinCast 生成已港进 guanlan,改用
+scripts/fincast_predict.py(guanlan 自有·读 guanlan close·直写 var/v4_fincast_pred.parquet)。
+本桥接(stocks→guanlan 搬数据)不再需要;保留仅作历史/回退兼容。
+
+#7 FinCast 桥接(离线·无 GPU)：把 qlib 侧 FinCast 预测 → guanlan 自有 parquet。
 
 生产端 `G:/stocks/tsfm_exp/scripts/fincast_daily_predict.py`(零样本 FinCast v1·GPU·conda
 `stocks` 环境)把每日预测写到 `G:/stocks/stock_data/parquet/fincast_daily_pred.parquet`

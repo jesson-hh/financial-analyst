@@ -45,6 +45,9 @@ var/
 .verify_tmp/
 # 大数据 artifacts(parquet,行情/主线)— 数据非源码,留本地
 guanlan_v2/strategy/vendor/artifacts/
+# Spec 2: vendored FinCast 模型代码 + 4GB 权重(外部·git clone vincent05r/FinCast-fts)
+vendor/fincast_repo/
+vendor/models/
 # 本地 agent / 编辑器配置
 .claude/
 # 散落服务 stdout/stderr 转储
