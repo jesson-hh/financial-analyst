@@ -25,6 +25,7 @@ const SPECS = {
   formula:  { title: '公式输入', cat: 'io', inputs: [], outputs: [{ id: 'out', label: '公式', dt: 'series' }], params: [{ id: 'expr', label: '表达式', type: 'text', value: 'close' }] },
   factorlib:{ title: '因子库', cat: 'io', inputs: [], outputs: [{ id: 'out', label: '因子', dt: 'series' }], params: [{ id: 'name', label: '已选因子', type: 'text', value: '' }, { id: 'expr', label: '表达式', type: 'text', value: '' }] },
   model:    { title: '模型(研究库)', cat: 'io', inputs: [], outputs: [{ id: 'out', label: '排名', dt: 'series' }], params: [{ id: 'model_id', label: '已选模型', type: 'text', value: '' }, { id: 'model_name', label: '模型名', type: 'text', value: '' }] },
+  validate: { title: 'CPCV 验证', cat: 'fa', inputs: [{ id: 'model', label: '模型', dt: 'series' }], outputs: [{ id: 'report', label: '验证', dt: 'validation' }], params: [{ id: 'model_id', label: '已选模型', type: 'text', value: '' }, { id: 'model_name', label: '模型名', type: 'text', value: '' }, { id: 'tier', label: '档位', type: 'select', value: 'strict', options: [{ value: 'strict', label: '严格(全历史 retrain-CPCV)' }, { value: 'quick', label: '快验(读冻结快照·秒级)' }], hint: '严格=全历史按组合净化交叉验证(CPCV)重训出路径分布(~分钟·异步);快验=读已积累的真OOS快照算夏普/DSR(秒级·零看未来,目前仅生产prod有快照,变体会拿到prod数据)。' }, { id: 'n_groups', label: '组数 N', type: 'step', value: 6, step: 1, hint: 'CPCV 连续切 N 段(严格档生效)。' }, { id: 'k', label: '测试组 k', type: 'step', value: 2, step: 1, hint: '每次取 C(N,k) 组当测试段;N=6,k=2 → 15 条路径。' }, { id: 'purge', label: 'purge 日', type: 'step', value: 5, step: 1, hint: '挖掉测试段前 N 个交易日(标签窗会探入测试段,防泄漏)。' }, { id: 'embargo', label: 'embargo 日', type: 'step', value: 5, step: 1, hint: '剔掉测试段后 N 个交易日(防紧邻泄漏)。' }] },
   feature:  { title: '特征工程构建', cat: 'fe', inputs: [{ id: 'feat', label: '特征公式', dt: 'series' }, { id: 'label', label: '标签公式', dt: 'series' }, { id: 'src', label: '数据源(可选)', dt: 'series' }], outputs: [{ id: 'fe', label: '特征工程', dt: 'fe' }], params: [{ id: 'tag', label: '标签(默认收益)', type: 'text', value: 'IC', hint: '不连上面「标签公式」端口时的默认预测目标;IC / fwd_ret 都 = 未来收益,一般不用改。想自定义预测目标,就把一个「公式输入」连到「标签公式」端口。' }] },
   xgb:      { title: 'XGBoost 模型', cat: 'ml', inputs: [{ id: 'fe', label: '特征工程', dt: 'fe' }], outputs: [{ id: 'model', label: '模型', dt: 'model' }], params: [{ id: 'trees', label: '决策树数量', type: 'step', value: 100, step: 10 }, { id: 'depth', label: '最大深度', type: 'step', value: 3, step: 1 }, { id: 'lr', label: '学习率', type: 'step', value: 0.1, step: 0.01, dec: 2 }, { id: 'sub', label: '子样本比例', type: 'step', value: 1.0, step: 0.1, dec: 2 }] },
   lgbm:     { title: 'LightGBM 模型', cat: 'ml', inputs: [{ id: 'fe', label: '特征工程', dt: 'fe' }], outputs: [{ id: 'model', label: '模型', dt: 'model' }], params: [{ id: 'leaves', label: '叶子数', type: 'step', value: 31, step: 1 }, { id: 'lr', label: '学习率', type: 'step', value: 0.05, step: 0.01, dec: 2 }] },
@@ -54,6 +55,7 @@ const CATALOG = [
   { g: '03 · 机器学习', items: ['xgb', 'lgbm', 'svm', 'rf', 'nn', 'lstm'] },
   { g: '04 · 因子相关', items: ['pca', 'spearman', 'iccalc', 'mf', 'analysis', 'tsic', 'event', 'relstat'] },
   { g: '05 · 回测相关', items: ['portfolio', 'backtest', 'risk', 'garch', 'attrib', 'tvbeta'] },
+  { g: '06 · 模型验证', items: ['validate'] },
 ];
 
 // ───────── 工具: 节点布局 / 端口坐标 ─────────
@@ -787,7 +789,7 @@ async function runGraph(nodes, edges, hooks) {
   const src = nodes.find(n => n.type === 'source');
   const universe = src ? _universeOf(src.params) : 'csi_fast';
   const allExprs = (deriveCall(nodes) || {}).exprs || [];  // mf 兜底 (上游占位拿不到逐端口 expr 时退回全图表达式集合)
-  const TERMINAL_DT = { report: 1, ic: 1, result: 1, portfolio: 1, tsic: 1, event: 1, relstat: 1, risk: 1, garch: 1, attrib: 1, tvbeta: 1 };
+  const TERMINAL_DT = { report: 1, ic: 1, result: 1, portfolio: 1, tsic: 1, event: 1, relstat: 1, risk: 1, garch: 1, attrib: 1, tvbeta: 1, validation: 1 };
   let lastResult = null, firstErr = '', anyFellBack = false; const nodeErrs = [];
 
   for (const id of order) {
@@ -826,7 +828,7 @@ async function runGraph(nodes, edges, hooks) {
       // 终端: 若本节点有任一 output 端口 dt ∈ TERMINAL_DT 且其载荷是真报告 → 记为结果
       spec.outputs.forEach(p => {
         const payload = outputs[id][p.id];
-        if (TERMINAL_DT[p.dt] && payload && !payload.__pending && (payload.ic || payload.portfolio || payload.composite || payload._compose != null || payload.holdings || payload.weights || payload.codes_tsic || payload.car_curve || payload.codes_relstat || payload.method === 'risk' || payload.method === 'garch' || payload.method === 'attrib' || payload.method === 'tvbeta')) {
+        if (TERMINAL_DT[p.dt] && payload && !payload.__pending && (payload.ic || payload.portfolio || payload.composite || payload._compose != null || payload.holdings || payload.weights || payload.codes_tsic || payload.car_curve || payload.codes_relstat || payload.method === 'risk' || payload.method === 'garch' || payload.method === 'attrib' || payload.method === 'tvbeta' || payload.__dt === 'validation')) {
           lastResult = payload;
         }
       });
@@ -1083,7 +1085,7 @@ function WorkflowApp() {
   // 客户端再校验 (审核): 用 SPECS 复核 LLM 图, 与画布既有连线规则同源 (type∈目录 / 每条边 from.dt===to.dt / ≥1 终端 / model 只经 mf)。返回 '' 即合法, 否则首个违例文案。
   const validateGraph = (gn, ge) => {
     if (!Array.isArray(gn) || !gn.length) return '图为空 — 无节点';
-    const TERM = { report: 1, ic: 1, result: 1, portfolio: 1, tsic: 1, event: 1, relstat: 1 };   // 与 runGraph 的 TERMINAL_DT 同源 (analysis/iccalc/backtest/portfolio/tsic/event/relstat)
+    const TERM = { report: 1, ic: 1, result: 1, portfolio: 1, tsic: 1, event: 1, relstat: 1, validation: 1 };   // 与 runGraph 的 TERMINAL_DT 同源 (analysis/iccalc/backtest/portfolio/tsic/event/relstat)
     const byId = {};
     for (const n of gn) {
       if (!n || typeof n.id !== 'string' || !n.id) return '存在无 id 节点';
