@@ -91,7 +91,10 @@ function ModelWorkshop({ API, models, reloadModels, flash, onPick, onClose }) {
       setSelBase(new Set(fs));   // 默认全选
       if (!fs.length) setBaseNote('未取到基础特征');
     }).catch(() => setBaseNote('基础特征拉取失败'));
-    return () => { if (_poll.current) { clearInterval(_poll.current); _poll.current = null; } };
+    return () => {
+      if (_poll.current) { clearInterval(_poll.current); _poll.current = null; }
+      if (_valPoll.current) { clearInterval(_valPoll.current); _valPoll.current = null; }
+    };
   }, []);  // eslint-disable-line react-hooks/exhaustive-deps
 
   const libFactors = (window.XG_FACTORS || []).filter(f => f && f.id);
@@ -156,7 +159,14 @@ function ModelWorkshop({ API, models, reloadModels, flash, onPick, onClose }) {
     if (!r || !r.ok) { say('严格验证', (r && r.reason) || '启动失败'); return; }
     say('严格验证', '已起(~分钟级),完成回灌');
     if (_valPoll.current) clearInterval(_valPoll.current);
+    let _valPollCount = 0;
     _valPoll.current = setInterval(async () => {
+      _valPollCount++;
+      if (_valPollCount > 160) {   // ~10.6 分钟上限(strict 通常 1–数分钟)
+        clearInterval(_valPoll.current); _valPoll.current = null;
+        say('严格验证', '严格验证轮询超时(>10min)—— 后端可能仍在跑,稍后到模型工坊看结果');
+        return;
+      }
       let s = {};
       try { const sr = await fetch(API + '/screen/model/validate/status'); s = ((await sr.json()).state) || {}; } catch (e) { return; }
       if (!s.running && s.phase === 'done') {

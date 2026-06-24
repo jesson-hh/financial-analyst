@@ -2106,7 +2106,7 @@ function ResultsDrawer({ result, loading, error, onClose, onSaveFactor, onSaveCa
             <>
               <div style={{ display: 'flex', gap: 22, marginBottom: 14, flexWrap: 'wrap' }}>
                 {[['Deflated Sharpe (DSR)', f2(result.dsr), ((result.dsr != null && result.dsr >= 0.5) ? 'var(--zhu)' : 'var(--dai)')],
-                  ['夏普 · 中位', f2(sd.median), 'var(--ink)'],
+                  ['夏普 · 中位', f2(sd.median != null ? sd.median : result.sharpe), 'var(--ink)'],
                   ['夏普 · 5%', f2(sd.p05), 'var(--ink-1)'],
                   ['夏普 · 95%', f2(sd.p95), 'var(--ink-1)'],
                   ['IC · 中位', f3(icMid), 'var(--ink-1)'],
