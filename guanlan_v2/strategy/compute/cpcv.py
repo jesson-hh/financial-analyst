@@ -163,6 +163,10 @@ def _registry_trials() -> int:
 def quick_validate(model_id: Optional[str] = None, n_trials: Optional[int] = None) -> Dict[str, Any]:
     """读 model_health 冻结快照 → 多头超额夏普 + DSR + RankIC 分布。秒级零看未来;不足→ready=False。
     仅 prod 当前积累快照;变体暂无 → ready=False(诚实)。"""
+    mid = model_id or "prod"
+    if mid != "prod":
+        return {"ready": False, "model_id": mid,
+                "note": "变体暂无独立快照(快验只读 prod 冻结快照)——请用严格档验证本变体"}
     from guanlan_v2.strategy import model_health as mh
     if not mh.SCORE_HISTORY_PARQUET.exists():
         return {"ready": False, "model_id": model_id or "prod",
@@ -192,12 +196,18 @@ def quick_validate(model_id: Optional[str] = None, n_trials: Optional[int] = Non
 
 def retrain_core(kind, panel_ctx, train_mask, test_dates):
     """train_mask 行 fit、test_dates 行 predict → test 行预测分 Series(MultiIndex datetime,code)。
-    panel_ctx 含已物化 `_fe`(特征)+ `_label`;v4-lgb 用 LGB_PARAMS,tree 用 workflow._build_model。
-    不改 v4.py / model_workflow.py。"""
+    panel_ctx 含已物化 `_fe`(特征)+ `_label`;v4-lgb 用 LGB_PARAMS + 复刻 prod NaN 策略(只去NaN标签行·特征fillna(0)),
+    tree 用 workflow._build_model(整行 dropna)。不改 v4.py / model_workflow.py。"""
     fe, label = panel_ctx["_fe"], panel_ctx["_label"]
-    Xtr = fe[train_mask].dropna()
-    ytr = label.reindex(Xtr.index).dropna()
-    Xtr = Xtr.reindex(ytr.index)
+    fill0 = (kind == "v4-lgb")   # 复刻 prod build_v4 的 NaN 策略
+    tr = fe[train_mask]
+    if fill0:
+        ytr = label.reindex(tr.index).dropna()
+        Xtr = tr.reindex(ytr.index).fillna(0)
+    else:
+        Xtr = tr.dropna()
+        ytr = label.reindex(Xtr.index).dropna()
+        Xtr = Xtr.reindex(ytr.index)
     if len(Xtr) < 200:
         return pd.Series(dtype="float64")
     if kind == "v4-lgb":
@@ -211,7 +221,8 @@ def retrain_core(kind, panel_ctx, train_mask, test_dates):
         model.fit(Xtr.values, ytr.values)
         predict = model.predict
     dts = fe.index.get_level_values("datetime")
-    Xte = fe[pd.Index(dts).isin(set(pd.to_datetime(test_dates)))].dropna()
+    Xte = fe[pd.Index(dts).isin(set(pd.to_datetime(test_dates)))]
+    Xte = Xte.fillna(0) if fill0 else Xte.dropna()
     if Xte.empty:
         return pd.Series(dtype="float64")
     return pd.Series(predict(Xte.values), index=Xte.index, name="pred")
@@ -277,7 +288,8 @@ def strict_validate(model_id=None, n_groups=6, k=2, purge=5, embargo=5,
         return {"ready": False, "model_id": mid, "note": "面板物化失败"}
     fe, label = ctx["_fe"], ctx["_label"]
     dts = pd.DatetimeIndex(sorted(set(fe.index.get_level_values("datetime"))))
-    splits = make_splits(dts, n_groups, k, purge, embargo)
+    eff_purge = max(int(purge), int(horizon) + 1)   # 修:purge 须 ≥ 标签前向跨度(v4 标签 shift(-1)..shift(-6)=6 bar),否则 tp-6 训练行标签探入测试段
+    splits = make_splits(dts, n_groups, k, eff_purge, embargo)
     if not splits:
         return {"ready": False, "model_id": mid, "note": "交易日不足以切分"}
     paths, all_excess = [], []

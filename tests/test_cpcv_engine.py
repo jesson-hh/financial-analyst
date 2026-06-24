@@ -49,3 +49,14 @@ def test_dsr_basic_properties():
 def test_dsr_insufficient_returns_none():
     from guanlan_v2.strategy.compute import cpcv
     assert cpcv.deflated_sharpe([0.01, 0.02], n_trials=5) is None
+
+
+def test_make_splits_purge6_covers_6bar_label():
+    import pandas as pd
+    from guanlan_v2.strategy.compute import cpcv
+    dates = pd.bdate_range("2022-01-03", periods=120)
+    splits = cpcv.make_splits(dates, n_groups=6, k=1, purge=6, embargo=5)
+    for tr, te in splits:
+        te_sorted = sorted(te); trs = set(tr)
+        pre6 = [d for d in dates if d < te_sorted[0]][-6:]
+        assert all(d not in trs for d in pre6), "purge=6 未覆盖标签 6-bar 前向跨度"

@@ -34,6 +34,13 @@ def test_quick_validate_insufficient_days(tmp_path, monkeypatch):
     assert out["ready"] is False and "证据不足" in out["note"]
 
 
+def test_quick_validate_variant_no_prod_leak(tmp_path, monkeypatch):
+    from guanlan_v2.strategy import model_health as mh
+    monkeypatch.setattr(mh, "SCORE_HISTORY_PARQUET", tmp_path / "score_hist.parquet")
+    out = cpcv.quick_validate(model_id="m_variant123")
+    assert out["ready"] is False and "变体" in out["note"]
+
+
 def test_retrain_core_tree_kind_predicts_test_rows():
     from guanlan_v2.strategy.compute import cpcv
     import numpy as np, pandas as pd
