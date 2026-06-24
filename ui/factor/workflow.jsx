@@ -2077,6 +2077,54 @@ function ResultsDrawer({ result, loading, error, onClose, onSaveFactor, onSaveCa
   const [openRow, setOpenRow] = useState(null);      // 时序IC 逐股展开行(点击看完整单票体检)
   // 悬停 helper:贴到 svg 柱/点上,鼠标移入即时显示详情、跟随光标,移出消失。
   const _hv = t => ({ onMouseMove: e => setTip({ x: e.clientX, y: e.clientY, t }), onMouseLeave: () => setTip(null) });
+  // —— CPCV 验证结果:独立视图(DSR / 夏普分布 / IC;诚实缺席 ready=false 显 note,不编数) ——
+  if (result && result.__dt === 'validation' && !loading && !error) {
+    const ready = result.ready === true;
+    const sd = result.sharpe_dist || {};
+    const f2 = v => (v == null || v !== v) ? '—' : (+v).toFixed(2);
+    const f3 = v => (v == null || v !== v) ? '—' : (+v).toFixed(3);
+    const icMid = (result.ic_mean != null) ? result.ic_mean : (result.ic_dist && result.ic_dist.median);
+    const tierLabel = result.tier === 'quick' ? '快验 · 读冻结快照' : '严格 · 全历史 retrain-CPCV';
+    return (
+      <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: expanded ? 'calc(100vh - 90px)' : 304, background: 'var(--paper)', borderTop: '1px solid var(--ink)', boxShadow: '0 -12px 32px rgba(28,24,20,0.12)', zIndex: 8, display: 'flex', flexDirection: 'column', animation: 'fadeIn .3s ease', transition: 'height .2s ease' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 18px', borderBottom: '1px solid var(--line-soft)' }}>
+          <span style={{ width: 20, height: 20, borderRadius: 5, background: ready ? 'var(--dai)' : 'var(--ink-3)', color: 'var(--paper)', fontFamily: 'var(--serif)', fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{ready ? '✓' : 'ⓘ'}</span>
+          <span className="serif" style={{ fontSize: 14, fontWeight: 600 }}>CPCV 验证 · {result.model_name || result.model_id}</span>
+          <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>{tierLabel}{result.asof ? ' · ' + result.asof : ''}</span>
+          <span style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+            <span onClick={() => setExpanded(e => !e)} className="serif" style={{ fontSize: 12, color: 'var(--ink-1)', border: '1px solid var(--line)', borderRadius: 7, padding: '5px 11px', cursor: 'pointer' }}>{expanded ? '⤡ 收起' : '⤢ 展开'}</span>
+            <span onClick={onClose} style={{ fontSize: 16, color: 'var(--ink-3)', cursor: 'pointer', padding: '0 4px' }}>✕</span>
+          </span>
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '13px 18px' }}>
+          {!ready ? (
+            <div style={{ padding: '10px 13px', background: 'rgba(28,24,20,0.03)', border: '1px solid var(--line-soft)', borderRadius: 8, fontSize: 12, color: 'var(--ink-1)', lineHeight: 1.5 }}>
+              <b>证据不足 / 未就绪</b>
+              <div style={{ marginTop: 4, color: 'var(--ink-2)' }}>{result.note || result.error || '无可用验证结果'}</div>
+            </div>
+          ) : (
+            <>
+              <div style={{ display: 'flex', gap: 22, marginBottom: 14, flexWrap: 'wrap' }}>
+                {[['Deflated Sharpe (DSR)', f2(result.dsr), ((result.dsr != null && result.dsr >= 0.5) ? 'var(--zhu)' : 'var(--dai)')],
+                  ['夏普 · 中位', f2(sd.median), 'var(--ink)'],
+                  ['夏普 · 5%', f2(sd.p05), 'var(--ink-1)'],
+                  ['夏普 · 95%', f2(sd.p95), 'var(--ink-1)'],
+                  ['IC · 中位', f3(icMid), 'var(--ink-1)'],
+                  ['路径数', (result.n_paths != null ? result.n_paths : '—'), 'var(--ink-1)'],
+                  ['试验数(deflate)', (result.n_trials != null ? result.n_trials : '—'), 'var(--ink-1)']].map(([l, v, c], i) => (
+                  <div key={i}><div className="mono" style={{ fontSize: 8.5, letterSpacing: '.08em', color: 'var(--ink-3)' }}>{l}</div><div className="mono" style={{ fontSize: 17, fontWeight: 600, color: c, marginTop: 2 }}>{v}</div></div>
+                ))}
+              </div>
+              <RCard title="说明">
+                <div style={{ fontSize: 11, color: 'var(--ink-2)', lineHeight: 1.5 }}>{result.note || ''}</div>
+                <div style={{ marginTop: 6, fontSize: 10, color: 'var(--ink-3)', lineHeight: 1.5 }}>DSR = 扣除「试了多个变体」的运气后,真夏普 &gt; 噪声基准的概率(0–1);越接近 1 越可信。{result.tier === 'quick' ? '快验读已积累的真 OOS 快照(零看未来)。' : ('严格档全历史按组合净化交叉验证(purge+embargo)重训,出 ' + (result.n_paths || 0) + ' 条路径分布。')}</div>
+              </RCard>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
   // —— 个股时序IC 结果:独立视图(report 那套 KPI/十分位/净值不适用单票) ——
   if (result && result.codes_tsic && !loading && !error) {
     const rows = result.codes_tsic || [], sm = result.summary || {};
