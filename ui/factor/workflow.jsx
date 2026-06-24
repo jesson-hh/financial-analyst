@@ -345,6 +345,31 @@ const NODE_EXEC = {
     const rows = j.rows || [];
     return { out: { __dt: 'series', kind: 'ranking', model_id: id, _label: String(params.model_name || '模型') || id, date: j.date, rows, series: Object.fromEntries(rows.map(r => [r.code, r.score])) } };
   },
+  // —— CPCV 验证节点: 取 model_id(优先上游 model 节点 → 否则本节点选择器)→ 调 ① /screen/model/validate。
+  //    quick: 内联取 result(秒级)。strict: POST 起异步子进程 → 每 4s 轮询 /status 至 done(~分钟级,上限~10min)。
+  //    出 dt=validation 终端载荷送抽屉。诚实: ready=false 原样带 note 不编数; 启动失败抛错; 轮询超时诚实标注。——
+  validate: async (inputs, params, ctx) => {
+    const id = String((inputs.model && inputs.model.model_id) || params.model_id || '').trim();
+    if (!id) throw new Error('CPCV 验证: 未选模型 —— 接一个「模型(研究库)」节点,或点本节点「研究库」选一个');
+    const name = String((inputs.model && inputs.model._label) || params.model_name || '') || id;
+    const tier = String(params.tier || 'strict');
+    if (tier === 'quick') {
+      const r = await _post('/screen/model/validate', { id, tier: 'quick' });
+      if (!r || !r.ok) throw new Error('CPCV 快验: ' + ((r && r.reason) || '/screen/model/validate 失败'));
+      return { report: Object.assign({ __dt: 'validation', tier: 'quick', model_id: id, model_name: name }, r.result || {}) };
+    }
+    const r = await _post('/screen/model/validate', { id, tier: 'strict', n_groups: +params.n_groups || 6, k: +params.k || 2, purge: +params.purge || 5, embargo: +params.embargo || 5 });
+    if (!r || !r.ok) throw new Error('CPCV 严格验证: ' + ((r && r.reason) || '启动失败'));
+    let st = {}, polls = 0;
+    while (polls++ < 160) {                                  // ~10.6 分钟上限(strict 通常 1–数分钟)
+      await new Promise(res => setTimeout(res, 4000));
+      const s = await _get('/screen/model/validate/status');
+      st = (s && s.state) || st;
+      if (!st.running && st.phase === 'done') break;
+    }
+    if (st.phase !== 'done') return { report: { __dt: 'validation', tier: 'strict', model_id: id, model_name: name, ready: false, note: '严格验证轮询超时(>10min)—— 后端可能仍在跑,稍后到模型工坊看结果' } };
+    return { report: Object.assign({ __dt: 'validation', tier: 'strict', model_id: id, model_name: name }, st.result || {}, st.ok ? {} : { error: st.error, ready: false, note: '严格验证失败: ' + (st.error || '') }) };
+  },
   // —— 特征工程构建: 收上游 feat/label 表达式 + params.tag + ctx.universe → POST /feature/build,
   //    后端经 compile_factor→winsorize/zscore→forward_simple_returns 在 universe 面板物化真 X/y,
   //    回真统计 + 可复算 fe spec (供 P3 ML 重建训练集)。dt=fe 非终端 → 不送抽屉, 仅置节点 done。
