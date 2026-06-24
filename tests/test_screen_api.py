@@ -156,3 +156,28 @@ def test_model_endpoints(monkeypatch, tmp_path):
     assert c.post("/screen/model/delete", json={"id":"prod"}).json()["ok"] is False
     assert c.post("/screen/model/delete", json={"id":"m_seed"}).json()["ok"] is True
     assert c.get("/screen/base_features").json()["ok"] is True
+
+
+def test_model_train_second_concurrent_returns_busy(monkeypatch):
+    """回归:第2个 /model/train 命中 busy-guard 时,不因 _model_public_state() 重入锁而永久死锁。"""
+    import guanlan_v2.screen.api as api
+
+    # 桩:让子进程 runner 成 no-op,_MODEL_STATE["running"] 保持 True 直到测试结束。
+    monkeypatch.setattr(api, "_run_model_train_subprocess", lambda spec: None)
+    # 确保从干净状态出发(防上一个测试污染)。
+    api._MODEL_STATE["running"] = False
+
+    app = _client()  # 复用本文件的 _client() helper
+    body = {"name": "deadlock-test", "factor_ids": [], "base_features": ["rev_20"]}
+
+    j1 = app.post("/screen/model/train", json=body).json()
+    assert j1.get("ok") is True, f"第1次 train 应成功启动: {j1}"
+
+    # 第2次命中 busy-guard。修复前此处会因 _model_public_state() 重入 _MODEL_LOCK 而永久挂起。
+    j2 = app.post("/screen/model/train", json=body).json()
+    assert j2.get("ok") is False, f"第2次 train 应返回 busy: {j2}"
+    assert "已有训练在跑" in j2.get("reason", ""), f"reason 字段不对: {j2}"
+    assert "state" in j2, "busy 响应应携带 state 字段"
+
+    # 收尾:复位防跨测污染
+    api._MODEL_STATE["running"] = False

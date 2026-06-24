@@ -1343,12 +1343,14 @@ def build_screen_router() -> APIRouter:
         if not fids and not base:
             return JSONResponse({"ok": False, "reason": "至少选 1 个因子"})
         with _MODEL_LOCK:
-            if _MODEL_STATE["running"]:
-                return JSONResponse({"ok": False, "reason": "已有训练在跑", "state": _model_public_state()})
-            vid = "m_" + uuid.uuid4().hex[:10]
-            _MODEL_STATE.update({"running": True, "phase": "starting", "label": "启动训练子进程…",
-                "step": 0, "started_at": _t.time(), "ended_at": None, "ok": None, "error": None,
-                "variant_id": vid, "lines": []})
+            already = _MODEL_STATE["running"]
+            if not already:
+                vid = "m_" + uuid.uuid4().hex[:10]
+                _MODEL_STATE.update({"running": True, "phase": "starting", "label": "启动训练子进程…",
+                    "step": 0, "started_at": _t.time(), "ended_at": None, "ok": None, "error": None,
+                    "variant_id": vid, "lines": []})
+        if already:
+            return JSONResponse({"ok": False, "reason": "已有训练在跑", "state": _model_public_state()})
         spec = {"variant_id": vid, "name": name, "factor_ids": fids, "base_features": base,
                 "universe": str(body.get("universe") or "all"), "created": _time_iso()}
         _threading.Thread(target=lambda: _safe(lambda: _run_model_train_subprocess(spec)), daemon=True).start()
@@ -1368,7 +1370,10 @@ def build_screen_router() -> APIRouter:
         from guanlan_v2.strategy.compute import cpcv
         mid = str(body.get("id") or "prod"); tier = str(body.get("tier") or "quick")
         if tier == "quick":
-            return JSONResponse({"ok": True, "result": cpcv.quick_validate(model_id=mid)})
+            try:
+                return JSONResponse({"ok": True, "result": cpcv.quick_validate(model_id=mid)})
+            except Exception as e:  # noqa: BLE001 — 引擎/坏parquet → 诚实 ok:false 而非 500
+                return JSONResponse({"ok": False, "note": f"{type(e).__name__}: {e}"})
         with _VALIDATE_LOCK:
             already = _VALIDATE_STATE["running"]
             if not already:
