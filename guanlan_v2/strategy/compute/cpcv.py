@@ -324,6 +324,50 @@ def strict_validate(model_id=None, n_groups=6, k=2, purge=5, embargo=5,
             "note": "严格档:全历史 retrain-CPCV(purge+embargo);DSR 按 registry 变体数 deflate"}
 
 
+DL_GATE_DSR = 0.5        # 激活建议门槛:DSR ≥ 0.5(真夏普>噪声基准概率过半)
+DL_SOURCE_TRIALS = 8     # DSR deflate 的试验数(DL 架构候选 fincast/lstm/gat + 调参,保守取 8)
+
+
+def validate_dl_source(path, score_col: str = "pred_ret_5d", n_trials: int = DL_SOURCE_TRIALS) -> Dict[str, Any]:
+    """读 DL 源预测表 → 用真已实现 fwd5d(PIT)算 多头超额夏普 + DSR + RankIC(复用本模块原语,零新算法)。
+    缺文件/缺列/不足 → ready=False(诚实)。passes_gate = DSR ≥ DL_GATE_DSR(建议性,激活仍人工)。"""
+    import os
+    if not path or not os.path.exists(path):
+        return {"ready": False, "path": path, "note": "证据不足:预测文件不存在"}
+    try:
+        df = pd.read_parquet(path)
+    except Exception as e:  # noqa: BLE001
+        return {"ready": False, "path": path, "note": f"读取失败({type(e).__name__})"}
+    need = {"eval_date", "instrument", score_col}
+    if not need.issubset(df.columns):
+        try:
+            df = df.reset_index()
+        except Exception:  # noqa: BLE001
+            pass
+    if not need.issubset(df.columns):
+        return {"ready": False, "path": path, "note": f"缺 {need} 列"}
+    hist = pd.DataFrame({"date": pd.to_datetime(df["eval_date"]).dt.strftime("%Y-%m-%d"),
+                         "code": df["instrument"].astype(str),
+                         "score": df[score_col].astype(float)})
+    fwd = _fwd_returns_for_snapshots(hist)   # 真函数只读 date/code 列(score 列无害);传完整 hist 便于桩测复用 score
+    hist = hist.assign(fwd=[fwd.get((r.date, r.code)) for r in hist.itertuples()])
+    realized = hist.dropna(subset=["fwd"]).copy()
+    n_days = int(realized["date"].nunique())
+    if n_days < MIN_OOS_DAYS:
+        return {"ready": False, "path": path, "n_oos_days": n_days,
+                "note": f"证据不足:已实现 OOS 仅 {n_days} 天(<{MIN_OOS_DAYS})"}
+    realized["lgb_pct"] = realized.groupby("date")["score"].rank(pct=True)   # 把"被排名分"塞进 lgb_pct 列复用 decile_metrics
+    m = decile_metrics(realized[["date", "code", "lgb_pct", "fwd"]])
+    dsr = deflated_sharpe(m["long_excess_ret"], n_trials=n_trials)
+    ic_dist = m["rank_ic"]
+    return {"ready": True, "path": path, "n_oos_days": n_days,
+            "sharpe": sharpe(m["long_excess_ret"]), "dsr": dsr,
+            "ic_mean": (float(np.mean(ic_dist)) if ic_dist else None),
+            "ic_dist": [round(x, 4) for x in ic_dist], "n_trials": n_trials,
+            "passes_gate": bool(dsr is not None and dsr >= DL_GATE_DSR),
+            "note": f"DL 源验证(PIT 真已实现 fwd5d);DSR≥{DL_GATE_DSR} 建议激活,激活仍人工"}
+
+
 if __name__ == "__main__":   # python -m guanlan_v2.strategy.compute.cpcv <spec.json>(严格档子进程)
     import json, sys
     spec = json.loads(open(sys.argv[1], encoding="utf-8").read())
