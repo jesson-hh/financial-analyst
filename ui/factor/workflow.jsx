@@ -1807,6 +1807,43 @@ function PromoteModelPanel({ node, nodes, edges, onNotify }) {
   );
 }
 
+// LSTM 节点「发布为 DL 源」: 据上游 recipe(universe/params)→ POST /model/publish_dl
+// (后端起子进程:训练 → 写 var/dl_pred_lstm.parquet → regen 折进 v4,异步)→ 轮询 status。仅 lstm 节点渲染。
+function PublishDlPanel({ node, nodes, edges, onNotify }) {
+  const [busy, setBusy] = useState(false);
+  const timerRef = useRef(null);
+  useEffect(() => () => { if (timerRef.current) clearInterval(timerRef.current); }, []);
+  const notify = (t, b) => { if (onNotify) onNotify(t, b, 6500); };
+  const publish = async (e) => {
+    e.stopPropagation();
+    if (busy) return;
+    const recipe = deriveRecipeForNode(node, nodes, edges);
+    setBusy(true);
+    try {
+      const name = String((node.params && node.params.name) || '').trim() || 'LSTM·DL源';
+      const r = await _post('/model/publish_dl', { kind: 'lstm', name, recipe });
+      if (!r || !r.ok) { setBusy(false); notify('发布失败', (r && r.reason) || '后端拒绝'); return; }
+      notify('已起 LSTM 发布(分钟级)', '训练 → 折进 v4(regen);完成后选股页徽章多一源 lstm');
+      if (timerRef.current) clearInterval(timerRef.current);
+      timerRef.current = setInterval(async () => {
+        const s = (await _get('/model/publish_dl/status')) || {};
+        const st = s.state || {};
+        if (!st.running && st.phase === 'done') {
+          clearInterval(timerRef.current); timerRef.current = null; setBusy(false);
+          notify(st.ok ? '已发布 DL 源 ✓' : '发布失败',
+                 st.ok ? '已折进 v4 · 重启 9999 后选股页徽章显 lstm 源' : (st.error || ''));
+        }
+      }, 3000);
+    } catch (err) { setBusy(false); notify('发布失败', String((err && err.message) || err)); }
+  };
+  return (
+    <div onPointerDown={e => e.stopPropagation()} style={{ marginTop: 6, paddingTop: 6, borderTop: '1px dashed var(--line)' }}>
+      <div onClick={publish} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, height: 22, borderRadius: 6, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.55 : 1, fontSize: 11, fontWeight: 500, color: 'var(--jin)', border: '1px solid var(--jin)', background: 'rgba(138,111,63,0.06)' }}>{busy ? '发布中(训练+regen)…' : '发布为 DL 源 ⤓'}</div>
+      <div style={{ marginTop: 5, fontSize: 9.5, color: 'var(--ink-3)', lineHeight: 1.4 }}>全市场 38 因子 PIT 训练 → 混进 v4(LGB 仍主导)→ 选股页徽章多一源(异步·分钟级)。</div>
+    </div>
+  );
+}
+
 // 数据源「数据体检」: 点一下真打后端 /data/probe, 显示该池真实覆盖(票数/交易日/字段/覆盖率)。
 // 只读真查询(不写盘); 无后端 / 失败 → 诚实显红, 不谎报。仅 source 节点渲染(见 Node 体内注入)。
 function SourceProbe({ node }) {
@@ -1911,6 +1948,7 @@ function Node({ node, sel, onDrag, onStartWire, onParam, onDel, onSel, status, n
         {node.type === 'model' ? <ModelLibPanel node={node} onParam={onParam} /> : null}
         {node.type === 'validate' ? <ModelLibPanel node={node} onParam={onParam} /> : null}
         {(node.type === 'xgb' || node.type === 'lgbm' || node.type === 'rf') ? <PromoteModelPanel node={node} nodes={nodes} edges={edges} onNotify={onNotify} /> : null}
+        {node.type === 'lstm' ? <PublishDlPanel node={node} nodes={nodes} edges={edges} onNotify={onNotify} /> : null}
         {node.type === 'analysis' ? <div title="单因子(直连公式 / 单特征 Spearman·PCA)→ 分组/调仓/方向 经壳内 /factor/report2 真生效;经多模型或多因子合成的复合因子,报告已在上游按其设置算好,此处透传(这三项对其不适用)。" style={{ marginTop: 6, paddingTop: 6, borderTop: '1px dashed var(--line)', fontSize: 9, color: 'var(--ink-3)', lineHeight: 1.4 }}>ⓘ 分组/调仓/方向:单因子时生效;多因子复合为透传</div> : null}
       </div>
     </div>
