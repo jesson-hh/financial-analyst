@@ -68,6 +68,8 @@ def main() -> None:
     ap.add_argument("--train-start", default="2022-01-01")
     ap.add_argument("--window", type=int, default=60)
     ap.add_argument("--topk", type=int, default=20)
+    ap.add_argument("--universe", default="all",
+                    help="all=全市场(默认);csi300/csi500/csi800/csi1000=指数成分(节点少·稠密图省显存,适合首跑打通)")
     ap.add_argument("--provider", default=DEFAULT_PROVIDER)
     args = ap.parse_args()
 
@@ -77,8 +79,12 @@ def main() -> None:
     print(f"评估日 {eval_date} · device {device} · provider {args.provider}", flush=True)
 
     loader = QlibBinaryLoader(args.provider)
-    codes = list_all_instruments(args.provider)
-    print(f"全市场 {len(codes)} 码,读 close/volume 面板 ...", flush=True)
+    if args.universe in ("all", "", None):
+        codes = list_all_instruments(args.provider)
+    else:
+        from financial_analyst.data.universe import resolve_universe_codes
+        codes = [str(c) for c in resolve_universe_codes(args.universe)]
+    print(f"universe={args.universe} · {len(codes)} 码,读 close/volume 面板 ...", flush=True)
     cp, vp = _read_panels(loader, codes, eval_date)
 
     rdates = [d for d in rebalance_dates(cp.index, horizon=HORIZON, start=args.train_start)
