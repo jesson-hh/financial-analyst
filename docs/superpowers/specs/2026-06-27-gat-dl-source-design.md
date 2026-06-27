@@ -111,13 +111,16 @@ var/dl_pred_gat.parquet   (契约: eval_date / instrument / pred_ret_5d / train_
 
 跑法:`D:/app/miniconda/envs/stocks/python.exe scripts/gat_predict.py --date 2026-06-27`
 
-内含(因依赖 torch,放脚本而非 gat_io,与 FinCastAdapter 同):
+GAT 模型(torch)抽到**可 import 的 `guanlan_v2/strategy/compute/gat_model.py`**(主 env 有 torch 2.10 CPU,
+故可 CPU 单测掩码注意力正确性;GPU 脚本 import 之。gat_io 仍 torch-free)。脚本本身只做编排:
 
-- `class GAT(nn.Module)`:2 层纯 torch 掩码图注意力(`_GATLayer`:线性投影 + `LeakyReLU(a·[hᵢ‖hⱼ])` 注意力,
-  非邻居 `-inf` 掩码 + softmax + 邻居加权聚合;多头可选,一期单头/小隐层 32),末层 `Linear→1`。
-- 训练:遍历 `rebalance_dates` 训练日,每日一个图 `(X_d, A_d, y_d)`;损失 = **横截面 z 标签上的 MSE**;
-  Adam(lr 1e-3),~60 epoch,GPU;`--device` 缺省 `cuda` 可退 `cpu`(单测/无卡可跑)。
-- 推理:对 `eval_date` 构 `(X_eval, A_eval)`(只用 `≤ eval_date` 数据)→ 前向 → `pred_ret_5d`。
+- `gat_model.py` `class GAT(nn.Module)`:2 层纯 torch 掩码图注意力(`_GATLayer`:线性投影 + `LeakyReLU(a·[hᵢ‖hⱼ])` 注意力,
+  非邻居 `-inf` 掩码 + softmax + 邻居加权聚合;一期单头/隐层 32),末层 `Linear→1`;`forward(X, A) -> (N,)`。
+- `gat_model.py` `train_gat(X_list, A_list, y_list, *, device="cpu", epochs=60, lr=1e-3, seed=0) -> GAT`:
+  遍历每日图 `(X_d, A_d, y_d)`,损失 = **横截面 z 标签上的 MSE**,Adam;返回训练好的模型。
+- `gat_model.py` `predict_gat(model, X, A, *, device="cpu") -> np.ndarray`:单日前向 → `(N,)` 预测。
+- `scripts/gat_predict.py`:引擎读 close/volume → gat_io 构每日 `(X,A,y)` → `train_gat`(`--device` 缺省 `cuda` 可退 `cpu`)
+  → 对 `eval_date` 构 `(X_eval, A_eval)`(只用 `≤ eval_date` 数据)→ `predict_gat` → `pred_ret_5d`。
 - `train_cutoff = ` 训练用到的**最末已实现标签日**(`= eval_date` 回退 `horizon` 个交易日)→ 传给
   `write_pred_rolling(..., train_cutoff=cutoff)`;`apply_dl_ensemble` 据此算 `lookahead = (eval_date ≤ cutoff)`,
   因 `cutoff < eval_date` 恒为 `False`(无前视),诚实显形。
@@ -200,11 +203,15 @@ DLSource(model_id="gat", path=str(var / "dl_pred_gat.parquet"),
 
 ## 7. 测试策略(Testing)
 
-**单测(主 env,`pytest`,无需 torch/GPU)**:
-- `tests/test_gat_io.py`:
+**单测(主 env,`pytest`;torch 仅需 CPU 2.10,无需 GPU)**:
+- `tests/test_gat_io.py`(纯 numpy/pandas,无 torch):
   - `compute_node_features` 横截面 z(均值≈0)、只用 `≤date` 数据(注入未来值不改结果)、缺失剔除;
   - `build_corr_graph` 对称 + 自环 + topk 度数上限 + 窗口不足退单位阵;
   - `forward_label` 真前向收益值正确 + 末日附近无未来标签(PIT)。
+- `tests/test_gat_model.py`(torch CPU):
+  - `GAT.forward(X,A)` 输出形状 `(N,)`、有限;
+  - **掩码生效**:把某节点的非邻居换任意值,该节点输出不变(注意力只看邻居)——这是图注意力正确性的命门测试;
+  - `train_gat` 在合成可学数据上 loss 单调下降(≥ 训练有效)。
 - `tests/test_dl_source_validate.py`:`validate_dl_source` 桩掉 `_fwd_returns_for_snapshots`(同 ① 既有 cpcv 测法),
   验:正向预测 → `dsr` 高 + `passes_gate=True`;反向预测 → 低 + False;缺文件 → `ready=False`;OOS<10 → `ready=False`。
 - 扩 `tests/test_dl_ensemble*.py`(若存在则扩,不新建重复):`default_dl_sources()` 含 `gat`;
@@ -244,11 +251,13 @@ DLSource(model_id="gat", path=str(var / "dl_pred_gat.parquet"),
 
 | 文件 | 动作 | 责任 |
 |------|------|------|
-| `guanlan_v2/strategy/compute/gat_io.py` | 新建 | 纯函数:PIT 节点特征 / 相关图 / 标签 / 换仓日 |
-| `scripts/gat_predict.py` | 新建 | conda stocks GPU:GAT 训练 + 推理 → 写 parquet |
+| `guanlan_v2/strategy/compute/gat_io.py` | 新建 | 纯函数(numpy/pandas,无 torch):PIT 节点特征 / 相关图 / 标签 / 换仓日 |
+| `guanlan_v2/strategy/compute/gat_model.py` | 新建 | torch GAT nn.Module + `train_gat` + `predict_gat`(CPU 可单测) |
+| `scripts/gat_predict.py` | 新建 | conda stocks GPU 编排:引擎读数 → gat_io → gat_model 训练/推理 → 写 parquet |
 | `scripts/gat_validate.py` | 新建 | 薄壳:调 validate_dl_source 打印闸结果 |
 | `guanlan_v2/strategy/compute/cpcv.py` | 改(加) | `validate_dl_source` + `DL_GATE_DSR`/`DL_SOURCE_TRIALS`(纯加,不动既有) |
-| `guanlan_v2/strategy/compute/dl_ensemble.py` | 改(+1 行) | `default_dl_sources()` 追加 gat 源(过闸后) |
+| `guanlan_v2/strategy/compute/dl_ensemble.py` | 改(+1 行) | `default_dl_sources()` 追加 gat 源(实现期即加,字节安全) |
 | `tests/test_gat_io.py` | 新建 | gat_io 纯函数 PIT/正确性 |
+| `tests/test_gat_model.py` | 新建 | GAT 形状 + 掩码生效 + train_gat loss 下降(torch CPU) |
 | `tests/test_dl_source_validate.py` | 新建 | validate_dl_source 桩测 |
-| `tests/test_dl_ensemble*.py` | 扩 | 注册表含 gat + 缺文件字节等价 + 封顶 0.5 |
+| `tests/test_dl_ensemble.py` | 扩 | 注册表含 gat + 缺文件字节等价 |
