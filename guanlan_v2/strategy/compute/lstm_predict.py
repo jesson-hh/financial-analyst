@@ -76,6 +76,28 @@ def _predict(net, X: np.ndarray) -> np.ndarray:
     return np.asarray(out, dtype=np.float32)
 
 
+def _close_series(loader, codes, start, end) -> pd.Series:
+    """逐码读 close → (instrument, datetime) 长 Series(float32·ffill)。
+    build_feature_panel 把 close 化成因子不回传原始 close,前向收益标签需原始 close 单独读。"""
+    start_ts, end_ts = pd.Timestamp(start), pd.Timestamp(end)
+    frames = []
+    for code in codes:
+        s = loader._read_bin(code, "close")
+        if s is None:
+            continue
+        s = s.loc[(s.index >= start_ts) & (s.index <= end_ts)]
+        if s.empty:
+            continue
+        df = s.astype("float32").ffill().to_frame("close")
+        df.index.name = "datetime"
+        df["instrument"] = code
+        frames.append(df.set_index("instrument", append=True))
+    if not frames:
+        raise RuntimeError("无任何可读 close")
+    c = pd.concat(frames, axis=0).reorder_levels(["instrument", "datetime"]).sort_index()
+    return c["close"]
+
+
 def train_and_predict(provider: str = DEFAULT_PROVIDER, eval_date: Optional[str] = None,
                       universe: str = "csi800", seq_len: int = 10, hidden: int = 32,
                       layers: int = 1, lr: float = 1e-3, epochs: int = 40, horizon: int = 5,
@@ -90,8 +112,10 @@ def train_and_predict(provider: str = DEFAULT_PROVIDER, eval_date: Optional[str]
     pred_codes = list_all_instruments(provider)
     print(f"[lstm_predict] 全市场 {len(pred_codes)} 码,build_feature_panel ...", flush=True)
     panel = build_feature_panel(loader, pred_codes, start, eval_date)
-    panel = add_forward_return(panel, horizon)
-    feat_cols = _select_mf(list(panel.columns), None)        # 38 v4 因子
+    feat_cols = _select_mf(list(panel.columns), None)        # 38 v4 因子(在注入 close/label 前取,防泄漏)
+    panel["close"] = _close_series(loader, pred_codes, start, eval_date).reindex(panel.index)
+    panel = add_forward_return(panel, horizon)               # 用原始 close 算前向收益标签
+    panel[feat_cols] = panel[feat_cols].fillna(0.0)          # 复刻 v4 LGB 的 fillna(0):特征窗全有限,否则序列窗含 NaN 被全剔
 
     dates = sorted(pd.DatetimeIndex(panel.index.get_level_values("datetime")).unique())
     if len(dates) <= horizon:
