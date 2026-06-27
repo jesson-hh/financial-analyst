@@ -25,7 +25,7 @@ def compute_node_features(close_panel: pd.DataFrame, volume_panel: Optional[pd.D
     """date 横截面 PIT 价量因子快照(只用 ≤date 数据)→ (codes, (N,F) float32),逐因子横截面 z。
     入选 = close 末值非空;volume 缺/空 → turn/amihud 置 0。"""
     cp = close_panel.loc[:pd.Timestamp(date)]
-    ret1 = cp.pct_change()
+    ret1 = cp.pct_change(fill_method=None)
     last = cp.iloc[-1]
     feat = {
         "mom_5": last / cp.shift(5).iloc[-1] - 1.0,
@@ -59,7 +59,7 @@ def build_corr_graph(close_panel: pd.DataFrame, date, codes, *, window: int = 60
     n = len(codes)
     eye = np.eye(n, dtype=np.float32)
     cp = close_panel.loc[:pd.Timestamp(date), list(codes)]
-    rets = cp.pct_change().tail(window)
+    rets = cp.pct_change(fill_method=None).tail(window)
     if len(rets) < 5:
         return eye
     C = rets.corr().to_numpy()
