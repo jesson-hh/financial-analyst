@@ -1,6 +1,7 @@
-# GAT 深度学习源(第 2 个 DL alpha 源)设计
+# GAT 深度学习源(DL 集成层第 3 个源)设计
 
-> **MVP-B**:把图注意力网络(GAT)作为统一 DL 集成层的**第 2 个生产级深度源**接入 v4——
+> **MVP-B**:把图注意力网络(GAT)作为统一 DL 集成层的**第 3 个生产级深度源**接入 v4
+> (DL 层整体 = 叠加在 LGB 之上的"第 2 个 alpha 来源";本 spec 在该层内加第 3 个源)——
 > 与 FinCast(零样本时序基础模型)、LSTM(单票时序)互补,GAT 提供**横截面关系(个股间相关图)**这一独立信息维度。
 > 一期目标:**打通端到端 + 过 ① 的 CPCV 闸**,**不追性能**。
 
@@ -62,9 +63,10 @@ fincast_io.write_pred_rolling(OUT, eval_date, codes, preds, keep_days=60, train_
 var/dl_pred_gat.parquet   (契约: eval_date / instrument / pred_ret_5d / train_cutoff)
     │
     ├──► ① 闸:cpcv.validate_dl_source(path) → {ready, sharpe, dsr, ic_mean, passes_gate}
-    │         DSR ≥ 0.5 且 ready  ──► 人工复审后,在 default_dl_sources() 加 1 行 DLSource(model_id="gat", …)
+    │         DSR ≥ 0.5 且 ready ──► 保留该 parquet(=激活 GAT);否则删除/不留 → GAT 经"无料诚实退出"休眠
     │
-    └──► (注册后)regen.py 已调 default_dl_sources() → build_v4 → apply_dl_ensemble
+    └──► gat 行实现期即在 default_dl_sources()(parquet 缺失 → 诚实跳过,字节等价);
+              regen.py 已调 default_dl_sources() → build_v4 → apply_dl_ensemble
               自适应权重(近期 ICIR) z 混合进 score(总 DL 权重封顶 0.5,LGB 主导)
               provenance 落 v4_dl_provenance.json → /screen 徽章自动显 "LGB + … + gat(w)"
 ```
@@ -86,7 +88,7 @@ var/dl_pred_gat.parquet   (契约: eval_date / instrument / pred_ret_5d / train_
   - `DEFAULT_GAT_FACTORS`(一期固定 ~8 个,均可由 close+volume 算,无需引擎因子目录):
     `mom_5, mom_20, mom_60`(动量)、`rev_1`(1 日反转 = `-(close/close.shift(1)-1)`)、
     `vol_20`(20 日日收益标准差)、`ma_gap`(`close/MA20 - 1`)、`turn`(`volume / volume.rolling(20).mean()`)、
-    `amihud_20`(非流动性近似 = `|ret|/amount` 均值,若无 amount 用 `|ret|/(close·volume)`)。
+    `amihud_20`(非流动性近似 = `mean(|日收益| / (close·volume + ε))`,一期只用 close+volume,不取 amount 面板)。
 - `build_corr_graph(close_panel, date, codes, *, window=60, topk=20) -> np.ndarray`
   - 用 `≤ date` 的末 `window` 日日收益算 `codes` 两两 Pearson 相关;
   - 每个节点保留 `topk` 个最相关邻居(按相关绝对值,排除自身)→ 返回 `(N, N)` 布尔/0-1 邻接掩码(对称化:`A = A | A.T`);
@@ -94,8 +96,9 @@ var/dl_pred_gat.parquet   (契约: eval_date / instrument / pred_ret_5d / train_
 - `forward_label(close_panel, date, codes, *, horizon=5) -> np.ndarray`
   - `codes` 在 `date` 起未来 `horizon` 个**交易日**收益(`close[t+h]/close[t] - 1`);
   - **仅用于训练日**(`date` 的 `t+h` 已存在于面板末日之前);返回 `(N,)` float32,缺失置 `nan`。
-- `rebalance_dates(panel_index, *, horizon=5, lookback_days=...) -> list[Timestamp]`
-  - 非重叠 `horizon` 日换仓的训练日序列(PIT:只含标签已实现日,即 `date + horizon ≤ 面板末日`)。
+- `rebalance_dates(panel_index, *, horizon=5, start=None) -> list[Timestamp]`
+  - 从 `start`(缺省 = 面板首日)到 `面板末日 - horizon` 的非重叠 `horizon` 日换仓训练日序列
+    (PIT:只含标签已实现日,即 `date + horizon ≤ 面板末日`)。
 - (复用)写盘统一走 `fincast_io.write_pred_rolling`,**不在 gat_io 重复实现写逻辑**。
 
 **PIT 命门**:所有函数对 `close_panel` 一律 `.loc[:date]` 截断后再算,绝不看未来;`forward_label` 的未来收益只在
@@ -154,19 +157,21 @@ def validate_dl_source(path: str, score_col: str = "pred_ret_5d",
 并 print 结果(`ready / n_oos_days / sharpe / dsr / ic_mean / passes_gate`)。一期 DL 源验证走脚本/函数,
 **不接入工坊 UI 的"快验/严格验证"按钮**(那是后续阶段;② 的 `/model/validate` 只验 v4 变体,不动)。
 
-### 4.5 `dl_ensemble.default_dl_sources()`(+1 行,过闸后才加)
+### 4.5 `dl_ensemble.default_dl_sources()`(+1 行,实现期即加,字节安全)
 
-过闸(`passes_gate=True` 且人工复审)后,在现有列表**追加一行**(紧跟 `lstm` 行,**不改 fincast/lstm 行**):
+**实现期**就在现有列表**追加一行**(紧跟 `lstm` 行,**不改 fincast/lstm 行**)——下述三道防线保证"注册≠盲信",
+故加行与"是否信任 GAT"解耦,可先接线、激活留给真机 DSR 闸:
 
 ```python
 DLSource(model_id="gat", path=str(var / "dl_pred_gat.parquet"),
          score_col="pred_ret_5d", weight_mode="adaptive"),
 ```
 
-- `weight_mode="adaptive"`:运行期再按近期 ICIR(`_adaptive_w_fc`)定权;若 GAT 近期表现差,权重自动趋 0(运行期二道闸)。
-- 文件不存在 / 当日无预测 / 匹配 `< MIN_MATCH(50)` → `_load_dl_for_date`/`dl_mix_scores` 诚实退出该源,**不影响其余源**。
-- **字节等价保护**:当 `dl_pred_gat.parquet` 不存在时(注册了但还没产),`apply_dl_ensemble` 把 gat 记为
-  missing,有效源集合与加 gat 前完全一致 → 生产行为零变化。故"加这行"本身安全,可与产 parquet 解耦。
+1. **缺料诚实退出**:`dl_pred_gat.parquet` 不存在 / 当日无预测 / 匹配 `< MIN_MATCH(50)` → `_load_dl_for_date`/`dl_mix_scores` 退出该源,**不影响其余源**。
+2. **CPCV 激活闸(人工)**:仅当 `validate_dl_source` 出 `passes_gate=True`(DSR≥0.5)才**保留** GAT parquet 在 `var/`(=激活);不过 → 删/不留 → GAT 经第 1 道休眠。**注册行常在,激活与否由 parquet 是否存在决定。**
+3. **运行期自适应权重**:`weight_mode="adaptive"` 按近期 ICIR(`_adaptive_w_fc`)定权;GAT 近期表现差 → 权重自动趋 0。
+
+**字节等价**:gat parquet 不存在时 `apply_dl_ensemble` 把 gat 记 missing,有效源集合与加 gat 前完全一致 → 生产行为零变化(单测守护)。
 
 ---
 
@@ -189,7 +194,7 @@ DLSource(model_id="gat", path=str(var / "dl_pred_gat.parquet"),
 4. **LGB 恒主导 ≥ 0.5**:沿用 `MAX_TOTAL_DL_W=0.5`,加 GAT 不改该约束。
 5. **不碰 Spec3(LSTM)**:不改 `lstm` 行、不改 LSTM 任何代码/产物;GAT 是平行第 3 源。
 6. **离线推理**:GPU 训练/推理只在 conda stocks 离线脚本;9999 请求路径绝不跑模型。
-7. **注册是人工闸**:`passes_gate` 仅建议;加 `DLSource` 行须人工复审后手动编辑。
+7. **激活是人工闸**:`passes_gate` 仅建议;是否**保留** GAT parquet(=激活该源)由人工复审 DSR 后决定;注册行本身字节安全、实现期即加。
 
 ---
 
@@ -215,7 +220,7 @@ DLSource(model_id="gat", path=str(var / "dl_pred_gat.parquet"),
 
 **一期(本 spec)只追两件**:
 1. **打通**:gat_io 纯函数 + GPU 脚本 + 闸 + 注册接线,端到端能产 parquet 并被 v4 读到。
-2. **过闸**:`validate_dl_source` 能对真 GAT 产物算出 DSR;以 DSR≥0.5 为注册前提(过则注册,不过则诚实留空不注册)。
+2. **过闸(激活)**:`validate_dl_source` 能对真 GAT 产物算出 DSR;注册行实现期即加(字节安全),**激活以 DSR≥0.5 为前提**——过则保留 parquet(GAT 真参与选股),不过则删 parquet(GAT 休眠,选股退回与现状字节等价)。
 
 **明确不做(Out of scope / 挂账)**:
 - 不追 GAT 性能/调参(特征集、层数、头数、损失只取一组稳妥默认);
