@@ -81,15 +81,15 @@ def _load_dl_for_date(path: str, ld: pd.Timestamp, score_col: str = "pred_ret_5d
             pass
     if not need.issubset(df.columns):
         return None, None, None, f"预测 parquet 缺 {need} 列,退出"
-    cutoff = None
-    if "train_cutoff" in df.columns and len(df):
-        try:
-            cutoff = str(pd.Timestamp(df["train_cutoff"].iloc[0]).date())
-        except Exception:  # noqa: BLE001
-            cutoff = None
     ev = pd.to_datetime(df["eval_date"]).dt.normalize()
     today = pd.Timestamp(ld).normalize()
     sub = df[ev == today]
+    cutoff = None   # 取被评分 eval_date 当天那行的 train_cutoff(滚动表多日累积,全表 iloc[0]=最旧日→lookahead/显示会错)
+    if "train_cutoff" in sub.columns and len(sub):
+        try:
+            cutoff = str(pd.Timestamp(sub["train_cutoff"].iloc[0]).date())
+        except Exception:  # noqa: BLE001
+            cutoff = None
     if sub.empty:
         return None, df, cutoff, f"无 {today.date()} 预测,退出"
     s = sub.set_index("instrument")[score_col]

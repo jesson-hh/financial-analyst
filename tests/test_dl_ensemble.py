@@ -164,3 +164,16 @@ def test_apply_dl_ensemble_gat_absent_byte_equivalent(tmp_path):
     assert abs(info1["w_lgb"] - info2["w_lgb"]) < 1e-12
     by = {s["model_id"]: s for s in info2["sources"]}
     assert by["gat"]["active"] is False              # gat 缺文件 → 诚实退出
+
+
+def test_load_dl_for_date_cutoff_is_scored_dates_own(tmp_path):
+    # 多日累积表:每日带自己的 train_cutoff;查某 eval_date 应取该日自己的 cutoff(非全表最旧日)
+    from guanlan_v2.strategy.compute.dl_ensemble import _load_dl_for_date
+    from guanlan_v2.strategy.compute.fincast_io import write_pred_rolling
+    p = str(tmp_path / "dl_pred_gat.parquet")
+    write_pred_rolling(p, "2026-01-10", ["A", "B"], [0.1, 0.2], keep_days=60, train_cutoff="2026-01-03")
+    write_pred_rolling(p, "2026-01-20", ["A", "B"], [0.3, 0.4], keep_days=60, train_cutoff="2026-01-13")
+    _, _, cutoff_late, fail = _load_dl_for_date(p, pd.Timestamp("2026-01-20"))
+    assert fail is None and cutoff_late == "2026-01-13"   # 取被评分日自己的 cutoff,非最旧 2026-01-03
+    _, _, cutoff_early, _ = _load_dl_for_date(p, pd.Timestamp("2026-01-10"))
+    assert cutoff_early == "2026-01-03"

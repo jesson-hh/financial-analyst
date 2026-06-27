@@ -33,6 +33,21 @@ def test_gat_layer_masks_non_neighbors():
     assert not torch.allclose(out1[3], out2[3], atol=1e-6) # node3 自身变了
 
 
+def test_gat_layer_neighbor_propagates():
+    """补命门另一向:改真邻居输入,目标节点输出 DID 变 —— 证明消息真在边上传播(非纯自变换)。"""
+    torch.manual_seed(0)
+    layer = _GATLayer(3, 4)
+    N = 5
+    X = torch.randn(N, 3)
+    mask = torch.eye(N)
+    mask[0, 1] = mask[1, 0] = 1.0           # node1 是 node0 的真邻居
+    out1 = layer(X, mask)
+    X2 = X.clone()
+    X2[1] = X[1] + 3.0                        # 改 node1(node0 的邻居)
+    out2 = layer(X2, mask)
+    assert not torch.allclose(out1[0], out2[0], atol=1e-6)  # node0 受真邻居影响(聚合确实生效)
+
+
 def test_train_gat_loss_decreases_and_predict():
     rng = np.random.default_rng(0)
     X_list, A_list, y_list = [], [], []
