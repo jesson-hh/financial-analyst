@@ -81,3 +81,20 @@ def test_write_pred_rolling_keep_days(tmp_path):
     out = pd.read_parquet(p)
     assert pd.to_datetime(out["eval_date"]).nunique() == 3   # 只保留最近 3 日
     assert pd.to_datetime(out["eval_date"]).max() == pd.Timestamp("2026-06-14")
+
+
+def test_write_pred_rolling_with_train_cutoff(tmp_path):
+    p = str(tmp_path / "dl_pred_lstm.parquet")
+    write_pred_rolling(p, "2026-06-22", ["SH600000", "SZ000001"], [0.01, -0.02],
+                       keep_days=60, train_cutoff="2026-06-15")
+    out = pd.read_parquet(p)
+    assert "train_cutoff" in out.columns
+    assert pd.api.types.is_datetime64_any_dtype(out["train_cutoff"])
+    assert (pd.to_datetime(out["train_cutoff"]) == pd.Timestamp("2026-06-15")).all()
+
+
+def test_write_pred_rolling_without_cutoff_unchanged(tmp_path):
+    p = str(tmp_path / "v4_fincast_pred.parquet")
+    write_pred_rolling(p, "2026-06-22", ["SH600000"], [0.01], keep_days=60)
+    out = pd.read_parquet(p)
+    assert list(out.columns) == ["eval_date", "instrument", "pred_ret_5d"]   # 无 train_cutoff

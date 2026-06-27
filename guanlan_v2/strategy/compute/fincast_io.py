@@ -32,21 +32,27 @@ def build_context_matrix(panel: pd.DataFrame, eval_date, context_len: int = 512,
 
 
 def write_pred_rolling(out_path: str, eval_date, chosen: List[str], preds,
-                       keep_days: int = 60) -> pd.DataFrame:
+                       keep_days: int = 60, train_cutoff=None) -> pd.DataFrame:
     """写 FinCast 预测表(扁平契约 eval_date/instrument/pred_ret_5d):同日覆盖 + 只保留最近 keep_days 日。
     返回写入后的全表 DataFrame。"""
     ed = pd.Timestamp(eval_date)
     insts = list(chosen)
     # 显式 [ed]*n 广播:pandas 2.1(conda stocks)不会把标量 Timestamp 在 dict 构造里广播到数组长度
     # (报 "Shape of passed values is (1,N)"),新版会;显式列表跨 pandas 版本稳。
-    new_df = pd.DataFrame({"eval_date": [ed] * len(insts), "instrument": insts,
-                           "pred_ret_5d": np.asarray(preds, dtype=np.float32)})
+    cols = {"eval_date": [ed] * len(insts), "instrument": insts,
+            "pred_ret_5d": np.asarray(preds, dtype=np.float32)}
+    if train_cutoff is not None:                               # LSTM 等训练源诚实显形 train_cutoff
+        cols["train_cutoff"] = [pd.Timestamp(train_cutoff)] * len(insts)
+    new_df = pd.DataFrame(cols)
     if os.path.exists(out_path):
         old = pd.read_parquet(out_path)
         if "eval_date" not in old.columns:
             old = old.reset_index()
         old = old[pd.to_datetime(old["eval_date"]) != ed]      # 同日覆盖
-        old = old[["eval_date", "instrument", "pred_ret_5d"]]
+        keep_cols = ["eval_date", "instrument", "pred_ret_5d"]
+        if "train_cutoff" in old.columns and train_cutoff is not None:
+            keep_cols.append("train_cutoff")
+        old = old[[c for c in keep_cols if c in old.columns]]
         frames = [f for f in (old, new_df) if not f.empty]     # 防空帧 concat 的 FutureWarning
         combined = pd.concat(frames, ignore_index=True) if frames else new_df
         dates = sorted(pd.to_datetime(combined["eval_date"]).unique())
@@ -60,5 +66,7 @@ def write_pred_rolling(out_path: str, eval_date, chosen: List[str], preds,
     # 强制 datetime64[ns]:标量 Timestamp 广播在 pandas 2.1/pyarrow22(conda stocks)会落 object 列,
     # pyarrow 无法序列化("Expected bytes, got a 'Timestamp'");显式 to_datetime 跨 env 稳。
     combined["eval_date"] = pd.to_datetime(combined["eval_date"])
+    if "train_cutoff" in combined.columns:                    # 同 eval_date:防 train_cutoff 落 object
+        combined["train_cutoff"] = pd.to_datetime(combined["train_cutoff"])
     combined.to_parquet(out_path, index=False)
     return combined
