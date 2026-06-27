@@ -105,7 +105,8 @@ def default_dl_sources() -> list:
     return [
         DLSource(model_id="fincast", path=str(var / "v4_fincast_pred.parquet"),
                  score_col="pred_ret_5d", weight_mode="adaptive"),
-        # Phase 2: DLSource(model_id="lstm", path=str(var / "dl_pred_lstm.parquet"), ...)
+        DLSource(model_id="lstm", path=str(var / "dl_pred_lstm.parquet"),
+                 score_col="pred_ret_5d", weight_mode="adaptive"),
     ]
 
 

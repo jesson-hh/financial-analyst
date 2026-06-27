@@ -125,3 +125,13 @@ def test_build_v4_signature_has_dl_sources():
     from guanlan_v2.strategy.compute import v4
     sig = inspect.signature(v4.build_v4)
     assert "dl_sources" in sig.parameters
+
+
+def test_default_dl_sources_includes_lstm():
+    from guanlan_v2.strategy.compute.dl_ensemble import default_dl_sources
+    srcs = default_dl_sources()
+    ids = {s.model_id for s in srcs}
+    assert "fincast" in ids and "lstm" in ids
+    lstm = next(s for s in srcs if s.model_id == "lstm")
+    assert lstm.path.endswith("dl_pred_lstm.parquet")
+    assert lstm.score_col == "pred_ret_5d" and lstm.weight_mode == "adaptive"
