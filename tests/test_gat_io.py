@@ -72,3 +72,34 @@ def test_rebalance_dates_nonoverlap_and_realized():
     assert all(b - a == 5 for a, b in zip(pos, pos[1:]))
     # 每个换仓日标签已实现(d + horizon ≤ 末日)
     assert all(cp.index.get_loc(d) + 5 <= len(cp.index) - 1 for d in rd)
+
+
+def test_corr_graph_pit_no_future():
+    # PIT 命门:相关图只用 ≤d 数据,篡改 d 之后未来不改变图(守护 .loc[:date] 截断)。
+    cp = _close_panel()
+    codes = list(cp.columns)
+    d = cp.index[60]
+    A1 = gat_io.build_corr_graph(cp, d, codes, window=40, topk=2)
+    cp2 = cp.copy()
+    cp2.iloc[70:] = cp2.iloc[70:] * 5.0
+    A2 = gat_io.build_corr_graph(cp2, d, codes, window=40, topk=2)
+    assert np.allclose(A1, A2)
+
+
+def test_corr_graph_degenerate_node_self_loop_only():
+    # 常量序列(相关性未定义/0)→ 该节点只连自己,不连任意低序号邻居。
+    cp = _close_panel(n_days=120, codes=("A", "B", "C", "D"))
+    cp["FLAT"] = 10.0
+    codes = list(cp.columns)
+    A = gat_io.build_corr_graph(cp, cp.index[-1], codes, window=60, topk=2)
+    fi = codes.index("FLAT")
+    assert A[fi].sum() == 1.0 and A[fi, fi] == 1.0
+
+
+def test_node_features_volume_misaligned_turn_honest_not_stale():
+    # 成交量末日早于 close 末日 → turn 诚实为 0(对齐 close 日历后缺量→NaN→z=0),非拿陈旧日成交量。
+    cp = _close_panel(n_days=120, codes=("A", "B", "C", "D", "E"))
+    vp = (cp * 1000.0).iloc[:-3]           # 成交量缺最后 3 个交易日
+    _, X = gat_io.compute_node_features(cp, vp, cp.index[-1])
+    j_turn = list(gat_io.DEFAULT_GAT_FACTORS).index("turn")
+    assert np.allclose(X[:, j_turn], 0.0)

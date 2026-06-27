@@ -37,7 +37,9 @@ def compute_node_features(close_panel: pd.DataFrame, volume_panel: Optional[pd.D
     }
     has_vol = volume_panel is not None and not volume_panel.empty
     if has_vol:
-        vp = volume_panel.loc[:pd.Timestamp(date)].reindex(columns=cp.columns)
+        # 对齐到 close 的交易日历(index)+ 标的(columns):否则 vp.iloc[-1] 取的是成交量面板自己的
+        # 末行(可能是更早日期),turn/amihud 会拿陈旧日 vs close 末值错位;对齐后缺量诚实成 NaN→z=0。
+        vp = volume_panel.loc[:pd.Timestamp(date)].reindex(index=cp.index, columns=cp.columns)
         vma20 = vp.tail(20).mean(axis=0).replace(0.0, np.nan)
         feat["turn"] = vp.iloc[-1] / vma20
         feat["amihud_20"] = (ret1.abs() / (cp * vp).replace(0.0, np.nan)).tail(20).mean(axis=0)
@@ -70,7 +72,10 @@ def build_corr_graph(close_panel: pd.DataFrame, date, codes, *, window: int = 60
         return eye
     A = np.zeros((n, n), dtype=np.float32)
     order = np.argsort(-np.abs(C), axis=1)[:, :k]
-    A[np.repeat(np.arange(n), k), order.reshape(-1)] = 1.0
+    rows = np.repeat(np.arange(n), k)
+    cols = order.reshape(-1)
+    keep = np.abs(C)[rows, cols] > 0     # 退化节点(常量/全 NaN 序列→全零相关行)不连任意邻居,只留自环
+    A[rows[keep], cols[keep]] = 1.0
     A = np.maximum(A, A.T)               # 对称化
     np.fill_diagonal(A, 1.0)             # 自环
     return A
