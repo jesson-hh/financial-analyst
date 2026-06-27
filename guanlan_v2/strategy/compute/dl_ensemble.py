@@ -98,14 +98,17 @@ def _load_dl_for_date(path: str, ld: pd.Timestamp, score_col: str = "pred_ret_5d
 
 
 def default_dl_sources() -> list:
-    """Phase 1 默认 DL 源注册表:仅 FinCast(沿用现有 var/v4_fincast_pred.parquet)。
-    Phase 2/3 加 LSTM 等:在此 append 一个 DLSource(指向 var/dl_pred_<model_id>.parquet)即接入。"""
+    """默认 DL 源注册表:FinCast(零样本) + LSTM(时序) + GAT(横截面关系图)。
+    加新源:在此 append 一个 DLSource(指向 var/dl_pred_<model_id>.parquet)即接入;
+    缺 parquet/无当日预测 → 该源诚实退出(字节等价旧行为),不影响其余源。"""
     from pathlib import Path
     var = Path(__file__).resolve().parents[3] / "var"
     return [
         DLSource(model_id="fincast", path=str(var / "v4_fincast_pred.parquet"),
                  score_col="pred_ret_5d", weight_mode="adaptive"),
         DLSource(model_id="lstm", path=str(var / "dl_pred_lstm.parquet"),
+                 score_col="pred_ret_5d", weight_mode="adaptive"),
+        DLSource(model_id="gat", path=str(var / "dl_pred_gat.parquet"),
                  score_col="pred_ret_5d", weight_mode="adaptive"),
     ]
 

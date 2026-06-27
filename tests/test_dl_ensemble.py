@@ -135,3 +135,32 @@ def test_default_dl_sources_includes_lstm():
     lstm = next(s for s in srcs if s.model_id == "lstm")
     assert lstm.path.endswith("dl_pred_lstm.parquet")
     assert lstm.score_col == "pred_ret_5d" and lstm.weight_mode == "adaptive"
+
+
+def test_default_dl_sources_includes_gat():
+    from guanlan_v2.strategy.compute.dl_ensemble import default_dl_sources
+    srcs = default_dl_sources()
+    ids = {s.model_id for s in srcs}
+    assert {"fincast", "lstm", "gat"} <= ids        # gat 已注册,且不挤掉 fincast/lstm
+    gat = next(s for s in srcs if s.model_id == "gat")
+    assert gat.path.endswith("dl_pred_gat.parquet")
+    assert gat.score_col == "pred_ret_5d" and gat.weight_mode == "adaptive"
+
+
+def test_apply_dl_ensemble_gat_absent_byte_equivalent(tmp_path):
+    # 加 gat(parquet 缺失)不扰动:有效源集合 / score / w_lgb 与不加 gat 完全一致
+    from guanlan_v2.strategy.compute.dl_ensemble import apply_dl_ensemble, DLSource
+    codes = [f"SZ{300000 + i:06d}" for i in range(120)]
+    rng = np.random.RandomState(7)
+    base = rng.randn(120)
+    fc_path = _write_pred(tmp_path, "v4_fincast_pred.parquet", "2026-03-10", codes, rng.randn(120))
+    fc = DLSource(model_id="fincast", path=fc_path, weight_mode="fixed", fixed_w=0.3)
+    gat = DLSource(model_id="gat", path=str(tmp_path / "__no_gat__.parquet"),
+                   score_col="pred_ret_5d", weight_mode="adaptive")
+    p1 = _mk_pred_frame(codes, base.copy()); p2 = _mk_pred_frame(codes, base.copy())
+    info1 = apply_dl_ensemble(p1, pd.Timestamp("2026-03-10"), [fc])
+    info2 = apply_dl_ensemble(p2, pd.Timestamp("2026-03-10"), [fc, gat])
+    assert np.allclose(p1["score"].values, p2["score"].values, atol=1e-12)
+    assert abs(info1["w_lgb"] - info2["w_lgb"]) < 1e-12
+    by = {s["model_id"]: s for s in info2["sources"]}
+    assert by["gat"]["active"] is False              # gat 缺文件 → 诚实退出
