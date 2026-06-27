@@ -35,6 +35,7 @@ def test_validate_dl_source_reverse_fails_gate(tmp_path, monkeypatch):
                                                  for r in hist.itertuples()})
     out = cpcv.validate_dl_source(path)
     assert out["ready"] is True
+    assert out["dsr"] is not None and out["dsr"] < cpcv.DL_GATE_DSR   # 真低 DSR 拒绝,非诚实缺席 None
     assert out["passes_gate"] is False
 
 
@@ -48,3 +49,25 @@ def test_validate_dl_source_insufficient_days(tmp_path, monkeypatch):
     monkeypatch.setattr(cpcv, "_fwd_returns_for_snapshots", lambda hist, horizon=5: {})
     out = cpcv.validate_dl_source(path)
     assert out["ready"] is False and "证据不足" in out["note"]
+
+
+def test_validate_dl_source_n_trials_deflates_gate(tmp_path, monkeypatch):
+    # n_trials 真接进闸:同一适中信号(每日方向因子有正有负→DSR 不饱和),试验数↑→DSR↓(deflation 生效)+ 闸与阈值自洽。
+    path = _write_src(tmp_path, n_days=60, n_codes=80)
+    df = pd.read_parquet(path)
+    rng = np.random.default_rng(7)
+    dates = df["eval_date"].dt.strftime("%Y-%m-%d").unique()
+    dfac = {d: float(rng.normal()) for d in dates}                       # 每日方向因子(有正有负)
+    noise = {(pd.Timestamp(r.eval_date).strftime("%Y-%m-%d"), str(r.instrument)): float(rng.normal(0, 0.2))
+             for r in df.itertuples()}
+    monkeypatch.setattr(cpcv, "_fwd_returns_for_snapshots",
+                        lambda hist, horizon=5: {(str(r.date), str(r.code)):
+                                                 0.1 * dfac[str(r.date)] * float(r.score)
+                                                 + noise[(str(r.date), str(r.code))]
+                                                 for r in hist.itertuples()})
+    lo = cpcv.validate_dl_source(path, n_trials=2)
+    hi = cpcv.validate_dl_source(path, n_trials=100000)
+    assert lo["dsr"] is not None and hi["dsr"] is not None
+    assert hi["dsr"] < lo["dsr"]                                          # 试验数↑ → DSR↓(deflation 真接进闸)
+    assert lo["passes_gate"] == (lo["dsr"] >= cpcv.DL_GATE_DSR)           # 闸 = DSR≥阈值,自洽
+    assert hi["passes_gate"] == (hi["dsr"] >= cpcv.DL_GATE_DSR)

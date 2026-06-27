@@ -365,7 +365,8 @@ def validate_dl_source(path, score_col: str = "pred_ret_5d", n_trials: int = DL_
             "ic_mean": (float(np.mean(ic_dist)) if ic_dist else None),
             "ic_dist": [round(x, 4) for x in ic_dist], "n_trials": n_trials,
             "passes_gate": bool(dsr is not None and dsr >= DL_GATE_DSR),
-            "note": f"DL 源验证(PIT 真已实现 fwd5d);DSR≥{DL_GATE_DSR} 建议激活,激活仍人工"}
+            "note": f"DL 源验证(PIT 真已实现 fwd5d·日度重叠 5 日窗口=同 quick_validate 口径→DSR 偏乐观);"
+                    f"DSR≥{DL_GATE_DSR} 建议激活,激活仍人工"}
 
 
 if __name__ == "__main__":   # python -m guanlan_v2.strategy.compute.cpcv <spec.json>(严格档子进程)
