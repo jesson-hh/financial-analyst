@@ -87,6 +87,57 @@ def _run_promote_subprocess(spec: Dict[str, Any]) -> None:
                 "phase": "done", "step": 3})
 
 
+# ── LSTM「发布为 DL 源」异步子进程状态机(镜像 _PROMOTE_*;训练→regen 链)──────────
+_PUBLISH_DL_LOCK = _threading.Lock()
+_PUBLISH_DL_STATE: Dict[str, Any] = {"running": False, "phase": "idle", "label": "", "step": 0,
+    "total": 3, "started_at": None, "ended_at": None, "ok": None, "error": None,
+    "variant_id": None, "lines": []}
+
+
+def _publish_dl_public_state() -> Dict[str, Any]:
+    import time as _t
+    with _PUBLISH_DL_LOCK:
+        s = dict(_PUBLISH_DL_STATE); s["lines"] = list(s.get("lines") or [])[-12:]
+    if s.get("started_at"):
+        s["elapsed_sec"] = int((s.get("ended_at") or _t.time()) - s["started_at"])
+    return s
+
+
+def _run_publish_dl_subprocess(spec: Dict[str, Any]) -> None:
+    import os, sys as _sys, time as _t, json as _json, tempfile, subprocess
+    from pathlib import Path as _P
+    rc, err = None, None
+    try:
+        repo = _P(__file__).resolve().parents[2]
+        sf = _P(tempfile.gettempdir()) / f"lstmpub_{spec['variant_id']}.json"
+        sf.write_text(_json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+        cmd = [_sys.executable, "-m", "guanlan_v2.strategy.compute.lstm_workflow", str(sf)]
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        proc = subprocess.Popen(cmd, cwd=str(repo), stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                                errors="replace", bufsize=1, env=env)
+        for raw in proc.stdout:
+            line = raw.rstrip("\r\n")
+            if not line:
+                continue
+            with _PUBLISH_DL_LOCK:
+                _PUBLISH_DL_STATE["lines"].append(line)
+                if "阶段1" in line:
+                    _PUBLISH_DL_STATE["phase"], _PUBLISH_DL_STATE["label"], _PUBLISH_DL_STATE["step"] = \
+                        ("train", "LSTM 训练中…", 1)
+                elif "阶段2" in line:
+                    _PUBLISH_DL_STATE["phase"], _PUBLISH_DL_STATE["label"], _PUBLISH_DL_STATE["step"] = \
+                        ("regen", "折进 v4(regen)…", 2)
+        proc.wait(); rc = proc.returncode
+    except Exception as e:  # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+    finally:
+        with _PUBLISH_DL_LOCK:
+            _PUBLISH_DL_STATE.update({"running": False, "ended_at": _t.time(),
+                "ok": (rc == 0 and not err), "error": err or (None if rc == 0 else f"exit {rc}"),
+                "phase": "done", "step": 3})
+
+
 class FeatureBuildIn(BaseModel):
     """``POST /feature/build`` 入参(zoo-DSL 特征 + 标签公式/前向收益 horizon + universe)。"""
 
@@ -6081,5 +6132,34 @@ def build_workflow_router() -> APIRouter:
     @router.get("/model/promote/status")
     def model_promote_status():
         return JSONResponse({"ok": True, "state": _promote_public_state()})
+
+    @router.post("/model/publish_dl")
+    def model_publish_dl(body: dict = Body(default={})):
+        """发布 LSTM 为生产 DL 源:起子进程(训练 → 写 var/dl_pred_lstm.parquet → regen 折进 v4)。
+        异步立即返回 + 轮询 /model/publish_dl/status。kind 限 lstm(首期)。"""
+        import time as _t, uuid
+        kind = str(body.get("kind") or "lstm").strip()
+        if kind != "lstm":
+            return JSONResponse({"ok": False, "reason": f"kind '{kind}' 暂不支持发布为 DL 源(首期 lstm)"})
+        with _PUBLISH_DL_LOCK:
+            already = _PUBLISH_DL_STATE["running"]
+            if not already:
+                vid = "dl_" + uuid.uuid4().hex[:10]
+                _PUBLISH_DL_STATE.update({"running": True, "phase": "starting", "label": "启动发布…",
+                    "step": 0, "started_at": _t.time(), "ended_at": None, "ok": None, "error": None,
+                    "variant_id": vid, "lines": []})
+        if already:
+            return JSONResponse({"ok": False, "reason": "已有发布在跑", "state": _publish_dl_public_state()})
+        spec = {"variant_id": vid, "kind": "lstm",
+                "date": str(body.get("date") or "").strip() or None,
+                "universe": str((body.get("recipe") or {}).get("universe") or body.get("universe") or "csi800"),
+                "params": dict((body.get("recipe") or {}).get("params") or body.get("params") or {})}
+        _threading.Thread(target=lambda: _run_publish_dl_subprocess(spec), daemon=True).start()
+        return JSONResponse({"ok": True, "started": True, "variant_id": vid,
+                             "state": _publish_dl_public_state()})
+
+    @router.get("/model/publish_dl/status")
+    def model_publish_dl_status():
+        return JSONResponse({"ok": True, "state": _publish_dl_public_state()})
 
     return router
