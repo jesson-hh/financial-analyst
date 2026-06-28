@@ -66,6 +66,45 @@ def list_variants() -> List[Dict[str, Any]]:
 def delete_variant(vid) -> None:
     if vid == "prod":
         raise ValueError("生产 v4(prod)不可删")
+    # 删的若是当前默认变体 → 先清默认指针(回落 prod),避免悬空(读原始指针,不经 get 的自愈)
+    p = _default_path()
+    if p.exists():
+        try:
+            if json.loads(p.read_text(encoding="utf-8")).get("id") == vid:
+                p.unlink()
+        except Exception:
+            pass
     d = _dir(vid)
     if d.exists():
         shutil.rmtree(d)
+
+
+def _default_path():
+    return MODELS_DIR / "_default.json"
+
+
+def get_default_model():
+    """当前「默认变体」id;无/损坏/指向已删变体 → None(= 用生产 prod,诚实降级)。"""
+    p = _default_path()
+    if not p.exists():
+        return None
+    try:
+        mid = json.loads(p.read_text(encoding="utf-8")).get("id")
+    except Exception:
+        return None
+    if not mid or not variant_ranking_path(mid).exists():
+        return None
+    return mid
+
+
+def set_default_model(model_id) -> None:
+    """设/清默认变体。变体 id → 校验存在后写指针;None/""/"prod" → 删指针(回落官方 prod)。"""
+    p = _default_path()
+    if model_id in (None, "", "prod"):
+        if p.exists():
+            p.unlink()
+        return
+    if not variant_ranking_path(model_id).exists():
+        raise ValueError(f"变体不存在: {model_id}")
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"id": model_id}, ensure_ascii=False), encoding="utf-8")

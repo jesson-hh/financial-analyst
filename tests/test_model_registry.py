@@ -28,3 +28,39 @@ def test_load_v4_ranking_by_model(tmp_path, monkeypatch):
     assert R.ranking_date(model_id="m_x") == "2026-06-17"
     with pytest.raises(FileNotFoundError):
         R.load_v4_ranking(model_id="nope")
+
+
+def _stub_variant(root, vid):
+    """造一个最小变体目录(只需 ranking 文件存在;set/get_default 只看 .exists())。"""
+    d = root / vid
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "v4_ranking.parquet").write_bytes(b"stub")
+    return d
+
+
+def test_default_model_set_get_clear(tmp_path, monkeypatch):
+    monkeypatch.setattr(reg, "MODELS_DIR", tmp_path / "models")
+    _stub_variant(tmp_path / "models", "m_a")
+    assert reg.get_default_model() is None            # 缺省 = None(=prod)
+    reg.set_default_model("m_a")
+    assert reg.get_default_model() == "m_a"
+    reg.set_default_model("prod")                       # "prod" = 清除
+    assert reg.get_default_model() is None
+    reg.set_default_model("m_a")
+    reg.set_default_model(None)                         # None = 清除
+    assert reg.get_default_model() is None
+
+
+def test_set_default_unknown_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(reg, "MODELS_DIR", tmp_path / "models")
+    with pytest.raises(ValueError):
+        reg.set_default_model("m_nope")                # 变体不存在 → 诚实失败
+
+
+def test_get_default_degrades_when_variant_gone(tmp_path, monkeypatch):
+    monkeypatch.setattr(reg, "MODELS_DIR", tmp_path / "models")
+    _stub_variant(tmp_path / "models", "m_a")
+    reg.set_default_model("m_a")
+    reg.delete_variant("m_a")                           # 删默认变体
+    assert reg.get_default_model() is None              # 指针自愈 + 被清
+    assert not (tmp_path / "models" / "_default.json").exists()
