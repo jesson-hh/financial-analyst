@@ -513,7 +513,7 @@ def test_engine_profile_excludes_ww_but_console_whitelist_resolves():
     assert out["research_is_none"] is False and out["research_ww"] == []
     assert out["default_is_none"] is False and out["default_ww"] == []
     assert out["all_is_none"] is False and out["all_ww"] == []
-    # ② console 显式白名单路径不受影响:46 名全部可解析,含 28 个 ww_(+模型工坊 2)
+    # ② console 显式白名单路径不受影响:55 名全部可解析,含 30 个 ww_(+工坊删除/设默认 2 + alpha-zoo 7)
     assert out["console_n"] == 55 and out["console_missing"] == []
     assert out["explicit_n"] == 55 and out["explicit_ww_n"] == 30
 
