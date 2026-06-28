@@ -181,3 +181,36 @@ def test_model_train_second_concurrent_returns_busy(monkeypatch):
 
     # 收尾:复位防跨测污染
     api._MODEL_STATE["running"] = False
+
+
+def test_resolve_model_id_default_pointer(tmp_path, monkeypatch):
+    from guanlan_v2.screen import api as sapi, model_registry as reg
+    monkeypatch.setattr(reg, "MODELS_DIR", tmp_path / "models")
+    (tmp_path / "models" / "m_x").mkdir(parents=True)
+    (tmp_path / "models" / "m_x" / "v4_ranking.parquet").write_bytes(b"stub")
+    assert sapi._resolve_model_id("prod") == "prod"        # 没设默认 = prod(零变化)
+    assert sapi._resolve_model_id("") == "prod"
+    assert sapi._resolve_model_id("m_y") == "m_y"           # 显式变体原样(解析不校验存在)
+    reg.set_default_model("m_x")
+    assert sapi._resolve_model_id("prod") == "m_x"          # 设了默认 → 变体
+    assert sapi._resolve_model_id("m_y") == "m_y"           # 显式仍优先于默认
+    reg.set_default_model(None)
+    assert sapi._resolve_model_id("prod") == "prod"         # 清除 → 回 prod
+
+
+def test_model_default_endpoint_and_models_flag(tmp_path, monkeypatch):
+    from guanlan_v2.screen import model_registry as reg
+    monkeypatch.setattr(reg, "MODELS_DIR", tmp_path / "models")
+    (tmp_path / "models" / "m_x").mkdir(parents=True)
+    (tmp_path / "models" / "m_x" / "meta.json").write_text(
+        '{"id": "m_x", "name": "测试"}', encoding="utf-8")
+    (tmp_path / "models" / "m_x" / "v4_ranking.parquet").write_bytes(b"stub")
+    c = _client()
+    assert c.get("/screen/models").json()["default_model"] is None
+    r = c.post("/screen/model/default", json={"id": "m_x"}).json()
+    assert r["ok"] is True and r["default"] == "m_x"
+    j = c.get("/screen/models").json()
+    assert j["default_model"] == "m_x"
+    assert any(v.get("is_default") for v in j["variants"])
+    assert c.post("/screen/model/default", json={"id": "m_nope"}).json()["ok"] is False
+    assert c.post("/screen/model/default", json={"id": "prod"}).json()["default"] is None

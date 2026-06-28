@@ -661,6 +661,19 @@ def _panel_enrich(codes, freq: str = "day", factors=None):
     return disp, regime, metrics
 
 
+def _resolve_model_id(m):
+    """model 省略/'prod' → 查默认变体指针;显式变体 id 原样(解析不校验存在)。
+    没设指针 → 'prod'(零行为变化)。"""
+    mid = (m or "prod").strip() or "prod"
+    if mid != "prod":
+        return mid
+    try:
+        from guanlan_v2.screen.model_registry import get_default_model
+        return get_default_model() or "prod"
+    except Exception:
+        return "prod"
+
+
 def _screen_via_v4(body: "ScreenIn"):
     """L1 = vendored v4 真排名(消费产物)。缺产物 → None(调用方回退玩具因子路径)。
 
@@ -669,7 +682,7 @@ def _screen_via_v4(body: "ScreenIn"):
     """
     import math as _math
 
-    _mid = getattr(body, "model", "prod") or "prod"
+    _mid = _resolve_model_id(getattr(body, "model", "prod"))
     try:
         from guanlan_v2 import strategy as S
         try:
@@ -1307,8 +1320,12 @@ def build_screen_router() -> APIRouter:
 
     @router.get("/models")
     def screen_models():
-        from guanlan_v2.screen.model_registry import list_variants
-        return JSONResponse({"ok": True, "variants": list_variants()})
+        from guanlan_v2.screen.model_registry import list_variants, get_default_model
+        dflt = get_default_model()
+        vs = list_variants()
+        for v in vs:
+            v["is_default"] = (v.get("id") == dflt)
+        return JSONResponse({"ok": True, "variants": vs, "default_model": dflt})
 
     @router.get("/model/ranking")
     def screen_model_ranking(id: str):
@@ -1365,6 +1382,15 @@ def build_screen_router() -> APIRouter:
         from guanlan_v2.screen.model_registry import delete_variant
         try:
             delete_variant(str(body.get("id") or "")); return JSONResponse({"ok": True})
+        except ValueError as e:
+            return JSONResponse({"ok": False, "reason": str(e)})
+
+    @router.post("/model/default")
+    def screen_model_default(body: dict = Body(default={})):
+        from guanlan_v2.screen.model_registry import set_default_model, get_default_model
+        try:
+            set_default_model(str(body.get("id") or "") or None)
+            return JSONResponse({"ok": True, "default": get_default_model()})
         except ValueError as e:
             return JSONResponse({"ok": False, "reason": str(e)})
 
