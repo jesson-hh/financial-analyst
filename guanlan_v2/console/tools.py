@@ -318,6 +318,7 @@ def model_list_impl() -> Dict[str, Any]:
     except Exception as e:
         return {"ok": False, "content": f"变体列表拉取失败: {e}", "artifact": None}
     vs = r.get("variants") or []
+    dflt = r.get("default_model")
     if not vs:
         return {"ok": True, "artifact": None, "raw": {"n": 0},
                 "content": "暂无训练好的 v4 变体(生产 v4=model 省略或 prod)。"
@@ -328,10 +329,12 @@ def model_list_impl() -> Dict[str, Any]:
         oid = "" if oi is None else f" 留出OOS IC {float(oi):+.3f}"
         uns = m.get("unsupported_factors") or []
         unl = f" ⚠{len(uns)}未用" if uns else ""
-        lines.append(f"{m.get('id')}「{m.get('name')}」· {m.get('n_features', '—')}特征{oid}{unl}")
-    head = f"已训练 v4 变体 {len(vs)} 个(ww_screen_run 传 model=<id> 用其选股;省略=生产 prod):\n"
+        star = " ★默认" if m.get("id") == dflt else ""
+        lines.append(f"{m.get('id')}「{m.get('name')}」· {m.get('n_features', '—')}特征{oid}{unl}{star}")
+    dl = f"(当前默认 = {dflt})" if dflt else "(当前默认 = 生产 prod)"
+    head = f"已训练 v4 变体 {len(vs)} 个{dl}(ww_screen_run 传 model=<id> 用其选股;省略=默认):\n"
     return {"ok": True, "content": head + "\n".join(lines), "artifact": None,
-            "raw": {"n": len(vs), "ids": [m.get("id") for m in vs]}}
+            "raw": {"n": len(vs), "ids": [m.get("id") for m in vs], "default": dflt}}
 
 
 def model_train_impl(name: str = "", factor_ids: Optional[List[str]] = None,
@@ -365,6 +368,42 @@ def model_train_impl(name: str = "", factor_ids: Optional[List[str]] = None,
     return {"ok": True, "artifact": None, "raw": r,
             "content": f"已启动训练变体「{nm}」(id={vid}·{len(base)}基础特征+{len(fids)}库因子)。"
                        f"后台 ~4min,完成后 ww_model_list 查看、ww_screen_run model={vid} 选股。生产 v4 不受影响。"}
+
+
+def model_delete_impl(id: str = "") -> Dict[str, Any]:
+    """删一个 v4 变体(生产 prod 不可删)。删的若是当前默认变体,后端连带回落 prod。需用户确认。"""
+    vid = (id or "").strip()
+    if not vid:
+        return {"ok": False, "content": "请给要删除的变体 id(ww_model_list 查)", "artifact": None}
+    try:
+        r = _self_post("/screen/model/delete", {"id": vid})
+    except Exception as e:
+        return {"ok": False, "content": f"删除失败: {e}", "artifact": None}
+    if r.get("ok") is False:
+        return {"ok": False, "content": f"未删除: {r.get('reason')}", "artifact": None}
+    try:
+        left = (_self_get("/screen/models").get("variants") or [])
+    except Exception:
+        left = []
+    tail = ("剩余变体: " + "、".join(m.get("id") for m in left)) if left else "已无自训变体(默认=生产 prod)。"
+    return {"ok": True, "artifact": None, "raw": {"id": vid, "left": [m.get("id") for m in left]},
+            "content": f"已删除变体 {vid}。{tail}"}
+
+
+def model_set_default_impl(id: str = "") -> Dict[str, Any]:
+    """设为默认变体:之后选股页/ww_screen_run 不指定模型时缺省用它;id=prod/省略=清除回官方 prod。
+    生产 prod 文件不动,随时可切回。需用户确认。"""
+    vid = (id or "").strip()
+    try:
+        r = _self_post("/screen/model/default", {"id": vid})
+    except Exception as e:
+        return {"ok": False, "content": f"设置失败: {e}", "artifact": None}
+    if r.get("ok") is False:
+        return {"ok": False, "content": f"未设置: {r.get('reason')}", "artifact": None}
+    cur = r.get("default")
+    msg = (f"已设默认变体 = {cur}(选股缺省用它,显式 model 仍优先;ww_model_set_default id=prod 可切回官方)。"
+           if cur else "已清除默认变体,选股缺省回生产 prod。")
+    return {"ok": True, "artifact": None, "raw": {"default": cur}, "content": msg}
 
 
 def seats_decide_impl(code: str, name: str = "", creed: str = "",
@@ -1101,6 +1140,24 @@ WW_TOOL_TABLE = [
       "required": ["name"]},
      "impl": model_train_impl, "cost": "minutes", "confirm": True,
      "reachable": ["/screen/base_features", "/screen/model/train"]},
+    {"name": "ww_model_delete",
+     "description":
+         "删除一个已训练的 v4 模型变体(生产 prod 不可删;删的若是当前默认变体,自动回落 prod)。"
+         "用户说『删掉变体 X/不要这个模型了』时用。需用户确认。",
+     "input_schema": {"type": "object", "properties": {
+         "id": {"type": "string", "description": "变体 id(ww_model_list 查)"}},
+      "required": ["id"]},
+     "impl": model_delete_impl, "cost": "instant", "confirm": True,
+     "reachable": ["/screen/model/delete"]},
+    {"name": "ww_model_set_default",
+     "description":
+         "把某个 v4 变体设为平台默认(之后选股页/ww_screen_run 不指定模型时缺省用它;显式 model 仍优先)。"
+         "id=prod 或省略 = 清除回官方生产 prod。生产 prod 文件不动,随时可切回。需用户确认。"
+         "用户说『把这个变体设为默认/上线/以后默认用它』时用。",
+     "input_schema": {"type": "object", "properties": {
+         "id": {"type": "string", "description": "变体 id(ww_model_list 查);传 prod/省略=清除回官方"}}},
+     "impl": model_set_default_impl, "cost": "instant", "confirm": True,
+     "reachable": ["/screen/model/default"]},
     {"name": "ww_seats_decide",
      "description":
          "触发落子席位研判(哨兵 agent,LLM 真研判并落盘 var/seats_decisions.jsonl)。需要用户确认。",
