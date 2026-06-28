@@ -72,8 +72,8 @@ def delete_variant(vid) -> None:
         try:
             if json.loads(p.read_text(encoding="utf-8")).get("id") == vid:
                 p.unlink()
-        except Exception:
-            pass
+        except (json.JSONDecodeError, OSError, AttributeError):
+            pass   # 损坏/读不了/非 dict 指针 → 不阻塞删除(get_default_model 也会自降级)
     d = _dir(vid)
     if d.exists():
         shutil.rmtree(d)
@@ -106,5 +106,4 @@ def set_default_model(model_id) -> None:
         return
     if not variant_ranking_path(model_id).exists():
         raise ValueError(f"变体不存在: {model_id}")
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps({"id": model_id}, ensure_ascii=False), encoding="utf-8")

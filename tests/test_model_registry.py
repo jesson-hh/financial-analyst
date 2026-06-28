@@ -62,5 +62,5 @@ def test_get_default_degrades_when_variant_gone(tmp_path, monkeypatch):
     _stub_variant(tmp_path / "models", "m_a")
     reg.set_default_model("m_a")
     reg.delete_variant("m_a")                           # 删默认变体
-    assert reg.get_default_model() is None              # 指针自愈 + 被清
+    assert reg.get_default_model() is None              # get 诚实降级 None(变体目录已删)
     assert not (tmp_path / "models" / "_default.json").exists()
