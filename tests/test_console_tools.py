@@ -1225,7 +1225,7 @@ def test_memory_read_global_includes_archive(tmp_path, monkeypatch):
 def test_model_delete_impl(monkeypatch):
     import guanlan_v2.console.tools as ct
     calls = {}
-    monkeypatch.setattr(ct, "_self_post", lambda path, payload, **k: calls.setdefault(path, payload) or {"ok": True})
+    monkeypatch.setattr(ct, "_self_post", lambda path, payload, **k: (calls.update({path: payload}) or {"ok": True}))
     monkeypatch.setattr(ct, "_self_get", lambda path, **k: {"variants": [{"id": "m_b", "name": "乙"}]})
     res = ct.model_delete_impl(id="m_a")
     assert res["ok"] is True
@@ -1243,7 +1243,11 @@ def test_model_delete_impl_refuses_prod(monkeypatch):
 def test_model_set_default_impl(monkeypatch):
     import guanlan_v2.console.tools as ct
     calls = {}
-    monkeypatch.setattr(ct, "_self_post", lambda path, payload, **k: calls.setdefault(path, payload) or {"ok": True, "default": payload.get("id") or None})
+    def _post(path, payload, **k):
+        calls[path] = payload
+        pid = payload.get("id")
+        return {"ok": True, "default": (pid if pid and pid != "prod" else None)}
+    monkeypatch.setattr(ct, "_self_post", _post)
     res = ct.model_set_default_impl(id="m_x")
     assert res["ok"] is True and calls["/screen/model/default"] == {"id": "m_x"}
     res2 = ct.model_set_default_impl(id="prod")

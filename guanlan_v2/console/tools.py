@@ -379,7 +379,7 @@ def model_delete_impl(id: str = "") -> Dict[str, Any]:
         r = _self_post("/screen/model/delete", {"id": vid})
     except Exception as e:
         return {"ok": False, "content": f"删除失败: {e}", "artifact": None}
-    if r.get("ok") is False:
+    if not r.get("ok"):
         return {"ok": False, "content": f"未删除: {r.get('reason')}", "artifact": None}
     try:
         left = (_self_get("/screen/models").get("variants") or [])
@@ -398,7 +398,7 @@ def model_set_default_impl(id: str = "") -> Dict[str, Any]:
         r = _self_post("/screen/model/default", {"id": vid})
     except Exception as e:
         return {"ok": False, "content": f"设置失败: {e}", "artifact": None}
-    if r.get("ok") is False:
+    if not r.get("ok"):
         return {"ok": False, "content": f"未设置: {r.get('reason')}", "artifact": None}
     cur = r.get("default")
     msg = (f"已设默认变体 = {cur}(选股缺省用它,显式 model 仍优先;ww_model_set_default id=prod 可切回官方)。"
