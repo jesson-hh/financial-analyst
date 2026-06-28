@@ -103,3 +103,20 @@ def test_node_features_volume_misaligned_turn_honest_not_stale():
     _, X = gat_io.compute_node_features(cp, vp, cp.index[-1])
     j_turn = list(gat_io.DEFAULT_GAT_FACTORS).index("turn")
     assert np.allclose(X[:, j_turn], 0.0)
+
+
+def test_corr_graph_connects_correlated_pair():
+    # numpy 相关确实识别相关性:近乎完全相关的一对必互连(守护 corr 计算正确)。
+    idx = pd.bdate_range("2024-01-01", periods=120)
+    rng = np.random.default_rng(0)
+    base = np.cumprod(1 + rng.normal(0.0, 0.02, 120))
+    cp = pd.DataFrame({
+        "X": 10.0 * base,
+        "Y": 10.0 * base * 1.001,                                  # 与 X 近乎完全相关
+        "Z": 10.0 * np.cumprod(1 + rng.normal(0.0, 0.02, 120)),    # 独立
+        "W": 10.0 * np.cumprod(1 + rng.normal(0.0, 0.02, 120)),    # 独立
+    }, index=idx)
+    codes = list(cp.columns)
+    A = gat_io.build_corr_graph(cp, idx[-1], codes, window=60, topk=1)
+    ix = {c: i for i, c in enumerate(codes)}
+    assert A[ix["X"], ix["Y"]] == 1.0 and A[ix["Y"], ix["X"]] == 1.0   # 高相关对必连

@@ -62,10 +62,16 @@ def build_corr_graph(close_panel: pd.DataFrame, date, codes, *, window: int = 60
     rets = cp.pct_change(fill_method=None).tail(window)
     if len(rets) < 5:
         return eye
-    C = rets.corr().to_numpy()
-    if not np.isfinite(C).any():
+    # 相关矩阵走 numpy(去均值+归一化后 R^T·R = 完整窗 Pearson),比 pandas .corr() 在数千列时快 ~100×;
+    # 缺值按"零偏差"计(同 kNN 鲁棒);常量/空列 → norm 0 → 该行全 0 → 后续零相关掩码留自环。
+    R = rets.to_numpy(dtype="float64")                 # (T, N)
+    R = np.nan_to_num(R - np.nanmean(R, axis=0, keepdims=True), nan=0.0)
+    norm = np.sqrt((R * R).sum(axis=0))                # (N,)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        Rn = np.nan_to_num(R / norm, nan=0.0, posinf=0.0, neginf=0.0)
+    C = Rn.T @ Rn                                       # (N, N) Pearson(完整窗精确等价 pandas)
+    if not np.isfinite(C).any() or not C.any():
         return eye
-    C = np.nan_to_num(C, nan=0.0)
     np.fill_diagonal(C, 0.0)
     k = min(topk, n - 1)
     if k <= 0:
