@@ -3,7 +3,10 @@
 import numpy as np
 import torch
 
-from guanlan_v2.strategy.compute.gat_model import _GATLayer, GAT, train_gat, predict_gat
+from guanlan_v2.strategy.compute.gat_model import (
+    _GATLayer, GAT, train_gat, predict_gat,
+    _GATLayerSparse, GATSparse, train_gat_sparse, predict_gat_sparse,
+)
 
 
 def test_gat_forward_shape_finite():
@@ -61,4 +64,43 @@ def test_train_gat_loss_decreases_and_predict():
     model, losses = train_gat(X_list, A_list, y_list, device="cpu", epochs=40, return_losses=True)
     assert losses[-1] < losses[0]            # 训练有效
     p = predict_gat(model, X_list[0], A_list[0], device="cpu")
+    assert p.shape == (N,) and np.isfinite(p).all()
+
+
+def test_sparse_layer_equals_dense_on_same_neighbors():
+    """等价命门:稀疏 gather 注意力在相同邻居集上与稠密掩码注意力逐位等价(证明稀疏路径数学正确)。"""
+    torch.manual_seed(0)
+    Fin, O = 5, 4
+    N = 6
+    nbr_list = [[0, 1, 2], [1, 0, 3], [2, 0, 4], [3, 1, 5], [4, 2, 5], [5, 3, 4]]
+    X = torch.randn(N, Fin)
+    # 由同一邻居集构造稠密 0/1 掩码:mask[i,j]=1 当 j 在 nbr_list[i]。
+    mask = torch.zeros(N, N)
+    for i, nb in enumerate(nbr_list):
+        for j in nb:
+            mask[i, j] = 1.0
+    dense = _GATLayer(Fin, O)
+    sparse = _GATLayerSparse(Fin, O)
+    # 把稠密层权重逐一复制进稀疏层(同初值才能对拍)。
+    sparse.W.weight.data = dense.W.weight.data.clone()
+    sparse.a_src.weight.data = dense.a_src.weight.data.clone()
+    sparse.a_dst.weight.data = dense.a_dst.weight.data.clone()
+    out_dense = dense(X, mask)
+    out_sparse = sparse(X, torch.tensor(nbr_list))
+    assert torch.allclose(out_dense, out_sparse, atol=1e-5)   # 逐位等价
+
+
+def test_train_gat_sparse_loss_decreases():
+    rng = np.random.default_rng(0)
+    X_list, nbr_list, y_list = [], [], []
+    N, Fin = 40, 4
+    w = rng.normal(size=Fin)
+    for _ in range(8):                       # 8 个"日"图,y 为 X 的线性可学函数;稀疏图用自环(self-only)。
+        X = rng.normal(size=(N, Fin)).astype(np.float32)
+        nbr = np.tile(np.arange(N)[:, None], (1, 3))     # (N,3) 全自身(只自注意)
+        y = (X @ w + rng.normal(0, 0.1, N)).astype(np.float32)
+        X_list.append(X); nbr_list.append(nbr); y_list.append(y)
+    model, losses = train_gat_sparse(X_list, nbr_list, y_list, device="cpu", epochs=40, return_losses=True)
+    assert losses[-1] < losses[0]            # 训练有效
+    p = predict_gat_sparse(model, X_list[0], nbr_list[0], device="cpu")
     assert p.shape == (N,) and np.isfinite(p).all()

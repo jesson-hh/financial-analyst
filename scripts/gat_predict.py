@@ -28,8 +28,9 @@ from financial_analyst.data.loaders.qlib_binary import QlibBinaryLoader   # noqa
 from guanlan_v2.strategy.compute.breadth import list_all_instruments       # noqa: E402
 from guanlan_v2.strategy.compute.regen import DEFAULT_PROVIDER, _latest_trade_date  # noqa: E402
 from guanlan_v2.strategy.compute.gat_io import (                            # noqa: E402
-    compute_node_features, build_corr_graph, forward_label, rebalance_dates)
-from guanlan_v2.strategy.compute.gat_model import train_gat, predict_gat    # noqa: E402
+    compute_node_features, build_corr_graph, build_corr_neighbors, forward_label, rebalance_dates)
+from guanlan_v2.strategy.compute.gat_model import (                         # noqa: E402
+    train_gat, predict_gat, train_gat_sparse, predict_gat_sparse)
 from guanlan_v2.strategy.compute.fincast_io import write_pred_rolling       # noqa: E402
 
 HORIZON = 5
@@ -70,6 +71,8 @@ def main() -> None:
     ap.add_argument("--topk", type=int, default=20)
     ap.add_argument("--universe", default="all",
                     help="all=全市场(默认);csi300/csi500/csi800/csi1000=指数成分(节点少·稠密图省显存,适合首跑打通)")
+    ap.add_argument("--graph", default="auto", choices=("auto", "dense", "sparse"),
+                    help="auto=全市场(all)走稀疏 kNN 图·否则稠密(默认);dense=稠密 N×N(小盘);sparse=稀疏 kNN(全市场不爆显存)")
     ap.add_argument("--provider", default=DEFAULT_PROVIDER)
     args = ap.parse_args()
 
@@ -85,6 +88,9 @@ def main() -> None:
         from financial_analyst.data.universe import resolve_universe_codes
         codes = [str(c) for c in resolve_universe_codes(args.universe)]
     print(f"universe={args.universe} · {len(codes)} 码,读 close/volume 面板 ...", flush=True)
+    # 图模式:auto=全市场(all)走稀疏 kNN(O(N·K) 不爆显存),否则稠密 N×N;dense/sparse 显式覆盖。
+    use_sparse = (args.universe == "all") if args.graph == "auto" else (args.graph == "sparse")
+    print(f"graph={'sparse' if use_sparse else 'dense'}(--graph={args.graph})", flush=True)
     cp, vp = _read_panels(loader, codes, eval_date)
 
     rdates = [d for d in rebalance_dates(cp.index, horizon=HORIZON, start=args.train_start)
@@ -98,17 +104,27 @@ def main() -> None:
         y = forward_label(cp, d, node_codes, horizon=HORIZON)
         if int(np.isfinite(y).sum()) < 50:
             continue
-        A = build_corr_graph(cp, d, node_codes, window=args.window, topk=args.topk)
+        if use_sparse:
+            A = build_corr_neighbors(cp, d, node_codes, window=args.window, topk=args.topk)
+        else:
+            A = build_corr_graph(cp, d, node_codes, window=args.window, topk=args.topk)
         X_list.append(X); A_list.append(A); y_list.append(y); cutoff = d
     if len(X_list) < 10:
         print(f"训练样本不足({len(X_list)} 日),退出(不产文件 → 下游诚实退纯 LGB)", flush=True)
         return
     print(f"训练日 {len(X_list)} · 末标签日 {cutoff.date()} · 训练 GAT(epochs={args.epochs}) ...", flush=True)
-    model = train_gat(X_list, A_list, y_list, device=device, epochs=args.epochs)
+    if use_sparse:
+        model = train_gat_sparse(X_list, A_list, y_list, device=device, epochs=args.epochs)
+    else:
+        model = train_gat(X_list, A_list, y_list, device=device, epochs=args.epochs)
 
     e_codes, Xe = compute_node_features(cp, vp, eval_date)
-    Ae = build_corr_graph(cp, eval_date, e_codes, window=args.window, topk=args.topk)
-    preds = predict_gat(model, Xe, Ae, device=device)
+    if use_sparse:
+        Ae = build_corr_neighbors(cp, eval_date, e_codes, window=args.window, topk=args.topk)
+        preds = predict_gat_sparse(model, Xe, Ae, device=device)
+    else:
+        Ae = build_corr_graph(cp, eval_date, e_codes, window=args.window, topk=args.topk)
+        preds = predict_gat(model, Xe, Ae, device=device)
     out = write_pred_rolling(OUT, eval_date, e_codes, np.asarray(preds, dtype=np.float32),
                              keep_days=60, train_cutoff=str(cutoff.date()))
     print(f"已写 {OUT}({len(out)} 条 · {pd.to_datetime(out['eval_date']).nunique()} 日 · {time.time() - t0:.1f}s)",

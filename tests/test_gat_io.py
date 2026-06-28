@@ -120,3 +120,49 @@ def test_corr_graph_connects_correlated_pair():
     A = gat_io.build_corr_graph(cp, idx[-1], codes, window=60, topk=1)
     ix = {c: i for i, c in enumerate(codes)}
     assert A[ix["X"], ix["Y"]] == 1.0 and A[ix["Y"], ix["X"]] == 1.0   # 高相关对必连
+
+
+def test_corr_neighbors_shape_self_and_pit():
+    # 稀疏 kNN 邻居:形状 (N, topk+1)、首列=自身、int dtype、PIT(篡改未来不改变邻居)。
+    cp = _close_panel()
+    codes = list(cp.columns)
+    d = cp.index[60]
+    topk = 2
+    out = gat_io.build_corr_neighbors(cp, d, codes, window=40, topk=topk)
+    n = len(codes)
+    assert out.shape == (n, topk + 1)
+    assert np.array_equal(out[:, 0], np.arange(n))    # 首列恒为自身
+    assert np.issubdtype(out.dtype, np.integer)       # 整数索引
+    # PIT:篡改 d 之后的未来行,重建邻居不变(守护 .loc[:date] 截断)。
+    cp2 = cp.copy()
+    cp2.iloc[70:] = cp2.iloc[70:] * 5.0
+    out2 = gat_io.build_corr_neighbors(cp2, d, codes, window=40, topk=topk)
+    assert np.array_equal(out, out2)
+
+
+def test_corr_neighbors_connects_correlated_pair():
+    # 近乎完全相关的一对 X/Y(Z/W 独立),topk=1:Y 必在 X 的邻居行,X 必在 Y 的邻居行。
+    idx = pd.bdate_range("2024-01-01", periods=120)
+    rng = np.random.default_rng(0)
+    base = np.cumprod(1 + rng.normal(0.0, 0.02, 120))
+    cp = pd.DataFrame({
+        "X": 10.0 * base,
+        "Y": 10.0 * base * 1.001,                                  # 与 X 近乎完全相关
+        "Z": 10.0 * np.cumprod(1 + rng.normal(0.0, 0.02, 120)),    # 独立
+        "W": 10.0 * np.cumprod(1 + rng.normal(0.0, 0.02, 120)),    # 独立
+    }, index=idx)
+    codes = list(cp.columns)
+    out = gat_io.build_corr_neighbors(cp, idx[-1], codes, window=60, topk=1)
+    ix = {c: i for i, c in enumerate(codes)}
+    assert ix["Y"] in out[ix["X"]]    # Y 在 X 的邻居行
+    assert ix["X"] in out[ix["Y"]]    # X 在 Y 的邻居行
+
+
+def test_corr_neighbors_degenerate_all_self():
+    # 常量序列(相关性未定义/0)→ 该节点整行邻居都填自身(零相关槽退化为自身)。
+    cp = _close_panel(n_days=120, codes=("A", "B", "C", "D"))
+    cp["FLAT"] = 10.0
+    codes = list(cp.columns)
+    out = gat_io.build_corr_neighbors(cp, cp.index[-1], codes, window=60, topk=2)
+    fi = codes.index("FLAT")
+    assert (out[fi] == fi).all()      # 整行全为自身索引

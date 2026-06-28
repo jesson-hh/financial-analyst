@@ -90,3 +90,78 @@ def predict_gat(model: GAT, X: np.ndarray, A: np.ndarray, *, device: str = "cpu"
         Xt = torch.tensor(X, dtype=torch.float32, device=device)
         At = torch.tensor(A, dtype=torch.float32, device=device)
         return model(Xt, At).detach().cpu().numpy()
+
+
+class _GATLayerSparse(nn.Module):
+    """稀疏图注意力:每节点对其邻居索引 nbr(含自身)做 gather 注意力,数学等价于 _GATLayer 在相同邻居集上的结果,
+    但内存 O(N·K) 非 O(N²)。e_ij = LeakyReLU(a_src·Wh_i + a_dst·Wh_j),邻居维 softmax,加权聚合。"""
+
+    def __init__(self, in_dim: int, out_dim: int, *, alpha: float = 0.2):
+        super().__init__()
+        self.W = nn.Linear(in_dim, out_dim, bias=False)
+        self.a_src = nn.Linear(out_dim, 1, bias=False)
+        self.a_dst = nn.Linear(out_dim, 1, bias=False)
+        self.leaky = nn.LeakyReLU(alpha)
+
+    def forward(self, h: torch.Tensor, nbr: torch.Tensor) -> torch.Tensor:
+        Wh = self.W(h)                                   # (N, out)
+        Wh_nbr = Wh[nbr]                                 # (N, K+1, out) gather 邻居
+        e = self.a_src(Wh).unsqueeze(1) + self.a_dst(Wh_nbr)   # (N,1,1)+(N,K+1,1) = (N,K+1,1)
+        e = self.leaky(e).squeeze(-1)                    # (N, K+1)
+        att = torch.softmax(e, dim=1)                    # 邻居维归一
+        return (att.unsqueeze(-1) * Wh_nbr).sum(dim=1)   # (N, out)
+
+
+class GATSparse(nn.Module):
+    def __init__(self, in_dim: int, hidden: int = 32):
+        super().__init__()
+        self.l1 = _GATLayerSparse(in_dim, hidden)
+        self.l2 = _GATLayerSparse(hidden, hidden)
+        self.head = nn.Linear(hidden, 1)
+
+    def forward(self, X: torch.Tensor, nbr: torch.Tensor) -> torch.Tensor:
+        h = F.elu(self.l1(X, nbr))
+        h = F.elu(self.l2(h, nbr))
+        return self.head(h).squeeze(-1)                  # (N,)
+
+
+def train_gat_sparse(X_list, nbr_list, y_list, *, device="cpu", epochs=60, lr=1e-3,
+                     hidden=32, seed=0, return_losses=False):
+    """同 train_gat 但用稀疏邻居索引图(nbr_list[i] 为 (N,K+1) int)。仅 finite-label 节点入横截面 z 标签 MSE。"""
+    torch.manual_seed(seed)
+    graphs = []
+    for X, nbr, y in zip(X_list, nbr_list, y_list):
+        m = np.isfinite(y)
+        if int(m.sum()) < 20:
+            continue
+        graphs.append((
+            torch.tensor(X, dtype=torch.float32, device=device),
+            torch.tensor(nbr, dtype=torch.long, device=device),
+            torch.tensor(m, device=device),
+            torch.tensor(_zscore_1d(y[m]), dtype=torch.float32, device=device),
+        ))
+    if not graphs:
+        raise ValueError("无可训练图(每日 finite 标签 < 20)")
+    model = GATSparse(X_list[0].shape[1], hidden=hidden).to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    model.train()
+    losses = []
+    for _ in range(epochs):
+        tot, nb = 0.0, 0
+        for Xt, nbrt, m, yz in graphs:
+            opt.zero_grad()
+            pred = model(Xt, nbrt)[m]
+            loss = F.mse_loss(pred, yz)
+            loss.backward()
+            opt.step()
+            tot += loss.item(); nb += 1
+        losses.append(tot / max(1, nb))
+    return (model, losses) if return_losses else model
+
+
+def predict_gat_sparse(model, X, nbr, *, device="cpu"):
+    model.eval()
+    with torch.no_grad():
+        Xt = torch.tensor(X, dtype=torch.float32, device=device)
+        nbrt = torch.tensor(nbr, dtype=torch.long, device=device)
+        return model(Xt, nbrt).detach().cpu().numpy()

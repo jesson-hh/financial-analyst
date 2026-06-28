@@ -87,6 +87,31 @@ def build_corr_graph(close_panel: pd.DataFrame, date, codes, *, window: int = 60
     return A
 
 
+def build_corr_neighbors(close_panel: pd.DataFrame, date, codes, *, window: int = 60, topk: int = 20) -> np.ndarray:
+    """≤date 末 window 日收益相关 → 每节点 [自身 + top-topk 最相关邻居] 的索引 (N, K+1) int64(K=min(topk,N-1))。
+    有向 kNN 稀疏表示(不对称化·省显存,全市场 6075 不爆),相关口径与 build_corr_graph 同(numpy);
+    退化(零相关/常量序列)节点的邻居槽全填自身;窗口<5 日 → 全填自身。"""
+    n = len(codes)
+    self_idx = np.arange(n)
+    K = min(topk, n - 1)
+    out = np.tile(self_idx[:, None], (1, K + 1))          # (N, K+1) 默认全自身
+    cp = close_panel.loc[:pd.Timestamp(date), list(codes)]
+    rets = cp.pct_change(fill_method=None).tail(window)
+    if len(rets) < 5 or K <= 0:
+        return out
+    R = rets.to_numpy(dtype="float64")
+    R = np.nan_to_num(R - np.nanmean(R, axis=0, keepdims=True), nan=0.0)
+    norm = np.sqrt((R * R).sum(axis=0))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        Rn = np.nan_to_num(R / norm, nan=0.0, posinf=0.0, neginf=0.0)
+    C = Rn.T @ Rn
+    np.fill_diagonal(C, 0.0)
+    order = np.argsort(-np.abs(C), axis=1)[:, :K]          # (N, K) 按 |corr| 取 topk
+    keep = np.take_along_axis(np.abs(C), order, axis=1) > 0
+    out[:, 1:] = np.where(keep, order, self_idx[:, None])  # 非邻居(零相关)槽 → 自身
+    return out
+
+
 def forward_label(close_panel: pd.DataFrame, date, codes, *, horizon: int = 5) -> np.ndarray:
     """codes 在 date 起未来 horizon 交易日收益 close[t+h]/close[t]-1(仅训练日可用:t+h ≤ 面板末日)。
     缺失/无未来 置 nan。返回 (N,) float32。"""
