@@ -1366,6 +1366,9 @@ _ALLOWED_ENGINE_TOOLS = [
     "iwencai_search", "ths_fund_flow", "fund_flow_change", "ths_concept_board",
     "market_status", "mainline_radar", "overseas_radar", "morning_brief",
     "quote_batch", "chain_for", "industry_show",
+    # B 类:引擎 alpha-zoo 因子研究线(442 学术因子库/事件研究/炼因子;各自带 confirm 门或只读)
+    "alpha_list", "alpha_show", "alpha_compare", "alpha_bench",
+    "event_report", "alpha_forge", "factor_report",
 ]
 
 # run_turn 白名单 = 帷幄工具(WW_TOOL_TABLE) + 精选 buddy/引擎研究工具(_ALLOWED_ENGINE_TOOLS)。

@@ -514,8 +514,8 @@ def test_engine_profile_excludes_ww_but_console_whitelist_resolves():
     assert out["default_is_none"] is False and out["default_ww"] == []
     assert out["all_is_none"] is False and out["all_ww"] == []
     # ② console 显式白名单路径不受影响:46 名全部可解析,含 28 个 ww_(+模型工坊 2)
-    assert out["console_n"] == 48 and out["console_missing"] == []
-    assert out["explicit_n"] == 48 and out["explicit_ww_n"] == 30
+    assert out["console_n"] == 55 and out["console_missing"] == []
+    assert out["explicit_n"] == 55 and out["explicit_ww_n"] == 30
 
 
 def test_f10_impl_returns_structured_facts(monkeypatch):
@@ -981,7 +981,7 @@ def test_registry_derivation_consistent():
     ww_in_table = {t["name"] for t in ct.WW_TOOL_TABLE}
     assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 30
     assert ww_in_table == {n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")}
-    assert len(ct.CONSOLE_ALLOWED) == 48
+    assert len(ct.CONSOLE_ALLOWED) == 55
     assert {"/factorlib/save", "/workflow/compose", "/feature/build"} <= ct._WW_REACHABLE_ENDPOINTS
     assert ct._WW_REACHABLE_ENDPOINTS == {ep for t in ct.WW_TOOL_TABLE for ep in t.get("reachable", [])}
 
@@ -1260,3 +1260,12 @@ def test_model_list_impl_marks_default(monkeypatch):
         "variants": [{"id": "m_x", "name": "甲", "n_features": 5}], "default_model": "m_x"})
     res = ct.model_list_impl()
     assert res["ok"] is True and "默认" in res["content"]
+
+
+def test_alpha_zoo_tools_whitelisted():
+    import guanlan_v2.console.tools as ct
+    _SURVIVORS = ["alpha_list", "alpha_show", "alpha_compare", "alpha_bench",
+                  "event_report", "alpha_forge", "factor_report"]
+    for name in _SURVIVORS:
+        assert name in ct._ALLOWED_ENGINE_TOOLS
+        assert name in ct.CONSOLE_ALLOWED
