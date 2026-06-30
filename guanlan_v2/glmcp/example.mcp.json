@@ -5,7 +5,7 @@
     },
     "guanlan-stdio": {
       "command": "python",
-      "args": ["-m", "guanlan_v2.mcp"]
+      "args": ["-m", "guanlan_v2.glmcp"]
     }
   }
 }

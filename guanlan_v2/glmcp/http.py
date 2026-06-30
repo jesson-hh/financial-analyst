@@ -15,7 +15,7 @@ from starlette.routing import Mount
 
 def build_mcp_http_app() -> Starlette:
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-    from guanlan_v2.mcp.server import build_server
+    from guanlan_v2.glmcp.server import build_server
 
     server = build_server()
     manager = StreamableHTTPSessionManager(app=server)

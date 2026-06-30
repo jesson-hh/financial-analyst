@@ -5,7 +5,7 @@
 
 ## 两种传输(任选)
 - **HTTP**:随 9999 后端一起跑,挂在 `http://127.0.0.1:9999/gl-mcp`。
-- **stdio**:`python -m guanlan_v2.mcp`(本地客户端启动它)。
+- **stdio**:`python -m guanlan_v2.glmcp`(本地客户端启动它)。
 
 `example.mcp.json` 是两种的客户端配置样例。
 

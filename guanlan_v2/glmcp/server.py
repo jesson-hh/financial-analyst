@@ -13,7 +13,7 @@ _DECLS: List[Dict[str, Any]] | None = None
 def _decls() -> List[Dict[str, Any]]:
     global _DECLS
     if _DECLS is None:
-        from guanlan_v2.mcp.tooltable import build_mcp_tools
+        from guanlan_v2.glmcp.tooltable import build_mcp_tools
         _DECLS = build_mcp_tools()
     return _DECLS
 

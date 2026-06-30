@@ -222,7 +222,7 @@ def create_app():
     # 跑被挂子应用的 lifespan,故这里把 guanlan MCP 的 session-manager lifespan
     # **叠加**进现有 lifespan(wrap app.router.lifespan_context:先进原,再进 guanlan MCP)。
     import contextlib as _ctxlib
-    from guanlan_v2.mcp.http import build_mcp_http_app as _build_gl_mcp
+    from guanlan_v2.glmcp.http import build_mcp_http_app as _build_gl_mcp
     _gl_mcp_app = _build_gl_mcp()
     _prev_lifespan = app.router.lifespan_context
 

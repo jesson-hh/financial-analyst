@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""python -m guanlan_v2.mcp → stdio MCP(本地客户端用)。镜像引擎 mcp_server.main。"""
+"""python -m guanlan_v2.glmcp → stdio MCP(本地客户端用)。镜像引擎 mcp_server.main。"""
 from __future__ import annotations
 
 import asyncio
@@ -7,7 +7,7 @@ import asyncio
 
 def main() -> None:
     from mcp.server.stdio import stdio_server
-    from guanlan_v2.mcp.server import build_server
+    from guanlan_v2.glmcp.server import build_server
 
     async def _run():
         server = build_server()

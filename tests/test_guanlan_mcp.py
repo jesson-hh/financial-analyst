@@ -2,7 +2,7 @@ import asyncio
 
 
 def test_build_mcp_tools_derivation():
-    from guanlan_v2.mcp.tooltable import build_mcp_tools
+    from guanlan_v2.glmcp.tooltable import build_mcp_tools
     import guanlan_v2.console.tools as ct
     tools = build_mcp_tools()
     names = {t["name"] for t in tools}
@@ -14,7 +14,7 @@ def test_build_mcp_tools_derivation():
 
 
 def test_build_mcp_tools_annotations_and_gate():
-    from guanlan_v2.mcp.tooltable import build_mcp_tools
+    from guanlan_v2.glmcp.tooltable import build_mcp_tools
     by = {t["name"]: t for t in build_mcp_tools()}
     assert by["ww_model_delete"]["destructive"] and by["ww_model_delete"]["gated"]      # confirm=True
     assert by["ww_model_set_default"]["gated"]
@@ -26,7 +26,7 @@ def test_build_mcp_tools_annotations_and_gate():
 
 
 def test_dispatch_readonly_wraps_impl(monkeypatch):
-    import guanlan_v2.mcp.server as ms
+    import guanlan_v2.glmcp.server as ms
 
     async def fake_to_thread(fn, **kw):
         return {"ok": True, "content": "RESULT_X"}
@@ -36,7 +36,7 @@ def test_dispatch_readonly_wraps_impl(monkeypatch):
 
 
 def test_dispatch_write_gate(monkeypatch):
-    import guanlan_v2.mcp.server as ms
+    import guanlan_v2.glmcp.server as ms
     monkeypatch.delenv("GUANLAN_MCP_WRITE", raising=False)
     called = {"n": 0}
 
@@ -52,25 +52,25 @@ def test_dispatch_write_gate(monkeypatch):
 
 
 def test_dispatch_unknown_tool():
-    import guanlan_v2.mcp.server as ms
+    import guanlan_v2.glmcp.server as ms
     res = asyncio.run(ms.dispatch_tool("ww_nope", {}))
     assert "未知工具" in res[0].text
 
 
 def test_build_server_name():
-    from guanlan_v2.mcp.server import build_server
+    from guanlan_v2.glmcp.server import build_server
     assert build_server().name == "guanlan"
 
 
 def test_build_mcp_http_app_is_starlette():
-    from guanlan_v2.mcp.http import build_mcp_http_app
+    from guanlan_v2.glmcp.http import build_mcp_http_app
     from starlette.applications import Starlette
     assert isinstance(build_mcp_http_app(), Starlette)
 
 
 def test_main_module_has_main():
     import importlib
-    m = importlib.import_module("guanlan_v2.mcp.__main__")
+    m = importlib.import_module("guanlan_v2.glmcp.__main__")
     assert callable(getattr(m, "main", None))
 
 
