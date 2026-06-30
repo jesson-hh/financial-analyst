@@ -23,3 +23,40 @@ def test_build_mcp_tools_annotations_and_gate():
     assert by["alpha_forge"]["destructive"] and by["alpha_forge"]["gated"]              # 唯一 alpha 写
     assert by["alpha_compare"]["read_only"] and not by["alpha_compare"]["gated"]        # 贵但只读=不锁
     assert by["alpha_list"]["read_only"] and not by["alpha_list"]["gated"]
+
+
+def test_dispatch_readonly_wraps_impl(monkeypatch):
+    import guanlan_v2.mcp.server as ms
+
+    async def fake_to_thread(fn, **kw):
+        return {"ok": True, "content": "RESULT_X"}
+    monkeypatch.setattr(ms.asyncio, "to_thread", fake_to_thread)
+    res = asyncio.run(ms.dispatch_tool("ww_screen_factors", {}))
+    assert res[0].text == "RESULT_X"
+
+
+def test_dispatch_write_gate(monkeypatch):
+    import guanlan_v2.mcp.server as ms
+    monkeypatch.delenv("GUANLAN_MCP_WRITE", raising=False)
+    called = {"n": 0}
+
+    async def fake_to_thread(fn, **kw):
+        called["n"] += 1
+        return {"ok": True, "content": "DID_WRITE"}
+    monkeypatch.setattr(ms.asyncio, "to_thread", fake_to_thread)
+    res = asyncio.run(ms.dispatch_tool("ww_model_set_default", {"id": "m_x"}))
+    assert "写操作未启用" in res[0].text and called["n"] == 0          # 默认锁:impl 未被调
+    monkeypatch.setenv("GUANLAN_MCP_WRITE", "1")
+    res2 = asyncio.run(ms.dispatch_tool("ww_model_set_default", {"id": "m_x"}))
+    assert called["n"] == 1 and res2[0].text == "DID_WRITE"           # 放行:impl 被调
+
+
+def test_dispatch_unknown_tool():
+    import guanlan_v2.mcp.server as ms
+    res = asyncio.run(ms.dispatch_tool("ww_nope", {}))
+    assert "未知工具" in res[0].text
+
+
+def test_build_server_name():
+    from guanlan_v2.mcp.server import build_server
+    assert build_server().name == "guanlan"
