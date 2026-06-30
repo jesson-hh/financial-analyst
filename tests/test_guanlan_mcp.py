@@ -60,3 +60,15 @@ def test_dispatch_unknown_tool():
 def test_build_server_name():
     from guanlan_v2.mcp.server import build_server
     assert build_server().name == "guanlan"
+
+
+def test_build_mcp_http_app_is_starlette():
+    from guanlan_v2.mcp.http import build_mcp_http_app
+    from starlette.applications import Starlette
+    assert isinstance(build_mcp_http_app(), Starlette)
+
+
+def test_main_module_has_main():
+    import importlib
+    m = importlib.import_module("guanlan_v2.mcp.__main__")
+    assert callable(getattr(m, "main", None))
