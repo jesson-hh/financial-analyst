@@ -62,6 +62,15 @@ def test_build_server_name():
     assert build_server().name == "guanlan"
 
 
+def test_build_server_prewarms_decls():
+    # 守护:build_server 必须急切预热工具表(_decls),把重导入挪到 stdio 读循环之前。
+    # 否则首个 list_tools 触发冷导入会卡死 stdio(initialize 能回、tools/list 永不返回)。
+    import guanlan_v2.glmcp.server as ms
+    ms._DECLS = None
+    ms.build_server()
+    assert ms._DECLS is not None and len(ms._DECLS) == 35
+
+
 def test_build_mcp_http_app_is_starlette():
     from guanlan_v2.glmcp.http import build_mcp_http_app
     from starlette.applications import Starlette

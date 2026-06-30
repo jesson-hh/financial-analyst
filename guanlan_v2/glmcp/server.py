@@ -62,6 +62,10 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> List[Any]:
 def build_server():
     from mcp.server import Server
     from mcp.types import Tool, ToolAnnotations
+    # 急切预热:把 console.tools / 引擎 buddy.tools 这类重导入(litellm 等)在
+    # 进入 stdio 读循环【之前】跑完。否则首个 list_tools 在请求处理中触发冷导入,
+    # 会卡死 stdio 读循环(初始化能回、tools/list 永不返回)。镜像引擎模块级 TOOLS 的急切构建。
+    _decls()
     server = Server("guanlan")
 
     @server.list_tools()
