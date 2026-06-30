@@ -58,3 +58,13 @@ _srv.*
 .playwright-mcp/
 # 生成的研报产物(运行态数据,非源码)
 guanlan_v2/reports/store/
+
+# === 前端依赖 / 构建产物 — 数据非源码,不入库 ===
+# node 依赖(任意层级)— 防 `git add -A` 误吞 ui-next/node_modules 千文件(已发生事故)
+# 注:只忽略 node_modules,不忽略 ui-next/ 本体(源码后续要入库)
+**/node_modules/
+# Vite 构建输出
+ui-next/dist/
+
+# === Superpowers SDD 草稿 / 账本 — 按 skill 设计本就 git-ignore ===
+.superpowers/
