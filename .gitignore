@@ -58,6 +58,10 @@ _srv.*
 .playwright-mcp/
 # 生成的研报产物(运行态数据,非源码)
 guanlan_v2/reports/store/
+# 工作流存储(运行态,与 reports/store 同类;注:不忽略整个 .data/,wisdom 卡片是跟踪源)
+.data/workflows/
+# 运行态日志目录
+logs/
 
 # === 前端依赖 / 构建产物 — 数据非源码,不入库 ===
 # node 依赖(任意层级)— 防 `git add -A` 误吞 ui-next/node_modules 千文件(已发生事故)
