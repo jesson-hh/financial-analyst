@@ -72,3 +72,11 @@ def test_main_module_has_main():
     import importlib
     m = importlib.import_module("guanlan_v2.mcp.__main__")
     assert callable(getattr(m, "main", None))
+
+
+def test_server_mounts_gl_mcp_alongside_engine_mcp():
+    import guanlan_v2.server as s
+    mounts = [getattr(r, "path", None) for r in s.app.routes if r.__class__.__name__ == "Mount"]
+    assert "/gl-mcp" in mounts          # 新 guanlan MCP
+    assert "/mcp" in mounts             # 引擎 MCP 仍在(不破)
+    assert "/ui" in mounts              # 既有 UI 不破

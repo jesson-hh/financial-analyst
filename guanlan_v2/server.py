@@ -217,6 +217,24 @@ def create_app():
     # 免手动点「数据」按钮 / 跑 CLI。盘中守卫在 generate 内, 早触发也只落上一完整收盘日。
     start_market_status_scheduler()
 
+    # ── guanlan 自有 MCP(挂 /gl-mcp,与引擎 /mcp 并存)──────────────
+    # build_app() 已挂引擎 MCP 于 /mcp 并为其设了 app lifespan。Starlette 不会自动
+    # 跑被挂子应用的 lifespan,故这里把 guanlan MCP 的 session-manager lifespan
+    # **叠加**进现有 lifespan(wrap app.router.lifespan_context:先进原,再进 guanlan MCP)。
+    import contextlib as _ctxlib
+    from guanlan_v2.mcp.http import build_mcp_http_app as _build_gl_mcp
+    _gl_mcp_app = _build_gl_mcp()
+    _prev_lifespan = app.router.lifespan_context
+
+    @_ctxlib.asynccontextmanager
+    async def _composed_lifespan(_app):
+        async with _prev_lifespan(_app):
+            async with _gl_mcp_app.router.lifespan_context(_gl_mcp_app):
+                yield
+
+    app.router.lifespan_context = _composed_lifespan
+    app.mount("/gl-mcp", _gl_mcp_app)
+
     if not _UI_DIR.is_dir():
         raise RuntimeError(f"guanlan_v2 UI dir missing: {_UI_DIR}")
 

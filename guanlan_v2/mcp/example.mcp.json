@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "guanlan-http": {
+      "url": "http://127.0.0.1:9999/gl-mcp"
+    },
+    "guanlan-stdio": {
+      "command": "python",
+      "args": ["-m", "guanlan_v2.mcp"]
+    }
+  }
+}
