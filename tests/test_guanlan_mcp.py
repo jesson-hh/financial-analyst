@@ -7,10 +7,10 @@ def test_build_mcp_tools_derivation():
     tools = build_mcp_tools()
     names = {t["name"] for t in tools}
     ww = {t["name"] for t in ct.WW_TOOL_TABLE}
-    assert "ww_plan_update" not in names and "ww_show_page" not in names      # 去除 console-UI-only
-    assert (ww - {"ww_plan_update", "ww_show_page"}) <= names                  # 其余 ww_ 全在
+    assert "ww_plan_update" not in names and "ww_show_page" not in names and "ww_seats_bind" not in names      # 去除 console-UI-only & 前端信封
+    assert (ww - {"ww_plan_update", "ww_show_page", "ww_seats_bind"}) <= names                  # 其余 ww_ 全在
     assert {"alpha_list", "alpha_compare", "alpha_forge", "factor_report"} <= names
-    assert len(tools) == 44                                                    # 37 ww_ + 7 alpha-zoo
+    assert len(tools) == 43                                                    # 36 ww_(39−3 excluded) + 7 alpha-zoo
 
 
 def test_build_mcp_tools_annotations_and_gate():
@@ -68,7 +68,7 @@ def test_build_server_prewarms_decls():
     import guanlan_v2.glmcp.server as ms
     ms._DECLS = None
     ms.build_server()
-    assert ms._DECLS is not None and len(ms._DECLS) == 44
+    assert ms._DECLS is not None and len(ms._DECLS) == 43
 
 
 def test_build_mcp_http_app_is_starlette():
@@ -89,3 +89,84 @@ def test_server_mounts_gl_mcp_alongside_engine_mcp():
     assert "/gl-mcp" in mounts          # 新 guanlan MCP
     assert "/mcp" in mounts             # 引擎 MCP 仍在(不破)
     assert "/ui" in mounts              # 既有 UI 不破
+
+
+def test_mcp_excludes_frontend_envelope_tools():
+    """ww_seats_bind 靠前端 window.GL 落地,MCP 语境=空转假成功 → 排除(同 ww_show_page)。"""
+    from guanlan_v2.glmcp.tooltable import build_mcp_tools
+    names = {t["name"] for t in build_mcp_tools()}
+    assert "ww_seats_bind" not in names
+    assert "ww_report_run" in names          # 研报经 detached 子进程真跑,保留(gated)
+    assert len(names) == 43
+
+
+def test_spawn_background_report_branch(monkeypatch):
+    import subprocess
+    from pathlib import Path
+    import guanlan_v2.glmcp.server as ms
+    calls = {}
+    class FakePopen:
+        def __init__(self, cmd, **kw):
+            calls["cmd"] = cmd
+            calls["kw"] = kw
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    receipt = ms._spawn_background_detached({"kind": "report", "code": "SZ000630"})
+    assert "已真启动后台研报" in receipt
+    assert calls["cmd"][1] == "report" and calls["cmd"][2] == "SZ000630"
+    assert calls["kw"]["creationflags"] == (0x00000008 | 0x00000200)   # detached
+    # 清理:FakePopen 未写内容 → 本测新建的空日志删掉
+    for p in (Path(ms.__file__).resolve().parents[2] / "var").glob("mcp_bg_*.log"):
+        if p.stat().st_size == 0:
+            p.unlink()
+
+
+def test_spawn_background_etf_branch(monkeypatch):
+    import subprocess
+    from pathlib import Path
+    import guanlan_v2.glmcp.server as ms
+    calls = {}
+    class FakePopen:
+        def __init__(self, cmd, **kw):
+            calls["cmd"] = cmd
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    receipt = ms._spawn_background_detached({"kind": "etf_report", "code": "510300", "asof": None})
+    assert "已真启动" in receipt and calls["cmd"][1] == "-c" and "run_etf_report" in calls["cmd"][2]
+    for p in (Path(ms.__file__).resolve().parents[2] / "var").glob("mcp_bg_*.log"):
+        if p.stat().st_size == 0:
+            p.unlink()
+
+
+def test_spawn_background_unknown_kind_refuses(monkeypatch):
+    """未知 kind → 诚实拒绝文案,绝不 spawn。"""
+    import subprocess
+    import guanlan_v2.glmcp.server as ms
+    def _boom(*a, **k):
+        raise AssertionError("不应 spawn")
+    monkeypatch.setattr(subprocess, "Popen", _boom)
+    msg = ms._spawn_background_detached({"kind": "weird"})
+    assert "暂不支持" in msg
+
+
+def test_dispatch_background_spawn_failure_is_visible(monkeypatch):
+    """spawn 抛错 → dispatch 回错误显形,绝不假成功(红线)。"""
+    import guanlan_v2.glmcp.server as ms
+    async def fake_to_thread(fn, **kw):
+        return {"ok": True, "content": "已受理", "background": {"kind": "report", "code": "X"}}
+    monkeypatch.setattr(ms.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setenv("GUANLAN_MCP_WRITE", "1")
+    def boom(bg):
+        raise RuntimeError("spawn炸了")
+    monkeypatch.setattr(ms, "_spawn_background_detached", boom)
+    res = asyncio.run(ms.dispatch_tool("ww_report_run", {"code": "X"}))
+    assert "后台任务启动失败" in res[0].text and "spawn炸了" in res[0].text
+
+
+def test_dispatch_background_success_appends_receipt(monkeypatch):
+    import guanlan_v2.glmcp.server as ms
+    async def fake_to_thread(fn, **kw):
+        return {"ok": True, "content": "已受理研报", "background": {"kind": "report", "code": "X"}}
+    monkeypatch.setattr(ms.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setenv("GUANLAN_MCP_WRITE", "1")
+    monkeypatch.setattr(ms, "_spawn_background_detached", lambda bg: "已真启动后台研报(job t)")
+    res = asyncio.run(ms.dispatch_tool("ww_report_run", {"code": "X"}))
+    assert "已受理研报" in res[0].text and "已真启动后台研报" in res[0].text
