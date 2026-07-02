@@ -63,6 +63,8 @@ def _spawn_background_detached(bg: dict) -> str:
               "import financial_analyst.buddy.tools as bt;"
               "t = bt.get_tool('run_etf_report');"
               "r = t.run(code={code!r}, asof={asof!r});"
+              "print('[etf_report] is_error=', getattr(r, 'is_error', None), flush=True);"
+              "print(str(getattr(r, 'content', ''))[:2000], flush=True);"
               "sys.exit(0 if not getattr(r, 'is_error', False) else 1)").format(
                   eng=str(repo / "engine"), code=code, asof=asof)
         cmd = [_sys.executable, "-c", py]
@@ -72,9 +74,10 @@ def _spawn_background_detached(bg: dict) -> str:
     log = repo / "var" / f"mcp_bg_{job}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     flags = 0x00000008 | 0x00000200   # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}   # 重定向流防 GBK UnicodeEncodeError(镜像 console 子进程)
     with open(log, "ab") as lf:
         subprocess.Popen(cmd, cwd=str(repo), stdout=lf, stderr=subprocess.STDOUT,
-                         creationflags=flags)
+                         creationflags=flags, env=env)
     return (f"已真启动后台研报(job {job} · {code} · 预计 5-8 分钟 · "
             f"产物落 reports store · 日志 {log})")
 
