@@ -205,6 +205,12 @@ def create_app():
 
     app.include_router(build_console_router())
 
+    # ── P2:自主研究回路(提案→求值→批判→改进 后台单飞;零开关零定时器,
+    #     只能被显式 POST /research/loop/start 发起 → 合并零行为变化)──────
+    from guanlan_v2.research import build_research_router
+
+    app.include_router(build_research_router())
+
     # guanlan 自有大盘状态刷新(market):POST /market_status/refresh —— 后台线程重生成
     # 仓内 data/market_status.json(guanlan_v2/strategy/market_status.py 原生生成器,
     # 直读引擎 day 二进制现算 regime/涨停/主线,不依赖 qlib/fa-watch-wt)。读仍走引擎
