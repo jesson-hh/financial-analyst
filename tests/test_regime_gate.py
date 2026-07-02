@@ -52,3 +52,44 @@ def test_eval_arms_neutral_zero_delta():
     pfav = {f: pd.Series(0.5, index=close.index) for f in set(fams.values())}
     res = eval_arms(frames, close, fams, pfav, close.index[0])
     assert res["ic_all"] == res["ic_static"]          # p=0.5 → 倾斜恒等 → 零差
+
+
+def test_gate_positive_control_activates():
+    # 阳性对照(闸自证):真 regime 依赖信号 → 动量反转族必过闸(闸不是永拒的橡皮闸)。
+    frames, close, fams, pfav = _synth()
+    rep = RG.gate_report(frames, close, fams, pfav, close.index[0],
+                         switch_stats=None, n_trials=8, rng_seed=0)
+    f = rep["families"]["动量反转"]
+    assert f["d_ic_mean"] > RG.GATE_MIN_DIC and f["nw_t"] > RG.GATE_MIN_T
+    assert f["bh_survive"] and "动量反转" in rep["activated"]
+    assert rep["passes_gate"] is True
+    assert rep["global"]["placebo_t"] is not None and rep["global"]["placebo_t"] >= 2.0
+    assert rep["global"]["pool_d_ic"] is not None
+    assert rep["global"]["cpcv_paths"] > 0 and rep["global"]["delay20_d_ic"] is not None
+
+
+def test_gate_negative_control_rejects():
+    # 阴性对照:p_fav 恒 0.5(无信息)→ 零差 → 全拒,activated 空(闸不是橡皮闸)。
+    frames, close, fams, _ = _synth()
+    pfav = {f: pd.Series(0.5, index=close.index) for f in set(fams.values())}
+    rep = RG.gate_report(frames, close, fams, pfav, close.index[0],
+                         switch_stats=None, n_trials=8, rng_seed=0)
+    assert rep["activated"] == [] and rep["passes_gate"] is False
+
+
+def test_gate_idempotent_same_seed():
+    frames, close, fams, pfav = _synth()
+    r1 = RG.gate_report(frames, close, fams, pfav, close.index[0], None, 8, 0)
+    r2 = RG.gate_report(frames, close, fams, pfav, close.index[0], None, 8, 0)
+    assert json.dumps(r1, sort_keys=True, default=str) == \
+           json.dumps(r2, sort_keys=True, default=str)
+
+
+def test_gate_whipsaw_guardrail_blocks():
+    # 过闸族若 switch_stats 超限(年切换>2 或吻合率<0.7)→ 被护栏拦下。
+    frames, close, fams, pfav = _synth()
+    ss = {"动量反转": {"switch_per_year": 9.0, "agree_hindsight": 0.5},
+          "波动率": {"switch_per_year": 9.0, "agree_hindsight": 0.5}}
+    rep = RG.gate_report(frames, close, fams, pfav, close.index[0],
+                         switch_stats=ss, n_trials=8, rng_seed=0)
+    assert rep["activated"] == []

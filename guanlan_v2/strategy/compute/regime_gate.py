@@ -150,3 +150,177 @@ def eval_arms(frames: Dict[str, pd.DataFrame], close_wide: pd.DataFrame,
             res["pool_static"].append(_rank_ic(c_static.reindex(top), r.reindex(top)))
             res["pool_all"].append(_rank_ic(c_all.reindex(top), r.reindex(top)))
     return res
+
+
+def _block_shuffle(s: pd.Series, rng, block: int = PLACEBO_BLOCK) -> pd.Series:
+    """时间块打乱(保边际分布与块内自相关)——安慰剂臂料(嫁接自评审)。"""
+    v = s.values
+    blocks = [v[i:i + block] for i in range(0, len(v), block)]
+    order = rng.permutation(len(blocks))
+    out = np.concatenate([blocks[j] for j in order])[: len(v)]
+    return pd.Series(out, index=s.index)
+
+
+def _delta(a: List[Optional[float]], b: List[Optional[float]]) -> np.ndarray:
+    x = np.array([np.nan if v is None else v for v in a], dtype=float)
+    y = np.array([np.nan if v is None else v for v in b], dtype=float)
+    d = x - y
+    return d[np.isfinite(d)]
+
+
+def gate_report(frames, close_wide, fams, regime_pfav, warmup_date,
+                switch_stats: Optional[dict] = None, n_trials: Optional[int] = None,
+                rng_seed: int = 0, n_placebo: int = N_PLACEBO,
+                placebo_block: int = PLACEBO_BLOCK) -> dict:
+    """全指标闸报告(纯、无时间戳 → 幂等;可注入合成数据自证)。
+    switch_stats={family:{switch_per_year, agree_hindsight}}(生产由 run_gate 从
+    regime 产物算好传入;None=跳过 whipsaw 护栏,仅合成测试用)。"""
+    from guanlan_v2.strategy.compute.cpcv import _norm_cdf, deflated_sharpe, make_splits
+
+    res = eval_arms(frames, close_wide, fams, regime_pfav, warmup_date)
+    families = sorted(res["ic_fam"])
+    out_fam: Dict[str, dict] = {}
+    pvals: Dict[str, Optional[float]] = {}
+    for fam in families:
+        d = _delta(res["ic_fam"][fam], res["ic_static"])
+        t = nw_tstat(d)
+        p = (1.0 - _norm_cdf(t)) if t is not None else None
+        pvals[fam] = p
+        out_fam[fam] = {"n_rb": int(len(d)),
+                        "d_ic_mean": (float(d.mean()) if len(d) else None),
+                        "nw_t": t, "p": p}
+    survivors = bh_fdr(pvals)
+
+    # 全族臂 Δ + 安慰剂(block-shuffle p_fav;真臂须显著优于安慰剂——归因,spec §7 #5)
+    d_all = _delta(res["ic_all"], res["ic_static"])
+    real_all = float(d_all.mean()) if len(d_all) else None
+    rng = np.random.default_rng(rng_seed)
+    plac = []
+    for _ in range(int(n_placebo)):
+        shuf = {f: _block_shuffle(s, rng, placebo_block)
+                for f, s in regime_pfav.items()}
+        r2 = eval_arms(frames, close_wide, fams, shuf, warmup_date, fam_arms=False)
+        dd = _delta(r2["ic_all"], r2["ic_static"])
+        plac.append(float(dd.mean()) if len(dd) else np.nan)
+    plac = np.array(plac, dtype=float)
+    plac = plac[np.isfinite(plac)]
+    placebo_t = None
+    if real_all is not None and len(plac) >= 5 and plac.std(ddof=1) > 0:
+        placebo_t = float((real_all - plac.mean()) / plac.std(ddof=1))
+
+    # 代理池 do-no-harm(spec §7 #6,评审必做:闸认证与生产 blend 作用面同总体)
+    d_pool = _delta(res["pool_all"], res["pool_static"])
+    pool_d_ic = float(d_pool.mean()) if len(d_pool) else None
+
+    # CPCV 折块(spec §7 #3):walk-forward Δ 序列按 make_splits test 折切块 → 路径分布
+    d_by_date = {}
+    for d_, a_, b_ in zip(res["dates"], res["ic_all"], res["ic_static"]):
+        if a_ is not None and b_ is not None:
+            d_by_date[d_] = a_ - b_
+    paths = make_splits(res["dates"], n_groups=6, k=2, purge=HORIZON + 1, embargo=5)
+    path_means = []
+    for _tr, te in paths:
+        vals = [d_by_date[d_] for d_ in te if d_ in d_by_date]
+        if len(vals) >= 10:
+            path_means.append(float(np.mean(vals)))
+    cpcv_median = float(np.median(path_means)) if path_means else None
+    cpcv_p05 = float(np.percentile(path_means, 5)) if path_means else None
+
+    # DSR(spec §7 #4):动态全族臂 top-decile 多头超额(未年化,decile_metrics 口径)
+    nt = int(n_trials if n_trials is not None else max(36, _resolve_trials()))
+    dsr = deflated_sharpe([v for v in res["ls_all"] if v is not None], n_trials=nt)
+
+    # 延迟敏感性(报告性,spec §7 末行):p_fav 滞后 20 交易日的 Δ
+    lag_pfav = {f: s.shift(20) for f, s in regime_pfav.items()}
+    r3 = eval_arms(frames, close_wide, fams, lag_pfav, warmup_date, fam_arms=False)
+    d_lag = _delta(r3["ic_all"], r3["ic_static"])
+    delay20_d_ic = float(d_lag.mean()) if len(d_lag) else None
+
+    activated = []
+    for fam in families:
+        f = out_fam[fam]
+        ok = (f["d_ic_mean"] is not None and f["d_ic_mean"] >= GATE_MIN_DIC
+              and f["nw_t"] is not None and f["nw_t"] >= GATE_MIN_T
+              and fam in survivors
+              and placebo_t is not None and placebo_t >= 2.0
+              and pool_d_ic is not None and pool_d_ic >= 0.0
+              and cpcv_median is not None and cpcv_median > 0.0
+              and cpcv_p05 is not None and cpcv_p05 > -0.005
+              and dsr is not None and dsr >= GATE_DSR)
+        if ok and switch_stats is not None:
+            ss = switch_stats.get(fam) or {}
+            ok = (ss.get("switch_per_year") is not None
+                  and ss["switch_per_year"] <= GATE_MAX_SWITCH
+                  and ss.get("agree_hindsight") is not None
+                  and ss["agree_hindsight"] >= GATE_MIN_AGREE)
+        f["bh_survive"] = fam in survivors
+        f["pass"] = bool(ok)
+        if ok:
+            activated.append(fam)
+    return {"spec_hash": SPEC_HASH, "n_trials": nt, "n_rb": len(res["dates"]),
+            "families": out_fam,
+            "global": {"d_ic_all": real_all, "placebo_t": placebo_t,
+                       "placebo_mean": (float(plac.mean()) if len(plac) else None),
+                       "pool_d_ic": pool_d_ic, "cpcv_median": cpcv_median,
+                       "cpcv_p05": cpcv_p05, "cpcv_paths": len(path_means),
+                       "dsr": dsr, "delay20_d_ic": delay20_d_ic},
+            "switch_stats": switch_stats, "activated": activated,
+            "passes_gate": bool(activated),
+            "note": "passes 仅建议;闸只由人工 CLI 触发=人工确认;0 族过闸=合法结局。"}
+
+
+def _switch_stats(rg: pd.DataFrame, warmup_date) -> dict:
+    """whipsaw 护栏料:OOS 年均切换 + 与 hindsight 吻合率(hindsight 仅在此处消费)。"""
+    out = {}
+    for fam, g in rg.groupby("family"):
+        g = g[g["date"] >= pd.Timestamp(warmup_date)].sort_values("date")
+        if len(g) < 50:
+            out[fam] = {"switch_per_year": None, "agree_hindsight": None}
+            continue
+        st = g["state"].to_numpy()
+        sw = float((st[1:] != st[:-1]).sum()) / max(len(g) / 244.0, 1e-9)
+        agree = None
+        if "state_hindsight" in g.columns and g["state_hindsight"].notna().any():
+            hh = g.dropna(subset=["state_hindsight"])
+            agree = float((hh["state"] == hh["state_hindsight"]).mean())
+        out[fam] = {"switch_per_year": sw, "agree_hindsight": agree}
+    return out
+
+
+def run_gate(universe: str = "csi800", start: str = "2016-01-01",
+             end: Optional[str] = None) -> dict:
+    """生产闸(人工 CLI 触发;重:物化因子框 + 20 次安慰剂重评,预计 30-60min)。"""
+    from guanlan_v2.strategy.compute.factor_ls import materialize_factor_frames
+    from guanlan_v2.strategy.paths import FACTOR_REGIME_PARQUET
+
+    frames, close_wide, fams = materialize_factor_frames(universe, start, end)
+    rg = pd.read_parquet(FACTOR_REGIME_PARQUET)
+    regime_pfav = {str(fam): pd.Series(g["p_fav"].values,
+                                       index=pd.DatetimeIndex(g["date"])).sort_index()
+                   for fam, g in rg.groupby("family")}
+    warmup_date = min(s.index.min() for s in regime_pfav.values())
+    rep = gate_report(frames, close_wide, fams, regime_pfav, warmup_date,
+                      switch_stats=_switch_stats(rg, warmup_date))
+    rep["asof"] = str(pd.Timestamp(rg["date"].max()).date())
+    rep["universe"], rep["start"] = universe, start
+    tmp = str(FACTOR_REGIME_GATE_JSON) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(rep, f, ensure_ascii=False, indent=1, default=str)
+    os.replace(tmp, str(FACTOR_REGIME_GATE_JSON))
+    return rep
+
+
+if __name__ == "__main__":
+    import argparse
+
+    ap = argparse.ArgumentParser(description="regime 激活闸(人工触发=人工确认)")
+    ap.add_argument("--universe", default="csi800")
+    ap.add_argument("--start", default="2016-01-01")
+    ap.add_argument("--end", default=None)
+    a = ap.parse_args()
+    rep = run_gate(a.universe, a.start, a.end)
+    brief = {"activated": rep["activated"], "asof": rep.get("asof"),
+             "global": rep["global"],
+             "families": {k: {kk: v.get(kk) for kk in ("d_ic_mean", "nw_t", "pass")}
+                          for k, v in rep["families"].items()}}
+    print(json.dumps(brief, ensure_ascii=False, indent=1, default=str))
