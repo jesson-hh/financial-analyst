@@ -49,7 +49,34 @@ function defaultCfg() {
     indCap: 0.25,
     liqMin: 5,
     exclST: true, exclHalt: true, exclLimit: true, exclNew: false,
+    regimeWeights: false,   // regime 因子族动态权重(opt-in;须后端过闸+新鲜双闸才真生效)
   };
+}
+
+// ───────── regime 族状态徽章(GET /screen/regime;缺产物诚实不渲染) ─────────
+function RegimeChips() {
+  const [rg, setRg] = React.useState(null);
+  React.useEffect(() => {
+    const API = window.GUANLAN_BACKEND || '';
+    if (!API) return;   // file:// 离线预览无后端 → 不渲染(诚实缺席)
+    fetch(API + '/screen/regime').then(r => r.json())
+      .then(j => { if (j && j.ok) setRg(j); }).catch(() => {});
+  }, []);
+  if (!rg) return null;
+  const act = new Set((rg.gate && rg.gate.activated) || []);
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 6, alignItems: 'center' }}>
+      {rg.families.map(f => (
+        <span key={f.family} className="mono"
+          title={'p_fav=' + f.p_fav + ' · 状态自 ' + f.confirmed_since + (act.has(f.family) ? ' · 已过闸' : ' · 未过闸(倾斜不生效)')}
+          style={{ fontSize: 9, padding: '1px 6px', borderRadius: 10,
+                   border: '1px solid ' + (act.has(f.family) ? 'var(--dai)' : 'var(--line)'),
+                   color: act.has(f.family) ? 'var(--dai)' : 'var(--ink-3)' }}>
+          {f.family} {(+f.p_fav).toFixed(2)}</span>
+      ))}
+      <span className="serif" style={{ fontSize: 9, color: 'var(--ink-3)' }}>族 p_fav · {rg.asof}</span>
+    </div>
+  );
 }
 
 // ───────── 一句话 → 约束 (轻解析) ─────────
@@ -602,6 +629,17 @@ function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, mod
             return <span className="mono" title={'排名口径:纯 LGB(' + (p.reason || '无当日 FinCast 预测') + ')'}
               style={{ fontSize: 10, color: 'var(--ink-3)', border: '1px dashed var(--line)', borderRadius: 5, padding: '2px 7px' }}>v4 · 纯 LGB</span>;
           })()}
+          {result.regime_weights && (() => {   // 仅 opt-in 请求才有此键;降级如实显形(绝不静默)
+            const b = result.regime_weights;
+            if (b.applied) {
+              const tip = '风格权重已生效(regime 因子族动态倾斜)· regime asof ' + (b.regime_asof || '—') + '\n'
+                + (b.per_factor || []).map(x => x.id + ' ' + x.w_user + '→' + x.w_eff + '(p_fav ' + (x.p_fav == null ? '—' : x.p_fav) + ')').join('\n');
+              return <span className="mono" title={tip}
+                style={{ fontSize: 10, color: 'var(--paper)', background: 'var(--dai)', borderRadius: 5, padding: '2px 7px' }}>风格权重 · {b.regime_asof || '—'}</span>;
+            }
+            return <span className="mono" title={'风格权重未生效:' + (b.fallback_reason || '')}
+              style={{ fontSize: 10, color: 'var(--ink-3)', border: '1px dashed var(--line)', borderRadius: 5, padding: '2px 7px' }}>风格权重 · 未生效</span>;
+          })()}
           {result.panel_ok === false && (
             <span className="mono" title="引擎面板不可用:现价/成交额/L3 量能/L4 位置指标缺失(非数据稀疏)" style={{ fontSize: 10, color: 'var(--paper)', background: 'var(--yin)', borderRadius: 5, padding: '2px 7px' }}>⚠ 引擎离线</span>
           )}
@@ -825,6 +863,11 @@ function ConstraintRail({ cfg, setF, toggleFactor, setFactorW, onReset, pickFact
             <div className="serif" style={{ fontSize: 10, color: 'var(--ink-3)', lineHeight: 1.5, marginTop: 6, textWrap: 'pretty' }}>
               右侧排序 = α·v4模型分 +(1-α)·所选因子复合分。<b style={{ color: 'var(--ink-2)' }}>调低 α 让因子权重真正改右侧</b>;因子库全部因子(含大盘共振/跟随)均可参与,逐因子实测 RankIC 见因子卡。
             </div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 10 }}>
+              <span style={rowLabel} title="过闸族按 p_fav 保守倾斜因子权重(乘子 0.75~1.25,向静态收缩);未过闸/产物过期自动回静态并在结果头徽章显形。仅在 α<1 时影响排序。">风格权重(regime)</span>
+              <Toggle on={!!cfg.regimeWeights} onClick={() => setF({ regimeWeights: !cfg.regimeWeights })} />
+            </div>
+            <RegimeChips />
           </div>
         )}
       </RailSection>
