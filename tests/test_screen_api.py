@@ -340,3 +340,11 @@ def test_screen_fallback_path_does_not_record(monkeypatch):
     monkeypatch.setattr(api, "_screen_via_v4", lambda body: None)
     j = _client().post("/screen/run", json=_CFG).json()
     assert j["ok"] is True and calls["n"] == 0 and "picks_recorded" not in j
+
+
+def test_record_picks_never_raises():
+    """红线:_record_picks 构造 rec 阶段抛错也不许穿透(回 False,/screen/run 不 500)。"""
+    from guanlan_v2.screen.api import ScreenIn, _record_picks
+    body = ScreenIn()
+    malformed = {"chosen": [123, "not-a-dict"], "pool": None}   # 元素无 .get → 构造必炸
+    assert _record_picks(body, malformed, "prod", "2026-07-01") is False

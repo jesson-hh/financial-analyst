@@ -686,31 +686,34 @@ def _resolve_model_id(m):
 
 
 def _record_picks(body: "ScreenIn", resp: Dict[str, Any], model_id: str, rdate: str) -> bool:
-    """v4 主路径选股结果 → picks 档案一行(P0 §1)。失败回 False,由 picks_recorded 显形。"""
-    from datetime import datetime as _dt
-    from guanlan_v2.screen import picks as _picks
-    chosen = resp.get("chosen") or []
-    rec = {
-        "ts": _dt.now().isoformat(timespec="seconds"),
-        "date": rdate,
-        "snapshot": bool(getattr(body, "snapshot", False)),
-        "note": getattr(body, "note", None),
-        "model": model_id,
-        "pool": body.pool,
-        "alpha": body.blend,
-        "factors": [{"id": f.id, "w": f.w} for f in (body.factors or [])],
-        "topN": body.topN,
-        "n_universe": len(resp.get("pool") or []),
-        "picks": [{"code": (x.get("s") or {}).get("code"),
-                   "name": (x.get("s") or {}).get("name"),
-                   "score": x.get("score"), "rank": i + 1}
-                  for i, x in enumerate(chosen)],
-        "constraints": {"liqMin": body.liqMin, "mlStatus": body.mlStatus,
-                        "industryNeutral": body.industryNeutral, "indCap": body.indCap,
-                        "exclST": body.exclST, "exclHalt": body.exclHalt,
-                        "exclLimit": body.exclLimit, "exclNew": body.exclNew},
-    }
-    return _picks.append_pick(rec)
+    """v4 主路径选股结果 → picks 档案一行(P0 §1)。任何异常回 False(picks_recorded 显形,绝不阻断选股)。"""
+    try:
+        from datetime import datetime as _dt
+        from guanlan_v2.screen import picks as _picks
+        chosen = resp.get("chosen") or []
+        rec = {
+            "ts": _dt.now().isoformat(timespec="seconds"),
+            "date": rdate,
+            "snapshot": bool(getattr(body, "snapshot", False)),
+            "note": getattr(body, "note", None),
+            "model": model_id,
+            "pool": body.pool,
+            "alpha": body.blend,
+            "factors": [{"id": f.id, "w": f.w} for f in (body.factors or [])],
+            "topN": body.topN,
+            "n_universe": len(resp.get("pool") or []),
+            "picks": [{"code": (x.get("s") or {}).get("code"),
+                       "name": (x.get("s") or {}).get("name"),
+                       "score": x.get("score"), "rank": i + 1}
+                      for i, x in enumerate(chosen)],
+            "constraints": {"liqMin": body.liqMin, "mlStatus": body.mlStatus,
+                            "industryNeutral": body.industryNeutral, "indCap": body.indCap,
+                            "exclST": body.exclST, "exclHalt": body.exclHalt,
+                            "exclLimit": body.exclLimit, "exclNew": body.exclNew},
+        }
+        return _picks.append_pick(rec)
+    except Exception:  # noqa: BLE001 — 构造/落盘任何失败都不阻断 /screen/run,由 picks_recorded=False 显形
+        return False
 
 
 def _screen_via_v4(body: "ScreenIn"):
