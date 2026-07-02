@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>观澜 · AI投研 — 设计稿 mockup(非实现)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&family=Noto+Serif+SC:wght@400;500;600;700;900&family=JetBrains+Mono:wght@300;400;500;600&display=swap" />
+<link rel="stylesheet" href="../_shared/tokens.css" />
+<style>
+  html, body { height: 100%; margin: 0; }
+  body { font-family: var(--sans); color: var(--ink); background: var(--paper); }
+  .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  *::-webkit-scrollbar { width: 8px; height: 8px; }
+  *::-webkit-scrollbar-thumb { background: rgba(28,24,20,0.16); border-radius: 4px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+
+  @keyframes riseIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  @keyframes flowDash { to { stroke-dashoffset: -14; } }
+
+  .page { min-width: 1400px; }
+
+  /* ── 顶栏 masthead ── */
+  .mast { display: flex; align-items: center; gap: 14px; padding: 0 18px; height: 52px;
+          border-bottom: 2px solid var(--ink); background: var(--paper); position: sticky; top: 0; z-index: 30; }
+  .mast .brand { display: flex; align-items: center; gap: 10px; }
+  .mast .brand .t { font-family: var(--serif); font-size: 17px; font-weight: 600; letter-spacing: 3px; }
+  .navtabs { display: flex; gap: 2px; margin-left: 10px; }
+  .navtab { padding: 15px 13px 12px; font-size: 13px; color: var(--ink-3); letter-spacing: 1px; cursor: pointer; }
+  .navtab.on { color: var(--ink); border-bottom: 2px solid var(--yin); margin-bottom: -2px; font-weight: 500; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; font-size: 11px;
+          border: 1px solid var(--line); color: var(--ink-2); background: var(--paper-2); border-radius: 2px; white-space: nowrap; }
+  .chip b { color: var(--ink-1); font-weight: 600; }
+  .chip .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: var(--dai); }
+  .btn-ingest { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; padding: 7px 16px;
+                background: var(--yin); color: var(--paper); font-family: var(--serif); font-size: 13px;
+                letter-spacing: 2px; cursor: pointer; border: 0; }
+  .btn-ingest small { font-family: var(--mono); font-size: 10px; letter-spacing: 0; opacity: .85; }
+  .viewswitch { display: flex; border: 1px solid var(--line); }
+  .viewswitch span { padding: 5px 12px; font-size: 12px; color: var(--ink-3); cursor: pointer; letter-spacing: 1px; }
+  .viewswitch span.on { background: var(--ink); color: var(--paper); }
+
+  /* ── 驱动层带 ── */
+  .drivers { display: flex; gap: 10px; align-items: stretch; padding: 14px 22px 10px; }
+  .drivers .lbl { writing-mode: vertical-rl; font-family: var(--serif); font-size: 11px; letter-spacing: 4px;
+                  color: var(--ink-3); border-right: 1px solid var(--line-soft); padding-right: 6px; margin-right: 2px; }
+  .drv { flex: 1; border: 1px solid var(--line); background: var(--paper-2); padding: 7px 10px 6px;
+         animation: riseIn .5s both; position: relative; }
+  .drv .n { font-size: 11.5px; color: var(--ink-2); letter-spacing: .5px; display: flex; gap: 6px; align-items: baseline; }
+  .drv .n i { font-family: var(--mono); font-style: normal; font-size: 9.5px; color: var(--ink-3); }
+  .drv .v { margin-top: 3px; font-family: var(--mono); font-size: 12.5px; color: var(--ink); display: flex; gap: 6px; align-items: baseline; }
+  .drv .v .up { color: var(--zhu); } .drv .v .dn { color: var(--dai); }
+
+  /* ── 河图(链图) ── */
+  .riverwrap { position: relative; margin: 4px 22px 0; }
+  .riverhint { position: absolute; left: 0; right: 0; top: 46%; height: 90px; pointer-events: none;
+               background: linear-gradient(180deg, transparent, rgba(184,165,123,0.10) 45%, rgba(184,165,123,0.10) 55%, transparent); }
+  .river { display: grid; grid-template-columns: repeat(7, 1fr); gap: 14px; position: relative; padding: 10px 0 16px; }
+  .col { display: flex; flex-direction: column; gap: 7px; animation: riseIn .55s both; }
+  .col .ghead { display: flex; align-items: center; gap: 8px; padding-bottom: 2px; }
+  .col .ghead .gname { font-family: var(--serif); font-size: 13px; font-weight: 600; letter-spacing: 2px; }
+  .col .ghead .gsub { font-size: 9.5px; color: var(--ink-3); letter-spacing: 1px; }
+  .col .ghead::after { content: ""; flex: 1; border-top: 2px solid var(--ink); opacity: .85; }
+
+  .node { border: 1px solid var(--line); border-left: 3px solid var(--ink-3); background: var(--paper);
+          padding: 6px 8px 6px 9px; cursor: pointer; position: relative; transition: box-shadow .15s, transform .15s; }
+  .node:hover { box-shadow: 2px 3px 0 rgba(28,24,20,0.14); transform: translateY(-1px); }
+  .node .nr { display: flex; align-items: baseline; gap: 6px; }
+  .node .nm { font-size: 12.5px; font-weight: 500; color: var(--ink); letter-spacing: .3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .node .star { color: var(--jin); font-size: 11px; flex: none; }
+  .node .mom { margin-left: auto; font-family: var(--mono); font-size: 10.5px; flex: none; }
+  .node .mom.up { color: var(--zhu); } .node .mom.dn { color: var(--dai); }
+  .node .sig { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+  .node .therm { flex: 1; height: 3px; background: var(--line-soft); position: relative; }
+  .node .therm i { position: absolute; left: 0; top: 0; bottom: 0; }
+  .node .rp { font-size: 9.5px; color: var(--ink-3); font-family: var(--mono); flex: none; }
+  .node .lg { font-family: var(--mono); font-size: 9px; color: var(--jin); flex: none; letter-spacing: 0; }
+  /* 四象限状态 → 左边框 */
+  .node.q-hh { border-left-color: var(--zhu); }                                 /* 双热 */
+  .node.q-lh { border-left-color: var(--jin); }                                 /* 潜伏 */
+  .node.q-hl { border-left-color: var(--zhu-soft); border-left-style: dashed; } /* 情绪 */
+  .node.q-ll { border-left-color: var(--ink-3); }                               /* 双冷 */
+  .node.sel { outline: 2px solid var(--ink); outline-offset: 1px; background: var(--paper-2); }
+  .node.stub { border-style: dashed; opacity: .62; }
+  .node.stub .nm { color: var(--ink-2); font-size: 11.5px; }
+
+  .legend { display: flex; gap: 14px; align-items: center; padding: 2px 22px 10px; font-size: 10.5px; color: var(--ink-3); flex-wrap: wrap; }
+  .legend .k { display: inline-flex; align-items: center; gap: 5px; }
+  .legend .sw { width: 10px; height: 10px; border-left: 3px solid; background: var(--paper); border-top: 1px solid var(--line); border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+
+  svg.edges { position: absolute; inset: 0; pointer-events: none; overflow: visible; z-index: 5; }
+  .edge { fill: none; stroke: var(--ink-2); stroke-width: 1.6; opacity: .9;
+          stroke-dasharray: 7 7; animation: flowDash 1.2s linear infinite; }
+  .edge.neg { stroke: var(--dai); stroke-dasharray: 3 5; }
+  .edgelbl { font-family: var(--mono); font-size: 9.5px; fill: var(--ink-2); paint-order: stroke; stroke: var(--paper); stroke-width: 3px; }
+  .edgelbl.neg { fill: var(--dai); }
+
+  /* ── 叙事温度条 ── */
+  .nar { display: grid; grid-template-columns: repeat(8, 1fr); gap: 10px; padding: 8px 22px 14px; }
+  .narc { border: 1px solid var(--line); background: var(--paper-2); padding: 8px 10px 7px; animation: riseIn .6s both; cursor: pointer; }
+  .narc .nh { display: flex; align-items: baseline; gap: 6px; }
+  .narc .nn { font-family: var(--serif); font-size: 12.5px; font-weight: 600; letter-spacing: 1px; white-space: nowrap; }
+  .narc .st { margin-left: auto; font-size: 9px; padding: 1px 5px; border: 1px solid var(--line); color: var(--ink-2); white-space: nowrap; }
+  .narc .st.hot { color: var(--paper); background: var(--zhu); border-color: var(--zhu); }
+  .narc .st.warm { color: var(--zhu); border-color: var(--zhu-soft); }
+  .narc .st.cool { color: var(--dai); border-color: var(--dai-soft); }
+  .narc .bar { margin-top: 7px; height: 4px; background: var(--line-soft); position: relative; }
+  .narc .bar i { position: absolute; left: 0; top: 0; bottom: 0; }
+  .narc .meta { margin-top: 5px; font-size: 9.5px; color: var(--ink-3); display: flex; gap: 8px; font-family: var(--mono); }
+  .narc .meta .plus { color: var(--zhu); } .narc .meta .minus { color: var(--dai); }
+
+  /* ── 区块标题 ── */
+  .secttl { display: flex; align-items: center; gap: 10px; padding: 10px 22px 6px; }
+  .secttl .t { font-family: var(--serif); font-size: 14px; font-weight: 600; letter-spacing: 3px; }
+  .secttl .s { font-size: 10.5px; color: var(--ink-3); letter-spacing: 1px; }
+  .secttl::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
+
+  /* ── 明细三栏 ── */
+  .detail { display: grid; grid-template-columns: 400px 1fr 380px; gap: 14px; padding: 4px 22px 26px; }
+  .panel { border: 1px solid var(--line); background: var(--paper); min-height: 430px; display: flex; flex-direction: column; }
+  .panel .ph { display: flex; align-items: center; gap: 8px; padding: 9px 13px; border-bottom: 1px solid var(--line); }
+  .panel .ph .t { font-family: var(--serif); font-size: 12.5px; font-weight: 600; letter-spacing: 2px; }
+  .panel .ph .s { font-size: 10px; color: var(--ink-3); }
+  .panel .ph .r { margin-left: auto; font-size: 10px; color: var(--ink-3); font-family: var(--mono); }
+
+  /* 象限图 */
+  .quad { padding: 10px 12px 6px; }
+  .quad svg { display: block; }
+  .qlab { font-family: var(--serif); font-size: 10px; fill: var(--ink-3); letter-spacing: 2px; }
+  .qdot { fill: var(--ink-3); opacity: .55; }
+  .qdot.hot { fill: var(--zhu); opacity: .9; }
+  .qdot.lurk { fill: var(--jin); opacity: .9; }
+  .qaxis { stroke: var(--line); stroke-width: 1; }
+  .qmid { stroke: var(--line-soft); stroke-dasharray: 3 4; }
+  .qsel { fill: none; stroke: var(--ink); stroke-width: 1.5; }
+  .qtxt { font-family: var(--mono); font-size: 8.5px; fill: var(--ink-2); }
+  .quadfoot { padding: 4px 14px 12px; font-size: 10.5px; color: var(--ink-3); line-height: 1.7; }
+  .quadfoot b { color: var(--ink-1); font-weight: 500; }
+
+  /* 观点流 */
+  .flow { flex: 1; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 9px; }
+  .op { border: 1px solid var(--line-soft); background: var(--paper-2); padding: 8px 11px; }
+  .op .oh { display: flex; align-items: center; gap: 7px; font-size: 10.5px; color: var(--ink-3); }
+  .op .stance { font-family: var(--serif); font-size: 10.5px; padding: 0 6px; line-height: 17px; letter-spacing: 1px; }
+  .op .stance.bull { background: var(--zhu); color: var(--paper); }
+  .op .stance.bear { background: var(--dai); color: var(--paper); }
+  .op .stance.neut { border: 1px solid var(--line); color: var(--ink-2); }
+  .op .strength { font-family: var(--mono); font-size: 9.5px; color: var(--jin); letter-spacing: 1px; }
+  .op .org { margin-left: auto; white-space: nowrap; }
+  .op .ttl { margin-top: 5px; font-size: 12px; color: var(--ink-1); font-weight: 500; line-height: 1.5; }
+  .op .quote { margin: 6px 0 2px; padding-left: 9px; border-left: 2px solid var(--jin); font-family: var(--serif);
+               font-size: 11.5px; color: var(--ink-2); line-height: 1.75; }
+  .op .of { margin-top: 6px; display: flex; gap: 8px; align-items: center; font-size: 9.5px; color: var(--ink-3); flex-wrap: wrap; }
+  .op .tag { border: 1px solid var(--line-soft); padding: 0 5px; line-height: 15px; }
+  .op .tag.t-edge { color: var(--zhu); border-color: var(--zhu-soft); }
+  .op .tag.t-glb { color: var(--jin); border-color: var(--jin); }
+  .op .trace { margin-left: auto; color: var(--yin); cursor: pointer; white-space: nowrap; }
+
+  /* 个股 + 全球坐标 */
+  .gcard { margin: 10px 12px 0; border: 1px solid var(--line); background: var(--paper-2); padding: 9px 12px; }
+  .gcard .gt { display: flex; align-items: center; gap: 8px; font-family: var(--serif); font-size: 11.5px;
+               font-weight: 600; letter-spacing: 2px; color: var(--ink-1); }
+  .gcard .gt .logic { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--jin); letter-spacing: 0; }
+  .gcard dl { display: grid; grid-template-columns: 34px 1fr; gap: 3px 10px; margin: 8px 0 2px; font-size: 11px; }
+  .gcard dt { color: var(--ink-3); letter-spacing: 2px; font-family: var(--serif); }
+  .gcard dd { margin: 0; color: var(--ink-1); line-height: 1.55; }
+  .gcard .pos { color: var(--zhu); font-weight: 500; }
+  .stbl { margin: 10px 12px 0; flex: 1; }
+  .stbl table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+  .stbl th { font-weight: 400; font-size: 9.5px; color: var(--ink-3); text-align: right; padding: 6px 4px 4px; border-bottom: 1px solid var(--line); letter-spacing: 1px; }
+  .stbl th:first-child { text-align: left; }
+  .stbl td { padding: 6px 4px; border-bottom: 1px solid var(--line-soft); text-align: right; font-family: var(--mono); font-size: 11px; }
+  .stbl td:first-child { text-align: left; font-family: var(--sans); }
+  .stbl td .code { font-family: var(--mono); font-size: 9px; color: var(--ink-3); margin-left: 5px; }
+  .stbl td.up { color: var(--zhu); } .stbl td.dn { color: var(--dai); }
+  .stbl tr:hover td { background: rgba(28,24,20,0.03); }
+
+  /* ── 全球坐标矩阵视图 ── */
+  .matrix { display: none; padding: 12px 22px 30px; }
+  .matrix.show { display: block; }
+  .mgrid { display: grid; grid-template-columns: 70px repeat(5, 1fr); gap: 6px; }
+  .mhead { font-family: var(--serif); font-size: 11.5px; letter-spacing: 1px; color: var(--ink-2); text-align: center;
+           padding: 7px 4px; border-bottom: 2px solid var(--ink); }
+  .mhead small { display: block; font-family: var(--mono); font-size: 9px; color: var(--ink-3); letter-spacing: 0; margin-top: 1px; }
+  .mrow { writing-mode: vertical-rl; text-align: center; font-family: var(--serif); font-size: 12px; letter-spacing: 4px;
+          color: var(--ink-1); border-right: 2px solid var(--ink); padding: 8px 6px; }
+  .mcell { border: 1px dashed var(--line-soft); min-height: 64px; padding: 6px; display: flex; flex-wrap: wrap; gap: 5px; align-content: flex-start; }
+  .mseg { font-size: 10.5px; border: 1px solid var(--line); background: var(--paper-2); padding: 3px 7px; cursor: pointer; white-space: nowrap; }
+  .mseg.good { border-color: var(--jin); color: var(--ink); }
+  .mseg.good::after { content: " ★"; color: var(--jin); font-size: 9px; }
+  .mseg.dual { border-color: var(--zhu); }
+  .matrixfoot { padding: 12px 2px 0; font-size: 10.5px; color: var(--ink-3); line-height: 1.8; }
+  .matrixfoot b { color: var(--ink-1); font-weight: 500; }
+
+  .foot { padding: 8px 22px 22px; font-size: 10px; color: var(--ink-3); display: flex; gap: 14px; align-items: center; }
+  .mockseal { font-family: var(--serif); border: 1.5px solid var(--yin); color: var(--yin); padding: 1px 7px; letter-spacing: 3px; font-size: 10.5px; }
+</style>
+</head>
+<body class="paper-bg">
+<div class="page">
+
+  <!-- 顶栏 -->
+  <div class="mast">
+    <div class="brand">
+      <span class="seal">觀</span>
+      <span class="t">觀瀾</span>
+    </div>
+    <div class="navtabs">
+      <span class="navtab">帷幄</span>
+      <span class="navtab">席位 · 落子</span>
+      <span class="navtab on">AI投研</span>
+    </div>
+    <span class="chip"><b>AI 产业链</b> · v1 · 28环节</span>
+    <span class="chip">语料 <b class="num">07-02</b></span>
+    <span class="chip">行情 <b class="num">07-01</b></span>
+    <span class="chip"><span class="dot"></span>已抽取 <b class="num">20</b> 篇 · 上次 <b class="num">16:42</b></span>
+    <button class="btn-ingest">處理新研報 <small>+3 待处理</small></button>
+    <div class="viewswitch" style="margin-left:12px">
+      <span class="on" onclick="showView('river')">河图</span>
+      <span onclick="showView('matrix')">全球坐标</span>
+    </div>
+  </div>
+
+  <!-- ═══ 河图视图 ═══ -->
+  <div id="v-river">
+
+    <!-- 驱动层 -->
+    <div class="drivers">
+      <div class="lbl">驅動</div>
+      <div class="drv" style="animation-delay:.02s"><div class="n">北美CSP capex <i>D1</i></div><div class="v"><span class="up">↑7100亿$</span><span style="font-size:10px;color:var(--ink-3)">+40% FY26</span></div></div>
+      <div class="drv" style="animation-delay:.06s"><div class="n">国内智算capex <i>D2</i></div><div class="v"><span class="up">↑招标加速</span></div></div>
+      <div class="drv" style="animation-delay:.10s"><div class="n">推理成本 <i>D3</i></div><div class="v"><span class="dn">↓至27%</span><span style="font-size:10px;color:var(--ink-3)">V4/token</span></div></div>
+      <div class="drv" style="animation-delay:.14s"><div class="n">供给约束 <i>D4</i></div><div class="v"><span class="up">DRAM +58~63%</span></div></div>
+      <div class="drv" style="animation-delay:.18s"><div class="n">国内政策 <i>D5</i></div><div class="v">测评名单 · 算电协同</div></div>
+      <div class="drv" style="animation-delay:.22s"><div class="n">出口管制 <i>D6</i></div><div class="v">维持收紧</div></div>
+      <div class="drv" style="animation-delay:.26s"><div class="n">海外技术路线 <i>D7</i></div><div class="v">COUPE量产 · GB300</div></div>
+    </div>
+
+    <!-- 链图 -->
+    <div class="riverwrap">
+      <div class="riverhint"></div>
+      <svg class="edges" id="edgeLayer"></svg>
+      <div class="river" id="river">
+
+        <div class="col" style="animation-delay:.05s">
+          <div class="ghead"><span class="gname">芯片材料</span><span class="gsub">A</span></div>
+          <div class="node q-hh" id="n-A1"><div class="nr"><span class="nm">国产AI芯片</span><span class="mom up">+18%</span></div><div class="sig"><div class="therm"><i style="width:82%;background:var(--zhu)"></i></div><span class="rp">研+8</span><span class="lg">Ω</span></div></div>
+          <div class="node q-hh" id="n-A2"><div class="nr"><span class="nm">先进制程</span><span class="mom up">+47%</span></div><div class="sig"><div class="therm"><i style="width:95%;background:var(--zhu)"></i></div><span class="rp">研+6</span><span class="lg">Ω</span></div></div>
+          <div class="node q-hh" id="n-A3"><div class="nr"><span class="nm">半导体设备</span><span class="star">★</span><span class="mom up">+29%</span></div><div class="sig"><div class="therm"><i style="width:88%;background:var(--zhu)"></i></div><span class="rp">研+7</span><span class="lg">Ω</span></div></div>
+          <div class="node q-hl" id="n-A4"><div class="nr"><span class="nm">先进封装</span><span class="mom up">+27%</span></div><div class="sig"><div class="therm"><i style="width:86%;background:var(--zhu)"></i></div><span class="rp">研+2</span><span class="lg">β·Ω</span></div></div>
+          <div class="node q-hh" id="n-A5"><div class="nr"><span class="nm">存储 / HBM</span><span class="mom up">+35%</span></div><div class="sig"><div class="therm"><i style="width:92%;background:var(--zhu)"></i></div><span class="rp">研+12</span><span class="lg">Δ·Ω</span></div></div>
+          <div class="node q-hh" id="n-A6"><div class="nr"><span class="nm">上游材料</span><span class="star">★</span><span class="mom up">+21%</span></div><div class="sig"><div class="therm"><i style="width:78%;background:var(--zhu)"></i></div><span class="rp">研+5</span><span class="lg">Δ</span></div></div>
+        </div>
+
+        <div class="col" style="animation-delay:.10s">
+          <div class="ghead"><span class="gname">服务器配套</span><span class="gsub">B</span></div>
+          <div class="node q-ll" id="n-B1"><div class="nr"><span class="nm">服务器/ODM</span><span class="star">★</span><span class="mom up">+3%</span></div><div class="sig"><div class="therm"><i style="width:55%;background:var(--zhu-soft)"></i></div><span class="rp">研+4</span><span class="lg">β</span></div></div>
+          <div class="node q-hh" id="n-B2"><div class="nr"><span class="nm">高速PCB</span><span class="star">★★</span><span class="mom up">+15%</span></div><div class="sig"><div class="therm"><i style="width:70%;background:var(--zhu)"></i></div><span class="rp">研+9</span><span class="lg">β</span></div></div>
+          <div class="node q-lh" id="n-B3"><div class="nr"><span class="nm">电源/HVDC</span><span class="star">★</span><span class="mom up">+7%</span></div><div class="sig"><div class="therm"><i style="width:62%;background:var(--jin)"></i></div><span class="rp">研+6</span><span class="lg">β·Θ</span></div></div>
+          <div class="node q-lh" id="n-B4"><div class="nr"><span class="nm">液冷</span><span class="star">★</span><span class="mom up">+5%</span></div><div class="sig"><div class="therm"><i style="width:58%;background:var(--jin)"></i></div><span class="rp">研+7</span><span class="lg">β</span></div></div>
+          <div class="node q-ll" id="n-B5"><div class="nr"><span class="nm">铜连接</span><span class="mom up">+7%</span></div><div class="sig"><div class="therm"><i style="width:60%;background:var(--ink-3)"></i></div><span class="rp">研+1</span><span class="lg">Θ</span></div></div>
+        </div>
+
+        <div class="col" style="animation-delay:.15s">
+          <div class="ghead"><span class="gname">光网络</span><span class="gsub">C</span></div>
+          <div class="node q-hh" id="n-C1"><div class="nr"><span class="nm">光模块</span><span class="star">★★</span><span class="mom up">+13%</span></div><div class="sig"><div class="therm"><i style="width:66%;background:var(--zhu)"></i></div><span class="rp">研+8</span><span class="lg">β</span></div></div>
+          <div class="node q-hh sel" id="n-C2"><div class="nr"><span class="nm">光芯片</span><span class="star">★★</span><span class="mom up">+24%</span></div><div class="sig"><div class="therm"><i style="width:74%;background:var(--zhu)"></i></div><span class="rp">研+6</span><span class="lg">Δ·Ω</span></div></div>
+          <div class="node q-hl" id="n-C3"><div class="nr"><span class="nm">CPO / 硅光</span><span class="mom up">+12%</span></div><div class="sig"><div class="therm"><i style="width:65%;background:var(--zhu-soft)"></i></div><span class="rp">研±分歧</span><span class="lg">Θ</span></div></div>
+          <div class="node q-lh" id="n-C4"><div class="nr"><span class="nm">OCS光交换</span><span class="mom up">+9%</span></div><div class="sig"><div class="therm"><i style="width:71%;background:var(--jin)"></i></div><span class="rp">研+3</span><span class="lg">Ψ→β</span></div></div>
+          <div class="node q-ll" id="n-C5"><div class="nr"><span class="nm">交换机</span><span class="mom dn">-1%</span></div><div class="sig"><div class="therm"><i style="width:52%;background:var(--ink-3)"></i></div><span class="rp">研+2</span><span class="lg">β·Ω</span></div></div>
+        </div>
+
+        <div class="col" style="animation-delay:.20s">
+          <div class="ghead"><span class="gname">算力基建</span><span class="gsub">I</span></div>
+          <div class="node q-lh" id="n-I1"><div class="nr"><span class="nm">IDC / AIDC</span><span class="star">★</span><span class="mom dn">-3%</span></div><div class="sig"><div class="therm"><i style="width:44%;background:var(--jin)"></i></div><span class="rp">研+8</span><span class="lg">β</span></div></div>
+          <div class="node q-ll" id="n-I2"><div class="nr"><span class="nm">算力租赁</span><span class="mom dn">-5%</span></div><div class="sig"><div class="therm"><i style="width:40%;background:var(--ink-3)"></i></div><span class="rp">研+2</span><span class="lg">β</span></div></div>
+          <div class="node q-lh" id="n-I3"><div class="nr"><span class="nm">算电协同</span><span class="mom up">+2%</span></div><div class="sig"><div class="therm"><i style="width:48%;background:var(--jin)"></i></div><span class="rp">研+5</span><span class="lg">政策</span></div></div>
+          <div class="node q-ll" id="n-I4"><div class="nr"><span class="nm">运营商/云</span><span class="mom dn">-2%</span></div><div class="sig"><div class="therm"><i style="width:45%;background:var(--ink-3)"></i></div><span class="rp">研+3</span><span class="lg">红利</span></div></div>
+        </div>
+
+        <div class="col" style="animation-delay:.25s">
+          <div class="ghead"><span class="gname">模型数据</span><span class="gsub">M</span></div>
+          <div class="node q-ll" id="n-M1"><div class="nr"><span class="nm">基础大模型</span><span class="mom dn">-6%</span></div><div class="sig"><div class="therm"><i style="width:38%;background:var(--ink-3)"></i></div><span class="rp">研+4</span><span class="lg">Ψ</span></div></div>
+          <div class="node q-ll" id="n-M2"><div class="nr"><span class="nm">数据/语料</span><span class="mom dn">-8%</span></div><div class="sig"><div class="therm"><i style="width:36%;background:var(--ink-3)"></i></div><span class="rp">研+1</span><span class="lg">Ψ</span></div></div>
+        </div>
+
+        <div class="col" style="animation-delay:.30s">
+          <div class="ghead"><span class="gname">应用</span><span class="gsub">F</span></div>
+          <div class="node q-lh" id="n-F1"><div class="nr"><span class="nm">办公/Agent</span><span class="star">★</span><span class="mom dn">-6%</span></div><div class="sig"><div class="therm"><i style="width:35%;background:var(--jin)"></i></div><span class="rp">研+6</span><span class="lg">业绩</span></div></div>
+          <div class="node q-ll" id="n-F2"><div class="nr"><span class="nm">AI金融</span><span class="mom dn">-4%</span></div><div class="sig"><div class="therm"><i style="width:42%;background:var(--ink-3)"></i></div><span class="rp">研+3</span><span class="lg">业绩</span></div></div>
+          <div class="node q-ll" id="n-F3"><div class="nr"><span class="nm">AIGC传媒</span><span class="mom dn">-7%</span></div><div class="sig"><div class="therm"><i style="width:33%;background:var(--ink-3)"></i></div><span class="rp">研+2</span><span class="lg">Ψ</span></div></div>
+          <div class="node q-ll" id="n-F4"><div class="nr"><span class="nm">垂直行业</span><span class="mom dn">-5%</span></div><div class="sig"><div class="therm"><i style="width:34%;background:var(--ink-3)"></i></div><span class="rp">研+2</span><span class="lg">Ψ</span></div></div>
+        </div>
+
+        <div class="col" style="animation-delay:.35s">
+          <div class="ghead"><span class="gname">端侧具身</span><span class="gsub">G</span></div>
+          <div class="node q-ll" id="n-G1"><div class="nr"><span class="nm">AI手机/PC</span><span class="mom up">+7%</span></div><div class="sig"><div class="therm"><i style="width:56%;background:var(--zhu-soft)"></i></div><span class="rp">研+4</span><span class="lg">β</span></div></div>
+          <div class="node q-ll" id="n-G2"><div class="nr"><span class="nm">AI眼镜/XR</span><span class="star">★</span><span class="mom up">+5%</span></div><div class="sig"><div class="therm"><i style="width:53%;background:var(--zhu-soft)"></i></div><span class="rp">研+3</span><span class="lg">β</span></div></div>
+          <div class="node stub" id="n-G3"><div class="nr"><span class="nm">机器人 · 相邻链 ↗</span></div></div>
+          <div class="node stub" id="n-G4"><div class="nr"><span class="nm">智能驾驶 · 相邻链 ↗</span></div></div>
+        </div>
+
+      </div>
+    </div>
+    <div class="legend">
+      <span class="k"><span class="sw" style="border-left-color:var(--zhu)"></span>双热</span>
+      <span class="k"><span class="sw" style="border-left-color:var(--jin)"></span>潜伏(研报热·行情冷)</span>
+      <span class="k"><span class="sw" style="border-left-color:var(--zhu-soft);border-left-style:dashed"></span>情绪(行情热·研报冷)</span>
+      <span class="k"><span class="sw" style="border-left-color:var(--ink-3)"></span>双冷</span>
+      <span class="k" style="color:var(--jin)">★ 好节点(国内领先/并跑 × β/Δ)</span>
+      <span class="k">选中节点显示传导边:墨线=正向 · <span style="color:var(--dai)">绿虚线=替代/负向</span></span>
+      <span class="k" style="margin-left:auto"><span class="mockseal" style="font-size:9px;padding:0 5px">示例</span>全部数据为设计示例</span>
+    </div>
+
+    <!-- 叙事温度条 -->
+    <div class="secttl"><span class="t">叙事主线</span><span class="s">温度 = 激活环节池加权动量 + 成交占比变化 · 页面加载现算</span></div>
+    <div class="nar">
+      <div class="narc" style="animation-delay:.05s"><div class="nh"><span class="nn">国产算力</span><span class="st hot">主升</span></div><div class="bar"><i style="width:92%;background:var(--zhu)"></i></div><div class="meta"><span>92°</span><span class="plus">研+14</span><span class="minus">-1</span></div></div>
+      <div class="narc" style="animation-delay:.08s"><div class="nh"><span class="nn">存储周期</span><span class="st hot">主升·兑现</span></div><div class="bar"><i style="width:88%;background:var(--zhu)"></i></div><div class="meta"><span>88°</span><span class="plus">研+12</span><span class="minus">-2</span></div></div>
+      <div class="narc" style="animation-delay:.11s"><div class="nh"><span class="nn">英伟达链</span><span class="st warm">高位分歧</span></div><div class="bar"><i style="width:71%;background:var(--zhu-soft)"></i></div><div class="meta"><span>71°</span><span class="plus">研+9</span><span class="minus">-4</span></div></div>
+      <div class="narc" style="animation-delay:.14s"><div class="nh"><span class="nn">ASIC/TPU</span><span class="st warm">活跃</span></div><div class="bar"><i style="width:68%;background:var(--zhu-soft)"></i></div><div class="meta"><span>68°</span><span class="plus">研+5</span><span class="minus">0</span></div></div>
+      <div class="narc" style="animation-delay:.17s"><div class="nh"><span class="nn">推理放量</span><span class="st warm">扩散中</span></div><div class="bar"><i style="width:61%;background:var(--zhu-soft)"></i></div><div class="meta"><span>61°</span><span class="plus">研+7</span><span class="minus">-1</span></div></div>
+      <div class="narc" style="animation-delay:.20s"><div class="nh"><span class="nn">端侧AI</span><span class="st">温和</span></div><div class="bar"><i style="width:52%;background:var(--jin)"></i></div><div class="meta"><span>52°</span><span class="plus">研+4</span><span class="minus">-1</span></div></div>
+      <div class="narc" style="animation-delay:.23s"><div class="nh"><span class="nn">算电协同</span><span class="st">酝酿</span></div><div class="bar"><i style="width:47%;background:var(--jin)"></i></div><div class="meta"><span>47°</span><span class="plus">研+5</span><span class="minus">0</span></div></div>
+      <div class="narc" style="animation-delay:.26s"><div class="nh"><span class="nn">应用商业化</span><span class="st cool">回调蓄势</span></div><div class="bar"><i style="width:31%;background:var(--dai-soft)"></i></div><div class="meta"><span>31°</span><span class="plus">研+8</span><span class="minus">-6</span></div></div>
+    </div>
+
+    <!-- 环节明细 -->
+    <div class="secttl"><span class="t">环节明细</span><span class="s">C2 光芯片 / 光器件 · Δ涨价 + Ω突破 双击型 ★★</span></div>
+    <div class="detail">
+
+      <!-- 象限图 -->
+      <div class="panel">
+        <div class="ph"><span class="t">双轴象限</span><span class="s">横=行情温度 · 纵=研报景气(半衰7天)</span></div>
+        <div class="quad">
+          <svg viewBox="0 0 376 300" width="100%">
+            <line class="qaxis" x1="30" y1="270" x2="366" y2="270"/>
+            <line class="qaxis" x1="30" y1="10" x2="30" y2="270"/>
+            <line class="qmid" x1="198" y1="10" x2="198" y2="270"/>
+            <line class="qmid" x1="30" y1="140" x2="366" y2="140"/>
+            <text class="qlab" x="340" y="26" text-anchor="end">雙熱</text>
+            <text class="qlab" x="44" y="26">潛伏</text>
+            <text class="qlab" x="340" y="262" text-anchor="end">情緒</text>
+            <text class="qlab" x="44" y="262">雙冷</text>
+            <circle class="qdot hot" cx="310" cy="52" r="4"/><text class="qtxt" x="318" y="55">A5</text>
+            <circle class="qdot hot" cx="330" cy="82" r="4"/><text class="qtxt" x="338" y="85">A2</text>
+            <circle class="qdot hot" cx="296" cy="72" r="4"/><text class="qtxt" x="304" y="75">A3</text>
+            <circle class="qdot hot" cx="282" cy="98" r="4"/><text class="qtxt" x="290" y="101">A1</text>
+            <circle class="qdot hot" cx="268" cy="60" r="4"/><text class="qtxt" x="276" y="63">B2</text>
+            <circle class="qdot hot" cx="252" cy="118" r="4"/><text class="qtxt" x="260" y="121">C1</text>
+            <circle class="qdot hot" cx="264" cy="88" r="5.5"/><text class="qtxt" x="273" y="91" style="font-weight:600">C2</text>
+            <circle class="qsel" cx="264" cy="88" r="10"/>
+            <circle class="qdot" cx="286" cy="176" r="4"/><text class="qtxt" x="294" y="179">A4</text>
+            <circle class="qdot" cx="238" cy="168" r="4"/><text class="qtxt" x="246" y="171">C3</text>
+            <circle class="qdot lurk" cx="150" cy="96" r="4"/><text class="qtxt" x="158" y="99">I1</text>
+            <circle class="qdot lurk" cx="128" cy="112" r="4"/><text class="qtxt" x="136" y="115">F1</text>
+            <circle class="qdot lurk" cx="162" cy="124" r="4"/><text class="qtxt" x="170" y="127">B3</text>
+            <circle class="qdot lurk" cx="156" cy="132" r="4"/><text class="qtxt" x="164" y="135">B4</text>
+            <circle class="qdot lurk" cx="142" cy="146" r="4"/><text class="qtxt" x="150" y="149">I3</text>
+            <circle class="qdot lurk" cx="178" cy="104" r="4"/><text class="qtxt" x="186" y="107">C4</text>
+            <circle class="qdot" cx="210" cy="196" r="4"/><text class="qtxt" x="218" y="199">G1</text>
+            <circle class="qdot" cx="196" cy="204" r="4"/><text class="qtxt" x="204" y="207">G2</text>
+            <circle class="qdot" cx="118" cy="210" r="4"/><text class="qtxt" x="126" y="213">B1</text>
+            <circle class="qdot" cx="102" cy="222" r="4"/><text class="qtxt" x="110" y="225">I4</text>
+            <circle class="qdot" cx="96" cy="196" r="4"/><text class="qtxt" x="104" y="199">I2</text>
+            <circle class="qdot" cx="88" cy="232" r="4"/><text class="qtxt" x="96" y="235">M1</text>
+            <circle class="qdot" cx="76" cy="244" r="4"/><text class="qtxt" x="84" y="247">M2</text>
+            <circle class="qdot" cx="110" cy="238" r="4"/><text class="qtxt" x="118" y="241">F2</text>
+            <circle class="qdot" cx="72" cy="228" r="4"/><text class="qtxt" x="80" y="231">F3</text>
+            <circle class="qdot" cx="84" cy="252" r="4"/><text class="qtxt" x="92" y="255">F4</text>
+            <circle class="qdot" cx="180" cy="182" r="4"/><text class="qtxt" x="188" y="185">B5</text>
+            <circle class="qdot" cx="132" cy="188" r="4"/><text class="qtxt" x="140" y="191">C5</text>
+            <circle class="qdot hot" cx="246" cy="76" r="4"/><text class="qtxt" x="254" y="79">A6</text>
+          </svg>
+        </div>
+        <div class="quadfoot">
+          <b>C2 光芯片</b> 处于双热区:行情温度 74°,研报景气 +6(近30日,分歧度低)。
+          同象限:存储、先进制程、半导体设备、上游材料。<b style="color:var(--jin)">潜伏区</b>(研报热·行情冷)当前 6 个:IDC、办公Agent、电源、液冷、算电协同、OCS——回调蓄势的关注清单。
+        </div>
+      </div>
+
+      <!-- 研报观点流 -->
+      <div class="panel">
+        <div class="ph"><span class="t">研报观点流</span><span class="s">C2 光芯片 · 近30日</span><span class="r">6 篇 · 示例</span></div>
+        <div class="flow">
+          <div class="op">
+            <div class="oh"><span class="stance bull">多</span><span class="strength">●●●</span><span class="org">中邮证券 · 06-26</span></div>
+            <div class="ttl">立昂微:AI拉动重掺需求,射频及光电强劲增长</div>
+            <div class="quote">"200G EML 全球供需缺口约 25-30%,涨价 15-20%,头部厂商订单排至 2027 年……"</div>
+            <div class="of"><span class="tag t-edge">验证边 T4 供给缺口→涨价 ✓</span><span class="tag">催化:涨价</span><span class="trace">溯源 doc#a3f2 →</span></div>
+          </div>
+          <div class="op">
+            <div class="oh"><span class="stance bull">多</span><span class="strength">●●○</span><span class="org">华鑫证券 · 06-29</span></div>
+            <div class="ttl">源杰科技:100G EML 量产爬坡,CW 光源百万级出货</div>
+            <div class="quote">"国产 100G EML 良率已接近海外一线水平,CW 光源进入北美大客户供应链……"</div>
+            <div class="of"><span class="tag t-glb">坐标修正:国产化率 ↑</span><span class="tag">催化:认证</span><span class="trace">溯源 doc#b81c →</span></div>
+          </div>
+          <div class="op">
+            <div class="oh"><span class="stance bull">多</span><span class="strength">●●○</span><span class="org">开源证券 · 06-30</span></div>
+            <div class="ttl">光通信行业:1.6T 放量元年,上游光芯片弹性最大</div>
+            <div class="quote">"硅光方案占 1.6T 比例约 72%,但 EML 在 800G 存量与 CW 光源需求同步扩张……"</div>
+            <div class="of"><span class="tag">催化:订单</span><span class="tag">关联叙事:英伟达链</span><span class="trace">溯源 doc#c44e →</span></div>
+          </div>
+          <div class="op">
+            <div class="oh"><span class="stance neut">中性</span><span class="strength">●○○</span><span class="org">某券商 · 06-18</span></div>
+            <div class="ttl">光芯片:关注 CW 光源竞争格局边际变化</div>
+            <div class="quote">"随着二线厂商产能释放,2027 年起 CW 光源或存在价格竞争风险……"</div>
+            <div class="of"><span class="tag">风险提示</span><span class="trace">溯源 doc#d905 →</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 全球坐标 + 个股 -->
+      <div class="panel">
+        <div class="ph"><span class="t">全球坐标 · 票池</span><span class="r">C2 · 6只 · 示例</span></div>
+        <div class="gcard">
+          <div class="gt">全球坐标 <span class="logic">Δ涨价 + Ω突破 双击</span></div>
+          <dl>
+            <dt>国际</dt><dd>Lumentum / Coherent 主导 EML,2028 产能售罄</dd>
+            <dt>国内</dt><dd><span class="pos">追赶 → 突破</span>:源杰 100G EML 量产,CW 光源出海</dd>
+            <dt>壁垒</dt><dd>良率与可靠性认证(认证周期 12-18 月)</dd>
+            <dt>前景</dt><dd>缺口 25-30% + 国产替代双击,十倍股发源地 ★★</dd>
+          </dl>
+        </div>
+        <div class="stbl">
+          <table>
+            <thead><tr><th>个股</th><th>现价</th><th>当日</th><th>资金5日</th><th>v4分位</th></tr></thead>
+            <tbody>
+              <tr><td>源杰科技<span class="code">688498</span></td><td>286.40</td><td class="up">+6.2%</td><td class="up">+3.2亿</td><td>97</td></tr>
+              <tr><td>仕佳光子<span class="code">688313</span></td><td>38.75</td><td class="up">+3.1%</td><td class="up">+1.1亿</td><td>92</td></tr>
+              <tr><td>长光华芯<span class="code">688048</span></td><td>62.10</td><td class="up">+2.4%</td><td class="up">+0.6亿</td><td>88</td></tr>
+              <tr><td>天孚通信<span class="code">300394</span></td><td>168.02</td><td class="up">+1.8%</td><td class="up">+2.4亿</td><td>90</td></tr>
+              <tr><td>太辰光<span class="code">300570</span></td><td>74.55</td><td class="dn">-0.7%</td><td class="dn">-0.3亿</td><td>81</td></tr>
+              <tr><td>腾景科技<span class="code">688195</span></td><td>45.90</td><td class="up">+4.5%</td><td class="up">+0.8亿</td><td>85</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div style="padding:10px 12px 12px;display:flex;gap:8px">
+          <span class="chip" style="cursor:pointer">↗ 送去选股页对比</span>
+          <span class="chip" style="cursor:pointer">↗ 落子盯盘</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ═══ 全球坐标矩阵视图 ═══ -->
+  <div id="v-matrix" class="matrix">
+    <div class="secttl" style="padding-left:0"><span class="t">全球坐标矩阵</span><span class="s">行=国内地位 · 列=主逻辑型 · ★=好节点 · 朱框=Δ+Ω双击</span></div>
+    <div class="mgrid">
+      <div></div>
+      <div class="mhead">β<small>全球需求</small></div>
+      <div class="mhead">Δ<small>涨价周期</small></div>
+      <div class="mhead">Ω<small>国产替代</small></div>
+      <div class="mhead">Θ<small>技术路线</small></div>
+      <div class="mhead">Ψ<small>映射主题</small></div>
+
+      <div class="mrow">领先</div>
+      <div class="mcell"><span class="mseg good">高速PCB</span><span class="mseg good">光模块</span><span class="mseg good">服务器ODM</span><span class="mseg good">液冷</span><span class="mseg good">AI眼镜</span></div>
+      <div class="mcell"><span class="mseg good">上游材料</span></div>
+      <div class="mcell"></div>
+      <div class="mcell"></div>
+      <div class="mcell"></div>
+
+      <div class="mrow">并跑</div>
+      <div class="mcell"><span class="mseg good">电源/HVDC</span><span class="mseg">先进封装</span><span class="mseg good">IDC/AIDC</span></div>
+      <div class="mcell"></div>
+      <div class="mcell"></div>
+      <div class="mcell"><span class="mseg">CPO/硅光</span></div>
+      <div class="mcell"></div>
+
+      <div class="mrow">追赶</div>
+      <div class="mcell"><span class="mseg">交换机</span><span class="mseg">AI手机/PC</span></div>
+      <div class="mcell"><span class="mseg dual good">光芯片 Δ+Ω</span></div>
+      <div class="mcell"><span class="mseg good">半导体设备</span></div>
+      <div class="mcell"><span class="mseg">铜连接</span></div>
+      <div class="mcell"><span class="mseg">OCS光交换</span></div>
+
+      <div class="mrow">短板</div>
+      <div class="mcell"></div>
+      <div class="mcell"><span class="mseg dual">存储/HBM Δ+Ω</span></div>
+      <div class="mcell"><span class="mseg">国产AI芯片</span><span class="mseg">先进制程</span></div>
+      <div class="mcell"></div>
+      <div class="mcell"><span class="mseg">基础大模型</span></div>
+
+      <div class="mrow">国内市场</div>
+      <div class="mcell"><span class="mseg">算力租赁</span><span class="mseg">运营商/云</span></div>
+      <div class="mcell"></div>
+      <div class="mcell"></div>
+      <div class="mcell"><span class="mseg">算电协同</span></div>
+      <div class="mcell"><span class="mseg">办公/Agent</span><span class="mseg">AI金融</span><span class="mseg">AIGC传媒</span><span class="mseg">垂直行业</span><span class="mseg">数据/语料</span></div>
+    </div>
+    <div class="matrixfoot">
+      读法:<b>左上 = 确定性</b>(领先 × β,业绩兑现型),<b>右下 = 弹性</b>(短板 × Ω,期权博弈型)。
+      「光芯片」「存储/HBM」以朱框标记 Δ+Ω 双击——历史上十倍股多诞生于此。
+      研报出现国产化率/份额/认证进展时,LLM 抽取 global_update 信号,节点在矩阵中<b>迁移</b>(如光芯片正从「追赶」爬向「并跑」)。
+    </div>
+  </div>
+
+  <div class="foot">
+    <span class="mockseal">設計稿</span>
+    <span>ui/_mockups/industry-mockup.html · 非实现 · 所有行情/研报/个股数据均为示例</span>
+    <span style="margin-left:auto">观澜 · AI投研看板 mockup v1 · 2026-07-02</span>
+  </div>
+</div>
+
+<script>
+  function showView(v) {
+    document.getElementById('v-river').style.display = v === 'river' ? '' : 'none';
+    document.getElementById('v-matrix').classList.toggle('show', v === 'matrix');
+    document.querySelectorAll('.viewswitch span').forEach((el, i) =>
+      el.classList.toggle('on', (v === 'river') === (i === 0)));
+  }
+
+  // 传导边(选中 C2 的演示边 + 一条负向替代边)
+  const EDGES = [
+    { from: 'n-A5', to: 'n-C2', label: '', neg: false },
+    { from: 'n-C2', to: 'n-C1', label: 'T8 缺口制约出货', neg: false },
+    { from: 'n-C3', to: 'n-C1', label: 'T15 替代威胁', neg: true },
+  ];
+  function drawEdges() {
+    const layer = document.getElementById('edgeLayer');
+    const wrap = layer.parentElement.getBoundingClientRect();
+    layer.setAttribute('width', wrap.width);
+    layer.setAttribute('height', wrap.height);
+    let html = '';
+    for (const e of EDGES) {
+      const fa = document.getElementById(e.from), fb = document.getElementById(e.to);
+      if (!fa || !fb) continue;
+      const a = fa.getBoundingClientRect(), b = fb.getBoundingClientRect();
+      let x1, y1, x2, y2;
+      if (Math.abs(a.left - b.left) < 10) {           // 同列:从右侧绕行
+        x1 = a.right - wrap.left; y1 = a.top + a.height / 2 - wrap.top;
+        x2 = b.right - wrap.left; y2 = b.top + b.height / 2 - wrap.top;
+        const bx = x1 + 26;
+        html += `<path class="edge${e.neg ? ' neg' : ''}" d="M${x1},${y1} C${bx},${y1} ${bx},${y2} ${x2},${y2}"/>`;
+        if (e.label) html += `<text class="edgelbl${e.neg ? ' neg' : ''}" x="${bx + 4}" y="${(y1 + y2) / 2 + 3}">${e.label}</text>`;
+      } else {                                         // 跨列:左→右贝塞尔
+        const src = a.left < b.left ? a : b, dst = a.left < b.left ? b : a;
+        x1 = src.right - wrap.left; y1 = src.top + src.height / 2 - wrap.top;
+        x2 = dst.left - wrap.left;  y2 = dst.top + dst.height / 2 - wrap.top;
+        const mx = (x1 + x2) / 2;
+        html += `<path class="edge${e.neg ? ' neg' : ''}" d="M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}"/>`;
+        if (e.label) html += `<text class="edgelbl${e.neg ? ' neg' : ''}" x="${mx}" y="${(y1 + y2) / 2 - 6}" text-anchor="middle">${e.label}</text>`;
+      }
+    }
+    layer.innerHTML = html;
+  }
+  window.addEventListener('load', drawEdges);
+  window.addEventListener('resize', drawEdges);
+</script>
+</body>
+</html>
