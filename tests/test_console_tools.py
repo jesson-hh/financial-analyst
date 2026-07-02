@@ -610,14 +610,14 @@ def test_engine_profile_excludes_ww_but_console_whitelist_resolves():
                           encoding="utf-8", errors="replace", timeout=180, env=env, cwd=str(repo))
     assert proc.returncode == 0, (proc.stderr or "")[-2000:]
     out = _json.loads(proc.stdout.strip().splitlines()[-1])
-    assert len(out["registered_ww"]) == 39                    # +7 P0 闭环读取面薄工具
+    assert len(out["registered_ww"]) == 40                    # +7 P0 闭环读取面薄工具 +1 ww_picks_perf
     # ① 非显式白名单路径(research / 缺省 / all)一律不外露 ww_*,且不再返回 None(None=完全不限制)
     assert out["research_is_none"] is False and out["research_ww"] == []
     assert out["default_is_none"] is False and out["default_ww"] == []
     assert out["all_is_none"] is False and out["all_ww"] == []
     # ② console 显式白名单路径不受影响:62 名全部可解析,含 37 个 ww_(+工坊删除/设默认 2 + alpha-zoo 7)
-    assert out["console_n"] == 64 and out["console_missing"] == []
-    assert out["explicit_n"] == 64 and out["explicit_ww_n"] == 39
+    assert out["console_n"] == 65 and out["console_missing"] == []
+    assert out["explicit_n"] == 65 and out["explicit_ww_n"] == 40
 
 
 def test_f10_impl_returns_structured_facts(monkeypatch):
@@ -1081,9 +1081,9 @@ def test_registry_derivation_consistent():
     """阶段0 重构守护:CONSOLE_ALLOWED 与 _WW_REACHABLE_ENDPOINTS 必须从声明表派生且与已知集合一致。"""
     import guanlan_v2.console.tools as ct
     ww_in_table = {t["name"] for t in ct.WW_TOOL_TABLE}
-    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 39
+    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 40
     assert ww_in_table == {n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")}
-    assert len(ct.CONSOLE_ALLOWED) == 64
+    assert len(ct.CONSOLE_ALLOWED) == 65
     assert {"/factorlib/save", "/workflow/compose", "/feature/build"} <= ct._WW_REACHABLE_ENDPOINTS
     assert ct._WW_REACHABLE_ENDPOINTS == {ep for t in ct.WW_TOOL_TABLE for ep in t.get("reachable", [])}
 
@@ -1125,6 +1125,8 @@ def test_ww_reachable_endpoints_matches_expected():
         "/workflow/critique",     # ww_workflow_critique
         "/screen/regen",          # ww_regen(触发)
         "/screen/regen/status",   # ww_regen(wait 轮询)
+        "/seats/basket_perf",     # ww_picks_perf(P1 成绩单)
+        "/screen/picks",          # ww_picks_perf(读 snapshot 档案)
     }
     assert ct._WW_REACHABLE_ENDPOINTS == expected
 
@@ -1514,3 +1516,33 @@ def test_screen_impl_passes_snapshot_note(monkeypatch):
     monkeypatch.setattr(ct, "_self_post", lambda path, payload, timeout=120: fake2)
     res2 = ct.screen_impl()
     assert "落盘失败" in res2["content"]                  # 失败显形透传
+
+
+# ── P1 §3: ww_picks_perf 成绩单 ────────────────────────────────────────────
+
+def test_picks_perf_impl(monkeypatch):
+    picks = {"ok": True, "items": [
+        {"date": "2026-06-30", "snapshot": True, "model": "prod",
+         "picks": [{"code": "SH600001", "rank": 1}, {"code": "SZ000002", "rank": 2}]}]}
+    perf = {"ok": True, "n": 2, "matured_n": 2, "horizon": 5, "avg_ret": 0.021,
+            "bench_ret": 0.004, "excess": 0.017, "per_code": [], "warnings": [],
+            "note": "口径:收盘进收盘出"}
+    sent = {}
+    def fake_get(path, timeout=30):
+        if path.startswith("/screen/picks"):
+            return picks
+        sent["path"] = path
+        return perf
+    monkeypatch.setattr(ct, "_self_get", fake_get)
+    res = ct.picks_perf_impl()
+    assert "codes=SH600001,SZ000002" in sent["path"] and "start=2026-06-30" in sent["path"]
+    assert res["ok"] is True
+    assert "+2.10%" in res["content"] and "+0.40%" in res["content"] and "+1.70%" in res["content"]
+    assert "成熟 2/2" in res["content"] and "口径" in res["content"]
+
+
+def test_picks_perf_impl_no_archive(monkeypatch):
+    monkeypatch.setattr(ct, "_self_get", lambda path, timeout=30: {"ok": True, "items": []})
+    res = ct.picks_perf_impl()
+    assert res["ok"] is True and "暂无正式选股档案" in res["content"]
+    assert "snapshot=true" in res["content"]                   # 教用户怎么落档

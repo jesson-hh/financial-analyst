@@ -756,6 +756,46 @@ def regen_impl(end: str = "", wait: bool = True,
             "content": "再生轮询超时: 后端可能仍在跑,稍后用 ww_model_health 查产物新鲜度验新。"}
 
 
+def picks_perf_impl(date: str = "", horizon: int = 5) -> Dict[str, Any]:
+    """查正式选股成绩单:picks 档案 snapshot 行 → 篮子前向收益 vs 全A等权(校准同口径)。"""
+    try:
+        r = _self_get("/screen/picks?snapshot_only=1&limit=50")
+    except Exception as e:
+        return {"ok": False, "content": f"picks 档案读取失败: {e}", "artifact": None}
+    items = r.get("items") or []
+    want = (date or "").strip()
+    if want:
+        items = [it for it in items
+                 if str(it.get("date")) == want or str(it.get("ts", "")).startswith(want)]
+    if not items:
+        return {"ok": True, "artifact": None, "raw": {"n": 0},
+                "content": ("暂无正式选股档案" + (f"(date={want})" if want else "")
+                            + "。ww_screen_run 传 snapshot=true 落档后才可跟踪成绩。")}
+    it = items[0]                                              # read_picks 新在前
+    codes = [str(p.get("code")) for p in (it.get("picks") or []) if p.get("code")][:40]
+    if not codes:
+        return {"ok": False, "content": f"档案 {it.get('date')} 无 picks 行,无法跟踪",
+                "artifact": None, "raw": {"item": it}}
+    hz = max(1, min(int(horizon or 5), 60))
+    q = f"/seats/basket_perf?codes={','.join(codes)}&start={it.get('date')}&horizon={hz}"
+    try:
+        b = _self_get(q, timeout=120)
+    except Exception as e:
+        return {"ok": False, "content": f"篮子收益计算失败: {e}", "artifact": None}
+    if not b.get("ok"):
+        return {"ok": False, "content": f"篮子收益计算失败: {b.get('reason')}",
+                "artifact": None, "raw": b}
+    def _pct(v):
+        return "—" if v is None else f"{float(v):+.2%}"
+    content = (f"{it.get('date')} 正式选股 {b.get('n')} 只 · {b.get('horizon')}日等权 "
+               f"{_pct(b.get('avg_ret'))} vs 全A等权 {_pct(b.get('bench_ret'))} · "
+               f"超额 {_pct(b.get('excess'))} · 成熟 {b.get('matured_n')}/{b.get('n')}"
+               + (f"\n⚠ {'; '.join(str(w) for w in b.get('warnings'))}" if b.get("warnings") else "")
+               + f"\n口径: {b.get('note')}")
+    return {"ok": True, "content": content, "artifact": None,
+            "raw": {"pick_date": it.get("date"), "model": it.get("model"), "perf": b}}
+
+
 def seats_decide_impl(code: str, name: str = "", creed: str = "",
                       mode: str = "fast") -> Dict[str, Any]:
     try:
@@ -1800,6 +1840,16 @@ WW_TOOL_TABLE = [
          "timeout_seconds": {"type": "number", "default": 600}}},
      "impl": regen_impl, "cost": "minutes", "confirm": True,
      "reachable": ["/screen/regen", "/screen/regen/status"]},
+    {"name": "ww_picks_perf",
+     "description":
+         "查正式选股成绩单:读 picks 档案(snapshot 行),算该篮子前向持有收益 vs 全A等权基准"
+         "(收盘进/收盘出,与置信校准同口径)。默认最新一次正式选股;date 可选某天;"
+         "未成熟票诚实标注,基准缺失显形 null。",
+     "input_schema": {"type": "object", "properties": {
+         "date": {"type": "string", "description": "可选,选某天的正式选股档案 YYYY-MM-DD"},
+         "horizon": {"type": "integer", "default": 5, "description": "持有窗口(交易日 1-60)"}}},
+     "impl": picks_perf_impl, "cost": "seconds", "confirm": False,
+     "reachable": ["/screen/picks", "/seats/basket_perf"]},
     {"name": "ww_capabilities",
      "description":
          "列出我(帷幄)当前能调用的全部工具及用途。用户问『你能做什么/有哪些功能/会用什么工具』,或我不确定该用哪个工具时,先调它自查。",
