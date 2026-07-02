@@ -757,7 +757,7 @@ def workflow_critique_impl(goal: str = "", graph: Optional[Dict[str, Any]] = Non
     src = r.get("source") or "?"
     content = (f"AI 批判({'真·LLM' if src == 'llm' else '规则兜底·非LLM'}):{r.get('diagnosis')}\n"
                f"改进图: {len(gr.get('nodes') or [])} 节点(nodes/edges 见 raw.graph)\n"
-               "⚠ 注意: metrics 为调用方自报,后端不复算(P2 将加强为后端取数)。")
+               "⚠ 注意: metrics 为调用方自报,后端不复算(要后端自算口径走 ww_research_loop 研究回路)。")
     return {"ok": bool(r.get("ok")), "content": content, "artifact": None, "raw": r}
 
 
@@ -836,6 +836,114 @@ def picks_perf_impl(date: str = "", horizon: int = 5) -> Dict[str, Any]:
                + f"\n口径: {b.get('note')}")
     return {"ok": True, "content": content, "artifact": None,
             "raw": {"pick_date": it.get("date"), "model": it.get("model"), "perf": b}}
+
+
+# ── P2 自主研究回路 ─────────────────────────────────────────────────────────
+
+def _research_run_line(run: Dict[str, Any]) -> str:
+    """run 行(read_runs 合并行)→ 一行成绩单人话。"""
+    bm = run.get("best_metrics") or {}
+    pr = run.get("promoted") or {}
+    ws = run.get("workflow_saved") or {}
+    ric = bm.get("rank_ic")
+    ric_s = f"{float(ric):+.4f}" if isinstance(ric, (int, float)) else "—"
+    if pr.get("status") == "draft":
+        verdict = f"达标 ✅ 已入 draft:{pr.get('name')}(待人审 POST /factorlib/promote 转正)"
+    elif pr.get("status") == "skipped_multi":
+        verdict = "达标但为多因子合成,未自动入库(成分见 ww_research_runs run_id 详情)"
+    elif run.get("error"):
+        verdict = f"中断:{run.get('error')}"
+    elif run.get("status") == "interrupted":
+        verdict = "已中断(服务重启)"
+    else:
+        verdict = "未达标(逐轮诊断 ww_research_runs run_id 查)"
+    tail = f" · 图已存工作流库「{ws.get('name')}」" if ws.get("ok") else ""
+    return (f"研究「{str(run.get('goal') or '')[:40]}」{run.get('n_rounds', '?')} 轮 · "
+            f"最佳 RankIC {ric_s}(第{run.get('best_k')}轮,oos={bm.get('oos_verdict')}) · "
+            f"{verdict}{tail}")
+
+
+def research_loop_impl(goal: str = "", max_rounds: int = 3, min_rank_ic: float = 0.02,
+                       universe: str = "csi300_active", wait: bool = True,
+                       poll_seconds: float = 15.0, timeout_seconds: float = 1800.0) -> Dict[str, Any]:
+    """发起自主研究回路(后台单飞);wait 时轮询到收工并拼成绩单(三段式仓例 model_promote_impl)。"""
+    g = (goal or "").strip()
+    if not g:
+        return {"ok": False, "content": "请给研究目标 goal(如:找一个短周期反转因子)", "artifact": None}
+    body = {"goal": g, "max_rounds": int(max_rounds or 3),
+            "min_rank_ic": float(min_rank_ic or 0.02), "universe": universe or "csi300_active"}
+    try:
+        r = _self_post("/research/loop/start", body)
+    except Exception as e:
+        return {"ok": False, "content": f"研究回路启动失败: {e}", "artifact": None}
+    if not r.get("ok"):
+        return {"ok": False, "content": f"研究回路未启动: {r.get('reason')}", "artifact": None, "raw": r}
+    rid = r.get("run_id")
+    if not wait:
+        return {"ok": True, "artifact": None, "raw": r,
+                "content": f"已启动研究回路 run_id={rid}(后台跑,数分钟);稍后 ww_research_runs 查成绩。"}
+    import time as _time
+    deadline = _time.time() + float(timeout_seconds or 1800.0)
+    state: Dict[str, Any] = {}
+    done = False
+    while _time.time() <= deadline:
+        try:
+            s = _self_get("/research/loop/status")
+        except Exception as e:
+            return {"ok": False, "content": f"回路状态读取失败: {e}", "artifact": None}
+        state = s.get("state") or {}
+        if not state.get("running") and state.get("phase") in ("done", "error"):
+            done = True
+            break
+        if poll_seconds:
+            _time.sleep(float(poll_seconds))
+    if not done:
+        return {"ok": False, "artifact": None, "raw": {"state": state},
+                "content": f"研究回路轮询超时 run_id={rid}:后端可能仍在跑,稍后 ww_research_runs 查"}
+    run = None
+    try:
+        rr = _self_get("/research/runs?limit=10")
+        run = next((x for x in (rr.get("runs") or []) if x.get("run_id") == rid), None)
+    except Exception:  # noqa: BLE001
+        run = None
+    if run is None:
+        return {"ok": False, "artifact": None, "raw": {"state": state},
+                "content": f"回路已停但档案缺失 run_id={rid}(rounds_recorded 可能为 False,查 var/research_runs.jsonl)"}
+    return {"ok": bool(run.get("ok")), "artifact": None, "raw": {"run": run},
+            "content": _research_run_line(run)}
+
+
+def research_runs_impl(run_id: str = "", limit: int = 10) -> Dict[str, Any]:
+    """研究回路档案:无 run_id 列近期 run;有 run_id 出逐轮详情(graph 不进上下文防灌)。"""
+    try:
+        if (run_id or "").strip():
+            rr = _self_get(f"/research/rounds?run_id={run_id.strip()}&limit=50")
+            rows = list(reversed(rr.get("rounds") or []))   # 时间正序讲故事
+            if not rows:
+                return {"ok": True, "content": f"run {run_id} 无轮次记录", "artifact": None}
+            lines = []
+            for r in rows:
+                m = r.get("metrics") or {}
+                ric = m.get("rank_ic")
+                ric_s = f"{float(ric):+.4f}" if isinstance(ric, (int, float)) else "—"
+                mark = "❌" if r.get("failed") else ("✅" if (r.get("gate") or {}).get("passed") else "·")
+                lines.append(
+                    f"第{r.get('k')}轮{mark} {r.get('dish') or '不支持'} RankIC {ric_s} "
+                    f"oos={m.get('oos_verdict') or '—'} | {str(r.get('diag') or '')[:70]}"
+                    + (f" | 错误: {str(r.get('error'))[:60]}" if r.get("failed") else ""))
+            slim = [{k_: v for k_, v in r.items() if k_ != "graph"} for r in rows]
+            return {"ok": True, "content": "\n".join(lines), "artifact": None,
+                    "raw": {"rounds": slim}}
+        rr = _self_get(f"/research/runs?limit={max(1, min(int(limit or 10), 50))}")
+        runs = rr.get("runs") or []
+        if not runs:
+            return {"ok": True, "artifact": None,
+                    "content": "暂无研究回路档案。用 ww_research_loop 发起一次(需确认)。"}
+        return {"ok": True, "artifact": None, "raw": {"runs": runs},
+                "content": "\n".join(
+                    f"{r.get('run_id')} [{r.get('status')}] {_research_run_line(r)}" for r in runs)}
+    except Exception as e:
+        return {"ok": False, "content": f"研究档案读取失败: {e}", "artifact": None}
 
 
 def seats_decide_impl(code: str, name: str = "", creed: str = "",
@@ -1869,7 +1977,7 @@ WW_TOOL_TABLE = [
      "description":
          "AI 批判环:给出研究目标+当前工作流 graph({nodes,edges})+该图真实回测指标,"
          "LLM 诊断问题并产改进图(LLM 不可用时规则兜底,来源诚实标注)。"
-         "注意:指标由调用方自报,后端不复算。",
+         "注意:指标由调用方自报,后端不复算(后端自算走 ww_research_loop)。",
      "input_schema": {"type": "object", "properties": {
          "goal": {"type": "string"},
          "graph": {"type": "object", "description": "{nodes:[],edges:[]} 当前工作流图"},
@@ -1899,6 +2007,33 @@ WW_TOOL_TABLE = [
          "horizon": {"type": "integer", "default": 5, "description": "持有窗口(交易日 1-60)"}}},
      "impl": picks_perf_impl, "cost": "seconds", "confirm": False,
      "reachable": ["/screen/picks", "/seats/basket_perf"]},
+    {"name": "ww_research_loop",
+     "description":
+         "自主研究回路(P2):goal 一句话 → 后端 LLM 生成因子工作流 → 真算指标(RankIC/样本外)→ "
+         "未达标 LLM 批判改进 → 循环(服务端钳 ≤5 轮)。达标单因子自动存 factorlib 为 draft"
+         "(不上选股货架,人审 POST /factorlib/promote 转正);逐轮落档;最佳图存工作流库。"
+         "花 LLM 钱+可能写 draft,需确认。",
+     "input_schema": {"type": "object", "properties": {
+         "goal": {"type": "string", "description": "研究目标,如:找一个短周期反转因子"},
+         "max_rounds": {"type": "integer", "default": 3, "description": "轮数上限(服务端钳 1-5)"},
+         "min_rank_ic": {"type": "number", "default": 0.02, "description": "达标门:RankIC 下限(另要求 oos=robust)"},
+         "universe": {"type": "string", "default": "csi300_active",
+                      "description": "求值股票池(csi300_active/csi_fast/csi500/csi800/all/sample30)"},
+         "wait": {"type": "boolean", "default": True},
+         "poll_seconds": {"type": "number", "default": 15},
+         "timeout_seconds": {"type": "number", "default": 1800}},
+      "required": ["goal"]},
+     "impl": research_loop_impl, "cost": "minutes", "confirm": True,
+     "reachable": ["/research/loop/start", "/research/loop/status", "/research/runs"]},
+    {"name": "ww_research_runs",
+     "description":
+         "研究回路档案:无 run_id 列近期 run(状态/轮数/最佳指标/draft 名);带 run_id 出逐轮详情"
+         "(诊断/指标/过门;规则兜底轮有「非 LLM」标注)。复盘研究成绩用它。",
+     "input_schema": {"type": "object", "properties": {
+         "run_id": {"type": "string", "description": "可选,某次 run 的 id(rr_ 开头)"},
+         "limit": {"type": "integer", "default": 10}}},
+     "impl": research_runs_impl, "cost": "instant", "confirm": False,
+     "reachable": ["/research/runs", "/research/rounds"]},
     {"name": "ww_capabilities",
      "description":
          "列出我(帷幄)当前能调用的全部工具及用途。用户问『你能做什么/有哪些功能/会用什么工具』,或我不确定该用哪个工具时,先调它自查。",

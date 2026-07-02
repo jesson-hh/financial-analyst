@@ -610,14 +610,14 @@ def test_engine_profile_excludes_ww_but_console_whitelist_resolves():
                           encoding="utf-8", errors="replace", timeout=180, env=env, cwd=str(repo))
     assert proc.returncode == 0, (proc.stderr or "")[-2000:]
     out = _json.loads(proc.stdout.strip().splitlines()[-1])
-    assert len(out["registered_ww"]) == 40                    # +7 P0 闭环读取面薄工具 +1 ww_picks_perf
+    assert len(out["registered_ww"]) == 42                    # +7 P0 闭环读取面薄工具 +1 ww_picks_perf +2 P2 研究回路
     # ① 非显式白名单路径(research / 缺省 / all)一律不外露 ww_*,且不再返回 None(None=完全不限制)
     assert out["research_is_none"] is False and out["research_ww"] == []
     assert out["default_is_none"] is False and out["default_ww"] == []
     assert out["all_is_none"] is False and out["all_ww"] == []
     # ② console 显式白名单路径不受影响:62 名全部可解析,含 37 个 ww_(+工坊删除/设默认 2 + alpha-zoo 7)
-    assert out["console_n"] == 65 and out["console_missing"] == []
-    assert out["explicit_n"] == 65 and out["explicit_ww_n"] == 40
+    assert out["console_n"] == 67 and out["console_missing"] == []
+    assert out["explicit_n"] == 67 and out["explicit_ww_n"] == 42
 
 
 def test_f10_impl_returns_structured_facts(monkeypatch):
@@ -1081,9 +1081,9 @@ def test_registry_derivation_consistent():
     """阶段0 重构守护:CONSOLE_ALLOWED 与 _WW_REACHABLE_ENDPOINTS 必须从声明表派生且与已知集合一致。"""
     import guanlan_v2.console.tools as ct
     ww_in_table = {t["name"] for t in ct.WW_TOOL_TABLE}
-    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 40
+    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 42
     assert ww_in_table == {n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")}
-    assert len(ct.CONSOLE_ALLOWED) == 65
+    assert len(ct.CONSOLE_ALLOWED) == 67
     assert {"/factorlib/save", "/workflow/compose", "/feature/build"} <= ct._WW_REACHABLE_ENDPOINTS
     assert ct._WW_REACHABLE_ENDPOINTS == {ep for t in ct.WW_TOOL_TABLE for ep in t.get("reachable", [])}
 
@@ -1127,6 +1127,10 @@ def test_ww_reachable_endpoints_matches_expected():
         "/screen/regen/status",   # ww_regen(wait 轮询)
         "/seats/basket_perf",     # ww_picks_perf(P1 成绩单)
         "/screen/picks",          # ww_picks_perf(读 snapshot 档案)
+        "/research/loop/start",   # ww_research_loop(P2 发起)
+        "/research/loop/status",  # ww_research_loop(wait 轮询)
+        "/research/runs",         # ww_research_loop 成绩单 + ww_research_runs 列表
+        "/research/rounds",       # ww_research_runs 逐轮详情
     }
     assert ct._WW_REACHABLE_ENDPOINTS == expected
 
@@ -1584,3 +1588,77 @@ def test_model_promote_impl_wait_reports_draft(monkeypatch):
     res = ct.model_promote_impl(name="w", features=["rev_20"], wait=True, poll_seconds=0)
     assert res["ok"] is True
     assert "draft 区" in res["content"] and "0.01" in res["content"]   # 诚实报未过门
+
+
+# ── P2: ww_research_loop / ww_research_runs ─────────────────────────────────
+
+_RUN_ROW = {"run_id": "rr_ab12cd34ef", "status": "done", "ok": True, "goal": "找一个短周期反转因子",
+            "n_rounds": 2, "best_k": 1,
+            "best_metrics": {"rank_ic": 0.031, "oos_verdict": "robust"},
+            "promoted": {"name": "lib_rl_cd34ef_r1", "status": "draft"},
+            "workflow_saved": {"ok": True, "id": "w1", "name": "研究·找一个短周期反转因子·cd34ef"}}
+
+
+def test_research_loop_impl_start_and_wait(monkeypatch):
+    calls = {"status": 0}
+
+    def fake_post(path, payload, timeout=120):
+        assert path == "/research/loop/start" and payload["goal"] == "找一个短周期反转因子"
+        return {"ok": True, "started": True, "run_id": "rr_ab12cd34ef", "state": {"running": True}}
+
+    def fake_get(path, timeout=30):
+        if path.startswith("/research/loop/status"):
+            calls["status"] += 1
+            done = calls["status"] >= 2
+            return {"ok": True, "state": {"running": (not done),
+                                          "phase": ("done" if done else "evaluate")}}
+        assert path.startswith("/research/runs")
+        return {"ok": True, "runs": [_RUN_ROW]}
+
+    monkeypatch.setattr(ct, "_self_post", fake_post)
+    monkeypatch.setattr(ct, "_self_get", fake_get)
+    res = ct.research_loop_impl(goal="找一个短周期反转因子", wait=True, poll_seconds=0, timeout_seconds=60)
+    assert res["ok"] is True
+    assert "lib_rl_cd34ef_r1" in res["content"] and "draft" in res["content"]
+    assert "+0.0310" in res["content"] and "工作流库" in res["content"]
+
+
+def test_research_loop_impl_already_running(monkeypatch):
+    monkeypatch.setattr(ct, "_self_post", lambda path, payload, timeout=120:
+                        {"ok": False, "reason": "already_running", "state": {"phase": "evaluate"}})
+    res = ct.research_loop_impl(goal="x", wait=False)
+    assert res["ok"] is False and "already_running" in res["content"]
+
+
+def test_research_loop_impl_timeout(monkeypatch):
+    monkeypatch.setattr(ct, "_self_post", lambda path, payload, timeout=120:
+                        {"ok": True, "started": True, "run_id": "rr_x", "state": {}})
+    monkeypatch.setattr(ct, "_self_get", lambda path, timeout=30:
+                        {"ok": True, "state": {"running": True, "phase": "evaluate"}})
+    res = ct.research_loop_impl(goal="x", wait=True, poll_seconds=0, timeout_seconds=0.05)
+    assert res["ok"] is False and "超时" in res["content"] and "ww_research_runs" in res["content"]
+
+
+def test_research_runs_impl_list(monkeypatch):
+    monkeypatch.setattr(ct, "_self_get", lambda path, timeout=30: {"ok": True, "runs": [_RUN_ROW]})
+    res = ct.research_runs_impl()
+    assert res["ok"] is True and "rr_ab12cd34ef" in res["content"] and "[done]" in res["content"]
+
+
+def test_research_runs_impl_detail_strips_graph(monkeypatch):
+    rounds = [{"run_id": "rr_a", "k": 1, "stage": "improve", "diag": "(规则兜底·非 LLM) 方向反了",
+               "critique_source": "rule", "dish": "report2",
+               "metrics": {"rank_ic": 0.02, "oos_verdict": "robust"},
+               "gate": {"passed": True}, "failed": False, "error": None,
+               "graph": {"nodes": [{"id": "n1"}], "edges": []}},
+              {"run_id": "rr_a", "k": 0, "stage": "propose", "diag": "初始生成(LLM propose)",
+               "critique_source": None, "dish": "report2",
+               "metrics": {"rank_ic": -0.01, "oos_verdict": "degraded"},
+               "gate": {"passed": False}, "failed": False, "error": None,
+               "graph": {"nodes": [], "edges": []}}]
+    monkeypatch.setattr(ct, "_self_get", lambda path, timeout=30: {"ok": True, "rounds": rounds})
+    res = ct.research_runs_impl(run_id="rr_a")
+    assert res["ok"] is True
+    assert "第0轮" in res["content"] and "第1轮" in res["content"]     # 时间正序讲故事
+    assert "规则兜底" in res["content"]                                # 诚实标注透传
+    assert all("graph" not in r for r in res["raw"]["rounds"])        # graph 不进上下文
