@@ -328,7 +328,8 @@ def segment_detail(sid: str) -> dict:
                                      "stance": s.get("stance"), "strength": s.get("strength"),
                                      "quote": s.get("quote"), "quote_dropped": s.get("quote_dropped")})
         opinions.sort(key=lambda x: str(x.get("publish_ts")), reverse=True)
-        qsig = quant_signals(fw)
+        pool_codes = [x["code"] for x in seg.get("stocks", [])]
+        qsig = quant_signals(fw, quotes=_fetch_quotes(pool_codes))
         rsig = research_signals(fw, ext)
         return {"ok": True, "reason": None, "segment": seg, "quant": qsig.get(sid),
                 "research": rsig.get(sid), "opinions": opinions, "stocks": seg.get("stocks", [])}

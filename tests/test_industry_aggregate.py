@@ -44,6 +44,23 @@ def test_empty_quotes_honest():
     assert sig["C2"]["momentum20"] is None and sig["C2"]["reason"]
 
 
+def test_segment_detail_fetches_only_pool(monkeypatch, tmp_path):
+    monkeypatch.setenv("GL_INDUSTRY_STORE", str(tmp_path / "store"))
+    from guanlan_v2.industry import aggregate
+    from guanlan_v2.industry.framework import load_framework, segment_pool
+    fw = load_framework()
+    seen = {}
+
+    def _fake_fetch(codes, days=45):
+        seen["codes"] = list(codes)
+        return {}
+
+    monkeypatch.setattr(aggregate, "_fetch_quotes", _fake_fetch)
+    r = aggregate.segment_detail("C2")
+    assert r["ok"] is True
+    assert set(seen["codes"]) == set(segment_pool(fw, "C2"))
+
+
 def test_fundflow_dotted_code_matched(monkeypatch):
     from guanlan_v2.industry import aggregate
     from guanlan_v2.industry.framework import load_framework, segment_pool

@@ -58,6 +58,7 @@ _srv.*
 .playwright-mcp/
 # 生成的研报产物(运行态数据,非源码)
 guanlan_v2/reports/store/
+guanlan_v2/industry/store/
 # 工作流存储(运行态,与 reports/store 同类;注:不忽略整个 .data/,wisdom 卡片是跟踪源)
 .data/workflows/
 # 运行态日志目录

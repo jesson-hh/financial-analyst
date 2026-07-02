@@ -78,6 +78,27 @@ def test_ingest_partial_failure_keeps_watermark(tmp_path, monkeypatch):
     assert len(store.load_extractions()) == 1           # d1 成功已落库
 
 
+def test_worker_crash_surfaces_in_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("GL_TEXT_SOURCE_ROOT", str(tmp_path))
+    monkeypatch.setenv("GL_INDUSTRY_STORE", str(tmp_path / "store"))
+    from guanlan_v2.industry import ingest, store
+    import guanlan_v2.industry.framework as fwmod
+
+    def _boom():
+        raise RuntimeError("boom-framework")
+
+    monkeypatch.setattr(fwmod, "load_framework", _boom)
+    ingest.start_ingest()
+    import time
+    for _ in range(100):
+        if not ingest.ingest_state()["running"]:
+            break
+        time.sleep(0.05)
+    st = store.load_state()
+    assert st["failed_docs"] and "worker 崩溃" in st["failed_docs"][0]["reason"]
+    assert st["last_ingest_at"]
+
+
 def test_ingest_single_flight(tmp_path, monkeypatch):
     _mk_corpus(tmp_path, n=1)
     monkeypatch.setenv("GL_TEXT_SOURCE_ROOT", str(tmp_path))

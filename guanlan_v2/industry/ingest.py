@@ -81,6 +81,16 @@ def _worker(limit: Optional[int], client) -> None:
             st["watermark"] = max(d["publish_ts"] for d in docs)
         st["last_ingest_at"] = pd.Timestamp.now().isoformat(timespec="seconds")
         store.save_state(st)
+    except Exception as exc:  # noqa: BLE001 — worker 意外崩溃也必须显形(诚实红线)
+        try:
+            from . import store as _store
+            import pandas as _pd
+            st = _store.load_state()
+            st["failed_docs"] = [{"doc_id": None, "reason": f"worker 崩溃: {exc}"}]
+            st["last_ingest_at"] = _pd.Timestamp.now().isoformat(timespec="seconds")
+            _store.save_state(st)
+        except Exception:  # noqa: BLE001 — 连状态都写不进时只能放弃,绝不抛出杀线程语义
+            pass
     finally:
         _running = False
 
