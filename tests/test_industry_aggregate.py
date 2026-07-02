@@ -42,3 +42,18 @@ def test_empty_quotes_honest():
     fw = load_framework()
     sig = quant_signals(fw, quotes={})
     assert sig["C2"]["momentum20"] is None and sig["C2"]["reason"]
+
+
+def test_fundflow_dotted_code_matched(monkeypatch):
+    from guanlan_v2.industry import aggregate
+    from guanlan_v2.industry.framework import load_framework, segment_pool
+    fw = load_framework()
+    pool = segment_pool(fw, "C2")
+    dates = pd.date_range("2026-05-01", periods=45, freq="B")
+    quotes = {c: pd.DataFrame({"trade_date": dates.strftime("%Y-%m-%d"),
+                               "close": 10 * (1.02) ** np.arange(45),
+                               "amount": np.full(45, 1e8)}) for c in pool}
+    dotted = {f"{c[2:]}.{c[:2]}": 1.0e8 for c in pool}
+    monkeypatch.setattr(aggregate, "_fundflow_map", lambda: dotted)
+    sig = aggregate.quant_signals(fw, quotes=quotes)
+    assert sig["C2"]["fundflow5"] == 1.0e8 * len(pool)

@@ -126,7 +126,7 @@ def quant_signals(fw: dict, quotes: Optional[dict] = None) -> dict:
         mom = float(np.mean(moms))
         ff = None
         if ffmap:
-            hits = [ffmap.get(c) or ffmap.get(c[2:]) for c in codes]
+            hits = [ffmap.get(c) or ffmap.get(c[2:]) or ffmap.get(f"{c[2:]}.{c[:2]}") for c in codes]
             hits = [h for h in hits if h is not None]
             ff = float(np.sum(hits)) if hits else None
         out[s["id"]] = {
