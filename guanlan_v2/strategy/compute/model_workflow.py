@@ -37,6 +37,8 @@ def train_promote(spec: Dict[str, Any]) -> Dict[str, Any]:
         fwd_days=fwd_days, universe=str(recipe.get("universe") or "all"),
         start=recipe.get("start") or "2022-01-01", end=end,
         params=dict(recipe.get("params") or {}), winsorize=True, standardize=True,
+        codes=recipe.get("codes"), benchmark=recipe.get("benchmark"),
+        leader=recipe.get("leader"), freq=recipe.get("freq") or "day",
     )
 
     mat = _materialize_xy(body, body.universe, feats, body.start, end)

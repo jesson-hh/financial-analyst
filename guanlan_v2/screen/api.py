@@ -385,7 +385,15 @@ def _panel_enrich(codes, freq: str = "day", factors=None):
             _lookback = max(130, min(470, int(max(_nums) * 1.6) + 40))
     start = (date.today() - timedelta(days=_lookback)).isoformat()
     try:
-        panel = load_panel_cached(_screen_loader(), list(codes), start, end, freq=freq)
+        ind_loader = None
+        if any("indmean(" in ex or "industry" in ex for ex in _sel_exprs):
+            try:
+                from financial_analyst.data.loaders.industry import IndustryLoader, industry_map_path
+                ind_loader = IndustryLoader() if industry_map_path().exists() else None
+            except Exception:  # noqa: BLE001
+                ind_loader = None
+        panel = load_panel_cached(_screen_loader(), list(codes), start, end, freq=freq,
+                                  industry_loader=ind_loader)
     except Exception:  # noqa: BLE001
         return {}, {}, {}
     # 大盘因子(共振/跟随族,表达式引用 idx_ret)→ 注入真沪深300 日收益列

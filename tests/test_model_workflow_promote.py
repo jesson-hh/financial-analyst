@@ -40,6 +40,74 @@ def test_train_promote_rejects_empty_features():
     assert out["ok"] is False
 
 
+def test_train_promote_passes_recipe_market_refs(monkeypatch):
+    import numpy as np
+    import guanlan_v2.workflow.api as wapi
+    from guanlan_v2.strategy.compute import model_workflow as mw
+    captured = {}
+
+    class FakeModel:
+        def fit(self, X, y):
+            self.n = len(X)
+
+        def predict(self, X):
+            return np.arange(len(X), dtype=float)
+
+    def fake_materialize(body, universe, features, start, end):
+        captured["benchmark"] = body.benchmark
+        captured["leader"] = body.leader
+        captured["universe"] = universe
+        dts = pd.date_range("2024-01-01", periods=12, freq="D")
+        codes = [f"SZ{300000+i:06d}" for i in range(60)]
+        idx = pd.MultiIndex.from_product([dts, codes], names=["datetime", "code"])
+        fe = pd.DataFrame({"f1": np.linspace(0, 1, len(idx))}, index=idx)
+        y = pd.Series(np.linspace(0, 1, len(idx)), index=idx, name="__label__")
+        return object(), fe, y, ["f1"]
+
+    monkeypatch.setattr(wapi, "_materialize_xy", fake_materialize)
+    monkeypatch.setattr(wapi, "_build_model", lambda kind, params: (FakeModel(), {"ok": True}))
+    monkeypatch.setattr(mw, "_holdout_oos_ic", lambda *a, **k: 0.01)
+    monkeypatch.setattr(reg, "save_variant", lambda *a, **k: None)
+
+    out = mw.train_promote({"variant_id": "m_ctx", "name": "ctx", "kind": "lightgbm",
+                            "recipe": {"features": ["correlation(returns,idx_ret,20)"],
+                                       "universe": "csi800", "benchmark": "csi300",
+                                       "leader": "SH600519"}})
+    assert out["ok"] is True
+    assert captured == {"benchmark": "csi300", "leader": "SH600519", "universe": "csi800"}
+
+
+def test_cpcv_materialize_panel_passes_recipe_market_refs(monkeypatch):
+    import numpy as np
+    import guanlan_v2.workflow.api as wapi
+    from guanlan_v2.strategy.compute import cpcv
+    from guanlan_v2.screen import model_registry
+    captured = {}
+
+    monkeypatch.setattr(model_registry, "variant_meta", lambda model_id: {
+        "kind": "lightgbm",
+        "recipe": {"features": ["correlation(returns,idx_ret,20)"],
+                   "label": "fwd_ret", "fwd_days": 5, "universe": "csi800",
+                   "start": "2024-01-01", "benchmark": "csi300", "leader": "SH600519",
+                   "params": {"leaves": 7}},
+    })
+
+    def fake_materialize(body, universe, features, start, end):
+        captured["benchmark"] = body.benchmark
+        captured["leader"] = body.leader
+        captured["params"] = body.params
+        idx = pd.MultiIndex.from_product([pd.date_range("2024-01-01", periods=3), ["SZ000001"]],
+                                         names=["datetime", "code"])
+        fe = pd.DataFrame({"f1": np.arange(len(idx), dtype=float)}, index=idx)
+        y = pd.Series(np.arange(len(idx), dtype=float), index=idx, name="__label__")
+        return object(), fe, y, ["f1"]
+
+    monkeypatch.setattr(wapi, "_materialize_xy", fake_materialize)
+    kind, ctx = cpcv._materialize_panel("m_ctx", "all", "2024-01-01", "2024-02-01")
+    assert kind == "lightgbm" and ctx is not None
+    assert captured == {"benchmark": "csi300", "leader": "SH600519", "params": {"leaves": 7}}
+
+
 def test_promote_rejects_empty_recipe():
     from fastapi.testclient import TestClient
     from guanlan_v2.server import app

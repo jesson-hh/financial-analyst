@@ -33,6 +33,36 @@ def test_factors_lists_defs():
     assert any("idx_ret" in (f.get("expr") or "") for f in j["factors"])  # 含大盘因子(共振/跟随)
     assert {"family", "ic", "desc"} <= set(j["factors"][0])  # 族/实测IC字段(ic 可为 null)
     assert j.get("families")                                # 族序下发
+    for fid in {
+        "lib_gl_fb_potential_no_recent_board",
+        "lib_gl_fb_event_quality_score",
+        "lib_gl_fb_breakout_mainline",
+        "lib_gl_fb_pullback_mainline",
+        "lib_gl_fb_tail_eod_3_95",
+        "lib_gl_fb_10cm_tail_turnover_hot",
+        "lib_gl_fb_10cm_strict_tail_pos",
+    }:
+        assert fid in by_id
+        assert by_id[fid]["supported"] is True
+
+
+def test_catalog_allows_factorlib_indmean(monkeypatch):
+    import guanlan_v2.screen.catalog as cat
+
+    class FakeStore:
+        def load_all(self):
+            return [{"name": "lib_gl_fb_indmean_probe",
+                     "expr": "rank(indmean(returns,industry))",
+                     "description": "industry mean probe",
+                     "source": "test"}]
+
+        def _zoo_expr(self, entry):
+            return entry["expr"]
+
+    monkeypatch.setattr("guanlan_v2.factorlib.store.LibraryFactorStore", FakeStore)
+    defs = cat._build()
+    assert "lib_gl_fb_indmean_probe" in defs
+    assert defs["lib_gl_fb_indmean_probe"]["expr"] == "rank(indmean(returns,industry))"
 
 
 def test_health_reports_v4_freshness():

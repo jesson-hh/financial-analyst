@@ -305,6 +305,108 @@ def test_model_train_impl_rejects_empty(monkeypatch):
     assert ct.model_train_impl(name="X", factor_ids=[], base_features=[])["ok"] is False  # 全空
 
 
+def test_model_promote_impl_builds_recipe_from_factor_ids(monkeypatch):
+    seen = {}
+
+    def fake_get(path, timeout=30):
+        assert path == "/screen/factors"
+        return {"ok": True, "factors": [
+            {"id": "c_mom", "expr": "rank(ts_sum(returns,60))", "supported": True},
+            {"id": "c_bad", "supported": False},
+        ]}
+
+    def fake_post(path, payload, timeout=120):
+        seen["path"] = path
+        seen["payload"] = payload
+        return {"ok": True, "variant_id": "m_recipe"}
+
+    monkeypatch.setattr(ct, "_self_get", fake_get)
+    monkeypatch.setattr(ct, "_self_post", fake_post)
+    res = ct.model_promote_impl(
+        name="recipe model",
+        factor_ids=["c_mom"],
+        features=["rank(close/ts_min(close,240))"],
+        universe="csi800",
+        kind="lightgbm",
+        params={"leaves": 17, "lr": 0.03},
+    )
+    assert res["ok"] is True and "m_recipe" in res["content"]
+    assert seen["path"] == "/model/promote"
+    assert seen["payload"]["kind"] == "lightgbm"
+    assert seen["payload"]["recipe"]["features"] == [
+        "rank(close/ts_min(close,240))",
+        "rank(ts_sum(returns,60))",
+    ]
+    assert seen["payload"]["recipe"]["params"] == {"leaves": 17, "lr": 0.03}
+    assert "recipe" in res["raw"]
+
+
+def test_model_promote_impl_carries_recipe_market_refs(monkeypatch):
+    seen = {}
+
+    monkeypatch.setattr(ct, "_self_get", lambda path, timeout=30: {"ok": True, "factors": []})
+
+    def fake_post(path, payload, timeout=120):
+        seen["payload"] = payload
+        return {"ok": True, "variant_id": "m_refs"}
+
+    monkeypatch.setattr(ct, "_self_post", fake_post)
+    res = ct.model_promote_impl(
+        name="recipe refs",
+        features=["correlation(returns,idx_ret,20)", "regbeta(returns,ref_ret,20)"],
+        benchmark="csi300",
+        leader="SH600519",
+    )
+    assert res["ok"] is True
+    recipe = seen["payload"]["recipe"]
+    assert recipe["benchmark"] == "csi300"
+    assert recipe["leader"] == "SH600519"
+
+
+def test_model_promote_impl_auto_defaults_idx_ret_benchmark(monkeypatch):
+    seen = {}
+
+    monkeypatch.setattr(ct, "_self_get", lambda path, timeout=30: {"ok": True, "factors": []})
+    monkeypatch.setattr(ct, "_self_post", lambda path, payload, timeout=120:
+                        (seen.update(payload), {"ok": True, "variant_id": "m_idx"})[1])
+    res = ct.model_promote_impl(
+        name="idx refs",
+        features=["correlation(returns,idx_ret,20)"],
+    )
+    assert res["ok"] is True
+    assert seen["recipe"]["benchmark"] == "csi300"
+
+
+def test_model_promote_impl_rejects_unknown_factor_id(monkeypatch):
+    monkeypatch.setattr(ct, "_self_get", lambda path, timeout=30:
+                        {"ok": True, "factors": [{"id": "known", "expr": "rank(close)"}]})
+    res = ct.model_promote_impl(name="bad", factor_ids=["missing"], features=[])
+    assert res["ok"] is False and "missing" in res["content"]
+
+
+def test_model_validate_impl_strict_waits_for_result(monkeypatch):
+    calls = []
+
+    def fake_post(path, payload, timeout=120):
+        calls.append((path, payload))
+        assert path == "/screen/model/validate"
+        return {"ok": True, "started": True, "model_id": payload["id"]}
+
+    def fake_get(path, timeout=30):
+        assert path == "/screen/model/validate/status"
+        return {"ok": True, "state": {"running": False, "phase": "done", "ok": True,
+            "result": {"ready": True, "model_id": "m_recipe", "dsr": 0.42,
+                       "n_paths": 15, "ic_dist": {"median": 0.03},
+                       "sharpe_dist": {"median": 0.8}}}}
+
+    monkeypatch.setattr(ct, "_self_post", fake_post)
+    monkeypatch.setattr(ct, "_self_get", fake_get)
+    res = ct.model_validate_impl(id="m_recipe", tier="strict", wait=True, poll_seconds=0, timeout_seconds=1)
+    assert res["ok"] is True and "DSR 0.420" in res["content"] and "15" in res["content"]
+    assert calls[0][1]["n_groups"] == 6 and calls[0][1]["k"] == 2
+    assert res["raw"]["result"]["ready"] is True
+
+
 def test_screen_factors_impl_lists_catalog(monkeypatch):
     fake = {"ok": True, "families": ["动量反转", "估值"], "factors": [
         {"id": "lib_rev5", "short": "缩量反转", "family": "动量反转", "supported": True, "ic": 0.043},
@@ -508,14 +610,14 @@ def test_engine_profile_excludes_ww_but_console_whitelist_resolves():
                           encoding="utf-8", errors="replace", timeout=180, env=env, cwd=str(repo))
     assert proc.returncode == 0, (proc.stderr or "")[-2000:]
     out = _json.loads(proc.stdout.strip().splitlines()[-1])
-    assert len(out["registered_ww"]) == 30                    # +2 模型工坊(ww_model_list/ww_model_train) +2 删除/设默认
+    assert len(out["registered_ww"]) == 32                    # +2 recipe/CPCV model tools
     # ① 非显式白名单路径(research / 缺省 / all)一律不外露 ww_*,且不再返回 None(None=完全不限制)
     assert out["research_is_none"] is False and out["research_ww"] == []
     assert out["default_is_none"] is False and out["default_ww"] == []
     assert out["all_is_none"] is False and out["all_ww"] == []
     # ② console 显式白名单路径不受影响:55 名全部可解析,含 30 个 ww_(+工坊删除/设默认 2 + alpha-zoo 7)
-    assert out["console_n"] == 55 and out["console_missing"] == []
-    assert out["explicit_n"] == 55 and out["explicit_ww_n"] == 30
+    assert out["console_n"] == 57 and out["console_missing"] == []
+    assert out["explicit_n"] == 57 and out["explicit_ww_n"] == 32
 
 
 def test_f10_impl_returns_structured_facts(monkeypatch):
@@ -979,9 +1081,9 @@ def test_registry_derivation_consistent():
     """阶段0 重构守护:CONSOLE_ALLOWED 与 _WW_REACHABLE_ENDPOINTS 必须从声明表派生且与已知集合一致。"""
     import guanlan_v2.console.tools as ct
     ww_in_table = {t["name"] for t in ct.WW_TOOL_TABLE}
-    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 30
+    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 32
     assert ww_in_table == {n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")}
-    assert len(ct.CONSOLE_ALLOWED) == 55
+    assert len(ct.CONSOLE_ALLOWED) == 57
     assert {"/factorlib/save", "/workflow/compose", "/feature/build"} <= ct._WW_REACHABLE_ENDPOINTS
     assert ct._WW_REACHABLE_ENDPOINTS == {ep for t in ct.WW_TOOL_TABLE for ep in t.get("reachable", [])}
 
@@ -1011,6 +1113,9 @@ def test_ww_reachable_endpoints_matches_expected():
         "/screen/models",         # ww_model_list(模型工坊)
         "/screen/base_features",  # ww_model_train(省略 base→取默认全部基础特征)
         "/screen/model/train",    # ww_model_train(启动训练)
+        "/model/promote",         # ww_model_promote
+        "/screen/model/validate", # ww_model_validate
+        "/screen/model/validate/status", # ww_model_validate(wait)
         "/screen/model/delete",   # ww_model_delete(删变体)
         "/screen/model/default",  # ww_model_set_default(设默认变体)
     }

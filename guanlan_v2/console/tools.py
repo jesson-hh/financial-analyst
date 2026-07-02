@@ -370,6 +370,152 @@ def model_train_impl(name: str = "", factor_ids: Optional[List[str]] = None,
                        f"后台 ~4min,完成后 ww_model_list 查看、ww_screen_run model={vid} 选股。生产 v4 不受影响。"}
 
 
+def _recipe_features_from_factor_ids(factor_ids: List[str]) -> "tuple[List[str], List[str]]":
+    """Map screen factor ids to workflow-replayable zoo expressions."""
+    if not factor_ids:
+        return [], []
+    r = _self_get("/screen/factors")
+    rows = r.get("factors") or []
+    by_id = {str(f.get("id")): f for f in rows if f.get("id")}
+    exprs: List[str] = []
+    missing: List[str] = []
+    for fid in factor_ids:
+        f = by_id.get(str(fid))
+        expr = str((f or {}).get("expr") or "").strip()
+        if not f or not expr:
+            missing.append(str(fid))
+        else:
+            exprs.append(expr)
+    return exprs, missing
+
+
+def model_promote_impl(name: str = "", features: Optional[List[str]] = None,
+                       factor_ids: Optional[List[str]] = None, kind: str = "lightgbm",
+                       universe: str = "csi800", label: str = "fwd_ret",
+                       fwd_days: int = 5, start: str = "2022-01-01",
+                       end: str = "", params: Optional[Dict[str, Any]] = None,
+                       benchmark: str = "", leader: str = "") -> Dict[str, Any]:
+    """Promote a workflow-replayable model variant with recipe, so strict CPCV can retrain it."""
+    nm = (name or "").strip()
+    if not nm:
+        return {"ok": False, "content": "请给可重训模型起名(name)", "artifact": None}
+    raw_features = [str(x).strip() for x in (features or []) if str(x).strip()]
+    fids = [str(x).strip() for x in (factor_ids or []) if str(x).strip()]
+    try:
+        factor_exprs, missing = _recipe_features_from_factor_ids(fids)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "content": f"因子目录读取失败: {e}", "artifact": None}
+    if missing:
+        return {"ok": False, "content": "这些 factor_ids 无法映射为可复算表达式: " + ", ".join(missing),
+                "artifact": None, "raw": {"missing": missing}}
+    recipe_features: List[str] = []
+    seen = set()
+    for expr in raw_features + factor_exprs:
+        if expr and expr not in seen:
+            seen.add(expr)
+            recipe_features.append(expr)
+    if not recipe_features:
+        return {"ok": False, "content": "至少传 1 个 features 表达式或 factor_ids", "artifact": None}
+    bench = (benchmark or "").strip()
+    lead = (leader or "").strip()
+    if not bench and any("idx_ret" in expr for expr in recipe_features):
+        bench = "csi300"
+    if any("ref_ret" in expr for expr in recipe_features) and not lead:
+        return {"ok": False, "content": "recipe.features 引用了 ref_ret, 需要同时传 leader 龙头代码",
+                "artifact": None}
+    recipe: Dict[str, Any] = {
+        "features": recipe_features,
+        "label": (label or "fwd_ret").strip() or "fwd_ret",
+        "fwd_days": int(fwd_days or 5),
+        "universe": (universe or "csi800").strip() or "csi800",
+        "start": (start or "2022-01-01").strip() or "2022-01-01",
+        "params": dict(params or {}),
+    }
+    if (end or "").strip():
+        recipe["end"] = str(end).strip()
+    if bench:
+        recipe["benchmark"] = bench
+    if lead:
+        recipe["leader"] = lead
+    body = {"name": nm, "kind": (kind or "lightgbm").strip() or "lightgbm", "recipe": recipe}
+    try:
+        r = _self_post("/model/promote", body)
+    except Exception as e:
+        return {"ok": False, "content": f"可重训模型入库启动失败: {e}", "artifact": None}
+    if not r.get("ok"):
+        return {"ok": False, "content": f"可重训模型未启动: {r.get('reason')}", "artifact": None, "raw": r}
+    vid = r.get("variant_id")
+    return {"ok": True, "artifact": None,
+            "raw": {"response": r, "recipe": recipe, "factor_ids": fids},
+            "content": f"已启动可重训模型入库「{nm}」id={vid}。recipe 已随模型保存；完成后 ww_model_validate id={vid} tier=strict 可跑 CPCV。"}
+
+
+def _model_validate_summary(result: Dict[str, Any]) -> str:
+    if not result:
+        return "暂无验证结果"
+    if not result.get("ready"):
+        return str(result.get("note") or "验证未就绪")
+    dsr = result.get("dsr")
+    n_paths = result.get("n_paths")
+    ic_med = (result.get("ic_dist") or {}).get("median")
+    sh_med = (result.get("sharpe_dist") or {}).get("median")
+    parts = ["ready=True", f"路径 {n_paths}" if n_paths is not None else ""]
+    if dsr is not None:
+        parts.append(f"DSR {float(dsr):.3f}")
+    if ic_med is not None:
+        parts.append(f"IC中位 {float(ic_med):+.4f}")
+    if sh_med is not None:
+        parts.append(f"Sharpe中位 {float(sh_med):+.3f}")
+    return " · ".join([p for p in parts if p])
+
+
+def model_validate_impl(id: str = "", tier: str = "strict", n_groups: int = 6, k: int = 2,
+                        purge: int = 5, embargo: int = 5, wait: bool = False,
+                        poll_seconds: float = 4.0, timeout_seconds: float = 600.0) -> Dict[str, Any]:
+    """Run quick/strict CPCV validation for a model variant."""
+    vid = (id or "").strip()
+    if not vid:
+        return {"ok": False, "content": "请给模型 id(ww_model_list 查询)", "artifact": None}
+    tier = (tier or "strict").strip().lower()
+    body: Dict[str, Any] = {"id": vid, "tier": tier}
+    if tier != "quick":
+        body.update({"tier": "strict", "n_groups": int(n_groups or 6), "k": int(k or 2),
+                     "purge": int(purge or 5), "embargo": int(embargo or 5)})
+    try:
+        r = _self_post("/screen/model/validate", body)
+    except Exception as e:
+        return {"ok": False, "content": f"CPCV 验证启动失败: {e}", "artifact": None}
+    if not r.get("ok"):
+        return {"ok": False, "content": f"CPCV 验证未启动: {r.get('reason') or r.get('note')}", "artifact": None, "raw": r}
+    if tier == "quick":
+        result = r.get("result") or {}
+        return {"ok": True, "artifact": None, "raw": {"response": r, "result": result},
+                "content": f"快验完成 {vid}: {_model_validate_summary(result)}"}
+    if not wait:
+        return {"ok": True, "artifact": None, "raw": r,
+                "content": f"已启动 strict CPCV 验证 {vid}。稍后调用 ww_model_validate id={vid} tier=strict wait=true 读取结果。"}
+    import time as _time
+    deadline = _time.time() + float(timeout_seconds or 600.0)
+    state: Dict[str, Any] = {}
+    while _time.time() <= deadline:
+        try:
+            s = _self_get("/screen/model/validate/status")
+        except Exception as e:
+            return {"ok": False, "content": f"CPCV 状态读取失败: {e}", "artifact": None, "raw": {"response": r}}
+        state = s.get("state") or {}
+        if not state.get("running") and state.get("phase") == "done":
+            result = state.get("result") or {}
+            ok = bool(state.get("ok"))
+            return {"ok": ok, "artifact": None,
+                    "raw": {"response": r, "state": state, "result": result},
+                    "content": f"strict CPCV 完成 {vid}: {_model_validate_summary(result)}" if ok
+                    else f"strict CPCV 失败 {vid}: {state.get('error') or _model_validate_summary(result)}"}
+        if poll_seconds:
+            _time.sleep(float(poll_seconds))
+    return {"ok": False, "artifact": None, "raw": {"response": r, "state": state},
+            "content": f"strict CPCV 轮询超时 {vid}: 后端可能仍在运行，请稍后再查"}
+
+
 def model_delete_impl(id: str = "") -> Dict[str, Any]:
     """删一个 v4 变体(生产 prod 不可删)。删的若是当前默认变体,后端连带回落 prod。需用户确认。"""
     vid = (id or "").strip()
@@ -1140,6 +1286,45 @@ WW_TOOL_TABLE = [
       "required": ["name"]},
      "impl": model_train_impl, "cost": "minutes", "confirm": True,
      "reachable": ["/screen/base_features", "/screen/model/train"]},
+    {"name": "ww_model_promote",
+     "description":
+         "把可复算因子表达式/因子ID训练成 workflow 模型并入模型库,保存 recipe 且 retrainable=true,供 strict CPCV 重训验证。"
+         "与 ww_model_train 不同:本工具不使用 v4 内部 base_features,只用 workflow 可物化 features/factor_ids,因此后续可 ww_model_validate tier=strict。需用户确认。",
+     "input_schema": {"type": "object", "properties": {
+         "name": {"type": "string", "description": "模型名"},
+         "features": {"type": "array", "items": {"type": "string"},
+                      "description": "zoo DSL 因子表达式列表,会原样写入 recipe.features"},
+         "factor_ids": {"type": "array", "items": {"type": "string"},
+                        "description": "ww_screen_factors 返回的 id,工具会映射为 expr 写入 recipe.features"},
+         "kind": {"type": "string", "enum": ["lightgbm", "xgboost", "rf"], "default": "lightgbm"},
+         "universe": {"type": "string", "default": "csi800"},
+         "label": {"type": "string", "default": "fwd_ret"},
+         "fwd_days": {"type": "integer", "default": 5},
+         "start": {"type": "string", "default": "2022-01-01"},
+         "end": {"type": "string"},
+         "benchmark": {"type": "string", "description": "可选; 表达式含 idx_ret 时默认 csi300,也可显式传 csi300"},
+         "leader": {"type": "string", "description": "可选; 表达式含 ref_ret 时必须传龙头代码"},
+         "params": {"type": "object", "description": "模型超参,如 lightgbm: {leaves, lr}"}},
+      "required": ["name"]},
+     "impl": model_promote_impl, "cost": "minutes", "confirm": True,
+     "reachable": ["/screen/factors", "/model/promote"]},
+    {"name": "ww_model_validate",
+     "description":
+         "对模型变体跑 quick 或 strict CPCV 验证。strict 会调用官方 retrain-CPCV(purge/embargo)并写 model_cpcv_<id>.json;"
+         "wait=true 会轮询到完成并返回 DSR/IC/Sharpe 摘要。需用户确认。",
+     "input_schema": {"type": "object", "properties": {
+         "id": {"type": "string", "description": "模型 id, ww_model_list 查看"},
+         "tier": {"type": "string", "enum": ["quick", "strict"], "default": "strict"},
+         "n_groups": {"type": "integer", "default": 6},
+         "k": {"type": "integer", "default": 2},
+         "purge": {"type": "integer", "default": 5},
+         "embargo": {"type": "integer", "default": 5},
+         "wait": {"type": "boolean", "default": False},
+         "poll_seconds": {"type": "number", "default": 4},
+         "timeout_seconds": {"type": "number", "default": 600}},
+      "required": ["id"]},
+     "impl": model_validate_impl, "cost": "minutes", "confirm": True,
+     "reachable": ["/screen/model/validate", "/screen/model/validate/status"]},
     {"name": "ww_model_delete",
      "description":
          "删除一个已训练的 v4 模型变体(生产 prod 不可删;删的若是当前默认变体,自动回落 prod)。"

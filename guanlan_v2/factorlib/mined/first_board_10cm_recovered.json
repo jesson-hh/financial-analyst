@@ -1,0 +1,51 @@
+[
+  {
+    "name": "lib_gl_fb_potential_no_recent_board",
+    "family": "library_mined",
+    "expr": "(delay(ts_sum((returns>0.095)*1.0,20),1)<=0)*(rank(roa)+rank(cfo/(abs(net_income)+1e-8))+rank(indmean(ts_sum((returns>0.095)*1.0,20),industry))+rank(indmean(ts_mean(amount,20)/(ts_mean(amount,120)+1e-8),industry))+rank(-stddev(turnover_rate,20)/(ts_mean(turnover_rate,20)+1e-8))+rank(-stddev(returns,20))+rank(close/(ts_max(close,120)+1e-8))+rank(indmean(ts_mean(returns,20)-ts_mean(returns,60),industry))+rank(amount/(ts_mean(amount,20)+1e-8)))",
+    "description": "Recovered Codex first-board candidate: no recent 10cm board, quality, industry heat, volume, low-vol and position legs.",
+    "source": "codex_recovered_from_var_20260618"
+  },
+  {
+    "name": "lib_gl_fb_event_quality_score",
+    "family": "library_mined",
+    "expr": "(returns>0.095)*(close/(high+1e-8)>0.995)*(delay(ts_sum((returns>0.095)*1.0,20),1)<=0)*(rank(roa)+rank(cfo/(abs(net_income)+1e-8))+rank(indmean(ts_sum((returns>0.095)*1.0,20),industry))+rank(indmean(ts_mean(amount,20)/(ts_mean(amount,120)+1e-8),industry))+rank(-stddev(turnover_rate,20)/(ts_mean(turnover_rate,20)+1e-8))+rank(-stddev(returns,20))+rank(close/(ts_max(close,120)+1e-8)))",
+    "description": "Recovered Codex event quality score for first-board limit-up events.",
+    "source": "codex_recovered_from_var_20260618"
+  },
+  {
+    "name": "lib_gl_fb_breakout_mainline",
+    "family": "library_mined",
+    "expr": "(delay(ts_sum((returns>0.095)*1.0,20),1)<=0)*(rank(ts_sum(returns,20))+rank(ts_sum(returns,60))+rank(close/(ts_max(close,120)+1e-8))+rank(amount/(ts_mean(amount,20)+1e-8))+rank(ts_mean(amount,20)/(ts_mean(amount,120)+1e-8))+rank(indmean(ts_sum((returns>0.095)*1.0,20),industry))+rank(indmean(ts_mean(returns,20)-ts_mean(returns,60),industry))+rank(-stddev(returns,20))+rank(roa)+rank(cfo/(abs(net_income)+1e-8)))",
+    "description": "Recovered Codex breakout plus mainline first-board proxy.",
+    "source": "codex_recovered_from_var_20260618"
+  },
+  {
+    "name": "lib_gl_fb_tail_eod_3_95",
+    "family": "library_mined",
+    "expr": "(delay(ts_sum((returns>0.095)*1.0,20),1)<=0)*(returns>0.03)*(returns<0.095)*(close/(high+1e-8)>0.98)*(rank(roa)+rank(cfo/(abs(net_income)+1e-8))+rank(indmean(ts_sum((returns>0.095)*1.0,20),industry))+rank(indmean(ts_mean(amount,20)/(ts_mean(amount,120)+1e-8),industry))+rank(-stddev(turnover_rate,20)/(ts_mean(turnover_rate,20)+1e-8))+rank(-stddev(returns,20))+rank(close/(ts_max(close,120)+1e-8))+rank(indmean(ts_mean(returns,20)-ts_mean(returns,60),industry))+rank(amount/(ts_mean(amount,20)+1e-8)))",
+    "description": "Recovered Codex tail/EOD 3%-9.5% first-board ambush proxy.",
+    "source": "codex_recovered_from_var_20260618"
+  },
+  {
+    "name": "lib_gl_fb_pullback_mainline",
+    "family": "library_mined",
+    "expr": "(delay(ts_sum((returns>0.095)*1.0,20),1)<=0)*(rank(ts_sum(returns,60))+rank(-ts_sum(returns,5))+rank(close/(ts_max(close,120)+1e-8))+rank(amount/(ts_mean(amount,20)+1e-8))+rank(indmean(ts_sum((returns>0.095)*1.0,20),industry))+rank(indmean(ts_mean(returns,20)-ts_mean(returns,60),industry))+rank(-stddev(turnover_rate,20)/(ts_mean(turnover_rate,20)+1e-8))+rank(roa)+rank(cfo/(abs(net_income)+1e-8)))",
+    "description": "Recovered Codex pullback plus mainline first-board proxy.",
+    "source": "codex_recovered_from_var_20260618"
+  },
+  {
+    "name": "lib_gl_fb_10cm_tail_turnover_hot",
+    "family": "library_mined",
+    "expr": "(delay(ts_sum((returns>0.095)*1.0,20),1)<=0)*(returns>0.03)*(returns<0.095)*(close/(high+1e-8)>0.985)*(turnover_rate>=3)*(turnover_rate<=15)*(rank(indmean(ts_sum((returns>0.095)*1.0,20),industry))+rank(indmean(ts_mean(returns,20)-ts_mean(returns,60),industry))+rank(amount/(ts_mean(amount,20)+1e-8))+rank(ts_mean(amount,5)/(ts_mean(amount,20)+1e-8))+rank(-stddev(returns,20))+rank(-circ_mv)+rank(close/(ts_max(close,120)+1e-8)))",
+    "description": "Recovered exact report formula: 10cm tail turnover hot first-board ambush proxy.",
+    "source": "codex_recovered_from_report_20260618163637"
+  },
+  {
+    "name": "lib_gl_fb_10cm_strict_tail_pos",
+    "family": "library_mined",
+    "expr": "(delay(ts_sum((returns>0.095)*1.0,20),1)<=0)*(returns>0.07)*(returns<0.095)*(close/(high+1e-8)>0.985)*(turnover_rate>5)*(turnover_rate<20)*(amount/(ts_mean(amount,20)+1e-8)>1.0)*(close/(ts_max(close,120)+1e-8)>0.70)*(rank(amount/(ts_mean(amount,20)+1e-8))+rank(turnover_rate)+rank(close/(high+1e-8))+rank(close/(ts_max(close,120)+1e-8))+rank(indmean(ts_sum((returns>0.095)*1.0,20),industry)))",
+    "description": "Recovered exact report formula: strict 10cm tail-position first-board ambush proxy.",
+    "source": "codex_recovered_from_report_20260618170012"
+  }
+]

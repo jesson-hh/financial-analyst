@@ -260,7 +260,9 @@ def _materialize_panel(model_id, universe, start, end):
     body = ModelTrainIn(kind=kind, features=list(recipe["features"]), label=recipe.get("label") or "fwd_ret",
                         fwd_days=int(recipe.get("fwd_days") or 5), universe=recipe.get("universe") or universe,
                         start=recipe.get("start") or start, end=end,
-                        params=dict(recipe.get("params") or {}), winsorize=True, standardize=True)
+                        params=dict(recipe.get("params") or {}), winsorize=True, standardize=True,
+                        codes=recipe.get("codes"), benchmark=recipe.get("benchmark"),
+                        leader=recipe.get("leader"), freq=recipe.get("freq") or "day")
     mat = _materialize_xy(body, body.universe, body.features, body.start, body.end)
     if not isinstance(mat, tuple):
         return kind, None
