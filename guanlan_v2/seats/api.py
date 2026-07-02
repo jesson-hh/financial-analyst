@@ -1974,6 +1974,60 @@ def build_seats_router() -> APIRouter:
                 except Exception:  # noqa: BLE001
                     pass
 
+    @router.get("/basket_perf")
+    async def seats_basket_perf(codes: str = "", start: str = "", horizon: int = 5):
+        """篮子前向持有收益 vs 全A等权基准(P1 §2;口径=收盘进→N根收盘出,同置信校准,
+        note 随响应下发)。codes 逗号分隔 ≤40(超截断并注明);失败恒 HTTP200 ok:false。"""
+        try:
+            raw = [c.strip() for c in (codes or "").split(",") if c.strip()]
+            if not raw or not (start or "").strip():
+                return JSONResponse({"ok": False, "reason": "codes 与 start 必填"})
+            truncated = len(raw) > 40
+            raw = raw[:40]
+            try:
+                from financial_analyst.buddy.tools import normalize_code as _norm
+            except Exception:  # noqa: BLE001 — 引擎不可导入时裸用 code
+                _norm = None
+            import pandas as _pd
+            from financial_analyst.data import loader_factory as _lf
+            loader = _lf.get_default_loader()
+            end = str(_pd.Timestamp.now().date())
+
+            def _closes(c: str):
+                df = loader.fetch_quote(c, str(start), end, "day")
+                df = _drop_unsettled(df)               # 当日未结算占位行不当收盘
+                if df is None or len(df) == 0 or "close" not in df.columns:
+                    return []
+                dcol = "trade_date" if "trade_date" in df.columns else df.columns[0]
+                return [(str(d)[:10], float(v)) for d, v in zip(df[dcol], df["close"])
+                        if v == v]
+
+            closes_by_code: dict = {}
+            for c in raw:
+                cc = c
+                if _norm is not None:
+                    try:
+                        cc = _norm(c)
+                    except Exception:  # noqa: BLE001
+                        cc = (c or "").strip().upper()
+                try:
+                    closes_by_code[cc] = await asyncio.to_thread(_closes, cc)
+                except Exception:  # noqa: BLE001 — 单票取数失败=空序列 → 纯函数记 warning 剔除
+                    closes_by_code[cc] = []
+
+            from guanlan_v2.seats.basket_perf import compute_basket_perf
+            from guanlan_v2.strategy.compute import eqw_market as _eqw
+            bench_df = _eqw.load_eqw_ret()
+            out = compute_basket_perf(closes_by_code, start=str(start), horizon=horizon,
+                                      bench_df=bench_df)
+            if truncated:
+                out.setdefault("warnings", []).append("codes>40 已截断")
+            if bench_df is None:
+                out.setdefault("warnings", []).append("全A等权基准产物缺失(跑 ww_regen 生成)")
+            return JSONResponse(out)
+        except Exception as exc:  # noqa: BLE001 — 诚实降级
+            return JSONResponse({"ok": False, "reason": f"{type(exc).__name__}: {exc}"})
+
     @router.get("/benchmark")
     async def seats_benchmark(start: Optional[str] = None, end: Optional[str] = None,
                               n: int = 250):
