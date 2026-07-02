@@ -59,6 +59,8 @@ class ScreenIn(BaseModel):
     start: Optional[str] = None
     end: Optional[str] = None
     freq: str = "day"
+    snapshot: bool = False       # P0:标记「正式选股」落 picks 档案(P1 收益跟踪只认 snapshot 行)
+    note: Optional[str] = None   # P0:选股备注,随 picks 档案落盘
 
 
 class LLMIn(BaseModel):
@@ -683,6 +685,34 @@ def _resolve_model_id(m):
         return "prod"
 
 
+def _record_picks(body: "ScreenIn", resp: Dict[str, Any], model_id: str, rdate: str) -> bool:
+    """v4 主路径选股结果 → picks 档案一行(P0 §1)。失败回 False,由 picks_recorded 显形。"""
+    from datetime import datetime as _dt
+    from guanlan_v2.screen import picks as _picks
+    chosen = resp.get("chosen") or []
+    rec = {
+        "ts": _dt.now().isoformat(timespec="seconds"),
+        "date": rdate,
+        "snapshot": bool(getattr(body, "snapshot", False)),
+        "note": getattr(body, "note", None),
+        "model": model_id,
+        "pool": body.pool,
+        "alpha": body.blend,
+        "factors": [{"id": f.id, "w": f.w} for f in (body.factors or [])],
+        "topN": body.topN,
+        "n_universe": len(resp.get("pool") or []),
+        "picks": [{"code": (x.get("s") or {}).get("code"),
+                   "name": (x.get("s") or {}).get("name"),
+                   "score": x.get("score"), "rank": i + 1}
+                  for i, x in enumerate(chosen)],
+        "constraints": {"liqMin": body.liqMin, "mlStatus": body.mlStatus,
+                        "industryNeutral": body.industryNeutral, "indCap": body.indCap,
+                        "exclST": body.exclST, "exclHalt": body.exclHalt,
+                        "exclLimit": body.exclLimit, "exclNew": body.exclNew},
+    }
+    return _picks.append_pick(rec)
+
+
 def _screen_via_v4(body: "ScreenIn"):
     """L1 = vendored v4 真排名(消费产物)。缺产物 → None(调用方回退玩具因子路径)。
 
@@ -938,7 +968,7 @@ def _screen_via_v4(body: "ScreenIn"):
     except Exception:  # noqa: BLE001
         _b3prov = None
 
-    return JSONResponse({
+    resp = {
         "ok": True,
         "source": "v4_ranking",
         "model": _mid,              # 实际所跑 v4 模型(变体缺失已回落 prod)
@@ -963,7 +993,9 @@ def _screen_via_v4(body: "ScreenIn"):
         # regime 徽章:仅 opt-in 请求才带此键(缺省响应逐字节不变);降级带 fallback_reason 显形
         **({"regime_weights": _rw_badge} if _rw_badge is not None else {}),
         "note": "L1=v4 排名 · L2 主线 · L3 量能 · L4 九视角(逐行 views)· L5 评级/护盾/≤5 收敛(decision)",
-    })
+    }
+    resp["picks_recorded"] = _record_picks(body, resp, _mid, rdate)   # P0:落档显形,失败不阻断
+    return JSONResponse(resp)
 
 
 def build_screen_router() -> APIRouter:
@@ -1378,6 +1410,14 @@ def build_screen_router() -> APIRouter:
         for v in vs:
             v["is_default"] = (v.get("id") == dflt)
         return JSONResponse({"ok": True, "variants": vs, "default_model": dflt})
+
+    @router.get("/picks")
+    def screen_picks(snapshot_only: int = 0, limit: int = 50):
+        """picks 档案读回(P0;P1 收益跟踪/前端将来消费)。坏行已在 read_picks 内跳过。"""
+        from guanlan_v2.screen import picks as _picks
+        items = _picks.read_picks(snapshot_only=bool(snapshot_only), limit=limit)
+        return JSONResponse({"ok": True, "items": items, "n": len(items),
+                             "path": str(_picks.PICKS_PATH)})
 
     @router.get("/model/ranking")
     def screen_model_ranking(id: str):

@@ -298,3 +298,45 @@ def test_screen_regime_endpoint_honest(monkeypatch, tmp_path):
     j = c.get("/screen/regime").json()
     assert j["ok"] is True and j["families"][0]["family"] == "技术"
     assert j["gate"]["activated"] == ["技术"] and j["gate"]["stale"] is False
+
+
+# ── P0 §1: picks 落档 ──────────────────────────────────────────────────────
+
+def test_screen_run_records_picks(monkeypatch, tmp_path):
+    """v4 主路径成功 → picks 落档一行 + 响应 picks_recorded:true + GET /screen/picks 读回。"""
+    import guanlan_v2.screen.picks as picks
+    monkeypatch.setattr(picks, "PICKS_PATH", tmp_path / "picks.jsonl")
+    c = _client()
+    j = c.post("/screen/run", json={**_CFG, "snapshot": True, "note": "t_p0"}).json()
+    assert j["ok"] is True and j["source"] == "v4_ranking"
+    assert j["picks_recorded"] is True
+    rows = picks.read_picks(snapshot_only=True, limit=5)
+    assert rows and rows[0]["note"] == "t_p0" and rows[0]["snapshot"] is True
+    assert rows[0]["model"] == j["model"] and rows[0]["date"] == j["date"]
+    assert rows[0]["picks"] and rows[0]["picks"][0]["rank"] == 1
+    assert rows[0]["picks"][0]["code"] and "score" in rows[0]["picks"][0]
+    assert rows[0]["topN"] == _CFG["topN"] and "constraints" in rows[0]
+    g = c.get("/screen/picks?snapshot_only=1&limit=3").json()
+    assert g["ok"] is True and g["n"] >= 1 and g["items"][0]["note"] == "t_p0"
+
+
+def test_screen_run_picks_failure_is_visible(monkeypatch, tmp_path):
+    """落盘失败 → 选股照常成功,但 picks_recorded:false 显形(红线:失败显形不阻断)。"""
+    import guanlan_v2.screen.picks as picks
+    monkeypatch.setattr(picks, "append_pick", lambda rec: False)
+    j = _client().post("/screen/run", json=_CFG).json()
+    assert j["ok"] is True and j["picks_recorded"] is False
+
+
+def test_screen_fallback_path_does_not_record(monkeypatch):
+    """玩具回退路径(非生产口径)不落档(spec §1)。"""
+    import guanlan_v2.screen.api as api
+    import guanlan_v2.screen.picks as picks
+    calls = {"n": 0}
+    def _spy(rec):
+        calls["n"] += 1
+        return True
+    monkeypatch.setattr(picks, "append_pick", _spy)
+    monkeypatch.setattr(api, "_screen_via_v4", lambda body: None)
+    j = _client().post("/screen/run", json=_CFG).json()
+    assert j["ok"] is True and calls["n"] == 0 and "picks_recorded" not in j
