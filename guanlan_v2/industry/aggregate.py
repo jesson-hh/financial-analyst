@@ -140,3 +140,209 @@ def quant_signals(fw: dict, quotes: Optional[dict] = None) -> dict:
             "reason": None if (eqw20 is not None and v4map and ffmap) else "部分产物缺失(eqw/v4/资金流)→对应字段null",
         }
     return out
+
+
+# ── 文本侧 + board 组装(Task 7)────────────────────────────────
+
+_STANCE_VAL = {"多": 1.0, "中": 0.0, "空": -1.0}
+_BOARD_CACHE: dict = {}
+_BOARD_TTL = 600.0
+
+
+def _dedupe_latest(extractions: list) -> list:
+    """同 doc_id 保留 extracted_at 最新一条(失败重跑会产生重复)。"""
+    best: dict = {}
+    for rec in extractions:
+        k = rec.get("doc_id")
+        if k not in best or str(rec.get("extracted_at") or "") > str(best[k].get("extracted_at") or ""):
+            best[k] = rec
+    return list(best.values())
+
+
+def _age_days(ts, now) -> float:
+    import pandas as pd
+    try:
+        return max(0.0, (now - pd.Timestamp(str(ts)[:10])).total_seconds() / 86400.0)
+    except Exception:  # noqa: BLE001
+        return 9e9
+
+
+def research_signals(fw: dict, extractions: list, now=None) -> dict:
+    import numpy as np
+    import pandas as pd
+    now = pd.Timestamp(now) if now else pd.Timestamp.now()
+    out = {s["id"]: {"score": 0.0, "n30": 0, "bull": 0, "bear": 0, "neutral": 0, "vals": []}
+           for s in fw["segments"] if not s.get("adjacent")}
+    for rec in _dedupe_latest(extractions):
+        age = _age_days(rec.get("publish_ts"), now)
+        if age > 30:
+            continue
+        decay = 0.5 ** (age / 7.0)
+        for seg in rec.get("segments", []):
+            sid = seg.get("segment_id")
+            if sid not in out:
+                continue
+            v = _STANCE_VAL.get(seg.get("stance"), 0.0)
+            out[sid]["score"] += v * float(seg.get("strength", 1)) * decay
+            out[sid]["n30"] += 1
+            out[sid]["vals"].append(v)
+            if v > 0:
+                out[sid]["bull"] += 1
+            elif v < 0:
+                out[sid]["bear"] += 1
+            else:
+                out[sid]["neutral"] += 1
+    for sid, d in out.items():
+        vals = d.pop("vals")
+        d["disagreement"] = float(np.var(vals)) if len(vals) >= 2 else None
+        d["score"] = round(d["score"], 3)
+    return out
+
+
+def edge_verdicts(fw: dict, extractions: list, now=None) -> dict:
+    import pandas as pd
+    now = pd.Timestamp(now) if now else pd.Timestamp.now()
+    out = {e["id"]: {"support": 0, "refute": 0} for e in fw["edges"]}
+    for rec in _dedupe_latest(extractions):
+        if _age_days(rec.get("publish_ts"), now) > 30:
+            continue
+        for e in rec.get("edges", []):
+            eid = e.get("edge_id")
+            if eid in out:
+                out[eid]["support" if e.get("verdict") == "支持" else "refute"] += 1
+    return out
+
+
+def _mom_rankpct(qsig: dict) -> dict:
+    moms = {sid: d["momentum20"] for sid, d in qsig.items() if d.get("momentum20") is not None}
+    if not moms:
+        return {}
+    ordered = sorted(moms, key=lambda k: moms[k])
+    n = len(ordered)
+    return {sid: (i + 0.5) / n for i, sid in enumerate(ordered)}
+
+
+def narrative_temps(fw: dict, qsig: dict, extractions: list, now=None) -> list:
+    import pandas as pd
+    now = pd.Timestamp(now) if now else pd.Timestamp.now()
+    rank = _mom_rankpct(qsig)
+    plus: dict = {}
+    minus: dict = {}
+    for rec in _dedupe_latest(extractions):
+        if _age_days(rec.get("publish_ts"), now) > 7:
+            continue
+        for n in rec.get("narratives", []):
+            nid = n.get("narrative_id")
+            if n.get("stance") == "多":
+                plus[nid] = plus.get(nid, 0) + 1
+            elif n.get("stance") == "空":
+                minus[nid] = minus.get(nid, 0) + 1
+    out = []
+    for n in fw["narratives"]:
+        num, den = 0.0, 0.0
+        for a in n.get("activates", []):
+            rp = rank.get(a["segment"])
+            if rp is None:
+                continue
+            num += a["weight"] * rp
+            den += a["weight"]
+        out.append({"id": n["id"], "name": n["name"], "status": n.get("status"),
+                    "temp": round(100.0 * num / den, 1) if den > 0 else None,
+                    "plus7": plus.get(n["id"], 0), "minus7": minus.get(n["id"], 0)})
+    return out
+
+
+def quadrant(q: dict, r: dict, rankpct) -> str:
+    hot_q = rankpct is not None and rankpct >= 0.5
+    hot_r = (r or {}).get("score", 0) > 0
+    return ("h" if hot_q else "l") + ("h" if hot_r else "l")
+
+
+def build_board(refresh: bool = False) -> dict:
+    import time
+    import pandas as pd
+    from . import corpus, store
+    from .framework import load_framework
+    if not refresh:
+        hit = _BOARD_CACHE.get("board")
+        if hit and time.time() - hit[0] < _BOARD_TTL:
+            return hit[1]
+    try:
+        fw = load_framework()
+        qsig = quant_signals(fw)
+        ext = store.load_extractions(window_days=45)
+        rsig = research_signals(fw, ext)
+        rank = _mom_rankpct(qsig)
+        ev = edge_verdicts(fw, ext)
+        st = store.load_state()
+        segments = []
+        qdate = None
+        for s in fw["segments"]:
+            if s.get("adjacent"):
+                segments.append({"id": s["id"], "name": s["name"], "group": s["group"],
+                                 "adjacent": True, "logic": s["logic"]})
+                continue
+            q = qsig.get(s["id"], {})
+            r = rsig.get(s["id"], {})
+            qdate = q.get("quote_date") or qdate
+            g = s.get("global", {})
+            segments.append({
+                "id": s["id"], "name": s["name"], "group": s["group"], "adjacent": False,
+                "logic": s["logic"], "stars": g.get("stars", 0),
+                "equity_logic": g.get("equity_logic", []), "global": g,
+                "quant": q, "research": r,
+                "quadrant": quadrant(q, r, rank.get(s["id"])),
+            })
+        board = {
+            "ok": True, "reason": None,
+            "generated_at": pd.Timestamp.now().isoformat(timespec="seconds"),
+            "freshness": {"corpus": corpus.corpus_freshness(),
+                          "last_ingest_at": st.get("last_ingest_at"),
+                          "extracted_total": st.get("totals", {}).get("docs", 0),
+                          "quote_date": qdate},
+            "drivers": fw["drivers"], "groups": fw["groups"], "segments": segments,
+            "edges": [dict(e, verdict_counts=ev.get(e["id"], {"support": 0, "refute": 0})) for e in fw["edges"]],
+            "narratives": narrative_temps(fw, qsig, ext),
+        }
+        _BOARD_CACHE["board"] = (time.time(), board)
+        return board
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": f"board 组装失败: {exc}"}
+
+
+def segment_detail(sid: str) -> dict:
+    from . import store
+    from .framework import load_framework
+    try:
+        fw = load_framework()
+        seg = next((s for s in fw["segments"] if s["id"] == sid), None)
+        if seg is None:
+            return {"ok": False, "reason": f"环节不存在: {sid}"}
+        ext = _dedupe_latest(store.load_extractions(window_days=30))
+        opinions = []
+        for rec in ext:
+            for s in rec.get("segments", []):
+                if s.get("segment_id") == sid:
+                    opinions.append({"doc_id": rec.get("doc_id"), "title": rec.get("title"),
+                                     "org": rec.get("org"), "publish_ts": rec.get("publish_ts"),
+                                     "stance": s.get("stance"), "strength": s.get("strength"),
+                                     "quote": s.get("quote"), "quote_dropped": s.get("quote_dropped")})
+        opinions.sort(key=lambda x: str(x.get("publish_ts")), reverse=True)
+        qsig = quant_signals(fw)
+        rsig = research_signals(fw, ext)
+        return {"ok": True, "reason": None, "segment": seg, "quant": qsig.get(sid),
+                "research": rsig.get(sid), "opinions": opinions, "stocks": seg.get("stocks", [])}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": f"segment 明细失败: {exc}"}
+
+
+def doc_detail(doc_id: str) -> dict:
+    from . import store
+    try:
+        recs = [r for r in store.load_extractions() if r.get("doc_id") == doc_id]
+        if not recs:
+            return {"ok": False, "reason": f"无此 doc: {doc_id}"}
+        recs.sort(key=lambda r: str(r.get("extracted_at") or ""), reverse=True)
+        return {"ok": True, "reason": None, "extraction": recs[0]}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": f"doc 明细失败: {exc}"}
