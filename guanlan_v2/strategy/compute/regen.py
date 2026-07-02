@@ -222,6 +222,26 @@ def regen_all(provider_uri: str = DEFAULT_PROVIDER, end: Optional[str] = None) -
             out["factor_ic"] = f"skipped: {type(e).__name__}: {e}"
             print(f"  [warn] factor_ic 失败(不阻断): {type(e).__name__}: {e}", flush=True)
 
+        # 5b) 因子族 L/S 增量 + regime 层(非阻断;全量回填走独立子进程,不占本锁——评审前置)
+        print("[regen] factor_ls → 族多空序列(日频增量)...", flush=True)
+        try:
+            from guanlan_v2.strategy.compute.factor_ls import update_factor_ls_incremental
+            n_ls = update_factor_ls_incremental(end=end)
+            out["factor_ls"] = n_ls
+            print(f"  factor_ls +{n_ls} 行", flush=True)
+        except Exception as e:  # noqa: BLE001
+            out["factor_ls"] = f"skipped: {type(e).__name__}: {e}"
+            print(f"  [warn] factor_ls 失败(不阻断): {type(e).__name__}: {e}", flush=True)
+        print("[regen] factor_regime → 族 regime(快照缓存重放)...", flush=True)
+        try:
+            from guanlan_v2.strategy.compute.factor_regime import build_factor_regime
+            n_rg = build_factor_regime(end=end)
+            out["factor_regime"] = n_rg
+            print(f"  factor_regime {n_rg} 行", flush=True)
+        except Exception as e:  # noqa: BLE001
+            out["factor_regime"] = f"skipped: {type(e).__name__}: {e}"
+            print(f"  [warn] factor_regime 失败(不阻断): {type(e).__name__}: {e}", flush=True)
+
         # 3.6) 因子 vintage IC(逐日截面 + 单票 tsic 真 OOS;失败不阻断三产物)
         print("[regen] factor_vintage → 逐日 vintage IC(截面 csi300 + 单票 tsic)...", flush=True)
         try:

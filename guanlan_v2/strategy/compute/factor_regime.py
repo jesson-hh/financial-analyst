@@ -139,3 +139,128 @@ def apply_regime_weights(sup: List[Tuple[str, float]], fam_of: Dict[str, str],
                      "w_eff": round(w_eff, 6),
                      "p_fav": (None if p is None else round(float(p), 4))})
     return out, info
+
+
+def _resolve_trials() -> int:
+    """trials 持久化(评审纪律):同 spec 复跑幂等(不涨);spec 变更 → 累计 +36(整格预算:
+    λ 3 × η 2 × 族 6)。DSR 按 max(36, 本值) deflate。"""
+    if FACTOR_REGIME_META_JSON.exists():
+        try:
+            m = json.loads(FACTOR_REGIME_META_JSON.read_text(encoding="utf-8"))
+            old = int(m.get("trials", 36))
+            return old if m.get("spec_hash") == SPEC_HASH else old + 36
+        except Exception:  # noqa: BLE001
+            pass
+    return 36
+
+
+def build_factor_regime(end: Optional[str] = None) -> int:
+    """族 L/S 产物 → 全族 walk-forward → factor_regime.parquet + meta。
+    PIT 命门:特征索引 = available_date(t 行只用 available_date≤t 的 L/S)。
+    快照缓存热路径:同 spec 下重放只拟合新到期的 refit 日(regen 内秒级)。
+    另算全样本 hindsight 状态列(**仅诊断/whipsaw 护栏,绝不入权重**)。"""
+    from guanlan_v2.strategy.compute.factor_ls import load_csv_series, load_family_ls
+
+    fam_ls = load_family_ls()
+    if fam_ls.empty:
+        print("[factor_regime] 无 factor_ls 产物,诚实缺席(先全量回填)", flush=True)
+        return 0
+    csv = load_csv_series()
+    old_snaps: Dict[str, list] = {}
+    if FACTOR_REGIME_META_JSON.exists():
+        try:
+            m = json.loads(FACTOR_REGIME_META_JSON.read_text(encoding="utf-8"))
+            if m.get("spec_hash") == SPEC_HASH:
+                old_snaps = m.get("snapshots") or {}
+        except Exception:  # noqa: BLE001
+            old_snaps = {}
+    parts, snaps_out = [], {}
+    for fam, g in fam_ls.groupby("family"):
+        s = pd.Series(g["ls_ret"].values,
+                      index=pd.DatetimeIndex(g["available_date"])).sort_index()
+        if end:
+            s = s.loc[: pd.Timestamp(end)]
+        feat = regime_features(s, csv)
+        if len(feat) < WARMUP:
+            print(f"[factor_regime] {fam} 热身不足({len(feat)}<{WARMUP}),诚实缺席", flush=True)
+            continue
+        cache = {sn["fit_asof"]: sn for sn in (old_snaps.get(fam) or [])}
+        df, sn = walk_forward_regimes(feat, snapshot_cache=cache)
+        if df.empty:
+            continue
+        # hindsight(全样本拟合 DP;非 PIT,仅供闸的吻合率护栏,绝不驱动权重)
+        hist = feat.values
+        mu, sd = hist.mean(axis=0), hist.std(axis=0) + 1e-12
+        _lam, C_h, s_h, _obj = _pick_lambda((hist - mu) / sd, LAM_GRID, seed=0)
+        fav_h = int(np.argmax(C_h[:, 1]))
+        hs = pd.Series((s_h == fav_h).astype(int), index=feat.index)
+        df["state_hindsight"] = hs.reindex(pd.DatetimeIndex(df["date"])).values
+        df["family"] = fam
+        df["source"] = "factor-regime-jm"
+        parts.append(df)
+        snaps_out[fam] = sn
+    if not parts:
+        return 0
+    out = pd.concat(parts, ignore_index=True)
+    tmp = str(FACTOR_REGIME_PARQUET) + ".tmp"
+    out.to_parquet(tmp, index=False)
+    os.replace(tmp, str(FACTOR_REGIME_PARQUET))
+    meta = {"spec": SPEC, "spec_hash": SPEC_HASH,
+            "asof": str(pd.Timestamp(out["date"].max()).date()),
+            "families": sorted(snaps_out), "trials": _resolve_trials(),
+            "snapshots": snaps_out}
+    tmpj = str(FACTOR_REGIME_META_JSON) + ".tmp"
+    with open(tmpj, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, default=str)
+    os.replace(tmpj, str(FACTOR_REGIME_META_JSON))
+    return len(out)
+
+
+def resolve_regime_weights(factors, rdate: Optional[str]):
+    """生产胶水(只在 ScreenIn.regimeWeights=True 时被调,默认路径零触碰):
+    读闸+产物,双闸(activated 族 + 新鲜度 ≤FRESH_MAX_LAG 交易日)→
+    (有效因子列表[{id,w}] 或 None, 徽章 dict)。任一环节缺 → 显式降级带 fallback_reason。"""
+    from guanlan_v2.screen.catalog import FACTOR_DEFS
+
+    badge = {"applied": False, "fallback_reason": None, "regime_asof": None,
+             "per_factor": []}
+    try:
+        gate = (json.loads(FACTOR_REGIME_GATE_JSON.read_text(encoding="utf-8"))
+                if FACTOR_REGIME_GATE_JSON.exists() else None)
+        if not gate:
+            badge["fallback_reason"] = "闸产物缺失(先人工跑 regime_gate)"
+            return None, badge
+        if gate.get("spec_hash") != SPEC_HASH:
+            badge["fallback_reason"] = "闸 spec 指纹不符(陈闸,须重跑闸)"
+            return None, badge
+        activated = set(gate.get("activated") or [])
+        if not activated:
+            badge["fallback_reason"] = "0 族激活(合法结局:闸判无 OOS 增量)"
+            return None, badge
+        if not FACTOR_REGIME_PARQUET.exists():
+            badge["fallback_reason"] = "regime 产物缺失"
+            return None, badge
+        df = pd.read_parquet(FACTOR_REGIME_PARQUET)
+        asof = pd.Timestamp(df["date"].max())
+        badge["regime_asof"] = str(asof.date())
+        if rdate:
+            lag = len(pd.bdate_range(asof, pd.Timestamp(rdate))) - 1
+            if lag > FRESH_MAX_LAG:
+                badge["fallback_reason"] = f"regime 产物过期({asof.date()} vs 排名 {rdate})"
+                return None, badge
+        last = df[df["date"] == df["date"].max()]
+        p_fav = {str(r["family"]): float(r["p_fav"]) for _, r in last.iterrows()}
+        sup, fam_of = [], {}
+        for f in (factors or []):
+            fid = getattr(f, "id", None) if not isinstance(f, dict) else f.get("id")
+            fw = getattr(f, "w", 1.0) if not isinstance(f, dict) else f.get("w", 1.0)
+            if not fid:
+                continue
+            sup.append((fid, float(fw)))
+            fam_of[fid] = (FACTOR_DEFS.get(fid) or {}).get("family")
+        new_sup, info = apply_regime_weights(sup, fam_of, p_fav, activated)
+        badge.update({"applied": True, "per_factor": info})
+        return [{"id": fid, "w": w} for fid, w in new_sup], badge
+    except Exception as e:  # noqa: BLE001
+        badge["fallback_reason"] = f"{type(e).__name__}: {e}"
+        return None, badge
