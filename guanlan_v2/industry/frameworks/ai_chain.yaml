@@ -1,0 +1,428 @@
+meta: {id: ai_chain, name: AI产业链, version: 1, updated: "2026-07-02"}
+
+drivers:
+  - {id: D1, name: 北美CSP capex, indicators: [四大云厂财报capex指引, TrendForce口径]}
+  - {id: D2, name: 国内智算capex, indicators: [运营商资本开支, 大厂采购, 智算中心招标]}
+  - {id: D3, name: 模型迭代与推理成本, indicators: [版本发布, token单价, 日均token调用量]}
+  - {id: D4, name: 供给约束与涨价, indicators: [DRAM/NAND合约价环比, HBM/CoWoS产能, EML缺口]}
+  - {id: D5, name: 国内政策, indicators: [安全可靠测评名单, 算电协同, 人工智能+专项行动]}
+  - {id: D6, name: 出口管制/地缘, indicators: [对华芯片禁令变化]}
+  - {id: D7, name: 海外技术路线, indicators: [GTC/GB300/Rubin, 谷歌TPU/OCS, 台积电COUPE]}
+
+groups:
+  - {id: A, name: 芯片材料}
+  - {id: B, name: 服务器配套}
+  - {id: C, name: 光网络}
+  - {id: I, name: 算力基建}
+  - {id: M, name: 模型数据}
+  - {id: F, name: 应用}
+  - {id: G, name: 端侧具身}
+
+segments:
+  - id: A1
+    name: 国产AI芯片
+    group: A
+    logic: 国产替代+推理放量,大厂真实采购兑现
+    keywords: [国产GPU, 昇腾, DCU, ASIC, 算力芯片, 推理芯片, 950PR, 950DT]
+    ths_concepts: [中芯国际概念, 华为昇腾, 东数西算(算力)]
+    stocks:
+      - {code: SH688256, name: 寒武纪, role: anchor}
+      - {code: SH688041, name: 海光信息, role: anchor}
+      - {code: SH688795, name: 摩尔线程, role: anchor}
+      - {code: SH688802, name: 沐曦股份, role: pool}
+    global: {intl: NVIDIA垄断90%+/博通ASIC崛起, cn_position: 短板→追赶, moat: CUDA生态+先进制程受限, equity_logic: [Ω], prospect: Ω→兑现过渡, stars: 0}
+  - id: A2
+    name: 先进制程代工
+    group: A
+    logic: 国产算力的产能咽喉
+    keywords: [先进制程, 代工, N+2, 晶圆厂, 扩产]
+    ths_concepts: [中芯国际概念]
+    stocks:
+      - {code: SH688981, name: 中芯国际, role: anchor}
+      - {code: SH688347, name: 华虹公司, role: anchor}
+    global: {intl: 台积电垄断2/3nm, cn_position: 短板, moat: EUV禁售, equity_logic: [Ω, β], prospect: Ω+产能扩张β, stars: 0}
+  - id: A3
+    name: 半导体设备
+    group: A
+    logic: 扩产+国产化双击
+    keywords: [刻蚀, 薄膜沉积, 光刻, 测试机, 量测, 设备国产化]
+    ths_concepts: [光刻机, 中芯国际概念]
+    stocks:
+      - {code: SZ002371, name: 北方华创, role: anchor}
+      - {code: SH688012, name: 中微公司, role: anchor}
+      - {code: SZ300604, name: 长川科技, role: pool}
+    global: {intl: AMAT/ASML/LAM主导, cn_position: 追赶, moat: 技术积累+专利, equity_logic: [Ω], prospect: Ω兑现型订单可见, stars: 1}
+  - id: A4
+    name: 先进封装
+    group: A
+    logic: HBM/算力芯片封装瓶颈(CoWoS)
+    keywords: [先进封装, CoWoS, Chiplet, 2.5D, 封测]
+    ths_concepts: [先进封装]
+    stocks:
+      - {code: SZ002156, name: 通富微电, role: anchor}
+      - {code: SH600584, name: 长电科技, role: anchor}
+      - {code: SZ002185, name: 华天科技, role: pool}
+    global: {intl: 台积电CoWoS主导, cn_position: 并跑, moat: 产能+工艺, equity_logic: [β, Ω], prospect: β+国产配套Ω, stars: 0}
+  - id: A5
+    name: 存储/HBM
+    group: A
+    logic: 超级周期合约价环比大涨,业绩兑现型
+    keywords: [存储, HBM, DRAM, NAND, 涨价, 内存接口, 模组]
+    ths_concepts: [存储芯片]
+    stocks:
+      - {code: SZ301308, name: 江波龙, role: anchor}
+      - {code: SH603986, name: 兆易创新, role: anchor}
+      - {code: SH688525, name: 佰维存储, role: pool}
+      - {code: SH688008, name: 澜起科技, role: pool}
+      - {code: SZ300475, name: 香农芯创, role: pool}
+    global: {intl: 海力士/三星/美光三寡头HBM全海外, cn_position: 短板, moat: 工艺+专利+产能, equity_logic: [Δ, Ω], prospect: Δ主模组吃涨价+Ω长鑫链, stars: 0}
+  - id: A6
+    name: 上游材料
+    group: A
+    logic: 价值量沿链上移(特气/靶材/PPO树脂/CCL)
+    keywords: [电子特气, 靶材, PPO, 覆铜板, CCL, 树脂, 电子材料]
+    ths_concepts: [PCB概念, 先进封装]
+    stocks:
+      - {code: SH688146, name: 中船特气, role: anchor}
+      - {code: SZ300666, name: 江丰电子, role: anchor}
+      - {code: SH601208, name: 东材科技, role: pool}
+      - {code: SH600183, name: 生益科技, role: pool}
+    global: {intl: 信越/杜邦等, cn_position: 部分领先, moat: 认证周期, equity_logic: [Δ, β], prospect: Δ+扩产β 股王发源地, stars: 1}
+  - id: B1
+    name: AI服务器/ODM
+    group: B
+    logic: 训练+推理整机放量,毛利改善
+    keywords: [AI服务器, ODM, 整机, 代工, 超节点]
+    ths_concepts: [液冷服务器, 英伟达概念]
+    stocks:
+      - {code: SH601138, name: 工业富联, role: anchor}
+      - {code: SZ000977, name: 浪潮信息, role: anchor}
+      - {code: SH603019, name: 中科曙光, role: pool}
+      - {code: SH603296, name: 华勤技术, role: pool}
+    global: {intl: 需求在海外制造在中国, cn_position: 领先, moat: 客户绑定+规模, equity_logic: [β], prospect: β兑现高确定低弹性, stars: 1}
+  - id: B2
+    name: 高速PCB
+    group: B
+    logic: 订单+60%排产到2027,三龙头占高端70%
+    keywords: [PCB, 高多层, HDI, 服务器板, 背板]
+    ths_concepts: [PCB概念]
+    stocks:
+      - {code: SZ002463, name: 沪电股份, role: anchor}
+      - {code: SZ300476, name: 胜宏科技, role: anchor}
+      - {code: SZ002916, name: 深南电路, role: pool}
+      - {code: SZ002938, name: 鹏鼎控股, role: pool}
+    global: {intl: 全球高端AI板中国主导, cn_position: 领先, moat: 高多层工艺+认证, equity_logic: [β], prospect: β最硬订单排2027, stars: 2}
+  - id: B3
+    name: 服务器电源/HVDC
+    group: B
+    logic: GB300单卡1.4kW→800V重构,独立主战场
+    keywords: [服务器电源, HVDC, 800V, PSU, 电源模块]
+    ths_concepts: [液冷服务器, 英伟达概念]
+    stocks:
+      - {code: SZ002851, name: 麦格米特, role: anchor}
+      - {code: SZ002364, name: 中恒电气, role: anchor}
+      - {code: SZ300593, name: 新雷能, role: pool}
+      - {code: SZ300870, name: 欧陆通, role: pool}
+    global: {intl: 台达/Vertiv, cn_position: 并跑, moat: 认证+功率密度, equity_logic: [β, Θ], prospect: β+Θ 800V路线, stars: 1}
+  - id: B4
+    name: 液冷
+    group: B
+    logic: 渗透率14%→31%,UQD/CDU零部件独立成炒作细分
+    keywords: [液冷, 冷板, 浸没式, UQD, CDU, 快接头, 温控]
+    ths_concepts: [液冷服务器]
+    stocks:
+      - {code: SZ002837, name: 英维克, role: anchor}
+      - {code: SZ301018, name: 申菱环境, role: anchor}
+      - {code: SZ300499, name: 高澜股份, role: pool}
+      - {code: SZ300547, name: 川环科技, role: pool}
+    global: {intl: 中国厂进MGX生态+谷歌认证, cn_position: 领先, moat: 认证+交付能力, equity_logic: [β], prospect: 渗透率β, stars: 1}
+  - id: B5
+    name: 铜连接/高速连接器
+    group: B
+    logic: 超节点架构受益,窄而纯
+    keywords: [铜缆, 高速连接器, 背板连接, DAC, 铜互连]
+    ths_concepts: [铜缆高速连接]
+    stocks:
+      - {code: SZ002475, name: 立讯精密, role: anchor}
+      - {code: SH688629, name: 华丰科技, role: anchor}
+      - {code: SZ002179, name: 中航光电, role: pool}
+      - {code: SZ002130, name: 沃尔核材, role: pool, note: 待核}
+    global: {intl: 安费诺主导, cn_position: 追赶, moat: 高速信号完整性技术, equity_logic: [Θ], prospect: Θ超节点架构, stars: 0}
+  - id: C1
+    name: 光模块
+    group: C
+    logic: 1.6T十倍放量,业绩最硬(盯CPO替代)
+    keywords: [光模块, 800G, 1.6T, 可插拔, 光互连]
+    ths_concepts: [共封装光学(CPO)]
+    stocks:
+      - {code: SZ300308, name: 中际旭创, role: anchor}
+      - {code: SZ300502, name: 新易盛, role: anchor}
+      - {code: SZ000988, name: 华工科技, role: pool}
+    global: {intl: 全球前二+前十占七, cn_position: 领先, moat: 规模+迭代速度, equity_logic: [β], prospect: β最硬盯CPO替代, stars: 2}
+  - id: C2
+    name: 光芯片/光器件
+    group: C
+    logic: EML缺口25-30%涨价,十倍股发源地
+    keywords: [光芯片, EML, DFB, CW光源, 光器件, 陶瓷套管]
+    ths_concepts: [共封装光学(CPO)]
+    stocks:
+      - {code: SH688498, name: 源杰科技, role: anchor}
+      - {code: SH688313, name: 仕佳光子, role: anchor}
+      - {code: SH688048, name: 长光华芯, role: pool}
+      - {code: SZ300394, name: 天孚通信, role: pool}
+      - {code: SZ300570, name: 太辰光, role: pool}
+    global: {intl: Lumentum/Coherent主导EML 2028产能售罄, cn_position: 追赶→突破, moat: 良率+可靠性认证12-18月, equity_logic: [Δ, Ω], prospect: Δ+Ω双击 十倍股发源地, stars: 2}
+  - id: C3
+    name: CPO/硅光
+    group: C
+    logic: 商业化元年但预期分歧大——与C1分开建
+    keywords: [CPO, 硅光, COUPE, NPO, 光引擎, 共封装]
+    ths_concepts: [共封装光学(CPO)]
+    stocks:
+      - {code: SZ300308, name: 中际旭创, role: anchor}
+      - {code: SZ300502, name: 新易盛, role: pool}
+      - {code: SZ300394, name: 天孚通信, role: pool}
+      - {code: SZ300757, name: 罗博特科, role: pool}
+    global: {intl: 台积电COUPE/NV定调, cn_position: 并跑, moat: 工艺平台, equity_logic: [Θ], prospect: Θ高波动高分歧, stars: 0}
+  - id: C4
+    name: OCS全光交换
+    group: C
+    logic: 谷歌链从零爆发(新兴)
+    keywords: [OCS, 全光交换, 光交换机, MEMS]
+    ths_concepts: []
+    stocks:
+      - {code: SZ300620, name: 光库科技, role: anchor}
+      - {code: SH600703, name: 三安光电, role: pool}
+    global: {intl: 谷歌自研生态, cn_position: 追赶, moat: 客户独占代工, equity_logic: [Ψ, β], prospect: Ψ→β小而陡, stars: 0}
+  - id: C5
+    name: 交换机/网络设备
+    group: C
+    logic: 集群组网 400G→800G
+    keywords: [交换机, 800G交换, 白牌, 交换芯片, 组网]
+    ths_concepts: [东数西算(算力)]
+    stocks:
+      - {code: SZ301165, name: 锐捷网络, role: anchor, note: 待核}
+      - {code: SZ000938, name: 紫光股份, role: anchor}
+      - {code: SH688702, name: 盛科通信, role: pool}
+    global: {intl: 博通芯片垄断, cn_position: 追赶, moat: 交换芯片, equity_logic: [β, Ω], prospect: 国内β+芯片Ω, stars: 0}
+  - id: I1
+    name: IDC/AIDC
+    group: I
+    logic: AIDC量价通胀+超节点,6-7月最新口径
+    keywords: [IDC, AIDC, 智算中心, 数据中心, 机柜, 上架率]
+    ths_concepts: [数据中心(AIDC), 东数西算(算力)]
+    stocks:
+      - {code: SZ300442, name: 润泽科技, role: anchor}
+      - {code: SZ300383, name: 光环新网, role: anchor}
+      - {code: SH603881, name: 数据港, role: pool}
+    global: {intl: 国内自主市场, cn_position: 国内市场, moat: 电力指标+区位卡位, equity_logic: [β], prospect: 量价通胀β超节点, stars: 1}
+  - id: I2
+    name: 算力租赁/智算服务
+    group: I
+    logic: 推理需求承接层,纯标的稀缺
+    keywords: [算力租赁, 智算服务, 算力调度, GPU云]
+    ths_concepts: [算力租赁]
+    stocks:
+      - {code: SZ300846, name: 首都在线, role: anchor}
+      - {code: SZ300857, name: 协创数据, role: anchor}
+    global: {intl: 国内市场, cn_position: 国内市场, moat: 卡量+客户, equity_logic: [β], prospect: 推理放量β竞争加剧, stars: 0}
+  - id: I3
+    name: 算电协同/电力设备
+    group: I
+    logic: 国家级新基建,规模1800亿+85%
+    keywords: [算电协同, 绿电直连, 柴发, 变压器, 特高压, HVDC输电]
+    ths_concepts: []
+    stocks:
+      - {code: SH603861, name: 白云电器, role: anchor, note: 票池待概念补全}
+      - {code: SZ002335, name: 科华数据, role: pool, note: 待核}
+    global: {intl: 国内政策市场, cn_position: 国内市场, moat: 电网资源, equity_logic: [Θ], prospect: 政策新基建, stars: 0}
+  - id: I4
+    name: 运营商/云平台
+    group: I
+    logic: 国内capex主体+推理入口
+    keywords: [运营商, 智算, 资本开支, 云计算, MaaS]
+    ths_concepts: [云计算]
+    stocks:
+      - {code: SH600941, name: 中国移动, role: anchor}
+      - {code: SH601728, name: 中国电信, role: anchor}
+      - {code: SH600050, name: 中国联通, role: pool}
+    global: {intl: 国内市场, cn_position: 国内市场, moat: 牌照+资源, equity_logic: [β], prospect: 红利+算力资产重估, stars: 0}
+  - id: M1
+    name: 基础大模型/MaaS
+    group: M
+    logic: 生态映射炒作(DeepSeek链/豆包链/千问链)
+    keywords: [大模型, DeepSeek, 豆包, 千问, MaaS, 开源模型]
+    ths_concepts: [DeepSeek概念, 多模态AI]
+    stocks:
+      - {code: SZ002230, name: 科大讯飞, role: anchor}
+      - {code: SZ300418, name: 昆仑万维, role: anchor}
+      - {code: SH601360, name: 三六零, role: pool}
+    global: {intl: OpenAI/谷歌领先, cn_position: 短板, moat: 算力+人才, equity_logic: [Ψ], prospect: Ψ映射 A股无纯标的, stars: 0}
+  - id: M2
+    name: 数据要素/语料
+    group: M
+    logic: 窄而纯(AI语料52只)
+    keywords: [数据要素, 语料, 数据标注, 数据集]
+    ths_concepts: [AI语料, 数据要素]
+    stocks:
+      - {code: SH688787, name: 海天瑞声, role: anchor}
+      - {code: SZ300229, name: 拓尔思, role: anchor}
+    global: {intl: 数据主权市场, cn_position: 国内市场, moat: 牌照+稀缺, equity_logic: [Ψ], prospect: 主题性, stars: 0}
+  - id: F1
+    name: AI办公/Agent
+    group: F
+    logic: 金融Agent渗透>30%、WPS AI千万用户,最先兑现
+    keywords: [Agent, 智能体, AI办公, WPS, Copilot, 订阅]
+    ths_concepts: [AI智能体]
+    stocks:
+      - {code: SH688111, name: 金山办公, role: anchor}
+      - {code: SH600588, name: 用友网络, role: anchor}
+      - {code: SZ300687, name: 赛意信息, role: pool}
+    global: {intl: Copilot/Agentforce成熟, cn_position: 追赶, moat: 场景数据+粘性, equity_logic: [Ψ], prospect: 业绩验证型选择性, stars: 1}
+  - id: F2
+    name: AI金融
+    group: F
+    logic: 券商8/10接大模型
+    keywords: [AI金融, 智能投顾, 券商AI, 金融大模型]
+    ths_concepts: [AI应用]
+    stocks:
+      - {code: SZ300033, name: 同花顺, role: anchor}
+      - {code: SH600570, name: 恒生电子, role: anchor}
+      - {code: SZ300059, name: 东方财富, role: pool}
+    global: {intl: 国内自主, cn_position: 国内市场, moat: 牌照+入口, equity_logic: [Ψ], prospect: 业绩验证型, stars: 0}
+  - id: F3
+    name: AIGC/传媒游戏
+    group: F
+    logic: Token经济到AIGC叙事
+    keywords: [AIGC, AI视频, AI游戏, 内容生成, 数字人]
+    ths_concepts: [AIGC, AI视频]
+    stocks:
+      - {code: SZ300418, name: 昆仑万维, role: anchor}
+      - {code: SZ300624, name: 万兴科技, role: anchor}
+      - {code: SZ002558, name: 巨人网络, role: pool}
+    global: {intl: 海外工具领先, cn_position: 追赶, moat: IP+流量, equity_logic: [Ψ], prospect: Ψ主题轮动, stars: 0}
+  - id: F4
+    name: AI垂直行业
+    group: F
+    logic: 医疗/教育/工业AI,专项行动政策面,轮动性强
+    keywords: [AI医疗, AI教育, 工业AI, 物理AI, 垂直大模型]
+    ths_concepts: [AI应用]
+    stocks:
+      - {code: SZ300253, name: 卫宁健康, role: anchor}
+      - {code: SZ002230, name: 科大讯飞, role: pool}
+      - {code: SZ300378, name: 鼎捷数智, role: pool}
+    global: {intl: 分化, cn_position: 追赶, moat: 行业数据, equity_logic: [Ψ], prospect: Ψ主题轮动, stars: 0}
+  - id: G1
+    name: AI手机/PC/端侧SoC
+    group: G
+    logic: AI手机渗透35%,SoC/存储模组受益
+    keywords: [AI手机, AI PC, 端侧, SoC, NPU, 端侧模型]
+    ths_concepts: [AI手机, AI PC]
+    stocks:
+      - {code: SZ002475, name: 立讯精密, role: anchor}
+      - {code: SH603296, name: 华勤技术, role: anchor}
+      - {code: SH688608, name: 恒玄科技, role: pool}
+      - {code: SH603893, name: 瑞芯微, role: pool}
+    global: {intl: 高通/苹果芯片主导, cn_position: 领先, moat: 制造供应链+SoC细分突破, equity_logic: [β], prospect: 新品周期β, stars: 0}
+  - id: G2
+    name: AI眼镜/XR
+    group: G
+    logic: 出货破2368万台,供应链80%在中国
+    keywords: [AI眼镜, 智能眼镜, XR, 光波导, 硅基OLED]
+    ths_concepts: [AI眼镜]
+    stocks:
+      - {code: SZ002241, name: 歌尔股份, role: anchor}
+      - {code: SZ301479, name: 弘景光电, role: anchor}
+    global: {intl: Meta定义品类, cn_position: 领先, moat: 光学/声学工艺, equity_logic: [β], prospect: 新品周期β, stars: 1}
+  - id: G3
+    name: 机器人/具身智能
+    group: G
+    adjacent: true
+    logic: 相邻链——只挂接口不建信号
+    keywords: [人形机器人, 具身智能]
+    ths_concepts: [人形机器人]
+    stocks: []
+  - id: G4
+    name: 智能驾驶
+    group: G
+    adjacent: true
+    logic: 相邻链——只挂接口不建信号
+    keywords: [智能驾驶, 无人驾驶]
+    ths_concepts: [无人驾驶]
+    stocks: []
+
+edges:
+  - {id: T1, from: [D1], to: [C1, B1, B2, B3, B4, B5], sign: "+", mechanism: 云厂开支→NV/ASIC订单→中国供应链, lag: 1-2季, validation: [订单排产, 月度出货, CoWoS产能]}
+  - {id: T2, from: [D2], to: [A1, B1, C5, I1], sign: "+", mechanism: 智算招标→国产整机/芯片采购, lag: 0-2季, validation: [招标金额, 运营商capex, 中标公告]}
+  - {id: T3, from: [D3], to: [F1, F2, F3, F4, A1, A5], sign: "+", mechanism: Jevons效应 便宜→用量爆炸→算力/显存需求(反馈环), lag: 1-2季, validation: [token调用量, API价格, 扩容公告]}
+  - {id: T4, from: [D4], to: [A5, C2, A6], sign: "+", mechanism: 缺口→合约价↑→业绩弹性, lag: 当季, validation: [合约价环比, EML交期]}
+  - {id: T5, from: [D5], to: [A1, A2, A3, I3], sign: "+", mechanism: 测评名单+采购倾斜+新基建, lag: 事件驱动, validation: [名单, 文件, 项目数]}
+  - {id: T6, from: [D6], to: [A1, A2, A3, A5], sign: "+", mechanism: 断供风险→替代紧迫性→估值溢价, lag: 即时, validation: [管制清单变化]}
+  - {id: T7, from: [D7], to: [C3, B3, B5, C4], sign: "+", mechanism: 路线定调→期权重估, lag: 即时情绪+2-4季兑现, validation: [GTC, COUPE量产, GB300出货]}
+  - {id: T8, from: [C2], to: [C1], sign: "+", mechanism: EML缺口制约出货+抬成本, lag: 当季, validation: [EML价格, 交期]}
+  - {id: T9, from: [B2], to: [A6], sign: "+", mechanism: PCB扩产→PPO/CCL/特气量价, lag: 1-2季, validation: [CCL提价函, 特气价格]}
+  - {id: T10, from: [B1], to: [B3, B4], sign: "+", mechanism: 机柜功率密度→供电/散热重构, lag: 1-2季, validation: [GB300机柜功率, 液冷渗透率]}
+  - {id: T11, from: [A1], to: [A2, A4], sign: "+", mechanism: 国产芯片放量订单沿链传导, lag: 1季, validation: [中芯产能利用率, 封测稼动率]}
+  - {id: T12, from: [A5], to: [A5], sign: "+", mechanism: HBM挤占产能→存储全线涨价(链内自反), lag: 当季, validation: [合约价环比]}
+  - {id: T13, from: [M1], to: [F1, F2, F3, F4], sign: "+", mechanism: 能力阈值跨越→场景可用, lag: 1-2季, validation: [版本发布, 评测]}
+  - {id: T14, from: [I1], to: [I3, B4], sign: "+", mechanism: 智算中心建设→配电/温控采购, lag: 1-2季, validation: [IDC招标明细]}
+  - {id: T15, from: [C3], to: [C1], sign: "-", mechanism: CPO起量威胁可插拔(替代边), lag: 2-4季, validation: [COUPE良率, CPO端口占比]}
+
+narratives:
+  - id: N1
+    name: 英伟达链
+    status: 活跃·高位分歧
+    activates: [{segment: C1, weight: 0.9}, {segment: B2, weight: 0.9}, {segment: B3, weight: 0.9}, {segment: B4, weight: 0.9}, {segment: B1, weight: 0.9}, {segment: B5, weight: 0.5}, {segment: C3, weight: 0.5}]
+    validation: [NV财报, GTC, GB300出货]
+    risks: [CPO替代, 砍单]
+  - id: N2
+    name: 国产算力链
+    status: 主升
+    activates: [{segment: A1, weight: 0.9}, {segment: A2, weight: 0.9}, {segment: A3, weight: 0.9}, {segment: A4, weight: 0.9}, {segment: A6, weight: 0.5}, {segment: B1, weight: 0.5}, {segment: C5, weight: 0.5}]
+    validation: [昇腾950节点, 测评名单, 大厂订单]
+    risks: [兑现斜率]
+  - id: N3
+    name: ASIC/TPU链
+    status: 活跃
+    activates: [{segment: B2, weight: 0.9}, {segment: C1, weight: 0.9}, {segment: C4, weight: 0.9}, {segment: B3, weight: 0.5}]
+    validation: [谷歌TPU出货, 博通Marvell指引]
+    risks: [单一客户依赖]
+  - id: N4
+    name: 存储超级周期
+    status: 主升·业绩兑现
+    activates: [{segment: A5, weight: 0.9}, {segment: A4, weight: 0.5}, {segment: A6, weight: 0.5}]
+    validation: [合约价环比, 龙头月营收]
+    risks: [周期见顶]
+  - id: N5
+    name: 推理放量
+    status: Q2新叙事·扩散中
+    activates: [{segment: A1, weight: 0.9}, {segment: A5, weight: 0.9}, {segment: I2, weight: 0.5}, {segment: I1, weight: 0.5}, {segment: F1, weight: 0.5}]
+    validation: [token调用量, 950DT量产]
+    risks: [需求增速证伪]
+  - id: N6
+    name: 应用商业化
+    status: 回调蓄势
+    activates: [{segment: F1, weight: 0.9}, {segment: F2, weight: 0.9}, {segment: F3, weight: 0.5}, {segment: F4, weight: 0.5}, {segment: M2, weight: 0.5}]
+    validation: [付费数据, 专项行动落地]
+    risks: [付费环境弱]
+  - id: N7
+    name: 端侧AI
+    status: 温和
+    activates: [{segment: G1, weight: 0.9}, {segment: G2, weight: 0.9}, {segment: A5, weight: 0.5}]
+    validation: [新品发布, 出货量]
+    risks: [出货不及预期]
+  - id: N8
+    name: 算电协同
+    status: 政策酝酿·扩散承接
+    activates: [{segment: I3, weight: 0.9}, {segment: I1, weight: 0.5}, {segment: B3, weight: 0.5}]
+    validation: [绿电直连项目数, 枢纽政策]
+    risks: [落地节奏]
+
+signal_defs:
+  quant: [momentum20, excess20_vs_eqw, amount_share_delta20, fundflow5, v4_pct_mean, breadth]
+  text:
+    stance: [多, 中, 空]
+    catalyst_types: [订单, 涨价, 扩产, 技术突破, 政策, 业绩, 认证, 新品]
+    global_fields: [国产化率, 份额, 技术差距, 认证]
+    half_life_days: 7
+    window_days: 30
