@@ -21,3 +21,5 @@ FACTOR_LS_PARQUET = ARTIFACTS_DIR / "factor_ls_returns.parquet"
 FACTOR_REGIME_PARQUET = ARTIFACTS_DIR / "factor_regime.parquet"
 FACTOR_REGIME_META_JSON = ARTIFACTS_DIR / "factor_regime_meta.json"
 FACTOR_REGIME_GATE_JSON = ARTIFACTS_DIR / "factor_regime_gate.json"
+# P1 收益回流:全A等权日收益基准(basket_perf 的公平尺;regen 顺算)
+EQW_MARKET_RET_PARQUET = ARTIFACTS_DIR / "eqw_market_ret.parquet"

@@ -163,6 +163,19 @@ def regen_all(provider_uri: str = DEFAULT_PROVIDER, end: Optional[str] = None) -
         out["breadth_resid"] = (len(resid), str(MARKET_BREADTH_PARQUET))
         print(f"  resid {len(resid)} 行 -> {MARKET_BREADTH_PARQUET}", flush=True)
 
+        # 1b) 全A等权日收益基准(P1 收益回流的公平尺;失败不阻断三产物)
+        print("[regen] eqw_market → 全A等权日收益 ...", flush=True)
+        try:
+            from guanlan_v2.strategy.compute.eqw_market import (
+                EQW_MARKET_RET_PARQUET, compute_eqw_market,
+            )
+            n_eqw = compute_eqw_market(provider_uri, end=end, codes=codes)
+            out["eqw_market"] = (n_eqw, str(EQW_MARKET_RET_PARQUET))
+            print(f"  eqw_market {n_eqw} 日 -> {EQW_MARKET_RET_PARQUET}", flush=True)
+        except Exception as e:  # noqa: BLE001
+            out["eqw_market"] = f"skipped: {type(e).__name__}: {e}"
+            print(f"  [warn] eqw_market 失败(不阻断): {type(e).__name__}: {e}", flush=True)
+
         # 2) 主线:月度面板(含 status)
         print("[regen] mainline → monthly_mainlines ...", flush=True)
         ml = build_mainline(provider_uri, end=end, codes=codes)
