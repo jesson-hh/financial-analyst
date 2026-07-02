@@ -10,7 +10,7 @@ def test_build_mcp_tools_derivation():
     assert "ww_plan_update" not in names and "ww_show_page" not in names      # 去除 console-UI-only
     assert (ww - {"ww_plan_update", "ww_show_page"}) <= names                  # 其余 ww_ 全在
     assert {"alpha_list", "alpha_compare", "alpha_forge", "factor_report"} <= names
-    assert len(tools) == 37                                                    # 30 ww_ + 7 alpha-zoo
+    assert len(tools) == 44                                                    # 37 ww_ + 7 alpha-zoo
 
 
 def test_build_mcp_tools_annotations_and_gate():
@@ -68,7 +68,7 @@ def test_build_server_prewarms_decls():
     import guanlan_v2.glmcp.server as ms
     ms._DECLS = None
     ms.build_server()
-    assert ms._DECLS is not None and len(ms._DECLS) == 37
+    assert ms._DECLS is not None and len(ms._DECLS) == 44
 
 
 def test_build_mcp_http_app_is_starlette():

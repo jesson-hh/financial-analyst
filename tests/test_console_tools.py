@@ -610,14 +610,14 @@ def test_engine_profile_excludes_ww_but_console_whitelist_resolves():
                           encoding="utf-8", errors="replace", timeout=180, env=env, cwd=str(repo))
     assert proc.returncode == 0, (proc.stderr or "")[-2000:]
     out = _json.loads(proc.stdout.strip().splitlines()[-1])
-    assert len(out["registered_ww"]) == 32                    # +2 recipe/CPCV model tools
+    assert len(out["registered_ww"]) == 39                    # +7 P0 闭环读取面薄工具
     # ① 非显式白名单路径(research / 缺省 / all)一律不外露 ww_*,且不再返回 None(None=完全不限制)
     assert out["research_is_none"] is False and out["research_ww"] == []
     assert out["default_is_none"] is False and out["default_ww"] == []
     assert out["all_is_none"] is False and out["all_ww"] == []
-    # ② console 显式白名单路径不受影响:55 名全部可解析,含 30 个 ww_(+工坊删除/设默认 2 + alpha-zoo 7)
-    assert out["console_n"] == 57 and out["console_missing"] == []
-    assert out["explicit_n"] == 57 and out["explicit_ww_n"] == 32
+    # ② console 显式白名单路径不受影响:62 名全部可解析,含 37 个 ww_(+工坊删除/设默认 2 + alpha-zoo 7)
+    assert out["console_n"] == 64 and out["console_missing"] == []
+    assert out["explicit_n"] == 64 and out["explicit_ww_n"] == 39
 
 
 def test_f10_impl_returns_structured_facts(monkeypatch):
@@ -1081,9 +1081,9 @@ def test_registry_derivation_consistent():
     """阶段0 重构守护:CONSOLE_ALLOWED 与 _WW_REACHABLE_ENDPOINTS 必须从声明表派生且与已知集合一致。"""
     import guanlan_v2.console.tools as ct
     ww_in_table = {t["name"] for t in ct.WW_TOOL_TABLE}
-    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 32
+    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 39
     assert ww_in_table == {n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")}
-    assert len(ct.CONSOLE_ALLOWED) == 57
+    assert len(ct.CONSOLE_ALLOWED) == 64
     assert {"/factorlib/save", "/workflow/compose", "/feature/build"} <= ct._WW_REACHABLE_ENDPOINTS
     assert ct._WW_REACHABLE_ENDPOINTS == {ep for t in ct.WW_TOOL_TABLE for ep in t.get("reachable", [])}
 
@@ -1118,6 +1118,13 @@ def test_ww_reachable_endpoints_matches_expected():
         "/screen/model/validate/status", # ww_model_validate(wait)
         "/screen/model/delete",   # ww_model_delete(删变体)
         "/screen/model/default",  # ww_model_set_default(设默认变体)
+        "/seats/ledger/state",    # ww_ledger_state(P0 闭环读取面)
+        "/seats/runs",            # ww_seats_runs
+        "/screen/health",         # ww_model_health
+        "/factor/tsic",           # ww_factor_tsic
+        "/workflow/critique",     # ww_workflow_critique
+        "/screen/regen",          # ww_regen(触发)
+        "/screen/regen/status",   # ww_regen(wait 轮询)
     }
     assert ct._WW_REACHABLE_ENDPOINTS == expected
 
@@ -1374,3 +1381,136 @@ def test_alpha_zoo_tools_whitelisted():
     for name in _SURVIVORS:
         assert name in ct._ALLOWED_ENGINE_TOOLS
         assert name in ct.CONSOLE_ALLOWED
+
+
+# ── P0 §2: 7 个闭环读取/触发薄工具 ─────────────────────────────────────────
+
+def test_ledger_state_impl(monkeypatch):
+    fake = {"ok": True, "opened": True, "start_date": "2026-06-12", "init_cash": 1000000.0,
+            "cash": 400000.0, "n_positions": 2, "covered": 1, "equity": None, "equity_date": None,
+            "days": [], "realized": 12000.0, "n_closed": 3, "win_rate": 2 / 3,
+            "positions": [{"code": "SZ300750", "name": "宁德时代", "qty": 100, "avg_cost": 180.0,
+                           "last_close": 190.0, "mkt_value": 19000.0, "upl": 1000.0},
+                          {"code": "SH600519", "name": "贵州茅台", "qty": 10, "avg_cost": 1500.0,
+                           "last_close": None, "mkt_value": None, "upl": None}]}
+    monkeypatch.setattr(ct, "_self_get", lambda path, timeout=30: fake)
+    res = ct.ledger_state_impl()
+    assert res["ok"] is True
+    assert "缺价" in res["content"]                      # equity=null 诚实显形
+    assert "67%" in res["content"] and "宁德时代" in res["content"]
+
+
+def test_ledger_state_impl_unopened(monkeypatch):
+    monkeypatch.setattr(ct, "_self_get", lambda path, timeout=30: {"ok": True, "opened": False})
+    res = ct.ledger_state_impl()
+    assert res["ok"] is True and "未开账" in res["content"]
+
+
+def test_calibration_impl(monkeypatch):
+    sent = {}
+    fake = {"ok": True, "horizon": 10, "total_decides": 30, "mature": 12,
+            "buckets": [{"bucket": "60-70", "n": 3, "hit_rate": 0.667},
+                        {"bucket": "70-80", "n": 9, "hit_rate": 0.556}],
+            "note": "口径:asof收盘进+N根收盘出"}
+    def fake_get(path, timeout=30):
+        sent["path"] = path
+        return fake
+    monkeypatch.setattr(ct, "_self_get", fake_get)
+    res = ct.calibration_impl(horizon=10)
+    assert sent["path"] == "/seats/calibration?horizon=10"
+    assert res["ok"] is True and "成熟 12" in res["content"]
+    assert "样本不足" in res["content"]                   # n=3 < 5 档注明
+
+
+def test_seats_runs_impl(monkeypatch):
+    fake = {"ok": True, "total": 1, "runs": [
+        {"run_id": "r_1", "code": "SH605358", "ts": "2026-06-13T10:00:00",
+         "start": "2026-03-01", "end": "2026-06-10", "n_buy": 7, "n_sell": 5, "n_hold": 60}]}
+    monkeypatch.setattr(ct, "_self_get", lambda path, timeout=30: fake)
+    res = ct.seats_runs_impl(limit=5)
+    assert res["ok"] is True and "r_1" in res["content"] and "SH605358" in res["content"]
+
+
+def test_model_health_impl(monkeypatch):
+    fake = {"ok": True, "source": "vendored",
+            "v4_ranking": {"date": "2026-07-01", "rows": 5027, "stale_days": 1},
+            "market_breadth": {"as_of": "2026-07-01", "stage": "回暖", "cached": True},
+            "model_health": None}
+    monkeypatch.setattr(ct, "_self_get", lambda path, timeout=30: fake)
+    res = ct.model_health_impl()
+    assert res["ok"] is True and "2026-07-01" in res["content"] and "5027" in res["content"]
+    assert "诚实缺席" in res["content"]                   # model_health=None 显形
+
+
+def test_factor_tsic_impl(monkeypatch):
+    sent = {}
+    fake = {"ok": True, "summary": {"n_codes": 1, "mean_tsic": 0.119, "median_tsic": 0.119,
+                                    "pos_ratio": 1.0, "fwd_days": 20},
+            "codes_tsic": [{"code": "SH605358", "tsic": 0.1192, "n": 220}]}
+    def fake_post(path, payload, timeout=120):
+        sent["path"] = path
+        sent.update(payload)
+        return fake
+    monkeypatch.setattr(ct, "_self_post", fake_post)
+    res = ct.factor_tsic_impl(expr="correlation(returns, idx_ret, 20)", code="SH605358")
+    assert sent["path"] == "/factor/tsic" and sent["codes"] == ["SH605358"]
+    assert sent["expr_or_name"] == "correlation(returns, idx_ret, 20)"
+    assert res["ok"] is True and "0.119" in res["content"]
+    assert "codes_tsic" not in (res.get("raw") or {})     # raw 瘦身:只带 summary
+
+
+def test_factor_tsic_impl_requires_expr():
+    res = ct.factor_tsic_impl(expr="")
+    assert res["ok"] is False and "表达式" in res["content"]
+
+
+def test_workflow_critique_impl(monkeypatch):
+    fake = {"ok": True, "diagnosis": "RankIC 为负,已取负", "source": "rule",
+            "graph": {"nodes": [{"id": "n1"}], "edges": []}}
+    monkeypatch.setattr(ct, "_self_post", lambda path, payload, timeout=120: fake)
+    res = ct.workflow_critique_impl(goal="g", graph={"nodes": [{"id": "n0"}], "edges": []},
+                                    metrics={"rank_ic": -0.02})
+    assert res["ok"] is True and "非LLM" in res["content"]          # source=rule 诚实标注
+    assert "自报" in res["content"]                                  # 红线:必注明指标自报
+    res2 = ct.workflow_critique_impl(goal="g", graph={})
+    assert res2["ok"] is False                                       # 缺图拒绝
+
+
+def test_regen_impl_start_and_wait(monkeypatch):
+    calls = {"n": 0}
+    def fake_post(path, payload, timeout=120):
+        assert path == "/screen/regen"
+        return {"ok": True, "started": True, "state": {"running": True, "phase": "starting"}}
+    def fake_get(path, timeout=30):
+        calls["n"] += 1
+        done = calls["n"] >= 2
+        return {"ok": True, "state": {"running": (not done), "phase": ("done" if done else "v4"),
+                                      "ok": done, "new_date": "2026-07-02", "elapsed_sec": 300}}
+    monkeypatch.setattr(ct, "_self_post", fake_post)
+    monkeypatch.setattr(ct, "_self_get", fake_get)
+    res = ct.regen_impl(wait=True, poll_seconds=0, timeout_seconds=60)
+    assert res["ok"] is True and "2026-07-02" in res["content"]
+
+
+def test_regen_impl_already_running(monkeypatch):
+    monkeypatch.setattr(ct, "_self_post", lambda path, payload, timeout=120:
+                        {"ok": False, "reason": "already_running",
+                         "state": {"phase": "v4", "step": 3}})
+    res = ct.regen_impl(wait=False)
+    assert res["ok"] is False and "already_running" in res["content"]
+
+
+def test_screen_impl_passes_snapshot_note(monkeypatch):
+    sent = {}
+    fake = {"ok": True, "chosen": [], "picks_recorded": True, "model": "prod"}
+    def fake_post(path, payload, timeout=120):
+        sent.update(payload)
+        return fake
+    monkeypatch.setattr(ct, "_self_post", fake_post)
+    res = ct.screen_impl(snapshot=True, note="正式")
+    assert sent["snapshot"] is True and sent["note"] == "正式"
+    assert "picks 已落档" in res["content"]
+    fake2 = {"ok": True, "chosen": [], "picks_recorded": False, "model": "prod"}
+    monkeypatch.setattr(ct, "_self_post", lambda path, payload, timeout=120: fake2)
+    res2 = ct.screen_impl()
+    assert "落盘失败" in res2["content"]                  # 失败显形透传

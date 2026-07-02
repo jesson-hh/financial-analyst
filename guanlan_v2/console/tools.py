@@ -234,7 +234,8 @@ def screen_impl(factors: Optional[List[Any]] = None, pool: str = "all",
                 industryNeutral: Optional[bool] = None, indCap: Optional[float] = None,
                 exclST: Optional[bool] = None, exclHalt: Optional[bool] = None,
                 exclLimit: Optional[bool] = None, exclNew: Optional[bool] = None,
-                model: Optional[str] = None) -> Dict[str, Any]:
+                model: Optional[str] = None,
+                snapshot: Optional[bool] = None, note: Optional[str] = None) -> Dict[str, Any]:
     norm_factors: List[Dict[str, Any]] = []
     for i, f in enumerate(factors or []):
         if isinstance(f, str):
@@ -259,7 +260,8 @@ def screen_impl(factors: Optional[List[Any]] = None, pool: str = "all",
                            "topN": topN, "liqMin": liqMin}
     for _k, _v in (("mlStatus", mlStatus), ("industryNeutral", industryNeutral),
                    ("indCap", indCap), ("exclST", exclST), ("exclHalt", exclHalt),
-                   ("exclLimit", exclLimit), ("exclNew", exclNew), ("model", model)):
+                   ("exclLimit", exclLimit), ("exclNew", exclNew), ("model", model),
+                   ("snapshot", snapshot), ("note", note)):
         if _v is not None:
             cfg[_k] = _v
     try:
@@ -277,7 +279,13 @@ def screen_impl(factors: Optional[List[Any]] = None, pool: str = "all",
         _model_line = f"\n⚠ 变体 {model} 不可用,已回落生产 v4(prod)"
     elif _used and str(_used) != "prod":
         _model_line = f"\n模型: 变体 {_used}"
-    return {"ok": bool(r.get("ok")), "content": summarize_screen(r) + _unsup_line + _model_line,
+    _pr = r.get("picks_recorded") if isinstance(r, dict) else None
+    _picks_line = ""
+    if _pr is True:
+        _picks_line = "\n✓ picks 已落档" + ("(正式选股 snapshot)" if cfg.get("snapshot") else "")
+    elif _pr is False:
+        _picks_line = "\n⚠ picks 档案落盘失败(不影响本次选股结果)"
+    return {"ok": bool(r.get("ok")), "content": summarize_screen(r) + _unsup_line + _model_line + _picks_line,
             "artifact": artifact("screen_result", page="screen", channel="screen",
                                  payload={"cfg": cfg}),
             "raw": r}
@@ -550,6 +558,202 @@ def model_set_default_impl(id: str = "") -> Dict[str, Any]:
     msg = (f"已设默认变体 = {cur}(选股缺省用它,显式 model 仍优先;ww_model_set_default id=prod 可切回官方)。"
            if cur else "已清除默认变体,选股缺省回生产 prod。")
     return {"ok": True, "artifact": None, "raw": {"default": cur}, "content": msg}
+
+
+# ── P0 §2: 闭环读取面 + regen 触发(全部薄壳,无新算法)─────────────────────
+
+def ledger_state_impl() -> Dict[str, Any]:
+    """实盘台账快照:组合持仓/已实现盈亏/胜率/MTM 权益(缺价诚实置空)。"""
+    try:
+        r = _self_get("/seats/ledger/state")
+    except Exception as e:
+        return {"ok": False, "content": f"台账读取失败: {e}", "artifact": None}
+    if not r.get("ok"):
+        return {"ok": False, "content": f"台账读取失败: {r.get('reason') or r}", "artifact": None, "raw": r}
+    if not r.get("opened"):
+        return {"ok": True, "content": "台账未开账(尚无实盘组合记录)。", "artifact": None, "raw": r}
+    eq = r.get("equity")
+    eq_line = (f"MTM权益 {eq:,.0f}(估值日 {r.get('equity_date')})"
+               if isinstance(eq, (int, float)) else "MTM权益 缺价不可估(诚实置空)")
+    wr = r.get("win_rate")
+    wr_line = f"{float(wr) * 100:.0f}%" if isinstance(wr, (int, float)) else "—(无已了结)"
+    pos_lines = []
+    for p in (r.get("positions") or [])[:12]:
+        upl = p.get("upl")
+        tail = (f" 现价 {p.get('last_close')} 浮盈 {upl:+,.0f}"
+                if isinstance(upl, (int, float)) else " 现价缺")
+        pos_lines.append(f"{p.get('code')} {p.get('name', '')} 持 {p.get('qty')} 成本 {p.get('avg_cost')}{tail}")
+    content = (f"实盘台账(开账 {r.get('start_date')} · 组合一本账):现金 {r.get('cash'):,.0f} · "
+               f"持仓 {r.get('n_positions')} 只(估到价 {r.get('covered')})· {eq_line}\n"
+               f"已实现盈亏 {r.get('realized'):+,.0f} · 已了结 {r.get('n_closed')} 笔 · 胜率 {wr_line}"
+               + ("\n" + "\n".join(pos_lines) if pos_lines else ""))
+    return {"ok": True, "content": content, "artifact": None, "raw": r}
+
+
+def calibration_impl(horizon: int = 5) -> Dict[str, Any]:
+    """置信度校准全表:各置信档的真实 N 日方向命中率(评估自己研判先看它)。"""
+    hz = max(1, min(int(horizon or 5), 20))
+    try:
+        r = _self_get(f"/seats/calibration?horizon={hz}")
+    except Exception as e:
+        return {"ok": False, "content": f"校准读取失败: {e}", "artifact": None}
+    if not r.get("ok"):
+        return {"ok": False, "content": f"校准读取失败: {r.get('reason')}", "artifact": None, "raw": r}
+    def _fmt(b: Dict[str, Any]) -> str:
+        seg = b.get("bucket") or b.get("range") or b.get("label") or "?"
+        n, hr = b.get("n"), b.get("hit_rate")
+        hr_s = f"{float(hr) * 100:.0f}%" if isinstance(hr, (int, float)) else "—"
+        low = "(样本不足)" if isinstance(n, int) and n < 5 else ""
+        return f"{seg}: n={n} 命中 {hr_s}{low}"
+    bks = r.get("buckets") or []
+    content = (f"置信校准(horizon={r.get('horizon')}日):研判 {r.get('total_decides')} 条 · 成熟 {r.get('mature')} 条\n"
+               + ("; ".join(_fmt(b) for b in bks) if bks else "(暂无成熟样本)")
+               + f"\n口径: {r.get('note')}")
+    return {"ok": True, "content": content, "artifact": None, "raw": r}
+
+
+def seats_runs_impl(code: str = "", limit: int = 10) -> Dict[str, Any]:
+    """落子回测 run 历史头(新在前;code 数字核匹配)。"""
+    cap = max(1, min(int(limit or 10), 50))
+    q = f"/seats/runs?limit={cap}" + (f"&code={(code or '').strip()}" if (code or "").strip() else "")
+    try:
+        r = _self_get(q)
+    except Exception as e:
+        return {"ok": False, "content": f"回测 run 列表读取失败: {e}", "artifact": None}
+    runs = r.get("runs") or []
+    if not runs:
+        return {"ok": True, "content": "暂无落子回测 run 记录。", "artifact": None, "raw": r}
+    lines = []
+    for x in runs:
+        seg = f"{x.get('run_id')} · {x.get('code')} · {str(x.get('ts', ''))[:16]}"
+        if x.get("start") or x.get("end"):
+            seg += f" · {x.get('start')}→{x.get('end')}"
+        if x.get("n_buy") is not None:
+            seg += f" · 买{x.get('n_buy')}/卖{x.get('n_sell')}/观{x.get('n_hold')}"
+        lines.append(seg)
+    return {"ok": True, "content": f"落子回测 run 头(近 {len(runs)} 条,新在前):\n" + "\n".join(lines),
+            "artifact": None, "raw": r}
+
+
+def model_health_impl() -> Dict[str, Any]:
+    """模型体检:v4 产物新鲜度 + 市场宽度 as_of + 模型健康(vintage OOS IC/告警)。"""
+    try:
+        r = _self_get("/screen/health")
+    except Exception as e:
+        return {"ok": False, "content": f"模型体检读取失败: {e}", "artifact": None}
+    if not r.get("ok"):
+        return {"ok": False, "content": f"模型体检读取失败: {r.get('reason')}", "artifact": None, "raw": r}
+    v4 = r.get("v4_ranking") or {}
+    lines = [f"v4 排名产物: date {v4.get('date')} · {v4.get('rows')} 行 · 陈旧 {v4.get('stale_days')} 天"]
+    mb = r.get("market_breadth")
+    if mb:
+        lines.append(f"市场宽度: as_of {mb.get('as_of')} · 阶段 {mb.get('stage')}")
+    mh = r.get("model_health")
+    if isinstance(mh, dict) and mh:
+        for k, v in mh.items():          # load_health_summary 键随产物在场程度变化 → 按在场键渲染
+            if v is not None and not isinstance(v, (list, dict)):
+                lines.append(f"{k}: {v}")
+        for k in ("alert", "trend", "vintage"):
+            if isinstance(mh.get(k), (list, dict)) and mh.get(k):
+                lines.append(f"{k}: {json.dumps(mh[k], ensure_ascii=False, default=str)[:300]}")
+    else:
+        lines.append("模型体检块: 无(产物缺失,诚实缺席)")
+    return {"ok": True, "content": "模型体检:\n" + "\n".join(lines), "artifact": None, "raw": r}
+
+
+def factor_tsic_impl(expr: str = "", code: str = "", codes: Optional[List[str]] = None,
+                     universe: str = "", fwd_days: int = 20,
+                     start: Optional[str] = None, end: Optional[str] = None) -> Dict[str, Any]:
+    """个股时序 IC:逐票 Spearman(因子值ₜ, 自身未来收益ₜ)——单票/小池的正确口径。"""
+    ex = (expr or "").strip()
+    if not ex:
+        return {"ok": False, "content": "请给因子表达式/注册名 expr(先用 ww_factor_fields 查合法字段)",
+                "artifact": None}
+    body: Dict[str, Any] = {"expr_or_name": ex, "fwd_days": int(fwd_days or 20)}
+    cs = [str(c).strip() for c in ([code] if (code or "").strip() else (codes or [])) if str(c).strip()]
+    if cs:
+        body["codes"] = cs
+    elif (universe or "").strip():
+        body["universe"] = universe.strip()
+    if start:
+        body["start"] = start
+    if end:
+        body["end"] = end
+    try:
+        r = _self_post("/factor/tsic", body, timeout=300)
+    except Exception as e:
+        return {"ok": False, "content": f"时序IC计算失败: {e}", "artifact": None}
+    if not r.get("ok"):
+        return {"ok": False, "content": f"时序IC计算失败: {r.get('reason') or r.get('status')}",
+                "artifact": None, "raw": {"summary": r.get("summary")}}
+    s = r.get("summary") or {}
+    rows = r.get("codes_tsic") or []
+    per = "; ".join(f"{x.get('code')}: tsic {x.get('tsic'):+.4f}(n={x.get('n')})"
+                    for x in rows[:5] if isinstance(x.get("tsic"), (int, float)))
+    content = (f"个股时序IC({ex} · 前向{s.get('fwd_days')}日 · {s.get('n_codes')}票):"
+               f"均值 {s.get('mean_tsic')} · 中位 {s.get('median_tsic')} · 正占比 {s.get('pos_ratio')}"
+               + (f"\n{per}" if per else "")
+               + "\n口径: 逐票 Spearman(因子值ₜ, 自身未来收益ₜ),因子取 RAW 值")
+    return {"ok": True, "content": content, "artifact": None,
+            "raw": {"summary": s, "n_rows": len(rows)}}   # raw 瘦身:codes_tsic 全池行不进上下文
+
+
+def workflow_critique_impl(goal: str = "", graph: Optional[Dict[str, Any]] = None,
+                           metrics: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """AI 批判环:目标+当前图+回测指标 → 诊断+改进图(LLM,失败规则兜底)。"""
+    g = graph if isinstance(graph, dict) else {}
+    if not (g.get("nodes") or g.get("edges")):
+        return {"ok": False, "artifact": None,
+                "content": "请给当前工作流 graph({nodes,edges});metrics 传该图的真实回测指标"
+                           "(rank_ic/sharpe/ann_return/oos_verdict 等)"}
+    body = {"goal": (goal or "").strip(), "graph": g, "metrics": metrics or {}}
+    try:
+        r = _self_post("/workflow/critique", body, timeout=120)
+    except Exception as e:
+        return {"ok": False, "content": f"批判环调用失败: {e}", "artifact": None}
+    gr = r.get("graph") or {}
+    src = r.get("source") or "?"
+    content = (f"AI 批判({'真·LLM' if src == 'llm' else '规则兜底·非LLM'}):{r.get('diagnosis')}\n"
+               f"改进图: {len(gr.get('nodes') or [])} 节点(nodes/edges 见 raw.graph)\n"
+               "⚠ 注意: metrics 为调用方自报,后端不复算(P2 将加强为后端取数)。")
+    return {"ok": bool(r.get("ok")), "content": content, "artifact": None, "raw": r}
+
+
+def regen_impl(end: str = "", wait: bool = True,
+               poll_seconds: float = 15.0, timeout_seconds: float = 600.0) -> Dict[str, Any]:
+    """三产物(breadth/mainline/v4)再生:后台子进程 ~5min;wait=true 轮询到完成。"""
+    body: Dict[str, Any] = {}
+    if (end or "").strip():
+        body["end"] = end.strip()
+    try:
+        r = _self_post("/screen/regen", body)
+    except Exception as e:
+        return {"ok": False, "content": f"再生启动失败: {e}", "artifact": None}
+    if not r.get("ok"):
+        st = r.get("state") or {}
+        return {"ok": False, "artifact": None, "raw": r,
+                "content": f"再生未启动: {r.get('reason')}(phase={st.get('phase')} step={st.get('step')})"}
+    if not wait:
+        return {"ok": True, "artifact": None, "raw": r,
+                "content": "三产物再生已启动(后台~5分钟)。稍后 ww_regen wait=true 续查,或 ww_model_health 验新鲜度。"}
+    import time as _time
+    deadline = _time.time() + float(timeout_seconds or 600.0)
+    state: Dict[str, Any] = {}
+    while _time.time() <= deadline:
+        try:
+            s = _self_get("/screen/regen/status")
+        except Exception as e:
+            return {"ok": False, "content": f"再生状态读取失败: {e}", "artifact": None, "raw": {"state": state}}
+        state = s.get("state") or {}
+        if not state.get("running") and state.get("phase") in ("done", "error"):
+            ok = bool(state.get("ok"))
+            return {"ok": ok, "artifact": None, "raw": {"state": state},
+                    "content": (f"再生完成: 新数据日 {state.get('new_date')} · 用时 {state.get('elapsed_sec')}s"
+                                if ok else f"再生失败: {state.get('error')}")}
+        if poll_seconds:
+            _time.sleep(float(poll_seconds))
+    return {"ok": False, "artifact": None, "raw": {"state": state},
+            "content": "再生轮询超时: 后端可能仍在跑,稍后用 ww_model_health 查产物新鲜度验新。"}
 
 
 def seats_decide_impl(code: str, name: str = "", creed: str = "",
@@ -1253,7 +1457,10 @@ WW_TOOL_TABLE = [
          "exclHalt": {"type": "boolean", "description": "剔除停牌(默认 true)"},
          "exclLimit": {"type": "boolean", "description": "剔除涨跌停(默认 true)"},
          "exclNew": {"type": "boolean", "description": "剔除次新(默认 false)"},
-         "model": {"type": "string", "description": "用哪个 v4 模型:省略/prod=生产 v4;传变体 id(ww_model_list 查)=用该变体选股,不可用则回落 prod"}}},
+         "model": {"type": "string", "description": "用哪个 v4 模型:省略/prod=生产 v4;传变体 id(ww_model_list 查)=用该变体选股,不可用则回落 prod"},
+         "snapshot": {"type": "boolean", "default": False,
+                      "description": "标记为「正式选股」落 picks 档案(供后续收益跟踪);实验/参数扫描别开"},
+         "note": {"type": "string", "description": "选股备注,随 picks 档案落盘"}}},
      "impl": screen_impl, "cost": "seconds", "confirm": False,
      "reachable": ["/screen/run"]},
     {"name": "ww_screen_factors",
@@ -1526,6 +1733,73 @@ WW_TOOL_TABLE = [
       "required": ["code"]},
      "impl": etf_report_run_impl, "cost": "minutes", "confirm": True,
      "reachable": []},
+    {"name": "ww_ledger_state",
+     "description":
+         "实盘台账快照:组合持仓、现金、已实现盈亏、胜率、MTM 权益(缺价诚实置空)。"
+         "看组合真实成绩用它,评估研判质量用 ww_calibration。",
+     "input_schema": {"type": "object", "properties": {}},
+     "impl": ledger_state_impl, "cost": "instant", "confirm": False,
+     "reachable": ["/seats/ledger/state"]},
+    {"name": "ww_calibration",
+     "description":
+         "置信度校准全表:各置信档研判的真实 N 日方向命中率(『我说80%把握时实际对几成』)。"
+         "复盘/评估自己研判先看它;n<5 的档样本不足仅供参考。",
+     "input_schema": {"type": "object", "properties": {
+         "horizon": {"type": "integer", "default": 5, "description": "N 日方向命中窗口(1-20)"}}},
+     "impl": calibration_impl, "cost": "instant", "confirm": False,
+     "reachable": ["/seats/calibration"]},
+    {"name": "ww_seats_runs",
+     "description": "落子回测 run 历史头(run_id/票/时间窗/买卖观计数,新在前)。可选 code 按票过滤。",
+     "input_schema": {"type": "object", "properties": {
+         "code": {"type": "string", "description": "可选,按票数字核过滤,如 605358"},
+         "limit": {"type": "integer", "default": 10}}},
+     "impl": seats_runs_impl, "cost": "instant", "confirm": False,
+     "reachable": ["/seats/runs"]},
+    {"name": "ww_model_health",
+     "description":
+         "模型体检:v4 排名产物新鲜度(date/rows/陈旧天数)+ 市场宽度 as_of + 模型健康"
+         "(vintage OOS IC/衰减告警,缺产物诚实缺席)。动因子/模型/选股前先用它核数据新鲜度。",
+     "input_schema": {"type": "object", "properties": {}},
+     "impl": model_health_impl, "cost": "instant", "confirm": False,
+     "reachable": ["/screen/health"]},
+    {"name": "ww_factor_tsic",
+     "description":
+         "个股时序 IC:逐票 Spearman(因子值, 自身未来收益)——单票/小池口径(截面 IC 单票退化时用它)。"
+         "expr 为 zoo 表达式或注册名(ww_factor_fields 查字段)。",
+     "input_schema": {"type": "object", "properties": {
+         "expr": {"type": "string", "description": "因子表达式/注册名"},
+         "code": {"type": "string", "description": "单票代码,如 SH605358(与 codes 二选一)"},
+         "codes": {"type": "array", "items": {"type": "string"}},
+         "universe": {"type": "string", "description": "不给 code/codes 时的小池 id,如 csi_fast"},
+         "fwd_days": {"type": "integer", "default": 20},
+         "start": {"type": "string"}, "end": {"type": "string"}},
+      "required": ["expr"]},
+     "impl": factor_tsic_impl, "cost": "seconds", "confirm": False,
+     "reachable": ["/factor/tsic"]},
+    {"name": "ww_workflow_critique",
+     "description":
+         "AI 批判环:给出研究目标+当前工作流 graph({nodes,edges})+该图真实回测指标,"
+         "LLM 诊断问题并产改进图(LLM 不可用时规则兜底,来源诚实标注)。"
+         "注意:指标由调用方自报,后端不复算。",
+     "input_schema": {"type": "object", "properties": {
+         "goal": {"type": "string"},
+         "graph": {"type": "object", "description": "{nodes:[],edges:[]} 当前工作流图"},
+         "metrics": {"type": "object",
+                     "description": "该图真实回测指标 {rank_ic,sharpe,ann_return,oos_verdict,n_dates,factor}"}},
+      "required": ["graph"]},
+     "impl": workflow_critique_impl, "cost": "seconds", "confirm": False,
+     "reachable": ["/workflow/critique"]},
+    {"name": "ww_regen",
+     "description":
+         "三产物再生(breadth/mainline/v4 排名重算,即选股页『拉取最新数据』):后台子进程 ~5 分钟,"
+         "单飞锁防并发;wait=true(默认)轮询到完成并报新数据日。更完行情(ww_update_data)后要选股吃到新数据,必须跑它。需用户确认。",
+     "input_schema": {"type": "object", "properties": {
+         "end": {"type": "string", "description": "可选截止交易日 YYYY-MM-DD,缺省=最新数据日"},
+         "wait": {"type": "boolean", "default": True},
+         "poll_seconds": {"type": "number", "default": 15},
+         "timeout_seconds": {"type": "number", "default": 600}}},
+     "impl": regen_impl, "cost": "minutes", "confirm": True,
+     "reachable": ["/screen/regen", "/screen/regen/status"]},
     {"name": "ww_capabilities",
      "description":
          "列出我(帷幄)当前能调用的全部工具及用途。用户问『你能做什么/有哪些功能/会用什么工具』,或我不确定该用哪个工具时,先调它自查。",
