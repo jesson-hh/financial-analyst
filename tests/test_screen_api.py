@@ -401,3 +401,41 @@ def test_health_has_regen_scheduler_block():
     j = _client().get("/screen/health").json()
     assert "regen_scheduler" in j
     assert set(j["regen_scheduler"].keys()) == {"enabled", "last_auto_ts"}
+
+
+# ── P1 §5: models draft 过滤 + set_default 拒 draft ─────────────────────────
+
+def _seed_variants(monkeypatch, tmp_path):
+    import pandas as pd
+    from guanlan_v2.screen import model_registry as reg
+    monkeypatch.setattr(reg, "MODELS_DIR", tmp_path / "models")
+    row = pd.DataFrame({"code": ["SH600519"], "lgb_score": [1.0], "lgb_pct": [0.9],
+                        "lgb_rank": [1], "v4_total": [5], "v4_layer": ["大盘"],
+                        "date": ["2026-07-01"]})
+    reg.save_variant("m_ok", row, {"id": "m_ok", "name": "过门", "oos_ic": 0.03})
+    reg.save_variant("m_dr", row, {"id": "m_dr", "name": "草稿", "oos_ic": 0.001,
+                                   "status": "draft",
+                                   "gate": {"min_oos_ic": 0.01, "oos_ic": 0.001,
+                                            "passed": False}})
+    return reg
+
+
+def test_models_filters_draft_by_default(monkeypatch, tmp_path):
+    _seed_variants(monkeypatch, tmp_path)
+    c = _client()
+    ids = [v["id"] for v in c.get("/screen/models").json()["variants"]]
+    assert "m_ok" in ids and "m_dr" not in ids                 # 默认不见 draft
+    j = c.get("/screen/models?include_draft=1").json()
+    ids2 = {v["id"]: v for v in j["variants"]}
+    assert "m_dr" in ids2 and ids2["m_dr"]["status"] == "draft"
+
+
+def test_set_default_rejects_draft(monkeypatch, tmp_path):
+    reg = _seed_variants(monkeypatch, tmp_path)
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        reg.set_default_model("m_dr")
+    j = _client().post("/screen/model/default", json={"id": "m_dr"}).json()
+    assert j["ok"] is False and "draft" in j["reason"]
+    reg.set_default_model("m_ok")                              # 非 draft 照常可设
+    assert reg.get_default_model() == "m_ok"

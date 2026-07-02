@@ -197,3 +197,22 @@ def test_model_ranking_endpoint(tmp_path, monkeypatch):
     from guanlan_v2.server import app
     j = TestClient(app).get("/screen/model/ranking?id=m_r1").json()
     assert j["ok"] is True and len(j["rows"]) == 120 and "score" in j["rows"][0]
+
+
+# ── P1 §5: promote 阈值门(opt-in 默认关)────────────────────────────────────
+
+def test_apply_promote_gate(monkeypatch):
+    from guanlan_v2.strategy.compute.model_workflow import _apply_promote_gate
+    monkeypatch.delenv("GUANLAN_PROMOTE_MIN_OOS_IC", raising=False)
+    m = {"id": "m_x"}
+    assert _apply_promote_gate(dict(m), 0.001) == m            # env 缺省=零行为变化
+    monkeypatch.setenv("GUANLAN_PROMOTE_MIN_OOS_IC", "not-a-float")
+    assert _apply_promote_gate(dict(m), 0.001) == m            # 非法值=门未启用
+    monkeypatch.setenv("GUANLAN_PROMOTE_MIN_OOS_IC", "0.01")
+    lo = _apply_promote_gate(dict(m), 0.004)
+    assert lo["status"] == "draft" and lo["gate"]["passed"] is False
+    assert lo["gate"]["min_oos_ic"] == 0.01 and lo["gate"]["oos_ic"] == 0.004
+    none_ic = _apply_promote_gate(dict(m), None)
+    assert none_ic["status"] == "draft"                        # 算不出 OOS 也进 draft
+    hi = _apply_promote_gate(dict(m), 0.01)
+    assert hi["gate"]["passed"] is True and "status" not in hi # ≥ 门槛(含相等)通过

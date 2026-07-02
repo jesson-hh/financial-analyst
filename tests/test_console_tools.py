@@ -1546,3 +1546,41 @@ def test_picks_perf_impl_no_archive(monkeypatch):
     res = ct.picks_perf_impl()
     assert res["ok"] is True and "暂无正式选股档案" in res["content"]
     assert "snapshot=true" in res["content"]                   # 教用户怎么落档
+
+
+# ── P1 §5: promote 阈值门 console 侧 ─────────────────────────────────────────
+
+def test_model_list_impl_draft_badge(monkeypatch):
+    sent = {}
+    fake = {"ok": True, "default_model": None, "variants": [
+        {"id": "m_dr", "name": "草稿", "n_features": 5, "oos_ic": 0.001, "status": "draft"}]}
+    def fake_get(path, timeout=30):
+        sent["path"] = path
+        return fake
+    monkeypatch.setattr(ct, "_self_get", fake_get)
+    res = ct.model_list_impl(include_draft=True)
+    assert sent["path"] == "/screen/models?include_draft=1"
+    assert "⚠draft未过门" in res["content"]
+    ct.model_list_impl()
+    assert sent["path"] == "/screen/models"                    # 默认不带参
+
+
+def test_model_promote_impl_wait_reports_draft(monkeypatch):
+    calls = {"status": 0}
+    def fake_post(path, payload, timeout=120):
+        return {"ok": True, "started": True, "variant_id": "m_w1"}
+    def fake_get(path, timeout=30):
+        if path.startswith("/model/promote/status"):
+            calls["status"] += 1
+            done = calls["status"] >= 2
+            return {"ok": True, "state": {"running": (not done),
+                                          "phase": ("done" if done else "train"),
+                                          "ok": done, "error": None}}
+        return {"ok": True, "default_model": None, "variants": [
+            {"id": "m_w1", "status": "draft", "oos_ic": 0.004,
+             "gate": {"min_oos_ic": 0.01, "oos_ic": 0.004, "passed": False}}]}
+    monkeypatch.setattr(ct, "_self_post", fake_post)
+    monkeypatch.setattr(ct, "_self_get", fake_get)
+    res = ct.model_promote_impl(name="w", features=["rev_20"], wait=True, poll_seconds=0)
+    assert res["ok"] is True
+    assert "draft 区" in res["content"] and "0.01" in res["content"]   # 诚实报未过门

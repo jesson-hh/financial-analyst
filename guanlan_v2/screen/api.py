@@ -1456,10 +1456,12 @@ def build_screen_router() -> APIRouter:
         return JSONResponse({"ok": True, "state": _regen_public_state()})
 
     @router.get("/models")
-    def screen_models():
+    def screen_models(include_draft: int = 0):
         from guanlan_v2.screen.model_registry import list_variants, get_default_model
         dflt = get_default_model()
         vs = list_variants()
+        if not include_draft:
+            vs = [v for v in vs if v.get("status") != "draft"]   # P1 门:draft 不进正式货架
         for v in vs:
             v["is_default"] = (v.get("id") == dflt)
         return JSONResponse({"ok": True, "variants": vs, "default_model": dflt})

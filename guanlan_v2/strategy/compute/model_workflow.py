@@ -10,6 +10,26 @@ from typing import Any, Dict
 _TREE_KINDS = ("lightgbm", "xgboost", "rf")
 
 
+def _apply_promote_gate(meta: Dict[str, Any], oos_ic) -> Dict[str, Any]:
+    """P1 §5 opt-in 阈值门:env GUANLAN_PROMOTE_MIN_OOS_IC 设了才生效(缺省零行为变化)。
+    不达标(含 oos_ic=None)→ meta.status="draft"(不进正式列表/不能设默认);达标记 passed。
+    门只拦「不合格自动进正式货架」;采纳(设默认)永远人工确认。"""
+    import os
+    raw = os.environ.get("GUANLAN_PROMOTE_MIN_OOS_IC")
+    if not raw:
+        return meta
+    try:
+        gate = float(raw)
+    except ValueError:
+        print(f"[model_promote] warn: GUANLAN_PROMOTE_MIN_OOS_IC 非法值 '{raw}',门未启用", flush=True)
+        return meta
+    passed = (oos_ic is not None) and (float(oos_ic) >= gate)
+    meta["gate"] = {"min_oos_ic": gate, "oos_ic": oos_ic, "passed": bool(passed)}
+    if not passed:
+        meta["status"] = "draft"
+    return meta
+
+
 def train_promote(spec: Dict[str, Any]) -> Dict[str, Any]:
     """spec={variant_id,name,kind,recipe:{features,label,fwd_days,universe,start,end,params},created}
     → 全窗口 fit → 最新截面预测 → lgb_pct 分位排名 → 真OOS留出IC → save_variant(source=workflow)。
@@ -80,11 +100,16 @@ def train_promote(spec: Dict[str, Any]) -> Dict[str, Any]:
         "universe": body.universe, "asof": rank_df["date"].iloc[0],
         "created": spec.get("created") or "", "hyper": hyper,
     }
+    meta = _apply_promote_gate(meta, oos_ic)
     try:
         reg.save_variant(spec["variant_id"], rank_df, meta)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": f"入库失败: {type(exc).__name__}: {exc}"}
-    return {"ok": True, "variant_id": spec["variant_id"], "oos_ic": oos_ic}
+    res: Dict[str, Any] = {"ok": True, "variant_id": spec["variant_id"], "oos_ic": oos_ic}
+    if meta.get("status") == "draft":
+        res["status"] = "draft"
+        res["gate"] = meta.get("gate")
+    return res
 
 
 def _jsonresp_reason(resp) -> str:
@@ -140,6 +165,6 @@ if __name__ == "__main__":   # python -m guanlan_v2.strategy.compute.model_workf
     spec = json.loads(open(sys.argv[1], encoding="utf-8").read())
     print(f"[model_promote] variant={spec['variant_id']} kind={spec.get('kind')} ...", flush=True)
     r = train_promote(spec)
-    print(f"[model_promote] done ok={r.get('ok')} oos_ic={r.get('oos_ic')} reason={r.get('reason')}",
-          flush=True)
+    print(f"[model_promote] done ok={r.get('ok')} oos_ic={r.get('oos_ic')} "
+          f"status={r.get('status') or 'ok'} reason={r.get('reason')}", flush=True)
     sys.exit(0 if r.get("ok") else 1)     # 失败非零退出码(供父进程状态机判 ok)

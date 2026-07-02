@@ -319,10 +319,10 @@ def screen_factors_impl(family: str = "", supported_only: bool = True) -> Dict[s
             "raw": {"n": len(rows), "ids": [f.get("id") for f in rows]}}
 
 
-def model_list_impl() -> Dict[str, Any]:
+def model_list_impl(include_draft: bool = False) -> Dict[str, Any]:
     """列出已训练的 v4 变体(供 ww_screen_run 的 model 取 id;生产 v4 隐含=prod)。"""
     try:
-        r = _self_get("/screen/models")
+        r = _self_get("/screen/models" + ("?include_draft=1" if include_draft else ""))
     except Exception as e:
         return {"ok": False, "content": f"变体列表拉取失败: {e}", "artifact": None}
     vs = r.get("variants") or []
@@ -337,8 +337,9 @@ def model_list_impl() -> Dict[str, Any]:
         oid = "" if oi is None else f" 留出OOS IC {float(oi):+.3f}"
         uns = m.get("unsupported_factors") or []
         unl = f" ⚠{len(uns)}未用" if uns else ""
+        dr = " ⚠draft未过门" if m.get("status") == "draft" else ""
         star = " ★默认" if m.get("id") == dflt else ""
-        lines.append(f"{m.get('id')}「{m.get('name')}」· {m.get('n_features', '—')}特征{oid}{unl}{star}")
+        lines.append(f"{m.get('id')}「{m.get('name')}」· {m.get('n_features', '—')}特征{oid}{unl}{dr}{star}")
     dl = f"(当前默认 = {dflt})" if dflt else "(当前默认 = 生产 prod)"
     head = f"已训练 v4 变体 {len(vs)} 个{dl}(ww_screen_run 传 model=<id> 用其选股;省略=默认):\n"
     return {"ok": True, "content": head + "\n".join(lines), "artifact": None,
@@ -402,7 +403,9 @@ def model_promote_impl(name: str = "", features: Optional[List[str]] = None,
                        universe: str = "csi800", label: str = "fwd_ret",
                        fwd_days: int = 5, start: str = "2022-01-01",
                        end: str = "", params: Optional[Dict[str, Any]] = None,
-                       benchmark: str = "", leader: str = "") -> Dict[str, Any]:
+                       benchmark: str = "", leader: str = "",
+                       wait: bool = False, poll_seconds: float = 5.0,
+                       timeout_seconds: float = 900.0) -> Dict[str, Any]:
     """Promote a workflow-replayable model variant with recipe, so strict CPCV can retrain it."""
     nm = (name or "").strip()
     if not nm:
@@ -453,6 +456,45 @@ def model_promote_impl(name: str = "", features: Optional[List[str]] = None,
     if not r.get("ok"):
         return {"ok": False, "content": f"可重训模型未启动: {r.get('reason')}", "artifact": None, "raw": r}
     vid = r.get("variant_id")
+    if wait:
+        import time as _time
+        deadline = _time.time() + float(timeout_seconds or 900.0)
+        state: Dict[str, Any] = {}
+        done = False
+        while _time.time() <= deadline:
+            try:
+                s = _self_get("/model/promote/status")
+            except Exception as e:
+                return {"ok": False, "content": f"入库状态读取失败: {e}", "artifact": None}
+            state = s.get("state") or {}
+            if not state.get("running") and state.get("phase") == "done":
+                done = True
+                break
+            if poll_seconds:
+                _time.sleep(float(poll_seconds))
+        if not done:
+            return {"ok": False, "artifact": None, "raw": {"state": state},
+                    "content": f"入库轮询超时 {vid}:后端可能仍在跑,稍后 ww_model_list 查"}
+        if not state.get("ok"):
+            return {"ok": False, "artifact": None, "raw": {"state": state},
+                    "content": f"入库失败 {vid}: {state.get('error')}"}
+        mrow = None
+        try:
+            mr = _self_get("/screen/models?include_draft=1")
+            mrow = next((m for m in (mr.get("variants") or []) if m.get("id") == vid), None)
+        except Exception:  # noqa: BLE001
+            mrow = None
+        g = (mrow or {}).get("gate") or {}
+        if (mrow or {}).get("status") == "draft":
+            return {"ok": True, "artifact": None, "raw": {"variant": mrow},
+                    "content": (f"入库完成但未过门槛:oos_ic {g.get('oos_ic')} < 门槛 "
+                                f"{g.get('min_oos_ic')},已落 draft 区(不进正式列表、"
+                                f"不能设默认;ww_model_list include_draft=true 可见)")}
+        oi = (mrow or {}).get("oos_ic")
+        return {"ok": True, "artifact": None, "raw": {"variant": mrow},
+                "content": f"入库完成 {vid}:留出 OOS IC {oi}"
+                           + (f"(过门槛 {g.get('min_oos_ic')})" if g else "")
+                           + f"。ww_model_validate id={vid} tier=strict 可跑 CPCV。"}
     return {"ok": True, "artifact": None,
             "raw": {"response": r, "recipe": recipe, "factor_ids": fids},
             "content": f"已启动可重训模型入库「{nm}」id={vid}。recipe 已随模型保存；完成后 ww_model_validate id={vid} tier=strict 可跑 CPCV。"}
@@ -1515,7 +1557,10 @@ WW_TOOL_TABLE = [
      "description":
          "列出已训练的 v4 模型变体(id+名称+留出OOS IC+特征数),供 ww_screen_run 的 model 取 id。"
          "用户问『有哪些(自训)模型/变体』或要用变体选股前先调它查 id。生产 v4 隐含=prod 不在此列。",
-     "input_schema": {"type": "object", "properties": {}},
+     "input_schema": {"type": "object", "properties": {
+         "include_draft": {"type": "boolean", "default": False,
+                           "description": "true=连 draft 区(未过 promote 门槛)一起列,带 ⚠ 标"},
+     }},
      "impl": model_list_impl, "cost": "instant", "confirm": False,
      "reachable": ["/screen/models"]},
     {"name": "ww_model_train",
@@ -1551,7 +1596,11 @@ WW_TOOL_TABLE = [
          "end": {"type": "string"},
          "benchmark": {"type": "string", "description": "可选; 表达式含 idx_ret 时默认 csi300,也可显式传 csi300"},
          "leader": {"type": "string", "description": "可选; 表达式含 ref_ret 时必须传龙头代码"},
-         "params": {"type": "object", "description": "模型超参,如 lightgbm: {leaves, lr}"}},
+         "params": {"type": "object", "description": "模型超参,如 lightgbm: {leaves, lr}"},
+         "wait": {"type": "boolean", "default": False,
+                  "description": "true=轮询到入库完成并报 oos_ic/是否过门槛(draft 区诚实显形)"},
+         "poll_seconds": {"type": "number", "default": 5},
+         "timeout_seconds": {"type": "number", "default": 900}},
       "required": ["name"]},
      "impl": model_promote_impl, "cost": "minutes", "confirm": True,
      "reachable": ["/screen/factors", "/model/promote"]},

@@ -106,4 +106,11 @@ def set_default_model(model_id) -> None:
         return
     if not variant_ranking_path(model_id).exists():
         raise ValueError(f"变体不存在: {model_id}")
+    try:
+        _m = variant_meta(model_id)
+    except Exception:  # noqa: BLE001 — meta 读不了不拦(存在性已校验)
+        _m = {}
+    if (_m or {}).get("status") == "draft":
+        raise ValueError(f"变体 {model_id} 处于 draft 区(未过 promote 门槛),不能设默认;"
+                         f"复核后重训过门再设")
     p.write_text(json.dumps({"id": model_id}, ensure_ascii=False), encoding="utf-8")
