@@ -348,3 +348,56 @@ def test_record_picks_never_raises():
     body = ScreenIn()
     malformed = {"chosen": [123, "not-a-dict"], "pool": None}   # 元素无 .get → 构造必炸
     assert _record_picks(body, malformed, "prod", "2026-07-01") is False
+
+
+# ── P1 §4: regen 每日定时(opt-in 默认关)────────────────────────────────────
+
+def test_regen_scheduler_default_off(monkeypatch):
+    import guanlan_v2.screen.api as api
+    monkeypatch.delenv("GUANLAN_REGEN_DAILY", raising=False)
+    monkeypatch.setattr(api, "_regen_sched_started", False)
+    monkeypatch.setattr(api, "_REGEN_SCHED",
+                        {"enabled": False, "last_auto_ts": None, "last_auto_date": None})
+    api.start_regen_daily_scheduler()
+    assert api._REGEN_SCHED["enabled"] is False                # env 缺省=不起线程,零行为变化
+    assert api._regen_sched_started is False
+
+
+def test_regen_sched_tick_fires_once_per_day(monkeypatch):
+    import datetime as dt
+    import guanlan_v2.screen.api as api
+    calls = {"n": 0}
+    monkeypatch.setattr(api, "_start_regen_bg",
+                        lambda end=None: calls.__setitem__("n", calls["n"] + 1) or True)
+    monkeypatch.setattr(api, "_REGEN_SCHED",
+                        {"enabled": True, "last_auto_ts": None, "last_auto_date": None})
+    monkeypatch.delenv("GUANLAN_REGEN_DAILY_HOUR", raising=False)
+    assert api._regen_sched_tick(dt.datetime(2026, 7, 2, 17, 59)) is False   # 未到 18 点
+    assert calls["n"] == 0
+    assert api._regen_sched_tick(dt.datetime(2026, 7, 2, 18, 1)) is True     # 触发
+    assert calls["n"] == 1 and api._REGEN_SCHED["last_auto_ts"].startswith("2026-07-02T18:01")
+    assert api._regen_sched_tick(dt.datetime(2026, 7, 2, 20, 0)) is False    # 当日不重复
+    assert calls["n"] == 1
+    assert api._regen_sched_tick(dt.datetime(2026, 7, 3, 18, 5)) is True     # 次日再触发
+    assert calls["n"] == 2
+
+
+def test_start_regen_bg_singleflight(monkeypatch):
+    import guanlan_v2.screen.api as api
+    monkeypatch.setattr(api, "_run_regen_subprocess", lambda end: None)      # 桩:不真跑
+    with api._REGEN_LOCK:
+        api._REGEN_STATE["running"] = True
+    assert api._start_regen_bg() is False                                    # 已在跑 → False
+    with api._REGEN_LOCK:
+        api._REGEN_STATE["running"] = False
+    assert api._start_regen_bg() is True                                     # 空闲 → 启动
+    import time
+    time.sleep(0.2)                                                          # 桩线程瞬时结束
+    with api._REGEN_LOCK:
+        api._REGEN_STATE["running"] = False                                  # 复位防跨测污染
+
+
+def test_health_has_regen_scheduler_block():
+    j = _client().get("/screen/health").json()
+    assert "regen_scheduler" in j
+    assert set(j["regen_scheduler"].keys()) == {"enabled", "last_auto_ts"}

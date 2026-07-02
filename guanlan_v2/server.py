@@ -217,6 +217,11 @@ def create_app():
     # 免手动点「数据」按钮 / 跑 CLI。盘中守卫在 generate 内, 早触发也只落上一完整收盘日。
     start_market_status_scheduler()
 
+    # P1:regen 每日 EOD 自动再生(opt-in;GUANLAN_REGEN_DAILY=1 才启;
+    # 定时器随本进程存亡,非 24/7 保证——进程死定时即停,health.regen_scheduler 显形)
+    from guanlan_v2.screen.api import start_regen_daily_scheduler
+    start_regen_daily_scheduler()
+
     # ── guanlan 自有 MCP(挂 /gl-mcp,与引擎 /mcp 并存)──────────────
     # build_app() 已挂引擎 MCP 于 /mcp 并为其设了 app lifespan。Starlette 不会自动
     # 跑被挂子应用的 lifespan,故这里把 guanlan MCP 的 session-manager lifespan

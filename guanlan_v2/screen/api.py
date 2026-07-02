@@ -158,6 +158,68 @@ def _regen_public_state() -> Dict[str, Any]:
     return s
 
 
+# ── P1 §4:regen 每日定时(opt-in;GUANLAN_REGEN_DAILY=1 才启;默认关=零行为变化)──
+# 诚实口径:定时器随 9999 进程存亡,进程死=定时停,非 24/7 保证。
+_REGEN_SCHED: Dict[str, Any] = {"enabled": False, "last_auto_ts": None, "last_auto_date": None}
+_regen_sched_started = False
+
+
+def _start_regen_bg(end: Optional[str] = None) -> bool:
+    """抢单飞锁并起再生后台线程;已在跑 → False。POST /screen/regen 与定时调度共用。"""
+    import time as _t
+    import threading as _th
+    with _REGEN_LOCK:
+        busy = bool(_REGEN_STATE.get("running"))
+        if not busy:
+            _REGEN_STATE.update(
+                running=True, phase="starting", label="启动子进程…", step=0,
+                started_at=_t.time(), ended_at=None, ok=None, error=None,
+                end=(end or None), new_date=None, lines=[],
+            )
+    if busy:
+        return False
+    _th.Thread(target=lambda: _safe(lambda: _run_regen_subprocess(end or None)),
+               daemon=True).start()
+    return True
+
+
+def _regen_sched_tick(now) -> bool:
+    """定时判定+触发(注入 now 可测)。每日 GUANLAN_REGEN_DAILY_HOUR(默认18)点后、
+    当日未自动处理过 → 触发一次;已有再生在跑(手动)也记当日已处理(单飞语义,不重复)。"""
+    import os as _os
+    hour = int(_os.environ.get("GUANLAN_REGEN_DAILY_HOUR", "18"))
+    today = now.date().isoformat()
+    if now.hour < hour or _REGEN_SCHED.get("last_auto_date") == today:
+        return False
+    _REGEN_SCHED["last_auto_date"] = today
+    _REGEN_SCHED["last_auto_ts"] = now.isoformat(timespec="seconds")
+    _start_regen_bg(None)   # 已在跑返 False 亦视为当日已处理(手动跑过就不叠一次)
+    return True
+
+
+def start_regen_daily_scheduler() -> None:
+    """opt-in 每日 EOD 自动再生(env GUANLAN_REGEN_DAILY=1 才起 daemon 线程;缺省直接返回)。"""
+    global _regen_sched_started
+    import os as _os
+    if _regen_sched_started or _os.environ.get("GUANLAN_REGEN_DAILY") != "1":
+        return
+    _regen_sched_started = True
+    _REGEN_SCHED["enabled"] = True
+    check_every = max(60, int(_os.environ.get("GUANLAN_REGEN_CHECK_EVERY", "600")))
+
+    def _loop():
+        import datetime as _dt
+        import time as _t
+        while True:
+            try:
+                _t.sleep(check_every)
+                _regen_sched_tick(_dt.datetime.now())
+            except Exception:  # noqa: BLE001 — 调度循环永不因单次异常退出
+                continue
+
+    _threading.Thread(target=_loop, name="regen-daily-scheduler", daemon=True).start()
+
+
 def _reload_artifacts_caches() -> None:
     """热加载:清三产物的进程级 LRU,使后端立即读到刚再生的 parquet(无需重启 9999)。
     load_v4_ranking 本就无缓存(每次读盘)→ v4 自动生效;此处清 lru_cache 的 mainline/名表 + market_cycle。"""
@@ -1097,7 +1159,9 @@ def build_screen_router() -> APIRouter:
             _mh = None
         return JSONResponse({"ok": bool(rd), "source": "vendored",
                              "v4_ranking": {"date": rd, "rows": n, "stale_days": stale_days},
-                             "market_breadth": mb, "model_health": _mh})
+                             "market_breadth": mb, "model_health": _mh,
+                             "regen_scheduler": {"enabled": bool(_REGEN_SCHED.get("enabled")),
+                                                 "last_auto_ts": _REGEN_SCHED.get("last_auto_ts")}})
 
     @router.post("/run")
     def screen_run(body: ScreenIn):
@@ -1380,24 +1444,10 @@ def build_screen_router() -> APIRouter:
     def screen_regen(body: RegenIn):
         """「拉取最新数据」:后台子进程跑引擎原生 compute.regen 再生三产物,立即返回(异步,
         v4 LGB ~5min);完成自动热加载缓存(无需重启)。单飞:已在跑 → ok:False/already_running。"""
-        import time as _t
-        import threading as _th
-
-        with _REGEN_LOCK:
-            busy = bool(_REGEN_STATE.get("running"))
-            if not busy:
-                _REGEN_STATE.update(
-                    running=True, phase="starting", label="启动子进程…", step=0,
-                    started_at=_t.time(), ended_at=None, ok=None, error=None,
-                    end=(body.end or None), new_date=None, lines=[],
-                )
-        if busy:
+        started = _start_regen_bg(body.end or None)
+        if not started:
             return JSONResponse({"ok": False, "reason": "already_running",
                                  "state": _regen_public_state()})
-        # _safe 兜底外层异常;_run_regen_subprocess 内 finally 必清 running
-        _th.Thread(
-            target=lambda: _safe(lambda: _run_regen_subprocess(body.end or None)),
-            daemon=True).start()
         return JSONResponse({"ok": True, "started": True, "state": _regen_public_state()})
 
     @router.get("/regen/status")
