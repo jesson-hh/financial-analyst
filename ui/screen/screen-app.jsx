@@ -567,20 +567,27 @@ function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, mod
             if (Array.isArray(p.sources)) {
               const act = p.sources.filter(s => s.active);
               if (!act.length) {
+                const cut = p.sources.filter(s => /断供/.test(s.reason || ''));   // 曾供过数才算断供(无文件源不误报)
                 const why = (p.sources[0] && p.sources[0].reason) || '无当日 DL 预测';
-                return <span className="mono" title={'排名口径:纯 LGB(' + why + ')。混入 DL 需离线产出当日预测 parquet。'}
-                  style={{ fontSize: 10, color: 'var(--ink-3)', border: '1px dashed var(--line)', borderRadius: 5, padding: '2px 7px' }}>v4 · 纯 LGB</span>;
+                const label = cut.length ? 'v4 · 纯 LGB ⚠DL断供' : 'v4 · 纯 LGB';
+                const tip = '排名口径:纯 LGB(' + why + ')。'
+                  + (cut.length ? ' 断供源:' + cut.map(s => s.model_id + '(' + (s.reason || '') + ')').join('、') + '。' : '')
+                  + '混入 DL 需离线产出当日预测 parquet。';
+                return <span className="mono" title={tip}
+                  style={{ fontSize: 10, color: cut.length ? 'var(--paper)' : 'var(--ink-3)', background: cut.length ? 'var(--yin)' : 'transparent', border: cut.length ? 'none' : '1px dashed var(--line)', borderRadius: 5, padding: '2px 7px' }}>{label}</span>;
               }
               const anyLa = act.some(s => s.lookahead === true);
+              const srcTxt = s => s.model_id + '(' + (+s.weight).toFixed(2) + ((s.stale_days || 0) > 0 ? '·旧' + s.stale_days + '日' : '') + ')';
               const tip = '排名口径:LGB + DL 多源混合 · w_LGB=' + (+p.w_lgb).toFixed(2)
                 + act.map(s => ' + ' + s.model_id + ' w=' + (+s.weight).toFixed(2)
                     + '(' + s.n_has + ' 只匹配'
                     + (s.fc_icir_recent != null ? '·ICIR ' + (+s.fc_icir_recent).toFixed(3) : '')
+                    + ((s.stale_days || 0) > 0 ? '·预测旧 ' + s.stale_days + ' 自然日(容忍窗内·过去预测零前视)' : '')
                     + (s.lookahead === true ? '·⚠前视' : '') + ')').join('')
                 + (anyLa ? ' · ⚠ 含模型 look-ahead' : '');
               return <span className="mono" title={tip}
                 style={{ fontSize: 10, color: 'var(--paper)', background: 'var(--yin)', borderRadius: 5, padding: '2px 7px' }}>
-                v4 · LGB+{act.map(s => s.model_id + '(' + (+s.weight).toFixed(2) + ')').join('+')}{anyLa ? ' ⚠前视' : ''}</span>;
+                v4 · LGB+{act.map(srcTxt).join('+')}{anyLa ? ' ⚠前视' : ''}</span>;
             }
             // 回退:旧单源 FinCast provenance
             const la = p.lookahead === true;
