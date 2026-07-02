@@ -1,3 +1,8 @@
+# [DEPRECATED 2026-07-02] Replaced by check_9999.ps1 (generational self-rotation)
+# + register_check_9999.ps1. This resident loop freezes on this box over time and
+# its frozen instance holds the global mutex, blocking new ones (dual-end outage
+# observed 2026-07-02). Kept for history/rollback only.
+#
 # watchdog_9999.ps1 -- keeps the guanlan-v2 backend (127.0.0.1:9999) alive.
 #
 # Registered as scheduled task 'guanlan-v2-9999-watchdog' (see register_watchdog_9999.ps1).
