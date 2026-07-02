@@ -173,7 +173,50 @@ def test_load_dl_for_date_cutoff_is_scored_dates_own(tmp_path):
     p = str(tmp_path / "dl_pred_gat.parquet")
     write_pred_rolling(p, "2026-01-10", ["A", "B"], [0.1, 0.2], keep_days=60, train_cutoff="2026-01-03")
     write_pred_rolling(p, "2026-01-20", ["A", "B"], [0.3, 0.4], keep_days=60, train_cutoff="2026-01-13")
-    _, _, cutoff_late, fail = _load_dl_for_date(p, pd.Timestamp("2026-01-20"))
+    _, _, cutoff_late, _stale, fail = _load_dl_for_date(p, pd.Timestamp("2026-01-20"))
     assert fail is None and cutoff_late == "2026-01-13"   # 取被评分日自己的 cutoff,非最旧 2026-01-03
-    _, _, cutoff_early, _ = _load_dl_for_date(p, pd.Timestamp("2026-01-10"))
+    _, _, cutoff_early, _stale2, _ = _load_dl_for_date(p, pd.Timestamp("2026-01-10"))
     assert cutoff_early == "2026-01-03"
+
+
+def _mk_pred(tmp_path, rows):
+    """rows: list[(eval_date_str, instrument, pred)] → parquet 路径。"""
+    p = str(tmp_path / "dl_pred_x.parquet")
+    df = pd.DataFrame(rows, columns=["eval_date", "instrument", "pred_ret_5d"])
+    df["eval_date"] = pd.to_datetime(df["eval_date"])
+    df.to_parquet(p, index=False)
+    return p
+
+
+def test_load_dl_stale_within_window(tmp_path):
+    from guanlan_v2.strategy.compute.dl_ensemble import _load_dl_for_date
+    p = _mk_pred(tmp_path, [("2026-06-30", "SH600000", 0.01), ("2026-06-30", "SZ000001", -0.02)])
+    s, df, cutoff, stale, fail = _load_dl_for_date(p, pd.Timestamp("2026-07-02"))
+    assert fail is None and stale == 2                     # 旧 2 自然日,窗内(≤4)
+    assert abs(float(s["SH600000"]) - 0.01) < 1e-9 and len(s) == 2   # 用的是最近一期截面
+
+
+def test_load_dl_stale_beyond_window(tmp_path):
+    from guanlan_v2.strategy.compute.dl_ensemble import _load_dl_for_date
+    p = _mk_pred(tmp_path, [("2026-06-25", "SH600000", 0.01)])
+    s, df, cutoff, stale, fail = _load_dl_for_date(p, pd.Timestamp("2026-07-02"))
+    assert s is None and "断供" in fail and "7" in fail     # 旧 7 日 > 4 → 诚实断供
+
+
+def test_load_dl_same_day_stale_zero(tmp_path):
+    from guanlan_v2.strategy.compute.dl_ensemble import _load_dl_for_date
+    p = _mk_pred(tmp_path, [("2026-07-02", "SH600000", 0.03)])
+    s, df, cutoff, stale, fail = _load_dl_for_date(p, pd.Timestamp("2026-07-02"))
+    assert fail is None and stale == 0 and abs(float(s["SH600000"]) - 0.03) < 1e-9
+
+
+def test_apply_dl_ensemble_stale_days_in_sources(tmp_path):
+    from guanlan_v2.strategy.compute.dl_ensemble import apply_dl_ensemble, DLSource
+    p = _mk_pred(tmp_path, [("2026-06-30", f"SH{600000+k}", 0.001 * k) for k in range(60)])  # 60 只 ≥ MIN_MATCH
+    idx = pd.MultiIndex.from_tuples([(f"SH{600000+k}", pd.Timestamp("2026-07-02")) for k in range(60)],
+                                    names=["instrument", "datetime"])
+    pred = pd.DataFrame({"score": [float(k) for k in range(60)]}, index=idx)
+    info = apply_dl_ensemble(pred, pd.Timestamp("2026-07-02"),
+                             [DLSource(model_id="x", path=p, weight_mode="fixed", fixed_w=0.3)])
+    src = next(s for s in info["sources"] if s["model_id"] == "x")
+    assert src["active"] is True and src["stale_days"] == 2 and "旧2日" in src["reason"]

@@ -28,6 +28,7 @@ class DLSource:
     score_col: str = "pred_ret_5d"
     weight_mode: str = "adaptive"          # "adaptive"(按近期 ICIR)| "fixed"
     fixed_w: Optional[float] = None
+    max_stale_days: int = 4                # 新鲜度容忍窗(自然日);超窗诚实断供退出
 
 
 def dl_mix_scores(score_lgb: pd.Series, dl_scores: dict, weights: dict,
@@ -64,15 +65,18 @@ def dl_mix_scores(score_lgb: pd.Series, dl_scores: dict, weights: dict,
     return mixed, {"active": True, "w_lgb": w_lgb, "sources": src_info}
 
 
-def _load_dl_for_date(path: str, ld: pd.Timestamp, score_col: str = "pred_ret_5d"):
-    """读 DL 预测 parquet → (当日 series[instrument→score], 全表 df, train_cutoff, reason_if_fail)。
-    泛化 v4_fincast._load_fincast_for_date(列名 score_col 参数化)。缺文件/缺列/无当日/读失败 → None+reason。"""
+def _load_dl_for_date(path: str, ld: pd.Timestamp, score_col: str = "pred_ret_5d",
+                      max_stale_days: int = 4):
+    """读 DL 预测 parquet → (当日或容忍窗内最近一期 series, 全表 df, train_cutoff, stale_days, fail)。
+    新鲜度容忍:当日缺 → 取窗内(自然日 ≤ max_stale_days)最近一期(过去预测,零前视),
+    stale_days 显形;超窗 → 诚实断供退出。当日命中 stale_days=0(行为与旧版一致)。
+    cutoff 取**所用截面**那行的 train_cutoff(滚动表多日累积,全表 iloc[0]=最旧日→lookahead/显示会错)。"""
     if not path or not os.path.exists(path):
-        return None, None, None, "预测文件不存在,退出(离线产出:见 scripts/fincast_predict.py 同款工具)"
+        return None, None, None, None, "预测文件不存在,退出(离线产出:见 scripts/fincast_predict.py 同款工具)"
     try:
         df = pd.read_parquet(path)
     except Exception as e:  # noqa: BLE001
-        return None, None, None, f"预测 parquet 读取失败({type(e).__name__}),退出"
+        return None, None, None, None, f"预测 parquet 读取失败({type(e).__name__}),退出"
     need = {"eval_date", "instrument", score_col}
     if not need.issubset(df.columns):
         try:
@@ -80,21 +84,29 @@ def _load_dl_for_date(path: str, ld: pd.Timestamp, score_col: str = "pred_ret_5d
         except Exception:  # noqa: BLE001
             pass
     if not need.issubset(df.columns):
-        return None, None, None, f"预测 parquet 缺 {need} 列,退出"
+        return None, None, None, None, f"预测 parquet 缺 {need} 列,退出"
     ev = pd.to_datetime(df["eval_date"]).dt.normalize()
     today = pd.Timestamp(ld).normalize()
     sub = df[ev == today]
-    cutoff = None   # 取被评分 eval_date 当天那行的 train_cutoff(滚动表多日累积,全表 iloc[0]=最旧日→lookahead/显示会错)
+    stale_days = 0
+    if sub.empty:
+        past = ev[ev < today]                              # 只看过去(零前视)
+        if past.empty:
+            return None, df, None, None, f"无 {today.date()} 预测且无更早预测,退出"
+        latest = past.max()
+        stale_days = int((today - latest).days)
+        if stale_days > max_stale_days:
+            return None, df, None, None, f"预测断供 {stale_days} 日(>{max_stale_days}),退出"
+        sub = df[ev == latest]
+    cutoff = None
     if "train_cutoff" in sub.columns and len(sub):
         try:
             cutoff = str(pd.Timestamp(sub["train_cutoff"].iloc[0]).date())
         except Exception:  # noqa: BLE001
             cutoff = None
-    if sub.empty:
-        return None, df, cutoff, f"无 {today.date()} 预测,退出"
     s = sub.set_index("instrument")[score_col]
     s = s[~s.index.duplicated(keep="last")]
-    return s, df, cutoff, None
+    return s, df, cutoff, stale_days, None
 
 
 def default_dl_sources() -> list:
@@ -123,10 +135,11 @@ def apply_dl_ensemble(pred: pd.DataFrame, ld: pd.Timestamp, sources: list,
     lgb_by_inst = pd.Series(pred["score"].values, index=inst)
     dl_scores, weights, meta, missing = {}, {}, {}, []
     for src in sources:
-        s, df, cutoff, fail = _load_dl_for_date(src.path, ld, src.score_col)
+        s, df, cutoff, stale_days, fail = _load_dl_for_date(
+            src.path, ld, src.score_col, max_stale_days=getattr(src, "max_stale_days", 4))
         if fail is not None:
             missing.append({"model_id": src.model_id, "active": False, "weight": 0.0,
-                            "n_has": 0, "lookahead": None, "reason": fail})
+                            "n_has": 0, "lookahead": None, "stale_days": None, "reason": fail})
             continue
         if src.weight_mode == "fixed" and src.fixed_w is not None:
             w, icir = float(src.fixed_w), None
@@ -138,7 +151,7 @@ def apply_dl_ensemble(pred: pd.DataFrame, ld: pd.Timestamp, sources: list,
         look = (str(pd.Timestamp(ld).date()) <= cutoff) if cutoff is not None else None
         dl_scores[src.model_id] = s
         weights[src.model_id] = w
-        meta[src.model_id] = {"lookahead": look, "fc_icir_recent": icir}
+        meta[src.model_id] = {"lookahead": look, "fc_icir_recent": icir, "stale_days": stale_days}
     if not dl_scores:
         info["sources"] = missing
         info["reason"] = "无可用 DL 源(全部缺文件/无当日预测),纯 LGB"
@@ -148,6 +161,9 @@ def apply_dl_ensemble(pred: pd.DataFrame, ld: pd.Timestamp, sources: list,
         m = meta.get(s["model_id"], {})
         s["lookahead"] = m.get("lookahead")
         s["fc_icir_recent"] = m.get("fc_icir_recent")
+        s["stale_days"] = m.get("stale_days")
+        if s.get("active") and (m.get("stale_days") or 0) > 0:
+            s["reason"] = f"{s['reason']}·旧{m['stale_days']}日"
     info["sources"] = mix["sources"] + missing
     info["w_lgb"] = mix["w_lgb"]
     info["active"] = mix["active"]
