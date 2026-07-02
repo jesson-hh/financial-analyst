@@ -117,7 +117,10 @@ def materialize_factor_frames(universe: str = "csi800", start: str = "2016-01-01
         except Exception:  # noqa: BLE001
             w = None
         if w is None or w.dropna(how="all").empty:
-            print(f"[factor_ls] 跳过 {fid}({meta.get('short')}):算不出(诚实缺席)", flush=True)
+            try:    # Windows GBK 控制台编不了部分因子短名(如 R²)→ 退 ASCII 行,日志不崩进程
+                print(f"[factor_ls] 跳过 {fid}({meta.get('short')}):算不出(诚实缺席)", flush=True)
+            except UnicodeEncodeError:
+                print(f"[factor_ls] skip {fid} (honest-absent)", flush=True)
             continue
         frames[fid] = w * float(meta.get("dir", 1) or 1)   # 预定向(legacy fa_distrib dir=-1)
         fams[fid] = fam
