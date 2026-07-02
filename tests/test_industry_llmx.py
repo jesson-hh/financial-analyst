@@ -52,7 +52,11 @@ def test_extract_ok_and_validation():
                   {"edge_id": "T99", "verdict": "支持", "evidence": "x"}],
         "narratives": [{"narrative_id": "N4", "stance": "多"}],
         "global_updates": [{"segment_id": "C2", "field": "国产化率", "content": "良率接近海外"}],
-        "stocks": [{"code": "688498.SH", "stance": "多", "logic": "量产爬坡"}],
+        "stocks": [
+            {"code": "688498.SH", "stance": "多", "logic": "量产爬坡"},
+            {"code": "830799", "stance": "多", "logic": "x"},
+            {"code": "912345", "stance": "多", "logic": "x"},
+        ],
     }
     r = asyncio.run(extract_one(_doc(), text, fw, client=_FakeClient(payload)))
     assert r["ok"] is True
@@ -62,7 +66,7 @@ def test_extract_ok_and_validation():
     assert segs["C2"]["quote"] == "EML 缺口 25-30%" and segs["C2"]["quote_dropped"] is False
     assert segs["C1"]["quote"] is None and segs["C1"]["quote_dropped"] is True
     assert [e["edge_id"] for e in ex["edges"]] == ["T4"]
-    assert ex["stocks"][0]["code"] == "SH688498"          # 码式归一
+    assert {s["code"] for s in ex["stocks"]} == {"SH688498", "BJ830799"}  # 码式归一+拒绝9开头
     assert ex["doc_id"] == "d1" and ex["extracted_at"]
     assert r["model"] == "deepseek-chat"
     assert r["prompt_tokens"] == 100 and r["completion_tokens"] == 50

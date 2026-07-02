@@ -49,11 +49,13 @@ def _norm_code(c: str) -> Optional[str]:
     pre, num = m.group(1), m.group(2)
     if pre:
         return pre + num
-    if num.startswith(("6", "9")):
+    if num.startswith("6"):
         return "SH" + num
     if num.startswith(("0", "3")):
         return "SZ" + num
-    return "BJ" + num
+    if num.startswith(("4", "8")):
+        return "BJ" + num
+    return None  # 1/2/5/7/9 开头非A股常规板块码,拒绝而非猜测
 
 
 def _prompt(doc: dict, text: str, digest: str) -> str:
