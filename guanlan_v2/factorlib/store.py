@@ -184,6 +184,8 @@ class LibraryFactorStore:
                 "origin": entry.get("origin", ""),
                 "description": entry.get("description", ""),
             }
+            if entry.get("status"):
+                row["status"] = str(entry.get("status"))    # P2:draft 显形(空/缺省不带键)
             # P2-E:验证快照里的 RankIC 下发(workflow「存入因子库」落的 meta.ic;base 库无 meta → 缺席)
             # —— 此前 meta 整体被吞,落子料库 syncArchive 只能给 ic:''(「validated」只剩可编译语义)。
             try:

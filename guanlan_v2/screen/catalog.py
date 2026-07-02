@@ -71,6 +71,8 @@ def _build() -> Dict[str, Dict[str, Any]]:
             fid = str(entry.get("name") or "").strip()
             if not fid or fid in out:
                 continue
+            if str(entry.get("status") or "").strip() == "draft":
+                continue   # P2:研究回路 draft 因子不上选股货架(人审 /factorlib/promote 转正后才可见)
             try:
                 expr = _st._zoo_expr(entry)
                 if not expr or any(r in expr for r in _UNAVAILABLE_REFS):

@@ -53,7 +53,147 @@ class SaveIn(BaseModel):
     description: str = ""
     source: str = ""
     is_qlib: bool = False
+    status: str = ""                # P2:空=正式;"draft"=研究回路产物待人审(不上选股货架)
     meta: dict = Field(default_factory=dict)   # 展示用快照(_label/universe/ic…);store 忽略未知键
+
+
+_VALID_SAVE_STATUS = {"", "draft"}
+
+
+def _save_factor(body: SaveIn, store: LibraryFactorStore) -> dict:
+    """/factorlib/save 内核(模块级;P2 研究回路直调复用)。返回 dict,端点包 JSONResponse。
+
+    流程与诚实失败契约同原闭包(见 /save docstring);新增 status 校验与落盘
+    (空=正式,draft=待人审——draft 仍注册进 zoo 可按名复验,只是不上选股货架)。
+    """
+    # 1) 表达式非空
+    raw = (body.expr or "").strip()
+    if not raw:
+        return {"ok": False, "reason": "空表达式"}
+    # 2) 因子名非空
+    nm = (body.name or "").strip()
+    if not nm:
+        return {"ok": False, "reason": "因子名不能为空"}
+    # 2.5) P2:status 校验(空=正式;draft=待人审)
+    status = (body.status or "").strip()
+    if status not in _VALID_SAVE_STATUS:
+        return {"ok": False, "reason": f"status 非法: {status}(允许空或 draft)"}
+
+    # 3) 译写(Qlib 形 → zoo 形;复用 /factorlib/validate 范式)
+    try:
+        zexpr = qlib_to_zoo(raw) if body.is_qlib else raw
+    except UnsupportedFactor as u:
+        return {"ok": False, "reason": f"untranslatable: {u}"}
+
+    # 4) 校验(与 /factorlib/validate、store.register_all 同源两行;非法 expr 诚实失败)
+    try:
+        from financial_analyst.factors.zoo.expr import compile_factor, validate_expr
+        validate_expr(zexpr)
+        compute = compile_factor(zexpr)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "zoo_expr": zexpr,
+                "reason": f"{type(exc).__name__}: {exc}"}
+
+    # 5) 重名检查(名字层把关:store.register 是 replace 语义不撞 registry,
+    #    但文件层同名会覆盖 → 此处拒绝覆盖,重名诚实失败)
+    try:
+        existing = {f["name"] for f in store.list_factors(validate=False)}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": f"读库失败: {type(exc).__name__}: {exc}"}
+    if nm in existing:
+        return {"ok": False, "reason": f"因子名已存在: {nm}"}
+
+    # 6) 落盘(写 mined/<安全名>.json;list[单 dict],对齐 _sample_mined.json + base/*.json)
+    try:
+        fn = _safe_filename(nm)
+        # 二次确认无路径穿越:文件名必须等于自身的 basename
+        if Path(fn).name != fn:
+            return {"ok": False, "reason": f"非法文件名: {fn}"}
+        fp = store.mined_dir / f"{fn}.json"
+        if fp.exists():
+            return {"ok": False, "reason": f"文件已存在: {fp.name}"}
+        fam = body.family or "library_mined"
+        rec = {
+            "name": nm,
+            "family": fam,
+            "expr": zexpr,
+            "description": body.description or "",
+            "source": body.source or "workflow",
+        }
+        if body.is_qlib:
+            rec["qlib_src"] = raw           # 原始 Qlib 串仅作台账/展示
+        if body.meta:
+            rec["meta"] = body.meta         # 展示用快照;store.list_factors 只读固定键,忽略未知键
+        if status:
+            rec["status"] = status   # P2:draft 落盘(promote 转正时摘除)
+        rec["saved_at"] = datetime.now().isoformat(timespec="seconds")
+        rec["id"] = uuid.uuid4().hex
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        fp.write_text(json.dumps([rec], ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "zoo_expr": zexpr,
+                "reason": f"落盘失败: {type(exc).__name__}: {exc}"}
+
+    # 7) 运行时注册(写后立即生效;复刻 store.register_all 内核单条三步,复用步骤4已编译的 compute)
+    registered = False
+    reg_reason = ""
+    try:
+        try:
+            import financial_analyst.factors.zoo  # noqa: F401  触发内置族注册(失败不致命)
+        except Exception:  # noqa: BLE001
+            pass
+        from financial_analyst.factors.zoo.registry import AlphaSpec, register, unregister
+        unregister(nm)                     # replace 语义:避开 frozen-collision
+        register(AlphaSpec(
+            name=nm, family=fam,
+            description=body.description or "",
+            formula_text=zexpr,
+            compute=compute,
+            tags=("guanlan_factorlib", "mined"),
+        ))
+        registered = True
+    except Exception as exc:  # noqa: BLE001
+        # 注册失败不回滚文件(已诚实落盘);标注 registered=False + 原因即可
+        reg_reason = f"{type(exc).__name__}: {exc}"
+
+    # 8) 成功返回(落盘成功即 ok:True;registered 标注运行时注册是否生效)
+    resp = {"ok": True, "name": nm, "expr": zexpr, "family": fam,
+            "file": fp.name, "registered": registered}
+    if reg_reason:
+        resp["reason"] = reg_reason
+    return resp
+
+
+class FactorPromoteIn(BaseModel):
+    """``POST /factorlib/promote`` 入参:draft 因子人审转正(摘 status)。"""
+
+    name: str = ""
+
+
+def _promote_factor(name: str, store: LibraryFactorStore) -> dict:
+    """人审转正:在 mined/ 各 JSON 里找 name 条目,摘掉 status(draft→正式)。幂等;
+    找不到 → not_found 诚实失败。转正后下次 /screen/factors 入口热刷新即上货架。"""
+    nm = (name or "").strip()
+    if not nm:
+        return {"ok": False, "reason": "因子名不能为空"}
+    try:
+        for fp in sorted(store.mined_dir.glob("*.json")):
+            try:
+                data = json.loads(fp.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001 — 坏文件跳过(与 store._read_json_dir 同口径)
+                continue
+            entries = data if isinstance(data, list) else [data]
+            hit = False
+            for e in entries:
+                if isinstance(e, dict) and e.get("name") == nm:
+                    e.pop("status", None)
+                    hit = True
+            if hit:
+                fp.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+                return {"ok": True, "name": nm, "file": fp.name}
+        return {"ok": False, "reason": f"not_found: {nm}"}
+    except Exception as exc:  # noqa: BLE001 — 诚实失败 HTTP 200,不抛 500
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
 
 
 def build_factorlib_router(store: Optional[LibraryFactorStore] = None) -> APIRouter:
@@ -120,103 +260,13 @@ def build_factorlib_router(store: Optional[LibraryFactorStore] = None) -> APIRou
     def factorlib_save(body: SaveIn):
         """把一条好因子(表达式)存入因子库 mined/ 并运行时注册进引擎 zoo。
 
-        流程:名字/表达式非空 → (is_qlib 则)``qlib_to_zoo`` 译写 → 引擎
-        ``validate_expr``+``compile_factor`` 校验(非法 → 诚实失败)→ 名字唯一性把关
-        (重名拒绝覆盖)→ 落盘 ``mined/<安全名>.json``(对齐现有 schema:list[单 dict])
-        → 复刻 store.register_all 内核单条注册(``unregister``→``register``,replace 语义)
-        使其立即出现在 ``/factorlib/list``、``/factor/list``、可被 ``/factor/report`` 求值。
-
-        诚实失败:任何异常 → ``{ok:False, reason}`` HTTP 200,绝不抛 500。
+        内核在模块级 _save_factor(P2 研究回路直调复用);本闭包只包 JSONResponse。
         """
-        # 1) 表达式非空
-        raw = (body.expr or "").strip()
-        if not raw:
-            return JSONResponse({"ok": False, "reason": "空表达式"})
-        # 2) 因子名非空
-        nm = (body.name or "").strip()
-        if not nm:
-            return JSONResponse({"ok": False, "reason": "因子名不能为空"})
+        return JSONResponse(_save_factor(body, store))
 
-        # 3) 译写(Qlib 形 → zoo 形;复用 /factorlib/validate 范式)
-        try:
-            zexpr = qlib_to_zoo(raw) if body.is_qlib else raw
-        except UnsupportedFactor as u:
-            return JSONResponse({"ok": False, "reason": f"untranslatable: {u}"})
-
-        # 4) 校验(与 /factorlib/validate、store.register_all 同源两行;非法 expr 诚实失败)
-        try:
-            from financial_analyst.factors.zoo.expr import compile_factor, validate_expr
-            validate_expr(zexpr)
-            compute = compile_factor(zexpr)
-        except Exception as exc:  # noqa: BLE001
-            return JSONResponse({"ok": False, "zoo_expr": zexpr,
-                                 "reason": f"{type(exc).__name__}: {exc}"})
-
-        # 5) 重名检查(名字层把关:store.register 是 replace 语义不撞 registry,
-        #    但文件层同名会覆盖 → 此处拒绝覆盖,重名诚实失败)
-        try:
-            existing = {f["name"] for f in store.list_factors(validate=False)}
-        except Exception as exc:  # noqa: BLE001
-            return JSONResponse({"ok": False, "reason": f"读库失败: {type(exc).__name__}: {exc}"})
-        if nm in existing:
-            return JSONResponse({"ok": False, "reason": f"因子名已存在: {nm}"})
-
-        # 6) 落盘(写 mined/<安全名>.json;list[单 dict],对齐 _sample_mined.json + base/*.json)
-        try:
-            fn = _safe_filename(nm)
-            # 二次确认无路径穿越:文件名必须等于自身的 basename
-            if Path(fn).name != fn:
-                return JSONResponse({"ok": False, "reason": f"非法文件名: {fn}"})
-            fp = store.mined_dir / f"{fn}.json"
-            if fp.exists():
-                return JSONResponse({"ok": False, "reason": f"文件已存在: {fp.name}"})
-            fam = body.family or "library_mined"
-            rec = {
-                "name": nm,
-                "family": fam,
-                "expr": zexpr,
-                "description": body.description or "",
-                "source": body.source or "workflow",
-            }
-            if body.is_qlib:
-                rec["qlib_src"] = raw           # 原始 Qlib 串仅作台账/展示
-            if body.meta:
-                rec["meta"] = body.meta         # 展示用快照;store.list_factors 只读固定键,忽略未知键
-            rec["saved_at"] = datetime.now().isoformat(timespec="seconds")
-            rec["id"] = uuid.uuid4().hex
-            fp.parent.mkdir(parents=True, exist_ok=True)
-            fp.write_text(json.dumps([rec], ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception as exc:  # noqa: BLE001
-            return JSONResponse({"ok": False, "zoo_expr": zexpr,
-                                 "reason": f"落盘失败: {type(exc).__name__}: {exc}"})
-
-        # 7) 运行时注册(写后立即生效;复刻 store.register_all 内核单条三步,复用步骤4已编译的 compute)
-        registered = False
-        reg_reason = ""
-        try:
-            try:
-                import financial_analyst.factors.zoo  # noqa: F401  触发内置族注册(失败不致命)
-            except Exception:  # noqa: BLE001
-                pass
-            from financial_analyst.factors.zoo.registry import AlphaSpec, register, unregister
-            unregister(nm)                     # replace 语义:避开 frozen-collision
-            register(AlphaSpec(
-                name=nm, family=fam,
-                description=body.description or "",
-                formula_text=zexpr,
-                compute=compute,
-                tags=("guanlan_factorlib", "mined"),
-            ))
-            registered = True
-        except Exception as exc:  # noqa: BLE001
-            # 注册失败不回滚文件(已诚实落盘);标注 registered=False + 原因即可
-            reg_reason = f"{type(exc).__name__}: {exc}"
-
-        # 8) 成功返回(落盘成功即 ok:True;registered 标注运行时注册是否生效)
-        resp = {"ok": True, "name": nm, "expr": zexpr, "family": fam,
-                "file": fp.name, "registered": registered}
-        if reg_reason:
-            resp["reason"] = reg_reason
-        return JSONResponse(resp)
+    @router.post("/promote")
+    def factorlib_promote(body: FactorPromoteIn):
+        """draft 因子人审转正(P2):摘 status → 下次选股目录刷新即上货架。"""
+        return JSONResponse(_promote_factor(body.name, store))
 
     return router
