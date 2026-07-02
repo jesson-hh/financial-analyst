@@ -848,7 +848,7 @@ def _research_run_line(run: Dict[str, Any]) -> str:
     ric = bm.get("rank_ic")
     ric_s = f"{float(ric):+.4f}" if isinstance(ric, (int, float)) else "—"
     if pr.get("status") == "draft":
-        verdict = f"达标 ✅ 已入 draft:{pr.get('name')}(待人审 POST /factorlib/promote 转正)"
+        verdict = f"达标 ✅ 已入 draft:{pr.get('name')}(待人审:ww_factor_promote 或选股页待审区转正)"
     elif pr.get("status") == "skipped_multi":
         verdict = "达标但为多因子合成,未自动入库(成分见 ww_research_runs run_id 详情)"
     elif run.get("error"):
@@ -1295,6 +1295,45 @@ def factorlib_save_impl(name: str = "", expr: str = "", family: str = "library_m
     return {"ok": True, "content": msg,
             "artifact": artifact("factor_saved", page="factor", channel="workflow",
                                  payload={"name": nm, "expr": zoo, "registered": registered})}
+
+
+def factor_drafts_impl(limit: int = 20) -> Dict[str, Any]:
+    """列待审 draft 因子(研究回路达标产物,未上选股货架)。
+    数据=GET /factorlib/list 过滤 status=='draft'(正式因子无 status 键)。"""
+    try:
+        r = _self_get("/factorlib/list?validate=false")
+    except Exception as e:
+        return {"ok": False, "content": f"因子库读取失败: {e}", "artifact": None}
+    if not r.get("ok"):
+        return {"ok": False, "content": f"因子库读取失败: {r.get('reason', '未知原因')}", "artifact": None}
+    drafts = [f for f in (r.get("factors") or []) if f.get("status") == "draft"]
+    if not drafts:
+        return {"ok": True, "artifact": None,
+                "content": "无待审 draft。研究回路(ww_research_loop)达标产物会自动出现在这里。"}
+    cap = max(1, min(int(limit or 20), 100))
+    lines = []
+    for f in drafts[:cap]:
+        ic = f.get("ic")
+        ic_s = f"{float(ic):+.4f}" if isinstance(ic, (int, float)) else "—"
+        lines.append(f"{f.get('name')} | IC {ic_s} | {str(f.get('expr') or '')[:60]}"
+                     + (f" | {str(f.get('description') or '')[:40]}" if f.get("description") else ""))
+    return {"ok": True, "artifact": None, "raw": {"drafts": drafts[:cap]},
+            "content": f"待审 draft {len(drafts)} 条(转正用 ww_factor_promote,需确认):\n" + "\n".join(lines)}
+
+
+def factor_promote_impl(name: str = "") -> Dict[str, Any]:
+    """draft 因子人审转正(摘 status;幂等)。转正后下次选股目录热刷新上货架。"""
+    nm = (name or "").strip()
+    if not nm:
+        return {"ok": False, "content": "缺少因子名 name(ww_factor_drafts 可列待审清单)", "artifact": None}
+    try:
+        r = _self_post("/factorlib/promote", {"name": nm})
+    except Exception as e:
+        return {"ok": False, "content": f"转正调用失败: {e}", "artifact": None}
+    if not r.get("ok"):
+        return {"ok": False, "content": f"转正未执行: {r.get('reason', '未知原因')}", "artifact": None, "raw": r}
+    return {"ok": True, "artifact": None, "raw": r,
+            "content": f"已转正「{nm}」(promote 幂等;下次选股目录刷新后上货架——选股页/ww_screen_factors 可见)。"}
 
 
 def _proxy_engine_tool(tool_name: str, fail_label: str, **kw: Any) -> Dict[str, Any]:
@@ -2011,7 +2050,7 @@ WW_TOOL_TABLE = [
      "description":
          "自主研究回路(P2):goal 一句话 → 后端 LLM 生成因子工作流 → 真算指标(RankIC/样本外)→ "
          "未达标 LLM 批判改进 → 循环(服务端钳 ≤5 轮)。达标单因子自动存 factorlib 为 draft"
-         "(不上选股货架,人审 POST /factorlib/promote 转正);逐轮落档;最佳图存工作流库。"
+         "(不上选股货架,人审 ww_factor_promote/选股页待审区转正);逐轮落档;最佳图存工作流库。"
          "花 LLM 钱+可能写 draft,需确认。",
      "input_schema": {"type": "object", "properties": {
          "goal": {"type": "string", "description": "研究目标,如:找一个短周期反转因子"},
@@ -2034,6 +2073,23 @@ WW_TOOL_TABLE = [
          "limit": {"type": "integer", "default": 10}}},
      "impl": research_runs_impl, "cost": "instant", "confirm": False,
      "reachable": ["/research/runs", "/research/rounds"]},
+    {"name": "ww_factor_drafts",
+     "description":
+         "列待审 draft 因子(P3:研究回路达标产物,未上选股货架):名/IC快照/表达式。"
+         "用户问『有哪些待审因子/研究回路产出了什么』用它;转正走 ww_factor_promote(需确认)。",
+     "input_schema": {"type": "object", "properties": {
+         "limit": {"type": "integer", "default": 20}}},
+     "impl": factor_drafts_impl, "cost": "instant", "confirm": False,
+     "reachable": ["/factorlib/list"]},
+    {"name": "ww_factor_promote",
+     "description":
+         "draft 因子人审转正(P3,上选股货架):摘 status → 下次选股目录热刷新可见。"
+         "我只能提请,用户确认后才执行;幂等,not_found 诚实失败。",
+     "input_schema": {"type": "object", "properties": {
+         "name": {"type": "string", "description": "draft 因子名(lib_rl_ 开头,ww_factor_drafts 可查)"}},
+      "required": ["name"]},
+     "impl": factor_promote_impl, "cost": "seconds", "confirm": True,
+     "reachable": ["/factorlib/promote"]},
     {"name": "ww_capabilities",
      "description":
          "列出我(帷幄)当前能调用的全部工具及用途。用户问『你能做什么/有哪些功能/会用什么工具』,或我不确定该用哪个工具时,先调它自查。",

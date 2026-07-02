@@ -610,14 +610,14 @@ def test_engine_profile_excludes_ww_but_console_whitelist_resolves():
                           encoding="utf-8", errors="replace", timeout=180, env=env, cwd=str(repo))
     assert proc.returncode == 0, (proc.stderr or "")[-2000:]
     out = _json.loads(proc.stdout.strip().splitlines()[-1])
-    assert len(out["registered_ww"]) == 42                    # +7 P0 闭环读取面薄工具 +1 ww_picks_perf +2 P2 研究回路
+    assert len(out["registered_ww"]) == 44                    # +7 P0 闭环读取面薄工具 +1 ww_picks_perf +2 P2 研究回路 +2 P3 draft转正面
     # ① 非显式白名单路径(research / 缺省 / all)一律不外露 ww_*,且不再返回 None(None=完全不限制)
     assert out["research_is_none"] is False and out["research_ww"] == []
     assert out["default_is_none"] is False and out["default_ww"] == []
     assert out["all_is_none"] is False and out["all_ww"] == []
     # ② console 显式白名单路径不受影响:62 名全部可解析,含 37 个 ww_(+工坊删除/设默认 2 + alpha-zoo 7)
-    assert out["console_n"] == 67 and out["console_missing"] == []
-    assert out["explicit_n"] == 67 and out["explicit_ww_n"] == 42
+    assert out["console_n"] == 69 and out["console_missing"] == []
+    assert out["explicit_n"] == 69 and out["explicit_ww_n"] == 44
 
 
 def test_f10_impl_returns_structured_facts(monkeypatch):
@@ -1081,9 +1081,9 @@ def test_registry_derivation_consistent():
     """阶段0 重构守护:CONSOLE_ALLOWED 与 _WW_REACHABLE_ENDPOINTS 必须从声明表派生且与已知集合一致。"""
     import guanlan_v2.console.tools as ct
     ww_in_table = {t["name"] for t in ct.WW_TOOL_TABLE}
-    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 42
+    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 44
     assert ww_in_table == {n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")}
-    assert len(ct.CONSOLE_ALLOWED) == 67
+    assert len(ct.CONSOLE_ALLOWED) == 69
     assert {"/factorlib/save", "/workflow/compose", "/feature/build"} <= ct._WW_REACHABLE_ENDPOINTS
     assert ct._WW_REACHABLE_ENDPOINTS == {ep for t in ct.WW_TOOL_TABLE for ep in t.get("reachable", [])}
 
@@ -1131,6 +1131,8 @@ def test_ww_reachable_endpoints_matches_expected():
         "/research/loop/status",  # ww_research_loop(wait 轮询)
         "/research/runs",         # ww_research_loop 成绩单 + ww_research_runs 列表
         "/research/rounds",       # ww_research_runs 逐轮详情
+        "/factorlib/promote",     # ww_factor_promote(P3 人审转正)
+        "/factorlib/list",        # ww_factor_drafts(P3 列待审)
     }
     assert ct._WW_REACHABLE_ENDPOINTS == expected
 
@@ -1662,3 +1664,39 @@ def test_research_runs_impl_detail_strips_graph(monkeypatch):
     assert "第0轮" in res["content"] and "第1轮" in res["content"]     # 时间正序讲故事
     assert "规则兜底" in res["content"]                                # 诚实标注透传
     assert all("graph" not in r for r in res["raw"]["rounds"])        # graph 不进上下文
+
+
+# ── P3: ww_factor_drafts / ww_factor_promote ────────────────────────────────
+
+def test_factor_drafts_impl_lists_and_empty(monkeypatch):
+    rows = {"ok": True, "factors": [
+        {"name": "lib_rl_ab_r0", "expr": "rank(-delta(close,5))", "status": "draft", "ic": 0.031},
+        {"name": "lib_ok", "expr": "rank(close)"}]}
+    monkeypatch.setattr(ct, "_self_get", lambda path, timeout=30: rows)
+    res = ct.factor_drafts_impl()
+    assert res["ok"] is True and "lib_rl_ab_r0" in res["content"] and "+0.0310" in res["content"]
+    assert "lib_ok" not in res["content"]                              # 正式因子(无 status 键)不混入
+    assert "ww_factor_promote" in res["content"]                       # 引流到转正工具
+    monkeypatch.setattr(ct, "_self_get", lambda path, timeout=30:
+                        {"ok": True, "factors": [{"name": "lib_ok"}]})
+    res2 = ct.factor_drafts_impl()
+    assert res2["ok"] is True and "无待审 draft" in res2["content"]
+
+
+def test_factor_promote_impl(monkeypatch):
+    sent = {}
+
+    def fake_post(path, payload, timeout=120):
+        sent["path"] = path
+        sent.update(payload)
+        return {"ok": True, "name": payload["name"], "file": "x.json"}
+
+    monkeypatch.setattr(ct, "_self_post", fake_post)
+    res = ct.factor_promote_impl(name="lib_rl_ab_r0")
+    assert sent["path"] == "/factorlib/promote" and res["ok"] is True
+    assert "已转正" in res["content"] and "下次选股目录刷新" in res["content"]
+    monkeypatch.setattr(ct, "_self_post", lambda path, payload, timeout=120:
+                        {"ok": False, "reason": "not_found: lib_x"})
+    res2 = ct.factor_promote_impl(name="lib_x")
+    assert res2["ok"] is False and "not_found" in res2["content"]
+    assert ct.factor_promote_impl(name="")["ok"] is False              # 缺名早退,不打后端
