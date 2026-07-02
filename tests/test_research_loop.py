@@ -151,6 +151,20 @@ def test_loop_multi_expr_pass_skips_autosave(monkeypatch, tmp_path):
     end = rl.run_research_loop("rr_test06", "找组合", 3, 0.02, "csi_fast", "month", None, None,
                                progress=lambda **kw: None)
     assert end["promoted"]["status"] == "skipped_multi" and drafts == []   # 多因子不自动入库(红线)
+    assert "达标" in lessons[0] and "未达标" not in lessons[0]              # 教训诚实:达标≠未达标
+
+
+def test_loop_save_failed_lesson_honest(monkeypatch, tmp_path):
+    """过门但落库失败(如重名/磁盘错):教训须写「达标但入库失败」,绝不误写「未达标」。"""
+    lessons, graphs, drafts = _wire(monkeypatch, tmp_path, evals=[_PASS])
+    monkeypatch.setattr(rl, "_save_draft",
+                        lambda rid, k, expr, goal, diag, m:
+                        {"ok": False, "reason": "因子名已存在: lib_x"})
+    end = rl.run_research_loop("rr_test07", "找反转", 3, 0.02, "csi_fast", "month", None, None,
+                               progress=lambda **kw: None)
+    assert end["promoted"]["status"] == "save_failed"
+    assert "达标但入库失败" in lessons[0] and "因子名已存在" in lessons[0]
+    assert "未达标" not in lessons[0]
 
 
 def test_write_lesson_real_memory(monkeypatch, tmp_path):

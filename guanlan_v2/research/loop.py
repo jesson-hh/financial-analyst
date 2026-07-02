@@ -291,6 +291,12 @@ def run_research_loop(run_id: str, goal: str, max_rounds: int, min_rank_ic: floa
     if promoted and promoted.get("status") == "draft":
         lesson = (f"研究「{goal[:40]}」{n}轮达标:{promoted['name']} rank_ic={bm.get('rank_ic')} "
                   f"oos={bm.get('oos_verdict')} 已入draft待人审;诊断:{str(diag)[:80]}")
+    elif promoted and promoted.get("status") == "skipped_multi":
+        lesson = (f"研究「{goal[:40]}」{n}轮达标(多因子合成,未自动入库):rank_ic={bm.get('rank_ic')} "
+                  f"oos={bm.get('oos_verdict')};成分见轮次档案;诊断:{str(diag)[:80]}")
+    elif promoted and promoted.get("status") == "save_failed":
+        lesson = (f"研究「{goal[:40]}」{n}轮达标但入库失败:{str(promoted.get('reason'))[:80]};"
+                  f"rank_ic={bm.get('rank_ic')} oos={bm.get('oos_verdict')}")
     elif error:
         lesson = f"研究「{goal[:40]}」{n}轮中断:{str(error)[:120]}"
     else:
