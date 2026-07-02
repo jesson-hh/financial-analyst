@@ -38,12 +38,13 @@
      - **有监听 + HTTP 健康**(`GET /workflow/list` 200,5s 超时,Proxy=null)→ fails=0 → 退出
      - **有监听 + HTTP 死(卡死)** → fails+1 落 state;**fails ≥ 3(≈连续 3 分钟卡死)→ 强杀监听 PID + 等端口释放 + 拉起 + fails=0**
   3. 全程日志追加 `var/watchdog-9999.log`(沿用·带 [check] 前缀区分旧行)+ 5MB 轮转
-  4. 单趟互斥:named mutex 只在本趟持有(秒级),拿不到(上一趟未退)直接退出——冻死的单趟被计划任务 ExecutionTimeLimit 强杀,mutex 随进程释放 → 自愈
-- **计划任务注册**:新任务 `guanlan-v2-9999-check`,每 1 分钟重复、无限期、**`ExecutionTimeLimit=2 分钟`**(冻死的单趟被调度器强杀);开机边界由每分钟重复天然覆盖。注册脚本 `scripts/register_check_9999.ps1`(镜像旧 register 脚本形制)。
-- **退役旧常驻**:`schtasks /delete` 旧任务 `guanlan-v2-9999-watchdog` + 杀现存 watchdog 实例;`watchdog_9999.ps1` 头部加 `[DEPRECATED 2026-07-02]` 注记(保留作历史/回退)。
+  4. 单趟互斥:named mutex 只在本代际持有,退出前先释放再派生下一代(防继任者抢锁失败断链)
+- **触发机制修正(plan 期实证推翻计划任务方案)**:旧注册脚本头注记载本机 2026-06-10 实证 —— **凡 Schedule 服务派生的进程(powershell/cmd)一律冻死在 loader init**,故绝不用计划任务。改用**代际自轮换**:`check_9999.ps1` 一个代际 = ≤5 分钟的 30s 循环检查,到期**先释放 mutex → WMI `Win32_Process.Create` 派生下一代(本机已验证存活机制,父挂 WmiPrvSE)→ 退出**。无任何进程存活超过 5 分钟 → 冻死面消灭。
+- **双引导 + 互拉兜底**(断链自愈):① HKCU Run key `guanlan-v2-9999-check`(登录自启,镜像旧 register 形制,`register_check_9999.ps1`);② **9999 server 侧互拉**——`server.py` lifespan 加异步守望:每 60s 查 `var/check_9999.heartbeat`(检查器每循环 touch),陈旧 >10 分钟 → detached 拉起新代际(server 拉检查器、检查器拉 server,互为守望;双死才需登录/人工)。
+- **退役旧常驻**:删旧 Run key `guanlan-v2-9999-watchdog` + 杀现存 watchdog 实例(旧 schtasks 任务早已被旧 register 移除);`watchdog_9999.ps1` 头部加 `[DEPRECATED 2026-07-02]` 注记(保留作历史/回退)。
 
 ### 自愈闭环论证
-短跑检查自身不冻(生命周期 10s + 调度器 2min 强杀兜底);即便它拉起的 server 后来冻死,表现为「端口在 + HTTP 死」→ 连败计数 → 强重启。**MTTR ≤ 1 分钟(死)/ ≤3 分钟(卡)**,无任何单点常驻。
+代际 ≤5 分钟自轮换 → 检查器无长驻冻死面;server 死/卡 → 检查器 ≤30s 测到(卡=连败 6 次 ≈3 分钟)强重启;检查器代际断链(冻死在派生前)→ server 侧心跳守望 ≤11 分钟拉起新代际;双死 → 登录 Run key。**MTTR:server 死 ≤1 分钟 / 卡 ≤3 分钟 / 检查链断 ≤11 分钟**,全程零 schtasks、零单点常驻。
 
 ### 验证(真机)
 1. 杀 9999 → ≤2 分钟内自动回来(日志见 [check] no-listener → start)
@@ -100,8 +101,10 @@
 - 全量回归:test_dl_ensemble / test_screen_api / test_guanlan_mcp(**只跑不改** —— 它在并行 WIP;若断言与新行为冲突,冲突点写进新测试文件并报告用户,不动 WIP 文件)。
 
 ## 5. 风险与坑
-- **计划任务**:重复间隔下限 1 分钟;`ExecutionTimeLimit` 必设(否则冻死单趟永不释放 mutex)。
-- **误杀窗口**:server 冷启动 ~10-30s 端口未起,下一趟重复拉起 → 被 10048 守卫/单趟 mutex 挡住,安全(旧 watchdog Stop-Listeners 空跑 no-op 同款)。
+- **绝不用计划任务**(本机 Schedule 服务派生进程冻死在 loader init,2026-06-10 实证);代际派生只用 WMI `Win32_Process.Create`(已验证)+ conhost --headless(无窗闪)。
+- **mutex 顺序命门**:代际必须**先 ReleaseMutex 再派生继任者**,否则继任者抢锁失败立即退出 → 链死。
+- **互拉防风暴**:server 侧拉起检查器后 sleep 300s 再复查(给新代际时间写心跳),防重复派生。
+- **误杀窗口**:server 冷启动 ~10-30s 端口未起,下一循环重复拉起 → 被 10048 守卫(等端口释放)+ 代际 mutex 挡住,安全(旧 watchdog Stop-Listeners 空跑 no-op 同款)。
 - **测试打架**:`tests/test_guanlan_mcp.py` 在并行 WIP → 修3 新测试放**新文件** `tests/test_glmcp_background.py`,零碰撞。
 - **stale 权重语义**:容忍窗不衰减权重(YAGNI,显形已足);要衰减后续在 DLSource 扩展。
 - **etf_report 引擎函数签名**:以 console/api.py 实际调用为准(读不改),plan 期核对。
