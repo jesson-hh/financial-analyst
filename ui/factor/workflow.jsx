@@ -1260,6 +1260,23 @@ function WorkflowApp() {
     if (q && q.trim()) { prefilledRef.current = true; const g = generateFromText(q); setNodes(g.nodes); setEdges(g.edges); setToast({ title: '已据「' + q.trim().slice(0, 24) + '」搭建工作流', build: g.nodes.map(n => SPECS[n.type].title).join(' → ') }); setTimeout(() => setToast(null), 7000); }
   }, []);
 
+  // P3:?load=<wid> 深链 —— 落子页「研究回路」卡「上画布」跳转落点:从工作流库取全图铺画布。
+  // 同步立旗 prefilledRef(否则「恢复上次会话」effect 抢画布,P0④ 坑);绝不自动运行。
+  useEffect(() => {
+    const wid = new URLSearchParams(location.search).get('load');
+    if (!wid) return;
+    prefilledRef.current = true;
+    _get('/workflow/get/' + encodeURIComponent(wid)).then(r => {
+      if (!r || !r.ok || !r.graph || !Array.isArray(r.graph.nodes) || !r.graph.nodes.length) {
+        setToast({ title: '深链载入失败', build: '工作流 ' + wid + ' 不存在或无图数据' }); setTimeout(() => setToast(null), 6000); return;
+      }
+      const g = cloneGraph(r.graph.nodes, r.graph.edges || []);
+      setNodes(g.nodes); setEdges(g.edges); if (r.name) setWfName(r.name); setSel(null); setShowRes(false); setRunState({});
+      wfSaveLast({ name: r.name || '深链载入', nodes: g.nodes, edges: g.edges });
+      setToast({ title: '已载入「' + (r.name || wid) + '」', build: '深链载入(研究回路存图可由此上画布)· 待审阅,不自动运行' }); setTimeout(() => setToast(null), 6000);
+    });
+  }, []);
+
   // 进页 hydrate: 用服务端 /workflow/list 覆盖/并入 localStorage 列表 (服务端为准, 本地离线存的按 name 去重并到尾部); 不可达 → 保持 localStorage 初值。
   useEffect(() => {
     _get('/workflow/list').then(r => {
@@ -1469,8 +1486,8 @@ function HistoryModal({ list, onLoad, onDelete, onClose }) {
               onClick={() => onLoad(w)}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div className="serif" style={{ fontSize: 13.5, fontWeight: 500, color: 'var(--ink)' }}>{w.name}</div>
-                <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)', marginTop: 3 }}>{wfAgo(w.ts)} · {(w.nodes || []).length} 节点 · {(w.edges || []).length} 连线</div>
-                <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', marginTop: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{(w.nodes || []).slice().sort((a, b) => a.x - b.x).map(n => SPECS[n.type] ? SPECS[n.type].title : n.type).join(' → ')}</div>
+                <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)', marginTop: 3 }}>{wfAgo(w.ts)} · {((w.graph && w.graph.nodes) || w.nodes || []).length} 节点 · {((w.graph && w.graph.edges) || w.edges || []).length} 连线</div>
+                <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', marginTop: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{(((w.graph && w.graph.nodes) || w.nodes || [])).slice().sort((a, b) => a.x - b.x).map(n => SPECS[n.type] ? SPECS[n.type].title : n.type).join(' → ')}</div>
               </div>
               <span onClick={() => onLoad(w)} className="serif" style={{ flexShrink: 0, fontSize: 12, color: 'var(--paper)', background: 'var(--ink)', borderRadius: 7, padding: '6px 13px', cursor: 'pointer' }}>载入</span>
               <span onClick={(e) => { e.stopPropagation(); onDelete(w.id); }} title="删除" style={{ flexShrink: 0, fontSize: 13, color: 'var(--ink-3)', cursor: 'pointer', padding: '0 2px' }}>✕</span>
@@ -1642,13 +1659,15 @@ function FactorLibModal({ onPick, onClose, onPickModel, initialLibTab }) {
       if (!c) setErr('因子目录加载失败 — 后端不可达或出错(检查 9999 是否在跑)');
       setCur(c && c.ok ? c : { factors: [], cats: [] });
       try {
+        const lib = await _get('/factorlib/list?validate=false');
+        const st = {}; ((lib && lib.factors) || []).forEach(x => { if (x.status) st[x.name] = x.status; });
         // 用引擎 /factor/list(含全部 442 内置 + 仓内已注册 = registered 481);兼容 /factorlib/list 的 factors 形。
         const l = (await _get('/factor/list')) || (await _list());
         const reg = (l && l.registered) || [], usr = (l && l.user) || [], fac = (l && l.factors) || [];
         setFull([
-          ...reg.map(s => ({ name: s.name, expr: s.formula || '', cat: s.family || 'zoo' })),
-          ...usr.map(u => ({ name: u.name, expr: u.expr || u.formula || '', cat: u.family || 'user' })),
-          ...fac.map(u => ({ name: u.name, expr: u.expr || u.formula || '', cat: u.family || 'library' })),
+          ...reg.map(s => ({ name: s.name, expr: s.formula || '', cat: s.family || 'zoo', status: st[s.name] })),
+          ...usr.map(u => ({ name: u.name, expr: u.expr || u.formula || '', cat: u.family || 'user', status: st[u.name] })),
+          ...fac.map(u => ({ name: u.name, expr: u.expr || u.formula || '', cat: u.family || 'library', status: st[u.name] || u.status })),
         ]);
       } catch (e) { setFull([]); setErr('因子清单加载失败 — 后端不可达或出错(检查 9999 是否在跑)'); }
     })();
@@ -1718,6 +1737,7 @@ function FactorLibModal({ onPick, onClose, onPickModel, initialLibTab }) {
                   <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
                     <span className="serif" style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>{f.name}</span>
                     {f.cat && <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', border: '1px solid var(--line)', borderRadius: 4, padding: '0 5px' }}>{f.cat}</span>}
+                    {f.status === 'draft' && <span className="mono" style={{ fontSize: 8.5, color: 'var(--zhu)', border: '1px solid var(--zhu-soft)', borderRadius: 4, padding: '0 5px' }}>draft·待审</span>}
                     {f.dir && <span className="mono" style={{ fontSize: 8.5, color: f.dir === '正向' ? 'var(--dai)' : 'var(--zhu)' }}>{f.dir}</span>}
                     <span onClick={() => onPick(f)} className="serif" style={{ marginLeft: 'auto', fontSize: 11.5, color: 'var(--paper)', background: 'var(--yin)', borderRadius: 6, padding: '4px 12px', cursor: 'pointer' }}>用此因子</span>
                   </div>
