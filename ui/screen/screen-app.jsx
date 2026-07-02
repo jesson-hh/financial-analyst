@@ -729,6 +729,59 @@ function LLMFactorPicker({ cfg, pickFactors, picking }) {
   );
 }
 
+// ───────── 待审 draft(P3:研究回路达标产物;人审转正后才上选股货架)─────────
+// 数据必须另拉 /factorlib/list(f.status==='draft';正式因子无 status 键)——XG_FACTORS←
+// /screen/factors 链路在后端 catalog 单点滤掉 draft,永远拿不到。转正(window.confirm 人审)
+// 成功即重拉目录(xgLoadCatalog → 后端 refresh_factor_defs),新因子立即上货架可勾选;
+// 实测 IC 待下次 regen 顺算(即刻显「—」,诚实降级)。空态整组不渲染,零噪音。
+function DraftFactorSection() {
+  const API = (typeof window !== 'undefined' && window.GUANLAN_BACKEND) || '';
+  const [drafts, setDrafts] = useState([]);
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState('');
+  const [bump, setBump] = useState(0);
+  useEffect(() => {
+    if (!API) return;
+    let dead = false;
+    fetch(API + '/factorlib/list?validate=false').then(r => r.json()).then(j => {
+      if (!dead && j && j.ok) setDrafts((j.factors || []).filter(f => f.status === 'draft'));
+    }).catch(() => {});
+    return () => { dead = true; };
+  }, [bump]);
+  if (!API || !drafts.length) return null;
+  const doPromote = async (nm) => {
+    if (!window.confirm('转正上架「' + nm + '」?转正后进入选股因子目录。')) return;
+    setBusy(nm);
+    try {
+      const r = await fetch(API + '/factorlib/promote', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: nm }) });
+      const j = await r.json();
+      if (j && j.ok) { try { await window.xgLoadCatalog(API); } catch (e) {} setBump(x => x + 1); }
+      else window.alert('转正失败:' + ((j && j.reason) || '未知原因'));
+    } catch (e) { window.alert('转正调用失败:' + e); }
+    setBusy('');
+  };
+  return (
+    <div style={{ marginTop: 8, borderTop: '1px dashed var(--line)', paddingTop: 6 }}>
+      <div onClick={() => setOpen(o => !o)} style={{ display: 'flex', alignItems: 'center', gap: 7, cursor: 'pointer', padding: '5px 2px', userSelect: 'none' }}>
+        <span className="mono" style={{ fontSize: 8, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--jin)', color: 'var(--jin)', flexShrink: 0 }}>draft</span>
+        <span className="serif" style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--ink-1)' }}>待审 draft(研究回路)</span>
+        <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>{drafts.length}</span>
+        <span className="mono" style={{ marginLeft: 'auto', fontSize: 9, color: 'var(--ink-3)' }}>{open ? '▾' : '▸'}</span>
+      </div>
+      {open && drafts.map(f => (
+        <div key={f.name} className="hover-row" title={(f.description || '') + (f.expr ? '\n' + f.expr : '')}
+             style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '4px 6px 4px 17px', borderRadius: 6 }}>
+          <span className="mono" style={{ fontSize: 10, color: 'var(--ink-1)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
+          <span className="mono" style={{ fontSize: 9, color: f.ic == null ? 'var(--ink-3)' : (f.ic >= 0 ? 'var(--zhu)' : 'var(--dai)'), flexShrink: 0 }}>{f.ic == null ? 'IC —' : 'IC ' + (f.ic >= 0 ? '+' : '') + (+f.ic).toFixed(3)}</span>
+          <span onClick={() => busy !== f.name && doPromote(f.name)} className="serif"
+                style={{ flexShrink: 0, fontSize: 10, color: 'var(--paper)', background: busy === f.name ? 'var(--ink-3)' : 'var(--yin)', borderRadius: 5, padding: '2px 8px', cursor: 'pointer' }}>{busy === f.name ? '…' : '转正'}</span>
+        </div>
+      ))}
+      <div className="serif" style={{ fontSize: 9, color: 'var(--ink-3)', lineHeight: 1.5, marginTop: 3, paddingLeft: 2 }}>转正=人审动作;转正后立即进入上方因子目录(实测 IC 待下次 regen 顺算)。</div>
+    </div>
+  );
+}
+
 // ───────── 因子库(选股页2.0:~56 因子 · 11 族 · 实测IC · 分族折叠)─────────
 function FactorLibrary({ cfg, toggleFactor, setFactorW }) {
   const [openFam, setOpenFam] = useState({});
@@ -800,6 +853,7 @@ function FactorLibrary({ cfg, toggleFactor, setFactorW }) {
           </div>
         );
       })}
+      <DraftFactorSection />
       {dyn && window.XG_IC_NOTE && <div className="serif" style={{ fontSize: 9, color: 'var(--ink-3)', lineHeight: 1.5, marginTop: 4 }}>{window.XG_IC_NOTE}</div>}
     </RailSection>
   );
