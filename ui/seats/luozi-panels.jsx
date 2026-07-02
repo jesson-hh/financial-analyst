@@ -1618,4 +1618,104 @@ function DecisionCard({ dec, symbol, mode }) {
   );
 }
 
-Object.assign(window, { MiniLine, MarketBar, MetricsStrip, SeatRail, LiveDecideFlow, DecisionCard, DecisionHistory, ReasoningChain, LedgerPanel, pct, plFmt });
+// ───────── 研究回路(P3:P2 后端研究回路的落子可视化;两模式通吃,默认折叠)─────────
+// 数据=window.lzResearchRuns / lzResearchRounds(graph 已在 data 层剔除)。
+// 视觉:头行/列表/选中展开照 RunPicker 范式;指标行与样本外中文映射照 workflow 页
+// AILoopModal 照抄(跨页无 import 机制,照抄一份是仓例——先例 toast 四页各抄)。
+// 状态四态全渲染(done/error/running/interrupted);「上画布」= 跳工作流页 ?load= 深链
+// 载入研究回路存的图(绝不自动运行);跳转透传 embed/ws(防帷幄 iframe 跌回独立态)。
+function ResearchLoopCard() {
+  const [open, setOpen] = useState(false);
+  const [runs, setRuns] = useState(null);          // null=未拉/后端不可达(诚实降级),[]=空档案
+  const [selId, setSelId] = useState(null);
+  const [rounds, setRounds] = useState([]);
+  const fIC = v => (v == null || v !== v) ? '—' : (v >= 0 ? '+' : '') + (+v).toFixed(4);
+  const VL = { robust: '稳健', degraded: '衰减', overfit: '疑似过拟合', insufficient: '期数不足', na: '不适用' };
+  const VC = { robust: 'rgb(74,107,92)', degraded: '#b8860b', overfit: 'var(--zhu)' };
+  const SC = { done: ['✓', 'var(--dai)'], error: ['✗', 'var(--zhu)'], running: ['⟳', 'var(--jin)'], interrupted: ['⚠', 'var(--ink-3)'] };
+  useEffect(() => {
+    if (!open) return;
+    let dead = false;
+    const pull = () => { (window.lzResearchRuns ? window.lzResearchRuns(20) : Promise.resolve(null)).then(rs => { if (!dead) setRuns(rs); }); };
+    pull();
+    const t = setInterval(pull, 60000);            // 展开时 60s 轮询(running run 可感知进度)
+    return () => { dead = true; clearInterval(t); };
+  }, [open]);
+  useEffect(() => {
+    if (!selId) { setRounds([]); return; }
+    let dead = false;
+    (window.lzResearchRounds ? window.lzResearchRounds(selId) : Promise.resolve([])).then(rs => { if (!dead) setRounds(rs || []); });
+    return () => { dead = true; };
+  }, [selId]);
+  const list = runs || [];
+  const promoBadge = (pr) => {
+    if (!pr) return null;
+    if (pr.status === 'draft') return <span className="mono" style={{ fontSize: 8, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--jin)', color: 'var(--jin)', flexShrink: 0 }}>draft·待人审</span>;
+    if (pr.status === 'skipped_multi') return <span className="mono" style={{ fontSize: 8, padding: '1px 5px', borderRadius: 5, border: '1px dashed var(--line)', color: 'var(--ink-3)', flexShrink: 0 }}>多因子未入库</span>;
+    if (pr.status === 'save_failed') return <span className="mono" title={pr.reason || ''} style={{ fontSize: 8, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--zhu)', color: 'var(--zhu)', flexShrink: 0 }}>入库失败</span>;
+    return null;
+  };
+  const goCanvas = (wid) => {
+    const qs = new URLSearchParams(location.search);
+    const extra = (qs.get('embed') === '1' ? '&embed=1' : '') + (qs.get('ws') ? '&ws=' + encodeURIComponent(qs.get('ws')) : '');
+    location.href = '../factor/观澜 · AI 工作流.html?load=' + encodeURIComponent(wid) + extra;
+  };
+  return (
+    <div style={{ flexShrink: 0, borderBottom: '1px solid var(--line)', display: 'flex', flexDirection: 'column' }}>
+      <div onClick={() => setOpen(o => !o)} style={{ padding: '9px 13px', borderBottom: open ? '1px solid var(--line-soft)' : 'none', flexShrink: 0, display: 'flex', alignItems: 'baseline', gap: 8, cursor: 'pointer', userSelect: 'none' }}>
+        <span className="serif" style={{ fontSize: 12.5, fontWeight: 600 }}>研究回路 ✦</span>
+        <span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)' }}>{runs === null ? (open ? '读取中…' : '') : list.length + ' 次研究'}</span>
+        <span style={{ flex: 1 }} />
+        <span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)' }}>{open ? '▾' : '▸'}</span>
+      </div>
+      {open && <div style={{ maxHeight: 300, overflowY: 'auto' }}>
+        {runs === null && <div className="mono" style={{ padding: 12, fontSize: 10, color: 'var(--ink-3)' }}>读取中…(后端不可达时保持空)</div>}
+        {runs !== null && list.length === 0 && <div className="mono" style={{ padding: 12, fontSize: 10, color: 'var(--ink-3)' }}>暂无研究档案 — 让帷幄「研究一个因子」(ww_research_loop)即产生第一条</div>}
+        {list.map(r => {
+          const sc = SC[r.status] || ['·', 'var(--ink-3)'];
+          const bm = r.best_metrics || {};
+          const on = selId === r.run_id;
+          return (
+            <div key={r.run_id} style={{ borderBottom: '1px solid var(--line-soft)' }}>
+              <div className="hover-row" onClick={() => setSelId(on ? null : r.run_id)}
+                   style={{ padding: '7px 13px', cursor: 'pointer', borderLeft: '2px solid ' + (on ? 'var(--zhu)' : 'transparent'), background: on ? 'rgba(168,57,45,0.07)' : 'transparent' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                  <span className="mono" style={{ fontSize: 10, color: sc[1], flexShrink: 0 }} title={r.status + (r.error ? ':' + r.error : '')}>{sc[0]}</span>
+                  <span className="serif" style={{ fontSize: 11.5, color: 'var(--ink-1)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.goal || ''}>{r.goal || '(无目标)'}</span>
+                  {promoBadge(r.promoted)}
+                </div>
+                <div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', marginTop: 3, display: 'flex', gap: 8, alignItems: 'baseline' }}>
+                  <span>{String(r.ts || '').slice(0, 16)}</span>
+                  <span>{r.n_rounds != null ? r.n_rounds + ' 轮' : ''}</span>
+                  <span>最佳 RankIC <b style={{ color: (bm.rank_ic >= 0 ? 'rgb(74,107,92)' : 'var(--zhu)') }}>{fIC(bm.rank_ic)}</b></span>
+                  <span style={{ flex: 1 }} />
+                  {r.workflow_saved && r.workflow_saved.ok && <span onClick={(e) => { e.stopPropagation(); goCanvas(r.workflow_saved.id); }} className="serif" style={{ color: 'var(--yin)', border: '1px solid var(--zhu-soft)', borderRadius: 5, padding: '0 6px', cursor: 'pointer', fontSize: 9, flexShrink: 0 }} title={'载入「' + (r.workflow_saved.name || '') + '」到工作流画布(绝不自动运行)'}>上画布</span>}
+                </div>
+              </div>
+              {on && <div style={{ borderLeft: '2px solid var(--zhu)', background: 'rgba(168,57,45,0.04)', padding: '4px 0' }}>
+                {rounds.length === 0 && <div className="mono" style={{ padding: '6px 13px', fontSize: 9, color: 'var(--ink-3)' }}>读取轮次…(或该 run 无轮次记录)</div>}
+                {rounds.map(rd => {
+                  const m = rd.metrics || {};
+                  const mark = rd.failed ? '❌' : ((rd.gate || {}).passed ? '✅' : '·');
+                  return (
+                    <div key={rd.k} className="mono" style={{ padding: '4px 13px', fontSize: 9, color: 'var(--ink-2)', lineHeight: 1.5 }}>
+                      <div style={{ display: 'flex', gap: 7, alignItems: 'baseline' }}>
+                        <span style={{ flexShrink: 0 }}>{mark} 第{rd.k + 1}轮·{rd.stage === 'propose' ? '初始' : '改进'}</span>
+                        <span>RankIC <b style={{ color: (m.rank_ic >= 0 ? 'rgb(74,107,92)' : 'var(--zhu)') }}>{fIC(m.rank_ic)}</b></span>
+                        {m.oos_verdict && <span>样本外 <b style={{ color: VC[m.oos_verdict] || 'var(--ink-3)' }}>{VL[m.oos_verdict] || m.oos_verdict}</b></span>}
+                      </div>
+                      {rd.diag && <div style={{ color: 'var(--ink-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={rd.diag}>{rd.diag}</div>}
+                      {rd.failed && <div style={{ color: 'var(--zhu)' }}>⚠ {String(rd.error || '本轮未产出结果').slice(0, 60)}</div>}
+                    </div>
+                  );
+                })}
+              </div>}
+            </div>
+          );
+        })}
+      </div>}
+    </div>
+  );
+}
+
+Object.assign(window, { MiniLine, MarketBar, MetricsStrip, SeatRail, LiveDecideFlow, ResearchLoopCard, DecisionCard, DecisionHistory, ReasoningChain, LedgerPanel, pct, plFmt });

@@ -747,6 +747,7 @@ function LuoziApp() {
               {mode === 'live' && <div style={{ height: 232, flexShrink: 0, borderBottom: '1px solid var(--line)', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
                 <LiveDecideFlow decs={realDecs[code]} openDate={(ledger && ledger.start_date) || null} />
               </div>}
+              <ResearchLoopCard />
               <OrderWatchPanel code={symbol.meta.code} name={symbol.meta.name} mode={mode === 'live' ? 'live' : 'backtest'} asOf={mode !== 'live' ? asOfDate : null} fresh={mode === 'live' && !!(quote && quote.fresh)} seatId={curSid} onRealDecide={onLiveDecide} onTrigger={(t) => {
   setOrderTriggers(ts => [...ts.filter(x => x.id !== t.id), t]);
   if (mode === 'live' && window.lzShadowAddEntry) setShadow(sh => { const ns = window.lzShadowAddEntry(sh, t); if (ns !== sh && window.lzShadowSave) window.lzShadowSave(code, ns); return ns; });
