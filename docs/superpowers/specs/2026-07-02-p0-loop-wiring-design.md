@@ -2,7 +2,7 @@
 
 日期:2026-07-02
 关联:帷幄自主闭环审计(memory: weiwo-autonomy-audit-2026-07-02);四期路线图 P0
-基线:main@faf102b(守护计数现值:WW_TOOL_TABLE 32 / CONSOLE_ALLOWED 57 / MCP 37)
+基线:main@355fea8(守护计数现值:WW_TOOL_TABLE 32 / CONSOLE_ALLOWED 57 / MCP 37;含已合入的 regime 因子权重与 glmcp background 修复两波并行工作)
 后续:P1 收益回流(basket_perf+定时 regen+promote 判据门)/ P2 自主研究回路 / P3 落子可视化——本 spec 均不含
 
 ## 背景与目标
@@ -66,10 +66,9 @@
 
 ## §3 MCP 诚实收尾
 
-**收编盘上未提交的 `_spawn_background_detached`**(glmcp/server.py,已实现:dispatch_tool 检测 background 信封 → detached 子进程真跑研报/ETF 研报 + 受理凭证 + 启动失败显形)。P0 补:
+研报假成功已由 `_spawn_background_detached` 修复并合 main(b49dd97 detached 真执行 + 5742125 GBK 编码修,均已真机验证)——但**无单测守护**。P0 补:
 
 - 单测(monkeypatch subprocess.Popen):report 分支命令构造 / etf_report 分支 / 未知 kind 拒绝文案 / Popen 抛错→错误显形(绝不假成功)
-- 随本分支提交(该代码当前未提交、未带测试)
 
 **`_EXCLUDED` 2→3**:`{ww_plan_update, ww_show_page}` + **`ww_seats_bind`**(seat_bind 信封靠前端 window.GL 落地,MCP 语境=空转假成功,同 ww_show_page 处理)。
 
@@ -91,7 +90,7 @@
 
 ## 流程
 
-main@faf102b 开分支 `p0-loop-wiring`,subagent-driven(逐任务两段评审+终审),完成后合并选项交用户。盘上未提交的 glmcp/server.py 改动=§3 收编对象,随分支提交。
+main@355fea8 开分支 `p0-loop-wiring`,subagent-driven(逐任务两段评审+终审),完成后合并选项交用户。注意:用户多会话并行开发活跃,分支存续期间以守护测试现值为计数锚,合并前 rebase/对表 main。
 
 ## 展望锚点(非本期,仅为对齐方向)
 
