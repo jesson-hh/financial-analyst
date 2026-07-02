@@ -55,6 +55,7 @@ class ScreenIn(BaseModel):
     exclNew: bool = False
     universe: str = "csi_fast"
     model: str = "prod"          # v4 模型:prod=生产 / 变体 id(读 models/<id>)
+    regimeWeights: bool = False  # regime 因子族动态权重(opt-in;默认 False=路径零触碰,须过闸+新鲜双闸)
     start: Optional[str] = None
     end: Optional[str] = None
     freq: str = "day"
@@ -730,7 +731,19 @@ def _screen_via_v4(body: "ScreenIn"):
         _vals = pool_df["lgb_pct"].astype(float)
     _pct = _vals.rank(pct=True).tolist()
     codes = [str(c) for c in pool_df["code"].tolist()]
-    disp, regime, metrics = _panel_enrich(codes, body.freq, body.factors)
+    # —— regime 条件化(opt-in;缺省 False 分支不执行任何新代码——红线1)——
+    _rw_badge = None
+    _factors_eff = body.factors
+    if getattr(body, "regimeWeights", False):
+        try:
+            from guanlan_v2.strategy.compute.factor_regime import resolve_regime_weights
+            _eff, _rw_badge = resolve_regime_weights(body.factors, rdate)
+            if _eff is not None:
+                _factors_eff = _eff
+        except Exception as _e:  # noqa: BLE001
+            _rw_badge = {"applied": False, "fallback_reason": f"{type(_e).__name__}: {_e}",
+                         "regime_asof": None, "per_factor": []}
+    disp, regime, metrics = _panel_enrich(codes, body.freq, _factors_eff)
 
     scored_rows = []
     for r, _pctv in zip(pool_df.itertuples(index=False), _pct):
@@ -947,6 +960,8 @@ def _screen_via_v4(body: "ScreenIn"):
         "model_health": _mh,   # 模型体检(回看趋势+vintage;缺产物=None,TopBar 不显卡)
         # 诚实健康标:disp 全空 = 引擎面板不可用(价/量/L3/L4 指标缺),UI 据此区分「引擎宕机」vs「字段稀疏」
         "panel_ok": bool(disp),
+        # regime 徽章:仅 opt-in 请求才带此键(缺省响应逐字节不变);降级带 fallback_reason 显形
+        **({"regime_weights": _rw_badge} if _rw_badge is not None else {}),
         "note": "L1=v4 排名 · L2 主线 · L3 量能 · L4 九视角(逐行 views)· L5 评级/护盾/≤5 收敛(decision)",
     })
 
@@ -954,6 +969,35 @@ def _screen_via_v4(body: "ScreenIn"):
 def build_screen_router() -> APIRouter:
     """选股自有路由组(prefix ``/screen``)。随 cards/seats/factorlib/workflow 工厂式。"""
     router = APIRouter(prefix="/screen", tags=["screen"])
+
+    @router.get("/regime")
+    def screen_regime():
+        """因子族 regime 只读:各族 p_fav/confirmed_since + 激活闸状态(前端因子卡/帷幄消费)。
+        缺产物 → ok:false 诚实缺席,不造数。从 factor_regime 模块命名空间取路径常量
+        (非直接 paths)——测试 monkeypatch 才能生效。"""
+        try:
+            import json as _json
+
+            import pandas as _pd
+
+            import guanlan_v2.strategy.compute.factor_regime as _frm
+            if not _frm.FACTOR_REGIME_PARQUET.exists():
+                return {"ok": False, "reason": "regime 产物缺失(先全量回填)"}
+            df = _pd.read_parquet(_frm.FACTOR_REGIME_PARQUET)
+            last = df[df["date"] == df["date"].max()]
+            gate = (_json.loads(_frm.FACTOR_REGIME_GATE_JSON.read_text(encoding="utf-8"))
+                    if _frm.FACTOR_REGIME_GATE_JSON.exists() else None)
+            return {"ok": True, "asof": str(_pd.Timestamp(df["date"].max()).date()),
+                    "spec_hash": _frm.SPEC_HASH,
+                    "families": [{"family": str(r["family"]),
+                                  "p_fav": round(float(r["p_fav"]), 4),
+                                  "state": int(r["state"]),
+                                  "confirmed_since": str(_pd.Timestamp(r["confirmed_since"]).date())}
+                                 for _, r in last.iterrows()],
+                    "gate": ({"activated": gate.get("activated"), "asof": gate.get("asof"),
+                              "stale": gate.get("spec_hash") != _frm.SPEC_HASH} if gate else None)}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "reason": f"{type(e).__name__}: {e}"}
 
     @router.get("/factors")
     def screen_factors():

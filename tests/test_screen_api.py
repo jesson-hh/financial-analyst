@@ -244,3 +244,57 @@ def test_model_default_endpoint_and_models_flag(tmp_path, monkeypatch):
     assert any(v.get("is_default") for v in j["variants"])
     assert c.post("/screen/model/default", json={"id": "m_nope"}).json()["ok"] is False
     assert c.post("/screen/model/default", json={"id": "prod"}).json()["default"] is None
+
+
+# —— regime 因子族动态权重(2026-07-02 spec):opt-in 隔离 + 徽章 + 只读端点 ——
+
+def test_screen_run_default_path_untouched(monkeypatch):
+    """红线1硬回归:缺省请求绝不触碰 regime 代码,响应无 regime_weights 键。"""
+    import guanlan_v2.strategy.compute.factor_regime as FR
+    called = {"n": 0}
+
+    def _spy(*a, **k):
+        called["n"] += 1
+        return None, {}
+
+    monkeypatch.setattr(FR, "resolve_regime_weights", _spy)
+    r = _client().post("/screen/run", json=dict(_CFG))
+    assert r.status_code == 200
+    assert called["n"] == 0
+    assert "regime_weights" not in r.json()
+
+
+def test_screen_run_optin_badge():
+    """opt-in:v4 路径可用时必带 regime_weights 徽章(applied 或 fallback_reason 非空)。"""
+    import pytest as _pytest
+    r = _client().post("/screen/run", json={**_CFG, "regimeWeights": True})
+    assert r.status_code == 200
+    j = r.json()
+    if j.get("source") != "v4_ranking":
+        _pytest.skip("v4 产物不可用(artifacts 未恢复),opt-in 徽章仅在 v4 路径下发")
+    assert "regime_weights" in j
+    b = j["regime_weights"]
+    assert b["applied"] is True or b["fallback_reason"]
+
+
+def test_screen_regime_endpoint_honest(monkeypatch, tmp_path):
+    """GET /screen/regime:缺产物 → ok:false;在位 → families+gate 下发。"""
+    import json as _json
+
+    import pandas as _pd
+
+    import guanlan_v2.strategy.compute.factor_regime as FR
+    monkeypatch.setattr(FR, "FACTOR_REGIME_PARQUET", tmp_path / "rg.parquet")
+    monkeypatch.setattr(FR, "FACTOR_REGIME_GATE_JSON", tmp_path / "gate.json")
+    c = _client()
+    assert c.get("/screen/regime").json()["ok"] is False
+    _pd.DataFrame({"date": [_pd.Timestamp("2026-07-01")], "family": ["技术"],
+                   "p_fav": [0.8], "state": [1],
+                   "confirmed_since": [_pd.Timestamp("2026-06-20")]}
+                  ).to_parquet(tmp_path / "rg.parquet", index=False)
+    (tmp_path / "gate.json").write_text(_json.dumps(
+        {"spec_hash": FR.SPEC_HASH, "activated": ["技术"], "asof": "2026-07-01"}),
+        encoding="utf-8")
+    j = c.get("/screen/regime").json()
+    assert j["ok"] is True and j["families"][0]["family"] == "技术"
+    assert j["gate"]["activated"] == ["技术"] and j["gate"]["stale"] is False
