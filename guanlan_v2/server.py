@@ -230,7 +230,12 @@ def create_app():
     async def _composed_lifespan(_app):
         async with _prev_lifespan(_app):
             async with _gl_mcp_app.router.lifespan_context(_gl_mcp_app):
-                yield
+                import asyncio as _aio
+                _revive = _aio.create_task(_checker_revive_loop())   # 互拉守望(见函数 docstring)
+                try:
+                    yield
+                finally:
+                    _revive.cancel()
 
     app.router.lifespan_context = _composed_lifespan
     app.mount("/gl-mcp", _gl_mcp_app)
@@ -250,6 +255,31 @@ def create_app():
         return RedirectResponse(url="/ui/")
 
     return app
+
+
+async def _checker_revive_loop() -> None:
+    """互拉守望:检查器心跳(var/check_9999.heartbeat)陈旧 >600s → detached 拉起新代际。
+    检查器守 server、server 守检查器;双死才需登录 Run key/人工。绝不用 schtasks(本机
+    Schedule 服务派生进程冻死在 loader init,见 scripts/register_watchdog_9999.ps1 头注)。"""
+    import asyncio as _aio
+    import subprocess
+    import time
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[1]
+    heart = repo / "var" / "check_9999.heartbeat"
+    script = repo / "scripts" / "check_9999.ps1"
+    cmd = ["C:\\Windows\\System32\\conhost.exe", "--headless", "powershell.exe",
+           "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
+    while True:
+        try:
+            stale = (not heart.exists()) or (time.time() - heart.stat().st_mtime > 600)
+            if stale and script.exists():
+                subprocess.Popen(cmd, creationflags=0x00000008 | 0x00000200)  # DETACHED
+                print("[revive] check_9999 心跳陈旧,已拉起新代际", flush=True)
+                await _aio.sleep(300)     # 给新代际时间写心跳,防派生风暴
+        except Exception:  # noqa: BLE001 — 守望绝不拖垮 server
+            pass
+        await _aio.sleep(60)
 
 
 app = create_app()
