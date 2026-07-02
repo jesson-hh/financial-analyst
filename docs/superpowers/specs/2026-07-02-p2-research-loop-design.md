@@ -27,7 +27,9 @@
 
 ## 2. 回路算法(确定性编排,LLM 只在提案/批判两个接缝)
 
-入参:`{goal(必填非空), max_rounds=3(服务端钳 1..5), min_rank_ic=0.02(钳 0..0.2), universe="csi300", start?, end?, freq="month"}`。
+入参:`{goal(必填非空), max_rounds=3(服务端钳 1..5), min_rank_ic=0.02(钳 0..0.2), universe="csi300_active"(须 ∈ workflow._UNIVERSE_OK), start?, end?, freq="month"}`。求值一律带 `oos_frac=0.3`(过门要求样本外判定,oos 必须开启)。
+
+> 实现注记(写计划时核实的事实):generate/critique handler 是 `build_workflow_router()` 内闭包,且 engine LLM 客户端连接池绑事件循环(daemon 线程反复 `asyncio.run` 会踩 "Event loop is closed");故两个 LLM 接缝从 daemon 线程**同步 HTTP 自调**本进程端点(`workflow_critique_impl` 已验证的模式,LLM 调用落在 server 主循环上)——同一实现零复制,与「同源复用」意图一致。求值三道菜维持模块函数直调(`_factor_report2/_factor_compose/_backtest_vector` 均模块级 sync)。
 
 每 run:
 
@@ -74,13 +76,14 @@
 - `/factorlib/list` 下发 status 字段(显形 draft 标)
 - **`POST /factorlib/promote {name}`(新端点,人审转正)**:在 mined JSON 里找到该条目,摘掉 status → `{ok,name}` | `{ok:false,reason:"not_found"}`;下次 `/screen/factors` 入口热刷新即上货架。P2 只给端点(curl/后续 UI 按钮);帷幄侧转正工具与「待审面板」留 P3
 - 回路入库命名:`lib_rl_{run_id 后 6 位}_r{k}`(保证唯一,规避 save 重名双重拒绝);description=goal+一句诊断;meta 带六键指标快照
+- 边界:达标轮若为多因子合成(compose,≥2 表达式),**不自动入库**(库以单表达式为单位,合成权重是数据驱动的非固定表达式);终态行 promoted 诚实标 `skipped_multi`,成分表达式全在轮次档案供人工取用
 
 ## 5. 帷幄两工具 + 教训记忆
 
 **`ww_research_loop`**(confirm=True——花 LLM 钱+可能写 draft,发起必过确认门;cost="minutes"):
 - 入参 `{goal 必填, max_rounds?, min_rank_ic?, universe?, wait?=true, timeout_seconds?=1800, poll_seconds?=15}`
 - impl:`_self_post /research/loop/start` → wait 时轮询 status(照 model_promote_impl 三段式:post-start→poll→deadline 诚实超时「后端可能仍在跑,稍后 ww_research_runs 查」)→ 收工读 runs/rounds 拼成绩单 content:`「研究『{goal}』{n} 轮 · 最佳 RankIC={x}(第{k}轮) · {达标已入 draft:lib_rl_xxx | 未达标(诊断一句)} · 图已存工作流库」`
-- reachable=["/research/loop/start","/research/loop/status","/research/runs","/research/rounds"]
+- reachable=["/research/loop/start","/research/loop/status","/research/runs"](按 impl 真实调用;仓规 reachable 取自 `_self_post/_self_get` 实调)
 
 **`ww_research_runs`**(confirm=False,cost="instant"):
 - 入参 `{run_id?, limit?}`;无 run_id 列近期 run(状态/轮数/最佳指标/draft 名),有 run_id 出逐轮详情(diag/指标/过门;graph 不进 content 防灌上下文,raw 瘦身)
