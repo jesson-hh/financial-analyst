@@ -36,9 +36,14 @@ _VERDICTS = {"支持", "否证"}
 
 _SYSTEM = (
     "你是 A 股行业研究抽取器。只依据给定研报原文抽取,禁止编造原文没有的数字/事件。"
-    "只输出 JSON(无多余文字)。所有 id 必须取自给定框架白名单;quote 字段必须是原文的连续子串;"
-    "研报与 AI 产业链无关时输出 {\"segments\": []}。"
+    "只输出 JSON(无多余文字)。segments/edges/narratives 等核心字段的 id 必须取自给定框架白名单;"
+    "quote 字段必须是原文的连续子串;研报与 AI 产业链无关时输出 {\"segments\": []}。"
+    "重要:若研报包含框架白名单未覆盖、但对 AI 产业链投研重要的信息"
+    "(新环节/新传导关系/新叙事/环节全球坐标应修正的证据),写进 observations 字段提案,"
+    "不要硬塞进白名单 id,也不要因为框架没覆盖就丢弃。"
 )
+
+_OBS_KINDS = {"新环节", "新边", "新叙事", "坐标修正", "其他"}
 
 
 def _norm_code(c: str) -> Optional[str]:
@@ -66,6 +71,7 @@ def _prompt(doc: dict, text: str, digest: str) -> str:
         "narratives": [{"narrative_id": "N4", "stance": "多|中|空"}],
         "global_updates": [{"segment_id": "C2", "field": "国产化率|份额|技术差距|认证", "content": "一句话"}],
         "stocks": [{"code": "SH688498", "stance": "多|中|空", "logic": "一句话"}],
+        "observations": [{"kind": "新环节|新边|新叙事|坐标修正|其他", "note": "一句话(框架未覆盖的重要信息)", "suggest_id": "建议挂靠的现有id,可空"}],
     }
     return (
         f"## 框架白名单\n{digest}\n\n"
@@ -132,6 +138,17 @@ def validate_extraction(raw: dict, fw: dict, text: str) -> dict:
         code = _norm_code(st.get("code") or "")
         if code and st.get("stance") in _STANCES:
             out["stocks"].append({"code": code, "stance": st["stance"], "logic": str(st.get("logic") or "")})
+    # 框架外观察通道:白名单不适用(它就是给框架没覆盖的信息的),轻消毒防注水:
+    # kind 归 enum、note 截 300 字、最多 8 条。Kimi 提案 → 人审 → 改 YAML,框架保持活的。
+    out["observations"] = []
+    for ob in (raw.get("observations") or [])[:8]:
+        note = str(ob.get("note") or "").strip()
+        if not note:
+            continue
+        kind = ob.get("kind") if ob.get("kind") in _OBS_KINDS else "其他"
+        sug = ob.get("suggest_id")
+        out["observations"].append({"kind": kind, "note": note[:300],
+                                    "suggest_id": (str(sug)[:8] if sug else None)})
     return out
 
 
@@ -144,6 +161,10 @@ async def extract_one(doc: dict, text: str, fw: dict, client=None, timeout: floa
         client = LLMClient.for_agent("industry_extract", config_path=_LLM_CONFIG)
     messages = [{"role": "system", "content": _SYSTEM},
                 {"role": "user", "content": _prompt(doc, text, framework_digest(fw))}]
+    # token 记账取增量:client 计数是实例累计属性,共享 client 跑批时直接取会逐篇重复累计
+    # (2026-07-03 深回填日志虚高实证)。快照前后差 = 本篇真实用量。
+    pt0 = getattr(client, "total_prompt_tokens", 0) or 0
+    ct0 = getattr(client, "total_completion_tokens", 0) or 0
     try:
         resp = await asyncio.wait_for(
             client.chat(messages, response_format={"type": "json_object"}, temperature=0.1),
@@ -176,7 +197,12 @@ async def extract_one(doc: dict, text: str, fw: dict, client=None, timeout: floa
         "publish_ts": doc.get("publish_ts"), "doc_type": doc.get("doc_type"),
         "extracted_at": pd.Timestamp.now().isoformat(timespec="seconds"),
         "model": model,
+        # 原始响应落盘:框架 v2(加环节/边/叙事)后可对存量 raw 重新校验聚合,
+        # 历史研报不用重新花钱再读(白名单当时丢弃的信息全在这里)。
+        "raw": raw,
     })
+    pt1 = getattr(client, "total_prompt_tokens", 0) or 0
+    ct1 = getattr(client, "total_completion_tokens", 0) or 0
     return {"ok": True, "extraction": ex, "model": model,
-            "prompt_tokens": getattr(client, "total_prompt_tokens", 0) or 0,
-            "completion_tokens": getattr(client, "total_completion_tokens", 0) or 0}
+            "prompt_tokens": max(0, pt1 - pt0),
+            "completion_tokens": max(0, ct1 - ct0)}

@@ -19,14 +19,18 @@ class _FakeClient:
         self._payload = payload
         self._exc = raise_exc
         self.model = model
-        self.total_prompt_tokens = prompt_tokens
-        self.total_completion_tokens = completion_tokens
+        # 镜像真契约:计数是"累计"属性,每次 chat 递增(extract_one 取前后快照差作单篇用量)
+        self._per_call = (prompt_tokens, completion_tokens)
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
         self.calls = []
 
     async def chat(self, messages, **kw):
         self.calls.append({"messages": messages, **kw})
         if self._exc:
             raise self._exc
+        self.total_prompt_tokens += self._per_call[0]
+        self.total_completion_tokens += self._per_call[1]
         content = json.dumps(self._payload, ensure_ascii=False)
         return {"choices": [{"message": {"content": content}}]}
 
@@ -57,6 +61,11 @@ def test_extract_ok_and_validation():
             {"code": "830799", "stance": "多", "logic": "x"},
             {"code": "912345", "stance": "多", "logic": "x"},
         ],
+        "observations": [
+            {"kind": "新环节", "note": "HBM 设备(键合机)研报中独立成投资主线,框架未覆盖", "suggest_id": "A3"},
+            {"kind": "瞎编的kind", "note": "x" * 500, "suggest_id": None},
+            {"kind": "新叙事", "note": ""},   # 空 note 丢弃
+        ],
     }
     r = asyncio.run(extract_one(_doc(), text, fw, client=_FakeClient(payload)))
     assert r["ok"] is True
@@ -69,7 +78,13 @@ def test_extract_ok_and_validation():
     assert {s["code"] for s in ex["stocks"]} == {"SH688498", "BJ830799"}  # 码式归一+拒绝9开头
     assert ex["doc_id"] == "d1" and ex["extracted_at"]
     assert r["model"] == "deepseek-chat"
-    assert r["prompt_tokens"] == 100 and r["completion_tokens"] == 50
+    assert r["prompt_tokens"] == 100 and r["completion_tokens"] == 50   # 前后快照差=单篇增量
+    # 框架外观察通道:kind 归 enum、note 截 300、空 note 丢;raw 原始响应落盘(框架v2免费重聚合)
+    obs = ex["observations"]
+    assert len(obs) == 2
+    assert obs[0] == {"kind": "新环节", "note": obs[0]["note"], "suggest_id": "A3"} and "HBM" in obs[0]["note"]
+    assert obs[1]["kind"] == "其他" and len(obs[1]["note"]) == 300
+    assert ex["raw"]["observations"][0]["kind"] == "新环节"
 
 
 def test_quote_whitespace_tolerant_but_no_fabrication():
