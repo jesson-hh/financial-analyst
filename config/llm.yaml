@@ -9,6 +9,11 @@ providers:
     base_url: https://api.deepseek.com/v1
     network_profile: intl_clash   # Clash fake-ip + MITM, 必经 proxy + verify=False
     models: [deepseek-chat, deepseek-reasoner]
+  kimi:
+    api_key_env: KIMI_API_KEY
+    base_url: https://api.moonshot.cn/v1
+    network_profile: domestic    # 国内直连 trust_env=False, 绕开 Clash fake-ip(qwen 前车之鉴, curl 直连已验通)
+    models: [kimi-k2.6, kimi-k2.5, moonshot-v1-auto]
   anthropic:
     api_key_env: ANTHROPIC_API_KEY
     network_profile: intl_clash   # 走 litellm fallback, 这字段仅占位
@@ -19,6 +24,8 @@ providers:
     network_profile: intl_clash
     models: [gpt-4o, gpt-4-turbo]
 
-# agent_overrides 全部移除 (2026-06-01) — 所有 agent 走 default_provider (deepseek/deepseek-chat).
-# (原 14 个 override 都指向已删的 qwen; client.py for_agent 缺 override 时回落 default_provider.)
-agent_overrides: {}
+# agent_overrides (2026-06-01 清零后重启用):
+# - industry_extract (2026-07-03): AI投研看板研报抽取走 Kimi k2.6 (256K ctx, 用户指定读研报模型).
+#   其余 agent 仍走 default_provider (deepseek/deepseek-chat).
+agent_overrides:
+  industry_extract: {provider: kimi, model: kimi-k2.6}

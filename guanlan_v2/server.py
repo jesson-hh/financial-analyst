@@ -47,6 +47,31 @@ _CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 # 走 guanlan 自包含生成器(guanlan_v2/strategy/market_status.py)的产物。
 _MARKET_STATUS_PATH = Path(__file__).resolve().parent.parent / "data" / "market_status.json"
 
+# var/secrets.env(gitignored, KEY=VALUE 每行一条):API key 的文件兜底。
+# 为什么需要:9999 由 check_9999.ps1 代际链拉起,链上环境是首次登录时的快照——
+# setx 的新 key(如 KIMI_API_KEY, 2026-07-03)在看门狗复活的进程里不存在,
+# kimi 调用会 401。文件兜底让任意代际拉起的 server 都能拿到 key(不覆盖已有 env)。
+_SECRETS_ENV = Path(__file__).resolve().parent.parent / "var" / "secrets.env"
+
+
+def _load_secrets_env() -> None:
+    try:
+        if not _SECRETS_ENV.exists():
+            return
+        for line in _SECRETS_ENV.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k, v = k.strip(), v.strip()
+            if k and v and not os.environ.get(k):
+                os.environ[k] = v
+    except Exception:  # noqa: BLE001 — 兜底失败不阻断启动;缺 key 的调用会诚实 401
+        pass
+
+
+_load_secrets_env()
+
 
 def _ensure_engine_importable() -> str:
     """Make ``financial_analyst`` importable, with GUANLAN_FA_SRC AUTHORITATIVE.

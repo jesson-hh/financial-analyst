@@ -42,7 +42,7 @@ def _is_transient(exc: BaseException) -> bool:
 # AsyncOpenAI + base_url switching. Non-compatible providers (anthropic) keep the
 # old litellm path.
 
-_OPENAI_COMPAT_PROVIDERS = {"qwen", "deepseek", "openai", "openrouter"}
+_OPENAI_COMPAT_PROVIDERS = {"qwen", "deepseek", "openai", "openrouter", "kimi"}
 _PROVIDER_CLIENTS: Dict[str, Any] = {}  # cache: f"{provider}:{base_url}" -> AsyncOpenAI
 
 
@@ -56,7 +56,9 @@ def _build_http_client(network_profile: str):
     """
     import httpx
     if network_profile == "domestic":
-        return httpx.AsyncClient(trust_env=False, timeout=120)
+        # timeout 600: kimi-k2.6 reasoning 长产出(实测 4k字研报抽取 170s/7996 completion tokens,
+        # 2026-07-03), 120s 会掐死单次尝试再被 SDK 静默重试, 表现为永远 TimeoutError.
+        return httpx.AsyncClient(trust_env=False, timeout=600)
     if network_profile == "intl_clash":
         proxy = os.environ.get("HTTPS_PROXY") or "http://127.0.0.1:7890"
         verify_env = os.environ.get("FA_INTL_VERIFY", "false").lower()
@@ -227,6 +229,10 @@ class LLMClient:
             "messages": messages,
             "temperature": temperature,
         }
+        if self.provider == "kimi" and str(self.model).startswith("kimi-k2"):
+            # Moonshot k2 系列硬约束: 只接受 temperature=1, 其他值直接 400
+            # ("invalid temperature: only 1 is allowed for this model", 2026-07-03 真机实测).
+            kwargs["temperature"] = 1
         if tools is not None:
             kwargs["tools"] = tools
         if response_format is not None:

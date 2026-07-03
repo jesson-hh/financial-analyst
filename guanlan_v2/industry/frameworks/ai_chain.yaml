@@ -1,4 +1,13 @@
-meta: {id: ai_chain, name: AI产业链, version: 1, updated: "2026-07-03", note: "编辑层(display_name/mrow/good/驱动读数/叙事状态)与河图设计稿对齐;行情/研报读数为运行时聚合,非本文件"}
+meta:
+  id: ai_chain
+  name: AI产业链
+  version: 1
+  updated: "2026-07-03"
+  note: "编辑层(display_name/mrow/good/驱动读数/叙事状态)与河图设计稿对齐;行情/研报读数为运行时聚合,非本文件"
+  # 语料范围声明(corpus.scan_new_docs / corpus_freshness 消费;seed 可被 env GL_CHAIN_SEED 覆盖)
+  corpus:
+    seed: G:/stocks/stock_data/wiki_source/raw/chain_logic/ai_industry_strong_3y/ai_chain_report_seed.parquet
+    themes: [compute_chain, semiconductor_equipment_chain, ai_application_chain]
 
 # 驱动:name 为规范名,display_name 为河图短名;reading/sub/dir 为人工维护的宏观读数(dir: up|down|flat|null)
 drivers:

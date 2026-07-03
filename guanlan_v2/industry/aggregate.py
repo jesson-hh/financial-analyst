@@ -305,10 +305,11 @@ def build_board(refresh: bool = False) -> dict:
                 "therm": (round(rp * 100.0, 1) if rp is not None else None),
                 "quadrant": quadrant(q, r, rp),
             })
+        ccfg = (fw.get("meta") or {}).get("corpus") or {}
         board = {
             "ok": True, "reason": None,
             "generated_at": pd.Timestamp.now().isoformat(timespec="seconds"),
-            "freshness": {"corpus": corpus.corpus_freshness(),
+            "freshness": {"corpus": corpus.corpus_freshness(seed=ccfg.get("seed"), themes=ccfg.get("themes")),
                           "last_ingest_at": st.get("last_ingest_at"),
                           "extracted_total": st.get("totals", {}).get("docs", 0),
                           "quote_date": qdate},

@@ -32,15 +32,26 @@ class _FailOnD2Client(_FakeClient):
         return await super().chat(messages, **kw)
 
 
+def _seed_row(i, ts, txt):
+    """种子包 schema(2026-07-03 语料层重建):institution/report_kind/text_status/matched_themes。"""
+    return {"doc_id": f"d{i}", "report_kind": "industry_research", "title": f"标题D{i}",
+            "institution": "x", "publish_ts": ts, "text_path": str(txt), "stock_codes": "[]",
+            "text_status": "parsed", "text_chars": 2, "matched_themes": ["compute_chain"]}
+
+
+def _dates(n):
+    """动态近日日期(升序),避开首跑回填窗(35天)时效炸弹。"""
+    now = pd.Timestamp.now()
+    return [str((now - pd.Timedelta(days=n - i)).date()) for i in range(1, n + 1)]
+
+
 def _mk_corpus(tmp_path, n=2):
     txt = tmp_path / "t.txt"
     txt.write_text("正文", encoding="utf-8")
-    rows = []
-    for i in range(1, n + 1):
-        rows.append({"doc_id": f"d{i}", "doc_type": "industry_research", "title": f"标题D{i}", "org": "x",
-                     "publish_ts": f"2026-06-2{i}", "text_path": str(txt), "stock_codes": "",
-                     "status": "parsed", "text_chars": 2})
-    pd.DataFrame(rows).to_parquet(tmp_path / "documents.parquet")
+    ds = _dates(n)
+    rows = [_seed_row(i, ds[i - 1], txt) for i in range(1, n + 1)]
+    pd.DataFrame(rows).to_parquet(tmp_path / "seed.parquet")
+    return ds
 
 
 def _wait_done(mod, timeout=10):
@@ -52,24 +63,24 @@ def _wait_done(mod, timeout=10):
 
 
 def test_ingest_ok_advances_watermark(tmp_path, monkeypatch):
-    _mk_corpus(tmp_path)
-    monkeypatch.setenv("GL_TEXT_SOURCE_ROOT", str(tmp_path))
+    ds = _mk_corpus(tmp_path)
+    monkeypatch.setenv("GL_CHAIN_SEED", str(tmp_path / "seed.parquet"))
     monkeypatch.setenv("GL_INDUSTRY_STORE", str(tmp_path / "store"))
     from guanlan_v2.industry import ingest, store
     r = ingest.start_ingest(client=_OkClient())
     assert r["ok"] and r["accepted"]
     _wait_done(ingest)
     st = store.load_state()
-    assert st["watermark"] == "2026-06-22" and st["totals"]["docs"] == 2
+    assert st["watermark"] == ds[-1] and st["totals"]["docs"] == 2
     assert len(store.load_extractions()) == 2
     assert st["failed_docs"] == []
 
 
 def test_ingest_rerun_same_day_backfill_no_double_count(tmp_path, monkeypatch):
-    # 首跑后水位=2026-06-22;同日晚回填 d3(publish_ts == 水位)→ 二跑只抽 d3,
+    # 首跑后水位=d2 日;同日晚回填 d3(publish_ts == 水位)→ 二跑只抽 d3,
     # 已抽取的 d2 不重复(totals.docs 不双计,无重复 LLM 花费)
-    _mk_corpus(tmp_path)
-    monkeypatch.setenv("GL_TEXT_SOURCE_ROOT", str(tmp_path))
+    ds = _mk_corpus(tmp_path)
+    monkeypatch.setenv("GL_CHAIN_SEED", str(tmp_path / "seed.parquet"))
     monkeypatch.setenv("GL_INDUSTRY_STORE", str(tmp_path / "store"))
     from guanlan_v2.industry import ingest, store
     ingest.start_ingest(client=_OkClient())
@@ -77,23 +88,19 @@ def test_ingest_rerun_same_day_backfill_no_double_count(tmp_path, monkeypatch):
     assert store.load_state()["totals"]["docs"] == 2
 
     txt = tmp_path / "t.txt"
-    rows = []
-    for i, ts in (("1", "2026-06-21"), ("2", "2026-06-22"), ("3", "2026-06-22")):
-        rows.append({"doc_id": f"d{i}", "doc_type": "industry_research", "title": f"标题D{i}", "org": "x",
-                     "publish_ts": ts, "text_path": str(txt), "stock_codes": "",
-                     "status": "parsed", "text_chars": 2})
-    pd.DataFrame(rows).to_parquet(tmp_path / "documents.parquet")
+    rows = [_seed_row(1, ds[0], txt), _seed_row(2, ds[1], txt), _seed_row(3, ds[1], txt)]
+    pd.DataFrame(rows).to_parquet(tmp_path / "seed.parquet")
     ingest.start_ingest(client=_OkClient())
     _wait_done(ingest)
     st = store.load_state()
     assert st["totals"]["docs"] == 3                       # 2+1,不双计
     assert sorted(r["doc_id"] for r in store.load_extractions()) == ["d1", "d2", "d3"]
-    assert st["watermark"] == "2026-06-22"
+    assert st["watermark"] == ds[1]
 
 
 def test_ingest_partial_failure_keeps_watermark(tmp_path, monkeypatch):
     _mk_corpus(tmp_path)
-    monkeypatch.setenv("GL_TEXT_SOURCE_ROOT", str(tmp_path))
+    monkeypatch.setenv("GL_CHAIN_SEED", str(tmp_path / "seed.parquet"))
     monkeypatch.setenv("GL_INDUSTRY_STORE", str(tmp_path / "store"))
     from guanlan_v2.industry import ingest, store
     ingest.start_ingest(client=_FailOnD2Client())
@@ -105,7 +112,7 @@ def test_ingest_partial_failure_keeps_watermark(tmp_path, monkeypatch):
 
 
 def test_worker_crash_surfaces_in_state(tmp_path, monkeypatch):
-    monkeypatch.setenv("GL_TEXT_SOURCE_ROOT", str(tmp_path))
+    monkeypatch.setenv("GL_CHAIN_SEED", str(tmp_path / "seed.parquet"))
     monkeypatch.setenv("GL_INDUSTRY_STORE", str(tmp_path / "store"))
     from guanlan_v2.industry import ingest, store
     import guanlan_v2.industry.framework as fwmod
@@ -127,7 +134,7 @@ def test_worker_crash_surfaces_in_state(tmp_path, monkeypatch):
 
 def test_ingest_single_flight(tmp_path, monkeypatch):
     _mk_corpus(tmp_path, n=1)
-    monkeypatch.setenv("GL_TEXT_SOURCE_ROOT", str(tmp_path))
+    monkeypatch.setenv("GL_CHAIN_SEED", str(tmp_path / "seed.parquet"))
     monkeypatch.setenv("GL_INDUSTRY_STORE", str(tmp_path / "store"))
     from guanlan_v2.industry import ingest
 

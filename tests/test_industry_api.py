@@ -33,6 +33,8 @@ def _seed_store(tmp_path, monkeypatch):
 
 def test_board_shape_and_honesty(tmp_path, monkeypatch):
     _seed_store(tmp_path, monkeypatch)
+    # 语料断供必须是构造出来的,不能依赖真机恰好缺语料(2026-07-03 种子包已就位)
+    monkeypatch.setenv("GL_CHAIN_SEED", str(tmp_path / "no-seed.parquet"))
     c = _app()
     r = c.get("/industry/board", params={"refresh": 1}).json()
     assert r["ok"] is True

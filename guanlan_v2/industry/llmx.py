@@ -113,7 +113,9 @@ def validate_extraction(raw: dict, fw: dict, text: str) -> dict:
     return out
 
 
-async def extract_one(doc: dict, text: str, fw: dict, client=None, timeout: float = 90.0) -> dict:
+async def extract_one(doc: dict, text: str, fw: dict, client=None, timeout: float = 600.0) -> dict:
+    # timeout 600s:kimi-k2.6 带 reasoning,4k字研报实测 170s/近8k completion tokens(2026-07-03);
+    # 须 > httpx 单次超时(domestic profile 600s),否则 wait_for 会掐掉本可成功的尝试。deepseek 时代为90s。
     from .framework import framework_digest
     if client is None:
         from financial_analyst.llm.client import LLMClient  # 延迟 import
@@ -125,8 +127,8 @@ async def extract_one(doc: dict, text: str, fw: dict, client=None, timeout: floa
             client.chat(messages, response_format={"type": "json_object"}, temperature=0.1),
             timeout=timeout,
         )
-    except Exception as exc:  # noqa: BLE001 — 真失败诚实
-        return {"ok": False, "reason": f"LLM 调用失败: {exc}"}
+    except Exception as exc:  # noqa: BLE001 — 真失败诚实(带异常类型:TimeoutError 的 str 为空)
+        return {"ok": False, "reason": f"LLM 调用失败: {type(exc).__name__}: {exc}"}
     # 真 LLMClient.chat() 返回 dict(OpenAI 兼容路径 response.model_dump() /
     # litellm 兜底路径 ModelResponse,均按 dict 取);模型名与 token 用量在
     # client 实例累计属性上,不在响应对象上(见模块 docstring「实现前必核结论」)。
