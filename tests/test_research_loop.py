@@ -18,26 +18,19 @@ def test_pick_dish_shapes():
     assert rl._pick_dish(g5) == ("report2", ["lib_x"])
 
 
-def test_metrics_of_report2_and_compose():
-    rep = {"status": "ok", "headline_ic": {"rank_ic": 0.031}, "ic": {"rank_ic_mean": 0.02},
-           "portfolio": {"sharpe": 0.8, "ann_return": 0.12},
-           "oos": {"verdict": "robust"}, "n_dates": 30, "composite": True}   # report2 的 composite 是 bool
-    m = rl._metrics_of(rep, "expr1")
-    assert m == {"rank_ic": 0.031, "sharpe": 0.8, "ann_return": 0.12,
-                 "oos_verdict": "robust", "n_dates": 30, "factor": "expr1"}
-    comp = {"ok": True, "composite": {"headline_ic": {"rank_ic": 0.04},
-                                      "portfolio": {"sharpe": 1.1, "ann_return": 0.2},
-                                      "oos": {"verdict": "degraded"}, "n_dates": 24}}
-    m2 = rl._metrics_of(comp, "a + b")
-    assert m2["rank_ic"] == 0.04 and m2["oos_verdict"] == "degraded"         # composite 块展开
-
-
 def test_gate():
-    assert rl._gate({"rank_ic": 0.03, "oos_verdict": "robust"}, 0.02)["passed"] is True
-    assert rl._gate({"rank_ic": 0.03, "oos_verdict": "overfit"}, 0.02)["passed"] is False
-    assert rl._gate({"rank_ic": 0.01, "oos_verdict": "robust"}, 0.02)["passed"] is False
-    assert rl._gate({"rank_ic": None, "oos_verdict": "robust"}, 0.02)["passed"] is False
+    assert rl._gate({"rank_ic": 0.03, "oos_verdict": "robust", "sharpe": 1.0}, 0.02)["passed"] is True
+    assert rl._gate({"rank_ic": 0.03, "oos_verdict": "overfit", "sharpe": 1.0}, 0.02)["passed"] is False
+    assert rl._gate({"rank_ic": 0.01, "oos_verdict": "robust", "sharpe": 1.0}, 0.02)["passed"] is False
+    assert rl._gate({"rank_ic": None, "oos_verdict": "robust", "sharpe": 1.0}, 0.02)["passed"] is False
     assert rl._gate({}, 0.02)["passed"] is False
+
+
+def test_gate_requires_positive_sharpe():
+    assert rl._gate({"rank_ic": 0.05, "oos_verdict": "robust", "sharpe": 1.0}, 0.02)["passed"] is True
+    g = rl._gate({"rank_ic": 0.05, "oos_verdict": "robust", "sharpe": -0.9}, 0.02)
+    assert g["passed"] is False and g["sharpe_required"] is True     # Sharpe 负 → 拦(今日教训)
+    assert rl._gate({"rank_ic": 0.05, "oos_verdict": "robust"}, 0.02)["passed"] is False  # 缺 sharpe 拦
 
 
 # ── 全链干跑(假桥)────────────────────────────────────────────────────────
@@ -59,7 +52,7 @@ def _wire(monkeypatch, tmp_path, evals, critique=None, generate=None):
     monkeypatch.setattr(rl, "_call_critique",
                         critique or (lambda goal, metrics, graph, constraints="":
                                      {"ok": True, "diagnosis": "换更长窗口", "graph": _G1, "source": "llm"}))
-    monkeypatch.setattr(rl, "_eval_report2", lambda expr, p: q.pop(0))
+    monkeypatch.setattr(rl, "_run_graph_eval", lambda graph, p, pr, k, mr: q.pop(0))
     lessons, graphs, drafts = [], [], []
     monkeypatch.setattr(rl, "_write_lesson", lambda goal, s: lessons.append(s) or True)
     monkeypatch.setattr(rl, "_save_graph",
@@ -70,14 +63,19 @@ def _wire(monkeypatch, tmp_path, evals, critique=None, generate=None):
     return lessons, graphs, drafts
 
 
-_PASS = {"status": "ok", "headline_ic": {"rank_ic": 0.05}, "portfolio": {"sharpe": 1.0, "ann_return": 0.2},
-         "oos": {"verdict": "robust"}, "n_dates": 30}
-_WEAK = {"status": "ok", "headline_ic": {"rank_ic": 0.001}, "portfolio": {"sharpe": 0.1, "ann_return": 0.01},
-         "oos": {"verdict": "degraded"}, "n_dates": 30}
+def _ex_ok(rank_ic=0.05, sharpe=1.0, oos="robust", exprs=("rank(-delta(close,5))",), has_ml=False):
+    return {"ok": True, "reason": None,
+            "metrics": {"rank_ic": rank_ic, "sharpe": sharpe, "ann_return": 0.1,
+                        "oos_verdict": oos, "n_dates": 20, "factor": " + ".join(exprs)},
+            "terminal": {"kind": "analysis", "node_id": "an", "payload": {}},
+            "exprs": list(exprs), "has_ml": has_ml, "node_errors": [], "warnings": []}
+
+
+_EX_WEAK = dict  # 语义帮助:_ex_ok(rank_ic=0.001, sharpe=0.1, oos="degraded")
 
 
 def test_loop_pass_first_round_early_stop(monkeypatch, tmp_path):
-    lessons, graphs, drafts = _wire(monkeypatch, tmp_path, evals=[_PASS])
+    lessons, graphs, drafts = _wire(monkeypatch, tmp_path, evals=[_ex_ok()])
     end = rl.run_research_loop("rr_test01", "找反转", 3, 0.02, "csi_fast", "month", None, None,
                                progress=lambda **kw: None)
     assert end["ok"] is True and end["n_rounds"] == 1 and end["best_k"] == 0
@@ -90,8 +88,51 @@ def test_loop_pass_first_round_early_stop(monkeypatch, tmp_path):
     assert rs.read_runs()[0]["status"] == "done"
 
 
+def test_loop_uses_executor_and_records_terminal(monkeypatch, tmp_path):
+    _wire(monkeypatch, tmp_path, evals=[_ex_ok()])
+    end = rl.run_research_loop("rr_t10", "找反转", 3, 0.02, "csi_fast", "month", None, None,
+                               progress=lambda **kw: None)
+    assert end["ok"] is True and end["promoted"]["status"] == "draft"
+    import guanlan_v2.research.store as rs
+    row = rs.read_rounds(run_id="rr_t10")[0]
+    assert row["terminal_kind"] == "analysis" and row["node_errors"] == []
+
+
+def test_stagnation_by_graph_signature_param_change_not_stagnant(monkeypatch, tmp_path):
+    """批判只改 ML 超参(表达式没变)→ 新语义下不算停滞(全图执行参数真生效)。"""
+    g2 = {"nodes": [{"id": "n1", "type": "formula", "params": {"expr": "rank(-delta(close,5))"}},
+                    {"id": "m", "type": "xgb", "params": {"trees": 300}}], "edges": []}
+    calls = []
+
+    def crit(goal, metrics, graph, constraints=""):
+        calls.append(constraints)
+        return {"ok": True, "diagnosis": "加树", "graph": g2, "source": "llm"}
+
+    weak = _ex_ok(rank_ic=0.001, sharpe=0.1, oos="degraded")
+    _wire(monkeypatch, tmp_path, evals=[dict(weak), dict(weak)], critique=crit)
+    end = rl.run_research_loop("rr_t11", "找反转", 2, 0.02, "csi_fast", "month", None, None,
+                               progress=lambda **kw: None)
+    assert end["n_rounds"] == 2 and len(calls) == 1        # 没触发停滞重批
+    assert "参数均真实生效" in calls[0]                     # constraints 新文案
+
+
+def test_stagnation_identical_graph_still_caught(monkeypatch, tmp_path):
+    calls = []
+
+    def crit(goal, metrics, graph, constraints=""):
+        calls.append(constraints)
+        return {"ok": True, "diagnosis": "原样", "graph": _G0, "source": "llm"}
+
+    lessons, _, _ = _wire(monkeypatch, tmp_path,
+                          evals=[_ex_ok(rank_ic=0.001, sharpe=0.1, oos="degraded")], critique=crit)
+    end = rl.run_research_loop("rr_t12", "找反转", 3, 0.02, "csi_fast", "month", None, None,
+                               progress=lambda **kw: None)
+    assert end["ok"] is False and "停滞" in end["error"] and len(calls) == 2
+
+
 def test_loop_exhausts_rounds_no_pass(monkeypatch, tmp_path):
-    lessons, graphs, _ = _wire(monkeypatch, tmp_path, evals=[_WEAK, _WEAK])
+    weak = _ex_ok(rank_ic=0.001, sharpe=0.1, oos="degraded")
+    lessons, graphs, _ = _wire(monkeypatch, tmp_path, evals=[dict(weak), dict(weak)])
     end = rl.run_research_loop("rr_test02", "找反转", 2, 0.02, "csi_fast", "month", None, None,
                                progress=lambda **kw: None)
     assert end["ok"] is True and end["n_rounds"] == 2 and end["promoted"] is None
@@ -116,8 +157,9 @@ def test_loop_generate_fail_honest_stop(monkeypatch, tmp_path):
 
 
 def test_loop_eval_fail_round_continues(monkeypatch, tmp_path):
-    bad = {"ok": False, "reason": "缺少数据"}
-    _wire(monkeypatch, tmp_path, evals=[bad, _PASS])
+    bad = {"ok": False, "reason": "缺少数据", "metrics": None, "exprs": [], "has_ml": False,
+           "node_errors": [], "terminal": None, "warnings": []}
+    _wire(monkeypatch, tmp_path, evals=[bad, _ex_ok()])
     end = rl.run_research_loop("rr_test04", "找反转", 3, 0.02, "csi_fast", "month", None, None,
                                progress=lambda **kw: None)
     assert end["ok"] is True and end["n_rounds"] == 2                # 求值失败轮继续批判改进
@@ -128,7 +170,8 @@ def test_loop_eval_fail_round_continues(monkeypatch, tmp_path):
 
 
 def test_loop_rule_critique_prefix(monkeypatch, tmp_path):
-    _wire(monkeypatch, tmp_path, evals=[_WEAK, _WEAK],
+    weak = _ex_ok(rank_ic=0.001, sharpe=0.1, oos="degraded")
+    _wire(monkeypatch, tmp_path, evals=[dict(weak), dict(weak)],
           critique=lambda goal, metrics, graph, constraints="":
           {"ok": True, "diagnosis": "方向反了", "graph": _G1, "source": "rule", "llm_error": "x"})
     rl.run_research_loop("rr_test05", "找反转", 2, 0.02, "csi_fast", "month", None, None,
@@ -150,12 +193,14 @@ def test_loop_critique_stagnant_retry_then_progress(monkeypatch, tmp_path):
             return {"ok": True, "diagnosis": "调 dir 参数", "graph": _G0, "source": "llm"}
         return {"ok": True, "diagnosis": "换20日窗口", "graph": _G1, "source": "llm"}
 
-    _wire(monkeypatch, tmp_path, evals=[_WEAK, _WEAK], critique=crit)
+    weak0 = _ex_ok(rank_ic=0.001, sharpe=0.1, oos="degraded")
+    weak1 = _ex_ok(rank_ic=0.001, sharpe=0.1, oos="degraded", exprs=("rank(-delta(close,20))",))
+    _wire(monkeypatch, tmp_path, evals=[weak0, weak1], critique=crit)
     end = rl.run_research_loop("rr_test08", "找反转", 2, 0.02, "csi_fast", "month", None, None,
                                progress=lambda **kw: None)
     assert end["ok"] is True and end["n_rounds"] == 2
     assert len(calls) == 2
-    assert "formula" in calls[0]                                     # 首批就声明求值语义(只读表达式)
+    assert "参数均真实生效" in calls[0]                               # 首批就声明求值语义(整图执行)
     assert "停滞" in calls[1]                                        # 重批带停滞警告
     import guanlan_v2.research.store as rs
     rows = rs.read_rounds(run_id="rr_test08", limit=10)
@@ -171,7 +216,8 @@ def test_loop_critique_stagnant_twice_honest_stop(monkeypatch, tmp_path):
         calls.append(constraints)
         return {"ok": True, "diagnosis": "还是只调参数", "graph": _G0, "source": "llm"}
 
-    lessons, _, _ = _wire(monkeypatch, tmp_path, evals=[_WEAK], critique=crit)
+    lessons, _, _ = _wire(monkeypatch, tmp_path,
+                          evals=[_ex_ok(rank_ic=0.001, sharpe=0.1, oos="degraded")], critique=crit)
     end = rl.run_research_loop("rr_test09", "找反转", 3, 0.02, "csi_fast", "month", None, None,
                                progress=lambda **kw: None)
     assert end["ok"] is False and "停滞" in end["error"]
@@ -195,14 +241,10 @@ def test_call_critique_payload_has_constraints(monkeypatch):
 
 
 def test_loop_multi_expr_pass_skips_autosave(monkeypatch, tmp_path):
-    comp_pass = {"ok": True, "composite": {"headline_ic": {"rank_ic": 0.05},
-                                           "portfolio": {"sharpe": 1.0, "ann_return": 0.2},
-                                           "oos": {"verdict": "robust"}, "n_dates": 24}}
-    lessons, graphs, drafts = _wire(monkeypatch, tmp_path, evals=[])
+    lessons, graphs, drafts = _wire(monkeypatch, tmp_path, evals=[_ex_ok(exprs=("a", "b"))])
     g2 = {"nodes": [{"type": "formula", "params": {"expr": "a"}},
                     {"type": "formula", "params": {"expr": "b"}}], "edges": []}
     monkeypatch.setattr(rl, "_call_generate", lambda goal: {"ok": True, "graph": g2})
-    monkeypatch.setattr(rl, "_eval_compose", lambda exprs, p: comp_pass)
     end = rl.run_research_loop("rr_test06", "找组合", 3, 0.02, "csi_fast", "month", None, None,
                                progress=lambda **kw: None)
     assert end["promoted"]["status"] == "skipped_multi" and drafts == []   # 多因子不自动入库(红线)
@@ -211,7 +253,7 @@ def test_loop_multi_expr_pass_skips_autosave(monkeypatch, tmp_path):
 
 def test_loop_save_failed_lesson_honest(monkeypatch, tmp_path):
     """过门但落库失败(如重名/磁盘错):教训须写「达标但入库失败」,绝不误写「未达标」。"""
-    lessons, graphs, drafts = _wire(monkeypatch, tmp_path, evals=[_PASS])
+    lessons, graphs, drafts = _wire(monkeypatch, tmp_path, evals=[_ex_ok()])
     monkeypatch.setattr(rl, "_save_draft",
                         lambda rid, k, expr, goal, diag, m:
                         {"ok": False, "reason": "因子名已存在: lib_x"})
