@@ -10,6 +10,9 @@ asyncio.run 会炸 "Event loop is closed"——HTTP 自调让 LLM 落在 server 
 
 红线:提案失败诚实终止(绝不降级模板,严于前端 aiLoop);规则兜底显形 source=rule;
 draft 绝不自动上架;多因子合成达标不自动入库(skipped_multi);失败也写教训。
+停滞守卫(2026-07-03 真机 v4-pro 暴露):求值器只读 formula/factorlib 表达式,批判若只改
+节点参数(如 analysis.dir)则指标必然逐位不变=烧轮次装研究;批判环显式声明求值语义
+(constraints),改进未触及表达式 → 带停滞警告重批一次,仍不变 → 诚实中断。
 独立小函数便于 monkeypatch(仓例 console/tools.py)。
 """
 from __future__ import annotations
@@ -25,6 +28,15 @@ from guanlan_v2.research import store as rstore
 
 GATE_OOS_OK = "robust"      # 过门要求的样本外判定
 _EVAL_OOS_FRAC = 0.3        # 求值一律开样本外(oos 不开 verdict 恒缺 → 门永不过)
+
+# 批判环求值语义声明(经 CritiqueIn.constraints 送进 LLM prompt):求值器只认表达式,
+# 节点参数是求值盲区——不声明的话 LLM 会按画布语义去调 analysis.dir(_CRITIQUE_SYS 通用
+# 改法之一),在回路里等于空转。
+_CRITIQUE_CONSTRAINTS = (
+    "本图由研究回路后端求值:求值器只读取 formula.expr 与 factorlib.name(以及是否存在 "
+    "backtest 节点),股票池/调仓频率由回路参数固定;analysis/backtest 等节点的 dir、rebal、"
+    "groups、topn 参数一律不被读取。因此改进必须落在因子表达式本身(方向反了就对表达式整体"
+    "取负,如 expr → -(expr)),只调节点参数而不改表达式的\"改进\"不会改变任何指标。")
 
 
 def new_run_id() -> str:
@@ -62,9 +74,11 @@ def _call_generate(goal: str) -> Dict[str, Any]:
     return _self_post("/workflow/generate", {"goal": goal}, timeout=300)
 
 
-def _call_critique(goal: str, metrics: Dict[str, Any], graph: Dict[str, Any]) -> Dict[str, Any]:
+def _call_critique(goal: str, metrics: Dict[str, Any], graph: Dict[str, Any],
+                   constraints: str = "") -> Dict[str, Any]:
     return _self_post("/workflow/critique",
-                      {"goal": goal, "metrics": metrics, "graph": graph}, timeout=300)
+                      {"goal": goal, "metrics": metrics, "graph": graph,
+                       "constraints": constraints}, timeout=300)
 
 
 def _eval_report2(expr: str, p: Dict[str, Any]) -> Dict[str, Any]:
@@ -263,14 +277,35 @@ def run_research_loop(run_id: str, goal: str, max_rounds: int, min_rank_ic: floa
         # ── 批判改进(LLM;失败规则兜底显形;批判环整体失败 → 诚实中断)──
         progress(phase="critique", label=f"④ 第 {k + 1} 轮未达标 · LLM 批判改进…", round_k=k)
         try:
-            cr = _call_critique(goal, metrics, graph)
+            cr = _call_critique(goal, metrics, graph, constraints=_CRITIQUE_CONSTRAINTS)
         except Exception as exc:  # noqa: BLE001
             cr = {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
         if not cr.get("ok") or not isinstance(cr.get("graph"), dict):
             error = f"批判环失败: {cr.get('reason')}"
             break
+        # ── 停滞守卫:改进图的求值表达式与本轮一致 → 指标必不变(求值确定性),
+        #    复算是烧轮次装研究。带停滞警告重批一次;仍不变 → 诚实中断。──
+        retried = False
+        if _pick_dish(cr["graph"]) == (dish, exprs):
+            progress(phase="critique", label="④b 改进未触及求值表达式 · 停滞重批…", round_k=k)
+            fb = (_CRITIQUE_CONSTRAINTS
+                  + f"\n【停滞警告】你上一份改进(诊断:{str(cr.get('diagnosis'))[:100]})没有改变"
+                    "任何会被求值的因子表达式,指标必然与本轮完全相同。这次必须给出不同的 formula "
+                    "表达式(换因子逻辑/窗口/组合皆可,方向反转直接对表达式取负)。")
+            try:
+                cr2 = _call_critique(goal, metrics, graph, constraints=fb)
+            except Exception as exc:  # noqa: BLE001
+                cr2 = {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+            if (cr2.get("ok") and isinstance(cr2.get("graph"), dict)
+                    and _pick_dish(cr2["graph"]) != (dish, exprs)):
+                cr, retried = cr2, True
+            else:
+                error = ("批判环停滞: 两次改进均未改变求值表达式(求值器只读 formula/factorlib "
+                         "表达式,节点参数不被读取,指标不会变),诚实中断")
+                break
         crit_source = str(cr.get("source") or "?")
-        diag = (("(规则兜底·非 LLM) " if crit_source == "rule" else "")
+        diag = (("(停滞重批) " if retried else "")
+                + ("(规则兜底·非 LLM) " if crit_source == "rule" else "")
                 + str(cr.get("diagnosis") or ""))
         graph = cr["graph"]
 

@@ -57,7 +57,7 @@ def _wire(monkeypatch, tmp_path, evals, critique=None, generate=None):
     monkeypatch.setattr(rl, "_call_generate",
                         generate or (lambda goal: {"ok": True, "graph": _G0, "attempts": 1}))
     monkeypatch.setattr(rl, "_call_critique",
-                        critique or (lambda goal, metrics, graph:
+                        critique or (lambda goal, metrics, graph, constraints="":
                                      {"ok": True, "diagnosis": "换更长窗口", "graph": _G1, "source": "llm"}))
     monkeypatch.setattr(rl, "_eval_report2", lambda expr, p: q.pop(0))
     lessons, graphs, drafts = [], [], []
@@ -129,7 +129,7 @@ def test_loop_eval_fail_round_continues(monkeypatch, tmp_path):
 
 def test_loop_rule_critique_prefix(monkeypatch, tmp_path):
     _wire(monkeypatch, tmp_path, evals=[_WEAK, _WEAK],
-          critique=lambda goal, metrics, graph:
+          critique=lambda goal, metrics, graph, constraints="":
           {"ok": True, "diagnosis": "方向反了", "graph": _G1, "source": "rule", "llm_error": "x"})
     rl.run_research_loop("rr_test05", "找反转", 2, 0.02, "csi_fast", "month", None, None,
                          progress=lambda **kw: None)
@@ -137,6 +137,61 @@ def test_loop_rule_critique_prefix(monkeypatch, tmp_path):
     rows = rs.read_rounds(run_id="rr_test05", limit=10)
     assert rows[0]["diag"].startswith("(规则兜底·非 LLM) ")           # 诚实标注(对齐前端)
     assert rows[0]["critique_source"] == "rule"
+
+
+def test_loop_critique_stagnant_retry_then_progress(monkeypatch, tmp_path):
+    """停滞守卫:批判改进没改求值表达式(如只调 analysis.dir)→ 带停滞警告重批一次;
+    重批换了表达式 → 回路继续,轮次 diag 带「(停滞重批)」显形。"""
+    calls = []
+
+    def crit(goal, metrics, graph, constraints=""):
+        calls.append(constraints)
+        if len(calls) == 1:                                          # 第一次:原图原样回(表达式没变)
+            return {"ok": True, "diagnosis": "调 dir 参数", "graph": _G0, "source": "llm"}
+        return {"ok": True, "diagnosis": "换20日窗口", "graph": _G1, "source": "llm"}
+
+    _wire(monkeypatch, tmp_path, evals=[_WEAK, _WEAK], critique=crit)
+    end = rl.run_research_loop("rr_test08", "找反转", 2, 0.02, "csi_fast", "month", None, None,
+                               progress=lambda **kw: None)
+    assert end["ok"] is True and end["n_rounds"] == 2
+    assert len(calls) == 2
+    assert "formula" in calls[0]                                     # 首批就声明求值语义(只读表达式)
+    assert "停滞" in calls[1]                                        # 重批带停滞警告
+    import guanlan_v2.research.store as rs
+    rows = rs.read_rounds(run_id="rr_test08", limit=10)
+    assert rows[0]["diag"].startswith("(停滞重批) ")                  # 显形,luozi 卡直显
+    assert rows[0]["exprs"] == ["rank(-delta(close,20))"]            # 第二轮真的换了表达式
+
+
+def test_loop_critique_stagnant_twice_honest_stop(monkeypatch, tmp_path):
+    """两次批判都不改求值表达式 → 诚实中断,绝不烧轮次复算同一个数(v4-pro 真机暴露的缺陷)。"""
+    calls = []
+
+    def crit(goal, metrics, graph, constraints=""):
+        calls.append(constraints)
+        return {"ok": True, "diagnosis": "还是只调参数", "graph": _G0, "source": "llm"}
+
+    lessons, _, _ = _wire(monkeypatch, tmp_path, evals=[_WEAK], critique=crit)
+    end = rl.run_research_loop("rr_test09", "找反转", 3, 0.02, "csi_fast", "month", None, None,
+                               progress=lambda **kw: None)
+    assert end["ok"] is False and "停滞" in end["error"]
+    assert end["n_rounds"] == 1                                      # 只真算了一轮,没浪费复算
+    assert len(calls) == 2                                           # 首批 + 停滞重批各一次
+    assert lessons and "停滞" in lessons[0]                          # 教训如实记停滞
+    import guanlan_v2.research.store as rs
+    assert rs.read_runs()[0]["status"] == "error"
+
+
+def test_call_critique_payload_has_constraints(monkeypatch):
+    """真桥 _call_critique 把 constraints 透传进 /workflow/critique payload。"""
+    seen = {}
+    monkeypatch.setattr(rl, "_self_post",
+                        lambda path, payload, timeout=300:
+                        seen.update(path=path, payload=payload) or {"ok": True})
+    rl._call_critique("目标", {"rank_ic": 0.1}, {"nodes": []}, constraints="只读表达式")
+    assert seen["path"] == "/workflow/critique"
+    assert seen["payload"]["constraints"] == "只读表达式"
+    assert seen["payload"]["goal"] == "目标"
 
 
 def test_loop_multi_expr_pass_skips_autosave(monkeypatch, tmp_path):

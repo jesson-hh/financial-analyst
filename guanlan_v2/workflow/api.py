@@ -5277,6 +5277,7 @@ class CritiqueIn(BaseModel):
     goal: str = ""
     metrics: Dict[str, Any] = Field(default_factory=dict)   # {rank_ic,sharpe,ann_return,oos_verdict,n_dates,factor}
     graph: Dict[str, Any] = Field(default_factory=dict)     # {nodes,edges}
+    constraints: str = ""    # 调用方求值环境约束(研究回路声明"求值只读表达式";空=prompt 逐字不变,画布/帷幄零行为变化)
 
 
 class WorkflowSaveIn(BaseModel):
@@ -5758,11 +5759,13 @@ def build_workflow_router() -> APIRouter:
         cur = body.graph if isinstance(body.graph, dict) else {}
         m = body.metrics or {}
         summary = {k: m.get(k) for k in ("rank_ic", "sharpe", "ann_return", "oos_verdict", "n_dates", "factor")}
+        constraints = (body.constraints or "").strip()
         user = (
             f"目标:{goal or '(未给)'}\n"
             f"当前工作流 graph:{_json.dumps(cur, ensure_ascii=False)}\n"
             f"真实回测指标:{_json.dumps(summary, ensure_ascii=False)}\n"
-            "请据指标诊断并只输出改进后的 {diagnosis,nodes,edges}。"
+            + (f"求值环境约束(必须遵守,优先于上面的通用改法):{constraints}\n" if constraints else "")
+            + "请据指标诊断并只输出改进后的 {diagnosis,nodes,edges}。"
         )
         try:
             text = await _llm_complete(_CRITIQUE_SYS, user, temperature=0.3)
