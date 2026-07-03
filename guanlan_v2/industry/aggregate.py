@@ -246,7 +246,9 @@ def narrative_temps(fw: dict, qsig: dict, extractions: list, now=None) -> list:
                 continue
             num += a["weight"] * rp
             den += a["weight"]
-        out.append({"id": n["id"], "name": n["name"], "status": n.get("status"),
+        out.append({"id": n["id"], "name": n["name"],
+                    "display_name": n.get("display_name", n["name"]), "status": n.get("status"),
+                    "validation": n.get("validation", []), "risks": n.get("risks", []),
                     "temp": round(100.0 * num / den, 1) if den > 0 else None,
                     "plus7": plus.get(n["id"], 0), "minus7": minus.get(n["id"], 0)})
     return out
@@ -279,19 +281,28 @@ def build_board(refresh: bool = False) -> dict:
         qdate = None
         for s in fw["segments"]:
             if s.get("adjacent"):
-                segments.append({"id": s["id"], "name": s["name"], "group": s["group"],
-                                 "adjacent": True, "logic": s["logic"]})
+                segments.append({"id": s["id"], "name": s["name"],
+                                 "display_name": s.get("display_name", s["name"]),
+                                 "group": s["group"], "adjacent": True, "logic": s["logic"]})
                 continue
             q = qsig.get(s["id"], {})
             r = rsig.get(s["id"], {})
             qdate = q.get("quote_date") or qdate
             g = s.get("global", {})
+            eqlog = g.get("equity_logic", [])
+            rp = rank.get(s["id"])
             segments.append({
-                "id": s["id"], "name": s["name"], "group": s["group"], "adjacent": False,
-                "logic": s["logic"], "stars": g.get("stars", 0),
-                "equity_logic": g.get("equity_logic", []), "global": g,
+                "id": s["id"], "name": s["name"], "display_name": s.get("display_name", s["name"]),
+                "group": s["group"], "adjacent": False,
+                "logic": s["logic"], "keywords": s.get("keywords", []),
+                "stars": g.get("stars", 0), "mrow": g.get("mrow"), "good": bool(g.get("good", False)),
+                "equity_logic": eqlog, "eq": "·".join(eqlog),
+                "mcol": (eqlog[0] if eqlog else None),
+                "dual": ("Δ" in eqlog and "Ω" in eqlog),
+                "global": g,
                 "quant": q, "research": r,
-                "quadrant": quadrant(q, r, rank.get(s["id"])),
+                "therm": (round(rp * 100.0, 1) if rp is not None else None),
+                "quadrant": quadrant(q, r, rp),
             })
         board = {
             "ok": True, "reason": None,
@@ -308,6 +319,32 @@ def build_board(refresh: bool = False) -> dict:
         return board
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": f"board 组装失败: {exc}"}
+
+
+def _stock_rows(stocks: list, quotes: dict, ffmap: Optional[dict], v4map: Optional[dict]) -> list:
+    """票池逐票真读数:px/当日涨跌/资金5日/v4分位。缺失字段 None(不编数)。
+    资金流单位随源(GL_PARQUET_ROOT/stock_fund_flow_daily),这里按元→亿换算;源缺时为 None。"""
+    rows = []
+    for x in stocks:
+        c = x["code"]
+        df = quotes.get(c)
+        px = chg = None
+        if df is not None and len(df) >= 2 and "close" in df.columns:
+            close = df["close"].astype(float).to_numpy()
+            px = round(float(close[-1]), 2)
+            prev = float(close[-2])
+            chg = round((float(close[-1]) / prev - 1.0) * 100.0, 2) if prev else None
+        ff5 = None
+        if ffmap:
+            hit = ffmap.get(c) or ffmap.get(c[2:]) or ffmap.get(f"{c[2:]}.{c[:2]}")
+            ff5 = round(float(hit) / 1e8, 2) if hit is not None else None
+        v4 = None
+        if v4map:
+            hit = v4map.get(c) or v4map.get(c[2:]) or v4map.get(f"{c[2:]}.{c[:2]}")
+            v4 = round(float(hit), 0) if hit is not None else None
+        rows.append({"code": c, "name": x.get("name"), "role": x.get("role"), "note": x.get("note"),
+                     "px": px, "chg": chg, "ff5": ff5, "v4pct": v4})
+    return rows
 
 
 def segment_detail(sid: str) -> dict:
@@ -329,10 +366,13 @@ def segment_detail(sid: str) -> dict:
                                      "quote": s.get("quote"), "quote_dropped": s.get("quote_dropped")})
         opinions.sort(key=lambda x: str(x.get("publish_ts")), reverse=True)
         pool_codes = [x["code"] for x in seg.get("stocks", [])]
-        qsig = quant_signals(fw, quotes=_fetch_quotes(pool_codes))
+        quotes = _fetch_quotes(pool_codes)
+        qsig = quant_signals(fw, quotes=quotes)
         rsig = research_signals(fw, ext)
+        stock_rows = _stock_rows(seg.get("stocks", []), quotes, _fundflow_map(), _v4_pct_map())
         return {"ok": True, "reason": None, "segment": seg, "quant": qsig.get(sid),
-                "research": rsig.get(sid), "opinions": opinions, "stocks": seg.get("stocks", [])}
+                "research": rsig.get(sid), "opinions": opinions,
+                "stocks": seg.get("stocks", []), "stock_rows": stock_rows}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": f"segment 明细失败: {exc}"}
 
