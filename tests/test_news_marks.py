@@ -97,3 +97,21 @@ def test_meta_read_never_crashes_honest_degrade():
     out = nm.assemble_news_marks("SZ000630", "2026-05-27", "pit", 250, reader=_StubReader())
     assert out["ok"] is True and out["items"] == []
     assert "coverage" in out and out["provenance"]["source"] == "pit_store"
+
+
+def test_live_uses_provider_headlines():
+    class _Stub:
+        def headlines(self, code):
+            return ["实时利好一则", "实时利空一则"]
+    out = nm.assemble_news_marks("SZ000630", mode="live", provider=_Stub())
+    titles = [it["title"] for it in out["items"]]
+    assert out["mode"] == "live" and titles == ["实时利好一则", "实时利空一则"]
+    assert all(it["ts"] == "" for it in out["items"])
+
+
+def test_live_provider_failure_is_empty():
+    class _Boom:
+        def headlines(self, code):
+            raise RuntimeError("net down")
+    out = nm.assemble_news_marks("SZ000630", mode="live", provider=_Boom())
+    assert out["ok"] is True and out["items"] == []
