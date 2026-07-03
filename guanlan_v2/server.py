@@ -223,6 +223,11 @@ def create_app():
     # 免手动点「数据」按钮 / 跑 CLI。盘中守卫在 generate 内, 早触发也只落上一完整收盘日。
     start_market_status_scheduler()
 
+    # ── AI投研看板(industry):GET /industry/board、/industry/segment/{id}、
+    #     /industry/doc/{doc_id}、POST /industry/ingest、GET /industry/ingest_state ──
+    from guanlan_v2.industry import build_industry_router  # AI投研看板(2026-07-02 spec)
+    app.include_router(build_industry_router())
+
     # P1:regen 每日 EOD 自动再生(opt-in;GUANLAN_REGEN_DAILY=1 才启;
     # 定时器随本进程存亡,非 24/7 保证——进程死定时即停,health.regen_scheduler 显形)
     from guanlan_v2.screen.api import start_regen_daily_scheduler

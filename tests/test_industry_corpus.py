@@ -51,3 +51,12 @@ def test_missing_root_honest(tmp_path, monkeypatch):
     assert r["ok"] is False and r["reason"]
     f = corpus_freshness()
     assert f["ok"] is False and f["reason"]
+
+
+def test_missing_schema_columns_honest(tmp_path, monkeypatch):
+    # 缺 status 和 text_chars 列——测试防静默清空
+    pd.DataFrame([{"doc_id": "d1", "publish_ts": "2026-06-30"}]).to_parquet(tmp_path / "documents.parquet")
+    monkeypatch.setenv("GL_TEXT_SOURCE_ROOT", str(tmp_path))
+    from guanlan_v2.industry.corpus import scan_new_docs
+    r = scan_new_docs(None, set(), [])
+    assert r["ok"] is False and "缺列" in r["reason"]

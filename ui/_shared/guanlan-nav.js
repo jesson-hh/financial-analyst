@@ -6,6 +6,7 @@
   var MODULES = [
     { label: '帷幄', file: '../console/观澜 · 帷幄.html', home: true },
     { label: '席位 · 落子', file: '../seats/观澜 · 落子.html' },
+    { label: 'AI投研', file: '../industry/观澜 · AI投研.html' },
   ];
   var here = '';
   try { here = decodeURIComponent(location.pathname.split('/').pop() || ''); } catch (e) { here = location.pathname; }

@@ -33,6 +33,14 @@ def scan_new_docs(watermark: Optional[str], pool_codes: set, keywords: Iterable[
         return {"ok": False, "docs": [], "reason": f"语料库不可读: {exc}", "skipped_unparsed": 0}
     try:
         df = df.copy()
+        # 校验必需列,防止 None 广播导致静默清空
+        required = {"doc_id", "doc_type", "title", "org", "publish_ts", "text_path",
+                    "stock_codes", "status", "text_chars"}
+        missing = sorted(required - set(df.columns))
+        if missing:
+            return {"ok": False, "docs": [],
+                    "reason": f"documents.parquet 缺列: {','.join(missing)}(schema 漂移,需在 _load_documents 加 rename 适配)",
+                    "skipped_unparsed": 0}
         df["publish_ts"] = df["publish_ts"].astype(str).str[:10]
         if watermark:
             df = df[df["publish_ts"] > str(watermark)[:10]]
@@ -73,6 +81,12 @@ def read_doc_text(text_path: str, max_chars: int = 20000) -> str:
 def corpus_freshness() -> dict:
     try:
         df = _load_documents()
+        # 校验必需列(publish_ts, doc_type)
+        required = {"publish_ts", "doc_type"}
+        missing = sorted(required - set(df.columns))
+        if missing:
+            return {"ok": False, "latest_publish_ts": None, "n_docs": None, "n_industry": None,
+                    "reason": f"documents.parquet 缺列: {','.join(missing)}(schema 漂移,需在 _load_documents 加 rename 适配)"}
         ts = df["publish_ts"].astype(str).str[:10]
         n_ind = int((df.get("doc_type") == "industry_research").sum())
         return {"ok": True, "latest_publish_ts": str(ts.max()), "n_docs": int(len(df)),
