@@ -59,7 +59,8 @@ def _worker(limit: Optional[int], client) -> None:
         import pandas as pd
         fw = load_framework()
         st = store.load_state()
-        scan = corpus.scan_new_docs(st.get("watermark"), all_pool_codes(fw), _extract_keywords(fw), limit=limit)
+        scan = corpus.scan_new_docs(st.get("watermark"), all_pool_codes(fw), _extract_keywords(fw),
+                                    limit=limit, exclude_doc_ids=store.load_extracted_doc_ids())
         if not scan["ok"]:
             st["failed_docs"] = [{"doc_id": None, "reason": scan["reason"]}]
             st["last_ingest_at"] = pd.Timestamp.now().isoformat(timespec="seconds")

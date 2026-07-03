@@ -36,6 +36,36 @@ def test_scan_filter_and_watermark(tmp_path, monkeypatch):
     assert r["skipped_unparsed"] == 1
 
 
+def test_scan_watermark_boundary_inclusive(tmp_path, monkeypatch):
+    # publish_ts == watermark 的文必须被扫到(同日晚回填的研报不能永久漏扫)
+    root = _mk_corpus(tmp_path)
+    monkeypatch.setenv("GL_TEXT_SOURCE_ROOT", str(root))
+    from guanlan_v2.industry.corpus import scan_new_docs
+    r = scan_new_docs(watermark="2026-06-27", pool_codes={"SH688498"}, keywords=["液冷"])
+    assert r["ok"] is True
+    ids = [d["doc_id"] for d in r["docs"]]
+    assert ids == ["d4", "d2", "d1"]          # d4 publish_ts == 水位,应在列
+
+
+def test_scan_excludes_already_extracted(tmp_path, monkeypatch):
+    root = _mk_corpus(tmp_path)
+    monkeypatch.setenv("GL_TEXT_SOURCE_ROOT", str(root))
+    from guanlan_v2.industry.corpus import scan_new_docs
+    r = scan_new_docs(watermark="2026-06-01", pool_codes={"SH688498"}, keywords=["液冷"],
+                      exclude_doc_ids={"d4", "d2"})
+    assert r["ok"] is True
+    assert [d["doc_id"] for d in r["docs"]] == ["d1"]
+
+
+def test_scan_exclude_applies_before_limit(tmp_path, monkeypatch):
+    root = _mk_corpus(tmp_path)
+    monkeypatch.setenv("GL_TEXT_SOURCE_ROOT", str(root))
+    from guanlan_v2.industry.corpus import scan_new_docs
+    r = scan_new_docs(watermark="2026-06-01", pool_codes={"SH688498"}, keywords=["液冷"],
+                      exclude_doc_ids={"d4"}, limit=1)
+    assert [d["doc_id"] for d in r["docs"]] == ["d2"]     # limit 名额不被已抽取文占掉
+
+
 def test_read_doc_text_truncates(tmp_path, monkeypatch):
     root = _mk_corpus(tmp_path)
     monkeypatch.setenv("GL_TEXT_SOURCE_ROOT", str(root))

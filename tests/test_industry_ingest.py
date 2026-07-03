@@ -65,6 +65,32 @@ def test_ingest_ok_advances_watermark(tmp_path, monkeypatch):
     assert st["failed_docs"] == []
 
 
+def test_ingest_rerun_same_day_backfill_no_double_count(tmp_path, monkeypatch):
+    # 首跑后水位=2026-06-22;同日晚回填 d3(publish_ts == 水位)→ 二跑只抽 d3,
+    # 已抽取的 d2 不重复(totals.docs 不双计,无重复 LLM 花费)
+    _mk_corpus(tmp_path)
+    monkeypatch.setenv("GL_TEXT_SOURCE_ROOT", str(tmp_path))
+    monkeypatch.setenv("GL_INDUSTRY_STORE", str(tmp_path / "store"))
+    from guanlan_v2.industry import ingest, store
+    ingest.start_ingest(client=_OkClient())
+    _wait_done(ingest)
+    assert store.load_state()["totals"]["docs"] == 2
+
+    txt = tmp_path / "t.txt"
+    rows = []
+    for i, ts in (("1", "2026-06-21"), ("2", "2026-06-22"), ("3", "2026-06-22")):
+        rows.append({"doc_id": f"d{i}", "doc_type": "industry_research", "title": f"标题D{i}", "org": "x",
+                     "publish_ts": ts, "text_path": str(txt), "stock_codes": "",
+                     "status": "parsed", "text_chars": 2})
+    pd.DataFrame(rows).to_parquet(tmp_path / "documents.parquet")
+    ingest.start_ingest(client=_OkClient())
+    _wait_done(ingest)
+    st = store.load_state()
+    assert st["totals"]["docs"] == 3                       # 2+1,不双计
+    assert sorted(r["doc_id"] for r in store.load_extractions()) == ["d1", "d2", "d3"]
+    assert st["watermark"] == "2026-06-22"
+
+
 def test_ingest_partial_failure_keeps_watermark(tmp_path, monkeypatch):
     _mk_corpus(tmp_path)
     monkeypatch.setenv("GL_TEXT_SOURCE_ROOT", str(tmp_path))

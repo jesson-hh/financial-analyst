@@ -66,6 +66,25 @@ def load_extractions(window_days: Optional[int] = None, now: Optional[str] = Non
     return out
 
 
+def load_extracted_doc_ids() -> set:
+    """已成功抽取过的 doc_id 集(ingest 剔重用;store 大了也只留 doc_id 不留全记录)。"""
+    p = _extractions_path()
+    if not p.exists():
+        return set()
+    ids = set()
+    for raw in p.read_text(encoding="utf-8").splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            did = json.loads(raw).get("doc_id")
+        except Exception:  # noqa: BLE001 — 坏行跳过,诚实容错
+            continue
+        if did:
+            ids.add(str(did))
+    return ids
+
+
 _DEFAULT_STATE = {
     "watermark": None,
     "failed_docs": [],

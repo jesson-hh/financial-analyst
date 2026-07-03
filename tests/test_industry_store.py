@@ -13,6 +13,18 @@ def test_append_and_load(tmp_path, monkeypatch):
     assert [r["doc_id"] for r in recent] == ["d1"]
 
 
+def test_load_extracted_doc_ids(tmp_path, monkeypatch):
+    monkeypatch.setenv("GL_INDUSTRY_STORE", str(tmp_path))
+    from guanlan_v2.industry import store
+    assert store.load_extracted_doc_ids() == set()
+    store.append_extraction({"doc_id": "d1", "publish_ts": "2026-06-30"})
+    store.append_extraction({"doc_id": "d2", "publish_ts": "2026-06-30"})
+    with open(tmp_path / "extractions.jsonl", "a", encoding="utf-8") as f:
+        f.write("{broken json\n")                          # 坏行跳过
+    store.append_extraction({"doc_id": "d1", "publish_ts": "2026-06-30"})
+    assert store.load_extracted_doc_ids() == {"d1", "d2"}
+
+
 def test_state_roundtrip_atomic(tmp_path, monkeypatch):
     monkeypatch.setenv("GL_INDUSTRY_STORE", str(tmp_path))
     from guanlan_v2.industry import store

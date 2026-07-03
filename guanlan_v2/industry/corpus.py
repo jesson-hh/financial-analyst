@@ -3,6 +3,7 @@
 
 env GL_TEXT_SOURCE_ROOT 可覆盖(仿 GL_F10_ROOT 先例);一切失败诚实 ok:False。
 PIT 红线:只按 publish_ts 增量,不回改历史。
+水位含当日(>=,防同日晚回填漏扫);重复靠 exclude_doc_ids(已抽取集)剔除。
 """
 from __future__ import annotations
 
@@ -26,7 +27,7 @@ def _load_documents():
 
 
 def scan_new_docs(watermark: Optional[str], pool_codes: set, keywords: Iterable[str],
-                  limit: Optional[int] = None) -> dict:
+                  limit: Optional[int] = None, exclude_doc_ids: Optional[set] = None) -> dict:
     try:
         df = _load_documents()
     except Exception as exc:  # noqa: BLE001
@@ -43,9 +44,11 @@ def scan_new_docs(watermark: Optional[str], pool_codes: set, keywords: Iterable[
                     "skipped_unparsed": 0}
         df["publish_ts"] = df["publish_ts"].astype(str).str[:10]
         if watermark:
-            df = df[df["publish_ts"] > str(watermark)[:10]]
+            df = df[df["publish_ts"] >= str(watermark)[:10]]
         unparsed = df[(df.get("status") != "parsed") | (df.get("text_chars", 0) == 0)]
         df = df.drop(index=unparsed.index)
+        if exclude_doc_ids:
+            df = df[~df["doc_id"].astype(str).isin(exclude_doc_ids)]
         kws = [k for k in (keywords or []) if k]
 
         def _hit(row) -> bool:
