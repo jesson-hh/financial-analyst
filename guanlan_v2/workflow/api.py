@@ -5287,6 +5287,17 @@ class WorkflowSaveIn(BaseModel):
     graph: dict = Field(default_factory=dict)   # {nodes:[...], edges:[...]}
 
 
+class WorkflowRunIn(BaseModel):
+    """``POST /workflow/run`` 入参:服务端整图执行(P4 执行器门面;供 e2e 与 P5 复用)。"""
+
+    graph: Dict[str, Any] = Field(default_factory=dict)
+    universe: Optional[str] = None
+    freq: Optional[str] = None
+    start: Optional[str] = None
+    end: Optional[str] = None
+    oos_frac: Optional[float] = None
+
+
 def build_workflow_router() -> APIRouter:
     """工作流自有节点路由组(无 prefix,P2-P5 共用)。随 cards/seats/factorlib 工厂式。"""
     router = APIRouter(tags=["workflow"])
@@ -5788,12 +5799,29 @@ def build_workflow_router() -> APIRouter:
             "source": "llm",
         })
 
-    # ===== 工作流服务端持久化(.data/workflows/*.json,id/ts 后端生成)=====
-    # 契约:POST /workflow/save {name, graph:{nodes,edges}} → {ok,id,ts,name}
+    # ===== 工作流服务端执行(P4 执行器 HTTP 门面)及持久化 ======
+    # 契约:POST /workflow/run  {graph, universe?, freq?, start?, end?, oos_frac?} → executor 结果
+    #      POST /workflow/save {name, graph:{nodes,edges}} → {ok,id,ts,name}
     #       GET  /workflow/list                            → {ok, items:[{id,name,ts,graph}]}
     #       GET  /workflow/get/{wid}                       → {ok, graph:{nodes,edges}, name,id,ts}
     #       DELETE /workflow/delete/{wid}                  → {ok}
     # 诚实失败:一律 {ok:False, reason} HTTP 200,绝不抛 500(对齐本文件 _fail 范式)。
+
+    @router.post("/workflow/run")
+    def workflow_run(body: WorkflowRunIn):
+        """服务端整图执行(同步 def → FastAPI 线程池;绝不在事件循环里跑重活)。
+        诚实失败 {ok:false,reason} HTTP 200;overrides 仅透传显式给出的键。"""
+        from guanlan_v2.workflow import executor as _wex
+        g = body.graph if isinstance(body.graph, dict) else {}
+        if not (isinstance(g.get("nodes"), list) and g.get("nodes")):
+            return JSONResponse({"ok": False, "reason": "graph.nodes 缺失或为空"})
+        ov = {k: v for k, v in (("universe", body.universe), ("freq", body.freq),
+                                ("start", body.start), ("end", body.end),
+                                ("oos_frac", body.oos_frac)) if v is not None}
+        try:
+            return JSONResponse(_wex.run_graph(g, overrides=(ov or None)))
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"ok": False, "reason": f"{type(exc).__name__}: {exc}"})
 
     @router.post("/workflow/save")
     def workflow_save(body: WorkflowSaveIn):
