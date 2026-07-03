@@ -76,16 +76,18 @@ async def _main(backfill_days: int, concurrency: int, chunk: int) -> int:
         n_conn = 0
         for f in totals["failed"]:
             reason = str(f.get("reason") or "")
-            transient = ("APIConnectionError" in reason) or ("TimeoutError" in reason)
+            # 瞬时/可恢复:断网、超时、429(限速或余额耗尽——充值后可续,被拒请求不计费)
+            transient = ("APIConnectionError" in reason) or ("TimeoutError" in reason) \
+                or ("RateLimitError" in reason) or ("429" in reason)
             if transient:
-                n_conn += 1        # 瞬时网络故障:不进永败集,下一轮自动重试
+                n_conn += 1        # 不进永败集,下一轮自动重试
             elif f.get("doc_id"):
                 perm_fail.add(str(f["doc_id"]))   # content_filter 等真永败才跳过
             print(f"[deep-backfill]   FAIL {f.get('doc_id')}: {reason[:100]}", flush=True)
-        # 熔断:整块全是连接类失败=网络断了(2026-07-03 Clash fake-ip 窗口期实证,
-        # 294篇被误标永败+0.4篇/分空转烧列表)——歇 180s 等网络回来,同批下一轮重试
+        # 熔断:整块全是可恢复失败=断网或配额耗尽(2026-07-03 两次实证:Clash fake-ip 窗口
+        # 294篇误标永败;余额烧干 429 quota)——歇 180s 待命重试,充值/网络恢复后自动续跑
         if totals["n_ok"] == 0 and docs and n_conn == len(docs):
-            print("[deep-backfill] NETWORK-DOWN? 整块连接失败,歇180s重试(不标永败)", flush=True)
+            print("[deep-backfill] SUSPENDED: 整块可恢复失败(断网/配额),歇180s重试(不标永败)", flush=True)
             await asyncio.sleep(180)
         el = time.time() - t0
         rate = grand["ok"] / el * 60 if el > 0 else 0
