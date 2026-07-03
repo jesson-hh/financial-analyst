@@ -23,8 +23,13 @@ def _extract_keywords(fw: dict) -> list:
 
 
 async def _run_batch(docs: list, fw: dict, client) -> dict:
+    import os
     from . import corpus, llmx, store
-    sem = asyncio.Semaphore(3)
+    try:
+        n_conc = max(1, min(16, int(os.environ.get("GL_INGEST_CONCURRENCY") or 3)))
+    except Exception:  # noqa: BLE001
+        n_conc = 3
+    sem = asyncio.Semaphore(n_conc)
     totals = {"n_ok": 0, "n_fail": 0, "prompt_tokens": 0, "completion_tokens": 0, "failed": []}
 
     async def _one(doc: dict):
@@ -51,7 +56,7 @@ async def _run_batch(docs: list, fw: dict, client) -> dict:
     return totals
 
 
-def _worker(limit: Optional[int], client) -> None:
+def _worker(limit: Optional[int], client, backfill_days: Optional[int] = None) -> None:
     global _running, _progress
     from . import corpus, store
     from .framework import all_pool_codes, load_framework
@@ -60,9 +65,13 @@ def _worker(limit: Optional[int], client) -> None:
         fw = load_framework()
         st = store.load_state()
         ccfg = (fw.get("meta") or {}).get("corpus") or {}
-        scan = corpus.scan_new_docs(st.get("watermark"), all_pool_codes(fw), _extract_keywords(fw),
+        # 深回填模式(backfill_days 显式给定):无视已有水位,按窗口扫历史;
+        # 已抽取 doc_id 剔重保证不重复花钱;水位推进有防回退护栏(见下)。
+        wm = None if backfill_days else st.get("watermark")
+        scan = corpus.scan_new_docs(wm, all_pool_codes(fw), _extract_keywords(fw),
                                     limit=limit, exclude_doc_ids=store.load_extracted_doc_ids(),
-                                    seed=ccfg.get("seed"), themes=ccfg.get("themes"))
+                                    seed=ccfg.get("seed"), themes=ccfg.get("themes"),
+                                    backfill_days=(backfill_days or 35))
         if not scan["ok"]:
             st["failed_docs"] = [{"doc_id": None, "reason": scan["reason"]}]
             st["last_ingest_at"] = pd.Timestamp.now().isoformat(timespec="seconds")
@@ -81,7 +90,9 @@ def _worker(limit: Optional[int], client) -> None:
         st["totals"]["prompt_tokens"] += totals["prompt_tokens"]
         st["totals"]["completion_tokens"] += totals["completion_tokens"]
         if totals["n_fail"] == 0 and docs:
-            st["watermark"] = max(d["publish_ts"] for d in docs)
+            # 防回退:深回填批的 max(publish_ts) 可能早于既有水位,取两者较大
+            batch_max = max(d["publish_ts"] for d in docs)
+            st["watermark"] = max(st.get("watermark") or "", batch_max)
         st["last_ingest_at"] = pd.Timestamp.now().isoformat(timespec="seconds")
         store.save_state(st)
     except Exception as exc:  # noqa: BLE001 — worker 意外崩溃也必须显形(诚实红线)
@@ -98,13 +109,14 @@ def _worker(limit: Optional[int], client) -> None:
         _running = False
 
 
-def start_ingest(limit: Optional[int] = None, client=None) -> dict:
+def start_ingest(limit: Optional[int] = None, client=None, backfill_days: Optional[int] = None) -> dict:
     global _running
     with _run_lock:
         if _running:
             return {"ok": True, "accepted": False, "running": True, "reason": "已有批处理在跑(单飞)"}
         _running = True
-    t = threading.Thread(target=_worker, args=(limit, client), daemon=True, name="industry-ingest")
+    t = threading.Thread(target=_worker, args=(limit, client, backfill_days),
+                         daemon=True, name="industry-ingest")
     t.start()
     return {"ok": True, "accepted": True, "running": True, "reason": None}
 

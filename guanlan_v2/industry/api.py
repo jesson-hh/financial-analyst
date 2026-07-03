@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 class IngestReq(BaseModel):
     limit: Optional[int] = None
+    backfill_days: Optional[int] = None   # 深回填:无视水位按窗口扫历史(已抽取剔重)
 
 
 def build_industry_router() -> APIRouter:
@@ -25,7 +26,8 @@ def build_industry_router() -> APIRouter:
     async def ingest_start(req: Optional[IngestReq] = None):
         from . import ingest
         limit = req.limit if req else None
-        return await asyncio.to_thread(ingest.start_ingest, limit)
+        backfill_days = req.backfill_days if req else None
+        return await asyncio.to_thread(ingest.start_ingest, limit, None, backfill_days)
 
     @router.get("/industry/ingest_state")
     async def ingest_state():

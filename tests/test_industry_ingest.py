@@ -132,6 +132,30 @@ def test_worker_crash_surfaces_in_state(tmp_path, monkeypatch):
     assert st["last_ingest_at"]
 
 
+def test_deep_backfill_ignores_watermark_and_never_regresses_it(tmp_path, monkeypatch):
+    # d_old 在默认35天窗外;常规跑只抽 d_new;深回填(backfill_days=90)补抽 d_old,
+    # 且水位不因老批回退(防回退护栏)
+    txt = tmp_path / "t.txt"
+    txt.write_text("正文", encoding="utf-8")
+    now = pd.Timestamp.now()
+    d_old, d_new = str((now - pd.Timedelta(days=60)).date()), str((now - pd.Timedelta(days=1)).date())
+    rows = [_seed_row("old", d_old, txt), _seed_row("new", d_new, txt)]
+    pd.DataFrame(rows).to_parquet(tmp_path / "seed.parquet")
+    monkeypatch.setenv("GL_CHAIN_SEED", str(tmp_path / "seed.parquet"))
+    monkeypatch.setenv("GL_INDUSTRY_STORE", str(tmp_path / "store"))
+    from guanlan_v2.industry import ingest, store
+    ingest.start_ingest(client=_OkClient())
+    _wait_done(ingest)
+    st = store.load_state()
+    assert st["totals"]["docs"] == 1 and st["watermark"] == d_new     # 只抽 d_new
+    ingest.start_ingest(client=_OkClient(), backfill_days=90)
+    _wait_done(ingest)
+    st = store.load_state()
+    assert st["totals"]["docs"] == 2                                   # 深回填补抽 d_old
+    assert sorted(r["doc_id"] for r in store.load_extractions()) == ["dnew", "dold"]
+    assert st["watermark"] == d_new                                    # 水位不回退到 d_old
+
+
 def test_ingest_single_flight(tmp_path, monkeypatch):
     _mk_corpus(tmp_path, n=1)
     monkeypatch.setenv("GL_CHAIN_SEED", str(tmp_path / "seed.parquet"))
