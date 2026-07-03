@@ -90,7 +90,7 @@ def _assemble_pit(code: str, asof: str, window: int, reader=None) -> dict:
     except Exception as exc:  # noqa: BLE001 — 诚实降级,绝不 500
         return {**base, "items": [], "coverage": {"partial": False, "note": f"读取失败: {type(exc).__name__}"},
                 "provenance": {"source": "pit_store", "rows": 0}}
-    meta = _load_meta(rdr._root)
+    meta = _load_meta(getattr(rdr, "_root", None))  # getattr:_root 私有属性防御,缺失也不崩(诚实降级红线)
     floor = meta.get("news_coverage_floor")
     rng = [meta.get("cal_start"), meta.get("cal_end")]
     partial = bool(floor and day < floor)

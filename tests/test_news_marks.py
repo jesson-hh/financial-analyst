@@ -85,3 +85,15 @@ def test_coverage_floor_partial(tmp_path):
 def test_honest_empty_on_missing_asof(tmp_path):
     out = nm.assemble_news_marks("SZ000630", "", "pit", 250, reader=_reader(tmp_path, ["2026-05-27"]))
     assert out["ok"] is True and out["items"] == []
+
+
+def test_meta_read_never_crashes_honest_degrade():
+    class _StubReader:
+        # 没有 _root 属性;get_visible_info 返回一个空 VisibleInfo 样式对象
+        def get_visible_info(self, *a, **k):
+            class _VI:
+                news = []; events = []; policy = []
+            return _VI()
+    out = nm.assemble_news_marks("SZ000630", "2026-05-27", "pit", 250, reader=_StubReader())
+    assert out["ok"] is True and out["items"] == []
+    assert "coverage" in out and out["provenance"]["source"] == "pit_store"
