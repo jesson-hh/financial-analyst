@@ -610,6 +610,20 @@ def build_seats_router() -> APIRouter:
             pass
         return JSONResponse({"ok": True, "decisions": out, "total": len(out)})
 
+    @router.get("/news")
+    async def seats_news(code: str = "", asof: str = "", mode: str = "pit", window: int = 250):
+        """落子 K 线新闻标记流。回测 ``mode=pit`` 按 ``as-of`` PIT 过滤 pit_store;
+        ``mode=live`` 取实时快讯。缺 code → ok:False;其余恒 HTTP200 诚实降级。"""
+        if not str(code).strip():
+            return JSONResponse({"ok": False, "reason": "缺 code", "items": []})
+        try:
+            from guanlan_v2.seats.news_marks import assemble_news_marks
+            payload = await asyncio.to_thread(
+                assemble_news_marks, code, asof, mode, int(window or 250))
+            return JSONResponse(payload)
+        except Exception as exc:  # noqa: BLE001 — 恒 200,诚实报因
+            return JSONResponse({"ok": False, "reason": f"{type(exc).__name__}: {exc}", "items": []})
+
     # ───────── run 头注册 / 查询(「让 agent 真跑」批跑分组,append-only var/seats_runs.jsonl)─────────
     @router.post("/runs")
     async def seats_runs_register(payload: dict = Body(default={})):
