@@ -216,3 +216,39 @@ def test_apply_promote_gate(monkeypatch):
     assert none_ic["status"] == "draft"                        # 算不出 OOS 也进 draft
     hi = _apply_promote_gate(dict(m), 0.01)
     assert hi["gate"]["passed"] is True and "status" not in hi # ≥ 门槛(含相等)通过
+
+
+def test_spec_status_forces_draft(monkeypatch):
+    """P4:spec.status='draft' → meta.status 恒 draft(研究回路产物绝不自动上正式货架);
+    门(GUANLAN_PROMOTE_MIN_OOS_IC)只降不升,与强制 draft 叠加仍是 draft。"""
+    import pandas as pd
+    import guanlan_v2.strategy.compute.model_workflow as mw
+    saved = {}
+
+    def fake_mat(body, universe, feats, start, end):
+        # train_promote 有 len(X)>=500 硬底线(生产防样本不足);30 期 x20 只=600 行过线。
+        idx = pd.MultiIndex.from_product(
+            [pd.date_range("2026-01-01", periods=30), [f"SH60{i:04d}" for i in range(20)]],
+            names=["datetime", "code"])
+        fe = pd.DataFrame({"f1": range(len(idx))}, index=idx, dtype="float64")
+        lab = pd.Series(range(len(idx)), index=idx, dtype="float64")
+        return (None, fe, lab, ["f1"])
+
+    class _M:
+        def fit(self, X, y):
+            return self
+
+        def predict(self, X):
+            import numpy as np
+            return np.arange(len(X), dtype="float64")
+
+    monkeypatch.setattr("guanlan_v2.workflow.api._materialize_xy", fake_mat)
+    monkeypatch.setattr("guanlan_v2.workflow.api._build_model", lambda k, p: (_M(), {}))
+    monkeypatch.setattr(mw, "_holdout_oos_ic", lambda *a, **kw: 0.9)
+    import guanlan_v2.screen.model_registry as reg
+    monkeypatch.setattr(reg, "save_variant", lambda vid, df, meta: saved.update(meta=meta))
+    r = mw.train_promote({"variant_id": "m_rl_x_r0", "name": "t", "kind": "xgboost",
+                          "recipe": {"features": ["rank(close)"], "universe": "csi_fast",
+                                     "start": "2026-01-01"},
+                          "status": "draft"})
+    assert r["ok"] is True and saved["meta"]["status"] == "draft"

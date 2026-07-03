@@ -10,7 +10,8 @@ asyncio.run 会炸 "Event loop is closed"——HTTP 自调让 LLM 落在 server 
 直调固定形状的窄口径。
 
 红线:提案失败诚实终止(绝不降级模板,严于前端 aiLoop);规则兜底显形 source=rule;
-draft 绝不自动上架;多因子合成达标不自动入库(skipped_multi);失败也写教训。
+产物一律 draft 人审,绝不自动上架(P4 三通道:ML 图→模型 train_promote 强制 draft;
+≥2 表达式→组合权重物化 draft;单表达式→现状;skipped_multi 语义已退役);失败也写教训。
 停滞守卫(2026-07-03 真机 v4-pro 暴露,P4 升级为图签名比较):批判若产出与上一轮完全相同的图
 (graph_signature 相等)则指标必然逐位不变=烧轮次装研究;批判环显式声明求值语义(constraints),
 改进产出同签名图 → 带停滞警告重批一次,仍相同 → 诚实中断。
@@ -94,6 +95,115 @@ def _save_draft(run_id: str, k: int, expr: str, goal: str, diag: str,
                   source="research_loop", status="draft",
                   meta={"metrics": metrics, "run_id": run_id, "round": k})
     return _save_factor(body, LibraryFactorStore())
+
+
+def _save_compose_expr(name: str, expr: str, goal: str, diag: str,
+                       meta: Dict[str, Any]) -> Dict[str, Any]:
+    """组合物化表达式存 factorlib draft(独立便于 monkeypatch)。"""
+    from guanlan_v2.factorlib.api import SaveIn, _save_factor
+    from guanlan_v2.factorlib.store import LibraryFactorStore
+    body = SaveIn(name=name, expr=expr, family="library_mined",
+                  description=f"研究回路组合产出:{goal[:60]} · {str(diag)[:80]}",
+                  source="research_loop", status="draft", meta=meta)
+    return _save_factor(body, LibraryFactorStore())
+
+
+def _call_train_promote(spec: Dict[str, Any]) -> Dict[str, Any]:
+    from guanlan_v2.strategy.compute.model_workflow import train_promote
+    return train_promote(spec)
+
+
+def _derive_ml_recipe(graph: Dict[str, Any], universe: str) -> Optional[Dict[str, Any]]:
+    """镜像前端 deriveRecipeForNode(workflow.jsx:779-807):首个 ML 节点 → recipe。
+    features=其上游 feature 节点 feat 口表达式保序去重;label 同前端语义;params 经
+    executor._HPMAP 画布名→后端名;universe=回路 run 参数权威。查无 ML 节点 → None。"""
+    from guanlan_v2.workflow.executor import _HPMAP, _ML_KINDS, _num
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
+    by_id = {n.get("id"): n for n in nodes if isinstance(n, dict)}
+    ml = next((n for n in nodes if isinstance(n, dict) and n.get("type") in _ML_KINDS), None)
+    if ml is None:
+        return None
+    feats: List[str] = []
+    label: Optional[str] = None
+    for e in edges:
+        to = e.get("to") or [None, None]
+        if to[0] != ml.get("id") or to[1] != "fe":
+            continue
+        fn = by_id.get((e.get("from") or [None])[0])
+        if not (fn and fn.get("type") == "feature"):
+            continue
+        for e2 in edges:
+            t2 = e2.get("to") or [None, None]
+            if t2[0] != fn.get("id"):
+                continue
+            up = by_id.get((e2.get("from") or [None])[0])
+            expr = str(((up or {}).get("params") or {}).get("expr") or "").strip()
+            if t2[1] == "feat" and expr and expr not in feats:
+                feats.append(expr)
+            if t2[1] == "label" and label is None and expr:
+                label = expr
+        if label is None:
+            tag = str((fn.get("params") or {}).get("tag") or "").strip()
+            if tag.lower() not in ("", "ic", "fwd_ret"):
+                label = tag
+    params: Dict[str, Any] = {}
+    for bk, ck in _HPMAP.get(ml["type"], {}).items():
+        v = (ml.get("params") or {}).get(ck)
+        if v in (None, ""):
+            continue
+        n = _num(v)
+        params[bk] = (int(n) if (n is not None and float(n).is_integer())
+                      else (n if n is not None else v))
+    return {"kind": _ML_KINDS[ml["type"]], "features": feats, "label": label,
+            "fwd_days": 5, "universe": universe, "params": params}
+
+
+def _route_product(run_id: str, k: int, graph: Dict[str, Any], goal: str, diag: str,
+                   metrics: Dict[str, Any], terminal: Optional[Dict[str, Any]],
+                   universe: str) -> Dict[str, Any]:
+    """达标产物三通道路由(spec §4):ML 图→模型 draft;≥2 表达式→组合物化 draft;单→现状。"""
+    recipe = _derive_ml_recipe(graph, universe)
+    if recipe is not None:                                  # ── 模型通道
+        if not recipe["features"]:
+            return {"name": None, "status": "save_failed",
+                    "reason": "ML 图缺 feature 上游表达式,无法提取 recipe"}
+        spec = {"variant_id": f"m_rl_{run_id[-6:]}_r{k}",
+                "name": f"研究·{goal[:12]}·r{k}", "kind": recipe.pop("kind"),
+                "recipe": recipe, "created": _now(), "status": "draft"}
+        try:
+            pr = _call_train_promote(spec)
+        except Exception as exc:  # noqa: BLE001
+            pr = {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        if pr.get("ok"):
+            return {"name": pr.get("variant_id"), "status": "draft_model"}
+        return {"name": None, "status": "save_failed", "reason": pr.get("reason")}
+    _, exprs2 = _pick_dish(graph)
+    if len(exprs2) >= 2:                                    # ── 组合通道(权重物化)
+        payload = (terminal or {}).get("payload") or {}
+        members = payload.get("members") or exprs2
+        weights = payload.get("weights") or []
+        wvals = [(w or {}).get("weight") for w in weights]
+        if len(wvals) != len(members) or any(not isinstance(w, (int, float)) for w in wvals):
+            wvals = [round(1.0 / len(members), 4)] * len(members)   # 无权重 → 等权(诚实缺省)
+        expr = " + ".join(f"({w})*({m})" for m, w in zip(members, wvals))
+        name = f"lib_rl_{run_id[-6:]}_r{k}"
+        try:
+            pr = _save_compose_expr(name, expr, goal, diag,
+                                    {"members": members, "weights": weights,
+                                     "metrics": metrics, "run_id": run_id, "round": k})
+        except Exception as exc:  # noqa: BLE001
+            pr = {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        return ({"name": pr.get("name") or name, "status": "draft_compose"} if pr.get("ok")
+                else {"name": None, "status": "save_failed", "reason": pr.get("reason")})
+    if len(exprs2) == 1:                                    # ── 单因子通道(现状)
+        try:
+            pr = _save_draft(run_id, k, exprs2[0], goal, diag, metrics)
+        except Exception as exc:  # noqa: BLE001
+            pr = {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        return ({"name": pr.get("name"), "status": "draft"} if pr.get("ok")
+                else {"name": None, "status": "save_failed", "reason": pr.get("reason")})
+    return {"name": None, "status": "save_failed", "reason": "图内无可入库表达式"}
 
 
 def _save_graph(goal: str, run_id: str, graph: Dict[str, Any]) -> Dict[str, Any]:
@@ -219,17 +329,9 @@ def run_research_loop(run_id: str, goal: str, max_rounds: int, min_rank_ic: floa
         rounds.append(row)
         # ── 过门 → draft 入库 + 提前收工 ──
         if gate["passed"]:
-            progress(phase="promote", label="③ 达标 · 存 draft 入库(待人审)…", round_k=k)
-            if len(exprs) == 1:
-                try:
-                    pr = _save_draft(run_id, k, exprs[0], goal, diag, metrics)
-                except Exception as exc:  # noqa: BLE001
-                    pr = {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
-                promoted = ({"name": pr.get("name"), "status": "draft"} if pr.get("ok")
-                            else {"name": None, "status": "save_failed", "reason": pr.get("reason")})
-            else:
-                promoted = {"name": None, "status": "skipped_multi",
-                            "reason": "多因子合成暂不自动入库(库以单表达式为单位),成分见轮次档案"}
+            progress(phase="promote", label="③ 达标 · 产物入库(draft 待人审)…", round_k=k)
+            promoted = _route_product(run_id, k, graph, goal, diag, metrics,
+                                      ex.get("terminal"), universe)
             break
         if k + 1 >= max_rounds:
             break
@@ -282,12 +384,10 @@ def run_research_loop(run_id: str, goal: str, max_rounds: int, min_rank_ic: floa
     ws = _save_graph(goal, run_id, best["graph"]) if best else None
     n = len(rounds)
     bm = (best or {}).get("metrics") or {}
-    if promoted and promoted.get("status") == "draft":
-        lesson = (f"研究「{goal[:40]}」{n}轮达标:{promoted['name']} rank_ic={bm.get('rank_ic')} "
-                  f"oos={bm.get('oos_verdict')} 已入draft待人审;诊断:{str(diag)[:80]}")
-    elif promoted and promoted.get("status") == "skipped_multi":
-        lesson = (f"研究「{goal[:40]}」{n}轮达标(多因子合成,未自动入库):rank_ic={bm.get('rank_ic')} "
-                  f"oos={bm.get('oos_verdict')};成分见轮次档案;诊断:{str(diag)[:80]}")
+    if promoted and promoted.get("status") in ("draft", "draft_compose", "draft_model"):
+        lesson = (f"研究「{goal[:40]}」{n}轮达标:{promoted['name']}(status={promoted['status']}) "
+                  f"rank_ic={bm.get('rank_ic')} oos={bm.get('oos_verdict')} 已入draft待人审;"
+                  f"诊断:{str(diag)[:80]}")
     elif promoted and promoted.get("status") == "save_failed":
         lesson = (f"研究「{goal[:40]}」{n}轮达标但入库失败:{str(promoted.get('reason'))[:80]};"
                   f"rank_ic={bm.get('rank_ic')} oos={bm.get('oos_verdict')}")

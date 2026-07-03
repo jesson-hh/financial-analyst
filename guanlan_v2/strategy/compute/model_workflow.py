@@ -100,6 +100,8 @@ def train_promote(spec: Dict[str, Any]) -> Dict[str, Any]:
         "universe": body.universe, "asof": rank_df["date"].iloc[0],
         "created": spec.get("created") or "", "hyper": hyper,
     }
+    if spec.get("status"):                   # P4:调用方强制状态(研究回路恒 draft);门只降不升
+        meta["status"] = str(spec["status"])
     meta = _apply_promote_gate(meta, oos_ic)
     try:
         reg.save_variant(spec["variant_id"], rank_df, meta)

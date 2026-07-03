@@ -240,15 +240,74 @@ def test_call_critique_payload_has_constraints(monkeypatch):
     assert seen["payload"]["goal"] == "目标"
 
 
-def test_loop_multi_expr_pass_skips_autosave(monkeypatch, tmp_path):
-    lessons, graphs, drafts = _wire(monkeypatch, tmp_path, evals=[_ex_ok(exprs=("a", "b"))])
-    g2 = {"nodes": [{"type": "formula", "params": {"expr": "a"}},
-                    {"type": "formula", "params": {"expr": "b"}}], "edges": []}
+def test_product_route_compose_materializes_weights(monkeypatch, tmp_path):
+    lessons, graphs, drafts = _wire(monkeypatch, tmp_path, evals=[])
+    g2 = {"nodes": [{"id": "a", "type": "formula", "params": {"expr": "rank(x)"}},
+                    {"id": "b", "type": "formula", "params": {"expr": "rank(y)"}}], "edges": []}
     monkeypatch.setattr(rl, "_call_generate", lambda goal: {"ok": True, "graph": g2})
-    end = rl.run_research_loop("rr_test06", "找组合", 3, 0.02, "csi_fast", "month", None, None,
+    ok = _ex_ok(exprs=("rank(x)", "rank(y)"))
+    ok["terminal"] = {"kind": "analysis", "node_id": "an", "payload": {
+        "members": ["rank(x)", "rank(y)"],
+        "weights": [{"name": "rank(x)", "weight": 0.63}, {"name": "rank(y)", "weight": 0.37}]}}
+    monkeypatch.setattr(rl, "_run_graph_eval", lambda graph, p, pr, k, mr: dict(ok))
+    saved = {}
+    monkeypatch.setattr(rl, "_save_compose_expr",
+                        lambda name, expr, goal, diag, meta:
+                        saved.update(name=name, expr=expr) or {"ok": True, "name": name})
+    end = rl.run_research_loop("rr_t13", "找组合", 3, 0.02, "csi_fast", "month", None, None,
                                progress=lambda **kw: None)
-    assert end["promoted"]["status"] == "skipped_multi" and drafts == []   # 多因子不自动入库(红线)
-    assert "达标" in lessons[0] and "未达标" not in lessons[0]              # 教训诚实:达标≠未达标
+    assert end["promoted"]["status"] == "draft_compose"
+    assert saved["expr"] == "(0.63)*(rank(x)) + (0.37)*(rank(y))"   # 权重物化线性表达式
+    assert "达标" in lessons[0]
+
+
+def test_product_route_model_channel(monkeypatch, tmp_path):
+    _wire(monkeypatch, tmp_path, evals=[])
+    gml = {"nodes": [
+        {"id": "f", "type": "formula", "params": {"expr": "rank(close)"}},
+        {"id": "fe", "type": "feature", "params": {"tag": "IC"}},
+        {"id": "m", "type": "xgb", "params": {"trees": 200, "depth": 4}},
+        {"id": "mf", "type": "mf", "params": {}},
+        {"id": "an", "type": "analysis", "params": {}},
+    ], "edges": [{"from": ["f", "out"], "to": ["fe", "feat"]},
+                 {"from": ["fe", "fe"], "to": ["m", "fe"]},
+                 {"from": ["m", "model"], "to": ["mf", "m1"]},
+                 {"from": ["mf", "factor"], "to": ["an", "factor"]}]}
+    monkeypatch.setattr(rl, "_call_generate", lambda goal: {"ok": True, "graph": gml})
+    monkeypatch.setattr(rl, "_run_graph_eval",
+                        lambda graph, p, pr, k, mr: _ex_ok(exprs=("rank(close)",), has_ml=True))
+    seen = {}
+    monkeypatch.setattr(rl, "_call_train_promote",
+                        lambda spec: seen.update(spec=spec) or
+                        {"ok": True, "variant_id": spec["variant_id"], "status": "draft"})
+    end = rl.run_research_loop("rr_t14", "ML找因子", 3, 0.02, "csi300_active", "month",
+                               None, None, progress=lambda **kw: None)
+    assert end["promoted"]["status"] == "draft_model"
+    sp = seen["spec"]
+    assert sp["kind"] == "xgboost" and sp["status"] == "draft"
+    assert sp["recipe"]["features"] == ["rank(close)"]
+    assert sp["recipe"]["params"] == {"n_estimators": 200, "max_depth": 4}   # hpMap 反向
+    assert sp["recipe"]["universe"] == "csi300_active"                       # run 参数权威
+
+
+def test_product_route_model_save_failed_honest(monkeypatch, tmp_path):
+    lessons, _, _ = _wire(monkeypatch, tmp_path, evals=[])
+    gml = {"nodes": [{"id": "f", "type": "formula", "params": {"expr": "rank(close)"}},
+                     {"id": "fe", "type": "feature", "params": {}},
+                     {"id": "m", "type": "lstm", "params": {}}],
+           "edges": [{"from": ["f", "out"], "to": ["fe", "feat"]},
+                     {"from": ["fe", "fe"], "to": ["m", "fe"]}]}
+    monkeypatch.setattr(rl, "_call_generate", lambda goal: {"ok": True, "graph": gml})
+    monkeypatch.setattr(rl, "_run_graph_eval",
+                        lambda graph, p, pr, k, mr: _ex_ok(has_ml=True))
+    monkeypatch.setattr(rl, "_call_train_promote",
+                        lambda spec: {"ok": False,
+                                      "reason": "kind 'lstm' 暂不支持生产入库(首期树模型)"})
+    end = rl.run_research_loop("rr_t15", "lstm", 3, 0.02, "csi_fast", "month", None, None,
+                               progress=lambda **kw: None)
+    assert end["promoted"]["status"] == "save_failed"
+    assert "暂不支持生产入库" in end["promoted"]["reason"]     # train_promote 诚实拒绝原样透出
+    assert lessons and "入库失败" in lessons[0]
 
 
 def test_loop_save_failed_lesson_honest(monkeypatch, tmp_path):
