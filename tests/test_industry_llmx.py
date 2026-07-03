@@ -72,6 +72,25 @@ def test_extract_ok_and_validation():
     assert r["prompt_tokens"] == 100 and r["completion_tokens"] == 50
 
 
+def test_quote_whitespace_tolerant_but_no_fabrication():
+    """PDF 解析正文句中有换行/空格 → 引句去空白后逐字连续一致即通过;
+    改写/编造仍必须丢弃(2026-07-03 kimi 首批实测大量误丢后加)。"""
+    from guanlan_v2.industry.framework import load_framework
+    from guanlan_v2.industry.llmx import validate_extraction
+    fw = load_framework()
+    text = "全球AI大模型总调\n用量为36.1万亿Token,较此前一周增长13.5%,连续七\n周上涨。"
+    raw = {"segments": [
+        {"segment_id": "M1", "stance": "多", "strength": 2,
+         "quote": "全球AI大模型总调用量为36.1万亿Token,较此前一周增长13.5%"},   # 同内容,原文断行
+        {"segment_id": "C2", "stance": "多", "strength": 2,
+         "quote": "全球AI大模型调用量为36万亿Token"},                          # 改写(丢字)→ 拒
+    ]}
+    out = validate_extraction(raw, fw, text)
+    segs = {s["segment_id"]: s for s in out["segments"]}
+    assert segs["M1"]["quote_dropped"] is False and segs["M1"]["quote"]
+    assert segs["C2"]["quote_dropped"] is True and segs["C2"]["quote"] is None
+
+
 def test_extract_llm_failure_honest():
     from guanlan_v2.industry.framework import load_framework
     from guanlan_v2.industry.llmx import extract_one

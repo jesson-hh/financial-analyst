@@ -75,33 +75,55 @@ def _prompt(doc: dict, text: str, digest: str) -> str:
     )
 
 
+def _ws_free(s: str) -> str:
+    return re.sub(r"\s+", "", s or "")
+
+
+def _quote_in_text(quote, text: str) -> bool:
+    """逐字连续匹配,但忽略空白差异:PDF 解析文本句中常有换行/空格,
+    模型复述同内容会挂纯子串检查(2026-07-03 kimi 首批实测大量误丢)。
+    去空白后仍要求字符连续一致 → 依旧防编造。"""
+    if not (isinstance(quote, str) and quote):
+        return False
+    if quote in text:
+        return True
+    q = _ws_free(quote)
+    return bool(q) and q in _ws_free(text)
+
+
 def validate_extraction(raw: dict, fw: dict, text: str) -> dict:
     sids = {s["id"] for s in fw["segments"]}
     eids = {e["id"] for e in fw["edges"]}
     nids = {n["id"] for n in fw["narratives"]}
     out: dict = {"segments": [], "catalysts": [], "edges": [], "narratives": [], "global_updates": [], "stocks": []}
+    seen_seg: set = set()
     for s in raw.get("segments") or []:
         sid = s.get("segment_id")
-        if sid not in sids or s.get("stance") not in _STANCES:
-            continue
+        if sid not in sids or s.get("stance") not in _STANCES or sid in seen_seg:
+            continue  # 同环节重复条目只留首条(kimi 首批实测出现 G1×2,聚合会双计)
+        seen_seg.add(sid)
         try:
             strength = max(1, min(3, int(s.get("strength") or 1)))
         except Exception:  # noqa: BLE001
             strength = 1
         quote = s.get("quote")
         dropped = False
-        if not (isinstance(quote, str) and quote and quote in text):
+        if not _quote_in_text(quote, text):
             quote, dropped = None, True
         out["segments"].append({"segment_id": sid, "stance": s["stance"], "strength": strength,
                                 "quote": quote, "quote_dropped": dropped})
     for c in raw.get("catalysts") or []:
         if c.get("type") in _CATALYSTS and c.get("desc"):
             out["catalysts"].append({"type": c["type"], "desc": str(c["desc"]), "date_hint": c.get("date_hint")})
+    seen_edge: set = set()
     for e in raw.get("edges") or []:
-        if e.get("edge_id") in eids and e.get("verdict") in _VERDICTS:
+        if e.get("edge_id") in eids and e.get("verdict") in _VERDICTS and e["edge_id"] not in seen_edge:
+            seen_edge.add(e["edge_id"])
             out["edges"].append({"edge_id": e["edge_id"], "verdict": e["verdict"], "evidence": str(e.get("evidence") or "")})
+    seen_narr: set = set()
     for n in raw.get("narratives") or []:
-        if n.get("narrative_id") in nids and n.get("stance") in _STANCES:
+        if n.get("narrative_id") in nids and n.get("stance") in _STANCES and n["narrative_id"] not in seen_narr:
+            seen_narr.add(n["narrative_id"])
             out["narratives"].append({"narrative_id": n["narrative_id"], "stance": n["stance"]})
     for g in raw.get("global_updates") or []:
         if g.get("segment_id") in sids and g.get("field") in _GLOBAL_FIELDS and g.get("content"):
