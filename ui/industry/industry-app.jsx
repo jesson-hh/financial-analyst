@@ -102,7 +102,9 @@ class River extends React.Component {
     });
     this.DRIVERS = (b.drivers || []).map((d) => ({
       id: d.id, name: d.display_name || d.name, val: d.reading, sub: d.sub,
-      up: d.dir === 'up' ? true : d.dir === 'down' ? false : null, hint: join(d.indicators),
+      up: d.dir === 'up' ? true : d.dir === 'down' ? false : null,
+      updates: d.updates || [],
+      hint: join(d.indicators) + ((d.updates || []).length ? '\n—— 近30日研报读数证据 ——\n' + d.updates.map((u) => `${(u.publish_ts || '').slice(5, 10)} ${u.org || ''}: ${u.note}`).join('\n') : ''),
     }));
     this.EDGES = (b.edges || []).map((e) => ({ id: e.id, from: e.from, to: e.to, sign: e.sign, mech: e.mechanism, lag: e.lag, valid: join(e.validation) }));
     this.NARRS = (b.narratives || []).map((n) => {
@@ -335,7 +337,7 @@ class River extends React.Component {
           <div style={{ writingMode: 'vertical-rl', fontFamily: 'var(--font-serif)', fontSize: 11, letterSpacing: 4, color: 'var(--ink-3)', borderRight: '1px solid var(--line-1)', paddingRight: 7, marginRight: 2 }}>驅動</div>
           {this.DRIVERS.map((dr, i) => (
             <div key={dr.id} id={'drv-' + dr.id} data-hv="drv" onMouseEnter={() => this.setState({ hoverId: dr.id })} onMouseLeave={() => this.setState({ hoverId: null })} title={dr.hint} style={{ flex: 1, border: '1px solid var(--line-2)', background: 'var(--paper-1)', padding: '8px 11px 7px', position: 'relative', cursor: 'default', animation: 'glRise .5s both', animationDelay: (0.02 + i * 0.04).toFixed(2) + 's' }}>
-              <div style={{ fontSize: 11.5, color: 'var(--ink-2)', letterSpacing: .5, display: 'flex', gap: 6, alignItems: 'baseline' }}>{dr.name} <i style={{ fontFamily: 'var(--font-mono)', fontStyle: 'normal', fontSize: 9.5, color: 'var(--ink-3)' }}>{dr.id}</i></div>
+              <div style={{ fontSize: 11.5, color: 'var(--ink-2)', letterSpacing: .5, display: 'flex', gap: 6, alignItems: 'baseline' }}>{dr.name} <i style={{ fontFamily: 'var(--font-mono)', fontStyle: 'normal', fontSize: 9.5, color: 'var(--ink-3)' }}>{dr.id}</i>{dr.updates.length > 0 && <span style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 8.5, color: 'var(--zhu)', border: '1px solid var(--zhu-soft)', padding: '0 4px' }} title="近30日研报读数证据条数(悬停卡片看明细)">研{dr.updates.length}</span>}</div>
               <div style={{ marginTop: 4, fontFamily: 'var(--font-mono)', fontSize: 12.5, display: 'flex', gap: 6, alignItems: 'baseline' }}><span style={{ color: dr.up === true ? 'var(--zhu)' : dr.up === false ? 'var(--dai)' : 'var(--ink-1)' }}>{dr.val || '—'}</span><span style={{ fontSize: 10, color: 'var(--ink-3)' }}>{dr.sub}</span></div>
             </div>
           ))}
@@ -595,6 +597,27 @@ class River extends React.Component {
                 ))}
               </div>
             </div>
+            {(() => {
+              const dps = det ? (det.datapoints || []) : [];
+              if (!dps.length) return null;
+              return (
+                <div style={{ border: '1px solid var(--line-2)', background: 'var(--paper-1)' }}>
+                  {panelHead('量化数据点', <><span style={{ fontSize: 10, color: 'var(--ink-3)' }}>研报硬数字 · 显式挂靠本环节 · 近30日</span><span style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--ink-3)' }}>{dps.length} 条</span></>)}
+                  <div style={{ padding: '8px 14px 10px', display: 'flex', flexDirection: 'column', gap: 5 }}>
+                    {dps.slice(0, 12).map((dp, i) => (
+                      <div key={i} style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 11, borderBottom: i < Math.min(dps.length, 12) - 1 ? '1px solid var(--line-1)' : 'none', paddingBottom: 5 }}>
+                        <span style={{ fontSize: 9, color: 'var(--ink-3)', border: '1px solid var(--line-1)', padding: '0 4px', flex: 'none' }}>{dp.kind}</span>
+                        <span style={{ color: 'var(--ink-1)' }}>{dp.subject}</span>
+                        <b style={{ fontFamily: 'var(--font-mono)', color: 'var(--zhu)' }}>{dp.value}</b>
+                        {dp.period && <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9.5, color: 'var(--ink-3)' }}>{dp.period}</span>}
+                        {dp.edge_id && <span style={{ fontSize: 9, color: 'var(--dai)', border: '1px solid var(--dai-soft)', padding: '0 4px' }} title="验证该传导边">{dp.edge_id}</span>}
+                        <span style={{ marginLeft: 'auto', fontSize: 9.5, color: 'var(--ink-3)', whiteSpace: 'nowrap' }}>{dp.org} · {(dp.publish_ts || '').slice(5, 10)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
             <div style={{ border: '1px solid var(--line-2)', background: 'var(--paper-1)' }}>
               {panelHead('研报观点流', <><span style={{ fontSize: 10, color: 'var(--ink-3)' }}>近30日 · 半衰7天</span><span style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--ink-3)' }}>{ops.length} 篇</span></>)}
               {ops.length > 0 ? (
@@ -606,6 +629,8 @@ class River extends React.Component {
                         <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 10.5, color: 'var(--ink-3)' }}>
                           <span style={{ fontFamily: 'var(--font-serif)', fontSize: 10.5, padding: '0 6px', lineHeight: '17px', letterSpacing: 1, background: bull ? 'var(--zhu)' : bear ? 'var(--dai)' : 'transparent', color: bull || bear ? 'var(--text-on-zhu)' : 'var(--ink-2)', border: `1px solid ${bull ? 'var(--zhu)' : bear ? 'var(--dai)' : 'var(--line-2)'}` }}>{op.stance || '中'}</span>
                           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 9.5, color: 'var(--jin)', letterSpacing: 1 }}>{'●'.repeat(op.strength || 1) + '○'.repeat(Math.max(0, 3 - (op.strength || 1)))}</span>
+                          {op.rating_change && op.rating_change !== '无' && <span style={{ fontSize: 9, color: op.rating_change === '下调' ? 'var(--dai)' : 'var(--zhu)', border: `1px solid ${op.rating_change === '下调' ? 'var(--dai-soft)' : 'var(--zhu-soft)'}`, padding: '0 4px', whiteSpace: 'nowrap' }}>{op.rating_change}{op.rating ? '·' + op.rating : ''}</span>}
+                          {op.target_price != null && <span style={{ fontSize: 9, fontFamily: 'var(--font-mono)', color: 'var(--ink-2)', border: '1px solid var(--line-1)', padding: '0 4px', whiteSpace: 'nowrap' }}>TP {op.target_price}</span>}
                           <span style={{ marginLeft: 'auto', whiteSpace: 'nowrap' }}>{op.org} · {(op.publish_ts || '').slice(5, 10)}</span>
                         </div>
                         <div style={{ marginTop: 5, fontSize: 12, color: 'var(--ink-1)', fontWeight: 500, lineHeight: 1.5 }}>{op.title}</div>
@@ -628,11 +653,27 @@ class River extends React.Component {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <div style={{ border: '1px solid var(--line-2)', background: 'var(--paper-1)' }}>
               {panelHead('双轴读数', <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--ink-3)' }}>{det ? '' : '载入…'}</span>)}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', padding: '12px 14px 14px', gap: 10 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', padding: '12px 14px 6px', gap: 10 }}>
                 {cell('动量20日', momTxt, momColor(s.mom))}
                 {cell('研报景气', s.n30 != null && s.n30 > 0 ? '+' + s.n30 : '—')}
                 {cell('行情温度', s.therm == null ? '—' : s.therm + '°')}
               </div>
+              {(() => {
+                const rs = (det && det.research) || {};
+                const chip = (label, up, dn) => (
+                  <span style={{ fontSize: 10, color: 'var(--ink-2)', border: '1px solid var(--line-1)', background: 'var(--paper-2)', padding: '2px 7px', whiteSpace: 'nowrap' }}>
+                    {label} <b style={{ fontFamily: 'var(--font-mono)', color: up > 0 ? 'var(--zhu)' : 'var(--ink-3)' }}>↑{up == null ? '—' : up}</b>
+                    <b style={{ fontFamily: 'var(--font-mono)', color: dn > 0 ? 'var(--dai)' : 'var(--ink-3)', marginLeft: 4 }}>↓{dn == null ? '—' : dn}</b>
+                  </span>
+                );
+                return (
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', padding: '0 14px 13px' }}>
+                    {chip('评级', rs.rating_up, rs.rating_dn)}
+                    {chip('盈利修正', rs.fc_up, rs.fc_dn)}
+                    <span style={{ fontSize: 10, color: 'var(--ink-2)', border: '1px solid var(--line-1)', background: 'var(--paper-2)', padding: '2px 7px' }}>覆盖机构 <b style={{ fontFamily: 'var(--font-mono)' }}>{rs.n_orgs == null ? '—' : rs.n_orgs}</b></span>
+                  </div>
+                );
+              })()}
             </div>
             <div style={{ border: '1px solid var(--line-2)', background: 'var(--paper-1)', display: 'flex', flexDirection: 'column' }}>
               {panelHead('票池', <span style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--ink-3)' }}>{rows.length} 只</span>)}

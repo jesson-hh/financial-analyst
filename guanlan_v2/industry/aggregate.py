@@ -171,13 +171,19 @@ def research_signals(fw: dict, extractions: list, now=None) -> dict:
     import numpy as np
     import pandas as pd
     now = pd.Timestamp(now) if now else pd.Timestamp.now()
-    out = {s["id"]: {"score": 0.0, "n30": 0, "bull": 0, "bear": 0, "neutral": 0, "vals": []}
+    out = {s["id"]: {"score": 0.0, "n30": 0, "bull": 0, "bear": 0, "neutral": 0, "vals": [],
+                     "orgs": set(), "rating_up": 0, "rating_dn": 0, "fc_up": 0, "fc_dn": 0}
            for s in fw["segments"] if not s.get("adjacent")}
     for rec in _dedupe_latest(extractions):
         age = _age_days(rec.get("publish_ts"), now)
         if age > 30:
             continue
         decay = 0.5 ** (age / 7.0)
+        # 文级硬指标(2026-07-03 扩展):评级变化/盈利修正方向,归到该文触达的每个环节
+        rc = (rec.get("report_meta") or {}).get("rating_change")
+        frs = rec.get("forecast_revisions") or []
+        fc_up = sum(1 for f in frs if f.get("direction") in ("上调", "新增"))
+        fc_dn = sum(1 for f in frs if f.get("direction") == "下调")
         for seg in rec.get("segments", []):
             sid = seg.get("segment_id")
             if sid not in out:
@@ -192,10 +198,19 @@ def research_signals(fw: dict, extractions: list, now=None) -> dict:
                 out[sid]["bear"] += 1
             else:
                 out[sid]["neutral"] += 1
+            if rec.get("org"):
+                out[sid]["orgs"].add(rec["org"])
+            if rc in ("上调", "首次覆盖"):
+                out[sid]["rating_up"] += 1
+            elif rc == "下调":
+                out[sid]["rating_dn"] += 1
+            out[sid]["fc_up"] += fc_up
+            out[sid]["fc_dn"] += fc_dn
     for sid, d in out.items():
         vals = d.pop("vals")
         d["disagreement"] = float(np.var(vals)) if len(vals) >= 2 else None
         d["score"] = round(d["score"], 3)
+        d["n_orgs"] = len(d.pop("orgs"))
     return out
 
 
@@ -252,6 +267,26 @@ def narrative_temps(fw: dict, qsig: dict, extractions: list, now=None) -> list:
                     "activates": n.get("activates", []),
                     "temp": round(100.0 * num / den, 1) if den > 0 else None,
                     "plus7": plus.get(n["id"], 0), "minus7": minus.get(n["id"], 0)})
+    return out
+
+
+def _drivers_with_updates(fw: dict, extractions: list, now=None) -> list:
+    """驱动卡带近30日研报读数证据(Kimi driver_updates,最新5条)——人审后更新 YAML reading。"""
+    import pandas as pd
+    now = pd.Timestamp(now) if now else pd.Timestamp.now()
+    upd: dict = {d["id"]: [] for d in fw["drivers"]}
+    for rec in _dedupe_latest(extractions):
+        if _age_days(rec.get("publish_ts"), now) > 30:
+            continue
+        for du in rec.get("driver_updates") or []:
+            did = du.get("driver_id")
+            if did in upd:
+                upd[did].append({"note": du.get("note"), "org": rec.get("org"),
+                                 "publish_ts": rec.get("publish_ts")})
+    out = []
+    for d in fw["drivers"]:
+        lst = sorted(upd[d["id"]], key=lambda x: str(x.get("publish_ts")), reverse=True)[:5]
+        out.append(dict(d, updates=lst))
     return out
 
 
@@ -313,7 +348,7 @@ def build_board(refresh: bool = False) -> dict:
                           "last_ingest_at": st.get("last_ingest_at"),
                           "extracted_total": st.get("totals", {}).get("docs", 0),
                           "quote_date": qdate},
-            "drivers": fw["drivers"], "groups": fw["groups"], "segments": segments,
+            "drivers": _drivers_with_updates(fw, ext), "groups": fw["groups"], "segments": segments,
             "edges": [dict(e, verdict_counts=ev.get(e["id"], {"support": 0, "refute": 0})) for e in fw["edges"]],
             "narratives": narrative_temps(fw, qsig, ext),
         }
@@ -359,21 +394,31 @@ def segment_detail(sid: str) -> dict:
             return {"ok": False, "reason": f"环节不存在: {sid}"}
         ext = _dedupe_latest(store.load_extractions(window_days=30))
         opinions = []
+        datapoints = []
         for rec in ext:
+            rm = rec.get("report_meta") or {}
             for s in rec.get("segments", []):
                 if s.get("segment_id") == sid:
                     opinions.append({"doc_id": rec.get("doc_id"), "title": rec.get("title"),
                                      "org": rec.get("org"), "publish_ts": rec.get("publish_ts"),
                                      "stance": s.get("stance"), "strength": s.get("strength"),
-                                     "quote": s.get("quote"), "quote_dropped": s.get("quote_dropped")})
+                                     "quote": s.get("quote"), "quote_dropped": s.get("quote_dropped"),
+                                     "rating": rm.get("rating"), "rating_change": rm.get("rating_change"),
+                                     "target_price": rm.get("target_price")})
+            for dp in rec.get("datapoints") or []:
+                if dp.get("segment_id") == sid:   # 只收显式挂靠本环节的(不猜)
+                    datapoints.append(dict(dp, org=rec.get("org"), publish_ts=rec.get("publish_ts"),
+                                           doc_id=rec.get("doc_id")))
         opinions.sort(key=lambda x: str(x.get("publish_ts")), reverse=True)
+        datapoints.sort(key=lambda x: str(x.get("publish_ts")), reverse=True)
+        datapoints = datapoints[:40]
         pool_codes = [x["code"] for x in seg.get("stocks", [])]
         quotes = _fetch_quotes(pool_codes)
         qsig = quant_signals(fw, quotes=quotes)
         rsig = research_signals(fw, ext)
         stock_rows = _stock_rows(seg.get("stocks", []), quotes, _fundflow_map(), _v4_pct_map())
         return {"ok": True, "reason": None, "segment": seg, "quant": qsig.get(sid),
-                "research": rsig.get(sid), "opinions": opinions,
+                "research": rsig.get(sid), "opinions": opinions, "datapoints": datapoints,
                 "stocks": seg.get("stocks", []), "stock_rows": stock_rows}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": f"segment 明细失败: {exc}"}

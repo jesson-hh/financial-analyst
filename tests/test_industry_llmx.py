@@ -66,6 +66,20 @@ def test_extract_ok_and_validation():
             {"kind": "瞎编的kind", "note": "x" * 500, "suggest_id": None},
             {"kind": "新叙事", "note": ""},   # 空 note 丢弃
         ],
+        "report_meta": {"rating": "买入", "rating_change": "上调", "target_price": "352.5元", "target_code": "688498.SH"},
+        "forecast_revisions": [
+            {"code": "688498.SH", "metric": "EPS", "direction": "上调", "year": "2026E"},
+            {"code": "688498.SH", "metric": "瞎编指标", "direction": "上调", "year": "2026E"},   # metric 非法丢弃
+        ],
+        "datapoints": [
+            {"kind": "价格", "subject": "200G EML", "value": "涨价15-20%", "period": "26H2", "segment_id": "C2", "edge_id": "T4"},
+            {"kind": "价格", "subject": "x", "value": "", "period": None},                        # 空 value 丢弃
+            {"kind": "产能", "subject": "CoWoS", "value": "翻倍", "segment_id": "ZZ9", "edge_id": "T99"},  # 非法挂靠→置空保留
+        ],
+        "driver_updates": [
+            {"driver_id": "D4", "note": "DRAM 合约价环比 +58~63%"},
+            {"driver_id": "D99", "note": "非法驱动id丢弃"},
+        ],
     }
     r = asyncio.run(extract_one(_doc(), text, fw, client=_FakeClient(payload)))
     assert r["ok"] is True
@@ -85,6 +99,17 @@ def test_extract_ok_and_validation():
     assert obs[0] == {"kind": "新环节", "note": obs[0]["note"], "suggest_id": "A3"} and "HBM" in obs[0]["note"]
     assert obs[1]["kind"] == "其他" and len(obs[1]["note"]) == 300
     assert ex["raw"]["observations"][0]["kind"] == "新环节"
+    # 硬指标(2026-07-03 扩展):评级/目标价解析、盈利修正 metric 白名单、
+    # 数据点非法挂靠置空保留、驱动 id 白名单
+    assert ex["report_meta"] == {"rating": "买入", "rating_change": "上调",
+                                 "target_price": 352.5, "target_code": "SH688498"}
+    assert ex["forecast_revisions"] == [{"code": "SH688498", "metric": "EPS",
+                                         "direction": "上调", "year": "2026E"}]
+    dps = ex["datapoints"]
+    assert len(dps) == 2
+    assert dps[0]["subject"] == "200G EML" and dps[0]["segment_id"] == "C2" and dps[0]["edge_id"] == "T4"
+    assert dps[1]["segment_id"] is None and dps[1]["edge_id"] is None    # 非法挂靠置空,数据点保留
+    assert ex["driver_updates"] == [{"driver_id": "D4", "note": "DRAM 合约价环比 +58~63%"}]
 
 
 def test_quote_whitespace_tolerant_but_no_fabrication():

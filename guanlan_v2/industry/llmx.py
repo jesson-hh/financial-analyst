@@ -41,9 +41,16 @@ _SYSTEM = (
     "重要:若研报包含框架白名单未覆盖、但对 AI 产业链投研重要的信息"
     "(新环节/新传导关系/新叙事/环节全球坐标应修正的证据),写进 observations 字段提案,"
     "不要硬塞进白名单 id,也不要因为框架没覆盖就丢弃。"
+    "同时尽量抽取硬指标:评级及其变化与目标价(report_meta)、盈利预测修正方向(forecast_revisions)、"
+    "带数值的量化数据点如价格/产能/渗透率/订单/国产化率(datapoints,能挂靠环节或传导边就挂)、"
+    "宏观驱动读数证据(driver_updates)。没有就留空,禁止编造数字。"
 )
 
 _OBS_KINDS = {"新环节", "新边", "新叙事", "坐标修正", "其他"}
+_RATING_CHANGES = {"首次覆盖", "上调", "下调", "维持", "无"}
+_FC_METRICS = {"营收", "净利润", "EPS"}
+_FC_DIRS = {"上调", "下调", "新增"}
+_DP_KINDS = {"价格", "产能", "渗透率", "订单", "出货量", "国产化率", "份额", "市场规模", "资本开支", "其他"}
 
 
 def _norm_code(c: str) -> Optional[str]:
@@ -72,6 +79,10 @@ def _prompt(doc: dict, text: str, digest: str) -> str:
         "global_updates": [{"segment_id": "C2", "field": "国产化率|份额|技术差距|认证", "content": "一句话"}],
         "stocks": [{"code": "SH688498", "stance": "多|中|空", "logic": "一句话"}],
         "observations": [{"kind": "新环节|新边|新叙事|坐标修正|其他", "note": "一句话(框架未覆盖的重要信息)", "suggest_id": "建议挂靠的现有id,可空"}],
+        "report_meta": {"rating": "研报评级原词,可空", "rating_change": "首次覆盖|上调|下调|维持|无", "target_price": "目标价数字,可空", "target_code": "目标价对应个股代码,可空"},
+        "forecast_revisions": [{"code": "SH688498", "metric": "营收|净利润|EPS", "direction": "上调|下调|新增", "year": "2026E"}],
+        "datapoints": [{"kind": "价格|产能|渗透率|订单|出货量|国产化率|份额|市场规模|资本开支|其他", "subject": "指标对象如 DRAM合约价", "value": "原文数值如 +58~63%", "period": "期间如 25Q4,可空", "segment_id": "关联环节id,可空", "edge_id": "验证的传导边id,可空"}],
+        "driver_updates": [{"driver_id": "D1", "note": "驱动最新读数证据一句话(带数字)"}],
     }
     return (
         f"## 框架白名单\n{digest}\n\n"
@@ -149,6 +160,47 @@ def validate_extraction(raw: dict, fw: dict, text: str) -> dict:
         sug = ob.get("suggest_id")
         out["observations"].append({"kind": kind, "note": note[:300],
                                     "suggest_id": (str(sug)[:8] if sug else None)})
+    # ── 硬指标(2026-07-03 扩展):评级/目标价、盈利预测修正、量化数据点、驱动读数证据 ──
+    rm = raw.get("report_meta") or {}
+    tp = rm.get("target_price")
+    try:
+        tp = round(float(str(tp).replace("元", "").replace(",", "")), 2) if tp not in (None, "", "无") else None
+    except Exception:  # noqa: BLE001 — 解析不了=没有,不猜
+        tp = None
+    out["report_meta"] = {
+        "rating": (str(rm.get("rating"))[:16] if rm.get("rating") else None),
+        "rating_change": (rm.get("rating_change") if rm.get("rating_change") in _RATING_CHANGES else "无"),
+        "target_price": tp,
+        "target_code": _norm_code(str(rm.get("target_code") or "")),
+    }
+    out["forecast_revisions"] = []
+    for fr in (raw.get("forecast_revisions") or [])[:12]:
+        code = _norm_code(str(fr.get("code") or ""))
+        if fr.get("metric") in _FC_METRICS and fr.get("direction") in _FC_DIRS:
+            out["forecast_revisions"].append({"code": code, "metric": fr["metric"],
+                                              "direction": fr["direction"],
+                                              "year": (str(fr.get("year"))[:8] if fr.get("year") else None)})
+    out["datapoints"] = []
+    for dp in (raw.get("datapoints") or [])[:12]:
+        subject = str(dp.get("subject") or "").strip()
+        value = str(dp.get("value") or "").strip()
+        if not subject or not value:
+            continue
+        sid = dp.get("segment_id")
+        eid = dp.get("edge_id")
+        out["datapoints"].append({
+            "kind": (dp.get("kind") if dp.get("kind") in _DP_KINDS else "其他"),
+            "subject": subject[:60], "value": value[:60],
+            "period": (str(dp.get("period"))[:16] if dp.get("period") else None),
+            "segment_id": (sid if sid in sids else None),
+            "edge_id": (eid if eid in eids else None),
+        })
+    dids = {d["id"] for d in fw["drivers"]}
+    out["driver_updates"] = []
+    for du in (raw.get("driver_updates") or [])[:7]:
+        note = str(du.get("note") or "").strip()
+        if du.get("driver_id") in dids and note:
+            out["driver_updates"].append({"driver_id": du["driver_id"], "note": note[:200]})
     return out
 
 
