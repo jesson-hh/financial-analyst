@@ -174,7 +174,7 @@ ui/industry/
 ### 4.2 ingest 管线(手动触发,增量)
 
 1. `POST /industry/ingest` → 单飞锁(temp 锁文件,仿 regen `_acquire_regen_lock`)→ 后台线程执行,立即返回受理凭证
-2. 扫 `G:\stocks\stock_data\text_source\documents.parquet`:增量 = `publish_ts > 水位`;筛选 = `doc_type=industry_research` 全收 + `company_research` 命中(票池 ∪ keywords 正文匹配);跨仓路径经 env `GL_TEXT_SOURCE_ROOT` 可覆盖(仿 `GL_F10_ROOT` 先例)
+2. 扫 `G:\stocks\stock_data\text_source\documents.parquet`:增量 = `publish_ts >= 水位` + 已抽取 doc_id 剔重(2026-07-03 终审 fast-follow #5:>= 防同日晚回填漏扫,剔重防重复 LLM 花费/totals 双计,剔重先于 limit);筛选 = `doc_type=industry_research` 全收 + `company_research` 命中(票池 ∪ keywords 正文匹配);跨仓路径经 env `GL_TEXT_SOURCE_ROOT` 可覆盖(仿 `GL_F10_ROOT` 先例)
 3. 每篇:读 text_path 全文(过长截断分段,首版单篇上限约 20k 字符,超出取头+尾)→ DeepSeek 抽取(见 4.3)→ 校验环节/边/叙事 id 合法性(非法 id 丢弃该条目并记 warning)→ append `extractions.jsonl`
 4. 全部成功才推水位;失败篇目记入 state(`failed_docs`),不阻断其余
 5. `GET /industry/ingest_state`:进度/水位/失败清单/累计 token 用量显形
