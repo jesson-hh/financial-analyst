@@ -1396,9 +1396,40 @@ def _route_product(run_id: str, k: int, graph: Dict[str, Any], goal: str, diag: 
 - [ ] **Step 4:** Run `pytest tests/test_research_loop.py tests/test_model_workflow_promote.py -q` → 全 PASS
 - [ ] **Step 5:** `git commit -m "feat(research): 达标产物三通道(单因子/组合权重物化/模型train_promote强制draft)"`
 
-### Task 6: vintage 扩面 + UI 小填充
+### Task 6: vintage 扩面 + 研究回路卡迁移选股页 + 顶栏恢复选股(spec §5b)
 
-**Files:** Modify `guanlan_v2/screen/factor_vintage.py`、`guanlan_v2/factorlib/api.py`、`ui/screen/screen-app.jsx`、`ui/screen/观澜 · 选股.html`、`ui/seats/luozi-panels.jsx`、`ui/seats/观澜 · 落子.html`;Test `tests/test_factorlib_draft.py`(追加)
+**Files:** Modify `guanlan_v2/screen/factor_vintage.py`、`guanlan_v2/factorlib/api.py`、`ui/screen/screen-app.jsx`、`ui/screen/观澜 · 选股.html`、`ui/seats/luozi-panels.jsx`、`ui/seats/luozi-data.jsx`、`ui/seats/luozi-app.jsx`、`ui/seats/观澜 · 落子.html`、`ui/_shared/guanlan-nav.js` + 全部 8 个含 nav 的 html;Test `tests/test_factorlib_draft.py`(追加)
+
+**迁移步骤(babel 全局词法域坑:迁入代码顶层禁 `const {useState}=React` 再解构,直接裸用 `useState`——screen-app.jsx 文件头已有既定做法,照当前文件风格):**
+
+- [ ] **Step A1: 迁入选股页** — 在 `ui/screen/screen-app.jsx` 的 `DraftFactorSection`(:737)之前插入:
+  1. 两个数据函数,照抄 `ui/seats/luozi-data.jsx:1275-1293` 的 `researchRuns/researchRounds` 函数体(名字改 `xgResearchRuns/xgResearchRounds`,`window.GUANLAN_BACKEND` 口径与 screen-app 现有 fetch 一致,graph 剔除逻辑逐字保留);
+  2. `ResearchLoopCard` 组件,照抄 `ui/seats/luozi-panels.jsx:1627-1720` 全函数体,四处适配:
+     - 数据调用 `window.lzResearchRuns(20)`→`xgResearchRuns(20)`、`window.lzResearchRounds(selId)`→`xgResearchRounds(selId)`(去掉 window 存在性三元,直调本地函数);
+     - promoBadge:删 `skipped_multi` 分支,原位插两分支(下方 Step A4 代码);
+     - 最外层容器样式改左栏区风格:`<div style={{ marginTop: 8, borderTop: '1px dashed var(--line)', paddingTop: 6 }}>`(对齐 DraftFactorSection:764),内部头行/列表/展开结构逐字保留;
+     - `goCanvas` 逐字保留(相对路径 `../factor/…` 从 screen 页同样成立;embed/ws 透传无害)。
+  3. 挂载:`FactorLibrary` 渲染里 `<DraftFactorSection />`(:856)之前插 `<ResearchLoopCard />`。
+- [ ] **Step A2: 落子侧移除** — `ui/seats/luozi-app.jsx:750` 删 `<ResearchLoopCard />` 挂载行;`ui/seats/luozi-panels.jsx:1621-1720` 删整个组件块 + `Object.assign(window, {...})`(:1721)里删 `ResearchLoopCard,`;`ui/seats/luozi-data.jsx:1272-1293` 删两函数 + 文件尾 window 导出里删 `lzResearchRuns/lzResearchRounds` 两项(先 grep 确认无其他引用)。
+- [ ] **Step A3: 顶栏加选股** — `ui/_shared/guanlan-nav.js` MODULES(:6-10)「席位 · 落子」后插一行:
+
+```js
+    { label: '选股', file: '../screen/观澜 · 选股.html' },
+```
+
+  随后 **8 个 html 全部** `guanlan-nav.js?v=2` → `?v=3`(用 Edit 精确替换;清单:cards/经验验证区、chat/交互原型、console/帷幄、factor/AI 工作流、graph/研究图谱、industry/AI投研、screen/选股、seats/落子)。
+- [ ] **Step A4: promoBadge 两态**(迁入后的 screen-app.jsx 代码里,替换原 skipped_multi 分支):
+
+```jsx
+    if (pr.status === 'draft_compose') return <span className="mono" style={{ fontSize: 8, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--jin)', color: 'var(--jin)', flexShrink: 0 }}>组合draft·待人审</span>;
+    if (pr.status === 'draft_model') return <span className="mono" style={{ fontSize: 8, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--jin)', color: 'var(--jin)', flexShrink: 0 }}>模型draft·工坊待审</span>;
+```
+
+  (luozi-panels.jsx 的 promoBadge 随组件删除一并消失,无需单改。)
+- [ ] **Step A5: jsx `?v=` bump** — `观澜 · 选股.html` 的 `screen-app.jsx?v=…`→`?v=20260703p4`;`观澜 · 落子.html` 的 `luozi-app.jsx/luozi-panels.jsx/luozi-data.jsx` 三处 →`?v=20260703p4`。
+- [ ] **Step A6 验证:** `grep -rn "ResearchLoopCard" ui/seats/` → 0 命中;`grep -rn "ResearchLoopCard" ui/screen/screen-app.jsx` → 组件定义+挂载两处;`grep -rn "guanlan-nav.js?v=3" ui/ | wc -l` → 8。
+
+(以下 vintage/factorlib 后端部分与原任务一致:)
 
 - [ ] **Step 1: 失败测试**(追加进 `tests/test_factorlib_draft.py`;TestClient/store 隔离方式**以该文件既有 fixture 为准,同风格复用**)
 
@@ -1480,16 +1511,9 @@ def _sweep_items():
           {f.vintage && <span className="mono" title={'前向 vintage IC(出生后真实 OOS,截至 ' + (f.vintage.asof || '—') + ')'} style={{ fontSize: 9, color: f.vintage.ic >= 0 ? 'var(--zhu)' : 'var(--dai)', flexShrink: 0 }}>前向 {(f.vintage.ic >= 0 ? '+' : '') + (+f.vintage.ic).toFixed(3)}·n{f.vintage.n}</span>}
 ```
 
-  - `ui/seats/luozi-panels.jsx` promoBadge:`skipped_multi` 分支删除,原位插:
-
-```jsx
-    if (pr.status === 'draft_compose') return <span className="mono" style={{ fontSize: 8, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--jin)', color: 'var(--jin)', flexShrink: 0 }}>组合draft·待人审</span>;
-    if (pr.status === 'draft_model') return <span className="mono" style={{ fontSize: 8, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--jin)', color: 'var(--jin)', flexShrink: 0 }}>模型draft·工坊待审</span>;
-```
-
-  - 两 html `?v=` bump(用 Edit 精确替换,勿动其他 `?v=`):`观澜 · 选股.html` 的 `screen-app.jsx?v=…` → `?v=20260703p4`;`观澜 · 落子.html` 的 `luozi-panels.jsx?v=…` → `?v=20260703p4`。
-- [ ] **Step 4:** Run `pytest tests/test_factorlib_draft.py -q` → PASS;`grep -rn "20260703p4" ui/` 两处命中
-- [ ] **Step 5:** `git commit -m "feat(vintage+ui): draft进vintage扫描面+list附前向IC+待审区徽章+promoBadge两态"`
+  (promoBadge 两态与全部 `?v=` bump 已由上方 Step A4/A5 覆盖,此处勿重复。)
+- [ ] **Step 4:** Run `pytest tests/test_factorlib_draft.py -q` → PASS;`grep -rn "guanlan-nav.js?v=3" ui/ | wc -l` → 8;`grep -rn "20260703p4" ui/` → 选股 html 1 处 + 落子 html 3 处;Step A6 三项 grep 全过
+- [ ] **Step 5:** `git commit -m "feat(ui+vintage): 研究回路卡迁选股页+顶栏恢复选股+draft进vintage扫描面+前向IC徽章"`
 
 ### Task 7: 全量回归 + 真机 e2e@9998 + 还原(控制器亲手执行,绝不转包)
 
@@ -1498,7 +1522,7 @@ def _sweep_items():
 - [ ] **Step 3:** `POST /workflow/run` 冒烟:最小图(formula `rank(-delta(close,5))` → analysis)→ `ok:true` + metrics.rank_ic 非空。
 - [ ] **Step 4:** 回路真跑 A(ML 图):goal=「用 xgboost 机器学习模型在沪深300活跃股里找一个量价因子并检验」,max_rounds=3,min_rank_ic=0.02;轮询 done;核验:轮次档案 `terminal_kind/node_errors` 显形;达标 → `promoted.status ∈ {draft_model, save_failed}`,若 draft_model → registry `m_rl_*` meta.status=="draft" 且 `GET /screen/models` 默认列表**不含**它(红线在拦);未达标 → promoted null 诚实。
 - [ ] **Step 5:** 回路真跑 B(Sharpe 门):goal=「构造一个量价背离的选股因子,并检验它的截面选股能力」(2026-07-03 真机同款,彼时 rank_ic=0.0376/sharpe=-0.98 过旧门),min_rank_ic=0.03 → 新门下该形态**不得**入 draft(promoted null,档案 gate.sharpe_required=true;若 v4-pro 提出 Sharpe>0 的更优因子过门=合法,核验其指标真实)。
-- [ ] **Step 6:** 浏览器速核(playwright):落子研究卡新 run 显形+徽章;选股待审区正常渲染(vintage 无值不显=合法空态)。
+- [ ] **Step 6:** 浏览器速核(playwright):**选股页**研究回路卡新 run 显形+徽章+逐轮展开;落子右栏**无**研究卡(迁移已生效);顶栏四门面含「选股」且当页高亮;待审区正常渲染(vintage 无值不显=合法空态);console 0 SyntaxError。
 - [ ] **Step 7:** 还原:杀 9998;删 e2e 产物(factorlib mined 新 json、registry 新 `m_rl_*` 变体);run 档案(var/research_*.jsonl)**保留**=真实历史;`git status` 干净;9999 健康 200。
 - [ ] **Step 8:** 台账 Ledger 记录;如 e2e 只读无代码改动则无 commit。
 
