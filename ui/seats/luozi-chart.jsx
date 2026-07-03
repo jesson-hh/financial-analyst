@@ -31,7 +31,7 @@ function maSeries(bars, period, end) {
 }
 
 // ───────── 蜡烛图 ─────────
-function CandleChart({ bars, decisions, truedecs, activeSeats, selected, onSelect, revealTo, view, live, asOf, triggers }) {
+function CandleChart({ bars, decisions, truedecs, activeSeats, selected, onSelect, revealTo, view, live, asOf, triggers, newsMarkers, onNewsClick }) {
   const [ref, { w, h }] = useSize();
   const [hover, setHover] = useState(null);
   const n = bars.length;
@@ -48,8 +48,9 @@ function CandleChart({ bars, decisions, truedecs, activeSeats, selected, onSelec
   const padR = 50, padT = 10, padB = 20, padL = 6;
   const plotW = w - padL - padR;
   const plotH = h - padT - padB;
-  const priceH = plotH * 0.72, gap = plotH * 0.05, volH = plotH * 0.23;
-  const priceTop = padT, volTop = padT + priceH + gap;
+  const newsLaneH = (newsMarkers && newsMarkers.length) ? 15 : 0;   // 新闻泳道预留带
+  const priceH = plotH * 0.72 - newsLaneH, gap = plotH * 0.05, volH = plotH * 0.23;
+  const priceTop = padT + newsLaneH, volTop = padT + priceH + gap;
 
   let pHi = -Infinity, pLo = Infinity, vMax = 0;
   vis.forEach(i => { pHi = Math.max(pHi, bars[i].h); pLo = Math.min(pLo, bars[i].l); vMax = Math.max(vMax, bars[i].v); });
@@ -246,6 +247,25 @@ function CandleChart({ bars, decisions, truedecs, activeSeats, selected, onSelec
               <rect x={cx - tbw / 2 - 2.5} y={ty - 2.5} width={tbw + 5} height={tbh + 5} rx={5} fill="none" stroke="var(--jin)" strokeWidth="1.3" opacity="0.9" filter="url(#lz-glow)" />
               <rect x={cx - tbw / 2} y={ty} width={tbw} height={tbh} rx={3} fill={buy ? 'var(--zhu)' : 'var(--dai)'} filter="url(#lz-stamp)" />
               <text x={cx} y={ty + tbh / 2 + 3.3} textAnchor="middle" fill="var(--paper)" fontSize={9.5} style={{ fontWeight: 600, fontFamily: 'var(--sans)' }}>{buy ? 'B' : 'S'}</text>
+            </g>
+          );
+        })}
+        {/* 新闻标记泳道(聚类 ▣N;命中关键词金色高亮;≤ revealTo 揭示墙约束;点击下钻)*/}
+        {(newsMarkers || []).map((nmk, k) => {
+          if (nmk.idx < vStart || nmk.idx > Math.min(vEnd, rt)) return null;
+          const cx = xOf(nmk.idx);
+          const stroke = nmk.hit ? 'var(--jin)' : 'var(--ink-3)';
+          const label = '▣ ' + nmk.count;
+          const wd = Math.max(26, 14 + String(nmk.count).length * 7);
+          const ly = padT + 1;
+          const tips = (nmk.items || []).slice(0, 3).map(it => (it.ts ? String(it.ts).slice(5, 16).replace('T', ' ') + ' ' : '') + it.title).join('\n');
+          return (
+            <g key={'nm' + k} style={{ cursor: 'pointer' }} onClick={() => onNewsClick && onNewsClick(nmk)}>
+              <line x1={cx} x2={cx} y1={ly + 13} y2={yP(bars[nmk.idx].h) - 2} stroke={stroke} strokeWidth="0.6" strokeDasharray="2 2" opacity="0.35" />
+              {nmk.hit && <rect x={cx - wd / 2 - 2} y={ly - 1} width={wd + 4} height={15} rx={4} fill="none" stroke="var(--jin)" strokeWidth="1.3" opacity="0.5" />}
+              <rect x={cx - wd / 2} y={ly} width={wd} height={13} rx={3} fill={nmk.hit ? 'rgba(191,138,23,0.14)' : 'var(--paper)'} stroke={stroke} strokeWidth="0.7" filter="url(#lz-stamp)" />
+              <text x={cx} y={ly + 9.5} textAnchor="middle" fontSize="9" fill={nmk.hit ? 'var(--jin)' : 'var(--ink-2)'} fontFamily="var(--mono)">{label}</text>
+              <title>{tips}</title>
             </g>
           );
         })}
