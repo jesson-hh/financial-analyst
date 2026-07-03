@@ -41,6 +41,9 @@ function LuoziApp() {
   const [panEnd, setPanEnd] = useState(null);         // 可见窗口右边缘 idx(滑动);null = 跟随最新
   const [market, setMarket] = useState(null);         // 今日市场状态(/watch/market_status:regime+涨跌停)
   const [quote, setQuote] = useState(null);           // ④ 实盘实时盘口(/seats/quote:腾讯实时价,仅 live 轮询)
+  const [newsKw, setNewsKw] = useState('');
+  const [newsPayload, setNewsPayload] = useState(null);
+  const [newsPanel, setNewsPanel] = useState(null);
   const [shadow, setShadow] = useState({ goLive: null, positions: [] });
   useEffect(() => { setShadow(window.lzShadowLoad ? window.lzShadowLoad(code) : { goLive: null, positions: [] }); }, [code]);
   const [liveBar, setLiveBar] = useState(null);       // ④-③ 实盘今日柱缓存(实时源;盘后/隔夜保持图有今天,官方日K入库即让位)
@@ -663,6 +666,21 @@ function LuoziApp() {
   const chartView = { start: Math.max(0, vEnd - vWin + 1), end: vEnd };
   const pitOn = mode === 'live' || (mode === 'backtest' && (playing || cursor < n - 1));
   const asOfDate = (symbol.bars[cursor] || symbol.bars[n - 1]).date;
+  // 新闻标记:回测态按 as-of 拉 PIT 流(后端只回 ≤as-of,前端图层再按 revealTo 拦),实时态拉 live。debounce 250ms。
+  useEffect(() => {
+    if (!code) { setNewsPayload(null); return; }
+    let alive = true;
+    const t = setTimeout(() => {
+      const nmode = mode === 'live' ? 'live' : 'pit';
+      const asof = mode === 'live' ? '' : asOfDate;
+      window.lzFetchNews && window.lzFetchNews(code, asof, nmode).then(p => { if (alive) setNewsPayload(p); });
+    }, 250);
+    return () => { alive = false; clearTimeout(t); };
+  }, [code, asOfDate, mode]);
+  const newsMarkers = useMemo(
+    () => (window.lzMapNewsToFrame && newsPayload)
+      ? window.lzMapNewsToFrame(newsPayload.items || [], dispFrame.fbars, newsKw) : [],
+    [newsPayload, dispFrame, newsKw]);
 
   const pnlActive = active.filter(s => symbol.perSeat[s]);
   // 基准末个**非 null** 值(alignBench 尾段在指数源末日后为 null,直读 [n-1] 会把「源滞后」
@@ -713,13 +731,36 @@ function LuoziApp() {
                   {scaleLabel}
                 </span>
                 <TfPicker tf={tf} setTf={setTf} />
+                <input value={newsKw} onChange={e => setNewsKw(e.target.value)}
+                  placeholder="新闻关键词 加息|非农|本票名"
+                  style={{ font: '11px var(--mono)', padding: '2px 7px', border: '1px solid var(--line)', borderRadius: 5, background: 'var(--paper)', color: 'var(--ink)', width: 150 }} />
+                {newsPayload && newsPayload.coverage && newsPayload.coverage.partial &&
+                  <span className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)' }}>覆盖不全&lt;{newsPayload.coverage.floor}</span>}
                 <span style={{ flex: 1 }} />
                 {mode === 'backtest' && repPerf && <span onClick={distillToCard} className="mono" title="复盘回灌 · 提炼为新经验卡入共享库" style={{ fontSize: 10, color: 'var(--yin)', border: '1px solid var(--zhu-soft)', borderRadius: 6, padding: '3px 9px', cursor: 'pointer' }}>↺ 提炼为经验卡</span>}
                 <span className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)' }}>朱砂涨 · 黛绿跌 · B 买 · S 卖 · ◆ 险(预警发光)</span>
               </div>
               <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-                <CandleChart bars={dispFrame.fbars} decisions={[]} truedecs={chartMarks} activeSeats={selRun ? Array.from(new Set(runDecs.map(d => d.seat))) : active} selected={selected} onSelect={setSelected} revealTo={dispFrame.freveal} view={chartView} live={pitOn} asOf={{ on: pitOn && !liveTodayEdge, date: asOfDate }} triggers={orderTriggers} />
+                <CandleChart bars={dispFrame.fbars} decisions={[]} truedecs={chartMarks} activeSeats={selRun ? Array.from(new Set(runDecs.map(d => d.seat))) : active} selected={selected} onSelect={setSelected} revealTo={dispFrame.freveal} view={chartView} live={pitOn} asOf={{ on: pitOn && !liveTodayEdge, date: asOfDate }} triggers={orderTriggers} newsMarkers={newsMarkers} onNewsClick={setNewsPanel} />
                 <Deliberation thinking={thinking} symbol={symbol} />
+                {newsPanel && (
+                  <div style={{ position: 'absolute', top: 8, right: 8, width: 300, maxHeight: '70%', overflow: 'auto', background: 'var(--paper)', border: '1px solid var(--line)', borderRadius: 8, boxShadow: '0 6px 20px rgba(28,24,20,0.18)', padding: '8px 10px', zIndex: 5 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                      <b className="serif" style={{ fontSize: 12, color: 'var(--ink)' }}>当日快讯 · {newsPanel.count} 条</b>
+                      <span onClick={() => setNewsPanel(null)} style={{ marginLeft: 'auto', cursor: 'pointer', color: 'var(--ink-3)', fontSize: 14 }}>×</span>
+                    </div>
+                    {(newsPanel.items || []).map((it, i) => {
+                      const hit = newsKw && newsKw.split('|').map(s => s.trim()).filter(Boolean).some(k => (it.title || '').indexOf(k) >= 0);
+                      return (
+                        <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'baseline', padding: '5px 6px', borderRadius: 5, background: hit ? 'rgba(191,138,23,0.12)' : 'transparent' }}>
+                          <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', minWidth: 40 }}>{String(it.ts || '').slice(5, 16).replace('T', ' ')}</span>
+                          <span className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)', border: '0.5px solid var(--line)', borderRadius: 4, padding: '0 5px' }}>{it.source || it.level}</span>
+                          <span style={{ fontSize: 12, color: 'var(--ink)' }}>{it.title}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
               <ChartNav fbars={dispFrame.fbars} win={vWin} end={vEnd} maxEnd={maxEnd} setZoom={setZoom} setPanEnd={setPanEnd} />
               <div style={{ height: 150, borderTop: '1px solid var(--line)', flexShrink: 0, position: 'relative' }}>
