@@ -791,6 +791,65 @@ function mapDecsToFrame(decs, fbars) {
   return out;
 }
 
+// 拉新闻标记流(回测 PIT / 实时);无 GUANLAN_BACKEND 或失败 → null(调用方泳道静默空,诚实降级)。
+async function fetchNews(code, asof, mode) {
+  const API = (window.GUANLAN_BACKEND || '');
+  if (!API) return null;
+  const m = mode || 'pit';
+  const q = '/seats/news?code=' + encodeURIComponent(code) + '&mode=' + m +
+            (asof ? '&asof=' + encodeURIComponent(asof) : '') + '&window=250';
+  try {
+    const res = await fetch(API + q);
+    if (!res.ok) return null;
+    const j = await res.json();
+    return (j && j.ok) ? j : null;
+  } catch (e) { return null; }
+}
+
+// 把 PIT 新闻流按时间戳聚类到「当前显示帧」的 bar(镜像 mapDecsToFrame 的 locate 规则)。
+//   pit_store ts 用 'T' 分隔(2026-06-01T09:31:00);日内帧 bar.date 用空格(YYYY-MM-DD HH:MM,收盘刻)→ 匹配前把 'T'→' '。
+//   产出每 bar 一桶:{idx, count, hit(命中关键词), items}。keyword 空 → hit 恒 false(不高亮)。
+function mapNewsToFrame(items, fbars, keyword) {
+  if (!items || !items.length || !fbars || !fbars.length) return [];
+  const intradayFrame = (fbars[0].date || '').length > 10;
+  const byFull = {}, byDayLast = {}, dayBars = {};
+  fbars.forEach((b, i) => {
+    const dt = b.date || '';
+    byFull[dt] = i;
+    const day = dt.slice(0, 10);
+    byDayLast[day] = i;
+    (dayBars[day] || (dayBars[day] = [])).push({ i, dt });
+  });
+  const locate = (ts) => {
+    if (!ts) return fbars.length - 1;                          // live 无 ts → 落最右 bar
+    const day = ts.slice(0, 10);
+    if (!intradayFrame) return byFull[day] != null ? byFull[day] : -1;
+    if (ts.length > 10) {
+      const norm = ts.replace('T', ' ');
+      const key = norm.slice(0, 16);
+      if (byFull[key] != null) return byFull[key];
+      const arr = dayBars[day] || [];
+      const hit = arr.find(x => x.dt >= norm);
+      return hit ? hit.i : (byDayLast[day] != null ? byDayLast[day] : -1);
+    }
+    return byDayLast[day] != null ? byDayLast[day] : -1;
+  };
+  const kw = String(keyword || '').split('|').map(s => s.trim()).filter(Boolean);
+  const matches = (t) => kw.length > 0 && kw.some(k => (t || '').indexOf(k) >= 0);
+  const byIdx = {};
+  items.forEach(it => {
+    const idx = locate(String(it.ts || it.date || ''));
+    if (idx < 0) return;
+    (byIdx[idx] || (byIdx[idx] = [])).push(it);
+  });
+  const out = [];
+  Object.keys(byIdx).forEach(k => {
+    const grp = byIdx[k];
+    out.push({ idx: +k, count: grp.length, hit: grp.some(it => matches(it.title)), items: grp });
+  });
+  return out;
+}
+
 // ───────── 真日K接入(/seats/daily;失败回退合成,见 ui/seats/README 开放项)─────────
 // 把 /seats/daily 的行 {date,open,high,low,close,vol,amount} 归一成本模块 bar 形状。
 function normDailyBars(rows) {
@@ -1603,6 +1662,7 @@ Object.assign(window, {
   lzRunTriggerReplay: runTriggerReplay, lzRsiOf: rsiOf, lzSeatOrder: seatOrder, lzFetchLiveEval: fetchLiveEval,
   lzRunsList: runsList, lzRunDecisions: runDecisions, lzLedgerState: ledgerState, lzLedgerPost: ledgerPost, lzSeatsTca: seatsTca, lzRunId: runIdGen, lzRunsClear: runsClear, lzRunBacktest: runBacktest,
   lzBars30: bars30, lzMapDecsToFrame: mapDecsToFrame,
+  lzFetchNews: fetchNews, lzMapNewsToFrame: mapNewsToFrame,
   lzShadowLoad: shadowLoad, lzShadowSave: shadowSave, lzShadowAddEntry: shadowAddEntry,
   lzShadowCheckExits: shadowCheckExits, lzShadowMetrics: shadowMetrics, lzShadowClose: shadowClose,
   lzShadowListAll: shadowListAll, lzShadowAggregate: shadowAggregate,
