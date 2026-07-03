@@ -249,6 +249,7 @@ def narrative_temps(fw: dict, qsig: dict, extractions: list, now=None) -> list:
         out.append({"id": n["id"], "name": n["name"],
                     "display_name": n.get("display_name", n["name"]), "status": n.get("status"),
                     "validation": n.get("validation", []), "risks": n.get("risks", []),
+                    "activates": n.get("activates", []),
                     "temp": round(100.0 * num / den, 1) if den > 0 else None,
                     "plus7": plus.get(n["id"], 0), "minus7": minus.get(n["id"], 0)})
     return out

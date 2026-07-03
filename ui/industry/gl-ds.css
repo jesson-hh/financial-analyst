@@ -1,0 +1,76 @@
+/* 观澜 Guanlan Design System — tokens vendored for AI投研河图页
+   源自设计稿 _ds/guanlan-design-system/tokens/{colors,typography}.css(逐字对齐,便于河图 1:1 复刻)。
+   字体走本页 <head> 的 Google Fonts <link>,不在此 @import。 */
+
+:root {
+  /* ---- Paper (宣纸) ---- */
+  --paper-page:   #ECE4D2;
+  --paper-0:      #F1EADB;
+  --paper-1:      #F7F1E5;
+  --paper-2:      #FBF7EE;
+  --paper-sink:   #E5DBC4;
+
+  /* ---- Ink (墨) ---- */
+  --ink-0:  #211B12;
+  --ink-1:  #36301F;
+  --ink-2:  #6A6049;
+  --ink-3:  #998C6F;
+  --ink-4:  #C0B498;
+
+  /* ---- Lines (界) ---- */
+  --line-1: #DCD2BC;
+  --line-2: #CABE9F;
+  --line-3: #B3A582;
+
+  /* ---- Cinnabar 朱砂 ---- */
+  --zhu:       #B23A2B;
+  --zhu-deep:  #97301F;
+  --zhu-soft:  #EBD3CB;
+  --zhu-wash:  #F4E2DB;
+
+  /* ---- Dai 黛 ---- */
+  --dai:       #3E6152;
+  --dai-bright:#4A6B5C;
+  --dai-soft:  #D3DED6;
+  --dai-wash:  #E4ECE5;
+
+  /* ---- Gold 金 ---- */
+  --jin:       #A37D17;
+  --jin-deep:  #7E5F10;
+  --jin-soft:  #E9DEC2;
+  --jin-wash:  #F1EAD6;
+
+  /* ---- Qing 青 ---- */
+  --qing:      #3C5C68;
+  --qing-soft: #D5E0E2;
+
+  /* text-on */
+  --text-on-ink:  #F1EADB;
+  --text-on-zhu:  #F7ECE6;
+
+  /* families */
+  --font-serif: "Noto Serif SC", "Songti SC", "STSong", serif;
+  --font-sans:  "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono:  "JetBrains Mono", "SFMono-Regular", "Roboto Mono", monospace;
+}
+
+html, body { margin: 0; padding: 0; background: var(--paper-page); }
+body { font-family: var(--font-sans); color: var(--ink-1); -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+
+@keyframes glRise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@keyframes glFlow { to { stroke-dashoffset: -14; } }
+@keyframes glMigFlag { 0% { opacity: 0; transform: translate(-50%, 3px); } 12% { opacity: 1; } 82% { opacity: 1; } 100% { opacity: 0; transform: translate(-50%, -16px); } }
+
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: rgba(33,27,18,0.18); border-radius: 4px; }
+*::-webkit-scrollbar-track { background: transparent; }
+::selection { background: var(--zhu-soft); color: var(--ink-0); }
+
+/* 悬停抬升:替代设计稿 dc 运行时的 style-hover。用 data-hv 分级。 */
+[data-hv="node"]:hover { box-shadow: 2px 3px 0 rgba(33,27,18,0.16); transform: translateY(-1px); background: var(--paper-2) !important; }
+[data-hv="drv"]:hover  { background: var(--paper-2) !important; box-shadow: 1px 2px 0 rgba(33,27,18,0.10); }
+[data-hv="soft"]:hover { background: var(--paper-2) !important; }
+[data-hv="row"]:hover  { background: rgba(33,27,18,0.04) !important; }
+[data-hv="back"]:hover { background: var(--paper-2) !important; box-shadow: 1px 2px 0 rgba(33,27,18,0.10); }
+[data-hv="chip"]:hover { background: var(--paper-1) !important; color: var(--ink-0) !important; }
+[data-hv="zhu"]:hover  { background: var(--zhu) !important; color: var(--text-on-zhu) !important; }
