@@ -210,6 +210,18 @@ def build_factorlib_router(store: Optional[LibraryFactorStore] = None) -> APIRou
         """
         try:
             factors = store.list_factors(validate=validate)
+            # P4:draft 附前向 vintage(有值才附=诚实空态;失败静默不挡清单)
+            try:
+                from datetime import date as _d
+                from guanlan_v2.screen.factor_vintage import cs_vintage_asof
+                for f in factors:
+                    if f.get("status") == "draft":
+                        v = cs_vintage_asof(str(f.get("name")), _d.today().isoformat())
+                        if v:
+                            f["vintage"] = {"ic": v.get("ic"), "n": v.get("n"),
+                                            "asof": v.get("asof")}
+            except Exception:  # noqa: BLE001
+                pass
             return JSONResponse({"ok": True, "count": len(factors), "factors": factors})
         except Exception as exc:  # noqa: BLE001  —— 诚实失败,不退假数据
             return JSONResponse({"ok": False, "count": 0, "factors": [],

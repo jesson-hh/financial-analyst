@@ -847,10 +847,14 @@ def _research_run_line(run: Dict[str, Any]) -> str:
     ws = run.get("workflow_saved") or {}
     ric = bm.get("rank_ic")
     ric_s = f"{float(ric):+.4f}" if isinstance(ric, (int, float)) else "—"
-    if pr.get("status") == "draft":
-        verdict = f"达标 ✅ 已入 draft:{pr.get('name')}(待人审:ww_factor_promote 或选股页待审区转正)"
-    elif pr.get("status") == "skipped_multi":
-        verdict = "达标但为多因子合成,未自动入库(成分见 ww_research_runs run_id 详情)"
+    st = pr.get("status")
+    if st in ("draft", "draft_compose", "draft_model"):
+        kind = {"draft": "draft", "draft_compose": "组合 draft",
+                "draft_model": "模型 draft(工坊)"}[st]
+        verdict = (f"达标 ✅ 已入 {kind}:{pr.get('name')}"
+                   "(待人审:因子用 ww_factor_promote/选股页待审区;模型在工坊转正)")
+    elif st == "save_failed":
+        verdict = f"达标但入库失败:{pr.get('reason')}"
     elif run.get("error"):
         verdict = f"中断:{run.get('error')}"
     elif run.get("status") == "interrupted":

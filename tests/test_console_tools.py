@@ -1666,6 +1666,30 @@ def test_research_runs_impl_detail_strips_graph(monkeypatch):
     assert all("graph" not in r for r in res["raw"]["rounds"])        # graph 不进上下文
 
 
+def test_research_run_line_four_states():
+    """帷幄成绩单四态:draft_model/save_failed/error(空 promoted)/未达标(promoted 全无)。
+    save_failed 绝不能误显「未达标」(诚实红线)。"""
+    base = {"goal": "研究x", "n_rounds": 2, "best_k": 1,
+            "best_metrics": {"rank_ic": 0.03, "oos_verdict": "robust"}}
+
+    run_model = dict(base, promoted={"name": "m_rl_ab12cd_r1", "status": "draft_model"})
+    line = ct._research_run_line(run_model)
+    assert "模型 draft" in line and "工坊" in line
+
+    run_failed = dict(base, promoted={"name": None, "status": "save_failed",
+                                      "reason": "因子名已存在: lib_x"})
+    line = ct._research_run_line(run_failed)
+    assert "入库失败" in line and "未达标" not in line
+
+    run_error = dict(base, promoted={}, error="LLM 不可用: timeout")
+    line = ct._research_run_line(run_error)
+    assert "中断" in line and "LLM 不可用" in line
+
+    run_none = dict(base, promoted=None)
+    line = ct._research_run_line(run_none)
+    assert "未达标" in line
+
+
 # ── P3: ww_factor_drafts / ww_factor_promote ────────────────────────────────
 
 def test_factor_drafts_impl_lists_and_empty(monkeypatch):

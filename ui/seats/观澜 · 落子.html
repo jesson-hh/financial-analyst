@@ -35,7 +35,7 @@
 <body>
 <div id="root"></div>
 <script src="../_shared/guanlan-bus.js?v=4"></script>
-<script src="../_shared/guanlan-nav.js?v=2"></script>
+<script src="../_shared/guanlan-nav.js?v=3"></script>
 <script>
   // 观澜 后端开关 — 默认同源（本页由 guanlan_v2/server.py 在 9999 服务，同源即真后端引擎）。
   //   http(s) 打开（经薄壳服务）→ 连真 /seats/daily，K线显示 stock_data 真日K。
@@ -44,12 +44,12 @@
     (location.protocol === 'http:' || location.protocol === 'https:') ? location.origin : null;
 </script>
 <!-- 顺序：数据内核(纯JS,先) → 图表(声明 hooks) → 面板 → 舰队 → 主壳 -->
-<script type="text/babel" data-presets="env,react" src="luozi-data.jsx?v=20260702p3"></script>
+<script type="text/babel" data-presets="env,react" src="luozi-data.jsx?v=20260703p4"></script>
 <script type="text/babel" data-presets="env,react" src="luozi-chart.jsx?v=20260613m"></script>
-<script type="text/babel" data-presets="env,react" src="luozi-panels.jsx?v=20260702p3"></script>
+<script type="text/babel" data-presets="env,react" src="luozi-panels.jsx?v=20260703p4"></script>
 <script type="text/babel" data-presets="env,react" src="luozi-fleet.jsx?v=20260615j"></script>
 <script type="text/babel" data-presets="env,react" src="luozi-foundry.jsx?v=20260614i"></script>
-<script type="text/babel" data-presets="env,react" src="luozi-app.jsx?v=20260702p3"></script>
+<script type="text/babel" data-presets="env,react" src="luozi-app.jsx?v=20260703p4"></script>
 <script type="text/babel" data-presets="env,react">
   ReactDOM.createRoot(document.getElementById('root')).render(<LuoziApp />);
 </script>

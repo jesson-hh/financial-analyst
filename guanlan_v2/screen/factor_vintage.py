@@ -27,9 +27,26 @@ def _realized_map(uniq_dates, horizon: int) -> dict:
     return out
 
 
+def _sweep_items():
+    """vintage 扫描面 = 选股目录 FACTOR_DEFS + factorlib 待审 draft(P4:度量不上架——
+    draft 仍不进选股目录,但前向真实表现从出生起就有档可查)。"""
+    from guanlan_v2.screen.catalog import FACTOR_DEFS
+    items = list(FACTOR_DEFS.items())
+    have = {str(k) for k, _ in items}
+    try:
+        from guanlan_v2.factorlib.store import LibraryFactorStore
+        for f in LibraryFactorStore().list_factors(validate=False):
+            nm, expr = str(f.get("name") or ""), f.get("expr")
+            if f.get("status") == "draft" and expr and nm and nm not in have:
+                items.append((nm, {"expr": expr, "family": "draft"}))
+    except Exception:  # noqa: BLE001 — draft 并入失败不挡正式因子 vintage
+        pass
+    return items
+
+
 def compute_factor_vintage(universe: str = "csi300", years: float = 2.0, horizon: int = 5,
                            end: Optional[str] = None, pool_codes=None) -> dict:
-    """全 catalog 逐日截面 vintage IC + pool×factorlib tsic → 两 parquet。
+    """全 catalog(+ factorlib draft)逐日截面 vintage IC + pool×factorlib tsic → 两 parquet。
     返回 {cs_rows, tsic_rows}。一次面板加载 + 一遍因子编译同产两表。"""
     import pandas as pd
     from datetime import date, timedelta
@@ -62,7 +79,7 @@ def compute_factor_vintage(universe: str = "csi300", years: float = 2.0, horizon
               if "库" in str(m.get("family", "")) or str(fid).startswith("lib_")}
 
     cs_rows, tsic_rows = [], []
-    for fid, meta in FACTOR_DEFS.items():
+    for fid, meta in _sweep_items():
         expr = meta.get("expr")
         if not expr:
             continue

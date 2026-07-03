@@ -1269,28 +1269,6 @@ async function runDecisions(runId) {
     return j.decisions.slice().reverse();   // 后端逆序(最新在前)→ 时间正序,方便上图
   } catch (e) { return []; }
 }
-// ── P3 研究回路档案(落子右栏「研究回路」卡数据源)──────────────────────
-// runs=合并行(status 四态后端推导);rounds 每行带完整 graph(工作流DAG,很重)——
-// 拉回即剔、绝不入 state(仓例:console 工具同款处理);新在前 → 转时间正序供渲染。
-async function researchRuns(limit) {
-  const API = (window.GUANLAN_BACKEND || ''); if (!API) return null;
-  try {
-    const res = await fetch(API + '/research/runs?limit=' + (limit || 20));
-    if (!res.ok) return null;
-    const j = await res.json();
-    return j.ok ? (j.runs || []) : null;
-  } catch (e) { return null; }
-}
-async function researchRounds(runId) {
-  const API = (window.GUANLAN_BACKEND || ''); if (!API) return [];
-  try {
-    const res = await fetch(API + '/research/rounds?run_id=' + encodeURIComponent(runId) + '&limit=50');
-    if (!res.ok) return [];
-    const j = await res.json();
-    if (!j.ok) return [];
-    return (j.rounds || []).map(r => { const { graph, ...rest } = r; return rest; }).slice().reverse();
-  } catch (e) { return []; }
-}
 async function ledgerState() {
   const API = (window.GUANLAN_BACKEND || '');
   if (!API) return null;
@@ -1624,7 +1602,6 @@ Object.assign(window, {
   lzBuildTriggerCtx: buildTriggerCtx, lzEvalTrigger: evalTrigger,
   lzRunTriggerReplay: runTriggerReplay, lzRsiOf: rsiOf, lzSeatOrder: seatOrder, lzFetchLiveEval: fetchLiveEval,
   lzRunsList: runsList, lzRunDecisions: runDecisions, lzLedgerState: ledgerState, lzLedgerPost: ledgerPost, lzSeatsTca: seatsTca, lzRunId: runIdGen, lzRunsClear: runsClear, lzRunBacktest: runBacktest,
-  lzResearchRuns: researchRuns, lzResearchRounds: researchRounds,
   lzBars30: bars30, lzMapDecsToFrame: mapDecsToFrame,
   lzShadowLoad: shadowLoad, lzShadowSave: shadowSave, lzShadowAddEntry: shadowAddEntry,
   lzShadowCheckExits: shadowCheckExits, lzShadowMetrics: shadowMetrics, lzShadowClose: shadowClose,

@@ -290,6 +290,40 @@ def test_product_route_model_channel(monkeypatch, tmp_path):
     assert sp["recipe"]["universe"] == "csi300_active"                       # run 参数权威
 
 
+def test_product_route_ml_beats_compose(monkeypatch, tmp_path):
+    """回归(上任务评审 Minor):图同时含 ML 子图(xgb + feature/formula 上游)与第二条
+    独立 formula(≥2 表达式凑够 compose 门槛)→ 仍须走模型通道,组合通道绝不触发。"""
+    _wire(monkeypatch, tmp_path, evals=[])
+    gml = {"nodes": [
+        {"id": "f", "type": "formula", "params": {"expr": "rank(close)"}},
+        {"id": "fe", "type": "feature", "params": {"tag": "IC"}},
+        {"id": "m", "type": "xgb", "params": {"trees": 200, "depth": 4}},
+        {"id": "mf", "type": "mf", "params": {}},
+        {"id": "an", "type": "analysis", "params": {}},
+        {"id": "f2", "type": "formula", "params": {"expr": "rank(open)"}},   # 独立第二条表达式
+    ], "edges": [{"from": ["f", "out"], "to": ["fe", "feat"]},
+                 {"from": ["fe", "fe"], "to": ["m", "fe"]},
+                 {"from": ["m", "model"], "to": ["mf", "m1"]},
+                 {"from": ["mf", "factor"], "to": ["an", "factor"]}]}
+    monkeypatch.setattr(rl, "_call_generate", lambda goal: {"ok": True, "graph": gml})
+    monkeypatch.setattr(rl, "_run_graph_eval",
+                        lambda graph, p, pr, k, mr: _ex_ok(exprs=("rank(close)", "rank(open)"),
+                                                           has_ml=True))
+    train_calls = []
+    monkeypatch.setattr(rl, "_call_train_promote",
+                        lambda spec: train_calls.append(spec) or
+                        {"ok": True, "variant_id": spec["variant_id"], "status": "draft"})
+
+    def _fail_compose(*a, **kw):
+        raise AssertionError("组合通道不应被触发(ML 图须优先路由模型通道)")
+
+    monkeypatch.setattr(rl, "_save_compose_expr", _fail_compose)
+    end = rl.run_research_loop("rr_t14b", "ML找因子", 3, 0.02, "csi300_active", "month",
+                               None, None, progress=lambda **kw: None)
+    assert end["promoted"]["status"] == "draft_model"
+    assert len(train_calls) == 1 and train_calls[0]["kind"] == "xgboost"
+
+
 def test_product_route_model_save_failed_honest(monkeypatch, tmp_path):
     lessons, _, _ = _wire(monkeypatch, tmp_path, evals=[])
     gml = {"nodes": [{"id": "f", "type": "formula", "params": {"expr": "rank(close)"}},

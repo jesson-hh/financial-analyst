@@ -79,3 +79,35 @@ def test_catalog_excludes_draft(monkeypatch, tmp_path):
     defs = cat._build()
     assert "lib_ok_y" in defs                                        # 正式因子照常上目录
     assert "lib_draft_x" not in defs                                 # draft 不上选股货架(红线)
+
+
+def test_vintage_sweep_includes_drafts(monkeypatch):
+    """P4:vintage 扫描面 = FACTOR_DEFS + factorlib draft(度量不上架)。"""
+    import guanlan_v2.screen.factor_vintage as fv
+
+    class _S:
+        def list_factors(self, validate=True):
+            return [{"name": "lib_rl_x_r0", "expr": "rank(close)", "status": "draft"},
+                    {"name": "lib_ok", "expr": "rank(open)"}]          # 非 draft 不并入
+
+    monkeypatch.setattr("guanlan_v2.screen.catalog.FACTOR_DEFS",
+                        {"mom20": {"expr": "rank(mom_20)", "family": "动量"}})
+    monkeypatch.setattr("guanlan_v2.factorlib.store.LibraryFactorStore", lambda: _S())
+    ids = [i[0] for i in fv._sweep_items()]
+    assert "mom20" in ids and "lib_rl_x_r0" in ids and "lib_ok" not in ids
+
+
+def test_factorlib_list_attaches_vintage_for_drafts(monkeypatch, tmp_path):
+    st = _store(tmp_path)
+    client = _client(st)
+    client.post("/factorlib/save", json={"name": "lib_d1", "expr": "rank(close)",
+                                         "status": "draft"})
+    client.post("/factorlib/save", json={"name": "lib_p1", "expr": "rank(open)"})
+    monkeypatch.setattr("guanlan_v2.screen.factor_vintage.cs_vintage_asof",
+                        lambda fid, d, **kw: ({"ic": 0.021, "n": 40, "dir": 1,
+                                               "asof": "2026-07-02"}
+                                              if fid == "lib_d1" else None))
+    j = client.get("/factorlib/list?validate=false").json()
+    by = {f["name"]: f for f in j["factors"]}
+    assert by["lib_d1"]["vintage"] == {"ic": 0.021, "n": 40, "asof": "2026-07-02"}
+    assert "vintage" not in by["lib_p1"]        # 只给 draft 附;无值不附(诚实空态)
