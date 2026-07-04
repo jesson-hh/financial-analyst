@@ -838,7 +838,10 @@ function mapNewsToFrame(items, fbars, keyword) {
   const matches = (t) => kw.length > 0 && kw.some(k => (t || '').indexOf(k) >= 0);
   const byIdx = {};
   items.forEach(it => {
-    const idx = locate(String(it.ts || it.date || ''));
+    let idx = locate(String(it.ts || it.date || ''));
+    // 周末/节假日 ts 无对应 bar(如周六快讯)→ 回退 pit_store 的 date(可见交易日,周末新闻滚进周一)。
+    //   PIT 安全:date≥ts 日,新闻只会标在其发生**之后**的首个交易 bar,绝不前置。真机实测缺此回退丢 46% 条目。
+    if (idx < 0) idx = locate(String(it.date || '').slice(0, 10));
     if (idx < 0) return;
     (byIdx[idx] || (byIdx[idx] = [])).push(it);
   });
