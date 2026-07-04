@@ -200,3 +200,147 @@ def v4_pool(top_n: int) -> List[dict]:
         raise RescoreError("v4 榜列缺失(code/pct)")
     df = df.sort_values("pct", ascending=False).head(int(top_n))
     return [{"code": str(r[codecol]), "v4pct": float(r["pct"])} for _, r in df.iterrows()]
+
+
+# ── run 主体 + 档案 ───────────────────────────────────────────────────────
+
+def append_run(row: Dict[str, Any]) -> bool:
+    try:
+        RUNS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(RUNS_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def read_latest() -> Optional[Dict[str, Any]]:
+    try:
+        last = None
+        with open(RUNS_PATH, encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    last = line
+        return json.loads(last) if last else None
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def run_rescore(run_id: str, top_n: int, note: str, progress) -> Dict[str, Any]:
+    """再打分主体(daemon 线程内):池→产业链分→情绪分→综合→落档。展示型,零信号回写。"""
+    try:
+        progress(phase="pool", label=f"① 取 v4 榜前 {top_n}…")
+        pool = v4_pool(top_n)
+        codes = [r["code"] for r in pool]
+        progress(phase="industry", label="② 产业链分(board 读数)…")
+        ind, fresh = industry_scores(codes)
+        progress(phase="news", label=f"③ 情绪分(LLM 整批,{len(codes)} 票)…")
+        news, nstats = news_scores(codes, top_n=top_n)
+        rows = []
+        for r in pool:
+            c = r["code"]
+            ch = ind.get(c)
+            nw = news.get(c)
+            comp = composite_score(r.get("v4pct"),
+                                   (ch or {}).get("chain") if ch else None,
+                                   (nw or {}).get("score") if nw else None)
+            rows.append({"code": c, "v4pct": r.get("v4pct"), "chain": ch, "news": nw,
+                         "composite": comp["score"], "parts": comp["parts"]})
+        end = {"run_id": run_id, "ts": _now(), "note": note, "top_n": top_n,
+               "ok": True, "error": None, "rows": rows,
+               "stats": dict(nstats, board_freshness=fresh)}
+    except RescoreError as exc:
+        end = {"run_id": run_id, "ts": _now(), "note": note, "top_n": top_n,
+               "ok": False, "error": str(exc), "rows": [], "stats": {}}
+    except Exception as exc:  # noqa: BLE001
+        end = {"run_id": run_id, "ts": _now(), "note": note, "top_n": top_n,
+               "ok": False, "error": f"{type(exc).__name__}: {exc}", "rows": [], "stats": {}}
+    append_run(end)
+    return end
+
+
+# ── 单飞状态机 + 路由(照 research/api.py 范式:锁不嵌套/finally 必清 running)──
+
+import threading as _threading
+import time as _time
+
+from fastapi import APIRouter
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+_RESCORE_LOCK = _threading.Lock()
+_RESCORE_STATE: Dict[str, Any] = {
+    "running": False, "phase": "idle", "label": "", "run_id": None,
+    "started_at": None, "ended_at": None, "ok": None, "error": None, "lines": []}
+
+
+def _rescore_public_state() -> Dict[str, Any]:
+    with _RESCORE_LOCK:
+        s = dict(_RESCORE_STATE)
+        s["lines"] = list(s.get("lines") or [])[-12:]
+    if s.get("started_at"):
+        s["elapsed_sec"] = int((s.get("ended_at") or _time.time()) - s["started_at"])
+    return s
+
+
+def _progress(**kw: Any) -> None:
+    with _RESCORE_LOCK:
+        for k, v in kw.items():
+            if k in ("phase", "label"):
+                _RESCORE_STATE[k] = v
+        if kw.get("label"):
+            _RESCORE_STATE["lines"].append(str(kw["label"]))
+            _RESCORE_STATE["lines"] = _RESCORE_STATE["lines"][-40:]
+
+
+class RescoreIn(BaseModel):
+    """``POST /screen/rescore`` 入参(钳制在端点内做,服务端权威)。"""
+
+    top_n: int = 50
+    note: str = ""
+
+
+def _run_thread(run_id: str, top_n: int, note: str) -> None:
+    err = None
+    end: Dict[str, Any] = {}
+    try:
+        end = run_rescore(run_id, top_n=top_n, note=note, progress=_progress)
+    except Exception as exc:  # noqa: BLE001
+        err = f"{type(exc).__name__}: {exc}"
+    finally:
+        ok = err is None and bool(end.get("ok"))
+        with _RESCORE_LOCK:
+            _RESCORE_STATE.update(running=False, ended_at=_time.time(), ok=ok,
+                                  phase=("done" if ok else "error"),
+                                  error=(err or end.get("error")))
+
+
+def build_rescore_router() -> APIRouter:
+    """再打分路由组(/screen/rescore*;展示型,无开关无定时器无子进程)。"""
+    router = APIRouter(tags=["rescore"])
+
+    @router.post("/screen/rescore")
+    def rescore_start(body: RescoreIn):
+        top_n = max(5, min(int(body.top_n or 50), 100))
+        run_id = new_run_id()
+        with _RESCORE_LOCK:
+            if _RESCORE_STATE.get("running"):
+                return JSONResponse({"ok": False, "reason": "already_running",
+                                     "state": _rescore_public_state()})
+            _RESCORE_STATE.update(running=True, phase="starting", label="启动再打分…",
+                                  run_id=run_id, started_at=_time.time(), ended_at=None,
+                                  ok=None, error=None, lines=[])
+        _threading.Thread(target=lambda: _run_thread(run_id, top_n, (body.note or "").strip()),
+                          name="rescore", daemon=True).start()
+        return JSONResponse({"ok": True, "started": True, "run_id": run_id,
+                             "state": _rescore_public_state()})
+
+    @router.get("/screen/rescore/status")
+    def rescore_status():
+        return JSONResponse({"ok": True, "state": _rescore_public_state()})
+
+    @router.get("/screen/rescore/latest")
+    def rescore_latest():
+        return JSONResponse({"ok": True, "run": read_latest()})
+
+    return router

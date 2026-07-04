@@ -111,3 +111,24 @@ def test_v4_pool_reads_parquet(monkeypatch, tmp_path):
     monkeypatch.setattr(rs, "_v4_ranking_path", lambda: tmp_path / "missing.parquet")
     with pytest.raises(rs.RescoreError):
         rs.v4_pool(2)
+
+
+def test_industry_scores_seg_no_signal_none(monkeypatch):
+    """环存在但 research/therm 双 None → 该票 None"""
+    board = {"ok": True, "freshness": {}, "segments": [
+        {"id": "A9", "name": "空环", "display_name": "空环", "adjacent": False,
+         "research": {"score": None}, "therm": None, "quadrant": "ll"}]}
+    monkeypatch.setattr(rs, "_load_board", lambda: board)
+    monkeypatch.setattr(rs, "_load_framework_segments",
+                        lambda: [{"id": "A9", "stocks": [{"code": "SH000009"}]}])
+    out, _ = rs.industry_scores(["SH000009"])
+    assert out["SH000009"] is None      # 挂正常环但环无信号 → None
+
+
+def test_v4_pool_ts_code_fallback(monkeypatch, tmp_path):
+    """ts_code 列回退"""
+    import pandas as pd
+    p = tmp_path / "v4b.parquet"
+    pd.DataFrame({"ts_code": ["SH7", "SH8"], "pct": [5.0, 90.0]}).to_parquet(p)
+    monkeypatch.setattr(rs, "_v4_ranking_path", lambda: p)
+    assert [r["code"] for r in rs.v4_pool(1)] == ["SH8"]

@@ -236,6 +236,11 @@ def create_app():
 
     app.include_router(build_research_router())
 
+    # ── P5:选股池再打分(产业链分+情绪分+综合;展示型,零信号回写)─────────────
+    from guanlan_v2.screen.rescore import build_rescore_router
+
+    app.include_router(build_rescore_router())
+
     # guanlan 自有大盘状态刷新(market):POST /market_status/refresh —— 后台线程重生成
     # 仓内 data/market_status.json(guanlan_v2/strategy/market_status.py 原生生成器,
     # 直读引擎 day 二进制现算 regime/涨停/主线,不依赖 qlib/fa-watch-wt)。读仍走引擎
