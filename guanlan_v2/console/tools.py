@@ -13,6 +13,7 @@ import logging
 import os
 import re as _re
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -948,6 +949,88 @@ def research_runs_impl(run_id: str = "", limit: int = 10) -> Dict[str, Any]:
                     f"{r.get('run_id')} [{r.get('status')}] {_research_run_line(r)}" for r in runs)}
     except Exception as e:
         return {"ok": False, "content": f"研究档案读取失败: {e}", "artifact": None}
+
+
+# ── P5 Task 3:选股池再打分(产业链+新闻情绪展示型再打分,绝不改选股信号)──────
+
+def _rescore_lines(run: Optional[Dict[str, Any]]) -> str:
+    """再打分成绩单人话(展示型红线逐行入回话,绝不暗示改了选股信号)。"""
+    if run is None:
+        return "无再打分档案(先在选股页点「再打分」或调 ww_rescore)"
+    if not run.get("ok"):
+        return f"上次再打分失败: {run.get('error')}"
+    ts = str(run.get("ts") or "")[:16]
+    lines = [f"再打分 {run.get('run_id')} · top{run.get('top_n')} · {ts}(展示参考,不改选股信号)"]
+    for r in (run.get("rows") or [])[:10]:
+        code = r.get("code")
+        v4pct = r.get("v4pct")
+        v4_s = f"{float(v4pct):.0f}" if isinstance(v4pct, (int, float)) else "—"
+        ch = r.get("chain")
+        if isinstance(ch, dict):
+            seg_s = f"{ch.get('seg_name')} {float(ch.get('chain')):+.2f}" \
+                if isinstance(ch.get("chain"), (int, float)) else str(ch.get("seg_name") or "—")
+        else:
+            seg_s = "链—"
+        nw = r.get("news")
+        news_s = str(nw.get("tag")) if isinstance(nw, dict) and nw.get("tag") else "闻—"
+        comp = r.get("composite")
+        comp_s = f"{float(comp):+.2f}" if isinstance(comp, (int, float)) else "—"
+        lines.append(f"{code} v4 {v4_s} | {seg_s} | {news_s} | 综 {comp_s}({r.get('parts')}/3)")
+    stats = run.get("stats") or {}
+    fresh = stats.get("board_freshness") or {}
+    lines.append(f"LLM调用 {stats.get('llm_calls', 0)} · 缓存命中 {stats.get('cache_hits', 0)} · "
+                 f"board行情日 {fresh.get('quote_date') or '—'}")
+    if stats.get("news_fail"):
+        lines.append(f"情绪批次失败: {stats.get('news_fail')}")
+    return "\n".join(lines)
+
+
+def rescore_impl(top_n: int = 50, note: str = "") -> Dict[str, Any]:
+    """发起选股池再打分(展示型:产业链分+新闻情绪分综合,绝不回写选股信号);发起+轮询≤120s。"""
+    try:
+        r = _self_post("/screen/rescore", {"top_n": int(top_n or 50), "note": note or ""})
+    except Exception as e:
+        return {"ok": False, "content": f"再打分启动失败: {e}", "artifact": None}
+    if not r.get("ok"):
+        if r.get("reason") == "already_running":
+            st = r.get("state") or {}
+            return {"ok": False, "artifact": None, "raw": r,
+                    "content": f"再打分已在跑(already_running):{st.get('phase')} {st.get('label') or ''}"
+                               f"。稍后 ww_rescore_view 查看。"}
+        return {"ok": False, "content": f"再打分未启动: {r.get('reason')}", "artifact": None, "raw": r}
+    deadline = time.time() + 120.0
+    done = False
+    state: Dict[str, Any] = {}
+    while time.time() <= deadline:
+        try:
+            s = _self_get("/screen/rescore/status")
+        except Exception as e:
+            return {"ok": False, "content": f"再打分状态读取失败: {e}", "artifact": None}
+        state = s.get("state") or {}
+        if not state.get("running") and state.get("phase") in ("done", "error"):
+            done = True
+            break
+        time.sleep(3)
+    if not done:
+        return {"ok": False, "artifact": None, "raw": {"state": state},
+                "content": "再打分仍在跑,稍后用 ww_rescore_view 查看。"}
+    try:
+        rr = _self_get("/screen/rescore/latest")
+    except Exception as e:
+        return {"ok": False, "content": f"再打分档案读取失败: {e}", "artifact": None}
+    run = rr.get("run")
+    return {"ok": bool(run and run.get("ok")), "artifact": None, "raw": {"run": run},
+            "content": _rescore_lines(run)}
+
+
+def rescore_view_impl() -> Dict[str, Any]:
+    """只读查最近一次再打分成绩单(不发起新 run)。"""
+    try:
+        rr = _self_get("/screen/rescore/latest")
+    except Exception as e:
+        return {"ok": False, "content": f"再打分档案读取失败: {e}", "artifact": None}
+    run = rr.get("run")
+    return {"ok": True, "artifact": None, "raw": {"run": run}, "content": _rescore_lines(run)}
 
 
 def seats_decide_impl(code: str, name: str = "", creed: str = "",
@@ -2094,6 +2177,22 @@ WW_TOOL_TABLE = [
       "required": ["name"]},
      "impl": factor_promote_impl, "cost": "seconds", "confirm": True,
      "reachable": ["/factorlib/promote"]},
+    {"name": "ww_rescore",
+     "description":
+         "选股池再打分(P5):产业链分(board 链环读数)+ 新闻情绪分(LLM 整批)综合成展示分,"
+         "产业链+新闻情绪展示型再打分,绝不改选股信号(v4/picks/blend 全不动)。花 LLM 钱+耗时数分钟,需确认。",
+     "input_schema": {"type": "object", "properties": {
+         "top_n": {"type": "integer", "default": 50, "description": "取 v4 榜前 N 只(服务端钳 5-100)"},
+         "note": {"type": "string", "description": "可选备注"}}},
+     "impl": rescore_impl, "cost": "minutes", "confirm": True,
+     "reachable": ["/screen/rescore", "/screen/rescore/status", "/screen/rescore/latest"]},
+    {"name": "ww_rescore_view",
+     "description":
+         "查最近一次选股池再打分成绩单(只读,不发起新 run):逐票链环+情绪读数+综合分。"
+         "用户问『再打分结果/某票为何值得关注』先用它看有没有现成档案。",
+     "input_schema": {"type": "object", "properties": {}},
+     "impl": rescore_view_impl, "cost": "instant", "confirm": False,
+     "reachable": ["/screen/rescore/latest"]},
     {"name": "ww_capabilities",
      "description":
          "列出我(帷幄)当前能调用的全部工具及用途。用户问『你能做什么/有哪些功能/会用什么工具』,或我不确定该用哪个工具时,先调它自查。",
