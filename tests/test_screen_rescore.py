@@ -104,10 +104,11 @@ def test_composite_parts():
 def test_v4_pool_reads_parquet(monkeypatch, tmp_path):
     import pandas as pd
     p = tmp_path / "v4.parquet"
-    pd.DataFrame({"code": ["SH1", "SH2", "SH3"], "pct": [10.0, 99.0, 50.0]}).to_parquet(p)
+    pd.DataFrame({"code": ["SH1", "SH2", "SH3"], "lgb_pct": [0.10, 0.99, 0.50]}).to_parquet(p)
     monkeypatch.setattr(rs, "_v4_ranking_path", lambda: p)
     pool = rs.v4_pool(2)
-    assert [r["code"] for r in pool] == ["SH2", "SH3"]   # pct 降序前 2
+    assert [r["code"] for r in pool] == ["SH2", "SH3"]   # lgb_pct 降序前 2
+    assert pool[0]["v4pct"] == 99.0   # 0-1 → 0-100 归一
     monkeypatch.setattr(rs, "_v4_ranking_path", lambda: tmp_path / "missing.parquet")
     with pytest.raises(rs.RescoreError):
         rs.v4_pool(2)
@@ -125,10 +126,20 @@ def test_industry_scores_seg_no_signal_none(monkeypatch):
     assert out["SH000009"] is None      # 挂正常环但环无信号 → None
 
 
+def test_v4_pool_pct_column_compat(monkeypatch, tmp_path):
+    """旧列名 pct (0-100) 兼容"""
+    import pandas as pd
+    p = tmp_path / "v4_old.parquet"
+    pd.DataFrame({"code": ["SH1"], "pct": [88.0]}).to_parquet(p)
+    monkeypatch.setattr(rs, "_v4_ranking_path", lambda: p)
+    pool = rs.v4_pool(1)
+    assert pool[0]["v4pct"] == 88.0   # 0-100 原样
+
+
 def test_v4_pool_ts_code_fallback(monkeypatch, tmp_path):
     """ts_code 列回退"""
     import pandas as pd
     p = tmp_path / "v4b.parquet"
-    pd.DataFrame({"ts_code": ["SH7", "SH8"], "pct": [5.0, 90.0]}).to_parquet(p)
+    pd.DataFrame({"ts_code": ["SH7", "SH8"], "lgb_pct": [0.05, 0.90]}).to_parquet(p)
     monkeypatch.setattr(rs, "_v4_ranking_path", lambda: p)
     assert [r["code"] for r in rs.v4_pool(1)] == ["SH8"]
