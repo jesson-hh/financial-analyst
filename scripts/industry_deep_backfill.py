@@ -43,23 +43,23 @@ def _load_secrets() -> None:
             os.environ[k.strip()] = v.strip()
 
 
-async def _main(backfill_days: int, concurrency: int, chunk: int) -> int:
+async def _main(backfill_days: int, concurrency: int, chunk: int, fw_id: str = "ai_chain") -> int:
     from guanlan_v2.industry import corpus, ingest, store
     from guanlan_v2.industry.framework import all_pool_codes, load_framework
     from financial_analyst.llm.client import LLMClient
 
     os.environ["GL_INGEST_CONCURRENCY"] = str(concurrency)   # ingest._run_batch 读它
-    fw = load_framework()
+    fw = load_framework(fw=fw_id)
     ccfg = (fw.get("meta") or {}).get("corpus") or {}
     client = LLMClient.for_agent("industry_extract", config_path=_REPO / "config" / "llm.yaml")
-    print(f"[deep-backfill] provider={client.provider} model={client.model} "
+    print(f"[deep-backfill] fw={fw_id} provider={client.provider} model={client.model} "
           f"days={backfill_days} conc={concurrency} chunk={chunk}", flush=True)
 
     grand = {"ok": 0, "fail": 0, "pt": 0, "ct": 0}
     perm_fail: set = set()   # 本次运行内失败的 doc_id:不再重试,防 content_filter 类永败篇死循环
     t0 = time.time()
     while True:
-        done_ids = store.load_extracted_doc_ids()
+        done_ids = store.load_extracted_doc_ids(fw_id)
         scan = corpus.scan_new_docs(None, all_pool_codes(fw), [], limit=chunk,
                                     exclude_doc_ids=done_ids | perm_fail,
                                     seed=ccfg.get("seed"), themes=ccfg.get("themes"),
@@ -95,13 +95,13 @@ async def _main(backfill_days: int, concurrency: int, chunk: int) -> int:
               f"fail={grand['fail']} | {rate:.1f}篇/分 | tokens {grand['pt']}/{grand['ct']}", flush=True)
 
     # 收官:把 token/篇数记进 server 可见的 state totals(单写者约定下低撞险)
-    st = store.load_state()
+    st = store.load_state(fw_id)
     st["totals"]["docs"] += grand["ok"]
     st["totals"]["prompt_tokens"] += grand["pt"]
     st["totals"]["completion_tokens"] += grand["ct"]
     import pandas as pd
     st["last_ingest_at"] = pd.Timestamp.now().isoformat(timespec="seconds")
-    store.save_state(st)
+    store.save_state(st, fw_id)
     print(f"[deep-backfill] DONE ok={grand['ok']} fail={grand['fail']} "
           f"tokens={grand['pt']}/{grand['ct']} elapsed={(time.time()-t0)/3600:.1f}h", flush=True)
     return 0 if grand["fail"] == 0 else 1
@@ -113,5 +113,6 @@ if __name__ == "__main__":
     ap.add_argument("--backfill-days", type=int, default=1200)
     ap.add_argument("--concurrency", type=int, default=8)
     ap.add_argument("--chunk", type=int, default=40)
+    ap.add_argument("--fw", type=str, default="ai_chain", help="框架 id(ai_chain/robot_chain)")
     a = ap.parse_args()
-    raise SystemExit(asyncio.run(_main(a.backfill_days, a.concurrency, a.chunk)))
+    raise SystemExit(asyncio.run(_main(a.backfill_days, a.concurrency, a.chunk, a.fw)))
