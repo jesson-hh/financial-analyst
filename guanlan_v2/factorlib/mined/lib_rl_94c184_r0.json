@@ -1,0 +1,24 @@
+[
+  {
+    "name": "lib_rl_94c184_r0",
+    "family": "library_mined",
+    "expr": "-correlation(rank(close), rank(volume), 10)",
+    "description": "研究回路产出:在沪深300活跃股里,构造一个量价背离的选股因子,并检验它的截面选股能力 · 初始生成(LLM propose)",
+    "source": "research_loop",
+    "meta": {
+      "metrics": {
+        "rank_ic": 0.020227361829528098,
+        "sharpe": -1.2948104558885463,
+        "ann_return": -0.14951378988129793,
+        "oos_verdict": "robust",
+        "n_dates": 13,
+        "factor": "-correlation(rank(close), rank(volume), 10)"
+      },
+      "run_id": "rr_ca8194c184",
+      "round": 0
+    },
+    "status": "draft",
+    "saved_at": "2026-07-03T14:00:43",
+    "id": "e50f55692c554ed3b98d9bc4f48dbe50"
+  }
+]

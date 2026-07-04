@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """P5 再打分端点+状态机单测:裸 FastAPI 挂 router;run 主体打桩。零网络。"""
+import threading
 import time
 
 from fastapi import FastAPI
@@ -86,3 +87,29 @@ def test_endpoint_latest_empty_honest(monkeypatch, tmp_path):
     monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "none.jsonl")
     j = _client().get("/screen/rescore/latest").json()
     assert j["ok"] is True and j["run"] is None
+
+
+def test_endpoint_already_running_no_deadlock(monkeypatch, tmp_path):
+    """running 期间第二个 POST 必须秒回 already_running(评审复现过的死锁回归)。"""
+    _reset(monkeypatch)
+    monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "runs.jsonl")
+    release = threading.Event()
+
+    def slow_run(run_id, top_n, note, progress):
+        release.wait(timeout=5)
+        return {"ok": True, "run_id": run_id, "rows": [], "stats": {}}
+
+    monkeypatch.setattr(rs, "run_rescore", slow_run)
+    c = _client()
+    j1 = c.post("/screen/rescore", json={"top_n": 5}).json()
+    assert j1["ok"] is True
+    t0 = time.time()
+    j2 = c.post("/screen/rescore", json={"top_n": 5}).json()
+    assert time.time() - t0 < 2.0                     # 不卡死
+    assert j2["ok"] is False and j2["reason"] == "already_running" and "state" in j2
+    release.set()
+    for _ in range(100):
+        time.sleep(0.02)
+        if not rs._rescore_public_state()["running"]:
+            break
+    assert rs._rescore_public_state()["phase"] == "done"

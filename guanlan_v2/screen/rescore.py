@@ -324,12 +324,14 @@ def build_rescore_router() -> APIRouter:
         top_n = max(5, min(int(body.top_n or 50), 100))
         run_id = new_run_id()
         with _RESCORE_LOCK:
-            if _RESCORE_STATE.get("running"):
-                return JSONResponse({"ok": False, "reason": "already_running",
-                                     "state": _rescore_public_state()})
-            _RESCORE_STATE.update(running=True, phase="starting", label="启动再打分…",
-                                  run_id=run_id, started_at=_time.time(), ended_at=None,
-                                  ok=None, error=None, lines=[])
+            busy = bool(_RESCORE_STATE.get("running"))
+            if not busy:
+                _RESCORE_STATE.update(running=True, phase="starting", label="启动再打分…",
+                                      run_id=run_id, started_at=_time.time(), ended_at=None,
+                                      ok=None, error=None, lines=[])
+        if busy:                                    # 锁外读状态(锁不可重入,绝不嵌套)
+            return JSONResponse({"ok": False, "reason": "already_running",
+                                 "state": _rescore_public_state()})
         _threading.Thread(target=lambda: _run_thread(run_id, top_n, (body.note or "").strip()),
                           name="rescore", daemon=True).start()
         return JSONResponse({"ok": True, "started": True, "run_id": run_id,
