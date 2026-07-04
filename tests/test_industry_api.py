@@ -66,16 +66,24 @@ def test_segment_and_doc_detail(tmp_path, monkeypatch):
 
 def test_ingest_endpoints(tmp_path, monkeypatch):
     _seed_store(tmp_path, monkeypatch)
+    # 语料断供必须显式构造:不设 GL_CHAIN_SEED 时真种子包在场,client=None 会走真 kimi
+    # → worker 泄漏拖 _running=True 毒害后续 ingest 测试 + 每次全量烧真钱(2026-07-03 实证)
+    monkeypatch.setenv("GL_CHAIN_SEED", str(tmp_path / "no-seed.parquet"))
     c = _app()
     st = c.get("/industry/ingest_state").json()
     assert "watermark" in st and "running" in st
     r = c.post("/industry/ingest", content=json.dumps({"limit": 1}),
                headers={"Content-Type": "application/json"}).json()
     assert r["ok"] is True and "accepted" in r
-    # 等 worker 结束(语料断供,应快速落 failed_docs 而非崩)
+    # 等 worker 结束(语料断供,应快速落 failed_docs 而非崩);结束是硬断言,不许泄漏
     import time
     from guanlan_v2.industry import ingest as ing
-    for _ in range(100):
+    done = False
+    for _ in range(200):
         if not ing.ingest_state()["running"]:
+            done = True
             break
         time.sleep(0.05)
+    assert done, "ingest worker 泄漏:10s 未收尾(_running 拖 True 会毒害后续测试)"
+    st2 = ing.ingest_state()
+    assert st2["failed_docs"] and "语料库不可读" in str(st2["failed_docs"][0].get("reason"))

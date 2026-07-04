@@ -34,17 +34,22 @@ _CATALYSTS = {"订单", "涨价", "扩产", "技术突破", "政策", "业绩", 
 _GLOBAL_FIELDS = {"国产化率", "份额", "技术差距", "认证"}
 _VERDICTS = {"支持", "否证"}
 
-_SYSTEM = (
-    "你是 A 股行业研究抽取器。只依据给定研报原文抽取,禁止编造原文没有的数字/事件。"
-    "只输出 JSON(无多余文字)。segments/edges/narratives 等核心字段的 id 必须取自给定框架白名单;"
-    "quote 字段必须是原文的连续子串;研报与 AI 产业链无关时输出 {\"segments\": []}。"
-    "重要:若研报包含框架白名单未覆盖、但对 AI 产业链投研重要的信息"
-    "(新环节/新传导关系/新叙事/环节全球坐标应修正的证据),写进 observations 字段提案,"
-    "不要硬塞进白名单 id,也不要因为框架没覆盖就丢弃。"
-    "同时尽量抽取硬指标:评级及其变化与目标价(report_meta)、盈利预测修正方向(forecast_revisions)、"
-    "带数值的量化数据点如价格/产能/渗透率/订单/国产化率(datapoints,能挂靠环节或传导边就挂)、"
-    "宏观驱动读数证据(driver_updates)。没有就留空,禁止编造数字。"
-)
+def _system(industry: str) -> str:
+    """系统提示按框架行业名生成(2026-07-03 多框架:硬编码「AI 产业链」会误导其他链的抽取)。"""
+    return (
+        "你是 A 股行业研究抽取器。只依据给定研报原文抽取,禁止编造原文没有的数字/事件。"
+        "只输出 JSON(无多余文字)。segments/edges/narratives 等核心字段的 id 必须取自给定框架白名单;"
+        f"quote 字段必须是原文的连续子串;研报与 {industry} 无关时输出 {{\"segments\": []}}。"
+        f"重要:若研报包含框架白名单未覆盖、但对 {industry} 投研重要的信息"
+        "(新环节/新传导关系/新叙事/环节全球坐标应修正的证据),写进 observations 字段提案,"
+        "不要硬塞进白名单 id,也不要因为框架没覆盖就丢弃。"
+        "同时尽量抽取硬指标:评级及其变化与目标价(report_meta)、盈利预测修正方向(forecast_revisions)、"
+        "带数值的量化数据点如价格/产能/渗透率/订单/国产化率(datapoints,能挂靠环节或传导边就挂)、"
+        "宏观驱动读数证据(driver_updates)。没有就留空,禁止编造数字。"
+    )
+
+
+_SYSTEM = _system("AI 产业链")   # 兼容旧引用(深回填冒烟脚本等);extract_one 按 fw 名现生成
 
 _OBS_KINDS = {"新环节", "新边", "新叙事", "坐标修正", "其他"}
 _RATING_CHANGES = {"首次覆盖", "上调", "下调", "维持", "无"}
@@ -211,7 +216,8 @@ async def extract_one(doc: dict, text: str, fw: dict, client=None, timeout: floa
     if client is None:
         from financial_analyst.llm.client import LLMClient  # 延迟 import
         client = LLMClient.for_agent("industry_extract", config_path=_LLM_CONFIG)
-    messages = [{"role": "system", "content": _SYSTEM},
+    industry = str(((fw.get("meta") or {}).get("name")) or "AI 产业链")
+    messages = [{"role": "system", "content": _system(industry)},
                 {"role": "user", "content": _prompt(doc, text, framework_digest(fw))}]
     # token 记账取增量:client 计数是实例累计属性,共享 client 跑批时直接取会逐篇重复累计
     # (2026-07-03 深回填日志虚高实证)。快照前后差 = 本篇真实用量。

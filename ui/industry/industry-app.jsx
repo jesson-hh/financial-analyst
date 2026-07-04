@@ -42,6 +42,7 @@ class River extends React.Component {
     super(p);
     this.state = {
       board: null, err: null, ing: null, detail: null,
+      fw: 'ai_chain', fwList: [],
       view: 'home', tab: 'river', sel: null, zoom: null, hoverId: null, activeNarr: null, hoverLane: null, mig: null,
       showAdjacent: true, restNetwork: false, edgeFlow: true, zoomMs: 420,
     };
@@ -52,8 +53,9 @@ class River extends React.Component {
 
   // ── 数据 ──
   componentDidMount() {
-    glFetchBoard(false).then((b) => this.setState(b && b.ok ? { board: b } : { err: (b && b.reason) || '看板不可用' }));
-    glIngestState().then((s) => this.setState({ ing: s }));
+    glFetchFrameworks().then((l) => this.setState({ fwList: Array.isArray(l) ? l : [] }));
+    glFetchBoard(false, this.state.fw).then((b) => this.setState(b && b.ok ? { board: b } : { err: (b && b.reason) || '看板不可用' }));
+    glIngestState(this.state.fw).then((s) => this.setState({ ing: s }));
     this._t = 0; this._lastTick = 0;
     this._reduced = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
     this._onVis = () => { if (!document.hidden) this._startLoop(); };
@@ -72,7 +74,7 @@ class River extends React.Component {
     this._startLoop();
     const isM = this.state.view === 'home' && this.state.tab === 'matrix';
     const isRiver = this.state.view === 'home' && this.state.tab === 'river';
-    const vk = this.state.view + '/' + this.state.tab + '/' + (this.state.board ? 1 : 0);
+    const vk = this.state.view + '/' + this.state.tab + '/' + this.state.fw + '/' + (this.state.board ? 1 : 0);
     if (vk !== this._lastVK) {
       this._lastVK = vk;
       if (isM) { clearTimeout(this._auto); this._auto = setTimeout(() => { if (this.state.view === 'home' && this.state.tab === 'matrix') this.migrateDemo(); }, 1400); }
@@ -81,8 +83,15 @@ class River extends React.Component {
     if (ps && (ps.showAdjacent !== this.state.showAdjacent || ps.restNetwork !== this.state.restNetwork) && isRiver) this._scheduleEdges(120);
   }
 
-  refresh() { glFetchBoard(true).then((b) => this.setState(b && b.ok ? { board: b, err: null } : { err: (b && b.reason) || '看板不可用' })); }
-  async ingest() { const r = await glStartIngest(); alert(r.accepted ? '已受理,后台处理中' : `未受理:${r.reason || ''}`); glIngestState().then((s) => this.setState({ ing: s })); }
+  refresh() { glFetchBoard(true, this.state.fw).then((b) => this.setState(b && b.ok ? { board: b, err: null } : { err: (b && b.reason) || '看板不可用' })); }
+  async ingest() { const r = await glStartIngest(this.state.fw); alert(r.accepted ? '已受理,后台处理中' : `未受理:${r.reason || ''}`); glIngestState(this.state.fw).then((s) => this.setState({ ing: s })); }
+  switchFw(id) {
+    if (id === this.state.fw) return;
+    this.setState({ fw: id, board: null, err: null, detail: null, view: 'home', sel: null, activeNarr: null, hoverId: null, mig: null });
+    this._edgesGeo = [];
+    glFetchBoard(false, id).then((b) => this.setState(b && b.ok ? { board: b } : { err: (b && b.reason) || '看板不可用' }));
+    glIngestState(id).then((s) => this.setState({ ing: s }));
+  }
 
   // ── 适配:board → 设计稿数据形 ──
   _adapt(b) {
@@ -121,7 +130,7 @@ class River extends React.Component {
     const r = e.currentTarget.getBoundingClientRect();
     this._rect = { x: r.left, y: r.top, w: r.width, h: r.height };
     this.setState({ zoom: { sid, big: false }, hoverId: null, detail: null });
-    glFetchSegment(sid).then((d) => this.setState({ detail: d }));
+    glFetchSegment(sid, this.state.fw).then((d) => this.setState({ detail: d }));
     requestAnimationFrame(() => requestAnimationFrame(() => this.setState((s) => (s.zoom ? { zoom: { sid: s.zoom.sid, big: true } } : null))));
     clearTimeout(this._zt);
     this._zt = setTimeout(() => { window.scrollTo(0, 0); this.setState({ view: 'detail', sel: sid, zoom: null }); }, this._zms() + 90);
@@ -135,7 +144,7 @@ class River extends React.Component {
       this._zt = setTimeout(() => this.setState({ zoom: null }), this._zms() + 60);
     } else this.setState({ view: 'home' });
   }
-  jump(sid) { window.scrollTo(0, 0); this.setState({ sel: sid, detail: null }); glFetchSegment(sid).then((d) => this.setState({ detail: d })); }
+  jump(sid) { window.scrollTo(0, 0); this.setState({ sel: sid, detail: null }); glFetchSegment(sid, this.state.fw).then((d) => this.setState({ detail: d })); }
 
   // ── 悬停传导边 ──
   _scheduleEdges(delay) {
@@ -299,7 +308,12 @@ class River extends React.Component {
           <span style={{ fontFamily: 'var(--font-serif)', fontSize: 17, fontWeight: 600, letterSpacing: 3, color: 'var(--ink-0)' }}>觀瀾 · AI投研</span>
         </div>
         <span style={{ fontFamily: 'var(--font-serif)', fontSize: 12, letterSpacing: 2, color: 'var(--ink-2)', borderLeft: '1px solid var(--line-2)', paddingLeft: 14 }}>產業鏈河圖</span>
-        {this._chip(<><b style={{ color: 'var(--ink-1)', fontWeight: 600 }}>AI 产业链</b>&nbsp;· 28环节 · 7驱动 · 15边</>, 'k1')}
+        <span style={{ display: 'flex', border: '1px solid var(--line-2)' }}>
+          {(st.fwList.length ? st.fwList : [{ id: st.fw, name: (st.board.meta || {}).name || st.fw }]).map((f) => (
+            <span key={f.id} onClick={() => this.switchFw(f.id)} style={{ padding: '5px 12px', fontSize: 11.5, letterSpacing: 1, cursor: 'pointer', whiteSpace: 'nowrap', background: st.fw === f.id ? 'var(--zhu)' : 'transparent', color: st.fw === f.id ? 'var(--text-on-zhu)' : 'var(--ink-3)', fontFamily: 'var(--font-serif)' }}>{f.name}</span>
+          ))}
+        </span>
+        {this._chip(<>{(() => { const m = st.board.meta || {}; return <><b style={{ color: 'var(--ink-1)', fontWeight: 600 }}>{m.name || st.fw}</b>&nbsp;· {m.n_segments != null ? m.n_segments : '—'}环节 · {m.n_drivers != null ? m.n_drivers : '—'}驱动 · {m.n_edges != null ? m.n_edges : '—'}边</>; })()}</>, 'k1')}
         {this._chip(<>语料 {corpusOk ? <b style={{ fontFamily: 'var(--font-mono)', color: 'var(--ink-1)' }}>{(fresh.corpus.latest_publish_ts || '').slice(5, 10) || '有'}</b> : <b style={{ fontFamily: 'var(--font-mono)', color: 'var(--jin)' }} title={fresh.corpus && fresh.corpus.reason}>—</b>}</>, 'k2')}
         {this._chip(<>行情 <b style={{ fontFamily: 'var(--font-mono)', color: 'var(--ink-1)' }}>{fresh.quote_date || '—'}</b></>, 'k3')}
         {this._chip(<><span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--dai)', display: 'inline-block' }} />已抽取 <b style={{ fontFamily: 'var(--font-mono)', color: 'var(--ink-1)' }}>{fresh.extracted_total != null ? fresh.extracted_total : 0}</b> 篇</>, 'k4')}
@@ -504,7 +518,7 @@ class River extends React.Component {
           </div>
         </div>
         <div style={{ padding: '16px 2px 0', fontSize: 10.5, color: 'var(--ink-3)', lineHeight: 1.8, maxWidth: 1040 }}>
-          读法:五轴由上而下 <b style={{ color: 'var(--ink-1)', fontWeight: 500 }}>确定性 → 弹性</b>——β 全球需求(业绩兑现型)最确定,Ψ 映射主题最主题化。每个环节标注国内站位(领先→并跑→追赶→短板→国内市场);<b style={{ color: 'var(--zhu)', fontWeight: 500 }}>朱边 Δ+Ω</b> 为涨价周期叠加国产替代的双击环节(光芯片、存储/HBM),历史上十倍股多诞生于此。节点内四点为国内站位(短板·追赶·并跑·领先),研报抽到国产化率/认证/份额修正时,对应节点<b style={{ color: 'var(--zhu)', fontWeight: 500 }}>站位沿轴迁移</b>(点「演示坐标修正」为示意动画);轴的粗细随该逻辑当前热度呼吸,地球上的「中」随转动掠过正面——均为示意。
+          读法:五轴由上而下 <b style={{ color: 'var(--ink-1)', fontWeight: 500 }}>确定性 → 弹性</b>——β 全球需求(业绩兑现型)最确定,Ψ 映射主题最主题化。每个环节标注国内站位(领先→并跑→追赶→短板→国内市场);<b style={{ color: 'var(--zhu)', fontWeight: 500 }}>朱边 Δ+Ω</b> 为涨价周期叠加国产替代的双击环节,历史上十倍股多诞生于此。节点内四点为国内站位(短板·追赶·并跑·领先),研报抽到国产化率/认证/份额修正时,对应节点<b style={{ color: 'var(--zhu)', fontWeight: 500 }}>站位沿轴迁移</b>(点「演示坐标修正」为示意动画);轴的粗细随该逻辑当前热度呼吸,地球上的「中」随转动掠过正面——均为示意。
         </div>
       </div>
     );
@@ -726,8 +740,8 @@ class River extends React.Component {
     return (
       <div style={{ padding: '8px 22px 22px', fontSize: 10, color: 'var(--ink-3)', display: 'flex', gap: 14, alignItems: 'center' }}>
         <span style={{ fontFamily: 'var(--font-serif)', border: '1.5px solid var(--ink-2)', color: 'var(--ink-2)', padding: '1px 7px', letterSpacing: 3, fontSize: 10.5 }}>觀瀾</span>
-        <span>行情/动量/温度/票池 = 引擎实时聚合 · 研报观点/景气 = DeepSeek 抽取{note} · 驱动读数为人工维护框架标注 · 缺失显 — 不编数</span>
-        <span style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)' }}>ai_chain v1</span>
+        <span>行情/动量/温度/票池 = 引擎实时聚合 · 研报观点/景气 = Kimi 抽取{note} · 驱动读数为人工维护框架标注 · 缺失显 — 不编数</span>
+        <span style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)' }}>{this.state.fw} v{((this.state.board || {}).meta || {}).version || 1}</span>
       </div>
     );
   }

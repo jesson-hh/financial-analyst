@@ -1,0 +1,425 @@
+meta:
+  id: robot_chain
+  name: 机器人产业链
+  version: 1
+  updated: "2026-07-03"
+  note: "人形机器人为主。取证2026-07-03四路(web本体执行器/感知大脑/驱动叙事+本地1498篇研报标题与THS概念交叉,Top40标的92.5%双源一致);编辑层与河图设计制式同 ai_chain;行情/研报读数为运行时聚合。"
+  corpus:
+    seed: G:/stocks/stock_data/wiki_source/raw/chain_logic/ai_industry_strong_3y/ai_chain_report_seed.parquet
+    themes: [humanoid_robot_chain]
+
+# 驱动读数=人工维护(dir: up|down|flat|null);证据见 driver_updates 聚合
+drivers:
+  - {id: D1, name: 特斯拉Optimus量产指引, display_name: 特斯拉量产, reading: "V3+Fremont投产 7-8月", sub: "初期爬坡slow", dir: up, indicators: [V3发布与规格, Fremont产线进度, 审厂定点公告, 周产爬坡]}
+  - {id: D2, name: 海外本体生态, display_name: 海外生态, reading: "BotQ 1台/时", sub: "GR00T N2", dir: up, indicators: [Figure产能, 1X NEO交付, 英伟达GR00T生态, BMW复购]}
+  - {id: D3, name: 国内本体与订单, display_name: 国内本体订单, reading: "宇树IPO注册", sub: "2025订单57亿", dir: up, indicators: [宇树上市与募投, 智元/优必选下线与中标, 央国企采购, 供应商大会]}
+  - {id: D4, name: 国内政策, display_name: 国内政策, reading: "设备补贴30%", sub: "标准体系2026", dir: up, indicators: [AI+制造专项, 具身智能入规划, 地方补贴, 标准发布]}
+  - {id: D5, name: 具身模型突破, display_name: 具身模型, reading: "GR00T N2预告", sub: "GO-1/VLA2.0", dir: null, indicators: [VLA发布节奏, 真机数据规模, 任务泛化演示, 开源生态采用]}
+  - {id: D6, name: 降本曲线, display_name: 降本曲线, reading: "整机目标2-2.5万$", sub: "丝杠→千元级", dir: down, indicators: [单机BOM, 丝杠单价, 灵巧手电机成本, 工艺切换落地]}
+  - {id: D7, name: 事件催化日历, display_name: 催化日历, reading: "V3发布 7月底", sub: "WRC 8.8", dir: null, indicators: [V3发布会, 宇树上市首日, WRC/GTC, 车企发布]}
+
+groups:
+  - {id: A, name: 核心运动件}
+  - {id: B, name: 执行器灵巧手}
+  - {id: S, name: 感知}
+  - {id: K, name: 大脑小脑}
+  - {id: M, name: 材料轻量化}
+  - {id: E, name: 能源磁材}
+  - {id: H, name: 本体场景}
+
+segments:
+  - id: A1
+    name: 行星滚柱丝杠
+    display_name: 丝杠
+    group: A
+    logic: 全链最紧缺+降本弹性最大,产能军备竞赛(北特18.5亿/五洲10亿),研报第一大部件热词(120篇)
+    keywords: [行星滚柱丝杠, 滚珠丝杠, 反向式, 冷锻, 滚轧, 螺纹磨削, C3精度, 丝杠国产化]
+    ths_concepts: [人形机器人, 减速器概念]
+    stocks:
+      - {code: SH603009, name: 北特科技, role: anchor}
+      - {code: SH603667, name: 五洲新春, role: anchor}
+      - {code: SZ300580, name: 贝斯特, role: pool}
+      - {code: SZ300100, name: 双林股份, role: pool}
+      - {code: SH601100, name: 恒立液压, role: pool}
+      - {code: SH603040, name: 新坐标, role: pool}
+      - {code: SH600889, name: 南京化纤, role: pool, note: 待核}
+    global: {intl: 瑞士GSA/Rollvis+舍弗勒+日本NSK主导高端, cn_position: 追赶→并跑, moat: 磨削精度+冷锻know-how+磨床获取, equity_logic: [β, Θ], prospect: T链放量β+工艺切换Θ 产能军备竞赛, stars: 2, mrow: 追赶, good: false}
+  - id: A2
+    name: 减速器
+    display_name: 减速器
+    group: A
+    logic: 谐波国产化最成熟(绿的全球第二),人形放量与价格竞争并存(26Q1毛利率-4pp)
+    keywords: [谐波减速器, RV减速器, 行星减速器, 柔轮, 摆线针轮, 背隙, 传动精度]
+    ths_concepts: [减速器概念, 人形机器人]
+    stocks:
+      - {code: SH688017, name: 绿的谐波, role: anchor}
+      - {code: SZ002472, name: 双环传动, role: anchor}
+      - {code: SZ002896, name: 中大力德, role: pool}
+      - {code: SH603915, name: 国茂股份, role: pool}
+      - {code: SZ300503, name: 昊志机电, role: pool}
+      - {code: SZ001306, name: 夏厦精密, role: pool}
+    global: {intl: 谐波=哈默纳科约60% RV=纳博特斯克主导, cn_position: 并跑, moat: 柔轮材料齿形工艺+寿命一致性, equity_logic: [β], prospect: 放量β·盯价格战毛利率, stars: 2, mrow: 并跑, good: true}
+  - id: A3
+    name: 关节电机
+    display_name: 电机
+    group: A
+    logic: 无框力矩销量已兑现报表(步科25年+248%),空心杯随灵巧手放量(鸣志过特斯拉C轮认证)
+    keywords: [无框力矩电机, 空心杯电机, 绕组工艺, 功率密度, 磁编码器, 伺服]
+    ths_concepts: [人形机器人, 减速器概念]
+    stocks:
+      - {code: SH603728, name: 鸣志电器, role: anchor}
+      - {code: SH688160, name: 步科股份, role: anchor}
+      - {code: SZ300660, name: 江苏雷利, role: pool}
+      - {code: SZ002979, name: 雷赛智能, role: pool}
+      - {code: SH688698, name: 伟创电气, role: pool}
+      - {code: SH688320, name: 禾川科技, role: pool}
+    global: {intl: 无框=Kollmorgen/TQ 空心杯=maxon/Faulhaber垄断绕线工艺, cn_position: 并跑, moat: 功率密度+空心杯自动化绕线良率, equity_logic: [β], prospect: 订单最先看得见报表的环节, stars: 1, mrow: 并跑, good: true}
+  - id: A4
+    name: 轴承与齿轮
+    display_name: 轴承齿轮
+    group: A
+    logic: 关节自润滑轴承+精密齿轮跟随放量,北交所小市值覆盖密集带
+    keywords: [自润滑轴承, 关节轴承, 交叉滚子轴承, 精密齿轮, 冷锻齿轮]
+    ths_concepts: [人形机器人]
+    stocks:
+      - {code: SZ300718, name: 长盛轴承, role: anchor}
+      - {code: SH600592, name: 龙溪股份, role: pool}
+      - {code: SZ300652, name: 雷迪克, role: pool}
+      - {code: SH603270, name: 金帝股份, role: pool}
+      - {code: SZ300258, name: 精锻科技, role: pool}
+    global: {intl: 斯凯孚/舍弗勒等外资主导高端, cn_position: 并跑, moat: 材料配方+批量一致性, equity_logic: [β], prospect: 跟随放量β, stars: 0, mrow: 并跑, good: false}
+  - id: A5
+    name: 丝杠工艺设备
+    display_name: 工艺设备
+    group: A
+    logic: 磨床采购领先丝杠出货6-12个月——全链最早领先指标(华辰100台单已验证)
+    keywords: [螺纹磨床, 内螺纹磨削, 丝杠设备, 冷锻设备, 数控机床]
+    ths_concepts: [人形机器人]
+    stocks:
+      - {code: SZ300809, name: 华辰装备, role: anchor, note: 待核}
+      - {code: SZ002520, name: 日发精机, role: pool}
+      - {code: SH688577, name: 浙海德曼, role: pool}
+      - {code: SZ000837, name: 秦川机床, role: pool}
+    global: {intl: 高端螺纹磨床瑞士/德/日进口依赖, cn_position: 短板, moat: 磨削精度与效率, equity_logic: [Ω], prospect: 设备国产化Ω·订单是领先指标, stars: 1, mrow: 短板, good: false}
+  - id: B1
+    name: 执行器总成
+    display_name: 执行器总成
+    group: B
+    logic: 单机价值量最大环节,T链双寡头(三花/拓普)墨西哥产能2026交付
+    keywords: [线性执行器, 旋转执行器, 执行器总成, Tier1, 定点, 审厂, 墨西哥工厂]
+    ths_concepts: [人形机器人]
+    stocks:
+      - {code: SZ002050, name: 三花智控, role: anchor}
+      - {code: SH601689, name: 拓普集团, role: anchor}
+      - {code: SZ300953, name: 震裕科技, role: pool}
+      - {code: SZ000887, name: 中鼎股份, role: pool}
+      - {code: SZ002196, name: 方正电机, role: pool}
+    global: {intl: 特斯拉自研设计+中国Tier1代工总成 海外无对手进主链, cn_position: 领先, moat: 主机厂联合开发绑定+海外近岸产能+年降能力, equity_logic: [β], prospect: T链定点→放量 第一传导站, stars: 2, mrow: 领先, good: true}
+  - id: B2
+    name: 灵巧手
+    display_name: 灵巧手
+    group: B
+    logic: V3路线定型(腱绳+微丝杠,单手22自由度),价值量占比最高迭代最快,2026送样→定点爬产
+    keywords: [灵巧手, 自由度, 腱绳传动, 微型丝杠, 全驱, 欠驱动, 指节集成]
+    ths_concepts: [人形机器人]
+    stocks:
+      - {code: SZ003021, name: 兆威机电, role: anchor}
+      - {code: SH603728, name: 鸣志电器, role: pool}
+      - {code: SZ002979, name: 雷赛智能, role: pool}
+      - {code: SZ003033, name: 征和工业, role: pool}
+      - {code: SZ300660, name: 江苏雷利, role: pool}
+    global: {intl: 路线定义权在特斯拉(腱绳专利) 科研级Shadow/Wonik, cn_position: 并跑, moat: 指节微型化集成+腱绳寿命+量产一致性, equity_logic: [β, Θ], prospect: 自由度竞赛β·路线未收敛Θ, stars: 2, mrow: 并跑, good: true}
+  - id: B3
+    name: 腱绳与微传动
+    display_name: 腱绳微传动
+    group: B
+    logic: UHMWPE腱绳(强度钢15倍/重量1/8)+微型滚珠丝杠,灵巧手自由度倍增的直接受益件
+    keywords: [腱绳, UHMWPE, 超高分子量聚乙烯, 微型滚珠丝杠, 微型执行器]
+    ths_concepts: [人形机器人]
+    stocks:
+      - {code: SH688722, name: 同益中, role: anchor}
+      - {code: SZ300952, name: 恒辉安防, role: anchor}
+      - {code: SZ300918, name: 南山智尚, role: pool}
+      - {code: SH603667, name: 五洲新春, role: pool}
+    global: {intl: 腱绳材料格局未定 微传动maxon系领先, cn_position: 并跑, moat: 纤维改性+疲劳寿命数据, equity_logic: [Θ], prospect: 挂钩腱绳路线渗透率Θ, stars: 0, mrow: 并跑, good: false}
+  - id: S1
+    name: 六维力传感器
+    display_name: 六维力
+    group: S
+    logic: 力控硬门槛(腕/踝各一),国产份额32%成本半价,量产单价2万→2000元打开空间
+    keywords: [六维力传感器, 力矩传感器, 应变片, 解耦算法, 力控]
+    ths_concepts: [传感器, 人形机器人]
+    stocks:
+      - {code: SH603662, name: 柯力传感, role: anchor}
+      - {code: SZ300354, name: 东华测试, role: pool}
+      - {code: SZ301413, name: 安培龙, role: pool}
+      - {code: SZ300445, name: 康斯特, role: pool}
+    global: {intl: ATI(美)22.4%主导 Epson次之, cn_position: 并跑, moat: 六维解耦标定+批量一致性温漂, equity_logic: [β], prospect: 力控必配β·2030国产化率80-90%, stars: 1, mrow: 并跑, good: true}
+  - id: S2
+    name: 触觉传感器
+    display_name: 触觉皮肤
+    group: S
+    logic: 灵巧操作下一个必配项(V3手指带触觉),全球0-1早期国内已小批量(汉威合作30家)
+    keywords: [电子皮肤, 柔性触觉, 压阻阵列, MEMS触觉, 指尖传感]
+    ths_concepts: [传感器, 人形机器人]
+    stocks:
+      - {code: SZ300007, name: 汉威科技, role: anchor}
+      - {code: SH605488, name: 福莱新材, role: pool}
+      - {code: SZ300657, name: 弘信电子, role: pool, note: 待核}
+    global: {intl: 无绝对霸主 GelSight/Tekscan 特斯拉自研, cn_position: 并跑, moat: 柔性材料体系+高密度阵列+耐磨寿命, equity_logic: [Θ], prospect: 0-1弹性大·路线未收敛Θ, stars: 1, mrow: 并跑, good: false}
+  - id: S3
+    name: 3D视觉
+    display_name: 3D视觉
+    group: S
+    logic: VLA主输入,国内3D视觉全球头部(奥比中光),量产降本受益确定
+    keywords: [3D视觉, 结构光, ToF, 深度相机, 激光雷达, 视觉SLAM]
+    ths_concepts: [传感器, 人形机器人]
+    stocks:
+      - {code: SH688322, name: 奥比中光, role: anchor}
+      - {code: SH688686, name: 奥普特, role: pool}
+      - {code: SH688400, name: 凌云光, role: pool}
+      - {code: SH688002, name: 睿创微纳, role: pool}
+    global: {intl: RealSense传统标杆 特斯拉纯视觉自研, cn_position: 领先, moat: 深度成像芯片自研+量产标定, equity_logic: [β], prospect: 机器人之眼放量β, stars: 1, mrow: 领先, good: true}
+  - id: S4
+    name: IMU与编码器
+    display_name: IMU
+    group: S
+    logic: 平衡控制刚需(躯干+关节多颗),高性能MEMS国产替代跟随放量
+    keywords: [IMU, MEMS陀螺, 零偏稳定性, 磁编码器, 姿态解算]
+    ths_concepts: [传感器]
+    stocks:
+      - {code: SH688582, name: 芯动联科, role: anchor}
+      - {code: SH688071, name: 华依科技, role: pool}
+      - {code: SH688286, name: 敏芯股份, role: pool}
+    global: {intl: Bosch/ST/ADI主导, cn_position: 追赶, moat: 导航级零偏+温补标定, equity_logic: [Ω], prospect: 国产替代Ω跟随放量, stars: 0, mrow: 追赶, good: false}
+  - id: K1
+    name: 端侧算力芯片
+    display_name: 端侧算力
+    group: K
+    logic: 英伟达Thor一家独大(2070 TFLOPS/$3499),国产端侧芯片=最大自主可控缺口即最大替代空间
+    keywords: [Jetson Thor, 机器人SoC, 端侧推理, RK3588, 具身算力]
+    ths_concepts: [人形机器人]
+    stocks:
+      - {code: SH603893, name: 瑞芯微, role: anchor}
+      - {code: SZ300458, name: 全志科技, role: pool}
+      - {code: SH688256, name: 寒武纪, role: pool}
+      - {code: SH688521, name: 芯原股份, role: pool}
+    global: {intl: 英伟达绝对主导(Thor+GR00T生态), cn_position: 短板, moat: 制程+CUDA生态+工具链, equity_logic: [Ω], prospect: 短板即最大Ω期权, stars: 1, mrow: 短板, good: false}
+  - id: K2
+    name: 具身模型映射
+    display_name: 具身模型
+    group: K
+    logic: 叙事强但A股无纯标的(VLA带个股研报仅1篇),情绪脉冲型映射炒作
+    keywords: [具身智能, VLA, 世界模型, GR00T, 真机数据, sim2real]
+    ths_concepts: [人形机器人]
+    stocks:
+      - {code: SZ002230, name: 科大讯飞, role: anchor, note: 待核}
+      - {code: SZ300496, name: 中科创达, role: pool, note: 待核}
+    global: {intl: Gemini Robotics/Helix/π系列领先 国内GO-1并跑, cn_position: 追赶, moat: 真机数据规模+跨本体泛化, equity_logic: [Ψ], prospect: Ψ映射·A股无纯标的, stars: 0, mrow: 短板, good: false}
+  - id: K3
+    name: 运动控制
+    display_name: 运动控制
+    group: K
+    logic: 大脑指令→kHz级关节力矩的小脑,国内产业覆盖度高确定性强(伺服汇川28%国内第一)
+    keywords: [运动控制器, 全身控制, MPC, 强化学习步态, 伺服驱动, EtherCAT]
+    ths_concepts: [人形机器人]
+    stocks:
+      - {code: SZ300124, name: 汇川技术, role: anchor}
+      - {code: SZ301510, name: 固高科技, role: pool}
+      - {code: SZ002747, name: 埃斯顿, role: pool}
+      - {code: SH688320, name: 禾川科技, role: pool}
+    global: {intl: Beckhoff PC-based第一 整机厂自研小脑, cn_position: 并跑, moat: kHz实时闭环+力控算法积累, equity_logic: [β], prospect: 确定性国产环节β, stars: 1, mrow: 并跑, good: true}
+  - id: K4
+    name: AI算力链
+    display_name: AI算力 · 相邻链
+    group: K
+    adjacent: true
+    logic: 相邻链——见 AI 产业链框架(训练侧算力/数据中心)
+    keywords: [AI算力, 智算中心]
+    ths_concepts: []
+    stocks: []
+  - id: M1
+    name: PEEK材料
+    display_name: PEEK
+    group: M
+    logic: 减重刚需但海外三巨头垄断86%,国产替代+人形增量双击
+    keywords: [PEEK, PEKK, DFBP, 特种工程塑料, 轻量化]
+    ths_concepts: [人形机器人]
+    stocks:
+      - {code: SH688716, name: 中研股份, role: anchor}
+      - {code: SZ301076, name: 新瀚新材, role: pool}
+      - {code: SZ301069, name: 凯盛新材, role: pool}
+      - {code: SZ002886, name: 沃特股份, role: pool}
+    global: {intl: 威格斯/索尔维/赢创合计86%, cn_position: 短板, moat: 聚合工艺(分子量纯度)+单体成本, equity_logic: [Ω, β], prospect: 短板Ω+人形增量β, stars: 1, mrow: 短板, good: false}
+  - id: M2
+    name: 镁合金与结构件
+    display_name: 镁合金结构件
+    group: M
+    logic: 镁铝价格比0.87减重同时降本,汽车压铸Tier1平移(骨架/关节壳体)
+    keywords: [镁合金, 半固态注射, 一体化压铸, 机器人骨骼, 结构件]
+    ths_concepts: [人形机器人]
+    stocks:
+      - {code: SZ002182, name: 宝武镁业, role: anchor}
+      - {code: SZ301398, name: 星源卓镁, role: pool}
+      - {code: SH603305, name: 旭升集团, role: pool}
+      - {code: SH600933, name: 爱柯迪, role: pool}
+      - {code: SZ002101, name: 广东鸿图, role: pool}
+    global: {intl: 镁合金产业链中国全球主导, cn_position: 领先, moat: 阻燃+半固态成型工艺+整机绑定, equity_logic: [β], prospect: 轻量化确定性β, stars: 1, mrow: 领先, good: true}
+  - id: E1
+    name: 机器人电池
+    display_name: 电池电源
+    group: E
+    logic: 峰值5kW+3C持续放电+续航1→8小时演进,高倍率/半固态新增长极,锂电格局=中国格局
+    keywords: [机器人电池, 高倍率, 3C放电, 异形电池, 全固态, BMS, 快换电]
+    ths_concepts: [人形机器人]
+    stocks:
+      - {code: SZ300014, name: 亿纬锂能, role: anchor}
+      - {code: SZ300750, name: 宁德时代, role: pool}
+      - {code: SZ002245, name: 蔚蓝锂芯, role: pool}
+      - {code: SZ300207, name: 欣旺达, role: pool}
+      - {code: SZ002851, name: 麦格米特, role: pool, note: 待核}
+    global: {intl: 全球锂电格局即中国格局 特斯拉自研pack, cn_position: 领先, moat: 高倍率与能量密度兼顾+异形集成+安全, equity_logic: [β], prospect: 全球主导β, stars: 1, mrow: 领先, good: true}
+  - id: E2
+    name: 稀土磁材
+    display_name: 稀土磁材
+    group: E
+    logic: 关节电机磁体上游,出口管制是海外链成本/供给变量——管制博弈的价格筹码
+    keywords: [稀土永磁, 钕铁硼, 磁材, 出口管制, 高性能磁体]
+    ths_concepts: [人形机器人]
+    stocks:
+      - {code: SZ300748, name: 金力永磁, role: anchor}
+      - {code: SZ300224, name: 正海磁材, role: pool}
+      - {code: SH600366, name: 宁波韵升, role: pool}
+    global: {intl: 中国全球主导+管制筹码, cn_position: 领先, moat: 资源+晶界渗透工艺, equity_logic: [Δ], prospect: 管制博弈Δ·量随电机β, stars: 1, mrow: 领先, good: true}
+  - id: H1
+    name: 本体与整机代工
+    display_name: 本体/代工
+    group: H
+    logic: 本体A股无纯标的(宇树/智元/优必选皆非A),映射走壳(上纬)与代工(蓝思承接智元全系)
+    keywords: [人形机器人整机, 本体, 整机组装, 代工, IPO映射, 供应商大会]
+    ths_concepts: [人形机器人]
+    stocks:
+      - {code: SH688585, name: 上纬新材, role: anchor}
+      - {code: SZ300433, name: 蓝思科技, role: anchor}
+      - {code: SZ002747, name: 埃斯顿, role: pool}
+      - {code: SH688306, name: 均普智能, role: pool, note: 待核}
+      - {code: SZ300403, name: 汉宇集团, role: pool}
+    global: {intl: 特斯拉/Figure定义路线 国内出货量全球领先, cn_position: 并跑, moat: 系统集成+运控算法+场景订单获取, equity_logic: [Ψ], prospect: Ψ映射(IPO/入主事件驱动)·出货量领先, stars: 1, mrow: 并跑, good: false}
+  - id: H2
+    name: 工业场景落地
+    display_name: 工业场景
+    group: H
+    logic: 从PoC到千台级交付(Walker S2交付500+,进比亚迪/富士康产线),复购是试金石
+    keywords: [进厂, 工业场景, 产线部署, 数据采集中心, 系统集成, 复购]
+    ths_concepts: [机器人概念]
+    stocks:
+      - {code: SZ002698, name: 博实股份, role: anchor}
+      - {code: SZ300607, name: 拓斯达, role: pool, note: 待核}
+      - {code: SZ300024, name: 机器人, role: pool}
+      - {code: SZ002747, name: 埃斯顿, role: pool}
+    global: {intl: Figure-BMW范式 国内车厂/3C进厂密集, cn_position: 国内市场, moat: 场景know-how+集成交付, equity_logic: [β], prospect: 复购兑现β·高盛式证伪风险, stars: 1, mrow: 国内市场, good: false}
+  - id: H3
+    name: 家庭消费场景
+    display_name: 家庭消费
+    group: H
+    logic: 1X NEO预售5天1万台+优必选U1发布,家庭叙事0→1,映射弱主题性强
+    keywords: [家用机器人, 消费级人形, NEO, 陪伴机器人, 安全传感]
+    ths_concepts: [机器人概念]
+    stocks:
+      - {code: SH603486, name: 科沃斯, role: anchor}
+      - {code: SZ300433, name: 蓝思科技, role: pool}
+      - {code: SZ300952, name: 恒辉安防, role: pool, note: 待核}
+    global: {intl: 1X NEO定义家用品类($2万/月租$499), cn_position: 国内市场, moat: 安全+成本+隐私(遥操作争议), equity_logic: [Ψ], prospect: Ψ主题·NEO年底真交付是验证点, stars: 0, mrow: 国内市场, good: false}
+  - id: H4
+    name: 智能驾驶
+    display_name: 智能驾驶 · 相邻链
+    group: H
+    adjacent: true
+    logic: 相邻链——车企跨界同源技术(VLA/运控/供应链平移)
+    keywords: [智能驾驶, 车企跨界]
+    ths_concepts: [无人驾驶]
+    stocks: []
+
+edges:
+  - {id: T1, from: [D1], to: [B1, A1, A3, B2], sign: "+", mechanism: V3定型→定点→爬坡 T链放量沿总成向部件传导, lag: 1-2季, validation: [V3发布规格, 定点公告, 供应商机器人收入显形]}
+  - {id: T2, from: [D3], to: [A2, A4, B2, S2, H1], sign: "+", mechanism: 国产本体订单/IPO募投→供应商大会定点→国产链放量, lag: 0-2季, validation: [宇树募投进度, 智元/优必选下线数, 中标公告]}
+  - {id: T3, from: [D2], to: [K1, S3, H1], sign: "+", mechanism: GR00T参考设计选中国本体=国际化背书+算力生态绑定, lag: 即时情绪+2-4季兑现, validation: [GR00T发售, Figure/1X交付, BMW复购]}
+  - {id: T4, from: [D4], to: [H2, H1, K3], sign: "+", mechanism: 设备补贴30%+标准体系→产线改造采购, lag: 事件驱动, validation: [专项行动项目数, 地方补贴落地, 标准发布]}
+  - {id: T5, from: [D5], to: [S1, S2, S3, K1], sign: "+", mechanism: 模型能力上限→任务复杂度→感知密度与算力需求, lag: 1-2季, validation: [VLA发布, 任务泛化演示, 传感器配置清单]}
+  - {id: T6, from: [D6], to: [A1, A5, A3], sign: "+", mechanism: 降本目标→磨削转冷锻/滚轧→设备采购+电机降价放量, lag: 1-2季, validation: [丝杠单价, 磨床订单, 灵巧手电机成本]}
+  - {id: T7, from: [D7], to: [H1, H3], sign: "+", mechanism: V3发布/宇树上市/WRC→情绪脉冲→映射标的轮动, lag: 即时, validation: [事件日历, 板块涨停家数]}
+  - {id: T8, from: [A5], to: [A1], sign: "+", mechanism: 磨床交付领先丝杠出货6-12个月(设备先行=最早领先指标), lag: 2-4季, validation: [磨床订单公告, 丝杠基地达产]}
+  - {id: T9, from: [B1], to: [A1, A2, A3, A4], sign: "+", mechanism: Tier1总成定点→向上游锁产能分包, lag: 1季, validation: [总成厂扩产, 部件厂配套公告]}
+  - {id: T10, from: [B2], to: [B3, A3, S2], sign: "+", mechanism: 自由度竞赛(11→22DOF)→电机×丝杠×腱绳×触觉用量倍增, lag: 1-2季, validation: [V3灵巧手方案, 单手部件清单]}
+  - {id: T11, from: [B2], to: [M1, M2], sign: "+", mechanism: 自由度↑重量↑→PEEK/镁合金减重需求, lag: 1-2季, validation: [轻量化方案采用, 单机用量]}
+  - {id: T12, from: [H2], to: [E1, S1], sign: "+", mechanism: 工业作业时长要求→高倍率电池+力控传感配置, lag: 1-2季, validation: [作业时长披露, 电池交样]}
+  - {id: T13, from: [K2], to: [H2, H3], sign: "+", mechanism: 模型能力阈值跨越→场景可用→落地加速, lag: 1-2季, validation: [连续自主作业时长, 复购率]}
+  - {id: T14, from: [H1], to: [A1, A2, A3], sign: "-", mechanism: 本体价格战→零部件年降压价(绿的26Q1毛利率-4pp已现), lag: 1-2季, validation: [整机售价, 部件毛利率]}
+  - {id: T15, from: [D1], to: [E2], sign: "+", mechanism: 海外机器人电机需求+稀土出口管制→磁材议价与博弈溢价, lag: 事件驱动, validation: [管制清单变化, 磁材出口价]}
+
+narratives:
+  - id: N1
+    name: 特斯拉链
+    display_name: T链
+    status: 第三轮点火
+    activates: [{segment: B1, weight: 0.9}, {segment: A1, weight: 0.9}, {segment: A3, weight: 0.9}, {segment: B2, weight: 0.9}, {segment: M2, weight: 0.5}, {segment: E2, weight: 0.5}]
+    validation: [V3发布与投产, 定点公告, Q3周产爬坡, 供应商季度机器人收入]
+    risks: [时点再跳票(已跳一次), 去中国化替代, 单一客户压价]
+  - id: N2
+    name: 国产本体链
+    display_name: 国产本体
+    status: 主升·宇树IPO
+    activates: [{segment: H1, weight: 0.9}, {segment: A2, weight: 0.9}, {segment: A4, weight: 0.9}, {segment: S2, weight: 0.5}, {segment: B2, weight: 0.5}, {segment: K3, weight: 0.5}]
+    validation: [宇树上市定价与首日, 央国企复购, 2026数万台指引兑现]
+    risks: [价格战与亏损, 订单集中政府/关联方, IPO映射退潮]
+  - id: N3
+    name: 灵巧手
+    display_name: 灵巧手
+    status: 活跃·路线未收敛
+    activates: [{segment: B2, weight: 0.9}, {segment: B3, weight: 0.9}, {segment: A3, weight: 0.9}, {segment: S2, weight: 0.9}]
+    validation: [V3灵巧手方案定型, 兆威批量出货, 单手成本破万元]
+    risks: [全驱/欠驱/腱绳/连杆多路线并存押错逻辑坍塌, 特斯拉自研外采比例存疑]
+  - id: N4
+    name: 丝杠降本
+    display_name: 丝杠降本
+    status: 军备竞赛
+    activates: [{segment: A1, weight: 0.9}, {segment: A5, weight: 0.9}, {segment: B3, weight: 0.5}]
+    validation: [单价2000→千元级且良率达标, 定点公告, 工艺切换落地]
+    risks: [产能过剩(高盛点名扩产超前订单), 路线迭代沉没成本]
+  - id: N5
+    name: 具身模型
+    display_name: 具身模型
+    status: 海外快于国内
+    activates: [{segment: K1, weight: 0.9}, {segment: K2, weight: 0.9}, {segment: S3, weight: 0.5}, {segment: S1, weight: 0.5}]
+    validation: [GR00T N2, 真实场景连续作业时长, 开源生态被本体采用]
+    risks: [A股无纯标的沾边股轮动退潮快]
+  - id: N6
+    name: 工业进厂
+    display_name: 工业进厂
+    status: 千台级交付
+    activates: [{segment: H2, weight: 0.9}, {segment: K3, weight: 0.5}, {segment: E1, weight: 0.5}, {segment: S1, weight: 0.5}]
+    validation: [同客户复购扩单, 单台日作业时长与ROI, 万台交付兑现率]
+    risks: [进厂≠复购, 人效不过关退回, 高盛式证伪杀重演]
+  - id: N7
+    name: 家庭消费
+    display_name: 家庭消费
+    status: 0→1(NEO/U1)
+    activates: [{segment: H3, weight: 0.9}, {segment: M1, weight: 0.5}, {segment: S2, weight: 0.5}]
+    validation: [NEO年底真实交付量, U1定价与预订, 退货率/安全事故]
+    risks: [遥操作隐私争议, 期望差过大, 家用安全监管]
+  - id: N8
+    name: 车企跨界
+    display_name: 车企跨界
+    status: 近20家入局
+    activates: [{segment: B1, weight: 0.9}, {segment: A1, weight: 0.5}, {segment: M2, weight: 0.5}, {segment: H1, weight: 0.5}]
+    validation: [车企自用量产台数, Tier1机器人定点公告]
+    risks: [车企自研自供压缩第三方市场, 内部投用不产生外部收入]
+
+signal_defs:
+  quant: [momentum20, excess20_vs_eqw, amount_share_delta20, fundflow5, v4_pct_mean, breadth]
+  text:
+    stance: [多, 中, 空]
+    catalyst_types: [订单, 涨价, 扩产, 技术突破, 政策, 业绩, 认证, 新品]
+    global_fields: [国产化率, 份额, 技术差距, 认证]
+    half_life_days: 7
+    window_days: 30

@@ -46,11 +46,31 @@ def _validate(fw: dict, path: str) -> None:
                 raise FrameworkError(f"{path}: narrative {n.get('id')} 引用不存在的环节 {a.get('segment')}")
 
 
-def load_framework(path: Optional[str] = None) -> dict:
-    """加载并校验框架;带进程内缓存(mtime 失效)。"""
+def list_frameworks() -> list:
+    """扫描 frameworks/*.yaml → [{id, name}](UI 切换器用;坏文件跳过不崩)。"""
+    out = []
+    for p in sorted(FRAMEWORKS_DIR.glob("*.yaml")):
+        try:
+            fw = load_framework(path=str(p))
+            meta = fw.get("meta") or {}
+            out.append({"id": meta.get("id") or p.stem, "name": meta.get("name") or p.stem})
+        except Exception:  # noqa: BLE001 — 单框架坏不拖垮清单
+            continue
+    return out
+
+
+def load_framework(path: Optional[str] = None, fw: Optional[str] = None) -> dict:
+    """加载并校验框架;带进程内缓存(mtime 失效)。fw=框架 id(frameworks/<fw>.yaml)。"""
     import yaml  # 延迟 import(引擎 venv 自带)
 
-    p = Path(path) if path else DEFAULT_FRAMEWORK
+    if path:
+        p = Path(path)
+    elif fw:
+        p = FRAMEWORKS_DIR / f"{fw}.yaml"
+        if not p.exists():
+            raise FrameworkError(f"框架不存在: {fw}({p})")
+    else:
+        p = DEFAULT_FRAMEWORK
     key = str(p)
     mtime = p.stat().st_mtime
     with _lock:

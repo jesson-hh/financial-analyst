@@ -299,23 +299,24 @@ def quadrant(q: dict, r: dict, rankpct) -> str:
     return ("h" if hot_q else "l") + ("h" if hot_r else "l")
 
 
-def build_board(refresh: bool = False) -> dict:
+def build_board(refresh: bool = False, fw_id: str = "ai_chain") -> dict:
     import time
     import pandas as pd
     from . import corpus, store
     from .framework import load_framework
+    cache_key = f"board:{fw_id}"
     if not refresh:
-        hit = _BOARD_CACHE.get("board")
+        hit = _BOARD_CACHE.get(cache_key)
         if hit and time.time() - hit[0] < _BOARD_TTL:
             return hit[1]
     try:
-        fw = load_framework()
+        fw = load_framework(fw=fw_id)
         qsig = quant_signals(fw)
-        ext = store.load_extractions(window_days=45)
+        ext = store.load_extractions(window_days=45, fw=fw_id)
         rsig = research_signals(fw, ext)
         rank = _mom_rankpct(qsig)
         ev = edge_verdicts(fw, ext)
-        st = store.load_state()
+        st = store.load_state(fw_id)
         segments = []
         qdate = None
         for s in fw["segments"]:
@@ -344,8 +345,13 @@ def build_board(refresh: bool = False) -> dict:
                 "quadrant": quadrant(q, r, rp),
             })
         ccfg = (fw.get("meta") or {}).get("corpus") or {}
+        meta = fw.get("meta") or {}
+        n_signal = sum(1 for s in fw["segments"] if not s.get("adjacent"))
         board = {
             "ok": True, "reason": None,
+            "meta": {"id": meta.get("id") or fw_id, "name": meta.get("name") or fw_id,
+                     "n_segments": n_signal, "n_drivers": len(fw["drivers"]),
+                     "n_edges": len(fw["edges"]), "version": meta.get("version")},
             "generated_at": pd.Timestamp.now().isoformat(timespec="seconds"),
             "freshness": {"corpus": corpus.corpus_freshness(seed=ccfg.get("seed"), themes=ccfg.get("themes")),
                           "last_ingest_at": st.get("last_ingest_at"),
@@ -355,7 +361,7 @@ def build_board(refresh: bool = False) -> dict:
             "edges": [dict(e, verdict_counts=ev.get(e["id"], {"support": 0, "refute": 0})) for e in fw["edges"]],
             "narratives": narrative_temps(fw, qsig, ext),
         }
-        _BOARD_CACHE["board"] = (time.time(), board)
+        _BOARD_CACHE[cache_key] = (time.time(), board)
         return board
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": f"board 组装失败: {exc}"}
@@ -387,15 +393,15 @@ def _stock_rows(stocks: list, quotes: dict, ffmap: Optional[dict], v4map: Option
     return rows
 
 
-def segment_detail(sid: str) -> dict:
+def segment_detail(sid: str, fw_id: str = "ai_chain") -> dict:
     from . import store
     from .framework import load_framework
     try:
-        fw = load_framework()
+        fw = load_framework(fw=fw_id)
         seg = next((s for s in fw["segments"] if s["id"] == sid), None)
         if seg is None:
             return {"ok": False, "reason": f"环节不存在: {sid}"}
-        ext = _dedupe_latest(store.load_extractions(window_days=30))
+        ext = _dedupe_latest(store.load_extractions(window_days=30, fw=fw_id))
         opinions = []
         datapoints = []
         for rec in ext:
@@ -427,10 +433,10 @@ def segment_detail(sid: str) -> dict:
         return {"ok": False, "reason": f"segment 明细失败: {exc}"}
 
 
-def doc_detail(doc_id: str) -> dict:
+def doc_detail(doc_id: str, fw_id: str = "ai_chain") -> dict:
     from . import store
     try:
-        recs = [r for r in store.load_extractions() if r.get("doc_id") == doc_id]
+        recs = [r for r in store.load_extractions(fw=fw_id) if r.get("doc_id") == doc_id]
         if not recs:
             return {"ok": False, "reason": f"无此 doc: {doc_id}"}
         recs.sort(key=lambda r: str(r.get("extracted_at") or ""), reverse=True)
