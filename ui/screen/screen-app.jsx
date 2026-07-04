@@ -312,6 +312,7 @@ function XuanguApp() {
   const [expanded, setExpanded] = useState({});
   const [picking, setPicking] = useState(false);
   const [showWs, setShowWs] = useState(false);   // v4 模型工坊抽屉
+  const [rsMap, setRsMap] = useState(null);      // P5 再打分:code → {chain,news,composite,parts}(展示型 overlay)
 
   useEffect(() => { document.body.classList.toggle('dark', dark); }, [dark]);
 
@@ -498,7 +499,7 @@ function XuanguApp() {
         onWorkshop={() => setShowWs(true)} />
       <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '400px 1fr', minHeight: 0 }}>
         <ConstraintRail cfg={cfg} setF={setF} toggleFactor={toggleFactor} setFactorW={setFactorW} onReset={reset} pickFactors={pickFactors} picking={picking} result={result} committed={committed} onClearCommit={() => setCommitted(null)} />
-        <RankTable result={result} cfg={cfg} sort={sort} setSort={setSort} showBench={showBench} setShowBench={setShowBench} expanded={expanded} toggleExpand={toggleExpand} onRefresh={refresh} loading={loading} lastRun={lastRun} dirty={dirty} onRegen={regenData} regen={regen} />
+        <RankTable result={result} cfg={cfg} sort={sort} setSort={setSort} showBench={showBench} setShowBench={setShowBench} expanded={expanded} toggleExpand={toggleExpand} onRefresh={refresh} loading={loading} lastRun={lastRun} dirty={dirty} onRegen={regenData} regen={regen} rsMap={rsMap} setRsMap={setRsMap} />
       </div>
       {showWs && <ModelWorkshop API={API} models={models} reloadModels={reloadModels} flash={flash}
         onPick={(id) => { setF({ model: id }); refresh(); }} onClose={() => setShowWs(false)} />}
@@ -1107,8 +1108,57 @@ function PctBar({ pct, color }) {
   );
 }
 
+// ───────── P5 再打分(展示型 overlay:产业链分+情绪分+综合;绝不回写 v4/picks)─────────
+function RescoreBar({ onData }) {
+  const API = (typeof window !== 'undefined' && window.GUANLAN_BACKEND) || '';
+  const [st, setSt] = useState(null);        // null=闲;{running,label}=跑
+  const [meta, setMeta] = useState(null);    // 最新 run 元数据(成本/新鲜度)
+  const pull = async () => {
+    try {
+      const j = await (await fetch(API + '/screen/rescore/latest')).json();
+      if (j && j.ok && j.run && j.run.ok) {
+        const m = {}; (j.run.rows || []).forEach(r => { m[r.code] = r; });
+        onData(m);
+        setMeta({ ts: j.run.ts, s: j.run.stats || {} });
+      } else if (j && j.ok && j.run && !j.run.ok) { setMeta({ err: j.run.error }); }
+    } catch (e) {}
+  };
+  useEffect(() => { if (API) pull(); }, []);
+  const go = async () => {
+    if (!API || (st && st.running)) return;
+    try {
+      const j = await (await fetch(API + '/screen/rescore', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ top_n: 50 }) })).json();
+      if (!j.ok) { window.alert('再打分:' + (j.reason || '发起失败')); return; }
+      setSt({ running: true, label: '再打分中…' });
+      const t = setInterval(async () => {
+        try {
+          const s = (await (await fetch(API + '/screen/rescore/status')).json()).state;
+          if (s.running) setSt({ running: true, label: s.label || '…' });
+          else { clearInterval(t); setSt(null); await pull(); }
+        } catch (e) {}
+      }, 3000);
+    } catch (e) { window.alert('再打分调用失败:' + e); }
+  };
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+      <span onClick={go} className="serif" style={{ fontSize: 10, color: 'var(--paper)',
+        background: (st && st.running) ? 'var(--ink-3)' : 'var(--yin)', borderRadius: 5,
+        padding: '2px 9px', cursor: 'pointer', userSelect: 'none' }}
+        title="产业链分+新闻情绪对 v4 前50再打分(展示参考,不改选股信号;LLM 按批计费)">
+        {(st && st.running) ? (st.label || '再打分中…') : '再打分 ✦'}</span>
+      {meta && !meta.err && <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>
+        {String(meta.ts || '').slice(5, 16)} · LLM {(meta.s || {}).llm_calls != null ? meta.s.llm_calls : '—'}
+        ·缓存 {(meta.s || {}).cache_hits != null ? meta.s.cache_hits : '—'}
+        ·行情日 {(((meta.s || {}).board_freshness || {}).quote_date) || '—'}</span>}
+      {meta && meta.err && <span className="mono" style={{ fontSize: 8.5, color: 'var(--zhu)' }}
+        title={meta.err}>上次再打分失败</span>}
+    </span>
+  );
+}
+
 // ───────── 中栏 · 排名清单 ─────────
-function RankTable({ result, cfg, sort, setSort, showBench, setShowBench, expanded, toggleExpand, onRefresh, loading, lastRun, dirty, onRegen, regen }) {
+function RankTable({ result, cfg, sort, setSort, showBench, setShowBench, expanded, toggleExpand, onRefresh, loading, lastRun, dirty, onRegen, regen, rsMap, setRsMap }) {
   const _fmtT = (d) => { try { return d.toLocaleTimeString('zh-CN', { hour12: false }); } catch (e) { return ''; } };
   const accent = ((window.XG_FBYID[(cfg.factors[0] || {}).id]) || { color: 'var(--zhu)' }).color;
   const pctW = 132;
@@ -1145,6 +1195,7 @@ function RankTable({ result, cfg, sort, setSort, showBench, setShowBench, expand
             cfg.factors.map(f => { const m = window.XG_FBYID[f.id] || { glyph: '?', short: f.id, color: 'var(--ink-2)' }; return <span key={f.id} className="mono" style={{ fontSize: 9, color: 'var(--paper)', background: m.color, borderRadius: 4, padding: '2px 7px' }}>{m.glyph} {m.short} ×{f.w.toFixed(1)}</span>; })
           )}
         </div>
+        <RescoreBar onData={setRsMap} />
         <span className="mono" style={{ marginLeft: 'auto', fontSize: 9, color: dirty ? 'var(--yin)' : 'var(--ink-3)', whiteSpace: 'nowrap' }}>
           {loading ? '计算中…' : (lastRun ? ((dirty ? '参数已变 · 上次 ' : '上次 ') + _fmtT(lastRun)) : '尚未计算')}
         </span>
@@ -1175,12 +1226,12 @@ function RankTable({ result, cfg, sort, setSort, showBench, setShowBench, expand
       {/* 行 */}
       <div style={{ overflowY: 'auto', minHeight: 0, flex: 1 }}>
         {chosen.map((x, i) => (
-          <Row key={x.s.code} x={x} rank={sort.k === 'score' && sort.d < 0 ? i + 1 : null} accent={accent} chosen pctW={pctW} open={!!expanded[x.s.code]} onToggle={() => toggleExpand(x.s.code)} />
+          <Row key={x.s.code} x={x} rank={sort.k === 'score' && sort.d < 0 ? i + 1 : null} accent={accent} chosen pctW={pctW} open={!!expanded[x.s.code]} onToggle={() => toggleExpand(x.s.code)} rsMap={rsMap} />
         ))}
         {showBench && bench.length > 0 && (
           <>
             <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', letterSpacing: '.1em', padding: '9px 18px 5px', borderTop: '1px solid var(--line)', marginTop: 4 }}>—— 约束外候选 · 未入选 ——</div>
-            {bench.map(x => <Row key={x.s.code} x={x} accent={accent} chosen={false} pctW={pctW} open={!!expanded[x.s.code]} onToggle={() => toggleExpand(x.s.code)} />)}
+            {bench.map(x => <Row key={x.s.code} x={x} accent={accent} chosen={false} pctW={pctW} open={!!expanded[x.s.code]} onToggle={() => toggleExpand(x.s.code)} rsMap={rsMap} />)}
           </>
         )}
         <div style={{ height: 16 }} />
@@ -1193,7 +1244,7 @@ function RankTable({ result, cfg, sort, setSort, showBench, setShowBench, expand
 const SHIELD_STYLE = {
   'v4.1': ['金信号', 'var(--jin)'], 'v4.2': ['仕佳险', 'var(--yin)'], 'v4.3': ['涨停5重', 'var(--ink-2)'],
 };
-function Row({ x, rank, accent, chosen, pctW, open, onToggle }) {
+function Row({ x, rank, accent, chosen, pctW, open, onToggle, rsMap }) {
   const s = x.s;
   const reason = x.excl && x.excl.length ? x.excl : (x.benchReason ? [x.benchReason] : []);
   const hasViews = x.views && x.views.length;
@@ -1237,6 +1288,19 @@ function Row({ x, rank, accent, chosen, pctW, open, onToggle }) {
               {reason.map(r => <span key={r} className="mono" style={{ fontSize: 8, color: 'var(--ink-3)' }}>{r}</span>)}
             </div>
           )}
+          {rsMap && rsMap[s.code] && (() => { const r = rsMap[s.code]; return (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginTop: 3, flexWrap: 'wrap' }}>
+              <span className="mono" title={r.chain ? ('象限 ' + (r.chain.quadrant || '—') + ' · 研报 ' + (r.chain.research != null ? r.chain.research : '—') + ' · 温度 ' + (r.chain.therm != null ? r.chain.therm : '—')) : '不在产业链票池'}
+                style={{ fontSize: 9, color: r.chain ? (r.chain.chain >= 0 ? 'var(--dai)' : 'var(--zhu)') : 'var(--ink-3)', flexShrink: 0 }}>
+                {r.chain ? (r.chain.seg_name + ' ' + (r.chain.chain >= 0 ? '+' : '') + (+r.chain.chain).toFixed(2)) : '链 —'}</span>
+              <span className="mono" title={r.news ? (r.news.read || '') : '无相关新闻/未判'}
+                style={{ fontSize: 9, color: r.news ? (r.news.score > 0 ? 'var(--dai)' : (r.news.score < 0 ? 'var(--zhu)' : 'var(--ink-2)')) : 'var(--ink-3)', flexShrink: 0 }}>
+                {r.news ? r.news.tag : '闻 —'}</span>
+              <span className="mono" title={'综合分(' + r.parts + '/3 成分;展示参考,不改选股信号)'}
+                style={{ fontSize: 9, color: 'var(--ink-1)', flexShrink: 0 }}>
+                {r.composite != null ? ('综 ' + (r.composite >= 0 ? '+' : '') + (+r.composite).toFixed(2) + '·' + r.parts + '/3') : '综 —'}</span>
+            </div>
+          ); })()}
         </div>
         <div style={{ width: 80, flexShrink: 0 }} className="mono"><span style={{ fontSize: 10, color: 'var(--ink-2)' }}>{s.ind}</span></div>
         <div style={{ width: pctW, flexShrink: 0 }}><PctBar pct={x.pct} color={accent} /></div>
