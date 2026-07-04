@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import numpy as np
 import pandas as pd
+import pytest
 
 
 def _quotes_for(codes, trend=0.02, days=45):
@@ -59,6 +60,34 @@ def test_segment_detail_fetches_only_pool(monkeypatch, tmp_path):
     r = aggregate.segment_detail("C2")
     assert r["ok"] is True
     assert set(seen["codes"]) == set(segment_pool(fw, "C2"))
+
+
+def test_v4_pct_map_production_lgb_pct_column(monkeypatch, tmp_path):
+    """生产 parquet 列为 lgb_pct(rank(pct=True) 值域 0-1)而非 pct —— 回退链须识别并归一 0-100。"""
+    from guanlan_v2.industry.aggregate import _v4_pct_map
+    from guanlan_v2.strategy import paths
+    p = tmp_path / "v4_ranking_latest.parquet"
+    pd.DataFrame({"code": ["SH688498", "SZ000001"], "lgb_score": [1.2, 0.3],
+                  "lgb_pct": [0.987, 0.5], "lgb_rank": [1, 2],
+                  "v4_total": [88.0, float("nan")], "v4_layer": ["L1", None],
+                  "date": ["2026-07-04", "2026-07-04"]}).to_parquet(p)
+    monkeypatch.setattr(paths, "V4_RANKING_PARQUET", p)
+    m = _v4_pct_map()
+    assert m is not None, "生产列名 lgb_pct 不该整体降级为 None"
+    assert m["SH688498"] == pytest.approx(98.7)
+    assert m["SZ000001"] == pytest.approx(50.0)
+
+
+def test_v4_pct_map_legacy_pct_column(monkeypatch, tmp_path):
+    """旧格式 pct(0-100)原样返回,不二次缩放。"""
+    from guanlan_v2.industry.aggregate import _v4_pct_map
+    from guanlan_v2.strategy import paths
+    p = tmp_path / "v4_ranking_legacy.parquet"
+    pd.DataFrame({"code": ["SH688498"], "pct": [98.7]}).to_parquet(p)
+    monkeypatch.setattr(paths, "V4_RANKING_PARQUET", p)
+    m = _v4_pct_map()
+    assert m is not None
+    assert m["SH688498"] == pytest.approx(98.7)
 
 
 def test_board_exposes_editorial_and_derived_fields(monkeypatch, tmp_path):

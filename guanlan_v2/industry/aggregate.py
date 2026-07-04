@@ -35,10 +35,13 @@ def _v4_pct_map() -> Optional[dict]:
         from guanlan_v2.strategy.paths import V4_RANKING_PARQUET
         df = pd.read_parquet(V4_RANKING_PARQUET)
         codecol = "code" if "code" in df.columns else ("ts_code" if "ts_code" in df.columns else None)
-        pctcol = "pct" if "pct" in df.columns else None
+        pctcol = "lgb_pct" if "lgb_pct" in df.columns else ("pct" if "pct" in df.columns else None)
         if not codecol or not pctcol:
             return None
-        return dict(zip(df[codecol].astype(str), df[pctcol]))
+        vals = df[pctcol].astype(float)
+        if pctcol == "lgb_pct":   # 生产 rank(pct=True) 值域 0-1;下游(_stock_rows round/前端原样)按 0-100 消费
+            vals = vals * 100.0
+        return dict(zip(df[codecol].astype(str), vals))
     except Exception:  # noqa: BLE001
         return None
 
