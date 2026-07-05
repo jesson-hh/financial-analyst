@@ -59,6 +59,26 @@ def _call_news(codes: List[str]) -> Dict[str, Any]:
     return asyncio.run(news_sentiment(codes, limit=200))
 
 
+def _run_rerank_bridge(rows: List[dict], market: Dict[str, Any]) -> Dict[str, Any]:
+    """桥(便于 monkeypatch):行业重排。"""
+    from guanlan_v2.screen.rerank import run_rerank
+    return run_rerank(rows, market)
+
+
+def _record_rerank_ab(run_id: str, rows: List[dict], rk: Dict[str, Any],
+                      top_n: int) -> None:
+    """A/B 双篮并行落 picks 档案(kind=rerank_ab;snapshot=False 绝不占正式语义)。"""
+    from guanlan_v2.screen.picks import append_pick
+    k = min(10, int(top_n))
+    data_codes = [r["code"] for r in rows[:k]]
+    after = sorted(rk.get("rows") or [], key=lambda x: x.get("rank_after", 0))
+    rr_codes = [x["code"] for x in after[:k]]
+    ts = _now()
+    for arm, codes in (("data", data_codes), ("rerank", rr_codes)):
+        append_pick({"kind": "rerank_ab", "arm": arm, "codes": codes,
+                     "run_id": run_id, "ts": ts, "snapshot": False})
+
+
 # ── 产业链分(纯函数,零 LLM)─────────────────────────────────────────────
 
 def industry_scores(codes: List[str]) -> Tuple[Dict[str, Optional[dict]], Dict[str, Any]]:
@@ -253,9 +273,14 @@ def run_rescore(run_id: str, top_n: int, note: str, progress) -> Dict[str, Any]:
                                    (nw or {}).get("score") if nw else None)
             rows.append({"code": c, "v4pct": r.get("v4pct"), "chain": ch, "news": nw,
                          "composite": comp["score"], "parts": comp["parts"]})
+        progress(phase="rerank", label="④ 行业重排(LLM 整批)…")
+        rk = _run_rerank_bridge(rows, {"market_read": nstats.get("market_read"),
+                                       "market_tilt": nstats.get("market_tilt")})
+        if rk.get("ok"):
+            _record_rerank_ab(run_id, rows, rk, top_n)
         end = {"run_id": run_id, "ts": _now(), "note": note, "top_n": top_n,
                "ok": True, "error": None, "rows": rows,
-               "stats": dict(nstats, board_freshness=fresh)}
+               "stats": dict(nstats, board_freshness=fresh), "rerank": rk}
     except RescoreError as exc:
         end = {"run_id": run_id, "ts": _now(), "note": note, "top_n": top_n,
                "ok": False, "error": str(exc), "rows": [], "stats": {}}

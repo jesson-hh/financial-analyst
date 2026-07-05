@@ -3,6 +3,7 @@
 import threading
 import time
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -12,6 +13,15 @@ import guanlan_v2.screen.rescore as rs
 def _client():
     app = FastAPI()
     app.include_router(rs.build_rescore_router())
+    return TestClient(app)
+
+
+@pytest.fixture
+def client():
+    """P6′ picks 端点(kind 过滤)测试用:挂 /screen 全路由组(picks 端点归属 screen.api)。"""
+    from guanlan_v2.screen.api import build_screen_router
+    app = FastAPI()
+    app.include_router(build_screen_router())
     return TestClient(app)
 
 
@@ -113,3 +123,17 @@ def test_endpoint_already_running_no_deadlock(monkeypatch, tmp_path):
         if not rs._rescore_public_state()["running"]:
             break
     assert rs._rescore_public_state()["phase"] == "done"
+
+
+def test_screen_picks_filters_rerank_ab_by_default(tmp_path, monkeypatch, client):
+    from guanlan_v2.screen import picks as pk
+    monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
+    pk.append_pick({"kind": "rerank_ab", "arm": "data", "codes": ["SH600000"],
+                    "run_id": "rs_x", "ts": "2026-07-05T10:00:00", "snapshot": False})
+    pk.append_pick({"codes": ["SZ000001"], "snapshot": True, "ts": "2026-07-05T10:01:00"})
+    r = client.get("/screen/picks").json()
+    body = r.get("picks") or r.get("items") or []
+    assert all(x.get("kind") != "rerank_ab" for x in body)     # 默认过滤=现有消费方零变化
+    r2 = client.get("/screen/picks", params={"kind": "rerank_ab"}).json()
+    rows2 = r2.get("picks") or r2.get("items") or []
+    assert rows2 and all(x.get("kind") == "rerank_ab" for x in rows2)

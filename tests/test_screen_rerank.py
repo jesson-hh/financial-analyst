@@ -120,3 +120,49 @@ def test_run_rerank_success_block_schema(monkeypatch):
     assert by["SH600000"]["rank_before"] == 1 and by["SH600000"]["rank_after"] == 3
     assert by["SH600519"]["rank_after"] == 1 and by["SH600519"]["stance"] == "中性"
     assert all(r["reason"] for r in out["rows"])
+
+
+def test_run_rescore_carries_rerank_block_and_ab_baskets(tmp_path, monkeypatch):
+    from guanlan_v2.screen import picks as pk
+    from guanlan_v2.screen import rescore as rs
+    monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
+    monkeypatch.setattr(rs, "v4_pool", lambda n: [
+        {"code": f"SH60000{i}", "v4pct": 99.0 - i} for i in range(5)])
+    monkeypatch.setattr(rs, "industry_scores", lambda codes: ({c: None for c in codes}, {}))
+    monkeypatch.setattr(rs, "news_scores", lambda codes, top_n: (
+        {c: None for c in codes},
+        {"llm_calls": 0, "cache_hits": 0, "market_read": "平", "market_tilt": "中性"}))
+    fake_rk = {"ok": True, "model": "m", "overall": "o", "lessons_injected": 0,
+               "board_snapshot": {}, "elapsed_sec": 0.1,
+               "rows": [{"code": f"SH60000{i}", "rank_before": i + 1,
+                         "rank_after": 5 - i, "stance": "中性", "reason": "r"}
+                        for i in range(5)]}
+    monkeypatch.setattr(rs, "_run_rerank_bridge", lambda rows, market: fake_rk)
+    end = rs.run_rescore("rs_test", top_n=5, note="t", progress=lambda **k: None)
+    assert end["ok"] and end["rerank"]["ok"]
+    rows = pk.read_picks(limit=10)
+    ab = [r for r in rows if r.get("kind") == "rerank_ab"]
+    assert len(ab) == 2 and {r["arm"] for r in ab} == {"data", "rerank"}
+    data_arm = next(r for r in ab if r["arm"] == "data")
+    rr_arm = next(r for r in ab if r["arm"] == "rerank")
+    assert data_arm["codes"][0] == "SH600000" and rr_arm["codes"][0] == "SH600004"
+    assert all(not r.get("snapshot") for r in ab)
+    assert all(r["run_id"] == "rs_test" for r in ab)
+
+
+def test_run_rescore_rerank_fail_no_baskets(tmp_path, monkeypatch):
+    from guanlan_v2.screen import picks as pk
+    from guanlan_v2.screen import rescore as rs
+    monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
+    monkeypatch.setattr(rs, "v4_pool", lambda n: [{"code": "SH600000", "v4pct": 99.0}])
+    monkeypatch.setattr(rs, "industry_scores", lambda codes: ({c: None for c in codes}, {}))
+    monkeypatch.setattr(rs, "news_scores", lambda codes, top_n: (
+        {c: None for c in codes}, {"llm_calls": 0, "cache_hits": 0}))
+    monkeypatch.setattr(rs, "_run_rerank_bridge",
+                        lambda rows, market: {"ok": False, "reason": "LLM 失败: x"})
+    end = rs.run_rescore("rs_t2", top_n=5, note="", progress=lambda **k: None)
+    assert end["ok"] is True                      # 打分本身成功(重排失败不拖垮 run)
+    assert end["rerank"]["ok"] is False           # 失败显形
+    assert pk.read_picks(limit=10) == []          # 失败绝不落 A/B 篮

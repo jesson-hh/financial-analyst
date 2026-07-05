@@ -1467,10 +1467,15 @@ def build_screen_router() -> APIRouter:
         return JSONResponse({"ok": True, "variants": vs, "default_model": dflt})
 
     @router.get("/picks")
-    def screen_picks(snapshot_only: int = 0, limit: int = 50):
-        """picks 档案读回(P0;P1 收益跟踪/前端将来消费)。坏行已在 read_picks 内跳过。"""
+    def screen_picks(snapshot_only: int = 0, limit: int = 50, kind: str = ""):
+        """picks 档案读回(P0;P1 收益跟踪/前端将来消费)。坏行已在 read_picks 内跳过。
+        P6′:kind=rerank_ab 只回 A/B 双篮行;默认(kind 空)过滤掉它们——现有消费方零行为变化。"""
         from guanlan_v2.screen import picks as _picks
         items = _picks.read_picks(snapshot_only=bool(snapshot_only), limit=limit)
+        if kind:
+            items = [r for r in items if r.get("kind") == kind]
+        else:
+            items = [r for r in items if r.get("kind") != "rerank_ab"]
         return JSONResponse({"ok": True, "items": items, "n": len(items),
                              "path": str(_picks.PICKS_PATH)})
 
