@@ -982,6 +982,24 @@ def _rescore_lines(run: Optional[Dict[str, Any]]) -> str:
                  f"board行情日 {fresh.get('quote_date') or '—'}")
     if stats.get("news_fail"):
         lines.append(f"情绪批次失败: {stats.get('news_fail')}")
+    rerank = run.get("rerank")
+    if isinstance(rerank, dict):
+        if rerank.get("ok"):
+            lines.append(f"重排({rerank.get('model')}): {rerank.get('overall')} · "
+                         f"教训注入 {rerank.get('lessons_injected', 0)}")
+            rows = sorted((rerank.get("rows") or []),
+                         key=lambda r: abs(int(r.get("rank_before", 0)) - int(r.get("rank_after", 0))),
+                         reverse=True)[:5]
+            for r in rows:
+                before = int(r.get("rank_before", 0))
+                after = int(r.get("rank_after", 0))
+                delta = after - before
+                arrow = "↑" if delta < 0 else ("↓" if delta > 0 else "→")
+                reason = str(r.get("reason") or "")[:40]
+                lines.append(f"{r.get('code')} {before}→{after} {arrow}{abs(delta)} "
+                             f"{r.get('stance')}·{reason}")
+        else:
+            lines.append(f"重排失败: {rerank.get('reason')}")
     return "\n".join(lines)
 
 
@@ -1031,6 +1049,55 @@ def rescore_view_impl() -> Dict[str, Any]:
         return {"ok": False, "content": f"再打分档案读取失败: {e}", "artifact": None}
     run = rr.get("run")
     return {"ok": True, "artifact": None, "raw": {"run": run}, "content": _rescore_lines(run)}
+
+
+# ── P6′ Task 5:行业重排层帷幄工具面(A/B 成绩单只读 + 结论蒸馏入记忆)─────────
+
+def _rerank_perf_fetch(limit: int = 5) -> Dict[str, Any]:
+    """桥:重排 A/B 对照档案(transport 照 rescore_impl 既有端点调用方式)。"""
+    lim = max(1, min(int(limit or 5), 20))
+    return _self_get(f"/seats/basket_perf?kind=rerank_ab&limit={lim}")
+
+
+def rerank_perf_impl(limit: int = 5) -> Dict[str, Any]:
+    """重排 A/B 前向对照成绩单(只读):data 臂 vs rerank 臂逐对 excess 对比。"""
+    try:
+        r = _rerank_perf_fetch(limit)
+    except Exception as e:
+        return {"ok": False, "content": f"A/B 档案读取失败: {e}", "artifact": None}
+    if not r.get("ok"):
+        return {"ok": False, "content": f"A/B 档案读取失败: {r.get('reason')}",
+                "artifact": None, "raw": r}
+    pairs = r.get("pairs") or []
+    if not pairs:
+        return {"ok": True, "artifact": None, "raw": r,
+                "content": "暂无 A/B 档案(先跑再打分+重排攒档案)"}
+    lines = []
+    for p in pairs:
+        ts = str(p.get("ts") or "")[:16]
+        arms = p.get("arms") or {}
+        data_arm = arms.get("data") or {}
+        rerank_arm = arms.get("rerank") or {}
+        def _arm_s(a: Dict[str, Any]) -> str:
+            if not a.get("ok"):
+                return f"失败({a.get('reason', '未成熟')})"
+            ex = a.get("excess")
+            return f"{float(ex):+.2%}" if isinstance(ex, (int, float)) else "未成熟"
+        diff = p.get("excess_diff")
+        diff_s = f"{float(diff) * 100:+.1f}pp" if isinstance(diff, (int, float)) else "—"
+        lines.append(f"{p.get('run_id')} · {ts} · data臂 {_arm_s(data_arm)} · "
+                     f"rerank臂 {_arm_s(rerank_arm)} · Δ={diff_s}")
+    return {"ok": True, "artifact": None, "raw": r, "content": "\n".join(lines)}
+
+
+def rerank_distill_impl(key: str = "", text: str = "") -> Dict[str, Any]:
+    """A/B 结论蒸馏为行业教训入帷幄记忆(key 强制加「行业·」前缀,scope=global)。"""
+    key = (key or "").strip()
+    if not key:
+        return {"ok": False, "content": "key 必填(蒸馏教训需可检索的主题 key)", "artifact": None}
+    if not key.startswith("行业·"):
+        key = f"行业·{key}"
+    return memory_write_impl(text=text, scope="global", key=key)
 
 
 def seats_decide_impl(code: str, name: str = "", creed: str = "",
@@ -2193,6 +2260,26 @@ WW_TOOL_TABLE = [
      "input_schema": {"type": "object", "properties": {}},
      "impl": rescore_view_impl, "cost": "instant", "confirm": False,
      "reachable": ["/screen/rescore/latest"]},
+    {"name": "ww_rerank_perf",
+     "description":
+         "重排 A/B 前向对照成绩单(P6′,只读):每次再打分若带重排,data 臂(纯产业链+情绪展示分)"
+         "与 rerank 臂(经 LLM 重排后)各自的前向 excess 逐对比,看重排是否真带来超额。"
+         "用户问『重排有没有用/A/B 效果』先用它看有没有现成对照档案。",
+     "input_schema": {"type": "object", "properties": {
+         "limit": {"type": "integer", "default": 5, "description": "最近几对(服务端钳 1-20)"}}},
+     "impl": rerank_perf_impl, "cost": "instant", "confirm": False,
+     "reachable": ["/seats/basket_perf"]},
+    {"name": "ww_rerank_distill",
+     "description":
+         "把 ww_rerank_perf 的真实 A/B 数字蒸馏为行业教训,写入帷幄长期记忆(key 强制加"
+         "「行业·」前缀,scope=global,供后续重排上下文注入引用)。绝不凭印象编教训,"
+         "必须先调 ww_rerank_perf 看到真实数字再蒸馏;需用户确认。",
+     "input_schema": {"type": "object", "properties": {
+         "key": {"type": "string", "description": "教训主题(会被强制加『行业·』前缀)"},
+         "text": {"type": "string", "description": "教训内容,须引用 ww_rerank_perf 的真实数字"}},
+      "required": ["key", "text"]},
+     "impl": rerank_distill_impl, "cost": "instant", "confirm": True,
+     "reachable": []},
     {"name": "ww_capabilities",
      "description":
          "列出我(帷幄)当前能调用的全部工具及用途。用户问『你能做什么/有哪些功能/会用什么工具』,或我不确定该用哪个工具时,先调它自查。",

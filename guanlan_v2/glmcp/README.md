@@ -1,7 +1,7 @@
 # guanlan MCP server
 
 把帷幄的 `ww_*` 工具(去 3 个仅 console 语境可用的,见下)+ 7 个引擎 alpha-zoo 研究工具
-暴露成 MCP 工具(**50 个**),供外部 MCP 客户端(别的 Claude / IDE 插件 / agent)驱动 guanlan。
+暴露成 MCP 工具(**52 个**),供外部 MCP 客户端(别的 Claude / IDE 插件 / agent)驱动 guanlan。
 
 ## 两种传输(任选)
 - **HTTP**:随 9999 后端一起跑,挂在 `http://127.0.0.1:9999/gl-mcp`。
@@ -10,7 +10,7 @@
 `example.mcp.json` 是两种的客户端配置样例。
 
 ## 与引擎 MCP 并存
-9999 上 `/mcp` 是引擎自带 MCP(20 个引擎研究/dream 工具);本 server 是 `/gl-mcp`(50 个 guanlan 工具)。两者并存、各管各的。
+9999 上 `/mcp` 是引擎自带 MCP(20 个引擎研究/dream 工具);本 server 是 `/gl-mcp`(52 个 guanlan 工具)。两者并存、各管各的。
 
 ## 排除的 3 个工具(为什么 MCP 里没有)
 - `ww_plan_update` / `ww_show_page`:console-UI-only(改会话计划/往 console 右栏弹页面),MCP 无意义。

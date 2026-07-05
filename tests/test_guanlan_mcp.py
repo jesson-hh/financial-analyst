@@ -10,7 +10,7 @@ def test_build_mcp_tools_derivation():
     assert "ww_plan_update" not in names and "ww_show_page" not in names and "ww_seats_bind" not in names      # 去除 console-UI-only & 前端信封
     assert (ww - {"ww_plan_update", "ww_show_page", "ww_seats_bind"}) <= names                  # 其余 ww_ 全在
     assert {"alpha_list", "alpha_compare", "alpha_forge", "factor_report"} <= names
-    assert len(tools) == 50                                                    # 43 ww_(46−3 excluded) + 7 alpha-zoo
+    assert len(tools) == 52                                                    # 45 ww_(48−3 excluded) + 7 alpha-zoo
 
 
 def test_build_mcp_tools_annotations_and_gate():
@@ -68,7 +68,7 @@ def test_build_server_prewarms_decls():
     import guanlan_v2.glmcp.server as ms
     ms._DECLS = None
     ms.build_server()
-    assert ms._DECLS is not None and len(ms._DECLS) == 50
+    assert ms._DECLS is not None and len(ms._DECLS) == 52
 
 
 def test_build_mcp_http_app_is_starlette():
@@ -97,7 +97,7 @@ def test_mcp_excludes_frontend_envelope_tools():
     names = {t["name"] for t in build_mcp_tools()}
     assert "ww_seats_bind" not in names
     assert "ww_report_run" in names          # 研报经 detached 子进程真跑,保留(gated)
-    assert len(names) == 50
+    assert len(names) == 52
 
 
 def test_spawn_background_report_branch(monkeypatch):

@@ -610,14 +610,14 @@ def test_engine_profile_excludes_ww_but_console_whitelist_resolves():
                           encoding="utf-8", errors="replace", timeout=180, env=env, cwd=str(repo))
     assert proc.returncode == 0, (proc.stderr or "")[-2000:]
     out = _json.loads(proc.stdout.strip().splitlines()[-1])
-    assert len(out["registered_ww"]) == 46                    # +7 P0 闭环读取面薄工具 +1 ww_picks_perf +2 P2 研究回路 +2 P3 draft转正面 +2 P5 再打分
+    assert len(out["registered_ww"]) == 48                    # +7 P0 闭环读取面薄工具 +1 ww_picks_perf +2 P2 研究回路 +2 P3 draft转正面 +2 P5 再打分 +2 P6′ 重排A/B
     # ① 非显式白名单路径(research / 缺省 / all)一律不外露 ww_*,且不再返回 None(None=完全不限制)
     assert out["research_is_none"] is False and out["research_ww"] == []
     assert out["default_is_none"] is False and out["default_ww"] == []
     assert out["all_is_none"] is False and out["all_ww"] == []
     # ② console 显式白名单路径不受影响:62 名全部可解析,含 37 个 ww_(+工坊删除/设默认 2 + alpha-zoo 7)
-    assert out["console_n"] == 71 and out["console_missing"] == []
-    assert out["explicit_n"] == 71 and out["explicit_ww_n"] == 46
+    assert out["console_n"] == 73 and out["console_missing"] == []
+    assert out["explicit_n"] == 73 and out["explicit_ww_n"] == 48
 
 
 def test_f10_impl_returns_structured_facts(monkeypatch):
@@ -1081,9 +1081,9 @@ def test_registry_derivation_consistent():
     """阶段0 重构守护:CONSOLE_ALLOWED 与 _WW_REACHABLE_ENDPOINTS 必须从声明表派生且与已知集合一致。"""
     import guanlan_v2.console.tools as ct
     ww_in_table = {t["name"] for t in ct.WW_TOOL_TABLE}
-    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 46
+    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 48
     assert ww_in_table == {n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")}
-    assert len(ct.CONSOLE_ALLOWED) == 71
+    assert len(ct.CONSOLE_ALLOWED) == 73
     assert {"/factorlib/save", "/workflow/compose", "/feature/build"} <= ct._WW_REACHABLE_ENDPOINTS
     assert ct._WW_REACHABLE_ENDPOINTS == {ep for t in ct.WW_TOOL_TABLE for ep in t.get("reachable", [])}
 
@@ -1125,7 +1125,7 @@ def test_ww_reachable_endpoints_matches_expected():
         "/workflow/critique",     # ww_workflow_critique
         "/screen/regen",          # ww_regen(触发)
         "/screen/regen/status",   # ww_regen(wait 轮询)
-        "/seats/basket_perf",     # ww_picks_perf(P1 成绩单)
+        "/seats/basket_perf",     # ww_picks_perf(P1 成绩单)+ww_rerank_perf(P6′ A/B 成绩单,kind=rerank_ab)
         "/screen/picks",          # ww_picks_perf(读 snapshot 档案)
         "/research/loop/start",   # ww_research_loop(P2 发起)
         "/research/loop/status",  # ww_research_loop(wait 轮询)
@@ -1723,6 +1723,64 @@ def test_rescore_view_impl_empty_honest(monkeypatch):
     monkeypatch.setattr(ct, "_self_get", lambda path, timeout=30: {"ok": True, "run": None})
     r = ct.rescore_view_impl()
     assert r["ok"] is True and "无再打分档案" in r["content"]
+
+
+# ── P6′ Task 5: ww_rerank_perf / ww_rerank_distill + ww_rescore 重排摘要升级 ──
+
+def test_rescore_lines_renders_rerank_block():
+    import guanlan_v2.console.tools as ct
+    run_ok = {"run_id": "rs_x", "top_n": 5, "ts": "2026-07-04T10:00", "ok": True,
+              "rows": [], "stats": {},
+              "rerank": {"ok": True, "model": "deepseek-v4-pro", "overall": "顺风",
+                         "lessons_injected": 3, "board_snapshot": "…", "elapsed_sec": 12.3,
+                         "rows": [{"code": "SH600000", "rank_before": 7, "rank_after": 2,
+                                   "stance": "顺风", "reason": "算力链条景气度上行,资金持续流入"},
+                                  {"code": "SH600001", "rank_before": 3, "rank_after": 3,
+                                   "stance": "中性", "reason": "无明显边际变化"}]}}
+    line = ct._rescore_lines(run_ok)
+    assert "顺风" in line and "deepseek-v4-pro" in line and "教训注入 3" in line
+    assert "SH600000 7→2 ↑5" in line
+
+    run_failed = dict(run_ok, rerank={"ok": False, "reason": "llm_timeout"})
+    line2 = ct._rescore_lines(run_failed)
+    assert "重排失败: llm_timeout" in line2
+
+    run_legacy = dict(run_ok)
+    del run_legacy["rerank"]
+    line3 = ct._rescore_lines(run_legacy)
+    assert "重排" not in line3 and "rerank" not in line3.lower()
+
+
+def test_rerank_distill_enforces_prefix(monkeypatch):
+    import guanlan_v2.console.tools as ct
+    seen = {}
+    monkeypatch.setattr(ct, "memory_write_impl",
+                        lambda text, scope, key: seen.update(k=key, t=text) or {"ok": True})
+    r = ct.rerank_distill_impl(key="光芯片顺风判断",
+                               text="6月底顺风提升的光芯片票 20日超额 +2.1pp")
+    assert r["ok"] and seen["k"] == "行业·光芯片顺风判断"     # 强制前缀
+    ct.rerank_distill_impl(key="行业·情绪", text="x")
+    assert seen["k"] == "行业·情绪"                            # 已带前缀不重复加
+    r3 = ct.rerank_distill_impl(key="", text="x")
+    assert r3["ok"] is False                                   # key 必填
+
+
+def test_rerank_perf_impl_renders_pairs(monkeypatch):
+    import guanlan_v2.console.tools as ct
+    fake = {"ok": True, "kind": "rerank_ab", "n": 1, "pairs": [
+        {"run_id": "rs_a", "ts": "2026-07-01T18:00:00", "excess_diff": 0.021,
+         "arms": {"data": {"ok": True, "excess": -0.01},
+                  "rerank": {"ok": True, "excess": 0.011}}}]}
+    monkeypatch.setattr(ct, "_rerank_perf_fetch", lambda limit: fake)   # 桥打桩
+    r = ct.rerank_perf_impl(limit=5)
+    assert r["ok"] and "rs_a" in r["content"] and "+2.1pp" in r["content"]
+
+
+def test_rerank_perf_impl_empty_honest(monkeypatch):
+    import guanlan_v2.console.tools as ct
+    monkeypatch.setattr(ct, "_rerank_perf_fetch", lambda limit: {"ok": True, "pairs": [], "n": 0})
+    r = ct.rerank_perf_impl(limit=5)
+    assert r["ok"] is True and "暂无 A/B 档案" in r["content"]
 
 
 # ── P3: ww_factor_drafts / ww_factor_promote ────────────────────────────────
