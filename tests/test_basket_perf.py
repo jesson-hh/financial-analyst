@@ -83,6 +83,12 @@ def _client() -> TestClient:
     return TestClient(app)
 
 
+@pytest.fixture
+def client() -> TestClient:
+    """kind=rerank_ab 测试用:挂 seats 路由(basket_perf 归属 seats.api)。"""
+    return _client()
+
+
 def test_endpoint_basket_perf(monkeypatch):
     import financial_analyst.data.loader_factory as _lf
     import guanlan_v2.strategy.compute.eqw_market as EQ
@@ -97,3 +103,26 @@ def test_endpoint_basket_perf(monkeypatch):
 def test_endpoint_requires_params():
     j = _client().get("/seats/basket_perf").json()
     assert j["ok"] is False and "必填" in j["reason"]
+
+
+def test_basket_perf_default_behavior_unchanged(client):
+    """无 kind:codes/start 必填契约原样(守护现有消费方零变化)。"""
+    r = client.get("/seats/basket_perf").json()
+    assert r["ok"] is False and "必填" in r["reason"]
+
+
+def test_basket_perf_rerank_ab_pairs(tmp_path, monkeypatch, client):
+    from guanlan_v2.screen import picks as pk
+    monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
+    ts = "2026-07-01T18:00:00"
+    pk.append_pick({"kind": "rerank_ab", "arm": "data", "codes": ["SH600000"],
+                    "run_id": "rs_a", "ts": ts, "snapshot": False})
+    pk.append_pick({"kind": "rerank_ab", "arm": "rerank", "codes": ["SZ000001"],
+                    "run_id": "rs_a", "ts": ts, "snapshot": False})
+    pk.append_pick({"kind": "rerank_ab", "arm": "data", "codes": ["SH600001"],
+                    "run_id": "rs_half", "ts": ts, "snapshot": False})   # 半对→跳过
+    r = client.get("/seats/basket_perf", params={"kind": "rerank_ab", "limit": 5}).json()
+    assert r["ok"] and r["kind"] == "rerank_ab" and r["n"] == 1
+    pair = r["pairs"][0]
+    assert pair["run_id"] == "rs_a" and set(pair["arms"]) == {"data", "rerank"}
+    # 两臂各为 compute_basket_perf 结果;测试环境无行情时两臂 ok:false 也如实并列(不编数)

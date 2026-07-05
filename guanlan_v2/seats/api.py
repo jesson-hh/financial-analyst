@@ -1989,15 +1989,15 @@ def build_seats_router() -> APIRouter:
                     pass
 
     @router.get("/basket_perf")
-    async def seats_basket_perf(codes: str = "", start: str = "", horizon: int = 5):
+    async def seats_basket_perf(codes: str = "", start: str = "", horizon: int = 5,
+                                kind: str = "", limit: int = 5):
         """篮子前向持有收益 vs 全A等权基准(P1 §2;口径=收盘进→N根收盘出,同置信校准,
-        note 随响应下发)。codes 逗号分隔 ≤40(超截断并注明);失败恒 HTTP200 ok:false。"""
+        note 随响应下发)。codes 逗号分隔 ≤40(超截断并注明);失败恒 HTTP200 ok:false。
+
+        kind=rerank_ab:行业重排 A/B 篮对照(P6′ Task 4),忽略 codes/start,改读
+        picks 档案里的 rerank_ab 成对行,两臂各跑一次 compute_basket_perf 后并列
+        对比(半对/无效跳过,绝不编数)。"""
         try:
-            raw = [c.strip() for c in (codes or "").split(",") if c.strip()]
-            if not raw or not (start or "").strip():
-                return JSONResponse({"ok": False, "reason": "codes 与 start 必填"})
-            truncated = len(raw) > 40
-            raw = raw[:40]
             try:
                 from financial_analyst.buddy.tools import normalize_code as _norm
             except Exception:  # noqa: BLE001 — 引擎不可导入时裸用 code
@@ -2016,6 +2016,57 @@ def build_seats_router() -> APIRouter:
                 return [(str(d)[:10], float(v)) for d, v in zip(df[dcol], df["close"])
                         if v == v]
 
+            from guanlan_v2.seats.basket_perf import compute_basket_perf
+            from guanlan_v2.strategy.compute import eqw_market as _eqw
+            bench_df = _eqw.load_eqw_ret()
+
+            if (kind or "").strip() == "rerank_ab":
+                from guanlan_v2.screen.picks import read_picks
+                rows = [r for r in read_picks(limit=500) if r.get("kind") == "rerank_ab"]
+                by_run: dict = {}
+                for r in rows:
+                    by_run.setdefault(r.get("run_id"), {})[r.get("arm")] = r
+                pairs = []
+                for rid, arms in by_run.items():
+                    if "data" not in arms or "rerank" not in arms:
+                        continue                     # 半对(写一半失败)诚实跳过
+                    start_d = str(arms["data"].get("ts") or "")[:10]
+                    out_arms = {}
+                    for arm in ("data", "rerank"):
+                        codes_a = [str(c) for c in (arms[arm].get("codes") or [])][:40]
+                        closes: dict = {}
+                        for c in codes_a:
+                            cc = c
+                            if _norm is not None:
+                                try:
+                                    cc = _norm(c)
+                                except Exception:  # noqa: BLE001
+                                    cc = (c or "").strip().upper()
+                            try:
+                                closes[cc] = await asyncio.to_thread(_closes, cc)
+                            except Exception:  # noqa: BLE001
+                                closes[cc] = []
+                        out_arms[arm] = compute_basket_perf(closes, start=start_d,
+                                                            horizon=horizon,
+                                                            bench_df=bench_df)
+                    ex_r = out_arms["rerank"].get("excess")
+                    ex_d = out_arms["data"].get("excess")
+                    diff = (round(ex_r - ex_d, 4)
+                            if isinstance(ex_r, (int, float)) and isinstance(ex_d, (int, float))
+                            else None)
+                    pairs.append({"run_id": rid, "ts": arms["data"].get("ts"),
+                                  "arms": out_arms, "excess_diff": diff})
+                    if len(pairs) >= max(1, min(int(limit or 5), 20)):
+                        break
+                return JSONResponse({"ok": True, "kind": "rerank_ab",
+                                     "pairs": pairs, "n": len(pairs)})
+
+            raw = [c.strip() for c in (codes or "").split(",") if c.strip()]
+            if not raw or not (start or "").strip():
+                return JSONResponse({"ok": False, "reason": "codes 与 start 必填"})
+            truncated = len(raw) > 40
+            raw = raw[:40]
+
             closes_by_code: dict = {}
             for c in raw:
                 cc = c
@@ -2029,9 +2080,6 @@ def build_seats_router() -> APIRouter:
                 except Exception:  # noqa: BLE001 — 单票取数失败=空序列 → 纯函数记 warning 剔除
                     closes_by_code[cc] = []
 
-            from guanlan_v2.seats.basket_perf import compute_basket_perf
-            from guanlan_v2.strategy.compute import eqw_market as _eqw
-            bench_df = _eqw.load_eqw_ret()
             out = compute_basket_perf(closes_by_code, start=str(start), horizon=horizon,
                                       bench_df=bench_df)
             if truncated:
