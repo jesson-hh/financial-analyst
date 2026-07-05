@@ -344,15 +344,35 @@ def _run_thread(run_id: str, top_n: int, note: str) -> None:
     err = None
     end: Dict[str, Any] = {}
     try:
-        end = run_rescore(run_id, top_n=top_n, note=note, progress=_progress)
+        result = run_rescore(run_id, top_n=top_n, note=note, progress=_progress)
+        end = result if isinstance(result, dict) else {}
     except Exception as exc:  # noqa: BLE001
         err = f"{type(exc).__name__}: {exc}"
-    finally:
+    finally:                  # 防御:end 非 dict 也绝不让 finally 自身炸→漏清 running(P5 死锁教训)
         ok = err is None and bool(end.get("ok"))
         with _RESCORE_LOCK:
             _RESCORE_STATE.update(running=False, ended_at=_time.time(), ok=ok,
                                   phase=("done" if ok else "error"),
                                   error=(err or end.get("error")))
+
+
+def start_rescore_bg(top_n: int = 50, note: str = "") -> Dict[str, Any]:
+    """模块级发起(端点/调度器共用同一状态机)。已在跑 → ok:false(单飞让路)。"""
+    top_n = max(5, min(int(top_n or 50), 100))
+    run_id = new_run_id()
+    with _RESCORE_LOCK:
+        busy = bool(_RESCORE_STATE.get("running"))
+        if not busy:
+            _RESCORE_STATE.update(running=True, phase="starting", label="启动再打分…",
+                                  run_id=run_id, started_at=_time.time(), ended_at=None,
+                                  ok=None, error=None, lines=[])
+    if busy:                                    # 锁外读状态(锁不可重入,绝不嵌套)
+        return {"ok": False, "reason": "already_running",
+                "state": _rescore_public_state()}
+    _threading.Thread(target=lambda: _run_thread(run_id, top_n, (note or "").strip()),
+                      name="rescore", daemon=True).start()
+    return {"ok": True, "started": True, "run_id": run_id,
+            "state": _rescore_public_state()}
 
 
 def build_rescore_router() -> APIRouter:
@@ -361,21 +381,7 @@ def build_rescore_router() -> APIRouter:
 
     @router.post("/screen/rescore")
     def rescore_start(body: RescoreIn):
-        top_n = max(5, min(int(body.top_n or 50), 100))
-        run_id = new_run_id()
-        with _RESCORE_LOCK:
-            busy = bool(_RESCORE_STATE.get("running"))
-            if not busy:
-                _RESCORE_STATE.update(running=True, phase="starting", label="启动再打分…",
-                                      run_id=run_id, started_at=_time.time(), ended_at=None,
-                                      ok=None, error=None, lines=[])
-        if busy:                                    # 锁外读状态(锁不可重入,绝不嵌套)
-            return JSONResponse({"ok": False, "reason": "already_running",
-                                 "state": _rescore_public_state()})
-        _threading.Thread(target=lambda: _run_thread(run_id, top_n, (body.note or "").strip()),
-                          name="rescore", daemon=True).start()
-        return JSONResponse({"ok": True, "started": True, "run_id": run_id,
-                             "state": _rescore_public_state()})
+        return JSONResponse(start_rescore_bg(body.top_n, body.note))
 
     @router.get("/screen/rescore/status")
     def rescore_status():

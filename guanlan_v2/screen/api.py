@@ -183,6 +183,19 @@ def _start_regen_bg(end: Optional[str] = None) -> bool:
     return True
 
 
+def _maybe_daily_rerank() -> None:
+    """opt-in:GUANLAN_RERANK_DAILY=1 时 regen 后顺跑一次打分+重排(复用 rescore
+    单飞锁,already_running 自然让路;失败显形于 rescore 档案,绝不重试风暴)。"""
+    import os as _os
+    if _os.environ.get("GUANLAN_RERANK_DAILY") != "1":
+        return
+    try:
+        from guanlan_v2.screen import rescore as _rs
+        _rs.start_rescore_bg(top_n=50, note="daily-scheduler")
+    except Exception:  # noqa: BLE001 — 顺跑失败不挡 regen 主流程
+        pass
+
+
 def _regen_sched_tick(now) -> bool:
     """定时判定+触发(注入 now 可测)。每日 GUANLAN_REGEN_DAILY_HOUR(默认18)点后、
     当日未自动处理过 → 触发一次;已有再生在跑(手动)也记当日已处理(单飞语义,不重复)。"""
@@ -194,6 +207,7 @@ def _regen_sched_tick(now) -> bool:
     _REGEN_SCHED["last_auto_date"] = today
     _REGEN_SCHED["last_auto_ts"] = now.isoformat(timespec="seconds")
     _start_regen_bg(None)   # 已在跑返 False 亦视为当日已处理(手动跑过就不叠一次)
+    _maybe_daily_rerank()   # opt-in 顺跑打分+重排(regen 触发后;默认关=零行为变化)
     return True
 
 
@@ -1157,11 +1171,14 @@ def build_screen_router() -> APIRouter:
             _mh = load_health_summary()
         except Exception:  # noqa: BLE001
             _mh = None
+        import os as _os
         return JSONResponse({"ok": bool(rd), "source": "vendored",
                              "v4_ranking": {"date": rd, "rows": n, "stale_days": stale_days},
                              "market_breadth": mb, "model_health": _mh,
                              "regen_scheduler": {"enabled": bool(_REGEN_SCHED.get("enabled")),
-                                                 "last_auto_ts": _REGEN_SCHED.get("last_auto_ts")}})
+                                                 "last_auto_ts": _REGEN_SCHED.get("last_auto_ts")},
+                             "rerank_scheduler": {"enabled": _os.environ.get("GUANLAN_RERANK_DAILY") == "1",
+                                                  "requires": "GUANLAN_REGEN_DAILY=1(随 regen 顺跑)"}})
 
     @router.post("/run")
     def screen_run(body: ScreenIn):

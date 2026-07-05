@@ -137,3 +137,40 @@ def test_screen_picks_filters_rerank_ab_by_default(tmp_path, monkeypatch, client
     r2 = client.get("/screen/picks", params={"kind": "rerank_ab"}).json()
     rows2 = r2.get("picks") or r2.get("items") or []
     assert rows2 and all(x.get("kind") == "rerank_ab" for x in rows2)
+
+
+def test_start_rescore_bg_module_level(monkeypatch):
+    import time as _t
+
+    from guanlan_v2.screen import rescore as rs
+    calls = {}
+    monkeypatch.setattr(rs, "run_rescore",
+                        lambda run_id, top_n, note, progress: calls.setdefault(
+                            "args", (top_n, note)) or {"ok": True})
+    r = rs.start_rescore_bg(top_n=7, note="daily-scheduler")
+    assert r["ok"] and r["started"] and r["run_id"].startswith("rs_")
+    for _ in range(50):
+        if calls.get("args"):
+            break
+        _t.sleep(0.05)
+    assert calls["args"] == (7, "daily-scheduler")
+    for _ in range(50):                       # finally 必清 running
+        if not rs._RESCORE_STATE.get("running"):
+            break
+        _t.sleep(0.05)
+    assert not rs._RESCORE_STATE.get("running")
+
+
+def test_daily_rerank_hook_default_off(monkeypatch):
+    """GUANLAN_RERANK_DAILY 缺省 → 绝不调 start_rescore_bg(零行为变化);=1 → 调。"""
+    import guanlan_v2.screen.api as sapi
+    from guanlan_v2.screen import rescore as rs
+    monkeypatch.delenv("GUANLAN_RERANK_DAILY", raising=False)
+    called = []
+    monkeypatch.setattr(rs, "start_rescore_bg",
+                        lambda **k: called.append(k) or {"ok": True})
+    sapi._maybe_daily_rerank()
+    assert called == []
+    monkeypatch.setenv("GUANLAN_RERANK_DAILY", "1")
+    sapi._maybe_daily_rerank()
+    assert called and called[0].get("note") == "daily-scheduler"
