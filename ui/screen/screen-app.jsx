@@ -313,6 +313,7 @@ function XuanguApp() {
   const [picking, setPicking] = useState(false);
   const [showWs, setShowWs] = useState(false);   // v4 模型工坊抽屉
   const [rsMap, setRsMap] = useState(null);      // P5 再打分:code → {chain,news,composite,parts}(展示型 overlay)
+  const [rkMap, setRkMap] = useState(null);      // P6 行业重排:code → {rank_before,rank_after,stance,reason}(展示型 overlay)
 
   useEffect(() => { document.body.classList.toggle('dark', dark); }, [dark]);
 
@@ -499,7 +500,7 @@ function XuanguApp() {
         onWorkshop={() => setShowWs(true)} />
       <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '400px 1fr', minHeight: 0 }}>
         <ConstraintRail cfg={cfg} setF={setF} toggleFactor={toggleFactor} setFactorW={setFactorW} onReset={reset} pickFactors={pickFactors} picking={picking} result={result} committed={committed} onClearCommit={() => setCommitted(null)} />
-        <RankTable result={result} cfg={cfg} sort={sort} setSort={setSort} showBench={showBench} setShowBench={setShowBench} expanded={expanded} toggleExpand={toggleExpand} onRefresh={refresh} loading={loading} lastRun={lastRun} dirty={dirty} onRegen={regenData} regen={regen} rsMap={rsMap} setRsMap={setRsMap} />
+        <RankTable result={result} cfg={cfg} sort={sort} setSort={setSort} showBench={showBench} setShowBench={setShowBench} expanded={expanded} toggleExpand={toggleExpand} onRefresh={refresh} loading={loading} lastRun={lastRun} dirty={dirty} onRegen={regenData} regen={regen} rsMap={rsMap} setRsMap={setRsMap} rkMap={rkMap} setRkMap={setRkMap} />
       </div>
       {showWs && <ModelWorkshop API={API} models={models} reloadModels={reloadModels} flash={flash}
         onPick={(id) => { setF({ model: id }); refresh(); }} onClose={() => setShowWs(false)} />}
@@ -1109,10 +1110,12 @@ function PctBar({ pct, color }) {
 }
 
 // ───────── P5 再打分(展示型 overlay:产业链分+情绪分+综合;绝不回写 v4/picks)─────────
-function RescoreBar({ onData }) {
+// P6:同批带 rerank 块(行业重排,LLM 整批研判排名;同为展示型 overlay,绝不回写 v4/picks)
+function RescoreBar({ onData, onRkData }) {
   const API = (typeof window !== 'undefined' && window.GUANLAN_BACKEND) || '';
   const [st, setSt] = useState(null);        // null=闲;{running,label}=跑
   const [meta, setMeta] = useState(null);    // 最新 run 元数据(成本/新鲜度)
+  const [rkMeta, setRkMeta] = useState(null); // P6 重排元数据(model/耗时/教训注入 或 失败原因)
   const pull = async () => {
     try {
       const j = await (await fetch(API + '/screen/rescore/latest')).json();
@@ -1120,6 +1123,17 @@ function RescoreBar({ onData }) {
         const m = {}; (j.run.rows || []).forEach(r => { m[r.code] = r; });
         onData(m);
         setMeta({ ts: j.run.ts, s: j.run.stats || {} });
+        const rr = j.run.rerank;
+        if (rr && rr.ok) {
+          onRkData(Object.fromEntries((rr.rows || []).map(r => [r.code, r])));
+          setRkMeta({ ok: true, model: rr.model, elapsed_sec: rr.elapsed_sec, lessons_injected: rr.lessons_injected });
+        } else if (rr && !rr.ok) {
+          onRkData(null);
+          setRkMeta({ ok: false, reason: rr.reason });
+        } else {
+          onRkData(null);
+          setRkMeta(null);
+        }
       } else if (j && j.ok && j.run && !j.run.ok) { setMeta({ err: j.run.error }); }
     } catch (e) {}
   };
@@ -1145,12 +1159,15 @@ function RescoreBar({ onData }) {
       <span onClick={go} className="serif" style={{ fontSize: 10, color: 'var(--paper)',
         background: (st && st.running) ? 'var(--ink-3)' : 'var(--yin)', borderRadius: 5,
         padding: '2px 9px', cursor: 'pointer', userSelect: 'none' }}
-        title="产业链分+新闻情绪对 v4 前50再打分(展示参考,不改选股信号;LLM 按批计费)">
-        {(st && st.running) ? (st.label || '再打分中…') : '再打分 ✦'}</span>
+        title="产业链分+新闻情绪对 v4 前50再打分(展示参考,不改选股信号;LLM 按批计费)+行业重排(LLM 整批)">
+        {(st && st.running) ? (st.label || '再打分中…') : '再打分+重排 ✦'}</span>
       {meta && !meta.err && <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>
         {String(meta.ts || '').slice(5, 16)} · LLM {(meta.s || {}).llm_calls != null ? meta.s.llm_calls : '—'}
         ·缓存 {(meta.s || {}).cache_hits != null ? meta.s.cache_hits : '—'}
-        ·行情日 {(((meta.s || {}).board_freshness || {}).quote_date) || '—'}</span>}
+        ·行情日 {(((meta.s || {}).board_freshness || {}).quote_date) || '—'}
+        {rkMeta && rkMeta.ok && <span> · 重排 {rkMeta.model} {rkMeta.elapsed_sec}s · 教训注入 {rkMeta.lessons_injected}</span>}
+        {rkMeta && !rkMeta.ok && <span style={{ color: 'var(--zhu)' }}> · 重排失败:{String(rkMeta.reason || '').slice(0, 60)}</span>}
+      </span>}
       {meta && meta.err && <span className="mono" style={{ fontSize: 8.5, color: 'var(--zhu)' }}
         title={meta.err}>上次再打分失败</span>}
     </span>
@@ -1158,7 +1175,7 @@ function RescoreBar({ onData }) {
 }
 
 // ───────── 中栏 · 排名清单 ─────────
-function RankTable({ result, cfg, sort, setSort, showBench, setShowBench, expanded, toggleExpand, onRefresh, loading, lastRun, dirty, onRegen, regen, rsMap, setRsMap }) {
+function RankTable({ result, cfg, sort, setSort, showBench, setShowBench, expanded, toggleExpand, onRefresh, loading, lastRun, dirty, onRegen, regen, rsMap, setRsMap, rkMap, setRkMap }) {
   const _fmtT = (d) => { try { return d.toLocaleTimeString('zh-CN', { hour12: false }); } catch (e) { return ''; } };
   const accent = ((window.XG_FBYID[(cfg.factors[0] || {}).id]) || { color: 'var(--zhu)' }).color;
   const pctW = 132;
@@ -1195,7 +1212,7 @@ function RankTable({ result, cfg, sort, setSort, showBench, setShowBench, expand
             cfg.factors.map(f => { const m = window.XG_FBYID[f.id] || { glyph: '?', short: f.id, color: 'var(--ink-2)' }; return <span key={f.id} className="mono" style={{ fontSize: 9, color: 'var(--paper)', background: m.color, borderRadius: 4, padding: '2px 7px' }}>{m.glyph} {m.short} ×{f.w.toFixed(1)}</span>; })
           )}
         </div>
-        <RescoreBar onData={setRsMap} />
+        <RescoreBar onData={setRsMap} onRkData={setRkMap} />
         <span className="mono" style={{ marginLeft: 'auto', fontSize: 9, color: dirty ? 'var(--yin)' : 'var(--ink-3)', whiteSpace: 'nowrap' }}>
           {loading ? '计算中…' : (lastRun ? ((dirty ? '参数已变 · 上次 ' : '上次 ') + _fmtT(lastRun)) : '尚未计算')}
         </span>
@@ -1226,12 +1243,12 @@ function RankTable({ result, cfg, sort, setSort, showBench, setShowBench, expand
       {/* 行 */}
       <div style={{ overflowY: 'auto', minHeight: 0, flex: 1 }}>
         {chosen.map((x, i) => (
-          <Row key={x.s.code} x={x} rank={sort.k === 'score' && sort.d < 0 ? i + 1 : null} accent={accent} chosen pctW={pctW} open={!!expanded[x.s.code]} onToggle={() => toggleExpand(x.s.code)} rsMap={rsMap} />
+          <Row key={x.s.code} x={x} rank={sort.k === 'score' && sort.d < 0 ? i + 1 : null} accent={accent} chosen pctW={pctW} open={!!expanded[x.s.code]} onToggle={() => toggleExpand(x.s.code)} rsMap={rsMap} rkMap={rkMap} />
         ))}
         {showBench && bench.length > 0 && (
           <>
             <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', letterSpacing: '.1em', padding: '9px 18px 5px', borderTop: '1px solid var(--line)', marginTop: 4 }}>—— 约束外候选 · 未入选 ——</div>
-            {bench.map(x => <Row key={x.s.code} x={x} accent={accent} chosen={false} pctW={pctW} open={!!expanded[x.s.code]} onToggle={() => toggleExpand(x.s.code)} rsMap={rsMap} />)}
+            {bench.map(x => <Row key={x.s.code} x={x} accent={accent} chosen={false} pctW={pctW} open={!!expanded[x.s.code]} onToggle={() => toggleExpand(x.s.code)} rsMap={rsMap} rkMap={rkMap} />)}
           </>
         )}
         <div style={{ height: 16 }} />
@@ -1244,7 +1261,7 @@ function RankTable({ result, cfg, sort, setSort, showBench, setShowBench, expand
 const SHIELD_STYLE = {
   'v4.1': ['金信号', 'var(--jin)'], 'v4.2': ['仕佳险', 'var(--yin)'], 'v4.3': ['涨停5重', 'var(--ink-2)'],
 };
-function Row({ x, rank, accent, chosen, pctW, open, onToggle, rsMap }) {
+function Row({ x, rank, accent, chosen, pctW, open, onToggle, rsMap, rkMap }) {
   const s = x.s;
   const reason = x.excl && x.excl.length ? x.excl : (x.benchReason ? [x.benchReason] : []);
   const hasViews = x.views && x.views.length;
@@ -1301,6 +1318,21 @@ function Row({ x, rank, accent, chosen, pctW, open, onToggle, rsMap }) {
                 {r.composite != null ? ('综 ' + (r.composite >= 0 ? '+' : '') + (+r.composite).toFixed(2) + '·' + r.parts + '/3') : '综 —'}</span>
             </div>
           ); })()}
+          {rkMap && rkMap[s.code] && (() => {
+            const k = rkMap[s.code];
+            const d = k.rank_before - k.rank_after;                    // >0 = 提升
+            const big = Math.abs(d) >= 10;
+            const col = k.stance === '顺风' ? 'var(--dai)'
+                      : k.stance === '逆风' ? 'var(--zhu)' : 'var(--ink-3)';
+            return <span className="mono"
+              title={`${k.stance} · ${k.reason || ''}(LLM 重排)`}
+              style={{ fontSize: 8.5, marginLeft: 6, flexShrink: 0,
+                       color: big ? 'var(--jin)' : 'var(--ink-2)' }}>
+              <span style={{ color: col }}>●</span> {k.rank_before}→{k.rank_after}
+              {d !== 0 && <span style={{ color: d > 0 ? 'var(--dai)' : 'var(--zhu)' }}>
+                {d > 0 ? `↑${d}` : `↓${-d}`}</span>}
+            </span>;
+          })()}
         </div>
         <div style={{ width: 80, flexShrink: 0 }} className="mono"><span style={{ fontSize: 10, color: 'var(--ink-2)' }}>{s.ind}</span></div>
         <div style={{ width: pctW, flexShrink: 0 }}><PctBar pct={x.pct} color={accent} /></div>
