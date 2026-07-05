@@ -39,7 +39,10 @@ _CRITIQUE_CONSTRAINTS = (
     "图内数据源节点的 universe 不生效。改进可落在:因子表达式、特征组合、模型类型与超参、"
     "多因子合成方式、回测/分析参数。多特征 ML:把多个 formula 各连一条边到同一个 feature "
     "节点的 feat 口即聚合为多特征训练(保序去重);其余同一输入口多条边仅最后一条生效并记"
-    "警告。与上一轮完全相同的图不会产生不同指标。")
+    "警告。feature.params.tag 只是标注:只能留空或写 IC/fwd_ret(默认标签=未来收益);写"
+    "任何其他文本会被当作 label 表达式执行(如 tag=\"ML\" 会炸 ML 训练),自定义预测标签"
+    "必须用 formula 连 feature.label 口。ML 图的过门指标取模型真实 OOS 成绩(analysis 模型"
+    "报告),不是特征集等权回测。与上一轮完全相同的图不会产生不同指标。")
 
 
 def new_run_id() -> str:
@@ -83,7 +86,8 @@ def _run_graph_eval(graph: Dict[str, Any], p: Dict[str, Any],
                      label=f"② 第 {k + 1}/{max_rounds} 轮 · 图执行:{typ}…", round_k=k)
     return wex.run_graph(graph, overrides={
         "universe": p["universe"], "freq": p["freq"], "oos_frac": _EVAL_OOS_FRAC,
-        "start": p.get("start"), "end": p.get("end")}, on_node=_on)
+        "start": p.get("start"), "end": p.get("end")}, on_node=_on,
+        prefer_model_terminal=True)   # 过门语义=模型真实成绩(ML 图不吃特征等权回测口径)
 
 
 def _save_draft(run_id: str, k: int, expr: str, goal: str, diag: str,
@@ -158,14 +162,27 @@ def _derive_ml_recipe(graph: Dict[str, Any], universe: str) -> Optional[Dict[str
         params[bk] = (int(n) if (n is not None and float(n).is_integer())
                       else (n if n is not None else v))
     return {"kind": _ML_KINDS[ml["type"]], "features": feats, "label": label,
-            "fwd_days": 5, "universe": universe, "params": params}
+            "fwd_days": 5, "universe": universe, "params": params,
+            "_node_id": ml.get("id")}   # 路由用(该 ML 节点求值是否失败),入 spec 前 pop
 
 
 def _route_product(run_id: str, k: int, graph: Dict[str, Any], goal: str, diag: str,
                    metrics: Dict[str, Any], terminal: Optional[Dict[str, Any]],
-                   universe: str) -> Dict[str, Any]:
-    """达标产物三通道路由(spec §4):ML 图→模型 draft;≥2 表达式→组合物化 draft;单→现状。"""
+                   universe: str,
+                   node_errors: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """达标产物三通道路由(spec §4):ML 图→模型 draft;≥2 表达式→组合物化 draft;单→现状。
+
+    保真度1(rr_3af347074b 实证):recipe 所属 ML 节点本轮求值失败(node_errors 有记录)时,
+    过闸指标来自 mf 回退口径而非模型 → 模型通道不可信,改走组合/单因子通道并带 note 显形。"""
+    note: Optional[str] = None
     recipe = _derive_ml_recipe(graph, universe)
+    if recipe is not None:
+        ml_nid = recipe.pop("_node_id", None)
+        failed = {str((e or {}).get("nid")) for e in (node_errors or []) if isinstance(e, dict)}
+        if ml_nid is not None and str(ml_nid) in failed:
+            note = (f"ML 节点 {ml_nid} 本轮求值失败(见 node_errors),过闸指标为 mf 回退"
+                    "口径 → 模型通道不可信,改走组合/单因子通道")
+            recipe = None
     if recipe is not None:                                  # ── 模型通道
         if not recipe["features"]:
             return {"name": None, "status": "save_failed",
@@ -196,16 +213,20 @@ def _route_product(run_id: str, k: int, graph: Dict[str, Any], goal: str, diag: 
                                      "metrics": metrics, "run_id": run_id, "round": k})
         except Exception as exc:  # noqa: BLE001
             pr = {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
-        return ({"name": pr.get("name") or name, "status": "draft_compose"} if pr.get("ok")
-                else {"name": None, "status": "save_failed", "reason": pr.get("reason")})
-    if len(exprs2) == 1:                                    # ── 单因子通道(现状)
+        res = ({"name": pr.get("name") or name, "status": "draft_compose"} if pr.get("ok")
+               else {"name": None, "status": "save_failed", "reason": pr.get("reason")})
+    elif len(exprs2) == 1:                                  # ── 单因子通道(现状)
         try:
             pr = _save_draft(run_id, k, exprs2[0], goal, diag, metrics)
         except Exception as exc:  # noqa: BLE001
             pr = {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
-        return ({"name": pr.get("name"), "status": "draft"} if pr.get("ok")
-                else {"name": None, "status": "save_failed", "reason": pr.get("reason")})
-    return {"name": None, "status": "save_failed", "reason": "图内无可入库表达式"}
+        res = ({"name": pr.get("name"), "status": "draft"} if pr.get("ok")
+               else {"name": None, "status": "save_failed", "reason": pr.get("reason")})
+    else:
+        res = {"name": None, "status": "save_failed", "reason": "图内无可入库表达式"}
+    if note:
+        res["note"] = note                                  # 改道显形(luozi 卡/终态行直显)
+    return res
 
 
 def _save_graph(goal: str, run_id: str, graph: Dict[str, Any]) -> Dict[str, Any]:
@@ -333,7 +354,8 @@ def run_research_loop(run_id: str, goal: str, max_rounds: int, min_rank_ic: floa
         if gate["passed"]:
             progress(phase="promote", label="③ 达标 · 产物入库(draft 待人审)…", round_k=k)
             promoted = _route_product(run_id, k, graph, goal, diag, metrics,
-                                      ex.get("terminal"), universe)
+                                      ex.get("terminal"), universe,
+                                      node_errors=ex.get("node_errors"))
             break
         if k + 1 >= max_rounds:
             break

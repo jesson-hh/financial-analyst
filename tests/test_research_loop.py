@@ -324,6 +324,64 @@ def test_product_route_ml_beats_compose(monkeypatch, tmp_path):
     assert len(train_calls) == 1 and train_calls[0]["kind"] == "xgboost"
 
 
+def test_product_route_ml_failed_falls_back_to_compose(monkeypatch, tmp_path):
+    """保真度1(rr_3af347074b 实证):ML 节点求值失败(node_errors 有记录)、mf 已回落
+    纯组合过闸 → 产物路由必须落组合通道并带 note 显形,绝不走模型通道 save_failed 丢产物。"""
+    _wire(monkeypatch, tmp_path, evals=[])
+    gml = {"nodes": [
+        {"id": "f1", "type": "formula", "params": {"expr": "rank(roe)"}},
+        {"id": "f2", "type": "formula", "params": {"expr": "rank(total_equity/total_mv)"}},
+        {"id": "fe", "type": "feature", "params": {"tag": "IC"}},
+        {"id": "m", "type": "xgb", "params": {"trees": 200}},
+        {"id": "mf", "type": "mf", "params": {}},
+        {"id": "an", "type": "analysis", "params": {}},
+    ], "edges": [{"from": ["f1", "out"], "to": ["fe", "feat"]},
+                 {"from": ["f2", "out"], "to": ["fe", "feat"]},
+                 {"from": ["fe", "fe"], "to": ["m", "fe"]},
+                 {"from": ["m", "model"], "to": ["mf", "m1"]},
+                 {"from": ["fe", "fe"], "to": ["mf", "f1"]},
+                 {"from": ["mf", "factor"], "to": ["an", "factor"]}]}
+    monkeypatch.setattr(rl, "_call_generate", lambda goal: {"ok": True, "graph": gml})
+    ok = _ex_ok(exprs=("rank(roe)", "rank(total_equity/total_mv)"), has_ml=True)
+    ok["node_errors"] = [{"nid": "m", "type": "xgb", "error": "label_error: 标签表达式非法"}]
+    ok["terminal"] = {"kind": "analysis", "node_id": "an", "payload": {
+        "members": ["rank(roe)", "rank(total_equity/total_mv)"],
+        "weights": [{"name": "rank(roe)", "weight": 0.5},
+                    {"name": "rank(total_equity/total_mv)", "weight": 0.5}]}}
+    monkeypatch.setattr(rl, "_run_graph_eval", lambda graph, p, pr, k, mr: dict(ok))
+
+    def _fail_train(spec):
+        raise AssertionError("ML 节点本轮求值已失败,模型通道不应被触发")
+
+    monkeypatch.setattr(rl, "_call_train_promote", _fail_train)
+    saved = {}
+    monkeypatch.setattr(rl, "_save_compose_expr",
+                        lambda name, expr, goal, diag, meta:
+                        saved.update(name=name, expr=expr) or {"ok": True, "name": name})
+    end = rl.run_research_loop("rr_t16", "ML找因子", 3, 0.02, "csi_fast", "month", None, None,
+                               progress=lambda **kw: None)
+    assert end["promoted"]["status"] == "draft_compose"      # 过闸口径=mf 回退组合 → 组合通道
+    assert "rank(roe)" in saved["expr"]
+    note = end["promoted"].get("note") or ""
+    assert "m" in note and "失败" in note                    # 改道显形,绝不静默
+
+
+def test_run_graph_eval_opts_in_model_terminal(monkeypatch):
+    """保真度2:研究回路求值桥必须开 prefer_model_terminal=True(过门语义=模型真实成绩);
+    画布 /workflow/run 不开(默认 False,零行为变化)。"""
+    seen = {}
+
+    def fake_run_graph(graph, overrides=None, on_node=None, prefer_model_terminal=False):
+        seen["flag"] = prefer_model_terminal
+        return {"ok": True}
+
+    monkeypatch.setattr(rl.wex, "run_graph", fake_run_graph)
+    out = rl._run_graph_eval({"nodes": [], "edges": []},
+                             {"universe": "csi_fast", "freq": "month", "start": None, "end": None},
+                             lambda **kw: None, 0, 3)
+    assert out == {"ok": True} and seen["flag"] is True
+
+
 def test_product_route_model_save_failed_honest(monkeypatch, tmp_path):
     lessons, _, _ = _wire(monkeypatch, tmp_path, evals=[])
     gml = {"nodes": [{"id": "f", "type": "formula", "params": {"expr": "rank(close)"}},

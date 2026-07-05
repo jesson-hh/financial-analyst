@@ -566,8 +566,14 @@ def graph_exprs(graph: Dict[str, Any]) -> List[str]:
 
 
 def run_graph(graph: Dict[str, Any], overrides: Optional[Dict[str, Any]] = None,
-              on_node: Optional[Callable[[str, str, str], None]] = None) -> Dict[str, Any]:
-    """整图执行(spec §1.1)。on_node(nid, type, state) state∈running|done|error,供回路进度显形。"""
+              on_node: Optional[Callable[[str, str, str], None]] = None,
+              prefer_model_terminal: bool = False) -> Dict[str, Any]:
+    """整图执行(spec §1.1)。on_node(nid, type, state) state∈running|done|error,供回路进度显形。
+
+    prefer_model_terminal(默认 False=画布 /workflow/run 零行为变化,仅研究回路 opt-in):
+    True 时携带模型报告(payload._kind,唯 ML 报告经 mf 透传才有)的 analysis/iccalc 终端
+    优先于 backtest——backtest 按 fe.features 重推导不吃模型预测(2026-07-05 真机实证:
+    死/活模型 backtest 指标逐位同),ML 图过门指标须对齐模型真实成绩;让位写 warnings 显形。"""
     t0 = time.time()
     ov = overrides or {}
     nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
@@ -639,11 +645,23 @@ def run_graph(graph: Dict[str, Any], overrides: Optional[Dict[str, Any]] = None,
                 on_node(nid, typ, "error")
 
     main = None
-    for kind in _TERMINAL_PRIORITY:                 # 优先级取主终端;同类取拓扑序最后
-        cand = [t for t in terminals if t["kind"] == kind]
-        if cand:
-            main = cand[-1]
-            break
+    if prefer_model_terminal:                       # opt-in:模型报告终端优先(过门=模型真实成绩)
+        for kind in ("analysis", "iccalc"):
+            cand = [t for t in terminals if t["kind"] == kind
+                    and isinstance(t.get("payload"), dict) and t["payload"].get("_kind")]
+            if cand:
+                main = cand[-1]
+                if any(t["kind"] == "backtest" for t in terminals):
+                    warnings.append(
+                        f"ML 图主终端改取 {kind} 模型报告(prefer_model_terminal):"
+                        "backtest 为特征集等权口径不吃模型预测,过门指标已让位给模型真实成绩")
+                break
+    if main is None:
+        for kind in _TERMINAL_PRIORITY:             # 优先级取主终端;同类取拓扑序最后
+            cand = [t for t in terminals if t["kind"] == kind]
+            if cand:
+                main = cand[-1]
+                break
     metrics = metrics_of_terminal(main["payload"]) if main else None
     if main is None:
         warnings.append("无主终端产出(回测/分析/IC)——过门指标缺失")

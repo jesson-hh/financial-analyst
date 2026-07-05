@@ -276,6 +276,66 @@ def test_critique_constraints_states_multi_feature_route():
     assert "feat" in _CRITIQUE_CONSTRAINTS
 
 
+def test_run_graph_ml_model_terminal_default_backtest_opt_in_analysis(monkeypatch):
+    """保真度2(rr 双 run 实证:死/活模型 backtest 指标逐位同):backtest 按 fe.features
+    重推导不吃模型预测——默认优先级不变(镜像前端,/workflow/run 零行为变化);
+    prefer_model_terminal=True(研究回路)时携带模型报告(_kind)的 analysis 终端优先,
+    过门指标=模型真实成绩,backtest 让位写 warnings 显形。"""
+    import json as _json
+    g = _json.loads(_json.dumps(_G_ML))
+    g["nodes"].append({"id": "bt", "type": "backtest", "x": 5, "y": 1, "params": {"topn": 30}})
+    g["edges"].append({"from": ["mf", "factor"], "to": ["bt", "factor"]})
+    # 模型报告如实镜像 _train_eval 形状:顶层 fe spec(backtest 靠它重推导)+ 独立 rank_ic
+    rep_model = dict(_REPORT, headline_ic={"rank_ic": 0.0077},
+                     fe={"features": ["rank(-delta(close,5))"]})
+    rep_bt = dict(_REPORT, headline_ic={"rank_ic": 0.045})
+    seen = {}
+
+    def fake_bt(body):
+        seen["features"] = list(body.features or [])
+        return JSONResponse(rep_bt)
+
+    monkeypatch.setattr(ex, "_call_train", lambda body, kind: JSONResponse(rep_model))
+    monkeypatch.setattr(ex, "_call_backtest", fake_bt)
+    ov = {"universe": "csi_fast", "freq": "month", "oos_frac": 0.3}
+    out0 = ex.run_graph(g, overrides=ov)
+    assert out0["terminal"]["kind"] == "backtest"          # 默认关:优先级镜像前端不变
+    assert out0["metrics"]["rank_ic"] == 0.045
+    assert seen["features"] == ["rank(-delta(close,5))"]   # 实证:backtest 只是特征集等权口径
+    out1 = ex.run_graph(g, overrides=ov, prefer_model_terminal=True)
+    assert out1["terminal"]["kind"] == "analysis"
+    assert out1["metrics"]["rank_ic"] == 0.0077            # 模型真实成绩,不再被回测遮蔽
+    assert any("模型" in w and "backtest" in w for w in out1["warnings"])   # 让位显形
+
+
+def test_run_graph_prefer_model_terminal_non_ml_noop(monkeypatch):
+    """开关只认携带模型报告(_kind)的终端:纯因子图(无 ML)开 True 仍取 backtest,零行为变化。"""
+    g = {"nodes": [
+        {"id": "f", "type": "formula", "x": 0, "y": 0, "params": {"expr": "rank(close)"}},
+        {"id": "an", "type": "analysis", "x": 1, "y": 0, "params": {}},
+        {"id": "bt", "type": "backtest", "x": 1, "y": 1, "params": {"topn": 20}},
+    ], "edges": [{"from": ["f", "out"], "to": ["an", "factor"]},
+                 {"from": ["f", "out"], "to": ["bt", "factor"]}]}
+    monkeypatch.setattr(ex, "_call_report2",
+                        lambda body: JSONResponse(dict(_REPORT, headline_ic={"rank_ic": 0.01})))
+    monkeypatch.setattr(ex, "_call_backtest",
+                        lambda body: JSONResponse(dict(_REPORT, headline_ic={"rank_ic": 0.09})))
+    out = ex.run_graph(g, overrides={"universe": "csi_fast", "freq": "month", "oos_frac": 0.3},
+                       prefer_model_terminal=True)
+    assert out["terminal"]["kind"] == "backtest" and out["metrics"]["rank_ic"] == 0.09
+    assert out["warnings"] == []                           # 没让位就不告警
+
+
+def test_tag_semantics_stated_in_generate_prompt_and_constraints():
+    """保真度3(LLM 曾生成 tag="ML" 致 xgb label_error):generate 提示词与批判环
+    constraints 都必须明示 feature.tag 语义(空/IC/fwd_ret=标注,其余=label 表达式)。"""
+    import guanlan_v2.workflow.api as wapi
+    from guanlan_v2.research.loop import _CRITIQUE_CONSTRAINTS
+    line = next(ln for ln in wapi.SYSTEM_PROMPT.splitlines() if ln.startswith("- feature"))
+    assert "fwd_ret" in line and "label" in line           # 目录行写明 tag 三合法值与后果
+    assert "tag" in _CRITIQUE_CONSTRAINTS and "fwd_ret" in _CRITIQUE_CONSTRAINTS
+
+
 def test_run_graph_unsupported_node_type_honest():
     g = {"nodes": [{"id": "v", "type": "validate", "x": 0, "y": 0, "params": {}}], "edges": []}
     out = ex.run_graph(g, overrides={"universe": "csi_fast", "freq": "month", "oos_frac": 0.3})
