@@ -67,7 +67,7 @@
 - **`factorlib`** 因子库 — 入:无 · 出:`out:series` · 参 `query`(模糊匹配)、`name`(精确名)· 后端:GET `/factorlib/list`(退 `/factor/list`)。从已迁移/注册因子里选一个。
 
 ### 02 · 特征工程
-- **`feature`** 特征工程构建 — 入:`feat:series`、`label:series`(可选)· 出:`fe:fe` · 参 `tag`(`IC`/`fwd_ret`/留空 → 前向收益;或连 `label` 用公式标签)· 后端:POST `/feature/build`。把上游公式在 universe 面板物化成真 X/y;其输出 `fe` 块是后续 ML/PCA 的入口。
+- **`feature`** 特征工程构建 — 入:`feat:series`、`label:series`(可选)· 出:`fe:fe` · 参 `tag`(`IC`/`fwd_ret`/留空 → 前向收益;或连 `label` 用公式标签)· 后端:POST `/feature/build`。把上游公式在 universe 面板物化成真 X/y;其输出 `fe` 块是后续 ML/PCA 的入口。**`feat` 口可接多条边**(唯一多入边例外):多个 `formula`/`factorlib` 各连一条边即聚合为多特征(保序去重),供多特征 ML/PCA/Spearman;其余任何输入口多条边仅最后一条生效并记警告。
 
 ### 03 · 机器学习(入都是 `fe:fe`,出都是 `model:model`)
 - **`xgb`** XGBoost — 参 `trees,depth,lr,sub` · POST `/model/xgboost`

@@ -375,13 +375,16 @@ const NODE_EXEC = {
   //    回真统计 + 可复算 fe spec (供 P3 ML 重建训练集)。dt=fe 非终端 → 不送抽屉, 仅置节点 done。
   //    标签语义: label 端口连了公式 → 用其 expr 作公式标签; 否则用 params.tag (IC/fwd_ret/空 → 后端走前向收益)。——
   feature: async (inputs, params, ctx) => {
-    const featExpr = (inputs.feat && inputs.feat.expr ? String(inputs.feat.expr) : '').trim();
-    if (!featExpr) throw new Error('特征工程: 上游未提供特征表达式 (需「公式输入 / 因子库」直连特征端口)');
+    // feat 口多边聚合为多特征 (保序去重, 与后端 run_graph/_exec_feature、deriveRecipeForNode 同语义)
+    const rawFeat = Array.isArray(inputs.feat) ? inputs.feat : [inputs.feat];
+    const featExprs = [];
+    rawFeat.forEach(p => { const e = (p && p.expr ? String(p.expr) : '').trim(); if (e && featExprs.indexOf(e) < 0) featExprs.push(e); });
+    if (!featExprs.length) throw new Error('特征工程: 上游未提供特征表达式 (需「公式输入 / 因子库」直连特征端口)');
     const labelExpr = (inputs.label && inputs.label.expr ? String(inputs.label.expr) : '').trim();
     const label = labelExpr || String(params.tag == null ? '' : params.tag).trim();   // 连了标签公式→公式标签; 否则 tag(IC/fwd_ret→前向收益)
-    const r = await ctx.post('/feature/build', { features: [featExpr], label, universe: ctx.universe });
+    const r = await ctx.post('/feature/build', { features: featExprs, label, universe: ctx.universe });
     if (!r || r.ok === false) throw new Error('特征工程: ' + ((r && r.reason) || 'feature/build 失败'));
-    return { fe: Object.assign({ __dt: 'fe' }, r, { _universe: ctx.universe, _label: featExpr, _warnings: r.warnings || [] }) };
+    return { fe: Object.assign({ __dt: 'fe' }, r, { _universe: ctx.universe, _label: featExprs.join('+'), _warnings: r.warnings || [] }) };
   },
   // —— ML 训练 (xgb/lgbm/svm/rf): 收上游特征工程 (P2 /feature/build 输出, 内含可复算 fe spec)
   //    + 本节点超参 (trees/depth/lr/leaves/c…) + ctx.universe → POST /model/<kind>。
@@ -815,15 +818,23 @@ async function runGraph(nodes, edges, hooks) {
   const universe = src ? _universeOf(src.params) : 'csi_fast';
   const allExprs = (deriveCall(nodes) || {}).exprs || [];  // mf 兜底 (上游占位拿不到逐端口 expr 时退回全图表达式集合)
   const TERMINAL_DT = { report: 1, ic: 1, result: 1, portfolio: 1, tsic: 1, event: 1, relstat: 1, risk: 1, garch: 1, attrib: 1, tvbeta: 1, validation: 1 };
-  let lastResult = null, firstErr = '', anyFellBack = false; const nodeErrs = [];
+  let lastResult = null, firstErr = '', anyFellBack = false; const nodeErrs = []; const multiEdgeWarns = [];
 
   for (const id of order) {
     const node = byId(id); const spec = SPECS[node.type];
     // 收集上游输入: 对本节点每条入边, 取上游 outputs[源节点][源端口] → inputs[本节点入端口]
-    const inputs = {};
+    // feature.feat 口多边聚合为数组 (多特征, 镜像后端 run_graph); 其余同口多边后到覆盖先到 + 记告警。
+    const inputs = {}; const inEdgeN = {};
     edges.filter(e => e.to[0] === id).forEach(e => {
       const up = outputs[e.from[0]];
-      if (up) inputs[e.to[1]] = up[e.from[1]];
+      if (!up) return;
+      inEdgeN[e.to[1]] = (inEdgeN[e.to[1]] || 0) + 1;
+      if (node.type === 'feature' && e.to[1] === 'feat') (inputs.feat = inputs.feat || []).push(up[e.from[1]]);
+      else inputs[e.to[1]] = up[e.from[1]];
+    });
+    Object.keys(inEdgeN).forEach(port => {
+      if (inEdgeN[port] > 1 && !(node.type === 'feature' && port === 'feat'))
+        multiEdgeWarns.push('节点 ' + id + '(' + node.type + ') 输入口 ' + port + ' 收到 ' + inEdgeN[port] + ' 条边——仅最后一条生效');
     });
     const exec = NODE_EXEC[node.type];
     // 逐节点解析 universe: 沿入边回溯到上游「数据源」→ 用其池(连了才生效); 否则回退全局默认 + 记 fellBack。
@@ -873,6 +884,10 @@ async function runGraph(nodes, edges, hooks) {
   // 部分节点失败但下游仍产出结果 → 在结果里诚实标出哪些节点挂了(否则用户看到「成功」却不知有节点降级)。
   if (nodeErrs.length && lastResult && typeof lastResult === 'object') {
     lastResult._warnings = ['⚠ ' + nodeErrs.length + ' 个节点执行失败(下游已降级,结果可能不完整):' + nodeErrs.join(' / '), ...(lastResult._warnings || [])];
+  }
+  // 非白名单口多边 last-wins → 诚实显形 (镜像后端 run_graph warnings; 画布拖线本不会造出这种图, 导入/粘贴图会)。
+  if (multiEdgeWarns.length && lastResult && typeof lastResult === 'object') {
+    lastResult._warnings = [...multiEdgeWarns, ...(lastResult._warnings || [])];
   }
   if (lastResult) hooks.onResult(lastResult);
   else if (firstErr) hooks.onError(firstErr);
@@ -1036,7 +1051,11 @@ function WorkflowApp() {
           setToast({ title: '连线类型不匹配', build: `输出 ${sP.dt} ✗ 需要 ${dP.dt}` }); setTimeout(() => setToast(null), 2800);
         } else {
           pushHist();
-          setEdges(es => [...es.filter(x => !(x.to[0] === tn && x.to[1] === tp)), { from: [nodeId, portId], to: [tn, tp] }]);
+          // feature.feat 口允许多边 (多特征聚合, 只剔完全重复的同一条); 其余口保持单入边 (新连替换旧连)。
+          const multi = dNode && dNode.type === 'feature' && tp === 'feat';
+          setEdges(es => [...es.filter(x => multi
+            ? !(x.from[0] === nodeId && x.from[1] === portId && x.to[0] === tn && x.to[1] === tp)
+            : !(x.to[0] === tn && x.to[1] === tp)), { from: [nodeId, portId], to: [tn, tp] }]);
         }
       }
       setDraft(null);

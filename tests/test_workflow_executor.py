@@ -169,6 +169,113 @@ def test_run_graph_diag_terminal_no_gate_metrics(monkeypatch):
     assert out["node_results"]["t"]["ok"] is True          # 但诊断照跑存档
 
 
+def test_run_graph_feature_multi_feat_edges_aggregate(monkeypatch):
+    # 多条 formula→feature.feat 边 → ML 收到多特征(保序去重,镜像前端 deriveRecipeForNode)
+    g = {"nodes": [
+        {"id": "f1", "type": "formula", "x": 0, "y": 0, "params": {"expr": "rank(pb)"}},
+        {"id": "f2", "type": "formula", "x": 0, "y": 1, "params": {"expr": "rank(-turnover_rate)"}},
+        {"id": "f3", "type": "formula", "x": 0, "y": 2, "params": {"expr": "rank(-turnover_rate)"}},
+        {"id": "fe", "type": "feature", "x": 1, "y": 0, "params": {"tag": "IC"}},
+        {"id": "m", "type": "lgbm", "x": 2, "y": 0, "params": {}},
+        {"id": "mf", "type": "mf", "x": 3, "y": 0, "params": {}},
+        {"id": "an", "type": "analysis", "x": 4, "y": 0, "params": {}},
+    ], "edges": [
+        {"from": ["f1", "out"], "to": ["fe", "feat"]},
+        {"from": ["f2", "out"], "to": ["fe", "feat"]},
+        {"from": ["f3", "out"], "to": ["fe", "feat"]},   # 重复表达式 → 去重
+        {"from": ["fe", "fe"], "to": ["m", "fe"]},
+        {"from": ["m", "model"], "to": ["mf", "m1"]},
+        {"from": ["mf", "factor"], "to": ["an", "factor"]},
+    ]}
+    seen = {}
+
+    def fake_train(body, kind):
+        seen["features"] = list(body.features or [])
+        return JSONResponse(_REPORT)
+
+    monkeypatch.setattr(ex, "_call_train", fake_train)
+    out = ex.run_graph(g, overrides={"universe": "csi_fast", "freq": "month", "oos_frac": 0.3})
+    assert out["ok"] is True
+    assert seen["features"] == ["rank(pb)", "rank(-turnover_rate)"]  # 聚合+保序去重
+    assert out["warnings"] == []                           # 白名单口聚合不告警
+
+
+def test_run_graph_multi_edge_nonwhitelist_warns_last_wins(monkeypatch):
+    # 两个 feature 连同一 lgbm.fe 口(非白名单)→ 仅最后一条边生效 + warnings 显形(不再静默)
+    g = {"nodes": [
+        {"id": "f1", "type": "formula", "x": 0, "y": 0, "params": {"expr": "rank(pb)"}},
+        {"id": "f2", "type": "formula", "x": 0, "y": 1, "params": {"expr": "rank(dv_ttm)"}},
+        {"id": "fe1", "type": "feature", "x": 1, "y": 0, "params": {"tag": "IC"}},
+        {"id": "fe2", "type": "feature", "x": 1, "y": 1, "params": {"tag": "IC"}},
+        {"id": "m", "type": "lgbm", "x": 2, "y": 0, "params": {}},
+        {"id": "mf", "type": "mf", "x": 3, "y": 0, "params": {}},
+        {"id": "an", "type": "analysis", "x": 4, "y": 0, "params": {}},
+    ], "edges": [
+        {"from": ["f1", "out"], "to": ["fe1", "feat"]},
+        {"from": ["f2", "out"], "to": ["fe2", "feat"]},
+        {"from": ["fe1", "fe"], "to": ["m", "fe"]},
+        {"from": ["fe2", "fe"], "to": ["m", "fe"]},        # 同口第二条边
+        {"from": ["m", "model"], "to": ["mf", "m1"]},
+        {"from": ["mf", "factor"], "to": ["an", "factor"]},
+    ]}
+    seen = {}
+
+    def fake_train(body, kind):
+        seen["features"] = list(body.features or [])
+        return JSONResponse(_REPORT)
+
+    monkeypatch.setattr(ex, "_call_train", fake_train)
+    out = ex.run_graph(g, overrides={"universe": "csi_fast", "freq": "month", "oos_frac": 0.3})
+    assert seen["features"] == ["rank(dv_ttm)"]            # 后到覆盖先到(边序最后)
+    assert any("m" in w and "fe" in w and "2" in w for w in out["warnings"])  # 显形
+
+
+def test_validate_graph_allows_multi_feat_edges_only():
+    # 服务端权威校验:feature.feat 口放行多边(多特征 ML 入口);其余口维持单入边
+    import json
+    import guanlan_v2.workflow.api as wapi
+    base = {"nodes": [
+        {"id": "s", "type": "source", "params": {}},
+        {"id": "f1", "type": "formula", "params": {"expr": "rank(pb)"}},
+        {"id": "f2", "type": "formula", "params": {"expr": "rank(roe)"}},
+        {"id": "fe", "type": "feature", "params": {}},
+        {"id": "m", "type": "lgbm", "params": {}},
+        {"id": "mf", "type": "mf", "params": {}},
+        {"id": "an", "type": "analysis", "params": {}},
+    ], "edges": [
+        {"from": ["s", "data"], "to": ["fe", "src"]},
+        {"from": ["f1", "out"], "to": ["fe", "feat"]},
+        {"from": ["f2", "out"], "to": ["fe", "feat"]},   # feat 口第二条边 → 放行
+        {"from": ["fe", "fe"], "to": ["m", "fe"]},
+        {"from": ["m", "model"], "to": ["mf", "m1"]},
+        {"from": ["fe", "fe"], "to": ["mf", "f1"]},
+        {"from": ["mf", "factor"], "to": ["an", "factor"]},
+    ]}
+    ok, errs = wapi.validate_graph(base)
+    assert ok is True and errs == []
+    bad = json.loads(json.dumps(base))                    # 非白名单口(lgbm.fe)多边仍拒
+    bad["nodes"].append({"id": "fe2", "type": "feature", "params": {}})
+    bad["edges"].append({"from": ["f2", "out"], "to": ["fe2", "feat"]})
+    bad["edges"].append({"from": ["fe2", "fe"], "to": ["m", "fe"]})
+    ok2, errs2 = wapi.validate_graph(bad)
+    assert ok2 is False and any("m.fe" in e for e in errs2)
+    # feat 口多边例外不放过 dt 不匹配:第二条边若 dt 错(model→series)仍拒
+    bad_dt = json.loads(json.dumps(base))
+    bad_dt["edges"].append({"from": ["m", "model"], "to": ["fe", "feat"]})
+    ok3, errs3 = wapi.validate_graph(bad_dt)
+    assert ok3 is False and any("dt 不匹配" in e for e in errs3)
+    # LLM grounding 与验证器同步:硬约束行必须写明 feat 口例外
+    line = next(ln for ln in wapi.SYSTEM_PROMPT.splitlines() if "最多一条入边" in ln)
+    assert "feat" in line
+
+
+def test_critique_constraints_states_multi_feature_route():
+    # 批判环语义声明须明示多特征 ML 的表达方式(防 LLM 在单特征子空间打转)
+    from guanlan_v2.research.loop import _CRITIQUE_CONSTRAINTS
+    assert "多特征" in _CRITIQUE_CONSTRAINTS
+    assert "feat" in _CRITIQUE_CONSTRAINTS
+
+
 def test_run_graph_unsupported_node_type_honest():
     g = {"nodes": [{"id": "v", "type": "validate", "x": 0, "y": 0, "params": {}}], "edges": []}
     out = ex.run_graph(g, overrides={"universe": "csi_fast", "freq": "month", "oos_frac": 0.3})

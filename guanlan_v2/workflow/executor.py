@@ -325,14 +325,19 @@ def _exec_factorlib(inputs, params, ctx):
 
 
 def _exec_feature(inputs, params, ctx):
-    feat = _expr_of(inputs.get("feat"))
-    if not feat:
+    raw = inputs.get("feat")
+    feats: List[str] = []
+    for p in (raw if isinstance(raw, list) else [raw]):   # feat 口多边 → 多特征(保序去重)
+        e = _expr_of(p)
+        if e and e not in feats:
+            feats.append(e)
+    if not feats:
         raise NodeError("特征工程: 上游未提供特征表达式")
     label = _expr_of(inputs.get("label"))
     if not label:
         tag = str((params or {}).get("tag") or "").strip()
         label = "" if tag.lower() in ("", "ic", "fwd_ret") else tag
-    return {"fe": {"features": [feat], "label": (label or None)}}
+    return {"fe": {"features": feats, "label": (label or None)}}
 
 
 def _exec_ml(node_type):
@@ -586,9 +591,20 @@ def run_graph(graph: Dict[str, Any], overrides: Optional[Dict[str, Any]] = None,
         typ = str(node.get("type") or "")
         fn = _DISPATCH.get(typ)
         inputs: Dict[str, Any] = {}
+        in_edge_n: Dict[str, int] = {}
         for e in edges:
             if e["to"][0] == nid and e["from"][0] in outputs:
-                inputs[e["to"][1]] = outputs[e["from"][0]].get(e["from"][1])
+                port = e["to"][1]
+                payload = outputs[e["from"][0]].get(e["from"][1])
+                in_edge_n[port] = in_edge_n.get(port, 0) + 1
+                if typ == "feature" and port == "feat":
+                    # feat 口多边聚合为多特征(镜像前端 deriveRecipeForNode 的多边解读)
+                    inputs.setdefault(port, []).append(payload)
+                else:
+                    inputs[port] = payload
+        for port, n in in_edge_n.items():
+            if n > 1 and not (typ == "feature" and port == "feat"):
+                warnings.append(f"节点 {nid}({typ}) 输入口 {port} 收到 {n} 条边——仅最后一条生效")
         u = universe_for_node(nid, nodes, edges)
         ctx = {
             "universe": ov.get("universe") or (u["universe"] if u["wired"] else None) or "csi_fast",
