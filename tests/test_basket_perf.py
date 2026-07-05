@@ -126,3 +126,17 @@ def test_basket_perf_rerank_ab_pairs(tmp_path, monkeypatch, client):
     pair = r["pairs"][0]
     assert pair["run_id"] == "rs_a" and set(pair["arms"]) == {"data", "rerank"}
     # 两臂各为 compute_basket_perf 结果;测试环境无行情时两臂 ok:false 也如实并列(不编数)
+
+
+def test_default_path_validation_first(monkeypatch, client):
+    """codes/start 必填校验须先于任何 I/O 构造(loader 等)执行——即便 loader 会抛异常,
+    默认路径(无 kind)仍必须先给出确定性的「codes 与 start 必填」,不能被 loader 异常劫持。
+    """
+    import financial_analyst.data.loader_factory as _lf
+
+    def _boom():
+        raise RuntimeError("loader 故意炸——证明校验没抢在它前面跑")
+
+    monkeypatch.setattr(_lf, "get_default_loader", _boom)
+    r = client.get("/seats/basket_perf").json()
+    assert r == {"ok": False, "reason": "codes 与 start 必填"}

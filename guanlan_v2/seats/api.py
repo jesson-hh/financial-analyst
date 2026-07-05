@@ -1998,35 +1998,39 @@ def build_seats_router() -> APIRouter:
         picks 档案里的 rerank_ab 成对行,两臂各跑一次 compute_basket_perf 后并列
         对比(半对/无效跳过,绝不编数)。"""
         try:
-            try:
-                from financial_analyst.buddy.tools import normalize_code as _norm
-            except Exception:  # noqa: BLE001 — 引擎不可导入时裸用 code
-                _norm = None
-            import pandas as _pd
-            from financial_analyst.data import loader_factory as _lf
-            loader = _lf.get_default_loader()
-            end = str(_pd.Timestamp.now().date())
-
-            def _closes(c: str):
-                df = loader.fetch_quote(c, str(start), end, "day")
-                df = _drop_unsettled(df)               # 当日未结算占位行不当收盘
-                if df is None or len(df) == 0 or "close" not in df.columns:
-                    return []
-                dcol = "trade_date" if "trade_date" in df.columns else df.columns[0]
-                return [(str(d)[:10], float(v)) for d, v in zip(df[dcol], df["close"])
-                        if v == v]
-
-            from guanlan_v2.seats.basket_perf import compute_basket_perf
-            from guanlan_v2.strategy.compute import eqw_market as _eqw
-            bench_df = _eqw.load_eqw_ret()
-
             if (kind or "").strip() == "rerank_ab":
+                # 自包含分支:完全不依赖默认路径下方的 codes/start 必填校验,
+                # 自己 import/构造所需的一切(_norm/pandas/loader/_closes/compute_basket_perf/
+                # bench_df),与默认路径零共享——允许与默认路径重复几行,换来两条路径互不干扰。
+                try:
+                    from financial_analyst.buddy.tools import normalize_code as _norm
+                except Exception:  # noqa: BLE001 — 引擎不可导入时裸用 code
+                    _norm = None
+                import pandas as _pd
+                from financial_analyst.data import loader_factory as _lf
+                loader = _lf.get_default_loader()
+                end = str(_pd.Timestamp.now().date())
+
+                def _closes(c: str):
+                    df = loader.fetch_quote(c, str(start), end, "day")
+                    df = _drop_unsettled(df)           # 当日未结算占位行不当收盘
+                    if df is None or len(df) == 0 or "close" not in df.columns:
+                        return []
+                    dcol = "trade_date" if "trade_date" in df.columns else df.columns[0]
+                    return [(str(d)[:10], float(v)) for d, v in zip(df[dcol], df["close"])
+                            if v == v]
+
+                from guanlan_v2.seats.basket_perf import compute_basket_perf
+                from guanlan_v2.strategy.compute import eqw_market as _eqw
+                bench_df = _eqw.load_eqw_ret()
+
                 from guanlan_v2.screen.picks import read_picks
                 rows = [r for r in read_picks(limit=500) if r.get("kind") == "rerank_ab"]
                 by_run: dict = {}
                 for r in rows:
                     by_run.setdefault(r.get("run_id"), {})[r.get("arm")] = r
                 pairs = []
+                cap = min(max(int(limit), 1), 20)
                 for rid, arms in by_run.items():
                     if "data" not in arms or "rerank" not in arms:
                         continue                     # 半对(写一半失败)诚实跳过
@@ -2056,7 +2060,7 @@ def build_seats_router() -> APIRouter:
                             else None)
                     pairs.append({"run_id": rid, "ts": arms["data"].get("ts"),
                                   "arms": out_arms, "excess_diff": diff})
-                    if len(pairs) >= max(1, min(int(limit or 5), 20)):
+                    if len(pairs) >= cap:
                         break
                 return JSONResponse({"ok": True, "kind": "rerank_ab",
                                      "pairs": pairs, "n": len(pairs)})
@@ -2066,6 +2070,28 @@ def build_seats_router() -> APIRouter:
                 return JSONResponse({"ok": False, "reason": "codes 与 start 必填"})
             truncated = len(raw) > 40
             raw = raw[:40]
+
+            try:
+                from financial_analyst.buddy.tools import normalize_code as _norm
+            except Exception:  # noqa: BLE001 — 引擎不可导入时裸用 code
+                _norm = None
+            import pandas as _pd
+            from financial_analyst.data import loader_factory as _lf
+            loader = _lf.get_default_loader()
+            end = str(_pd.Timestamp.now().date())
+
+            def _closes(c: str):
+                df = loader.fetch_quote(c, str(start), end, "day")
+                df = _drop_unsettled(df)               # 当日未结算占位行不当收盘
+                if df is None or len(df) == 0 or "close" not in df.columns:
+                    return []
+                dcol = "trade_date" if "trade_date" in df.columns else df.columns[0]
+                return [(str(d)[:10], float(v)) for d, v in zip(df[dcol], df["close"])
+                        if v == v]
+
+            from guanlan_v2.seats.basket_perf import compute_basket_perf
+            from guanlan_v2.strategy.compute import eqw_market as _eqw
+            bench_df = _eqw.load_eqw_ret()
 
             closes_by_code: dict = {}
             for c in raw:
