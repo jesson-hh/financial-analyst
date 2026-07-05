@@ -573,7 +573,9 @@ def run_graph(graph: Dict[str, Any], overrides: Optional[Dict[str, Any]] = None,
     prefer_model_terminal(默认 False=画布 /workflow/run 零行为变化,仅研究回路 opt-in):
     True 时携带模型报告(payload._kind,唯 ML 报告经 mf 透传才有)的 analysis/iccalc 终端
     优先于 backtest——backtest 按 fe.features 重推导不吃模型预测(2026-07-05 真机实证:
-    死/活模型 backtest 指标逐位同),ML 图过门指标须对齐模型真实成绩;让位写 warnings 显形。"""
+    死/活模型 backtest 指标逐位同),ML 图过门指标须对齐模型真实成绩;让位写 warnings 显形。
+    图无模型报告终端时(rr_3e2e4dbe58 残余缺口)直取 mf/ML 节点输出为主终端(kind=节点
+    类型)并记警告;全图无模型报告(ML 训练失败)也记警告——绝不静默回落 backtest 口径。"""
     t0 = time.time()
     ov = overrides or {}
     nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
@@ -656,6 +658,32 @@ def run_graph(graph: Dict[str, Any], overrides: Optional[Dict[str, Any]] = None,
                         f"ML 图主终端改取 {kind} 模型报告(prefer_model_terminal):"
                         "backtest 为特征集等权口径不吃模型预测,过门指标已让位给模型真实成绩")
                 break
+        if main is None and has_ml:                 # 残余缺口(rr_3e2e4dbe58):图无模型报告终端
+            for nid in reversed(order):             # → 直取 mf/ML 节点输出,绝不静默回落 backtest
+                typ = str(by_id[nid].get("type") or "")
+                o = outputs.get(nid) or {}
+                payload = None
+                if typ == "mf" and isinstance(o.get("factor"), dict) \
+                        and o["factor"].get("_kind"):
+                    payload = o["factor"]
+                elif typ in _ML_KINDS:
+                    rep = _model_report(o.get("model"))
+                    if isinstance(rep, dict):
+                        payload = dict(rep)
+                        payload.setdefault("_kind", (o.get("model") or {}).get("_kind"))
+                if isinstance(payload, dict) and payload.get("_kind"):
+                    main = {"kind": typ, "node_id": nid, "payload": payload}
+                    warnings.append(
+                        f"ML 图缺 analysis/iccalc 模型报告终端——主终端直取 {nid}({typ}) "
+                        "模型报告(prefer_model_terminal)"
+                        + (";backtest 为特征集等权口径不吃模型预测,已让位"
+                           if any(t["kind"] == "backtest" for t in terminals) else "")
+                        + ";建议给 mf 下游补 analysis 终端")
+                    break
+            if main is None:
+                warnings.append(
+                    "prefer_model_terminal 开启但图中无模型报告(ML 训练失败或 mf 未接模型)"
+                    "——过门指标为非模型口径")
     if main is None:
         for kind in _TERMINAL_PRIORITY:             # 优先级取主终端;同类取拓扑序最后
             cand = [t for t in terminals if t["kind"] == kind]

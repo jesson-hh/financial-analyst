@@ -336,6 +336,104 @@ def test_tag_semantics_stated_in_generate_prompt_and_constraints():
     assert "tag" in _CRITIQUE_CONSTRAINTS and "fwd_ret" in _CRITIQUE_CONSTRAINTS
 
 
+def _g_ml_no_analysis(extra_nodes=(), extra_edges=()):
+    """rr_3e2e4dbe58 图形状:source→formula→feature→lgbm→mf(无 analysis/iccalc 终端)。"""
+    g = {"nodes": [
+        {"id": "s", "type": "source", "x": 0, "y": 0, "params": {"universe": "csi300_active"}},
+        {"id": "f", "type": "formula", "x": 0, "y": 1, "params": {"expr": "rank(pb)"}},
+        {"id": "fe", "type": "feature", "x": 1, "y": 0, "params": {"tag": "IC"}},
+        {"id": "m", "type": "lgbm", "x": 2, "y": 0, "params": {}},
+        {"id": "mf", "type": "mf", "x": 3, "y": 0, "params": {}},
+    ], "edges": [
+        {"from": ["s", "data"], "to": ["fe", "src"]},
+        {"from": ["f", "out"], "to": ["fe", "feat"]},
+        {"from": ["fe", "fe"], "to": ["m", "fe"]},
+        {"from": ["m", "model"], "to": ["mf", "m1"]},
+        {"from": ["fe", "fe"], "to": ["mf", "f1"]},
+    ]}
+    g["nodes"].extend(extra_nodes)
+    g["edges"].extend(extra_edges)
+    return g
+
+
+def test_run_graph_prefer_model_terminal_no_report_terminal_takes_mf(monkeypatch):
+    """残余缺口(rr_3e2e4dbe58 实证:lgbm 误过闸产 draft,生产 oos_ic=-0.0069):
+    ML 图无 analysis/iccalc 终端(…→mf→backtest)时,flag 开必须直取 mf 模型报告为
+    主终端(过门=模型真实成绩),绝不静默回落 backtest;默认关仍取 backtest(画布零变化)。"""
+    g = _g_ml_no_analysis(
+        extra_nodes=[{"id": "bt", "type": "backtest", "x": 4, "y": 0, "params": {"topn": 30}}],
+        extra_edges=[{"from": ["mf", "factor"], "to": ["bt", "factor"]}])
+    rep_model = dict(_REPORT, headline_ic={"rank_ic": -0.0069},
+                     fe={"features": ["rank(pb)"]})
+    rep_bt = dict(_REPORT, headline_ic={"rank_ic": 0.0348})
+    monkeypatch.setattr(ex, "_call_train", lambda body, kind: JSONResponse(rep_model))
+    monkeypatch.setattr(ex, "_call_backtest", lambda body: JSONResponse(rep_bt))
+    ov = {"universe": "csi_fast", "freq": "month", "oos_frac": 0.3}
+    out0 = ex.run_graph(g, overrides=ov)
+    assert out0["terminal"]["kind"] == "backtest"          # 默认关:零行为变化
+    assert out0["metrics"]["rank_ic"] == 0.0348 and out0["warnings"] == []
+    out1 = ex.run_graph(g, overrides=ov, prefer_model_terminal=True)
+    assert out1["terminal"]["kind"] == "mf"                # 主终端=mf 模型报告(诚实标源)
+    assert out1["metrics"]["rank_ic"] == -0.0069           # 模型真实成绩 → 联合门必拦
+    assert out1["terminal"]["payload"]["_kind"] == "lightgbm"
+    assert any("analysis" in w and "mf" in w for w in out1["warnings"])   # 缺终端大声显形
+
+
+def test_run_graph_prefer_model_terminal_graph_ends_at_mf(monkeypatch):
+    """图终点=mf(连 backtest 都没有):默认关维持 ok=False(无主终端,现状);
+    flag 开 → 模型报告即过门口径,ok=True + 警告显形。"""
+    g = _g_ml_no_analysis()
+    rep_model = dict(_REPORT, headline_ic={"rank_ic": 0.03})
+    monkeypatch.setattr(ex, "_call_train", lambda body, kind: JSONResponse(rep_model))
+    ov = {"universe": "csi_fast", "freq": "month", "oos_frac": 0.3}
+    out0 = ex.run_graph(g, overrides=ov)
+    assert out0["ok"] is False and out0["terminal"] is None   # 默认关:现状不变
+    out1 = ex.run_graph(g, overrides=ov, prefer_model_terminal=True)
+    assert out1["ok"] is True and out1["terminal"]["kind"] == "mf"
+    assert out1["metrics"]["rank_ic"] == 0.03
+    assert any("analysis" in w for w in out1["warnings"])
+
+
+def test_run_graph_prefer_model_terminal_ml_dead_warns_non_model(monkeypatch):
+    """flag 开 + has_ml 但全图无模型报告(ML 训练失败,mf 落 compose 兜底)→
+    过门口径为非模型口径必须 warning 显形(绝不静默);主终端走默认优先级。"""
+    g = {"nodes": [
+        {"id": "f1", "type": "formula", "x": 0, "y": 0, "params": {"expr": "rank(pb)"}},
+        {"id": "f2", "type": "formula", "x": 0, "y": 1, "params": {"expr": "rank(roe)"}},
+        {"id": "fe", "type": "feature", "x": 1, "y": 0, "params": {"tag": "IC"}},
+        {"id": "m", "type": "lgbm", "x": 2, "y": 0, "params": {}},
+        {"id": "mf", "type": "mf", "x": 3, "y": 0, "params": {}},
+        {"id": "an", "type": "analysis", "x": 4, "y": 0, "params": {}},
+    ], "edges": [
+        {"from": ["f1", "out"], "to": ["fe", "feat"]},
+        {"from": ["f2", "out"], "to": ["fe", "feat"]},
+        {"from": ["fe", "fe"], "to": ["m", "fe"]},
+        {"from": ["m", "model"], "to": ["mf", "m1"]},
+        {"from": ["fe", "fe"], "to": ["mf", "f1"]},
+        {"from": ["mf", "factor"], "to": ["an", "factor"]},
+    ]}
+    monkeypatch.setattr(ex, "_call_train",
+                        lambda body, kind: JSONResponse({"ok": False, "reason": "lgbm 未装"}))
+    comp = {"ok": True, "members": ["rank(pb)", "rank(roe)"], "weights": [],
+            "composite": dict(_REPORT)}
+    monkeypatch.setattr(ex, "_call_compose", lambda body: JSONResponse(comp))
+    out = ex.run_graph(g, overrides={"universe": "csi_fast", "freq": "month", "oos_frac": 0.3},
+                       prefer_model_terminal=True)
+    assert out["terminal"]["kind"] == "analysis"           # compose 兜底口径照常出终端
+    assert any("模型报告" in w for w in out["warnings"])    # 非模型口径显形
+    assert any(e["nid"] == "m" for e in out["node_errors"])
+
+
+def test_ml_graph_requires_analysis_terminal_in_prompts():
+    """残余缺口配套(提示词加固):generate 提示词与批判环 constraints 都必须要求
+    ML 图带 analysis 终端(backtest 为特征集等权口径,不能作为模型成绩唯一出口)。"""
+    import guanlan_v2.workflow.api as wapi
+    from guanlan_v2.research.loop import _CRITIQUE_CONSTRAINTS
+    assert "analysis 终端" in _CRITIQUE_CONSTRAINTS
+    assert "analysis 终端" in wapi.SYSTEM_PROMPT
+    assert "不吃模型预测" in wapi.SYSTEM_PROMPT
+
+
 def test_run_graph_unsupported_node_type_honest():
     g = {"nodes": [{"id": "v", "type": "validate", "x": 0, "y": 0, "params": {}}], "edges": []}
     out = ex.run_graph(g, overrides={"universe": "csi_fast", "freq": "month", "oos_frac": 0.3})

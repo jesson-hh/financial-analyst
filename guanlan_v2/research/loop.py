@@ -42,7 +42,8 @@ _CRITIQUE_CONSTRAINTS = (
     "警告。feature.params.tag 只是标注:只能留空或写 IC/fwd_ret(默认标签=未来收益);写"
     "任何其他文本会被当作 label 表达式执行(如 tag=\"ML\" 会炸 ML 训练),自定义预测标签"
     "必须用 formula 连 feature.label 口。ML 图的过门指标取模型真实 OOS 成绩(analysis 模型"
-    "报告),不是特征集等权回测。与上一轮完全相同的图不会产生不同指标。")
+    "报告),不是特征集等权回测,且必须给 mf 下游接 analysis 终端(缺失时执行器直取 mf 模型"
+    "报告并记警告,backtest 口径绝不用于过门)。与上一轮完全相同的图不会产生不同指标。")
 
 
 def new_run_id() -> str:
