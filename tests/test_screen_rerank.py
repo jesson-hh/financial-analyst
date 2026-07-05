@@ -166,3 +166,51 @@ def test_run_rescore_rerank_fail_no_baskets(tmp_path, monkeypatch):
     assert end["ok"] is True                      # 打分本身成功(重排失败不拖垮 run)
     assert end["rerank"]["ok"] is False           # 失败显形
     assert pk.read_picks(limit=10) == []          # 失败绝不落 A/B 篮
+
+
+def test_run_rescore_bridge_exception_does_not_kill_run(tmp_path, monkeypatch):
+    """桥异常(ImportError/KeyError 等)捕获显形,run 整体 ok 不挡。"""
+    from guanlan_v2.screen import picks as pk
+    from guanlan_v2.screen import rescore as rs
+    monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
+    monkeypatch.setattr(rs, "v4_pool", lambda n: [{"code": "SH600000", "v4pct": 99.0}])
+    monkeypatch.setattr(rs, "industry_scores", lambda codes: ({c: None for c in codes}, {}))
+    monkeypatch.setattr(rs, "news_scores", lambda codes, top_n: (
+        {c: None for c in codes}, {"llm_calls": 0, "cache_hits": 0}))
+    # 桥本身抛异常(模拟导入或结构错误)
+    monkeypatch.setattr(rs, "_run_rerank_bridge",
+                        lambda rows, market: (_ for _ in ()).throw(RuntimeError("boom")))
+    end = rs.run_rescore("rs_t3", top_n=5, note="", progress=lambda **k: None)
+    assert end["ok"] is True                      # run 不因桥异常挂掉
+    assert end["rerank"]["ok"] is False           # 重排失败显形
+    assert end["rerank"]["reason"] == "RuntimeError: boom"  # 异常显形
+    assert len(end["rows"]) == 1 and end["rows"][0]["code"] == "SH600000"  # 打分行保留
+    assert pk.read_picks(limit=10) == []          # A/B 篮空(桥失败故不落篮)
+
+
+def test_run_rescore_ab_record_failure_surfaces(tmp_path, monkeypatch):
+    """A/B 篮落档失败(权限/IO 等)时 ab_recorded 显形,run 不挂,rerank ok 保持。"""
+    from guanlan_v2.screen import picks as pk
+    from guanlan_v2.screen import rescore as rs
+    monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
+    monkeypatch.setattr(rs, "v4_pool", lambda n: [
+        {"code": f"SH60000{i}", "v4pct": 99.0 - i} for i in range(3)])
+    monkeypatch.setattr(rs, "industry_scores", lambda codes: ({c: None for c in codes}, {}))
+    monkeypatch.setattr(rs, "news_scores", lambda codes, top_n: (
+        {c: None for c in codes}, {"llm_calls": 0, "cache_hits": 0}))
+    # 桥返回成功,但落篮时异常
+    fake_rk = {"ok": True, "model": "m", "overall": "o", "lessons_injected": 0,
+               "board_snapshot": {}, "elapsed_sec": 0.1,
+               "rows": [{"code": f"SH60000{i}", "rank_before": i + 1,
+                         "rank_after": 3 - i, "stance": "中性", "reason": "r"}
+                        for i in range(3)]}
+    monkeypatch.setattr(rs, "_run_rerank_bridge", lambda rows, market: fake_rk)
+    monkeypatch.setattr(rs, "_record_rerank_ab",
+                        lambda run_id, rows, rk, top_n: (_ for _ in ()).throw(OSError("权限拒绝")))
+    end = rs.run_rescore("rs_t4", top_n=5, note="", progress=lambda **k: None)
+    assert end["ok"] is True                      # run 整体成功(篮失败不拖垮)
+    assert end["rerank"]["ok"] is True            # 重排本身 ok(落档失败不改信号)
+    assert end["rerank"]["ab_recorded"] is False  # 落档失败显形
+    assert pk.read_picks(limit=10) == []          # 失败绝不落篮

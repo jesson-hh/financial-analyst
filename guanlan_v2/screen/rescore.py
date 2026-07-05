@@ -274,10 +274,18 @@ def run_rescore(run_id: str, top_n: int, note: str, progress) -> Dict[str, Any]:
             rows.append({"code": c, "v4pct": r.get("v4pct"), "chain": ch, "news": nw,
                          "composite": comp["score"], "parts": comp["parts"]})
         progress(phase="rerank", label="④ 行业重排(LLM 整批)…")
-        rk = _run_rerank_bridge(rows, {"market_read": nstats.get("market_read"),
-                                       "market_tilt": nstats.get("market_tilt")})
+        # 桥调用包 try/except:异常时 rk = {"ok": False, "reason": ...}(与失败态同构,失败显形)
+        try:
+            rk = _run_rerank_bridge(rows, {"market_read": nstats.get("market_read"),
+                                           "market_tilt": nstats.get("market_tilt")})
+        except Exception as exc:  # noqa: BLE001
+            rk = {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        # 落档调用包 try/except:异常时 rk["ab_recorded"] = False(落篮失败显形,不改 ok,不挡 run)
         if rk.get("ok"):
-            _record_rerank_ab(run_id, rows, rk, top_n)
+            try:
+                _record_rerank_ab(run_id, rows, rk, top_n)
+            except Exception as exc:  # noqa: BLE001
+                rk["ab_recorded"] = False
         end = {"run_id": run_id, "ts": _now(), "note": note, "top_n": top_n,
                "ok": True, "error": None, "rows": rows,
                "stats": dict(nstats, board_freshness=fresh), "rerank": rk}
