@@ -258,6 +258,11 @@ def create_app():
     from guanlan_v2.industry import build_industry_router  # AI投研看板(2026-07-02 spec)
     app.include_router(build_industry_router())
 
+    # ── 全球情绪温度计(macro):GET /macro/pulse、/macro/history ──
+    # PM+Kalshi 全球宏观预期概率 × A股本土打板温度(2026-07-06 spec,纯展示层)
+    from guanlan_v2.macro import build_macro_router
+    app.include_router(build_macro_router())
+
     # P1:regen 每日 EOD 自动再生(opt-in;GUANLAN_REGEN_DAILY=1 才启;
     # 定时器随本进程存亡,非 24/7 保证——进程死定时即停,health.regen_scheduler 显形)
     from guanlan_v2.screen.api import start_regen_daily_scheduler
