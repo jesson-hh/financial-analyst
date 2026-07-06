@@ -1504,6 +1504,45 @@ def live_text_impl(source: str, code: str = "", date: str = "", limit: int = 20)
     return _fin({**base, "rows": rows, "n": len(rows), "note": note})
 
 
+# ── ww_macro_pulse:全球情绪温度计(PM+Kalshi 预测市场概率 × A股打板温度)──────────
+# 纯展示型参考:预测市场概率/温度绝非交易信号,不得混入选股/落子决策权重。
+
+def macro_pulse_impl(refresh: bool = True) -> Dict[str, Any]:
+    """现拉全球宏观预期概率(Polymarket+Kalshi)+ A股本土打板温度,组装 agent 可读摘要。
+    外部失败在 payload.notes 诚实显形(单源降级/probe 缺席),绝不编造。"""
+    try:
+        from guanlan_v2.macro import pulse as _mp
+        p = _mp.build_pulse(refresh=bool(refresh))
+    except Exception as e:
+        return {"ok": False, "content": f"全球情绪温度计拉取失败: {type(e).__name__}: {e}"}
+    th = p.get("thermometer") or {}
+    lines = ["全球情绪温度计 · " + str(p.get("pulled_at", ""))[:16]
+             + (f" · 快照态(stale {p['stale_minutes']:.0f}min)" if p.get("stale_minutes") else "")]
+    g, a = th.get("global"), th.get("astock")
+    lines.append(f"总温度:全球预期 {g if g is not None else '—'} / A股本土 {a if a is not None else '—'}"
+                 "(0-100,高=risk-on;仅 themes.yaml 锚定市场参与合成,展示型非信号)")
+    for t in p.get("themes") or []:
+        temp = t.get("temp")
+        head = f"[{t.get('label')}] 温度 {temp if temp is not None else '—'}"
+        if t.get("anchor_hits") is not None:
+            head += f"(锚 {t['anchor_hits']})"
+        lines.append(head)
+        for m in (t.get("markets") or [])[:3]:
+            d = m.get("delta24h")
+            d_s = f" Δ24h {d:+.1%}" if isinstance(d, (int, float)) else ""
+            src = "PM" if m.get("source") == "polymarket" else "K"
+            lines.append(f"  · [{src}] {m.get('question', '')} = {float(m.get('prob') or 0):.0%}{d_s}")
+    ast = p.get("astock") or {}
+    if ast.get("available"):
+        lines.append(f"[A股打板] 温度 {ast.get('temp')} · 涨停 {ast.get('zt_count')} 家"
+                     f" · 最高 {ast.get('max_streak')} 板 · 炸板率 {float(ast.get('break_ratio') or 0):.0%}")
+    else:
+        lines.append("[A股打板] 不可用:" + ";".join(ast.get("notes") or ["未接线"]))
+    for n in p.get("notes") or []:
+        lines.append(f"⚠ {n}")
+    return {"ok": True, "content": "\n".join(lines), "raw": p}
+
+
 def seats_history_impl(code: str = "", limit: int = 10) -> Dict[str, Any]:
     """查询落子哨兵的研判/条件单历史(平台级,跨会话;读 GET /seats/decisions,逆序最新在前)。
     真实响应形状 {"ok": True, "decisions": [...], "total": N}(seats/api.py /decisions)。"""
@@ -2225,6 +2264,17 @@ WW_TOOL_TABLE = [
       "required": ["source"]},
      "impl": live_text_impl, "cost": "seconds", "confirm": False,
      "reachable": []},
+    {"name": "ww_macro_pulse",
+     "description":
+         "全球情绪温度计:现拉 Polymarket+Kalshi 预测市场概率(美联储利率/通胀衰退/地缘/中美/加密五主题,"
+         "真金白银交易出的全球宏观预期)+ A股本土打板温度(涨停池广度,stocks probe)。温度 0-100 高=risk-on,"
+         "仅 YAML 锚定市场参与合成;**纯展示型参考,绝非交易信号**。单源失败/probe 缺席诚实降级带 note。"
+         "问『全球宏观预期/降息概率/地缘风险温度/市场情绪冷热』时用。global macro sentiment via prediction markets.",
+     "input_schema": {"type": "object", "properties": {
+         "refresh": {"type": "boolean", "default": True,
+                     "description": "true=现拉(秒级,顺手落快照);false=读最近快照(≤24h)"}}},
+     "impl": macro_pulse_impl, "cost": "seconds", "confirm": False,
+     "reachable": ["/macro/pulse"]},
     {"name": "ww_factorlib_save",
      "description":
          "把一条因子表达式存进因子库并注册进引擎(校验+落盘 mined/+运行期注册→选股/工作流可复用)。"
