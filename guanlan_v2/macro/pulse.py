@@ -146,11 +146,14 @@ def build_pulse(refresh: bool = False, snapshot_path=None, astock_fn=None, http=
         themes_out.append({"id": t["id"], "label": t["label"], "temp": temp,
                            "anchor_hits": hits, "markets": shown})
 
-    # A 股侧(Task 3 接默认;None=未接线,available False)
+    # A 股侧:默认走 astock.build_astock(stocks probe);失败降级不拖垮全球侧
     if astock_fn is None:
-        astock = {"available": False, "temp": None, "notes": []}
-    else:
+        from .astock import build_astock as astock_fn
+    try:
         astock = astock_fn()
+    except Exception as e:
+        astock = {"available": False, "temp": None,
+                  "notes": [f"astock 侧异常: {type(e).__name__}: {e}"]}
     astock_temp = astock.get("temp")
 
     with_temp = [v for v in temps.values() if isinstance(v, (int, float))]
