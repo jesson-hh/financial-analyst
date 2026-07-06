@@ -43,7 +43,7 @@ def _theme_temp(markets, anchors):
                 break
     if tot_w <= 0:
         return None, 0
-    return max(0.0, min(100.0, 50.0 + 50.0 * acc / tot_w)), hits
+    return round(max(0.0, min(100.0, 50.0 + 50.0 * acc / tot_w)), 1), hits
 
 
 def _read_snapshots(path: Path):
