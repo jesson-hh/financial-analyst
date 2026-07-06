@@ -90,6 +90,23 @@ def test_polymarket_normalizes_binary_and_multi():
     assert multi["prob"] == 0.2 and multi["question"].endswith("→ 0")
 
 
+def test_polymarket_flaky_first_call_retries_and_succeeds(monkeypatch):
+    """真机坐实:串行连打偶发 SSL 截断,单次重试即愈——重试成功不留 note。"""
+    monkeypatch.setattr(ms, "_RETRY_SLEEP", 0)
+    inner = FakeHttp()
+    state = {"failed_once": False}
+
+    class Flaky:
+        def get(self, url, params=None, timeout=None):
+            if not state["failed_once"]:
+                state["failed_once"] = True
+                raise ConnectionError("SSL EOF")
+            return inner.get(url, params=params, timeout=timeout)
+
+    rows, notes = ms.fetch_polymarket(["fed-rates"], http=Flaky())
+    assert len(rows) == 2 and notes == []
+
+
 def test_polymarket_single_tag_failure_degrades_with_note():
     rows, notes = ms.fetch_polymarket(["dead-tag", "fed-rates"],
                                       http=FakeHttp(fail_tags={"dead-tag"}))

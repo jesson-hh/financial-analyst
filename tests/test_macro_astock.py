@@ -38,6 +38,20 @@ def test_astock_temp_arithmetic():
     assert out["notes"] == []
 
 
+def test_astock_zt_truncation_honest_note():
+    """真机坐实:涨停 50 家=壳上限截断 → 诚实标注『>=』口径。"""
+    many = [dict(ZT_ROWS[1], code=f"{i:06d}") for i in range(50)]
+
+    def full(source, code="", date="", limit=20):
+        if source == "em_zt_pool":
+            return {"ok": True, "note": "", "n": 50, "rows": many}
+        return {"ok": True, "note": "", "n": 0, "rows": []}
+
+    out = ma.build_astock(live_fn=full)
+    assert out["zt_count"] == 50
+    assert any("截断" in n for n in out["notes"])
+
+
 def test_astock_probe_dead_degrades_honest():
     def dead(source, code="", date="", limit=20):
         return {"ok": True, "note": "stocks probe 不可用(G:\\stocks 缺席)", "n": 0, "rows": []}

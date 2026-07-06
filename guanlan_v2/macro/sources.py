@@ -15,6 +15,7 @@ import yaml
 _GAMMA = "https://gamma-api.polymarket.com"
 _KALSHI = "https://api.elections.kalshi.com/trade-api/v2"
 _TIMEOUT = 10
+_RETRY_SLEEP = 0.8   # 串行连打偶发 SSL 截断(2026-07-06 真机 7 连发 3 失败),单次重试+间隔即愈
 _THEMES_PATH = Path(__file__).with_name("themes.yaml")
 
 
@@ -35,17 +36,28 @@ def _f(v) -> float:
         return 0.0
 
 
+def _get_json(http, url, params):
+    """带单次重试的 GET(重试仍败则向上抛给调用方计 note;不做重试轰炸)。"""
+    import time as _t
+    try:
+        r = http.get(url, params=params, timeout=_TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        _t.sleep(_RETRY_SLEEP)
+        r = http.get(url, params=params, timeout=_TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+
+
 def fetch_polymarket(tags, limit=12, http=None):
     http = http or _http()
     rows, notes = [], []
     for tag in tags or []:
         try:
-            r = http.get(f"{_GAMMA}/events", params={
+            events = _get_json(http, f"{_GAMMA}/events", {
                 "tag_slug": tag, "active": "true", "closed": "false",
-                "order": "volume24hr", "ascending": "false", "limit": limit},
-                timeout=_TIMEOUT)
-            r.raise_for_status()
-            events = r.json()
+                "order": "volume24hr", "ascending": "false", "limit": limit})
         except Exception as e:
             notes.append(f"polymarket tag={tag} 失败: {type(e).__name__}: {e}")
             continue
@@ -81,11 +93,8 @@ def fetch_kalshi(series, limit=12, http=None):
     rows, notes = [], []
     for st in series or []:
         try:
-            r = http.get(f"{_KALSHI}/markets", params={
-                "series_ticker": st, "status": "open", "limit": limit},
-                timeout=_TIMEOUT)
-            r.raise_for_status()
-            markets = (r.json() or {}).get("markets") or []
+            markets = (_get_json(http, f"{_KALSHI}/markets", {
+                "series_ticker": st, "status": "open", "limit": limit}) or {}).get("markets") or []
         except Exception as e:
             notes.append(f"kalshi series={st} 失败: {type(e).__name__}: {e}")
             continue

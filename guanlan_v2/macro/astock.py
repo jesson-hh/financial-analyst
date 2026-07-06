@@ -14,13 +14,16 @@ def build_astock(live_fn=None) -> dict:
     cfg = load_themes().get("astock") or {}
     out = {"available": False, "temp": None, "zt_count": 0, "max_streak": 0,
            "break_ratio": 0.0, "top_reasons": [], "hot_list": [], "notes": []}
-    zt = live_fn(source="em_zt_pool", limit=50)
+    _ZT_LIMIT = 50   # live_text_impl 壳上限;打满即截断,涨停数按"≥"口径诚实标注
+    zt = live_fn(source="em_zt_pool", limit=_ZT_LIMIT)
     if not zt.get("ok") or zt.get("note"):
         out["notes"].append(f"em_zt_pool: {zt.get('note') or 'ok=False'}")
     rows = zt.get("rows") or []
     if rows:
         out["available"] = True
         out["zt_count"] = int(zt.get("n") or len(rows))
+        if out["zt_count"] >= _ZT_LIMIT:
+            out["notes"].append(f"涨停家数按上限 {_ZT_LIMIT} 截断,实际 >= {_ZT_LIMIT};温度以截断值计")
         streaks, breaks = [], 0
         for r in rows:
             m = re.search(r"(\d+)板", str(r.get("zt_stat") or ""))
