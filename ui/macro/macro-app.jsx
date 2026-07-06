@@ -78,7 +78,10 @@ function MarketRow({ m }) {
                        background: m.source === "polymarket" ? "var(--qing)" : "var(--dai)" }}>
           {m.source === "polymarket" ? "PM" : "K"}</span>
         <span style={{ flex: 1, fontSize: 12, color: "var(--ink-1)", overflow: "hidden",
-                       textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={m.question}>{m.question}</span>
+                       textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={m.question}>
+          {m.question_zh || m.question}
+          {m.question_zh ? <span style={{ fontSize: 8, color: "var(--ink-4)", marginLeft: 4 }}>机翻</span> : null}
+        </span>
         {dBadge}
         <span style={{ fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 700,
                        color: "var(--ink-0)", width: 42, textAlign: "right" }}>{fmtPct(m.prob)}</span>
@@ -88,13 +91,31 @@ function MarketRow({ m }) {
                       background: m.source === "polymarket" ? "var(--qing)" : "var(--dai)" }} />
       </div>
       {open && (
-        <div onClick={(e) => e.stopPropagation()} style={{ padding: "6px 2px 2px" }}>
-          <Spark hist={hist} />
-          <div style={{ display: "flex", gap: 12, marginTop: 4, fontFamily: "var(--font-mono)",
-                        fontSize: 10, color: "var(--ink-3)" }}>
-            <span>截止 {m.close_time || "—"}</span>
-            {m.url ? <a href={m.url} target="_blank" rel="noreferrer"
-                        style={{ color: "var(--qing)" }}>原市场 ↗</a> : null}
+        <div onClick={(e) => e.stopPropagation()}
+             style={{ margin: "8px 0 4px", padding: "10px 12px", background: "var(--paper-2)",
+                      border: "1px solid var(--line-1)", borderRadius: 4 }}>
+          {m.question_zh && (
+            <div style={{ fontSize: 10, color: "var(--ink-3)", marginBottom: 6 }}>原文:{m.question}</div>
+          )}
+          <div style={{ display: "flex", alignItems: "baseline", gap: 16, flexWrap: "wrap" }}>
+            <span style={{ fontFamily: "var(--font-mono)", fontSize: 26, fontWeight: 700,
+                           color: "var(--ink-0)" }}>{fmtPct(m.prob)}</span>
+            <span style={{ fontSize: 11, color: "var(--ink-2)" }}>
+              Δ24h {typeof d === "number" ? `${d >= 0 ? "+" : ""}${(d * 100).toFixed(1)}pp` : "—(需隔日快照)"}</span>
+            <span style={{ fontSize: 11, color: "var(--ink-2)" }}>
+              24h量 {m.volume ? `$${Math.round(m.volume).toLocaleString()}` : "—"}</span>
+            <span style={{ fontSize: 11, color: "var(--ink-2)" }}>截止 {m.close_time || "—"}</span>
+            {m.url ? (
+              <a href={m.url} target="_blank" rel="noreferrer" data-hv="chip"
+                 style={{ fontSize: 11, padding: "2px 10px", borderRadius: 3, textDecoration: "none",
+                          background: "var(--qing-soft)", color: "var(--qing)",
+                          border: "1px solid var(--line-2)" }}>去原市场 ↗</a>
+            ) : null}
+          </div>
+          <div style={{ marginTop: 8 }}>
+            <div style={{ fontSize: 10, color: "var(--ink-3)", marginBottom: 2 }}>
+              历史概率{hist && hist.length ? `(已沉淀 ${hist.length} 个快照点,跨数日后成趋势线)` : ""}</div>
+            <Spark hist={hist} />
           </div>
         </div>
       )}

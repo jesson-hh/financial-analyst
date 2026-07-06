@@ -111,7 +111,8 @@ def _snapshot_view(snap: dict, cfg: dict, now: datetime) -> dict:
             "notes": ["快照态(未现拉),点刷新取实时"]}
 
 
-def build_pulse(refresh: bool = False, snapshot_path=None, astock_fn=None, http=None) -> dict:
+def build_pulse(refresh: bool = False, snapshot_path=None, astock_fn=None, http=None,
+                translate_fn=None) -> dict:
     cfg = sources.load_themes()
     path = Path(snapshot_path) if snapshot_path else _SNAP_DEFAULT
     now = _now()
@@ -145,6 +146,20 @@ def build_pulse(refresh: bool = False, snapshot_path=None, astock_fn=None, http=
             all_markets.append(row)
         themes_out.append({"id": t["id"], "label": t["label"], "temp": temp,
                            "anchor_hits": hits, "markets": shown})
+
+    # 中文翻译层(缓存优先,一次批量;失败英文回落+note,绝不拖垮主体)
+    if translate_fn is None:
+        from .translate import translate_questions as translate_fn
+    try:
+        zh_map, zh_note = translate_fn([m["question"] for m in all_markets])
+    except Exception as e:  # noqa: BLE001
+        zh_map, zh_note = {}, f"翻译层异常: {type(e).__name__}: {e}"
+    if zh_note:
+        notes.append(zh_note)
+    for m in all_markets:
+        z = zh_map.get(m["question"])
+        if z:
+            m["question_zh"] = z
 
     # A 股侧:默认走 astock.build_astock(stocks probe);失败降级不拖垮全球侧
     if astock_fn is None:

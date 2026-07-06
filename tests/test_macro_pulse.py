@@ -10,6 +10,7 @@ from guanlan_v2.macro import pulse as mp
 from test_macro_sources import FakeHttp
 
 _NO_ASTOCK = lambda: {"available": False, "temp": None, "notes": []}  # 测试禁真 probe
+_NO_ZH = lambda qs: ({}, "")                                          # 测试禁真 LLM 翻译
 
 
 # ── 温度算术(表驱动) ────────────────────────────────────────────────────────
@@ -66,7 +67,7 @@ def test_build_pulse_writes_snapshot_and_delta(tmp_path):
            "temps": {}, "astock_temp": None}
     snap.write_text(json.dumps(old) + "\n" + "NOT-JSON-DIRTY-LINE\n", encoding="utf-8")
 
-    out = mp.build_pulse(refresh=True, snapshot_path=snap, astock_fn=_NO_ASTOCK, http=FakeHttp())
+    out = mp.build_pulse(refresh=True, snapshot_path=snap, astock_fn=_NO_ASTOCK, translate_fn=_NO_ZH, http=FakeHttp())
     assert out["ok"] is True and out["stale_minutes"] is None
     fed = next(t for t in out["themes"] if t["id"] == "fed")
     m = next(x for x in fed["markets"] if x["id"] == "pm_517311")
@@ -104,7 +105,7 @@ def test_build_pulse_nonrefresh_returns_stale_snapshot(tmp_path):
 
 def test_build_pulse_no_snapshot_forces_fetch(tmp_path):
     snap = tmp_path / "snapshots.jsonl"
-    out = mp.build_pulse(refresh=False, snapshot_path=snap, astock_fn=_NO_ASTOCK, http=FakeHttp())
+    out = mp.build_pulse(refresh=False, snapshot_path=snap, astock_fn=_NO_ASTOCK, translate_fn=_NO_ZH, http=FakeHttp())
     assert out["ok"] is True and out["stale_minutes"] is None
     assert snap.exists()
 
@@ -116,12 +117,23 @@ def test_build_pulse_total_failure_honest_empty(tmp_path):
         def get(self, *a, **k):
             raise ConnectionError("total outage")
 
-    out = mp.build_pulse(refresh=True, snapshot_path=snap, astock_fn=_NO_ASTOCK, http=AllFail())
+    out = mp.build_pulse(refresh=True, snapshot_path=snap, astock_fn=_NO_ASTOCK, translate_fn=_NO_ZH, http=AllFail())
     assert out["ok"] is True
     assert all(not t["markets"] for t in out["themes"])
     assert out["notes"]  # 每 tag/series 一条失败 note
     assert out["thermometer"]["global"] is None
     assert not snap.exists()  # 全空不落快照
+
+
+def test_build_pulse_attaches_question_zh(tmp_path):
+    """翻译层命中 → 市场行带 question_zh;未命中的行诚实无该字段。"""
+    snap = tmp_path / "snapshots.jsonl"
+    fake_zh = lambda qs: ({qs[0]: "美联储7月会降息吗?"}, "")
+    out = mp.build_pulse(refresh=True, snapshot_path=snap, astock_fn=_NO_ASTOCK,
+                         translate_fn=fake_zh, http=FakeHttp())
+    ms = [m for t in out["themes"] for m in t["markets"]]
+    assert any(m.get("question_zh") == "美联储7月会降息吗?" for m in ms)
+    assert any("question_zh" not in m for m in ms)
 
 
 def test_load_history_filters_by_market(tmp_path):
