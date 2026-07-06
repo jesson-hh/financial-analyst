@@ -97,9 +97,16 @@ def _six_digit(code: str) -> str:
 
 
 def _ak_stock_news(symbol: str):
-    """懒导入 akshare 个股新闻(便于测试替身;缺失/失败由上层降级)。"""
+    """懒导入 akshare 个股新闻(便于测试替身;缺失/失败由上层降级)。
+
+    pandas 3.x Arrow 字符串默认化后,akshare 内部 `\\u` 正则会进 pyarrow re2 抛
+    ArrowInvalid(生产 venv pd3.0.3 真机踩中,个股新闻路静默空返)→ 本调用内强制
+    python 字符串存储(pandas 2/3 都有此选项),venv 零改动。
+    """
     import akshare as ak
-    return ak.stock_news_em(symbol=symbol)
+    import pandas as pd
+    with pd.option_context("mode.string_storage", "python"):
+        return ak.stock_news_em(symbol=symbol)
 
 
 def fetch_stock_news(code: str, limit: int = 50) -> List[Dict[str, Any]]:
