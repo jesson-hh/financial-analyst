@@ -1816,6 +1816,7 @@ def test_factor_promote_impl(monkeypatch):
                         {"ok": False, "reason": "not_found: lib_x"})
     res2 = ct.factor_promote_impl(name="lib_x")
     assert res2["ok"] is False and "not_found" in res2["content"]
+    assert ct.factor_promote_impl(name="")["ok"] is False              # 缺名早退,不打后端
 
 
 def test_ww_news_live_registered():
@@ -1835,4 +1836,3 @@ def test_news_live_impl_wraps_assembler(monkeypatch):
             "coverage": {"note": "n"}})
     out = ct.news_live_impl("000630", limit=5)
     assert out["ok"] and out["items"][0]["title"] == "t" and out["note"] == "n"
-    assert ct.factor_promote_impl(name="")["ok"] is False              # 缺名早退,不打后端
