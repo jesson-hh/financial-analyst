@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 _READER: Any = None      # 懒单例 PitReader(构造含日历/探针,较重 → 复用)
 _LIVE: Any = None        # 懒单例 KuaixunNewsProvider
+_STOCKS_NEWS_PARQUET = Path(r"G:\stocks\_news_staging\normalized\news_events.parquet")
 
 
 def _norm_code(code: str) -> str:
@@ -104,22 +106,139 @@ def _assemble_pit(code: str, asof: str, window: int, reader=None) -> dict:
             "provenance": {"source": "pit_store", "rows": len(items)}}
 
 
-def _assemble_live(code: str, provider=None) -> dict:
-    norm = _norm_code(code)
-    prov = provider or _get_live()
+def _stock_name(norm: str) -> str:
+    """本票名称(快讯名称匹配用);失败→''(只按 code 匹配,诚实降级)。"""
     try:
-        heads = prov.headlines(code) or []
+        from financial_analyst.data.stock_basic import get_basic
+        return str((get_basic(norm) or {}).get("name") or "")
     except Exception:  # noqa: BLE001
-        heads = []
-    items = [{"ts": "", "date": "", "title": h, "source": "eastmoney_kuaixun",
-              "code": norm, "level": "stock", "body_head": ""} for h in heads]
-    return {"ok": True, "code": norm, "mode": "live", "asof": "", "items": items,
-            "coverage": {"partial": False, "note": ""},
-            "provenance": {"source": "kuaixun", "rows": len(items)}}
+        return ""
+
+
+def _t16(s) -> str:
+    """'2026-07-04 09:31[:00]' / Timestamp → '2026-07-04T09:31';空/坏→''。"""
+    t = str(s or "").strip().replace(" ", "T")[:16]
+    return t if len(t) >= 10 else ""
+
+
+def _assemble_live(code: str, provider=None, *, stock_news_fn=None,
+                   kuaixun_fn=None, parquet_path=None, limit: int = 20) -> dict:
+    norm = _norm_code(code)
+    pulled_at = datetime.now().isoformat(timespec="seconds")
+    # —— 兼容:显式传 provider(既有测试/旧调用)→ 维持原 headlines 语义,不走三路 ——
+    if provider is not None:
+        try:
+            heads = provider.headlines(code) or []
+        except Exception:  # noqa: BLE001
+            heads = []
+        items = [{"ts": "", "date": "", "title": h, "source": "eastmoney_kuaixun",
+                  "code": norm, "level": "stock", "body_head": ""} for h in heads]
+        return {"ok": True, "code": norm, "mode": "live", "asof": "", "items": items,
+                "coverage": {"partial": False, "note": ""},
+                "freshness": {"pulled_at": pulled_at, "rich_asof": None, "rich_available": False},
+                "provenance": {"source": "kuaixun", "rows": len(items)}}
+    notes: List[str] = []
+    stock_items: List[Dict[str, Any]] = []
+    broad_items: List[Dict[str, Any]] = []
+    # ① akshare 东财个股新闻(引擎现成 fetch_stock_news;其自身失败已降级 [])
+    try:
+        fn = stock_news_fn
+        if fn is None:
+            from financial_analyst.data.news_pulse import fetch_stock_news as fn
+        rows = fn(norm, limit=max(int(limit or 20), 20)) or []
+    except Exception:  # noqa: BLE001
+        rows = []
+    if not rows:
+        notes.append("个股新闻源不可用或无条目")
+    for r in rows:
+        ts = _t16(r.get("time"))
+        stock_items.append({"ts": ts, "date": ts[:10], "title": str(r.get("title") or "").strip(),
+                            "source": str(r.get("source") or "") or "eastmoney_stock_news",
+                            "code": norm, "level": "stock", "body_head": _head(r.get("summary"))})
+    # ② 东财 7×24 快讯(codes 已 qlib 归一):命中本票(code或名)→stock,其余→macro 补位
+    try:
+        kfn = kuaixun_fn
+        if kfn is None:
+            from financial_analyst.data.news_pulse import fetch_kuaixun as kfn
+        flash = kfn(limit=200) or []
+    except Exception:  # noqa: BLE001
+        flash = []
+        notes.append("快讯源不可用")
+    name = _stock_name(norm)
+    for it in flash:
+        ts = _t16(it.get("time"))
+        title = str(it.get("title") or "").strip()
+        hit = (norm in (it.get("codes") or [])) or (
+            bool(name) and (name in title or name in str(it.get("summary") or "")))
+        rec = {"ts": ts, "date": ts[:10], "title": title, "source": "eastmoney_kuaixun",
+               "code": norm if hit else None, "level": "stock" if hit else "macro",
+               "body_head": _head(it.get("summary"))}
+        (stock_items if hit else broad_items).append(rec)
+    # ③ stocks 富 parquet(公告/政策)可选加菜:纯文件读、近3日窗;缺/错→rich_available False
+    rich_asof = None
+    rich_available = False
+    ppath = Path(parquet_path) if parquet_path else _STOCKS_NEWS_PARQUET
+    try:
+        if ppath.exists():
+            import pandas as pd
+            df = pd.read_parquet(ppath)
+            rich_asof = _t16(df["publish_ts"].max())
+            rich_available = True
+            cutoff = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+            recent = df[df["publish_ts"].astype(str) >= cutoff].copy()
+            sc = recent["stock_codes"].astype(str)
+            mine = recent[sc.str.contains(norm, na=False)]
+            pol = recent[recent["is_policy"].fillna(False).astype(bool)
+                         & ~sc.str.contains(norm, na=False)]
+            for _, r in mine.iterrows():
+                ts = _t16(r.get("publish_ts"))
+                stock_items.append({"ts": ts, "date": ts[:10],
+                                    "title": str(r.get("title") or "").strip(),
+                                    "source": str(r.get("source") or "stocks_staging"),
+                                    "code": norm, "level": "event",
+                                    "body_head": _head(r.get("content"))})
+            for _, r in pol.iterrows():
+                ts = _t16(r.get("publish_ts"))
+                broad_items.append({"ts": ts, "date": ts[:10],
+                                    "title": str(r.get("title") or "").strip(),
+                                    "source": str(r.get("source") or "stocks_staging"),
+                                    "code": None, "level": "policy",
+                                    "body_head": _head(r.get("content"))})
+        else:
+            notes.append("stocks 富 parquet 不在,公告/政策层缺席")
+    except Exception:  # noqa: BLE001
+        rich_available = False
+        notes.append("stocks 富 parquet 读取失败")
+    # 去重(①②同源标题重叠;seen 跨两组共享)→ 本票优先补位 → 展示按 ts 降序
+    seen: set = set()
+
+    def _dedup(arr):
+        out = []
+        for x in arr:
+            if x["title"] and x["title"] not in seen:
+                seen.add(x["title"])
+                out.append(x)
+        return out
+
+    stock_items = _dedup(sorted(stock_items, key=lambda x: x["ts"], reverse=True))
+    broad_items = _dedup(sorted(broad_items, key=lambda x: x["ts"], reverse=True))
+    lim = max(1, int(limit or 20))
+    picked = stock_items[:lim]
+    if len(picked) < lim:
+        picked += broad_items[:lim - len(picked)]
+    picked.sort(key=lambda x: x["ts"], reverse=True)
+    return {"ok": True, "code": norm, "mode": "live", "asof": "", "items": picked,
+            "coverage": {"partial": False, "note": ";".join(notes)},
+            "freshness": {"pulled_at": pulled_at, "rich_asof": rich_asof,
+                          "rich_available": rich_available},
+            "provenance": {"source": "stock_news+kuaixun+staging_parquet", "rows": len(picked)}}
 
 
 def assemble_news_marks(code: str, asof: str = "", mode: str = "pit",
-                        window: int = 250, *, reader=None, provider=None) -> dict:
+                        window: int = 250, *, reader=None, provider=None,
+                        stock_news_fn=None, kuaixun_fn=None,
+                        parquet_path=None, limit: int = 20) -> dict:
     if mode == "live":
-        return _assemble_live(code, provider=provider)
+        return _assemble_live(code, provider=provider, stock_news_fn=stock_news_fn,
+                              kuaixun_fn=kuaixun_fn, parquet_path=parquet_path, limit=limit)
     return _assemble_pit(code, asof, window, reader=reader)

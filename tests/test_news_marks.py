@@ -115,3 +115,64 @@ def test_live_provider_failure_is_empty():
             raise RuntimeError("net down")
     out = nm.assemble_news_marks("SZ000630", mode="live", provider=_Boom())
     assert out["ok"] is True and out["items"] == []
+
+
+def test_live_three_way_merge_and_dedupe(tmp_path):
+    import pandas as pd
+    pq = tmp_path / "news_events.parquet"
+    pd.DataFrame([
+        {"publish_ts": "2026-07-04 09:00:00", "title": "公告:拟增持", "content": "x",
+         "source": "eastmoney_announcement", "stock_codes": "SZ000630", "is_policy": False},
+        {"publish_ts": "2026-07-04 08:00:00", "title": "政策:降准", "content": "y",
+         "source": "gov_policy", "stock_codes": "", "is_policy": True},
+    ]).to_parquet(pq)
+    sn = lambda code, limit=20: [
+        {"time": "2026-07-04 10:00", "title": "个股新闻A", "summary": "a", "source": "东方财富"},
+        {"time": "2026-07-04 09:30", "title": "重复标题", "summary": "b", "source": "东方财富"},
+    ]
+    kx = lambda limit=200: [
+        {"time": "2026-07-04 10:05", "title": "重复标题", "summary": "", "codes": ["SZ000630"]},
+        {"time": "2026-07-04 10:03", "title": "宏观快讯Z", "summary": "", "codes": []},
+    ]
+    out = nm.assemble_news_marks("000630", mode="live", stock_news_fn=sn, kuaixun_fn=kx,
+                                 parquet_path=pq, limit=10)
+    titles = [it["title"] for it in out["items"]]
+    assert titles.count("重复标题") == 1                      # ①②同标题去重
+    lv = {it["title"]: it["level"] for it in out["items"]}
+    assert lv["个股新闻A"] == "stock" and lv["公告:拟增持"] == "event"
+    assert lv["政策:降准"] == "policy" and lv["宏观快讯Z"] == "macro"
+    assert out["freshness"]["rich_available"] is True
+    assert out["freshness"]["rich_asof"] == "2026-07-04T09:00"
+    ts = [it["ts"] for it in out["items"]]
+    assert ts == sorted(ts, reverse=True)                     # 展示按 ts 降序
+
+
+def test_live_limit_prioritizes_stock_items():
+    sn = lambda code, limit=20: [{"time": f"2026-07-04 09:{i:02d}", "title": f"股{i}",
+                                  "summary": "", "source": ""} for i in range(5)]
+    kx = lambda limit=200: [{"time": f"2026-07-04 10:{i:02d}", "title": f"宏{i}",
+                             "summary": "", "codes": []} for i in range(5)]
+    out = nm.assemble_news_marks("SZ000630", mode="live", stock_news_fn=sn, kuaixun_fn=kx,
+                                 parquet_path="Z:/__none__.parquet", limit=6)
+    lv = [it["level"] for it in out["items"]]
+    assert len(out["items"]) == 6 and lv.count("stock") == 5 and lv.count("macro") == 1
+
+
+def test_live_single_source_failure_degrades():
+    def sn(code, limit=20):
+        raise RuntimeError("akshare down")
+    kx = lambda limit=200: [{"time": "2026-07-04 10:00", "title": "快讯B", "summary": "",
+                             "codes": ["SZ000630"]}]
+    out = nm.assemble_news_marks("SZ000630", mode="live", stock_news_fn=sn, kuaixun_fn=kx,
+                                 parquet_path="Z:/__none__.parquet", limit=5)
+    assert out["ok"] is True and [it["title"] for it in out["items"]] == ["快讯B"]
+    assert "个股新闻" in out["coverage"]["note"]
+
+
+def test_live_parquet_absent_rich_unavailable():
+    out = nm.assemble_news_marks("SZ000630", mode="live",
+                                 stock_news_fn=lambda code, limit=20: [],
+                                 kuaixun_fn=lambda limit=200: [],
+                                 parquet_path="Z:/__none__.parquet", limit=5)
+    assert out["ok"] is True and out["items"] == []
+    assert out["freshness"]["rich_available"] is False and out["freshness"]["pulled_at"]
