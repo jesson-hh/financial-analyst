@@ -1,0 +1,43 @@
+# 全球情绪温度计 · 主题与锚定市场(唯一事实源)
+# anchor.direction: +1=概率升→risk-on / -1=概率升→risk-off;只有锚定市场参与温度合成,
+# 其余市场只展示不合成——避免自动猜方向的软伪造。match 为小写子串,命中 question/id。
+themes:
+  - id: fed
+    label: 美联储 · 利率
+    polymarket_tags: [fed-rates]
+    kalshi_series: [KXFED]
+    anchors:
+      - {match: "fed rate hike", direction: -1, weight: 1.0}
+      - {match: "rate cuts in 2026", direction: 1, weight: 1.0}
+  - id: inflation_recession
+    label: 通胀 · 衰退
+    polymarket_tags: [inflation, recession]
+    kalshi_series: []
+    anchors:
+      - {match: "recession", direction: -1, weight: 1.0}
+  - id: geopolitics
+    label: 地缘政治
+    polymarket_tags: [geopolitics]
+    kalshi_series: []
+    anchors:
+      - {match: "military clash", direction: -1, weight: 1.0}
+      - {match: "nuclear", direction: -1, weight: 1.0}
+  - id: china
+    label: 中美 · 中国
+    polymarket_tags: [china]
+    kalshi_series: []
+    anchors:
+      - {match: "china x taiwan", direction: -1, weight: 1.5}
+      - {match: "tariff", direction: -1, weight: 1.0}
+  - id: crypto_risk
+    label: 加密 · 风险偏好
+    polymarket_tags: [crypto]
+    kalshi_series: []
+    anchors: []   # 展示为主,方向语义混杂不硬标
+astock:
+  # 打板温度 = clamp(base + k_zt*涨停数 + k_streak*最高连板 - k_break*炸板率(0-1), 0, 100)
+  base: 30.0
+  k_zt: 0.35
+  k_streak: 3.0
+  k_break: 30.0
+display_top_n: 8
