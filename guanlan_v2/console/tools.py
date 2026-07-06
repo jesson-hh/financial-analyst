@@ -1364,6 +1364,15 @@ def news_search_impl(code: str = "", scope: str = "both", query: str = "",
     return {"ok": True, "content": content, "artifact": art, "raw": r}
 
 
+def news_live_impl(code: str, limit: int = 20) -> dict:
+    """实时新闻现拉(个股新闻+快讯,stocks 公告/政策富层在场顺带;秒回,绝不编造)。"""
+    from guanlan_v2.seats.news_marks import assemble_news_marks
+    out = assemble_news_marks(code, mode="live", limit=int(limit or 20))
+    return {"ok": out.get("ok", False), "code": out.get("code"),
+            "items": out.get("items", []), "freshness": out.get("freshness", {}),
+            "note": (out.get("coverage") or {}).get("note", "")}
+
+
 def seats_history_impl(code: str = "", limit: int = 10) -> Dict[str, Any]:
     """查询落子哨兵的研判/条件单历史(平台级,跨会话;读 GET /seats/decisions,逆序最新在前)。
     真实响应形状 {"ok": True, "decisions": [...], "total": N}(seats/api.py /decisions)。"""
@@ -2051,6 +2060,17 @@ WW_TOOL_TABLE = [
          "keyword": {"type": "string", "description": "可选,按子串过滤事件标题"}},
       "required": ["code"]},
      "impl": f10_impl, "cost": "seconds", "confirm": False,
+     "reachable": []},
+    {"name": "ww_news_live",
+     "description":
+         "现拉本票实时新闻(秒回):akshare 东财个股新闻 + 东财7×24快讯(命中本票标 stock,宏观补位),"
+         "stocks 富层(公告 event/政策 policy)在场顺带读并以 freshness.rich_asof 标截止,缺料诚实空不编造。"
+         "经验回滚/复盘问『此刻这只票有什么新闻』时用。live realtime news pull.",
+     "input_schema": {"type": "object", "properties": {
+         "code": {"type": "string", "description": "股票代码,如 SZ000630 或 000630"},
+         "limit": {"type": "integer", "default": 20, "description": "最多条数,本票优先"}},
+      "required": ["code"]},
+     "impl": news_live_impl, "cost": "seconds", "confirm": False,
      "reachable": []},
     {"name": "ww_factorlib_save",
      "description":

@@ -610,14 +610,14 @@ def test_engine_profile_excludes_ww_but_console_whitelist_resolves():
                           encoding="utf-8", errors="replace", timeout=180, env=env, cwd=str(repo))
     assert proc.returncode == 0, (proc.stderr or "")[-2000:]
     out = _json.loads(proc.stdout.strip().splitlines()[-1])
-    assert len(out["registered_ww"]) == 48                    # +7 P0 闭环读取面薄工具 +1 ww_picks_perf +2 P2 研究回路 +2 P3 draft转正面 +2 P5 再打分 +2 P6′ 重排A/B
+    assert len(out["registered_ww"]) == 49                    # +7 P0 闭环读取面薄工具 +1 ww_picks_perf +2 P2 研究回路 +2 P3 draft转正面 +2 P5 再打分 +2 P6′ 重排A/B +1 ww_news_live 实时新闻
     # ① 非显式白名单路径(research / 缺省 / all)一律不外露 ww_*,且不再返回 None(None=完全不限制)
     assert out["research_is_none"] is False and out["research_ww"] == []
     assert out["default_is_none"] is False and out["default_ww"] == []
     assert out["all_is_none"] is False and out["all_ww"] == []
     # ② console 显式白名单路径不受影响:62 名全部可解析,含 37 个 ww_(+工坊删除/设默认 2 + alpha-zoo 7)
-    assert out["console_n"] == 73 and out["console_missing"] == []
-    assert out["explicit_n"] == 73 and out["explicit_ww_n"] == 48
+    assert out["console_n"] == 74 and out["console_missing"] == []
+    assert out["explicit_n"] == 74 and out["explicit_ww_n"] == 49
 
 
 def test_f10_impl_returns_structured_facts(monkeypatch):
@@ -1081,9 +1081,9 @@ def test_registry_derivation_consistent():
     """阶段0 重构守护:CONSOLE_ALLOWED 与 _WW_REACHABLE_ENDPOINTS 必须从声明表派生且与已知集合一致。"""
     import guanlan_v2.console.tools as ct
     ww_in_table = {t["name"] for t in ct.WW_TOOL_TABLE}
-    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 48
+    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 49
     assert ww_in_table == {n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")}
-    assert len(ct.CONSOLE_ALLOWED) == 73
+    assert len(ct.CONSOLE_ALLOWED) == 74
     assert {"/factorlib/save", "/workflow/compose", "/feature/build"} <= ct._WW_REACHABLE_ENDPOINTS
     assert ct._WW_REACHABLE_ENDPOINTS == {ep for t in ct.WW_TOOL_TABLE for ep in t.get("reachable", [])}
 
@@ -1816,4 +1816,23 @@ def test_factor_promote_impl(monkeypatch):
                         {"ok": False, "reason": "not_found: lib_x"})
     res2 = ct.factor_promote_impl(name="lib_x")
     assert res2["ok"] is False and "not_found" in res2["content"]
+
+
+def test_ww_news_live_registered():
+    import guanlan_v2.console.tools as ct
+    assert "ww_news_live" in {t["name"] for t in ct.WW_TOOL_TABLE}
+    assert "ww_news_live" in ct.CONSOLE_ALLOWED
+
+
+def test_news_live_impl_wraps_assembler(monkeypatch):
+    import guanlan_v2.console.tools as ct
+    monkeypatch.setattr(
+        "guanlan_v2.seats.news_marks.assemble_news_marks",
+        lambda code, mode="live", limit=20, **k: {
+            "ok": True, "code": "SZ000630",
+            "items": [{"title": "t", "ts": "2026-07-04T10:00", "level": "stock"}],
+            "freshness": {"pulled_at": "x", "rich_available": False, "rich_asof": None},
+            "coverage": {"note": "n"}})
+    out = ct.news_live_impl("000630", limit=5)
+    assert out["ok"] and out["items"][0]["title"] == "t" and out["note"] == "n"
     assert ct.factor_promote_impl(name="")["ok"] is False              # 缺名早退,不打后端
