@@ -1365,12 +1365,143 @@ def news_search_impl(code: str = "", scope: str = "both", query: str = "",
 
 
 def news_live_impl(code: str, limit: int = 20) -> dict:
-    """实时新闻现拉(个股新闻+快讯,stocks 公告/政策富层在场顺带;秒回,绝不编造)。"""
+    """实时新闻现拉(个股新闻+快讯,stocks 公告/政策富层在场顺带;秒回,绝不编造)。
+    content 必须自带全部条目:无 content 键时 _wrap 兜底 json[:400],agent 只见断裂 JSON
+    (评审对抗核实坐实的交付层缺陷,勿回退)。"""
     from guanlan_v2.seats.news_marks import assemble_news_marks
     out = assemble_news_marks(code, mode="live", limit=int(limit or 20))
-    return {"ok": out.get("ok", False), "code": out.get("code"),
-            "items": out.get("items", []), "freshness": out.get("freshness", {}),
-            "note": (out.get("coverage") or {}).get("note", "")}
+    items = out.get("items", [])
+    note = (out.get("coverage") or {}).get("note", "")
+    fresh = out.get("freshness", {}) or {}
+    head = (f"实时新闻 · {out.get('code')} · {len(items)} 条"
+            f"(拉取 {str(fresh.get('pulled_at') or '')[:16]})" + (f" · {note}" if note else ""))
+    lines = [head] + [f"[{str(it.get('ts') or '')[:16]}]({it.get('level', '')}) {it.get('title', '')}"
+                      for it in items]
+    return {"ok": out.get("ok", False), "content": "\n".join(lines), "code": out.get("code"),
+            "items": items, "freshness": fresh, "note": note}
+
+
+# ── ww_live_text:stocks 实时文本源薄壳(13 端点+catalog)────────────────────────
+# 零重造:端点实现归 G:\stocks(live_text_sources.py),观澜只起子进程跑其官方 probe CLI
+# (只读,write_enabled 恒 False)。解释器复用本进程 sys.executable(生产=pinned venv,
+# 已真机验证可跑 probe)。东财侧有风控:facade 的串行限流只在单次子进程内生效(跨调用
+# 无共享节流),节奏靠 agent 工具循环天然串行 + 子进程冷启;壳不并发、不重试轰炸。
+_STOCKS_PROBE = Path(r"G:\stocks\scripts\probe_live_text_sources.py")
+_LIVE_TEXT_SOURCES = (
+    "catalog", "stock_news", "global_news", "research", "industry_research",
+    "cninfo_announcements", "concept_blocks", "ths_hot_reason", "em_zt_pool",
+    "ths_limit_up_pool", "cninfo_irm", "ths_hot_list", "em_hot_rank", "em_hot_concept")
+_LIVE_TEXT_NEED_CODE = {"stock_news", "cninfo_announcements", "concept_blocks",
+                        "cninfo_irm", "em_hot_concept", "research"}
+# 涨停两池 date 缺省必须补当日(YYYYMMDD),否则上游 API 对空 date 静默返空。
+_LIVE_TEXT_DATE_POOLS = {"em_zt_pool", "ths_limit_up_pool"}
+_LIVE_TEXT_CLIP = 400
+
+
+def _live_text_clip_row(row: Any) -> Any:
+    """剥 raw(原始报文体积大、信息已归一)+ 顶层长字符串截 400 字(截断非编造)。"""
+    if not isinstance(row, dict):
+        return row
+    out: Dict[str, Any] = {}
+    for k, v in row.items():
+        if k == "raw":
+            continue
+        if isinstance(v, str) and len(v) > _LIVE_TEXT_CLIP:
+            v = v[:_LIVE_TEXT_CLIP] + "…"
+        out[k] = v
+    return out
+
+
+def _live_text_content(res: Dict[str, Any]) -> str:
+    """组装 agent 可读 content(评审对抗核实抓 Critical:无 content 键时 _wrap 兜底
+    json[:400],agent 只见断裂 JSON——content 必须自带全部 rows;行内已剥 raw+字段截 400,
+    体量受 limit≤50 与字段截断双重约束)。"""
+    head = "实时文本 · " + res["source"]
+    if res.get("code"):
+        head += f" · {res['code']}"
+    if res.get("date"):
+        head += f" · {res['date']}"
+    head += f" · {res['n']} 行(拉取 {res['pulled_at']})"
+    if res.get("note"):
+        head += f" · {res['note']}"
+    lines = [head] + [json.dumps(r, ensure_ascii=False) if isinstance(r, dict) else str(r)
+                      for r in res["rows"]]
+    return "\n".join(lines)
+
+
+def live_text_impl(source: str, code: str = "", date: str = "", limit: int = 20) -> Dict[str, Any]:
+    """stocks 实时文本源探针(公告/互动易/研报元数据/涨停题材热度等 13 端点 + catalog 自省)。
+    caller 错误(source 非法/缺必填 code/date·limit 形态非法)→ ok:False 明说;外部失败
+    (probe 缺席/超时/非零退出/JSON 脏)→ ok:True + 空 + note 记因,恒不编造(与 ww_news_live 同约)。"""
+    import subprocess
+    import sys as _sys
+    src = (source or "").strip().lower()
+    base: Dict[str, Any] = {"ok": True, "source": src, "code": code, "date": date,
+                            "rows": [], "n": 0, "note": "",
+                            "pulled_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+
+    def _fin(d: Dict[str, Any]) -> Dict[str, Any]:
+        d["content"] = _live_text_content(d)
+        return d
+
+    if src not in _LIVE_TEXT_SOURCES:
+        return _fin({**base, "ok": False,
+                     "note": f"source 非法: {source!r};合法值 {', '.join(_LIVE_TEXT_SOURCES)}"})
+    try:
+        lim = max(1, min(int(limit or 20), 50))
+    except (TypeError, ValueError):
+        return _fin({**base, "ok": False, "note": f"limit 非法: {limit!r}(需整数)"})
+    # code 语义照搬 probe CLI:ths_hot_list=榜期 / industry_research=行业代码 / 其余=股票代码取 6 位
+    if src not in ("ths_hot_list", "industry_research"):
+        m = _re.search(r"\d{6}", code or "")
+        code = m.group(0) if m else ""
+    if src in _LIVE_TEXT_NEED_CODE and not code:
+        return _fin({**base, "ok": False,
+                     "note": f"source={src} 必须带 code(6 位股票代码,SZ000630/000630 均可)"})
+    # date 归一(评审真机坐实:涨停池上游对非 YYYYMMDD 的 date 静默返空,不拦会被
+    # "0 行" note 伪装成正常;ths_hot_reason 的 date 进上游 URL 路径,归一顺带封死注入面)
+    if src in _LIVE_TEXT_DATE_POOLS:
+        digits = _re.sub(r"\D", "", date or "")
+        if (date or "").strip() and len(digits) != 8:
+            return _fin({**base, "ok": False, "note": f"date 非法: {date!r}(需 YYYYMMDD,如 20260706)"})
+        date = digits or time.strftime("%Y%m%d")
+    elif src == "ths_hot_reason" and (date or "").strip():
+        digits = _re.sub(r"\D", "", date)
+        if len(digits) != 8:
+            return _fin({**base, "ok": False, "note": f"date 非法: {date!r}(需 YYYY-MM-DD 或 YYYYMMDD)"})
+        date = f"{digits[:4]}-{digits[4:6]}-{digits[6:]}"
+    base.update(code=code, date=date)
+    if not _STOCKS_PROBE.exists():
+        return _fin({**base, "note": "stocks probe 不可用(G:\\stocks 缺席),该能力此机不可达"})
+    # --opt=value 形态:值以 - 开头(如榜期误传 "-day")时 argparse 不会误当选项(评审抓)
+    cmd = [_sys.executable, str(_STOCKS_PROBE), f"--source={src}", f"--code={code}",
+           f"--date={date}", f"--limit={lim}", "--json"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=90, cwd=str(_STOCKS_PROBE.parents[1]),
+                              env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    except subprocess.TimeoutExpired:
+        return _fin({**base, "note": "probe 超时(90s),外源可能限流/阻塞;稍后再试"})
+    except Exception as e:
+        return _fin({**base, "note": f"probe 启动失败: {e}"})
+    if proc.returncode != 0:
+        tail = (proc.stderr or "").strip()[-300:]
+        return _fin({**base, "note": f"probe 退出码 {proc.returncode}: {tail}"})
+    try:
+        payload = json.loads(proc.stdout.strip())
+    except Exception:
+        return _fin({**base, "note": "probe 输出非 JSON(截断/编码异常),该次结果作废不编造"})
+    raw_rows = payload.get("rows") if isinstance(payload, dict) else None
+    if isinstance(raw_rows, dict):        # concept_blocks 等返回单 dict(boards/total)→ 包成一行
+        rows = [_live_text_clip_row(raw_rows)]
+    elif isinstance(raw_rows, list):
+        # catalog 承诺"列全部端点"(rule 7 引导的自省第一跳),不受 limit 截(评审抓)
+        keep = raw_rows if src == "catalog" else raw_rows[:lim]
+        rows = [_live_text_clip_row(r) for r in keep]
+    else:
+        rows = []
+    note = "" if rows else "该源本次返回 0 行(非交易日/无相关条目等;上游不报原因,不臆断)"
+    return _fin({**base, "rows": rows, "n": len(rows), "note": note})
 
 
 def seats_history_impl(code: str = "", limit: int = 10) -> Dict[str, Any]:
@@ -2071,6 +2202,28 @@ WW_TOOL_TABLE = [
          "limit": {"type": "integer", "default": 20, "description": "最多条数,本票优先"}},
       "required": ["code"]},
      "impl": news_live_impl, "cost": "seconds", "confirm": False,
+     "reachable": []},
+    {"name": "ww_live_text",
+     "description":
+         "现拉 stocks 实时文本源(13 端点,只读子进程探针):个股新闻/7×24快讯/个股·行业研报元数据(含PDF URL)/"
+         "巨潮公告/互动易问答/概念归属/涨停池·涨停原因·热点归因/热榜·人气榜·热门概念。source=catalog 列全部端点。"
+         "缺料/外源失败诚实空+note 不编造。问『XX最新公告/互动易怎么答的/今天涨停梯队/现在什么题材热』时用。"
+         "live text probe (announcements/IRM/reports/limit-up/heat).",
+     "input_schema": {"type": "object", "properties": {
+         "source": {"type": "string",
+                    "enum": ["catalog", "stock_news", "global_news", "research", "industry_research",
+                             "cninfo_announcements", "concept_blocks", "ths_hot_reason", "em_zt_pool",
+                             "ths_limit_up_pool", "cninfo_irm", "ths_hot_list", "em_hot_rank",
+                             "em_hot_concept"],
+                    "description": "端点名;catalog=列能力目录"},
+         "code": {"type": "string",
+                  "description": "股票代码 SZ000630/000630;ths_hot_list 填榜期 hour/day(缺省 hour);"
+                                 "industry_research 填行业代码(缺省 * 全行业)"},
+         "date": {"type": "string",
+                  "description": "em_zt_pool/ths_limit_up_pool 用 YYYYMMDD(缺省当日);ths_hot_reason 可 YYYY-MM-DD"},
+         "limit": {"type": "integer", "default": 20, "description": "最多条数(≤50)"}},
+      "required": ["source"]},
+     "impl": live_text_impl, "cost": "seconds", "confirm": False,
      "reachable": []},
     {"name": "ww_factorlib_save",
      "description":
