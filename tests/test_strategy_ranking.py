@@ -38,6 +38,21 @@ def test_ts_to_qlib():
     assert ts_to_qlib("BJ920690") == "BJ920690"  # 无点原样
 
 
+def test_v4_pct_map_column_and_scale_compat():
+    """单一列名/量纲归一入口(rescore.v4_pool 与 industry.aggregate 收拢至此)。"""
+    import pytest
+    from guanlan_v2.strategy.ranking import v4_pct_map
+    # lgb_pct(0-1)→×100
+    df1 = pd.DataFrame({"code": ["SH600519", "SZ000001"], "lgb_pct": [0.99, 0.10]})
+    assert v4_pct_map(df1) == {"SH600519": 99.0, "SZ000001": 10.0}
+    # pct(0-100)原样;ts_code 回退
+    df2 = pd.DataFrame({"ts_code": ["600519.SH"], "pct": [88.0]})
+    assert v4_pct_map(df2) == {"600519.SH": 88.0}
+    # 缺列 → ValueError(诚实不猜)
+    with pytest.raises(ValueError):
+        v4_pct_map(pd.DataFrame({"foo": [1]}))
+
+
 def test_name_industry_map_structure():
     m = name_industry_map()
     assert len(m) > 1000

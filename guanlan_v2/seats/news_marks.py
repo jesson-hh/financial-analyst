@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -14,7 +15,10 @@ from typing import Any, Dict, List, Optional
 
 _READER: Any = None      # 懒单例 PitReader(构造含日历/探针,较重 → 复用)
 _LIVE: Any = None        # 懒单例 KuaixunNewsProvider
-_STOCKS_NEWS_PARQUET = Path(r"G:\stocks\_news_staging\normalized\news_events.parquet")
+# 富层(公告/政策)parquet:env 可覆写(stocks 把 _news_staging 迁到 canonical text_source 时
+# 改配置不改码;缺/读失败 → 该路静默空,rich_available:false,主链不受影响)。
+_STOCKS_NEWS_PARQUET = Path(os.environ.get(
+    "GUANLAN_NEWS_EVENTS_PARQUET", r"G:\stocks\_news_staging\normalized\news_events.parquet"))
 
 
 def _norm_code(code: str) -> str:

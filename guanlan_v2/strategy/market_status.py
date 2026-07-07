@@ -51,10 +51,19 @@ def _provider_uri() -> str:
 
 
 def _mainline_panel_path(provider_uri: str) -> Path:
-    """``monthly_mainlines_panel.parquet`` 在 ``<stocks>/strategy/mainline/``(data 外置)。
+    """``monthly_mainlines_panel.parquet`` 路径。
 
+    优先 regen 自产的 **artifacts 版**(``strategy.ranking.MAINLINE_PARQUET``,qlib 管线退役后
+    唯一在刷新的);缺失才回落 stocks 侧 ``<stocks>/strategy/mainline/``(该处已成陈尸,双源分叉修:
+    market_status 的『主线』曾读 06-08 旧面板而选股 L2 读 artifacts 07-02 版,同月两个答案)。
     provider = ``.../stocks/stock_data/cn_data`` → ``.parent.parent`` = ``.../stocks``。
     """
+    try:
+        from guanlan_v2.strategy.ranking import MAINLINE_PARQUET
+        if MAINLINE_PARQUET.exists():
+            return MAINLINE_PARQUET
+    except Exception:  # noqa: BLE001 — 取不到 artifacts 常量则回落 stocks 侧
+        pass
     return Path(provider_uri).parent.parent / "strategy" / "mainline" / "monthly_mainlines_panel.parquet"
 
 

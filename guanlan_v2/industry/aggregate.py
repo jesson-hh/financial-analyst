@@ -30,18 +30,13 @@ def _fetch_quotes(codes: list, days: int = 45) -> dict:
 
 
 def _v4_pct_map() -> Optional[dict]:
+    """{code: pct(0-100)};列名/量纲归一走单一入口 strategy.ranking.v4_pct_map
+    (与 rescore.v4_pool 同源,防口径漂移)。缺产物/缺列 → None(诚实降级)。"""
     try:
         import pandas as pd
         from guanlan_v2.strategy.paths import V4_RANKING_PARQUET
-        df = pd.read_parquet(V4_RANKING_PARQUET)
-        codecol = "code" if "code" in df.columns else ("ts_code" if "ts_code" in df.columns else None)
-        pctcol = "lgb_pct" if "lgb_pct" in df.columns else ("pct" if "pct" in df.columns else None)
-        if not codecol or not pctcol:
-            return None
-        vals = df[pctcol].astype(float)
-        if pctcol == "lgb_pct":   # 生产 rank(pct=True) 值域 0-1;下游(_stock_rows round/前端原样)按 0-100 消费
-            vals = vals * 100.0
-        return dict(zip(df[codecol].astype(str), vals))
+        from guanlan_v2.strategy.ranking import v4_pct_map
+        return v4_pct_map(pd.read_parquet(V4_RANKING_PARQUET))
     except Exception:  # noqa: BLE001
         return None
 

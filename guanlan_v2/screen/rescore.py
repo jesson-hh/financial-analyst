@@ -198,24 +198,20 @@ def composite_score(v4_pct: Optional[float], chain: Optional[float],
 # ── 池来源(v4 榜)────────────────────────────────────────────────────────
 
 def v4_pool(top_n: int) -> List[dict]:
-    """v4 榜按 pct/lgb_pct 降序前 top_n:[{code, v4pct}];不可用 → RescoreError 拒开跑。
-    列名兼容:code/ts_code;lgb_pct(0-1)→0-100 归一,pct(0-100)原样。"""
+    """v4 榜按 pct 降序前 top_n:[{code, v4pct(0-100)}];不可用 → RescoreError 拒开跑。
+    列名/量纲归一走单一入口 strategy.ranking.v4_pct_map(与 industry.aggregate 同源,防口径漂移)。"""
     import pandas as pd
+    from guanlan_v2.strategy.ranking import v4_pct_map
     try:
         df = pd.read_parquet(_v4_ranking_path())
     except Exception as exc:  # noqa: BLE001
         raise RescoreError(f"v4 榜不可用: {type(exc).__name__}: {exc}")
-    codecol = "code" if "code" in df.columns else ("ts_code" if "ts_code" in df.columns else None)
-    pctcol = "lgb_pct" if "lgb_pct" in df.columns else ("pct" if "pct" in df.columns else None)
-    if not codecol or not pctcol:
-        raise RescoreError(f"v4 榜列缺失(code/lgb_pct): {list(df.columns)}")
-    df = df.sort_values(pctcol, ascending=False).head(int(top_n))
-    out = []
-    for _, r in df.iterrows():
-        v = float(r[pctcol])
-        out.append({"code": str(r[codecol]),
-                    "v4pct": round(v * 100.0, 1) if v <= 1.0 else round(v, 1)})  # 0-1 分位→0-100;旧 0-100 原样
-    return out
+    try:
+        pmap = v4_pct_map(df)
+    except ValueError as exc:
+        raise RescoreError(str(exc))
+    top = sorted(pmap.items(), key=lambda kv: kv[1], reverse=True)[: int(top_n)]
+    return [{"code": c, "v4pct": round(p, 1)} for c, p in top]
 
 
 # ── run 主体 + 档案 ───────────────────────────────────────────────────────

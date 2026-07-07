@@ -81,6 +81,25 @@ def ranking_date(model_id=None) -> str:
     return ""
 
 
+def v4_pct_map(df=None, model_id=None) -> Dict[str, float]:
+    """v4 榜 → ``{code: pct(0-100)}`` 的唯一列名/量纲归一入口。
+    列兼容:``code`` | ``ts_code``;``lgb_pct``(生产 rank(pct=True) 值域 0-1)×100、
+    ``pct``(0-100)原样。缺列 → ValueError(诚实,不猜)。
+    此口径此前 rescore.v4_pool 与 industry.aggregate._v4_pct_map 各手写一份、量纲判据还不一致
+    (前者按值 v≤1、后者按列名 lgb_pct),2026-07-04 v4 换列名 lgb_pct 时 rescore 整体拒开跑
+    已咬过一次 → 收拢至此,漂移只修一处。df 省略则 load_v4_ranking(model_id)。"""
+    if df is None:
+        df = load_v4_ranking(model_id=model_id)
+    codecol = "code" if "code" in df.columns else ("ts_code" if "ts_code" in df.columns else None)
+    pctcol = "lgb_pct" if "lgb_pct" in df.columns else ("pct" if "pct" in df.columns else None)
+    if not codecol or not pctcol:
+        raise ValueError(f"v4 榜列缺失(code/lgb_pct): {list(df.columns)}")
+    vals = df[pctcol].astype(float)
+    if pctcol == "lgb_pct":   # 0-1 分位 → 0-100(下游 _stock_rows/rescore 均按 0-100 消费)
+        vals = vals * 100.0
+    return dict(zip(df[codecol].astype(str), vals))
+
+
 @functools.lru_cache(maxsize=1)
 def name_industry_map() -> Dict[str, Tuple[str, str]]:
     """qlib_code → (name, industry),来自 tushare_stock_basic。缺文件 → 空 dict。"""
