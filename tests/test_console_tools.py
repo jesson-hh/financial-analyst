@@ -1867,12 +1867,32 @@ def test_news_live_impl_wraps_assembler(monkeypatch):
     assert out["ok"] and out["items"][0]["title"] == "t" and out["note"] == "n"
 
 
-# ── ww_live_text:stocks 实时文本源薄壳(13端点+catalog,子进程 probe CLI)──────────
+# ── ww_live_text:stocks 统一实时源(经 datafeed.live_client,30源+catalog)─────────
 
 
 def _lt_fake_proc(stdout="", returncode=0, stderr=""):
     import types
     return types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+def _lt_envelope(source_id="cninfo_irm", status="ok", items=None, error=""):
+    import json as _json
+    return _json.dumps({"source_id": source_id, "provider": "x", "category": "x", "query": {},
+                        "fetched_ts": "2026-07-07T01:00:00", "items": items or [],
+                        "status": status, "error": error, "write_enabled": False},
+                       ensure_ascii=False)
+
+
+def _lt_client_stub(monkeypatch, tmp_path):
+    """live_client 指到临时 probe 桩 + 免节流 + catalog 缓存隔离;返回 lc 模块。"""
+    import guanlan_v2.datafeed.live_client as lc
+    probe = tmp_path / "scripts" / "probe.py"
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    probe.write_text("# stub", encoding="utf-8")
+    monkeypatch.setattr(lc, "_STOCKS_PROBE", probe)
+    monkeypatch.setattr(lc, "_MIN_INTERVAL_S", 0.0)
+    monkeypatch.setattr(lc, "_CATALOG_CACHE", {"ts": 0.0, "rows": None})
+    return lc
 
 
 def test_ww_live_text_registered():
@@ -1883,56 +1903,51 @@ def test_ww_live_text_registered():
     props = entry["input_schema"]["properties"]
     assert {"source", "code", "date", "limit"} <= set(props)
     assert entry["input_schema"]["required"] == ["source"]
-    assert set(props["source"]["enum"]) == set(ct._LIVE_TEXT_SOURCES) and len(ct._LIVE_TEXT_SOURCES) == 14
+    # 30 canonical 源 + catalog = 31(枚举与 datafeed 静态兜底表同步派生)
+    assert set(props["source"]["enum"]) == set(ct._LIVE_TEXT_SOURCES) and len(ct._LIVE_TEXT_SOURCES) == 31
 
 
-def test_live_text_impl_happy_strips_raw_and_truncates(monkeypatch, tmp_path):
-    import json as _json
+def test_live_text_impl_happy_native_rows_and_truncates(monkeypatch, tmp_path):
     import guanlan_v2.console.tools as ct
-    probe = tmp_path / "scripts" / "probe.py"
-    probe.parent.mkdir()
-    probe.write_text("# stub", encoding="utf-8")
-    monkeypatch.setattr(ct, "_STOCKS_PROBE", probe)
-    payload = {"source": "cninfo_irm", "code": "000630", "date": "", "limit": 5,
-               "write_enabled": False,
-               "rows": [{"question": "Q1", "answer": "长" * 900, "raw": {"huge": "x" * 5000}},
-                        {"question": "Q2", "answer": "", "raw": {}}]}
+    _lt_client_stub(monkeypatch, tmp_path)
+    items = [{"title": "问1", "text": "答", "raw": {"question": "Q1", "answer": "长" * 900}},
+             {"title": "问2", "text": "", "raw": {"question": "Q2", "answer": ""}}]
     calls = {}
     def fake_run(cmd, **kw):
         calls["cmd"] = cmd
         calls["kw"] = kw
-        return _lt_fake_proc(stdout=_json.dumps(payload, ensure_ascii=False))
+        return _lt_fake_proc(stdout=_lt_envelope(items=items))
     monkeypatch.setattr("subprocess.run", fake_run)
     out = ct.live_text_impl(source="cninfo_irm", code="SZ000630", limit=5)
     assert out["ok"] is True and out["n"] == 2 and out["note"] == ""
-    assert all("raw" not in r for r in out["rows"])                      # 剥 raw,防撑爆上下文
+    assert out["rows"][0]["question"] == "Q1"                            # 源原生行形(raw 平铺保真)
+    assert all("raw" not in r for r in out["rows"])                      # 平铺后无嵌套 raw
     assert out["rows"][0]["answer"].endswith("…") and len(out["rows"][0]["answer"]) == 401
-    assert "--code=000630" in calls["cmd"]                               # SZ 前缀壳内取 6 位;=形态防 - 开头值被 argparse 吞
-    assert calls["kw"].get("cwd") == str(probe.parents[1])               # cwd=stocks 仓根
+    assert "--code=000630" in calls["cmd"]                               # SZ 前缀取 6 位;=形态防 - 开头值
     assert calls["kw"].get("timeout") == 90
     assert "Q1" in out["content"] and "Q2" in out["content"]             # content 自带全部 rows
 
 
-def test_live_text_impl_rejects_caller_errors():
+def test_live_text_impl_rejects_caller_errors(monkeypatch, tmp_path):
     import guanlan_v2.console.tools as ct
+    _lt_client_stub(monkeypatch, tmp_path)
     out = ct.live_text_impl(source="nope")
     assert out["ok"] is False and "nope" in out["note"]
     out2 = ct.live_text_impl(source="stock_news")                        # 缺必填 code
     assert out2["ok"] is False and "code" in out2["note"]
+    assert ct.live_text_impl(source="cninfo_irm", code="000630", limit="abc")["ok"] is False
 
 
 def test_live_text_impl_degrades_honestly(monkeypatch, tmp_path):
     import subprocess as _sp
     import guanlan_v2.console.tools as ct
+    lc = _lt_client_stub(monkeypatch, tmp_path)
     # ① probe 缺席(G:\stocks 不在此机)→ 诚实空,不是异常
-    monkeypatch.setattr(ct, "_STOCKS_PROBE", tmp_path / "absent.py")
+    monkeypatch.setattr(lc, "_STOCKS_PROBE", tmp_path / "absent.py")
     out = ct.live_text_impl(source="em_hot_rank")
     assert out["ok"] is True and out["rows"] == [] and "不可用" in out["note"]
-    # ②③④ 超时 / 非零退出 / stdout 脏 → 恒 ok:True + 空 + note 记因,绝不编造
-    probe = tmp_path / "scripts" / "probe.py"
-    probe.parent.mkdir()
-    probe.write_text("# stub", encoding="utf-8")
-    monkeypatch.setattr(ct, "_STOCKS_PROBE", probe)
+    # ②③④⑤ 超时 / 非零退出 / stdout 脏 / 上游 status=error → 恒 ok:True + 空 + note 记因
+    monkeypatch.setattr(lc, "_STOCKS_PROBE", tmp_path / "scripts" / "probe.py")
     def boom_timeout(cmd, **kw):
         raise _sp.TimeoutExpired(cmd, 90)
     monkeypatch.setattr("subprocess.run", boom_timeout)
@@ -1945,78 +1960,78 @@ def test_live_text_impl_degrades_honestly(monkeypatch, tmp_path):
     monkeypatch.setattr("subprocess.run", lambda cmd, **kw: _lt_fake_proc(stdout="not json"))
     out = ct.live_text_impl(source="em_hot_rank")
     assert out["ok"] is True and out["rows"] == [] and "JSON" in out["note"]
+    monkeypatch.setattr("subprocess.run",
+                        lambda cmd, **kw: _lt_fake_proc(stdout=_lt_envelope(status="error", error="upstream boom")))
+    out = ct.live_text_impl(source="em_hot_rank")
+    assert out["ok"] is True and out["rows"] == [] and "upstream boom" in out["note"]
 
 
-def test_live_text_impl_date_default_and_dict_rows(monkeypatch, tmp_path):
-    import json as _json
+def test_live_text_impl_planned_source_honest(monkeypatch, tmp_path):
+    import guanlan_v2.console.tools as ct
+    _lt_client_stub(monkeypatch, tmp_path)
+    monkeypatch.setattr("subprocess.run",
+                        lambda cmd, **kw: _lt_fake_proc(stdout=_lt_envelope(source_id="ths_eps_forecast",
+                                                                            status="planned")))
+    out = ct.live_text_impl(source="ths_eps_forecast")
+    assert out["ok"] is True and out["rows"] == [] and "planned" in out["note"]
+
+
+def test_live_text_impl_date_default_and_alias(monkeypatch, tmp_path):
     import re
     import guanlan_v2.console.tools as ct
-    probe = tmp_path / "scripts" / "probe.py"
-    probe.parent.mkdir()
-    probe.write_text("# stub", encoding="utf-8")
-    monkeypatch.setattr(ct, "_STOCKS_PROBE", probe)
+    _lt_client_stub(monkeypatch, tmp_path)
     seen = {}
     def fake_run(cmd, **kw):
         seen["cmd"] = cmd
-        return _lt_fake_proc(stdout=_json.dumps({"rows": []}))
+        return _lt_fake_proc(stdout=_lt_envelope(source_id="em_limit_up_pool"))
     monkeypatch.setattr("subprocess.run", fake_run)
-    out = ct.live_text_impl(source="em_zt_pool")                         # 涨停池缺省补当日,否则 API 静默空
-    assert any(re.match(r"^--date=\d{8}$", a) for a in seen["cmd"])
-    assert out["ok"] is True and out["rows"] == [] and "0 行" in out["note"]
-    # ISO 日期归一为 YYYYMMDD(评审真机坐实:上游对 ISO 格式静默返空,会被 0 行 note 伪装成正常)
-    out = ct.live_text_impl(source="em_zt_pool", date="2026-07-06")
+    out = ct.live_text_impl(source="em_zt_pool")                         # 旧短名 alias → canonical
+    assert out["source"] == "em_limit_up_pool"
+    assert any(re.match(r"^--date=\d{8}$", a) for a in seen["cmd"])      # 涨停池缺省补当日
+    assert out["ok"] is True and "0 行" in out["note"]
+    out = ct.live_text_impl(source="em_zt_pool", date="2026-07-06")      # ISO 归一(真机坐实上游静默空)
     assert "--date=20260706" in seen["cmd"] and out["date"] == "20260706"
-    assert ct.live_text_impl(source="em_zt_pool", date="下周")["ok"] is False       # 归一后非 8 位 → 拒
+    assert ct.live_text_impl(source="em_zt_pool", date="下周")["ok"] is False
     assert ct.live_text_impl(source="ths_hot_reason", date="20260706")["date"] == "2026-07-06"
-    assert ct.live_text_impl(source="ths_hot_reason", date="../../x")["ok"] is False  # URL 路径注入面封死
-    assert ct.live_text_impl(source="cninfo_irm", code="000630", limit="abc")["ok"] is False  # limit 形态守卫
-    # concept_blocks 的 rows 是单 dict(boards/total)→ 包成一行透传,不得丢
-    def fake_run2(cmd, **kw):
-        return _lt_fake_proc(stdout=_json.dumps(
-            {"rows": {"total": 2, "boards": [{"name": "铜"}, {"name": "锂"}], "concept_tags": ["铜", "锂"]}}))
-    monkeypatch.setattr("subprocess.run", fake_run2)
-    out = ct.live_text_impl(source="concept_blocks", code="000630")
-    assert out["ok"] is True and out["n"] == 1 and out["rows"][0]["total"] == 2
+    assert ct.live_text_impl(source="ths_hot_reason", date="../../x")["ok"] is False  # URL 注入面封死
 
 
 def test_live_text_impl_limit_clamp_and_catalog_uncut(monkeypatch, tmp_path):
     import json as _json
     import guanlan_v2.console.tools as ct
-    probe = tmp_path / "scripts" / "probe.py"
-    probe.parent.mkdir()
-    probe.write_text("# stub", encoding="utf-8")
-    monkeypatch.setattr(ct, "_STOCKS_PROBE", probe)
+    _lt_client_stub(monkeypatch, tmp_path)
     seen = {}
-    catalog = [{"source_id": f"src_{i}"} for i in range(14)]
+    catalog_rows = [{"source_id": f"src_{i}", "alias": f"a{i}", "status": "available"} for i in range(30)]
     def fake_run(cmd, **kw):
         seen["cmd"] = cmd
-        return _lt_fake_proc(stdout=_json.dumps({"rows": catalog}))
+        if "--source=catalog" in cmd:
+            return _lt_fake_proc(stdout=_json.dumps({"source": "catalog", "rows": catalog_rows}))
+        return _lt_fake_proc(stdout=_lt_envelope(source_id="eastmoney_hot_rank",
+                                                 items=[{"title": f"t{i}", "raw": {}} for i in range(3)]))
     monkeypatch.setattr("subprocess.run", fake_run)
-    out = ct.live_text_impl(source="catalog", limit=500)
+    out = ct.live_text_impl(source="catalog", limit=5)
+    assert out["n"] == 30                                                # catalog 列全部端点,不受 limit 截
+    out = ct.live_text_impl(source="em_hot_rank", limit=500)
     assert "--limit=50" in seen["cmd"]                                   # 夹取上限 50(schema 承诺)
-    assert out["n"] == 14                                                # catalog 承诺列全部端点,不受 limit 截
     out = ct.live_text_impl(source="em_hot_rank", limit=3)
-    assert "--limit=3" in seen["cmd"] and out["n"] == 3                  # 非 catalog 正常截
+    assert "--limit=3" in seen["cmd"] and out["n"] == 3
 
 
 def test_live_text_and_news_live_wrap_content_carries_all_rows(monkeypatch, tmp_path):
     """交付层回归(评审对抗核实抓 Critical):console 通道 LLM 只见 _wrap 产出的
     ToolResult.content——无 content 键时兜底 json[:400] 会把 rows 截成断裂 JSON。
     本测穿真实 _wrap,锁死两个现拉工具的 content 自带全部条目、绝无静默截断。"""
-    import json as _json
     import guanlan_v2.console.tools as ct
+    _lt_client_stub(monkeypatch, tmp_path)
     # ① ww_live_text:10 条问答(序列化远超 400 字)经 _wrap 后逐条可见
-    probe = tmp_path / "scripts" / "probe.py"
-    probe.parent.mkdir()
-    probe.write_text("# stub", encoding="utf-8")
-    monkeypatch.setattr(ct, "_STOCKS_PROBE", probe)
-    rows = [{"question": f"问题{i}", "answer": "答" * 80} for i in range(10)]
+    items = [{"title": f"问题{i}", "raw": {"question": f"问题{i}", "answer": "答" * 80}}
+             for i in range(10)]
     monkeypatch.setattr("subprocess.run",
-                        lambda cmd, **kw: _lt_fake_proc(stdout=_json.dumps({"rows": rows}, ensure_ascii=False)))
+                        lambda cmd, **kw: _lt_fake_proc(stdout=_lt_envelope(items=items)))
     tr = ct._wrap(ct.live_text_impl)(source="cninfo_irm", code="000630", limit=10)
     assert not tr.is_error and len(tr.content) > 400
     assert all(f"问题{i}" in tr.content for i in range(10))
-    # ② ww_news_live(同构存量缺陷,随本批修):12 条标题经 _wrap 后逐条可见
+    # ② ww_news_live(同构存量缺陷,随上批修):12 条标题经 _wrap 后逐条可见
     monkeypatch.setattr(
         "guanlan_v2.seats.news_marks.assemble_news_marks",
         lambda code, mode="live", limit=20, **k: {

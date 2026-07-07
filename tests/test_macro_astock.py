@@ -39,17 +39,31 @@ def test_astock_temp_arithmetic():
 
 
 def test_astock_zt_truncation_honest_note():
-    """真机坐实:涨停 50 家=壳上限截断 → 诚实标注『>=』口径。"""
-    many = [dict(ZT_ROWS[1], code=f"{i:06d}") for i in range(50)]
+    """涨停家数打满统一客户端上限(现 300;旧壳 50 饱和已修)→ 仍诚实标注『>=』口径。"""
+    many = [dict(ZT_ROWS[1], code=f"{i:06d}") for i in range(ma._ZT_LIMIT)]
 
     def full(source, code="", date="", limit=20):
         if source == "em_zt_pool":
-            return {"ok": True, "note": "", "n": 50, "rows": many}
+            return {"ok": True, "note": "", "n": ma._ZT_LIMIT, "rows": many}
         return {"ok": True, "note": "", "n": 0, "rows": []}
 
     out = ma.build_astock(live_fn=full)
-    assert out["zt_count"] == 50
+    assert out["zt_count"] == ma._ZT_LIMIT and ma._ZT_LIMIT >= 300
     assert any("截断" in n for n in out["notes"])
+
+
+def test_astock_zt_64_true_count_no_truncation():
+    """真机口径回归(2026-07-06 实测 64 家):>旧上限 50 不再饱和,取真值且无截断标注。"""
+    many = [dict(ZT_ROWS[1], code=f"{i:06d}") for i in range(64)]
+
+    def full(source, code="", date="", limit=20):
+        if source == "em_zt_pool":
+            return {"ok": True, "note": "", "n": 64, "rows": many}
+        return {"ok": True, "note": "", "n": 0, "rows": []}
+
+    out = ma.build_astock(live_fn=full)
+    assert out["zt_count"] == 64
+    assert not any("截断" in n for n in out["notes"])
 
 
 def test_astock_probe_dead_degrades_honest():
