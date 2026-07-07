@@ -72,6 +72,7 @@ NEED_CODE = {
     "eastmoney_fund_flow", "eastmoney_fund_flow_minute", "eastmoney_lhb_stock",
     "eastmoney_unlock", "eastmoney_margin", "eastmoney_block_trade",
     "eastmoney_holder_change", "eastmoney_dividend", "tencent_realtime_quote",
+    "ths_eps_forecast",   # 同花顺一致预期 EPS,按 6 位股票代码查
 }
 # date 缺省补当日 YYYYMMDD 的源(上游对空/ISO date 静默返空,评审真机坐实)
 DATE_POOLS = {"em_limit_up_pool", "em_zb_pool", "em_dt_pool", "em_yzt_pool",

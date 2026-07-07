@@ -48,6 +48,8 @@ def test_probe_caller_errors(monkeypatch):
     assert lc.probe("nope")["ok"] is False
     assert lc.probe("stock_news")["ok"] is False                     # 缺必填 code
     assert "code" in lc.probe("stock_news")["note"]
+    assert lc.probe("eps_forecast")["ok"] is False                   # ths_eps_forecast 缺 code 亦拒(需股票代码)
+    assert "code" in lc.probe("ths_eps_forecast")["note"]
     assert lc.probe("em_zt_pool", date="下周")["ok"] is False         # date 归一后非 8 位
     assert lc.probe("cninfo_irm", code="000630", limit="abc")["ok"] is False
     assert called["n"] == 0                                          # caller 错误全部不起子进程
@@ -84,10 +86,11 @@ def test_probe_date_pool_default_and_iso(monkeypatch):
 
 
 def test_probe_planned_and_error_passthrough(monkeypatch):
+    # iwencai_search 是剩余唯一 planned 源(需 API key);ths_eps_forecast 已转 available
     monkeypatch.setattr("subprocess.run",
-                        lambda cmd, **kw: _proc(stdout=_envelope(source_id="ths_eps_forecast",
+                        lambda cmd, **kw: _proc(stdout=_envelope(source_id="iwencai_search",
                                                                  status="planned")))
-    out = lc.probe("eps_forecast")
+    out = lc.probe("iwencai")
     assert out["ok"] is True and out["status"] == "planned" and out["items"] == []
     assert "planned" in out["note"]
     monkeypatch.setattr("subprocess.run",

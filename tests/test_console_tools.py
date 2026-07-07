@@ -1970,10 +1970,11 @@ def test_live_text_impl_degrades_honestly(monkeypatch, tmp_path):
 def test_live_text_impl_planned_source_honest(monkeypatch, tmp_path):
     import guanlan_v2.console.tools as ct
     _lt_client_stub(monkeypatch, tmp_path)
+    # iwencai_search 是剩余唯一 planned 源(需 API key);ths_eps_forecast 已转 available
     monkeypatch.setattr("subprocess.run",
-                        lambda cmd, **kw: _lt_fake_proc(stdout=_lt_envelope(source_id="ths_eps_forecast",
+                        lambda cmd, **kw: _lt_fake_proc(stdout=_lt_envelope(source_id="iwencai_search",
                                                                             status="planned")))
-    out = ct.live_text_impl(source="ths_eps_forecast")
+    out = ct.live_text_impl(source="iwencai_search")
     assert out["ok"] is True and out["rows"] == [] and "planned" in out["note"]
 
 
