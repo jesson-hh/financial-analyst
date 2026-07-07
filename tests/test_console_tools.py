@@ -610,14 +610,14 @@ def test_engine_profile_excludes_ww_but_console_whitelist_resolves():
                           encoding="utf-8", errors="replace", timeout=180, env=env, cwd=str(repo))
     assert proc.returncode == 0, (proc.stderr or "")[-2000:]
     out = _json.loads(proc.stdout.strip().splitlines()[-1])
-    assert len(out["registered_ww"]) == 51                    # +7 P0 闭环读取面薄工具 +1 ww_picks_perf +2 P2 研究回路 +2 P3 draft转正面 +2 P5 再打分 +2 P6′ 重排A/B +1 ww_news_live 实时新闻 +1 ww_live_text stocks实时文本13端点 +1 ww_macro_pulse 全球情绪温度计
+    assert len(out["registered_ww"]) == 53                    # …+1 ww_news_live +1 ww_live_text +1 ww_macro_pulse +1 ww_sentiment 统一情绪查询 +1 ww_data_health 数据健康总闸
     # ① 非显式白名单路径(research / 缺省 / all)一律不外露 ww_*,且不再返回 None(None=完全不限制)
     assert out["research_is_none"] is False and out["research_ww"] == []
     assert out["default_is_none"] is False and out["default_ww"] == []
     assert out["all_is_none"] is False and out["all_ww"] == []
     # ② console 显式白名单路径不受影响:76 名全部可解析,含 51 个 ww_(历史注释曾漂移,以断言数字为准)
-    assert out["console_n"] == 76 and out["console_missing"] == []
-    assert out["explicit_n"] == 76 and out["explicit_ww_n"] == 51
+    assert out["console_n"] == 78 and out["console_missing"] == []
+    assert out["explicit_n"] == 78 and out["explicit_ww_n"] == 53
 
 
 def test_f10_impl_returns_structured_facts(monkeypatch):
@@ -1081,9 +1081,9 @@ def test_registry_derivation_consistent():
     """阶段0 重构守护:CONSOLE_ALLOWED 与 _WW_REACHABLE_ENDPOINTS 必须从声明表派生且与已知集合一致。"""
     import guanlan_v2.console.tools as ct
     ww_in_table = {t["name"] for t in ct.WW_TOOL_TABLE}
-    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 51
+    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 53
     assert ww_in_table == {n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")}
-    assert len(ct.CONSOLE_ALLOWED) == 76
+    assert len(ct.CONSOLE_ALLOWED) == 78
     assert {"/factorlib/save", "/workflow/compose", "/feature/build"} <= ct._WW_REACHABLE_ENDPOINTS
     assert ct._WW_REACHABLE_ENDPOINTS == {ep for t in ct.WW_TOOL_TABLE for ep in t.get("reachable", [])}
 
@@ -1137,6 +1137,7 @@ def test_ww_reachable_endpoints_matches_expected():
         "/screen/rescore/status", # ww_rescore(wait 轮询)
         "/screen/rescore/latest", # ww_rescore 成绩单 + ww_rescore_view(只读)
         "/macro/pulse",           # ww_macro_pulse(全球情绪温度计)
+        "/data/health",           # ww_data_health(数据健康总闸,中台③)
     }
     assert ct._WW_REACHABLE_ENDPOINTS == expected
 

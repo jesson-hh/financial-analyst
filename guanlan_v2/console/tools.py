@@ -1357,11 +1357,80 @@ def news_search_impl(code: str = "", scope: str = "both", query: str = "",
         else:
             lines.append(f"本票 {c}:近期无相关快讯(不编造)")
     content = "\n".join(lines) if lines else "无可用消息面"
+    _sentiment_write_through(r)      # 判读写进统一 store 供 rescore/ww_sentiment 复用(不改现拉行为)
     art = artifact("news_sentiment", page=None, channel="console",
                    payload={"scope": scope, "code": code, "as_of": r.get("as_of"),
                             "market_read": r.get("market_read"), "sentiment": r.get("sentiment"),
                             "model": r.get("model")})
     return {"ok": True, "content": content, "artifact": art, "raw": r}
+
+
+def _sentiment_write_through(r: Dict[str, Any]) -> None:
+    """news_search LLM 成功后把本票判读 + 大盘 read/tilt 写进统一情绪 store(datafeed.sentiment)。
+    与 rescore 共享同一 (date,code) 缓存,消除同日同票口径分裂;写失败静默(不挡工具)。"""
+    try:
+        from datetime import date as _d
+        from guanlan_v2.datafeed import sentiment as _sm
+        _TAG = {"利好", "中性", "利空"}
+        day = _d.today().isoformat()
+        sent = r.get("sentiment") or {}
+        rows = {str(c): ({"tag": v["tag"], "read": v.get("read")}
+                         if isinstance(v, dict) and v.get("tag") in _TAG else None)
+                for c, v in sent.items()}
+        if rows:
+            _sm.write_judgments(day, rows, as_of=r.get("as_of"), source="news_search")
+        _sm.write_market(day, r.get("market_read"), r.get("market_tilt"),
+                         r.get("as_of"), "news_search")
+    except Exception:  # noqa: BLE001 — 写透失败绝不影响 news_search 主结果
+        pass
+
+
+def sentiment_impl(code: str = "", date: str = "") -> Dict[str, Any]:
+    """读统一情绪 store 当日判读(零 LLM):本票 tag/read/score + 大盘 read/tilt。
+    与 ww_news_search(每调必真 LLM 现拉头条)的分工=『查我们今天已判的口径』vs『现在去重判』。
+    未判则诚实提示可用 ww_news_search 现判(不编造)。"""
+    from guanlan_v2.datafeed import sentiment as _sm
+    code = (code or "").strip().upper()
+    if code and not (_CODE_RE.match(code) or _re.match(r"^\d{6}$", code)):
+        return {"ok": False, "content": f"代码非法: {code}(应为 SZ000001 / 000001 形)", "artifact": None}
+    day = (date or "").strip() or None
+    s = _sm.read_summary(code, day)
+    mk = s.get("market") or {}
+    lines = [f"情绪快照 · {s.get('date')}(读统一 store,零 LLM)"]
+    tilt, mread = mk.get("market_tilt"), mk.get("market_read")
+    lines.append(f"大盘消息面:{tilt or '—'}" + (f" · {mread}" if mread else "(今日尚无大盘判读)"))
+    if code:
+        if not s.get("judged"):
+            lines.append(f"本票 {code}:今日未判读(可用 ww_news_search 现判)")
+        elif s.get("judgment"):
+            j = s["judgment"]
+            lines.append(f"本票 {code}:{j.get('tag')}(score {j.get('score')}) — {j.get('read') or ''}")
+        else:
+            lines.append(f"本票 {code}:今日已判,无相关新闻(不编造)")
+    return {"ok": True, "content": "\n".join(lines), "artifact": None, "raw": s}
+
+
+def data_health_impl() -> Dict[str, Any]:
+    """全仓数据新鲜度总闸(只读):v4榜/regen调度/DL三源/正本/腾讯cache/pit_store 各自 status。
+    收编 T5:断供/停摆从"看 provenance 的人才知道"变一处可见。绝不伪造新鲜。"""
+    from guanlan_v2.datafeed.health import collect_data_health
+    hh = collect_data_health()
+    ov = hh.get("overall") or {}
+    _MARK = {"fresh": "✓", "stale": "⚠", "missing": "✗", "unknown": "·"}
+    lines = [f"数据健康 · {ov.get('status', '?')}(生成 {hh.get('generated_at', '')[:16]})"]
+    if ov.get("stale"):
+        lines.append("陈旧:" + "、".join(ov["stale"]))
+    if ov.get("missing"):
+        lines.append("缺失:" + "、".join(ov["missing"]))
+    for name, it in (hh.get("items") or {}).items():
+        st = it.get("status", "?")
+        bits = []
+        for k in ("date", "cal_end", "stale_days", "age_days", "age_hours", "n_active", "enabled"):
+            if it.get(k) is not None:
+                bits.append(f"{k}={it[k]}")
+        tail = ("  " + it["note"]) if it.get("note") else ""
+        lines.append(f"{_MARK.get(st, '·')} {name}: {st}" + (f"({', '.join(bits)})" if bits else "") + tail)
+    return {"ok": True, "content": "\n".join(lines), "artifact": None, "raw": hh}
 
 
 def news_live_impl(code: str, limit: int = 20) -> dict:
@@ -2205,6 +2274,17 @@ WW_TOOL_TABLE = [
                      "description": "true=现拉(秒级,顺手落快照);false=读最近快照(≤24h)"}}},
      "impl": macro_pulse_impl, "cost": "seconds", "confirm": False,
      "reachable": ["/macro/pulse"]},
+    {"name": "ww_sentiment",
+     "description":
+         "查统一情绪 store 当日判读(零 LLM、秒回):本票 tag/read/score(利好/中性/利空)+ 大盘消息面 read/tilt。"
+         "读的是平台今天已判过的口径(rescore/ww_news_search 共享同一 store),**不触发新的 LLM 判读**。"
+         "与 ww_news_search 分工:问『我们今天对 XX 的情绪口径/大盘消息面倾向』用本工具;要现拉最新头条重判用 ww_news_search。"
+         "未判则诚实提示可 ww_news_search 现判。shared sentiment cache read.",
+     "input_schema": {"type": "object", "properties": {
+         "code": {"type": "string", "description": "可选,股票代码 SZ000630/000630;省略只给大盘倾向"},
+         "date": {"type": "string", "description": "可选 YYYY-MM-DD,缺省今天"}}},
+     "impl": sentiment_impl, "cost": "instant", "confirm": False,
+     "reachable": []},
     {"name": "ww_factorlib_save",
      "description":
          "把一条因子表达式存进因子库并注册进引擎(校验+落盘 mined/+运行期注册→选股/工作流可复用)。"
@@ -2446,6 +2526,15 @@ WW_TOOL_TABLE = [
          "filter_prefix": {"type": "string", "description": "可选,只列某前缀,如 /workflow 或 /seats"}}},
      "impl": endpoints_impl, "cost": "instant", "confirm": False,
      "reachable": ["/openapi.json"]},
+    {"name": "ww_data_health",
+     "description":
+         "全仓数据新鲜度总闸(只读):v4排名榜/每日再生调度/DL三源(fincast·lstm·gat)/tushare正本/"
+         "腾讯live cache/pit_store 各自 status(fresh/stale/missing)+ 陈旧·缺失清单。收编断供/停摆,"
+         "从『看 provenance 的人才知道』变一处可见。用户问『数据新不新/为什么选股是旧的/DL 断没断/"
+         "哪些数据要更新』时用。绝不伪造新鲜。fleet-wide data freshness registry.",
+     "input_schema": {"type": "object", "properties": {}},
+     "impl": data_health_impl, "cost": "instant", "confirm": False,
+     "reachable": ["/data/health"]},
 ]
 
 

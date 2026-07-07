@@ -1,7 +1,7 @@
 # guanlan MCP server
 
 把帷幄的 `ww_*` 工具(去 3 个仅 console 语境可用的,见下)+ 7 个引擎 alpha-zoo 研究工具
-暴露成 MCP 工具(数量随 WW_TOOL_TABLE 派生,现 **54 个**,守护断言在 tests/test_guanlan_mcp.py),供外部 MCP 客户端(别的 Claude / IDE 插件 / agent)驱动 guanlan。
+暴露成 MCP 工具(数量随 WW_TOOL_TABLE 派生,现 **57 个**,守护断言在 tests/test_guanlan_mcp.py),供外部 MCP 客户端(别的 Claude / IDE 插件 / agent)驱动 guanlan。
 
 ## 两种传输(任选)
 - **HTTP**:随 9999 后端一起跑,挂在 `http://127.0.0.1:9999/gl-mcp`。

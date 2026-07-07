@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 RUNS_PATH = Path(__file__).resolve().parents[2] / "var" / "rescore_runs.jsonl"
-NEWS_CACHE_PATH = Path(__file__).resolve().parents[2] / "var" / "rescore_news_cache.jsonl"
+# 情绪判读缓存已迁至统一 store(datafeed.sentiment,var/sentiment/*);此处不再自存。
 
 _TAG_SCORE = {"利好": 1.0, "中性": 0.0, "利空": -1.0}   # news_pulse.NEWS_SYSTEM tag 枚举
 _RESEARCH_NORM = 3.0   # tanh 归一常数:≈3 份当周强看多研报饱和(board research.score 衰减求和量级);
@@ -123,43 +123,24 @@ def industry_scores(codes: List[str]) -> Tuple[Dict[str, Optional[dict]], Dict[s
 
 
 # ── 情绪分(LLM 整批 + 当日缓存)──────────────────────────────────────────
+# 缓存改走统一情绪 store(datafeed.sentiment):与 ww_news_search/ww_sentiment 共享同一
+# (date,code) 判读与大盘 read/tilt,消除三家各拉各存的口径分裂+重复 LLM。
 
-def _load_news_cache(day: str) -> Dict[str, Optional[dict]]:
-    out: Dict[str, Optional[dict]] = {}
-    try:
-        with open(NEWS_CACHE_PATH, encoding="utf-8") as f:
-            for line in f:
-                try:
-                    r = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if r.get("date") == day and r.get("code"):
-                    out[str(r["code"])] = r.get("news")   # None=当日判过无新闻,也算缓存
-    except FileNotFoundError:
-        pass
-    return out
-
-
-def _append_news_cache(day: str, rows: Dict[str, Optional[dict]]) -> None:
-    try:
-        NEWS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(NEWS_CACHE_PATH, "a", encoding="utf-8") as f:
-            for c, v in rows.items():
-                f.write(json.dumps({"date": day, "code": c, "news": v},
-                                   ensure_ascii=False) + "\n")
-    except OSError:
-        pass    # 缓存写失败不挡 run(代价=下次重调)
+def _sentiment_store():
+    from guanlan_v2.datafeed import sentiment
+    return sentiment
 
 
 def news_scores(codes: List[str], top_n: int = 50
                 ) -> Tuple[Dict[str, Optional[dict]], Dict[str, Any]]:
-    """前 top_n 只:先查当日缓存,余下整批一次 LLM;无新闻/没判 → None(不编造)。
-    stats: {llm_calls, cache_hits, as_of, market_read, market_tilt[, news_fail]}。"""
+    """前 top_n 只:先查统一 store 当日判读,余下整批一次 LLM;无新闻/没判 → None(不编造)。
+    stats: {llm_calls, cache_hits, as_of, market_read, market_tilt[, news_fail]}。
+    market 全命中回填:即使本次无 LLM,也从 store 读回当日大盘 read/tilt(修 rerank 空转缺陷)。"""
+    sm = _sentiment_store()
     day = date.today().isoformat()
     pool = [str(c) for c in codes][: int(top_n)]
-    cache = _load_news_cache(day)
-    hit = {c: cache[c] for c in pool if c in cache}
-    todo = [c for c in pool if c not in cache]
+    hit = sm.read_judgments(pool, day)                   # 只含 store 里已判过的 code
+    todo = [c for c in pool if c not in hit]
     stats: Dict[str, Any] = {"llm_calls": 0, "cache_hits": len(hit), "as_of": None,
                              "market_read": None, "market_tilt": None}
     fresh: Dict[str, Optional[dict]] = {}
@@ -179,11 +160,19 @@ def news_scores(codes: List[str], top_n: int = 50
                                 "score": _TAG_SCORE[v["tag"]]}
                 else:
                     fresh[c] = None              # 无相关新闻/LLM 没判 → None(不编造)
-            _append_news_cache(day, fresh)       # 成功批次才缓存(含 None=当日判过)
+            sm.write_judgments(day, fresh, as_of=r.get("as_of"), source="rescore")
+            sm.write_market(day, r.get("market_read"), r.get("market_tilt"),
+                            r.get("as_of"), "rescore")     # 大盘判读入 store 供全平台复用
         else:
             for c in todo:
-                fresh[c] = None                  # 失败:本次 None,不写缓存(可重试)
+                fresh[c] = None                  # 失败:本次 None,不写 store(可重试)
             stats["news_fail"] = str(r.get("reason") or "")[:120]
+    # 大盘全命中回填:本次未跑 LLM(或跑了但没拿到 market)→ 从 store 读当日最新大盘判读,
+    # 使 rerank 的大盘上下文不再因"全缓存命中"而恒 None(评审真机坐实的缺陷)。
+    if stats["market_read"] is None:
+        mk = sm.latest_market(day)
+        stats.update(market_read=mk.get("market_read"), market_tilt=mk.get("market_tilt"),
+                     as_of=stats["as_of"] or mk.get("as_of"))
     out = dict(hit)
     out.update(fresh)
     return {c: out.get(c) for c in pool}, stats

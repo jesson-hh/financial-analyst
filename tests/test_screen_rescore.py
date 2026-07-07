@@ -57,8 +57,15 @@ def test_industry_scores_board_fail_raises(monkeypatch):
         rs.industry_scores(["SH600000"])
 
 
-def test_news_scores_cache_hit_skips_llm(monkeypatch, tmp_path):
-    monkeypatch.setattr(rs, "NEWS_CACHE_PATH", tmp_path / "cache.jsonl")
+@pytest.fixture
+def _sm_tmp(monkeypatch, tmp_path):
+    """把统一情绪 store 的 _ROOT 隔离到 tmp(rescore 现委托它做当日缓存)。"""
+    import guanlan_v2.datafeed.sentiment as sm
+    monkeypatch.setattr(sm, "_ROOT", tmp_path / "sentiment")
+    return sm
+
+
+def test_news_scores_cache_hit_skips_llm(monkeypatch, _sm_tmp):
     calls = []
 
     def fake_news(codes):
@@ -69,24 +76,39 @@ def test_news_scores_cache_hit_skips_llm(monkeypatch, tmp_path):
     monkeypatch.setattr(rs, "_call_news", fake_news)
     out1, st1 = rs.news_scores(["SH600000", "SH600001"], top_n=50)
     assert out1["SH600000"] == {"tag": "利好", "read": "中标", "score": 1.0}
-    assert out1["SH600001"] is None          # LLM 没判(无新闻)→ None,且落缓存
+    assert out1["SH600001"] is None          # LLM 没判(无新闻)→ None,且落统一 store
     assert st1["llm_calls"] == 1 and st1["cache_hits"] == 0
+    assert st1["market_read"] == "平" and st1["market_tilt"] == "中性"
     out2, st2 = rs.news_scores(["SH600000", "SH600001"], top_n=50)
-    assert len(calls) == 1                   # 当日缓存命中,不再调 LLM
+    assert len(calls) == 1                   # 当日 store 命中,不再调 LLM
     assert st2["llm_calls"] == 0 and st2["cache_hits"] == 2
     assert out2["SH600000"]["score"] == 1.0 and out2["SH600001"] is None
+    # 修:全缓存命中时也从 store 回填大盘 read/tilt(不再恒 None → rerank 上下文不空转)
+    assert st2["market_read"] == "平" and st2["market_tilt"] == "中性"
 
 
-def test_news_scores_fail_none_not_cached(monkeypatch, tmp_path):
-    monkeypatch.setattr(rs, "NEWS_CACHE_PATH", tmp_path / "cache.jsonl")
+def test_news_scores_market_backfill_on_all_hit(monkeypatch, _sm_tmp):
+    """全命中且本次零 LLM:大盘 read/tilt 从 store 回填(评审真机坐实的 rerank 空转修)。"""
+    from datetime import date as _d
+    day = _d.today().isoformat()
+    _sm_tmp.write_judgments(day, {"SH600000": {"tag": "利好", "read": "r"}}, source="rescore")
+    _sm_tmp.write_market(day, "早盘偏暖", "利好", "09:30", "rescore")
+    monkeypatch.setattr(rs, "_call_news",
+                        lambda codes: pytest.fail("全命中不应调 LLM"))
+    out, st = rs.news_scores(["SH600000"], top_n=50)
+    assert st["llm_calls"] == 0 and st["cache_hits"] == 1
+    assert st["market_read"] == "早盘偏暖" and st["market_tilt"] == "利好"   # 回填非 None
+
+
+def test_news_scores_fail_none_not_cached(monkeypatch, _sm_tmp):
     monkeypatch.setattr(rs, "_call_news", lambda codes: {"ok": False, "reason": "限频"})
     out, st = rs.news_scores(["SH600000"], top_n=50)
     assert out["SH600000"] is None and "限频" in st["news_fail"]
-    assert not (tmp_path / "cache.jsonl").exists()   # 失败不写缓存(下次可重试)
+    from datetime import date as _d
+    assert _sm_tmp.read_judgments(["SH600000"], _d.today().isoformat()) == {}  # 失败不写(可重试)
 
 
-def test_news_scores_top_n_clips(monkeypatch, tmp_path):
-    monkeypatch.setattr(rs, "NEWS_CACHE_PATH", tmp_path / "c.jsonl")
+def test_news_scores_top_n_clips(monkeypatch, _sm_tmp):
     seen = {}
     monkeypatch.setattr(rs, "_call_news",
                         lambda codes: seen.update(codes=list(codes)) or {"ok": True, "sentiment": {}})

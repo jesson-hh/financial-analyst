@@ -263,6 +263,11 @@ def create_app():
     from guanlan_v2.macro import build_macro_router
     app.include_router(build_macro_router())
 
+    # ── 数据健康总闸(datafeed):GET /data/health ──
+    # 全仓数据新鲜度一处可见(2026-07-07 中台③;收编 T5 断供/停摆)
+    from guanlan_v2.datafeed.api import build_datafeed_router
+    app.include_router(build_datafeed_router())
+
     # P1:regen 每日 EOD 自动再生(opt-in;GUANLAN_REGEN_DAILY=1 才启;
     # 定时器随本进程存亡,非 24/7 保证——进程死定时即停,health.regen_scheduler 显形)
     from guanlan_v2.screen.api import start_regen_daily_scheduler
