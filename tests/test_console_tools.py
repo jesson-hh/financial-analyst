@@ -610,14 +610,14 @@ def test_engine_profile_excludes_ww_but_console_whitelist_resolves():
                           encoding="utf-8", errors="replace", timeout=180, env=env, cwd=str(repo))
     assert proc.returncode == 0, (proc.stderr or "")[-2000:]
     out = _json.loads(proc.stdout.strip().splitlines()[-1])
-    assert len(out["registered_ww"]) == 53                    # …+1 ww_news_live +1 ww_live_text +1 ww_macro_pulse +1 ww_sentiment 统一情绪查询 +1 ww_data_health 数据健康总闸
+    assert len(out["registered_ww"]) == 54                    # …+1 ww_sentiment +1 ww_data_health +1 ww_market_tape 盘口实时快照
     # ① 非显式白名单路径(research / 缺省 / all)一律不外露 ww_*,且不再返回 None(None=完全不限制)
     assert out["research_is_none"] is False and out["research_ww"] == []
     assert out["default_is_none"] is False and out["default_ww"] == []
     assert out["all_is_none"] is False and out["all_ww"] == []
     # ② console 显式白名单路径不受影响:76 名全部可解析,含 51 个 ww_(历史注释曾漂移,以断言数字为准)
-    assert out["console_n"] == 78 and out["console_missing"] == []
-    assert out["explicit_n"] == 78 and out["explicit_ww_n"] == 53
+    assert out["console_n"] == 79 and out["console_missing"] == []
+    assert out["explicit_n"] == 79 and out["explicit_ww_n"] == 54
 
 
 def test_f10_impl_returns_structured_facts(monkeypatch):
@@ -1081,9 +1081,9 @@ def test_registry_derivation_consistent():
     """阶段0 重构守护:CONSOLE_ALLOWED 与 _WW_REACHABLE_ENDPOINTS 必须从声明表派生且与已知集合一致。"""
     import guanlan_v2.console.tools as ct
     ww_in_table = {t["name"] for t in ct.WW_TOOL_TABLE}
-    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 53
+    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 54
     assert ww_in_table == {n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")}
-    assert len(ct.CONSOLE_ALLOWED) == 78
+    assert len(ct.CONSOLE_ALLOWED) == 79
     assert {"/factorlib/save", "/workflow/compose", "/feature/build"} <= ct._WW_REACHABLE_ENDPOINTS
     assert ct._WW_REACHABLE_ENDPOINTS == {ep for t in ct.WW_TOOL_TABLE for ep in t.get("reachable", [])}
 
@@ -1138,6 +1138,7 @@ def test_ww_reachable_endpoints_matches_expected():
         "/screen/rescore/latest", # ww_rescore 成绩单 + ww_rescore_view(只读)
         "/macro/pulse",           # ww_macro_pulse(全球情绪温度计)
         "/data/health",           # ww_data_health(数据健康总闸,中台③)
+        "/data/market_tape",      # ww_market_tape(盘口实时快照,中台④)
     }
     assert ct._WW_REACHABLE_ENDPOINTS == expected
 
@@ -2044,3 +2045,52 @@ def test_live_text_and_news_live_wrap_content_carries_all_rows(monkeypatch, tmp_
             "coverage": {"note": ""}})
     tr2 = ct._wrap(ct.news_live_impl)(code="000630", limit=12)
     assert not tr2.is_error and all(f"标题{i}" in tr2.content for i in range(12))
+
+
+def test_market_tape_impl_full_content_through_wrap(monkeypatch):
+    """交付层守护(同 live_text/news_live):盘口快照经真 _wrap 后全量 content 逐项可见,
+    绝不因超 400 字被 json[:400] 静默截断;pulled_at 龄期显形。"""
+    import guanlan_v2.console.tools as ct
+    import guanlan_v2.datafeed.market_tape as mt
+    monkeypatch.setattr(mt, "read_tape", lambda *a, **k: {
+        "ok": True, "warming": False, "pulled_at": "2026-07-08T10:15:03",
+        "freshness": {"overall_age_s": 40, "stale": False},
+        "derived": {"zt_count": 64, "max_streak": 7, "break_ratio": 0.08,
+                    "dt_count": 3, "zb_count": 12, "north_net": 12.3},
+        "sources": {"eastmoney_lhb": {"rows": [{"name": "寒武纪", "net": 1.2}]},
+                    "eastmoney_hot_rank": {"rows": [{"name": "中际旭创"}]},
+                    "eastmoney_industry_comparison": {"rows": [{"name": "光模块", "pct": 5.1}]}}})
+    tr = ct._wrap(ct.market_tape_impl)()
+    assert not tr.is_error
+    assert "涨停" in tr.content and "64" in tr.content
+    assert "寒武纪" in tr.content and "光模块" in tr.content    # 首尾组都在,无截断
+    assert "10:15" in tr.content                                # pulled_at 显形
+
+
+def test_market_tape_impl_warming_is_honest(monkeypatch):
+    import guanlan_v2.console.tools as ct
+    import guanlan_v2.datafeed.market_tape as mt
+    monkeypatch.setattr(mt, "read_tape",
+                        lambda *a, **k: {"ok": True, "warming": True, "sources": {}, "derived": {}})
+    out = ct.market_tape_impl()
+    assert out["ok"] is True and "预热" in out["content"]
+
+
+def test_live_text_global_news_routes_to_kuaixun_portal(monkeypatch, tmp_path):
+    """T2 收敛:ww_live_text 的 global_news 不再走 stocks getFastNewsList(本机 TCP 不可达 +
+    每条 stock_codes 恒空),改走 datafeed.kuaixun 门户(opencli,带 per-flash codes)。
+    子进程 probe 不应被触发(证明短路到门户)。"""
+    import guanlan_v2.console.tools as ct
+    _lt_client_stub(monkeypatch, tmp_path)
+    monkeypatch.setattr("subprocess.run",
+                        lambda cmd, **kw: (_ for _ in ()).throw(
+                            AssertionError("global_news 不应起 stocks 子进程")))
+    monkeypatch.setattr("guanlan_v2.datafeed.kuaixun.fetch_kuaixun",
+                        lambda limit=200: [{"time": "2026-07-08 20:36", "title": "央行降准",
+                                            "summary": "释放流动性", "codes": ["SH600030"]}])
+    for src in ("global_news", "eastmoney_global_news"):
+        out = ct.live_text_impl(source=src, limit=5)
+        assert out["ok"] is True and out["n"] == 1
+        assert out["source"] == "eastmoney_global_news"
+        assert out["rows"][0]["codes"] == ["SH600030"]       # per-flash codes 带出(getFastNewsList 恒空)
+        assert "央行降准" in out["content"]

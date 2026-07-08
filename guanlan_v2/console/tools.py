@@ -1433,6 +1433,42 @@ def data_health_impl() -> Dict[str, Any]:
     return {"ok": True, "content": "\n".join(lines), "artifact": None, "raw": hh}
 
 
+def market_tape_impl(fresh_within_s: int = 180) -> Dict[str, Any]:
+    """读盘口实时快照(零 LLM,进程内直调 read_tape 不自 HTTP):北向净额 / 涨停家数·连板高度 /
+    跌停·炸板率 / 龙虎榜 top / 人气榜 top / 行业涨幅榜 + 整体 pulled_at·龄期。warming/空诚实标注。
+    content 必须自带全量(避免 _wrap 兜底 json[:400] 断裂,历史交付层缺陷)。"""
+    from guanlan_v2.datafeed.market_tape import read_tape
+    try:
+        t = read_tape(int(fresh_within_s or 180))
+    except (TypeError, ValueError):
+        t = read_tape(180)
+    if t.get("warming"):
+        return {"ok": True, "content": "盘口快照预热中(后台首拉已触发),稍后重试。", "artifact": None, "raw": t}
+    d = t.get("derived") or {}
+    fr = t.get("freshness") or {}
+    src = t.get("sources") or {}
+
+    def top(canon: str, key: str = "name", n: int = 5) -> str:
+        rows = (src.get(canon) or {}).get("rows") or []
+        vals = [str(r.get(key) or r.get("name") or "") for r in rows[:n] if isinstance(r, dict)]
+        return "、".join(v for v in vals if v) or "—"
+    age = fr.get("overall_age_s")
+    fresh_mark = "" if not fr.get("stale") else "(已过期,后台刷新中)"
+    lines = [
+        f"盘口快照 · {str(t.get('pulled_at') or '')[:16]}(龄 {age}s{fresh_mark},读缓存零 LLM)",
+        f"打板:涨停 {d.get('zt_count', '—')} 家 · 最高 {d.get('max_streak', '—')} 连板 · "
+        f"炸板率 {d.get('break_ratio', '—')} · 跌停 {d.get('dt_count', '—')} · 炸板池 {d.get('zb_count', '—')}",
+        f"北向净额:{d.get('north_net') if d.get('north_net') is not None else '—'}",
+        f"龙虎榜 top:{top('eastmoney_lhb')}",
+        f"人气榜 top:{top('eastmoney_hot_rank')}",
+        f"行业涨幅榜:{top('eastmoney_industry_comparison')}",
+    ]
+    stale_srcs = [s for s, v in src.items() if isinstance(v, dict) and "新失败" in (v.get("note") or "")]
+    if stale_srcs:
+        lines.append("局部陈旧(保留上轮):" + "、".join(stale_srcs))
+    return {"ok": True, "content": "\n".join(lines), "artifact": None, "raw": t}
+
+
 def news_live_impl(code: str, limit: int = 20) -> dict:
     """实时新闻现拉(个股新闻+快讯,stocks 公告/政策富层在场顺带;秒回,绝不编造)。
     content 必须自带全部条目:无 content 键时 _wrap 兜底 json[:400],agent 只见断裂 JSON
@@ -1495,6 +1531,18 @@ def live_text_impl(source: str, code: str = "", date: str = "", limit: int = 20)
         lim = max(1, min(int(limit or 20), 50))
     except (TypeError, ValueError):
         return _fin({**base, "ok": False, "note": f"limit 非法: {limit!r}(需整数)"})
+    # T2 收敛:global_news(东财 7×24 快讯)改走唯一快讯门户 datafeed.kuaixun(opencli,带
+    # per-flash codes、真机可达),不再落 stocks getFastNewsList(np-weblist 本机 TCP 不可达 +
+    # stock_codes 恒空);其余 29 源仍走统一客户端 probe。源不可用→ok:True+空+note,不编造。
+    if src_in in ("global_news", "eastmoney_global_news"):
+        from guanlan_v2.datafeed import kuaixun as _kuaixun
+        try:
+            rows = _kuaixun.fetch_kuaixun(limit=lim)
+            note = "" if rows else "快讯源本次空返(非交易时段/限频等),不臆断"
+        except Exception as e:  # noqa: BLE001 — 源不可用诚实显形
+            rows, note = [], f"快讯源不可用:{type(e).__name__}"
+        return _fin({**base, "ok": True, "source": "eastmoney_global_news",
+                     "rows": rows, "n": len(rows), "note": note})
     r = _live_client.probe(src_in, code=code, date=date, limit=lim)
     rows = _live_client.native_rows(r.get("items"))
     return _fin({**base, "ok": bool(r.get("ok", False)),
@@ -2535,6 +2583,16 @@ WW_TOOL_TABLE = [
      "input_schema": {"type": "object", "properties": {}},
      "impl": data_health_impl, "cost": "instant", "confirm": False,
      "reachable": ["/data/health"]},
+    {"name": "ww_market_tape",
+     "description":
+         "盘口实时快照(只读、零 LLM、秒回):全市场打板生态(涨停/炸板/跌停/一字家数·最高连板·炸板率)+"
+         "北向净额 + 全市场龙虎榜 top + 人气榜 + 行业涨幅榜,SWR 保鲜(过期后台异步刷新,首拉预热)。"
+         "用户问『今天盘口热不热/涨停多少/连板高度/北向流向/龙虎榜谁上榜/哪个行业强』时用。"
+         "展示型绝不进信号;龄期显形绝不伪造新鲜。market microstructure live snapshot.",
+     "input_schema": {"type": "object", "properties": {
+         "fresh_within_s": {"type": "integer", "description": "可选,新鲜窗秒数(默认 180);超则触发后台刷新"}}},
+     "impl": market_tape_impl, "cost": "instant", "confirm": False,
+     "reachable": ["/data/market_tape"]},
 ]
 
 
