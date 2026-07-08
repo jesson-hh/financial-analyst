@@ -215,16 +215,109 @@ function AStockPanel({ a }) {
   );
 }
 
+/* ── 实时盘口快照(数据中台④):全市场微观,SWR 只读展示,绝不混入信号 ── */
+function pickName(r) {
+  return (r && (r.name || r.stock_name || r.title || r.concept || r.industry || r.代码)) || "—";
+}
+function TapeStat({ k, v }) {
+  return (
+    <div style={{ flex: 1, textAlign: "center", padding: "8px 0", minWidth: 68 }}>
+      <div style={{ fontFamily: "var(--font-mono)", fontSize: 17, fontWeight: 700, color: "var(--ink-0)" }}>{v}</div>
+      <div style={{ fontSize: 10, color: "var(--ink-3)", marginTop: 2 }}>{k}</div>
+    </div>
+  );
+}
+function TapeList({ title, rows, color }) {
+  const items = (rows || []).slice(0, 6);
+  return (
+    <div style={{ flex: 1, minWidth: 176 }}>
+      <div style={{ fontSize: 11, color: "var(--ink-2)", marginBottom: 4 }}>{title}</div>
+      {items.length
+        ? items.map((r, i) => (
+            <div key={i} style={{ display: "flex", gap: 6, padding: "2px 0", fontSize: 12,
+                                  borderTop: i ? "1px solid var(--line-1)" : "none" }}>
+              <span style={{ fontFamily: "var(--font-mono)", width: 14,
+                             color: i < 3 ? (color || "var(--zhu)") : "var(--ink-3)" }}>{i + 1}</span>
+              <span style={{ color: "var(--ink-1)", overflow: "hidden", textOverflow: "ellipsis",
+                             whiteSpace: "nowrap" }}>{pickName(r)}</span>
+            </div>))
+        : <div style={{ fontSize: 11, color: "var(--ink-3)" }}>—</div>}
+    </div>
+  );
+}
+function MarketTapePanel({ tape }) {
+  if (!tape) return null;                       // 未加载先不占位(温度计已在)
+  const head = (extra) => (
+    <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 8 }}>
+      <span style={{ fontFamily: "var(--font-serif)", fontSize: 15, fontWeight: 600, color: "var(--ink-0)" }}>
+        实时盘口 <span style={{ fontSize: 10, color: "var(--ink-3)", fontWeight: 400 }}>全市场微观 · 只读展示</span></span>
+      {extra}
+    </div>
+  );
+  const shell = (inner) => (
+    <div style={{ marginTop: 14, background: "var(--paper-1)", border: "1px solid var(--line-2)",
+                  borderRadius: 6, padding: 14 }}>{inner}</div>
+  );
+  if (tape.ok === false) {
+    return shell(<>{head(null)}<div style={{ padding: 10, background: "var(--paper-sink)", borderRadius: 4,
+                    fontSize: 11, color: "var(--ink-2)" }}>盘口快照不可用:{tape.reason || "后端降级"}</div></>);
+  }
+  if (tape.warming) {
+    return shell(<>{head(null)}<div style={{ padding: 10, background: "var(--paper-sink)", borderRadius: 4,
+                    fontSize: 11, color: "var(--ink-2)" }}>盘口快照预热中(后台首拉已触发),稍后自动刷新。</div></>);
+  }
+  const d = tape.derived || {};
+  const src = tape.sources || {};
+  const rows = (id) => (src[id] && src[id].rows) || [];
+  const stale = tape.freshness && tape.freshness.stale;
+  const ageMin = tape.freshness && tape.freshness.overall_age_s != null
+    ? Math.round(tape.freshness.overall_age_s / 60) : null;
+  const ageBadge = (
+    <span style={{ fontFamily: "var(--font-mono)", fontSize: 10,
+                   color: stale ? "var(--jin-deep)" : "var(--ink-3)" }}>
+      {stale ? `⚠ ${ageMin} 分钟前(刷新中)` : `现拉 ${String(tape.pulled_at || "").slice(0, 16).replace("T", " ")}`}</span>
+  );
+  return shell(
+    <>
+      {head(ageBadge)}
+      <div style={{ display: "flex", flexWrap: "wrap", background: "var(--paper-0)", borderRadius: 4,
+                    border: "1px solid var(--line-1)" }}>
+        <TapeStat k="涨停" v={d.zt_count != null ? d.zt_count : "—"} />
+        <TapeStat k="最高连板" v={d.max_streak != null ? `${d.max_streak}板` : "—"} />
+        <TapeStat k="炸板率" v={d.break_ratio != null ? `${(d.break_ratio * 100).toFixed(0)}%` : "—"} />
+        <TapeStat k="跌停" v={d.dt_count != null ? d.dt_count : "—"} />
+        <TapeStat k="炸板池" v={d.zb_count != null ? d.zb_count : "—"} />
+        <TapeStat k="北向净额" v={d.north_net != null ? d.north_net : "—"} />
+      </div>
+      <div style={{ display: "flex", gap: 16, marginTop: 12, flexWrap: "wrap" }}>
+        <TapeList title="龙虎榜(全市场)" rows={rows("eastmoney_lhb")} color="var(--zhu)" />
+        <TapeList title="人气榜" rows={rows("eastmoney_hot_rank")} color="var(--jin-deep)" />
+        <TapeList title="行业涨幅榜" rows={rows("eastmoney_industry_comparison")} color="var(--qing)" />
+      </div>
+      <div style={{ marginTop: 10, fontSize: 9, color: "var(--ink-4)", lineHeight: 1.5 }}>
+        走统一实时客户端聚合(SWR 保鲜,过期后台异步刷新,龄期显形);纯展示,绝不混入 v4/信号。</div>
+    </>
+  );
+}
+
 /* ── 主应用 ── */
 function App() {
   const [pulse, setPulse] = useState(null);
+  const [tape, setTape] = useState(null);
   const [loading, setLoading] = useState(true);
   const load = useCallback(async (refresh) => {
     setLoading(true);
     setPulse(await window.glFetchMacroPulse(refresh));
     setLoading(false);
+    window.glFetchMarketTape().then(setTape).catch(() => {});  // 盘口独立拉,不阻塞温度计
   }, []);
   useEffect(() => { load(true); }, [load]);   // 首开即现拉(秒级,顺手落快照沉淀历史)
+  useEffect(() => {                            // 快照 warming → 12s 后自动重取一次(后台首拉完成)
+    if (tape && tape.warming) {
+      const id = setTimeout(() => window.glFetchMarketTape().then(setTape).catch(() => {}), 12000);
+      return () => clearTimeout(id);
+    }
+  }, [tape]);
 
   if (pulse && pulse.ok === false) {
     return <div style={{ padding: 40, fontFamily: "var(--font-serif)", color: "var(--ink-2)" }}>
@@ -276,6 +369,9 @@ function App() {
             <AStockPanel a={pulse && pulse.astock} />
           </div>
         )}
+
+      {/* 实时盘口快照(数据中台④,全宽只读) */}
+      <MarketTapePanel tape={tape} />
 
       {/* 降级条:源失败/快照提示,诚实显形 */}
       {notes.length > 0 && (

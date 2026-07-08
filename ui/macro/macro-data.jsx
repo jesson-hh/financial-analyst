@@ -18,4 +18,13 @@ async function glFetchMacroHistory(marketId) {
   } catch (e) { return []; }
 }
 
-Object.assign(window, { glFetchMacroPulse, glFetchMacroHistory });
+async function glFetchMarketTape() {
+  if (!API) return { ok: false, warming: false, reason: "file:// 直开无后端 — 请经 9999 访问" };
+  try {
+    return await (await fetch(`${API}/data/market_tape`)).json();
+  } catch (e) {
+    return { ok: false, warming: false, reason: `后端不可达: ${e}` };
+  }
+}
+
+Object.assign(window, { glFetchMacroPulse, glFetchMacroHistory, glFetchMarketTape });
