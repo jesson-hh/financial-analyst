@@ -16,4 +16,9 @@ def build_datafeed_router() -> APIRouter:
         from guanlan_v2.datafeed.health import collect_data_health
         return JSONResponse(await asyncio.to_thread(collect_data_health))
 
+    @router.get("/data/market_tape")
+    async def market_tape_ep():
+        from guanlan_v2.datafeed.market_tape import read_tape
+        return JSONResponse(await asyncio.to_thread(read_tape))
+
     return router
