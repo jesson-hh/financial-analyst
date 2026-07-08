@@ -142,3 +142,55 @@ def build_live(kind: str = "concept", refresh: bool = False, snapshot_dir=None,
         except OSError as e:
             payload["notes"].append(f"快照落盘失败: {e}")
     return payload
+
+
+def _read_day(path: Path, kind: str) -> list:
+    if not path.exists():
+        return []
+    out = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(row, dict) and row.get("kind") == kind and row.get("ts"):
+            out.append(row)
+    return out
+
+
+def load_history(kind: str = "concept", date: str = "", snapshot_dir=None,
+                 top_each: int = 8) -> dict:
+    k = "industry" if str(kind).lower().startswith("ind") else "concept"
+    stamp = "".join(ch for ch in str(date) if ch.isdigit()) or datetime.now().strftime("%Y%m%d")
+    base = Path(snapshot_dir) if snapshot_dir else _SNAP_DEFAULT
+    path = base / f"{stamp}.jsonl"
+    snaps = _read_day(path, k)
+    if not snaps:
+        return {"date": stamp, "kind": k, "ticks": [], "boards": [],
+                "market_series": {"main_net": []}}
+    ticks = [s["ts"] for s in snaps]
+    # 选线:末快照 main_net 净流入前 top_each + 净流出前 top_each
+    last = sorted(snaps[-1].get("boards", []),
+                  key=lambda b: float(b.get("main_net") or 0.0), reverse=True)
+    inflow = [b["name"] for b in last[:top_each]]
+    outflow = [b["name"] for b in last[-top_each:] if b["name"] not in inflow]
+    picked = inflow + outflow
+    boards = []
+    for name in picked:
+        series = []
+        for s in snaps:
+            val = next((float(b.get("main_net")) for b in s.get("boards", [])
+                        if b.get("name") == name and b.get("main_net") is not None), None)
+            series.append(val)
+        boards.append({"name": name, "series": series})
+    market_series = {"main_net": [float((s.get("market") or {}).get("main_net") or 0.0)
+                                  for s in snaps]}
+    return {"date": stamp, "kind": k, "ticks": ticks, "boards": boards,
+            "market_series": market_series}

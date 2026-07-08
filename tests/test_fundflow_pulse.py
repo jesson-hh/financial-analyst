@@ -88,3 +88,32 @@ def test_build_live_other_tier_degrade_continues(tmp_path):
     assert out["notes"]                                            # 降级 note 显形
     lines = [json.loads(l) for l in (Path(tmp_path) / "20260708.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
     assert {l["kind"] for l in lines} == {"concept"}              # 只落有数据的档
+
+
+def test_load_history_top_in_out_and_gap(tmp_path):
+    from guanlan_v2.fundflow import pulse
+    snap = Path(tmp_path) / "20260708.jsonl"
+    def line(ts, kind, boards):
+        return json.dumps({"ts": ts, "kind": kind,
+                           "market": {"main_net": sum(b[1] for b in boards)},
+                           "boards": [{"name": n, "main_net": v} for n, v in boards]},
+                          ensure_ascii=False)
+    snap.write_text("\n".join([
+        line("2026-07-08T09:33:00", "concept", [("算力概念", 1e9), ("存储芯片", -1e9)]),
+        line("2026-07-08T09:36:00", "concept", [("算力概念", 3e9)]),                    # 存储缺该 tick
+        line("2026-07-08T09:36:00", "industry", [("银行", 5e8)]),                        # 别档,忽略
+        line("2026-07-08T09:39:00", "concept", [("算力概念", 9.45e9), ("存储芯片", -1.52e10)]),
+    ]) + "\n", encoding="utf-8")
+    out = pulse.load_history("concept", date="20260708", snapshot_dir=str(tmp_path))
+    assert out["ticks"] == ["2026-07-08T09:33:00", "2026-07-08T09:36:00", "2026-07-08T09:39:00"]
+    names = {b["name"]: b["series"] for b in out["boards"]}
+    assert names["算力概念"] == [1e9, 3e9, 9.45e9]
+    assert names["存储芯片"] == [-1e9, None, -1.52e10]      # 中间 tick 缺 → None(断线)
+    assert out["market_series"]["main_net"][0] == 0.0        # 1e9 + (-1e9)
+
+
+def test_load_history_missing_day_returns_empty(tmp_path):
+    from guanlan_v2.fundflow import pulse
+    out = pulse.load_history("concept", date="20260708", snapshot_dir=str(tmp_path))
+    assert out == {"date": "20260708", "kind": "concept", "ticks": [],
+                   "boards": [], "market_series": {"main_net": []}}
