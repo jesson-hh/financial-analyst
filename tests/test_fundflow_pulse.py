@@ -117,3 +117,20 @@ def test_load_history_missing_day_returns_empty(tmp_path):
     out = pulse.load_history("concept", date="20260708", snapshot_dir=str(tmp_path))
     assert out == {"date": "20260708", "kind": "concept", "ticks": [],
                    "boards": [], "market_series": {"main_net": []}}
+
+
+def test_load_history_dedup_and_split_many_boards(tmp_path):
+    import json
+    from pathlib import Path
+    from guanlan_v2.fundflow import pulse
+    boards = [{"name": f"板块{i:02d}", "main_net": (9 - i) * 1e9} for i in range(18)]  # +9e9…-8e9
+    snap = Path(tmp_path) / "20260708.jsonl"
+    snap.write_text(json.dumps({"ts": "2026-07-08T10:00:00", "kind": "concept",
+                                "market": {"main_net": 0.0}, "boards": boards},
+                               ensure_ascii=False) + "\n", encoding="utf-8")
+    out = pulse.load_history("concept", date="20260708", snapshot_dir=str(tmp_path), top_each=8)
+    names = [b["name"] for b in out["boards"]]
+    assert len(names) == 16                                   # 8 净流入 + 8 净流出
+    assert len(set(names)) == 16                              # 无重复(dedup 生效)
+    assert names[:8] == [f"板块{i:02d}" for i in range(8)]     # 净流入前8(main_net 最高,板块00..07)
+    assert names[8:] == [f"板块{i:02d}" for i in range(10, 18)]  # 净流出前8(main_net 最低,板块10..17)
