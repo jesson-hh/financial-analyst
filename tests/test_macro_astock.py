@@ -83,3 +83,32 @@ def test_astock_hot_sources_fail_but_zt_survives():
     assert out["available"] is True and out["temp"] is not None
     assert out["top_reasons"] == [] and out["hot_list"] == []
     assert len(out["notes"]) == 2  # 两个热源各一条
+
+
+# ── 盘口快照收敛(MT-3):默认路径优先读快照,缺席/warming 回落直拉 ──────────────
+def test_build_astock_reads_from_tape_when_fresh(monkeypatch):
+    tape = {"warming": False, "sources": {
+        "em_limit_up_pool": {"rows": [{"zt_stat": "3天3板", "break_times": 0, "limit_days": 3}]},
+        "ths_hot_reason": {"rows": [{"reason": "AI 算力"}]},
+        "ths_hot_list": {"rows": [{"name": "寒武纪"}]}}}
+    monkeypatch.setattr(ma, "_read_tape_safe", lambda: tape)
+    called = {"n": 0}
+    monkeypatch.setattr(ma, "_client_live",
+                        lambda **k: called.__setitem__("n", called["n"] + 1) or {"ok": True, "rows": [], "n": 0, "note": ""})
+    out = ma.build_astock()                                   # 无 live_fn → 走快照
+    assert out["available"] is True and out["zt_count"] == 1 and out["max_streak"] == 3
+    assert called["n"] == 0                                   # 快照在→零直拉(收敛)
+    assert out["top_reasons"] and out["hot_list"]
+
+
+def test_build_astock_falls_back_when_tape_warming(monkeypatch):
+    monkeypatch.setattr(ma, "_read_tape_safe", lambda: {"warming": True, "sources": {}})
+    hits = []
+
+    def fake_live(**kw):
+        hits.append(kw.get("source"))
+        rows = [{"zt_stat": "2天2板", "break_times": 0}] if kw.get("source") == "em_zt_pool" else []
+        return {"ok": True, "rows": rows, "n": len(rows), "note": ""}
+    monkeypatch.setattr(ma, "_client_live", fake_live)
+    out = ma.build_astock()                                   # 无 live_fn → 快照 warming → 回落直拉
+    assert "em_zt_pool" in hits and out["zt_count"] == 1      # 温度计不破
