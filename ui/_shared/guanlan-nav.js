@@ -9,6 +9,7 @@
     { label: '选股', file: '../screen/观澜 · 选股.html' },
     { label: 'AI投研', file: '../industry/观澜 · AI投研.html' },
     { label: '全球情绪', file: '../macro/观澜 · 全球情绪.html' },
+    { label: '资金流向', file: '../fundflow/观澜 · 资金流向.html' },
   ];
   var here = '';
   try { here = decodeURIComponent(location.pathname.split('/').pop() || ''); } catch (e) { here = location.pathname; }
