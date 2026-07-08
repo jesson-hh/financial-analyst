@@ -18,6 +18,7 @@ _BASIC_STALE_DAYS = 5
 _DL_STALE_DAYS = 4
 _TENCENT_STALE_HOURS = 24
 _PIT_STALE_DAYS = 3
+_TAPE_STALE_MIN = 30    # 盘口快照:SWR 常态 <3min;超 30min 未刷(服务停摆/盘后)→ stale
 
 _STATUS_RANK = {"fresh": 0, "unknown": 1, "stale": 2, "missing": 3}
 
@@ -41,6 +42,15 @@ def _age_hours(iso: Optional[str]) -> Optional[float]:
         ts = datetime.fromisoformat(str(iso))
         return round((datetime.now() - ts).total_seconds() / 3600.0, 1)
     except Exception:  # noqa: BLE001
+        return None
+
+
+def _age_minutes(iso: Optional[str]) -> Optional[float]:
+    if not iso:
+        return None
+    try:
+        return round((datetime.now() - datetime.fromisoformat(str(iso))).total_seconds() / 60.0, 1)
+    except (TypeError, ValueError):
         return None
 
 
@@ -187,9 +197,25 @@ def _item_pit_store() -> Dict[str, Any]:
             "cal_end_age_days": age, "n_trade_days": m.get("n_trade_days")}
 
 
+def _item_market_tape() -> Dict[str, Any]:
+    """盘口实时快照新鲜度:读 var/live/market_tape.json 的 pulled_at 龄期。
+    缺文件=missing(未预热);≤30min=fresh;超=stale(服务停摆/盘后)。属数据项,参与 overall。"""
+    try:
+        from guanlan_v2.datafeed.market_tape import _CACHE_PATH
+        m = _read_json(Path(_CACHE_PATH))
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "missing", "note": f"{type(exc).__name__}"}
+    if not m:
+        return {"status": "missing", "note": "无盘口快照(未预热/首拉未完成)"}
+    age = _age_minutes(m.get("pulled_at"))
+    status = "unknown" if age is None else ("stale" if age > _TAPE_STALE_MIN else "fresh")
+    return {"status": status, "pulled_at": m.get("pulled_at"), "age_min": age,
+            "note": "盘口快照久未刷新(服务停摆/盘后?)" if status == "stale" else ""}
+
+
 _ITEMS = {"v4_ranking": _item_v4, "regen_scheduler": _item_regen, "dl_ensemble": _item_dl,
           "stock_basic": _item_stock_basic, "tencent_live_cache": _item_tencent_cache,
-          "pit_store": _item_pit_store}
+          "pit_store": _item_pit_store, "market_tape": _item_market_tape}
 # 运维类项(非"数据新鲜度")不参与 overall 恶化:regen 调度是开关,关着不代表数据陈旧,
 # 否则生产常态(opt-in 未开)会把 overall 恒拉成 unknown 掩盖真实数据面(评审 Minor)。
 _OPS_ITEMS = {"regen_scheduler"}

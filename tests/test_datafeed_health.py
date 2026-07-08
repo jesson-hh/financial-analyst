@@ -127,6 +127,26 @@ def test_stock_basic_missing_when_no_paths(monkeypatch):
     assert h._item_pit_store()["status"] == "missing"
 
 
+def test_market_tape_health_fresh_stale_missing(monkeypatch, tmp_path):
+    import guanlan_v2.datafeed.market_tape as mt
+    p = tmp_path / "market_tape.json"
+    monkeypatch.setattr(mt, "_CACHE_PATH", p)
+    assert h._item_market_tape()["status"] == "missing"        # 缺文件
+    now = h.datetime.now().isoformat(timespec="seconds")
+    p.write_text('{"pulled_at": "%s"}' % now, encoding="utf-8")
+    assert h._item_market_tape()["status"] == "fresh"          # 新鲜
+    p.write_text('{"pulled_at": "2020-01-01T00:00:00"}', encoding="utf-8")
+    assert h._item_market_tape()["status"] == "stale"          # 陈旧
+
+
+def test_market_tape_in_items_and_overall(monkeypatch, tmp_path):
+    import guanlan_v2.datafeed.market_tape as mt
+    monkeypatch.setattr(mt, "_CACHE_PATH", tmp_path / "absent.json")
+    out = h.collect_data_health()
+    assert "market_tape" in out["items"]                       # 纳入 items
+    assert "market_tape" not in h._OPS_ITEMS                   # 数据项(参与 overall)
+
+
 def test_ww_data_health_registered_and_formats(monkeypatch):
     import guanlan_v2.console.tools as ct
     entry = next(t for t in ct.WW_TOOL_TABLE if t["name"] == "ww_data_health")
