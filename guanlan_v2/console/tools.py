@@ -1458,7 +1458,7 @@ def market_tape_impl(fresh_within_s: int = 180) -> Dict[str, Any]:
         f"盘口快照 · {str(t.get('pulled_at') or '')[:16]}(龄 {age}s{fresh_mark},读缓存零 LLM)",
         f"打板:涨停 {d.get('zt_count', '—')} 家 · 最高 {d.get('max_streak', '—')} 连板 · "
         f"炸板率 {d.get('break_ratio', '—')} · 跌停 {d.get('dt_count', '—')} · 炸板池 {d.get('zb_count', '—')}",
-        f"北向净额:{d.get('north_net') if d.get('north_net') is not None else '—'}",
+        f"北向净额:{(str(d.get('north_net')) + ' 亿(沪+深股通)') if d.get('north_net') is not None else '—'}",
         f"龙虎榜 top:{top('eastmoney_lhb')}",
         f"人气榜 top:{top('eastmoney_hot_rank')}",
         f"行业涨幅榜:{top('eastmoney_industry_comparison')}",
@@ -1537,7 +1537,8 @@ def live_text_impl(source: str, code: str = "", date: str = "", limit: int = 20)
     if src_in in ("global_news", "eastmoney_global_news"):
         from guanlan_v2.datafeed import kuaixun as _kuaixun
         try:
-            rows = _kuaixun.fetch_kuaixun(limit=lim)
+            # 经 native_rows 与其余 29 源同路(字段截 400),兑现 _live_text_content 截断约定
+            rows = _live_client.native_rows(_kuaixun.fetch_kuaixun(limit=lim))
             note = "" if rows else "快讯源本次空返(非交易时段/限频等),不臆断"
         except Exception as e:  # noqa: BLE001 — 源不可用诚实显形
             rows, note = [], f"快讯源不可用:{type(e).__name__}"

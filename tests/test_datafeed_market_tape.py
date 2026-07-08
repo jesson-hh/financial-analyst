@@ -23,7 +23,8 @@ def _probe_ok(source, code="", date="", limit=20):
     fixtures = {
         "em_limit_up_pool": [{"raw": {"code": "000656", "zt_stat": "7天7板", "break_times": 0, "limit_days": 7}},
                              {"raw": {"code": "300001", "zt_stat": "2天2板", "break_times": 1, "limit_days": 2}}],
-        "ths_hsgt_realtime": [{"raw": {"name": "北向", "net": 12.3}}],
+        "ths_hsgt_realtime": [{"raw": {"time": "15:00", "hgt_yi": -9.28, "sgt_yi": -31.1}},
+                              {"raw": {"time": "14:59", "hgt_yi": -10.0, "sgt_yi": -36.0}}],
     }
     items = fixtures.get(canon, [{"raw": {"code": "600000", "x": 1}}])
     return {"ok": True, "source": canon, "status": "ok", "items": items,
@@ -40,7 +41,7 @@ def test_refresh_pulls_all_sources_writes_cache_and_derives(monkeypatch):
     assert data["derived"]["zt_count"] == 2
     assert data["derived"]["max_streak"] == 7
     assert data["derived"]["break_ratio"] == 0.5
-    assert data["derived"]["north_net"] == 12.3
+    assert data["derived"]["north_net"] == -40.38     # 最新一分钟 hgt_yi+sgt_yi(newest-first)
     assert mt._CACHE_PATH.exists()                                 # 原子落盘
     on_disk = json.loads(mt._CACHE_PATH.read_text(encoding="utf-8"))
     assert on_disk["pulled_at"] == data["pulled_at"]

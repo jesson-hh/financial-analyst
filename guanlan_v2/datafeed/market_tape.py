@@ -76,15 +76,23 @@ def _derive(sources: Dict[str, Any]) -> Dict[str, Any]:
                          "max_streak": max(streaks) if streaks else 0,
                          "break_ratio": round(breaks / len(zt), 4) if zt else 0.0,
                          "north_net": None}
-    if north and isinstance(north[0], dict):     # 北向净额字段名多变,多候选探测,缺则 None
-        for k in ("net", "net_inflow", "north_net", "成交净买额", "净买额"):
-            v = north[0].get(k)
-            if v is not None:
-                try:
-                    d["north_net"] = float(v)
-                    break
-                except (TypeError, ValueError):
-                    pass
+    if north and isinstance(north[0], dict):     # 北向净额=最新一分钟(newest-first)沪股通+深股通,单位亿
+        r0 = north[0]
+        hg, sg = r0.get("hgt_yi"), r0.get("sgt_yi")
+        if hg is not None or sg is not None:
+            try:
+                d["north_net"] = round(float(hg or 0) + float(sg or 0), 2)
+            except (TypeError, ValueError):
+                pass
+        else:                                     # 兜底:别的源若给单一净额字段
+            for k in ("net", "net_inflow", "north_net", "成交净买额", "净买额"):
+                v = r0.get(k)
+                if v is not None:
+                    try:
+                        d["north_net"] = float(v)
+                        break
+                    except (TypeError, ValueError):
+                        pass
     return d
 
 

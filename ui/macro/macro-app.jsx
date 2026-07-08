@@ -287,7 +287,7 @@ function MarketTapePanel({ tape }) {
         <TapeStat k="炸板率" v={d.break_ratio != null ? `${(d.break_ratio * 100).toFixed(0)}%` : "—"} />
         <TapeStat k="跌停" v={d.dt_count != null ? d.dt_count : "—"} />
         <TapeStat k="炸板池" v={d.zb_count != null ? d.zb_count : "—"} />
-        <TapeStat k="北向净额" v={d.north_net != null ? d.north_net : "—"} />
+        <TapeStat k="北向净额(亿)" v={d.north_net != null ? d.north_net : "—"} />
       </div>
       <div style={{ display: "flex", gap: 16, marginTop: 12, flexWrap: "wrap" }}>
         <TapeList title="龙虎榜(全市场)" rows={rows("eastmoney_lhb")} color="var(--zhu)" />
