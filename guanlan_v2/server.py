@@ -263,6 +263,12 @@ def create_app():
     from guanlan_v2.macro import build_macro_router
     app.include_router(build_macro_router())
 
+    # ── 板块资金流向(fundflow):GET /fundflow/live、/fundflow/history ──
+    # 纯展示层(2026-07-08 spec);盘中多线由 var/fundflow/<当日>.jsonl 自累快照重建
+    from guanlan_v2.fundflow import build_fundflow_router, start_fundflow_poller
+    app.include_router(build_fundflow_router())
+    start_fundflow_poller()   # opt-in;GUANLAN_FUNDFLOW_POLL=1 才真起(非 24/7)
+
     # ── 数据健康总闸(datafeed):GET /data/health ──
     # 全仓数据新鲜度一处可见(2026-07-07 中台③;收编 T5 断供/停摆)
     from guanlan_v2.datafeed.api import build_datafeed_router
