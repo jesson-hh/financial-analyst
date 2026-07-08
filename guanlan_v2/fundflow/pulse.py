@@ -99,17 +99,16 @@ def build_live(kind: str = "concept", refresh: bool = False, snapshot_dir=None,
     notes: list[str] = []
 
     cur = sector_fn(k)
-    other = sector_fn("industry" if k == "concept" else "concept")
-    concept_rows = cur["rows"] if k == "concept" else other["rows"]
-    industry_rows = other["rows"] if k == "concept" else cur["rows"]
-
     if not cur.get("ok"):
         notes.append(f"{k} 档板块资金流不可用:{cur.get('note') or '空'}")
         return {"ok": False, "kind": k, "pulled_at": dt.strftime("%Y-%m-%dT%H:%M:%S"),
                 "trading": trading, "market": {}, "breadth": {}, "boards": [], "notes": notes}
+    other = sector_fn("industry" if k == "concept" else "concept")
     if not other.get("ok"):
         notes.append(f"{'industry' if k=='concept' else 'concept'} 档缺失,"
                      f"大盘分解/全A涨跌降级:{other.get('note') or '空'}")
+    concept_rows = cur["rows"] if k == "concept" else other["rows"]
+    industry_rows = other["rows"] if k == "concept" else cur["rows"]
 
     market = _market_from(industry_rows) if industry_rows else {}
     breadth = {

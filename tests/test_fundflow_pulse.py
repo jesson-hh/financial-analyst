@@ -59,3 +59,32 @@ def test_build_live_degrades_when_sector_empty(tmp_path):
     out = pulse.build_live("concept", refresh=True, snapshot_dir=str(tmp_path),
                            sector_fn=_sector_fn([], []), now=datetime(2026, 7, 8, 10, 0, 0))
     assert out["ok"] is False and out["notes"]
+
+
+def test_build_live_delta_intraday_across_two_calls(tmp_path):
+    from guanlan_v2.fundflow import pulse
+    industry = _rows(("银行", 2.66e8, 1e8, 1.66e8, 0.0, -2e8, 0.3, 20, 8))
+    concept1 = _rows(("算力概念", 5e9, 3e9, 2e9, 0, 0, 2.1, 30, 5))
+    concept2 = _rows(("算力概念", 9.45e9, 6e9, 3.45e9, 0, 0, 2.1, 30, 5))
+    out1 = pulse.build_live("concept", refresh=True, snapshot_dir=str(tmp_path),
+                            sector_fn=_sector_fn(concept1, industry), now=datetime(2026, 7, 8, 10, 0, 0))
+    assert out1["boards"][0]["delta_intraday"] is None            # 首快照无基线
+    out2 = pulse.build_live("concept", refresh=True, snapshot_dir=str(tmp_path),
+                            sector_fn=_sector_fn(concept2, industry), now=datetime(2026, 7, 8, 10, 6, 0))
+    assert round(out2["boards"][0]["delta_intraday"]) == round(9.45e9 - 5e9)
+
+
+def test_build_live_other_tier_degrade_continues(tmp_path):
+    import json
+    from pathlib import Path
+    from guanlan_v2.fundflow import pulse
+    concept = _rows(("算力概念", 9.45e9, 6e9, 3.45e9, -1e8, -4e9, 2.1, 30, 5))
+    out = pulse.build_live("concept", refresh=True, snapshot_dir=str(tmp_path),
+                           sector_fn=_sector_fn(concept, []), now=datetime(2026, 7, 8, 10, 0, 0))
+    assert out["ok"] is True and out["market"] == {}
+    assert out["breadth"]["allA"] == {"up": None, "down": None}
+    assert out["breadth"]["industry"] == {"up": None, "down": None}
+    assert out["breadth"]["concept"] == {"up": 1, "down": 0}
+    assert out["notes"]                                            # 降级 note 显形
+    lines = [json.loads(l) for l in (Path(tmp_path) / "20260708.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert {l["kind"] for l in lines} == {"concept"}              # 只落有数据的档
