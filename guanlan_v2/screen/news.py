@@ -26,10 +26,11 @@ async def news_sentiment(codes: List[str], *, limit: int = 200,
     """真消息面:实时快讯 + LLM 情绪。委托引擎共享核心 news_pulse(单一事实来源)。
     保持既有返回字段不变(选股页 C 节在用)。"""
     from financial_analyst.data import news_pulse
+    from guanlan_v2.datafeed import kuaixun as _kuaixun
     from guanlan_v2.screen.llm import _call_llm_json
 
     try:
-        market = news_pulse.fetch_kuaixun(limit=limit)
+        market = _kuaixun.fetch_kuaixun(limit=limit)   # T2 收敛:唯一快讯门户(opencli,带 codes)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": f"快讯拉取失败:{type(exc).__name__}: {str(exc)[:200]}"}
     if not market:

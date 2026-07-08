@@ -119,20 +119,22 @@ def test_live_provider_failure_is_empty():
 
 def test_live_three_way_merge_and_dedupe(tmp_path):
     import pandas as pd
+    from datetime import datetime
+    day = datetime.now().strftime("%Y-%m-%d")   # 相对当日:恒落 parquet 近 3 日窗内(防日期时炸,原固定 07-04 已过窗)
     pq = tmp_path / "news_events.parquet"
     pd.DataFrame([
-        {"publish_ts": "2026-07-04 09:00:00", "title": "公告:拟增持", "content": "x",
+        {"publish_ts": f"{day} 09:00:00", "title": "公告:拟增持", "content": "x",
          "source": "eastmoney_announcement", "stock_codes": "SZ000630", "is_policy": False},
-        {"publish_ts": "2026-07-04 08:00:00", "title": "政策:降准", "content": "y",
+        {"publish_ts": f"{day} 08:00:00", "title": "政策:降准", "content": "y",
          "source": "gov_policy", "stock_codes": "", "is_policy": True},
     ]).to_parquet(pq)
     sn = lambda code, limit=20: [
-        {"time": "2026-07-04 10:00", "title": "个股新闻A", "summary": "a", "source": "东方财富"},
-        {"time": "2026-07-04 09:30", "title": "重复标题", "summary": "b", "source": "东方财富"},
+        {"time": f"{day} 10:00", "title": "个股新闻A", "summary": "a", "source": "东方财富"},
+        {"time": f"{day} 09:30", "title": "重复标题", "summary": "b", "source": "东方财富"},
     ]
     kx = lambda limit=200: [
-        {"time": "2026-07-04 10:05", "title": "重复标题", "summary": "", "codes": ["SZ000630"]},
-        {"time": "2026-07-04 10:03", "title": "宏观快讯Z", "summary": "", "codes": []},
+        {"time": f"{day} 10:05", "title": "重复标题", "summary": "", "codes": ["SZ000630"]},
+        {"time": f"{day} 10:03", "title": "宏观快讯Z", "summary": "", "codes": []},
     ]
     out = nm.assemble_news_marks("000630", mode="live", stock_news_fn=sn, kuaixun_fn=kx,
                                  parquet_path=pq, limit=10)
@@ -142,7 +144,7 @@ def test_live_three_way_merge_and_dedupe(tmp_path):
     assert lv["个股新闻A"] == "stock" and lv["公告:拟增持"] == "event"
     assert lv["政策:降准"] == "policy" and lv["宏观快讯Z"] == "macro"
     assert out["freshness"]["rich_available"] is True
-    assert out["freshness"]["rich_asof"] == "2026-07-04T09:00"
+    assert out["freshness"]["rich_asof"] == f"{day}T09:00"
     ts = [it["ts"] for it in out["items"]]
     assert ts == sorted(ts, reverse=True)                     # 展示按 ts 降序
 
@@ -176,3 +178,18 @@ def test_live_parquet_absent_rich_unavailable():
                                  parquet_path="Z:/__none__.parquet", limit=5)
     assert out["ok"] is True and out["items"] == []
     assert out["freshness"]["rich_available"] is False and out["freshness"]["pulled_at"]
+
+
+def test_live_default_kuaixun_fn_uses_portal(monkeypatch):
+    # T2 收敛:不注入 kuaixun_fn 时,route ② 默认解析到 datafeed.kuaixun 门户(非直调 news_pulse);
+    # 且门户带 per-flash codes → 命中本票落 stock 层(by_code 契约在 news_marks 侧同样成立)。
+    import guanlan_v2.datafeed.kuaixun as kx
+    monkeypatch.setattr(kx, "fetch_kuaixun",
+                        lambda limit=200: [{"time": "2026-07-08 20:36", "title": "门户快讯X",
+                                            "summary": "", "codes": ["SZ000630"]}])
+    out = nm.assemble_news_marks("SZ000630", mode="live",
+                                 stock_news_fn=lambda code, limit=20: [],
+                                 parquet_path="Z:/__none__.parquet", limit=5)
+    hit = next((it for it in out["items"] if it["title"] == "门户快讯X"), None)
+    assert hit is not None                                # 默认 kfn 解析到门户 → 快讯流入
+    assert hit["level"] == "stock" and hit["code"] == "SZ000630"   # codes 命中本票

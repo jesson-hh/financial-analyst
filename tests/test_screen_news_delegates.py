@@ -4,11 +4,13 @@ if str(_ENGINE) not in sys.path:
     sys.path.insert(0, str(_ENGINE))
 
 from guanlan_v2.screen import news as snews
+from guanlan_v2.datafeed import kuaixun as _kuaixun
 from financial_analyst.data import news_pulse
 
 
-def test_news_sentiment_delegates_to_news_pulse(monkeypatch):
-    monkeypatch.setattr(news_pulse, "fetch_kuaixun",
+def test_news_sentiment_delegates_to_kuaixun_portal(monkeypatch):
+    # T2 收敛:情绪链现拉走 datafeed.kuaixun 门户(非直调 news_pulse.fetch_kuaixun)
+    monkeypatch.setattr(_kuaixun, "fetch_kuaixun",
                         lambda limit=200: [{"time": "2026-06-13 09:31", "title": "降准",
                                             "summary": "", "codes": ["SZ300750"]}])
 
@@ -33,7 +35,7 @@ def test_news_sentiment_delegates_to_news_pulse(monkeypatch):
 
 
 def test_news_sentiment_llm_fail_keeps_real_flash(monkeypatch):
-    monkeypatch.setattr(news_pulse, "fetch_kuaixun",
+    monkeypatch.setattr(_kuaixun, "fetch_kuaixun",
                         lambda limit=200: [{"time": "2026-06-13 09:31", "title": "降准",
                                             "summary": "", "codes": ["SZ300750"]}])
     async def judge_fail(market, by_code, stock_news, *, llm_json_call):

@@ -163,7 +163,7 @@ def _assemble_live(code: str, provider=None, *, stock_news_fn=None,
     try:
         kfn = kuaixun_fn
         if kfn is None:
-            from financial_analyst.data.news_pulse import fetch_kuaixun as kfn
+            from guanlan_v2.datafeed.kuaixun import fetch_kuaixun as kfn  # T2 收敛:唯一快讯门户
         flash = kfn(limit=200) or []
     except Exception:  # noqa: BLE001
         flash = []

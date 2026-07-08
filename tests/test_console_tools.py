@@ -2087,10 +2087,11 @@ def test_live_text_global_news_routes_to_kuaixun_portal(monkeypatch, tmp_path):
                             AssertionError("global_news 不应起 stocks 子进程")))
     monkeypatch.setattr("guanlan_v2.datafeed.kuaixun.fetch_kuaixun",
                         lambda limit=200: [{"time": "2026-07-08 20:36", "title": "央行降准",
-                                            "summary": "释放流动性", "codes": ["SH600030"]}])
+                                            "summary": "释放流动性" * 100, "codes": ["SH600030"]}])
     for src in ("global_news", "eastmoney_global_news"):
         out = ct.live_text_impl(source=src, limit=5)
         assert out["ok"] is True and out["n"] == 1
         assert out["source"] == "eastmoney_global_news"
         assert out["rows"][0]["codes"] == ["SH600030"]       # per-flash codes 带出(getFastNewsList 恒空)
+        assert out["rows"][0]["summary"].endswith("…") and len(out["rows"][0]["summary"]) == 401  # 与其余 29 源同截 400
         assert "央行降准" in out["content"]
