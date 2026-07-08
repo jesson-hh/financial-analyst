@@ -7,14 +7,14 @@ async function glFetchFundflowLive(kind, refresh) {
     const q = `kind=${encodeURIComponent(kind || "concept")}${refresh ? "&refresh=1" : ""}`;
     return await (await fetch(`${API}/fundflow/live?${q}`)).json();
   } catch (e) {
-    return { ok: false, reason: `后端不可达: ${e}` };
+    return { ok: false, reason: `后端不可达: ${e.message}` };
   }
 }
 
 async function glFetchFundflowHistory(kind, date) {
   if (!API) return { ticks: [], boards: [], market_series: { main_net: [] } };
   try {
-    const q = `kind=${encodeURIComponent(kind || "concept")}${date ? `&date=${date}` : ""}`;
+    const q = `kind=${encodeURIComponent(kind || "concept")}${date ? `&date=${encodeURIComponent(date)}` : ""}`;
     return await (await fetch(`${API}/fundflow/history?${q}`)).json();
   } catch (e) {
     return { ticks: [], boards: [], market_series: { main_net: [] } };
