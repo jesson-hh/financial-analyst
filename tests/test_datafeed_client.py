@@ -192,6 +192,15 @@ def test_tencent_quote_preserves_prefix_and_multicode(monkeypatch):
     assert "--code=600519,000630" in seen["cmd"]                      # 逗号多码不被砍成首只
 
 
+def test_sector_fund_flow_alias_and_passthrough():
+    """板块资金流源:别名解析 + code 档位透传(concept/industry 不被 6位提取毁掉)。"""
+    assert lc.resolve_source("sector_fund_flow") == "eastmoney_sector_fund_flow"
+    assert lc.resolve_source("eastmoney_sector_fund_flow") == "eastmoney_sector_fund_flow"
+    # code 档位透传:concept 不被 \d{6} 提取清空
+    norm = lc._normalize_args("eastmoney_sector_fund_flow", "concept", "")
+    assert norm["err"] == "" and norm["code"] == "concept"
+
+
 def test_static_sources_reconcile_with_stocks_registry():
     """守护 _STATIC_SOURCES 与 stocks LIVE_SOURCE_REGISTRY 的 canonical source_id 集合对账;
     stocks 缺席则 skip。别名为加法式 resolve 键,不要求与 stocks alias 字段逐一相等。"""
@@ -203,4 +212,4 @@ def test_static_sources_reconcile_with_stocks_registry():
     ids.discard("a_stock_live_sources")                              # catalog meta 源,非注册表条目
     static_ids = set(lc._STATIC_SOURCES)
     assert static_ids == ids, f"漂移:观澜多 {sorted(static_ids - ids)};stocks 多 {sorted(ids - static_ids)}"
-    assert len(ids) == 30
+    assert len(ids) == 31

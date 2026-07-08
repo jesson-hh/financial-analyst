@@ -62,6 +62,7 @@ _STATIC_SOURCES: Dict[str, str] = {
     "ths_hsgt_realtime": "northbound",
     "eastmoney_industry_comparison": "industry_rank",
     "ths_eps_forecast": "eps_forecast",
+    "eastmoney_sector_fund_flow": "sector_fund_flow",
     "iwencai_search": "iwencai",
 }
 
@@ -79,8 +80,9 @@ DATE_POOLS = {"em_limit_up_pool", "em_zb_pool", "em_dt_pool", "em_yzt_pool",
               "ths_limit_up_pool", "eastmoney_lhb"}
 # code 原样透传的源:ths_hot_list=榜期 / eastmoney_industry_reports=行业码 /
 # tencent_realtime_quote=支持 SH/SZ/BJ 前缀+逗号分隔多码(6位提取会毁前缀·砍多码,故透传;
-# stocks 侧 _tencent_symbol 自行处理前缀与裸码重推市场)
-CODE_PASSTHROUGH = {"ths_hot_list", "eastmoney_industry_reports", "tencent_realtime_quote"}
+# stocks 侧 _tencent_symbol 自行处理前缀与裸码重推市场) / eastmoney_sector_fund_flow=概念/行业档
+CODE_PASSTHROUGH = {"ths_hot_list", "eastmoney_industry_reports", "tencent_realtime_quote",
+                    "eastmoney_sector_fund_flow"}
 
 
 def _alias_index() -> Dict[str, str]:
