@@ -610,14 +610,14 @@ def test_engine_profile_excludes_ww_but_console_whitelist_resolves():
                           encoding="utf-8", errors="replace", timeout=180, env=env, cwd=str(repo))
     assert proc.returncode == 0, (proc.stderr or "")[-2000:]
     out = _json.loads(proc.stdout.strip().splitlines()[-1])
-    assert len(out["registered_ww"]) == 54                    # …+1 ww_sentiment +1 ww_data_health +1 ww_market_tape 盘口实时快照
+    assert len(out["registered_ww"]) == 55                    # …+1 ww_data_health +1 ww_market_tape +1 ww_fundflow 板块资金流向
     # ① 非显式白名单路径(research / 缺省 / all)一律不外露 ww_*,且不再返回 None(None=完全不限制)
     assert out["research_is_none"] is False and out["research_ww"] == []
     assert out["default_is_none"] is False and out["default_ww"] == []
     assert out["all_is_none"] is False and out["all_ww"] == []
-    # ② console 显式白名单路径不受影响:76 名全部可解析,含 51 个 ww_(历史注释曾漂移,以断言数字为准)
-    assert out["console_n"] == 79 and out["console_missing"] == []
-    assert out["explicit_n"] == 79 and out["explicit_ww_n"] == 54
+    # ② console 显式白名单路径不受影响:80 名全部可解析,含 55 个 ww_(历史注释曾漂移,以断言数字为准)
+    assert out["console_n"] == 80 and out["console_missing"] == []
+    assert out["explicit_n"] == 80 and out["explicit_ww_n"] == 55
 
 
 def test_f10_impl_returns_structured_facts(monkeypatch):
@@ -1081,9 +1081,9 @@ def test_registry_derivation_consistent():
     """阶段0 重构守护:CONSOLE_ALLOWED 与 _WW_REACHABLE_ENDPOINTS 必须从声明表派生且与已知集合一致。"""
     import guanlan_v2.console.tools as ct
     ww_in_table = {t["name"] for t in ct.WW_TOOL_TABLE}
-    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 54
+    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 55
     assert ww_in_table == {n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")}
-    assert len(ct.CONSOLE_ALLOWED) == 79
+    assert len(ct.CONSOLE_ALLOWED) == 80
     assert {"/factorlib/save", "/workflow/compose", "/feature/build"} <= ct._WW_REACHABLE_ENDPOINTS
     assert ct._WW_REACHABLE_ENDPOINTS == {ep for t in ct.WW_TOOL_TABLE for ep in t.get("reachable", [])}
 
@@ -1139,6 +1139,7 @@ def test_ww_reachable_endpoints_matches_expected():
         "/macro/pulse",           # ww_macro_pulse(全球情绪温度计)
         "/data/health",           # ww_data_health(数据健康总闸,中台③)
         "/data/market_tape",      # ww_market_tape(盘口实时快照,中台④)
+        "/fundflow/live",         # ww_fundflow(板块资金流向)
     }
     assert ct._WW_REACHABLE_ENDPOINTS == expected
 
@@ -2074,6 +2075,40 @@ def test_market_tape_impl_warming_is_honest(monkeypatch):
                         lambda *a, **k: {"ok": True, "warming": True, "sources": {}, "derived": {}})
     out = ct.market_tape_impl()
     assert out["ok"] is True and "预热" in out["content"]
+
+
+def test_ww_fundflow_registered_and_full_content_through_wrap(monkeypatch):
+    """Task 12:ww_fundflow 注册表项齐 + 交付层守护(同 market_tape\\live_text\\news_live):
+    板块资金流经真 _wrap 后全量 content 逐项可见,绝不因超 400 字被 json[:400] 静默截断。"""
+    import guanlan_v2.console.tools as ct
+    entry = next(t for t in ct.WW_TOOL_TABLE if t["name"] == "ww_fundflow")
+    assert "ww_fundflow" in ct.CONSOLE_ALLOWED
+    assert entry["confirm"] is False and entry["reachable"] == ["/fundflow/live"]
+
+    from guanlan_v2.fundflow import pulse
+    boards = [{"code": f"BK{i}", "name": f"概念板块{i}", "main_net": (20 - i) * 1e8,
+               "change_pct": 1.0 + i * 0.1, "rank": i + 1} for i in range(20)]
+    fake = {"ok": True, "kind": "concept", "trading": True, "pulled_at": "2026-07-08T10:57:00",
+            "market": {"super_net": -1.93e10, "large_net": -2.17e10, "mid_net": -1.39e8,
+                       "small_net": 4.11e10, "main_net": -4.10e10},
+            "breadth": {"allA": {"up": 1886, "down": 3458}, "industry": {"up": 149, "down": 347},
+                        "concept": {"up": 178, "down": 317}},
+            "boards": boards, "notes": []}
+    monkeypatch.setattr(pulse, "build_live", lambda *a, **k: fake)
+    tr = ct._wrap(ct.fundflow_impl)(kind="concept")
+    assert not tr.is_error
+    assert all(f"概念板块{i}" in tr.content for i in range(20))   # 20 条全量,未被 400 截
+    assert "1886" in tr.content and "3458" in tr.content          # 涨跌头条在
+    assert len(tr.content) > 400
+
+
+def test_ww_fundflow_impl_not_ok_is_honest(monkeypatch):
+    import guanlan_v2.console.tools as ct
+    from guanlan_v2.fundflow import pulse
+    monkeypatch.setattr(pulse, "build_live",
+                        lambda *a, **k: {"ok": False, "notes": ["concept 档板块资金流不可用:超时"]})
+    out = ct.fundflow_impl(kind="concept")
+    assert out["ok"] is False and "超时" in out["content"]
 
 
 def test_live_text_global_news_routes_to_kuaixun_portal(monkeypatch, tmp_path):

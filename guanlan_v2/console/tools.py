@@ -1469,6 +1469,32 @@ def market_tape_impl(fresh_within_s: int = 180) -> Dict[str, Any]:
     return {"ok": True, "content": "\n".join(lines), "artifact": None, "raw": t}
 
 
+def fundflow_impl(kind: str = "concept") -> Dict[str, Any]:
+    """现拉板块资金流(concept|industry,零 LLM):排行榜前20 + 大盘超大/大/中/小/主力分解 +
+    全A/行业/概念涨跌头条。纯展示绝不混入信号。content 必须自带全量(避免 _wrap 兜底 json[:400]
+    断裂,ww_market_tape/ww_live_text/ww_news_live 同构历史教训)。"""
+    from guanlan_v2.fundflow import pulse
+    d = pulse.build_live(kind, refresh=True)
+    if not d.get("ok"):
+        return {"ok": False, "content": "板块资金流不可用:" + "；".join(d.get("notes") or ["空"]),
+                "artifact": None, "raw": d}
+    yi = lambda v: "—" if v is None else f"{v/1e8:.2f}亿"
+    m, b = d.get("market") or {}, d.get("breadth") or {}
+    lines = [f"板块资金流 · {d.get('kind')} · {'盘中' if d.get('trading') else '非交易'} · {d.get('pulled_at')}",
+             f"大盘:主力{yi(m.get('main_net'))} 超大{yi(m.get('super_net'))} 大{yi(m.get('large_net'))} "
+             f"中{yi(m.get('mid_net'))} 小{yi(m.get('small_net'))}",
+             f"涨跌:全A 涨{(b.get('allA') or {}).get('up')}/跌{(b.get('allA') or {}).get('down')} "
+             f"行业 涨{(b.get('industry') or {}).get('up')}/跌{(b.get('industry') or {}).get('down')} "
+             f"概念 涨{(b.get('concept') or {}).get('up')}/跌{(b.get('concept') or {}).get('down')}",
+             "排行(前20):"]
+    for x in (d.get("boards") or [])[:20]:
+        lines.append(f"  {x.get('rank')}. {x.get('name')} 主力{yi(x.get('main_net'))} "
+                     f"涨跌{float(x.get('change_pct') or 0):+.2f}%")
+    if d.get("notes"):
+        lines.append("提示:" + "；".join(d["notes"]))
+    return {"ok": True, "content": "\n".join(lines), "artifact": None, "raw": d}
+
+
 def news_live_impl(code: str, limit: int = 20) -> dict:
     """实时新闻现拉(个股新闻+快讯,stocks 公告/政策富层在场顺带;秒回,绝不编造)。
     content 必须自带全部条目:无 content 键时 _wrap 兜底 json[:400],agent 只见断裂 JSON
@@ -2594,6 +2620,15 @@ WW_TOOL_TABLE = [
          "fresh_within_s": {"type": "integer", "description": "可选,新鲜窗秒数(默认 180);超则触发后台刷新"}}},
      "impl": market_tape_impl, "cost": "instant", "confirm": False,
      "reachable": ["/data/market_tape"]},
+    {"name": "ww_fundflow",
+     "description":
+         "板块资金流向(只读、零 LLM、秒回):概念/行业双档现拉,主力净流入排行前20 + 大盘超大/大/中/小/"
+         "主力资金分解 + 全A/行业/概念涨跌家数头条。用户问『哪个板块/概念资金流入流出/主力在买什么/"
+         "板块资金排行』时用。展示型绝不进信号。sector fund flow live snapshot.",
+     "input_schema": {"type": "object", "properties": {
+         "kind": {"type": "string", "description": "可选,concept(概念,默认)| industry(行业)"}}},
+     "impl": fundflow_impl, "cost": "instant", "confirm": False,
+     "reachable": ["/fundflow/live"]},
 ]
 
 
