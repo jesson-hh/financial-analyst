@@ -79,9 +79,9 @@ function IntradayChart({ hist }) {
       <svg width={W} height={H} style={{ display: "block" }}>
         <line x1={PL} y1={y(0)} x2={W - PR} y2={y(0)} stroke="var(--line-3)" strokeWidth="1" />
         {boards.map((b) => {
-          const last = [...b.series].reverse().find((v) => v != null);
+          const li = b.series.reduce((acc, v, i) => (v != null ? i : acc), null);
+          const last = li != null ? b.series[li] : null;
           const col = flowColor(last);
-          const li = b.series.map((v, i) => (v == null ? null : i)).filter((i) => i != null).slice(-1)[0];
           return (
             <g key={b.name}>
               {seg(b.series).map((pts, pi) => (
@@ -137,9 +137,9 @@ function App() {
   }, []);
   useEffect(() => { load(kind, true); }, [kind, load]);
 
-  if (live && live.ok === false && live.reason)
+  if (live && live.ok === false)
     return <div style={{ padding: 40, fontFamily: "var(--font-serif)", color: "var(--ink-2)" }}>
-      资金流向断供:{live.reason}</div>;
+      资金流向断供:{live.reason || (live.notes || []).join("；") || "数据源不可用"}</div>;
 
   const notes = (live && live.notes) || [];
   const tab = (k, label) => (
