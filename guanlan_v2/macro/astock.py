@@ -29,12 +29,17 @@ def _read_tape_safe() -> dict:
 
 
 def _tape_rows(tape: dict, alias: str):
-    """快照里取某源 rows;缺席/warming 返回 None(→回落直拉该源)。"""
+    """快照里取某源 rows;缺席/warming/该源本轮拉取失败(保留上轮陈旧行,note 带『新失败』)
+    → None(回落直拉该源)。绝不把上轮陈旧涨停行当今日打板算温度(评审 Important 红线)。"""
     if not tape or tape.get("warming"):
         return None
     from guanlan_v2.datafeed import live_client as lc
     src = (tape.get("sources") or {}).get(lc.resolve_source(alias) or alias)
-    return src.get("rows") if isinstance(src, dict) else None
+    if not isinstance(src, dict):
+        return None
+    if "新失败" in (src.get("note") or ""):
+        return None
+    return src.get("rows")
 
 
 def build_astock(live_fn=None) -> dict:

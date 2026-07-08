@@ -112,3 +112,22 @@ def test_build_astock_falls_back_when_tape_warming(monkeypatch):
     monkeypatch.setattr(ma, "_client_live", fake_live)
     out = ma.build_astock()                                   # 无 live_fn → 快照 warming → 回落直拉
     assert "em_zt_pool" in hits and out["zt_count"] == 1      # 温度计不破
+
+
+def test_build_astock_stale_tape_source_falls_back_not_faked(monkeypatch):
+    """快照里 em_zt_pool 是上轮失败保留的陈旧行(note 带『新失败』)→ 不当今日算温度,
+    回落直拉;直拉同源也失败 → 诚实 available=False + note,绝不伪造新鲜(评审 Important)。"""
+    tape = {"warming": False, "sources": {
+        "em_limit_up_pool": {"rows": [{"zt_stat": "9天9板", "break_times": 0}],
+                             "note": "(旧)|新失败:probe 超时"}}}
+    monkeypatch.setattr(ma, "_read_tape_safe", lambda: tape)
+    hits = []
+
+    def fake_live(**kw):
+        hits.append(kw.get("source"))
+        return {"ok": True, "rows": [], "n": 0, "note": "probe 超时(90s)"}   # 直拉同源也宕
+    monkeypatch.setattr(ma, "_client_live", fake_live)
+    out = ma.build_astock()
+    assert "em_zt_pool" in hits                               # 陈旧源不读快照,回落直拉
+    assert out["available"] is False                         # 直拉空 → 诚实不可用
+    assert any("em_zt_pool" in n for n in out["notes"])      # 诚实 note,不把 9连板陈旧当今日

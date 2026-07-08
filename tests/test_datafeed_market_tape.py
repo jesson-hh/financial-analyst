@@ -53,17 +53,21 @@ def test_refresh_failed_source_keeps_prev_entry(monkeypatch):
     mt._refresh(ttl_s=180)
     zt = lc.resolve_source("em_zt_pool")
 
-    # 次轮涨停池失败 → 保留上轮 rows + 标 note(局部陈旧诚实显形)
+    # 次轮涨停池失败 → 保留上轮 rows + 标 note(局部陈旧诚实显形);其它源刷到更新时刻
     def _probe_zt_fails(source, code="", date="", limit=20):
         canon = lc.resolve_source(source) or source
         if canon == "em_limit_up_pool":
             return {"ok": True, "source": canon, "status": "error", "items": [], "n": 0,
                     "note": "", "error": "boom"}
-        return _probe_ok(source, code, date, limit)
+        r = _probe_ok(source, code, date, limit)
+        r["pulled_at"] = "2026-07-08T11:00:00"     # 新鲜源(比 zt 保留的 10:15:01 新)
+        return r
     monkeypatch.setattr(lc, "probe", _probe_zt_fails)
     data = mt._refresh(ttl_s=180)
     assert data["sources"][zt]["rows"][0]["code"] == "000656"      # 旧 rows 保留
     assert "新失败" in data["sources"][zt]["note"]
+    assert data["sources"][zt]["pulled_at"] == "2026-07-08T10:15:01"   # 保留旧龄期
+    assert data["pulled_at"] == "2026-07-08T10:15:01"   # overall=min(最旧分量),新源不掩盖陈旧(不伪造新鲜)
 
 
 # ── Task 2: SWR read_tape + 单飞 + warming ────────────────────────────────────
@@ -103,3 +107,18 @@ def test_trigger_refresh_single_flight(monkeypatch):
     monkeypatch.setattr(mt.threading, "Thread",
                         lambda *a, **k: types.SimpleNamespace(start=lambda: started.__setitem__("n", started["n"] + 1)))
     assert mt._trigger_refresh() is False and started["n"] == 0
+
+
+def test_trigger_refresh_resets_flag_when_thread_start_fails(monkeypatch):
+    """Thread.start() 抛(线程耗尽)→ 立即复位 in-flight 旗,不永久冻结禁刷(评审 minor)。"""
+    monkeypatch.setattr(mt, "_REFRESH_INFLIGHT", [False])
+
+    class _BoomThread:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+    monkeypatch.setattr(mt.threading, "Thread", _BoomThread)
+    assert mt._trigger_refresh() is False
+    assert mt._REFRESH_INFLIGHT[0] is False        # 旗已复位,下次仍可刷

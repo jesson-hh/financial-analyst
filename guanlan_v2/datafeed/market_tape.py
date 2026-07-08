@@ -126,8 +126,10 @@ def _refresh(ttl_s: int = _DEFAULT_TTL_S) -> Dict[str, Any]:
             else:
                 sources[canon] = {"status": "error", "n": 0, "pulled_at": None,
                                   "note": note, "rows": []}
+    # overall 取**最旧**分量(min):失败被保留的陈旧源会把整体龄期拖旧,health/UI/read_tape
+    # 据此判 stale——绝不让某源新鲜掩盖另一源陈旧而伪造新鲜(评审 Important 红线)。
     pulled_list = [v["pulled_at"] for v in sources.values() if v.get("pulled_at")]
-    overall = max(pulled_list) if pulled_list else prev.get("pulled_at")
+    overall = min(pulled_list) if pulled_list else prev.get("pulled_at")
     data = {"pulled_at": overall, "ttl_s": ttl_s, "sources": sources, "derived": _derive(sources)}
     _write_cache_atomic(data)
     _MEM_CACHE["data"] = data
@@ -161,7 +163,12 @@ def _trigger_refresh(ttl_s: int = _DEFAULT_TTL_S) -> bool:
         finally:
             with _LOCK:
                 _REFRESH_INFLIGHT[0] = False
-    threading.Thread(target=_run, name="market_tape_refresh", daemon=True).start()
+    try:
+        threading.Thread(target=_run, name="market_tape_refresh", daemon=True).start()
+    except Exception:  # noqa: BLE001 — 线程起不来(资源耗尽)→ 立即复位旗,不永久冻结禁刷
+        with _LOCK:
+            _REFRESH_INFLIGHT[0] = False
+        return False
     return True
 
 

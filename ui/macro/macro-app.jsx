@@ -217,7 +217,7 @@ function AStockPanel({ a }) {
 
 /* ── 实时盘口快照(数据中台④):全市场微观,SWR 只读展示,绝不混入信号 ── */
 function pickName(r) {
-  return (r && (r.name || r.stock_name || r.title || r.concept || r.industry || r.代码)) || "—";
+  return (r && (r.name || r.stock_name || r.title || r.concept || r.industry || r.code)) || "—";
 }
 function TapeStat({ k, v }) {
   return (
