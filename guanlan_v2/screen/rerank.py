@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 _LESSON_PAT = re.compile(r"^- \[\d{4}-\d{2}-\d{2}\] \((行业·[^)]*)\) (.+)$")
 _STANCES = ("顺风", "逆风", "中性")
@@ -52,19 +52,34 @@ def _call_llm(system: str, user: str) -> Dict[str, Any]:
 
 # ── 纯函数 ───────────────────────────────────────────────────────────────
 
-def read_industry_lessons(k: int = 5) -> List[str]:
-    """读帷幄全局记忆「行业·」keyed 行尾部 k 条(反哺;无/不可读 → [] 诚实不挡重排)。"""
+def read_industry_lessons(board_segs: Set[str], k: int = 5) -> Tuple[List[str], List[str]]:
+    """按今天盘面行业相关性召回帷幄「行业·」keyed 教训。
+
+    命中 = 某盘面 seg 与教训 key(去『行业·』前缀、非空)双向子串相含(容 seg⊂key 与 key⊂seg)。
+    返回 (lessons, matched_segs);board_segs 空/无记忆/不可读/无命中 → ([], []) 诚实降级不回填。
+    lessons 保持既有格式 "(行业·XXX) 正文";matched_segs = 被保留的 k 条命中到的盘面 seg 去重升序。"""
+    segs = {s.strip() for s in (board_segs or set()) if s and s.strip()}
+    if not segs:
+        return [], []
     try:
         from guanlan_v2.console.tools import _MEMORY_PATH
         lines = _MEMORY_PATH.read_text(encoding="utf-8").splitlines()
-    except Exception:  # noqa: BLE001
-        return []
-    hits: List[str] = []
+    except Exception:  # noqa: BLE001 — 无/不可读记忆诚实降级,绝不挡重排
+        return [], []
+    hits: List[Tuple[str, str]] = []          # (key_去前缀, 格式化行)
     for ln in lines:
         m = _LESSON_PAT.match(ln.strip())
-        if m:
-            hits.append(f"({m.group(1)}) {m.group(2)}")
-    return hits[-max(0, int(k)):] if k else []
+        if not m:
+            continue
+        key = m.group(1).removeprefix("行业·").strip()
+        if not key:                            # 空 key(如「行业·」)跳过,防空串全命中
+            continue
+        if any((s in key) or (key in s) for s in segs):
+            hits.append((key, f"({m.group(1)}) {m.group(2)}"))
+    kept = hits[-max(0, int(k)):] if k else []
+    lessons = [line for _, line in kept]
+    matched = sorted({s for key, _ in kept for s in segs if (s in key) or (key in s)})
+    return lessons, matched
 
 
 def build_context_pack(ranked_rows: List[dict], board: Dict[str, Any],
@@ -119,8 +134,10 @@ def run_rerank(rows: List[dict], market: Optional[Dict[str, Any]]) -> Dict[str, 
         board = _board_summary()
         if not board.get("ok"):
             return {"ok": False, "reason": f"产业链板不可用: {board.get('reason')}"}
-        lessons = read_industry_lessons(k=5)
         ranked = [dict(r, rank=i + 1) for i, r in enumerate(rows)]
+        board_segs = {r["chain"]["seg_name"] for r in ranked
+                      if isinstance(r.get("chain"), dict) and r["chain"].get("seg_name")}
+        lessons, matched_segs = read_industry_lessons(board_segs, k=5)
         pack = build_context_pack(ranked, board, market, lessons)
         system, user = build_prompt(pack)
         resp = _call_llm(system, user)
@@ -141,6 +158,7 @@ def run_rerank(rows: List[dict], market: Optional[Dict[str, Any]]) -> Dict[str, 
         return {"ok": True, "model": resp.get("model"),
                 "overall": str(data.get("overall") or "")[:200],
                 "lessons_injected": len(lessons),
+                "matched_segs": sorted(matched_segs),
                 "board_snapshot": dict(board.get("snapshot") or {}),
                 "elapsed_sec": round(time.time() - t0, 1), "rows": out_rows}
     except Exception as exc:  # noqa: BLE001 — 重排层任何异常绝不炸 rescore run

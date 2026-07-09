@@ -27,7 +27,7 @@ def _order_rev(codes):
     return [{"code": c, "stance": "中性", "reason": "r"} for c in reversed(codes)]
 
 
-def test_read_lessons_filters_prefix_and_tail(tmp_path, monkeypatch):
+def test_read_lessons_filters_by_board_and_tail(tmp_path, monkeypatch):
     p = tmp_path / "memory.md"
     lines = ["- [2026-07-01] (研究·某目标) 因子教训",
              "- [2026-07-02] (行业·光芯片) 教训A",
@@ -37,14 +37,31 @@ def test_read_lessons_filters_prefix_and_tail(tmp_path, monkeypatch):
     p.write_text("\n".join(lines), encoding="utf-8")
     import guanlan_v2.console.tools as ct
     monkeypatch.setattr(ct, "_MEMORY_PATH", p)
-    got = rk.read_industry_lessons(k=2)
-    assert got == ["(行业·情绪) 教训B", "(行业·风格) 教训C"]   # 只「行业·」前缀,取尾部k条,保序
+    # 盘面含 光芯片/情绪/风格;研究· 前缀非行业教训被排除;命中三条取尾部 k=2 保序
+    lessons, matched = rk.read_industry_lessons({"光芯片", "情绪", "风格"}, k=2)
+    assert lessons == ["(行业·情绪) 教训B", "(行业·风格) 教训C"]
+    assert set(matched) == {"情绪", "风格"} and matched == sorted(matched)  # 只反映保留的 k 条,去重升序
+
+
+def test_read_lessons_bidirectional_and_strict(tmp_path, monkeypatch):
+    p = tmp_path / "memory.md"
+    lines = ["- [2026-07-01] (行业·光芯片顺风) 教训X",   # seg 光芯片 ⊂ key(seg-in-key)
+             "- [2026-07-02] (行业·半导体) 教训Y",         # key 半导体 ⊂ seg 半导体材料(key-in-seg)
+             "- [2026-07-03] (行业·消费) 教训Z",           # 无重叠 → 严格不命中
+             "- [2026-07-04] (行业·) 空key正文"]          # 空 key → 跳过,不空串全命中
+    p.write_text("\n".join(lines), encoding="utf-8")
+    import guanlan_v2.console.tools as ct
+    monkeypatch.setattr(ct, "_MEMORY_PATH", p)
+    lessons, matched = rk.read_industry_lessons({"光芯片", "半导体材料"}, k=5)
+    assert lessons == ["(行业·光芯片顺风) 教训X", "(行业·半导体) 教训Y"]  # 双向子串命中,消费/严格未命中
+    assert set(matched) == {"光芯片", "半导体材料"} and matched == sorted(matched)
+    assert rk.read_industry_lessons(set(), k=5) == ([], [])            # 空 board → 严格空
 
 
 def test_read_lessons_missing_file_returns_empty(tmp_path, monkeypatch):
     import guanlan_v2.console.tools as ct
     monkeypatch.setattr(ct, "_MEMORY_PATH", tmp_path / "nope.md")
-    assert rk.read_industry_lessons() == []
+    assert rk.read_industry_lessons({"光芯片"}) == ([], [])            # 不可读 → ([], [])
 
 
 def test_context_pack_states():
@@ -80,7 +97,7 @@ def test_validate_order_accepts_permutation():
 def test_run_rerank_llm_fail_is_honest(monkeypatch):
     monkeypatch.setattr(rk, "_board_summary", lambda: {"ok": True, "segments": [],
                                                        "snapshot": {}})
-    monkeypatch.setattr(rk, "read_industry_lessons", lambda k=5: [])
+    monkeypatch.setattr(rk, "read_industry_lessons", lambda board_segs, k=5: ([], []))
     monkeypatch.setattr(rk, "_call_llm", lambda s, u: {"ok": False, "reason": "超时"})
     out = rk.run_rerank(_rows(), {})
     assert out["ok"] is False and "超时" in out["reason"]
@@ -89,7 +106,7 @@ def test_run_rerank_llm_fail_is_honest(monkeypatch):
 def test_run_rerank_invalid_order_whole_fail(monkeypatch):
     monkeypatch.setattr(rk, "_board_summary", lambda: {"ok": True, "segments": [],
                                                        "snapshot": {}})
-    monkeypatch.setattr(rk, "read_industry_lessons", lambda k=5: [])
+    monkeypatch.setattr(rk, "read_industry_lessons", lambda board_segs, k=5: ([], []))
     monkeypatch.setattr(rk, "_call_llm", lambda s, u: {
         "ok": True, "model": "m", "data": {"order": _order(["SH600000"]), "overall": "x"}})
     out = rk.run_rerank(_rows(), {})
@@ -108,13 +125,14 @@ def test_run_rerank_success_block_schema(monkeypatch):
         "ok": True, "segments": [{"name": "光芯片", "research": 2.1, "therm": 80,
                                   "quadrant": "hh"}],
         "snapshot": {"latest_publish_ts": "2026-07-02", "n_docs": 1841}})
-    monkeypatch.setattr(rk, "read_industry_lessons", lambda k=5: ["(行业·x) 教训"])
+    monkeypatch.setattr(rk, "read_industry_lessons", lambda board_segs, k=5: (["(行业·x) 教训"], ["x"]))
     monkeypatch.setattr(rk, "_call_llm", lambda s, u: {
         "ok": True, "model": "deepseek-chat",
         "data": {"order": _order_rev(codes), "overall": "光芯片顺风"}})
     out = rk.run_rerank(_rows(), {"market_read": "平", "market_tilt": "中性"})
     assert out["ok"] is True and out["model"] == "deepseek-chat"
     assert out["lessons_injected"] == 1
+    assert out["matched_segs"] == ["x"]
     assert out["board_snapshot"] == {"latest_publish_ts": "2026-07-02", "n_docs": 1841}
     by = {r["code"]: r for r in out["rows"]}
     assert by["SH600000"]["rank_before"] == 1 and by["SH600000"]["rank_after"] == 3
