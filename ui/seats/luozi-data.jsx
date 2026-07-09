@@ -1108,6 +1108,27 @@ async function fetchQuote(code) {
   } catch (e) { return null; }
 }
 
+// ───────── ② 五档盘口 + 逐笔(/seats/orderbook, /seats/ticks):tdx 经统一 live_client ─────────
+//   落子原无盘口挂单薄/逐笔成交面板;tdx 不可达/非交易时段 → 后端 ok:false,前端显 note 降级绝不塞假档。
+async function fetchOrderbook(code) {
+  const API = (window.GUANLAN_BACKEND || '');
+  if (!API || !code) return null;
+  try {
+    const res = await fetch(API + '/seats/orderbook?code=' + encodeURIComponent(code));
+    if (!res.ok) return null;
+    return await res.json();                       // {ok, code, price, levels:[{level,bid,bid_vol,ask,ask_vol}], note}
+  } catch (e) { return null; }
+}
+async function fetchTicks(code, limit) {
+  const API = (window.GUANLAN_BACKEND || '');
+  if (!API || !code) return null;
+  try {
+    const res = await fetch(API + '/seats/ticks?code=' + encodeURIComponent(code) + '&limit=' + (limit || 30));
+    if (!res.ok) return null;
+    return await res.json();                       // {ok, code, ticks:[{time,price,vol,side}], n, note}
+  } catch (e) { return null; }
+}
+
 // ───────── 研报(A+闭环):本股深度研报状态(/report-progress)+ 席位引用的 GL research ─────────
 function prefixCode(code) {
   const c = String(code || '').replace(/^(SH|SZ|BJ)/i, '').trim();
@@ -1659,7 +1680,7 @@ Object.assign(window, {
   lzFetchReportStatus: fetchReportStatus, lzSeatResearch: seatResearch, lzSeatCard: seatCard,
   lzSyncArchive: syncArchive, lzFetchSignalRow: fetchSignalRow,
   lzFetchSeatFactors: fetchSeatFactorsCached, lzSeatDecide: seatDecide,
-  lzFetchQuote: fetchQuote,
+  lzFetchQuote: fetchQuote, lzFetchOrderbook: fetchOrderbook, lzFetchTicks: fetchTicks,
   lzLivebarLoad: livebarLoad, lzLivebarSave: livebarSave, lzLivebarClear: livebarClear, lzLivebarFromQuote: livebarFromQuote,
   lzBuildTriggerCtx: buildTriggerCtx, lzEvalTrigger: evalTrigger,
   lzRunTriggerReplay: runTriggerReplay, lzRsiOf: rsiOf, lzSeatOrder: seatOrder, lzFetchLiveEval: fetchLiveEval,

@@ -17,6 +17,52 @@ function strategyMetrics(symbol, sid) {
   return { eq: ps.eq, metrics: ps.metrics || window.lzMetricsOf(ps.eq, ps.trades || []) };
 }
 
+// ② 五档盘口 + 逐笔成交面板(纯展示,数据来自 /seats/orderbook + /seats/ticks;tdx 经统一 live_client)。
+//   null-safe:book/ticks 缺失或 ok:false → 显 note 降级,绝不塞 0 价假档。红线:只读展示,绝不喂研判/信号。
+function OrderbookTicksPanel({ book, ticks }) {
+  const asks = (book && book.ok ? (book.levels || []) : []).slice().reverse();   // 卖5..卖1 由上到下
+  const bids = (book && book.ok) ? (book.levels || []) : [];
+  const lc = book && book.last_close;
+  const px = (p) => (p == null ? '—' : (+p).toFixed(2));
+  const col = (p) => ((lc != null && p != null) ? (+p > +lc ? 'var(--zhu,#c0392b)' : (+p < +lc ? 'var(--fall,#1f9d55)' : 'var(--ink-2)')) : 'var(--ink-2)');
+  const lvlRow = (lv, side) => {
+    const p = side === '卖' ? lv.ask : lv.bid, vol = side === '卖' ? lv.ask_vol : lv.bid_vol;
+    return (
+      <div key={side + lv.level} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, fontFamily: 'var(--font-mono)', padding: '1px 6px' }}>
+        <span style={{ color: 'var(--ink-3)', width: 30 }}>{side}{lv.level}</span>
+        <span style={{ color: col(p) }}>{px(p)}</span>
+        <span style={{ color: 'var(--ink-2)', width: 64, textAlign: 'right' }}>{vol == null ? '—' : vol}</span>
+      </div>
+    );
+  };
+  return (
+    <div style={{ flexShrink: 0, borderTop: '1px solid var(--line)', padding: '6px 4px' }}>
+      <div style={{ fontSize: 11, color: 'var(--ink-2)', fontWeight: 600, marginBottom: 4, display: 'flex', justifyContent: 'space-between' }}>
+        <span>五档盘口 · 逐笔</span><span style={{ fontSize: 9, color: 'var(--ink-4)' }} title="tdx 经统一 live_client 现拉">tdx 实时</span>
+      </div>
+      {(!book || !book.ok) ? (
+        <div style={{ fontSize: 10, color: 'var(--ink-4)', padding: '4px 6px' }}>{(book && book.note) || '盘口加载中 / tdx 不可达(非交易时段无挂单)'}</div>
+      ) : (
+        <div>{asks.map(l => lvlRow(l, '卖'))}<div style={{ borderTop: '1px dashed var(--line)', margin: '2px 0' }} />{bids.map(l => lvlRow(l, '买'))}</div>
+      )}
+      <div style={{ fontSize: 9, color: 'var(--ink-4)', margin: '5px 6px 2px' }}>逐笔成交</div>
+      {(!ticks || !ticks.ok || !(ticks.ticks || []).length) ? (
+        <div style={{ fontSize: 10, color: 'var(--ink-4)', padding: '0 6px 4px' }}>{(ticks && ticks.note) || '无逐笔(非交易时段/tdx 不可达)'}</div>
+      ) : (
+        <div style={{ maxHeight: 96, overflowY: 'auto' }}>
+          {(ticks.ticks || []).slice(0, 20).map((t, i) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, fontFamily: 'var(--font-mono)', padding: '0 6px' }}>
+              <span style={{ color: 'var(--ink-4)', width: 64 }}>{t.time || '—'}</span>
+              <span style={{ color: t.side === 'buy' ? 'var(--zhu,#c0392b)' : (t.side === 'sell' ? 'var(--fall,#1f9d55)' : 'var(--ink-3)') }}>{t.price == null ? '—' : (+t.price).toFixed(2)}</span>
+              <span style={{ color: 'var(--ink-3)', width: 52, textAlign: 'right' }}>{t.vol == null ? '—' : t.vol}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function LuoziApp() {
   const [mode, setMode] = useState('backtest');     // backtest | live
   const [view, setView] = useState('single');        // single | fleet
@@ -41,6 +87,8 @@ function LuoziApp() {
   const [panEnd, setPanEnd] = useState(null);         // 可见窗口右边缘 idx(滑动);null = 跟随最新
   const [market, setMarket] = useState(null);         // 今日市场状态(/watch/market_status:regime+涨跌停)
   const [quote, setQuote] = useState(null);           // ④ 实盘实时盘口(/seats/quote:腾讯实时价,仅 live 轮询)
+  const [book, setBook] = useState(null);             // ② 五档盘口(/seats/orderbook:tdx,仅 live 轮询)
+  const [ticks, setTicks] = useState(null);           // ② 逐笔成交(/seats/ticks:tdx,仅 live 轮询)
   const [newsKw, setNewsKw] = useState('');
   const [newsPayload, setNewsPayload] = useState(null);
   const [newsPanel, setNewsPanel] = useState(null);
@@ -166,6 +214,20 @@ function LuoziApp() {
     const pull = () => window.lzFetchQuote(code).then(q => { if (alive && q) setQuote(q); });
     pull();
     const iv = setInterval(pull, 6000);
+    return () => { alive = false; clearInterval(iv); };
+  }, [mode, code]);
+
+  // ② 五档盘口 + 逐笔:live 模式下轮询 /seats/orderbook + /seats/ticks(~8s,tdx 较重故略慢于报价);
+  //   切走/非 live 清空;失败保留上次(诚实降级)。纯展示,绝不喂研判/信号。
+  useEffect(() => {
+    if (mode !== 'live' || !window.lzFetchOrderbook) { setBook(null); setTicks(null); return; }
+    let alive = true;
+    const pull = () => {
+      window.lzFetchOrderbook(code).then(b => { if (alive && b) setBook(b); });
+      window.lzFetchTicks(code, 30).then(t => { if (alive && t) setTicks(t); });
+    };
+    pull();
+    const iv = setInterval(pull, 8000);
     return () => { alive = false; clearInterval(iv); };
   }, [mode, code]);
 
@@ -806,6 +868,7 @@ function LuoziApp() {
   strategies={strategies}
   onClosePosition={(posId, price) => { if (!window.lzShadowClose) return; setShadow(sh => { const r = window.lzShadowClose(sh, posId, price, (quote && quote.asofDate) || null, '研判平'); if (r.changed && window.lzShadowSave) window.lzShadowSave(code, r.shadow); return r.changed ? r.shadow : sh; }); }}
 />
+              {mode === 'live' && <OrderbookTicksPanel book={book} ticks={ticks} />}
               <div style={{ flexShrink: 0, minHeight: 320 }}>
                 {selected && selected._isRun
                   ? <RunDecCard dec={selected} />
