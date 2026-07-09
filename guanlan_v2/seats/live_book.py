@@ -88,8 +88,9 @@ def read_ticks(code: str, limit: int = 30, live_fn: Optional[Callable] = None) -
             vol = t.get("volume")
         ticks.append({"time": t.get("time"), "price": _num(t.get("price")),
                       "vol": _num(vol), "side": _tick_side(t)})
-    return {"ok": bool(ticks), "code": code, "ticks": ticks[:lim], "n": len(ticks),
-            "note": r.get("note") or ("" if ticks else "无逐笔(非交易时段/tdx 不可达)")}
+    out = ticks[:lim]   # 取满窗口反转后只返最新 lim 笔;n 与返回条数一致(不报满窗口大小)
+    return {"ok": bool(out), "code": code, "ticks": out, "n": len(out),
+            "note": r.get("note") or ("" if out else "无逐笔(非交易时段/tdx 不可达)")}
 
 
 def read_quote_failover(code: str, live_fn: Optional[Callable] = None) -> Dict[str, Any]:

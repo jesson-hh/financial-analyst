@@ -54,6 +54,14 @@ def test_read_orderbook_empty_levels_degrades():
     assert out["ok"] is False and out["levels"] == [] and "无挂单档" in out["note"]
 
 
+def test_read_ticks_slices_to_limit_newest():
+    # 满窗口反转后只返最新 lim 笔,n 与返回条数一致(不报满窗口大小)
+    rows = [{"time": f"14:0{i}", "price": 10 + i * 0.01, "vol": i, "buyorsell": 0} for i in range(5)]  # 升序
+    out = lb.read_ticks("000630", limit=2, live_fn=_fn({"ok": True, "rows": rows, "n": 5, "note": ""}))
+    assert out["n"] == 2 and len(out["ticks"]) == 2
+    assert [t["time"] for t in out["ticks"]] == ["14:04", "14:03"]   # 最新 2 笔,最新在前
+
+
 def test_read_ticks_empty_is_honest():
     out = lb.read_ticks("000630", live_fn=_fn({"ok": True, "rows": [], "n": 0, "note": ""}))
     assert out["ok"] is False and out["ticks"] == [] and "无逐笔" in out["note"]
