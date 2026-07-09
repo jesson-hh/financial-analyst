@@ -1624,7 +1624,16 @@ def build_seats_router() -> APIRouter:
             data = await asyncio.to_thread(TencentQuoteCollector().fetch, [c])
             q = (data or {}).get(c) or next(iter((data or {}).values()), None)
             if not q:
-                return JSONResponse({"ok": False, "code": c, "reason": "无实时报价(腾讯未返回)"})
+                # 腾讯未返回 → tdx_realtime_quote failover(消实时价单点;经统一 live_client)。
+                # failover 仅给 price/OHLC 核心,腾讯专有字段(turnover/量比/pe)缺,source=tdx 显形。
+                from guanlan_v2.seats import live_book as _lb
+                fb = await asyncio.to_thread(_lb.read_quote_failover, c)
+                if fb.get("ok"):
+                    return JSONResponse({"name": None, "turnover_rate": None, "vol_ratio": None,
+                                         "pe": None, "pb": None, "asof": None, "asofDate": None,
+                                         "lastBarDate": None, "lastClose": None, "fresh": None, **fb})
+                return JSONResponse({"ok": False, "code": c,
+                                     "reason": "无实时报价(腾讯 + tdx failover 均未返回)"})
 
             # 盘口时间戳 'YYYYMMDDHHMMSS' → 'YYYY-MM-DD HH:MM'(+ asofDate 供 fresh 判定)
             asof_raw = str(q.get("asof") or "")
@@ -1664,6 +1673,25 @@ def build_seats_router() -> APIRouter:
             })
         except Exception as exc:  # noqa: BLE001 — 取数/网络失败诚实降级
             return JSONResponse({"ok": False, "code": c, "reason": f"{type(exc).__name__}: {exc}"})
+
+    @router.get("/orderbook")
+    async def seats_orderbook(code: str):
+        """五档盘口挂单薄(tdx_orderbook,经统一 datafeed.live_client)。落子原无盘口面板,
+        本端补上。code 由 live_client 自行提取 6 位;tdx 不可达/非交易时段 → ok:False + note,
+        前端降级不塞假档。纯展示,绝不回写 seats 信号。"""
+        from guanlan_v2.seats import live_book as _lb
+        if not (code or "").strip():
+            return JSONResponse({"ok": False, "code": code, "levels": [], "note": "code 为空"})
+        return JSONResponse(await asyncio.to_thread(_lb.read_orderbook, code))
+
+    @router.get("/ticks")
+    async def seats_ticks(code: str, limit: int = 30):
+        """最新逐笔成交(tdx_transaction,经统一 datafeed.live_client)。limit≤100。
+        tdx 不可达/无逐笔 → ok:False + note,绝不编造成交。纯展示,绝不回写 seats 信号。"""
+        from guanlan_v2.seats import live_book as _lb
+        if not (code or "").strip():
+            return JSONResponse({"ok": False, "code": code, "ticks": [], "note": "code 为空"})
+        return JSONResponse(await asyncio.to_thread(_lb.read_ticks, code, limit))
 
     @router.get("/live_eval")
     async def seats_live_eval(code: str, tf: str = "day"):
