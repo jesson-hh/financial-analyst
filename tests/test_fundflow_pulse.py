@@ -134,3 +134,87 @@ def test_load_history_dedup_and_split_many_boards(tmp_path):
     assert len(set(names)) == 16                              # 无重复(dedup 生效)
     assert names[:8] == [f"板块{i:02d}" for i in range(8)]     # 净流入前8(main_net 最高,板块00..07)
     assert names[8:] == [f"板块{i:02d}" for i in range(10, 18)]  # 净流出前8(main_net 最低,板块10..17)
+
+
+# ── SWR 秒回层(read_live)——收口「反复刷新反复打东财」──────────────────────────
+def _mk_build(calls, ok=True):
+    """伪 build_live:记录调用 + 按 now 打 pulled_at;ok=False 模拟源空返。"""
+    def _b(kind, refresh=False, snapshot_dir=None, sector_fn=None, now=None):
+        k = "industry" if str(kind).startswith("ind") else "concept"
+        calls.append((k, refresh))
+        stamp = (now or datetime(2026, 7, 8, 10, 0, 0)).strftime("%Y-%m-%dT%H:%M:%S")
+        return {"ok": ok, "kind": k, "pulled_at": stamp, "trading": True,
+                "market": {"main_net": 1.0}, "breadth": {}, "boards": [],
+                "notes": [] if ok else ["源本次空返"]}
+    return _b
+
+
+def test_read_live_caches_within_ttl(tmp_path):
+    from guanlan_v2.fundflow import pulse
+    calls = []
+    b = _mk_build(calls)
+    r1 = pulse.read_live("concept", cache_dir=str(tmp_path), ttl_s=180,
+                         now=datetime(2026, 7, 8, 10, 0, 0), build_fn=b)
+    assert r1["ok"] and r1["freshness"]["stale"] is False and len(calls) == 1
+    assert (Path(tmp_path) / "fundflow_live_concept.json").exists()          # 冷启动落缓存
+    # TTL 内二次读 → 命中缓存,不再拉(核心:不反复打东财)
+    r2 = pulse.read_live("concept", cache_dir=str(tmp_path), ttl_s=180,
+                         now=datetime(2026, 7, 8, 10, 1, 0), build_fn=b)
+    assert len(calls) == 1 and r2["freshness"]["stale"] is False
+
+
+def test_read_live_refresh_bypasses_cache(tmp_path):
+    from guanlan_v2.fundflow import pulse
+    calls = []
+    b = _mk_build(calls)
+    pulse.read_live("concept", cache_dir=str(tmp_path), ttl_s=180,
+                    now=datetime(2026, 7, 8, 10, 0, 0), build_fn=b)
+    assert len(calls) == 1
+    pulse.read_live("concept", refresh=True, cache_dir=str(tmp_path), ttl_s=180,
+                    now=datetime(2026, 7, 8, 10, 0, 30), build_fn=b)
+    assert len(calls) == 2 and calls[1] == ("concept", True)                 # 显式强拉透传 refresh=True
+
+
+def test_read_live_stale_serves_prev_and_triggers(tmp_path, monkeypatch):
+    from guanlan_v2.fundflow import pulse
+    calls = []
+    b = _mk_build(calls)
+    pulse.read_live("concept", cache_dir=str(tmp_path), ttl_s=180,
+                    now=datetime(2026, 7, 8, 10, 0, 0), build_fn=b)
+    triggered = []
+    monkeypatch.setattr(pulse, "_trigger_live_refresh",
+                        lambda *a, **k: (triggered.append(a), True)[1])
+    r = pulse.read_live("concept", cache_dir=str(tmp_path), ttl_s=180,
+                        now=datetime(2026, 7, 8, 10, 5, 0), build_fn=b)   # 5min>180s → 过期
+    assert r["freshness"]["stale"] is True
+    assert any("缓存过期" in n for n in r["notes"])
+    assert triggered and len(calls) == 1        # 秒回旧值+触发后台单飞;本次读未同步再拉
+
+
+def test_refresh_live_keeps_prev_on_failed_refresh(tmp_path):
+    from guanlan_v2.fundflow import pulse
+    pulse._refresh_live("concept", cache_dir=str(tmp_path),
+                        now=datetime(2026, 7, 8, 10, 0, 0), build_fn=_mk_build([], ok=True))
+    out = pulse._refresh_live("concept", cache_dir=str(tmp_path),
+                              now=datetime(2026, 7, 8, 10, 3, 0), build_fn=_mk_build([], ok=False))
+    assert out["ok"] is True                                     # 失败沿用上轮(诚实降级)
+    assert any("刷新失败沿用上轮" in n for n in out["notes"])
+    assert out["pulled_at"] == "2026-07-08T10:00:00"             # 锚点不动=真陈旧,不伪造新鲜
+
+
+def test_read_live_cold_failure_is_honest(tmp_path):
+    from guanlan_v2.fundflow import pulse
+    out = pulse.read_live("concept", cache_dir=str(tmp_path), ttl_s=180,
+                          now=datetime(2026, 7, 8, 10, 0, 0), build_fn=_mk_build([], ok=False))
+    assert out["ok"] is False and out["notes"]
+    assert not (Path(tmp_path) / "fundflow_live_concept.json").exists()   # 失败不缓存
+
+
+def test_trigger_live_refresh_resets_flag_on_thread_fail(tmp_path, monkeypatch):
+    from guanlan_v2.fundflow import pulse
+    def _boom(*a, **k):
+        raise RuntimeError("thread 起不来")
+    monkeypatch.setattr(pulse.threading, "Thread", _boom)
+    pulse._live_inflight.pop("concept", None)
+    ok = pulse._trigger_live_refresh("concept", cache_dir=str(tmp_path))
+    assert ok is False and pulse._live_inflight.get("concept") is False   # 复位旗,不永久冻结

@@ -1457,7 +1457,8 @@ def market_tape_impl(fresh_within_s: int = 180) -> Dict[str, Any]:
     lines = [
         f"盘口快照 · {str(t.get('pulled_at') or '')[:16]}(龄 {age}s{fresh_mark},读缓存零 LLM)",
         f"打板:涨停 {d.get('zt_count', '—')} 家 · 最高 {d.get('max_streak', '—')} 连板 · "
-        f"炸板率 {d.get('break_ratio', '—')} · 跌停 {d.get('dt_count', '—')} · 炸板池 {d.get('zb_count', '—')}",
+        f"炸板率 {d.get('break_rate', '—')} · 晋级率 {d.get('promotion_rate', '—')} · "
+        f"开板率 {d.get('break_ratio', '—')} · 跌停 {d.get('dt_count', '—')} · 炸板池 {d.get('zb_count', '—')}",
         f"北向净额:{(str(d.get('north_net')) + ' 亿(沪+深股通)') if d.get('north_net') is not None else '—'}",
         f"龙虎榜 top:{top('eastmoney_lhb')}",
         f"人气榜 top:{top('eastmoney_hot_rank')}",
@@ -1611,7 +1612,7 @@ def macro_pulse_impl(refresh: bool = True) -> Dict[str, Any]:
     ast = p.get("astock") or {}
     if ast.get("available"):
         lines.append(f"[A股打板] 温度 {ast.get('temp')} · 涨停 {ast.get('zt_count')} 家"
-                     f" · 最高 {ast.get('max_streak')} 板 · 炸板率 {float(ast.get('break_ratio') or 0):.0%}")
+                     f" · 最高 {ast.get('max_streak')} 板 · 开板率 {float(ast.get('break_ratio') or 0):.0%}")
     else:
         lines.append("[A股打板] 不可用:" + ";".join(ast.get("notes") or ["未接线"]))
     for n in p.get("notes") or []:

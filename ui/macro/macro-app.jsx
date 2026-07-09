@@ -180,7 +180,7 @@ function AStockPanel({ a }) {
                     border: "1px solid var(--line-1)" }}>
         {stat("涨停家数", a.zt_count)}
         {stat("最高连板", `${a.max_streak}板`)}
-        {stat("炸板率", `${((a.break_ratio || 0) * 100).toFixed(0)}%`)}
+        {stat("开板率", `${((a.break_ratio || 0) * 100).toFixed(0)}%`)}
       </div>
       {(a.top_reasons || []).length > 0 && (
         <div style={{ marginTop: 10 }}>
@@ -210,7 +210,7 @@ function AStockPanel({ a }) {
         </div>
       )}
       <div style={{ marginTop: 10, fontSize: 9, color: "var(--ink-4)", lineHeight: 1.5 }}>
-        温度=clamp(30 + 0.35×涨停数 + 3×最高连板 − 30×炸板率, 0, 100),确定性算术,常数在 themes.yaml。</div>
+        温度=clamp(30 + 0.35×涨停数 + 3×最高连板 − 30×开板率, 0, 100),确定性算术,常数在 themes.yaml。</div>
     </div>
   );
 }
@@ -284,7 +284,9 @@ function MarketTapePanel({ tape }) {
                     border: "1px solid var(--line-1)" }}>
         <TapeStat k="涨停" v={d.zt_count != null ? d.zt_count : "—"} />
         <TapeStat k="最高连板" v={d.max_streak != null ? `${d.max_streak}板` : "—"} />
-        <TapeStat k="炸板率" v={d.break_ratio != null ? `${(d.break_ratio * 100).toFixed(0)}%` : "—"} />
+        <TapeStat k="炸板率" v={d.break_rate != null ? `${(d.break_rate * 100).toFixed(0)}%` : "—"} />
+        <TapeStat k="晋级率" v={d.promotion_rate != null ? `${(d.promotion_rate * 100).toFixed(0)}%` : "—"} />
+        <TapeStat k="开板率" v={d.break_ratio != null ? `${(d.break_ratio * 100).toFixed(0)}%` : "—"} />
         <TapeStat k="跌停" v={d.dt_count != null ? d.dt_count : "—"} />
         <TapeStat k="炸板池" v={d.zb_count != null ? d.zb_count : "—"} />
         <TapeStat k="北向净额(亿)" v={d.north_net != null ? d.north_net : "—"} />

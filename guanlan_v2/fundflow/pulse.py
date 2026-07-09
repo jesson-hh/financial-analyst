@@ -8,12 +8,18 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 from datetime import datetime
 from pathlib import Path
 
 from . import sources
 
 _SNAP_DEFAULT = Path(__file__).resolve().parents[2] / "var" / "fundflow"
+_LIVE_CACHE_DEFAULT = Path(__file__).resolve().parents[2] / "var" / "live"
+_LIVE_TTL_S = int(os.environ.get("GUANLAN_FUNDFLOW_TTL_S", "180"))
+_live_lock = threading.Lock()
+_live_inflight: dict[str, bool] = {}   # kind -> 是否有后台刷新在跑(单飞)
 
 
 def _is_trading(dt: datetime) -> bool:
@@ -142,6 +148,121 @@ def build_live(kind: str = "concept", refresh: bool = False, snapshot_dir=None,
         except OSError as e:
             payload["notes"].append(f"快照落盘失败: {e}")
     return payload
+
+
+# ── SWR 秒回层(收敛到 market_tape 已建立的范式)──────────────────────────────────
+# 收口「/fundflow/live 每次真拉两个 probe 子进程(cur+other),反复刷新=反复打东财」。
+# 与 market_tape 同款:磁盘缓存 + 过期后台单飞刷新;差别=冷启动阻塞首拉(2 探针~3s,一次性,
+# payload 契约不变故前端零改),而非 warming 占位。TTL 内重复读全命中缓存;refresh=True 显式绕缓存。
+# 纯展示,绝不回写信号。锚点用 build_live 自带的 pulled_at(失败沿用上轮=真陈旧,不伪造新鲜)。
+def _norm_kind(kind: str) -> str:
+    return "industry" if str(kind).lower().startswith("ind") else "concept"
+
+
+def _live_cache_path(kind: str, cache_dir=None) -> Path:
+    base = Path(cache_dir) if cache_dir else Path(
+        os.environ.get("GUANLAN_FUNDFLOW_LIVE_DIR") or _LIVE_CACHE_DEFAULT)
+    return base / f"fundflow_live_{kind}.json"
+
+
+def _load_live_cache(kind: str, cache_dir=None) -> dict | None:
+    try:
+        d = json.loads(_live_cache_path(kind, cache_dir).read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _write_live_cache(kind: str, data: dict, cache_dir=None) -> None:
+    path = _live_cache_path(kind, cache_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _refresh_live(kind: str, refresh: bool = False, snapshot_dir=None, cache_dir=None,
+                  sector_fn=None, now=None, build_fn=None) -> dict:
+    """真拉一档(经 build_live)并落缓存。ok→缓存并返;失败且有旧缓存→沿用上轮(诚实降级,
+    标 note 不伪造新鲜);失败且无旧缓存→原样返失败 payload(不缓存)。"""
+    build_fn = build_fn or build_live
+    payload = build_fn(kind, refresh=refresh, snapshot_dir=snapshot_dir, sector_fn=sector_fn, now=now)
+    k = payload.get("kind") or _norm_kind(kind)
+    if payload.get("ok"):
+        _write_live_cache(k, payload, cache_dir)
+        return payload
+    prev = _load_live_cache(k, cache_dir)
+    if prev:
+        kept = dict(prev)
+        reason = "; ".join(payload.get("notes") or []) or "空"
+        kept["notes"] = list(kept.get("notes") or []) + [f"刷新失败沿用上轮:{reason}"]
+        return kept
+    return payload   # 无旧缓存 → 诚实失败,不缓存
+
+
+def _live_age_s(data: dict, ref_now: datetime):
+    try:
+        return int((ref_now - datetime.fromisoformat(str(data.get("pulled_at")))).total_seconds())
+    except (TypeError, ValueError):
+        return None
+
+
+def _annotate_live(data: dict, ref_now: datetime, ttl: int) -> dict:
+    age = _live_age_s(data, ref_now)
+    stale = age is None or age > ttl
+    out = dict(data)
+    out["freshness"] = {"age_s": age, "stale": bool(stale), "ttl_s": ttl}
+    if stale and out.get("ok"):
+        out["notes"] = list(out.get("notes") or []) + [
+            "缓存过期,已触发后台刷新;本次返回现有值(龄期见 freshness)"]
+    return out
+
+
+def _trigger_live_refresh(kind: str, snapshot_dir=None, cache_dir=None,
+                          sector_fn=None, build_fn=None) -> bool:
+    """单飞:该 kind 已有刷新在跑→返 False;否则起 daemon 后台刷新(线程起不来即复位旗,不永冻)。"""
+    with _live_lock:
+        if _live_inflight.get(kind):
+            return False
+        _live_inflight[kind] = True
+
+    def _run() -> None:
+        try:
+            _refresh_live(kind, refresh=False, snapshot_dir=snapshot_dir, cache_dir=cache_dir,
+                          sector_fn=sector_fn, build_fn=build_fn)
+        except Exception:  # noqa: BLE001 — 后台刷新失败绝不冒泡
+            pass
+        finally:
+            with _live_lock:
+                _live_inflight[kind] = False
+    try:
+        threading.Thread(target=_run, name=f"fundflow_live_{kind}", daemon=True).start()
+    except Exception:  # noqa: BLE001
+        with _live_lock:
+            _live_inflight[kind] = False
+        return False
+    return True
+
+
+def read_live(kind: str = "concept", refresh: bool = False, snapshot_dir=None,
+              cache_dir=None, ttl_s=None, now=None, sector_fn=None, build_fn=None) -> dict:
+    """SWR 只读门户(/fundflow/live 走它):缓存新鲜→秒回;缺失→阻塞首拉(一次性);过期→返旧值
+    +触发后台单飞刷新。refresh=True 显式强拉绕缓存。TTL 内重复读绝不反复打东财。纯展示不回写。"""
+    k = _norm_kind(kind)
+    ttl = _LIVE_TTL_S if ttl_s is None else int(ttl_s)
+    ref_now = now or datetime.now()
+    if refresh:
+        data = _refresh_live(k, refresh=True, snapshot_dir=snapshot_dir, cache_dir=cache_dir,
+                             sector_fn=sector_fn, now=now, build_fn=build_fn)
+        return _annotate_live(data, ref_now, ttl)
+    cached = _load_live_cache(k, cache_dir)
+    if not cached:                       # 冷启动:阻塞首拉,落缓存
+        data = _refresh_live(k, refresh=False, snapshot_dir=snapshot_dir, cache_dir=cache_dir,
+                             sector_fn=sector_fn, now=now, build_fn=build_fn)
+        return _annotate_live(data, ref_now, ttl)
+    if _live_age_s(cached, ref_now) is None or _live_age_s(cached, ref_now) > ttl:
+        _trigger_live_refresh(k, snapshot_dir, cache_dir, sector_fn, build_fn)
+    return _annotate_live(cached, ref_now, ttl)
 
 
 def _read_day(path: Path, kind: str) -> list:

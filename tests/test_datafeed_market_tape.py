@@ -23,6 +23,9 @@ def _probe_ok(source, code="", date="", limit=20):
     fixtures = {
         "em_limit_up_pool": [{"raw": {"code": "000656", "zt_stat": "7天7板", "break_times": 0, "limit_days": 7}},
                              {"raw": {"code": "300001", "zt_stat": "2天2板", "break_times": 1, "limit_days": 2}}],
+        "em_zb_pool": [{"raw": {"code": "111", "x": 1}}, {"raw": {"code": "222", "x": 2}}],   # 炸板 2 家
+        "em_yzt_pool": [{"raw": {"code": "aaa", "pct": 10.0}},    # 一字板已晋级(pct≥9.8)
+                        {"raw": {"code": "bbb", "pct": 3.0}}],    # 一字板未晋级
         "ths_hsgt_realtime": [{"raw": {"time": "15:00", "hgt_yi": -9.28, "sgt_yi": -31.1}},
                               {"raw": {"time": "14:59", "hgt_yi": -10.0, "sgt_yi": -36.0}}],
     }
@@ -40,7 +43,11 @@ def test_refresh_pulls_all_sources_writes_cache_and_derives(monkeypatch):
     assert data["sources"][zt]["rows"][0]["code"] == "000656"     # native_rows 平铺保真
     assert data["derived"]["zt_count"] == 2
     assert data["derived"]["max_streak"] == 7
-    assert data["derived"]["break_ratio"] == 0.5
+    assert data["derived"]["break_ratio"] == 0.5      # 开板率=涨停中曾开板家数/涨停数(300001 break_times=1)
+    # 收敛 limit_up_sentiment 权威口径(零新增拉取,zt/zb/yzt 本已拉):
+    assert data["derived"]["zb_count"] == 2 and data["derived"]["yzt_count"] == 2
+    assert data["derived"]["break_rate"] == 0.5       # 炸板率=zb/(zt+zb)=2/(2+2)
+    assert data["derived"]["promotion_rate"] == 0.5   # 晋级率=一字板 pct≥9.8 家数/一字板池=1/2
     assert data["derived"]["north_net"] == -40.38     # 最新一分钟 hgt_yi+sgt_yi(newest-first)
     assert mt._CACHE_PATH.exists()                                 # 原子落盘
     on_disk = json.loads(mt._CACHE_PATH.read_text(encoding="utf-8"))

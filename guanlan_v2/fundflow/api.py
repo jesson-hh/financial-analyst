@@ -20,8 +20,10 @@ def build_fundflow_router() -> APIRouter:
 
     @router.get("/fundflow/live")
     async def live_ep(kind: str = "concept", refresh: int = 0):
+        # SWR 秒回:read_live 缓存新鲜直接返、过期返旧值+后台单飞刷新、冷启动一次性阻塞首拉;
+        # 反复点刷新不再反复起 probe 打东财(refresh=1 才显式强拉)。收敛到 market_tape 范式。
         from . import pulse
-        return await asyncio.to_thread(pulse.build_live, kind, bool(refresh), _snapshot_dir())
+        return await asyncio.to_thread(pulse.read_live, kind, bool(refresh), _snapshot_dir())
 
     @router.get("/fundflow/history")
     async def history_ep(kind: str = "concept", date: str = ""):

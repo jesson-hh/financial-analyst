@@ -46,6 +46,13 @@ _MEM_CACHE: Dict[str, Any] = {"data": None}
 _STREAK_RE = re.compile(r"(\d+)板")
 
 
+def _num(v: Any):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _load_cache() -> Optional[Dict[str, Any]]:
     try:
         d = json.loads(_CACHE_PATH.read_text(encoding="utf-8"))
@@ -65,6 +72,7 @@ def _derive(sources: Dict[str, Any]) -> Dict[str, Any]:
     def rows(alias: str) -> List[dict]:
         return (sources.get(_lc.resolve_source(alias) or alias) or {}).get("rows") or []
     zt, zb, dt = rows("em_zt_pool"), rows("em_zb_pool"), rows("em_dt_pool")
+    yzt = rows("em_yzt_pool")
     north = rows("northbound")
     streaks, breaks = [], 0
     for r in zt:
@@ -72,9 +80,18 @@ def _derive(sources: Dict[str, Any]) -> Dict[str, Any]:
         streaks.append(int(m.group(1)) if m else int(r.get("limit_days") or 1))
         if int(r.get("break_times") or 0) > 0:
             breaks += 1
-    d: Dict[str, Any] = {"zt_count": len(zt), "zb_count": len(zb), "dt_count": len(dt),
+    zt_n, zb_n = len(zt), len(zb)
+    promoted = sum(1 for r in yzt if (_num(r.get("pct")) or 0.0) >= 9.8)
+    # 三个语义不同的口径,分别命名消歧(评审「两套炸板率定义并存」的收敛):
+    #   break_ratio = 开板率  = 涨停中曾开板家数 / 涨停数(astock 打板温度用此·系数已标定,不并入)
+    #   break_rate  = 炸板率  = 炸板数 / 涨停尝试 = zb/(zt+zb)(收敛 limit_up_sentiment 权威口径)
+    #   promotion_rate = 晋级率 = 一字板 pct≥9.8 家数 / 一字板池(连板晋级维度,零新增拉取)
+    d: Dict[str, Any] = {"zt_count": zt_n, "zb_count": zb_n, "dt_count": len(dt),
+                         "yzt_count": len(yzt),
                          "max_streak": max(streaks) if streaks else 0,
-                         "break_ratio": round(breaks / len(zt), 4) if zt else 0.0,
+                         "break_ratio": round(breaks / zt_n, 4) if zt else 0.0,
+                         "break_rate": round(zb_n / (zt_n + zb_n), 4) if (zt_n + zb_n) else 0.0,
+                         "promotion_rate": round(promoted / len(yzt), 4) if yzt else 0.0,
                          "north_net": None}
     if north and isinstance(north[0], dict):     # 北向净额=最新一分钟(newest-first)沪股通+深股通,单位亿
         r0 = north[0]
