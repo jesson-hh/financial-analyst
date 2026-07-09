@@ -43,6 +43,9 @@ def read_orderbook(code: str, live_fn: Optional[Callable] = None) -> Dict[str, A
         if bid is None and ask is None and bv is None and av is None:
             continue                     # 该档整体缺失则跳过,不塞 0 价假档
         levels.append({"level": i, "bid": bid, "bid_vol": bv, "ask": ask, "ask_vol": av})
+    if not levels:   # 有 book 壳但无任何真档(退市/空报价:get_security_quotes 返 []→退化 book)→ 诚实降级
+        return {"ok": False, "code": str(book.get("code") or code), "levels": [],
+                "note": r.get("note") or "盘口无挂单档(退市/空报价),诚实降级"}
     return {"ok": True, "code": str(book.get("code") or code),
             "price": _num(book.get("price")), "last_close": _num(book.get("last_close")),
             "open": _num(book.get("open")), "high": _num(book.get("high")),
@@ -71,8 +74,11 @@ def read_ticks(code: str, limit: int = 30, live_fn: Optional[Callable] = None) -
         lim = max(1, min(int(limit or 30), 100))
     except (TypeError, ValueError):
         lim = 30
-    r = live_fn("tdx_transaction", code=code, limit=lim)
-    rows = r.get("rows") or []
+    # pytdx get_transaction_data 按时间升序返回(最旧在前),handler 未反转;若只请求 lim 笔则
+    # probe 的 items[:lim] 会截到「最旧 lim 笔」丢掉最新成交(评审 live 复现)。故取满窗口(默认 50)
+    # 再本地反转成最新在前,末端 [:lim] 取最新 lim 笔——面板「最新逐笔」名实相符。
+    r = live_fn("tdx_transaction", code=code, limit=max(lim, 50))
+    rows = list(reversed(r.get("rows") or []))
     ticks: List[Dict[str, Any]] = []
     for t in rows:
         if not isinstance(t, dict):

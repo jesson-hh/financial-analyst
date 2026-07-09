@@ -210,6 +210,19 @@ def test_read_live_cold_failure_is_honest(tmp_path):
     assert not (Path(tmp_path) / "fundflow_live_concept.json").exists()   # 失败不缓存
 
 
+def test_read_live_forced_refresh_failure_no_false_bg_note(tmp_path):
+    from guanlan_v2.fundflow import pulse
+    # 先落一份缓存
+    pulse._refresh_live("concept", cache_dir=str(tmp_path),
+                        now=datetime(2026, 7, 8, 10, 0, 0), build_fn=_mk_build([], ok=True))
+    # refresh=True 强拉失败(now 远超 ttl,缓存已陈旧)→ 沿用上轮。修:该路径未触发后台刷新,
+    # 不得谎报「已触发后台刷新」(评审 minor)。
+    out = pulse.read_live("concept", refresh=True, cache_dir=str(tmp_path), ttl_s=180,
+                          now=datetime(2026, 7, 8, 12, 0, 0), build_fn=_mk_build([], ok=False))
+    assert out["ok"] is True and any("刷新失败沿用上轮" in n for n in out["notes"])
+    assert not any("已触发后台刷新" in n for n in out["notes"])
+
+
 def test_trigger_live_refresh_resets_flag_on_thread_fail(tmp_path, monkeypatch):
     from guanlan_v2.fundflow import pulse
     def _boom(*a, **k):

@@ -35,15 +35,23 @@ def test_read_orderbook_unavailable_is_honest():
     assert out["ok"] is False and out["levels"] == [] and "tdx" in out["note"]
 
 
-def test_read_ticks_maps_side_and_vol():
-    rows = [{"time": "14:59:57", "price": 10.5, "vol": 12, "buyorsell": 0},
-            {"time": "14:59:58", "price": 10.49, "volume": 8, "buyorsell": 1},
-            {"time": "14:59:59", "price": 10.5, "vol": 3, "buyorsell": 2}]
+def test_read_ticks_newest_first_and_maps_side_vol():
+    # pytdx 升序(最旧在前)→ read_ticks 反转成最新在前(否则层层 [:lim] 丢最新);side/vol 归一。
+    rows = [{"time": "14:59:57", "price": 10.5, "vol": 12, "buyorsell": 0},    # buy,最旧
+            {"time": "14:59:58", "price": 10.49, "volume": 8, "buyorsell": 1},  # sell
+            {"time": "14:59:59", "price": 10.51, "vol": 3, "buyorsell": 2}]     # neutral,最新
     out = lb.read_ticks("000630", limit=30, live_fn=_fn({"ok": True, "rows": rows, "n": 3, "note": ""}))
     assert out["ok"] and out["n"] == 3
-    assert [t["side"] for t in out["ticks"]] == ["buy", "sell", "neutral"]
-    assert out["ticks"][1]["vol"] == 8.0        # volume 兜底映射
-    assert out["ticks"][0]["price"] == 10.5
+    assert [t["side"] for t in out["ticks"]] == ["neutral", "sell", "buy"]      # 最新在前
+    assert out["ticks"][0]["time"] == "14:59:59"                               # 最新成交居首
+    assert out["ticks"][1]["vol"] == 8.0                                       # volume 兜底映射
+
+
+def test_read_orderbook_empty_levels_degrades():
+    # tdx 返回退化 book(有 code 壳但无任何 bid/ask 档:退市/空报价)→ ok:False+note,不静默空面板
+    book = {"code": "000630", "market": None, "price": None}
+    out = lb.read_orderbook("000630", live_fn=_fn({"ok": True, "rows": [book], "n": 1, "note": ""}))
+    assert out["ok"] is False and out["levels"] == [] and "无挂单档" in out["note"]
 
 
 def test_read_ticks_empty_is_honest():

@@ -85,7 +85,8 @@ def _derive(sources: Dict[str, Any]) -> Dict[str, Any]:
     # 三个语义不同的口径,分别命名消歧(评审「两套炸板率定义并存」的收敛):
     #   break_ratio = 开板率  = 涨停中曾开板家数 / 涨停数(astock 打板温度用此·系数已标定,不并入)
     #   break_rate  = 炸板率  = 炸板数 / 涨停尝试 = zb/(zt+zb)(收敛 limit_up_sentiment 权威口径)
-    #   promotion_rate = 晋级率 = 一字板 pct≥9.8 家数 / 一字板池(连板晋级维度,零新增拉取)
+    #   promotion_rate = 晋级率 = 昨日涨停池(em_yzt_pool=getYesterdayZTPool)今日 pct≥9.8(再涨停)家数
+    #                    / 昨日涨停池家数(连板晋级维度,零新增拉取;yzt=昨日涨停,非一字板,勿误改语义)
     d: Dict[str, Any] = {"zt_count": zt_n, "zb_count": zb_n, "dt_count": len(dt),
                          "yzt_count": len(yzt),
                          "max_streak": max(streaks) if streaks else 0,

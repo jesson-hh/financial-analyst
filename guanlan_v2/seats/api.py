@@ -1621,10 +1621,13 @@ def build_seats_router() -> APIRouter:
 
         try:
             from financial_analyst.data.collectors.tencent_quote import TencentQuoteCollector
-            data = await asyncio.to_thread(TencentQuoteCollector().fetch, [c])
-            q = (data or {}).get(c) or next(iter((data or {}).values()), None)
+            try:
+                data = await asyncio.to_thread(TencentQuoteCollector().fetch, [c])
+                q = (data or {}).get(c) or next(iter((data or {}).values()), None)
+            except Exception:  # noqa: BLE001 — 腾讯网络故障(connect/timeout/5xx 抛错)才是「实时价单点」主故障;
+                q = None        #                须与「200 空返」一样回落 tdx,否则 failover 形同虚设(评审 Important)
             if not q:
-                # 腾讯未返回 → tdx_realtime_quote failover(消实时价单点;经统一 live_client)。
+                # 腾讯未返回或抛错 → tdx_realtime_quote failover(消实时价单点;经统一 live_client)。
                 # failover 仅给 price/OHLC 核心,腾讯专有字段(turnover/量比/pe)缺,source=tdx 显形。
                 from guanlan_v2.seats import live_book as _lb
                 fb = await asyncio.to_thread(_lb.read_quote_failover, c)

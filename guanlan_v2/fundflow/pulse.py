@@ -207,12 +207,14 @@ def _live_age_s(data: dict, ref_now: datetime):
         return None
 
 
-def _annotate_live(data: dict, ref_now: datetime, ttl: int) -> dict:
+def _annotate_live(data: dict, ref_now: datetime, ttl: int, triggered: bool = False) -> dict:
     age = _live_age_s(data, ref_now)
     stale = age is None or age > ttl
     out = dict(data)
     out["freshness"] = {"age_s": age, "stale": bool(stale), "ttl_s": ttl}
-    if stale and out.get("ok"):
+    # 仅在「本次真触发了后台刷新」时才这么标——refresh=True 强拉路径、单飞旗已占(_trigger 返 False)
+    # 都不该谎报「已触发后台刷新」(评审 minor:freshness 本就诚实,note 不再自相矛盾)。
+    if stale and out.get("ok") and triggered:
         out["notes"] = list(out.get("notes") or []) + [
             "缓存过期,已触发后台刷新;本次返回现有值(龄期见 freshness)"]
     return out
@@ -260,9 +262,10 @@ def read_live(kind: str = "concept", refresh: bool = False, snapshot_dir=None,
         data = _refresh_live(k, refresh=False, snapshot_dir=snapshot_dir, cache_dir=cache_dir,
                              sector_fn=sector_fn, now=now, build_fn=build_fn)
         return _annotate_live(data, ref_now, ttl)
+    triggered = False
     if _live_age_s(cached, ref_now) is None or _live_age_s(cached, ref_now) > ttl:
-        _trigger_live_refresh(k, snapshot_dir, cache_dir, sector_fn, build_fn)
-    return _annotate_live(cached, ref_now, ttl)
+        triggered = _trigger_live_refresh(k, snapshot_dir, cache_dir, sector_fn, build_fn)
+    return _annotate_live(cached, ref_now, ttl, triggered=triggered)
 
 
 def _read_day(path: Path, kind: str) -> list:

@@ -2333,9 +2333,13 @@ WW_TOOL_TABLE = [
                     "description": "端点名(canonical source_id);catalog=列能力目录"},
          "code": {"type": "string",
                   "description": "股票代码 SZ000630/000630;ths_hot_list 填榜期 hour/day(缺省 hour);"
-                                 "eastmoney_industry_reports 填行业代码(缺省 * 全行业)"},
+                                 "eastmoney_industry_reports 填行业代码(缺省 * 全行业);"
+                                 "iwencai_query/iwencai_search 把自然语言 query 放这里(如『医药高增长龙头』,不填则空返);"
+                                 "sina_option_tquote/sina_option_greeks 放期权合约 id(如 10004949);"
+                                 "sina_option_codes 放标的 ETF 码(缺省 510050 50ETF)"},
          "date": {"type": "string",
-                  "description": "涨停/炸板/跌停/昨涨停池与龙虎榜用 YYYYMMDD(缺省当日);ths_hot_reason 可 YYYY-MM-DD"},
+                  "description": "涨停/炸板/跌停/昨涨停池与龙虎榜、limit_up_sentiment 用 YYYYMMDD(缺省当日);"
+                                 "ths_hot_reason 可 YYYY-MM-DD;tdx_kline 用本字段传周期 freq(day/5min/15min/30min/60min/week/month,缺省 day)"},
          "limit": {"type": "integer", "default": 20, "description": "最多条数(≤50)"}},
       "required": ["source"]},
      "impl": live_text_impl, "cost": "seconds", "confirm": False,
