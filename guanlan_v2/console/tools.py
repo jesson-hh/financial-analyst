@@ -1513,6 +1513,60 @@ def news_live_impl(code: str, limit: int = 20) -> dict:
             "items": items, "freshness": fresh, "note": note}
 
 
+# ── 落子五档盘口 / 逐笔成交 → 帷幄工具(经 seats.live_book → 统一 live_client → tdx)──────
+# 纯展示/盯盘上下文,绝不回写 seats 交易信号;tdx 不可达/非交易时段诚实降级,绝不编造挂单/成交。
+# content 必须自带全量(否则 _wrap 兜底 json[:400] 会把逐档/逐笔截成断裂 JSON,agent 只见碎片
+# —— market_tape/fundflow/live_text/news_live 同构历史教训)。
+def orderbook_impl(code: str) -> Dict[str, Any]:
+    """五档盘口现拉(零 LLM 秒回):买卖各五档挂单价+量 + 现价/今开/最高/最低/昨收。"""
+    from guanlan_v2.seats import live_book as _lb
+    code = str(code or "").strip()
+    if not code:
+        return {"ok": False, "content": "请提供股票代码(如 SZ000630 / 000630 / 600519)。", "artifact": None}
+    r = _lb.read_orderbook(code)
+    if not r.get("ok"):
+        return {"ok": False, "content": f"盘口不可用({r.get('code') or code}):{r.get('note') or '未知'}",
+                "artifact": None, "raw": r}
+    levels = r.get("levels") or []
+    lines = [f"五档盘口 · {r.get('code')} · 现价 {r.get('price')}"
+             f"(昨收 {r.get('last_close')} 开 {r.get('open')} 高 {r.get('high')} 低 {r.get('low')})"]
+    for lv in reversed(levels):                    # 卖档由高到低(卖五在上,靠成交口在下)
+        if lv.get("ask") is not None:
+            lines.append(f"  卖{lv.get('level')} {lv.get('ask')} × {lv.get('ask_vol')}")
+    for lv in levels:                              # 买档由高到低(买一在上)
+        if lv.get("bid") is not None:
+            lines.append(f"  买{lv.get('level')} {lv.get('bid')} × {lv.get('bid_vol')}")
+    if r.get("note"):
+        lines.append("提示:" + str(r["note"]))
+    return {"ok": True, "content": "\n".join(lines), "artifact": None, "raw": r}
+
+
+_TICK_SIDE_CN = {"buy": "主动买", "sell": "主动卖", "neutral": "中性"}
+
+
+def ticks_impl(code: str, limit: int = 20) -> Dict[str, Any]:
+    """最新逐笔成交现拉(零 LLM):最新在前,方向=主动买/主动卖/中性。"""
+    from guanlan_v2.seats import live_book as _lb
+    code = str(code or "").strip()
+    if not code:
+        return {"ok": False, "content": "请提供股票代码(如 SZ000630 / 000630 / 600519)。", "artifact": None}
+    try:
+        lim = int(limit or 20)
+    except (TypeError, ValueError):
+        lim = 20
+    r = _lb.read_ticks(code, limit=lim)
+    if not r.get("ok"):
+        return {"ok": False, "content": f"逐笔不可用({r.get('code') or code}):{r.get('note') or '未知'}",
+                "artifact": None, "raw": r}
+    lines = [f"逐笔成交 · {r.get('code')} · 最新 {r.get('n')} 笔(最新在前)"]
+    for t in r.get("ticks") or []:
+        lines.append(f"  {t.get('time')}  {t.get('price')}  ×{t.get('vol')}  "
+                     f"{_TICK_SIDE_CN.get(t.get('side'), t.get('side'))}")
+    if r.get("note"):
+        lines.append("提示:" + str(r["note"]))
+    return {"ok": True, "content": "\n".join(lines), "artifact": None, "raw": r}
+
+
 # ── ww_live_text:stocks 实时文本/事件源(统一客户端 datafeed.live_client)──────────
 # 零重造:端点归 G:\stocks(live_sources.py 统一门面,47 源);观澜唯一现拉门户=
 # datafeed.live_client(子进程正典 probe_live_sources.py + 跨调用最小间隔节流 +
@@ -2635,6 +2689,27 @@ WW_TOOL_TABLE = [
          "kind": {"type": "string", "description": "可选,concept(概念,默认)| industry(行业)"}}},
      "impl": fundflow_impl, "cost": "instant", "confirm": False,
      "reachable": ["/fundflow/live"]},
+    {"name": "ww_orderbook",
+     "description":
+         "五档盘口现拉(只读、零 LLM、秒回):某票买卖各五档挂单价+量 + 现价/今开/最高/最低/昨收,"
+         "通达信(tdx)经统一实时门户。用户问『XX 的盘口/五档/买卖挂单/买盘卖盘厚不厚/上方压力大不大』时用。"
+         "纯展示/盯盘绝不进信号;tdx 不可达/退市诚实降级,绝不编造挂单。five-level order book snapshot.",
+     "input_schema": {"type": "object", "properties": {
+         "code": {"type": "string", "description": "股票代码,如 SZ000630 / 000630 / 600519"}},
+         "required": ["code"]},
+     "impl": orderbook_impl, "cost": "instant", "confirm": False,
+     "reachable": ["/seats/orderbook"]},
+    {"name": "ww_ticks",
+     "description":
+         "逐笔成交现拉(只读、零 LLM、秒回):某票最新 N 笔成交明细(时间/价/量/主动买卖方向),最新在前,"
+         "通达信(tdx)经统一实时门户。用户问『XX 的逐笔/成交明细/是主动买还是主动卖/有没有大单扫货』时用。"
+         "纯展示绝不进信号;非交易时段/tdx 不可达诚实降级。tick-by-tick trades snapshot.",
+     "input_schema": {"type": "object", "properties": {
+         "code": {"type": "string", "description": "股票代码,如 SZ000630 / 000630 / 600519"},
+         "limit": {"type": "integer", "description": "返回最新几笔(默认 20,上限 100)"}},
+         "required": ["code"]},
+     "impl": ticks_impl, "cost": "instant", "confirm": False,
+     "reachable": ["/seats/ticks"]},
 ]
 
 

@@ -610,14 +610,14 @@ def test_engine_profile_excludes_ww_but_console_whitelist_resolves():
                           encoding="utf-8", errors="replace", timeout=180, env=env, cwd=str(repo))
     assert proc.returncode == 0, (proc.stderr or "")[-2000:]
     out = _json.loads(proc.stdout.strip().splitlines()[-1])
-    assert len(out["registered_ww"]) == 55                    # …+1 ww_data_health +1 ww_market_tape +1 ww_fundflow 板块资金流向
+    assert len(out["registered_ww"]) == 57                    # …+1 ww_market_tape +1 ww_fundflow +1 ww_orderbook +1 ww_ticks(落子盘口/逐笔进 MCP)
     # ① 非显式白名单路径(research / 缺省 / all)一律不外露 ww_*,且不再返回 None(None=完全不限制)
     assert out["research_is_none"] is False and out["research_ww"] == []
     assert out["default_is_none"] is False and out["default_ww"] == []
     assert out["all_is_none"] is False and out["all_ww"] == []
     # ② console 显式白名单路径不受影响:80 名全部可解析,含 55 个 ww_(历史注释曾漂移,以断言数字为准)
-    assert out["console_n"] == 80 and out["console_missing"] == []
-    assert out["explicit_n"] == 80 and out["explicit_ww_n"] == 55
+    assert out["console_n"] == 82 and out["console_missing"] == []
+    assert out["explicit_n"] == 82 and out["explicit_ww_n"] == 57
 
 
 def test_f10_impl_returns_structured_facts(monkeypatch):
@@ -1081,9 +1081,9 @@ def test_registry_derivation_consistent():
     """阶段0 重构守护:CONSOLE_ALLOWED 与 _WW_REACHABLE_ENDPOINTS 必须从声明表派生且与已知集合一致。"""
     import guanlan_v2.console.tools as ct
     ww_in_table = {t["name"] for t in ct.WW_TOOL_TABLE}
-    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 55
+    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 57   # +ww_orderbook +ww_ticks(落子盘口/逐笔进 MCP)
     assert ww_in_table == {n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")}
-    assert len(ct.CONSOLE_ALLOWED) == 80
+    assert len(ct.CONSOLE_ALLOWED) == 82
     assert {"/factorlib/save", "/workflow/compose", "/feature/build"} <= ct._WW_REACHABLE_ENDPOINTS
     assert ct._WW_REACHABLE_ENDPOINTS == {ep for t in ct.WW_TOOL_TABLE for ep in t.get("reachable", [])}
 
@@ -1140,6 +1140,8 @@ def test_ww_reachable_endpoints_matches_expected():
         "/data/health",           # ww_data_health(数据健康总闸,中台③)
         "/data/market_tape",      # ww_market_tape(盘口实时快照,中台④)
         "/fundflow/live",         # ww_fundflow(板块资金流向)
+        "/seats/orderbook",       # ww_orderbook(五档盘口现拉)
+        "/seats/ticks",           # ww_ticks(逐笔成交现拉)
     }
     assert ct._WW_REACHABLE_ENDPOINTS == expected
 
@@ -2110,6 +2112,72 @@ def test_ww_fundflow_impl_not_ok_is_honest(monkeypatch):
                         lambda *a, **k: {"ok": False, "notes": ["concept 档板块资金流不可用:超时"]})
     out = ct.fundflow_impl(kind="concept")
     assert out["ok"] is False and "超时" in out["content"]
+
+
+# ── 落子五档盘口 / 逐笔 → 帷幄 ww_ 工具(进 MCP):交付层守护同 market_tape/fundflow/live_text ──
+def test_ww_orderbook_registered_and_full_content_through_wrap(monkeypatch):
+    """ww_orderbook:注册表项齐(只读、reachable=/seats/orderbook)+ 经真 _wrap 后五档全量 content
+    逐档可见(买卖各五档),绝不因缺 content 键被 json[:400] 静默截断(历史交付层缺陷)。"""
+    import guanlan_v2.console.tools as ct
+    entry = next(t for t in ct.WW_TOOL_TABLE if t["name"] == "ww_orderbook")
+    assert "ww_orderbook" in ct.CONSOLE_ALLOWED
+    assert entry["confirm"] is False and entry["reachable"] == ["/seats/orderbook"]
+
+    from guanlan_v2.seats import live_book as lb
+    levels = [{"level": i, "bid": round(10.5 - i * 0.01, 2), "bid_vol": 100 * i,
+               "ask": round(10.5 + i * 0.01, 2), "ask_vol": 200 * i} for i in range(1, 6)]
+    fake = {"ok": True, "code": "000630", "price": 10.5, "last_close": 10.0,
+            "open": 10.1, "high": 10.8, "low": 9.9, "levels": levels, "note": ""}
+    monkeypatch.setattr(lb, "read_orderbook", lambda code: fake)
+    tr = ct._wrap(ct.orderbook_impl)(code="SZ000630")
+    assert not tr.is_error
+    assert "卖5" in tr.content and "卖1" in tr.content and "买1" in tr.content and "买5" in tr.content
+    assert "10.5" in tr.content                                # 现价在
+
+
+def test_ww_orderbook_impl_unavailable_is_honest(monkeypatch):
+    import guanlan_v2.console.tools as ct
+    from guanlan_v2.seats import live_book as lb
+    monkeypatch.setattr(lb, "read_orderbook",
+                        lambda code: {"ok": False, "code": "000630", "levels": [], "note": "tdx TCP 不可达"})
+    out = ct.orderbook_impl(code="000630")
+    assert out["ok"] is False and "tdx" in out["content"]      # 诚实降级,绝不编造挂单
+
+
+def test_ww_orderbook_impl_empty_code_honest():
+    import guanlan_v2.console.tools as ct
+    out = ct.orderbook_impl(code="")
+    assert out["ok"] is False and "代码" in out["content"]
+
+
+def test_ww_ticks_registered_and_full_content_through_wrap(monkeypatch):
+    """ww_ticks:注册表项齐(只读、reachable=/seats/ticks)+ 经真 _wrap 后逐笔全量 content
+    逐笔可见(20 笔不被 400 截),最新在前,方向中文(主动买/主动卖/中性)。"""
+    import guanlan_v2.console.tools as ct
+    entry = next(t for t in ct.WW_TOOL_TABLE if t["name"] == "ww_ticks")
+    assert "ww_ticks" in ct.CONSOLE_ALLOWED
+    assert entry["confirm"] is False and entry["reachable"] == ["/seats/ticks"]
+
+    from guanlan_v2.seats import live_book as lb
+    ticks = [{"time": f"14:{i:02d}:30", "price": round(10.5 + i * 0.01, 2), "vol": i + 1,
+              "side": ["buy", "sell", "neutral"][i % 3]} for i in range(20)]
+    fake = {"ok": True, "code": "000630", "ticks": ticks, "n": 20, "note": ""}
+    monkeypatch.setattr(lb, "read_ticks", lambda code, limit: fake)
+    tr = ct._wrap(ct.ticks_impl)(code="000630", limit=20)
+    assert not tr.is_error
+    assert all(f"14:{i:02d}:30" in tr.content for i in range(20))   # 20 笔全量,未被 400 截
+    assert "主动买" in tr.content and "主动卖" in tr.content and "中性" in tr.content
+    assert len(tr.content) > 400
+
+
+def test_ww_ticks_impl_unavailable_is_honest(monkeypatch):
+    import guanlan_v2.console.tools as ct
+    from guanlan_v2.seats import live_book as lb
+    monkeypatch.setattr(lb, "read_ticks",
+                        lambda code, limit: {"ok": False, "code": "000630", "ticks": [], "n": 0,
+                                             "note": "无逐笔(非交易时段/tdx 不可达)"})
+    out = ct.ticks_impl(code="000630")
+    assert out["ok"] is False and "非交易时段" in out["content"]
 
 
 def test_live_text_global_news_routes_to_kuaixun_portal(monkeypatch, tmp_path):
