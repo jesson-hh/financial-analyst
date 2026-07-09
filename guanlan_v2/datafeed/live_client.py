@@ -64,6 +64,24 @@ _STATIC_SOURCES: Dict[str, str] = {
     "ths_eps_forecast": "eps_forecast",
     "eastmoney_sector_fund_flow": "sector_fund_flow",
     "iwencai_search": "iwencai",
+    # 2026-07-09 补:与 stocks 47 源正典对齐(通达信实时套件/新浪期权·财报/个股信息/
+    # 观澜合成源/问财结构化)。别名沿用 stocks alias 字段;arg 口径见下方三张分类表。
+    "tdx_realtime_quote": "tdx_quote",
+    "tdx_kline": "tdx_kline",
+    "tdx_orderbook": "orderbook",
+    "tdx_transaction": "transaction",
+    "tdx_finance_snapshot": "finance_snapshot",
+    "tdx_f10_text": "tdx_f10",
+    "baidu_kline_ma": "baidu_kline",
+    "sina_option_codes": "option_codes",
+    "sina_option_tquote": "option_tquote",
+    "sina_option_greeks": "option_greeks",
+    "sina_financial_report": "financial_report",
+    "eastmoney_stock_info": "stock_info",
+    "stock_live_brief": "live_brief",
+    "full_valuation": "full_valuation",
+    "limit_up_sentiment": "limit_up_sentiment",
+    "iwencai_query": "iwencai_query",
 }
 
 # 必带 code 的源(6 位股票代码;lhb_stock/unlock 等个股口径)
@@ -74,15 +92,29 @@ NEED_CODE = {
     "eastmoney_unlock", "eastmoney_margin", "eastmoney_block_trade",
     "eastmoney_holder_change", "eastmoney_dividend", "tencent_realtime_quote",
     "ths_eps_forecast",   # 同花顺一致预期 EPS,按 6 位股票代码查
+    # 2026-07-09 补:tdx 实时套件/新浪财报/个股信息/观澜合成源均按 6 位代码查。
+    # sina_option_tquote/greeks 亦必带 code,但其 code=期权合约 id(非6位),故同时进
+    # CODE_PASSTHROUGH 保原样(见下),NEED_CODE 只负责「缺 code 报错」。
+    "tdx_realtime_quote", "tdx_kline", "tdx_orderbook", "tdx_transaction",
+    "tdx_finance_snapshot", "tdx_f10_text", "baidu_kline_ma",
+    "sina_option_tquote", "sina_option_greeks", "sina_financial_report",
+    "eastmoney_stock_info", "stock_live_brief", "full_valuation",
 }
 # date 缺省补当日 YYYYMMDD 的源(上游对空/ISO date 静默返空,评审真机坐实)
 DATE_POOLS = {"em_limit_up_pool", "em_zb_pool", "em_dt_pool", "em_yzt_pool",
-              "ths_limit_up_pool", "eastmoney_lhb"}
+              "ths_limit_up_pool", "eastmoney_lhb",
+              "limit_up_sentiment"}   # 2026-07-09 补:打板情绪快照 date 缺省=当日
 # code 原样透传的源:ths_hot_list=榜期 / eastmoney_industry_reports=行业码 /
 # tencent_realtime_quote=支持 SH/SZ/BJ 前缀+逗号分隔多码(6位提取会毁前缀·砍多码,故透传;
 # stocks 侧 _tencent_symbol 自行处理前缀与裸码重推市场) / eastmoney_sector_fund_flow=概念/行业档
 CODE_PASSTHROUGH = {"ths_hot_list", "eastmoney_industry_reports", "tencent_realtime_quote",
-                    "eastmoney_sector_fund_flow"}
+                    "eastmoney_sector_fund_flow",
+                    # 2026-07-09 补:code 不是 6 位股票代码,禁 \d{6} 提取——
+                    # sina_option_tquote/greeks=期权合约 id(CON_OP_10004949 等 8 位);
+                    # iwencai_query/iwencai_search=自然语言 query(问财)。iwencai_search
+                    # 修既有隐患:此前未列入,文本 query 被 \d{6} 清空致恒空。
+                    "sina_option_tquote", "sina_option_greeks",
+                    "iwencai_query", "iwencai_search"}
 
 
 def _alias_index() -> Dict[str, str]:

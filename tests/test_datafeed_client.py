@@ -212,4 +212,38 @@ def test_static_sources_reconcile_with_stocks_registry():
     ids.discard("a_stock_live_sources")                              # catalog meta 源,非注册表条目
     static_ids = set(lc._STATIC_SOURCES)
     assert static_ids == ids, f"漂移:观澜多 {sorted(static_ids - ids)};stocks 多 {sorted(ids - static_ids)}"
-    assert len(ids) == 31
+    assert len(ids) == 47   # 2026-07-09:stocks 实时层 31→47(通达信/新浪期权·财报/个股信息/观澜合成源/问财)
+
+
+def test_new_sources_resolve_and_arg_classification():
+    """2026-07-09 补的 16 源:静态即可解析(无需 catalog 探针)+ arg 口径分类正确。
+    要害:期权合约 id/问财 query 禁 \\d{6} 提取;打板情绪 date 缺省补当日;tdx 类缺 code 报错。"""
+    # 1) 16 新源全部静态可解析(catalog 未探针也认)
+    for sid in ("tdx_realtime_quote", "tdx_orderbook", "tdx_transaction", "tdx_kline",
+                "sina_option_tquote", "sina_option_greeks", "sina_financial_report",
+                "eastmoney_stock_info", "stock_live_brief", "full_valuation",
+                "limit_up_sentiment", "iwencai_query", "baidu_kline_ma"):
+        assert lc.resolve_source(sid) == sid, f"{sid} 未静态解析"
+    # 别名也认
+    assert lc.resolve_source("orderbook") == "tdx_orderbook"
+    assert lc.resolve_source("tdx_quote") == "tdx_realtime_quote"
+    # 2) 期权合约 id(8 位/CON_OP_ 前缀)passthrough 保原样,绝不被 \d{6} 截成 6 位
+    n = lc._normalize_args("sina_option_tquote", "CON_OP_10004949", "")
+    assert n["err"] == "" and n["code"] == "CON_OP_10004949"
+    n2 = lc._normalize_args("sina_option_greeks", "10004949", "")
+    assert n2["err"] == "" and n2["code"] == "10004949"
+    # 3) 问财 query=自然语言,passthrough 保原样(修既有 iwencai_search 隐患一并覆盖)
+    for src in ("iwencai_query", "iwencai_search"):
+        nq = lc._normalize_args(src, "医药板块高增长龙头", "")
+        assert nq["err"] == "" and nq["code"] == "医药板块高增长龙头", f"{src} query 被清空"
+    # 4) 打板情绪 date 缺省补当日 8 位;非法 date 报错
+    nd = lc._normalize_args("limit_up_sentiment", "", "")
+    assert nd["err"] == "" and len(nd["date"]) == 8 and nd["date"].isdigit()
+    # 5) tdx 类缺 code 诚实报错;带 6 位 code 归一放行
+    ne = lc._normalize_args("tdx_realtime_quote", "", "")
+    assert ne["err"] and "code" in ne["err"]
+    ng = lc._normalize_args("tdx_orderbook", "SZ000630", "")
+    assert ng["err"] == "" and ng["code"] == "000630"
+    # 6) 新浪期权代码档有默认标的,不强制 code(缺 code 不报错)
+    nc = lc._normalize_args("sina_option_codes", "", "")
+    assert nc["err"] == ""

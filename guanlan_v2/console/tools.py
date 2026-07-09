@@ -1513,7 +1513,7 @@ def news_live_impl(code: str, limit: int = 20) -> dict:
 
 
 # ── ww_live_text:stocks 实时文本/事件源(统一客户端 datafeed.live_client)──────────
-# 零重造:端点归 G:\stocks(live_sources.py 统一门面,30 源);观澜唯一现拉门户=
+# 零重造:端点归 G:\stocks(live_sources.py 统一门面,47 源);观澜唯一现拉门户=
 # datafeed.live_client(子进程正典 probe_live_sources.py + 跨调用最小间隔节流 +
 # catalog 动态目录 + date/code 归一)。本壳只做 agent 面信封(rows=源原生行形、
 # 全量 content、limit 夹 50);macro 打板温度等内部消费方直用 client(limit 可放开)。
@@ -1541,7 +1541,8 @@ def _live_text_content(res: Dict[str, Any]) -> str:
 
 def live_text_impl(source: str, code: str = "", date: str = "", limit: int = 20) -> Dict[str, Any]:
     """stocks 实时文本/事件源探针(统一客户端:公告/互动易/研报元数据/资金流/龙虎榜/两融/
-    解禁/北向/涨停·炸板·跌停池/热榜等 30 源 + catalog 自省)。caller 错误(source 非法/缺
+    解禁/北向/涨停·炸板·跌停池/热榜/通达信实时报价·K线·盘口·逐笔·F10/新浪期权·财报/
+    个股信息/问财/观澜合成速览等 47 源 + catalog 自省)。caller 错误(source 非法/缺
     必填 code/date·limit 形态非法)→ ok:False 明说;上游 planned/error/外部失败 →
     ok:True + 空 + note 记因,恒不编造(与 ww_news_live 同约)。"""
     src_in = (source or "").strip().lower()

@@ -1906,8 +1906,9 @@ def test_ww_live_text_registered():
     props = entry["input_schema"]["properties"]
     assert {"source", "code", "date", "limit"} <= set(props)
     assert entry["input_schema"]["required"] == ["source"]
-    # 31 canonical 源 + catalog = 32(枚举与 datafeed 静态兜底表同步派生;含 Task4 新增 sector_fund_flow)
-    assert set(props["source"]["enum"]) == set(ct._LIVE_TEXT_SOURCES) and len(ct._LIVE_TEXT_SOURCES) == 32
+    # 47 canonical 源 + catalog = 48(枚举与 datafeed 静态兜底表同步派生;2026-07-09 补 16 源:
+    # 通达信实时套件/新浪期权·财报/个股信息/观澜合成源/问财结构化)
+    assert set(props["source"]["enum"]) == set(ct._LIVE_TEXT_SOURCES) and len(ct._LIVE_TEXT_SOURCES) == 48
 
 
 def test_live_text_impl_happy_native_rows_and_truncates(monkeypatch, tmp_path):
