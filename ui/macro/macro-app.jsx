@@ -10,7 +10,17 @@ function tempColor(t) {
   return { fg: "var(--zhu)", wash: "var(--zhu-wash)" };
 }
 const fmtTemp = (t) => (t == null ? "—" : Number(t).toFixed(1));
-const fmtPct = (p) => (p == null ? "—" : `${(p * 100).toFixed(0)}%`);
+/* 0% 只该表示真的 0(而真 0 的已结算市场早被后端剔除)。0.2% 这类极低概率市场
+   四舍五入成 0% 会被误读成幽灵行,故夹到 <1% / >99% 显示。 */
+const fmtPct = (p) => {
+  if (p == null) return "—";
+  const v = p * 100;
+  if (v > 0 && v < 0.5) return "<1%";
+  if (v < 100 && v >= 99.5) return ">99%";
+  return `${v.toFixed(0)}%`;
+};
+/* 展开区大数字:给出一位小数,极端值不夹断(读者点开就是要看精确值) */
+const fmtPctPrecise = (p) => (p == null ? "—" : `${(p * 100).toFixed(1)}%`);
 
 /* ── 总温度计仪表(横向色带+游标) ── */
 function Gauge({ label, value, note }) {
@@ -104,7 +114,7 @@ function MarketRow({ m }) {
           )}
           <div style={{ display: "flex", alignItems: "baseline", gap: 16, flexWrap: "wrap" }}>
             <span style={{ fontFamily: "var(--font-mono)", fontSize: 26, fontWeight: 700,
-                           color: "var(--ink-0)" }}>{fmtPct(m.prob)}</span>
+                           color: "var(--ink-0)" }}>{fmtPctPrecise(m.prob)}</span>
             <span style={{ fontSize: 11, color: "var(--ink-2)" }}>
               Δ24h {typeof d === "number" ? `${d >= 0 ? "+" : ""}${(d * 100).toFixed(1)}pp` : "—(需隔日快照)"}</span>
             <span style={{ fontSize: 11, color: "var(--ink-2)" }}>
