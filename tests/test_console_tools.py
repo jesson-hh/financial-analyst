@@ -1790,6 +1790,9 @@ def test_rerank_distill_enforces_prefix(monkeypatch):
     seen = {}
     monkeypatch.setattr(ct, "memory_write_impl",
                         lambda text, scope, key: seen.update(k=key, t=text) or {"ok": True})
+    monkeypatch.setattr(ct, "_rerank_perf_fetch", lambda limit: {"ok": True, "pairs": [
+        {"run_id": "rs_m", "arms": {"data": {"ok": True, "n": 3, "matured_n": 3},
+                                    "rerank": {"ok": True, "n": 3, "matured_n": 3}}}]})
     r = ct.rerank_distill_impl(key="光芯片顺风判断",
                                text="6月底顺风提升的光芯片票 20日超额 +2.1pp")
     assert r["ok"] and seen["k"] == "行业·光芯片顺风判断"     # 强制前缀
@@ -1797,6 +1800,46 @@ def test_rerank_distill_enforces_prefix(monkeypatch):
     assert seen["k"] == "行业·情绪"                            # 已带前缀不重复加
     r3 = ct.rerank_distill_impl(key="", text="x")
     assert r3["ok"] is False                                   # key 必填
+
+
+def test_rerank_distill_matured_gate(monkeypatch):
+    import guanlan_v2.console.tools as ct
+    wrote = {}
+    monkeypatch.setattr(ct, "memory_write_impl",
+                        lambda text, scope, key: wrote.update(k=key) or {"ok": True})
+    # ① 只有未成熟对 → 拒绝,不写记忆
+    unmat = {"ok": True, "pairs": [{"run_id": "rs_u", "arms": {
+        "data": {"ok": True, "n": 5, "matured_n": 0},
+        "rerank": {"ok": True, "n": 5, "matured_n": 0}}}]}
+    monkeypatch.setattr(ct, "_rerank_perf_fetch", lambda limit: unmat)
+    r = ct.rerank_distill_impl(key="x", text="t")
+    assert r["ok"] is False and "matured 门" in r["content"] and not wrote
+    # ② 桥抛异常(端点不可达)→ 拒绝(无法核实=不写)
+    monkeypatch.setattr(ct, "_rerank_perf_fetch",
+                        lambda limit: (_ for _ in ()).throw(RuntimeError("boom")))
+    r2 = ct.rerank_distill_impl(key="x", text="t")
+    assert r2["ok"] is False and "拒绝蒸馏" in r2["content"] and not wrote
+    # ③ 端点 ok:False → 拒绝
+    monkeypatch.setattr(ct, "_rerank_perf_fetch", lambda limit: {"ok": False, "reason": "档案坏"})
+    r3 = ct.rerank_distill_impl(key="x", text="t")
+    assert r3["ok"] is False and not wrote
+    # ④ 混合档案里存在一对完整成熟(两臂 ok 且 matured_n==n>0)→ 放行写入
+    mat = {"ok": True, "pairs": [
+        {"run_id": "rs_u", "arms": {"data": {"ok": True, "n": 5, "matured_n": 0},
+                                    "rerank": {"ok": True, "n": 5, "matured_n": 0}}},
+        {"run_id": "rs_m", "arms": {"data": {"ok": True, "n": 3, "matured_n": 3},
+                                    "rerank": {"ok": True, "n": 3, "matured_n": 3}}}]}
+    monkeypatch.setattr(ct, "_rerank_perf_fetch", lambda limit: mat)
+    r4 = ct.rerank_distill_impl(key="x", text="t")
+    assert r4["ok"] is True and wrote["k"] == "行业·x"
+    # ⑤ 臂失败(ok:False)的对不算成熟
+    armfail = {"ok": True, "pairs": [{"run_id": "rs_f", "arms": {
+        "data": {"ok": False, "reason": "无任何可算票"},
+        "rerank": {"ok": True, "n": 3, "matured_n": 3}}}]}
+    wrote.clear()
+    monkeypatch.setattr(ct, "_rerank_perf_fetch", lambda limit: armfail)
+    r5 = ct.rerank_distill_impl(key="x", text="t")
+    assert r5["ok"] is False and not wrote
 
 
 def test_rerank_perf_impl_renders_pairs(monkeypatch):

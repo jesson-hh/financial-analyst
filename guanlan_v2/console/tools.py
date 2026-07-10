@@ -1095,12 +1095,33 @@ def rerank_perf_impl(limit: int = 5) -> Dict[str, Any]:
 
 
 def rerank_distill_impl(key: str = "", text: str = "") -> Dict[str, Any]:
-    """A/B 结论蒸馏为行业教训入帷幄记忆(key 强制加「行业·」前缀,scope=global)。"""
+    """A/B 结论蒸馏为行业教训入帷幄记忆(key 强制加「行业·」前缀,scope=global)。
+    matured 门(2026-07-10):须存在至少一对完整成熟(两臂 ok 且 matured_n==n>0)的
+    A/B 档案才放行——horizon 未走完的是未实现收益,蒸馏进永久记忆会经召回反哺固化。"""
     key = (key or "").strip()
     if not key:
         return {"ok": False, "content": "key 必填(蒸馏教训需可检索的主题 key)", "artifact": None}
     if not key.startswith("行业·"):
         key = f"行业·{key}"
+    try:
+        perf = _rerank_perf_fetch(limit=20)
+    except Exception as e:  # noqa: BLE001 — 成熟度无法核实=不写,拒绝显形
+        return {"ok": False, "artifact": None,
+                "content": f"matured 门:A/B 档案读取失败({e}),无法核实成熟度,拒绝蒸馏"}
+    if not perf.get("ok"):
+        return {"ok": False, "artifact": None,
+                "content": f"matured 门:A/B 档案读取失败({perf.get('reason')}),拒绝蒸馏"}
+
+    def _pair_matured(p: Dict[str, Any]) -> bool:
+        arms = p.get("arms") or {}
+        return all(bool(a.get("ok")) and isinstance(a.get("n"), int) and a.get("n") > 0
+                   and a.get("matured_n") == a.get("n")
+                   for a in ((arms.get("data") or {}), (arms.get("rerank") or {})))
+
+    if not any(_pair_matured(p) for p in (perf.get("pairs") or [])):
+        return {"ok": False, "artifact": None,
+                "content": "matured 门:暂无完整成熟的 A/B 对(horizon 未走完),"
+                           "拒绝蒸馏——未熟数字不入永久记忆"}
     return memory_write_impl(text=text, scope="global", key=key)
 
 
@@ -2645,7 +2666,8 @@ WW_TOOL_TABLE = [
      "description":
          "把 ww_rerank_perf 的真实 A/B 数字蒸馏为行业教训,写入帷幄长期记忆(key 强制加"
          "「行业·」前缀,scope=global,供后续重排上下文注入引用)。绝不凭印象编教训,"
-         "必须先调 ww_rerank_perf 看到真实数字再蒸馏;需用户确认。",
+         "必须先调 ww_rerank_perf 看到真实数字再蒸馏;需用户确认。"
+         "matured 门:无完整成熟 A/B 对(两臂 matured_n==n)时拒绝蒸馏,未熟数字不入记忆。",
      "input_schema": {"type": "object", "properties": {
          "key": {"type": "string", "description": "教训主题(会被强制加『行业·』前缀)"},
          "text": {"type": "string", "description": "教训内容,须引用 ww_rerank_perf 的真实数字"}},
