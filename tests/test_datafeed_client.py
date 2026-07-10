@@ -212,7 +212,7 @@ def test_static_sources_reconcile_with_stocks_registry():
     ids.discard("a_stock_live_sources")                              # catalog meta 源,非注册表条目
     static_ids = set(lc._STATIC_SOURCES)
     assert static_ids == ids, f"漂移:观澜多 {sorted(static_ids - ids)};stocks 多 {sorted(ids - static_ids)}"
-    assert len(ids) == 48   # 2026-07-10:+eastmoney_market_fund_flow(全市场五档独立源)
+    assert len(ids) == 50   # 2026-07-10:+market_fund_flow(五档独立源)+{sector,market}_flow_minute(分钟线)
 
 
 def test_new_sources_resolve_and_arg_classification():

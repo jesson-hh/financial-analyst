@@ -63,50 +63,128 @@ function MarketFlowBars({ m }) {
   );
 }
 
-/* 盘中多线图(纯 SVG,放大版 Spark) */
+/* y 轴取整到「好看的」刻度步长(1/2/2.5/3/4/5/10 × 10^n 亿)——档位太粗会把曲线压扁 */
+function niceStep(maxAbsYi) {
+  const raw = maxAbsYi / 2;                      // 目标:0 线两侧各约 2 格
+  const pow = Math.pow(10, Math.floor(Math.log10(Math.max(raw, 1))));
+  const n = raw / pow;
+  const mult = n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 3 ? 3 : n <= 4 ? 4 : n <= 5 ? 5 : 10;
+  return mult * pow;
+}
+
+/* 标签防重叠:按 y 排序后强制最小行距,再回推防越界 */
+function spreadLabels(items, top, bottom, gap) {
+  const s = items.slice().sort((a, b) => a.y - b.y);
+  for (let i = 1; i < s.length; i++)
+    if (s[i].y - s[i - 1].y < gap) s[i].y = s[i - 1].y + gap;
+  const overflow = s.length ? s[s.length - 1].y - bottom : 0;
+  if (overflow > 0) for (let i = s.length - 1; i >= 0; i--) {
+    s[i].y -= overflow;
+    if (i > 0 && s[i].y - s[i - 1].y >= gap) break;
+  }
+  if (s.length && s[0].y < top) {
+    const d = top - s[0].y;
+    for (let i = 0; i < s.length; i++) s[i].y += d;
+  }
+  return s;
+}
+
+/* 盘中分钟多线图(纯 SVG)—— 数据为东财当日 09:31→15:00 分钟累计线 */
 function IntradayChart({ hist }) {
   const boards = (hist && hist.boards) || [];
   const ticks = (hist && hist.ticks) || [];
+  const mkt = ((hist && hist.market_series) || {}).main_net || [];
   if (ticks.length < 2 || !boards.length)
     return <div style={{ padding: 24, fontSize: 12, color: "var(--ink-3)", background: "var(--paper-1)",
                          border: "1px solid var(--line-2)", borderRadius: 6, marginBottom: 12 }}>
-      盘中数据累计中(每次刷新落一点,开盘后逐步成线;开 GUANLAN_FUNDFLOW_POLL=1 全时段成线)</div>;
-  const W = 900, H = 380, PL = 8, PR = 120, PT = 12, PB = 18;
-  const all = boards.flatMap((b) => b.series).filter((v) => v != null);
+      {hist && hist.warming
+        ? "首次拉取当日分钟线(20 条板块 + 大盘,约 25 秒),完成后自动出图…"
+        : "暂无当日分钟线(非交易日 / 盘前 / 上游源降级)。开盘后自动出全天曲线。"}</div>;
+
+  const W = 980, H = 420, PL = 52, PR = 150, PT = 14, PB = 26;
+  const all = boards.flatMap((b) => b.series).concat(mkt).filter((v) => v != null);
   const maxAbs = Math.max(1, ...all.map((v) => Math.abs(v)));
+  const stepYi = niceStep(maxAbs / YI);
+  const spanYi = Math.max(stepYi, Math.ceil((maxAbs / YI) / stepYi) * stepYi);
   const x = (i) => PL + (i * (W - PL - PR)) / (ticks.length - 1);
-  const y = (v) => PT + (H - PT - PB) * (0.5 - (v / maxAbs) * 0.5);
+  const y = (v) => PT + (H - PT - PB) * (0.5 - (v / (spanYi * YI)) * 0.5);
+
   const seg = (series) => {
-    const parts = [];
-    let cur = [];
+    const parts = []; let cur = [];
     series.forEach((v, i) => {
-      if (v == null) { if (cur.length) parts.push(cur); cur = []; }
+      if (v == null) { if (cur.length > 1) parts.push(cur); cur = []; }
       else cur.push(`${x(i)},${y(v)}`);
     });
-    if (cur.length) parts.push(cur);
+    if (cur.length > 1) parts.push(cur);
     return parts;
   };
+  const lastIdx = (s) => s.reduce((acc, v, i) => (v != null ? i : acc), null);
+
+  // y 轴刻度
+  const gridYi = [];
+  for (let v = -spanYi; v <= spanYi + 1e-9; v += stepYi) gridYi.push(Math.round(v * 100) / 100);
+  // x 轴刻度:等距取 6 个真实时刻
+  const xIdx = [];
+  const nx = Math.min(6, ticks.length);
+  for (let i = 0; i < nx; i++) xIdx.push(Math.round((i * (ticks.length - 1)) / (nx - 1)));
+
+  const labels = spreadLabels(
+    boards.map((b) => {
+      const li = lastIdx(b.series);
+      return li == null ? null : { name: b.name, v: b.series[li], x: x(li), y: y(b.series[li]) };
+    }).filter(Boolean),
+    PT + 6, H - PB - 2, 12
+  );
+
   return (
     <div style={{ background: "var(--paper-1)", border: "1px solid var(--line-2)", borderRadius: 6,
                   padding: 10, marginBottom: 12, overflowX: "auto" }}>
       <svg width={W} height={H} style={{ display: "block" }}>
-        <line x1={PL} y1={y(0)} x2={W - PR} y2={y(0)} stroke="var(--line-3)" strokeWidth="1" />
+        {gridYi.map((g) => (
+          <g key={g}>
+            <line x1={PL} y1={y(g * YI)} x2={W - PR} y2={y(g * YI)}
+                  stroke={g === 0 ? "var(--line-3)" : "var(--line-1)"} strokeWidth={g === 0 ? 1 : 0.5} />
+            <text x={PL - 6} y={y(g * YI) + 3} fontSize="9" textAnchor="end" fill="var(--ink-3)"
+                  style={{ fontFamily: "var(--font-mono)" }}>{g > 0 ? "+" : ""}{g}亿</text>
+          </g>
+        ))}
+        {xIdx.map((i) => (
+          <g key={i}>
+            <line x1={x(i)} y1={PT} x2={x(i)} y2={H - PB} stroke="var(--line-1)" strokeWidth="0.5" />
+            <text x={x(i)} y={H - PB + 13} fontSize="9" textAnchor="middle" fill="var(--ink-3)"
+                  style={{ fontFamily: "var(--font-mono)" }}>{ticks[i]}</text>
+          </g>
+        ))}
+
+        {/* 大盘主力:加粗虚线基准 */}
+        {mkt.some((v) => v != null) && seg(mkt).map((pts, pi) => (
+          <polyline key={"m" + pi} points={pts.join(" ")} fill="none" stroke="var(--ink-2)"
+                    strokeWidth="1.8" strokeDasharray="5 3" opacity="0.55" />
+        ))}
+
         {boards.map((b) => {
-          const li = b.series.reduce((acc, v, i) => (v != null ? i : acc), null);
-          const last = li != null ? b.series[li] : null;
-          const col = flowColor(last);
+          const li = lastIdx(b.series);
+          const col = flowColor(li != null ? b.series[li] : null);
           return (
             <g key={b.name}>
               {seg(b.series).map((pts, pi) => (
-                <polyline key={pi} points={pts.join(" ")} fill="none" stroke={col} strokeWidth="1.4" opacity="0.85" />
+                <polyline key={pi} points={pts.join(" ")} fill="none" stroke={col}
+                          strokeWidth="1.3" opacity="0.85" />
               ))}
-              {li != null && (
-                <text x={x(li) + 4} y={y(b.series[li]) + 3} fontSize="10" fill={col}
-                      style={{ fontFamily: "var(--font-mono)" }}>{b.name} {fmtYi(last)}</text>
-              )}
             </g>
           );
         })}
+
+        {/* 右缘标签:错开后用引导线连回曲线末点 */}
+        {labels.map((L) => (
+          <g key={L.name}>
+            <line x1={L.x} y1={y(L.v)} x2={W - PR + 2} y2={L.y - 3} stroke={flowColor(L.v)}
+                  strokeWidth="0.5" opacity="0.35" />
+            <text x={W - PR + 5} y={L.y} fontSize="10" fill={flowColor(L.v)}
+                  style={{ fontFamily: "var(--font-mono)" }}>{L.name} {fmtYi(L.v)}</text>
+          </g>
+        ))}
+        <text x={W - PR + 5} y={H - 4} fontSize="9" fill="var(--ink-3)">— — 大盘主力</text>
       </svg>
     </div>
   );
@@ -123,10 +201,6 @@ function BoardRankTable({ boards }) {
                                              borderTop: "1px solid var(--line-1)", fontSize: 12 }}>
           <span style={{ width: 20, fontFamily: "var(--font-mono)", color: "var(--ink-3)" }}>{b.rank}</span>
           <span style={{ flex: 1, color: "var(--ink-1)" }}>{b.name}</span>
-          {typeof b.delta_intraday === "number" && (
-            <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: flowColor(b.delta_intraday) }}>
-              {b.delta_intraday >= 0 ? "▲" : "▼"}{fmtYi(Math.abs(b.delta_intraday))}</span>
-          )}
           <span style={{ fontFamily: "var(--font-mono)", color: flowColor(b.change_pct) }}>
             {b.change_pct >= 0 ? "+" : ""}{Number(b.change_pct).toFixed(2)}%</span>
           <span style={{ width: 82, textAlign: "right", fontFamily: "var(--font-mono)", fontWeight: 700,
@@ -149,6 +223,13 @@ function App() {
     setLive(lv); setHist(hs); setLoading(false);
   }, []);
   useEffect(() => { load(kind, true); }, [kind, load]);
+
+  // 分钟线冷启动约 25s(后台拉),warming 期间轮询直到出图;之后走 60s SWR 缓存。
+  useEffect(() => {
+    if (!hist || !hist.warming) return;
+    const t = setTimeout(async () => setHist(await window.glFetchFundflowHistory(kind, "")), 5000);
+    return () => clearTimeout(t);
+  }, [hist, kind]);
 
   if (live && live.ok === false)
     return <div style={{ padding: 40, fontFamily: "var(--font-serif)", color: "var(--ink-2)" }}>

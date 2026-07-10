@@ -1,18 +1,14 @@
 # -*- coding: utf-8 -*-
-"""板块资金流路由(薄壳,无 prefix)+ opt-in 盘中 poller。
-协程内严禁同步 HTTP——一律 asyncio.to_thread。"""
+"""板块资金流路由(薄壳,无 prefix)。
+协程内严禁同步 HTTP——一律 asyncio.to_thread。
+
+盘中曲线由东财分钟线直出(fflow/kline klt=1),故无 poller、无自累快照:
+开盘即完整、进程重启不断线。两端点各自带 SWR 缓存,反复刷新不反复打东财。"""
 from __future__ import annotations
 
 import asyncio
-import os
-import threading
-import time
 
 from fastapi import APIRouter
-
-
-def _snapshot_dir():
-    return os.environ.get("GUANLAN_FUNDFLOW_DIR") or None
 
 
 def build_fundflow_router() -> APIRouter:
@@ -20,39 +16,16 @@ def build_fundflow_router() -> APIRouter:
 
     @router.get("/fundflow/live")
     async def live_ep(kind: str = "concept", refresh: int = 0):
-        # SWR 秒回:read_live 缓存新鲜直接返、过期返旧值+后台单飞刷新、冷启动一次性阻塞首拉;
-        # 反复点刷新不再反复起 probe 打东财(refresh=1 才显式强拉)。收敛到 market_tape 范式。
+        # SWR 秒回:缓存新鲜直接返、过期返旧值+后台单飞刷新、冷启动一次性阻塞首拉;
+        # 反复点刷新不再反复起 probe 打东财(refresh=1 才显式强拉)。
         from . import pulse
-        return await asyncio.to_thread(pulse.read_live, kind, bool(refresh), _snapshot_dir())
+        return await asyncio.to_thread(pulse.read_live, kind, bool(refresh))
 
     @router.get("/fundflow/history")
-    async def history_ep(kind: str = "concept", date: str = ""):
+    async def history_ep(kind: str = "concept", date: str = "", refresh: int = 0):
+        # 一次 history = 1 次板块排行 + N 条板块分钟线 + 1 条大盘分钟线(~21 个东财请求),
+        # 必须走 SWR(TTL 60s):盘中数据每分钟才变一次。
         from . import pulse
-        return await asyncio.to_thread(pulse.load_history, kind, date, _snapshot_dir())
+        return await asyncio.to_thread(pulse.read_history, kind, date, bool(refresh))
 
     return router
-
-
-_POLLER_STARTED = [False]
-
-
-def start_fundflow_poller() -> None:
-    """opt-in:GUANLAN_FUNDFLOW_POLL=1 才起。进程内 daemon,交易时段每 N 秒拉两档落点。
-    随本进程存亡——非 24/7 保证。幂等只起一次。"""
-    if _POLLER_STARTED[0] or os.environ.get("GUANLAN_FUNDFLOW_POLL") != "1":
-        return
-    _POLLER_STARTED[0] = True
-    interval = int(os.environ.get("GUANLAN_FUNDFLOW_POLL_SEC") or 180)
-
-    def _loop():
-        from datetime import datetime
-        from . import pulse
-        while True:
-            try:
-                if pulse._is_trading(datetime.now()):
-                    pulse.build_live("concept", refresh=False, snapshot_dir=_snapshot_dir())
-            except Exception:
-                pass
-            time.sleep(max(30, interval))
-
-    threading.Thread(target=_loop, name="fundflow-poller", daemon=True).start()

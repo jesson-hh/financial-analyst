@@ -64,6 +64,8 @@ _STATIC_SOURCES: Dict[str, str] = {
     "ths_eps_forecast": "eps_forecast",
     "eastmoney_sector_fund_flow": "sector_fund_flow",
     "eastmoney_market_fund_flow": "market_fund_flow",   # 全市场五档(沪深合计),无参
+    "eastmoney_sector_flow_minute": "sector_flow_minute",  # 单板块当日分钟累计线(code=BKxxxx)
+    "eastmoney_market_flow_minute": "market_flow_minute",  # 全市场当日分钟累计线,无参
     "iwencai_search": "iwencai",
     # 2026-07-09 补:与 stocks 47 源正典对齐(通达信实时套件/新浪期权·财报/个股信息/
     # 观澜合成源/问财结构化)。别名沿用 stocks alias 字段;arg 口径见下方三张分类表。
@@ -93,6 +95,8 @@ NEED_CODE = {
     "eastmoney_unlock", "eastmoney_margin", "eastmoney_block_trade",
     "eastmoney_holder_change", "eastmoney_dividend", "tencent_realtime_quote",
     "ths_eps_forecast",   # 同花顺一致预期 EPS,按 6 位股票代码查
+    # 板块分钟线必带板块码 BKxxxx(非 6 位,故同时进 CODE_PASSTHROUGH)
+    "eastmoney_sector_flow_minute",
     # 2026-07-09 补:tdx 实时套件/新浪财报/个股信息/观澜合成源均按 6 位代码查。
     # sina_option_tquote/greeks 亦必带 code,但其 code=期权合约 id(非6位),故同时进
     # CODE_PASSTHROUGH 保原样(见下),NEED_CODE 只负责「缺 code 报错」。
@@ -110,6 +114,8 @@ DATE_POOLS = {"em_limit_up_pool", "em_zb_pool", "em_dt_pool", "em_yzt_pool",
 # stocks 侧 _tencent_symbol 自行处理前缀与裸码重推市场) / eastmoney_sector_fund_flow=概念/行业档
 CODE_PASSTHROUGH = {"ths_hot_list", "eastmoney_industry_reports", "tencent_realtime_quote",
                     "eastmoney_sector_fund_flow",
+                    # 板块码 BK0963 数字只 4 位,\d{6} 提取会把 code 清空 → 必须透传
+                    "eastmoney_sector_flow_minute",
                     # 2026-07-09 补:code 不是 6 位股票代码,禁 \d{6} 提取——
                     # sina_option_tquote/greeks=期权合约 id(CON_OP_10004949 等 8 位);
                     # iwencai_query/iwencai_search=自然语言 query(问财)。iwencai_search

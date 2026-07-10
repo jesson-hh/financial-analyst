@@ -1952,9 +1952,9 @@ def test_ww_live_text_registered():
     props = entry["input_schema"]["properties"]
     assert {"source", "code", "date", "limit"} <= set(props)
     assert entry["input_schema"]["required"] == ["source"]
-    # 48 canonical 源 + catalog = 49(枚举与 datafeed 静态兜底表同步派生;2026-07-10 补
-    # eastmoney_market_fund_flow=全市场五档独立源)
-    assert set(props["source"]["enum"]) == set(ct._LIVE_TEXT_SOURCES) and len(ct._LIVE_TEXT_SOURCES) == 49
+    # 50 canonical 源 + catalog = 51(枚举与 datafeed 静态兜底表同步派生;2026-07-10 补
+    # market_fund_flow=全市场五档独立源,{sector,market}_flow_minute=当日分钟累计线)
+    assert set(props["source"]["enum"]) == set(ct._LIVE_TEXT_SOURCES) and len(ct._LIVE_TEXT_SOURCES) == 51
 
 
 def test_live_text_impl_happy_native_rows_and_truncates(monkeypatch, tmp_path):

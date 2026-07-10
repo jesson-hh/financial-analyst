@@ -264,10 +264,10 @@ def create_app():
     app.include_router(build_macro_router())
 
     # ── 板块资金流向(fundflow):GET /fundflow/live、/fundflow/history ──
-    # 纯展示层(2026-07-08 spec);盘中多线由 var/fundflow/<当日>.jsonl 自累快照重建
-    from guanlan_v2.fundflow import build_fundflow_router, start_fundflow_poller
+    # 纯展示层(2026-07-08 spec)。盘中多线由东财分钟线直出(fflow/kline klt=1,当日 240 点),
+    # 开盘即完整、进程重启不断线,故无 poller、无自累快照;两端点各带 SWR 缓存。
+    from guanlan_v2.fundflow import build_fundflow_router
     app.include_router(build_fundflow_router())
-    start_fundflow_poller()   # opt-in;GUANLAN_FUNDFLOW_POLL=1 才真起(非 24/7)
 
     # ── 数据健康总闸(datafeed):GET /data/health ──
     # 全仓数据新鲜度一处可见(2026-07-07 中台③;收编 T5 断供/停摆)

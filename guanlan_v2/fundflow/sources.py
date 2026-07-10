@@ -58,3 +58,57 @@ def fetch_market(live_fn=None) -> dict:
         return {"ok": False, "row": {},
                 "note": r.get("note") or "大盘资金源本次 0 行(源降级)"}
     return {"ok": True, "row": rows[0], "note": r.get("note") or ""}
+
+
+# ── 分钟线腿(当日 09:31→15:00 累计曲线,东财直出,无需自累快照)────────────────
+# 关键:板块线**一次 probe 批量拉**(逗号分隔多码)。每条线各起一个 probe 子进程的话,
+# 20 条线要 40-60s(子进程启动开销,非网络);批量后只 1 个子进程。
+# 上游每板块返回一行紧凑序列 {code, name, times[], main_net[]},故 limit 只需覆盖板块数。
+_MINUTE_LIMIT = 64
+
+
+def _minute_rows(r: dict) -> list:
+    rows = r.get("rows")
+    if rows is None:
+        from guanlan_v2.datafeed import live_client as lc
+        rows = lc.native_rows(r.get("items") or [])
+    return rows or []
+
+
+def fetch_sector_minute(board_codes, live_fn=None) -> dict:
+    """批量拉板块当日分钟累计线。board_codes = "BK1" 或 ["BK1","BK2"]。
+
+    返回 {ok, rows, note};rows = [{code, name, times:["09:31",…], main_net:[…], src_host}, …]
+    main_net 为从开盘累计,末值等于该板块今日主力净额(真机对拍)。
+    """
+    if live_fn is None:
+        live_fn = _client_live
+    if isinstance(board_codes, str):
+        codes = [c.strip().upper() for c in board_codes.split(",") if c.strip()]
+    else:
+        codes = [str(c).strip().upper() for c in (board_codes or []) if str(c).strip()]
+    bad = [c for c in codes if not c.startswith("BK")]
+    if not codes or bad:
+        return {"ok": False, "rows": [], "note": f"板块码非法: {bad or board_codes!r}(需 BKxxxx)"}
+    r = live_fn(source="eastmoney_sector_flow_minute", code=",".join(codes),
+                limit=max(_MINUTE_LIMIT, len(codes)))
+    rows = _minute_rows(r)
+    if not rows:
+        return {"ok": False, "rows": [],
+                "note": r.get("note") or "板块分钟线本次 0 行(非交易日/盘前)"}
+    return {"ok": True, "rows": rows, "note": r.get("note") or ""}
+
+
+def fetch_market_minute(live_fn=None) -> dict:
+    """拉全市场当日分钟累计线(沪深合计)。返回 {ok, row, note}。
+
+    row = {times:["09:31",…], main_net:[…], src_host}
+    """
+    if live_fn is None:
+        live_fn = _client_live
+    r = live_fn(source="eastmoney_market_flow_minute", code="", limit=4)
+    rows = _minute_rows(r)
+    if not rows or not isinstance(rows[0], dict) or not rows[0].get("times"):
+        return {"ok": False, "row": {},
+                "note": r.get("note") or "大盘分钟线本次 0 行(非交易日/盘前)"}
+    return {"ok": True, "row": rows[0], "note": r.get("note") or ""}
