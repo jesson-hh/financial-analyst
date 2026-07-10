@@ -77,6 +77,17 @@ class _FakeLoader:
                              "close": [v for _, v in _SER]})
 
 
+class _RecordingLoader:
+    """录下每次 fetch_quote 收到的 start 实参——钉死『取数起始日=每对 pick ts』。"""
+    def __init__(self):
+        self.calls = []
+
+    def fetch_quote(self, code, start, end, freq):
+        self.calls.append((str(code), str(start)))
+        return pd.DataFrame({"trade_date": [d for d, _ in _SER],
+                             "close": [v for _, v in _SER]})
+
+
 def _client() -> TestClient:
     app = FastAPI()
     app.include_router(seats_api.build_seats_router())
@@ -112,6 +123,10 @@ def test_basket_perf_default_behavior_unchanged(client):
 
 
 def test_basket_perf_rerank_ab_pairs(tmp_path, monkeypatch, client):
+    import financial_analyst.data.loader_factory as _lf
+    import guanlan_v2.strategy.compute.eqw_market as EQ
+    monkeypatch.setattr(_lf, "get_default_loader", lambda: _FakeLoader())
+    monkeypatch.setattr(EQ, "load_eqw_ret", lambda: _BENCH)
     from guanlan_v2.screen import picks as pk
     monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
     ts = "2026-07-01T18:00:00"
@@ -126,6 +141,31 @@ def test_basket_perf_rerank_ab_pairs(tmp_path, monkeypatch, client):
     pair = r["pairs"][0]
     assert pair["run_id"] == "rs_a" and set(pair["arms"]) == {"data", "rerank"}
     # 两臂各为 compute_basket_perf 结果;测试环境无行情时两臂 ok:false 也如实并列(不编数)
+
+
+def test_rerank_ab_uses_per_pair_start(tmp_path, monkeypatch, client):
+    """缺陷A 的精确反面:取数起始日=每对 pick ts;查询参数 start 被忽略(docstring 契约)。"""
+    import financial_analyst.data.loader_factory as _lf
+    import guanlan_v2.strategy.compute.eqw_market as EQ
+    from guanlan_v2.screen import picks as pk
+    rec = _RecordingLoader()
+    monkeypatch.setattr(_lf, "get_default_loader", lambda: rec)
+    monkeypatch.setattr(EQ, "load_eqw_ret", lambda: _BENCH)
+    monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
+    ts = "2026-06-01T18:00:00"                      # 早于 _SER 首根 06-02 → 首根即入场
+    for arm in ("data", "rerank"):
+        pk.append_pick({"kind": "rerank_ab", "arm": arm, "codes": ["SH600001"],
+                        "run_id": "rs_a", "ts": ts, "snapshot": False})
+    r = client.get("/seats/basket_perf",
+                   params={"kind": "rerank_ab", "limit": 5, "start": "2099-01-01"}).json()
+    assert r["ok"] and r["n"] == 1
+    pair = r["pairs"][0]
+    assert pair["start"] == "2026-06-01"                              # 载荷显形实际起始日
+    assert rec.calls and all(s == "2026-06-01" for _, s in rec.calls)  # 每次取数都用对内 ts,2099 被忽略
+    for arm in ("data", "rerank"):
+        a = pair["arms"][arm]
+        assert a["ok"] is True and a["per_code"][0]["entry_date"] == "2026-06-02"
+    assert pair["excess_diff"] == pytest.approx(0.0)                  # 两臂同码 → 恒等
 
 
 def test_default_path_validation_first(monkeypatch, client):

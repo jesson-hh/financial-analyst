@@ -34,6 +34,10 @@ def _reset(monkeypatch):
 def test_run_rescore_end_to_end_rows(monkeypatch, tmp_path):
     """run 主体:池→链分→情绪→综合→落档,行形完整。"""
     monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "runs.jsonl")
+    from guanlan_v2.screen import picks as pk
+    monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
+    monkeypatch.setattr(rs, "_run_rerank_bridge",
+                        lambda rows, market: {"ok": False, "reason": "stubbed"})
     monkeypatch.setattr(rs, "v4_pool", lambda n: [{"code": "SH1", "v4pct": 90.0},
                                                   {"code": "SH2", "v4pct": 80.0}])
     monkeypatch.setattr(rs, "industry_scores", lambda codes: (
@@ -52,6 +56,7 @@ def test_run_rescore_end_to_end_rows(monkeypatch, tmp_path):
     assert r2["chain"] is None and r2["news"] is None and r2["parts"] == 1
     assert end["stats"]["llm_calls"] == 1
     assert end["stats"]["board_freshness"]["quote_date"] == "2026-07-03"
+    assert end["rerank"]["ok"] is False           # 桩真被走到(防重构绕开 rerank 段后静默失覆盖)
     latest = rs.read_latest()
     assert latest["run_id"] == "rs_t1" and latest["note"] == "测试"
 

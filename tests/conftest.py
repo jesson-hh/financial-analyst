@@ -31,6 +31,16 @@ def _isolate_console_memory(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_screen_archives(tmp_path, monkeypatch):
+    """测试永不写真 var/ 选股档案(picks/rescore runs;2026-07-10 缺陷B同类事故护栏)。
+    各测试自己的显式 monkeypatch.setattr(pk/rs, ...) 在本 fixture 之后生效,优先级更高。"""
+    from guanlan_v2.screen import picks as pk
+    from guanlan_v2.screen import rescore as rs
+    monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "_isolated_screen" / "picks.jsonl")
+    monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "_isolated_screen" / "runs.jsonl")
+
+
+@pytest.fixture(autouse=True)
 def _clear_bg_inflight():
     """_bg_inflight 是模块级全局:断言失败/异常路径可能留残键,跨测试串扰 dedup/搭车判定 → 每测后清空。"""
     yield

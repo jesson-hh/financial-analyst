@@ -1080,9 +1080,13 @@ def rerank_perf_impl(limit: int = 5) -> Dict[str, Any]:
         rerank_arm = arms.get("rerank") or {}
         def _arm_s(a: Dict[str, Any]) -> str:
             if not a.get("ok"):
-                return f"失败({a.get('reason', '未成熟')})"
+                return f"失败({a.get('reason', '?')})"
             ex = a.get("excess")
-            return f"{float(ex):+.2%}" if isinstance(ex, (int, float)) else "未成熟"
+            s = f"{float(ex):+.2%}" if isinstance(ex, (int, float)) else "无excess(基准缺失)"
+            n, mn = a.get("n"), a.get("matured_n")
+            if isinstance(n, int) and isinstance(mn, int) and mn < n:
+                s += f"·未成熟{mn}/{n}"
+            return s
         diff = p.get("excess_diff")
         diff_s = f"{float(diff) * 100:+.1f}pp" if isinstance(diff, (int, float)) else "—"
         lines.append(f"{p.get('run_id')} · {ts} · data臂 {_arm_s(data_arm)} · "

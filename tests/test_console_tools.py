@@ -1803,11 +1803,12 @@ def test_rerank_perf_impl_renders_pairs(monkeypatch):
     import guanlan_v2.console.tools as ct
     fake = {"ok": True, "kind": "rerank_ab", "n": 1, "pairs": [
         {"run_id": "rs_a", "ts": "2026-07-01T18:00:00", "excess_diff": 0.021,
-         "arms": {"data": {"ok": True, "excess": -0.01},
-                  "rerank": {"ok": True, "excess": 0.011}}}]}
+         "arms": {"data": {"ok": True, "excess": -0.01, "n": 5, "matured_n": 0},
+                  "rerank": {"ok": True, "excess": 0.011, "n": 5, "matured_n": 0}}}]}
     monkeypatch.setattr(ct, "_rerank_perf_fetch", lambda limit: fake)   # 桥打桩
     r = ct.rerank_perf_impl(limit=5)
     assert r["ok"] and "rs_a" in r["content"] and "+2.1pp" in r["content"]
+    assert "未成熟0/5" in r["content"]                                   # 未成熟显形(防蒸馏未熟数字)
 
 
 def test_rerank_perf_impl_empty_honest(monkeypatch):

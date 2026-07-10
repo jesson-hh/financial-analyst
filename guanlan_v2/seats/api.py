@@ -2042,8 +2042,8 @@ def build_seats_router() -> APIRouter:
                 loader = _lf.get_default_loader()
                 end = str(_pd.Timestamp.now().date())
 
-                def _closes(c: str):
-                    df = loader.fetch_quote(c, str(start), end, "day")
+                def _closes(c: str, s: str):
+                    df = loader.fetch_quote(c, str(s), end, "day")
                     df = _drop_unsettled(df)           # 当日未结算占位行不当收盘
                     if df is None or len(df) == 0 or "close" not in df.columns:
                         return []
@@ -2066,6 +2066,8 @@ def build_seats_router() -> APIRouter:
                     if "data" not in arms or "rerank" not in arms:
                         continue                     # 半对(写一半失败)诚实跳过
                     start_d = str(arms["data"].get("ts") or "")[:10]
+                    if not start_d:
+                        continue                 # ts 缺失=空窗必空对,诚实跳过
                     out_arms = {}
                     for arm in ("data", "rerank"):
                         codes_a = [str(c) for c in (arms[arm].get("codes") or [])][:40]
@@ -2078,7 +2080,7 @@ def build_seats_router() -> APIRouter:
                                 except Exception:  # noqa: BLE001
                                     cc = (c or "").strip().upper()
                             try:
-                                closes[cc] = await asyncio.to_thread(_closes, cc)
+                                closes[cc] = await asyncio.to_thread(_closes, cc, start_d)
                             except Exception:  # noqa: BLE001
                                 closes[cc] = []
                         out_arms[arm] = compute_basket_perf(closes, start=start_d,
@@ -2090,7 +2092,7 @@ def build_seats_router() -> APIRouter:
                             if isinstance(ex_r, (int, float)) and isinstance(ex_d, (int, float))
                             else None)
                     pairs.append({"run_id": rid, "ts": arms["data"].get("ts"),
-                                  "arms": out_arms, "excess_diff": diff})
+                                  "start": start_d, "arms": out_arms, "excess_diff": diff})
                     if len(pairs) >= cap:
                         break
                 return JSONResponse({"ok": True, "kind": "rerank_ab",
