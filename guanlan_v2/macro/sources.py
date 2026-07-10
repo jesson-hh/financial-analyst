@@ -62,11 +62,23 @@ def fetch_polymarket(tags, limit=12, http=None):
             notes.append(f"polymarket tag={tag} 失败: {type(e).__name__}: {e}")
             continue
         for ev in events or []:
-            for m in (ev.get("markets") or [])[:3]:
+            # event.closed=False 不代表其子市场都活着:已过期会议/已结算问题的子市场
+            # closed=True、结算价 0/1,原市场页不展示——先剔死市场,再按各自 24h 量取前 3,
+            # 否则死市场既造幽灵 0% 行,又挤掉真正活跃的市场,还会污染锚定温度。
+            alive = [m for m in (ev.get("markets") or []) if not _truthy(m.get("closed"))]
+            alive.sort(key=lambda m: _f(m.get("volume24hr")), reverse=True)
+            for m in alive[:3]:
                 row = _pm_market_row(m, ev)
                 if row is not None:
                     rows.append(row)
     return rows, notes
+
+
+def _truthy(v):
+    """Gamma 的 closed 可能是 bool 或 "true"/"false" 字符串。"""
+    if isinstance(v, str):
+        return v.strip().lower() == "true"
+    return bool(v)
 
 
 def _pm_market_row(m, ev):
@@ -83,7 +95,9 @@ def _pm_market_row(m, ev):
         q = f"{q} → {outcomes[0]}"
     return {"source": "polymarket", "id": f"pm_{m.get('id')}", "question": q,
             "prob": round(_f(prices[0]), 4),
-            "volume": _f(m.get("volume24hr") or ev.get("volume24hr")),
+            # 只取 market 自身 24h 量:回落 event 总量会让同 event 各行显示同一个数字
+            # (伪造归属),并把无量的死市场顶到成交量榜首。
+            "volume": _f(m.get("volume24hr")),
             "close_time": (m.get("endDate") or "")[:10],
             "url": f"https://polymarket.com/event/{ev.get('slug', '')}"}
 
