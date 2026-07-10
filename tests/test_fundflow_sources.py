@@ -18,3 +18,23 @@ def test_fetch_sector_degrades_on_empty():
     from guanlan_v2.fundflow import sources
     out = sources.fetch_sector("industry", live_fn=_fake_live([]))
     assert out["ok"] is False and out["note"]
+
+
+def test_fetch_market_returns_single_row():
+    """大盘五档独立源:单行 {date, 五档, src_host}(单位:元)。"""
+    from guanlan_v2.fundflow import sources
+    row = {"date": "2026-07-10", "main_net": -3.9791e10, "super_net": -2.9097e10,
+           "large_net": -1.0694e10, "mid_net": 6.426e9, "small_net": 3.3366e10,
+           "src_host": "push2delay.eastmoney.com"}
+    out = sources.fetch_market(live_fn=_fake_live([row]))
+    assert out["ok"] is True
+    assert out["row"]["main_net"] == -3.9791e10
+    assert out["row"]["date"] == "2026-07-10"
+    assert out["row"]["src_host"] == "push2delay.eastmoney.com"
+
+
+def test_fetch_market_degrades_on_empty():
+    """源挂 → ok=False + 空 row + note;绝不由板块加总兜底给错数。"""
+    from guanlan_v2.fundflow import sources
+    out = sources.fetch_market(live_fn=_fake_live([]))
+    assert out["ok"] is False and out["row"] == {} and out["note"]

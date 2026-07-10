@@ -63,6 +63,7 @@ _STATIC_SOURCES: Dict[str, str] = {
     "eastmoney_industry_comparison": "industry_rank",
     "ths_eps_forecast": "eps_forecast",
     "eastmoney_sector_fund_flow": "sector_fund_flow",
+    "eastmoney_market_fund_flow": "market_fund_flow",   # 全市场五档(沪深合计),无参
     "iwencai_search": "iwencai",
     # 2026-07-09 补:与 stocks 47 源正典对齐(通达信实时套件/新浪期权·财报/个股信息/
     # 观澜合成源/问财结构化)。别名沿用 stocks alias 字段;arg 口径见下方三张分类表。

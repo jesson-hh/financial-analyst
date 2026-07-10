@@ -17,7 +17,25 @@ def _rows(*specs):
             for i, (n, m, su, la, mi, sm, c, u, d) in enumerate(specs)]
 
 
-def test_build_live_aggregates_market_and_breadth(tmp_path):
+_MARKET_ROW = {"date": "2026-07-10", "main_net": -3.9791e10, "super_net": -2.9097e10,
+               "large_net": -1.0694e10, "mid_net": 6.426e9, "small_net": 3.3366e10,
+               "src_host": "push2delay.eastmoney.com"}
+
+
+def _market_fn(row=None, ok=True):
+    def _fn():
+        if not ok:
+            return {"ok": False, "row": {}, "note": "大盘资金源不可达"}
+        return {"ok": True, "row": dict(row if row is not None else _MARKET_ROW), "note": ""}
+    return _fn
+
+
+def test_build_live_uses_independent_market_source(tmp_path):
+    """大盘五档必须来自独立源。
+
+    绝不可由板块加总——东财 t:2 混排一/二/三级行业,股票重复归属(真机 up+down=16545
+    >> A股约 5400;加总主力 +963.50亿 vs 独立源真值 -397.91亿,连符号都相反)。
+    """
     from guanlan_v2.fundflow import pulse
     concept = _rows(("算力概念", 9.45e9, 6e9, 3.45e9, -1e8, -4e9, 2.1, 30, 5),
                     ("存储芯片", -1.52e10, -9e9, -6.2e9, 1e8, 1.42e10, -3.4, 4, 40))
@@ -25,16 +43,19 @@ def test_build_live_aggregates_market_and_breadth(tmp_path):
                      ("银行", 2.66e8, 1e8, 1.66e8, 0.0, -2e8, 0.3, 20, 8))
     now = datetime(2026, 7, 8, 10, 57, 0)
     out = pulse.build_live("concept", refresh=True, snapshot_dir=str(tmp_path),
-                           sector_fn=_sector_fn(concept, industry), now=now)
+                           sector_fn=_sector_fn(concept, industry),
+                           market_fn=_market_fn(), now=now)
     assert out["ok"] and out["kind"] == "concept" and out["trading"] is True
-    # 大盘分解 = 行业档加总
-    assert round(out["market"]["main_net"]) == round(-1.34e10 + 2.66e8)
-    assert round(out["market"]["super_net"]) == round(-8e9 + 1e8)
-    # 全A 涨跌 = 行业档 up/down 加总;行业涨跌数=行业板块涨跌计数;概念涨跌数=概念板块计数
-    assert out["breadth"]["allA"] == {"up": 30, "down": 38}
+    # 大盘 = 独立源原样(加总会得 -1.34e10+2.66e8,截然不同)
+    assert out["market"]["main_net"] == -3.9791e10
+    assert out["market"]["super_net"] == -2.9097e10
+    assert out["market"]["src_host"] == "push2delay.eastmoney.com"
+    # 全A 涨跌:无独立源 → 诚实 None + note,绝不用板块加总冒充
+    assert out["breadth"]["allA"] == {"up": None, "down": None}
+    assert any("全A" in n for n in out["notes"])
+    # 板块级涨跌计数(计的是板块个数,不涉股票重叠)照常出数
     assert out["breadth"]["industry"] == {"up": 1, "down": 1}   # 银行涨、半导体跌
     assert out["breadth"]["concept"] == {"up": 1, "down": 1}    # 算力涨、存储跌
-    # boards = 当前档(concept),按 main_net 降序,带 rank
     assert out["boards"][0]["name"] == "算力概念" and out["boards"][0]["rank"] == 1
     # 落点:当日快照文件出现,含 concept + industry 两行
     snap = Path(tmp_path) / "20260708.jsonl"
@@ -43,13 +64,45 @@ def test_build_live_aggregates_market_and_breadth(tmp_path):
     assert kinds == {"concept", "industry"}
 
 
+def test_build_live_never_sums_overlapping_boards(tmp_path):
+    """回归护栏:板块 up/down_count 之和绝不出现在 breadth.allA(板块重叠→重复计数)。"""
+    from guanlan_v2.fundflow import pulse
+    # 行业档含重复板块(航天装备Ⅱ/Ⅲ 同值),加总会得 up=38
+    industry = _rows(("航天装备Ⅱ", 2.981e9, 2e9, 9.81e8, 0.0, -1e9, 10.36, 9, 0),
+                     ("航天装备Ⅲ", 2.981e9, 2e9, 9.81e8, 0.0, -1e9, 10.36, 9, 0),
+                     ("银行", 2.66e8, 1e8, 1.66e8, 0.0, -2e8, 0.3, 20, 8))
+    concept = _rows(("商业航天", 1.1086e10, 7e9, 4.086e9, -1e8, -2e9, 2.7, 40, 3))
+    out = pulse.build_live("industry", refresh=True, snapshot_dir=str(tmp_path),
+                           sector_fn=_sector_fn(concept, industry),
+                           market_fn=_market_fn(), now=datetime(2026, 7, 10, 10, 0, 0))
+    assert out["breadth"]["allA"]["up"] is None          # 绝不是 38
+    assert out["breadth"]["allA"]["down"] is None
+    assert out["market"]["main_net"] == -3.9791e10       # 绝不是板块加总
+    assert out["breadth"]["industry"] == {"up": 3, "down": 0}   # 板块个数计数照常
+
+
+def test_build_live_degrades_when_market_source_down(tmp_path):
+    """独立大盘源挂掉 → market 空 + note 显形,绝不回落到板块加总。"""
+    from guanlan_v2.fundflow import pulse
+    concept = _rows(("商业航天", 1.1086e10, 7e9, 4.086e9, -1e8, -2e9, 2.7, 40, 3))
+    industry = _rows(("银行", 2.66e8, 1e8, 1.66e8, 0.0, -2e8, 0.3, 20, 8))
+    out = pulse.build_live("concept", refresh=True, snapshot_dir=str(tmp_path),
+                           sector_fn=_sector_fn(concept, industry),
+                           market_fn=_market_fn(ok=False), now=datetime(2026, 7, 10, 10, 0, 0))
+    assert out["ok"] is True          # 板块还在,不整份作废
+    assert out["market"] == {}        # 不编造,不回落加总
+    assert any("大盘" in n for n in out["notes"])
+    assert out["boards"][0]["name"] == "商业航天"
+
+
 def test_build_live_no_sink_when_not_trading_and_not_refresh(tmp_path):
     from guanlan_v2.fundflow import pulse
     concept = _rows(("算力概念", 9.45e9, 6e9, 3.45e9, -1e8, -4e9, 2.1, 30, 5))
     industry = _rows(("银行", 2.66e8, 1e8, 1.66e8, 0.0, -2e8, 0.3, 20, 8))
     now = datetime(2026, 7, 8, 20, 0, 0)   # 收盘后
     out = pulse.build_live("concept", refresh=False, snapshot_dir=str(tmp_path),
-                           sector_fn=_sector_fn(concept, industry), now=now)
+                           sector_fn=_sector_fn(concept, industry),
+                           market_fn=_market_fn(), now=now)
     assert out["trading"] is False
     assert not (Path(tmp_path) / "20260708.jsonl").exists()   # 非交易且非 refresh 不落点
 
@@ -57,7 +110,8 @@ def test_build_live_no_sink_when_not_trading_and_not_refresh(tmp_path):
 def test_build_live_degrades_when_sector_empty(tmp_path):
     from guanlan_v2.fundflow import pulse
     out = pulse.build_live("concept", refresh=True, snapshot_dir=str(tmp_path),
-                           sector_fn=_sector_fn([], []), now=datetime(2026, 7, 8, 10, 0, 0))
+                           sector_fn=_sector_fn([], []), market_fn=_market_fn(),
+                           now=datetime(2026, 7, 8, 10, 0, 0))
     assert out["ok"] is False and out["notes"]
 
 
@@ -67,21 +121,26 @@ def test_build_live_delta_intraday_across_two_calls(tmp_path):
     concept1 = _rows(("算力概念", 5e9, 3e9, 2e9, 0, 0, 2.1, 30, 5))
     concept2 = _rows(("算力概念", 9.45e9, 6e9, 3.45e9, 0, 0, 2.1, 30, 5))
     out1 = pulse.build_live("concept", refresh=True, snapshot_dir=str(tmp_path),
-                            sector_fn=_sector_fn(concept1, industry), now=datetime(2026, 7, 8, 10, 0, 0))
+                            sector_fn=_sector_fn(concept1, industry), market_fn=_market_fn(),
+                            now=datetime(2026, 7, 8, 10, 0, 0))
     assert out1["boards"][0]["delta_intraday"] is None            # 首快照无基线
     out2 = pulse.build_live("concept", refresh=True, snapshot_dir=str(tmp_path),
-                            sector_fn=_sector_fn(concept2, industry), now=datetime(2026, 7, 8, 10, 6, 0))
+                            sector_fn=_sector_fn(concept2, industry), market_fn=_market_fn(),
+                            now=datetime(2026, 7, 8, 10, 6, 0))
     assert round(out2["boards"][0]["delta_intraday"]) == round(9.45e9 - 5e9)
 
 
 def test_build_live_other_tier_degrade_continues(tmp_path):
-    import json
-    from pathlib import Path
+    """另一档缺失只影响该档板块涨跌数;大盘来自独立源,照常出数。"""
     from guanlan_v2.fundflow import pulse
     concept = _rows(("算力概念", 9.45e9, 6e9, 3.45e9, -1e8, -4e9, 2.1, 30, 5))
     out = pulse.build_live("concept", refresh=True, snapshot_dir=str(tmp_path),
-                           sector_fn=_sector_fn(concept, []), now=datetime(2026, 7, 8, 10, 0, 0))
-    assert out["ok"] is True and out["market"] == {}
+                           sector_fn=_sector_fn(concept, []), market_fn=_market_fn(),
+                           now=datetime(2026, 7, 8, 10, 0, 0))
+    assert out["ok"] is True
+    assert out["market"]["main_net"] == -3.9791e10        # 独立源不受行业档缺失影响
+    assert out["breadth"]["industry"] == {"up": None, "down": None}   # 该档缺 → 诚实 None
+    assert out["breadth"]["concept"] == {"up": 1, "down": 0}
     assert out["breadth"]["allA"] == {"up": None, "down": None}
     assert out["breadth"]["industry"] == {"up": None, "down": None}
     assert out["breadth"]["concept"] == {"up": 1, "down": 0}

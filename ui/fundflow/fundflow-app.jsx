@@ -31,7 +31,20 @@ function MarketFlowBars({ m }) {
   return (
     <div style={{ background: "var(--paper-1)", border: "1px solid var(--line-2)", borderRadius: 6,
                   padding: "10px 14px", marginBottom: 12 }}>
-      <div style={{ fontSize: 12, color: "var(--ink-2)", marginBottom: 6 }}>大盘资金</div>
+      <div style={{ fontSize: 12, color: "var(--ink-2)", marginBottom: 6 }}>
+        大盘资金
+        {m && m.date && (
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--ink-3)", marginLeft: 8 }}>
+            {m.date} · 沪深合计</span>
+        )}
+        {m && m.src_host && String(m.src_host).indexOf("delay") >= 0 && (
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--jin)", marginLeft: 8 }}>
+            延时源</span>
+        )}
+        {(!m || m.main_net == null) && (
+          <span style={{ fontSize: 10, color: "var(--ink-3)", marginLeft: 8 }}>· 源不可用,不编造</span>
+        )}
+      </div>
       {items.map(([label, v]) => (
         <div key={label} style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 0" }}>
           <span style={{ width: 44, fontSize: 12, color: "var(--ink-2)" }}>{label}</span>

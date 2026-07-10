@@ -34,24 +34,18 @@ def _snapshot_path(snapshot_dir, dt: datetime) -> Path:
     return base / f"{dt.strftime('%Y%m%d')}.jsonl"
 
 
-def _market_from(rows: list) -> dict:
-    out = {"super_net": 0.0, "large_net": 0.0, "mid_net": 0.0, "small_net": 0.0}
-    for r in rows:
-        for k in out:
-            out[k] += float(r.get(k) or 0.0)
-    out["main_net"] = out["super_net"] + out["large_net"]
-    return out
-
-
 def _breadth_count(rows: list) -> dict:
+    """板块级涨跌计数(数的是板块个数,不涉股票重叠,故正确)。"""
     up = sum(1 for r in rows if float(r.get("change_pct") or 0) > 0)
     down = sum(1 for r in rows if float(r.get("change_pct") or 0) < 0)
     return {"up": up, "down": down}
 
 
-def _allA_from(industry_rows: list) -> dict:
-    return {"up": sum(int(r.get("up_count") or 0) for r in industry_rows),
-            "down": sum(int(r.get("down_count") or 0) for r in industry_rows)}
+# 全A 涨跌家数是**股票级**计数,无法由板块 up_count/down_count 加总得出——
+# 东财 t:2 混排一/二/三级行业(航天装备Ⅱ/Ⅲ 同值重复),股票重复归属,
+# 真机加总 up+down=16545 >> A股约 5400。乐咕 legu 源已失效,暂无独立源。
+# 按 spec §4.3 兜底C:诚实置 None + note,绝不用板块数冒充全A。挂账待接源。
+_ALLA_UNAVAILABLE_NOTE = "全A 涨跌家数暂无独立源(板块重叠不可加总,乐咕源失效),已挂账"
 
 
 def _first_snapshot_today(path: Path, kind: str) -> dict | None:
@@ -96,9 +90,16 @@ def _snap_boards(rows: list) -> list:
 
 
 def build_live(kind: str = "concept", refresh: bool = False, snapshot_dir=None,
-               sector_fn=None, now=None) -> dict:
+               sector_fn=None, market_fn=None, now=None) -> dict:
+    """当前档板块图/排行 + 大盘五档(独立源)+ 板块级涨跌数。
+
+    大盘五档一律取自独立源 fetch_market(沪深合计 fflow),源挂则 market={} + note,
+    绝不回落到「板块加总」——板块重叠会给出连符号都相反的错数(真机 +963.50亿 vs -397.91亿)。
+    """
     if sector_fn is None:
         sector_fn = sources.fetch_sector
+    if market_fn is None:
+        market_fn = sources.fetch_market
     k = "industry" if str(kind).lower().startswith("ind") else "concept"
     dt = now or datetime.now()
     trading = _is_trading(dt)
@@ -112,16 +113,33 @@ def build_live(kind: str = "concept", refresh: bool = False, snapshot_dir=None,
     other = sector_fn("industry" if k == "concept" else "concept")
     if not other.get("ok"):
         notes.append(f"{'industry' if k=='concept' else 'concept'} 档缺失,"
-                     f"大盘分解/全A涨跌降级:{other.get('note') or '空'}")
+                     f"该档板块涨跌数降级:{other.get('note') or '空'}")
     concept_rows = cur["rows"] if k == "concept" else other["rows"]
     industry_rows = other["rows"] if k == "concept" else cur["rows"]
 
-    market = _market_from(industry_rows) if industry_rows else {}
+    # 大盘五档:独立源。失败 → 空 + note,绝不加总冒充。
+    mk = market_fn()
+    if mk.get("ok"):
+        market = dict(mk.get("row") or {})
+    else:
+        market = {}
+        notes.append(f"大盘资金五档不可用:{mk.get('note') or '空'}")
+
+    notes.append(_ALLA_UNAVAILABLE_NOTE)
     breadth = {
-        "allA": _allA_from(industry_rows) if industry_rows else {"up": None, "down": None},
+        "allA": {"up": None, "down": None},          # 股票级计数,板块不可加总(见模块注释)
         "industry": _breadth_count(industry_rows) if industry_rows else {"up": None, "down": None},
         "concept": _breadth_count(concept_rows) if concept_rows else {"up": None, "down": None},
     }
+
+    # 数据源标注:板块行带 src_host(push2 被掐时为 push2delay=延时行情)
+    src_host = ""
+    for _r in (cur.get("rows") or []):
+        if _r.get("src_host"):
+            src_host = str(_r["src_host"])
+            break
+    if "delay" in src_host:
+        notes.append("板块资金流走延时源 push2delay(push2 主节点被掐),盘中可能有延时")
 
     path = _snapshot_path(snapshot_dir, dt)
     first = _first_snapshot_today(path, k)
@@ -129,7 +147,7 @@ def build_live(kind: str = "concept", refresh: bool = False, snapshot_dir=None,
 
     payload = {"ok": True, "kind": k, "pulled_at": dt.strftime("%Y-%m-%dT%H:%M:%S"),
                "trading": trading, "market": market, "breadth": breadth,
-               "boards": boards, "notes": notes}
+               "boards": boards, "src_host": src_host, "notes": notes}
 
     # 落点:真拉到且(交易时段 或 显式 refresh);concept+industry 各落一行
     if trading or refresh:
