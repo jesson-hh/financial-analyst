@@ -19,21 +19,29 @@ themes:
     label: 地缘政治
     polymarket_tags: [geopolitics]
     kalshi_series: []
+    # 措辞按 2026-07 真机核过:geopolitics 池(81 市场)只有 "U.S. invade Iran" 一条
+    # 带明确风险语义;military clash 实际挂在 china 标签下。nuclear weapon 留作未来
+    # 出现即命中(未命中的锚点不计权;全不命中会在 notes 告警,不静默变 —)。
     anchors:
-      - {match: "military clash", direction: -1, weight: 1.0}
-      - {match: "nuclear", direction: -1, weight: 1.0}
+      - {match: "invade", direction: -1, weight: 1.5}
+      - {match: "nuclear weapon", direction: -1, weight: 1.0}
   - id: china
     label: 中美 · 中国
     polymarket_tags: [china]
     kalshi_series: []
     anchors:
       - {match: "china x taiwan", direction: -1, weight: 1.5}
-      - {match: "tariff", direction: -1, weight: 1.0}
+      # 真机纠错:池中该市场是 "US x China tariff agreement by July 31?"——达成关税
+      # 协议是利好,概率升 = risk-on。裸 "tariff" + direction:-1 把语义标反了。
+      - {match: "tariff agreement", direction: 1, weight: 1.0}
   - id: crypto_risk
     label: 加密 · 风险偏好
     polymarket_tags: [crypto]
     kalshi_series: []
-    anchors: []   # 展示为主,方向语义混杂不硬标
+    # BTC 各价位阈值市场方向语义混杂(阈值不同,概率不可比),不锚;唯 "Up or Down"
+    # 当日涨跌市场方向干净:Up 概率升 = risk-on。
+    anchors:
+      - {match: "bitcoin up or down", direction: 1, weight: 1.0}
 astock:
   # 打板温度 = clamp(base + k_zt*涨停数 + k_streak*最高连板 - k_break*炸板率(0-1), 0, 100)
   base: 30.0
@@ -41,3 +49,12 @@ astock:
   k_streak: 3.0
   k_break: 30.0
 display_top_n: 8
+
+# 锚定市场流动性门槛(按源分设:PM 的 volume24hr 与 Kalshi 的 liquidity_dollars
+# 语义不同、量纲不可比,统一门槛会把 Kalshi 锚点全数误杀)。
+# 2026-07 真机:真锚定市场 24h 量在 2.5万~15万;而 "US x China tariff agreement"
+# 仅 $979、"Japan recession in 2026?" 仅 $11——这种成交额的概率无信息量,不配定温度。
+# 全部锚点被门槛拒时 notes 会告警(与「措辞不匹配」区分)。
+anchor_min_volume:
+  polymarket: 5000
+  kalshi: 0

@@ -26,24 +26,47 @@ def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S")
 
 
-def _theme_temp(markets, anchors):
-    """锚定温度;返回 (temp|None, hits)。markets 须已按 volume 降序,每锚吃首个命中。"""
-    tot_w, acc, hits = 0.0, 0.0, 0
+def _theme_temp(markets, anchors, min_volume=None):
+    """锚定温度;返回 (temp|None, hits, hit_ids)。markets 须已按 volume 降序,每锚吃首个命中。
+
+    hit_ids 供展示层把合成温度的市场提进列表——否则温度由页面上看不见的市场算出,
+    读者无从核对(诚实红线:凡显形的数字,其依据必须可见)。
+
+    min_volume 按源分别设门槛(如 {"polymarket": 5000, "kalshi": 0}):预测市场的概率
+    只在有人真金白银下注时才有信息量,$11 成交额的市场不配决定一个主题的温度。
+    按源分别配置是因为两家的 volume 字段语义不同(PM=volume24hr,Kalshi=liquidity_dollars),
+    量纲不可比,统一门槛会把 Kalshi 锚点全数误杀。
+    """
+    floors = min_volume or {}
+    tot_w, acc, hit_ids = 0.0, 0.0, []
     for a in anchors or []:
         needle = str(a.get("match", "")).lower()
         if not needle:
             continue
         for m in markets:
-            if needle in m["question"].lower() or needle in m["id"].lower():
-                w = float(a.get("weight", 1.0))
-                d = int(a.get("direction", 0))
-                acc += w * d * (m["prob"] - 0.5)
-                tot_w += w
-                hits += 1
-                break
+            if needle not in m["question"].lower() and needle not in m["id"].lower():
+                continue
+            if (m.get("volume") or 0) < float(floors.get(m.get("source"), 0)):
+                continue  # 流动性不足,继续找同锚的下一个命中
+            w = float(a.get("weight", 1.0))
+            d = int(a.get("direction", 0))
+            acc += w * d * (m["prob"] - 0.5)
+            tot_w += w
+            hit_ids.append(m["id"])
+            break
     if tot_w <= 0:
-        return None, 0
-    return round(max(0.0, min(100.0, 50.0 + 50.0 * acc / tot_w)), 1), hits
+        return None, 0, []
+    return round(max(0.0, min(100.0, 50.0 + 50.0 * acc / tot_w)), 1), len(hit_ids), hit_ids
+
+
+def _anchor_matched_ignoring_volume(markets, anchors) -> bool:
+    """是否有锚点在忽略流动性门槛时能命中(用于区分「措辞不匹配」与「流动性不足」)。"""
+    for a in anchors or []:
+        needle = str(a.get("match", "")).lower()
+        if needle and any(needle in m["question"].lower() or needle in m["id"].lower()
+                          for m in markets):
+            return True
+    return False
 
 
 def _read_snapshots(path: Path):
@@ -129,18 +152,36 @@ def build_pulse(refresh: bool = False, snapshot_path=None, astock_fn=None, http=
 
     # ── 现拉 ──
     top_n = int(cfg.get("display_top_n") or 8)
+    vol_floors = cfg.get("anchor_min_volume") or {}
     notes, themes_out, all_markets, temps = [], [], [], {}
     for t in cfg.get("themes") or []:
         pm_rows, pm_notes = sources.fetch_polymarket(t.get("polymarket_tags") or [], http=http)
         k_rows, k_notes = sources.fetch_kalshi(t.get("kalshi_series") or [], http=http)
         notes.extend(pm_notes + k_notes)
         rows = sorted(pm_rows + k_rows, key=lambda m: m.get("volume") or 0, reverse=True)
-        temp, hits = _theme_temp(rows, t.get("anchors"))
+        anchors = t.get("anchors") or []
+        temp, hits, hit_ids = _theme_temp(rows, anchors, min_volume=vol_floors)
         temps[t["id"]] = temp
+        # 声明了锚点却一个没命中:静默显示 "—" 会把「配置写错」或「市场没人交易」
+        # 伪装成「无数据」。两种病因排查方向不同,告警必须区分。
+        if anchors and hits == 0:
+            if _anchor_matched_ignoring_volume(rows, anchors):
+                notes.append(f"主题 {t['id']} 的锚定市场全部因流动性不足被拒"
+                             f"(门槛 {vol_floors}),温度显示 —;这些市场概率无信息量")
+            else:
+                notes.append(f"主题 {t['id']} 声明了 {len(anchors)} 个锚定市场但当前一个都没命中"
+                             f"(池中 {len(rows)} 个市场),温度显示 —;请核对 themes.yaml 的 match 措辞")
+        # 展示 = 量前 top_n ∪ 锚定命中市场(后者常是低量尾部市场,但温度由它们合成,
+        # 必须可见可核);顺序仍按量降序,锚定行带 is_anchor 徽章。
+        hit_set = set(hit_ids)
+        picked = [m for m in rows[:top_n]]
+        picked += [m for m in rows if m["id"] in hit_set and m not in picked]
+        picked.sort(key=lambda m: m.get("volume") or 0, reverse=True)
         shown = []
-        for m in rows[:top_n]:
+        for m in picked:
             row = dict(m)
             row["theme"] = t["id"]
+            row["is_anchor"] = m["id"] in hit_set
             row["delta24h"] = _delta24h(m["id"], m["prob"], snapshots, now)
             shown.append(row)
             all_markets.append(row)

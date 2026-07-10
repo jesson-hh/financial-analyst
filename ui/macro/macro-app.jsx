@@ -77,6 +77,11 @@ function MarketRow({ m }) {
                        borderRadius: 3, color: "var(--text-on-ink)",
                        background: m.source === "polymarket" ? "var(--qing)" : "var(--dai)" }}>
           {m.source === "polymarket" ? "PM" : "K"}</span>
+        {m.is_anchor ? (
+          <span title="该市场参与本主题温度合成"
+                style={{ fontFamily: "var(--font-mono)", fontSize: 9, fontWeight: 700, padding: "1px 5px",
+                         borderRadius: 3, color: "var(--zhu)", border: "1px solid var(--zhu)" }}>锚</span>
+        ) : null}
         <span style={{ flex: 1, fontSize: 12, color: "var(--ink-1)", overflow: "hidden",
                        textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={m.question}>
           {m.question_zh || m.question}

@@ -38,7 +38,7 @@ def _mk(question, prob, mid="x"):
     ([_mk("whatever", 0.5)], [{"match": "no-hit", "direction": 1, "weight": 1}], None, 0),
 ])
 def test_theme_temp_arithmetic(markets, anchors, want_temp, want_hits):
-    temp, hits = mp._theme_temp(markets, anchors)
+    temp, hits, _ids = mp._theme_temp(markets, anchors)
     assert hits == want_hits
     if want_temp is None:
         assert temp is None
@@ -47,7 +47,7 @@ def test_theme_temp_arithmetic(markets, anchors, want_temp, want_hits):
 
 
 def test_theme_temp_single_hit_in_bounds():
-    temp, hits = mp._theme_temp(
+    temp, hits, _ids = mp._theme_temp(
         [_mk("doom", 1.0)],
         [{"match": "doom", "direction": -1, "weight": 1.0}])
     assert hits == 1 and temp == 25.0  # 50+50*(-0.5),单锚极值仍在 [0,100]

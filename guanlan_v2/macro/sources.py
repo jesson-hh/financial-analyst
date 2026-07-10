@@ -24,6 +24,9 @@ def load_themes() -> dict:
         return yaml.safe_load(f)
 
 
+_PER_EVENT_CAP = 25   # 单 event 子市场入池上限(防极端 event 撑爆翻译批量/快照)
+
+
 def _http():
     import requests
     return requests
@@ -63,11 +66,16 @@ def fetch_polymarket(tags, limit=12, http=None):
             continue
         for ev in events or []:
             # event.closed=False 不代表其子市场都活着:已过期会议/已结算问题的子市场
-            # closed=True、结算价 0/1,原市场页不展示——先剔死市场,再按各自 24h 量取前 3,
-            # 否则死市场既造幽灵 0% 行,又挤掉真正活跃的市场,还会污染锚定温度。
+            # closed=True、结算价 0/1,原市场页不展示——剔掉,否则既造幽灵 0% 行,
+            # 又(因无自身量而借 event 总量)顶到量榜首污染锚定温度。
+            #
+            # 全部活跃市场都入池:锚定市场常是低成交量的尾部市场(如 geopolitics 的
+            # military clash),按量截前几名会让它们永不进池 → 主题温度恒 "—"。
+            # 展示层另按 display_top_n 切片,池全量 ≠ 页面全列。_PER_EVENT_CAP 仅防
+            # 极端 event(数十子市场)撑爆翻译批量与快照体积。
             alive = [m for m in (ev.get("markets") or []) if not _truthy(m.get("closed"))]
             alive.sort(key=lambda m: _f(m.get("volume24hr")), reverse=True)
-            for m in alive[:3]:
+            for m in alive[:_PER_EVENT_CAP]:
                 row = _pm_market_row(m, ev)
                 if row is not None:
                     rows.append(row)
