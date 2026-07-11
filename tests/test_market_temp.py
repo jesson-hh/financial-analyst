@@ -59,7 +59,10 @@ def _boom(*a, **k):
 
 
 def _patch_all_ok(monkeypatch):
-    """四源全打桩为健康值(全部走缓存/快照语义,零网络)。"""
+    """四源全打桩为健康值(全部走缓存/快照语义,零网络)。
+
+    flow 块先探缓存再 read_live:_load_live_cache 桩为真(缓存在),
+    _trigger_live_refresh 桩死(护栏:测试进程绝不 spawn 真拉线程)。"""
     snap = {"ts": "2026-07-11T18:38:35",
             "temps": {"fed": 48.2, "china": None, "crypto_risk": 57.8},
             "astock_temp": 62.3}
@@ -69,6 +72,8 @@ def _patch_all_ok(monkeypatch):
         "derived": {"zt_count": 47, "zb_count": 12, "break_rate": 0.2034,
                     "promotion_rate": 0.31},
         "freshness": {"overall_age_s": 120}})
+    monkeypatch.setattr(ff_pulse, "_load_live_cache", lambda kind, cache_dir=None: {"ok": True})
+    monkeypatch.setattr(ff_pulse, "_trigger_live_refresh", lambda *a, **k: False)
     monkeypatch.setattr(ff_pulse, "read_live", lambda kind: {
         "market": {"main_net": -39791411200.0, "super_net": -29097578496.0},
         "pulled_at": "2026-07-11T14:22:30"})
@@ -117,8 +122,9 @@ def test_flow_failure_gate_follows_temp(monkeypatch):
 
 def test_all_blocks_down_gate_none(monkeypatch):
     # 四源全挂 → 全 None + gate None(护盾休眠),函数绝不抛
+    # flow 块首个触点是 _load_live_cache(探缓存),在它上炸即覆盖整块
     for mod, name in ((macro_pulse, "_read_snapshots"), (market_tape, "read_tape"),
-                      (ff_pulse, "read_live"), (dfs, "latest_market")):
+                      (ff_pulse, "_load_live_cache"), (dfs, "latest_market")):
         monkeypatch.setattr(mod, name, _boom)
     out = build_market_temp()
     assert out["global"] is None and out["board"] is None
@@ -131,6 +137,8 @@ def test_empty_sources_honest_none(monkeypatch):
     # 空值(非异常)同样诚实 None:无快照 / tape 预热中 / market 空 / 今日无判读
     monkeypatch.setattr(macro_pulse, "_read_snapshots", lambda p: [])
     monkeypatch.setattr(market_tape, "read_tape", lambda: {"warming": True})
+    monkeypatch.setattr(ff_pulse, "_load_live_cache", lambda kind, cache_dir=None: {"ok": True})
+    monkeypatch.setattr(ff_pulse, "_trigger_live_refresh", lambda *a, **k: False)
     monkeypatch.setattr(ff_pulse, "read_live", lambda kind: {"market": {}, "pulled_at": "x"})
     monkeypatch.setattr(dfs, "latest_market", lambda: {
         "market_read": None, "market_tilt": None, "as_of": None, "ts": None})
@@ -138,6 +146,24 @@ def test_empty_sources_honest_none(monkeypatch):
     assert out["global"] is None and out["board"] is None
     assert out["flow"] is None and out["llm"] is None
     assert out["gate"] is None
+
+
+def test_flow_no_cache_never_blocks(monkeypatch):
+    # 无缓存(新部署/var 被清)→ 绝不走 read_live(其冷启动=同步阻塞真拉,最坏 ~270s):
+    # 触发后台单飞预热 + 本次诚实 None。read_live 桩死为炸——被调即证阻塞路径泄漏。
+    _patch_all_ok(monkeypatch)
+    triggered: list = []
+    monkeypatch.setattr(ff_pulse, "_load_live_cache", lambda kind, cache_dir=None: None)
+    monkeypatch.setattr(ff_pulse, "_trigger_live_refresh",
+                        lambda kind, *a, **k: triggered.append(kind) or True)
+    monkeypatch.setattr(ff_pulse, "read_live", _boom)
+    out = build_market_temp()
+    assert out["flow"] is None
+    assert triggered == ["industry"]                       # 预热已触发(后台单飞,非本请求)
+    assert any("无缓存" in n and "预热" in n for n in out["notes"])
+    assert not any("flow 块异常" in n for n in out["notes"])   # read_live 从未被触到
+    # 其余块不受影响,gate 按余下信号走(astock_temp 62.3 → neutral)
+    assert out["board"] is not None and out["gate"]["level"] == "neutral"
 
 
 # ── converge(market_temp=…) · 护盾 v4.4 ────────────────────────────────────

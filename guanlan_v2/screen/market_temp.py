@@ -6,7 +6,8 @@
             **绝不调 build_pulse**:它在快照过期时会现拉 Polymarket/Kalshi(网络阻塞),
             这里只读已落盘快照,过期用 stale_min 诚实显形。
   board  —— 打板生态(datafeed.market_tape.read_tape,SWR 秒回缓存,绝不阻塞网络)。
-  flow   —— 大盘资金五档(fundflow.pulse.read_live,SWR 缓存;fetch_market row 的
+  flow   —— 大盘资金五档(**只读 fundflow live 缓存**:read_live 的冷启动语义=同步阻塞
+            真拉,这里先探缓存、缺缓存走后台预热,详见 flow 块注释;fetch_market row 的
             main_net 单位=元,换算成亿命名 main_net_yi)。
   llm    —— LLM 大盘判读(datafeed.sentiment.latest_market,纯文件读零 LLM)。
 
@@ -106,18 +107,26 @@ def build_market_temp(now: Optional[datetime] = None) -> Dict[str, Any]:
         b = None
         notes.append(f"board 块异常: {type(e).__name__}: {e}")
 
-    # ── flow:大盘资金五档(read_live SWR 缓存;main_net 元→亿)──
+    # ── flow:大盘资金五档(**只读缓存**;main_net 元→亿)──
+    # read_live 的冷启动语义=同步阻塞真拉(build_live=industry+concept+market 3 个 probe
+    # 子进程,live_client 超时 90s/个 → 单次最坏 ~270s),且拉失败不落缓存 → 新部署/var 被清
+    # +源拒连时每次 /screen/run 都重复阻塞。故这里先探缓存:有 → read_live 秒回(过期由其
+    # 内部后台单飞刷新);无 → 触发后台单飞预热 + 本次诚实 None,read_tape warming 同款范式。
     f: Optional[Dict[str, Any]] = None
     try:
-        from guanlan_v2.fundflow.pulse import read_live
-        d = read_live("industry")
-        market = d.get("market") or {}
-        if market:
-            mn = _num(market.get("main_net"))    # fetch_market row 单位=元
-            f = {"main_net_yi": round(mn / 1e8, 2) if mn is not None else None,
-                 "pulled_at": d.get("pulled_at")}
+        from guanlan_v2.fundflow import pulse as ff_pulse
+        if ff_pulse._load_live_cache("industry") is None:
+            ff_pulse._trigger_live_refresh("industry")   # 后台预热(单飞,失败绝不冒泡)
+            notes.append("flow:大盘资金无缓存(后台预热已触发,本次无数据)")
         else:
-            notes.append("flow:大盘资金五档缺失(源降级/无缓存)")
+            d = ff_pulse.read_live("industry")
+            market = d.get("market") or {}
+            if market:
+                mn = _num(market.get("main_net"))    # fetch_market row 单位=元
+                f = {"main_net_yi": round(mn / 1e8, 2) if mn is not None else None,
+                     "pulled_at": d.get("pulled_at")}
+            else:
+                notes.append("flow:大盘资金五档缺失(源降级)")
     except Exception as e:  # noqa: BLE001
         f = None
         notes.append(f"flow 块异常: {type(e).__name__}: {e}")
