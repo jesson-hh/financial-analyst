@@ -546,6 +546,40 @@ def _run_model_train_subprocess(spec: Dict[str, Any]) -> None:
                 "phase": "done", "step": 3})
 
 
+def _run_model_retrain_subprocess(vid: str) -> None:
+    """手动重训子进程:python -m guanlan_v2.strategy.compute.model_workflow --retrain <vid>
+    (内部 retrain_variant:清死 end→数据滚动到最新交易日,覆盖同 vid;股池仍 recipe.universe 快照)。
+    镜像 _run_model_train_subprocess:PYTHONIOENCODING=utf-8、逐行进 lines、退码判 ok、finally 必清
+    running。retrain_variant 自身对不存在/不可重训 kind 诚实返回 {ok:False}→子进程非零退出→state.ok=False
+    (绝不冒充成功)。"""
+    import os, sys as _sys, time as _t, subprocess
+    from pathlib import Path as _P
+    rc, err = None, None
+    try:
+        repo = _P(__file__).resolve().parents[2]
+        cmd = [_sys.executable, "-m", "guanlan_v2.strategy.compute.model_workflow", "--retrain", str(vid)]
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        proc = subprocess.Popen(cmd, cwd=str(repo), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, encoding="utf-8", errors="replace", bufsize=1, env=env)
+        for raw in proc.stdout:
+            line = raw.rstrip("\r\n")
+            if not line:
+                continue
+            with _MODEL_LOCK:
+                _MODEL_STATE["lines"].append(line)
+                if "[model_retrain]" in line:
+                    _MODEL_STATE["phase"], _MODEL_STATE["label"], _MODEL_STATE["step"] = (
+                        "train", "重训中(数据滚动到最新)", 2)
+        proc.wait(); rc = proc.returncode
+    except Exception as e:  # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+    finally:
+        with _MODEL_LOCK:
+            _MODEL_STATE.update({"running": False, "ended_at": _t.time(),
+                "ok": (rc == 0 and not err), "error": err or (None if rc == 0 else f"exit {rc}"),
+                "phase": "done", "step": 3})
+
+
 # ───────────────────────────────────────────────────────────────────────────
 # 异步 CPCV 验证 —— UI 发起 quick(内联,秒级)或 strict(子进程,分钟级)验证。
 # 镜像 model-train 机器:单飞锁 + 可轮询进度 + 子进程隔离;finally 必清 running。
@@ -1744,6 +1778,30 @@ def build_screen_router() -> APIRouter:
                 "universe": str(body.get("universe") or "all"), "created": _time_iso()}
         _threading.Thread(target=lambda: _safe(lambda: _run_model_train_subprocess(spec)), daemon=True).start()
         return JSONResponse({"ok": True, "started": True, "variant_id": vid, "state": _model_public_state()})
+
+    @router.post("/model/retrain")
+    def screen_model_retrain(body: dict = Body(default={})):
+        """手动重训一个已存在变体(D:「其余给手动重训按钮」):校验 id 非空 → 单飞抢锁(与工坊训练
+        共用 _MODEL_LOCK,已在训/重训则拒)→ 起子进程跑 model_workflow --retrain <id>,立即返回(异步);
+        轮询 GET /screen/model/status 见进度。空 id 优先于运行锁拒绝(各自原因)。诚实口径:股池仍是变体
+        recipe.universe 快照,仅数据滚动到最新交易日(新上市股不纳入),绝不冒充股池也更新;不存在/不可
+        重训的变体由 retrain_variant 诚实拒→子进程非零退出→status.ok=False。"""
+        import time as _t
+        vid = str(body.get("id") or "").strip()
+        if not vid:
+            return JSONResponse({"ok": False, "reason": "缺少变体 id"})
+        with _MODEL_LOCK:
+            already = _MODEL_STATE["running"]
+            if not already:
+                _MODEL_STATE.update({"running": True, "phase": "starting", "label": "启动重训子进程…",
+                    "step": 0, "started_at": _t.time(), "ended_at": None, "ok": None, "error": None,
+                    "variant_id": vid, "lines": []})
+        if already:
+            return JSONResponse({"ok": False, "reason": "已有训练/重训在跑", "state": _model_public_state()})
+        _threading.Thread(target=lambda: _safe(lambda: _run_model_retrain_subprocess(vid)), daemon=True).start()
+        return JSONResponse({"ok": True, "started": True, "variant_id": vid,
+            "universe_note": "股池为变体 recipe.universe 快照,仅数据滚动到最新(新上市股不纳入)",
+            "state": _model_public_state()})
 
     @router.post("/model/delete")
     def screen_model_delete(body: dict = Body(default={})):

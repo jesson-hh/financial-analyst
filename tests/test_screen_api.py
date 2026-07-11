@@ -241,6 +241,50 @@ def test_model_train_second_concurrent_returns_busy(monkeypatch):
     api._MODEL_STATE["running"] = False
 
 
+def test_model_retrain_endpoint(monkeypatch):
+    """手动重训端点(D:「其余给手动重训按钮」):①空 id 拒(优先于运行锁,不抢锁)
+    ②合法 id 抢锁起线程返 started+诚实 universe_note ③已在跑时 busy 拒。桩掉子进程 runner
+    (no-op,不真训 5min);no-op 不清 running,故第2次命中 busy-guard,收尾手动复位防跨测污染。"""
+    import guanlan_v2.screen.api as api
+    monkeypatch.setattr(api, "_run_model_retrain_subprocess", lambda vid: None)
+    api._MODEL_STATE["running"] = False   # 干净起点(防上测污染)
+    c = _client()
+
+    # ① 空 id → 拒(优先于运行锁;此刻未 running,不应抢锁)
+    j0 = c.post("/screen/model/retrain", json={"id": "  "}).json()
+    assert j0["ok"] is False and "id" in j0.get("reason", "")
+    assert api._MODEL_STATE["running"] is False   # 空 id 绝不抢锁
+
+    # ② 合法 id → 抢锁起线程返 started + 诚实股池快照标注
+    j1 = c.post("/screen/model/retrain", json={"id": "m_seed"}).json()
+    assert j1["ok"] is True and j1["started"] is True and j1["variant_id"] == "m_seed"
+    assert "快照" in j1.get("universe_note", "")   # 诚实:仅数据滚动,股池不滚动
+
+    # ③ 已在跑(runner 桩为 no-op,running 保持 True)→ busy 拒
+    j2 = c.post("/screen/model/retrain", json={"id": "m_other"}).json()
+    assert j2["ok"] is False and "已有训练/重训在跑" in j2.get("reason", "")
+    assert "state" in j2
+
+    api._MODEL_STATE["running"] = False   # 收尾复位防跨测污染
+
+
+def test_model_retrain_cli_rejects_missing_variant():
+    """--retrain <vid> CLI 分支端到端:不存在的变体 → retrain_variant 诚实 {ok:False}
+    → 子进程非零退出(绝不冒充成功)。证 __main__ 重训分支与命令串真通(不真训,秒回)。"""
+    import subprocess, sys, os
+    from pathlib import Path
+    import guanlan_v2
+    repo = Path(guanlan_v2.__file__).resolve().parents[1]
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    r = subprocess.run(
+        [sys.executable, "-m", "guanlan_v2.strategy.compute.model_workflow",
+         "--retrain", "__no_such_variant__"],
+        cwd=str(repo), env=env, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=120)
+    assert r.returncode != 0, f"不存在变体应非零退出: rc={r.returncode} out={r.stdout}"
+    assert "ok=False" in r.stdout   # 诚实拒(而非静默成功)
+
+
 def test_resolve_model_id_default_pointer(tmp_path, monkeypatch):
     from guanlan_v2.screen import api as sapi, model_registry as reg
     monkeypatch.setattr(reg, "MODELS_DIR", tmp_path / "models")

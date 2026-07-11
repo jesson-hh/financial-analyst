@@ -201,8 +201,15 @@ def _holdout_oos_ic(kind, params, fe_df, label_s, fwd_days=5, frac=0.2):
         return None
 
 
-if __name__ == "__main__":   # python -m guanlan_v2.strategy.compute.model_workflow <spec.json>
+if __name__ == "__main__":   # spec 模式:<spec.json> 训新变体;重训模式:--retrain <vid> 覆盖旧变体
     import json, sys
+    if len(sys.argv) >= 3 and sys.argv[1] == "--retrain":   # 手动/日跑重训子进程入口(api.py 调)
+        vid = sys.argv[2]
+        print(f"[model_retrain] variant={vid} ...", flush=True)
+        r = retrain_variant(vid)
+        print(f"[model_retrain] done ok={r.get('ok')} asof={r.get('date')} "
+              f"oos_ic={r.get('oos_ic')} reason={r.get('reason')}", flush=True)
+        sys.exit(0 if r.get("ok") else 1)     # 失败非零退出码(供父进程状态机判 ok)
     spec = json.loads(open(sys.argv[1], encoding="utf-8").read())
     print(f"[model_promote] variant={spec['variant_id']} kind={spec.get('kind')} ...", flush=True)
     r = train_promote(spec)
