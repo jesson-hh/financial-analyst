@@ -328,6 +328,15 @@ function XuanguApp() {
   useEffect(() => { document.body.classList.toggle('dark', dark); }, [dark]);
   // 口径守卫:切模型即清再打分/重排 overlay(旧 overlay 基于旧榜口径,绝不串贴到新榜)
   useEffect(() => { setRsMap(null); setRkMap(null); }, [cfg.model]);
+  // blend<1 时后端行 score=纯 v4 分、pct=混合后综合分位 → 默认排序键切 pct,
+  // 序号与「综合分位」列一致;回到 blend=1 恢复 score。只动默认键,不覆盖用户点其他列的选择。
+  useEffect(() => {
+    setSort(s => {
+      if (cfg.blend < 0.999 && s.k === 'score') return { k: 'pct', d: -1 };
+      if (cfg.blend >= 0.999 && s.k === 'pct') return { k: 'score', d: -1 };
+      return s;
+    });
+  }, [cfg.blend]);
 
   // 从工作流 / 图谱带因子进来(P1⑨:旧版只认 4 个 demo 名,真因子被静默丢弃 → 改全目录解析)
   useEffect(() => {
@@ -408,7 +417,13 @@ function XuanguApp() {
   const reloadModels = () => {
     if (!API || !window.xgModels) return;
     window.xgModels(API).then(j => {
-      if (j && j.ok) setModels([{ id: 'prod', name: '生产 v4', oos_ic: null }].concat(j.variants || []));
+      // 列表序:生产置顶 → 变体按新鲜度(asof 降序;缺 asof 沉底)。不按 oos_ic 排——
+      // 各变体训练股池/窗口不同,oos_ic 跨变体不可比。
+      if (j && j.ok) {
+        const vs = (j.variants || []).slice()
+          .sort((a, b) => String(b.asof || '').localeCompare(String(a.asof || '')));
+        setModels([{ id: 'prod', name: '生产 v4', oos_ic: null }].concat(vs));
+      }
     }).catch(() => {});
   };
   useEffect(reloadModels, []);  // eslint-disable-line react-hooks/exhaustive-deps
@@ -548,55 +563,43 @@ function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, mod
       <span style={{ color: 'var(--line)' }}>|</span>
       {result.source === 'v4_ranking' ? (
         <>
-          {(() => {
-            // 候选池口径诚实显形:pool_kind=v4_rated(五维评级)/ lgb_pct(模型分位);旧后端缺键回退原文案
-            const pn = result.pool_n != null ? result.pool_n : result.scored.length;
-            if (result.pool_kind === 'lgb_pct') return (
-              <span className="mono" title={'候选池=全市场模型分位(lgb_pct)Top ' + pn + '(指数池/五维评级缺席时口径,非评级池)'}
-                style={{ fontSize: 11, color: 'var(--ink-2)' }}>模型分位 <b style={{ fontFamily: 'var(--sans)', color: 'var(--ink)' }}>Top {pn}</b></span>);
+          {/* ── 〔模型态〕下拉 + 切换中/回落 + 体检IC(prod)/ 变体OOS+变体口径 ── */}
+          {models && models.length > 0 && (() => {
+            // 下拉治理:按 source 分组(生产 / 工坊训练 / 工作流晋升),组内保持 asof 降序(reloadModels 已排);
+            // 文案截 ~24 字符 + title 全名;workflow 变体尾缀冻结日期(meta.asof,/screen/models 实测字段)。
+            const trunc = (s) => { s = String(s || ''); return s.length > 24 ? s.slice(0, 24) + '…' : s; };
+            const vs = models.filter(m => m.id !== 'prod');
+            const ws = vs.filter(m => (m.source || 'workshop') !== 'workflow');
+            const wf = vs.filter(m => (m.source || 'workshop') === 'workflow');
+            const opt = (m, isWf) => (
+              <option key={m.id} value={m.id}
+                title={(m.name || m.id)
+                  + (m.oos_ic != null ? ' · 留出 OOS ' + (+m.oos_ic).toFixed(3) : '')
+                  + (m.asof ? ' · 冻结 ' + m.asof : '')}>
+                {trunc(m.name || m.id)}{isWf && m.asof ? ' @' + m.asof : ''}
+              </option>
+            );
             return (
-              <span className="mono" title={result.pool_kind === 'v4_rated' ? ('候选池=v4 五维评级 Top ' + pn + '(全A 口径)') : undefined}
-                style={{ fontSize: 11, color: 'var(--ink-2)' }}>评级池 <b style={{ fontFamily: 'var(--sans)', color: 'var(--ink)' }}>v4 · {pn}</b></span>);
+              <select value={model} onChange={e => onModel(e.target.value)}
+                title="选择 v4 模型:生产 / 工坊训练变体 / 工作流晋升变体(组内按冻结日新→旧)"
+                style={{ fontFamily: 'var(--mono)', fontSize: 10.5, color: 'var(--ink)', background: 'var(--paper)', maxWidth: 220,
+                         border: '1px solid var(--line)', borderRadius: 6, padding: '2px 6px', marginLeft: 2, cursor: 'pointer' }}>
+                <optgroup label="生产 v4">
+                  {models.filter(m => m.id === 'prod').map(m => <option key={m.id} value={m.id} title={m.name}>{m.name}</option>)}
+                </optgroup>
+                {ws.length > 0 && <optgroup label="工坊训练">{ws.map(m => opt(m, false))}</optgroup>}
+                {wf.length > 0 && <optgroup label="工作流晋升">{wf.map(m => opt(m, true))}</optgroup>}
+              </select>
+            );
           })()}
-          {models && models.length > 0 && (
-            <select value={model} onChange={e => onModel(e.target.value)}
-              title="选择 v4 模型:生产 / 训练的变体"
-              style={{ fontFamily: 'var(--mono)', fontSize: 10.5, color: 'var(--ink)', background: 'var(--paper)',
-                       border: '1px solid var(--line)', borderRadius: 6, padding: '2px 6px', marginLeft: 2, cursor: 'pointer' }}>
-              {models.map(m => (
-                <option key={m.id} value={m.id}>
-                  {m.name}{m.oos_ic != null ? ` · OOS ${(+m.oos_ic).toFixed(3)}` : ''}
-                </option>
-              ))}
-            </select>
-          )}
           {loading && (
             <span className="mono" title="正在按所选模型重算…" style={{ fontSize: 9.5, color: 'var(--ink-3)', border: '1px dashed var(--line)', borderRadius: 5, padding: '2px 7px' }}>切换中…</span>
           )}
           {!loading && result.model_fallback === true && (
-            // 只信后端显式回落信号(model_fallback),绝不再用 actualModel!==model 竞态推断
+            // 只信后端显式回落信号(model_fallback),绝不再用 actualModel!==model 竞态推断;红=数据不可信/回落
             <span className="mono" title={'所选变体不可用,已回落生产:' + (result.fallback_reason || '原因未知')}
               style={{ fontSize: 9.5, color: 'var(--paper)', background: 'var(--yin)', borderRadius: 5, padding: '2px 7px' }}>⚠ 回落 {result.requested_model || '?'}→{result.model || 'prod'}</span>
           )}
-          <span className="mono" title={isVariant ? ('静态历史截面·冻结于 ' + result.date) : undefined}
-            style={{ fontSize: 11, color: 'var(--ink-3)' }}>排名日 {result.date}{result.mainline_as_of ? ' · 主线 ' + result.mainline_as_of : ''}</span>
-          {(() => {
-            // 排名龄期显形:≥3 自然日黄 / ≥30 红;后端未给 ranking_stale_days(旧后端/解析失败)诚实不渲染
-            const sd = result.ranking_stale_days;
-            if (sd == null || sd < 3) return null;
-            const red = sd >= 30;
-            const tip = (isVariant ? '静态历史截面·冻结于 ' + result.date + ' · ' : '')
-              + '排名产物距今 ' + sd + ' 自然日' + (red ? '(截面严重陈旧,谨慎使用)' : '(可「拉取最新数据」再生)');
-            return <span className="mono" title={tip} style={red
-              ? { fontSize: 9.5, color: 'var(--paper)', background: 'var(--yin)', borderRadius: 5, padding: '2px 7px' }
-              : { fontSize: 9.5, color: 'var(--jin)', border: '1px solid var(--jin)', borderRadius: 5, padding: '2px 7px' }}>
-              {red ? '⚠ 截面 ' + sd + ' 天旧' : '排名 ' + sd + ' 天旧'}</span>;
-          })()}
-          {result.market && (() => {
-            const stale = result.market.as_of && result.date && result.market.as_of < result.date;
-            return <span className="mono" title={'L4 V1 节奏 · 涨停残差60日分位 ' + (result.market.lu_pct60 ?? '—') + (stale ? ' · 口径较排名日旧' : '')}
-              style={{ fontSize: 10, color: 'var(--paper)', background: stale ? 'var(--ink-3)' : 'var(--dai)', borderRadius: 5, padding: '2px 7px' }}>节奏 · {result.market.stage} @{result.market.as_of ?? '—'}{stale ? ' 旧' : ''}</span>;
-          })()}
           {!isVariant && result.model_health && (() => {
             const h = result.model_health;
             const vin = h.vintage && h.vintage.ready;       // 真OOS 积累≥10天 → 主口径切 vintage
@@ -637,6 +640,8 @@ function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, mod
               style={{ fontSize: 10, color: 'var(--ink-1)', border: '1px dashed var(--zhu-soft)', borderRadius: 5, padding: '2px 7px' }}>
               变体 · 纯 LGB{uns.length ? ' ⚠' + uns.length : ''}</span>;
           })()}
+          {/* ── 〔口径态〕v4 provenance + 风格权重 + 候选池口径 ── */}
+          <span style={{ width: 1, height: 16, background: 'var(--line)', flexShrink: 0 }} />
           {!isVariant && result.v4_provenance && (() => {
             const p = result.v4_provenance;   // 多源 {active,w_lgb,sources:[...]} 或旧单源 {active,w_fc,...}
             // 新多源 provenance
@@ -649,8 +654,9 @@ function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, mod
                 const tip = '排名口径:纯 LGB(' + why + ')。'
                   + (cut.length ? ' 断供源:' + cut.map(s => s.model_id + '(' + (s.reason || '') + ')').join('、') + '。' : '')
                   + '混入 DL 需离线产出当日预测 parquet。';
+                // 严重度分层:DL断供=降级(黄,榜仍可用只是少一源);红只留给数据不可信/回落
                 return <span className="mono" title={tip}
-                  style={{ fontSize: 10, color: cut.length ? 'var(--paper)' : 'var(--ink-3)', background: cut.length ? 'var(--yin)' : 'transparent', border: cut.length ? 'none' : '1px dashed var(--line)', borderRadius: 5, padding: '2px 7px' }}>{label}</span>;
+                  style={{ fontSize: 10, color: cut.length ? 'var(--jin)' : 'var(--ink-3)', background: 'transparent', border: cut.length ? '1px solid var(--jin)' : '1px dashed var(--line)', borderRadius: 5, padding: '2px 7px' }}>{label}</span>;
               }
               const anyLa = act.some(s => s.lookahead === true);
               const srcTxt = s => s.model_id + '(' + (+s.weight).toFixed(2) + ((s.stale_days || 0) > 0 ? '·旧' + s.stale_days + '日' : '') + ')';
@@ -688,6 +694,37 @@ function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, mod
             }
             return <span className="mono" title={'风格权重未生效:' + (b.fallback_reason || '')}
               style={{ fontSize: 10, color: 'var(--ink-3)', border: '1px dashed var(--line)', borderRadius: 5, padding: '2px 7px' }}>风格权重 · 未生效</span>;
+          })()}
+          {(() => {
+            // 候选池口径诚实显形:pool_kind=v4_rated(五维评级)/ lgb_pct(模型分位);旧后端缺键回退原文案
+            const pn = result.pool_n != null ? result.pool_n : result.scored.length;
+            if (result.pool_kind === 'lgb_pct') return (
+              <span className="mono" title={'候选池=全市场模型分位(lgb_pct)Top ' + pn + '(指数池/五维评级缺席时口径,非评级池)'}
+                style={{ fontSize: 11, color: 'var(--ink-2)' }}>模型分位 <b style={{ fontFamily: 'var(--sans)', color: 'var(--ink)' }}>Top {pn}</b></span>);
+            return (
+              <span className="mono" title={result.pool_kind === 'v4_rated' ? ('候选池=v4 五维评级 Top ' + pn + '(全A 口径)') : undefined}
+                style={{ fontSize: 11, color: 'var(--ink-2)' }}>评级池 <b style={{ fontFamily: 'var(--sans)', color: 'var(--ink)' }}>v4 · {pn}</b></span>);
+          })()}
+          {/* ── 〔数据态〕排名日 + 龄期 + 主线 + 节奏 + 引擎离线 ── */}
+          <span style={{ width: 1, height: 16, background: 'var(--line)', flexShrink: 0 }} />
+          <span className="mono" title={isVariant ? ('静态历史截面·冻结于 ' + result.date) : undefined}
+            style={{ fontSize: 11, color: 'var(--ink-3)' }}>排名日 {result.date}{result.mainline_as_of ? ' · 主线 ' + result.mainline_as_of : ''}</span>
+          {(() => {
+            // 排名龄期显形:≥3 自然日黄 / ≥30 红;后端未给 ranking_stale_days(旧后端/解析失败)诚实不渲染
+            const sd = result.ranking_stale_days;
+            if (sd == null || sd < 3) return null;
+            const red = sd >= 30;
+            const tip = (isVariant ? '静态历史截面·冻结于 ' + result.date + ' · ' : '')
+              + '排名产物距今 ' + sd + ' 自然日' + (red ? '(截面严重陈旧,谨慎使用)' : '(可「拉取最新数据」再生)');
+            return <span className="mono" title={tip} style={red
+              ? { fontSize: 9.5, color: 'var(--paper)', background: 'var(--yin)', borderRadius: 5, padding: '2px 7px' }
+              : { fontSize: 9.5, color: 'var(--jin)', border: '1px solid var(--jin)', borderRadius: 5, padding: '2px 7px' }}>
+              {red ? '⚠ 截面 ' + sd + ' 天旧' : '排名 ' + sd + ' 天旧'}</span>;
+          })()}
+          {result.market && (() => {
+            const stale = result.market.as_of && result.date && result.market.as_of < result.date;
+            return <span className="mono" title={'L4 V1 节奏 · 涨停残差60日分位 ' + (result.market.lu_pct60 ?? '—') + (stale ? ' · 口径较排名日旧' : '')}
+              style={{ fontSize: 10, color: 'var(--paper)', background: stale ? 'var(--ink-3)' : 'var(--dai)', borderRadius: 5, padding: '2px 7px' }}>节奏 · {result.market.stage} @{result.market.as_of ?? '—'}{stale ? ' 旧' : ''}</span>;
           })()}
           {result.panel_ok === false && (
             <span className="mono" title="引擎面板不可用:现价/成交额/L3 量能/L4 位置指标缺失(非数据稀疏)" style={{ fontSize: 10, color: 'var(--paper)', background: 'var(--yin)', borderRadius: 5, padding: '2px 7px' }}>⚠ 引擎离线</span>
@@ -1245,13 +1282,19 @@ function RescoreBar({ onData, onRkData, result, flash }) {
       {mismatch && <span className="mono" title="旧再打分档案与当前榜口径不符,分数未贴到清单;重新点「再打分+重排」按当前 prod 榜生成"
         style={{ fontSize: 8.5, color: 'var(--ink-3)', border: '1px dashed var(--line)', borderRadius: 4, padding: '1px 6px' }}>
         再打分基于 {mismatch.base_model}·{mismatch.ranking_date} 榜,与当前口径不符</span>}
-      {!mismatch && meta && !meta.err && <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>
-        {String(meta.ts || '').slice(5, 16)} · LLM {(meta.s || {}).llm_calls != null ? meta.s.llm_calls : '—'}
-        ·缓存 {(meta.s || {}).cache_hits != null ? meta.s.cache_hits : '—'}
-        ·行情日 {(((meta.s || {}).board_freshness || {}).quote_date) || '—'}
-        {rkMeta && rkMeta.ok && <span> · 重排 {rkMeta.model} {rkMeta.elapsed_sec}s · 教训注入 {rkMeta.lessons_injected}</span>}
-        {rkMeta && !rkMeta.ok && <span style={{ color: 'var(--zhu)' }}> · 重排失败:{String(rkMeta.reason || '').slice(0, 60)}</span>}
-      </span>}
+      {!mismatch && meta && !meta.err && (() => {
+        // 长 meta(模型名/失败原因)加 ellipsis 截断 + title 全文,不再挤压右侧「重新计算」等按钮
+        const s = meta.s || {};
+        const base = String(meta.ts || '').slice(5, 16) + ' · LLM ' + (s.llm_calls != null ? s.llm_calls : '—')
+          + '·缓存 ' + (s.cache_hits != null ? s.cache_hits : '—')
+          + '·行情日 ' + (((s.board_freshness || {}).quote_date) || '—')
+          + (rkMeta && rkMeta.ok ? (' · 重排 ' + rkMeta.model + ' ' + rkMeta.elapsed_sec + 's · 教训注入 ' + rkMeta.lessons_injected) : '');
+        const fail = (rkMeta && !rkMeta.ok) ? (' · 重排失败:' + String(rkMeta.reason || '')) : '';
+        return <span className="mono" title={base + fail}
+          style={{ fontSize: 8.5, color: 'var(--ink-3)', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {base}{fail && <span style={{ color: 'var(--zhu)' }}>{fail}</span>}
+        </span>;
+      })()}
       {!mismatch && meta && meta.err && <span className="mono" style={{ fontSize: 8.5, color: 'var(--zhu)' }}
         title={meta.err}>上次再打分失败</span>}
     </span>
@@ -1265,7 +1308,7 @@ function RankTable({ result, cfg, sort, setSort, showBench, setShowBench, expand
   const pctW = 132;
   const sortRows = (rows) => {
     const k = sort.k, d = sort.d;
-    const val = (x) => k === 'score' ? x.score : k === 'pct' ? x.pct : k === 'chg' ? x.s.chg : k === 'price' ? x.s.price : k === 'amt' ? x.s.amt : k === 'weight' ? (x.weight || 0) : k === 'mktcap' ? x.s.mktcap : x.score;
+    const val = (x) => k === 'score' ? x.score : k === 'pct' ? x.pct : k === 'chg' ? x.s.chg : k === 'price' ? x.s.price : k === 'amt' ? x.s.amt : k === 'weight' ? (x.weight || 0) : x.score;
     return rows.slice().sort((a, b) => (val(a) - val(b)) * d);
   };
   const chosen = sortRows(result.chosen);
@@ -1325,7 +1368,8 @@ function RankTable({ result, cfg, sort, setSort, showBench, setShowBench, expand
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 18px', borderBottom: '1px solid var(--line-soft)', background: 'rgba(28,24,20,0.02)', flexShrink: 0 }}>
         <div style={{ width: 30 }} className="mono">{th('score', '#', 30)}</div>
         <div style={{ flex: 1, minWidth: 0 }} className="mono"><span className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)' }}>代码 · 名称</span></div>
-        {th('mktcap', '行业', 80)}
+        {/* 行业列不可排序:v4 行无 mktcap 字段,旧绑定点了无反应——摘掉可点样式,只留静态标签 */}
+        <div style={{ width: 80 }} className="mono"><span className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)', letterSpacing: '.04em' }}>行业</span></div>
         {th('pct', '综合分位', pctW, 'left')}
         {th('chg', '当日', 60, 'right')}
         {th('price', '现价', 66, 'right')}
@@ -1334,7 +1378,8 @@ function RankTable({ result, cfg, sort, setSort, showBench, setShowBench, expand
       {/* 行 */}
       <div style={{ overflowY: 'auto', minHeight: 0, flex: 1 }}>
         {chosen.map((x, i) => (
-          <Row key={x.s.code} x={x} rank={sort.k === 'score' && sort.d < 0 ? i + 1 : null} accent={accent} chosen pctW={pctW} open={!!expanded[x.s.code]} onToggle={() => toggleExpand(x.s.code)} rsMap={rsMap} rkMap={rkMap} />
+          // 序号在 score/pct 两个主键降序时都显示:blend<1 默认键=pct(与「综合分位」列一致),序号不再消失
+          <Row key={x.s.code} x={x} rank={(sort.k === 'score' || sort.k === 'pct') && sort.d < 0 ? i + 1 : null} accent={accent} chosen pctW={pctW} open={!!expanded[x.s.code]} onToggle={() => toggleExpand(x.s.code)} rsMap={rsMap} rkMap={rkMap} />
         ))}
         {showBench && bench.length > 0 && (
           <>
