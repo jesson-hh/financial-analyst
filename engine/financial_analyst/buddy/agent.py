@@ -360,7 +360,8 @@ class BuddyAgent:
                 yield TurnEvent("error",
                                 f"token 预算耗尽({spent}/{self.turn_token_budget}):停止工具循环,"
                                 f"以上为已完成部分(诚实截停,非完整答案)。")
-                break
+                yield TurnEvent("done", None)
+                return
             if verdict == "warn":
                 _budget_warned = True
                 self.messages.append(Message(role="user", content=(
