@@ -294,9 +294,18 @@ def create_app():
             async with _gl_mcp_app.router.lifespan_context(_gl_mcp_app):
                 import asyncio as _aio
                 _revive = _aio.create_task(_checker_revive_loop())   # 互拉守望(见函数 docstring)
+                # 后端定时盯盘(2026-07-11 落子改造 Task 1;opt-in:GUANLAN_SEATS_WATCH=1 才起)。
+                # enabled 开关持久化在 var/seats_watch.json → 重启自恢复;tick 内 LLM/取数全走
+                # to_thread(run_loop 只 await asyncio.to_thread(tick)),绝不堵事件循环。
+                _seats_watch = None
+                if os.environ.get("GUANLAN_SEATS_WATCH") == "1":
+                    from guanlan_v2.seats import watcher as _seats_watcher
+                    _seats_watch = _aio.create_task(_seats_watcher.run_loop())
                 try:
                     yield
                 finally:
+                    if _seats_watch is not None:
+                        _seats_watch.cancel()
                     _revive.cancel()
 
     app.router.lifespan_context = _composed_lifespan

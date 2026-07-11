@@ -782,7 +782,9 @@ def test_seats_bind_impl_prefixed_code():
     p = art["payload"]
     assert p["code"] == "SZ000630" and p["bareCode"] == "000630"
     assert p["name"] == "铜陵有色" and p["template"] == "momentum" and p["creed"] == "盯铜价异动"
-    assert "7×24" in res["content"]            # 诚实口径必须在文案里
+    # 诚实口径(2026-07-11 三页重排):盯盘=后端 watcher 盘中自动研判,须显式声明开关依赖,不再是「页面开着才盯」
+    assert "GUANLAN_SEATS_WATCH" in res["content"]
+    assert "关页面也盯" in res["content"]
 
 
 def test_seats_bind_impl_bare_code_normalizes(monkeypatch):

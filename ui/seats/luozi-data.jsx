@@ -552,9 +552,11 @@ const SYMBOL_META = [
     phases: [{ len: 24, drift: 0.002, vol: 0.011, volBias: 0.9 }, { len: 30, drift: 0.005, vol: 0.012, volBias: 1.0 }, { len: 16, drift: -0.002, vol: 0.013, volBias: 1.0 }, { len: 26, drift: 0.004, vol: 0.013, volBias: 1.05 }, { len: 24, drift: -0.001, vol: 0.014, volBias: 1.1 }], eventBar: 85 },
 ];
 
-try { seedDefaultStrategy(); _dedupeDefaultStrategies(); _stripDeadDemoRecipe(); } catch (e) {}     // 必须在 SYMBOLS 构建前
+try { seedDefaultStrategy(); _dedupeDefaultStrategies(); _stripDeadDemoRecipe(); _pruneRetiredStrategies(); } catch (e) {}     // 必须在 SYMBOLS 构建前
 // 后端持久化默认经 guanlan-bus 异步回填(setTimeout)→ 走 persist→emit;挂 GL.on 自愈去重(折叠后无环)。
+// _pruneRetiredStrategies 同挂 GL.on:后端 /archive 异步回填可能复活烂尾策略,回填即再剪(幂等无环)。
 try { if (window.GL && window.GL.on) window.GL.on(_dedupeDefaultStrategies); } catch (e) {}
+try { if (window.GL && window.GL.on) window.GL.on(_pruneRetiredStrategies); } catch (e) {}
 const SYMBOLS = {};
 SYMBOL_META.forEach(m => { SYMBOLS[m.code] = buildSymbol(m); });
 const PRIMARY_CODE = '300750';
@@ -611,6 +613,37 @@ function monitorAgentFor(code) {
   return strategyList().find(s => Array.isArray(s.bind) && s.bind.length && s.bind.map(_monCode).indexOf(c) >= 0) || null;
 }
 function poolIsMonitored(code) { return monitoredCodes().indexOf(_monCode(code)) >= 0; }
+// 一键盯盘(2026-07-11 三页重排):开 = 把票绑进「本票当前策略」(无本票策略则绑全局默认「动量 · 默认」);
+// 关 = 从所有策略 bind 移除。绑定仍是盯盘集唯一真相(与 ww_seats_bind / 后端 watcher 同源)。
+function watchSet(code, on) {
+  const c = _monCode(code);
+  if (!c) return false;
+  if (on) {
+    if (poolIsMonitored(c)) return true;                       // 幂等
+    const all = strategyList();
+    // 优先全局默认「动量 · 默认」;没有则任一 bind 空的全局策略;再没有则第一个策略
+    const tgt = all.find(s => s.name === '动量 · 默认' && (!s.bind || !s.bind.length))
+      || all.find(s => !s.bind || !s.bind.length) || all[0];
+    if (!tgt) return false;
+    strategySave(Object.assign({}, tgt, { bind: (tgt.bind || []).concat([c]) }));
+    return true;
+  }
+  let changed = false;
+  strategyList().forEach(s => {
+    if (!Array.isArray(s.bind) || !s.bind.length) return;
+    const next = s.bind.filter(b => _monCode(b) !== c);
+    if (next.length !== s.bind.length) { strategySave(Object.assign({}, s, { bind: next })); changed = true; }
+  });
+  return changed;
+}
+// 一次性迁移(2026-07-11 改造):清两只烂尾实验策略(0612演习策略/铜陵有色 · 盯盘,绑票不在池、
+// 校场永「待演武·真K未达」、且让盯盘集藏池外票隐形烧 LLM)。按 id 精确匹配,幂等;var/archive 侧文件另行删除。
+function _pruneRetiredStrategies() {
+  if (!window.GL) return;
+  ['strat_mqae2q6f2th', 'strat_mqf7alg41jz'].forEach(id => {
+    try { if (window.GL.get(id)) window.GL.remove(id); } catch (e) {}
+  });
+}
 // 启动恢复持久池(SYMBOLS 构建后;坏条目跳过)
 try {
   _poolLoad().forEach(e => {
@@ -1126,6 +1159,48 @@ async function fetchTicks(code, limit) {
     const res = await fetch(API + '/seats/ticks?code=' + encodeURIComponent(code) + '&limit=' + (limit || 30));
     if (!res.ok) return null;
     return await res.json();                       // {ok, code, ticks:[{time,price,vol,side}], n, note}
+  } catch (e) { return null; }
+}
+
+// ───────── 后端定时盯盘(2026-07-11 三页重排):状态/开关 + 研判时间线 ─────────
+//   watcher 在服务端盘中按策略节拍自动研判绑定票(GUANLAN_SEATS_WATCH=1 才起);
+//   老后端无此端点 → 404 → null → UI 显「未启用」诚实态,绝不冒充在盯。
+async function fetchWatchStatus() {
+  const API = (window.GUANLAN_BACKEND || '');
+  if (!API) return null;
+  try {
+    const res = await fetch(API + '/seats/watch/status');
+    if (!res.ok) return null;
+    const j = await res.json();
+    if (!j || !j.ok) return null;
+    return { enabled: !!j.enabled, watching: j.watching || [], todayCount: (j.today_count != null ? +j.today_count : null),
+      budget: (j.daily_budget != null ? +j.daily_budget : null), lastTick: j.last_tick || null, marketOpen: !!j.market_open };
+  } catch (e) { return null; }
+}
+async function toggleWatch(on) {
+  const API = (window.GUANLAN_BACKEND || '');
+  if (!API) return null;
+  try {
+    const res = await fetch(API + '/seats/watch/toggle', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ on: !!on }) });
+    if (!res.ok) return null;
+    const j = await res.json();
+    if (!j || !j.ok) return null;
+    return { enabled: !!j.enabled, watching: j.watching || [], todayCount: (j.today_count != null ? +j.today_count : null),
+      budget: (j.daily_budget != null ? +j.daily_budget : null), lastTick: j.last_tick || null, marketOpen: !!j.market_open };
+  } catch (e) { return null; }
+}
+// 本票研判/条件单时间线(后端落盘全量,exclude_runs 剔批跑回放;研判卡与决策留痕共用)。
+async function fetchDecisionsTimeline(code, limit) {
+  const API = (window.GUANLAN_BACKEND || '');
+  if (!API || !code) return null;
+  try {
+    const res = await fetch(API + '/seats/decisions?code=' + encodeURIComponent(code)
+      + '&limit=' + (limit || 60) + '&exclude_runs=1');
+    if (!res.ok) return null;
+    const j = await res.json();
+    if (!j || !j.ok || !Array.isArray(j.decisions)) return null;
+    return j.decisions;
   } catch (e) { return null; }
 }
 
@@ -1695,6 +1770,8 @@ Object.assign(window, {
   lzRecipeForStrategy: recipeForStrategy,
   lzPoolAdd: poolAdd, lzPoolRemove: poolRemove, lzPoolIsDynamic: poolIsDynamic,   // 盯盘池扩池
   lzPoolIsMonitored: poolIsMonitored, lzMonitoredCodes: monitoredCodes, lzMonitorAgentFor: monitorAgentFor,   // 盯盘集(校场绑定派生)
+  lzWatchSet: watchSet, lzFetchWatchStatus: fetchWatchStatus, lzToggleWatch: toggleWatch,   // 后端定时盯盘(2026-07-11)
+  lzFetchDecisionsTimeline: fetchDecisionsTimeline,
   lzSeedDefaultStrategy: seedDefaultStrategy, LZ_TEMPLATES: LZ_TEMPLATES, LZ_TEMPLATE_IDS: LZ_TEMPLATE_IDS,
   lzScanSeat: scanSeat, lzSeatEquity: seatEquity,
   lzHydrateRealBars: hydrateRealBars, lzHydrateRealBars5: hydrateRealBars5,

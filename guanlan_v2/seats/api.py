@@ -572,6 +572,338 @@ def _rf_vintage_line(recipe_factors, code: str, asof: str, freq: str = "day"):
     return ("; ".join(parts) or "无"), vint
 
 
+async def _decide_impl(payload: dict) -> dict:
+    """decide 内核(POST /seats/decide 路由体原样提取:payload dict → 响应 dict)。
+
+    路由只是它的 JSONResponse 薄壳;后端定时盯盘 watcher(seats/watcher.py)在
+    to_thread 工作线程内经 asyncio.run 进程内直调它(严禁 HTTP 自调本服务)。
+    payload 额外可带 ``source``(如 'watcher'):有值才随 _persist_decision 落盘,
+    手动/旧路径不带则记录形状不变。
+    """
+    code = str(payload.get("code") or "").strip()
+    date = payload.get("date")
+    seat_cn = str(payload.get("seat_cn") or "席位")
+    creed = str(payload.get("creed") or "")
+    name = str(payload.get("name") or code)
+    card = payload.get("card") or {}
+    cards = payload.get("cards") or ([card] if card else [])
+    recipe_factors = payload.get("recipe_factors") or []
+    w = payload.get("w")   # P3:策略加权混合权重(0=纯 LLM;>0 把因子 z 分混进 hybrid_direction)
+    strategy_id = str(payload.get("strategy_id") or "")
+    strategy_name = str(payload.get("strategy_name") or seat_cn)
+    research = payload.get("research") or []
+    regime = payload.get("regime")
+    # 价格行为(price-action):pa 开关 + 可编辑方法论(几何始终算/回响应,pa 仅控制 prompt 注入)。
+    pa = bool(payload.get("pa"))
+    pa_method = str(payload.get("pa_method") or "")
+    # ⑤ 决策频率:day=日线(既有行为,默认) / 30min=日内 30 分钟 PIT(date 带时分,5min 聚 30min)。
+    freq = str(payload.get("freq") or "day").strip().lower()
+    freq = "30min" if freq in ("30min", "30", "30m") else "day"
+    # run 化:批跑分组标识,仅透传落盘(有值才落键 → 旧记录/手动研判形状不变)。
+    run_id = str(payload.get("run_id") or "").strip()
+    # watcher 定时研判溯源(Task 1):有值才落键(与 run_id 同模式)→ 手动/旧记录形状不变。
+    source = str(payload.get("source") or "").strip()
+    # ⑤ 研判模式:fast=deepseek-chat(几秒,无思维链) / deep=deepseek-reasoner(十几秒,有真思维链)。
+    # 默认 deep(保持既有「真思维链」行为不回退);前端 toggle 显式传 mode。
+    mode = str(payload.get("mode") or "deep").strip().lower()
+    if mode not in ("fast", "deep"):
+        mode = "deep"
+
+    try:
+        from financial_analyst.buddy.tools import normalize_code
+        try:
+            c = normalize_code(code)
+        except Exception:  # noqa: BLE001
+            c = code.upper()
+    except Exception:  # noqa: BLE001
+        c = code.upper()
+    if not c or not date:
+        return {"ok": False, "reason": "缺 code 或 date"}
+
+    try:
+        import pandas as _pd
+        from financial_analyst.data import loader_factory as _lf
+        loader = _lf.get_default_loader()
+        unit = "日"
+
+        if freq == "30min":
+            # 日内 30 分钟:date 当带时分 datetime;拉 5min 按 PIT 砍掉 >决策时刻的 bar,
+            # 每 6 根聚成 30min 序列再算因子(rev_20 等口径从「20日」变「20根30min bar」)。
+            unit = "根30分钟bar"
+            anchor_dt = _pd.Timestamp(date)
+            if anchor_dt > _pd.Timestamp.now():
+                anchor_dt = _pd.Timestamp.now()
+            end_day = str(anchor_dt.date())
+            start_day = str((anchor_dt - _pd.Timedelta(days=40)).date())
+            df5 = await asyncio.to_thread(loader.fetch_quote, c, start_day, end_day, "5min")
+            df = _pd.DataFrame()
+            asof = str(anchor_dt)[:16]
+            if df5 is not None and len(df5) > 0:
+                df5 = df5[_pd.to_datetime(df5["trade_date"]) <= anchor_dt]   # PIT:只取 ≤决策时刻
+                df = _agg_5min_to_30min(df5)
+            if df is not None and len(df) > 0:
+                td = df["trade_date"].iloc[-1]
+                asof = str(td)[:16]
+        else:
+            anchor = min(_pd.Timestamp(date), _pd.Timestamp.now())
+            end = str(anchor.date())
+            start = str((anchor - _pd.Timedelta(days=180)).date())
+            df = await asyncio.to_thread(loader.fetch_quote, c, start, end, "day")  # end=date PIT,≤当日
+            asof = end
+            if df is not None and len(df) > 0:
+                td = df["trade_date"].iloc[-1] if "trade_date" in df.columns else None
+                asof = str(td)[:10] if td is not None else end
+
+        fac: dict = {}
+        if df is not None and len(df) > 0:
+            try:
+                from financial_analyst.factors.core import compute_factors
+                v = compute_factors(df)
+                fac = {k: _num(v.get(k)) for k in
+                       ("rev_20", "mom_60", "rsi_14", "ma_diff_20", "turnover_20")}
+            except Exception:  # noqa: BLE001
+                fac = {}
+
+        # 价量几何特征(确定性,§ price_action.py):始终算(便宜),随响应回前端供决策卡显示;
+        # 仅 pa 开时注入 LLM prompt。df 已 PIT≤asof,故取最新根=决策 bar 不越界。
+        pa_feat: dict = {}
+        if df is not None and len(df) > 0:
+            try:
+                from guanlan_v2.seats.price_action import compute_pa_features
+                pa_feat = compute_pa_features(df, c, name)
+            except Exception:  # noqa: BLE001 — 几何失败不挡研判
+                pa_feat = {}
+
+        # fm_backfill 查 parquet 分位仅日线有(W11 产物按 date 键),30min 保持空 dict。
+        mdl: dict = {}
+        if freq == "day":
+            try:
+                from pathlib import Path as _Path
+                cache_p = _Path(__file__).resolve().parents[2] / "var" / "seats_fm_backfill.parquet"
+                if cache_p.exists():
+                    fmdf = await asyncio.to_thread(_pd.read_parquet, cache_p)
+                    if fmdf is not None and len(fmdf) > 0 and "date" in fmdf.columns:
+                        hit = fmdf[(fmdf["date"].astype(str) == end)
+                                   & (fmdf["code"].astype(str).str.upper() == c.upper())]
+                        if len(hit) > 0:
+                            r = hit.iloc[0].to_dict()
+                            mdl = {"combo_pct": _num(r.get("combo_pct")), "fm_pct": _num(r.get("fm_pct"))}
+            except Exception:  # noqa: BLE001
+                pass
+
+        # P1:后端按日 PIT 浮出叙事卡(替代前端固定 research 透传)。无料诚实空(不退 demo)。
+        # 用决策日 asof 作 PIT 锚(≤asof 的卡/研报才浮出);浮出结果覆盖入参 research。
+        # I/O(扫 out/、读 archive)进 to_thread,不阻塞 async 事件循环。
+        _narr_ids: list = []
+        _surf = await asyncio.to_thread(_surface_for_decide, c, payload.get("industry") or "", asof)
+        _narr_ids = [x.get("id") for x in _surf]
+        research = [{"title": x.get("title"), "from": (x.get("source") or {}).get("from", ""),
+                     "path": x.get("path")} for x in _surf]
+
+        # 大盘市况(PIT):回测前端不再传 regime → 后端按大盘日产物(breadth)补。
+        # 日线:决策在 D 收盘 → 用 D 的 EOD breadth;30min:盘中决策(如 10:30)→ 当日 EOD
+        # breadth 那时**尚不存在**,喂它=看未来 → 显式回退到上一**交易**日 EOD
+        # (`_prev_trading_day` 按引擎全量交易日历取,跳周末/假日,不靠 regime_asof 的 idx≤date 隐式滑动)。
+        if not regime:
+            try:
+                from guanlan_v2.seats.narrative import regime_asof
+                _bdf = _load_breadth_df()
+                _rg_date = (asof[:10] if freq == "day"
+                            else _prev_trading_day(asof[:10]))
+                regime = await asyncio.to_thread(regime_asof, _rg_date, _bdf)
+            except Exception as _e:  # noqa: BLE001 — 无产物/读盘失败留痕,仍诚实 None
+                _log.warning("regime_asof failed asof=%s freq=%s: %s", asof, freq, _e)
+                regime = None
+
+        # —— 组装证据 + prompt（只喂真证据，prompt 明令 PIT、禁后见之明）——
+        def _f(x, p=3):
+            return (("%." + str(p) + "f") % x) if isinstance(x, (int, float)) else "—"
+
+        from guanlan_v2.factorlib.semantics import render_factors
+        fac_line = render_factors(
+            fac, ("rev_20", "mom_60", "rsi_14", "ma_diff_20", "turnover_20"), unit=unit)
+        if mdl.get("combo_pct") is not None or mdl.get("fm_pct") is not None:
+            fac_line += f" | combo分位={_f(mdl.get('combo_pct'), 0)} FM分位={_f(mdl.get('fm_pct'), 0)}"
+
+        card_line = "无"
+        if cards:
+            _cl = []
+            for cd in cards[:3]:
+                if not cd:
+                    continue
+                extra = " ".join(filter(None, [
+                    cd.get("verdict") and ("验证" + str(cd.get("verdict"))),
+                    (cd.get("conf") is not None) and ("conf" + str(cd.get("conf"))),
+                    cd.get("ic") and ("IC" + str(cd.get("ic")))]))
+                _cl.append(f"{cd.get('name', '')}:{cd.get('insight', '')}" + (f"({extra})" if extra else ""))
+            card_line = "\n".join(_cl) or "无"
+        # 研报条目兼容两种形状:旧 list[str] / 新 list[{title,from,path}](P1⑤:带 path 才能喂正文)
+        _res_items = []
+        for x in research[:4]:
+            if isinstance(x, dict):
+                _res_items.append({"title": str(x.get("title") or ""), "from": str(x.get("from") or ""),
+                                   "path": x.get("path") or None})
+            else:
+                _res_items.append({"title": str(x), "from": "", "path": None})
+        res_line = " / ".join(
+            (it["title"] + (f"({it['from']})" if it["from"] else "")) for it in _res_items if it["title"]
+        ) or "无"
+        # 研报正文摘录(out/ 深度研报才有 path):同 buddy._tool_report 口径抽「一、综合评级」「八、操作建议」,
+        # 最多 2 篇、每篇 ≤700 字——研判真用上研报结论,而非只看一句标题(互通审计 P1⑤)。
+        res_excerpt = ""
+        _ex_n = 0
+        try:
+            import re as _rex
+            from pathlib import Path as _P
+            from financial_analyst.buddy.tools import _project_root as _proot
+            _out_dir = (_proot() / "out").resolve()
+            _ex = []
+            for it in _res_items:
+                if not it["path"] or len(_ex) >= 2:
+                    continue
+                _p = _P(str(it["path"])).resolve()
+                if _p.suffix.lower() != ".md" or not str(_p).startswith(str(_out_dir)) or not _p.exists():
+                    continue   # 只认 out/ 下的 md(同 /report 端点的安全边界)
+                _body = _p.read_text(encoding="utf-8", errors="replace")
+                _parts = []
+                for _sect in (r"## 一、综合评级.*?(?=## 二)", r"## 八、操作建议.*?(?=---|\Z)"):
+                    _m = _rex.search(_sect, _body, _rex.DOTALL)
+                    if _m:
+                        _parts.append(_m.group(0).strip())
+                _txt = ("\n".join(_parts) or _body[:700])[:700]
+                _ex.append(f"《{it['title']}》摘录:\n{_txt}")
+            if _ex:
+                _ex_n = len(_ex)
+                res_excerpt = "【研报摘录·注意:研报观点截至其落款日,按 PIT 自行折价】\n" + "\n---\n".join(_ex) + "\n"
+        except Exception:  # noqa: BLE001 — 摘录失败退回标题级,不挡研判
+            res_excerpt = ""
+            _ex_n = 0
+        # 本席配方因子(用户在校场给该策略配的因子)—— P2:每因子按 catalog 反查 → 优先本票 tsic、
+        # 退而截面 cs 的 vintage(as-of 决策日 asof)真 OOS IC,只喂 LLM 当参考视角,不进信号(加权混合 P3)。
+        # 命中=真历史外样本 IC;未命中/样本不足=诚实「样本不足」(不再喂静态看未来 IC)。
+        rf_line, _rf_vint = _rf_vintage_line(recipe_factors, c, asof, freq)
+
+        # 价格行为两块(仅 pa 开):几何=确定性事实;方法论=推理框架(可编辑,空则默认模板)。
+        pa_block_line = ""
+        pa_method_line = ""
+        if pa:
+            from guanlan_v2.seats.price_action import render_pa_block, PA_METHOD_DEFAULT
+            _pb = render_pa_block(pa_feat, unit)
+            if _pb:
+                pa_block_line = f"【价量形态·确定性(PIT≤决策bar·{unit})】{_pb}\n"
+            pa_method_line = ("【价格行为读法(本席方法论·推理框架·不替代证据·证据不足给观望)】"
+                              f"{pa_method or PA_METHOD_DEFAULT}\n")
+
+        sys_p = (f"你是「观澜」量化交易系统中的{seat_cn}(信条:{creed})。"
+                 f"基于**截至 {asof} 已发生的信息**(point-in-time,严禁使用该日之后任何信息或后见之明),"
+                 f"判断此刻是否对 {name}({c}) 落子。只依据下方证据推理,不得编造数据;证据不足就给「观望」。")
+        _json_fmt = ('JSON 格式:{"direction":"买入或卖出或观望","confidence":0到100整数,'
+                     '"rationale":"≤140字结论理由","key_evidence":["最多3条支撑点"]}')
+        if mode == "fast":
+            _ask = (f"研判:此刻{seat_cn}是否落子?综合上面证据与本席信条权衡,"
+                    f"**只输出一个 JSON 对象**(不要任何其他文字)。\n" + _json_fmt)
+        else:
+            _ask = (f"研判:此刻{seat_cn}是否落子?请**逐步分析**上面每条证据(扣住具体数值),"
+                    f"再结合本席信条权衡,最后在**单独一行**给出 JSON 结论。\n" + _json_fmt)
+        usr_p = (f"【标的】{name} {c} 截至 {asof}（{('30分钟K·日内' if freq=='30min' else '日线')}）\n"
+                 f"【量化因子·PIT≤当日收盘】{fac_line}\n"
+                 + pa_block_line +
+                 f"【本席经验卡】{card_line}\n"
+                 f"【相关研报/情绪】{res_line}\n"
+                 + res_excerpt +
+                 f"【本席配方因子·vintage OOS IC(as-of·真历史外样本)·供研判参考·不进信号】{rf_line}\n"
+                 f"【市况】{regime or '—'}\n"
+                 + pa_method_line + _ask)
+
+        from financial_analyst.llm.client import LLMClient
+        import json as _json
+        import re as _re
+        if mode == "fast":
+            # 快:deepseek-chat + response_format=json_object,整段即 JSON 结论(无思维链,~秒级)。
+            client = LLMClient.for_agent("watch-agent").with_overrides(
+                provider="deepseek", model="deepseek-chat")
+            resp = await client.chat(
+                [{"role": "system", "content": sys_p}, {"role": "user", "content": usr_p}],
+                temperature=0.3, response_format={"type": "json_object"})
+        else:
+            # 深:deepseek-reasoner(R1)拿**真·思维链**(reasoning_content)。reasoner 不支持
+            # response_format,故让它先逐步推理、末尾给一行 JSON,再 regex 抽取结论(~十几秒)。
+            client = LLMClient.for_agent("watch-agent").with_overrides(
+                provider="deepseek", model="deepseek-reasoner")
+            resp = await client.chat(
+                [{"role": "system", "content": sys_p}, {"role": "user", "content": usr_p}],
+                temperature=0.3)
+        msg = (resp["choices"][0]["message"] if isinstance(resp, dict)
+               else resp.choices[0].message)
+        reasoning = ((msg.get("reasoning_content") if isinstance(msg, dict)
+                      else getattr(msg, "reasoning_content", None)) or "")
+        content = ((msg.get("content") if isinstance(msg, dict)
+                    else getattr(msg, "content", None)) or "")
+        j = {}
+        try:
+            mt = _re.search(r"\{[\s\S]*\}", content)   # 抽 JSON 结论(深:末尾一行;快:整段即 JSON)
+            if mt:
+                j = _json.loads(mt.group(0))
+        except Exception:  # noqa: BLE001 — 抽不出 JSON 也别崩
+            j = {}
+        if not j:
+            j = {"direction": "观望", "confidence": None,
+                 "rationale": (content or reasoning)[:200], "key_evidence": []}
+        # 断言质检(修复#2):方向矛盾+无出处百分数 → advisory flags,不阻断
+        audit_flags: list = []
+        try:
+            from guanlan_v2.factorlib.claim_audit import audit_claims
+            _claims = " ".join([str(j.get("rationale") or "")]
+                               + [str(x) for x in (j.get("key_evidence") or [])])
+            _audit_src = "\n".join([fac_line, card_line, res_line, res_excerpt or "",
+                                    rf_line, str(creed or ""), str(regime or "")])
+            audit_flags = audit_claims(_claims, fac, _audit_src)
+        except Exception:  # noqa: BLE001 — 质检失败不挡研判
+            audit_flags = []
+        # P3 加权混合:llm_score(LLM 方向×置信)+ factor_score(配方因子 dir·z clip 等权)→ hybrid。
+        # w=0 / factor_score=None → hybrid_direction 透传 LLM 方向(纯 LLM,不经死区)。
+        _llm_s = _llm_score(j.get("direction"), j.get("confidence"))
+        _factor_s = _combine_factor_score(_rf_vint)
+        _hyb_dir, _hyb_bias = _hybrid_direction(j.get("direction"), _llm_s, _factor_s, w)
+        # 落盘(仅成功路径 → LLM 失败走 except 不到这里 = 不落盘);recipe_factors 仅记录,不参与计算。
+        _persist_decision("decide", {
+            "code": c, "name": name, "strategy_id": strategy_id, "strategy_name": strategy_name,
+            "mode": mode, "freq": freq, "direction": j.get("direction"), "confidence": j.get("confidence"),
+            "rationale": j.get("rationale"), "key_evidence": (j.get("key_evidence") or []),
+            "reasoning": reasoning, "model_name": f"{client.provider}/{client.model}", "asof": asof,
+            "factors_std": fac, "recipe_factors": recipe_factors,
+            "recipe_factors_vintage": _rf_vint,   # P2:配方因子 vintage(as-of)OOS IC 记录,供 RunDecCard/审计
+            "card_names": [cd.get("name") for cd in cards if cd and cd.get("name")],
+            "research": [it["title"] for it in _res_items if it["title"]],
+            "research_excerpt_n": _ex_n,   # 喂进 prompt 的研报正文篇数(0=只有标题级)
+            "narratives_surfaced": _narr_ids,   # P1:后端按日 PIT 浮出的叙事卡 id(逐日不同)
+            "regime_asof_used": bool(regime),   # P1:本笔是否用上大盘日产物补的 regime
+            "regime_asof": regime,              # P1:当日大盘点评文本(PIT 日产物 / 实盘今日快照),供 RunDecCard 显形
+            "audit_flags": audit_flags,
+            "w": w, "llm_score": _llm_s, "factor_score": _factor_s,   # P3:加权混合输入/分量
+            "hybrid_bias": _hyb_bias, "hybrid_direction": _hyb_dir,   # P3:混合偏置 + 最终方向(w=0 透传 LLM)
+            "creed": creed,
+            "pa": pa, "pa_features": pa_feat,   # 价格行为:开关 + 确定性几何特征
+            **({"run_id": run_id} if run_id else {}),   # 有 run 才落键,绝不落空键
+            **({"source": source} if source else {}),   # watcher 溯源:有值才落键
+        })
+        return {
+            "ok": True, "code": c, "name": name, "asof": asof, "seat": seat_cn,
+            "mode": mode, "freq": freq,
+            "audit_flags": audit_flags,
+            "model_name": f"{client.provider}/{client.model}",
+            "direction": j.get("direction"), "confidence": j.get("confidence"),
+            "rationale": j.get("rationale"), "key_evidence": (j.get("key_evidence") or []),
+            "reasoning": reasoning,   # 真·思维链(仅深模式 reasoner 有;快模式为空串)
+            "factors": fac, "model": mdl, "recipe_factors": recipe_factors,
+            "w": w, "llm_score": _llm_s, "factor_score": _factor_s,   # P3:加权混合输入/分量
+            "hybrid_bias": _hyb_bias, "hybrid_direction": _hyb_dir,   # P3:混合偏置 + 最终方向
+            "pa_features": pa_feat,   # 几何常显:无论 pa 开关都回前端供决策卡显示
+        }
+    except Exception as exc:  # noqa: BLE001 — LLM/取数失败诚实降级,不 500
+        return {"ok": False, "code": c, "reason": f"{type(exc).__name__}: {exc}"}
+
+
 def build_seats_router() -> APIRouter:
     router = APIRouter(prefix="/seats", tags=["seats"])
 
@@ -1277,325 +1609,7 @@ def build_seats_router() -> APIRouter:
         body: ``{code, name, date, seat_cn, creed, card:{name,insight,verdict,conf,ic}, research:[str], regime}``
         坏入参 / LLM 失败 → ``ok:False`` + reason(恒 HTTP200,前端降级)。
         """
-        code = str(payload.get("code") or "").strip()
-        date = payload.get("date")
-        seat_cn = str(payload.get("seat_cn") or "席位")
-        creed = str(payload.get("creed") or "")
-        name = str(payload.get("name") or code)
-        card = payload.get("card") or {}
-        cards = payload.get("cards") or ([card] if card else [])
-        recipe_factors = payload.get("recipe_factors") or []
-        w = payload.get("w")   # P3:策略加权混合权重(0=纯 LLM;>0 把因子 z 分混进 hybrid_direction)
-        strategy_id = str(payload.get("strategy_id") or "")
-        strategy_name = str(payload.get("strategy_name") or seat_cn)
-        research = payload.get("research") or []
-        regime = payload.get("regime")
-        # 价格行为(price-action):pa 开关 + 可编辑方法论(几何始终算/回响应,pa 仅控制 prompt 注入)。
-        pa = bool(payload.get("pa"))
-        pa_method = str(payload.get("pa_method") or "")
-        # ⑤ 决策频率:day=日线(既有行为,默认) / 30min=日内 30 分钟 PIT(date 带时分,5min 聚 30min)。
-        freq = str(payload.get("freq") or "day").strip().lower()
-        freq = "30min" if freq in ("30min", "30", "30m") else "day"
-        # run 化:批跑分组标识,仅透传落盘(有值才落键 → 旧记录/手动研判形状不变)。
-        run_id = str(payload.get("run_id") or "").strip()
-        # ⑤ 研判模式:fast=deepseek-chat(几秒,无思维链) / deep=deepseek-reasoner(十几秒,有真思维链)。
-        # 默认 deep(保持既有「真思维链」行为不回退);前端 toggle 显式传 mode。
-        mode = str(payload.get("mode") or "deep").strip().lower()
-        if mode not in ("fast", "deep"):
-            mode = "deep"
-
-        try:
-            from financial_analyst.buddy.tools import normalize_code
-            try:
-                c = normalize_code(code)
-            except Exception:  # noqa: BLE001
-                c = code.upper()
-        except Exception:  # noqa: BLE001
-            c = code.upper()
-        if not c or not date:
-            return JSONResponse({"ok": False, "reason": "缺 code 或 date"})
-
-        try:
-            import pandas as _pd
-            from financial_analyst.data import loader_factory as _lf
-            loader = _lf.get_default_loader()
-            unit = "日"
-
-            if freq == "30min":
-                # 日内 30 分钟:date 当带时分 datetime;拉 5min 按 PIT 砍掉 >决策时刻的 bar,
-                # 每 6 根聚成 30min 序列再算因子(rev_20 等口径从「20日」变「20根30min bar」)。
-                unit = "根30分钟bar"
-                anchor_dt = _pd.Timestamp(date)
-                if anchor_dt > _pd.Timestamp.now():
-                    anchor_dt = _pd.Timestamp.now()
-                end_day = str(anchor_dt.date())
-                start_day = str((anchor_dt - _pd.Timedelta(days=40)).date())
-                df5 = await asyncio.to_thread(loader.fetch_quote, c, start_day, end_day, "5min")
-                df = _pd.DataFrame()
-                asof = str(anchor_dt)[:16]
-                if df5 is not None and len(df5) > 0:
-                    df5 = df5[_pd.to_datetime(df5["trade_date"]) <= anchor_dt]   # PIT:只取 ≤决策时刻
-                    df = _agg_5min_to_30min(df5)
-                if df is not None and len(df) > 0:
-                    td = df["trade_date"].iloc[-1]
-                    asof = str(td)[:16]
-            else:
-                anchor = min(_pd.Timestamp(date), _pd.Timestamp.now())
-                end = str(anchor.date())
-                start = str((anchor - _pd.Timedelta(days=180)).date())
-                df = await asyncio.to_thread(loader.fetch_quote, c, start, end, "day")  # end=date PIT,≤当日
-                asof = end
-                if df is not None and len(df) > 0:
-                    td = df["trade_date"].iloc[-1] if "trade_date" in df.columns else None
-                    asof = str(td)[:10] if td is not None else end
-
-            fac: dict = {}
-            if df is not None and len(df) > 0:
-                try:
-                    from financial_analyst.factors.core import compute_factors
-                    v = compute_factors(df)
-                    fac = {k: _num(v.get(k)) for k in
-                           ("rev_20", "mom_60", "rsi_14", "ma_diff_20", "turnover_20")}
-                except Exception:  # noqa: BLE001
-                    fac = {}
-
-            # 价量几何特征(确定性,§ price_action.py):始终算(便宜),随响应回前端供决策卡显示;
-            # 仅 pa 开时注入 LLM prompt。df 已 PIT≤asof,故取最新根=决策 bar 不越界。
-            pa_feat: dict = {}
-            if df is not None and len(df) > 0:
-                try:
-                    from guanlan_v2.seats.price_action import compute_pa_features
-                    pa_feat = compute_pa_features(df, c, name)
-                except Exception:  # noqa: BLE001 — 几何失败不挡研判
-                    pa_feat = {}
-
-            # fm_backfill 查 parquet 分位仅日线有(W11 产物按 date 键),30min 保持空 dict。
-            mdl: dict = {}
-            if freq == "day":
-                try:
-                    from pathlib import Path as _Path
-                    cache_p = _Path(__file__).resolve().parents[2] / "var" / "seats_fm_backfill.parquet"
-                    if cache_p.exists():
-                        fmdf = await asyncio.to_thread(_pd.read_parquet, cache_p)
-                        if fmdf is not None and len(fmdf) > 0 and "date" in fmdf.columns:
-                            hit = fmdf[(fmdf["date"].astype(str) == end)
-                                       & (fmdf["code"].astype(str).str.upper() == c.upper())]
-                            if len(hit) > 0:
-                                r = hit.iloc[0].to_dict()
-                                mdl = {"combo_pct": _num(r.get("combo_pct")), "fm_pct": _num(r.get("fm_pct"))}
-                except Exception:  # noqa: BLE001
-                    pass
-
-            # P1:后端按日 PIT 浮出叙事卡(替代前端固定 research 透传)。无料诚实空(不退 demo)。
-            # 用决策日 asof 作 PIT 锚(≤asof 的卡/研报才浮出);浮出结果覆盖入参 research。
-            # I/O(扫 out/、读 archive)进 to_thread,不阻塞 async 事件循环。
-            _narr_ids: list = []
-            _surf = await asyncio.to_thread(_surface_for_decide, c, payload.get("industry") or "", asof)
-            _narr_ids = [x.get("id") for x in _surf]
-            research = [{"title": x.get("title"), "from": (x.get("source") or {}).get("from", ""),
-                         "path": x.get("path")} for x in _surf]
-
-            # 大盘市况(PIT):回测前端不再传 regime → 后端按大盘日产物(breadth)补。
-            # 日线:决策在 D 收盘 → 用 D 的 EOD breadth;30min:盘中决策(如 10:30)→ 当日 EOD
-            # breadth 那时**尚不存在**,喂它=看未来 → 显式回退到上一**交易**日 EOD
-            # (`_prev_trading_day` 按引擎全量交易日历取,跳周末/假日,不靠 regime_asof 的 idx≤date 隐式滑动)。
-            if not regime:
-                try:
-                    from guanlan_v2.seats.narrative import regime_asof
-                    _bdf = _load_breadth_df()
-                    _rg_date = (asof[:10] if freq == "day"
-                                else _prev_trading_day(asof[:10]))
-                    regime = await asyncio.to_thread(regime_asof, _rg_date, _bdf)
-                except Exception as _e:  # noqa: BLE001 — 无产物/读盘失败留痕,仍诚实 None
-                    _log.warning("regime_asof failed asof=%s freq=%s: %s", asof, freq, _e)
-                    regime = None
-
-            # —— 组装证据 + prompt（只喂真证据，prompt 明令 PIT、禁后见之明）——
-            def _f(x, p=3):
-                return (("%." + str(p) + "f") % x) if isinstance(x, (int, float)) else "—"
-
-            from guanlan_v2.factorlib.semantics import render_factors
-            fac_line = render_factors(
-                fac, ("rev_20", "mom_60", "rsi_14", "ma_diff_20", "turnover_20"), unit=unit)
-            if mdl.get("combo_pct") is not None or mdl.get("fm_pct") is not None:
-                fac_line += f" | combo分位={_f(mdl.get('combo_pct'), 0)} FM分位={_f(mdl.get('fm_pct'), 0)}"
-
-            card_line = "无"
-            if cards:
-                _cl = []
-                for cd in cards[:3]:
-                    if not cd:
-                        continue
-                    extra = " ".join(filter(None, [
-                        cd.get("verdict") and ("验证" + str(cd.get("verdict"))),
-                        (cd.get("conf") is not None) and ("conf" + str(cd.get("conf"))),
-                        cd.get("ic") and ("IC" + str(cd.get("ic")))]))
-                    _cl.append(f"{cd.get('name', '')}:{cd.get('insight', '')}" + (f"({extra})" if extra else ""))
-                card_line = "\n".join(_cl) or "无"
-            # 研报条目兼容两种形状:旧 list[str] / 新 list[{title,from,path}](P1⑤:带 path 才能喂正文)
-            _res_items = []
-            for x in research[:4]:
-                if isinstance(x, dict):
-                    _res_items.append({"title": str(x.get("title") or ""), "from": str(x.get("from") or ""),
-                                       "path": x.get("path") or None})
-                else:
-                    _res_items.append({"title": str(x), "from": "", "path": None})
-            res_line = " / ".join(
-                (it["title"] + (f"({it['from']})" if it["from"] else "")) for it in _res_items if it["title"]
-            ) or "无"
-            # 研报正文摘录(out/ 深度研报才有 path):同 buddy._tool_report 口径抽「一、综合评级」「八、操作建议」,
-            # 最多 2 篇、每篇 ≤700 字——研判真用上研报结论,而非只看一句标题(互通审计 P1⑤)。
-            res_excerpt = ""
-            _ex_n = 0
-            try:
-                import re as _rex
-                from pathlib import Path as _P
-                from financial_analyst.buddy.tools import _project_root as _proot
-                _out_dir = (_proot() / "out").resolve()
-                _ex = []
-                for it in _res_items:
-                    if not it["path"] or len(_ex) >= 2:
-                        continue
-                    _p = _P(str(it["path"])).resolve()
-                    if _p.suffix.lower() != ".md" or not str(_p).startswith(str(_out_dir)) or not _p.exists():
-                        continue   # 只认 out/ 下的 md(同 /report 端点的安全边界)
-                    _body = _p.read_text(encoding="utf-8", errors="replace")
-                    _parts = []
-                    for _sect in (r"## 一、综合评级.*?(?=## 二)", r"## 八、操作建议.*?(?=---|\Z)"):
-                        _m = _rex.search(_sect, _body, _rex.DOTALL)
-                        if _m:
-                            _parts.append(_m.group(0).strip())
-                    _txt = ("\n".join(_parts) or _body[:700])[:700]
-                    _ex.append(f"《{it['title']}》摘录:\n{_txt}")
-                if _ex:
-                    _ex_n = len(_ex)
-                    res_excerpt = "【研报摘录·注意:研报观点截至其落款日,按 PIT 自行折价】\n" + "\n---\n".join(_ex) + "\n"
-            except Exception:  # noqa: BLE001 — 摘录失败退回标题级,不挡研判
-                res_excerpt = ""
-                _ex_n = 0
-            # 本席配方因子(用户在校场给该策略配的因子)—— P2:每因子按 catalog 反查 → 优先本票 tsic、
-            # 退而截面 cs 的 vintage(as-of 决策日 asof)真 OOS IC,只喂 LLM 当参考视角,不进信号(加权混合 P3)。
-            # 命中=真历史外样本 IC;未命中/样本不足=诚实「样本不足」(不再喂静态看未来 IC)。
-            rf_line, _rf_vint = _rf_vintage_line(recipe_factors, c, asof, freq)
-
-            # 价格行为两块(仅 pa 开):几何=确定性事实;方法论=推理框架(可编辑,空则默认模板)。
-            pa_block_line = ""
-            pa_method_line = ""
-            if pa:
-                from guanlan_v2.seats.price_action import render_pa_block, PA_METHOD_DEFAULT
-                _pb = render_pa_block(pa_feat, unit)
-                if _pb:
-                    pa_block_line = f"【价量形态·确定性(PIT≤决策bar·{unit})】{_pb}\n"
-                pa_method_line = ("【价格行为读法(本席方法论·推理框架·不替代证据·证据不足给观望)】"
-                                  f"{pa_method or PA_METHOD_DEFAULT}\n")
-
-            sys_p = (f"你是「观澜」量化交易系统中的{seat_cn}(信条:{creed})。"
-                     f"基于**截至 {asof} 已发生的信息**(point-in-time,严禁使用该日之后任何信息或后见之明),"
-                     f"判断此刻是否对 {name}({c}) 落子。只依据下方证据推理,不得编造数据;证据不足就给「观望」。")
-            _json_fmt = ('JSON 格式:{"direction":"买入或卖出或观望","confidence":0到100整数,'
-                         '"rationale":"≤140字结论理由","key_evidence":["最多3条支撑点"]}')
-            if mode == "fast":
-                _ask = (f"研判:此刻{seat_cn}是否落子?综合上面证据与本席信条权衡,"
-                        f"**只输出一个 JSON 对象**(不要任何其他文字)。\n" + _json_fmt)
-            else:
-                _ask = (f"研判:此刻{seat_cn}是否落子?请**逐步分析**上面每条证据(扣住具体数值),"
-                        f"再结合本席信条权衡,最后在**单独一行**给出 JSON 结论。\n" + _json_fmt)
-            usr_p = (f"【标的】{name} {c} 截至 {asof}（{('30分钟K·日内' if freq=='30min' else '日线')}）\n"
-                     f"【量化因子·PIT≤当日收盘】{fac_line}\n"
-                     + pa_block_line +
-                     f"【本席经验卡】{card_line}\n"
-                     f"【相关研报/情绪】{res_line}\n"
-                     + res_excerpt +
-                     f"【本席配方因子·vintage OOS IC(as-of·真历史外样本)·供研判参考·不进信号】{rf_line}\n"
-                     f"【市况】{regime or '—'}\n"
-                     + pa_method_line + _ask)
-
-            from financial_analyst.llm.client import LLMClient
-            import json as _json
-            import re as _re
-            if mode == "fast":
-                # 快:deepseek-chat + response_format=json_object,整段即 JSON 结论(无思维链,~秒级)。
-                client = LLMClient.for_agent("watch-agent").with_overrides(
-                    provider="deepseek", model="deepseek-chat")
-                resp = await client.chat(
-                    [{"role": "system", "content": sys_p}, {"role": "user", "content": usr_p}],
-                    temperature=0.3, response_format={"type": "json_object"})
-            else:
-                # 深:deepseek-reasoner(R1)拿**真·思维链**(reasoning_content)。reasoner 不支持
-                # response_format,故让它先逐步推理、末尾给一行 JSON,再 regex 抽取结论(~十几秒)。
-                client = LLMClient.for_agent("watch-agent").with_overrides(
-                    provider="deepseek", model="deepseek-reasoner")
-                resp = await client.chat(
-                    [{"role": "system", "content": sys_p}, {"role": "user", "content": usr_p}],
-                    temperature=0.3)
-            msg = (resp["choices"][0]["message"] if isinstance(resp, dict)
-                   else resp.choices[0].message)
-            reasoning = ((msg.get("reasoning_content") if isinstance(msg, dict)
-                          else getattr(msg, "reasoning_content", None)) or "")
-            content = ((msg.get("content") if isinstance(msg, dict)
-                        else getattr(msg, "content", None)) or "")
-            j = {}
-            try:
-                mt = _re.search(r"\{[\s\S]*\}", content)   # 抽 JSON 结论(深:末尾一行;快:整段即 JSON)
-                if mt:
-                    j = _json.loads(mt.group(0))
-            except Exception:  # noqa: BLE001 — 抽不出 JSON 也别崩
-                j = {}
-            if not j:
-                j = {"direction": "观望", "confidence": None,
-                     "rationale": (content or reasoning)[:200], "key_evidence": []}
-            # 断言质检(修复#2):方向矛盾+无出处百分数 → advisory flags,不阻断
-            audit_flags: list = []
-            try:
-                from guanlan_v2.factorlib.claim_audit import audit_claims
-                _claims = " ".join([str(j.get("rationale") or "")]
-                                   + [str(x) for x in (j.get("key_evidence") or [])])
-                _audit_src = "\n".join([fac_line, card_line, res_line, res_excerpt or "",
-                                        rf_line, str(creed or ""), str(regime or "")])
-                audit_flags = audit_claims(_claims, fac, _audit_src)
-            except Exception:  # noqa: BLE001 — 质检失败不挡研判
-                audit_flags = []
-            # P3 加权混合:llm_score(LLM 方向×置信)+ factor_score(配方因子 dir·z clip 等权)→ hybrid。
-            # w=0 / factor_score=None → hybrid_direction 透传 LLM 方向(纯 LLM,不经死区)。
-            _llm_s = _llm_score(j.get("direction"), j.get("confidence"))
-            _factor_s = _combine_factor_score(_rf_vint)
-            _hyb_dir, _hyb_bias = _hybrid_direction(j.get("direction"), _llm_s, _factor_s, w)
-            # 落盘(仅成功路径 → LLM 失败走 except 不到这里 = 不落盘);recipe_factors 仅记录,不参与计算。
-            _persist_decision("decide", {
-                "code": c, "name": name, "strategy_id": strategy_id, "strategy_name": strategy_name,
-                "mode": mode, "freq": freq, "direction": j.get("direction"), "confidence": j.get("confidence"),
-                "rationale": j.get("rationale"), "key_evidence": (j.get("key_evidence") or []),
-                "reasoning": reasoning, "model_name": f"{client.provider}/{client.model}", "asof": asof,
-                "factors_std": fac, "recipe_factors": recipe_factors,
-                "recipe_factors_vintage": _rf_vint,   # P2:配方因子 vintage(as-of)OOS IC 记录,供 RunDecCard/审计
-                "card_names": [cd.get("name") for cd in cards if cd and cd.get("name")],
-                "research": [it["title"] for it in _res_items if it["title"]],
-                "research_excerpt_n": _ex_n,   # 喂进 prompt 的研报正文篇数(0=只有标题级)
-                "narratives_surfaced": _narr_ids,   # P1:后端按日 PIT 浮出的叙事卡 id(逐日不同)
-                "regime_asof_used": bool(regime),   # P1:本笔是否用上大盘日产物补的 regime
-                "regime_asof": regime,              # P1:当日大盘点评文本(PIT 日产物 / 实盘今日快照),供 RunDecCard 显形
-                "audit_flags": audit_flags,
-                "w": w, "llm_score": _llm_s, "factor_score": _factor_s,   # P3:加权混合输入/分量
-                "hybrid_bias": _hyb_bias, "hybrid_direction": _hyb_dir,   # P3:混合偏置 + 最终方向(w=0 透传 LLM)
-                "creed": creed,
-                "pa": pa, "pa_features": pa_feat,   # 价格行为:开关 + 确定性几何特征
-                **({"run_id": run_id} if run_id else {}),   # 有 run 才落键,绝不落空键
-            })
-            return JSONResponse({
-                "ok": True, "code": c, "name": name, "asof": asof, "seat": seat_cn,
-                "mode": mode, "freq": freq,
-                "audit_flags": audit_flags,
-                "model_name": f"{client.provider}/{client.model}",
-                "direction": j.get("direction"), "confidence": j.get("confidence"),
-                "rationale": j.get("rationale"), "key_evidence": (j.get("key_evidence") or []),
-                "reasoning": reasoning,   # 真·思维链(仅深模式 reasoner 有;快模式为空串)
-                "factors": fac, "model": mdl, "recipe_factors": recipe_factors,
-                "w": w, "llm_score": _llm_s, "factor_score": _factor_s,   # P3:加权混合输入/分量
-                "hybrid_bias": _hyb_bias, "hybrid_direction": _hyb_dir,   # P3:混合偏置 + 最终方向
-                "pa_features": pa_feat,   # 几何常显:无论 pa 开关都回前端供决策卡显示
-            })
-        except Exception as exc:  # noqa: BLE001 — LLM/取数失败诚实降级,不 500
-            return JSONResponse({"ok": False, "code": c, "reason": f"{type(exc).__name__}: {exc}"})
+        return JSONResponse(await _decide_impl(payload))
 
     @router.get("/quote")
     async def seats_quote(code: str):
@@ -2162,5 +2176,20 @@ def build_seats_router() -> APIRouter:
             return JSONResponse({"ok": True, "code": "csi300", "bars": rows})
         except Exception as e:  # noqa: BLE001 —— 诚实降级,不让基准把整页打挂
             return JSONResponse({"ok": False, "error": str(e)[:200]})
+
+    # ── 后端定时盯盘(2026-07-11 落子改造 Task 1):状态 / 开关 ──────────────
+    @router.get("/watch/status")
+    def watch_status():
+        """盯盘 watcher 状态:{ok, enabled, watching, today_count, daily_budget,
+        last_tick, market_open}。watching = 策略 bind 非空并集(去重)。"""
+        from . import watcher
+        return {"ok": True, **watcher.get_status()}
+
+    @router.post("/watch/toggle")
+    def watch_toggle(payload: dict = Body(...)):
+        """开/关后端盯盘(body ``{on: bool}``):落盘 var/seats_watch.json 持久化,
+        返回最新 get_status()。日预算护栏与盘中门在 watcher.tick 内。"""
+        from . import watcher
+        return {"ok": True, **watcher.set_enabled(bool(payload.get("on")))}
 
     return router
