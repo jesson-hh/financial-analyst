@@ -47,7 +47,7 @@ def _call_llm(system: str, user: str) -> Dict[str, Any]:
     """daemon 线程内同步跑异步 _call_llm_json(仓内已验模式,rescore._call_news 同款)。"""
     import asyncio
     from guanlan_v2.screen.llm import _call_llm_json
-    return asyncio.run(_call_llm_json(system, user, timeout=120.0, temperature=0.2))
+    return asyncio.run(_call_llm_json(system, user, timeout=120.0, temperature=0.2, agent="rerank"))
 
 
 # ── 纯函数 ───────────────────────────────────────────────────────────────

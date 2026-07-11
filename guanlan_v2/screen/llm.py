@@ -72,27 +72,34 @@ def build_prompt(final: List[Dict[str, Any]], market: Optional[Dict[str, Any]]) 
     return "\n".join(lines)
 
 
+def _effective_timeout(seat_timeout, fallback: float) -> float:
+    """座席配置了 timeout(deep 档)→ 用它 +5s 缓冲(让 SDK per-request 超时先抛,错误信息更准);
+    否则用调用方 fallback(旧行为逐字节不变)。"""
+    return float(seat_timeout) + 5.0 if seat_timeout else float(fallback)
+
+
 async def _call_llm_json(system: str, user: str, *, timeout: float = 45.0,
-                         temperature: float = 0.2) -> Dict[str, Any]:
+                         temperature: float = 0.2, agent: str = "screen") -> Dict[str, Any]:
     """共用:deepseek JSON 模式调用。成功 → {ok,data,model,tokens};失败 → {ok:False,reason}(不伪造)。
 
     显式传 LLM_CONFIG_PATH(deepseek),避开引擎 workspace 旧 qwen 配置。
     """
     try:
         from financial_analyst.llm.client import LLMClient
-        client = LLMClient.for_agent("screen", config_path=LLM_CONFIG_PATH)
+        client = LLMClient.for_agent(agent, config_path=LLM_CONFIG_PATH)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": f"LLM 配置/引擎加载失败:{type(exc).__name__}: {exc}"}
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    eff = _effective_timeout(getattr(client, "default_timeout", None), timeout)
     try:
         resp = await asyncio.wait_for(
             client.chat(messages, response_format={"type": "json_object"}, temperature=temperature),
-            timeout=timeout,
+            timeout=eff,
         )
         content = resp["choices"][0]["message"]["content"]
         data = json.loads(content)
     except asyncio.TimeoutError:
-        return {"ok": False, "reason": f"LLM 超时(>{int(timeout)}s)"}
+        return {"ok": False, "reason": f"LLM 超时(>{int(eff)}s)"}
     except json.JSONDecodeError as exc:
         return {"ok": False, "reason": f"LLM 返回非 JSON:{exc}"}
     except Exception as exc:  # noqa: BLE001
