@@ -636,13 +636,33 @@ function watchSet(code, on) {
   });
   return changed;
 }
-// 一次性迁移(2026-07-11 改造):清两只烂尾实验策略(0612演习策略/铜陵有色 · 盯盘,绑票不在池、
-// 校场永「待演武·真K未达」、且让盯盘集藏池外票隐形烧 LLM)。按 id 精确匹配,幂等;var/archive 侧文件另行删除。
+// 一次性迁移(2026-07-11 改造+料库整理):按 id 精确剪除退役实体,幂等,挂 GL.on 防后端回填复活。
+//   ①烂尾实验策略×2(绑票不在池,盯盘集藏池外票隐形烧LLM);②guanlan-bus 种的示例物料(demo 假IC:
+//   卡×6/研报×4/因子×4——P0①审计已从真路径剔除,料库里纯属噪音);③不在池股票的陈旧深度研报×2;
+//   ④EV-014 联调测试卡(后端已打回 rejected,syncArchive 滤 rejected 不回流)。
+//   research 类 GL.remove 经总线自动 /archive/remove(后端镜像同步删);卡/因子是 GL 本地种子,删即净。
 function _pruneRetiredStrategies() {
   if (!window.GL) return;
-  ['strat_mqae2q6f2th', 'strat_mqf7alg41jz'].forEach(id => {
+  // 清单内联(勿提为模块级 const:本函数在模块顶部 L555 即被调,const 在其后声明会踩 TDZ 抛错被吞)
+  const RETIRED = [
+    'strat_mqae2q6f2th', 'strat_mqf7alg41jz',
+    'card_reversal', 'card_north', 'card_pead', 'card_distrib', 'card_diverge', 'card_smallcap',
+    'rs_reversal', 'rs_north', 'rs_distrib', 'rs_pead',
+    'fa_reversal', 'fa_north', 'fa_pead', 'fa_distrib',
+    'rs_report_SH605358_2026-06-10', 'rs_report_SZ000630_2026-06-15',
+    'EV-014',
+  ];
+  RETIRED.forEach(id => {
     try { if (window.GL.get(id)) window.GL.remove(id); } catch (e) {}
   });
+  // 配方里的死引用一并剥掉(如「动量 · 默认」旧 seed 挂的 card_reversal)
+  try {
+    strategyList().forEach(s => {
+      const refs = s.refs || [];
+      const next = refs.filter(r => RETIRED.indexOf(r) < 0);
+      if (next.length !== refs.length) strategySave(Object.assign({}, s, { refs: next }));
+    });
+  } catch (e) {}
 }
 // 启动恢复持久池(SYMBOLS 构建后;坏条目跳过)
 try {
