@@ -158,9 +158,11 @@ def _regen_public_state() -> Dict[str, Any]:
     return s
 
 
-# ── P1 §4:regen 每日定时(opt-in;GUANLAN_REGEN_DAILY=1 才启;默认关=零行为变化)──
+# ── P1 §4→T3:regen 数据到即再生(opt-in;GUANLAN_REGEN_DAILY=1 才启;默认关=零行为变化)──
 # 诚实口径:定时器随 9999 进程存亡,进程死=定时停,非 24/7 保证。
-_REGEN_SCHED: Dict[str, Any] = {"enabled": False, "last_auto_ts": None, "last_auto_date": None}
+# data_date=当前处理中的数据日;attempts=该数据日已触发次数(失败重试上限 _REGEN_MAX_RETRY)。
+_REGEN_SCHED: Dict[str, Any] = {"enabled": False, "last_auto_ts": None, "last_auto_date": None,
+                                "data_date": None, "attempts": 0}
 _regen_sched_started = False
 
 
@@ -230,23 +232,110 @@ def _after_regen(ok: bool, source: str, new_date: str) -> None:
         _maybe_daily_rerank(new_date or None)
 
 
-def _regen_sched_tick(now) -> bool:
-    """定时判定+触发(注入 now 可测)。每日 GUANLAN_REGEN_DAILY_HOUR(默认18)点后、
-    当日未自动处理过 → 触发一次;已有再生在跑(手动)也记当日已处理(单飞语义,不重复)。
-    日跑重排不在此处同步触发:挪至 regen 子进程成功+热加载后回调 _after_regen。"""
+_REGEN_MAX_RETRY = 3           # 同一数据日失败重试上限(防抖)
+_DL_PRODUCER_TIMEOUT_SEC = 1200            # 每个 DL 生产器 20 分钟硬顶(GAT 真机 ~10 分钟)
+_STOCKS_PY_DEFAULT = "D:/app/miniconda/envs/stocks/python.exe"   # conda GPU 解释器(fincast/gat)
+
+
+def _sched_latest_data_date() -> Optional[str]:
+    """最新数据日 = qlib bins close∩pe_ttm 共同覆盖末日(同 regen 口径;上游 T+1 约
+    14:30 落 T 日数据)。失败 → None(本 tick 静默跳过,下 tick 再试)。"""
+    try:
+        from guanlan_v2.strategy.compute.regen import DEFAULT_PROVIDER, _latest_trade_date
+        return str(_latest_trade_date(DEFAULT_PROVIDER))[:10] or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _sched_ranking_date() -> Optional[str]:
+    """现产物排名日(vendored v4_ranking.parquet 的 date 列);失败/缺产物 → None。"""
+    try:
+        from guanlan_v2 import strategy as S
+        return str(S.ranking_date())[:10] or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _dl_producer_cmds() -> list:
+    """三 DL 生产器的真实调用方式(2026-07-11 T0 救活报告验证口径)→ [(name, cmd), ...]。
+    fincast/gat 走 conda stocks GPU 解释器(env GUANLAN_STOCKS_PY 可覆写);
+    lstm 走本解释器 -m(PYTHONPATH 仓根+engine 由 _run_dl_producers 注入)。"""
     import os as _os
-    hour = int(_os.environ.get("GUANLAN_REGEN_DAILY_HOUR", "18"))
-    today = now.date().isoformat()
-    if now.hour < hour or _REGEN_SCHED.get("last_auto_date") == today:
-        return False
-    _REGEN_SCHED["last_auto_date"] = today
+    import sys as _sys
+    from pathlib import Path as _P
+    repo = _P(__file__).resolve().parents[2]
+    stocks_py = _os.environ.get("GUANLAN_STOCKS_PY") or _STOCKS_PY_DEFAULT
+    return [
+        ("fincast", [stocks_py, str(repo / "scripts" / "fincast_predict.py")]),
+        ("lstm", [_sys.executable, "-m", "guanlan_v2.strategy.compute.lstm_predict"]),
+        ("gat", [stocks_py, str(repo / "scripts" / "gat_predict.py")]),
+    ]
+
+
+def _run_dl_producers() -> None:
+    """opt-in GUANLAN_DL_DAILY=1:调度触发的 regen 之前顺跑三 DL 生产器(子进程逐个跑,
+    先产预测 parquet 再 regen,v4 才吃到当日 DL)。失败隔离:单个非零退出/超时/异常只记
+    调度日志,绝不挡其余生产器与后续 regen;每个超时 _DL_PRODUCER_TIMEOUT_SEC;
+    stdout/stderr 尾行进调度日志(_sched_log)。"""
+    import os as _os
+    if _os.environ.get("GUANLAN_DL_DAILY") != "1":
+        return
+    import subprocess as _sp
+    from pathlib import Path as _P
+    repo = _P(__file__).resolve().parents[2]
+    pp = _os.pathsep.join(
+        [str(repo), str(repo / "engine")]
+        + ([_os.environ["PYTHONPATH"]] if _os.environ.get("PYTHONPATH") else []))
+    env = {**_os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONPATH": pp}
+    for name, cmd in _dl_producer_cmds():
+        try:
+            r = _sp.run(cmd, cwd=str(repo), capture_output=True, text=True,
+                        encoding="utf-8", errors="replace",
+                        timeout=_DL_PRODUCER_TIMEOUT_SEC, env=env)
+            tail = ((r.stdout or "").strip() or (r.stderr or "").strip()).splitlines()[-1:] or [""]
+            if r.returncode == 0:
+                _sched_log(f"[dl-daily] {name} 成功:{tail[0][:160]}")
+            else:
+                _sched_log(f"[dl-daily] {name} 失败 rc={r.returncode}(隔离,不挡 regen):{tail[0][:160]}")
+        except _sp.TimeoutExpired:
+            _sched_log(f"[dl-daily] {name} 超时 >{_DL_PRODUCER_TIMEOUT_SEC}s,放弃该源(隔离,不挡 regen)")
+        except Exception as exc:  # noqa: BLE001 — 生产器异常绝不挡 regen
+            _sched_log(f"[dl-daily] {name} 异常 {type(exc).__name__}: {exc}(隔离,不挡 regen)")
+
+
+def _regen_sched_tick(now) -> bool:
+    """数据到即再生(注入 now 可测,仅用于记时间戳)。每 tick 比对最新数据日(bins)与
+    现产物排名日:数据日更新且无再生在跑 → 先顺跑 DL 生产器(GUANLAN_DL_DAILY 门内)
+    再触发再生。「每日至多一次」改「每个数据日至多一次」;同一数据日失败重试上限
+    _REGEN_MAX_RETRY 次(防抖);18 点门废除——数据日比对本身就是门(上游 bins T+1
+    ~14:30 落 T 日数据,旧 18 点门致排名结构性 T-2)。
+    日跑重排不在此处同步触发:挪至 regen 子进程成功+热加载后回调 _after_regen。"""
+    data_date = _sched_latest_data_date()
+    rank_date = _sched_ranking_date()
+    if not data_date or not rank_date or data_date <= rank_date:
+        return False                        # 数据未更新 / 口径不可得 → 不动
+    with _REGEN_LOCK:
+        running = bool(_REGEN_STATE.get("running"))
+    if running:
+        return False                        # 再生在跑(手动/上轮)→ 让路,不耗重试额度
+    if _REGEN_SCHED.get("data_date") != data_date:
+        _REGEN_SCHED["data_date"] = data_date       # 新数据日 → 重试计数清零
+        _REGEN_SCHED["attempts"] = 0
+    if int(_REGEN_SCHED.get("attempts") or 0) >= _REGEN_MAX_RETRY:
+        return False                        # 已试满(最后一次日志带 3/3)→ 停手防重试风暴
+    _REGEN_SCHED["attempts"] = int(_REGEN_SCHED.get("attempts") or 0) + 1
+    _REGEN_SCHED["last_auto_date"] = data_date
     _REGEN_SCHED["last_auto_ts"] = now.isoformat(timespec="seconds")
-    _start_regen_bg(None, source="scheduler")   # 已在跑返 False 亦视为当日已处理(不叠一次)
+    _sched_log(f"[regen-sched] 数据日 {data_date} > 榜 {rank_date} → 触发再生"
+               f"(第 {_REGEN_SCHED['attempts']}/{_REGEN_MAX_RETRY} 次)")
+    _run_dl_producers()                     # DL 生产器先行(门内;失败隔离,内部自兜)
+    _start_regen_bg(None, source="scheduler")
     return True
 
 
 def start_regen_daily_scheduler() -> None:
-    """opt-in 每日 EOD 自动再生(env GUANLAN_REGEN_DAILY=1 才起 daemon 线程;缺省直接返回)。"""
+    """opt-in 数据到即自动再生(env GUANLAN_REGEN_DAILY=1 才起 daemon 线程;缺省直接返回)。
+    每 GUANLAN_REGEN_CHECK_EVERY(默认600s)tick 一次 _regen_sched_tick(数据日比对为门)。"""
     global _regen_sched_started
     import os as _os
     if _regen_sched_started or _os.environ.get("GUANLAN_REGEN_DAILY") != "1":
@@ -1237,7 +1326,10 @@ def build_screen_router() -> APIRouter:
                              "v4_ranking": {"date": rd, "rows": n, "stale_days": stale_days},
                              "market_breadth": mb, "model_health": _mh,
                              "regen_scheduler": {"enabled": bool(_REGEN_SCHED.get("enabled")),
-                                                 "last_auto_ts": _REGEN_SCHED.get("last_auto_ts")},
+                                                 "last_auto_ts": _REGEN_SCHED.get("last_auto_ts"),
+                                                 "data_date": _REGEN_SCHED.get("data_date"),
+                                                 "attempts": _REGEN_SCHED.get("attempts"),
+                                                 "dl_daily": _os.environ.get("GUANLAN_DL_DAILY") == "1"},
                              "rerank_scheduler": {"enabled": _os.environ.get("GUANLAN_RERANK_DAILY") == "1",
                                                   "requires": "GUANLAN_REGEN_DAILY=1(随 regen 顺跑)"}})
 

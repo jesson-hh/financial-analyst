@@ -28,7 +28,8 @@ class DLSource:
     score_col: str = "pred_ret_5d"
     weight_mode: str = "adaptive"          # "adaptive"(按近期 ICIR)| "fixed"
     fixed_w: Optional[float] = None
-    max_stale_days: int = 4                # 新鲜度容忍窗(自然日);超窗诚实断供退出
+    max_stale_days: int = 3                # 新鲜度容忍窗(**交易日**);超窗诚实断供退出
+                                           # (原自然日≤4:长假后首个交易日必集体误报断供)
 
 
 def dl_mix_scores(score_lgb: pd.Series, dl_scores: dict, weights: dict,
@@ -65,11 +66,22 @@ def dl_mix_scores(score_lgb: pd.Series, dl_scores: dict, weights: dict,
     return mixed, {"active": True, "w_lgb": w_lgb, "sources": src_info}
 
 
+def _trade_days_between(latest: pd.Timestamp, today: pd.Timestamp, trade_cal=None) -> int:
+    """交易日距离 =(latest, today] 内的交易日数(latest==today → 0)。
+    有真日历(bins/面板日期序列,调用方现算传入)→ 按日历数;缺日历 → np.busday_count
+    工作日近似(周末不误报;法定长假仍偏保守——生产 regen 路径恒有面板日历,不走此支)。"""
+    if trade_cal is not None and len(trade_cal):
+        cal = pd.DatetimeIndex(pd.to_datetime(trade_cal)).normalize().unique().sort_values()
+        return int(cal.searchsorted(today, side="right") - cal.searchsorted(latest, side="right"))
+    return int(np.busday_count(latest.date(), today.date()))
+
+
 def _load_dl_for_date(path: str, ld: pd.Timestamp, score_col: str = "pred_ret_5d",
-                      max_stale_days: int = 4):
+                      max_stale_days: int = 3, trade_cal=None):
     """读 DL 预测 parquet → (当日或容忍窗内最近一期 series, 全表 df, train_cutoff, stale_days, fail)。
-    新鲜度容忍:当日缺 → 取窗内(自然日 ≤ max_stale_days)最近一期(过去预测,零前视),
-    stale_days 显形;超窗 → 诚实断供退出。当日命中 stale_days=0(行为与旧版一致)。
+    新鲜度容忍:当日缺 → 取窗内(**交易日** ≤ max_stale_days)最近一期(过去预测,零前视),
+    stale_days(交易日)显形;超窗 → 诚实断供退出。当日命中 stale_days=0(行为与旧版一致)。
+    trade_cal=交易日历(缺省 np.busday 工作日近似,见 _trade_days_between)。
     cutoff 取**所用截面**那行的 train_cutoff(滚动表多日累积,全表 iloc[0]=最旧日→lookahead/显示会错)。"""
     if not path or not os.path.exists(path):
         return None, None, None, None, "预测文件不存在,退出(离线产出:见 scripts/fincast_predict.py 同款工具)"
@@ -94,9 +106,9 @@ def _load_dl_for_date(path: str, ld: pd.Timestamp, score_col: str = "pred_ret_5d
         if past.empty:
             return None, df, None, None, f"无 {today.date()} 预测且无更早预测,退出"
         latest = past.max()
-        stale_days = int((today - latest).days)
+        stale_days = _trade_days_between(latest, today, trade_cal)
         if stale_days > max_stale_days:
-            return None, df, None, None, f"预测断供 {stale_days} 日(>{max_stale_days}),退出"
+            return None, df, None, None, f"预测断供 {stale_days} 交易日(>{max_stale_days}),退出"
         sub = df[ev == latest]
     cutoff = None
     if "train_cutoff" in sub.columns and len(sub):
@@ -133,10 +145,18 @@ def apply_dl_ensemble(pred: pd.DataFrame, ld: pd.Timestamp, sources: list,
             "sources": [], "reason": None}
     inst = pred.index.get_level_values("instrument")
     lgb_by_inst = pd.Series(pred["score"].values, index=inst)
+    # 交易日历现算自面板日期序列(bins 口径,零新依赖);data 缺 → None(busday 近似兜底)
+    trade_cal = None
+    if data is not None:
+        try:
+            trade_cal = data.index.get_level_values("datetime").unique()
+        except (KeyError, AttributeError):
+            trade_cal = None
     dl_scores, weights, meta, missing = {}, {}, {}, []
     for src in sources:
         s, df, cutoff, stale_days, fail = _load_dl_for_date(
-            src.path, ld, src.score_col, max_stale_days=getattr(src, "max_stale_days", 4))
+            src.path, ld, src.score_col, max_stale_days=getattr(src, "max_stale_days", 3),
+            trade_cal=trade_cal)
         if fail is not None:
             missing.append({"model_id": src.model_id, "active": False, "weight": 0.0,
                             "n_has": 0, "lookahead": None, "stale_days": None, "reason": fail})
@@ -163,7 +183,7 @@ def apply_dl_ensemble(pred: pd.DataFrame, ld: pd.Timestamp, sources: list,
         s["fc_icir_recent"] = m.get("fc_icir_recent")
         s["stale_days"] = m.get("stale_days")
         if s.get("active") and (m.get("stale_days") or 0) > 0:
-            s["reason"] = f"{s['reason']}·旧{m['stale_days']}日"
+            s["reason"] = f"{s['reason']}·旧{m['stale_days']}交易日"
     info["sources"] = mix["sources"] + missing
     info["w_lgb"] = mix["w_lgb"]
     info["active"] = mix["active"]

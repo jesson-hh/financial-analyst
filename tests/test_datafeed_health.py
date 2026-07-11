@@ -25,7 +25,8 @@ def test_dl_all_inactive_is_stale(tmp_path, monkeypatch):
 
 
 def test_dl_active_fresh(monkeypatch):
-    prov = {"date": "2026-07-06", "active": True,
+    # prov date 用动态今日:原硬编 2026-07-06 随真实日期流逝腐烂成 stale(2026-07-11 基线已红)
+    prov = {"date": _today_iso(), "active": True,
             "sources": [{"model_id": "fincast", "active": True, "stale_days": 0},
                         {"model_id": "lstm", "active": True, "stale_days": 1}]}
     monkeypatch.setattr(h, "_read_json", lambda path: prov)
@@ -56,6 +57,35 @@ def test_dl_active_stale_days_none_is_suspicious(monkeypatch):
     prov = {"date": _today_iso(), "sources": [{"model_id": "x", "active": True, "stale_days": None}]}
     monkeypatch.setattr(h, "_read_json", lambda path: prov)
     assert h._item_dl()["status"] == "stale"       # 活跃源未记 stale_days → 保守判陈旧
+
+
+def test_dl_stale_note_mentions_producer_hook(monkeypatch):
+    """T3:断供/陈旧 note 必写「regen 不自愈,需 DL 生产器」,GUANLAN_DL_DAILY 状态诚实反映
+    env(开=已挂/关=未挂,绝不冒充已挂)。"""
+    prov = {"date": "2020-01-01", "active": True,
+            "sources": [{"model_id": "x", "active": True, "stale_days": 9}]}
+    monkeypatch.setattr(h, "_read_json", lambda path: prov)
+    monkeypatch.setenv("GUANLAN_DL_DAILY", "1")
+    out = h._item_dl()
+    assert out["status"] == "stale" and "regen 不自愈" in out["note"]
+    assert "GUANLAN_DL_DAILY 已挂" in out["note"]
+    monkeypatch.delenv("GUANLAN_DL_DAILY", raising=False)
+    assert "GUANLAN_DL_DAILY 未挂" in h._item_dl()["note"]
+
+
+def test_age_busdays_weekend_gap(monkeypatch):
+    """交易日窗核心修:周五产物到下周一,自然日 3 但工作日 1 → 不因周末误报龄期。"""
+    from datetime import date
+
+    class _FD(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 7, 13)                # 2026-07-13 = 周一
+
+    monkeypatch.setattr(h, "_date", _FD)
+    assert h._age_busdays("2026-07-10") == 1       # 上周五 → 1 工作日
+    assert h._age_days("2026-07-10") == 3          # 自然日口径对照:3
+    assert h._age_busdays(None) is None and h._age_busdays("不是日期") is None
 
 
 def _today_iso():

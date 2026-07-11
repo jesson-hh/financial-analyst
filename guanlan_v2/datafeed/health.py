@@ -15,7 +15,8 @@ from typing import Any, Dict, Optional
 # 阈值(自然日/小时;超则 stale)
 _V4_STALE_DAYS = 3
 _BASIC_STALE_DAYS = 5
-_DL_STALE_DAYS = 4
+_DL_STALE_DAYS = 3      # **交易日**窗(与 dl_ensemble.DLSource.max_stale_days 对齐;
+                        # 原自然日≤4:长假后首个交易日必集体误报断供)
 _TENCENT_STALE_HOURS = 24
 _PIT_STALE_DAYS = 3
 _TAPE_STALE_MIN = 30    # 盘口快照:SWR 常态 <3min;超 30min 未刷(服务停摆/盘后)→ stale
@@ -31,6 +32,20 @@ def _age_days(iso: Optional[str]) -> Optional[int]:
     try:
         y, m, d = (int(x) for x in s.split("-"))
         return (_date.today() - _date(y, m, d)).days
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _age_busdays(iso: Optional[str]) -> Optional[int]:
+    """ISO 日期串 → 距今工作日数(np.busday 近似交易日;周末不计入——长假仍偏保守,
+    本模块只读 JSON 无交易日历,诚实近似而非冒充真日历)。不可解析→None。"""
+    if not iso:
+        return None
+    s = str(iso)[:10]
+    try:
+        import numpy as _np
+        y, m, d = (int(x) for x in s.split("-"))
+        return int(_np.busday_count(_date(y, m, d), _date.today()))
     except Exception:  # noqa: BLE001
         return None
 
@@ -122,7 +137,7 @@ def _item_dl() -> Dict[str, Any]:
     srcs = []
     any_active_stale = False
     for s in prov.get("sources") or []:
-        sd = s.get("stale_days")
+        sd = s.get("stale_days")            # 单位=交易日(dl_ensemble 落盘口径)
         active = bool(s.get("active"))
         # 活跃源:stale_days 超窗 或 未记(None)都算可疑陈旧(诚实偏保守)
         if active and (sd is None or (isinstance(sd, (int, float)) and sd > _DL_STALE_DAYS)):
@@ -133,13 +148,21 @@ def _item_dl() -> Dict[str, Any]:
     # 关键(评审 Important,真机坐实):per-source stale_days 是 regen 落盘那刻冻结的快照,
     # regen 一停摆就永远停在旧值(通常 0)→ 会把 6 天前的 DL 误报 fresh。必须再用
     # provenance 自身的 date 龄期兜底:整份产物超窗即 stale,不看冻结的 per-source。
+    # 龄期改工作日计(_age_busdays):周末不再把周五产物误报 stale(交易日窗口径对齐)。
     prov_age = _age_days(prov.get("date"))
-    prov_stale = prov_age is not None and prov_age > _DL_STALE_DAYS
+    prov_age_bd = _age_busdays(prov.get("date"))
+    prov_stale = prov_age_bd is not None and prov_age_bd > _DL_STALE_DAYS
     status = "stale" if (any_active_stale or n_active == 0 or prov_stale) else "fresh"
     note = ("DL 全断供(退纯 LGB)" if n_active == 0
-            else (f"DL provenance 已 {prov_age} 天未刷新(regen 停摆?)" if prov_stale
+            else (f"DL provenance 已 {prov_age_bd} 交易日未刷新(regen 停摆?)" if prov_stale
                   else ("有活跃源超窗陈旧" if any_active_stale else "")))
+    if status == "stale":
+        # DL 断供 regen 不自愈(regen 只读 DL parquet 不产它),须生产器日跑挂上才回血
+        import os as _os
+        _on = _os.environ.get("GUANLAN_DL_DAILY") == "1"
+        note = f"{note}·regen 不自愈,需 DL 生产器(GUANLAN_DL_DAILY {'已挂' if _on else '未挂'})"
     return {"status": status, "date": prov.get("date"), "prov_age_days": prov_age,
+            "prov_age_busdays": prov_age_bd,
             "active": bool(prov.get("active")), "n_active": n_active,
             "sources": srcs, "note": note}
 

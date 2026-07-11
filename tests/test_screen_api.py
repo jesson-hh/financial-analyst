@@ -400,45 +400,153 @@ def test_record_picks_never_raises():
     assert _record_picks(body, malformed, "prod", "2026-07-01") is False
 
 
-# ── P1 §4: regen 每日定时(opt-in 默认关)────────────────────────────────────
+# ── P1 §4→T3: regen 数据到即再生(opt-in 默认关)─────────────────────────────
+
+def _sched_dict(**kw):
+    """_REGEN_SCHED 测试底座(T3 后含 data_date/attempts)。"""
+    base = {"enabled": True, "last_auto_ts": None, "last_auto_date": None,
+            "data_date": None, "attempts": 0}
+    base.update(kw)
+    return base
+
 
 def test_regen_scheduler_default_off(monkeypatch):
     import guanlan_v2.screen.api as api
     monkeypatch.delenv("GUANLAN_REGEN_DAILY", raising=False)
     monkeypatch.setattr(api, "_regen_sched_started", False)
-    monkeypatch.setattr(api, "_REGEN_SCHED",
-                        {"enabled": False, "last_auto_ts": None, "last_auto_date": None})
+    monkeypatch.setattr(api, "_REGEN_SCHED", _sched_dict(enabled=False))
     api.start_regen_daily_scheduler()
     assert api._REGEN_SCHED["enabled"] is False                # env 缺省=不起线程,零行为变化
     assert api._regen_sched_started is False
 
 
-def test_regen_sched_tick_fires_once_per_day(monkeypatch):
+def test_regen_sched_tick_fires_on_new_data_date(monkeypatch):
+    """数据到即再生:数据日 > 榜日 → 触发(上午也触发——18 点门已废);
+    数据未更新(==榜日)→ 不动;DL 生产器先于 regen 顺跑(时序)。"""
     import datetime as dt
     import guanlan_v2.screen.api as api
-    calls = {"n": 0, "src": None}
+    order = []
 
     def _spy(end=None, source="manual"):
-        calls["n"] += 1
-        calls["src"] = source
+        order.append(("regen", source))
         return True
 
     monkeypatch.setattr(api, "_start_regen_bg", _spy)
+    monkeypatch.setattr(api, "_run_dl_producers", lambda: order.append(("dl", None)))
     rr = []
     monkeypatch.setattr(api, "_maybe_daily_rerank", lambda *a, **k: rr.append(1))
-    monkeypatch.setattr(api, "_REGEN_SCHED",
-                        {"enabled": True, "last_auto_ts": None, "last_auto_date": None})
-    monkeypatch.delenv("GUANLAN_REGEN_DAILY_HOUR", raising=False)
-    assert api._regen_sched_tick(dt.datetime(2026, 7, 2, 17, 59)) is False   # 未到 18 点
-    assert calls["n"] == 0
-    assert api._regen_sched_tick(dt.datetime(2026, 7, 2, 18, 1)) is True     # 触发
-    assert calls["n"] == 1 and api._REGEN_SCHED["last_auto_ts"].startswith("2026-07-02T18:01")
-    assert calls["src"] == "scheduler"          # 调度器来源旗标(成功后才回调日跑)
-    assert rr == []                             # 时序修:tick 不再同步触发日跑(旧榜脏读)
-    assert api._regen_sched_tick(dt.datetime(2026, 7, 2, 20, 0)) is False    # 当日不重复
-    assert calls["n"] == 1
-    assert api._regen_sched_tick(dt.datetime(2026, 7, 3, 18, 5)) is True     # 次日再触发
-    assert calls["n"] == 2
+    monkeypatch.setattr(api, "_REGEN_SCHED", _sched_dict())
+    monkeypatch.setattr(api, "_REGEN_STATE", dict(api._REGEN_STATE, running=False, lines=[]))
+    monkeypatch.setattr(api, "_sched_ranking_date", lambda: "2026-07-09")
+    monkeypatch.setattr(api, "_sched_latest_data_date", lambda: "2026-07-09")
+    assert api._regen_sched_tick(dt.datetime(2026, 7, 10, 19, 0)) is False   # 数据未更新:19点也不动
+    assert order == []
+    monkeypatch.setattr(api, "_sched_latest_data_date", lambda: "2026-07-10")
+    assert api._regen_sched_tick(dt.datetime(2026, 7, 10, 15, 0)) is True    # 数据日推进:15点即触发
+    assert order == [("dl", None), ("regen", "scheduler")]     # DL 生产器先行,再 regen
+    assert api._REGEN_SCHED["data_date"] == "2026-07-10" and api._REGEN_SCHED["attempts"] == 1
+    assert api._REGEN_SCHED["last_auto_ts"].startswith("2026-07-10T15:00")
+    assert rr == []                             # 时序修:tick 不同步触发日跑(旧榜脏读)
+
+
+def test_regen_sched_tick_retry_cap_then_new_data_date_resets(monkeypatch):
+    """「每日至多一次」改「每个数据日至多一次」:regen 失败(榜不推进)→ 同数据日重试
+    上限 3 次防抖;榜追平后不再触发;新数据日重置计数再触发。"""
+    import datetime as dt
+    import guanlan_v2.screen.api as api
+    calls = {"n": 0}
+
+    def _spy(end=None, source="manual"):
+        calls["n"] += 1
+        return True
+
+    monkeypatch.setattr(api, "_start_regen_bg", _spy)
+    monkeypatch.setattr(api, "_run_dl_producers", lambda: None)
+    monkeypatch.setattr(api, "_REGEN_SCHED", _sched_dict())
+    monkeypatch.setattr(api, "_REGEN_STATE", dict(api._REGEN_STATE, running=False, lines=[]))
+    monkeypatch.setattr(api, "_sched_ranking_date", lambda: "2026-07-09")
+    monkeypatch.setattr(api, "_sched_latest_data_date", lambda: "2026-07-10")
+    t = dt.datetime(2026, 7, 10, 15, 0)
+    assert api._regen_sched_tick(t) is True                    # 第 1 次
+    assert api._regen_sched_tick(t) is True                    # regen 失败榜未推进 → 第 2 次
+    assert api._regen_sched_tick(t) is True                    # 第 3 次
+    assert api._regen_sched_tick(t) is False and calls["n"] == 3   # 试满 → 停手防抖
+    monkeypatch.setattr(api, "_sched_ranking_date", lambda: "2026-07-10")
+    assert api._regen_sched_tick(t) is False                   # 榜追平(成功)→ 不再触发
+    monkeypatch.setattr(api, "_sched_latest_data_date", lambda: "2026-07-13")
+    assert api._regen_sched_tick(dt.datetime(2026, 7, 13, 15, 0)) is True   # 新数据日 → 重置重触发
+    assert api._REGEN_SCHED["attempts"] == 1 and calls["n"] == 4
+
+
+def test_regen_sched_tick_running_or_unknown_dates_no_burn(monkeypatch):
+    """再生在跑 → 让路且不耗重试额度;数据日/榜日不可得 → 诚实不动(不猜)。"""
+    import datetime as dt
+    import guanlan_v2.screen.api as api
+    calls = []
+    monkeypatch.setattr(api, "_start_regen_bg", lambda end=None, source="manual": calls.append(1) or True)
+    monkeypatch.setattr(api, "_run_dl_producers", lambda: None)
+    monkeypatch.setattr(api, "_REGEN_SCHED", _sched_dict())
+    monkeypatch.setattr(api, "_sched_ranking_date", lambda: "2026-07-09")
+    monkeypatch.setattr(api, "_sched_latest_data_date", lambda: "2026-07-10")
+    t = dt.datetime(2026, 7, 10, 15, 0)
+    monkeypatch.setattr(api, "_REGEN_STATE", dict(api._REGEN_STATE, running=True, lines=[]))
+    assert api._regen_sched_tick(t) is False                   # 在跑 → 让路
+    assert api._REGEN_SCHED["attempts"] == 0 and calls == []   # 不耗额度
+    monkeypatch.setattr(api, "_REGEN_STATE", dict(api._REGEN_STATE, running=False, lines=[]))
+    monkeypatch.setattr(api, "_sched_latest_data_date", lambda: None)
+    assert api._regen_sched_tick(t) is False                   # 数据日读失败 → 不动
+    monkeypatch.setattr(api, "_sched_latest_data_date", lambda: "2026-07-10")
+    monkeypatch.setattr(api, "_sched_ranking_date", lambda: None)
+    assert api._regen_sched_tick(t) is False and calls == []   # 榜日读失败 → 不动
+
+
+# ── T3: DL 生产器日跑(opt-in GUANLAN_DL_DAILY 默认关)──────────────────────
+
+def test_run_dl_producers_default_off(monkeypatch):
+    """GUANLAN_DL_DAILY 缺省 → 零子进程(默认关=零行为变化)。"""
+    import subprocess
+    import guanlan_v2.screen.api as api
+    monkeypatch.delenv("GUANLAN_DL_DAILY", raising=False)
+    ran = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: ran.append(a))
+    api._run_dl_producers()
+    assert ran == []
+
+
+def test_run_dl_producers_sequential_failure_isolated(monkeypatch):
+    """=1:三生产器逐个跑(fincast→lstm→gat);超时/非零退出隔离不挡后续;
+    每个 20 分钟硬顶;lstm 子进程 PYTHONPATH 带仓根+engine;日志显形。"""
+    import subprocess
+    import guanlan_v2.screen.api as api
+    monkeypatch.setenv("GUANLAN_DL_DAILY", "1")
+    seen = []
+
+    class _R:
+        def __init__(self, rc):
+            self.returncode = rc
+            self.stdout = "tail-line"
+            self.stderr = ""
+
+    def _fake_run(cmd, **kw):
+        seen.append((cmd, kw))
+        assert kw["timeout"] == api._DL_PRODUCER_TIMEOUT_SEC == 1200
+        if len(seen) == 1:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kw["timeout"])   # fincast 超时
+        if len(seen) == 2:
+            return _R(1)                                                      # lstm 非零退出
+        return _R(0)                                                          # gat 成功
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    logs = []
+    monkeypatch.setattr(api, "_sched_log", lambda m: logs.append(m))
+    api._run_dl_producers()                                    # 不抛 → 失败隔离
+    assert len(seen) == 3                                      # 一个都没被前面的失败挡住
+    assert seen[0][0][-1].endswith("fincast_predict.py")
+    assert seen[1][0][-1] == "guanlan_v2.strategy.compute.lstm_predict"
+    assert seen[2][0][-1].endswith("gat_predict.py")
+    assert "engine" in seen[1][1]["env"]["PYTHONPATH"]         # lstm 需 engine 可导
+    assert any("超时" in m for m in logs) and any("rc=1" in m for m in logs)
+    assert any("gat 成功" in m for m in logs)
 
 
 def test_after_regen_gates_daily_rerank(monkeypatch):
@@ -496,7 +604,8 @@ def test_start_regen_bg_singleflight(monkeypatch):
 def test_health_has_regen_scheduler_block():
     j = _client().get("/screen/health").json()
     assert "regen_scheduler" in j
-    assert set(j["regen_scheduler"].keys()) == {"enabled", "last_auto_ts"}
+    assert set(j["regen_scheduler"].keys()) == {"enabled", "last_auto_ts",
+                                                "data_date", "attempts", "dl_daily"}
 
 
 # ── P1 §5: models draft 过滤 + set_default 拒 draft ─────────────────────────

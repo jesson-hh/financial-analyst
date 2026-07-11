@@ -192,7 +192,7 @@ def test_load_dl_stale_within_window(tmp_path):
     from guanlan_v2.strategy.compute.dl_ensemble import _load_dl_for_date
     p = _mk_pred(tmp_path, [("2026-06-30", "SH600000", 0.01), ("2026-06-30", "SZ000001", -0.02)])
     s, df, cutoff, stale, fail = _load_dl_for_date(p, pd.Timestamp("2026-07-02"))
-    assert fail is None and stale == 2                     # 旧 2 自然日,窗内(≤4)
+    assert fail is None and stale == 2                     # 旧 2 交易日(busday 兜底),窗内(≤3)
     assert abs(float(s["SH600000"]) - 0.01) < 1e-9 and len(s) == 2   # 用的是最近一期截面
 
 
@@ -200,7 +200,24 @@ def test_load_dl_stale_beyond_window(tmp_path):
     from guanlan_v2.strategy.compute.dl_ensemble import _load_dl_for_date
     p = _mk_pred(tmp_path, [("2026-06-25", "SH600000", 0.01)])
     s, df, cutoff, stale, fail = _load_dl_for_date(p, pd.Timestamp("2026-07-02"))
-    assert s is None and "断供" in fail and "7" in fail     # 旧 7 日 > 4 → 诚实断供
+    assert s is None and "断供" in fail and "5" in fail     # 旧 5 交易日 > 3 → 诚实断供
+
+
+def test_load_dl_stale_trading_days_across_holiday(tmp_path):
+    """长假核心修:自然日 9 天但真日历下交易日距离 1 → 窗内不误报断供(原自然日≤4 必炸)。"""
+    from guanlan_v2.strategy.compute.dl_ensemble import _load_dl_for_date
+    p = _mk_pred(tmp_path, [("2026-09-30", "SH600000", 0.01), ("2026-09-30", "SZ000001", 0.02)])
+    cal = pd.to_datetime(["2026-09-28", "2026-09-29", "2026-09-30", "2026-10-09"])
+    s, df, cutoff, stale, fail = _load_dl_for_date(p, pd.Timestamp("2026-10-09"), trade_cal=cal)
+    assert fail is None and stale == 1 and len(s) == 2
+
+
+def test_load_dl_no_cal_busday_fallback_is_conservative(tmp_path):
+    """缺日历 → busday 工作日近似:跨长假(工作日 7 > 3)诚实断供(偏保守,不冒充有日历)。"""
+    from guanlan_v2.strategy.compute.dl_ensemble import _load_dl_for_date
+    p = _mk_pred(tmp_path, [("2026-09-30", "SH600000", 0.01)])
+    s, df, cutoff, stale, fail = _load_dl_for_date(p, pd.Timestamp("2026-10-09"))
+    assert s is None and "断供" in fail
 
 
 def test_load_dl_same_day_stale_zero(tmp_path):
@@ -219,4 +236,24 @@ def test_apply_dl_ensemble_stale_days_in_sources(tmp_path):
     info = apply_dl_ensemble(pred, pd.Timestamp("2026-07-02"),
                              [DLSource(model_id="x", path=p, weight_mode="fixed", fixed_w=0.3)])
     src = next(s for s in info["sources"] if s["model_id"] == "x")
-    assert src["active"] is True and src["stale_days"] == 2 and "旧2日" in src["reason"]
+    assert src["active"] is True and src["stale_days"] == 2 and "旧2交易日" in src["reason"]
+
+
+def test_apply_dl_ensemble_derives_trade_cal_from_panel(tmp_path):
+    """apply_dl_ensemble 从面板 datetime 层现算交易日历(bins 口径零新依赖):
+    跨长假(自然 9 日)DL 预测按真日历距离 1 交易日 → 仍窗内活跃。"""
+    from guanlan_v2.strategy.compute.dl_ensemble import apply_dl_ensemble, DLSource
+    codes = [f"SH{600000 + k}" for k in range(60)]                   # 60 只 ≥ MIN_MATCH
+    p = _mk_pred(tmp_path, [("2026-09-30", c, 0.001 * i) for i, c in enumerate(codes)])
+    idx = pd.MultiIndex.from_tuples([(c, pd.Timestamp("2026-10-09")) for c in codes],
+                                    names=["instrument", "datetime"])
+    pred = pd.DataFrame({"score": [float(k) for k in range(60)]}, index=idx)
+    d_idx = pd.MultiIndex.from_product(                              # 面板:节前节后交易日,长假无行
+        [codes, pd.to_datetime(["2026-09-29", "2026-09-30", "2026-10-09"])],
+        names=["instrument", "datetime"])
+    data = pd.DataFrame({"close": 1.0}, index=d_idx)
+    info = apply_dl_ensemble(pred, pd.Timestamp("2026-10-09"),
+                             [DLSource(model_id="x", path=p, weight_mode="fixed", fixed_w=0.3)],
+                             data=data)
+    src = next(s for s in info["sources"] if s["model_id"] == "x")
+    assert src["active"] is True and src["stale_days"] == 1          # 真日历:1 交易日,不误报断供
