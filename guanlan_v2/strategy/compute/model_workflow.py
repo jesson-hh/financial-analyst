@@ -89,8 +89,14 @@ def train_promote(spec: Dict[str, Any]) -> Dict[str, Any]:
     rank_df = pd.DataFrame({
         "code": [str(c) for c in codes],
         "date": pd.Timestamp(last).date().isoformat(),
+        "lgb_score": pred.values,   # 原始预测值(与 prod 契约 lgb_score 同位,别只留分位丢真值)
         "lgb_pct": pred.rank(pct=True).values,
     })
+    # lgb_rank:按预测值降序名次(method="first" 并列稳定、1 起),与 prod 契约同语义
+    rank_df["lgb_rank"] = rank_df["lgb_score"].rank(ascending=False, method="first").astype(int)
+    # T2(2026-07-11):附着五维评级 → 7 列 == prod 契约 V4_COLUMNS,选股页②决策自然复活;
+    # dims 缺失/跨日/异常 → 原样 3+2 列 + 诚实 reason(附着失败绝不 fail 训练)
+    rank_df, v4info = _attach_v4_dims(rank_df)
 
     oos_ic = _holdout_oos_ic(kind, body.params, fe_df, label_s, fwd_days=fwd_days, frac=0.2)
     meta = {
@@ -99,6 +105,7 @@ def train_promote(spec: Dict[str, Any]) -> Dict[str, Any]:
         "oos_ic": oos_ic, "n_features": len(feature_names),
         "universe": body.universe, "asof": rank_df["date"].iloc[0],
         "created": spec.get("created") or "", "hyper": hyper,
+        "v4_rating": v4info,   # 五维附着结果(attached/dims_date/n_rated 或诚实 reason)
     }
     if spec.get("status"):                   # P4:调用方强制状态(研究回路恒 draft);门只降不升
         meta["status"] = str(spec["status"])
@@ -107,11 +114,63 @@ def train_promote(spec: Dict[str, Any]) -> Dict[str, Any]:
         reg.save_variant(spec["variant_id"], rank_df, meta)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "reason": f"入库失败: {type(exc).__name__}: {exc}"}
-    res: Dict[str, Any] = {"ok": True, "variant_id": spec["variant_id"], "oos_ic": oos_ic}
+    res: Dict[str, Any] = {"ok": True, "variant_id": spec["variant_id"], "oos_ic": oos_ic,
+                           "v4_rating": v4info}
     if meta.get("status") == "draft":
         res["status"] = "draft"
         res["gate"] = meta.get("gate")
     return res
+
+
+def _attach_v4_dims(rank_df):
+    """变体排名附着五维评级(v4_total/v4_layer):3+2 列 → 7 列(== prod 契约 V4_COLUMNS)。
+
+    为什么:变体 parquet 只有 code/date/lgb_pct(现加 lgb_score/lgb_rank)→ 选股页②决策
+    恒空。四个非模型维(fs/ts/vs/ud)+市值分层来自 prod regen 顺手落的全截面侧产物
+    v4_dims_latest.parquet(见 v4.compute_dims);model 维 ms=变体**自己的** lgb_pct 分位
+    (rp=1-lgb_pct,阈值表与 _score_top200 逐档一致,封 ±mc)。只给变体自己的前 200 名
+    评级(与 prod「仅顶200有评级」同语义),其余行 v4_total=NaN / v4_layer=None。
+
+    诚实红线:dims 缺失 / dims 日期 ≠ 变体排名日期 → 原样返回 + reason(绝不跨日冒充);
+    任何异常 → 原样返回(附着失败绝不 fail 训练,排名本体依旧可用)。
+    返回 (rank_df, info):info = {attached, dims_date?, n_rated?} 或 {attached: False, reason}。"""
+    try:
+        import numpy as np
+        import pandas as pd
+        from guanlan_v2.strategy import paths   # 惰性 import + 属性访问:测试可 monkeypatch
+
+        p = paths.V4_DIMS_PARQUET
+        if not p.exists():
+            return rank_df, {"attached": False, "reason": "dims 产物缺失(需先跑一次 regen)"}
+        dims = pd.read_parquet(p)
+        dd = str(dims["date"].iloc[0])
+        rd = str(rank_df["date"].iloc[0])
+        if dd != rd:
+            return rank_df, {"attached": False,
+                             "reason": f"dims 日期 {dd} ≠ 变体排名日期 {rd},拒绝跨日冒充"}
+        # eligible 门(mv>30亿 / 3<close<500 / 非ST)∩ 变体榜 → 候选;
+        # 按**变体自身** lgb_pct 降序取前 200(与 prod 顶200同口径,但榜是变体自己的)
+        elig = dims[dims["eligible"] == True]  # noqa: E712 — parquet 读回容忍非纯 bool dtype
+        cand = rank_df.merge(elig[["code", "layer", "mc", "fs", "ts", "vs", "ud"]],
+                             on="code", how="inner")
+        top = cand.sort_values("lgb_pct", ascending=False).head(200).copy()
+        # ms(model 维):rp = 1 - lgb_pct ≈「分位更高者占比」,阈值表同 _score_top200
+        rp = (1.0 - top["lgb_pct"]).to_numpy()
+        ms = np.select([rp < 0.05, rp < 0.15, rp < 0.3, rp < 0.5, rp < 0.7, rp < 0.85],
+                       [2, 2, 1, 1, 0, -1], default=-2)
+        mc = top["mc"].to_numpy()
+        ms = np.clip(ms, -mc, mc)   # 大盘 mc=1 封顶(rp<0.05 → ms=1 不是 2),同 prod
+        top["v4_total"] = (top["fs"].to_numpy() + top["ts"].to_numpy() + ms
+                           + top["vs"].to_numpy() + top["ud"].to_numpy()).astype(int)
+        top["v4_layer"] = top["layer"]
+        # left-merge 回完整榜:未入前200 → v4_total=NaN / v4_layer=None(诚实,不冒充有评级)
+        out = rank_df.merge(top[["code", "v4_total", "v4_layer"]], on="code", how="left")
+        from guanlan_v2.strategy.ranking import V4_COLUMNS
+        head = [c for c in V4_COLUMNS if c in out.columns]   # 列顺序对齐 prod 契约
+        out = out[head + [c for c in out.columns if c not in head]]
+        return out, {"attached": True, "dims_date": dd, "n_rated": int(len(top))}
+    except Exception as exc:  # noqa: BLE001 — 附着失败绝不 fail 训练(诚实降级为无评级榜)
+        return rank_df, {"attached": False, "reason": f"{type(exc).__name__}: {exc}"}
 
 
 def retrain_variant(vid: str) -> Dict[str, Any]:
@@ -145,6 +204,7 @@ def retrain_variant(vid: str) -> Dict[str, Any]:
 
     new_meta = reg.variant_meta(vid)   # 复读取重训后 asof(诚实取真值,不回填 spec)
     universe = new_meta.get("universe") or recipe2.get("universe") or "all"
+    # 注意:res 来自 train_promote,已带 v4_rating(五维附着结果)——update 只增键不覆盖它
     res.update({
         "ok": True, "variant_id": vid, "date": new_meta.get("asof"),
         "oos_ic": new_meta.get("oos_ic"), "universe": universe,
