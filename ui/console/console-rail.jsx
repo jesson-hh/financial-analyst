@@ -53,6 +53,7 @@ function WwRail({ state, sessions, onNew, onSwitch, onUpdate }) {
           </div>
         </div>
       ))}
+      {window.WwReviewReportCard && <WwReviewReportCard />}
       <h3 style={WW_RAIL_H3}>会话</h3>
       <div style={{ overflowY: 'auto', minHeight: 0 }}>
         {ungrouped.map(sessRow)}
