@@ -1116,74 +1116,85 @@ function RunDecCard({ dec }) {
         <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', marginTop: 3 }}>{dec.asof ? 'as-of ' + String(dec.asof).slice(0, 10) : ''}{dec.model_name ? ' · ' + dec.model_name : ''}</div>
       </div>
       <div style={{ padding: '13px 15px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-        {dec.rationale && <div className="serif" style={{ fontSize: 12.5, color: 'var(--ink-1)', lineHeight: 1.6, textWrap: 'pretty' }}>「{dec.rationale}」</div>}
-        {(dec.key_evidence || []).length > 0 && (
-          <Field label="关键证据">
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-              {dec.key_evidence.map((k, i) => <div key={i} className="mono" style={{ fontSize: 9.5, color: 'var(--ink-2)', lineHeight: 1.5 }}>· {k}</div>)}
-            </div>
-          </Field>
-        )}
-        {(dec.recipe_factors_vintage || []).length > 0 && (
-          <Field label="配方因子 vintage IC(as-of·真OOS·不进信号)">
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-              {dec.recipe_factors_vintage.map((f, i) => (
-                <span key={f.id || f.name || i} className="mono" style={{ fontSize: 8.5, color: f.ic == null ? 'var(--ink-3)' : 'var(--yin)', border: '1px solid var(--line)', borderRadius: 4, padding: '1px 5px' }}>
-                  {f.name}{f.ic == null ? ' · 样本不足' : ` · IC@${String(f.asof).slice(0, 10)}=${f.ic} · n${f.n} · ${f.kind === 'tsic' ? '本票' : '截面'}`}
-                </span>
-              ))}
-            </div>
-          </Field>
-        )}
-        {/* P3:加权混合(因子进信号)。w>0 显混合方向/bias/因子分;w=0 显纯 LLM。读 runDecs 透传的 dec.* */}
-        {(dec.w || 0) > 0 ? (
-          <Field label="混合决策(因子进信号)">
-            <div className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', lineHeight: 1.5 }}>
-              {dec.hybrid_direction || dec.direction}
-              {dec.hybrid_bias != null ? ` · bias=${dec.hybrid_bias}` : ''}
-              {dec.factor_score != null ? ` · 因子分=${dec.factor_score}` : ' · 无因子信号'}
-              {` · w=${dec.w}`}
-            </div>
-          </Field>
-        ) : (
-          <Field label="混合决策"><div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)' }}>纯 LLM(w=0)</div></Field>
-        )}
-        {(dec.recipe_factors || []).length > 0 && !(dec.recipe_factors_vintage || []).length && (
-          <Field label="配方因子(供参考·未回测)">
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-              {dec.recipe_factors.map((f, i) => <span key={i} className="mono" style={{ fontSize: 8.5, color: 'var(--ink-2)', border: '1px solid var(--line)', borderRadius: 4, padding: '1px 5px' }}>{(f && f.name) || String(f)}</span>)}
-            </div>
-          </Field>
-        )}
-        {(dec.card_names || []).length > 0 && (
-          <Field label="命中经验卡">
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-              {dec.card_names.map((c, i) => <span key={i} className="mono" style={{ fontSize: 8.5, color: 'var(--yin)', border: '1px solid var(--line)', borderRadius: 4, padding: '1px 5px' }}>⌘ {String(c)}</span>)}
-            </div>
-          </Field>
-        )}
-        {(dec.research || []).length > 0 && (
-          <Field label="当日浮出研报(PIT 按日)">
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-              {dec.research.map((t, i) => <div key={i} className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', lineHeight: 1.5 }}>📄 {typeof t === 'string' ? t : (t && t.title) || ''}</div>)}
-            </div>
-          </Field>
-        )}
-        {dec.regime_asof && (
-          <Field label="当日大盘(PIT 日产物)">
-            <div className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', lineHeight: 1.5 }}>{dec.regime_asof}</div>
-          </Field>
-        )}
-        {dec.factors_std && (
-          <Field label="当时因子读数(PIT 真值)">
-            <div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', lineHeight: 1.7 }}>
-              {Object.entries(dec.factors_std).map(([k, v]) => k + '=' + (typeof v === 'number' ? v.toFixed(3) : v)).join(' · ')}
-            </div>
-          </Field>
-        )}
-        <ReasoningChain reasoning={dec.reasoning} />
+        <EvidenceFields dec={dec} />
       </div>
     </div>
+  );
+}
+
+// ───────── 证据链渲染(2026-07-11 三页重排:RunDecCard / JudgeCard 时间线共用)─────────
+//   容忍两种行形状:run 映射行(conf)与落盘原始行(confidence);字段缺席即不渲染,绝不编造。
+function EvidenceFields({ dec }) {
+  if (!dec) return null;
+  return (
+    <React.Fragment>
+      {dec.rationale && <div className="serif" style={{ fontSize: 12.5, color: 'var(--ink-1)', lineHeight: 1.6, textWrap: 'pretty' }}>「{dec.rationale}」</div>}
+      {(dec.key_evidence || []).length > 0 && (
+        <Field label="关键证据">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+            {dec.key_evidence.map((k, i) => <div key={i} className="mono" style={{ fontSize: 9.5, color: 'var(--ink-2)', lineHeight: 1.5 }}>· {k}</div>)}
+          </div>
+        </Field>
+      )}
+      {(dec.recipe_factors_vintage || []).length > 0 && (
+        <Field label="配方因子 vintage IC(as-of·真OOS·不进信号)">
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+            {dec.recipe_factors_vintage.map((f, i) => (
+              <span key={f.id || f.name || i} className="mono" style={{ fontSize: 8.5, color: f.ic == null ? 'var(--ink-3)' : 'var(--yin)', border: '1px solid var(--line)', borderRadius: 4, padding: '1px 5px' }}>
+                {f.name}{f.ic == null ? ' · 样本不足' : ` · IC@${String(f.asof).slice(0, 10)}=${f.ic} · n${f.n} · ${f.kind === 'tsic' ? '本票' : '截面'}`}
+              </span>
+            ))}
+          </div>
+        </Field>
+      )}
+      {/* P3:加权混合(因子进信号)。w>0 显混合方向/bias/因子分;w=0/缺席 显纯 LLM。 */}
+      {(dec.w || 0) > 0 ? (
+        <Field label="混合决策(因子进信号)">
+          <div className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', lineHeight: 1.5 }}>
+            {dec.hybrid_direction || dec.direction}
+            {dec.hybrid_bias != null ? ` · bias=${dec.hybrid_bias}` : ''}
+            {dec.factor_score != null ? ` · 因子分=${dec.factor_score}` : ' · 无因子信号'}
+            {` · w=${dec.w}`}
+          </div>
+        </Field>
+      ) : (
+        <Field label="混合决策"><div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)' }}>纯 LLM(w=0)</div></Field>
+      )}
+      {(dec.recipe_factors || []).length > 0 && !(dec.recipe_factors_vintage || []).length && (
+        <Field label="配方因子(供参考·未回测)">
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+            {dec.recipe_factors.map((f, i) => <span key={i} className="mono" style={{ fontSize: 8.5, color: 'var(--ink-2)', border: '1px solid var(--line)', borderRadius: 4, padding: '1px 5px' }}>{(f && f.name) || String(f)}</span>)}
+          </div>
+        </Field>
+      )}
+      {(dec.card_names || []).length > 0 && (
+        <Field label="命中经验卡">
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+            {dec.card_names.map((c, i) => <span key={i} className="mono" style={{ fontSize: 8.5, color: 'var(--yin)', border: '1px solid var(--line)', borderRadius: 4, padding: '1px 5px' }}>⌘ {String(c)}</span>)}
+          </div>
+        </Field>
+      )}
+      {(dec.research || []).length > 0 && (
+        <Field label="当日浮出研报(PIT 按日)">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+            {dec.research.map((t, i) => <div key={i} className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', lineHeight: 1.5 }}>📄 {typeof t === 'string' ? t : (t && t.title) || ''}</div>)}
+          </div>
+        </Field>
+      )}
+      {dec.regime_asof && (
+        <Field label="当日大盘(PIT 日产物)">
+          <div className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', lineHeight: 1.5 }}>{dec.regime_asof}</div>
+        </Field>
+      )}
+      {dec.factors_std && (
+        <Field label="当时因子读数(PIT 真值)">
+          <div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', lineHeight: 1.7 }}>
+            {Object.entries(dec.factors_std).map(([k, v]) => k + '=' + (typeof v === 'number' ? v.toFixed(3) : v)).join(' · ')}
+          </div>
+        </Field>
+      )}
+      <ReasoningChain reasoning={dec.reasoning} />
+    </React.Fragment>
   );
 }
 
@@ -1618,4 +1629,154 @@ function DecisionCard({ dec, symbol, mode }) {
   );
 }
 
-Object.assign(window, { MiniLine, MarketBar, MetricsStrip, SeatRail, LiveDecideFlow, DecisionCard, DecisionHistory, ReasoningChain, LedgerPanel, pct, plFmt });
+// ───────── 研判卡(2026-07-11 三页重排:LiveDecideFlow + DecisionCard「席位·agent 研判」区 合一)─────────
+//   「▶ 研判一次」真调 /seats/decide + 研判时间线(后端落盘全量,修旧「流水只留最新1条」名实不符);
+//   行点开 = EvidenceFields 完整证据链。industry 传真值(修旧 runTimedDecide 恒空 bug)。
+function JudgeCard({ code, name, industry, strat, regime }) {
+  const [decide, setDecide] = useState(null);
+  const [deciding, setDeciding] = useState(false);
+  const [agentMode, setAgentMode] = useState('deep');
+  const [rows, setRows] = useState(null);
+  const [openId, setOpenId] = useState(null);
+  const [histOpen, setHistOpen] = useState(false);
+  const [bump, setBump] = useState(0);
+  useEffect(() => {
+    let alive = true; setDecide(null); setOpenId(null);
+    if (window.lzFetchDecisionsTimeline) window.lzFetchDecisionsTimeline(code, 40)
+      .then(ds => { if (alive) setRows(ds ? ds.filter(d => d.kind !== 'order') : null); });
+    else setRows(null);
+    return () => { alive = false; };
+  }, [code, bump]);
+  const runDecide = () => {
+    if (!window.lzSeatDecide || deciding || !strat) return;
+    setDeciding(true); setDecide(null);
+    const rcp = window.lzRecipeForStrategy ? window.lzRecipeForStrategy(strat.id) : { cards: [], research: [], factors: [] };
+    window.lzSeatDecide({
+      code, name, date: new Date().toISOString().slice(0, 10),
+      seat_cn: strat.name, creed: strat.creed || '', mode: agentMode,
+      strategy_id: strat.id, strategy_name: strat.name,
+      industry: industry || '',
+      card: rcp.cards[0] ? { name: rcp.cards[0].name, insight: rcp.cards[0].insight, verdict: rcp.cards[0].verdict, conf: rcp.cards[0].conf, ic: rcp.cards[0].ic } : null,
+      cards: rcp.cards, recipe_factors: rcp.factors,
+      research: rcp.research.map(r => ({ title: r.title, from: r.from || '', path: r.path || null })),
+      regime: regime || null,
+      pa: !!strat.pa,
+      pa_method: strat.pa ? (strat.paMethod || window.LZ_PA_METHOD_DEFAULT || '') : '',
+      w: isFinite(+strat.w) ? Math.max(0, Math.min(1, +strat.w)) : 0,
+    }).then(d => { setDecide(d); setDeciding(false); setBump(b => b + 1); });
+  };
+  const dirColor = (d) => d && /买/.test(d) ? 'var(--zhu)' : (d && /卖/.test(d) ? 'var(--dai)' : 'var(--ink-2)');
+  const modeBtn = (m, label, tip) => (
+    <span onClick={() => { if (!deciding) setAgentMode(m); }} title={tip}
+      style={{ fontSize: 9, padding: '2px 7px', borderRadius: 5, cursor: deciding ? 'default' : 'pointer', fontFamily: 'var(--mono)', border: '1px solid ' + (agentMode === m ? 'var(--zhu-soft)' : 'var(--line)'), background: agentMode === m ? 'rgba(168,57,45,0.07)' : 'transparent', color: agentMode === m ? 'var(--yin)' : 'var(--ink-3)', fontWeight: agentMode === m ? 600 : 400, opacity: deciding ? 0.45 : 1 }}>{label}</span>
+  );
+  return (
+    <div style={{ borderBottom: '1px solid var(--line)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '10px 13px 7px' }}>
+        <span className="serif" style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-1)' }}>研判</span>
+        <span className="mono" style={{ fontSize: 8.5, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--zhu-soft)', color: 'var(--yin)' }}>真 · LLM</span>
+        {modeBtn('fast', '快', 'deepseek-chat:几秒出方向,无思维链')}
+        {modeBtn('deep', '深', 'deepseek-reasoner:十几秒,带真思维链')}
+        <span onClick={() => setHistOpen(true)} className="mono" title="历次研判/条件单全量(落盘)"
+          style={{ marginLeft: 'auto', fontSize: 9, padding: '2px 8px', borderRadius: 5, cursor: 'pointer', border: '1px solid var(--line)', color: 'var(--ink-3)' }}>⏱ 全部</span>
+      </div>
+      <div style={{ padding: '0 13px 10px' }}>
+        {deciding ? (
+          <div className="mono" style={{ fontSize: 10.5, color: 'var(--yin)', display: 'flex', alignItems: 'center', gap: 6, padding: '6px 0' }}>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--yin)', animation: 'pulse 1s ease-in-out infinite' }} />
+            {agentMode === 'deep' ? '研判中…(reasoner 真推理,十几秒)' : '研判中…(chat 快研判,几秒)'}
+          </div>
+        ) : (
+          <div onClick={runDecide} title="真调 LLM:综合 配方卡/因子/研报 + 今日市况(仅 ≤当日信息)研判当下"
+            style={{ fontSize: 10.5, color: strat ? 'var(--yin)' : 'var(--ink-3)', cursor: strat ? 'pointer' : 'default', border: '1px dashed var(--zhu-soft)', borderRadius: 8, padding: '6px 10px', display: 'inline-block', fontFamily: 'var(--serif)' }}>
+            ▶ 研判一次{strat ? ' · ' + strat.name : '(无策略,去「策略」页建)'}
+          </div>
+        )}
+        {decide && decide.error && <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)', marginTop: 6 }}>研判失败:{decide.error} · <span onClick={runDecide} style={{ color: 'var(--yin)', cursor: 'pointer' }}>重试 →</span></div>}
+        {decide && !decide.error && (
+          <div style={{ border: '1px solid var(--zhu-soft)', borderRadius: 9, background: 'rgba(138,111,63,0.05)', padding: '9px 11px', marginTop: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="serif" style={{ fontSize: 13.5, fontWeight: 600, color: dirColor(decide.direction) }}>{decide.direction || '—'}</span>
+              {decide.confidence != null && <span className="mono" style={{ fontSize: 10.5, color: 'var(--ink-2)' }}>置信 {decide.confidence}</span>}
+              <span className="mono" style={{ marginLeft: 'auto', fontSize: 8.5, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--zhu-soft)', color: 'var(--yin)' }}>真·{(decide.model_name || 'agent').split('/').pop()}</span>
+            </div>
+            {(decide.w || 0) > 0 && (
+              <div className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', marginTop: 6 }}>
+                混合方向 <b style={{ color: 'var(--yin)' }}>{decide.hybrid_direction || decide.direction}</b>
+                {decide.factor_score != null ? ' · 因子分 ' + decide.factor_score : ' · 无因子信号'}
+                {decide.hybrid_bias != null ? ' · bias ' + decide.hybrid_bias : ''} · w={decide.w}
+              </div>
+            )}
+            <div className="serif" style={{ fontSize: 11.5, color: 'var(--ink-1)', marginTop: 5, lineHeight: 1.6, textWrap: 'pretty' }}>{decide.rationale}</div>
+            <ReasoningChain reasoning={decide.reasoning} />
+          </div>
+        )}
+        {/* 研判时间线(后端落盘,含 watcher/手动;条件单在下方「决策留痕」)*/}
+        <div style={{ marginTop: 9 }}>
+          {rows === null && <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)' }}>时间线读取中 / 后端未连…</div>}
+          {rows && rows.length === 0 && <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)' }}>本票尚无研判 —— 点上方「▶ 研判一次」,或开顶部「盯盘」由服务端盘中自动判</div>}
+          {rows && rows.slice(0, 8).map(r => {
+            const isOpen = openId === r.id;
+            return (
+              <div key={r.id} style={{ borderTop: '1px solid var(--line-soft)', padding: '6px 0' }}>
+                <div onClick={() => setOpenId(isOpen ? null : r.id)} className="hover-row" style={{ display: 'flex', alignItems: 'center', gap: 7, cursor: 'pointer' }}>
+                  <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', width: 84, flexShrink: 0 }}>{String(r.ts || '').replace('T', ' ').slice(5, 16)}</span>
+                  <span className="serif" style={{ fontSize: 12, fontWeight: 600, color: dirColor(r.direction) }}>{r.direction || '—'}</span>
+                  {r.confidence != null && <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>置信{r.confidence}</span>}
+                  <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.strategy_name || ''}</span>
+                  {r.source === 'watcher' && <span className="mono" title="服务端盯盘自动研判" style={{ fontSize: 8, padding: '1px 5px', borderRadius: 4, border: '1px solid var(--line)', color: 'var(--ink-3)' }}>盯</span>}
+                  <span className="mono" style={{ marginLeft: 'auto', fontSize: 8, color: 'var(--ink-3)' }}>{isOpen ? '▴' : '▾'}</span>
+                </div>
+                {isOpen && <div style={{ padding: '6px 2px 4px', display: 'flex', flexDirection: 'column', gap: 10 }}><EvidenceFields dec={r} /></div>}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      <DecisionHistory code={code} open={histOpen} onClose={() => setHistOpen(false)} />
+    </div>
+  );
+}
+
+// ───────── 决策留痕(2026-07-11:台账记账半边退役,只留只读时间线)─────────
+//   按日分组:研判/条件单混排(后端 seats_decisions 落盘全量);纯展示,不记现金/持仓。
+function DecisionTrail({ code }) {
+  const [rows, setRows] = useState(null);
+  useEffect(() => {
+    let alive = true; setRows(null);
+    if (window.lzFetchDecisionsTimeline) window.lzFetchDecisionsTimeline(code, 60).then(ds => { if (alive) setRows(ds); });
+    return () => { alive = false; };
+  }, [code]);
+  const days = {};
+  (rows || []).forEach(r => { const d = String(r.ts || '').slice(0, 10) || '—'; (days[d] = days[d] || []).push(r); });
+  const keys = Object.keys(days).sort().reverse();
+  const dirColor = (d) => d && /买/.test(d) ? 'var(--zhu)' : (d && /卖/.test(d) ? 'var(--dai)' : 'var(--ink-2)');
+  return (
+    <div style={{ borderBottom: '1px solid var(--line)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '10px 13px 6px' }}>
+        <span className="serif" style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-1)' }}>决策留痕</span>
+        <span className="mono" title="只读时间线(后端落盘);记账/持仓管理已退役——你在手机下单,系统只留研判与信号的痕" style={{ fontSize: 8, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--line)', color: 'var(--ink-3)' }}>只读 · 不记账</span>
+      </div>
+      <div style={{ padding: '0 13px 10px', maxHeight: 200, overflowY: 'auto' }}>
+        {rows === null && <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)' }}>读取中 / 后端未连…</div>}
+        {rows && keys.length === 0 && <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)' }}>本票暂无留痕</div>}
+        {keys.map(d => (
+          <div key={d} style={{ marginBottom: 4 }}>
+            <div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', letterSpacing: '.06em', padding: '4px 0 2px' }}>{d}</div>
+            {days[d].map(r => (
+              <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '2px 0' }}>
+                <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', width: 38, flexShrink: 0 }}>{String(r.ts || '').slice(11, 16)}</span>
+                <span className="mono" style={{ fontSize: 8, padding: '0 5px', borderRadius: 4, border: '1px solid var(--line)', color: 'var(--ink-3)', flexShrink: 0 }}>{r.kind === 'order' ? '条件单' : '研判'}</span>
+                <span className="serif" style={{ fontSize: 11, fontWeight: 600, color: dirColor(r.kind === 'order' ? r.side : r.direction) }}>{(r.kind === 'order' ? r.side : r.direction) || '—'}</span>
+                <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.strategy_name || ''}</span>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+Object.assign(window, { MiniLine, MarketBar, MetricsStrip, SeatRail, LiveDecideFlow, DecisionCard, DecisionHistory, ReasoningChain, LedgerPanel, pct, plFmt,
+  EvidenceFields, JudgeCard, DecisionTrail });   // 2026-07-11 三页重排新组件
