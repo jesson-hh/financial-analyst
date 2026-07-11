@@ -41,6 +41,15 @@ def _isolate_screen_archives(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_sentiment_store(tmp_path, monkeypatch):
+    """统一情绪 store 隔离:任何测试对 judgments/market 的写入落 tmp,绝不碰生产
+    var/sentiment(2026-07-12 事故:test_console_tools 桩数据经 _sentiment_write_through
+    写真档案,大盘判读 as_of 被冻在桩值 2026-06-13)。"""
+    from guanlan_v2.datafeed import sentiment as sm
+    monkeypatch.setattr(sm, "_ROOT", tmp_path / "sentiment")
+
+
+@pytest.fixture(autouse=True)
 def _clear_bg_inflight():
     """_bg_inflight 是模块级全局:断言失败/异常路径可能留残键,跨测试串扰 dedup/搭车判定 → 每测后清空。"""
     yield

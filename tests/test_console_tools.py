@@ -514,6 +514,7 @@ def test_news_search_impl_both_scope(monkeypatch):
             "by_code": {"SZ300750": [{"time": "2026-06-13 09:31", "title": "获批"}]},
             "model": "deepseek/deepseek-chat", "note": "ok"}
     monkeypatch.setattr(ct, "_run_news_sentiment", lambda codes, limit: fake)
+    monkeypatch.setattr(ct, "_sentiment_write_through", lambda r: None)
     res = ct.news_search_impl(code="SZ300750", scope="both")
     assert res["ok"] is True
     assert "偏多" in res["content"] and "利好" in res["content"]
