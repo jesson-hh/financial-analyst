@@ -1,5 +1,7 @@
 # seats — 席位 · 落子(A4)
 
+> **2026-07-11 三页重排(`?v=20260711r*`,feat/luozi-renovation)**:页面从「三轴八面」(盯盘·校场×复盘·实盘×单标·舰队)重排为单轴三页 **今日 | 复盘 | 策略**。①今日=票池列表(现价/最新真研判/一键盯盘开关)+K线+右栏四卡(研判卡[三卡合一,时间线读后端落盘]/条件单[保立单·验触发·8s实时比对]/决策留痕[只读]/五档盘口);②复盘=**新建回测向导**(票/策略/日期区间/日线|30min→一键真跑,与游标彻底解耦,跑完自动选中 run)+run列表+净值双线+证据卡;③策略=校场瘦身(演武退役)。**后端定时盯盘** `guanlan_v2/seats/watcher.py`:GUANLAN_SEATS_WATCH=1+运行时总闸,交易日盘中按策略节拍(hourly/daily+10min地板)自动研判绑定票,日预算24,decide 内核直调(`_decide_impl` 提取),落盘 `source:watcher`;关页面也盯。**删**:scanSeat启发式全家(演武/逐bar推演/Deliberation/舰队示意)、台账记账UI+TCA卡接线、影子组合接线、前端盯盘循环、播放条、烂尾策略实体×2。台账/校准/basket_perf 后端端点保留(帷幄在用)。审查与决策见 `docs/superpowers/specs/2026-07-11-luozi-renovation-design.md`。**挂账**:panels/data/chart 内已断线的旧组件与死导出(LedgerPanel/LiveDecideFlow/DecisionCard/SeatRail/shadow*/scanSeat本体/chart启发式层)待清扫提交;复盘向导真跑与手动研判的真 LLM e2e 待交易日实跑验证。以下为历史编年史(其中「盯盘/校场/复盘/实盘」等旧结构描述已被本次重排取代)。
+
 | 项 | 值 |
 |----|----|
 | 页面 | 观澜 · 落子.html |
