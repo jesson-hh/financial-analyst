@@ -140,9 +140,19 @@ function ModelWorkshop({ API, models, reloadModels, flash, onPick, onClose }) {
     const vid = r.variant_id;   // 训完按此 id 找回变体,核其 unsupported_factors → 诚实告知用户哪些因子被丢弃
     setTrain({ busy: true, phase: 'starting', label: '启动训练子进程…', step: 0, total: 3, elapsed: 0 });
     if (_poll.current) clearInterval(_poll.current);
+    let _fails = 0;   // 连续失败计数:≥5 次中止轮询并退出跑态(卸载清理在挂载 effect return)
     _poll.current = setInterval(async () => {
       let s = {};
-      try { s = (await window.xgTrainStatus(API)).state || {}; } catch (e) { return; }
+      try { s = (await window.xgTrainStatus(API)).state || {}; _fails = 0; }
+      catch (e) {
+        _fails += 1;
+        if (_fails >= 5) {
+          clearInterval(_poll.current); _poll.current = null;
+          setTrain(t => ({ ...t, busy: false, phase: 'poll_lost' }));
+          say('训练轮询中断', '连续 ' + _fails + ' 次状态查询失败 · 后端可能仍在训,稍后重开工坊看变体列表');
+        }
+        return;
+      }
       setTrain({ busy: !!s.running, phase: s.phase, label: s.label, step: s.step, total: s.total || 3, elapsed: s.elapsed_sec || 0 });
       if (!s.running) {
         clearInterval(_poll.current); _poll.current = null;
@@ -316,6 +326,8 @@ function XuanguApp() {
   const [rkMap, setRkMap] = useState(null);      // P6 行业重排:code → {rank_before,rank_after,stance,reason}(展示型 overlay)
 
   useEffect(() => { document.body.classList.toggle('dark', dark); }, [dark]);
+  // 口径守卫:切模型即清再打分/重排 overlay(旧 overlay 基于旧榜口径,绝不串贴到新榜)
+  useEffect(() => { setRsMap(null); setRkMap(null); }, [cfg.model]);
 
   // 从工作流 / 图谱带因子进来(P1⑨:旧版只认 4 个 demo 名,真因子被静默丢弃 → 改全目录解析)
   useEffect(() => {
@@ -371,7 +383,12 @@ function XuanguApp() {
     setLoading(true);
     window.xgBuildBackend(cfg, API)
       .then(r => { if (alive) { setResult(r); setLastRun(new Date()); setDirty(false); } })
-      .catch(e => { if (alive) flash('⚠ 选股后端失败', String((e && e.message) || e)); })
+      .catch(e => {
+        if (!alive) return;
+        flash('⚠ 选股后端失败', String((e && e.message) || e));
+        // 本次请求失败 → 旧 result 里的回落态已不描述当前请求,清掉防「⚠ 回落」徽章滞留误导
+        setResult(r => { if (!r || !r.model_fallback) return r; const { model_fallback, requested_model, fallback_reason, ...rest } = r; return rest; });
+      })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, [tick]);  // eslint-disable-line react-hooks/exhaustive-deps
@@ -497,10 +514,10 @@ function XuanguApp() {
     <div className="paper-bg" style={{ height: '100vh', display: 'flex', flexDirection: 'column', minWidth: 1340 }}>
       <TopBar cfg={cfg} result={result} onPhrase={runPhrase} onCommit={commit} dark={dark} setDark={setDark} committed={committed}
         models={models} model={cfg.model} actualModel={result.model} onModel={(v) => { setF({ model: v }); refresh(); }}
-        onWorkshop={() => setShowWs(true)} />
+        onWorkshop={() => setShowWs(true)} loading={loading} />
       <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '400px 1fr', minHeight: 0 }}>
         <ConstraintRail cfg={cfg} setF={setF} toggleFactor={toggleFactor} setFactorW={setFactorW} onReset={reset} pickFactors={pickFactors} picking={picking} result={result} committed={committed} onClearCommit={() => setCommitted(null)} />
-        <RankTable result={result} cfg={cfg} sort={sort} setSort={setSort} showBench={showBench} setShowBench={setShowBench} expanded={expanded} toggleExpand={toggleExpand} onRefresh={refresh} loading={loading} lastRun={lastRun} dirty={dirty} onRegen={regenData} regen={regen} rsMap={rsMap} setRsMap={setRsMap} rkMap={rkMap} setRkMap={setRkMap} />
+        <RankTable result={result} cfg={cfg} sort={sort} setSort={setSort} showBench={showBench} setShowBench={setShowBench} expanded={expanded} toggleExpand={toggleExpand} onRefresh={refresh} loading={loading} lastRun={lastRun} dirty={dirty} onRegen={regenData} regen={regen} rsMap={rsMap} setRsMap={setRsMap} rkMap={rkMap} setRkMap={setRkMap} flash={flash} />
       </div>
       {showWs && <ModelWorkshop API={API} models={models} reloadModels={reloadModels} flash={flash}
         onPick={(id) => { setF({ model: id }); refresh(); }} onClose={() => setShowWs(false)} />}
@@ -515,7 +532,7 @@ function XuanguApp() {
 }
 
 // ───────── 顶栏 ─────────
-function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, models, model, actualModel, onModel, onWorkshop }) {
+function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, models, model, actualModel, onModel, onWorkshop, loading }) {
   const [q, setQ] = useState('');
   // 变体口径:真正在用变体(actualModel 非 prod、未回落)时,顶栏「体检 IC / v4 provenance」两枚徽章
   //   原读 prod 全局产物(model_health / v4_b3_provenance),对变体是误标 → 换成变体自身口径。
@@ -531,7 +548,16 @@ function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, mod
       <span style={{ color: 'var(--line)' }}>|</span>
       {result.source === 'v4_ranking' ? (
         <>
-          <span className="mono" style={{ fontSize: 11, color: 'var(--ink-2)' }}>评级池 <b style={{ fontFamily: 'var(--sans)', color: 'var(--ink)' }}>v4 · {result.scored.length}</b></span>
+          {(() => {
+            // 候选池口径诚实显形:pool_kind=v4_rated(五维评级)/ lgb_pct(模型分位);旧后端缺键回退原文案
+            const pn = result.pool_n != null ? result.pool_n : result.scored.length;
+            if (result.pool_kind === 'lgb_pct') return (
+              <span className="mono" title={'候选池=全市场模型分位(lgb_pct)Top ' + pn + '(指数池/五维评级缺席时口径,非评级池)'}
+                style={{ fontSize: 11, color: 'var(--ink-2)' }}>模型分位 <b style={{ fontFamily: 'var(--sans)', color: 'var(--ink)' }}>Top {pn}</b></span>);
+            return (
+              <span className="mono" title={result.pool_kind === 'v4_rated' ? ('候选池=v4 五维评级 Top ' + pn + '(全A 口径)') : undefined}
+                style={{ fontSize: 11, color: 'var(--ink-2)' }}>评级池 <b style={{ fontFamily: 'var(--sans)', color: 'var(--ink)' }}>v4 · {pn}</b></span>);
+          })()}
           {models && models.length > 0 && (
             <select value={model} onChange={e => onModel(e.target.value)}
               title="选择 v4 模型:生产 / 训练的变体"
@@ -544,11 +570,28 @@ function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, mod
               ))}
             </select>
           )}
-          {actualModel && model && actualModel !== model && (
-            <span className="mono" title="所选变体不可用,已回落生产 v4"
-              style={{ fontSize: 9.5, color: 'var(--paper)', background: 'var(--yin)', borderRadius: 5, padding: '2px 7px' }}>⚠ 变体不可用·已用 {actualModel}</span>
+          {loading && (
+            <span className="mono" title="正在按所选模型重算…" style={{ fontSize: 9.5, color: 'var(--ink-3)', border: '1px dashed var(--line)', borderRadius: 5, padding: '2px 7px' }}>切换中…</span>
           )}
-          <span className="mono" style={{ fontSize: 11, color: 'var(--ink-3)' }}>排名日 {result.date}{result.mainline_as_of ? ' · 主线 ' + result.mainline_as_of : ''}</span>
+          {!loading && result.model_fallback === true && (
+            // 只信后端显式回落信号(model_fallback),绝不再用 actualModel!==model 竞态推断
+            <span className="mono" title={'所选变体不可用,已回落生产:' + (result.fallback_reason || '原因未知')}
+              style={{ fontSize: 9.5, color: 'var(--paper)', background: 'var(--yin)', borderRadius: 5, padding: '2px 7px' }}>⚠ 回落 {result.requested_model || '?'}→{result.model || 'prod'}</span>
+          )}
+          <span className="mono" title={isVariant ? ('静态历史截面·冻结于 ' + result.date) : undefined}
+            style={{ fontSize: 11, color: 'var(--ink-3)' }}>排名日 {result.date}{result.mainline_as_of ? ' · 主线 ' + result.mainline_as_of : ''}</span>
+          {(() => {
+            // 排名龄期显形:≥3 自然日黄 / ≥30 红;后端未给 ranking_stale_days(旧后端/解析失败)诚实不渲染
+            const sd = result.ranking_stale_days;
+            if (sd == null || sd < 3) return null;
+            const red = sd >= 30;
+            const tip = (isVariant ? '静态历史截面·冻结于 ' + result.date + ' · ' : '')
+              + '排名产物距今 ' + sd + ' 自然日' + (red ? '(截面严重陈旧,谨慎使用)' : '(可「拉取最新数据」再生)');
+            return <span className="mono" title={tip} style={red
+              ? { fontSize: 9.5, color: 'var(--paper)', background: 'var(--yin)', borderRadius: 5, padding: '2px 7px' }
+              : { fontSize: 9.5, color: 'var(--jin)', border: '1px solid var(--jin)', borderRadius: 5, padding: '2px 7px' }}>
+              {red ? '⚠ 截面 ' + sd + ' 天旧' : '排名 ' + sd + ' 天旧'}</span>;
+          })()}
           {result.market && (() => {
             const stale = result.market.as_of && result.date && result.market.as_of < result.date;
             return <span className="mono" title={'L4 V1 节奏 · 涨停残差60日分位 ' + (result.market.lu_pct60 ?? '—') + (stale ? ' · 口径较排名日旧' : '')}
@@ -558,12 +601,16 @@ function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, mod
             const h = result.model_health;
             const vin = h.vintage && h.vintage.ready;       // 真OOS 积累≥10天 → 主口径切 vintage
             const icShow = vin ? h.vintage.ic_mean : h.recent20;
+            // 真OOS 已负显形:vintage 有样本(n_days≥1)且均值<0 → 徽章尾红字,绝不让回看口径遮真相
+            const oosNeg = !!(h.vintage && h.vintage.n_days >= 1 && h.vintage.ic_mean < 0);
             const tip = (vin ? ('真OOS vintage IC ' + h.vintage.ic_mean + '(' + h.vintage.n_days + '日)· ') : '')
               + '回看:近20日 ' + h.recent20 + ' / 前40日 ' + (h.prior40 ?? '—') + ' · ' + h.note
-              + (h.vintage && !vin ? (' · vintage 积累中 ' + h.vintage.n_days + '/10 日') : '');
+              + (h.vintage && !vin ? (' · vintage 积累中 ' + h.vintage.n_days + '/10 日') : '')
+              + (oosNeg ? ' · ⚠ 回看=训练窗内评估,偏乐观;真OOS(vintage)均值已为负 ' + h.vintage.ic_mean : '');
             return <span className="mono" title={tip}
               style={{ fontSize: 10, color: h.alert ? 'var(--paper)' : 'var(--ink-2)', background: h.alert ? 'var(--yin)' : 'transparent', border: '1px solid ' + (h.alert ? 'var(--yin)' : 'var(--line)'), borderRadius: 5, padding: '2px 7px' }}>
-              体检{vin ? '·OOS' : ''} IC {(icShow >= 0 ? '+' : '') + (+icShow).toFixed(3)} {h.trend}{h.alert ? ' ⚠衰减' : ''}</span>;
+              {vin ? '体检·OOS IC ' : '体检 IC(回看)'}{(icShow >= 0 ? '+' : '') + (+icShow).toFixed(3)} {h.trend}{h.alert ? ' ⚠衰减' : ''}
+              {oosNeg && <span style={{ color: h.alert ? 'var(--paper)' : 'var(--zhu)', fontWeight: 600 }}> ⚠OOS {(h.vintage.ic_mean >= 0 ? '+' : '') + (+h.vintage.ic_mean).toFixed(3)}</span>}</span>;
           })()}
           {isVariant && (() => {
             // 变体「留出 OOS IC」徽章(替代 prod 回看体检 IC;变体无 model_health.parquet)
@@ -1111,71 +1158,108 @@ function PctBar({ pct, color }) {
 
 // ───────── P5 再打分(展示型 overlay:产业链分+情绪分+综合;绝不回写 v4/picks)─────────
 // P6:同批带 rerank 块(行业重排,LLM 整批研判排名;同为展示型 overlay,绝不回写 v4/picks)
-function RescoreBar({ onData, onRkData }) {
+function RescoreBar({ onData, onRkData, result, flash }) {
   const API = (typeof window !== 'undefined' && window.GUANLAN_BACKEND) || '';
   const [st, setSt] = useState(null);        // null=闲;{running,label}=跑
   const [meta, setMeta] = useState(null);    // 最新 run 元数据(成本/新鲜度)
   const [rkMeta, setRkMeta] = useState(null); // P6 重排元数据(model/耗时/教训注入 或 失败原因)
+  const [run, setRun] = useState(null);      // 最新 run 原始体(口径守卫在 effect 里判)
+  const [mismatch, setMismatch] = useState(null); // 口径不符:{base_model, ranking_date}
+  const _poll = useRef(null);
+  const say = flash || ((t, b) => { try { console.log('[再打分]', t, b); } catch (e) {} });
+  // 再打分票池永远读 prod 榜(后端 rescore.py 固定 base_model="prod")→ 变体口径按钮置灰
+  const isVariant = !!(result && result.model && result.model !== 'prod');
   const pull = async () => {
     try {
       const j = await (await fetch(API + '/screen/rescore/latest')).json();
-      if (j && j.ok && j.run && j.run.ok) {
-        const m = {}; (j.run.rows || []).forEach(r => { m[r.code] = r; });
-        onData(m);
-        setMeta({ ts: j.run.ts, s: j.run.stats || {} });
-        const rr = j.run.rerank;
-        if (rr && rr.ok) {
-          onRkData(Object.fromEntries((rr.rows || []).map(r => [r.code, r])));
-          setRkMeta({ ok: true, model: rr.model, elapsed_sec: rr.elapsed_sec, lessons_injected: rr.lessons_injected });
-        } else if (rr && !rr.ok) {
-          onRkData(null);
-          setRkMeta({ ok: false, reason: rr.reason });
-        } else {
-          onRkData(null);
-          setRkMeta(null);
-        }
-      } else if (j && j.ok && j.run && !j.run.ok) { setMeta({ err: j.run.error }); }
+      if (j && j.ok && j.run) setRun(j.run);
     } catch (e) {}
   };
-  useEffect(() => { if (API) pull(); }, []);
+  useEffect(() => {
+    if (API) pull();
+    return () => { if (_poll.current) { clearInterval(_poll.current); _poll.current = null; } };  // 卸载止轮询
+  }, []);  // eslint-disable-line react-hooks/exhaustive-deps
+  // 口径守卫:仅 run.base_model===当前实跑模型 且 run.ranking_date===当前排名日 才贴 overlay;
+  // 不符 → 清 overlay + 灰条显形(旧口径分数绝不贴到新榜上冒充)
+  useEffect(() => {
+    if (!run) return;
+    if (!result || result.source !== 'v4_ranking') { onData(null); onRkData(null); setRkMeta(null); setMismatch(null); return; }
+    if (!run.ok) { setMeta({ err: run.error }); onData(null); onRkData(null); setRkMeta(null); setMismatch(null); return; }
+    const okScope = (run.base_model || 'prod') === (result.model || 'prod')
+      && (run.ranking_date || null) === (result.date || null);
+    if (!okScope) {
+      onData(null); onRkData(null); setRkMeta(null);
+      setMeta({ ts: run.ts, s: run.stats || {} });
+      setMismatch({ base_model: run.base_model || 'prod', ranking_date: run.ranking_date || '—' });
+      return;
+    }
+    setMismatch(null);
+    const m = {}; (run.rows || []).forEach(r => { m[r.code] = r; });
+    onData(m);
+    setMeta({ ts: run.ts, s: run.stats || {} });
+    const rr = run.rerank;
+    if (rr && rr.ok) {
+      onRkData(Object.fromEntries((rr.rows || []).map(r => [r.code, r])));
+      setRkMeta({ ok: true, model: rr.model, elapsed_sec: rr.elapsed_sec, lessons_injected: rr.lessons_injected });
+    } else if (rr && !rr.ok) {
+      onRkData(null);
+      setRkMeta({ ok: false, reason: rr.reason });
+    } else {
+      onRkData(null);
+      setRkMeta(null);
+    }
+  }, [run, result]);  // eslint-disable-line react-hooks/exhaustive-deps
   const go = async () => {
-    if (!API || (st && st.running)) return;
+    if (!API || (st && st.running) || isVariant) return;
     try {
       const j = await (await fetch(API + '/screen/rescore', { method: 'POST',
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ top_n: 50 }) })).json();
       if (!j.ok) { window.alert('再打分:' + (j.reason || '发起失败')); return; }
       setSt({ running: true, label: '再打分中…' });
-      const t = setInterval(async () => {
+      let fails = 0;   // 连续失败计数:≥5 次中止轮询,按钮退出跑态并 flash 原因(绝不无限空转)
+      if (_poll.current) clearInterval(_poll.current);
+      _poll.current = setInterval(async () => {
         try {
           const s = (await (await fetch(API + '/screen/rescore/status')).json()).state;
+          fails = 0;
           if (s.running) setSt({ running: true, label: s.label || '…' });
-          else { clearInterval(t); setSt(null); await pull(); }
-        } catch (e) {}
+          else { clearInterval(_poll.current); _poll.current = null; setSt(null); await pull(); }
+        } catch (e) {
+          fails += 1;
+          if (fails >= 5) {
+            clearInterval(_poll.current); _poll.current = null; setSt(null);
+            say('再打分轮询中断', '连续 ' + fails + ' 次状态查询失败:' + String((e && e.message) || e) + ' · 后端可能仍在跑,稍后刷新查看');
+          }
+        }
       }, 3000);
     } catch (e) { window.alert('再打分调用失败:' + e); }
   };
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-      <span onClick={go} className="serif" style={{ fontSize: 10, color: 'var(--paper)',
-        background: (st && st.running) ? 'var(--ink-3)' : 'var(--yin)', borderRadius: 5,
-        padding: '2px 9px', cursor: 'pointer', userSelect: 'none' }}
-        title="产业链分+新闻情绪对 v4 前50再打分(展示参考,不改选股信号;LLM 按批计费)+行业重排(LLM 整批)">
+      <span onClick={(isVariant || (st && st.running)) ? undefined : go} className="serif" style={{ fontSize: 10, color: 'var(--paper)',
+        background: (isVariant || (st && st.running)) ? 'var(--ink-3)' : 'var(--yin)', borderRadius: 5,
+        padding: '2px 9px', cursor: isVariant ? 'not-allowed' : 'pointer', userSelect: 'none', opacity: isVariant ? 0.6 : 1 }}
+        title={isVariant ? '再打分仅对生产 v4 口径(当前为变体榜,票池不匹配)'
+          : '产业链分+新闻情绪对 v4 前50再打分(展示参考,不改选股信号;LLM 按批计费)+行业重排(LLM 整批)'}>
         {(st && st.running) ? (st.label || '再打分中…') : '再打分+重排 ✦'}</span>
-      {meta && !meta.err && <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>
+      {mismatch && <span className="mono" title="旧再打分档案与当前榜口径不符,分数未贴到清单;重新点「再打分+重排」按当前 prod 榜生成"
+        style={{ fontSize: 8.5, color: 'var(--ink-3)', border: '1px dashed var(--line)', borderRadius: 4, padding: '1px 6px' }}>
+        再打分基于 {mismatch.base_model}·{mismatch.ranking_date} 榜,与当前口径不符</span>}
+      {!mismatch && meta && !meta.err && <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>
         {String(meta.ts || '').slice(5, 16)} · LLM {(meta.s || {}).llm_calls != null ? meta.s.llm_calls : '—'}
         ·缓存 {(meta.s || {}).cache_hits != null ? meta.s.cache_hits : '—'}
         ·行情日 {(((meta.s || {}).board_freshness || {}).quote_date) || '—'}
         {rkMeta && rkMeta.ok && <span> · 重排 {rkMeta.model} {rkMeta.elapsed_sec}s · 教训注入 {rkMeta.lessons_injected}</span>}
         {rkMeta && !rkMeta.ok && <span style={{ color: 'var(--zhu)' }}> · 重排失败:{String(rkMeta.reason || '').slice(0, 60)}</span>}
       </span>}
-      {meta && meta.err && <span className="mono" style={{ fontSize: 8.5, color: 'var(--zhu)' }}
+      {!mismatch && meta && meta.err && <span className="mono" style={{ fontSize: 8.5, color: 'var(--zhu)' }}
         title={meta.err}>上次再打分失败</span>}
     </span>
   );
 }
 
 // ───────── 中栏 · 排名清单 ─────────
-function RankTable({ result, cfg, sort, setSort, showBench, setShowBench, expanded, toggleExpand, onRefresh, loading, lastRun, dirty, onRegen, regen, rsMap, setRsMap, rkMap, setRkMap }) {
+function RankTable({ result, cfg, sort, setSort, showBench, setShowBench, expanded, toggleExpand, onRefresh, loading, lastRun, dirty, onRegen, regen, rsMap, setRsMap, rkMap, setRkMap, flash }) {
   const _fmtT = (d) => { try { return d.toLocaleTimeString('zh-CN', { hour12: false }); } catch (e) { return ''; } };
   const accent = ((window.XG_FBYID[(cfg.factors[0] || {}).id]) || { color: 'var(--zhu)' }).color;
   const pctW = 132;
@@ -1205,6 +1289,13 @@ function RankTable({ result, cfg, sort, setSort, showBench, setShowBench, expand
             ⚠ {result.unsupported_factors.length} 个因子未识别·已忽略
           </span>
         )}
+        {result.unsupported_excl && result.unsupported_excl.length > 0 && (
+          // 剔除条件未生效显形(仿 unsupported_factors):数据缺口时勾了也没剔任何票,绝不静默装生效
+          <span className="mono" title={'以下剔除条件因数据缺口未真正生效(未剔除任何票):' + result.unsupported_excl.join('、')}
+            style={{ fontSize: 9.5, color: 'var(--jin)', border: '1px solid var(--jin)', borderRadius: 5, padding: '2px 7px', cursor: 'help' }}>
+            ⚠ {result.unsupported_excl.length} 项剔除未生效
+          </span>
+        )}
         <div style={{ display: 'flex', gap: 5, marginLeft: 6 }}>
           {result.source === 'v4_ranking' ? (
             <span className="mono" style={{ fontSize: 9, color: 'var(--paper)', background: 'var(--yin)', borderRadius: 4, padding: '2px 7px' }}>v4 模型 · LGB + 自适应 + 五维评级(市值分层)</span>
@@ -1212,7 +1303,7 @@ function RankTable({ result, cfg, sort, setSort, showBench, setShowBench, expand
             cfg.factors.map(f => { const m = window.XG_FBYID[f.id] || { glyph: '?', short: f.id, color: 'var(--ink-2)' }; return <span key={f.id} className="mono" style={{ fontSize: 9, color: 'var(--paper)', background: m.color, borderRadius: 4, padding: '2px 7px' }}>{m.glyph} {m.short} ×{f.w.toFixed(1)}</span>; })
           )}
         </div>
-        <RescoreBar onData={setRsMap} onRkData={setRkMap} />
+        <RescoreBar onData={setRsMap} onRkData={setRkMap} result={result} flash={flash} />
         <span className="mono" style={{ marginLeft: 'auto', fontSize: 9, color: dirty ? 'var(--yin)' : 'var(--ink-3)', whiteSpace: 'nowrap' }}>
           {loading ? '计算中…' : (lastRun ? ((dirty ? '参数已变 · 上次 ' : '上次 ') + _fmtT(lastRun)) : '尚未计算')}
         </span>
