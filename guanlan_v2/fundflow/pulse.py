@@ -175,9 +175,10 @@ def _live_age_s(data: dict, ref_now: datetime):
 
 def _annotate_live(data: dict, ref_now: datetime, ttl: int, triggered: bool = False) -> dict:
     age = _live_age_s(data, ref_now)
-    stale = age is None or age > ttl
+    frozen = not _is_trading(ref_now)          # 非交易时段:当天数据已定格,缓存即最终值
+    stale = (not frozen) and (age is None or age > ttl)
     out = dict(data)
-    out["freshness"] = {"age_s": age, "stale": bool(stale), "ttl_s": ttl}
+    out["freshness"] = {"age_s": age, "stale": bool(stale), "ttl_s": ttl, "frozen": bool(frozen)}
     # 仅在「本次真触发了后台刷新」时才这么标——refresh=True 强拉路径、单飞旗已占(_trigger 返 False)
     # 都不该谎报「已触发后台刷新」(评审 minor:freshness 本就诚实,note 不再自相矛盾)。
     if stale and out.get("ok") and triggered:
@@ -228,8 +229,10 @@ def read_live(kind: str = "concept", refresh: bool = False,
         data = _refresh_live(k, refresh=False, cache_dir=cache_dir,
                              sector_fn=sector_fn, now=now, build_fn=build_fn)
         return _annotate_live(data, ref_now, ttl)
+    # 非交易时段:当天数据定格,秒回缓存,绝不后台重拉(省得白打东财 + 用户无感)。
     triggered = False
-    if _live_age_s(cached, ref_now) is None or _live_age_s(cached, ref_now) > ttl:
+    age = _live_age_s(cached, ref_now)
+    if _is_trading(ref_now) and (age is None or age > ttl):
         triggered = _trigger_live_refresh(k, cache_dir, sector_fn, build_fn)
     return _annotate_live(cached, ref_now, ttl, triggered=triggered)
 
@@ -405,10 +408,13 @@ def read_history(kind: str = "concept", date: str = "", refresh: bool = False,
         age = int((ref_now - datetime.fromisoformat(str(cached.get("cached_at")))).total_seconds())
     except (TypeError, ValueError):
         age = None
-    if age is None or age > ttl:
+    # 非交易时段:当天分钟线已定格(240 点全落),秒回缓存,绝不再触发那 20+ 个东财请求。
+    frozen = not _is_trading(ref_now)
+    stale = (not frozen) and (age is None or age > ttl)
+    if stale:
         _trigger_hist_refresh(k, date, cache_dir, hist_fn, now)
     out = dict(cached)
-    out["freshness"] = {"age_s": age, "stale": age is None or age > ttl, "ttl_s": ttl}
+    out["freshness"] = {"age_s": age, "stale": bool(stale), "ttl_s": ttl, "frozen": bool(frozen)}
     return out
 
 

@@ -222,7 +222,9 @@ function App() {
                                         window.glFetchFundflowHistory(k, "")]);
     setLive(lv); setHist(hs); setLoading(false);
   }, []);
-  useEffect(() => { load(kind, true); }, [kind, load]);
+  // 打开走缓存(不强拉)——后端已把上次拉的存盘,秒回;收盘后当天数据定格不再重拉。
+  // 只有点「刷新」按钮才 load(kind, true) 强拉最新。首次/重启后无缓存时后端自会拉一次。
+  useEffect(() => { load(kind, false); }, [kind, load]);
 
   // 分钟线冷启动约 25s(后台拉),warming 期间轮询直到出图;之后走 60s SWR 缓存。
   useEffect(() => {
@@ -253,7 +255,8 @@ function App() {
         <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
           {live && <span style={{ fontFamily: "var(--font-mono)", fontSize: 10,
                                   color: live.trading ? "var(--zhu)" : "var(--ink-3)" }}>
-            {live.trading ? "盘中" : "非交易"} · {String(live.pulled_at || "").slice(0, 16).replace("T", " ")}</span>}
+            {live.trading ? "盘中" : "非交易"} · {String(live.pulled_at || "").slice(0, 16).replace("T", " ")}
+            {live.freshness && live.freshness.frozen ? " · 已存档" : ""}</span>}
           <button onClick={() => load(kind, true)} disabled={loading} data-hv="zhu"
             style={{ fontFamily: "var(--font-serif)", fontSize: 12, padding: "5px 16px", cursor: "pointer",
                      background: "var(--paper-0)", color: "var(--ink-1)", border: "1px solid var(--line-3)", borderRadius: 4 }}>

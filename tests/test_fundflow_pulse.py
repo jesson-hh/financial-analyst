@@ -277,6 +277,46 @@ def test_read_live_stale_serves_prev_and_triggers(tmp_path, monkeypatch):
     assert triggered and len(calls) == 1        # 秒回旧值+触发后台单飞;本次读未同步再拉
 
 
+def test_read_live_offhours_serves_cache_without_trigger(tmp_path, monkeypatch):
+    """收盘后:缓存视为定格,秒回且绝不后台重拉(当天数据不变,省得白打东财)。"""
+    from guanlan_v2.fundflow import pulse
+    calls = []
+    b = _mk_build(calls)
+    pulse.read_live("concept", cache_dir=str(tmp_path), ttl_s=180,
+                    now=datetime(2026, 7, 8, 14, 0, 0), build_fn=b)   # 盘中落一份缓存
+    assert len(calls) == 1
+    triggered = []
+    monkeypatch.setattr(pulse, "_trigger_live_refresh",
+                        lambda *a, **k: (triggered.append(a), True)[1])
+    r = pulse.read_live("concept", cache_dir=str(tmp_path), ttl_s=180,
+                        now=datetime(2026, 7, 8, 20, 0, 0), build_fn=b)   # 收盘后,远超 TTL
+    assert triggered == [] and len(calls) == 1          # 收盘后不后台重拉
+    assert r["freshness"]["stale"] is False             # 定格=不显过期
+    assert r["freshness"]["frozen"] is True             # 显式标「收盘定格」
+
+
+def test_read_history_offhours_serves_cache_without_refresh(tmp_path, monkeypatch):
+    """收盘后 history:秒回缓存,不触发那 20+ 个东财请求。"""
+    from guanlan_v2.fundflow import pulse
+    calls = []
+    def hf(kind, date="", now=None):
+        calls.append(kind)
+        return {"date": "20260708", "kind": kind, "ticks": ["09:31", "15:00"],
+                "boards": [{"name": "x", "series": [1.0, 2.0]}],
+                "market_series": {"main_net": [1.0, 2.0]}}
+    pulse.read_history("concept", refresh=True, cache_dir=str(tmp_path),
+                       now=datetime(2026, 7, 8, 14, 0, 0), hist_fn=hf)   # 盘中拉一次落缓存
+    assert len(calls) == 1
+    refreshed = []
+    monkeypatch.setattr(pulse, "_trigger_hist_refresh",
+                        lambda *a, **k: (refreshed.append(a), True)[1])
+    out = pulse.read_history("concept", cache_dir=str(tmp_path),
+                             now=datetime(2026, 7, 8, 20, 0, 0), hist_fn=hf)   # 收盘后
+    assert refreshed == [] and len(calls) == 1
+    assert out["ticks"] == ["09:31", "15:00"]
+    assert out["freshness"]["stale"] is False
+
+
 def test_refresh_live_keeps_prev_on_failed_refresh(tmp_path):
     from guanlan_v2.fundflow import pulse
     pulse._refresh_live("concept", cache_dir=str(tmp_path),
