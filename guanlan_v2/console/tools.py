@@ -1461,6 +1461,20 @@ def data_health_impl() -> Dict[str, Any]:
     return {"ok": True, "content": "\n".join(lines), "artifact": None, "raw": hh}
 
 
+def review_report_impl(date: str = "") -> Dict[str, Any]:
+    """读复盘官最新(或指定日)晨报:全量 content 自带(_wrap 信封红线)。"""
+    try:
+        from guanlan_v2.autonomy.review_officer import read_report
+        r = read_report(date=str(date or "").strip())
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "content": f"晨报读取失败: {e}", "artifact": None}
+    if not r.get("ok"):
+        return {"ok": False, "content": f"暂无晨报({r.get('reason')})——复盘官尚未跑过或当日未出报",
+                "artifact": None, "raw": r}
+    md = str(r.get("md") or "")
+    return {"ok": True, "content": md[:8000], "artifact": None, "raw": r}
+
+
 def market_tape_impl(fresh_within_s: int = 180) -> Dict[str, Any]:
     """读盘口实时快照(零 LLM,进程内直调 read_tape 不自 HTTP):北向净额 / 涨停家数·连板高度 /
     跌停·炸板率 / 龙虎榜 top / 人气榜 top / 行业涨幅榜 + 整体 pulled_at·龄期。warming/空诚实标注。
@@ -2739,6 +2753,17 @@ WW_TOOL_TABLE = [
          "required": ["code"]},
      "impl": ticks_impl, "cost": "instant", "confirm": False,
      "reachable": ["/seats/ticks"]},
+    {"name": "ww_review_report",
+     "description":
+         "盘后复盘官晨报(只读、零 LLM 秒回):读 autonomy 日跑产物——A/B 成绩单+落子复盘+数据巡检+"
+         "综合晨报+批判五段汇总,含大盘判读/蒸馏草稿/macro 快照搭车三新职责。"
+         "用户问『今天的复盘官晨报/昨晚autonomy跑得怎么样/日报看看』时用。"
+         "纯展示绝不进信号;无报告诚实降级绝不编造。post-market autonomous review report.",
+     "input_schema": {"type": "object", "properties": {
+         "date": {"type": "string", "description": "YYYY-MM-DD,空=最新"}},
+         "required": []},
+     "impl": review_report_impl, "cost": "instant", "confirm": False,
+     "reachable": ["/autonomy/report/latest"]},
 ]
 
 
