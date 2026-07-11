@@ -114,6 +114,45 @@ def train_promote(spec: Dict[str, Any]) -> Dict[str, Any]:
     return res
 
 
+def retrain_variant(vid: str) -> Dict[str, Any]:
+    """重训一个已存在变体:旧股池快照 + 数据滚动到最新交易日,覆盖同 vid。
+    关键=清死 end——变体 meta.recipe 存了死 end(如 '2026-04-01')会让 train_promote 永冻旧日期;
+    清后 train_promote 自动取 _latest_trade_date 最新交易日。保留原 name/id/created/kind/status,
+    只更新 asof/oos_ic/parquet/hyper。股池仍是 recipe.universe 快照(仅数据滚动,新上市股不纳入)——
+    诚实标注 universe_note,绝不冒充股池也更新。失败原样透传 reason,train_promote 失败前不 save_variant→原快照不动。"""
+    from guanlan_v2.screen import model_registry as reg
+
+    meta = reg.variant_meta(vid)
+    if not meta:
+        return {"ok": False, "variant_id": vid, "reason": "变体不存在"}
+    kind = str(meta.get("kind") or "").strip()
+    if meta.get("retrainable") is not True or kind not in _TREE_KINDS:
+        return {"ok": False, "variant_id": vid,
+                "reason": f"该变体不支持重训(kind={kind or '?'} / retrainable={meta.get('retrainable')})"}
+
+    recipe2 = {**(meta.get("recipe") or {})}
+    recipe2.pop("end", None)   # 关键:清死 end → train_promote 自动取最新交易日(不清则永冻旧日期)
+    spec: Dict[str, Any] = {
+        "variant_id": vid, "name": meta.get("name"), "kind": kind,
+        "created": meta.get("created") or "", "recipe": recipe2,
+    }
+    if meta.get("status"):     # 保留原 draft 语义(重训不擅自升格)
+        spec["status"] = meta["status"]
+
+    res = train_promote(spec)
+    if not res.get("ok"):
+        return res             # 透传 reason;save_variant 未发生 → 原快照未动
+
+    new_meta = reg.variant_meta(vid)   # 复读取重训后 asof(诚实取真值,不回填 spec)
+    universe = new_meta.get("universe") or recipe2.get("universe") or "all"
+    res.update({
+        "ok": True, "variant_id": vid, "date": new_meta.get("asof"),
+        "oos_ic": new_meta.get("oos_ic"), "universe": universe,
+        "universe_note": f"股池为 {universe} 快照,仅数据滚动到最新(新上市股不纳入)",
+    })
+    return res
+
+
 def _jsonresp_reason(resp) -> str:
     """从 _materialize_xy 失败 JSONResponse 抽真 reason(诚实透传)。"""
     import json
