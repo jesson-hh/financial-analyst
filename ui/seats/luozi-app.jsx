@@ -320,12 +320,16 @@ function LuoziApp() {
     setRealDecs({});                                    // 进行中标记清零重来
     setRealRun({ running: true, done: 0, total: total, cur: 0, seatName: seatName, errors: 0 });
     let done = 0, errors = 0;
+    // 持仓状态机(纯 LLM 口径,镜像 lzRunBacktest 的 pos/entryPx/entryIdx):只活在本次「真跑」作用域,
+    //   不落盘不外泄——喂给 decide 的 hold_entry/hold_bars 只是上下文,后端不因此改输出 schema。
+    let pos = 0, entryPx = null, entryIdx = null;
     for (let k = 0; k < total; k++) {
       if (realStopRef.current) break;
       const bar = runBars[k];
       if (!bar) continue;
       setRealRun(s => Object.assign({}, s, { cur: k }));
       let res = null;
+      const holdExtra = (pos === 1) ? { hold_entry: entryPx, hold_bars: k - entryIdx } : null;
       try {
         res = await window.lzSeatDecide({
           code: codeNow, name: meta.name, date: bar.date,
@@ -340,7 +344,7 @@ function LuoziApp() {
           w: (strat && strat.w) || 0,
           pa: !!(strat && strat.pa),
           pa_method: (strat && strat.pa) ? (strat.paMethod || window.LZ_PA_METHOD_DEFAULT || '') : '',
-        });
+        }, holdExtra);
       } catch (e) { res = null; }
       if (realStopRef.current) break;
       done++;
@@ -348,6 +352,9 @@ function LuoziApp() {
         const dir = res.direction;
         const side = /买/.test(dir) ? 'buy' : (/卖/.test(dir) ? 'sell' : 'watch');
         if (side === 'buy') nBuy++; else if (side === 'sell') nSell++; else nWatch++;
+        // 状态机更新(纯 LLM side 驱动,不掺 hybrid w):买入建仓/卖出清仓,其余(观望)不动。
+        if (side === 'buy' && pos === 0) { pos = 1; entryPx = +bar.c; entryIdx = k; }
+        else if (side === 'sell' && pos === 1) { pos = 0; entryPx = null; entryIdx = null; }
         if (!firstDate) firstDate = bar.date;
         lastDate = bar.date;
         if (res.model_name) lastModel = res.model_name;

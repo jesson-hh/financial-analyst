@@ -1498,10 +1498,21 @@ function JudgeCard({ code, name, industry, strat, regime }) {
     else setRows(null);
     return () => { alive = false; };
   }, [code, bump]);
-  const runDecide = () => {
+  const runDecide = async () => {
     if (!window.lzSeatDecide || deciding || !strat) return;
     setDeciding(true); setDecide(null);
     const rcp = window.lzRecipeForStrategy ? window.lzRecipeForStrategy(strat.id) : { cards: [], research: [], factors: [] };
+    // 持仓上下文(可选,诚实降级):台账若已开仓且本票在持 → 喂 hold_entry(加权成本);
+    //   台账无入场日,不传 hold_bars。台账调用失败/未开仓/找不到该票 → 不传,研判照常(纯上下文,不改 schema)。
+    let holdExtra = null;
+    try {
+      const led = window.lzLedgerState ? await window.lzLedgerState() : null;
+      if (led && led.opened && Array.isArray(led.positions)) {
+        const bare = (c) => String(c || '').replace(/^(SH|SZ|BJ)/i, '').trim().toUpperCase();
+        const p = led.positions.find(x => x && bare(x.code) === bare(code) && (+x.qty) > 0);
+        if (p) holdExtra = { hold_entry: p.avg_cost };
+      }
+    } catch (e) { holdExtra = null; }
     window.lzSeatDecide({
       code, name, date: new Date().toISOString().slice(0, 10),
       seat_cn: strat.name, creed: strat.creed || '', mode: agentMode,
@@ -1514,7 +1525,7 @@ function JudgeCard({ code, name, industry, strat, regime }) {
       pa: !!strat.pa,
       pa_method: strat.pa ? (strat.paMethod || window.LZ_PA_METHOD_DEFAULT || '') : '',
       w: isFinite(+strat.w) ? Math.max(0, Math.min(1, +strat.w)) : 0,
-    }).then(d => { setDecide(d); setDeciding(false); setBump(b => b + 1); });
+    }, holdExtra).then(d => { setDecide(d); setDeciding(false); setBump(b => b + 1); });
   };
   const dirColor = (d) => d && /买/.test(d) ? 'var(--zhu)' : (d && /卖/.test(d) ? 'var(--dai)' : 'var(--ink-2)');
   const modeBtn = (m, label, tip) => (

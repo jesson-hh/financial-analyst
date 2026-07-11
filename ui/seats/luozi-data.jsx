@@ -1378,13 +1378,14 @@ function fetchSeatFactorsCached(code, date) {
 
 // ───────── ⑤ 席位真决策(/seats/decide):on-demand 调真 LLM(deepseek)综合 因子+卡+研报+市况 研判这一笔 ─────────
 //   区别于 K 线上的 scanSeat 价量启发式标记(回放骨架);这里是真模型推理(秒级、要等)。
-async function seatDecide(payload) {
+async function seatDecide(payload, extra) {
+  // extra(可选):持仓上下文透传(hold_entry/hold_bars),浅并进 body;不带时 body 逐字节不变。
   const API = (window.GUANLAN_BACKEND || '');
   if (!API || !payload || !payload.code || !payload.date) return null;
   try {
     const r = await fetch(API + '/seats/decide', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(extra ? Object.assign({}, payload, extra) : payload),
     });
     if (!r.ok) return { error: 'HTTP ' + r.status };
     const j = await r.json();
