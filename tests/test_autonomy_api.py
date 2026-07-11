@@ -208,6 +208,32 @@ def test_maybe_enqueue_swallows_exceptions(monkeypatch):
     assert RT.maybe_enqueue_daily_review("daily-scheduler") is False
 
 
+def test_maybe_enqueue_running_today_blocks_via_real_read_jobs(tmp_path, monkeypatch):
+    """Important 修复回归:此前 `J.read_jobs(limit=20)` 漏传 `running_job_id`,导致今日真在
+    跑的 review_officer job 被 read_jobs 误判成 `interrupted` 而非 `running`,「当日 running」
+    门从未生效。本测试用真实 `guanlan_v2.autonomy.jobs.read_jobs`(不打桩)+ 真实
+    `_AUTONOMY_STATE`(仅 monkeypatch.setitem 两键)联动验证:门确实拦下,`start_job_bg`
+    绝不被调。"""
+    import guanlan_v2.autonomy.jobs as J
+    import guanlan_v2.autonomy.runtime as RT
+
+    monkeypatch.setattr(J, "JOBS_DIR", tmp_path)
+    monkeypatch.setattr(J, "JOBS_PATH", tmp_path / "jobs.jsonl")
+
+    job_id = "aj_running_today"
+    assert J.append_event({"job_id": job_id, "kind": "start", "playbook": "review_officer"})
+
+    monkeypatch.setitem(RT._AUTONOMY_STATE, "running", True)
+    monkeypatch.setitem(RT._AUTONOMY_STATE, "job_id", job_id)
+
+    monkeypatch.setenv("GUANLAN_REVIEW_DAILY", "1")
+    called = []
+    monkeypatch.setattr(RT, "start_job_bg", lambda pb: called.append(pb) or {"ok": True})
+
+    assert RT.maybe_enqueue_daily_review("daily-scheduler") is False
+    assert called == []
+
+
 # ── rescore._run_thread finally 钩子:仅 ok 分支才排队 ────────────────────
 
 def _reset_rescore_state():

@@ -128,7 +128,9 @@ def maybe_enqueue_daily_review(note: str) -> bool:
         if note != "daily-scheduler":
             return False
         today = time.strftime("%Y-%m-%d")
-        for j in J.read_jobs(limit=20):
+        st = _autonomy_public_state()
+        running_id = st.get("job_id") if st.get("running") else None
+        for j in J.read_jobs(limit=20, running_job_id=running_id):
             if (j.get("playbook") == "review_officer"
                     and str(j.get("started_ts") or "")[:10] == today
                     and j.get("status") in ("done", "running")):
