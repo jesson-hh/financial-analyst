@@ -214,6 +214,20 @@ def v4_pool(top_n: int) -> List[dict]:
     return [{"code": c, "v4pct": round(p, 1)} for c, p in top]
 
 
+def v4_ranking_date() -> Optional[str]:
+    """所读 prod 榜(_v4_ranking_path)的 date 列首行(YYYY-MM-DD,口径落档用);
+    读不到/缺列 → None(诚实降级,不挡 run;绝不猜日期)。"""
+    import pandas as pd
+    try:
+        df = pd.read_parquet(_v4_ranking_path(), columns=["date"])
+    except Exception:  # noqa: BLE001 — 缺文件/缺列均按未知处理
+        return None
+    if "date" in df.columns and len(df):
+        s = str(df["date"].iloc[0])
+        return s[:10] if s else None
+    return None
+
+
 # ── run 主体 + 档案 ───────────────────────────────────────────────────────
 
 def append_run(row: Dict[str, Any]) -> bool:
@@ -239,9 +253,12 @@ def read_latest() -> Optional[Dict[str, Any]]:
 
 
 def run_rescore(run_id: str, top_n: int, note: str, progress) -> Dict[str, Any]:
-    """再打分主体(daemon 线程内):池→产业链分→情绪分→综合→落档。展示型,零信号回写。"""
+    """再打分主体(daemon 线程内):池→产业链分→情绪分→综合→落档。展示型,零信号回写。
+    口径落档:票池永远读 prod 榜(v4_pool→V4_RANKING_PARQUET),run 记录带
+    base_model="prod" + ranking_date(所读榜 date),供前端/A-B 档案做口径守卫。"""
+    base = {"base_model": "prod", "ranking_date": v4_ranking_date()}
     try:
-        progress(phase="pool", label=f"① 取 v4 榜前 {top_n}…")
+        progress(phase="pool", label=f"① 取 v4 榜前 {top_n}…", **base)
         pool = v4_pool(top_n)
         codes = [r["code"] for r in pool]
         progress(phase="industry", label="② 产业链分(board 读数)…")
@@ -271,14 +288,14 @@ def run_rescore(run_id: str, top_n: int, note: str, progress) -> Dict[str, Any]:
                 _record_rerank_ab(run_id, rows, rk, top_n)
             except Exception as exc:  # noqa: BLE001
                 rk["ab_recorded"] = False
-        end = {"run_id": run_id, "ts": _now(), "note": note, "top_n": top_n,
+        end = {"run_id": run_id, "ts": _now(), "note": note, "top_n": top_n, **base,
                "ok": True, "error": None, "rows": rows,
                "stats": dict(nstats, board_freshness=fresh), "rerank": rk}
     except RescoreError as exc:
-        end = {"run_id": run_id, "ts": _now(), "note": note, "top_n": top_n,
+        end = {"run_id": run_id, "ts": _now(), "note": note, "top_n": top_n, **base,
                "ok": False, "error": str(exc), "rows": [], "stats": {}}
     except Exception as exc:  # noqa: BLE001
-        end = {"run_id": run_id, "ts": _now(), "note": note, "top_n": top_n,
+        end = {"run_id": run_id, "ts": _now(), "note": note, "top_n": top_n, **base,
                "ok": False, "error": f"{type(exc).__name__}: {exc}", "rows": [], "stats": {}}
     append_run(end)
     return end
@@ -296,7 +313,8 @@ from pydantic import BaseModel
 _RESCORE_LOCK = _threading.Lock()
 _RESCORE_STATE: Dict[str, Any] = {
     "running": False, "phase": "idle", "label": "", "run_id": None,
-    "started_at": None, "ended_at": None, "ok": None, "error": None, "lines": []}
+    "started_at": None, "ended_at": None, "ok": None, "error": None, "lines": [],
+    "base_model": None, "ranking_date": None}   # 口径落档:status 响应供前端守卫
 
 
 def _rescore_public_state() -> Dict[str, Any]:
@@ -311,7 +329,7 @@ def _rescore_public_state() -> Dict[str, Any]:
 def _progress(**kw: Any) -> None:
     with _RESCORE_LOCK:
         for k, v in kw.items():
-            if k in ("phase", "label"):
+            if k in ("phase", "label", "base_model", "ranking_date"):
                 _RESCORE_STATE[k] = v
         if kw.get("label"):
             _RESCORE_STATE["lines"].append(str(kw["label"]))
@@ -350,7 +368,8 @@ def start_rescore_bg(top_n: int = 50, note: str = "") -> Dict[str, Any]:
         if not busy:
             _RESCORE_STATE.update(running=True, phase="starting", label="启动再打分…",
                                   run_id=run_id, started_at=_time.time(), ended_at=None,
-                                  ok=None, error=None, lines=[])
+                                  ok=None, error=None, lines=[],
+                                  base_model="prod", ranking_date=None)  # 池永远读 prod 榜;date 待 run 读榜后回填
     if busy:                                    # 锁外读状态(锁不可重入,绝不嵌套)
         return {"ok": False, "reason": "already_running",
                 "state": _rescore_public_state()}

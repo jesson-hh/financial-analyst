@@ -416,9 +416,16 @@ def test_regen_scheduler_default_off(monkeypatch):
 def test_regen_sched_tick_fires_once_per_day(monkeypatch):
     import datetime as dt
     import guanlan_v2.screen.api as api
-    calls = {"n": 0}
-    monkeypatch.setattr(api, "_start_regen_bg",
-                        lambda end=None: calls.__setitem__("n", calls["n"] + 1) or True)
+    calls = {"n": 0, "src": None}
+
+    def _spy(end=None, source="manual"):
+        calls["n"] += 1
+        calls["src"] = source
+        return True
+
+    monkeypatch.setattr(api, "_start_regen_bg", _spy)
+    rr = []
+    monkeypatch.setattr(api, "_maybe_daily_rerank", lambda *a, **k: rr.append(1))
     monkeypatch.setattr(api, "_REGEN_SCHED",
                         {"enabled": True, "last_auto_ts": None, "last_auto_date": None})
     monkeypatch.delenv("GUANLAN_REGEN_DAILY_HOUR", raising=False)
@@ -426,15 +433,54 @@ def test_regen_sched_tick_fires_once_per_day(monkeypatch):
     assert calls["n"] == 0
     assert api._regen_sched_tick(dt.datetime(2026, 7, 2, 18, 1)) is True     # 触发
     assert calls["n"] == 1 and api._REGEN_SCHED["last_auto_ts"].startswith("2026-07-02T18:01")
+    assert calls["src"] == "scheduler"          # 调度器来源旗标(成功后才回调日跑)
+    assert rr == []                             # 时序修:tick 不再同步触发日跑(旧榜脏读)
     assert api._regen_sched_tick(dt.datetime(2026, 7, 2, 20, 0)) is False    # 当日不重复
     assert calls["n"] == 1
     assert api._regen_sched_tick(dt.datetime(2026, 7, 3, 18, 5)) is True     # 次日再触发
     assert calls["n"] == 2
 
 
+def test_after_regen_gates_daily_rerank(monkeypatch):
+    """日跑回调:仅 scheduler 来源+成功才触发;手动/失败一律不触发(防脏 A/B)。"""
+    import guanlan_v2.screen.api as api
+    got = []
+    monkeypatch.setattr(api, "_maybe_daily_rerank", lambda nd=None: got.append(nd))
+    api._after_regen(True, "manual", "2026-07-10")     # 手动成功 → 不触发
+    api._after_regen(False, "scheduler", "2026-07-10")  # 调度失败 → 不触发
+    assert got == []
+    api._after_regen(True, "scheduler", "2026-07-10")   # 调度成功 → 触发且带新榜 date
+    assert got == ["2026-07-10"]
+
+
+def test_run_regen_subprocess_success_invokes_after_regen(monkeypatch):
+    """子进程退 0 → finally 按来源回调 _after_regen(热加载后才触发——时序修接线)。"""
+    import subprocess
+    import guanlan_v2.screen.api as api
+
+    class _FakeProc:
+        stdout = iter(["[regen] breadth done\n"])
+        returncode = 0
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr("guanlan_v2.strategy.ranking_date", lambda: "2026-07-10")
+    monkeypatch.setattr(api, "_reload_artifacts_caches", lambda: None)
+    monkeypatch.setattr(api, "_REGEN_STATE", dict(api._REGEN_STATE, running=True, lines=[]))
+    got = []
+    monkeypatch.setattr(api, "_after_regen", lambda ok, src, nd: got.append((ok, src, nd)))
+    api._run_regen_subprocess(None, "scheduler")
+    assert got == [(True, "scheduler", "2026-07-10")]
+    assert api._REGEN_STATE["running"] is False and api._REGEN_STATE["ok"] is True
+    assert api._REGEN_STATE["new_date"] == "2026-07-10"
+
+
 def test_start_regen_bg_singleflight(monkeypatch):
     import guanlan_v2.screen.api as api
-    monkeypatch.setattr(api, "_run_regen_subprocess", lambda end: None)      # 桩:不真跑
+    monkeypatch.setattr(api, "_run_regen_subprocess",
+                        lambda end, source="manual": None)                   # 桩:不真跑
     with api._REGEN_LOCK:
         api._REGEN_STATE["running"] = True
     assert api._start_regen_bg() is False                                    # 已在跑 → False

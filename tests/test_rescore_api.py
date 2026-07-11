@@ -144,6 +144,71 @@ def test_screen_picks_filters_rerank_ab_by_default(tmp_path, monkeypatch, client
     assert rows2 and all(x.get("kind") == "rerank_ab" for x in rows2)
 
 
+def test_v4_ranking_date_reads_parquet(monkeypatch, tmp_path):
+    """v4_ranking_date:读所配 prod 榜路径的 date 首行;缺文件 → None(诚实,不猜)。"""
+    import pandas as pd
+    p = tmp_path / "r.parquet"
+    pd.DataFrame({"code": ["SH1"], "lgb_pct": [0.9], "date": ["2026-07-08"]}).to_parquet(p)
+    monkeypatch.setattr(rs, "_v4_ranking_path", lambda: p)
+    assert rs.v4_ranking_date() == "2026-07-08"
+    monkeypatch.setattr(rs, "_v4_ranking_path", lambda: tmp_path / "missing.parquet")
+    assert rs.v4_ranking_date() is None
+
+
+def test_run_rescore_records_base_model_and_ranking_date(monkeypatch, tmp_path):
+    """口径落档:run 记录带 base_model="prod" + ranking_date(所读榜 date),供口径守卫。"""
+    monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "runs.jsonl")
+    from guanlan_v2.screen import picks as pk
+    monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
+    monkeypatch.setattr(rs, "v4_ranking_date", lambda: "2026-07-09")
+    monkeypatch.setattr(rs, "v4_pool", lambda n: [{"code": "SH1", "v4pct": 90.0}])
+    monkeypatch.setattr(rs, "industry_scores", lambda codes: ({"SH1": None}, {}))
+    monkeypatch.setattr(rs, "news_scores", lambda codes, top_n: (
+        {"SH1": None}, {"llm_calls": 0, "cache_hits": 0, "as_of": None,
+                        "market_read": None, "market_tilt": None}))
+    monkeypatch.setattr(rs, "_run_rerank_bridge",
+                        lambda rows, market: {"ok": False, "reason": "stubbed"})
+    end = rs.run_rescore("rs_t5", top_n=1, note="", progress=lambda **kw: None)
+    assert end["ok"] is True
+    assert end["base_model"] == "prod" and end["ranking_date"] == "2026-07-09"
+    latest = rs.read_latest()
+    assert latest["base_model"] == "prod" and latest["ranking_date"] == "2026-07-09"
+
+
+def test_run_rescore_failure_still_records_base(monkeypatch, tmp_path):
+    """失败 run 也落口径字段(ranking_date 未知 → None 诚实),口径守卫对失败档不失明。"""
+    monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "runs.jsonl")
+    monkeypatch.setattr(rs, "v4_ranking_date", lambda: None)
+
+    def boom(n):
+        raise rs.RescoreError("v4 榜不可用: x")
+
+    monkeypatch.setattr(rs, "v4_pool", boom)
+    end = rs.run_rescore("rs_t6", top_n=1, note="", progress=lambda **kw: None)
+    assert end["ok"] is False
+    assert end["base_model"] == "prod" and end["ranking_date"] is None
+
+
+def test_status_exposes_base_model_and_ranking_date(monkeypatch, tmp_path):
+    """/screen/rescore/status:state 带 base_model/ranking_date(progress 通道回填)。"""
+    _reset(monkeypatch)
+    monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "runs.jsonl")
+
+    def fake_run(run_id, top_n, note, progress):
+        progress(phase="pool", label="池", base_model="prod", ranking_date="2026-07-09")
+        return {"ok": True, "run_id": run_id, "rows": [], "stats": {}}
+
+    monkeypatch.setattr(rs, "run_rescore", fake_run)
+    c = _client()
+    assert c.post("/screen/rescore", json={"top_n": 5}).json()["ok"] is True
+    for _ in range(50):
+        time.sleep(0.02)
+        if not rs._rescore_public_state()["running"]:
+            break
+    st = c.get("/screen/rescore/status").json()["state"]
+    assert st["base_model"] == "prod" and st["ranking_date"] == "2026-07-09"
+
+
 def test_start_rescore_bg_module_level(monkeypatch):
     import time as _t
 
@@ -167,15 +232,36 @@ def test_start_rescore_bg_module_level(monkeypatch):
 
 
 def test_daily_rerank_hook_default_off(monkeypatch):
-    """GUANLAN_RERANK_DAILY 缺省 → 绝不调 start_rescore_bg(零行为变化);=1 → 调。"""
+    """GUANLAN_RERANK_DAILY 缺省 → 绝不调 start_rescore_bg(零行为变化);
+    =1 且榜 date==今天(守卫过)→ 调。"""
+    import datetime as dt
     import guanlan_v2.screen.api as sapi
     from guanlan_v2.screen import rescore as rs
+    today = dt.date.today().isoformat()
     monkeypatch.delenv("GUANLAN_RERANK_DAILY", raising=False)
     called = []
     monkeypatch.setattr(rs, "start_rescore_bg",
                         lambda **k: called.append(k) or {"ok": True})
-    sapi._maybe_daily_rerank()
+    sapi._maybe_daily_rerank(today)
     assert called == []
     monkeypatch.setenv("GUANLAN_RERANK_DAILY", "1")
-    sapi._maybe_daily_rerank()
+    sapi._maybe_daily_rerank(today)
     assert called and called[0].get("note") == "daily-scheduler"
+
+
+def test_daily_rerank_guard_skips_stale_or_unknown(monkeypatch):
+    """日跑守卫:榜 date≠今天/未知 → 跳过不烧 LLM(防脏 A/B 档);==今天(含时间戳串)→ 放行。"""
+    import datetime as dt
+    import guanlan_v2.screen.api as sapi
+    from guanlan_v2.screen import rescore as rs
+    monkeypatch.setenv("GUANLAN_RERANK_DAILY", "1")
+    called = []
+    monkeypatch.setattr(rs, "start_rescore_bg",
+                        lambda **k: called.append(k) or {"ok": True})
+    sapi._maybe_daily_rerank("2020-01-01")           # 旧榜
+    sapi._maybe_daily_rerank(None)                   # 未知
+    sapi._maybe_daily_rerank("")                     # 空串
+    assert called == []
+    today = dt.date.today().isoformat()
+    sapi._maybe_daily_rerank(today + " 00:00:00")    # 时间戳串归一 [:10] 后命中
+    assert len(called) == 1

@@ -164,8 +164,10 @@ _REGEN_SCHED: Dict[str, Any] = {"enabled": False, "last_auto_ts": None, "last_au
 _regen_sched_started = False
 
 
-def _start_regen_bg(end: Optional[str] = None) -> bool:
-    """抢单飞锁并起再生后台线程;已在跑 → False。POST /screen/regen 与定时调度共用。"""
+def _start_regen_bg(end: Optional[str] = None, source: str = "manual") -> bool:
+    """抢单飞锁并起再生后台线程;已在跑 → False。POST /screen/regen(source="manual")
+    与定时调度(source="scheduler")共用;source 只决定成功后是否回调日跑重排
+    (_after_regen),不改再生行为本身。"""
     import time as _t
     import threading as _th
     with _REGEN_LOCK:
@@ -178,27 +180,60 @@ def _start_regen_bg(end: Optional[str] = None) -> bool:
             )
     if busy:
         return False
-    _th.Thread(target=lambda: _safe(lambda: _run_regen_subprocess(end or None)),
+    _th.Thread(target=lambda: _safe(lambda: _run_regen_subprocess(end or None, source)),
                daemon=True).start()
     return True
 
 
-def _maybe_daily_rerank() -> None:
-    """opt-in:GUANLAN_RERANK_DAILY=1 时 regen 后顺跑一次打分+重排(复用 rescore
-    单飞锁,already_running 自然让路;失败显形于 rescore 档案,绝不重试风暴)。"""
+def _sched_log(msg: str) -> None:
+    """调度日志:stdout + regen 状态 lines(前端轮询可见);绝不抛。"""
+    try:
+        print(msg, flush=True)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        with _REGEN_LOCK:
+            _REGEN_STATE["lines"].append(msg)
+            _REGEN_STATE["lines"] = _REGEN_STATE["lines"][-40:]
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _maybe_daily_rerank(new_date: Optional[str] = None) -> None:
+    """opt-in:GUANLAN_RERANK_DAILY=1 时 regen 成功后顺跑一次打分+重排(复用 rescore
+    单飞锁,already_running 自然让路;失败显形于 rescore 档案,绝不重试风暴)。
+    守卫:榜 date(new_date)== 今天才跑——regen 口径 end==最新交易日,故
+    榜date==今天 ⇔ 今天是交易日且榜为当日口径;非交易日/旧榜/未知一律跳过留日志
+    (省 LLM 钱,防脏 A/B 档)。"""
     import os as _os
     if _os.environ.get("GUANLAN_RERANK_DAILY") != "1":
+        return
+    import datetime as _dt
+    today = _dt.date.today().isoformat()
+    nd = str(new_date or "")[:10]        # 兼容 "YYYY-MM-DD hh:mm:ss" 时间戳串
+    if nd != today:
+        _sched_log(f"[rerank-daily] 跳过:榜date={nd or '未知'} != 今天 {today}(非交易日/旧榜)")
         return
     try:
         from guanlan_v2.screen import rescore as _rs
         _rs.start_rescore_bg(top_n=50, note="daily-scheduler")
+        _sched_log(f"[rerank-daily] 已触发(榜date={nd})")
     except Exception:  # noqa: BLE001 — 顺跑失败不挡 regen 主流程
         pass
 
 
+def _after_regen(ok: bool, source: str, new_date: str) -> None:
+    """regen 子进程收尾回调:仅调度器来源+成功(新榜已热加载)才顺跑日跑重排。
+    时序修:原 tick 里 spawn 即触发会让 rescore 读到再生前旧榜(v4 训练约 5 分钟);
+    手动 regen 不触发(GUANLAN_RERANK_DAILY 门内亦不放行);失败不触发(防脏 A/B)。"""
+    if ok and source == "scheduler":
+        _maybe_daily_rerank(new_date or None)
+
+
 def _regen_sched_tick(now) -> bool:
     """定时判定+触发(注入 now 可测)。每日 GUANLAN_REGEN_DAILY_HOUR(默认18)点后、
-    当日未自动处理过 → 触发一次;已有再生在跑(手动)也记当日已处理(单飞语义,不重复)。"""
+    当日未自动处理过 → 触发一次;已有再生在跑(手动)也记当日已处理(单飞语义,不重复)。
+    日跑重排不在此处同步触发:挪至 regen 子进程成功+热加载后回调 _after_regen。"""
     import os as _os
     hour = int(_os.environ.get("GUANLAN_REGEN_DAILY_HOUR", "18"))
     today = now.date().isoformat()
@@ -206,8 +241,7 @@ def _regen_sched_tick(now) -> bool:
         return False
     _REGEN_SCHED["last_auto_date"] = today
     _REGEN_SCHED["last_auto_ts"] = now.isoformat(timespec="seconds")
-    _start_regen_bg(None)   # 已在跑返 False 亦视为当日已处理(手动跑过就不叠一次)
-    _maybe_daily_rerank()   # opt-in 顺跑打分+重排(regen 触发后;默认关=零行为变化)
+    _start_regen_bg(None, source="scheduler")   # 已在跑返 False 亦视为当日已处理(不叠一次)
     return True
 
 
@@ -272,10 +306,12 @@ def _regen_phase_from_line(line: str):
     return None
 
 
-def _run_regen_subprocess(end: Optional[str]) -> None:
+def _run_regen_subprocess(end: Optional[str], source: str = "manual") -> None:
     """后台线程体:跑 ``python -m guanlan_v2.strategy.compute.regen [END]`` 子进程,逐行解析进度;
     退 0 → 热加载缓存 + 记新日期;否则记错误。无论何种结局 finally 必清 running(防卡死)。
-    子进程用同一解释器(sys.executable=引擎 venv),cwd=仓根;无网络/无 qlib/无 LLM。"""
+    子进程用同一解释器(sys.executable=引擎 venv),cwd=仓根;无网络/无 qlib/无 LLM。
+    source="scheduler" 且成功 → finally 末尾回调 _after_regen 顺跑日跑重排(时序修:
+    确保 rescore 读到的是刚再生+热加载后的新榜,而非再生前旧榜)。"""
     import os
     import sys as _sys
     import time as _t
@@ -325,6 +361,7 @@ def _run_regen_subprocess(end: Optional[str]) -> None:
                 error=(err if err else (None if ok else f"再生子进程退出码 {rc}")),
                 new_date=(nd if ok else _REGEN_STATE.get("new_date")),
             )
+        _after_regen(ok, source, nd)   # 仅 scheduler+成功放行日跑重排(内部自兜异常)
 
 
 # ───────────────────────────────────────────────────────────────────────────
