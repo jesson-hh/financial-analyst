@@ -1,6 +1,5 @@
-// 观澜 · 落子 — 校场装配 (Foundry)  ·  文人书案 · 演武校场(d31 重排)
-// 消费共享档案库(window.GL)的经验卡 / 因子 / 研报组装命名策略实例,
-// 跨标的"演武"回测验真,排行仅展示,由用户在盯盘/复盘拍板启用。
+// 观澜 · 落子 — 策略 · 校场(Foundry)· 文人书案(2026-07-11 三页重排:演武退役)
+// 消费共享档案库(window.GL)的经验卡 / 因子 / 研报组装命名策略实例;验证归「复盘」页真跑 LLM run。
 // 注:不重声明 React hooks(useState/useEffect 由 chart.jsx 全局提供);数据层(window.lzStrategy*/GL)不动。
 
 const TCN = { card: '经验卡', factor: '因子', research: '研报' };
@@ -12,70 +11,12 @@ const LZ_TRASH_KEY = 'guanlan:luozi:trash:v1';
 function lzTrashLoad() { try { return JSON.parse(localStorage.getItem(LZ_TRASH_KEY)) || {}; } catch (e) { return {}; } }
 function lzTrashSave(t) { try { localStorage.setItem(LZ_TRASH_KEY, JSON.stringify(t)); } catch (e) {} }
 
-// 迷你净值火苗(演武 equity sparkline)
-function MiniSpark({ eq, color, w = 44, h = 16 }) {
-  if (!eq || eq.length < 2) return <svg width={w} height={h} style={{ display: 'block' }} />;
-  let lo = Math.min(...eq, 1), hi = Math.max(...eq, 1);
-  const pad = (hi - lo) * 0.18 || 0.01; lo -= pad; hi += pad;
-  const x = (i) => (i / (eq.length - 1)) * w;
-  const y = (v) => h - (v - lo) / (hi - lo) * h;
-  const d = eq.map((v, i) => (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(v).toFixed(1)).join(' ');
-  return (
-    <svg width={w} height={h} style={{ display: 'block', overflow: 'visible' }}>
-      <line x1={0} x2={w} y1={y(1)} y2={y(1)} stroke="var(--line-soft)" strokeDasharray="2 2" />
-      <path d={d + ' L' + w + ' ' + h + ' L0 ' + h + ' Z'} fill={color} opacity="0.08" />
-      <path d={d} fill="none" stroke={color} strokeWidth="1.4" vectorEffect="non-scaling-stroke" />
-    </svg>
-  );
-}
-
-// 跨标的演武:聚合该策略实例在其绑票(或全局)上的回测成绩
-// 真数据红线:bars 只来自 lzRealBarsOf(/seats/daily 水合缓存);缺位的票诚实剔除并报 missing,绝不用合成K顶上。
-function strategyArena(strat) {
-  const codes = (strat.bind && strat.bind.length) ? strat.bind : window.LZ_SYMBOL_META.map(m => m.code);
-  const freq = (strat.clock && strat.clock.execTF) === '5min' ? '5min' : 'day';
-  let tot = [], shp = [], trades = [], holds = [], eqs = [];
-  const per = [], missing = [];
-  codes.forEach(c => {
-    const meta = window.LZ_SYMBOL_META.find(m => m.code === c);
-    const bars = window.lzRealBarsOf ? window.lzRealBarsOf(c, freq) : null;
-    if (!bars || !bars.length) { missing.push((meta && meta.name) || c); return; }
-    const ds = window.lzScanSeat(bars, strat, meta);
-    const eqTr = window.lzSeatEquity(bars, ds, strat.id);
-    const m = window.lzMetricsOf(eqTr.eq, eqTr.trades, freq);
-    tot.push(m.total); shp.push(m.sharpe); eqs.push(eqTr.eq);
-    (eqTr.trades || []).forEach(t => { trades.push(t); if (t.out != null && t.in != null) holds.push(t.out - t.in); });
-    per.push({ code: c, name: (meta && meta.name) || c, total: m.total });
-  });
-  const avg = a => a.reduce((x, y) => x + y, 0) / (a.length || 1);
-  const wins = trades.filter(t => t.ret > 0), losses = trades.filter(t => t.ret <= 0);
-  const aw = wins.length ? avg(wins.map(t => t.ret)) : 0, al = losses.length ? Math.abs(avg(losses.map(t => t.ret))) : 0;
-  let eq = [];
-  if (eqs.length) {
-    const L = Math.min(...eqs.map(e => e.length));
-    for (let k = 0; k < L; k++) {
-      let s = 0;
-      for (const e of eqs) { const off = e.length - L; s += e[off + k] / e[off]; }   // 尾段对齐 + 首值归一,防不等长日期错位
-      eq.push(+(s / eqs.length).toFixed(4));
-    }
-  }
-  return {
-    avgTotal: avg(tot), avgSharpe: avg(shp),
-    winRate: trades.length ? wins.length / trades.length : 0,
-    plRatio: al ? aw / al : (aw ? 99 : 0),
-    nTrades: trades.length, per, eq,
-    avgHold: holds.length ? avg(holds) : null,
-    recommend: per.length > 0 && avg(shp) >= 1 && avg(tot) > 0 && trades.length >= 3,
-    freq, nCodes: codes.length, nReal: per.length, missing,
-    ready: per.length > 0,            // false = 一只真K都没有 → 渲染端必须显形,不出成绩
-  };
-}
+// 2026-07-11 三页重排:演武(scanSeat 价量启发式跨标的回测)退役——验证策略去「复盘」页真跑 LLM run;
+//   校场只留:策略 CRUD(名/模板/信条/时钟/w/PA/绑票)+ 配方装配 + 料库(编辑/回收站)。
 
 function Foundry() {
   const [tick, setTick] = useState(0);
   const [cur, setCur] = useState(null);
-  const [ran, setRan] = useState({});       // seatId → 演武次数(≥1 即已运行;计数使重跑必变 → board memo 重算)
-  const [running, setRunning] = useState(null);
   const [editing, setEditing] = useState(null);   // null=不在编辑;对象=新建/改某策略草稿
   const [matTab, setMatTab] = useState('card');    // 料库分类页
   const [matEdit, setMatEdit] = useState(false);   // 料库编辑态:显形删除(从共享档案库移除,各页同步)
@@ -83,13 +24,6 @@ function Foundry() {
   const [trashOpen, setTrashOpen] = useState(false);   // 回收站视图开关
   const [trash, setTrash] = useState(lzTrashLoad);     // 回收站内容(id→artifact+_trashedAt)
   useEffect(() => GL.on(() => setTick(t => t + 1)), []);
-  const [hydrated, setHydrated] = useState(false);
-  useEffect(() => {
-    let alive = true;
-    if (window.lzHydrateRealBars) window.lzHydrateRealBars().finally(() => { if (alive) setHydrated(true); });
-    else setHydrated(true);
-    return () => { alive = false; };
-  }, []);
 
   // 候选 = 用户自命名的策略实例(第3期:席位 → 策略)
   const seats = window.lzStrategyList();
@@ -124,34 +58,18 @@ function Foundry() {
   const trashArr = Object.values(trash).sort((a, b) => (b._trashedAt || 0) - (a._trashedAt || 0));
   const trashN = trashArr.length;
 
-  const runArena = async (sid) => {
-    const s = seats.find(x => x.id === sid); if (!s || running) return;
-    const codes = (s.bind && s.bind.length) ? s.bind : window.LZ_SYMBOL_META.map(m => m.code);
-    setRunning(sid);
-    try {
-      // 「推演中…」= 真实拉数:execTF 决定拉日线还是 5min(Task 3 接通 5min)
-      if ((s.clock && s.clock.execTF) === '5min') { if (window.lzHydrateRealBars5) await window.lzHydrateRealBars5(codes); }
-      else { if (window.lzHydrateRealBars) await window.lzHydrateRealBars(codes); }
-    } finally {
-      setRunning(null); setRan(r => ({ ...r, [sid]: (r[sid] || 0) + 1 }));   // 计数而非布尔:重跑(TTL 后拉到新K)必变 ran → board memo 失效重算
-    }
-  };
-
   const newDraft = () => setEditing({ name: '', template: 'momentum', bind: [], clock: Object.assign({}, window.LZ_TEMPLATES.momentum.clock), refs: [], creed: window.LZ_TEMPLATES.momentum.creed, w: 0, pa: false, paMethod: '' });
 
-  // 排行(按推荐 + 综合)
-  // deps 注:strategyArena 读模块级 REAL_BARS 缓存(deps 表达不了)——hydrated/ran 即缓存失效令牌,重跑必须改变 ran
-  const board = React.useMemo(() => seats.map(s => ({ s, a: strategyArena(s) }))
-    .sort((x, y) => (y.a.recommend - x.a.recommend) || (y.a.avgSharpe - x.a.avgSharpe)),
-    [tick, hydrated, JSON.stringify(ran), seats.map(s => s.id).join()]);
-
-  const pc = (x) => (x >= 0 ? '+' : '') + (x * 100).toFixed(1) + '%';
-  const upc = (x) => x >= 0 ? 'var(--zhu)' : 'var(--dai)';
+  // 策略架:按名称序(演武排行退役,Sharpe 序无数据源)
+  const board = React.useMemo(() => seats.map(s => ({ s }))
+    .sort((x, y) => String(x.s.name || '').localeCompare(String(y.s.name || ''), 'zh')),
+    [tick, seats.map(s => s.id).join()]);
   const matCount = GL.all('card').length + GL.all('factor').length + GL.all('research').length;
 
-  // ── 策略架 roster 卡 ──
-  const RosterCard = ({ s, a, i }) => {
+  // ── 策略架 roster 卡(演武成绩退役:验证去「复盘」页真跑)──
+  const RosterCard = ({ s, i }) => {
     const on = s.id === curId && !editing;
+    const bindNames = (s.bind || []).map(c => { const m = window.LZ_SYMBOL_META.find(x => x.code === c); return (m && m.name) || c; });
     return (
       <div onClick={() => { setEditing(null); setCur(s.id); }} className="hover-row"
         style={{ cursor: 'pointer', borderRadius: 11, padding: '11px 13px', transition: 'box-shadow .15s, border-color .15s',
@@ -160,29 +78,17 @@ function Foundry() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span className="serif" style={{ width: 22, height: 22, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 5, fontSize: 12, fontWeight: 600, color: on ? 'var(--paper)' : scol(s.id), background: on ? scol(s.id) : 'transparent', border: '1px solid ' + scol(s.id) }}>{s.glyph || '策'}</span>
           <span className="serif" style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</span>
-          {a.recommend && <span className="serif" title="推荐晋升" style={{ fontSize: 8.5, color: 'var(--paper)', background: 'var(--jin)', borderRadius: 3, padding: '1px 5px', flexShrink: 0 }}>荐</span>}
+          {on && <span className="mono" style={{ fontSize: 8, color: 'var(--yin)', flexShrink: 0 }}>● 当前</span>}
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 8, flexWrap: 'wrap' }}>
           <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>{(window.LZ_TEMPLATES[s.template] || {}).cn || s.template}</span>
-          <span className="mono" style={{ fontSize: 8, color: 'var(--ink-3)', border: '1px solid var(--line)', borderRadius: 4, padding: '0 4px' }}>{(s.bind && s.bind.length) ? '绑 ' + s.bind.length : '全局'}</span>
-          <span style={{ flex: 1 }} />
-          {a.ready && <MiniSpark eq={a.eq} color={upc(a.avgTotal)} w={44} h={16} />}
+          <span className="mono" title={bindNames.length ? ('盯盘票:' + bindNames.join('、')) : '未绑票 = 全局(每票可见,不入盯盘集)'}
+            style={{ fontSize: 8, color: (s.bind && s.bind.length) ? 'var(--yin)' : 'var(--ink-3)', border: '1px solid ' + ((s.bind && s.bind.length) ? 'var(--zhu-soft)' : 'var(--line)'), borderRadius: 4, padding: '0 4px' }}>
+            {(s.bind && s.bind.length) ? '盯 ' + s.bind.length + ' 票' : '全局'}
+          </span>
+          {(s.w || 0) > 0 && <span className="mono" style={{ fontSize: 8, color: 'var(--ink-3)' }}>w={(+s.w).toFixed(2)}</span>}
+          {s.pa && <span className="mono" style={{ fontSize: 8, color: 'var(--ink-3)' }}>PA</span>}
         </div>
-        {!a.ready ? (
-          <div style={{ marginTop: 7 }}>
-            <span className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)' }}>
-              {hydrated ? '待演武 · 真K未达' : '取数中…'}
-            </span>
-          </div>
-        ) : (
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 11, marginTop: 7 }}>
-            <span className="mono" style={{ fontSize: 14.5, fontWeight: 600, color: upc(a.avgTotal), letterSpacing: '-.01em' }}>{pc(a.avgTotal)}</span>
-            <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>Sharpe {a.avgSharpe.toFixed(2)}</span>
-            <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>胜 {(a.winRate * 100).toFixed(0)}%</span>
-            <span style={{ flex: 1 }} />
-            {on && <span className="mono" style={{ fontSize: 8, color: 'var(--yin)' }}>● 当前</span>}
-          </div>
-        )}
       </div>
     );
   };
@@ -204,8 +110,8 @@ function Foundry() {
       {/* 顶栏 masthead */}
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 14, padding: '14px 28px 13px', borderBottom: '1px solid var(--line)', flexShrink: 0, background: 'linear-gradient(180deg, rgba(168,57,45,0.025), transparent 70%)' }}>
         <span className="seal serif" style={{ width: 30, height: 30, fontSize: 16, borderRadius: 3, alignSelf: 'center' }}>校</span>
-        <span className="serif" style={{ fontSize: 20, fontWeight: 700, letterSpacing: '.05em', color: 'var(--ink)' }}>校场 · 演武</span>
-        <span className="serif" style={{ fontSize: 11.5, color: 'var(--ink-3)' }}>遣 经验卡 · 因子 · 研报,自组命名策略 → 跨标的回测验真</span>
+        <span className="serif" style={{ fontSize: 20, fontWeight: 700, letterSpacing: '.05em', color: 'var(--ink)' }}>策略 · 校场</span>
+        <span className="serif" style={{ fontSize: 11.5, color: 'var(--ink-3)' }}>遣 经验卡 · 因子 · 研报,自组命名策略;验证去「复盘」页真跑</span>
         <span style={{ flex: 1 }} />
         <span className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)' }}>共 <b style={{ color: 'var(--ink-2)' }}>{seats.length}</b> 策 · 料 <b style={{ color: 'var(--ink-2)' }}>{matCount}</b> 件</span>
       </div>
@@ -215,13 +121,13 @@ function Foundry() {
         <div style={{ width: 300, flexShrink: 0, borderRight: '1px solid var(--line)', display: 'flex', flexDirection: 'column', minHeight: 0, background: 'linear-gradient(180deg, rgba(28,24,20,0.016), transparent 24%)' }}>
           <div style={{ padding: '15px 16px 9px', display: 'flex', alignItems: 'baseline', gap: 8, flexShrink: 0 }}>
             <span className="serif" style={{ fontSize: 13, fontWeight: 600, letterSpacing: '.14em', color: 'var(--ink)' }}>策 略 架</span>
-            <span className="mono" style={{ fontSize: 8, color: 'var(--ink-3)' }}>按 推荐 · Sharpe 序</span>
+            <span className="mono" style={{ fontSize: 8, color: 'var(--ink-3)' }}>按 名称序</span>
           </div>
           <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, padding: '0 13px 14px', display: 'flex', flexDirection: 'column', gap: 9 }}>
             <div onClick={newDraft} className="serif" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, fontSize: 12.5, letterSpacing: '.16em', padding: '11px', borderRadius: 11, cursor: 'pointer', color: editing ? 'var(--paper)' : 'var(--yin)', background: editing ? 'var(--yin)' : 'transparent', border: '1px dashed ' + (editing ? 'var(--yin)' : 'var(--zhu-soft)'), transition: 'all .15s' }}>
               <span style={{ fontSize: 15, fontWeight: 300 }}>＋</span> 立 新 策
             </div>
-            {board.map(({ s, a }, i) => <RosterCard key={s.id} s={s} a={a} i={i} />)}
+            {board.map(({ s }, i) => <RosterCard key={s.id} s={s} i={i} />)}
             {!board.length && <div className="serif" style={{ fontSize: 11, color: 'var(--ink-3)', textAlign: 'center', padding: '20px 8px', lineHeight: 1.8 }}>架上无策<br />点上方「立新策」开始</div>}
           </div>
         </div>
@@ -337,8 +243,6 @@ function Foundry() {
               </div>
             );
           })() : seat ? (() => {
-            const showRes = ran[seat.id] || running === seat.id;
-            const a = showRes ? ((board.find(b => b.s.id === seat.id) || {}).a || null) : null;
             const tcn = (window.LZ_TEMPLATES[seat.template] || {}).cn || seat.template;
             const creed = seat.creed || (window.LZ_TEMPLATES[seat.template] || {}).creed;
             const mgmt = (c, on) => ({ fontSize: 10, padding: '4px 11px', borderRadius: 8, cursor: 'pointer', color: c, border: '1px solid ' + (on || 'var(--line)') });
@@ -390,65 +294,10 @@ function Foundry() {
                   );
                 })}
 
-                {/* 演武 */}
-                <div style={{ marginTop: 26 }}>
-                  <span onClick={() => runArena(seat.id)} className="serif"
-                    style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13.5, letterSpacing: '.08em', color: 'var(--paper)', background: running === seat.id ? 'var(--ink-2)' : 'var(--yin)', borderRadius: 10, padding: '10px 24px', cursor: running === seat.id ? 'default' : 'pointer', boxShadow: '0 3px 14px rgba(168,57,45,0.20)' }}>
-                    <span className="seal serif" style={{ width: 18, height: 18, fontSize: 11, borderRadius: 2, background: 'rgba(255,255,255,0.16)', color: 'var(--paper)' }}>演</span>
-                    {running === seat.id ? '推演中…' : (ran[seat.id] ? '重跑演武' : '运行演武(跨标的回测)')}
-                  </span>
+                {/* 验证入口(演武退役):真跑 LLM run 归「复盘」页 */}
+                <div className="serif" style={{ marginTop: 26, fontSize: 11.5, color: 'var(--ink-3)', lineHeight: 1.7, padding: '10px 14px', border: '1px dashed var(--line)', borderRadius: 10 }}>
+                  要验证这套策略?去顶栏「<b style={{ color: 'var(--yin)' }}>复盘</b>」页,选它 + 选区间,一键真跑(逐 bar 真 LLM 研判,run 化留档)。旧「演武」为价量启发式非 LLM,已退役。
                 </div>
-
-                {showRes && (running === seat.id ? (
-                  <div className="mono" style={{ marginTop: 16, color: 'var(--ink-3)', fontSize: 11 }}>在 {(seat.bind && seat.bind.length) ? seat.bind.length : window.LZ_SYMBOL_META.length} 只标的上回放推演…</div>
-                ) : (
-                  <div style={{ marginTop: 16, border: '1px solid var(--line)', borderRadius: 13, background: 'var(--paper-2)', padding: '20px 22px', boxShadow: '0 1px 3px rgba(28,24,20,0.05)', animation: 'fadeIn .3s ease both' }}>
-                    {(!a || !a.ready) ? (
-                      <div className="mono" style={{ padding: '18px 16px', fontSize: 11, color: 'var(--zhu)', border: '1px dashed var(--zhu)', borderRadius: 13 }}>
-                        演武需要真实K线 · 后端未连接或所选标的全部无数据(已拒绝在合成样例上出成绩)。
-                        启动 9999 后端后点「重跑演武」。
-                      </div>
-                    ) : (<React.Fragment>
-                    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 20 }}>
-                      <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', letterSpacing: '.12em' }}>跨标的收益</span>
-                          <span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', border: '1px solid var(--line)', borderRadius: 8, padding: '1px 7px' }}>
-                            真·{a.freq === '5min' ? '5min' : '日线'} {a.nReal}/{a.nCodes}
-                            {a.missing.length > 0 ? ' · 缺 ' + a.missing.join('/') + '(未纳入)' : ''}
-                          </span>
-                          {a.freq === '5min' && <span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)' }}>窗口 ~50 交易日(2400 根)</span>}
-                        </div>
-                        <div className="mono" style={{ fontSize: 32, fontWeight: 600, color: upc(a.avgTotal), letterSpacing: '-.02em', lineHeight: 1.05, marginTop: 2 }}>{pc(a.avgTotal)}</div>
-                      </div>
-                      <div style={{ paddingBottom: 4 }}><MiniSpark eq={a.eq} color={upc(a.avgTotal)} w={150} h={42} /></div>
-                      <span style={{ flex: 1 }} />
-                      {a.recommend && <span className="serif" style={{ fontSize: 11, color: 'var(--paper)', background: 'var(--jin)', borderRadius: 7, padding: '5px 12px', boxShadow: '0 2px 8px rgba(138,111,63,0.25)' }}>✓ 推荐晋升</span>}
-                    </div>
-                    <div style={{ display: 'flex', gap: 26, marginTop: 16, paddingTop: 14, borderTop: '1px solid var(--line-soft)' }}>
-                      {[['Sharpe', a.avgSharpe.toFixed(2)], ['胜率', (a.winRate * 100).toFixed(0) + '%'], ['盈亏比', a.plRatio >= 99 ? '∞' : a.plRatio.toFixed(2)], ['成交', a.nTrades + ' 笔']].map(([k, v]) => (
-                        <div key={k}><div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', letterSpacing: '.1em' }}>{k}</div><div className="mono" style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)', marginTop: 2 }}>{v}</div></div>
-                      ))}
-                      <div style={{ flex: 1, minWidth: 120 }}>
-                        <div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', letterSpacing: '.1em' }}>平均持有 / 上限</div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 5 }}>
-                          <div style={{ flex: 1, height: 5, borderRadius: 3, background: 'var(--paper-3)', overflow: 'hidden' }}>
-                            <div style={{ width: Math.min(100, a.avgHold == null ? 0 : a.avgHold / Math.max(1, seat.clock.maxHold) * 100) + '%', height: '100%', background: 'var(--jin)' }} />
-                          </div>
-                          <span className="mono" style={{ fontSize: 11, color: 'var(--ink-1)' }}>{a.avgHold == null ? '—' : a.avgHold.toFixed(1)}/{seat.clock.maxHold}</span>
-                        </div>
-                      </div>
-                    </div>
-                    {a.per.length > 1 && (
-                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 14 }}>
-                        {a.per.map(p => (
-                          <span key={p.code} className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', border: '1px solid var(--line-soft)', borderRadius: 5, padding: '2px 8px' }}>{p.name} <b style={{ color: upc(p.total) }}>{pc(p.total)}</b></span>
-                        ))}
-                      </div>
-                    )}
-                  </React.Fragment>)}
-                  </div>
-                ))}
               </div>
             );
           })() : (
