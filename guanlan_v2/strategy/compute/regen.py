@@ -26,7 +26,7 @@ if _ENGINE.is_dir() and str(_ENGINE) not in sys.path:
 import pandas as pd
 
 from guanlan_v2.strategy.paths import (
-    ARTIFACTS_DIR, MARKET_BREADTH_PARQUET, V4_RANKING_PARQUET,
+    ARTIFACTS_DIR, MARKET_BREADTH_PARQUET, V4_DIMS_PARQUET, V4_RANKING_PARQUET,
 )
 from guanlan_v2.strategy.compute.breadth import build_breadth, list_all_instruments
 from guanlan_v2.strategy.compute.mainline import build_mainline
@@ -192,10 +192,24 @@ def regen_all(provider_uri: str = DEFAULT_PROVIDER, end: Optional[str] = None) -
         from guanlan_v2.strategy.compute.dl_ensemble import default_dl_sources
         _b3: dict = {}
         _dl_sources = default_dl_sources()
+        # dims 出参:全截面四个非模型维分项(变体训练 join 复用;见 v4.compute_dims)
+        _dims: dict = {}
         v4out = build_v4(provider_uri, end=end, codes=codes, date_str=end,
-                         health=_health, dl_sources=_dl_sources, b3=_b3)
+                         health=_health, dl_sources=_dl_sources, b3=_b3, dims=_dims)
         _write_atomic(v4out, V4_RANKING_PARQUET, index=False)
         out["v4"] = (len(v4out), str(V4_RANKING_PARQUET))
+        # 3b) 五维分项侧产物落盘(排名已落盘后才写;缺失/失败只 warn 绝不阻断再生)
+        try:
+            if "df" in _dims:
+                _write_atomic(_dims["df"], V4_DIMS_PARQUET, index=False)
+                out["v4_dims"] = (len(_dims["df"]), str(V4_DIMS_PARQUET))
+                print(f"  v4_dims {len(_dims['df'])} 行 -> {V4_DIMS_PARQUET}", flush=True)
+            else:
+                out["v4_dims"] = f"skipped: {_dims.get('error', '无 dims 输出')}"
+                print(f"  [warn] v4_dims 未产出(不阻断): {_dims.get('error', '无 dims 输出')}", flush=True)
+        except Exception as _e:  # noqa: BLE001 — dims 落盘失败绝不拖垮排名再生
+            out["v4_dims"] = f"skipped: {type(_e).__name__}: {_e}"
+            print(f"  [warn] v4_dims 落盘失败(不阻断): {type(_e).__name__}: {_e}", flush=True)
         out["v4_dl"] = dict(_b3) if _b3 else {"active": False, "reason": "未启用"}
         try:   # DL provenance 旁路落盘(serving 读它判 纯 LGB vs 多源混合 + 每源 look-ahead)
             import json as _json
