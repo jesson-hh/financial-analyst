@@ -26,6 +26,13 @@ providers:
 
 # agent_overrides (2026-06-01 清零后重启用):
 # - industry_extract (2026-07-03): AI投研看板研报抽取走 Kimi k2.6 (256K ctx, 用户指定读研报模型).
+# - 思考档位 (2026-07-12 思考预算层): deep=deepseek-reasoner+max_tokens+长超时(判断密集型缝),
+#   fast=deepseek-chat(填表型缝, 默认). 真机探针(2026-07-12): reasoner 别名支持
+#   json_object/tools/max_tokens/per-request timeout 且返回 reasoning_content;
+#   models.list()=[deepseek-v4-flash, deepseek-v4-pro], 别名可用.
 #   其余 agent 仍走 default_provider (deepseek/deepseek-chat).
 agent_overrides:
   industry_extract: {provider: kimi, model: kimi-k2.6}
+  rerank:           {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
+  review_officer:   {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
+  review_section:   {provider: deepseek, model: deepseek-chat}
