@@ -102,10 +102,14 @@ def load_llm_config(path: Optional[Path] = None) -> Dict[str, Any]:
 
 
 class LLMClient:
-    def __init__(self, provider: str, model: str, config: Dict[str, Any]):
+    def __init__(self, provider: str, model: str, config: Dict[str, Any],
+                 max_tokens: Optional[int] = None, timeout: Optional[float] = None):
         self.provider = provider
         self.model = model
         self.config = config
+        # 座席级思考预算(2026-07-12 思考预算层):None=不传该 kwargs,行为与旧版逐字节一致。
+        self.default_max_tokens: Optional[int] = int(max_tokens) if max_tokens is not None else None
+        self.default_timeout: Optional[float] = float(timeout) if timeout is not None else None
         # v1.7.5: cumulative token accounting for the buddy status line.
         # Carried across /model switches via with_overrides().
         self.total_prompt_tokens: int = 0
@@ -133,7 +137,9 @@ class LLMClient:
         override = config.get("agent_overrides", {}).get(agent_name, {})
         provider = override.get("provider", config["default_provider"])
         model = override.get("model", config["default_model"])
-        return cls(provider=provider, model=model, config=config)
+        return cls(provider=provider, model=model, config=config,
+                   max_tokens=override.get("max_tokens"),
+                   timeout=override.get("timeout"))
 
     def with_overrides(self, provider: Optional[str] = None,
                         model: Optional[str] = None) -> "LLMClient":
@@ -147,6 +153,8 @@ class LLMClient:
             provider=provider or self.provider,
             model=model or self.model,
             config=self.config,
+            max_tokens=self.default_max_tokens,
+            timeout=self.default_timeout,
         )
         new.total_prompt_tokens = self.total_prompt_tokens
         new.total_completion_tokens = self.total_completion_tokens
@@ -213,6 +221,8 @@ class LLMClient:
         tools: Optional[List[Dict[str, Any]]],
         response_format: Optional[Dict[str, Any]],
         temperature: float,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> Any:
         """OpenAI-compatible providers (qwen / deepseek / openai / openrouter).
         Goes through AsyncOpenAI + provider-specific http_client."""
@@ -237,6 +247,10 @@ class LLMClient:
             kwargs["tools"] = tools
         if response_format is not None:
             kwargs["response_format"] = response_format
+        if max_tokens is not None:
+            kwargs["max_tokens"] = int(max_tokens)
+        if timeout is not None:
+            kwargs["timeout"] = float(timeout)   # openai SDK per-request 项,压过 httpx client 默认 120s
         response = await client.chat.completions.create(**kwargs)
         self._accumulate_usage(response)
         # v1.9.6: 21+ callers do response["choices"][0]["message"]["content"]
@@ -250,6 +264,8 @@ class LLMClient:
         tools: Optional[List[Dict[str, Any]]],
         response_format: Optional[Dict[str, Any]],
         temperature: float,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> Any:
         """Fallback path via litellm for non-OpenAI-compatible providers
         (e.g. anthropic)."""
@@ -262,6 +278,10 @@ class LLMClient:
             kwargs["tools"] = tools
         if response_format is not None:
             kwargs["response_format"] = response_format
+        if max_tokens is not None:
+            kwargs["max_tokens"] = int(max_tokens)
+        if timeout is not None:
+            kwargs["timeout"] = float(timeout)   # per-request 项,压过默认超时
 
         provider_cfg = self.config.get("providers", {}).get(self.provider, {})
         if "base_url" in provider_cfg:
@@ -282,7 +302,14 @@ class LLMClient:
         tools: Optional[List[Dict[str, Any]]] = None,
         response_format: Optional[Dict[str, Any]] = None,
         temperature: float = 0.2,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> Any:
+        # 座席级思考预算(2026-07-12 思考预算层):显式参 > 座席默认(for_agent 解析的
+        # agent_overrides.max_tokens/timeout)> 不传。两者都 None 时两条路径 kwargs 不出现
+        # 对应键,行为与旧版逐字节一致。
+        eff_mt = max_tokens if max_tokens is not None else self.default_max_tokens
+        eff_timeout = timeout if timeout is not None else self.default_timeout
         # 瞬时错误(SSL hiccup / 超时 / 5xx / 429)指数退避重试。此前 chat() 零重试,
         # 任何抖动直接冒泡 → seats/decide、各研报 SubAgent、wisdom 等单次失败即判失败
         # (重试只在交互式 buddy 循环有)。鉴权/请求错(401/400)不重试,立即抛。
@@ -293,9 +320,11 @@ class LLMClient:
                 if self.provider in _OPENAI_COMPAT_PROVIDERS:
                     return await self._chat_openai_compat(
                         messages, tools, response_format, temperature,
+                        max_tokens=eff_mt, timeout=eff_timeout,
                     )
                 return await self._chat_litellm(
                     messages, tools, response_format, temperature,
+                    max_tokens=eff_mt, timeout=eff_timeout,
                 )
             except asyncio.CancelledError:
                 raise
