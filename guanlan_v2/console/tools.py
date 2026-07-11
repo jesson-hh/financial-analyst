@@ -1215,9 +1215,10 @@ def report_run_impl(code: str, name: str = "", asof: Optional[str] = None) -> Di
 
 def seats_bind_impl(code: str, name: str = "", creed: str = "",
                     template: str = "momentum") -> Dict[str, Any]:
-    """为某只票在校场创建专属盯盘 agent(纯前端落地:后端只产 seat_bind 信封,
-    控制台前端 applySeatBind 写 window.GL 策略 bind=[code] = 盯盘)。
-    诚实口径:盯盘 = 校场绑定的 agent、页面开着时前端循环研判,非服务器 7×24。"""
+    """为某只票创建专属盯盘 agent(前端落地:后端只产 seat_bind 信封,
+    控制台前端 applySeatBind 写 window.GL 策略 bind=[code] = 盯盘;GL 镜像到 var/archive)。
+    诚实口径:绑定即入盯盘集;服务端 watcher(GUANLAN_SEATS_WATCH=1)交易日盘中
+    按策略节拍自动研判并落盘,关页面也盯;未开 watcher 时仅手动研判。"""
     code = (code or "").strip().upper()
     if _re.match(r"^\d{6}$", code):          # 裸码 → 引擎规范化(同 report_run_impl)
         try:
@@ -1231,9 +1232,9 @@ def seats_bind_impl(code: str, name: str = "", creed: str = "",
     bare = code[2:]
     nm = (name or "").strip() or code
     return {"ok": True,
-            "content": (f"已为 {nm}({bare}) 在校场创建盯盘 agent「{nm} · 盯盘」({template} 模板)。"
-                        f"它会显现在校场,页面开着时由前端盯盘循环持续研判提醒;"
-                        f"这不是服务器 7×24 常驻盯盘。需要立刻看一次研判,我再跑 ww_seats_decide。"),
+            "content": (f"已为 {nm}({bare}) 创建盯盘 agent「{nm} · 盯盘」({template} 模板),显现在落子「策略」页。"
+                        f"绑定即入盯盘集:服务端盯盘开着时(GUANLAN_SEATS_WATCH=1 + 落子「今日」页总闸)交易日盘中"
+                        f"按策略节拍自动研判并落盘,关页面也盯;未开则仅手动研判。需要立刻看一次研判,我再跑 ww_seats_decide。"),
             "artifact": artifact("seat_bind", page="seats", channel="cockpit",
                                  payload={"code": code, "bareCode": bare, "name": nm,
                                           "creed": (creed or "").strip(), "template": template})}
@@ -2286,9 +2287,9 @@ WW_TOOL_TABLE = [
      "reachable": ["/seats/decide", "/seats/calibration"]},
     {"name": "ww_seats_bind",
      "description":
-         "为某只票在校场创建专属盯盘 agent(绑定策略 bind=该票=盯盘,显现在校场,页面开着时前端循环持续研判)。"
+         "为某只票创建专属盯盘 agent(绑定策略 bind=该票=入盯盘集,显现在落子「策略」页)。"
          "用户说『加入盯盘/配个 agent 盯住 X/专门盯这只票』时用。需用户确认。"
-         "诚实:盯盘=校场绑定 agent+页面开着时前端研判,非服务器 7×24。",
+         "诚实:服务端 watcher(GUANLAN_SEATS_WATCH=1+今日页总闸)盘中按节拍自动研判落盘,关页面也盯;未开 watcher 则仅手动研判。",
      "input_schema": {"type": "object", "properties": {
          "code": {"type": "string", "description": "股票代码,如 SZ000630 或 000630"},
          "name": {"type": "string"},
