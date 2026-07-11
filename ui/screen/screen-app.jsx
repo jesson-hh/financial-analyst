@@ -1303,8 +1303,10 @@ function RescoreBar({ onData, onRkData, result, flash }) {
   const [mismatch, setMismatch] = useState(null); // 口径不符:{base_model, ranking_date}
   const _poll = useRef(null);
   const say = flash || ((t, b) => { try { console.log('[再打分]', t, b); } catch (e) {} });
-  // 再打分票池永远读 prod 榜(后端 rescore.py 固定 base_model="prod")→ 变体口径按钮置灰
+  // 再打分票池按当前模型读榜(prod 生产榜 / 变体自己的榜);后端 base_model 回真实 model,口径守卫据此贴 overlay
   const isVariant = !!(result && result.model && result.model !== 'prod');
+  // 诚实:情绪/消息面是当日实时抓的,配未重训、名单陈旧(排名日非今日)的变体名单口径不完全对齐 → 提示不硬禁
+  const staleList = isVariant && Number((result && result.ranking_stale_days) || 0) > 1;
   const pull = async () => {
     try {
       const j = await (await fetch(API + '/screen/rescore/latest')).json();
@@ -1346,10 +1348,13 @@ function RescoreBar({ onData, onRkData, result, flash }) {
     }
   }, [run, result]);  // eslint-disable-line react-hooks/exhaustive-deps
   const go = async () => {
-    if (!API || (st && st.running) || isVariant) return;
+    if (!API || (st && st.running)) return;
+    // 变体名单陈旧:诚实提示口径(情绪当日实时 vs 名单旧)但不硬禁——用户可能就想看旧名单的产业链分布
+    if (staleList && !window.confirm('该模型名单为 ' + (result.date || '?') + '(非今日),而产业链/情绪是当日实时抓取——口径不完全对齐。\n建议先「↻ 重训到最新」再打分。仍要继续?')) return;
     try {
       const j = await (await fetch(API + '/screen/rescore', { method: 'POST',
-        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ top_n: 50 }) })).json();
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ top_n: 50, model: (result && result.model) || 'prod' }) })).json();
       if (!j.ok) { window.alert('再打分:' + (j.reason || '发起失败')); return; }
       setSt({ running: true, label: '再打分中…' });
       let fails = 0;   // 连续失败计数:≥5 次中止轮询,按钮退出跑态并 flash 原因(绝不无限空转)
@@ -1372,12 +1377,16 @@ function RescoreBar({ onData, onRkData, result, flash }) {
   };
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-      <span onClick={(isVariant || (st && st.running)) ? undefined : go} className="serif" style={{ fontSize: 10, color: 'var(--paper)',
-        background: (isVariant || (st && st.running)) ? 'var(--ink-3)' : 'var(--yin)', borderRadius: 5,
-        padding: '2px 9px', cursor: isVariant ? 'not-allowed' : 'pointer', userSelect: 'none', opacity: isVariant ? 0.6 : 1 }}
-        title={isVariant ? '再打分仅对生产 v4 口径(当前为变体榜,票池不匹配)'
+      <span onClick={(st && st.running) ? undefined : go} className="serif" style={{ fontSize: 10, color: 'var(--paper)',
+        background: (st && st.running) ? 'var(--ink-3)' : 'var(--yin)', borderRadius: 5,
+        padding: '2px 9px', cursor: (st && st.running) ? 'default' : 'pointer', userSelect: 'none', opacity: 1 }}
+        title={isVariant
+          ? ('对当前模型「' + result.model + '」名单再打分:产业链分+情绪分+行业重排(展示参考,不改信号)'
+             + (staleList ? ' · ⚠名单为 ' + result.date + ',情绪为当日实时,口径不完全对齐,建议先重训' : ''))
           : '产业链分+新闻情绪对 v4 前50再打分(展示参考,不改选股信号;LLM 按批计费)+行业重排(LLM 整批)'}>
         {(st && st.running) ? (st.label || '再打分中…') : '再打分+重排 ✦'}</span>
+      {staleList && <span className="mono" title={'名单为 ' + result.date + ',情绪/消息面为当日实时,口径不完全对齐——建议先「↻ 重训到最新」'}
+        style={{ fontSize: 8.5, color: 'var(--paper)', background: 'var(--jin)', borderRadius: 4, padding: '1px 6px' }}>⚠名单较旧</span>}
       {mismatch && <span className="mono" title="旧再打分档案与当前榜口径不符,分数未贴到清单;重新点「再打分+重排」按当前 prod 榜生成"
         style={{ fontSize: 8.5, color: 'var(--ink-3)', border: '1px dashed var(--line)', borderRadius: 4, padding: '1px 6px' }}>
         再打分基于 {mismatch.base_model}·{mismatch.ranking_date} 榜,与当前口径不符</span>}
