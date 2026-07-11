@@ -80,8 +80,11 @@ def _record_rerank_ab(run_id: str, rows: List[dict], rk: Dict[str, Any],
     rr_codes = [x["code"] for x in after[:k]]
     ts = _now()
     for arm, codes in (("data", data_codes), ("rerank", rr_codes)):
-        append_pick({"kind": "rerank_ab", "arm": arm, "codes": codes,
-                     "run_id": run_id, "ts": ts, "snapshot": False})
+        row = {"kind": "rerank_ab", "arm": arm, "codes": codes,
+               "run_id": run_id, "ts": ts, "snapshot": False}
+        if arm == "rerank" and rk.get("model"):
+            row["model"] = str(rk["model"])   # 代次标注:升档=换处理组,跨代次不混合归因
+        append_pick(row)
 
 
 # ── 产业链分(纯函数,零 LLM)─────────────────────────────────────────────

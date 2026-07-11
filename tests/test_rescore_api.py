@@ -380,3 +380,16 @@ def test_daily_rerank_guard_skips_stale_or_unknown(monkeypatch):
     today = dt.date.today().isoformat()
     sapi._maybe_daily_rerank(today + " 00:00:00")    # 时间戳串归一 [:10] 后命中
     assert len(called) == 1
+
+
+def test_record_rerank_ab_stamps_model(tmp_path, monkeypatch):
+    """代次标注:rerank 臂行带 model,data 臂(无 LLM)不带。"""
+    from guanlan_v2.screen import picks as pk, rescore as rs
+    monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
+    rows = [{"code": f"SH60000{i}"} for i in range(3)]
+    rk = {"ok": True, "model": "deepseek/deepseek-reasoner",
+          "rows": [{"code": r["code"], "rank_after": 3 - i} for i, r in enumerate(rows)]}
+    rs._record_rerank_ab("rs_test", rows, rk, top_n=3)
+    got = {r["arm"]: r for r in pk.read_picks(limit=10)}
+    assert got["rerank"].get("model") == "deepseek/deepseek-reasoner"
+    assert "model" not in got["data"]

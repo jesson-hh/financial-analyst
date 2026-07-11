@@ -2106,7 +2106,8 @@ def build_seats_router() -> APIRouter:
                             if isinstance(ex_r, (int, float)) and isinstance(ex_d, (int, float))
                             else None)
                     pairs.append({"run_id": rid, "ts": arms["data"].get("ts"),
-                                  "start": start_d, "arms": out_arms, "excess_diff": diff})
+                                  "start": start_d, "arms": out_arms, "excess_diff": diff,
+                                  "model": arms["rerank"].get("model")})
                     if len(pairs) >= cap:
                         break
                 return JSONResponse({"ok": True, "kind": "rerank_ab",

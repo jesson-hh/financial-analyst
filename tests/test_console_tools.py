@@ -1848,12 +1848,27 @@ def test_rerank_perf_impl_renders_pairs(monkeypatch):
     import guanlan_v2.console.tools as ct
     fake = {"ok": True, "kind": "rerank_ab", "n": 1, "pairs": [
         {"run_id": "rs_a", "ts": "2026-07-01T18:00:00", "excess_diff": 0.021,
+         "model": "deepseek/deepseek-reasoner",
          "arms": {"data": {"ok": True, "excess": -0.01, "n": 5, "matured_n": 0},
                   "rerank": {"ok": True, "excess": 0.011, "n": 5, "matured_n": 0}}}]}
     monkeypatch.setattr(ct, "_rerank_perf_fetch", lambda limit: fake)   # 桥打桩
     r = ct.rerank_perf_impl(limit=5)
     assert r["ok"] and "rs_a" in r["content"] and "+2.1pp" in r["content"]
     assert "未成熟0/5" in r["content"]                                   # 未成熟显形(防蒸馏未熟数字)
+    assert "· deepseek/deepseek-reasoner" in r["content"]               # 代次显形
+
+
+def test_rerank_perf_impl_no_model_omits_tail(monkeypatch):
+    """旧档案(无 model 字段,Task 4 上线前存量)不渲染代次尾巴——向后兼容。"""
+    import guanlan_v2.console.tools as ct
+    fake = {"ok": True, "kind": "rerank_ab", "n": 1, "pairs": [
+        {"run_id": "rs_old", "ts": "2026-07-01T18:00:00", "excess_diff": 0.021,
+         "arms": {"data": {"ok": True, "excess": -0.01, "n": 5, "matured_n": 0},
+                  "rerank": {"ok": True, "excess": 0.011, "n": 5, "matured_n": 0}}}]}
+    monkeypatch.setattr(ct, "_rerank_perf_fetch", lambda limit: fake)   # 桥打桩
+    r = ct.rerank_perf_impl(limit=5)
+    assert r["ok"] and "rs_old" in r["content"]
+    assert "· deepseek" not in r["content"]                              # 缺失不渲染
 
 
 def test_rerank_perf_impl_empty_honest(monkeypatch):

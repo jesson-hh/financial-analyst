@@ -1089,8 +1089,10 @@ def rerank_perf_impl(limit: int = 5) -> Dict[str, Any]:
             return s
         diff = p.get("excess_diff")
         diff_s = f"{float(diff) * 100:+.1f}pp" if isinstance(diff, (int, float)) else "—"
+        mdl = p.get("model")
         lines.append(f"{p.get('run_id')} · {ts} · data臂 {_arm_s(data_arm)} · "
-                     f"rerank臂 {_arm_s(rerank_arm)} · Δ={diff_s}")
+                     f"rerank臂 {_arm_s(rerank_arm)} · Δ={diff_s}"
+                     + (f" · {mdl}" if mdl else ""))
     return {"ok": True, "artifact": None, "raw": r, "content": "\n".join(lines)}
 
 

@@ -133,13 +133,15 @@ def test_basket_perf_rerank_ab_pairs(tmp_path, monkeypatch, client):
     pk.append_pick({"kind": "rerank_ab", "arm": "data", "codes": ["SH600000"],
                     "run_id": "rs_a", "ts": ts, "snapshot": False})
     pk.append_pick({"kind": "rerank_ab", "arm": "rerank", "codes": ["SZ000001"],
-                    "run_id": "rs_a", "ts": ts, "snapshot": False})
+                    "run_id": "rs_a", "ts": ts, "snapshot": False,
+                    "model": "deepseek/deepseek-reasoner"})
     pk.append_pick({"kind": "rerank_ab", "arm": "data", "codes": ["SH600001"],
                     "run_id": "rs_half", "ts": ts, "snapshot": False})   # 半对→跳过
     r = client.get("/seats/basket_perf", params={"kind": "rerank_ab", "limit": 5}).json()
     assert r["ok"] and r["kind"] == "rerank_ab" and r["n"] == 1
     pair = r["pairs"][0]
     assert pair["run_id"] == "rs_a" and set(pair["arms"]) == {"data", "rerank"}
+    assert pair["model"] == "deepseek/deepseek-reasoner"
     # 两臂各为 compute_basket_perf 结果;测试环境无行情时两臂 ok:false 也如实并列(不编数)
 
 
