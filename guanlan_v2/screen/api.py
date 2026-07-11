@@ -54,7 +54,7 @@ class ScreenIn(BaseModel):
     exclLimit: bool = True
     exclNew: bool = False
     universe: str = "csi_fast"
-    model: str = "prod"          # v4 模型:prod=生产 / 变体 id(读 models/<id>)
+    model: Optional[str] = None  # v4 模型:None/省略=默认指针(没设→prod)/ 'prod'=生产直通 / 变体 id
     regimeWeights: bool = False  # regime 因子族动态权重(opt-in;默认 False=路径零触碰,须过闸+新鲜双闸)
     start: Optional[str] = None
     end: Optional[str] = None
@@ -749,10 +749,12 @@ def _panel_enrich(codes, freq: str = "day", factors=None):
 
 
 def _resolve_model_id(m):
-    """model 省略/'prod' → 查默认变体指针;显式变体 id 原样(解析不校验存在)。
-    没设指针 → 'prod'(零行为变化)。"""
-    mid = (m or "prod").strip() or "prod"
-    if mid != "prod":
+    """model 省略/None/空串 → 查默认变体指针(没设 → 'prod');字面量 'prod' 直通生产,
+    绝不被默认指针劫持;显式变体 id 原样(解析不校验存在)。"""
+    mid = (m or "").strip()
+    if mid == "prod":
+        return "prod"
+    if mid:
         return mid
     try:
         from guanlan_v2.screen.model_registry import get_default_model
@@ -800,17 +802,25 @@ def _screen_via_v4(body: "ScreenIn"):
     """
     import math as _math
 
-    _mid = _resolve_model_id(getattr(body, "model", "prod"))
+    _mid = _resolve_model_id(getattr(body, "model", None))
+    _requested, _fb_reason = _mid, None
     try:
         from guanlan_v2 import strategy as S
-        try:
-            rank = S.load_v4_ranking(model_id=_mid)
-        except FileNotFoundError:
-            rank = S.load_v4_ranking(); _mid = "prod"        # 变体不可用 → 诚实回落 prod
-    except Exception:  # noqa: BLE001  —— 产物缺失/读失败 → 回退
+        if _mid != "prod":
+            try:
+                rank = S.load_v4_ranking(model_id=_mid)
+            except Exception as _e:  # noqa: BLE001 — 变体缺失(FileNotFoundError)/损坏(parquet 坏档等)
+                # → 诚实回落 prod 并在响应显形(model_fallback);变体损坏绝不跌到 legacy 玩具因子路径
+                _fb_reason = f"{type(_e).__name__}: {_e}"[:200]
+                _mid = "prod"
+                rank = S.load_v4_ranking()
+        else:
+            rank = S.load_v4_ranking()
+    except Exception:  # noqa: BLE001  —— 仅 prod 本身缺失/读失败 → 回退玩具因子路径
         return None
 
-    rdate = S.ranking_date(model_id=_mid)
+    # 排名日期:直接取已加载的 rank(免同一 parquet 二读;口径与 S.ranking_date 逐字一致)
+    rdate = (str(rank["date"].iloc[0]) if ("date" in rank.columns and len(rank)) else "")
     nim = S.name_industry_map()
 
     # 股票池切换:指数成份(csi300/500/800/1000)→ 先把 v4 排名过滤到成份内。
@@ -838,6 +848,7 @@ def _screen_via_v4(body: "ScreenIn"):
                    .sort_values("lgb_pct", ascending=False)
                    .head(max(int(body.topN) * 8, 150)))
         _vals = pool_df["lgb_pct"].astype(float)
+    _pool_kind = "v4_rated" if use_v4_total else "lgb_pct"   # 候选池口径诚实显形(响应 pool_kind/pool_n)
     _pct = _vals.rank(pct=True).tolist()
     codes = [str(c) for c in pool_df["code"].tolist()]
     # —— regime 条件化(opt-in;缺省 False 分支不执行任何新代码——红线1)——
@@ -1047,15 +1058,28 @@ def _screen_via_v4(body: "ScreenIn"):
     except Exception:  # noqa: BLE001
         _b3prov = None
 
+    # 排名龄期(自然日:date.today() − 产物排名日);日期解析失败 → null 诚实缺席
+    try:
+        from datetime import date as _date
+        _stale_days = (_date.today() - _date.fromisoformat(str(rdate)[:10])).days
+    except Exception:  # noqa: BLE001
+        _stale_days = None
+
     resp = {
         "ok": True,
         "source": "v4_ranking",
-        "model": _mid,              # 实际所跑 v4 模型(变体缺失已回落 prod)
+        "model": _mid,              # 实际所跑 v4 模型(变体缺失/损坏已回落 prod)
+        # 回落显式信号:仅真发生回落时带此三键(缺省响应逐字节不变),前端据此区分真回落/竞态
+        **({"requested_model": _requested, "model_fallback": True,
+            "fallback_reason": _fb_reason} if _fb_reason is not None else {}),
         "date": rdate,
+        "ranking_stale_days": _stale_days,   # 排名龄期(自然日;前端陈旧显形)
         "v4_provenance": _b3prov,   # #7 v4 排名口径:纯 LGB vs LGB+FinCast(w_fc)+look-ahead,诚实显形
         "chosen": chosen,
         "benched": benched[:40],
         "pool": [{"s": x["s"]} for x in pool],
+        "pool_kind": _pool_kind,    # 候选池口径:v4_rated(五维评级顶200)/ lgb_pct(模型分位)
+        "pool_n": len(pool_df),     # 候选池行数(排除前)
         "scored": [{"s": x["s"]} for x in scored_rows],
         # #3 去 mock:v4 路径消费的是 vendored 排名产物(非表达式 alpha 时序),无法当窗实算
         #    rank-IC → 诚实给 None(前端显示「—」),绝不再下发装饰常数 0.05。
@@ -1481,6 +1505,14 @@ def build_screen_router() -> APIRouter:
             vs = [v for v in vs if v.get("status") != "draft"]   # P1 门:draft 不进正式货架
         for v in vs:
             v["is_default"] = (v.get("id") == dflt)
+            # 列表瘦身:recipe.codes(可达 6000+ 代码/变体,列表零消费方)→ 只回 n_codes 计数;
+            # 磁盘 meta.json 不动,单变体消费方(cpcv 等走 variant_meta)不受影响
+            rc = v.get("recipe")
+            if isinstance(rc, dict) and "codes" in rc:
+                rc = dict(rc)
+                _codes = rc.pop("codes")
+                rc["n_codes"] = len(_codes) if isinstance(_codes, (list, tuple)) else None
+                v["recipe"] = rc
         return JSONResponse({"ok": True, "variants": vs, "default_model": dflt})
 
     @router.get("/picks")

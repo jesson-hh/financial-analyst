@@ -20,6 +20,19 @@ def test_delete_prod_refused(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         reg.delete_variant("prod")
 
+
+def test_delete_variant_rejects_empty_and_escape(tmp_path, monkeypatch):
+    """删除守卫:空/全空白/None id 拒删(_dir('')==MODELS_DIR,曾会 rmtree 整库);
+    路径越界(解析出 models/ 库外)同样拒删,整库文件安然无恙。"""
+    monkeypatch.setattr(reg, "MODELS_DIR", tmp_path / "models")
+    reg.save_variant("m_keep", _DF, {"id": "m_keep"})
+    for bad in ("", "   ", None):
+        with pytest.raises(ValueError):
+            reg.delete_variant(bad)
+    with pytest.raises(ValueError):
+        reg.delete_variant("..")                            # 越界(models/ 库外)拒删
+    assert reg.variant_ranking_path("m_keep").exists()      # 整库未被误删
+
 def test_load_v4_ranking_by_model(tmp_path, monkeypatch):
     from guanlan_v2.strategy import ranking as R
     monkeypatch.setattr(reg, "MODELS_DIR", tmp_path / "models")

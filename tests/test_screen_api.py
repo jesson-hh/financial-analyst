@@ -168,6 +168,34 @@ def test_run_bad_model_falls_back():
     j = _client().post("/screen/run", json={**_CFG, "model": "does_not_exist"}).json()
     assert j["ok"] is True and j["source"] == "v4_ranking"      # 回落 prod,不 500
     assert j.get("model") == "prod"                             # 变体缺失 → 诚实回落 prod
+    assert j.get("model_fallback") is True                      # 回落显式信号(前端可区分真回落/竞态)
+    assert j.get("requested_model") == "does_not_exist"
+    assert "FileNotFoundError" in (j.get("fallback_reason") or "")
+
+
+def test_run_corrupt_variant_falls_back_to_prod_not_legacy(monkeypatch, tmp_path):
+    """变体 parquet 损坏(非 FileNotFoundError)→ 回落 prod 并显形,绝不跌到 legacy 玩具因子路径。"""
+    from guanlan_v2.screen import model_registry as reg
+    monkeypatch.setattr(reg, "MODELS_DIR", tmp_path / "models")
+    d = tmp_path / "models" / "m_bad"
+    d.mkdir(parents=True)
+    (d / "v4_ranking.parquet").write_bytes(b"not a parquet file")   # 损坏产物
+    j = _client().post("/screen/run", json={**_CFG, "model": "m_bad"}).json()
+    assert j["ok"] is True and j["source"] == "v4_ranking"          # 仍是 v4 主路径(prod)
+    assert j["model"] == "prod" and j["model_fallback"] is True
+    assert j["requested_model"] == "m_bad" and j["fallback_reason"]
+
+
+def test_run_success_has_no_fallback_keys_and_reports_pool_stale():
+    """成功路径:无回落三键(缺省响应不背噪声);pool_kind/pool_n/ranking_stale_days 诚实下发。"""
+    import datetime as _dt
+    j = _client().post("/screen/run", json=_CFG).json()
+    assert j["ok"] is True
+    assert "model_fallback" not in j and "requested_model" not in j and "fallback_reason" not in j
+    assert j["pool_kind"] in ("v4_rated", "lgb_pct")            # 候选池口径显形
+    assert j["pool_n"] == len(j["scored"]) > 0                  # 池行数 = 全量打分行数
+    exp = (_dt.date.today() - _dt.date.fromisoformat(j["date"][:10])).days
+    assert j["ranking_stale_days"] == exp >= 0                  # 排名龄期(自然日)
 
 
 def test_model_endpoints(monkeypatch, tmp_path):
@@ -218,14 +246,36 @@ def test_resolve_model_id_default_pointer(tmp_path, monkeypatch):
     monkeypatch.setattr(reg, "MODELS_DIR", tmp_path / "models")
     (tmp_path / "models" / "m_x").mkdir(parents=True)
     (tmp_path / "models" / "m_x" / "v4_ranking.parquet").write_bytes(b"stub")
-    assert sapi._resolve_model_id("prod") == "prod"        # 没设默认 = prod(零变化)
+    assert sapi._resolve_model_id(None) == "prod"           # 没设默认:省略 = prod(零变化)
     assert sapi._resolve_model_id("") == "prod"
+    assert sapi._resolve_model_id("prod") == "prod"
     assert sapi._resolve_model_id("m_y") == "m_y"           # 显式变体原样(解析不校验存在)
     reg.set_default_model("m_x")
-    assert sapi._resolve_model_id("prod") == "m_x"          # 设了默认 → 变体
+    assert sapi._resolve_model_id(None) == "m_x"            # 省略 → 默认指针
+    assert sapi._resolve_model_id("") == "m_x"              # 空串同省略
+    assert sapi._resolve_model_id("prod") == "prod"         # 字面量 prod 直通生产,绝不被默认劫持
     assert sapi._resolve_model_id("m_y") == "m_y"           # 显式仍优先于默认
     reg.set_default_model(None)
-    assert sapi._resolve_model_id("prod") == "prod"         # 清除 → 回 prod
+    assert sapi._resolve_model_id(None) == "prod"           # 清除 → 回 prod
+
+
+def test_models_list_strips_recipe_codes(monkeypatch, tmp_path):
+    """GET /screen/models 列表瘦身:recipe.codes(每变体可达 6000+ 代码)→ n_codes 计数;
+    磁盘 meta.json 不动,单变体消费方(cpcv 走 variant_meta)不受影响。"""
+    import json as _json
+    import pandas as pd
+    from guanlan_v2.screen import model_registry as reg
+    monkeypatch.setattr(reg, "MODELS_DIR", tmp_path / "models")
+    row = pd.DataFrame({"code": ["SH600519"], "lgb_pct": [0.9], "date": ["2026-07-01"]})
+    reg.save_variant("m_rc", row, {"id": "m_rc", "name": "带池",
+                                   "recipe": {"features": ["rank(close)"],
+                                              "codes": ["SH600519", "SZ000001", "SZ300750"]}})
+    j = _client().get("/screen/models").json()
+    v = next(x for x in j["variants"] if x["id"] == "m_rc")
+    assert "codes" not in v["recipe"] and v["recipe"]["n_codes"] == 3
+    assert v["recipe"]["features"] == ["rank(close)"]        # 其余 recipe 字段原样保留
+    disk = _json.loads((tmp_path / "models" / "m_rc" / "meta.json").read_text(encoding="utf-8"))
+    assert disk["recipe"]["codes"] == ["SH600519", "SZ000001", "SZ300750"]   # 磁盘 meta 不动
 
 
 def test_model_default_endpoint_and_models_flag(tmp_path, monkeypatch):

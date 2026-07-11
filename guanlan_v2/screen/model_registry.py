@@ -64,8 +64,14 @@ def list_variants() -> List[Dict[str, Any]]:
 
 
 def delete_variant(vid) -> None:
+    if not str(vid or "").strip():
+        raise ValueError("变体 id 为空,拒绝删除")   # 守卫:_dir('')==MODELS_DIR,空 id 会 rmtree 整库
     if vid == "prod":
         raise ValueError("生产 v4(prod)不可删")
+    d = _dir(vid)
+    _dr, _mr = d.resolve(), MODELS_DIR.resolve()
+    if _dr == _mr or _mr not in _dr.parents:
+        raise ValueError(f"变体路径越界(须在 models/ 库内),拒绝删除: {vid}")
     # 删的若是当前默认变体 → 先清默认指针(回落 prod),避免悬空(读原始指针,不经 get 的自愈)
     p = _default_path()
     if p.exists():
@@ -74,7 +80,6 @@ def delete_variant(vid) -> None:
                 p.unlink()
         except (json.JSONDecodeError, OSError, AttributeError):
             pass   # 损坏/读不了/非 dict 指针 → 不阻塞删除(get_default_model 也会自降级)
-    d = _dir(vid)
     if d.exists():
         shutil.rmtree(d)
 
