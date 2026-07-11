@@ -127,11 +127,11 @@ def test_v4_pool_reads_parquet(monkeypatch, tmp_path):
     import pandas as pd
     p = tmp_path / "v4.parquet"
     pd.DataFrame({"code": ["SH1", "SH2", "SH3"], "lgb_pct": [0.10, 0.99, 0.50]}).to_parquet(p)
-    monkeypatch.setattr(rs, "_v4_ranking_path", lambda: p)
+    monkeypatch.setattr(rs, "_v4_ranking_path", lambda model="prod": p)
     pool = rs.v4_pool(2)
     assert [r["code"] for r in pool] == ["SH2", "SH3"]   # lgb_pct 降序前 2
     assert pool[0]["v4pct"] == 99.0   # 0-1 → 0-100 归一
-    monkeypatch.setattr(rs, "_v4_ranking_path", lambda: tmp_path / "missing.parquet")
+    monkeypatch.setattr(rs, "_v4_ranking_path", lambda model="prod": tmp_path / "missing.parquet")
     with pytest.raises(rs.RescoreError):
         rs.v4_pool(2)
 
@@ -153,7 +153,7 @@ def test_v4_pool_pct_column_compat(monkeypatch, tmp_path):
     import pandas as pd
     p = tmp_path / "v4_old.parquet"
     pd.DataFrame({"code": ["SH1"], "pct": [88.0]}).to_parquet(p)
-    monkeypatch.setattr(rs, "_v4_ranking_path", lambda: p)
+    monkeypatch.setattr(rs, "_v4_ranking_path", lambda model="prod": p)
     pool = rs.v4_pool(1)
     assert pool[0]["v4pct"] == 88.0   # 0-100 原样
 
@@ -163,5 +163,5 @@ def test_v4_pool_ts_code_fallback(monkeypatch, tmp_path):
     import pandas as pd
     p = tmp_path / "v4b.parquet"
     pd.DataFrame({"ts_code": ["SH7", "SH8"], "lgb_pct": [0.05, 0.90]}).to_parquet(p)
-    monkeypatch.setattr(rs, "_v4_ranking_path", lambda: p)
+    monkeypatch.setattr(rs, "_v4_ranking_path", lambda model="prod": p)
     assert [r["code"] for r in rs.v4_pool(1)] == ["SH8"]

@@ -47,9 +47,14 @@ def _load_framework_segments() -> List[dict]:
     return list(load_framework().get("segments") or [])
 
 
-def _v4_ranking_path():
+def _v4_ranking_path(model: str = "prod"):
+    """model 为 None/空/"prod" → 生产榜 V4_RANKING_PARQUET;否则 → 变体榜 models/<vid>/v4_ranking.parquet。
+    变体路径不做存在性兜底:读取层(v4_pool/v4_ranking_date)读失败即诚实失败,绝不回落 prod 榜冒充。"""
     from guanlan_v2.strategy.paths import V4_RANKING_PARQUET
-    return V4_RANKING_PARQUET
+    if not model or model == "prod":
+        return V4_RANKING_PARQUET
+    from guanlan_v2.screen.model_registry import variant_ranking_path
+    return variant_ranking_path(model)
 
 
 def _call_news(codes: List[str]) -> Dict[str, Any]:
@@ -197,13 +202,14 @@ def composite_score(v4_pct: Optional[float], chain: Optional[float],
 
 # ── 池来源(v4 榜)────────────────────────────────────────────────────────
 
-def v4_pool(top_n: int) -> List[dict]:
+def v4_pool(top_n: int, model: str = "prod") -> List[dict]:
     """v4 榜按 pct 降序前 top_n:[{code, v4pct(0-100)}];不可用 → RescoreError 拒开跑。
+    model 选池来源(prod 生产榜 / 变体 id 榜);变体榜读失败 → RescoreError 诚实失败,绝不回落 prod 冒充。
     列名/量纲归一走单一入口 strategy.ranking.v4_pct_map(与 industry.aggregate 同源,防口径漂移)。"""
     import pandas as pd
     from guanlan_v2.strategy.ranking import v4_pct_map
     try:
-        df = pd.read_parquet(_v4_ranking_path())
+        df = pd.read_parquet(_v4_ranking_path(model))
     except Exception as exc:  # noqa: BLE001
         raise RescoreError(f"v4 榜不可用: {type(exc).__name__}: {exc}")
     try:
@@ -214,12 +220,12 @@ def v4_pool(top_n: int) -> List[dict]:
     return [{"code": c, "v4pct": round(p, 1)} for c, p in top]
 
 
-def v4_ranking_date() -> Optional[str]:
-    """所读 prod 榜(_v4_ranking_path)的 date 列首行(YYYY-MM-DD,口径落档用);
+def v4_ranking_date(model: str = "prod") -> Optional[str]:
+    """所读榜(_v4_ranking_path(model))的 date 列首行(YYYY-MM-DD,口径落档用);
     读不到/缺列 → None(诚实降级,不挡 run;绝不猜日期)。"""
     import pandas as pd
     try:
-        df = pd.read_parquet(_v4_ranking_path(), columns=["date"])
+        df = pd.read_parquet(_v4_ranking_path(model), columns=["date"])
     except Exception:  # noqa: BLE001 — 缺文件/缺列均按未知处理
         return None
     if "date" in df.columns and len(df):
@@ -252,14 +258,19 @@ def read_latest() -> Optional[Dict[str, Any]]:
         return None
 
 
-def run_rescore(run_id: str, top_n: int, note: str, progress) -> Dict[str, Any]:
+def run_rescore(run_id: str, top_n: int, note: str, progress,
+                model: str = "prod") -> Dict[str, Any]:
     """再打分主体(daemon 线程内):池→产业链分→情绪分→综合→落档。展示型,零信号回写。
-    口径落档:票池永远读 prod 榜(v4_pool→V4_RANKING_PARQUET),run 记录带
-    base_model="prod" + ranking_date(所读榜 date),供前端/A-B 档案做口径守卫。"""
-    base = {"base_model": "prod", "ranking_date": v4_ranking_date()}
+    口径落档:票池读 model 指定榜(prod 生产榜 / 变体 id 榜),run 记录带 base_model=真实 model
+    + ranking_date(所读榜 date),供前端/A-B 档案做口径守卫。base_model 回真实 model 非硬编 prod。
+    变体口径显形:model!=prod 时额外落 model 字段——名单为 ranking_date(陈旧排名日)、情绪为当日实时,
+    口径不符须前端诚实标注;变体榜读失败 → run 诚实失败落档(reason),绝不静默串 prod 榜冒充。"""
+    base = {"base_model": model, "ranking_date": v4_ranking_date(model)}
+    if model and model != "prod":
+        base["model"] = model   # 变体旗:前端据此标"名单陈旧、情绪当日实时"口径提示(T3)
     try:
         progress(phase="pool", label=f"① 取 v4 榜前 {top_n}…", **base)
-        pool = v4_pool(top_n)
+        pool = v4_pool(top_n, model)
         codes = [r["code"] for r in pool]
         progress(phase="industry", label="② 产业链分(board 读数)…")
         ind, fresh = industry_scores(codes)
@@ -337,17 +348,20 @@ def _progress(**kw: Any) -> None:
 
 
 class RescoreIn(BaseModel):
-    """``POST /screen/rescore`` 入参(钳制在端点内做,服务端权威)。"""
+    """``POST /screen/rescore`` 入参(钳制在端点内做,服务端权威)。
+    model 缺省 "prod"(生产榜);传变体 id → 该变体名单再打分(口径由 run 落 model 旗显形)。"""
 
     top_n: int = 50
     note: str = ""
+    model: str = "prod"
 
 
-def _run_thread(run_id: str, top_n: int, note: str) -> None:
+def _run_thread(run_id: str, top_n: int, note: str, model: str = "prod") -> None:
     err = None
     end: Dict[str, Any] = {}
     try:
-        result = run_rescore(run_id, top_n=top_n, note=note, progress=_progress)
+        result = run_rescore(run_id, top_n=top_n, note=note, progress=_progress,
+                             model=model)
         end = result if isinstance(result, dict) else {}
     except Exception as exc:  # noqa: BLE001
         err = f"{type(exc).__name__}: {exc}"
@@ -359,9 +373,12 @@ def _run_thread(run_id: str, top_n: int, note: str) -> None:
                                   error=(err or end.get("error")))
 
 
-def start_rescore_bg(top_n: int = 50, note: str = "") -> Dict[str, Any]:
-    """模块级发起(端点/调度器共用同一状态机)。已在跑 → ok:false(单飞让路)。"""
+def start_rescore_bg(top_n: int = 50, note: str = "",
+                     model: str = "prod") -> Dict[str, Any]:
+    """模块级发起(端点/调度器共用同一状态机)。已在跑 → ok:false(单飞让路)。
+    model 透传 worker→run_rescore 决定池来源(prod/变体 id);state.base_model 落真实 model。"""
     top_n = max(5, min(int(top_n or 50), 100))
+    model = (model or "prod").strip() or "prod"
     run_id = new_run_id()
     with _RESCORE_LOCK:
         busy = bool(_RESCORE_STATE.get("running"))
@@ -369,12 +386,13 @@ def start_rescore_bg(top_n: int = 50, note: str = "") -> Dict[str, Any]:
             _RESCORE_STATE.update(running=True, phase="starting", label="启动再打分…",
                                   run_id=run_id, started_at=_time.time(), ended_at=None,
                                   ok=None, error=None, lines=[],
-                                  base_model="prod", ranking_date=None)  # 池永远读 prod 榜;date 待 run 读榜后回填
+                                  base_model=model, ranking_date=None)  # base_model 落真实 model;date 待 run 读榜后回填
     if busy:                                    # 锁外读状态(锁不可重入,绝不嵌套)
         return {"ok": False, "reason": "already_running",
                 "state": _rescore_public_state()}
-    _threading.Thread(target=lambda: _run_thread(run_id, top_n, (note or "").strip()),
-                      name="rescore", daemon=True).start()
+    _threading.Thread(
+        target=lambda: _run_thread(run_id, top_n, (note or "").strip(), model),
+        name="rescore", daemon=True).start()
     return {"ok": True, "started": True, "run_id": run_id,
             "state": _rescore_public_state()}
 
@@ -385,7 +403,7 @@ def build_rescore_router() -> APIRouter:
 
     @router.post("/screen/rescore")
     def rescore_start(body: RescoreIn):
-        return JSONResponse(start_rescore_bg(body.top_n, body.note))
+        return JSONResponse(start_rescore_bg(body.top_n, body.note, body.model))
 
     @router.get("/screen/rescore/status")
     def rescore_status():

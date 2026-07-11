@@ -145,7 +145,7 @@ def test_run_rescore_carries_rerank_block_and_ab_baskets(tmp_path, monkeypatch):
     from guanlan_v2.screen import rescore as rs
     monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "runs.jsonl")
     monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
-    monkeypatch.setattr(rs, "v4_pool", lambda n: [
+    monkeypatch.setattr(rs, "v4_pool", lambda n, model="prod": [
         {"code": f"SH60000{i}", "v4pct": 99.0 - i} for i in range(5)])
     monkeypatch.setattr(rs, "industry_scores", lambda codes: ({c: None for c in codes}, {}))
     monkeypatch.setattr(rs, "news_scores", lambda codes, top_n: (
@@ -174,7 +174,7 @@ def test_run_rescore_rerank_fail_no_baskets(tmp_path, monkeypatch):
     from guanlan_v2.screen import rescore as rs
     monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "runs.jsonl")
     monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
-    monkeypatch.setattr(rs, "v4_pool", lambda n: [{"code": "SH600000", "v4pct": 99.0}])
+    monkeypatch.setattr(rs, "v4_pool", lambda n, model="prod": [{"code": "SH600000", "v4pct": 99.0}])
     monkeypatch.setattr(rs, "industry_scores", lambda codes: ({c: None for c in codes}, {}))
     monkeypatch.setattr(rs, "news_scores", lambda codes, top_n: (
         {c: None for c in codes}, {"llm_calls": 0, "cache_hits": 0}))
@@ -192,7 +192,7 @@ def test_run_rescore_bridge_exception_does_not_kill_run(tmp_path, monkeypatch):
     from guanlan_v2.screen import rescore as rs
     monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "runs.jsonl")
     monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
-    monkeypatch.setattr(rs, "v4_pool", lambda n: [{"code": "SH600000", "v4pct": 99.0}])
+    monkeypatch.setattr(rs, "v4_pool", lambda n, model="prod": [{"code": "SH600000", "v4pct": 99.0}])
     monkeypatch.setattr(rs, "industry_scores", lambda codes: ({c: None for c in codes}, {}))
     monkeypatch.setattr(rs, "news_scores", lambda codes, top_n: (
         {c: None for c in codes}, {"llm_calls": 0, "cache_hits": 0}))
@@ -213,7 +213,7 @@ def test_run_rescore_ab_record_failure_surfaces(tmp_path, monkeypatch):
     from guanlan_v2.screen import rescore as rs
     monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "runs.jsonl")
     monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
-    monkeypatch.setattr(rs, "v4_pool", lambda n: [
+    monkeypatch.setattr(rs, "v4_pool", lambda n, model="prod": [
         {"code": f"SH60000{i}", "v4pct": 99.0 - i} for i in range(3)])
     monkeypatch.setattr(rs, "industry_scores", lambda codes: ({c: None for c in codes}, {}))
     monkeypatch.setattr(rs, "news_scores", lambda codes, top_n: (

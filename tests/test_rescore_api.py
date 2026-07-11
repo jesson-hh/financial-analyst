@@ -38,8 +38,8 @@ def test_run_rescore_end_to_end_rows(monkeypatch, tmp_path):
     monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
     monkeypatch.setattr(rs, "_run_rerank_bridge",
                         lambda rows, market: {"ok": False, "reason": "stubbed"})
-    monkeypatch.setattr(rs, "v4_pool", lambda n: [{"code": "SH1", "v4pct": 90.0},
-                                                  {"code": "SH2", "v4pct": 80.0}])
+    monkeypatch.setattr(rs, "v4_pool", lambda n, model="prod": [{"code": "SH1", "v4pct": 90.0},
+                                                                {"code": "SH2", "v4pct": 80.0}])
     monkeypatch.setattr(rs, "industry_scores", lambda codes: (
         {"SH1": {"seg": "A1", "seg_name": "算力", "chain": 0.6, "research": 3.0,
                  "therm": 80.0, "quadrant": "hh"}, "SH2": None},
@@ -63,7 +63,7 @@ def test_run_rescore_end_to_end_rows(monkeypatch, tmp_path):
 
 def test_run_rescore_board_fail_honest(monkeypatch, tmp_path):
     monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "runs.jsonl")
-    monkeypatch.setattr(rs, "v4_pool", lambda n: [{"code": "SH1", "v4pct": 90.0}])
+    monkeypatch.setattr(rs, "v4_pool", lambda n, model="prod": [{"code": "SH1", "v4pct": 90.0}])
 
     def boom(codes):
         raise rs.RescoreError("产业链板不可用: 板坏了")
@@ -79,7 +79,7 @@ def test_endpoint_start_clamps_and_single_flight(monkeypatch, tmp_path):
     monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "runs.jsonl")
     seen = {}
 
-    def fake_run(run_id, top_n, note, progress):
+    def fake_run(run_id, top_n, note, progress, model="prod"):
         seen.update(top_n=top_n)
         progress(phase="score", label="打分中…")
         return {"ok": True, "run_id": run_id, "rows": [], "stats": {}}
@@ -110,7 +110,7 @@ def test_endpoint_already_running_no_deadlock(monkeypatch, tmp_path):
     monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "runs.jsonl")
     release = threading.Event()
 
-    def slow_run(run_id, top_n, note, progress):
+    def slow_run(run_id, top_n, note, progress, model="prod"):
         release.wait(timeout=5)
         return {"ok": True, "run_id": run_id, "rows": [], "stats": {}}
 
@@ -149,9 +149,9 @@ def test_v4_ranking_date_reads_parquet(monkeypatch, tmp_path):
     import pandas as pd
     p = tmp_path / "r.parquet"
     pd.DataFrame({"code": ["SH1"], "lgb_pct": [0.9], "date": ["2026-07-08"]}).to_parquet(p)
-    monkeypatch.setattr(rs, "_v4_ranking_path", lambda: p)
+    monkeypatch.setattr(rs, "_v4_ranking_path", lambda model="prod": p)
     assert rs.v4_ranking_date() == "2026-07-08"
-    monkeypatch.setattr(rs, "_v4_ranking_path", lambda: tmp_path / "missing.parquet")
+    monkeypatch.setattr(rs, "_v4_ranking_path", lambda model="prod": tmp_path / "missing.parquet")
     assert rs.v4_ranking_date() is None
 
 
@@ -160,8 +160,8 @@ def test_run_rescore_records_base_model_and_ranking_date(monkeypatch, tmp_path):
     monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "runs.jsonl")
     from guanlan_v2.screen import picks as pk
     monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
-    monkeypatch.setattr(rs, "v4_ranking_date", lambda: "2026-07-09")
-    monkeypatch.setattr(rs, "v4_pool", lambda n: [{"code": "SH1", "v4pct": 90.0}])
+    monkeypatch.setattr(rs, "v4_ranking_date", lambda model="prod": "2026-07-09")
+    monkeypatch.setattr(rs, "v4_pool", lambda n, model="prod": [{"code": "SH1", "v4pct": 90.0}])
     monkeypatch.setattr(rs, "industry_scores", lambda codes: ({"SH1": None}, {}))
     monkeypatch.setattr(rs, "news_scores", lambda codes, top_n: (
         {"SH1": None}, {"llm_calls": 0, "cache_hits": 0, "as_of": None,
@@ -178,9 +178,9 @@ def test_run_rescore_records_base_model_and_ranking_date(monkeypatch, tmp_path):
 def test_run_rescore_failure_still_records_base(monkeypatch, tmp_path):
     """失败 run 也落口径字段(ranking_date 未知 → None 诚实),口径守卫对失败档不失明。"""
     monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "runs.jsonl")
-    monkeypatch.setattr(rs, "v4_ranking_date", lambda: None)
+    monkeypatch.setattr(rs, "v4_ranking_date", lambda model="prod": None)
 
-    def boom(n):
+    def boom(n, model="prod"):
         raise rs.RescoreError("v4 榜不可用: x")
 
     monkeypatch.setattr(rs, "v4_pool", boom)
@@ -189,12 +189,127 @@ def test_run_rescore_failure_still_records_base(monkeypatch, tmp_path):
     assert end["base_model"] == "prod" and end["ranking_date"] is None
 
 
+# ── T1:变体榜 model 参数化(池来源可切 prod/变体 id,base_model 回真实 model)───────
+
+def test_v4_pool_reads_variant_ranking(monkeypatch, tmp_path):
+    """v4_pool(model=变体):经 model_registry.variant_ranking_path 读变体榜(非 prod 榜),按 pct 降序取 top_n。"""
+    import pandas as pd
+    from guanlan_v2.screen import model_registry as mr
+    p = tmp_path / "variant.parquet"
+    pd.DataFrame({"code": ["SZ1", "SZ2", "SZ3"], "date": ["2026-07-10"] * 3,
+                  "lgb_pct": [0.2, 0.9, 0.5]}).to_parquet(p)
+    monkeypatch.setattr(mr, "variant_ranking_path", lambda vid: p)
+    pool = rs.v4_pool(2, model="m_variant_x")
+    assert [r["code"] for r in pool] == ["SZ2", "SZ3"]     # 0.9 > 0.5 > 0.2 取前二
+    # 口径路由坐实:变体走 variant_ranking_path;prod/空/None 走生产榜 V4_RANKING_PARQUET
+    from guanlan_v2.strategy.paths import V4_RANKING_PARQUET
+    assert rs._v4_ranking_path("m_variant_x") == p
+    assert rs._v4_ranking_path("prod") == V4_RANKING_PARQUET
+    assert rs._v4_ranking_path("") == V4_RANKING_PARQUET
+    assert rs._v4_ranking_path(None) == V4_RANKING_PARQUET
+
+
+def test_v4_pool_variant_missing_fails_honest_no_prod_fallback(monkeypatch, tmp_path):
+    """变体榜不存在 → RescoreError 诚实失败;绝不静默回落 prod 榜冒充(prod 有效也不返回其行)。"""
+    import pandas as pd
+    from guanlan_v2.screen import model_registry as mr
+    import guanlan_v2.strategy.paths as paths
+    prod = tmp_path / "prod.parquet"                       # prod 榜有效且带哨兵码
+    pd.DataFrame({"code": ["PRODSENTINEL"], "date": ["2026-07-10"],
+                  "lgb_pct": [0.9]}).to_parquet(prod)
+    monkeypatch.setattr(paths, "V4_RANKING_PARQUET", prod)
+    monkeypatch.setattr(mr, "variant_ranking_path",
+                        lambda vid: tmp_path / "does_not_exist.parquet")
+    with pytest.raises(rs.RescoreError):
+        rs.v4_pool(5, model="m_gone")                      # 变体缺 → 抛,绝不返回 prod 哨兵
+    # prod 口径仍正常读得到哨兵(证 prod 榜本身有效,失败纯因变体缺而非环境坏)
+    assert rs.v4_pool(5, model="prod")[0]["code"] == "PRODSENTINEL"
+
+
+def test_run_rescore_variant_base_model_and_flag(monkeypatch, tmp_path):
+    """变体 run:base_model 落真实变体 id(非硬编 prod)+ 落 model 旗(口径显形)+ ranking_date 走变体榜。"""
+    monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "runs.jsonl")
+    from guanlan_v2.screen import picks as pk
+    monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
+    seen = {}
+
+    def rd(model="prod"):
+        seen["rd_model"] = model
+        return "2026-06-30"
+
+    def pool(n, model="prod"):
+        seen["pool_model"] = model
+        return [{"code": "SZ1", "v4pct": 90.0}]
+
+    monkeypatch.setattr(rs, "v4_ranking_date", rd)
+    monkeypatch.setattr(rs, "v4_pool", pool)
+    monkeypatch.setattr(rs, "industry_scores", lambda codes: ({"SZ1": None}, {}))
+    monkeypatch.setattr(rs, "news_scores", lambda codes, top_n: (
+        {"SZ1": None}, {"llm_calls": 0, "cache_hits": 0, "as_of": None,
+                        "market_read": None, "market_tilt": None}))
+    monkeypatch.setattr(rs, "_run_rerank_bridge",
+                        lambda rows, market: {"ok": False, "reason": "stubbed"})
+    end = rs.run_rescore("rs_t7", top_n=1, note="", progress=lambda **kw: None,
+                         model="m_variant_x")
+    assert end["ok"] is True
+    assert end["base_model"] == "m_variant_x"              # 回真实 model 非 prod
+    assert end["model"] == "m_variant_x"                   # 变体口径旗显形
+    assert end["ranking_date"] == "2026-06-30"
+    assert seen["pool_model"] == "m_variant_x"             # 池确实按变体取
+    assert seen["rd_model"] == "m_variant_x"               # date 也走变体榜
+    latest = rs.read_latest()
+    assert latest["base_model"] == "m_variant_x" and latest["model"] == "m_variant_x"
+
+
+def test_run_rescore_prod_default_unchanged(monkeypatch, tmp_path):
+    """prod 默认口径零行为变化:base_model=="prod" 且不落 model 旗(前端不误标变体口径)。"""
+    monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "runs.jsonl")
+    from guanlan_v2.screen import picks as pk
+    monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
+    monkeypatch.setattr(rs, "v4_ranking_date", lambda model="prod": "2026-07-09")
+    monkeypatch.setattr(rs, "v4_pool", lambda n, model="prod": [{"code": "SH1", "v4pct": 90.0}])
+    monkeypatch.setattr(rs, "industry_scores", lambda codes: ({"SH1": None}, {}))
+    monkeypatch.setattr(rs, "news_scores", lambda codes, top_n: (
+        {"SH1": None}, {"llm_calls": 0, "cache_hits": 0, "as_of": None,
+                        "market_read": None, "market_tilt": None}))
+    monkeypatch.setattr(rs, "_run_rerank_bridge",
+                        lambda rows, market: {"ok": False, "reason": "stubbed"})
+    end = rs.run_rescore("rs_t8", top_n=1, note="", progress=lambda **kw: None)  # 默认 model=prod
+    assert end["ok"] is True
+    assert end["base_model"] == "prod"
+    assert "model" not in end                              # prod 不落变体旗
+
+
+def test_start_rescore_bg_passes_variant_model(monkeypatch):
+    """start_rescore_bg(model=变体) 透传给 worker→run_rescore,且 state.base_model 落真实 model。"""
+    import time as _t
+    calls = {}
+
+    def fake_run(run_id, top_n, note, progress, model="prod"):
+        calls["model"] = model
+        return {"ok": True, "run_id": run_id, "rows": [], "stats": {}}
+
+    monkeypatch.setattr(rs, "run_rescore", fake_run)
+    r = rs.start_rescore_bg(top_n=7, note="x", model="m_variant_x")
+    assert r["ok"] and r["state"]["base_model"] == "m_variant_x"   # state 落真实 model
+    for _ in range(50):
+        if calls.get("model"):
+            break
+        _t.sleep(0.05)
+    assert calls["model"] == "m_variant_x"                # 透传坐实
+    for _ in range(50):
+        if not rs._RESCORE_STATE.get("running"):
+            break
+        _t.sleep(0.05)
+    assert not rs._RESCORE_STATE.get("running")
+
+
 def test_status_exposes_base_model_and_ranking_date(monkeypatch, tmp_path):
     """/screen/rescore/status:state 带 base_model/ranking_date(progress 通道回填)。"""
     _reset(monkeypatch)
     monkeypatch.setattr(rs, "RUNS_PATH", tmp_path / "runs.jsonl")
 
-    def fake_run(run_id, top_n, note, progress):
+    def fake_run(run_id, top_n, note, progress, model="prod"):
         progress(phase="pool", label="池", base_model="prod", ranking_date="2026-07-09")
         return {"ok": True, "run_id": run_id, "rows": [], "stats": {}}
 
@@ -215,7 +330,7 @@ def test_start_rescore_bg_module_level(monkeypatch):
     from guanlan_v2.screen import rescore as rs
     calls = {}
     monkeypatch.setattr(rs, "run_rescore",
-                        lambda run_id, top_n, note, progress: calls.setdefault(
+                        lambda run_id, top_n, note, progress, model="prod": calls.setdefault(
                             "args", (top_n, note)) or {"ok": True})
     r = rs.start_rescore_bg(top_n=7, note="daily-scheduler")
     assert r["ok"] and r["started"] and r["run_id"].startswith("rs_")
