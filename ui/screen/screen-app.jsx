@@ -1616,6 +1616,68 @@ function NineViewDetail({ x }) {
   );
 }
 
+// ───────── 护盾 v4.4 · 市场温度上下文条 (纯展示;gate 只调仓位档与警示,绝不动星级/名单) ─────────
+// result.decision.market_temp 由后端 build_market_temp 组装:{gate, global, board, flow, llm, notes}。
+// 旧后端/组装异常无此键 → 整条不渲染(向后兼容);单块缺 → 该格「—」,龄期缺 → 不显,诚实不造数。
+function MarketTempBar({ mt }) {
+  if (!mt) return null;
+  const g = mt.global, b = mt.board, f = mt.flow, lm = mt.llm, gate = mt.gate;
+  const notes = mt.notes || [];
+  // 龄期:分钟 →「n分/n.n时」;负值/NaN(时钟漂移、解析失败)→ null 诚实不显
+  const fmtAge = (min) => (min == null || !isFinite(min) || min < 0) ? null
+    : (min < 90 ? Math.round(min) + '分前' : (min / 60).toFixed(1) + '时前');
+  const sinceMin = (iso) => { if (!iso) return null; const t = Date.parse(String(iso).replace(' ', 'T')); return isNaN(t) ? null : (Date.now() - t) / 60000; };
+  // gate 徽章:risk_off 红 / overheat 金 / neutral 灰 / null 灰小字休眠;tooltip 放 reasons 全文
+  const why = gate ? ((gate.reasons || []).join(';') || '无触发条件(打板温度/主力资金均在正常区间)')
+    : ('打板温度与主力净额全缺 → 护盾休眠(不猜不造)' + (notes.length ? '\n' + notes.join('\n') : ''));
+  const GATE_STY = {
+    risk_off: { text: '风险规避 · 仓位减半', style: { color: 'var(--paper)', background: 'var(--zhu)' } },
+    overheat: { text: '过热 · 分化警示', style: { color: 'var(--paper)', background: 'var(--jin)' } },
+    neutral: { text: '中性', style: { color: 'var(--ink-3)', border: '1px solid var(--line)' } },
+  };
+  const gs = gate && GATE_STY[gate.level];
+  const bAge = (b && b.age_s != null) ? fmtAge(b.age_s / 60) : null;
+  const boardTip = b
+    ? ('打板生态:涨停 ' + (b.zt_count ?? '—') + ' · 炸板 ' + (b.zb_count ?? '—')
+      + ' · 炸板率 ' + (b.break_rate != null ? (b.break_rate * 100).toFixed(0) + '%' : '—')
+      + ' · 晋级率 ' + (b.promotion_rate != null ? (b.promotion_rate * 100).toFixed(0) + '%' : '—')
+      + (bAge ? '(快照 ' + bAge + ')' : ''))
+    : '打板生态快照缺席(预热中/源异常)';
+  const cells = [
+    { k: 'A股打板温', v: (g && g.astock_temp != null) ? String(Math.round(g.astock_temp)) : '—',
+      c: (g && g.astock_temp != null) ? (g.astock_temp <= 25 ? 'var(--dai)' : g.astock_temp >= 85 ? 'var(--zhu)' : 'var(--ink-1)') : 'var(--ink-3)',
+      age: g ? fmtAge(g.stale_min) : null, tip: boardTip },
+    { k: '全球情绪', v: (g && g.g_temp != null) ? String(Math.round(g.g_temp)) : '—',
+      c: (g && g.g_temp != null) ? 'var(--ink-1)' : 'var(--ink-3)',
+      age: g ? fmtAge(g.stale_min) : null, tip: '海外预测市场温度均值(Polymarket/Kalshi 锚定事件)· 仅展示不进闸' },
+    { k: '主力净流', v: (f && f.main_net_yi != null) ? ((f.main_net_yi >= 0 ? '+' : '') + (+f.main_net_yi).toFixed(1) + '亿') : '—',
+      c: (f && f.main_net_yi != null) ? upc(f.main_net_yi) : 'var(--ink-3)',
+      age: f ? fmtAge(sinceMin(f.pulled_at)) : null, tip: '大盘主力净额(沪深合计 · 东财资金流)' },
+    { k: 'LLM判读', v: (lm && (lm.market_tilt || (lm.market_read ? '有判读' : null))) || '—',
+      c: (lm && (lm.market_tilt || lm.market_read)) ? 'var(--ink-1)' : 'var(--ink-3)',
+      age: null, tip: lm ? ((lm.market_read || '(无判读全文)') + (lm.as_of ? ' · as_of ' + lm.as_of : '')) : '今日无大盘判读记录' },
+  ];
+  return (
+    <div style={{ padding: '0 14px 10px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 7 }}>
+        <span className="mono" title={notes.length ? ('缺块明细:\n' + notes.join('\n')) : undefined}
+          style={{ fontSize: 8.5, letterSpacing: '.12em', color: 'var(--ink-3)' }}>市场温度 · 护盾 v4.4{notes.length > 0 && ' ⚠' + notes.length}</span>
+        {gs
+          ? <span className="mono" title={why} style={{ fontSize: 9, borderRadius: 4, padding: '1px 7px', marginLeft: 'auto', flexShrink: 0, ...gs.style }}>{gs.text}</span>
+          : <span className="mono" title={why} style={{ fontSize: 8.5, color: 'var(--ink-3)', border: '1px dashed var(--line)', borderRadius: 4, padding: '1px 7px', marginLeft: 'auto', flexShrink: 0 }}>数据不足 · 护盾休眠</span>}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+        {cells.map(cl => (
+          <div key={cl.k} title={cl.tip} style={{ border: '1px solid var(--line)', borderRadius: 7, background: 'var(--paper)', padding: '5px 7px', minWidth: 0 }}>
+            <div className="mono" style={{ fontSize: 7.5, color: 'var(--ink-3)', letterSpacing: '.05em', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cl.k}{cl.age && <span style={{ marginLeft: 3 }}>· {cl.age}</span>}</div>
+            <div className="mono" style={{ fontSize: 12.5, fontWeight: 600, color: cl.c, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cl.v}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ───────── L5 决策 · ≤5 持仓收敛 (五维评级 + 护盾 + 仓位档 + 操作) ─────────
 function DecisionPanel({ result }) {
   const [llm, setLlm] = useState(null);          // { ok, market_read, holdings:[{code,bull,bear,synth,op}], model } | { ok:false, reason }
@@ -1625,6 +1687,7 @@ function DecisionPanel({ result }) {
   if (result.source !== 'v4_ranking' || !result.decision) return null;
   const dec = result.decision;
   const final = dec.final || [];
+  const isVariant = !!(result.model && result.model !== 'prod');   // 与顶栏同口径:后端回真实 model
   const API = (typeof window !== 'undefined' && window.GUANLAN_BACKEND) || '';
   const llmByCode = {}; ((llm && llm.holdings) || []).forEach(h => { llmByCode[h.code] = h; });
   const newsSent = (news && news.ok && news.sentiment) || {};
@@ -1660,7 +1723,13 @@ function DecisionPanel({ result }) {
         <div className="serif" style={{ fontSize: 10.5, color: 'var(--ink-2)', marginTop: 6, lineHeight: 1.5 }}>
           可执行 <b style={{ color: 'var(--dai)' }}>{dec.n_actionable}</b> 只 → 行业去重收敛 <b style={{ color: 'var(--ink)' }}>{final.length}</b> 只持仓
         </div>
+        {isVariant && result.pool_kind === 'v4_rated' && (
+          // 变体五维口径诚实显形:model 维=变体自身分位,其余四维=prod 同日全市场因子截面(T2 附着)
+          <div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', marginTop: 4, lineHeight: 1.5 }}>
+            五维评级 · model 维 = 本变体分位 · 其余四维 = 全市场因子截面(与 prod 同日)</div>
+        )}
       </div>
+      <MarketTempBar mt={dec.market_temp} />
       {final.length > 0 && API && (
         <div style={{ padding: '0 14px 10px' }}>
           <div onClick={runLlm} className="serif" style={{ textAlign: 'center', fontSize: 11.5, color: 'var(--paper)', background: llmLoading ? 'var(--ink-3)' : 'var(--yin)', borderRadius: 7, padding: '7px', cursor: llmLoading ? 'default' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
@@ -1690,7 +1759,12 @@ function DecisionPanel({ result }) {
         </div>
       )}
       {final.length === 0 ? (
-        <div className="serif" style={{ padding: '0 14px 12px', fontSize: 10.5, color: 'var(--ink-3)', lineHeight: 1.5 }}>当前清单无 ★★★★+ 标的(评级偏中性 → 观望)。</div>
+        // 变体旧快照(pool_kind=lgb_pct)恒无五维 → 决策必空:诚实指路重训,不装「评级偏中性」
+        (isVariant && result.pool_kind === 'lgb_pct') ? (
+          <div className="serif" style={{ padding: '0 14px 12px', fontSize: 10.5, color: 'var(--ink-3)', lineHeight: 1.5 }}>该变体排名无五维评级(旧快照)——点顶栏『↻ 重训到最新』,重训后自动生成五维评级与决策。</div>
+        ) : (
+          <div className="serif" style={{ padding: '0 14px 12px', fontSize: 10.5, color: 'var(--ink-3)', lineHeight: 1.5 }}>当前清单无 ★★★★+ 标的(评级偏中性 → 观望)。</div>
+        )
       ) : (
         <div style={{ padding: '0 14px 11px', display: 'flex', flexDirection: 'column', gap: 7 }}>
           {final.map((f, i) => (
