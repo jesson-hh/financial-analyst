@@ -529,7 +529,7 @@ function XuanguApp() {
     <div className="paper-bg" style={{ height: '100vh', display: 'flex', flexDirection: 'column', minWidth: 1340 }}>
       <TopBar cfg={cfg} result={result} onPhrase={runPhrase} onCommit={commit} dark={dark} setDark={setDark} committed={committed}
         models={models} model={cfg.model} actualModel={result.model} onModel={(v) => { setF({ model: v }); refresh(); }}
-        onWorkshop={() => setShowWs(true)} loading={loading} />
+        onWorkshop={() => setShowWs(true)} loading={loading} flash={flash} reloadModels={reloadModels} refresh={refresh} />
       <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '400px 1fr', minHeight: 0 }}>
         <ConstraintRail cfg={cfg} setF={setF} toggleFactor={toggleFactor} setFactorW={setFactorW} onReset={reset} pickFactors={pickFactors} picking={picking} result={result} committed={committed} onClearCommit={() => setCommitted(null)} />
         <RankTable result={result} cfg={cfg} sort={sort} setSort={setSort} showBench={showBench} setShowBench={setShowBench} expanded={expanded} toggleExpand={toggleExpand} onRefresh={refresh} loading={loading} lastRun={lastRun} dirty={dirty} onRegen={regenData} regen={regen} rsMap={rsMap} setRsMap={setRsMap} rkMap={rkMap} setRkMap={setRkMap} flash={flash} />
@@ -546,8 +546,106 @@ function XuanguApp() {
   );
 }
 
+// ───────── 变体重训按钮(变体态:按原配方+原股池快照,数据滚动到最新)─────────
+// 与工坊训练共用后端 _MODEL_STATE 单飞锁:POST /screen/model/retrain → 轮询 /screen/model/status。
+// 诚实口径:股池仍是 recipe.universe 快照,仅数据滚动到最新交易日(新上市股不纳入),绝不冒充股池也更新。
+// 轮询有界:自调度 setTimeout 仅 running 才续,连续 5 次查询失败中止(绝不无限空转),卸载清句柄。
+function RetrainButton({ actualModel, models, flash, reloadModels, refresh }) {
+  const API = (typeof window !== 'undefined' && window.GUANLAN_BACKEND) || '';
+  const [st, setSt] = useState(null);         // 后端 model 状态机快照(null=未知/闲)
+  const _poll = useRef(null);                 // 自调度 setTimeout 句柄
+  const _initiated = useRef(false);           // 本按钮亲自发起重训 → 完成时才 flash 成功/失败
+  const _fails = useRef(0);                    // 连续状态查询失败计数
+  const _prevRunning = useRef(false);
+  const say = flash || ((t, b) => { try { console.log('[重训]', t, b); } catch (e) {} });
+  const vmeta = (models || []).find(m => m.id === actualModel) || null;
+  const isDefault = !!(vmeta && vmeta.is_default);
+  const running = !!(st && st.running);
+  const mine = running && st.variant_id === actualModel;    // 当前变体正在(本处或他处)重训
+  const other = running && st.variant_id !== actualModel;   // 工坊/另一变体在训 → 本按钮禁用提示忙
+  const stopPoll = () => { if (_poll.current) { clearTimeout(_poll.current); _poll.current = null; } };
+  const poll = () => {
+    fetch(API + '/screen/model/status').then(r => r.json()).then(j => {
+      _fails.current = 0;
+      const s = (j && j.state) || {};
+      setSt(s);
+      const was = _prevRunning.current; _prevRunning.current = !!s.running;
+      if (s.running) { _poll.current = setTimeout(poll, 3000); return; }
+      stopPoll();                                            // running 落沿:完成收尾
+      if (was) {
+        const fvid = s.variant_id, fok = s.ok === true, ferr = s.error;
+        if (reloadModels) reloadModels();                    // 列表 asof/oos_ic 刷新(龄期红牌应消失)
+        if (fvid === actualModel && refresh) refresh();       // 屏上正看的变体产物已推进 → 重算当前视图
+        if (_initiated.current) {
+          say(fok ? '重训完成' : '重训失败',
+            fok ? ('已按最新数据滚动 · ' + (fvid || '')) : String(ferr || '子进程非零退出'));
+          _initiated.current = false;
+        } else if (fvid === actualModel) {
+          say('该变体已更新', '另一处重训完成 · 已刷新当前视图');
+        }
+      }
+    }).catch(() => {
+      _fails.current += 1;
+      if (_fails.current >= 5) {
+        stopPoll(); _prevRunning.current = false; setSt(s => (s ? { ...s, running: false } : s));
+        if (_initiated.current) { say('重训轮询中断', '连续 5 次状态查询失败 · 后端可能仍在训,稍后刷新看列表'); _initiated.current = false; }
+      } else { _poll.current = setTimeout(poll, 3000); }
+    });
+  };
+  // 挂载即查一次:已有训练/重训在跑(刷新页/多标签/工坊在训)→ 接管轮询以如实禁用并显进度;卸载停轮询
+  useEffect(() => {
+    if (!API) return undefined;
+    fetch(API + '/screen/model/status').then(r => r.json()).then(j => {
+      const s = (j && j.state) || {};
+      setSt(s); _prevRunning.current = !!s.running;
+      if (s.running && !_poll.current) { _fails.current = 0; _poll.current = setTimeout(poll, 3000); }
+    }).catch(() => {});
+    return () => stopPoll();
+  }, [API, actualModel]);  // eslint-disable-line react-hooks/exhaustive-deps
+  const go = () => {
+    if (!API) { say('需后端', '重训需连接 9999 后端'); return; }
+    if (running) {                                           // 单飞:已在训 → 诚实提示,不发起
+      say('已有训练在跑', other ? ('工坊/另一变体正在训(' + (st.variant_id || '') + ')· 稍后再试') : '该变体正在重训中');
+      return;
+    }
+    _initiated.current = true; _prevRunning.current = true;
+    setSt({ running: true, variant_id: actualModel, label: '启动重训子进程…', phase: 'starting' });
+    fetch(API + '/screen/model/retrain', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: actualModel }) }).then(r => r.json()).then(j => {
+      if (!j || !j.ok) {                                     // 单飞碰撞/空 id → 后端诚实拒,退出跑态显原因
+        _initiated.current = false; _prevRunning.current = false; setSt(null);
+        say('重训未发起', (j && j.reason) || '发起失败'); return;
+      }
+      say('瀾 重训到最新…', '按原配方+原股池快照 · 数据滚动到今天 · 完成自动刷新');
+      _fails.current = 0; stopPoll(); _poll.current = setTimeout(poll, 3000);
+    }).catch(e => {
+      _initiated.current = false; _prevRunning.current = false; setSt(null);
+      say('⚠ 触发重训失败', String((e && e.message) || e));
+    });
+  };
+  const disabled = running;                                  // mine 或 other 都禁点(单飞锁)
+  const label = mine ? ('重训中 · ' + ((st && st.label) || '…')) : (other ? '已有训练在跑' : '↻ 重训到最新');
+  const tip = other
+    ? ('工坊或另一变体正在训练(' + ((st && st.variant_id) || '') + '),单飞锁占用,稍后再试')
+    : '按原配方+原股池快照,用最新数据重训到今天(新上市股不纳入)';
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+      <span onClick={disabled ? undefined : go} className="mono" title={tip}
+        style={{ fontSize: 9.5, color: disabled ? 'var(--ink-3)' : 'var(--paper)',
+          background: disabled ? 'transparent' : 'var(--dai)',
+          border: '1px solid ' + (disabled ? 'var(--line)' : 'var(--dai)'), borderRadius: 5,
+          padding: '2px 8px', cursor: disabled ? 'not-allowed' : 'pointer', userSelect: 'none',
+          opacity: (disabled && !mine) ? 0.7 : 1 }}>
+        {label}</span>
+      {isDefault && <span className="mono" title="该变体为默认上线口径 · 随每日数据再生自动重训到最新(此按钮为即时手动重训,不必等日跑)"
+        style={{ fontSize: 8.5, color: 'var(--ink-2)', border: '1px solid var(--line)', borderRadius: 4, padding: '1px 6px' }}>
+        ⏱ 已上线·每日自动更新</span>}
+    </span>
+  );
+}
+
 // ───────── 顶栏 ─────────
-function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, models, model, actualModel, onModel, onWorkshop, loading }) {
+function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, models, model, actualModel, onModel, onWorkshop, loading, flash, reloadModels, refresh }) {
   const [q, setQ] = useState('');
   // 变体口径:真正在用变体(actualModel 非 prod、未回落)时,顶栏「体检 IC / v4 provenance」两枚徽章
   //   原读 prod 全局产物(model_health / v4_b3_provenance),对变体是误标 → 换成变体自身口径。
@@ -640,6 +738,7 @@ function TopBar({ cfg, result, onPhrase, onCommit, dark, setDark, committed, mod
               style={{ fontSize: 10, color: 'var(--ink-1)', border: '1px dashed var(--zhu-soft)', borderRadius: 5, padding: '2px 7px' }}>
               变体 · 纯 LGB{uns.length ? ' ⚠' + uns.length : ''}</span>;
           })()}
+          {isVariant && <RetrainButton actualModel={actualModel} models={models} flash={flash} reloadModels={reloadModels} refresh={refresh} />}
           {/* ── 〔口径态〕v4 provenance + 风格权重 + 候选池口径 ── */}
           <span style={{ width: 1, height: 16, background: 'var(--line)', flexShrink: 0 }} />
           {!isVariant && result.v4_provenance && (() => {
