@@ -11,8 +11,12 @@ _REPO = Path(__file__).resolve().parent.parent
 
 
 def test_gat_predict_help_exits_zero():
+    # 显式 utf-8 + replace:text=True 在 Windows 用 GBK 解码,而按仓规跑测试带
+    # PYTHONIOENCODING=utf-8 时子进程 help(含中文)输出 UTF-8 → reader 线程
+    # GBK 解码炸 → r.stdout=None → TypeError。断言只看 ASCII 旗名,replace 两头安全。
     r = subprocess.run([sys.executable, str(_REPO / "scripts" / "gat_predict.py"), "--help"],
-                       capture_output=True, text=True, cwd=str(_REPO))
+                       capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       cwd=str(_REPO))
     assert r.returncode == 0
     assert "--date" in r.stdout and "--device" in r.stdout
 
