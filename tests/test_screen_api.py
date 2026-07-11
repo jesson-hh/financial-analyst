@@ -405,7 +405,7 @@ def test_record_picks_never_raises():
 def _sched_dict(**kw):
     """_REGEN_SCHED 测试底座(T3 后含 data_date/attempts)。"""
     base = {"enabled": True, "last_auto_ts": None, "last_auto_date": None,
-            "data_date": None, "attempts": 0}
+            "data_date": None, "attempts": 0, "default_retrain": None}
     base.update(kw)
     return base
 
@@ -554,11 +554,71 @@ def test_after_regen_gates_daily_rerank(monkeypatch):
     import guanlan_v2.screen.api as api
     got = []
     monkeypatch.setattr(api, "_maybe_daily_rerank", lambda nd=None: got.append(nd))
+    monkeypatch.setattr(api, "_maybe_default_retrain", lambda nd=None: None)  # 隔离:重训另有测
     api._after_regen(True, "manual", "2026-07-10")     # 手动成功 → 不触发
     api._after_regen(False, "scheduler", "2026-07-10")  # 调度失败 → 不触发
     assert got == []
     api._after_regen(True, "scheduler", "2026-07-10")   # 调度成功 → 触发且带新榜 date
     assert got == ["2026-07-10"]
+
+
+def test_after_regen_default_retrain_any_source(monkeypatch):
+    """默认重训门:成功即触发,不限 source(手动 regen 也让上线模型跟新);失败不触发。
+    与日跑重排(仅 scheduler)是两件事——别把两门搞混。"""
+    import guanlan_v2.screen.api as api
+    calls = []
+    monkeypatch.setattr(api, "_maybe_default_retrain", lambda nd=None: calls.append(nd))
+    monkeypatch.setattr(api, "_maybe_daily_rerank", lambda nd=None: None)   # 隔离重排门
+    api._after_regen(True, "manual", "2026-07-10")      # 手动成功 → 触发重训
+    api._after_regen(True, "scheduler", "2026-07-11")   # 调度成功 → 触发重训
+    api._after_regen(False, "scheduler", "2026-07-12")  # 失败 → 不触发
+    assert calls == ["2026-07-10", "2026-07-11"]
+
+
+def test_maybe_default_retrain_calls_when_default_set(monkeypatch):
+    """默认非空 → 调 retrain_variant(默认 id)+ 结果落 _REGEN_SCHED.default_retrain 显形。"""
+    import guanlan_v2.screen.api as api
+    from guanlan_v2.screen import model_registry as reg
+    from guanlan_v2.strategy.compute import model_workflow as mw
+    called = []
+    monkeypatch.setattr(reg, "get_default_model", lambda: "v_abc")
+    monkeypatch.setattr(mw, "retrain_variant",
+                        lambda vid: (called.append(vid) or
+                                     {"ok": True, "date": "2026-07-11", "oos_ic": 0.03}))
+    monkeypatch.setattr(api, "_REGEN_SCHED", _sched_dict())
+    api._maybe_default_retrain("2026-07-11")
+    assert called == ["v_abc"]
+    assert api._REGEN_SCHED["default_retrain"] == {"id": "v_abc", "date": "2026-07-11", "ok": True}
+
+
+def test_maybe_default_retrain_skips_when_no_default(monkeypatch):
+    """默认为空(回落官方 prod)→ 绝不调 retrain_variant(诚实跳过)。"""
+    import guanlan_v2.screen.api as api
+    from guanlan_v2.screen import model_registry as reg
+    from guanlan_v2.strategy.compute import model_workflow as mw
+    called = []
+    monkeypatch.setattr(reg, "get_default_model", lambda: None)
+    monkeypatch.setattr(mw, "retrain_variant", lambda vid: called.append(vid))
+    monkeypatch.setattr(api, "_REGEN_SCHED", _sched_dict())
+    api._maybe_default_retrain("2026-07-11")
+    assert called == []
+    assert api._REGEN_SCHED["default_retrain"] is None   # 未触发 → 不落记录
+
+
+def test_maybe_default_retrain_failure_does_not_raise(monkeypatch):
+    """重训异常绝不拖垮 regen 收尾:吞异常 + 落 ok=False 记录显形。"""
+    import guanlan_v2.screen.api as api
+    from guanlan_v2.screen import model_registry as reg
+    from guanlan_v2.strategy.compute import model_workflow as mw
+
+    def _boom(vid):
+        raise RuntimeError("train blew up")
+
+    monkeypatch.setattr(reg, "get_default_model", lambda: "v_x")
+    monkeypatch.setattr(mw, "retrain_variant", _boom)
+    monkeypatch.setattr(api, "_REGEN_SCHED", _sched_dict())
+    api._maybe_default_retrain("2026-07-11")   # 绝不抛
+    assert api._REGEN_SCHED["default_retrain"] == {"id": "v_x", "date": None, "ok": False}
 
 
 def test_run_regen_subprocess_success_invokes_after_regen(monkeypatch):
@@ -605,7 +665,7 @@ def test_health_has_regen_scheduler_block():
     j = _client().get("/screen/health").json()
     assert "regen_scheduler" in j
     assert set(j["regen_scheduler"].keys()) == {"enabled", "last_auto_ts",
-                                                "data_date", "attempts", "dl_daily"}
+                                                "data_date", "attempts", "default_retrain", "dl_daily"}
 
 
 # ── P1 §5: models draft 过滤 + set_default 拒 draft ─────────────────────────

@@ -162,7 +162,7 @@ def _regen_public_state() -> Dict[str, Any]:
 # 诚实口径:定时器随 9999 进程存亡,进程死=定时停,非 24/7 保证。
 # data_date=当前处理中的数据日;attempts=该数据日已触发次数(失败重试上限 _REGEN_MAX_RETRY)。
 _REGEN_SCHED: Dict[str, Any] = {"enabled": False, "last_auto_ts": None, "last_auto_date": None,
-                                "data_date": None, "attempts": 0}
+                                "data_date": None, "attempts": 0, "default_retrain": None}
 _regen_sched_started = False
 
 
@@ -224,12 +224,49 @@ def _maybe_daily_rerank(new_date: Optional[str] = None) -> None:
         pass
 
 
+def _maybe_default_retrain(new_date: Optional[str] = None) -> None:
+    """regen 成功收尾:让上线「默认变体」跟数据滚动重训一次。任何 source 都做——手动 regen
+    也要让上线模型跟新(与仅调度器的日跑重排是两件事,别混门)。默认为空(回落官方 prod)
+    → 跳过不训。重训同步约几分钟(已在 regen 子进程收尾线程内),失败/异常绝不抛(不拖垮
+    regen 收尾),记 _sched_log + _REGEN_SCHED['default_retrain'] 显形于 /screen/health。
+    诚实口径:股池仍是 recipe.universe 快照,仅数据滚动到最新(retrain_variant 内清死 end;
+    universe_note 标注新上市股不纳入),绝不冒充股池也更新。"""
+    try:
+        from guanlan_v2.screen.model_registry import get_default_model
+        did = get_default_model()          # 已内含「指向已删变体→None」校验(诚实降级)
+    except Exception:  # noqa: BLE001
+        did = None
+    if not did:
+        _sched_log("[default-retrain] 跳过:无默认变体(回落官方 prod)")
+        return
+    rec = {"id": did, "date": None, "ok": False}
+    try:
+        from guanlan_v2.strategy.compute.model_workflow import retrain_variant
+        res = retrain_variant(did) or {}
+        rec = {"id": did, "date": res.get("date"), "ok": bool(res.get("ok"))}
+        if rec["ok"]:
+            _sched_log(f"[default-retrain] {did} 重训成功 asof={res.get('date')} "
+                       f"oos_ic={res.get('oos_ic')}")
+        else:
+            _sched_log(f"[default-retrain] {did} 重训失败(不挡收尾):{res.get('reason')}")
+    except Exception as exc:  # noqa: BLE001 — 重训异常绝不拖垮 regen 收尾
+        _sched_log(f"[default-retrain] {did} 异常 {type(exc).__name__}: {exc}(不挡收尾)")
+    try:
+        _REGEN_SCHED["default_retrain"] = rec
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _after_regen(ok: bool, source: str, new_date: str) -> None:
-    """regen 子进程收尾回调:仅调度器来源+成功(新榜已热加载)才顺跑日跑重排。
+    """regen 子进程收尾回调:成功即让上线默认变体跟数据滚动重训(任何 source);另仅调度器
+    来源才顺跑日跑重排(新榜已热加载)。两门分明——重训无关 source,重排仅 scheduler。
     时序修:原 tick 里 spawn 即触发会让 rescore 读到再生前旧榜(v4 训练约 5 分钟);
-    手动 regen 不触发(GUANLAN_RERANK_DAILY 门内亦不放行);失败不触发(防脏 A/B)。"""
-    if ok and source == "scheduler":
-        _maybe_daily_rerank(new_date or None)
+    重排手动不触发(GUANLAN_RERANK_DAILY 门内亦不放行);失败不触发(防脏 A/B)。"""
+    if not ok:
+        return
+    _maybe_default_retrain(new_date or None)   # 任何 source:上线模型跟数据滚动
+    if source == "scheduler":
+        _maybe_daily_rerank(new_date or None)  # 仅调度器:日跑重排
 
 
 _REGEN_MAX_RETRY = 3           # 同一数据日失败重试上限(防抖)
@@ -1329,6 +1366,7 @@ def build_screen_router() -> APIRouter:
                                                  "last_auto_ts": _REGEN_SCHED.get("last_auto_ts"),
                                                  "data_date": _REGEN_SCHED.get("data_date"),
                                                  "attempts": _REGEN_SCHED.get("attempts"),
+                                                 "default_retrain": _REGEN_SCHED.get("default_retrain"),
                                                  "dl_daily": _os.environ.get("GUANLAN_DL_DAILY") == "1"},
                              "rerank_scheduler": {"enabled": _os.environ.get("GUANLAN_RERANK_DAILY") == "1",
                                                   "requires": "GUANLAN_REGEN_DAILY=1(随 regen 顺跑)"}})
