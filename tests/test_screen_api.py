@@ -5,10 +5,26 @@
 import re
 from collections import Counter
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from guanlan_v2.screen.api import build_screen_router
+
+
+@pytest.fixture(autouse=True)
+def _stub_market_temp(monkeypatch):
+    """隔离 /screen/run 内嵌的市场温度上下文(护盾 v4.4)。
+
+    真 build_market_temp 会触 live 源:read_tape 缓存过期时 spawn 真 probe 后台线程并改写
+    var/live/market_tape.json;fundflow 缓存缺失时(新 checkout/CI 的 var/ 是 gitignored)
+    触发后台预热真打东财。单元测试必须打桩(test_rescore_api 漏桩真调 LLM 的正典同款护栏)。
+    market_temp 自身逻辑由 test_market_temp.py 全桩覆盖。"""
+    import guanlan_v2.screen.market_temp as mt
+    monkeypatch.setattr(mt, "build_market_temp", lambda now=None: {
+        "gate": None, "global": None, "board": None, "flow": None, "llm": None,
+        "notes": ["test:market_temp 已打桩"]})
+
 
 _SHAPE_KEYS = ("chosen", "benched", "pool", "scored", "stat")
 _CFG = {"factors": [{"id": "fa_reversal", "w": 1.0}], "topN": 20, "industryNeutral": True,

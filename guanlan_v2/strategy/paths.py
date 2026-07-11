@@ -13,6 +13,9 @@ PROVENANCE_JSON = _PKG / "_provenance.json"
 
 # 选股直接消费的核心产物
 V4_RANKING_PARQUET = ARTIFACTS_DIR / "v4_ranking_latest.parquet"
+# 五维分项侧产物(2026-07-11):regen 顺手落的**全截面**四个非模型维分项
+# (code/layer/mc/fs/ts/vs/ud/eligible/date),供变体(工作流模型)训练时 join 复用
+V4_DIMS_PARQUET = ARTIFACTS_DIR / "v4_dims_latest.parquet"
 STOCK_BASIC_PARQUET = ARTIFACTS_DIR / "tushare_stock_basic.parquet"
 # L4 V1 节奏视角:市场宽度残差面板(lu/amt 残差 + 60 日分位;R27 情绪周期判据)
 MARKET_BREADTH_PARQUET = ARTIFACTS_DIR / "market_breadth_resid.parquet"

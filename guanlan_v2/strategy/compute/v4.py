@@ -230,13 +230,18 @@ def build_v4(provider_uri: str, start: str = START_DEFAULT, end: str = "2026-06-
              dl_sources: Optional[list] = None,
              feature_cols: Optional[List[str]] = None,
              extra_factor_panel: Optional["pd.DataFrame"] = None,
-             holdout: Optional[dict] = None) -> pd.DataFrame:
+             holdout: Optional[dict] = None,
+             dims: Optional[dict] = None) -> pd.DataFrame:
     """引擎原生 v4 排名 → 7 列(== v4_ranking_latest.parquet)。
 
     ``health``(可选出参,模型体检):传入 dict 时,顺带用**刚训完的同一模型**对近 ~60 个
     有标签交易日(标签=真实未来5日收益)逐日算截面 rank-IC,填 ``health["ic_series"]``
     =[(date,ic)...]。⚠ 这些日子在训练窗内 → 偏乐观,仅作衰减趋势监控(model_health.py 落盘
-    并标注口径)。默认 None = 行为与迁移验证版逐位一致,排名输出不受任何影响。"""
+    并标注口径)。默认 None = 行为与迁移验证版逐位一致,排名输出不受任何影响。
+
+    ``dims``(可选出参,2026-07-11 五维侧产物):传入 dict 时,顺带把**全截面**的四个
+    非模型维分项(compute_dims)填进 ``dims["df"]``(含 date 列),供 regen 落盘、变体
+    join 复用;失败只填 ``dims["error"]`` 绝不抛。默认 None = 一行新代码都不执行。"""
     import lightgbm as lgb
     from financial_analyst.data.loaders.qlib_binary import QlibBinaryLoader
     from guanlan_v2.strategy.compute.breadth import list_all_instruments
@@ -379,6 +384,18 @@ def build_v4(provider_uri: str, start: str = START_DEFAULT, end: str = "2026-06-
 
     df_top = _score_top200(pred, name_map)
 
+    # —— 五维分项侧产物(可选出参,2026-07-11):全截面四个非模型维(fs/ts/vs/ud)+ 市值
+    #    分层,供变体(工作流模型)训练时按 code join 复用(model 维 ms=变体自己的分位,
+    #    不在此算)。dims=None(缺省)→ 本块一行不执行,排名输出逐字节不变;
+    #    失败只记 error 绝不抛(dims 绝不拖垮排名)。
+    if dims is not None:
+        try:
+            d = compute_dims(pred, name_map)
+            d["date"] = (date_str or (ld.strftime("%Y-%m-%d") if hasattr(ld, "strftime") else str(ld)[:10]))
+            dims["df"] = d
+        except Exception as _e:  # noqa: BLE001
+            dims["error"] = f"{type(_e).__name__}: {_e}"
+
     # 导出 7 列(== v4_ranking_latest.parquet)
     pred_codes = list(pred.index.get_level_values("instrument"))
     rank = pd.DataFrame({"code": pred_codes, "lgb_score": pred["score"].values}).dropna(subset=["lgb_score"])
@@ -477,3 +494,90 @@ def _score_top200(pred: pd.DataFrame, name_map: dict) -> pd.DataFrame:
     if not results:
         return pd.DataFrame(columns=["code", "layer", "total"])
     return pd.DataFrame(results).sort_values("total", ascending=False)
+
+
+def compute_dims(pred: pd.DataFrame, name_map: dict) -> pd.DataFrame:
+    """全截面五维**非模型维**分项(factor/technical/volume/utility + 市值分层)。
+
+    为什么要它:``_score_top200`` 只对过滤后前 200 名算五维且只存总分 → 变体(工作流模型)
+    没有这个截面就无五维评级(选股页②决策恒空)。本函数把它的逐行规则**向量化推广到全
+    截面**落侧产物,变体训练时按 code join 复用;model 维(ms)是变体自身分位,不在此算。
+
+    分位语义与循环版逐位一致:``pctl(x, v_i) = (x < v_i).mean()`` = 严格小于 v_i 的个数 /
+    总行数 n(NaN 行含在分母)⇔ ``(x.rank(method="min") - 1) / n``;自身值 NaN → 0.5
+    (对应循环版 ``pd.notna(...) else 0.5``)。rsi/b20/vr 用原始值比较,NaN 比较恒 False
+    → 贡献 0,同循环版 ``row.get`` 后 NaN 比较的行为。round 两边同为银行家舍入(np/py 一致)。
+
+    依赖 pred 含 build_v4 补的末日 ``close`` 列(价格过滤门)。返回列:
+    code/layer/mc/fs/ts/vs/ud/eligible —— 不含 ms、不含 date(date 由 build_v4 出参时补)。
+    **红线**:绝不改 pred、绝不影响 _score_top200 的排名输出(prod 排名逐位不变)。"""
+    cols = ["code", "layer", "mc", "fs", "ts", "vs", "ud", "eligible"]
+    if not len(pred):
+        return pd.DataFrame(columns=cols)
+
+    # code 提取同 _score_top200 的 `idx[0] if isinstance(idx, tuple) else idx`
+    if isinstance(pred.index, pd.MultiIndex):
+        codes = list(pred.index.get_level_values(0))
+    else:
+        codes = list(pred.index)
+    names = [name_map.get(c, "?") for c in codes]
+    n = len(pred)
+
+    def _col(name: str) -> pd.Series:
+        # 列缺失 → 全 NaN(分位取 0.5 / 原始值比较 False),与循环版 row.get 缺省同向
+        return pred[name] if name in pred.columns else pd.Series(np.nan, index=pred.index)
+
+    def _pctl(name: str) -> pd.Series:
+        x = _col(name)
+        p = (x.rank(method="min") - 1.0) / float(n)
+        return p.fillna(0.5)
+
+    # 市值分层(total_mv 万元 → mv_billion 亿):>=1000 大盘 / >=300 中盘 / >=100 中小 /
+    # else(含 NaN,反正 ineligible)小盘;fc=factor 维封顶,mc=model 维封顶(变体 T2 用)
+    mv_b = _col("total_mv") / 1e4
+    is_big = (mv_b >= 1000).to_numpy()
+    is_mid = ((mv_b >= 300) & (mv_b < 1000)).to_numpy()
+    is_midsmall = ((mv_b >= 100) & (mv_b < 300)).to_numpy()
+    layer = np.select([is_big, is_mid, is_midsmall], ["大盘", "中盘", "中小"], default="小盘")
+    fc = pd.Series(np.select([is_big, is_mid], [0, 1], default=2), index=pred.index)
+    mc = np.select([is_big], [1], default=2)
+
+    # fs(factor 维):四因子截面分位打分,封 ±fc(大盘 fc=0 → 恒 0)
+    r20p, acp = _pctl("rev_20"), _pctl("amt_cv")
+    vp, bp = _pctl("volatility_20"), _pctl("big_up_freq")
+    fs = pd.Series(0.0, index=pred.index)
+    fs += (r20p > 0.7).astype(float) - (r20p < 0.3).astype(float)
+    fs += (acp < 0.3).astype(float) - (acp > 0.7).astype(float)
+    fs += (vp < 0.3).astype(float) - (vp > 0.7).astype(float)
+    fs += 0.5 * (bp < 0.3).astype(float) - 0.5 * (bp > 0.7).astype(float)
+    fs = fs.round().clip(lower=-fc, upper=fc).astype(int)
+
+    # ts(technical 维):rsi/bias 原始值阈值(NaN 比较 False → 0 贡献),封 ±2
+    rsi, b20 = _col("rsi_approx"), _col("bias_ma20")
+    ts = (rsi < 0.3).astype(float) - (rsi > 0.7).astype(float)
+    ts += 0.5 * (b20 < -0.05).astype(float) - 0.5 * (b20 > 0.05).astype(float)
+    ts = ts.round().clip(-2, 2).astype(int)
+
+    # vs(volume 维):量比 <0.7 缩量 +1 / >1.5 放量 -1 / 其余(含 NaN)0
+    vr = _col("vol_ratio_5_20")
+    vs = np.select([(vr < 0.7).to_numpy(), (vr > 1.5).to_numpy()], [1, -1], default=0)
+
+    # ud(utility 维):公用事业关键词 → -1(名字缺失 → "?" 不命中)
+    ud = np.array([-1 if any(kw in nm for kw in UTILITY_KW) else 0 for nm in names], dtype=int)
+
+    # eligible:同 _score_top200 的过滤门,但不含 score.notna —— 模型分是变体自己的事
+    close = _col("close")
+    st = pd.Series([("ST" in nm) for nm in names], index=pred.index)
+    eligible = ((mv_b > 30) & (close > 3) & (close < 500)
+                & close.notna() & _col("total_mv").notna() & ~st)
+
+    return pd.DataFrame({
+        "code": codes,
+        "layer": layer,
+        "mc": mc.astype(int),
+        "fs": fs.to_numpy(),
+        "ts": ts.to_numpy(),
+        "vs": vs.astype(int),
+        "ud": ud,
+        "eligible": eligible.to_numpy().astype(bool),
+    })
