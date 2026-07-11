@@ -113,3 +113,26 @@ def start_job_bg(playbook: str) -> Dict[str, Any]:
     threading.Thread(target=_run_job_thread, args=(job_id, playbook),
                      name="autonomy-job", daemon=True).start()
     return {"ok": True, "job_id": job_id}
+
+
+def maybe_enqueue_daily_review(note: str) -> bool:
+    """rescore 落定后的调度钩子(挂在 screen/rescore.py `_run_thread` finally 里,ok 分支
+    才调):三门全过才排队复盘官——①env `GUANLAN_REVIEW_DAILY=="1"`、②note=="daily-scheduler"
+    (仅日跑重排收尾才排队,手动重排不排)、③今日尚未跑过(read_jobs 里查不到当日
+    playbook==review_officer 且 status∈{done,running} 的 job,防重复排队)。
+    自吞异常返回 False——排队失败绝不拖垮调用方(rescore 主流程)。"""
+    try:
+        import os
+        if os.environ.get("GUANLAN_REVIEW_DAILY") != "1":
+            return False
+        if note != "daily-scheduler":
+            return False
+        today = time.strftime("%Y-%m-%d")
+        for j in J.read_jobs(limit=20):
+            if (j.get("playbook") == "review_officer"
+                    and str(j.get("started_ts") or "")[:10] == today
+                    and j.get("status") in ("done", "running")):
+                return False
+        return bool(start_job_bg("review_officer").get("ok"))
+    except Exception:  # noqa: BLE001 — 排队失败绝不拖垮 rescore 主流程
+        return False

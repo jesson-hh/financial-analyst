@@ -374,6 +374,12 @@ def _run_thread(run_id: str, top_n: int, note: str, model: str = "prod") -> None
             _RESCORE_STATE.update(running=False, ended_at=_time.time(), ok=ok,
                                   phase=("done" if ok else "error"),
                                   error=(err or end.get("error")))
+        if ok:
+            try:
+                from guanlan_v2.autonomy.runtime import maybe_enqueue_daily_review
+                maybe_enqueue_daily_review(note)
+            except Exception:  # noqa: BLE001 — 复盘官排队失败绝不拖垮 rescore
+                pass
 
 
 def start_rescore_bg(top_n: int = 50, note: str = "",

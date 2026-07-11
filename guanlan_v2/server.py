@@ -269,6 +269,15 @@ def create_app():
     from guanlan_v2.fundflow import build_fundflow_router
     app.include_router(build_fundflow_router())
 
+    # ── 盘后自主复盘官(autonomy):GET /autonomy/jobs、/autonomy/report/latest、
+    # POST /autonomy/run(帷幄智能体化一期·单元二 Task 5)。调度钩子挂在 rescore 落定后
+    # (opt-in GUANLAN_REVIEW_DAILY,默认关),此处仅挂端点——注册失败不阻断启动。
+    try:
+        from guanlan_v2.autonomy import build_autonomy_router
+        app.include_router(build_autonomy_router())
+    except Exception as exc:  # noqa: BLE001 — autonomy 注册失败不阻断启动
+        print(f"[guanlan_v2] autonomy router skipped: {exc}", file=sys.stderr)
+
     # ── 数据健康总闸(datafeed):GET /data/health ──
     # 全仓数据新鲜度一处可见(2026-07-07 中台③;收编 T5 断供/停摆)
     from guanlan_v2.datafeed.api import build_datafeed_router

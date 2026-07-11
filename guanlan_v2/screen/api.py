@@ -1409,7 +1409,9 @@ def build_screen_router() -> APIRouter:
                                                  "default_retrain": _REGEN_SCHED.get("default_retrain"),
                                                  "dl_daily": _os.environ.get("GUANLAN_DL_DAILY") == "1"},
                              "rerank_scheduler": {"enabled": _os.environ.get("GUANLAN_RERANK_DAILY") == "1",
-                                                  "requires": "GUANLAN_REGEN_DAILY=1(随 regen 顺跑)"}})
+                                                  "requires": "GUANLAN_REGEN_DAILY=1(随 regen 顺跑)"},
+                             "review_scheduler": {"enabled": _os.environ.get("GUANLAN_REVIEW_DAILY") == "1",
+                                                  "requires": "GUANLAN_RERANK_DAILY=1(随重排落定后排队)"}})
 
     @router.post("/run")
     def screen_run(body: ScreenIn):
