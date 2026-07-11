@@ -608,6 +608,18 @@ async def _decide_impl(payload: dict) -> dict:
     mode = str(payload.get("mode") or "deep").strip().lower()
     if mode not in ("fast", "deep"):
         mode = "deep"
+    # 单元三·持仓感知(2026-07-12):可选键,>0 才认;只喂上下文绝不改输出 schema/clock。
+    hold_entry = payload.get("hold_entry")
+    try:
+        hold_entry = float(hold_entry) if hold_entry is not None else None
+    except (TypeError, ValueError):
+        hold_entry = None
+    held = hold_entry is not None and hold_entry > 0
+    hold_bars = payload.get("hold_bars")
+    try:
+        hold_bars = int(hold_bars) if (held and hold_bars is not None) else None
+    except (TypeError, ValueError):
+        hold_bars = None
 
     try:
         from financial_analyst.buddy.tools import normalize_code
@@ -794,6 +806,22 @@ async def _decide_impl(payload: dict) -> dict:
             pa_method_line = ("【价格行为读法(本席方法论·推理框架·不替代证据·证据不足给观望)】"
                               f"{pa_method or PA_METHOD_DEFAULT}\n")
 
+        # 单元三·持仓感知(2026-07-12):只喂上下文,不改输出 schema/clock/w。持仓键全可选。
+        last_close = None
+        try:
+            if df is not None and len(df) > 0 and "close" in df.columns:
+                last_close = float(df["close"].iloc[-1])
+        except Exception:  # noqa: BLE001 — 缺价不挡研判,浮盈亏诚实显 —
+            last_close = None
+        hold_line = ""
+        if held:
+            _pnl = f"{(last_close / hold_entry - 1.0) * 100.0:.2f}%" if last_close else "—"
+            hold_line = (
+                f"【持仓】入场价 {hold_entry} · 持有约 {hold_bars if hold_bars is not None else '—'} {unit}"
+                f" · 最新收盘 {last_close if last_close else '—'} · 浮动盈亏 {_pnl}\n"
+                "你已持有该股:重点判断【继续持有】还是【了结卖出】——继续持有 → side 填\"观望\";"
+                "了结卖出 → side 填\"卖出\"并在 note 给理由。输出 JSON 结构不变。\n")
+
         sys_p = (f"你是「观澜」量化交易系统中的{seat_cn}(信条:{creed})。"
                  f"基于**截至 {asof} 已发生的信息**(point-in-time,严禁使用该日之后任何信息或后见之明),"
                  f"判断此刻是否对 {name}({c}) 落子。只依据下方证据推理,不得编造数据;证据不足就给「观望」。")
@@ -813,6 +841,7 @@ async def _decide_impl(payload: dict) -> dict:
                  + res_excerpt +
                  f"【本席配方因子·vintage OOS IC(as-of·真历史外样本)·供研判参考·不进信号】{rf_line}\n"
                  f"【市况】{regime or '—'}\n"
+                 + hold_line
                  + pa_method_line + _ask)
 
         from financial_analyst.llm.client import LLMClient
@@ -886,6 +915,8 @@ async def _decide_impl(payload: dict) -> dict:
             "pa": pa, "pa_features": pa_feat,   # 价格行为:开关 + 确定性几何特征
             **({"run_id": run_id} if run_id else {}),   # 有 run 才落键,绝不落空键
             **({"source": source} if source else {}),   # watcher 溯源:有值才落键
+            **({"hold_entry": hold_entry} if held else {}),      # 单元三:有持仓才落键,旧记录形状不变
+            **({"hold_bars": hold_bars} if hold_bars is not None else {}),
         })
         return {
             "ok": True, "code": c, "name": name, "asof": asof, "seat": seat_cn,
