@@ -189,6 +189,18 @@ class TurnEvent:
     payload: Any = None
 
 
+def _budget_verdict(budget: int, spent: int, iteration: int, warned: bool) -> str:
+    """turn 级 completion-token 预算判定。0=关;首轮(iteration=0)永不拦(至少答一次);
+    ≥100%→stop(诚实显形停循环);≥80% 且未警告→warn(注入收敛提示)。"""
+    if not budget or iteration <= 0:
+        return "ok"
+    if spent >= budget:
+        return "stop"
+    if not warned and spent >= int(budget * 0.8):
+        return "warn"
+    return "ok"
+
+
 class BuddyAgent:
     """Conversational agent with tool-use. Reusable across turns; keeps
     conversation state in ``self.messages``."""
@@ -197,7 +209,8 @@ class BuddyAgent:
 
     def __init__(self, system_prompt: Optional[str] = None,
                  max_tool_iters: int = 15,
-                 max_llm_retries: int = 2):
+                 max_llm_retries: int = 2,
+                 turn_token_budget: int = 0):
         """
         Args:
             max_tool_iters: Cap on tool-use rounds per turn. Bumped from
@@ -208,11 +221,15 @@ class BuddyAgent:
             max_llm_retries: Auto-retry the LLM call this many times
                 on transient network failures (SSL, timeout, 5xx).
                 Default 2. Set to 0 to disable retries.
+            turn_token_budget: turn 级 completion-token 预算闸,无人值守夜跑安全门
+                (2026-07-12)。0=关(默认,行为逐字节不变)。耗尽后诚实截停工具循环,
+                不静默截断答案。
         """
         self._system = system_prompt or _build_system_prompt()
         self.messages: List[Message] = []
         self.max_tool_iters = max_tool_iters
         self.max_llm_retries = max_llm_retries
+        self.turn_token_budget = max(0, int(turn_token_budget))
         self._client = LLMClient.for_agent(self.AGENT_NAME)
 
     def reset(self) -> None:
@@ -333,7 +350,23 @@ class BuddyAgent:
         # across iterations, which is what lets the prefix cache hit.
         tool_schemas = self._tool_schemas(allowed_tools)
 
+        _budget_start = self._client.total_completion_tokens
+        _budget_warned = False
+
         for iteration in range(self.max_tool_iters):
+            spent = self._client.total_completion_tokens - _budget_start
+            verdict = _budget_verdict(self.turn_token_budget, spent, iteration, _budget_warned)
+            if verdict == "stop":
+                yield TurnEvent("error",
+                                f"token 预算耗尽({spent}/{self.turn_token_budget}):停止工具循环,"
+                                f"以上为已完成部分(诚实截停,非完整答案)。")
+                break
+            if verdict == "warn":
+                _budget_warned = True
+                self.messages.append(Message(role="user", content=(
+                    f"[系统:本轮 token 预算已用 {spent}/{self.turn_token_budget},"
+                    f"请立即收敛——不要再发起新工具调用,直接给结论。]")))
+
             # v1.6.4: retry transient LLM failures (SSL hiccups, 5xx,
             # DashScope rate-limit blips) before giving up. Exponential
             # backoff: 0.8s, 2.4s.

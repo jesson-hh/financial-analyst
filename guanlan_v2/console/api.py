@@ -115,10 +115,12 @@ async def _confirm_extras(tool_name: str, args: dict) -> dict:
 
 
 def _default_agent_factory(sid: str):
-    """生产路径:BuddyAgent + 帷幄工具注册(仅 9999 进程触达引擎)。"""
+    """生产路径:BuddyAgent + 帷幄工具注册(仅 9999 进程触达引擎)。
+    CONSOLE_TURN_TOKEN_BUDGET(默认 0=关):turn 级 completion-token 预算闸,无人值守安全门。"""
     from financial_analyst.buddy.agent import BuddyAgent
     ct.register_console_tools()
-    return BuddyAgent(system_prompt=_SYSTEM_PROMPT)
+    budget = int(os.environ.get("CONSOLE_TURN_TOKEN_BUDGET", "0") or 0)
+    return BuddyAgent(system_prompt=_SYSTEM_PROMPT, turn_token_budget=budget)
 
 
 def _reseed(agent, events: List[Dict[str, Any]], max_msgs: int = 16, max_chars: int = 8000) -> None:
