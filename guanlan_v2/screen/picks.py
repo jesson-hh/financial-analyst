@@ -46,3 +46,21 @@ def read_picks(snapshot_only: bool = False, limit: int = 50) -> List[Dict[str, A
     except Exception:  # noqa: BLE001 — 读失败 = 已收集的(或空),诚实降级
         return out
     return out
+
+
+def read_picks_by_kind(kind: str, limit: int = 200) -> List[Dict[str, Any]]:
+    """按 kind 全文件流式过滤(新在前)。rerank_ab 证据留存专用:不吃 500 行尾窗,
+    防日常 run 把 A/B 对挤出窗口(2026-07-12 单元二)。"""
+    want = str(kind or "").strip()
+    lim = max(1, min(int(limit), 1000))
+    if not want or not PICKS_PATH.exists():
+        return []
+    out: List[Dict[str, Any]] = []
+    for line in open(PICKS_PATH, encoding="utf-8"):
+        try:
+            r = json.loads(line)
+        except Exception:  # noqa: BLE001
+            continue
+        if r.get("kind") == want:
+            out.append(r)
+    return list(reversed(out))[:lim]

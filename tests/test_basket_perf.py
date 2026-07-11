@@ -170,6 +170,28 @@ def test_rerank_ab_uses_per_pair_start(tmp_path, monkeypatch, client):
     assert pair["excess_diff"] == pytest.approx(0.0)                  # 两臂同码 → 恒等
 
 
+def test_rerank_ab_survives_tail_window(tmp_path, monkeypatch, client):
+    """录音回归(2026-07-12 单元二 Task 8):旧实现 read_picks(limit=500) 按『行数』开尾窗——
+    当天量 snapshot 行涌入时,最老的 rerank_ab 对会被挤出 500 行窗口而彻底读不到。
+    新实现改按 kind 全文件流式扫描,与档案总行数、其余 kind 的行数无关。"""
+    import financial_analyst.data.loader_factory as _lf
+    import guanlan_v2.strategy.compute.eqw_market as EQ
+    monkeypatch.setattr(_lf, "get_default_loader", lambda: _FakeLoader())
+    monkeypatch.setattr(EQ, "load_eqw_ret", lambda: _BENCH)
+    from guanlan_v2.screen import picks as pk
+    monkeypatch.setattr(pk, "PICKS_PATH", tmp_path / "picks.jsonl")
+    ts = "2026-06-01T18:00:00"
+    for arm in ("data", "rerank"):                       # 最老端:先写这对 rerank_ab
+        pk.append_pick({"kind": "rerank_ab", "arm": arm, "codes": ["SH600001"],
+                        "run_id": "rs_old", "ts": ts, "snapshot": False})
+    for i in range(600):                                  # kind 无关填充(snapshot 行)
+        pk.append_pick({"kind": "screen_run", "snapshot": True, "codes": ["SH600000"],
+                        "run_id": f"fill_{i}", "ts": "2026-07-01T00:00:00"})
+    r = client.get("/seats/basket_perf", params={"kind": "rerank_ab", "limit": 5}).json()
+    assert r["ok"] and r["kind"] == "rerank_ab" and r["n"] == 1   # 旧尾窗下 n 会是 0(对被挤出)
+    assert r["pairs"][0]["run_id"] == "rs_old"
+
+
 def test_default_path_validation_first(monkeypatch, client):
     """codes/start 必填校验须先于任何 I/O 构造(loader 等)执行——即便 loader 会抛异常,
     默认路径(无 kind)仍必须先给出确定性的「codes 与 start 必填」,不能被 loader 异常劫持。

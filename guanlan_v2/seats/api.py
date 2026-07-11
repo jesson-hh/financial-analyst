@@ -2069,8 +2069,8 @@ def build_seats_router() -> APIRouter:
                 from guanlan_v2.strategy.compute import eqw_market as _eqw
                 bench_df = _eqw.load_eqw_ret()
 
-                from guanlan_v2.screen.picks import read_picks
-                rows = [r for r in read_picks(limit=500) if r.get("kind") == "rerank_ab"]
+                from guanlan_v2.screen.picks import read_picks_by_kind
+                rows = read_picks_by_kind("rerank_ab", limit=400)
                 by_run: dict = {}
                 for r in rows:
                     by_run.setdefault(r.get("run_id"), {})[r.get("arm")] = r
