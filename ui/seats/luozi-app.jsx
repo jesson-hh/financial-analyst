@@ -656,9 +656,10 @@ function LuoziApp() {
           <div style={{ position: 'absolute', top: 5, left: 10, zIndex: 2, display: 'flex', gap: 12, fontFamily: 'var(--mono)', fontSize: 9.5, color: 'var(--ink-3)' }}>
             <span className="serif" style={{ fontSize: 11, color: 'var(--ink-2)', fontWeight: 600 }}>收益曲线</span>
             {repPerf && <span><span style={{ color: 'var(--yin)' }}>━</span> {curName} · 纯LLM(按 run 真决策模拟成交)</span>}
-            {(repPerf && repPerfHybrid && anyHybrid) && <span><span style={{ color: 'var(--zhu)' }}>┅</span> 混合(因子进信号){hybridDelta != null ? ' · Δtotal=' + (hybridDelta >= 0 ? '+' : '') + (hybridDelta * 100).toFixed(2) + '%' : ''}</span>}
+            {(repPerfHybrid && anyHybrid) && <span><span style={{ color: 'var(--zhu)' }}>┅</span> 混合(因子进信号){(repPerf && hybridDelta != null) ? ' · Δtotal=' + (hybridDelta >= 0 ? '+' : '') + (hybridDelta * 100).toFixed(2) + '%' : (!repPerf ? ' · 纯LLM零成交,仅混合线' : '')}</span>}
             {(repPerf && repPerfHybrid && !anyHybrid) && <span style={{ color: 'var(--ink-3)' }}>w=0 · 两线重合(未混入因子)</span>}
-            {!repPerf && <span style={{ color: 'var(--ink-3)' }}>未选回测 —— 上方向导跑一次,或右栏点开历史 run</span>}
+            {(!selRun && !repPerf) && <span style={{ color: 'var(--ink-3)' }}>未选回测 —— 上方向导跑一次,或右栏点开历史 run</span>}
+            {(selRun && !repPerf && !(repPerfHybrid && anyHybrid)) && <span style={{ color: 'var(--ink-3)' }}>本 run 纯LLM全观望 · 零成交(空仓避险,无净值可画)</span>}
             {(symbol.bench && !eqMin) && <span><span style={{ color: 'var(--ink-3)' }}>┄</span> 基准</span>}
             {eqMin && <span style={{ color: 'var(--ink-3)' }}>30 分粒度 · 基准另案对齐</span>}
           </div>
@@ -733,7 +734,7 @@ function LuoziApp() {
         <React.Fragment>
           <MarketBar symbol={symbol} revealTo={cursor} mode="backtest" market={market} quote={null} />
           {wizardBar}
-          <MetricsStrip m={repPerf ? repPerf.metrics : null} benchTotal={benchTotal} label={'回测 · ' + curName} symbol={symbol} rt={cursor} mode="backtest" quote={null} ledger={null} />
+          <MetricsStrip m={repPerf ? repPerf.metrics : ((repPerfHybrid && anyHybrid) ? repPerfHybrid.metrics : null)} benchTotal={benchTotal} label={'回测 · ' + curName + ((!repPerf && repPerfHybrid && anyHybrid) ? ' · 混合线' : '')} symbol={symbol} rt={cursor} mode="backtest" quote={null} ledger={null} />
           <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
             {chartCenter(true)}
             <div style={{ width: 372, flexShrink: 0, display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto', overflowX: 'hidden', background: 'var(--paper)' }}>
