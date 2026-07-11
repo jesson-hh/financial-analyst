@@ -149,13 +149,50 @@ def apply_shields(s: Dict[str, Any], metrics: Optional[Dict[str, Any]] = None,
             "label": label, "band": band, "shields": shields, "notes": notes}
 
 
+def _apply_market_temp(final: List[Dict[str, Any]], notes: List[str],
+                       market_temp: Dict[str, Any]) -> None:
+    """护盾 v4.4 市场温度:只调仓位档(band)与警示,**绝不动星级/排序/剔票**。
+
+    playbook 红线:勿用滞后单维否决前瞻(汉缆/立昂微教训)——市场温度是滞后的大盘维度,
+    对个股前瞻信号只降杠杆(risk_off 仓位区间减半)或出分化警示(overheat),不否决名单。
+    gate=None(数据不足)/neutral → 一个数字都不碰。原地改 final/notes,不返回。
+    """
+    gate = market_temp.get("gate") or {}
+    level = gate.get("level")
+    why = ";".join(gate.get("reasons") or []) or "无明细"
+    if level == "risk_off":
+        for it in final:
+            band = it.get("band") or {}
+            lo, hi = band.get("lo"), band.get("hi")
+            if lo is None or hi is None:
+                continue
+            band["lo"], band["hi"] = int(lo) // 2, int(hi) // 2
+            it.setdefault("shields", []).append({
+                "id": "v4.4", "name": "市场温度", "level": "warn",
+                "text": f"风险规避({why})→ 仓位区间减半:{lo}-{hi}% → "
+                        f"{band['lo']}-{band['hi']}%;星级/名单不动"})
+        notes.append("护盾 v4.4 市场温度:risk_off → 全体仓位区间减半;"
+                     "只降杠杆不动星级/排序/名单(勿用滞后单维否决前瞻)")
+    elif level == "overheat":
+        for it in final:
+            it.setdefault("shields", []).append({
+                "id": "v4.4", "name": "市场温度", "level": "info",
+                "text": f"市场过热分化({why}):高位股炸板风险上升,"
+                        f"建仓分批更细、优先低位承接;仓位档不动"})
+        notes.append("护盾 v4.4 市场温度:overheat → 分化警示(仓位档/星级/名单全不动)")
+
+
 def converge(rows: List[Dict[str, Any]], metrics_by_code: Optional[Dict[str, Dict]] = None,
-             max_n: int = 5, base_by_code: Optional[Dict[str, Dict]] = None) -> Dict[str, Any]:
+             max_n: int = 5, base_by_code: Optional[Dict[str, Dict]] = None,
+             market_temp: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """≤5 收敛 —— 从入选清单挑 ≤max_n 持仓(评级 ★★★★+,行业去重,带仓位档 + 操作)。
 
     ``rows`` = chosen 列表(每项含 ``s``);``metrics_by_code`` = code→metrics(算护盾用);
-    ``base_by_code``(可选)= code→分位制基础评级(rate_from_pool_pct;缺省走 rate_v4 旧语义)。
-    返回 ``{final, n_actionable, notes}``。final 每项 = {code,name,ind,stars,stars_str,band,shields,op}。
+    ``base_by_code``(可选)= code→分位制基础评级(rate_from_pool_pct;缺省走 rate_v4 旧语义);
+    ``market_temp``(可选)= screen.market_temp.build_market_temp() 的市场温度上下文——
+    缺省 None 时输出与旧版逐字节相同;传入时挂 ``market_temp`` 键(前端上下文条,gate 何值都挂)
+    并按 gate 走护盾 v4.4(见 _apply_market_temp,只调 band/警示)。
+    返回 ``{final, n_actionable, notes[, market_temp]}``。final 每项 = {code,name,ind,stars,stars_str,band,shields,op}。
     """
     mbc = metrics_by_code or {}
     bbc = base_by_code or {}
@@ -196,4 +233,8 @@ def converge(rows: List[Dict[str, Any]], metrics_by_code: Optional[Dict[str, Dic
     ]
     if bbc:
         notes.insert(0, "评级口径:当日评级池内分位(前10% ★★★★★ / 前30% ★★★★)——相对强弱,非绝对档")
-    return {"final": final, "n_actionable": len(actionable), "notes": notes}
+    out = {"final": final, "n_actionable": len(actionable), "notes": notes}
+    if market_temp is not None:
+        out["market_temp"] = market_temp     # 上下文条永远显形(gate 无论何值,含 None)
+        _apply_market_temp(final, notes, market_temp)
+    return out

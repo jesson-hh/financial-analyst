@@ -1231,7 +1231,13 @@ def _screen_via_v4(body: "ScreenIn"):
 
     # —— L5 决策层:≤5 收敛(护盾后 ★★★★+ → 行业去重 → ≤5)+ 市场节奏(V1)——
     from guanlan_v2.strategy.decision import converge
-    decision = converge(chosen, metrics, max_n=5, base_by_code=base_by_code)
+    # 市场温度上下文(护盾 v4.4):全读缓存/快照,零网络阻塞;组装失败 → None(护盾休眠,绝不挡选股)
+    try:
+        from guanlan_v2.screen.market_temp import build_market_temp
+        _mt = build_market_temp()
+    except Exception:  # noqa: BLE001
+        _mt = None
+    decision = converge(chosen, metrics, max_n=5, base_by_code=base_by_code, market_temp=_mt)
     decision["market"] = mkt
 
     # —— 模型体检摘要(regen 顺算的 model_health.parquet;缺产物 → None,前端不显卡)——
