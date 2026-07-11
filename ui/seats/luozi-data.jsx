@@ -1504,8 +1504,13 @@ function runIdGen() { return 'run_' + Date.now().toString(36) + Math.random().to
 //   (纯观望 = 从未建仓 = 没有回测净值可言,诚实空)。决策日**之前**的 bar 净值留 NaN(未参与,不画)。
 //   P3 双线:useHybrid=true 时按**混合方向**(d.hybrid_direction,后端 w>0 时 (1-w)·LLM分+w·因子z分定的方向)派生 side;
 //   false(缺省)沿用既有 d.side(由 LLM direction 派生),逐字向后兼容。w=0 时后端 hybrid_direction==direction → 两线必重合。
-function runBacktest(runDecs, bars, useHybrid) {
+function runBacktest(runDecs, bars, useHybrid, clock) {
+  // 2026-07-11:加第四参 clock——模拟成交执行策略时钟(止损/止盈 intrabar 触碰按触发价、最长持有到期按收盘)。
+  //   此前只认显式卖出信号,策略配的 8% 止损纯装饰(进攻·十卡PA 宁德段 -23.2% 实证);不传 clock 行为不变。
   if (!bars || !bars.length || !runDecs || !runDecs.length) return null;
+  const stop = (clock && isFinite(+clock.stopLoss) && +clock.stopLoss > 0) ? +clock.stopLoss : null;
+  const take = (clock && isFinite(+clock.takeProfit) && +clock.takeProfit > 0) ? +clock.takeProfit : null;
+  const maxHold = (clock && isFinite(+clock.maxHold) && +clock.maxHold > 0) ? Math.round(+clock.maxHold) : null;
   const sideByIdx = {};
   let firstSig = Infinity;
   runDecs.forEach(d => {
@@ -1523,13 +1528,27 @@ function runBacktest(runDecs, bars, useHybrid) {
   const trades = [];
   let pos = 0, entryPx = 0, entryIdx = -1, cash = 1, shares = 0;
   for (let i = firstSig; i < n; i++) {
-    const px = bars[i] && +bars[i].c;
+    const b = bars[i];
+    const px = b && +b.c;
     const sig = sideByIdx[i];
+    // 持仓中先查时钟出场(同 bar 止损止盈双触保守按止损;出场后同 bar 再有买入信号允许按收盘重进,罕见)
+    if (pos === 1 && b && i > entryIdx) {
+      const lo = +b.l, hi = +b.h;
+      let exitPx = null, why = null;
+      if (stop != null && lo > 0 && lo <= entryPx * (1 - stop)) { exitPx = entryPx * (1 - stop); why = '止损'; }
+      else if (take != null && hi > 0 && hi >= entryPx * (1 + take)) { exitPx = entryPx * (1 + take); why = '止盈'; }
+      else if (maxHold != null && (i - entryIdx) >= maxHold && px > 0) { exitPx = px; why = '到期'; }
+      if (exitPx != null) {
+        cash = shares * exitPx;
+        trades.push({ entry: entryPx, exit: exitPx, ret: exitPx / entryPx - 1, in: entryIdx, out: i, reason: why });
+        pos = 0; shares = 0;
+      }
+    }
     if (sig === 'buy' && pos === 0 && px > 0) {
       pos = 1; entryPx = px; entryIdx = i; shares = cash / px; cash = 0;
     } else if (sig === 'sell' && pos === 1 && px > 0) {
       cash = shares * px;
-      trades.push({ entry: entryPx, exit: px, ret: px / entryPx - 1, in: entryIdx, out: i });
+      trades.push({ entry: entryPx, exit: px, ret: px / entryPx - 1, in: entryIdx, out: i, reason: '信号' });
       pos = 0; shares = 0;
     }
     eq[i] = (px > 0) ? (pos === 1 ? shares * px : cash) : (i > 0 ? eq[i - 1] : 1);

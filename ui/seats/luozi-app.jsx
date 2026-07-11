@@ -251,21 +251,23 @@ function LuoziApp() {
     if (nb) { setLiveBar(nb); if (window.lzLivebarSave) window.lzLivebarSave(code, nb); }
   }, [quote, page, code, n]);
 
-  // 复盘净值:只由选中 run 驱动(run 真决策模拟成交);未选 run → null 引导。
+  // 复盘净值:只由选中 run 驱动(run 真决策模拟成交 + 该策略时钟止损/止盈/最长持有);未选 run → null 引导。
+  //   策略已删则 clock=undefined → 回退旧口径(只认显式信号),诚实降级。
+  const runClock = (selRun && window.lzStrategyGet && (window.lzStrategyGet(selRun.strategy_id) || {}).clock) || undefined;
   const runPerf = useMemo(() => {
     if (page !== 'replay' || !selRun || !window.lzRunBacktest) return null;
     const isMin = (selRun.tf === '30min');
     if (!isMin && tf !== 'D') return null;
     const refBars = isMin ? (window.lzBars30 ? window.lzBars30(symbol) : []) : symbol.bars;
-    return window.lzRunBacktest(runDecs, refBars, false);
-  }, [page, selRun, tf, runDecs, symbol]);
+    return window.lzRunBacktest(runDecs, refBars, false, runClock);
+  }, [page, selRun, tf, runDecs, symbol, runClock]);
   const runPerfHybrid = useMemo(() => {
     if (page !== 'replay' || !selRun || !window.lzRunBacktest) return null;
     const isMin = (selRun.tf === '30min');
     if (!isMin && tf !== 'D') return null;
     const refBars = isMin ? (window.lzBars30 ? window.lzBars30(symbol) : []) : symbol.bars;
-    return window.lzRunBacktest(runDecs, refBars, true);
-  }, [page, selRun, tf, runDecs, symbol]);
+    return window.lzRunBacktest(runDecs, refBars, true, runClock);
+  }, [page, selRun, tf, runDecs, symbol, runClock]);
   const repPerf = page === 'replay' ? runPerf : null;
   const repPerfHybrid = page === 'replay' ? runPerfHybrid : null;
   const anyHybrid = (runDecs || []).some(d => (d && (+d.w || 0) > 0));
@@ -655,7 +657,7 @@ function LuoziApp() {
         <div style={{ height: 150, borderTop: '1px solid var(--line)', flexShrink: 0, position: 'relative' }}>
           <div style={{ position: 'absolute', top: 5, left: 10, zIndex: 2, display: 'flex', gap: 12, fontFamily: 'var(--mono)', fontSize: 9.5, color: 'var(--ink-3)' }}>
             <span className="serif" style={{ fontSize: 11, color: 'var(--ink-2)', fontWeight: 600 }}>收益曲线</span>
-            {repPerf && <span><span style={{ color: 'var(--yin)' }}>━</span> {curName} · 纯LLM(按 run 真决策模拟成交)</span>}
+            {repPerf && <span><span style={{ color: 'var(--yin)' }}>━</span> {curName} · 纯LLM(run 真决策{runClock ? '+时钟止损止盈' : ''}模拟成交)</span>}
             {(repPerfHybrid && anyHybrid) && <span><span style={{ color: 'var(--zhu)' }}>┅</span> 混合(因子进信号){(repPerf && hybridDelta != null) ? ' · Δtotal=' + (hybridDelta >= 0 ? '+' : '') + (hybridDelta * 100).toFixed(2) + '%' : (!repPerf ? ' · 纯LLM零成交,仅混合线' : '')}</span>}
             {(repPerf && repPerfHybrid && !anyHybrid) && <span style={{ color: 'var(--ink-3)' }}>w=0 · 两线重合(未混入因子)</span>}
             {(!selRun && !repPerf) && <span style={{ color: 'var(--ink-3)' }}>未选回测 —— 上方向导跑一次,或右栏点开历史 run</span>}
