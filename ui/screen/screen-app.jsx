@@ -1196,7 +1196,7 @@ function ConstraintRail({ cfg, setF, toggleFactor, setFactorW, onReset, pickFact
         {tabBtn('deci', '② 决策 · 持仓与概览', nDeci)}
       </div>
       {tab === 'deci' ? (<>
-        <DecisionPanel result={result} />
+        <DecisionPanel result={result} pool={cfg.pool || 'all'} />
         <OverviewPanel result={result} cfg={cfg} committed={committed} onClearCommit={onClearCommit} />
       </>) : (<>
       {WW_LEGACY && <LLMFactorPicker cfg={cfg} pickFactors={pickFactors} picking={picking} />}
@@ -1679,7 +1679,7 @@ function MarketTempBar({ mt }) {
 }
 
 // ───────── L5 决策 · ≤5 持仓收敛 (五维评级 + 护盾 + 仓位档 + 操作) ─────────
-function DecisionPanel({ result }) {
+function DecisionPanel({ result, pool }) {
   const [llm, setLlm] = useState(null);          // { ok, market_read, holdings:[{code,bull,bear,synth,op}], model } | { ok:false, reason }
   const [llmLoading, setLlmLoading] = useState(false);
   const [news, setNews] = useState(null);        // { ok, market_read, market:[{time,title}], by_code, sentiment, as_of, source } | { ok:false, reason }
@@ -1759,8 +1759,11 @@ function DecisionPanel({ result }) {
         </div>
       )}
       {final.length === 0 ? (
-        // 变体旧快照(pool_kind=lgb_pct)恒无五维 → 决策必空:诚实指路重训,不装「评级偏中性」
-        (isVariant && result.pool_kind === 'lgb_pct') ? (
+        // 空态按真因分流(诚实归因):指数池后端一律按模型分位排(无五维评级)与变体新旧无关;
+        // 全A 变体 pool_kind=lgb_pct 才是「旧快照缺五维」→ 指路重训;其余=真·评级偏中性。
+        (pool && pool !== 'all' && result.pool_kind === 'lgb_pct') ? (
+          <div className="serif" style={{ padding: '0 14px 12px', fontSize: 10.5, color: 'var(--ink-3)', lineHeight: 1.5 }}>指数池按模型分位排名(成份内多数无五维评级)——决策层需五维评级,切回「全A」池查看持仓收敛。</div>
+        ) : (isVariant && result.pool_kind === 'lgb_pct') ? (
           <div className="serif" style={{ padding: '0 14px 12px', fontSize: 10.5, color: 'var(--ink-3)', lineHeight: 1.5 }}>该变体排名无五维评级(旧快照)——点顶栏『↻ 重训到最新』,重训后自动生成五维评级与决策。</div>
         ) : (
           <div className="serif" style={{ padding: '0 14px 12px', fontSize: 10.5, color: 'var(--ink-3)', lineHeight: 1.5 }}>当前清单无 ★★★★+ 标的(评级偏中性 → 观望)。</div>
