@@ -201,6 +201,7 @@ def _ensure_registered() -> None:
     from financial_analyst.agent.tier1.news_reader import NewsReader
     from financial_analyst.agent.tier1.news_sentiment import NewsSentiment
     from financial_analyst.agent.tier1.f10_reader import F10Reader
+    from financial_analyst.agent.tier1.evidence_loader import EvidenceLoader
     from financial_analyst.agent.tier2.fundamental_analyst import FundamentalAnalyst
     from financial_analyst.agent.tier2.technical_analyst import TechnicalAnalyst
     from financial_analyst.agent.tier2.whale_analyst import WhaleAnalyst
@@ -239,6 +240,7 @@ def _ensure_registered() -> None:
         ("news-reader", NewsReader),
         ("news-sentiment", NewsSentiment),
         ("f10-reader", F10Reader),
+        ("evidence-loader", EvidenceLoader),
         ("fundamental-analyst", FundamentalAnalyst),
         ("technical-analyst", TechnicalAnalyst),
         ("whale-analyst", WhaleAnalyst),

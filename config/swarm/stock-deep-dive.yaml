@@ -43,6 +43,9 @@ agents:
   - name: news-sentiment            # 实时新闻情绪(大盘 market_read + 本票 tag)
     deps: []
     input_keys: [code, asof_date]
+  - name: evidence-loader           # 平台证据包(十数据面,guanlan_v2 侧构建·零LLM)
+    deps: []
+    input_keys: []
 
   # ── Tier 2 — Tier 1 之后并行 ──
   - name: fundamental-analyst
