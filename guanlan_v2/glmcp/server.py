@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 _DECLS: List[Dict[str, Any]] | None = None
 
@@ -54,10 +54,23 @@ def _report_spawn_env() -> Dict[str, str]:
             "FA_CONFIG_DIR": os.environ.get("FA_CONFIG_DIR", str(repo / "config"))}
 
 
+def _build_pack_safe(code: str) -> Optional[Dict[str, Any]]:
+    """研报起跑前构证据包(best-effort,与 console.api._build_pack_safe 逐项对齐)。整体
+    try/except——任何异常(含 import 失败)绝不挡报,只 print 诊断日志返 None。glmcp 与
+    9999 同进程,import guanlan_v2.reports.evidence 可行(不像子进程有包边界)。"""
+    try:
+        from guanlan_v2.reports.evidence import build_evidence_pack
+        return build_evidence_pack(code)
+    except Exception as e:  # noqa: BLE001 — 构包失败绝不挡报,诚实打印后放行
+        print(f"[report] evidence pack build failed for {code}: {type(e).__name__}: {e}")
+        return None
+
+
 def _spawn_background_detached(bg: dict) -> str:
     """background 信封 → detached 子进程真跑(不随 MCP 客户端退出而死)→ 诚实受理凭证。
     console 事件循环外的 MCP 通道没有 _spawn_bg 跑道 —— 此处补齐真执行,修假成功红线。
-    kind=report → console 同款 CLI `financial-analyst report`;etf_report → 引擎 run_etf_report。"""
+    kind=report → console 同款 CLI `financial-analyst report`;etf_report → 引擎 run_etf_report。
+    本函数是同步上下文(dispatch_tool 直调,非 to_thread)→ 构证据包直接同步调用即可。"""
     import shutil
     import subprocess
     import sys as _sys
@@ -67,9 +80,13 @@ def _spawn_background_detached(bg: dict) -> str:
     kind = str((bg or {}).get("kind") or "")
     code = str((bg or {}).get("code") or "")
     asof = (bg or {}).get("asof")
+    pack_path: Optional[str] = None
     if kind == "report":
         exe = shutil.which("financial-analyst") or r"G:\financial-analyst\.venv\Scripts\financial-analyst.exe"
         cmd = [exe, "report", code] + (["--asof", str(asof)] if asof else [])
+        pack = _build_pack_safe(code)
+        if pack and pack.get("path"):
+            pack_path = pack["path"]
     elif kind == "etf_report":
         py = ("import sys; sys.path.insert(0, r'{eng}');"
               "import financial_analyst.buddy.tools as bt;"
@@ -87,6 +104,8 @@ def _spawn_background_detached(bg: dict) -> str:
     log.parent.mkdir(parents=True, exist_ok=True)
     flags = 0x00000008 | 0x00000200   # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
     env = _report_spawn_env()   # PYTHONIOENCODING + PYTHONPATH=engine/ + FA_CONFIG_DIR(与 console 逐项对齐)
+    if pack_path:
+        env["FA_EVIDENCE_PACK"] = pack_path
     with open(log, "ab") as lf:
         subprocess.Popen(cmd, cwd=str(repo), stdout=lf, stderr=subprocess.STDOUT,
                          creationflags=flags, env=env)

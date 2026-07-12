@@ -25,6 +25,8 @@ def test_spawn_detached_report_builds_cli(monkeypatch):
         return _FakeProc()
 
     monkeypatch.setattr("subprocess.Popen", fake_popen)
+    # 证据包构建是独立关注点(见 test_report_seams.py),这里桩掉防止真触网/真落盘拖慢本测。
+    monkeypatch.setattr(G, "_build_pack_safe", lambda code: None)
     txt = G._spawn_background_detached({"kind": "report", "code": "SH600000", "name": "x", "asof": None})
     assert "已真启动" in txt and "mcpbg_" in txt and "5-8" in txt
     assert "完成" not in txt                                   # 受理凭证,绝不谎称完成
@@ -37,6 +39,7 @@ def test_spawn_detached_report_builds_cli(monkeypatch):
 def test_spawn_detached_report_with_asof(monkeypatch):
     calls = {}
     monkeypatch.setattr("subprocess.Popen", lambda cmd, **kw: calls.update(cmd=cmd) or _FakeProc())
+    monkeypatch.setattr(G, "_build_pack_safe", lambda code: None)
     G._spawn_background_detached({"kind": "report", "code": "SZ000001", "asof": "2026-07-01"})
     assert calls["cmd"][-2:] == ["--asof", "2026-07-01"]
 
@@ -56,6 +59,7 @@ def test_dispatch_appends_receipt_and_honest_failure(monkeypatch):
     monkeypatch.setattr(G, "_resolve_impl", lambda d, n: (
         lambda **kw: {"ok": True, "content": "已受理",
                       "background": {"kind": "report", "code": "SH600000", "name": "", "asof": None}}))
+    monkeypatch.setattr(G, "_build_pack_safe", lambda code: None)
     # ① Popen 成功 → content + 凭证
     monkeypatch.setattr("subprocess.Popen", lambda cmd, **kw: _FakeProc())
     out = asyncio.run(G.dispatch_tool("ww_report_run", {}))

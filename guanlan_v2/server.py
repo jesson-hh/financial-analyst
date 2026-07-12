@@ -47,6 +47,12 @@ _CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 # 走 guanlan 自包含生成器(guanlan_v2/strategy/market_status.py)的产物。
 _MARKET_STATUS_PATH = Path(__file__).resolve().parent.parent / "data" / "market_status.json"
 
+# 引擎 mainline-classifier(研报 DAG 节点)dev fallback 硬编码指向 G:/stocks 里的月度主线
+# 面板(34 天陈旧,作者机路径)。create_app() 用 FA_MAINLINE_PANEL env 把它指到仓内 vendor
+# 产物(guanlan_v2/strategy/vendor/artifacts/,随 regen 刷新),子进程(研报/glmcp)继承。
+_MAINLINE_PANEL_PATH = (Path(__file__).resolve().parent.parent / "guanlan_v2" / "strategy"
+                        / "vendor" / "artifacts" / "monthly_mainlines_panel.parquet")
+
 # var/secrets.env(gitignored, KEY=VALUE 每行一条):API key 的文件兜底。
 # 为什么需要:9999 由 check_9999.ps1 代际链拉起,链上环境是首次登录时的快照——
 # setx 的新 key(如 KIMI_API_KEY, 2026-07-03)在看门狗复活的进程里不存在,
@@ -124,6 +130,11 @@ def create_app():
     # 引擎 default_market_status_path() 见此 env 且文件存在即读它, 否则回退老的 stocks
     # parquet(向后兼容)。生成/刷新: python -m guanlan_v2.strategy.market_status。
     os.environ.setdefault("MARKET_STATUS_PATH", str(_MARKET_STATUS_PATH))
+
+    # 引擎 mainline-classifier(研报 DAG 节点)原读 G:/stocks 里 34 天陈旧的主线面板(dev
+    # fallback 硬编码,作者机路径)。setdefault 后子进程(研报 CLI / glmcp detached 子进程)
+    # 继承此 env,改吃仓内新鲜产物 —— 34 天陈旧根治。见 MARKET_STATUS_PATH 同款先例(上一行)。
+    os.environ.setdefault("FA_MAINLINE_PANEL", str(_MAINLINE_PANEL_PATH))
 
     # 双 wisdom 合流(互通审计 P1⑩):引擎 WisdomStore / buddy wisdom_search 的根
     # 指到 guanlan 卡片库(.data/wisdom)。此前两套存储互不相通 —— 卡片页 approve 的

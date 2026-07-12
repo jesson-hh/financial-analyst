@@ -5,8 +5,16 @@ recent quote, computes today's pct_change + volume_ratio, classifies by mv tier,
 flags 异动 if either threshold breached.
 
 No LLM call. Returns structured payload.
+
+证据包捷径(2026-07-12):`_execute` 开头读 FA_EVIDENCE_PACK(ctor 参数 pack_path >
+env > 无默认 —— 与 evidence_loader.py / mainline_classifier.py 三层同款),pack 存在且
+``sections.board_eco`` 非空 → 直接用其聚合字段(涨停/炸板家数→n_flagged、北向净额/晋级率→
+index_snapshot)拼一份 Output 返回,零逐票扫描(个股级 top_gainers/top_losers/
+volume_anomalies 该聚合面没有对应源,诚实留空,不编造)。否则退回现状逐票扫描,universe
+上限从 5000 收敛到 1500(全市场扫描本就是兜底路径,证据包命中时优先级更高更省时)。
 """
 from __future__ import annotations
+import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -58,15 +66,33 @@ class MarketScanner(SubAgent[MarketScannerOutput]):
     OUTPUT_SCHEMA = MarketScannerOutput
 
     def __init__(self, memory_root, loader=None, universe_file: Optional[str] = None,
-                 max_scan: int = 5000):
+                 max_scan: int = 1500, pack_path: Optional[str] = None):
         super().__init__(memory_root=memory_root)
         self._loader = loader
         self._universe_file = universe_file
         self._max_scan = max_scan
+        # 证据包路径:ctor 显式传入 > env FA_EVIDENCE_PACK > 无(None,诚实退回扫描)。
+        self._pack_path = pack_path or os.environ.get("FA_EVIDENCE_PACK")
 
     def _get_loader(self):
         from financial_analyst.data.loader_factory import get_default_loader
         return self._loader or get_default_loader()
+
+    def _read_evidence_pack(self) -> Optional[Dict[str, Any]]:
+        """读 FA_EVIDENCE_PACK 落盘 JSON;文件缺失/不可解析/board_eco 段为空 → None
+        (诚实退回现状扫描路径,绝不编造)。仅在此处触碰该文件——找不到就当没有。"""
+        if not self._pack_path:
+            return None
+        path = Path(self._pack_path)
+        if not path.exists():
+            return None
+        try:
+            pack = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not (pack.get("sections") or {}).get("board_eco"):
+            return None
+        return pack
 
     def _list_codes(self) -> List[str]:
         """Read instruments list. Default: provider_uri/instruments/all.txt."""
@@ -88,11 +114,46 @@ class MarketScanner(SubAgent[MarketScannerOutput]):
             parts = line.strip().split("\t")
             if parts and parts[0]:
                 codes.append(parts[0].upper())
+        if len(codes) > self._max_scan:
+            print(f"[market-scanner] universe {len(codes)} 支收敛到 max_scan={self._max_scan}"
+                  f"(证据包未命中,退回逐票扫描路径)")
         return codes[: self._max_scan]
 
     async def _execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         asof = inputs.get("asof_date") or pd.Timestamp.today().strftime("%Y-%m-%d")
         universe = inputs.get("universe", "all")
+
+        pack = self._read_evidence_pack()
+        if pack is not None:
+            board = (pack.get("sections") or {}).get("board_eco") or {}
+            index_snapshot: Dict[str, float] = {}
+            for src_key, out_key in (("north_net", "north_net"), ("promotion_rate", "promotion_rate"),
+                                      ("break_rate", "break_rate")):
+                v = board.get(src_key)
+                if v is not None:
+                    try:
+                        index_snapshot[out_key] = float(v)
+                    except (TypeError, ValueError):
+                        pass
+            try:
+                n_flagged = int(board.get("zt_count") or 0) + int(board.get("zb_count") or 0)
+            except (TypeError, ValueError):
+                n_flagged = 0
+            return {
+                "as_of": str(board.get("as_of") or asof),
+                "universe": universe,
+                "n_scanned": 0,   # 平台证据路径零逐票扫描,诚实 0(非"扫了 0 支")
+                "n_flagged": n_flagged,
+                "top_gainers": [],       # 聚合面无个股级涨跌幅明细,诚实留空(非编造)
+                "top_losers": [],
+                "volume_anomalies": [],  # 聚合面无个股级量比明细,诚实留空
+                "index_snapshot": index_snapshot,
+                "note": "平台证据路径(evidence pack):涨停/炸板家数→n_flagged,晋级率/炸板率/"
+                        "北向净额→index_snapshot,取自打板生态聚合(board_eco),未逐票扫描;"
+                        "个股级涨跌幅/量比该聚合面无对应源,诚实留空。",
+            }
+
+        # ---- 退回现状:证据包未命中 → 逐票扫描(原逻辑不变,仅 max_scan 上限收敛) ----
         codes = self._list_codes()
         if not codes:
             raise FileNotFoundError(

@@ -110,6 +110,8 @@ def test_spawn_background_report_branch(monkeypatch):
             calls["cmd"] = cmd
             calls["kw"] = kw
     monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    # 证据包构建是独立关注点(见 test_report_seams.py),这里桩掉防止真触网/真落盘拖慢本测。
+    monkeypatch.setattr(ms, "_build_pack_safe", lambda code: None)
     receipt = ms._spawn_background_detached({"kind": "report", "code": "SZ000630"})
     assert "已真启动后台研报" in receipt
     assert calls["cmd"][1] == "report" and calls["cmd"][2] == "SZ000630"

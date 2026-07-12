@@ -286,10 +286,28 @@ def _buddy_report_env() -> Dict[str, str]:
     return env
 
 
+def _build_pack_safe(code: str) -> Optional[Dict[str, Any]]:
+    """研报起跑前构证据包(best-effort)。整体 try/except——任何异常(含 import 失败)
+    绝不挡报,只 print 诊断日志返 None(引擎侧 evidence-loader 缺 FA_EVIDENCE_PACK 时自行
+    显形降级为『平台证据缺失』,不是本函数的责任)。成功时返回 build_evidence_pack 原样
+    结果 {ok, path, sections_ok, errors}(即便 ok=False,path 也是 None,调用方只需判 path)。"""
+    try:
+        from guanlan_v2.reports.evidence import build_evidence_pack
+        return build_evidence_pack(code)
+    except Exception as e:  # noqa: BLE001 — 构包失败绝不挡报,诚实打印后放行
+        print(f"[report] evidence pack build failed for {code}: {type(e).__name__}: {e}")
+        return None
+
+
 def _call_buddy_report(code: str, asof: Optional[str]) -> Dict[str, Any]:
     """同步阻塞跑引擎深度研报(在 executor 线程调)。env 注入 PYTHONPATH=engine/ 让子进程吃 fork 改动;
     cwd=仓根、timeout 900。**只接受本次起跑后真产出的 md**(mtime 闸门,见 _freshest_report_md),
-    防研报失败 exit 0 时拿历史旧档冒充成功。"""
+    防研报失败 exit 0 时拿历史旧档冒充成功。
+
+    起跑前顺手构一份证据包(guanlan_v2.reports.evidence.build_evidence_pack),path 经
+    env FA_EVIDENCE_PACK 传给子进程(引擎 evidence-loader 零 LLM 节点读取,供研报各段引用
+    真实数字);已在 executor 线程里跑(见调用处 run_in_executor),同步调用不再额外 to_thread。
+    构包失败/无 path 时诚实不设该 env,引擎侧显形降级,绝不挡本次研报。"""
     import subprocess
     import time as _t
     cmd = ["financial-analyst", "report", code]
@@ -297,6 +315,9 @@ def _call_buddy_report(code: str, asof: Optional[str]) -> Dict[str, Any]:
         cmd += ["--asof", asof]
     root = _REPO_DIR
     env = _buddy_report_env()
+    pack = _build_pack_safe(code)
+    if pack and pack.get("path"):
+        env["FA_EVIDENCE_PACK"] = pack["path"]
     t0 = _t.time()   # 起跑时刻 — 下面据此甄别「本次新产出」vs「历史旧档」
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
