@@ -389,6 +389,7 @@ def test_yaml_seven_nodes_wire_evidence_loader():
     by_name = {a["name"]: a for a in cfg["agents"]}
     for name in _SEVEN:
         node = by_name[name]
+        assert "evidence-loader" in node.get("deps", []), f"{name} 缺 deps evidence-loader(deps 是唯一生效字段)"
         assert "evidence-loader" in node.get("input_keys", []), f"{name} 缺 input_keys evidence-loader"
         assert "evidence-loader" in node.get("soft_deps", []), f"{name} 缺 soft_deps evidence-loader"
 

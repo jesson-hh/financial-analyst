@@ -31,8 +31,16 @@ providers:
 #   json_object/tools/max_tokens/per-request timeout 且返回 reasoning_content;
 #   models.list()=[deepseek-v4-flash, deepseek-v4-pro], 别名可用.
 #   其余 agent 仍走 default_provider (deepseek/deepseek-chat).
+# - 研报辩护/风控/写手 deep 档 (2026-07-12): bull/bear-advocate 逐条交锋 + risk-officer
+#   综合裁决 + report-writer 终稿成文, 四座席判断密集型, 升 reasoner (座席名经
+#   LLMClient.for_agent(self.NAME) 实测, 见 tier3/*.py); advocates 内容重试
+#   temperature=0.3+attempt*0.2 对 reasoner 无害 (温度参数照单收, 真机已验).
 agent_overrides:
   industry_extract: {provider: kimi, model: kimi-k2.6}
   rerank:           {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
   review_officer:   {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
   review_section:   {provider: deepseek, model: deepseek-chat}
+  bull-advocate:    {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
+  bear-advocate:    {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
+  risk-officer:     {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
+  report-writer:    {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}

@@ -67,8 +67,10 @@ agents:
     input_keys: [fundamental-analyst, technical-analyst, whale-analyst, evidence-loader, quote-fetcher]
     soft_deps: [evidence-loader]    # quote-fetcher 是全体 tier2 硬依赖必然已 done,input_keys 引用安全,不入 deps(不改波次)
   - name: bear-advocate
-    deps: [fundamental-analyst, technical-analyst, whale-analyst, evidence-loader]
-    input_keys: [fundamental-analyst, technical-analyst, whale-analyst, evidence-loader, quote-fetcher]
+    # 2026-07-12 反驳波:deps 加 bull-advocate → bear 天然晚一波(orchestrator._ready 按
+    # deps∈done 动态分波,零 orchestrator 改动),能看到 bull 完整论点逐条反驳。
+    deps: [fundamental-analyst, technical-analyst, whale-analyst, evidence-loader, bull-advocate]
+    input_keys: [fundamental-analyst, technical-analyst, whale-analyst, evidence-loader, quote-fetcher, bull-advocate]
     soft_deps: [evidence-loader]
     memory_mode: retrieval    # large pitfalls.md, F1-F14 — better retrieved
   - name: risk-officer

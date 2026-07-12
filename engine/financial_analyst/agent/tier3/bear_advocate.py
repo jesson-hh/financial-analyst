@@ -98,12 +98,16 @@ class BearAdvocate(SubAgent[BearOutput]):
             "price": quote.get("price"), "mv_yi": quote.get("mv_yi"),
             "pe": quote.get("pe"), "ret_60d": quote.get("ret_60d"),
         }
+        # 反驳波(2026-07-12):yaml deps 加 bull-advocate 后 bear 晚一波,能看到 bull
+        # 的完整论点——拼进 upstream 供逐条反驳引用(诚实降级:缺席则 bull_out={}）。
+        bull_out = inputs.get("bull-advocate") or {}
         upstream = json.dumps({
             "fundamental": inputs.get("fundamental-analyst", {}),
             "technical": inputs.get("technical-analyst", {}),
             "whale": inputs.get("whale-analyst", {}),
             "quant": inputs.get("quant-analyst", {}),
             "quote_summary": quote_summary,
+            "bull": bull_out,
         }, default=str, ensure_ascii=False)
         timeline = (factor.get("stock_timeline") or "").strip()
         timeline_block = f"\n\n# 上次研报时间线 (必读)\n{timeline}" if timeline else ""
@@ -122,6 +126,20 @@ class BearAdvocate(SubAgent[BearOutput]):
         # F4 幻觉市值断根:静态模板改成占位符 {F4_CLAUSE},这里用 quote-fetcher 真实
         # mv_yi/pe/ret_60d 判定后原样替换——不满足三条件时明确禁止援引 F4。
         sys_prompt = SYSTEM_PROMPT.replace("{F4_CLAUSE}", f4_clause(quote)) + "\n\n# Memory\n" + memory_text
+
+        # 反驳波:bull-advocate 输出到位才下达"逐条针对性反驳"硬指令(诚实降级——
+        # 缺席时如实告知,不假装完成了反驳,不许静默回退成普通看空判断而不留痕迹)。
+        if bull_out:
+            sys_prompt += (
+                "\n\n# 反驳规则\n"
+                "你能看到 bull-advocate 的完整论点(upstream 里),必须逐条针对性反驳或指出"
+                "其漏洞与前提缺陷,不许回避;反驳须引用证据数字。"
+            )
+        else:
+            sys_prompt += (
+                "\n\n# 反驳规则\n"
+                "bull-advocate 论点缺席(上游未提供),本次无法逐条反驳,仅给出独立看空判断。"
+            )
 
         # 平台证据(evidence-loader):bear 消费 sentiment/fundflow/board_eco(数值面佐证)。
         ev = inputs.get("evidence-loader") or {}

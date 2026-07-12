@@ -29,7 +29,8 @@ def test_overrides_schema_and_models_in_register():
 
 def test_deep_tier_seats_exist():
     ov = _cfg().get("agent_overrides") or {}
-    for seat in ("rerank", "review_officer"):
+    for seat in ("rerank", "review_officer",
+                 "bull-advocate", "bear-advocate", "risk-officer", "report-writer"):
         assert ov.get(seat, {}).get("model") == "deepseek-reasoner", f"{seat} 应为 deep 档"
         assert ov[seat].get("timeout", 0) >= 180, f"{seat} deep 档须放宽超时(reasoner 思考 1-3 分钟)"
     assert ov.get("review_section", {}).get("model") == "deepseek-chat"
