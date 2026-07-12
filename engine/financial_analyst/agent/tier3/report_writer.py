@@ -138,6 +138,101 @@ def render_ownership_section(facts: dict) -> str:
     return "\n".join(lines)
 
 
+def render_holding_section(holding: dict) -> str:
+    """确定性渲染持仓视角段(源 seats 台账,evidence pack 的 holding section)。
+
+    成本/数量/浮盈亏数字逐字照搬,LLM 不碰 —— 只在持有该票(held=True)时才被调用;
+    未持有/无台账不出现该段(与券商/股东段"缺则写无"不同,持仓视角是可选小节)。
+    """
+    holding = holding or {}
+    avg_cost = holding.get("avg_cost")
+    qty = holding.get("qty")
+    upl = holding.get("upl")
+    lines = ["持仓视角(确定性,源台账):"]
+    if avg_cost is not None:
+        lines.append(f"- 成本 {float(avg_cost):.2f}")
+    if qty is not None:
+        lines.append(f"- 数量 {qty}")
+    if upl is not None:
+        sign = "浮盈" if float(upl) >= 0 else "浮亏"
+        lines.append(f"- {sign} {abs(float(upl)):.2f}")
+    return "\n".join(lines)
+
+
+# ── 证据 as_of 徽章:每大段落尾部注(确定性 Python 后处理,LLM 不碰 as_of 数字)──────
+# 只认报告模板(memories/report-writer/report_template.md)里真正的"大段落"标题——
+# 「## 一、综合评级」这类中文数字编号标题,以及不带编号的「新闻情绪研判」段;不含 F10
+# 确定性子块(「## 券商评级与目标价」/「## 股东与主力」,那些本就非 evidence pack 来源,
+# 侵入最小原则下跳过)。
+
+_MAJOR_HEADING_NUM_RE = re.compile(r"^##\s+[一二三四五六七八九十]+、")
+
+
+def _is_major_heading(line: str) -> bool:
+    s = line.strip()
+    if not s.startswith("## "):
+        return False
+    return bool(_MAJOR_HEADING_NUM_RE.match(s)) or "新闻情绪研判" in s
+
+
+# 大段落标题关键字 → 对应 evidence pack section(按优先级取第一个有 as_of 的);
+# 全部未命中/该 section 无 as_of → 回退整包 generated_at。
+_HEADING_SECTION_MAP: tuple = (
+    ("新闻情绪", ("sentiment", "kuaixun")),
+    ("市场环境", ("macro", "board_eco", "mainline")),
+    ("综合评级", ("quant", "mainline")),
+    ("基本面", ("chain", "mainline", "quant")),
+    ("技术面", ("quote_live", "fundflow")),
+    ("主力", ("fundflow", "board_eco")),
+    ("多空辩论", ("sentiment", "fundflow", "board_eco")),
+    ("风控审查", ("sentiment", "fundflow", "board_eco")),
+    ("操作建议", ("quant", "macro")),
+)
+
+
+def _pick_as_of(heading: str, ev_secs: dict, generated_at: str) -> str:
+    for kw, names in _HEADING_SECTION_MAP:
+        if kw in heading:
+            for n in names:
+                sec = ev_secs.get(n)
+                if isinstance(sec, dict) and sec.get("as_of"):
+                    return sec["as_of"]
+            break
+    return generated_at or "未知"
+
+
+def inject_evidence_badges(markdown_body: str, ev_secs: dict, generated_at: str) -> str:
+    """给每个大段落尾部加证据 as_of 徽章(确定性,数字禁 LLM 编造)。
+
+    ev_secs 为空(平台证据缺失/evidence-loader 未跑通)→ 每段统一写诚实降级徽章
+    「〔平台证据缺失,本段基于引擎自采数据〕」;ev_secs 非空 → 按 _HEADING_SECTION_MAP
+    找对应 section 的 as_of,查无则回退整包 generated_at。
+    """
+    if not markdown_body:
+        return markdown_body
+    lines = markdown_body.splitlines()
+    heading_idxs = [i for i, l in enumerate(lines) if _is_major_heading(l)]
+    if not heading_idxs:
+        return markdown_body
+    inserts: Dict[int, str] = {}
+    for pos, start in enumerate(heading_idxs):
+        end = heading_idxs[pos + 1] if pos + 1 < len(heading_idxs) else len(lines)
+        j = end - 1
+        while j > start and not lines[j].strip():
+            j -= 1
+        if ev_secs:
+            badge = f"〔证据 as_of: {_pick_as_of(lines[start], ev_secs, generated_at)}〕"
+        else:
+            badge = "〔平台证据缺失,本段基于引擎自采数据〕"
+        inserts[j] = badge
+    out: list = []
+    for i, line in enumerate(lines):
+        out.append(line)
+        if i in inserts:
+            out.append(inserts[i])
+    return "\n".join(out)
+
+
 class ReportOutput(BaseModel):
     """Writer 最终输出.
 
@@ -304,14 +399,54 @@ class ReportWriter(SubAgent[ReportOutput]):
             "\n\n# 股东与主力 (确定性 — 逐字照搬, 禁改数字)\n" + ownership_section
         )
 
+        # 平台证据(evidence-loader):report-writer 消费全部 sections(逐段引用+as_of 徽章)。
+        # 无 ev(或 sections 全空)→ evidence_block/sys_prompt 追加均不触发,旧行为不变。
+        ev = inputs.get("evidence-loader") or {}
+        ev_secs = ev.get("sections") or {}
+        sys_prompt = SYSTEM_PROMPT + "\n\n# Memory\n" + self.memory.load_all()
+        evidence_block = ""
+        if ev_secs:
+            evidence_block = (
+                "\n\n# 平台证据 (确定性 — 引用须带出处, 数字禁编造)\n"
+                + json.dumps(ev_secs, ensure_ascii=False)
+            )
+            sys_prompt += (
+                "\n\n# 平台证据使用规则\n"
+                "若提供【平台证据】块:引用其中数据须标出处(section 名+as_of);"
+                "证据中没有的数字一律写「证据未及」,严禁编造。"
+            )
+
+        # 持仓视角(确定性):仅当台账持有该票(evidence pack holding.held=True)才注入 ——
+        # 成本/数量/浮盈亏数字逐字照搬,LLM 不碰;结论段须额外给持有者视角建议(非持有则
+        # sys_prompt/holding_block 均不出现,旧行为不变)。
+        holding_sec = ev_secs.get("holding") or {}
+        holding_block = ""
+        if holding_sec.get("held"):
+            holding_block = (
+                "\n\n# 持仓视角 (确定性 — 逐字照搬, 禁改数字)\n" + render_holding_section(holding_sec)
+            )
+            sys_prompt += (
+                "\n\n# 持仓视角使用规则\n"
+                "用户消息末尾含 `# 持仓视角` 确定性块时,在 markdown_body 加一节 "
+                "\"# 持仓视角 (确定性)\"(成本/数量/浮盈亏逐字照搬,禁改数字);"
+                "此时结论段(§七 操作建议)须额外给出「持有者视角」建议(加仓/持有/减仓/止损),"
+                "不能只给一个新买入者视角。"
+            )
+
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT + "\n\n# Memory\n" + self.memory.load_all()},
-            {"role": "user", "content": f"Code: {code}\nAs-of: {asof}\n\nUpstream:\n{upstream_json}{timeline_block}{broker_block}{ownership_block}\n\nReturn JSON."},
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": f"Code: {code}\nAs-of: {asof}\n\nUpstream:\n{upstream_json}{timeline_block}{broker_block}{ownership_block}{evidence_block}{holding_block}\n\nReturn JSON."},
         ]
         response = await client.chat(
             messages=messages, response_format={"type": "json_object"}, temperature=0.3,
         )
         parsed = json.loads(response["choices"][0]["message"]["content"])
+
+        # 证据 as_of 徽章:每大段落尾部注(确定性 Python 后处理,LLM 不碰 as_of 数字;
+        # ev_secs 空 → 每段诚实写「平台证据缺失」,不冒充查过)。
+        parsed["markdown_body"] = inject_evidence_badges(
+            parsed.get("markdown_body", ""), ev_secs, ev.get("generated_at", "")
+        )
 
         # Sanity-check the output before writing files — enforce internal consistency.
         # 多层 auto-fix: 1) range clamp 2) cross-field 3) introspector 反馈过的 pattern

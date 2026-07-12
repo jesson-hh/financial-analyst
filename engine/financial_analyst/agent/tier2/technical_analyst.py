@@ -84,9 +84,25 @@ class TechnicalAnalyst(SubAgent[TechnicalOutput]):
                 "- sector_rotation: 今日板块 leaders / laggards / rotation_signal. "
                 "如果该股所属行业在 leaders → 顺势加分, 在 laggards → 警惕."
             )
+        # 平台证据(evidence-loader):技术面消费 quote_live/fundflow/board_eco(量价/资金/打板生态)。
+        ev = inputs.get("evidence-loader") or {}
+        ev_secs = ev.get("sections") or {}
+        ev_picked = {k: ev_secs.get(k) for k in ("quote_live", "fundflow", "board_eco") if ev_secs.get(k)}
+        evidence_block = ""
+        if ev_picked:
+            evidence_block = (
+                "\n\n# 平台证据 (确定性 — 引用须带出处, 数字禁编造)\n"
+                + json.dumps(ev_picked, ensure_ascii=False)
+            )
+            sys_prompt += (
+                "\n\n# 平台证据使用规则\n"
+                "若提供【平台证据】块:引用其中数据须标出处(section 名+as_of);"
+                "证据中没有的数字一律写「证据未及」,严禁编造。"
+            )
+
         messages = [
             {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": f"Upstream:\n{upstream}\n\nReturn JSON."},
+            {"role": "user", "content": f"Upstream:\n{upstream}{evidence_block}\n\nReturn JSON."},
         ]
         response = await client.chat(
             messages=messages,

@@ -49,44 +49,48 @@ agents:
 
   # ── Tier 2 — Tier 1 之后并行 ──
   - name: fundamental-analyst
-    deps: [quote-fetcher, overseas-market-scanner]
-    input_keys: [quote-fetcher, overseas-market-scanner]
-    soft_deps: [overseas-market-scanner]   # 海外宏观=上下文,失败不应拖垮基本面分析
+    deps: [quote-fetcher, overseas-market-scanner, evidence-loader]
+    input_keys: [quote-fetcher, overseas-market-scanner, evidence-loader]
+    soft_deps: [overseas-market-scanner, evidence-loader]   # 海外宏观=上下文,失败不应拖垮基本面分析;平台证据同理软降级
   - name: technical-analyst         # 技术面: 均线/量价/支撑压力 + 大盘/主线 context (不再吃 factor-computer)
-    deps: [quote-fetcher, market-scanner, mainline-classifier, overseas-market-scanner, sector-rotation-analyzer]
-    input_keys: [quote-fetcher, market-scanner, mainline-classifier, overseas-market-scanner, sector-rotation-analyzer]
-    soft_deps: [market-scanner, mainline-classifier, overseas-market-scanner, sector-rotation-analyzer]   # 市场环境=上下文,失败则技术面降级(仍出)
+    deps: [quote-fetcher, market-scanner, mainline-classifier, overseas-market-scanner, sector-rotation-analyzer, evidence-loader]
+    input_keys: [quote-fetcher, market-scanner, mainline-classifier, overseas-market-scanner, sector-rotation-analyzer, evidence-loader]
+    soft_deps: [market-scanner, mainline-classifier, overseas-market-scanner, sector-rotation-analyzer, evidence-loader]   # 市场环境=上下文,失败则技术面降级(仍出)
   - name: whale-analyst             # 主力行为 / 筹码集中 (价量 + 股东户数, 不再吃 factor-computer)
-    deps: [quote-fetcher, f10-reader]
-    input_keys: [quote-fetcher, f10-reader]
+    deps: [quote-fetcher, f10-reader, evidence-loader]
+    input_keys: [quote-fetcher, f10-reader, evidence-loader]
+    soft_deps: [evidence-loader]    # 平台证据=上下文佐证,缺失不拖垮主力面判读
 
   # ── Tier 3 — 多空 → 风控 → writer ──
   - name: bull-advocate
-    deps: [fundamental-analyst, technical-analyst, whale-analyst]
-    input_keys: [fundamental-analyst, technical-analyst, whale-analyst]
+    deps: [fundamental-analyst, technical-analyst, whale-analyst, evidence-loader]
+    input_keys: [fundamental-analyst, technical-analyst, whale-analyst, evidence-loader, quote-fetcher]
+    soft_deps: [evidence-loader]    # quote-fetcher 是全体 tier2 硬依赖必然已 done,input_keys 引用安全,不入 deps(不改波次)
   - name: bear-advocate
-    deps: [fundamental-analyst, technical-analyst, whale-analyst]
-    input_keys: [fundamental-analyst, technical-analyst, whale-analyst]
+    deps: [fundamental-analyst, technical-analyst, whale-analyst, evidence-loader]
+    input_keys: [fundamental-analyst, technical-analyst, whale-analyst, evidence-loader, quote-fetcher]
+    soft_deps: [evidence-loader]
     memory_mode: retrieval    # large pitfalls.md, F1-F14 — better retrieved
   - name: risk-officer
-    deps: [bull-advocate, bear-advocate, news-reader, f10-reader]
-    input_keys: [bull-advocate, bear-advocate, news-reader, f10-reader]
+    deps: [bull-advocate, bear-advocate, news-reader, f10-reader, evidence-loader]
+    input_keys: [bull-advocate, bear-advocate, news-reader, f10-reader, evidence-loader, quote-fetcher]
+    soft_deps: [evidence-loader]
     borrows_memory: [bear-advocate]
     memory_mode: retrieval
   - name: report-writer
     deps: [quote-fetcher, fundamental-analyst, technical-analyst, whale-analyst,
            market-scanner, mainline-classifier, morning-brief-writer,
            overseas-market-scanner, sector-rotation-analyzer,
-           bull-advocate, bear-advocate, risk-officer, news-sentiment]
+           bull-advocate, bear-advocate, risk-officer, news-sentiment, evidence-loader]
     input_keys: [quote-fetcher, fundamental-analyst, technical-analyst, whale-analyst,
                  market-scanner, mainline-classifier, morning-brief-writer,
                  overseas-market-scanner, sector-rotation-analyzer,
-                 bull-advocate, bear-advocate, risk-officer, news-sentiment,
+                 bull-advocate, bear-advocate, risk-officer, news-sentiment, evidence-loader,
                  code, asof_date, out_dir]
     # 市场环境/新闻情绪类 agent 是上下文佐证,任一失败只让对应段落降级,不该让整份研报夭折。
     # 核心链(quote/基本面/技术面/主力/多空/风控)仍是硬依赖,缺则研报不成立。
     soft_deps: [market-scanner, mainline-classifier, morning-brief-writer,
-                overseas-market-scanner, sector-rotation-analyzer, news-sentiment]
+                overseas-market-scanner, sector-rotation-analyzer, news-sentiment, evidence-loader]
 
   # ── Tier 4 — 复盘 (不阻塞研报输出) ──
   - name: introspector

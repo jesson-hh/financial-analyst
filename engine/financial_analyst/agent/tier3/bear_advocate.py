@@ -16,13 +16,46 @@ class BearOutput(BaseModel):
     f_anchors: List[str] = []                    # F1-F14 failure mode references
 
 
+def _fmt_num(v: Any, suffix: str = "") -> str:
+    """数字锚渲染:真实值→'123.45亿' 一类字符串;缺失(None/非数字)→诚实'证据未及'
+    (绝不留 None/编造)。"""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return f"{v:.2f}{suffix}"
+    return "证据未及"
+
+
+def f4_clause(quote: Dict[str, Any]) -> str:
+    """F4(game-capital)判定文案——根治幻觉市值:旧版硬编码"Sub-200亿"逼模型自己
+    编造市值数字来凑条件;现在从 quote-fetcher 真实 mv_yi/pe/ret_60d 判定三条件是否
+    同时成立,不满足则明确禁止援引 F4,满足才允许,数字全部真实可溯源。"""
+    quote = quote or {}
+    mv = quote.get("mv_yi")
+    pe = quote.get("pe")
+    ret60 = quote.get("ret_60d")
+    mv_txt = _fmt_num(mv, "亿")
+    pe_txt = _fmt_num(pe)
+    ret60_txt = f"{ret60 * 100:.1f}%" if isinstance(ret60, (int, float)) and not isinstance(ret60, bool) else "证据未及"
+
+    condition_met = (
+        isinstance(mv, (int, float)) and not isinstance(mv, bool) and mv < 200
+        and isinstance(pe, (int, float)) and not isinstance(pe, bool) and pe > 100
+        and isinstance(ret60, (int, float)) and not isinstance(ret60, bool) and ret60 > 0.50
+    )
+    verdict = (
+        "三条件(mv<200亿 且 PE>100 且 ret60>50%)同时成立,可援引 F4(game-capital)"
+        if condition_met else
+        "不同时满足 mv<200亿 且 PE>100 且 ret60>50% 三条件,不得援引 F4 模式"
+    )
+    return f"game-capital 模式——当前市值 {mv_txt}, PE {pe_txt}, ret60 {ret60_txt}:{verdict}。"
+
+
 SYSTEM_PROMPT = """You are a buy-side Bear Advocate for A-share single-stock research. You receive same upstream as bull.
 
 Build the strongest bear case in 3-5 bullets. Anchor each to F1-F14 failure modes from memory:
 - F1: factor signal in systemic-uptrend regime is unreliable
 - F2: game-capital tickers — quant models structurally fail
 - F3: Alpha158 failure mode (overfitting on lookback)
-- F4: Sub-200亿 + PE>100 + ret60>50% (game-capital)
+- F4: {F4_CLAUSE}
 - F5: 商誉/净资产 > 30% (impairment risk)
 - F6: Below-MA200 + rev_20 positive (catching falling knife)
 - F7: 增量数据覆盖事故 (data quality breakdown)
@@ -58,11 +91,19 @@ class BearAdvocate(SubAgent[BearOutput]):
     async def _execute(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         client = LLMClient.for_agent(self.NAME)
         factor = inputs.get("factor-computer", {}) or {}
+        # 数字锚:quote-fetcher 的市值/PE/60日涨幅拼进 upstream(quote-fetcher 是全体
+        # tier2 硬依赖,到 bear-advocate 这一波必然已 done——见 yaml input_keys 注释)。
+        quote = inputs.get("quote-fetcher") or {}
+        quote_summary = {
+            "price": quote.get("price"), "mv_yi": quote.get("mv_yi"),
+            "pe": quote.get("pe"), "ret_60d": quote.get("ret_60d"),
+        }
         upstream = json.dumps({
             "fundamental": inputs.get("fundamental-analyst", {}),
             "technical": inputs.get("technical-analyst", {}),
             "whale": inputs.get("whale-analyst", {}),
             "quant": inputs.get("quant-analyst", {}),
+            "quote_summary": quote_summary,
         }, default=str, ensure_ascii=False)
         timeline = (factor.get("stock_timeline") or "").strip()
         timeline_block = f"\n\n# 上次研报时间线 (必读)\n{timeline}" if timeline else ""
@@ -78,9 +119,29 @@ class BearAdvocate(SubAgent[BearOutput]):
         else:
             memory_text = self.memory.load_all()
 
+        # F4 幻觉市值断根:静态模板改成占位符 {F4_CLAUSE},这里用 quote-fetcher 真实
+        # mv_yi/pe/ret_60d 判定后原样替换——不满足三条件时明确禁止援引 F4。
+        sys_prompt = SYSTEM_PROMPT.replace("{F4_CLAUSE}", f4_clause(quote)) + "\n\n# Memory\n" + memory_text
+
+        # 平台证据(evidence-loader):bear 消费 sentiment/fundflow/board_eco(数值面佐证)。
+        ev = inputs.get("evidence-loader") or {}
+        ev_secs = ev.get("sections") or {}
+        ev_picked = {k: ev_secs.get(k) for k in ("sentiment", "fundflow", "board_eco") if ev_secs.get(k)}
+        evidence_block = ""
+        if ev_picked:
+            evidence_block = (
+                "\n\n# 平台证据 (确定性 — 引用须带出处, 数字禁编造)\n"
+                + json.dumps(ev_picked, ensure_ascii=False)
+            )
+            sys_prompt += (
+                "\n\n# 平台证据使用规则\n"
+                "若提供【平台证据】块:引用其中数据须标出处(section 名+as_of);"
+                "证据中没有的数字一律写「证据未及」,严禁编造。"
+            )
+
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT + "\n\n# Memory\n" + memory_text},
-            {"role": "user", "content": f"Upstream:\n{upstream}{timeline_block}\n\nReturn JSON per schema."},
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": f"Upstream:\n{upstream}{timeline_block}{evidence_block}\n\nReturn JSON per schema."},
         ]
         # 同 bull-advocate: 若 thesis_bullets 空, 一次激进 retry; 仍空才占位 (introspector 踩坑反推)
         raw: Dict[str, Any] = {}

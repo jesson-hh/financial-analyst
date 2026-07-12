@@ -91,9 +91,27 @@ class FundamentalAnalyst(SubAgent[FundamentalOutput]):
                 "- 该股出口 / 海外业务占比高 + 美元强 → bear point 加 1 条"
             )
 
+        # 平台证据(evidence-loader,零LLM节点透传的十数据面):按消费矩阵裁剪
+        # (fundamental←chain/mainline/quant),缺失/空段静默跳过——soft_dep 段级降级,
+        # 绝不因为平台证据缺失而改变旧行为(无 ev → sys_prompt/evidence_block 均不变)。
+        ev = inputs.get("evidence-loader") or {}
+        ev_secs = ev.get("sections") or {}
+        ev_picked = {k: ev_secs.get(k) for k in ("chain", "mainline", "quant") if ev_secs.get(k)}
+        evidence_block = ""
+        if ev_picked:
+            evidence_block = (
+                "\n\n# 平台证据 (确定性 — 引用须带出处, 数字禁编造)\n"
+                + json.dumps(ev_picked, ensure_ascii=False)
+            )
+            sys_prompt += (
+                "\n\n# 平台证据使用规则\n"
+                "若提供【平台证据】块:引用其中数据须标出处(section 名+as_of);"
+                "证据中没有的数字一律写「证据未及」,严禁编造。"
+            )
+
         messages = [
             {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": f"Upstream quote data:\n{upstream}{chain_block}{overseas_block}\n\nReturn JSON per schema."},
+            {"role": "user", "content": f"Upstream quote data:\n{upstream}{chain_block}{overseas_block}{evidence_block}\n\nReturn JSON per schema."},
         ]
         response = await client.chat(
             messages=messages,
