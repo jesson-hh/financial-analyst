@@ -76,7 +76,9 @@ agents:
   - name: risk-officer
     deps: [bull-advocate, bear-advocate, news-reader, f10-reader, evidence-loader]
     input_keys: [bull-advocate, bear-advocate, news-reader, f10-reader, evidence-loader, quote-fetcher]
-    soft_deps: [evidence-loader]
+    # 2026-07-12 依赖卫生:news-reader/f10-reader 原是硬依赖(任一失败→risk-officer 被
+    # 阻塞→整份研报夭折),降为 soft——CRO 该在证据不全时仍出诚实降级判断,而非陪葬。
+    soft_deps: [news-reader, f10-reader, evidence-loader]
     borrows_memory: [bear-advocate]
     memory_mode: retrieval
   - name: report-writer
@@ -97,7 +99,13 @@ agents:
   # ── Tier 4 — 复盘 (不阻塞研报输出) ──
   - name: introspector
     deps: [report-writer, bull-advocate, bear-advocate, risk-officer,
-           fundamental-analyst, technical-analyst, whale-analyst]
+           fundamental-analyst, technical-analyst, whale-analyst,
+           evidence-loader, quote-fetcher]
     input_keys: [report-writer, bull-advocate, bear-advocate, risk-officer,
-                 fundamental-analyst, technical-analyst, whale-analyst]
+                 fundamental-analyst, technical-analyst, whale-analyst,
+                 evidence-loader, quote-fetcher]
+    # 数字溯源门(2026-07-12)所需的证据/现价锚——introspector 是波4事后校验,证据/现价
+    # 缺席它该降级继续复盘(不因此塌掉),故两者均走 soft(quote-fetcher 虽是全体
+    # tier2 的硬依赖必然已 done,这里仍显式照 soft 加,与 T5 的 evidence-loader 形态一致)。
+    soft_deps: [evidence-loader, quote-fetcher]
     memory_mode: full

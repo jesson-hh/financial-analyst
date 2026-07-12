@@ -534,7 +534,24 @@ class ReportWriter(SubAgent[ReportOutput]):
         md_path = out_dir / f"{code}_{asof}.md"
         json_path = out_dir / f"{code}_{asof}.json"
         md_path.write_text(parsed.get("markdown_body", f"# {code} Report\n(empty)"), encoding="utf-8")
-        json_path.write_text(json.dumps(parsed.get("summary_json", parsed), ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # ⑥根修:落盘 .json 用 sanity 修正后的数字,不是 LLM 原始输出。此前这里直接写
+        # parsed["summary_json"](LLM 自己的原始值),与上面刚做完的 range clamp /
+        # rating_overall=sum(dims) / veto→0仓 / action-target_price 修正 各走各的 ——
+        # .md 里"sanity overrides"附注了修正,但 .json(outcome_tracker/introspector 等
+        # 下游都读它当"summary_json")仍是没被修正过的旧数字,md/json 两份档案对不上。
+        summary_json = parsed.get("summary_json", parsed)
+        if isinstance(summary_json, dict):
+            summary_json = dict(summary_json)
+            summary_json.update({
+                "rating_overall": rating_overall,
+                "rating_dimensions": rating_dimensions,
+                "action": action,
+                "target_price": target_price,
+                "stop_loss": stop_loss,
+                "position_pct": position_pct,
+            })
+        json_path.write_text(json.dumps(summary_json, ensure_ascii=False, indent=2), encoding="utf-8")
 
         return {
             "output_md_path": str(md_path),
