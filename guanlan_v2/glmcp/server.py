@@ -70,7 +70,9 @@ def _spawn_background_detached(bg: dict) -> str:
     """background 信封 → detached 子进程真跑(不随 MCP 客户端退出而死)→ 诚实受理凭证。
     console 事件循环外的 MCP 通道没有 _spawn_bg 跑道 —— 此处补齐真执行,修假成功红线。
     kind=report → console 同款 CLI `financial-analyst report`;etf_report → 引擎 run_etf_report。
-    本函数是同步上下文(dispatch_tool 直调,非 to_thread)→ 构证据包直接同步调用即可。"""
+    本函数内部同步跑 _build_pack_safe(证据包构建,含秒级网络调用)+ Popen——dispatch_tool
+    经 asyncio.to_thread 派本函数到工作线程,绝不同步跑在 9999 事件循环线程上(堵 loop→
+    健康检查失败→看门狗误杀 9999 的历史事故模式)。"""
     import shutil
     import subprocess
     import sys as _sys
@@ -115,7 +117,10 @@ def _spawn_background_detached(bg: dict) -> str:
 
 async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> List[Any]:
     """派发一次 MCP 工具调用 → list[TextContent]。写门 + to_thread + 诚实失败。
-    background 信封(研报类长任务)→ detached 子进程真执行 + 受理凭证(修假成功红线)。"""
+    background 信封(研报类长任务)→ detached 子进程真执行 + 受理凭证(修假成功红线)。
+    _spawn_background_detached 内部同步跑证据包构建(秒级网络调用)+ Popen,必须经
+    asyncio.to_thread 派到工作线程——直调会把网络调用堵在 9999 事件循环线程上,
+    触发看门狗误杀(仓级红线,见 Task 4 评审)。"""
     from mcp.types import TextContent
     d = _by_name().get(name)
     if d is None:
@@ -130,7 +135,7 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> List[Any]:
         return [TextContent(type="text", text=json.dumps({"error": f"{type(e).__name__}: {e}"}, ensure_ascii=False))]
     if isinstance(result, dict) and result.get("background"):
         try:
-            receipt = _spawn_background_detached(result["background"])
+            receipt = await asyncio.to_thread(_spawn_background_detached, result["background"])
         except Exception as e:  # noqa: BLE001 — 诚实失败显形,绝不假成功
             return [TextContent(type="text", text=json.dumps(
                 {"error": f"后台任务启动失败: {type(e).__name__}: {e}"}, ensure_ascii=False))]

@@ -150,9 +150,15 @@ def test_spawn_background_unknown_kind_refuses(monkeypatch):
 
 
 def test_dispatch_background_spawn_failure_is_visible(monkeypatch):
-    """spawn 抛错 → dispatch 回错误显形,绝不假成功(红线)。"""
+    """spawn 抛错 → dispatch 回错误显形,绝不假成功(红线)。
+    fake_to_thread 现须区分两次 asyncio.to_thread 调用:impl 调用(纯 kwargs)回桩 dict;
+    spawn 调用(dispatch_tool 传 fn+位置参数 background,Task 4 评审后 spawn 也经 to_thread
+    离开事件循环线程)→ 真调 fn(*args, **kw),让 monkeypatch 的 _spawn_background_detached
+    真正生效(含抛错传播,同真实 asyncio.to_thread 行为)。"""
     import guanlan_v2.glmcp.server as ms
-    async def fake_to_thread(fn, **kw):
+    async def fake_to_thread(fn, *args, **kw):
+        if args:
+            return fn(*args, **kw)
         return {"ok": True, "content": "已受理", "background": {"kind": "report", "code": "X"}}
     monkeypatch.setattr(ms.asyncio, "to_thread", fake_to_thread)
     monkeypatch.setenv("GUANLAN_MCP_WRITE", "1")
@@ -164,8 +170,12 @@ def test_dispatch_background_spawn_failure_is_visible(monkeypatch):
 
 
 def test_dispatch_background_success_appends_receipt(monkeypatch):
+    """同上:fake_to_thread 区分 impl 调用(纯 kwargs,回桩 dict)与 spawn 调用(位置参数,
+    真调 fn 走 monkeypatch 的 _spawn_background_detached)。"""
     import guanlan_v2.glmcp.server as ms
-    async def fake_to_thread(fn, **kw):
+    async def fake_to_thread(fn, *args, **kw):
+        if args:
+            return fn(*args, **kw)
         return {"ok": True, "content": "已受理研报", "background": {"kind": "report", "code": "X"}}
     monkeypatch.setattr(ms.asyncio, "to_thread", fake_to_thread)
     monkeypatch.setenv("GUANLAN_MCP_WRITE", "1")

@@ -183,6 +183,47 @@ def _cleanup_empty_mcp_logs(gsrv_module):
             p.unlink()
 
 
+# ── ②b dispatch_tool 的 background spawn 必须离开 9999 事件循环线程 ──────────
+# (Task 4 评审升格缺陷:_spawn_background_detached 内部同步跑 _build_pack_safe——
+#  十 section 证据包构建,含 kuaixun/probe 等秒级网络调用,最坏 10-30s——旧代码里
+#  dispatch_tool 直调而非 asyncio.to_thread,等于把该网络调用堵在 9999 事件循环
+#  线程上,触发看门狗误杀 9999 的历史真实事故模式。console 路径无此问题,因其整体
+#  跑在 executor 线程。)
+
+def test_dispatch_tool_spawns_background_off_event_loop(monkeypatch):
+    """回归锁:经真实 dispatch_tool 路径触发 report background spawn,桩 _build_pack_safe
+    在函数体内探测当前是否在运行中的 event loop 线程——修复前(直调)应为 True/RED,
+    修复后(asyncio.to_thread)应为 False/GREEN。"""
+    import mcp.types  # noqa: F401 — 预热 SDK 导入链(win32 模块导入期用 subprocess.Popen[bytes] 下标,须在 patch Popen 前完成)
+    import guanlan_v2.glmcp.server as gsrv
+
+    seen = {}
+
+    def _probe(code):
+        try:
+            asyncio.get_running_loop()
+            seen["on_loop"] = True     # 在 loop 线程 = 缺陷回归
+        except RuntimeError:
+            seen["on_loop"] = False    # 在工作线程 = 正确
+        return None
+
+    monkeypatch.setattr(gsrv, "_build_pack_safe", _probe)
+    monkeypatch.setattr("subprocess.Popen", lambda cmd, **kw: object())
+
+    decl = {"name": "ww_report_run", "gated": False, "engine": False,
+            "description": "", "inputSchema": {}, "read_only": False, "destructive": False}
+    monkeypatch.setattr(gsrv, "_by_name", lambda: {"ww_report_run": decl})
+    monkeypatch.setattr(gsrv, "_resolve_impl", lambda d, n: (
+        lambda **kw: {"ok": True, "content": "已受理",
+                      "background": {"kind": "report", "code": "SH600000", "name": "", "asof": None}}))
+
+    out = asyncio.run(gsrv.dispatch_tool("ww_report_run", {}))
+
+    assert "已真启动" in out[0].text
+    assert seen["on_loop"] is False
+    _cleanup_empty_mcp_logs(gsrv)
+
+
 # ── ③ server.py create_app() FA_MAINLINE_PANEL setdefault ──────────────────
 
 def test_server_fa_mainline_panel_path_points_at_vendor_artifact():
