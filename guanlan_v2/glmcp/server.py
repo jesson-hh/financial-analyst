@@ -42,6 +42,18 @@ def _resolve_impl(d: Dict[str, Any], name: str):
     return {t["name"]: t["impl"] for t in ct.WW_TOOL_TABLE}[name]
 
 
+def _report_spawn_env() -> Dict[str, str]:
+    """研报类后台子进程 env(与 console `_call_buddy_report` 逐项对齐):
+    PYTHONIOENCODING 防 GBK UnicodeEncodeError + PYTHONPATH 挂仓内 engine/(崩溃根修——
+    缺此键子进程吃 venv 里 pinned 旧引擎,缺 news-sentiment 注册即起跑即崩)+ FA_CONFIG_DIR
+    钉死仓内 config/(find_config 显式注入赢过 pinned workspace,不靠父进程环境继承)。"""
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[2]
+    return {**os.environ, "PYTHONIOENCODING": "utf-8",
+            "PYTHONPATH": str(repo / "engine") + os.pathsep + os.environ.get("PYTHONPATH", ""),
+            "FA_CONFIG_DIR": os.environ.get("FA_CONFIG_DIR", str(repo / "config"))}
+
+
 def _spawn_background_detached(bg: dict) -> str:
     """background 信封 → detached 子进程真跑(不随 MCP 客户端退出而死)→ 诚实受理凭证。
     console 事件循环外的 MCP 通道没有 _spawn_bg 跑道 —— 此处补齐真执行,修假成功红线。
@@ -74,7 +86,7 @@ def _spawn_background_detached(bg: dict) -> str:
     log = repo / "var" / f"mcp_bg_{job}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     flags = 0x00000008 | 0x00000200   # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}   # 重定向流防 GBK UnicodeEncodeError(镜像 console 子进程)
+    env = _report_spawn_env()   # PYTHONIOENCODING + PYTHONPATH=engine/ + FA_CONFIG_DIR(与 console 逐项对齐)
     with open(log, "ab") as lf:
         subprocess.Popen(cmd, cwd=str(repo), stdout=lf, stderr=subprocess.STDOUT,
                          creationflags=flags, env=env)
