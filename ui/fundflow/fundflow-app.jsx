@@ -216,22 +216,40 @@ function App() {
   const [live, setLive] = useState(null);
   const [hist, setHist] = useState(null);
   const [loading, setLoading] = useState(true);
-  const load = useCallback(async (k, refresh) => {
-    setLoading(true);
-    const [lv, hs] = await Promise.all([window.glFetchFundflowLive(k, refresh),
+  const [fromMemory, setFromMemory] = useState(false);   // 当前展示是否来自本地记忆(未手动更新)
+
+  // 手动更新:强拉最新 live+hist,成功后写浏览器本地记忆(hist 若 warming 由下方轮询补齐再存)。
+  const update = useCallback(async (k) => {
+    setLoading(true); setFromMemory(false);
+    const [lv, hs] = await Promise.all([window.glFetchFundflowLive(k, true),
                                         window.glFetchFundflowHistory(k, "")]);
     setLive(lv); setHist(hs); setLoading(false);
+    if (lv && lv.ok !== false && !(hs && hs.warming))
+      window.glSaveFundflowMemory(k, { live: lv, hist: hs });
   }, []);
-  // 打开走缓存(不强拉)——后端已把上次拉的存盘,秒回;收盘后当天数据定格不再重拉。
-  // 只有点「刷新」按钮才 load(kind, true) 强拉最新。首次/重启后无缓存时后端自会拉一次。
-  useEffect(() => { load(kind, false); }, [kind, load]);
 
-  // 分钟线冷启动约 25s(后台拉),warming 期间轮询直到出图;之后走 60s SWR 缓存。
+  // 打开/切档:优先从浏览器本地记忆**秒恢复**(0 拉取,连后端请求都不发);
+  // 只有从未拉过(无记忆)才自动首拉一次。想要最新数据点「更新数据」按钮。
+  useEffect(() => {
+    const mem = window.glLoadFundflowMemory(kind);
+    if (mem && mem.live) {
+      setLive(mem.live); setHist(mem.hist || null); setFromMemory(true); setLoading(false);
+    } else {
+      update(kind);
+    }
+  }, [kind, update]);
+
+  // 分钟线首拉 warming(约 25s):轮询直到出图,拿到后连同 live 存进本地记忆。
   useEffect(() => {
     if (!hist || !hist.warming) return;
-    const t = setTimeout(async () => setHist(await window.glFetchFundflowHistory(kind, "")), 5000);
+    const t = setTimeout(async () => {
+      const hs = await window.glFetchFundflowHistory(kind, "");
+      setHist(hs);
+      if (hs && hs.ticks && hs.ticks.length && live && live.ok !== false)
+        window.glSaveFundflowMemory(kind, { live, hist: hs });
+    }, 5000);
     return () => clearTimeout(t);
-  }, [hist, kind]);
+  }, [hist, kind, live]);
 
   if (live && live.ok === false)
     return <div style={{ padding: 40, fontFamily: "var(--font-serif)", color: "var(--ink-2)" }}>
@@ -255,12 +273,14 @@ function App() {
         <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
           {live && <span style={{ fontFamily: "var(--font-mono)", fontSize: 10,
                                   color: live.trading ? "var(--zhu)" : "var(--ink-3)" }}>
-            {live.trading ? "盘中" : "非交易"} · {String(live.pulled_at || "").slice(0, 16).replace("T", " ")}
-            {live.freshness && live.freshness.frozen ? " · 已存档" : ""}</span>}
-          <button onClick={() => load(kind, true)} disabled={loading} data-hv="zhu"
+            数据 {String(live.pulled_at || "").slice(0, 16).replace("T", " ")}
+            {fromMemory ? " · 本地记忆" : (live.freshness && live.freshness.frozen ? " · 已存档" : "")}</span>}
+          <button onClick={() => update(kind)} disabled={loading} data-hv="zhu"
             style={{ fontFamily: "var(--font-serif)", fontSize: 12, padding: "5px 16px", cursor: "pointer",
-                     background: "var(--paper-0)", color: "var(--ink-1)", border: "1px solid var(--line-3)", borderRadius: 4 }}>
-            {loading ? "拉取中…" : "刷新"}</button>
+                     background: loading ? "var(--paper-0)" : "var(--zhu)",
+                     color: loading ? "var(--ink-2)" : "var(--text-on-ink)",
+                     border: "1px solid var(--line-3)", borderRadius: 4 }}>
+            {loading ? "更新中…" : "更新数据"}</button>
         </span>
       </div>
 

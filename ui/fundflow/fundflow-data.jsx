@@ -21,4 +21,21 @@ async function glFetchFundflowHistory(kind, date) {
   }
 }
 
-Object.assign(window, { glFetchFundflowLive, glFetchFundflowHistory });
+/* 本地记忆:切回页面从浏览器 localStorage 秒恢复,连后端请求都不发。
+   只有点「更新」按钮才拉最新并覆盖记忆。key 按档位分,concept/industry 各存一份。 */
+function glLoadFundflowMemory(kind) {
+  try {
+    const raw = localStorage.getItem("fundflow_mem_" + (kind || "concept"));
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+
+function glSaveFundflowMemory(kind, data) {
+  try { localStorage.setItem("fundflow_mem_" + (kind || "concept"), JSON.stringify(data)); }
+  catch (e) { /* localStorage 满/隐私模式:静默,记忆只是加速,失败不影响功能 */ }
+}
+
+Object.assign(window, {
+  glFetchFundflowLive, glFetchFundflowHistory,
+  glLoadFundflowMemory, glSaveFundflowMemory,
+});
