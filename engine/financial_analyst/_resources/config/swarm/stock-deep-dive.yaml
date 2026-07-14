@@ -59,7 +59,11 @@ agents:
   - name: whale-analyst             # 主力行为 / 筹码集中 (价量 + 股东户数, 不再吃 factor-computer)
     deps: [quote-fetcher, f10-reader, evidence-loader]
     input_keys: [quote-fetcher, f10-reader, evidence-loader]
-    soft_deps: [evidence-loader]    # 平台证据=上下文佐证,缺失不拖垮主力面判读
+    # 2026-07-14 依赖卫生(补 §5 遗漏):f10-reader 原是硬依赖 → f10 失败(如 LLM 把 dict 字段
+    # 返成 [] 触发 F10Output 校验崩)时 whale 永不 ready → 硬依赖 whale 的 bull/bear/risk/writer
+    # 全塌 → 整份研报夭折(真机 SH603986 实证)。降为 soft:f10 缺失只让筹码/股东户数佐证降级
+    # (whale 主力面本就走 evidence-loader 的 fundflow/board_eco),与 risk-officer 同款处置。
+    soft_deps: [evidence-loader, f10-reader]    # 平台证据+F10=上下文佐证,缺失不拖垮主力面判读
 
   # ── Tier 3 — 多空 → 风控 → writer ──
   - name: bull-advocate

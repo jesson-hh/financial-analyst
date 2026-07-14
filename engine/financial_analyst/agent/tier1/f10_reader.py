@@ -116,9 +116,21 @@ class F10Reader(SubAgent[F10Output]):
 
         response = await self._call_llm("\n\n".join(parts))
         parsed = json.loads(response["choices"][0]["message"]["content"])
+        # deepseek 偶发把空 dict 字段返成空 list [](或反之),.get(k, default) 只在 key
+        # 缺失时兜底,key 在但值类型错 → 直灌 F10Output 触发 pydantic dict_type 崩 →
+        # f10-reader fail → 硬依赖它的 whale 塌 → 整份研报夭折。类型不符即回落空默认。
+        recent = parsed.get("recent_events", [])
+        if not isinstance(recent, list):
+            recent = []
+        lhb = parsed.get("lhb_seats", {})
+        if not isinstance(lhb, dict):
+            lhb = {}
+        ec = parsed.get("event_classified", {"positive": [], "negative": [], "calendar": [], "neutral": []})
+        if not isinstance(ec, dict):
+            ec = {"positive": [], "negative": [], "calendar": [], "neutral": []}
         return {
             "code": code, "asof_date": asof,
-            "recent_events": parsed.get("recent_events", []),
-            "lhb_seats": parsed.get("lhb_seats", {}),
-            "event_classified": parsed.get("event_classified", {"positive": [], "negative": [], "calendar": [], "neutral": []}),
+            "recent_events": recent,
+            "lhb_seats": lhb,
+            "event_classified": ec,
         }
