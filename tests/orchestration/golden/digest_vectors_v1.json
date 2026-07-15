@@ -1,0 +1,84 @@
+{
+  "algorithm": "sha256+cjson-v1",
+  "description": "Frozen golden vectors for guanlan_v2.orchestration.digest (sha256+cjson-v1). Regenerate only on a reviewed canonicalization change; see tests/orchestration/test_digest.py::golden_cases.",
+  "vectors": [
+    {
+      "name": "primitives_neg_zero",
+      "projection": "semantic",
+      "canonical_json": "{\"a\":0.0,\"b\":[0.0,1.5,-2.5],\"n\":7}",
+      "digest": "8bd085f875b372cc0788410acf9592e5999fc450c783120920a2dd77c04a6f5b"
+    },
+    {
+      "name": "primitives_pos_zero",
+      "projection": "semantic",
+      "canonical_json": "{\"a\":0.0,\"b\":[0.0,1.5,-2.5],\"n\":7}",
+      "digest": "8bd085f875b372cc0788410acf9592e5999fc450c783120920a2dd77c04a6f5b"
+    },
+    {
+      "name": "nested_dict",
+      "projection": "semantic",
+      "canonical_json": "{\"a\":{\"m\":[3,2,1],\"n\":2},\"z\":1}",
+      "digest": "d76deea8ce52006191315294a6e492341016329c5ccac54343b2e6ef95934850"
+    },
+    {
+      "name": "set_of_ints",
+      "projection": "semantic",
+      "canonical_json": "{\"s\":[1,2,3,4,5]}",
+      "digest": "548defb317ed56024152382f922c6ad7ff1a4fc8040179c85b95be1dbc435cf5"
+    },
+    {
+      "name": "enum_by_value",
+      "projection": "semantic",
+      "canonical_json": "{\"c\":\"red\",\"d\":\"green\"}",
+      "digest": "06fe7fb7cdfd30cc3e9f7f846e780a2a8a79bce4c438f657d9c6fee1253101c8"
+    },
+    {
+      "name": "datetime_utc",
+      "projection": "semantic",
+      "canonical_json": "{\"t\":\"2026-07-15T08:30:15.123456Z\"}",
+      "digest": "9824d1d20303cb49968ff878e4855fcdcfa4b982b9c4c9d2d7bcde0da54ea079"
+    },
+    {
+      "name": "datetime_offset_same_instant",
+      "projection": "semantic",
+      "canonical_json": "{\"t\":\"2026-07-15T08:30:15.123456Z\"}",
+      "digest": "9824d1d20303cb49968ff878e4855fcdcfa4b982b9c4c9d2d7bcde0da54ea079"
+    },
+    {
+      "name": "leaf_semantic",
+      "projection": "semantic",
+      "canonical_json": "{\"business_value\":10,\"schema_version\":\"1\",\"weight\":0.5}",
+      "digest": "0524bac9f5e93a6c93e0b5760661200c8c11e2e62271d9cb3545124b65828367"
+    },
+    {
+      "name": "leaf_audit",
+      "projection": "audit",
+      "canonical_json": "{\"business_value\":10,\"created_at\":\"2026-07-15T08:30:15.123456Z\",\"record_id\":\"rid-fixed\",\"schema_version\":\"1\",\"weight\":0.5}",
+      "digest": "479054b03b0c314460d1b924ceb82ea6d45379f004094bde1c6a82688b85eacd"
+    },
+    {
+      "name": "parent_semantic",
+      "projection": "semantic",
+      "canonical_json": "{\"label\":\"anchor\",\"leaf\":{\"business_value\":10,\"schema_version\":\"1\",\"weight\":0.5},\"schema_version\":\"1\"}",
+      "digest": "79223d6ba251c643910ec5b08441f9be47361161c9feae50a1514ed7cc4188f7"
+    },
+    {
+      "name": "parent_audit",
+      "projection": "audit",
+      "canonical_json": "{\"label\":\"anchor\",\"leaf\":{\"business_value\":10,\"created_at\":\"2026-07-15T08:30:15.123456Z\",\"record_id\":\"rid-fixed\",\"schema_version\":\"1\",\"weight\":0.5},\"schema_version\":\"1\"}",
+      "digest": "be8b4d9313cf0179c3ec47634d95b1add34bd523d177147a8b5984da32e27986"
+    },
+    {
+      "name": "sealed_semantic",
+      "projection": "semantic",
+      "canonical_json": "{\"payload\":\"frozen\",\"schema_version\":\"1\",\"tags\":[\"a\",\"m\",\"z\"]}",
+      "digest": "69171c7a4cc72d6b4578ac3a03add1a27c1afad6da3982b792c1079d6b4c0ed3"
+    },
+    {
+      "name": "set_fragment_semantic",
+      "projection": "semantic",
+      "canonical_json": "{\"layers\":[\"L0\",\"L1\",\"L2\"],\"plan_id\":\"plan-2026-07-15\",\"schema_version\":\"1\",\"worker_tags\":[\"alpha\",\"beta\",\"delta\",\"epsilon\",\"eta\",\"gamma\",\"iota\",\"kappa\",\"lambda\",\"mu\",\"theta\",\"zeta\"]}",
+      "digest": "8396b3ad3e226432e2530c7b21321d70413d68697283f8af53f2e3f0def0727a"
+    }
+  ]
+}
