@@ -3,8 +3,6 @@
 打板温度为确定性纯算术(常数在 themes.yaml astock 节),无 LLM;probe 缺席诚实降级。"""
 from __future__ import annotations
 
-import re
-
 from .sources import load_themes
 
 _ZT_LIMIT = 300   # 统一客户端上限;旧壳 50 饱和已修,极端 >300 家才截断
@@ -65,8 +63,9 @@ def build_astock(live_fn=None) -> dict:
             out["notes"].append(f"涨停家数按上限 {_ZT_LIMIT} 截断,实际 >= {_ZT_LIMIT};温度以截断值计")
         streaks, breaks = [], 0
         for r in rows:
-            m = re.search(r"(\d+)板", str(r.get("zt_stat") or ""))
-            streaks.append(int(m.group(1)) if m else int(r.get("limit_days") or 1))
+            # 最高连板取真连板 limit_days(lbc);绝不抓 zt_stat『N天M板』里的 M——那是统计窗内
+            # 累计涨停次数 ct(≥ 真连板),会系统性推高温度、让 risk_off 冰点闸更难触发。
+            streaks.append(int(r.get("limit_days") or 1))
             if int(r.get("break_times") or 0) > 0:
                 breaks += 1
         out["max_streak"] = max(streaks)

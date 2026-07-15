@@ -24,8 +24,8 @@ def _probe_ok(source, code="", date="", limit=20):
         "em_limit_up_pool": [{"raw": {"code": "000656", "zt_stat": "7天7板", "break_times": 0, "limit_days": 7}},
                              {"raw": {"code": "300001", "zt_stat": "2天2板", "break_times": 1, "limit_days": 2}}],
         "em_zb_pool": [{"raw": {"code": "111", "x": 1}}, {"raw": {"code": "222", "x": 2}}],   # 炸板 2 家
-        "em_yzt_pool": [{"raw": {"code": "aaa", "pct": 10.0}},    # 一字板已晋级(pct≥9.8)
-                        {"raw": {"code": "bbb", "pct": 3.0}}],    # 一字板未晋级
+        "em_yzt_pool": [{"raw": {"code": "aaa", "pct": 10.0}},    # 昨涨停池仅作晋级率分母(len)
+                        {"raw": {"code": "bbb", "pct": 3.0}}],    # 分子改数今日 zt 池真连板 limit_days>=2
         "ths_hsgt_realtime": [{"raw": {"time": "15:00", "hgt_yi": -9.28, "sgt_yi": -31.1}},
                               {"raw": {"time": "14:59", "hgt_yi": -10.0, "sgt_yi": -36.0}}],
     }
@@ -47,7 +47,8 @@ def test_refresh_pulls_all_sources_writes_cache_and_derives(monkeypatch):
     # 收敛 limit_up_sentiment 权威口径(零新增拉取,zt/zb/yzt 本已拉):
     assert data["derived"]["zb_count"] == 2 and data["derived"]["yzt_count"] == 2
     assert data["derived"]["break_rate"] == 0.5       # 炸板率=zb/(zt+zb)=2/(2+2)
-    assert data["derived"]["promotion_rate"] == 0.5   # 晋级率=一字板 pct≥9.8 家数/一字板池=1/2
+    # 晋级率=今日涨停池真连板(limit_days>=2)家数/昨涨停池家数;此 fixture 两只今日涨停 limit_days=7/2 皆连板=2/2
+    assert data["derived"]["promotion_rate"] == 1.0
     assert data["derived"]["north_net"] == -40.38     # 最新一分钟 hgt_yi+sgt_yi(newest-first)
     assert mt._CACHE_PATH.exists()                                 # 原子落盘
     on_disk = json.loads(mt._CACHE_PATH.read_text(encoding="utf-8"))
@@ -75,6 +76,39 @@ def test_refresh_failed_source_keeps_prev_entry(monkeypatch):
     assert "新失败" in data["sources"][zt]["note"]
     assert data["sources"][zt]["pulled_at"] == "2026-07-08T10:15:01"   # 保留旧龄期
     assert data["pulled_at"] == "2026-07-08T10:15:01"   # overall=min(最旧分量),新源不掩盖陈旧(不伪造新鲜)
+
+
+# ── 最高连板/晋级率口径修复(2026-07-15:zt_stat 抓的是累计涨停次数 ct,非连板 lbc)──
+def test_derive_max_streak_uses_limit_days_not_cumulative_ct():
+    """max_streak 必须取真连板 limit_days(lbc),不是 zt_stat『N天M板』里的累计涨停次数 M(ct)。
+    一只票『10天6板』= 统计窗内累计涨停 6 次,但当前只是首板(limit_days=1)——旧正则抓到 6,虚高。"""
+    zt = lc.resolve_source("em_zt_pool")
+    sources = {zt: {"rows": [
+        {"code": "A", "zt_stat": "10天6板", "limit_days": 1, "break_times": 0},   # ct=6 但真连板=1
+        {"code": "B", "zt_stat": "4天4板", "limit_days": 4, "break_times": 0},     # 真 4 连板
+    ]}}
+    d = mt._derive(sources)
+    assert d["max_streak"] == 4     # 真连板 lbc,不是 zt_stat 的累计次数 6
+
+
+def test_derive_promotion_rate_counts_today_consecutive_boards():
+    """晋级率分子改数『今日涨停池里 limit_days>=2 的真连板家数』(数据已在快照),
+    不再用昨日涨停池的 pct>=9.8 代理(双创未封误算+,ST 封板漏算-)。分母仍 = 昨日涨停家数。"""
+    zt = lc.resolve_source("em_zt_pool")
+    yzt = lc.resolve_source("em_yzt_pool")
+    sources = {
+        zt: {"rows": [
+            {"code": "A", "zt_stat": "2天2板", "limit_days": 2, "break_times": 0},   # 真连板 → 计
+            {"code": "B", "zt_stat": "1天1板", "limit_days": 1, "break_times": 0},   # 首板 → 不计
+        ]},
+        yzt: {"rows": [
+            {"code": "X", "pct": 12.0},   # 双创大涨未封:旧 pct>=9.8 误计+
+            {"code": "Y", "pct": 10.0},   # 旧 pct>=9.8 计
+            {"code": "Z", "pct": 3.0},    # 分母
+        ]},
+    }
+    d = mt._derive(sources)
+    assert d["promotion_rate"] == round(1 / 3, 4)   # 今日 1 家真连板 / 昨日 3 家涨停,非旧口径 2/3
 
 
 # ── Task 2: SWR read_tape + 单飞 + warming ────────────────────────────────────

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -43,14 +42,6 @@ _SOURCES: List[Dict[str, Any]] = [
 _LOCK = threading.Lock()
 _REFRESH_INFLIGHT = [False]
 _MEM_CACHE: Dict[str, Any] = {"data": None}
-_STREAK_RE = re.compile(r"(\d+)板")
-
-
-def _num(v: Any):
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return None
 
 
 def _load_cache() -> Optional[Dict[str, Any]]:
@@ -76,17 +67,19 @@ def _derive(sources: Dict[str, Any]) -> Dict[str, Any]:
     north = rows("northbound")
     streaks, breaks = [], 0
     for r in zt:
-        m = _STREAK_RE.search(str(r.get("zt_stat") or ""))
-        streaks.append(int(m.group(1)) if m else int(r.get("limit_days") or 1))
+        # 最高连板取真连板 limit_days(lbc);绝不抓 zt_stat『N天M板』里的 M——那是统计窗内
+        # 累计涨停次数 ct(≥ 真连板),会系统性推高打板温度、让 risk_off 冰点闸更难触发。
+        streaks.append(int(r.get("limit_days") or 1))
         if int(r.get("break_times") or 0) > 0:
             breaks += 1
     zt_n, zb_n = len(zt), len(zb)
-    promoted = sum(1 for r in yzt if (_num(r.get("pct")) or 0.0) >= 9.8)
+    promoted = sum(1 for r in zt if int(r.get("limit_days") or 1) >= 2)
     # 三个语义不同的口径,分别命名消歧(评审「两套炸板率定义并存」的收敛):
     #   break_ratio = 开板率  = 涨停中曾开板家数 / 涨停数(astock 打板温度用此·系数已标定,不并入)
     #   break_rate  = 炸板率  = 炸板数 / 涨停尝试 = zb/(zt+zb)(收敛 limit_up_sentiment 权威口径)
-    #   promotion_rate = 晋级率 = 昨日涨停池(em_yzt_pool=getYesterdayZTPool)今日 pct≥9.8(再涨停)家数
-    #                    / 昨日涨停池家数(连板晋级维度,零新增拉取;yzt=昨日涨停,非一字板,勿误改语义)
+    #   promotion_rate = 晋级率 = 今日涨停池里真连板(limit_days>=2)家数 / 昨日涨停池家数
+    #                    分子改数今日 em_zt_pool 的真连板(每只 limit_days>=2 必是昨日也涨停=晋级成功),
+    #                    替代旧的『昨池今日 pct≥9.8』代理(双创未封误算+/ST 封板漏算-);零新增拉取。
     d: Dict[str, Any] = {"zt_count": zt_n, "zb_count": zb_n, "dt_count": len(dt),
                          "yzt_count": len(yzt),
                          "max_streak": max(streaks) if streaks else 0,

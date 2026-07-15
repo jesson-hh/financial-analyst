@@ -30,12 +30,29 @@ def test_astock_temp_arithmetic():
     out = ma.build_astock(live_fn=_live_ok)
     assert out["available"] is True
     assert out["zt_count"] == 3
-    assert out["max_streak"] == 3          # "4天3板" → 3;无 zt_stat 行回落 limit_days=2
+    assert out["max_streak"] == 2          # 真连板取 limit_days:max(1,1,2)=2(不再抓 zt_stat 的累计次数)
     assert out["break_ratio"] == pytest.approx(1 / 3, abs=1e-4)
-    # 温度 = base30 + 0.35*3 + 3*3 - 30*(1/3) = 30+1.05+9-10 = 30.05 → round .1
-    assert out["temp"] == pytest.approx(30.1, abs=0.01)
+    # 温度 = base30 + 0.35*3 + 3*2 - 30*round(1/3,4) = 30+1.05+6-9.999 = 27.051 → round .1
+    assert out["temp"] == pytest.approx(27.1, abs=0.01)
     assert out["top_reasons"] and out["hot_list"]
     assert out["notes"] == []
+
+
+def test_astock_max_streak_uses_limit_days_not_cumulative_ct():
+    """打板温度的最高连板必须取真连板 limit_days(lbc),不是 zt_stat『N天M板』里的累计涨停次数 M(ct)。
+    旧正则对『10天6板/limit_days=1』抓到 6(虚高)→ 乘 k_streak=3 推高温度 → 冰点闸更难触发。"""
+    rows = [
+        {"code": "A", "zt_stat": "10天6板", "limit_days": 1, "break_times": 0},   # ct=6 但真连板=1
+        {"code": "B", "zt_stat": "4天4板", "limit_days": 4, "break_times": 0},     # 真 4 连板
+    ]
+
+    def live(source, code="", date="", limit=20):
+        if source == "em_zt_pool":
+            return {"ok": True, "note": "", "n": len(rows), "rows": rows}
+        return {"ok": True, "note": "", "n": 0, "rows": []}
+
+    out = ma.build_astock(live_fn=live)
+    assert out["max_streak"] == 4     # 真连板 lbc,不是 zt_stat 的累计次数 6
 
 
 def test_astock_zt_truncation_honest_note():
