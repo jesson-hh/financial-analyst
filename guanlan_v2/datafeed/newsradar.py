@@ -34,6 +34,8 @@ _FETCH_TIMEOUT = 12
 
 _LOCK = threading.Lock()
 _INFLIGHT = [False]
+_WARM_LOCK = threading.Lock()
+_WARM_INFLIGHT = [False]
 
 
 def _local(tag: str) -> str:
@@ -160,6 +162,45 @@ def read_radar(sectors: Optional[List[str]] = None, days: int = 7, limit: int = 
     if use_cache and want is None:                # 只缓存全量抓取,子集不污染缓存
         _write_cache(data)
     return _slice(data, sectors, days, limit)
+
+
+def _trigger_radar() -> bool:
+    """单飞:后台全量抓 108 源并写缓存(供 SWR 非阻塞路由用)。已在跑 → False。"""
+    with _WARM_LOCK:
+        if _WARM_INFLIGHT[0]:
+            return False
+        _WARM_INFLIGHT[0] = True
+
+    def _run() -> None:
+        try:
+            read_radar(sectors=None, days=30, use_cache=True, ttl_s=0)   # ttl_s=0 强制现抓+写缓存
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            _WARM_INFLIGHT[0] = False
+
+    try:
+        threading.Thread(target=_run, daemon=True).start()
+    except RuntimeError:
+        _WARM_INFLIGHT[0] = False
+        return False
+    return True
+
+
+def read_radar_swr(sectors: Optional[List[str]] = None, days: int = 7, limit: int = 200,
+                   ttl_s: int = _DEFAULT_TTL_S) -> Dict[str, Any]:
+    """非阻塞 SWR(web 路由用):有 TTL 内磁盘缓存 → 秒回切片;过期/无缓存 → 触发后台全量抓,
+    无缓存时返回 warming(绝不在请求线程里阻塞打 108 源)。"""
+    cached = _read_cache()
+    fresh = cached and (int(datetime.now().timestamp()) - int(cached.get("pulled_ts") or 0)) < ttl_s
+    if not fresh:
+        _trigger_radar()
+    if not cached:
+        return {"warming": True, "items": [], "n": 0, "note": "资讯雷达预热中(后台首拉 108 源已触发),稍后重试。"}
+    out = _slice(cached, sectors, days, limit)
+    out["warming"] = False
+    out["stale"] = not fresh
+    return out
 
 
 def _slice(data: Dict[str, Any], sectors, days: int, limit: int) -> Dict[str, Any]:

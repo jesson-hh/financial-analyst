@@ -1971,9 +1971,9 @@ def test_ww_live_text_registered():
     props = entry["input_schema"]["properties"]
     assert {"source", "code", "date", "limit"} <= set(props)
     assert entry["input_schema"]["required"] == ["source"]
-    # 51 canonical 源 + catalog = 52(枚举与 datafeed 静态兜底表同步派生;2026-07-15 补
-    # baidu_valuation_percentile=估值分位带·vibe⑤)
-    assert set(props["source"]["enum"]) == set(ct._LIVE_TEXT_SOURCES) and len(ct._LIVE_TEXT_SOURCES) == 52
+    # 52 canonical 源 + catalog = 53(枚举与 datafeed 静态兜底表同步派生;2026-07-15 补
+    # baidu_valuation_percentile=估值分位带 + overseas_stock_quote=海外个股行情维度)
+    assert set(props["source"]["enum"]) == set(ct._LIVE_TEXT_SOURCES) and len(ct._LIVE_TEXT_SOURCES) == 53
 
 
 def test_live_text_impl_happy_native_rows_and_truncates(monkeypatch, tmp_path):

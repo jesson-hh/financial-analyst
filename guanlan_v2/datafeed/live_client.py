@@ -77,6 +77,7 @@ _STATIC_SOURCES: Dict[str, str] = {
     "tdx_f10_text": "tdx_f10",
     "baidu_kline_ma": "baidu_kline",
     "baidu_valuation_percentile": "valuation_percentile",   # 百度股市通 PE-TTM/PB 近5年分位带
+    "overseas_stock_quote": "overseas_quote",               # 美股/港股个股实时行情(海外维度·腾讯 qt)
     "sina_option_codes": "option_codes",
     "sina_option_tquote": "option_tquote",
     "sina_option_greeks": "option_greeks",
@@ -97,6 +98,7 @@ NEED_CODE = {
     "eastmoney_holder_change", "eastmoney_dividend", "tencent_realtime_quote",
     "ths_eps_forecast",   # 同花顺一致预期 EPS,按 6 位股票代码查
     "baidu_valuation_percentile",   # 百度股市通估值分位,按 6 位股票代码查
+    "overseas_stock_quote",   # 海外个股行情,按代码查(美股 AAPL / 港股 00700,透传见 CODE_PASSTHROUGH)
     # 板块分钟线必带板块码 BKxxxx(非 6 位,故同时进 CODE_PASSTHROUGH)
     "eastmoney_sector_flow_minute",
     # 2026-07-09 补:tdx 实时套件/新浪财报/个股信息/观澜合成源均按 6 位代码查。
@@ -123,7 +125,9 @@ CODE_PASSTHROUGH = {"ths_hot_list", "eastmoney_industry_reports", "tencent_realt
                     # iwencai_query/iwencai_search=自然语言 query(问财)。iwencai_search
                     # 修既有隐患:此前未列入,文本 query 被 \d{6} 清空致恒空。
                     "sina_option_tquote", "sina_option_greeks",
-                    "iwencai_query", "iwencai_search"}
+                    "iwencai_query", "iwencai_search",
+                    # 海外行情:美股字母代码(AAPL)/港股数字码(00700),\d{6} 提取会毁代码 → 透传
+                    "overseas_stock_quote"}
 
 
 def _alias_index() -> Dict[str, str]:

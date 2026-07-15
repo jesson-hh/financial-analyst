@@ -21,4 +21,20 @@ def build_datafeed_router() -> APIRouter:
         from guanlan_v2.datafeed.market_tape import read_tape
         return JSONResponse(await asyncio.to_thread(read_tape))
 
+    @router.get("/data/overseas")
+    async def overseas_ep(code: str = ""):
+        """海外(美股/港股)个股行情。code 为空 → 精选清单 SWR 快照;传 code → 单只直拉 lookup。"""
+        from guanlan_v2.datafeed import overseas as ov
+        if code.strip():
+            row = await asyncio.to_thread(ov.probe_one, code.strip())
+            return JSONResponse({"ok": row is not None, "code": code.strip(), "row": row})
+        return JSONResponse(await asyncio.to_thread(ov.read_overseas))
+
+    @router.get("/data/newsradar")
+    async def newsradar_ep(sectors: str = "", days: int = 7, limit: int = 200):
+        """产业一手 RSS 资讯雷达(SWR,非阻塞)。sectors=逗号分隔赛道 hint(空=全部)。"""
+        from guanlan_v2.datafeed import newsradar as nr
+        secs = [s for s in (sectors or "").split(",") if s.strip()] or None
+        return JSONResponse(await asyncio.to_thread(nr.read_radar_swr, secs, int(days), int(limit)))
+
     return router

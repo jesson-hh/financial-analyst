@@ -79,3 +79,22 @@ def test_read_radar_aggregates_filters_by_sector_and_recency(monkeypatch):
     assert "fresh ai" in titles                                  # 命中赛道+新鲜
     assert "stale ai" not in titles                              # 超 7 天滤除
     assert "fresh semi" not in titles                            # 非选中赛道不抓
+
+
+def test_read_radar_swr_warming_when_cold_then_serves_cache(monkeypatch):
+    """非阻塞 SWR(web 路由用):无缓存 → 触发后台全量抓 + 返回 warming(不阻塞 108 源);
+    有新鲜缓存 → 秒回切片。"""
+    import time as _t
+    now = int(_t.time())
+    monkeypatch.setattr(nr, "_read_cache", lambda: None)
+    fired = {"n": 0}
+    monkeypatch.setattr(nr, "_trigger_radar", lambda: fired.__setitem__("n", fired["n"] + 1) or True)
+    out = nr.read_radar_swr(sectors=None, days=7)
+    assert out["warming"] is True and out["items"] == [] and fired["n"] == 1
+
+    cached = {"pulled_ts": now, "pulled_at": "x", "n_sources": 108,
+              "items": [{"title": "cached ai", "url": "u", "ts": now - 100, "summary": "",
+                         "source": "S", "sector": "ai"}]}
+    monkeypatch.setattr(nr, "_read_cache", lambda: cached)
+    out2 = nr.read_radar_swr(sectors=["ai"], days=7)
+    assert out2["warming"] is False and [it["title"] for it in out2["items"]] == ["cached ai"]

@@ -212,7 +212,7 @@ def test_static_sources_reconcile_with_stocks_registry():
     ids.discard("a_stock_live_sources")                              # catalog meta 源,非注册表条目
     static_ids = set(lc._STATIC_SOURCES)
     assert static_ids == ids, f"漂移:观澜多 {sorted(static_ids - ids)};stocks 多 {sorted(ids - static_ids)}"
-    assert len(ids) == 51   # 2026-07-15:+baidu_valuation_percentile(估值分位带·vibe⑤)
+    assert len(ids) == 52   # 2026-07-15:+baidu_valuation_percentile(估值分位带)+overseas_stock_quote(海外维度)
 
 
 def test_new_sources_resolve_and_arg_classification():
