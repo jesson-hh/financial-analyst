@@ -1,0 +1,1369 @@
+{
+  "meta": {
+    "task": "orchestration phase1 task 0",
+    "generated_from": "real legacy sources (verbatim field extraction, no summaries)",
+    "note": "Phase 1 builds zero runnable WorkerSpecs; all 24 IDs are planned. Graph node->worker links are design-intent only."
+  },
+  "scalars": [
+    {
+      "key": "financial_analyst.agent.tier3.report_writer.ReportOutput@1#action",
+      "source_schema": "financial_analyst.agent.tier3.report_writer.ReportOutput@1",
+      "source_path": "engine/financial_analyst/agent/tier3/report_writer.py",
+      "field": "action",
+      "kind": "action",
+      "raw_type": "str",
+      "raw_domain": [
+        "buy",
+        "hold",
+        "sell",
+        "avoid",
+        "accumulate"
+      ],
+      "semantic_domain": "research_recommendation",
+      "target_schema": "guanlan_v2.orchestration.enums.ResearchAction@1",
+      "target_domain": [
+        "buy",
+        "accumulate",
+        "hold",
+        "avoid",
+        "sell"
+      ],
+      "mapping_basis": "authoritative_code",
+      "adapter_version": "v1",
+      "roundtrip_policy": "exact",
+      "samples": [
+        "buy",
+        "hold",
+        "sell",
+        "avoid",
+        "accumulate"
+      ],
+      "evidence": "report_writer.py:263 valid_actions={buy,hold,sell,avoid,accumulate}; model_validator hard-guard",
+      "unmapped_reason": null
+    },
+    {
+      "key": "financial_analyst.agent.etf.report_writer.EtfReportOutput@1#action",
+      "source_schema": "financial_analyst.agent.etf.report_writer.EtfReportOutput@1",
+      "source_path": "engine/financial_analyst/agent/etf/report_writer.py",
+      "field": "action",
+      "kind": "action",
+      "raw_type": "str",
+      "raw_domain": [
+        "buy",
+        "hold",
+        "sell",
+        "avoid",
+        "accumulate"
+      ],
+      "semantic_domain": "research_recommendation",
+      "target_schema": "guanlan_v2.orchestration.enums.ResearchAction@1",
+      "target_domain": [
+        "buy",
+        "accumulate",
+        "hold",
+        "avoid",
+        "sell"
+      ],
+      "mapping_basis": "authoritative_code",
+      "adapter_version": "v1",
+      "roundtrip_policy": "exact",
+      "samples": [
+        "buy",
+        "hold",
+        "sell",
+        "avoid",
+        "accumulate"
+      ],
+      "evidence": "etf/report_writer.py:58-59 valid_actions={buy,hold,sell,avoid,accumulate}; SEPARATE class from stock ReportOutput",
+      "unmapped_reason": null
+    },
+    {
+      "key": "financial_analyst.backtest.decision.DecisionLeg@1#action",
+      "source_schema": "financial_analyst.backtest.decision.DecisionLeg@1",
+      "source_path": "engine/financial_analyst/backtest/decision.py",
+      "field": "action",
+      "kind": "action",
+      "raw_type": "str",
+      "raw_domain": [
+        "buy",
+        "add",
+        "hold",
+        "reduce",
+        "sell"
+      ],
+      "semantic_domain": "position_adjustment",
+      "target_schema": "guanlan_v2.orchestration.enums.PositionAction@1",
+      "target_domain": [
+        "buy",
+        "add",
+        "hold",
+        "reduce",
+        "sell"
+      ],
+      "mapping_basis": "authoritative_code",
+      "adapter_version": "v1",
+      "roundtrip_policy": "exact",
+      "samples": [
+        "buy",
+        "add",
+        "hold",
+        "reduce",
+        "sell"
+      ],
+      "evidence": "decision.py:32 _VALID_ACTIONS={buy,add,hold,reduce,sell}; decision.py:253 unknown->hold",
+      "unmapped_reason": null
+    },
+    {
+      "key": "financial_analyst.watch.models.WatchRec@1#action",
+      "source_schema": "financial_analyst.watch.models.WatchRec@1",
+      "source_path": "engine/financial_analyst/watch/models.py",
+      "field": "action",
+      "kind": "action",
+      "raw_type": "str",
+      "raw_domain": [
+        "buy",
+        "add",
+        "hold",
+        "reduce",
+        "sell"
+      ],
+      "semantic_domain": "position_adjustment",
+      "target_schema": "guanlan_v2.orchestration.enums.PositionAction@1",
+      "target_domain": [
+        "buy",
+        "add",
+        "hold",
+        "reduce",
+        "sell"
+      ],
+      "mapping_basis": "authoritative_code",
+      "adapter_version": "v1",
+      "roundtrip_policy": "exact",
+      "samples": [
+        "buy",
+        "add",
+        "hold",
+        "reduce",
+        "sell"
+      ],
+      "evidence": "watch/models.py:6 _ACTIONS={buy,add,hold,reduce,sell}; __post_init__ raises on bad action",
+      "unmapped_reason": null
+    },
+    {
+      "key": "financial_analyst.agent.tier3.report_writer.ReportOutput@1#rating_overall",
+      "source_schema": "financial_analyst.agent.tier3.report_writer.ReportOutput@1",
+      "source_path": "engine/financial_analyst/agent/tier3/report_writer.py",
+      "field": "rating_overall",
+      "kind": "rating",
+      "raw_type": "int",
+      "raw_domain": [
+        "[-10,10]"
+      ],
+      "semantic_domain": "research_rating_score",
+      "target_schema": "UNMAPPABLE",
+      "target_domain": [],
+      "mapping_basis": "none",
+      "adapter_version": "v1",
+      "roundtrip_policy": "preserve_raw",
+      "samples": [
+        -10,
+        -3,
+        0,
+        5,
+        10
+      ],
+      "evidence": "report_writer.py:254 Field(ge=-10, le=10); strict int",
+      "unmapped_reason": "int score [-10,10] has no authoritative binning to the 5-band PortfolioRating; preserve raw int"
+    },
+    {
+      "key": "financial_analyst.agent.etf.report_writer.EtfReportOutput@1#rating_overall",
+      "source_schema": "financial_analyst.agent.etf.report_writer.EtfReportOutput@1",
+      "source_path": "engine/financial_analyst/agent/etf/report_writer.py",
+      "field": "rating_overall",
+      "kind": "rating",
+      "raw_type": "int",
+      "raw_domain": [
+        "[-10,10]"
+      ],
+      "semantic_domain": "etf_rating_score",
+      "target_schema": "UNMAPPABLE",
+      "target_domain": [],
+      "mapping_basis": "none",
+      "adapter_version": "v1",
+      "roundtrip_policy": "preserve_raw",
+      "samples": [
+        -10,
+        0,
+        6,
+        10
+      ],
+      "evidence": "etf/report_writer.py:47 Field(ge=-10, le=10) = sum of 5 dims (each -2..+2, risk -2..0)",
+      "unmapped_reason": "ETF int score [-10,10]; SEPARATE composition from stock; no authoritative band binning; preserve raw int"
+    },
+    {
+      "key": "financial_analyst.agent.tier3.introspector.IntrospectionProposal@1#confidence",
+      "source_schema": "financial_analyst.agent.tier3.introspector.IntrospectionProposal@1",
+      "source_path": "engine/financial_analyst/agent/tier3/introspector.py",
+      "field": "confidence",
+      "kind": "confidence",
+      "raw_type": "str",
+      "raw_domain": [
+        "low",
+        "med",
+        "high"
+      ],
+      "semantic_domain": "introspection_confidence",
+      "target_schema": "UNMAPPABLE",
+      "target_domain": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "mapping_basis": "none",
+      "adapter_version": "v1",
+      "roundtrip_policy": "preserve_raw",
+      "samples": [
+        "low",
+        "med",
+        "high"
+      ],
+      "evidence": "introspector.py:32 confidence='low'|'med'|'high'; introspector.py:50-51 2=low/3-5=med/6+=high",
+      "unmapped_reason": "raw 'med' != design Confidence 'medium'; med->medium rename has no authoritative code or approved policy yet; preserve raw"
+    },
+    {
+      "key": "guanlan_v2.strategy.perspectives.market_cycle@1#stage",
+      "source_schema": "guanlan_v2.strategy.perspectives.market_cycle@1",
+      "source_path": "guanlan_v2/strategy/perspectives.py",
+      "field": "stage",
+      "kind": "stage",
+      "raw_type": "str",
+      "raw_domain": [
+        "冰点",
+        "分化",
+        "逼空",
+        "发酵",
+        "回踩/启动"
+      ],
+      "semantic_domain": "market_cycle_stage",
+      "target_schema": "guanlan_v2.orchestration.enums.LegacyMarketCycleStage@1",
+      "target_domain": [
+        "冰点",
+        "分化",
+        "逼空",
+        "发酵",
+        "回踩/启动"
+      ],
+      "mapping_basis": "authoritative_code",
+      "adapter_version": "v1",
+      "roundtrip_policy": "exact",
+      "samples": [
+        "冰点",
+        "分化",
+        "逼空",
+        "发酵",
+        "回踩/启动"
+      ],
+      "evidence": "perspectives.py:65-74 lu<0.10 冰点 / lu>=0.90&amt>=0.90 分化 / lu>=0.70 逼空 / lu>=0.35 发酵 / else 回踩/启动",
+      "unmapped_reason": null
+    },
+    {
+      "key": "financial_analyst.agent.tier1.news_sentiment.NewsSentimentOutput@1#market_tilt",
+      "source_schema": "financial_analyst.agent.tier1.news_sentiment.NewsSentimentOutput@1",
+      "source_path": "engine/financial_analyst/agent/tier1/news_sentiment.py",
+      "field": "market_tilt",
+      "kind": "sentiment",
+      "raw_type": "str|null",
+      "raw_domain": [
+        "利好",
+        "利空",
+        "中性"
+      ],
+      "semantic_domain": "news_market_tilt",
+      "target_schema": "UNMAPPABLE",
+      "target_domain": [
+        "Bullish",
+        "Mildly Bullish",
+        "Neutral",
+        "Mixed",
+        "Mildly Bearish",
+        "Bearish"
+      ],
+      "mapping_basis": "none",
+      "adapter_version": "v1",
+      "roundtrip_policy": "preserve_raw",
+      "samples": [
+        "利好",
+        "利空",
+        "中性",
+        null
+      ],
+      "evidence": "news_sentiment.py:17 market_tilt Optional[str] 利好/利空/中性; news_pulse.py:22 NEWS_SYSTEM vocab",
+      "unmapped_reason": "3-level 利好/利空/中性 (nullable) has no authoritative mapping to 6-level SentimentBand; preserve raw"
+    },
+    {
+      "key": "financial_analyst.agent.tier1.news_sentiment.NewsSentimentOutput@1#stock_tilt",
+      "source_schema": "financial_analyst.agent.tier1.news_sentiment.NewsSentimentOutput@1",
+      "source_path": "engine/financial_analyst/agent/tier1/news_sentiment.py",
+      "field": "stock_tilt",
+      "kind": "sentiment",
+      "raw_type": "str|null",
+      "raw_domain": [
+        "利好",
+        "利空",
+        "中性"
+      ],
+      "semantic_domain": "news_stock_tilt",
+      "target_schema": "UNMAPPABLE",
+      "target_domain": [
+        "Bullish",
+        "Mildly Bullish",
+        "Neutral",
+        "Mixed",
+        "Mildly Bearish",
+        "Bearish"
+      ],
+      "mapping_basis": "none",
+      "adapter_version": "v1",
+      "roundtrip_policy": "preserve_raw",
+      "samples": [
+        "利好",
+        "利空",
+        "中性",
+        null
+      ],
+      "evidence": "news_sentiment.py:18 stock_tilt Optional[str]; None when no relevant flash",
+      "unmapped_reason": "per-stock 3-level tilt (nullable, None=no coverage); no authoritative 3->6 band mapping; preserve raw"
+    },
+    {
+      "key": "guanlan_v2.datafeed.sentiment._TAG_SCORE@1#score",
+      "source_schema": "guanlan_v2.datafeed.sentiment._TAG_SCORE@1",
+      "source_path": "guanlan_v2/datafeed/sentiment.py",
+      "field": "score",
+      "kind": "sentiment",
+      "raw_type": "float",
+      "raw_domain": [
+        -1.0,
+        0.0,
+        1.0
+      ],
+      "semantic_domain": "news_tag_score",
+      "target_schema": "UNMAPPABLE",
+      "target_domain": [],
+      "mapping_basis": "none",
+      "adapter_version": "v1",
+      "roundtrip_policy": "preserve_raw",
+      "samples": [
+        -1.0,
+        0.0,
+        1.0
+      ],
+      "evidence": "sentiment.py:20 _TAG_SCORE={利好:1.0, 中性:0.0, 利空:-1.0}; authoritative tag->score within legacy",
+      "unmapped_reason": "ternary {-1,0,1} store score; no authoritative rescale to design SentimentReport score[0,10]; preserve raw"
+    },
+    {
+      "key": "guanlan_v2.macro.astock.build_astock@1#temp",
+      "source_schema": "guanlan_v2.macro.astock.build_astock@1",
+      "source_path": "guanlan_v2/macro/astock.py",
+      "field": "temp",
+      "kind": "sentiment",
+      "raw_type": "float",
+      "raw_domain": [
+        "[0,100]"
+      ],
+      "semantic_domain": "board_limitup_temperature",
+      "target_schema": "UNMAPPABLE",
+      "target_domain": [],
+      "mapping_basis": "none",
+      "adapter_version": "v1",
+      "roundtrip_policy": "preserve_raw",
+      "samples": [
+        0.0,
+        25.0,
+        50.0,
+        85.0,
+        100.0
+      ],
+      "evidence": "astock.py:73-76 temp=clamp(base + k_zt*zt_count + k_streak*max_streak - k_break*break_ratio, 0, 100); themes.yaml astock consts",
+      "unmapped_reason": "deterministic limit-up temperature [0,100]; no authoritative mapping to design SentimentReport score[0,10]; preserve raw"
+    },
+    {
+      "key": "guanlan_v2.macro.pulse._theme_temp@1#temp",
+      "source_schema": "guanlan_v2.macro.pulse._theme_temp@1",
+      "source_path": "guanlan_v2/macro/pulse.py",
+      "field": "temp",
+      "kind": "sentiment",
+      "raw_type": "float",
+      "raw_domain": [
+        "[0,100]"
+      ],
+      "semantic_domain": "predictionmkt_temperature",
+      "target_schema": "UNMAPPABLE",
+      "target_domain": [],
+      "mapping_basis": "none",
+      "adapter_version": "v1",
+      "roundtrip_policy": "preserve_raw",
+      "samples": [
+        0.0,
+        50.0,
+        100.0
+      ],
+      "evidence": "pulse.py:59 temp=clamp(50 + 50*acc/tot_w, 0, 100); prediction-market anchored (PM/Kalshi prob-0.5 weighted)",
+      "unmapped_reason": "prediction-market anchored temperature [0,100]; display-only; no authoritative target scale; preserve raw"
+    },
+    {
+      "key": "guanlan_v2.screen.market_temp._gate@1#level",
+      "source_schema": "guanlan_v2.screen.market_temp._gate@1",
+      "source_path": "guanlan_v2/screen/market_temp.py",
+      "field": "level",
+      "kind": "sentiment",
+      "raw_type": "str|null",
+      "raw_domain": [
+        "risk_off",
+        "overheat",
+        "neutral"
+      ],
+      "semantic_domain": "market_temp_gate_level",
+      "target_schema": "UNMAPPABLE",
+      "target_domain": [],
+      "mapping_basis": "none",
+      "adapter_version": "v1",
+      "roundtrip_policy": "preserve_raw",
+      "samples": [
+        "risk_off",
+        "overheat",
+        "neutral",
+        null
+      ],
+      "evidence": "market_temp.py:49-58 risk_off if temp<=25 or main_net<=-300; overheat if temp>=85 & break_rate>=0.35; else neutral; None=both inputs missing",
+      "unmapped_reason": "conservative shield gate {risk_off,overheat,neutral} (None=data insufficient); no design target enum; preserve raw"
+    }
+  ],
+  "workers": [
+    {
+      "worker_id": "market.factor",
+      "lane": "market",
+      "execution_kind": "deterministic",
+      "legacy_owner": "guanlan regime factor family + market_tape (帷幄)",
+      "source_path": "guanlan_v2/strategy/compute/factor_regime.py",
+      "legacy_config_schema": "guanlan_v2.strategy.compute.factor_regime@1",
+      "proposed_abi": {
+        "output": "market_factor_report (factor trend vector + coverage)"
+      },
+      "can_emit_decision": false,
+      "status": "planned"
+    },
+    {
+      "worker_id": "market.regime",
+      "lane": "market",
+      "execution_kind": "llm",
+      "legacy_owner": "NEW LLM regime read over market.factor + experience library (帷幄+新)",
+      "source_path": null,
+      "legacy_config_schema": null,
+      "proposed_abi": {
+        "output": "regime_report (trend x risk x heat, structured + prob/confidence)"
+      },
+      "can_emit_decision": false,
+      "status": "planned"
+    },
+    {
+      "worker_id": "market.rotation",
+      "lane": "market",
+      "execution_kind": "llm",
+      "legacy_owner": "guanlan fundflow/industry mainline rotation (帷幄+新)",
+      "source_path": "guanlan_v2/fundflow/pulse.py",
+      "legacy_config_schema": null,
+      "proposed_abi": {
+        "output": "rotation_report (mainline ranking + 启动/扩散/分化/退潮 stage)"
+      },
+      "can_emit_decision": false,
+      "status": "planned"
+    },
+    {
+      "worker_id": "quant.factor",
+      "lane": "quant",
+      "execution_kind": "deterministic",
+      "legacy_owner": "guanlan rescore/factor_ic (帷幄)",
+      "source_path": "guanlan_v2/screen/factor_ic.py",
+      "legacy_config_schema": "guanlan_v2.screen.factor_ic@1",
+      "proposed_abi": {
+        "output": "factor IC report"
+      },
+      "can_emit_decision": false,
+      "status": "planned"
+    },
+    {
+      "worker_id": "quant.model",
+      "lane": "quant",
+      "execution_kind": "deterministic",
+      "legacy_owner": "guanlan v4 + DL ensemble (帷幄)",
+      "source_path": "guanlan_v2/screen/model_registry.py",
+      "legacy_config_schema": "guanlan_v2.screen.model_registry@1",
+      "proposed_abi": {
+        "output": "model prediction report"
+      },
+      "can_emit_decision": false,
+      "status": "planned"
+    },
+    {
+      "worker_id": "quant.backtest",
+      "lane": "quant",
+      "execution_kind": "deterministic",
+      "legacy_owner": "guanlan backtest cards (vintage/OOS/PBO) (帷幄)",
+      "source_path": "guanlan_v2/screen/factor_vintage.py",
+      "legacy_config_schema": "guanlan_v2.screen.factor_vintage@1",
+      "proposed_abi": {
+        "output": "backtest report (vintage IC / OOS / PBO)"
+      },
+      "can_emit_decision": false,
+      "status": "planned"
+    },
+    {
+      "worker_id": "quant.fundamentals",
+      "lane": "quant",
+      "execution_kind": "deterministic",
+      "legacy_owner": "TA fundamental-analyst + astock get_profit_forecast",
+      "source_path": "engine/financial_analyst/agent/tier2/fundamental_analyst.py",
+      "legacy_config_schema": null,
+      "proposed_abi": {
+        "output": "fundamentals report (valuation_score, mv_tier)"
+      },
+      "can_emit_decision": false,
+      "status": "planned"
+    },
+    {
+      "worker_id": "quant.factor_miner",
+      "lane": "quant",
+      "execution_kind": "deterministic",
+      "legacy_owner": "guanlan research/loop (Sharpe/robust gate) (帷幄)",
+      "source_path": "guanlan_v2/research/loop.py",
+      "legacy_config_schema": null,
+      "proposed_abi": {
+        "output": "mined factor draft (passes Sharpe/robust gate)"
+      },
+      "can_emit_decision": false,
+      "status": "planned"
+    },
+    {
+      "worker_id": "pv.price_action",
+      "lane": "pv",
+      "execution_kind": "deterministic",
+      "legacy_owner": "guanlan 15-key PA + editable methodology (帷幄 EV-017~026)",
+      "source_path": "guanlan_v2/seats/price_action.py",
+      "legacy_config_schema": "guanlan_v2.seats.price_action@1",
+      "proposed_abi": {
+        "output": "price-action features (15 keys) + methodology read"
+      },
+      "can_emit_decision": false,
+      "status": "planned"
+    },
+    {
+      "worker_id": "pv.technical",
+      "lane": "pv",
+      "execution_kind": "llm",
+      "legacy_owner": "TA technical-analyst + get_verified_snapshot truth anchor",
+      "source_path": "engine/financial_analyst/agent/tier2/technical_analyst.py",
+      "legacy_config_schema": null,
+      "proposed_abi": {
+        "output": "technical report (<=8 complementary indicators)"
+      },
+      "can_emit_decision": false,
+      "status": "planned"
+    },
+    {
+      "worker_id": "pv.microstructure",
+      "lane": "pv",
+      "execution_kind": "deterministic",
+      "legacy_owner": "guanlan live_book/market_tape/fundflow (五档/逐笔/炸板/主力) (帷幄)",
+      "source_path": "guanlan_v2/seats/live_book.py",
+      "legacy_config_schema": "guanlan_v2.seats.live_book@1",
+      "proposed_abi": {
+        "output": "microstructure report (L1 book / ticks / break / whale)"
+      },
+      "can_emit_decision": false,
+      "status": "planned"
+    },
+    {
+      "worker_id": "text.news",
+      "lane": "text",
+      "execution_kind": "llm",
+      "legacy_owner": "guanlan kuaixun/news_marks (~TA)",
+      "source_path": "guanlan_v2/datafeed/kuaixun.py",
+      "legacy_config_schema": "guanlan_v2.datafeed.kuaixun@1",
+      "proposed_abi": {
+        "output": "news report (flash + global)"
+      },
+      "can_emit_decision": false,
+      "status": "planned"
+    },
+    {
+      "worker_id": "text.sentiment",
+      "lane": "text",
+      "execution_kind": "llm",
+      "legacy_owner": "TA anti-fabrication #557/#796 + guanlan sentiment (no tools, pre-fetched blocks)",
+      "source_path": "guanlan_v2/datafeed/sentiment.py",
+      "legacy_config_schema": "guanlan_v2.datafeed.sentiment@1",
+      "proposed_abi": {
+        "output": "SentimentReport (band/score/confidence)"
+      },
+      "can_emit_decision": false,
+      "status": "planned"
+    },
+    {
+      "worker_id": "text.research_report",
+      "lane": "text",
+      "execution_kind": "llm",
+      "legacy_owner": "guanlan Kimi research extraction + old-report downweight (帷幄)",
+      "source_path": null,
+      "legacy_config_schema": null,
+      "proposed_abi": {
+        "output": "research-report extraction (+ stale-report downweight)"
+      },
+      "can_emit_decision": false,
+      "status": "planned"
+    },
+    {
+      "worker_id": "text.policy",
+      "lane": "text",
+      "execution_kind": "llm",
+      "legacy_owner": "astock policy / window guidance (NEW)",
+      "source_path": null,
+      "legacy_config_schema": null,
+      "proposed_abi": {
+        "output": "policy report (policy / window guidance)"
+      },
+      "can_emit_decision": false,
+      "status": "planned"
+    },
+    {
+      "worker_id": "text.macro",
+      "lane": "text",
+      "execution_kind": "llm",
+      "legacy_owner": "guanlan macro + TA get_prediction_markets (prediction markets + limit-up temp)",
+      "source_path": "guanlan_v2/macro/pulse.py",
+      "legacy_config_schema": "guanlan_v2.macro.pulse@1",
+      "proposed_abi": {
+        "output": "macro report (prediction markets + board temperature)"
+      },
+      "can_emit_decision": false,
+      "status": "planned"
+    },
+    {
+      "worker_id": "dec.bull",
+      "lane": "decision",
+      "execution_kind": "llm",
+      "legacy_owner": "TA bull-advocate (tier3)",
+      "source_path": "engine/financial_analyst/agent/tier3/bull_advocate.py",
+      "legacy_config_schema": null,
+      "proposed_abi": {
+        "output": "bull thesis_bullets [V#] + target_price_high/base"
+      },
+      "can_emit_decision": false,
+      "status": "planned"
+    },
+    {
+      "worker_id": "dec.bear",
+      "lane": "decision",
+      "execution_kind": "llm",
+      "legacy_owner": "TA bear-advocate (tier3), rebuttal wave",
+      "source_path": "engine/financial_analyst/agent/tier3/bear_advocate.py",
+      "legacy_config_schema": null,
+      "proposed_abi": {
+        "output": "bear thesis_bullets [F#] + target_price_low/downside"
+      },
+      "can_emit_decision": false,
+      "status": "planned"
+    },
+    {
+      "worker_id": "dec.research_mgr",
+      "lane": "decision",
+      "execution_kind": "llm",
+      "legacy_owner": "TA report-writer (ReportOutput -> ResearchPlan 5-band)",
+      "source_path": "engine/financial_analyst/agent/tier3/report_writer.py",
+      "legacy_config_schema": "financial_analyst.agent.tier3.report_writer.ReportOutput@1",
+      "proposed_abi": {
+        "output": "ResearchPlan (5-band PortfolioRating + strategic actions)"
+      },
+      "can_emit_decision": true,
+      "status": "planned"
+    },
+    {
+      "worker_id": "dec.risk_debate",
+      "lane": "decision",
+      "execution_kind": "llm",
+      "legacy_owner": "TA risk-officer (aggressive/steady/neutral 3-seat debate)",
+      "source_path": "engine/financial_analyst/agent/tier3/risk_officer.py",
+      "legacy_config_schema": null,
+      "proposed_abi": {
+        "output": "risk_score, veto_flags, position_sizing_advice"
+      },
+      "can_emit_decision": false,
+      "status": "planned"
+    },
+    {
+      "worker_id": "dec.pm",
+      "lane": "decision",
+      "execution_kind": "llm",
+      "legacy_owner": "NEW A-share-constraint final arbitration (PortfolioDecision, deep tier)",
+      "source_path": null,
+      "legacy_config_schema": null,
+      "proposed_abi": {
+        "output": "PortfolioDecision (final rating + thesis + optional target)"
+      },
+      "can_emit_decision": true,
+      "status": "planned"
+    },
+    {
+      "worker_id": "dec.trader",
+      "lane": "decision",
+      "execution_kind": "llm",
+      "legacy_owner": "NEW trader (PortfolioTargetProposal; runtime wraps ADVISORY_ONLY+SHADOW_ONLY intent)",
+      "source_path": null,
+      "legacy_config_schema": null,
+      "proposed_abi": {
+        "output": "PortfolioTargetProposal (shadow-only)"
+      },
+      "can_emit_decision": true,
+      "status": "planned"
+    },
+    {
+      "worker_id": "x.quality_gate",
+      "lane": "cross",
+      "execution_kind": "deterministic",
+      "legacy_owner": "astock data-quality ABCDF grade",
+      "source_path": "guanlan_v2/datafeed/health.py",
+      "legacy_config_schema": "guanlan_v2.datafeed.health@1",
+      "proposed_abi": {
+        "output": "data quality grade (A/B/C/D/F)"
+      },
+      "can_emit_decision": false,
+      "status": "planned"
+    },
+    {
+      "worker_id": "x.number_critic",
+      "lane": "cross",
+      "execution_kind": "deterministic",
+      "legacy_owner": "guanlan introspector provenance gate + FSI untrusted-input isolation (帷幄)",
+      "source_path": "engine/financial_analyst/agent/tier3/introspector.py",
+      "legacy_config_schema": "financial_analyst.agent.tier3.introspector.IntrospectionProposal@1",
+      "proposed_abi": {
+        "output": "provenance violations ([UNSOURCED] on unsourced load-bearing numbers)"
+      },
+      "can_emit_decision": false,
+      "status": "planned"
+    }
+  ],
+  "graphs": [
+    {
+      "source_schema": "financial_analyst.swarm.stock-deep-dive@1",
+      "source_path": "engine/financial_analyst/_resources/config/swarm/stock-deep-dive.yaml",
+      "source_format": "yaml",
+      "normalized_config": {
+        "name": "stock-deep-dive",
+        "nodes": {
+          "quote-fetcher": {
+            "deps": [],
+            "soft_deps": [],
+            "input_keys": [
+              "code",
+              "asof_date"
+            ]
+          },
+          "news-reader": {
+            "deps": [],
+            "soft_deps": [],
+            "input_keys": [
+              "code",
+              "asof_date"
+            ]
+          },
+          "f10-reader": {
+            "deps": [],
+            "soft_deps": [],
+            "input_keys": [
+              "code",
+              "asof_date"
+            ]
+          },
+          "market-scanner": {
+            "deps": [],
+            "soft_deps": [],
+            "input_keys": [
+              "asof_date"
+            ]
+          },
+          "mainline-classifier": {
+            "deps": [],
+            "soft_deps": [],
+            "input_keys": [
+              "asof_date"
+            ]
+          },
+          "morning-brief-writer": {
+            "deps": [],
+            "soft_deps": [],
+            "input_keys": [
+              "asof_date"
+            ]
+          },
+          "overseas-market-scanner": {
+            "deps": [],
+            "soft_deps": [],
+            "input_keys": [
+              "asof_date"
+            ]
+          },
+          "sector-rotation-analyzer": {
+            "deps": [],
+            "soft_deps": [],
+            "input_keys": [
+              "asof_date"
+            ]
+          },
+          "news-sentiment": {
+            "deps": [],
+            "soft_deps": [],
+            "input_keys": [
+              "code",
+              "asof_date"
+            ]
+          },
+          "evidence-loader": {
+            "deps": [],
+            "soft_deps": [],
+            "input_keys": []
+          },
+          "fundamental-analyst": {
+            "deps": [
+              "quote-fetcher",
+              "overseas-market-scanner",
+              "evidence-loader"
+            ],
+            "soft_deps": [
+              "overseas-market-scanner",
+              "evidence-loader"
+            ],
+            "input_keys": [
+              "quote-fetcher",
+              "overseas-market-scanner",
+              "evidence-loader"
+            ]
+          },
+          "technical-analyst": {
+            "deps": [
+              "quote-fetcher",
+              "market-scanner",
+              "mainline-classifier",
+              "overseas-market-scanner",
+              "sector-rotation-analyzer",
+              "evidence-loader"
+            ],
+            "soft_deps": [
+              "market-scanner",
+              "mainline-classifier",
+              "overseas-market-scanner",
+              "sector-rotation-analyzer",
+              "evidence-loader"
+            ],
+            "input_keys": [
+              "quote-fetcher",
+              "market-scanner",
+              "mainline-classifier",
+              "overseas-market-scanner",
+              "sector-rotation-analyzer",
+              "evidence-loader"
+            ]
+          },
+          "whale-analyst": {
+            "deps": [
+              "quote-fetcher",
+              "f10-reader",
+              "evidence-loader"
+            ],
+            "soft_deps": [
+              "evidence-loader",
+              "f10-reader"
+            ],
+            "input_keys": [
+              "quote-fetcher",
+              "f10-reader",
+              "evidence-loader"
+            ]
+          },
+          "bull-advocate": {
+            "deps": [
+              "fundamental-analyst",
+              "technical-analyst",
+              "whale-analyst",
+              "evidence-loader"
+            ],
+            "soft_deps": [
+              "evidence-loader"
+            ],
+            "input_keys": [
+              "fundamental-analyst",
+              "technical-analyst",
+              "whale-analyst",
+              "evidence-loader",
+              "quote-fetcher"
+            ]
+          },
+          "bear-advocate": {
+            "deps": [
+              "fundamental-analyst",
+              "technical-analyst",
+              "whale-analyst",
+              "evidence-loader",
+              "bull-advocate"
+            ],
+            "soft_deps": [
+              "evidence-loader"
+            ],
+            "input_keys": [
+              "fundamental-analyst",
+              "technical-analyst",
+              "whale-analyst",
+              "evidence-loader",
+              "quote-fetcher",
+              "bull-advocate"
+            ]
+          },
+          "risk-officer": {
+            "deps": [
+              "bull-advocate",
+              "bear-advocate",
+              "news-reader",
+              "f10-reader",
+              "evidence-loader"
+            ],
+            "soft_deps": [
+              "news-reader",
+              "f10-reader",
+              "evidence-loader"
+            ],
+            "input_keys": [
+              "bull-advocate",
+              "bear-advocate",
+              "news-reader",
+              "f10-reader",
+              "evidence-loader",
+              "quote-fetcher"
+            ]
+          },
+          "report-writer": {
+            "deps": [
+              "quote-fetcher",
+              "fundamental-analyst",
+              "technical-analyst",
+              "whale-analyst",
+              "market-scanner",
+              "mainline-classifier",
+              "morning-brief-writer",
+              "overseas-market-scanner",
+              "sector-rotation-analyzer",
+              "bull-advocate",
+              "bear-advocate",
+              "risk-officer",
+              "news-sentiment",
+              "evidence-loader"
+            ],
+            "soft_deps": [
+              "market-scanner",
+              "mainline-classifier",
+              "morning-brief-writer",
+              "overseas-market-scanner",
+              "sector-rotation-analyzer",
+              "news-sentiment",
+              "evidence-loader"
+            ],
+            "input_keys": [
+              "quote-fetcher",
+              "fundamental-analyst",
+              "technical-analyst",
+              "whale-analyst",
+              "market-scanner",
+              "mainline-classifier",
+              "morning-brief-writer",
+              "overseas-market-scanner",
+              "sector-rotation-analyzer",
+              "bull-advocate",
+              "bear-advocate",
+              "risk-officer",
+              "news-sentiment",
+              "evidence-loader",
+              "code",
+              "asof_date",
+              "out_dir"
+            ]
+          },
+          "introspector": {
+            "deps": [
+              "report-writer",
+              "bull-advocate",
+              "bear-advocate",
+              "risk-officer",
+              "fundamental-analyst",
+              "technical-analyst",
+              "whale-analyst",
+              "evidence-loader",
+              "quote-fetcher"
+            ],
+            "soft_deps": [
+              "evidence-loader",
+              "quote-fetcher"
+            ],
+            "input_keys": [
+              "report-writer",
+              "bull-advocate",
+              "bear-advocate",
+              "risk-officer",
+              "fundamental-analyst",
+              "technical-analyst",
+              "whale-analyst",
+              "evidence-loader",
+              "quote-fetcher"
+            ]
+          }
+        }
+      },
+      "config_digest": "5a175cb91de0cff8358da93272a4ac26fb29013a833a062a096fae56be5b9dbb",
+      "dependency_semantics": {
+        "hard": {
+          "definition": "dep in `deps` and NOT in `soft_deps`",
+          "accepted_statuses": [
+            "completed_ok"
+          ],
+          "missing_output_behavior": "orchestrator._ready: dep must be in `done` AND done[dep].ok; a failed/missing hard dep blocks the node forever -> downstream report dies (整份研报夭折)"
+        },
+        "soft": {
+          "definition": "dep listed in `soft_deps` (soft_deps subset of deps)",
+          "accepted_statuses": [
+            "completed_ok",
+            "any_terminal_done_regardless_of_ok"
+          ],
+          "missing_output_behavior": "orchestrator._ready requires dep in `done` (must have run) but NOT ok; _build_inputs injects done[k].output only when done[k].ok, so a failed soft dep is omitted and the node runs degraded"
+        }
+      },
+      "nodes": [
+        {
+          "node": "quote-fetcher",
+          "hard_deps": [],
+          "soft_deps": [],
+          "input_keys": [
+            "code",
+            "asof_date"
+          ],
+          "slot_output": "OHLC/quote/valuation fetch",
+          "target_worker": "compat.quote_fetcher"
+        },
+        {
+          "node": "news-reader",
+          "hard_deps": [],
+          "soft_deps": [],
+          "input_keys": [
+            "code",
+            "asof_date"
+          ],
+          "slot_output": "raw stock news fetch",
+          "target_worker": "compat.news_reader"
+        },
+        {
+          "node": "f10-reader",
+          "hard_deps": [],
+          "soft_deps": [],
+          "input_keys": [
+            "code",
+            "asof_date"
+          ],
+          "slot_output": "F10 holder-count / chip concentration",
+          "target_worker": "compat.f10_reader"
+        },
+        {
+          "node": "market-scanner",
+          "hard_deps": [],
+          "soft_deps": [],
+          "input_keys": [
+            "asof_date"
+          ],
+          "slot_output": "market regime + limit-up breadth",
+          "target_worker": "market.regime"
+        },
+        {
+          "node": "mainline-classifier",
+          "hard_deps": [],
+          "soft_deps": [],
+          "input_keys": [
+            "asof_date"
+          ],
+          "slot_output": "industry-chain mainline 5-state",
+          "target_worker": "market.rotation"
+        },
+        {
+          "node": "morning-brief-writer",
+          "hard_deps": [],
+          "soft_deps": [],
+          "input_keys": [
+            "asof_date"
+          ],
+          "slot_output": "overnight moves + pre-open watchlist",
+          "target_worker": "compat.morning_brief"
+        },
+        {
+          "node": "overseas-market-scanner",
+          "hard_deps": [],
+          "soft_deps": [],
+          "input_keys": [
+            "asof_date"
+          ],
+          "slot_output": "overseas macro (US/HK/VIX overnight)",
+          "target_worker": "text.macro"
+        },
+        {
+          "node": "sector-rotation-analyzer",
+          "hard_deps": [],
+          "soft_deps": [],
+          "input_keys": [
+            "asof_date"
+          ],
+          "slot_output": "sector rotation",
+          "target_worker": "market.rotation"
+        },
+        {
+          "node": "news-sentiment",
+          "hard_deps": [],
+          "soft_deps": [],
+          "input_keys": [
+            "code",
+            "asof_date"
+          ],
+          "slot_output": "market_read + per-stock tilt tag",
+          "target_worker": "text.sentiment"
+        },
+        {
+          "node": "evidence-loader",
+          "hard_deps": [],
+          "soft_deps": [],
+          "input_keys": [],
+          "slot_output": "platform evidence pack (deterministic, zero-LLM)",
+          "target_worker": "compat.evidence_loader"
+        },
+        {
+          "node": "fundamental-analyst",
+          "hard_deps": [
+            "quote-fetcher"
+          ],
+          "soft_deps": [
+            "overseas-market-scanner",
+            "evidence-loader"
+          ],
+          "input_keys": [
+            "quote-fetcher",
+            "overseas-market-scanner",
+            "evidence-loader"
+          ],
+          "slot_output": "valuation_score, mv_tier",
+          "target_worker": "quant.fundamentals"
+        },
+        {
+          "node": "technical-analyst",
+          "hard_deps": [
+            "quote-fetcher"
+          ],
+          "soft_deps": [
+            "market-scanner",
+            "mainline-classifier",
+            "overseas-market-scanner",
+            "sector-rotation-analyzer",
+            "evidence-loader"
+          ],
+          "input_keys": [
+            "quote-fetcher",
+            "market-scanner",
+            "mainline-classifier",
+            "overseas-market-scanner",
+            "sector-rotation-analyzer",
+            "evidence-loader"
+          ],
+          "slot_output": "MA/vol/support-resistance, technical_score",
+          "target_worker": "pv.technical"
+        },
+        {
+          "node": "whale-analyst",
+          "hard_deps": [
+            "quote-fetcher"
+          ],
+          "soft_deps": [
+            "evidence-loader",
+            "f10-reader"
+          ],
+          "input_keys": [
+            "quote-fetcher",
+            "f10-reader",
+            "evidence-loader"
+          ],
+          "slot_output": "whale_score, chip concentration, sentiment_label",
+          "target_worker": "pv.microstructure"
+        },
+        {
+          "node": "bull-advocate",
+          "hard_deps": [
+            "fundamental-analyst",
+            "technical-analyst",
+            "whale-analyst"
+          ],
+          "soft_deps": [
+            "evidence-loader"
+          ],
+          "input_keys": [
+            "fundamental-analyst",
+            "technical-analyst",
+            "whale-analyst",
+            "evidence-loader",
+            "quote-fetcher"
+          ],
+          "slot_output": "thesis_bullets [V#], target_price_high/base",
+          "target_worker": "dec.bull"
+        },
+        {
+          "node": "bear-advocate",
+          "hard_deps": [
+            "fundamental-analyst",
+            "technical-analyst",
+            "whale-analyst",
+            "bull-advocate"
+          ],
+          "soft_deps": [
+            "evidence-loader"
+          ],
+          "input_keys": [
+            "fundamental-analyst",
+            "technical-analyst",
+            "whale-analyst",
+            "evidence-loader",
+            "quote-fetcher",
+            "bull-advocate"
+          ],
+          "slot_output": "thesis_bullets [F#], target_price_low, downside_pct",
+          "target_worker": "dec.bear"
+        },
+        {
+          "node": "risk-officer",
+          "hard_deps": [
+            "bull-advocate",
+            "bear-advocate"
+          ],
+          "soft_deps": [
+            "news-reader",
+            "f10-reader",
+            "evidence-loader"
+          ],
+          "input_keys": [
+            "bull-advocate",
+            "bear-advocate",
+            "news-reader",
+            "f10-reader",
+            "evidence-loader",
+            "quote-fetcher"
+          ],
+          "slot_output": "risk_score, veto_flags, position_sizing_advice",
+          "target_worker": "dec.risk_debate"
+        },
+        {
+          "node": "report-writer",
+          "hard_deps": [
+            "quote-fetcher",
+            "fundamental-analyst",
+            "technical-analyst",
+            "whale-analyst",
+            "bull-advocate",
+            "bear-advocate",
+            "risk-officer"
+          ],
+          "soft_deps": [
+            "market-scanner",
+            "mainline-classifier",
+            "morning-brief-writer",
+            "overseas-market-scanner",
+            "sector-rotation-analyzer",
+            "news-sentiment",
+            "evidence-loader"
+          ],
+          "input_keys": [
+            "quote-fetcher",
+            "fundamental-analyst",
+            "technical-analyst",
+            "whale-analyst",
+            "market-scanner",
+            "mainline-classifier",
+            "morning-brief-writer",
+            "overseas-market-scanner",
+            "sector-rotation-analyzer",
+            "bull-advocate",
+            "bear-advocate",
+            "risk-officer",
+            "news-sentiment",
+            "evidence-loader",
+            "code",
+            "asof_date",
+            "out_dir"
+          ],
+          "slot_output": "ReportOutput: rating_overall, action, target/stop, position_pct",
+          "target_worker": "dec.research_mgr"
+        },
+        {
+          "node": "introspector",
+          "hard_deps": [
+            "report-writer",
+            "bull-advocate",
+            "bear-advocate",
+            "risk-officer",
+            "fundamental-analyst",
+            "technical-analyst",
+            "whale-analyst"
+          ],
+          "soft_deps": [
+            "evidence-loader",
+            "quote-fetcher"
+          ],
+          "input_keys": [
+            "report-writer",
+            "bull-advocate",
+            "bear-advocate",
+            "risk-officer",
+            "fundamental-analyst",
+            "technical-analyst",
+            "whale-analyst",
+            "evidence-loader",
+            "quote-fetcher"
+          ],
+          "slot_output": "IntrospectionOutput: provenance_violations, quality_flags, proposals",
+          "target_worker": "x.number_critic"
+        }
+      ],
+      "unresolved_workers": [
+        "bear-advocate",
+        "bull-advocate",
+        "evidence-loader",
+        "f10-reader",
+        "fundamental-analyst",
+        "introspector",
+        "mainline-classifier",
+        "market-scanner",
+        "morning-brief-writer",
+        "news-reader",
+        "news-sentiment",
+        "overseas-market-scanner",
+        "quote-fetcher",
+        "report-writer",
+        "risk-officer",
+        "sector-rotation-analyzer",
+        "technical-analyst",
+        "whale-analyst"
+      ],
+      "unresolved_edges": [
+        "all node->worker mappings are design-intent, not frozen 1:1 WorkerSpec equivalences (Phase 1 builds zero runnable WorkerSpecs)"
+      ],
+      "runnable": false,
+      "evidence": "orchestrator.py:13-16 soft_deps doc; orchestrator.py:24-32 _ready; orchestrator.py:34-39 _build_inputs (ok-gated injection)"
+    }
+  ]
+}
