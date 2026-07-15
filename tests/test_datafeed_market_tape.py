@@ -2,6 +2,7 @@
 """datafeed.market_tape 单测(全离线,桩 live_client)。"""
 import json
 import types
+from datetime import date
 
 import pytest
 
@@ -109,6 +110,94 @@ def test_derive_promotion_rate_counts_today_consecutive_boards():
     }
     d = mt._derive(sources)
     assert d["promotion_rate"] == round(1 / 3, 4)   # 今日 1 家真连板 / 昨日 3 家涨停,非旧口径 2/3
+
+
+def test_derive_ladder_histogram_by_limit_days():
+    """连板梯队直方图:按真连板 limit_days 分桶(首板/2/3/4/5+ 板各几家)。温度是标量、梯队是形状:
+    同 60 家涨停,首板堆量(虚胖)vs 高标接力(真亢奋)标量分辨不出。纯展示零新增拉取。"""
+    zt = lc.resolve_source("em_zt_pool")
+    sources = {zt: {"rows": [
+        {"code": "a", "limit_days": 1, "break_times": 0},   # 首板
+        {"code": "b", "limit_days": 1, "break_times": 0},   # 首板
+        {"code": "c", "limit_days": 2, "break_times": 0},
+        {"code": "d", "limit_days": 3, "break_times": 0},
+        {"code": "e", "limit_days": 5, "break_times": 0},   # 5+
+        {"code": "f", "limit_days": 7, "break_times": 0},   # 5+
+        {"code": "g", "break_times": 0},                    # 缺 limit_days → 首板
+    ]}}
+    d = mt._derive(sources)
+    assert d["ladder"] == {"first": 3, "2": 1, "3": 1, "4": 0, "5plus": 2}
+
+
+def test_derive_empty_pool_is_honest_none_not_fake_zero():
+    """涨停池空(周末/盘前/回溯失败)→ 打板派生值诚实 None,绝不显示假 0.0%/空梯队冒充真事实
+    (假 0.0 会原样进研报证据包与 UI)。非交易日两池皆空即此路径。"""
+    d = mt._derive({})     # 无任何源 = 全空
+    assert d["zt_count"] == 0
+    assert d["break_ratio"] is None       # 开板率:无涨停无从算,非 0.0
+    assert d["break_rate"] is None        # 炸板率:无涨停尝试,非 0.0
+    assert d["promotion_rate"] is None    # 晋级率:无昨涨停池,非 0.0
+    assert d["ladder"] is None            # 梯队:无池即无形状,非全零
+    assert d["max_streak"] is None        # 最高连板:空池未定义,非 0
+
+
+# ── 北向净额 scope:深股通不可靠(sgt 置空)→ 只算沪股通并诚实标 scope ──────────────
+def test_derive_north_scope_hgt_only_when_sgt_unreliable():
+    """stocks 已把退化的 sgt 整列置空 → 北向净额只算沪股通,scope 诚实标『沪股通』(不冒充沪+深)。"""
+    nb = lc.resolve_source("northbound")
+    sources = {nb: {"rows": [{"time": "15:00", "hgt_yi": -9.28, "sgt_yi": None},
+                             {"time": "14:59", "hgt_yi": -10.0, "sgt_yi": None}]}}
+    d = mt._derive(sources)
+    assert d["north_net"] == -9.28
+    assert d["north_scope"] == "沪股通"
+
+
+def test_derive_north_scope_both_when_sgt_present():
+    """深股通可靠(sgt 有值)→ 北向净额=沪+深合计,scope 标『沪+深股通』。"""
+    nb = lc.resolve_source("northbound")
+    sources = {nb: {"rows": [{"time": "15:00", "hgt_yi": -9.28, "sgt_yi": -31.1}]}}
+    d = mt._derive(sources)
+    assert d["north_net"] == -40.38
+    assert d["north_scope"] == "沪+深股通"
+
+
+# ── 涨停池空回溯定日:今日空(周末/盘前)→ 回溯至上一有数据交易日 ────────────────
+def test_backfill_walks_back_to_last_trading_day_when_today_empty(monkeypatch):
+    """今日涨停池空 → 往回探(非交易日上游静默返空),首个非空=上一交易日;
+    用同一日期重拉四池并打「回溯至 MM-DD」徽章。7-12(周日)→回溯 7-10(周五有数据)。"""
+    def _probe(source, code="", date="", limit=20):
+        canon = lc.resolve_source(source) or source
+        if date == "20260710":                        # 上一交易日(周五)有数据
+            fx = {"em_limit_up_pool": [{"raw": {"code": "600000", "limit_days": 3, "break_times": 0}}],
+                  "em_zb_pool": [{"raw": {"code": "111"}}],
+                  "em_dt_pool": [],
+                  "em_yzt_pool": [{"raw": {"code": "222", "pct": 10.0}}]}
+            items = fx.get(canon, [])
+            return {"ok": True, "source": canon, "status": "ok", "items": items,
+                    "n": len(items), "pulled_at": "2026-07-10T15:00:00"}
+        return {"ok": True, "source": canon, "status": "ok", "items": [], "n": 0,
+                "pulled_at": "2026-07-12T09:00:00"}   # 7-11 周六 / 7-12 周日皆空
+    monkeypatch.setattr(lc, "probe", _probe)
+    sources = {}                                       # 今日(7-12)空
+    board_date, backfilled = mt._backfill_board_pools(sources, today=date(2026, 7, 12))
+    assert backfilled is True and board_date == "20260710"
+    zt = lc.resolve_source("em_zt_pool")
+    assert sources[zt]["rows"][0]["code"] == "600000"
+    assert "回溯至 07-10" in sources[zt]["note"]
+    # 四池同日对齐 + derive 用回溯数据出真值(非诚实空)
+    d = mt._derive(sources)
+    assert d["zt_count"] == 1 and d["max_streak"] == 3
+
+
+def test_backfill_noop_when_today_has_data(monkeypatch):
+    """今日涨停池有数据 → 不回溯、不额外触网。"""
+    def _boom(*a, **k):
+        raise AssertionError("今日有数据不应回溯触网")
+    monkeypatch.setattr(lc, "probe", _boom)
+    zt = lc.resolve_source("em_zt_pool")
+    sources = {zt: {"rows": [{"code": "1", "limit_days": 1}], "n": 1}}
+    board_date, backfilled = mt._backfill_board_pools(sources, today=date(2026, 7, 15))
+    assert backfilled is False and board_date is None
 
 
 # ── Task 2: SWR read_tape + 单飞 + warming ────────────────────────────────────

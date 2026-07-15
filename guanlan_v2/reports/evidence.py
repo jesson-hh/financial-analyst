@@ -144,7 +144,8 @@ def _sec_board_eco(code: str) -> Optional[Dict[str, Any]]:
                 == "".join(ch for ch in code if ch.isdigit())]
     return {"as_of": t.get("pulled_at"), "zt_count": der.get("zt_count"),
             "zb_count": der.get("zb_count"), "break_rate": der.get("break_rate"),
-            "promotion_rate": der.get("promotion_rate"),
+            "promotion_rate": der.get("promotion_rate"), "max_streak": der.get("max_streak"),
+            "ladder": der.get("ladder"),
             "lhb": code_lhb[:5], "north_net": der.get("north_net")}
 
 
@@ -256,6 +257,25 @@ def _rerank_lookup(code: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _valuation_bands(code: str) -> Optional[Dict[str, Any]]:
+    """个股估值历史分位「贵不贵」锚:baidu_valuation_percentile 探针 → {pe_ttm:{...}, pb:{...}}。
+    中立呈现(只标位置不划买卖线);缺源/触网失败 → None(诚实空,绝不编造)。"""
+    try:
+        from guanlan_v2.datafeed import live_client as lc
+        r = lc.probe("baidu_valuation_percentile", code=code, limit=2)
+    except Exception:  # noqa: BLE001
+        return None
+    if not (r.get("ok") and r.get("status") in ("ok", "")):
+        return None
+    keep = ("current", "percentile", "p20", "p50", "p80", "min", "max", "n")
+    out: Dict[str, Any] = {}
+    for row in (lc.native_rows(r.get("items")) or []):
+        m = row.get("metric")
+        if m in ("pe_ttm", "pb"):
+            out[m] = {k: row.get(k) for k in keep}
+    return out or None
+
+
 def _sec_quant(code: str) -> Optional[Dict[str, Any]]:
     from guanlan_v2.strategy.ranking import load_v4_ranking, v4_pct_map
     df = load_v4_ranking()                      # 缺产物 → FileNotFoundError,整节 null(合理:核心榜缺失)
@@ -268,7 +288,7 @@ def _sec_quant(code: str) -> Optional[Dict[str, Any]]:
     dl = _dl_scores(code)
     rerank = _rerank_lookup(code)
     return {"v4_rank": v4_rank, "v4_pct": (round(v4_pct, 2) if v4_pct is not None else None),
-            "dl": dl, "rerank": rerank}
+            "dl": dl, "rerank": rerank, "valuation": _valuation_bands(code)}
 
 
 # ── ⑧ mainline:主线雷达(仓内新鲜月度面板,lru_cache;测试直接桩本函数)──────────

@@ -189,6 +189,36 @@ def test_zero_network_when_all_sections_stubbed(monkeypatch, tmp_path):
     assert set(result["sections_ok"]) == set(_SECTION_NAMES)
 
 
+def test_valuation_bands_maps_pe_pb_from_probe(monkeypatch):
+    """估值分位段:把 baidu_valuation_percentile 探针的 pe_ttm/pb 行映射成研报「贵不贵」锚。"""
+    def _fake_probe(source, code="", date="", limit=20):
+        assert source == "baidu_valuation_percentile"
+        return {"ok": True, "status": "ok", "items": [
+            {"raw": {"metric": "pe_ttm", "current": 18.4, "percentile": 32.1, "p20": 15,
+                     "p50": 22, "p80": 30, "min": 10, "max": 45, "n": 900}},
+            {"raw": {"metric": "pb", "current": 5.6, "percentile": 48.0, "p20": 4,
+                     "p50": 5.5, "p80": 7, "min": 3, "max": 9, "n": 900}},
+        ], "n": 2, "note": ""}
+    monkeypatch.setattr("guanlan_v2.datafeed.live_client.probe", _fake_probe)
+    v = evidence._valuation_bands("SH600519")
+    assert v["pe_ttm"]["current"] == 18.4 and v["pe_ttm"]["percentile"] == 32.1
+    assert v["pb"]["p80"] == 7 and v["pb"]["n"] == 900
+
+
+def test_board_eco_section_passes_through_ladder_and_max_streak(monkeypatch):
+    """打板生态段透传 max_streak(真连板)与连板梯队 ladder 到研报证据包(供 LLM 看形状不只看标量)。"""
+    tape = {"warming": False, "pulled_at": "2026-07-15T15:00:00",
+            "derived": {"zt_count": 60, "zb_count": 5, "break_rate": 0.1,
+                        "promotion_rate": 0.3, "max_streak": 4,
+                        "ladder": {"first": 40, "2": 12, "3": 5, "4": 1, "5plus": 2},
+                        "north_net": -12.3},
+            "sources": {}}
+    monkeypatch.setattr("guanlan_v2.datafeed.market_tape.read_tape", lambda: tape)
+    sec = evidence._sec_board_eco("SH600000")
+    assert sec["max_streak"] == 4
+    assert sec["ladder"] == {"first": 40, "2": 12, "3": 5, "4": 1, "5plus": 2}
+
+
 # ── 默认落盘目录常量指向 var/reports/evidence(不实际写,只断言路径) ────────────
 
 def test_default_out_dir_points_at_var_reports_evidence():

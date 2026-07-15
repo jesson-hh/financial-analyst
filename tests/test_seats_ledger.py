@@ -51,6 +51,8 @@ def _setup(tmp_path, monkeypatch, closes=None) -> TestClient:
     import financial_analyst.data.loader_factory as _lf
     monkeypatch.setattr(_lf, "get_default_loader",
                         lambda: _FakeLedgerLoader(closes or {}))
+    # 默认钉「结算价模式」:MTM 测试用 fake 日线测昨收,不受运行时刻是否盘中影响、不触实时网络。
+    monkeypatch.setattr(seats_api, "_is_trading_now", lambda *a: False)
     return _client()
 
 
@@ -211,6 +213,48 @@ def test_ledger_equity_mtm(tmp_path, monkeypatch):
     p1b = next(p for p in s2["positions"] if p["code"] == "SH600001")
     assert p1b["last_close"] == 55                  # 有价的持仓照常显形
     assert s2["cash"] == 94000                      # 其余字段照常返回
+
+
+# ──────── 6) 盘中实时 MTM(vibe③):交易时段持仓现价取实时报价,缺价/盘后回落昨收 ────────
+
+def test_is_trading_now_windows():
+    """A 股连续竞价时段判定:周一–周五 09:30–15:00 内为 True(午间冻结按盘中处理),其余 False。"""
+    from datetime import datetime
+    assert seats_api._is_trading_now(datetime(2026, 7, 15, 10, 0)) is True    # 周三盘中
+    assert seats_api._is_trading_now(datetime(2026, 7, 15, 14, 59)) is True
+    assert seats_api._is_trading_now(datetime(2026, 7, 15, 9, 15)) is False   # 集合竞价前
+    assert seats_api._is_trading_now(datetime(2026, 7, 15, 15, 1)) is False   # 盘后
+    assert seats_api._is_trading_now(datetime(2026, 7, 18, 10, 0)) is False   # 周六
+
+
+def test_ledger_mtm_uses_intraday_price_during_trading(tmp_path, monkeypatch):
+    """盘中:持仓现价取实时报价(60),而非末根已结算收盘(55);标 intraday + mtm_mode=intraday。"""
+    client = _setup(tmp_path, monkeypatch, closes={"600001": 55.0})
+    monkeypatch.setattr(seats_api, "_is_trading_now", lambda *a: True)
+    monkeypatch.setattr(seats_api, "_intraday_quote", lambda code: 60.0)
+    _post(client, {"kind": "open", "date": "2026-06-10", "cash": 100000})
+    _post(client, {"kind": "trade", "date": "2026-06-10", "code": "SH600001", "name": "甲",
+                   "side": "buy", "price": 50, "qty": 100})
+    s = _state(client)
+    p = s["positions"][0]
+    assert p["last_close"] == 60.0 and p["intraday"] is True       # 用盘中实时价
+    assert p["mkt_value"] == pytest.approx(6000) and p["upl"] == pytest.approx(1000)
+    assert s["mtm_mode"] == "intraday"
+    assert s["equity"] == pytest.approx(95000 + 100 * 60)   # 现金95000(买100@50) + 实时市值6000
+
+
+def test_ledger_mtm_falls_back_to_settled_when_intraday_missing(tmp_path, monkeypatch):
+    """盘中但实时缺价 → 诚实回落末根已结算收盘(55),intraday=False,mtm_mode=settled。"""
+    client = _setup(tmp_path, monkeypatch, closes={"600001": 55.0})
+    monkeypatch.setattr(seats_api, "_is_trading_now", lambda *a: True)
+    monkeypatch.setattr(seats_api, "_intraday_quote", lambda code: None)
+    _post(client, {"kind": "open", "date": "2026-06-10", "cash": 100000})
+    _post(client, {"kind": "trade", "date": "2026-06-10", "code": "SH600001", "name": "甲",
+                   "side": "buy", "price": 50, "qty": 100})
+    s = _state(client)
+    p = s["positions"][0]
+    assert p["last_close"] == 55.0 and p["intraday"] is False
+    assert s["mtm_mode"] == "settled"
 
 
 # ───────────────────────── 5) 再次 open = 重开新账(旧事件留档)─────────────────────────

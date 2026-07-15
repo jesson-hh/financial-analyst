@@ -76,6 +76,7 @@ _STATIC_SOURCES: Dict[str, str] = {
     "tdx_finance_snapshot": "finance_snapshot",
     "tdx_f10_text": "tdx_f10",
     "baidu_kline_ma": "baidu_kline",
+    "baidu_valuation_percentile": "valuation_percentile",   # 百度股市通 PE-TTM/PB 近5年分位带
     "sina_option_codes": "option_codes",
     "sina_option_tquote": "option_tquote",
     "sina_option_greeks": "option_greeks",
@@ -95,6 +96,7 @@ NEED_CODE = {
     "eastmoney_unlock", "eastmoney_margin", "eastmoney_block_trade",
     "eastmoney_holder_change", "eastmoney_dividend", "tencent_realtime_quote",
     "ths_eps_forecast",   # 同花顺一致预期 EPS,按 6 位股票代码查
+    "baidu_valuation_percentile",   # 百度股市通估值分位,按 6 位股票代码查
     # 板块分钟线必带板块码 BKxxxx(非 6 位,故同时进 CODE_PASSTHROUGH)
     "eastmoney_sector_flow_minute",
     # 2026-07-09 补:tdx 实时套件/新浪财报/个股信息/观澜合成源均按 6 位代码查。

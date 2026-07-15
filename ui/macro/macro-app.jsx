@@ -300,12 +300,26 @@ function MarketTapePanel({ tape }) {
         <TapeStat k="涨停" v={d.zt_count != null ? d.zt_count : "—"} />
         <TapeStat k="最高连板" v={d.max_streak != null ? `${d.max_streak}板` : "—"} />
         <TapeStat k="炸板率" v={d.break_rate != null ? `${(d.break_rate * 100).toFixed(0)}%` : "—"} />
+        <TapeStat k="封板率" v={d.break_rate != null ? `${((1 - d.break_rate) * 100).toFixed(0)}%` : "—"} />
         <TapeStat k="晋级率" v={d.promotion_rate != null ? `${(d.promotion_rate * 100).toFixed(0)}%` : "—"} />
         <TapeStat k="开板率" v={d.break_ratio != null ? `${(d.break_ratio * 100).toFixed(0)}%` : "—"} />
         <TapeStat k="跌停" v={d.dt_count != null ? d.dt_count : "—"} />
         <TapeStat k="炸板池" v={d.zb_count != null ? d.zb_count : "—"} />
-        <TapeStat k="北向净额(亿)" v={d.north_net != null ? d.north_net : "—"} />
+        <TapeStat k="北向净额(亿)" v={d.north_net != null ? `${d.north_net}${d.north_scope && d.north_scope !== "沪+深股通" ? ` · ${d.north_scope}` : ""}` : "—"} />
       </div>
+      {d.ladder && (
+        <div style={{ display: "flex", gap: 14, marginTop: 8, padding: "6px 10px", fontSize: 11,
+                      color: "var(--ink-2)", flexWrap: "wrap", background: "var(--paper-0)",
+                      borderRadius: 4, border: "1px solid var(--line-1)" }}>
+          <span style={{ color: "var(--ink-3)", fontWeight: 600 }}>连板梯队</span>
+          <span>首板 {d.ladder.first}</span>
+          <span>2板 {d.ladder["2"]}</span>
+          <span>3板 {d.ladder["3"]}</span>
+          <span>4板 {d.ladder["4"]}</span>
+          <span>5+板 {d.ladder["5plus"]}</span>
+          <span style={{ color: "var(--ink-4)", fontSize: 9 }}>形状:首板堆量=虚胖 · 高标接力=真亢奋(纯展示)</span>
+        </div>
+      )}
       <div style={{ display: "flex", gap: 16, marginTop: 12, flexWrap: "wrap" }}>
         <TapeList title="龙虎榜(全市场)" rows={rows("eastmoney_lhb")} color="var(--zhu)" />
         <TapeList title="人气榜" rows={rows("eastmoney_hot_rank")} color="var(--jin-deep)" />

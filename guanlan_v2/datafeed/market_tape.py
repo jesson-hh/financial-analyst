@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -74,25 +74,38 @@ def _derive(sources: Dict[str, Any]) -> Dict[str, Any]:
             breaks += 1
     zt_n, zb_n = len(zt), len(zb)
     promoted = sum(1 for r in zt if int(r.get("limit_days") or 1) >= 2)
+    # 连板梯队直方图:温度是标量、梯队是形状。首板堆量(虚胖)vs 高标接力(真亢奋)标量分辨不出。
+    ladder = {"first": 0, "2": 0, "3": 0, "4": 0, "5plus": 0}
+    for lb in streaks:                            # streaks 已是每只真连板 lbc(缺省 1)
+        if lb <= 1:
+            ladder["first"] += 1
+        elif lb >= 5:
+            ladder["5plus"] += 1
+        else:
+            ladder[str(lb)] += 1
     # 三个语义不同的口径,分别命名消歧(评审「两套炸板率定义并存」的收敛):
     #   break_ratio = 开板率  = 涨停中曾开板家数 / 涨停数(astock 打板温度用此·系数已标定,不并入)
     #   break_rate  = 炸板率  = 炸板数 / 涨停尝试 = zb/(zt+zb)(收敛 limit_up_sentiment 权威口径)
     #   promotion_rate = 晋级率 = 今日涨停池里真连板(limit_days>=2)家数 / 昨日涨停池家数
     #                    分子改数今日 em_zt_pool 的真连板(每只 limit_days>=2 必是昨日也涨停=晋级成功),
     #                    替代旧的『昨池今日 pct≥9.8』代理(双创未封误算+/ST 封板漏算-);零新增拉取。
+    # 空池诚实:无涨停/无昨池 → 派生值 None,绝不用假 0.0 冒充真事实(进研报/UI)。
     d: Dict[str, Any] = {"zt_count": zt_n, "zb_count": zb_n, "dt_count": len(dt),
                          "yzt_count": len(yzt),
-                         "max_streak": max(streaks) if streaks else 0,
-                         "break_ratio": round(breaks / zt_n, 4) if zt else 0.0,
-                         "break_rate": round(zb_n / (zt_n + zb_n), 4) if (zt_n + zb_n) else 0.0,
-                         "promotion_rate": round(promoted / len(yzt), 4) if yzt else 0.0,
-                         "north_net": None}
+                         "max_streak": max(streaks) if streaks else None,
+                         "break_ratio": round(breaks / zt_n, 4) if zt else None,
+                         "break_rate": round(zb_n / (zt_n + zb_n), 4) if (zt_n + zb_n) else None,
+                         "promotion_rate": round(promoted / len(yzt), 4) if yzt else None,
+                         "ladder": ladder if zt else None,
+                         "north_net": None, "north_scope": None}
     if north and isinstance(north[0], dict):     # 北向净额=最新一分钟(newest-first)沪股通+深股通,单位亿
         r0 = north[0]
         hg, sg = r0.get("hgt_yi"), r0.get("sgt_yi")
         if hg is not None or sg is not None:
             try:
                 d["north_net"] = round(float(hg or 0) + float(sg or 0), 2)
+                # sg 为 None = stocks 已判深股通源退化置空 → 诚实标『仅沪股通』,不冒充沪+深(vibe⑥实测坐实)
+                d["north_scope"] = "沪+深股通" if sg is not None else "沪股通"
             except (TypeError, ValueError):
                 pass
         else:                                     # 兜底:别的源若给单一净额字段
@@ -105,6 +118,47 @@ def _derive(sources: Dict[str, Any]) -> Dict[str, Any]:
                     except (TypeError, ValueError):
                         pass
     return d
+
+
+_POOL_ALIASES = ("em_zt_pool", "em_zb_pool", "em_dt_pool", "em_yzt_pool")
+_BACKFILL_MAX_DAYS = 8   # 往回探交易日上限(覆盖周末+短假;超长假如春节>8日则诚实空由 _derive 兜)
+
+
+def _backfill_board_pools(sources: Dict[str, Any], today=None):
+    """今日涨停池空(周末/盘前/长假)→ 往回探至上一有数据交易日(≤8天),用同一日期重拉四池,
+    打「回溯至 MM-DD」徽章,返回 (board_date_yyyymmdd, backfilled)。非交易日上游静默返空,
+    首个非空即上一交易日;找不到(超上限/全宕)→ (None, False),诚实空由 _derive 兜。
+    仅在今日池空时回溯,故正常交易时段零额外触网。"""
+    zt_canon = _lc.resolve_source("em_zt_pool") or "em_zt_pool"
+    if (sources.get(zt_canon) or {}).get("rows"):
+        return None, False                          # 今日有数据,无需回溯
+    base = today or datetime.now().date()
+    for k in range(1, _BACKFILL_MAX_DAYS + 1):
+        d = base - timedelta(days=k)
+        ds = d.strftime("%Y%m%d")
+        try:
+            zt_probe = _lc.probe("em_zt_pool", date=ds, limit=300)
+        except Exception:  # noqa: BLE001
+            continue
+        zt_rows = _lc.native_rows(zt_probe.get("items")) if (
+            zt_probe.get("ok") and zt_probe.get("status") in ("ok", "")) else []
+        if not zt_rows:
+            continue                                # 非交易日/无数据,继续往回
+        badge = f"回溯至 {d.strftime('%m-%d')}"
+        sources[zt_canon] = {"status": "ok", "n": len(zt_rows),
+                             "pulled_at": zt_probe.get("pulled_at"), "note": badge, "rows": zt_rows}
+        for alias in ("em_zb_pool", "em_dt_pool", "em_yzt_pool"):   # 其余三池同日对齐
+            canon = _lc.resolve_source(alias) or alias
+            try:
+                r = _lc.probe(alias, date=ds, limit=300)
+            except Exception:  # noqa: BLE001
+                continue
+            if r.get("ok") and r.get("status") in ("ok", ""):
+                rr = _lc.native_rows(r.get("items"))
+                sources[canon] = {"status": "ok", "n": len(rr),
+                                  "pulled_at": r.get("pulled_at"), "note": badge, "rows": rr}
+        return ds, True
+    return None, False
 
 
 def _refresh(ttl_s: int = _DEFAULT_TTL_S) -> Dict[str, Any]:
@@ -137,11 +191,15 @@ def _refresh(ttl_s: int = _DEFAULT_TTL_S) -> Dict[str, Any]:
             else:
                 sources[canon] = {"status": "error", "n": 0, "pulled_at": None,
                                   "note": note, "rows": []}
+    # 今日涨停池空(周末/盘前/长假)→ 回溯至上一有数据交易日,四池同日对齐并打「回溯至」徽章
+    # (在 overall/derive 之前:回溯改了四池 rows/pulled_at,须并入龄期与派生计算)。
+    board_date, board_backfilled = _backfill_board_pools(sources)
     # overall 取**最旧**分量(min):失败被保留的陈旧源会把整体龄期拖旧,health/UI/read_tape
     # 据此判 stale——绝不让某源新鲜掩盖另一源陈旧而伪造新鲜(评审 Important 红线)。
     pulled_list = [v["pulled_at"] for v in sources.values() if v.get("pulled_at")]
     overall = min(pulled_list) if pulled_list else prev.get("pulled_at")
-    data = {"pulled_at": overall, "ttl_s": ttl_s, "sources": sources, "derived": _derive(sources)}
+    data = {"pulled_at": overall, "ttl_s": ttl_s, "sources": sources, "derived": _derive(sources),
+            "board_date": board_date, "board_backfilled": board_backfilled}
     _write_cache_atomic(data)
     _MEM_CACHE["data"] = data
     return data

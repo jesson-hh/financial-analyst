@@ -45,6 +45,39 @@ def _num(v: Any) -> Optional[float]:
     return None if f != f else f          # NaN != NaN → None
 
 
+def _is_trading_now(now: Optional[datetime] = None) -> bool:
+    """A 股连续竞价时段(周一–周五 09:30–15:00,本机时区=沪市)。午间 11:30–13:00 报价冻结在
+    11:30,MTM 取之无碍,故用单窗从简。台账盘中 MTM 据此决定取实时价还是末根已结算收盘。"""
+    now = now or datetime.now()
+    if now.weekday() >= 5:
+        return False
+    hm = now.hour * 60 + now.minute
+    return (9 * 60 + 30) <= hm <= (15 * 60)
+
+
+def _intraday_quote(code: str) -> Optional[float]:
+    """盘中实时价:tencent_realtime_quote 主源 → tdx_realtime_quote failover,经 live_client 只读门户
+    (seats/live_book.py 同源同信封)。缺价/触网失败/非法 → None(caller 回落已结算收盘,绝不半真)。
+    code 透传(腾讯 adapter 自动加前缀;live_client 已把这两源列 CODE_PASSTHROUGH)。"""
+    try:
+        from guanlan_v2.datafeed import live_client as lc
+    except Exception:  # noqa: BLE001 — datafeed 不可导入 → 回落
+        return None
+    for src in ("tencent_realtime_quote", "tdx_realtime_quote"):
+        try:
+            r = lc.probe(src, code=code, limit=1)
+        except Exception:  # noqa: BLE001 — 单源失败 → 试 failover
+            continue
+        if not (r.get("ok") and r.get("status") in ("ok", "")):
+            continue
+        rows = lc.native_rows(r.get("items")) or []
+        if rows and isinstance(rows[0], dict):
+            px = _num(rows[0].get("price"))
+            if px is not None and px > 0:
+                return px
+    return None
+
+
 def _drop_unsettled(df):
     """丢弃 ``close`` 为空(NaN/None)的未结算占位行。
 
@@ -1149,7 +1182,8 @@ def build_seats_router() -> APIRouter:
             return JSONResponse({"ok": True, "opened": False})
 
         positions = list(st["positions"].values())
-        closes: dict = {}                       # code → (date, close) | None
+        closes: dict = {}                       # code → (date, price, intraday) | None
+        trading = _is_trading_now()             # 盘中 → 现价优先取实时报价
         if positions:
             try:
                 import pandas as _pd
@@ -1161,6 +1195,7 @@ def build_seats_router() -> APIRouter:
                 loader = _lf.get_default_loader()
                 end = str(_pd.Timestamp.now().date())
                 start = str((_pd.Timestamp.now() - _pd.Timedelta(days=30)).date())
+                today_str = str(_pd.Timestamp.now().date())
 
                 def _last_close(c: str):
                     cc = c
@@ -1180,23 +1215,35 @@ def build_seats_router() -> APIRouter:
                     d = rec.get("trade_date")
                     return (str(d)[:10] if d is not None else None, px)
 
+                def _resolve(c: str):
+                    # 盘中优先实时价(as-of=今日);缺价/盘后 → 末根已结算收盘(昨收),诚实标 intraday
+                    if trading:
+                        px = _intraday_quote(c)
+                        if px is not None:
+                            return (today_str, px, True)
+                    hit = _last_close(c)
+                    return (hit[0], hit[1], False) if hit else None
+
                 for c in sorted({p["code"] for p in positions}):   # 合并去重后逐票取
                     try:
-                        closes[c] = await asyncio.to_thread(_last_close, c)
+                        closes[c] = await asyncio.to_thread(_resolve, c)
                     except Exception:  # noqa: BLE001 — 单票失败 = 该票缺价
                         closes[c] = None
             except Exception:  # noqa: BLE001 — loader 整体失败 → 全缺价,不崩
                 closes = {}
 
         covered = 0
+        any_intraday = False
         equity: Optional[float] = st["cash"]
         eq_dates: list = []
         pos_out = []
         for p in positions:
             hit = closes.get(p["code"])
             last_close = hit[1] if hit else None
+            is_intraday = bool(hit[2]) if hit else False
             if last_close is not None:
                 covered += 1
+                any_intraday = any_intraday or is_intraday
                 mkt = last_close * p["qty"]
                 upl = (last_close - p["avg_cost"]) * p["qty"]
                 if equity is not None:
@@ -1208,6 +1255,7 @@ def build_seats_router() -> APIRouter:
                 equity = None               # 任一缺价 → 权益诚实置空,绝不半真半假
             pos_out.append({"code": p["code"], "name": p["name"], "qty": p["qty"],
                             "avg_cost": p["avg_cost"], "last_close": last_close,
+                            "intraday": is_intraday,
                             "mkt_value": mkt, "upl": upl})
 
         return JSONResponse({
@@ -1215,6 +1263,7 @@ def build_seats_router() -> APIRouter:
             "start_date": st["start_date"], "init_cash": st["init_cash"],
             "cash": st["cash"],
             "positions": pos_out, "n_positions": len(pos_out), "covered": covered,
+            "mtm_mode": "intraday" if any_intraday else "settled",
             "equity": equity,
             # 估值日取覆盖票里最旧的末根日(最保守的 as-of;全缺价/无持仓 → null)
             "equity_date": (min(eq_dates) if (equity is not None and eq_dates) else None),

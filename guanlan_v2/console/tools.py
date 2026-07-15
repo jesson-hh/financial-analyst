@@ -1496,12 +1496,15 @@ def market_tape_impl(fresh_within_s: int = 180) -> Dict[str, Any]:
         return "、".join(v for v in vals if v) or "—"
     age = fr.get("overall_age_s")
     fresh_mark = "" if not fr.get("stale") else "(已过期,后台刷新中)"
+    board_mark = f" · 打板数据回溯至 {t.get('board_date') or ''}(非当日,今日无涨停数据)" if t.get("board_backfilled") else ""
     lines = [
-        f"盘口快照 · {str(t.get('pulled_at') or '')[:16]}(龄 {age}s{fresh_mark},读缓存零 LLM)",
+        f"盘口快照 · {str(t.get('pulled_at') or '')[:16]}(龄 {age}s{fresh_mark},读缓存零 LLM){board_mark}",
         f"打板:涨停 {d.get('zt_count', '—')} 家 · 最高 {d.get('max_streak', '—')} 连板 · "
         f"炸板率 {d.get('break_rate', '—')} · 晋级率 {d.get('promotion_rate', '—')} · "
         f"开板率 {d.get('break_ratio', '—')} · 跌停 {d.get('dt_count', '—')} · 炸板池 {d.get('zb_count', '—')}",
-        f"北向净额:{(str(d.get('north_net')) + ' 亿(沪+深股通)') if d.get('north_net') is not None else '—'}",
+        (lambda L: f"梯队:首板 {L.get('first', '—')} · 2板 {L.get('2', '—')} · 3板 {L.get('3', '—')} · "
+                   f"4板 {L.get('4', '—')} · 5+板 {L.get('5plus', '—')}")(d.get("ladder") or {}),
+        f"北向净额:{(str(d.get('north_net')) + ' 亿(' + (d.get('north_scope') or '沪+深股通') + ')') if d.get('north_net') is not None else '—'}",
         f"龙虎榜 top:{top('eastmoney_lhb')}",
         f"人气榜 top:{top('eastmoney_hot_rank')}",
         f"行业涨幅榜:{top('eastmoney_industry_comparison')}",
