@@ -46,9 +46,9 @@ payload/rendered drift can never pass silently.
 """
 from __future__ import annotations
 
-from typing import Any, ClassVar, Generic, Literal, TypeVar
+from typing import Annotated, Any, ClassVar, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from guanlan_v2.orchestration.digest import (
     DigestHex,
@@ -60,7 +60,13 @@ from guanlan_v2.orchestration.digest import (
     UtcDateTime,
     content_digest,
 )
-from guanlan_v2.orchestration.enums import DataMode, NodeStatus
+from guanlan_v2.orchestration.enums import (
+    Confidence,
+    DataMode,
+    NodeStatus,
+    PortfolioRating,
+    SentimentBand,
+)
 from guanlan_v2.orchestration.refs import CapabilityRef, ContentRef, SchemaRef
 from guanlan_v2.orchestration.schema_registry import SchemaRegistry
 
@@ -76,6 +82,9 @@ __all__ = [
     "ArtifactRelation",
     "NodeRun",
     "validate_artifact_payload",
+    "ResearchPlan",
+    "PortfolioDecision",
+    "SentimentReport",
 ]
 
 T = TypeVar("T")
@@ -464,3 +473,72 @@ def validate_artifact_payload(
     payload = artifact.payload
     raw = payload.model_dump() if isinstance(payload, BaseModel) else payload
     return registry.validate_payload(artifact.payload_schema_ref, raw)
+
+
+# --------------------------------------------------------------------------- #
+# Minimal Phase 2 compatibility payloads                                      #
+# --------------------------------------------------------------------------- #
+# These are the *minimal* typed outputs that exercise the Phase 2 static
+# compatibility path and the legacy rating / sentiment adapters. Each is a pure
+# value payload: a strict, frozen ``DigestModel`` with a closed
+# ``schema_version`` and **no** runtime-generated authority / identity field
+# (no artifact id, run id or wall-clock) — a runtime seals those on the wrapping
+# :class:`Artifact`, never on the payload. Deferred Phase 5 / 6 / 8 report and
+# proposal schemas are intentionally *not* defined here; their consumer phases
+# own the final invariants.
+
+#: A strictly-positive finite price. ``FiniteFloat`` already rejects ``bool`` and
+#: ``NaN`` / ``±Inf``; ``gt=0`` additionally rejects zero and negatives, so a
+#: quoted target can never be non-positive or non-finite.
+PositivePrice = Annotated[FiniteFloat, Field(gt=0)]
+
+#: A sentiment score confined to the reviewed ``[0, 10]`` band. ``FiniteFloat``
+#: rejects ``bool`` / ``NaN`` / ``±Inf``; ``ge=0, le=10`` bounds it.
+SentimentScore = Annotated[FiniteFloat, Field(ge=0, le=10)]
+
+
+class ResearchPlan(DigestModel):
+    """A research recommendation: a five-level rating with its supporting case.
+
+    ``recommendation`` is the closed five-level :class:`PortfolioRating`,
+    ``rationale`` is the non-blank narrative behind it, and ``strategic_actions``
+    is an ordered, immutable tuple of the concrete actions the plan proposes.
+    """
+
+    schema_version: Literal["1"] = "1"
+    recommendation: PortfolioRating
+    rationale: NonEmptyStr
+    strategic_actions: tuple[NonEmptyStr, ...] = ()
+
+
+class PortfolioDecision(DigestModel):
+    """A portfolio-level decision: rating, thesis and an optional price target.
+
+    ``rating`` is the closed five-level :class:`PortfolioRating`.
+    ``price_target`` is an optional strictly-positive finite price
+    (``bool`` / ``NaN`` / ``Inf`` and non-positive values are rejected) and
+    ``time_horizon`` is an optional free-text horizon.
+    """
+
+    schema_version: Literal["1"] = "1"
+    rating: PortfolioRating
+    executive_summary: NonEmptyStr
+    investment_thesis: NonEmptyStr
+    price_target: PositivePrice | None = None
+    time_horizon: str | None = None
+
+
+class SentimentReport(DigestModel):
+    """A sentiment read: a labelled band, a bounded finite score and confidence.
+
+    ``overall_band`` is the closed :class:`SentimentBand`, ``overall_score`` is a
+    finite score in ``[0, 10]`` (``bool`` / ``NaN`` / ``Inf`` and out-of-band
+    values are rejected), ``confidence`` is the closed :class:`Confidence` and
+    ``narrative`` is the non-blank supporting text.
+    """
+
+    schema_version: Literal["1"] = "1"
+    overall_band: SentimentBand
+    overall_score: SentimentScore
+    confidence: Confidence
+    narrative: NonEmptyStr
