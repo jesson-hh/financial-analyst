@@ -247,6 +247,8 @@ class Artifact(DigestModel, Generic[T]):
     ``rendered_md`` whose payload binding drifted — is rejected.
     """
 
+    # schema_version pinned to "2" (siblings default to "1") per the plan's
+    # Global Constraints: Artifact and PlanDraft are the two contracts on "2".
     schema_version: Literal["2"] = "2"
 
     # --- audit identity (volatile) -------------------------------------- #

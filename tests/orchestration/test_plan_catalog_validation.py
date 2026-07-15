@@ -887,6 +887,36 @@ def test_dynamic_draft_must_copy_request_approval_policy():
     assert "auto_approval_rejected" in _codes(report)
 
 
+def test_dynamic_draft_approval_policy_mismatch_isolated():
+    # DYNAMIC draft REQUIRED vs request AUTO -> only the mismatch branch fires:
+    # the draft is REQUIRED (no AUTO rejection, no not-required rejection), so this
+    # isolates the dynamic_approval_policy_mismatch issue.
+    catalog, registry, context = _chain_catalog(), _registry(), _context()
+    draft = _chain_draft(catalog, registry, context, source=PlanSource.DYNAMIC)
+    assert draft.approval_policy is ApprovalPolicy.REQUIRED
+    report = _validate(draft, _request(approval_policy=ApprovalPolicy.AUTO), context, catalog, registry)
+    codes = _codes(report)
+    assert not report.valid
+    assert "dynamic_approval_policy_mismatch" in codes
+    assert "auto_approval_rejected" not in codes
+    assert "dynamic_approval_policy_not_required" not in codes
+
+
+def test_dynamic_draft_approval_policy_not_required_branch():
+    # DYNAMIC draft AUTO with request also AUTO -> policies match (no mismatch) but
+    # a DYNAMIC draft's approval_policy must be REQUIRED, so the not_required branch
+    # fires (alongside the blanket auto_approval_rejected).
+    catalog, registry, context = _chain_catalog(), _registry(), _context()
+    draft = _chain_draft(catalog, registry, context, source=PlanSource.DYNAMIC).model_copy(
+        update={"approval_policy": ApprovalPolicy.AUTO}
+    )
+    report = _validate(draft, _request(approval_policy=ApprovalPolicy.AUTO), context, catalog, registry)
+    codes = _codes(report)
+    assert not report.valid
+    assert "dynamic_approval_policy_not_required" in codes
+    assert "dynamic_approval_policy_mismatch" not in codes
+
+
 # --------------------------------------------------------------------------- #
 # 8. compatibility worker / static legacy attestation                        #
 # --------------------------------------------------------------------------- #

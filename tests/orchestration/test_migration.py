@@ -320,6 +320,14 @@ def test_sentiment_rejects_bool_and_spurious_scale():
         M.migrate_sentiment(50.0, source_schema=M.SRC_ASTOCK_TEMP, scale="pm1")
 
 
+def test_sentiment_rejects_none_raw():
+    # LegacyScalar = StrictStr | StrictInt | StrictFloat excludes None: a None raw
+    # means "no value to migrate" and is rejected at the strict scalar boundary,
+    # before any per-source scale/domain logic.
+    with pytest.raises(ValueError, match="unsupported legacy scalar type NoneType"):
+        M.migrate_sentiment(None, source_schema=M.SRC_NEWS_SENTIMENT)
+
+
 # =========================================================================== #
 # 10. known non-equivalent rotation stages -> UNMAPPABLE                       #
 # =========================================================================== #

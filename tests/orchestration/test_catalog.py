@@ -287,6 +287,14 @@ def test_negative_thinking_budget_rejected():
         ExecutionSpec(kind=ExecutionKind.LLM, model_tier="reasoner", thinking_budget=-1)
 
 
+def test_worker_spec_rejects_empty_supported_modes():
+    """A WorkerSpec must declare at least one supported DataMode; an empty tuple is
+    rejected by the ``supported_modes must be non-empty`` validator branch."""
+    prompt_ref, _ = make_text("p.modes", "prompt", "x")
+    with pytest.raises(ValidationError, match="supported_modes must be non-empty"):
+        base_llm_worker(prompt_ref=prompt_ref, supported_modes=())
+
+
 # --------------------------------------------------------------------------- #
 # 2. Deterministic no-prompt / no-skill success                               #
 # --------------------------------------------------------------------------- #

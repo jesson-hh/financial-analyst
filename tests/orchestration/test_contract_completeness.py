@@ -25,11 +25,13 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import pkgutil
 from typing import Mapping
 
 import pytest
 
-from guanlan_v2.orchestration.digest import ContractModel
+import guanlan_v2.orchestration as _orchestration_pkg
+from guanlan_v2.orchestration.digest import ContractModel, DigestModel
 from guanlan_v2.orchestration.schema_registry import (
     INTERNAL_MODELS,
     PHASE1_PUBLIC_MODELS,
@@ -104,6 +106,64 @@ def _discover_public_contract_models() -> dict[str, type[ContractModel]]:
 
 
 DISCOVERED = _discover_public_contract_models()
+
+
+def _modules_defining_public_contract_models() -> set[str]:
+    """Walk the WHOLE ``guanlan_v2.orchestration`` package (not just the frozen
+    ``PHASE1_MODULES`` list) and return every module name that *defines* a public
+    ``ContractModel`` subclass — a class whose ``__module__`` is that module, that
+    is a ``ContractModel`` subclass, excluding the ``ContractModel`` / ``DigestModel``
+    bases and private ``_``-prefixed names.
+
+    Uses :func:`pkgutil.walk_packages` + :func:`importlib.import_module` so a
+    brand-new module added anywhere under the package is discovered on disk, not
+    read from a hand-maintained list.
+    """
+    def _onerror(name: str) -> None:  # pragma: no cover - defensive, keeps failures loud
+        raise AssertionError(f"pkgutil.walk_packages failed to import {name!r}")
+
+    defining: set[str] = set()
+    for mod_info in pkgutil.walk_packages(
+        _orchestration_pkg.__path__,
+        prefix=_orchestration_pkg.__name__ + ".",
+        onerror=_onerror,
+    ):
+        module = importlib.import_module(mod_info.name)
+        for obj in vars(module).values():
+            if (
+                inspect.isclass(obj)
+                and issubclass(obj, ContractModel)
+                and obj not in (ContractModel, DigestModel)
+                and obj.__module__ == mod_info.name
+                and not obj.__name__.startswith("_")
+            ):
+                defining.add(mod_info.name)
+                break
+    return defining
+
+
+# --------------------------------------------------------------------------- #
+# The discovery firewall — PHASE1_MODULES must enumerate every module that      #
+# defines a public contract model (a new module cannot escape discovery)        #
+# --------------------------------------------------------------------------- #
+def test_phase1_modules_lists_every_module_defining_a_public_contract_model():
+    """Close the "a new module with a public payload escapes discovery" hole.
+
+    ``_discover_public_contract_models`` above only inspects the hand-maintained
+    ``PHASE1_MODULES`` tuple, so a brand-new module carrying a public
+    ``ContractModel`` subclass would never be seen by the completeness firewall.
+    This test walks the entire package from disk and asserts every module that
+    actually defines such a model is enumerated in ``PHASE1_MODULES``.
+    """
+    defining = _modules_defining_public_contract_models()
+    # sanity: the walk found the known payload-bearing modules (not silently empty)
+    assert "guanlan_v2.orchestration.schemas" in defining
+    missing = defining - set(PHASE1_MODULES)
+    assert not missing, (
+        "these modules define a public ContractModel subclass but are absent from "
+        "PHASE1_MODULES, so the completeness firewall would never review their "
+        "contracts — add them to PHASE1_MODULES: " + ", ".join(sorted(missing))
+    )
 
 
 # --------------------------------------------------------------------------- #

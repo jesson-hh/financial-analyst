@@ -653,6 +653,8 @@ class PlanDraft(DigestModel):
     against supplied immutable evidence rather than trusting Planner authority.
     """
 
+    # schema_version pinned to "2" (siblings default to "1") per the plan's
+    # Global Constraints: PlanDraft and Artifact are the two contracts on "2".
     schema_version: Literal["2"] = "2"
     id: LogicalId
     run_id: NonEmptyStr
