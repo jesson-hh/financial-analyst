@@ -31,6 +31,9 @@ from guanlan_v2.orchestration.refs import (
     SchemaName,  # noqa: F401
     SchemaRef,
     SchemaVersion,  # noqa: F401
+    TypedPayloadRef,
+    typed_ref_sort_key,
+    validate_typed_ref_tuple,
 )
 
 # Three distinct, well-formed sha256 hex digests.
@@ -178,7 +181,8 @@ def test_payload_ref_object_id_must_be_non_blank():
 # Refs are immutable DigestModels                                             #
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize(
-    "cls", [SchemaRef, ContentRef, CapabilityRef, PayloadRef, SchemaManifestEntry]
+    "cls",
+    [SchemaRef, ContentRef, CapabilityRef, PayloadRef, TypedPayloadRef, SchemaManifestEntry],
 )
 def test_refs_are_digest_models(cls):
     assert issubclass(cls, DigestModel)
@@ -240,6 +244,190 @@ def test_content_ref_all_fields_participate_in_parent_semantic():
     assert base_d != diff_id.semantic_digest()
     assert base_d != diff_ver.semantic_digest()
     assert base_d != diff_dig.semantic_digest()
+
+
+# --------------------------------------------------------------------------- #
+# TypedPayloadRef — composite typed evidence reference (Amendment 1, Task A)  #
+# --------------------------------------------------------------------------- #
+def _typed_ref(
+    name: str = "ReportOutput",
+    version: str = "1",
+    namespace: str = "main",
+    object_id: str = "obj-1",
+    digest: str = D1,
+) -> TypedPayloadRef:
+    return TypedPayloadRef(
+        schema_ref=SchemaRef(name=name, version=version),
+        payload_ref=PayloadRef(
+            namespace=namespace, object_id=object_id, content_digest=digest
+        ),
+    )
+
+
+class _TypedHolder(DigestModel):
+    """Embedding parent used to prove the composite's nested projection."""
+
+    schema_version: Literal["1"] = "1"
+    evidence: TypedPayloadRef
+
+
+def test_typed_payload_ref_construction():
+    ref = _typed_ref()
+    assert ref.schema_version == "1"
+    assert ref.schema_ref.key == "ReportOutput@1"
+    assert ref.payload_ref.namespace == "main"
+    assert ref.payload_ref.content_digest == D1
+
+
+def test_typed_payload_ref_is_frozen():
+    ref = _typed_ref()
+    with pytest.raises(ValidationError):
+        ref.schema_ref = SchemaRef(name="Other", version="1")
+
+
+def test_typed_payload_ref_rejects_extra_fields():
+    with pytest.raises(ValidationError):
+        TypedPayloadRef(
+            schema_ref=SchemaRef(name="Foo", version="1"),
+            payload_ref=PayloadRef(namespace="main", object_id="o", content_digest=D1),
+            transport="http",
+        )
+
+
+@pytest.mark.parametrize("bad", BAD_DIGESTS)
+def test_typed_payload_ref_rejects_garbage_digest_through_nested_payload_ref(bad):
+    # a garbage content_digest cannot sneak in through the composite: the nested
+    # PayloadRef enforces the strict digest shape (constructed via dict form so
+    # validation demonstrably runs through the nested model, not a pre-built ref).
+    with pytest.raises(ValidationError):
+        TypedPayloadRef(
+            schema_ref=SchemaRef(name="Foo", version="1"),
+            payload_ref={"namespace": "main", "object_id": "o", "content_digest": bad},
+        )
+
+
+def test_typed_payload_ref_has_no_namespace_constraint_on_the_type_itself():
+    # owners enforce main-ness (see validate_typed_ref_tuple); the type accepts
+    # every closed namespace so sealed/review/audit evidence can be referenced.
+    for ns in ("main", "sealed", "review", "audit"):
+        assert _typed_ref(namespace=ns).payload_ref.namespace == ns
+
+
+def test_typed_payload_ref_declares_no_new_semantic_excludes():
+    # object_id stays audit-only purely via the nested PayloadRef projection —
+    # the composite itself must not need any exclusion of its own.
+    assert TypedPayloadRef.SEMANTIC_EXCLUDE == frozenset()
+    assert TypedPayloadRef.SELF_DIGEST_FIELDS == frozenset()
+
+
+def test_typed_ref_object_id_relocation_is_audit_only_in_parent_semantic():
+    base = _TypedHolder(evidence=_typed_ref(object_id="obj-A"))
+    relocated = _TypedHolder(evidence=_typed_ref(object_id="obj-B"))
+    # re-storing identical content under a new object_id must not move the
+    # parent's semantic digest, but must move its audit digest.
+    assert base.semantic_digest() == relocated.semantic_digest()
+    assert base.audit_digest_value() != relocated.audit_digest_value()
+
+
+def test_typed_ref_semantic_identity_moves_parent_semantic_digest():
+    base_d = _TypedHolder(evidence=_typed_ref()).semantic_digest()
+    diff_name = _TypedHolder(evidence=_typed_ref(name="Other"))
+    diff_ver = _TypedHolder(evidence=_typed_ref(version="2"))
+    diff_ns = _TypedHolder(evidence=_typed_ref(namespace="sealed"))
+    diff_dig = _TypedHolder(evidence=_typed_ref(digest=D2))
+    assert base_d != diff_name.semantic_digest()
+    assert base_d != diff_ver.semantic_digest()
+    assert base_d != diff_ns.semantic_digest()
+    assert base_d != diff_dig.semantic_digest()
+
+
+# --------------------------------------------------------------------------- #
+# typed_ref_sort_key — canonical typed semantic projection key                #
+# --------------------------------------------------------------------------- #
+def test_typed_ref_sort_key_shape():
+    ref = _typed_ref(name="Foo", version="2", namespace="sealed", digest=D3)
+    assert typed_ref_sort_key(ref) == ("Foo", "2", "sealed", D3)
+
+
+def test_typed_ref_sort_key_orders_by_name_version_namespace_digest():
+    # constructed so each successive tie-break level decides exactly once.
+    a = _typed_ref(name="Alpha", version="1", namespace="main", digest=D1)
+    b = _typed_ref(name="Alpha", version="1", namespace="main", digest=D2)
+    c = _typed_ref(name="Alpha", version="1", namespace="sealed", digest=D1)
+    d = _typed_ref(name="Alpha", version="2", namespace="main", digest=D1)
+    e = _typed_ref(name="Beta", version="1", namespace="main", digest=D1)
+    assert sorted([e, d, c, b, a], key=typed_ref_sort_key) == [a, b, c, d, e]
+
+
+def test_typed_ref_sort_key_ignores_object_id():
+    assert typed_ref_sort_key(_typed_ref(object_id="obj-A")) == typed_ref_sort_key(
+        _typed_ref(object_id="obj-B")
+    )
+
+
+# --------------------------------------------------------------------------- #
+# validate_typed_ref_tuple — shared owner-side tuple invariant                #
+# --------------------------------------------------------------------------- #
+def test_validate_typed_ref_tuple_accepts_canonical_main_tuple():
+    a = _typed_ref(name="Alpha", digest=D1)
+    b = _typed_ref(name="Alpha", digest=D2)
+    c = _typed_ref(name="Beta", digest=D1)
+    # canonical order, duplicate-free, all main — no raise; empty is also valid.
+    validate_typed_ref_tuple((a, b, c), require_main=True, field_name="data_result_refs")
+    validate_typed_ref_tuple((), require_main=True, field_name="data_result_refs")
+
+
+def test_validate_typed_ref_tuple_rejects_out_of_order():
+    a = _typed_ref(name="Alpha", digest=D1)
+    c = _typed_ref(name="Beta", digest=D1)
+    with pytest.raises(ValueError, match="data_result_refs"):
+        validate_typed_ref_tuple(
+            (c, a), require_main=True, field_name="data_result_refs"
+        )
+
+
+def test_validate_typed_ref_tuple_rejects_exact_duplicate():
+    a = _typed_ref()
+    with pytest.raises(ValueError, match="execution_evidence_refs"):
+        validate_typed_ref_tuple(
+            (a, a), require_main=True, field_name="execution_evidence_refs"
+        )
+
+
+def test_validate_typed_ref_tuple_rejects_semantic_duplicate_differing_object_id():
+    # two refs differing only in the audit object_id are the SAME evidence.
+    a = _typed_ref(object_id="obj-A")
+    a2 = _typed_ref(object_id="obj-B")
+    with pytest.raises(ValueError, match="execution_evidence_refs"):
+        validate_typed_ref_tuple(
+            (a, a2), require_main=True, field_name="execution_evidence_refs"
+        )
+
+
+def test_validate_typed_ref_tuple_rejects_non_main_when_required():
+    sealed = _typed_ref(namespace="sealed")
+    with pytest.raises(ValueError, match="my_evidence"):
+        validate_typed_ref_tuple(
+            (sealed,), require_main=True, field_name="my_evidence"
+        )
+
+
+def test_validate_typed_ref_tuple_allows_non_main_when_not_required():
+    # still canonical + duplicate-free, but namespace is the owner's choice.
+    sealed = _typed_ref(namespace="main")
+    review = _typed_ref(namespace="review")
+    validate_typed_ref_tuple(
+        (sealed, review), require_main=False, field_name="my_evidence"
+    )
+
+
+def test_validate_typed_ref_tuple_error_names_the_owning_field():
+    a = _typed_ref()
+    with pytest.raises(ValueError) as exc_info:
+        validate_typed_ref_tuple(
+            (a, a), require_main=True, field_name="some_owner_field"
+        )
+    assert "some_owner_field" in str(exc_info.value)
 
 
 # --------------------------------------------------------------------------- #

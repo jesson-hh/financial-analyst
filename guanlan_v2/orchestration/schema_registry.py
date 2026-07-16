@@ -244,6 +244,12 @@ _R_MIGRATION_ADAPTER = (
     "legacy-migration adapter validated by the migration regime; a Phase-1 "
     "compatibility output, not a shipped node-output payload"
 )
+_R_TYPED_REF_PENDING_PROMOTION = (
+    "composite typed evidence ref (schema_ref + payload_ref) added by Phase-1 "
+    "Amendment 1 Task A; scheduled for promotion to the registered public set in "
+    "this amendment's registry/golden re-freeze task (Task C/D) — kept internal "
+    "until that single reviewed golden change lands"
+)
 
 #: cache for the lazily-built population (see :func:`_load_population`).
 _POPULATION: dict[str, Any] | None = None
@@ -295,6 +301,7 @@ def _load_population() -> dict[str, Any]:
         _refs.ContentRef: _R_ADDRESSING_REF,
         _refs.CapabilityRef: _R_ADDRESSING_REF,
         _refs.PayloadRef: _R_ADDRESSING_REF,
+        _refs.TypedPayloadRef: _R_TYPED_REF_PENDING_PROMOTION,
         _refs.SchemaManifestEntry: _R_ADDRESSING_REF,
         # data/symbols.py — embedded instrument value objects (no schema_version)
         _symbols.Symbol: _R_VALUE_OBJECT,
