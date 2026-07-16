@@ -1,14 +1,14 @@
 # Orchestration Phase 3 · 数据 / PIT 层 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Execution note:** implement task-by-task with a review checkpoint after the Phase 1/2 handoff gate, the Phase 3 registry snapshot, PIT/cache invariants, and runtime integration. Steps use checkbox (`- [ ]`) syntax for tracking; do not require an environment-specific execution skill.
 
-**Goal:** Build the typed, PIT-safe multi-source data interface for `guanlan_v2/orchestration/data/` — error taxonomy, syntactic symbol normalization, `PitGuard` (physically refuses future data), narrow-fallback `SourceRegistry.dispatch`, and the `DataReader` facade + `render_for_prompt`. **Vendor acquisition stays stubbed** — this phase freezes the interface, not the scrapers.
+**Goal:** Build the typed, PIT-safe multi-source data interface for `guanlan_v2/orchestration/data/` — error taxonomy, syntactic symbol normalization, concrete `PitRecord` payloads, immutable routing/snapshot/cache identities, `PitGuard`, narrow-fallback dispatch and deterministic untrusted rendering — then close Phase 3 with a unified PIT-safe read/proposal facade over the existing AgentMemory and console stores. **Vendor acquisition stays stubbed**; no third memory store or accepted-write path is introduced.
 
-**Architecture:** Mirrors TradingAgents `dataflows/interface.py` — a `{method:{vendor:DataSource}}` dispatch table, a config-resolved vendor *chain*, and **routing by typed exception** (the set of exception types is the whole control surface, so adding a vendor needs zero new `except` clauses). Adds what TA lacks and 帷幄 requires: a first-class `PitGuard` keyed on `available_at` (当时可知时间) that refuses `> as_of` rows in strict replay and never falls through to another vendor. Everything returns a typed `DataResult[RowSet]`; only `render_for_prompt` turns a result into an LLM-facing text block. Built entirely on Phase 1 contracts (`DataResult`, `PitAudit`, `SourceAttempt`, `Symbol`, `DataStatus`, `DataMode`) plus this phase's `errors`.
+**Architecture:** Extends the cumulative sealed Phase 2 runtime registry (which already contains the unchanged Phase 1 public contracts) and the Phase 2 engine-neutral runtime ports. A sealed, versioned `DataSourceRegistry` resolves a catalog-owned ordered vendor chain into an immutable `DataRoutingSnapshot`; a `DataSnapshotManifest` and `DataCacheKey` bind every read to the exact as-of, vintage, schema, source configuration and registry digests. `DataContext` is the sole authority for mode, strictness, backend, resolved chains and snapshot identity. `PitGuard.from_context` rejects future or missing availability before typed conversion; only `RateLimitError` / `NotConfiguredError` may advance the already-frozen chain. Data outcomes and refusal audits persist through Phase 2 ports before workers receive refs or an exception. Task 9 then creates a new immutable cumulative data+memory registry/catalog, freezes PIT-visible memory snapshots from the existing stores, filters before ranking and preserves proposal/human-review writers. Data and memory rendering are deterministic, versioned and explicitly untrusted.
 
-**Tech Stack:** Python ≥3.11, Pydantic v2, `re`, `pytest`. All modules `from __future__ import annotations`. Depends on Phase 1 (`guanlan_v2/orchestration/data/{symbols,result}.py`, `enums.py`, `digest.py`).
+**Tech Stack:** Python ≥3.11, Pydantic v2, `re`, `pytest`. All modules `from __future__ import annotations`. Depends on Phase 1 (`digest.py`, `refs.py`, `schema_registry.py`, `context.py`, `schemas.py`, `data/{symbols,result}.py`), Phase 2 runtime ports (`PayloadStore`, `EventStore`, `CapabilityGateway`, `ArtifactPool`, `AuthoritativeClock`, prompt assembly and replay), and read/proposal adapters over the existing AgentMemory/memory_ops/console modules.
 
-> **Scope note.** The spec §12 phase 3 bundles "data/PIT + **memory facade**". The memory facade wraps the existing metadata-less `AgentMemory`/`memory_ops`/console writer and is a distinct subsystem needing those write-path APIs; it is split into a separate **Phase 3b** plan. This plan is the complete, self-contained data/PIT half.
+> **Scope note.** The spec §12 phase 3 bundles “data/PIT + memory facade”; this plan now covers both in Task 0–9. Tasks 0–8 freeze and integrate the data half, and Task 9 closes memory PIT/snapshot/proposal semantics in the same reviewed phase. There is no dependency on a nonexistent separate Phase 3b file; Phase 4/5 may start only after all Task 0–9 exit gates pass.
 
 ## Global Constraints
 
@@ -16,11 +16,14 @@ Copied from the spec (`docs/superpowers/specs/2026-07-15-orchestration-framework
 
 - **Narrow fallback.** Cross-vendor fallback fires **only** on `RateLimitError` / `NotConfiguredError`. `NoDataError` and `StaleDataError` terminate the current chain with a typed result (no continue). `FutureDataRefused` and any other `DataError` **raise** (a broken primary must be loud, never masked by a fallback's answer).
 - **Never fabricate.** No path returns an empty string a model could fill in; missing data is a typed `NO_DATA`/`STALE`/`UNAVAILABLE` `DataResult`, and `render_for_prompt` emits an explicit "do not fabricate" sentinel.
-- **PIT is `available_at`, not period-end.** `PitGuard` compares each row's `available_at` (当时可知时间). Strict replay: any `available_at > as_of` → `FutureDataRefused` (never a silent drop, never a fallback). Any row missing `available_at` → `MissingAvailabilityRefused`. Freshness is per-method/category, not a global `MAX_STALE_DAYS`.
+- **PIT is `available_at`, not period-end.** `PitGuard` compares each raw row/vintage's `available_at` (当时可知时间). Any `available_at > as_of` → `FutureDataRefused`; any required row missing it → `MissingAvailabilityRefused`. Neither case may be silently filtered or trigger fallback. `PIT_REPLAY` additionally requires strict mode, a frozen snapshot and matching vintage manifest, and may never fall through to LIVE. Freshness is a versioned per-method/category policy using the frozen trading clock, not a global `MAX_STALE_DAYS`.
 - **`normalize_symbol` is purely syntactic** (no network): only normalizes a code; never infers ST, listing stage, or the day's price-limit. The 6-digit result must match `^[0-9]{6}$` before it may be used as a cache key. `resolve_name_to_code` rejects industry/concept names (forces the caller to pass a 6-digit code, never guesses).
 - **`DataResult` invariants (Phase 1):** `OK`/`DEGRADED` carry data; `NO_DATA`/`STALE`/`UNAVAILABLE` do not; `DEGRADED` needs `coverage` + `degradation_reason`. Every result keeps the full `attempts` list; `content_digest` excludes wall-clock, `audit_digest` covers it.
-- `OPTIONAL_CATEGORIES = {"signal_data", "macro_data", "prediction_markets"}` degrade to `UNAVAILABLE` on chain exhaustion; core categories raise.
-- No placeholders, DRY, YAGNI, TDD, frequent commits. Run tests from repo root `G:\guanlan-v2` with `pytest`.
+- Every public data DTO inherits the Phase 1 `ContractModel`/`DigestModel`, declares a closed `schema_version: Literal["N"]`, rejects unknown/coerced values, and is immutable when it records a fact. All persisted digests are computed or verified by pure builders; tests use real `DigestHex` values, never placeholders.
+- Optional/core behavior belongs to the versioned `DataMethodSpec`; it is not a mutable module-level set. Optional chain exhaustion returns `UNAVAILABLE`; core exhaustion raises the first retryable error after its audit is persisted.
+- **Memory PIT before relevance.** Freeze/resolve the exact memory snapshot, filter availability/validity/review/role/session in storage/facade space, and only then rank/top-k/fallback. Workers submit proposals only; existing reviewed writers remain the sole accepted-mutation paths.
+- Refusal and other raised paths persist an idempotent request/attempt/PIT audit record through the authoritative Phase 2 audit-only `EventRefusalAuditSink` **before** re-raising. Persist failure is loud; it never converts a PIT refusal into a successful or fallback result.
+- Run tests from repo root `G:\guanlan-v2` with `pytest`; do not stage unrelated worktree changes.
 
 ---
 
@@ -29,12 +32,76 @@ Copied from the spec (`docs/superpowers/specs/2026-07-15-orchestration-framework
 | File | Responsibility |
 |---|---|
 | `guanlan_v2/orchestration/data/errors.py` | error taxonomy (the router's whole control surface) |
+| `guanlan_v2/orchestration/data/calendar.py` | exact read-only trading-calendar port/resolver; no global “today” calendar |
 | `guanlan_v2/orchestration/data/symbols.py` (append) | `normalize_symbol` / `resolve_name_to_code` / `resolve_limit_rule` |
-| `guanlan_v2/orchestration/data/pit.py` | `PitGuard` + `FreshnessPolicy` |
-| `guanlan_v2/orchestration/data/source.py` | `DataSource` protocol + `DataRequest` / `RawFetch` / `RowSet` |
-| `guanlan_v2/orchestration/data/registry.py` | `SourceRegistry.dispatch` (narrow fallback) |
-| `guanlan_v2/orchestration/data/reader.py` | `DataReader` facade + `render_for_prompt` |
+| `guanlan_v2/orchestration/data/pit.py` | `PitGuard.from_context` + versioned `FreshnessPolicy` |
+| `guanlan_v2/orchestration/data/source.py` | strict request/raw carriers, concrete `PitRecord` batches and `DataSource` protocol |
+| `guanlan_v2/orchestration/data/catalog.py` | reviewed data CapabilityDescriptors + cumulative Phase 3 `WorkerCatalogSnapshot` builder |
+| `guanlan_v2/orchestration/data/snapshot.py` | `DataRoutingSnapshot` / `DataSnapshotManifest` / `DataCacheKey` builders |
+| `guanlan_v2/orchestration/data/registry.py` | sealed `DataSourceRegistry` + narrow dispatch |
+| `guanlan_v2/orchestration/data/render.py` | registered `RenderedDataBlock` contract + deterministic renderer |
+| `guanlan_v2/orchestration/data/reader.py` | `DataReader` facade |
+| `guanlan_v2/orchestration/data/runtime.py` | Phase 2 payload/event/capability/provenance bridge |
+| `guanlan_v2/orchestration/memory/models.py` | strict memory record/snapshot/query/selection/proposal/render contracts |
+| `guanlan_v2/orchestration/memory/adapters.py` | read-only adapters over existing AgentMemory and console stores |
+| `guanlan_v2/orchestration/memory/store.py` | unified PIT-visible snapshot facade; filter before rank/top-k |
+| `guanlan_v2/orchestration/memory/proposals.py` | proposal-only delegation to existing reviewed write paths |
+| `guanlan_v2/orchestration/memory/{schema_registry,catalog,runtime}.py` | immutable full-Phase-3 registry/catalog extension and Phase 2 snapshot/replay bridge |
+| `tests/orchestration/golden/data_schema_manifest_v1.json` | Phase 3 schema-registry extension golden |
+| `tests/orchestration/golden/data_catalog_manifest_v1.json` | reviewed data-capability/catalog extension golden |
+| `tests/orchestration/golden/phase3_full_schema_manifest_v1.json` | immutable data+memory cumulative registry golden; does not replace data-only golden |
+| `tests/orchestration/golden/phase3_full_catalog_manifest_v1.json` | immutable data+memory catalog extension golden; does not replace data-only golden |
+| `tests/orchestration/golden/memory_capture_policy_v1.json` | reviewed conservative legacy-memory capture/ranking policy |
+| `tests/orchestration/golden/data_source_manifest_v1.json` | method/source/default-route manifest golden |
+| `tests/orchestration/golden/limit_rule_policy_v1.json` | versioned as-of limit-rule policy material/digest |
 | `tests/orchestration/data/` | one test module per source module |
+
+---
+
+## Task 0: Phase 1 / Phase 2 handoff gate
+
+**Files:**
+- Create: `tests/orchestration/data/test_phase_handoff.py`
+- Read only: Phase 1 contract/registry implementation and Phase 2 runtime ports.
+
+**Required handoff:**
+
+- Phase 1 provides strict `ContractModel`/`DigestModel`, canonical semantic/audit digest builders, `SchemaRef`, `PayloadRef`, the sole generic public `TypedPayloadRef`, sealed schema-registry snapshots, `DataResult.build`, `PitRecord`, `PitAudit`, `SourceAttempt`, `DataContext`, `ContextSnapshot`, `InputSnapshot`, `MemoryRecordRef`, canonical `EmptyMemorySnapshot/EmptyMemorySelection`, `Artifact`, `Provenance` and `ToolCallRecord`. The exact memory ABI is already frozen there: record/revision/availability/content identity, audit-only memory snapshot locator, semantic `memory_snapshot_hash/past_context_hash/memory_session_id`, exact main-namespace `memory_selection_ref`, canonical InputSnapshot memory refs, and main-only `NodeRun.execution_evidence_refs`/`Provenance.execution_evidence_refs` with identical successful-Artifact tuples and failed/no-Artifact retention.
+- Phase 2 provides its sealed cumulative runtime registry/golden (Phase 1 public models plus Phase 2 control facts and registered `ExecutionBridgeDescriptor/PromptUntrustedBlockRef/PromptAssemblyRecord`), `SchemaRegistryResolver`, read-only `CatalogRuntime`, service-owned `ExecutionBridgeResolver` with one global ordinal sequencer and two-stage `prepare_input → InputSnapshot freeze → RUNNING/open_execution/freeze_for_execution`, the canonical `PHASE2_STATIC_CATALOG_DIGEST/phase2_static_catalog_snapshot()`, and `AuthoritativeClock`; `PayloadStore.put(schema_ref, payload, *, namespace, idempotency_key) -> PayloadRef` plus `get(ref, *, expected_schema_ref)` with digest/schema verification; append-only persist-before-publish `EventStore.append(EventAppendRequest) -> RunEvent`; audit-only refusal sink; two-stage `CapabilityGateway.begin/invoke → finalize_success | reject` as the only source-call boundary; `ArtifactPool`; and zero-live-I/O replay. RuntimeSupportReport binds every activated bridge descriptor/config/handler ref and rejects missing/dynamic/tool-loop semantics before reservation. `LLM` execution merges all provider blocks into one main prompt record before its single model call; `DETERMINISTIC` creates none; both retain branch-complete evidence on failed/no-Artifact NodeRuns.
+- `PayloadStore`, events and CapabilityGateway continue to use their exact `SchemaRef + PayloadRef` signatures, not Phase 3 Python classes or physical paths. Whenever a persisted payload enters `PromptAssembler`/`PromptUntrustedBlockRef` or generic execution evidence, Phase 3 must pass the single Phase 1 `TypedPayloadRef`; it must not pass two free-floating schema/locator arguments.
+- A Phase 1 or Phase 2 exit gate failure blocks this plan. Do not locally redefine a missing upstream type to make an import pass.
+
+- [ ] **Step 1: Write handoff conformance tests**
+
+Required tests inspect real signatures and exercise representative valid objects:
+
+1. every required upstream symbol imports from its owning module;
+2. payload round-trip validates the exact `SchemaRef`, `PayloadRef.content_digest` and namespace; `TypedPayloadRef` round-trips through the inherited registry, rejects wrong schema/namespace/content and treats object-ID relocation as audit-only;
+3. `PayloadRef.object_id` and snapshot-locator-only relocation change audit identity but not a parent semantic digest;
+4. `EventAppendRequest` has no caller-selected cursor, append is authoritative before publish and idempotent on the same key; refusal audit is separate and cannot create a public event;
+5. capability invocation cannot bypass `CapabilityGateway`; a pending data invocation yields no evidence-counting ToolCallRecord until `finalize_success`, while `reject` writes only refusal audit;
+6. replay resolves a recorded tool/data result without invoking a live handler;
+7. `InputSnapshot` and `Artifact.Provenance` can bind immutable data-result refs/digests;
+8. the Phase 1 memory ABI imports with exact closed fields/projections: the two canonical empty models round-trip through Phase 2 PayloadStore, snapshot/selection locator relocation is semantic-invariant, selection ref content equals `past_context_hash`, memory/past-context/session-scope changes are semantic, and canonical full `MemoryRecordRef`s enter InputSnapshot without a Phase 3 redefinition;
+9. Phase 2's public PromptAssemblyRecord round-trips only in `main`, is persisted before an `LLM` model call, and its typed ref reaches NodeRun plus successful Artifact with tuple equality; `DETERMINISTIC` creates no prompt record, while either branch retains its complete direct/prompt evidence tuple on failed/no-Artifact NodeRun paths.
+10. the generic bridge descriptor round-trips from exact catalog material; RuntimeSupport rejects missing/drifted/dynamic provider semantics before budget, memory-only pre-input refs are frozen into InputSnapshot before execution, RUNNING precedes data/capability I/O, providers cannot call PromptAssembler, and reversed multi-provider completion preserves the one canonical merge order.
+
+- [ ] **Step 2: Record the reviewed upstream registry/catalog/runtime digests in the test fixture**
+
+The fixture records the exact Phase 2 registry digest and canonical `PHASE2_STATIC_CATALOG_DIGEST`, not local paths, an earlier pilot catalog or mutable singleton identities.
+
+- [ ] **Step 3: Run the complete upstream suite and the frozen Phase 3 handoff gate**
+
+Run from the pre-Phase-3 implementation state: `pytest tests/orchestration -v`.
+
+Expected: the complete Phase 1 + Phase 2 suite and `tests/orchestration/data/test_phase_handoff.py` PASS **after** the reviewed digests have been recorded. If an upstream contract is absent, incompatible or drifted, stop and fix its owning phase rather than creating a duplicate here.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add tests/orchestration/data/test_phase_handoff.py
+git commit -m "test(orchestration): gate phase3 on phase1 and phase2 contracts"
+```
 
 ---
 
@@ -45,7 +112,7 @@ Copied from the spec (`docs/superpowers/specs/2026-07-15-orchestration-framework
 - Test: `tests/orchestration/data/__init__.py` (empty), `tests/orchestration/data/test_errors.py`
 
 **Interfaces:**
-- Produces: `DataError(Exception)`; `NoDataError(DataError)` with `__init__(self, *, symbol, canonical, detail)`; `StaleDataError(DataError)` with `__init__(self, detail, *, latest_available_at)`; `RateLimitError(DataError)`; `NotConfiguredError(DataError, ValueError)`; `FutureDataRefused(DataError)` with `__init__(self, detail, *, future_rows)`; `MissingAvailabilityRefused(DataError)`; `SourceBrokenError(DataError)`.
+- Produces: `DataError(Exception)`; `NoDataError(DataError)` with `__init__(self, *, symbol, canonical, detail)`; `StaleDataError(DataError)` with `__init__(self, detail, *, latest_available_at, pit_audit=None)`; `RateLimitError(DataError)`; `NotConfiguredError(DataError, ValueError)`; `FutureDataRefused(DataError)` with `__init__(self, detail, *, future_rows)`; `MissingAvailabilityRefused(DataError)`; non-fallback `DataIntegrityError(DataError)` with `SourceBrokenError`, `RoutingConfigurationError(DataIntegrityError, ValueError)`, `SnapshotMismatchError`, `CacheIntegrityError` and `LiveFallbackRefused` subclasses.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -62,6 +129,11 @@ def test_hierarchy():
     assert issubclass(e.NotConfiguredError, (e.DataError, ValueError))
     assert issubclass(e.FutureDataRefused, e.DataError)
     assert issubclass(e.MissingAvailabilityRefused, e.DataError)
+    assert issubclass(e.SourceBrokenError, e.DataIntegrityError)
+    assert issubclass(e.RoutingConfigurationError, (e.DataIntegrityError, ValueError))
+    assert issubclass(e.SnapshotMismatchError, e.DataIntegrityError)
+    assert issubclass(e.CacheIntegrityError, e.DataIntegrityError)
+    assert issubclass(e.LiveFallbackRefused, e.DataIntegrityError)
 
 
 def test_no_data_carries_symbol_detail():
@@ -105,9 +177,11 @@ class NoDataError(DataError):
 
 
 class StaleDataError(DataError):
-    def __init__(self, detail: str, *, latest_available_at: datetime | None = None):
+    def __init__(self, detail: str, *, latest_available_at: datetime | None = None,
+                 pit_audit=None):
         self.detail = detail
         self.latest_available_at = latest_available_at
+        self.pit_audit = pit_audit
         super().__init__(detail)
 
 
@@ -129,14 +203,34 @@ class MissingAvailabilityRefused(DataError):
     pass
 
 
-class SourceBrokenError(DataError):
+class DataIntegrityError(DataError):
+    pass
+
+
+class SourceBrokenError(DataIntegrityError):
+    pass
+
+
+class RoutingConfigurationError(DataIntegrityError, ValueError):
+    pass
+
+
+class SnapshotMismatchError(DataIntegrityError):
+    pass
+
+
+class CacheIntegrityError(DataIntegrityError):
+    pass
+
+
+class LiveFallbackRefused(DataIntegrityError):
     pass
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/orchestration/data/test_errors.py -v`
-Expected: PASS (4 passed)
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -155,7 +249,7 @@ git commit -m "feat(orchestration): data error taxonomy (phase3)"
 
 **Interfaces:**
 - Consumes: `Symbol` (Phase 1).
-- Produces: `normalize_symbol(raw: str) -> Symbol` — accepts bare (`"600519"`), dotted (`"600519.SH"`), or engine (`"SH600519"`) forms; extracts the 6-digit core; infers `exchange`/`board` from 号段 (688→SH/star, 300|301→SZ/chinext, leading 8|4→BJ/bj, leading 6→SH/main, else SZ/main). Raises `ValueError` if no unambiguous 6-digit code. The returned `Symbol.code` always matches `^[0-9]{6}$` (path-safety guard).
+- Produces: `normalize_symbol(raw: StrictStr) -> Symbol` — accepts only the complete bare (`"600519"`), dotted (`"600519.SH"`), or engine (`"SH600519"`) grammar; infers `exchange`/`board` from 号段 (688→SH/star, 300|301→SZ/chinext, leading 8|4→BJ/bj, leading 6→SH/main, else SZ/main). Embedded codes, non-strings, multiple codes and an explicit exchange conflicting with the inferred exchange are rejected rather than silently repaired. The returned `Symbol.code` always matches `^[0-9]{6}$` before it may enter a cache key.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -196,6 +290,18 @@ def test_rejects_no_six_digit_code():
         normalize_symbol("AAPL")
     with pytest.raises(ValueError):
         normalize_symbol("60051")
+
+
+@pytest.mark.parametrize("raw", ["x600519", "600519-extra", "600519 000001", 600519])
+def test_rejects_partial_or_coerced_input(raw):
+    with pytest.raises((TypeError, ValueError)):
+        normalize_symbol(raw)
+
+
+@pytest.mark.parametrize("raw", ["600519.SZ", "SZ600519"])
+def test_rejects_explicit_exchange_conflict(raw):
+    with pytest.raises(ValueError, match="exchange"):
+        normalize_symbol(raw)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -209,16 +315,21 @@ Expected: FAIL with `ImportError: cannot import name 'normalize_symbol'`
 # ── append to guanlan_v2/orchestration/data/symbols.py ──
 import re as _re
 
-_SIX = _re.compile(r"(?<!\d)(\d{6})(?!\d)")
+_BARE = _re.compile(r"^(?P<code>[0-9]{6})$")
+_DOTTED = _re.compile(r"^(?P<code>[0-9]{6})\.(?P<exchange>SH|SZ|BJ)$")
+_ENGINE = _re.compile(r"^(?P<exchange>SH|SZ|BJ)(?P<code>[0-9]{6})$")
 
 
 def normalize_symbol(raw: str) -> Symbol:
-    """Purely syntactic (no network). Accepts bare / dotted / engine forms."""
-    s = str(raw).strip().upper()
-    m = _SIX.search(s)
+    """Purely syntactic (no network); never coerces or partially matches."""
+    if type(raw) is not str:
+        raise TypeError("symbol must be a string")
+    s = raw.strip().upper()
+    m = _BARE.fullmatch(s) or _DOTTED.fullmatch(s) or _ENGINE.fullmatch(s)
     if not m:
-        raise ValueError(f"no unambiguous 6-digit A-share code in {raw!r}")
-    code = m.group(1)
+        raise ValueError(f"unsupported A-share symbol grammar: {raw!r}")
+    code = m.group("code")
+    explicit_exchange = m.groupdict().get("exchange")
     if code.startswith("688"):
         exchange, board = "SH", "star"
     elif code.startswith(("300", "301")):
@@ -229,13 +340,16 @@ def normalize_symbol(raw: str) -> Symbol:
         exchange, board = "SH", "main"
     else:
         exchange, board = "SZ", "main"
+    if explicit_exchange is not None and explicit_exchange != exchange:
+        raise ValueError(
+            f"explicit exchange {explicit_exchange} conflicts with code-derived {exchange}")
     return Symbol(code=code, exchange=exchange, board=board)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/orchestration/data/test_normalize_symbol.py -v`
-Expected: PASS (6 passed)
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -249,16 +363,25 @@ git commit -m "feat(orchestration): syntactic normalize_symbol (phase3)"
 ## Task 3: `resolve_name_to_code` + `resolve_limit_rule`
 
 **Files:**
+- Create: `guanlan_v2/orchestration/data/calendar.py`
 - Modify: `guanlan_v2/orchestration/data/symbols.py` (append)
+- Create: `tests/orchestration/data/calendar_fixtures.py`
+- Test: `tests/orchestration/data/test_calendar.py`
 - Test: `tests/orchestration/data/test_resolve.py`
+- Create: `tests/orchestration/golden/limit_rule_policy_v1.json`
 
 **Interfaces:**
-- Consumes: `Symbol`, `InstrumentMeta`, `LimitRule` (Phase 1), `normalize_symbol`.
+- Consumes: `Symbol`, `InstrumentMeta`, `LimitRule`, `ContentRef` (Phase 1), `normalize_symbol` and the exact `calendar_id` frozen in `DataContext/ClockSpec`.
 - Produces:
-  - `resolve_name_to_code(raw: str, name_map: Mapping[str, str]) -> Symbol` — if `raw` already yields a 6-digit code → `normalize_symbol`; if `raw` contains CJK and is in `name_map` (个股中文名→码) → resolve; if it contains CJK but is not a known stock name (i.e. an industry/concept word) → raise `ValueError` instructing the caller to pass a 6-digit code (never guesses).
-  - `resolve_limit_rule(sym: Symbol, as_of: datetime, meta: InstrumentMeta) -> LimitRule` — `is_st is True` → `pct=0.05 reason="ST"`; else by board (`star`/`chinext`→0.20, `bj`→0.30, `main`→0.10); if `meta.is_st is None` → `pct=None reason="ST status unknown"` (never defaults to 10%). `rule_version="a-share-2020"`.
+  - `TradingCalendar(Protocol)`: read-only `calendar_id`, exact versioned `material_ref: ContentRef`, `is_session(date)` and deterministic `sessions_between(start, end)` over one immutable calendar material. It never reads wall clock or mutable global holidays.
+  - `TradingCalendarResolver`: service-owned mapping from the full calendar `ContentRef` to a trusted implementation. Resolution verifies material digest and exact `calendar_id`; missing/drifted material is loud. Tests use an immutable fake behind this same port.
+  - `LimitRulePolicy(DigestModel)`: closed versioned rule table plus exact trading-calendar material ref and verified policy digest; Task 5 registers it. There is no unversioned module-global policy.
+  - internal pure helper `resolve_name_to_code(raw: StrictStr, name_map: Mapping[str, StrictStr]) -> Symbol`. `name_map` may only be extracted from the digest-verified, PIT-filtered `InstrumentNameRows` registered in Task 5; capability/public APIs never accept a caller-supplied current map. A direct symbol uses `normalize_symbol`; an unknown CJK industry/concept term is rejected rather than guessed.
+  - `resolve_limit_rule(sym: Symbol, as_of: UtcDateTime, meta: InstrumentMeta, *, policy: LimitRulePolicy, calendar: TradingCalendar | None) -> LimitRule`. It verifies `meta.symbol == sym`, `listed_at <= as_of`, and `metadata_available_at <= as_of` before using `is_st`. Missing/future metadata or an uncovered listing-policy window returns `pct=None` with an explicit reason. The injected digest-frozen policy selected by `as_of` owns ST/board/listing-stage rules; any session-based branch requires the exact matching calendar, and unavailable/mismatched calendar returns explicit unknown rather than guessing.
 
 - [ ] **Step 1: Write the failing test**
+
+The test module constructs one verified `LimitRulePolicy` and immutable fake `TradingCalendar`, and passes them explicitly to every `resolve_limit_rule` call shown below; no example may rely on a module-global/current calendar. `test_calendar.py` separately covers material/calendar-ID mismatch, deterministic session counts, holidays and missing material.
 
 ```python
 # tests/orchestration/data/test_resolve.py
@@ -267,9 +390,22 @@ from datetime import datetime, timezone
 import pytest
 from guanlan_v2.orchestration.data.symbols import (
     Symbol, InstrumentMeta, resolve_name_to_code, resolve_limit_rule)
+from tests.orchestration.data.calendar_fixtures import CALENDAR, LIMIT_POLICY
 
 UTC = timezone.utc
-_MAP = {"贵州茅台": "600519"}
+_MAP = {"贵州茅台": "600519"}  # extracted from a verified InstrumentNameRows fixture
+META_AT = datetime(2026, 7, 14, tzinfo=UTC)
+LISTED_AT = datetime(2001, 8, 27, tzinfo=UTC)
+
+
+def _limit(sym, as_of, meta):
+    return resolve_limit_rule(
+        sym, as_of, meta, policy=LIMIT_POLICY, calendar=CALENDAR)
+
+
+def _meta(sym, *, is_st=False, metadata_available_at=META_AT):
+    return InstrumentMeta(symbol=sym, is_st=is_st, listed_at=LISTED_AT,
+                          metadata_available_at=metadata_available_at)
 
 
 def test_name_resolves_to_code():
@@ -287,75 +423,81 @@ def test_industry_name_rejected():
 
 def test_limit_rule_main_board():
     sym = Symbol(code="600519", exchange="SH", board="main")
-    r = resolve_limit_rule(sym, datetime(2026, 7, 15, tzinfo=UTC),
-                           InstrumentMeta(symbol=sym, is_st=False))
+    r = _limit(sym, datetime(2026, 7, 15, tzinfo=UTC), _meta(sym))
     assert r.pct == 0.10
 
 
 def test_limit_rule_star_and_st():
     star = Symbol(code="688981", exchange="SH", board="star")
-    assert resolve_limit_rule(star, datetime(2026, 7, 15, tzinfo=UTC),
-                              InstrumentMeta(symbol=star, is_st=False)).pct == 0.20
-    st = InstrumentMeta(symbol=star, is_st=True)
-    assert resolve_limit_rule(star, datetime(2026, 7, 15, tzinfo=UTC), st).pct == 0.05
+    assert _limit(star, datetime(2026, 7, 15, tzinfo=UTC),
+                  _meta(star)).pct == 0.20
+    st = _meta(star, is_st=True)
+    assert _limit(star, datetime(2026, 7, 15, tzinfo=UTC), st).pct == 0.05
 
 
 def test_limit_rule_unknown_st_returns_none():
     sym = Symbol(code="600519", exchange="SH", board="main")
-    r = resolve_limit_rule(sym, datetime(2026, 7, 15, tzinfo=UTC),
-                           InstrumentMeta(symbol=sym, is_st=None))
+    r = _limit(sym, datetime(2026, 7, 15, tzinfo=UTC),
+               _meta(sym, is_st=None))
     assert r.pct is None and "unknown" in r.reason.lower()
+
+
+def test_limit_rule_rejects_symbol_mismatch():
+    sym = Symbol(code="600519", exchange="SH", board="main")
+    other = Symbol(code="000001", exchange="SZ", board="main")
+    with pytest.raises(ValueError, match="symbol"):
+        _limit(sym, datetime(2026, 7, 15, tzinfo=UTC), _meta(other))
+
+
+def test_future_metadata_is_explicit_unknown_not_current_rule():
+    sym = Symbol(code="600519", exchange="SH", board="main")
+    future = datetime(2026, 7, 16, tzinfo=UTC)
+    rule = _limit(sym, datetime(2026, 7, 15, tzinfo=UTC),
+                  _meta(sym, metadata_available_at=future))
+    assert rule.pct is None and "available" in rule.reason.lower()
+
+
+def test_not_yet_listed_is_explicit_unknown():
+    sym = Symbol(code="600519", exchange="SH", board="main")
+    meta = InstrumentMeta(
+        symbol=sym, is_st=False,
+        listed_at=datetime(2026, 7, 16, tzinfo=UTC), metadata_available_at=META_AT)
+    rule = _limit(sym, datetime(2026, 7, 15, tzinfo=UTC), meta)
+    assert rule.pct is None and "listed" in rule.reason.lower()
+
+
+def test_limit_rule_rejects_naive_as_of():
+    sym = Symbol(code="600519", exchange="SH", board="main")
+    with pytest.raises((TypeError, ValueError)):
+        _limit(sym, datetime(2026, 7, 15), _meta(sym))
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pytest tests/orchestration/data/test_resolve.py -v`
+Run: `pytest tests/orchestration/data/test_calendar.py tests/orchestration/data/test_resolve.py -v`
 Expected: FAIL with `ImportError`
 
-- [ ] **Step 3: Write minimal implementation** (append to `guanlan_v2/orchestration/data/symbols.py`)
+- [ ] **Step 3: Implement the PIT-aware pure resolvers** (append to `guanlan_v2/orchestration/data/symbols.py`)
 
-```python
-# ── append to guanlan_v2/orchestration/data/symbols.py ──
-from collections.abc import Mapping as _Mapping
-from datetime import datetime as _dt
+Implementation requirements:
 
-_CJK = _re.compile(r"[一-鿿]")
-
-
-def resolve_name_to_code(raw: str, name_map: _Mapping[str, str]) -> Symbol:
-    s = str(raw).strip()
-    if _SIX.search(s.upper()):
-        return normalize_symbol(s)
-    if _CJK.search(s):
-        if s in name_map:
-            return normalize_symbol(name_map[s])
-        raise ValueError(
-            f"{s!r} is not a known stock name (looks like an industry/concept). "
-            "Pass a 6-digit code — never guessed.")
-    raise ValueError(f"cannot resolve {raw!r} to a 6-digit code")
-
-
-def resolve_limit_rule(sym: Symbol, as_of: _dt, meta: InstrumentMeta) -> LimitRule:
-    ver = "a-share-2020"
-    if meta.is_st is True:
-        return LimitRule(pct=0.05, reason="ST", rule_version=ver)
-    if meta.is_st is None:
-        return LimitRule(pct=None, reason="ST status unknown; cannot assert limit", rule_version=ver)
-    board_pct = {"star": 0.20, "chinext": 0.20, "bj": 0.30, "main": 0.10}
-    if sym.board not in board_pct:
-        return LimitRule(pct=None, reason=f"unknown board {sym.board}", rule_version=ver)
-    return LimitRule(pct=board_pct[sym.board], reason=f"{sym.board} board", rule_version=ver)
-```
+- never call `str(raw)` or partially match a code;
+- attempt the exact symbol grammar first, then the verified name map;
+- reject a name-map value that is not itself an exact valid symbol;
+- verify symbol identity and all metadata timestamps before consulting the rule table;
+- select one immutable `LimitRulePolicy` entry by `as_of`; its canonical material/digest matches `limit_rule_policy_v1.json` and Task 6 refers to it by `ContentRef` rather than treating policy bytes as a schema-registry entry;
+- use the authoritative trading calendar for any listing-session rule; if it is unavailable, return an explicit unknown `LimitRule`, not a guessed percentage;
+- preserve the Phase 1 strict/frozen/digest invariants of returned `Symbol` and `LimitRule`.
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pytest tests/orchestration/data/test_resolve.py -v`
-Expected: PASS (6 passed)
+Run: `pytest tests/orchestration/data/test_calendar.py tests/orchestration/data/test_resolve.py -v`
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add guanlan_v2/orchestration/data/symbols.py tests/orchestration/data/test_resolve.py
+git add guanlan_v2/orchestration/data/calendar.py guanlan_v2/orchestration/data/symbols.py tests/orchestration/data/calendar_fixtures.py tests/orchestration/data/test_calendar.py tests/orchestration/data/test_resolve.py tests/orchestration/golden/limit_rule_policy_v1.json
 git commit -m "feat(orchestration): resolve_name_to_code + resolve_limit_rule (phase3)"
 ```
 
@@ -368,129 +510,50 @@ git commit -m "feat(orchestration): resolve_name_to_code + resolve_limit_rule (p
 - Test: `tests/orchestration/data/test_pit.py`
 
 **Interfaces:**
-- Consumes: `data.result.PitAudit` (Phase 1), `enums.DataMode`, `data.errors.*`.
+- Consumes: Phase 1 `DataContext`, `PitAudit`, `ContentRef`, canonical digest/shared strict types; Task 1 errors; Task 3 `TradingCalendar`; Phase 2 `AuthoritativeClock`/`NamedEvidenceDigest` shapes and an internal refusal-recorder protocol. It does not construct a store or require the Task 5 registry.
 - Produces:
-  - `class FreshnessPolicy(BaseModel)`: `max_stale_days: int | None = None`.
-  - `class PitGuard` — `__init__(self, *, mode: DataMode, strict: bool)`; `check_rows(self, rows: list[dict], *, as_of: datetime, now: datetime, freshness: FreshnessPolicy | None = None) -> tuple[list[dict], PitAudit]`. Each row must have a tz-aware `available_at`; missing → `MissingAvailabilityRefused`. Rows with `available_at > as_of`: strict → `FutureDataRefused`; non-strict → filtered out (`guard_result="filtered"`). Latest visible `available_at` older than `freshness.max_stale_days` → `StaleDataError`.
+  - `RawRowCandidate(DigestModel)`: the minimal immutable pre-validation envelope—canonical raw JSON payload, effective time, optional `available_at` so missing metadata remains classifiable, trusted ingestion time, revision ID and verified raw content digest. It is not consumable data and is registered by Task 5.
+  - `FreshnessPolicy(DigestModel)`: closed `schema_version: Literal["1"]`, stable policy ID/version, exactly one explicit elapsed-duration or trading-session threshold, exact calendar `ContentRef` when session-based, and its verified policy digest. Counts are strict non-negative integers; bool is rejected.
+  - `DataFetchRefusalDetails(DigestModel)`: closed `schema_version: Literal["1"]` audit-detail payload containing reason code/stage plus request/context/method/routing/snapshot-content/vintage identities and optional source/capability/candidate-metadata/PIT-audit identities according to how far execution reached. Its validator enforces the stage/optional-field matrix (for example, pre-invocation manifest mismatch forbids candidate/PIT facts; future-row refusal requires both). It contains no raw candidate bytes, credentials or physical paths and is registered by Task 5.
+  - `PitGuard.from_context(ctx: DataContext, *, clock: AuthoritativeClock, calendar: TradingCalendar, refusal_recorder) -> PitGuard`. Calendar ID/material must match the context and selected freshness policy; there is no session arithmetic fallback. The recorder protocol accepts `DataFetchRefusalDetails` plus ordered evidence and returns only after recording succeeds; neither the guard nor recorder callers construct `EventRefusalRecord`. Task 4 tests it with an in-memory spy because the cumulative Phase 3 registry does not exist until Task 5; Task 6 binds it to the current gateway pending invocation's `reject` adapter or a standalone pre-invocation `EventRefusalAuditSink.record` adapter. The constructor copies no caller override: mode, backend, strictness, as-of, snapshot locator/content digest, vintage digest and source-config identity come only from `ctx`.
+  - `check_raw(candidates: tuple[RawRowCandidate, ...], *, request_digest: DigestHex, request_context_digest: DigestHex, source_ref: ContentRef, freshness=None) -> tuple[tuple[RawRowCandidate, ...], PitAudit]`. It verifies the supplied context digest, timezone metadata and frozen cutoff before Task 5 converts payloads to a registered `PitRecord` subtype. Task 5's DataRequest builder supplies these values; Task 4 has no forward dependency.
 
-- [ ] **Step 1: Write the failing test**
+**PIT/refusal invariants:**
 
-```python
-# tests/orchestration/data/test_pit.py
-from __future__ import annotations
-from datetime import datetime, timedelta, timezone
-import pytest
-from guanlan_v2.orchestration.enums import DataMode
-from guanlan_v2.orchestration.data.pit import PitGuard, FreshnessPolicy
-from guanlan_v2.orchestration.data.errors import (
-    FutureDataRefused, MissingAvailabilityRefused, StaleDataError)
+- `PitGuard` validates only intrinsic `DataContext` facts: `PIT_REPLAY` requires `strict_pit=True`, a non-empty snapshot locator, `data_snapshot_content_digest`, `vintage_manifest_digest` and a non-LIVE backend. Exact context↔manifest/routing/source-registry equality is a Task 6 pre-invocation check because Task 4 deliberately does not receive those objects.
+- missing/naive `available_at` always raises `MissingAvailabilityRefused`; `available_at > ctx.as_of` always raises `FutureDataRefused`. There is no soft `filtered` success path.
+- the guard makes exactly one recorder call with typed `DataFetchRefusalDetails` and ordered `NamedEvidenceDigest`s before raising. Task 4 proves ordering and failure propagation with a spy; Task 6 proves the registered production binding. In production, an active source call delegates to `CapabilityGateway.reject`, which alone calls `EventRefusalAuditSink`; before an invocation the adapter delegates directly to `EventRefusalAuditSink.record`. The sink is the sole owner of detail persistence and `EventRefusalRecord` creation. Dispatch must not write a second record, and refusal is never forged as a public `RunEvent`.
+- a refused candidate never enters a cache, `PayloadStore`, `DataResult`, `InputSnapshot`, `Artifact` or fallback vendor.
+- freshness is evaluated against `ctx.as_of` with the frozen clock/calendar policy; wall-clock collection time remains audit-only.
 
-UTC = timezone.utc
-AS_OF = datetime(2026, 7, 15, tzinfo=UTC)
-def _row(day, v=1): return {"available_at": datetime(2026, 7, day, tzinfo=UTC), "v": v}
+- [ ] **Step 1: Write the failing tests**
 
+Keep the reusable visible/future/missing/naive/stale cases, but construct valid Phase 1 `DataContext` fixtures and `RawRowCandidate` objects through their builders. Add this rejection matrix:
 
-def test_all_visible_rows_pass():
-    g = PitGuard(mode=DataMode.ONLINE, strict=False)
-    rows, audit = g.check_rows([_row(10), _row(14)], as_of=AS_OF, now=AS_OF)
-    assert len(rows) == 2 and audit.guard_result == "passed" and audit.future_rows == 0
-
-
-def test_strict_replay_refuses_future_rows():
-    g = PitGuard(mode=DataMode.PIT_REPLAY, strict=True)
-    with pytest.raises(FutureDataRefused) as ei:
-        g.check_rows([_row(14), _row(16)], as_of=AS_OF, now=AS_OF)
-    assert ei.value.future_rows == 1
-
-
-def test_soft_mode_filters_future_rows():
-    g = PitGuard(mode=DataMode.ONLINE, strict=False)
-    rows, audit = g.check_rows([_row(14), _row(16)], as_of=AS_OF, now=AS_OF)
-    assert len(rows) == 1 and audit.guard_result == "filtered" and audit.future_rows == 1
-
-
-def test_missing_available_at_refused():
-    g = PitGuard(mode=DataMode.ONLINE, strict=False)
-    with pytest.raises(MissingAvailabilityRefused):
-        g.check_rows([{"v": 1}], as_of=AS_OF, now=AS_OF)
-
-
-def test_naive_available_at_refused():
-    g = PitGuard(mode=DataMode.ONLINE, strict=False)
-    with pytest.raises(MissingAvailabilityRefused):
-        g.check_rows([{"available_at": datetime(2026, 7, 10)}], as_of=AS_OF, now=AS_OF)
-
-
-def test_stale_rows_raise():
-    g = PitGuard(mode=DataMode.ONLINE, strict=False)
-    with pytest.raises(StaleDataError):
-        g.check_rows([_row(1)], as_of=AS_OF, now=AS_OF, freshness=FreshnessPolicy(max_stale_days=5))
-```
+1. visible ordered candidates return an immutable tuple and coherent `PitAudit(passed)`;
+2. both ONLINE and PIT_REPLAY refuse a future candidate rather than filtering it;
+3. missing and naive availability produce distinct refusal reasons;
+4. PIT_REPLAY with non-strict context, missing snapshot locator/content/vintage identity or LIVE backend is rejected before a source call; exact manifest/context mismatch moves to Task 6 tests;
+5. a request-context digest different from the guard's DataContext digest is rejected;
+6. the recorder spy observes exactly one typed detail before the exception is observed, and the same guard idempotency key is reused deterministically;
+7. recorder failure remains loud and cannot return data; registered audit-sink idempotency/namespace behavior is tested after Task 5 in Task 6;
+8. refused candidates cause zero cache/payload/snapshot writes;
+9. negative/bool thresholds, calendar mismatch and mutable/extra policy fields are rejected;
+10. elapsed-duration and trading-session freshness boundaries use the frozen clock and exact calendar material; missing/drifted calendars fail rather than using wall-clock/global session arithmetic.
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/orchestration/data/test_pit.py -v`
 Expected: FAIL with `ModuleNotFoundError`
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Implement strict policy and context-bound guard**
 
-```python
-# guanlan_v2/orchestration/data/pit.py
-from __future__ import annotations
-from datetime import datetime
-from pydantic import BaseModel
-from guanlan_v2.orchestration.data.errors import (
-    FutureDataRefused, MissingAvailabilityRefused, StaleDataError)
-from guanlan_v2.orchestration.data.result import PitAudit
-from guanlan_v2.orchestration.enums import DataMode
-
-
-class FreshnessPolicy(BaseModel):
-    max_stale_days: int | None = None
-
-
-class PitGuard:
-    def __init__(self, *, mode: DataMode, strict: bool):
-        self.mode = mode
-        self.strict = strict
-
-    def check_rows(self, rows: list[dict], *, as_of: datetime, now: datetime,
-                   freshness: FreshnessPolicy | None = None) -> tuple[list[dict], PitAudit]:
-        rows_seen = len(rows)
-        for r in rows:
-            av = r.get("available_at")
-            if av is None:
-                raise MissingAvailabilityRefused("row missing available_at")
-            if av.tzinfo is None:
-                raise MissingAvailabilityRefused("available_at must be timezone-aware")
-        future = [r for r in rows if r["available_at"] > as_of]
-        if future:
-            if self.strict:
-                raise FutureDataRefused(
-                    f"{len(future)} rows available_at > as_of in strict PIT replay",
-                    future_rows=len(future))
-            visible = [r for r in rows if r["available_at"] <= as_of]
-            guard_result = "filtered"
-        else:
-            visible = list(rows)
-            guard_result = "passed"
-        latest = max((r["available_at"] for r in visible), default=None)
-        if freshness and freshness.max_stale_days is not None and latest is not None:
-            if (as_of - latest).days > freshness.max_stale_days:
-                raise StaleDataError(
-                    f"latest available_at {latest.isoformat()} older than "
-                    f"{freshness.max_stale_days}d", latest_available_at=latest)
-        audit = PitAudit(mode=self.mode, as_of=as_of, rows_seen=rows_seen,
-                         rows_returned=len(visible), future_rows=len(future),
-                         missing_available_at_rows=0, guard_result=guard_result,
-                         latest_available_at=latest)
-        return visible, audit
-```
+Use Phase 1 shared validators and digest projections. Build `PitAudit` through its verified builder. The refusal helper calls the supplied recorder once with `DataFetchRefusalDetails` and waits for success before raising. Keep Task 4 free of registry/store construction; Task 6 supplies the production gateway/sink adapter after Task 5 registers the detail schema. Raw rejected data is never passed to the recorder. Do not add a public event, duplicate the recorder call, or catch a refusal in order to return data.
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/orchestration/data/test_pit.py -v`
-Expected: PASS (6 passed)
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -505,542 +568,605 @@ git commit -m "feat(orchestration): PitGuard refuses future data (phase3)"
 
 **Files:**
 - Create: `guanlan_v2/orchestration/data/source.py`
+- Create: `guanlan_v2/orchestration/data/catalog.py`
+- Create: `guanlan_v2/orchestration/data/snapshot.py`
+- Create: `guanlan_v2/orchestration/data/render.py`
+- Create: `guanlan_v2/orchestration/data/schema_registry.py`
 - Test: `tests/orchestration/data/test_source.py`
+- Test: `tests/orchestration/data/test_snapshot.py`
+- Test: `tests/orchestration/data/test_data_schema_registry.py`
+- Test: `tests/orchestration/data/test_data_catalog.py`
+- Create: `tests/orchestration/golden/data_schema_manifest_v1.json`
+- Create: `tests/orchestration/golden/data_catalog_manifest_v1.json`
 
 **Interfaces:**
-- Consumes: `digest.content_digest`.
+- Consumes: Phase 1 strict/digest types, `SchemaRef`/`ContentRef`/`CapabilityRef`/`PayloadRef`, sealed `SchemaRegistry`, `WorkerCatalogSnapshot`/`WorkerSpec`/`CapabilityDescriptor` and their material-aware builder, `PitRecord`, `DataResult`, `DataContext`, `Symbol`, `DataMode` and `DataBackend`; plus Phase 2 `PHASE2_PUBLIC_MODELS`, cumulative registry digest, canonical `PHASE2_STATIC_CATALOG_DIGEST/phase2_static_catalog_snapshot()` and read-only `CatalogRuntime` contract.
 - Produces:
-  - `class DataRequest(BaseModel)`: `method: str`, `params: dict[str, Any]`, `category: str`, `as_of: datetime`, `strict_pit: bool`; property `request_digest -> str` (content_digest over method+params+as_of, sorted).
-  - `class RawFetch(BaseModel)`: `rows: list[dict]`, `vendor: str`, `subsource: str | None = None`, `fetched_at: datetime`.
-  - `class RowSet(BaseModel)`: `rows: list[dict]` (the typed `DataResult` payload for this phase).
-  - `class DataSource(Protocol)`: `name: str`; `def capabilities(self) -> set[str]`; `def fetch(self, method: str, req: DataRequest) -> RawFetch` (raises a `DataError` subclass on any non-success).
+  - `DataMethodSpec(DigestModel)`: closed `schema_version: Literal["1"]`, stable ID/version/category, `params_schema_ref`, concrete `batch_schema_ref`, named concrete `result_schema_ref`, optional/core policy, supported modes/backends, `read_only: Literal[True]`, exact data-adapter `CapabilityRef`, versioned freshness-policy `ContentRef` and exact `renderer_ref: ContentRef`. Caller/model input cannot select a renderer.
+  - `DataRequest(DigestModel)`: closed version, audit-only request ID and snapshot locator, method-spec `ContentRef`, validated params plus params `SchemaRef`, and values derived by its pure builder from one `DataContext`/routing/registry snapshot: as-of, mode, backend, semantic `data_snapshot_content_digest`, vintage-manifest/source-config/source-registry/routing/context/schema-registry digests and resolved-chain digest. There is no caller-owned `strict_pit`, chain or config override. `request_digest` is verified and excludes the audit-only request ID/snapshot locator.
+  - Task 4 `RawRowCandidate` is reused as the only untrusted pre-validation carrier; Task 5 does not redefine it.
+  - `RawFetch(DigestModel)`: exact request digest, source/capability refs, immutable candidate tuple, subsource identity and audit-only fetch/provider timing; declared semantic/audit digests are builder-computed.
+  - intentionally unregistered, frozen internal carriers in `source.py`: `DataInvocationScope(plan_digest, node_id, worker_id, ordinal_token: ExecutionEvidenceOrdinalToken, catalog_digest, schema_registry_digest)`, `ResolvedDataMethodPolicy(method_ref, freshness_policy, limit_policy, calendar, policy_bundle_digest)`, `VerifiedDataCacheHit(result, result_schema_ref, result_ref)` and `DataReadOutcome(ordinal_token, result, result_schema_ref, request_ref, result_ref, tool_call_record)`. The Phase 2 executor issues the token from its one cross-provider sequencer before dispatch; Phase 3 may validate/echo but never mint it. These carriers preserve service authorization/policy, issuance order and already-persisted refs without creating a second public schema; `tool_call_record` is zero-or-one per read. Task 6 consumes them rather than defining later registry models.
+  - service-side `DataSource(Protocol)`: one adapter handler behind the Phase 2 `CapabilityGateway`; it does not expose a mutable capability set and dispatch never calls the handler directly.
 
-- [ ] **Step 1: Write the failing test**
+**Concrete registered payloads:**
 
-```python
-# tests/orchestration/data/test_source.py
-from __future__ import annotations
-from datetime import datetime, timezone
-from guanlan_v2.orchestration.data.source import DataRequest, RawFetch, RowSet
+- `InstrumentNameRecord`, `OHLCVRecord`, `IndicatorRecord`, `VerifiedSnapshotRecord`, `FundamentalRecord`, `NewsRecord` and `SignalRecord` each subclass Phase 1 `PitRecord` and add field-level strict domain data. Their required `available_at`, `ingested_at`, revision and row content digest are never replaced by one top-level timestamp.
+- Corresponding immutable batches `InstrumentNameRows`, `OHLCVRows`, `IndicatorRows`, `VerifiedSnapshotRows`, `FundamentalRows`, `NewsRows` and `SignalRows` subclass `DigestModel` and contain tuples of exactly the matching record type. Builders enforce method-specific canonical sort keys, duplicate identity rules and batch content digest.
+- Named persisted envelopes `InstrumentNameDataResult`, `OHLCVDataResult`, `IndicatorDataResult`, `VerifiedSnapshotDataResult`, `FundamentalDataResult`, `NewsDataResult` and `SignalDataResult` are closed concrete subclasses/specializations of Phase 1 `DataResult[MatchingRows]`. Each has its own stable registered `SchemaRef`; `DataMethodSpec.result_schema_ref` must name the matching envelope. A runtime-only generic annotation is never used as a persisted schema identity.
+- No public generic `RowSet`, `list[dict]` result payload or anonymous schema is allowed. `RawRowCandidate.raw_payload` is the only pre-validation JSON envelope; the method adapter validates it to the method spec's concrete registered record before `DataResult.build` can consume it.
+- Task 5 also freezes the strict DTOs consumed by later runtime tasks:
+  - `DataSourceDescriptor(DigestModel)`: closed version, stable source ID/version, supported method refs, per-method capability refs, supported modes/backends, trusted `handler_ref: ContentRef`, source-config `SchemaRef` and descriptor digest. `handler_ref` resolves from the reviewed catalog/material runtime and may not be a caller callable/path; credentials and physical paths remain service-owned;
+  - `DataSourceRegistrySnapshot(DigestModel)`: closed version, immutable method specs/source descriptors/default route policies, exact `LimitRulePolicy`/`FreshnessPolicy` materials keyed by their `ContentRef`, and verified source-registry digest. It contains policy values/digests, not physical files;
+  - read-only `DataPolicyResolver` over that sealed snapshot: `resolve_method(method_spec, *, ctx) -> ResolvedDataMethodPolicy` resolves exact policy refs, verifies material digest/type, resolves the context-matching session calendar through Task 3 `TradingCalendarResolver`, and returns the single bound bundle. Missing, extra, wrong-type or drifted policy/calendar material fails at seal/startup rather than falling back to a module global;
+  - `RenderedDataBlock(DigestModel)`: closed version, renderer `ContentRef`, result `SchemaRef + PayloadRef`, source result/content/PIT-audit digests, status/provenance fields, `trust=Literal["untrusted_data"]`, deterministic media type/text, `rendered_from_payload_digest` and verified block digest.
+  - `DataPrefetchOperation@1` and `DataBridgePrefetchBinding@1`: strict registered catalog-material contracts that bind one exact execution-bridge ID to canonically ordered worker/method/capability mappings and a closed projection from already validated `PlanNode.params`/named InputSnapshot values into each method's params schema. Sources are exact JSON-pointer/value bindings only—no expression, callable, model-generated method/params, clock, global config or dynamic late-call escape. The binding digest is verified and all referenced workers/methods/capabilities/schemas cross-resolve.
+  Tasks 6/7 implement registry/renderer behavior over these already-registered contracts; they do not introduce a late unregistered model.
 
-UTC = timezone.utc
+**Routing / snapshot / cache ABI (`snapshot.py`):**
 
+- `DataSourceConfigSnapshot(DigestModel)`: normalized non-secret method/source selections and option digests. Credential values never enter this model; the gateway owns them. Its declared source-config digest is builder-verified.
+- `ResolvedMethodRoute(DigestModel)`: method-spec ref plus an explicit ordered tuple of source/capability refs and the versioned route-policy ref.
+- `DataRoutingSnapshot(DigestModel)`: audit ID, source-registry/schema-registry/source-config digests and canonically keyed method routes. Its builder is the sole producer of `DataContext.resolved_vendor_chains`; registry insertion order is never a routing policy.
+- `DataSnapshotEntry(DigestModel)`: dataset/method/source/revision identities, payload `SchemaRef`, content digest and maximum availability. It never embeds a cache-key digest; cache keys bind the completed manifest in one direction, avoiding a digest cycle.
+- `DataSnapshotManifest(DigestModel)`: audit-only `data_snapshot_id`, `manifest_kind: Literal["pit_frozen","online_capture_root"]`, as-of/mode, routing and schema-registry digests, immutable sorted entries, vintage-manifest digest and verified `content_digest`. The locator is excluded from the semantic projection; relocating byte-identical manifest content changes audit/dereference identity only. The vintage digest is computed from the sorted vintage-entry projection and excludes itself; the overall content digest is then computed without either declared digest self-referencing. A `pit_frozen` manifest is complete and immutable for replay. An `online_capture_root` freezes the run-start boundary/routing but does not pretend a live vendor is snapshot-isolated; subsequently recorded DataResults append under that root without mutating it.
+- `build_data_context(clock: AuthoritativeClock, *, mode, backend, source_config, source_registry, routing, manifest) -> DataContext` is the only Phase 3 runtime constructor. It fills the exact Phase 1 fields `resolved_vendor_chains`, `source_config_digest`, `source_registry_digest`, `routing_snapshot_digest`, `data_snapshot_id`, `data_snapshot_content_digest` and `vintage_manifest_digest`, and verifies exact digest/as-of/calendar consistency. PIT_REPLAY accepts only a complete `pit_frozen` manifest; ONLINE uses an `online_capture_root` and per-result persisted evidence.
+- `DataCacheKey(DigestModel)`: method/source refs, canonical params digest, as-of, mode/backend, semantic snapshot-content/vintage/schema/source-config/routing/source-registry/schema-registry digests. It never uses `data_snapshot_id` as a semantic key dimension. `DataCacheEntry(DigestModel)` binds that key to a result `SchemaRef + PayloadRef`, result content/audit digests and `PitAudit` digest. Result content/schema/PIT identity is semantic; result audit digest, snapshot locator and `PayloadRef.object_id` remain audit/dereference identity and cannot perturb semantic cache equivalence.
+- `DataCache(Protocol)`: `get_verified(key, *, ctx, manifest, registry, payload_store) -> VerifiedDataCacheHit | None` and `put_verified(key, result_ref, *, result, pit_audit)`. The protocol carries no physical root; an in-memory conformance fake proves the ABI while production PIT/cache adapters remain later work. A cache hit therefore keeps the exact result ref needed by provenance instead of returning a detached Python object.
+- Cache reads verify every bound digest and rerun the context/PIT compatibility check. Rejected data is never written. In PIT_REPLAY, a manifest mismatch is terminal; a miss may continue only to an explicitly frozen, snapshot-bound PIT_STORE adapter. `backend=CACHE` has no such continuation, and no replay path may invoke LIVE.
 
-def test_request_digest_stable_and_param_sensitive():
-    a = DataRequest(method="get_ohlcv", params={"symbol": "600519", "start": "2026-01-01"},
-                    category="core_stock_apis", as_of=datetime(2026, 7, 15, tzinfo=UTC), strict_pit=False)
-    b = DataRequest(method="get_ohlcv", params={"start": "2026-01-01", "symbol": "600519"},
-                    category="core_stock_apis", as_of=datetime(2026, 7, 15, tzinfo=UTC), strict_pit=False)
-    assert a.request_digest == b.request_digest        # key order independent
-    c = a.model_copy(update={"params": {"symbol": "000001"}})
-    assert a.request_digest != c.request_digest
+**Phase 3 schema-registry extension:**
 
+- `PHASE3_PUBLIC_MODELS` is one reviewed tuple containing the Task 3 `LimitRulePolicy` and every public model introduced by Tasks 4–5, including `DataFetchRefusalDetails`, `DataPrefetchOperation`, `DataBridgePrefetchBinding` and all seven named concrete DataResult envelopes; `PHASE3_INTERNAL_MODELS` maps `DataInvocationScope`, `ResolvedDataMethodPolicy`, `VerifiedDataCacheHit`, `DataReadOutcome` and any other intentionally unregistered helper to a reviewed reason.
+- `PHASE3_DATA_REGISTRY_DIGEST` and `build_phase3_registry(expected_phase2_runtime_digest) -> sealed SchemaRegistry` construct/identify a fresh cumulative **data-only** registry from Phase 2's exported `PHASE2_PUBLIC_MODELS` (which already includes the exact Phase 1 public model set) plus `PHASE3_PUBLIC_MODELS`, and first verify the expected Phase 2 runtime manifest/digest plus its exported `PHASE2_BASE_REGISTRY_DIGEST`. It never mutates or unseals either upstream sealed registry. Task 9 may extend this immutable snapshot but may not rewrite its tuple, digest or golden.
+- Every new model's JSON Schema has a constant closed version; manifest ordering and digest are registration-order independent and frozen in `data_schema_manifest_v1.json`.
+- old Plans continue resolving their exact Phase 1 or Phase 2 registry digest; Plans using these data payloads bind the Phase 3 cumulative registry digest. No global mutable "latest registry" may reinterpret an old Plan.
 
-def test_rawfetch_and_rowset_roundtrip():
-    rf = RawFetch(rows=[{"v": 1}], vendor="a_stock", fetched_at=datetime(2026, 7, 15, tzinfo=UTC))
-    assert RowSet(rows=rf.rows).rows == [{"v": 1}]
-```
+**Phase 3 catalog/capability extension (`catalog.py`):**
+
+- `PHASE3_DATA_CAPABILITIES` is a reviewed tuple of the unchanged closed Phase 1 `CapabilityDescriptor@1`. Each entry contains only `id/version/capability_kind/transport/operation/input_schema_ref/output_schema_ref`; for a data method those SchemaRefs are the registered `DataRequest` and that method's named concrete DataResult. `RawFetch` is an unpublished gateway/adapter intermediate, never the public capability output SchemaRef. Phase 3 must not add mode/backend/side-effect/handler fields to this v1 descriptor.
+- Data semantics remain in their owning contracts: allowed modes/backends and `read_only=True` live in `DataMethodSpec`; trusted handler material lives in `DataSourceDescriptor.handler_ref` and resolves through the catalog's `ContentManifestEntry(kind="handler")` plus Phase 2 `CatalogRuntime`. The method spec, source route, capability descriptor and handler material must cross-resolve to one reviewed identity set.
+- Phase 3 data adds one canonical Phase 2 `ExecutionBridgeDescriptor@1` material for `DataRuntimeBridge`. Its activation predicates are the exact Phase 3 data capability refs, `pre_input_kind="none"`, `lifecycle="static_prefetch_v1"`; its config ref/schema identify the exact `DataBridgePrefetchBinding@1`, its handler ref identifies the trusted provider implementation, and its priority is globally reviewed for later data+memory composition. Descriptor/config are `kind="guardrail"`; provider handler is `kind="handler"`. A worker with any activated data capability therefore requires this exact provider before reservation.
+- `PHASE3_BASE_CATALOG_DIGEST` equals the canonical end-of-Phase-2 `PHASE2_STATIC_CATALOG_DIGEST`; the Task 0 fixture verifies it. `PHASE3_DATA_CATALOG_DIGEST` identifies the immutable data-only result. `build_phase3_catalog(phase2_snapshot, *, reviewed_worker_updates, reviewed_source_descriptors, reviewed_method_specs, data_bridge_descriptor, data_bridge_prefetch_binding, resolved_materials) -> WorkerCatalogSnapshot` first rejects every other base digest, then uses the Phase 1 catalog builder. It preserves unchanged worker/material identities, applies only reviewed capability-allowlist updates, and proves every source handler, method renderer and execution-bridge descriptor/config/handler ref has exactly one correctly typed material and no extra material. Every worker granted a data capability has an exact prefetch row for that capability, and every row is granted—coverage is one-to-one. It validates all model/content/capability digests and emits the one Phase 3 data catalog digest/golden. Missing/drifted bridge material, a dynamic/late-call config or incomplete/extra worker-capability mapping fails. It never mutates the Phase 2 snapshot; Task 9 extends it by a new digest/golden rather than overwriting it.
+- No capability is granted globally. The initial integration explicitly reviews which existing pilot/final worker may call each data method; at minimum the Phase 3 integration fixture grants only the methods exercised by that worker. `compat.*` remains `static_legacy_only` and gains no data capability unless the legacy mapping/material evidence explicitly requires it.
+- old Plans keep the Phase 1/2 catalog digest. A Plan using a Phase 3 data capability binds both the Phase 3 cumulative registry digest and Phase 3 catalog digest; changing either requires validation, support analysis, reservation and approval again.
+
+- [ ] **Step 1: Write failing contract, snapshot and registry tests**
+
+Preserve the useful request-digest intent: reversed JSON key order is stable, while a params/context/mode/snapshot/routing/source-config/schema-registry change alters the digest. Construct requests only with the pure builder. Add:
+
+1. params are validated by the method's exact `params_schema_ref`; extra fields, bool-as-number, naive datetime and non-finite values fail;
+2. RawFetch semantic digest ignores only declared audit timing/provider IDs; source, capability, request, candidate content/order/outcome changes are semantic;
+3. missing availability can exist only in `RawRowCandidate` long enough for `PitGuard` to refuse it;
+4. every concrete batch accepts only its matching `PitRecord` subtype, is immutable and canonicalizes ordering deterministically;
+5. `DataResult.build` accepts each registered concrete batch through its matching named DataResult envelope and rejects generic runtime specializations, generic mappings, wrong result/batch schema refs and declared digest mismatches;
+6. `RowSet` is absent from the public module/registry;
+7. source-config/routing/snapshot/context builders reject secrets, duplicate/unknown methods/sources, missing/extra/drifted policy material, mismatched policy/calendar refs, registry/config/context/as-of/calendar digests and unordered declarations;
+8. adding a future revision does not change an older PIT manifest/result digest; appending an online captured result does not mutate its capture-root digest;
+9. all semantic cache-key dimensions are sensitive; snapshot-ID/object-ID relocation alone is invariant, while a cache hit with a mismatched snapshot-content/result/PIT/schema digest is rejected;
+10. PIT_REPLAY cache miss can reach only an explicitly frozen matching PIT_STORE fake; CACHE-only and every LIVE continuation are rejected;
+11. Phase 1 and Phase 2 registries remain sealed and unchanged after building the Phase 3 snapshot, and the Phase 2 control-model subset remains byte/schema-identical;
+12. every public ContractModel introduced by Tasks 3–5 under `orchestration.data` is in the data-only `PHASE3_PUBLIC_MODELS` or reviewed data internal map; Task 9 memory modules are deliberately checked by their separate full-registry completeness test;
+13. reversed Phase 3 registration order has the same manifest/digest and matches the golden file.
+14. the Phase 3 catalog builder rejects a non-canonical Phase 2 base digest, unknown/schema-mismatched capabilities, an attempted extra field on closed `CapabilityDescriptor@1`, unreviewed worker grants, missing/extra handler material and handler drift; the exact data bridge descriptor/config/handler cross-resolve, activate for every granted data worker, reject dynamic/model-selected/late-call mappings and alter the catalog digest on any mapping/material/priority drift. Unchanged worker/material entries remain digest-identical, and the resulting manifest matches the single `data_catalog_manifest_v1.json`.
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pytest tests/orchestration/data/test_source.py -v`
+Run: `pytest tests/orchestration/data/test_source.py tests/orchestration/data/test_snapshot.py tests/orchestration/data/test_data_schema_registry.py tests/orchestration/data/test_data_catalog.py -v`
 Expected: FAIL with `ModuleNotFoundError`
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Implement strict models, pure builders and the sealed Phase 3 registry/catalog extensions**
 
-```python
-# guanlan_v2/orchestration/data/source.py
-from __future__ import annotations
-from datetime import datetime
-from typing import Any, Protocol
-from pydantic import BaseModel
-from guanlan_v2.orchestration.digest import content_digest
-
-
-class DataRequest(BaseModel):
-    method: str
-    params: dict[str, Any]
-    category: str
-    as_of: datetime
-    strict_pit: bool
-
-    @property
-    def request_digest(self) -> str:
-        return content_digest({"method": self.method, "params": self.params,
-                               "as_of": self.as_of.isoformat()})
-
-
-class RawFetch(BaseModel):
-    rows: list[dict]
-    vendor: str
-    subsource: str | None = None
-    fetched_at: datetime
-
-
-class RowSet(BaseModel):
-    rows: list[dict]
-
-
-class DataSource(Protocol):
-    name: str
-
-    def capabilities(self) -> set[str]: ...
-
-    def fetch(self, method: str, req: DataRequest) -> RawFetch: ...
-```
+All public DTOs use `ContractModel`/`DigestModel`, immutable tuples and shared strict validators. Registry and cache lookup take an explicit snapshot/digest; imports perform no registration or I/O. Method-specific adapters are the only code allowed to turn a raw candidate into a concrete record, and their output is immediately registry-validated before batch/result construction.
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pytest tests/orchestration/data/test_source.py -v`
-Expected: PASS (2 passed)
+Run: `pytest tests/orchestration/data/test_source.py tests/orchestration/data/test_snapshot.py tests/orchestration/data/test_data_schema_registry.py tests/orchestration/data/test_data_catalog.py -v`
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add guanlan_v2/orchestration/data/source.py tests/orchestration/data/test_source.py
-git commit -m "feat(orchestration): DataSource protocol + request/result value objects (phase3)"
+git add guanlan_v2/orchestration/data/source.py guanlan_v2/orchestration/data/catalog.py guanlan_v2/orchestration/data/snapshot.py guanlan_v2/orchestration/data/render.py guanlan_v2/orchestration/data/schema_registry.py tests/orchestration/data/test_source.py tests/orchestration/data/test_snapshot.py tests/orchestration/data/test_data_schema_registry.py tests/orchestration/data/test_data_catalog.py tests/orchestration/golden/data_schema_manifest_v1.json tests/orchestration/golden/data_catalog_manifest_v1.json
+git commit -m "feat(orchestration): freeze typed data payload and snapshot ABI"
 ```
 
 ---
 
-## Task 6: `SourceRegistry.dispatch` (narrow fallback router)
+## Task 6: sealed `DataSourceRegistry.dispatch` (narrow fallback router)
 
 **Files:**
 - Create: `guanlan_v2/orchestration/data/registry.py`
 - Test: `tests/orchestration/data/test_registry.py`
+- Create: `tests/orchestration/golden/data_source_manifest_v1.json`
 
 **Interfaces:**
-- Consumes: `data.source.DataSource/DataRequest/RawFetch/RowSet`, `data.pit.PitGuard/FreshnessPolicy`, `data.errors.*`, `data.result.DataResult/SourceAttempt`, `enums.DataStatus`, `digest.content_digest`.
-- Produces: module constant `OPTIONAL_CATEGORIES: set[str]`; `class SourceRegistry`:
-  - `register(self, method: str, vendor: str, source: DataSource) -> None`.
-  - `resolve_chain(self, method: str, cfg: Mapping[str, str]) -> list[str]` — `cfg[method]` (or category default) is a comma-separated ordered chain; `"default"`/absent ⇒ all registered vendors for the method; empty resolution ⇒ raise `NotConfiguredError`.
-  - `dispatch(self, method: str, req: DataRequest, *, guard: PitGuard, now: datetime, cfg: Mapping[str, str] | None = None, source_config_digest: str = "", freshness: FreshnessPolicy | None = None) -> DataResult[RowSet]` — routes by typed exception exactly as the Global Constraints specify.
 
-- [ ] **Step 1: Write the failing test**
+- Consumes: Task 4 guard/policy/refusal detail, Task 5 method/source/request/named concrete result/routing/snapshot/cache contracts, sealed `DataPolicyResolver` and cumulative Phase 3 registry, Phase 1 `DataResult.build`/`SourceAttempt`/refs/registry, and Phase 2 `CapabilityGateway`, `PayloadStore`, `AuthoritativeClock` and audit-only `EventRefusalAuditSink`.
+- Produces:
+  - `DataSourceRegistry.register_descriptor(...)`, `register_method(...)`, `seal()`, `manifest()`, `snapshot()` and `build_routing_snapshot(...)`. Same declaration is idempotent; conflicts, unknown refs and every mutation after seal fail.
+  - dispatch behavior over Task 5's internal carriers. `DataInvocationScope` is created only by Task 8 from an admitted Plan and selected WorkerSpec, verified against the gateway/runtime before every `begin`, and cannot be manufactured from application/model input. `DataReadOutcome` carries the named result plus exact persisted refs and an optional finalized-success Phase 1 `ToolCallRecord`.
+  - `dispatch(req: DataRequest, *, invocation_scope: DataInvocationScope, ctx: DataContext, routing: DataRoutingSnapshot, manifest: DataSnapshotManifest, schema_registry, resolved_policy: ResolvedDataMethodPolicy, gateway: CapabilityGateway, payload_store: PayloadStore, refusal_audit_sink: EventRefusalAuditSink, cache, clock: AuthoritativeClock) -> DataReadOutcome`.
 
-```python
-# tests/orchestration/data/test_registry.py
-from __future__ import annotations
-from datetime import datetime, timezone
-import pytest
-from guanlan_v2.orchestration.enums import DataMode, DataStatus
-from guanlan_v2.orchestration.data.source import DataRequest, RawFetch
-from guanlan_v2.orchestration.data.pit import PitGuard
-from guanlan_v2.orchestration.data.errors import (
-    RateLimitError, NotConfiguredError, NoDataError, SourceBrokenError, FutureDataRefused)
-from guanlan_v2.orchestration.data.registry import SourceRegistry
+**Routing and authorization invariants:**
 
-UTC = timezone.utc
-AS_OF = datetime(2026, 7, 15, tzinfo=UTC)
-def _now(): return datetime(2026, 7, 15, 1, tzinfo=UTC)
-def _row(day=10): return {"available_at": datetime(2026, 7, day, tzinfo=UTC), "v": 1}
+- the registry is sealed before `DataRoutingSnapshot`/`DataContext` construction. A configured unknown source/method is a freeze-time error; it is never filtered out. A known descriptor whose runtime capability/credentials are absent may raise `NotConfiguredError`, creating a real attempt before advancing the frozen chain;
+- before dispatch, `DataReader` asks the sealed `DataPolicyResolver` for one `ResolvedDataMethodPolicy`. Dispatch verifies its method/context/bundle digest and gives its sole calendar to PitGuard; there is no second `calendar`/policy parameter. Drift or an unbound caller bundle fails before cache/source access;
+- the default chain is an explicit ordered tuple in a versioned route policy. Registration order, later registration and process hash seed cannot alter it;
+- before cache lookup or `CapabilityGateway.begin`, dispatch verifies that request, context, route, manifest, source/schema registry and source-config digests are one frozen set, including `ctx.data_snapshot_content_digest == manifest.content_digest`, `ctx.data_snapshot_id == manifest.data_snapshot_id` as audit locator, and exact vintage-manifest equality. A mismatch records one registered `DataFetchRefusalDetails` directly through `EventRefusalAuditSink.record` and stops before any source call. Dispatch accepts no `cfg`, chain, mode, strictness, snapshot or blank digest argument;
+- every adapter invocation goes through the two-stage `CapabilityGateway` with current service-owned worker/catalog authorization. The exact normal sequence after a verified cache miss is: reuse the already persisted validated request ref; `begin(plan_digest=..., node_id=..., worker_id=..., capability_ref=..., request_schema_ref=..., idempotency_key=...)`; `invoke(pending, validated_request)`; keep `RawFetch` unpublished while PIT/output validation builds the method's named concrete DataResult; persist that result exactly once under `DataMethodSpec.result_schema_ref`; then call only `finalize_success(pending, request_ref=..., result_ref=..., request_digest=req.request_digest, result_digest=result.content_digest)`. The gateway re-verifies existing refs/digests and creates the Phase 1 `ToolCallRecord`; it receives no extra PIT/attempt fields and performs no second write. Dispatch never calls a descriptor handler or registered Python object directly;
+- scope re-verification checks the selected Worker's exact capability allowlist even for a cache path. Dispatch validates/persists the current `DataRequest` once before `get_verified`; a hit returns `DataReadOutcome(current_request_ref, cached result_schema_ref/result_ref, tool_call_record=None)` after registry/digest/PIT verification and preserves recorded attempts/audit/badges. It does not fabricate a source ToolCallRecord. In PIT_REPLAY, a miss may advance only to an explicitly frozen matching PIT_STORE source; CACHE-only miss, snapshot mismatch or any route pointing to LIVE fails before that invocation.
 
+**Outcome matrix:**
 
-class Stub:
-    def __init__(self, name, behavior):
-        self.name = name
-        self._b = behavior
-    def capabilities(self): return {"get_ohlcv"}
-    def fetch(self, method, req):
-        b = self._b
-        if isinstance(b, Exception):
-            raise b
-        return RawFetch(rows=b, vendor=self.name, fetched_at=_now())
+- only `RateLimitError` and `NotConfiguredError` advance to the next already-frozen source. Each failed pending invocation is first terminalized exactly once through `gateway.reject(... DataFetchRefusalDetails ...)`; its audit-sink failure is loud and prevents fallback;
+- success after an advance remains `OK` and adds `FALLBACK_USED`; fallback count alone never means `DEGRADED`;
+- `DEGRADED` is allowed only for a method-policy-approved partial concrete batch meeting its coverage floor, with coverage and reason;
+- `NO_DATA` and `STALE` are derived only after `PitGuard` evaluates the returned candidates, then become named concrete DataResults persisted and finalized as successful capability outcomes. An adapter-raised `NoDataError`/`StaleDataError` before it returns candidates/audit is a broken-source error and is rejected, never converted into a fabricated passed audit;
+- `FutureDataRefused` / `MissingAvailabilityRefused` are already transitioned/persisted by the guard's pending reject recorder and are re-raised unchanged; the catch does not reject a second time, continue, `finalize_success` or write cache/data payloads;
+- any other `DataError` checks whether the pending invocation is still open and, if so, calls `gateway.reject` exactly once before raising. Optional exhaustion builds/persists a named `UNAVAILABLE` result with no fabricated success ToolCallRecord; core exhaustion has already persisted every failed-attempt refusal and raises the first retryable error;
+- every returned result is created only by Phase 1 `DataResult.build`, wrapped as the method's registered named concrete result, registry-validated and persisted by `PayloadStore.put(result_schema_ref, payload, namespace="main", idempotency_key=...)`. `DataReadOutcome` carries the existing refs/record to the invocation-scoped collector; no manual semantic/audit digest dictionary or second persistence path is permitted.
 
+- [ ] **Step 1: Write failing registry/router tests**
 
-def _req(category="core_stock_apis"):
-    return DataRequest(method="get_ohlcv", params={"s": "600519"}, category=category,
-                       as_of=AS_OF, strict_pit=False)
+Preserve the original source-routing scenarios as contract tests, rebuilt with strict fixtures, a sealed registry, a real `DataContext` builder and a fake `CapabilityGateway`:
 
+1. `test_first_source_success`: first source succeeds and returns `DataReadOutcome` with one persisted request ref, one named concrete DataResult ref and one verified ToolCallRecord; request/result each have exactly one write;
+2. `test_rate_limit_falls_through`: first attempt is rate-limited, second succeeds, attempt order is preserved and `FALLBACK_USED` is present;
+3. `test_not_configured_falls_through`: a known but unavailable capability advances with an explicit attempt;
+4. `test_no_data_stops_chain` and `test_stale_stops_chain`: guard-derived terminal named results, no second invocation and no consumable data; premature adapter-raised claims are rejected as broken source;
+5. `test_future_refused_raises_not_falls_through` and the matching missing-availability case: pending invocation is rejected, the already validated request may remain by its idempotent ref, but no second invocation/cache/raw/result main-payload write or success ToolCallRecord exists; one audit-only refusal exists before the raised exception;
+6. `test_core_broken_primary_raises`, with its failure audit retained;
+7. `test_optional_category_exhaustion_is_unavailable`: policy comes from `DataMethodSpec`, not a module set;
+8. `test_core_exhausted_raises_first_retriable`, after persisting the complete ordered attempts;
+9. empty explicit route, unknown configured source/method and route/registry/context/manifest snapshot-content or vintage mismatch fail instead of silently defaulting; a manifest mismatch writes one audit detail before `begin` and invokes no source;
+10. reverse descriptor registration order gives the same registry/routing digests and explicit default route, matching `data_source_manifest_v1.json`;
+11. conflicting registration and mutation after seal fail;
+12. direct handler invocation/bypassed gateway is impossible; pending invocation cannot count as evidence, every attempted invocation reaches exactly one terminal state, and double finalize/reject or finalize-after-reject fails;
+13. params/output schema mismatch, wrong source/capability ref and wrong DataResult declared digest fail;
+14. verified cache hit performs no source call; bad cache entry is rejected; replay miss reaches only a frozen matching PIT_STORE source, while CACHE-only miss/LIVE route is terminal;
+15. same idempotency key/same data fetch is stable; same key/different semantics conflicts;
+16. fallback success is `OK`, while partial coverage alone exercises the complete `DEGRADED` matrix.
 
-def _reg(*sources):
-    r = SourceRegistry()
-    for s in sources:
-        r.register("get_ohlcv", s.name, s)
-    return r
-
-
-def _guard(): return PitGuard(mode=DataMode.ONLINE, strict=False)
-
-
-def test_first_vendor_success():
-    reg = _reg(Stub("a_stock", [_row()]))
-    res = reg.dispatch("get_ohlcv", _req(), guard=_guard(), now=_now())
-    assert res.status == DataStatus.OK and res.vendor == "a_stock" and res.data.rows
-
-
-def test_rate_limit_falls_through():
-    reg = _reg(Stub("a_stock", RateLimitError("429")), Stub("tushare", [_row()]))
-    res = reg.dispatch("get_ohlcv", _req(), guard=_guard(), now=_now(),
-                       cfg={"get_ohlcv": "a_stock,tushare"})
-    assert res.status == DataStatus.OK and res.vendor == "tushare"
-    assert [a.vendor for a in res.attempts] == ["a_stock", "tushare"]
-
-
-def test_no_data_stops_chain():
-    reg = _reg(Stub("a_stock", NoDataError(symbol="600519", canonical="600519.SH", detail="delisted")),
-               Stub("tushare", [_row()]))
-    res = reg.dispatch("get_ohlcv", _req(), guard=_guard(), now=_now(),
-                       cfg={"get_ohlcv": "a_stock,tushare"})
-    assert res.status == DataStatus.NO_DATA and res.data is None
-    assert [a.vendor for a in res.attempts] == ["a_stock"]   # did NOT continue
-
-
-def test_future_refused_raises_not_falls_through():
-    reg = _reg(Stub("a_stock", [{"available_at": datetime(2026, 7, 20, tzinfo=UTC), "v": 1}]),
-               Stub("tushare", [_row()]))
-    with pytest.raises(FutureDataRefused):
-        reg.dispatch("get_ohlcv", _req(), guard=PitGuard(mode=DataMode.PIT_REPLAY, strict=True),
-                     now=_now(), cfg={"get_ohlcv": "a_stock,tushare"})
-
-
-def test_core_broken_primary_raises():
-    reg = _reg(Stub("a_stock", SourceBrokenError("parse failed")))
-    with pytest.raises(SourceBrokenError):
-        reg.dispatch("get_ohlcv", _req(), guard=_guard(), now=_now())
-
-
-def test_optional_category_degrades_to_unavailable():
-    reg = _reg(Stub("a_stock", RateLimitError("429")))
-    res = reg.dispatch("get_ohlcv", _req(category="signal_data"), guard=_guard(), now=_now())
-    assert res.status == DataStatus.UNAVAILABLE and res.data is None and "DEGRADED_SOURCE" in res.badges
-
-
-def test_core_exhausted_raises_first_retriable():
-    reg = _reg(Stub("a_stock", RateLimitError("429")))
-    with pytest.raises(RateLimitError):
-        reg.dispatch("get_ohlcv", _req(), guard=_guard(), now=_now())
-
-
-def test_empty_chain_raises_not_configured():
-    reg = SourceRegistry()   # nothing registered
-    with pytest.raises(NotConfiguredError):
-        reg.dispatch("get_ohlcv", _req(), guard=_guard(), now=_now())
-```
-
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run tests to verify failure**
 
 Run: `pytest tests/orchestration/data/test_registry.py -v`
-Expected: FAIL with `ModuleNotFoundError`
 
-- [ ] **Step 3: Write minimal implementation**
+Expected: FAIL until the sealed registry/router exists.
 
-```python
-# guanlan_v2/orchestration/data/registry.py
-from __future__ import annotations
-import uuid
-from collections.abc import Mapping
-from datetime import datetime
-from guanlan_v2.orchestration.data.errors import (
-    DataError, FutureDataRefused, NoDataError, NotConfiguredError, RateLimitError, StaleDataError)
-from guanlan_v2.orchestration.data.pit import FreshnessPolicy, PitGuard
-from guanlan_v2.orchestration.data.result import DataResult, PitAudit, SourceAttempt
-from guanlan_v2.orchestration.data.source import DataRequest, DataSource, RowSet
-from guanlan_v2.orchestration.digest import content_digest
-from guanlan_v2.orchestration.enums import DataStatus
+- [ ] **Step 3: Implement the sealed registry, frozen router and result builder path**
 
-OPTIONAL_CATEGORIES = {"signal_data", "macro_data", "prediction_markets"}
+Keep source descriptors separate from service-owned handlers. Resolve the descriptor's reviewed handler ref only inside the Phase 2 trusted runtime/gateway, keeping raw output unpublished while Task 4/5 perform PIT and schema validation. Persist the validated request and named result once, then pass their existing refs to `finalize_success`. The guard owns PIT rejection; its catch only re-raises. Other still-pending failures call `reject` once before fallback/raise. Both gateway rejection and pre-invocation refusal delegate record/detail creation to the one `EventRefusalAuditSink`; no caller constructs `EventRefusalRecord`, and no refusal detail enters the main namespace or public event journal.
 
-
-class SourceRegistry:
-    def __init__(self) -> None:
-        self._methods: dict[str, dict[str, DataSource]] = {}
-
-    def register(self, method: str, vendor: str, source: DataSource) -> None:
-        self._methods.setdefault(method, {})[vendor] = source
-
-    def resolve_chain(self, method: str, cfg: Mapping[str, str]) -> list[str]:
-        available = list(self._methods.get(method, {}).keys())
-        raw = (cfg or {}).get(method, "default")
-        if raw and raw != "default":
-            chain = [v.strip() for v in raw.split(",") if v.strip() and v.strip() in self._methods.get(method, {})]
-        else:
-            chain = available
-        if not chain:
-            raise NotConfiguredError(f"no configured vendor for method {method}")
-        return chain
-
-    def _result(self, *, status, method, req, chain, source_config_digest, attempts, pit_audit,
-                now, data=None, vendor=None, badges=(), coverage=None, degradation_reason=None):
-        semantic = {"method": method, "request_digest": req.request_digest, "status": status.value,
-                    "chain": chain, "rows": (data.rows if data is not None else None)}
-        return DataResult[RowSet](
-            id=uuid.uuid4().hex, method=method, request_digest=req.request_digest, status=status,
-            data=data, coverage=coverage, degradation_reason=degradation_reason, vendor=vendor,
-            resolved_vendor_chain=chain, source_config_digest=source_config_digest,
-            fetched_at=now, content_digest=content_digest(semantic),
-            audit_digest=content_digest({"attempts": [a.model_dump(mode="json") for a in attempts]}),
-            attempts=attempts, pit_audit=pit_audit, badges=list(badges))
-
-    def dispatch(self, method: str, req: DataRequest, *, guard: PitGuard, now: datetime,
-                 cfg: Mapping[str, str] | None = None, source_config_digest: str = "",
-                 freshness: FreshnessPolicy | None = None) -> DataResult[RowSet]:
-        chain = self.resolve_chain(method, cfg or {})
-        attempts: list[SourceAttempt] = []
-        first_error: DataError | None = None
-
-        for vendor in chain:
-            src = self._methods[method][vendor]
-            started = now
-            try:
-                raw = src.fetch(method, req)
-                rows, audit = guard.check_rows(raw.rows, as_of=req.as_of, now=now, freshness=freshness)
-                attempts.append(SourceAttempt(vendor=vendor, subsource=raw.subsource, configured=True,
-                                              outcome="success", started_at=started, finished_at=now))
-                return self._result(status=DataStatus.OK, method=method, req=req, chain=chain,
-                                    source_config_digest=source_config_digest, attempts=attempts,
-                                    pit_audit=audit, now=now, data=RowSet(rows=rows), vendor=vendor)
-            except RateLimitError:
-                attempts.append(SourceAttempt(vendor=vendor, configured=True, outcome="rate_limited",
-                                              fallback_reason="rate limited", started_at=started, finished_at=now))
-                if first_error is None:
-                    first_error = RateLimitError(f"{vendor} rate limited")
-                continue
-            except NotConfiguredError as e:
-                attempts.append(SourceAttempt(vendor=vendor, configured=False, outcome="not_configured",
-                                              fallback_reason=str(e), started_at=started, finished_at=now))
-                if first_error is None:
-                    first_error = e
-                continue
-            except NoDataError:
-                attempts.append(SourceAttempt(vendor=vendor, configured=True, outcome="no_data",
-                                              started_at=started, finished_at=now))
-                audit = PitAudit(mode=guard.mode, as_of=req.as_of, rows_seen=0, rows_returned=0,
-                                 future_rows=0, missing_available_at_rows=0, guard_result="passed")
-                return self._result(status=DataStatus.NO_DATA, method=method, req=req, chain=chain,
-                                    source_config_digest=source_config_digest, attempts=attempts,
-                                    pit_audit=audit, now=now, vendor=vendor)
-            except StaleDataError:
-                attempts.append(SourceAttempt(vendor=vendor, configured=True, outcome="stale",
-                                              started_at=started, finished_at=now))
-                audit = PitAudit(mode=guard.mode, as_of=req.as_of, rows_seen=0, rows_returned=0,
-                                 future_rows=0, missing_available_at_rows=0, guard_result="passed")
-                return self._result(status=DataStatus.STALE, method=method, req=req, chain=chain,
-                                    source_config_digest=source_config_digest, attempts=attempts,
-                                    pit_audit=audit, now=now, vendor=vendor)
-            except FutureDataRefused:
-                attempts.append(SourceAttempt(vendor=vendor, configured=True, outcome="future_refused",
-                                              started_at=started, finished_at=now))
-                raise
-            except DataError:
-                attempts.append(SourceAttempt(vendor=vendor, configured=True, outcome="error",
-                                              started_at=started, finished_at=now))
-                raise
-
-        # chain exhausted only via RateLimit / NotConfigured
-        audit = PitAudit(mode=guard.mode, as_of=req.as_of, rows_seen=0, rows_returned=0,
-                         future_rows=0, missing_available_at_rows=0, guard_result="passed")
-        if req.category in OPTIONAL_CATEGORIES:
-            return self._result(status=DataStatus.UNAVAILABLE, method=method, req=req, chain=chain,
-                                source_config_digest=source_config_digest, attempts=attempts,
-                                pit_audit=audit, now=now, badges=["DEGRADED_SOURCE"])
-        assert first_error is not None
-        raise first_error
-```
-
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run tests**
 
 Run: `pytest tests/orchestration/data/test_registry.py -v`
-Expected: PASS (8 passed)
+
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add guanlan_v2/orchestration/data/registry.py tests/orchestration/data/test_registry.py
-git commit -m "feat(orchestration): SourceRegistry narrow-fallback dispatch (phase3)"
+git add guanlan_v2/orchestration/data/registry.py tests/orchestration/data/test_registry.py tests/orchestration/golden/data_source_manifest_v1.json
+git commit -m "feat(orchestration): add sealed narrow-fallback data router"
 ```
 
 ---
 
-## Task 7: `DataReader` facade + `render_for_prompt`
+## Task 7: `DataReader` facade + deterministic untrusted rendering
 
 **Files:**
 - Create: `guanlan_v2/orchestration/data/reader.py`
+- Modify: `guanlan_v2/orchestration/data/render.py`
 - Test: `tests/orchestration/data/test_reader.py`
+- Test: `tests/orchestration/data/test_render.py`
 
 **Interfaces:**
-- Consumes: `data.registry.SourceRegistry`, `data.source.DataRequest/RowSet`, `data.pit.PitGuard/FreshnessPolicy`, `data.result.DataResult`, `context.DataContext`, `enums.DataStatus`.
+
+- Consumes: sealed `DataSourceRegistry`, `DataRoutingSnapshot`, `DataSnapshotManifest`, Task 6 `DataReadOutcome`, Task 5 `RenderedDataBlock`, Phase 3 schema registry, Phase 1 `DataContext` and Phase 2 capability/payload/audit/cache/`AuthoritativeClock` plus executor-owned ordinal-token ports.
 - Produces:
-  - `class DataReader` — `__init__(self, registry, ctx: DataContext, guard: PitGuard, *, now, cfg=None, freshness_by_category=None)`; methods `get_ohlcv(sym, start, end)`, `get_indicators(sym, indicator, curr_date, look_back_days=30)`, `get_fundamentals(ticker, curr_date)`, `get_news(ticker, start, end)`, `get_signal(method, sym, curr_date)` — each builds a `DataRequest` (category set per method), calls `registry.dispatch`, returns `DataResult[RowSet]`.
-  - `render_for_prompt(result: DataResult) -> str` — an **unforgeable** data block: a provenance header (`status/as_of/vendor/coverage/badges`), and on `OK` the rows; on `NO_DATA`/`STALE`/`UNAVAILABLE` the explicit sentinel `"⚠ 数据不可用(status)…不得编造数值"`. Never returns an empty string.
+  - internal invocation-scoped `DataEvidenceCollector`: accepts Phase 2-issued ordinal tokens before dispatch, never creates an ordinal, accepts each complete token-matching `DataReadOutcome`, rejects foreign/duplicate/conflicting tokens/refs and drains by the generic `(call_ordinal, bridge_priority, bridge_id, within_call_role)` key regardless of completion order for Task 8/Phase 2 `WorkerExecutionResult`. It is not a second payload/evidence schema.
+  - `DataReader` constructed from that exact frozen evidence plus the Task 8-created `DataInvocationScope`, collector, sealed `DataPolicyResolver` and `AuthoritativeClock`. For each method it resolves one policy/calendar bundle, and Task 6 constructs `PitGuard` only after `begin` using that bundle and the current pending invocation's reject recorder; invocation-precheck refusals use the standalone sink adapter. Callers cannot supply plan/node/worker identity, a second guard, mutable config, source chain, freshness map, mode, strict flag, wall clock or alternate calendar.
+  - typed methods:
+    - `get_ohlcv(...) -> OHLCVDataResult`;
+    - `get_indicators(...) -> IndicatorDataResult`;
+    - `get_verified_snapshot(...) -> VerifiedSnapshotDataResult`;
+    - `get_fundamentals(...) -> FundamentalDataResult`;
+    - `get_news(...) -> NewsDataResult`;
+    - `get_signal(method_ref, ...) -> SignalDataResult`, where the ref must resolve to an approved signal method spec rather than an arbitrary method string.
+  - pure `render_for_prompt(result, *, result_schema_ref, result_ref, method_spec: DataMethodSpec, schema_registry, catalog_runtime) -> RenderedDataBlock`. It resolves only `method_spec.renderer_ref` from the exact catalog; ordinary callers cannot pass/replace a renderer. Task 8 owns registry-validated persistence and prompt assembly; the renderer itself performs no I/O.
 
-- [ ] **Step 1: Write the failing test**
+**Reader/render invariants:**
 
-```python
-# tests/orchestration/data/test_reader.py
-from __future__ import annotations
-from datetime import datetime, timezone
-from guanlan_v2.orchestration.enums import DataMode, DataBackend, DataStatus
-from guanlan_v2.orchestration.context import DataContext, ClockSpec
-from guanlan_v2.orchestration.data.source import RawFetch
-from guanlan_v2.orchestration.data.pit import PitGuard
-from guanlan_v2.orchestration.data.registry import SourceRegistry
-from guanlan_v2.orchestration.data.reader import DataReader, render_for_prompt
+- constructor validation proves context, route, snapshot, source/schema registry and source-config digests form one frozen set. Every call selects its `DataMethodSpec`, validates a concrete params model, builds `DataRequest` from the context, delegates to Task 6, records the complete `DataReadOutcome`, then returns only its named concrete result to application code;
+- DataReader never reads today's date, global vendor config, mutable registry state or a physical cache path;
+- rendering verifies the result/method/result-SchemaRef tuple, resolves the catalog-bound renderer and uses the canonical registry serializer—never `default=str`, ad-hoc markdown parsing or an anonymous dict. OK/DEGRADED embeds the concrete payload as length-delimited canonical JSON; missing statuses embed an explicit no-fabrication sentinel;
+- the block is not described as cryptographically “unforgeable.” Task 8 persists it and returns one exact Phase 1 `TypedPayloadRef` (plus media type and bounded length) in the provider's untrusted-block DTO; Phase 2's executor alone merges that DTO into its generic PromptAssembler and untrusted data/tool-input channel. The underlying PayloadStore write/read still uses its own `SchemaRef + PayloadRef` signature. Strings inside rows cannot become system/skill/guardrail instructions or close the outer boundary;
+- changing only `PayloadRef.object_id` changes audit/dereference identity but not rendered semantic content; changing namespace, schema, content, PIT audit, status or renderer material changes the block digest;
+- downstream workers consume typed payloads when available. `RenderedDataBlock` is only for an LLM-facing view and records `rendered_from_payload_digest`.
 
-UTC = timezone.utc
-AS_OF = datetime(2026, 7, 15, tzinfo=UTC)
-def _now(): return datetime(2026, 7, 15, 1, tzinfo=UTC)
+- [ ] **Step 1: Write failing reader/render tests**
 
+Preserve the original useful scenarios with contract-correct fixtures:
 
-class Stub:
-    name = "a_stock"
-    def __init__(self, rows): self.rows = rows
-    def capabilities(self): return {"get_ohlcv"}
-    def fetch(self, method, req):
-        return RawFetch(rows=self.rows, vendor="a_stock", fetched_at=_now())
+1. `test_get_ohlcv_ok` returns the registered `OHLCVDataResult` whose rows are `OHLCVRecord`, while the collector retains the matching request/result refs and ToolCallRecord;
+2. every facade method chooses the exact approved params and result SchemaRefs, including `get_verified_snapshot`;
+3. unknown/arbitrary signal method ref is rejected;
+4. a constructor with mismatched context/routing/manifest/registry/config digests fails;
+5. there is no caller `cfg`, guard, strict, mode, `now` or freshness override;
+6. OK and DEGRADED rendering includes schema key, result/content/PIT audit digests, source/coverage/badges and canonical data;
+7. NO_DATA/STALE/UNAVAILABLE rendering is deterministic, non-empty and contains the no-fabrication sentinel without consumable data;
+8. embedded fake headers, delimiters and “ignore previous instructions” text remain JSON data inside the untrusted block;
+9. renderer ref comes only from DataMethodSpec/exact catalog; caller override is absent, and renderer material drift or result schema/content/status/PIT changes alter the digest while object-ID-only change does not;
+10. naive/non-finite/unregistered payload rendering fails instead of string-coercing;
+11. the pure renderer returns a registry-valid `RenderedDataBlock` without touching PayloadStore or PromptAssembler;
+12. foreign/duplicate/conflicting executor-issued ordinal tokens/refs fail and the generic merge order is deterministic under reversed completion.
 
+- [ ] **Step 2: Run tests to verify failure**
 
-def _ctx():
-    clock = ClockSpec(as_of=AS_OF, timezone="UTC", calendar_id="XSHG", clock_version="1")
-    return DataContext(as_of=AS_OF, clock=clock, mode=DataMode.ONLINE, backend=DataBackend.LIVE,
-                       strict_pit=False, calendar_id="XSHG", resolved_vendor_chains={},
-                       source_config_digest="c", data_snapshot_id="s")
+Run: `pytest tests/orchestration/data/test_reader.py tests/orchestration/data/test_render.py -v`
 
+Expected: FAIL until the frozen reader and renderer exist.
 
-def _reader(rows):
-    reg = SourceRegistry(); reg.register("get_ohlcv", "a_stock", Stub(rows))
-    return DataReader(reg, _ctx(), PitGuard(mode=DataMode.ONLINE, strict=False), now=_now)
+- [ ] **Step 3: Implement the facade and deterministic renderer**
 
+Resolve every method, policy and renderer by stable refs/digests. Return only the named envelopes built through Phase 1 `DataResult.build`, while the invocation collector retains the already-persisted refs/evidence for Phase 2. The renderer returns a strict block for Task 8 to persist and route through the generic prompt assembler; row content never owns trust boundaries. Imports and rendering perform no external I/O.
 
-def test_get_ohlcv_ok():
-    r = _reader([{"available_at": datetime(2026, 7, 10, tzinfo=UTC), "close": 1700}])
-    res = r.get_ohlcv("600519", "2026-01-01", "2026-07-15")
-    assert res.status == DataStatus.OK and res.data.rows[0]["close"] == 1700
+- [ ] **Step 4: Run tests**
 
+Run: `pytest tests/orchestration/data/test_reader.py tests/orchestration/data/test_render.py -v`
 
-def test_render_ok_has_provenance_header_and_rows():
-    r = _reader([{"available_at": datetime(2026, 7, 10, tzinfo=UTC), "close": 1700}])
-    text = render_for_prompt(r.get_ohlcv("600519", "2026-01-01", "2026-07-15"))
-    assert "vendor: a_stock" in text and "1700" in text
+Expected: PASS.
 
-
-def test_render_no_data_is_sentinel_never_empty():
-    reg = SourceRegistry()
-    reg.register("get_signal", "a_stock", _NoData())
-    reader = DataReader(reg, _ctx(), PitGuard(mode=DataMode.ONLINE, strict=False), now=_now)
-    text = render_for_prompt(reader.get_signal("get_signal", "600519", "2026-07-15"))
-    assert text.strip() != "" and "不得编造" in text
-
-
-class _NoData:
-    name = "a_stock"
-    def capabilities(self): return {"get_signal"}
-    def fetch(self, method, req):
-        from guanlan_v2.orchestration.data.errors import NoDataError
-        raise NoDataError(symbol="600519", canonical="600519.SH", detail="no coverage")
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `pytest tests/orchestration/data/test_reader.py -v`
-Expected: FAIL with `ModuleNotFoundError`
-
-- [ ] **Step 3: Write minimal implementation**
-
-```python
-# guanlan_v2/orchestration/data/reader.py
-from __future__ import annotations
-import json
-from collections.abc import Mapping
-from datetime import datetime
-from typing import Callable
-from guanlan_v2.orchestration.context import DataContext
-from guanlan_v2.orchestration.data.pit import FreshnessPolicy, PitGuard
-from guanlan_v2.orchestration.data.registry import SourceRegistry
-from guanlan_v2.orchestration.data.result import DataResult
-from guanlan_v2.orchestration.data.source import DataRequest, RowSet
-from guanlan_v2.orchestration.enums import DataStatus
-
-_CATEGORY = {
-    "get_ohlcv": "core_stock_apis", "get_indicators": "technical_indicators",
-    "get_verified_snapshot": "core_stock_apis", "get_fundamentals": "fundamental_data",
-    "get_news": "news_data",
-}
-
-
-class DataReader:
-    def __init__(self, registry: SourceRegistry, ctx: DataContext, guard: PitGuard, *,
-                 now: Callable[[], datetime], cfg: Mapping[str, str] | None = None,
-                 freshness_by_category: Mapping[str, FreshnessPolicy] | None = None):
-        self._reg = registry
-        self._ctx = ctx
-        self._guard = guard
-        self._now = now
-        self._cfg = dict(cfg or {})
-        self._fresh = dict(freshness_by_category or {})
-
-    def _call(self, method: str, params: dict, *, category: str) -> DataResult[RowSet]:
-        req = DataRequest(method=method, params=params, category=category,
-                          as_of=self._ctx.as_of, strict_pit=self._ctx.strict_pit)
-        return self._reg.dispatch(method, req, guard=self._guard, now=self._now(), cfg=self._cfg,
-                                  source_config_digest=self._ctx.source_config_digest,
-                                  freshness=self._fresh.get(category))
-
-    def get_ohlcv(self, sym: str, start: str, end: str) -> DataResult[RowSet]:
-        return self._call("get_ohlcv", {"symbol": sym, "start": start, "end": end},
-                          category=_CATEGORY["get_ohlcv"])
-
-    def get_indicators(self, sym: str, indicator: str, curr_date: str,
-                       look_back_days: int = 30) -> DataResult[RowSet]:
-        return self._call("get_indicators", {"symbol": sym, "indicator": indicator,
-                                             "curr_date": curr_date, "look_back_days": look_back_days},
-                          category=_CATEGORY["get_indicators"])
-
-    def get_fundamentals(self, ticker: str, curr_date: str) -> DataResult[RowSet]:
-        return self._call("get_fundamentals", {"ticker": ticker, "curr_date": curr_date},
-                          category=_CATEGORY["get_fundamentals"])
-
-    def get_news(self, ticker: str, start: str, end: str) -> DataResult[RowSet]:
-        return self._call("get_news", {"ticker": ticker, "start": start, "end": end},
-                          category=_CATEGORY["get_news"])
-
-    def get_signal(self, method: str, sym: str, curr_date: str) -> DataResult[RowSet]:
-        return self._call(method, {"symbol": sym, "curr_date": curr_date}, category="signal_data")
-
-
-def render_for_prompt(result: DataResult) -> str:
-    head = (f"# Data · {result.method}\n"
-            f"# status: {result.status.value} · as_of: {result.pit_audit.as_of.isoformat()} "
-            f"· vendor: {result.vendor or 'none'} · coverage: {result.coverage} "
-            f"· badges: {','.join(result.badges) or '-'}")
-    if result.status in (DataStatus.OK, DataStatus.DEGRADED) and result.data is not None:
-        body = json.dumps(getattr(result.data, "rows", result.data.model_dump()),
-                          ensure_ascii=False, default=str)
-        return f"{head}\n{body}"
-    return (f"{head}\n⚠ 数据不可用(status={result.status.value})。该字段无可用数据,"
-            "不得编造数值;如需请改用可得口径或显式标注缺失。")
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `pytest tests/orchestration/data/test_reader.py -v`
-Expected: PASS (3 passed)
-
-- [ ] **Step 5: Run the whole data suite + commit**
-
-Run: `pytest tests/orchestration/data/ -v`
-Expected: PASS (all phase-3 data/PIT tests green)
+- [ ] **Step 5: Commit**
 
 ```bash
-git add guanlan_v2/orchestration/data/reader.py tests/orchestration/data/test_reader.py
-git commit -m "feat(orchestration): DataReader facade + render_for_prompt (phase3)"
+git add guanlan_v2/orchestration/data/reader.py guanlan_v2/orchestration/data/render.py tests/orchestration/data/test_reader.py tests/orchestration/data/test_render.py
+git commit -m "feat(orchestration): add frozen data reader and untrusted renderer"
 ```
 
 ---
 
-## Self-Review (completed by plan author)
+## Task 8: Phase 2 runtime, provenance and replay integration
 
-**Spec coverage (§4 + §12 phase 3 data half):** error taxonomy incl. `FutureDataRefused`/`MissingAvailabilityRefused`/`SourceBrokenError` ✓(T1) · `normalize_symbol` syntactic + path-safe ✓(T2) · `resolve_name_to_code` rejects concept names + `resolve_limit_rule` unknown-ST honesty ✓(T3) · `PitGuard` `available_at` cutoff + strict `FutureDataRefused` + freshness ✓(T4) · `DataSource`/`DataRequest`/`RawFetch`/`RowSet` ✓(T5) · `SourceRegistry.dispatch` narrow fallback (RateLimit/NotConfigured→next, NoData/Stale→typed stop, Future/other→raise, optional→UNAVAILABLE, core→raise) ✓(T6) · `DataReader` + `render_for_prompt` never-empty sentinel ✓(T7). **Deferred (correctly out of scope):** the **memory facade** → Phase 3b (needs `memory_ops`/console/curator write-path); real vendor adapters (akshare/tushare/mootdx/东财) + intra-adapter locale redundancy + `_em_get` throttle (acquisition, later); `DEGRADED` partial-coverage path (needs real coverage computation); `resolve_vendor_chain` freeze into `DataContext` at run start (wired in Phase 2/5 runtime); `PitReader`/`pit_store` backend adapter + `news_coverage_floor` (Phase 5 Bootstrap/落子 adapter).
+**Files:**
+- Create: `guanlan_v2/orchestration/data/runtime.py`
+- Test: `tests/orchestration/data/test_runtime_integration.py`
+- Test: `tests/orchestration/data/test_data_replay.py`
 
-**Placeholder scan:** none — every code step is complete and runnable.
+**Interfaces:**
 
-**Type consistency:** `DataRequest`/`RawFetch`/`RowSet` identical across T5/T6/T7; `PitGuard(mode=, strict=)` + `check_rows(rows, *, as_of, now, freshness)` identical in T4/T6/T7; `DataResult[RowSet]` returned by `dispatch` and all `DataReader` methods; `OPTIONAL_CATEGORIES` used in T6 dispatch and referenced by `get_signal` category `"signal_data"` in T7; `NoDataError(symbol=, canonical=, detail=)` keyword form identical in T1/T6/T7.
+- `DataRuntimeBridge` implements Phase 2's generic `ExecutionBridgeProvider/Session`; it is constructed only by the service-owned `ExecutionBridgeResolver` from the exact registered data bridge descriptor/config/handler material, never passed by a worker/model. `prepare_input` validates/binds the admitted Plan/node/WorkerSpec/config and returns an empty InputSnapshot addition plus frozen handle—data is never prefetched into the current node's InputSnapshot and this phase performs no capability/live/source I/O. After RUNNING, `open_execution` binds the exact ContextSnapshot/InputSnapshot, catalog/schema/source/routing/snapshot/policy/calendar-material digests, Phase 2 `CapabilityGateway`, `PayloadStore`, `EventRefusalAuditSink`, continued shared evidence sequencer and `AuthoritativeClock`; the sealed `DataPolicyResolver` supplies the sole exact policy/calendar bundle for each method.
+- the bridge resolves the exact sealed Phase 3 schema snapshot through Phase 2 `SchemaRegistryResolver` using the admitted Plan's registry digest and loads the exact catalog digest; neither worker/model input nor a global “latest” registry can supply a replacement. A data method is callable only when `DataMethodSpec`, `DataSourceDescriptor`, closed Phase 1 `CapabilityDescriptor@1`, handler material and the selected Worker's allowlist form the same reviewed identity set.
+- from that authority the bridge executes only the catalog-bound `DataBridgePrefetchBinding` mappings, creates `DataInvocationScope`, `DataEvidenceCollector` and `DataReader`, and asks Phase 2 for an issuance token before each mapped operation. `freeze_for_execution(kind)` returns its immutable typed contribution for the resolver to merge; no later/model-selected call may mutate prompt inputs. It drains complete `DataReadOutcome`s into the existing Phase 2 `WorkerExecutionResult` DataResult/PayloadRef/ToolCallRecord fields; Phase 3 does not create a parallel public evidence or tool schema.
+- a normal read follows Task 6's one-owner state machine: request and named concrete result are each registry-validated/persisted once, raw output remains unpublished, and `finalize_success` receives only the existing `request_ref`, `result_ref`, `request_digest` and `result_digest`. PIT audit/attempts are already bound inside the result digest and are not extra gateway parameters.
+- for an LLM view, the bridge calls the pure Task 7 renderer, validates `RenderedDataBlock@1`, persists it once in `main`, and returns an ordered untrusted-block DTO containing its exact `TypedPayloadRef`, media type and bounded length. The provider never holds/calls PromptAssembler. Phase 2 merges data/memory block DTOs, persists one registered `PromptAssemblyRecord@1` before its single model invocation and appends that record ref to execution evidence; the data block ref remains transitively ordered only inside that record.
+- for deterministic execution, the bridge returns only typed data values/refs and ToolCallRecords actually consumed; it does not render or return an untrusted block. A required data provider that cannot resolve is a pre-execution failure in either branch; static v1 has no optional activated provider and no fake empty payload.
+- the Phase 1 Artifact builder receives the exact pre-node `InputSnapshot` digest, data-result refs/digests, ToolCallRecords and PromptAssemblyRecord evidence ref in `Provenance`. Its reproducibility digest therefore changes with data/schema/routing/capability/request/result/render/prompt-assembly changes, while provider/wall-clock/object locators remain audit-only. A failed/no-Artifact node still retains the prompt-assembly evidence ref in NodeRun.
+- Phase 2's InputSnapshot builder accepts deterministically ordered Artifact/DataResult/Memory/Context refs. A data call made during a node is **not** retroactively inserted into that node's already-frozen input snapshot; it enters ToolCallRecord/Artifact provenance and, after the layer barrier commits the artifact, may be included by reference in a later layer's snapshot.
+- normal request/result/render payloads use namespace `main`. Namespace/capability checks occur on write and read; `sealed`, `review` and `audit` payloads cannot enter public ArtifactPool, ContextSnapshot, InputSnapshot or ordinary worker replay.
+- audit replay resolves NodeRun/Artifact's PromptAssemblyRecord typed ref, then the record's exact render ref, plus recorded request/result refs via `PayloadStore.get(..., expected_schema_ref=...)`; it reconstructs the same named DataResult/RenderedDataBlock without invoking a source, renderer or model-dependent live service. Re-execution creates a new run identity and may call sources only under the new frozen context/policy.
+- future/missing availability makes the guard call the pending invocation's sink-backed reject recorder exactly once, producing an `audit`-namespace detail and Phase 2 `EventRefusalRecord` before the error; dispatch only re-raises. The already persisted request may remain, but there is no public/main raw/result/render payload, `RunEvent`, cache entry, evidence-counting ToolCallRecord, Artifact or layer commit. The owning node terminates with the reviewed PIT refusal reason; it does not degrade or fall back.
+
+- [ ] **Step 1: Write failing end-to-end integration tests**
+
+Required tests:
+
+1. one authorized source read follows request put once → pending/invoke → PIT/schema → named result put once → exact four-argument `finalize_success`, yielding one complete `DataReadOutcome`, one Phase 1 ToolCallRecord and an Artifact whose Provenance contains the exact request/result/data/input-snapshot digests;
+2. capability absent from WorkerSpec/descriptor is denied before handler invocation;
+3. a Phase 2 catalog-bound Plan cannot use a newly registered Phase 3 capability, and catalog/registry digest drift requires a new candidate/approval;
+4. request/result/render payload cannot be staged under the wrong schema/namespace or with a mismatched registry/plan/context digest;
+5. object-ID and snapshot-ID-only relocation leaves reproducibility/semantic digests stable; data/snapshot-content/schema/routing/capability/renderer content changes them;
+6. concurrency completion order does not alter the deterministic data-ref/ToolCallRecord ordering;
+7. same idempotency key/replay does not duplicate payload/event/artifact visibility; same key/different semantics conflicts;
+8. audit replay resolves the exact persisted PromptAssemblyRecord TypedPayloadRef and its ordered render ref plus request/result refs, makes zero external calls and reconstructs identical canonical data/render output;
+9. a future or missing-availability candidate transitions pending → rejected, persists one refusal audit, calls no second source, and leaves zero public raw/result/cache/success-record/artifact/commit records;
+10. the next layer sees only barrier-committed refs; same-layer data/artifacts remain invisible;
+11. the catalog-bound resolver—not worker input—constructs the DataRuntimeBridge; missing required/extra/forged descriptor/config/handler material fails before reservation, `prepare_input` is I/O-free/empty, RUNNING precedes every source call and two reviewed data/memory providers share one sequencer and merge identically under reversed completion;
+12. the DataRuntimeBridge returns the persisted RenderedDataBlock TypedPayloadRef only as an untrusted-block DTO; Phase 2's executor alone merges all providers and persists one PromptAssemblyRecord before model execution, binding that record ref into NodeRun plus successful Artifact. Malicious row text never enters system/skill/guardrail materials;
+13. deterministic execution receives typed data/direct evidence but creates neither RenderedDataBlock nor PromptAssemblyRecord; a late/dynamic/model-selected provider call is rejected. Timeout/failure after LLM prompt persistence still leaves the exact PromptAssemblyRecord ref in NodeRun, while wrong namespace/schema/content or NodeRun/Artifact evidence drift fails;
+14. every begun invocation has exactly one terminal success/reject transition across success, retryable fallback, PIT refusal and broken-source paths;
+15. Phase 1 and Phase 2 suites remain green with old Phase 1/2 registry/catalog-bound fixtures and new Phase 3 cumulative fixtures.
+
+- [ ] **Step 2: Run integration tests to verify failure**
+
+Run: `pytest tests/orchestration/data/test_runtime_integration.py tests/orchestration/data/test_data_replay.py -v`
+
+Expected: FAIL until the bridge is implemented.
+
+- [ ] **Step 3: Implement the thin runtime bridge**
+
+Do not duplicate storage, event, capability, snapshot, Artifact or provenance builders. The bridge resolves and composes the Phase 1/2 owners, and carries Phase 3 typed refs/digests across them.
+
+- [ ] **Step 4: Run Phase 1–3 regression suites**
+
+Run: `pytest tests/orchestration/ -v`
+
+Expected: PASS, including the Phase 2 static-runtime integration/equivalence tests.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add guanlan_v2/orchestration/data/runtime.py tests/orchestration/data/test_runtime_integration.py tests/orchestration/data/test_data_replay.py
+git commit -m "feat(orchestration): integrate PIT data with runtime provenance and replay"
+```
+
+---
+
+## Task 9: Unified PIT-safe memory facade + proposal-only mutation boundary
+
+**Files:**
+- Create: `guanlan_v2/orchestration/memory/__init__.py`
+- Create: `guanlan_v2/orchestration/memory/models.py`
+- Create: `guanlan_v2/orchestration/memory/adapters.py`
+- Create: `guanlan_v2/orchestration/memory/store.py`
+- Create: `guanlan_v2/orchestration/memory/proposals.py`
+- Create: `guanlan_v2/orchestration/memory/schema_registry.py`
+- Create: `guanlan_v2/orchestration/memory/catalog.py`
+- Create: `guanlan_v2/orchestration/memory/runtime.py`
+- Modify: `engine/financial_analyst/dream/proposal_writer.py` (backward-compatible safe/idempotent proposal API; legacy entry point preserved)
+- Modify: `engine/financial_analyst/memory_ops.py` (shared owner coordinator for decision-backed exact apply/update/reject and legacy CLI/MCP accept/reject/revert; legacy results are not post-cutover approval evidence)
+- Modify: `guanlan_v2/console/store.py` (idempotent structured proposal/decision events under the shared root coordinator)
+- Modify: `guanlan_v2/console/tools.py` (human-approved idempotent proposal application through the shared root/file coordinator)
+- Modify: `guanlan_v2/console/api.py` (fail-closed verifier-injected approve/reject endpoints for exact structured proposals)
+- Modify: `guanlan_v2/console/curator.py` (marker-aware consolidation/archive under the shared root coordinator)
+- Test: `tests/test_memory_ops.py`
+- Test: `tests/test_console_store.py`
+- Test: `tests/test_console_tools.py`
+- Test: `tests/test_console_api.py`
+- Test: `tests/test_curator.py`
+- Test: `tests/orchestration/memory/test_handoff.py`
+- Test: `tests/orchestration/memory/test_models.py`
+- Test: `tests/orchestration/memory/test_schema_registry.py`
+- Test: `tests/orchestration/memory/test_catalog.py`
+- Test: `tests/orchestration/memory/test_adapters.py`
+- Test: `tests/orchestration/memory/test_visibility.py`
+- Test: `tests/orchestration/memory/test_snapshot.py`
+- Test: `tests/orchestration/memory/test_proposals.py`
+- Test: `tests/orchestration/memory/test_runtime_integration.py`
+- Create: `tests/orchestration/golden/phase3_full_schema_manifest_v1.json`
+- Create: `tests/orchestration/golden/phase3_full_catalog_manifest_v1.json`
+- Create: `tests/orchestration/golden/memory_capture_policy_v1.json`
+
+### Handoff and ownership gate
+
+- Phase 1 remains the sole owner of `MemoryRecordRef`, `ContextSnapshot`, `InputSnapshot` and their builders/projections. Task 9 imports the Task 0-verified ABI; it never adds fields or locally redefines those types.
+- Phase 2 supplies `SchemaRegistryResolver`, `PayloadStore`, `CapabilityGateway`, `PromptAssembler`, `AuthoritativeClock`, admitted Plan/Worker authorization and replay. Frozen memory evidence may be stored in PayloadStore, but Phase 2 remains the storage/evidence owner.
+- The authoritative accepted facts remain the existing memory-root Markdown and `var/console/{memory.md,memory.archive.md,sessions/*/notes.md}` files. Existing entry points are `engine/financial_analyst/agent/memory.py`, `agent/memory_index.py`, `memory_paths.py`, `memory_ops.py`, `dream/proposal_writer.py` and `guanlan_v2/console/{store,tools,api,curator}.py`. Task 9 adds a read/proposal facade and narrow backward-compatible idempotency/review hooks to those owners, not a third authoritative memory root, SQLite DB, JSONL log or accepted-write path.
+- `tests/orchestration/memory/test_handoff.py` inspects those real read/proposal/accept/reject/revert/archive/session entry points. Read adapters require explicit service-owned roots and must not call a default-root helper that seeds/mutates the filesystem during capture. If repository behavior differs, update this plan from evidence before implementation; do not hide it behind a second writer.
+
+### Strict public contracts (`memory/models.py`)
+
+- `MemoryKind = semantic | episodic | procedural`; v1 `MemoryReviewState = pending | approved`; `StoreDigestPrecondition = DigestHex | Literal["absent"]`. Rejected proposals remain proposal decisions and never become MemoryRecords; an accepted file later removed/reverted is omitted from the next snapshot while old snapshots retain its historical approved revision. V1 does not invent a revoked tombstone state.
+- `MemoryCapturePolicy@1`: reviewed logical source IDs; source→kind/scope/importance/mandatory mappings; one-global-cutover requirement; revision identity/state-evidence rule; archive window; canonical context-scope, worker-own/shared, borrower→borrowed-owner, kind and session grant matrices; strict `top_k_non_mandatory`, maximum mandatory count, per-record normalized/rendered byte limit and total rendered byte limit; deterministic rank/tie-break policy; exact policy digest. All set-like grants are canonically sorted/unique. Context selection is `MemoryContextAuthority ∩ policy`; worker selection is the already frozen context/session/snapshot boundary `∩ policy ∩ exact WorkerSpec`, with borrowed scope requiring both policy and `borrowed_from`. One side alone cannot widen either path. Mandatory records do not consume `top_k_non_mandatory`; exceeding any mandatory/count/byte bound fails closed rather than truncating or silently dropping a mandatory record. Physical roots are runtime configuration/audit only. A structurally valid caller policy has no authority; runtime accepts only the exact catalog-bound policy material.
+- `MemoryCutoverSourcePayload@1` freezes one normalized baseline source body plus global `cutover_operation_id`, logical source/locator identity, store-content digest and a source revision token deterministically derived from `(cutover_operation_id, logical source identity, store-content digest)`. Its PayloadStore idempotency key is derived from the same tuple. `MemoryCutoverManifest@1` binds that operation ID and contains exact main TypedPayloadRefs to those payloads and their store digests; it deliberately contains no final MemoryRecord revision/content digest, review-evidence digest, availability time or attestation digest. `MemoryCutoverAttestation@1` binds the manifest's main TypedPayloadRef, exact **cutover-policy**/root-state digests, authenticated admin actor and authoritative cutover time. A later reviewed current policy may reclassify only these frozen baseline bodies without a second cutover; snapshot binds both cutover attestation and current policy, and any changed derived record is a new capture-timed revision/head.
+- The non-cyclic, crash-recoverable construction order is fixed: stable-scan raw sources → `MemoryCutoverRepository.prepare_once(admin_operation_key, scan)` atomically freezes one service-derived operation ID plus the complete normalized source tuple/digests/revision-token map → idempotently persist every source payload **from that preparation** → persist manifest → acquire the global cutover lease and every reviewed owner-root coordinator in canonical logical-root order → perform a second stable scan used **only for equality validation** → require its complete logical locator set, normalized bytes and store digests to equal the frozen preparation/manifest exactly → `initialize_once(manifest_ref, authenticated_admin, validated_root_state_digest)` persists/returns one attestation → initialize the policy-independent source-continuity genesis from that same validated manifest/root-state digest → release leases → build legacy evidence from attestation + frozen source ref + genesis continuity epoch → build final capture-timed MemoryRecord/revision → persist snapshot. Missing, extra or drifted content at the second scan fails closed and must never refresh the preparation, update the manifest or cut a replacement baseline. Root leases remain held through attestation and genesis initialization; crash recovery reacquires them, repeats the equality-only scan and reuses the same operation/token/put identities. A crash after attestation but before genesis may resume only if the current root-state digest still equals the attested/frozen digest; otherwise ONLINE remains blocked. Competing preparation/initialization conflicts. The v1 repository is an explicit port in `memory/store.py` over the supplied Phase 2 payload/event backend; its pre-attestation preparation is frozen recovery evidence, not a third accepted-memory copy, and becomes immutable after attestation. Recovery is supported only when that backend survives the service object/process; the Phase 2 in-memory backend makes no cross-process durability claim. Lost/corrupt repository, preparation or payload state blocks ONLINE until reviewed evidence is restored or a later durable backend is installed—rescanning a new baseline is forbidden.
+- `MemorySourceStateEntry@1` records one logical source/locator as `present | absent`, optional exact store digest, optional validated `apply_marker_id` and a service-owned `continuity_epoch`; present requires a digest, absent forbids digest/marker. `MemorySourceStateSnapshot@1` is a registered, policy/session-independent stable-scan fact binding root-state identity, capture time, canonically ordered entries, predecessor ref/hash and verified content digest. Its genesis form has no predecessor and must bind the exact cutover manifest TypedPayloadRef plus attestation TypedPayloadRef; later forms bind neither replacement genesis nor caller epoch. Each content/marker change, missing or reappearing locator advances its epoch—even `A → B → A` or `A → absent → A`; unchanged continuously present bytes/marker retain it. A service-owned `MemorySourceStateHeadRepository` keyed only by logical root-state binding advances this chain by CAS and persists it in `main`, so replay proves continuity without live filesystem I/O.
+- `MemoryOwnerApplySemanticReceipt@1` is the registered main-namespace semantic projection of an exact owner apply. It contains Decision ref, operation, logical target/relative locator or console event identity, expected/intended and actual before/after target digests, console container digests when applicable, and exact apply-marker identity. Physical root/path, audit ID/time, Git staged/error and raw owner log fields live only in an optional audit projection/ref and never affect MemoryRecord semantics. `AgentAppliedEvidence` binds this typed semantic receipt—not a raw `memory_ops` audit-record digest; PIT replay needs no live audit file.
+- `MemoryReviewEvidence@1` is a concrete registered `DigestModel` envelope whose discriminated `evidence` field contains exactly `LegacyCutoverEvidence | AgentAppliedEvidence | ConsoleAppliedEvidence`. Legacy evidence binds exact attestation/source payload/source-state genesis epoch and is valid only while that source continuity remains unbroken. Post-cutover variants bind the current source-state entry/continuity epoch and transitively bind exact persisted proposal, pending receipt, authenticated Decision and `MemoryOwnerApplySemanticReceipt` refs; console evidence also binds the exact `console_memory_applied (journal_session_id,event_id)`. The closed target CAS matrix distinguishes intent from observation: create has `expected_before_target_store_digest=actual_before_target_store_digest="absent"`; update has equal digest values; both require `actual_after_target_store_digest == intended_after_target_store_digest`. Console additionally requires actual-before container == expected-before container and actual-after container == intended-after container. Proposal/Receipt/Decision never claim an `actual_*` value. Every semantic value/marker/epoch must cross-match; `None`, blank, physical-path and MemoryRecord digests are invalid. A caller string such as legacy `source="mcp"` is not evidence.
+- `MemoryRecord@1`: exact Phase 1 ref identity (`record_id`, required `revision_id`, aware `available_at`, `content_digest`) plus logical source/locator, required `source_continuity_epoch`, owner/scope, kind, immutable normalized text, aware `created_at/valid_from/valid_to`, review state, optional `review_basis: legacy_cutover | memory_ops_approval | console_proposal_approval | None`, optional exact review-evidence `TypedPayloadRef`, finite importance and mandatory flag. `pending` requires basis/evidence absent; `approved` requires matching positive evidence and exact store/text/continuity identity. `valid_to` is exclusive. Its builder verifies the epoch against the bound `MemorySourceStateEntry`, computes the final record revision/content only after evidence exists, then emits/verifies the matching Phase 1 `MemoryRecordRef`; raw store digest, record semantic digest and PayloadRef content digest are named/tested separately and never substituted.
+- `MemorySnapshotEntry@1`: exact `MemoryRecordRef` plus the registered `MemoryRecord@1` `SchemaRef + PayloadRef(namespace="main")`. It verifies record/revision/availability/content equality; `PayloadRef.object_id` remains locator-only.
+- `MemorySnapshot@1`: as-of, aware capture-completed time, exact `memory_session_id: LogicalId | None`, service-derived policy-independent `scope_binding_digest`, exact main `cutover_attestation_ref: TypedPayloadRef`, exact main `source_state_ref: TypedPayloadRef`, `previous_snapshot_hash: DigestHex | None`, audit-only main `previous_snapshot_ref: PayloadRef | None`, current policy digest, canonically sorted entries and verified content digest. The cutover/source-state refs must resolve their exact schemas and every record locator/continuity epoch must match the bound source state. Previous hash/ref are both absent only for a scope's first snapshot; policy changes use the same scope head and therefore retain predecessor lineage. The snapshot digest includes scope/cutover/source-state/previous/current-policy content identities and excludes physical roots, capture wall-clock and payload object IDs. The current snapshot still has no self-locator field—only its PayloadStore-assigned object ID becomes `ContextSnapshot.memory_snapshot_id`.
+- `MemoryQuery@1`: query text plus service-derived reader role (`context | worker`), allowed kinds/scopes, optional exact session ID, strict positive bounded `top_k` (bool rejected) and policy digest. Two authority-specific builders exist—there is no generic caller-filled builder:
+  - `build_context_memory_query(query_text, top_k, *, authority: MemoryContextAuthority, policy: ResolvedMemoryPolicy) -> MemoryQuery` is used only before ContextSnapshot construction; `authority` is created by the authenticated orchestration entry point and supplies the exact session/context scopes;
+  - `build_worker_memory_query(query_text, top_k, *, worker: WorkerSpec, context: ContextSnapshot, snapshot: MemorySnapshot, policy: ResolvedMemoryPolicy) -> MemoryQuery` requires `"memory" in worker.read_categories`, verifies `snapshot.memory_session_id == context.memory_session_id`, derives own scope from `worker.id`, permits borrowed scopes only when both policy and `worker.borrowed_from` grant them, and can only retain or narrow the ContextSnapshot session scope.
+  Caller/model values may provide query text and a policy-bounded `top_k`; they can never widen role, scope, kind, session or the policy maximum. In particular, pre-admission code does not fabricate a WorkerSpec or use a not-yet-created RunContext.
+- `MemorySelection@1`: exact snapshot digest plus persisted `MemoryQuery@1` `TypedPayloadRef(namespace="main")`, whose payload content equals `query_digest`, and selected entries with explicit rank in deterministic ranking order and a verified order-sensitive content digest. Query object-ID relocation is audit-only; query semantic drift changes selection digest. Ties use `(record_id, revision_id)`; the selection digest is `past_context_hash`. When refs enter Phase 1 InputSnapshot they are separately canonicalized by its ABI, while prompt rendering follows persisted selection ranks.
+- `MemoryProposalRequest@1` is the worker-safe registered capability input envelope. Its discriminated `target` contains agent topic/content fields or console `scope/key/text`, but never proposer/run/session/journal/expected-digest/actor/path authority. `MemoryProposalGrant@1` is a canonical catalog-bound least-privilege row from exact worker ID to allowed agent owners and separately allowed console `session | global` scopes; no wildcard exists, borrowed/read access grants nothing, and self-only must be explicit. `MemoryProposal@1` is a separate service-owned registered envelope with explicit `proposal_id`, aware `proposed_at`, `effective_date`, expected-before target/container preconditions and intended-after target digest: `build_memory_proposal(request, *, preparation: MemoryProposalPreparation, worker, plan, run_id, context: ContextSnapshot, facade) -> MemoryProposal` verifies the exact capability/catalog and matching grant **before any pending side effect**, derives proposer/run identity, copies only preparation-frozen authority/time/CAS values, and derives journal origin/target session only from `context.memory_session_id`. Cross-agent, borrowed-owner, session→global and ungranted target requests fail; a session/global console target from a context with no session also fails. No caller-supplied foreign session/journal value exists.
+- Both proposal envelopes are concrete `DigestModel`s whose `target` field contains explicitly registered discriminator variants, not an unregistrable top-level `Annotated[Union]` alias. Agent target fields mirror the existing writer (`target_agent, topic_slug, title, confidence, supporting_cases, reasoning, lesson_md`); console keys reject separators, traversal and anything changed/collided by the exact normalizer. Registered `AgentPendingLocator@1` contains only target agent, proposal ID and reviewed relative logical locator; it rejects absolute roots, drive/UNC prefixes, separators outside the closed form and `..`. Registered `ConsolePendingEventLocator@1` contains only `(journal_session_id,event_id)`. After Proposal persistence, the service derives `apply_marker_id` solely from `(proposal_ref semantic identity, logical target, intended target digest, "apply-v1")`; it never depends on Receipt/Decision and therefore creates no digest cycle. `MemoryProposalReceipt@1` binds Proposal ref/target, marker ID, expected-before target/container and intended-after target/container digests, pending-store content digest and exactly one logical pending locator, with `status="pending_external_review"`. Physical root/path is owner runtime/audit state and two roots with identical logical content produce the same semantic receipt.
+- admin-only `MemoryProposalDecision@1` binds exact proposal/receipt TypedPayloadRefs, the same expected-before/intended-after target/container digests, `approved|rejected`, authenticated human actor, reason and authoritative decision time; it contains no `actual_*` field. The actor comes only from a fail-closed injected `AdminReviewVerifier`, never a body field. It is not accepted by `memory.propose` or any WorkerSpec. A service-owned `MemoryDecisionRepository.decide_once(...)` atomically keys the terminal decision by proposal content identity, not caller idempotency key: the same proposal + identical semantics returns the one stored Decision ref even under a different retry key; any changed actor/reason/digest or `approved`↔`rejected` race conflicts. Decision persistence precedes every owner side effect, and retry recovers the unique ref. Approval adapters may delegate to existing writers only from this persisted record; there is no approved/direct-write request in the worker-facing schema.
+- `MemoryBridgePrefetchBinding@1` is a strict registered catalog material that binds the memory bridge ID to exact worker/query-text/`top_k` projections from admitted node params plus the already bound snapshot/context. It cannot select a new snapshot, scope, policy, renderer, clock or live store, and model-generated/late query expansion is absent.
+- `MemoryFacadeDescriptor@1` is a self-contained registered body with stable descriptor ID/version, exact proposal `CapabilityRef`, trusted proposal-handler `ContentRef`, one combined capture/visibility/ranking `policy_ref: ContentRef`, renderer `ContentRef`, exact bridge-prefetch binding `ContentRef`, supported proposal targets and canonical `proposal_grants`; it contains no self-referential ContentRef. Builder-owned `PHASE3_MEMORY_FACADE_DESCRIPTOR_REF: ContentRef` hashes the complete canonical JSON bytes of that body as an exact catalog `ContentManifestEntry(kind="guardrail")`; policy/prefetch canonical JSON are separate exact `kind="guardrail"` materials. Thus supported target/grant or handler/policy/prefetch/renderer drift changes the external descriptor ref and catalog digest without a hash cycle. The Phase 1 CapabilityDescriptor stays closed; runtime resolves only this externally bound descriptor material.
+- `RenderedMemoryBlock@1`: exact selection/snapshot identities, renderer `ContentRef`, `trust="untrusted_data"`, deterministic text/media type, per-record and total encoded-byte counts and verified digest. `render_memory(...)` resolves only the bound descriptor renderer. It must fail before prompt assembly on any policy byte/count overflow; truncation, partial mandatory rendering and caller renderer override are absent. Raw memory text can never become prompt/skill/guardrail material.
+- `MemoryContextAuthority`, `AuthenticatedAdminPrincipal`, `AdminReviewVerifier`, `MemoryCutoverPreparation`, global `MemoryCutoverRepository`, service-owned `MemoryCutoverCoordinator`, policy-independent `MemorySourceStateHeadRepository`, scoped `MemorySnapshotHeadRepository`, `MemoryProposalPreparation`, `MemoryProposalSubmissionRepository`, `MemoryDecisionRepository`, `MemoryReplayBinding`, `ReviewEvidenceResolver`, `ResolvedMemoryPolicy`, `MemoryReadOutcome(ordinal_token: ExecutionEvidenceOrdinalToken, query_ref: TypedPayloadRef, selection_ref: TypedPayloadRef, rendered_block_ref: TypedPayloadRef | None, selected_memory_refs)` and raw adapter rows/source scan/head state are frozen internal carriers/ports in `PHASE3_MEMORY_INTERNAL_MODELS`. The orchestration `ReviewEvidenceResolver` resolves/validates Phase 2 refs and builds a primitive immutable exact mutation command plus the semantic owner-receipt projection; `financial_analyst.memory_ops` receives only that command's strings/digests/paths and never imports `guanlan_v2` or Phase 2 models. `MemoryCutoverCoordinator` owns the one global cutover lease, acquires the existing reviewed root coordinators in canonical order and exposes no mutation/refresh operation. The cutover repository exposes `load_preparation/prepare_once/load/initialize_once`; `initialize_once` requires the equality-validated root-state digest and cannot attest a different preparation/manifest. Source-state/snapshot heads expose `load/compare_and_swap`; proposal/decision repositories expose their single-writer prepare/terminal transitions. Stale/missing conflicts fail the whole operation.
+
+### Preserve data-only replay while extending the registry/catalog
+
+- `PHASE3_MEMORY_PUBLIC_MODELS` explicitly contains `MemoryCapturePolicy`, cutover source/manifest/attestation, `MemorySourceStateEntry/Snapshot`, `MemoryOwnerApplySemanticReceipt`, every concrete review-evidence/proposal-target/pending-locator variant plus their registered envelopes, record/snapshot/query/selection, proposal grant/request/proposal/receipt/decision, `MemoryBridgePrefetchBinding`, `MemoryFacadeDescriptor` and rendered-block contracts. Together with `PHASE3_FULL_BASE_REGISTRY_DIGEST = PHASE3_DATA_REGISTRY_DIGEST`, `PHASE3_FULL_REGISTRY_DIGEST` and `build_phase3_full_registry(expected_phase3_data_digest)`, it creates a **new** sealed cumulative registry from the immutable Task 5 data snapshot plus those models. Completeness/round-trip tests reject an unregistered nested variant, owner receipt, source-state or cutover source schema. The data-only builder/tuple/digest/golden remain byte-for-byte rebuildable for Plans admitted by Tasks 5–8.
+- `phase3_full_schema_manifest_v1.json` is a separate reviewed golden. Tests prove the inherited Phase 1/2/data JSON Schemas are byte-identical, order-independent and simultaneously resolvable by `SchemaRegistryResolver` under their original digests.
+- `PHASE3_FULL_BASE_CATALOG_DIGEST = PHASE3_DATA_CATALOG_DIGEST`, `PHASE3_FULL_CATALOG_DIGEST` and `build_phase3_full_catalog(phase3_data_snapshot: WorkerCatalogSnapshot, *, facade_descriptor_ref: ContentRef, facade_descriptor: MemoryFacadeDescriptor, memory_bridge_descriptor: ExecutionBridgeDescriptor, memory_bridge_prefetch_binding: MemoryBridgePrefetchBinding, resolved_materials: tuple[ResolvedMaterial, ...]) -> WorkerCatalogSnapshot` first reject every non-canonical data base and require `facade_descriptor_ref == PHASE3_MEMORY_FACADE_DESCRIPTOR_REF`, then extend it with the exact `memory.propose` capability (`input_schema_ref=MemoryProposalRequest@1`, `output_schema_ref=MemoryProposalReceipt@1`), facade/policy/prefetch materials and one generic memory execution-bridge descriptor. That descriptor activates exactly on `read_categories` containing `memory`, uses `pre_input_kind="memory_refs_v1"`/`lifecycle="static_prefetch_v1"`, binds the registered prefetch config and trusted MemoryRuntimeBridge handler, and has a globally reviewed priority distinct from data. Descriptor/facade/policy/prefetch are strict-NFC canonical JSON `kind="guardrail"`; proposal/provider/renderer handlers use `kind="handler"`. Builder parses/round-trips every complete registered body, verifies semantic and external material digests separately and requires one-to-one coverage. Missing/extra/drifted material, grant/priority/config mismatch or competing refs fails. This full golden performs no WorkerSpec update, emits `phase3_full_catalog_manifest_v1.json` and never rewrites `data_catalog_manifest_v1.json`.
+- The reviewed full-Phase-3 golden grants `memory.propose` to **no existing worker**, contains no production proposal-grant row and preserves every inherited `read_categories` tuple exactly. `PHASE3_FULL_MEMORY_READERS` is a derived/read-only set of inherited workers that already had `"memory"`; it grants nothing but does activate the exact memory bridge descriptor where non-empty, and the frozen prefetch binding must contain one reviewed query projection for every such worker. Canonical runtime tests assert exact inherited allow/deny/provider/config coverage. If no suitable final worker exists, node-read and proposal success conformance tests use a separately reviewed derived test snapshot whose WorkerSpec, prefetch row and descriptor `proposal_grants` agree; a future production reader/proposer/target grant requires a new catalog digest, RuntimeSupportReport and approval. `compat.*` remains ungranted for proposals. There is no `memory.accept`, generic path write, skill write or code write capability.
+
+### Existing-store adapters and conservative legacy capture
+
+- `AgentMemoryAdapter` preserves current own/shared/borrowed and `always_include.txt` coverage; excludes `_proposed`, `_pending_introspections`, `_buddy` and other staging/private paths. Static v1 does **not** call existing `MemoryIndex.search` because its API applies `ORDER BY/LIMIT` before any visibility allowlist; Task 9 ranks the already frozen/visible MemoryRecord tuple deterministically in memory. The live search→top-k→fallback-to-`load_all` path is forbidden for orchestration reads.
+- `ConsoleMemoryAdapter` reads current global `memory.md`, the same reviewed archive-tail window used by existing console behavior (the policy freezes its size), and only the matching session's `sessions/<sid>/notes.md`; it parses the existing dated/keyed line form, preserves keyed importance, ignores headings and reserved exact-apply metadata markers as user memory, and never crosses session IDs. It separately validates any marker for review evidence. Indexing the full archive would be a future reviewed policy change, not an implicit expansion here.
+- Logical record IDs never contain an absolute root or raw Unicode/path text: builders hash the canonical logical identity into `mem.<lowercase-sha256>` so it satisfies Phase 1 `LogicalId`. Agent records derive identity from reviewed owner/source/relative locator; `always_include` targets must remain under the explicit root and reject absolute/`..` paths. Console keyed records derive identity from scope/session/key, and unkeyed records from scope/session/canonical content plus deterministic occurrence index so identical repeated lines are not collapsed. Moving the same logical record into the reviewed archive window preserves identity. Same locator with changed content is a new required revision.
+- Legacy adoption is an explicit one-time administrative operation, not “the first capture for this session”. It stable-scans reviewed roots, persists cutover source payloads/manifest/attestation and initializes the exact `MemorySourceStateSnapshot` genesis. Only a source whose current entry remains continuously on that genesis epoch may use `review_basis=legacy_cutover`; all sessions/scopes reuse the same proof. Crash after attestation resumes from frozen refs, not current files. Missing attestation/source payload/source-state genesis blocks ONLINE preparation, and restart/head loss never recreates a baseline.
+- After cutover, a new/changed agent record is `approved` only when an exact Decision-backed `MemoryOwnerApplySemanticReceipt` resolves, matches expected/intended/actual target digests and matches a canonical proposal/apply identity marker atomically embedded by the exact owner in the accepted file. Legacy CLI/MCP `accept_proposal(source=...)` remains operational for old callers but cannot create that marker/evidence. A console record requires Decision, exact apply-start marker and `console_memory_applied` semantic receipt/event. Approval alone, visible text written without the marker or a raw audit receipt remains pending. Unmatched direct writes remain `pending`/invisible, so legacy writers remain compatible without bypassing the Worker proposal boundary.
+- Existing accepted files do not contain sufficient PIT metadata. Never infer `created_at`, `valid_from` or `available_at` from filesystem mtime, Git timestamp or a date embedded in prose. `MemoryContextPreparationService` receives the already frozen `DataContext.as_of` as the run cutoff and captures stable sources afterwards. A baseline revision uses `created_at = valid_from = available_at = cutover capture_completed_at` and `valid_to=None`; every later newly observed **record revision** uses its own capture-completed instant. It is therefore not visible in that current run and can appear only in a later run, preventing backdating of data observed after the cutoff.
+- An ONLINE capture first stable-scans and CAS-advances/reuses the policy-independent global source-state head keyed by logical root-state binding. It then obtains the memory-snapshot predecessor only from a service-owned head keyed by policy-independent `(scope_binding_digest, memory_session_id)`, never a request parameter, so a policy change cannot reset lineage. It binds source-state, `previous_snapshot_ref/hash` and current policy, persists new evidence, then advances the scope head by CAS. Stale heads, concurrent source change, missing predecessor/source-state ref/hash or non-initial absent head retry/fail closed; session heads cannot initialize another legacy baseline. The Phase 2 in-memory backend proves same-process behavior but does not claim cross-process durability before a later durable backend.
+- Revision reuse requires the immediately preceding source-state entry to be continuously present with the same epoch **and** the complete immutable tuple to match: normalized content, review state, review basis and exact review-evidence digest. Any changed/missing→reappearing source receives a new epoch and capture-timed revision; old legacy/agent/console evidence cannot approve it, even when bytes return exactly (`A→B→A`, `A→absent→A`) or policy changes in between. New exact applied evidence may approve only its matching epoch. If continuously present content is unchanged but valid applied evidence arrives later, capture emits a new approved revision with `available_at=capture_completed_at`; it never mutates/backdates the pending revision. Rejected proposals never create MemoryRecords. Deleted/reverted accepted content is omitted from the new snapshot while old snapshots remain immutable.
+- `MemorySnapshot.as_of == DataContext.as_of` is mandatory, and the Phase 1 ContextSnapshot must bind that exact DataContext content digest and the same `memory_session_id`. PIT_REPLAY verifies those identities plus exact snapshot/query/selection refs and predecessor lineage. ONLINE may contain future-available captured entries, but the selection filter excludes them until a later run.
+- The preparation API has a closed mode matrix. `prepare_online(data_context, authority, ...)` may capture/reuse and create a new memory binding. `prepare_pit_replay(data_context, authority: MemoryContextAuthority, *, prior_context_ref: TypedPayloadRef, ...) -> MemoryReplayBinding` first resolves a previously persisted Phase 1 `ContextSnapshot` through the exact registry/PayloadStore, then verifies its DataContext digest/as-of, registry/catalog/policy identity, session and context scopes against authenticated authority. Merely possessing/guessing a ref grants nothing; `None↔session`, leaked foreign session and scope mismatch fail. It projects the exact existing snapshot/source-state/selection refs and hashes without capture, query rewrite or clock/live-store access. Wrong schema/namespace/content or any data-context/as-of/policy mismatch also fails; object-ID relocation remains audit-only when content identity is unchanged. Frozen payload copies are run evidence, never a write-back or third authoritative memory store.
+
+### Visibility-before-ranking and snapshot binding
+
+The retrieval order is closed:
+
+1. resolve and verify the exact frozen snapshot/registry;
+2. create the visible set using `available_at <= as_of`, `valid_from <= as_of < valid_to` (or no `valid_to`), `review_state=approved`, role/own/shared/borrowed grants and exact session scope;
+3. only then include all visible mandatory records in deterministic ID order, rank the remaining visible records by the frozen role/recency/importance/relevance policy, and take `top_k` non-mandatory records;
+4. zero-hit fallback may inspect only that same visible set—never live `AgentMemory.load_all()` or an unfiltered FTS result.
+
+Missing/naive metadata is a loud refusal. A future/pending/expired highly relevant record cannot consume a rank slot. Source enumeration and FTS completion order cannot affect selection; ties use `(record_id, revision_id)`.
+
+- pre-admission `MemoryContextPreparationService` runs after the frozen DataContext/request cutoff but before Plan validation, support, budget and approval. In `ONLINE`, authenticated `MemoryContextAuthority` exists before a new ContextSnapshot: the service resolves the catalog-bound policy, captures/reuses and persists the exact `MemorySnapshot`, service-builds/persists the context `MemoryQuery`, then builds/persists `MemorySelection`; these values feed the Phase 1 ContextSnapshot builder. In `PIT_REPLAY`, authenticated authority plus an exact **prior persisted** ContextSnapshot TypedPayloadRef are required; the ref alone is never authority and is not the not-yet-built current ContextSnapshot. `prepare_pit_replay` verifies both and supplies the unchanged `MemoryReplayBinding`. Both paths bind `memory_snapshot_id/hash`, exact `memory_session_id`, `memory_selection_ref` and `past_context_hash=memory_selection_ref.content_digest`; neither fabricates a RunContext or WorkerSpec.
+- Node-specific selections come only from that same snapshot through Phase 2's pre-input bridge stage. `MemoryRuntimeBridge.prepare_input(..., sequencer)` consumes one executor-issued token, builds/persists the exact query and selection in `main`, returns their direct evidence refs plus canonical Phase 1 `MemoryRecordRef`s and freezes all of them in its prepared handle. Before freeze, the runner computes `expected_memory_record_refs = canonical_union(base_authorized_memory_refs, every completed PreparedBridgeSet provider addition)` with the Phase 1 canonicalizer; it freezes InputSnapshot from that tuple and immediately re-resolves it to require exact equality. Missing, extra, foreign, duplicate-ambiguous, future or post-freeze refs fail; live/proposal/accepted-after-freeze content cannot be added retroactively. This stage uses only frozen registry/PayloadStore facts—no legacy/FTS/filesystem, clock, CapabilityGateway, PromptAssembler or model I/O.
+- after child reservation and RUNNING, `MemoryRuntimeBridge.open_execution(handle, input_snapshot, sequencer)` verifies its prepared selection/ref tuple, while the Phase 2 resolver re-verifies the **whole** PreparedBridgeSet-derived `expected_memory_record_refs` tuple against InputSnapshot rather than a provider-local subset. Any drift or late selection fails. Direct query/selection refs retain the generic `(call_ordinal, bridge_priority, bridge_id, within_call_role)` order. On `LLM`, the session renders/persists `RenderedMemoryBlock` and returns its TypedPayloadRef only as an untrusted-block DTO; it never holds/calls PromptAssembler. Phase 2 merges all providers and appends its one PromptAssemblyRecord ref. On `DETERMINISTIC`, it does not render or return a prompt block. NodeRun and successful Artifact retain the identical branch-complete tuple, including preparation/execution failure and no-Artifact paths. Context replay uses `memory_selection_ref`; node replay resolves the direct tuple and optional prompt record with zero legacy-store I/O.
+
+### Proposal-only mutation boundary
+
+- `submit_proposal` is idempotent, always returns a pending receipt and never makes content readable in the current snapshot. Same idempotency key + same semantic request returns the already persisted enriched proposal/receipt; same key + different content is a conflict. After Request persistence, the service first verifies exact WorkerSpec capability plus descriptor `proposal_grants`; only then may `MemoryProposalSubmissionRepository.prepare_once(request_ref, authority, store_view, clock, idempotency_key)` atomically freeze `proposal_id`, aware `proposed_at`, effective date, journal/session authority, `expected_before_target_store_digest`, `intended_after_target_store_digest` and console `expected_before_container_store_digest`. Retry loads this preparation before consulting clock/store, so a crash after Request, during preparation, before Proposal put or across midnight cannot change identity/path/date/CAS. Unauthorized target rejection creates no preparation or pending-store side effect.
+- extend the **existing** agent `proposal_writer.py` with a backward-compatible safe pending-proposal API that receives service-assigned proposal ID/effective date, validates target agent/slug/root containment, creates one deterministic `_proposed` path, uses create-if-absent/atomic replace and returns a logical `AgentPendingLocator` plus pending content digest; absolute physical path remains audit/runtime only. The legacy writer remains. A crash after file creation but before Receipt persistence is recovered by the same ID/digest; no second file/date is created. Worker submission never calls accept/reject/revert.
+- extend the **existing owner** `engine/financial_analyst/memory_ops.py` with an `AgentMemoryFileCoordinator` keyed by canonical owner root. Primitive exact apply/update/reject **and** existing legacy CLI/MCP accept/reject/revert must all enter this same coordinator with the sole lock order `owner-root → target`; no path may perform an unlocked check-then-move/unlink. While holding the locks, the coordinator rereads pending/accepted/intent state, enforces root containment and target CAS, persists/reuses the deterministic apply intent, performs create-if-absent or atomic temp+fsync+replace/move, verifies the reserved proposal-derived `apply_marker_id` and actual digest after the write, emits/recovers the main `MemoryOwnerApplySemanticReceipt` plus separate raw audit projection, and only then releases. An unresolved exact intent or marker-bound target makes a competing legacy overwrite/move/delete fail closed; exact-vs-legacy concurrency permits at most one semantic winner and cannot lose a marker. The orchestration adapter resolves proposal/receipt/Decision refs first and passes an immutable primitive command; `memory_ops.py` never imports Phase 2/`guanlan_v2` or treats `source` as authority. Same command retry returns the receipt; stale/conflicting/manual same-text-without-marker fails. Legacy entry points and return shapes remain backward-compatible but cannot create exact markers or `AgentAppliedEvidence` after cutover.
+- add a structured console lifecycle to the **existing** `ConsoleStore` journal because today's `review_proposal` is notification-only. One `ConsoleRootCoordinator`, keyed by canonical console root, owns the service writer lease and root lock and is injected into ConsoleStore, `ConsoleMemoryFileCoordinator`, legacy memory writers and curator; the old independent module/instance locks cannot guard these paths. The only lock order is `console-root → optional target-file`, and reverse acquisition is forbidden. `append_event_once` atomically keys lifecycle events by proposal/Decision/idempotency plus expected/intended target/container digests and returns the stored event on identical retry. For `console_memory_proposed`, `console_memory_apply_started` and `console_memory_applied`, event append and `provenance_pinned=true` commit in one coordinator transaction. `delete_session` enters the same root transaction, folds the complete journal (not the 2,000-event tail), rejects a pin and only then deletes; append/apply/curate cannot interleave. Recovery rebuilds pins from the journal without any deletable window. A second writer lease for the same root fails closed. Receipt/event identity is `(journal_session_id,event_id)`.
+- `build_console_router(..., memory_review_verifier: AdminReviewVerifier | None = None)` remains backward-compatible for existing routes. Memory approve/reject routes call the injected verifier; when it is absent they are disabled/fail closed, anonymous/non-admin requests are denied, and a body-supplied actor is ignored/rejected. The endpoint resolves exact persisted proposal/receipt refs and calls `MemoryDecisionRepository.decide_once` to persist/recover the proposal's unique terminal `MemoryProposalDecision` in `main` **before** any apply/reject side effect, then passes only that ref to the owner adapter. A concurrent approve-vs-reject or semantically different second decision fails before an owner write. Workers cannot call this admin port. The default `guanlan_v2/server.py` wiring does not silently invent authentication.
+- add one pure `normalize_console_memory_write(...)` shared by request, Proposal, Decision, exact writer, capture and tests. It rejects text over 280 characters, CR/LF, empty text, invalid scope/session and lossy/colliding keys. `ConsoleMemoryFileCoordinator` is subordinate to the injected `ConsoleRootCoordinator`; it owns only target-file selection and atomic temp+fsync+replace. The exact writer enters one root transaction and, without releasing it, (1) persists/recovers `console_memory_apply_started` plus the provenance pin, binding Decision, expected-before/intended-after digests and the Receipt-bound proposal-derived marker, (2) acquires the target-file lock in the sole allowed order and re-verifies target/container CAS, (3) atomically writes and post-verifies the container/marker/digests, then (4) appends `console_memory_applied`, commits its pin and emits/recovers the semantic receipt before releasing file then root locks. Internal locked store methods never reacquire locks. Any legacy write enters the same root→file path, refuses while an apply intent is unresolved and preserves existing reserved markers; direct/manual same visible text lacks the marker and cannot be recovered as exact apply. Existing `memory_write_impl` preserves public normalization/return behavior while using these coordinators. Exact service paths use explicit Store/root/session, never `CTX_SID` or module-global `_MEMORY_PATH`.
+- the reserved console marker has one closed ASCII grammar, for example `<!-- guanlan-memory-apply-v1 marker_id=<LogicalId> proposal_digest=<DigestHex> target_digest=<DigestHex> -->`, and must immediately precede exactly one normalized target record. It is non-user-memory metadata: adapters ignore its text but validate its binding. `curator.py` parses marker+target as one indivisible unit under `ConsoleRootCoordinator`; it may neither classify a marker as an unkeyed memory line nor archive/drop/reorder it independently. Key consolidation retains the winning keyed record with its matching marker; when policy allows an unkeyed record to move to archive, the matching marker moves in the same atomic unit. Orphan, duplicate, non-adjacent or digest-mismatched markers fail closed before any rewrite. Console capture requires the exact Decision + apply-start marker + applied semantic event, not approval or matching visible bytes alone. Retry after exact file-write-before-applied-event may finalize only when the in-container marker and intended target/container digests match the frozen intent; crash before exact write followed by manual identical text remains distinguishable and pending. Accepted agent/console content becomes visible only in a later ONLINE snapshot because approval changes create a new capture-timed revision.
+- all Task 9 source-state/snapshot/query/selection/render, proposal Request/enriched Proposal/Receipt/Decision, semantic owner receipt, review evidence and cutover payloads use namespace `main`; optional raw owner audit projections use `audit` and never enter record semantics. `main` means replayable typed run/control evidence, **not** approved memory. Wrong namespace fails. For an authorized future worker the exact proposal sequence is: persist validated Request once → verify target grant → atomically prepare/recover service metadata once from that Request ref → service-build/persist enriched Proposal once → perform/recover pending-store side effect → persist Receipt once binding Proposal ref → `finalize_success(request_ref=Request, result_ref=Receipt, ...)`. Retry reuses all three public refs plus internal preparation; gateway request_ref is never the enriched Proposal ref. Runtime evidence persistence is not an accepted-memory write.
+
+- [ ] **Step 1: Write failing handoff, contract and immutable-extension tests**
+
+Write every listed `tests/orchestration/memory/` module plus the decision-backed owner/coordinator regressions in `tests/test_memory_ops.py`, `tests/test_console_store.py`, `tests/test_console_tools.py`, `tests/test_console_api.py` and `tests/test_curator.py` before implementation. They cover exact upstream imports/projections, real legacy entry points, all strict model/state matrices, cutover/source-state/head/capture/visibility, proposal/application/crash recovery, runtime evidence, shared lock ordering/marker preservation, separate data-only/full registry and catalog goldens, inherited-schema byte identity, non-canonical base rejection, closed CapabilityDescriptor fields and no implicit worker grants. Exact tests prove supported-target/proposal-grant drift changes the facade ref; policy/prefetch/renderer/proposal-handler/provider-handler/bridge-priority drift changes the correct material ref and full catalog digest; facade/bridge descriptor/policy/prefetch use `kind="guardrail"`, handlers/renderers use `kind="handler"`; activated memory readers are bound into RuntimeSupportReport before reservation.
+
+- [ ] **Step 2: Run the initial failing suite**
+
+Run: `pytest tests/orchestration/memory tests/test_memory_ops.py tests/orchestration/data/test_data_schema_registry.py tests/orchestration/data/test_data_catalog.py -v`
+
+Expected: FAIL until the memory contracts and immutable extensions exist.
+
+- [ ] **Step 3: Implement contracts and immutable full registry/catalog snapshots**
+
+Implement `models.py`, `schema_registry.py` and `catalog.py` first, including the cutover/review-evidence state matrices, query ref and predecessor-ref projection rules. Manually review and freeze `memory_capture_policy_v1.json`, `phase3_full_schema_manifest_v1.json` and `phase3_full_catalog_manifest_v1.json`; tests never regenerate or overwrite a golden. Prove data-only digests still rebuild exactly.
+
+Run: `pytest tests/orchestration/memory/test_models.py tests/orchestration/memory/test_schema_registry.py tests/orchestration/memory/test_catalog.py tests/orchestration/data/test_data_schema_registry.py tests/orchestration/data/test_data_catalog.py -v`
+
+Expected: PASS before filesystem adapters or writers are changed.
+
+- [ ] **Step 4: Implement adapters, capture, visibility and pre-admission preparation**
+
+Required behavioral tests:
+
+1. Agent adapter matches own/shared/borrowed/always-include coverage, enforces root containment and excludes staging/buddy content without calling the seeding default-root helper;
+2. console global/reviewed-archive-tail/session/keyed parsing, duplicate occurrence identity, archive identity stability and session isolation;
+3. cutover preparation/source payloads/manifest/attestation/source-state genesis initialize exactly once with no digest cycle; empty baseline, competing preparation/attestation/genesis, crash before/among source puts, before manifest, after attestation-before-genesis and after genesis are covered with surviving-backend recovery and lost/corrupt-backend fail-closed. At both prepare→attestation and attestation→genesis windows, parameterized add/change/delete races must make the equality-only second stable scan reject missing/extra/drifted logical locators/bytes/digests without changing the frozen preparation or baseline. Tests prove the global-cutover→canonical-root lock order, leases held through initialization, exact root-state digest binding, same-state retry and drifted-state fail-closed. Retry reuses exact operation/token/put identities; restart/new session cannot reclassify a post-cutover direct edit as legacy-approved;
+4. policy-independent source-state-head CAS plus `(scope_binding_digest, memory_session_id)` snapshot-head CAS, two-session/policy-change concurrency, stale-head retry, missing/wrong source-state/predecessor ref/hash and old-lineage replay;
+5. conservative unchanged/new/changed/deleted/reappeared behavior; mtime, physical-root and payload-object relocation cannot backdate/change semantic identity. `A→B→A` and `A→absent→A`, including an intervening policy change, advance continuity epoch and cannot reuse legacy/applied evidence; continuously present policy reclassification creates a linked capture-timed revision/head without re-cutting raw baseline;
+6. the pending/approved basis/evidence matrix, including `write → pending capture → exact marker + semantic applied receipt → new approved capture revision → later-run visibility`, stale/forged/raw-audit-only evidence, approval-without-application, proposal rejection producing no MemoryRecord and accepted-file removal disappearing only from later snapshots;
+7. filter-before-rank for future/pending/expired/wrong-role/wrong-session records, mandatory/top-k/byte budgets, mandatory overflow fail-closed and zero-hit fallback;
+8. canonical query/selection/snapshot digests independent of filesystem/completion order; query/snapshot/selection object-ID relocation is invariant but wrong schema/content digest fails;
+9. every record ref resolves exact schema/revision/availability/content/continuity epoch and mismatch fails; same text with changed review evidence or epoch is a new immutable revision;
+10. a future addition cannot alter an old snapshot/selection hash; ONLINE and PIT_REPLAY obey separate input/state matrices, and replay resolves prior ContextSnapshot, source-state, query, selection, records and predecessor lineage with zero legacy-store/clock calls. Missing/leaked foreign context ref, wrong schema/namespace/session/authority scope/data-context/as-of/policy and attempted query rewrite fail, while object relocation alone is invariant.
+
+Run: `pytest tests/orchestration/memory/test_adapters.py tests/orchestration/memory/test_visibility.py tests/orchestration/memory/test_snapshot.py -v`
+
+Expected: PASS before proposal/runtime integration begins.
+
+- [ ] **Step 5: Implement idempotent proposal owners and post-admission runtime bridge**
+
+Test pre-admission authority→query ref→selection ref→ContextSnapshot binding and Phase 2 pre-input memory selection→exact MemoryRecordRefs→InputSnapshot→prepared-handle verification. The InputSnapshot tuple must equal the Phase 1-canonical union of base-authorized refs and **all** completed PreparedBridgeSet additions; missing/extra/foreign/duplicate-ambiguous/future/late refs fail, selection precedes freeze/reservation, and the whole expected tuple is reverified after RUNNING. The generic resolver alone constructs the catalog-bound MemoryRuntimeBridge; missing/forged/extra provider fails and data+memory contributions retain canonical shared-token order under reversed completion. Cover the three-public-payload + internal-prepare proposal sequence, target grants (cross-agent/session→global/borrowed-owner denied before preparation), logical pending locators, two-root semantic invariance, request/proposal/receipt single persistence, pending invisibility, service-derived session/journal authority, target/container expected-vs-intended-vs-actual CAS, direct-edit/stale decision conflicts, crash after Request/between prepare-and-Proposal/before every later put, and midnight retry. Concurrent approve-vs-reject, identical decision under another key, semantic drift and crash after Decision-before-apply prove one terminal Decision. Agent exact application binds marker + semantic receipt; exact apply/update/reject raced against each legacy accept/reject/revert under `AgentMemoryFileCoordinator` permits at most one winner, cannot lose a marker, and leaves a post-verified digest/intent state. Physical root/Git/audit-time drift is semantic-invariant while tampered Decision/store fails. Console tests cover fail-closed admin/session inputs, one shared root coordinator/lease, enforced root→file lock order, full-journal/pin UoW, event-before-pin, apply/curate/append-vs-delete races, normalization/root/concurrency cases, apply-start intent, exact-write-before-applied recovery, and the contrasting Decision→manual-identical-before-writer case which remains pending without the marker. Curator tests cover keyed consolidation and unkeyed archival of marker+record units plus orphan/duplicate/non-adjacent/mismatched marker refusal with byte-identical files after failure. `LLM` keeps query/selection direct and render only inside the one executor-owned PromptAssemblyRecord; `DETERMINISTIC` creates neither render nor prompt. Spies prove no worker path reaches owner/admin writes.
+
+Run: `pytest tests/orchestration/memory/test_proposals.py tests/orchestration/memory/test_runtime_integration.py tests/test_memory_ops.py tests/test_console_store.py tests/test_console_tools.py tests/test_console_api.py tests/test_curator.py -v`
+
+Expected: PASS.
+
+- [ ] **Step 6: Run focused Phase 3 memory + cumulative snapshot suites**
+
+Run: `pytest tests/orchestration/memory tests/test_memory_ops.py tests/orchestration/data/test_data_schema_registry.py tests/orchestration/data/test_data_catalog.py -v`
+
+Expected: PASS with both data-only and full-Phase-3 digests resolvable.
+
+- [ ] **Step 7: Run existing memory/console and orchestration regressions**
+
+Run: `pytest tests/test_bug_fixes_124.py tests/test_playbook_placement.py tests/test_memory_ops.py tests/test_console_store.py tests/test_console_tools.py tests/test_console_api.py tests/test_curator.py -v`
+
+Then run: `pytest tests/orchestration -v`.
+
+Assert no new authoritative memory root/database/log and no dual accepted-write path were created.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add guanlan_v2/orchestration/memory engine/financial_analyst/dream/proposal_writer.py engine/financial_analyst/memory_ops.py guanlan_v2/console/store.py guanlan_v2/console/tools.py guanlan_v2/console/api.py guanlan_v2/console/curator.py tests/test_memory_ops.py tests/test_console_store.py tests/test_console_tools.py tests/test_console_api.py tests/test_curator.py tests/orchestration/memory tests/orchestration/golden/phase3_full_schema_manifest_v1.json tests/orchestration/golden/phase3_full_catalog_manifest_v1.json tests/orchestration/golden/memory_capture_policy_v1.json
+git commit -m "feat(orchestration): add PIT-safe unified memory facade"
+```
+
+---
+
+## Phase 3 Exit Gates
+
+The previous “self-review completed” assertion is removed. Phase 3 is complete only when implementation evidence satisfies every applicable data **and memory** gate below for Tasks 0–9.
+
+### Upstream handoff and strict contracts
+
+- [ ] Phase 1 and revised Phase 2 exit suites pass before Phase 3 tests;
+- [ ] Task 0 proves exact imports/signatures and registry/payload/event/capability/snapshot extension points; no upstream type is locally redefined;
+- [ ] every public Phase 3 DTO is a closed-version strict `ContractModel`/`DigestModel`, immutable when factual, and rejects extra/coerced/naive/non-finite input;
+- [ ] every persisted digest is computed/verified with the Phase 1 canonical projection; no short placeholder digest exists;
+- [ ] no public generic `RowSet`, consumable `list[dict]`, caller-selected schema or anonymous payload remains;
+- [ ] every successful multi-row result contains a registered concrete `PitRecord` subtype, is built only through `DataResult.build`, and persists under its named concrete `*DataResult@1` SchemaRef rather than a runtime generic.
+
+### Registry, routing, snapshot and cache identity
+
+- [ ] the Phase 3 data-only schema snapshot extends rather than mutates the sealed cumulative Phase 2 registry, preserves exact Phase 1/2 subsets, matches `data_schema_manifest_v1.json` and remains rebuildable after Task 9;
+- [ ] Task 9 creates a separate immutable full data+memory registry/golden extending the exact data digest; `SchemaRegistryResolver` simultaneously resolves old Phase 1/2, data-only Phase 3 and full Phase 3 digests without a “latest” alias;
+- [ ] old Plans resolve their original registry/catalog digests; new data Plans bind the data-only Phase 3 pair and memory-enabled Plans bind the full Phase 3 pair;
+- [ ] data-only and full Phase 3 catalog snapshots each extend one canonical base, preserve unchanged entries, use only the closed Phase 1 `CapabilityDescriptor@1` fields, match separate goldens and are loaded by exact digest;
+- [ ] a worker/Plan without the exact Phase 3 capability/catalog/registry binding is denied before any source invocation;
+- [ ] `DataSourceRegistry` is sealed; descriptor conflicts, mutation after seal and unknown configured method/source are rejected;
+- [ ] every default/fallback chain is an explicit versioned order frozen into `DataRoutingSnapshot` and `DataContext`;
+- [ ] `DataContext` is the only authority for as-of, mode, backend, strictness, chain, source config, data snapshot and vintage manifest; no dispatch/reader override exists;
+- [ ] `DataSnapshotManifest` binds all dataset/source/revision/schema/content identities and a future revision cannot alter an old as-of digest;
+- [ ] every semantic `DataCacheKey` dimension is covered; snapshot locator relocation is invariant, cache hits retain exact result SchemaRef/PayloadRef, and refused data is never cached;
+- [ ] PIT_REPLAY manifest mismatch, missing immutable snapshot, CACHE-only miss or LIVE route is a hard stop; a miss can reach only an explicitly frozen matching PIT_STORE source.
+
+### PIT, freshness and fallback behavior
+
+- [ ] symbol parsing is exact/full-match, rejects coercion and exchange conflict, and all emitted cache keys use canonical symbols;
+- [ ] name resolution uses only a PIT-filtered, digest-verified name snapshot;
+- [ ] limit rules reject symbol mismatch and current/future metadata; policy and trading-calendar selection use exact sealed refs/material, and missing/drifted calendar or policy never falls back to a global calendar;
+- [ ] missing/naive/future availability is refused in ONLINE and PIT_REPLAY with no silent filter, fallback, result, cache or artifact;
+- [ ] refusal audit is persisted once to `EventRefusalAuditSink` before the exception; it never masquerades as a valid public `RunEvent`;
+- [ ] only RateLimit/NotConfigured advances the frozen chain; NoData/Stale stops; every other DataError is loud;
+- [ ] fallback success is OK + `FALLBACK_USED`; DEGRADED requires policy-approved partial data, coverage and reason;
+- [ ] freshness uses the frozen method policy, `AuthoritativeClock` and exact `TradingCalendar`, and its elapsed/session boundary tests pass;
+- [ ] every result/raised path retains truthful ordered attempts and PIT audit—no unexecuted guard is labeled passed.
+
+### Phase 2 runtime, evidence and replay
+
+- [ ] every external source call traverses the service-owned two-stage `CapabilityGateway` and exact WorkerSpec/capability allowlist; pending/rejected invocations cannot satisfy evidence policy;
+- [ ] normal request and named result persist exactly once as registry-validated `SchemaRef + PayloadRef` before exposure; `finalize_success` only verifies their existing refs/digests and never writes again;
+- [ ] Phase 1 `ToolCallRecord` binds request/result/DataResult refs and digests; no parallel tool record exists;
+- [ ] every begun capability invocation reaches exactly one terminal `finalize_success` or `reject`; retryable fallback rejects the failed pending call once, while PIT-refusal catch paths never reject twice;
+- [ ] Artifact Provenance binds Plan/context/catalog/registry/routing/InputSnapshot/data/capability/ToolCallRecord digests with correct semantic/audit separation;
+- [ ] a during-node read is not retroactively inserted into the frozen pre-node InputSnapshot; later visibility occurs only through the layer barrier;
+- [ ] the support-report-bound generic resolver constructs only exact catalog descriptor/config/handler providers; memory pre-input additions precede InputSnapshot, RUNNING/timeout precede data/provider I/O, one sequencer/canonical merge key spans both stages/providers, and late/dynamic calls fail;
+- [ ] audit replay performs zero external I/O and reconstructs identical recorded named DataResult plus any LLM-persisted `RenderedDataBlock` by exact refs; deterministic runs have no render/prompt ref;
+- [ ] idempotent retry/replay cannot duplicate payload, event or artifact visibility, while same-key semantic conflict fails;
+- [ ] PIT refusal yields an audit-only refusal and reviewed failed-node reason, with no successful ToolCallRecord, public event, artifact or commit.
+
+### Rendering and scope protection
+
+- [ ] `RenderedDataBlock` is deterministic, versioned and bound to renderer/result/PIT identities;
+- [ ] each data renderer comes only from `DataMethodSpec.renderer_ref` and exact catalog material; caller renderer selection is impossible;
+- [ ] Task 8 providers persist each LLM-facing block once and return only ordered untrusted-block DTOs; Phase 2's executor alone merges all providers and passes exact `TypedPayloadRef`s to one PromptAssembler/PromptAssemblyRecord, while deterministic execution creates no render-only block or prompt record;
+- [ ] embedded instructions/delimiters stay untrusted data and cannot escape the Phase 2 prompt boundary;
+- [ ] missing data renders a non-empty no-fabrication sentinel; canonical serialization never uses `default=str`;
+- [ ] no real vendor scraper, credential, physical cache root or silent `PitReader` wrapper is smuggled into this interface phase;
+- [ ] existing `financial_analyst` runtime and `workflow/executor.run_graph` remain unchanged except through reviewed adapters;
+- [ ] unrelated worktree changes are not staged.
+
+### Unified memory facade, PIT and mutation boundary
+
+- [ ] one Task 9 facade covers existing AgentMemory own/shared/borrowed/always-include plus console global/session/keyed/archive semantics without a third authoritative store or accepted-write path;
+- [ ] one authenticated global cutover preparation/manifest/attestation plus persisted source-state genesis fixes the only `legacy_cutover` baseline. Before attestation/genesis, a global-cutover→canonical-root lease set protects an equality-only stable re-scan whose complete locators/normalized bytes/store digests must equal the frozen preparation/manifest; missing/extra/drift cannot refresh or re-cut it. Crashes before/among source puts or between attestation/genesis reuse the frozen operation/token map and revalidate the same root-state digest, while restart, missing head, direct edit or a new session/scope cannot initialize another baseline;
+- [ ] policy-independent source-state continuity proves each present/absent epoch; `A→B→A` and `A→absent→A` cannot reuse old legacy/applied evidence, policy changes do not reset scope lineage, and PIT replay resolves the proof with zero legacy-store/FTS/filesystem I/O;
+- [ ] conservative incremental capture never backdates from mtime/Git/prose dates; a new content, continuity epoch or review-evidence revision takes capture-completed availability;
+- [ ] every pending/approved basis/evidence combination follows the closed matrix; rejected proposals create no MemoryRecord and removed/reverted accepted files disappear only from later snapshots. Post-cutover approval requires exact Decision + in-store apply marker + semantic owner receipt whose actual digests equal expected/intended values, never a raw audit receipt, legacy source string, approval-only event or matching visible manual write;
+- [ ] availability/validity/review/role/session filtering precedes mandatory/relevance/ranking/top-k/fallback; future/pending/expired records cannot displace visible results, and mandatory/count/byte overflow fails closed without truncation;
+- [ ] every `MemoryRecordRef` matches one exact stored record revision/availability/content/continuity epoch; authenticated context/replay authority binds exact session/scopes, source-state/snapshot locator/hash and main-namespace query→`memory_selection_ref/past_context_hash` into ContextSnapshot;
+- [ ] source-state and policy-independent scope heads advance by compare-and-swap, every non-initial snapshot carries a digest-matching main predecessor ref, and old source/query/selection/record/lineage refs remain reproducible after policy/future memory changes;
+- [ ] payload object-ID relocation is semantic-invariant, but query/record/review/snapshot/selection content changes are semantic; wrong SchemaRef/content/namespace or missing predecessor evidence fails closed;
+- [ ] memory `prepare_input` persists query/selection before InputSnapshot freeze; its final memory tuple equals the Phase 1-canonical union of base-authorized refs plus every completed PreparedBridgeSet addition and rejects missing/extra/foreign/duplicate-ambiguous/future/late refs. The resolver reverifies that whole tuple after RUNNING. Query/selection TypedPayloadRefs remain direct evidence; on `LLM`, render remains only inside the single executor-owned PromptAssemblyRecord, while `DETERMINISTIC` creates neither render nor prompt;
+- [ ] workers can only submit pending proposals through both exact `memory.propose` capability and catalog-bound proposer→target/scope grant; service preparation freezes clock/expected/intended CAS metadata, logical locators exclude physical paths, one repository-enforced terminal Decision exists per proposal, and no worker path reaches owner/admin/generic writes;
+- [ ] exact agent mutation remains owned by decision-backed `memory_ops` and emits a path/Git/time-invariant semantic receipt plus separate audit projection. Exact and legacy accept/reject/revert paths share `AgentMemoryFileCoordinator`, the sole owner-root→target lock order, lock-held reread/CAS/atomic write/postverify and marker/intent conflict rules; concurrency permits at most one winner. Legacy APIs stay compatible but cannot grant orchestration approval;
+- [ ] console review rejects missing/forged admin authority and lossy normalization, uses unique `(journal_session_id,event_id)` evidence and one injected `ConsoleRootCoordinator`/writer lease across journal, pins, root→file writes, legacy writer, curator and delete. Exact apply holds the root transaction from apply-start+pin through CAS/replace/postverify/applied event/receipt; delete folds/checks pins under that same lock, and exact-write crash recovery remains distinguishable from manual identical visible text;
+- [ ] the reserved console marker has one strict grammar and is inseparable from its target record: curator preserves the matching marker during keyed consolidation or moves it atomically with an eligible unkeyed record, while orphan/duplicate/non-adjacent/mismatched markers fail before rewrite. Accepted agent/console content becomes visible only in a later ONLINE capture;
+- [ ] data-only Phase 3 registry/catalog digests remain rebuildable while the separate full data+memory snapshots pass their goldens; any later memory-capable phase extends the exact `PHASE3_FULL_REGISTRY_DIGEST/PHASE3_FULL_CATALOG_DIGEST` pair rather than the data-only pair or a “latest” alias.
 
 ---
 
 ## Execution Handoff
 
-Two execution options:
+Implement in task order. Mandatory review checkpoints:
 
-1. **Subagent-Driven (recommended)** — dispatch a fresh subagent per task, review between tasks.
-2. **Inline Execution** — execute tasks in this session with checkpoints.
+1. after Task 0 — Phase 1/2 ABI and runtime-port conformance;
+2. after Task 3 — exact symbol and as-of metadata semantics;
+3. after Task 5 — concrete `PitRecord` payloads, Phase 3 registry, routing/snapshot/cache identity;
+4. after Task 6 — sealed source registry, narrow fallback and refusal audit;
+5. after Task 7 — typed reader and untrusted deterministic rendering;
+6. after Task 8 — Phase 2 provenance/barrier/replay integration;
+7. after Task 9 — memory PIT, snapshot, untrusted rendering and proposal-only closure.
+
+Do not begin Phase 4/5 until every Task 0–9 Phase 3 exit gate has test evidence.

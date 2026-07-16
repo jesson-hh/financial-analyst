@@ -1,26 +1,72 @@
 # Orchestration Phase 2 · 静态 runtime 兼容 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Execution note:** implement task-by-task with a review checkpoint after the handoff gate, admission service, three-worker pilot, and full legacy-equivalence tasks. Steps use checkbox (`- [ ]`) syntax for tracking. Do not require an environment-specific execution skill that may not be installed.
 
-**Goal:** Build the deterministic, event-sourced runtime kernel that executes a **frozen static `Plan`** (Phase 1 contracts) — budget ledger, dual-cursor event store, staged→barrier `ArtifactPool`, strict Plan freeze validator, worker executor, and a bounded/stable-ordered DAG runner — then prove it reproduces the engine `Orchestrator`'s soft/hard dependency semantics. **No dynamic Planner in this phase.**
+**Goal:** Consume the exact Phase 1 contracts to build a deterministic, event-sourced runtime kernel for an already validated **static `Plan`**: typed payload/event storage, an event-sourced budget ledger, read-only catalog material resolution, service-owned admission, staged→barrier artifacts, a capability-confined worker executor and a bounded/stable DAG runner. First prove a reviewed three-final-worker pilot, then prove full attested `stock-deep-dive` compatibility. **No dynamic Planner and no second contract/digest implementation in this phase.**
 
-**Architecture:** The new kernel is engine-neutral and reuses the *behavior baseline* of `financial_analyst.agent.orchestrator.Orchestrator/DAGNode` (wave execution, `soft_deps` = done-not-ok) and `agent.base.SubAgent/SubAgentResult` (typed Pydantic output), but adds the four things those lack: **strict validation, bounded concurrency + stable ordering, persistent event/state + recovery, and per-scope budget reservation**. `run_graph` is untouched. Everything is in-memory (an `EventStore` list) with a replay/recovery test standing in for durable storage; wiring to a real store is a later phase.
+**Architecture:** Phase 1 remains the sole owner of `WorkerCatalogSnapshot`, `PlanDraft`, `PlanValidationReport`, `Plan`, canonical digests and `freeze_plan`. Phase 2 adds authoritative stores and state transitions around those immutable values. The initial backend is in-memory, but every accepted transition is append-only and replayable. Legacy behavior is admitted only through a reviewed `LegacyGraphMapping`, `compat.*` WorkerSpecs and a matching `StaticLegacyPlanAttestation`; arbitrary `DAGNode` names never become runnable workers. Existing `workflow/executor.run_graph` and the legacy engine remain untouched.
 
 **Tech Stack:** Python ≥3.11, Pydantic v2, `asyncio` (`Semaphore`, `gather`, `run`), `pytest` + `pytest-asyncio` (or `asyncio.run` in sync tests). All modules `from __future__ import annotations`. Depends on Phase 1 contracts in `guanlan_v2/orchestration/`.
 
 ## Global Constraints
 
-Copied from the spec (`docs/superpowers/specs/2026-07-15-orchestration-framework-design.md`). Every task implicitly includes these.
+These extend, and never override, the Phase 1 Global Constraints and Exit Gates. Every task implicitly includes both documents.
 
-- **Reuse, don't fork semantics.** Match engine `Orchestrator._ready`: every dep (soft or hard) must be *done*; a hard dep must additionally be *ok*; a soft (DEGRADE) dep that failed does not block, it just contributes no input. Do not invent a third, divergent semantics.
-- **Stable ordering.** Completion/thread order must never change `artifact_seq`, reducer input order, or sink input order. Order layers by Kahn depth, nodes within a layer by `PlanNode.id`, committed artifacts by `(node_id, output_key)`.
-- **Bounded concurrency.** Never launch unbounded `asyncio.gather` per wave; cap with `min(plan.max_concurrency, budget.max_concurrency)` via a semaphore.
+- **Consume, do not fork.** Import Phase 1 models/builders from their owning modules. Phase 2 must not redefine canonical JSON, candidate/plan digest, WorkerSpec, catalog snapshot, schema registry, Artifact, RunEvent, Plan validation or freeze semantics.
+- **Admission order is fixed.** Phase 1 validation → Phase 2 runtime-support report → atomic same-digest plan reservation → same-digest REQUIRED approval → Phase 1 freeze → append `PlanAdmitted` → dispatch. `AUTO` remains rejected for every PlanSource.
+- **Stable ordering.** Completion/thread order must never change dependency injection, `artifact_seq` or sink input order. Order layers by Kahn depth, nodes within a layer by `PlanNode.id`, `many` inputs by Plan dependency declaration order, and committed artifacts by `(node_id, output_key)`.
+- **Bounded concurrency.** Use the minimum of the frozen Plan budget request, active reservation, runtime limit and RunBudget limit. Never launch an unbounded layer.
 - **Staged→barrier.** Worker output is `stage`d (journal-only, invisible) and becomes readable only when its whole layer atomically `commit_layer`s. A crash before the barrier must leave no visible downstream input.
-- **Persist-then-publish + idempotency.** Every state change appends a `RunEvent` (journal_seq assigned to *all* events; visible_seq only to public ones) keyed by an idempotency key; re-append returns the existing event.
-- **Budget is one ledger for the whole run.** Bootstrap/planner/plan/node/repair/retry all draw from one `RunBudget`; reserve before work, settle actuals after, release the unused. Over-budget reservation raises.
-- **Freeze validator is a hard gate.** `BLOCK.accept_statuses` must be exactly `{COMPLETED}`; `INCOMPLETE/FAILED/BLOCKED/CANCELLED` may never be declared success; same-slot multi-write requires a registered reducer; a decision-class sink requires `can_emit_decision=True`; `phase=main` requires a `context_snapshot_id`, `phase=bootstrap` forbids one.
-- `plan_digest` is computed over the canonical `PlanDraft` executable fields + `catalog_digest`, excluding approval/wall-clock; any field change yields a new digest.
+- **Persist-then-publish + strict idempotency.** Every accepted state change appends a typed `RunEvent` using `SchemaRef + PayloadRef`. Repeating the same idempotency key with identical semantic content returns the stored event; different semantic content raises `IdempotencyConflict`. Rejected/unauthorized append attempts never enter the run journal and may be recorded only in a separate audit-only refusal sink.
+- **Immutable visibility.** `ArtifactStaged.visible_seq` is always `None`. No event is updated in place and there is no `make_visible`; the public `LayerCommitted` event is the visibility boundary.
+- **Budget is one event-sourced ledger.** Plan and node reservations bind request, candidate plan digest and exact token/invocation/concurrency amounts. Node reservations are children of the active plan reservation. Settlement cannot exceed reservation.
+- **Catalog authority is read-only.** A runtime view is built from one verified `WorkerCatalogSnapshot`; it cannot register or mutate workers. Physical material resolution must match every referenced id/version/digest.
+- **Runtime support is narrower than schema validity.** Static v1 supports LLM/deterministic workers, BLOCK/DEGRADE/SKIP, one/many named inputs, timeout, cancellation and barrier commit. It rejects conditions, reducers, debates, gates, stop conditions, `max_attempts > 1` and multi-writer slots before any budget reservation.
+- **Legacy semantics come from evidence.** Hard/soft accepted statuses, missing-output behavior, base/upstream input projection and output slots come from the Phase 1 migration table/mapping, not from a new heuristic.
+- **Digest discipline.** Runtime records call Phase 1 builders and verify persisted digests. Empty/short placeholders, JSON-mode ad-hoc hashing and blank `plan_digest`/snapshot hashes are forbidden.
+- **Executable red/green checkpoints.** Every step named “Write failing … tests” immediately runs the focused command shown in that task and records the expected missing-contract/behavior failure before implementation. The later PASS step reruns the same focused tests plus the listed upstream regressions; merely writing a test without observing the red state is not completion evidence.
 - No placeholders, DRY, YAGNI, TDD, frequent commits. Run tests from repo root `G:\guanlan-v2` with `pytest`.
+
+---
+
+## Task 0: Phase 1 handoff gate (mandatory before Task 1)
+
+Phase 2 work starts only after the Phase 1 Exit Gates pass. Add `tests/orchestration/test_phase2_handoff.py` as an executable consumer test rather than copying Phase 1 assertions.
+
+**Files:**
+- Create: `tests/orchestration/test_phase2_handoff.py`
+
+- [ ] **Step 1: Write the executable consumer gate**
+
+The handoff test must prove:
+
+1. `schema_manifest_v1.json` and digest golden vectors pass, and `default_registry()` is sealed;
+2. Phase 1 exports one canonical `compute_candidate_plan_digest`, `validate_plan_draft` and `freeze_plan`; Phase 2 contains no alternative projection;
+3. `WorkerSpec`, `ExecutionSpec` and `EvidencePolicy` resolve from `catalog.py`, not `spec.py`;
+4. `WorkerCatalogSnapshot` material/content/capability digests validate with the Phase 1 builder;
+5. `RunEvent` accepts `SchemaRef + PayloadRef`; Phase 1 `TypedPayloadRef` preserves exact schema/content with audit-only object relocation; `Artifact`, `InputSnapshot`, `NodeRun`, `BudgetReservation`, `PlanApproval`, `PlanValidationReport` and `StaticLegacyPlanAttestation` reject arbitrary digest strings;
+6. the real Task 0 legacy fixture contains `scalars`, `workers` and `graphs`, including one frozen `stock-deep-dive` config digest plus complete `LegacyWorkerMapping`, `LegacyDependencyMapping` and `LegacyInputMapping` tuples;
+7. canonical empty-memory facts persist in `main` and produce an exact ContextSnapshot binding with `memory_session_id=None`; session-scope drift is semantic and cannot be supplied by a Worker/model;
+8. no Phase 2 source/test path overwrites the Phase 1-owned `catalog.py`, `spec.py`, `schema_registry.py`, `test_catalog.py`, `test_budget.py` or contract golden files.
+
+If an exact field or builder name differs in the implemented Phase 1 public API, update this plan to that reviewed API before writing runtime code; do not invent an adapter with parallel semantics.
+
+- [ ] **Step 2: Freeze the reviewed upstream evidence in the fixture**
+
+Record only the exact Phase 1 schema-registry/catalog/migration/config digests and exported symbol signatures; never record local paths or mutable singleton identities.
+
+- [ ] **Step 3: Run the complete Phase 1 suite and the frozen handoff gate**
+
+Run from the repository state in which no Phase 2 runtime module exists yet: `pytest tests/orchestration -v`.
+
+Expected: every Phase 1 test plus `test_phase2_handoff.py` PASS **after** the reviewed evidence has been recorded. Any failure or fixture drift blocks Task 1; do not update expected digests from test code.
+
+- [ ] **Step 4: Commit the gate independently**
+
+```bash
+git add tests/orchestration/test_phase2_handoff.py
+git commit -m "test(orchestration): gate phase2 on phase1 contracts"
+```
 
 ---
 
@@ -28,421 +74,221 @@ Copied from the spec (`docs/superpowers/specs/2026-07-15-orchestration-framework
 
 | File | Responsibility |
 |---|---|
-| `guanlan_v2/orchestration/budget.py` | `BudgetLedger` (reserve/settle/release + events) |
-| `guanlan_v2/orchestration/eventstore.py` | `EventStore` (append, dual seq, idempotency, journal/visible, replay) |
-| `guanlan_v2/orchestration/catalog.py` | `WorkerCatalog` (register/get/version/digest) |
+| `guanlan_v2/orchestration/budget.py` | event-sourced `BudgetLedger` over Phase 1 `RunBudget/BudgetReservation` |
+| `guanlan_v2/orchestration/runtime_clock.py` | `AuthoritativeClock` service port and aware-UTC clock validation |
+| `guanlan_v2/orchestration/eventstore.py` | registry-validated `PayloadStore`, append-only `EventStore`, dual cursors, replay and idempotency conflict |
+| `guanlan_v2/orchestration/catalog_runtime.py` | read-only runtime index/material resolver over `WorkerCatalogSnapshot` |
+| `guanlan_v2/orchestration/runtime_contracts.py` | Phase 2 control-plane facts plus registered ExecutionBridgeDescriptor and prompt evidence |
+| `guanlan_v2/orchestration/runtime_support.py` | `StaticRuntimeProfile@1` and pure `RuntimeSupportReport` |
+| `guanlan_v2/orchestration/admission.py` | service-owned validation→support→reservation→approval→freeze→`PlanAdmitted` coordinator |
 | `guanlan_v2/orchestration/pool.py` | `ArtifactPool` staged→barrier + `freeze_input_snapshot` |
-| `guanlan_v2/orchestration/validate.py` | `validate_plan_draft` + `freeze_plan` (hard gate + plan_digest) |
-| `guanlan_v2/orchestration/worker.py` | `WorkerHandler` protocol + `run_node` (typed Artifact + NodeRun + honesty classify) |
+| `guanlan_v2/orchestration/worker.py` | trusted handler/model resolution, `CapabilityGateway`, typed Artifact/NodeRun builders |
 | `guanlan_v2/orchestration/dag.py` | `run_plan` (layers, bounded parallel, gating, barrier, budget) |
-| `guanlan_v2/orchestration/presets.py` | `plandraft_from_dagnodes` (engine DAGNode → PlanDraft) |
-| `tests/orchestration/` | one test module per source module |
+| `guanlan_v2/orchestration/presets.py` | reviewed `LegacyGraphMapping` → attested static PlanDraft adapter |
+| `config/orchestration/catalogs/` + `config/orchestration/materials/` | service-owned physical sources for only the three pilot and reviewed compatibility materials; paths never enter Plan |
+| `tests/orchestration/golden/runtime_schema_manifest_v1.json` | reviewed Phase 2 control-payload registry manifest; does not replace Phase 1 golden |
+| `tests/orchestration/fixtures/stock_deep_dive_equivalence_v1.json` | deterministic full-graph old/new equivalence cases keyed to Phase 1 mapping/config digests |
+| `tests/orchestration/test_phase2_handoff.py` | executable Phase 1→2 ABI/golden gate |
+| `tests/orchestration/test_budget_ledger.py` | Phase 2 ledger tests; does not replace Phase 1 `test_budget.py` |
+| `tests/orchestration/test_catalog_runtime.py` | runtime resolver/pilot catalog tests; does not replace Phase 1 `test_catalog.py` |
+| `tests/orchestration/` | remaining source-focused runtime and end-to-end tests |
 
 ---
 
-## Task 1: Budget ledger
+## Task 1: Event-sourced budget ledger
 
 **Files:**
 - Create: `guanlan_v2/orchestration/budget.py`
-- Test: `tests/orchestration/test_budget.py`
+- Create: `guanlan_v2/orchestration/runtime_clock.py`
+- Test: `tests/orchestration/test_budget_ledger.py`
+- Test: `tests/orchestration/test_runtime_clock.py`
 
-**Interfaces:**
-- Consumes: `context.RunBudget`, `context.BudgetReservation` (Phase 1).
-- Produces:
-  - `class BudgetExceeded(Exception)`.
-  - `class BudgetLedger` — `__init__(self, budget: RunBudget, *, run_id: str, now: Callable[[], datetime])`; `reserve(*, scope_type, scope_id, tokens, invocations, parent_reservation_id=None) -> BudgetReservation` (raises `BudgetExceeded` if it would exceed `max_tokens`/`max_llm_invocations`); `settle(reservation_id, *, actual_tokens, actual_invocations) -> BudgetReservation`; `release(reservation_id, *, reason) -> BudgetReservation`; `available() -> tuple[int, int]` returning `(tokens_left, invocations_left)` against outstanding reservations+settled actuals.
+**Consumes:** Phase 1 `RunBudget`, `BudgetReservation`, candidate-plan digest contract, plus an injected append-only `BudgetEventSink` protocol and `AuthoritativeClock`. Task 2 supplies the production in-memory PayloadStore/EventStore.
 
-- [ ] **Step 1: Write the failing test**
+**Produces:**
 
-```python
-# tests/orchestration/test_budget.py
-from __future__ import annotations
-from datetime import datetime, timezone
-import pytest
-from guanlan_v2.orchestration.context import RunBudget
-from guanlan_v2.orchestration.budget import BudgetLedger, BudgetExceeded
+- `BudgetExceeded`, `InvalidBudgetTransition`.
+- `AuthoritativeClock(Protocol)`: `now() -> UtcDateTime`. Runtime services accept this port, reject naive datetimes and do not call `datetime.now()` directly; tests use a deterministic fixed/advancing implementation.
+- strict internal `BudgetTransitionCommand(operation, semantic_args, idempotency_key)`: a closed `reserve_plan | reserve_node | settle | release` command with no caller-selected reservation ID, cursor or timestamp. `BudgetLedger` can validate it purely against a supplied folded state; the injected sink assigns service IDs/time and commits the corresponding typed budget event. Task 2 may include this declared command in a wider RuntimeUnitOfWork without accepting an arbitrary callback.
+- `BudgetLedger`, rebuilt from budget events rather than a mutable reservation dict:
+  - `reserve_plan(*, request_id, candidate_plan_digest, budget_request, idempotency_key) -> BudgetReservation`;
+  - `reserve_node(*, plan_reservation_id, node_id, attempt, tokens, llm_invocations, concurrency, idempotency_key) -> BudgetReservation`;
+  - `settle(reservation_id, *, actual_tokens, actual_llm_invocations, idempotency_key) -> BudgetReservation`;
+  - `release(reservation_id, *, reason, idempotency_key) -> BudgetReservation`;
+  - `get(reservation_id)`, `get_active_plan(request_id, candidate_plan_digest)`, `available()`, and `replay(...)`.
 
-UTC = timezone.utc
-def _now(): return datetime(2026, 7, 15, tzinfo=UTC)
+The implementation must construct each new Phase 1 `BudgetReservation` through its validated builder. It must not mutate a frozen reservation with unvalidated `model_copy(update=...)`.
 
+**Required invariants:**
 
-def _ledger(**kw):
-    b = RunBudget(ledger_id="L", max_tokens=1000, max_llm_invocations=24, max_concurrency=4, **kw)
-    return BudgetLedger(b, run_id="r", now=_now)
+1. the plan reservation binds ledger ID, request ID, candidate plan digest and the exact token/invocation/concurrency budget request;
+2. every node reservation is a child of that active plan reservation and carries the same request/candidate/ledger identity;
+3. total outstanding + settled actual usage never exceeds the run or plan reservation;
+4. actual values cannot exceed the reservation; bool/negative values fail through Phase 1 strict types;
+5. deterministic nodes reserve zero LLM invocations; LLM nodes reserve per allowed attempt;
+6. reserve/settle/release is atomic with its typed budget event; the public convenience methods use the sink's single-command transaction, while Task 2's production sink may validate/commit the exact same `BudgetTransitionCommand` inside a larger RuntimeUnitOfWork;
+7. identical idempotent calls return the same record, while conflicting calls fail;
+8. invalid state transitions (double settle, settle after release, child of inactive plan) fail without appending an accepted event;
+9. approval rejection, admission failure or cancellation releases unused plan/node reservations;
+10. replay produces the same availability and active-reservation index.
 
+- [ ] **Step 1: Write failing ledger tests**
 
-def test_reserve_reduces_available():
-    led = _ledger()
-    led.reserve(scope_type="node", scope_id="n1", tokens=300, invocations=2)
-    assert led.available() == (700, 22)
+Cover aware authoritative-clock injection/naive rejection, request/candidate/concurrency binding, parent-child scope, concurrent over-reservation, transition matrix, actual-over-reserved rejection, idempotency conflict, rejection release and event replay. Prove callers cannot select reservation ID/cursor/time, the closed BudgetTransitionCommand validator is deterministic over the same folded state, and same-head concurrent commands cannot over-reserve. Task 2 later reuses these exact command vectors in its production transaction tests.
 
+Run now: `pytest tests/orchestration/test_runtime_clock.py tests/orchestration/test_budget_ledger.py -v`.
 
-def test_over_budget_reservation_raises():
-    led = _ledger()
-    led.reserve(scope_type="node", scope_id="n1", tokens=900, invocations=1)
-    with pytest.raises(BudgetExceeded):
-        led.reserve(scope_type="node", scope_id="n2", tokens=200, invocations=1)
-    with pytest.raises(BudgetExceeded):
-        led.reserve(scope_type="node", scope_id="n3", tokens=10, invocations=24)
+Expected: FAIL on the missing clock/ledger contract or intended transition assertions before implementation; unrelated collection/environment failures do not count as the red checkpoint.
 
+- [ ] **Step 2: Implement event-sourced transitions**
 
-def test_settle_uses_actuals_and_release_frees():
-    led = _ledger()
-    r = led.reserve(scope_type="node", scope_id="n1", tokens=300, invocations=2)
-    led.settle(r.reservation_id, actual_tokens=120, actual_invocations=1)
-    assert led.available() == (880, 23)
-    r2 = led.reserve(scope_type="node", scope_id="n2", tokens=300, invocations=2)
-    led.release(r2.reservation_id, reason="blocked")
-    assert led.available() == (880, 23)
-```
+Reservation authority is the ledger fold, not a caller-carried `BudgetReservation`. Implement transitions against an injected strict append-only sink and use a fake sink in this focused test; Task 2 adds the real store/replay integration. Expose a lookup by reservation ID for admission/dispatch.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 3: Run and commit**
 
-Run: `pytest tests/orchestration/test_budget.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'guanlan_v2.orchestration.budget'`
+Run: `pytest tests/orchestration/test_runtime_clock.py tests/orchestration/test_budget_ledger.py -v`
 
-- [ ] **Step 3: Write minimal implementation**
-
-```python
-# guanlan_v2/orchestration/budget.py
-from __future__ import annotations
-import uuid
-from datetime import datetime
-from typing import Callable, Literal
-from guanlan_v2.orchestration.context import BudgetReservation, RunBudget
-
-
-class BudgetExceeded(Exception):
-    pass
-
-
-class BudgetLedger:
-    def __init__(self, budget: RunBudget, *, run_id: str, now: Callable[[], datetime]):
-        self._budget = budget
-        self._run_id = run_id
-        self._now = now
-        self._reservations: dict[str, BudgetReservation] = {}
-
-    def _committed(self) -> tuple[int, int]:
-        tokens = inv = 0
-        for r in self._reservations.values():
-            if r.status == "released":
-                continue
-            if r.status == "settled":
-                tokens += r.actual_tokens
-                inv += r.actual_llm_invocations
-            else:  # reserved
-                tokens += r.reserved_tokens
-                inv += r.reserved_llm_invocations
-        return tokens, inv
-
-    def available(self) -> tuple[int, int]:
-        t, i = self._committed()
-        return self._budget.max_tokens - t, self._budget.max_llm_invocations - i
-
-    def reserve(self, *, scope_type: Literal["bootstrap", "planner", "plan", "node", "schema_repair", "retry"],
-                scope_id: str, tokens: int, invocations: int,
-                parent_reservation_id: str | None = None) -> BudgetReservation:
-        t_left, i_left = self.available()
-        if tokens > t_left or invocations > i_left:
-            raise BudgetExceeded(
-                f"reserve({scope_id}) tokens={tokens}/{t_left} inv={invocations}/{i_left}")
-        r = BudgetReservation(
-            reservation_id=uuid.uuid4().hex, ledger_id=self._budget.ledger_id, run_id=self._run_id,
-            scope_type=scope_type, scope_id=scope_id, parent_reservation_id=parent_reservation_id,
-            reserved_tokens=tokens, reserved_llm_invocations=invocations,
-            status="reserved", reserved_at=self._now())
-        self._reservations[r.reservation_id] = r
-        return r
-
-    def settle(self, reservation_id: str, *, actual_tokens: int, actual_invocations: int) -> BudgetReservation:
-        r = self._reservations[reservation_id]
-        updated = r.model_copy(update={"actual_tokens": actual_tokens,
-                                       "actual_llm_invocations": actual_invocations,
-                                       "status": "settled", "settled_at": self._now()})
-        self._reservations[reservation_id] = updated
-        return updated
-
-    def release(self, reservation_id: str, *, reason: str) -> BudgetReservation:
-        r = self._reservations[reservation_id]
-        updated = r.model_copy(update={"status": "released", "settled_at": self._now()})
-        self._reservations[reservation_id] = updated
-        return updated
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `pytest tests/orchestration/test_budget.py -v`
-Expected: PASS (3 passed)
-
-- [ ] **Step 5: Commit**
+Expected: PASS.
 
 ```bash
-git add guanlan_v2/orchestration/budget.py tests/orchestration/test_budget.py
-git commit -m "feat(orchestration): budget ledger reserve/settle/release (phase2)"
+git add guanlan_v2/orchestration/runtime_clock.py guanlan_v2/orchestration/budget.py tests/orchestration/test_runtime_clock.py tests/orchestration/test_budget_ledger.py
+git commit -m "feat(orchestration): add candidate-bound event-sourced budget ledger"
 ```
 
 ---
 
-## Task 2: Event store (dual cursor + idempotency + replay)
+## Task 2: Typed payload store + append-only event store
 
 **Files:**
 - Create: `guanlan_v2/orchestration/eventstore.py`
+- Create: `guanlan_v2/orchestration/runtime_contracts.py` (initial refusal-audit contracts; Task 5 appends the remaining runtime-control facts)
 - Test: `tests/orchestration/test_eventstore.py`
+- Test: `tests/orchestration/test_event_refusal.py`
 
-**Interfaces:**
-- Consumes: `events.RunEvent`, `events.EventCursor`.
-- Produces: `class EventStore` (in-memory) with:
-  - `append(*, run_id, partition, event_type, payload_type, payload_version, payload_ref, idempotency_key, plan_digest=None, causation_id=None, visible=False, occurred_at) -> RunEvent` — assigns monotonic `journal_seq` per `(run_id, partition)`; assigns `visible_seq` per `(run_id, partition)` **only if `visible`**; idempotent by `(run_id, partition, idempotency_key)` (re-append returns the stored event unchanged).
-  - `journal(run_id, partition) -> list[RunEvent]` (all, `journal_seq` order).
-  - `visible(run_id, partition, *, after: int = 0) -> list[RunEvent]` (visible only, `visible_seq` order, `visible_seq > after`).
-  - `make_visible(event_ids: list[str]) -> list[RunEvent]` — assign `visible_seq` (in the given order) to events currently lacking one; idempotent (already-visible events keep their seq).
+**Consumes:** Phase 1 `SchemaRegistry`, `SchemaRef`, `PayloadRef`, `RunEvent`, `EventCursor`, `LayerCommit` and their pure builders, plus Task 1 `BudgetLedger`, `BudgetEventSink` and closed `BudgetTransitionCommand`.
 
-- [ ] **Step 1: Write the failing test**
+**Produces:**
 
-```python
-# tests/orchestration/test_eventstore.py
-from __future__ import annotations
-from datetime import datetime, timezone
-from guanlan_v2.orchestration.eventstore import EventStore
+- `SchemaRegistryResolver`: a service-owned read-only map from reviewed registry digest to one sealed registry snapshot. Registration verifies the declared manifest/digest, rejects conflicts, and never treats a mutable global "latest" registry as authority. A run resolves the exact registry digest bound by its admitted Plan.
+- `PayloadStore`: registry-validated in-memory payload persistence. `put(schema_ref, payload, *, namespace, idempotency_key) -> PayloadRef` validates against the sealed registry, verifies/computes content digest and assigns only the audit locator `object_id`; `get(ref, *, expected_schema_ref) -> validated payload` re-verifies namespace/content/schema before returning.
+- `IdempotencyConflict`: raised when one idempotency key is reused with different semantic content.
+- `NamedEvidenceDigest@1`, `GenericRefusalDetails@1` and `EventRefusalRecord@1`: strict audit-only facts. `EventRefusalRecord` binds reason/code, attempted capability/schema/namespace, a typed detail `SchemaRef + PayloadRef` in the audit namespace, canonically ordered named evidence digests and audit identity/time; raw rejected bytes/secrets are never fields.
+- `EventRefusalAuditSink.record(*, detail_schema_ref, detail_payload, reason_code, attempted_capability_ref=None, attempted_schema_ref=None, attempted_namespace=None, evidence_digests=(), idempotency_key) -> EventRefusalRecord`: the sink is the **single owner** of refusal-detail validation, audit-namespace persistence and record creation. A same-key semantic conflict fails. Refusals are not `RunEvent`, receive no journal/visible sequence and cannot expose rejected payloads through the public stream.
+- exported stable runtime-port DTO `EventAppendRequest`: the fields known before persistence (`run_id`, partition/type, `SchemaRef`, `PayloadRef`, idempotency/causation/plan identity), but no caller-selected sequence or occurred-at. It is strict but not itself a persisted public event schema.
+- `EventStore`: constructed with `SchemaRegistryResolver` and `AuthoritativeClock`; `append(request: EventAppendRequest) -> RunEvent`, `journal(run_id, partition)`, `visible(run_id, partition, after=0)`, cursor helpers and deterministic replay. Under the store lock it stamps aware time, allocates sequences and invokes the Phase 1 RunEvent builder.
+- internal service-only `RuntimeUnitOfWork` over the production PayloadStore/EventStore/BudgetEventSink's same copy-on-write backend/lock atomically commits a declared tuple of registry-validated PayloadStore puts, EventStore appends and closed BudgetTransitionCommands, or none. Under that lock it folds the current ledger head, calls BudgetLedger's pure command validator, then assigns all object IDs/cursors/reservation IDs/timestamps only at commit. It exposes no arbitrary callback. Task 4 layer commit, Task 6 candidate+reservation and Plan+PlanAdmitted, and Task 7 evidence-payload+`BridgeEvidenceRecorded` use this one boundary. Semantic idempotency keys cover the whole batch; same-key drift conflicts, crash before commit exposes none and replay after commit exposes all.
 
-UTC = timezone.utc
-def _t(): return datetime(2026, 7, 15, tzinfo=UTC)
+**Required invariants:**
 
+1. the store accepts only a strict append request whose `SchemaRef` resolves and whose `PayloadRef` exists with the same content digest; the resulting record must be a Phase 1-valid immutable `RunEvent`;
+2. registry resolution uses the exact admitted digest; adding a later sealed Phase 3 registry cannot reinterpret payloads or replay from a Phase 1/2-bound Plan;
+3. the store, never the caller, assigns monotonic `journal_seq` per run/partition; `visible_seq` is assigned only while initially building a Phase 1-valid public event;
+4. `ArtifactStaged.visible_seq` is always `None`; no `make_visible` API exists;
+5. `LayerCommitted` is the public barrier and refers to canonically ordered committed artifact refs;
+6. main/public namespace restrictions from Phase 1 are rechecked before persistence; `sealed`, `review` and `audit` refs can never back a main/public event;
+7. an identical retry returns the existing event; a same-key/different-event retry raises `IdempotencyConflict`;
+8. events are never changed with `model_copy(update=...)`; facts change only through a new event;
+9. replay from the persisted payloads/events reproduces cursors and visibility indexes without trusting cached maps;
+10. a rejected append leaves both payload visibility and the run journal unchanged; its typed audit detail is recorded exactly once by `EventRefusalAuditSink` and cannot be read through main/public APIs.
+11. a RuntimeUnitOfWork validates every payload/event/budget transition before allocating any cursor/reservation/object visibility; a failure cannot leave an orphan payload, reservation, bridge journal row or half-published admission pair.
 
-def _append(store, **kw):
-    d = dict(run_id="r", partition="main", event_type="NodeStateChanged",
-             payload_type="NodeRun", payload_version="1", payload_ref="ref",
-             idempotency_key="k", occurred_at=_t())
-    d.update(kw)
-    return store.append(**d)
+- [ ] **Step 1: Write failing store tests**
 
+Required tests:
 
-def test_journal_seq_is_monotonic_per_partition():
-    s = EventStore()
-    a = _append(s, idempotency_key="k1")
-    b = _append(s, idempotency_key="k2")
-    assert (a.journal_seq, b.journal_seq) == (1, 2)
+- typed payload put/get and wrong SchemaRef/content digest/namespace/registry-digest rejection;
+- simultaneous resolution/replay of old Phase 1, current Phase 2 and a fake later sealed registry without "latest" aliasing;
+- journal/visible dual-cursor monotonicity;
+- staged event permanently invisible and LayerCommitted visible;
+- identical idempotent retry versus conflicting retry;
+- sealed/review/audit payload cannot enter a main-public event;
+- invalid append produces only one typed refusal-audit record with a generic safe detail; Phase 3-style typed detail schemas are accepted through a later exact registry digest without changing the wrapper ABI;
+- callers cannot set event cursors or occurred-at, and a naive/invalid authoritative clock is rejected;
+- reverse/replayed construction yields the same journal, cursors and visible view;
+- crash before the LayerCommitted atomic batch exposes no artifact; replay after the batch exposes all of them.
+- crash-before/after matrices for payload+event, candidate+reservation and Plan+PlanAdmitted batches prove all-or-none replay; an injected mid-batch failure leaves no orphan payload/reservation/event.
 
+Run now: `pytest tests/orchestration/test_eventstore.py tests/orchestration/test_event_refusal.py -v`.
 
-def test_idempotent_append_returns_same_event():
-    s = EventStore()
-    a = _append(s, idempotency_key="dup")
-    b = _append(s, idempotency_key="dup", payload_ref="different")
-    assert a.event_id == b.event_id and a.payload_ref == b.payload_ref == "ref"
+Expected: FAIL on the missing store/refusal behavior before implementation; unrelated collection/environment failures do not count.
 
+- [ ] **Step 2: Implement append-only stores**
 
-def test_staged_events_have_no_visible_seq_until_committed():
-    s = EventStore()
-    staged = _append(s, event_type="ArtifactStaged", idempotency_key="s1", visible=False)
-    assert staged.visible_seq is None
-    assert s.visible("r", "main") == []
-    [made] = s.make_visible([staged.event_id])
-    assert made.visible_seq == 1
-    assert [e.event_id for e in s.visible("r", "main")] == [staged.event_id]
+Use a lock plus copy-on-write state for the in-memory transaction boundary. This is a behavioral stand-in for later durable storage, not permission to mutate accepted records.
 
+- [ ] **Step 3: Run and commit**
 
-def test_visible_after_cursor():
-    s = EventStore()
-    _append(s, idempotency_key="v1", visible=True)
-    _append(s, idempotency_key="v2", visible=True)
-    assert [e.visible_seq for e in s.visible("r", "main", after=1)] == [2]
-```
+Run: `pytest tests/orchestration/test_phase2_handoff.py tests/orchestration/test_eventstore.py tests/orchestration/test_event_refusal.py tests/orchestration/test_budget_ledger.py -v`
 
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `pytest tests/orchestration/test_eventstore.py -v`
-Expected: FAIL with `ModuleNotFoundError`
-
-- [ ] **Step 3: Write minimal implementation**
-
-```python
-# guanlan_v2/orchestration/eventstore.py
-from __future__ import annotations
-import uuid
-from datetime import datetime
-from guanlan_v2.orchestration.digest import content_digest
-from guanlan_v2.orchestration.events import RunEvent
-
-
-class EventStore:
-    def __init__(self) -> None:
-        self._events: list[RunEvent] = []
-        self._by_idem: dict[tuple[str, str, str], str] = {}
-        self._by_id: dict[str, int] = {}          # event_id → index in self._events
-        self._journal_seq: dict[tuple[str, str], int] = {}
-        self._visible_seq: dict[tuple[str, str], int] = {}
-
-    def append(self, *, run_id: str, partition: str, event_type, payload_type: str,
-               payload_version: str, payload_ref: str, idempotency_key: str,
-               plan_digest: str | None = None, causation_id: str | None = None,
-               visible: bool = False, occurred_at: datetime) -> RunEvent:
-        idem = (run_id, partition, idempotency_key)
-        if idem in self._by_idem:
-            return self._events[self._by_id[self._by_idem[idem]]]
-        part = (run_id, partition)
-        jseq = self._journal_seq.get(part, 0) + 1
-        self._journal_seq[part] = jseq
-        vseq = None
-        if visible:
-            vseq = self._visible_seq.get(part, 0) + 1
-            self._visible_seq[part] = vseq
-        digest_src = {"run_id": run_id, "partition": partition, "event_type": event_type,
-                      "payload_type": payload_type, "payload_version": payload_version,
-                      "payload_ref": payload_ref, "plan_digest": plan_digest}
-        evt = RunEvent(
-            event_id=uuid.uuid4().hex, run_id=run_id, partition=partition, plan_digest=plan_digest,
-            event_type=event_type, causation_id=causation_id, journal_seq=jseq, visible_seq=vseq,
-            idempotency_key=idempotency_key, payload_type=payload_type, payload_version=payload_version,
-            payload_ref=payload_ref, occurred_at=occurred_at, content_digest=content_digest(digest_src))
-        self._by_id[evt.event_id] = len(self._events)
-        self._events.append(evt)
-        self._by_idem[idem] = evt.event_id
-        return evt
-
-    def journal(self, run_id: str, partition: str) -> list[RunEvent]:
-        out = [e for e in self._events if e.run_id == run_id and e.partition == partition]
-        return sorted(out, key=lambda e: e.journal_seq)
-
-    def visible(self, run_id: str, partition: str, *, after: int = 0) -> list[RunEvent]:
-        out = [e for e in self._events if e.run_id == run_id and e.partition == partition
-               and e.visible_seq is not None and e.visible_seq > after]
-        return sorted(out, key=lambda e: e.visible_seq)
-
-    def make_visible(self, event_ids: list[str]) -> list[RunEvent]:
-        made: list[RunEvent] = []
-        for eid in event_ids:
-            idx = self._by_id[eid]
-            evt = self._events[idx]
-            if evt.visible_seq is not None:
-                made.append(evt)
-                continue
-            part = (evt.run_id, evt.partition)
-            vseq = self._visible_seq.get(part, 0) + 1
-            self._visible_seq[part] = vseq
-            updated = evt.model_copy(update={"visible_seq": vseq})
-            self._events[idx] = updated
-            made.append(updated)
-        return made
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `pytest tests/orchestration/test_eventstore.py -v`
-Expected: PASS (4 passed)
-
-- [ ] **Step 5: Commit**
+Expected: PASS.
 
 ```bash
-git add guanlan_v2/orchestration/eventstore.py tests/orchestration/test_eventstore.py
-git commit -m "feat(orchestration): dual-cursor idempotent event store (phase2)"
+git add guanlan_v2/orchestration/eventstore.py guanlan_v2/orchestration/runtime_contracts.py tests/orchestration/test_eventstore.py tests/orchestration/test_event_refusal.py
+git commit -m "feat(orchestration): add typed append-only event store"
 ```
 
 ---
 
-## Task 3: Worker catalog
+## Task 3: Read-only catalog runtime + material resolver
 
 **Files:**
-- Create: `guanlan_v2/orchestration/catalog.py`
-- Test: `tests/orchestration/test_catalog.py`
+- Create: `guanlan_v2/orchestration/catalog_runtime.py`
+- Create: `config/orchestration/catalogs/phase2-pilot-v1.yaml`
+- Create: only the prompt/SKILL/guardrail materials referenced by the reviewed three-worker pilot under `config/orchestration/materials/phase2-pilot-v1/`
+- Test: `tests/orchestration/test_catalog_runtime.py`
 
-**Interfaces:**
-- Consumes: `spec.WorkerSpec`, `digest.content_digest`.
-- Produces: `class WorkerCatalog` — `__init__(self, workers: Iterable[WorkerSpec] = (), *, version: str = "1")`; `register(spec) -> None` (duplicate id with different digest raises `ValueError`); `get(worker_id) -> WorkerSpec` (missing raises `KeyError`); `has(worker_id) -> bool`; property `version -> str`; property `digest -> str` (sha256 over sorted `worker_id -> semantic_digest`, so identical rosters give identical digests regardless of registration order).
+**Consumes:** Phase 1 `WorkerCatalogSnapshot`, `WorkerSpec`, content/skill/capability manifests, `ResolvedMaterial`, `build_catalog_snapshot` and `validate_catalog_snapshot`.
 
-- [ ] **Step 1: Write the failing test**
+**Produces:**
 
-```python
-# tests/orchestration/test_catalog.py
-from __future__ import annotations
-import pytest
-from guanlan_v2.orchestration.enums import DataMode, Tier, ExecutionKind
-from guanlan_v2.orchestration.spec import WorkerSpec, ExecutionSpec
-from guanlan_v2.orchestration.catalog import WorkerCatalog
+- `MaterialSource(Protocol)`: service configuration maps a logical ref to bytes/descriptor; this physical locator is never exposed in WorkerSpec or Plan.
+- `CatalogMaterialError`.
+- `CatalogRuntime`: immutable runtime index constructed from one snapshot and exact resolved materials. It exposes lookup/resolution only: `worker(worker_id)`, `text(ContentRef)`, `capability(CapabilityRef)`, `resolve_worker(worker_id) -> ResolvedWorkerRuntime`, and the pinned snapshot/catalog digest.
+- `ResolvedWorkerRuntime`: service-owned prompt/skill/guardrail/handler/capability materials already checked against the selected WorkerSpec. It cannot add or replace a binding.
+- a trusted handler/model-factory registry keyed by the full catalog ref identity, never by caller-provided callable or path.
 
+There is deliberately no `register(spec)`, mutable version, or second catalog digest implementation in Phase 2.
 
-def _w(wid, **kw):
-    d = dict(id=wid, lane="text", persona="p", system_prompt_ref="s.md", tier=Tier.READER,
-             execution=ExecutionSpec(kind=ExecutionKind.LLM, model_tier="fast"),
-             input_model="In", outputs={"primary": "X@1"}, supported_modes={DataMode.ONLINE})
-    d.update(kw)
-    return WorkerSpec(**d)
+**Pilot catalog scope:**
 
+Freeze exactly three final workers before the Task 9 pilot. The recommended chain, because it consumes the three Phase 1 compatibility payloads, is:
 
-def test_get_and_has():
-    c = WorkerCatalog([_w("a"), _w("b")])
-    assert c.has("a") and c.get("b").id == "b"
-    with pytest.raises(KeyError):
-        c.get("missing")
+`text.sentiment -> dec.research_mgr -> dec.pm`
 
+with primary output schemas `SentimentReport`, `ResearchPlan`, and `PortfolioDecision`. If repository evidence selects another triad, update the Task 0 worker map and this plan together before implementation. Each pilot worker must be `catalog_role="final"`, `selection_scope="dynamic_allowed"`, complete, and use actual Phase 1-valid prompt/SKILL/guardrail/capability material. `dec.pm` remains advisory-only and gains no trading authority. This task does not finalize the other 21 redesigned workers.
 
-def test_digest_is_order_independent():
-    c1 = WorkerCatalog([_w("a"), _w("b")])
-    c2 = WorkerCatalog([_w("b"), _w("a")])
-    assert c1.digest == c2.digest
+**Required invariants:**
 
+1. rebuild the snapshot using the Phase 1 material-aware builder and require exact catalog digest equality;
+2. strict UTF-8/NFC/LF and skill-v1 envelope rules are inherited, not reimplemented differently;
+3. missing, extra, duplicate or content-drifted material fails startup;
+4. handler/model/tool resolution cannot escape the selected WorkerSpec refs;
+5. a snapshot is immutable for a run; publishing another catalog creates a new version/digest and never changes an old Plan;
+6. final workers remain ordinary candidates; `compat.*` workers remain `static_legacy_only` and gain no authority merely by resolving;
+7. a compatibility worker is not counted toward the final 24 or the three-worker pilot;
+8. no physical path occurs in the snapshot, WorkerSpec, PlanDraft or Plan.
 
-def test_conflicting_registration_raises():
-    c = WorkerCatalog([_w("a", persona="p1")])
-    with pytest.raises(ValueError):
-        c.register(_w("a", persona="p2"))
-    c.register(_w("a", persona="p1"))  # identical is idempotent
-```
+- [ ] **Step 1: Write failing runtime/material tests**
 
-- [ ] **Step 2: Run test to verify it fails**
+Test exact material resolution, drift/missing/extra material rejection, immutable snapshot lookup, handler-ref confinement, pilot worker role/scope/output schemas, compat exclusion and absence of physical paths.
 
-Run: `pytest tests/orchestration/test_catalog.py -v`
-Expected: FAIL with `ModuleNotFoundError`
+Run now: `pytest tests/orchestration/test_catalog_runtime.py -v`.
 
-- [ ] **Step 3: Write minimal implementation**
+Expected: FAIL on missing resolver/material confinement before implementation; unrelated collection/environment failures do not count.
 
-```python
-# guanlan_v2/orchestration/catalog.py
-from __future__ import annotations
-from collections.abc import Iterable
-from guanlan_v2.orchestration.digest import content_digest
-from guanlan_v2.orchestration.spec import WorkerSpec
+- [ ] **Step 2: Add only the reviewed pilot materials and resolver**
 
+Do not write all 24 playbooks. The three pilot SKILL files must satisfy Phase 1's machine-readable trigger/data-source-priority envelope and contain enough reviewed behavior to be runnable through a fake model gateway in Task 9.
 
-class WorkerCatalog:
-    def __init__(self, workers: Iterable[WorkerSpec] = (), *, version: str = "1"):
-        self._version = version
-        self._workers: dict[str, WorkerSpec] = {}
-        for w in workers:
-            self.register(w)
+- [ ] **Step 3: Run and commit**
 
-    def register(self, spec: WorkerSpec) -> None:
-        existing = self._workers.get(spec.id)
-        if existing is not None and existing.semantic_digest() != spec.semantic_digest():
-            raise ValueError(f"worker {spec.id} already registered with a different definition")
-        self._workers[spec.id] = spec
+Run: `pytest tests/orchestration/test_catalog.py tests/orchestration/test_catalog_runtime.py -v`
 
-    def get(self, worker_id: str) -> WorkerSpec:
-        return self._workers[worker_id]
-
-    def has(self, worker_id: str) -> bool:
-        return worker_id in self._workers
-
-    @property
-    def version(self) -> str:
-        return self._version
-
-    @property
-    def digest(self) -> str:
-        table = {wid: w.semantic_digest() for wid, w in self._workers.items()}
-        return content_digest(table)
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `pytest tests/orchestration/test_catalog.py -v`
-Expected: PASS (3 passed)
-
-- [ ] **Step 5: Commit**
+Expected: PASS; the first file is the unchanged Phase 1 contract suite.
 
 ```bash
-git add guanlan_v2/orchestration/catalog.py tests/orchestration/test_catalog.py
-git commit -m "feat(orchestration): worker catalog with order-independent digest (phase2)"
+git add guanlan_v2/orchestration/catalog_runtime.py config/orchestration/catalogs/phase2-pilot-v1.yaml config/orchestration/materials/phase2-pilot-v1 tests/orchestration/test_catalog_runtime.py
+git commit -m "feat(orchestration): add read-only catalog material runtime"
 ```
 
 ---
@@ -453,756 +299,370 @@ git commit -m "feat(orchestration): worker catalog with order-independent digest
 - Create: `guanlan_v2/orchestration/pool.py`
 - Test: `tests/orchestration/test_pool.py`
 
-**Interfaces:**
-- Consumes: `schemas.Artifact`, `events.LayerCommit`, `events.CommittedArtifactRef`, `context.InputSnapshot`, `eventstore.EventStore`, `schema_registry.SchemaRegistry`.
-- Produces: `class ArtifactPool` — `__init__(self, run_id, event_store, registry, *, partition="main", now)`:
-  - `stage(art, *, layer_index, idempotency_key) -> Artifact` — validates `art.payload` via `registry.validate_payload(art.payload_type, art.payload_version, art.payload)`; stores in the open staging set for `layer_index`; appends `ArtifactStaged` (invisible); raises `RuntimeError` if that layer is already committed.
-  - `commit_layer(layer_index, *, node_run_ids, expected_output_keys: set[tuple[str,str]]) -> LayerCommit` — verifies every `(node_id, output_key)` in `expected_output_keys` is staged; assigns `artifact_seq` in canonical `(node_id, output_key)` order; moves them to committed; appends `LayerCommitted` and makes staged events visible atomically; closes the layer. Missing expected key → `RuntimeError`. Re-commit → `RuntimeError`.
-  - `committed_artifact(node_id, output_key) -> Artifact | None`.
-  - `get_typed(slot, model) -> BaseModel | None` (latest committed by `artifact_seq` for that slot, validated to `model`).
-  - `history(slot) -> list[Artifact]` (committed only).
-  - `freeze_input_snapshot(layer_index, *, context_snapshot_id=None) -> InputSnapshot` (over currently committed artifacts).
+**Consumes:** Phase 1 `Artifact`, `ArtifactRef`, `InputSnapshot`, `NodeRun`, `LayerCommit`, their builders/validators, sealed SchemaRegistry, plus the Task 2 stores.
 
-- [ ] **Step 1: Write the failing test**
+**Produces:**
 
-```python
-# tests/orchestration/test_pool.py
-from __future__ import annotations
-from datetime import datetime, timezone
-import pytest
-from pydantic import BaseModel
-from guanlan_v2.orchestration.eventstore import EventStore
-from guanlan_v2.orchestration.schema_registry import SchemaRegistry
-from guanlan_v2.orchestration.schemas import Artifact, Provenance
-from guanlan_v2.orchestration.enums import DataMode
-from guanlan_v2.orchestration.pool import ArtifactPool
+- `ArtifactPool`, scoped to one run and frozen Plan:
+  - `stage(artifact, *, layer_index, node_run, idempotency_key) -> ArtifactRef`;
+  - `commit_layer(layer_index, *, node_runs, expected_outputs, idempotency_key) -> LayerCommit`;
+  - `committed(ref) -> Artifact`;
+  - `committed_output(node_id, output_key) -> Artifact | None`;
+  - `freeze_input_snapshot(node, *, context_snapshot_ref, bound_dependencies, data_result_ids=(), memory_record_refs=()) -> InputSnapshot`;
+  - `replay(...) -> ArtifactPool`.
 
-UTC = timezone.utc
-def _now(): return datetime(2026, 7, 15, tzinfo=UTC)
+`expected_outputs` is derived from the frozen Worker's `OutputBinding` for actual COMPLETED/DEGRADED NodeRuns; non-success NodeRuns require no Artifact. It is never a caller-written slot set.
 
+**Required invariants:**
 
-class Doc(BaseModel):
-    text: str
+1. stage verifies run/plan/node/output binding, payload SchemaRef, content/reproducibility/audit digests, provenance and rendered-payload binding through Phase 1 functions;
+2. the Artifact and ArtifactStaged payload are persisted before returning, but the artifact is not readable as committed;
+3. downstream/runtime dataflow reads artifacts only through the pool's committed index; possession of a low-level staged PayloadRef does not authorize an input read;
+4. one layer commit atomically validates all expected outputs, assigns canonical `artifact_seq`, stores the typed LayerCommit payload, appends one public LayerCommitted event and advances the committed index;
+5. ArtifactStaged events remain journal-only forever;
+6. a crash before the atomic commit exposes none of the layer; replay after commit exposes all;
+7. identical stage/commit retries are idempotent; conflicting retries raise `IdempotencyConflict`;
+8. late stage after commit and duplicate `(node_id, output_key)` with different content fail;
+9. every LayerCommit and InputSnapshot binds the real plan digest; no blank digest or fabricated NodeRun ID is allowed;
+10. InputSnapshot contains exactly the selected node's named inputs available **before node start**. `one` has one ArtifactRef; `many` preserves Plan dependency declaration order. Pre-existing Context, DataResult and memory refs enter through their Phase 1 fields/builders;
+11. DataResult/PayloadRefs obtained during node execution do not mutate or replace the pre-node InputSnapshot; they bind ToolCallRecord, NodeRun evidence and final Artifact provenance instead;
+12. retrieval resolves the exact committed ArtifactRef/content digest, not “latest value by slot”;
+13. replay derives committed visibility only from LayerCommitted events and their typed refs.
 
+- [ ] **Step 1: Write failing barrier/snapshot tests**
 
-def _registry():
-    r = SchemaRegistry(); r.register("Doc", "1", Doc); return r
+Required tests:
 
+- invalid payload/provenance/digest rejected at stage;
+- staged artifact unavailable before barrier;
+- canonical artifact sequence independent of worker completion order;
+- missing/extra/conflicting output prevents the whole commit;
+- crash-before/crash-after replay matrix;
+- ArtifactStaged never gains visible sequence;
+- same commit retry succeeds, conflicting retry fails;
+- late stage fails;
+- one/many InputSnapshot ordering and digest binding;
+- context/data/memory/artifact change alters snapshot content digest;
+- no empty plan/snapshot/provenance digest can be persisted.
 
-def _prov(node):
-    return Provenance(run_id="r", plan_id="p", plan_digest="pd", node_id=node,
-                      as_of=_now(), pit_mode=DataMode.ONLINE, code_version="v1")
+Run now: `pytest tests/orchestration/test_pool.py -v`.
 
+Expected: FAIL on missing staged/barrier/snapshot behavior before implementation; unrelated collection/environment failures do not count.
 
-def _art(node, slot, key="primary", text="hi"):
-    return Artifact(id=f"{node}:{key}", kind="doc", slot=slot, output_key=key, producer_node_id=node,
-                    run_id="r", payload_type="Doc", payload_version="1", payload={"text": text},
-                    rendered_md=text, provenance=_prov(node), created_at=_now(),
-                    content_digest="c", rendered_from_payload_digest="rp")
+- [ ] **Step 2: Implement pool over the Task 2 transaction boundary**
 
+Do not manually hash `model_dump(mode="json")`. Use the Phase 1 Artifact/InputSnapshot/LayerCommit builders and validate every persisted record on replay.
 
-def _pool():
-    return ArtifactPool("r", EventStore(), _registry(), now=_now)
+- [ ] **Step 3: Run and commit**
 
+Run: `pytest tests/orchestration/test_pool.py tests/orchestration/test_eventstore.py tests/orchestration/test_artifact.py -v`
 
-def test_staged_is_not_visible_until_commit():
-    p = _pool()
-    p.stage(_art("n1", "s1"), layer_index=0, idempotency_key="i1")
-    assert p.get_typed("s1", Doc) is None            # staged, not committed
-    p.commit_layer(0, node_run_ids=["nr1"], expected_output_keys={("n1", "primary")})
-    assert p.get_typed("s1", Doc).text == "hi"
-
-
-def test_commit_missing_expected_key_raises():
-    p = _pool()
-    p.stage(_art("n1", "s1"), layer_index=0, idempotency_key="i1")
-    with pytest.raises(RuntimeError):
-        p.commit_layer(0, node_run_ids=["nr1"], expected_output_keys={("n1", "primary"), ("n2", "primary")})
-
-
-def test_late_stage_after_commit_rejected():
-    p = _pool()
-    p.stage(_art("n1", "s1"), layer_index=0, idempotency_key="i1")
-    p.commit_layer(0, node_run_ids=["nr1"], expected_output_keys={("n1", "primary")})
-    with pytest.raises(RuntimeError):
-        p.stage(_art("n9", "s1"), layer_index=0, idempotency_key="i9")
-
-
-def test_artifact_seq_is_canonical_not_stage_order():
-    p = _pool()
-    p.stage(_art("nB", "s1", text="b"), layer_index=0, idempotency_key="iB")
-    p.stage(_art("nA", "s2", text="a"), layer_index=0, idempotency_key="iA")
-    commit = p.commit_layer(0, node_run_ids=["x"],
-                            expected_output_keys={("nB", "primary"), ("nA", "primary")})
-    # canonical order by (node_id, output_key): nA before nB regardless of stage order
-    assert [r.artifact_id for r in commit.artifacts] == ["nA:primary", "nB:primary"]
-
-
-def test_invalid_payload_rejected_at_stage():
-    p = _pool()
-    bad = _art("n1", "s1"); bad = bad.model_copy(update={"payload": {"wrong": 1}})
-    with pytest.raises(Exception):
-        p.stage(bad, layer_index=0, idempotency_key="ibad")
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `pytest tests/orchestration/test_pool.py -v`
-Expected: FAIL with `ModuleNotFoundError`
-
-- [ ] **Step 3: Write minimal implementation**
-
-```python
-# guanlan_v2/orchestration/pool.py
-from __future__ import annotations
-from datetime import datetime
-from typing import Callable
-from pydantic import BaseModel
-from guanlan_v2.orchestration.context import InputSnapshot
-from guanlan_v2.orchestration.digest import content_digest
-from guanlan_v2.orchestration.eventstore import EventStore
-from guanlan_v2.orchestration.events import CommittedArtifactRef, LayerCommit
-from guanlan_v2.orchestration.schema_registry import SchemaRegistry
-from guanlan_v2.orchestration.schemas import Artifact, ArtifactRef
-
-
-class ArtifactPool:
-    def __init__(self, run_id: str, event_store: EventStore, registry: SchemaRegistry,
-                 *, partition: str = "main", now: Callable[[], datetime]):
-        self.run_id = run_id
-        self._store = event_store
-        self._registry = registry
-        self._partition = partition
-        self._now = now
-        self._staged: dict[int, dict[tuple[str, str], tuple[Artifact, str]]] = {}  # layer → {(node,key): (art, event_id)}
-        self._committed: dict[tuple[str, str], Artifact] = {}                        # (node,key) → art
-        self._by_slot: dict[str, list[tuple[int, Artifact]]] = {}                    # slot → [(artifact_seq, art)]
-        self._closed_layers: set[int] = set()
-        self._artifact_seq = 0
-
-    def stage(self, art: Artifact, *, layer_index: int, idempotency_key: str) -> Artifact:
-        if layer_index in self._closed_layers:
-            raise RuntimeError(f"layer {layer_index} already committed; cannot stage {art.id}")
-        self._registry.validate_payload(art.payload_type, art.payload_version, art.payload)
-        evt = self._store.append(
-            run_id=self.run_id, partition=self._partition, event_type="ArtifactStaged",
-            payload_type="Artifact", payload_version=art.schema_version, payload_ref=art.id,
-            idempotency_key=idempotency_key, visible=False, occurred_at=self._now())
-        self._staged.setdefault(layer_index, {})[(art.producer_node_id, art.output_key)] = (art, evt.event_id)
-        return art
-
-    def commit_layer(self, layer_index: int, *, node_run_ids: list[str],
-                     expected_output_keys: set[tuple[str, str]]) -> LayerCommit:
-        if layer_index in self._closed_layers:
-            raise RuntimeError(f"layer {layer_index} already committed")
-        staged = self._staged.get(layer_index, {})
-        missing = expected_output_keys - set(staged.keys())
-        if missing:
-            raise RuntimeError(f"layer {layer_index} missing expected outputs: {sorted(missing)}")
-        refs: list[CommittedArtifactRef] = []
-        event_ids: list[str] = []
-        for key in sorted(expected_output_keys):            # canonical (node_id, output_key)
-            art, event_id = staged[key]
-            self._artifact_seq += 1
-            self._committed[key] = art
-            self._by_slot.setdefault(art.slot, []).append((self._artifact_seq, art))
-            refs.append(CommittedArtifactRef(artifact_id=art.id, artifact_seq=self._artifact_seq))
-            event_ids.append(event_id)
-        self._store.make_visible(event_ids)
-        self._store.append(
-            run_id=self.run_id, partition=self._partition, event_type="LayerCommitted",
-            payload_type="LayerCommit", payload_version="1", payload_ref=f"layer:{layer_index}",
-            idempotency_key=f"commit:{layer_index}", visible=True, occurred_at=self._now())
-        self._closed_layers.add(layer_index)
-        return LayerCommit(plan_digest="", layer_index=layer_index, node_run_ids=node_run_ids,
-                           artifacts=refs, committed_at=self._now())
-
-    def committed_artifact(self, node_id: str, output_key: str = "primary") -> Artifact | None:
-        return self._committed.get((node_id, output_key))
-
-    def get_typed(self, slot: str, model: type[BaseModel]) -> BaseModel | None:
-        entries = self._by_slot.get(slot)
-        if not entries:
-            return None
-        _, art = max(entries, key=lambda t: t[0])
-        return model.model_validate(art.payload)
-
-    def history(self, slot: str) -> list[Artifact]:
-        return [a for _, a in sorted(self._by_slot.get(slot, []), key=lambda t: t[0])]
-
-    def freeze_input_snapshot(self, layer_index: int, *, context_snapshot_id: str | None = None) -> InputSnapshot:
-        refs = [ArtifactRef(artifact_id=a.id, producer_node_id=a.producer_node_id, slot=a.slot,
-                            output_key=a.output_key, kind=a.kind, content_digest=a.content_digest,
-                            relation="input")
-                for (_, _), a in sorted(self._committed.items())]
-        digest = content_digest({"refs": [r.model_dump(mode="json") for r in refs],
-                                 "layer": layer_index, "ctx": context_snapshot_id})
-        return InputSnapshot(id=f"{self.run_id}:L{layer_index}", run_id=self.run_id, plan_digest="",
-                             layer_index=layer_index, context_snapshot_id=context_snapshot_id,
-                             artifact_refs=refs, data_result_ids=[], memory_record_refs=[],
-                             frozen_at=self._now(), content_digest=digest)
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `pytest tests/orchestration/test_pool.py -v`
-Expected: PASS (5 passed)
-
-- [ ] **Step 5: Commit**
+Expected: PASS.
 
 ```bash
 git add guanlan_v2/orchestration/pool.py tests/orchestration/test_pool.py
-git commit -m "feat(orchestration): staged->barrier ArtifactPool (phase2)"
+git commit -m "feat(orchestration): add atomic replayable artifact barriers"
 ```
 
 ---
 
-## Task 5: Plan freeze validator
+## Task 5: Static runtime profile + support report
 
 **Files:**
-- Create: `guanlan_v2/orchestration/validate.py`
-- Test: `tests/orchestration/test_validate.py`
+- Modify: `guanlan_v2/orchestration/runtime_contracts.py`
+- Modify: `guanlan_v2/orchestration/catalog_runtime.py`
+- Create: `guanlan_v2/orchestration/runtime_support.py`
+- Create: `tests/orchestration/golden/runtime_schema_manifest_v1.json`
+- Test: `tests/orchestration/test_runtime_contracts.py`
+- Test: `tests/orchestration/test_runtime_support.py`
+- Test: `tests/orchestration/test_catalog_runtime.py`
 
-**Interfaces:**
-- Consumes: `spec.PlanDraft/PlanNode/Dependency/Plan`, `catalog.WorkerCatalog`, `enums.NodeStatus/DependencyPolicy/ExecutionKind/DataMode`.
-- Produces:
-  - `class PlanValidationError(Exception)`.
-  - `validate_plan_draft(draft: PlanDraft, *, catalog: WorkerCatalog) -> None` — raises `PlanValidationError` on any hard-gate violation (rules below).
-  - `_topo_layers(draft) -> list[list[str]]` (helper; Kahn by node deps; cycle → `PlanValidationError`).
+**Consumes:** the exact Phase 1 `PlanDraft`, `PlanValidationReport`, sealed catalog/registry snapshots and shared enums. It does not replace `validate_plan_draft`.
 
-Hard-gate rules implemented:
-1. node ids unique; every `node.worker_id` exists in `catalog`.
-2. every `Dependency.upstream_node_id` refers to a node in the draft; DAG acyclic; every `sink_node_id` is a real node and reachable (has a path from some source).
-3. `Dependency.artifact_slot`/`upstream_output_key` must exist in the upstream node's worker `outputs`.
-4. `policy==BLOCK` ⇒ `accept_statuses == {COMPLETED}`; `INCOMPLETE/FAILED/BLOCKED/CANCELLED` never in `accept_statuses`.
-5. same `writes_slot` by ≥2 nodes ⇒ a `ReducerCfg` for that slot must exist.
-6. deterministic worker (`execution.kind==DETERMINISTIC`) ⇒ `execution.handler_ref` set; LLM worker ⇒ `execution.model_tier` set.
-7. `node.worker_id`'s `supported_modes` must contain `draft.mode`.
-8. every sink whose worker primary output is a decision payload (`can_emit_decision`) — enforce: a sink node whose worker has `can_emit_decision=False` may still be a research sink, but a node writing a decision-class slot must have `can_emit_decision=True`. (v1: enforce `can_emit_decision` required only when the worker declares it; test covers the reject path.)
-9. `phase=="main"` ⇒ `context_snapshot_id` set; `phase=="bootstrap"` ⇒ `context_snapshot_id is None`.
+**Produces:**
 
-- [ ] **Step 1: Write the failing test**
+- `StaticRuntimeProfile@1`: immutable `DigestModel` with closed `schema_version="1"`, `profile_id="static-runtime"`, `profile_version="1"` and an explicit fixed feature matrix.
+- `RuntimeSupportIssue@1`: stable issue code, model path and explanation.
+- `RuntimeSupportReport@1`: immutable, canonically ordered issues plus:
+  - `supported`;
+  - `candidate_plan_digest`;
+  - Phase 1 validation-report digest;
+  - runtime-profile digest;
+  - catalog and schema-registry digests;
+  - canonically ordered active execution-bridge descriptor/config/handler `ContentRef`s;
+  - checker version.
+- the remaining Phase 2 immutable control facts: `AdmissionCandidate@1`, `PlanAdmitted@1`, and `RunResult@1`. Task 2 already owns `NamedEvidenceDigest/GenericRefusalDetails/EventRefusalRecord`; Tasks 6 and 8 own state-transition behavior, not alternate model definitions.
+- `ExecutionBridgeDescriptor@1`: strict registered generic descriptor with `descriptor_kind=Literal["execution_bridge"]`, closed version, stable bridge ID/version, strict priority, exact provider-handler/config `ContentRef`s, config `SchemaRef`, canonical activation tuples of exact capability refs and read categories, supported execution kinds, `pre_input_kind: Literal["none","memory_refs_v1"]`, `lifecycle: Literal["static_prefetch_v1"]` and `required: Literal[True]`. At least one activation tuple is non-empty; a descriptor activates for a WorkerSpec when **any** listed capability is in its allowlist or any listed category is in its read categories. There is no caller override/negative predicate. Its full canonical JSON is a catalog `kind="guardrail"` material; handler is `kind="handler"`, config is a schema-validated `kind="guardrail"` material. `CatalogRuntime` indexes only marker-bearing strict descriptors and ignores ordinary guardrail prose; malformed/unknown marker versions fail catalog resolution.
+- `PromptUntrustedBlockRef@1`: immutable ordered block envelope with a one-based strict positive ordinal (the first block is `1`), exact Phase 1 `TypedPayloadRef`, reviewed media type, bounded non-negative rendered length and verified block digest. The typed ref must use `main`; its payload object ID is dereference/audit identity while SchemaRef + namespace/content are semantic.
+- `PromptAssemblyRecord@1`: immutable persisted execution evidence binding plan/node/worker, exact assembler ID/version, system-prompt/ordered skill/guardrail identities, canonically named trusted-input digests, ordered `PromptUntrustedBlockRef`s, canonical model-request digest and verified assembly digest. It contains refs/digests, not duplicated raw untrusted bytes, and is persisted in `main` before model invocation.
+- `BridgeEvidenceRecorded@1`: strict main-namespace control fact binding run/plan/node, exact `ExecutionEvidenceOrdinalToken` projection, within-call role and the already persisted main `TypedPayloadRef`. The service-owned bridge journal appends it idempotently immediately after each evidence put; it is recovery metadata, not a replacement for the referenced evidence or NodeRun tuple.
+- `check_runtime_support(draft, *, phase1_report, catalog, bridge_view, schema_registry, profile) -> RuntimeSupportReport`: pure and I/O-free. `bridge_view` is the immutable, already material-verified view produced by CatalogRuntime from that exact catalog digest; it is not a mutable provider registry.
+- `PHASE2_PUBLIC_MODELS`, `PHASE2_BASE_REGISTRY_DIGEST` and `phase2_runtime_registry(expected_phase1_digest)`: a deterministic sealed registry containing the reviewed Phase 1 public models plus all Phase 2 runtime-control and prompt-evidence payloads above. The builder first requires the exact Phase 1 digest, and its tests prove the inherited Phase 1 schema subset is byte-identical. It has its own reviewed golden manifest and never mutates or regenerates the Phase 1 default registry/golden.
+- every new Phase 2 PlanDraft/Plan uses the cumulative Phase 2 registry digest. Previously persisted Phase 1 registry-bound Plans remain resolvable and replayable through `SchemaRegistryResolver`; they are never silently rebound.
 
-```python
-# tests/orchestration/test_validate.py
-from __future__ import annotations
-from datetime import datetime, timezone
-import pytest
-from guanlan_v2.orchestration.enums import (DataMode, Tier, ExecutionKind, NodeStatus,
-                                            DependencyPolicy, PlanSource)
-from guanlan_v2.orchestration.spec import (WorkerSpec, ExecutionSpec, PlanNode, Dependency, PlanDraft)
-from guanlan_v2.orchestration.catalog import WorkerCatalog
-from guanlan_v2.orchestration.validate import validate_plan_draft, PlanValidationError
+**StaticRuntimeProfile v1 support matrix:**
 
-UTC = timezone.utc
+Supported:
 
+- already Phase 1-validated **main** static DAGs from `PRESET`, `PRESET_FALLBACK`, or `DYNAMIC`; Phase 2 itself never invokes a Planner, and `PlanSource` never grants authority or bypasses REQUIRED approval;
+- `ExecutionKind.LLM` and `DETERMINISTIC`;
+- `DependencyPolicy.BLOCK`, `DEGRADE`, and `SKIP`;
+- `InputBinding.cardinality` one and many;
+- typed params and exact v1 SchemaRef input/output equality;
+- bounded layers, staged→barrier commit;
+- per-node timeout and run cancellation.
+- reviewed `ExecutionBridgeDescriptor@1` with the exact two-phase `memory_refs_v1` pre-input or no-pre-input path followed by `static_prefetch_v1`; all provider-selected calls/parameters come from the admitted Plan's validated node params/InputSnapshot through the schema-validated config, never model-generated dynamic expansion. Static v1 performs at most one prompt assembly and one ModelGateway invocation per LLM node.
 
-def _w(wid, **kw):
-    d = dict(id=wid, lane="text", persona="p", system_prompt_ref="s.md", tier=Tier.READER,
-             execution=ExecutionSpec(kind=ExecutionKind.LLM, model_tier="fast"),
-             input_model="In", outputs={"primary": "Doc@1"}, supported_modes={DataMode.ONLINE})
-    d.update(kw)
-    return WorkerSpec(**d)
+Rejected before budget reservation:
 
+- `BOOTSTRAP` / no-ContextSnapshot Lane 0 execution, which remains a Phase 5 runtime profile;
+- condition refs;
+- reducers and any slot with multiple writers;
+- debates;
+- gates/gate metrics;
+- stop conditions;
+- `max_attempts > 1` or any repair/retry request;
+- missing/drifted descriptor/config/handler material, unknown bridge version/lifecycle, an unregistered provider, model-driven/dynamic late bridge calls, a multi-round tool-result→prompt/model loop, or any provider feature outside the two-phase static-prefetch matrix;
+- an LLM node with `tool_calls=REQUIRED` unless its exact activated static-prefetch config guarantees at least one WorkerSpec-allowed finalized capability call; conversely `FORBIDDEN` rejects any activated prefetch call. Phase 1 schema validity alone does not promise that runtime behavior;
+- any runtime construct not explicitly listed as supported.
 
-def _draft(nodes, sinks, **kw):
-    d = dict(id="pl", run_id="r", request_id="q", phase="main", source=PlanSource.PRESET,
-             goal="g", as_of=datetime(2026, 7, 15, tzinfo=UTC), mode=DataMode.ONLINE,
-             context_snapshot_id="cs", universe=[], nodes=nodes, sink_node_ids=sinks,
-             catalog_version="1", catalog_digest="d")
-    d.update(kw)
-    return PlanDraft(**d)
+Dependency runtime meanings are closed:
 
+- unsatisfied `BLOCK` → downstream `BLOCKED`;
+- unsatisfied `DEGRADE` → omit only that input, execute, and terminal success is at least `DEGRADED`;
+- unsatisfied `SKIP` → downstream `SKIPPED`, no handler/model call and no output;
+- every dependency waits for a terminal upstream state;
+- for an attested legacy Plan, the selected policy/missing behavior must equal its reviewed `LegacyDependencyMapping`.
 
-def _cat():
-    return WorkerCatalog([_w("a"), _w("b")])
+**Required invariants:**
 
+1. a support report is emitted only for a valid, exact-input Phase 1 report; it cannot turn an invalid Plan valid;
+2. candidate/catalog/registry/report/profile digest mismatches fail;
+3. issue order is deterministic and report construction has no ledger/event side effect;
+4. changing the profile or executable draft changes the bound report;
+5. unknown future fields/features are rejected rather than assumed supported;
+6. compatibility workers remain subject to the matching legacy attestation already checked by Phase 1;
+7. `EventRefusalRecord` and its generic detail/evidence contracts remain exactly the Task 2 ABI; the cumulative registry adds them without redefinition, and rejected raw content is never a field;
+8. AdmissionCandidate/PlanAdmitted/RunResult field matrices match Tasks 6/8 and reject extra fields/mutation;
+9. the runtime registry manifest is complete, reviewed and never regenerated automatically; its declared base digest equals Phase 1 and every inherited Phase 1 JSON Schema is byte-identical.
+10. the runtime checker/store accept a later reviewed cumulative registry snapshot by exact digest without changing Phase 1/2 schema identities or hard-coding the Phase 2 digest as "latest".
+11. PromptAssemblyRecord/PromptUntrustedBlockRef are registered, main-only, strict and order-sensitive; changing a block SchemaRef/content/order changes assembly digest, while object-ID relocation changes audit/dereference identity only.
+12. active bridge descriptors are derived from their exact activation predicates against each admitted WorkerSpec, not caller choice; every active descriptor/config/handler ref is bound into the support report, and unsupported/missing bridge semantics produce deterministic issue paths before reservation.
+13. one catalog may contain at most one descriptor per `bridge_id` and one exact `(priority, bridge_id)` key; duplicate ID/version, competing versions, or the same identity bound to different descriptor/config/handler refs fails CatalogRuntime indexing and RuntimeSupport before reservation.
 
-def _node(nid, worker, deps=(), slot=None):
-    return PlanNode(id=nid, worker_id=worker, writes_slot=slot or nid, dependencies=list(deps))
+- [ ] **Step 1: Write the failing support-matrix tests**
 
+Include public-model completeness/golden tests (including `ExecutionBridgeDescriptor`, `BridgeEvidenceRecorded`, `PromptUntrustedBlockRef` and `PromptAssemblyRecord`), then one accepted fixture for every supported execution/dependency/cardinality/bridge branch and one rejection for every deferred feature. Prove active descriptors/material refs enter RuntimeSupportReport; missing/drifted provider material, duplicate/competing bridge identity, unknown lifecycle and dynamic/tool-loop config are refused before reservation. Assert the EventStore and BudgetLedger remain unchanged after both supported and rejected checks.
 
-def test_valid_two_node_plan_passes():
-    n1 = _node("n1", "a")
-    n2 = _node("n2", "b", deps=[Dependency(upstream_node_id="n1", artifact_slot="n1",
-                                            upstream_output_key="primary", inject_as="ctx")])
-    validate_plan_draft(_draft([n1, n2], ["n2"]), catalog=_cat())
+Run now: `pytest tests/orchestration/test_runtime_contracts.py tests/orchestration/test_runtime_support.py -v`.
 
+Expected: FAIL on the missing support models/checker before implementation; unrelated collection/environment failures do not count.
 
-def test_unknown_worker_rejected():
-    with pytest.raises(PlanValidationError):
-        validate_plan_draft(_draft([_node("n1", "ghost")], ["n1"]), catalog=_cat())
+- [ ] **Step 2: Implement the pure checker and runtime registry manifest**
 
+Reuse Phase 1 topology/catalog/schema validation results. Do not copy their algorithms.
 
-def test_cycle_rejected():
-    n1 = _node("n1", "a", deps=[Dependency(upstream_node_id="n2", artifact_slot="n2", inject_as="x")])
-    n2 = _node("n2", "b", deps=[Dependency(upstream_node_id="n1", artifact_slot="n1", inject_as="y")])
-    with pytest.raises(PlanValidationError):
-        validate_plan_draft(_draft([n1, n2], ["n2"]), catalog=_cat())
+- [ ] **Step 3: Run and commit**
 
+Run: `pytest tests/orchestration/test_runtime_contracts.py tests/orchestration/test_runtime_support.py tests/orchestration/test_catalog_runtime.py tests/orchestration/test_plan_catalog_validation.py -v`
 
-def test_block_dep_must_accept_only_completed():
-    bad = Dependency(upstream_node_id="n1", artifact_slot="n1", inject_as="ctx",
-                     policy=DependencyPolicy.BLOCK, accept_statuses={NodeStatus.DEGRADED})
-    n2 = _node("n2", "b", deps=[bad])
-    with pytest.raises(PlanValidationError):
-        validate_plan_draft(_draft([_node("n1", "a"), n2], ["n2"]), catalog=_cat())
-
-
-def test_dependency_output_key_must_exist_on_upstream():
-    dep = Dependency(upstream_node_id="n1", artifact_slot="n1", upstream_output_key="ghost", inject_as="c")
-    n2 = _node("n2", "b", deps=[dep])
-    with pytest.raises(PlanValidationError):
-        validate_plan_draft(_draft([_node("n1", "a"), n2], ["n2"]), catalog=_cat())
-
-
-def test_same_slot_multiwrite_needs_reducer():
-    n1 = _node("n1", "a", slot="shared")
-    n2 = _node("n2", "b", slot="shared")
-    with pytest.raises(PlanValidationError):
-        validate_plan_draft(_draft([n1, n2], ["n1", "n2"]), catalog=_cat())
-
-
-def test_main_phase_requires_context_snapshot():
-    with pytest.raises(PlanValidationError):
-        validate_plan_draft(_draft([_node("n1", "a")], ["n1"], context_snapshot_id=None), catalog=_cat())
-
-
-def test_deterministic_worker_needs_handler():
-    det = _w("d", execution=ExecutionSpec(kind=ExecutionKind.DETERMINISTIC))  # no handler_ref
-    cat = WorkerCatalog([det])
-    with pytest.raises(PlanValidationError):
-        validate_plan_draft(_draft([_node("n1", "d")], ["n1"]), catalog=cat)
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `pytest tests/orchestration/test_validate.py -v`
-Expected: FAIL with `ModuleNotFoundError`
-
-- [ ] **Step 3: Write minimal implementation**
-
-```python
-# guanlan_v2/orchestration/validate.py
-from __future__ import annotations
-from guanlan_v2.orchestration.catalog import WorkerCatalog
-from guanlan_v2.orchestration.enums import DependencyPolicy, ExecutionKind, NodeStatus
-from guanlan_v2.orchestration.spec import PlanDraft
-
-_SUCCESS_ONLY = {NodeStatus.COMPLETED}
-_NEVER_SUCCESS = {NodeStatus.INCOMPLETE, NodeStatus.FAILED, NodeStatus.BLOCKED, NodeStatus.CANCELLED}
-
-
-class PlanValidationError(Exception):
-    pass
-
-
-def _topo_layers(draft: PlanDraft) -> list[list[str]]:
-    ids = [n.id for n in draft.nodes]
-    deps = {n.id: [d.upstream_node_id for d in n.dependencies] for n in draft.nodes}
-    indeg = {i: 0 for i in ids}
-    adj: dict[str, list[str]] = {i: [] for i in ids}
-    for nid, ups in deps.items():
-        for up in ups:
-            indeg[nid] += 1
-            adj[up].append(nid)
-    layers: list[list[str]] = []
-    frontier = sorted([i for i in ids if indeg[i] == 0])
-    seen = 0
-    while frontier:
-        layers.append(frontier)
-        seen += len(frontier)
-        nxt: list[str] = []
-        for nid in frontier:
-            for child in adj[nid]:
-                indeg[child] -= 1
-                if indeg[child] == 0:
-                    nxt.append(child)
-        frontier = sorted(nxt)
-    if seen != len(ids):
-        raise PlanValidationError("plan DAG has a cycle")
-    return layers
-
-
-def validate_plan_draft(draft: PlanDraft, *, catalog: WorkerCatalog) -> None:
-    ids = [n.id for n in draft.nodes]
-    if len(ids) != len(set(ids)):
-        raise PlanValidationError("duplicate PlanNode.id")
-    by_id = {n.id: n for n in draft.nodes}
-
-    # phase / context snapshot
-    if draft.phase == "main" and not draft.context_snapshot_id:
-        raise PlanValidationError("main phase requires context_snapshot_id")
-    if draft.phase == "bootstrap" and draft.context_snapshot_id:
-        raise PlanValidationError("bootstrap phase forbids context_snapshot_id")
-
-    # workers exist + mode + execution
-    for n in draft.nodes:
-        if not catalog.has(n.worker_id):
-            raise PlanValidationError(f"unknown worker {n.worker_id} for node {n.id}")
-        spec = catalog.get(n.worker_id)
-        if draft.mode not in spec.supported_modes:
-            raise PlanValidationError(f"worker {n.worker_id} does not support mode {draft.mode}")
-        if spec.execution.kind == ExecutionKind.DETERMINISTIC and not spec.execution.handler_ref:
-            raise PlanValidationError(f"deterministic worker {n.worker_id} needs handler_ref")
-        if spec.execution.kind == ExecutionKind.LLM and not spec.execution.model_tier:
-            raise PlanValidationError(f"LLM worker {n.worker_id} needs model_tier")
-
-    # dependencies
-    for n in draft.nodes:
-        for dep in n.dependencies:
-            if dep.upstream_node_id not in by_id:
-                raise PlanValidationError(f"node {n.id} depends on unknown node {dep.upstream_node_id}")
-            up_spec = catalog.get(by_id[dep.upstream_node_id].worker_id)
-            if dep.upstream_output_key not in up_spec.outputs:
-                raise PlanValidationError(
-                    f"node {n.id} dep output_key {dep.upstream_output_key} not in {dep.upstream_node_id} outputs")
-            if _NEVER_SUCCESS & dep.accept_statuses:
-                raise PlanValidationError(f"node {n.id} dep accept_statuses includes a non-success status")
-            if dep.policy == DependencyPolicy.BLOCK and dep.accept_statuses != _SUCCESS_ONLY:
-                raise PlanValidationError(f"node {n.id} BLOCK dep must accept exactly {{COMPLETED}}")
-
-    # acyclic (raises on cycle)
-    _topo_layers(draft)
-
-    # sinks real + reachable
-    reachable = {n.id for n in draft.nodes if not n.dependencies}
-    changed = True
-    while changed:
-        changed = False
-        for n in draft.nodes:
-            if n.id not in reachable and any(d.upstream_node_id in reachable for d in n.dependencies):
-                reachable.add(n.id); changed = True
-    for sid in draft.sink_node_ids:
-        if sid not in by_id:
-            raise PlanValidationError(f"sink {sid} is not a node")
-        if sid not in reachable:
-            raise PlanValidationError(f"sink {sid} not reachable")
-
-    # same-slot multi-write needs reducer
-    slot_writers: dict[str, list[str]] = {}
-    for n in draft.nodes:
-        slot_writers.setdefault(n.writes_slot, []).append(n.id)
-    reducer_slots = {r.slot for r in draft.reducers}
-    for slot, writers in slot_writers.items():
-        if len(writers) > 1 and slot not in reducer_slots:
-            raise PlanValidationError(f"slot {slot} has multiple writers but no reducer")
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `pytest tests/orchestration/test_validate.py -v`
-Expected: PASS (8 passed)
-
-- [ ] **Step 5: Commit**
+Expected: PASS.
 
 ```bash
-git add guanlan_v2/orchestration/validate.py tests/orchestration/test_validate.py
-git commit -m "feat(orchestration): strict Plan freeze validator (phase2)"
+git add guanlan_v2/orchestration/runtime_contracts.py guanlan_v2/orchestration/runtime_support.py guanlan_v2/orchestration/catalog_runtime.py tests/orchestration/test_runtime_contracts.py tests/orchestration/test_runtime_support.py tests/orchestration/test_catalog_runtime.py tests/orchestration/golden/runtime_schema_manifest_v1.json
+git commit -m "feat(orchestration): freeze static runtime support profile"
 ```
 
 ---
 
-## Task 6: freeze_plan (digest + budget binding)
+## Task 6: Service-owned Plan admission and freeze
 
 **Files:**
-- Modify: `guanlan_v2/orchestration/validate.py` (add `freeze_plan`)
-- Test: `tests/orchestration/test_freeze.py`
+- Create: `guanlan_v2/orchestration/admission.py`
+- Test: `tests/orchestration/test_admission.py`
 
-**Interfaces:**
-- Consumes: `validate_plan_draft`, `spec.PlanDraft/Plan`, `catalog.WorkerCatalog`, `digest.content_digest`.
-- Produces: `freeze_plan(draft: PlanDraft, *, catalog, budget_reservation_id: str, frozen_at: datetime) -> Plan` — validates, then computes `plan_digest = content_digest(draft.model_dump minus {id, run_id, request_id} + catalog_digest)`, returns a `Plan` with `budget_reservation_id`, `frozen_at`, `plan_digest`. Two drafts identical in executable content get the same `plan_digest`; changing any node/dep/gate changes it; `id`/`run_id`/`request_id` do NOT change it.
+**Consumes:** authoritative stores for request/draft/context/catalog/registry/legacy mapping and attestation, exact CatalogRuntime material resolver/immutable bridge view, Phase 1 `validate_plan_draft` / `freeze_plan`, Task 5 frozen runtime contracts/support checker, BudgetLedger, PayloadStore/EventStore, Task 2's service-only `RuntimeUnitOfWork` and Phase 1 `PlanApproval`.
 
-- [ ] **Step 1: Write the failing test**
+**Produces:**
 
-```python
-# tests/orchestration/test_freeze.py
-from __future__ import annotations
-from datetime import datetime, timezone
-from guanlan_v2.orchestration.enums import DataMode, Tier, ExecutionKind, PlanSource
-from guanlan_v2.orchestration.spec import WorkerSpec, ExecutionSpec, PlanNode, PlanDraft
-from guanlan_v2.orchestration.catalog import WorkerCatalog
-from guanlan_v2.orchestration.validate import freeze_plan
+- `AdmissionRejected`.
+- service transitions that construct the Task 5-owned immutable `AdmissionCandidate@1`, which binds exact request/draft/context/catalog/registry/legacy-attestation inputs, Phase 1 report, RuntimeSupportReport and one candidate plan digest but contains no approval or reservation authority;
+- service transitions that construct the Task 5-owned immutable `PlanAdmitted@1`, which binds:
+  - request/candidate/final plan digest;
+  - Phase 1 validation-report digest;
+  - RuntimeSupportReport and StaticRuntimeProfile digests;
+  - context/catalog/schema-registry digests;
+  - active plan BudgetReservation ID and semantic digest;
+  - approved PlanApproval event ID/digest;
+  - matching legacy-attestation digest when present;
+  - persisted frozen Plan PayloadRef.
+- strict internal `PreparedAdmissionCandidate`, which carries the fully validated candidate contents and report refs but is neither persisted authority nor approval/reservation evidence;
+- `PlanAdmissionService` with separate state transitions:
+  - `prepare_candidate(draft_id, *, authoritative_refs...) -> PreparedAdmissionCandidate`;
+  - `persist_and_reserve_candidate(preparation, *, idempotency_key) -> (AdmissionCandidate, BudgetReservation)`;
+  - `record_approval(candidate_id, approval_input, *, authenticated_actor, idempotency_key) -> RunEvent`;
+  - `freeze_and_admit_candidate(candidate_id, *, reservation_id, approval_event_id, idempotency_key) -> (Plan, PlanAdmitted)`;
+  - `load_admitted(plan_digest) -> (Plan, PlanAdmitted)`;
+  - `verify_for_dispatch(plan_digest) -> verified authoritative bundle`.
 
-UTC = timezone.utc
-def _t(): return datetime(2026, 7, 15, tzinfo=UTC)
+The public/service API receives identifiers and authenticated approval input. It loads Reservation, PlanApproval and StaticLegacyPlanAttestation from authoritative stores; callers cannot submit constructed records as authority.
 
+**Normative state sequence:**
 
-def _cat():
-    return WorkerCatalog([WorkerSpec(id="a", lane="text", persona="p", system_prompt_ref="s.md",
-                                     tier=Tier.READER, execution=ExecutionSpec(kind=ExecutionKind.LLM, model_tier="fast"),
-                                     input_model="In", outputs={"primary": "Doc@1"}, supported_modes={DataMode.ONLINE})])
+1. load immutable request/draft/context/catalog/registry and optional service-owned legacy attestation; resolve/verify the catalog's immutable bridge descriptor/config/handler view with no provider execution;
+2. call Phase 1 `validate_plan_draft`;
+3. call `check_runtime_support` with that exact bridge view;
+4. persist both reports as typed payloads — no budget event may exist before this succeeds; if `RuntimeSupportReport.supported=False`, return the diagnostic and stop with no AdmissionCandidate/reservation;
+5. only for `supported=True`, use one Task 2 `RuntimeUnitOfWork` to persist AdmissionCandidate and reserve the exact candidate/budget request as one all-or-none transition; `PreparedAdmissionCandidate` alone is not loadable authority;
+6. append an APPROVED or REJECTED `PlanApproval` event for the same request/candidate digest;
+7. on rejection, release the reservation and stop;
+8. on approval, reload all authoritative inputs, rerun Phase 1 validation and runtime support, require byte/semantic equality with the stored reports, and require the active reservation/approval/attestation to bind the same digest;
+9. call the Phase 1 `freeze_plan`; never recompute its projection locally;
+10. use one Task 2 `RuntimeUnitOfWork` to persist the frozen Plan payload and append public `PlanAdmitted` as one all-or-none transition;
+11. dispatch only through `verify_for_dispatch`, which recomputes/verifies the persisted Plan digest and checks the same catalog/registry/context plus active reservation.
 
+**Required invariants:**
 
-def _draft(**kw):
-    d = dict(id="pl", run_id="r", request_id="q", phase="main", source=PlanSource.PRESET, goal="g",
-             as_of=_t(), mode=DataMode.ONLINE, context_snapshot_id="cs", universe=[],
-             nodes=[PlanNode(id="n1", worker_id="a", writes_slot="s")], sink_node_ids=["n1"],
-             catalog_version="1", catalog_digest=_cat().digest)
-    d.update(kw)
-    return PlanDraft(**d)
+- `ApprovalPolicy.AUTO` fails for every source;
+- PRESET provenance alone grants no approval;
+- REJECTED, missing, wrong-request, wrong-candidate or unauthenticated approval fails;
+- a caller-carried reservation/approval/attestation object is ignored/rejected;
+- RuntimeSupportReport is created before reservation and its digest is included in PlanAdmitted;
+- any changed draft/request/context/catalog/registry/profile/attestation after preparation invalidates the candidate and releases unused reservation;
+- all selected `compat.*` bindings match one service-owned attestation; Phase 1 rejects compatibility workers under DYNAMIC/BOOTSTRAP, and this Phase 2 profile independently rejects every BOOTSTRAP Plan;
+- freeze/reservation/approval IDs and wall-clock do not cause a second plan digest;
+- candidate persistence and plan-budget reservation are one semantic idempotency boundary: before commit neither is visible, after commit both are replayable, and a conflicting retry exposes neither a second candidate nor a second reservation;
+- frozen Plan persistence and `PlanAdmitted` append are one semantic idempotency boundary: dispatch can observe both or neither, never an orphan Plan or a dangling admitted event;
+- identical admission retries return the existing PlanAdmitted; conflicting retries fail;
+- there is no Phase 2 `compute_plan_digest` or alternative `freeze_plan`.
 
+- [ ] **Step 1: Write failing admission tests**
 
-def test_freeze_produces_plan_with_digest_and_reservation():
-    p = freeze_plan(_draft(), catalog=_cat(), budget_reservation_id="res1", frozen_at=_t())
-    assert p.budget_reservation_id == "res1" and p.plan_digest
+Cover the full happy-path ordering and every missing/mismatched/forged record; assert no reservation before both reports; assert PlanAdmitted binds both report digests; assert rejection releases reservation; assert dispatch fails after catalog/reservation drift; assert AUTO and spoofed PRESET fail. Add crash-before/crash-after and injected mid-commit matrices for both RuntimeUnitOfWork boundaries: candidate+reservation and Plan+PlanAdmitted must replay all-or-none, retries must reuse the same semantic batch, and no orphan reservation, Plan payload or admission event may remain.
 
+Run now: `pytest tests/orchestration/test_admission.py -v`.
 
-def test_plan_digest_ignores_run_and_request_id():
-    a = freeze_plan(_draft(run_id="r1", request_id="q1"), catalog=_cat(), budget_reservation_id="x", frozen_at=_t())
-    b = freeze_plan(_draft(run_id="r2", request_id="q2"), catalog=_cat(), budget_reservation_id="y", frozen_at=_t())
-    assert a.plan_digest == b.plan_digest
+Expected: FAIL on missing service-owned admission/order enforcement before implementation; unrelated collection/environment failures do not count.
 
+- [ ] **Step 2: Implement stores/coordinator over Phase 1 builders**
 
-def test_plan_digest_changes_with_node_change():
-    a = freeze_plan(_draft(), catalog=_cat(), budget_reservation_id="x", frozen_at=_t())
-    b = freeze_plan(_draft(nodes=[PlanNode(id="n1", worker_id="a", writes_slot="OTHER")]),
-                    catalog=_cat(), budget_reservation_id="x", frozen_at=_t())
-    assert a.plan_digest != b.plan_digest
-```
+The in-memory repositories are service-owned test doubles for later persistence. Keep each transition append-only and replayable.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 3: Run focused and Phase 1 freeze tests**
 
-Run: `pytest tests/orchestration/test_freeze.py -v`
-Expected: FAIL with `ImportError: cannot import name 'freeze_plan'`
+Run: `pytest tests/orchestration/test_admission.py tests/orchestration/test_runtime_support.py tests/orchestration/test_plan_catalog_validation.py -v`
 
-- [ ] **Step 3: Write minimal implementation** (append to `guanlan_v2/orchestration/validate.py`)
+Expected: PASS.
 
-```python
-# ── append to guanlan_v2/orchestration/validate.py ──
-from datetime import datetime
-from guanlan_v2.orchestration.digest import content_digest
-from guanlan_v2.orchestration.spec import Plan
-
-_DIGEST_EXCLUDE = {"id", "run_id", "request_id", "approval_policy"}
-
-
-def freeze_plan(draft: PlanDraft, *, catalog: WorkerCatalog, budget_reservation_id: str,
-                frozen_at: datetime) -> Plan:
-    validate_plan_draft(draft, catalog=catalog)
-    body = {k: v for k, v in draft.model_dump(mode="json").items() if k not in _DIGEST_EXCLUDE}
-    body["catalog_digest"] = catalog.digest
-    plan_digest = content_digest(body)
-    return Plan(**draft.model_dump(), budget_reservation_id=budget_reservation_id,
-                frozen_at=frozen_at, plan_digest=plan_digest)
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `pytest tests/orchestration/test_freeze.py -v`
-Expected: PASS (3 passed)
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add guanlan_v2/orchestration/validate.py tests/orchestration/test_freeze.py
-git commit -m "feat(orchestration): freeze_plan digest + budget binding (phase2)"
+git add guanlan_v2/orchestration/admission.py tests/orchestration/test_admission.py
+git commit -m "feat(orchestration): add authoritative static Plan admission"
 ```
 
 ---
 
-## Task 7: Worker executor (typed Artifact + NodeRun + honesty classify)
+## Task 7: Worker executor (typed Artifact + NodeRun + evidence)
 
 **Files:**
 - Create: `guanlan_v2/orchestration/worker.py`
 - Test: `tests/orchestration/test_worker.py`
 
-**Interfaces:**
-- Consumes: `spec.PlanNode/WorkerSpec`, `context.RunContext`, `schemas.Artifact/Provenance/NumberAnchor/NodeRun`, `enums.NodeStatus/ToolCallRequirement`, `digest.content_digest`.
-- Produces:
-  - `class WorkerResult(BaseModel)`: `payload: dict`, `numbers: list[NumberAnchor] = []`, `tool_call_count: int = 0`, `degraded: bool = False`, `input_tokens: int = 0`, `output_tokens: int = 0`.
-  - `class WorkerHandler(Protocol)`: `async def execute(self, node: PlanNode, spec: WorkerSpec, inputs: dict, ctx: RunContext) -> WorkerResult`.
-  - `async def run_node(node, spec, handler, inputs, ctx, *, degraded_inputs: bool, now, attempt=1) -> tuple[NodeRun, Artifact | None]` — runs handler; on exception → NodeRun `FAILED`, no artifact; else classify: `INCOMPLETE` if (`evidence_policy.tool_calls==REQUIRED and tool_call_count==0`) or (`evidence_policy.require_number_anchors and not allow_unsourced_numbers and any number is_unsourced`); else `DEGRADED` if `result.degraded or degraded_inputs`; else `COMPLETED`. On non-failed, build one `Artifact` for `outputs["primary"]` with runtime `Provenance` (payload validated to the primary output model name string is caller's registry concern; here we only carry `payload_type` = primary model name from `spec.outputs["primary"]` split on "@").
+**Consumes:** admitted frozen Plan bundle, Task 5's exact `CatalogRuntime` bridge view/`ExecutionBridgeDescriptor`, `ResolvedWorkerRuntime`, exact Phase 1 `InputSnapshot`, `RunContext`, Artifact/Provenance/NumberAnchor/ToolCallRecord/NodeRun/TypedPayloadRef builders, registered `PromptUntrustedBlockRef/PromptAssemblyRecord`, schema registry, PayloadStore/EventStore, Task 2's service-only `RuntimeUnitOfWork`, `AuthoritativeClock` and an active child budget reservation.
 
-- [ ] **Step 1: Write the failing test**
+**Produces:**
 
-```python
-# tests/orchestration/test_worker.py
-from __future__ import annotations
-import asyncio
-from datetime import datetime, timezone
-from guanlan_v2.orchestration.enums import (DataMode, Tier, ExecutionKind, NodeStatus,
-                                            ToolCallRequirement)
-from guanlan_v2.orchestration.spec import WorkerSpec, ExecutionSpec, PlanNode, EvidencePolicy
-from guanlan_v2.orchestration.schemas import NumberAnchor
-from guanlan_v2.orchestration.context import (RunContext, DataContext, ClockSpec, RunBudget)
-from guanlan_v2.orchestration.enums import DataBackend
-from guanlan_v2.orchestration.worker import run_node, WorkerResult
+- strict internal `WorkerExecutionResult`: typed primary payload, rendered text, NumberAnchors, Phase 1 ToolCallRecords, DataResult/PayloadRefs, bridge-supplied ordered `execution_evidence_refs: tuple[TypedPayloadRef, ...]`, `prompt_assembly_ref: TypedPayloadRef | None`, token usage and explicit degradation reasons. Complete untrusted prompt-block refs live in the referenced public PromptAssemblyRecord, while non-prompt runtime evidence such as memory query/selection refs remains directly in `execution_evidence_refs`. The closed execution-kind matrix is: `LLM` requires one persisted main-namespace prompt ref; `DETERMINISTIC` requires `None`, has no PromptAssembler/ModelGateway call and retains only the direct typed evidence it actually consumed. It is not a replacement public Artifact schema.
+- internal immutable `AssembledModelRequest(canonical_request_bytes, request_digest, prompt_record)` is produced only by PromptAssembler. `PromptAssemblyRecord.canonical_model_request_digest` must equal the domain-separated digest of those exact bytes and binds assembler version/order. After persisting the record, the executor calls `ModelGateway.invoke(request: AssembledModelRequest, *, prompt_assembly_ref: TypedPayloadRef)`: the gateway resolves the ref, rehashes the exact bytes and refuses any record/request/assembler/order mismatch **before** sending provider bytes. It cannot accept a detached raw prompt/string.
+- `ModelGateway(Protocol)` is that service-owned single-shot invocation selected from the catalog's model tier/prompt/skills/guardrails. Static v1 exposes no model-controlled provider callback or tool-result→second-model loop; tests use a fake gateway behind the same interface.
+- internal immutable `ExecutionEvidenceOrdinalToken(node_id, call_ordinal, bridge_priority, bridge_id, issuance_digest)` and `PreparedBridgeSet`: only the node-owned sequencer constructs tokens, starting at one and continuing across pre-input/execution phases; providers must return the exact token and cannot change its provider identity. These are reviewed runtime DTOs, not persisted public schemas.
+- internal closed `BridgeStageOutcome(status=prepared|completed|failed|timed_out|cancelled, input_contribution, prepared_handle, frozen_contribution, reason, journal_cursor)` and service-owned `BridgeEvidenceJournal`. Evidence persistence goes through one helper that atomically performs the PayloadStore put and idempotent `BridgeEvidenceRecorded` append before returning the ref to a provider. Provider exceptions are caught at the resolver boundary and always yield an outcome; recovery drains the journal by node/token even when no provider return value exists. A service crash replays the same idempotency keys/events. Providers never own the only copy of partial evidence state.
+- generic internal `ExecutionBridgeProvider/ExecutionBridgeSession` ports plus immutable `BridgeInputContribution`, `PreparedBridgeHandle` and `BridgeContribution` close a two-stage protocol. `CatalogRuntime` resolves providers only from reviewed `ExecutionBridgeDescriptor`/config/handler material and verifies provider ID/version/content digests; no worker/model/caller can inject a provider, choose material or mint an ordinal.
+  - `prepare_input(..., sequencer, evidence_journal) -> BridgeStageOutcome` runs after terminal dependencies but before final InputSnapshot freeze. It receives admitted Plan/node/WorkerSpec, ContextSnapshot, unresolved dependency bindings and the same node-global sequencer later used during execution—not an InputSnapshot. The resolver obtains issuance tokens before any pre-input evidence work; successful handles freeze those tokens with every created ref/digest, while failure outcomes retain the journal cursor/partial refs. Preparation may read/write only exact registry-validated Phase 2 PayloadStore facts and may add only descriptor-authorized canonical `memory_refs_v1`; CapabilityGateway, external/live stores, model/handler, wall clock and data-result backfill are forbidden.
+  - after the runner freezes the exact InputSnapshot and reserves the child budget, `open_execution(handle, *, input_snapshot, sequencer, evidence_journal, ...) -> ExecutionBridgeSession` re-verifies every pre-input ref/token and continues the same sequencer rather than restarting ordinals. Only after RUNNING/timeout/cancellation are active may the session perform catalog-configured static prefetch through CapabilityGateway. `freeze_for_execution(kind) -> BridgeStageOutcome` seals the session and returns direct evidence plus LLM-only untrusted-block DTOs; any late call/mutation is rejected, and every exception/timeout/cancellation still returns/drains a terminal outcome.
+- `ExecutionBridgeResolver` derives the required provider set from the support-report-bound descriptors and composes it in canonical `(bridge_priority, bridge_id)` order. One executor-owned `ExecutionEvidenceSequencer` issues globally unique ordinals before bridge work; providers receive issuance tokens and only echo/validate them. The single canonical merge key everywhere is `(call_ordinal, bridge_priority, bridge_id, within_call_role)`. Duplicate/conflicting tokens/roles/refs fail. Reversed completion cannot change the merge. Required provider absence, extra/forged providers or prepared-handle drift fail before handler/model execution.
+- providers never receive or call PromptAssembler. The executor merges all providers' untrusted-block DTOs, assigns one-based prompt block ordinals in canonical merge order, builds/persists exactly one PromptAssemblyRecord and invokes ModelGateway at most once. Phase 3/static v1 bridge calls and parameters are derived solely from the descriptor's validated config plus admitted node params/InputSnapshot; model-driven late fetch or tool-result→second-prompt/model loops are unsupported. The frozen merged contribution set is the only bridge input/evidence source for WorkerExecutionResult.
+- strict internal `PendingCapabilityInvocation` and `UnpublishedCapabilityResult`, plus one closed `CapabilityGateway` state machine:
+  - `begin(*, plan_digest, node_id, worker_id, capability_ref, request_schema_ref, idempotency_key) -> PendingCapabilityInvocation` verifies the admitted Plan, exact WorkerSpec allowlist and CapabilityDescriptor request schema;
+  - `invoke(pending, validated_request) -> UnpublishedCapabilityResult` calls only the trusted resolved backend. The raw result has no PayloadRef/public visibility and cannot count as tool evidence;
+  - the owning adapter validates PIT/output schema and persists the validated request/result through `PayloadStore` exactly once;
+  - `finalize_success(pending, *, request_ref, result_ref, request_digest, result_digest) -> ToolCallRecord` re-resolves/verifies those existing refs and digests, then creates the single success record. It performs **no second payload write**;
+  - `reject(pending, *, detail_schema_ref, detail_payload, reason_code, evidence_digests, idempotency_key) -> EventRefusalRecord` delegates the one audit-only persistence to `EventRefusalAuditSink`. A pending invocation has exactly one terminal transition; repeated identical terminal calls are idempotent and success/reject conflicts fail.
+- `PromptAssembler(Protocol)`: combines resolved system prompt/ordered skills/guardrails with typed trusted inputs and generic untrusted payload blocks (`TypedPayloadRef`, media type and bounded length), validates/builds the registered Task 5 `PromptAssemblyRecord`, and returns only `AssembledModelRequest(canonical_request_bytes, request_digest, prompt_record)`. It never returns a detached prompt/string. Untrusted blocks are placed only in the model gateway's data/tool-input channel, never interpolated into system/skill/guardrail text. It is generic and does not import Phase 3 `RenderedDataBlock`.
+- on the `LLM` branch, the executor persists the single merged `PromptAssemblyRecord` exactly once in `main` **before** invoking ModelGateway with its digest-matching `AssembledModelRequest`, obtains one exact `TypedPayloadRef`, and forms the final evidence tuple as direct non-prompt bridge refs in canonical merge order followed by the prompt ref exactly once. Successfully assembled untrusted block refs remain transitive only. If termination occurs after a block was persisted/journaled but before a valid prompt record exists, NodeRun directly retains those otherwise-orphaned block TypedPayloadRefs; no Artifact/model call exists. On `DETERMINISTIC`, prompt ref is `None`, PromptAssembler/ModelGateway are absent and only direct evidence is used. Successful Artifact Provenance equals NodeRun's tuple. Failure/timeout/cancellation drains all journaled evidence even when a provider never returned.
+- `execute_node(plan, node, *, runtime, prepared_bridges: PreparedBridgeSet, input_snapshot, ctx, node_reservation, bridge_resolver: ExecutionBridgeResolver, model_gateway, capability_gateway, registry, stores, clock: AuthoritativeClock) -> (NodeRun, Artifact | None)`.
 
-UTC = timezone.utc
-def _t(): return datetime(2026, 7, 15, tzinfo=UTC)
+There is no public `handlers: dict[worker_id, callable]` injection point.
 
+**Execution and honesty rules:**
 
-def _ctx():
-    clock = ClockSpec(as_of=_t(), timezone="UTC", calendar_id="XSHG", clock_version="1")
-    dc = DataContext(as_of=_t(), clock=clock, mode=DataMode.ONLINE, backend=DataBackend.LIVE,
-                     strict_pit=False, calendar_id="XSHG", resolved_vendor_chains={},
-                     source_config_digest="c", data_snapshot_id="s")
-    return RunContext(run_id="r", data=dc, context_snapshot_id="cs", memory_snapshot_hash="m",
-                      budget=RunBudget(ledger_id="L", max_tokens=1, max_llm_invocations=1, max_concurrency=1),
-                      cancellation_token_id="ct")
+1. reload/verify the admitted Plan, catalog/support-report bridge refs, active parent/child reservations, prepared handles and exact WorkerSpec using pure preflight checks; preflight failure performs no provider/capability/PayloadStore side effect;
+2. build runtime inputs from the final InputSnapshot's named bindings. The resolver recomputes `expected_memory_record_refs = canonical_union(base_authorized_memory_refs, every completed PreparedBridgeSet memory addition)` with the Phase 1 canonicalizer and requires exact tuple equality with InputSnapshot—missing, extra, foreign, duplicate-ambiguous or late/future refs fail before execution. Each provider also verifies its own prepared subset unchanged; one/many artifact shape and order must already match WorkerSpec;
+3. append typed RUNNING state, then activate the node timeout/cancellation scope **before** opening any execution-stage bridge session or allowing provider/capability I/O;
+4. open the exact prepared sessions, perform only catalog-configured static prefetch and freeze their reviewed contributions. For `LLM`, all prompt-contributing bridge work is sealed before the executor's single PromptAssembler→prompt persistence→ModelGateway sequence; for `DETERMINISTIC`, only direct typed contributions are supplied to the handler and untrusted-block output is forbidden. A terminal interruption drains already frozen/recorded evidence into NodeRun;
+5. every capability call goes through CapabilityGateway; RUNNING always precedes `begin/invoke`, timeout/cancellation covers bridge work, a worker cannot self-report a numeric tool count, and pending/rejected invocations do not count as evidence;
+6. `tool_calls=REQUIRED` requires at least one allowed, finalized-success ToolCallRecord; FORBIDDEN requires no invocation;
+7. required input refs, number anchors and unsourced-number policy are evaluated from typed evidence, including numeric payload paths, not merely a claimed list length;
+8. every persisted untrusted block accepted by PromptAssembler is retained transitively in the persisted PromptAssemblyRecord rather than duplicated as a direct execution-evidence ref. For `LLM`, direct non-prompt bridge refs plus the exact prompt-record typed ref form the execution-evidence tuple; for `DETERMINISTIC`, only actually consumed direct typed refs are permitted and no render-only block or prompt record is created. No required ref is dropped after prompt construction or on a no-Artifact terminal path;
+9. validate the primary payload through its exact OutputBinding SchemaRef before declaring success;
+10. schema/evidence failure with static v1 `max_attempts=1` yields INCOMPLETE and no Artifact; handler/model exception yields FAILED; timeout yields TIMED_OUT; cancellation yields CANCELLED; every required reason code is present;
+11. successful degraded input/result yields DEGRADED, otherwise COMPLETED;
+12. COMPLETED/DEGRADED creates one primary Artifact exclusively through the Phase 1 builder.
 
+**Artifact/NodeRun binding:**
 
-def _spec(**kw):
-    d = dict(id="w", lane="text", persona="p", system_prompt_ref="s.md", tier=Tier.WRITER,
-             execution=ExecutionSpec(kind=ExecutionKind.LLM, model_tier="fast"), can_emit_decision=True,
-             input_model="In", outputs={"primary": "Doc@1"}, supported_modes={DataMode.ONLINE})
-    d.update(kw)
-    return WorkerSpec(**d)
+- NodeRun uses the real run ID, Plan ID/digest, node/worker ID, attempt number, exact InputSnapshot content digest, actual tool-call records/usage and a real output ArtifactRef only on an output-producing terminal status. Phase 1 NodeRun has no reservation field: the child reservation is correlated externally by the BudgetLedger and lifecycle RunEvents using the same run/plan/node/attempt identity;
+- Artifact content digest covers payload + SchemaRef;
+- reproducibility provenance includes Plan/code/model config, prompt/ordered skills/guardrails/capabilities, InputSnapshot artifact/data/memory/context digests, deterministic ToolCallRecord request/result digests and the complete exact main execution-evidence tuple (including PromptAssemblyRecord on `LLM`, absent on `DETERMINISTIC`);
+- data obtained after node start remains in ToolCallRecord/NodeRun/Artifact provenance and never backfills the already frozen InputSnapshot;
+- audit provenance includes runtime IDs, provider response ID and wall-clock;
+- `rendered_from_payload_digest` is set/verified by the Phase 1 builder against the source payload, never by hashing markdown as a substitute;
+- no blank plan/snapshot digest, fabricated Plan ID, path ref or arbitrary short digest is accepted.
 
+- [ ] **Step 1: Write failing worker tests**
 
-def _node(): return PlanNode(id="n1", worker_id="w", writes_slot="s")
+Required matrix:
 
+- LLM and deterministic success through trusted resolution;
+- arbitrary handler/model/capability injection rejected;
+- missing required, extra or forged bridge provider/material rejected before execution; a worker/model cannot inject a provider or ordinal;
+- exact input snapshot/SchemaRef enforcement;
+- required/optional/forbidden tool behavior based on ToolCallRecords;
+- capability outside allowlist and request/result schema mismatch rejected;
+- pending→finalize/reject state matrix, including PIT future/missing refusal with no public raw payload or success ToolCallRecord;
+- adapter-owned single request/result persistence followed by gateway ref verification, proving `finalize_success` performs no duplicate write;
+- generic prompt assembly keeps malicious untrusted payload text out of system/skill/guardrail channels, enforces the registered bounded typed block envelope, persists PromptAssemblyRecord once before an `LLM` model call, retains direct non-prompt bridge evidence plus its exact typed ref in WorkerExecutionResult/NodeRun/Artifact, and replays every direct/ordered block ref with zero live renderer/source call;
+- PromptAssembler/request binding is exact: changing assembler ID/version, trusted-input order, block order or canonical request bytes changes the recorded request digest. A gateway spy proves that a record for request A cannot authorize request B and that any ref/schema/content/assembler/order/request-digest mismatch is rejected before provider bytes are sent;
+- the execution-kind matrix rejects `LLM` without a prompt ref and `DETERMINISTIC` with one; spies prove deterministic execution never invokes PromptAssembler/ModelGateway or creates a render-only block, but retains its actually consumed direct evidence;
+- two reviewed providers complete in reversed order yet merge by `(call_ordinal, bridge_priority, bridge_id, within_call_role)`; provider-minted/duplicate/conflicting issuance tokens or refs fail, and failure after contribution freeze retains the merged branch-complete tuple;
+- a provider exception after its first evidence put, timeout/cancellation between puts, and service crash before provider return all recover the already committed refs from `BridgeEvidenceJournal` in canonical token/role order. Injected failure between evidence payload and `BridgeEvidenceRecorded` leaves neither visible; replay after their RuntimeUnitOfWork commit exposes both exactly once;
+- preflight failure has zero side effects; event/capability spies prove RUNNING precedes bridge `begin/invoke`, timeout/cancellation covers bridge work, and a late call after freeze is rejected. Failed/timed-out/no-Artifact execution retains every already frozen contribution in NodeRun, while wrong namespace/SchemaRef/content, duplicate write or Artifact/NodeRun ref drift fails;
+- termination after an untrusted block is journaled but before PromptAssemblyRecord persistence retains that otherwise-orphaned block ref directly in the no-Artifact NodeRun; a successful assembled branch keeps it only transitively and never duplicates it in direct evidence;
+- sourced/unsourced/missing NumberAnchor cases;
+- output schema failure → INCOMPLETE/no Artifact;
+- exception/timeout/cancellation reason/status;
+- degraded input propagation;
+- provenance content/reproducibility/audit digests vary in the Phase 1-defined layers;
+- NodeRun carries real plan/snapshot identity; lifecycle events and BudgetLedger records correlate every attempt handed to Task 7—including a pure-preflight failure—to its real child reservation. Runner-only BLOCKED/SKIPPED, bridge-preparation-failed, child-allocation-denied and not-started-cancelled attempts have none.
 
-class OkHandler:
-    async def execute(self, node, spec, inputs, ctx):
-        return WorkerResult(payload={"text": "hi"}, tool_call_count=1)
+Run now: `pytest tests/orchestration/test_worker.py -v`.
 
+Expected: FAIL on missing gateway/executor/evidence behavior before implementation; unrelated collection/environment failures do not count.
 
-class BoomHandler:
-    async def execute(self, node, spec, inputs, ctx):
-        raise RuntimeError("kaboom")
+- [ ] **Step 2: Implement gateways and executor**
 
+Do not add retry/schema repair in static v1. Tests may inject fake model/tool backends only when those fakes are registered behind the same trusted resolver/gateway boundaries.
 
-class NoToolHandler:
-    async def execute(self, node, spec, inputs, ctx):
-        return WorkerResult(payload={"text": "hi"}, tool_call_count=0)
+- [ ] **Step 3: Run and commit**
 
+Run: `pytest tests/orchestration/test_worker.py tests/orchestration/test_artifact.py tests/orchestration/test_node_run.py -v`
 
-def test_ok_handler_completes_with_artifact():
-    nr, art = asyncio.run(run_node(_node(), _spec(), OkHandler(), {}, _ctx(),
-                                   degraded_inputs=False, now=_t))
-    assert nr.status == NodeStatus.COMPLETED and art is not None and art.payload == {"text": "hi"}
-    assert art.payload_type == "Doc" and art.payload_version == "1"
-
-
-def test_exception_is_failed_no_artifact():
-    nr, art = asyncio.run(run_node(_node(), _spec(), BoomHandler(), {}, _ctx(),
-                                   degraded_inputs=False, now=_t))
-    assert nr.status == NodeStatus.FAILED and art is None and "kaboom" in (nr.reason or "")
-
-
-def test_required_tool_zero_calls_is_incomplete():
-    spec = _spec(evidence_policy=EvidencePolicy(tool_calls=ToolCallRequirement.REQUIRED))
-    nr, art = asyncio.run(run_node(_node(), spec, NoToolHandler(), {}, _ctx(),
-                                   degraded_inputs=False, now=_t))
-    assert nr.status == NodeStatus.INCOMPLETE and art is None
-
-
-def test_degraded_inputs_yield_degraded_status():
-    nr, art = asyncio.run(run_node(_node(), _spec(), OkHandler(), {}, _ctx(),
-                                   degraded_inputs=True, now=_t))
-    assert nr.status == NodeStatus.DEGRADED and art is not None
-
-
-def test_unsourced_number_is_incomplete():
-    class NumHandler:
-        async def execute(self, node, spec, inputs, ctx):
-            return WorkerResult(payload={"text": "hi"}, tool_call_count=1,
-                                numbers=[NumberAnchor(label="mv", value=1.0, payload_path="$.mv")])
-    nr, art = asyncio.run(run_node(_node(), _spec(), NumHandler(), {}, _ctx(),
-                                   degraded_inputs=False, now=_t))
-    assert nr.status == NodeStatus.INCOMPLETE and art is None
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `pytest tests/orchestration/test_worker.py -v`
-Expected: FAIL with `ModuleNotFoundError`
-
-- [ ] **Step 3: Write minimal implementation**
-
-```python
-# guanlan_v2/orchestration/worker.py
-from __future__ import annotations
-import uuid
-from datetime import datetime
-from typing import Any, Callable, Protocol
-from pydantic import BaseModel, Field
-from guanlan_v2.orchestration.context import RunContext
-from guanlan_v2.orchestration.digest import content_digest
-from guanlan_v2.orchestration.enums import NodeStatus, ToolCallRequirement
-from guanlan_v2.orchestration.schemas import Artifact, NodeRun, NumberAnchor, Provenance
-from guanlan_v2.orchestration.spec import PlanNode, WorkerSpec
-
-
-class WorkerResult(BaseModel):
-    payload: dict[str, Any]
-    numbers: list[NumberAnchor] = Field(default_factory=list)
-    tool_call_count: int = 0
-    degraded: bool = False
-    input_tokens: int = 0
-    output_tokens: int = 0
-    rendered_md: str = ""
-
-
-class WorkerHandler(Protocol):
-    async def execute(self, node: PlanNode, spec: WorkerSpec, inputs: dict[str, Any],
-                      ctx: RunContext) -> WorkerResult: ...
-
-
-def _classify(spec: WorkerSpec, result: WorkerResult, degraded_inputs: bool) -> NodeStatus:
-    pol = spec.evidence_policy
-    if pol.tool_calls == ToolCallRequirement.REQUIRED and result.tool_call_count == 0:
-        return NodeStatus.INCOMPLETE
-    if pol.require_number_anchors and not pol.allow_unsourced_numbers:
-        if any(n.is_unsourced for n in result.numbers):
-            return NodeStatus.INCOMPLETE
-    if result.degraded or degraded_inputs:
-        return NodeStatus.DEGRADED
-    return NodeStatus.COMPLETED
-
-
-async def run_node(node: PlanNode, spec: WorkerSpec, handler: WorkerHandler, inputs: dict[str, Any],
-                   ctx: RunContext, *, degraded_inputs: bool, now: Callable[[], datetime],
-                   attempt: int = 1) -> tuple[NodeRun, Artifact | None]:
-    started = now()
-    base = dict(node_run_id=uuid.uuid4().hex, run_id=ctx.run_id, plan_id=node.id, plan_digest="",
-                node_id=node.id, worker_id=spec.id, attempt_id=uuid.uuid4().hex, attempt=attempt,
-                input_snapshot_hash="", started_at=started)
-    try:
-        result = await handler.execute(node, spec, inputs, ctx)
-    except Exception as exc:  # noqa: BLE001 — honest failure
-        nr = NodeRun(**base, status=NodeStatus.FAILED, finished_at=now(),
-                     reason_code="handler_error", reason=f"{type(exc).__name__}: {exc}",
-                     error_type=type(exc).__name__)
-        return nr, None
-
-    status = _classify(spec, result, degraded_inputs)
-    if status in (NodeStatus.INCOMPLETE,):
-        nr = NodeRun(**base, status=status, finished_at=now(),
-                     reason_code="evidence_policy", reason="incomplete per evidence policy",
-                     tool_call_count=result.tool_call_count,
-                     input_tokens=result.input_tokens, output_tokens=result.output_tokens)
-        return nr, None
-
-    ptype, pver = spec.outputs["primary"].split("@")
-    art = Artifact(
-        id=f"{node.id}:primary", kind=node.writes_slot, slot=node.writes_slot, output_key="primary",
-        producer_node_id=node.id, run_id=ctx.run_id, payload_type=ptype, payload_version=pver,
-        payload=result.payload, rendered_md=result.rendered_md or "",
-        provenance=Provenance(run_id=ctx.run_id, plan_id=node.id, plan_digest="", node_id=node.id,
-                              as_of=ctx.data.as_of, pit_mode=ctx.data.mode, code_version="phase2"),
-        numbers=result.numbers, created_at=now(),
-        content_digest=content_digest(result.payload),
-        rendered_from_payload_digest=content_digest({"md": result.rendered_md or ""}))
-    nr = NodeRun(**base, status=status, finished_at=now(),
-                 output_keys=["primary"], output_artifact_ids=[art.id],
-                 tool_call_count=result.tool_call_count,
-                 input_tokens=result.input_tokens, output_tokens=result.output_tokens)
-    return nr, art
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `pytest tests/orchestration/test_worker.py -v`
-Expected: PASS (5 passed)
-
-- [ ] **Step 5: Commit**
+Expected: PASS.
 
 ```bash
 git add guanlan_v2/orchestration/worker.py tests/orchestration/test_worker.py
-git commit -m "feat(orchestration): worker executor with honesty classify (phase2)"
+git commit -m "feat(orchestration): add capability-confined typed worker executor"
 ```
 
 ---
@@ -1213,538 +673,384 @@ git commit -m "feat(orchestration): worker executor with honesty classify (phase
 - Create: `guanlan_v2/orchestration/dag.py`
 - Test: `tests/orchestration/test_dag.py`
 
-**Interfaces:**
-- Consumes: `spec.Plan/PlanNode/Dependency`, `catalog.WorkerCatalog`, `worker.WorkerHandler/run_node`, `pool.ArtifactPool`, `budget.BudgetLedger`, `validate._topo_layers`, `enums.DependencyPolicy/NodeStatus`, `context.RunContext`.
-- Produces:
-  - `class RunResult(BaseModel)`: `run_id: str`, `node_runs: dict[str, NodeRun]`, `status: Literal["completed","partial","failed"]`.
-  - `async def run_plan(plan, ctx, *, pool, catalog, handlers: dict[str, WorkerHandler], budget, now, max_concurrency=None) -> RunResult` — for each Kahn layer (from `_topo_layers`, nodes sorted by id): freeze input snapshot; for each node (bounded by `asyncio.Semaphore(min(plan.max_concurrency, budget max, max_concurrency or ∞))`): apply gating (a `BLOCK` dep whose upstream NodeRun status ∉ `accept_statuses` ⇒ node `BLOCKED`, not executed; a `DEGRADE`/`SKIP` dep missing/failed ⇒ omit its input + `degraded_inputs=True`); build `inputs[dep.inject_as]` from `pool.committed_artifact(up, key).payload` for satisfied deps; reserve budget for the node, run via `run_node`, settle; stage successful artifact. After the layer, `commit_layer` with the `(node_id, "primary")` set for `COMPLETED`/`DEGRADED` nodes. `status` = `completed` if all nodes COMPLETED, `failed` if any sink FAILED/BLOCKED, else `partial`.
+**Consumes:** a Plan digest resolved through `PlanAdmissionService.verify_for_dispatch`, the bound RuntimeSupportReport/Profile, CatalogRuntime, ArtifactPool, BudgetLedger, worker gateways/executor and RunContext.
 
-- [ ] **Step 1: Write the failing test**
+**Produces:**
 
-```python
-# tests/orchestration/test_dag.py
-from __future__ import annotations
-import asyncio
-from datetime import datetime, timezone
-from pydantic import BaseModel
-from guanlan_v2.orchestration.enums import (DataMode, DataBackend, Tier, ExecutionKind, NodeStatus,
-                                            DependencyPolicy, PlanSource)
-from guanlan_v2.orchestration.spec import (WorkerSpec, ExecutionSpec, PlanNode, Dependency, PlanDraft)
-from guanlan_v2.orchestration.catalog import WorkerCatalog
-from guanlan_v2.orchestration.validate import freeze_plan
-from guanlan_v2.orchestration.context import RunContext, DataContext, ClockSpec, RunBudget
-from guanlan_v2.orchestration.eventstore import EventStore
-from guanlan_v2.orchestration.schema_registry import SchemaRegistry
-from guanlan_v2.orchestration.pool import ArtifactPool
-from guanlan_v2.orchestration.budget import BudgetLedger
-from guanlan_v2.orchestration.worker import WorkerResult
-from guanlan_v2.orchestration.dag import run_plan
+- the Task 5-owned immutable `RunResult@1`: run/plan digest, canonically keyed NodeRuns, committed LayerCommit refs and terminal `completed | partial | failed | cancelled` status.
+- `run_plan(plan_digest, ctx, *, admission, pool, budget, catalog_runtime, bridge_resolver: ExecutionBridgeResolver, model_gateway, capability_gateway, stores, runtime_limit, clock: AuthoritativeClock) -> RunResult`.
 
-UTC = timezone.utc
-def _t(): return datetime(2026, 7, 15, tzinfo=UTC)
+The caller does not pass an arbitrary Plan object, catalog, registry, handler map or raw provider map. The service-owned bridge resolver is bound to the same exact admitted catalog digest and rejects any provider whose reviewed material identity is absent or drifted.
 
+**Normative algorithm:**
 
-class Doc(BaseModel):
-    text: str
+1. verify Plan/PlanAdmitted, Phase 1 and RuntimeSupport report digests, catalog/registry/context and active plan reservation;
+2. derive stable Kahn layers from the already validated DAG; sort nodes by PlanNode ID;
+3. before each layer, recheck cancellation and active reservation;
+4. wait for every dependency to reach a terminal state;
+5. apply the closed policy to determine, but not yet persist, the node outcome:
+   - unsatisfied BLOCK → pending terminal outcome `BLOCKED`;
+   - unsatisfied SKIP → pending terminal outcome `SKIPPED`;
+   - unsatisfied DEGRADE → omit only that dependency's value, retain the other inputs, mark `degraded_inputs=True` and remain executable;
+6. resolve the deterministic base dependency bindings in Plan declaration order for every node. Then follow exactly one branch:
+   - `BLOCKED | SKIPPED`: do not resolve/open a bridge or issue an evidence token. First freeze the exact base InputSnapshot containing every satisfied binding available at the terminal decision boundary and no prepared memory additions; only then persist the terminal NodeRun with an empty bridge-evidence tuple, no child reservation/RUNNING/executor/output;
+   - executable: purely resolve the exact support-report-bound provider set, create the node-global evidence sequencer, then call each provider's `prepare_input(..., sequencer)` in canonical bridge order. Merge only descriptor-authorized memory refs and freeze returned handles plus sequencer state; data/capability/live-I/O contributions are forbidden at this stage;
+7. for the executable branch, compute `expected_memory_record_refs` as the Phase 1-canonical union of base authorized memory refs and every completed provider addition, freeze the exact per-node InputSnapshot, then re-resolve it and require exact tuple equality—no caller/provider may insert an extra, foreign, duplicate-ambiguous or late/future ref. If preparation fails, compute the same equality from the deterministic base plus additions from providers whose preparation already completed successfully; exclude every half-built contribution from the failing provider, while retaining its journal-recovered partial evidence only in NodeRun. Create one `INCOMPLETE` NodeRun with the reviewed bridge-preparation reason and allocate no child reservation/RUNNING/provider execution/Artifact;
+8. otherwise attempt to reserve a candidate-bound child node budget (zero LLM invocation for deterministic, one for v1 LLM). Allocation denial or cancellation before allocation persists a reviewed non-success NodeRun against the already frozen snapshot, retains preparation evidence and has no child reservation/RUNNING/Task 7 call. On success, call Task 7 with the prepared handles under a semaphore capped by every bound concurrency limit;
+9. settle actuals or release unused reservation on non-execution/cancellation;
+10. persist terminal NodeRun, stage COMPLETED/DEGRADED Artifact only;
+11. after every node in the layer is terminal, atomically commit the layer's successful outputs in canonical order;
+12. only LayerCommitted artifacts become inputs to the next layer;
+13. append/persist the final RunResult; replay derives progress from PlanAdmitted, bridge preparation evidence, node, budget, ArtifactStaged and LayerCommitted records.
 
+**Failure/recovery rules:**
 
-def _registry():
-    r = SchemaRegistry(); r.register("Doc", "1", Doc); return r
+- BudgetExceeded becomes an explicit non-success NodeRun/reason against the already frozen InputSnapshot and cannot leave a hidden reservation;
+- timeout and cancellation propagate through the Task 7 statuses/events;
+- cancellation during a layer does not publish its staged artifacts. A not-started node first freezes its deterministic base InputSnapshot, skips bridge/reservation/RUNNING and then records CANCELLED; a prepared-but-unreserved node uses its already frozen snapshot/evidence; a reserved/running node releases/settles its externally correlated reservation;
+- a crash before LayerCommitted restarts that uncommitted layer with the same semantic idempotency keys; a crash after commit resumes at the next layer;
+- actual NodeRun IDs, never fabricated `nr:{node_id}` strings, enter LayerCommit;
+- sink FAILED/BLOCKED/TIMED_OUT/INCOMPLETE is failed, cancellation is cancelled, usable degraded/skipped outcomes are partial, and only fully successful required sinks are completed;
+- unsupported condition/reducer/debate/gate/stop/retry/multi-writer constructs cannot reach this function because Task 5 rejects them; the runner still defense-in-depth rejects a mismatched profile/report.
 
+- [ ] **Step 1: Write failing runner tests**
 
-def _w(wid):
-    return WorkerSpec(id=wid, lane="text", persona="p", system_prompt_ref="s.md", tier=Tier.WRITER,
-                      execution=ExecutionSpec(kind=ExecutionKind.LLM, model_tier="fast"),
-                      can_emit_decision=True, input_model="In", outputs={"primary": "Doc@1"},
-                      supported_modes={DataMode.ONLINE})
+Cover:
 
+- two-node one binding and fan-in many ordering;
+- BLOCK, DEGRADE and SKIP independently;
+- LLM versus deterministic reservation counts;
+- bounded concurrency under different completion orders;
+- stable artifact sequence and sink results;
+- timeout/cancellation/budget exhaustion;
+- no next-layer read before LayerCommitted;
+- crash-before/crash-after replay and idempotent resume;
+- actual NodeRun IDs in LayerCommit;
+- dispatch rejection for changed Plan/catalog/registry/context/profile/reservation/report;
+- node memory selection is prepared and the InputSnapshot memory tuple equals the Phase 1-canonical union of base-authorized refs plus every completed PreparedBridgeSet addition before reservation/RUNNING; missing/extra/foreign/duplicate-ambiguous/late refs fail, while a data call or late bridge mutation cannot backfill the current snapshot;
+- bridge-input preparation failure yields deterministic INCOMPLETE/no-reservation/no-execution with retained preparation evidence; provider I/O never occurs before RUNNING;
+- BLOCKED/SKIPPED freeze a real base InputSnapshot before their NodeRun, issue no bridge token, create no bridge/prompt evidence and have no child reservation/RUNNING/output; DEGRADE remains executable and follows normal preparation/reservation;
+- allocation-denied and cancellation-before-allocation NodeRuns use a real already frozen snapshot, retain any completed preparation evidence and have no child reservation/RUNNING/Task 7 call; every attempt handed to Task 7, including preflight failure, is externally correlated to one real child reservation;
+- defense-in-depth rejection of every unsupported static-v1 feature.
 
-class EchoHandler:
-    def __init__(self, tag): self.tag = tag
-    async def execute(self, node, spec, inputs, ctx):
-        up = ",".join(f"{k}={v}" for k, v in sorted(inputs.items()))
-        return WorkerResult(payload={"text": f"{self.tag}[{up}]"}, tool_call_count=1)
+Run now: `pytest tests/orchestration/test_dag.py -v`.
 
+Expected: FAIL on missing runner/barrier/cancellation behavior before implementation; unrelated collection/environment failures do not count.
 
-class FailHandler:
-    async def execute(self, node, spec, inputs, ctx):
-        raise RuntimeError("boom")
+- [ ] **Step 2: Implement runner without another validator**
 
+Runtime Kahn scheduling is allowed; do not recalculate a competing Plan validity or digest. Every input/output follows the already validated Phase 1 bindings.
 
-def _ctx():
-    clock = ClockSpec(as_of=_t(), timezone="UTC", calendar_id="XSHG", clock_version="1")
-    dc = DataContext(as_of=_t(), clock=clock, mode=DataMode.ONLINE, backend=DataBackend.LIVE,
-                     strict_pit=False, calendar_id="XSHG", resolved_vendor_chains={},
-                     source_config_digest="c", data_snapshot_id="s")
-    return RunContext(run_id="r", data=dc, context_snapshot_id="cs", memory_snapshot_hash="m",
-                      budget=RunBudget(ledger_id="L", max_tokens=100000, max_llm_invocations=100,
-                                       max_concurrency=4), cancellation_token_id="ct")
+- [ ] **Step 3: Run and commit**
 
+Run: `pytest tests/orchestration/test_dag.py tests/orchestration/test_worker.py tests/orchestration/test_pool.py tests/orchestration/test_admission.py -v`
 
-def _plan(nodes, sinks, cat):
-    draft = PlanDraft(id="pl", run_id="r", request_id="q", phase="main", source=PlanSource.PRESET,
-                      goal="g", as_of=_t(), mode=DataMode.ONLINE, context_snapshot_id="cs", universe=[],
-                      nodes=nodes, sink_node_ids=sinks, catalog_version="1", catalog_digest=cat.digest)
-    return freeze_plan(draft, catalog=cat, budget_reservation_id="res", frozen_at=_t())
-
-
-def _harness(nodes, sinks, handlers):
-    cat = WorkerCatalog([_w(n.worker_id) for n in nodes])
-    plan = _plan(nodes, sinks, cat)
-    ctx = _ctx()
-    pool = ArtifactPool("r", EventStore(), _registry(), now=_t)
-    budget = BudgetLedger(ctx.budget, run_id="r", now=_t)
-    return asyncio.run(run_plan(plan, ctx, pool=pool, catalog=cat, handlers=handlers,
-                                budget=budget, now=_t)), pool
-
-
-def test_two_node_chain_passes_upstream_payload():
-    n1 = PlanNode(id="n1", worker_id="n1", writes_slot="n1")
-    n2 = PlanNode(id="n2", worker_id="n2", writes_slot="n2",
-                  dependencies=[Dependency(upstream_node_id="n1", artifact_slot="n1", inject_as="ctx")])
-    res, pool = _harness([n1, n2], ["n2"], {"n1": EchoHandler("A"), "n2": EchoHandler("B")})
-    assert res.status == "completed"
-    assert res.node_runs["n2"].status == NodeStatus.COMPLETED
-    assert "ctx=A[]" in pool.get_typed("n2", Doc).text        # upstream payload injected
-
-
-def test_block_dep_blocks_downstream_when_upstream_fails():
-    n1 = PlanNode(id="n1", worker_id="n1", writes_slot="n1")
-    n2 = PlanNode(id="n2", worker_id="n2", writes_slot="n2",
-                  dependencies=[Dependency(upstream_node_id="n1", artifact_slot="n1", inject_as="ctx")])
-    res, _ = _harness([n1, n2], ["n2"], {"n1": FailHandler(), "n2": EchoHandler("B")})
-    assert res.node_runs["n1"].status == NodeStatus.FAILED
-    assert res.node_runs["n2"].status == NodeStatus.BLOCKED
-    assert res.status == "failed"
-
-
-def test_soft_dep_failure_degrades_downstream_but_runs():
-    n1 = PlanNode(id="n1", worker_id="n1", writes_slot="n1")
-    n2 = PlanNode(id="n2", worker_id="n2", writes_slot="n2",
-                  dependencies=[Dependency(upstream_node_id="n1", artifact_slot="n1", inject_as="ctx",
-                                           policy=DependencyPolicy.DEGRADE,
-                                           accept_statuses={NodeStatus.COMPLETED})])
-    res, pool = _harness([n1, n2], ["n2"], {"n1": FailHandler(), "n2": EchoHandler("B")})
-    assert res.node_runs["n1"].status == NodeStatus.FAILED
-    assert res.node_runs["n2"].status == NodeStatus.DEGRADED
-    assert pool.get_typed("n2", Doc).text == "B[]"            # ran without the failed input
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `pytest tests/orchestration/test_dag.py -v`
-Expected: FAIL with `ModuleNotFoundError`
-
-- [ ] **Step 3: Write minimal implementation**
-
-```python
-# guanlan_v2/orchestration/dag.py
-from __future__ import annotations
-import asyncio
-from datetime import datetime
-from typing import Callable, Literal
-from pydantic import BaseModel
-from guanlan_v2.orchestration.budget import BudgetLedger
-from guanlan_v2.orchestration.catalog import WorkerCatalog
-from guanlan_v2.orchestration.context import RunContext
-from guanlan_v2.orchestration.enums import DependencyPolicy, NodeStatus
-from guanlan_v2.orchestration.pool import ArtifactPool
-from guanlan_v2.orchestration.schemas import NodeRun
-from guanlan_v2.orchestration.spec import Plan, PlanNode
-from guanlan_v2.orchestration.validate import _topo_layers
-from guanlan_v2.orchestration.worker import WorkerHandler, run_node
-
-_OK_ARTIFACT = {NodeStatus.COMPLETED, NodeStatus.DEGRADED}
-
-
-class RunResult(BaseModel):
-    run_id: str
-    node_runs: dict[str, NodeRun]
-    status: Literal["completed", "partial", "failed"]
-
-
-def _gate(node: PlanNode, node_runs: dict[str, NodeRun]) -> tuple[bool, bool, list[tuple[str, str, str]]]:
-    """Return (blocked, degraded_inputs, satisfied[(inject_as, upstream_id, output_key)])."""
-    blocked = False
-    degraded = False
-    satisfied: list[tuple[str, str, str]] = []
-    for dep in node.dependencies:
-        up = node_runs.get(dep.upstream_node_id)
-        ok = up is not None and up.status in dep.accept_statuses
-        if ok:
-            satisfied.append((dep.inject_as, dep.upstream_node_id, dep.upstream_output_key))
-        elif dep.policy == DependencyPolicy.BLOCK:
-            blocked = True
-        else:  # DEGRADE / SKIP — omit input, continue degraded
-            degraded = True
-    return blocked, degraded, satisfied
-
-
-async def run_plan(plan: Plan, ctx: RunContext, *, pool: ArtifactPool, catalog: WorkerCatalog,
-                   handlers: dict[str, WorkerHandler], budget: BudgetLedger,
-                   now: Callable[[], datetime], max_concurrency: int | None = None) -> RunResult:
-    cap = min(x for x in [plan.max_concurrency, ctx.budget.max_concurrency, max_concurrency]
-              if x is not None)
-    sem = asyncio.Semaphore(cap)
-    node_runs: dict[str, NodeRun] = {}
-    by_id = {n.id: n for n in plan.nodes}
-    layers = _topo_layers(plan)
-
-    for layer_index, layer in enumerate(layers):
-        pool.freeze_input_snapshot(layer_index, context_snapshot_id=ctx.context_snapshot_id)
-        staged_keys: set[tuple[str, str]] = set()
-
-        async def _one(node: PlanNode) -> None:
-            blocked, degraded_inputs, satisfied = _gate(node, node_runs)
-            if blocked:
-                node_runs[node.id] = NodeRun(
-                    node_run_id=f"nr:{node.id}", run_id=ctx.run_id, plan_id=plan.id,
-                    plan_digest=plan.plan_digest, node_id=node.id, worker_id=node.worker_id,
-                    status=NodeStatus.BLOCKED, attempt_id=f"a:{node.id}", input_snapshot_hash="",
-                    reason_code="dependency_failed", reason="a BLOCK dependency did not succeed",
-                    started_at=now(), finished_at=now())
-                return
-            inputs = {inject: pool.committed_artifact(up, key).payload
-                      for inject, up, key in satisfied
-                      if pool.committed_artifact(up, key) is not None}
-            spec = catalog.get(node.worker_id)
-            reservation = budget.reserve(scope_type="node", scope_id=node.id,
-                                         tokens=node.token_reservation, invocations=1)
-            async with sem:
-                nr, art = await run_node(node, spec, handlers[node.worker_id], inputs, ctx,
-                                         degraded_inputs=degraded_inputs, now=now)
-            budget.settle(reservation.reservation_id, actual_tokens=nr.input_tokens + nr.output_tokens,
-                          actual_invocations=1)
-            node_runs[node.id] = nr
-            if art is not None and nr.status in _OK_ARTIFACT:
-                pool.stage(art, layer_index=layer_index, idempotency_key=f"{node.id}:primary")
-                staged_keys.add((node.id, "primary"))
-
-        await asyncio.gather(*(_one(by_id[nid]) for nid in layer))  # layer sorted by id in _topo_layers
-        pool.commit_layer(layer_index, node_run_ids=[f"nr:{nid}" for nid in layer],
-                          expected_output_keys=staged_keys)
-
-    sink_bad = any(node_runs[s].status in (NodeStatus.FAILED, NodeStatus.BLOCKED)
-                   for s in plan.sink_node_ids)
-    all_ok = all(nr.status == NodeStatus.COMPLETED for nr in node_runs.values())
-    status: Literal["completed", "partial", "failed"] = (
-        "failed" if sink_bad else ("completed" if all_ok else "partial"))
-    return RunResult(run_id=ctx.run_id, node_runs=node_runs, status=status)
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `pytest tests/orchestration/test_dag.py -v`
-Expected: PASS (3 passed)
-
-- [ ] **Step 5: Commit**
+Expected: PASS.
 
 ```bash
 git add guanlan_v2/orchestration/dag.py tests/orchestration/test_dag.py
-git commit -m "feat(orchestration): DAG runner with gating/barrier/budget (phase2)"
+git commit -m "feat(orchestration): add admitted static DAG runner"
 ```
 
 ---
 
-## Task 9: Preset adapter (engine DAGNode → PlanDraft) + 3-worker e2e
+## Task 9: Reviewed three-worker pilot + attested legacy preset adapter
 
 **Files:**
 - Create: `guanlan_v2/orchestration/presets.py`
+- Modify: `guanlan_v2/orchestration/catalog_runtime.py`
+- Create: `config/orchestration/catalogs/stock-deep-dive-compat-v1.yaml`
+- Create: only the complete compatibility materials required by the reviewed graph under `config/orchestration/materials/stock-deep-dive-compat-v1/`
+- Test: `tests/orchestration/test_pilot_runtime.py`
 - Test: `tests/orchestration/test_presets.py`
 
-**Interfaces:**
-- Consumes: `financial_analyst.agent.orchestrator.DAGNode`, `spec.PlanDraft/PlanNode/Dependency`, `catalog.WorkerCatalog`, `enums.DependencyPolicy/PlanSource/DataMode`.
-- Produces: `plandraft_from_dagnodes(nodes: list[DAGNode], *, run_id, request_id, as_of, mode, sink_node_ids, catalog, universe=(), phase="main", context_snapshot_id=None, source=PlanSource.PRESET) -> PlanDraft` — maps each `DAGNode`: `node_id = worker_id = agent.NAME`; for every `dep` in `agent`'s node, add a `Dependency(upstream_node_id=dep, artifact_slot=dep, upstream_output_key="primary", inject_as=dep, policy=DEGRADE if dep in soft_deps else BLOCK, accept_statuses={COMPLETED})`; `writes_slot = agent.NAME`.
+This task has two ordered checkpoints. The compatibility adapter cannot begin until the three-final-worker path passes.
 
-- [ ] **Step 1: Write the failing test**
+### 9.1 Three-final-worker pilot
 
-```python
-# tests/orchestration/test_presets.py
-from __future__ import annotations
-import asyncio
-from datetime import datetime, timezone
-from pathlib import Path
-from pydantic import BaseModel
-from financial_analyst.agent.base import SubAgent
-from financial_analyst.agent.orchestrator import DAGNode
-from guanlan_v2.orchestration.enums import (DataMode, DataBackend, Tier, ExecutionKind,
-                                            NodeStatus, DependencyPolicy)
-from guanlan_v2.orchestration.spec import WorkerSpec, ExecutionSpec
-from guanlan_v2.orchestration.catalog import WorkerCatalog
-from guanlan_v2.orchestration.validate import freeze_plan
-from guanlan_v2.orchestration.context import RunContext, DataContext, ClockSpec, RunBudget
-from guanlan_v2.orchestration.eventstore import EventStore
-from guanlan_v2.orchestration.schema_registry import SchemaRegistry
-from guanlan_v2.orchestration.pool import ArtifactPool
-from guanlan_v2.orchestration.budget import BudgetLedger
-from guanlan_v2.orchestration.worker import WorkerResult
-from guanlan_v2.orchestration.dag import run_plan
-from guanlan_v2.orchestration.presets import plandraft_from_dagnodes
+Run the Task 3 triad (recommended `text.sentiment -> dec.research_mgr -> dec.pm`) end-to-end with the actual Phase 1 `SentimentReport -> ResearchPlan -> PortfolioDecision` schemas and a trusted fake model gateway.
 
-UTC = timezone.utc
-def _t(): return datetime(2026, 7, 15, tzinfo=UTC)
+The selected pilot must also pass the Task 5 tool/bridge support matrix. If repository evidence shows an LLM worker requires a model-driven tool loop, choose another reviewed final-worker triad or add an exact catalog-bound static-prefetch descriptor/config and new catalog digest; do not smuggle a second model invocation into static v1.
 
+The test must exercise the real path:
 
-class Doc(BaseModel):
-    text: str
+1. build/verify the material-aware final-worker catalog snapshot;
+2. create a strict PRESET OrchestrationRequest, ContextSnapshot and PlanDraft with exact registry/catalog/budget bindings;
+   the pre-Phase-3 runtime builds and persists Phase 1's canonical `EmptyMemorySnapshot/EmptyMemorySelection`, then puts their exact locator/hash/selection ref into ContextSnapshot with `memory_session_id=None`—never blank/random placeholders or a caller-selected session scope;
+3. Phase 1 validation;
+4. RuntimeSupportReport;
+5. plan reservation;
+6. REQUIRED authenticated approval;
+7. Phase 1 freeze and PlanAdmitted;
+8. bounded execution with typed InputSnapshots, NodeRuns, Artifacts, LayerCommits and provenance;
+9. replay and final PortfolioDecision validation.
 
+All three workers are `final/dynamic_allowed`; none uses `compat.*`. The pilot must fail if any prompt/SKILL/capability byte drifts, if a skill/tool override is attempted, or if approval/reservation/report identity changes.
 
-def _sub(name, deps=(), soft=(), input_keys=()):
-    cls = type(f"Sub_{name}", (SubAgent,), {"NAME": name, "OUTPUT_SCHEMA": Doc,
-                                            "_execute": lambda self, inputs: {"text": name}})
-    return DAGNode(agent=cls(memory_root=Path(".")), deps=list(deps),
-                   soft_deps=list(soft), input_keys=list(input_keys))
+### 9.2 Legacy mapping adapter and compatibility catalog
 
+**Consumes:** the Phase 1 real `LegacyGraphMapping` (including `worker_mappings`, `dependency_mappings` and `input_mappings: tuple[LegacyInputMapping,...]`), `compatibility_binding_for`, `attest_static_legacy_plan`, Task 0 normalized fixture/mapping tables, catalog builder and admission service.
 
-def test_mapping_marks_soft_dep_as_degrade():
-    nodes = [_sub("a"), _sub("b", deps=["a"], soft=["a"], input_keys=["a"])]
-    cat = WorkerCatalog([_w("a"), _w("b")])
-    draft = plandraft_from_dagnodes(nodes, run_id="r", request_id="q", as_of=_t(),
-                                    mode=DataMode.ONLINE, sink_node_ids=["b"], catalog=cat,
-                                    context_snapshot_id="cs")
-    b = next(n for n in draft.nodes if n.id == "b")
-    assert b.dependencies[0].policy == DependencyPolicy.DEGRADE
+**Produces:**
 
+- `legacy_draft_from_mapping(mapping, *, request, context, catalog, schema_registry, budget_request, sink_mapping) -> PlanDraft`;
+- a service-only attestation builder/store path using the Phase 1 `StaticLegacyPlanAttestation`;
+- the complete `compat.*` WorkerSpec/material subset needed by the frozen graph.
+- `PHASE2_STATIC_CATALOG_DIGEST` plus `phase2_static_catalog_snapshot()`: the reviewed cumulative end-of-Phase-2 catalog containing the unchanged three final pilot workers and the complete Task 9 compatibility subset. This is the sole canonical base for a new Phase 3 catalog extension; earlier pilot/catalog digests remain resolvable for old Plans but are not alternative Phase 3 build bases.
 
-def _w(wid):
-    return WorkerSpec(id=wid, lane="text", persona="p", system_prompt_ref="s.md", tier=Tier.WRITER,
-                      execution=ExecutionSpec(kind=ExecutionKind.LLM, model_tier="fast"),
-                      can_emit_decision=True, input_model="In", outputs={"primary": "Doc@1"},
-                      supported_modes={DataMode.ONLINE})
+There is no public `plandraft_from_dagnodes(list[DAGNode])` heuristic.
 
+**Legacy adapter invariants:**
 
-def test_three_worker_static_plan_runs_end_to_end():
-    nodes = [_sub("mkt"), _sub("news"), _sub("pm", deps=["mkt", "news"], input_keys=["mkt", "news"])]
-    cat = WorkerCatalog([_w("mkt"), _w("news"), _w("pm")])
-    draft = plandraft_from_dagnodes(nodes, run_id="r", request_id="q", as_of=_t(),
-                                    mode=DataMode.ONLINE, sink_node_ids=["pm"], catalog=cat,
-                                    context_snapshot_id="cs")
-    plan = freeze_plan(draft, catalog=cat, budget_reservation_id="res", frozen_at=_t())
+1. mapping must be fully MAPPED and its source schema/config/mapping digests must match the frozen Task 0 fixture;
+2. node → worker comes from `LegacyWorkerMapping`; edge policy/accepted statuses/missing-output behavior comes from `LegacyDependencyMapping`; source kind/key, target kind plus its exact input-binding/param/context/service target, upstream SchemaRef, projection/projection field, missing behavior and evidence come from `LegacyInputMapping`;
+3. legacy agent names never become final worker IDs by coincidence. Non-honest one-to-one mappings use `compat.*`, `catalog_role=compatibility`, `selection_scope=static_legacy_only` and a matching CompatibilityBinding;
+4. every compatibility WorkerSpec is otherwise complete: params/input/output SchemaRefs, execution ref, prompt/SKILL/guardrails/capabilities and evidence policy resolve and hash;
+5. every legacy `input_keys` entry resolves through exactly one mapped `LegacyInputMapping`, and its semantics are preserved:
+   - base `code/asof_date` require reviewed `target_kind="param"|"context"` and validation against the strict target schema;
+   - `out_dir` requires a reviewed `target_kind="service_binding"`; it is supplied by the service and is never an arbitrary Plan/caller path;
+   - every upstream value uses `target_kind="input_binding"`. A value named in `input_keys` but not a direct legacy dep must be a proven transitive ancestor, so the existing graph already orders it; the adapter may not invent a dependency or weaken an intervening BLOCK;
+   - direct edge/input missing semantics obey the Phase 1 BLOCK/DEGRADE/SKIP consistency matrix and nullable/optional target rules;
+   - the Plan/InputSnapshot binds the full upstream output SchemaRef exactly; legacy single-field unwrap versus multi-field `model_dump` occurs only afterwards inside an attested catalog-owned compatibility handler and is recorded in provenance;
+6. `memory_mode` and `borrows_memory` map through reviewed WorkerSpec/read-category/provenance entries;
+7. unknown node/input/output/edge semantics, `missing_behavior="unknown"`, incomplete evidence or an unresolved required target InputBinding return UNMAPPABLE and cannot yield a draft, binding or attestation;
+8. the adapter writes the all-set legacy source/config/mapping tuple into PlanDraft and calls the single Phase 1 candidate-digest function; `legacy_mapping_digest` is the LegacyGraphMapping semantic digest and therefore includes every `input_mappings` target-kind/target/projection/behavior/evidence field;
+9. the service calls `attest_static_legacy_plan(mapping, draft, request, context=context, catalog=catalog, schema_registry=schema_registry)` from Phase 1. The stored attestation therefore binds the same request/candidate/context/catalog/registry/config/mapping inputs and grants neither AUTO approval nor dynamic selection;
+10. PRESET/PRESET_FALLBACK still follows support→reserve→REQUIRED approval→freeze;
+11. compatibility entries do not count toward the final 24 or the three-worker pilot.
+12. the exported static catalog digest is rebuilt/verified by the Phase 1 material-aware builder, is pinned by a reviewed manifest, and cannot vary with physical material location or load order.
 
-    class H:
-        def __init__(self, tag): self.tag = tag
-        async def execute(self, node, spec, inputs, ctx):
-            return WorkerResult(payload={"text": f"{self.tag}<{sorted(inputs)}>"}, tool_call_count=1)
+The current authoritative fixture is derived from `config/swarm/stock-deep-dive.yaml` (currently 18 agents) and must prove its normalized content is identical to `engine/financial_analyst/_resources/config/swarm/stock-deep-dive.yaml` before attestation.
 
-    clock = ClockSpec(as_of=_t(), timezone="UTC", calendar_id="XSHG", clock_version="1")
-    dc = DataContext(as_of=_t(), clock=clock, mode=DataMode.ONLINE, backend=DataBackend.LIVE,
-                     strict_pit=False, calendar_id="XSHG", resolved_vendor_chains={},
-                     source_config_digest="c", data_snapshot_id="s")
-    ctx = RunContext(run_id="r", data=dc, context_snapshot_id="cs", memory_snapshot_hash="m",
-                     budget=RunBudget(ledger_id="L", max_tokens=100000, max_llm_invocations=100,
-                                      max_concurrency=4), cancellation_token_id="ct")
-    pool = ArtifactPool("r", (lambda: (lambda r: (r.register("Doc", "1", Doc), r)[1])(SchemaRegistry()))(),
-                        now=_t)  # registry with Doc
-    budget = BudgetLedger(ctx.budget, run_id="r", now=_t)
-    handlers = {"mkt": H("MKT"), "news": H("NEWS"), "pm": H("PM")}
-    res = asyncio.run(run_plan(plan, ctx, pool=pool, catalog=cat, handlers=handlers, budget=budget, now=_t))
-    assert res.status == "completed"
-    assert res.node_runs["pm"].status == NodeStatus.COMPLETED
-    assert "mkt" in pool.get_typed("pm", Doc).text and "news" in pool.get_typed("pm", Doc).text
-```
+- [ ] **Step 1: Write the failing three-worker pilot**
 
-- [ ] **Step 2: Run test to verify it fails**
+Run: `pytest tests/orchestration/test_pilot_runtime.py -v`
 
-Run: `pytest tests/orchestration/test_presets.py -v`
-Expected: FAIL with `ModuleNotFoundError: ... presets`
+Expected: FAIL on the not-yet-integrated pilot path; unrelated collection/environment failures do not count.
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 2: Complete and pass the three-worker pilot**
 
-```python
-# guanlan_v2/orchestration/presets.py
-from __future__ import annotations
-from collections.abc import Iterable
-from datetime import datetime
-from financial_analyst.agent.orchestrator import DAGNode
-from guanlan_v2.orchestration.catalog import WorkerCatalog
-from guanlan_v2.orchestration.data.symbols import Symbol
-from guanlan_v2.orchestration.enums import DataMode, DependencyPolicy, NodeStatus, PlanSource
-from guanlan_v2.orchestration.spec import Dependency, PlanDraft, PlanNode
+Run: `pytest tests/orchestration/test_pilot_runtime.py -v`
 
+Expected: PASS before compatibility work starts.
 
-def plandraft_from_dagnodes(nodes: list[DAGNode], *, run_id: str, request_id: str, as_of: datetime,
-                            mode: DataMode, sink_node_ids: list[str], catalog: WorkerCatalog,
-                            universe: Iterable[Symbol] = (), phase: str = "main",
-                            context_snapshot_id: str | None = None,
-                            source: PlanSource = PlanSource.PRESET) -> PlanDraft:
-    plan_nodes: list[PlanNode] = []
-    for dn in nodes:
-        name = dn.agent.NAME
-        soft = set(dn.soft_deps)
-        deps = [Dependency(upstream_node_id=dep, artifact_slot=dep, upstream_output_key="primary",
-                           inject_as=dep,
-                           policy=DependencyPolicy.DEGRADE if dep in soft else DependencyPolicy.BLOCK,
-                           accept_statuses={NodeStatus.COMPLETED})
-                for dep in dn.deps]
-        plan_nodes.append(PlanNode(id=name, worker_id=name, writes_slot=name, dependencies=deps))
-    return PlanDraft(id=f"draft:{run_id}", run_id=run_id, request_id=request_id, phase=phase,
-                     source=source, goal="static-preset", as_of=as_of, mode=mode,
-                     context_snapshot_id=context_snapshot_id, universe=list(universe),
-                     nodes=plan_nodes, sink_node_ids=sink_node_ids, catalog_version=catalog.version,
-                     catalog_digest=catalog.digest)
-```
+- [ ] **Step 3: Write failing mapping/attestation/catalog tests**
 
-- [ ] **Step 4: Run test to verify it passes**
+Cover fully mapped versus partial graph, unknown node/input/edge, final versus compat ID/role/scope, the complete `LegacyInputMapping` source-kind/target-kind/exact-target/upstream-schema/projection/projection-field/missing-behavior/evidence matrix, dependency/input behavior consistency, nullable/optional checks, non-direct transitive ancestry, memory metadata, YAML-copy drift, context/registry-sensitive attestation and prohibition of direct DAGNode-name conversion.
 
-Run: `pytest tests/orchestration/test_presets.py -v`
-Expected: PASS (2 passed)
+Run now: `pytest tests/orchestration/test_presets.py tests/orchestration/test_catalog_runtime.py -v`.
 
-- [ ] **Step 5: Commit**
+Expected: FAIL on the missing compatibility mapping/catalog behavior before implementation; unrelated collection/environment failures do not count.
+
+- [ ] **Step 4: Add only the reviewed compatibility materials and adapter**
+
+Do not redesign the compatibility workers into the final 24. Their purpose is a faithful, attested bridge for Task 10.
+
+- [ ] **Step 5: Run pilot + compatibility regressions and commit**
+
+Run: `pytest tests/orchestration/test_pilot_runtime.py tests/orchestration/test_presets.py tests/orchestration/test_migration.py tests/orchestration/test_catalog_runtime.py -v`
+
+Expected: PASS.
 
 ```bash
-git add guanlan_v2/orchestration/presets.py tests/orchestration/test_presets.py
-git commit -m "feat(orchestration): engine DAGNode -> PlanDraft adapter + 3-worker e2e (phase2)"
+git add guanlan_v2/orchestration/presets.py guanlan_v2/orchestration/catalog_runtime.py config/orchestration/catalogs/stock-deep-dive-compat-v1.yaml config/orchestration/materials/stock-deep-dive-compat-v1 tests/orchestration/test_pilot_runtime.py tests/orchestration/test_presets.py
+git commit -m "feat(orchestration): add pilot and attested legacy preset bridge"
 ```
 
 ---
 
-## Task 10: Engine dependency-semantics equivalence test
+## Task 10: Full attested stock-deep-dive execution equivalence
 
 **Files:**
+- Create: `tests/orchestration/fixtures/stock_deep_dive_equivalence_v1.json`
 - Test: `tests/orchestration/test_engine_equivalence.py`
 
-**Interfaces:**
-- Consumes: engine `Orchestrator`/`DAGNode`/`SubAgent`, plus the Phase 2 kernel (`plandraft_from_dagnodes`, `freeze_plan`, `run_plan`).
-- Produces: no new source — a behavioral parity test proving the new runner reproduces the engine's soft/hard dependency outcomes on the same graph (the acceptance criterion for Phase 2). Two properties:
-  1. **Hard-dep failure blocks downstream** in both: engine marks the downstream `SubAgentResult.ok is False` ("upstream dependency failed"); new runner marks it `NodeStatus.BLOCKED`.
-  2. **Soft-dep failure degrades but runs** in both: engine still runs the downstream (soft dep only needs `done`); new runner marks it `NodeStatus.DEGRADED` and still produces its artifact.
+**Consumes:** both authoritative YAML copies, the frozen Task 0 LegacyGraphMapping/attestation fixture, the complete Task 9 compatibility catalog, legacy `Orchestrator/DAGNode/SubAgentResult`, and the admitted Phase 2 kernel.
 
-- [ ] **Step 1: Write the failing test**
+This is not a two-node semantic smoke test. It is the Phase 2 acceptance test for the complete current `stock-deep-dive` graph.
 
-```python
-# tests/orchestration/test_engine_equivalence.py
-from __future__ import annotations
-import asyncio
-from datetime import datetime, timezone
-from pathlib import Path
-from pydantic import BaseModel
-from financial_analyst.agent.base import SubAgent
-from financial_analyst.agent.orchestrator import DAGNode, Orchestrator
-from guanlan_v2.orchestration.enums import (DataMode, DataBackend, Tier, ExecutionKind, NodeStatus)
-from guanlan_v2.orchestration.spec import WorkerSpec, ExecutionSpec
-from guanlan_v2.orchestration.catalog import WorkerCatalog
-from guanlan_v2.orchestration.validate import freeze_plan
-from guanlan_v2.orchestration.context import RunContext, DataContext, ClockSpec, RunBudget
-from guanlan_v2.orchestration.eventstore import EventStore
-from guanlan_v2.orchestration.schema_registry import SchemaRegistry
-from guanlan_v2.orchestration.pool import ArtifactPool
-from guanlan_v2.orchestration.budget import BudgetLedger
-from guanlan_v2.orchestration.worker import WorkerResult
-from guanlan_v2.orchestration.dag import run_plan
-from guanlan_v2.orchestration.presets import plandraft_from_dagnodes
+**Hermetic harness:**
 
-UTC = timezone.utc
-def _t(): return datetime(2026, 7, 15, tzinfo=UTC)
+- load and normalize the real repository YAML and assert the bundled copy normalizes identically and matches the attested source-config digest;
+- preserve the full current node/deps/soft_deps/input_keys/memory metadata (currently 18 agents);
+- instantiate deterministic legacy SubAgent test doubles with the real node names and reviewed output schemas;
+- resolve the corresponding final/compat WorkerSpecs and deterministic/fake model handlers only through CatalogRuntime;
+- feed both runtimes the same typed base inputs and per-node fixture outputs/failures;
+- do not call live data, LLM, memory or filesystem output. A service-owned temporary output locator may stand in for legacy `out_dir`;
+- configure the test environment to import `engine/financial_analyst` automatically; do not leave a manual `PYTHONPATH` workaround as an acceptance condition.
 
+**Equivalence assertions:**
 
-class Doc(BaseModel):
-    text: str
+For each scenario compare the legacy result with the reviewed canonical mapping of the new result:
 
+1. complete node set, dependency partial order and executed/not-executed set;
+2. each node's canonical terminal outcome. A missing failed soft input maps to DEGRADED only where the reviewed table says so; hard failure maps downstream blocking; SKIP follows its explicit mapping;
+3. every `LegacyInputMapping` source kind/key, target kind and exact input-binding/param/context/service target, upstream output SchemaRef, projection/projection field, missing behavior and injected payload shape, including proven non-direct transitive input and single-field unwrap/multi-field dump projection;
+4. every `LegacyDependencyMapping` hard/soft accepted-status, target-policy and missing-output behavior;
+5. artifact slot, output key and output SchemaRef per mapped node;
+6. canonical normalized typed payload and content digest for deterministic outputs;
+7. sink outcomes and public LayerCommit boundaries;
+8. no uncommitted staged artifact is visible;
+9. Plan/Artifact/NodeRun provenance binds the same attested config/mapping/catalog and input/tool/data evidence.
 
-def _engine_node(name, deps=(), soft=(), fail=False):
-    def _exec(self, inputs):
-        if fail:
-            raise RuntimeError("boom")
-        return {"text": name}
-    cls = type(f"E_{name}", (SubAgent,), {"NAME": name, "OUTPUT_SCHEMA": Doc, "_execute": _exec})
-    return DAGNode(agent=cls(memory_root=Path(".")), deps=list(deps), soft_deps=list(soft),
-                   input_keys=list(deps))
+Required scenarios:
 
+- all-success full graph;
+- one injected failure at each legacy node, parameterized across the full graph, so every hard/soft downstream consequence is exercised;
+- optional/soft output absent while downstream still runs;
+- required/hard output absent and downstream blocks;
+- base input missing/invalid according to the reviewed policy;
+- completion-order permutations proving stable new artifact/input ordering;
+- crash before and after a representative LayerCommitted boundary followed by replay.
 
-def _w(wid):
-    return WorkerSpec(id=wid, lane="text", persona="p", system_prompt_ref="s.md", tier=Tier.WRITER,
-                      execution=ExecutionSpec(kind=ExecutionKind.LLM, model_tier="fast"),
-                      can_emit_decision=True, input_model="In", outputs={"primary": "Doc@1"},
-                      supported_modes={DataMode.ONLINE})
+Live LLM prose is deliberately not byte-compared. This exception does not permit replacing output schemas or canonical deterministic payload fields with a generic `Doc`.
 
+**Negative-control assertions:**
 
-def _new_run(nodes, sinks, fail_map):
-    cat = WorkerCatalog([_w(dn.agent.NAME) for dn in nodes])
-    draft = plandraft_from_dagnodes(nodes, run_id="r", request_id="q", as_of=_t(),
-                                    mode=DataMode.ONLINE, sink_node_ids=sinks, catalog=cat,
-                                    context_snapshot_id="cs")
-    plan = freeze_plan(draft, catalog=cat, budget_reservation_id="res", frozen_at=_t())
+- no/mismatched request, candidate, catalog, registry, source-config or mapping attestation;
+- one YAML copy drifted;
+- unknown/partial mapping;
+- `compat.*` selected under DYNAMIC/BOOTSTRAP;
+- caller-supplied handler/path/approval/reservation;
+- changed prompt/SKILL/capability material after snapshot;
+- runtime profile/report changed after reservation.
 
-    class H:
-        def __init__(self, name): self.name = name
-        async def execute(self, node, spec, inputs, ctx):
-            if fail_map.get(self.name):
-                raise RuntimeError("boom")
-            return WorkerResult(payload={"text": self.name}, tool_call_count=1)
+Every negative control must fail before execution, and pre-admission failures must consume no budget.
 
-    clock = ClockSpec(as_of=_t(), timezone="UTC", calendar_id="XSHG", clock_version="1")
-    dc = DataContext(as_of=_t(), clock=clock, mode=DataMode.ONLINE, backend=DataBackend.LIVE,
-                     strict_pit=False, calendar_id="XSHG", resolved_vendor_chains={},
-                     source_config_digest="c", data_snapshot_id="s")
-    ctx = RunContext(run_id="r", data=dc, context_snapshot_id="cs", memory_snapshot_hash="m",
-                     budget=RunBudget(ledger_id="L", max_tokens=100000, max_llm_invocations=100,
-                                      max_concurrency=4), cancellation_token_id="ct")
-    reg = SchemaRegistry(); reg.register("Doc", "1", Doc)
-    pool = ArtifactPool("r", EventStore(), reg, now=_t)
-    budget = BudgetLedger(ctx.budget, run_id="r", now=_t)
-    handlers = {dn.agent.NAME: H(dn.agent.NAME) for dn in nodes}
-    return asyncio.run(run_plan(plan, ctx, pool=pool, catalog=cat, handlers=handlers, budget=budget, now=_t)), pool
+- [ ] **Step 1: Write the full equivalence harness/test**
 
-
-def test_hard_dep_failure_blocks_downstream_in_both():
-    # engine
-    eng = [_engine_node("a", fail=True), _engine_node("b", deps=["a"])]
-    edone = asyncio.run(Orchestrator(eng).run({}))
-    assert edone["a"].ok is False and edone["b"].ok is False
-    # new kernel
-    new = [_engine_node("a", fail=True), _engine_node("b", deps=["a"])]
-    res, _ = _new_run(new, ["b"], {"a": True})
-    assert res.node_runs["a"].status == NodeStatus.FAILED
-    assert res.node_runs["b"].status == NodeStatus.BLOCKED
-
-
-def test_soft_dep_failure_runs_downstream_in_both():
-    # engine: b soft-depends on a; a fails but b still runs (soft dep only needs done)
-    eng = [_engine_node("a", fail=True), _engine_node("b", deps=["a"], soft=["a"])]
-    edone = asyncio.run(Orchestrator(eng).run({}))
-    assert edone["a"].ok is False and edone["b"].ok is True
-    # new kernel: b DEGRADED but produced
-    new = [_engine_node("a", fail=True), _engine_node("b", deps=["a"], soft=["a"])]
-    res, pool = _new_run(new, ["b"], {"a": True})
-    assert res.node_runs["a"].status == NodeStatus.FAILED
-    assert res.node_runs["b"].status == NodeStatus.DEGRADED
-    assert pool.get_typed("b", Doc).text == "b"
-```
-
-- [ ] **Step 2: Run test to verify it fails**
+Create `tests/orchestration/test_engine_equivalence.py` with the hermetic harness, every assertion/scenario/negative control above and an explicit requirement for the reviewed fixture.
 
 Run: `pytest tests/orchestration/test_engine_equivalence.py -v`
-Expected: FAIL — either import error (if a kernel piece is missing) or assertion mismatch. If the engine import fails because `financial_analyst` is not importable from repo root, prepend the engine to `PYTHONPATH`: run `pytest` with `PYTHONPATH=engine`. Document this in the test module docstring.
 
-- [ ] **Step 3: No new implementation** — this task only asserts parity of Tasks 1–9. If a property fails, fix the offending kernel module (most likely `dag._gate` mapping of `DEGRADE`), re-run.
+Expected: FAIL because the reviewed equivalence fixture is absent; unrelated import/environment failure or a skipped/empty matrix does not count.
 
-- [ ] **Step 4: Run the whole phase-2 suite**
+- [ ] **Step 2: Build the reviewed deterministic equivalence fixture**
 
-Run: `pytest tests/orchestration/ -v` (with `PYTHONPATH=engine` if needed for the engine imports)
-Expected: PASS (all phase-1 and phase-2 tests green)
+The fixture contains deterministic node outputs/failure injections and expected canonical outcome mappings. It references, rather than duplicates or silently edits, the Phase 1 graph/config/mapping digests.
+
+- [ ] **Step 3: Run the complete old/new equivalence matrix**
+
+Run: `pytest tests/orchestration/test_engine_equivalence.py -v`
+
+Expected: PASS for the actual full graph and all parameterized failure cases.
+
+- [ ] **Step 4: Run the whole Phase 1 + Phase 2 suite**
+
+Run:
+
+`pytest tests/orchestration/ -v`
+
+Also run:
+
+`python -m compileall -q guanlan_v2/orchestration`
+
+If Ruff is available:
+
+`ruff check guanlan_v2/orchestration tests/orchestration`
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tests/orchestration/test_engine_equivalence.py
-git commit -m "test(orchestration): engine dependency-semantics equivalence (phase2)"
+git add tests/orchestration/test_engine_equivalence.py tests/orchestration/fixtures/stock_deep_dive_equivalence_v1.json
+git commit -m "test(orchestration): prove full attested legacy execution equivalence"
 ```
 
 ---
 
-## Self-Review (completed by plan author)
+## Phase 2 Exit Gates
 
-**Spec coverage (§12 phase 2 + §0 decision 10 + §6.1 + §8 freeze validator):** budget ledger ✓(T1) · dual-cursor event store persist-then-publish + idempotency ✓(T2) · worker catalog ✓(T3) · staged→barrier ArtifactPool with canonical `artifact_seq` + late-stage/double-commit rejection ✓(T4) · strict freeze validator hard-gates ✓(T5) · `plan_digest` + budget binding ✓(T6) · worker executor typed Artifact + evidence-policy honesty classify ✓(T7) · DAG runner stable layers + bounded concurrency + BLOCK/DEGRADE gating + barrier + budget reservation ✓(T8) · engine `DAGNode → PlanDraft` adapter + 3-worker static Plan e2e ✓(T9) · old/new dependency-semantics equivalence ✓(T10). **Deferred to later phases (correctly out of scope):** durable (non-in-memory) event store + crash recovery replay (Phase persistence), retry/attempt re-run + late-stage rejection under real interruption (property tests, later), dynamic Planner (Phase 7), `optimize_existing`/holdout/sealed (Phase 4), Bootstrap Lane 0 (Phase 5), reducers execution + multi-write fold (folded into a later runner iteration; Phase 2 validator only *rejects* unreduced multi-write), condition-DSL, cancellation-token propagation via `RunCancelled` events, real `load_preset` YAML integration for `stock-deep-dive` (kept as a documented manual e2e; the hermetic equivalence test in T10 covers the semantics).
+The previous “Self-Review completed” assertion is not evidence. Phase 2 is complete only when every gate below is checked by tests and reviewed artifacts.
 
-**Placeholder scan:** none — every code step is complete and runnable.
+### Phase 1 handoff
 
-**Type consistency:** `WorkerResult`/`WorkerHandler`/`run_node` signatures identical across T7/T8/T9/T10; `NodeStatus` values (`COMPLETED/DEGRADED/BLOCKED/FAILED/INCOMPLETE`) used consistently; `ArtifactPool.__init__(run_id, event_store, registry, *, now)` matches every construction; `Dependency.accept_statuses={COMPLETED}` default matches `_gate`; `freeze_plan(...)` keyword args identical in T6/T8/T9/T10; engine `DAGNode(agent, deps, input_keys, soft_deps)` + `SubAgent(NAME, OUTPUT_SCHEMA, _execute)` used exactly as defined in `engine/financial_analyst/agent/{orchestrator,base}.py`.
+- [ ] every Phase 1 Exit Gate remains green;
+- [ ] Phase 2 imports, rather than redefines, WorkerSpec/catalog/registry/Plan validation/freeze/digest contracts;
+- [ ] no Phase 1 source, test or golden file was overwritten;
+- [ ] Phase 2 runtime registry/golden is explicit, sealed and separate from the unchanged Phase 1 golden.
+- [ ] new Phase 2 Plans bind the cumulative Phase 2 registry digest, while registry resolution/replay preserves exact older digests and permits later reviewed cumulative snapshots without reinterpretation.
+- [ ] every pre-Phase-3 ContextSnapshot uses the persisted canonical empty-memory snapshot/query-selection binding with `memory_session_id=None`; no caller/worker session field is invented.
+
+### Store, visibility and replay
+
+- [ ] every RunEvent uses SchemaRef + existing digest-matching PayloadRef;
+- [ ] ArtifactStaged remains permanently journal-only;
+- [ ] LayerCommitted is the only artifact visibility boundary and commit is atomic;
+- [ ] same-key/same-content retry is idempotent; same-key/different-content fails;
+- [ ] invalid or main/public-to-sealed/review/audit append is absent from the run journal and can only reach the audit refusal sink;
+- [ ] replay reproduces cursors, ledger, admitted Plan, node states and artifact visibility;
+- [ ] every declared RuntimeUnitOfWork batch is all-or-none under injected failure and crash/replay; it cannot expose a payload-only/event-only bridge record, orphan reservation, orphan Plan or half-published admission pair;
+- [ ] crash-before/crash-after barrier tests pass.
+
+### Catalog and execution authority
+
+- [ ] runtime catalog is an immutable view over one verified WorkerCatalogSnapshot;
+- [ ] material drift/missing/extra bytes fail;
+- [ ] the three pilot final workers have complete reviewed prompt/SKILL/guardrail/capability material;
+- [ ] Task 9 exports one canonical `PHASE2_STATIC_CATALOG_DIGEST` containing the unchanged pilot plus reviewed compatibility subset; earlier catalog digests remain replayable but cannot serve as alternate Phase 3 bases;
+- [ ] arbitrary handler/model/tool/MCP/path injection is impossible;
+- [ ] CapabilityGateway enforces the exact allowlist and produces typed ToolCallRecords/evidence;
+- [ ] gateway begin/invoke/finalize/reject signatures and exactly-once terminal transitions are frozen; adapters own validated success persistence, while EventRefusalAuditSink alone owns rejection persistence;
+- [ ] the service-owned ExecutionBridgeResolver admits only support-report-bound `ExecutionBridgeDescriptor`/config/handler providers and supplies the only bridge path to `run_plan/execute_node`; its two stages prepare authorized memory refs before InputSnapshot, continue one ordinal sequencer after RUNNING, merge providers by the one canonical key and reject missing/extra/forged/late/dynamic behavior. CatalogRuntime/RuntimeSupport also reject duplicate or competing `bridge_id` identities before reservation;
+- [ ] bridge evidence put + `BridgeEvidenceRecorded` is atomic; provider exception/timeout/cancellation or service crash without a provider return drains the replayed journal into the terminal NodeRun in canonical token/role order, with no payload-only/event-only orphan;
+- [ ] before execution, InputSnapshot memory refs equal the Phase 1-canonical union of base-authorized refs and every completed PreparedBridgeSet addition; the resolver rejects missing/extra/foreign/duplicate-ambiguous/late refs rather than accepting provider-local subset checks;
+- [ ] PromptAssembler keeps typed untrusted blocks out of system/skill/guardrail channels and returns no detached prompt. On `LLM`, the registered PromptAssemblyRecord persists once in `main`; before provider send, ModelGateway resolves that exact ref and rehashes the canonical request bytes against its assembler/version/order/request digest. Direct non-prompt bridge evidence + prompt-record TypedPayloadRefs survive in NodeRun plus successful Artifact Provenance, while a pre-assembly orphan block survives directly only on the no-Artifact failure path. On `DETERMINISTIC`, the prompt ref is `None`, PromptAssembler/ModelGateway are never called and actually consumed direct evidence still survives for replay without imports or live I/O;
+- [ ] pending/rejected capability results never enter main/public PayloadStore and never satisfy REQUIRED tool evidence; only validated `finalize_success` does;
+- [ ] compatibility workers remain static_legacy_only and are excluded from final-24/pilot counts.
+
+### Admission and budget
+
+- [ ] Phase 1 validation and RuntimeSupportReport both exist before the first plan reservation;
+- [ ] RuntimeSupportReport binds candidate/report/profile/catalog/registry digests plus every activated bridge descriptor/config/handler ref, rejects unsupported bridge semantics and has no budget/provider side effect;
+- [ ] AdmissionCandidate persistence + exact plan reservation is one RuntimeUnitOfWork, and frozen Plan persistence + `PlanAdmitted` append is a second; crash-before/after, injected mid-batch failure and retry prove both pairs all-or-none with no orphan authority;
+- [ ] plan reservation binds request/candidate and exact token/invocation/concurrency request;
+- [ ] node reservations are children of the active plan reservation and replay correctly;
+- [ ] REQUIRED authenticated same-digest approval is mandatory for every PlanSource; AUTO always fails;
+- [ ] reservation/approval/attestation authority is loaded from service-owned stores;
+- [ ] Phase 1 freeze is rerun from exact immutable inputs and no second plan digest exists;
+- [ ] PlanAdmitted binds Phase 1 report, RuntimeSupportReport, reservation, approval, optional attestation and frozen Plan PayloadRef;
+- [ ] dispatch re-verifies Plan, PlanAdmitted, context/catalog/registry/profile/report and active reservation.
+
+### Static runtime behavior
+
+- [ ] PRESET/PRESET_FALLBACK and already validated DYNAMIC **main** DAGs share the same support matrix and REQUIRED approval; Phase 2 invokes no Planner, while BOOTSTRAP is rejected before reservation until the Phase 5 profile;
+- [ ] accepted matrix covers LLM/deterministic, BLOCK/DEGRADE/SKIP, one/many, timeout/cancel and barrier;
+- [ ] conditions/reducers/debates/gates/stop conditions/retries/multi-writer are rejected before reservation;
+- [ ] BLOCK/DEGRADE/SKIP terminal behavior is distinct and tested;
+- [ ] bounded concurrency and dependency-many ordering are deterministic;
+- [ ] every NodeRun has real Plan and frozen InputSnapshot identity plus the required terminal reason. Every attempt handed to Task 7—including preflight failure—correlates to a real child reservation through BudgetLedger/lifecycle events. BLOCKED, SKIPPED, bridge-preparation-failed, allocation-denied and not-started-cancelled attempts have no child reservation/RUNNING/output; only COMPLETED/DEGRADED NodeRuns carry an output ArtifactRef;
+- [ ] every Artifact passes Phase 1 payload/provenance/digest validation;
+- [ ] cancellation/budget/timeout cannot publish a partial layer or leak a reservation.
+
+### Pilot and legacy compatibility
+
+- [ ] the reviewed three-final-worker pilot passes the full validate→support→reserve→approve→freeze→dispatch→replay path;
+- [ ] the authoritative and bundled stock-deep-dive YAML normalize identically and match the frozen config digest;
+- [ ] only a fully MAPPED graph produces compatibility bindings/draft/attestation;
+- [ ] legacy input_keys/base/unwrap, hard/soft/missing-output, output slot/SchemaRef and memory metadata are evidence-mapped;
+- [ ] PRESET/PRESET_FALLBACK compat execution requires one exact service-owned attestation and still requires approval;
+- [ ] full current stock-deep-dive all-success and parameterized per-node failure equivalence pass;
+- [ ] canonical terminal outcomes, inputs, artifact slots, output SchemaRefs and deterministic normalized payloads match;
+- [ ] no “manual e2e later” substitute remains.
+
+### Scope protection
+
+- [ ] no dynamic Planner, Bootstrap Lane 0, trial/holdout, optimizer, reducer engine, retry/repair or real trading authority was added;
+- [ ] existing legacy engine and workflow/executor.run_graph are unchanged;
+- [ ] unrelated worktree changes are not staged.
 
 ---
 
 ## Execution Handoff
 
-Two execution options:
+Implement in task order. Mandatory review checkpoints:
 
-1. **Subagent-Driven (recommended)** — dispatch a fresh subagent per task, review between tasks.
-2. **Inline Execution** — execute tasks in this session with checkpoints.
+1. after the Phase 1 Handoff Gate — exact imported ABI/goldens;
+2. after Tasks 1–2 — append-only replay and candidate-bound ledger;
+3. after Tasks 3 and 5 — material authority and closed runtime feature profile;
+4. after Task 6 — support-before-budget plus approval/freeze admission order;
+5. after Tasks 7–8 — evidence/provenance and crash-safe static execution;
+6. after Task 9.1 — three-final-worker pilot;
+7. after Tasks 9.2–10 — attested full legacy-graph equivalence and all Exit Gates.
+
+Do not begin Phase 3 until the Phase 2 Exit Gates are checked with test evidence. No execution method requires a particular optional skill package.
