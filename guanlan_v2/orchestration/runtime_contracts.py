@@ -50,6 +50,7 @@ from guanlan_v2.orchestration.digest import (
 )
 from guanlan_v2.orchestration.enums import DependencyPolicy, ExecutionKind, PlanSource
 from guanlan_v2.orchestration.catalog import Cardinality, ReadCategory
+from guanlan_v2.orchestration.events import LayerCommit
 from guanlan_v2.orchestration.refs import (
     CapabilityRef,
     ContentRef,
@@ -1131,6 +1132,13 @@ PHASE2_RUNTIME_MODELS: tuple[type[BaseModel], ...] = (
     PromptUntrustedBlockRef,
     PromptAssemblyRecord,
     BridgeEvidenceRecorded,
+    # Task 4 layer-commit payload. Reviewed promotion: Phase 1 deliberately keeps
+    # LayerCommit OUT of its payload registry (_R_EVENT_RECORD — event-log regime);
+    # the cumulative Phase-2 registry intentionally promotes it to a resolvable
+    # payload schema because the runtime pool persists it as a registry-validated
+    # PayloadStore payload behind the public LayerCommitted visibility event.
+    # CommittedArtifactRef rides nested inside it and is NOT registered separately.
+    LayerCommit,
 )
 
 

@@ -33,6 +33,7 @@ from guanlan_v2.orchestration.catalog import (
     ContentManifestEntry,
     EvidencePolicy,
     ExecutionSpec,
+    InputBinding,
     OutputBinding,
     ResolvedCapabilityMaterial,
     ResolvedTextMaterial,
@@ -61,6 +62,7 @@ from guanlan_v2.orchestration.enums import (
     DataBackend,
     DataMode,
     ExecutionKind,
+    NodeStatus,
     PlanSource,
     Tier,
     ToolCallRequirement,
@@ -243,6 +245,7 @@ def build_scenario(
     bridges=None,
     worker_read_categories=("context",),
     worker_caps=("cap.data",),
+    worker_inputs=(),
     context_requirements=None,
     node_over=None,
     source=PlanSource.DYNAMIC,
@@ -307,6 +310,7 @@ def build_scenario(
         system_prompt_ref=prompt_ref,
         capability_allowlist=tuple(sorted((cap_refs[c] for c in worker_caps), key=lambda r: (r.id, r.version))),
         read_categories=tuple(sorted(worker_read_categories)),
+        inputs=tuple(worker_inputs),
         outputs=(OutputBinding(name="primary", schema_ref=SR_OUT),),
         evidence_policy=EvidencePolicy(tool_calls=tool_calls),
         supported_modes=(DataMode.ONLINE,), can_emit_decision=False, decision_authority="none",
@@ -502,6 +506,72 @@ def test_multi_writer_rejected():
         context=sc.context, context_requirements=None, catalog=sc.runtime, bridge_view=sc.view,
         schema_registry=sc.registry, profile=sc.profile)
     assert report.supported is False and "multi_writer_unsupported" in _codes(report)
+
+
+# =========================================================================== #
+# 3b. affirmative allow-list — a value ABSENT from the profile's closed       #
+#     tuples is rejected, never assumed supported (invariant 5 hardening)     #
+# =========================================================================== #
+def _narrowed_profile(**over):
+    """A simulated future/changed profile built via ``model_construct`` (bypasses
+    the closed-matrix validator) — proves the checker trusts the profile's tuples
+    affirmatively rather than deny-listing known-today values."""
+    base = static_runtime_profile().model_dump()
+    base.update(over)
+    base["profile_digest"] = "1" * 64
+    return type(static_runtime_profile()).model_construct(**base)
+
+
+def test_plan_source_absent_from_profile_allowlist_rejected():
+    sc = build_scenario(source=PlanSource.DYNAMIC)
+    narrowed = _narrowed_profile(supported_plan_sources=(PlanSource.PRESET,))
+    report = sc.check(profile=narrowed)
+    assert report.supported is False and "plan_source_unsupported" in _codes(report)
+
+
+def test_execution_kind_absent_from_profile_allowlist_rejected():
+    sc = build_scenario()  # LLM worker
+    narrowed = _narrowed_profile(supported_execution_kinds=(ExecutionKind.DETERMINISTIC,))
+    report = sc.check(profile=narrowed)
+    assert report.supported is False and "execution_kind_unsupported" in _codes(report)
+
+
+def test_dependency_policy_absent_from_profile_allowlist_rejected():
+    from guanlan_v2.orchestration.enums import DependencyPolicy
+    from guanlan_v2.orchestration.spec import Dependency
+
+    sc = build_scenario(worker_inputs=(
+        InputBinding(name="feed", schema_ref=SR_OUT, required=False, cardinality="one"),))
+    n1 = sc.draft.nodes[0]
+    n2 = PlanNode(id="n2", worker_id="text.brw", writes_slot="s2", dependencies=(
+        Dependency(upstream_node_id="n1", artifact_slot="s1", inject_as="feed",
+                   policy=DependencyPolicy.DEGRADE,
+                   accept_statuses=frozenset({NodeStatus.COMPLETED, NodeStatus.DEGRADED})),))
+    draft = sc.draft.model_copy(update={"nodes": (n1, n2), "sink_node_ids": ("n1", "n2")})
+    phase1 = validate_plan_draft(draft, request=sc.request, context=sc.context,
+                                 catalog=sc.snapshot, schema_registry=sc.registry)
+    narrowed = _narrowed_profile(supported_dependency_policies=(DependencyPolicy.BLOCK,))
+    report = check_runtime_support(draft, phase1_report=phase1, context=sc.context,
+                                   context_requirements=None, catalog=sc.runtime,
+                                   bridge_view=sc.view, schema_registry=sc.registry,
+                                   profile=narrowed)
+    assert report.supported is False and "dependency_policy_unsupported" in _codes(report)
+    # the same draft is supported under the canonical (full) profile.
+    full = check_runtime_support(draft, phase1_report=phase1, context=sc.context,
+                                 context_requirements=None, catalog=sc.runtime,
+                                 bridge_view=sc.view, schema_registry=sc.registry,
+                                 profile=static_runtime_profile())
+    assert full.supported is True, full.issues
+
+
+def test_cardinality_absent_from_profile_allowlist_rejected():
+    sc = build_scenario(worker_inputs=(
+        InputBinding(name="feed", schema_ref=SR_OUT, required=False, cardinality="many"),))
+    narrowed = _narrowed_profile(supported_cardinalities=("one",))
+    report = sc.check(profile=narrowed)
+    assert report.supported is False and "cardinality_unsupported" in _codes(report)
+    # supported under the canonical (full) profile.
+    assert sc.check().supported is True
 
 
 # =========================================================================== #
@@ -707,22 +777,20 @@ def test_empty_memory_forbids_a_supplied_requirements():
 # =========================================================================== #
 # 6. purity: no store dereference, no ledger/event side effect                #
 # =========================================================================== #
-class _SpyStore:
-    def __init__(self):
-        self.calls = 0
+def test_checker_signature_is_structurally_store_free():
+    """The purity guarantee is structural: the checker's signature accepts only
+    pre-resolved immutable views — there is no store/resolver/ledger parameter
+    through which a dereference could even be requested."""
+    import inspect
 
-    def __getattr__(self, name):
-        self.calls += 1
-        raise AssertionError(f"the pure checker must not touch storage (accessed {name!r})")
-
-
-def test_checker_takes_no_store_and_never_dereferences():
-    sc = build_scenario()
-    spy = _SpyStore()
-    # the checker signature has no store parameter — the spy is simply never passed.
-    report = sc.check()
-    assert report.supported is True
-    assert spy.calls == 0
+    sig = inspect.signature(check_runtime_support)
+    assert set(sig.parameters) == {
+        "draft", "phase1_report", "context", "context_requirements",
+        "catalog", "bridge_view", "schema_registry", "profile",
+    }
+    for forbidden in ("store", "stores", "payload_store", "payloads", "resolver",
+                      "event_store", "events", "ledger", "budget"):
+        assert forbidden not in sig.parameters
 
 
 def test_no_event_or_budget_side_effect_on_supported_and_rejected():

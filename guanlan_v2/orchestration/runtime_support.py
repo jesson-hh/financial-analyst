@@ -135,6 +135,18 @@ def check_runtime_support(
         )
 
     # -- (2) closed support matrix (runtime is narrower than schema) ------- #
+    # Affirmative allow-list: a plan source is supported only if it is IN the
+    # profile's closed tuple — a future Phase-1 enum value can never reach
+    # supported=True without an explicit profile change.
+    if draft.source not in profile.supported_plan_sources:
+        issues.append(
+            _issue(
+                "plan_source_unsupported",
+                "draft.source",
+                f"plan source {draft.source.value!r} is not in the static profile's "
+                "supported_plan_sources allow-list",
+            )
+        )
     if draft.source is PlanSource.BOOTSTRAP or draft.phase == "bootstrap" or context is None:
         issues.append(
             _issue(
@@ -183,6 +195,15 @@ def check_runtime_support(
         if node.debate_id is not None:
             issues.append(_issue("debates_unsupported", "PlanNode.debate_id",
                                  f"node {node.id!r} carries a debate id", node_id=node.id))
+        # Affirmative allow-list: every dependency policy must be IN the profile's
+        # closed tuple (a future policy value is rejected, never assumed supported).
+        for dep in node.dependencies:
+            if dep.policy not in profile.supported_dependency_policies:
+                issues.append(_issue(
+                    "dependency_policy_unsupported", "Dependency.policy",
+                    f"node {node.id!r} dependency on {dep.upstream_node_id!r} uses policy "
+                    f"{dep.policy.value!r} which is not in the static profile's "
+                    "supported_dependency_policies allow-list", node_id=node.id))
 
     # -- (3) bridge static support (per node, per active bridge) ----------- #
     summaries: list[BridgeStaticSupportSummary] = []
@@ -196,6 +217,24 @@ def check_runtime_support(
             worker: "WorkerSpec" = catalog.worker(node.worker_id)
         except CatalogMaterialError:
             continue  # unknown worker is a Phase-1 concern (report already invalid)
+
+        # Affirmative allow-list: the worker's execution kind and every declared
+        # input cardinality must be IN the profile's closed tuples — a future
+        # Phase-1 enum/literal value is rejected, never assumed supported.
+        if worker.execution.kind not in profile.supported_execution_kinds:
+            issues.append(_issue(
+                "execution_kind_unsupported", "WorkerSpec.execution.kind",
+                f"worker {worker.id!r} execution kind {worker.execution.kind.value!r} is "
+                "not in the static profile's supported_execution_kinds allow-list",
+                node_id=node.id))
+        for binding in worker.inputs:
+            if binding.cardinality not in profile.supported_cardinalities:
+                issues.append(_issue(
+                    "cardinality_unsupported", "InputBinding.cardinality",
+                    f"worker {worker.id!r} input {binding.name!r} cardinality "
+                    f"{binding.cardinality!r} is not in the static profile's "
+                    "supported_cardinalities allow-list", node_id=node.id))
+
         node_params_digest = content_digest(dict(node.params))
         worker_digest = worker.semantic_digest()
         worker_cap_keys = {_ref_key(c) for c in worker.capability_allowlist}

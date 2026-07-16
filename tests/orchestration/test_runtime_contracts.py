@@ -545,6 +545,27 @@ def test_refusal_facts_added_by_identity_no_redefinition():
     assert rec.detail_payload_ref.namespace == "audit"
 
 
+# -- Task 4 pool payload: LayerCommit promoted into the cumulative registry - #
+def test_layer_commit_registered_by_identity_for_the_pool():
+    """Phase 1 deliberately keeps LayerCommit out of its payload registry
+    (_R_EVENT_RECORD); the cumulative Phase-2 registry promotes it because the
+    Task-4 pool persists it as a registry-validated PayloadStore payload behind
+    the public LayerCommitted event. CommittedArtifactRef rides nested and is
+    NOT independently resolvable."""
+    from guanlan_v2.orchestration import events
+
+    p1 = default_registry()
+    reg = phase2_runtime_registry(p1.registry_digest)
+    assert reg.resolve(SchemaRef(name="LayerCommit", version="1")) is events.LayerCommit
+    # the Phase-1 default registry stays blind to it (no Phase-1 mutation).
+    from guanlan_v2.orchestration.schema_registry import UnknownSchemaError
+    with pytest.raises(UnknownSchemaError):
+        p1.resolve(SchemaRef(name="LayerCommit", version="1"))
+    # the nested component is not registered separately.
+    with pytest.raises(Phase2RuntimeRegistryError):
+        reg.resolve(SchemaRef(name="CommittedArtifactRef", version="1"))
+
+
 # -- invariant 10: a later reviewed registry is accepted by exact digest ---- #
 def test_resolver_accepts_phase2_registry_by_exact_digest_no_latest():
     from guanlan_v2.orchestration.eventstore import SchemaRegistryResolver
