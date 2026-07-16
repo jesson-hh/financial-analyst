@@ -50,7 +50,8 @@ from guanlan_v2.orchestration.digest import (
 )
 from guanlan_v2.orchestration.enums import DependencyPolicy, ExecutionKind, PlanSource
 from guanlan_v2.orchestration.catalog import Cardinality, ReadCategory
-from guanlan_v2.orchestration.events import LayerCommit
+from guanlan_v2.orchestration.events import LayerCommit, PlanApproval
+from guanlan_v2.orchestration.spec import Plan, PlanValidationReport
 from guanlan_v2.orchestration.refs import (
     CapabilityRef,
     ContentRef,
@@ -897,7 +898,16 @@ class RuntimeSupportReport(_StrictModel):
 # Control facts (Tasks 6/8 own transitions, not alternate definitions)        #
 # --------------------------------------------------------------------------- #
 class AdmissionCandidate(_StrictModel):
-    """A support-validated candidate awaiting budget reservation (no dispatch grant)."""
+    """A support-validated candidate awaiting budget reservation (no dispatch grant).
+
+    Binds the exact request/draft/context/catalog/registry/legacy-attestation
+    inputs (the draft is bound by ``candidate_plan_digest``, which the Phase-1
+    ``compute_candidate_plan_digest`` seals over the whole executable projection),
+    the optional ContextRuntimeRequirements typed ref/digest, the Phase-1 and
+    runtime-support report digests and the one candidate plan digest. It carries
+    **no** approval or reservation authority — those are separate, later,
+    service-loaded facts (Task 6 review extension of the Task-5 field matrix).
+    """
 
     schema_version: Literal["1"] = "1"
     run_id: NonEmptyStr
@@ -908,7 +918,23 @@ class AdmissionCandidate(_StrictModel):
     runtime_profile_digest: DigestHex
     catalog_digest: DigestHex
     schema_registry_digest: DigestHex
+    context_content_digest: DigestHex | None = None
+    context_requirements_ref: TypedPayloadRef | None = None
     context_requirements_digest: DigestHex | None = None
+    legacy_attestation_digest: DigestHex | None = None
+
+    @model_validator(mode="after")
+    def _verify(self) -> "AdmissionCandidate":
+        if (self.context_requirements_ref is None) != (self.context_requirements_digest is None):
+            raise ValueError(
+                "context_requirements_ref and context_requirements_digest are both-set or both-none"
+            )
+        if self.context_requirements_ref is not None:
+            if self.context_requirements_ref.payload_ref.namespace != "main":
+                raise ValueError("context_requirements_ref must reference a main-namespace payload")
+            if self.context_requirements_ref.payload_ref.content_digest != self.context_requirements_digest:
+                raise ValueError("context_requirements_ref content digest must equal the bound digest")
+        return self
 
 
 class AdmissionInvalidated(_StrictModel):
@@ -940,16 +966,67 @@ class AdmissionInvalidated(_StrictModel):
 
 
 class PlanAdmitted(_StrictModel):
-    """The terminal admission fact: a candidate that reserved budget and was admitted."""
+    """The terminal admission fact: a candidate that reserved budget and was admitted.
+
+    Binds the complete admission authority chain (Task 6 review extension of the
+    Task-5 field matrix — the brief's nine-item binding list):
+
+    * ``request_id`` / ``candidate_plan_digest`` / ``plan_digest`` — the request,
+      candidate and final plan digest (``plan_digest == candidate_plan_digest``:
+      Phase-1 ``freeze_plan`` preserves the candidate digest, there is no second
+      plan digest);
+    * ``phase1_report_digest`` — the Phase-1 validation-report digest;
+    * ``support_report_digest`` / ``runtime_profile_digest`` — the RuntimeSupportReport
+      and StaticRuntimeProfile digests;
+    * ``catalog_digest`` / ``schema_registry_digest`` / ``context_content_digest``
+      plus the optional ContextRuntimeRequirements typed ref/digest;
+    * ``reservation_id`` + ``reservation_semantic_digest`` — the active plan
+      BudgetReservation id and its semantic digest;
+    * ``approval_event_id`` + ``approval_digest`` — the approved PlanApproval event
+      id and the approval's semantic digest;
+    * ``legacy_attestation_digest`` — the matching legacy-attestation digest when present;
+    * ``plan_payload_ref`` — the persisted frozen Plan's PayloadRef.
+    """
 
     schema_version: Literal["1"] = "1"
     run_id: NonEmptyStr
+    request_id: NonEmptyStr
     plan_digest: DigestHex
+    candidate_plan_digest: DigestHex
+    phase1_report_digest: DigestHex
     support_report_digest: DigestHex
-    reservation_id: NonEmptyStr
     runtime_profile_digest: DigestHex
     catalog_digest: DigestHex
     schema_registry_digest: DigestHex
+    context_content_digest: DigestHex | None = None
+    context_requirements_ref: TypedPayloadRef | None = None
+    context_requirements_digest: DigestHex | None = None
+    reservation_id: NonEmptyStr
+    reservation_semantic_digest: DigestHex
+    approval_event_id: NonEmptyStr
+    approval_digest: DigestHex
+    legacy_attestation_digest: DigestHex | None = None
+    plan_payload_ref: PayloadRef
+
+    @model_validator(mode="after")
+    def _verify(self) -> "PlanAdmitted":
+        if self.plan_digest != self.candidate_plan_digest:
+            raise ValueError(
+                "PlanAdmitted.plan_digest must equal candidate_plan_digest "
+                "(Phase-1 freeze preserves the candidate digest; there is no second plan digest)"
+            )
+        if (self.context_requirements_ref is None) != (self.context_requirements_digest is None):
+            raise ValueError(
+                "context_requirements_ref and context_requirements_digest are both-set or both-none"
+            )
+        if self.context_requirements_ref is not None:
+            if self.context_requirements_ref.payload_ref.namespace != "main":
+                raise ValueError("context_requirements_ref must reference a main-namespace payload")
+            if self.context_requirements_ref.payload_ref.content_digest != self.context_requirements_digest:
+                raise ValueError("context_requirements_ref content digest must equal the bound digest")
+        if self.plan_payload_ref.namespace != "main":
+            raise ValueError("plan_payload_ref must reference a main-namespace payload")
+        return self
 
 
 class RunResult(_StrictModel):
@@ -1139,6 +1216,19 @@ PHASE2_RUNTIME_MODELS: tuple[type[BaseModel], ...] = (
     # PayloadStore payload behind the public LayerCommitted visibility event.
     # CommittedArtifactRef rides nested inside it and is NOT registered separately.
     LayerCommit,
+    # Task 6 admission payloads. SAME reviewed promotion pattern as LayerCommit:
+    # Phase 1 keeps these authorization-surface / event-log records OUT of its
+    # payload registry (_R_PLAN_SURFACE / _R_EVENT_RECORD), but the service-owned
+    # admission coordinator persists each as a registry-validated PayloadStore
+    # payload behind a public RunEvent — the Phase-1 validation report and frozen
+    # Plan (step 4 / step 10) and the APPROVED/REJECTED PlanApproval (step 6). They
+    # are added to the *cumulative Phase-2 registry only*; the Phase-1
+    # default_registry / completeness partition is untouched. (PlanValidationReport
+    # and RuntimeSupportReport are the "both reports" persisted before any budget
+    # event; RuntimeSupportReport is already registered above.)
+    PlanValidationReport,
+    Plan,
+    PlanApproval,
 )
 
 

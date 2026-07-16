@@ -462,16 +462,65 @@ def test_admission_invalidated_binds_drift_without_dispatch_authority():
 
 
 def test_plan_admitted_and_run_result_are_strict():
+    # Task 6 review extension: PlanAdmitted binds the full nine-item admission
+    # authority chain (both report digests, reservation id + semantic digest,
+    # approval event id/digest, optional attestation digest and the frozen Plan
+    # PayloadRef). plan_digest must equal candidate_plan_digest.
+    plan_ref = PayloadRef(namespace="main", object_id="plan-1", content_digest="9" * 64)
     pa = PlanAdmitted(
-        run_id="run-1", plan_digest=DA, support_report_digest=DB, reservation_id="res-1",
-        runtime_profile_digest=DC, catalog_digest=DD, schema_registry_digest="e" * 64,
+        run_id="run-1", request_id="req-1", plan_digest=DA, candidate_plan_digest=DA,
+        phase1_report_digest=DB, support_report_digest=DC, runtime_profile_digest=DD,
+        catalog_digest="e" * 64, schema_registry_digest="f" * 64,
+        reservation_id="res-1", reservation_semantic_digest="1" * 64,
+        approval_event_id="ev-1", approval_digest="2" * 64, plan_payload_ref=plan_ref,
     )
+    assert pa.plan_digest == pa.candidate_plan_digest
     with pytest.raises(ValidationError):
-        pa.plan_digest = DB
+        pa.plan_digest = DB  # frozen
+    # plan_digest != candidate_plan_digest is rejected (no second plan digest).
+    with pytest.raises(ValidationError):
+        PlanAdmitted(
+            run_id="run-1", request_id="req-1", plan_digest=DA, candidate_plan_digest=DB,
+            phase1_report_digest=DB, support_report_digest=DC, runtime_profile_digest=DD,
+            catalog_digest="e" * 64, schema_registry_digest="f" * 64,
+            reservation_id="res-1", reservation_semantic_digest="1" * 64,
+            approval_event_id="ev-1", approval_digest="2" * 64, plan_payload_ref=plan_ref,
+        )
+    # a non-main frozen Plan payload ref is rejected.
+    with pytest.raises(ValidationError):
+        PlanAdmitted(
+            run_id="run-1", request_id="req-1", plan_digest=DA, candidate_plan_digest=DA,
+            phase1_report_digest=DB, support_report_digest=DC, runtime_profile_digest=DD,
+            catalog_digest="e" * 64, schema_registry_digest="f" * 64,
+            reservation_id="res-1", reservation_semantic_digest="1" * 64,
+            approval_event_id="ev-1", approval_digest="2" * 64,
+            plan_payload_ref=PayloadRef(namespace="sealed", object_id="p", content_digest="9" * 64),
+        )
     rr = RunResult(run_id="run-1", plan_digest=DA, terminal_status="completed")
     assert rr.settled_tokens == 0
     with pytest.raises(ValidationError):
         RunResult(run_id="r", plan_digest=DA, terminal_status="exploded")  # not a closed status
+
+
+def test_admission_candidate_optional_context_requirements_ref_coherence():
+    # Task 6 review extension: the optional ContextRuntimeRequirements typed ref +
+    # digest are both-set-or-both-none and the digest must equal the ref content.
+    ref = _typed_main(schema="ContextRuntimeRequirements", digest=DA)
+    ok = AdmissionCandidate(
+        run_id="run-1", request_id="req-1", candidate_plan_digest=DA, support_report_digest=DB,
+        phase1_report_digest=DC, runtime_profile_digest=DD, catalog_digest="e" * 64,
+        schema_registry_digest="f" * 64, context_content_digest="7" * 64,
+        context_requirements_ref=ref, context_requirements_digest=DA,
+        legacy_attestation_digest="8" * 64,
+    )
+    assert ok.context_requirements_ref == ref
+    with pytest.raises(ValidationError):
+        AdmissionCandidate(
+            run_id="run-1", request_id="req-1", candidate_plan_digest=DA, support_report_digest=DB,
+            phase1_report_digest=DC, runtime_profile_digest=DD, catalog_digest="e" * 64,
+            schema_registry_digest="f" * 64, context_requirements_ref=ref,
+            context_requirements_digest=DB,  # != ref content digest
+        )
 
 
 # =========================================================================== #
