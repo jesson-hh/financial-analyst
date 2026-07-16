@@ -587,9 +587,15 @@ class ArtifactPool:
         Binds the real run / Plan / node / layer / attempt identity, validates that
         every bound input is a declared Worker input with matching cardinality, that
         the outer binding order follows the WorkerSpec declaration order, and that a
-        ``ready`` snapshot carries every required input. Persists the registered
-        InputSnapshot so the frozen read-set is durable, and returns it. DataResult
-        refs obtained *during* execution never enter this pre-node snapshot.
+        ``ready`` snapshot carries every required input **and only artifacts already
+        made visible by a layer barrier** — each bound ref must resolve through the
+        pool's committed index with its exact identity/content digest, so a staged
+        or fabricated ref can never enter an executable read-set. A
+        ``terminal_partial`` snapshot may bind unavailable refs (that is its
+        purpose: binding a BLOCKED/SKIPPED/early-terminal NodeRun to evidence).
+        Persists the registered InputSnapshot so the frozen read-set is durable, and
+        returns it. DataResult refs obtained *during* execution never enter this
+        pre-node snapshot.
         """
         self._require_run(run_id, "freeze_input_snapshot")
         if plan.plan_id != self._plan.plan_id or plan.plan_digest != self._plan.plan_digest:
@@ -630,6 +636,19 @@ class ArtifactPool:
                     raise InputSnapshotError(
                         f"readiness='ready' requires the required input {declared.name!r}"
                     )
+            # a ready read-set may bind only barrier-committed artifacts: each ref
+            # must resolve through the committed index with its exact identity and
+            # content digest (staged/fabricated refs are structurally rejected).
+            for binding in bound_artifact_inputs:
+                for ref in binding.artifact_refs:
+                    try:
+                        self.committed(ref)
+                    except ArtifactNotCommitted as exc:
+                        raise InputSnapshotError(
+                            f"readiness='ready' input {binding.input_name!r} binds "
+                            f"artifact {ref.artifact_id!r} that does not resolve as "
+                            f"committed: {exc}"
+                        ) from exc
 
         snapshot = InputSnapshot.build(
             snapshot_id=f"insnap-{run_id}-{node.id}-L{layer_index}-a{attempt}",

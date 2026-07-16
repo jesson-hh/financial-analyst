@@ -713,6 +713,14 @@ def test_replay_derives_committed_visibility_only_from_layer_committed_events():
 # =========================================================================== #
 # freeze_input_snapshot — identity, ordering, readiness matrix                #
 # =========================================================================== #
+def _committed_layer0(pool, plan):
+    """Stage + barrier-commit pa/pb so their refs are legally bindable as ready."""
+    ra, rb, _a, _b = _stage_layer0_pa_pb(pool, plan)
+    runs = (_node_run(plan, node_id="pa"), _node_run(plan, node_id="pb"))
+    pool.commit_layer(0, node_runs=runs, expected_outputs=_expected(pool, runs), idempotency_key="c0")
+    return ra, rb
+
+
 def _consumer_node(plan):
     return next(n for n in plan.nodes if n.id == "consumer")
 
@@ -743,11 +751,9 @@ def test_freeze_ready_snapshot_binds_the_real_identity():
 
 def test_freeze_ready_one_and_many_bindings_follow_worker_declaration_order():
     pool, _stores, plan, _ = _pool()
-    one = InputArtifactBinding(input_name="a", cardinality="one", artifact_refs=(_in_ref(content=DA),))
-    many = InputArtifactBinding(
-        input_name="b", cardinality="many",
-        artifact_refs=(_in_ref(content=DB, artifact_id="m1"), _in_ref(content=DC, artifact_id="m2")),
-    )
+    ra, rb = _committed_layer0(pool, plan)
+    one = InputArtifactBinding(input_name="a", cardinality="one", artifact_refs=(ra,))
+    many = InputArtifactBinding(input_name="b", cardinality="many", artifact_refs=(ra, rb))
     snap = _freeze(pool, plan, bound_artifact_inputs=(one, many))
     assert [b.input_name for b in snap.artifact_inputs] == ["a", "b"]
     # outer order must follow the WorkerSpec declaration order (a before b).
@@ -757,7 +763,7 @@ def test_freeze_ready_one_and_many_bindings_follow_worker_declaration_order():
 
 def test_freeze_many_binding_preserves_declaration_order_in_the_digest():
     pool, _stores, plan, _ = _pool()
-    r1, r2 = _in_ref(content=DB, artifact_id="m1"), _in_ref(content=DC, artifact_id="m2")
+    r1, r2 = _committed_layer0(pool, plan)
     fwd = _freeze(pool, plan, bound_artifact_inputs=(
         InputArtifactBinding(input_name="b", cardinality="many", artifact_refs=(r1, r2)),))
     rev = _freeze(pool, plan, bound_artifact_inputs=(
@@ -806,8 +812,57 @@ def test_terminal_partial_records_missing_inputs_and_cannot_be_executed():
     assert pool.assert_executable(ready) is ready
 
 
+def test_ready_freeze_with_an_uncommitted_ref_fails():
+    pool, _stores, plan, _ = _pool()
+    # a fabricated ref that was never staged or committed is rejected.
+    fabricated = InputArtifactBinding(input_name="a", cardinality="one", artifact_refs=(_in_ref(),))
+    with pytest.raises(InputSnapshotError) as excinfo:
+        _freeze(pool, plan, bound_artifact_inputs=(fabricated,))
+    assert "'a'" in str(excinfo.value) and "in-1" in str(excinfo.value)
+    # a staged-but-uncommitted ref is equally rejected — the barrier is the boundary.
+    art = _artifact(plan, node_id="pa", artifact_id="art-pa")
+    staged_ref = pool.stage(art, layer_index=0, node_run=_node_run(plan, node_id="pa"),
+                            idempotency_key="s-pa")
+    staged = InputArtifactBinding(input_name="a", cardinality="one", artifact_refs=(staged_ref,))
+    with pytest.raises(InputSnapshotError):
+        _freeze(pool, plan, bound_artifact_inputs=(staged,))
+
+
+def test_ready_freeze_with_all_committed_refs_passes():
+    pool, _stores, plan, _ = _pool()
+    ra, rb = _committed_layer0(pool, plan)
+    snap = _freeze(pool, plan, bound_artifact_inputs=(
+        InputArtifactBinding(input_name="a", cardinality="one", artifact_refs=(ra,)),
+        InputArtifactBinding(input_name="b", cardinality="many", artifact_refs=(rb,)),
+    ))
+    assert snap.readiness == "ready"
+    assert pool.assert_executable(snap) is snap
+
+
+def test_terminal_partial_may_still_bind_uncommitted_refs():
+    # terminal_partial exists to bind BLOCKED/SKIPPED/early-terminal NodeRuns to the
+    # evidence that WAS available — committed-ness is deliberately not required.
+    pool, _stores, plan, _ = _pool()
+    art = _artifact(plan, node_id="pa", artifact_id="art-pa")
+    staged_ref = pool.stage(art, layer_index=0, node_run=_node_run(plan, node_id="pa"),
+                            idempotency_key="s-pa")
+    partial = pool.freeze_input_snapshot(
+        _consumer_node(plan), run_id="run-1", plan=plan, layer_index=1, attempt=1,
+        context_snapshot_ref=_ctx_ref(),
+        bound_artifact_inputs=(
+            InputArtifactBinding(input_name="a", cardinality="one", artifact_refs=(staged_ref,)),
+        ),
+        data_result_refs=(), memory_record_refs=(),
+        readiness="terminal_partial", missing_input_names=("b",),
+    )
+    assert partial.readiness == "terminal_partial"
+    with pytest.raises(InputSnapshotError):
+        pool.assert_executable(partial)
+
+
 def test_context_data_memory_and_artifact_changes_each_move_the_snapshot_digest():
     pool, _stores, plan, _ = _pool()
+    ra, _rb = _committed_layer0(pool, plan)
     base = _freeze(pool, plan)
 
     ctx_changed = _freeze(pool, plan, context_snapshot_ref=_ctx_ref(content=DB))
@@ -823,7 +878,7 @@ def test_context_data_memory_and_artifact_changes_each_move_the_snapshot_digest(
     assert mem_changed.content_digest != base.content_digest
 
     art_changed = _freeze(pool, plan, bound_artifact_inputs=(
-        InputArtifactBinding(input_name="a", cardinality="one", artifact_refs=(_in_ref(content=DB),)),))
+        InputArtifactBinding(input_name="a", cardinality="one", artifact_refs=(ra,)),))
     assert art_changed.content_digest != base.content_digest
 
 
@@ -856,3 +911,106 @@ def test_derive_expected_outputs_comes_from_the_frozen_worker_binding():
         ExpectedOutput(node_id="multi", output_key="primary", schema_ref=SR_UP),
         ExpectedOutput(node_id="multi", output_key="secondary", schema_ref=SR_SEC),
     }
+
+
+# =========================================================================== #
+# Integration — the pool constructs against the PRODUCTION cumulative registry #
+# =========================================================================== #
+def test_pool_round_trips_against_the_production_phase2_runtime_registry():
+    """Cross-task contract pin: the production ``phase2_runtime_registry`` resolves
+    ``LayerCommit@1`` (Task 5 fix ``a5c4f3c``), so an ArtifactPool constructed
+    against the real cumulative registry works end-to-end — construct, stage,
+    commit_layer, committed(), replay — with no hand-registered control schema."""
+    # local import: the production registry is Task 5's module; keep the coupling
+    # inside this one integration test.
+    from guanlan_v2.orchestration.enums import PortfolioRating
+    from guanlan_v2.orchestration.runtime_contracts import (
+        PHASE2_BASE_REGISTRY_DIGEST,
+        phase2_runtime_registry,
+    )
+    from guanlan_v2.orchestration.schemas import ResearchPlan
+
+    runtime_reg = phase2_runtime_registry(PHASE2_BASE_REGISTRY_DIGEST)
+    # the seam that used to be masked by the hand-built test registry:
+    assert runtime_reg.resolve(SchemaRef(name="LayerCommit", version="1")) is LayerCommit
+    assert runtime_reg.resolve(SchemaRef(name="InputSnapshot", version="1")) is InputSnapshot
+
+    # a one-node plan whose output schema is a production-registered payload.
+    sr_plan = SchemaRef(name="ResearchPlan", version="1")
+    w, mats, entries = _worker(
+        "prod.worker", outputs=(OutputBinding(name="primary", schema_ref=sr_plan),)
+    )
+    catalog = build_catalog_snapshot(
+        catalog_version="cat.prod", content_manifest=tuple(entries), skill_manifest=(),
+        capability_manifest=(), workers=(w,), resolved_material=tuple(mats),
+    )
+    context = _context()
+    node = PlanNode(id="prod", worker_id="prod.worker", writes_slot="sp")
+    ctx_ref = PayloadRef(namespace="main", object_id="ctx-obj", content_digest=context.content_digest)
+    draft = PlanDraft(
+        id="plan.prod", run_id="run-1", request_id="req-1", phase="main",
+        source=PlanSource.DYNAMIC, goal="g", as_of=_dt(), mode=DataMode.ONLINE,
+        context_snapshot_ref=ctx_ref, nodes=(node,), sink_node_ids=("prod",),
+        catalog_version=catalog.catalog_version, catalog_digest=catalog.catalog_digest,
+        schema_registry_digest=runtime_reg.registry_digest,
+        approval_policy=ApprovalPolicy.REQUIRED,
+        budget_request_tokens=1000, budget_request_llm_invocations=1, max_concurrency=1,
+    )
+    request = OrchestrationRequest(
+        request_id="req-1", goal="g", workflow="orchestrate_only",
+        approval_policy=ApprovalPolicy.REQUIRED,
+    )
+    report = validate_plan_draft(
+        draft, request=request, context=context, catalog=catalog,
+        schema_registry=runtime_reg, legacy_attestation=None,
+    )
+    assert report.valid, report.issues
+    cand = report.candidate_plan_digest
+    reservation = BudgetReservation(
+        reservation_id="res-p", ledger_id="ledger-1", run_id="run-1", request_id="req-1",
+        candidate_plan_digest=cand, scope_type="plan", scope_id="plan.prod",
+        reserved_tokens=1000, reserved_llm_invocations=1, reserved_concurrency=1,
+        status="reserved", reserved_at=_dt(),
+    )
+    approval = PlanApproval(
+        request_id="req-1", candidate_plan_digest=cand, decision=ApprovalDecision.APPROVED,
+        actor_id="rev-1", decided_at=_dt(),
+    )
+    plan = freeze_plan(
+        draft, request=request, context=context, catalog=catalog, schema_registry=runtime_reg,
+        legacy_attestation=None, report=report, reservation=reservation, approval=approval,
+    )
+
+    resolver = SchemaRegistryResolver()
+    digest = resolver.register(runtime_reg)
+    clk = AdvancingClock()
+    stores = RuntimeStores(resolver=resolver, clock=clk)
+    # constructor succeeds against the production registry (LayerCommit resolves).
+    pool = ArtifactPool(stores=stores, registry_digest=digest, plan=plan, catalog=catalog, clock=clk)
+
+    payload = ResearchPlan(recommendation=PortfolioRating.BUY, rationale="thesis")
+    art = Artifact.build(
+        artifact_id="art-prod", run_id="run-1", producer_node_id="prod", slot="sp",
+        output_key="primary", kind="k", payload_schema_ref=sr_plan, payload=payload,
+        rendered_md="# r", input_refs=(), provenance=_provenance(plan.plan_digest),
+        numbers=(), badges=(), created_at=_dt(45),
+    )
+    nr = NodeRun(
+        node_run_id="nr-prod", run_id="run-1", plan_id=plan.plan_id,
+        plan_digest=plan.plan_digest, node_id="prod", worker_id="prod.worker",
+        status=NodeStatus.COMPLETED, attempt_id="att-1", attempt=1,
+        input_snapshot_digest="1" * 64, output_keys=("primary",),
+        output_artifact_ids=("art-prod",),
+    )
+    aref = pool.stage(art, layer_index=0, node_run=nr, idempotency_key="s-prod")
+    with pytest.raises(ArtifactNotCommitted):
+        pool.committed(aref)  # staged-only, even against the production registry
+    lc = pool.commit_layer(
+        0, node_runs=(nr,), expected_outputs=pool.derive_expected_outputs((nr,)),
+        idempotency_key="c-prod",
+    )
+    assert isinstance(lc, LayerCommit)
+    assert pool.committed(aref) == art
+    assert pool.committed_output("prod", "primary") == art
+    # replay also resolves the persisted LayerCommit payload via the production registry.
+    assert pool.replay().committed_output("prod", "primary") == art
