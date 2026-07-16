@@ -1,0 +1,50 @@
+# Phase 2 · Task 9.2 — reviewed static-legacy compatibility catalog manifest.
+#
+# This manifest pins the *cumulative end-of-Phase-2 static catalog*: the three
+# unchanged `final` pilot workers (from `phase2-pilot-v1`) plus the complete
+# `compat.*` compatibility subset that mirrors a reviewed connected core of the
+# frozen 18-agent `stock-deep-dive` legacy graph.
+#
+# The compat workers are NOT declared field-by-field here: each embeds a
+# `CompatibilityBinding` whose `legacy_mapping_digest` is derived from the reviewed
+# `LegacyGraphMapping` (see `guanlan_v2.orchestration._legacy_compat.build_mapping`),
+# so the worker set is built programmatically from that reviewed mapping + the
+# on-disk materials under `materials/stock-deep-dive-compat-v1/`. This manifest is
+# the reviewed pin: `guanlan_v2.orchestration.presets.load_compat_catalog` rebuilds
+# the snapshot through the Phase-1 material-aware builder and requires the sealed
+# `catalog_digest` below to match. Editing any material — or the reviewed mapping —
+# without regenerating this digest fails startup. The digest is location- and
+# load-order-independent (materials are addressed by ref identity).
+
+catalog_version: "phase2-static-v1"
+
+# Legacy source this compatibility subset mirrors (must match the frozen Task-0
+# fixture source schema + normalized config digest).
+legacy_source_schema: "financial_analyst.swarm.stock-deep-dive@1"
+legacy_source_config_digest: "5a175cb91de0cff8358da93272a4ac26fb29013a833a062a096fae56be5b9dbb"
+
+# Shared compat materials (digests recomputed from these physical bytes at load).
+materials:
+  prompts:
+    - id: compat.prompt.mirror
+      file: prompts/compat_mirror.md
+  guardrails:
+    - id: compat.guard.discipline
+      file: guardrails/compat_discipline.md
+  skills:
+    - id: compat.skill.mirror
+      file: skills/compat_mirror.md
+
+# Reviewed compat.* mirror worker ids (built from the reviewed mapping in code).
+compat_workers:
+  - compat.quote_fetcher
+  - compat.evidence_loader
+  - compat.fundamental_analyst
+  - compat.bull_advocate
+  - compat.bear_advocate
+  - compat.risk_officer
+  - compat.report_writer
+
+# Pinned cumulative static catalog digest (sha256+cjson-v1 over the sealed
+# WorkerCatalogSnapshot: 3 final pilot workers + 7 compat.* workers + materials).
+catalog_digest: "3b51204e833d1b68b1272ca5cd737269918c12c7071cbe404b84c1937831cda7"

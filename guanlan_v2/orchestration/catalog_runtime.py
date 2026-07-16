@@ -96,6 +96,7 @@ __all__ = [
     "CatalogRuntime",
     "TrustedFactoryRegistry",
     "load_pilot_catalog",
+    "build_text_material",
     "PILOT_CATALOG_PATH",
     "PILOT_MATERIALS_DIR",
     # -- Task 5 execution-bridge descriptor indexing ----------------------- #
@@ -371,6 +372,26 @@ class CatalogRuntime:
                 f"capability digest mismatch for {ref.id}@{ref.version}"
             )
         return mat
+
+    def resolved_materials(
+        self,
+    ) -> tuple[tuple[ResolvedTextMaterial, ...], tuple[ResolvedCapabilityMaterial, ...]]:
+        """Every resolved text + capability material backing this runtime's snapshot.
+
+        Returns ``(text_materials, capability_materials)`` in manifest order
+        (content then skill for text), each already digest-verified at build. A
+        consumer that assembles a *cumulative* snapshot (e.g. the end-of-Phase-2
+        static catalog = pilot final workers + compatibility subset) reuses these
+        exact resolved materials rather than re-reading physical bytes, so the merge
+        is location / load-order independent.
+        """
+        text: list[ResolvedTextMaterial] = []
+        for entry in self._snapshot.content_manifest:
+            text.append(self.text(entry.ref))
+        for entry in self._snapshot.skill_manifest:
+            text.append(self.text(entry.ref))
+        caps = tuple(self.capability(entry.ref) for entry in self._snapshot.capability_manifest)
+        return tuple(text), caps
 
     def resolve_worker(self, worker_id: str) -> ResolvedWorkerRuntime:
         """Return the pre-checked materials bound to ``worker_id``.
@@ -715,9 +736,15 @@ def _schema_ref(token: str) -> SchemaRef:
     return SchemaRef(name=name, version=version)
 
 
-def _text_material(
+def build_text_material(
     *, id: str, version: str, kind: str, raw: bytes
 ) -> tuple[ContentRef, ResolvedTextMaterial]:
+    """Build a text material + its content-digest-sealed :class:`ContentRef` from bytes.
+
+    The single reviewed place a physical text material's ``content_digest`` is
+    computed from its bytes (used by the pilot loader and the Task-9 compatibility
+    catalog assembler); a caller never pins a digest by hand.
+    """
     tmp = ResolvedTextMaterial(
         ref=ContentRef(id=id, version=version, content_digest=_DIGEST_PLACEHOLDER),
         kind=kind,
@@ -726,6 +753,10 @@ def _text_material(
     digest = catalog_material_digest(tmp)
     ref = ContentRef(id=id, version=version, content_digest=digest)
     return ref, ResolvedTextMaterial(ref=ref, kind=kind, raw_utf8=raw)
+
+
+#: backwards-compatible internal alias (pre-Task-9 call sites).
+_text_material = build_text_material
 
 
 def _capability_material(entry: Mapping[str, Any]) -> tuple[CapabilityRef, ResolvedCapabilityMaterial]:
