@@ -422,13 +422,13 @@ git commit -m "feat(orchestration): shared enums (phase1)"
 - `ContentRef(id, version, content_digest)`.
 - `CapabilityRef(id, version, content_digest)`; transport exists only on the corresponding manifest entry, so it cannot be double-written inconsistently.
 - `PayloadRef(namespace, object_id, content_digest)`, namespace `main | sealed | review | audit`. `audit` is non-public, never a valid ordinary Artifact/InputSnapshot/public-event source, and exists so later phases can persist typed refusal details without mislabeling them as main data.
-- `TypedPayloadRef(schema_ref: SchemaRef, payload_ref: PayloadRef)`: generic immutable typed evidence reference. Its semantic projection includes the exact SchemaRef plus payload namespace/content digest and excludes only `payload_ref.object_id`; owners that expose public/runtime evidence additionally require `namespace="main"`.
+- `PayloadRef(schema_ref: SchemaRef, payload_ref: PayloadRef)`: generic immutable typed evidence reference. Its semantic projection includes the exact SchemaRef plus payload namespace/content digest and excludes only `payload_ref.object_id`; owners that expose public/runtime evidence additionally require `namespace="main"`.
 - `SchemaManifestEntry(schema_ref, json_schema_digest)`.
 - `SchemaRegistry.register(model)`, `resolve(ref)`, `validate_payload(ref, payload)`, `manifest()`, `seal()`, `registry_digest`.
 
 Logical refs never contain a physical file path. Content/capability logical IDs, versions and expected digests are semantic authorization identity; a later catalog resolver owns physical storage.
 
-`PayloadRef.object_id` is an audit/dereference locator. A parent semantic digest projects a payload ref as `namespace + content_digest` and excludes the random `object_id`; changing referenced payload content therefore changes the parent semantic digest without making it depend on a storage-assigned ID. `TypedPayloadRef` is the only generic public wrapper when both the schema identity and payload locator are needed for deterministic replay.
+`PayloadRef.object_id` is an audit/dereference locator. A parent semantic digest projects a payload ref as `namespace + content_digest` and excludes the random `object_id`; changing referenced payload content therefore changes the parent semantic digest without making it depend on a storage-assigned ID. `PayloadRef` is the only generic public wrapper when both the schema identity and payload locator are needed for deterministic replay.
 
 Registry invariants:
 
@@ -455,7 +455,7 @@ Required tests:
 - conflicting registration rejection;
 - payload extra field rejection;
 - closed payload-namespace matrix, including `audit` rejection from main/public visibility paths;
-- `TypedPayloadRef` SchemaRef sensitivity, object-ID relocation invariance and main-only checks at public evidence consumers;
+- `PayloadRef` SchemaRef sensitivity, object-ID relocation invariance and main-only checks at public evidence consumers;
 - reverse registration order produces the same manifest/digest;
 - changed model JSON schema changes registry digest;
 - mutation after seal rejected.
@@ -690,7 +690,7 @@ git commit -m "feat(orchestration): freeze typed DataResult and PIT contracts"
 
 **Interfaces:**
 - Produces `ArtifactRef`, `ToolCallRecord`, `Provenance`, `NumberAnchor`, `Artifact`, `ArtifactRelation`, `NodeRun`.
-- Uses `SchemaRef`, `PayloadRef` and Task 3 `TypedPayloadRef` for payload type/version, dereference identity and reproducibility.
+- Uses `SchemaRef`, `PayloadRef` and Task 3 `PayloadRef` for payload type/version, dereference identity and reproducibility.
 
 Artifact has three distinct digest meanings:
 
@@ -705,8 +705,10 @@ Do not exclude the whole Provenance object from reproducibility. Changing only p
 - `validate_artifact_payload(artifact, registry)` resolves SchemaRef and validates payload.
 - persisted content/reproducibility/audit digests are computed by a pure builder or verified on load.
 - `rendered_from_payload_digest` must bind the rendered source payload.
-- `Provenance.execution_evidence_refs: tuple[TypedPayloadRef, ...]` is immutable, deterministically ordered and duplicate-free. It records persisted runtime evidence that is not already represented by an Artifact/InputSnapshot/ToolCallRecord field (for example a later phase's prompt-assembly record); every ref must be `main`, registry-resolvable and content-matching. Full SchemaRef + namespace/content enter reproducibility, while object IDs enter audit/dereference identity only.
-- `NodeRun.execution_evidence_refs` records the same pre-output evidence refs even for INCOMPLETE/FAILED/TIMED_OUT/CANCELLED attempts. On COMPLETED/DEGRADED, the produced Artifact Provenance must contain the exact same tuple; evidence cannot disappear because execution produced no Artifact.
+- `ToolCallRecord@1` is a successful finalized capability-call fact with a service-issued strict positive `call_ordinal`, exact `CapabilityRef`, exact main `request_ref: PayloadRef` and `result_ref: PayloadRef`, verified request/result semantic digests, and audit-only provider/runtime identity. It cannot represent pending/rejected/cache-only work. The two typed refs must match the capability's request/output SchemaRefs; object-ID relocation is audit-only.
+- `Provenance.tool_call_records: tuple[ToolCallRecord, ...]` and `Provenance.data_result_refs: tuple[PayloadRef, ...]` are immutable, duplicate-free and canonically ordered. Tool calls order by service `call_ordinal`; data results order by the Phase 1 canonical typed semantic projection `(SchemaRef, namespace, content_digest)`, and every ref is main/registry/content verified. A finalized tool result that is also a consumed DataResult must cross-match the exact typed result ref; a verified cache hit may appear only in `data_result_refs` and cannot fabricate a ToolCallRecord.
+- `Provenance.execution_evidence_refs: tuple[PayloadRef, ...]` is immutable, deterministically ordered and duplicate-free. It records persisted runtime evidence that is not already represented by an Artifact/InputSnapshot/ToolCallRecord/data-result field (for example a later phase's prompt-assembly record); every ref must be `main`, registry-resolvable and content-matching. Full SchemaRef + namespace/content enter reproducibility, while object IDs enter audit/dereference identity only.
+- `NodeRun` freezes the exact `input_snapshot_digest`, `tool_call_records`, `data_result_refs` and `execution_evidence_refs` for every terminal status, including INCOMPLETE/FAILED/TIMED_OUT/CANCELLED after a successful data/tool step. On COMPLETED/DEGRADED, the produced Artifact Provenance must contain all three evidence tuples exactly equal to NodeRun; on a no-Artifact path NodeRun remains their sole main run-level carrier. Evidence cannot disappear merely because later prompt/model/output work failed.
 - ArtifactRef random artifact ID is audit identity; schema/producer/slot/output/content digest form its semantic projection.
 - NumberAnchor value is finite; `is_unsourced` is explicit and never silently treated as sourced.
 - NodeRun counters are non-negative; attempt starts at one.
@@ -722,11 +724,13 @@ Required tests:
 4. provider response ID/wall-clock changes audit digest only;
 5. payload schema/version and declared digest mismatch rejection;
 6. rendered digest mismatch rejection;
-7. execution-evidence SchemaRef/namespace/content mismatch and duplicate/order rejection; object-ID-only relocation changes audit but not reproducibility;
-8. successful Artifact/NodeRun evidence-ref equality and failed/no-Artifact NodeRun evidence retention;
-9. non-finite NumberAnchor rejection;
-10. NodeRun status/counter/attempt matrix;
-11. all models reject extra fields and mutation.
+7. ToolCallRecord ordinal/capability/request/result typed-ref/schema/digest matrix; pending/rejected/cache-only work cannot construct one;
+8. tool-call/data-result/execution-evidence SchemaRef/namespace/content mismatch and duplicate/order rejection; object-ID-only relocation changes audit but not reproducibility;
+9. successful Artifact/NodeRun equality across all three evidence tuples and failed/no-Artifact NodeRun retention after data success, tool success, prompt persistence and later failure;
+10. cache-hit DataResult without ToolCallRecord is retained honestly and cannot satisfy tool-call evidence;
+11. non-finite NumberAnchor rejection;
+12. NodeRun status/counter/attempt/input-snapshot matrix;
+13. all models reject extra fields and mutation.
 
 - [ ] **Step 2: Run tests to verify failure**
 
@@ -818,7 +822,7 @@ git commit -m "feat(orchestration): add minimal static compatibility payloads"
 **Interfaces:**
 - `ClockSpec`, `DataContext`.
 - `RunBudget`, `BudgetReservation`.
-- `MemoryRecordRef`, `EmptyMemorySnapshot`, `EmptyMemorySelection`, `ContextSnapshot`, `InputSnapshot`, `RunContext`.
+- `MemoryRecordRef`, `EmptyMemorySnapshot`, `EmptyMemorySelection`, `ContextRuntimeRequirements`, `ContextSnapshot`, `InputArtifactBinding`, `InputSnapshot`, `RunContext`.
 
 **Closed `DataContext@1` field matrix:**
 
@@ -833,12 +837,21 @@ git commit -m "feat(orchestration): add minimal static compatibility payloads"
 
 - `MemoryRecordRef(schema_version: Literal["1"], record_id: LogicalId, revision_id: NonEmptyStr, available_at: UtcDateTime, content_digest: DigestHex)` is a semantic reference to one exact accepted memory revision. It contains no filesystem path, mutable score, `PayloadRef`, review writer or storage handle; later phases map it to stored evidence without extending this ABI;
 - `EmptyMemorySnapshot@1` and `EmptyMemorySelection@1` are strict immutable Phase 1 compatibility facts with provably empty record tuples and verified canonical content digests; the selection binds the empty snapshot digest. `build_empty_memory_binding()` is the sole pure builder and returns both models/digests for a runtime to persist—never random placeholder hashes;
-- `ContextSnapshot.memory_snapshot_id: NonEmptyStr` is an audit/dereference locator. `memory_snapshot_hash: DigestHex` and `past_context_hash: DigestHex` are required semantic identities; the former binds the complete frozen visible-memory universe and the latter binds the reviewed/query-specific selection used to construct context. Required `memory_selection_ref: PayloadRef` uses `namespace="main"` and `content_digest == past_context_hash`;
+- `ContextSnapshot.memory_snapshot_ref: PayloadRef` and `memory_selection_ref: PayloadRef` are required main-namespace typed references. `memory_snapshot_hash: DigestHex == memory_snapshot_ref.payload_ref.content_digest` and `past_context_hash: DigestHex == memory_selection_ref.payload_ref.content_digest` are required semantic identities; exact SchemaRef + namespace/content are semantic, while each nested `PayloadRef.object_id` is audit/dereference identity. This permits the canonical `EmptyMemory*` schemas and Phase 3's different registered non-empty schemas to replay without guessing a schema from an object ID/hash;
 - `ContextSnapshot.memory_session_id: LogicalId | None` is the service-bound semantic session scope for memory. It is populated only from an authenticated request/session authority before Plan validation, never from Planner, Worker or model output. A Phase 3 context selection and every node-specific selection must use this exact scope or a stricter non-session subset;
-- before the Phase 3 memory facade exists, a no-memory runtime persists the two canonical empty models in `main`, uses the empty snapshot `PayloadRef.object_id/content_digest` as `memory_snapshot_id/hash`, uses the exact empty selection ref/hash and sets `memory_session_id=None`. Task 9 substitutes its non-empty schemas through the same generic fields. Blank/random locator/hash pairs are invalid;
-- relocating byte-identical memory snapshot/selection evidence changes only `memory_snapshot_id` or `memory_selection_ref.object_id`; it cannot change `ContextSnapshot.content_digest`. Changing `memory_snapshot_hash`, selection namespace/content, `past_context_hash` or `memory_session_id` must change that digest and therefore the candidate Plan digest;
+- `ContextRuntimeRequirements@1` is a generic strict main fact binding a builder-computed `context_subject_digest` (DataContext content plus memory snapshot/selection typed semantic projections and session), exact `required_schema_registry_digest`, exact `required_catalog_digest`, canonical required runtime material `ContentRef`s, canonical required capability refs, required bridge IDs and a verified requirements digest. It contains no provider object or path. `ContextSnapshot.runtime_requirements_ref: PayloadRef | None` is `None` only for the exact canonical EmptyMemorySnapshot/EmptyMemorySelection pair; any non-empty/different memory schema requires a main typed ref to this Phase 1 schema whose subject digest cross-matches the ContextSnapshot. Phase 1 proves shape/digest equality; Phase 2 admission resolves and enforces the required registry/catalog/material/capability/bridge authority before reservation;
+- before the Phase 3 memory facade exists, a no-memory runtime persists the two canonical empty models in `main`, wraps each as the exact `PayloadRef`, sets the matching hashes, `memory_session_id=None` and `runtime_requirements_ref=None`. Phase 3 Task 9 substitutes its registered non-empty snapshot/selection schemas through the same typed fields and supplies a requirements ref. Blank/random locator/hash pairs, plain PayloadRefs and missing/wrong-schema requirements are invalid;
+- relocating byte-identical memory snapshot/selection/requirements payloads changes only nested `payload_ref.object_id`; it cannot change `ContextSnapshot.content_digest`. Changing any SchemaRef, namespace/content digest, memory hash, past-context hash, memory-session scope or runtime requirement changes that digest and therefore the candidate Plan digest;
 - `InputSnapshot.memory_record_refs` is an immutable tuple canonically ordered by `(record_id, revision_id, content_digest)`, duplicate-free, and included in the snapshot semantic projection as full refs (including `available_at`). Two refs with the same `(record_id, revision_id)` but different availability/content are a conflict, not two records. A node cannot receive a later/live record by mutating the already-frozen snapshot;
 - `verify_memory_record_ref(ref, *, record_id, revision_id, available_at, content_digest) -> None` is the pure Phase 1 identity checker. A later memory facade must call it for each selected payload; missing, naive or mismatched availability is not repaired here.
+
+**Closed `InputSnapshot@1` ABI:**
+
+- `InputArtifactBinding@1` contains one exact Worker input name/cardinality and its tuple of full `ArtifactRef`s. Bindings follow the selected WorkerSpec InputBinding declaration order; refs within `many` preserve frozen Plan dependency declaration order, and `one` contains exactly one ref on an executable snapshot. Artifact producer/node/output/slot/schema/content identities must equal the admitted Plan/catalog bindings—no anonymous payload ID or projected scalar is stored;
+- `InputSnapshot@1` contains strict `snapshot_id`, run/Plan IDs, `plan_digest`, node ID, non-negative layer index, positive attempt, exact main `context_snapshot_ref: PayloadRef` resolving `ContextSnapshot@1`, ordered `artifact_inputs`, canonical main `data_result_refs: tuple[PayloadRef, ...]`, canonical `memory_record_refs`, `readiness: ready | terminal_partial`, canonical `missing_input_names` and verified content digest. Plain `data_result_ids`/PayloadRefs are not part of the ABI;
+- `ready` requires no missing input and exact WorkerSpec one/many shape. `terminal_partial` is non-executable, records the exact unsatisfied required input names and only the bindings available at the terminal decision boundary; it exists so BLOCKED/SKIPPED/early terminal NodeRuns can still bind a real immutable snapshot. A handler/model/capability gateway must reject `terminal_partial`;
+- snapshot/Plan/run IDs and attempt are audit/correlation identity and are cross-checked by builders; the semantic projection includes Plan digest, node/layer, context SchemaRef+namespace/content, complete ArtifactRefs, typed DataResult SchemaRefs+namespace/content, full MemoryRecordRefs, readiness/missing set and excludes only random object/snapshot locators. Typed-ref object relocation is audit-only; any schema/content/order/readiness change changes the snapshot digest;
+- DataResult refs are canonical by their typed semantic identity and duplicate-free; same schema/content under a relocated object is one semantic ref, while same logical result identity with conflicting schema/content fails. During-node results never mutate this pre-node tuple.
 
 **DataContext/snapshot invariants:**
 
@@ -846,10 +859,10 @@ git commit -m "feat(orchestration): add minimal static compatibility payloads"
 - PIT_REPLAY requires strict PIT, data snapshot ID and vintage manifest digest;
 - every datetime is timezone-aware and canonicalized to UTC;
 - contexts/snapshots are immutable;
-- random IDs/freeze wall-clock are audit; content refs, hashes, modes and PIT identity are semantic;
+- random IDs/freeze wall-clock and typed-ref object locators are audit; SchemaRefs, referenced content, hashes, modes and PIT identity are semantic;
 - persisted snapshot content digest excludes itself and is computed/verified by a pure builder.
 - `ContextSnapshot` embeds/references the exact `DataContext` semantic digest; changing source registry, route, chain, config, snapshot content or vintage changes ContextSnapshot content and therefore the candidate Plan digest. Relocating the same snapshot under another `data_snapshot_id` does not.
-- `ContextSnapshot` and `InputSnapshot` apply the memory locator/hash/ref rules above; storage IDs remain audit-only while memory hashes and exact record revisions remain semantic.
+- `ContextSnapshot` and `InputSnapshot` apply the typed memory/context/data/artifact locator/ref rules above; storage IDs remain audit-only while schemas/content hashes, requirements and exact record revisions remain semantic.
 
 **Budget invariants:**
 
@@ -870,9 +883,9 @@ Required tests:
 2. equal-instant clock/context handling and naive rejection;
 3. snapshot mutation and declared digest mismatch rejection;
 4. complete DataContext field/mode/backend matrix, including empty reviewed routing, ONLINE capture-root and strict PIT replay;
-5. data- or memory-snapshot-ID-only relocation leaves semantic/context digest stable, while source/routing/snapshot-content/vintage/memory-snapshot/past-context hash or memory-session scope changes alter it;
-6. strict `MemoryRecordRef` field/time/digest validation, canonical InputSnapshot ordering, duplicate rejection, same-record/revision conflict rejection and full-ref semantic sensitivity;
-7. canonical empty-memory builder/digests, exact persisted locator/ref binding, `memory_selection_ref` namespace/content-digest matrix, pre-facade `memory_session_id=None`, rejection of caller/worker session widening and record payload versus `MemoryRecordRef` identity verification through the exported helper;
+5. data-snapshot-ID or memory snapshot/selection/requirements typed-object relocation leaves semantic/context digest stable, while source/routing/snapshot-content/vintage or any memory SchemaRef/content/hash/session/requirements change alters it;
+6. strict `MemoryRecordRef` field/time/digest validation, complete InputSnapshot plan/node/layer/context/artifact/data/memory/readiness field matrix, one/many ordering, typed DataResult ref validation, duplicate rejection, same-record/revision conflict rejection and full-ref semantic sensitivity;
+7. canonical empty-memory builder/digests, exact persisted PayloadRef/hash binding, non-empty-memory requirements matrix, pre-facade `memory_session_id=None`, rejection of caller/worker session widening and record payload versus `MemoryRecordRef` identity verification through the exported helper;
 8. negative/bool budget rejection;
 9. reserved>max and actual>reserved rejection;
 10. zero concurrency rejection;
@@ -1449,7 +1462,7 @@ The test must assert:
 - model JSON-schema digest matches `schema_manifest_v1.json`;
 - reverse registration order produces the same registry digest;
 - representative payloads round-trip through registry;
-- `TypedPayloadRef`, `MemoryRecordRef`, both canonical empty-memory facts, `ContextSnapshot` and `InputSnapshot` are public registered models with the Task 3/8 locator/schema/hash/ref/session-scope projections intact;
+- `PayloadRef`, `MemoryRecordRef`, both canonical empty-memory facts, `ContextRuntimeRequirements`, `ContextSnapshot`, `InputArtifactBinding` and `InputSnapshot` are public registered models with the Task 3/8 locator/schema/hash/ref/session-scope/readiness projections intact;
 - registry payload validation rejects a self-declared version different from the resolved `SchemaRef`;
 - registry validation still rejects extra fields;
 - no Task 11 Trial/Holdout type appears;
@@ -1505,8 +1518,10 @@ The old “self-review complete” assertion is removed. Phase 1 is complete onl
 - [ ] every immutable fact rejects assignment;
 - [ ] every persisted declared digest is computed/verified and non-self-referential;
 - [ ] `PayloadRef` accepts only main/sealed/review/audit, and sealed/review/audit refs cannot enter main/public events or snapshots;
-- [ ] `TypedPayloadRef` binds exact schema + payload content for replay while projecting only object locator to audit; Artifact/NodeRun evidence consumers reject non-main refs and retain evidence on failed/no-Artifact attempts;
-- [ ] data/memory snapshot locators are audit-only while snapshot-content/memory/past-context hashes, service-bound memory-session scope and exact canonical MemoryRecordRefs are semantic; the empty-memory builder with `memory_session_id=None` produces the only valid pre-facade empty binding.
+- [ ] `PayloadRef` binds exact schema + payload content for replay while projecting only object locator to audit; Artifact/NodeRun evidence consumers reject non-main refs and retain evidence on failed/no-Artifact attempts;
+- [ ] Data/memory/context payload locators are audit-only while every PayloadRef SchemaRef+namespace/content, snapshot-content/memory/past-context hash, service-bound memory-session scope, runtime requirements and exact canonical MemoryRecordRefs are semantic; the empty-memory builder with `memory_session_id=None`/no requirements produces the only valid pre-facade empty binding;
+- [ ] InputSnapshot freezes real plan/node/layer/context identity, ordered named Artifact bindings, typed DataResult refs, canonical MemoryRecordRefs and `ready | terminal_partial`; plain data IDs are absent and terminal-partial snapshots cannot execute;
+- [ ] NodeRun retains ToolCallRecords, typed DataResult refs and remaining execution-evidence refs on every no-Artifact path, and all three tuples exactly equal successful Artifact Provenance.
 
 ### Catalog / Plan security
 
