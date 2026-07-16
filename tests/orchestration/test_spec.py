@@ -175,11 +175,12 @@ def _context(*, config_digest: str = DA) -> ContextSnapshot:
         source_config_digest=config_digest, source_registry_digest=DB, routing_snapshot_digest=DC,
         data_snapshot_id="snap-1", data_snapshot_content_digest=DD, built_at=_dt(),
     )
-    sel = PayloadRef(namespace="main", object_id="sel-1", content_digest=binding.past_context_hash)
     return ContextSnapshot.build(
         snapshot_id="ctx-1", data_context=dc, memory_snapshot_id="ms-1",
         memory_snapshot_hash=binding.snapshot_hash, past_context_hash=binding.past_context_hash,
-        memory_selection_ref=sel, built_at=_dt(),
+        memory_snapshot_ref=binding.memory_snapshot_ref,
+        memory_selection_ref=binding.memory_selection_ref,
+        runtime_requirements_ref=None, built_at=_dt(),
     )
 
 

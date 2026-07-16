@@ -21,12 +21,14 @@ It proves the eight points of ``.superpowers/sdd/task-0-brief.md`` Step 1:
 4. a ``WorkerCatalogSnapshot`` built from content / skill / capability materials
    validates with the Phase 1 builder, and a tampered material digest is
    rejected;
-5. ``RunEvent`` accepts ``SchemaRef`` + ``PayloadRef``; ``PayloadRef`` (the type
-   the Phase 2 plan calls ``TypedPayloadRef``) preserves exact schema/content
-   under audit-only object relocation; and every ``DigestHex``-typed field of
-   ``Artifact`` / ``InputSnapshot`` / ``NodeRun`` / ``BudgetReservation`` /
-   ``PlanApproval`` / ``PlanValidationReport`` / ``StaticLegacyPlanAttestation``
-   rejects an arbitrary digest string;
+5. ``RunEvent`` accepts ``SchemaRef`` + ``PayloadRef``; a plain ``PayloadRef``
+   preserves exact namespace/content under audit-only object relocation, and the
+   composite ``TypedPayloadRef`` (a distinct type carrying an exact ``SchemaRef``
+   plus a nested ``PayloadRef``) likewise projects only its schema + payload
+   namespace/content, never the audit object id; and every ``DigestHex``-typed
+   field of ``Artifact`` / ``InputSnapshot`` / ``NodeRun`` / ``BudgetReservation``
+   / ``PlanApproval`` / ``PlanValidationReport`` /
+   ``StaticLegacyPlanAttestation`` rejects an arbitrary digest string;
 6. the real Task 0 legacy fixture carries ``scalars`` / ``workers`` / ``graphs``,
    one frozen ``stock-deep-dive`` config digest and complete
    ``LegacyWorkerMapping`` / ``LegacyDependencyMapping`` / ``LegacyInputMapping``
@@ -61,7 +63,7 @@ from guanlan_v2.orchestration.digest import (
     canonical_json,
     content_digest,
 )
-from guanlan_v2.orchestration.refs import PayloadRef, SchemaRef
+from guanlan_v2.orchestration.refs import PayloadRef, SchemaRef, TypedPayloadRef
 from guanlan_v2.orchestration.schema_registry import (
     RegistrySealedError,
     SchemaRegistry,
@@ -477,9 +479,20 @@ def _attestation_fields():
     )
 
 
+def _context_snapshot_ref(object_id: str = "ctx-obj-1", content: str = D64) -> TypedPayloadRef:
+    return TypedPayloadRef(
+        schema_ref=SchemaRef(name="ContextSnapshot", version="1"),
+        payload_ref=PayloadRef(namespace="main", object_id=object_id, content_digest=content),
+    )
+
+
 def _input_snapshot_fields():
     return dict(
-        snapshot_id="in-1", context_snapshot_hash=D64, memory_record_refs=(), built_at=DT,
+        snapshot_id="in-1", run_id="run-1", plan_id="plan-1", plan_digest=D64,
+        node_id="node-1", layer_index=0, attempt=1,
+        context_snapshot_ref=_context_snapshot_ref(),
+        artifact_inputs=(), data_result_refs=(), memory_record_refs=(),
+        readiness="ready", missing_input_names=(), built_at=DT,
     )
 
 
@@ -511,7 +524,7 @@ def test_point5_valid_digest_models_construct():
         (PlanApproval, _plan_approval_fields, "candidate_plan_digest"),
         (PlanValidationReport, _plan_validation_report_fields, "candidate_plan_digest"),
         (StaticLegacyPlanAttestation, _attestation_fields, "request_digest"),
-        (InputSnapshot.build, _input_snapshot_fields, "context_snapshot_hash"),
+        (InputSnapshot.build, _input_snapshot_fields, "plan_digest"),
         (NodeRun, _node_run_fields, "plan_digest"),
     ],
 )
@@ -595,17 +608,18 @@ def test_point7_empty_memory_binding_persists_in_main():
 
 def test_point7_context_snapshot_binding_has_memory_session_id_none():
     binding = build_empty_memory_binding()
-    selection_ref = PayloadRef(
-        namespace="main", object_id="sel-obj-1", content_digest=binding.past_context_hash
-    )
     cs = ContextSnapshot.build(
         snapshot_id="cs-1", data_context=_online_data_context(), memory_snapshot_id="ms-1",
         memory_snapshot_hash=binding.snapshot_hash, past_context_hash=binding.past_context_hash,
-        memory_selection_ref=selection_ref, built_at=DT,
+        memory_snapshot_ref=binding.memory_snapshot_ref,
+        memory_selection_ref=binding.memory_selection_ref,
+        runtime_requirements_ref=None, built_at=DT,
     )
-    # before the Phase 3 facade there is no session scope.
+    # before the Phase 3 facade there is no session scope and no requirements ref.
     assert cs.memory_session_id is None
-    assert cs.memory_selection_ref.namespace == "main"
+    assert cs.memory_selection_ref.payload_ref.namespace == "main"
+    assert cs.memory_snapshot_ref.payload_ref.content_digest == binding.snapshot_hash
+    assert cs.runtime_requirements_ref is None
     assert cs.content_digest == cs.semantic_digest()
 
 

@@ -46,9 +46,19 @@ from guanlan_v2.orchestration.digest import (
     NonNegativeInt,
     PositiveInt,
     UtcDateTime,
+    content_digest,
 )
 from guanlan_v2.orchestration.enums import DataBackend, DataMode
-from guanlan_v2.orchestration.refs import LogicalId, PayloadRef
+from guanlan_v2.orchestration.refs import (
+    CapabilityRef,
+    ContentRef,
+    LogicalId,
+    PayloadRef,
+    SchemaRef,
+    TypedPayloadRef,
+    validate_typed_ref_tuple,
+)
+from guanlan_v2.orchestration.schemas import ArtifactRef
 
 __all__ = [
     "ClockSpec",
@@ -61,6 +71,10 @@ __all__ = [
     "verify_memory_record_ref",
     "check_memory_session_scope",
     "ContextSnapshot",
+    "ContextRuntimeRequirements",
+    "compute_context_subject_digest",
+    "verify_context_runtime_requirements",
+    "InputArtifactBinding",
     "InputSnapshot",
     "RunBudget",
     "BudgetReservation",
@@ -244,19 +258,39 @@ class EmptyMemorySelection(DigestModel):
         return self
 
 
+#: canonical registered schema identities of the two Phase-1 empty-memory facts.
+_EMPTY_MEMORY_SNAPSHOT_SCHEMA_REF = SchemaRef(name="EmptyMemorySnapshot", version="1")
+_EMPTY_MEMORY_SELECTION_SCHEMA_REF = SchemaRef(name="EmptyMemorySelection", version="1")
+#: reviewed, deterministic dereference locators for the persisted empty facts.
+#: ``object_id`` is audit-only, so a fixed canonical value never affects any
+#: semantic digest; it only names *where* a no-memory runtime persisted the fact.
+_EMPTY_MEMORY_SNAPSHOT_OBJECT_ID = "empty-memory-snapshot-main"
+_EMPTY_MEMORY_SELECTION_OBJECT_ID = "empty-memory-selection-main"
+#: registered schema key a present ``runtime_requirements_ref`` must resolve.
+_RUNTIME_REQUIREMENTS_SCHEMA_NAME = "ContextRuntimeRequirements"
+_RUNTIME_REQUIREMENTS_SCHEMA_VERSION = "1"
+
+
 class EmptyMemoryBinding(NamedTuple):
     """The output of :func:`build_empty_memory_binding` — models + canonical hashes.
 
     A no-memory runtime persists ``snapshot`` and ``selection`` in the ``main``
     namespace and uses ``snapshot_hash`` / ``past_context_hash`` as a
     :class:`ContextSnapshot`'s ``memory_snapshot_hash`` / ``past_context_hash``.
-    The hashes are canonical content digests — never random placeholders.
+    ``memory_snapshot_ref`` / ``memory_selection_ref`` are the exact
+    :class:`TypedPayloadRef`s wrapping each canonical fact (its
+    ``EmptyMemorySnapshot@1`` / ``EmptyMemorySelection@1`` schema identity plus its
+    main-namespace content digest) so the no-memory runtime can populate the new
+    typed :class:`ContextSnapshot` fields directly. All hashes are canonical
+    content digests — never random placeholders.
     """
 
     snapshot: EmptyMemorySnapshot
     selection: EmptyMemorySelection
     snapshot_hash: DigestHex
     past_context_hash: DigestHex
+    memory_snapshot_ref: TypedPayloadRef
+    memory_selection_ref: TypedPayloadRef
 
 
 def build_empty_memory_binding() -> EmptyMemoryBinding:
@@ -264,8 +298,9 @@ def build_empty_memory_binding() -> EmptyMemoryBinding:
 
     This is the *sole* pure builder for the pre-Phase-3 no-memory universe. It
     seals the empty snapshot, then the empty selection (which binds the snapshot
-    digest), and returns both with their canonical content digests for a runtime
-    to persist. Blank / random locator-hash pairs are never produced.
+    digest), wraps each as the exact main-namespace :class:`TypedPayloadRef`, and
+    returns both models, their canonical content digests and refs for a runtime to
+    persist. Blank / random locator-hash pairs are never produced.
     """
     snap_digest = EmptyMemorySnapshot.digest_of_fields(projection="semantic", records=())
     snapshot = EmptyMemorySnapshot(records=(), content_digest=snap_digest)
@@ -275,12 +310,39 @@ def build_empty_memory_binding() -> EmptyMemoryBinding:
     selection = EmptyMemorySelection(
         records=(), snapshot_digest=snapshot.content_digest, content_digest=sel_digest
     )
+    memory_snapshot_ref = TypedPayloadRef(
+        schema_ref=_EMPTY_MEMORY_SNAPSHOT_SCHEMA_REF,
+        payload_ref=PayloadRef(
+            namespace="main",
+            object_id=_EMPTY_MEMORY_SNAPSHOT_OBJECT_ID,
+            content_digest=snapshot.content_digest,
+        ),
+    )
+    memory_selection_ref = TypedPayloadRef(
+        schema_ref=_EMPTY_MEMORY_SELECTION_SCHEMA_REF,
+        payload_ref=PayloadRef(
+            namespace="main",
+            object_id=_EMPTY_MEMORY_SELECTION_OBJECT_ID,
+            content_digest=selection.content_digest,
+        ),
+    )
     return EmptyMemoryBinding(
         snapshot=snapshot,
         selection=selection,
         snapshot_hash=snapshot.content_digest,
         past_context_hash=selection.content_digest,
+        memory_snapshot_ref=memory_snapshot_ref,
+        memory_selection_ref=memory_selection_ref,
     )
+
+
+#: the canonical empty-memory content digests, keyed by :func:`build_empty_memory_binding`.
+#: A ``ContextSnapshot`` whose ``(memory_snapshot_hash, past_context_hash)`` equal
+#: this exact pair is the pre-Phase-3 no-memory universe and carries no runtime
+#: requirements ref; any other pair is a real (Phase 3) memory binding and must.
+_EMPTY_MEMORY_BINDING = build_empty_memory_binding()
+_CANONICAL_EMPTY_MEMORY_SNAPSHOT_HASH: DigestHex = _EMPTY_MEMORY_BINDING.snapshot_hash
+_CANONICAL_EMPTY_PAST_CONTEXT_HASH: DigestHex = _EMPTY_MEMORY_BINDING.past_context_hash
 
 
 def verify_memory_record_ref(
@@ -349,16 +411,28 @@ class ContextSnapshot(DigestModel):
     Embeds the exact :class:`DataContext` (so any source-registry / route /
     chain / config / snapshot-content / vintage change flows into this
     snapshot's semantic digest, and therefore into the candidate Plan digest),
-    plus the memory binding. ``snapshot_id`` / ``memory_snapshot_id`` are audit
-    dereference locators and ``built_at`` is the freeze wall-clock — all audit —
-    while ``memory_snapshot_hash`` (the complete frozen visible-memory universe),
-    ``past_context_hash`` (the reviewed/query-specific selection) and
-    ``memory_session_id`` are semantic. ``memory_selection_ref`` must live in the
-    ``main`` namespace with ``content_digest == past_context_hash``;
-    ``memory_session_id`` comes only from an authenticated request/session
-    authority (``None`` before the Phase 3 facade). Self-seals ``content_digest``
-    via :meth:`build`; relocating identical memory evidence (a new
-    ``memory_snapshot_id`` or ``memory_selection_ref.object_id``) cannot change it.
+    plus the memory binding as *typed* references. ``snapshot_id`` /
+    ``memory_snapshot_id`` are audit dereference locators and ``built_at`` is the
+    freeze wall-clock — all audit — while ``memory_snapshot_hash`` (the complete
+    frozen visible-memory universe), ``past_context_hash`` (the
+    reviewed/query-specific selection) and ``memory_session_id`` are semantic.
+
+    ``memory_snapshot_ref`` / ``memory_selection_ref`` are required main-namespace
+    :class:`TypedPayloadRef`s: each carries the exact registered SchemaRef of the
+    persisted fact plus its namespace/content digest, so a Phase 3 non-empty
+    schema replays without guessing a schema from a bare hash. Their content
+    digests must equal ``memory_snapshot_hash`` / ``past_context_hash``. Each
+    nested ``payload_ref.object_id`` is audit-only, so relocating byte-identical
+    memory evidence cannot change ``content_digest``.
+
+    ``runtime_requirements_ref`` is ``None`` **iff** the memory binding is the
+    canonical empty pair produced by :func:`build_empty_memory_binding`; any other
+    (non-empty / Phase 3) binding must supply a main typed ref to a
+    ``ContextRuntimeRequirements@1`` fact whose ``context_subject_digest``
+    cross-matches this snapshot (Phase 1 proves shape/digest equality only; Phase 2
+    admission resolves and enforces the required authority). ``memory_session_id``
+    comes only from an authenticated request/session authority (``None`` before the
+    Phase 3 facade). Self-seals ``content_digest`` via :meth:`build`.
     """
 
     schema_version: Literal["1"] = "1"
@@ -367,7 +441,9 @@ class ContextSnapshot(DigestModel):
     memory_snapshot_id: NonEmptyStr
     memory_snapshot_hash: DigestHex
     past_context_hash: DigestHex
-    memory_selection_ref: PayloadRef
+    memory_snapshot_ref: TypedPayloadRef
+    memory_selection_ref: TypedPayloadRef
+    runtime_requirements_ref: TypedPayloadRef | None = None
     memory_session_id: LogicalId | None = None
     built_at: UtcDateTime
     content_digest: DigestHex
@@ -379,12 +455,45 @@ class ContextSnapshot(DigestModel):
 
     @model_validator(mode="after")
     def _verify(self) -> "ContextSnapshot":
-        if self.memory_selection_ref.namespace != "main":
-            raise ValueError("memory_selection_ref must use namespace='main'")
-        if self.memory_selection_ref.content_digest != self.past_context_hash:
+        if self.memory_snapshot_ref.payload_ref.namespace != "main":
+            raise ValueError("memory_snapshot_ref must reference a main-namespace payload")
+        if self.memory_snapshot_ref.payload_ref.content_digest != self.memory_snapshot_hash:
             raise ValueError(
-                "memory_selection_ref.content_digest must equal past_context_hash"
+                "memory_snapshot_ref.payload_ref.content_digest must equal memory_snapshot_hash"
             )
+        if self.memory_selection_ref.payload_ref.namespace != "main":
+            raise ValueError("memory_selection_ref must reference a main-namespace payload")
+        if self.memory_selection_ref.payload_ref.content_digest != self.past_context_hash:
+            raise ValueError(
+                "memory_selection_ref.payload_ref.content_digest must equal past_context_hash"
+            )
+        is_empty_pair = (
+            self.memory_snapshot_hash == _CANONICAL_EMPTY_MEMORY_SNAPSHOT_HASH
+            and self.past_context_hash == _CANONICAL_EMPTY_PAST_CONTEXT_HASH
+        )
+        if is_empty_pair:
+            if self.runtime_requirements_ref is not None:
+                raise ValueError(
+                    "the canonical empty-memory pair must have runtime_requirements_ref=None"
+                )
+        else:
+            if self.runtime_requirements_ref is None:
+                raise ValueError(
+                    "a non-empty memory binding requires a runtime_requirements_ref"
+                )
+        rr = self.runtime_requirements_ref
+        if rr is not None:
+            if rr.payload_ref.namespace != "main":
+                raise ValueError(
+                    "runtime_requirements_ref must reference a main-namespace payload"
+                )
+            if (
+                rr.schema_ref.name != _RUNTIME_REQUIREMENTS_SCHEMA_NAME
+                or rr.schema_ref.version != _RUNTIME_REQUIREMENTS_SCHEMA_VERSION
+            ):
+                raise ValueError(
+                    "runtime_requirements_ref must resolve ContextRuntimeRequirements@1"
+                )
         if self.content_digest != self.semantic_digest():
             raise ValueError("declared content_digest does not match canonical digest")
         return self
@@ -399,32 +508,238 @@ class ContextSnapshot(DigestModel):
         return cls(**fields, content_digest=digest)
 
 
-class InputSnapshot(DigestModel):
-    """The frozen, per-layer read-set one node receives.
+class ContextRuntimeRequirements(DigestModel):
+    """The runtime authority a :class:`ContextSnapshot` binds — a generic strict fact.
 
-    ``memory_record_refs`` is an immutable tuple canonically ordered by
-    ``(record_id, revision_id, content_digest)``, duplicate-free, with no
-    ``(record_id, revision_id)`` appearing twice — two refs sharing a
-    ``(record_id, revision_id)`` but differing in availability/content are a
-    *conflict*, not two records. The full refs (including ``available_at``) enter
-    the semantic projection, so a node can never be handed a later/live record by
-    mutating an already-frozen snapshot. ``snapshot_id`` and ``built_at`` are
-    audit; ``context_snapshot_hash`` binds the :class:`ContextSnapshot` this input
-    derives from. Self-seals ``content_digest`` via :meth:`build`.
+    Binds a builder-computed ``context_subject_digest`` (the DataContext content
+    plus the memory snapshot/selection typed semantic projections and the memory
+    session scope — see :func:`compute_context_subject_digest`) to the exact
+    ``required_schema_registry_digest`` / ``required_catalog_digest`` and the
+    canonical required runtime material :class:`ContentRef`s, required capability
+    :class:`CapabilityRef`s and required bridge ids the run must have available.
+    It contains **no** provider object or path: it names *what* authority is
+    required, not *how* to obtain it. ``requirements_digest`` self-seals the whole
+    fact.
+
+    Phase 1 proves shape/digest equality only (see
+    :func:`verify_context_runtime_requirements`); a Phase 2 admission service
+    resolves and enforces the required registry/catalog/material/capability/bridge
+    authority before any budget reservation.
+    """
+
+    schema_version: Literal["1"] = "1"
+    context_subject_digest: DigestHex
+    required_schema_registry_digest: DigestHex
+    required_catalog_digest: DigestHex
+    required_runtime_material_refs: tuple[ContentRef, ...] = ()
+    required_capability_refs: tuple[CapabilityRef, ...] = ()
+    required_bridge_ids: tuple[LogicalId, ...] = ()
+    requirements_digest: DigestHex
+
+    SELF_DIGEST_FIELDS: ClassVar[frozenset[str]] = frozenset({"requirements_digest"})
+
+    @model_validator(mode="after")
+    def _verify(self) -> "ContextRuntimeRequirements":
+        mat_keys = [
+            (r.id, r.version, r.content_digest) for r in self.required_runtime_material_refs
+        ]
+        if mat_keys != sorted(mat_keys):
+            raise ValueError(
+                "required_runtime_material_refs must be canonically ordered by "
+                "(id, version, content_digest)"
+            )
+        if len(set(mat_keys)) != len(mat_keys):
+            raise ValueError("required_runtime_material_refs must be duplicate-free")
+        cap_keys = [
+            (r.id, r.version, r.content_digest) for r in self.required_capability_refs
+        ]
+        if cap_keys != sorted(cap_keys):
+            raise ValueError(
+                "required_capability_refs must be canonically ordered by "
+                "(id, version, content_digest)"
+            )
+        if len(set(cap_keys)) != len(cap_keys):
+            raise ValueError("required_capability_refs must be duplicate-free")
+        bridge = list(self.required_bridge_ids)
+        if bridge != sorted(bridge):
+            raise ValueError("required_bridge_ids must be canonically sorted")
+        if len(set(bridge)) != len(bridge):
+            raise ValueError("required_bridge_ids must be duplicate-free")
+        if self.requirements_digest != self.semantic_digest():
+            raise ValueError("declared requirements_digest does not match canonical digest")
+        return self
+
+    @classmethod
+    def build(cls, **fields: Any) -> "ContextRuntimeRequirements":
+        """Seal a requirements fact: compute ``requirements_digest`` from the fields."""
+        try:
+            digest = cls.digest_of_fields(projection="semantic", **fields)
+        except (ValueError, TypeError, AttributeError, KeyError):
+            digest = _DIGEST_PLACEHOLDER
+        return cls(**fields, requirements_digest=digest)
+
+
+def compute_context_subject_digest(
+    *,
+    data_context: DataContext,
+    memory_snapshot_ref: TypedPayloadRef,
+    memory_selection_ref: TypedPayloadRef,
+    memory_session_id: str | None,
+) -> DigestHex:
+    """The canonical *context subject* digest a :class:`ContextRuntimeRequirements` binds.
+
+    Combines the :class:`DataContext` **content** (its semantic projection) with
+    the memory snapshot/selection **typed** semantic projections (exact SchemaRef
+    + namespace/content, never the audit object id) and the memory session scope.
+    Pure and deterministic so a Phase 2 admission service can recompute it from a
+    resolved :class:`ContextSnapshot` and cross-match a resolved requirements fact.
+    """
+    return content_digest(
+        {
+            "data_context": data_context,
+            "memory_snapshot_ref": memory_snapshot_ref,
+            "memory_selection_ref": memory_selection_ref,
+            "memory_session_id": memory_session_id,
+        }
+    )
+
+
+def verify_context_runtime_requirements(
+    snapshot: ContextSnapshot, requirements: ContextRuntimeRequirements
+) -> None:
+    """Pure Phase 1 shape/digest cross-check binding ``requirements`` to ``snapshot``.
+
+    Proves, and *only* proves: the snapshot carries a ``runtime_requirements_ref``
+    that resolves ``ContextRuntimeRequirements@1`` and whose referenced content
+    digest equals ``requirements.requirements_digest``; and the recomputed context
+    subject digest equals ``requirements.context_subject_digest``. It does **not**
+    resolve the required registry/catalog/material/capability/bridge authority —
+    that is Phase 2 admission's duty (docline 842). Raises :class:`ValueError` on
+    any mismatch.
+    """
+    ref = snapshot.runtime_requirements_ref
+    if ref is None:
+        raise ValueError(
+            "snapshot carries no runtime_requirements_ref (canonical empty-memory "
+            "pair); there is nothing to verify"
+        )
+    if (
+        ref.schema_ref.name != _RUNTIME_REQUIREMENTS_SCHEMA_NAME
+        or ref.schema_ref.version != _RUNTIME_REQUIREMENTS_SCHEMA_VERSION
+    ):
+        raise ValueError("runtime_requirements_ref must resolve ContextRuntimeRequirements@1")
+    if ref.payload_ref.content_digest != requirements.requirements_digest:
+        raise ValueError(
+            "runtime_requirements_ref content digest must equal the requirements digest"
+        )
+    expected = compute_context_subject_digest(
+        data_context=snapshot.data_context,
+        memory_snapshot_ref=snapshot.memory_snapshot_ref,
+        memory_selection_ref=snapshot.memory_selection_ref,
+        memory_session_id=snapshot.memory_session_id,
+    )
+    if requirements.context_subject_digest != expected:
+        raise ValueError(
+            "requirements context_subject_digest does not cross-match the ContextSnapshot"
+        )
+
+
+class InputArtifactBinding(DigestModel):
+    """One Worker input's satisfied artifact binding on a per-node input snapshot.
+
+    ``input_name`` names the exact Worker input; ``cardinality`` is its declared
+    ``one`` | ``many`` shape; ``artifact_refs`` are the full :class:`ArtifactRef`s
+    that satisfy it (producer/node/output/slot/schema/content identities intact —
+    no anonymous payload id). ``many`` preserves the frozen Plan dependency
+    declaration order. A ``one`` binding carries at most one ref at the model
+    level; the *exactly one* bound is enforced by :class:`InputSnapshot` when
+    ``readiness == "ready"`` (a ``terminal_partial`` snapshot may leave a ``one``
+    binding empty). Structural only in Phase 1: equality with the admitted
+    Plan/catalog bindings is a Phase 2 admission cross-check.
+    """
+
+    schema_version: Literal["1"] = "1"
+    input_name: NonEmptyStr
+    cardinality: Literal["one", "many"]
+    artifact_refs: tuple[ArtifactRef, ...] = ()
+
+    @model_validator(mode="after")
+    def _verify(self) -> "InputArtifactBinding":
+        if self.cardinality == "one" and len(self.artifact_refs) > 1:
+            raise ValueError(
+                f"a 'one' cardinality binding {self.input_name!r} cannot carry more "
+                "than one artifact ref"
+            )
+        return self
+
+
+class InputSnapshot(DigestModel):
+    """The frozen, per-node read-set one node receives before it executes.
+
+    Identity / correlation. ``snapshot_id`` / ``run_id`` / ``plan_id`` and
+    ``attempt`` are audit/correlation identity (cross-checked by builders, excluded
+    from the semantic projection); ``plan_digest``, ``node_id`` and the
+    non-negative ``layer_index`` are semantic.
+
+    Bindings. ``context_snapshot_ref`` is the exact main :class:`TypedPayloadRef`
+    resolving ``ContextSnapshot@1`` this input derives from. ``artifact_inputs`` is
+    the ordered tuple of :class:`InputArtifactBinding`s in the selected WorkerSpec
+    input declaration order (order is semantic). ``data_result_refs`` is the
+    canonical, duplicate-free, main-only typed DataResult tuple (ordered by the
+    typed semantic projection; a relocated object is one semantic ref, and
+    during-node results never mutate this pre-node tuple). ``memory_record_refs``
+    is canonically ordered by ``(record_id, revision_id, content_digest)``,
+    duplicate-free, with no ``(record_id, revision_id)`` appearing twice (a shared
+    pair with different availability/content is a *conflict*, not two records).
+
+    Readiness. ``ready`` requires no missing input and every ``one`` binding to
+    carry exactly one ref. ``terminal_partial`` is non-executable (a gateway must
+    reject it), records the exact unsatisfied ``missing_input_names`` (canonically
+    sorted, duplicate-free) and only the bindings available at the terminal
+    boundary — it exists so a BLOCKED/SKIPPED/early terminal NodeRun can still bind
+    a real immutable snapshot. Self-seals ``content_digest`` via :meth:`build`.
     """
 
     schema_version: Literal["1"] = "1"
     snapshot_id: NonEmptyStr
-    context_snapshot_hash: DigestHex
+    run_id: NonEmptyStr
+    plan_id: NonEmptyStr
+    plan_digest: DigestHex
+    node_id: NonEmptyStr
+    layer_index: NonNegativeInt
+    attempt: PositiveInt
+    context_snapshot_ref: TypedPayloadRef
+    artifact_inputs: tuple[InputArtifactBinding, ...] = ()
+    data_result_refs: tuple[TypedPayloadRef, ...] = ()
     memory_record_refs: tuple[MemoryRecordRef, ...] = ()
+    readiness: Literal["ready", "terminal_partial"]
+    missing_input_names: tuple[NonEmptyStr, ...] = ()
     built_at: UtcDateTime
     content_digest: DigestHex
 
-    SEMANTIC_EXCLUDE: ClassVar[frozenset[str]] = frozenset({"snapshot_id", "built_at"})
+    SEMANTIC_EXCLUDE: ClassVar[frozenset[str]] = frozenset(
+        {"snapshot_id", "run_id", "plan_id", "attempt", "built_at"}
+    )
     SELF_DIGEST_FIELDS: ClassVar[frozenset[str]] = frozenset({"content_digest"})
 
     @model_validator(mode="after")
     def _verify(self) -> "InputSnapshot":
+        if self.context_snapshot_ref.payload_ref.namespace != "main":
+            raise ValueError("context_snapshot_ref must reference a main-namespace payload")
+        if (
+            self.context_snapshot_ref.schema_ref.name != "ContextSnapshot"
+            or self.context_snapshot_ref.schema_ref.version != "1"
+        ):
+            raise ValueError("context_snapshot_ref must resolve ContextSnapshot@1")
+
+        validate_typed_ref_tuple(
+            self.data_result_refs, require_main=True, field_name="data_result_refs"
+        )
+
+        input_names = [b.input_name for b in self.artifact_inputs]
+        if len(set(input_names)) != len(input_names):
+            raise ValueError("artifact_inputs must not repeat an input_name")
+
         refs = self.memory_record_refs
         keys = [(r.record_id, r.revision_id, r.content_digest) for r in refs]
         if keys != sorted(keys):
@@ -447,6 +762,30 @@ class InputSnapshot(DigestModel):
                     "(record_id, revision_id) with different availability/content"
                 )
             seen[pair] = r
+
+        missing = list(self.missing_input_names)
+        if missing != sorted(missing):
+            raise ValueError("missing_input_names must be canonically sorted")
+        if len(set(missing)) != len(missing):
+            raise ValueError("missing_input_names must be duplicate-free")
+
+        if self.readiness == "ready":
+            if self.missing_input_names:
+                raise ValueError(
+                    "readiness='ready' requires an empty missing_input_names tuple"
+                )
+            for binding in self.artifact_inputs:
+                if binding.cardinality == "one" and len(binding.artifact_refs) != 1:
+                    raise ValueError(
+                        f"readiness='ready' requires the 'one' binding "
+                        f"{binding.input_name!r} to carry exactly one artifact ref"
+                    )
+        else:  # terminal_partial
+            if not self.missing_input_names:
+                raise ValueError(
+                    "readiness='terminal_partial' requires at least one missing input name"
+                )
+
         if self.content_digest != self.semantic_digest():
             raise ValueError("declared content_digest does not match canonical digest")
         return self

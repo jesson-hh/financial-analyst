@@ -161,11 +161,16 @@ def test_snapshot_locator_and_hash_projections_intact():
     for semantic_field in ("memory_snapshot_hash", "past_context_hash", "memory_session_id"):
         assert semantic_field not in ContextSnapshot.SEMANTIC_EXCLUDE
 
-    # InputSnapshot: only the storage locator + wall-clock are audit; the frozen
-    # memory record refs stay semantic.
-    assert InputSnapshot.SEMANTIC_EXCLUDE == frozenset({"snapshot_id", "built_at"})
+    # InputSnapshot: storage/correlation locators + attempt + wall-clock are audit;
+    # the frozen memory record refs (and plan_digest/node/layer/refs/readiness) stay
+    # semantic.
+    assert InputSnapshot.SEMANTIC_EXCLUDE == frozenset(
+        {"snapshot_id", "run_id", "plan_id", "attempt", "built_at"}
+    )
     assert InputSnapshot.SELF_DIGEST_FIELDS == frozenset({"content_digest"})
     assert "memory_record_refs" not in InputSnapshot.SEMANTIC_EXCLUDE
+    for semantic_field in ("plan_digest", "node_id", "layer_index", "readiness"):
+        assert semantic_field not in InputSnapshot.SEMANTIC_EXCLUDE
 
     # empty-memory facts self-seal their canonical identity.
     assert EmptyMemorySnapshot.SELF_DIGEST_FIELDS == frozenset({"content_digest"})

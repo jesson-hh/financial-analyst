@@ -40,6 +40,7 @@ from guanlan_v2.orchestration.refs import (
     PayloadRef,
     SchemaManifestEntry,
     SchemaRef,
+    TypedPayloadRef,
 )
 from guanlan_v2.orchestration.schema_registry import (
     RegistrySealedError,
@@ -56,6 +57,8 @@ from guanlan_v2.orchestration.schema_registry import (
 _LAZY_CONTEXT = frozenset(
     {
         "ContextSnapshot",
+        "ContextRuntimeRequirements",
+        "InputArtifactBinding",
         "InputSnapshot",
         "MemoryRecordRef",
         "EmptyMemorySnapshot",
@@ -68,9 +71,11 @@ _LAZY_REGISTRY = frozenset({"PHASE1_PUBLIC_MODELS", "INTERNAL_MODELS"})
 
 if TYPE_CHECKING:  # give static tools the real symbols without eager runtime import
     from guanlan_v2.orchestration.context import (
+        ContextRuntimeRequirements,
         ContextSnapshot,
         EmptyMemorySelection,
         EmptyMemorySnapshot,
+        InputArtifactBinding,
         InputSnapshot,
         MemoryRecordRef,
         build_empty_memory_binding,
@@ -101,6 +106,7 @@ __all__ = [
     "ContentRef",
     "CapabilityRef",
     "PayloadRef",
+    "TypedPayloadRef",
     "SchemaManifestEntry",
     # registry API
     "SchemaRegistry",
@@ -120,6 +126,8 @@ __all__ = [
     "EmptyMemorySnapshot",  # noqa: F822 — lazy via __getattr__
     "EmptyMemorySelection",  # noqa: F822 — lazy via __getattr__
     "ContextSnapshot",  # noqa: F822 — lazy via __getattr__
+    "ContextRuntimeRequirements",  # noqa: F822 — lazy via __getattr__
+    "InputArtifactBinding",  # noqa: F822 — lazy via __getattr__
     "InputSnapshot",  # noqa: F822 — lazy via __getattr__
     "build_empty_memory_binding",  # noqa: F822 — lazy via __getattr__
 ]

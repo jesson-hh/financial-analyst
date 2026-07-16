@@ -37,19 +37,30 @@ from pydantic import ValidationError
 
 from guanlan_v2.orchestration.digest import DigestModel
 from guanlan_v2.orchestration.enums import DataBackend, DataMode
-from guanlan_v2.orchestration.refs import PayloadRef
+from guanlan_v2.orchestration.refs import (
+    CapabilityRef,
+    ContentRef,
+    PayloadRef,
+    SchemaRef,
+    TypedPayloadRef,
+)
+from guanlan_v2.orchestration.schemas import ArtifactRef
 from guanlan_v2.orchestration.context import (
     ClockSpec,
+    ContextRuntimeRequirements,
     ContextSnapshot,
     DataContext,
     EmptyMemorySelection,
     EmptyMemorySnapshot,
+    InputArtifactBinding,
     InputSnapshot,
     MemoryRecordRef,
     RunBudget,
     RunContext,
     build_empty_memory_binding,
     check_memory_session_scope,
+    compute_context_subject_digest,
+    verify_context_runtime_requirements,
     verify_memory_record_ref,
 )
 
@@ -167,6 +178,30 @@ def _mem_ref(
     )
 
 
+def _typed_ref(
+    schema_name: str,
+    content_digest_hex: str,
+    object_id: str,
+    *,
+    version: str = "1",
+    namespace: str = "main",
+) -> TypedPayloadRef:
+    return TypedPayloadRef(
+        schema_ref=SchemaRef(name=schema_name, version=version),
+        payload_ref=PayloadRef(
+            namespace=namespace, object_id=object_id, content_digest=content_digest_hex
+        ),
+    )
+
+
+def _runtime_requirements_ref(
+    content_digest_hex: str = DE, *, object_id: str = "rr-obj-1", namespace: str = "main"
+) -> TypedPayloadRef:
+    return _typed_ref(
+        "ContextRuntimeRequirements", content_digest_hex, object_id, namespace=namespace
+    )
+
+
 def _context_snapshot(
     *,
     data_context: DataContext | None = None,
@@ -174,9 +209,13 @@ def _context_snapshot(
     memory_snapshot_id: str = "memsnap-1",
     memory_snapshot_hash: str | None = None,
     past_context_hash: str | None = None,
+    snapshot_object_id: str = "snap-obj-1",
+    snapshot_namespace: str = "main",
+    snapshot_content_digest: str | None = None,
     selection_object_id: str = "sel-obj-1",
     selection_namespace: str = "main",
     selection_content_digest: str | None = None,
+    runtime_requirements_ref: TypedPayloadRef | None = None,
     memory_session_id: str | None = None,
     built_at: datetime | None = None,
 ) -> ContextSnapshot:
@@ -184,11 +223,13 @@ def _context_snapshot(
     dc = data_context if data_context is not None else _online_ctx()
     msh = memory_snapshot_hash if memory_snapshot_hash is not None else binding.snapshot_hash
     pch = past_context_hash if past_context_hash is not None else binding.past_context_hash
+    snap_cd = snapshot_content_digest if snapshot_content_digest is not None else msh
     sel_cd = selection_content_digest if selection_content_digest is not None else pch
-    sel = PayloadRef(
-        namespace=selection_namespace,
-        object_id=selection_object_id,
-        content_digest=sel_cd,
+    snap_ref = _typed_ref(
+        "EmptyMemorySnapshot", snap_cd, snapshot_object_id, namespace=snapshot_namespace
+    )
+    sel_ref = _typed_ref(
+        "EmptyMemorySelection", sel_cd, selection_object_id, namespace=selection_namespace
     )
     return ContextSnapshot.build(
         snapshot_id=snapshot_id,
@@ -196,9 +237,47 @@ def _context_snapshot(
         memory_snapshot_id=memory_snapshot_id,
         memory_snapshot_hash=msh,
         past_context_hash=pch,
-        memory_selection_ref=sel,
+        memory_snapshot_ref=snap_ref,
+        memory_selection_ref=sel_ref,
+        runtime_requirements_ref=runtime_requirements_ref,
         memory_session_id=memory_session_id,
         built_at=built_at if built_at is not None else _dt(3, 5),
+    )
+
+
+def _non_empty_context_snapshot(
+    *,
+    memory_snapshot_hash: str = DA,
+    past_context_hash: str = DB,
+    snapshot_schema: str = "EmptyMemorySnapshot",
+    selection_schema: str = "EmptyMemorySelection",
+    snapshot_object_id: str = "snap-obj-1",
+    selection_object_id: str = "sel-obj-1",
+    requirements_object_id: str = "rr-obj-1",
+    requirements_content_digest: str = DE,
+    memory_session_id: str | None = None,
+) -> ContextSnapshot:
+    """A ContextSnapshot bound to a *non*-canonical-empty memory pair.
+
+    A non-empty (or different-schema) memory binding is no longer the canonical
+    empty pair, so it must carry a ``runtime_requirements_ref``.
+    """
+    snap_ref = _typed_ref(snapshot_schema, memory_snapshot_hash, snapshot_object_id)
+    sel_ref = _typed_ref(selection_schema, past_context_hash, selection_object_id)
+    rr_ref = _runtime_requirements_ref(
+        requirements_content_digest, object_id=requirements_object_id
+    )
+    return ContextSnapshot.build(
+        snapshot_id="ctx-1",
+        data_context=_online_ctx(),
+        memory_snapshot_id="memsnap-1",
+        memory_snapshot_hash=memory_snapshot_hash,
+        past_context_hash=past_context_hash,
+        memory_snapshot_ref=snap_ref,
+        memory_selection_ref=sel_ref,
+        runtime_requirements_ref=rr_ref,
+        memory_session_id=memory_session_id,
+        built_at=_dt(3, 5),
     )
 
 
@@ -393,6 +472,22 @@ def test_context_snapshot_stable_under_selection_object_id_relocation():
     assert a.content_digest == b.content_digest
 
 
+def test_context_snapshot_stable_under_snapshot_ref_object_id_relocation():
+    # relocating the byte-identical memory snapshot payload under a new object id
+    # touches only the audit-only nested object_id, never the content digest.
+    a = _context_snapshot(snapshot_object_id="snap-obj-1")
+    b = _context_snapshot(snapshot_object_id="snap-obj-99")
+    assert a.content_digest == b.content_digest
+
+
+def test_context_snapshot_stable_under_requirements_ref_object_id_relocation():
+    # a non-empty memory binding carries a runtime_requirements_ref; relocating its
+    # payload (object_id churn only) cannot move the ContextSnapshot content digest.
+    a = _non_empty_context_snapshot(requirements_object_id="rr-obj-1")
+    b = _non_empty_context_snapshot(requirements_object_id="rr-obj-99")
+    assert a.content_digest == b.content_digest
+
+
 def test_context_snapshot_moves_on_source_registry_change():
     a = _context_snapshot(data_context=_online_ctx(source_registry_digest=DB))
     b = _context_snapshot(data_context=_online_ctx(source_registry_digest=DF))
@@ -401,14 +496,36 @@ def test_context_snapshot_moves_on_source_registry_change():
 
 def test_context_snapshot_moves_on_memory_snapshot_hash_change():
     a = _context_snapshot()
-    b = _context_snapshot(memory_snapshot_hash=DF)
+    # a changed memory snapshot hash is no longer the canonical empty pair, so it
+    # must carry a runtime_requirements_ref; the digest still moves on the hash.
+    b = _context_snapshot(memory_snapshot_hash=DF, runtime_requirements_ref=_runtime_requirements_ref())
     assert a.content_digest != b.content_digest
 
 
 def test_context_snapshot_moves_on_past_context_hash_change():
     a = _context_snapshot()
     # past_context_hash is bound by the selection ref content digest too.
-    b = _context_snapshot(past_context_hash=DF, selection_content_digest=DF)
+    b = _context_snapshot(
+        past_context_hash=DF,
+        selection_content_digest=DF,
+        runtime_requirements_ref=_runtime_requirements_ref(),
+    )
+    assert a.content_digest != b.content_digest
+
+
+def test_context_snapshot_moves_on_runtime_requirements_ref_content_change():
+    # the requirements ref's referenced content is semantic: two otherwise-equal
+    # non-empty snapshots that bind different requirements payloads differ.
+    a = _non_empty_context_snapshot(requirements_content_digest=DE)
+    b = _non_empty_context_snapshot(requirements_content_digest=DF)
+    assert a.content_digest != b.content_digest
+
+
+def test_context_snapshot_moves_on_memory_snapshot_ref_schema_change():
+    # exact SchemaRef of the memory snapshot ref is semantic (a Phase 3 non-empty
+    # schema replays differently from the canonical empty schema).
+    a = _non_empty_context_snapshot(snapshot_schema="EmptyMemorySnapshot")
+    b = _non_empty_context_snapshot(snapshot_schema="MemorySnapshot")
     assert a.content_digest != b.content_digest
 
 
@@ -449,6 +566,68 @@ def test_context_snapshot_selection_ref_namespace_must_be_main():
 def test_context_snapshot_selection_ref_content_must_equal_past_context_hash():
     with pytest.raises(ValidationError):
         _context_snapshot(selection_content_digest=DF)  # != past_context_hash
+
+
+def test_context_snapshot_snapshot_ref_namespace_must_be_main():
+    with pytest.raises(ValidationError):
+        _context_snapshot(snapshot_namespace="sealed")
+
+
+def test_context_snapshot_snapshot_ref_content_must_equal_memory_snapshot_hash():
+    with pytest.raises(ValidationError):
+        _context_snapshot(snapshot_content_digest=DF)  # != memory_snapshot_hash
+
+
+def test_context_snapshot_empty_pair_forbids_runtime_requirements_ref():
+    # the canonical empty pair must have runtime_requirements_ref=None.
+    with pytest.raises(ValidationError):
+        _context_snapshot(runtime_requirements_ref=_runtime_requirements_ref())
+
+
+def test_context_snapshot_non_empty_pair_requires_runtime_requirements_ref():
+    # a non-empty memory binding without a requirements ref is rejected.
+    binding = build_empty_memory_binding()
+    snap_ref = _typed_ref("MemorySnapshot", DA, "snap-obj-1")
+    sel_ref = _typed_ref("MemorySelection", DB, "sel-obj-1")
+    with pytest.raises(ValidationError):
+        ContextSnapshot.build(
+            snapshot_id="ctx-1", data_context=_online_ctx(), memory_snapshot_id="ms-1",
+            memory_snapshot_hash=DA, past_context_hash=DB,
+            memory_snapshot_ref=snap_ref, memory_selection_ref=sel_ref,
+            runtime_requirements_ref=None, built_at=_dt(3, 5),
+        )
+    assert binding.snapshot_hash != DA  # sanity: DA is not the canonical empty hash
+
+
+def test_context_snapshot_non_empty_pair_builds_with_requirements_ref():
+    snap = _non_empty_context_snapshot()
+    assert snap.runtime_requirements_ref is not None
+    assert snap.content_digest == snap.semantic_digest()
+
+
+def test_context_snapshot_runtime_requirements_ref_must_pin_requirements_schema():
+    # a present requirements ref must resolve ContextRuntimeRequirements@1.
+    bad = _typed_ref("NotRequirements", DE, "rr-obj-1")
+    with pytest.raises(ValidationError):
+        _context_snapshot(  # empty pair would forbid it anyway; make it non-empty
+            memory_snapshot_hash=DA,
+            snapshot_content_digest=DA,
+            past_context_hash=DB,
+            selection_content_digest=DB,
+            runtime_requirements_ref=bad,
+        )
+
+
+def test_context_snapshot_runtime_requirements_ref_namespace_must_be_main():
+    bad = _runtime_requirements_ref(namespace="review")
+    with pytest.raises(ValidationError):
+        _context_snapshot(
+            memory_snapshot_hash=DA,
+            snapshot_content_digest=DA,
+            past_context_hash=DB,
+            selection_content_digest=DB,
+            runtime_requirements_ref=bad,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -492,11 +671,57 @@ def test_memory_record_ref_is_frozen():
 # --------------------------------------------------------------------------- #
 # 6. InputSnapshot canonical ordering + duplicate/conflict                    #
 # --------------------------------------------------------------------------- #
-def _input_snapshot(refs, **over) -> InputSnapshot:
+def _ctx_ref(
+    *, content_digest_hex: str = D1, object_id: str = "ctx-obj-1",
+    namespace: str = "main", schema_name: str = "ContextSnapshot",
+) -> TypedPayloadRef:
+    return _typed_ref(schema_name, content_digest_hex, object_id, namespace=namespace)
+
+
+def _data_ref(
+    schema_name: str, content_digest_hex: str, object_id: str = "dr-obj-1",
+    *, namespace: str = "main",
+) -> TypedPayloadRef:
+    return _typed_ref(schema_name, content_digest_hex, object_id, namespace=namespace)
+
+
+def _artifact_ref(
+    *, output_key: str = "primary", content_digest_hex: str = DA, artifact_id: str = "art-1",
+    schema_name: str = "ResearchPlan", producer: str = "up.node", slot: str = "slot-1",
+) -> ArtifactRef:
+    return ArtifactRef(
+        artifact_id=artifact_id,
+        schema_ref=SchemaRef(name=schema_name, version="1"),
+        producer_node_id=producer,
+        slot=slot,
+        output_key=output_key,
+        content_digest=content_digest_hex,
+    )
+
+
+def _binding(
+    input_name: str, cardinality: str, refs: tuple[ArtifactRef, ...] = ()
+) -> InputArtifactBinding:
+    return InputArtifactBinding(
+        input_name=input_name, cardinality=cardinality, artifact_refs=refs
+    )
+
+
+def _input_snapshot(refs=(), **over) -> InputSnapshot:
     base = dict(
         snapshot_id="in-1",
-        context_snapshot_hash=D1,
+        run_id="run-1",
+        plan_id="plan-1",
+        plan_digest=D2,
+        node_id="node-1",
+        layer_index=0,
+        attempt=1,
+        context_snapshot_ref=_ctx_ref(),
+        artifact_inputs=(),
+        data_result_refs=(),
         memory_record_refs=tuple(refs),
+        readiness="ready",
+        missing_input_names=(),
         built_at=_dt(3, 10),
     )
     base.update(over)
@@ -564,6 +789,348 @@ def test_input_snapshot_snapshot_id_is_audit_only():
 
 
 # --------------------------------------------------------------------------- #
+# 6. InputSnapshot redesigned ABI — context ref / data refs / artifacts        #
+# --------------------------------------------------------------------------- #
+def test_input_snapshot_happy_ready_builds():
+    snap = _input_snapshot()
+    assert snap.readiness == "ready"
+    assert snap.layer_index == 0
+    assert snap.attempt == 1
+    assert snap.content_digest == snap.semantic_digest()
+
+
+def test_input_snapshot_context_ref_namespace_must_be_main():
+    with pytest.raises(ValidationError):
+        _input_snapshot(context_snapshot_ref=_ctx_ref(namespace="sealed"))
+
+
+def test_input_snapshot_context_ref_must_pin_context_snapshot_schema():
+    with pytest.raises(ValidationError):
+        _input_snapshot(context_snapshot_ref=_ctx_ref(schema_name="NotContextSnapshot"))
+
+
+def test_input_snapshot_context_ref_object_relocation_is_audit_only():
+    a = _input_snapshot(context_snapshot_ref=_ctx_ref(object_id="ctx-obj-1"))
+    b = _input_snapshot(context_snapshot_ref=_ctx_ref(object_id="ctx-obj-99"))
+    assert a.content_digest == b.content_digest
+
+
+def test_input_snapshot_context_ref_content_is_semantic():
+    a = _input_snapshot(context_snapshot_ref=_ctx_ref(content_digest_hex=DA))
+    b = _input_snapshot(context_snapshot_ref=_ctx_ref(content_digest_hex=DB))
+    assert a.content_digest != b.content_digest
+
+
+def test_input_snapshot_data_result_refs_canonical_order_required():
+    hi = _data_ref("Zeta", DB)
+    lo = _data_ref("Alpha", DA)
+    with pytest.raises(ValidationError):
+        _input_snapshot(data_result_refs=(hi, lo))  # out of order
+    ok = _input_snapshot(data_result_refs=(lo, hi))
+    assert len(ok.data_result_refs) == 2
+
+
+def test_input_snapshot_data_result_refs_reject_duplicate():
+    r = _data_ref("Alpha", DA)
+    r2 = _data_ref("Alpha", DA, object_id="dr-obj-2")  # same semantic identity
+    with pytest.raises(ValidationError):
+        _input_snapshot(data_result_refs=(r, r2))
+
+
+def test_input_snapshot_data_result_refs_reject_non_main():
+    r = _data_ref("Alpha", DA, namespace="sealed")
+    with pytest.raises(ValidationError):
+        _input_snapshot(data_result_refs=(r,))
+
+
+def test_input_snapshot_data_result_ref_object_relocation_is_audit_only():
+    a = _input_snapshot(data_result_refs=(_data_ref("Alpha", DA, object_id="dr-1"),))
+    b = _input_snapshot(data_result_refs=(_data_ref("Alpha", DA, object_id="dr-9"),))
+    assert a.content_digest == b.content_digest
+
+
+def test_input_snapshot_data_result_ref_content_is_semantic():
+    a = _input_snapshot(data_result_refs=(_data_ref("Alpha", DA),))
+    b = _input_snapshot(data_result_refs=(_data_ref("Alpha", DB),))
+    assert a.content_digest != b.content_digest
+
+
+# --------------------------------------------------------------------------- #
+# 6. InputSnapshot readiness matrix + artifact binding cardinality             #
+# --------------------------------------------------------------------------- #
+def test_input_snapshot_ready_with_missing_names_rejected():
+    with pytest.raises(ValidationError):
+        _input_snapshot(readiness="ready", missing_input_names=("feed",))
+
+
+def test_input_snapshot_ready_requires_one_binding_exactly_one_ref():
+    empty_one = _binding("feed", "one", ())  # zero refs is legal at model level
+    with pytest.raises(ValidationError):
+        _input_snapshot(readiness="ready", artifact_inputs=(empty_one,))
+
+
+def test_input_snapshot_ready_accepts_one_binding_with_one_ref():
+    one = _binding("feed", "one", (_artifact_ref(),))
+    snap = _input_snapshot(readiness="ready", artifact_inputs=(one,))
+    assert snap.artifact_inputs[0].cardinality == "one"
+
+
+def test_input_snapshot_ready_accepts_many_binding_with_multiple_refs():
+    many = _binding("feeds", "many", (_artifact_ref(content_digest_hex=DA),
+                                       _artifact_ref(content_digest_hex=DB, artifact_id="art-2")))
+    snap = _input_snapshot(readiness="ready", artifact_inputs=(many,))
+    assert len(snap.artifact_inputs[0].artifact_refs) == 2
+
+
+def test_input_snapshot_terminal_partial_requires_missing_names():
+    with pytest.raises(ValidationError):
+        _input_snapshot(readiness="terminal_partial", missing_input_names=())
+
+
+def test_input_snapshot_terminal_partial_records_exact_missing_names():
+    snap = _input_snapshot(readiness="terminal_partial", missing_input_names=("feed", "peer"))
+    assert snap.readiness == "terminal_partial"
+    assert snap.missing_input_names == ("feed", "peer")
+
+
+def test_input_snapshot_missing_names_must_be_sorted_and_dupfree():
+    with pytest.raises(ValidationError):
+        _input_snapshot(readiness="terminal_partial", missing_input_names=("peer", "feed"))
+    with pytest.raises(ValidationError):
+        _input_snapshot(readiness="terminal_partial", missing_input_names=("feed", "feed"))
+
+
+def test_input_snapshot_artifact_inputs_reject_duplicate_input_name():
+    a = _binding("feed", "one", (_artifact_ref(),))
+    b = _binding("feed", "many", ())
+    with pytest.raises(ValidationError):
+        _input_snapshot(readiness="terminal_partial", missing_input_names=("x",),
+                        artifact_inputs=(a, b))
+
+
+def test_input_snapshot_artifact_inputs_order_is_semantic():
+    a = _binding("alpha", "one", (_artifact_ref(),))
+    b = _binding("beta", "one", (_artifact_ref(artifact_id="art-2"),))
+    x = _input_snapshot(readiness="ready", artifact_inputs=(a, b))
+    y = _input_snapshot(readiness="ready", artifact_inputs=(b, a))
+    assert x.content_digest != y.content_digest
+
+
+# --------------------------------------------------------------------------- #
+# 6. InputSnapshot audit-vs-semantic field classification                      #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("field, val_a, val_b", [
+    ("run_id", "run-1", "run-2"),
+    ("plan_id", "plan-1", "plan-2"),
+    ("attempt", 1, 2),
+])
+def test_input_snapshot_audit_fields_do_not_move_digest(field, val_a, val_b):
+    a = _input_snapshot(**{field: val_a})
+    b = _input_snapshot(**{field: val_b})
+    assert a.content_digest == b.content_digest
+    assert a.audit_digest_value() != b.audit_digest_value()
+
+
+@pytest.mark.parametrize("field, val_a, val_b", [
+    ("plan_digest", DA, DB),
+    ("node_id", "node-1", "node-2"),
+    ("layer_index", 0, 3),
+    ("readiness", "ready", "terminal_partial"),
+])
+def test_input_snapshot_semantic_fields_move_digest(field, val_a, val_b):
+    over_a = {field: val_a}
+    over_b = {field: val_b}
+    if val_b == "terminal_partial":
+        over_b["missing_input_names"] = ("feed",)
+    a = _input_snapshot(**over_a)
+    b = _input_snapshot(**over_b)
+    assert a.content_digest != b.content_digest
+
+
+def test_input_snapshot_semantic_exclude_is_the_new_audit_set():
+    assert InputSnapshot.SEMANTIC_EXCLUDE == frozenset(
+        {"snapshot_id", "run_id", "plan_id", "attempt", "built_at"}
+    )
+
+
+# --------------------------------------------------------------------------- #
+# InputArtifactBinding model                                                   #
+# --------------------------------------------------------------------------- #
+def test_input_artifact_binding_one_rejects_two_refs():
+    with pytest.raises(ValidationError):
+        InputArtifactBinding(
+            input_name="feed", cardinality="one",
+            artifact_refs=(_artifact_ref(), _artifact_ref(artifact_id="art-2")),
+        )
+
+
+def test_input_artifact_binding_one_allows_single_ref():
+    b = InputArtifactBinding(input_name="feed", cardinality="one", artifact_refs=(_artifact_ref(),))
+    assert b.cardinality == "one"
+
+
+def test_input_artifact_binding_is_frozen_and_forbids_extra():
+    b = _binding("feed", "many", ())
+    with pytest.raises(ValidationError):
+        b.input_name = "other"
+    with pytest.raises(ValidationError):
+        InputArtifactBinding(input_name="feed", cardinality="one", bogus=1)
+
+
+def test_input_artifact_binding_artifact_id_is_audit_only():
+    a = _binding("feed", "one", (_artifact_ref(artifact_id="art-1"),))
+    b = _binding("feed", "one", (_artifact_ref(artifact_id="art-99"),))
+    assert a.semantic_digest() == b.semantic_digest()
+
+
+# --------------------------------------------------------------------------- #
+# ContextRuntimeRequirements model + helpers                                   #
+# --------------------------------------------------------------------------- #
+def _content_ref(id: str = "prompt.macro", cd: str = DA) -> ContentRef:
+    return ContentRef(id=id, version="1", content_digest=cd)
+
+
+def _capability_ref(id: str = "cap.markets", cd: str = DB) -> CapabilityRef:
+    return CapabilityRef(id=id, version="1", content_digest=cd)
+
+
+def _requirements(**over) -> ContextRuntimeRequirements:
+    base = dict(
+        context_subject_digest=DA,
+        required_schema_registry_digest=DB,
+        required_catalog_digest=DC,
+        required_runtime_material_refs=(),
+        required_capability_refs=(),
+        required_bridge_ids=(),
+    )
+    base.update(over)
+    return ContextRuntimeRequirements.build(**base)
+
+
+def test_requirements_happy_self_seals():
+    req = _requirements()
+    assert req.requirements_digest == req.semantic_digest()
+
+
+def test_requirements_declared_digest_mismatch_rejected():
+    req = _requirements()
+    payload = req.model_dump()
+    payload["requirements_digest"] = WRONG
+    with pytest.raises(ValidationError):
+        ContextRuntimeRequirements(**payload)
+
+
+def test_requirements_is_frozen_and_forbids_extra():
+    req = _requirements()
+    with pytest.raises(ValidationError):
+        req.required_catalog_digest = DF
+    with pytest.raises(ValidationError):
+        _requirements(bogus=1)
+
+
+def test_requirements_material_refs_canonical_and_dupfree():
+    hi = _content_ref("z.prompt", DB)
+    lo = _content_ref("a.prompt", DA)
+    with pytest.raises(ValidationError):
+        _requirements(required_runtime_material_refs=(hi, lo))  # out of order
+    with pytest.raises(ValidationError):
+        _requirements(required_runtime_material_refs=(lo, lo))  # duplicate
+    ok = _requirements(required_runtime_material_refs=(lo, hi))
+    assert len(ok.required_runtime_material_refs) == 2
+
+
+def test_requirements_capability_refs_canonical_and_dupfree():
+    hi = _capability_ref("z.cap", DB)
+    lo = _capability_ref("a.cap", DA)
+    with pytest.raises(ValidationError):
+        _requirements(required_capability_refs=(hi, lo))
+    with pytest.raises(ValidationError):
+        _requirements(required_capability_refs=(lo, lo))
+    ok = _requirements(required_capability_refs=(lo, hi))
+    assert len(ok.required_capability_refs) == 2
+
+
+def test_requirements_bridge_ids_sorted_and_dupfree():
+    with pytest.raises(ValidationError):
+        _requirements(required_bridge_ids=("bridge.b", "bridge.a"))
+    with pytest.raises(ValidationError):
+        _requirements(required_bridge_ids=("bridge.a", "bridge.a"))
+    ok = _requirements(required_bridge_ids=("bridge.a", "bridge.b"))
+    assert ok.required_bridge_ids == ("bridge.a", "bridge.b")
+
+
+def test_requirements_semantic_fields_move_digest():
+    a = _requirements(required_catalog_digest=DC)
+    b = _requirements(required_catalog_digest=DF)
+    assert a.requirements_digest != b.requirements_digest
+
+
+def test_compute_context_subject_digest_is_deterministic_and_sensitive():
+    snap = _non_empty_context_snapshot()
+    d1 = compute_context_subject_digest(
+        data_context=snap.data_context,
+        memory_snapshot_ref=snap.memory_snapshot_ref,
+        memory_selection_ref=snap.memory_selection_ref,
+        memory_session_id=snap.memory_session_id,
+    )
+    d2 = compute_context_subject_digest(
+        data_context=snap.data_context,
+        memory_snapshot_ref=snap.memory_snapshot_ref,
+        memory_selection_ref=snap.memory_selection_ref,
+        memory_session_id=snap.memory_session_id,
+    )
+    assert d1 == d2
+    # session scope participates in the subject digest.
+    d3 = compute_context_subject_digest(
+        data_context=snap.data_context,
+        memory_snapshot_ref=snap.memory_snapshot_ref,
+        memory_selection_ref=snap.memory_selection_ref,
+        memory_session_id="sess.desk_a",
+    )
+    assert d1 != d3
+
+
+def test_verify_context_runtime_requirements_cross_match_both_directions():
+    snap = _non_empty_context_snapshot()
+    subject = compute_context_subject_digest(
+        data_context=snap.data_context,
+        memory_snapshot_ref=snap.memory_snapshot_ref,
+        memory_selection_ref=snap.memory_selection_ref,
+        memory_session_id=snap.memory_session_id,
+    )
+    req = _requirements(context_subject_digest=subject)
+    # bind the snapshot's runtime_requirements_ref to the requirements' self digest.
+    bound = _non_empty_context_snapshot(requirements_content_digest=req.requirements_digest)
+    assert verify_context_runtime_requirements(bound, req) is None
+    # a requirements whose subject digest does not match is rejected.
+    wrong = _requirements(context_subject_digest=DF)
+    bound_wrong = _non_empty_context_snapshot(requirements_content_digest=wrong.requirements_digest)
+    with pytest.raises(ValueError):
+        verify_context_runtime_requirements(bound_wrong, wrong)
+
+
+def test_verify_context_runtime_requirements_rejects_content_digest_mismatch():
+    snap = _non_empty_context_snapshot()
+    subject = compute_context_subject_digest(
+        data_context=snap.data_context,
+        memory_snapshot_ref=snap.memory_snapshot_ref,
+        memory_selection_ref=snap.memory_selection_ref,
+        memory_session_id=snap.memory_session_id,
+    )
+    req = _requirements(context_subject_digest=subject)
+    # snap's requirements_ref content digest (DE) != req.requirements_digest.
+    with pytest.raises(ValueError):
+        verify_context_runtime_requirements(snap, req)
+
+
+def test_verify_context_runtime_requirements_rejects_empty_pair():
+    empty = _context_snapshot()  # canonical empty pair, no requirements ref
+    req = _requirements()
+    with pytest.raises(ValueError):
+        verify_context_runtime_requirements(empty, req)
+
+
+# --------------------------------------------------------------------------- #
 # 7. empty-memory builder + persisted locator/ref binding                     #
 # --------------------------------------------------------------------------- #
 def test_empty_memory_binding_is_deterministic_and_empty():
@@ -605,9 +1172,32 @@ def test_no_memory_context_snapshot_binds_empty_selection():
     snap = _context_snapshot(memory_session_id=None)
     assert snap.memory_snapshot_hash == binding.snapshot_hash
     assert snap.past_context_hash == binding.past_context_hash
-    assert snap.memory_selection_ref.namespace == "main"
-    assert snap.memory_selection_ref.content_digest == binding.past_context_hash
+    assert snap.memory_snapshot_ref.payload_ref.namespace == "main"
+    assert snap.memory_snapshot_ref.payload_ref.content_digest == binding.snapshot_hash
+    assert snap.memory_selection_ref.payload_ref.namespace == "main"
+    assert snap.memory_selection_ref.payload_ref.content_digest == binding.past_context_hash
+    # a no-memory (canonical empty pair) runtime carries no requirements ref.
+    assert snap.runtime_requirements_ref is None
     assert snap.memory_session_id is None
+
+
+def test_build_empty_memory_binding_exposes_canonical_typed_refs():
+    binding = build_empty_memory_binding()
+    assert binding.memory_snapshot_ref.schema_ref.name == "EmptyMemorySnapshot"
+    assert binding.memory_snapshot_ref.schema_ref.version == "1"
+    assert binding.memory_snapshot_ref.payload_ref.namespace == "main"
+    assert binding.memory_snapshot_ref.payload_ref.content_digest == binding.snapshot_hash
+    assert binding.memory_selection_ref.schema_ref.name == "EmptyMemorySelection"
+    assert binding.memory_selection_ref.payload_ref.content_digest == binding.past_context_hash
+    # a ContextSnapshot built straight from the binding refs is the empty pair.
+    snap = ContextSnapshot.build(
+        snapshot_id="ctx-1", data_context=_online_ctx(), memory_snapshot_id="ms-1",
+        memory_snapshot_hash=binding.snapshot_hash, past_context_hash=binding.past_context_hash,
+        memory_snapshot_ref=binding.memory_snapshot_ref,
+        memory_selection_ref=binding.memory_selection_ref,
+        runtime_requirements_ref=None, built_at=_dt(3, 5),
+    )
+    assert snap.runtime_requirements_ref is None
 
 
 # --------------------------------------------------------------------------- #
