@@ -402,14 +402,15 @@ Factory = Callable[..., Any]
 
 
 class TrustedFactoryRegistry:
-    """Handler / model factories keyed by *catalog* ref identity.
+    """Handler / model / capability-backend factories keyed by *catalog* ref identity.
 
     Registration keys are derived from the :class:`CatalogRuntime` — handler
-    ``ContentRef`` identities of kind ``handler``, and model tiers declared by
-    catalog LLM workers — never from a caller-supplied callable identity or
-    filesystem path. A ref / tier not present in the catalog is rejected, and no
-    binding may be replaced, so a caller can neither smuggle an off-catalog
-    handler nor override a bound one.
+    ``ContentRef`` identities of kind ``handler``, model tiers declared by
+    catalog LLM workers, and capability ``CapabilityRef`` identities from the
+    catalog capability manifest — never from a caller-supplied callable identity
+    or filesystem path. A ref / tier not present in the catalog is rejected, and
+    no binding may be replaced, so a caller can neither smuggle an off-catalog
+    handler/backend nor override a bound one.
     """
 
     def __init__(self, runtime: CatalogRuntime) -> None:
@@ -423,8 +424,13 @@ class TrustedFactoryRegistry:
             for w in runtime.snapshot.workers
             if w.execution.kind is ExecutionKind.LLM and w.execution.model_tier is not None
         )
+        self._capability_keys: frozenset[HandlerKey] = frozenset(
+            (e.ref.id, e.ref.version, e.ref.content_digest)
+            for e in runtime.snapshot.capability_manifest
+        )
         self._handlers: dict[HandlerKey, Factory] = {}
         self._models: dict[str, Factory] = {}
+        self._capability_backends: dict[HandlerKey, Factory] = {}
 
     def register_handler(self, ref: ContentRef, factory: Factory) -> None:
         key: HandlerKey = (ref.id, ref.version, ref.content_digest)
@@ -462,6 +468,35 @@ class TrustedFactoryRegistry:
         except KeyError:
             raise CatalogMaterialError(
                 f"no model factory bound for tier {model_tier!r}"
+            ) from None
+
+    def register_capability_backend(self, ref: CapabilityRef, factory: Factory) -> None:
+        """Bind the trusted backend factory for one exact catalog capability identity.
+
+        Mirrors :meth:`register_handler`: the key is the capability's
+        ``(id, version, content_digest)`` drawn from the catalog capability
+        manifest, so an off-catalog capability — or a catalog id with a forged
+        digest — can never receive a backend, and a bound backend can never be
+        replaced.
+        """
+        key: HandlerKey = (ref.id, ref.version, ref.content_digest)
+        if key not in self._capability_keys:
+            raise CatalogMaterialError(
+                f"capability ref {ref.id}@{ref.version} is not a catalog capability identity"
+            )
+        if key in self._capability_backends:
+            raise CatalogMaterialError(
+                f"capability backend {ref.id}@{ref.version} is already bound"
+            )
+        self._capability_backends[key] = factory
+
+    def capability_backend_factory(self, ref: CapabilityRef) -> Factory:
+        key: HandlerKey = (ref.id, ref.version, ref.content_digest)
+        try:
+            return self._capability_backends[key]
+        except KeyError:
+            raise CatalogMaterialError(
+                f"no capability backend bound for {ref.id}@{ref.version}"
             ) from None
 
 

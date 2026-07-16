@@ -34,13 +34,22 @@ DEGRADED terminal status). Everything it does is confined by *trusted* resolutio
 * **Closed CapabilityGateway state machine.** ``begin`` verifies the admitted
   Plan, the exact WorkerSpec allowlist, the token/summary binding and the
   descriptor request schema and charges the invocation to the token-bound summary;
-  ``invoke`` calls only the trusted backend (its raw result carries no PayloadRef
-  and cannot count as evidence); the owning adapter validates and persists the
-  request/result ONCE through :class:`BridgeEvidenceWriter`; ``finalize_success``
-  re-resolves those exact main refs and mints one Phase-1
+  ``invoke`` resolves the backend from the :class:`TrustedFactoryRegistry` keyed by
+  the exact catalog capability identity — a caller cannot inject a backend — and
+  the raw result carries no PayloadRef and cannot count as evidence; the owning
+  adapter validates and persists the request/result ONCE through
+  :class:`BridgeEvidenceWriter`; ``finalize_success`` re-resolves those exact main
+  refs and mints one Phase-1
   :class:`~guanlan_v2.orchestration.schemas.ToolCallRecord` with **no** second
   write; ``reject`` records one audit-only refusal. A pending invocation has
-  exactly one terminal transition.
+  exactly one terminal transition. Before sealing any result, the executor
+  cross-checks every provider-contributed ToolCallRecord against the gateway's
+  authoritative ``finalized_records()`` — a record the gateway never finalized is
+  forged evidence and yields an honest INCOMPLETE, never a sealed Artifact.
+  The :class:`ModelGateway` remains an *injected service port* in static v1: the
+  runner is the trust boundary that selects it. Carry-forward for Task 8: the
+  runner resolves the gateway via ``factories.model_factory(worker.execution.model_tier)``
+  so the tier binding is enforced at the same trusted-registry seam.
 * **Prompt confinement.** :class:`StaticPromptAssembler` returns only an immutable
   :class:`AssembledModelRequest`; untrusted blocks go ONLY into the model gateway's
   data channel and are never interpolated into system/skill/guardrail text. The
@@ -52,15 +61,23 @@ DEGRADED terminal status). Everything it does is confined by *trusted* resolutio
 Capability I/O schema seam (documented reconciliation)
 ------------------------------------------------------
 A capability's declared ``input_schema_ref`` / ``output_schema_ref`` are
-adapter-opaque and are NOT part of the cumulative Phase-2 runtime registry. They
-are, however, ordinary members of the Phase-1 ``SchemaRegistry`` the catalog was
-validated against (a capability that named an unresolvable schema could never have
-passed Phase-1 catalog validation). So the CapabilityGateway validates a request /
-result **adapter-side** against the exact ``CapabilityDescriptor`` refs through that
-Phase-1 registry, and evidence persistence uses the Phase-1 registry digest for the
-main data payloads while the review-namespace control facts use the runtime-registry
-digest. No registry is mutated and no capability model is registered into the
-runtime registry.
+adapter-opaque: they are NOT registered in the cumulative Phase-2 runtime registry,
+and Phase-1 catalog validation does **not** resolve them against any schema
+registry either (a catalog snapshot never touches a registry). What actually
+confines them is that the CapabilityGateway validates every request / result
+**adapter-side** against the exact ``CapabilityDescriptor`` refs through the
+Phase-1 ``SchemaRegistry`` instance it is constructed with — and that validation
+**fails closed**: an unresolvable schema raises (``UnknownSchemaError``), so an
+unregistered capability I/O schema means the capability invocation FAILS, never
+that validation is silently skipped. Evidence persistence uses the Phase-1
+registry digest for the main data payloads while the review-namespace control
+facts use the runtime-registry digest. No registry is mutated and no capability
+model enters the runtime registry.
+
+**NOTE for Task 9 (pilot):** the pilot MUST register its capability I/O schemas
+(e.g. ``AshareConstraintQuery@1`` / ``AshareConstraintResult@1``) into the
+``SchemaRegistry`` instance it hands the CapabilityGateway / worker executor, or
+its capability workers fail closed at ``invoke``/``validate_result``.
 """
 from __future__ import annotations
 
@@ -495,6 +512,24 @@ class BridgeEvidenceWriter:
         self._data_rt = data_registry_digest
         self._rt = runtime_registry_digest
         self._put_seq = 0
+        self._sealed = False
+
+    def seal(self) -> None:
+        """Seal the writer: any later ``put`` / ``record_existing`` is rejected.
+
+        The executor seals the stage-1 writer once every prepared handle is frozen
+        and the execution writer once every session's ``freeze_for_execution``
+        returned (or a terminal interruption fired), so a provider that stashed the
+        writer cannot journal late evidence after its contribution was sealed.
+        """
+        self._sealed = True
+
+    def _require_open(self, op: str) -> None:
+        if self._sealed:
+            raise WorkerExecutionError(
+                f"BridgeEvidenceWriter.{op} rejected: the writer is sealed "
+                "(late call after freeze_for_execution)"
+            )
 
     @property
     def reader(self):
@@ -527,6 +562,7 @@ class BridgeEvidenceWriter:
         payload: Any,
         idempotency_key: str,
     ) -> TypedPayloadRef:
+        self._require_open("put")
         self._sequencer.validate_token(token)
         evidence_ordinal = self._sequencer.next_evidence_ordinal()
         ordinal = ExecutionEvidenceOrdinalToken(
@@ -571,6 +607,7 @@ class BridgeEvidenceWriter:
         typed_ref: TypedPayloadRef,
         idempotency_key: str,
     ) -> TypedPayloadRef:
+        self._require_open("record_existing")
         self._sequencer.validate_token(token)
         if typed_ref.payload_ref.namespace != "main":
             raise EvidenceGatewayNamespace("record_existing requires a main-namespace typed ref")
@@ -693,11 +730,14 @@ class CapabilityGateway:
     """The closed capability state machine (``begin`` → ``invoke`` → terminal).
 
     Confines every capability call to the admitted Plan, the exact WorkerSpec
-    allowlist and the token-bound summary. A caller cannot inject a backend: the
-    backend is resolved from the trusted :class:`TrustedFactoryRegistry` keyed by the
-    capability descriptor identity. A worker cannot self-report a numeric tool count;
-    only a ``finalize_success`` (which re-resolves the exact persisted main refs)
-    mints a :class:`ToolCallRecord`.
+    allowlist and the token-bound summary. A caller cannot inject a backend:
+    ``invoke`` resolves it per capability from the
+    :class:`~guanlan_v2.orchestration.catalog_runtime.TrustedFactoryRegistry`
+    keyed by the exact catalog capability identity (id + version + content
+    digest); an unbound / off-catalog capability has no backend and fails. A
+    worker cannot self-report a numeric tool count; only a ``finalize_success``
+    (which re-resolves the exact persisted main refs) mints a
+    :class:`ToolCallRecord`.
     """
 
     def __init__(
@@ -707,19 +747,25 @@ class CapabilityGateway:
         worker: WorkerSpec,
         summaries: dict[str, BridgeStaticSupportSummary],
         catalog: CatalogRuntime,
-        backend: _CapabilityBackend,
+        factories: TrustedFactoryRegistry,
         phase1_registry: SchemaRegistry,
         refusal_sink,
         clock: AuthoritativeClock,
+        sequencer: ExecutionEvidenceSequencer,
     ) -> None:
         self._plan_digest = plan_digest
         self._worker = worker
         self._summaries = summaries
         self._catalog = catalog
-        self._backend = backend
+        self._factories = factories
         self._registry = phase1_registry
         self._refusals = refusal_sink
         self._clock = clock
+        self._sequencer = sequencer
+        # anchor tokens whose own ordinal has already been consumed by a begin;
+        # a later begin under the same anchor draws a FRESH service-issued ordinal
+        # (Phase-1 requires duplicate-free call ordinals across all records).
+        self._anchor_used: set[tuple[int, int, str]] = set()
         self._allow = {(c.id, c.version): c for c in worker.capability_allowlist}
         self._charges: dict[str, _SummaryCharge] = {d: _SummaryCharge() for d in summaries}
         self._pending: dict[str, PendingCapabilityInvocation] = {}
@@ -790,9 +836,24 @@ class CapabilityGateway:
         if idempotency_key in self._terminal or idempotency_key in self._pending:
             raise CapabilityGatewayError("invocation idempotency key already in use")
         charge.invocations += 1
+        # service-issued unique call ordinal: the FIRST begin under a bridge's
+        # issuance token consumes that token's own ordinal; every later begin under
+        # the same anchor draws a fresh ordinal from the same node sequencer, so
+        # two finalized records can never share a call_ordinal. Providers still
+        # cannot mint one — the sequencer is executor-owned.
+        anchor_key = (ordinal_token.call_ordinal, ordinal_token.bridge_priority,
+                      ordinal_token.bridge_id)
+        if anchor_key in self._anchor_used:
+            call_token = self._sequencer.issue_call_token(
+                bridge_priority=ordinal_token.bridge_priority,
+                bridge_id=ordinal_token.bridge_id,
+                summary_digest=ordinal_token.summary_digest)
+        else:
+            self._anchor_used.add(anchor_key)
+            call_token = ordinal_token
         pending = PendingCapabilityInvocation(
             plan_digest=self._plan_digest, node_id=ordinal_token.node_id,
-            worker_id=self._worker.id, ordinal_token=ordinal_token,
+            worker_id=self._worker.id, ordinal_token=call_token,
             capability_ref=capability_ref, request_schema_ref=request_schema_ref,
             result_schema_ref=desc.output_schema_ref, summary_digest=ordinal_token.summary_digest,
             idempotency_key=idempotency_key,
@@ -806,8 +867,20 @@ class CapabilityGateway:
         if self._pending.get(pending.idempotency_key) is not pending:
             raise CapabilityGatewayError("invoke on an unknown / already-terminal pending invocation")
         # adapter-side request validation against the exact descriptor input schema.
+        # FAILS CLOSED: an unregistered/unresolvable schema raises here — the
+        # invocation can never silently skip validation.
         req_model = self._registry.validate_payload(pending.request_schema_ref, _raw(validated_request))
-        raw = self._backend.invoke(capability_ref=pending.capability_ref, request=req_model)
+        # the backend resolves ONLY from the trusted registry, keyed by the exact
+        # catalog capability identity — never from a caller-supplied callable.
+        try:
+            factory = self._factories.capability_backend_factory(pending.capability_ref)
+        except CatalogMaterialError as exc:
+            raise CapabilityGatewayError(
+                f"no trusted capability backend bound for "
+                f"{pending.capability_ref.id}@{pending.capability_ref.version}: {exc}"
+            ) from exc
+        backend = factory(capability_ref=pending.capability_ref)
+        raw = backend.invoke(capability_ref=pending.capability_ref, request=req_model)
         return UnpublishedCapabilityResult(pending=pending, validated_request=req_model, raw_result=raw)
 
     def validate_result(self, unpublished: UnpublishedCapabilityResult) -> Any:
@@ -1464,6 +1537,9 @@ def prepare_input(
         runtime_registry_digest=runtime.runtime_registry_digest)
     prepared = resolver.prepare_input(
         plan=plan, context_snapshot_ref=context_snapshot_ref, evidence_writer=writer)
+    # pre-input evidence work ends when every handle is frozen: seal the stage-1
+    # writer so a provider that stashed it cannot journal late pre-input evidence.
+    writer.seal()
     return resolver, prepared, sequencer
 
 
@@ -1540,19 +1616,44 @@ def execute_node(
             capability_gateway=capability_gateway, evidence_writer=writer, reader=reader, kind=kind)
     except _TimeoutSignal as exc:
         return _drain_terminal(NodeStatus.TIMED_OUT, "node_timeout", str(exc), None,
-                               writer, sequencer, stores, ctx, plan, node, _terminal_nodrun), None
+                               capability_gateway, stores, ctx, plan, node, _terminal_nodrun), None
     except _CancelSignal as exc:
         return _drain_terminal(NodeStatus.CANCELLED, "node_cancelled", str(exc), None,
-                               writer, sequencer, stores, ctx, plan, node, _terminal_nodrun), None
+                               capability_gateway, stores, ctx, plan, node, _terminal_nodrun), None
     except WorkerExecutionError:
         raise
     except Exception as exc:  # handler/provider exception
         return _drain_terminal(NodeStatus.FAILED, "bridge_execution_error", str(exc),
-                               type(exc).__name__, writer, sequencer, stores, ctx, plan, node,
+                               type(exc).__name__, capability_gateway, stores, ctx, plan, node,
                                _terminal_nodrun), None
+    finally:
+        # every session is sealed (or terminally interrupted): reject any late
+        # provider put through a stashed writer reference.
+        writer.seal()
 
     # ---- classify merged bridge contributions ------------------------------ #
     merged = _MergedEvidence.from_contributions(contributions)
+    data_refs = _sorted_typed(_dedup_typed(merged.data_result_refs))
+
+    # ---- (5) forged-evidence gate: a provider-contributed ToolCallRecord the
+    #          CapabilityGateway never finalized can NEVER reach sealed provenance
+    #          or satisfy REQUIRED. -------------------------------------------- #
+    finalized_digests = {r.semantic_digest() for r in capability_gateway.finalized_records()}
+    forged = tuple(r for r in merged.tool_call_records
+                   if r.semantic_digest() not in finalized_digests)
+    if forged:
+        verified = tuple(r for r in merged.tool_call_records
+                         if r.semantic_digest() in finalized_digests)
+        honest = _MergedEvidence(
+            tool_call_records=verified, data_result_refs=merged.data_result_refs,
+            direct_evidence_refs=merged.direct_evidence_refs,
+            untrusted_blocks=merged.untrusted_blocks, degradation_reasons=())
+        return _terminal_nodrun(
+            NodeStatus.INCOMPLETE, reason_code="forged_tool_evidence",
+            reason=("provider contributed ToolCallRecord(s) the CapabilityGateway never "
+                    f"finalized: call ordinals {sorted(r.call_ordinal for r in forged)}"),
+            data_refs=data_refs, tool_records=verified,
+            evid_refs=_finalize_direct_evidence(honest, None)), None
 
     # ---- (6) per-summary REQUIRED/FORBIDDEN + tool-call discipline --------- #
     ok, why = _check_tool_discipline(worker, runtime, node, capability_gateway,
@@ -1560,7 +1661,7 @@ def execute_node(
     if not ok:
         return _terminal_nodrun(
             NodeStatus.INCOMPLETE, reason_code="tool_discipline_unmet", reason=why,
-            data_refs=merged.data_result_refs, tool_records=merged.tool_call_records,
+            data_refs=data_refs, tool_records=merged.tool_call_records,
             evid_refs=_finalize_direct_evidence(merged, None)), None
 
     # ---- (4b) LLM prompt assembly + single model call ---------------------- #
@@ -1580,7 +1681,7 @@ def execute_node(
         except Exception as exc:  # assembly failure -> orphan blocks retained directly
             return _terminal_nodrun(
                 NodeStatus.INCOMPLETE, reason_code="prompt_assembly_failed", reason=str(exc),
-                data_refs=merged.data_result_refs, tool_records=merged.tool_call_records,
+                data_refs=data_refs, tool_records=merged.tool_call_records,
                 evid_refs=_finalize_direct_evidence(merged, None)), None
 
         if model_gateway is None:
@@ -1596,12 +1697,12 @@ def execute_node(
             raise
         except _TimeoutSignal as exc:
             return _drain_terminal(NodeStatus.TIMED_OUT, "model_timeout", str(exc), None,
-                                   writer, sequencer, stores, ctx, plan, node, _terminal_nodrun,
+                                   capability_gateway, stores, ctx, plan, node, _terminal_nodrun,
                                    extra_prompt_ref=prompt_ref, merged=merged), None
         except Exception as exc:
             return _terminal_nodrun(
                 NodeStatus.FAILED, reason_code="model_error", reason=str(exc),
-                error_type=type(exc).__name__, data_refs=merged.data_result_refs,
+                error_type=type(exc).__name__, data_refs=data_refs,
                 tool_records=merged.tool_call_records,
                 evid_refs=_finalize_direct_evidence(merged, prompt_ref)), None
         payload = model_result.payload
@@ -1617,12 +1718,12 @@ def execute_node(
                 data_result_refs=merged.data_result_refs)
         except _TimeoutSignal as exc:
             return _drain_terminal(NodeStatus.TIMED_OUT, "handler_timeout", str(exc), None,
-                                   writer, sequencer, stores, ctx, plan, node, _terminal_nodrun,
+                                   capability_gateway, stores, ctx, plan, node, _terminal_nodrun,
                                    merged=merged), None
         except Exception as exc:
             return _terminal_nodrun(
                 NodeStatus.FAILED, reason_code="handler_error", reason=str(exc),
-                error_type=type(exc).__name__, data_refs=merged.data_result_refs,
+                error_type=type(exc).__name__, data_refs=data_refs,
                 tool_records=merged.tool_call_records,
                 evid_refs=_finalize_direct_evidence(merged, None)), None
         payload = model_result.payload
@@ -1635,7 +1736,7 @@ def execute_node(
     if not anchor_ok:
         return _terminal_nodrun(
             NodeStatus.INCOMPLETE, reason_code="number_anchor_policy", reason=anchor_why,
-            data_refs=merged.data_result_refs, tool_records=merged.tool_call_records,
+            data_refs=data_refs, tool_records=merged.tool_call_records,
             evid_refs=_finalize_direct_evidence(merged, prompt_ref),
             itok=model_result.input_tokens, otok=model_result.output_tokens), None
 
@@ -1646,14 +1747,13 @@ def execute_node(
     except Exception as exc:
         return _terminal_nodrun(
             NodeStatus.INCOMPLETE, reason_code="output_schema_invalid", reason=str(exc),
-            data_refs=merged.data_result_refs, tool_records=merged.tool_call_records,
+            data_refs=data_refs, tool_records=merged.tool_call_records,
             evid_refs=_finalize_direct_evidence(merged, prompt_ref),
             itok=model_result.input_tokens, otok=model_result.output_tokens), None
 
     # ---- (11/12) COMPLETED or DEGRADED: seal NodeRun + one Artifact -------- #
     status = NodeStatus.DEGRADED if degradation else NodeStatus.COMPLETED
     direct_evidence = _finalize_direct_evidence(merged, prompt_ref)
-    data_refs = _sorted_typed(_dedup_typed(merged.data_result_refs))
 
     artifact = _build_artifact(
         plan=plan, node=node, worker=worker, ctx=ctx, out_binding=out_binding,
@@ -1676,9 +1776,15 @@ def execute_node(
 
     # cross-object equality: Artifact provenance tuples == NodeRun tuples.
     prov = artifact.provenance
-    assert prov.tool_call_records == node_run.tool_call_records
-    assert prov.data_result_refs == node_run.data_result_refs
-    assert prov.execution_evidence_refs == node_run.execution_evidence_refs
+    if (
+        prov.tool_call_records != node_run.tool_call_records
+        or prov.data_result_refs != node_run.data_result_refs
+        or prov.execution_evidence_refs != node_run.execution_evidence_refs
+    ):
+        raise WorkerExecutionError(
+            "Artifact provenance evidence tuples drifted from the NodeRun tuples "
+            "(internal invariant; the record must not be sealed)"
+        )
     return node_run, artifact
 
 
@@ -1699,37 +1805,46 @@ CancelSignal = _CancelSignal
 
 
 def _drain_terminal(
-    status, reason_code, reason, error_type, writer, sequencer, stores, ctx, plan, node,
+    status, reason_code, reason, error_type, capability_gateway, stores, ctx, plan, node,
     build_terminal, *, extra_prompt_ref=None, merged=None,
 ):
     """Drain the persisted evidence journal into a terminal NodeRun (no Artifact).
 
     Recovers every committed evidence ref from :class:`BridgeEvidenceJournal` by
     node/token — even when a provider never returned — so partial work is never
-    dropped on a failed / timed-out / cancelled path.
+    dropped on a failed / timed-out / cancelled path. The recovered set runs
+    through the SAME :func:`_finalize_direct_evidence` classifier as the normal
+    path: a ref represented by a gateway-finalized :class:`ToolCallRecord` or a
+    consumed DataResult is never double-listed in direct execution evidence.
+    With no frozen contribution the authoritative
+    ``capability_gateway.finalized_records()`` supplies the retained records, so a
+    data/tool success followed by a terminal interruption keeps its records.
     """
     journal = BridgeEvidenceJournal(
         stores=stores, run_id=ctx.run_id, plan_digest=plan.plan_digest, node_id=node.id)
     drained = journal.drain()
-    data_refs: list[TypedPayloadRef] = []
-    evid_refs: list[TypedPayloadRef] = []
-    tool_records: tuple[ToolCallRecord, ...] = ()
     if merged is not None:
-        data_refs.extend(merged.data_result_refs)
-        evid_refs.extend(merged.direct_evidence_refs)
         tool_records = merged.tool_call_records
+        data_refs = list(merged.data_result_refs)
+        direct = list(merged.direct_evidence_refs)
+        blocks = merged.untrusted_blocks
     else:
-        # no frozen contribution: recover strictly from the journal.
-        tool_result_digests: set = set()
-        for j in drained:
-            if j.within_call_role == "provider_prefetch":
-                data_refs.append(j.evidence_ref)
-            else:
-                evid_refs.append(j.evidence_ref)
-    if extra_prompt_ref is not None:
-        evid_refs.append(extra_prompt_ref)
+        # no frozen contribution: the gateway's finalized records are the only
+        # authoritative tool evidence; their result refs are the consumed data.
+        tool_records = tuple(
+            sorted(capability_gateway.finalized_records(), key=lambda r: r.call_ordinal))
+        data_refs = [r.result_ref for r in tool_records]
+        direct = []
+        blocks = ()
+    # every journal-recovered ref becomes a direct candidate; the shared classifier
+    # filters record/data/block-represented refs, so nothing is double-listed.
+    direct.extend(j.evidence_ref for j in drained)
+    pseudo = _MergedEvidence(
+        tool_call_records=tool_records, data_result_refs=tuple(data_refs),
+        direct_evidence_refs=tuple(direct), untrusted_blocks=tuple(blocks),
+        degradation_reasons=())
+    evid_final = _finalize_direct_evidence(pseudo, extra_prompt_ref)
     data_final = _sorted_typed(_dedup_typed(data_refs))
-    evid_final = _sorted_typed(_dedup_typed(evid_refs))
     return build_terminal(
         status, reason_code=reason_code, reason=reason, error_type=error_type,
         data_refs=data_final, evid_refs=evid_final, tool_records=tool_records)

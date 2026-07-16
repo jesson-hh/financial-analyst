@@ -408,6 +408,36 @@ def test_model_factory_registry_confined_to_catalog_tiers():
         reg.register_model_factory("reasoner_deep", lambda: None)
 
 
+def test_capability_backend_registry_keyed_by_catalog_identity():
+    snap, mats = synthetic_snapshot()
+    rt = CatalogRuntime.build(snap, source_from_materials(mats))
+    reg = TrustedFactoryRegistry(rt)
+    cap_ref = rt.worker("text.demo").capability_allowlist[0]
+    sentinel = object()
+    reg.register_capability_backend(cap_ref, lambda **kw: sentinel)
+    assert reg.capability_backend_factory(cap_ref)() is sentinel
+    # a bound backend can never be replaced.
+    with pytest.raises(CatalogMaterialError):
+        reg.register_capability_backend(cap_ref, lambda **kw: None)
+
+
+def test_capability_backend_registry_rejects_off_catalog_or_forged_digest():
+    snap, mats = synthetic_snapshot()
+    rt = CatalogRuntime.build(snap, source_from_materials(mats))
+    reg = TrustedFactoryRegistry(rt)
+    foreign = CapabilityRef(id="cap.smuggled", version="1", content_digest="d" * 64)
+    with pytest.raises(CatalogMaterialError):
+        reg.register_capability_backend(foreign, lambda **kw: None)
+    # a catalog capability id with a forged digest is off-catalog.
+    real = rt.worker("text.demo").capability_allowlist[0]
+    forged = CapabilityRef(id=real.id, version=real.version, content_digest="e" * 64)
+    with pytest.raises(CatalogMaterialError):
+        reg.register_capability_backend(forged, lambda **kw: None)
+    # an unbound catalog capability resolves no backend factory.
+    with pytest.raises(CatalogMaterialError):
+        reg.capability_backend_factory(real)
+
+
 # --------------------------------------------------------------------------- #
 # 4. Compatibility exclusion                                                  #
 # --------------------------------------------------------------------------- #

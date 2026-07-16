@@ -93,6 +93,7 @@ class ScriptedProvider:
     raise_in_freeze: BaseException | None = None
     raise_after_capability: BaseException | None = None
     forge_token: bool = False
+    forge_record: bool = False
     memory_refs: tuple = ()
 
     def prepare_input(self, request: "W.BridgePrepareRequest") -> "W.BridgeStageOutcome":
@@ -154,6 +155,21 @@ class _ScriptedSession:
                 rec = gw.finalize_success(pending, request_ref=req_ref, result_ref=res_ref)
                 records.append(rec)
                 data_refs.append(res_ref)
+        if p.forge_record:
+            # a compromised provider fabricates a ToolCallRecord the gateway never
+            # finalized (it even persists real refs to look legitimate).
+            f_req = writer.put(token=token, role="tool_result", schema_ref=SR_OUT,
+                               payload=OtherOut(note="forged-req"),
+                               idempotency_key=f"{p.bridge.bridge_id}:forged-req")
+            f_res = writer.put(token=token, role="tool_result", schema_ref=SR_OUT,
+                               payload=OtherOut(note="forged-res"),
+                               idempotency_key=f"{p.bridge.bridge_id}:forged-res")
+            now = datetime(2026, 7, 17, tzinfo=UTC)
+            records.append(ToolCallRecord(
+                call_ordinal=token.call_ordinal, tool_ref=cap_ref, request_ref=f_req,
+                result_ref=f_res, call_id="forged-call", started_at=now, finished_at=now))
+            data_refs.append(f_res)
+            direct.append(f_req)
         if p.raise_after_capability is not None:
             raise p.raise_after_capability
         if p.force_block or (p.emit_block and kind is ExecutionKind.LLM):
@@ -238,6 +254,7 @@ class Env:
             self.plan, self.node, runtime=self.runtime, ctx=self.ctx, stores=self.stores,
             registry=self.sc.registry, context_snapshot_ref=ctx_ref, clock=self.clock,
             observer=observer)
+        self._last_seq = seq
         return resolver, prepared, seq
 
     def _register_provider(self, provider_factory):
@@ -254,11 +271,17 @@ class Env:
         return self.input_snapshot.context_snapshot_ref
 
     def capability_gateway(self, *, backend=None):
+        # the trusted backend binds ONLY through the TrustedFactoryRegistry, keyed
+        # by the exact catalog capability identity (never a caller callable).
+        chosen = backend or EchoBackend()
+        for cap in self.worker.capability_allowlist:
+            self.factories.register_capability_backend(cap, lambda **kw: chosen)
         summaries = {s.summary_digest: s for s in self.runtime.summaries_for(self.node.id)}
         gw = W.CapabilityGateway(
             plan_digest=self.plan.plan_digest, worker=self.worker, summaries=summaries,
-            catalog=self.sc.runtime, backend=backend or EchoBackend(),
-            phase1_registry=self.sc.registry, refusal_sink=self.refusal_sink, clock=self.clock)
+            catalog=self.sc.runtime, factories=self.factories,
+            phase1_registry=self.sc.registry, refusal_sink=self.refusal_sink, clock=self.clock,
+            sequencer=self._last_seq)
         return gw
 
     def model_gateway(self, **kw):
@@ -488,7 +511,7 @@ def test_deterministic_success_no_prompt_no_model():
     assert artifact.provenance.execution_evidence_refs == node_run.execution_evidence_refs
 
 
-def _run_deterministic(e, **kw):
+def _run_deterministic(e, *, prompt_assembler=None, model_gateway=None):
     factories = TrustedFactoryRegistry(e.sc.runtime)
     for rb_id in e.sc.view.bridge_ids():
         rb = e.sc.view.resolve(rb_id)
@@ -502,12 +525,14 @@ def _run_deterministic(e, **kw):
     resolver, prepared, seq = W.prepare_input(
         e.plan, e.node, runtime=e.runtime, ctx=e.ctx, stores=e.stores, registry=e.sc.registry,
         context_snapshot_ref=e.input_snapshot.context_snapshot_ref, clock=e.clock)
+    e._last_seq = seq
     gw = e.capability_gateway()
     return W.execute_node(
         e.plan, e.node, runtime=e.runtime, prepared_bridges=prepared,
         input_snapshot=e.input_snapshot, ctx=e.ctx, node_reservation=e.node_res,
-        bridge_resolver=resolver, model_gateway=None, capability_gateway=gw,
-        registry=e.sc.registry, stores=e.stores, clock=e.clock)
+        bridge_resolver=resolver, model_gateway=model_gateway, capability_gateway=gw,
+        registry=e.sc.registry, stores=e.stores, clock=e.clock,
+        prompt_assembler=prompt_assembler)
 
 
 # =========================================================================== #
@@ -590,9 +615,9 @@ def test_preflight_failure_has_zero_side_effects():
 # =========================================================================== #
 # 4. capability gateway state machine + per-summary arithmetic                 #
 # =========================================================================== #
-def _running_gateway(e):
+def _running_gateway(e, *, backend=None):
     resolver, prepared, seq = e.sequencer_and_prepared()
-    gw = e.capability_gateway()
+    gw = e.capability_gateway(backend=backend)
     gw.mark_running()
     return gw, prepared.handles[0].token, seq
 
@@ -842,6 +867,7 @@ def test_deterministic_with_a_block_is_rejected():
     resolver, prepared, seq = W.prepare_input(
         e.plan, e.node, runtime=e.runtime, ctx=e.ctx, stores=e.stores, registry=e.sc.registry,
         context_snapshot_ref=e.input_snapshot.context_snapshot_ref, clock=e.clock)
+    e._last_seq = seq
     gw = e.capability_gateway()
     with pytest.raises(W.WorkerExecutionError):
         W.execute_node(e.plan, e.node, runtime=e.runtime, prepared_bridges=prepared,
@@ -877,8 +903,13 @@ def test_failure_after_evidence_recovers_journal_into_node_run():
     assert node_run.status is NodeStatus.FAILED
     assert node_run.reason_code == "bridge_execution_error"
     assert node_run.error_type == "RuntimeError"
-    assert len(node_run.execution_evidence_refs) == 2
     assert artifact is None
+    # the gateway-finalized ToolCallRecord SURVIVES the terminal interruption; its
+    # result is the consumed data ref and its request stays represented by the
+    # record - the drain path runs the same classifier, so nothing double-lists.
+    assert len(node_run.tool_call_records) == 1
+    assert node_run.data_result_refs == (node_run.tool_call_records[0].result_ref,)
+    assert node_run.execution_evidence_refs == ()
 
 
 def test_timeout_and_cancel_yield_terminal_status():
@@ -980,3 +1011,210 @@ def test_artifact_three_digest_layers_are_distinct():
     digests = {artifact.content_digest, artifact.reproducibility_digest, artifact.audit_digest}
     assert len(digests) == 3
     assert artifact.reproducibility_digest != artifact.content_digest
+
+
+# =========================================================================== #
+# 12. forged tool evidence can never reach sealed provenance                   #
+# =========================================================================== #
+def test_forged_tool_record_is_rejected_and_never_seals():
+    e = build_env()
+    node_run, artifact = e.run(provider_factory=make_provider_factory(
+        do_capability=False, emit_block=False, forge_record=True))
+    assert node_run.status is NodeStatus.INCOMPLETE
+    assert node_run.reason_code == "forged_tool_evidence"
+    assert artifact is None
+    # the forged record is NOT retained: the gateway never finalized it.
+    assert node_run.tool_call_records == ()
+    # honest retention: the persisted forged request/result refs survive as
+    # evidence (data + direct), never as tool-call authority.
+    assert len(node_run.data_result_refs) == 1
+    assert len(node_run.execution_evidence_refs) == 1
+
+
+def test_legitimate_finalized_records_pass_the_forged_gate():
+    e = build_env()
+    node_run, artifact = e.run()
+    # the happy path's record IS gateway-finalized and seals normally.
+    assert node_run.status is NodeStatus.COMPLETED
+    assert len(node_run.tool_call_records) == 1
+    assert artifact is not None
+    assert artifact.provenance.tool_call_records == node_run.tool_call_records
+
+
+def test_required_cannot_be_satisfied_by_forged_record():
+    e = build_env(tool_calls=ToolCallRequirement.REQUIRED)
+    node_run, artifact = e.run(provider_factory=make_provider_factory(
+        do_capability=False, emit_block=False, forge_record=True))
+    # the forged gate fires BEFORE the REQUIRED arithmetic: a fabricated record
+    # can never count toward tool_calls=REQUIRED.
+    assert node_run.status is NodeStatus.INCOMPLETE
+    assert node_run.reason_code == "forged_tool_evidence"
+    assert node_run.tool_call_records == ()
+    assert artifact is None
+
+
+# =========================================================================== #
+# 13. cross-summary minimum: an unrelated bridge cannot satisfy another's bound #
+# =========================================================================== #
+def per_bridge_factory(configs):
+    def factory(*, bridge, summary):
+        kw = configs.get(bridge.bridge_id, {})
+        return ScriptedProvider(bridge=bridge, summary=summary, **kw)
+    return factory
+
+
+def test_unrelated_bridge_cannot_satisfy_another_summary_minimum():
+    e = build_env(bridges=[
+        _BridgeSpec(bridge_id="bridge.data", priority=10, activation_caps=("cap.data",),
+                    min_calls=1, max_calls=2),
+        _BridgeSpec(bridge_id="bridge.two", priority=20, activation_caps=("cap.data",),
+                    min_calls=1, max_calls=2),
+    ])
+    node_run, artifact = e.run(provider_factory=per_bridge_factory({
+        "bridge.data": {"n_calls": 2, "emit_block": False},
+        "bridge.two": {"do_capability": False, "emit_block": False},
+    }))
+    # bridge.data finalized TWO successes, but bridge.two's own minimum (1) is
+    # checked independently: the surplus cannot satisfy the other summary.
+    assert node_run.status is NodeStatus.INCOMPLETE
+    assert node_run.reason_code == "tool_discipline_unmet"
+    assert "bridge.two" in (node_run.reason or "")
+    assert len(node_run.tool_call_records) == 2  # the real successes retained honestly
+    assert artifact is None
+
+
+# =========================================================================== #
+# 14. capability RESULT schema mismatch (adapter-side, fails closed)           #
+# =========================================================================== #
+class BadResultBackend:
+    """A trusted backend whose raw result violates the descriptor output schema."""
+
+    def invoke(self, *, capability_ref, request):
+        return {"not_a_valid_field": 1}
+
+
+def test_capability_result_schema_mismatch_is_rejected():
+    from pydantic import ValidationError
+
+    e = build_env()
+    gw, token, seq = _running_gateway(e, backend=BadResultBackend())
+    pending = gw.begin(ordinal_token=token, capability_ref=_cap_ref(e.worker),
+                       request_schema_ref=SR_OUT, idempotency_key="k1")
+    unpub = gw.invoke(pending, OtherOut(note="req"))
+    with pytest.raises(ValidationError):
+        gw.validate_result(unpub)
+    # no ToolCallRecord exists for the invalid result.
+    assert gw.finalized_records() == ()
+
+
+# =========================================================================== #
+# 15. reversed completion order cannot change the canonical merge              #
+# =========================================================================== #
+def test_reversed_completion_merges_by_canonical_key():
+    from guanlan_v2.orchestration.refs import CapabilityRef
+
+    now = datetime(2026, 7, 17, tzinfo=UTC)
+    cap = CapabilityRef(id="cap.data", version="1", content_digest="a" * 64)
+
+    def _ref(digest):
+        return TypedPayloadRef(schema_ref=SR_OUT, payload_ref=PayloadRef(
+            namespace="main", object_id=f"obj-{digest[0]}", content_digest=digest))
+
+    rec1 = ToolCallRecord(call_ordinal=1, tool_ref=cap, request_ref=_ref("b" * 64),
+                          result_ref=_ref("c" * 64), call_id="c1",
+                          started_at=now, finished_at=now)
+    rec2 = ToolCallRecord(call_ordinal=2, tool_ref=cap, request_ref=_ref("d" * 64),
+                          result_ref=_ref("e" * 64), call_id="c2",
+                          started_at=now, finished_at=now)
+    c_late = W.BridgeContribution(bridge_id="bridge.two", bridge_priority=20,
+                                  summary_digest="f" * 64, tool_call_records=(rec2,))
+    c_early = W.BridgeContribution(bridge_id="bridge.data", bridge_priority=10,
+                                   summary_digest="f" * 64, tool_call_records=(rec1,))
+    # contributions complete in REVERSED order; the merge is canonical regardless.
+    merged = W._MergedEvidence.from_contributions((c_late, c_early))
+    assert [r.call_ordinal for r in merged.tool_call_records] == [1, 2]
+    # a duplicate/conflicting ordinal across bridges fails the merge.
+    dup = W.BridgeContribution(bridge_id="bridge.x", bridge_priority=30,
+                               summary_digest="f" * 64, tool_call_records=(rec2,))
+    with pytest.raises(W.WorkerExecutionError):
+        W._MergedEvidence.from_contributions((c_late, dup))
+
+
+# =========================================================================== #
+# 16. deterministic execution NEVER touches PromptAssembler / ModelGateway      #
+# =========================================================================== #
+def test_deterministic_never_invokes_prompt_assembler_or_model_gateway():
+    e = build_env(deterministic=True)
+    asm_calls = []
+    mg_calls = []
+
+    class SpyAssembler:
+        def assemble(self, **kw):
+            asm_calls.append(kw)
+            raise AssertionError("PromptAssembler must never run for DETERMINISTIC")
+
+    class SpyModelGateway:
+        def invoke(self, request, *, prompt_assembly_ref):
+            mg_calls.append(request)
+            raise AssertionError("ModelGateway must never run for DETERMINISTIC")
+
+    node_run, artifact = _run_deterministic(
+        e, prompt_assembler=SpyAssembler(), model_gateway=SpyModelGateway())
+    assert node_run.status is NodeStatus.COMPLETED
+    assert asm_calls == [] and mg_calls == []  # spies prove zero invocations
+    # no render-only block / prompt record was created; consumed evidence retained.
+    assert artifact.provenance.prompt_ref is None
+    assert len(node_run.data_result_refs) == 1  # the cache-hit DataResult it consumed
+
+
+# =========================================================================== #
+# 17. post-freeze seal: a late writer call is rejected                          #
+# =========================================================================== #
+def test_late_writer_call_after_freeze_is_rejected():
+    e = build_env()
+    stash = []
+
+    def factory(*, bridge, summary):
+        provider = ScriptedProvider(bridge=bridge, summary=summary, emit_block=False)
+        real_open = provider.open_execution
+
+        def stashing_open(request):
+            stash.append((request.evidence_writer, request.handle.token))
+            return real_open(request)
+
+        provider.open_execution = stashing_open
+        return provider
+
+    node_run, artifact = e.run(provider_factory=factory)
+    assert node_run.status is NodeStatus.COMPLETED
+    writer, token = stash[0]
+    # a provider that stashed the writer cannot journal late evidence post-freeze.
+    with pytest.raises(W.WorkerExecutionError, match="sealed"):
+        writer.put(token=token, role="provider_prefetch", schema_ref=SR_OUT,
+                   payload=OtherOut(note="late"), idempotency_key="late-put")
+    with pytest.raises(W.WorkerExecutionError, match="sealed"):
+        writer.record_existing(token=token, role="provider_prefetch",
+                               typed_ref=node_run.data_result_refs[0],
+                               idempotency_key="late-rec")
+
+
+def test_stage1_writer_is_sealed_after_prepare_input():
+    e = build_env()
+    stash = []
+
+    def factory(*, bridge, summary):
+        provider = ScriptedProvider(bridge=bridge, summary=summary, emit_block=False)
+        real_prepare = provider.prepare_input
+
+        def stashing_prepare(request):
+            stash.append((request.evidence_writer, request.token))
+            return real_prepare(request)
+
+        provider.prepare_input = stashing_prepare
+        return provider
+
+    resolver, prepared, seq = e.sequencer_and_prepared(provider_factory=factory)
+    writer, token = stash[0]
+    with pytest.raises(W.WorkerExecutionError, match="sealed"):
+        writer.put(token=token, role="memory_prefetch", schema_ref=SR_OUT,
+                   payload=OtherOut(note="late-pre"), idempotency_key="late-pre")
