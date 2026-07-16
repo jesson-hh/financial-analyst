@@ -41,29 +41,26 @@ Event-type mapping (reviewed)
 The Phase-1 :class:`~guanlan_v2.orchestration.events.EventType` vocabulary is
 frozen and carries no admission-specific members, so admission RunEvents reuse the
 closest existing types: candidate-prepared -> ``PlanDrafted``; approve/reject ->
-``PlanApproved`` / ``PlanRejected``; drift invalidation -> ``PlanRejected``;
-admitted -> ``PlanFrozen`` (the public admission/visibility boundary). The public
-``PlanFrozen`` event's ``causation_id`` carries the authorizing approval event id
-and its ``correlation_id`` the active plan reservation id, so an admitted Plan is
-fully reconstructable from persisted state alone.
+``PlanApproved`` / ``PlanRejected``; drift invalidation -> ``PlanRejected`` (over
+an ``AdmissionInvalidated`` payload); admitted -> ``PlanFrozen`` (the public
+admission/visibility boundary), whose payload is the persisted ``PlanAdmitted``
+witness (a main-namespace payload on a main-partition event, per the ``events.py``
+namespace matrix); the witness's nested ``plan_payload_ref`` resolves the frozen
+``Plan`` payload committed in the same unit of work.
 
-Durable-anchor persistence (reviewed adaptation — see the task report)
----------------------------------------------------------------------
+Witness persistence (reviewer-prescribed unlock)
+------------------------------------------------
 The Task 2 :class:`~guanlan_v2.orchestration.eventstore.PayloadStore` digests a
-payload with Task 1 ``content_digest(model)``, which **only** accepts a
-``DigestModel`` (a ``_StrictModel`` raises ``TypeError`` in canonical JSON). The
-Task 5 control facts (``AdmissionCandidate`` / ``PlanAdmitted`` /
-``RuntimeSupportReport`` / ``AdmissionInvalidated``) are deliberately
-``_StrictModel`` (to keep the Phase-1 completeness firewall blind to
-``runtime_contracts``), so they cannot be PayloadStore payloads and cannot be made
-``DigestModel`` without breaking a Phase-1 test this task must not touch. Admission
-therefore anchors durability on the ``DigestModel`` facts that *do* persist — the
-Phase-1 ``PlanValidationReport`` (report anchor), the frozen ``Plan`` and the
-``PlanApproval`` — plus the append-only event journal and the event-sourced budget
-ledger. The ``_StrictModel`` control facts are *constructed* and returned to the
-caller and are **fully re-derivable** from that persisted state, so
-``load_admitted`` / ``verify_for_dispatch`` work from a fresh service over the same
-stores. Every ordering / atomic-boundary / idempotency invariant is preserved.
+strict *non*-DigestModel runtime fact over its canonical JSON dump (the audit-sink
+precedent — see ``eventstore._payload_content_digest``), so the four ``_StrictModel``
+admission witnesses persist as registry-validated typed payloads exactly as the
+brief states: both reports before any budget event (step 4); the
+``AdmissionCandidate`` payload inside the candidate+event+reservation unit of work
+(step 5); the ``AdmissionInvalidated`` payload inside the invalidation+release unit
+of work (step 8); and the ``PlanAdmitted`` payload inside the Plan+admitted-event
+unit of work (step 10). ``load_admitted`` is a pure store read of the persisted
+witness, and ``verify_for_dispatch`` compares current recomputations **against the
+persisted witness** — real drift detection, not recomputed-vs-recomputed.
 """
 from __future__ import annotations
 
@@ -95,6 +92,7 @@ from guanlan_v2.orchestration.eventstore import (
     RuntimeBatch,
     RuntimeStores,
     StagedPayloadKey,
+    StagedPayloadRef,
 )
 from guanlan_v2.orchestration.refs import PayloadRef, SchemaRef
 from guanlan_v2.orchestration.runtime_clock import AuthoritativeClock
@@ -134,10 +132,11 @@ __all__ = [
 # --------------------------------------------------------------------------- #
 # Schema refs of the persisted control payloads (cumulative Phase-2 registry)   #
 # --------------------------------------------------------------------------- #
-# DigestModel payloads this service persists as durable anchors (the _StrictModel
-# control facts — AdmissionCandidate / PlanAdmitted / RuntimeSupportReport /
-# AdmissionInvalidated — cannot be PayloadStore payloads; see the module docstring).
 _PLAN_VALIDATION_REPORT_SR = SchemaRef(name="PlanValidationReport", version="1")
+_RUNTIME_SUPPORT_REPORT_SR = SchemaRef(name="RuntimeSupportReport", version="1")
+_ADMISSION_CANDIDATE_SR = SchemaRef(name="AdmissionCandidate", version="1")
+_ADMISSION_INVALIDATED_SR = SchemaRef(name="AdmissionInvalidated", version="1")
+_PLAN_ADMITTED_SR = SchemaRef(name="PlanAdmitted", version="1")
 _PLAN_APPROVAL_SR = SchemaRef(name="PlanApproval", version="1")
 _PLAN_SR = SchemaRef(name="Plan", version="1")
 
@@ -307,10 +306,12 @@ class PlanAdmissionService:
         self._stores = stores
         self._run_budget = run_budget
         self._clock = clock
-        # the cumulative runtime registry must resolve every DigestModel payload
-        # this service persists as a durable anchor (report / approval / plan).
+        # the cumulative runtime registry must resolve every payload this service
+        # persists (both reports, all four control witnesses, approval and Plan).
         rt = stores.resolver.resolve(runtime_registry_digest)
-        for sr in (_PLAN_VALIDATION_REPORT_SR, _PLAN_APPROVAL_SR, _PLAN_SR):
+        for sr in (_PLAN_VALIDATION_REPORT_SR, _RUNTIME_SUPPORT_REPORT_SR,
+                   _ADMISSION_CANDIDATE_SR, _ADMISSION_INVALIDATED_SR,
+                   _PLAN_ADMITTED_SR, _PLAN_APPROVAL_SR, _PLAN_SR):
             rt.resolve(sr)
         # first-bind the maxima-only run-budget authority (idempotent rebind).
         stores.bind_run_budget(run_id=run_id, run_budget=run_budget)
@@ -374,18 +375,35 @@ class PlanAdmissionService:
             context_content_digest=context_content_digest)
 
     # ------------------------------------------------------------------ #
-    # Step 4-5 — persist report anchor, then prepared event + reservation #
+    # Step 4-5 — persist both reports, then candidate + event + reserve   #
     # ------------------------------------------------------------------ #
     def persist_and_reserve_candidate(
         self, preparation: PreparedAdmissionCandidate, *, idempotency_key: str,
     ):
         candidate = preparation.candidate_plan_digest
 
-        # -- (4) the report anchor persists BEFORE any budget event ----- #
-        # (the RuntimeSupportReport is a pure _StrictModel derivation and is not a
-        # PayloadStore payload; it is created here, before reservation, and its
-        # digest is bound into the derived AdmissionCandidate / PlanAdmitted).
-        report_ref = self._persist_report(preparation.phase1_report)
+        # defensive seam re-check: recompute the candidate digest from the carried
+        # request/draft/context and require both reports to bind it — a caller who
+        # assembled a forged PreparedAdmissionCandidate (it is a plain dataclass)
+        # is refused before any persistence or reservation.
+        recomputed = compute_candidate_plan_digest(
+            request=preparation.request, draft=preparation.draft,
+            context_content_digest=preparation.context_content_digest)
+        if recomputed != candidate:
+            raise AdmissionRejected(
+                "PreparedAdmissionCandidate.candidate_plan_digest does not recompute from "
+                "its carried request/draft/context", code="report_binding_mismatch")
+        check_report_binding(recomputed, preparation.phase1_report, preparation.support_report)
+
+        # -- (4) BOTH reports persist as typed payloads BEFORE any budget event
+        self._stores.payloads.put(
+            _PLAN_VALIDATION_REPORT_SR, preparation.phase1_report,
+            registry_digest=self._rt_digest, namespace="main",
+            idempotency_key=f"phase1-report:{candidate}")
+        self._stores.payloads.put(
+            _RUNTIME_SUPPORT_REPORT_SR, preparation.support_report,
+            registry_digest=self._rt_digest, namespace="main",
+            idempotency_key=f"support-report:{candidate}")
 
         if not preparation.support_report.supported:
             raise AdmissionRejected(
@@ -395,15 +413,24 @@ class PlanAdmissionService:
 
         candidate_model = self._build_candidate(preparation)
 
-        # -- (5) prepared event (refs the report anchor) + reservation --- #
+        # -- (5) AdmissionCandidate payload + prepared event + reservation
+        #        as ONE all-or-none RuntimeUnitOfWork batch.
         batch = RuntimeBatch(
             idempotency_key=idempotency_key,
+            payload_puts=(
+                PayloadPutCommand(
+                    staged_key=StagedPayloadKey(key="candidate"),
+                    schema_ref=_ADMISSION_CANDIDATE_SR, namespace="main",
+                    payload_template=dict(candidate_model),
+                    registry_digest=self._rt_digest,
+                    idempotency_key=f"{idempotency_key}:candidate-payload"),
+            ),
             event_appends=(
                 EventAppendCommand(
                     run_id=self._run_id, partition="main",
                     event_type=_CANDIDATE_PREPARED_EVENT.value,
-                    payload_schema_ref=_PLAN_VALIDATION_REPORT_SR,
-                    payload_target=report_ref,
+                    payload_schema_ref=_ADMISSION_CANDIDATE_SR,
+                    payload_target=StagedPayloadKey(key="candidate"),
                     registry_digest=self._rt_digest,
                     idempotency_key=f"{idempotency_key}:candidate-event",
                     plan_digest=candidate),
@@ -521,6 +548,13 @@ class PlanAdmissionService:
         self, candidate_id: str, *, reservation_id: str, approval_event_id: str,
         idempotency_key: str,
     ):
+        # already-admitted short-circuit: a retry — even under a FRESH idempotency
+        # key — returns the existing Plan + persisted witness and can never mint a
+        # duplicate PlanFrozen event or a second admitted payload.
+        existing = self._maybe_admitted_event(candidate_id)
+        if existing is not None:
+            return self.load_admitted(candidate_id)
+
         state = self._candidates.get(candidate_id)
         if state is None:
             raise AdmissionRejected("no reserved candidate for this digest", code="unknown_candidate")
@@ -566,9 +600,14 @@ class PlanAdmissionService:
             report=state.prep.phase1_report, reservation=reservation, approval=approval,
             frozen_at=self._clock.now())
 
-        # -- (10) frozen Plan payload + public PlanFrozen event (one UoW) - #
-        # the PlanFrozen event carries the approval event id (causation) and the
-        # active reservation id (correlation), so PlanAdmitted is fully re-derivable.
+        # -- (10) frozen Plan payload + PlanAdmitted witness payload + the public
+        #        PlanFrozen event as ONE all-or-none RuntimeUnitOfWork batch. The
+        #        event's payload IS the persisted PlanAdmitted witness (main
+        #        namespace on a main partition per the events.py matrix); the
+        #        witness's nested plan_payload_ref is a staged sentinel the unit
+        #        of work resolves to the frozen Plan payload in the same batch.
+        admitted_template = self._build_admitted_template(
+            state, plan, reservation, approval, approval_event_id)
         batch = RuntimeBatch(
             idempotency_key=idempotency_key,
             payload_puts=(
@@ -578,12 +617,18 @@ class PlanAdmissionService:
                     payload_template=dict(plan),
                     registry_digest=self._rt_digest,
                     idempotency_key=f"{idempotency_key}:plan-payload"),
+                PayloadPutCommand(
+                    staged_key=StagedPayloadKey(key="admitted"),
+                    schema_ref=_PLAN_ADMITTED_SR, namespace="main",
+                    payload_template=admitted_template,
+                    registry_digest=self._rt_digest,
+                    idempotency_key=f"{idempotency_key}:admitted-payload"),
             ),
             event_appends=(
                 EventAppendCommand(
                     run_id=self._run_id, partition="main", event_type=_ADMITTED_EVENT.value,
-                    payload_schema_ref=_PLAN_SR,
-                    payload_target=StagedPayloadKey(key="plan"),
+                    payload_schema_ref=_PLAN_ADMITTED_SR,
+                    payload_target=StagedPayloadKey(key="admitted"),
                     registry_digest=self._rt_digest,
                     idempotency_key=f"{idempotency_key}:admitted-event",
                     plan_digest=plan.plan_digest,
@@ -592,54 +637,21 @@ class PlanAdmissionService:
             ),
         )
         result = self._stores.unit_of_work.commit(batch)
-        plan_ref = result.payload_ref("plan")
-        admitted = self._build_admitted(
-            state, plan, plan_ref, reservation, approval, approval_event_id)
+        admitted = self._stores.payloads.get(
+            result.payload_ref("admitted"), expected_schema_ref=_PLAN_ADMITTED_SR)
         return plan, admitted
 
     # ------------------------------------------------------------------ #
-    # Step 11a — load an admitted plan (re-derived from persisted state)  #
+    # Step 11a — load an admitted plan (pure read of the persisted witness) #
     # ------------------------------------------------------------------ #
     def load_admitted(self, plan_digest: str):
         event = self._find_admitted_event(plan_digest)
-        plan = self._stores.payloads.get(event.payload_ref, expected_schema_ref=_PLAN_SR)
-        request = self._requests.get(plan.request_id)
-        if request is None:
-            raise AdmissionError("admitted request is no longer authoritative")
-        reservation_id = event.correlation_id
-        approval_event_id = event.causation_id
-        if reservation_id is None or approval_event_id is None:  # pragma: no cover - defensive
-            raise AdmissionError("admitted PlanFrozen event is missing reservation/approval identity")
-        reservation = self._ledger.get(reservation_id)
-        if reservation is None:
-            raise AdmissionRejected("the admitted plan reservation is unknown", code="reservation_missing")
-        approval, _ = self._load_approval_event(approval_event_id, plan_digest)
-        context = self._load_context(plan.draft, soft=True)
-        rcr = self._resolve_requirements(context, soft=True)
-        attestation = self._attestations.get(plan_digest)
-        phase1 = validate_plan_draft(
-            plan.draft, request=request, context=context, catalog=self._catalog.snapshot,
-            schema_registry=self._phase1_registry, legacy_attestation=attestation)
-        support = check_runtime_support(
-            plan.draft, phase1_report=phase1, context=context, context_requirements=rcr,
-            catalog=self._catalog, bridge_view=self._bridge_view,
-            schema_registry=self._phase1_registry, profile=self._profile)
-        admitted = PlanAdmitted(
-            run_id=self._run_id, request_id=plan.request_id, plan_digest=plan.plan_digest,
-            candidate_plan_digest=plan.plan_digest,
-            phase1_report_digest=phase1.semantic_digest(),
-            support_report_digest=support.report_digest,
-            runtime_profile_digest=self._profile.profile_digest,
-            catalog_digest=self._catalog.catalog_digest,
-            schema_registry_digest=self._phase1_registry.registry_digest,
-            context_content_digest=(context.content_digest if context is not None else None),
-            context_requirements_ref=(rcr.typed_ref if rcr is not None else None),
-            context_requirements_digest=(rcr.fact.requirements_digest if rcr is not None else None),
-            reservation_id=reservation_id,
-            reservation_semantic_digest=reservation.semantic_digest(),
-            approval_event_id=approval_event_id, approval_digest=approval.semantic_digest(),
-            legacy_attestation_digest=plan.legacy_attestation_digest,
-            plan_payload_ref=event.payload_ref)
+        admitted = self._stores.payloads.get(event.payload_ref, expected_schema_ref=_PLAN_ADMITTED_SR)
+        if not isinstance(admitted, PlanAdmitted):  # pragma: no cover - schema guarded
+            raise AdmissionError("admitted event does not reference a PlanAdmitted payload")
+        if admitted.plan_digest != plan_digest:  # pragma: no cover - event bound by plan_digest
+            raise AdmissionError("persisted PlanAdmitted witness does not bind this plan digest")
+        plan = self._stores.payloads.get(admitted.plan_payload_ref, expected_schema_ref=_PLAN_SR)
         return plan, admitted
 
     # ------------------------------------------------------------------ #
@@ -772,36 +784,37 @@ class PlanAdmissionService:
                 prep.legacy_attestation.semantic_digest() if prep.legacy_attestation is not None else None),
         )
 
-    def _persist_report(self, phase1_report: PlanValidationReport) -> PayloadRef:
-        """Persist the Phase-1 validation report anchor (idempotent by candidate)."""
-        return self._stores.payloads.put(
-            _PLAN_VALIDATION_REPORT_SR, phase1_report, registry_digest=self._rt_digest,
-            namespace="main",
-            idempotency_key=f"report:{phase1_report.candidate_plan_digest}")
-
-    def _build_admitted(
-        self, state: _CandidateState, plan: Plan, plan_ref: PayloadRef, reservation,
+    def _build_admitted_template(
+        self, state: _CandidateState, plan: Plan, reservation,
         approval: PlanApproval, approval_event_id: str,
-    ) -> PlanAdmitted:
+    ) -> dict[str, Any]:
+        """The PlanAdmitted witness template; ``plan_payload_ref`` is a staged
+        sentinel the unit of work resolves to the same-batch frozen Plan payload."""
         prep = state.prep
         rcr = prep.resolved_requirements
-        return PlanAdmitted(
-            run_id=self._run_id, request_id=prep.request.request_id, plan_digest=plan.plan_digest,
-            candidate_plan_digest=prep.candidate_plan_digest,
-            phase1_report_digest=prep.phase1_report.semantic_digest(),
-            support_report_digest=prep.support_report.report_digest,
-            runtime_profile_digest=self._profile.profile_digest,
-            catalog_digest=self._catalog.catalog_digest,
-            schema_registry_digest=self._phase1_registry.registry_digest,
-            context_content_digest=prep.context_content_digest,
-            context_requirements_ref=(rcr.typed_ref if rcr is not None else None),
-            context_requirements_digest=(rcr.fact.requirements_digest if rcr is not None else None),
-            reservation_id=reservation.reservation_id,
-            reservation_semantic_digest=reservation.semantic_digest(),
-            approval_event_id=approval_event_id, approval_digest=approval.semantic_digest(),
-            legacy_attestation_digest=(
+        return {
+            "schema_version": "1",
+            "run_id": self._run_id,
+            "request_id": prep.request.request_id,
+            "plan_digest": plan.plan_digest,
+            "candidate_plan_digest": prep.candidate_plan_digest,
+            "phase1_report_digest": prep.phase1_report.semantic_digest(),
+            "support_report_digest": prep.support_report.report_digest,
+            "runtime_profile_digest": self._profile.profile_digest,
+            "catalog_digest": self._catalog.catalog_digest,
+            "schema_registry_digest": self._phase1_registry.registry_digest,
+            "context_content_digest": prep.context_content_digest,
+            "context_requirements_ref": (rcr.typed_ref if rcr is not None else None),
+            "context_requirements_digest": (rcr.fact.requirements_digest if rcr is not None else None),
+            "reservation_id": reservation.reservation_id,
+            "reservation_semantic_digest": reservation.semantic_digest(),
+            "approval_event_id": approval_event_id,
+            "approval_digest": approval.semantic_digest(),
+            "legacy_attestation_digest": (
                 prep.legacy_attestation.semantic_digest() if prep.legacy_attestation is not None else None),
-            plan_payload_ref=plan_ref)
+            "plan_payload_ref": StagedPayloadRef(
+                staged_key=StagedPayloadKey(key="plan"), schema_ref=_PLAN_SR, namespace="main"),
+        }
 
     def _detect_drift(self, state, draft, request, context, rcr, attestation) -> tuple[NamedEvidenceDigest, ...]:
         """Recompute Phase-1 + support over the reloaded inputs and return the exact
@@ -824,14 +837,10 @@ class PlanAdmissionService:
 
     def _invalidate(self, state, draft, request, context, rcr, attestation, reservation_id,
                     drifted, idempotency_key: str) -> None:
-        """AdmissionInvalidated drift-recovery: persist the drifted report anchor,
-        append the invalidation event and release the reservation as ONE UoW."""
-        # the AdmissionInvalidated (_StrictModel) evidence is constructed but is not a
-        # PayloadStore payload; the drifted Phase-1 report is the durable anchor.
-        drifted_report = validate_plan_draft(
-            draft, request=request, context=context, catalog=self._catalog.snapshot,
-            schema_registry=self._phase1_registry, legacy_attestation=attestation)
-        AdmissionInvalidated(  # constructed evidence (validated), not persisted
+        """The only drift-after-preparation recovery path: persist the
+        ``AdmissionInvalidated`` witness, append its RunEvent and release the
+        reservation as ONE all-or-none unit of work."""
+        invalidated = AdmissionInvalidated(
             run_id=self._run_id, candidate_plan_digest=state.prep.candidate_plan_digest,
             reservation_id=reservation_id, drifted_inputs=drifted,
             reason_code="authoritative_input_drift")
@@ -839,17 +848,17 @@ class PlanAdmissionService:
             idempotency_key=f"{idempotency_key}:invalidate",
             payload_puts=(
                 PayloadPutCommand(
-                    staged_key=StagedPayloadKey(key="drifted-report"),
-                    schema_ref=_PLAN_VALIDATION_REPORT_SR, namespace="main",
-                    payload_template=dict(drifted_report),
+                    staged_key=StagedPayloadKey(key="invalidated"),
+                    schema_ref=_ADMISSION_INVALIDATED_SR, namespace="main",
+                    payload_template=dict(invalidated),
                     registry_digest=self._rt_digest,
-                    idempotency_key=f"{idempotency_key}:drifted-report"),
+                    idempotency_key=f"{idempotency_key}:invalidated-payload"),
             ),
             event_appends=(
                 EventAppendCommand(
                     run_id=self._run_id, partition="main", event_type=_INVALIDATED_EVENT.value,
-                    payload_schema_ref=_PLAN_VALIDATION_REPORT_SR,
-                    payload_target=StagedPayloadKey(key="drifted-report"),
+                    payload_schema_ref=_ADMISSION_INVALIDATED_SR,
+                    payload_target=StagedPayloadKey(key="invalidated"),
                     registry_digest=self._rt_digest,
                     idempotency_key=f"{idempotency_key}:invalidated-event",
                     plan_digest=state.prep.candidate_plan_digest,
@@ -882,8 +891,14 @@ class PlanAdmissionService:
                                     code="approval_payload_mismatch")
         return approval, event
 
-    def _find_admitted_event(self, plan_digest: str):
+    def _maybe_admitted_event(self, plan_digest: str):
         for ev in self._stores.events.journal(self._run_id, "main"):
             if ev.event_type is _ADMITTED_EVENT and ev.plan_digest == plan_digest:
                 return ev
-        raise AdmissionError(f"no admitted plan for digest {plan_digest!r}")
+        return None
+
+    def _find_admitted_event(self, plan_digest: str):
+        event = self._maybe_admitted_event(plan_digest)
+        if event is None:
+            raise AdmissionError(f"no admitted plan for digest {plan_digest!r}")
+        return event

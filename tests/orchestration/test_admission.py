@@ -208,9 +208,9 @@ def test_no_budget_event_before_both_reports_persisted():
     assert e.ledger()._state().reservations == {}
 
     cand, res = e.service.persist_and_reserve_candidate(prep, idempotency_key="k")
-    # after persist+reserve: the report anchor is persisted AND exactly one plan
-    # reservation exists (the report payload precedes the budget event).
-    assert e.stores.payloads_object_count() == 1  # the persisted Phase-1 report anchor
+    # after persist+reserve: BOTH reports + the AdmissionCandidate witness are
+    # persisted AND exactly one plan reservation exists (reports precede budget).
+    assert e.stores.payloads_object_count() == 3  # phase1 + support reports + candidate
     active = e.ledger().get_active_plan(e.sc.request.request_id, cand.candidate_plan_digest)
     assert active is not None and active.reservation_id == res.reservation_id
 
@@ -222,8 +222,8 @@ def test_unsupported_report_persists_reports_but_no_candidate_or_reservation():
     assert prep.support_report.supported is False
     with pytest.raises(AdmissionRejected):
         e.service.persist_and_reserve_candidate(prep, idempotency_key="k")
-    # the report anchor was persisted (before the stop) but no reservation / event.
-    assert e.stores.payloads_object_count() == 1  # only the Phase-1 report anchor
+    # BOTH reports were persisted (before the stop) but no candidate/reservation/event.
+    assert e.stores.payloads_object_count() == 2  # the two report payloads only
     assert e.ledger()._state().reservations == {}
     assert e.stores.events.journal(e.sc.draft.run_id, "main") == ()
 
@@ -483,13 +483,22 @@ def test_conflicting_retry_same_key_raises():
 def test_fresh_service_replays_admitted_plan_from_persisted_state():
     e = env()
     _, cand, res, ev, plan, admitted = e.admit()
-    # a brand-new service instance over the SAME shared stores (a "restart").
+    # the public PlanFrozen event's payload IS the persisted PlanAdmitted witness.
+    frozen = [x for x in e.stores.events.journal(e.sc.draft.run_id, "main")
+              if x.event_type is EventType.PLAN_FROZEN]
+    assert frozen[0].payload_schema_ref == SchemaRef(name="PlanAdmitted", version="1")
+    stored_witness = e.stores.payloads.get(
+        frozen[0].payload_ref, expected_schema_ref=SchemaRef(name="PlanAdmitted", version="1"))
+    assert stored_witness == admitted
+    # a brand-new service instance over the SAME shared stores (a "restart")
+    # loads the PERSISTED witness, not a recomputation.
     fresh = e._make_service()
     plan2, admitted2 = fresh.load_admitted(plan.plan_digest)
     assert plan2.plan_digest == plan.plan_digest
-    assert admitted2 == admitted
+    assert admitted2 == admitted == stored_witness
     bundle = fresh.verify_for_dispatch(plan.plan_digest)
     assert bundle.reservation.reservation_id == res.reservation_id
+    assert bundle.plan_admitted == stored_witness
 
 
 # =========================================================================== #
@@ -537,3 +546,264 @@ def test_present_context_requirements_closure_admits_and_binds():
         approval_event_id=ev.event_id, idempotency_key="f")
     assert admitted.context_requirements_ref == ctx3.runtime_requirements_ref
     assert admitted.context_requirements_digest == reqs.requirements_digest
+
+
+# =========================================================================== #
+# 12. REAL witness drift detection (reviewer fix 2)                            #
+# =========================================================================== #
+def test_dispatch_fails_against_witness_when_profile_drifts_but_stays_supported():
+    """The tautology killer: swap the service profile for one with the SAME closed
+    matrix but a different profile digest. Recomputation still yields
+    supported=True, so a recomputed-vs-recomputed comparison would pass — only a
+    comparison against the PERSISTED PlanAdmitted witness can catch the drift."""
+    from tests.orchestration.test_runtime_support import _narrowed_profile
+
+    e = env()
+    _, cand, res, ev, plan, admitted = e.admit()
+    drifted_profile = _narrowed_profile()  # same matrix, profile_digest = "1" * 64
+    assert drifted_profile.profile_digest != e.sc.profile.profile_digest
+    e.service._profile = drifted_profile
+    with pytest.raises(AdmissionRejected) as excinfo:
+        e.service.verify_for_dispatch(plan.plan_digest)
+    assert excinfo.value.code in ("profile_drift", "support_drift")
+    # the persisted witness still binds the ORIGINAL profile digest.
+    _, admitted2 = e.service.load_admitted(plan.plan_digest)
+    assert admitted2.runtime_profile_digest == e.sc.profile.profile_digest
+
+
+# =========================================================================== #
+# 13. minors (reviewer fix 4)                                                  #
+# =========================================================================== #
+def test_freeze_retry_with_fresh_key_short_circuits_to_existing_admission():
+    e = env()
+    _, cand, res, ev, plan, admitted = e.admit()
+    # a FRESH idempotency key must NOT mint a duplicate PlanFrozen/admitted witness.
+    plan2, admitted2 = e.service.freeze_and_admit_candidate(
+        cand.candidate_plan_digest, reservation_id=res.reservation_id,
+        approval_event_id=ev.event_id, idempotency_key="freeze-FRESH")
+    assert plan2.plan_digest == plan.plan_digest and admitted2 == admitted
+    frozen = [x for x in e.stores.events.journal(e.sc.draft.run_id, "main")
+              if x.event_type is EventType.PLAN_FROZEN]
+    assert len(frozen) == 1
+
+
+def test_forged_prepared_candidate_is_rejected_before_any_persistence():
+    import dataclasses
+
+    from guanlan_v2.orchestration.runtime_support import check_runtime_support
+
+    e = env()
+    prep = e.service.prepare_candidate(e.sc.draft.id, request_id=e.sc.request.request_id)
+    # a valid report pair bound to a DIFFERENT draft, spliced into the dataclass.
+    draft_b = e.sc.draft.model_copy(update={"goal": "another goal entirely"})
+    p1_b = validate_plan_draft(draft_b, request=e.sc.request, context=e.sc.context,
+                               catalog=e.sc.snapshot, schema_registry=e.sc.registry)
+    sup_b = check_runtime_support(draft_b, phase1_report=p1_b, context=e.sc.context,
+                                  context_requirements=None, catalog=e.sc.runtime,
+                                  bridge_view=e.sc.view, schema_registry=e.sc.registry,
+                                  profile=e.sc.profile)
+    forged = dataclasses.replace(prep, phase1_report=p1_b, support_report=sup_b)
+    with pytest.raises(AdmissionRejected):
+        e.service.persist_and_reserve_candidate(forged, idempotency_key="forged-1")
+    # forging the carried digest to match the foreign reports fails the recompute.
+    forged2 = dataclasses.replace(prep, phase1_report=p1_b, support_report=sup_b,
+                                  candidate_plan_digest=p1_b.candidate_plan_digest)
+    with pytest.raises(AdmissionRejected):
+        e.service.persist_and_reserve_candidate(forged2, idempotency_key="forged-2")
+    # NOTHING was persisted or reserved by either forgery.
+    assert e.stores.payloads_object_count() == 0
+    assert e.ledger()._state().reservations == {}
+    assert e.stores.events.journal(e.sc.draft.run_id, "main") == ()
+
+
+# =========================================================================== #
+# 14. crash / injected-mid-commit matrices (reviewer fix 3)                    #
+# =========================================================================== #
+import guanlan_v2.orchestration.eventstore as es_mod  # noqa: E402
+
+
+class _EventAppendBomb:
+    """Injected mid-commit failure: raises inside the unit of work AFTER payload
+    puts and budget commands were applied to the private snapshot but BEFORE the
+    batch publishes — so nothing may become visible."""
+
+    def __init__(self, real):
+        self.real = real
+        self.armed = False
+
+    def __call__(self, *args, **kwargs):
+        if self.armed:
+            raise RuntimeError("injected mid-commit failure")
+        return self.real(*args, **kwargs)
+
+
+@pytest.fixture
+def event_bomb(monkeypatch):
+    bomb = _EventAppendBomb(es_mod._append_event)
+    monkeypatch.setattr(es_mod, "_append_event", bomb)
+    return bomb
+
+
+def test_crash_matrix_candidate_payload_event_reservation(event_bomb):
+    e = env()
+    run, req = e.sc.draft.run_id, e.sc.request.request_id
+    prep = e.service.prepare_candidate(e.sc.draft.id, request_id=req)
+    event_bomb.armed = True
+    with pytest.raises(RuntimeError):
+        e.service.persist_and_reserve_candidate(prep, idempotency_key="R1")
+    # both reports persisted (step 4 precedes the UoW) but NO candidate payload,
+    # NO prepared event and NO reservation escaped the failed batch.
+    assert e.stores.payloads_object_count() == 2
+    assert e.stores.events.journal(run, "main") == ()
+    assert e.ledger()._state().reservations == {}
+    # disarm and retry with the SAME key: the whole batch commits.
+    event_bomb.armed = False
+    cand, res = e.service.persist_and_reserve_candidate(prep, idempotency_key="R1")
+    assert e.stores.payloads_object_count() == 3
+    assert [x.event_type for x in e.stores.events.journal(run, "main")] == [EventType.PLAN_DRAFTED]
+    # identical retry reuses the same semantic batch — no second candidate/event/reservation.
+    cand2, res2 = e.service.persist_and_reserve_candidate(prep, idempotency_key="R1")
+    assert cand2 == cand and res2.reservation_id == res.reservation_id
+    assert len(e.stores.events.journal(run, "main")) == 1
+    # replay: a fresh fold over the same stores sees exactly the one reservation.
+    assert e.ledger().get_active_plan(req, cand.candidate_plan_digest).reservation_id == res.reservation_id
+
+
+def test_crash_matrix_approved_payload_event(event_bomb):
+    e = env()
+    run, req = e.sc.draft.run_id, e.sc.request.request_id
+    prep = e.service.prepare_candidate(e.sc.draft.id, request_id=req)
+    cand, res = e.service.persist_and_reserve_candidate(prep, idempotency_key="k")
+    e.approve()
+    event_bomb.armed = True
+    with pytest.raises(RuntimeError):
+        e.service.record_approval(cand.candidate_plan_digest, e.submission(),
+                                  authenticated_actor="human-1", idempotency_key="A1")
+    # no approval payload / event escaped.
+    assert e.stores.payloads_object_count() == 3
+    assert len(e.stores.events.journal(run, "main")) == 1
+    event_bomb.armed = False
+    ev1 = e.service.record_approval(cand.candidate_plan_digest, e.submission(),
+                                    authenticated_actor="human-1", idempotency_key="A1")
+    ev2 = e.service.record_approval(cand.candidate_plan_digest, e.submission(),
+                                    authenticated_actor="human-1", idempotency_key="A1")
+    assert ev1.event_id == ev2.event_id  # idempotent batch replay
+    assert [x.event_type for x in e.stores.events.journal(run, "main")] == [
+        EventType.PLAN_DRAFTED, EventType.PLAN_APPROVED]
+    # a visible approval always references its persisted payload.
+    approval = e.stores.payloads.get(ev1.payload_ref,
+                                     expected_schema_ref=SchemaRef(name="PlanApproval", version="1"))
+    assert approval.candidate_plan_digest == cand.candidate_plan_digest
+
+
+def test_crash_matrix_rejected_payload_event_release(event_bomb):
+    e = env()
+    run, req = e.sc.draft.run_id, e.sc.request.request_id
+    prep = e.service.prepare_candidate(e.sc.draft.id, request_id=req)
+    cand, res = e.service.persist_and_reserve_candidate(prep, idempotency_key="k")
+    e.approve(decision=ApprovalDecision.REJECTED)
+    event_bomb.armed = True
+    with pytest.raises(RuntimeError):
+        e.service.record_approval(cand.candidate_plan_digest,
+                                  e.submission(decision=ApprovalDecision.REJECTED),
+                                  authenticated_actor="human-1", idempotency_key="RJ1")
+    # crash exposes NOTHING: the reservation was NOT released without its event.
+    assert e.ledger().get(res.reservation_id).status == "reserved"
+    assert len(e.stores.events.journal(run, "main")) == 1
+    event_bomb.armed = False
+    ev1 = e.service.record_approval(cand.candidate_plan_digest,
+                                    e.submission(decision=ApprovalDecision.REJECTED),
+                                    authenticated_actor="human-1", idempotency_key="RJ1")
+    # after commit: rejected payload + event + release all visible together.
+    assert ev1.event_type is EventType.PLAN_REJECTED
+    assert e.ledger().get(res.reservation_id).status == "released"
+    # idempotent replay retains no rejected budget authority and no second event.
+    ev2 = e.service.record_approval(cand.candidate_plan_digest,
+                                    e.submission(decision=ApprovalDecision.REJECTED),
+                                    authenticated_actor="human-1", idempotency_key="RJ1")
+    assert ev2.event_id == ev1.event_id
+    assert len([x for x in e.stores.events.journal(run, "main")
+                if x.event_type is EventType.PLAN_REJECTED]) == 1
+
+
+def test_crash_matrix_invalidated_payload_event_release(event_bomb):
+    e = env()
+    run, req = e.sc.draft.run_id, e.sc.request.request_id
+    prep = e.service.prepare_candidate(e.sc.draft.id, request_id=req)
+    cand, res = e.service.persist_and_reserve_candidate(prep, idempotency_key="k")
+    e.approve()
+    ev = e.service.record_approval(cand.candidate_plan_digest, e.submission(),
+                                   authenticated_actor="human-1", idempotency_key="a")
+    e.service._drafts[e.sc.draft.id] = e.sc.draft.model_copy(
+        update={"goal": "a drifted goal after reservation"})
+    event_bomb.armed = True
+    with pytest.raises(RuntimeError):
+        e.service.freeze_and_admit_candidate(
+            cand.candidate_plan_digest, reservation_id=res.reservation_id,
+            approval_event_id=ev.event_id, idempotency_key="F1")
+    # crash exposes NOTHING: no invalidation visible with live budget untouched...
+    assert e.ledger().get(res.reservation_id).status == "reserved"
+    assert len(e.stores.events.journal(run, "main")) == 2  # drafted + approved only
+    # ...and no silent release without replay evidence.
+    event_bomb.armed = False
+    with pytest.raises(AdmissionRejected):
+        e.service.freeze_and_admit_candidate(
+            cand.candidate_plan_digest, reservation_id=res.reservation_id,
+            approval_event_id=ev.event_id, idempotency_key="F1")
+    # after commit: invalidated payload + event + release all visible together.
+    assert e.ledger().get(res.reservation_id).status == "released"
+    invalidated_events = [x for x in e.stores.events.journal(run, "main")
+                          if x.event_type is EventType.PLAN_REJECTED]
+    assert len(invalidated_events) == 1
+    witness = e.stores.payloads.get(
+        invalidated_events[0].payload_ref,
+        expected_schema_ref=SchemaRef(name="AdmissionInvalidated", version="1"))
+    assert witness.reservation_id == res.reservation_id
+    assert witness.candidate_plan_digest == cand.candidate_plan_digest
+    # a further retry cannot re-release / duplicate the invalidation.
+    with pytest.raises(AdmissionRejected):
+        e.service.freeze_and_admit_candidate(
+            cand.candidate_plan_digest, reservation_id=res.reservation_id,
+            approval_event_id=ev.event_id, idempotency_key="F1")
+    assert len([x for x in e.stores.events.journal(run, "main")
+                if x.event_type is EventType.PLAN_REJECTED]) == 1
+
+
+def test_crash_matrix_plan_plus_admitted_payload_event(event_bomb):
+    e = env()
+    run, req = e.sc.draft.run_id, e.sc.request.request_id
+    prep = e.service.prepare_candidate(e.sc.draft.id, request_id=req)
+    cand, res = e.service.persist_and_reserve_candidate(prep, idempotency_key="k")
+    e.approve()
+    ev = e.service.record_approval(cand.candidate_plan_digest, e.submission(),
+                                   authenticated_actor="human-1", idempotency_key="a")
+    payloads_before = e.stores.payloads_object_count()
+    event_bomb.armed = True
+    with pytest.raises(RuntimeError):
+        e.service.freeze_and_admit_candidate(
+            cand.candidate_plan_digest, reservation_id=res.reservation_id,
+            approval_event_id=ev.event_id, idempotency_key="F1")
+    # crash exposes NOTHING: no orphan Plan payload, no witness, no admitted event;
+    # the plan reservation stays active.
+    assert e.stores.payloads_object_count() == payloads_before
+    assert all(x.event_type is not EventType.PLAN_FROZEN
+               for x in e.stores.events.journal(run, "main"))
+    assert e.ledger().get(res.reservation_id).status == "reserved"
+    event_bomb.armed = False
+    plan1, adm1 = e.service.freeze_and_admit_candidate(
+        cand.candidate_plan_digest, reservation_id=res.reservation_id,
+        approval_event_id=ev.event_id, idempotency_key="F1")
+    # identical retry reuses the same semantic batch (short-circuit / idempotent).
+    plan2, adm2 = e.service.freeze_and_admit_candidate(
+        cand.candidate_plan_digest, reservation_id=res.reservation_id,
+        approval_event_id=ev.event_id, idempotency_key="F1")
+    assert plan2.plan_digest == plan1.plan_digest and adm2 == adm1
+    frozen = [x for x in e.stores.events.journal(run, "main")
+              if x.event_type is EventType.PLAN_FROZEN]
+    assert len(frozen) == 1
+    # replay after commit exposes all three: a fresh service dispatches from the
+    # persisted witness.
+    fresh = e._make_service()
+    plan3, adm3 = fresh.load_admitted(plan1.plan_digest)
+    assert adm3 == adm1
+    assert fresh.verify_for_dispatch(plan1.plan_digest).plan_admitted == adm1

@@ -45,6 +45,7 @@ from guanlan_v2.orchestration.budget import (
 from guanlan_v2.orchestration.context import RunBudget
 from guanlan_v2.orchestration.digest import (
     DigestHex,
+    DigestModel,
     NonEmptyStr,
     content_digest,
 )
@@ -400,6 +401,23 @@ class SchemaRegistryResolver:
 # --------------------------------------------------------------------------- #
 # Shared low-level operations (used by the stores AND the unit of work)         #
 # --------------------------------------------------------------------------- #
+def _payload_content_digest(model: Any) -> str:
+    """Canonical stored-content digest for a registry-validated payload model.
+
+    A Phase-1 :class:`DigestModel` digests through its own canonical semantic
+    projection (``content_digest(model)``). A strict *non*-DigestModel runtime
+    fact (a Phase-2 ``_StrictModel`` control payload such as RuntimeSupportReport,
+    AdmissionCandidate, PlanAdmitted or PromptAssemblyRecord) digests over its
+    canonical JSON dump — the exact reviewed path the Task-2
+    :class:`EventRefusalAuditSink` already uses for its strict detail payloads.
+    Registry validation has already run by the time this is called, so ``model``
+    is always the exact registered schema's instance.
+    """
+    if isinstance(model, DigestModel):
+        return content_digest(model)
+    return content_digest(model.model_dump(mode="json"))
+
+
 def _apply_payload_put(
     wb: _Backend,
     resolver: SchemaRegistryResolver,
@@ -412,7 +430,7 @@ def _apply_payload_put(
 ) -> PayloadRef:
     registry = resolver.resolve(registry_digest)  # UnknownRegistryDigest
     model = registry.validate_payload(schema_ref, payload)  # ValidationError
-    cdigest = content_digest(model)
+    cdigest = _payload_content_digest(model)
     existing_id = wb.payload_idem.get(idempotency_key)
     if existing_id is not None:
         stored = wb.payloads[existing_id]
@@ -578,6 +596,12 @@ class PayloadStore:
             raise EventStoreError(
                 f"stored payload schema {stored.schema_key!r} does not match expected "
                 f"{expected_schema_ref.key!r}"
+            )
+        # re-verify through the exact digesting path used at put time, so a
+        # tampered stored model (not just a wrong ref) is rejected on read.
+        if _payload_content_digest(stored.model) != stored.content_digest:
+            raise ContentDigestMismatch(
+                "stored payload content does not recompute to its declared digest (tamper)"
             )
         return stored.model
 

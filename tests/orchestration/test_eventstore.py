@@ -1040,3 +1040,76 @@ def test_production_sink_is_a_budget_event_sink_and_conflicts_on_drift():
         idempotency_key="k1")
     with pytest.raises(IdempotencyConflict):
         sink.append(drift)
+
+
+# =========================================================================== #
+# Strict-fact (non-DigestModel) payload digesting — the Task-6 unlock          #
+# =========================================================================== #
+def _phase2_stores():
+    """Stores whose resolver additionally carries the cumulative Phase-2 registry
+    (which registers strict non-DigestModel runtime facts like RuntimeSupportIssue)."""
+    from guanlan_v2.orchestration.runtime_contracts import phase2_runtime_registry
+
+    resolver = SchemaRegistryResolver()
+    resolver.register(default_registry())
+    rt_digest = resolver.register(phase2_runtime_registry(default_registry().registry_digest))
+    return RuntimeStores(resolver=resolver, clock=AdvancingClock()), rt_digest
+
+
+_ISSUE_SR = SchemaRef(name="RuntimeSupportIssue", version="1")
+
+
+def _issue_fact():
+    from guanlan_v2.orchestration.runtime_contracts import RuntimeSupportIssue
+
+    return RuntimeSupportIssue(code="x", model_path="draft.nodes", explanation="why")
+
+
+def test_strict_fact_put_get_round_trip_digests_via_canonical_json_dump():
+    from guanlan_v2.orchestration.runtime_contracts import RuntimeSupportIssue
+
+    stores, rt_digest = _phase2_stores()
+    fact = _issue_fact()
+    ref = stores.payloads.put(_ISSUE_SR, fact, registry_digest=rt_digest,
+                              namespace="main", idempotency_key="sf-1")
+    # a strict non-DigestModel fact digests over its canonical JSON dump — the
+    # exact reviewed path the Task-2 EventRefusalAuditSink uses for its details.
+    assert ref.content_digest == content_digest(fact.model_dump(mode="json"))
+    got = stores.payloads.get(ref, expected_schema_ref=_ISSUE_SR)
+    assert isinstance(got, RuntimeSupportIssue) and got == fact
+
+
+def test_strict_fact_digest_stable_across_identical_instances():
+    stores, rt_digest = _phase2_stores()
+    r1 = stores.payloads.put(_ISSUE_SR, _issue_fact(), registry_digest=rt_digest,
+                             namespace="main", idempotency_key="sf-a")
+    r2 = stores.payloads.put(_ISSUE_SR, _issue_fact(), registry_digest=rt_digest,
+                             namespace="main", idempotency_key="sf-b")
+    assert r1.content_digest == r2.content_digest  # one content identity
+    assert r1.object_id != r2.object_id  # two audit locators
+
+
+def test_strict_fact_content_tamper_rejected_on_get():
+    from guanlan_v2.orchestration.runtime_contracts import RuntimeSupportIssue
+
+    stores, rt_digest = _phase2_stores()
+    ref = stores.payloads.put(_ISSUE_SR, _issue_fact(), registry_digest=rt_digest,
+                              namespace="main", idempotency_key="sf-t")
+    # a ref claiming different content is refused.
+    wrong = PayloadRef(namespace="main", object_id=ref.object_id, content_digest=DB)
+    with pytest.raises(ContentDigestMismatch):
+        stores.payloads.get(wrong, expected_schema_ref=_ISSUE_SR)
+    # a tampered stored model (mutated behind the store) is refused on read.
+    stores._shared.backend.payloads[ref.object_id].model = RuntimeSupportIssue(
+        code="tampered", model_path="draft.nodes", explanation="why")
+    with pytest.raises(ContentDigestMismatch):
+        stores.payloads.get(ref, expected_schema_ref=_ISSUE_SR)
+
+
+def test_digest_model_payload_path_unchanged_by_strict_fact_support():
+    stores, digest = _stores()
+    ref = _put(stores, digest, _research())
+    # a DigestModel still digests through its own canonical semantic projection.
+    assert ref.content_digest == content_digest(_research())
+    got = stores.payloads.get(ref, expected_schema_ref=SchemaRef(name="ResearchPlan", version="1"))
+    assert got == _research()
