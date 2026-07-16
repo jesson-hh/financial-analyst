@@ -41,13 +41,15 @@ classes directly.
 """
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol, runtime_checkable
 
 import yaml
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from guanlan_v2.orchestration.catalog import (
     CapabilityDescriptor,
@@ -81,6 +83,10 @@ from guanlan_v2.orchestration.refs import (
     ContentRef,
     SchemaRef,
 )
+from guanlan_v2.orchestration.runtime_contracts import (
+    BridgeSupportAnalyzer,
+    ExecutionBridgeDescriptor,
+)
 
 __all__ = [
     "CatalogMaterialError",
@@ -92,6 +98,12 @@ __all__ = [
     "load_pilot_catalog",
     "PILOT_CATALOG_PATH",
     "PILOT_MATERIALS_DIR",
+    # -- Task 5 execution-bridge descriptor indexing ----------------------- #
+    "BRIDGE_DESCRIPTOR_KIND",
+    "serialize_bridge_descriptor",
+    "parse_bridge_descriptor",
+    "ResolvedBridge",
+    "BridgeCatalogView",
 ]
 
 _DIGEST_PLACEHOLDER = "0" * 64
@@ -451,6 +463,206 @@ class TrustedFactoryRegistry:
             raise CatalogMaterialError(
                 f"no model factory bound for tier {model_tier!r}"
             ) from None
+
+
+# --------------------------------------------------------------------------- #
+# Task 5 — execution-bridge descriptor indexing (marker-bearing guardrails)   #
+# --------------------------------------------------------------------------- #
+BRIDGE_DESCRIPTOR_KIND = "execution_bridge"
+_BRIDGE_SCHEMA_VERSION = "1"
+
+
+def serialize_bridge_descriptor(descriptor: ExecutionBridgeDescriptor) -> bytes:
+    """Serialize a descriptor to deterministic canonical guardrail-material bytes."""
+    return json.dumps(
+        descriptor.model_dump(mode="json"),
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def parse_bridge_descriptor(raw: bytes) -> ExecutionBridgeDescriptor | None:
+    """Parse marker-bearing guardrail bytes into a descriptor, else ``None``.
+
+    Ordinary guardrail prose (non-JSON, or JSON without the
+    ``descriptor_kind="execution_bridge"`` marker) returns ``None`` and is ignored.
+    A material carrying the execution-bridge marker with a malformed / unknown
+    schema version — or an otherwise invalid descriptor — raises
+    :class:`CatalogMaterialError` (marker-bearing material must parse strictly).
+    """
+    try:
+        obj = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None  # ordinary (non-JSON) guardrail prose
+    if not isinstance(obj, dict):
+        return None
+    if obj.get("descriptor_kind") != BRIDGE_DESCRIPTOR_KIND:
+        return None  # ordinary guardrail prose / other material
+    version = obj.get("schema_version")
+    if version != _BRIDGE_SCHEMA_VERSION:
+        raise CatalogMaterialError(
+            f"execution-bridge descriptor has unknown/malformed schema_version {version!r}"
+        )
+    try:
+        # reviewed catalog material: JSON arrays become tuples (strict=False), but
+        # extra fields, closed literals and the activation/kind invariants still hold.
+        return ExecutionBridgeDescriptor.model_validate(obj, strict=False)
+    except ValidationError as exc:
+        raise CatalogMaterialError(
+            f"marker-bearing guardrail is not a valid ExecutionBridgeDescriptor: {exc}"
+        ) from exc
+
+
+@dataclass(frozen=True)
+class ResolvedBridge:
+    """One indexed, material-verified execution bridge (descriptor + resolved refs).
+
+    ``descriptor_ref`` is the guardrail ContentRef whose bytes are the descriptor;
+    ``config_bytes`` is the resolved config guardrail material; ``provider_ref`` /
+    ``analyzer_ref`` are the resolved handler materials; ``analyzer`` is the pure
+    :class:`BridgeSupportAnalyzer` bound from reviewed material.
+    """
+
+    descriptor: ExecutionBridgeDescriptor
+    descriptor_ref: ContentRef
+    config_ref: ContentRef
+    config_bytes: bytes
+    provider_ref: ContentRef
+    analyzer_ref: ContentRef
+    analyzer: BridgeSupportAnalyzer
+
+    @property
+    def bridge_id(self) -> str:
+        return self.descriptor.bridge_id
+
+    @property
+    def priority(self) -> int:
+        return self.descriptor.priority
+
+
+class BridgeCatalogView:
+    """An immutable, material-verified view over a catalog's execution bridges.
+
+    Built from one verified :class:`CatalogRuntime` plus the reviewed analyzer
+    bindings. It scans guardrail materials, indexes only marker-bearing
+    :class:`ExecutionBridgeDescriptor`s (ignoring ordinary prose), resolves each
+    descriptor's config guardrail + provider/analyzer handler materials against the
+    same catalog, and enforces at most one descriptor per ``bridge_id`` and one
+    exact ``(priority, bridge_id)`` key. A duplicate/competing bridge identity — or
+    the same identity bound to different descriptor/config/provider/analyzer refs —
+    fails indexing before any reservation.
+    """
+
+    __slots__ = ("_runtime", "_by_bridge_id")
+
+    def __init__(self, *, runtime: "CatalogRuntime", bridges: Mapping[str, ResolvedBridge]) -> None:
+        self._runtime = runtime
+        self._by_bridge_id: Mapping[str, ResolvedBridge] = MappingProxyType(dict(bridges))
+
+    @classmethod
+    def build(
+        cls,
+        runtime: "CatalogRuntime",
+        analyzers: Mapping[HandlerKey, BridgeSupportAnalyzer],
+    ) -> "BridgeCatalogView":
+        snapshot = runtime.snapshot
+        kind_by_key: dict[TextKey, str] = {
+            (e.ref.id, e.ref.version): e.kind for e in snapshot.content_manifest
+        }
+        by_bridge_id: dict[str, ResolvedBridge] = {}
+        priority_keys: set[tuple[int, str]] = set()
+        for entry in snapshot.content_manifest:
+            if entry.kind != "guardrail":
+                continue
+            material = runtime.text(entry.ref)
+            descriptor = parse_bridge_descriptor(material.raw_utf8)
+            if descriptor is None:
+                continue  # ordinary guardrail prose
+
+            bid = descriptor.bridge_id
+            if bid in by_bridge_id:
+                raise CatalogMaterialError(
+                    f"catalog contains more than one execution-bridge descriptor for "
+                    f"bridge_id {bid!r} (duplicate/competing identity)"
+                )
+            pkey = (descriptor.priority, bid)
+            if pkey in priority_keys:  # pragma: no cover - implied by unique bridge_id
+                raise CatalogMaterialError(
+                    f"duplicate (priority, bridge_id) key {pkey!r} in catalog bridges"
+                )
+
+            # config must be a schema-validated guardrail material
+            if kind_by_key.get((descriptor.config_ref.id, descriptor.config_ref.version)) != "guardrail":
+                raise CatalogMaterialError(
+                    f"bridge {bid!r} config_ref {descriptor.config_ref.id}@"
+                    f"{descriptor.config_ref.version} is not a catalog guardrail material"
+                )
+            config_material = runtime.text(descriptor.config_ref)  # digest-checked
+
+            # provider + analyzer must be distinct handler materials
+            for role, ref in (("provider", descriptor.provider_handler_ref),
+                              ("analyzer", descriptor.support_analyzer_ref)):
+                if kind_by_key.get((ref.id, ref.version)) != "handler":
+                    raise CatalogMaterialError(
+                        f"bridge {bid!r} {role} ref {ref.id}@{ref.version} is not a "
+                        "catalog handler material"
+                    )
+                runtime.text(ref)  # digest-checked resolution (missing/drift -> raise)
+
+            akey: HandlerKey = (
+                descriptor.support_analyzer_ref.id,
+                descriptor.support_analyzer_ref.version,
+                descriptor.support_analyzer_ref.content_digest,
+            )
+            analyzer = analyzers.get(akey)
+            if analyzer is None:
+                raise CatalogMaterialError(
+                    f"bridge {bid!r} has no reviewed analyzer bound for "
+                    f"{descriptor.support_analyzer_ref.id}@{descriptor.support_analyzer_ref.version}"
+                )
+
+            by_bridge_id[bid] = ResolvedBridge(
+                descriptor=descriptor,
+                descriptor_ref=entry.ref,
+                config_ref=descriptor.config_ref,
+                config_bytes=config_material.raw_utf8,
+                provider_ref=descriptor.provider_handler_ref,
+                analyzer_ref=descriptor.support_analyzer_ref,
+                analyzer=analyzer,
+            )
+            priority_keys.add(pkey)
+        return cls(runtime=runtime, bridges=by_bridge_id)
+
+    @property
+    def catalog_digest(self) -> str:
+        return self._runtime.catalog_digest
+
+    def bridge_ids(self) -> frozenset[str]:
+        return frozenset(self._by_bridge_id)
+
+    def resolve(self, bridge_id: str) -> ResolvedBridge:
+        try:
+            return self._by_bridge_id[bridge_id]
+        except KeyError:
+            raise CatalogMaterialError(f"unknown bridge {bridge_id!r}") from None
+
+    def active_bridges_for(self, worker: "WorkerSpec") -> tuple[ResolvedBridge, ...]:
+        """Every active bridge for ``worker``, ordered by ``(priority, bridge_id)``.
+
+        A bridge activates when any of its activation capability ids is in the
+        worker's allowlist or any activation read category is in the worker's read
+        categories — the descriptor's own predicate, never a caller choice.
+        """
+        cap_ids = frozenset(c.id for c in worker.capability_allowlist)
+        cats = frozenset(worker.read_categories)
+        active = [
+            rb
+            for rb in self._by_bridge_id.values()
+            if rb.descriptor.activates_for(capability_ids=cap_ids, read_categories=cats)
+        ]
+        active.sort(key=lambda rb: (rb.priority, rb.bridge_id))
+        return tuple(active)
 
 
 # --------------------------------------------------------------------------- #

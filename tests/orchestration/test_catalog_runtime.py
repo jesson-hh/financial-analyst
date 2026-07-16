@@ -12,6 +12,8 @@ the snapshot / WorkerSpec.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -48,13 +50,23 @@ from guanlan_v2.orchestration.refs import (
 )
 
 from guanlan_v2.orchestration.catalog_runtime import (
+    BRIDGE_DESCRIPTOR_KIND,
+    BridgeCatalogView,
     CatalogMaterialError,
     CatalogRuntime,
     InMemoryMaterialSource,
     MaterialSource,
+    ResolvedBridge,
     ResolvedWorkerRuntime,
     TrustedFactoryRegistry,
     load_pilot_catalog,
+    parse_bridge_descriptor,
+    serialize_bridge_descriptor,
+)
+from guanlan_v2.orchestration.digest import content_digest
+from guanlan_v2.orchestration.runtime_contracts import (
+    BridgeStaticSupportSummary,
+    ExecutionBridgeDescriptor,
 )
 
 DIGEST0 = "0" * 64
@@ -533,3 +545,152 @@ def test_no_physical_path_in_snapshot(pilot_runtime):
         assert pat.match(w.id)
         if w.system_prompt_ref:
             assert "/" not in w.system_prompt_ref.id and "\\" not in w.system_prompt_ref.id
+
+
+# --------------------------------------------------------------------------- #
+# 7. Task 5 — execution-bridge descriptor indexing                            #
+# --------------------------------------------------------------------------- #
+SR_CFG = SchemaRef(name="BridgeConfig", version="1")
+
+
+class _PassthroughAnalyzer:
+    """A pure analyzer that binds the exact resolved identity (test double)."""
+
+    def analyze(self, *, candidate_plan_digest, node, worker, descriptor, descriptor_ref, config_bytes):
+        return BridgeStaticSupportSummary.build(
+            candidate_plan_digest=candidate_plan_digest, node_id=node.id,
+            node_params_digest=content_digest(dict(node.params)),
+            worker_id=worker.id, worker_digest=worker.semantic_digest(),
+            bridge_id=descriptor.bridge_id, descriptor_ref=descriptor_ref,
+            config_ref=descriptor.config_ref, provider_ref=descriptor.provider_handler_ref,
+            analyzer_ref=descriptor.support_analyzer_ref,
+            allowed_capability_refs=tuple(sorted(worker.capability_allowlist, key=lambda r: (r.id, r.version))),
+            min_finalized_tool_calls_on_success=1, max_capability_invocations=1,
+            pre_input_kind=descriptor.pre_input_kind,
+        )
+
+
+def _make_descriptor(*, bridge_id, priority, cfg_ref, prov_ref, anal_ref, cap_ref, version="1"):
+    return ExecutionBridgeDescriptor(
+        bridge_id=bridge_id, bridge_version=version, priority=priority,
+        provider_handler_ref=prov_ref, config_ref=cfg_ref, support_analyzer_ref=anal_ref,
+        config_schema_ref=SR_CFG,
+        activation_capability_refs=(cap_ref,), activation_read_categories=(),
+        supported_execution_kinds=(ExecutionKind.LLM,), pre_input_kind="memory_refs_v1",
+    )
+
+
+def _bridge_snapshot(*, extra_guardrail_prose=False, second_bridge_same_id=False):
+    """A snapshot carrying one (or a conflicting) execution-bridge descriptor."""
+    prompt_ref, prompt_mat = make_text("text.brw.prompt", "prompt", "You are the bridge worker.")
+    cfg_ref, cfg_mat = make_text("guard.bridgecfg", "guardrail", '{"mode":"cache_or_invoke"}')
+    prov_ref, prov_mat = make_text("handler.provider", "handler", "def provide(ctx): return ctx")
+    anal_ref, anal_mat = make_text("handler.analyzer", "handler", "def analyze(ctx): return ctx")
+    cap_ref, cap_mat = make_capability("cap.data")
+
+    desc = _make_descriptor(bridge_id="bridge.data", priority=10, cfg_ref=cfg_ref,
+                            prov_ref=prov_ref, anal_ref=anal_ref, cap_ref=cap_ref)
+    desc_text = serialize_bridge_descriptor(desc).decode("utf-8")
+    desc_ref, desc_mat = make_text("guard.bridge", "guardrail", desc_text)
+
+    worker = WorkerSpec(
+        id="text.brw", catalog_role="final", selection_scope="dynamic_allowed",
+        lane="text", persona="analyst", tier=Tier.WRITER,
+        execution=ExecutionSpec(kind=ExecutionKind.LLM, model_tier="reasoner"),
+        system_prompt_ref=prompt_ref, guardrail_refs=(desc_ref, cfg_ref),
+        capability_allowlist=(cap_ref,), read_categories=("context",),
+        outputs=(OutputBinding(name="primary", schema_ref=SREF_OUT),),
+        evidence_policy=EvidencePolicy(tool_calls=ToolCallRequirement.OPTIONAL),
+        supported_modes=(DataMode.ONLINE,), can_emit_decision=False, decision_authority="none",
+    )
+
+    content = [
+        ContentManifestEntry(ref=prompt_ref, kind="prompt", name="P", description="d",
+                             source_identity="gl.brw"),
+        ContentManifestEntry(ref=cfg_ref, kind="guardrail", name="Cfg", description="d",
+                             source_identity="gl.brw"),
+        ContentManifestEntry(ref=prov_ref, kind="handler", name="Prov", description="d",
+                             source_identity="gl.brw"),
+        ContentManifestEntry(ref=anal_ref, kind="handler", name="Anal", description="d",
+                             source_identity="gl.brw"),
+        ContentManifestEntry(ref=desc_ref, kind="guardrail", name="Bridge", description="d",
+                             source_identity="gl.brw"),
+    ]
+    mats = [prompt_mat, cfg_mat, prov_mat, anal_mat, desc_mat, cap_mat]
+
+    if extra_guardrail_prose:
+        prose_ref, prose_mat = make_text("guard.prose", "guardrail", "Always cite every number you emit.")
+        content.append(ContentManifestEntry(ref=prose_ref, kind="guardrail", name="Prose",
+                                            description="d", source_identity="gl.brw"))
+        mats.append(prose_mat)
+
+    if second_bridge_same_id:
+        desc2 = _make_descriptor(bridge_id="bridge.data", priority=20, cfg_ref=cfg_ref,
+                                 prov_ref=prov_ref, anal_ref=anal_ref, cap_ref=cap_ref, version="2")
+        desc2_text = serialize_bridge_descriptor(desc2).decode("utf-8")
+        d2_ref, d2_mat = make_text("guard.bridge2", "guardrail", desc2_text)
+        content.append(ContentManifestEntry(ref=d2_ref, kind="guardrail", name="Bridge2",
+                                            description="d", source_identity="gl.brw"))
+        mats.append(d2_mat)
+
+    snap = build_catalog_snapshot(
+        catalog_version="bridge-v1", content_manifest=tuple(content),
+        skill_manifest=(), capability_manifest=(
+            CapabilityManifestEntry(ref=cap_ref, capability_kind="tool", transport="in_process"),
+        ),
+        workers=(worker,), resolved_material=tuple(mats),
+    )
+    analyzers = {(anal_ref.id, anal_ref.version, anal_ref.content_digest): _PassthroughAnalyzer()}
+    return snap, tuple(mats), analyzers, desc, desc_ref
+
+
+def test_serialize_parse_descriptor_round_trip():
+    _, _, _, desc, _ = _bridge_snapshot()
+    raw = serialize_bridge_descriptor(desc)
+    assert parse_bridge_descriptor(raw) == desc
+    # ordinary prose is ignored (returns None).
+    assert parse_bridge_descriptor(b"Always cite every number.") is None
+    assert parse_bridge_descriptor(b'{"not":"a bridge"}') is None
+
+
+def test_bridge_view_indexes_marker_descriptor_and_ignores_prose():
+    snap, mats, analyzers, desc, desc_ref = _bridge_snapshot(extra_guardrail_prose=True)
+    rt = CatalogRuntime.build(snap, source_from_materials(mats))
+    view = BridgeCatalogView.build(rt, analyzers)
+    assert view.bridge_ids() == frozenset({"bridge.data"})
+    rb = view.resolve("bridge.data")
+    assert isinstance(rb, ResolvedBridge)
+    assert rb.descriptor_ref == desc_ref
+    assert rb.descriptor == desc
+    assert rb.config_bytes == b'{"mode":"cache_or_invoke"}'
+
+
+def test_bridge_view_active_for_worker_by_activation_predicate():
+    snap, mats, analyzers, desc, _ = _bridge_snapshot()
+    rt = CatalogRuntime.build(snap, source_from_materials(mats))
+    view = BridgeCatalogView.build(rt, analyzers)
+    worker = rt.worker("text.brw")
+    active = view.active_bridges_for(worker)
+    assert len(active) == 1 and active[0].bridge_id == "bridge.data"
+
+
+def test_bridge_view_duplicate_bridge_id_fails_indexing():
+    snap, mats, analyzers, _, _ = _bridge_snapshot(second_bridge_same_id=True)
+    rt = CatalogRuntime.build(snap, source_from_materials(mats))
+    with pytest.raises(CatalogMaterialError):
+        BridgeCatalogView.build(rt, analyzers)
+
+
+def test_bridge_view_missing_analyzer_binding_fails():
+    snap, mats, _, _, _ = _bridge_snapshot()
+    rt = CatalogRuntime.build(snap, source_from_materials(mats))
+    with pytest.raises(CatalogMaterialError):
+        BridgeCatalogView.build(rt, {})  # no analyzer bound
+
+
+def test_unknown_marker_version_fails_parse():
+    _, _, _, desc, _ = _bridge_snapshot()
+    obj = json.loads(serialize_bridge_descriptor(desc).decode("utf-8"))
+    obj["schema_version"] = "9"
+    with pytest.raises(CatalogMaterialError):
+        parse_bridge_descriptor(json.dumps(obj).encode("utf-8"))
