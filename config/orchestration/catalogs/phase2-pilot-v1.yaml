@@ -1,0 +1,149 @@
+# Phase 2 · Task 3 — reviewed three-worker pilot catalog (final workers only).
+#
+# This is the human-reviewed definition of the pilot catalog. The runtime loader
+# (`guanlan_v2.orchestration.catalog_runtime.load_pilot_catalog`) reads this file
+# plus the material files under `materials/phase2-pilot-v1/`, recomputes every
+# material digest from the physical bytes, rebuilds the snapshot through the
+# Phase 1 material-aware builder, and requires the sealed `catalog_digest` below
+# to match. Editing any material without updating this pinned digest fails startup.
+#
+# Physical file locators (`file:`) are service configuration only — they are read
+# into bytes at load time and never enter the snapshot, WorkerSpec or Plan.
+
+catalog_version: "phase2-pilot-v1"
+
+# Pinned attestation over the whole resolved catalog (sha256+cjson-v1 semantic
+# digest of the sealed WorkerCatalogSnapshot). Regenerate only through a reviewed
+# change to the materials or worker specs below.
+catalog_digest: "21a2197c24b7ed946fe53e87340890f062911b4eca7e3ad2ddcafcaae23394e2"
+
+materials:
+  prompts:
+    - id: prompt.sentiment
+      version: "1"
+      name: "Sentiment analyst system prompt"
+      description: "Role and boundary for the A-share sentiment analyst."
+      source_identity: guanlan.datafeed.sentiment
+      file: prompts/sentiment.md
+    - id: prompt.research_mgr
+      version: "1"
+      name: "Research manager system prompt"
+      description: "Role and boundary for the research-plan synthesizer."
+      source_identity: ta.report_writer
+      file: prompts/research_mgr.md
+    - id: prompt.pm
+      version: "1"
+      name: "Advisory PM system prompt"
+      description: "Role and advisory-only boundary for the final arbiter."
+      source_identity: guanlan.decision.pm
+      file: prompts/pm.md
+
+  guardrails:
+    - id: guard.provenance
+      version: "1"
+      name: "Provenance / anti-fabrication guardrail"
+      description: "Every number must trace to a provided block; no fabrication."
+      source_identity: guanlan.introspector
+      file: guardrails/provenance.md
+    - id: guard.advisory_discipline
+      version: "1"
+      name: "Advisory-discipline guardrail"
+      description: "Decision workers stay advisory; no execution authority."
+      source_identity: guanlan.decision.discipline
+      file: guardrails/advisory_discipline.md
+
+  skills:
+    - id: skill.sentiment
+      version: "1"
+      source_identity: guanlan.datafeed.sentiment
+      file: skills/sentiment.md
+    - id: skill.research_mgr
+      version: "1"
+      source_identity: ta.report_writer
+      file: skills/research_mgr.md
+    - id: skill.pm
+      version: "1"
+      source_identity: guanlan.decision.pm
+      file: skills/pm.md
+
+  capabilities:
+    - id: cap.ashare_constraint_check
+      version: "1"
+      capability_kind: data_adapter
+      transport: in_process
+      operation: ashare.constraint_check
+      input_schema: AshareConstraintQuery@1
+      output_schema: AshareConstraintResult@1
+
+workers:
+  - id: text.sentiment
+    lane: text
+    persona: "A-share sentiment analyst"
+    tier: writer
+    model_tier: reasoner
+    thinking_budget: 4096
+    system_prompt: prompt.sentiment
+    skills: [skill.sentiment]
+    guardrails: [guard.provenance]
+    capability_allowlist: []
+    tool_calls: forbidden
+    read_categories: [context, market_data]
+    inputs: []
+    outputs:
+      - name: primary
+        schema: SentimentReport@1
+    supported_modes: [online, pit_replay]
+    can_emit_decision: false
+    decision_authority: none
+
+  - id: dec.research_mgr
+    lane: decision
+    persona: "Research manager"
+    tier: writer
+    model_tier: reasoner
+    thinking_budget: 8192
+    system_prompt: prompt.research_mgr
+    skills: [skill.research_mgr]
+    guardrails: [guard.provenance, guard.advisory_discipline]
+    capability_allowlist: []
+    tool_calls: forbidden
+    read_categories: [context, upstream_artifacts, experience_cases]
+    inputs:
+      - name: sentiment
+        schema: SentimentReport@1
+        required: true
+        cardinality: one
+    outputs:
+      - name: primary
+        schema: ResearchPlan@1
+    supported_modes: [online, pit_replay]
+    can_emit_decision: true
+    decision_authority: advisory_only
+
+  - id: dec.pm
+    lane: decision
+    persona: "Advisory portfolio manager"
+    tier: writer
+    model_tier: reasoner_deep
+    thinking_budget: 16384
+    system_prompt: prompt.pm
+    skills: [skill.pm]
+    guardrails: [guard.provenance, guard.advisory_discipline]
+    capability_allowlist: [cap.ashare_constraint_check]
+    tool_calls: optional
+    read_categories: [context, upstream_artifacts]
+    inputs:
+      - name: research_plan
+        schema: ResearchPlan@1
+        required: true
+        cardinality: one
+      - name: sentiment
+        schema: SentimentReport@1
+        required: true
+        cardinality: one
+    outputs:
+      - name: primary
+        schema: PortfolioDecision@1
+    supported_modes: [online, pit_replay]
+    can_emit_decision: true
+    decision_authority: advisory_only
