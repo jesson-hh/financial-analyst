@@ -37,8 +37,14 @@ from guanlan_v2.orchestration.digest import (
     NonEmptyStr,
     content_digest,
 )
-from guanlan_v2.orchestration.enums import DataMode
-from guanlan_v2.orchestration.refs import CapabilityRef, ContentRef, SchemaRef
+from guanlan_v2.orchestration.enums import DataMode, NodeStatus
+from guanlan_v2.orchestration.refs import (
+    CapabilityRef,
+    ContentRef,
+    PayloadRef,
+    SchemaRef,
+    TypedPayloadRef,
+)
 from guanlan_v2.orchestration.schema_registry import (
     SchemaRegistry,
     SchemaRegistryError,
@@ -48,6 +54,7 @@ from guanlan_v2.orchestration.schemas import (
     Artifact,
     ArtifactRef,
     ArtifactRelation,
+    NodeRun,
     NumberAnchor,
     Provenance,
     ToolCallRecord,
@@ -91,21 +98,38 @@ class OtherPayload(DigestModel):
 # --------------------------------------------------------------------------- #
 # Builders                                                                    #
 # --------------------------------------------------------------------------- #
+def _typed_ref(
+    *,
+    name: str = "DemoPayload",
+    version: str = "1",
+    namespace: str = "main",
+    object_id: str = "obj-1",
+    content: str = DE,
+) -> TypedPayloadRef:
+    """A composite typed evidence ref: exact schema identity + payload locator."""
+    return TypedPayloadRef(
+        schema_ref=SchemaRef(name=name, version=version),
+        payload_ref=PayloadRef(namespace=namespace, object_id=object_id, content_digest=content),
+    )
+
+
 def _tool_call(
     *,
+    call_ordinal: int = 1,
     request: str = DD,
-    result: str | None = DE,
-    status: str = "ok",
+    result: str = DE,
     call_id: str = "call-1",
+    provider_call_id: str | None = None,
     started: datetime | None = None,
     finished: datetime | None = None,
 ) -> ToolCallRecord:
     return ToolCallRecord(
+        call_ordinal=call_ordinal,
         tool_ref=CapabilityRef(id="news.search", version="1", content_digest=DC),
-        request_digest=request,
-        result_digest=result,
-        status=status,
+        request_ref=_typed_ref(name="ToolRequest", object_id="req-obj", content=request),
+        result_ref=_typed_ref(name="ToolResult", object_id="res-obj", content=result),
         call_id=call_id,
+        provider_call_id=provider_call_id,
         started_at=started or _dt(9, 0),
         finished_at=finished or _dt(9, 1),
     )
@@ -119,8 +143,11 @@ def _provenance(
     model_response_id: str | None = "resp-1",
     tool_calls=None,
     input_snapshot_digest: str | None = "1" * 64,
-    data_result_digests=("2" * 64,),
+    data_result_refs=None,
+    execution_evidence_refs=(),
 ) -> Provenance:
+    if data_result_refs is None:
+        data_result_refs = (_typed_ref(name="DataResult", object_id="dr-obj", content="2" * 64),)
     return Provenance(
         plan_digest=DA,
         code_version="git:abc123",
@@ -132,8 +159,9 @@ def _provenance(
         skill_refs=(skill_ref,) if skill_ref is not None else (),
         capability_refs=(CapabilityRef(id="news.search", version="1", content_digest=DC),),
         input_snapshot_digest=input_snapshot_digest,
-        data_result_digests=tuple(data_result_digests),
-        tool_calls=tuple(tool_calls) if tool_calls is not None else (_tool_call(),),
+        data_result_refs=tuple(data_result_refs),
+        execution_evidence_refs=tuple(execution_evidence_refs),
+        tool_call_records=tuple(tool_calls) if tool_calls is not None else (_tool_call(),),
         provider="deepseek",
         model="v4-pro",
         model_response_id=model_response_id,
@@ -292,13 +320,15 @@ def test_input_artifact_content_digest_change_moves_reproducibility():
     assert a.content_digest == b.content_digest
 
 
-def test_data_result_digest_change_moves_reproducibility():
-    a = _artifact(provenance=_provenance(data_result_digests=("2" * 64,)))
-    b = _artifact(provenance=_provenance(data_result_digests=("9" * 64,)))
+def test_data_result_ref_change_moves_reproducibility():
+    a = _artifact(provenance=_provenance(
+        data_result_refs=(_typed_ref(name="DataResult", object_id="dr", content="2" * 64),)))
+    b = _artifact(provenance=_provenance(
+        data_result_refs=(_typed_ref(name="DataResult", object_id="dr", content="9" * 64),)))
     assert a.reproducibility_digest != b.reproducibility_digest
 
 
-def test_tool_request_digest_change_moves_reproducibility():
+def test_tool_request_ref_change_moves_reproducibility():
     a = _artifact(provenance=_provenance(tool_calls=[_tool_call(request=DD)]))
     b = _artifact(provenance=_provenance(tool_calls=[_tool_call(request="0" * 64)]))
     assert a.reproducibility_digest != b.reproducibility_digest
@@ -510,17 +540,19 @@ def test_provenance_is_frozen():
 
 def test_tool_call_record_rejects_extra_field():
     with pytest.raises(ValidationError):
-        _tool_call(), ToolCallRecord(
+        ToolCallRecord(
+            call_ordinal=1,
             tool_ref=CapabilityRef(id="news.search", version="1", content_digest=DC),
-            request_digest=DD, result_digest=DE, status="ok", call_id="c-1",
-            started_at=_dt(9, 0), finished_at=_dt(9, 1), bogus=1,
+            request_ref=_typed_ref(name="ToolRequest", content=DD),
+            result_ref=_typed_ref(name="ToolResult", content=DE),
+            call_id="c-1", started_at=_dt(9, 0), finished_at=_dt(9, 1), bogus=1,
         )
 
 
 def test_tool_call_record_is_frozen():
     t = _tool_call()
     with pytest.raises(ValidationError):
-        t.status = "error"
+        t.call_ordinal = 2
 
 
 def test_number_anchor_rejects_extra_field():
@@ -550,3 +582,208 @@ def test_artifact_relation_is_frozen():
     )
     with pytest.raises(ValidationError):
         r.relation = "rejects"
+
+
+# --------------------------------------------------------------------------- #
+# 10. typed evidence refs — amendment 1 overhaul                              #
+#   ToolCallRecord is success-only with a service call_ordinal + typed         #
+#   request/result refs; Provenance/NodeRun freeze canonical, main-only,       #
+#   duplicate-free data-result / execution-evidence tuples with a tool-result  #
+#   cross-match. A cache hit lives only in data_result_refs.                    #
+# --------------------------------------------------------------------------- #
+def test_tool_call_record_success_only_has_no_status_field():
+    # the record represents a *successful finalized* call: it cannot carry a
+    # pending/rejected/cache-only marker, so a status kwarg is an extra field.
+    with pytest.raises(ValidationError):
+        ToolCallRecord(
+            call_ordinal=1,
+            tool_ref=CapabilityRef(id="news.search", version="1", content_digest=DC),
+            request_ref=_typed_ref(name="ToolRequest", content=DD),
+            result_ref=_typed_ref(name="ToolResult", content=DE),
+            call_id="c-1", started_at=_dt(9, 0), finished_at=_dt(9, 1),
+            status="refused",
+        )
+
+
+def test_tool_call_record_requires_a_result_ref():
+    # a finalized successful call always produced a result; result_ref is required.
+    with pytest.raises(ValidationError):
+        ToolCallRecord(
+            call_ordinal=1,
+            tool_ref=CapabilityRef(id="news.search", version="1", content_digest=DC),
+            request_ref=_typed_ref(name="ToolRequest", content=DD),
+            call_id="c-1", started_at=_dt(9, 0), finished_at=_dt(9, 1),
+        )
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_tool_call_record_call_ordinal_must_be_positive(bad):
+    with pytest.raises(ValidationError):
+        _tool_call(call_ordinal=bad)
+
+
+@pytest.mark.parametrize("which", ["request_ref", "result_ref"])
+def test_tool_call_record_refs_must_be_main(which):
+    base = dict(
+        call_ordinal=1,
+        tool_ref=CapabilityRef(id="news.search", version="1", content_digest=DC),
+        request_ref=_typed_ref(name="ToolRequest", content=DD),
+        result_ref=_typed_ref(name="ToolResult", content=DE),
+        call_id="c-1", started_at=_dt(9, 0), finished_at=_dt(9, 1),
+    )
+    base[which] = _typed_ref(namespace="sealed", content=DD)
+    with pytest.raises(ValidationError):
+        ToolCallRecord(**base)
+
+
+def test_tool_call_record_clock_coherence_kept():
+    with pytest.raises(ValidationError):
+        _tool_call(started=_dt(10, 0), finished=_dt(9, 0))
+
+
+def test_tool_call_provider_call_id_is_audit_only():
+    a = _tool_call(provider_call_id="prov-1")
+    b = _tool_call(provider_call_id="prov-2")
+    assert a.semantic_digest() == b.semantic_digest()
+    assert a.audit_digest_value() != b.audit_digest_value()
+
+
+# -- Provenance evidence-tuple invariants -----------------------------------
+def test_provenance_tool_call_records_order_by_call_ordinal():
+    p = _provenance(tool_calls=[_tool_call(call_ordinal=1), _tool_call(call_ordinal=2)])
+    assert [r.call_ordinal for r in p.tool_call_records] == [1, 2]
+
+
+def test_provenance_tool_call_records_reject_disordered_ordinal():
+    with pytest.raises(ValidationError):
+        _provenance(tool_calls=[_tool_call(call_ordinal=2), _tool_call(call_ordinal=1)])
+
+
+def test_provenance_tool_call_records_reject_duplicate_ordinal():
+    with pytest.raises(ValidationError):
+        _provenance(tool_calls=[_tool_call(call_ordinal=1), _tool_call(call_ordinal=1)])
+
+
+def test_provenance_data_result_refs_reject_out_of_order():
+    r1 = _typed_ref(name="AData", object_id="o1", content="1" * 64)
+    r2 = _typed_ref(name="BData", object_id="o2", content="2" * 64)
+    with pytest.raises(ValidationError):
+        _provenance(tool_calls=[], data_result_refs=(r2, r1))
+
+
+def test_provenance_data_result_refs_reject_duplicate_semantic_identity():
+    # two refs differing only in the audit object_id are the same evidence.
+    r = _typed_ref(name="AData", object_id="o1", content="1" * 64)
+    dup = _typed_ref(name="AData", object_id="o2", content="1" * 64)
+    with pytest.raises(ValidationError):
+        _provenance(tool_calls=[], data_result_refs=(r, dup))
+
+
+def test_provenance_data_result_refs_reject_non_main():
+    with pytest.raises(ValidationError):
+        _provenance(tool_calls=[], data_result_refs=(_typed_ref(namespace="sealed", content="1" * 64),))
+
+
+def test_provenance_execution_evidence_refs_accept_canonical():
+    r1 = _typed_ref(name="AEvidence", object_id="o1", content="1" * 64)
+    r2 = _typed_ref(name="BEvidence", object_id="o2", content="2" * 64)
+    p = _provenance(execution_evidence_refs=(r1, r2))
+    assert len(p.execution_evidence_refs) == 2
+
+
+def test_provenance_execution_evidence_refs_reject_out_of_order():
+    r1 = _typed_ref(name="AEvidence", object_id="o1", content="1" * 64)
+    r2 = _typed_ref(name="BEvidence", object_id="o2", content="2" * 64)
+    with pytest.raises(ValidationError):
+        _provenance(execution_evidence_refs=(r2, r1))
+
+
+def test_provenance_execution_evidence_refs_reject_non_main():
+    with pytest.raises(ValidationError):
+        _provenance(execution_evidence_refs=(_typed_ref(namespace="review", content="1" * 64),))
+
+
+# -- tool-result / data-result cross-match ----------------------------------
+def test_data_result_that_is_a_tool_result_cross_matches():
+    # the consumed data result IS the tool's finalized result (same typed identity).
+    shared = _typed_ref(name="ToolResult", object_id="res-obj", content=DE)
+    p = _provenance(tool_calls=[_tool_call(result=DE)], data_result_refs=(shared,))
+    assert p.data_result_refs[0].payload_ref.content_digest == DE
+
+
+def test_data_result_sharing_tool_result_content_but_wrong_schema_rejected():
+    # same content digest as the tool result, different SchemaRef → cannot pose
+    # as that finalized tool result.
+    forged = _typed_ref(name="ForgedResult", object_id="x", content=DE)
+    with pytest.raises(ValidationError):
+        _provenance(tool_calls=[_tool_call(result=DE)], data_result_refs=(forged,))
+
+
+def test_cache_hit_data_result_without_tool_call_is_retained_honestly():
+    # a verified cache hit appears only in data_result_refs, fabricates no
+    # ToolCallRecord, and its content matches no tool result.
+    cache = _typed_ref(name="CachedData", object_id="c", content="7" * 64)
+    p = _provenance(tool_calls=[], data_result_refs=(cache,))
+    assert p.tool_call_records == ()
+    assert p.data_result_refs == (cache,)
+
+
+# -- differential digests through an embedding Artifact ---------------------
+def test_execution_evidence_ref_change_moves_reproducibility():
+    ev = _typed_ref(name="PromptAssembly", object_id="e1", content="5" * 64)
+    a = _artifact(provenance=_provenance())
+    b = _artifact(provenance=_provenance(execution_evidence_refs=(ev,)))
+    assert a.reproducibility_digest != b.reproducibility_digest
+    assert a.content_digest == b.content_digest
+
+
+def test_tool_result_ref_change_moves_reproducibility():
+    a = _artifact(provenance=_provenance(tool_calls=[_tool_call(result=DE)]))
+    b = _artifact(provenance=_provenance(tool_calls=[_tool_call(result="9" * 64)]))
+    assert a.reproducibility_digest != b.reproducibility_digest
+    assert a.content_digest == b.content_digest
+
+
+def test_provider_call_id_moves_audit_only():
+    a = _artifact(provenance=_provenance(tool_calls=[_tool_call(provider_call_id="p-1")]))
+    b = _artifact(provenance=_provenance(tool_calls=[_tool_call(provider_call_id="p-2")]))
+    assert a.audit_digest != b.audit_digest
+    assert a.content_digest == b.content_digest
+    assert a.reproducibility_digest == b.reproducibility_digest
+
+
+def test_evidence_object_id_relocation_moves_audit_only():
+    # re-storing identical evidence under a new object_id is audit-only:
+    # reproducibility and content are unchanged, audit moves.
+    a = _artifact(provenance=_provenance(
+        data_result_refs=(_typed_ref(name="DataResult", object_id="dr-1", content="2" * 64),)))
+    b = _artifact(provenance=_provenance(
+        data_result_refs=(_typed_ref(name="DataResult", object_id="dr-2", content="2" * 64),)))
+    assert a.reproducibility_digest == b.reproducibility_digest
+    assert a.content_digest == b.content_digest
+    assert a.audit_digest != b.audit_digest
+
+
+# -- cross-object equal-construction pattern (Phase 2 executor enforces) -----
+def test_artifact_provenance_and_node_run_carry_equal_evidence_tuples():
+    tool_calls = (_tool_call(call_ordinal=1),)
+    data_refs = (_typed_ref(name="DataResult", object_id="dr", content="2" * 64),)
+    evidence = (_typed_ref(name="PromptAssembly", object_id="e", content="5" * 64),)
+    prov = _provenance(
+        tool_calls=list(tool_calls),
+        data_result_refs=data_refs,
+        execution_evidence_refs=evidence,
+    )
+    art = _artifact(provenance=prov)
+    nr = NodeRun(
+        node_run_id="nr-1", run_id="run-1", plan_id="plan-1", plan_digest="a" * 64,
+        node_id="node.research", worker_id="worker.reader", status=NodeStatus.COMPLETED,
+        attempt_id="att-1", input_snapshot_digest="1" * 64,
+        started_at=_dt(9, 0), finished_at=_dt(9, 5),
+        output_keys=("report",), output_artifact_ids=("art-1",),
+        tool_call_records=tool_calls, data_result_refs=data_refs,
+        execution_evidence_refs=evidence,
+    )
+    assert nr.tool_call_records == art.provenance.tool_call_records
+    assert nr.data_result_refs == art.provenance.data_result_refs
+    assert nr.execution_evidence_refs == art.provenance.execution_evidence_refs

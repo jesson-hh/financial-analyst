@@ -5,9 +5,14 @@ Written test-first (RED until ``schemas.py`` exists). Locks the reviewed
 per-status invariants of a node execution record:
 
 * it is a frozen, strict :class:`DigestModel` that forbids extra fields;
-* counters (``tool_call_count`` / ``input_tokens`` / ``output_tokens``) are
-  strict non-negative ints (``bool`` rejected) and ``attempt`` starts at 1
-  (``PositiveInt`` — ``0`` / negatives / ``bool`` rejected);
+* counters (``input_tokens`` / ``output_tokens``) are strict non-negative ints
+  (``bool`` rejected) and ``attempt`` starts at 1 (``PositiveInt`` — ``0`` /
+  negatives / ``bool`` rejected);
+* it freezes the three typed evidence tuples (``tool_call_records`` /
+  ``data_result_refs`` / ``execution_evidence_refs``) on **every** terminal
+  status, with the shared canonical/main-only/duplicate-free invariants; the
+  denormalized ``tool_call_count`` is gone (``len(tool_call_records)`` is the
+  only truth);
 * ``COMPLETED`` requires declared outputs (``output_keys`` non-empty with a
   matching count of ``output_artifact_ids``);
 * ``FAILED`` / ``TIMED_OUT`` / ``CANCELLED`` each require a ``reason_code``;
@@ -25,13 +30,41 @@ from pydantic import ValidationError
 
 from guanlan_v2.orchestration.digest import DigestModel
 from guanlan_v2.orchestration.enums import NodeStatus
-from guanlan_v2.orchestration.schemas import NodeRun
+from guanlan_v2.orchestration.refs import (
+    CapabilityRef,
+    PayloadRef,
+    SchemaRef,
+    TypedPayloadRef,
+)
+from guanlan_v2.orchestration.schemas import NodeRun, ToolCallRecord
 
 UTC = timezone.utc
 
 
 def _dt(hour: int = 9, minute: int = 0) -> datetime:
     return datetime(2026, 7, 15, hour, minute, tzinfo=UTC)
+
+
+def _typed_ref(
+    *, name: str = "DataResult", object_id: str = "o1", namespace: str = "main",
+    content: str = "2" * 64,
+) -> TypedPayloadRef:
+    return TypedPayloadRef(
+        schema_ref=SchemaRef(name=name, version="1"),
+        payload_ref=PayloadRef(namespace=namespace, object_id=object_id, content_digest=content),
+    )
+
+
+def _tool_call(*, call_ordinal: int = 1, result: str = "e" * 64) -> ToolCallRecord:
+    return ToolCallRecord(
+        call_ordinal=call_ordinal,
+        tool_ref=CapabilityRef(id="news.search", version="1", content_digest="c" * 64),
+        request_ref=_typed_ref(name="ToolRequest", object_id="req", content="d" * 64),
+        result_ref=_typed_ref(name="ToolResult", object_id="res", content=result),
+        call_id="call-1",
+        started_at=_dt(9, 0),
+        finished_at=_dt(9, 1),
+    )
 
 
 def _node_run(
@@ -44,6 +77,9 @@ def _node_run(
     output_artifact_ids=None,
     started_at: datetime | None = None,
     finished_at: datetime | None = None,
+    tool_call_records=(),
+    data_result_refs=(),
+    execution_evidence_refs=(),
     **over,
 ) -> NodeRun:
     completed = status is NodeStatus.COMPLETED
@@ -68,7 +104,9 @@ def _node_run(
         finished_at=finished_at if finished_at is not None else _dt(9, 5),
         output_keys=output_keys,
         output_artifact_ids=output_artifact_ids,
-        tool_call_count=0,
+        tool_call_records=tuple(tool_call_records),
+        data_result_refs=tuple(data_result_refs),
+        execution_evidence_refs=tuple(execution_evidence_refs),
         input_tokens=0,
         output_tokens=0,
         warnings=(),
@@ -172,13 +210,13 @@ def test_attempt_bool_rejected():
 # --------------------------------------------------------------------------- #
 # counters are strict non-negative ints                                       #
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("field", ["tool_call_count", "input_tokens", "output_tokens"])
+@pytest.mark.parametrize("field", ["input_tokens", "output_tokens"])
 def test_counters_reject_negative(field):
     with pytest.raises(ValidationError):
         _node_run(status=NodeStatus.RUNNING, output_keys=(), output_artifact_ids=(), **{field: -1})
 
 
-@pytest.mark.parametrize("field", ["tool_call_count", "input_tokens", "output_tokens"])
+@pytest.mark.parametrize("field", ["input_tokens", "output_tokens"])
 def test_counters_reject_bool(field):
     with pytest.raises(ValidationError):
         _node_run(status=NodeStatus.RUNNING, output_keys=(), output_artifact_ids=(), **{field: True})
@@ -207,3 +245,93 @@ def test_node_run_is_frozen():
     r = _node_run(status=NodeStatus.COMPLETED)
     with pytest.raises(ValidationError):
         r.status = NodeStatus.FAILED
+
+
+# --------------------------------------------------------------------------- #
+# typed evidence tuples (amendment 1) — frozen on every terminal status        #
+# --------------------------------------------------------------------------- #
+def test_tool_call_count_field_is_removed():
+    # the denormalized counter is gone; a worker cannot self-report a count.
+    with pytest.raises(ValidationError):
+        _node_run(
+            status=NodeStatus.RUNNING, output_keys=(), output_artifact_ids=(),
+            tool_call_count=1,
+        )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [NodeStatus.INCOMPLETE, NodeStatus.FAILED, NodeStatus.TIMED_OUT, NodeStatus.CANCELLED],
+)
+def test_evidence_is_retained_on_every_terminal_status(status):
+    # evidence cannot disappear because later prompt/model/output work failed:
+    # a failed/incomplete run after a successful data/tool step still freezes
+    # all three tuples.
+    reason = None if status is NodeStatus.INCOMPLETE else "budget_exhausted"
+    r = _node_run(
+        status=status, reason_code=reason, output_keys=(), output_artifact_ids=(),
+        tool_call_records=(_tool_call(call_ordinal=1),),
+        data_result_refs=(_typed_ref(content="2" * 64),),
+        execution_evidence_refs=(_typed_ref(name="PromptAssembly", content="5" * 64),),
+    )
+    assert len(r.tool_call_records) == 1
+    assert len(r.data_result_refs) == 1
+    assert len(r.execution_evidence_refs) == 1
+
+
+def test_node_run_tool_call_records_reject_disordered_ordinal():
+    with pytest.raises(ValidationError):
+        _node_run(
+            status=NodeStatus.RUNNING, output_keys=(), output_artifact_ids=(),
+            tool_call_records=(_tool_call(call_ordinal=2), _tool_call(call_ordinal=1)),
+        )
+
+
+def test_node_run_tool_call_records_reject_duplicate_ordinal():
+    with pytest.raises(ValidationError):
+        _node_run(
+            status=NodeStatus.RUNNING, output_keys=(), output_artifact_ids=(),
+            tool_call_records=(_tool_call(call_ordinal=1), _tool_call(call_ordinal=1)),
+        )
+
+
+def test_node_run_data_result_refs_reject_non_main():
+    with pytest.raises(ValidationError):
+        _node_run(
+            status=NodeStatus.RUNNING, output_keys=(), output_artifact_ids=(),
+            data_result_refs=(_typed_ref(namespace="sealed", content="2" * 64),),
+        )
+
+
+def test_node_run_evidence_refs_reject_duplicate_semantic_identity():
+    dup = (
+        _typed_ref(object_id="a", content="2" * 64),
+        _typed_ref(object_id="b", content="2" * 64),
+    )
+    with pytest.raises(ValidationError):
+        _node_run(
+            status=NodeStatus.RUNNING, output_keys=(), output_artifact_ids=(),
+            data_result_refs=dup,
+        )
+
+
+def test_node_run_data_result_refs_reject_out_of_order():
+    r1 = _typed_ref(name="AData", object_id="o1", content="1" * 64)
+    r2 = _typed_ref(name="BData", object_id="o2", content="2" * 64)
+    with pytest.raises(ValidationError):
+        _node_run(
+            status=NodeStatus.RUNNING, output_keys=(), output_artifact_ids=(),
+            data_result_refs=(r2, r1),
+        )
+
+
+def test_node_run_evidence_change_moves_semantic_digest():
+    a = _node_run(
+        status=NodeStatus.RUNNING, output_keys=(), output_artifact_ids=(),
+        data_result_refs=(_typed_ref(content="2" * 64),),
+    )
+    b = _node_run(
+        status=NodeStatus.RUNNING, output_keys=(), output_artifact_ids=(),
+        data_result_refs=(_typed_ref(content="9" * 64),),
+    )
+    assert a.semantic_digest() != b.semantic_digest()

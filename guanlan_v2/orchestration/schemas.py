@@ -18,9 +18,10 @@ re-verified on load:
    moves **only** when the payload or its schema ref changes.
 2. ``reproducibility_digest`` — the *stable* provenance: the structural slot
    identity plus the :class:`Provenance` **semantic** projection
-   (plan/code/model-config/prompt/skills/capabilities, input-snapshot and data
-   digests, and each :class:`ToolCallRecord`'s deterministic request/result
-   digests) plus the input :class:`ArtifactRef`s (by their referenced content
+   (plan/code/model-config/prompt/skills/capabilities, input-snapshot digest,
+   the typed data-result and execution-evidence refs, and each
+   :class:`ToolCallRecord`'s ``call_ordinal`` + typed request/result refs) plus
+   the input :class:`ArtifactRef`s (by their referenced content
    digest, not their random ids) plus the anchored numbers. It answers *"would
    re-running this produce the same thing?"* The whole ``Provenance`` object is
    **not** excluded — a prompt / skill / model-config / data-input change moves
@@ -67,7 +68,14 @@ from guanlan_v2.orchestration.enums import (
     PortfolioRating,
     SentimentBand,
 )
-from guanlan_v2.orchestration.refs import CapabilityRef, ContentRef, SchemaRef
+from guanlan_v2.orchestration.refs import (
+    CapabilityRef,
+    ContentRef,
+    SchemaRef,
+    TypedPayloadRef,
+    typed_ref_sort_key,
+    validate_typed_ref_tuple,
+)
 from guanlan_v2.orchestration.schema_registry import SchemaRegistry
 
 __all__ = [
@@ -135,33 +143,100 @@ class ArtifactRef(DigestModel):
 
 
 class ToolCallRecord(DigestModel):
-    """One capability invocation made while producing an artifact.
+    """One *successful finalized* capability invocation made while producing an
+    artifact.
 
-    ``tool_ref`` (which capability) and the deterministic ``request_digest`` /
-    ``result_digest`` / ``status`` are semantic — they belong in the
-    reproducibility layer. ``call_id`` and the ``started_at`` / ``finished_at``
-    wall-clock are audit-only, so a tool call's timestamps never leak into a
-    parent artifact's reproducibility digest.
+    The record is success-only by construction: it carries no status field and
+    cannot represent pending / rejected / cache-only work (that work simply has
+    no record). ``call_ordinal`` is the service-issued strictly-positive
+    ordering key; ``tool_ref`` (which capability) and the typed ``request_ref`` /
+    ``result_ref`` (each a main-namespace :class:`TypedPayloadRef` carrying the
+    exact schema identity plus the payload's namespace/content digest) are
+    semantic — they belong in the reproducibility layer. ``call_id`` /
+    ``provider_call_id`` and the ``started_at`` / ``finished_at`` wall-clock are
+    audit-only, so a tool call's provider identity and timestamps never leak into
+    a parent artifact's reproducibility digest. Each ref's ``payload_ref.object_id``
+    is audit-only through the nested :class:`~guanlan_v2.orchestration.refs.PayloadRef`
+    projection, so object-id relocation is audit-only too.
+
+    The two typed refs must match the capability's request/output SchemaRefs — a
+    cross-object rule the Phase 2 CapabilityGateway enforces; Phase 1 fixes only
+    the shape (both refs main, result present, clock coherent).
     """
 
     schema_version: Literal["1"] = "1"
+    call_ordinal: PositiveInt
     tool_ref: CapabilityRef
-    request_digest: DigestHex
-    result_digest: DigestHex | None = None
-    status: ToolCallStatus
+    request_ref: TypedPayloadRef
+    result_ref: TypedPayloadRef
     call_id: NonEmptyStr
+    provider_call_id: NonEmptyStr | None = None
     started_at: UtcDateTime
     finished_at: UtcDateTime
 
     SEMANTIC_EXCLUDE: ClassVar[frozenset[str]] = frozenset(
-        {"call_id", "started_at", "finished_at"}
+        {"call_id", "provider_call_id", "started_at", "finished_at"}
     )
 
     @model_validator(mode="after")
-    def _clock_coherent(self) -> "ToolCallRecord":
+    def _coherent(self) -> "ToolCallRecord":
+        if self.request_ref.payload_ref.namespace != "main":
+            raise ValueError("request_ref must reference a main-namespace payload")
+        if self.result_ref.payload_ref.namespace != "main":
+            raise ValueError("result_ref must reference a main-namespace payload")
         if self.finished_at < self.started_at:
             raise ValueError("finished_at must not precede started_at")
         return self
+
+
+def _validate_evidence_tuples(
+    tool_call_records: tuple[ToolCallRecord, ...],
+    data_result_refs: tuple[TypedPayloadRef, ...],
+    execution_evidence_refs: tuple[TypedPayloadRef, ...],
+) -> None:
+    """Shared run-level evidence invariant reused by ``Provenance`` and ``NodeRun``.
+
+    Enforces, in order:
+
+    * ``tool_call_records`` are ordered by strictly-increasing service
+      ``call_ordinal`` (duplicate-free);
+    * ``data_result_refs`` and ``execution_evidence_refs`` are each canonically
+      ordered by the typed semantic projection, duplicate-free and main-only
+      (delegated to :func:`validate_typed_ref_tuple`);
+    * the tool-result / data-result cross-match: a ``data_result_refs`` element
+      that shares a finalized tool result's ``content_digest`` must be that exact
+      typed result ref (same semantic identity). A verified cache hit shares no
+      tool result and therefore lives in ``data_result_refs`` only, fabricating
+      no :class:`ToolCallRecord`.
+
+    Raises :class:`ValueError` naming the offending tuple.
+    """
+    ordinals = [rec.call_ordinal for rec in tool_call_records]
+    if ordinals != sorted(ordinals):
+        raise ValueError(
+            "tool_call_records must be ordered by strictly increasing call_ordinal"
+        )
+    if len(set(ordinals)) != len(ordinals):
+        raise ValueError("tool_call_records must have a duplicate-free call_ordinal")
+    validate_typed_ref_tuple(
+        data_result_refs, require_main=True, field_name="data_result_refs"
+    )
+    validate_typed_ref_tuple(
+        execution_evidence_refs, require_main=True, field_name="execution_evidence_refs"
+    )
+    tool_result_keys: dict[str, set[tuple[str, str, str, str]]] = {}
+    for rec in tool_call_records:
+        result = rec.result_ref
+        tool_result_keys.setdefault(result.payload_ref.content_digest, set()).add(
+            typed_ref_sort_key(result)
+        )
+    for ref in data_result_refs:
+        keys = tool_result_keys.get(ref.payload_ref.content_digest)
+        if keys is not None and typed_ref_sort_key(ref) not in keys:
+            raise ValueError(
+                "a data_result_refs element that shares a tool result's content "
+                "digest must match that exact typed result ref"
+            )
 
 
 class Provenance(DigestModel):
@@ -169,12 +244,21 @@ class Provenance(DigestModel):
 
     Every field except ``model_response_id`` is *reproducibility* content: the
     plan/code/model-config pin, the ordered prompt/skill/capability refs, the
-    input-snapshot and data-result digests, and the deterministic tool-call
-    request/result digests. ``model_response_id`` — the specific provider
-    response id — is the one volatile fact here and is excluded from the semantic
-    projection, so it participates only in an artifact's audit digest. Because a
-    nested ``DigestModel`` applies its own projection, the whole ``Provenance``
-    object is included in — never wholesale excluded from — reproducibility.
+    input-snapshot digest, the typed ``data_result_refs`` / ``execution_evidence_refs``
+    evidence tuples, and the ordered ``tool_call_records``. ``model_response_id``
+    — the specific provider response id — is the one volatile fact here and is
+    excluded from the semantic projection, so it participates only in an
+    artifact's audit digest. Because a nested ``DigestModel`` applies its own
+    projection, the whole ``Provenance`` object is included in — never wholesale
+    excluded from — reproducibility, while each typed ref's audit-only object id
+    stays out of it.
+
+    The three evidence tuples share one invariant (:func:`_validate_evidence_tuples`):
+    tool calls order by service ``call_ordinal``; data-result and
+    execution-evidence refs are canonically ordered, duplicate-free and
+    main-only; and a consumed data result that is also a finalized tool result
+    must cross-match that exact typed result ref (a cache hit appears only in
+    ``data_result_refs``).
     """
 
     schema_version: Literal["1"] = "1"
@@ -188,14 +272,24 @@ class Provenance(DigestModel):
     skill_refs: tuple[ContentRef, ...] = ()
     capability_refs: tuple[CapabilityRef, ...] = ()
     input_snapshot_digest: DigestHex | None = None
-    data_result_digests: tuple[DigestHex, ...] = ()
-    tool_calls: tuple[ToolCallRecord, ...] = ()
+    data_result_refs: tuple[TypedPayloadRef, ...] = ()
+    execution_evidence_refs: tuple[TypedPayloadRef, ...] = ()
+    tool_call_records: tuple[ToolCallRecord, ...] = ()
     provider: NonEmptyStr | None = None
     model: NonEmptyStr | None = None
     model_response_id: NonEmptyStr | None = None
 
     #: the sole volatile provenance fact; absent from the reproducibility layer.
     SEMANTIC_EXCLUDE: ClassVar[frozenset[str]] = frozenset({"model_response_id"})
+
+    @model_validator(mode="after")
+    def _evidence_coherent(self) -> "Provenance":
+        _validate_evidence_tuples(
+            self.tool_call_records,
+            self.data_result_refs,
+            self.execution_evidence_refs,
+        )
+        return self
 
 
 class NumberAnchor(DigestModel):
@@ -410,6 +504,18 @@ class NodeRun(DigestModel):
     (a non-empty ``output_keys`` with a matching count of
     ``output_artifact_ids``); ``FAILED`` / ``TIMED_OUT`` / ``CANCELLED`` each
     require a ``reason_code``. Random ids and wall-clock are audit-only.
+
+    A ``NodeRun`` freezes the exact ``input_snapshot_digest`` plus the three
+    typed evidence tuples (``tool_call_records`` / ``data_result_refs`` /
+    ``execution_evidence_refs``, under the shared
+    :func:`_validate_evidence_tuples` invariant) for **every** terminal status —
+    including INCOMPLETE / FAILED / TIMED_OUT / CANCELLED after a successful
+    data/tool step. Evidence cannot disappear merely because later prompt/model/
+    output work failed. There is deliberately no ``tool_call_count``:
+    ``len(tool_call_records)`` is the only truth, so a worker cannot self-report
+    a divergent count. On COMPLETED / DEGRADED the produced Artifact's
+    ``Provenance`` must carry all three tuples exactly equal to this record — a
+    cross-object equality the Phase 2 executor enforces.
     """
 
     schema_version: Literal["1"] = "1"
@@ -429,7 +535,9 @@ class NodeRun(DigestModel):
     finished_at: UtcDateTime | None = None
     output_keys: tuple[NonEmptyStr, ...] = ()
     output_artifact_ids: tuple[NonEmptyStr, ...] = ()
-    tool_call_count: NonNegativeInt = 0
+    tool_call_records: tuple[ToolCallRecord, ...] = ()
+    data_result_refs: tuple[TypedPayloadRef, ...] = ()
+    execution_evidence_refs: tuple[TypedPayloadRef, ...] = ()
     input_tokens: NonNegativeInt = 0
     output_tokens: NonNegativeInt = 0
     warnings: tuple[NonEmptyStr, ...] = ()
@@ -438,6 +546,15 @@ class NodeRun(DigestModel):
     SEMANTIC_EXCLUDE: ClassVar[frozenset[str]] = frozenset(
         {"node_run_id", "attempt_id", "started_at", "finished_at"}
     )
+
+    @model_validator(mode="after")
+    def _evidence_coherent(self) -> "NodeRun":
+        _validate_evidence_tuples(
+            self.tool_call_records,
+            self.data_result_refs,
+            self.execution_evidence_refs,
+        )
+        return self
 
     @model_validator(mode="after")
     def _status_matrix(self) -> "NodeRun":
