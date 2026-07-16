@@ -54,7 +54,7 @@ def _board_view(rows: list) -> list:
 
 
 def build_live(kind: str = "concept", refresh: bool = False,
-               sector_fn=None, market_fn=None, now=None) -> dict:
+               sector_fn=None, market_fn=None, market_minute_fn=None, now=None) -> dict:
     """当前档板块排行 + 大盘五档(独立源)+ 板块级涨跌数。
 
     大盘五档一律取自独立源 fetch_market(沪深合计 fflow),源挂则 market={} + note,
@@ -66,6 +66,8 @@ def build_live(kind: str = "concept", refresh: bool = False,
         sector_fn = sources.fetch_sector
     if market_fn is None:
         market_fn = sources.fetch_market
+    if market_minute_fn is None:
+        market_minute_fn = sources.fetch_market_minute
     k = "industry" if str(kind).lower().startswith("ind") else "concept"
     dt = now or datetime.now()
     trading = _is_trading(dt)
@@ -83,13 +85,21 @@ def build_live(kind: str = "concept", refresh: bool = False,
     concept_rows = cur["rows"] if k == "concept" else other["rows"]
     industry_rows = other["rows"] if k == "concept" else cur["rows"]
 
-    # 大盘五档:独立源。失败 → 空 + note,绝不加总冒充。
-    mk = market_fn()
-    if mk.get("ok"):
-        market = dict(mk.get("row") or {})
+    # 大盘五档:优先分钟线末点(今天此刻)。daykline 盘中滞后一天(真机:盘中 daykline
+    # 返回昨天收盘),故仅当分钟线空(盘前/非交易日)才回落 daykline。绝不加总冒充。
+    market = {}
+    mkm = market_minute_fn()
+    last = (mkm.get("row") or {}).get("last") if mkm.get("ok") else None
+    if last:
+        market = dict(last)
+        market["date"] = dt.strftime("%Y-%m-%d")            # 分钟线是今天,用 now 打日期
+        market["src_host"] = (mkm.get("row") or {}).get("src_host", "")
     else:
-        market = {}
-        notes.append(f"大盘资金五档不可用:{mk.get('note') or '空'}")
+        mk = market_fn()
+        if mk.get("ok"):
+            market = dict(mk.get("row") or {})               # 回落 daykline(带其自身 date)
+        else:
+            notes.append(f"大盘资金五档不可用:{mk.get('note') or '空'}")
 
     notes.append(_ALLA_UNAVAILABLE_NOTE)
     breadth = {

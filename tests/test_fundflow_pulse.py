@@ -23,10 +23,27 @@ _MARKET_ROW = {"date": "2026-07-10", "main_net": -3.9791e10, "super_net": -2.909
 
 
 def _market_fn(row=None, ok=True):
+    """daykline(日线)大盘五档 mock —— 盘中滞后一天,仅作 fallback。"""
     def _fn():
         if not ok:
             return {"ok": False, "row": {}, "note": "大盘资金源不可达"}
         return {"ok": True, "row": dict(row if row is not None else _MARKET_ROW), "note": ""}
+    return _fn
+
+
+_MARKET_MIN_LAST = {"main_net": -2.3753e10, "super_net": -1.8e10, "large_net": -5.753e9,
+                    "mid_net": 9.318e9, "small_net": 4.0475e10}
+
+
+def _market_min_fn(last=None, ok=True):
+    """分钟线末点五档 mock —— 盘中大盘五档改用它(今天此刻,不滞后)。"""
+    def _fn():
+        if not ok:
+            return {"ok": False, "row": {}, "note": "分钟线空"}
+        return {"ok": True, "note": "", "row": {
+            "times": ["09:31", "11:30"], "main_net": [1e9, -2.3753e10],
+            "last": dict(last if last is not None else _MARKET_MIN_LAST),
+            "src_host": "push2delay.eastmoney.com"}}
     return _fn
 
 
@@ -43,7 +60,7 @@ def test_build_live_uses_independent_market_source(tmp_path):
                      ("银行", 2.66e8, 1e8, 1.66e8, 0.0, -2e8, 0.3, 20, 8))
     now = datetime(2026, 7, 8, 10, 57, 0)
     out = pulse.build_live("concept", refresh=True, sector_fn=_sector_fn(concept, industry),
-                           market_fn=_market_fn(), now=now)
+                           market_fn=_market_fn(), market_minute_fn=_market_min_fn(ok=False), now=now)
     assert out["ok"] and out["kind"] == "concept" and out["trading"] is True
     # 大盘 = 独立源原样(加总会得 -1.34e10+2.66e8,截然不同)
     assert out["market"]["main_net"] == -3.9791e10
@@ -67,7 +84,7 @@ def test_build_live_never_sums_overlapping_boards(tmp_path):
                      ("银行", 2.66e8, 1e8, 1.66e8, 0.0, -2e8, 0.3, 20, 8))
     concept = _rows(("商业航天", 1.1086e10, 7e9, 4.086e9, -1e8, -2e9, 2.7, 40, 3))
     out = pulse.build_live("industry", refresh=True, sector_fn=_sector_fn(concept, industry),
-                           market_fn=_market_fn(), now=datetime(2026, 7, 10, 10, 0, 0))
+                           market_fn=_market_fn(), market_minute_fn=_market_min_fn(ok=False), now=datetime(2026, 7, 10, 10, 0, 0))
     assert out["breadth"]["allA"]["up"] is None          # 绝不是 38
     assert out["breadth"]["allA"]["down"] is None
     assert out["market"]["main_net"] == -3.9791e10       # 绝不是板块加总
@@ -80,11 +97,41 @@ def test_build_live_degrades_when_market_source_down(tmp_path):
     concept = _rows(("商业航天", 1.1086e10, 7e9, 4.086e9, -1e8, -2e9, 2.7, 40, 3))
     industry = _rows(("银行", 2.66e8, 1e8, 1.66e8, 0.0, -2e8, 0.3, 20, 8))
     out = pulse.build_live("concept", refresh=True, sector_fn=_sector_fn(concept, industry),
-                           market_fn=_market_fn(ok=False), now=datetime(2026, 7, 10, 10, 0, 0))
+                           market_fn=_market_fn(ok=False), market_minute_fn=_market_min_fn(ok=False),
+                           now=datetime(2026, 7, 10, 10, 0, 0))
     assert out["ok"] is True          # 板块还在,不整份作废
-    assert out["market"] == {}        # 不编造,不回落加总
+    assert out["market"] == {}        # 两源(分钟线+daykline)都挂 → 不编造,不回落加总
     assert any("大盘" in n for n in out["notes"])
     assert out["boards"][0]["name"] == "商业航天"
+
+
+def test_build_live_market_uses_minute_last_not_daykline(tmp_path):
+    """大盘五档必须来自分钟线末点(今天此刻);daykline 盘中滞后一天,仅 fallback。
+
+    根因(2026-07-16 真机):daykline 盘中返回昨天(07-15 -497.94亿),分钟线末点才是
+    今天此刻(-237.53亿)。板块排行/分钟线都是今天,唯独大盘五档滞后一天 → 修。
+    """
+    from guanlan_v2.fundflow import pulse
+    concept = _rows(("算力概念", 9.45e9, 6e9, 3.45e9, -1e8, -4e9, 2.1, 30, 5))
+    industry = _rows(("银行", 2.66e8, 1e8, 1.66e8, 0.0, -2e8, 0.3, 20, 8))
+    out = pulse.build_live("concept", refresh=True, sector_fn=_sector_fn(concept, industry),
+                           market_fn=_market_fn(), market_minute_fn=_market_min_fn(),
+                           now=datetime(2026, 7, 16, 11, 30, 0))
+    assert out["market"]["main_net"] == -2.3753e10       # 分钟线末点(今天),不是 daykline -397.91亿
+    assert out["market"]["super_net"] == -1.8e10
+    assert out["market"]["date"] == "2026-07-16"         # build_live 用 now 打今天,不是昨天
+    assert out["market"]["src_host"] == "push2delay.eastmoney.com"
+
+
+def test_build_live_market_falls_back_to_daykline_when_minute_empty(tmp_path):
+    """分钟线空(盘前/非交易日)→ 回落 daykline(带其自身 date)。"""
+    from guanlan_v2.fundflow import pulse
+    concept = _rows(("算力概念", 9.45e9, 6e9, 3.45e9, -1e8, -4e9, 2.1, 30, 5))
+    out = pulse.build_live("concept", refresh=True, sector_fn=_sector_fn(concept, []),
+                           market_fn=_market_fn(), market_minute_fn=_market_min_fn(ok=False),
+                           now=datetime(2026, 7, 16, 8, 0, 0))
+    assert out["market"]["main_net"] == -3.9791e10       # 回落 daykline(_MARKET_ROW)
+    assert out["market"].get("date") == "2026-07-10"     # daykline 自带的 date
 
 
 def test_build_live_writes_no_snapshot_file(tmp_path, monkeypatch):
@@ -94,7 +141,7 @@ def test_build_live_writes_no_snapshot_file(tmp_path, monkeypatch):
     concept = _rows(("算力概念", 9.45e9, 6e9, 3.45e9, -1e8, -4e9, 2.1, 30, 5))
     industry = _rows(("银行", 2.66e8, 1e8, 1.66e8, 0.0, -2e8, 0.3, 20, 8))
     out = pulse.build_live("concept", refresh=True, sector_fn=_sector_fn(concept, industry),
-                           market_fn=_market_fn(), now=datetime(2026, 7, 8, 10, 30, 0))
+                           market_fn=_market_fn(), market_minute_fn=_market_min_fn(ok=False), now=datetime(2026, 7, 8, 10, 30, 0))
     assert out["ok"] is True
     assert not list(Path(tmp_path).rglob("*.jsonl"))
     assert "delta_intraday" not in out["boards"][0]      # 快照派生物,已随快照一起废除
@@ -102,7 +149,7 @@ def test_build_live_writes_no_snapshot_file(tmp_path, monkeypatch):
 
 def test_build_live_degrades_when_sector_empty(tmp_path):
     from guanlan_v2.fundflow import pulse
-    out = pulse.build_live("concept", refresh=True, sector_fn=_sector_fn([], []), market_fn=_market_fn(),
+    out = pulse.build_live("concept", refresh=True, sector_fn=_sector_fn([], []), market_fn=_market_fn(), market_minute_fn=_market_min_fn(ok=False),
                            now=datetime(2026, 7, 8, 10, 0, 0))
     assert out["ok"] is False and out["notes"]
 
@@ -111,7 +158,7 @@ def test_build_live_other_tier_degrade_continues(tmp_path):
     """另一档缺失只影响该档板块涨跌数;大盘来自独立源,照常出数。"""
     from guanlan_v2.fundflow import pulse
     concept = _rows(("算力概念", 9.45e9, 6e9, 3.45e9, -1e8, -4e9, 2.1, 30, 5))
-    out = pulse.build_live("concept", refresh=True, sector_fn=_sector_fn(concept, []), market_fn=_market_fn(),
+    out = pulse.build_live("concept", refresh=True, sector_fn=_sector_fn(concept, []), market_fn=_market_fn(), market_minute_fn=_market_min_fn(ok=False),
                            now=datetime(2026, 7, 8, 10, 0, 0))
     assert out["ok"] is True
     assert out["market"]["main_net"] == -3.9791e10        # 独立源不受行业档缺失影响
