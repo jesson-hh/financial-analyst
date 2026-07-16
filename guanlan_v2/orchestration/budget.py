@@ -513,6 +513,19 @@ def validate_budget_command(
             raise InvalidBudgetTransition("settle references an unknown reservation")
         if res.status != "reserved":
             raise InvalidBudgetTransition(f"cannot settle a {res.status!r} reservation")
+        if res.scope_type == "plan" and _has_active_children(state, args.reservation_id):
+            # Mirror the release guard (invariant 3): settling a plan down to its
+            # actual usage while a child node still holds a reserved slice would
+            # free run budget that child is still consuming — a later plan could
+            # then over-reserve past the run maxima.
+            raise InvalidBudgetTransition(
+                "cannot settle a plan with active child reservations"
+            )
+        # NOTE: no parent-status check is needed for a *node* settle — with the
+        # plan-scope settle guard above and the symmetric release guard below, a
+        # plan can never leave 'reserved' while any child is still reserved, so a
+        # reserved node always has a reserved parent (proven by
+        # test_reserved_node_implies_reserved_parent_plan).
         if (
             args.actual_tokens > res.reserved_tokens
             or args.actual_llm_invocations > res.reserved_llm_invocations
@@ -551,6 +564,18 @@ class BudgetLedger:
     """
 
     def __init__(self, *, sink: BudgetEventSink, run_budget: RunBudget) -> None:
+        if (
+            run_budget.reserved_tokens != 0
+            or run_budget.reserved_llm_invocations != 0
+            or run_budget.reserved_concurrency != 0
+        ):
+            raise ValueError(
+                "the Task-1 BudgetLedger owns all holds via its event fold and "
+                "expects a maxima-only RunBudget (reserved_tokens / "
+                "reserved_llm_invocations / reserved_concurrency must be 0); "
+                "a pre-populated running total would be silently ignored by "
+                "compute_available and allow over-reservation (Task 2/6 may revisit)"
+            )
         self._sink = sink
         self._run_budget = run_budget
 

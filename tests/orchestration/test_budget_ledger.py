@@ -386,6 +386,68 @@ def test_conflicting_idempotency_key_is_rejected():
 # --------------------------------------------------------------------------- #
 # 8. invalid transitions fail without appending                               #
 # --------------------------------------------------------------------------- #
+def test_plan_settle_with_active_reserved_child_is_rejected_without_appending():
+    """Reviewer scenario (invariant 3): an out-of-order plan settle while a child
+    node is still reserved would free run budget the child still holds — a later
+    plan could then over-reserve (300 settled + 600 child + 700 new > 1000 run).
+    The settle must be rejected like the symmetric release guard, appending no
+    event."""
+    ledger, sink = _ledger(_run_budget(max_tokens=1000))
+    plan = _reserve_plan(ledger, tokens=1000, llm=10, concurrency=4)
+    ledger.reserve_node(
+        plan_reservation_id=plan.reservation_id, node_id="n1", attempt=1,
+        tokens=600, llm_invocations=3, concurrency=1, idempotency_key="n1",
+    )
+    before = len(sink.budget_events())
+    with pytest.raises(InvalidBudgetTransition):
+        ledger.settle(plan.reservation_id, actual_tokens=300, actual_llm_invocations=2,
+                      idempotency_key="s-plan-early")
+    assert len(sink.budget_events()) == before
+    # the plan's full reservation is still held against the run.
+    assert ledger.available().tokens == 0
+
+
+def test_plan_settle_succeeds_after_all_children_are_settled_or_released():
+    ledger, _ = _ledger(_run_budget(max_tokens=1000, max_llm_invocations=40))
+    plan = _reserve_plan(ledger, tokens=1000, llm=10, concurrency=4)
+    n1 = ledger.reserve_node(
+        plan_reservation_id=plan.reservation_id, node_id="n1", attempt=1,
+        tokens=400, llm_invocations=2, concurrency=1, idempotency_key="n1",
+    )
+    n2 = ledger.reserve_node(
+        plan_reservation_id=plan.reservation_id, node_id="n2", attempt=1,
+        tokens=400, llm_invocations=2, concurrency=1, idempotency_key="n2",
+    )
+    ledger.settle(n1.reservation_id, actual_tokens=100, actual_llm_invocations=1,
+                  idempotency_key="s-n1")
+    ledger.release(n2.reservation_id, reason="skipped", idempotency_key="r-n2")
+    settled = ledger.settle(plan.reservation_id, actual_tokens=300,
+                            actual_llm_invocations=2, idempotency_key="s-plan")
+    assert settled.status == "settled"
+    # only the plan's settled actual is now held against the run.
+    assert ledger.available().tokens == 700
+
+
+def test_reserved_node_implies_reserved_parent_plan():
+    """With both the settle and release guards in place, a plan cannot leave
+    'reserved' while any child is still reserved — so 'node settle whose parent is
+    no longer reserved' is unreachable through the transition matrix (no separate
+    node-parent settle check is needed). This proves both exits are barred."""
+    ledger, _ = _ledger()
+    plan = _reserve_plan(ledger, tokens=1000, llm=10, concurrency=4)
+    ledger.reserve_node(
+        plan_reservation_id=plan.reservation_id, node_id="n1", attempt=1,
+        tokens=100, llm_invocations=1, concurrency=1, idempotency_key="n1",
+    )
+    with pytest.raises(InvalidBudgetTransition):
+        ledger.settle(plan.reservation_id, actual_tokens=0, actual_llm_invocations=0,
+                      idempotency_key="s-plan")
+    with pytest.raises(InvalidBudgetTransition):
+        ledger.release(plan.reservation_id, reason="cancel", idempotency_key="r-plan")
+    # the parent is provably still reserved while its child is reserved.
+    assert ledger.get(plan.reservation_id).status == "reserved"
+
+
 def test_double_settle_is_invalid_without_appending():
     ledger, sink = _ledger()
     plan = _reserve_plan(ledger, tokens=1000)
@@ -555,6 +617,28 @@ def test_validate_budget_command_raises_on_over_reserve_against_advanced_head():
     )
     with pytest.raises(BudgetExceeded):
         validate_budget_command(cmd_b, advanced, run_budget=rb)
+
+
+# --------------------------------------------------------------------------- #
+# constructor guard: the ledger owns all holds, maxima-only RunBudget         #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"reserved_tokens": 100},
+        {"reserved_llm_invocations": 1},
+        {"reserved_concurrency": 1},
+    ],
+)
+def test_ledger_rejects_run_budget_with_nonzero_reserved_totals(over):
+    """compute_available subtracts only the fold's plan holds from max_*; a
+    RunBudget carrying pre-existing reserved_* would silently over-reserve beyond
+    the true remainder. The ledger owns all holds — a maxima-only RunBudget is
+    enforced at construction."""
+    rb = _run_budget(**over)
+    sink = FakeBudgetEventSink(run_id="run-1", ledger_id=rb.ledger_id, clock=AdvancingClock())
+    with pytest.raises(ValueError):
+        BudgetLedger(sink=sink, run_budget=rb)
 
 
 # --------------------------------------------------------------------------- #
