@@ -615,6 +615,29 @@ def test_layer_commit_registered_by_identity_for_the_pool():
         reg.resolve(SchemaRef(name="CommittedArtifactRef", version="1"))
 
 
+# -- Task 8 runner payload: NodeRun promoted into the cumulative registry --- #
+def test_node_run_registered_by_identity_for_the_dag_runner():
+    """Phase 1 deliberately keeps NodeRun out of its payload registry
+    (_R_EVENT_RECORD); the cumulative Phase-2 registry promotes it because the
+    Task-8 DAG runner persists every terminal NodeRun as a registry-validated
+    PayloadStore payload behind a NodeStateChanged RunEvent (durable resume
+    status). Nested ToolCallRecord rides inside and is NOT independently
+    resolvable."""
+    from guanlan_v2.orchestration import schemas
+
+    p1 = default_registry()
+    reg = phase2_runtime_registry(p1.registry_digest)
+    assert reg.resolve(SchemaRef(name="NodeRun", version="1")) is schemas.NodeRun
+    assert schemas.NodeRun in rc.PHASE2_RUNTIME_MODELS
+    # the Phase-1 default registry stays blind to it (no Phase-1 mutation).
+    from guanlan_v2.orchestration.schema_registry import UnknownSchemaError
+    with pytest.raises(UnknownSchemaError):
+        p1.resolve(SchemaRef(name="NodeRun", version="1"))
+    # the nested component is not registered separately.
+    with pytest.raises(Phase2RuntimeRegistryError):
+        reg.resolve(SchemaRef(name="ToolCallRecord", version="1"))
+
+
 # -- invariant 10: a later reviewed registry is accepted by exact digest ---- #
 def test_resolver_accepts_phase2_registry_by_exact_digest_no_latest():
     from guanlan_v2.orchestration.eventstore import SchemaRegistryResolver

@@ -51,6 +51,7 @@ from guanlan_v2.orchestration.digest import (
 from guanlan_v2.orchestration.enums import DependencyPolicy, ExecutionKind, PlanSource
 from guanlan_v2.orchestration.catalog import Cardinality, ReadCategory
 from guanlan_v2.orchestration.events import LayerCommit, PlanApproval
+from guanlan_v2.orchestration.schemas import NodeRun
 from guanlan_v2.orchestration.spec import Plan, PlanValidationReport
 from guanlan_v2.orchestration.refs import (
     CapabilityRef,
@@ -1229,6 +1230,17 @@ PHASE2_RUNTIME_MODELS: tuple[type[BaseModel], ...] = (
     PlanValidationReport,
     Plan,
     PlanApproval,
+    # Task 8 durable node-terminal record. SAME reviewed promotion pattern as
+    # LayerCommit: Phase 1 deliberately keeps NodeRun OUT of its payload registry
+    # (_R_EVENT_RECORD — event-log regime), but the Task-8 DAG runner persists every
+    # terminal NodeRun as a registry-validated PayloadStore payload behind a
+    # NodeStateChanged RunEvent, so crash/replay resume derives each committed
+    # layer's exact per-node terminal status (incl. DEGRADED/FAILED and the real
+    # output keys) from durable node records instead of inferring it from committed
+    # outputs. Nested ToolCallRecord/TypedPayloadRef components ride inside it and
+    # are NOT registered separately. Cumulative Phase-2 registry only; the Phase-1
+    # default_registry / completeness partition is untouched.
+    NodeRun,
 )
 
 

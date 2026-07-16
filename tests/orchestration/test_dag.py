@@ -756,6 +756,171 @@ def test_crash_after_layer_commit_resumes_next_layer():
     assert len(a_res) == 1
 
 
+def test_crash_after_commit_with_degraded_node_resumes_identically():
+    """Resume reads the DURABLE node record: a DEGRADED upstream must stay DEGRADED
+    (never collapse to COMPLETED), so a downstream dep accepting only COMPLETED
+    still gates identically and the resumed RunResult equals the clean run's."""
+    def specs():
+        dep = Dependency(upstream_node_id="a", artifact_slot="slot-a", inject_as="in_one",
+                         policy=DependencyPolicy.SKIP,
+                         accept_statuses=frozenset({NodeStatus.COMPLETED}))
+        return [NodeSpec("a", behaviour="degrade"),
+                NodeSpec("b", worker="chain", deps=(dep,))]
+
+    clean = build_dag_env(specs(), sink_node_ids=("a", "b"))
+    result_clean, rec_clean = clean.run()
+    assert _status(rec_clean, "a") is NodeStatus.DEGRADED
+    assert _status(rec_clean, "b") is NodeStatus.SKIPPED
+    assert result_clean.terminal_status == "degraded"
+
+    crashed = build_dag_env(specs(), sink_node_ids=("a", "b"))
+
+    class _Crash(Exception):
+        pass
+
+    def layer_hook(layer_index, *, committed):
+        if layer_index == 0:
+            raise _Crash("crash after layer 0 commit")
+
+    with pytest.raises(_Crash):
+        crashed.run(layer_hook=layer_hook)
+    result_resumed, rec_resumed = crashed.run()
+    # exact status fidelity from the durable record — not inferred from outputs.
+    assert _status(rec_resumed, "a") is NodeStatus.DEGRADED
+    assert _status(rec_resumed, "b") is NodeStatus.SKIPPED
+    assert result_resumed == result_clean  # full RunResult equality incl. settled totals
+
+
+def test_crash_after_commit_with_failed_sink_resumes_identically():
+    """A FAILED node in a committed layer must resume as FAILED (never SKIPPED):
+    the resumed run's terminal status cannot flip vs a clean run."""
+    def specs():
+        return [NodeSpec("a", behaviour="fail"), NodeSpec("b")]
+
+    clean = build_dag_env(specs(), sink_node_ids=("a", "b"))
+    result_clean, _ = clean.run()
+    assert result_clean.terminal_status == "failed"
+
+    crashed = build_dag_env(specs(), sink_node_ids=("a", "b"))
+
+    class _Crash(Exception):
+        pass
+
+    def layer_hook(layer_index, *, committed):
+        raise _Crash("crash after layer 0 commit")
+
+    with pytest.raises(_Crash):
+        crashed.run(layer_hook=layer_hook)
+    result_resumed, rec_resumed = crashed.run()
+    assert _status(rec_resumed, "a") is NodeStatus.FAILED
+    assert _status(rec_resumed, "b") is NodeStatus.COMPLETED
+    assert result_resumed == result_clean
+    assert result_resumed.terminal_status == "failed"
+
+
+def test_resume_verifies_recorded_output_keys_not_primary():
+    """Resume availability checks iterate the durable record's declared output keys
+    (multi-output / non-'primary' exact), and a pool that does not resolve them
+    raises the honest resume-precondition error."""
+    from guanlan_v2.orchestration.schemas import NodeRun as NR
+
+    record = NR(
+        node_run_id="nr-x", run_id="run-dag", plan_id="p", plan_digest="a" * 64,
+        node_id="n1", worker_id="w", status=NodeStatus.DEGRADED,
+        reason_code="degraded_input_or_result", reason="r", attempt_id="att-x", attempt=1,
+        input_snapshot_digest="b" * 64,
+        output_keys=("alt", "beta"), output_artifact_ids=("art-alt", "art-beta"))
+
+    class _StubArt:
+        def __init__(self, artifact_id):
+            self.artifact_id = artifact_id
+
+    class _StubPool:
+        def __init__(self, mapping):
+            self.m = mapping
+
+        def committed_output(self, node_id, key):
+            return self.m.get((node_id, key))
+
+    ok = _StubPool({("n1", "alt"): _StubArt("art-alt"), ("n1", "beta"): _StubArt("art-beta")})
+    assert D._verify_recorded_outputs(record, ok) == [("n1", "alt"), ("n1", "beta")]
+    with pytest.raises(D.DagRunError):  # missing recorded output → precondition error
+        D._verify_recorded_outputs(record, _StubPool({("n1", "alt"): _StubArt("art-alt")}))
+    with pytest.raises(D.DagRunError):  # foreign artifact id → precondition error
+        D._verify_recorded_outputs(record, _StubPool({
+            ("n1", "alt"): _StubArt("art-alt"), ("n1", "beta"): _StubArt("other")}))
+
+
+# =========================================================================== #
+# 14. reservation-leak hardening (review Important #2)                         #
+# =========================================================================== #
+def test_executor_exception_releases_child_and_fails_honestly():
+    # a model factory that yields a None gateway makes execute_node RAISE
+    # (WorkerExecutionError) after the child reservation was taken.
+    env = build_dag_env([NodeSpec("a")], sink_node_ids=("a",), kind="llm")
+    env.factories.register_model_factory("reasoner", lambda **kw: None)
+    result, rec = env.run(model_gateway=None)
+    a_run = [nr for nr in rec.node_runs if nr.node_id == "a"][-1]
+    assert a_run.status is NodeStatus.FAILED
+    assert a_run.reason_code == "executor_exception"
+    # exactly one child reservation exists and it was RELEASED (no leak).
+    a_res = [r for r in _node_reservations(env) if r.scope_id == "a"]
+    assert len(a_res) == 1 and a_res[0].status == "released"
+    assert env.pool.committed_output("a", "primary") is None
+    assert result.terminal_status == "failed"
+
+
+def test_model_factory_miss_after_reserve_releases_child():
+    # NO model factory bound: post-reserve setup fails → child released, FAILED.
+    env = build_dag_env([NodeSpec("a")], sink_node_ids=("a",), kind="llm")
+    result, rec = env.run(model_gateway=None)
+    a_run = [nr for nr in rec.node_runs if nr.node_id == "a"][-1]
+    assert a_run.status is NodeStatus.FAILED
+    assert a_run.reason_code == "executor_setup_failed"
+    a_res = [r for r in _node_reservations(env) if r.scope_id == "a"]
+    assert len(a_res) == 1 and a_res[0].status == "released"
+    assert result.terminal_status == "failed"
+
+
+def test_crash_residue_reconciled_and_plan_not_wedged():
+    """Crash between barrier and settlement leaves the child reserved; resume settles
+    it from the durable record (resumed totals == clean totals) and plan-level
+    release is no longer wedged — proven with a direct ledger call."""
+    def specs():
+        return [NodeSpec("a"),
+                NodeSpec("b", worker="chain", deps=(_dep("a", "in_one", DependencyPolicy.BLOCK),))]
+
+    clean = build_dag_env(specs(), sink_node_ids=("b",), kind="llm")
+    result_clean, _ = clean.run()
+    assert result_clean.terminal_status == "completed"
+    assert result_clean.settled_llm_invocations == 2  # both LLM nodes settled
+
+    crashed = build_dag_env(specs(), sink_node_ids=("b",), kind="llm")
+
+    class _Crash(Exception):
+        pass
+
+    def layer_hook(layer_index, *, committed):
+        if layer_index == 0:
+            raise _Crash("crash after layer 0 commit, BEFORE settle")
+
+    with pytest.raises(_Crash):
+        crashed.run(layer_hook=layer_hook)
+    # residue: a executed and committed but its child reservation is still reserved.
+    a_res = [r for r in _node_reservations(crashed) if r.scope_id == "a"]
+    assert len(a_res) == 1 and a_res[0].status == "reserved"
+
+    result_resumed, _ = crashed.run()
+    assert result_resumed == result_clean  # exact settled-totals equality
+    a_res = [r for r in _node_reservations(crashed) if r.scope_id == "a"]
+    assert a_res[0].status == "settled"
+    # direct ledger call: with no active children left, plan release succeeds.
+    plan_res = crashed.budget.get_active_plan("req-dag", crashed.plan.plan_digest)
+    released = crashed.budget.release(plan_res.reservation_id, reason="test-unwedged",
+                                      idempotency_key="plan-release-unwedged")
+    assert released.status == "released"
+
+
 def test_crash_before_layer_commit_leaves_no_visible_artifact_then_replays():
     env = build_dag_env([NodeSpec("a")], sink_node_ids=("a",))
 

@@ -30,6 +30,24 @@ Idempotency keys are **deterministic** (run/node/layer/attempt) so a crash befor
 ``LayerCommitted`` barrier restarts that uncommitted layer, and a crash after it
 resumes at the next layer.
 
+**Durable node-terminal records (resume authority).** Every terminal NodeRun —
+executed, BLOCKED, SKIPPED, INCOMPLETE, CANCELLED or exception-failed — is
+persisted as a registry-validated ``NodeRun@1`` payload plus one ``NodeStateChanged``
+RunEvent (one unit of work) *before* its layer commits. Resume derives a committed
+layer's per-node terminal status from the latest durable record preceding that
+layer's ``LayerCommitted`` barrier — never by inferring status from committed
+outputs — so DEGRADED/FAILED/multi-output fidelity is exact and a resumed run's
+RunResult equals a clean run's. Artifact availability is verified against the
+record's declared ``output_keys``/``output_artifact_ids`` through the pool's
+committed index; **resume precondition:** the supplied ArtifactPool must reflect the
+same event history (a fresh pool must be ``replay()``ed) or the runner raises an
+honest :class:`DagRunError`. Orphaned still-``reserved`` child reservations of a
+committed layer (crash between barrier and settlement) are reconciled at resume by
+settling the actuals recorded in the durable NodeRun (same idempotency key as the
+normal path, keeping resumed == clean settled totals); a reserved child with no
+usable record is released with reason ``crash-resume-reconcile``. Plan-level
+settle/release is therefore never wedged by crash residue.
+
 **RunResult vocabulary (reported tension).** The brief describes the run terminal
 status as ``completed | partial | failed | cancelled``; the frozen Task-5
 ``RunResult@1`` model's closed vocabulary is
@@ -56,8 +74,9 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from guanlan_v2.orchestration.budget import BudgetExceeded, BudgetLedger
+from guanlan_v2.orchestration.budget import BudgetError, BudgetExceeded, BudgetLedger
 from guanlan_v2.orchestration.context import InputArtifactBinding, RunContext
+from guanlan_v2.orchestration.digest import audit_digest
 from guanlan_v2.orchestration.enums import DependencyPolicy, ExecutionKind, NodeStatus
 from guanlan_v2.orchestration.events import EventType
 from guanlan_v2.orchestration.eventstore import (
@@ -90,6 +109,7 @@ _NODE_TOKEN_RESERVATION = 4096
 _CONTEXT_SCHEMA_REF = SchemaRef(name="ContextSnapshot", version="1")
 _RUN_RESULT_SCHEMA_REF = SchemaRef(name="RunResult", version="1")
 _LAYER_COMMIT_SCHEMA_REF = SchemaRef(name="LayerCommit", version="1")
+_NODE_RUN_SCHEMA_REF = SchemaRef(name="NodeRun", version="1")
 
 _FAILED_SINK_STATUSES = frozenset(
     {NodeStatus.FAILED, NodeStatus.TIMED_OUT, NodeStatus.INCOMPLETE, NodeStatus.BLOCKED}
@@ -125,11 +145,13 @@ class LayerHook(Protocol):
 class RunRecorder:
     """A service-owned in-memory sink for terminal NodeRuns / frozen snapshots / commits.
 
-    ``NodeRun`` is intentionally **not** a schema-registry payload (it is governed by
-    the event-log / barrier regime, referenced by real id in ``LayerCommit``), so the
-    runner exposes its terminal NodeRuns through this service-owned recorder rather
-    than a fabricated payload put. Frozen InputSnapshots are persisted durably by the
-    pool; the recorder additionally keeps them keyed by node for observation.
+    The durable authority is the event store: every terminal NodeRun is persisted as
+    a registry-validated ``NodeRun@1`` payload behind a ``NodeStateChanged`` RunEvent,
+    frozen InputSnapshots are persisted by the pool and LayerCommits by the barrier.
+    On resume, the recorder is rebuilt from those durable node/commit records for
+    every already-committed layer, so a resumed run's recorder view is complete.
+    ``input_snapshots`` is observational only — resumed layers re-expose their
+    snapshots via digest on the durable NodeRun, not through this map.
     """
 
     node_runs: list = field(default_factory=list)
@@ -323,6 +345,12 @@ async def run_plan(
     it — the caller passes no Plan object, catalog, registry, handler map or raw
     provider map. See the module docstring for the RunResult-vocabulary and
     model-gateway decisions.
+
+    **Resume precondition:** when resuming a crashed run, ``pool`` must reflect the
+    same persisted event history as ``stores`` (a freshly constructed pool must be
+    ``replay()``ed first). The runner verifies every committed layer's durable
+    NodeRun-declared outputs against the pool's committed index and raises
+    :class:`DagRunError` on any mismatch instead of silently re-executing.
     """
     rec = recorder if recorder is not None else RunRecorder()
 
@@ -352,23 +380,27 @@ async def run_plan(
         raise DagRunError("computed concurrency bound is not positive")
 
     layers = _kahn_depth_layers(plan.nodes)
-    already_committed = _committed_layer_indices(stores, run_id)
+    node_records, committed_layers = _load_run_history(stores, run_id)
 
     node_status: dict[str, NodeStatus] = {}
     committed_outputs: set[tuple[str, str]] = set()
-    settled_tokens = 0
-    settled_llm = 0
     cancelled = False
     mutation = threading.Lock()
 
     for layer_index, layer_nodes in enumerate(layers):
-        # ---- resume: a committed layer is skipped (its outputs are visible) - #
-        if layer_index in already_committed:
+        # ---- resume: a committed layer replays its DURABLE node records ----- #
+        # (never inferred from committed outputs — exact DEGRADED/FAILED/multi-
+        # output fidelity; outputs are consulted only for artifact availability.)
+        if layer_index in committed_layers:
+            commit_seq, layer_commit = committed_layers[layer_index]
             for node in layer_nodes:
-                art = pool.committed_output(node.id, "primary")
-                node_status[node.id] = NodeStatus.COMPLETED if art is not None else NodeStatus.SKIPPED
-                if art is not None:
-                    committed_outputs.add((node.id, "primary"))
+                record = _terminal_record_at_commit(node.id, commit_seq, node_records)
+                node_status[node.id] = record.status
+                rec.record_node_run(record)
+                for pair in _verify_recorded_outputs(record, pool):
+                    committed_outputs.add(pair)
+                _reconcile_node_reservation(budget, plan_reservation, record, run_id)
+            rec.record_layer_commit(layer_commit)
             continue
 
         # ---- (3) recheck cancellation + active reservation ----------------- #
@@ -381,7 +413,8 @@ async def run_plan(
 
         if cancelled:
             _cancel_layer(layer_nodes, run_id=run_id, plan=plan, runtime=runtime, pool=pool,
-                          node_status=node_status, ctx_ref=ctx_ref, clock=clock, rec=rec)
+                          node_status=node_status, ctx_ref=ctx_ref, clock=clock, rec=rec,
+                          stores=stores)
             continue
 
         # ---- (4/5) gating + preparation (sequential, node-id order) -------- #
@@ -405,6 +438,7 @@ async def run_plan(
                 node_status[node.id] = status
                 rec.record_input_snapshot(node.id, snapshot)
                 rec.record_node_run(node_run)
+                _persist_terminal_node_run(stores, runtime, plan, node_run)
                 layer_node_runs.append(node_run)
                 continue
 
@@ -425,6 +459,7 @@ async def run_plan(
                 node_status[node.id] = NodeStatus.INCOMPLETE
                 rec.record_input_snapshot(node.id, snapshot)
                 rec.record_node_run(node_run)
+                _persist_terminal_node_run(stores, runtime, plan, node_run)
                 layer_node_runs.append(node_run)
                 continue
 
@@ -449,18 +484,34 @@ async def run_plan(
                     reason_code="budget_denied", reason=str(exc))
                 node_status[node.id] = NodeStatus.INCOMPLETE
                 rec.record_node_run(node_run)
+                _persist_terminal_node_run(stores, runtime, plan, node_run)
                 layer_node_runs.append(node_run)
                 continue
 
-            gw = CapabilityGateway(
-                plan_digest=plan.plan_digest, worker=worker,
-                summaries={s.summary_digest: s for s in runtime.summaries_for(node.id)},
-                catalog=runtime.catalog, factories=runtime.factories, phase1_registry=registry,
-                refusal_sink=refusal_sink, clock=clock, sequencer=seq)
-            mg = None
-            if is_llm:
-                mg = model_gateway if model_gateway is not None else \
-                    runtime.factories.model_factory(worker.execution.model_tier)(worker=worker)
+            # post-reserve setup: a failure here (e.g. an unbound model factory)
+            # must not leak the just-taken child reservation.
+            try:
+                gw = CapabilityGateway(
+                    plan_digest=plan.plan_digest, worker=worker,
+                    summaries={s.summary_digest: s for s in runtime.summaries_for(node.id)},
+                    catalog=runtime.catalog, factories=runtime.factories, phase1_registry=registry,
+                    refusal_sink=refusal_sink, clock=clock, sequencer=seq)
+                mg = None
+                if is_llm:
+                    mg = model_gateway if model_gateway is not None else \
+                        runtime.factories.model_factory(worker.execution.model_tier)(worker=worker)
+            except Exception as exc:
+                _release_if_reserved(budget, node_res, run_id, node.id,
+                                     reason=f"executor-setup-failed: {type(exc).__name__}")
+                node_run = _terminal_node_run(
+                    run_id=run_id, plan=plan, node=node, worker=worker,
+                    status=NodeStatus.FAILED, snapshot=snapshot, clock=clock,
+                    reason_code="executor_setup_failed", reason=str(exc))
+                node_status[node.id] = NodeStatus.FAILED
+                rec.record_node_run(node_run)
+                _persist_terminal_node_run(stores, runtime, plan, node_run)
+                layer_node_runs.append(node_run)
+                continue
             prepared_ctxs.append(_PreparedNode(
                 node=node, worker=worker, snapshot=snapshot, resolver=resolver, prepared=prepared,
                 node_res=node_res, gateway=gw, model_gateway=mg, is_llm=is_llm,
@@ -471,25 +522,40 @@ async def run_plan(
 
         async def _exec(pctx: "_PreparedNode"):
             async with sem:
-                node_run, artifact = await asyncio.to_thread(
-                    execute_node, plan, pctx.node, runtime=runtime, prepared_bridges=pctx.prepared,
-                    input_snapshot=pctx.snapshot, ctx=ctx, node_reservation=pctx.node_res,
-                    bridge_resolver=pctx.resolver, model_gateway=pctx.model_gateway,
-                    capability_gateway=pctx.gateway, registry=registry, stores=stores, clock=clock,
-                    prompt_assembler=prompt_assembler, attempt=1)
-                if pctx.degraded_inputs:
-                    node_run = _upgrade_to_degraded(node_run)
-                return pctx, node_run, artifact
+                try:
+                    node_run, artifact = await asyncio.to_thread(
+                        execute_node, plan, pctx.node, runtime=runtime,
+                        prepared_bridges=pctx.prepared, input_snapshot=pctx.snapshot, ctx=ctx,
+                        node_reservation=pctx.node_res, bridge_resolver=pctx.resolver,
+                        model_gateway=pctx.model_gateway, capability_gateway=pctx.gateway,
+                        registry=registry, stores=stores, clock=clock,
+                        prompt_assembler=prompt_assembler, attempt=1)
+                    if pctx.degraded_inputs:
+                        node_run = _upgrade_to_degraded(node_run)
+                    return pctx, node_run, artifact, True
+                except Exception as exc:
+                    # an executor exception (Preflight/WorkerExecution/PromptBinding/…)
+                    # must not leak the child reservation nor abort the run silently:
+                    # release honestly and persist a reviewed FAILED NodeRun instead.
+                    _release_if_reserved(budget, pctx.node_res, run_id, pctx.node.id,
+                                         reason=f"executor-exception: {type(exc).__name__}")
+                    node_run = _terminal_node_run(
+                        run_id=run_id, plan=plan, node=pctx.node, worker=pctx.worker,
+                        status=NodeStatus.FAILED, snapshot=pctx.snapshot, clock=clock,
+                        reason_code="executor_exception", reason=str(exc))
+                    return pctx, node_run, None, False
 
         exec_results = await asyncio.gather(*(_exec(p) for p in prepared_ctxs))
 
         # ---- (9/10) settle + stage successes (sequential, deterministic) --- #
         to_settle: list[tuple[_PreparedNode, NodeRun]] = []
-        for pctx, node_run, artifact in exec_results:
+        for pctx, node_run, artifact, executed in exec_results:
             node_status[pctx.node.id] = node_run.status
             rec.record_node_run(node_run)
+            _persist_terminal_node_run(stores, runtime, plan, node_run)
             layer_node_runs.append(node_run)
-            to_settle.append((pctx, node_run))
+            if executed:
+                to_settle.append((pctx, node_run))
             if node_run.status in _SUCCESS_STATUSES and artifact is not None:
                 with mutation:
                     pool.stage(artifact, layer_index=layer_index, node_run=node_run,
@@ -515,10 +581,11 @@ async def run_plan(
             budget.settle(pctx.node_res.reservation_id, actual_tokens=actual_tokens,
                           actual_llm_invocations=actual_llm,
                           idempotency_key=f"settle:{run_id}:{pctx.node.id}:1")
-            settled_tokens += actual_tokens
-            settled_llm += actual_llm
 
     # ---- (13) map sinks → RunResult and persist ---------------------------- #
+    # settled totals are ledger-fold-derived (not in-process counters), so a resumed
+    # run reports exactly the same totals as a clean run.
+    settled_tokens, settled_llm = _settled_totals(budget, plan_reservation)
     terminal_status = _map_sink_status(plan.sink_node_ids, node_status, cancelled=cancelled)
     result = RunResult(
         run_id=run_id, plan_digest=plan.plan_digest, terminal_status=terminal_status,
@@ -541,7 +608,8 @@ class _PreparedNode:
     degraded_inputs: bool
 
 
-def _cancel_layer(layer_nodes, *, run_id, plan, runtime, pool, node_status, ctx_ref, clock, rec):
+def _cancel_layer(layer_nodes, *, run_id, plan, runtime, pool, node_status, ctx_ref, clock, rec,
+                  stores):
     """Every not-started node freezes its base snapshot and records CANCELLED (no reservation)."""
     for node in layer_nodes:
         worker = runtime.catalog.worker(node.worker_id)
@@ -558,16 +626,138 @@ def _cancel_layer(layer_nodes, *, run_id, plan, runtime, pool, node_status, ctx_
         node_status[node.id] = NodeStatus.CANCELLED
         rec.record_input_snapshot(node.id, snapshot)
         rec.record_node_run(node_run)
+        _persist_terminal_node_run(stores, runtime, plan, node_run)
 
 
-def _committed_layer_indices(stores, run_id) -> set[int]:
-    """Layers whose ``LayerCommitted`` barrier already persisted (event-sourced resume)."""
-    idxs: set[int] = set()
+def _persist_terminal_node_run(stores, runtime, plan, node_run: NodeRun) -> None:
+    """Persist one terminal NodeRun payload + ``NodeStateChanged`` event (one UoW).
+
+    The idempotency key embeds the record's Phase-1 audit digest, so a byte-identical
+    crash-restart replay returns the stored batch while a semantically different
+    restart outcome persists a NEW record — resume disambiguates by taking the latest
+    record preceding the layer's ``LayerCommitted`` barrier.
+    """
+    key = f"nodeterm:{plan.run_id}:{node_run.node_id}:{node_run.attempt}:{audit_digest(node_run)}"
+    batch = RuntimeBatch(
+        idempotency_key=key,
+        payload_puts=(
+            PayloadPutCommand(
+                staged_key=StagedPayloadKey(key="nodeterm"), schema_ref=_NODE_RUN_SCHEMA_REF,
+                namespace="main", payload_template=dict(node_run),
+                registry_digest=runtime.runtime_registry_digest,
+                idempotency_key=f"{key}:payload"),
+        ),
+        event_appends=(
+            EventAppendCommand(
+                run_id=plan.run_id, partition="main", event_type="NodeStateChanged",
+                payload_schema_ref=_NODE_RUN_SCHEMA_REF,
+                payload_target=StagedPayloadKey(key="nodeterm"),
+                registry_digest=runtime.runtime_registry_digest,
+                idempotency_key=f"{key}:event", plan_digest=plan.plan_digest,
+                correlation_id=node_run.node_run_id),
+        ),
+    )
+    stores.unit_of_work.commit(batch)
+
+
+def _load_run_history(stores, run_id):
+    """Event-sourced resume state: durable node-terminal records + committed layers.
+
+    Returns ``(node_records, committed)`` where ``node_records`` is the journal-ordered
+    list of ``(journal_seq, NodeRun)`` from ``NodeStateChanged`` events and
+    ``committed`` maps ``layer_index -> (journal_seq, LayerCommit)``.
+    """
+    node_records: list = []
+    committed: dict[int, tuple] = {}
     for event in stores.events.journal(run_id, "main"):
-        if event.event_type is EventType.LAYER_COMMITTED:
+        if event.event_type is EventType.NODE_STATE_CHANGED:
+            nr = stores.payloads.get(event.payload_ref, expected_schema_ref=_NODE_RUN_SCHEMA_REF)
+            node_records.append((event.journal_seq, nr))
+        elif event.event_type is EventType.LAYER_COMMITTED:
             lc = stores.payloads.get(event.payload_ref, expected_schema_ref=_LAYER_COMMIT_SCHEMA_REF)
-            idxs.add(lc.layer_index)
-    return idxs
+            committed[lc.layer_index] = (event.journal_seq, lc)
+    return node_records, committed
+
+
+def _terminal_record_at_commit(node_id: str, commit_seq: int, node_records) -> NodeRun:
+    """The node's terminal status at the barrier: the latest durable record whose
+    ``NodeStateChanged`` event precedes the layer's ``LayerCommitted`` event."""
+    candidates = [nr for seq, nr in node_records if nr.node_id == node_id and seq < commit_seq]
+    if not candidates:
+        raise DagRunError(
+            f"resume: no durable terminal NodeRun record precedes the layer barrier for "
+            f"node {node_id!r} (corrupt or foreign run history)")
+    return candidates[-1]
+
+
+def _verify_recorded_outputs(record: NodeRun, pool) -> list[tuple[str, str]]:
+    """Verify each output the durable record declares resolves as committed.
+
+    Iterates the record's ``output_keys``/``output_artifact_ids`` (never a hardcoded
+    key), so multi-output and non-``primary`` outputs are exact. A miss means the
+    supplied pool does not reflect the run's event history — the resume precondition
+    is violated and an honest error is raised instead of silent re-execution.
+    """
+    pairs: list[tuple[str, str]] = []
+    for key, artifact_id in zip(record.output_keys, record.output_artifact_ids):
+        artifact = pool.committed_output(record.node_id, key)
+        if artifact is None or artifact.artifact_id != artifact_id:
+            raise DagRunError(
+                "resume precondition violated: the ArtifactPool does not resolve committed "
+                f"output ({record.node_id!r}, {key!r}) declared by the durable NodeRun record "
+                "— pass a pool replay()ed from the same event history")
+        pairs.append((record.node_id, key))
+    return pairs
+
+
+def _release_if_reserved(budget: BudgetLedger, node_res, run_id: str, node_id: str, *, reason: str) -> None:
+    """Release the child reservation iff it is still active (idempotent-safe guard)."""
+    current = budget.get(node_res.reservation_id)
+    if current is not None and current.status == "reserved":
+        budget.release(node_res.reservation_id, reason=reason,
+                       idempotency_key=f"release:{run_id}:{node_id}:1")
+
+
+def _reconcile_node_reservation(budget: BudgetLedger, plan_reservation, record: NodeRun, run_id: str) -> None:
+    """Reconcile an orphaned still-``reserved`` child of an already-committed layer.
+
+    A crash between the layer barrier and settlement leaves the executed node's child
+    reservation ``reserved``; settle it from the durable record's actual token usage
+    under the SAME idempotency key as the normal path (resumed settled totals equal a
+    clean run's). If the record cannot settle, release with ``crash-resume-reconcile``
+    so plan-level settle/release is never wedged by residue.
+    """
+    state = budget.replay()
+    for res_id, parent_id in state.parent_of.items():
+        if parent_id != plan_reservation.reservation_id:
+            continue
+        res = state.reservations[res_id]
+        if res.scope_id != record.node_id or res.status != "reserved":
+            continue
+        actual_tokens = min(record.input_tokens + record.output_tokens, res.reserved_tokens)
+        actual_llm = 1 if (res.reserved_llm_invocations > 0 and record.output_tokens > 0) else 0
+        try:
+            budget.settle(res_id, actual_tokens=actual_tokens, actual_llm_invocations=actual_llm,
+                          idempotency_key=f"settle:{run_id}:{record.node_id}:{record.attempt}")
+        except BudgetError:
+            budget.release(res_id, reason="crash-resume-reconcile",
+                           idempotency_key=f"release:{run_id}:{record.node_id}:reconcile")
+
+
+def _settled_totals(budget: BudgetLedger, plan_reservation) -> tuple[int, int]:
+    """Ledger-fold-derived settled (tokens, llm) over this plan's node children —
+    replay-derived, so a resumed run reports the same totals as a clean run."""
+    state = budget.replay()
+    tokens = 0
+    llm = 0
+    for res_id, parent_id in state.parent_of.items():
+        if parent_id != plan_reservation.reservation_id:
+            continue
+        res = state.reservations[res_id]
+        if res.status == "settled":
+            tokens += res.actual_tokens
+            llm += res.actual_llm_invocations
+    return tokens, llm
 
 
 def _map_sink_status(sink_node_ids, node_status: dict, *, cancelled: bool) -> str:
