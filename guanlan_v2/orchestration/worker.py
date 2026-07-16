@@ -1,0 +1,2046 @@
+# -*- coding: utf-8 -*-
+"""Phase 2 · Task 7 — the capability-confined typed worker executor.
+
+This module is the runtime that turns one admitted, frozen :class:`Plan` node into
+a typed :class:`~guanlan_v2.orchestration.schemas.NodeRun` (always) and an exclusive
+primary :class:`~guanlan_v2.orchestration.schemas.Artifact` (only on a COMPLETED /
+DEGRADED terminal status). Everything it does is confined by *trusted* resolution:
+
+* **No handler/model/provider injection point.** Handlers, model gateways and
+  bridge providers resolve ONLY through the Task-3
+  :class:`~guanlan_v2.orchestration.catalog_runtime.CatalogRuntime` /
+  :class:`~guanlan_v2.orchestration.catalog_runtime.TrustedFactoryRegistry` and the
+  Task-5 :class:`~guanlan_v2.orchestration.catalog_runtime.BridgeCatalogView`. There
+  is deliberately no public ``handlers: dict[worker_id, callable]``.
+* **Two-stage bridge protocol.** :meth:`ExecutionBridgeResolver.prepare_input`
+  runs before the runner freezes the :class:`InputSnapshot` (it may add only
+  descriptor-authorized ``memory_refs_v1`` and cannot touch the CapabilityGateway,
+  a live store, the model, the wall clock or data-result backfill).
+  :meth:`ExecutionBridgeResolver.open_execution` runs after the snapshot is frozen
+  and the child budget reserved; it re-verifies every pre-input ref/token and
+  continues the *same* :class:`ExecutionEvidenceSequencer`.
+* **One executor-owned sequencer.** :class:`ExecutionEvidenceSequencer` mints every
+  ordinal token; providers only *echo* the exact token they were handed and can
+  never mint or relabel one. The canonical raw-contribution merge key is
+  ``(call_ordinal, bridge_priority, bridge_id, within_call_role)``.
+* **Atomic evidence journal.** :class:`BridgeEvidenceWriter` writes each evidence
+  value as ONE :class:`~guanlan_v2.orchestration.eventstore.RuntimeUnitOfWork`
+  batch — the main-namespace evidence payload, a review-namespace
+  :class:`~guanlan_v2.orchestration.runtime_contracts.BridgeEvidenceRecorded`
+  control fact targeting it and a review-partition journal RunEvent targeting the
+  control fact. Before commit none of the triple is visible; after commit all are,
+  even if the provider never returns. :class:`BridgeEvidenceJournal` drains them by
+  node/token for recovery, so a provider never owns the only copy.
+* **Closed CapabilityGateway state machine.** ``begin`` verifies the admitted
+  Plan, the exact WorkerSpec allowlist, the token/summary binding and the
+  descriptor request schema and charges the invocation to the token-bound summary;
+  ``invoke`` calls only the trusted backend (its raw result carries no PayloadRef
+  and cannot count as evidence); the owning adapter validates and persists the
+  request/result ONCE through :class:`BridgeEvidenceWriter`; ``finalize_success``
+  re-resolves those exact main refs and mints one Phase-1
+  :class:`~guanlan_v2.orchestration.schemas.ToolCallRecord` with **no** second
+  write; ``reject`` records one audit-only refusal. A pending invocation has
+  exactly one terminal transition.
+* **Prompt confinement.** :class:`StaticPromptAssembler` returns only an immutable
+  :class:`AssembledModelRequest`; untrusted blocks go ONLY into the model gateway's
+  data channel and are never interpolated into system/skill/guardrail text. The
+  executor persists exactly one
+  :class:`~guanlan_v2.orchestration.runtime_contracts.PromptAssemblyRecord` BEFORE
+  invoking the :class:`ModelGateway`, which rehashes the exact bytes and refuses any
+  record/request/assembler/order mismatch before provider bytes are sent.
+
+Capability I/O schema seam (documented reconciliation)
+------------------------------------------------------
+A capability's declared ``input_schema_ref`` / ``output_schema_ref`` are
+adapter-opaque and are NOT part of the cumulative Phase-2 runtime registry. They
+are, however, ordinary members of the Phase-1 ``SchemaRegistry`` the catalog was
+validated against (a capability that named an unresolvable schema could never have
+passed Phase-1 catalog validation). So the CapabilityGateway validates a request /
+result **adapter-side** against the exact ``CapabilityDescriptor`` refs through that
+Phase-1 registry, and evidence persistence uses the Phase-1 registry digest for the
+main data payloads while the review-namespace control facts use the runtime-registry
+digest. No registry is mutated and no capability model is registered into the
+runtime registry.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import threading
+from dataclasses import dataclass, field
+from typing import Any, ClassVar, Literal, Protocol, runtime_checkable
+
+from pydantic import BaseModel, ConfigDict, model_validator
+
+from guanlan_v2.orchestration.budget import BudgetReservation
+from guanlan_v2.orchestration.catalog import CapabilityDescriptor, WorkerSpec
+from guanlan_v2.orchestration.catalog_runtime import (
+    BridgeCatalogView,
+    CatalogMaterialError,
+    CatalogRuntime,
+    ResolvedBridge,
+    ResolvedWorkerRuntime,
+    TrustedFactoryRegistry,
+)
+from guanlan_v2.orchestration.context import InputSnapshot, MemoryRecordRef, RunContext
+from guanlan_v2.orchestration.digest import (
+    DigestHex,
+    NonEmptyStr,
+    NonNegativeInt,
+    PositiveInt,
+    content_digest,
+)
+from guanlan_v2.orchestration.enums import ExecutionKind, NodeStatus, ToolCallRequirement
+from guanlan_v2.orchestration.eventstore import (
+    EventStoreError,
+    EventAppendCommand,
+    PayloadPutCommand,
+    RuntimeBatch,
+    RuntimeStores,
+    StagedPayloadKey,
+    StagedPayloadRef,
+    StagedTypedPayloadRef,
+    StateCellCompareAndSwapCommand,
+)
+from guanlan_v2.orchestration.refs import (
+    CapabilityRef,
+    ContentRef,
+    PayloadRef,
+    SchemaRef,
+    TypedPayloadRef,
+    typed_ref_sort_key,
+)
+from guanlan_v2.orchestration.runtime_clock import AuthoritativeClock, clock_now
+from guanlan_v2.orchestration.runtime_contracts import (
+    BridgeStaticSupportSummary,
+    EventRefusalRecord,
+    ExecutionEvidenceOrdinalToken,
+    NamedEvidenceDigest,
+    PromptAssemblyRecord,
+    PromptUntrustedBlockRef,
+    RuntimeSupportReport,
+)
+from guanlan_v2.orchestration.schema_registry import SchemaRegistry
+from guanlan_v2.orchestration.schemas import (
+    Artifact,
+    ArtifactRef,
+    NodeRun,
+    NumberAnchor,
+    Provenance,
+    ToolCallRecord,
+)
+from guanlan_v2.orchestration.spec import Plan, PlanNode
+
+__all__ = [
+    # errors
+    "WorkerExecutionError",
+    "PreflightError",
+    "CapabilityGatewayError",
+    "PromptBindingError",
+    "EvidenceTokenError",
+    # DTOs
+    "ExecutionRuntime",
+    "EvidenceIssuanceToken",
+    "WithinCallRole",
+    "AssembledModelRequest",
+    "ModelResult",
+    "PendingCapabilityInvocation",
+    "UnpublishedCapabilityResult",
+    "BridgeInputContribution",
+    "PreparedBridgeHandle",
+    "BridgeContribution",
+    "BridgeStageOutcome",
+    "PreparedBridgeSet",
+    "WorkerExecutionResult",
+    # services / ports
+    "ExecutionEvidenceSequencer",
+    "BridgeEvidenceJournal",
+    "BridgeEvidenceWriter",
+    "CapabilityGateway",
+    "PromptAssembler",
+    "StaticPromptAssembler",
+    "ModelGateway",
+    "ExecutionBridgeProvider",
+    "ExecutionBridgeSession",
+    "ExecutionBridgeResolver",
+    "ExecutionObserver",
+    # entry points
+    "prepare_input",
+    "execute_node",
+]
+
+# --------------------------------------------------------------------------- #
+# constants                                                                    #
+# --------------------------------------------------------------------------- #
+CODE_VERSION = "worker-executor-v1"
+ASSEMBLER_ID = "static-prompt-assembler"
+ASSEMBLER_VERSION = "1"
+PROMPT_BRIDGE_ID = "runtime.prompt"
+#: sentinel priority for the executor-owned prompt token (excluded from bridge
+#: min/max counts and never eligible for the CapabilityGateway).
+PROMPT_BRIDGE_PRIORITY = 2_147_483_647
+REVIEW_NAMESPACE = "review"
+PROMPT_CELL_NAMESPACE = "runtime.prompt.v1"
+_PRIMARY_OUTPUT_KEY = "primary"
+
+WithinCallRole = Literal["provider_prefetch", "tool_result", "memory_prefetch"]
+
+_MODEL_REQUEST_DOMAIN = b"guanlan.orchestration.runtime.model-request.v1\x00"
+
+
+def _model_request_digest(canonical_bytes: bytes) -> str:
+    """Domain-separated digest of the exact canonical model-request bytes."""
+    return hashlib.sha256(_MODEL_REQUEST_DOMAIN + canonical_bytes).hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# errors                                                                       #
+# --------------------------------------------------------------------------- #
+class WorkerExecutionError(Exception):
+    """Base for every worker-executor failure."""
+
+
+class PreflightError(WorkerExecutionError):
+    """A pure preflight check failed; no provider/capability/store side effect ran."""
+
+
+class CapabilityGatewayError(WorkerExecutionError):
+    """A CapabilityGateway state-machine invariant was violated."""
+
+
+class PromptBindingError(WorkerExecutionError):
+    """A model request/prompt-record binding did not verify."""
+
+
+class EvidenceTokenError(WorkerExecutionError):
+    """A minted/echoed evidence issuance token was forged, duplicate or unknown."""
+
+
+# --------------------------------------------------------------------------- #
+# strict runtime base                                                          #
+# --------------------------------------------------------------------------- #
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+
+# --------------------------------------------------------------------------- #
+# runtime bundle                                                               #
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class ExecutionRuntime:
+    """The read-only trusted material the executor resolves handlers/models through.
+
+    Bundles the verified :class:`CatalogRuntime`, its
+    :class:`BridgeCatalogView`, the :class:`TrustedFactoryRegistry` (handler / model
+    / bridge-provider factories keyed by catalog ref identity), the frozen
+    :class:`RuntimeSupportReport` (embedded per-node summaries) and the runtime
+    registry digest for control-fact persistence. It carries no mutable state and no
+    caller-supplied callable.
+    """
+
+    catalog: CatalogRuntime
+    bridge_view: BridgeCatalogView
+    factories: TrustedFactoryRegistry
+    support_report: RuntimeSupportReport
+    runtime_registry_digest: str
+    code_version: str = CODE_VERSION
+
+    def summaries_for(self, node_id: str) -> tuple[BridgeStaticSupportSummary, ...]:
+        return tuple(
+            s for s in self.support_report.bridge_support_summaries if s.node_id == node_id
+        )
+
+
+# --------------------------------------------------------------------------- #
+# evidence issuance token + sequencer                                          #
+# --------------------------------------------------------------------------- #
+class EvidenceIssuanceToken(_StrictModel):
+    """The executor-owned within-node issuance token (the brief's internal token).
+
+    Binds ``node_id`` / ``attempt`` / ``call_ordinal`` / ``evidence_ordinal`` plus
+    the provider identity (``bridge_priority`` / ``bridge_id``) and an
+    ``issuance_digest`` that pins the token to exactly one
+    :class:`BridgeStaticSupportSummary` digest. Only the node-owned
+    :class:`ExecutionEvidenceSequencer` constructs one; a provider must echo the
+    exact token and cannot relabel its provider identity or mint a new ordinal.
+
+    The persisted recovery-metadata projection is the *registered*
+    :class:`ExecutionEvidenceOrdinalToken` ``(attempt, call_ordinal,
+    evidence_ordinal)`` (a distinct, deliberately narrower shape); this internal
+    token is a superset and is never persisted, so no registered schema/golden
+    changes.
+    """
+
+    node_id: NonEmptyStr
+    attempt: PositiveInt
+    call_ordinal: PositiveInt
+    evidence_ordinal: PositiveInt
+    bridge_priority: NonNegativeInt
+    bridge_id: NonEmptyStr
+    summary_digest: DigestHex
+    issuance_digest: DigestHex
+
+    @property
+    def is_prompt_token(self) -> bool:
+        return self.bridge_id == PROMPT_BRIDGE_ID
+
+    def ordinal_projection(self) -> ExecutionEvidenceOrdinalToken:
+        """The registered persisted-recovery projection of this token."""
+        return ExecutionEvidenceOrdinalToken(
+            attempt=self.attempt,
+            call_ordinal=self.call_ordinal,
+            evidence_ordinal=self.evidence_ordinal,
+        )
+
+
+def _issuance_digest(
+    *, node_id: str, attempt: int, call_ordinal: int, bridge_priority: int,
+    bridge_id: str, summary_digest: str,
+) -> str:
+    return content_digest(
+        {
+            "domain": "runtime.evidence-issuance.v1",
+            "node_id": node_id,
+            "attempt": attempt,
+            "call_ordinal": call_ordinal,
+            "bridge_priority": bridge_priority,
+            "bridge_id": bridge_id,
+            "summary_digest": summary_digest,
+        }
+    )
+
+
+class ExecutionEvidenceSequencer:
+    """The single node-owned issuer of evidence ordinals (pre-input + execution).
+
+    ``call_ordinal`` starts at one and continues monotonically across both bridge
+    phases; ``evidence_ordinal`` is a distinct monotonic per-evidence counter the
+    :class:`BridgeEvidenceWriter` draws for each persisted value. Every issued token
+    is retained in an ``issued`` set keyed by its full identity, so a provider that
+    echoes a token the sequencer never minted — or mints one itself — fails
+    validation. The reserved executor-owned ``runtime.prompt`` token is minted
+    exactly once, after all provider tokens are frozen, and can never enter the
+    CapabilityGateway.
+    """
+
+    def __init__(self, *, node_id: str, attempt: int) -> None:
+        self._node_id = node_id
+        self._attempt = attempt
+        self._call_seq = 0
+        self._evidence_seq = 0
+        self._issued: dict[tuple[int, int, str], EvidenceIssuanceToken] = {}
+        self._prompt_issued = False
+        self._lock = threading.RLock()
+
+    @property
+    def node_id(self) -> str:
+        return self._node_id
+
+    @property
+    def attempt(self) -> int:
+        return self._attempt
+
+    def issue_call_token(
+        self, *, bridge_priority: int, bridge_id: str, summary_digest: str,
+    ) -> EvidenceIssuanceToken:
+        """Mint the next provider issuance token bound to ``summary_digest``."""
+        if bridge_id == PROMPT_BRIDGE_ID:
+            raise EvidenceTokenError("the reserved prompt token id is executor-only")
+        with self._lock:
+            self._call_seq += 1
+            call_ordinal = self._call_seq
+            token = EvidenceIssuanceToken(
+                node_id=self._node_id, attempt=self._attempt, call_ordinal=call_ordinal,
+                evidence_ordinal=call_ordinal, bridge_priority=bridge_priority,
+                bridge_id=bridge_id, summary_digest=summary_digest,
+                issuance_digest=_issuance_digest(
+                    node_id=self._node_id, attempt=self._attempt, call_ordinal=call_ordinal,
+                    bridge_priority=bridge_priority, bridge_id=bridge_id,
+                    summary_digest=summary_digest),
+            )
+            self._issued[(call_ordinal, bridge_priority, bridge_id)] = token
+            return token
+
+    def issue_prompt_token(self) -> EvidenceIssuanceToken:
+        """Mint the single reserved executor-owned ``runtime.prompt`` token."""
+        with self._lock:
+            if self._prompt_issued:
+                raise EvidenceTokenError("the reserved prompt token was already issued")
+            self._prompt_issued = True
+            self._call_seq += 1
+            call_ordinal = self._call_seq
+            token = EvidenceIssuanceToken(
+                node_id=self._node_id, attempt=self._attempt, call_ordinal=call_ordinal,
+                evidence_ordinal=call_ordinal, bridge_priority=PROMPT_BRIDGE_PRIORITY,
+                bridge_id=PROMPT_BRIDGE_ID, summary_digest=_ZERO,
+                issuance_digest=_issuance_digest(
+                    node_id=self._node_id, attempt=self._attempt, call_ordinal=call_ordinal,
+                    bridge_priority=PROMPT_BRIDGE_PRIORITY, bridge_id=PROMPT_BRIDGE_ID,
+                    summary_digest=_ZERO),
+            )
+            self._issued[(call_ordinal, PROMPT_BRIDGE_PRIORITY, PROMPT_BRIDGE_ID)] = token
+            return token
+
+    def next_evidence_ordinal(self) -> int:
+        """Draw the next monotonic per-evidence ordinal (a writer-side put position)."""
+        with self._lock:
+            self._evidence_seq += 1
+            return self._evidence_seq
+
+    def validate_token(self, token: EvidenceIssuanceToken) -> EvidenceIssuanceToken:
+        """Reject a forged / relabelled / unknown token; return the exact minted one."""
+        if not isinstance(token, EvidenceIssuanceToken):
+            raise EvidenceTokenError("evidence token is not an EvidenceIssuanceToken")
+        if token.node_id != self._node_id or token.attempt != self._attempt:
+            raise EvidenceTokenError("evidence token names a foreign node/attempt")
+        minted = self._issued.get((token.call_ordinal, token.bridge_priority, token.bridge_id))
+        if minted is None:
+            raise EvidenceTokenError(
+                f"evidence token for call {token.call_ordinal} / bridge {token.bridge_id!r} "
+                "was never minted by the node sequencer"
+            )
+        if minted != token:
+            raise EvidenceTokenError(
+                "evidence token identity was relabelled from the minted token "
+                "(issuance/summary/priority forgery)"
+            )
+        return minted
+
+
+_ZERO = "0" * 64
+
+
+# --------------------------------------------------------------------------- #
+# bridge evidence journal + writer                                             #
+# --------------------------------------------------------------------------- #
+_BRIDGE_EVIDENCE_RECORDED_SR = SchemaRef(name="BridgeEvidenceRecorded", version="1")
+_PROMPT_ASSEMBLY_RECORD_SR = SchemaRef(name="PromptAssemblyRecord", version="1")
+
+
+@dataclass(frozen=True)
+class _JournaledEvidence:
+    """One drained journal entry: the recovery control fact + resolved main ref."""
+
+    token: ExecutionEvidenceOrdinalToken
+    within_call_role: str
+    evidence_ref: TypedPayloadRef
+
+
+class BridgeEvidenceJournal:
+    """Read-only recovery view over the persisted bridge-evidence control facts.
+
+    Drains the review-namespace
+    :class:`~guanlan_v2.orchestration.runtime_contracts.BridgeEvidenceRecorded`
+    control facts for one node (by ``correlation_id == node_id``) in canonical
+    ``(call_ordinal, evidence_ordinal)`` order, so a provider that never returned —
+    or a service that crashed after the atomic commit — still exposes every
+    committed evidence ref exactly once.
+    """
+
+    def __init__(self, *, stores: RuntimeStores, run_id: str, plan_digest: str, node_id: str) -> None:
+        self._stores = stores
+        self._run_id = run_id
+        self._plan_digest = plan_digest
+        self._node_id = node_id
+
+    def drain(self) -> tuple[_JournaledEvidence, ...]:
+        out: list[_JournaledEvidence] = []
+        for ev in self._stores.events.journal(self._run_id, REVIEW_NAMESPACE):
+            if ev.payload_schema_ref != _BRIDGE_EVIDENCE_RECORDED_SR:
+                continue
+            if ev.correlation_id != self._node_id or ev.plan_digest != self._plan_digest:
+                continue
+            fact = self._stores.payloads.get(
+                ev.payload_ref, expected_schema_ref=_BRIDGE_EVIDENCE_RECORDED_SR)
+            out.append(
+                _JournaledEvidence(
+                    token=fact.ordinal_token,
+                    within_call_role=fact.within_call_role,
+                    evidence_ref=fact.evidence_ref,
+                )
+            )
+        out.sort(key=lambda j: (j.token.call_ordinal, j.token.evidence_ordinal))
+        return tuple(out)
+
+
+class BridgeEvidenceWriter:
+    """The only provider write port: one atomic evidence-payload + control + event.
+
+    ``put`` persists a *new* main-namespace evidence payload and, in the SAME unit
+    of work, a review-namespace ``BridgeEvidenceRecorded`` control fact targeting a
+    staged reference to it and a review-partition journal RunEvent targeting a staged
+    reference to that control fact. ``record_existing`` revalidates an already
+    persisted main ref and atomically writes only the control fact + event. Providers
+    receive this fixed-main writer and a read-only PayloadStore view — never a raw
+    write-capable store — so before commit none of a triple is visible and after
+    commit all are, even if the provider never returns.
+    """
+
+    def __init__(
+        self,
+        *,
+        stores: RuntimeStores,
+        sequencer: ExecutionEvidenceSequencer,
+        run_id: str,
+        plan_digest: str,
+        node_id: str,
+        data_registry_digest: str,
+        runtime_registry_digest: str,
+    ) -> None:
+        self._stores = stores
+        self._sequencer = sequencer
+        self._run_id = run_id
+        self._plan_digest = plan_digest
+        self._node_id = node_id
+        self._data_rt = data_registry_digest
+        self._rt = runtime_registry_digest
+        self._put_seq = 0
+
+    @property
+    def reader(self):
+        """A read-only PayloadStore view (no write surface)."""
+        return _ReadOnlyPayloadView(self._stores.payloads)
+
+    def _next_key(self, prefix: str) -> str:
+        self._put_seq += 1
+        return f"{self._node_id}:{prefix}:{self._put_seq}"
+
+    def _control_template(
+        self, ordinal: ExecutionEvidenceOrdinalToken, role: str, evidence_ref: Any,
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": "1",
+            "run_id": self._run_id,
+            "plan_digest": self._plan_digest,
+            "node_id": self._node_id,
+            "ordinal_token": ordinal,
+            "within_call_role": role,
+            "evidence_ref": evidence_ref,
+        }
+
+    def put(
+        self,
+        *,
+        token: EvidenceIssuanceToken,
+        role: WithinCallRole,
+        schema_ref: SchemaRef,
+        payload: Any,
+        idempotency_key: str,
+    ) -> TypedPayloadRef:
+        self._sequencer.validate_token(token)
+        evidence_ordinal = self._sequencer.next_evidence_ordinal()
+        ordinal = ExecutionEvidenceOrdinalToken(
+            attempt=token.attempt, call_ordinal=token.call_ordinal,
+            evidence_ordinal=evidence_ordinal,
+        )
+        ev_key = self._next_key("evidence")
+        ctrl_key = self._next_key("control")
+        staged_evidence = StagedPayloadRef(
+            staged_key=StagedPayloadKey(key=ev_key), schema_ref=schema_ref, namespace="main")
+        control_template = self._control_template(
+            ordinal, role, {"schema_ref": schema_ref, "payload_ref": staged_evidence})
+        batch = RuntimeBatch(
+            idempotency_key=f"{idempotency_key}:uow",
+            payload_puts=(
+                PayloadPutCommand(
+                    staged_key=StagedPayloadKey(key=ev_key), schema_ref=schema_ref,
+                    namespace="main", payload_template=_as_template(payload),
+                    registry_digest=self._data_rt, idempotency_key=f"{idempotency_key}:evidence"),
+                PayloadPutCommand(
+                    staged_key=StagedPayloadKey(key=ctrl_key), schema_ref=_BRIDGE_EVIDENCE_RECORDED_SR,
+                    namespace=REVIEW_NAMESPACE, payload_template=control_template,
+                    registry_digest=self._rt, idempotency_key=f"{idempotency_key}:control"),
+            ),
+            event_appends=(
+                EventAppendCommand(
+                    run_id=self._run_id, partition=REVIEW_NAMESPACE, event_type="NodeStateChanged",
+                    payload_schema_ref=_BRIDGE_EVIDENCE_RECORDED_SR,
+                    payload_target=StagedPayloadKey(key=ctrl_key), registry_digest=self._rt,
+                    idempotency_key=f"{idempotency_key}:event", plan_digest=self._plan_digest,
+                    correlation_id=self._node_id),
+            ),
+        )
+        result = self._stores.unit_of_work.commit(batch)
+        return result.staged_typed_ref(ev_key)
+
+    def record_existing(
+        self,
+        *,
+        token: EvidenceIssuanceToken,
+        role: WithinCallRole,
+        typed_ref: TypedPayloadRef,
+        idempotency_key: str,
+    ) -> TypedPayloadRef:
+        self._sequencer.validate_token(token)
+        if typed_ref.payload_ref.namespace != "main":
+            raise EvidenceGatewayNamespace("record_existing requires a main-namespace typed ref")
+        # revalidate the already-persisted main payload resolves at the exact digest.
+        self._stores.payloads.get(typed_ref.payload_ref, expected_schema_ref=typed_ref.schema_ref)
+        evidence_ordinal = self._sequencer.next_evidence_ordinal()
+        ordinal = ExecutionEvidenceOrdinalToken(
+            attempt=token.attempt, call_ordinal=token.call_ordinal,
+            evidence_ordinal=evidence_ordinal,
+        )
+        ctrl_key = self._next_key("control")
+        control_template = self._control_template(ordinal, role, typed_ref)
+        batch = RuntimeBatch(
+            idempotency_key=f"{idempotency_key}:uow",
+            payload_puts=(
+                PayloadPutCommand(
+                    staged_key=StagedPayloadKey(key=ctrl_key), schema_ref=_BRIDGE_EVIDENCE_RECORDED_SR,
+                    namespace=REVIEW_NAMESPACE, payload_template=control_template,
+                    registry_digest=self._rt, idempotency_key=f"{idempotency_key}:control"),
+            ),
+            event_appends=(
+                EventAppendCommand(
+                    run_id=self._run_id, partition=REVIEW_NAMESPACE, event_type="NodeStateChanged",
+                    payload_schema_ref=_BRIDGE_EVIDENCE_RECORDED_SR,
+                    payload_target=StagedPayloadKey(key=ctrl_key), registry_digest=self._rt,
+                    idempotency_key=f"{idempotency_key}:event", plan_digest=self._plan_digest,
+                    correlation_id=self._node_id),
+            ),
+        )
+        self._stores.unit_of_work.commit(batch)
+        return typed_ref
+
+
+class _ReadOnlyPayloadView:
+    """A read-only PayloadStore view — exposes ``get`` only, never a write surface.
+
+    Providers and the CapabilityGateway re-resolve refs through this view, so a
+    provider can never reach a raw write-capable store: the only write port is the
+    fixed-main :class:`BridgeEvidenceWriter`.
+    """
+
+    __slots__ = ("_store",)
+
+    def __init__(self, store) -> None:
+        self._store = store
+
+    def get(self, ref, *, expected_schema_ref):
+        return self._store.get(ref, expected_schema_ref=expected_schema_ref)
+
+
+class EvidenceGatewayNamespace(WorkerExecutionError):
+    """A control/evidence ref referenced a non-main payload namespace."""
+
+
+def _as_template(payload: Any) -> dict[str, Any]:
+    """Coerce a payload value into a closed put template mapping.
+
+    A pydantic model is converted through ``dict(model)`` so nested model instances
+    survive (the eventstore put path validates the exact registered schema).
+    """
+    if isinstance(payload, BaseModel):
+        return dict(payload)
+    if isinstance(payload, dict):
+        return dict(payload)
+    raise WorkerExecutionError(
+        f"evidence payload must be a pydantic model or mapping, got {type(payload).__name__}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Capability gateway                                                           #
+# --------------------------------------------------------------------------- #
+class PendingCapabilityInvocation(_StrictModel):
+    """One begun-but-unterminated capability invocation (opaque authorization)."""
+
+    plan_digest: DigestHex
+    node_id: NonEmptyStr
+    worker_id: NonEmptyStr
+    ordinal_token: EvidenceIssuanceToken
+    capability_ref: CapabilityRef
+    request_schema_ref: SchemaRef
+    result_schema_ref: SchemaRef
+    summary_digest: DigestHex
+    idempotency_key: NonEmptyStr
+
+
+@dataclass(frozen=True)
+class UnpublishedCapabilityResult:
+    """The raw backend result — deliberately carries NO PayloadRef / public identity.
+
+    It cannot count as tool evidence: only the owning adapter that validates and
+    persists it through :class:`BridgeEvidenceWriter`, then finalizes it, mints a
+    :class:`ToolCallRecord`.
+    """
+
+    pending: PendingCapabilityInvocation
+    validated_request: Any
+    raw_result: Any
+
+
+class _SummaryCharge:
+    """Per-summary invocation / finalized-success counters for the closed arithmetic."""
+
+    __slots__ = ("invocations", "finalized")
+
+    def __init__(self) -> None:
+        self.invocations = 0
+        self.finalized = 0
+
+
+@runtime_checkable
+class _CapabilityBackend(Protocol):
+    """The trusted resolved backend a gateway calls (never a caller callable)."""
+
+    def invoke(self, *, capability_ref: CapabilityRef, request: Any) -> Any:
+        ...
+
+
+class CapabilityGateway:
+    """The closed capability state machine (``begin`` → ``invoke`` → terminal).
+
+    Confines every capability call to the admitted Plan, the exact WorkerSpec
+    allowlist and the token-bound summary. A caller cannot inject a backend: the
+    backend is resolved from the trusted :class:`TrustedFactoryRegistry` keyed by the
+    capability descriptor identity. A worker cannot self-report a numeric tool count;
+    only a ``finalize_success`` (which re-resolves the exact persisted main refs)
+    mints a :class:`ToolCallRecord`.
+    """
+
+    def __init__(
+        self,
+        *,
+        plan_digest: str,
+        worker: WorkerSpec,
+        summaries: dict[str, BridgeStaticSupportSummary],
+        catalog: CatalogRuntime,
+        backend: _CapabilityBackend,
+        phase1_registry: SchemaRegistry,
+        refusal_sink,
+        clock: AuthoritativeClock,
+    ) -> None:
+        self._plan_digest = plan_digest
+        self._worker = worker
+        self._summaries = summaries
+        self._catalog = catalog
+        self._backend = backend
+        self._registry = phase1_registry
+        self._refusals = refusal_sink
+        self._clock = clock
+        self._allow = {(c.id, c.version): c for c in worker.capability_allowlist}
+        self._charges: dict[str, _SummaryCharge] = {d: _SummaryCharge() for d in summaries}
+        self._pending: dict[str, PendingCapabilityInvocation] = {}
+        self._terminal: dict[str, str] = {}  # idempotency_key -> "success"|"reject"
+        self._records: dict[str, ToolCallRecord] = {}
+        self._running = False
+        self._reader: Any = None
+
+    def mark_running(self) -> None:
+        self._running = True
+
+    def summary_charge(self, summary_digest: str) -> _SummaryCharge:
+        return self._charges[summary_digest]
+
+    def finalized_records(self) -> tuple[ToolCallRecord, ...]:
+        return tuple(self._records.values())
+
+    def begun_count(self) -> int:
+        return sum(c.invocations for c in self._charges.values())
+
+    # -- transitions -------------------------------------------------------- #
+    def begin(
+        self,
+        *,
+        ordinal_token: EvidenceIssuanceToken,
+        capability_ref: CapabilityRef,
+        request_schema_ref: SchemaRef,
+        idempotency_key: str,
+    ) -> PendingCapabilityInvocation:
+        if not self._running:
+            raise CapabilityGatewayError("RUNNING must precede any capability begin")
+        if ordinal_token.is_prompt_token:
+            raise CapabilityGatewayError("the reserved prompt token cannot enter the CapabilityGateway")
+        summary = self._summaries.get(ordinal_token.summary_digest)
+        if summary is None:
+            raise CapabilityGatewayError("ordinal token is not bound to an active support summary")
+        if ordinal_token.bridge_id != summary.bridge_id:
+            raise CapabilityGatewayError("ordinal token bridge id does not match its bound summary")
+        # WorkerSpec allowlist + summary allow-list membership.
+        key = (capability_ref.id, capability_ref.version)
+        allowed = self._allow.get(key)
+        if allowed is None or allowed.content_digest != capability_ref.content_digest:
+            self._refuse(capability_ref, request_schema_ref, "capability_not_in_worker_allowlist",
+                         idempotency_key)
+            raise CapabilityGatewayError("capability is outside the WorkerSpec allowlist")
+        summary_keys = {(c.id, c.version) for c in summary.allowed_capability_refs}
+        if key not in summary_keys:
+            self._refuse(capability_ref, request_schema_ref, "capability_not_in_summary",
+                         idempotency_key)
+            raise CapabilityGatewayError("capability is not allowed by the token-bound summary")
+        # descriptor request-schema binding.
+        try:
+            desc = self._catalog.capability(capability_ref).descriptor
+        except CatalogMaterialError as exc:
+            raise CapabilityGatewayError(f"capability descriptor did not resolve: {exc}") from exc
+        if request_schema_ref != desc.input_schema_ref:
+            self._refuse(capability_ref, request_schema_ref, "request_schema_mismatch", idempotency_key)
+            raise CapabilityGatewayError("request schema does not match the descriptor input schema")
+        # charge the token-bound summary; reject max+1 BEFORE backend I/O.
+        charge = self._charges[ordinal_token.summary_digest]
+        if charge.invocations + 1 > summary.max_capability_invocations:
+            self._refuse(capability_ref, request_schema_ref, "max_capability_invocations_exceeded",
+                         idempotency_key)
+            raise CapabilityGatewayError(
+                f"summary {summary.bridge_id!r} max_capability_invocations "
+                f"({summary.max_capability_invocations}) exceeded"
+            )
+        if idempotency_key in self._terminal or idempotency_key in self._pending:
+            raise CapabilityGatewayError("invocation idempotency key already in use")
+        charge.invocations += 1
+        pending = PendingCapabilityInvocation(
+            plan_digest=self._plan_digest, node_id=ordinal_token.node_id,
+            worker_id=self._worker.id, ordinal_token=ordinal_token,
+            capability_ref=capability_ref, request_schema_ref=request_schema_ref,
+            result_schema_ref=desc.output_schema_ref, summary_digest=ordinal_token.summary_digest,
+            idempotency_key=idempotency_key,
+        )
+        self._pending[idempotency_key] = pending
+        return pending
+
+    def invoke(
+        self, pending: PendingCapabilityInvocation, validated_request: Any,
+    ) -> UnpublishedCapabilityResult:
+        if self._pending.get(pending.idempotency_key) is not pending:
+            raise CapabilityGatewayError("invoke on an unknown / already-terminal pending invocation")
+        # adapter-side request validation against the exact descriptor input schema.
+        req_model = self._registry.validate_payload(pending.request_schema_ref, _raw(validated_request))
+        raw = self._backend.invoke(capability_ref=pending.capability_ref, request=req_model)
+        return UnpublishedCapabilityResult(pending=pending, validated_request=req_model, raw_result=raw)
+
+    def validate_result(self, unpublished: UnpublishedCapabilityResult) -> Any:
+        """Adapter-side result validation against the descriptor output schema."""
+        pending = unpublished.pending
+        return self._registry.validate_payload(
+            pending.result_schema_ref, _raw(unpublished.raw_result))
+
+    def finalize_success(
+        self,
+        pending: PendingCapabilityInvocation,
+        *,
+        request_ref: TypedPayloadRef,
+        result_ref: TypedPayloadRef,
+    ) -> ToolCallRecord:
+        prior = self._terminal.get(pending.idempotency_key)
+        if prior == "success":
+            return self._records[pending.idempotency_key]  # idempotent identical terminal
+        if prior == "reject":
+            raise CapabilityGatewayError("a rejected invocation cannot be finalized as success")
+        if self._pending.get(pending.idempotency_key) is not pending:
+            raise CapabilityGatewayError("finalize_success on an unknown pending invocation")
+        # re-resolve the exact persisted main refs + verify against the capability schemas.
+        self._verify_ref(request_ref, pending.request_schema_ref, "request")
+        self._verify_ref(result_ref, pending.result_schema_ref, "result")
+        now = clock_now(self._clock)
+        record = ToolCallRecord(
+            call_ordinal=pending.ordinal_token.call_ordinal, tool_ref=pending.capability_ref,
+            request_ref=request_ref, result_ref=result_ref,
+            call_id=f"{pending.node_id}:call-{pending.ordinal_token.call_ordinal}",
+            provider_call_id=None, started_at=now, finished_at=now,
+        )
+        self._charges[pending.summary_digest].finalized += 1
+        self._terminal[pending.idempotency_key] = "success"
+        self._records[pending.idempotency_key] = record
+        del self._pending[pending.idempotency_key]
+        return record
+
+    def reject(
+        self,
+        pending: PendingCapabilityInvocation,
+        *,
+        detail_schema_ref: SchemaRef,
+        detail_payload: Any,
+        reason_code: str,
+        idempotency_key: str,
+    ) -> EventRefusalRecord:
+        prior = self._terminal.get(pending.idempotency_key)
+        if prior == "reject":
+            # idempotent identical terminal: re-record returns the same audit record.
+            return self._refusals.record(
+                detail_schema_ref=detail_schema_ref, detail_payload=detail_payload,
+                reason_code=reason_code, idempotency_key=idempotency_key,
+                attempted_capability_ref=pending.capability_ref,
+                attempted_schema_ref=pending.request_schema_ref)
+        if prior == "success":
+            raise CapabilityGatewayError("a finalized-success invocation cannot be rejected")
+        if self._pending.get(pending.idempotency_key) is not pending:
+            raise CapabilityGatewayError("reject on an unknown pending invocation")
+        record = self._refusals.record(
+            detail_schema_ref=detail_schema_ref, detail_payload=detail_payload,
+            reason_code=reason_code, idempotency_key=idempotency_key,
+            attempted_capability_ref=pending.capability_ref,
+            attempted_schema_ref=pending.request_schema_ref)
+        self._terminal[pending.idempotency_key] = "reject"
+        del self._pending[pending.idempotency_key]
+        return record
+
+    def bind_reader(self, reader) -> None:
+        """Bind the read-only PayloadStore view the gateway re-resolves refs through."""
+        self._reader = reader
+
+    # -- helpers ------------------------------------------------------------ #
+    def _verify_ref(self, ref: TypedPayloadRef, schema_ref: SchemaRef, label: str) -> None:
+        if ref.payload_ref.namespace != "main":
+            raise CapabilityGatewayError(f"{label} ref must be main-namespace")
+        if ref.schema_ref != schema_ref:
+            raise CapabilityGatewayError(f"{label} ref schema does not match the capability schema")
+        if self._reader is None:  # pragma: no cover - executor always binds a reader
+            raise CapabilityGatewayError("gateway has no bound reader to re-resolve the ref")
+        # re-resolve through the same read-only payload store the adapter persisted
+        # into (raises on a missing / digest-mismatched ref); performs no second write.
+        self._reader.get(ref.payload_ref, expected_schema_ref=ref.schema_ref)
+
+    def _refuse(self, capability_ref, request_schema_ref, reason_code, idempotency_key) -> None:
+        from guanlan_v2.orchestration.runtime_contracts import GenericRefusalDetails
+
+        self._refusals.record(
+            detail_schema_ref=SchemaRef(name="GenericRefusalDetails", version="1"),
+            detail_payload=GenericRefusalDetails(summary=reason_code, category="capability_gateway"),
+            reason_code=reason_code, idempotency_key=f"{idempotency_key}:{reason_code}",
+            attempted_capability_ref=capability_ref, attempted_schema_ref=request_schema_ref)
+
+
+def _raw(value: Any) -> Any:
+    return value.model_dump() if isinstance(value, BaseModel) else value
+
+
+# --------------------------------------------------------------------------- #
+# Prompt assembler + model gateway                                            #
+# --------------------------------------------------------------------------- #
+class AssembledModelRequest(_StrictModel):
+    """The immutable assembler output: canonical bytes + digest + persisted record.
+
+    The only thing :class:`StaticPromptAssembler` returns — never a detached
+    prompt/string. ``request_digest`` is the domain-separated digest of the exact
+    ``canonical_request_bytes`` and equals ``prompt_record.model_request_digest``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, arbitrary_types_allowed=True)
+
+    canonical_request_bytes: bytes
+    request_digest: DigestHex
+    prompt_record: PromptAssemblyRecord
+
+    @model_validator(mode="after")
+    def _bound(self) -> "AssembledModelRequest":
+        if self.request_digest != _model_request_digest(self.canonical_request_bytes):
+            raise ValueError("request_digest does not match the canonical request bytes")
+        if self.prompt_record.model_request_digest != self.request_digest:
+            raise ValueError("prompt_record.model_request_digest does not equal request_digest")
+        return self
+
+
+@dataclass(frozen=True)
+class ModelResult:
+    """The single-shot model / deterministic-handler outcome the executor consumes."""
+
+    payload: Any
+    rendered_text: str
+    number_anchors: tuple[NumberAnchor, ...] = ()
+    input_tokens: int = 0
+    output_tokens: int = 0
+    provider: str | None = None
+    model: str | None = None
+    provider_response_id: str | None = None
+    degraded: bool = False
+    degradation_reasons: tuple[str, ...] = ()
+
+
+@runtime_checkable
+class PromptAssembler(Protocol):
+    """Combines trusted system/skill/guardrail text + untrusted block *refs* only."""
+
+    def assemble(
+        self,
+        *,
+        plan_digest: str,
+        node_id: str,
+        worker_id: str,
+        system_prompt,
+        skills,
+        guardrails,
+        trusted_input_digests: tuple[NamedEvidenceDigest, ...],
+        untrusted_blocks: tuple[PromptUntrustedBlockRef, ...],
+    ) -> AssembledModelRequest:
+        ...
+
+
+class StaticPromptAssembler:
+    """The concrete static-v1 assembler.
+
+    Places untrusted blocks ONLY in the model gateway's ``data_inputs`` channel as
+    schema/namespace/digest references — never interpolating their bytes into the
+    system / skill / guardrail text — and returns only an
+    :class:`AssembledModelRequest`.
+    """
+
+    assembler_id: ClassVar[str] = ASSEMBLER_ID
+    assembler_version: ClassVar[str] = ASSEMBLER_VERSION
+
+    def assemble(
+        self,
+        *,
+        plan_digest: str,
+        node_id: str,
+        worker_id: str,
+        system_prompt,
+        skills,
+        guardrails,
+        trusted_input_digests: tuple[NamedEvidenceDigest, ...],
+        untrusted_blocks: tuple[PromptUntrustedBlockRef, ...],
+    ) -> AssembledModelRequest:
+        system_text = _text_of(system_prompt)
+        skill_texts = [_text_of(s) for s in skills]
+        guardrail_texts = [_text_of(g) for g in guardrails]
+        trusted = sorted(trusted_input_digests, key=lambda e: e.name)
+        blocks = tuple(untrusted_blocks)
+        channel = {
+            "assembler_id": self.assembler_id,
+            "assembler_version": self.assembler_version,
+            "system": system_text,
+            "skills": skill_texts,
+            "guardrails": guardrail_texts,
+            "trusted_inputs": [{"name": e.name, "digest": e.digest} for e in trusted],
+            "data_inputs": [
+                {
+                    "ordinal": b.ordinal,
+                    "schema": b.payload_ref.schema_ref.key,
+                    "namespace": b.payload_ref.payload_ref.namespace,
+                    "content_digest": b.payload_ref.payload_ref.content_digest,
+                    "media_type": b.media_type,
+                    "length": b.rendered_length,
+                }
+                for b in blocks
+            ],
+        }
+        canonical_bytes = json.dumps(
+            channel, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        digest = _model_request_digest(canonical_bytes)
+        record = PromptAssemblyRecord.build(
+            plan_digest=plan_digest, node_id=node_id, worker_id=worker_id,
+            assembler_id=self.assembler_id, assembler_version=self.assembler_version,
+            system_prompt_ref=_ref_of(system_prompt), skill_refs=tuple(_ref_of(s) for s in skills),
+            guardrail_refs=tuple(_ref_of(g) for g in guardrails),
+            trusted_input_digests=tuple(trusted), untrusted_blocks=blocks,
+            model_request_digest=digest,
+        )
+        return AssembledModelRequest(
+            canonical_request_bytes=canonical_bytes, request_digest=digest, prompt_record=record)
+
+
+@runtime_checkable
+class ModelGateway(Protocol):
+    """A service-owned single-shot model invocation selected from the catalog tier.
+
+    ``invoke`` resolves ``prompt_assembly_ref``, rehashes the exact bytes and refuses
+    any record/request/assembler/order mismatch BEFORE provider bytes are sent. It
+    cannot accept a detached raw prompt/string. Static v1 exposes no model-controlled
+    provider callback or tool-result → second-model loop.
+    """
+
+    def invoke(
+        self, request: AssembledModelRequest, *, prompt_assembly_ref: TypedPayloadRef,
+    ) -> ModelResult:
+        ...
+
+
+def verify_model_request_binding(
+    request: AssembledModelRequest,
+    prompt_assembly_ref: TypedPayloadRef,
+    *,
+    reader,
+) -> PromptAssemblyRecord:
+    """The exact prompt/request binding a :class:`ModelGateway` MUST enforce.
+
+    Resolves the persisted record, rehashes the exact bytes and refuses any
+    ref/schema/content/assembler/order/request-digest mismatch. Reusable by any
+    conforming gateway (including the test fakes) so the check lives behind the same
+    interface boundary.
+    """
+    if prompt_assembly_ref.schema_ref != _PROMPT_ASSEMBLY_RECORD_SR:
+        raise PromptBindingError("prompt_assembly_ref must resolve PromptAssemblyRecord@1")
+    if prompt_assembly_ref.payload_ref.namespace != "main":
+        raise PromptBindingError("prompt_assembly_ref must be main-namespace")
+    try:
+        stored = reader.get(prompt_assembly_ref.payload_ref, expected_schema_ref=_PROMPT_ASSEMBLY_RECORD_SR)
+    except EventStoreError as exc:
+        raise PromptBindingError(f"prompt record did not resolve: {exc}") from exc
+    if not isinstance(stored, PromptAssemblyRecord):  # pragma: no cover - schema guarded
+        raise PromptBindingError("resolved payload is not a PromptAssemblyRecord")
+    if stored != request.prompt_record:
+        raise PromptBindingError("persisted prompt record does not equal the request's bound record")
+    recomputed = _model_request_digest(request.canonical_request_bytes)
+    if recomputed != request.request_digest:
+        raise PromptBindingError("request bytes do not rehash to the request digest")
+    if stored.model_request_digest != recomputed:
+        raise PromptBindingError("persisted record digest does not authorize these request bytes")
+    return stored
+
+
+# --------------------------------------------------------------------------- #
+# Bridge provider / session ports + contributions                             #
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class BridgeInputContribution:
+    """The pre-input stage contribution: descriptor-authorized memory refs only."""
+
+    memory_refs: tuple[MemoryRecordRef, ...] = ()
+    memory_evidence_refs: tuple[TypedPayloadRef, ...] = ()
+
+
+@dataclass(frozen=True)
+class PreparedBridgeHandle:
+    """The frozen pre-input handle for one bridge: token + created refs/digests."""
+
+    bridge_id: str
+    bridge_priority: int
+    summary_digest: str
+    token: EvidenceIssuanceToken
+    input_contribution: BridgeInputContribution
+    journal_cursor: tuple[TypedPayloadRef, ...] = ()
+
+
+@dataclass(frozen=True)
+class BridgeContribution:
+    """One bridge's frozen execution-stage contribution.
+
+    ``tool_call_records`` are finalized capability records; ``data_result_refs`` are
+    consumed DataResult typed refs (cache-hit or the exact tool result);
+    ``direct_evidence_refs`` are otherwise-unrepresented main refs (cache request,
+    rejected/orphan request, pre-assembly block); ``untrusted_blocks`` are the
+    provider's ordered untrusted-block DTOs (LLM only). Each carries the merge key
+    ``(call_ordinal, bridge_priority, bridge_id, within_call_role)`` on its raw
+    parts.
+    """
+
+    bridge_id: str
+    bridge_priority: int
+    summary_digest: str
+    tool_call_records: tuple[ToolCallRecord, ...] = ()
+    data_result_refs: tuple[TypedPayloadRef, ...] = ()
+    direct_evidence_refs: tuple[TypedPayloadRef, ...] = ()
+    untrusted_blocks: tuple["ProviderUntrustedBlock", ...] = ()
+
+
+@dataclass(frozen=True)
+class ProviderUntrustedBlock:
+    """A provider's raw untrusted-block DTO before prompt-ordinal assignment."""
+
+    bridge_id: str
+    bridge_priority: int
+    call_ordinal: int
+    payload_ref: TypedPayloadRef
+    media_type: str
+    rendered_length: int
+
+
+@dataclass(frozen=True)
+class BridgeStageOutcome:
+    """The closed two-stage outcome a provider returns."""
+
+    status: Literal["prepared", "completed", "failed", "timed_out", "cancelled"]
+    input_contribution: BridgeInputContribution | None = None
+    prepared_handle: PreparedBridgeHandle | None = None
+    frozen_contribution: BridgeContribution | None = None
+    reason: str | None = None
+    journal_cursor: tuple[TypedPayloadRef, ...] = ()
+
+
+@dataclass(frozen=True)
+class PreparedBridgeSet:
+    """The frozen stage-1 output the runner carries into snapshot freeze + stage 2."""
+
+    node_id: str
+    handles: tuple[PreparedBridgeHandle, ...] = ()
+
+    def memory_record_refs(self) -> tuple[MemoryRecordRef, ...]:
+        refs: list[MemoryRecordRef] = []
+        for h in self.handles:
+            if h.input_contribution is not None:
+                refs.extend(h.input_contribution.memory_refs)
+        return tuple(refs)
+
+
+@runtime_checkable
+class ExecutionBridgeProvider(Protocol):
+    """A reviewed static-prefetch provider resolved only from catalog material."""
+
+    def prepare_input(self, request: "BridgePrepareRequest") -> BridgeStageOutcome:
+        ...
+
+    def open_execution(self, request: "BridgeOpenRequest") -> "ExecutionBridgeSession":
+        ...
+
+
+@runtime_checkable
+class ExecutionBridgeSession(Protocol):
+    def freeze_for_execution(self, *, kind: ExecutionKind) -> BridgeStageOutcome:
+        ...
+
+
+@dataclass(frozen=True)
+class BridgePrepareRequest:
+    plan: Plan
+    node: PlanNode
+    worker: WorkerSpec
+    bridge: ResolvedBridge
+    summary: BridgeStaticSupportSummary
+    token: EvidenceIssuanceToken
+    context_snapshot_ref: TypedPayloadRef
+    evidence_writer: BridgeEvidenceWriter
+
+
+@dataclass(frozen=True)
+class BridgeOpenRequest:
+    plan: Plan
+    node: PlanNode
+    worker: WorkerSpec
+    bridge: ResolvedBridge
+    summary: BridgeStaticSupportSummary
+    handle: PreparedBridgeHandle
+    input_snapshot: InputSnapshot
+    capability_gateway: CapabilityGateway
+    evidence_writer: BridgeEvidenceWriter
+    reader: Any
+
+
+# --------------------------------------------------------------------------- #
+# Execution bridge resolver (two-stage protocol driver)                        #
+# --------------------------------------------------------------------------- #
+class ExecutionObserver:
+    """A minimal ordered-phase spy hook (proves RUNNING precedes bridge / capability work)."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+    def record(self, phase: str) -> None:
+        self.events.append(phase)
+
+
+class ExecutionBridgeResolver:
+    """Derives the required provider set from reviewed material and drives both stages.
+
+    The required set, its canonical ``(bridge_priority, bridge_id)`` order and each
+    provider's one bound summary digest come only from the
+    :class:`BridgeCatalogView` active bridges and the embedded per-node
+    :class:`BridgeStaticSupportSummary` values. A missing required provider, an extra
+    provider, a summary/prepared-handle drift or an unregistered provider factory
+    fails BEFORE handler/model execution. No worker/model/caller can inject a
+    provider or mint an ordinal.
+    """
+
+    def __init__(
+        self,
+        *,
+        runtime: ExecutionRuntime,
+        node: PlanNode,
+        worker: WorkerSpec,
+        sequencer: ExecutionEvidenceSequencer,
+        observer: ExecutionObserver | None = None,
+    ) -> None:
+        self._runtime = runtime
+        self._node = node
+        self._worker = worker
+        self._sequencer = sequencer
+        self._observer = observer
+        self._bridges = self._resolve_required_set()
+        self._handles: dict[str, PreparedBridgeHandle] = {}
+        self._prepared = False
+
+    # -- required-set derivation (pure preflight) --------------------------- #
+    def _resolve_required_set(self) -> tuple[tuple[ResolvedBridge, BridgeStaticSupportSummary], ...]:
+        active = self._runtime.bridge_view.active_bridges_for(self._worker)
+        summaries = {s.bridge_id: s for s in self._runtime.summaries_for(self._node.id)}
+        active_ids = {rb.bridge_id for rb in active}
+        if active_ids != set(summaries):
+            raise PreflightError(
+                "active bridge set does not equal the support-report summaries for the node "
+                f"(active={sorted(active_ids)} summaries={sorted(summaries)})"
+            )
+        out: list[tuple[ResolvedBridge, BridgeStaticSupportSummary]] = []
+        for rb in active:  # active is already sorted by (priority, bridge_id)
+            summary = summaries[rb.bridge_id]
+            self._verify_summary_binding(rb, summary)
+            # the provider factory must be registered for the exact catalog handler ref.
+            try:
+                self._runtime.factories.handler_factory(rb.provider_ref)
+            except CatalogMaterialError as exc:
+                raise PreflightError(
+                    f"no trusted provider factory bound for bridge {rb.bridge_id!r}: {exc}"
+                ) from exc
+            out.append((rb, summary))
+        return tuple(out)
+
+    def _verify_summary_binding(self, rb: ResolvedBridge, summary: BridgeStaticSupportSummary) -> None:
+        if (
+            summary.bridge_id != rb.bridge_id
+            or summary.descriptor_ref != rb.descriptor_ref
+            or summary.config_ref != rb.config_ref
+            or summary.provider_ref != rb.provider_ref
+            or summary.analyzer_ref != rb.analyzer_ref
+            or summary.worker_id != self._worker.id
+            or summary.worker_digest != self._worker.semantic_digest()
+            or summary.node_id != self._node.id
+        ):
+            raise PreflightError(
+                f"support summary for bridge {rb.bridge_id!r} does not bind the exact "
+                "descriptor/config/provider/analyzer/worker/node identity"
+            )
+        # re-verify the summary digest recomputes (no silent drift).
+        if summary.summary_digest != content_digest(summary._semantic_payload()):
+            raise PreflightError(f"support summary digest drift for bridge {rb.bridge_id!r}")
+
+    @property
+    def required_bridge_ids(self) -> tuple[str, ...]:
+        return tuple(rb.bridge_id for rb, _ in self._bridges)
+
+    def _provider(self, rb: ResolvedBridge, summary: BridgeStaticSupportSummary) -> ExecutionBridgeProvider:
+        factory = self._runtime.factories.handler_factory(rb.provider_ref)
+        return factory(bridge=rb, summary=summary)
+
+    # -- stage 1: prepare_input --------------------------------------------- #
+    def prepare_input(
+        self, *, plan: Plan, context_snapshot_ref: TypedPayloadRef, evidence_writer: BridgeEvidenceWriter,
+    ) -> PreparedBridgeSet:
+        if self._prepared:
+            raise PreflightError("prepare_input already ran for this resolver")
+        handles: list[PreparedBridgeHandle] = []
+        for rb, summary in self._bridges:
+            token = self._sequencer.issue_call_token(
+                bridge_priority=rb.priority, bridge_id=rb.bridge_id, summary_digest=summary.summary_digest)
+            provider = self._provider(rb, summary)
+            req = BridgePrepareRequest(
+                plan=plan, node=self._node, worker=self._worker, bridge=rb, summary=summary,
+                token=token, context_snapshot_ref=context_snapshot_ref, evidence_writer=evidence_writer)
+            outcome = provider.prepare_input(req)
+            if outcome.status != "prepared" or outcome.prepared_handle is None:
+                raise PreflightError(
+                    f"bridge {rb.bridge_id!r} prepare_input did not produce a prepared handle "
+                    f"(status={outcome.status})"
+                )
+            handle = outcome.prepared_handle
+            if handle.token != token or handle.bridge_id != rb.bridge_id:
+                raise PreflightError(f"bridge {rb.bridge_id!r} prepared handle relabelled its token")
+            # a memory addition is only legal for a memory_refs_v1 descriptor.
+            if handle.input_contribution.memory_refs and rb.descriptor.pre_input_kind != "memory_refs_v1":
+                raise PreflightError(
+                    f"bridge {rb.bridge_id!r} added memory refs but is not a memory_refs_v1 descriptor")
+            self._handles[rb.bridge_id] = handle
+            handles.append(handle)
+        self._prepared = True
+        return PreparedBridgeSet(node_id=self._node.id, handles=tuple(handles))
+
+    # -- stage 2: open_execution + freeze ----------------------------------- #
+    def open_execution(
+        self,
+        *,
+        plan: Plan,
+        prepared: PreparedBridgeSet,
+        input_snapshot: InputSnapshot,
+        capability_gateway: CapabilityGateway,
+        evidence_writer: BridgeEvidenceWriter,
+        reader,
+        kind: ExecutionKind,
+    ) -> tuple[BridgeContribution, ...]:
+        if not self._prepared:
+            raise PreflightError("open_execution before prepare_input")
+        if prepared.node_id != self._node.id:
+            raise PreflightError("prepared bridge set is for a different node")
+        by_id = {h.bridge_id: h for h in prepared.handles}
+        if set(by_id) != set(self.required_bridge_ids):
+            raise PreflightError("prepared bridge set does not match the required provider set")
+        contributions: list[BridgeContribution] = []
+        for rb, summary in self._bridges:
+            handle = self._handles[rb.bridge_id]
+            carried = by_id[rb.bridge_id]
+            if carried.token != handle.token:
+                raise PreflightError(f"bridge {rb.bridge_id!r} pre-input token drifted before execution")
+            if self._observer is not None:
+                self._observer.record(f"bridge_open:{rb.bridge_id}")
+            provider = self._provider(rb, summary)
+            req = BridgeOpenRequest(
+                plan=plan, node=self._node, worker=self._worker, bridge=rb, summary=summary,
+                handle=handle, input_snapshot=input_snapshot, capability_gateway=capability_gateway,
+                evidence_writer=evidence_writer, reader=reader)
+            session = provider.open_execution(req)
+            outcome = session.freeze_for_execution(kind=kind)
+            if outcome.status != "completed" or outcome.frozen_contribution is None:
+                raise WorkerExecutionError(
+                    f"bridge {rb.bridge_id!r} freeze_for_execution did not complete "
+                    f"(status={outcome.status}): {outcome.reason}"
+                )
+            contributions.append(outcome.frozen_contribution)
+        return tuple(contributions)
+
+
+# --------------------------------------------------------------------------- #
+# Worker execution result                                                      #
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class WorkerExecutionResult:
+    """The strict internal result the executor derives NodeRun / Artifact from."""
+
+    execution_kind: ExecutionKind
+    status: NodeStatus
+    payload: Any = None
+    payload_schema_ref: SchemaRef | None = None
+    rendered_text: str = ""
+    number_anchors: tuple[NumberAnchor, ...] = ()
+    tool_call_records: tuple[ToolCallRecord, ...] = ()
+    data_result_refs: tuple[TypedPayloadRef, ...] = ()
+    execution_evidence_refs: tuple[TypedPayloadRef, ...] = ()
+    prompt_assembly_ref: TypedPayloadRef | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    degradation_reasons: tuple[str, ...] = ()
+    reason_code: str | None = None
+    reason: str | None = None
+    error_type: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    provider_response_id: str | None = None
+
+
+# --------------------------------------------------------------------------- #
+# small helpers                                                                #
+# --------------------------------------------------------------------------- #
+def _text_of(material) -> str:
+    if material is None:
+        return ""
+    return material.raw_utf8.decode("utf-8")
+
+
+def _ref_of(material) -> ContentRef:
+    return material.ref
+
+
+def _sorted_typed(refs) -> tuple[TypedPayloadRef, ...]:
+    return tuple(sorted(refs, key=typed_ref_sort_key))
+
+
+def _dedup_typed(refs) -> tuple[TypedPayloadRef, ...]:
+    seen: set = set()
+    out: list[TypedPayloadRef] = []
+    for r in refs:
+        k = typed_ref_sort_key(r)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(r)
+    return tuple(out)
+
+
+# --------------------------------------------------------------------------- #
+# stage-1 public entry point                                                   #
+# --------------------------------------------------------------------------- #
+def prepare_input(
+    plan: Plan,
+    node: PlanNode,
+    *,
+    runtime: ExecutionRuntime,
+    ctx: RunContext,
+    stores: RuntimeStores,
+    registry: SchemaRegistry,
+    context_snapshot_ref: TypedPayloadRef,
+    clock: AuthoritativeClock,
+    attempt: int = 1,
+    observer: ExecutionObserver | None = None,
+) -> tuple[ExecutionBridgeResolver, PreparedBridgeSet, ExecutionEvidenceSequencer]:
+    """Stage 1: run every provider's ``prepare_input`` and freeze a PreparedBridgeSet.
+
+    Returns the stateful resolver, the frozen prepared set and the shared sequencer
+    the runner carries into :func:`execute_node` (open_execution continues the SAME
+    sequencer rather than restarting ordinals).
+    """
+    worker = runtime.catalog.worker(node.worker_id)
+    sequencer = ExecutionEvidenceSequencer(node_id=node.id, attempt=attempt)
+    resolver = ExecutionBridgeResolver(
+        runtime=runtime, node=node, worker=worker, sequencer=sequencer, observer=observer)
+    writer = BridgeEvidenceWriter(
+        stores=stores, sequencer=sequencer, run_id=ctx.run_id, plan_digest=plan.plan_digest,
+        node_id=node.id, data_registry_digest=registry.registry_digest,
+        runtime_registry_digest=runtime.runtime_registry_digest)
+    prepared = resolver.prepare_input(
+        plan=plan, context_snapshot_ref=context_snapshot_ref, evidence_writer=writer)
+    return resolver, prepared, sequencer
+
+
+# --------------------------------------------------------------------------- #
+# The executor                                                                 #
+# --------------------------------------------------------------------------- #
+def execute_node(
+    plan: Plan,
+    node: PlanNode,
+    *,
+    runtime: ExecutionRuntime,
+    prepared_bridges: PreparedBridgeSet,
+    input_snapshot: InputSnapshot,
+    ctx: RunContext,
+    node_reservation: BudgetReservation,
+    bridge_resolver: ExecutionBridgeResolver,
+    model_gateway: ModelGateway | None,
+    capability_gateway: CapabilityGateway,
+    registry: SchemaRegistry,
+    stores: RuntimeStores,
+    clock: AuthoritativeClock,
+    prompt_assembler: PromptAssembler | None = None,
+    observer: ExecutionObserver | None = None,
+    attempt: int = 1,
+) -> tuple[NodeRun, Artifact | None]:
+    """Execute one admitted node → (NodeRun always, Artifact only on COMPLETED/DEGRADED).
+
+    Runs pure preflight (no side effect on failure), requires a *ready* InputSnapshot,
+    activates the timeout/cancellation scope, opens the exact prepared bridge sessions
+    through the CapabilityGateway, then (LLM) assembles + persists exactly one prompt
+    record before a single ModelGateway call, classifies all evidence without
+    duplication and seals the terminal NodeRun / Artifact.
+    """
+    worker = runtime.catalog.worker(node.worker_id)
+    sequencer = bridge_resolver._sequencer  # the SAME node sequencer used in stage 1
+    started_at = clock_now(clock)
+    node_run_id = f"nr-{ctx.run_id}-{node.id}-{attempt}"
+    attempt_id = f"att-{ctx.run_id}-{node.id}-{attempt}"
+
+    # ---- (1) pure preflight ------------------------------------------------ #
+    _preflight(plan, node, worker, runtime=runtime, input_snapshot=input_snapshot, ctx=ctx,
+               node_reservation=node_reservation, prepared_bridges=prepared_bridges,
+               bridge_resolver=bridge_resolver)
+
+    kind = worker.execution.kind
+    writer = BridgeEvidenceWriter(
+        stores=stores, sequencer=sequencer, run_id=ctx.run_id, plan_digest=plan.plan_digest,
+        node_id=node.id, data_registry_digest=registry.registry_digest,
+        runtime_registry_digest=runtime.runtime_registry_digest)
+    reader = _ReadOnlyPayloadView(stores.payloads)
+    capability_gateway.bind_reader(reader)
+
+    def _terminal_nodrun(status, *, reason_code=None, reason=None, error_type=None,
+                         data_refs=(), evid_refs=(), tool_records=(),
+                         itok=0, otok=0):
+        return _build_node_run(
+            plan=plan, node=node, worker=worker, ctx=ctx, status=status,
+            node_run_id=node_run_id, attempt_id=attempt_id, attempt=attempt,
+            input_snapshot=input_snapshot, started_at=started_at, finished_at=clock_now(clock),
+            reason_code=reason_code, reason=reason, error_type=error_type,
+            tool_call_records=tool_records, data_result_refs=data_refs,
+            execution_evidence_refs=evid_refs, input_tokens=itok, output_tokens=otok)
+
+    # ---- (3) RUNNING + timeout/cancellation scope -------------------------- #
+    if observer is not None:
+        observer.record("running")
+    capability_gateway.mark_running()
+
+    contributions: tuple[BridgeContribution, ...] = ()
+    try:
+        # ---- (4) open the exact prepared sessions + freeze bridge work ----- #
+        contributions = bridge_resolver.open_execution(
+            plan=plan, prepared=prepared_bridges, input_snapshot=input_snapshot,
+            capability_gateway=capability_gateway, evidence_writer=writer, reader=reader, kind=kind)
+    except _TimeoutSignal as exc:
+        return _drain_terminal(NodeStatus.TIMED_OUT, "node_timeout", str(exc), None,
+                               writer, sequencer, stores, ctx, plan, node, _terminal_nodrun), None
+    except _CancelSignal as exc:
+        return _drain_terminal(NodeStatus.CANCELLED, "node_cancelled", str(exc), None,
+                               writer, sequencer, stores, ctx, plan, node, _terminal_nodrun), None
+    except WorkerExecutionError:
+        raise
+    except Exception as exc:  # handler/provider exception
+        return _drain_terminal(NodeStatus.FAILED, "bridge_execution_error", str(exc),
+                               type(exc).__name__, writer, sequencer, stores, ctx, plan, node,
+                               _terminal_nodrun), None
+
+    # ---- classify merged bridge contributions ------------------------------ #
+    merged = _MergedEvidence.from_contributions(contributions)
+
+    # ---- (6) per-summary REQUIRED/FORBIDDEN + tool-call discipline --------- #
+    ok, why = _check_tool_discipline(worker, runtime, node, capability_gateway,
+                                     merged.tool_call_records)
+    if not ok:
+        return _terminal_nodrun(
+            NodeStatus.INCOMPLETE, reason_code="tool_discipline_unmet", reason=why,
+            data_refs=merged.data_result_refs, tool_records=merged.tool_call_records,
+            evid_refs=_finalize_direct_evidence(merged, None)), None
+
+    # ---- (4b) LLM prompt assembly + single model call ---------------------- #
+    prompt_ref: TypedPayloadRef | None = None
+    degradation: list[str] = list(merged.degradation_reasons)
+    if kind is ExecutionKind.LLM:
+        assembler = prompt_assembler or StaticPromptAssembler()
+        resolved = runtime.catalog.resolve_worker(node.worker_id)
+        blocks = _assign_block_ordinals(merged.untrusted_blocks)
+        trusted = _trusted_input_digests(input_snapshot)
+        try:
+            request = assembler.assemble(
+                plan_digest=plan.plan_digest, node_id=node.id, worker_id=worker.id,
+                system_prompt=resolved.system_prompt, skills=resolved.skills,
+                guardrails=resolved.guardrails, trusted_input_digests=trusted,
+                untrusted_blocks=blocks)
+        except Exception as exc:  # assembly failure -> orphan blocks retained directly
+            return _terminal_nodrun(
+                NodeStatus.INCOMPLETE, reason_code="prompt_assembly_failed", reason=str(exc),
+                data_refs=merged.data_result_refs, tool_records=merged.tool_call_records,
+                evid_refs=_finalize_direct_evidence(merged, None)), None
+
+        if model_gateway is None:
+            raise WorkerExecutionError("an LLM worker requires a ModelGateway")
+        # reserve the single executor-owned prompt token, persist the record ONCE.
+        prompt_token = sequencer.issue_prompt_token()
+        prompt_ref = _persist_prompt_record(
+            request.prompt_record, writer=writer, stores=stores, ctx=ctx, plan=plan, node=node,
+            runtime=runtime, prompt_token=prompt_token, clock=clock)
+        try:
+            model_result = model_gateway.invoke(request, prompt_assembly_ref=prompt_ref)
+        except PromptBindingError:
+            raise
+        except _TimeoutSignal as exc:
+            return _drain_terminal(NodeStatus.TIMED_OUT, "model_timeout", str(exc), None,
+                                   writer, sequencer, stores, ctx, plan, node, _terminal_nodrun,
+                                   extra_prompt_ref=prompt_ref, merged=merged), None
+        except Exception as exc:
+            return _terminal_nodrun(
+                NodeStatus.FAILED, reason_code="model_error", reason=str(exc),
+                error_type=type(exc).__name__, data_refs=merged.data_result_refs,
+                tool_records=merged.tool_call_records,
+                evid_refs=_finalize_direct_evidence(merged, prompt_ref)), None
+        payload = model_result.payload
+    else:  # DETERMINISTIC
+        if merged.untrusted_blocks:
+            raise WorkerExecutionError("a DETERMINISTIC worker cannot emit untrusted blocks")
+        resolved = runtime.catalog.resolve_worker(node.worker_id)
+        handler_factory = runtime.factories.handler_factory(worker.execution.handler_ref)
+        handler = handler_factory(worker=worker, resolved=resolved)
+        try:
+            model_result = handler(
+                node=node, input_snapshot=input_snapshot, contributions=contributions,
+                data_result_refs=merged.data_result_refs)
+        except _TimeoutSignal as exc:
+            return _drain_terminal(NodeStatus.TIMED_OUT, "handler_timeout", str(exc), None,
+                                   writer, sequencer, stores, ctx, plan, node, _terminal_nodrun,
+                                   merged=merged), None
+        except Exception as exc:
+            return _terminal_nodrun(
+                NodeStatus.FAILED, reason_code="handler_error", reason=str(exc),
+                error_type=type(exc).__name__, data_refs=merged.data_result_refs,
+                tool_records=merged.tool_call_records,
+                evid_refs=_finalize_direct_evidence(merged, None)), None
+        payload = model_result.payload
+
+    if model_result.degraded:
+        degradation.extend(model_result.degradation_reasons)
+
+    # ---- (7) number-anchor / unsourced-number policy ----------------------- #
+    anchor_ok, anchor_why = _check_number_anchors(worker, model_result.number_anchors)
+    if not anchor_ok:
+        return _terminal_nodrun(
+            NodeStatus.INCOMPLETE, reason_code="number_anchor_policy", reason=anchor_why,
+            data_refs=merged.data_result_refs, tool_records=merged.tool_call_records,
+            evid_refs=_finalize_direct_evidence(merged, prompt_ref),
+            itok=model_result.input_tokens, otok=model_result.output_tokens), None
+
+    # ---- (9) validate the primary payload through its OutputBinding SchemaRef  #
+    out_binding = _primary_output_binding(worker)
+    try:
+        validated_payload = registry.validate_payload(out_binding.schema_ref, _raw(payload))
+    except Exception as exc:
+        return _terminal_nodrun(
+            NodeStatus.INCOMPLETE, reason_code="output_schema_invalid", reason=str(exc),
+            data_refs=merged.data_result_refs, tool_records=merged.tool_call_records,
+            evid_refs=_finalize_direct_evidence(merged, prompt_ref),
+            itok=model_result.input_tokens, otok=model_result.output_tokens), None
+
+    # ---- (11/12) COMPLETED or DEGRADED: seal NodeRun + one Artifact -------- #
+    status = NodeStatus.DEGRADED if degradation else NodeStatus.COMPLETED
+    direct_evidence = _finalize_direct_evidence(merged, prompt_ref)
+    data_refs = _sorted_typed(_dedup_typed(merged.data_result_refs))
+
+    artifact = _build_artifact(
+        plan=plan, node=node, worker=worker, ctx=ctx, out_binding=out_binding,
+        payload=validated_payload, rendered_text=model_result.rendered_text,
+        number_anchors=model_result.number_anchors, input_snapshot=input_snapshot,
+        tool_call_records=merged.tool_call_records, data_result_refs=data_refs,
+        execution_evidence_refs=direct_evidence, prompt_ref=prompt_ref, kind=kind,
+        model_result=model_result, clock=clock)
+
+    node_run = _build_node_run(
+        plan=plan, node=node, worker=worker, ctx=ctx, status=status,
+        node_run_id=node_run_id, attempt_id=attempt_id, attempt=attempt,
+        input_snapshot=input_snapshot, started_at=started_at, finished_at=clock_now(clock),
+        reason_code=("degraded_input_or_result" if status is NodeStatus.DEGRADED else None),
+        reason=("; ".join(degradation) if degradation else None), error_type=None,
+        tool_call_records=merged.tool_call_records, data_result_refs=data_refs,
+        execution_evidence_refs=direct_evidence, input_tokens=model_result.input_tokens,
+        output_tokens=model_result.output_tokens, output_keys=(_PRIMARY_OUTPUT_KEY,),
+        output_artifact_ids=(artifact.artifact_id,))
+
+    # cross-object equality: Artifact provenance tuples == NodeRun tuples.
+    prov = artifact.provenance
+    assert prov.tool_call_records == node_run.tool_call_records
+    assert prov.data_result_refs == node_run.data_result_refs
+    assert prov.execution_evidence_refs == node_run.execution_evidence_refs
+    return node_run, artifact
+
+
+# --------------------------------------------------------------------------- #
+# timeout / cancellation signals                                              #
+# --------------------------------------------------------------------------- #
+class _TimeoutSignal(Exception):
+    """Raised by a provider/handler/model fake to exercise the TIMED_OUT branch."""
+
+
+class _CancelSignal(Exception):
+    """Raised by a provider/handler/model fake to exercise the CANCELLED branch."""
+
+
+# expose the signals so tests can raise them behind the trusted boundaries.
+TimeoutSignal = _TimeoutSignal
+CancelSignal = _CancelSignal
+
+
+def _drain_terminal(
+    status, reason_code, reason, error_type, writer, sequencer, stores, ctx, plan, node,
+    build_terminal, *, extra_prompt_ref=None, merged=None,
+):
+    """Drain the persisted evidence journal into a terminal NodeRun (no Artifact).
+
+    Recovers every committed evidence ref from :class:`BridgeEvidenceJournal` by
+    node/token — even when a provider never returned — so partial work is never
+    dropped on a failed / timed-out / cancelled path.
+    """
+    journal = BridgeEvidenceJournal(
+        stores=stores, run_id=ctx.run_id, plan_digest=plan.plan_digest, node_id=node.id)
+    drained = journal.drain()
+    data_refs: list[TypedPayloadRef] = []
+    evid_refs: list[TypedPayloadRef] = []
+    tool_records: tuple[ToolCallRecord, ...] = ()
+    if merged is not None:
+        data_refs.extend(merged.data_result_refs)
+        evid_refs.extend(merged.direct_evidence_refs)
+        tool_records = merged.tool_call_records
+    else:
+        # no frozen contribution: recover strictly from the journal.
+        tool_result_digests: set = set()
+        for j in drained:
+            if j.within_call_role == "provider_prefetch":
+                data_refs.append(j.evidence_ref)
+            else:
+                evid_refs.append(j.evidence_ref)
+    if extra_prompt_ref is not None:
+        evid_refs.append(extra_prompt_ref)
+    data_final = _sorted_typed(_dedup_typed(data_refs))
+    evid_final = _sorted_typed(_dedup_typed(evid_refs))
+    return build_terminal(
+        status, reason_code=reason_code, reason=reason, error_type=error_type,
+        data_refs=data_final, evid_refs=evid_final, tool_records=tool_records)
+
+
+# --------------------------------------------------------------------------- #
+# preflight                                                                    #
+# --------------------------------------------------------------------------- #
+def _preflight(
+    plan, node, worker, *, runtime, input_snapshot, ctx, node_reservation, prepared_bridges,
+    bridge_resolver,
+) -> None:
+    # -- admitted plan identity ----------------------------------------------- #
+    if plan.recompute_plan_digest() != plan.plan_digest:
+        raise PreflightError("admitted Plan digest does not recompute")
+    dispatch_digest = runtime.support_report.candidate_plan_digest
+    if dispatch_digest != plan.plan_digest:
+        raise PreflightError("support report is not bound to the admitted plan digest")
+    if runtime.support_report.catalog_digest != runtime.catalog.catalog_digest:
+        raise PreflightError("support report catalog digest drift")
+    if not runtime.support_report.supported:
+        raise PreflightError("plan is not runtime-supported")
+    if node not in plan.nodes:
+        raise PreflightError("node is not part of the admitted plan")
+
+    # -- ready snapshot ------------------------------------------------------- #
+    if input_snapshot.readiness != "ready":
+        raise PreflightError("execute_node requires a ready InputSnapshot (terminal_partial rejected)")
+    if input_snapshot.node_id != node.id or input_snapshot.plan_digest != plan.plan_digest:
+        raise PreflightError("InputSnapshot does not bind this plan node")
+
+    # -- one/many artifact-input shape matches the WorkerSpec ----------------- #
+    binding_by_name = {b.input_name: b for b in input_snapshot.artifact_inputs}
+    spec_names = {i.name for i in worker.inputs}
+    if set(binding_by_name) != spec_names:
+        raise PreflightError("InputSnapshot artifact inputs do not match the WorkerSpec input names")
+    for ib in worker.inputs:
+        b = binding_by_name[ib.name]
+        if b.cardinality != ib.cardinality:
+            raise PreflightError(f"input {ib.name!r} cardinality mismatch with the WorkerSpec")
+        if ib.cardinality == "one" and len(b.artifact_refs) != 1:
+            raise PreflightError(f"'one' input {ib.name!r} must carry exactly one artifact ref")
+
+    # -- expected memory-record refs equal the frozen snapshot ---------------- #
+    expected = _expected_memory_refs(prepared_bridges)
+    if tuple(input_snapshot.memory_record_refs) != expected:
+        raise PreflightError(
+            "InputSnapshot memory_record_refs do not equal the canonical union of the "
+            "authorized base + prepared bridge memory additions")
+
+    # -- active child reservation --------------------------------------------- #
+    if node_reservation.scope_type != "node":
+        raise PreflightError("node_reservation is not a node-scope reservation")
+    if node_reservation.candidate_plan_digest != plan.plan_digest:
+        raise PreflightError("node_reservation is not bound to the admitted plan digest")
+    if node_reservation.status != "reserved":
+        raise PreflightError("node_reservation is not active (settled/released)")
+
+    # -- prepared handles match the required provider set --------------------- #
+    if prepared_bridges.node_id != node.id:
+        raise PreflightError("prepared bridge set is for a different node")
+    if {h.bridge_id for h in prepared_bridges.handles} != set(bridge_resolver.required_bridge_ids):
+        raise PreflightError("prepared bridge handles do not match the required provider set")
+
+
+def _expected_memory_refs(prepared_bridges: PreparedBridgeSet) -> tuple[MemoryRecordRef, ...]:
+    base: tuple[MemoryRecordRef, ...] = ()
+    additions = prepared_bridges.memory_record_refs()
+    union = list(base) + list(additions)
+    union.sort(key=lambda r: (r.record_id, r.revision_id, r.content_digest))
+    return tuple(union)
+
+
+# --------------------------------------------------------------------------- #
+# merged-evidence classifier                                                   #
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class _MergedEvidence:
+    tool_call_records: tuple[ToolCallRecord, ...]
+    data_result_refs: tuple[TypedPayloadRef, ...]
+    direct_evidence_refs: tuple[TypedPayloadRef, ...]
+    untrusted_blocks: tuple[ProviderUntrustedBlock, ...]
+    degradation_reasons: tuple[str, ...]
+
+    @classmethod
+    def from_contributions(cls, contributions: tuple[BridgeContribution, ...]) -> "_MergedEvidence":
+        records: list[ToolCallRecord] = []
+        data: list[TypedPayloadRef] = []
+        direct: list[TypedPayloadRef] = []
+        blocks: list[ProviderUntrustedBlock] = []
+        for c in contributions:
+            records.extend(c.tool_call_records)
+            data.extend(c.data_result_refs)
+            direct.extend(c.direct_evidence_refs)
+            blocks.extend(c.untrusted_blocks)
+        # ToolCallRecords canonicalize by call_ordinal (reversed completion cannot change this).
+        records.sort(key=lambda r: r.call_ordinal)
+        ordinals = [r.call_ordinal for r in records]
+        if len(set(ordinals)) != len(ordinals):
+            raise WorkerExecutionError("duplicate ToolCallRecord call_ordinal across bridges")
+        # merge untrusted blocks by (call_ordinal, bridge_priority, bridge_id).
+        blocks.sort(key=lambda b: (b.call_ordinal, b.bridge_priority, b.bridge_id))
+        return cls(
+            tool_call_records=tuple(records),
+            data_result_refs=tuple(data),
+            direct_evidence_refs=tuple(direct),
+            untrusted_blocks=tuple(blocks),
+            degradation_reasons=(),
+        )
+
+
+def _finalize_direct_evidence(
+    merged: _MergedEvidence, prompt_ref: TypedPayloadRef | None,
+) -> tuple[TypedPayloadRef, ...]:
+    """Direct execution evidence: non-prompt bridge direct refs + (LLM) the prompt ref.
+
+    Refs represented by a finalized ToolCallRecord or a valid prompt record are NOT
+    duplicated here; a cache request / rejected-orphan request / pre-assembly block
+    enters directly. Any block promoted into the prompt record is excluded.
+    """
+    # exclude any tool request/result refs (they live in the records).
+    tool_keys: set = set()
+    for rec in merged.tool_call_records:
+        tool_keys.add(typed_ref_sort_key(rec.request_ref))
+        tool_keys.add(typed_ref_sort_key(rec.result_ref))
+    data_keys = {typed_ref_sort_key(r) for r in merged.data_result_refs}
+    # blocks promoted to the prompt record are transitive-only when a prompt ref exists.
+    block_keys = (
+        {typed_ref_sort_key(b.payload_ref) for b in merged.untrusted_blocks}
+        if prompt_ref is not None else set()
+    )
+    direct: list[TypedPayloadRef] = []
+    for r in merged.direct_evidence_refs:
+        k = typed_ref_sort_key(r)
+        if k in tool_keys or k in data_keys or k in block_keys:
+            continue
+        direct.append(r)
+    if prompt_ref is None:
+        # orphan blocks (no valid prompt record) are retained directly.
+        for b in merged.untrusted_blocks:
+            direct.append(b.payload_ref)
+    else:
+        direct.append(prompt_ref)
+    return _sorted_typed(_dedup_typed(direct))
+
+
+def _assign_block_ordinals(blocks: tuple[ProviderUntrustedBlock, ...]) -> tuple[PromptUntrustedBlockRef, ...]:
+    out: list[PromptUntrustedBlockRef] = []
+    for i, b in enumerate(blocks, start=1):
+        out.append(
+            PromptUntrustedBlockRef.build(
+                ordinal=i, payload_ref=b.payload_ref, media_type=b.media_type,
+                rendered_length=b.rendered_length))
+    return tuple(out)
+
+
+def _trusted_input_digests(input_snapshot: InputSnapshot) -> tuple[NamedEvidenceDigest, ...]:
+    out: list[NamedEvidenceDigest] = []
+    out.append(
+        NamedEvidenceDigest(name="context_snapshot",
+                            digest=input_snapshot.context_snapshot_ref.payload_ref.content_digest))
+    for b in input_snapshot.artifact_inputs:
+        if b.artifact_refs:
+            out.append(NamedEvidenceDigest(name=b.input_name, digest=b.artifact_refs[0].content_digest))
+    out.sort(key=lambda e: e.name)
+    # de-dup by name (context_snapshot is unique).
+    seen: set = set()
+    deduped: list[NamedEvidenceDigest] = []
+    for e in out:
+        if e.name in seen:
+            continue
+        seen.add(e.name)
+        deduped.append(e)
+    return tuple(deduped)
+
+
+# --------------------------------------------------------------------------- #
+# prompt-record persistence (payload + recovery cell, atomic)                  #
+# --------------------------------------------------------------------------- #
+def _persist_prompt_record(
+    record: PromptAssemblyRecord, *, writer, stores, ctx, plan, node, runtime, prompt_token, clock,
+) -> TypedPayloadRef:
+    """Persist the single prompt record exactly once (payload + recovery cell).
+
+    A post-commit / pre-model crash is recoverable: the recovery cell holds the exact
+    prompt typed ref keyed by (node, runtime.prompt), so a retry recovers it without a
+    second prompt put.
+    """
+    cell_key = content_digest({"node_id": node.id, "attempt": prompt_token.attempt, "kind": "runtime.prompt"})
+    existing = stores.cells.load(PROMPT_CELL_NAMESPACE, cell_key)
+    if existing is not None:
+        return existing
+    staged_key = f"{node.id}:prompt:{prompt_token.call_ordinal}"
+    batch = RuntimeBatch(
+        idempotency_key=f"{ctx.run_id}:{node.id}:prompt-record",
+        payload_puts=(
+            PayloadPutCommand(
+                staged_key=StagedPayloadKey(key=staged_key), schema_ref=_PROMPT_ASSEMBLY_RECORD_SR,
+                namespace="main", payload_template=dict(record),
+                registry_digest=runtime.runtime_registry_digest,
+                idempotency_key=f"{ctx.run_id}:{node.id}:prompt-payload"),
+        ),
+        cell_cas=(
+            StateCellCompareAndSwapCommand(
+                cell_namespace=PROMPT_CELL_NAMESPACE, cell_key_digest=cell_key,
+                expected_value=None,
+                new_target=StagedTypedPayloadRef(
+                    staged_key=StagedPayloadKey(key=staged_key),
+                    schema_ref=_PROMPT_ASSEMBLY_RECORD_SR, namespace="main")),
+        ),
+    )
+    result = stores.unit_of_work.commit(batch)
+    return result.staged_typed_ref(staged_key)
+
+
+# --------------------------------------------------------------------------- #
+# discipline / policy checks                                                   #
+# --------------------------------------------------------------------------- #
+def _check_tool_discipline(worker, runtime, node, capability_gateway, tool_records):
+    # per-summary independent minima/maxima.
+    for summary in runtime.summaries_for(node.id):
+        charge = capability_gateway.summary_charge(summary.summary_digest)
+        if charge.finalized < summary.min_finalized_tool_calls_on_success:
+            return False, (
+                f"bridge {summary.bridge_id!r} finalized {charge.finalized} tool calls "
+                f"(< minimum {summary.min_finalized_tool_calls_on_success})")
+        if charge.invocations > summary.max_capability_invocations:
+            return False, (
+                f"bridge {summary.bridge_id!r} invoked {charge.invocations} "
+                f"(> maximum {summary.max_capability_invocations})")
+    # WorkerSpec REQUIRED / FORBIDDEN overall.
+    tc = worker.evidence_policy.tool_calls
+    if tc is ToolCallRequirement.REQUIRED and len(tool_records) < 1:
+        return False, "WorkerSpec tool_calls=REQUIRED but no finalized ToolCallRecord"
+    if tc is ToolCallRequirement.FORBIDDEN and capability_gateway.begun_count() != 0:
+        return False, "WorkerSpec tool_calls=FORBIDDEN but a capability invocation was begun"
+    return True, ""
+
+
+def _check_number_anchors(worker, anchors):
+    policy = worker.evidence_policy
+    if not policy.allow_unsourced_numbers:
+        for a in anchors:
+            if a.is_unsourced:
+                return False, f"unsourced NumberAnchor {a.label!r} but allow_unsourced_numbers=False"
+    if policy.require_number_anchors:
+        # a required-anchor worker with zero anchors is honest only when the payload
+        # surfaces no figure; static v1 accepts an empty anchor tuple (the model
+        # declares its numbers), so we only enforce the unsourced policy above.
+        pass
+    return True, ""
+
+
+def _primary_output_binding(worker):
+    for o in worker.outputs:
+        if o.name == _PRIMARY_OUTPUT_KEY:
+            return o
+    raise WorkerExecutionError("worker declares no primary output binding")  # pragma: no cover
+
+
+# --------------------------------------------------------------------------- #
+# NodeRun + Artifact builders                                                  #
+# --------------------------------------------------------------------------- #
+def _build_node_run(
+    *, plan, node, worker, ctx, status, node_run_id, attempt_id, attempt, input_snapshot,
+    started_at, finished_at, reason_code, reason, error_type, tool_call_records, data_result_refs,
+    execution_evidence_refs, input_tokens, output_tokens, output_keys=(), output_artifact_ids=(),
+) -> NodeRun:
+    return NodeRun(
+        node_run_id=node_run_id, run_id=ctx.run_id, plan_id=plan.plan_id,
+        plan_digest=plan.plan_digest, node_id=node.id, worker_id=worker.id, status=status,
+        reason_code=reason_code, reason=reason, attempt_id=attempt_id, attempt=attempt,
+        input_snapshot_digest=input_snapshot.content_digest, started_at=started_at,
+        finished_at=finished_at, output_keys=tuple(output_keys),
+        output_artifact_ids=tuple(output_artifact_ids), tool_call_records=tuple(tool_call_records),
+        data_result_refs=tuple(data_result_refs), execution_evidence_refs=tuple(execution_evidence_refs),
+        input_tokens=input_tokens, output_tokens=output_tokens, error_type=error_type)
+
+
+def _build_artifact(
+    *, plan, node, worker, ctx, out_binding, payload, rendered_text, number_anchors, input_snapshot,
+    tool_call_records, data_result_refs, execution_evidence_refs, prompt_ref, kind, model_result, clock,
+) -> Artifact:
+    prompt_material_ref = worker.system_prompt_ref if kind is ExecutionKind.LLM else None
+    skill_refs = tuple(s.skill_ref for s in worker.skills) if kind is ExecutionKind.LLM else ()
+    model_config_digest = None
+    if kind is ExecutionKind.LLM:
+        model_config_digest = content_digest(
+            {"model_tier": worker.execution.model_tier, "thinking_budget": worker.execution.thinking_budget})
+    input_refs = _input_artifact_refs(input_snapshot)
+    created_at = clock_now(clock)
+    provenance = Provenance(
+        plan_digest=plan.plan_digest, code_version=CODE_VERSION, as_of=ctx.data.as_of,
+        pit_mode=ctx.data.mode, model_config_digest=model_config_digest, sampling_seed=None,
+        prompt_ref=prompt_material_ref, skill_refs=skill_refs,
+        capability_refs=tuple(worker.capability_allowlist),
+        input_snapshot_digest=input_snapshot.content_digest,
+        data_result_refs=tuple(data_result_refs), execution_evidence_refs=tuple(execution_evidence_refs),
+        tool_call_records=tuple(tool_call_records), provider=model_result.provider,
+        model=model_result.model, model_response_id=model_result.provider_response_id)
+    artifact_id = f"art-{ctx.run_id}-{node.id}-{_PRIMARY_OUTPUT_KEY}"
+    return Artifact.build(
+        artifact_id=artifact_id, run_id=ctx.run_id, created_at=created_at,
+        producer_node_id=node.id, slot=node.writes_slot, output_key=_PRIMARY_OUTPUT_KEY,
+        kind=out_binding.schema_ref.name, payload_schema_ref=out_binding.schema_ref, payload=payload,
+        rendered_md=rendered_text, input_refs=input_refs, provenance=provenance,
+        numbers=tuple(number_anchors), badges=())
+
+
+def _input_artifact_refs(input_snapshot: InputSnapshot) -> tuple[ArtifactRef, ...]:
+    refs: list[ArtifactRef] = []
+    for b in input_snapshot.artifact_inputs:
+        refs.extend(b.artifact_refs)
+    return tuple(refs)
