@@ -291,6 +291,30 @@ def test_conflicting_refusal_idempotency_key_raises():
         _record(sink, idem="k1", summary="different detail")
 
 
+def test_concurrent_same_key_records_persist_exactly_once():
+    """The probe + append is serialized under the sink's lock, so concurrent
+    identical same-key records can never double-append past the probe."""
+    import threading
+
+    sink = _sink()
+    results, errors = [], []
+
+    def worker():
+        try:
+            results.append(_record(sink, idem="k-conc", summary="same detail"))
+        except Exception as exc:  # pragma: no cover - would fail the assertions below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert len(sink.records()) == 1  # exactly one persisted record
+    assert len({r.record_id for r in results}) == 1  # everyone got the same record
+
+
 # --------------------------------------------------------------------------- #
 # 5. refusals never reach the main/public stream                               #
 # --------------------------------------------------------------------------- #

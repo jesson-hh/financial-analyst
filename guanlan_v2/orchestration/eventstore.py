@@ -251,7 +251,14 @@ class EventAppendRequest(_StrictModel):
 
 
 class RuntimeBatch(_StrictModel):
-    """A closed, atomic unit-of-work command tuple (all-or-none)."""
+    """A closed, atomic unit-of-work command tuple (all-or-none).
+
+    A batch deliberately carries **no** :class:`RunBudget`: budget maxima are
+    service authority bound once per run via
+    :meth:`RuntimeStores.bind_run_budget`, so two batches for the same run can
+    never validate against inconsistent ceilings. ``budget_run_id`` only selects
+    the already-bound authority.
+    """
 
     idempotency_key: NonEmptyStr
     payload_puts: tuple[PayloadPutCommand, ...] = ()
@@ -260,24 +267,13 @@ class RuntimeBatch(_StrictModel):
     cell_cas: tuple[StateCellCompareAndSwapCommand, ...] = ()
     # budget context (required only when budget_commands is non-empty).
     budget_run_id: NonEmptyStr | None = None
-    budget_run_budget: RunBudget | None = None
 
     @model_validator(mode="after")
     def _budget_context_present(self) -> "RuntimeBatch":
-        if self.budget_commands and (self.budget_run_id is None or self.budget_run_budget is None):
+        if self.budget_commands and self.budget_run_id is None:
             raise ValueError(
-                "budget_commands require budget_run_id and a maxima-only budget_run_budget"
-            )
-        if self.budget_run_budget is not None and (
-            self.budget_run_budget.reserved_tokens != 0
-            or self.budget_run_budget.reserved_llm_invocations != 0
-            or self.budget_run_budget.reserved_concurrency != 0
-        ):
-            # inherited Task 1 accounting semantics: the event fold owns ALL holds,
-            # so a pre-populated running total would allow over-reservation.
-            raise ValueError(
-                "budget_run_budget must be maxima-only (reserved_* == 0); the "
-                "event fold owns all holds"
+                "budget_commands require budget_run_id (the RunBudget itself is "
+                "bound service-side via RuntimeStores.bind_run_budget)"
             )
         return self
 
@@ -462,6 +458,11 @@ def _append_event(
         raise EventStoreError(
             f"append declares payload schema {request.payload_schema_ref.key!r} but the "
             f"stored payload was validated as {stored.schema_key!r}"
+        )
+    if stored.registry_digest != request.registry_digest:
+        raise EventStoreError(
+            "append declares a registry digest different from the one its payload "
+            "was validated/stored under"
         )
     # 3) recheck the main/public namespace boundary before persistence.
     partition_public = request.partition in PUBLIC_EVENT_PARTITIONS
@@ -748,7 +749,13 @@ def _typed_ref_equal(a: TypedPayloadRef | None, b: TypedPayloadRef | None) -> bo
 # RuntimeUnitOfWork                                                            #
 # --------------------------------------------------------------------------- #
 class RuntimeUnitOfWork:
-    """Atomically commit a closed batch of payload/event/budget/CAS commands, or none."""
+    """Atomically commit a closed batch of payload/event/budget/CAS commands, or none.
+
+    ``run_budgets`` is the service-owned run → :class:`RunBudget` authority map
+    shared with :class:`RuntimeStores` (bound once per run via
+    :meth:`RuntimeStores.bind_run_budget`); a batch selects it by ``budget_run_id``
+    and can never carry its own maxima.
+    """
 
     def __init__(
         self,
@@ -757,11 +764,13 @@ class RuntimeUnitOfWork:
         clock: AuthoritativeClock,
         *,
         allowed_cell_namespaces: frozenset[str],
+        run_budgets: dict[str, RunBudget],
     ) -> None:
         self._shared = shared
         self._resolver = resolver
         self._clock = clock
         self._allowed_cell_namespaces = frozenset(allowed_cell_namespaces)
+        self._run_budgets = run_budgets
 
     def commit(self, batch: RuntimeBatch) -> UnitOfWorkResult:
         with self._shared.lock:
@@ -817,8 +826,14 @@ class RuntimeUnitOfWork:
         budget_events: list[BudgetEvent] = []
         if batch.budget_commands:
             run_id = batch.budget_run_id
-            run_budget = batch.budget_run_budget
-            assert run_id is not None and run_budget is not None  # RuntimeBatch validator
+            assert run_id is not None  # RuntimeBatch validator
+            run_budget = self._run_budgets.get(run_id)
+            if run_budget is None:
+                raise UnitOfWorkError(
+                    f"no RunBudget is bound for run {run_id!r}; bind the service "
+                    "authority via RuntimeStores.bind_run_budget before committing "
+                    "budget commands"
+                )
             ledger_id = run_budget.ledger_id
             for command in batch.budget_commands:
                 existing = _find_budget_event(wb, run_id, ledger_id, command.idempotency_key)
@@ -908,6 +923,7 @@ class EventRefusalAuditSink:
     def __init__(self, *, detail_registry: AuditDetailRegistry, clock: AuthoritativeClock) -> None:
         self._registry = detail_registry
         self._clock = clock
+        self._lock = threading.RLock()  # serializes the idempotency probe + append
         self._records: list[EventRefusalRecord] = []
         self._by_key: dict[str, EventRefusalRecord] = {}
         self._details: dict[str, Any] = {}  # object_id → validated safe detail
@@ -943,30 +959,31 @@ class EventRefusalAuditSink:
             attempted_schema_ref=attempted_schema_ref, attempted_namespace=attempted_namespace,
             evidence_digests=tuple(evidence_digests),
         )
-        existing = self._by_key.get(idempotency_key)
-        if existing is not None:
-            if existing.record_digest != candidate.record_digest:
-                raise IdempotencyConflict(
-                    f"refusal idempotency key {idempotency_key!r} reused with different content"
-                )
-            return existing
+        with self._lock:  # probe + append must be one step under concurrency
+            existing = self._by_key.get(idempotency_key)
+            if existing is not None:
+                if existing.record_digest != candidate.record_digest:
+                    raise IdempotencyConflict(
+                        f"refusal idempotency key {idempotency_key!r} reused with different content"
+                    )
+                return existing
 
-        # persist the safe detail in the audit namespace + seal the final record.
-        self._obj_seq += 1
-        object_id = f"audit-detail-{self._obj_seq}"
-        detail_ref = PayloadRef(namespace="audit", object_id=object_id, content_digest=detail_digest)
-        self._rec_seq += 1
-        record = EventRefusalRecord.build(
-            record_id=f"refusal-{self._rec_seq}", occurred_at=occurred_at, reason_code=reason_code,
-            detail_schema_ref=detail_schema_ref, detail_payload_ref=detail_ref,
-            idempotency_key=idempotency_key, attempted_capability_ref=attempted_capability_ref,
-            attempted_schema_ref=attempted_schema_ref, attempted_namespace=attempted_namespace,
-            evidence_digests=tuple(evidence_digests),
-        )
-        self._details[object_id] = detail
-        self._records.append(record)
-        self._by_key[idempotency_key] = record
-        return record
+            # persist the safe detail in the audit namespace + seal the final record.
+            self._obj_seq += 1
+            object_id = f"audit-detail-{self._obj_seq}"
+            detail_ref = PayloadRef(namespace="audit", object_id=object_id, content_digest=detail_digest)
+            self._rec_seq += 1
+            record = EventRefusalRecord.build(
+                record_id=f"refusal-{self._rec_seq}", occurred_at=occurred_at, reason_code=reason_code,
+                detail_schema_ref=detail_schema_ref, detail_payload_ref=detail_ref,
+                idempotency_key=idempotency_key, attempted_capability_ref=attempted_capability_ref,
+                attempted_schema_ref=attempted_schema_ref, attempted_namespace=attempted_namespace,
+                evidence_digests=tuple(evidence_digests),
+            )
+            self._details[object_id] = detail
+            self._records.append(record)
+            self._by_key[idempotency_key] = record
+            return record
 
 
 # --------------------------------------------------------------------------- #
@@ -987,16 +1004,48 @@ class RuntimeStores:
         self._resolver = resolver
         self._clock = clock
         self._allowed_cell_namespaces = frozenset(allowed_cell_namespaces)
+        self._run_budgets: dict[str, RunBudget] = {}
         self.payloads = PayloadStore(self._shared, resolver)
         self.events = EventStore(self._shared, resolver, clock)
         self.cells = RuntimeStateCellStore(self._shared, allowed_namespaces=self._allowed_cell_namespaces)
         self.unit_of_work = RuntimeUnitOfWork(
-            self._shared, resolver, clock, allowed_cell_namespaces=self._allowed_cell_namespaces
+            self._shared, resolver, clock,
+            allowed_cell_namespaces=self._allowed_cell_namespaces,
+            run_budgets=self._run_budgets,
         )
 
     @property
     def resolver(self) -> SchemaRegistryResolver:
         return self._resolver
+
+    def bind_run_budget(self, *, run_id: str, run_budget: RunBudget) -> None:
+        """Bind the single :class:`RunBudget` authority for ``run_id``.
+
+        Service-owned, first-bind-wins: an identical rebind is idempotent; a
+        different RunBudget for the same run is rejected, so two unit-of-work
+        batches can never validate against inconsistent maxima for one run.
+        Mirrors the Task 1 ``BudgetLedger`` constructor guard: the event fold owns
+        all holds, so the RunBudget must be maxima-only.
+        """
+        if (
+            run_budget.reserved_tokens != 0
+            or run_budget.reserved_llm_invocations != 0
+            or run_budget.reserved_concurrency != 0
+        ):
+            raise EventStoreError(
+                "bind_run_budget requires a maxima-only RunBudget (reserved_* == 0); "
+                "the event fold owns all holds"
+            )
+        with self._shared.lock:
+            existing = self._run_budgets.get(run_id)
+            if existing is not None:
+                if existing != run_budget:
+                    raise EventStoreError(
+                        f"run {run_id!r} already has a bound RunBudget with different "
+                        "maxima/ledger; budget authority is bound once per run"
+                    )
+                return  # idempotent identical rebind
+            self._run_budgets[run_id] = run_budget
 
     def budget_event_sink(self, *, run_id: str, ledger_id: str) -> RuntimeBudgetEventSink:
         return RuntimeBudgetEventSink(self._shared, self._clock, run_id=run_id, ledger_id=ledger_id)

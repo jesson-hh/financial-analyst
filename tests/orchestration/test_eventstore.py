@@ -282,6 +282,21 @@ def test_append_rejects_a_schema_ref_that_differs_from_the_stored_payload():
     assert stores.events.journal("run-1", "main") == ()
 
 
+def test_append_rejects_a_registry_digest_that_differs_from_the_stored_payload():
+    # an event cannot declare a different (even valid, sealed) registry than the
+    # exact one its payload was validated/stored under.
+    stores, digest = _stores()
+    ref = _put(stores, digest, _research())
+    later = SchemaRegistry()
+    later.register(ResearchPlan)
+    later.seal()
+    later_digest = stores.resolver.register(later)
+    assert later_digest != digest
+    with pytest.raises(EventStoreError):
+        _append(stores, later_digest, ref, event_type="LayerCommitted")
+    assert stores.events.journal("run-1", "main") == ()
+
+
 def test_journal_and_visible_cursors_are_monotonic_and_store_assigned():
     stores, digest = _stores()
     r1 = _put(stores, digest, _research(rationale="one"), idem="p1")
@@ -433,9 +448,10 @@ def _reserve_plan_command(idem="rp") -> BudgetTransitionCommand:
 
 def test_uow_commits_payload_event_and_budget_atomically():
     stores, digest = _stores()
+    stores.bind_run_budget(run_id="run-1", run_budget=_plan_run_budget())
     batch = RuntimeBatch(
         idempotency_key="batch-1",
-        budget_run_id="run-1", budget_run_budget=_plan_run_budget(),
+        budget_run_id="run-1",
         payload_puts=(PayloadPutCommand(
             staged_key=StagedPayloadKey(key="a"),
             schema_ref=SchemaRef(name="ResearchPlan", version="1"),
@@ -466,10 +482,11 @@ def test_uow_commits_payload_event_and_budget_atomically():
 
 def test_uow_mid_batch_failure_leaves_no_orphan_payload_event_or_budget():
     stores, digest = _stores()
+    stores.bind_run_budget(run_id="run-1", run_budget=_plan_run_budget())
     # the event command targets an unknown staged key → the whole batch fails.
     batch = RuntimeBatch(
         idempotency_key="batch-bad",
-        budget_run_id="run-1", budget_run_budget=_plan_run_budget(),
+        budget_run_id="run-1",
         payload_puts=(PayloadPutCommand(
             staged_key=StagedPayloadKey(key="a"),
             schema_ref=SchemaRef(name="ResearchPlan", version="1"), namespace="main",
@@ -496,6 +513,7 @@ def test_uow_budget_precondition_failure_aborts_the_whole_batch():
     resolver = SchemaRegistryResolver()
     digest = resolver.register(default_registry())
     stores = RuntimeStores(resolver=resolver, clock=AdvancingClock())
+    stores.bind_run_budget(run_id="run-1", run_budget=_plan_run_budget())
     over = BudgetTransitionCommand(
         operation="reserve_plan",
         semantic_args=budget_mod.ReservePlanArgs(
@@ -504,7 +522,7 @@ def test_uow_budget_precondition_failure_aborts_the_whole_batch():
         idempotency_key="rp-over",
     )
     batch = RuntimeBatch(
-        idempotency_key="batch-over", budget_run_id="run-1", budget_run_budget=_plan_run_budget(),
+        idempotency_key="batch-over", budget_run_id="run-1",
         payload_puts=(PayloadPutCommand(
             staged_key=StagedPayloadKey(key="a"),
             schema_ref=SchemaRef(name="ResearchPlan", version="1"), namespace="main",
@@ -519,18 +537,76 @@ def test_uow_budget_precondition_failure_aborts_the_whole_batch():
     assert stores.budget_event_sink(run_id="run-1", ledger_id="ledger-1").budget_events() == ()
 
 
-def test_uow_batch_rejects_a_non_maxima_only_run_budget():
-    # inherited Task 1 semantics: the event fold owns all holds, so a RunBudget
-    # carrying pre-populated reserved_* totals is rejected at batch construction.
+def test_batch_cannot_carry_its_own_run_budget():
+    # the RunBudget is service authority bound once per run via bind_run_budget;
+    # a batch structurally cannot carry maxima of its own (extra=forbid).
     with pytest.raises(ValidationError):
         RuntimeBatch(
-            idempotency_key="batch-rb",
-            budget_run_id="run-1",
-            budget_run_budget=RunBudget(
-                ledger_id="ledger-1", max_tokens=5000, max_llm_invocations=40,
-                max_concurrency=8, reserved_tokens=100),
+            idempotency_key="batch-rb", budget_run_id="run-1",
+            budget_run_budget=_plan_run_budget(),
             budget_commands=(_reserve_plan_command(),),
         )
+
+
+def test_bind_run_budget_rejects_a_non_maxima_only_run_budget():
+    # inherited Task 1 semantics: the event fold owns all holds.
+    stores, _ = _stores()
+    with pytest.raises(EventStoreError):
+        stores.bind_run_budget(run_id="run-1", run_budget=RunBudget(
+            ledger_id="ledger-1", max_tokens=5000, max_llm_invocations=40,
+            max_concurrency=8, reserved_tokens=100))
+
+
+def test_rebinding_a_different_run_budget_for_the_same_run_is_rejected():
+    """Two batches for one run can never validate against inconsistent maxima:
+    the second bind with different maxima fails with an honest error, no budget
+    event is ever appended against the wrong ceiling, and commits keep
+    validating against the originally bound authority."""
+    stores, digest = _stores()
+    stores.bind_run_budget(run_id="run-1", run_budget=RunBudget(
+        ledger_id="ledger-1", max_tokens=1000, max_llm_invocations=10, max_concurrency=2))
+    with pytest.raises(EventStoreError) as excinfo:
+        stores.bind_run_budget(run_id="run-1", run_budget=RunBudget(
+            ledger_id="ledger-1", max_tokens=5000, max_llm_invocations=10, max_concurrency=2))
+    assert "already has a bound RunBudget" in str(excinfo.value)
+    # a reservation above the ORIGINAL maxima still fails — the inflated ceiling
+    # never took effect and no event was appended.
+    over = BudgetTransitionCommand(
+        operation="reserve_plan",
+        semantic_args=budget_mod.ReservePlanArgs(
+            request_id="req-1", candidate_plan_digest=DA,
+            reserved_tokens=4000, reserved_llm_invocations=1, reserved_concurrency=1),
+        idempotency_key="rp-4000")
+    with pytest.raises(BudgetExceeded):
+        stores.unit_of_work.commit(RuntimeBatch(
+            idempotency_key="b-over", budget_run_id="run-1", budget_commands=(over,)))
+    assert stores.budget_event_sink(run_id="run-1", ledger_id="ledger-1").budget_events() == ()
+
+
+def test_identical_rebind_is_idempotent_and_batches_use_the_bound_maxima():
+    stores, digest = _stores()
+    rb = _plan_run_budget()
+    stores.bind_run_budget(run_id="run-1", run_budget=rb)
+    stores.bind_run_budget(run_id="run-1", run_budget=rb)  # idempotent, no error
+    stores.unit_of_work.commit(RuntimeBatch(
+        idempotency_key="b-ok", budget_run_id="run-1",
+        budget_commands=(_reserve_plan_command(idem="rp-ok"),)))
+    # replay is unaffected: a fresh Task 1 ledger over the production sink folds
+    # the committed event identically.
+    ledger = BudgetLedger(
+        sink=stores.budget_event_sink(run_id="run-1", ledger_id="ledger-1"), run_budget=rb)
+    assert ledger.get_active_plan("req-1", DA) is not None
+    assert ledger.available().tokens == rb.max_tokens - 1000
+
+
+def test_uow_budget_commands_without_a_bound_run_budget_fail_honestly():
+    stores, _ = _stores()
+    with pytest.raises(UnitOfWorkError) as excinfo:
+        stores.unit_of_work.commit(RuntimeBatch(
+            idempotency_key="b-unbound", budget_run_id="run-1",
+            budget_commands=(_reserve_plan_command(),)))
+    assert "bind_run_budget" in str(excinfo.value)
+    assert stores.budget_event_sink(run_id="run-1", ledger_id="ledger-1").budget_events() == ()
 
 
 def test_identical_uow_replay_returns_the_original_result():
