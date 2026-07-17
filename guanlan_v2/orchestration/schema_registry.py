@@ -270,6 +270,11 @@ _R_PHASE3_DATA_PAYLOAD = (
     "registry (guanlan_v2.orchestration.data.schema_registry.build_phase3_registry), "
     "never by the Phase-1 default registry"
 )
+_R_PHASE3_MEMORY_PAYLOAD = (
+    "Phase-3 memory-layer payload/value registered by the Task 9 cumulative FULL "
+    "registry (guanlan_v2.orchestration.memory.schema_registry."
+    "build_phase3_full_registry), never by the Phase-1 default registry"
+)
 #: cache for the lazily-built population (see :func:`_load_population`).
 _POPULATION: dict[str, Any] | None = None
 
@@ -430,6 +435,16 @@ def _load_population() -> dict[str, Any]:
     internal.update(_dcatalog.CATALOG_INTERNAL_MODELS)
     # Task 6 dispatch-owned policy extension (classification only; unregistered).
     internal.update(_dregistry.REGISTRY_INTERNAL_MODELS)
+
+    # -- Phase-3 Task-9 memory-layer module (classification only; the Phase-1
+    # registry/golden are untouched). Every registered memory payload is listed
+    # in the reviewed MEMORY_PUBLIC_MODELS tuple and registered ONLY by the
+    # Task-9 cumulative FULL registry; internal memory carriers are deliberately
+    # non-ContractModel types, so they never reach this firewall.
+    from guanlan_v2.orchestration.memory import models as _memory_models
+
+    for model in _memory_models.MEMORY_PUBLIC_MODELS:
+        internal[model] = _R_PHASE3_MEMORY_PAYLOAD
 
     overlap = set(public) & set(internal)
     if overlap:  # pragma: no cover - reviewed invariant, guards a future edit

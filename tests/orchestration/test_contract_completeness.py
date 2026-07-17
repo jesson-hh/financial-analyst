@@ -61,6 +61,7 @@ PHASE1_MODULES: tuple[str, ...] = (
     "guanlan_v2.orchestration.data.render",
     "guanlan_v2.orchestration.data.catalog",
     "guanlan_v2.orchestration.data.registry",
+    "guanlan_v2.orchestration.memory.models",
     "guanlan_v2.orchestration.schemas",
     "guanlan_v2.orchestration.context",
     "guanlan_v2.orchestration.events",
