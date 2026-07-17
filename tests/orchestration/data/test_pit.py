@@ -95,8 +95,10 @@ class SpyRecorder:
             raise RuntimeError("audit sink is down")
 
 
-def _clock_spec(*, as_of: datetime = AS_OF, calendar_id: str = CAL_ID) -> ClockSpec:
-    return ClockSpec(as_of=as_of, timezone="Asia/Shanghai", calendar_id=calendar_id)
+def _clock_spec(
+    *, as_of: datetime = AS_OF, calendar_id: str = CAL_ID, tz: str = "Asia/Shanghai"
+) -> ClockSpec:
+    return ClockSpec(as_of=as_of, timezone=tz, calendar_id=calendar_id)
 
 
 def _ctx(
@@ -106,10 +108,12 @@ def _ctx(
     strict_pit: bool = False,
     calendar_id: str = CAL_ID,
     vintage_manifest_digest: str | None = None,
+    as_of: datetime = AS_OF,
+    tz: str = "Asia/Shanghai",
 ) -> DataContext:
     return DataContext(
-        as_of=AS_OF,
-        clock=_clock_spec(calendar_id=calendar_id),
+        as_of=as_of,
+        clock=_clock_spec(as_of=as_of, calendar_id=calendar_id, tz=tz),
         mode=mode,
         backend=backend,
         strict_pit=strict_pit,
@@ -121,7 +125,7 @@ def _ctx(
         data_snapshot_id="snap-1",
         data_snapshot_content_digest=DD,
         vintage_manifest_digest=vintage_manifest_digest,
-        built_at=AS_OF,
+        built_at=as_of,
     )
 
 
@@ -150,12 +154,17 @@ def _cand(
     )
 
 
-def _guard(ctx: DataContext | None = None, recorder: SpyRecorder | None = None) -> PitGuard:
+def _guard(
+    ctx: DataContext | None = None,
+    recorder: SpyRecorder | None = None,
+    *,
+    calendar=CALENDAR,
+) -> PitGuard:
     ctx = ctx if ctx is not None else _ctx()
     return PitGuard.from_context(
         ctx,
-        clock=FixedClock(AS_OF),
-        calendar=CALENDAR,
+        clock=FixedClock(ctx.as_of),
+        calendar=calendar,
         refusal_recorder=recorder if recorder is not None else SpyRecorder(),
     )
 
@@ -607,3 +616,162 @@ def test_refusal_detail_stage_matrix_is_enforced():
         DataFetchRefusalDetails.build(
             reason_code="future_data", stage="context_validation", **common,
         )
+
+
+# =========================================================================== #
+# Review fixes — calendar-coverage span assertion (no silent undercount)       #
+# =========================================================================== #
+def _short_calendar(start: date, end: date, *, material_id: str):
+    return build_trading_calendar(
+        calendar_id=CAL_ID,
+        sessions=tuple(d for d in _weekdays_2026() if start <= d <= end),
+        material_id=material_id,
+        material_version="1",
+    )
+
+
+def test_session_freshness_material_ending_before_as_of_is_loud():
+    # Material ends 2026-06-30 but as_of reduces to local 2026-07-15: counting
+    # across the uncovered tail would silently undercount elapsed sessions and
+    # pass stale data as fresh (a generous max=100 WOULD have passed pre-fix).
+    short = _short_calendar(date(2026, 1, 1), date(2026, 6, 30), material_id="cal.cn.h1")
+    ctx = _ctx()
+    guard = _guard(ctx, calendar=short)
+    latest = datetime(2026, 6, 15, 6, 0, tzinfo=UTC)  # inside the material
+    with pytest.raises(SnapshotMismatchError, match="cover"):
+        guard.check_raw(
+            (_cand(latest),),
+            freshness=_session_policy(100, calendar=short),
+            **_req_kwargs(ctx),
+        )
+
+
+def test_session_freshness_material_starting_after_latest_is_loud():
+    short = _short_calendar(date(2026, 7, 1), date(2026, 12, 31), material_id="cal.cn.h2")
+    ctx = _ctx()
+    guard = _guard(ctx, calendar=short)
+    latest = datetime(2026, 6, 15, 6, 0, tzinfo=UTC)  # before the covered span
+    with pytest.raises(SnapshotMismatchError, match="cover"):
+        guard.check_raw(
+            (_cand(latest),),
+            freshness=_session_policy(100, calendar=short),
+            **_req_kwargs(ctx),
+        )
+
+
+def test_session_freshness_empty_material_is_loud():
+    empty = build_trading_calendar(
+        calendar_id=CAL_ID, sessions=(), material_id="cal.cn.empty", material_version="1"
+    )
+    ctx = _ctx()
+    guard = _guard(ctx, calendar=empty)
+    with pytest.raises(SnapshotMismatchError):
+        guard.check_raw(
+            (_cand(AS_OF - timedelta(days=1)),),
+            freshness=_session_policy(1, calendar=empty),
+            **_req_kwargs(ctx),
+        )
+
+
+def test_session_freshness_covered_range_behavior_unchanged():
+    # explicit no-regression: a material spanning the counted range behaves as before.
+    ctx = _ctx()
+    guard = _guard(ctx)
+    latest = datetime(2026, 7, 14, 6, 0, tzinfo=UTC)  # 1 session behind, covered
+    rows, audit = guard.check_raw(
+        (_cand(latest),), freshness=_session_policy(1), **_req_kwargs(ctx)
+    )
+    assert audit.guard_result == "passed"
+
+
+# =========================================================================== #
+# Review fixes — LOCAL trading dates, not UTC dates, near the day boundary     #
+# =========================================================================== #
+def test_session_freshness_counts_local_trading_dates_not_utc():
+    # as_of 2026-07-14 20:00 UTC == 2026-07-15 04:00 Asia/Shanghai (local Wed);
+    # latest 2026-07-14 10:00 UTC == 18:00 CST Tue 07-14. UTC dates are BOTH
+    # 07-14 (0 sessions behind → a UTC reduction would pass); LOCAL trading
+    # dates are Tue vs Wed (1 session behind) → stale at max=0.
+    boundary_as_of = datetime(2026, 7, 14, 20, 0, tzinfo=UTC)
+    ctx = _ctx(as_of=boundary_as_of)
+    guard = _guard(ctx)
+    latest = datetime(2026, 7, 14, 10, 0, tzinfo=UTC)
+    with pytest.raises(StaleDataError):
+        guard.check_raw(
+            (_cand(latest),), freshness=_session_policy(0), **_req_kwargs(ctx)
+        )
+
+
+def test_session_freshness_same_local_date_across_utc_midnight_is_fresh():
+    # latest 2026-07-14 16:30 UTC == 00:30 CST Wed 07-15 — the SAME local trading
+    # date as as_of → 0 sessions behind → fresh even at max=0.
+    boundary_as_of = datetime(2026, 7, 14, 20, 0, tzinfo=UTC)
+    ctx = _ctx(as_of=boundary_as_of)
+    guard = _guard(ctx)
+    latest = datetime(2026, 7, 14, 16, 30, tzinfo=UTC)
+    rows, audit = guard.check_raw(
+        (_cand(latest),), freshness=_session_policy(0), **_req_kwargs(ctx)
+    )
+    assert audit.guard_result == "passed"
+
+
+def test_unresolvable_clock_timezone_is_loud_no_utc_fallback():
+    ctx = _ctx(tz="Not/AZone")
+    guard = _guard(ctx)
+    with pytest.raises(RoutingConfigurationError):
+        guard.check_raw(
+            (_cand(AS_OF - timedelta(days=1)),),
+            freshness=_session_policy(1),
+            **_req_kwargs(ctx),
+        )
+    # the elapsed-duration path stays pure instant math — no timezone needed.
+    rows, audit = guard.check_raw(
+        (_cand(AS_OF - timedelta(seconds=10)),),
+        freshness=_elapsed_policy(60),
+        **_req_kwargs(ctx),
+    )
+    assert audit.guard_result == "passed"
+
+
+# =========================================================================== #
+# Review fix (Minor) — mixed missing+naive batch: detail internally consistent #
+# =========================================================================== #
+def test_mixed_missing_and_naive_batch_detail_is_internally_consistent():
+    # a mixed batch refuses as missing_availability; the offending metadata digest
+    # covers BOTH availability-unprovable rows (missing + naive, candidate order)
+    # and matches the audit's missing_available_at_rows == 2.
+    ctx = _ctx()
+    rec = SpyRecorder()
+    guard = _guard(ctx, rec)
+    m = _cand(None)
+    n = _cand(datetime(2026, 7, 14, 6, 0))  # naive
+    with pytest.raises(MissingAvailabilityRefused):
+        guard.check_raw((m, n), **_req_kwargs(ctx))
+    detail = rec.calls[0][0]
+    assert detail.reason_code == "missing_availability"
+    expected_meta = [
+        {
+            "raw_content_digest": m.raw_content_digest,
+            "availability_status": "missing",
+            "revision_id": m.revision_id,
+            "required": m.required,
+        },
+        {
+            "raw_content_digest": n.raw_content_digest,
+            "availability_status": "naive",
+            "revision_id": n.revision_id,
+            "required": n.required,
+        },
+    ]
+    assert detail.candidate_metadata_digest == content_digest(expected_meta)
+    expected_audit = PitAudit(
+        mode=DataMode.ONLINE,
+        as_of=AS_OF,
+        rows_seen=2,
+        rows_returned=0,
+        future_rows=0,
+        missing_available_at_rows=2,
+        guard_result="refused",
+        latest_available_at=None,
+    )
+    assert detail.pit_audit_digest == content_digest(expected_audit)

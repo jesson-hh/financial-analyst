@@ -48,6 +48,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, ClassVar, Literal, Protocol, runtime_checkable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import model_validator
 
@@ -488,9 +489,16 @@ class PitGuard:
         ]
 
         if missing:
+            # the audit counts every availability-unprovable row (missing + naive),
+            # so the offending metadata carries the SAME set, in candidate order —
+            # detail and audit stay internally consistent on a mixed batch.
+            unprovable = tuple(
+                c for c in candidates
+                if c.available_at is None or not _is_aware(c.available_at)
+            )
             self._refuse_candidates(
                 reason_code="missing_availability",
-                offending=tuple(missing),
+                offending=unprovable,
                 rows_seen=len(candidates),
                 missing_rows=len(missing) + len(naive),
                 future_rows=len(future),
@@ -559,6 +567,23 @@ class PitGuard:
         ]
         return max(aware) if aware else None
 
+    def _clock_zone(self) -> ZoneInfo:
+        """Resolve the frozen clock's declared reasoning timezone — no UTC fallback.
+
+        A trading calendar is keyed on *local* trading dates (``ClockSpec.timezone``,
+        e.g. ``Asia/Shanghai``); reducing an instant to a UTC date would be off by
+        one near the local day boundary. An unresolvable zone fails loudly rather
+        than silently falling back to UTC date arithmetic.
+        """
+        tz_name = self._ctx.clock.timezone
+        try:
+            return ZoneInfo(tz_name)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise RoutingConfigurationError(
+                f"cannot resolve the frozen clock timezone {tz_name!r} for local "
+                "session-date reduction; there is no silent UTC fallback"
+            ) from exc
+
     def _check_freshness(
         self, policy: FreshnessPolicy, latest: datetime, *, rows_seen: int
     ) -> None:
@@ -571,8 +596,31 @@ class PitGuard:
                     "session-based freshness policy calendar does not match the guard's "
                     "trading calendar; there is no session-arithmetic fallback"
                 )
-            latest_date = latest.date()
-            span = self._calendar.sessions_between(latest_date, self._as_of.date())
+            # session counting runs on LOCAL trading dates (the clock's declared
+            # timezone), never UTC dates — an instant after the local midnight is
+            # already the next trading date.
+            tz = self._clock_zone()
+            latest_date = latest.astimezone(tz).date()
+            as_of_date = self._as_of.astimezone(tz).date()
+            # the material must SPAN the counted range: a session absent from the
+            # material because the range is uncovered is not "zero sessions" — it
+            # would silently undercount elapsed sessions and pass stale data as
+            # fresh. An uncovered range is a snapshot-integrity fault, loud.
+            coverage = self._calendar.coverage
+            if coverage is None:
+                raise SnapshotMismatchError(
+                    "trading-calendar material is empty; session freshness cannot "
+                    "be evaluated (no covered range)"
+                )
+            lo, hi = coverage
+            if latest_date < lo or as_of_date > hi:
+                raise SnapshotMismatchError(
+                    "trading-calendar material covers "
+                    f"[{lo.isoformat()}, {hi.isoformat()}] but session freshness "
+                    f"must count [{latest_date.isoformat()}, {as_of_date.isoformat()}]; "
+                    "an uncovered range cannot be counted (no silent undercount)"
+                )
+            span = self._calendar.sessions_between(latest_date, as_of_date)
             sessions_since = span - (1 if self._calendar.is_session(latest_date) else 0)
             if sessions_since > policy.max_trading_sessions:
                 raise StaleDataError(

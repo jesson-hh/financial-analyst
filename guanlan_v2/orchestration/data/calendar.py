@@ -107,9 +107,16 @@ class TradingCalendar(Protocol):
     @property
     def material_ref(self) -> ContentRef: ...
 
-    def is_session(self, day: date) -> bool: ...
+    @property
+    def coverage(self) -> tuple[date, date] | None:
+        """The material's covered span ``(first_session, last_session)``.
 
-    def sessions_between(self, start: date, end: date) -> int: ...
+        ``None`` for an empty material. A consumer counting sessions over a range
+        MUST first assert the range lies inside this span — a date outside the
+        material is *uncovered*, not "zero sessions", and counting across it would
+        silently undercount.
+        """
+        ...
 
 
 class ImmutableTradingCalendar:
@@ -121,7 +128,7 @@ class ImmutableTradingCalendar:
     trusted as exactly the material its ref names.
     """
 
-    __slots__ = ("_material", "_material_ref", "_sessions")
+    __slots__ = ("_material", "_material_ref", "_sessions", "_coverage")
 
     def __init__(
         self, *, material: TradingCalendarMaterial, material_ref: ContentRef
@@ -136,6 +143,9 @@ class ImmutableTradingCalendar:
         self._sessions: frozenset[date] = frozenset(
             date.fromisoformat(s) for s in material.sessions
         )
+        self._coverage: tuple[date, date] | None = (
+            (min(self._sessions), max(self._sessions)) if self._sessions else None
+        )
 
     @property
     def calendar_id(self) -> str:
@@ -148,6 +158,10 @@ class ImmutableTradingCalendar:
     @property
     def material(self) -> TradingCalendarMaterial:
         return self._material
+
+    @property
+    def coverage(self) -> tuple[date, date] | None:
+        return self._coverage
 
     def is_session(self, day: date) -> bool:
         return _require_pure_date(day, arg="day") in self._sessions
