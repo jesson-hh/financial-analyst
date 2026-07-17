@@ -1277,6 +1277,12 @@ class BridgeOpenRequest:
     capability_gateway: CapabilityGateway
     evidence_writer: BridgeEvidenceWriter
     reader: Any
+    #: the continued shared node sequencer (the same instance stage 1 used). A
+    #: provider that needs additional executor-issued evidence tokens (e.g. the
+    #: Phase-3 data bridge's per-route attempt tokens) draws them HERE — it can
+    #: never mint an ordinal itself. Optional for backward compatibility with
+    #: providers that only echo their single prepared-handle token.
+    sequencer: "ExecutionEvidenceSequencer | None" = None
 
 
 # --------------------------------------------------------------------------- #
@@ -1436,7 +1442,7 @@ class ExecutionBridgeResolver:
             req = BridgeOpenRequest(
                 plan=plan, node=self._node, worker=self._worker, bridge=rb, summary=summary,
                 handle=handle, input_snapshot=input_snapshot, capability_gateway=capability_gateway,
-                evidence_writer=evidence_writer, reader=reader)
+                evidence_writer=evidence_writer, reader=reader, sequencer=self._sequencer)
             session = provider.open_execution(req)
             outcome = session.freeze_for_execution(kind=kind)
             if outcome.status != "completed" or outcome.frozen_contribution is None:
