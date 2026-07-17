@@ -99,3 +99,67 @@ class LimitRule(DigestModel):
     pct: FiniteFloat | None = Field(default=None, gt=0, le=1)
     reason: str
     rule_version: str
+
+
+# ── syntactic, path-safe symbol normalization ──────────────────────────────
+#: The three complete external grammars. Each is anchored (``fullmatch``) so a
+#: partial or embedded code can never sneak through: only a bare six-digit code
+#: (``600519``), a dotted form (``600519.SH``) or an engine form (``SH600519``)
+#: is accepted. There is deliberately no lenient/"repair" path.
+_BARE_RE = re.compile(r"^(?P<code>[0-9]{6})$")
+_DOTTED_RE = re.compile(r"^(?P<code>[0-9]{6})\.(?P<exchange>SH|SZ|BJ)$")
+_ENGINE_RE = re.compile(r"^(?P<exchange>SH|SZ|BJ)(?P<code>[0-9]{6})$")
+
+
+def normalize_symbol(raw: str) -> Symbol:
+    """Normalize a complete A-share symbol string into a :class:`Symbol`.
+
+    Purely syntactic and offline: it only reshapes a *complete* bare / dotted /
+    engine code and infers ``exchange``/``board`` from the 号段. It never touches
+    the network and never infers ST status, listing stage, or the day's
+    price-limit — those are metadata, not shape.
+
+    Inference rules (prefix → exchange, board):
+
+    * ``688`` → ``SH``/``star`` (科创板)
+    * ``300`` / ``301`` → ``SZ``/``chinext`` (创业板)
+    * leading ``8`` or ``4`` → ``BJ``/``bj`` (北交所)
+    * leading ``6`` → ``SH``/``main``
+    * otherwise → ``SZ``/``main``
+
+    Anything that is not one of the three complete grammars — an embedded code,
+    trailing junk, multiple codes, the wrong number of digits — is rejected with
+    a :class:`ValueError` rather than silently repaired. A non-string ``raw``
+    (including ``bool``, which subclasses ``int``) raises :class:`TypeError`; no
+    coercion is attempted. When the caller supplies an explicit exchange that
+    disagrees with the code-derived one, that too is a :class:`ValueError`
+    (message mentions ``exchange``) — the conflict is surfaced, never resolved by
+    fiat.
+
+    The returned :attr:`Symbol.code` always matches ``^[0-9]{6}$`` and is thus
+    safe to use as a cache-key component.
+    """
+    if type(raw) is not str:
+        raise TypeError(f"symbol must be a str, got {type(raw).__name__}")
+    s = raw.strip().upper()
+    m = _BARE_RE.fullmatch(s) or _DOTTED_RE.fullmatch(s) or _ENGINE_RE.fullmatch(s)
+    if m is None:
+        raise ValueError(f"unsupported A-share symbol grammar: {raw!r}")
+    code = m.group("code")
+    explicit_exchange = m.groupdict().get("exchange")
+    if code.startswith("688"):
+        exchange, board = "SH", "star"
+    elif code.startswith(("300", "301")):
+        exchange, board = "SZ", "chinext"
+    elif code[0] in ("8", "4"):
+        exchange, board = "BJ", "bj"
+    elif code[0] == "6":
+        exchange, board = "SH", "main"
+    else:
+        exchange, board = "SZ", "main"
+    if explicit_exchange is not None and explicit_exchange != exchange:
+        raise ValueError(
+            f"explicit exchange {explicit_exchange} conflicts with "
+            f"code-derived exchange {exchange} for {code}"
+        )
+    return Symbol(code=code, exchange=exchange, board=board)
