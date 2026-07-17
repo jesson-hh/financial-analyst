@@ -171,6 +171,70 @@ def test_missing_availability_message_passthrough():
 
 
 # --------------------------------------------------------------------------- #
+# Programmatic partition enforcement — closes the future-additions hole
+# --------------------------------------------------------------------------- #
+# The hardcoded tests above pin today's exact 12-class shape; the walk below
+# subjects EVERY DataError subclass that will ever exist (transitively, wherever
+# defined) to the routing invariants, so a future addition cannot silently
+# escape them.
+
+_FALLBACK_ROOTS = (e.RateLimitError, e.NotConfiguredError)
+_TERMINATE_ROOTS = (e.NoDataError, e.StaleDataError)
+
+
+def _all_subclasses(cls: type) -> set[type]:
+    """Transitively collect every subclass of ``cls`` (deduped)."""
+    seen: set[type] = set()
+    stack = [cls]
+    while stack:
+        for sub in stack.pop().__subclasses__():
+            if sub not in seen:
+                seen.add(sub)
+                stack.append(sub)
+    return seen
+
+
+def test_walk_discovers_the_known_taxonomy():
+    # Sanity: the walk sees at least the 11 concrete classes + integrity base.
+    discovered = _all_subclasses(e.DataError)
+    assert {
+        e.NoDataError, e.StaleDataError, e.RateLimitError, e.NotConfiguredError,
+        e.FutureDataRefused, e.MissingAvailabilityRefused, e.DataIntegrityError,
+        e.SourceBrokenError, e.RoutingConfigurationError, e.SnapshotMismatchError,
+        e.CacheIntegrityError, e.LiveFallbackRefused,
+    } <= discovered
+
+
+def test_taxonomy_partition_is_total_and_disjoint():
+    # (c) the two fallback triggers stay mutually disjoint.
+    assert not issubclass(e.RateLimitError, e.NotConfiguredError)
+    assert not issubclass(e.NotConfiguredError, e.RateLimitError)
+
+    for cls in _all_subclasses(e.DataError):
+        # (a) every discovered class is catchable as DataError.
+        assert issubclass(cls, e.DataError), cls
+        with pytest.raises(e.DataError):
+            raise cls.__new__(cls)  # bypass __init__: works for any signature
+
+        in_fallback = issubclass(cls, _FALLBACK_ROOTS)
+        in_terminate = issubclass(cls, _TERMINATE_ROOTS)
+        in_raise = not (in_fallback or in_terminate)
+
+        # (d) exactly one routing bucket: fallback / typed-terminate / raise.
+        assert sum((in_fallback, in_terminate, in_raise)) == 1, cls
+
+        # (b) nothing outside the fallback subtrees may cross INTO them:
+        # the integrity family and the PIT refusals are raise-only, and the
+        # typed terminals may never double as fallback triggers.
+        if issubclass(cls, e.DataIntegrityError):
+            assert in_raise, f"{cls} is integrity but not raise-only"
+        if issubclass(cls, (e.FutureDataRefused, e.MissingAvailabilityRefused)):
+            assert in_raise, f"{cls} is a PIT refusal but not raise-only"
+        if in_terminate:
+            assert not in_fallback, f"{cls} is terminal yet a fallback trigger"
+
+
+# --------------------------------------------------------------------------- #
 # Catch-as-DataError (broad handler still works after typed catches)
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize(
