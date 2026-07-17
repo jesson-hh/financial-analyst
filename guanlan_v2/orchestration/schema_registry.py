@@ -265,6 +265,11 @@ _R_DATA_REFUSAL_DETAIL = (
     "Phase-3 audit-detail refusal record validated by the Task 5 audit-detail registry, "
     "not a node-output payload resolved via the Phase-1 schema registry"
 )
+_R_PHASE3_DATA_PAYLOAD = (
+    "Phase-3 data-layer payload/value registered by the Task 5 cumulative data schema "
+    "registry (guanlan_v2.orchestration.data.schema_registry.build_phase3_registry), "
+    "never by the Phase-1 default registry"
+)
 #: cache for the lazily-built population (see :func:`_load_population`).
 _POPULATION: dict[str, Any] | None = None
 
@@ -291,6 +296,10 @@ def _load_population() -> dict[str, Any]:
     from guanlan_v2.orchestration.data import result as _result
     from guanlan_v2.orchestration.data import calendar as _calendar
     from guanlan_v2.orchestration.data import pit as _pit
+    from guanlan_v2.orchestration.data import source as _dsource
+    from guanlan_v2.orchestration.data import snapshot as _dsnapshot
+    from guanlan_v2.orchestration.data import render as _drender
+    from guanlan_v2.orchestration.data import catalog as _dcatalog
 
     # -- registered: node-output value payloads + committed context/memory facts.
     public: tuple[type[ContractModel], ...] = (
@@ -400,6 +409,24 @@ def _load_population() -> dict[str, Any]:
         _migration.LegacyInputMapping: _R_MIGRATION_ADAPTER,
         _migration.LegacyGraphMapping: _R_MIGRATION_ADAPTER,
     }
+
+    # -- Phase-3 Task-5 data-layer modules (classification only; the Phase-1
+    # registry/golden are untouched). Every registered Phase-3 payload is listed
+    # in its module's reviewed *_PUBLIC_MODELS tuple (and registered ONLY by the
+    # Phase-3 cumulative data registry); the frozen dispatch carriers keep their
+    # module-reviewed reasons. A model missing from those tuples stays
+    # unclassified here and still fails this firewall.
+    for model in (
+        _dsource.SOURCE_PUBLIC_MODELS
+        + _dsnapshot.SNAPSHOT_PUBLIC_MODELS
+        + _drender.RENDER_PUBLIC_MODELS
+        + _dcatalog.CATALOG_PUBLIC_MODELS
+    ):
+        internal[model] = _R_PHASE3_DATA_PAYLOAD
+    internal.update(_dsource.SOURCE_INTERNAL_MODELS)
+    internal.update(_dsnapshot.SNAPSHOT_INTERNAL_MODELS)
+    internal.update(_drender.RENDER_INTERNAL_MODELS)
+    internal.update(_dcatalog.CATALOG_INTERNAL_MODELS)
 
     overlap = set(public) & set(internal)
     if overlap:  # pragma: no cover - reviewed invariant, guards a future edit
