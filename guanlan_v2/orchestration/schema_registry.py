@@ -253,6 +253,18 @@ _R_CALENDAR_MATERIAL = (
     "immutable Phase-3 trading-calendar session material value referenced by a "
     "ContentRef; a data-layer material, not a SchemaRef-addressed node-output payload"
 )
+_R_DATA_RAW_CANDIDATE = (
+    "Phase-3 pre-validation raw-row candidate envelope; not consumable data, "
+    "registered by the Task 5 data schema registry, never by the Phase-1 default registry"
+)
+_R_DATA_FRESHNESS_POLICY = (
+    "versioned Phase-3 freshness-policy value sealed by its own digest and registered "
+    "by the Task 5 data schema registry, never by the Phase-1 default registry"
+)
+_R_DATA_REFUSAL_DETAIL = (
+    "Phase-3 audit-detail refusal record validated by the Task 5 audit-detail registry, "
+    "not a node-output payload resolved via the Phase-1 schema registry"
+)
 #: cache for the lazily-built population (see :func:`_load_population`).
 _POPULATION: dict[str, Any] | None = None
 
@@ -278,6 +290,7 @@ def _load_population() -> dict[str, Any]:
     from guanlan_v2.orchestration.data import symbols as _symbols
     from guanlan_v2.orchestration.data import result as _result
     from guanlan_v2.orchestration.data import calendar as _calendar
+    from guanlan_v2.orchestration.data import pit as _pit
 
     # -- registered: node-output value payloads + committed context/memory facts.
     public: tuple[type[ContractModel], ...] = (
@@ -318,6 +331,10 @@ def _load_population() -> dict[str, Any]:
         _symbols.LimitRuleEntry: _R_NESTED_COMPONENT,
         # data/calendar.py — immutable Phase-3 trading-calendar session material
         _calendar.TradingCalendarMaterial: _R_CALENDAR_MATERIAL,
+        # data/pit.py — Phase-3 PIT-firewall data-layer facts (Task 5 registers them)
+        _pit.RawRowCandidate: _R_DATA_RAW_CANDIDATE,
+        _pit.FreshnessPolicy: _R_DATA_FRESHNESS_POLICY,
+        _pit.DataFetchRefusalDetails: _R_DATA_REFUSAL_DETAIL,
         # data/result.py — envelope + nested components + abstract PIT base
         _result.DataResult: _R_GENERIC_ENVELOPE,
         _result.SourceAttempt: _R_NESTED_COMPONENT,
