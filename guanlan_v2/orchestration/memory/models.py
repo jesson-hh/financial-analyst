@@ -762,12 +762,14 @@ def derive_memory_revision_id(
     review_state: str,
     review_basis: str | None,
     review_evidence_digest: str | None,
+    classification_digest: str,
 ) -> str:
     """The deterministic revision identity — the complete immutable tuple.
 
-    Any changed normalized content, continuity epoch, review state, review basis
-    or exact review-evidence digest is a NEW revision (revision reuse requires
-    all five to match; see the conservative capture rules).
+    Any changed normalized content, continuity epoch, review state, review
+    basis, exact review-evidence digest or policy classification (kind/scope/
+    owner/session/importance/mandatory — a reviewed policy reclassification is
+    a new capture-timed revision) is a NEW revision.
     """
     return _sha256_hex(
         canonical_json(
@@ -779,6 +781,7 @@ def derive_memory_revision_id(
                 review_state,
                 review_basis,
                 review_evidence_digest,
+                classification_digest,
             ]
         )
     )
@@ -909,6 +912,16 @@ def build_memory_record(
         review_state=review_state,
         review_basis=review_basis,
         review_evidence_digest=evidence_digest,
+        classification_digest=content_digest(
+            {
+                "kind": kind,
+                "scope": scope,
+                "owner_id": owner_id,
+                "session_id": session_id,
+                "importance": importance,
+                "mandatory": mandatory,
+            }
+        ),
     )
     fields: dict[str, Any] = dict(
         record_id=record_id,

@@ -1570,6 +1570,7 @@ def execute_node(
     prompt_assembler: PromptAssembler | None = None,
     observer: ExecutionObserver | None = None,
     attempt: int = 1,
+    base_authorized_memory_refs: tuple[MemoryRecordRef, ...] = (),
 ) -> tuple[NodeRun, Artifact | None]:
     """Execute one admitted node → (NodeRun always, Artifact only on COMPLETED/DEGRADED).
 
@@ -1588,7 +1589,8 @@ def execute_node(
     # ---- (1) pure preflight ------------------------------------------------ #
     _preflight(plan, node, worker, runtime=runtime, input_snapshot=input_snapshot, ctx=ctx,
                node_reservation=node_reservation, prepared_bridges=prepared_bridges,
-               bridge_resolver=bridge_resolver)
+               bridge_resolver=bridge_resolver,
+               base_authorized_memory_refs=base_authorized_memory_refs)
 
     kind = worker.execution.kind
     writer = BridgeEvidenceWriter(
@@ -1865,7 +1867,7 @@ def _drain_terminal(
 # --------------------------------------------------------------------------- #
 def _preflight(
     plan, node, worker, *, runtime, input_snapshot, ctx, node_reservation, prepared_bridges,
-    bridge_resolver,
+    bridge_resolver, base_authorized_memory_refs: tuple[MemoryRecordRef, ...] = (),
 ) -> None:
     # -- admitted plan identity ----------------------------------------------- #
     if plan.recompute_plan_digest() != plan.plan_digest:
@@ -1914,7 +1916,7 @@ def _preflight(
             raise PreflightError(f"'one' input {ib.name!r} must carry exactly one artifact ref")
 
     # -- expected memory-record refs equal the frozen snapshot ---------------- #
-    expected = _expected_memory_refs(prepared_bridges)
+    expected = _expected_memory_refs(prepared_bridges, base=base_authorized_memory_refs)
     if tuple(input_snapshot.memory_record_refs) != expected:
         raise PreflightError(
             "InputSnapshot memory_record_refs do not equal the canonical union of the "
@@ -1935,10 +1937,29 @@ def _preflight(
         raise PreflightError("prepared bridge handles do not match the required provider set")
 
 
-def _expected_memory_refs(prepared_bridges: PreparedBridgeSet) -> tuple[MemoryRecordRef, ...]:
-    base: tuple[MemoryRecordRef, ...] = ()
+def _expected_memory_refs(
+    prepared_bridges: PreparedBridgeSet,
+    base: tuple[MemoryRecordRef, ...] = (),
+) -> tuple[MemoryRecordRef, ...]:
+    """The Phase-1-canonical union of the authorized base + provider additions.
+
+    ``base`` is the run's base-authorized memory (the Phase-3 context selection
+    supplied by the memory preparation service); providers add their completed
+    PreparedBridgeSet contributions. An exactly-identical ref appearing in both
+    is ONE piece of evidence (deduplicated by full semantic identity); a
+    conflicting duplicate — same ``(record_id, revision_id)`` with different
+    availability/content — is deliberately left in the tuple so the Phase-1
+    InputSnapshot validator rejects it loudly.
+    """
     additions = prepared_bridges.memory_record_refs()
-    union = list(base) + list(additions)
+    union: list[MemoryRecordRef] = []
+    seen: set[tuple[str, str, str, datetime]] = set()
+    for ref in tuple(base) + tuple(additions):
+        key = (ref.record_id, ref.revision_id, ref.content_digest, ref.available_at)
+        if key in seen:
+            continue
+        seen.add(key)
+        union.append(ref)
     union.sort(key=lambda r: (r.record_id, r.revision_id, r.content_digest))
     return tuple(union)
 
