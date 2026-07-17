@@ -40,6 +40,7 @@ from guanlan_v2.orchestration.data.result import (
     PitAudit,
     PitRecord,
     SourceAttempt,
+    row_time_metadata_digest_of,
 )
 
 UTC = timezone.utc
@@ -108,7 +109,7 @@ def _result(*, status: DataStatus = DataStatus.OK, data=..., coverage=None,
         resolved_vendor_chain=("mootdx", "sina"),
         source_config_digest=CFG_DIGEST,
         effective_at=None, available_at=_dt(9, 30), ingested_at=_dt(9, 31),
-        fetched_at=_dt(9, 32), revision_id=None, row_time_metadata_digest=None,
+        fetched_at=_dt(9, 32), revision_id=None,
         attempts=attempts if attempts is not None else (_attempt(),),
         pit_audit=_audit(),
     )
@@ -463,8 +464,127 @@ def test_multi_row_payload_of_pit_records():
         vendor="mootdx", subsource=None, resolved_vendor_chain=("mootdx",),
         source_config_digest=CFG_DIGEST, effective_at=None,
         available_at=_dt(9, 30), ingested_at=_dt(9, 31), fetched_at=_dt(9, 32),
-        revision_id=None, row_time_metadata_digest=content_digest([_dt(9, 30), _dt(9, 30)]),
+        revision_id=None,
         attempts=(_attempt(),), pit_audit=_audit(seen=2, returned=2),
     )
     assert len(result.data) == 2
     assert result.data_content_digest == content_digest(rows)
+    # the row-time digest is derived from the rows, never caller-asserted.
+    assert result.row_time_metadata_digest == row_time_metadata_digest_of(rows)
+
+
+# --------------------------------------------------------------------------- #
+# 10. coverage is DEGRADED-only (symmetric matrix)                             #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "status",
+    [DataStatus.OK, DataStatus.NO_DATA, DataStatus.STALE, DataStatus.UNAVAILABLE],
+)
+def test_coverage_rejected_on_every_non_degraded_status(status):
+    """A NO_DATA envelope must never seal a misleading coverage=0.9 fraction."""
+    with pytest.raises(ValidationError, match="coverage is only valid for DEGRADED"):
+        _result(status=status, coverage=0.9)
+
+
+def test_degraded_with_coverage_and_reason_still_accepted():
+    r = _result(status=DataStatus.DEGRADED, coverage=0.5, reason="partial")
+    assert r.coverage == 0.5 and r.degradation_reason == "partial"
+
+
+# --------------------------------------------------------------------------- #
+# 11. row_time_metadata_digest is computed + verified, never caller-asserted    #
+# --------------------------------------------------------------------------- #
+def test_build_computes_a_real_row_time_digest():
+    r = _result(status=DataStatus.OK)
+    expected = row_time_metadata_digest_of(r.data)
+    assert r.row_time_metadata_digest == expected
+    assert expected is not None and expected != "0" * 64  # real, not a placeholder
+
+
+def test_row_time_digest_round_trips_and_reverifies_on_load():
+    r = _result(status=DataStatus.OK)
+    reloaded = DataResult[OhlcvRow](**r.model_dump())
+    assert reloaded.row_time_metadata_digest == r.row_time_metadata_digest
+
+
+def test_caller_supplied_wrong_row_time_digest_is_rejected():
+    # build() seals the envelope digests over the wrong value, so ONLY the
+    # row-time verification can (and must) catch it.
+    with pytest.raises(ValidationError, match="row time metadata"):
+        _result(status=DataStatus.OK, row_time_metadata_digest="0" * 64)
+
+
+def test_tampered_row_time_metadata_fails_on_load():
+    original = _result(status=DataStatus.OK)
+    tampered_row = _row(available_at=_dt(11, 45))  # a validly-sealed later row
+    fields = {
+        n: getattr(original, n)
+        for n in type(original).model_fields
+        if n not in ("content_digest", "audit_digest", "data_content_digest")
+    }
+    fields["data"] = tampered_row  # rows' time metadata moved...
+    fields["data_content_digest"] = content_digest(tampered_row)
+    # ...while the stale row-time digest is retained and the envelope digests
+    # are re-sealed coherently — the row-time verification must still fail.
+    assert fields["row_time_metadata_digest"] == original.row_time_metadata_digest
+    with pytest.raises(ValidationError, match="row time metadata"):
+        DataResult[OhlcvRow].build(**fields)
+
+
+@pytest.mark.parametrize(
+    "status", [DataStatus.NO_DATA, DataStatus.STALE, DataStatus.UNAVAILABLE]
+)
+def test_absent_data_statuses_require_none_row_time_digest(status):
+    ok = _result(status=status, data=None)
+    assert ok.row_time_metadata_digest is None
+    with pytest.raises(ValidationError, match="must be None"):
+        _result(status=status, data=None,
+                row_time_metadata_digest=content_digest([_dt(9, 30)]))
+
+
+class _OpaquePayload(DigestModel):
+    """A registered-payload stand-in with no derivable PIT rows."""
+
+    schema_version: Literal["1"] = "1"
+    note: str
+
+
+class _MiniBatch(DigestModel):
+    """A batch-shaped payload exposing ``rows`` of PitRecords (Phase-3 style)."""
+
+    schema_version: Literal["1"] = "1"
+    rows: tuple[OhlcvRow, ...] = ()
+
+
+def _typed_result(payload_cls, data, **over):
+    base = dict(
+        id="dr-typed", method="get_ohlcv", request_digest=REQ_DIGEST,
+        status=DataStatus.OK, data=data, coverage=None, degradation_reason=None,
+        vendor="mootdx", subsource=None, resolved_vendor_chain=("mootdx",),
+        source_config_digest=CFG_DIGEST, effective_at=None,
+        available_at=_dt(9, 30), ingested_at=_dt(9, 31), fetched_at=_dt(9, 32),
+        revision_id=None, attempts=(_attempt(),), pit_audit=_audit(),
+    )
+    base.update(over)
+    return DataResult[payload_cls].build(**base)
+
+
+def test_opaque_payload_forbids_an_unverifiable_row_time_digest():
+    """A payload with no derivable PIT rows can never carry a row-time digest."""
+    opaque = _OpaquePayload(note="no rows here")
+    ok = _typed_result(_OpaquePayload, opaque)
+    assert ok.row_time_metadata_digest is None  # honest: not derivable
+    with pytest.raises(ValidationError, match="must be None"):
+        _typed_result(_OpaquePayload, opaque,
+                      row_time_metadata_digest=content_digest([_dt(9, 30)]))
+
+
+def test_batch_rows_payloads_derive_the_row_time_digest():
+    """The Phase-3 concrete batches (a model exposing rows) are derivable too."""
+    batch = _MiniBatch(rows=(_row(close=10.0),))
+    r = _typed_result(_MiniBatch, batch)
+    assert r.row_time_metadata_digest == row_time_metadata_digest_of(batch)
+    assert r.row_time_metadata_digest is not None
+    # retiming a row changes the derived digest.
+    later = _MiniBatch(rows=(_row(close=10.0, available_at=_dt(12, 0)),))
+    assert row_time_metadata_digest_of(later) != row_time_metadata_digest_of(batch)

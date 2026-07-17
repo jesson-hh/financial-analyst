@@ -60,6 +60,7 @@ __all__ = [
     "PitAudit",
     "PitRecord",
     "DataResult",
+    "row_time_metadata_digest_of",
 ]
 
 T = TypeVar("T")
@@ -194,17 +195,63 @@ class PitRecord(DigestModel):
         return cls(**fields, content_digest=digest)
 
 
+def row_time_metadata_digest_of(data: Any) -> DigestHex | None:
+    """Pure derivation of a payload's row-time-metadata digest (or ``None``).
+
+    Derivable payload shapes — the three PIT-row-bearing families used across the
+    codebase: a single :class:`PitRecord`, a ``list``/``tuple`` of
+    :class:`PitRecord`\\ s, or a batch model exposing ``rows`` as a tuple of
+    :class:`PitRecord`\\ s (the Phase-3 concrete ``*Rows`` batches). The digest
+    covers each row's ordered PIT time metadata (``effective_at`` /
+    ``available_at`` / ``ingested_at`` / ``revision_id``), so tampering with any
+    row's time metadata — or reordering rows — changes it. Any other payload
+    (or no payload) yields ``None``, and the :class:`DataResult` validator then
+    *forbids* a declared digest, so an unverifiable caller-supplied digest can
+    never survive.
+    """
+    if data is None:
+        return None
+    rows: tuple[PitRecord, ...] | None = None
+    if isinstance(data, PitRecord):
+        rows = (data,)
+    elif isinstance(data, (list, tuple)) and all(isinstance(r, PitRecord) for r in data):
+        rows = tuple(data)
+    else:
+        maybe = getattr(data, "rows", None)
+        if isinstance(maybe, (list, tuple)) and all(isinstance(r, PitRecord) for r in maybe):
+            rows = tuple(maybe)
+    if rows is None:
+        return None
+    return content_digest(
+        [
+            {
+                "effective_at": r.effective_at,
+                "available_at": r.available_at,
+                "ingested_at": r.ingested_at,
+                "revision_id": r.revision_id,
+            }
+            for r in rows
+        ]
+    )
+
+
 class DataResult(DigestModel, Generic[T]):
     """Strict typed status envelope for one resolved data fetch.
 
     Only ``OK``/``DEGRADED`` carry a typed ``data`` payload and a
     ``data_content_digest`` (verified against that payload); every other status
     carries neither. ``DEGRADED`` additionally requires ``coverage`` in ``[0, 1]``
-    and a non-empty ``degradation_reason``. The semantic ``content_digest`` covers
-    the data, PIT metadata, resolved chain/config and attempt outcome order but
-    excludes volatile wall-clock (``fetched_at`` and each attempt's timestamps);
-    the full ``audit_digest`` includes them. Both are self-sealed and re-verified
-    on load — use :meth:`build`.
+    and a non-empty ``degradation_reason``; ``coverage`` and
+    ``degradation_reason`` are *only* valid for ``DEGRADED`` (a ``NO_DATA``
+    envelope can never seal a misleading coverage fraction).
+    ``row_time_metadata_digest`` is never caller-asserted: it is derived from the
+    payload's PIT rows by :func:`row_time_metadata_digest_of` (computed by
+    :meth:`build`, re-verified on load) and must be ``None`` when the payload
+    carries no derivable rows — including every no-data status. The semantic
+    ``content_digest`` covers the data, PIT metadata, resolved chain/config and
+    attempt outcome order but excludes volatile wall-clock (``fetched_at`` and
+    each attempt's timestamps); the full ``audit_digest`` includes them. Both are
+    self-sealed and re-verified on load — use :meth:`build`.
     """
 
     schema_version: Literal["1"] = "1"
@@ -263,23 +310,43 @@ class DataResult(DigestModel, Generic[T]):
             if self.data_content_digest is not None:
                 raise ValueError(f"status={self.status.value} must not carry a data content digest")
 
-        # 3) degraded coverage / reason matrix.
+        # 3) degraded coverage / reason matrix (symmetric: DEGRADED-only).
         if self.status is DataStatus.DEGRADED:
             if self.coverage is None:
                 raise ValueError("DEGRADED requires coverage in [0, 1]")
             if self.degradation_reason is None:
                 raise ValueError("DEGRADED requires a non-empty degradation_reason")
-        elif self.degradation_reason is not None:
-            raise ValueError("degradation_reason is only valid for DEGRADED status")
+        else:
+            if self.degradation_reason is not None:
+                raise ValueError("degradation_reason is only valid for DEGRADED status")
+            if self.coverage is not None:
+                raise ValueError("coverage is only valid for DEGRADED status")
+
+        # 4) row-time metadata digest: derived from the payload's PIT rows,
+        # never caller-asserted; None whenever no rows are derivable.
+        expected_row_time = row_time_metadata_digest_of(self.data)
+        if self.row_time_metadata_digest != expected_row_time:
+            if expected_row_time is None:
+                raise ValueError(
+                    "row_time_metadata_digest must be None when the payload carries "
+                    "no derivable PIT row time metadata"
+                )
+            raise ValueError(
+                "declared row_time_metadata_digest does not match the digest derived "
+                "from the payload's row time metadata"
+            )
         return self
 
     @classmethod
     def build(cls, **fields: Any) -> "DataResult[T]":
-        """Seal a result: compute ``data_content_digest`` and the semantic /
-        audit digests from the field values, then construct (and re-verify).
+        """Seal a result: compute ``data_content_digest``,
+        ``row_time_metadata_digest`` and the semantic / audit digests from the
+        field values, then construct (and re-verify).
 
-        ``data_content_digest`` is computed from ``data`` unless explicitly
-        provided (a persisted record round-trips it through direct construction).
+        ``data_content_digest`` / ``row_time_metadata_digest`` are computed from
+        ``data`` unless explicitly provided (a persisted record round-trips them
+        through direct construction; an explicitly-supplied wrong value is
+        rejected by the validator, never trusted).
         Malformed field values make digest projection raise; we then fall back to
         placeholder digests so the validating constructor raises the precise
         ``ValidationError``. Placeholders can never seal a real record because the
@@ -289,6 +356,8 @@ class DataResult(DigestModel, Generic[T]):
         if "data_content_digest" not in sealed:
             data = sealed.get("data")
             sealed["data_content_digest"] = content_digest(data) if data is not None else None
+        if "row_time_metadata_digest" not in sealed:
+            sealed["row_time_metadata_digest"] = row_time_metadata_digest_of(sealed.get("data"))
         try:
             content = cls.digest_of_fields(projection="semantic", **sealed)
             audit = cls.digest_of_fields(projection="audit", **sealed)
