@@ -1,0 +1,189 @@
+{
+  "meta": {
+    "task": "orchestration phase2 task 10 — attested stock-deep-dive execution equivalence",
+    "scope_ruling": "2026-07-17 user ruling: equivalence value assertions are scoped to the reviewed honest core (news-sentiment, report-writer — the fixture SOFT edge / DEGRADE semantics); the excluded data agents are documented exclusions whose real schemas arrive with Phase 3 data/PIT; the full-18 config digest attestation and 'the authoritative graph is UNMAPPABLE' remain negative-control anchors.",
+    "note": "This fixture REFERENCES the frozen Phase-1 identities (it never duplicates or edits legacy_contract_samples.json). Deterministic payloads below feed BOTH the legacy SubAgent doubles and the new-side fake model gateways, so payload byte-equality is a real old-vs-new comparison. Both core planned workers are LLM per the Task-0 worker table: byte-comparison therefore applies to the deterministic HARNESS artifacts; live LLM prose is never byte-compared and no legacy-deterministic core node exists."
+  },
+  "references": {
+    "legacy_contract_fixture": "legacy_contract_samples.json",
+    "source_config_digest": "5a175cb91de0cff8358da93272a4ac26fb29013a833a062a096fae56be5b9dbb",
+    "legacy_mapping_semantic_digest": "85c190c72ca482e76e46f88e9255666c711b048e878e023b4e5b0726f34cda03",
+    "phase2_static_catalog_digest": "b41bf223f0dd0b05c5a4f4f7bbd32960eef90d7176a17300dbe576f6b61bf0d3",
+    "phase1_schema_registry_digest": "75f7920db13cdcaac89a70e0103812a29348ab3caaa98b9c1020429bb4e18b03"
+  },
+  "core": {
+    "nodes": ["news-sentiment", "report-writer"],
+    "workers": {
+      "news-sentiment": "compat.news_sentiment",
+      "report-writer": "compat.report_writer"
+    },
+    "planned_workers": {
+      "news-sentiment": "text.sentiment",
+      "report-writer": "dec.research_mgr"
+    },
+    "soft_edge": {
+      "upstream": "news-sentiment",
+      "downstream": "report-writer",
+      "legacy_semantics": "soft (dependency_semantics.soft: must have run; a failed soft dep is omitted from _build_inputs and the node runs degraded)",
+      "target_policy": "degrade",
+      "inject_as": "sentiment"
+    },
+    "outputs": {
+      "news-sentiment": {
+        "schema": "SentimentReport@1",
+        "slot": "slot-news-sentiment",
+        "output_key": "primary"
+      },
+      "report-writer": {
+        "schema": "ResearchPlan@1",
+        "slot": "slot-report-writer",
+        "output_key": "primary",
+        "migration_note": "the legacy agent emits ReportOutput; the reviewed Phase-1 rating migration (ReportOutput -> ResearchPlan 5-band) is the attested mapping target, so both harness sides emit the reviewed ResearchPlan values below"
+      }
+    }
+  },
+  "base_inputs": {
+    "code": "600519",
+    "asof_date": "2026-07-16",
+    "out_dir_note": "out_dir is supplied ONLY by a service-owned temporary locator on the legacy side and by the attested service_binding 'output_locator' on the new side; it never appears in the frozen Plan"
+  },
+  "deterministic_payloads": {
+    "news-sentiment": {
+      "overall_band": "Neutral",
+      "overall_score": 5.0,
+      "confidence": "medium",
+      "narrative": "Balanced flow with mild caution; no dominant tilt."
+    },
+    "report-writer": {
+      "recommendation": "Hold",
+      "rationale": "Hold pending confirmation of the sentiment read.",
+      "strategic_actions": ["Monitor breadth", "Re-check on catalyst"]
+    }
+  },
+  "outcome_mapping": {
+    "legacy_ok": "completed",
+    "legacy_ok_with_omitted_soft_input": "degraded",
+    "legacy_error": "failed",
+    "legacy_upstream_dependency_failed": "blocked",
+    "note": "reviewed canonical terminal-outcome mapping: legacy SubAgentResult.ok=True with every input present maps to COMPLETED; ok=True while a failed soft dep was omitted from its inputs maps to DEGRADED (the legacy engine has no degraded token — omission IS its degradation signal); ok=False from an agent error maps to FAILED; the orchestrator's 'upstream dependency failed' marker (hard dep failed; node never executed) maps to BLOCKED. RunResult.terminal_status collapses degraded/partial — per-node truth is asserted on NodeRuns/LayerCommit."
+  },
+  "scenarios": [
+    {
+      "id": "all-success",
+      "fail": [],
+      "expected": {
+        "legacy_ok": {"news-sentiment": true, "report-writer": true},
+        "new": {"news-sentiment": "completed", "report-writer": "completed"},
+        "terminal": "completed"
+      }
+    },
+    {
+      "id": "soft-upstream-fails",
+      "fail": ["news-sentiment"],
+      "load_bearing": "the ruling's defining DEGRADE-missing case: soft input absent, downstream still runs",
+      "expected": {
+        "legacy_ok": {"news-sentiment": false, "report-writer": true},
+        "legacy_omitted_inputs": {"report-writer": ["news-sentiment"]},
+        "new": {"news-sentiment": "failed", "report-writer": "degraded"},
+        "terminal": "degraded"
+      }
+    },
+    {
+      "id": "sink-fails",
+      "fail": ["report-writer"],
+      "expected": {
+        "legacy_ok": {"news-sentiment": true, "report-writer": false},
+        "legacy_blocked_downstream": ["introspector"],
+        "new": {"news-sentiment": "completed", "report-writer": "failed"},
+        "terminal": "failed"
+      }
+    }
+  ],
+  "base_input_missing_policy": {
+    "reviewed_rows": "base code/asof_date/out_dir rows carry missing_behavior='error'",
+    "legacy": "the agent errors at run time (SubAgentResult.ok=False)",
+    "new": "STRICTER, documented: the ContextSnapshot carrying the context-targeted base values is admission authority — a missing context fails prepare_candidate (code=context_missing) BEFORE execution and consumes no budget"
+  },
+  "excluded_nodes": {
+    "quote-fetcher": {
+      "planned_worker": "compat.quote_fetcher",
+      "reason": "compat placeholder with no Task-0 worker-table row; data agent with no registered Phase-1 output schema",
+      "arrives_with": "Phase 3 data/PIT"
+    },
+    "news-reader": {
+      "planned_worker": "compat.news_reader",
+      "reason": "compat placeholder with no Task-0 worker-table row; data agent with no registered Phase-1 output schema",
+      "arrives_with": "Phase 3 data/PIT"
+    },
+    "f10-reader": {
+      "planned_worker": "compat.f10_reader",
+      "reason": "compat placeholder with no Task-0 worker-table row; data agent with no registered Phase-1 output schema",
+      "arrives_with": "Phase 3 data/PIT"
+    },
+    "market-scanner": {
+      "planned_worker": "market.regime",
+      "reason": "planned worker output 'regime_report' is not a registered Phase-1 schema",
+      "arrives_with": "Phase 3 data/PIT"
+    },
+    "mainline-classifier": {
+      "planned_worker": "market.rotation",
+      "reason": "planned worker output 'rotation_report' is not a registered Phase-1 schema",
+      "arrives_with": "Phase 3 data/PIT"
+    },
+    "morning-brief-writer": {
+      "planned_worker": "compat.morning_brief",
+      "reason": "compat placeholder with no Task-0 worker-table row",
+      "arrives_with": "Phase 3 data/PIT"
+    },
+    "overseas-market-scanner": {
+      "planned_worker": "text.macro",
+      "reason": "planned worker output 'macro report' is not a registered Phase-1 schema",
+      "arrives_with": "Phase 3 data/PIT"
+    },
+    "sector-rotation-analyzer": {
+      "planned_worker": "market.rotation",
+      "reason": "planned worker output 'rotation_report' is not a registered Phase-1 schema",
+      "arrives_with": "Phase 3 data/PIT"
+    },
+    "evidence-loader": {
+      "planned_worker": "compat.evidence_loader",
+      "reason": "compat placeholder with no Task-0 worker-table row; documented zero-LLM deterministic evidence pack",
+      "arrives_with": "Phase 3 data/PIT"
+    },
+    "fundamental-analyst": {
+      "planned_worker": "quant.fundamentals",
+      "reason": "planned worker is execution_kind=deterministic and its 'fundamentals report' output is not a registered Phase-1 schema",
+      "arrives_with": "Phase 3 data/PIT"
+    },
+    "technical-analyst": {
+      "planned_worker": "pv.technical",
+      "reason": "planned worker output 'technical report' is not a registered Phase-1 schema",
+      "arrives_with": "Phase 3 data/PIT"
+    },
+    "whale-analyst": {
+      "planned_worker": "pv.microstructure",
+      "reason": "planned worker is execution_kind=deterministic and its 'microstructure report' output is not a registered Phase-1 schema",
+      "arrives_with": "Phase 3 data/PIT"
+    },
+    "bull-advocate": {
+      "planned_worker": "dec.bull",
+      "reason": "planned worker output 'bull thesis_bullets' is not a registered Phase-1 schema",
+      "arrives_with": "Phase 3 data/PIT"
+    },
+    "bear-advocate": {
+      "planned_worker": "dec.bear",
+      "reason": "planned worker output 'bear thesis_bullets' is not a registered Phase-1 schema",
+      "arrives_with": "Phase 3 data/PIT"
+    },
+    "risk-officer": {
+      "planned_worker": "dec.risk_debate",
+      "reason": "planned worker output 'risk_score/veto_flags' is not a registered Phase-1 schema",
+      "arrives_with": "Phase 3 data/PIT"
+    },
+    "introspector": {
+      "planned_worker": "x.number_critic",
+      "reason": "planned worker is execution_kind=deterministic and its 'provenance violations' output is not a registered Phase-1 schema",
+      "arrives_with": "Phase 3 data/PIT"
+    }
+  }
+}
