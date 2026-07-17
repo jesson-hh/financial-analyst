@@ -1667,6 +1667,10 @@ def execute_node(
     # ---- (4b) LLM prompt assembly + single model call ---------------------- #
     prompt_ref: TypedPayloadRef | None = None
     degradation: list[str] = list(merged.degradation_reasons)
+    # honesty rule 11: a plan-fed input that arrived absent/empty on the ready
+    # snapshot was weakened away (DEGRADE/SKIP) — a successful result is at most
+    # DEGRADED, and the worker self-reports the honest reason.
+    degradation.extend(_absent_input_degradations(node, worker, input_snapshot))
     if kind is ExecutionKind.LLM:
         assembler = prompt_assembler or StaticPromptAssembler()
         resolved = runtime.catalog.resolve_worker(node.worker_id)
@@ -1876,13 +1880,28 @@ def _preflight(
     if input_snapshot.node_id != node.id or input_snapshot.plan_digest != plan.plan_digest:
         raise PreflightError("InputSnapshot does not bind this plan node")
 
-    # -- one/many artifact-input shape matches the WorkerSpec ----------------- #
+    # -- one/many artifact-input shape honors the WorkerSpec required matrix -- #
+    # Consistent with Phase-1 validate_plan_draft (an optional input may be fed by a
+    # weakening DEGRADE/SKIP dependency) and pool.freeze_input_snapshot (a ready
+    # snapshot requires only the REQUIRED inputs): present names ⊆ declared names AND
+    # required names ⊆ present names. An absent OPTIONAL input is legal on a ready
+    # snapshot and flows into the degraded-inputs path; an undeclared (extra) name or
+    # an absent REQUIRED input still fails.
     binding_by_name = {b.input_name: b for b in input_snapshot.artifact_inputs}
     spec_names = {i.name for i in worker.inputs}
-    if set(binding_by_name) != spec_names:
-        raise PreflightError("InputSnapshot artifact inputs do not match the WorkerSpec input names")
+    undeclared = sorted(set(binding_by_name) - spec_names)
+    if undeclared:
+        raise PreflightError(
+            f"InputSnapshot binds undeclared worker input(s): {undeclared}")
+    missing_required = sorted(
+        i.name for i in worker.inputs if i.required and i.name not in binding_by_name)
+    if missing_required:
+        raise PreflightError(
+            f"ready InputSnapshot is missing required worker input(s): {missing_required}")
     for ib in worker.inputs:
-        b = binding_by_name[ib.name]
+        b = binding_by_name.get(ib.name)
+        if b is None:
+            continue  # absent OPTIONAL input — legal; the node runs at most DEGRADED
         if b.cardinality != ib.cardinality:
             raise PreflightError(f"input {ib.name!r} cardinality mismatch with the WorkerSpec")
         if ib.cardinality == "one" and len(b.artifact_refs) != 1:
@@ -2082,6 +2101,29 @@ def _check_tool_discipline(worker, runtime, node, capability_gateway, tool_recor
     if tc is ToolCallRequirement.FORBIDDEN and capability_gateway.begun_count() != 0:
         return False, "WorkerSpec tool_calls=FORBIDDEN but a capability invocation was begun"
     return True, ""
+
+
+def _absent_input_degradations(node, worker, input_snapshot) -> tuple[str, ...]:
+    """Honest worker-side degraded-input detection.
+
+    A declared worker input that the Plan feeds (>= 1 dependency injects into it)
+    but that arrives absent — or bound with zero refs — on the ready snapshot was
+    weakened away by an unsatisfied DEGRADE/SKIP dependency: a successful result is
+    then at most DEGRADED (honesty rule 11). An input the Plan never feeds is absent
+    *by design* and degrades nothing.
+    """
+    fed = {dep.inject_as for dep in node.dependencies}
+    by_name = {b.input_name: b for b in input_snapshot.artifact_inputs}
+    reasons: list[str] = []
+    for ib in worker.inputs:
+        if ib.name not in fed:
+            continue
+        binding = by_name.get(ib.name)
+        if binding is None or not binding.artifact_refs:
+            reasons.append(
+                f"declared input {ib.name!r} was omitted from the ready snapshot "
+                "(unsatisfied weakening dependency)")
+    return tuple(reasons)
 
 
 def _check_number_anchors(worker, anchors):

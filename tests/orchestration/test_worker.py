@@ -302,7 +302,24 @@ class Env:
             prompt_assembler=prompt_assembler, observer=observer)
 
 
-def build_env(*, worker_override=None, deterministic=False, **scenario_kwargs) -> Env:
+def build_env(*, worker_override=None, deterministic=False, one_input=None,
+              **scenario_kwargs) -> Env:
+    """Build the fully-admitted single-node env (or, with ``one_input``, a two-node
+    plan whose second node's declared ``one`` input ``opt_in`` is fed by a weakening
+    dependency and OMITTED from the ready InputSnapshot).
+
+    ``one_input="optional_degrade"`` — `opt_in` is optional (required=False) fed by a
+    DEGRADE dependency; the built InputSnapshot binds no artifact inputs, so the
+    executor sees the input absent. (A *required* input absent from a ready snapshot
+    is unreachable through admission — Phase-1 rejects a plan whose required input is
+    unfed and the pool refuses to freeze it — so that branch is unit-tested at the
+    preflight seam directly.)
+    """
+    if one_input is not None:
+        from guanlan_v2.orchestration.catalog import InputBinding
+        scenario_kwargs.setdefault("worker_inputs", (
+            InputBinding(name="opt_in", schema_ref=SR_OUT,
+                         required=False, cardinality="one"),))
     sc = build_scenario(**scenario_kwargs)
     if deterministic:
         sc = _make_deterministic(sc)
@@ -323,11 +340,22 @@ def build_env(*, worker_override=None, deterministic=False, **scenario_kwargs) -
                            max_llm_invocations=1000, max_concurrency=16)
 
     # generous draft budget so the child node reservation fits.
-    draft = sc.draft.model_copy(update={
-        "budget_request_tokens": 500_000, "budget_request_llm_invocations": 100,
-        "max_concurrency": 8})
+    update = {"budget_request_tokens": 500_000, "budget_request_llm_invocations": 100,
+              "max_concurrency": 8}
+    if one_input is not None:
+        # two-node plan: n0 feeds n1's optional `opt_in` through a DEGRADE dep.
+        from guanlan_v2.orchestration.enums import DependencyPolicy
+        from guanlan_v2.orchestration.spec import Dependency, PlanNode
+
+        n1 = sc.draft.nodes[0]
+        dep = Dependency(upstream_node_id="n0", artifact_slot="s0", inject_as="opt_in",
+                         policy=DependencyPolicy.DEGRADE,
+                         accept_statuses=frozenset({NodeStatus.COMPLETED, NodeStatus.DEGRADED}))
+        n0 = PlanNode(id="n0", worker_id=n1.worker_id, writes_slot="s0")
+        update["nodes"] = (n0, n1.model_copy(update={"dependencies": (dep,)}))
+    draft = sc.draft.model_copy(update=update)
     sc.draft = draft
-    node = draft.nodes[0]
+    node = next(n for n in draft.nodes if n.id == "n1")
     worker = sc.runtime.worker(node.worker_id)
 
     # -- run the full admission pipeline ---------------------------------- #
@@ -1218,3 +1246,70 @@ def test_stage1_writer_is_sealed_after_prepare_input():
     with pytest.raises(W.WorkerExecutionError, match="sealed"):
         writer.put(token=token, role="memory_prefetch", schema_ref=SR_OUT,
                    payload=OtherOut(note="late-pre"), idempotency_key="late-pre")
+
+
+# =========================================================================== #
+# 18. optional-input semantics in preflight (Task 10 defect regression)        #
+# =========================================================================== #
+def test_absent_optional_one_input_executes_degraded_not_failed():
+    """The Task-10 defect: a DEGRADE-weakened optional `one` input absent from the
+    ready snapshot must EXECUTE (preflight passes) and self-report DEGRADED with an
+    honest reason — never FAILED."""
+    e = build_env(one_input="optional_degrade")
+    node_run, artifact = e.run()
+    assert node_run.status is NodeStatus.DEGRADED
+    assert artifact is not None
+    assert node_run.reason_code == "degraded_input_or_result"
+    assert "opt_in" in (node_run.reason or "")
+    # the DEGRADED record seals with full provenance parity, like any success.
+    assert artifact.provenance.tool_call_records == node_run.tool_call_records
+    assert artifact.provenance.execution_evidence_refs == node_run.execution_evidence_refs
+
+
+def test_absent_required_input_still_fails_preflight():
+    """A ready snapshot missing a REQUIRED input is unreachable through admission
+    (Phase-1 rejects an unfed required input; the pool refuses to freeze one), so the
+    preflight branch is defense-in-depth — unit-tested at the pure preflight seam with
+    a required-input WorkerSpec value against the same admitted plan/snapshot."""
+    from guanlan_v2.orchestration.catalog import InputBinding
+
+    e = build_env(one_input="optional_degrade")
+    resolver, prepared, seq = e.sequencer_and_prepared()
+    required_worker = e.worker.model_copy(update={"inputs": (
+        InputBinding(name="opt_in", schema_ref=SR_OUT, required=True, cardinality="one"),)})
+    with pytest.raises(W.PreflightError, match="required"):
+        W._preflight(e.plan, e.node, required_worker, runtime=e.runtime,
+                     input_snapshot=e.input_snapshot, ctx=e.ctx,
+                     node_reservation=e.node_res, prepared_bridges=prepared,
+                     bridge_resolver=resolver)
+
+
+def test_undeclared_input_binding_still_fails_preflight():
+    from guanlan_v2.orchestration.context import InputArtifactBinding, InputSnapshot
+
+    e = build_env()
+    resolver, prepared, seq = e.sequencer_and_prepared()
+    gw = e.capability_gateway()
+    ghost = InputArtifactBinding(input_name="ghost", cardinality="many", artifact_refs=())
+    fields = {k: getattr(e.input_snapshot, k) for k in InputSnapshot.model_fields
+              if k != "content_digest"}
+    fields["artifact_inputs"] = (ghost,)
+    bad = InputSnapshot.build(**fields)
+    with pytest.raises(W.PreflightError, match="undeclared"):
+        W.execute_node(e.plan, e.node, runtime=e.runtime, prepared_bridges=prepared,
+                       input_snapshot=bad, ctx=e.ctx, node_reservation=e.node_res,
+                       bridge_resolver=resolver, model_gateway=e.model_gateway(),
+                       capability_gateway=gw, registry=e.sc.registry, stores=e.stores,
+                       clock=e.clock)
+
+
+def test_absent_optional_unfed_input_completes_not_degraded():
+    """An optional input the Plan never feeds is absent BY DESIGN: the node completes
+    (no degradation) — absence only degrades when a plan dependency was weakened away."""
+    from guanlan_v2.orchestration.catalog import InputBinding
+
+    e = build_env(worker_inputs=(
+        InputBinding(name="opt_in", schema_ref=SR_OUT, required=False, cardinality="one"),))
+    node_run, artifact = e.run()
+    assert node_run.status is NodeStatus.COMPLETED
+    assert artifact is not None

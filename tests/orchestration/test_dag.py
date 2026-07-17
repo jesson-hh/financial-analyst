@@ -464,6 +464,40 @@ def test_unsatisfied_degrade_omits_input_and_executes():
     assert env.pool.committed_output("b", "primary") is not None
 
 
+def test_unsatisfied_degrade_one_optional_input_executes_degraded():
+    """Task-10 defect regression: a failed DEGRADE soft upstream feeding a `one`
+    (required=False) input must leave the downstream DEGRADED with its artifact —
+    the same terminal class as the `many` case — never preflight-FAILED."""
+    env = build_dag_env(
+        [NodeSpec("a", behaviour="fail"),
+         NodeSpec("b", worker="chain",
+                  deps=(_dep("a", "in_one", DependencyPolicy.DEGRADE),))],
+        sink_node_ids=("b",))
+    result, rec = env.run()
+    assert _status(rec, "a") is NodeStatus.FAILED
+    assert _status(rec, "b") is NodeStatus.DEGRADED  # NOT FAILED
+    b_run = [nr for nr in rec.node_runs if nr.node_id == "b"][-1]
+    assert b_run.reason_code != "executor_exception"
+    snap = rec.input_snapshots["b"]
+    assert snap.readiness == "ready"
+    # the absent optional `one` input is simply omitted from the ready snapshot.
+    assert [x.input_name for x in snap.artifact_inputs] == []
+    # DEGRADE followed normal preparation/reservation and produced the artifact.
+    assert any(r.scope_id == "b" for r in _node_reservations(env))
+    assert env.pool.committed_output("b", "primary") is not None
+    assert result.terminal_status == "degraded"
+
+    # parity: the SAME policy through a `many` input lands in the same terminal class.
+    env2 = build_dag_env(
+        [NodeSpec("a", behaviour="fail"),
+         NodeSpec("b", worker="fan",
+                  deps=(_dep("a", "in_many", DependencyPolicy.DEGRADE, cardinality="many"),))],
+        sink_node_ids=("b",))
+    result2, rec2 = env2.run()
+    assert _status(rec2, "b") is NodeStatus.DEGRADED
+    assert result2.terminal_status == result.terminal_status == "degraded"
+
+
 # =========================================================================== #
 # 3. LLM vs deterministic reservation counts                                    #
 # =========================================================================== #
