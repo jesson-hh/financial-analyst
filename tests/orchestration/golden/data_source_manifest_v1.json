@@ -1,0 +1,133 @@
+{
+  "algorithm": "sha256+cjson-v1",
+  "registry_version": "phase3-source-v1",
+  "source_registry_digest": "8aaccfda51ab828c6190920125ed53eb12568f8ff10ea5e8f6306e5edd5a8de4",
+  "methods": [
+    {
+      "method_id": "fundamentals",
+      "method_version": "1",
+      "category": "fundamentals",
+      "optional": true,
+      "result_schema_ref": "FundamentalDataResult@1",
+      "spec_digest": "16866066461cdc0013af7e63a49855f68d42360b387986a6d8c0b2734a986e24"
+    },
+    {
+      "method_id": "indicators",
+      "method_version": "1",
+      "category": "prices",
+      "optional": true,
+      "result_schema_ref": "IndicatorDataResult@1",
+      "spec_digest": "6d95955b996c5fd699b30ec8b0702b2d2d58dd11a72190ffa87861e6703dc556"
+    },
+    {
+      "method_id": "instrument_names",
+      "method_version": "1",
+      "category": "reference",
+      "optional": false,
+      "result_schema_ref": "InstrumentNameDataResult@1",
+      "spec_digest": "ac3c6363a068d0dccfdd1a4c5d63a48fa4530ad331e20f82a040cc90b0c864ad"
+    },
+    {
+      "method_id": "news",
+      "method_version": "1",
+      "category": "news",
+      "optional": true,
+      "result_schema_ref": "NewsDataResult@1",
+      "spec_digest": "ecaf9abe1cf29e3b76565e3f6a715b5a5583bb608a0857c4b1cafe4a6e30e4b3"
+    },
+    {
+      "method_id": "ohlcv",
+      "method_version": "1",
+      "category": "prices",
+      "optional": false,
+      "result_schema_ref": "OHLCVDataResult@1",
+      "spec_digest": "b5693f417b7506c2125834615a8e800f7c4855d2f17fca5eeb0da8466e515677"
+    },
+    {
+      "method_id": "signals",
+      "method_version": "1",
+      "category": "signals",
+      "optional": true,
+      "result_schema_ref": "SignalDataResult@1",
+      "spec_digest": "c9d97df6b9903c81e5660f57106b7f4471572ba23ef47ad79d1701f4d5e7a9f6"
+    },
+    {
+      "method_id": "verified_snapshot",
+      "method_version": "1",
+      "category": "quote",
+      "optional": false,
+      "result_schema_ref": "VerifiedSnapshotDataResult@1",
+      "spec_digest": "e77bc00479717dfcca33b47e892534fae9e21a917e406d53ef6e746c8b1f4989"
+    }
+  ],
+  "sources": [
+    {
+      "source_id": "backup.vendor",
+      "source_version": "1",
+      "descriptor_digest": "c0cff649225485fe38e08a80e44b2c4789e6a75f92a3641301395ebeffc0ce4d"
+    },
+    {
+      "source_id": "primary.vendor",
+      "source_version": "1",
+      "descriptor_digest": "8b966cc0b8a15073115597b8571b998dbd02bba4f2126ba40ee8624f72a07d25"
+    }
+  ],
+  "default_routes": [
+    {
+      "method_id": "fundamentals",
+      "method_version": "1",
+      "chain": [
+        "primary.vendor",
+        "backup.vendor"
+      ]
+    },
+    {
+      "method_id": "indicators",
+      "method_version": "1",
+      "chain": [
+        "primary.vendor",
+        "backup.vendor"
+      ]
+    },
+    {
+      "method_id": "instrument_names",
+      "method_version": "1",
+      "chain": [
+        "primary.vendor",
+        "backup.vendor"
+      ]
+    },
+    {
+      "method_id": "news",
+      "method_version": "1",
+      "chain": [
+        "primary.vendor",
+        "backup.vendor"
+      ]
+    },
+    {
+      "method_id": "ohlcv",
+      "method_version": "1",
+      "chain": [
+        "primary.vendor",
+        "backup.vendor"
+      ]
+    },
+    {
+      "method_id": "signals",
+      "method_version": "1",
+      "chain": [
+        "primary.vendor",
+        "backup.vendor"
+      ]
+    },
+    {
+      "method_id": "verified_snapshot",
+      "method_version": "1",
+      "chain": [
+        "primary.vendor",
+        "backup.vendor"
+      ]
+    }
+  ]
+}
