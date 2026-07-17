@@ -20,16 +20,218 @@ See ``docs/superpowers/specs/2026-05-27-mcp-accept-proposal-design.md``.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import re
 import subprocess
+import tempfile
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from financial_analyst.memory_paths import default_memory_root
 
+try:  # the owner-neutral canonical-root lease (engine/memory_coordination.py).
+    import memory_coordination as _coordination
+except ImportError:  # pragma: no cover - engine dir not on path (pip install)
+    _coordination = None
+
 
 AUDIT_PATH = Path.home() / ".financial-analyst" / "audit.jsonl"
+
+#: the closed ASCII exact-apply marker grammar (first line of an applied unit).
+APPLY_MARKER_RE = re.compile(
+    r"^<!-- guanlan-memory-apply-v1 marker_id=(apply\.[0-9a-f]{64}) "
+    r"request_digest=([0-9a-f]{64}) payload_digest=([0-9a-f]{64}) -->$"
+)
+
+
+def _is_marker_bound(path: Path) -> bool:
+    """True when an accepted file's first line is a reserved exact-apply marker.
+
+    A marker-bound target may only change through the decision-backed exact
+    coordinator; a competing legacy overwrite/move/delete fails closed so a
+    marker can never be lost by a legacy code path.
+    """
+    try:
+        first = path.read_text(encoding="utf-8").lstrip("﻿").split("\n", 1)[0]
+    except OSError:
+        return False
+    return bool(APPLY_MARKER_RE.match(first.strip()))
+
+
+class OwnerApplyError(Exception):
+    """An exact-apply invariant failed closed (CAS/containment/marker)."""
+
+
+@dataclass(frozen=True)
+class OwnerApplyCommand:
+    """The primitive immutable exact mutation command (strings/digests only).
+
+    Built by the orchestration adapter from the resolved Proposal/Receipt/
+    Decision; this module never imports those models (or ``guanlan_v2``).
+    """
+
+    operation_id: str
+    target_agent: str
+    slug: str
+    marker_line: str
+    payload_text: str
+    expected_before_target_store_digest: str  # "absent" or 64-hex
+    intended_after_target_store_digest: str
+
+
+@dataclass(frozen=True)
+class OwnerApplyResult:
+    """The durable owner-owned recovery primitive (never a public receipt)."""
+
+    operation_id: str
+    state: str  # "applied"
+    target: str  # "<agent>/<slug>" logical target
+    marker_line: str
+    expected_before_target_store_digest: str
+    actual_before_target_store_digest: str
+    intended_after_target_store_digest: str
+    actual_after_target_store_digest: str
+
+
+def _unit_digest(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+class AgentMemoryFileCoordinator:
+    """The ONE owner coordinator for exact decision-backed agent-file mutation.
+
+    Keyed by the canonical owner root and guarded by the process-shared
+    :class:`memory_coordination.ProcessSharedRootLease`; the sole lock order is
+    ``owner-root lease → target``. While holding the lease it rereads state,
+    enforces root containment + target CAS, performs create-if-absent or atomic
+    temp+fsync+replace, verifies the reserved marker and actual digest after
+    the write, then durably commits/recovers the owner-owned
+    :class:`OwnerApplyResult` before releasing. It never imports Phase-2 /
+    ``guanlan_v2`` and never constructs a public semantic receipt.
+    """
+
+    def __init__(self, memory_root: Path, *, lease_factory: Any = None) -> None:
+        if _coordination is None:  # pragma: no cover - engine path missing
+            raise OwnerApplyError("memory_coordination is unavailable; exact apply is disabled")
+        self.root = Path(memory_root).resolve()
+        self._leases = lease_factory or _coordination.RootLeaseFactory()
+        self._results_path = (
+            self.root / _coordination.COORDINATION_DIRNAME / "apply_results.jsonl"
+        )
+
+    # -- durable owner results ---------------------------------------------- #
+    def _load_result(self, operation_id: str) -> OwnerApplyResult | None:
+        if not self._results_path.exists():
+            return None
+        for line in self._results_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if entry.get("operation_id") == operation_id:
+                return OwnerApplyResult(**entry)
+        return None
+
+    def _commit_result(self, result: OwnerApplyResult) -> None:
+        self._results_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._results_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(asdict(result), ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+
+    # -- exact apply ---------------------------------------------------------- #
+    def apply_exact(self, command: OwnerApplyCommand) -> OwnerApplyResult:
+        """Perform (or idempotently recover) one decision-backed exact apply."""
+        if not APPLY_MARKER_RE.match(command.marker_line.strip()):
+            raise OwnerApplyError("command marker_line is outside the closed grammar")
+        name_re = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+        if not name_re.fullmatch(command.target_agent) or not name_re.fullmatch(command.slug):
+            raise OwnerApplyError("target agent/slug outside the closed name form")
+        lease = self._leases.lease_for(
+            self.root, owner="memory_ops.exact", operation=command.operation_id)
+        with lease:
+            recovered = self._load_result(command.operation_id)
+            if recovered is not None:
+                if recovered.intended_after_target_store_digest != (
+                        command.intended_after_target_store_digest):
+                    raise OwnerApplyError(
+                        "operation id reused with a semantically different command")
+                return recovered
+            target = (self.root / command.target_agent / f"{command.slug}.md").resolve()
+            if self.root not in target.parents:
+                raise OwnerApplyError("target escapes the canonical owner root")
+            actual_before = (
+                _unit_digest(target.read_text(encoding="utf-8"))
+                if target.exists() else "absent"
+            )
+            if actual_before != command.expected_before_target_store_digest:
+                raise OwnerApplyError(
+                    "target CAS failed: the store moved since the decision froze "
+                    f"its precondition (expected {command.expected_before_target_store_digest[:12]}, "
+                    f"actual {actual_before[:12]})"
+                )
+            unit = command.marker_line.rstrip("\n") + "\n" + command.payload_text
+            if _unit_digest(unit) != command.intended_after_target_store_digest:
+                raise OwnerApplyError(
+                    "the complete marker+payload unit does not hash to the intended digest")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
+            try:
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(unit.encode("utf-8"))
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp, target)
+            except OSError:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            # post-verify the marker position + the actual digest.
+            written = target.read_text(encoding="utf-8")
+            first = written.split("\n", 1)[0]
+            if not APPLY_MARKER_RE.match(first.strip()):
+                raise OwnerApplyError("post-write verification lost the reserved marker")
+            actual_after = _unit_digest(written)
+            if actual_after != command.intended_after_target_store_digest:
+                raise OwnerApplyError("post-write digest does not equal the intended digest")
+            result = OwnerApplyResult(
+                operation_id=command.operation_id,
+                state="applied",
+                target=f"{command.target_agent}/{command.slug}",
+                marker_line=command.marker_line,
+                expected_before_target_store_digest=command.expected_before_target_store_digest,
+                actual_before_target_store_digest=actual_before,
+                intended_after_target_store_digest=command.intended_after_target_store_digest,
+                actual_after_target_store_digest=actual_after,
+            )
+            self._commit_result(result)  # durable BEFORE releasing the lease
+            return result
+
+    # -- legacy lifecycle through the same coordinator -------------------------- #
+    def accept_legacy(self, target: str, *, source: str) -> dict:
+        with self._leases.lease_for(self.root, owner="memory_ops.legacy",
+                                    operation=f"accept:{target}"):
+            return accept_proposal(target, source=source, project_root=self.root.parent)
+
+    def reject_legacy(self, target: str, *, source: str) -> dict:
+        with self._leases.lease_for(self.root, owner="memory_ops.legacy",
+                                    operation=f"reject:{target}"):
+            return reject_proposal(target, source=source, project_root=self.root.parent)
+
+    def revert_legacy(self, target: str, *, source: str) -> dict:
+        with self._leases.lease_for(self.root, owner="memory_ops.legacy",
+                                    operation=f"revert:{target}"):
+            return revert_proposal(target, source=source, project_root=self.root.parent)
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +506,11 @@ def revert_proposal(
     src = project_root / "memories" / agent / f"{slug}.md"
     if not src.exists():
         return {"error": f"no accepted file at {src}, nothing to revert"}
+    if _is_marker_bound(src):
+        return {"error": (
+            f"refusing to revert {target!r}: the accepted file is bound to an "
+            "exact-apply marker; only the decision-backed exact coordinator may "
+            "change it (a legacy move would lose the marker)")}
 
     dst_dir = project_root / "memories" / "_proposed" / agent
     dst = dst_dir / f"{slug}.md"

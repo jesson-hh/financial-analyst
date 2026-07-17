@@ -875,6 +875,7 @@ class MemoryContextPreparationService:
         required_runtime_material_refs: tuple[ContentRef, ...] = (),
         required_capability_refs: tuple[CapabilityRef, ...] = (),
         required_bridge_ids: tuple[str, ...] = ("memory.runtime",),
+        applied_resolver: Callable[[str], Any] | None = None,
     ) -> None:
         validate_memory_namespace_wiring(stores.cells.allowed_namespaces)
         self._stores = stores
@@ -895,6 +896,7 @@ class MemoryContextPreparationService:
         self._required_capabilities = tuple(sorted(
             required_capability_refs, key=lambda r: (r.id, r.version, r.content_digest)))
         self._required_bridge_ids = tuple(sorted(required_bridge_ids))
+        self._applied_resolver = applied_resolver
         # legacy-eligibility map from the genesis state.
         genesis = self._resolve_typed(
             cutover.genesis_source_state_ref, "MemorySourceStateSnapshot")
@@ -1051,10 +1053,23 @@ class MemoryContextPreparationService:
                 ev_model: MemoryReviewEvidence | None = evidence
                 base_time = self._attestation.attested_at
             else:
-                # conservative: a post-baseline direct write stays PENDING until
-                # exact Decision-backed applied evidence exists (Stage C).
-                review_state, review_basis, ev_ref, ev_model = "pending", None, None, None
-                base_time = capture_time
+                applied = self._applied_evidence_for(entry)
+                if applied is not None:
+                    ev_model, review_basis = applied
+                    ev_pref = self._stores.payloads.put(
+                        _SR("MemoryReviewEvidence"), ev_model,
+                        registry_digest=self._registry_digest, namespace="main",
+                        idempotency_key=f"mem-evidence:{ev_model.semantic_digest()}")
+                    review_state = "approved"
+                    ev_ref = _typed("MemoryReviewEvidence", ev_pref)
+                    base_time = capture_time  # a new approved revision is capture-timed
+                else:
+                    # conservative: a post-baseline direct write stays PENDING until
+                    # exact Decision-backed applied evidence exists. Approval alone,
+                    # visible text without the marker, or a raw audit receipt is
+                    # never sufficient.
+                    review_state, review_basis, ev_ref, ev_model = "pending", None, None, None
+                    base_time = capture_time
             record, ref = build_memory_record(
                 source_entry=entry,
                 owner_id=row.owner_id,
@@ -1085,6 +1100,48 @@ class MemoryContextPreparationService:
             # capture-completed availability — never backdated from mtime/Git/prose.
             out.append((record, ref))
         return tuple(out)
+
+    def _applied_evidence_for(
+        self, entry: MemorySourceStateEntry,
+    ) -> tuple[MemoryReviewEvidence, str] | None:
+        """Exact Decision-backed applied evidence for one marker-bound entry.
+
+        Approves ONLY when the entry's in-store marker and complete-unit store
+        digest still equal the verified owner receipt's actual values — a later
+        direct edit (new epoch / changed digest) can never reuse old evidence.
+        """
+        if self._applied_resolver is None or entry.apply_marker_id is None:
+            return None
+        bundle = self._applied_resolver(entry.apply_marker_id)
+        if bundle is None:
+            return None
+        if bundle.actual_after_target_store_digest != entry.store_content_digest:
+            return None  # content moved after the exact apply — pending again
+        if bundle.kind == "agent":
+            from guanlan_v2.orchestration.memory.models import AgentAppliedEvidence
+
+            evidence = MemoryReviewEvidence(evidence=AgentAppliedEvidence(
+                source_id=entry.source_id, locator=entry.locator,
+                continuity_epoch=entry.continuity_epoch,
+                proposal_ref=bundle.proposal_ref,
+                receipt_ref=bundle.receipt_ref,
+                decision_ref=bundle.decision_ref,
+                owner_receipt_ref=bundle.owner_receipt_ref))
+            return evidence, "memory_ops_approval"
+        from guanlan_v2.orchestration.memory.models import ConsoleAppliedEvidence
+
+        if bundle.journal_session_id is None or bundle.journal_event_id is None:
+            return None
+        evidence = MemoryReviewEvidence(evidence=ConsoleAppliedEvidence(
+            source_id=entry.source_id, locator=entry.locator,
+            continuity_epoch=entry.continuity_epoch,
+            proposal_ref=bundle.proposal_ref,
+            receipt_ref=bundle.receipt_ref,
+            decision_ref=bundle.decision_ref,
+            owner_receipt_ref=bundle.owner_receipt_ref,
+            journal_session_id=bundle.journal_session_id,
+            journal_event_id=bundle.journal_event_id))
+        return evidence, "console_proposal_approval"
 
     # -- ONLINE ------------------------------------------------------------------- #
     def prepare_online(

@@ -38,7 +38,19 @@ __all__ = [
     "AgentMemoryAdapter",
     "ConsoleMemoryAdapter",
     "APPLY_MARKER_LINE_RE",
+    "sha256_text",
 ]
+
+
+def sha256_text(text: str) -> str:
+    """The OWNER-shared store-unit digest domain: raw sha256 over the
+    CRLF-folded utf-8 bytes (exactly ``financial_analyst.memory_ops``'s
+    ``_unit_digest``), so an owner CAS precondition and a source-state entry
+    digest name the same store fact."""
+    import hashlib
+
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 #: the closed ASCII apply-marker grammar (validated in the proposal layer; the
 #: adapters only *recognize* it so it is never parsed as user memory).
@@ -52,16 +64,23 @@ _AGENT_STAGING_EXCLUDED = ("_proposed", "_pending_introspections", "_buddy", "_c
 
 @dataclass(frozen=True)
 class RawSourceUnit:
-    """One stable-scan unit: a logical source/locator plus normalized bytes."""
+    """One stable-scan unit: a logical source/locator plus normalized bytes.
+
+    ``text`` is the USER-memory body (a recognized first-line exact-apply
+    marker is metadata and excluded); ``unit_digest`` — when set — is the
+    digest of the COMPLETE normalized unit including its marker (the store CAS
+    identity owners verify against).
+    """
 
     source_id: str
     locator: str
     text: str
     apply_marker_id: str | None = None
+    unit_digest: str | None = None
 
     @property
     def store_content_digest(self) -> str:
-        return content_digest(self.text)
+        return self.unit_digest if self.unit_digest is not None else sha256_text(self.text)
 
 
 @dataclass(frozen=True)
@@ -125,23 +144,49 @@ class AgentMemoryAdapter:
             names.add(name)
         return names
 
+    @staticmethod
+    def _split_marker(text: str, locator: str) -> tuple[str | None, str]:
+        """Recognize the closed exact-apply marker grammar.
+
+        After an optional UTF-8 BOM the marker is exactly the FIRST line of the
+        complete unit and occurs exactly once. It is metadata, never user
+        memory: the returned text excludes it. Duplicate / relocated markers
+        fail closed."""
+        body = text.lstrip("﻿")
+        lines = body.split("\n")
+        marker_id: str | None = None
+        rest = body
+        if lines and (m := APPLY_MARKER_LINE_RE.match(lines[0].strip())):
+            marker_id = m.group(1)
+            rest = "\n".join(lines[1:])
+            lines = lines[1:]
+        for ln in lines:
+            if APPLY_MARKER_LINE_RE.match(ln.strip()):
+                raise MemoryContractError(
+                    f"duplicate/relocated exact-apply marker in {locator!r}; "
+                    "the marker must be exactly the first line, exactly once"
+                )
+        return marker_id, rest
+
     def scan_units(self) -> tuple[RawSourceUnit, ...]:
         units: list[RawSourceUnit] = []
         shared = self.root / "_shared"
         if shared.is_dir():
             for p in sorted(shared.glob("*.md")):
+                locator = f"_shared/{p.name}"
+                full = _normalize(p.read_text(encoding="utf-8"))
+                marker, text = self._split_marker(full, locator)
                 units.append(RawSourceUnit(
-                    source_id="agent.shared",
-                    locator=f"_shared/{p.name}",
-                    text=_normalize(p.read_text(encoding="utf-8")),
-                ))
+                    source_id="agent.shared", locator=locator, text=text,
+                    apply_marker_id=marker, unit_digest=sha256_text(full)))
         for agent_dir in self._agent_dirs():
             for p in sorted(agent_dir.glob("*.md")):
+                locator = f"{agent_dir.name}/{p.name}"
+                full = _normalize(p.read_text(encoding="utf-8"))
+                marker, text = self._split_marker(full, locator)
                 units.append(RawSourceUnit(
-                    source_id="agent.own",
-                    locator=f"{agent_dir.name}/{p.name}",
-                    text=_normalize(p.read_text(encoding="utf-8")),
-                ))
+                    source_id="agent.own", locator=locator, text=text,
+                    apply_marker_id=marker, unit_digest=sha256_text(full)))
         units.sort(key=lambda u: (u.source_id, u.locator))
         return tuple(units)
 

@@ -92,10 +92,9 @@ class ProcessSharedRootLease:
     """One exclusive OS/process-shared advisory lease over one canonical root."""
 
     def __init__(self, root: os.PathLike | str, *, owner: str, operation: str) -> None:
-        raw = Path(root)
-        if not str(raw).strip():
+        if not str(root).strip():
             raise RootLeaseError("root must be a non-empty path")
-        canonical = raw.resolve()
+        canonical = Path(root).resolve()
         if not canonical.is_dir():
             raise RootLeaseError(f"canonical root {canonical} is not an existing directory")
         if not owner.strip() or not operation.strip():
