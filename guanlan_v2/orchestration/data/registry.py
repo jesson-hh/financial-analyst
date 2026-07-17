@@ -63,9 +63,21 @@ Binding obligations closed here
   for this task. The gap is closed; the vocabulary is not silently forked.
 * **method vs source identity honesty.** Every attempt and every audit records the
   method identity (from ``req.method_spec_ref``) and the source identity (the route
-  entry's ``source_ref``) *distinctly*: ``SourceAttempt.vendor`` is the source id, and
-  refusal evidence carries the method digest and the source digest under separate
-  named slots.
+  entry's ``source_ref``) *distinctly*: ``SourceAttempt.vendor`` is the source id
+  (never conflated with ``DataResult.method``), and every refusal detail names the
+  method id and the source id as separate facts.
+* **calendar-policy binding (review I-1).** The injected trading ``calendar`` is
+  verified against the ONE resolved policy bundle before any cache/source access:
+  ``resolved_policy.calendar_id == ctx.calendar_id``, ``calendar.calendar_id ==
+  resolved_policy.calendar_id`` and ``calendar.material_ref ==
+  resolved_policy.calendar_material_ref`` — a right-id/wrong-material calendar is an
+  audited structural refusal, never a silent session-arithmetic substitution.
+* **DEGRADED coverage matrix (review I-2).** When the resolved policy carries a
+  reviewed ``coverage_floor`` (see :class:`ResolvedDispatchPolicy`), a PIT-passed
+  *non-empty* batch whose measured coverage of the requested universe/window falls
+  below the floor is finalized ``DEGRADED`` with an honest ``coverage`` fraction and
+  ``degradation_reason``; at/above the floor stays ``OK``; an empty batch stays
+  ``NO_DATA``. Fallback count alone NEVER means ``DEGRADED``.
 
 Note on the collaborator ABI. Task 6's tests exercise the router against strict
 fakes (a fake ``CapabilityGateway`` / evidence writer / cache), exactly as the brief
@@ -77,7 +89,11 @@ calls a descriptor handler or a registered Python object directly.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from pydantic import Field
 
 from guanlan_v2.orchestration.context import DataContext
 from guanlan_v2.orchestration.data.errors import (
@@ -119,7 +135,7 @@ from guanlan_v2.orchestration.data.source import (
     build_data_result,
 )
 from guanlan_v2.orchestration.data.source import DataReadOutcome
-from guanlan_v2.orchestration.digest import content_digest
+from guanlan_v2.orchestration.digest import FiniteFloat, content_digest
 from guanlan_v2.orchestration.enums import DataStatus
 from guanlan_v2.orchestration.refs import ContentRef, SchemaRef
 from guanlan_v2.orchestration.runtime_clock import AuthoritativeClock, clock_now
@@ -133,6 +149,7 @@ __all__ = [
     "SealedRegistryError",
     "RegistryConflictError",
     "DataSourceRegistry",
+    "ResolvedDispatchPolicy",
     "DataCapabilityGateway",
     "DataEvidenceWriter",
     "dispatch",
@@ -140,6 +157,7 @@ __all__ = [
     "REQUEST_SCHEMA_REF",
     "GENERIC_DETAIL_SCHEMA_REF",
     "DATA_FETCH_REFUSAL_SCHEMA_REF",
+    "REGISTRY_INTERNAL_MODELS",
 ]
 
 #: badge added to an ``OK`` result that a fallback source served.
@@ -165,6 +183,31 @@ class SealedRegistryError(RuntimeError):
 
 class RegistryConflictError(ValueError):
     """A declaration conflicts with an incompatible earlier declaration."""
+
+
+# --------------------------------------------------------------------------- #
+# ResolvedDispatchPolicy — the dispatch-owned policy extension (coverage floor) #
+# --------------------------------------------------------------------------- #
+class ResolvedDispatchPolicy(ResolvedDataMethodPolicy):
+    """The dispatch-owned policy-resolution extension carrying the coverage floor.
+
+    Task 5's :class:`ResolvedDataMethodPolicy` is a frozen internal carrier owned by
+    ``source.py``; the reviewed per-method **coverage floor** (the plan's ``DEGRADED``
+    matrix) is a *dispatch* policy concern, so it lives here on the policy-resolution
+    surface Task 6 owns — never as a field added to a frozen Task-5 model. There is
+    still exactly ONE policy bundle: a resolver that binds a floor returns this
+    subclass through the same ``resolved_policy`` slot; dispatch takes no second
+    policy/config parameter.
+
+    ``coverage_floor`` is the ``[0, 1]`` fraction of the requested universe/window
+    below which a PIT-passed *non-empty* batch is an honest ``DEGRADED`` rather than
+    ``OK``. ``None`` (or the plain base class) means the method policy approves no
+    partial-coverage judgement and every PIT-passed batch is ``OK``. Like its base,
+    this is an intentionally unregistered frozen dispatch carrier (see
+    :data:`REGISTRY_INTERNAL_MODELS`).
+    """
+
+    coverage_floor: FiniteFloat | None = Field(default=None, ge=0, le=1)
 
 
 # --------------------------------------------------------------------------- #
@@ -521,7 +564,7 @@ def dispatch(
         method_spec=method_spec, resolved_policy=resolved_policy,
         invocation_scope=invocation_scope, schema_registry=schema_registry,
         registry=registry, method_id=method_id, frozen_route=frozen_route,
-        refusal_audit_sink=refusal_audit_sink, clock=clock,
+        refusal_audit_sink=refusal_audit_sink, clock=clock, calendar=calendar,
     )
 
     op_token = invocation_scope.operation_token
@@ -572,6 +615,10 @@ def dispatch(
         idem = f"data:{req.request_digest}:{source_ref.id}:{i}"
 
         # -- 5a. authorize the attempt (may fail closed as not-configured) --- #
+        # only NotConfiguredError is catchable here by ABI contract: ``begin`` is
+        # pure authorization (allowlist/summary/credential presence) and performs
+        # no vendor I/O, so it can never rate-limit — RateLimitError can arise
+        # only from ``invoke``.
         try:
             pending = gateway.begin(
                 attempt_token=token, source_ref=source_ref,
@@ -679,13 +726,14 @@ def dispatch(
                 op_token=op_token, attempt_token=token, clock=clock,
             )
 
-        # -- 5d. success: adapt -> batch -> named OK result ------------------ #
+        # -- 5d. success: adapt -> batch -> named OK/DEGRADED result --------- #
         return _finalize_ok(
             passed, pit_audit, method_spec=method_spec, req=req, ctx=ctx, chain=chain,
             attempts=attempts, source_ref=source_ref, fallback_index=i,
             schema_registry=schema_registry, evidence_writer=evidence_writer,
             gateway=gateway, pending=pending, request_typed=request_typed,
             op_token=op_token, attempt_token=token, clock=clock,
+            resolved_policy=resolved_policy, calendar=calendar,
         )
 
     # -- 6) chain exhausted (only RateLimit/NotConfigured advanced) --------- #
@@ -722,19 +770,6 @@ def _generic_detail(summary: str, method_id: str, source_ref: ContentRef) -> Gen
         summary=f"{summary} method={method_id} source={source_ref.id}",
         category="data_dispatch",
     )
-
-
-def _evidence(method_spec: DataMethodSpec, req: DataRequest,
-              source_ref: ContentRef | None) -> tuple[NamedEvidenceDigest, ...]:
-    """Canonically ordered evidence recording method + source identity *distinctly*."""
-    items = [
-        NamedEvidenceDigest(name="method", digest=req.method_spec_ref.content_digest),
-        NamedEvidenceDigest(name="request", digest=req.request_digest),
-    ]
-    if source_ref is not None:
-        items.append(NamedEvidenceDigest(name="source", digest=source_ref.content_digest))
-    items.sort(key=lambda e: e.name)
-    return tuple(items)
 
 
 def _build_guard(
@@ -790,13 +825,16 @@ def _verify_frozen_set(
     method_spec: DataMethodSpec, resolved_policy: ResolvedDataMethodPolicy,
     invocation_scope: DataInvocationScope, schema_registry: Any,
     registry: DataSourceRegistry, method_id: str, frozen_route: ResolvedMethodRoute,
-    refusal_audit_sink: Any, clock: AuthoritativeClock,
+    refusal_audit_sink: Any, clock: AuthoritativeClock, calendar: Any,
 ) -> None:
-    """Verify request/context/route/manifest/registry are one frozen set.
+    """Verify request/context/route/manifest/registry/calendar are one frozen set.
 
     A mismatch records exactly one :class:`GenericRefusalDetails` directly through
     the sink and raises :class:`SnapshotMismatchError` *before* any cache lookup,
-    ``begin`` or source invocation (invokes no source).
+    ``begin`` or source invocation (invokes no source). The injected ``calendar`` is
+    bound to the ONE resolved policy bundle here (plan L19: the policy's sole
+    calendar goes to PitGuard; there is no second calendar parameter) — an injected
+    calendar with the right id but different session material is refused loud.
     """
     def fail(reason: str) -> None:
         refusal_audit_sink.record(
@@ -845,6 +883,14 @@ def _verify_frozen_set(
         fail("request method ref != registry method spec ref")
     if resolved_policy.method_ref != method_spec.method_ref:
         fail("resolved policy method ref != method spec ref")
+    # the injected calendar must BE the resolved policy's bound calendar (I-1):
+    # identity AND session material — right id with different material is refused.
+    if resolved_policy.calendar_id != ctx.calendar_id:
+        fail("resolved policy calendar id != ctx calendar id")
+    if getattr(calendar, "calendar_id", None) != resolved_policy.calendar_id:
+        fail("injected calendar id != resolved policy calendar id")
+    if getattr(calendar, "material_ref", None) != resolved_policy.calendar_material_ref:
+        fail("injected calendar material != resolved policy calendar material")
     # the runtime route must equal the catalog-frozen default route exactly.
     default_route = registry.default_route(method_id)
     if content_digest(frozen_route) != content_digest(default_route):
@@ -876,6 +922,66 @@ def _cache_lookup(
     )
 
 
+def _batch_coverage(
+    req: DataRequest, records: tuple[Any, ...], *, calendar: Any, ctx: DataContext,
+) -> float | None:
+    """Measure a PIT-passed batch's coverage of the *requested* universe/window.
+
+    A pure, deterministic fraction in ``[0, 1]``, or ``None`` when the request shape
+    yields no measurable denominator (whole-market universe, an unresolvable clock
+    timezone, or calendar material that does not span the requested window — an
+    uncovered range cannot honestly count sessions):
+
+    * **universe** (params carry non-empty ``symbols``): the fraction of requested
+      ``(code, exchange)`` instruments the batch covers;
+    * **series** (params carry ``start``/``end``): the fraction of the bound
+      calendar's trading sessions in the local-date window that have at least one
+      row (``effective_at`` reduced in the frozen clock's timezone, mirroring the
+      guard's local-session-date rule).
+    """
+    params = req.params
+    symbols = params.get("symbols")
+    if symbols is not None:
+        requested = {
+            (s.get("code"), s.get("exchange")) for s in symbols if isinstance(s, dict)
+        }
+        requested.discard((None, None))
+        if not requested:
+            return None  # a whole-market request has no finite denominator
+        covered: set[tuple[str, str]] = set()
+        for r in records:
+            sym = getattr(r, "symbol", None)
+            if sym is not None:
+                covered.add((sym.code, sym.exchange))
+        return min(1.0, len(covered & requested) / len(requested))
+    start, end = params.get("start"), params.get("end")
+    if start is not None and end is not None:
+        try:
+            tz = ZoneInfo(ctx.clock.timezone)
+        except (ZoneInfoNotFoundError, ValueError):
+            return None
+        start_d = datetime.fromisoformat(start).astimezone(tz).date()
+        end_d = datetime.fromisoformat(end).astimezone(tz).date()
+        span = getattr(calendar, "coverage", None)
+        if span is None:
+            return None
+        lo, hi = span
+        if start_d < lo or end_d > hi:
+            return None  # uncovered material: counting would silently undercount
+        expected = calendar.sessions_between(start_d, end_d)
+        if expected <= 0:
+            return None
+        covered_dates: set[Any] = set()
+        for r in records:
+            eff = getattr(r, "effective_at", None)
+            if eff is not None:
+                d = eff.astimezone(tz).date()
+                if calendar.is_session(d):
+                    covered_dates.add(d)
+        return min(1.0, len(covered_dates) / expected)
+    return None
+
+
 def _finalize_ok(
     passed: tuple[Any, ...], pit_audit: PitAudit, *, method_spec: DataMethodSpec,
     req: DataRequest, ctx: DataContext, chain: tuple[str, ...],
@@ -883,10 +989,46 @@ def _finalize_ok(
     schema_registry: Any, evidence_writer: Any, gateway: Any, pending: Any,
     request_typed: Any, op_token: ExecutionEvidenceOrdinalToken,
     attempt_token: ExecutionEvidenceOrdinalToken, clock: AuthoritativeClock,
+    resolved_policy: ResolvedDataMethodPolicy, calendar: Any,
 ) -> DataReadOutcome:
-    """Adapt PIT-passed candidates into the named OK result, persist + finalize."""
+    """Adapt PIT-passed candidates into the named OK/DEGRADED result, persist + finalize.
+
+    The DEGRADED matrix: only a resolved-policy ``coverage_floor`` (see
+    :class:`ResolvedDispatchPolicy`) can degrade a non-empty PIT-passed batch — the
+    measured coverage below the floor yields ``DEGRADED`` with honest ``coverage`` +
+    ``degradation_reason``; at/above the floor stays ``OK``. Fallback position never
+    enters this judgement (it only adds the ``FALLBACK_USED`` badge on ``OK`` or
+    ``DEGRADED`` alike). A declared floor with an unmeasurable request shape is
+    refused loud (reject once, then raise) rather than claiming OK unmeasured.
+    """
     binding = _BINDING_BY_METHOD[method_spec.method_id]
     records = tuple(binding.adapt(c) for c in passed)
+    status: DataStatus = DataStatus.OK
+    coverage: float | None = None
+    reason: str | None = None
+    floor = getattr(resolved_policy, "coverage_floor", None)
+    if floor is not None:
+        measured = _batch_coverage(req, records, calendar=calendar, ctx=ctx)
+        if measured is None:
+            gateway.reject(
+                pending, detail_schema_ref=GENERIC_DETAIL_SCHEMA_REF,
+                detail_payload=_generic_detail(
+                    "coverage_unmeasurable", method_spec.method_id, source_ref),
+                reason_code="coverage_unmeasurable",
+                idempotency_key=f"data:{req.request_digest}:{source_ref.id}:coverage",
+            )
+            raise RoutingConfigurationError(
+                f"method {method_spec.method_id!r} declares coverage floor {floor:g} "
+                "but the request shape yields no measurable coverage; refusing to "
+                "claim OK unmeasured"
+            )
+        if measured < floor:
+            status = DataStatus.DEGRADED
+            coverage = measured
+            reason = (
+                f"coverage {measured:.4f} of the requested universe/window is below "
+                f"the method policy floor {floor:g}"
+            )
     batch = binding.batch_cls.build(records)
     finished = clock_now(clock)
     attempts.append(_attempt(source_ref, configured=True, outcome="success",
@@ -894,9 +1036,10 @@ def _finalize_ok(
     badges = (FALLBACK_USED_BADGE,) if fallback_index > 0 else ()
     result = build_data_result(
         method_spec, registry=schema_registry, id=f"data-{req.request_digest[:16]}",
-        request_digest=req.request_digest, status=DataStatus.OK, data=batch,
+        request_digest=req.request_digest, status=status, data=batch,
         resolved_vendor_chain=chain, source_config_digest=ctx.source_config_digest,
         fetched_at=finished, attempts=tuple(attempts), pit_audit=pit_audit, badges=badges,
+        coverage=coverage, degradation_reason=reason,
     )
     return _persist_and_finalize(
         result, method_spec=method_spec, req=req, evidence_writer=evidence_writer,
@@ -987,3 +1130,19 @@ def _exhaustion(
         operation_token=op_token, result_token=op_token, result=result,
         request_ref=request_typed, result_ref=result_typed, tool_call_record=None,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Reviewed Task-6 model partition (for the Phase-1 completeness firewall)       #
+# --------------------------------------------------------------------------- #
+#: intentionally-unregistered model this module contributes, with a reviewed reason
+#: (the same idiom as source.py's SOURCE_INTERNAL_MODELS; folded into the Phase-1
+#: INTERNAL_MODELS map by schema_registry._load_population).
+REGISTRY_INTERNAL_MODELS: dict[type, str] = {
+    ResolvedDispatchPolicy: (
+        "intentionally unregistered frozen dispatch-carrier value (the Task 6 "
+        "policy-resolution extension adding the reviewed coverage floor); like its "
+        "ResolvedDataMethodPolicy base it preserves service policy without a second "
+        "public schema"
+    ),
+}

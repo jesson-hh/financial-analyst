@@ -300,6 +300,7 @@ def _load_population() -> dict[str, Any]:
     from guanlan_v2.orchestration.data import snapshot as _dsnapshot
     from guanlan_v2.orchestration.data import render as _drender
     from guanlan_v2.orchestration.data import catalog as _dcatalog
+    from guanlan_v2.orchestration.data import registry as _dregistry
 
     # -- registered: node-output value payloads + committed context/memory facts.
     public: tuple[type[ContractModel], ...] = (
@@ -427,6 +428,8 @@ def _load_population() -> dict[str, Any]:
     internal.update(_dsnapshot.SNAPSHOT_INTERNAL_MODELS)
     internal.update(_drender.RENDER_INTERNAL_MODELS)
     internal.update(_dcatalog.CATALOG_INTERNAL_MODELS)
+    # Task 6 dispatch-owned policy extension (classification only; unregistered).
+    internal.update(_dregistry.REGISTRY_INTERNAL_MODELS)
 
     overlap = set(public) & set(internal)
     if overlap:  # pragma: no cover - reviewed invariant, guards a future edit

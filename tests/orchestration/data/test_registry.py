@@ -43,6 +43,7 @@ from guanlan_v2.orchestration.data.pit import (
 from guanlan_v2.orchestration.data.registry import (
     DataSourceRegistry,
     RegistryConflictError,
+    ResolvedDispatchPolicy,
     SealedRegistryError,
     dispatch,
 )
@@ -196,7 +197,8 @@ def build_golden_registry(*, reverse: bool = False) -> DataSourceRegistry:
 class _World:
     """A fully-built, coherent frozen set for one method + its invocation scope."""
 
-    def __init__(self, schema_registry, *, method_id="ohlcv", mode="cache_or_invoke"):
+    def __init__(self, schema_registry, *, method_id="ohlcv", mode="cache_or_invoke",
+                 params=None, coverage_floor=None):
         self.surface = phase3_data_surface()
         self.registry = build_golden_registry()
         self.snapshot = self.registry.snapshot()
@@ -216,8 +218,9 @@ class _World:
             FixedClock(AS_OF), mode=DataMode.ONLINE, backend=DataBackend.LIVE,
             source_config=self.config, source_registry=self.snapshot, routing=self.routing,
             manifest=self.manifest)
-        params = dict(_SERIES_PARAMS) if method_id in ("ohlcv", "indicators") else {
-            "as_of": "2026-07-16T07:00:00+00:00"}
+        if params is None:
+            params = dict(_SERIES_PARAMS) if method_id in ("ohlcv", "indicators") else {
+                "as_of": "2026-07-16T07:00:00+00:00"}
         self.req = build_data_request(
             self.ctx, method_spec=self.spec, params=params, registry=schema_registry,
             request_id="req-1")
@@ -227,10 +230,15 @@ class _World:
             operation_token=_token(1), attempt_tokens=(_token(2), _token(3)),
             frozen_route=self.route, invocation_mode=mode,
             catalog_digest="b" * 64, schema_registry_digest=schema_registry.registry_digest)
-        self.policy = ResolvedDataMethodPolicy.build(
+        policy_fields = dict(
             method_ref=self.spec.method_ref, freshness_policy=self.surface.freshness_policy,
             limit_policy=None, calendar_id="cn_a_share",
             calendar_material_ref=CALENDAR.material_ref)
+        if coverage_floor is not None:
+            self.policy = ResolvedDispatchPolicy.build(
+                **policy_fields, coverage_floor=coverage_floor)
+        else:
+            self.policy = ResolvedDataMethodPolicy.build(**policy_fields)
 
     def source_ref(self, source_id: str) -> ContentRef:
         for entry in self.route.entries:
@@ -397,14 +405,14 @@ class FakeCache:
         return self._hit
 
 
-def _run(world: _World, gateway, *, cache=None, calendar=CALENDAR, sink=None):
+def _run(world: _World, gateway, *, cache=None, calendar=CALENDAR, sink=None, clock=None):
     return dispatch(
         world.req, invocation_scope=world.scope, ctx=world.ctx, routing=world.routing,
         manifest=world.manifest, registry=world.registry,
         schema_registry=world.schema_registry, resolved_policy=world.policy,
         gateway=gateway, evidence_writer=FakeEvidenceWriter(),
         payload_reader=None, refusal_audit_sink=sink or gateway._sink,
-        cache=cache or FakeCache(), clock=FixedClock(AS_OF), calendar=calendar,
+        cache=cache or FakeCache(), clock=clock or FixedClock(AS_OF), calendar=calendar,
     )
 
 
@@ -699,19 +707,60 @@ def test_manifest_mismatch_audits_once_and_invokes_no_source(schema_registry):
 
 
 def test_guard_construction_refusal_is_audited_before_raise(schema_registry):
-    """Obligation 1: a construction refusal (wrong calendar) audits before re-raising."""
+    """Obligation 1: a construction refusal (drifted clock) audits before re-raising."""
     world = _World(schema_registry)
-    wrong_cal = build_trading_calendar(
-        calendar_id="XSHE", sessions=_weekdays_2026(), material_id="cal.xshe", material_version="1")
     gw = FakeGateway(sources={_PRIMARY: lambda r, s: pytest.fail("no source before guard")})
     sink = _audit_sink()
     before = len(sink.records())
     with pytest.raises(RoutingConfigurationError):
-        _run(world, gw, calendar=wrong_cal, sink=sink)
+        # the injected clock reads an instant other than the frozen ctx.as_of, so
+        # PitGuard.from_context refuses at construction — the wrap must audit first.
+        _run(world, gw, sink=sink, clock=FixedClock(AS_OF + timedelta(hours=1)))
     assert gw.begun == []
     audits = sink.records()[before:]
     assert len(audits) == 1
     assert audits[0].reason_code == "guard_construction_refused"
+
+
+def test_injected_calendar_material_mismatch_is_refused_loud(schema_registry):
+    """Review I-1: a calendar with the RIGHT id but different session material is a
+    structural refusal (audited) — never a silent session-arithmetic substitution."""
+    world = _World(schema_registry)
+    wrong_material = build_trading_calendar(
+        calendar_id="cn_a_share",  # right identity …
+        sessions=tuple(d for d in _weekdays_2026() if d.month <= 6),  # … wrong material
+        material_id="cal.cn.h1", material_version="1")
+    assert wrong_material.calendar_id == CALENDAR.calendar_id
+    assert wrong_material.material_ref != CALENDAR.material_ref
+    gw = FakeGateway(sources={_PRIMARY: lambda r, s: pytest.fail("no source on mismatch")})
+    sink = _audit_sink()
+    before = len(sink.records())
+    with pytest.raises(SnapshotMismatchError):
+        _run(world, gw, calendar=wrong_material, sink=sink)
+    assert gw.begun == []  # refused before any begin/source access
+    audits = sink.records()[before:]
+    assert len(audits) == 1
+    assert audits[0].reason_code == "frozen_set_mismatch"
+
+
+def test_wrong_calendar_id_is_refused_loud(schema_registry):
+    world = _World(schema_registry)
+    wrong_id = build_trading_calendar(
+        calendar_id="XSHE", sessions=_weekdays_2026(),
+        material_id="cal.xshe", material_version="1")
+    gw = FakeGateway(sources={_PRIMARY: lambda r, s: pytest.fail("no source on mismatch")})
+    sink = _audit_sink()
+    with pytest.raises(SnapshotMismatchError):
+        _run(world, gw, calendar=wrong_id, sink=sink)
+    assert gw.begun == []
+
+
+def test_matching_calendar_is_unchanged(schema_registry):
+    world = _World(schema_registry)
+    gw = FakeGateway(sources={_PRIMARY: lambda r, s: _raw(world, _PRIMARY, [_cand(
+        available_at=AS_OF - timedelta(hours=1))])})
+    outcome = _run(world, gw, calendar=CALENDAR)
+    assert outcome.result.status is DataStatus.OK
 
 
 # =========================================================================== #
@@ -780,7 +829,117 @@ def test_attempts_record_method_and_source_distinctly(schema_registry):
 
 
 # =========================================================================== #
-# I. golden manifest                                                           #
+# I. DEGRADED coverage matrix (review I-2)                                     #
+# =========================================================================== #
+_TWO_SYMBOL_UNIVERSE = {
+    "as_of": "2026-07-16T07:00:00+00:00",
+    "symbols": (
+        {"code": "600519", "exchange": "SH", "board": "main"},
+        {"code": "000001", "exchange": "SZ", "board": "main"},
+    ),
+}
+
+
+def _snap_cand(code="600519", exchange="SH") -> RawRowCandidate:
+    return RawRowCandidate.build(
+        raw_payload={"symbol": {"code": code, "exchange": exchange, "board": "main"},
+                     "last_price": 10.0, "prev_close": 9.5},
+        available_at=AS_OF - timedelta(hours=1),
+        ingested_at=AS_OF,
+    )
+
+
+def _coverage_world(schema_registry, *, floor, mode="cache_or_invoke"):
+    return _World(schema_registry, method_id="verified_snapshot",
+                  params=dict(_TWO_SYMBOL_UNIVERSE), coverage_floor=floor, mode=mode)
+
+
+def test_below_floor_partial_batch_is_degraded(schema_registry):
+    world = _coverage_world(schema_registry, floor=0.8)
+    gw = FakeGateway(sources={_PRIMARY: lambda r, s: _raw(
+        world, _PRIMARY, [_snap_cand("600519", "SH")])})  # 1 of 2 requested → 0.5
+    outcome = _run(world, gw)
+    assert outcome.result.status is DataStatus.DEGRADED
+    assert outcome.result.coverage == 0.5  # honest measured fraction
+    assert outcome.result.degradation_reason and "floor" in outcome.result.degradation_reason
+    assert outcome.result.data is not None  # DEGRADED is data-bearing
+    assert outcome.tool_call_record is not None  # a finalized capability outcome
+
+
+def test_at_or_above_floor_stays_ok(schema_registry):
+    world = _coverage_world(schema_registry, floor=0.5)
+    gw = FakeGateway(sources={_PRIMARY: lambda r, s: _raw(
+        world, _PRIMARY, [_snap_cand("600519", "SH")])})  # 0.5 == floor → not below
+    outcome = _run(world, gw)
+    assert outcome.result.status is DataStatus.OK
+    assert outcome.result.coverage is None  # coverage is DEGRADED-only
+    full = _coverage_world(schema_registry, floor=0.8)
+    gw2 = FakeGateway(sources={_PRIMARY: lambda r, s: _raw(
+        full, _PRIMARY, [_snap_cand("600519", "SH"), _snap_cand("000001", "SZ")])})
+    assert _run(full, gw2).result.status is DataStatus.OK  # 1.0 above floor
+
+
+def test_empty_batch_with_floor_stays_no_data(schema_registry):
+    world = _coverage_world(schema_registry, floor=0.8)
+    gw = FakeGateway(sources={_PRIMARY: lambda r, s: _raw(world, _PRIMARY, [])})
+    outcome = _run(world, gw)
+    assert outcome.result.status is DataStatus.NO_DATA  # empty is NO_DATA, never DEGRADED
+    assert outcome.result.coverage is None
+
+
+def test_degraded_via_fallback_carries_full_attempts(schema_registry):
+    """Coverage (not fallback position) drives DEGRADED; fallback only adds the badge."""
+    world = _coverage_world(schema_registry, floor=0.8)
+
+    def throttled(r, s):
+        raise RateLimitError("throttled")
+
+    gw = FakeGateway(sources={
+        _PRIMARY: throttled,
+        _BACKUP: lambda r, s: _raw(world, _BACKUP, [_snap_cand("600519", "SH")]),
+    })
+    outcome = _run(world, gw)
+    assert outcome.result.status is DataStatus.DEGRADED
+    assert [a.outcome for a in outcome.result.attempts] == ["rate_limited", "success"]
+    assert FALLBACK_USED in outcome.result.badges
+    # and the inverse stands proven elsewhere: full-coverage fallback stays OK
+    # (test_rate_limit_falls_through) — fallback count alone never means DEGRADED.
+
+
+def test_series_window_coverage_below_floor_is_degraded(schema_registry):
+    # ohlcv 2026-07-01..07-15 spans 11 local trading sessions; one bar → ~0.09.
+    world = _World(schema_registry, method_id="ohlcv", coverage_floor=0.5)
+    gw = FakeGateway(sources={_PRIMARY: lambda r, s: _raw(world, _PRIMARY, [_cand(
+        available_at=AS_OF - timedelta(hours=1))])})
+    outcome = _run(world, gw)
+    assert outcome.result.status is DataStatus.DEGRADED
+    assert outcome.result.coverage == pytest.approx(1 / 11)
+
+
+def test_floor_with_unmeasurable_shape_is_refused_loud(schema_registry):
+    # a whole-market universe (no symbols) has no finite denominator: claiming OK
+    # unmeasured against a declared floor is dishonest — reject once, then raise.
+    world = _World(schema_registry, method_id="verified_snapshot",
+                   params={"as_of": "2026-07-16T07:00:00+00:00"}, coverage_floor=0.8)
+    gw = FakeGateway(sources={_PRIMARY: lambda r, s: _raw(
+        world, _PRIMARY, [_snap_cand("600519", "SH")])})
+    with pytest.raises(RoutingConfigurationError):
+        _run(world, gw)
+    assert gw.rejects == [("coverage_unmeasurable", _PRIMARY)]
+    assert gw.records == []
+
+
+def test_no_floor_means_every_passed_batch_is_ok(schema_registry):
+    world = _World(schema_registry, method_id="verified_snapshot",
+                   params=dict(_TWO_SYMBOL_UNIVERSE))  # base policy: no floor
+    gw = FakeGateway(sources={_PRIMARY: lambda r, s: _raw(
+        world, _PRIMARY, [_snap_cand("600519", "SH")])})  # partial, but no floor
+    outcome = _run(world, gw)
+    assert outcome.result.status is DataStatus.OK
+
+
+# =========================================================================== #
+# J. golden manifest                                                           #
 # =========================================================================== #
 def test_manifest_matches_frozen_golden():
     assert GOLDEN_PATH.exists(), f"missing golden: {GOLDEN_PATH}"
