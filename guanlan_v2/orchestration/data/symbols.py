@@ -163,3 +163,292 @@ def normalize_symbol(raw: str) -> Symbol:
             f"code-derived exchange {exchange} for {code}"
         )
     return Symbol(code=code, exchange=exchange, board=board)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Name resolution + versioned, PIT-aware price-limit rules (Phase 3 · Task 3)
+# ─────────────────────────────────────────────────────────────────────────────
+# Appended (existing content above is byte-untouched). These are pure, offline
+# resolvers plus the closed, versioned price-limit policy they consult.
+from collections.abc import Mapping
+from datetime import datetime, timezone
+from typing import ClassVar
+
+from guanlan_v2.orchestration.data.calendar import TradingCalendar
+from guanlan_v2.orchestration.digest import (
+    DigestHex,
+    NonEmptyStr,
+    NonNegativeInt,
+    content_digest,
+)
+from guanlan_v2.orchestration.refs import ContentRef
+
+#: The closed set of boards a policy rule table may key on.
+_KNOWN_BOARDS: frozenset[str] = frozenset({"main", "star", "chinext", "bj"})
+
+
+def _aware_utc(v: object) -> datetime:
+    """Return ``v`` normalized to UTC iff it is a tz-aware datetime.
+
+    A non-datetime raises :class:`TypeError`; a naive datetime raises
+    :class:`ValueError`. Mirrors the Phase 1 ``UtcDateTime`` rule for a plain
+    argument that is not a validated model field.
+    """
+    if not isinstance(v, datetime):
+        raise TypeError(f"as_of must be a tz-aware datetime, got {type(v).__name__}")
+    if v.tzinfo is None or v.tzinfo.utcoffset(v) is None:
+        raise ValueError("as_of must be tz-aware; a naive datetime is rejected")
+    return v.astimezone(timezone.utc)
+
+
+def resolve_name_to_code(raw: str, name_map: Mapping[str, str]) -> Symbol:
+    """Resolve a *complete* symbol or a verified instrument *name* to a Symbol.
+
+    Order of attempts:
+
+    1. the exact A-share symbol grammar via :func:`normalize_symbol` (so a code /
+       dotted / engine form passes straight through);
+    2. the ``name_map`` — which must be extracted from the digest-verified,
+       PIT-filtered ``InstrumentNameRows`` (Task 5); this helper never fetches or
+       mutates a map and public/capability APIs never accept a caller-supplied
+       current map. A mapped value is itself run through :func:`normalize_symbol`,
+       so a bogus map value is rejected, never trusted blindly.
+
+    Anything that is neither a symbol nor a verified name — in particular a CJK
+    industry / concept term such as ``"白酒"`` — is rejected with a
+    :class:`ValueError`. The resolver never *guesses* a code; the caller must pass
+    a six-digit code (or a verified exact name).
+    """
+    if type(raw) is not str:
+        raise TypeError(f"name/code must be a str, got {type(raw).__name__}")
+    try:
+        return normalize_symbol(raw)
+    except (TypeError, ValueError):
+        pass
+    for key in (raw, raw.strip()):
+        if key in name_map:
+            value = name_map[key]
+            try:
+                return normalize_symbol(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"verified name map value {value!r} for {key!r} is not a valid "
+                    f"symbol: {exc}"
+                ) from exc
+    raise ValueError(
+        f"cannot resolve {raw!r} to a 6-digit code: it is neither a symbol nor a "
+        "verified instrument name (industry / concept names are rejected, never "
+        "guessed — pass a 6-digit code)"
+    )
+
+
+class LimitRuleEntry(DigestModel):
+    """One as-of-effective slice of a versioned price-limit rule table.
+
+    Closed and immutable. ``board_pct`` maps each board to the ordinary (non-ST)
+    daily price-limit fraction; ``st_pct`` is the fraction applied when an
+    instrument is ST, regardless of board. ``first_session_window`` is the number
+    of initial trading *sessions* after listing during which the ordinary limit
+    does not yet apply — a session-based rule that can only be evaluated against
+    the exact authoritative trading calendar — and ``first_session_pct`` is the
+    fraction that applies inside that window, or ``None`` when the initial
+    sessions carry no ordinary price limit at all.
+    """
+
+    schema_version: Literal["1"] = "1"
+    effective_from: UtcDateTime
+    effective_to: UtcDateTime | None = None
+    board_pct: dict[str, FiniteFloat]
+    st_pct: FiniteFloat = Field(gt=0, le=1)
+    first_session_window: NonNegativeInt = 0
+    first_session_pct: FiniteFloat | None = Field(default=None, gt=0, le=1)
+
+    @model_validator(mode="after")
+    def _check(self) -> "LimitRuleEntry":
+        if not self.board_pct:
+            raise ValueError("board_pct must be non-empty")
+        for board, pct in self.board_pct.items():
+            if board not in _KNOWN_BOARDS:
+                raise ValueError(f"unknown board {board!r} in board_pct")
+            if not (0.0 < pct <= 1.0):
+                raise ValueError(f"board_pct[{board!r}] must be a fraction in (0, 1]")
+        if self.effective_to is not None and self.effective_to <= self.effective_from:
+            raise ValueError("effective_to must be strictly after effective_from")
+        return self
+
+    def covers(self, as_of: datetime) -> bool:
+        if as_of < self.effective_from:
+            return False
+        if self.effective_to is not None and as_of >= self.effective_to:
+            return False
+        return True
+
+
+class LimitRulePolicy(DigestModel):
+    """A closed, versioned A-share price-limit policy sealed by its own digest.
+
+    Holds an ordered, non-overlapping table of :class:`LimitRuleEntry` slices
+    selected by ``as_of``, plus the exact trading-calendar identity
+    (``calendar_id`` + versioned ``calendar_material_ref``) any session-based
+    listing-stage rule must be evaluated against. ``policy_digest`` self-seals the
+    reviewed material; there is deliberately **no** unversioned module-global
+    policy. Build (and seal) it with :func:`build_limit_rule_policy`; Task 5
+    registers it and Task 6 refers to it by :class:`ContentRef`.
+    """
+
+    schema_version: Literal["1"] = "1"
+    policy_id: NonEmptyStr
+    policy_version: NonEmptyStr
+    calendar_id: NonEmptyStr
+    calendar_material_ref: ContentRef
+    entries: tuple[LimitRuleEntry, ...]
+    policy_digest: DigestHex
+
+    SELF_DIGEST_FIELDS: ClassVar[frozenset[str]] = frozenset({"policy_digest"})
+
+    @model_validator(mode="after")
+    def _verify(self) -> "LimitRulePolicy":
+        if not self.entries:
+            raise ValueError("a LimitRulePolicy must carry at least one entry")
+        starts = [e.effective_from for e in self.entries]
+        if starts != sorted(starts):
+            raise ValueError("entries must be ordered by effective_from")
+        for prev, cur in zip(self.entries, self.entries[1:]):
+            if prev.effective_to is None or prev.effective_to > cur.effective_from:
+                raise ValueError(
+                    "policy entries must be closed and non-overlapping in order"
+                )
+        if self.policy_digest != self.semantic_digest():
+            raise ValueError("declared policy_digest does not match canonical digest")
+        return self
+
+    @property
+    def rule_version(self) -> str:
+        return f"{self.policy_id}@{self.policy_version}"
+
+    def entry_for(self, as_of: datetime) -> "LimitRuleEntry | None":
+        for entry in self.entries:
+            if entry.covers(as_of):
+                return entry
+        return None
+
+
+def build_limit_rule_policy(
+    *,
+    policy_id: str,
+    policy_version: str,
+    calendar: TradingCalendar,
+    entries: tuple[LimitRuleEntry, ...],
+) -> LimitRulePolicy:
+    """Seal a :class:`LimitRulePolicy`, binding it to ``calendar``'s exact identity.
+
+    The policy's ``calendar_id`` / ``calendar_material_ref`` are copied from the
+    supplied calendar so a session-based rule can only be evaluated against the
+    exact material named here. ``policy_digest`` is computed from the reviewed
+    field values (never a placeholder) and re-verified by the constructor.
+    """
+    fields = dict(
+        policy_id=policy_id,
+        policy_version=policy_version,
+        calendar_id=calendar.calendar_id,
+        calendar_material_ref=calendar.material_ref,
+        entries=entries,
+    )
+    digest = LimitRulePolicy.digest_of_fields(projection="semantic", **fields)
+    return LimitRulePolicy(**fields, policy_digest=digest)
+
+
+def resolve_limit_rule(
+    sym: Symbol,
+    as_of: datetime,
+    meta: InstrumentMeta,
+    *,
+    policy: LimitRulePolicy,
+    calendar: TradingCalendar | None,
+) -> LimitRule:
+    """Deterministically resolve the price-limit rule for ``sym`` at ``as_of``.
+
+    PIT-aware and calendar-aware. Before consulting the rule table it verifies
+    ``meta.symbol == sym`` (mismatch raises) and that ``as_of`` is tz-aware
+    (naive raises). It then requires the metadata to be *knowable* and *not in the
+    future* at ``as_of``: missing/future ``metadata_available_at``, a
+    not-yet-listed instrument, an unknown ST flag, an ``as_of`` outside every
+    policy window, or an unavailable / mismatched trading calendar for a
+    session-based listing-stage rule each return an explicit ``pct=None``
+    :class:`LimitRule` with a stated reason — never a guessed percentage. The
+    injected digest-frozen ``policy`` (selected by ``as_of``) owns the ST / board /
+    listing-stage rules.
+    """
+    as_of = _aware_utc(as_of)  # raises on naive / non-datetime
+
+    if meta.symbol != sym:
+        raise ValueError(
+            f"metadata symbol {meta.symbol.dotted} does not match the requested "
+            f"symbol {sym.dotted}"
+        )
+
+    def _unknown(reason: str) -> LimitRule:
+        return LimitRule(pct=None, reason=reason, rule_version=policy.rule_version)
+
+    entry = policy.entry_for(as_of)
+    if entry is None:
+        return _unknown(
+            f"no limit-rule policy window covers as_of {as_of.isoformat()}"
+        )
+
+    if meta.metadata_available_at is None or meta.metadata_available_at > as_of:
+        return _unknown("instrument metadata is not yet available at as_of")
+
+    if meta.listed_at is None or meta.listed_at > as_of:
+        return _unknown("instrument is not yet listed at as_of")
+
+    if meta.is_st is None:
+        return _unknown("ST status is unknown; the price limit cannot be determined")
+
+    # Session-based listing-stage rule: requires the exact authoritative calendar.
+    # Even a clearly seasoned instrument must be confirmed past the initial window
+    # by counting real sessions — never by guessing from calendar-day arithmetic.
+    if entry.first_session_window > 0:
+        if (
+            calendar is None
+            or calendar.calendar_id != policy.calendar_id
+            or calendar.material_ref != policy.calendar_material_ref
+        ):
+            return _unknown(
+                "the exact trading calendar is unavailable or does not match the "
+                "policy; the listing-stage price limit cannot be determined"
+            )
+        sessions_since_listing = calendar.sessions_between(
+            meta.listed_at.date(), as_of.date()
+        )
+        if sessions_since_listing <= entry.first_session_window:
+            if entry.first_session_pct is None:
+                return LimitRule(
+                    pct=None,
+                    reason=(
+                        "within the initial listing sessions: no ordinary price "
+                        "limit applies"
+                    ),
+                    rule_version=policy.rule_version,
+                )
+            return LimitRule(
+                pct=entry.first_session_pct,
+                reason="initial listing-session price limit",
+                rule_version=policy.rule_version,
+            )
+
+    if meta.is_st:
+        return LimitRule(
+            pct=entry.st_pct,
+            reason=f"ST instrument on board {sym.board}",
+            rule_version=policy.rule_version,
+        )
+
+    board_pct = entry.board_pct.get(sym.board)
+    if board_pct is None:
+        return _unknown(f"policy has no ordinary limit for board {sym.board!r}")
+    return LimitRule(
+        pct=board_pct,
+        reason=f"ordinary limit for board {sym.board}",
+        rule_version=policy.rule_version,
+    )

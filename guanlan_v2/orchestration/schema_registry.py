@@ -244,6 +244,15 @@ _R_MIGRATION_ADAPTER = (
     "legacy-migration adapter validated by the migration regime; a Phase-1 "
     "compatibility output, not a shipped node-output payload"
 )
+_R_DATA_POLICY_VALUE = (
+    "versioned Phase-3 data-layer price-limit policy value, sealed by its own "
+    "digest and registered by the Phase-3 data schema registry (Task 5), never by "
+    "the Phase-1 default registry"
+)
+_R_CALENDAR_MATERIAL = (
+    "immutable Phase-3 trading-calendar session material value referenced by a "
+    "ContentRef; a data-layer material, not a SchemaRef-addressed node-output payload"
+)
 #: cache for the lazily-built population (see :func:`_load_population`).
 _POPULATION: dict[str, Any] | None = None
 
@@ -268,6 +277,7 @@ def _load_population() -> dict[str, Any]:
     from guanlan_v2.orchestration import migration as _migration
     from guanlan_v2.orchestration.data import symbols as _symbols
     from guanlan_v2.orchestration.data import result as _result
+    from guanlan_v2.orchestration.data import calendar as _calendar
 
     # -- registered: node-output value payloads + committed context/memory facts.
     public: tuple[type[ContractModel], ...] = (
@@ -303,6 +313,11 @@ def _load_population() -> dict[str, Any]:
         _symbols.Symbol: _R_VALUE_OBJECT,
         _symbols.InstrumentMeta: _R_VALUE_OBJECT,
         _symbols.LimitRule: _R_VALUE_OBJECT,
+        # data/symbols.py — Phase-3 versioned price-limit policy + its nested table
+        _symbols.LimitRulePolicy: _R_DATA_POLICY_VALUE,
+        _symbols.LimitRuleEntry: _R_NESTED_COMPONENT,
+        # data/calendar.py — immutable Phase-3 trading-calendar session material
+        _calendar.TradingCalendarMaterial: _R_CALENDAR_MATERIAL,
         # data/result.py — envelope + nested components + abstract PIT base
         _result.DataResult: _R_GENERIC_ENVELOPE,
         _result.SourceAttempt: _R_NESTED_COMPONENT,
