@@ -429,7 +429,12 @@ def legacy_draft_from_mapping(
 
 
 def _base_param_value(im) -> str:
-    """The reviewed default param value for a base ``code`` / ``asof_date`` input."""
+    """The reviewed default param value for a base ``code`` / ``asof_date`` input.
+
+    NOTE: exercised only by the synthetic param-branch unit fixture in
+    ``test_presets.py``; the production core maps base inputs to context /
+    service_binding targets, never to node params.
+    """
     if im.source_key == "code":
         return "600519"
     if im.source_key == "asof_date":
@@ -465,14 +470,26 @@ def attest_and_store_legacy_plan(
 # --------------------------------------------------------------------------- #
 # The reviewed MAPPED stock-deep-dive compatibility mapping (row table)        #
 # --------------------------------------------------------------------------- #
-# The reviewed row table lives beside the compat catalog it binds. Its
-# ``normalized_raw_config`` is the full 18-node ``stock-deep-dive`` config (so
-# ``source_config_digest`` equals the frozen Task-0 fixture digest — invariant 1),
-# while its worker/dependency/input rows cover a reviewed connected core chosen to
-# exercise every LegacyInputMapping shape the invariants call out. Only registered
-# Phase-1 schemas are reused (no runtime/Phase-1 golden touched); the base ``param``
-# target-kind (which needs a params schema absent from the phase-1 registry) is
-# exercised at the unit level in ``test_presets.py``, not in this production bridge.
+# Evidence-faithful core ONLY (user ruling: Option A — honest core; no interim
+# invented schemas). The Task-0 fixture's per-node ``target_worker`` column plus
+# its 24-worker table support exactly TWO legacy nodes whose planned worker has a
+# REGISTERED Phase-1 output schema and the right execution kind:
+#
+#   news-sentiment -> text.sentiment    (llm, "SentimentReport (band/score/confidence)")
+#   report-writer  -> dec.research_mgr  (llm, "ReportOutput -> ResearchPlan 5-band",
+#                                        via the documented Phase-1 rating migration)
+#
+# Every other node's planned worker output schema is unregistered (it arrives with
+# Phase 3 data/PIT) or its execution kind is deterministic; the frozen Phase-1
+# ``MappingBasis`` vocabulary ("authoritative_code" / "approved_policy"+policy-id /
+# "none") has no honest structural/stand-in label, so those nodes stay OUT of the
+# core rather than carrying a fabricated basis. The two mirrors are
+# migration-mediated (not byte-identical), so they are ``compat.*`` compatibility
+# workers under attestation — never the final ids themselves. The core is connected:
+# ``report-writer.soft_deps`` includes ``news-sentiment`` (one reviewed SOFT edge).
+# ``normalized_raw_config`` remains the FULL 18-node config, so
+# ``source_config_digest`` equals the frozen Task-0 fixture digest (invariant 1)
+# and any legacy-config change still invalidates the attestation.
 _SWARM_YAML = _CONFIG_ROOT.parent / "swarm" / "stock-deep-dive.yaml"
 _ENGINE_SWARM_YAML = (
     Path(__file__).resolve().parents[2] / "engine" / "financial_analyst" / "_resources"
@@ -480,7 +497,6 @@ _ENGINE_SWARM_YAML = (
 )
 _SR_SENTIMENT = SchemaRef(name="SentimentReport", version="1")
 _SR_RESEARCH = SchemaRef(name="ResearchPlan", version="1")
-_SR_DECISION = SchemaRef(name="PortfolioDecision", version="1")
 
 _COMPAT_PROMPT_FILE = COMPAT_MATERIALS_DIR / "prompts" / "compat_mirror.md"
 _COMPAT_SKILL_FILE = COMPAT_MATERIALS_DIR / "skills" / "compat_mirror.md"
@@ -491,50 +507,35 @@ def _compat_id(node: str) -> str:
     return "compat." + node.replace("-", "_")
 
 
-#: reviewed connected core (legacy node -> its compat mirror's output schema).
+#: fixture evidence pointer: legacy node -> planned worker in the Task-0 table.
+_CORE_FIXTURE_WORKER: dict[str, str] = {
+    "news-sentiment": "text.sentiment",
+    "report-writer": "dec.research_mgr",
+}
+#: legacy node -> its compat mirror's registered output schema (per the table).
 _CORE_OUTPUT: dict[str, SchemaRef] = {
-    "quote-fetcher": _SR_SENTIMENT,
-    "evidence-loader": _SR_SENTIMENT,
-    "fundamental-analyst": _SR_RESEARCH,
-    "bull-advocate": _SR_RESEARCH,
-    "bear-advocate": _SR_RESEARCH,
-    "risk-officer": _SR_DECISION,
-    "report-writer": _SR_DECISION,
+    "news-sentiment": _SR_SENTIMENT,
+    "report-writer": _SR_RESEARCH,
 }
 _CORE_NODES: tuple[str, ...] = tuple(_CORE_OUTPUT)
+#: lane / decision authority mirrored from the fixture worker table.
+_CORE_LANE: dict[str, str] = {"news-sentiment": "text", "report-writer": "decision"}
+_CORE_CAN_EMIT: dict[str, bool] = {"news-sentiment": False, "report-writer": True}
 
-#: reviewed direct edges among the core (upstream, downstream, strength).
+#: reviewed direct edges among the core: report-writer's dep on news-sentiment is
+#: listed in the legacy ``soft_deps`` (fixture dependency_semantics: soft).
 _CORE_EDGES: tuple[tuple[str, str, str], ...] = (
-    ("quote-fetcher", "fundamental-analyst", "hard"),
-    ("evidence-loader", "fundamental-analyst", "soft"),
-    ("fundamental-analyst", "bull-advocate", "hard"),
-    ("evidence-loader", "bull-advocate", "soft"),
-    ("fundamental-analyst", "bear-advocate", "hard"),
-    ("bull-advocate", "bear-advocate", "hard"),
-    ("evidence-loader", "bear-advocate", "soft"),
-    ("bull-advocate", "risk-officer", "hard"),
-    ("bear-advocate", "risk-officer", "hard"),
-    ("evidence-loader", "risk-officer", "soft"),
-    ("quote-fetcher", "report-writer", "hard"),
-    ("fundamental-analyst", "report-writer", "hard"),
-    ("bull-advocate", "report-writer", "hard"),
-    ("bear-advocate", "report-writer", "hard"),
-    ("risk-officer", "report-writer", "hard"),
-    ("evidence-loader", "report-writer", "soft"),
+    ("news-sentiment", "report-writer", "soft"),
 )
 
-#: memory_mode → read categories (invariant 6).
+#: read categories mirrored from the fixture roles. NEITHER core node declares
+#: ``memory_mode`` or ``borrows_memory`` in the legacy YAML, so (invariant 6) their
+#: mirrors honestly carry NO memory read category and NO borrowed_from entry.
 _CORE_READ_CATEGORIES: dict[str, tuple[str, ...]] = {
-    "quote-fetcher": ("context",),
-    "evidence-loader": ("context",),
-    "fundamental-analyst": ("context", "upstream_artifacts"),
-    "bull-advocate": ("context", "upstream_artifacts"),
-    "bear-advocate": ("context", "upstream_artifacts", "experience_cases"),  # retrieval
-    "risk-officer": ("context", "upstream_artifacts", "experience_cases"),   # retrieval
+    "news-sentiment": ("context", "market_data"),
     "report-writer": ("context", "upstream_artifacts"),
 }
-#: borrows_memory → borrowed_from (invariant 6): risk-officer borrows bear-advocate.
-_CORE_BORROWED: dict[str, tuple[str, ...]] = {"risk-officer": (_compat_id("bear-advocate"),)}
+_CORE_BORROWED: dict[str, tuple[str, ...]] = {}
 
 _SOFT_ACCEPTED_STATUSES = (
     NodeStatus.COMPLETED, NodeStatus.DEGRADED, NodeStatus.INCOMPLETE,
@@ -559,47 +560,21 @@ def _up(binding, schema, source, *, required, missing, projection="raw", project
     return _CoreInput(binding, schema, required, source, missing, projection, projection_field)
 
 
-#: reviewed per-consumer upstream input rows.
+#: reviewed per-consumer upstream input rows. ``report-writer``'s input on the
+#: news-sentiment output is soft (DEGRADE) per the legacy YAML, so the mirror's
+#: binding is optional and the reviewed missing behavior is ``omit``. Projection is
+#: ``raw`` — the fixture records no single-field-unwrap/model_dump evidence.
 _CORE_INPUTS: dict[str, tuple[_CoreInput, ...]] = {
-    "quote-fetcher": (),
-    "evidence-loader": (),
-    "fundamental-analyst": (
-        _up("quote", _SR_SENTIMENT, "quote-fetcher", required=True, missing="error"),
-        _up("evidence", _SR_SENTIMENT, "evidence-loader", required=False, missing="omit",
-            projection="model_dump"),
-    ),
-    "bull-advocate": (
-        _up("fundamental", _SR_RESEARCH, "fundamental-analyst", required=True, missing="error"),
-        _up("evidence", _SR_SENTIMENT, "evidence-loader", required=False, missing="omit",
-            projection="single_field_unwrap", projection_field="narrative"),
-        # quote-fetcher is in bull's input_keys but NOT a direct dep → transitive ancestor.
-        _up("quote_ctx", _SR_SENTIMENT, "quote-fetcher", required=False, missing="omit"),
-    ),
-    "bear-advocate": (
-        _up("fundamental", _SR_RESEARCH, "fundamental-analyst", required=True, missing="error"),
-        _up("bull", _SR_RESEARCH, "bull-advocate", required=True, missing="error"),
-        _up("evidence", _SR_SENTIMENT, "evidence-loader", required=False, missing="omit"),
-        _up("quote_ctx", _SR_SENTIMENT, "quote-fetcher", required=False, missing="omit"),
-    ),
-    "risk-officer": (
-        _up("bull", _SR_RESEARCH, "bull-advocate", required=True, missing="error"),
-        _up("bear", _SR_RESEARCH, "bear-advocate", required=True, missing="error"),
-        _up("evidence", _SR_SENTIMENT, "evidence-loader", required=False, missing="omit"),
-        _up("quote_ctx", _SR_SENTIMENT, "quote-fetcher", required=False, missing="omit"),
-    ),
+    "news-sentiment": (),
     "report-writer": (
-        _up("quote", _SR_SENTIMENT, "quote-fetcher", required=True, missing="error"),
-        _up("fundamental", _SR_RESEARCH, "fundamental-analyst", required=True, missing="error"),
-        _up("bull", _SR_RESEARCH, "bull-advocate", required=True, missing="error"),
-        _up("bear", _SR_RESEARCH, "bear-advocate", required=True, missing="error"),
-        _up("risk", _SR_DECISION, "risk-officer", required=True, missing="error"),
-        _up("evidence", _SR_SENTIMENT, "evidence-loader", required=False, missing="omit"),
+        _up("sentiment", _SR_SENTIMENT, "news-sentiment", required=False, missing="omit"),
     ),
 }
 
-#: reviewed per-consumer base (request-origin) input rows: (source_key, target_kind, target).
+#: reviewed per-consumer base (request-origin) input rows: (source_key, target_kind,
+#: target) — both nodes' ``input_keys`` per the fixture normalized config.
 _CORE_BASE_INPUTS: dict[str, tuple[tuple[str, str, str], ...]] = {
-    "quote-fetcher": (("code", "context", "code"), ("asof_date", "context", "asof_date")),
+    "news-sentiment": (("code", "context", "code"), ("asof_date", "context", "asof_date")),
     "report-writer": (
         ("code", "context", "code"), ("asof_date", "context", "asof_date"),
         ("out_dir", "service_binding", _SERVICE_OUT_LOCATOR),
@@ -615,13 +590,16 @@ def _full_normalized_config() -> dict[str, Any]:
     """
     repo_text = _SWARM_YAML.read_text(encoding="utf-8")
     raw = yaml.safe_load(repo_text)
-    if _ENGINE_SWARM_YAML.exists():
-        eng_text = _ENGINE_SWARM_YAML.read_text(encoding="utf-8")
-        if content_digest(normalize_legacy_graph_config(repo_text, source_format="yaml")) != \
-                content_digest(normalize_legacy_graph_config(eng_text, source_format="yaml")):
-            raise MigrationError(
-                "repo swarm config does not normalize identically to the engine copy; "
-                "the legacy graph is not frozen and cannot be attested")
+    if not _ENGINE_SWARM_YAML.exists():
+        raise MigrationError(
+            "engine copy of stock-deep-dive.yaml is missing; the repo/engine identity "
+            "cannot be proven, so the legacy graph is not frozen and cannot be attested")
+    eng_text = _ENGINE_SWARM_YAML.read_text(encoding="utf-8")
+    if content_digest(normalize_legacy_graph_config(repo_text, source_format="yaml")) != \
+            content_digest(normalize_legacy_graph_config(eng_text, source_format="yaml")):
+        raise MigrationError(
+            "repo swarm config does not normalize identically to the engine copy; "
+            "the legacy graph is not frozen and cannot be attested")
     nodes = {
         a["name"]: {
             "deps": list(a.get("deps", []) or []),
@@ -633,14 +611,16 @@ def _full_normalized_config() -> dict[str, Any]:
     return {"name": raw["name"], "nodes": nodes}
 
 
-def _worker_mapping_row(node: str) -> LegacyWorkerMapping:
-    raw = {
-        "compat_worker": _compat_id(node),
-        "read_categories": list(_CORE_READ_CATEGORIES[node]),
-        "borrows_memory": list(_CORE_BORROWED.get(node, ())),
-    }
+def _worker_mapping_row(node: str, raw_node: Mapping[str, Any]) -> LegacyWorkerMapping:
+    """One evidence-backed worker row: ``raw_node`` is the REAL normalized legacy node.
+
+    ``authoritative_code`` basis is backed by the Task-0 fixture's per-node
+    ``target_worker`` column (:data:`_CORE_FIXTURE_WORKER`); the compat mirror id
+    wraps that planned worker because the mapping is migration-mediated, not
+    byte-identical (invariant 3).
+    """
     return LegacyWorkerMapping(
-        source_node_id=node, raw_node=raw, target_worker_id=_compat_id(node),
+        source_node_id=node, raw_node=dict(raw_node), target_worker_id=_compat_id(node),
         mapping_status=MappingStatus.MAPPED, mapping_basis="authoritative_code",
         mapping_policy_id=None, reason=None)
 
@@ -692,11 +672,13 @@ def build_stock_deep_dive_compat_mapping() -> LegacyGraphMapping:
     """The reviewed, fully-MAPPED ``stock-deep-dive`` compatibility mapping.
 
     Its ``normalized_raw_config`` is the full 18-node config (``source_config_digest``
-    equals the frozen Task-0 fixture); its worker/dependency/input rows cover the
-    reviewed connected core.
+    equals the frozen Task-0 fixture); its worker/dependency/input rows cover ONLY
+    the evidence-faithful connected core ``news-sentiment -> report-writer`` (see the
+    row-table comment above for the audit).
     """
     cfg = _full_normalized_config()
-    worker_mappings = tuple(_worker_mapping_row(n) for n in _CORE_NODES)
+    worker_mappings = tuple(
+        _worker_mapping_row(n, cfg["nodes"][n]) for n in _CORE_NODES)
     dependency_mappings = tuple(_dep_mapping_row(up, down, s) for up, down, s in _CORE_EDGES)
     input_mappings: list[LegacyInputMapping] = []
     for node in _CORE_NODES:
@@ -747,10 +729,13 @@ def _compat_worker_spec(node: str, *, binding: CompatibilityBinding, mats) -> Wo
     inputs = tuple(
         InputBinding(name=i.binding, schema_ref=i.schema, required=i.required, cardinality="one")
         for i in _CORE_INPUTS[node])
-    can_emit = out_schema.name == "PortfolioDecision"
+    # lane / decision authority / execution kind mirror the fixture worker table
+    # (both core planned workers are execution_kind=llm; dec.research_mgr can emit).
+    can_emit = _CORE_CAN_EMIT[node]
     return WorkerSpec(
         id=_compat_id(node), catalog_role="compatibility", selection_scope="static_legacy_only",
-        compatibility=binding, lane="decision", persona=f"legacy {node} mirror", tier=Tier.WRITER,
+        compatibility=binding, lane=_CORE_LANE[node], persona=f"legacy {node} mirror",
+        tier=Tier.WRITER,
         execution=ExecutionSpec(kind=ExecutionKind.LLM, model_tier="reasoner"),
         system_prompt_ref=mats["prompt_ref"], skills=(SkillBinding(skill_ref=mats["skill_ref"]),),
         guardrail_refs=(mats["guard_ref"],), capability_allowlist=(),

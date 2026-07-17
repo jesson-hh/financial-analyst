@@ -165,6 +165,55 @@ def test_normalized_config_identical_to_engine_copy():
                                     ["graphs"][0]["normalized_config"]["nodes"])
 
 
+def test_missing_engine_copy_is_a_hard_failure(monkeypatch, tmp_path):
+    # a MISSING engine YAML must hard-fail (frozen identity unprovable), not skip.
+    monkeypatch.setattr(P, "_ENGINE_SWARM_YAML", tmp_path / "does-not-exist.yaml")
+    with pytest.raises(M.MigrationError):
+        P._full_normalized_config()
+
+
+def test_core_mappings_are_evidence_faithful_against_the_fixture():
+    """Every core row is backed by the Task-0 fixture: the graph's per-node
+    ``target_worker`` names the planned worker, and the 24-worker table gives it
+    execution_kind=llm and an output naming the registered schema the mirror uses."""
+    fx = json.loads(_FIXTURE.read_text(encoding="utf-8"))
+    graph_nodes = {n["node"]: n for n in fx["graphs"][0]["nodes"]}
+    table = {w["worker_id"]: w for w in fx["workers"]}
+    m = P.build_stock_deep_dive_compat_mapping()
+    assert {w.source_node_id for w in m.worker_mappings} == set(P._CORE_FIXTURE_WORKER)
+    for node, planned in P._CORE_FIXTURE_WORKER.items():
+        assert graph_nodes[node]["target_worker"] == planned          # fixture column
+        entry = table[planned]
+        assert entry["execution_kind"] == "llm"                       # kind faithful
+        # the planned worker's documented output names the mirror's schema.
+        assert P._CORE_OUTPUT[node].name in entry["proposed_abi"]["output"]
+    # worker rows carry the REAL normalized legacy node as raw_node.
+    cfg_nodes = P._full_normalized_config()["nodes"]
+    for w in m.worker_mappings:
+        assert w.raw_node == cfg_nodes[w.source_node_id]
+    # the connecting edge is the fixture's soft dependency.
+    assert "news-sentiment" in graph_nodes["report-writer"]["soft_deps"]
+
+
+def test_no_other_fixture_row_is_faithful():
+    """The audit is closed: every non-core node's planned worker either lacks a
+    registered output schema or is deterministic — no honest MAPPED row exists."""
+    from guanlan_v2.orchestration.refs import SchemaRef as SR
+    registered = {"SentimentReport", "ResearchPlan", "PortfolioDecision"}
+    fx = json.loads(_FIXTURE.read_text(encoding="utf-8"))
+    table = {w["worker_id"]: w for w in fx["workers"]}
+    for n in fx["graphs"][0]["nodes"]:
+        if n["node"] in P._CORE_FIXTURE_WORKER:
+            continue
+        entry = table.get(n["target_worker"])
+        if entry is None:
+            continue  # compat.* placeholder with no worker-table row at all
+        out = entry["proposed_abi"]["output"]
+        faithful = (entry["execution_kind"] == "llm"
+                    and any(out.startswith(s) for s in registered))
+        assert not faithful, f"{n['node']} -> {n['target_worker']} looks faithful; re-audit"
+
+
 # =========================================================================== #
 # 2. compat workers: compat.* id / role / scope / binding (invariants 3, 4)    #
 # =========================================================================== #
@@ -219,15 +268,14 @@ def test_adapter_builds_a_valid_attested_compat_draft():
 def test_edge_policy_and_missing_behavior_come_from_the_mapping():
     env = build_compat_env()
     node_by_id = {n.id: n for n in env.draft.nodes}
-    # quote-fetcher → fundamental-analyst is a HARD edge → BLOCK dependency.
-    fund = node_by_id["fundamental-analyst"]
-    quote_dep = [d for d in fund.dependencies if d.upstream_node_id == "quote-fetcher"][0]
-    assert quote_dep.policy is DependencyPolicy.BLOCK
-    assert quote_dep.accept_statuses == frozenset({NodeStatus.COMPLETED})
-    # evidence-loader → fundamental-analyst is a SOFT edge → DEGRADE dependency.
-    ev_dep = [d for d in fund.dependencies if d.upstream_node_id == "evidence-loader"][0]
-    assert ev_dep.policy is DependencyPolicy.DEGRADE
-    assert ev_dep.accept_statuses == frozenset({NodeStatus.COMPLETED, NodeStatus.DEGRADED})
+    # news-sentiment → report-writer is the fixture's SOFT edge → DEGRADE dependency.
+    writer = node_by_id["report-writer"]
+    dep = [d for d in writer.dependencies if d.upstream_node_id == "news-sentiment"][0]
+    assert dep.policy is DependencyPolicy.DEGRADE
+    assert dep.accept_statuses == frozenset({NodeStatus.COMPLETED, NodeStatus.DEGRADED})
+    assert dep.inject_as == "sentiment"
+    # news-sentiment is a root (no dependencies).
+    assert node_by_id["news-sentiment"].dependencies == ()
 
 
 def test_out_dir_maps_to_a_service_binding_not_a_plan_path():
@@ -251,42 +299,31 @@ def test_base_code_and_asof_map_to_context_not_node_params():
         assert n.params == {}
 
 
-def test_transitive_ancestor_input_creates_no_invented_dependency():
+def test_production_projection_is_raw_and_full_schema_bound():
+    # the fixture records NO single-field-unwrap/model_dump evidence, so every
+    # production row is projection="raw" and the Plan Dependency binds the full
+    # upstream output SchemaRef (projection would live on the mapping row and be
+    # applied only by the attested compat handler — none is claimed here).
     env = build_compat_env()
-    node_by_id = {n.id: n for n in env.draft.nodes}
-    # quote-fetcher is in bull-advocate's input_keys but is NOT a direct dep.
-    bull = node_by_id["bull-advocate"]
-    assert "quote-fetcher" not in {d.upstream_node_id for d in bull.dependencies}
-    # yet the mapping records it as an upstream input with a proven ancestor.
-    row = [i for i in env.mapping.input_mappings
-           if i.source_consumer_node_id == "bull-advocate" and i.source_key == "quote-fetcher"][0]
-    assert row.source_kind == "upstream" and row.target_kind == "input_binding"
-    # bull's direct deps are exactly fundamental (BLOCK) + evidence (DEGRADE).
-    assert {d.upstream_node_id for d in bull.dependencies} == {"fundamental-analyst", "evidence-loader"}
+    for row in env.mapping.input_mappings:
+        assert row.projection == "raw" and row.projection_field is None
+    writer = [n for n in env.draft.nodes if n.id == "report-writer"][0]
+    dep = [d for d in writer.dependencies if d.upstream_node_id == "news-sentiment"][0]
+    assert dep.upstream_output_key == "primary"
 
 
-def test_upstream_input_binds_full_schema_projection_recorded_not_applied():
-    # single_field_unwrap / model_dump live on the mapping row (handled later by the
-    # attested compat handler); the Plan Dependency binds the full upstream schema.
+def test_memory_metadata_is_honestly_absent_for_the_core():
+    # neither core node declares memory_mode/borrows_memory in the legacy YAML, so
+    # the mirrors carry NO memory read category and NO borrowed_from (invariant 6:
+    # memory metadata maps through reviewed entries — absence maps to absence).
     env = build_compat_env()
-    rows = {(i.source_consumer_node_id, i.source_key): i for i in env.mapping.input_mappings}
-    unwrap = rows[("bull-advocate", "evidence-loader")]
-    assert unwrap.projection == "single_field_unwrap" and unwrap.projection_field == "narrative"
-    dump = rows[("fundamental-analyst", "evidence-loader")]
-    assert dump.projection == "model_dump"
-    # the draft dependency injects the full artifact (no projection at plan level).
-    fund = [n for n in env.draft.nodes if n.id == "fundamental-analyst"][0]
-    ev_dep = [d for d in fund.dependencies if d.upstream_node_id == "evidence-loader"][0]
-    assert ev_dep.upstream_output_key == "primary"
-
-
-def test_memory_mode_and_borrows_memory_map_to_worker_metadata():
-    env = build_compat_env()
-    risk = env.catalog.worker("compat.risk_officer")
-    assert "experience_cases" in risk.read_categories            # memory_mode: retrieval
-    assert risk.borrowed_from == ("compat.bear_advocate",)       # borrows_memory
-    bear = env.catalog.worker("compat.bear_advocate")
-    assert "experience_cases" in bear.read_categories
+    cfg = P._full_normalized_config()["nodes"]
+    for node in P._CORE_NODES:
+        assert "memory_mode" not in cfg[node] and "borrows_memory" not in cfg[node]
+        w = env.catalog.worker("compat." + node.replace("-", "_"))
+        assert "experience_cases" not in w.read_categories
+        assert "memory" not in w.read_categories
+        assert w.borrowed_from == ()
 
 
 # =========================================================================== #
@@ -409,8 +446,8 @@ def test_static_catalog_has_three_finals_plus_compat_subset():
     finals = {w.id for w in snap.workers if w.catalog_role == "final"}
     compat = {w.id for w in snap.workers if w.catalog_role == "compatibility"}
     assert finals == {"text.sentiment", "dec.research_mgr", "dec.pm"}
-    assert len(compat) == len(P._CORE_NODES) == 7
-    assert all(c.startswith("compat.") for c in compat)
+    assert compat == {"compat.news_sentiment", "compat.report_writer"}
+    assert len(compat) == len(P._CORE_NODES) == 2
 
 
 def test_static_catalog_digest_is_stable_and_exported():
@@ -488,23 +525,23 @@ def _synthetic_param_mapping() -> M.LegacyGraphMapping:
         mapping_status=MappingStatus.MAPPED, reason=None)
 
 
+def _empty_memory_context_for_tests(clock):
+    resolver = SchemaRegistryResolver()
+    reg2 = default_registry()
+    resolver.register(reg2)
+    stores = RuntimeStores(resolver=resolver, clock=clock,
+                           allowed_cell_namespaces=(W.PROMPT_CELL_NAMESPACE,))
+    return P.build_empty_memory_context(
+        data_context=P.pilot_data_context(as_of=clock.now()), stores=stores,
+        registry_digest=reg2.registry_digest, built_at=clock.now())
+
+
 def test_adapter_places_base_param_on_the_node():
     catalog, reg = _synthetic_param_catalog()
     mapping = _synthetic_param_mapping()
     clock = FixedClock()
-    resolver = SchemaRegistryResolver()
-    resolver.register(reg)
-    rt_digest = resolver.register(phase2_runtime_registry(reg.registry_digest)) \
-        if False else None  # not needed here
-    stores = RuntimeStores(resolver=resolver, clock=clock,
-                           allowed_cell_namespaces=(W.PROMPT_CELL_NAMESPACE,))
     request = P.preset_orchestration_request(request_id="req-syn")
-    # a minimal empty-memory context registered in this synthetic registry.
-    reg2 = default_registry()
-    resolver.register(reg2)
-    mem = P.build_empty_memory_context(
-        data_context=P.pilot_data_context(as_of=clock.now()), stores=stores,
-        registry_digest=reg2.registry_digest, built_at=clock.now())
+    mem = _empty_memory_context_for_tests(clock)
     draft = P.legacy_draft_from_mapping(
         mapping, request=request, context=mem.context, catalog=catalog, schema_registry=reg,
         budget_request={"tokens": 1000, "llm_invocations": 1}, sink_mapping=("consumer",))
@@ -512,6 +549,136 @@ def test_adapter_places_base_param_on_the_node():
     assert node.params == {"code": "600519"}   # base param placed on the node
     # and it validates against the worker's strict params schema.
     reg.validate_payload(SchemaRef(name="_Params", version="1"), node.params)
+
+
+# =========================================================================== #
+# 9. adapter graph semantics on a synthetic mapping (invariant 5 matrix)       #
+# =========================================================================== #
+# The production core has one SOFT edge only; the BLOCK branch, the non-direct
+# transitive-ancestor branch and the recorded-projection branch are locked here on
+# an explicitly synthetic catalog+mapping (no stock-deep-dive semantics claimed).
+_SYN_SENT = SchemaRef(name="SentimentReport", version="1")
+_SYN_PLAN = SchemaRef(name="ResearchPlan", version="1")
+
+
+def _synthetic_graph_catalog() -> tuple[CatalogRuntime, SchemaRegistry]:
+    from guanlan_v2.orchestration.catalog import ContentManifestEntry, EvidencePolicy
+    reg = default_registry()
+    p_ref, p_mat = build_text_material(id="p.syng", version="1", kind="prompt", raw=b"You are syn-g.")
+
+    def _w(wid, inputs, out):
+        return WorkerSpec(
+            id=wid, catalog_role="final", selection_scope="dynamic_allowed", lane="quant",
+            persona="p", tier=Tier.WRITER,
+            execution=ExecutionSpec(kind=ExecutionKind.LLM, model_tier="reasoner"),
+            system_prompt_ref=p_ref, inputs=tuple(inputs),
+            outputs=(OutputBinding(name="primary", schema_ref=out),),
+            evidence_policy=EvidencePolicy(), supported_modes=(DataMode.ONLINE,),
+            can_emit_decision=False, decision_authority="none")
+
+    workers = (
+        _w("syn.up", (), _SYN_SENT),
+        _w("syn.mid", (InputBinding(name="feed", schema_ref=_SYN_SENT, required=True),), _SYN_PLAN),
+        _w("syn.sink", (
+            InputBinding(name="feed2", schema_ref=_SYN_PLAN, required=True),
+            InputBinding(name="ctx", schema_ref=_SYN_SENT, required=False),), _SYN_PLAN),
+    )
+    snap = build_catalog_snapshot(
+        catalog_version="syn-g-v1",
+        content_manifest=(ContentManifestEntry(ref=p_ref, kind="prompt", name="P",
+                                               description="d", source_identity="gl.syn"),),
+        skill_manifest=(), capability_manifest=(), workers=workers, resolved_material=(p_mat,))
+    source = InMemoryMaterialSource(text={(p_mat.ref.id, p_mat.ref.version): p_mat.raw_utf8},
+                                    capabilities={})
+    return CatalogRuntime.build(snap, source), reg
+
+
+def _syn_worker_row(node, target):
+    return M.LegacyWorkerMapping(
+        source_node_id=node, raw_node={"deps": []}, target_worker_id=target,
+        mapping_status=MappingStatus.MAPPED, mapping_basis="authoritative_code",
+        mapping_policy_id=None, reason=None)
+
+
+def _syn_hard_edge(up, down):
+    return M.LegacyDependencyMapping(
+        source_upstream_node_id=up, source_downstream_node_id=down,
+        raw_edge={"strength": "hard"}, source_strength="hard",
+        accepted_statuses=(NodeStatus.COMPLETED,), missing_output_behavior="block",
+        target_policy=DependencyPolicy.BLOCK, mapping_status=MappingStatus.MAPPED,
+        mapping_basis="authoritative_code", mapping_policy_id=None, reason=None)
+
+
+def _syn_up_input(consumer, up, binding, schema, *, missing="error",
+                  projection="raw", projection_field=None):
+    return M.LegacyInputMapping(
+        source_consumer_node_id=consumer, source_key=up, source_kind="upstream",
+        source_upstream_node_id=up, target_kind="input_binding",
+        target_input_binding=binding, upstream_output_schema_ref=schema,
+        projection=projection, projection_field=projection_field,
+        missing_behavior=missing, mapping_status=MappingStatus.MAPPED,
+        mapping_basis="authoritative_code", mapping_policy_id=None,
+        mapping_evidence="synthetic reviewed row", reason=None)
+
+
+def _synthetic_graph_mapping() -> M.LegacyGraphMapping:
+    cfg = {"nodes": {"up": {}, "mid": {}, "sink": {}}}
+    norm = M.normalize_legacy_graph_config(cfg, source_format="json")
+    return M.LegacyGraphMapping(
+        adapter_version="v1", source_schema=M.SRC_STOCK_DEEP_DIVE, source_format="json",
+        normalized_raw_config=norm, source_config_digest=content_digest(norm),
+        worker_mappings=(
+            _syn_worker_row("up", "syn.up"), _syn_worker_row("mid", "syn.mid"),
+            _syn_worker_row("sink", "syn.sink")),
+        dependency_mappings=(_syn_hard_edge("up", "mid"), _syn_hard_edge("mid", "sink")),
+        input_mappings=(
+            # direct BLOCK edge + a recorded (not applied) single-field unwrap.
+            _syn_up_input("mid", "up", "feed", _SYN_SENT,
+                          projection="single_field_unwrap", projection_field="narrative"),
+            _syn_up_input("sink", "mid", "feed2", _SYN_PLAN),
+            # 'up' is NOT a direct dep of 'sink' but is a proven ancestor (up→mid→sink).
+            _syn_up_input("sink", "up", "ctx", _SYN_SENT, missing="omit"),
+        ),
+        mapping_status=MappingStatus.MAPPED, reason=None)
+
+
+def test_synthetic_block_edge_and_ancestor_and_projection_semantics():
+    catalog, reg = _synthetic_graph_catalog()
+    mapping = _synthetic_graph_mapping()
+    clock = FixedClock()
+    request = P.preset_orchestration_request(request_id="req-syn-g")
+    mem = _empty_memory_context_for_tests(clock)
+    draft = P.legacy_draft_from_mapping(
+        mapping, request=request, context=mem.context, catalog=catalog, schema_registry=reg,
+        budget_request={"tokens": 1000, "llm_invocations": 3}, sink_mapping=("sink",))
+    nodes = {n.id: n for n in draft.nodes}
+    # hard edge → BLOCK with exactly {COMPLETED}.
+    mid_dep = nodes["mid"].dependencies[0]
+    assert mid_dep.policy is DependencyPolicy.BLOCK
+    assert mid_dep.accept_statuses == frozenset({NodeStatus.COMPLETED})
+    # non-direct ancestor input creates NO invented dependency on 'sink'.
+    assert {d.upstream_node_id for d in nodes["sink"].dependencies} == {"mid"}
+    # projection is recorded on the mapping row, never applied at plan level.
+    row = [i for i in mapping.input_mappings
+           if i.source_consumer_node_id == "mid" and i.source_key == "up"][0]
+    assert row.projection == "single_field_unwrap" and row.projection_field == "narrative"
+    assert mid_dep.upstream_output_key == "primary"   # full upstream output bound
+
+
+def test_synthetic_ancestorless_upstream_input_is_refused():
+    # an input naming an upstream that is neither a direct dep nor a proven
+    # ancestor cannot pass the Phase-1 mapping matrix (no adapter invention).
+    cfg = {"nodes": {"up": {}, "sink": {}}}
+    norm = M.normalize_legacy_graph_config(cfg, source_format="json")
+    with pytest.raises(Exception):
+        M.LegacyGraphMapping(
+            adapter_version="v1", source_schema=M.SRC_STOCK_DEEP_DIVE, source_format="json",
+            normalized_raw_config=norm, source_config_digest=content_digest(norm),
+            worker_mappings=(_syn_worker_row("up", "syn.up"),
+                             _syn_worker_row("sink", "syn.sink")),
+            dependency_mappings=(),   # no edge at all
+            input_mappings=(_syn_up_input("sink", "up", "ctx", _SYN_SENT, missing="omit"),),
+            mapping_status=MappingStatus.MAPPED, reason=None)
 
 
 @pytest.fixture
