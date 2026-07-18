@@ -12,19 +12,33 @@ ref field, so it is structurally incapable of pointing at sealed content.
 
 Structural isolation (frozen access-control matrix)
 ---------------------------------------------------
-* **No public journal reference.** A sealed record is persisted with a bare
+The security does **not** rest on :meth:`PayloadStore.get` refusing the ``sealed``
+namespace — it does not. ``PayloadStore.get`` has no namespace or capability gate:
+hand it the exact :class:`PayloadRef` (namespace + content digest) and it returns
+the payload. Sealed metrics stay unreachable because that ref never escapes,
+defended by three independent barriers:
+
+* **(a) Unlinkability.** A sealed record is persisted with a bare
   :meth:`PayloadStore.put` (``namespace="sealed"``) that writes **no** event; the
-  only reference to it lives inside this store's in-process index. The ledger's
-  terminal transition appends a ``HoldoutReceipt`` (``main``) + the full terminal
-  ``TrialRecord`` (``audit``) — neither references the sealed payload. The Phase 1/2
-  ``EventStore`` independently refuses any ``main`` event that names a ``sealed``
-  payload (namespace-masquerade rule), so the isolation is defended twice.
-* **Capability gate.** Reads require a valid :class:`SealedCapability`
-  (``final_report`` or ``human_review`` scope); an expired or forged capability is
-  refused with :class:`CapabilityVerificationError`.
-* **Defense-in-depth for adapters.** :func:`assert_no_sealed_refs` refuses any
-  non-public payload ref before an adapter stages evidence into the Phase 2
-  ``ArtifactPool`` — a redundant guard on top of the Phase 1/2 validators.
+  only reference to it lives inside :class:`SealedResultStore`'s in-process
+  ``_sealed_index``. The ledger's terminal transition appends a ``HoldoutReceipt``
+  (``main``) + the full terminal ``TrialRecord`` (``audit``) — neither carries the
+  sealed ``PayloadRef``, so no public/audit reader can discover it.
+* **(b) Content-digest-as-capability.** Even a reader who guessed the sealed object
+  id could not dereference it: :meth:`PayloadStore.get` demands the exact content
+  digest, which is never published. The public ``HoldoutReceipt.result_digest`` is a
+  *different* digest domain (:data:`SEALED_RESULT_DOMAIN` over the metrics), not the
+  payload content digest.
+* **(c) Event-path NamespaceViolation.** The Phase 1/2 ``EventStore`` refuses at
+  ``append`` any ``main`` event that names a ``sealed`` payload (namespace-masquerade
+  rule), so a coding error cannot smuggle the ref onto the public journal.
+
+On top of these, the one sanctioned reader (:meth:`SealedResultStore.get`) adds a
+**capability gate** — a valid :class:`SealedCapability` (``final_report`` /
+``human_review`` scope); an expired or forged capability is refused with
+:class:`CapabilityVerificationError`. And :func:`assert_no_sealed_refs` is a
+defense-in-depth guard refusing any non-public payload ref before an adapter stages
+evidence into the Phase 2 ``ArtifactPool``.
 
 One-shot lease coordination (with Task 5)
 -----------------------------------------
@@ -376,10 +390,14 @@ class SealedResultStore:
         self._sealed_index: dict[str, PayloadRef] = {}
         self._lock = threading.RLock()
 
-    def put(self, lease_id: str, record: SealedEvaluationRecord) -> HoldoutReceipt:
+    def put(self, lease: HoldoutLease, record: SealedEvaluationRecord) -> HoldoutReceipt:
         """Seal the evaluation record and reveal the opaque receipt (idempotently).
 
-        Verifies ``lease_id`` is the live reservation for ``record.trial_id``,
+        Verifies ``lease.lease_id`` is the live reservation for ``record.trial_id``
+        **and** authenticates the full lease token via :func:`verify_holdout_lease`
+        (signature + trial binding + expiry) — id-equality alone would let a direct
+        ``put`` caller seal a record using only the audit-visible lease id, so the
+        full signature check is enforced here as well as at the gateway. Then
         persists the :class:`SealedEvaluationRecord` (and, by its own validator, any
         ``curve_ref`` already points into the ``sealed`` namespace) with
         ``namespace="sealed"``, then calls
@@ -393,10 +411,13 @@ class SealedResultStore:
             raise SealedAccessError(
                 f"trial {trial_id!r} is not a sealed_holdout trial"
             )
-        if trial.holdout_lease_id != lease_id:
+        if trial.holdout_lease_id != lease.lease_id:
             raise LeaseVerificationError(
                 "put lease_id is not the live reservation for this trial"
             )
+        # full-token authentication (M1): signature + trial binding + expiry, so a
+        # forged / mis-bound / expired lease cannot bypass with a matching id.
+        verify_holdout_lease(lease, trial=trial, clock=self._clock)
         with self._lock:
             if trial.status == "reserved":
                 ref = self._payload_store.put(
@@ -417,11 +438,23 @@ class SealedResultStore:
     def get(
         self, trial_id: str, *, capability: SealedCapability
     ) -> SealedEvaluationRecord:
-        """The only read path — verify the capability, then return the sealed record.
+        """The only *sanctioned* read path — verify the capability, then return the record.
 
-        Any other dereference attempt of a sealed ref through public plumbing is
-        refused by the Phase 1/2 namespace rules; there is no accessor that leaks the
-        ref.
+        The isolation does **not** come from :meth:`PayloadStore.get` self-defending:
+        that primitive has no namespace or capability gate (see eventstore.py) — hand
+        it the exact :class:`PayloadRef` (namespace + content digest) and it returns
+        the payload. Sealed content stays unreachable because that ref never escapes:
+
+        * **unlinkability** — the sealed ``PayloadRef`` lives only in this store's
+          in-process ``_sealed_index``, written with *no* journal event, so no
+          public/audit reader can discover it; and
+        * **content-digest-as-capability** — a dereference needs the exact content
+          digest, which is never published (the public ``HoldoutReceipt.result_digest``
+          is a *different* digest domain, :data:`SEALED_RESULT_DOMAIN` over the
+          metrics, not the payload content digest).
+
+        The capability check added here is the gate for the one legitimate reader; it
+        is not what keeps the optimizer / ``improve`` / L3 side out.
         """
         verify_sealed_capability(capability, clock=self._clock)
         ref = self._sealed_index.get(trial_id)
@@ -526,13 +559,20 @@ class SealedEvaluatorGateway:
         metrics → ``inconclusive``. Each returns a :class:`HoldoutReceipt`.
         """
         trial = self._ledger.get_trial(holdout_reservation_id)
-        verify_holdout_lease(lease_token, trial=trial, clock=self._clock)
         if trial.status != "reserved":
-            # idempotent crash recovery — the original receipt, no reopen, no callable.
+            # Terminal-first idempotent crash recovery: a receipt already exists,
+            # so re-return it byte-identically **without** lease verification. A
+            # terminal trial requires no *live* lease — the lease may legitimately
+            # have expired between the original evaluation and this recovery call,
+            # and refusing recovery on expiry would break the "re-calling
+            # evaluate_once returns the original receipt" invariant. Only a
+            # genuinely-pending (still-``reserved``) evaluation, below, needs a
+            # verified live lease. No reopen, no callable re-run.
             return self._ledger.exhaust_holdout(
                 holdout_reservation_id, status=trial.status,
                 result_digest=trial.result_digest,
             )
+        verify_holdout_lease(lease_token, trial=trial, clock=self._clock)
 
         window = self._resolve_window(trial)
         metrics, error, timed_out = self._run_bounded(frozen_candidate_ref, window)
@@ -545,7 +585,7 @@ class SealedEvaluatorGateway:
                 holdout_reservation_id, status="inconclusive"
             )
         record = self._build_record(trial, metrics)
-        return self._sealed_store.put(lease_token.lease_id, record)
+        return self._sealed_store.put(lease_token, record)
 
     # -- helpers ------------------------------------------------------------ #
     def _resolve_window(self, trial: TrialRecord) -> HoldoutWindow:

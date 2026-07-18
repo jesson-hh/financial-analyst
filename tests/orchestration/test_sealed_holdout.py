@@ -363,7 +363,7 @@ def test_put_persists_sealed_and_reveals_then_get_requires_capability():
         result_digest="9" * 64, metrics_payload={"rank_ic": 0.05},
         created_at=env.clock.now())
 
-    receipt = store.put(lease.lease_id, record)
+    receipt = store.put(lease, record)
     assert receipt.status == "revealed"
     assert receipt.result_digest == "9" * 64  # invariant 6: opaque digest matches
 
@@ -397,12 +397,56 @@ def test_put_rejects_lease_id_not_the_live_reservation():
     reserved = led.reserve_holdout(
         study, cand, win_ref, data_snapshot_hash=DH, code_prompt_model_hash=CH,
         idempotency_key="h1")
+    lease = issue_holdout_lease(trial=reserved, clock=env.clock, ttl_seconds=3600,
+                                nonce="n1")
     record = SealedEvaluationRecord(
         trial_id=reserved.trial_id, result_artifact_id="art",
         result_digest="9" * 64, metrics_payload={"rank_ic": 0.05},
         created_at=env.clock.now())
+    # a lease whose lease_id is not this trial's live reservation is refused.
     with pytest.raises(LeaseVerificationError):
-        store.put("lease.bogus", record)
+        store.put(lease.model_copy(update={"lease_id": "lease.bogus"}), record)
+
+
+def test_put_authenticates_full_lease_not_just_id():
+    """M1: put runs the full verify_holdout_lease (signature + binding + expiry),
+    not id-equality alone — a forged-signature token whose lease_id still matches
+    the live reservation is refused before any write, while the genuine lease
+    seals and reveals. A direct put caller therefore cannot bypass with a token
+    forged from the (audit-visible) lease id.
+    """
+    env = _Env()
+    led = env.ledger()
+    study = _study()
+    fam = derive_study_family(study)
+    store = env.store(led)
+    cand, _ = env.put_candidate("a")
+    win_ref, _ = env.put_window(fam)
+    reserved = led.reserve_holdout(
+        study, cand, win_ref, data_snapshot_hash=DH, code_prompt_model_hash=CH,
+        idempotency_key="h1")
+    lease = issue_holdout_lease(trial=reserved, clock=env.clock, ttl_seconds=3600,
+                                nonce="n1")
+    record = SealedEvaluationRecord(
+        trial_id=reserved.trial_id, result_artifact_id="art",
+        result_digest="9" * 64, metrics_payload={"rank_ic": 0.05},
+        created_at=env.clock.now())
+
+    # forged signature, lease_id still equal to the live reservation → refused,
+    # and nothing is sealed (trial stays reserved, no sealed record exists).
+    forged = lease.model_copy(update={"signature": "0" * 64})
+    with pytest.raises(LeaseVerificationError):
+        store.put(forged, record)
+    assert led.get_trial(reserved.trial_id).status == "reserved"
+    probe = issue_sealed_capability(scope="final_report", principal_id="p",
+                                    clock=env.clock, ttl_seconds=3600)
+    with pytest.raises(SealedAccessError):
+        store.get(reserved.trial_id, capability=probe)
+
+    # the genuine lease is accepted: it seals and reveals the opaque receipt.
+    receipt = store.put(lease, record)
+    assert receipt.status == "revealed"
+    assert receipt.result_digest == "9" * 64
 
 
 def test_second_put_returns_original_receipt_without_writing():
@@ -422,14 +466,14 @@ def test_second_put_returns_original_receipt_without_writing():
         trial_id=reserved.trial_id, result_artifact_id="art",
         result_digest="9" * 64, metrics_payload={"rank_ic": 0.05},
         created_at=env.clock.now())
-    r1 = store.put(lease.lease_id, rec)
+    r1 = store.put(lease, rec)
 
     # a second put with *different* content returns the original receipt, no write.
     rec2 = SealedEvaluationRecord(
         trial_id=reserved.trial_id, result_artifact_id="art2",
         result_digest="8" * 64, metrics_payload={"rank_ic": 0.9},
         created_at=env.clock.now())
-    r2 = store.put(lease.lease_id, rec2)
+    r2 = store.put(lease, rec2)
     assert r2 == r1
     assert content_digest(r2) == content_digest(r1)
 
@@ -644,6 +688,38 @@ def test_crash_recovery_after_failure_returns_identical_receipt():
     r2 = gw.evaluate_once(cand, holdout_reservation_id=reserved.trial_id, lease_token=lease)
     assert spy.calls == 1  # a terminal window never reopens or re-runs
     assert r2 == r1
+
+
+def test_crash_recovery_returns_identical_receipt_even_past_lease_expiry():
+    """I1: terminal-state recovery must precede lease verification.
+
+    Recovery is a read of an already-written receipt, not a fresh evaluation, so
+    it must not require a *live* lease. With the authoritative clock advanced well
+    beyond ``expires_at``, a re-call still returns the byte-identical original
+    receipt (no ``LeaseVerificationError``) and never re-runs the callable — only a
+    genuinely-pending (still-``reserved``) evaluation needs a verified live lease.
+    """
+    env = _Env()
+    led = env.ledger()
+    study = _study()
+    fam = derive_study_family(study)
+    store = env.store(led)
+    spy = SpyEval(metrics=_good_metrics())
+    gw = _gateway(env, led, spy, study=study, store=store, lease_ttl=3600)
+    cand, _ = env.put_candidate("a")
+    win_ref, _ = env.put_window(fam)
+    reserved, lease = gw.reserve_and_lease(cand, window_ref=win_ref, idempotency_key="h1")
+
+    r1 = gw.evaluate_once(cand, holdout_reservation_id=reserved.trial_id, lease_token=lease)
+    assert spy.calls == 1
+    assert r1.status == "revealed"
+
+    # advance the clock far past the lease TTL, then recover the receipt.
+    env.clock.advance(1_000_000)
+    r2 = gw.evaluate_once(cand, holdout_reservation_id=reserved.trial_id, lease_token=lease)
+    assert spy.calls == 1  # the callable is NOT re-run
+    assert r2 == r1
+    assert content_digest(r2) == content_digest(r1)
 
 
 # --------------------------------------------------------------------------- #
