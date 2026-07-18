@@ -43,6 +43,7 @@ from guanlan_v2.orchestration.runtime_contracts import (
 )
 
 if TYPE_CHECKING:
+    from guanlan_v2.orchestration.bootstrap import BootstrapRuntimeProfile
     from guanlan_v2.orchestration.catalog import WorkerSpec
     from guanlan_v2.orchestration.context import ContextSnapshot
     from guanlan_v2.orchestration.schema_registry import SchemaRegistry
@@ -75,7 +76,7 @@ def check_runtime_support(
     catalog: CatalogRuntime,
     bridge_view: BridgeCatalogView,
     schema_registry: "SchemaRegistry",
-    profile: StaticRuntimeProfile,
+    profile: "StaticRuntimeProfile | BootstrapRuntimeProfile",
 ) -> RuntimeSupportReport:
     """Pure static-runtime support check → a frozen :class:`RuntimeSupportReport`.
 
@@ -83,8 +84,22 @@ def check_runtime_support(
     unsupported / drifted construct (see the module docstring / brief matrix) and
     is ``supported`` iff no issue is emitted. All identity digests it validated are
     bound into the returned report.
+
+    Phase 5 (Task 8, additive — static-profile behavior bit-unchanged): the
+    reviewed ``BootstrapRuntimeProfile`` is also accepted; its data-expressed
+    delta is exactly one admission widening — a ``phase="bootstrap"`` /
+    no-ContextSnapshot draft with ``source ∈ profile.bootstrap_plan_sources``
+    (``PRESET`` / ``PRESET_FALLBACK``) is supported. ``PlanSource.BOOTSTRAP``
+    stays dormant and a bootstrap-phase ``DYNAMIC`` draft stays rejected under
+    every profile.
     """
     issues: list[RuntimeSupportIssue] = []
+
+    # -- Phase 5 additive: the reviewed bootstrap profile identity ---------- #
+    is_bootstrap_profile = (
+        profile.profile_id == "bootstrap-runtime"
+        and getattr(profile, "supports_bootstrap", False) is True
+    )
 
     catalog_digest = catalog.catalog_digest
     registry_digest = schema_registry.registry_digest
@@ -103,7 +118,7 @@ def check_runtime_support(
                 "plan can never be supported",
             )
         )
-    if profile.profile_id != "static-runtime":
+    if profile.profile_id != "static-runtime" and not is_bootstrap_profile:
         issues.append(
             _issue("profile_mismatch", "profile.profile_id",
                    "the supplied profile is not the static-runtime profile")
@@ -147,7 +162,19 @@ def check_runtime_support(
                 "supported_plan_sources allow-list",
             )
         )
-    if draft.source is PlanSource.BOOTSTRAP or draft.phase == "bootstrap" or context is None:
+    # the exact reviewed widening: bootstrap phase + no ContextSnapshot + a static
+    # preset source, and ONLY under the bootstrap profile. Everything else is
+    # bit-equal to static-runtime v1 (is_bootstrap_profile is False there).
+    bootstrap_admissible = (
+        is_bootstrap_profile
+        and draft.phase == "bootstrap"
+        and context is None
+        and draft.context_snapshot_ref is None
+        and draft.source in getattr(profile, "bootstrap_plan_sources", ())
+    )
+    if (
+        draft.source is PlanSource.BOOTSTRAP or draft.phase == "bootstrap" or context is None
+    ) and not bootstrap_admissible:
         issues.append(
             _issue(
                 "bootstrap_unsupported",
