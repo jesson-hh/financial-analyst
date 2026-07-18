@@ -15,6 +15,7 @@ Run from repo root: ``pytest tests/orchestration/test_market_factor_compute.py -
 from __future__ import annotations
 
 import ast
+import json
 from datetime import date as _date
 from datetime import datetime, timedelta, timezone
 
@@ -588,6 +589,11 @@ def test_loader_none_steady_state(monkeypatch):
     monkeypatch.setattr(F, "_load_closes_index_rows", lambda as_of, rule: None)
     monkeypatch.setattr(F, "_load_today_tape", lambda as_of, rule: None)
     monkeypatch.setattr(F, "_load_panel_rows", lambda provider_uri, end, as_of, rule: (None, None, None))
+    monkeypatch.setattr(
+        F, "_load_archive_series",
+        lambda as_of, rule, archive_dir=None: {
+            "break_counts": None, "board_pools": None, "north_net": None, "main_net": None},
+    )
     inp = load_market_factor_inputs(provider_uri="x", end="2026-07-16", as_of=_stamp("2026-07-16"))
     for name in (
         "updown", "closes_panel", "limit_up_total", "closes_index", "astock_temp",
@@ -606,10 +612,152 @@ def test_loader_windows_series_to_as_of(monkeypatch):
     monkeypatch.setattr(F, "_load_closes_index_rows", lambda a, r: None)
     monkeypatch.setattr(F, "_load_today_tape", lambda a, r: None)
     monkeypatch.setattr(F, "_load_panel_rows", lambda p, e, a, r: (None, None, None))
+    monkeypatch.setattr(
+        F, "_load_archive_series",
+        lambda a, r, archive_dir=None: {
+            "break_counts": None, "board_pools": None, "north_net": None, "main_net": None},
+    )
     inp = load_market_factor_inputs(provider_uri="x", end=dates[4], as_of=as_of)
     assert inp.astock_temp is not None
     assert all(row.available_at <= as_of for row in inp.astock_temp)
     assert len(inp.astock_temp) == 5
+
+
+# --------------------------------------------------------------------------- #
+# interim loader — snapshot-archive wiring (read_archive; tmp-injected, no var/) #
+# --------------------------------------------------------------------------- #
+def _write_archive(tmp_path, kind: str, rows: list[dict]) -> None:
+    """Write a fake per-kind snapshots.jsonl the frozen read_archive reader consumes."""
+    d = tmp_path / kind
+    d.mkdir(parents=True, exist_ok=True)
+    with open(d / "snapshots.jsonl", "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+def _mt_row(iso: str, archived_at: str, *, zt=3, zb=1, max_streak=4, promo=0.3, north=None):
+    ymd = iso.replace("-", "")
+    return {
+        "trade_date": ymd, "archived_at": archived_at, "kind": "market_tape",
+        "payload": {"derived": {
+            "zt_count": zt, "zb_count": zb, "max_streak": max_streak,
+            "promotion_rate": promo, "north_net": north}},
+    }
+
+
+def _ff_row(iso: str, archived_at: str, *, main_net: float):
+    return {
+        "trade_date": iso.replace("-", ""), "archived_at": archived_at, "kind": "fundflow_industry",
+        "payload": {"market": {"main_net": main_net}},
+    }
+
+
+def _patch_non_archive_loaders(monkeypatch):
+    """Silence every non-archive source so a test sees only the injected archive."""
+    monkeypatch.setattr(F, "_load_astock_temp_rows", lambda a, r: None)
+    monkeypatch.setattr(F, "_load_closes_index_rows", lambda a, r: None)
+    monkeypatch.setattr(F, "_load_today_tape", lambda a, r: None)
+    monkeypatch.setattr(F, "_load_panel_rows", lambda p, e, a, r: (None, None, None))
+
+
+def test_loader_wires_archive_into_series(monkeypatch, tmp_path):
+    _patch_non_archive_loaders(monkeypatch)
+    days = _dates(6)  # 6 archived sessions
+    _write_archive(tmp_path, "market_tape", [
+        _mt_row(d, f"{d}T15:06:00", zt=3, zb=1, max_streak=4, promo=0.3, north=5.0) for d in days])
+    _write_archive(tmp_path, "fundflow_industry", [
+        _ff_row(d, f"{d}T15:06:00", main_net=3.0e10) for d in days])
+    as_of = _stamp("2025-01-07")  # after every trade_date
+    inp = load_market_factor_inputs(provider_uri="x", end=days[-1], as_of=as_of, archive_dir=str(tmp_path))
+    assert inp.break_counts is not None and len(inp.break_counts) == 6
+    assert inp.board_pools is not None and len(inp.board_pools) == 6
+    assert inp.north_net is not None and len(inp.north_net) == 6
+    assert inp.main_net is not None and len(inp.main_net) == 6
+    assert inp.north_net[0].value == pytest.approx(5.0)  # 亿 pass-through
+    assert inp.main_net[0].value == pytest.approx(300.0)  # 元 → 亿 (3e10/1e8)
+    rep = _compute(inp, as_of)
+    br = _val(rep, "breadth.break_rate")
+    assert br.status in ("OK", "DEGRADED") and br.value == pytest.approx(0.25)
+    lh = _val(rep, "breadth.ladder_height")
+    assert lh.status in ("OK", "DEGRADED") and lh.value == pytest.approx(4.0)
+
+
+def test_loader_young_archive_unavailable_with_first_date(monkeypatch, tmp_path):
+    _patch_non_archive_loaders(monkeypatch)
+    days = _dates(2)  # only two archived sessions (< the 5/250 windows)
+    _write_archive(tmp_path, "market_tape", [
+        _mt_row(d, f"{d}T15:06:00", north=5.0) for d in days])
+    as_of = _stamp("2025-01-05")
+    inp = load_market_factor_inputs(provider_uri="x", end=days[-1], as_of=as_of, archive_dir=str(tmp_path))
+    assert inp.break_counts is not None and len(inp.break_counts) == 2
+    rep = _compute(inp, as_of)
+    br = _val(rep, "breadth.break_rate")
+    assert br.status == "UNAVAILABLE"
+    assert br.reason is not None
+    assert days[0] in br.reason  # first archived session surfaced in the reason
+    assert "no history store" not in br.reason  # the stale claim is gone
+    nb = _val(rep, "flow.northbound")
+    assert nb.status == "UNAVAILABLE"
+    assert days[0] in nb.reason and "250" in nb.reason
+
+
+def test_loader_absent_archive_unavailable_truthful(monkeypatch, tmp_path):
+    _patch_non_archive_loaders(monkeypatch)
+    (tmp_path / "empty").mkdir()  # a real dir, but no snapshots.jsonl for any kind
+    as_of = _stamp("2025-06-01")
+    inp = load_market_factor_inputs(
+        provider_uri="x", end="2025-06-01", as_of=as_of, archive_dir=str(tmp_path / "empty"))
+    assert inp.break_counts is None and inp.north_net is None and inp.main_net is None
+    rep = _compute(inp, as_of)
+    for fid in ("breadth.break_rate", "flow.northbound", "flow.main_pct"):
+        v = _val(rep, fid)
+        assert v.status == "UNAVAILABLE"
+        assert "no history store" not in (v.reason or "")
+
+
+def test_loader_archive_asof_pit_pass_through(monkeypatch, tmp_path):
+    """A row archived AFTER as_of is invisible even when its trade_date bar predates
+    as_of — proving read_archive's asof filter (not just available_at) gates it."""
+    _patch_non_archive_loaders(monkeypatch)
+    _write_archive(tmp_path, "market_tape", [
+        _mt_row("2025-01-01", "2025-01-01T15:06:00", north=5.0),   # archived before as_of
+        _mt_row("2025-01-02", "2025-01-05T15:06:00", north=6.0),   # bar<as_of but archived AFTER
+    ])
+    as_of = _stamp("2025-01-03")  # Beijing-naive 2025-01-03T15:05
+    inp = load_market_factor_inputs(
+        provider_uri="x", end="2025-01-03", as_of=as_of, archive_dir=str(tmp_path))
+    assert inp.break_counts is not None and len(inp.break_counts) == 1
+    assert inp.break_counts[0].date == "2025-01-01"
+
+
+# --------------------------------------------------------------------------- #
+# MINOR-2 — flow.northbound slope is a 20-session slope of cum5 (spec ①§3)       #
+# --------------------------------------------------------------------------- #
+def test_northbound_slope_is_20_session_of_cum5():
+    dates = _dates(300)
+    # net is flat then ramps only in the final stretch, so a 20-session slope of cum5
+    # (17.5) is distinct from a 5-session slope (50.0) — the window is discriminated.
+    net = [0.0] * 300
+    for i in range(291, 300):
+        net[i] = (i - 290) * 10.0
+    inp = MarketFactorInputs(north_net=_daily(dates, net))
+    v = _val(_compute(inp, _stamp(dates[-1])), "flow.northbound")
+    assert v.status in ("OK", "DEGRADED")
+    assert v.series[-1].aux["slope"] == pytest.approx(17.5)  # (cum5[299]-cum5[279])/20
+
+
+# --------------------------------------------------------------------------- #
+# MINOR-3 — breadth.divergence z-window band emits a truthful (not 空池) reason   #
+# --------------------------------------------------------------------------- #
+def test_divergence_zwindow_band_truthful_reason():
+    # 271..288 common sessions clear the 271 definition floor but the z_breadth leg
+    # needs 20+20+250=289 → honest UNAVAILABLE naming 289, never a misleading 空池/gaps.
+    dates = _dates(280)
+    inp = MarketFactorInputs(updown=_updown(dates), closes_index=_daily(dates, 0.01))
+    v = _val(_compute(inp, _stamp(dates[-1])), "breadth.divergence")
+    assert v.status == "UNAVAILABLE"
+    assert "289" in v.reason
+    assert "空池" not in v.reason and "gaps" not in v.reason.lower()
 
 
 # --------------------------------------------------------------------------- #

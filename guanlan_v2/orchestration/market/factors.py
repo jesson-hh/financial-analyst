@@ -1121,11 +1121,12 @@ class MarketFactorInputs(DigestModel):
     """The PIT-windowed raw inputs for one battery run (internal, unregistered).
 
     One optional named series per ``required_inputs`` id in the v1 factor set plus
-    the today-only ``today_tape``. Fields for sources with **no history store in
-    this repo** simply stay ``None`` in production (⇒ honest UNAVAILABLE
-    downstream); the compute core is total over every combination. Its
-    ``semantic_digest()`` is the report's ``data_snapshot_hash`` (the exact PIT
-    snapshot bound into the report).
+    the today-only ``today_tape``. Fields whose upstream is absent or whose compute
+    is deferred simply stay ``None`` (⇒ honest UNAVAILABLE downstream); the
+    archive-backed series arrive from a YOUNG snapshot archive so they render
+    UNAVAILABLE/DEGRADED until they accrete — never zero-filled. The compute core is
+    total over every combination. Its ``semantic_digest()`` is the report's
+    ``data_snapshot_hash`` (the exact PIT snapshot bound into the report).
     """
 
     updown: tuple[UpDownRow, ...] | None = None
@@ -1182,36 +1183,42 @@ _MISSING_POLICY: dict[str, str] = {
     "breadth.ladder_height": "最高连板 (limit_days 真连板口径) from the board-pool archive (young)",
     "breadth.promotion_rate": "晋级率 (limit_days>=2 numerator) from the board-pool archive (young)",
     "breadth.divergence": "z(index 20d return) − z(breadth 20d change) fitted on a trailing 250 window",
-    "flow.northbound": "5/20-session cumulative net + 250d percentile (unit 亿; no daily store in v1)",
-    "flow.main_pct": "250d percentile of whole-market main net inflow (unit 亿; no daily store in v1)",
-    "rot.hhi": "sector 净流入 HHI/top3 (needs the fundflow snapshot archive; deferred in v1)",
-    "rot.diffusion": "top3 净流入概念 上涨成分占比 (needs concept panel + archive; deferred in v1)",
-    "rot.dispersion": "industry 日收益截面 std (fid=f3 口径; needs the archive; deferred in v1)",
-    "rot.ladder_theme": "题材梯队占据度 (needs board pools + 涨停原因归因; deferred in v1)",
-    "rot.leader_persist": "top3 主线领涨股 5d 重合率 (needs 板块领涨股 archive; deferred in v1)",
-    "rot.flow_streak": "top3 主线连续净流入天数 (needs the fundflow archive; deferred in v1)",
-    "rot.theme_burst": "新题材首日爆发 (needs universe-version diff + board pools; deferred in v1)",
+    "flow.northbound": "5/20-session cumulative net + 250d percentile (unit 亿; from the "
+    "market_tape snapshot archive, young — 250d percentile still accreting)",
+    "flow.main_pct": "250d percentile of whole-market main net inflow (unit 亿; from the "
+    "fundflow snapshot archive, young — 250d percentile still accreting)",
+    "rot.hhi": "sector 净流入 HHI/top3 (archive accreting; per-factor compute deferred)",
+    "rot.diffusion": "top3 净流入概念 上涨成分占比 (archive accreting; per-factor compute deferred)",
+    "rot.dispersion": "industry 日收益截面 std (fid=f3 口径; archive accreting; compute deferred)",
+    "rot.ladder_theme": "题材梯队占据度 (board pools + 涨停原因归因 archive accreting; compute deferred)",
+    "rot.leader_persist": "top3 主线领涨股 5d 重合率 (板块领涨股 archive accreting; compute deferred)",
+    "rot.flow_streak": "top3 主线连续净流入天数 (fundflow archive accreting; compute deferred)",
+    "rot.theme_burst": "新题材首日爆发 (universe-version diff + board pools accreting; compute deferred)",
     "vol.rv": "index RV20 + short/long ratio RV5/RV20 from the eqw daily return series",
     "val.pct": "index PE/PB five-year percentile (no verified upstream in v1 — R5)",
     "temp.astock": "打板温度 verbatim from the macro-pulse snapshots (accreting since 2026-07-06)",
 }
 
-#: rot.* + val.pct — deferred by construction in v1 (① archive/upstream not landed).
+#: rot.* — the snapshot archive (甲, 2026-07-18) now supplies the raw material, but
+#: each rot.* cross-sectional formula is deferred until its own compute task lands; the
+#: reason states that present-tense posture (never "the deliverable does not exist").
+#: val.pct is a separate deferral — its blocker is a missing verified upstream, not the
+#: archive — so it keeps its own R5 reason.
 _DEFERRED_FACTORS: dict[str, str] = {
-    "rot.hhi": "cross-sectional rotation series depends on the market_tape/fundflow "
-    "snapshot-archive deliverable (①§5); not computable in v1",
-    "rot.diffusion": "top3 净流入概念内上涨成分占比 needs the concept panel + snapshot "
-    "archive (①§5); deferred in v1",
-    "rot.dispersion": "industry cross-sectional std needs the行业排名 snapshot archive "
-    "(①§5); deferred in v1",
-    "rot.ladder_theme": "题材梯队占据度 needs board-pool + 涨停原因归因 archive (①§5); "
-    "deferred in v1",
-    "rot.leader_persist": "主线领涨股 5-session identity needs the fundflow archive (①§5); "
-    "deferred in v1",
-    "rot.flow_streak": "top3 主线连续净流入天数 needs the fundflow snapshot archive (①§5); "
-    "deferred in v1",
-    "rot.theme_burst": "新入 universe 题材首日 needs the universe-version diff archive (①§5); "
-    "deferred in v1",
+    "rot.hhi": "sector 净流入 HHI/top3 — snapshot archive (甲) accreting since 2026-07-18; "
+    "the cross-sectional rot compute lands in a later task",
+    "rot.diffusion": "top3 净流入概念内上涨成分占比 — concept panel + snapshot archive "
+    "accreting since 2026-07-18; per-factor compute lands in a later task",
+    "rot.dispersion": "industry 收益截面 std — 行业排名 snapshot archive accreting since "
+    "2026-07-18; per-factor compute lands in a later task",
+    "rot.ladder_theme": "题材梯队占据度 — board-pool + 涨停原因归因 archive accreting since "
+    "2026-07-18; per-factor compute lands in a later task",
+    "rot.leader_persist": "主线领涨股 5-session identity — fundflow archive accreting since "
+    "2026-07-18; per-factor compute lands in a later task",
+    "rot.flow_streak": "top3 主线连续净流入天数 — fundflow snapshot archive accreting since "
+    "2026-07-18; per-factor compute lands in a later task",
+    "rot.theme_burst": "新入 universe 题材首日 — universe-version diff archive accreting since "
+    "2026-07-18; per-factor compute lands in a later task",
     "val.pct": "no verified index PE/PB five-year-percentile upstream (R5); the cited "
     "baidu_valuation_percentile is per-stock only — deferred to a stocks-layer new source",
 }
@@ -1318,12 +1325,16 @@ def _unavail(reason: str):
     return ("unavail", reason)
 
 
-def _short(name: str, have: int, need: int):
-    return _unavail(f"input {name!r} has {have} sessions (< {need} required)")
+def _short(name: str, have: int, need: int, first: str | None = None):
+    """Too-few-sessions UNAVAILABLE. ``first`` (the earliest observed session date)
+    is surfaced for the archive-backed series so a YOUNG archive renders its true
+    starting point (①§2 honesty), never a bare count."""
+    since = f"; earliest observed session {first}" if first else ""
+    return _unavail(f"input {name!r} has {have} sessions (< {need} required){since}")
 
 
 def _missing(name: str):
-    return _unavail(f"required input {name!r} is not available (no history store in this repo)")
+    return _unavail(f"required input {name!r} unavailable: no rows in the PIT window")
 
 
 def _sorted(seq) -> list:
@@ -1428,7 +1439,7 @@ def _f_break_rate(inputs: "MarketFactorInputs", tape):
     if sessions is None:
         return _missing("break_counts")
     if len(sessions) < 5:
-        return _short("break_counts", len(sessions), 5)
+        return _short("break_counts", len(sessions), 5, first=sessions[0][0])
     points = [MarketFactorPoint(date=d, value=v) for d, v, _ in sessions if v is not None]
     return _ok(points, latest)
 
@@ -1440,7 +1451,7 @@ def _f_ladder_height(inputs: "MarketFactorInputs", tape):
     if sessions is None:
         return _missing("board_pools")
     if len(sessions) < 5:
-        return _short("board_pools", len(sessions), 5)
+        return _short("board_pools", len(sessions), 5, first=sessions[0][0])
     points = [MarketFactorPoint(date=d, value=v) for d, v, _ in sessions if v is not None]
     return _ok(points, latest)
 
@@ -1459,7 +1470,7 @@ def _f_promotion_rate(inputs: "MarketFactorInputs", tape):
     if sessions is None:
         return _missing("board_pools")
     if len(sessions) < 5:
-        return _short("board_pools", len(sessions), 5)
+        return _short("board_pools", len(sessions), 5, first=sessions[0][0])
     points = [MarketFactorPoint(date=d, value=v) for d, v, _ in sessions if v is not None]
     return _ok(points, latest, force_reason=_PROMOTION_RATE_REASON)
 
@@ -1473,8 +1484,15 @@ def _f_divergence(inputs: "MarketFactorInputs", tape):
     up_by = {r.date: r for r in up_rows}
     ci_by = {r.date: r for r in ci_rows}
     common = sorted(set(up_by) & set(ci_by))
-    if len(common) < 271:
-        return _short("closes_index+updown", len(common), 271)
+    # The z_breadth leg's first point needs 20 (ad MA) + 20 (Δ over 20) + 250 (z-window)
+    # = 289 aligned sessions; the definition floor (min_history_sessions=271) is the raw
+    # gate, so 271–288 sessions clear the floor yet emit no z-score. Report that honestly
+    # instead of a misleading 空池/gaps (①§2 three-state honesty; MINOR-3 review).
+    if len(common) < 289:
+        return _unavail(
+            f"insufficient z-window history: breadth.divergence's first z-score needs "
+            f"20+20+250=289 aligned sessions (have {len(common)})"
+        )
     rets = [ci_by[d].value for d in common]
     ad = [(up_by[d].up - up_by[d].down) / up_by[d].total for d in common]
     idx_ret20 = _compounded_return(rets, 20)
@@ -1532,12 +1550,13 @@ def _f_northbound(inputs: "MarketFactorInputs", tape):
         return _missing("north_net")
     rows = _sorted(rows)
     if len(rows) < 250:
-        return _short("north_net", len(rows), 250)
+        return _short("north_net", len(rows), 250, first=rows[0].date)
     net = [r.value for r in rows]
     cum5 = [sum(net[i - 4 : i + 1]) if i >= 4 else None for i in range(len(net))]
     cum20 = [sum(net[i - 19 : i + 1]) if i >= 19 else None for i in range(len(net))]
+    # 20-session slope of cum5 (spec ①§3 20日斜率; MINOR-2 review — was a 5-session lag).
     slope = [
-        (cum5[i] - cum5[i - 5]) / 5 if i >= 9 and cum5[i] is not None and cum5[i - 5] is not None else None
+        (cum5[i] - cum5[i - 20]) / 20 if i >= 24 and cum5[i] is not None and cum5[i - 20] is not None else None
         for i in range(len(net))
     ]
     pct250 = _percentile_trailing(net, 250)
@@ -1560,7 +1579,7 @@ def _f_main_pct(inputs: "MarketFactorInputs", tape):
         return _missing("main_net")
     rows = _sorted(rows)
     if len(rows) < 250:
-        return _short("main_net", len(rows), 250)
+        return _short("main_net", len(rows), 250, first=rows[0].date)
     pct250 = _percentile_trailing([r.value for r in rows], 250)
     points = [
         MarketFactorPoint(date=r.date, value=pct250[i], aux={"pct250": pct250[i]})
@@ -1916,18 +1935,113 @@ def _load_panel_rows(provider_uri: str, end: str, as_of: datetime, rule: PanelAv
     return (tuple(updown) or None, None, tuple(limit_up) or None)
 
 
+def _iso_from_yyyymmdd(s: Any) -> str | None:
+    """'20260716'/'2026-07-16' → '2026-07-16'; unparseable → None."""
+    digits = "".join(ch for ch in str(s or "") if ch.isdigit())
+    if len(digits) < 8:
+        return None
+    return f"{digits[0:4]}-{digits[4:6]}-{digits[6:8]}"
+
+
+def _load_archive_series(
+    as_of: datetime, rule: PanelAvailabilityRule, archive_dir: str | None = None
+) -> dict[str, tuple | None]:
+    """Map the snapshot archive (甲 ``read_archive``) into the archive-backed series.
+
+    Lazily imports ``read_archive`` (import purity: the compute core stays clean; only
+    this loader touches ``guanlan_v2.datafeed``). Sources the factors whose v1 formulas
+    already exist and consume these inputs:
+
+    - ``break_counts`` / ``board_pools`` ← ``market_tape.derived`` (zt/zb, max_streak,
+      promotion_rate) — 炸板率 / 连板梯队 / 晋级率;
+    - ``north_net`` ← ``market_tape.derived.north_net`` (already 亿, sgt guard applied
+      upstream);
+    - ``main_net`` ← ``fundflow_industry.market.main_net`` (元 → 亿 via ``_yuan_to_yi``).
+
+    PIT: ``as_of`` is passed to ``read_archive`` as a Beijing-naive string (matching the
+    archive's Beijing-local ``archived_at``), so a row archived AFTER ``as_of`` is
+    invisible in replay — the archive-visibility gate, distinct from the per-row
+    ``available_at`` session-close gate applied by ``_window_inputs``. Honesty: a
+    missing/short archive ⇒ ``None`` series (⇒ UNAVAILABLE downstream), a ``None`` field
+    on a row is a gap (skipped), never a zero-fill; the rot.* cross-sectional inputs are
+    left ``None`` (their compute is deferred).
+    """
+    empty: dict[str, tuple | None] = {
+        "break_counts": None, "board_pools": None, "north_net": None, "main_net": None}
+    try:
+        from guanlan_v2.datafeed.snapshot_archive import read_archive
+    except Exception:  # noqa: BLE001 — a missing deliverable is honest None, not a crash
+        return empty
+    asof_bj = as_of.astimezone(timezone(timedelta(hours=8))).replace(tzinfo=None).isoformat()
+
+    def _rows(kind: str) -> list[dict]:
+        try:
+            return read_archive(kind, asof=asof_bj, archive_dir=archive_dir).get("rows") or []
+        except Exception:  # noqa: BLE001
+            return []
+
+    break_counts: list[BreakCountRow] = []
+    board_pools: list[BoardPoolRow] = []
+    north_net: list[DailyValueRow] = []
+    for r in _rows("market_tape"):
+        iso = _iso_from_yyyymmdd(r.get("trade_date"))
+        if iso is None:
+            continue
+        der = ((r.get("payload") or {}).get("derived")) or {}
+        avail = _available_at_for(iso, rule)
+        zt, zb = der.get("zt_count"), der.get("zb_count")
+        if isinstance(zt, int) and not isinstance(zt, bool) and isinstance(zb, int) and not isinstance(zb, bool):
+            break_counts.append(BreakCountRow(date=iso, zt=zt, zb=zb, available_at=avail))
+        ms = der.get("max_streak")
+        if isinstance(ms, int) and not isinstance(ms, bool):
+            board_pools.append(
+                BoardPoolRow(date=iso, max_streak=ms, promotion_rate=der.get("promotion_rate"), available_at=avail))
+        nn = der.get("north_net")  # already 亿 (sgt guard ⇒ None, never 0, upstream)
+        if nn is not None:
+            try:
+                north_net.append(DailyValueRow(date=iso, value=float(nn), available_at=avail))
+            except (TypeError, ValueError):
+                pass
+
+    main_net: list[DailyValueRow] = []
+    for r in _rows("fundflow_industry"):
+        iso = _iso_from_yyyymmdd(r.get("trade_date"))
+        if iso is None:
+            continue
+        mn = ((r.get("payload") or {}).get("market") or {}).get("main_net")
+        if mn is not None:
+            try:
+                main_net.append(
+                    DailyValueRow(date=iso, value=_yuan_to_yi(float(mn)), available_at=_available_at_for(iso, rule)))
+            except (TypeError, ValueError):
+                pass
+
+    return {
+        "break_counts": tuple(break_counts) or None,
+        "board_pools": tuple(board_pools) or None,
+        "north_net": tuple(north_net) or None,
+        "main_net": tuple(main_net) or None,
+    }
+
+
 def load_market_factor_inputs(
-    *, provider_uri: str, end: str, as_of: UtcDateTime, rule: PanelAvailabilityRule = DEFAULT_AVAILABILITY_RULE
+    *, provider_uri: str, end: str, as_of: UtcDateTime,
+    rule: PanelAvailabilityRule = DEFAULT_AVAILABILITY_RULE, archive_dir: str | None = None,
 ) -> MarketFactorInputs:
     """The production PIT input loader (thin, I/O; interim Phase-5 adapter).
 
     Stamps ``available_at`` per ``rule``, windows every series to
-    ``available_at <= as_of``, and sources each field read-only. Sources with no
-    history store in this repo stay ``None`` (⇒ honest UNAVAILABLE downstream); the
-    loader performs no vendor fallback and fabricates no history — returning ``None``
-    fields is its honest steady state.
+    ``available_at <= as_of``, and sources each field read-only. The archive-backed
+    series (break_counts / board_pools / north_net / main_net) come from the snapshot
+    archive (甲 ``read_archive``); it is YOUNG (accreting since 2026-07-18), so those
+    factors render honestly UNAVAILABLE/DEGRADED until enough sessions accrete — never
+    zero-filled. The rot.* cross-sectional inputs (whose compute is deferred) stay
+    ``None``. The loader performs no vendor fallback and fabricates no history —
+    returning ``None`` fields is its honest steady state. ``archive_dir`` is a test/ops
+    injection seam (production reads ``var/archive``).
     """
     updown, closes_panel, limit_up_total = _load_panel_rows(provider_uri, end, as_of, rule)
+    arch = _load_archive_series(as_of, rule, archive_dir=archive_dir)
     inputs = MarketFactorInputs(
         updown=updown,
         closes_index=_load_closes_index_rows(as_of, rule),
@@ -1935,8 +2049,10 @@ def load_market_factor_inputs(
         limit_up_total=limit_up_total,
         astock_temp=_load_astock_temp_rows(as_of, rule),
         today_tape=_load_today_tape(as_of, rule),
-        # no history store in this repo yet ⇒ honest None (①§5 archive deliverable):
-        break_counts=None, board_pools=None, north_net=None, main_net=None,
+        # archive-backed series (甲 snapshot archive, young; ①§5):
+        break_counts=arch["break_counts"], board_pools=arch["board_pools"],
+        north_net=arch["north_net"], main_net=arch["main_net"],
+        # rot.* cross-sectional upstreams — compute deferred ⇒ honest None:
         sector_flows=None, index_valuation=None, concept_membership=None,
         industry_returns=None, limit_reasons=None, sector_leaders=None, universe_versions=None,
     )
