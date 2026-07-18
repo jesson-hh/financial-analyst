@@ -31,6 +31,8 @@ frozen digest is pinned by ``tests/orchestration/golden/market_factor_set_v1.jso
 """
 from __future__ import annotations
 
+import math
+from enum import Enum
 from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import AfterValidator, Field, StringConstraints, model_validator
@@ -44,7 +46,8 @@ from guanlan_v2.orchestration.digest import (
     PositiveInt,
     UtcDateTime,
 )
-from guanlan_v2.orchestration.refs import LogicalId, PayloadRef
+from guanlan_v2.orchestration.enums import Confidence, RotationStage
+from guanlan_v2.orchestration.refs import LogicalId, PayloadRef, SchemaRef
 
 __all__ = [
     "MarketFactorPoint",
@@ -58,6 +61,20 @@ __all__ = [
     "assemble_market_factor_report",
     "build_market_factor_set_v1",
     "MARKET_FACTOR_SET_V1_FACTOR_IDS",
+    # --- Task 2: Lane 0 LLM output contracts ---
+    "TrendState",
+    "RiskState",
+    "HeatState",
+    "AXIS_SUM_TOLERANCE",
+    "UNKNOWN_ATTENTION_THRESHOLD",
+    "HIGH_CONFIDENCE_UNKNOWN_MAX",
+    "EvidenceAnchor",
+    "RegimeReport",
+    "MainlineRead",
+    "RotationReport",
+    "MARKET_FACTOR_REPORT_SCHEMA_REF",
+    "REGIME_REPORT_SCHEMA_REF",
+    "ROTATION_REPORT_SCHEMA_REF",
 ]
 
 #: sealing placeholder used by the ``build`` classmethods when a raw field is
@@ -686,3 +703,291 @@ def build_market_factor_set_v1() -> MarketFactorSetSpec:
         frequency="day",
         definitions=definitions,
     )
+
+
+# =========================================================================== #
+# Task 2 — Lane 0 LLM output contracts (RegimeReport / RotationReport)          #
+# =========================================================================== #
+# The two reasoner seats read exactly one MarketFactorReport (bound by its
+# content digest) and emit these draft-only reads. They are Lane 0 outputs and
+# are NEVER decision-class (invariant 1: neither name is in Phase 1
+# ``_DECISION_CLASS_SCHEMAS``). Honesty is structural: unknown is a first-class
+# mass on every axis, an axis whose modal label is unknown forces LOW confidence,
+# and an empty mainline list is a lawful "无主线=诚实" output with a named reason.
+
+
+# --------------------------------------------------------------------------- #
+# Phase-5-local axis enums (④§1; ruling R6 fixes the CHINESE trend values).     #
+# --------------------------------------------------------------------------- #
+# Phase-1 ``enums.py`` is untouched — these live here (Phase-5-local). Ruling R6
+# fixes the Chinese ``TrendState`` values (牛/熊/震荡); the delayed grader's
+# ``RealizedRegime`` realized-trend vocabulary (memory/experience.py, a later
+# task) MUST reuse this exact same 词表 so 判读 vs realized calibration keys off
+# one word list — the constraint is recorded here at the vocabulary's source.
+class TrendState(str, Enum):
+    BULL = "牛"; BEAR = "熊"; RANGE = "震荡"; UNKNOWN = "unknown"  # noqa: E702
+
+
+class RiskState(str, Enum):
+    RISK_ON = "risk_on"; RISK_OFF = "risk_off"; NEUTRAL = "neutral"; UNKNOWN = "unknown"  # noqa: E702
+
+
+class HeatState(str, Enum):
+    NORMAL = "normal"; OVERHEAT = "overheat"; UNKNOWN = "unknown"  # noqa: E702
+
+
+#: closed-map sum must land within this tolerance of 1.0 (LLM-reported floats).
+AXIS_SUM_TOLERANCE: float = 1e-8
+#: an axis whose ``unknown`` mass reaches this REQUIRES a named ``unknown_reason``
+#: (and forbids one below it — unknown is never decorative).
+UNKNOWN_ATTENTION_THRESHOLD: float = 0.25
+#: HIGH confidence requires every axis's ``unknown`` mass to be at or below this.
+HIGH_CONFIDENCE_UNKNOWN_MAX: float = 0.10
+
+#: the ordered axis → (enum, probabilities-field, modal-field) wiring the
+#: RegimeReport validators iterate; ``unknown_member`` is each enum's honest mass.
+_REGIME_AXES: tuple[tuple[str, type[Enum], str, str, Enum], ...] = (
+    ("trend", TrendState, "trend_probabilities", "trend", TrendState.UNKNOWN),
+    ("risk", RiskState, "risk_probabilities", "risk_state", RiskState.UNKNOWN),
+    ("heat", HeatState, "heat_probabilities", "heat_state", HeatState.UNKNOWN),
+)
+
+
+def _argmax_member(members: type[Enum], probs: dict[Any, float]) -> Any:
+    """The highest-probability member, ties broken by frozen declaration order.
+
+    ``max`` returns the first maximal element encountered, so iterating the enum
+    in declaration order makes the earliest-declared label win an exact tie.
+    """
+    return max(members, key=lambda m: probs[m])
+
+
+# --------------------------------------------------------------------------- #
+# EvidenceAnchor / MainlineRead — nested value objects.                         #
+# --------------------------------------------------------------------------- #
+# ④§1 sketches these as ``ContractModel``; here they are ``DigestModel`` (a
+# ``ContractModel`` subclass). They MUST be DigestModel because canonical JSON
+# refuses to project a non-DigestModel pydantic model nested in a DigestModel's
+# semantic fields (``digest._project`` raises), so a plain ContractModel anchor
+# would make the parent report's digest uncomputable — the same in-file idiom as
+# ``MarketFactorPoint``/``FactorSummary`` (nested DigestModel value objects).
+class EvidenceAnchor(DigestModel):
+    """One cited factor reading anchoring a load-bearing claim (④§1).
+
+    ``factor_id`` must exist in the bound ``market_factor_report`` — that machine
+    check is a downstream (Task 10 e2e) responsibility; the contract only carries
+    the fields. ``value`` is 逐字 from the Task 3b rendered block.
+    """
+
+    factor_id: NonEmptyStr
+    value: FiniteFloat
+    reading: NonEmptyStr
+
+
+class MainlineRead(DigestModel):
+    """One ranked mainline with its per-mainline rotation stage (④§1).
+
+    Replaces the earlier ``RotationMainline``. ``stage`` binds the FROZEN
+    ``RotationStage`` enum (启动/扩散/分化/退潮/unknown) — staging is per mainline
+    (④/AMEND-4 §4.2), ``unknown`` lawful. ``strength`` is on ④'s [0,10] scale.
+    ``chain_nodes`` stays empty without an industry-chain block (never improvised).
+    """
+
+    name: NonEmptyStr
+    universe_key: NonEmptyStr
+    stage: RotationStage
+    strength: Annotated[FiniteFloat, Field(ge=0.0, le=10.0)]
+    persistence: NonEmptyStr
+    evidence: tuple[EvidenceAnchor, ...]
+    chain_nodes: tuple[NonEmptyStr, ...] = ()
+
+
+# --------------------------------------------------------------------------- #
+# RegimeReport@1 — three-axis regime read.                                     #
+# --------------------------------------------------------------------------- #
+class RegimeReport(DigestModel):
+    """The Lane 0 market-regime read (registered ``RegimeReport@1``; ④§1).
+
+    Three closed probability axes (trend/risk/heat) each summing to 1 with
+    ``unknown`` a first-class mass; ``confidence`` is the ONLY confidence carrier
+    (④/AMEND-7-3 deleted the earlier ``confidence_score`` float). ``build`` seals
+    the content digest; a ``model_validator`` re-verifies it on load.
+    """
+
+    schema_version: Literal["1"] = "1"
+    as_of: UtcDateTime
+    factor_report_digest: DigestHex
+    trend: TrendState
+    risk_state: RiskState
+    heat_state: HeatState
+    trend_probabilities: dict[TrendState, FiniteFloat]
+    risk_probabilities: dict[RiskState, FiniteFloat]
+    heat_probabilities: dict[HeatState, FiniteFloat]
+    confidence: Confidence
+    evidence: tuple[EvidenceAnchor, ...]
+    conflicts: tuple[NonEmptyStr, ...] = ()
+    analog_case_ids: tuple[NonEmptyStr, ...] = ()
+    drivers: tuple[NonEmptyStr, ...]
+    evidence_factor_ids: tuple[LogicalId, ...]
+    narrative: NonEmptyStr
+    unknown_reason: NonEmptyStr | None = None
+    content_digest: DigestHex
+
+    SELF_DIGEST_FIELDS: ClassVar[frozenset[str]] = frozenset({"content_digest"})
+
+    @model_validator(mode="after")
+    def _verify(self) -> "RegimeReport":
+        axis_probs: dict[str, dict[Any, float]] = {}
+        any_unknown_attention = False
+        modal_is_unknown = False
+
+        for _label, members, probs_field, modal_field, unknown_member in _REGIME_AXES:
+            probs: dict[Any, float] = getattr(self, probs_field)
+            # 1. exactly the enum's member set (axis-specific labels only).
+            if set(probs) != set(members):
+                raise ValueError(
+                    f"{probs_field} must carry exactly the {members.__name__} member set"
+                )
+            # 2. every probability in [0, 1] and the axis sums to 1 ± tolerance.
+            for p in probs.values():
+                if not 0.0 <= p <= 1.0:
+                    raise ValueError(f"{probs_field} probabilities must lie in [0, 1]")
+            if abs(math.fsum(probs.values()) - 1.0) > AXIS_SUM_TOLERANCE:
+                raise ValueError(
+                    f"{probs_field} must sum to 1 ± {AXIS_SUM_TOLERANCE}"
+                )
+            # 3. the modal field equals the axis argmax (declaration-order ties).
+            if getattr(self, modal_field) is not _argmax_member(members, probs):
+                raise ValueError(
+                    f"{modal_field} must equal the highest-probability {members.__name__} label"
+                )
+            axis_probs[probs_field] = probs
+            if probs[unknown_member] >= UNKNOWN_ATTENTION_THRESHOLD:
+                any_unknown_attention = True
+            if getattr(self, modal_field) is unknown_member:
+                modal_is_unknown = True
+
+        # 4. unknown_reason required iff some axis reaches the attention threshold.
+        if any_unknown_attention and self.unknown_reason is None:
+            raise ValueError(
+                "unknown_reason is required when any axis unknown mass "
+                f">= {UNKNOWN_ATTENTION_THRESHOLD}"
+            )
+        if not any_unknown_attention and self.unknown_reason is not None:
+            raise ValueError(
+                "unknown_reason is forbidden when no axis reaches the attention "
+                "threshold (unknown must be coverage/evidence-driven, not decorative)"
+            )
+
+        # 5. HIGH-confidence caps + modal-unknown forces LOW.
+        if self.confidence is Confidence.HIGH:
+            for _label, _members, probs_field, _modal, unknown_member in _REGIME_AXES:
+                if axis_probs[probs_field][unknown_member] > HIGH_CONFIDENCE_UNKNOWN_MAX:
+                    raise ValueError(
+                        "HIGH confidence requires every axis unknown mass "
+                        f"<= {HIGH_CONFIDENCE_UNKNOWN_MAX}"
+                    )
+        if modal_is_unknown and self.confidence is not Confidence.LOW:
+            raise ValueError(
+                "an axis with a modal 'unknown' label forces confidence == LOW"
+            )
+
+        # 6. evidence non-empty; evidence_factor_ids == sorted distinct anchor ids;
+        #    drivers sorted + duplicate-free.
+        if not self.evidence:
+            raise ValueError("evidence must carry at least one EvidenceAnchor (④ ≥1)")
+        distinct_ids = tuple(sorted({a.factor_id for a in self.evidence}))
+        if self.evidence_factor_ids != distinct_ids:
+            raise ValueError(
+                "evidence_factor_ids must equal the sorted distinct anchor factor_ids"
+            )
+        drivers = list(self.drivers)
+        if drivers != sorted(drivers):
+            raise ValueError("drivers must be sorted")
+        if len(set(drivers)) != len(drivers):
+            raise ValueError("drivers must be duplicate-free")
+
+        if self.content_digest != self.semantic_digest():
+            raise ValueError("declared content_digest does not match canonical digest")
+        return self
+
+    @classmethod
+    def build(cls, **fields: Any) -> "RegimeReport":
+        """Seal a regime read: compute ``content_digest`` from the fields."""
+        try:
+            digest = cls.digest_of_fields(projection="semantic", **fields)
+        except (ValueError, TypeError, AttributeError, KeyError):
+            digest = _DIGEST_PLACEHOLDER
+        return cls(**fields, content_digest=digest)
+
+
+# --------------------------------------------------------------------------- #
+# RotationReport@1 — mainline rotation read.                                    #
+# --------------------------------------------------------------------------- #
+class RotationReport(DigestModel):
+    """The Lane 0 mainline-rotation read (registered ``RotationReport@1``; ④§1).
+
+    ``mainlines`` tuple order **is** the ranking (no separate rank field); the
+    list may be empty — 无主线=诚实合法 — in which case a ``unknown_reason`` naming
+    the driver (themeless tape / archive-young factors) is required, and forbidden
+    otherwise. Staging lives on each ``MainlineRead`` (the earlier report-level
+    ``stage`` field is deleted).
+    """
+
+    schema_version: Literal["1"] = "1"
+    as_of: UtcDateTime
+    factor_report_digest: DigestHex
+    mainlines: tuple[MainlineRead, ...]
+    confidence: Confidence
+    conflicts: tuple[NonEmptyStr, ...] = ()
+    analog_case_ids: tuple[NonEmptyStr, ...] = ()
+    narrative: NonEmptyStr
+    evidence_factor_ids: tuple[LogicalId, ...]
+    unknown_reason: NonEmptyStr | None = None
+    content_digest: DigestHex
+
+    SELF_DIGEST_FIELDS: ClassVar[frozenset[str]] = frozenset({"content_digest"})
+
+    @model_validator(mode="after")
+    def _verify(self) -> "RotationReport":
+        names = [m.name for m in self.mainlines]
+        if len(set(names)) != len(names):
+            raise ValueError("mainline names must be duplicate-free")
+        ids = list(self.evidence_factor_ids)
+        if ids != sorted(ids):
+            raise ValueError("evidence_factor_ids must be sorted")
+        if len(set(ids)) != len(ids):
+            raise ValueError("evidence_factor_ids must be duplicate-free")
+        # 无主线=诚实: an empty ranking requires a named reason; a non-empty one
+        # forbids it (the reason is only for the honest empty case).
+        if not self.mainlines and self.unknown_reason is None:
+            raise ValueError(
+                "an empty mainlines list requires unknown_reason (无主线=诚实: name "
+                "the driver — themeless tape or archive-young factors)"
+            )
+        if self.mainlines and self.unknown_reason is not None:
+            raise ValueError(
+                "unknown_reason is forbidden when mainlines is non-empty"
+            )
+        if self.content_digest != self.semantic_digest():
+            raise ValueError("declared content_digest does not match canonical digest")
+        return self
+
+    @classmethod
+    def build(cls, **fields: Any) -> "RotationReport":
+        """Seal a rotation read: compute ``content_digest`` from the fields."""
+        try:
+            digest = cls.digest_of_fields(projection="semantic", **fields)
+        except (ValueError, TypeError, AttributeError, KeyError):
+            digest = _DIGEST_PLACEHOLDER
+        return cls(**fields, content_digest=digest)
+
+
+# --------------------------------------------------------------------------- #
+# Exported SchemaRef constants — one definition each, imported everywhere else. #
+# --------------------------------------------------------------------------- #
+#: downstream pinning surfaces (bridge config, manifest validators, worker output
+#: bindings) import these — never re-instantiate the SchemaRef inline.
+MARKET_FACTOR_REPORT_SCHEMA_REF: SchemaRef = SchemaRef(name="MarketFactorReport", version="1")
+REGIME_REPORT_SCHEMA_REF: SchemaRef = SchemaRef(name="RegimeReport", version="1")
+ROTATION_REPORT_SCHEMA_REF: SchemaRef = SchemaRef(name="RotationReport", version="1")
