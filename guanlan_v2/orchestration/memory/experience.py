@@ -42,14 +42,21 @@ the same case.
 """
 from __future__ import annotations
 
+import bisect
 import math
 import statistics
 import warnings
 from collections.abc import Callable, Sequence
-from typing import Any, ClassVar, Literal, get_args
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, ClassVar, Literal, NamedTuple, get_args
 
 from pydantic import Field, model_validator
 
+from guanlan_v2.orchestration.data.calendar import (
+    ImmutableTradingCalendar,
+    TradingCalendarMaterial,
+    build_trading_calendar,
+)
 from guanlan_v2.orchestration.data.errors import FutureDataRefused
 from guanlan_v2.orchestration.digest import (
     DigestHex,
@@ -59,6 +66,7 @@ from guanlan_v2.orchestration.digest import (
     NonNegativeInt,
     PositiveInt,
     UtcDateTime,
+    content_digest,
 )
 from guanlan_v2.orchestration.eventstore import (
     EventAppendCommand,
@@ -81,7 +89,7 @@ from guanlan_v2.orchestration.refs import (
     SchemaRef,
     TypedPayloadRef,
 )
-from guanlan_v2.orchestration.runtime_clock import AuthoritativeClock
+from guanlan_v2.orchestration.runtime_clock import AuthoritativeClock, clock_now
 
 __all__ = [
     # errors / warnings
@@ -103,6 +111,17 @@ __all__ = [
     "ExperienceNeighbour",
     "ExperienceSelection",
     "MIN_FEATURE_OVERLAP",
+    # grader + observed-calendar contracts (Task 6)
+    "RegimeGraderSpec",
+    "CaseMaturityPending",
+    "ObservedTradeDateCalendar",
+    "build_observed_calendar",
+    "grade_case",
+    "mature_pending_cases",
+    "matured_only",
+    "OBSERVED_CALENDAR_ID",
+    "OBSERVED_CALENDAR_MATERIAL_ID",
+    "REALIZED_HEAT_UNAVAILABLE_REASON",
     # schema refs
     "REGIME_CASE_SCHEMA_REF",
     "REALIZED_REGIME_SCHEMA_REF",
@@ -111,6 +130,7 @@ __all__ = [
     "EXPERIENCE_SCALER_SNAPSHOT_SCHEMA_REF",
     "EXPERIENCE_QUERY_SCHEMA_REF",
     "EXPERIENCE_SELECTION_SCHEMA_REF",
+    "REGIME_GRADER_SPEC_SCHEMA_REF",
     # service + fold + retrieval
     "ExperienceLog",
     "fold_case_views",
@@ -300,6 +320,72 @@ class RealizedRegime(DigestModel):
 
     @classmethod
     def build(cls, **fields: Any) -> "RealizedRegime":
+        try:
+            digest = cls.digest_of_fields(projection="semantic", **fields)
+        except (ValueError, TypeError, AttributeError, KeyError):
+            digest = _DIGEST_PLACEHOLDER
+        return cls(**fields, content_digest=digest)
+
+
+# --------------------------------------------------------------------------- #
+# RegimeGraderSpec@1 — the golden-frozen v1 grading policy (no LLM, D10)         #
+# --------------------------------------------------------------------------- #
+#: v1 realized-heat is honestly ``None`` — a realized-heat definition needs a
+#: temperature history Lane 0 does not yet own (spec §13 挂账, plan D10).
+REALIZED_HEAT_UNAVAILABLE_REASON = "no_realized_heat_definition_v1"
+
+
+class RegimeGraderSpec(DigestModel):
+    """The versioned, golden-frozen deterministic grading policy (registered
+    ``RegimeGraderSpec@1``; spec §5 参数不拍脑袋 / plan D10).
+
+    The grader NEVER runs an LLM. Every threshold lives here (invariant 5: no
+    literal threshold in any grading function); v1 values are hand-frozen in
+    ``tests/orchestration/golden/regime_grader_policy_v1.json`` and are *provisional*
+    — tuning belongs to Phase 4 ``run_optimize`` over matured cases with the
+    sealed-holdout discipline, explicitly out of scope here.
+
+    Closed label rules (pinned by tests; the golden's ``notes`` array is the
+    human-readable authority):
+
+    * **window** — entry = the first observed session strictly after the case's
+      ``as_of`` session (a case dated on a non-session grades from the previous
+      session); exit = the ``horizon_trading_days``-th observed session after entry
+      **by list position** (never calendar days — a holiday gap can never fake
+      maturity).
+    * **forward_return** = ∏(1+ret)−1 over the per-session benchmark returns in
+      ``(entry, exit]``; **max_drawdown** = the minimum running drawdown of the
+      compounded wealth path (≤ 0); **realized_volatility** = the population std of
+      those returns.
+    * **trend** (R6 词表, shared with ④ ``TrendState``): ``forward_return ≥
+      bull_min_return`` ⇒ ``牛``; ``≤ bear_max_return`` ⇒ ``熊``; else ``震荡``.
+    * **risk**: ``max_drawdown ≤ risk_off_max_drawdown`` ⇒ ``risk_off`` (drawdown
+      precedence); else ``forward_return ≥ risk_on_min_return and max_drawdown >
+      risk_on_min_drawdown`` ⇒ ``risk_on``; else ``neutral``.
+    * **heat**: ``None`` in v1 with ``heat_unavailable_reason`` = the honest reason.
+    """
+
+    schema_version: Literal["1"] = "1"
+    grader_version: NonEmptyStr
+    horizon_trading_days: PositiveInt
+    benchmark_id: LogicalId
+    bull_min_return: FiniteFloat
+    bear_max_return: FiniteFloat
+    risk_off_max_drawdown: FiniteFloat
+    risk_on_min_return: FiniteFloat
+    risk_on_min_drawdown: FiniteFloat
+    content_digest: DigestHex
+
+    SELF_DIGEST_FIELDS: ClassVar[frozenset[str]] = frozenset({"content_digest"})
+
+    @model_validator(mode="after")
+    def _verify(self) -> "RegimeGraderSpec":
+        if self.content_digest != self.semantic_digest():
+            raise ValueError("declared content_digest does not match canonical digest")
+        return self
+
+    @classmethod
+    def build(cls, **fields: Any) -> "RegimeGraderSpec":
         try:
             digest = cls.digest_of_fields(projection="semantic", **fields)
         except (ValueError, TypeError, AttributeError, KeyError):
@@ -617,7 +703,10 @@ EXPERIENCE_PUBLIC_MODELS: tuple[type[DigestModel], ...] = (
     ExperienceScalerSnapshot,
     ExperienceQuery,
     ExperienceSelection,
+    RegimeGraderSpec,
 )
+
+REGIME_GRADER_SPEC_SCHEMA_REF: SchemaRef = SchemaRef(name="RegimeGraderSpec", version="1")
 
 _SCHEMA_FOR_EVENT: dict[EventType, str] = {
     EventType.CASE_CREATED: "RegimeCase",
@@ -1115,3 +1204,359 @@ def retrieve_neighbours(
         visible_case_count=visible_case_count,
         badges=badges,
     )
+
+
+# --------------------------------------------------------------------------- #
+# ObservedTradeDateCalendar — the "N 交易日后" authority (no wall clock, D3)      #
+# --------------------------------------------------------------------------- #
+#: the observed-trade-date calendar identity bound as ``ClockSpec.calendar_id`` for
+#: the bootstrap ``DataContext`` (Task 8/10 consume this value).
+OBSERVED_CALENDAR_ID = "cn-ashare-observed-v1"
+#: the logical id of the versioned calendar material ref (its ``version`` tracks the
+#: content — the list digest prefix by default).
+OBSERVED_CALENDAR_MATERIAL_ID = "calendar.cn_ashare_observed"
+
+
+class ObservedTradeDateCalendar:
+    """A Phase-3 :class:`~guanlan_v2.orchestration.data.calendar.TradingCalendar`
+    over the observed PIT trade-date list of the grading benchmark series.
+
+    Phase 5 mints no exchange calendar and never uses ``np.busday`` / ``pd.bdate_range``
+    for maturity (those are honest-approximation idioms unfit for realized-label
+    arithmetic — they invent sessions across suspensions/holidays). The sole
+    authority for "N 个交易日后" is the observed benchmark date list itself — bar
+    counts / positions in the instrument's own series — which handles long holidays
+    by construction and never consults a wall clock.
+
+    Delegates the protocol surface (``calendar_id`` / ``material_ref`` / ``coverage``
+    / :meth:`is_session` / :meth:`sessions_between`) to a verified
+    :class:`~guanlan_v2.orchestration.data.calendar.ImmutableTradingCalendar` (consume-
+    don't-fork), and adds the ordered list-position surface the delayed grader needs
+    (``_realized_map`` idiom: the realized date is a *position* in the observed list).
+    In PIT_REPLAY the list is frozen by its material digest; in ONLINE it only extends
+    forward — a changed historical prefix is a refusal (the extension policy is owned
+    by the consuming seeder/bootstrap task, not minted here).
+    """
+
+    __slots__ = ("_inner", "_sessions", "_index")
+
+    def __init__(
+        self, *, inner: ImmutableTradingCalendar, sessions: tuple[str, ...]
+    ) -> None:
+        self._inner = inner
+        self._sessions = sessions
+        self._index = {d: i for i, d in enumerate(sessions)}
+
+    # -- TradingCalendar protocol (delegated to the verified material) ------- #
+    @property
+    def calendar_id(self) -> str:
+        return self._inner.calendar_id
+
+    @property
+    def material_ref(self) -> Any:
+        return self._inner.material_ref
+
+    @property
+    def coverage(self) -> tuple[date, date] | None:
+        return self._inner.coverage
+
+    def is_session(self, day: date) -> bool:
+        return self._inner.is_session(day)
+
+    def sessions_between(self, start: date, end: date) -> int:
+        return self._inner.sessions_between(start, end)
+
+    # -- ordered list-position surface (the position-in-observed-list idiom) -- #
+    @property
+    def sessions(self) -> tuple[str, ...]:
+        """The ordered, strictly-increasing observed ISO trade-date list."""
+        return self._sessions
+
+    def index_of(self, day_iso: str) -> int | None:
+        """The 0-based position of ``day_iso`` in the observed list, or ``None``."""
+        return self._index.get(day_iso)
+
+    def session_on_or_before(self, day_iso: str) -> str | None:
+        """The last observed session ``<= day_iso`` (a non-session anchors to the
+        previous session), or ``None`` when ``day_iso`` precedes coverage."""
+        idx = bisect.bisect_right(self._sessions, day_iso) - 1
+        return self._sessions[idx] if idx >= 0 else None
+
+    def next_session(self, day_iso: str) -> str | None:
+        """The first observed session strictly after ``day_iso``, or ``None``."""
+        idx = bisect.bisect_right(self._sessions, day_iso)
+        return self._sessions[idx] if idx < len(self._sessions) else None
+
+    def session_at(self, idx: int) -> str | None:
+        """The observed session at list position ``idx`` (bounds-checked)."""
+        return self._sessions[idx] if 0 <= idx < len(self._sessions) else None
+
+
+def build_observed_calendar(
+    dates: tuple[NonEmptyStr, ...], *, version: NonEmptyStr | None = None
+) -> ObservedTradeDateCalendar:
+    """Build an :class:`ObservedTradeDateCalendar` from strictly-increasing ISO dates.
+
+    ``dates`` must be canonically strictly increasing ISO ``YYYY-MM-DD`` strings
+    (duplicates or descending order are a loud ``ValueError`` — the observed list is
+    a fact, never re-sorted silently). ``version`` labels the material ref; when
+    omitted it defaults to the **list content-digest prefix** so the version tracks
+    the exact list (PIT_REPLAY identity).
+    """
+    iso = tuple(str(d) for d in dates)
+    prev: str | None = None
+    for s in iso:
+        if len(s) != 10:
+            raise ValueError(f"observed session {s!r} is not an ISO YYYY-MM-DD date")
+        try:
+            date.fromisoformat(s)
+        except ValueError as exc:
+            raise ValueError(f"observed session {s!r} is not a valid date: {exc}") from exc
+        if prev is not None and s <= prev:
+            raise ValueError(
+                f"observed trade dates must be strictly increasing; {s!r} follows {prev!r}"
+            )
+        prev = s
+    session_dates = [date.fromisoformat(s) for s in iso]
+    if version is None:
+        material = TradingCalendarMaterial(calendar_id=OBSERVED_CALENDAR_ID, sessions=iso)
+        version = content_digest(material)[:12] or "empty"
+    inner = build_trading_calendar(
+        calendar_id=OBSERVED_CALENDAR_ID,
+        sessions=session_dates,
+        material_id=OBSERVED_CALENDAR_MATERIAL_ID,
+        material_version=version,
+    )
+    return ObservedTradeDateCalendar(inner=inner, sessions=iso)
+
+
+# --------------------------------------------------------------------------- #
+# CaseMaturityPending — the Phase-4 WAITING_FOR_MATURITY carrier (clause C5)     #
+# --------------------------------------------------------------------------- #
+class CaseMaturityPending(NamedTuple):
+    """The value a Phase-4 experiment wrapper folds into
+    ``ExperimentStatus.WAITING_FOR_MATURITY`` for an un-matured case.
+
+    Same ``resume_after`` / ``wakeup_key`` shape as the Phase-4
+    :class:`~guanlan_v2.orchestration.optimize.MaturityPending` carrier (clause C5),
+    so a grader-produced pending folds straight into the ledger's waiting state.
+    ``resume_after`` is a *scheduling hint only* (a wakeup always re-checks maturity
+    from the observed list — it is never a correctness input); ``wakeup_key`` is the
+    deterministic ``case.mature:{case_id}:{grader_version}`` grammar Phase 5 owns.
+    """
+
+    resume_after: datetime
+    wakeup_key: str
+
+
+# --------------------------------------------------------------------------- #
+# grade_case — the pure, LLM-free, delayed deterministic grader                  #
+# --------------------------------------------------------------------------- #
+def _label_trend(forward_return: float, grader: RegimeGraderSpec) -> str:
+    """R6 词表 trend label — thresholds read only from ``grader`` (invariant 5)."""
+    if forward_return >= grader.bull_min_return:
+        return "牛"
+    if forward_return <= grader.bear_max_return:
+        return "熊"
+    return "震荡"
+
+
+def _label_risk(forward_return: float, max_drawdown: float, grader: RegimeGraderSpec) -> str:
+    """Risk label with risk_off-by-drawdown precedence — thresholds from ``grader``."""
+    if max_drawdown <= grader.risk_off_max_drawdown:
+        return "risk_off"
+    if forward_return >= grader.risk_on_min_return and max_drawdown > grader.risk_on_min_drawdown:
+        return "risk_on"
+    return "neutral"
+
+
+def _maturity_pending(
+    case: RegimeCase,
+    *,
+    sessions: tuple[str, ...],
+    exit_idx: int,
+    bench: tuple["DailyValueRow", ...],
+    grader: RegimeGraderSpec,
+) -> CaseMaturityPending:
+    """Extrapolate a *scheduling hint* for when the exit session will land.
+
+    The list positions still missing (``exit_idx - last_idx``) are projected forward
+    by the mean recent session spacing, anchored on — and clamped to ≥ — the last
+    observed session's availability (data-driven, never a wall clock). A wakeup
+    re-checks real maturity from the observed list, so this value's only job is to
+    stop the loop busy-waiting.
+    """
+    last_idx = len(sessions) - 1
+    positions_beyond = exit_idx - last_idx  # > 0 by construction (not matured)
+    recent = min(len(sessions) - 1, grader.horizon_trading_days)
+    if recent >= 1:
+        gaps = [
+            (date.fromisoformat(sessions[i]) - date.fromisoformat(sessions[i - 1])).days
+            for i in range(len(sessions) - recent, len(sessions))
+        ]
+        mean_gap_days = statistics.fmean(gaps)
+    else:
+        mean_gap_days = 1.0  # single-session fallback
+    # the last observed session's close = the latest known bench availability.
+    last_close = max(r.available_at for r in bench)
+    resume_after = last_close + timedelta(days=positions_beyond * mean_gap_days)
+    if resume_after < last_close:  # belt-and-suspenders clamp
+        resume_after = last_close
+    return CaseMaturityPending(
+        resume_after=resume_after,
+        wakeup_key=f"case.mature:{case.id}:{grader.grader_version}",
+    )
+
+
+def grade_case(
+    case: RegimeCase,
+    *,
+    bench: tuple["DailyValueRow", ...],
+    calendar: ObservedTradeDateCalendar,
+    grader: RegimeGraderSpec,
+) -> "RealizedRegime | CaseMaturityPending":
+    """Deterministically grade one case — never an LLM, never before maturity.
+
+    Closed steps (spec 延迟确定性标注 red line): (1) locate the case's session — the
+    last observed session ``<= as_of`` (a non-session anchors to the previous
+    session); (2) entry = the next session, exit = the ``horizon_trading_days``-th
+    session after entry **by list position**; (3) if the exit session is absent from
+    the observed list (the ``basket_perf`` bar-count criterion, inverted) return
+    :class:`CaseMaturityPending`; (4) otherwise compound the benchmark returns over
+    ``(entry, exit]``, derive drawdown / vol and the R6 labels, stamping
+    ``available_at`` = the exit bar's availability (PIT, not a clock) and
+    ``data_snapshot_hash`` = the digest of the exact ``(entry, exit]`` window. Bench
+    rows carry ``available_at``, so grading at a historical vantage cannot see rows
+    beyond it by construction.
+    """
+    as_of_iso = case.as_of.astimezone(timezone.utc).date().isoformat()
+    anchor = calendar.session_on_or_before(as_of_iso)
+    if anchor is None:
+        raise ValueError(
+            f"case {case.id!r} as_of {as_of_iso} precedes the observed calendar "
+            "coverage; there is no session to ground grading on"
+        )
+    sessions = calendar.sessions
+    anchor_idx = calendar.index_of(anchor)
+    assert anchor_idx is not None  # anchor came from the list
+    entry_idx = anchor_idx + 1
+    horizon = grader.horizon_trading_days
+    exit_idx = entry_idx + horizon
+    # (3) maturity: the exit bar must exist in the observed list (basket_perf:36).
+    if exit_idx >= len(sessions):
+        return _maturity_pending(
+            case, sessions=sessions, exit_idx=exit_idx, bench=bench, grader=grader
+        )
+
+    entry_date = sessions[entry_idx]
+    exit_date = sessions[exit_idx]
+    window_dates = sessions[entry_idx + 1 : exit_idx + 1]  # (entry, exit], horizon rows
+    by_date = {r.date: r for r in bench}
+    missing = [d for d in window_dates if d not in by_date]
+    if missing:
+        raise ValueError(
+            f"benchmark series is missing observed session(s) {missing} for case "
+            f"{case.id!r}; the observed calendar must be built from the bench dates"
+        )
+    window_rows = tuple(by_date[d] for d in window_dates)
+    returns = [float(r.value) for r in window_rows]
+
+    # (4) compounded wealth path anchored at 1.0 (entry) + running drawdown.
+    wealth = 1.0
+    running_max = 1.0
+    max_drawdown = 0.0
+    for ret in returns:
+        wealth *= 1.0 + ret
+        if wealth > running_max:
+            running_max = wealth
+        drawdown = wealth / running_max - 1.0
+        if drawdown < max_drawdown:
+            max_drawdown = drawdown
+    forward_return = wealth - 1.0
+    realized_volatility = statistics.pstdev(returns) if returns else 0.0
+
+    exit_row = by_date[exit_date]
+    return RealizedRegime.build(
+        case_as_of=case.as_of,
+        horizon_trading_days=horizon,
+        entry_date=entry_date,
+        exit_date=exit_date,
+        forward_return=forward_return,
+        max_drawdown=max_drawdown,
+        realized_volatility=realized_volatility,
+        realized_trend=_label_trend(forward_return, grader),
+        realized_risk=_label_risk(forward_return, max_drawdown, grader),
+        realized_heat=None,
+        heat_unavailable_reason=REALIZED_HEAT_UNAVAILABLE_REASON,
+        available_at=exit_row.available_at,
+        data_snapshot_hash=content_digest(window_rows),
+        grader_version=grader.grader_version,
+        grader_digest=grader.content_digest,
+        benchmark_id=grader.benchmark_id,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# mature_pending_cases — grade every pending view, append CaseMatured facts      #
+# --------------------------------------------------------------------------- #
+def mature_pending_cases(
+    *,
+    views: Sequence[CaseView],
+    bench: tuple["DailyValueRow", ...],
+    calendar: ObservedTradeDateCalendar,
+    grader: RegimeGraderSpec,
+    log: ExperienceLog,
+    clock: AuthoritativeClock,
+) -> tuple[CaseMatured, ...]:
+    """Grade every ``pending`` view; append a :class:`CaseMatured` for the matured
+    ones, leaving the rest pending.
+
+    Idempotent via the Task-4 keys (``case.matured:{case_id}:{grader_version}``): a
+    re-run over freshly-folded views finds those cases already ``matured`` (not
+    ``pending``) and appends nothing new. ``CaseMatured.available_at`` = the exit
+    bar's availability (the PIT fact, data-driven), while ``matured_at`` is the
+    wall-clock audit fact read once per batch through :func:`clock_now` — for replay
+    the two must never be conflated.
+    """
+    matured_at = clock_now(clock)  # wall-clock audit stamp (rejects a naive clock)
+    out: list[CaseMatured] = []
+    for view in views:
+        if view.state != "pending":
+            continue
+        graded = grade_case(view.case, bench=bench, calendar=calendar, grader=grader)
+        if isinstance(graded, CaseMaturityPending):
+            continue  # not matured yet — leave pending, emit no event
+        matured = CaseMatured.build(
+            case_id=view.case.id,
+            realized=graded,
+            matured_at=matured_at,
+            available_at=graded.available_at,
+        )
+        log.append_matured(
+            matured,
+            idempotency_key=f"case.matured:{view.case.id}:{grader.grader_version}",
+        )
+        out.append(matured)
+    return tuple(out)
+
+
+# --------------------------------------------------------------------------- #
+# matured_only — the downstream validation/distillation gate (_pair_matured)     #
+# --------------------------------------------------------------------------- #
+def matured_only(views: Sequence[CaseView]) -> tuple[CaseView, ...]:
+    """Return the batch iff every case is matured/reviewed; **raise** otherwise.
+
+    The ``_pair_matured`` distillation rule transplanted (``console/tools.py:1117``):
+    a batch is usable for validation/distillation only when every sampled case is
+    matured — pending cases never leak un-realized numbers into feedback. Unlike the
+    ``calibration.py`` silent-filter behavior (deliberately not copied for feedback
+    paths), a pending case in a requested validation batch is a loud ``ValueError``
+    naming the offending ids.
+    """
+    pending_ids = [v.case.id for v in views if v.state == "pending"]
+    if pending_ids:
+        raise ValueError(
+            "a validation/distillation batch must contain no pending cases; refusing "
+            f"— pending case id(s): {pending_ids}"
+        )
+    return tuple(views)
