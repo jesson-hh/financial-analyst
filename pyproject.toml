@@ -30,6 +30,7 @@ dependencies = [
     "hf-transfer>=0.1.6",
     "pypdf>=4",                # /upload PDF 抽取
     "python-multipart>=0.0.9", # /upload multipart
+    "jieba>=0.42",             # 事件库 FTS 中文预分词(缺席时 LIKE 诚实降级)
 ]
 
 [tool.guanlan]

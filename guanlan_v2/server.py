@@ -321,11 +321,20 @@ def create_app():
                 if os.environ.get("GUANLAN_SEATS_WATCH") == "1":
                     from guanlan_v2.seats import watcher as _seats_watcher
                     _seats_watch = _aio.create_task(_seats_watcher.run_loop())
+                # 事件库入库 tick(小 phase 乙;opt-in:GUANLAN_EVENTS_INGEST=1 才起)。
+                # maybe_ingest_tick 内三门(env 闸/30min 节奏/EOD 兜底)自吞异常;run_loop
+                # 每拍 to_thread 调它,取数/写盘全在工作线程,绝不堵事件循环。
+                _events_ingest = None
+                if os.environ.get("GUANLAN_EVENTS_INGEST") == "1":
+                    from guanlan_v2.events import ingest as _events_ingest_mod
+                    _events_ingest = _aio.create_task(_events_ingest_mod.run_loop())
                 try:
                     yield
                 finally:
                     if _seats_watch is not None:
                         _seats_watch.cancel()
+                    if _events_ingest is not None:
+                        _events_ingest.cancel()
                     _revive.cancel()
 
     app.router.lifespan_context = _composed_lifespan
