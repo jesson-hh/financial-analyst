@@ -92,6 +92,20 @@ PHASE4_MODULES: tuple[str, ...] = (
     "guanlan_v2.orchestration.optimize",
 )
 
+#: Phase 5 (Bootstrap Lane 0) contract modules. ``market.factors`` (Task 1)
+#: defines public ``ContractModel`` subclasses (``MarketFactorValue`` /
+#: ``MarketFactorReport`` are still deferred payloads below — Task 9 flips those
+#: guards and stands up the Phase-5 completeness firewall + cumulative registry).
+#: Like the Phase-4 precedent this scoping addition keeps the Phase-1 discovery
+#: firewall from mislabeling a Phase-5 module as a missing Phase-1 module; the
+#: Phase-1 classification tests (keyed off ``DISCOVERED``, derived only from
+#: ``PHASE1_MODULES``) never see it. Task 9 grows this tuple to the full Phase-5
+#: contract surface; the real Phase-5 firewall lives in
+#: ``tests/orchestration/test_phase5_registry.py``.
+PHASE5_MODULES: tuple[str, ...] = (
+    "guanlan_v2.orchestration.market.factors",
+)
+
 #: Deferred payloads frozen in later consumer phases. None exist yet; the guard
 #: proves they stay out of Phase 1 (registry, classification and namespaces).
 DEFERRED_PHASE_PAYLOADS: tuple[str, ...] = (
@@ -188,12 +202,13 @@ def test_phase1_modules_lists_every_module_defining_a_public_contract_model():
     defining = _modules_defining_public_contract_models()
     # sanity: the walk found the known payload-bearing modules (not silently empty)
     assert "guanlan_v2.orchestration.schemas" in defining
-    # Phase 4 contract modules are governed by the Phase 4 firewall (Task 9), not
-    # the Phase 1 buckets, so they are excluded from the Phase-1 review here.
-    missing = defining - set(PHASE1_MODULES) - set(PHASE4_MODULES)
+    # Phase 4 / Phase 5 contract modules are governed by their own phase firewalls
+    # (Task 9 in each), not the Phase 1 buckets, so they are excluded from the
+    # Phase-1 review here.
+    missing = defining - set(PHASE1_MODULES) - set(PHASE4_MODULES) - set(PHASE5_MODULES)
     assert not missing, (
         "these modules define a public ContractModel subclass but are absent from "
-        "PHASE1_MODULES (and are not Phase 4 modules), so the completeness firewall "
+        "PHASE1_MODULES (and are not Phase 4/5 modules), so the completeness firewall "
         "would never review their contracts — add them to PHASE1_MODULES: "
         + ", ".join(sorted(missing))
     )

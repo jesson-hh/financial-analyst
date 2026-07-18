@@ -261,8 +261,11 @@ FROZEN_READONLY_SURFACES = (
     REPO_ROOT / "guanlan_v2" / "macro" / "astock.py",
 )
 
-#: The Phase 5 module/golden paths the plan creates — none may exist yet, and
-#: none may shadow a Phase 1–4 owned path.
+#: The Phase 5 module/golden paths the plan creates task-by-task. Task 0 ran from
+#: a state with none of them present; from Task 1 onward they are created
+#: incrementally. The durable point-9 guarantee is that none of them ever *shadows*
+#: (equals) a Phase 1–4 owned source/test/golden file — never a "must not exist"
+#: assertion, which Task 1 (market/factors.py + its golden) lawfully invalidates.
 PHASE5_NEW_PATHS = (
     ORCH_DIR / "market",
     ORCH_DIR / "market" / "factors.py",
@@ -272,6 +275,26 @@ PHASE5_NEW_PATHS = (
     GOLDEN_DIR / "regime_grader_policy_v1.json",
     GOLDEN_DIR / "phase5_schema_manifest_v1.json",
     GOLDEN_DIR / "phase5_catalog_manifest_v1.json",
+)
+
+#: Phase 1–4 owned source files Phase 5 must never overwrite (shadow). Shared by
+#: the two point-9 tests; presence is checked in one, non-collision in the other.
+UPSTREAM_OWNED_FILES = (
+    # Phase 1
+    ORCH_DIR / "digest.py", ORCH_DIR / "refs.py", ORCH_DIR / "enums.py",
+    ORCH_DIR / "events.py", ORCH_DIR / "schemas.py", ORCH_DIR / "context.py",
+    ORCH_DIR / "schema_registry.py",
+    # Phase 2
+    ORCH_DIR / "eventstore.py", ORCH_DIR / "budget.py", ORCH_DIR / "admission.py",
+    ORCH_DIR / "runtime_contracts.py", ORCH_DIR / "runtime_support.py",
+    ORCH_DIR / "catalog_runtime.py", ORCH_DIR / "presets.py", ORCH_DIR / "dag.py",
+    # Phase 3
+    ORCH_DIR / "data" / "errors.py", ORCH_DIR / "data" / "pit.py",
+    ORCH_DIR / "data" / "calendar.py", ORCH_DIR / "data" / "render.py",
+    ORCH_DIR / "memory" / "schema_registry.py", ORCH_DIR / "memory" / "catalog.py",
+    ORCH_DIR / "memory" / "models.py", ORCH_DIR / "memory" / "proposals.py",
+    # Phase 4
+    ORCH_DIR / "trial.py", ORCH_DIR / "trial_ledger.py", ORCH_DIR / "optimize.py",
 )
 
 
@@ -642,38 +665,32 @@ def test_point8_market_tape_derived_keys_present():
 # Point 9 — no Phase 5 path overwrites Phase 1–4; fresh no-Phase-5 state          #
 # =========================================================================== #
 def test_point9_upstream_owned_source_files_exist_singular():
-    owned = {
-        # Phase 1
-        ORCH_DIR / "digest.py", ORCH_DIR / "refs.py", ORCH_DIR / "enums.py",
-        ORCH_DIR / "events.py", ORCH_DIR / "schemas.py", ORCH_DIR / "context.py",
-        ORCH_DIR / "schema_registry.py",
-        # Phase 2
-        ORCH_DIR / "eventstore.py", ORCH_DIR / "budget.py", ORCH_DIR / "admission.py",
-        ORCH_DIR / "runtime_contracts.py", ORCH_DIR / "runtime_support.py",
-        ORCH_DIR / "catalog_runtime.py", ORCH_DIR / "presets.py", ORCH_DIR / "dag.py",
-        # Phase 3
-        ORCH_DIR / "data" / "errors.py", ORCH_DIR / "data" / "pit.py",
-        ORCH_DIR / "data" / "calendar.py", ORCH_DIR / "data" / "render.py",
-        ORCH_DIR / "memory" / "schema_registry.py", ORCH_DIR / "memory" / "catalog.py",
-        ORCH_DIR / "memory" / "models.py", ORCH_DIR / "memory" / "proposals.py",
-        # Phase 4
-        ORCH_DIR / "trial.py", ORCH_DIR / "trial_ledger.py", ORCH_DIR / "optimize.py",
-    }
-    for path in owned:
+    for path in UPSTREAM_OWNED_FILES:
         assert path.is_file() and path.stat().st_size > 0, f"missing upstream file: {path}"
     # this handoff gate is an *additive* Phase 5 test; it must not shadow upstream.
     assert Path(__file__).name == "test_phase5_handoff.py"
 
 
-def test_point9_no_phase5_module_or_golden_exists_yet():
+def test_point9_phase5_paths_never_shadow_upstream_owned_files():
+    """Point 9 (permanent form): a Phase 5 module/golden path is always a NEW path,
+    never an overwrite of a Phase 1–4 owned source/test/golden file.
+
+    Task 0 ran from a state with no Phase 5 module; from Task 1 onward the plan
+    creates these paths incrementally (Task 1: ``market/``, ``market/factors.py``
+    and ``market_factor_set_v1.json``). The durable guarantee is that none of the
+    Phase 5 paths ever *collides with* an upstream-owned file — checked here
+    structurally rather than by a transient "does not exist yet" assertion.
+    """
+    owned = set(UPSTREAM_OWNED_FILES)
     for path in PHASE5_NEW_PATHS:
-        assert not path.exists(), (
-            f"Phase 5 path {path} already exists — Task 0 must run from a state with "
-            "no Phase 5 module, and no Phase 5 path may overwrite a Phase 1–4 file"
+        assert path not in owned, (
+            f"Phase 5 path {path} shadows a Phase 1–4 owned file — Phase 5 is additive "
+            "and may never overwrite an upstream source/test/golden"
         )
-    # the Phase 5 contract modules are not importable yet.
-    for mod in ("guanlan_v2.orchestration.market.factors",
-                "guanlan_v2.orchestration.memory.experience",
+    # Task 1 landed the market-factor contracts module; it now imports cleanly.
+    importlib.import_module("guanlan_v2.orchestration.market.factors")
+    # the remaining Phase 5 contract modules are not importable yet (later tasks).
+    for mod in ("guanlan_v2.orchestration.memory.experience",
                 "guanlan_v2.orchestration.bootstrap"):
         with pytest.raises(ModuleNotFoundError):
             importlib.import_module(mod)
