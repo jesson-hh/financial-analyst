@@ -2,7 +2,7 @@
 
 > **Execution note:** implement task-by-task with a review checkpoint after the handoff gate, the PIT replay data adapter, the interval-replay driver, the dual-curve/evaluator handoff, the weiwo ONLINE adapter, the mirror golden harness and the final e2e/red-line suite. Steps use checkbox (`- [ ]`) syntax for tracking. Do not require an environment-specific execution skill that may not be installed.
 
-**Goal:** Complete the consumer edge of the orchestration framework: (a) the 落子 replay adapter that drives a `DecisionSchedule` over an interval — at every decision point it reruns Bootstrap plus the needed MainPlan against that point's PIT `ContextSnapshot` (strict raw `PitReader` adapter, `DataMode.PIT_REPLAY`), never generating historical intents retroactively — and produces the spec §2.3 dual curves (deterministic strategy vs LLM shadow intents) under one shared universe/capital/data-snapshot/calendar/cost-model/clock configuration, handing results to the Phase 4 Evaluator; (b) `WAITING_FOR_MATURITY` persistence with `resume_after`/`wakeup_key` idempotent wakeup wired to the autonomy scheduler precedent; (c) the 帷幄 live adapter: `DataMode.ONLINE` with `as_of` frozen at run start, live_client data binding, Bootstrap → ContextSnapshot → open research, `evaluate_validation=run_graph` binding, products draft-only into factorlib; (d) mirror stage ② — a backend golden harness proving rich fill/reject/cost/corporate-action execution independent of the frontend; (e) explicit, measurable retirement gates for the three legacy entry points (console report subprocess, swarm `load_preset` CLI, research loop direct route) — **no removal happens inside this phase**; (f) the whole-framework e2e + red-line regression suite of spec §11; (g) the Phase 9 cumulative registry/catalog chain node with its own goldens.
+**Goal:** Complete the consumer edge of the orchestration framework: (a) the 落子 replay adapter that drives a `DecisionSchedule` over an interval — at every decision point it reruns Bootstrap plus the needed MainPlan against that point's PIT `ContextSnapshot` (strict raw `PitReader` adapter, `DataMode.PIT_REPLAY`), never generating historical intents retroactively — and produces the spec §2.3 dual curves (deterministic strategy vs LLM shadow intents) under one shared universe/capital/data-snapshot/calendar/cost-model/clock configuration, handing results to the Phase 4 Evaluator; (b) `WAITING_FOR_MATURITY` persistence with `resume_after`/`wakeup_key` idempotent wakeup wired to the autonomy scheduler precedent; (c) the 帷幄 live adapter: `DataMode.ONLINE` with `as_of` frozen at run start, live_client data binding, Bootstrap → ContextSnapshot → open research, `evaluate_validation=run_graph` binding, products draft-only into factorlib; (d) mirror stage ② — a backend golden harness proving rich fill/reject/cost/corporate-action execution independent of the frontend; (e) explicit, measurable retirement gates for the three legacy entry points (console report subprocess, swarm `load_preset` CLI, research loop direct route) — **no removal happens inside this phase**; (f) the whole-framework e2e + red-line regression suite of spec §11; (g) the Phase 9 cumulative registry/catalog chain node with its own goldens; (h) the durable jsonl store backend + honest lifespan resume/interrupt marking that lets admitted plans, run events and parked maturity heads survive process restarts (Task 1b — integration amendment 2026-07-18); (i) the daily Lane 0 bootstrap gate on the existing autonomy scheduling chain, admitted through the Phase 7 `ApprovalLease` channel (Task 6 — same amendment).
 
 **Architecture:** Phase 9 is a consumer phase. It imports — never redefines — Phase 1 contracts (`guanlan_v2/orchestration/`), the Phase 2 runtime kernel (admission/eventstore/pool/worker/dag/budget), the Phase 3 data/PIT + memory facade, Phase 4 `run_optimize`/`TrialLedger`/sealed evaluator, Phase 5 `BootstrapPlan`/BOOTSTRAP profile, Phase 6 shadow consumer (`PortfolioTargetProposal`/`TargetPortfolioIntent`/`DecisionSchedule`/`ShadowDecisionAgent`/`ShadowBacktestRunner` + idempotency key families + mirror stage ①), Phase 7 dynamic planner/approval surface and the Phase 8 lane catalog. New code lives in `guanlan_v2/orchestration/adapters/` plus thin additive seams in `guanlan_v2/autonomy/`, `guanlan_v2/seats/watcher.py` and `guanlan_v2/server.py`. `engine/financial_analyst/` and `workflow/executor.run_graph`/`_DISPATCH`/`_OUT_PORT` are frozen consumption surfaces: every execution-semantics gap (take-profit, max-hold, corporate actions) is closed in the Phase 6-owned shadow-runner layer, never inside the engine. The browser keeps its existing pages and consumes backend results through the existing runs/decisions append-only stores and new read-only endpoints (UI 只填充不重建).
 
@@ -24,6 +24,7 @@ These extend, and never override, the Phase 1–8 Global Constraints and Exit Ga
 - **UI 只填充不重建.** No new frontend pages, no rewrite of `ui/seats/*`. The adapter writes run heads/decision rows into the existing append-only stores (`var/seats_runs.jsonl`, `var/seats_decisions.jsonl`) in their existing shapes so the current RunPicker/replay UI consumes orchestrated results unchanged, and exposes new read-only JSON endpoints for richer curves.
 - **Old entries stay alive.** The console report subprocess, swarm `load_preset` CLI and research-loop direct route are not removed, rerouted or degraded in this phase. Phase 9 only delivers their measurable retirement gates and parity evidence; removal is a post-gate follow-up commit outside this plan.
 - **Budget honesty.** Each replay/weiwo run reserves from one Phase 2 `BudgetLedger` under one `RunBudget` covering Bootstrap + Planner + MainPlan + every decision point; the seats watcher's 24/day live budget and orchestration `RunBudget` reconcile through one explicit rule (Task 4) — never double-accounted, never double-spent.
+- **Durability honesty (integration amendment 2026-07-18).** Production bindings (Task 10 router, Task 6 playbooks) run on the Task 1b durable jsonl stores; the in-memory Phase 2 stores remain the test default and continue to make no durability claim. On process restart, in-flight attempts are marked `interrupted` honestly — nothing resumes mid-attempt and nothing displays as running that is not — while parked `WAITING_FOR_MATURITY` heads survive byte-identically. Store files follow the repo journal discipline: append-only, fsync per append, torn-tail tolerance with a logged badge, mid-file corruption ⇒ typed hard failure.
 - **Executable red/green checkpoints.** Every "Write failing … tests" step immediately runs the focused command shown in that task and records the expected missing-contract/behavior failure before implementation; collection/environment errors do not count as the red checkpoint. The PASS step reruns the same focused tests plus listed upstream regressions.
 - **Explicit pathspec commits.** The branch is shared with concurrent sessions: every commit block lists exactly the task's files; `git add -A`, `git add .` and bare `git commit -a` are forbidden.
 - No placeholders, DRY, YAGNI, TDD, frequent commits.
@@ -44,7 +45,7 @@ The handoff test must prove:
 1. Phase 1 goldens (`schema_manifest_v1.json` **as re-frozen by Phase 1 Amendment 1** — the amended **11**-model golden including `TypedPayloadRef@1`/`InputArtifactBinding@1`/`ContextRuntimeRequirements@1` — plus digest vectors) still pass and `default_registry()` seals; `TypedPayloadRef(schema_ref, payload_ref)` resolves as the Phase 1 composite while plain `PayloadRef` stays the bare locator; the full `tests/orchestration` upstream suite is green.
 2. The linear chain resolves end-to-end by exact digest: `PHASE2_BASE_REGISTRY_DIGEST` → `PHASE3_DATA_REGISTRY_DIGEST` → `PHASE3_FULL_REGISTRY_DIGEST` → `PHASE4_REGISTRY_DIGEST` → `PHASE5_REGISTRY_DIGEST` → `PHASE6_REGISTRY_DIGEST` → `PHASE7_REGISTRY_DIGEST` → `PHASE8_REGISTRY_DIGEST`, and the catalog chain `PHASE2_STATIC_CATALOG_DIGEST` → … → `PHASE8_CATALOG_DIGEST`, each builder consuming its predecessor's exact digest; no "latest" alias exists anywhere in `guanlan_v2/orchestration/`.
 3. Phase 6 shipped and registered `TargetPosition@1`, `PortfolioTargetProposal@1`, `TargetPortfolioIntent@1`, `DecisionSchedule@1` (the Phase 1 `DEFERRED_PHASE_PAYLOADS` guard was flipped for exactly these names), plus `ShadowDecisionAgent`/`ShadowBacktestRunner` with **both** entries — `run(intents, *, start, end)` and the deterministic dual-curve entry `run_targets(target_sets, *, run_config, calendar, clock)` with `DeterministicTargetSet` and `deterministic_apply_key` (domain `shadow-deterministic-apply-key-v1`) — the schedule-time computations `compute_scheduled_for`/`compute_cutoff_at`/`compute_eligible_execution_at` (+ `UnsupportedBarFrequencyError` under `shadow-match-v1`), the DecisionSchedule registry, the three idempotency key families `(intent_id, scheduled_for, target_version)` / `(target_apply_key, symbol, order_kind, trigger_bar, ordinal)` / `(order_id, fill_seq)`, and the mirror stage-① compatibility profile with its explicit tolerance constants.
-4. Phase 4 exports `run_optimize`, `finalize_candidate`, `TrialLedger`, `OptimizeRunState`, `HoldoutReceipt` and honors `ExperimentStatus.WAITING_FOR_MATURITY`; Phase 5 exports the versioned `BootstrapPlan` preset and the BOOTSTRAP-enabled `StaticRuntimeProfile` version; Phase 7 exports the dynamic-planner admission path with digest-bound human approval; Phase 8 exports the lane catalog whose `dec.trader` emits only `PortfolioTargetProposal`. The gate accepts the R2-revised Phase 8 catalog as handed off — including curator workers #26/#27 and the D11 capability-manifest generator's products where present — and asserts no seat count; the `dec.trader`-emits-only-`PortfolioTargetProposal` assertion stays unchanged.
+4. Phase 4 exports `run_optimize`, `finalize_candidate`, `TrialLedger`, `OptimizeRunState`, `HoldoutReceipt` and honors `ExperimentStatus.WAITING_FOR_MATURITY`; Phase 5 exports the versioned `BootstrapPlan` preset and the BOOTSTRAP-enabled `StaticRuntimeProfile` version; Phase 7 exports the dynamic-planner admission path with digest-bound human approval plus the `ApprovalLease` standing-approval surface (`issue_lease`/`list_leases`/`revoke_lease`/`register_and_try_lease` — consumed by the Task 6 lane0 playbook and any unattended preset admission); Phase 8 exports the lane catalog whose `dec.trader` emits only `PortfolioTargetProposal`. The gate accepts the R2-revised Phase 8 catalog as handed off — including curator workers #26/#27 and the D11 capability-manifest generator's products where present — and asserts no seat count; the `dec.trader`-emits-only-`PortfolioTargetProposal` assertion stays unchanged.
 5. Phase 5's delivered `BootstrapPlan`/`market_factor_report` surface exposes the coverage/UNAVAILABLE semantics and the `factor_report_digest` of R2 deliverables ①/④ in consumable form — the anchor for Task 2b's manifest coverage floors and Task 12's digest-binding assertions (recorded in correction-clause style as a refinement of C3; no parallel semantics invented).
 6. The Phase 2 `RuntimeStateCellStore` startup-namespace union mechanism accepts a reviewed extension (P2:180) and the current sealed union (Phase 3's seven `memory.*` plus any Phase 4–8 additions) is enumerable from code, so Task 6 can extend it without resealing semantics.
 7. Engine baseline symbols resolve unchanged: `financial_analyst.backtest.broker.Broker.match`, `portfolio.VirtualPortfolio` (`seed_initial_nav`/`record_nav`), `costs.CostModel`, `limits.limit_pct_for`/`compute_ref_prev_close`/`is_one_word`, `engine.BacktestRunner`/`RunConfig`/`BacktestResult`, `pit_reader.PitReader.get_visible_info`/`trading_days`/`fetch_bars_intraday`; and `guanlan_v2/datafeed/live_client.py` exports `probe`/`catalog`/`resolve_source`/`known_sources` (no source-count constant is asserted).
@@ -61,6 +62,7 @@ The handoff test must prove:
 - **C4 (Phase 3 data builders):** the exact `DataSnapshotManifest`/`DataSourceConfigSnapshot`/`DataRoutingSnapshot`/`DataSourceRegistry` builder signatures, the `DataSource` protocol method names and the existing Phase 3 data method ids (`get_ohlcv`/`get_news`/`get_verified_snapshot` families) are Phase 3-owned; Tasks 2–3 and 9 bind to the reviewed names. Task 4's quoted memory-facade signature `prepare_pit_replay(data_context, authority, *, prior_context_ref: PayloadRef, ...)` is an upstream verbatim quote; if the implemented facade lands typed (Amendment 1-consistent, `prior_context_ref: TypedPayloadRef`), the driver binds the typed form.
 - **C5 (state-cell union):** the reviewed startup namespace union current at implementation time is the base Task 6 extends; the two new namespaces are appended to that union, not to a hardcoded list.
 - **C6 (seats/autonomy seams):** exact helper names inside `guanlan_v2/seats/api.py` (decision persistence), `guanlan_v2/seats/watcher.py` (state file readers) and `guanlan_v2/autonomy/runtime.py`/`playbooks.py` are verified against code at implementation time; the additive seam functions of Tasks 4/6/10 are renamed to match reviewed conventions if needed.
+- **C7 (Phase 7 lease API):** the exact `ApprovalLease` field set, coordinator method names and `LeaseAdmissionOutcome` vocabulary are Phase 7-owned (Task 7b); Tasks 1b/6/10 bind to the reviewed names.
 
 - [ ] **Step 2: Freeze the reviewed upstream evidence in the fixture**
 
@@ -94,17 +96,19 @@ git commit -m "test(orchestration): gate phase9 on phase1-8 contracts"
 | `guanlan_v2/orchestration/adapters/retirement.py` | retirement-gate contracts instances + pure readiness evaluator |
 | `guanlan_v2/orchestration/adapters/chain.py` | `PHASE9_PUBLIC_MODELS`/`PHASE9_INTERNAL_MODELS`, `build_phase9_registry`, `build_phase9_catalog_snapshot`, chain digests |
 | `guanlan_v2/orchestration/adapters/api.py` | thin read/start FastAPI router (shadow/draft only) + seats-compatibility persistence |
-| `guanlan_v2/autonomy/runtime.py` (modify, additive) | `maybe_enqueue_shadow_wakeup` scheduler gate |
-| `guanlan_v2/autonomy/playbooks.py` (modify, additive) | register `shadow_replay_wakeup` playbook |
-| `guanlan_v2/screen/rescore.py` (modify, one additive line) | daily-scheduler seam calls the wakeup gate next to `maybe_enqueue_daily_review` |
+| `guanlan_v2/orchestration/adapters/durable.py` | durable jsonl/file implementations of the Phase 2 store ABIs (`JsonlEventStore`/`FilePayloadStore`/`JsonlStateCellStore`) + `build_durable_runtime_stores` + startup interrupt-marking scan |
+| `guanlan_v2/autonomy/runtime.py` (modify, additive) | `maybe_enqueue_shadow_wakeup` + `maybe_enqueue_lane0_bootstrap` scheduler gates |
+| `guanlan_v2/autonomy/playbooks.py` (modify, additive) | register `shadow_replay_wakeup` + `lane0_bootstrap` playbooks |
+| `guanlan_v2/screen/rescore.py` (modify, additive lines) | daily-scheduler seam calls the wakeup + lane0 gates next to `maybe_enqueue_daily_review` |
 | `guanlan_v2/seats/watcher.py` (modify, additive) | `note_external_llm_use` daily-budget seam + orchestrated-run skip guard |
-| `guanlan_v2/server.py` (modify, additive) | mount adapters router |
+| `guanlan_v2/server.py` (modify, additive) | mount adapters router + bind durable stores + startup interrupt-marking scan |
 | `tests/orchestration/golden/phase9_schema_manifest_v1.json` | Phase 9 registry golden |
 | `tests/orchestration/golden/phase9_catalog_manifest_v1.json` | Phase 9 catalog golden |
 | `tests/orchestration/golden/shadow_execution_golden_v1.json` | hand-authored mirror stage-② execution fixtures |
 | `tests/orchestration/golden/phase9_retirement_gates_v1.json` | reviewed retirement-gate instances (digest-frozen) |
 | `tests/orchestration/test_phase9_handoff.py` | executable Phases 1–8 → 9 ABI gate |
 | `tests/orchestration/test_adapters_contracts.py` | contract validation/projection/digest tests |
+| `tests/orchestration/test_durable_stores.py` | durable-store conformance + crash-recovery + restart-survival tests |
 | `tests/orchestration/test_adapters_replay_data.py` | PIT adapter + replay DataContext tests |
 | `tests/orchestration/test_adapters_live_data.py` | live_client adapter + ONLINE freeze tests |
 | `tests/orchestration/test_luozi_replay.py` | schedule resolution + interval replay driver tests |
@@ -193,6 +197,51 @@ Run: `pytest tests/orchestration/test_adapters_contracts.py -v` — expected PAS
 ```bash
 git add guanlan_v2/orchestration/adapters/contracts.py tests/orchestration/test_adapters_contracts.py
 git commit -m "feat(orchestration): phase9 adapter contracts (replay/curves/maturity/harness/retirement)"
+```
+
+---
+
+## Task 1b: Durable store backend + lifespan resume/interrupt marking
+
+> Integration amendment (2026-07-18, `docs/superpowers/specs/2026-07-18-orchestration-integration-design.md` §3; applied via `2026-07-18-integration-reconcile-checklist.md`). Phase 7 states outright that the Phase 2 in-memory stores make no durability claim, yet Task 6 parks `WAITING_FOR_MATURITY` heads that must survive to the next day's wakeup — this task supplies the durable backend Phase 9's own exit gates depend on.
+
+**Files:**
+- Create: `guanlan_v2/orchestration/adapters/durable.py`
+- Modify: `guanlan_v2/server.py` (additive lifespan block; shares the Task 10 commit surface)
+- Test: `tests/orchestration/test_durable_stores.py`
+
+**Consumes:** the implemented Phase 2 store ABIs from `guanlan_v2/orchestration/eventstore.py` (`PayloadStore`, `EventStore` with dual journal/visible cursors, `RuntimeStateCellStore` + closed CAS command, `RuntimeUnitOfWork`, `RuntimeStores`) — bind to the reviewed protocol/ABC names verbatim (Task 0 correction discipline); the Phase 7 journal discipline (append-only, fsync per append, torn-tail drop with warning badge, mid-file corruption ⇒ typed hard failure) as the file-format idiom; the Phase 2 persisted `NodeRun@1` terminal records (the resume/interrupt source of truth).
+
+**Produces:**
+
+- `class FilePayloadStore:` — content-addressed write-once files `var/orchestration/payloads/<namespace>/<digest>`; a second put of an existing digest verifies byte-identity (mismatch ⇒ typed conflict); `get` re-verifies the digest before returning (corruption never flows onward silently); namespaces partition physically (`sealed` never shares a directory with `main`).
+- `class JsonlEventStore:` — per-partition append-only journals `var/orchestration/events/<partition>.jsonl`, fsync per append; the dual `journal_seq`/`visible_seq` cursor semantics byte-equivalent to the in-memory implementation; fold-on-open rebuilds cursors.
+- `class JsonlStateCellStore:` — CAS transitions appended to `var/orchestration/state_cells.jsonl`, folded to heads on open; CAS conflict semantics identical to the in-memory store.
+- `def build_durable_runtime_stores(root: Path) -> RuntimeStores:` — the production binding consumed by Task 6's playbooks and Task 10's router; in-memory stores remain the test default everywhere.
+- Server lifespan (additive block in `guanlan_v2/server.py`): bind the durable stores once per process (root default `var/orchestration/`, env `GUANLAN_ORCH_STORE_ROOT` override for 9998 verification runs); a startup scan folds the journals and marks any admitted-but-unfinished attempt `interrupted` through the reviewed Phase 2 record path — nothing resumes mid-attempt, nothing is displayed as running that is not; parked `WAITING_FOR_MATURITY` heads are left untouched by the scan (surviving them is the point).
+- Conformance discipline: the durable implementations run the SAME behavioral matrices as the Phase 2 in-memory store suites — parametrize/reuse the reviewed Phase 2 test matrices where importable rather than mirroring them by hand — plus the durability-specific tests below.
+
+**Required invariants:**
+
+1. store ABI conformance: every behavioral assertion that holds for the in-memory stores holds for the durable ones (UoW atomicity, staged sentinel replacement, whole-batch idempotency, CAS conflicts, dual-cursor visibility);
+2. crash windows are safe: kill between append and any downstream step recovers by fold to a consistent state; no partial row is ever trusted (torn tail dropped with a logged badge; earlier corruption ⇒ typed hard failure, no silent skip);
+3. restart survival: admitted plans, run events, payloads and `WAITING_FOR_MATURITY` heads fold back byte-identically after process death;
+4. the startup scan is honest and conservative: it only marks `interrupted`; it never re-executes, re-admits or fabricates progress;
+5. payloads are write-once and digest-verified on read.
+
+- [ ] **Step 1: Write failing durable-store tests** — conformance parametrization; crash-recovery matrix (kill points around append/fold/UoW); torn-tail vs mid-file corruption; write-once conflict; digest-verify-on-get; restart survival of a parked maturity head; startup-scan marking (in-flight attempt fixture ⇒ `interrupted`; parked head ⇒ untouched).
+
+Run now: `pytest tests/orchestration/test_durable_stores.py -v` — expected FAIL on missing module.
+
+- [ ] **Step 2: Implement `durable.py` + the lifespan block.**
+
+- [ ] **Step 3: Run and commit**
+
+Run: `pytest tests/orchestration/test_durable_stores.py -v` plus the Phase 2 store suites — expected PASS with the Phase 2 suites byte-identical green.
+
+```bash
+git add guanlan_v2/orchestration/adapters/durable.py guanlan_v2/server.py tests/orchestration/test_durable_stores.py
+git commit -m "feat(orchestration): durable jsonl store backend + honest lifespan interrupt marking"
 ```
 
 ---
@@ -484,7 +533,7 @@ git commit -m "feat(orchestration): dual curves under one execution attestation 
 
 ---
 
-## Task 6: WAITING_FOR_MATURITY persistence + idempotent wakeup
+## Task 6: WAITING_FOR_MATURITY persistence + idempotent wakeup + daily Lane 0 gate
 
 **Files:**
 - Modify: `guanlan_v2/orchestration/adapters/luozi.py`
@@ -500,6 +549,7 @@ git commit -m "feat(orchestration): dual curves under one execution attestation 
 - `def wakeup_shadow_replay(wakeup_key: str, *, bindings: ReplayRuntimeBindings, now: UtcDateTime) -> ReplayWakeupReceipt:` — idempotent: ① resolve the head state by `wakeup_key`; unknown key ⇒ typed error; ② `now < resume_after` ⇒ `outcome="not_mature"`, state untouched; ③ already processed (operation cell hit) ⇒ `outcome="already_processed"` returning the original receipt; ④ mature ⇒ process **only matured batches** (points/intervals whose realized data is now available under PIT), re-run `submit_dual_curves_to_evaluator`, advance state (`COMPLETED` or a new `WAITING_FOR_MATURITY` with strictly later `resume_after` and a **new** `wakeup_key`), `outcome="resumed"|"completed"`. Wakeup never re-executes decision points and never regenerates intents — it only consumes maturity.
 - `wakeup_key` derivation: `content_digest({"domain": "adapters-replay-wakeup-v1", "experiment_id": ..., "resume_after": ..., "state_digest": ...})` — service-derived, never caller-chosen.
 - Autonomy wiring: `def maybe_enqueue_shadow_wakeup(note: str) -> bool` in `autonomy/runtime.py` — gates: env `GUANLAN_SHADOW_WAKEUP == "1"`; `note == "daily-scheduler"`; not already run today (scan `read_jobs` for today's `shadow_replay_wakeup`); self-swallows exceptions (same shape as `maybe_enqueue_daily_review`). New playbook `PLAYBOOKS["shadow_replay_wakeup"]` iterates pending `WAITING_FOR_MATURITY` heads and calls `wakeup_shadow_replay` per key; job report lists per-key outcomes; write scope = orchestration stores only (no picks/signal/seats writes — review-officer red-line shape). One additive call site in `rescore.py` next to `maybe_enqueue_daily_review(note)`.
+- Daily Lane 0 gate (integration amendment 2026-07-18): `def maybe_enqueue_lane0_bootstrap(note: str) -> bool` in `autonomy/runtime.py` — same three-gate shape (env `GUANLAN_LANE0_DAILY == "1"`; `note == "daily-scheduler"`; not already run today) and self-swallowing. New playbook `PLAYBOOKS["lane0_bootstrap"]`: materialize the Phase 5 bootstrap preset draft → Phase 1 validation + Phase 2 reservation → Phase 7 `register_and_try_lease` (clause C7); with an active lane0 `ApprovalLease` the candidate admits (real `PlanApproval`, actor `lease:<id>`) → `admit_after_approval` → `run_plan` under the BOOTSTRAP profile on the durable stores (Task 1b), committing the `ContextSnapshot` and appending the day's case seeds per the Phase 5 lifecycle; no active lease ⇒ job report `"skipped: no active lease"` — an honest skip, not an error, nothing admitted. Snapshot `as_of` = the data date of the evening chain; intraday consumers reference the latest committed snapshot with its recency badge. Same additive `rescore.py` call-site block as the wakeup gate.
 
 **Required invariants:**
 
@@ -508,6 +558,7 @@ git commit -m "feat(orchestration): dual curves under one execution attestation 
 3. A `WAITING_FOR_MATURITY` state always has a resolvable `resume_after`/`wakeup_key`; wakeup with a stale (superseded) key returns `already_processed`, never double-advances.
 4. The scheduler gate is off by default (env unset ⇒ `False`, no job) and never raises into the rescore seam.
 5. Every state transition appends `ExperimentStateChanged` with the state's `PayloadRef`; replaying the journal folds to the current head.
+6. `maybe_enqueue_lane0_bootstrap` honors the same off-by-default/self-swallow contract; the lane0 playbook admits nothing without an active lease and reports the skip honestly.
 
 - [ ] **Step 1: Write failing tests** — fake stores with injectable crash points; duplicate-delivery matrix; not-mature/mature/partial-maturity paths; scheduler gate matrix (env off / wrong note / already-today / happy path); journal fold equality.
 
@@ -529,6 +580,9 @@ Test matrix:
 | `test_scheduler_gate_matrix` | env unset / wrong note / already-today / happy | `False`/`False`/`False`/`True`+job enqueued |
 | `test_gate_self_swallows` | playbook raising | `maybe_enqueue_shadow_wakeup` returns without raising into the rescore seam |
 | `test_playbook_write_scope` | run playbook against fakes | writes only orchestration stores/job events; no picks/signal/seats/memory writes |
+| `test_lane0_gate_matrix` | env unset / wrong note / already-today / happy | `False`/`False`/`False`/`True`+job enqueued |
+| `test_lane0_no_lease_honest_skip` | no active lease (admission spy) | job report `skipped: no active lease`; zero admissions |
+| `test_lane0_leased_run_commits_snapshot` | active lease + fake stores | BootstrapPlan admitted with actor `lease:<id>`; snapshot committed; case seeds appended |
 
 Run now: `pytest tests/orchestration/test_luozi_wakeup.py -v` — expected FAIL on missing functions/namespaces.
 
@@ -715,7 +769,7 @@ git commit -m "feat(orchestration): phase9 cumulative registry/catalog chain nod
 
 **Produces:**
 
-- `def build_adapters_router() -> APIRouter` mounted at `/orchestration` in `server.py` (one additive block, same shape as the existing sixteen mounts). Endpoints (all JSON; shadow/draft only; **no endpoint executes an unapproved plan or writes orders/signals**):
+- `def build_adapters_router() -> APIRouter` mounted at `/orchestration` in `server.py` (one additive block, same shape as the existing sixteen mounts); production wiring binds `build_durable_runtime_stores` (Task 1b; root default `var/orchestration/`, env-overridable for 9998 verification) while tests keep tmp/in-memory stores. Endpoints (all JSON; shadow/draft only; **no endpoint executes an unapproved plan or writes orders/signals**):
   - `POST /orchestration/replay/start` — body `{code: str, schedule_id: str, schedule_version: str, start_date: "YYYY-MM-DD", end_date: "YYYY-MM-DD", strategy_id?: str}`; validates the schedule against the Phase 6 registry (unknown id/version ⇒ 422 `{ok: False, reason}`), creates the `OrchestrationRequest` + candidate and returns `{ok: True, request_id, experiment_id, status: "awaiting_approval", candidate_plan_digest}` — approval flows through the Phase 7 console surface; the route never self-approves (AUTO forbidden).
   - `GET /orchestration/replay/state?experiment_id=` — `{ok, state: <ShadowReplayRunState semantic projection>, badges: [...]}`; unknown id ⇒ `{ok: False, reason: "unknown_experiment"}` with 404.
   - `GET /orchestration/replay/curves?experiment_id=` — `{ok, report: <DualCurveReport projection>}` (curve points, config attestation, `not_causal_attribution` flag) when `COMPLETED`; pre-maturity ⇒ `{ok: True, report: null, status: "waiting_for_maturity", resume_after}` — explicit, never a fabricated curve.
@@ -895,6 +949,13 @@ Phase 9 is complete only when every gate below is checked by tests and reviewed 
 - [ ] `wakeup_shadow_replay` is idempotent (duplicate delivery returns the stored receipt), processes only matured batches, never re-executes decision points, and issues a fresh `wakeup_key` on re-park;
 - [ ] the autonomy scheduler gate is env-gated off by default, fires at most once per day and self-swallows.
 
+### Durable stores, resume and daily Lane 0
+
+- [ ] the durable jsonl/file stores pass the same behavioral matrices as the in-memory Phase 2 implementations plus crash-recovery (kill between append and fold), torn-tail tolerance, mid-file corruption hard-fail, payload write-once + digest-verify-on-get;
+- [ ] admitted plans, run events, payloads and parked `WAITING_FOR_MATURITY` heads survive process restart byte-identically (journal fold equality pre/post restart);
+- [ ] the lifespan startup scan marks in-flight attempts `interrupted` honestly, never resumes mid-attempt, never displays stale runs as running; production router/playbooks bind the durable stores while tests default to in-memory;
+- [ ] `maybe_enqueue_lane0_bootstrap` is env-gated off by default, fires at most once per day and self-swallows; without an active lease the playbook reports an honest skip and admits nothing; with a lease the BootstrapPlan admits through the Phase 7 lease channel (real `PlanApproval`, actor `lease:<id>`) and the day's snapshot/case seeds commit.
+
 ### Weiwo ONLINE
 
 - [ ] `as_of` is frozen at run start everywhere (advancing clock changes nothing semantic);
@@ -938,9 +999,9 @@ Phase 9 is complete only when every gate below is checked by tests and reviewed 
 Implement in task order. Mandatory review checkpoints:
 
 1. after Task 0 — Phases 1–8 handoff evidence and the six correction clauses reconciled against implemented upstream APIs;
-2. after Tasks 1–2b — contract surface and the strict PIT adapter (FutureDataRefused honesty + archive coverage floors);
+2. after Tasks 1–2b — contract surface, the durable store backend (Task 1b conformance + crash-recovery evidence) and the strict PIT adapter (FutureDataRefused honesty + archive coverage floors);
 3. after Tasks 3–4 — ONLINE freeze and the interval-replay driver (no-retroactive-intent + budget reconcile);
-4. after Tasks 5–6 — dual-curve attestation/evaluator handoff and idempotent maturity/wakeup;
+4. after Tasks 5–6 — dual-curve attestation/evaluator handoff, idempotent maturity/wakeup and the daily Lane 0 gate (lease-admitted run + honest no-lease skip);
 5. after Task 7 — weiwo ONLINE binding and draft-only landing;
 6. after Tasks 8–9 — mirror stage-② golden harness and the frozen Phase 9 chain node;
 7. after Tasks 10–12 — router/UI-fill-only compat, retirement gates and the full e2e/red-line suites plus all Exit Gates.

@@ -2,7 +2,7 @@
 
 > **Execution note:** implement task-by-task with a review checkpoint after the handoff gate, the bounded planner loop, the durable approval carrier, and the end-to-end dynamic admission task. Steps use checkbox (`- [ ]`) syntax for tracking. Do not require an environment-specific execution skill that may not be installed.
 
-**Goal:** Build the dynamic Orchestrator: a catalog-confined Planner LLM that consumes one frozen `ContextSnapshot` + the pre-persisted `OrchestrationRequest` + one verified `WorkerCatalogSnapshot` and emits a **MainPlanDraft** candidate — where "MainPlanDraft" is the spec's vocabulary for a Phase 1 `PlanDraft` with `phase="main"`, `source=PlanSource.DYNAMIC`; Phase 7 defines **no new draft class and no second validation/freeze/admission path**. The candidate flows verbatim through Phase 1 `validate_plan_draft`/`compute_candidate_plan_digest`/`freeze_plan` and the Phase 2 `PlanAdmissionService`. Phase 7 adds exactly three missing pieces: (1) **generation** — a budget-reserved, bounded-attempt Planner loop with a request-level `fallback_preset_id` path and honest termination; (2) **the human-approval carrier** — a durable digest-bound `PlanApproval` recording surface riding the existing console (events.jsonl + SSE + a REST decide endpoint following the `POST /confirm` precedent at `guanlan_v2/console/api.py:827-838` — api.py:741 is the confirm-callback closure, not the route; file:line cites in this plan are advisory and every symbol/route binds by name), plus a plan-diff typed payload with deterministic `rendered_md` for the reviewer; (3) the **Phase 7 registry/catalog chain** with its own goldens. Dynamic v1 default is `approval_policy=required`; `AUTO` remains rejected for every `PlanSource`; approval events remain the sole source of truth (no `approved_by/at` is ever written back into a Plan). Phase 2 already executes validated DYNAMIC static main DAGs — Phase 7 adds no new runner.
+**Goal:** Build the dynamic Orchestrator: a catalog-confined Planner LLM that consumes one frozen `ContextSnapshot` + the pre-persisted `OrchestrationRequest` + one verified `WorkerCatalogSnapshot` and emits a **MainPlanDraft** candidate — where "MainPlanDraft" is the spec's vocabulary for a Phase 1 `PlanDraft` with `phase="main"`, `source=PlanSource.DYNAMIC`; Phase 7 defines **no new draft class and no second validation/freeze/admission path**. The candidate flows verbatim through Phase 1 `validate_plan_draft`/`compute_candidate_plan_digest`/`freeze_plan` and the Phase 2 `PlanAdmissionService`. Phase 7 adds exactly four missing pieces: (1) **generation** — a budget-reserved, bounded-attempt Planner loop with a request-level `fallback_preset_id` path and honest termination; (2) **the human-approval carrier** — a durable digest-bound `PlanApproval` recording surface riding the existing console (events.jsonl + SSE + a REST decide endpoint following the `POST /confirm` precedent at `guanlan_v2/console/api.py:827-838` — api.py:741 is the confirm-callback closure, not the route; file:line cites in this plan are advisory and every symbol/route binds by name), plus a plan-diff typed payload with deterministic `rendered_md` for the reviewer; (3) the **Phase 7 registry/catalog chain** with its own goldens; (4) **bounded standing approvals** — a human-issued, digest-bound `ApprovalLease` channel (Task 7b) through which instances of attested static presets are auto-approved inside an explicit envelope (expiry / admission count / budget cap), every leased admission recorded as a real digest-bound `PlanApproval` — the piece that makes unattended preset runs (daily Lane 0, intraday deep-chain, interval replay) possible without weakening per-plan approval for anything dynamic. Dynamic v1 default is `approval_policy=required`; `AUTO` remains rejected for every `PlanSource`; approval events remain the sole source of truth (no `approved_by/at` is ever written back into a Plan). Phase 2 already executes validated DYNAMIC static main DAGs — Phase 7 adds no new runner.
 
 **Architecture:** The Planner is an LLM invocation executed inside the runtime discipline: catalog-owned prompt/SKILL/guardrail materials (never inline strings), one `PromptAssemblyRecord` per attempt, one `ModelGateway` invocation per attempt, and a per-attempt `BudgetReservation` with `scope_type="planner"` drawn from the ONE run ledger that bootstrap/planner/main share (spec §10). The Planner authors only a closed low-authority field set (nodes/dependencies/slots/sinks/params/universe/budget request); every authority-bearing field (`approval_policy`, `catalog_digest`, `schema_registry_digest`, `as_of`, `mode`, `context_snapshot_ref`, `source`, `phase`) is runtime-stamped. The Planner can only SHRINK — structurally: Phase 1 `PlanNode` carries no tool/server/path/prompt/skill override field, `_HIDDEN_AUTHORITY_KEYS` are rejected in params, and the Planner is deliberately **not** registered as a catalog `WorkerSpec`, so it can never select itself into a plan. Fallback is exclusively the pre-persisted `OrchestrationRequest.fallback_preset_id` resolved against a sealed, golden-frozen `PlanPresetRegistry`; a failed generation with no explicit fallback terminates honestly. The approval carrier persists pending/decision rows in an append-only fsync journal that survives process restarts (the Phase 2 in-memory stores make no durability claim), mirrors them into the console event stream for the human, and feeds decisions into Phase 2 `PlanAdmissionService.record_approval` — the console card is a new card on the EXISTING console surface (user red line: UI 只填充不重建; no new page).
 
@@ -15,7 +15,7 @@ These extend, and never override, the Phase 1–6 Global Constraints, the frozen
 - **Consume, do not fork.** Import `PlanDraft`, `PlanNode`, `Dependency`, `OrchestrationRequest`, `PlanValidationReport`, `PlanApproval`, `validate_plan_draft`, `compute_candidate_plan_digest`, `freeze_plan` from `guanlan_v2/orchestration/spec.py`/`events.py`; `WorkerSpec`/`WorkerCatalogSnapshot`/`build_catalog_snapshot`/skill-v1 from `catalog.py`; `BudgetLedger`/`AuthoritativeClock` from `budget.py`/`runtime_clock.py`; `PayloadStore`/`EventStore`/`EventRefusalAuditSink`/`RuntimeUnitOfWork` from `eventstore.py`; `CatalogRuntime` from `catalog_runtime.py`; `PromptAssembler`/`ModelGateway`/`AssembledModelRequest` ports from `worker.py`; `PlanAdmissionService` from `admission.py`. Phase 7 must not redefine canonical JSON, the candidate/plan digest, plan validation, freeze semantics, event semantics, or admission order.
 - **`TypedPayloadRef` vs `PayloadRef` (Phase 1 Amendment 1).** `TypedPayloadRef(schema_ref: SchemaRef, payload_ref: PayloadRef)` is the implemented Phase 1 composite for schema-typed references; bare `PayloadRef` is a plain storage locator. Phase 7's typed reference fields (`prompt_assembly_ref`, `record_ref`, `plan_diff_ref`) are `TypedPayloadRef`s with validator-pinned `schema_ref`s, and digest/namespace checks go through `.payload_ref.content_digest`/`.payload_ref.namespace`; pure storage locators stay plain `PayloadRef`, and Phase 1-owned fields keep whatever type the implemented (post-Amendment) Phase 1 API defines.
 - **One admission path.** Dynamic and fallback candidates go through the exact Phase 2 sequence: Phase 1 validation → runtime-support report → atomic same-digest plan reservation → same-digest REQUIRED approval → Phase 1 freeze → `PlanAdmitted` → dispatch. There is no Planner-side shortcut, no second `freeze_plan`, and no post-approval digest.
-- **`AUTO` stays rejected for every `PlanSource`.** Phase 7 does not relax `auto_approval_rejected` (spec.py:869-870), not even for presets. Relaxing it for versioned static presets is a future reviewed change to `validate_plan_draft` itself and is explicitly out of scope.
+- **`AUTO` stays rejected for every `PlanSource`.** Phase 7 does not relax `auto_approval_rejected` (spec.py:869-870), not even for presets. Bounded standing approvals for attested presets are delivered instead by Task 7b's `ApprovalLease` channel, which never touches `validate_plan_draft`: every candidate keeps `approval_policy=REQUIRED` and is admitted only through a real recorded `PlanApproval` — minted by the lease within its human-signed envelope. `DYNAMIC` candidates never match a lease.
 - **Planner authority is subtractive only.** The Planner chooses catalog worker IDs with `selection_scope="dynamic_allowed"` and params bound by each worker's `params_schema_ref`. It cannot name a Python callable, file path, tool, MCP server, or skill path; it cannot widen any `capability_allowlist`; it cannot pick `approval_policy`; it cannot emit debates/gates/reducers/conditions/`max_attempts>1` in v1 (static profile rejects them; Phase 8 lifts). `_HIDDEN_AUTHORITY_KEYS = {"handler","system_prompt","skills","tools","mcp","path"}` are rejected wherever they appear in authored params.
 - **Fallback is request-level and explicit.** Only a pre-persisted `OrchestrationRequest.fallback_preset_id` resolved in the sealed `PlanPresetRegistry` may materialize a `PRESET_FALLBACK` draft after generation exhaustion. Neither the model nor the runtime ever picks a preset. Failure without an explicit fallback is an honest terminal outcome, never a silent default.
 - **One budget ledger.** Every Planner attempt takes a `BudgetReservation` (`scope_type="planner"`) from the same event-sourced ledger the bootstrap/main plans use, settles actual usage, and releases the remainder. A failed or invalid attempt consumes budget honestly. Attempts are bounded by the reviewed `PlannerSpec.max_generation_attempts` (hard cap 3); no unbounded regeneration loop exists.
@@ -87,7 +87,7 @@ git commit -m "test(orchestration): gate phase7 on phase2/5/6 contracts"
 | `guanlan_v2/orchestration/orchestrator.py` | Planner contracts (`PlannerSpec@1`, `PlannerAttemptRecord@1`, `PlannerRunRecord@1`), strict output parser, dynamic draft assembly, bounded `run_planner` loop, fallback/halt terminal logic |
 | `guanlan_v2/orchestration/plan_presets.py` | `PlanPresetRecord@1`, sealed `PlanPresetRegistry`, strict loader, `materialize_fallback_draft` |
 | `guanlan_v2/orchestration/plan_diff.py` | `PlanDiffEntry@1`/`PlanDiff@1`, `build_plan_diff` over `executable_projection()`, deterministic `render_plan_diff_md`, `build_pending_plan_approval` |
-| `guanlan_v2/orchestration/approval.py` | `PendingPlanApproval@1` consumption, durable append-only approval journal, `PlanApprovalCoordinator` (register/list/decide/replay) feeding Phase 2 `record_approval` |
+| `guanlan_v2/orchestration/approval.py` | `PendingPlanApproval@1` consumption, durable append-only approval journal, `PlanApprovalCoordinator` (register/list/decide/replay) feeding Phase 2 `record_approval`, plus the `ApprovalLease@1` standing-approval channel (issue/list/revoke/`register_and_try_lease`) sharing the same journal |
 | `guanlan_v2/orchestration/planner_gateway.py` | production `ModelGateway` adapter for the `planner` LLM seat (engine `LLMClient`, explicit repo `config/llm.yaml` path, single-shot, thread-isolated) |
 | `guanlan_v2/orchestration/phase7_registry.py` | `PHASE7_PUBLIC_MODELS`/`PHASE7_INTERNAL_MODELS`, `build_phase7_registry`, `PHASE7_REGISTRY_DIGEST`, `build_phase7_catalog_snapshot`, `PHASE7_CATALOG_DIGEST`, `build_phase7_planner_spec` |
 | `guanlan_v2/console/api.py` (modified, additive) | `GET /plan/approvals`, `GET /plan/approvals/status`, `POST /plan/approvals/decide`, console event emission `plan_approval_request`/`plan_approval_resolved`, optional `plan_approval_coordinator`/verifier wiring |
@@ -99,7 +99,7 @@ git commit -m "test(orchestration): gate phase7 on phase2/5/6 contracts"
 | `tests/orchestration/golden/phase7_catalog_manifest_v1.json` | Phase 7 cumulative catalog golden incl. frozen `planner_spec_digest` |
 | `tests/orchestration/golden/plan_preset_manifest_v1.json` | sealed preset registry golden |
 | `tests/orchestration/test_phase7_handoff.py` | executable upstream ABI/golden gate |
-| `tests/orchestration/` (`test_orchestrator_contracts.py`, `test_orchestrator_assembly.py`, `test_plan_presets.py`, `test_planner_loop.py`, `test_planner_gateway.py`, `test_plan_diff.py`, `test_approval_store.py`, `test_plan_approval_console.py`, `test_phase7_registry.py`, `test_dynamic_e2e.py`) | task-focused suites |
+| `tests/orchestration/` (`test_orchestrator_contracts.py`, `test_orchestrator_assembly.py`, `test_plan_presets.py`, `test_planner_loop.py`, `test_planner_gateway.py`, `test_plan_diff.py`, `test_approval_store.py`, `test_approval_lease.py`, `test_plan_approval_console.py`, `test_phase7_registry.py`, `test_dynamic_e2e.py`) | task-focused suites |
 
 ---
 
@@ -459,6 +459,59 @@ git commit -m "feat(orchestration): durable digest-bound plan-approval journal +
 
 ---
 
+## Task 7b: ApprovalLease — bounded standing approvals for attested presets
+
+> Integration amendment (2026-07-18, `docs/superpowers/specs/2026-07-18-orchestration-integration-design.md` §2; applied via `2026-07-18-integration-reconcile-checklist.md`). Adds the human-issued standing-approval channel that daily Lane 0, intraday deep-chain and interval-replay preset runs require; without it, `REQUIRED`-per-instance approval makes unattended preset runs structurally impossible.
+
+**Files:**
+- Modify: `guanlan_v2/orchestration/approval.py` (extends Task 7's module — same journal, same coordinator)
+- Test: `tests/orchestration/test_approval_lease.py`
+
+**Consumes:** Task 7 coordinator/journal; Task 3 sealed `PlanPresetRegistry` + `PlanPresetRecord`; Task 6 `PendingPlanApproval` — **binding note:** Task 6 defines `PendingPlanApproval` with preset-provenance fields from the start (`preset_id: LogicalId | None`, `preset_record_digest: DigestHex | None`; populated iff the draft source is `PRESET`/`PRESET_FALLBACK`, `None` for DYNAMIC); Phase 3's fail-closed `AdminReviewVerifier` (Task 0 clause (c)); Phase 1 `PlanApproval`; Phase 2 `record_approval`; `AuthoritativeClock`.
+
+**Produces:**
+
+- Registered contract `class ApprovalLease(DigestModel)` → `ApprovalLease@1`: `lease_id` (service-derived digest over the issue content — never caller-chosen), `purpose: NonEmptyStr` (display), `preset_id: LogicalId`, `preset_record_digest: DigestHex`, `catalog_digest: DigestHex`, `registry_digest: DigestHex`, `valid_from: UtcDateTime`, `valid_until: UtcDateTime`, `max_admissions: PositiveInt`, `budget_cap_llm_invocations: PositiveInt`, `issued_by: NonEmptyStr` (verified actor id), `issued_at: UtcDateTime`, `reason: NonEmptyStr`. Correction-clause style: if the implemented Phase 1/2 budget vocabulary meters plan-grain spend in a different unit, adopt that unit verbatim instead of LLM-invocation counts.
+- Journal vocabulary (additive to Task 7's `ApprovalJournalRow`): `row_kind` gains `"lease_issued"`, `"lease_consumed"`, `"lease_revoked"`; consume rows carry `{lease_id, consume_seq, request_id, candidate_plan_digest, budget_consumed}`.
+- Coordinator methods (same instance as Task 7):
+  - `issue_lease(...) -> ApprovalLease` — verifier authenticates the actor fail-closed; the preset must resolve in the sealed registry and the lease's digests must equal the current chain digests; appends `lease_issued` (fsync) then emits `plan_lease_issued`. Idempotent by issue-content digest.
+  - `list_leases(*, now: UtcDateTime) -> tuple[...]` — active + terminal (expired/exhausted/revoked, with terminal reason) with per-lease balances folded from the journal.
+  - `revoke_lease(lease_id, *, actor, reason, idempotency_key)` — verifier-gated; appends `lease_revoked`; effective immediately; idempotent replay returns the stored row.
+  - `register_and_try_lease(pending: PendingPlanApproval, *, idempotency_key, now: UtcDateTime) -> LeaseAdmissionOutcome` — registers the pending card (Task 7 semantics unchanged), then: the candidate has preset provenance ∧ an active lease matches `(preset_id, preset_record_digest, catalog_digest, registry_digest)` exactly ∧ `valid_from <= now < valid_until` ∧ admissions balance > 0 ∧ the plan's requested budget ≤ the lease's remaining budget cap → appends `lease_consumed` FIRST, then decides APPROVED through the Task 7 `decide` internals with `actor_id=f"lease:{lease_id}"` (a real `PlanApproval`, a real `PLAN_APPROVED` event — no admission bypass, no new `EventType`), then emits `plan_lease_admitted`. Any condition failing → the card simply stays pending for a human (`outcome="pending_human"`) — never an error, never a silent admit. The caller (console decide flow, autonomy playbook, Phase 9 automation) then invokes `admit_after_approval` exactly as for a human decision: the lease changes who signs, never the admission sequence.
+- `LeaseAdmissionOutcome` (internal value carrier): `outcome: Literal["lease_admitted","pending_human"]`, optional `lease_id`, and the stored `(PlanApproval, RunEvent)` pair when admitted.
+
+**Required invariants:**
+
+1. a lease can only admit candidates whose draft source is `PRESET`/`PRESET_FALLBACK` **and** whose preset/catalog/registry digests all match; DYNAMIC candidates structurally never match (no preset provenance);
+2. envelopes are hard: expiry, admission count and budget cap are each independently enforced at decide time; crossing any one falls back to a human pending card;
+3. every leased admission is a durable journal pair (`lease_consumed` + `decision`) plus a real digest-bound `PlanApproval`; replay after process death reconstructs balances exactly and never double-consumes;
+4. revocation is immediate and durable; a revoked/expired/exhausted lease is displayed with its terminal reason, never deleted;
+5. `AUTO` remains rejected for every source (`validate_plan_draft` untouched); the lease channel exists strictly downstream of Phase 1 validation and Phase 2 reservation;
+6. issuance and revocation require a verified human actor (fail-closed verifier); no code path issues a lease programmatically.
+
+- [ ] **Step 1: Write failing lease tests**
+
+Matrix: issue happy + idempotent replay + unverified refusal + chain-digest-drift refusal + unknown-preset refusal; `register_and_try_lease` admit happy (real approval recorded, actor `lease:<id>`, balances decrement); expiry / count exhaustion / budget exhaustion each fall back to `pending_human`; a DYNAMIC card never matches; revoke-then-try falls back; crash-replay reconstructs balances (kill between `lease_consumed` and `decision`; kill after both); double delivery of one idempotency key admits once.
+
+Run: `pytest tests/orchestration/test_approval_lease.py -v`
+
+Expected: FAIL on the missing lease surface.
+
+- [ ] **Step 2: Implement the lease channel inside `approval.py`**
+
+- [ ] **Step 3: Run and commit**
+
+Run: `pytest tests/orchestration/test_approval_lease.py tests/orchestration/test_approval_store.py -v`
+
+Expected: PASS (the Task 7 suite stays byte-identical green — the lease is additive).
+
+```bash
+git add guanlan_v2/orchestration/approval.py tests/orchestration/test_approval_lease.py
+git commit -m "feat(orchestration): ApprovalLease bounded standing approvals for attested presets"
+```
+
+---
+
 ## Task 8: Console carrier — API endpoints, event stream, UI card
 
 **Files:**
@@ -475,8 +528,9 @@ git commit -m "feat(orchestration): durable digest-bound plan-approval journal +
 - `GET /plan/approvals` — returns `{"ok": true, "items": [...]}` where each item is the `PendingPlanApproval` public JSON (goal, source, digest, worker ids, budget request, the typed `plan_diff_ref` — a `TypedPayloadRef` naming `PlanDiff@1`, `rendered_md`, rationale, requested_at). Coordinator access wrapped in `asyncio.to_thread` (journal I/O off the 9999 loop — watchdog red line).
 - `GET /plan/approvals/status` — query `request_id` + `candidate_plan_digest`; returns the durable decision via the coordinator's `load_decision` (in `to_thread`): decided → `{"ok": true, "decision": ..., "actor_id": ..., "decided_at": ...}` (idempotent re-read after the pending card resolves); registered-but-undecided → `{"ok": true, "decision": null, "pending": true}`; unknown pair → 404.
 - `POST /plan/approvals/decide` — body `{request_id, candidate_plan_digest, decision: "approved"|"rejected", reason?}`; actor material passes to the coordinator's fail-closed verifier; on success returns `{"ok": true, "decision": ..., "candidate_plan_digest": ...}` and, for APPROVED candidates, subsequently invokes `admit_after_approval` (also in `to_thread`) so the admitted `Plan`/`PlanAdmitted` pair exists before the response reports `"admitted": true`. Conflict → 409 with the stored decision; unknown candidate → 404; unverified actor → 403. All error bodies honest and typed.
-- Console event mirroring into a reserved console session `plan-approvals` (created idempotently through `ConsoleStore`): event `plan_approval_request` `{request_id, candidate_plan_digest, goal, source, node_count, rendered_md}` and `plan_approval_resolved` `{request_id, candidate_plan_digest, decision, actor_id, reason}` — new event *types* in events.jsonl/SSE; existing `confirm_request`/`confirm_resolved` semantics untouched (the turn-scoped, digest-free confirm gate is never reused for plan approval).
-- `ui/console/console-plan-approval-card.jsx` — follows the `console-report-card.jsx`/ResearchLoopCard idiom (fold/poll/cleanup; components are copied per page — no cross-page import): collapsed header shows pending count; expanded list shows per-candidate goal, `source` badge (`动态` / `preset回落` — degradation displayed, never hidden), node/worker summary, full digest (monospace, copyable), diff `rendered_md` in a scrollable `<pre>`, labeled untrusted rationale, and 批准/拒绝 buttons POSTing to `/plan/approvals/decide` with a confirm dialog that repeats the digest. Polls `GET /plan/approvals` every 60s while open. Mounted beside the existing report card on the existing console surface; no new page, no navigation change.
+- Lease endpoints (Task 7b surface): `GET /plan/approvals/leases` — active + terminal leases with per-lease balances (`admissions_used/max_admissions`, budget used/cap, terminal reason); `POST /plan/approvals/lease` — issue body `{preset_id, valid_from?, valid_until, max_admissions, budget_cap, reason}` through the coordinator's fail-closed verifier (403 unverified, 409 on conflicting idempotent re-issue); `POST /plan/approvals/lease/revoke` — body `{lease_id, reason}`, idempotent. All coordinator access in `to_thread`; unwired coordinator ⇒ the same honest 503.
+- Console event mirroring into a reserved console session `plan-approvals` (created idempotently through `ConsoleStore`): event `plan_approval_request` `{request_id, candidate_plan_digest, goal, source, node_count, rendered_md}` and `plan_approval_resolved` `{request_id, candidate_plan_digest, decision, actor_id, reason}` — new event *types* in events.jsonl/SSE; existing `confirm_request`/`confirm_resolved` semantics untouched (the turn-scoped, digest-free confirm gate is never reused for plan approval). Lease lifecycle mirrors into the same reserved session as `plan_lease_issued`/`plan_lease_admitted`/`plan_lease_revoked` events — leased auto-admissions are always displayed, never silent.
+- `ui/console/console-plan-approval-card.jsx` — follows the `console-report-card.jsx`/ResearchLoopCard idiom (fold/poll/cleanup; components are copied per page — no cross-page import): collapsed header shows pending count; expanded list shows per-candidate goal, `source` badge (`动态` / `preset回落` — degradation displayed, never hidden), node/worker summary, full digest (monospace, copyable), diff `rendered_md` in a scrollable `<pre>`, labeled untrusted rationale, and 批准/拒绝 buttons POSTing to `/plan/approvals/decide` with a confirm dialog that repeats the digest. Polls `GET /plan/approvals` every 60s while open. A collapsed «租约» section lists active leases (preset, 期/次/预算 balances, 撤销 button) plus a minimal issue form that repeats the preset digest in its confirm dialog; resolved-feed rows for leased admissions show actor `lease:<id>`. Mounted beside the existing report card on the existing console surface; no new page, no navigation change.
 
 **Required invariants:**
 
@@ -488,7 +542,7 @@ git commit -m "feat(orchestration): durable digest-bound plan-approval journal +
 
 - [ ] **Step 1: Write failing endpoint tests**
 
-FastAPI `TestClient` over `build_console_router(store=<tmp ConsoleStore>, plan_approval_coordinator=<real coordinator with fake admission + fake verifier>)`. Matrix: unwired 503; list happy path; decide approve (journal row + admission call + `admitted: true` + console events emitted in order); decide reject (reservation-release path delegated to admission); 404/409/403; status endpoint decided/pending/unknown triple (decided candidates re-readable via `load_decision` after resolution); existing console route regression (e.g. `/confirm` untouched); event payload digest fields present.
+FastAPI `TestClient` over `build_console_router(store=<tmp ConsoleStore>, plan_approval_coordinator=<real coordinator with fake admission + fake verifier>)`. Matrix: unwired 503; list happy path; decide approve (journal row + admission call + `admitted: true` + console events emitted in order); decide reject (reservation-release path delegated to admission); 404/409/403; status endpoint decided/pending/unknown triple (decided candidates re-readable via `load_decision` after resolution); existing console route regression (e.g. `/confirm` untouched); event payload digest fields present; lease endpoint matrix (issue/list/revoke happy + 403 unverified + 409 conflicting re-issue; a leased auto-admission surfaces `plan_lease_admitted` in the session feed).
 
 Run: `pytest tests/orchestration/test_plan_approval_console.py -v`
 
@@ -524,8 +578,8 @@ git commit -m "feat(console): digest-bound plan-approval card + decide endpoint 
 
 **Produces:**
 
-- `PHASE7_PUBLIC_MODELS` — exactly: `PlannerSpec`, `PlannerAttemptRecord`, `PlannerRunRecord`, `PlanPresetRecord`, `PlanDiffEntry`, `PlanDiff`, `PendingPlanApproval` (7 models).
-- `PHASE7_INTERNAL_MODELS` — reviewed-reason map for `PlannerDraftEnvelope` (+ node/dependency envelopes), `PlannerResult`, `ApprovalJournalRow` (value carriers / recovery rows, never cross-boundary payloads).
+- `PHASE7_PUBLIC_MODELS` — exactly: `PlannerSpec`, `PlannerAttemptRecord`, `PlannerRunRecord`, `PlanPresetRecord`, `PlanDiffEntry`, `PlanDiff`, `PendingPlanApproval`, `ApprovalLease` (8 models).
+- `PHASE7_INTERNAL_MODELS` — reviewed-reason map for `PlannerDraftEnvelope` (+ node/dependency envelopes), `PlannerResult`, `ApprovalJournalRow` (incl. its Task 7b lease row kinds), `LeaseAdmissionOutcome` (value carriers / recovery rows, never cross-boundary payloads).
 - `def build_phase7_registry(expected_phase6_digest: DigestHex) -> SchemaRegistry:` — verifies the supplied digest equals `PHASE6_REGISTRY_DIGEST`, builds a fresh sealed cumulative registry = Phase 6 public models + `PHASE7_PUBLIC_MODELS`; inherited entries byte-identical. `PHASE7_REGISTRY_DIGEST: DigestHex` frozen constant.
 - `def build_phase7_catalog_snapshot(phase6_snapshot: WorkerCatalogSnapshot, *, planner_materials: tuple[ResolvedMaterial, ...]) -> WorkerCatalogSnapshot:` — rejects any base other than `PHASE6_CATALOG_DIGEST`; adds ONLY the planner content/skill/guardrail manifest entries (source_identity `orchestrator.planner`; prompt kind `"prompt"`, skill via skill-v1 grammar — frontmatter + `Perfect for:` canonical-JSON trigger line + the exact `## ⚠️ CRITICAL: Data Source Priority` heading, guardrail kind `"guardrail"`). It adds **no `WorkerSpec`**: the Planner is deliberately not a selectable worker (a `final` spec would be `dynamic_allowed` and could recursively select itself; materials-without-worker is the reviewed containment). `PHASE7_CATALOG_DIGEST: DigestHex` frozen constant.
 - `def build_phase7_planner_spec(catalog: WorkerCatalogSnapshot) -> PlannerSpec:` — derives `system_prompt_ref`/`skills`/`guardrail_refs` from the Phase 7 catalog manifests by exact id/version/digest (never a path), `model_tier="reasoner_deep"` (reviewed deviation from spec §10, which reserves `reasoner_deep` for the `dec.pm` seat: the Planner is not a lane worker, and plan-shaping quality dominates its once-per-run cost), `max_generation_attempts=2`, reviewed `attempt_token_reservation`. Its semantic digest is frozen as `planner_spec_digest` inside `phase7_catalog_manifest_v1.json`.
@@ -542,7 +596,7 @@ git commit -m "feat(console): digest-bound plan-approval card + decide endpoint 
 
 - [ ] **Step 1: Write failing chain tests**
 
-Matrix: wrong-base refusal; registry population exactness (7 new publics; internal/public partition disjoint + exhaustive for Phase 7 modules); byte-identical inheritance sweep; golden equality; catalog no-new-worker + material resolution; skill grammar acceptance; planner-spec derivation determinism + frozen digest; EventType frozen-set regression.
+Matrix: wrong-base refusal; registry population exactness (8 new publics; internal/public partition disjoint + exhaustive for Phase 7 modules); byte-identical inheritance sweep; golden equality; catalog no-new-worker + material resolution; skill grammar acceptance; planner-spec derivation determinism + frozen digest; EventType frozen-set regression.
 
 Run: `pytest tests/orchestration/test_phase7_registry.py -v`
 
@@ -575,12 +629,14 @@ git commit -m "feat(orchestration): phase7 cumulative registry/catalog chain + c
 1. **Dynamic happy path:** persisted `OrchestrationRequest(workflow="orchestrate_only", approval_policy=REQUIRED)` + Phase 5-style frozen ContextSnapshot → `run_planner` (scripted valid output) → `PlannerRunRecord.terminal_outcome="candidate_ready"` → `prepare_candidate`/`persist_and_reserve_candidate` → `build_plan_diff(baseline_kind="fallback_preset")` + `build_pending_plan_approval` → coordinator `register_pending` → console decide endpoint APPROVED → `record_approval` RunEvent (`PLAN_APPROVED`) → `admit_after_approval` → `verify_for_dispatch` → Phase 2 `run_plan` executes the DYNAMIC main DAG to `RunResult(completed)`. Assert: `Plan.plan_digest == candidate digest`, plan carries zero approver fields, budget ledger replay shows planner + plan + node reservations on ONE ledger.
 2. **Fallback path:** scripted garbage model output ×2 attempts, request carries `fallback_preset_id="main.research_baseline"` → `fallback_materialized` → PRESET_FALLBACK draft admitted through the same approval carrier (source badge `preset_fallback` on the pending card) → executes.
 3. **Honest halt:** same garbage, no fallback field → `halted_no_fallback`; no draft, no candidate, no reservation leak (planner reservations settled/released; ledger availability restored).
-4. **Red lines:**
+4. **Lease lifecycle:** verified issue → attested preset candidate through `register_and_try_lease` → auto-admitted with actor `lease:<id>` and a real `PLAN_APPROVED` event → `admit_after_approval` → executes; count/budget balances decrement verifiably; exhaustion, expiry and revocation each flip the *next* candidate to a human pending card (never a silent admit, never an error); journal replay after simulated process death reconstructs lease balances exactly.
+5. **Red lines:**
    - an unapproved dynamic candidate never reaches `freeze_and_admit_candidate` (missing approval event ⇒ admission refuses; `run_plan` unreachable);
    - `approval_policy=AUTO` on the request ⇒ the assembled draft fails Phase 1 validation for every source (no Phase 7 bypass);
    - a REJECTED decision releases the plan reservation and the candidate can never be admitted afterward;
    - editing any executable field after approval yields a new digest and the old `PlanApproval.authorizes_freeze` returns False (re-approval mandatory);
    - the Planner cannot schedule a `compat.*` worker or itself (`orchestrator.planner` is not a catalog worker id);
+   - a DYNAMIC candidate never matches any lease (structurally: no preset provenance), and a lease bound to stale catalog/preset digests refuses drifted candidates;
    - approval journal replay after simulated process death still admits exactly once (idempotent resubmission);
    - no Planner path writes memory/skill/code or emits an order/signal (import + capability sweep: `orchestrator.py`/`plan_presets.py`/`plan_diff.py`/`approval.py` import no seats/trade/memory-write modules).
 
@@ -641,6 +697,13 @@ Phase 7 is complete only when every gate below is checked by tests or a reviewed
 - [ ] console endpoints are additive, honest on error (503/403/404/409), and off-loop for I/O; SSE mirrors request/resolved pairs in order;
 - [ ] the reviewer card rides the existing console page (no new page), shows source/degradation badges, full digest, typed-diff `rendered_md` bound to the diff payload digest, and labeled untrusted rationale — reviewed screenshot artifact after 9999 restart.
 
+### Standing approvals (lease)
+
+- [ ] lease issuance/revocation is verifier-gated fail-closed and journal-durable; balances survive restart via replay and never double-consume;
+- [ ] a leased admission mints a real digest-bound `PlanApproval` (actor `lease:<id>`) and reuses `PLAN_APPROVED` — no new `EventType`, no admission bypass, no second freeze path;
+- [ ] expiry / admission-count / budget-cap envelopes are each independently enforced; exhausted, expired, revoked or digest-drifted leases fall back to a human pending card;
+- [ ] DYNAMIC candidates never lease-admit; `AUTO` remains rejected for every source (regression pinned); leased admissions are always visible in the console session feed.
+
 ### Plan diff
 
 - [ ] `PlanDiff`/`PlanDiffEntry` cover exactly the executable projection (audit locators excluded); build + render are deterministic pure functions; tampered markdown is detected via `rendered_from_diff_digest`.
@@ -667,7 +730,7 @@ Implement in task order. Mandatory review checkpoints:
 2. after Tasks 1–2 — closed authored grammar + runtime-stamped assembly accepted by the unmodified Phase 1 validator;
 3. after Tasks 3–4 — sealed preset golden, bounded budget-reserved loop, fallback/halt terminal honesty;
 4. after Task 5 — pinned planner seat + byte-rehash gateway (no engine changes);
-5. after Tasks 6–7 — deterministic diff/render and durable digest-bound approval journal with crash-recovery evidence;
+5. after Tasks 6–7b — deterministic diff/render, the durable digest-bound approval journal with crash-recovery evidence, and the lease channel's envelope/fallback matrix;
 6. after Task 8 — additive console carrier; restart 9999 and record the reviewed card screenshot (真机);
 7. after Tasks 9–10 — chain goldens, full-tree green, all Exit Gates checked with test evidence.
 
