@@ -42,17 +42,21 @@ the same case.
 """
 from __future__ import annotations
 
+import math
+import statistics
 import warnings
 from collections.abc import Callable, Sequence
 from typing import Any, ClassVar, Literal, get_args
 
 from pydantic import Field, model_validator
 
+from guanlan_v2.orchestration.data.errors import FutureDataRefused
 from guanlan_v2.orchestration.digest import (
     DigestHex,
     DigestModel,
     FiniteFloat,
     NonEmptyStr,
+    NonNegativeInt,
     PositiveInt,
     UtcDateTime,
 )
@@ -93,14 +97,25 @@ __all__ = [
     "CaseMatured",
     "CaseReviewed",
     "CaseView",
+    # scaler + retrieval contracts (Task 5)
+    "ExperienceScalerSnapshot",
+    "ExperienceQuery",
+    "ExperienceNeighbour",
+    "ExperienceSelection",
+    "MIN_FEATURE_OVERLAP",
     # schema refs
     "REGIME_CASE_SCHEMA_REF",
     "REALIZED_REGIME_SCHEMA_REF",
     "CASE_MATURED_SCHEMA_REF",
     "CASE_REVIEWED_SCHEMA_REF",
-    # service + fold
+    "EXPERIENCE_SCALER_SNAPSHOT_SCHEMA_REF",
+    "EXPERIENCE_QUERY_SCHEMA_REF",
+    "EXPERIENCE_SELECTION_SCHEMA_REF",
+    # service + fold + retrieval
     "ExperienceLog",
     "fold_case_views",
+    "fit_scaler",
+    "retrieve_neighbours",
     "EXPERIENCE_PUBLIC_MODELS",
 ]
 
@@ -399,20 +414,209 @@ class CaseView(DigestModel):
 
 
 # --------------------------------------------------------------------------- #
+# ExperienceScalerSnapshot@1 — the versioned point-in-time standardizer          #
+# --------------------------------------------------------------------------- #
+#: v1 fixes normalized standardized-Euclidean retrieval; the scaler standardizes
+#: each feature by its expanding (≤ fit_as_of) z-score, exactly the in-repo
+#: precedent ``factor_regime.py::walk_forward_regimes`` (mu/sd fitted on ≤t history
+#: and persisted as versioned snapshots) — copied in shape, not in artifacts.
+DEFAULT_SCALER_VERSION = "expanding-zscore-v1"
+
+
+class ExperienceScalerSnapshot(DigestModel):
+    """A versioned point-in-time standardizer (registered ``ExperienceScalerSnapshot@1``).
+
+    ``mu``/``sd`` are fitted **only** on cases with ``available_at <= fit_as_of`` and
+    a matching ``feature_schema_version`` (the spec red line 标准化器只在查询时点之前的
+    数据拟合并版本化). A degenerate feature (fewer than two present observations, or a
+    zero/near-zero spread) is *dropped* from ``mu``/``sd`` and listed honestly in
+    ``degenerate_features`` — never standardized against a fabricated unit spread.
+    Every retained ``sd`` value is strictly positive so the retrieval division is
+    always well-defined. ``content_digest`` is this snapshot's identity — it is the
+    ``scaler_digest`` recorded on a :class:`RegimeCase` / :class:`ExperienceSelection`
+    (a case scored under scaler v1 vs v2 is therefore always distinguishable).
+    """
+
+    schema_version: Literal["1"] = "1"
+    feature_schema_version: NonEmptyStr
+    scaler_version: NonEmptyStr
+    fit_as_of: UtcDateTime
+    n_obs: NonNegativeInt
+    mu: dict[LogicalId, FiniteFloat]
+    sd: dict[LogicalId, FiniteFloat]
+    degenerate_features: tuple[LogicalId, ...] = ()
+    content_digest: DigestHex
+
+    SELF_DIGEST_FIELDS: ClassVar[frozenset[str]] = frozenset({"content_digest"})
+
+    @model_validator(mode="after")
+    def _verify(self) -> "ExperienceScalerSnapshot":
+        if set(self.mu) != set(self.sd):
+            raise ValueError("mu and sd must share exactly the same feature keys")
+        for fid, spread in self.sd.items():
+            if spread <= 0.0:
+                raise ValueError(f"sd[{fid!r}] must be > 0 (a degenerate feature is dropped, not kept)")
+        degen = list(self.degenerate_features)
+        if degen != sorted(degen):
+            raise ValueError("degenerate_features must be canonically sorted")
+        if len(set(degen)) != len(degen):
+            raise ValueError("degenerate_features must be duplicate-free")
+        if set(degen) & set(self.mu):
+            raise ValueError("degenerate_features must be disjoint from the fitted (mu/sd) keys")
+        if self.content_digest != self.semantic_digest():
+            raise ValueError("declared content_digest does not match canonical digest")
+        return self
+
+    @classmethod
+    def build(cls, **fields: Any) -> "ExperienceScalerSnapshot":
+        try:
+            digest = cls.digest_of_fields(projection="semantic", **fields)
+        except (ValueError, TypeError, AttributeError, KeyError):
+            digest = _DIGEST_PLACEHOLDER
+        return cls(**fields, content_digest=digest)
+
+
+# --------------------------------------------------------------------------- #
+# ExperienceQuery@1 / ExperienceNeighbour / ExperienceSelection@1                #
+# --------------------------------------------------------------------------- #
+#: fraction of the query's (scaler-covered) feature keys that must be co-present in
+#: a candidate case; a candidate below this is excluded (missing is never imputed).
+MIN_FEATURE_OVERLAP = 0.6
+
+
+class ExperienceQuery(DigestModel):
+    """The numeric nearest-neighbour query (registered ``ExperienceQuery@1``).
+
+    A raw feature vector as of ``as_of``; retrieval requires the query's
+    ``feature_schema_version`` to equal the scaler's, and ranks over PIT-visible
+    matching-schema cases only. ``k`` is bounded (``1 <= k <= 20``).
+    """
+
+    schema_version: Literal["1"] = "1"
+    as_of: UtcDateTime
+    feature_schema_version: NonEmptyStr
+    features: dict[LogicalId, FiniteFloat]
+    k: PositiveInt = Field(le=20)
+    content_digest: DigestHex
+
+    SELF_DIGEST_FIELDS: ClassVar[frozenset[str]] = frozenset({"content_digest"})
+
+    @model_validator(mode="after")
+    def _verify(self) -> "ExperienceQuery":
+        if self.content_digest != self.semantic_digest():
+            raise ValueError("declared content_digest does not match canonical digest")
+        return self
+
+    @classmethod
+    def build(cls, **fields: Any) -> "ExperienceQuery":
+        try:
+            digest = cls.digest_of_fields(projection="semantic", **fields)
+        except (ValueError, TypeError, AttributeError, KeyError):
+            digest = _DIGEST_PLACEHOLDER
+        return cls(**fields, content_digest=digest)
+
+
+class ExperienceNeighbour(DigestModel):
+    """One retrieved analog case (nested inside :class:`ExperienceSelection`).
+
+    Carries the folded ``state``/``realized``/``lesson`` *as of the query time*: a
+    ``pending`` neighbour shows no realized numbers and no lesson (unmatured numbers
+    never leak), a ``matured`` neighbour carries realized numbers but no lesson, a
+    ``reviewed`` neighbour carries both. Not a registered payload — it is digested
+    only through its parent selection.
+    """
+
+    case_id: NonEmptyStr
+    case_as_of: UtcDateTime
+    distance: FiniteFloat = Field(ge=0.0)
+    feature_overlap: FiniteFloat = Field(ge=0.0, le=1.0)
+    state: Literal["pending", "matured", "reviewed"]
+    realized: RealizedRegime | None = None
+    lesson: NonEmptyStr | None = None
+
+    @model_validator(mode="after")
+    def _verify(self) -> "ExperienceNeighbour":
+        if self.state == "pending":
+            if self.realized is not None or self.lesson is not None:
+                raise ValueError("a pending neighbour carries no realized/lesson (numbers never leak)")
+        elif self.state == "matured":
+            if self.realized is None:
+                raise ValueError("a matured neighbour requires realized numbers")
+            if self.lesson is not None:
+                raise ValueError("a matured neighbour carries no lesson (review is a later state)")
+        else:  # reviewed
+            if self.realized is None or self.lesson is None:
+                raise ValueError("a reviewed neighbour requires realized + lesson")
+        return self
+
+
+class ExperienceSelection(DigestModel):
+    """The retrieval result (registered ``ExperienceSelection@1``).
+
+    ``neighbours`` are sorted ``(distance, case_id)`` and truncated to the query's
+    ``k``; ``visible_case_count`` is how many PIT-visible matching-schema cases were
+    ranked over; ``scaler_digest`` dereferences the exact
+    :class:`ExperienceScalerSnapshot` used. A zero-neighbour result is honest (not an
+    error) and always carries the ``cold_start:0_neighbours`` badge.
+    """
+
+    schema_version: Literal["1"] = "1"
+    query_digest: DigestHex
+    scaler_digest: DigestHex
+    feature_schema_version: NonEmptyStr
+    neighbours: tuple[ExperienceNeighbour, ...]
+    visible_case_count: NonNegativeInt
+    badges: tuple[NonEmptyStr, ...] = ()
+    content_digest: DigestHex
+
+    SELF_DIGEST_FIELDS: ClassVar[frozenset[str]] = frozenset({"content_digest"})
+
+    @model_validator(mode="after")
+    def _verify(self) -> "ExperienceSelection":
+        keys = [(n.distance, n.case_id) for n in self.neighbours]
+        if keys != sorted(keys):
+            raise ValueError("neighbours must be sorted by (distance, case_id)")
+        case_ids = [n.case_id for n in self.neighbours]
+        if len(set(case_ids)) != len(case_ids):
+            raise ValueError("neighbours must be duplicate-free by case_id")
+        if not self.neighbours and "cold_start:0_neighbours" not in self.badges:
+            raise ValueError("a zero-neighbour selection must carry the cold_start:0_neighbours badge")
+        if self.content_digest != self.semantic_digest():
+            raise ValueError("declared content_digest does not match canonical digest")
+        return self
+
+    @classmethod
+    def build(cls, **fields: Any) -> "ExperienceSelection":
+        try:
+            digest = cls.digest_of_fields(projection="semantic", **fields)
+        except (ValueError, TypeError, AttributeError, KeyError):
+            digest = _DIGEST_PLACEHOLDER
+        return cls(**fields, content_digest=digest)
+
+
+# --------------------------------------------------------------------------- #
 # Registered-schema refs (one definition each; downstream pinning).             #
 # --------------------------------------------------------------------------- #
 REGIME_CASE_SCHEMA_REF: SchemaRef = SchemaRef(name="RegimeCase", version="1")
 REALIZED_REGIME_SCHEMA_REF: SchemaRef = SchemaRef(name="RealizedRegime", version="1")
 CASE_MATURED_SCHEMA_REF: SchemaRef = SchemaRef(name="CaseMatured", version="1")
 CASE_REVIEWED_SCHEMA_REF: SchemaRef = SchemaRef(name="CaseReviewed", version="1")
+EXPERIENCE_SCALER_SNAPSHOT_SCHEMA_REF: SchemaRef = SchemaRef(name="ExperienceScalerSnapshot", version="1")
+EXPERIENCE_QUERY_SCHEMA_REF: SchemaRef = SchemaRef(name="ExperienceQuery", version="1")
+EXPERIENCE_SELECTION_SCHEMA_REF: SchemaRef = SchemaRef(name="ExperienceSelection", version="1")
 
 #: the reviewed public (registered) contract surface of this module (Task 9 stands
-#: up the Phase-5 completeness firewall + cumulative registry over it).
+#: up the Phase-5 completeness firewall + cumulative registry over it). The nested
+#: ``ExperienceNeighbour`` is digested only through ``ExperienceSelection`` and is
+#: deliberately not a standalone registered payload.
 EXPERIENCE_PUBLIC_MODELS: tuple[type[DigestModel], ...] = (
     RegimeCase,
     RealizedRegime,
     CaseMatured,
     CaseReviewed,
+    ExperienceScalerSnapshot,
+    ExperienceQuery,
+    ExperienceSelection,
 )
 
 _SCHEMA_FOR_EVENT: dict[EventType, str] = {
@@ -757,3 +961,157 @@ def fold_case_views(
     for msg in sorted(orphan_msgs):
         warnings.warn(msg, OrphanExperienceEventWarning, stacklevel=2)
     return tuple(views)
+
+
+# --------------------------------------------------------------------------- #
+# fit_scaler — the pure, versioned point-in-time standardizer fit                #
+# --------------------------------------------------------------------------- #
+def fit_scaler(
+    views: Sequence[CaseView],
+    *,
+    as_of: UtcDateTime,
+    feature_schema_version: NonEmptyStr,
+    scaler_version: NonEmptyStr = DEFAULT_SCALER_VERSION,
+) -> ExperienceScalerSnapshot:
+    """Fit a versioned point-in-time standardizer over the folded cases (pure).
+
+    The spec red line: the standardizer is fitted **only** on data before the query
+    point and versioned. Concretely — only cases with ``available_at <= as_of`` *and*
+    a matching ``feature_schema_version`` contribute; per-feature ``mu``/``sd`` are the
+    mean and population standard deviation over the cases where that feature is
+    *present* (a missing feature is never imputed as zero). A feature with fewer than
+    two present observations, or a zero spread, is degenerate — it is dropped from
+    ``mu``/``sd`` and recorded in ``degenerate_features``. ``n_obs == 0`` is a valid
+    cold-start snapshot; its retrieval necessarily returns zero neighbours with a
+    badge. Population std matches the in-repo precedent (``factor_regime.py:101``).
+    """
+    qualifying = [
+        v.case
+        for v in views
+        if v.case.feature_schema_version == feature_schema_version
+        and v.case.available_at <= as_of
+    ]
+    present: dict[str, list[float]] = {}
+    for case in qualifying:
+        for fid, value in case.features.items():
+            present.setdefault(fid, []).append(float(value))
+
+    mu: dict[str, float] = {}
+    sd: dict[str, float] = {}
+    degenerate: list[str] = []
+    for fid in sorted(present):
+        values = present[fid]
+        if len(values) < 2:
+            degenerate.append(fid)  # cannot standardize a single observation
+            continue
+        spread = statistics.pstdev(values)
+        if spread <= 0.0:
+            degenerate.append(fid)  # zero spread — a constant feature is degenerate
+            continue
+        mu[fid] = statistics.fmean(values)
+        sd[fid] = spread
+
+    return ExperienceScalerSnapshot.build(
+        feature_schema_version=feature_schema_version,
+        scaler_version=scaler_version,
+        fit_as_of=as_of,
+        n_obs=len(qualifying),
+        mu=mu,
+        sd=sd,
+        degenerate_features=tuple(sorted(degenerate)),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# retrieve_neighbours — the pure numeric nearest-neighbour retrieval             #
+# --------------------------------------------------------------------------- #
+def retrieve_neighbours(
+    query: ExperienceQuery,
+    *,
+    views: Sequence[CaseView],
+    scaler: ExperienceScalerSnapshot,
+) -> ExperienceSelection:
+    """Rank the PIT-visible analog cases by normalized standardized distance (pure).
+
+    Closed order (spec red line: visibility predicate FIRST, then ranking):
+
+    1. reject on ``feature_schema_version`` mismatch between query and scaler;
+    2. re-assert PIT — a candidate whose ``available_at > query.as_of`` is a breach
+       and raises :class:`FutureDataRefused` (defense in depth; the caller's fold
+       already drops future cases);
+    3. rank only cases sharing the query's ``feature_schema_version``;
+    4. for each candidate, let ``K`` = keys co-present in the query, the candidate and
+       the scaler's non-degenerate set; ``feature_overlap = |K| / |query ∩ scaler|``;
+       exclude candidates with overlap ``< MIN_FEATURE_OVERLAP``; distance is the
+       ``1/sqrt(|K|)``-normalized standardized Euclidean distance over ``K``;
+    5. top-k by ``(distance, case_id)``, embedding each candidate's folded state.
+
+    Zero surviving candidates ⇒ an honest empty selection badged
+    ``cold_start:0_neighbours`` — never an error.
+    """
+    # (1) schema-version contamination is structurally impossible.
+    if query.feature_schema_version != scaler.feature_schema_version:
+        raise ValueError(
+            f"query feature_schema_version {query.feature_schema_version!r} does not match "
+            f"scaler {scaler.feature_schema_version!r}; refusing cross-schema retrieval"
+        )
+
+    # (2) PIT re-assertion — no future candidate may reach the ranking.
+    future = [v for v in views if v.case.available_at > query.as_of]
+    if future:
+        raise FutureDataRefused(
+            f"retrieve_neighbours saw {len(future)} case(s) available after as_of "
+            f"{query.as_of.isoformat()} (the fold must filter before retrieval)",
+            future_rows=len(future),
+        )
+
+    # (3) same-feature-schema candidates only.
+    candidates = [v for v in views if v.case.feature_schema_version == query.feature_schema_version]
+    visible_case_count = len(candidates)
+
+    # (4) overlap gate + normalized standardized-Euclidean distance.
+    scaler_keys = set(scaler.mu)  # the non-degenerate (standardizable) keys
+    query_scaler_keys = set(query.features) & scaler_keys
+    denominator = len(query_scaler_keys)
+
+    neighbours: list[ExperienceNeighbour] = []
+    if denominator:
+        for view in candidates:
+            case = view.case
+            shared = query_scaler_keys & set(case.features)
+            overlap = len(shared) / denominator
+            if overlap < MIN_FEATURE_OVERLAP or not shared:
+                continue
+            acc = 0.0
+            for fid in shared:
+                spread = scaler.sd[fid]
+                q_z = (query.features[fid] - scaler.mu[fid]) / spread
+                c_z = (case.features[fid] - scaler.mu[fid]) / spread
+                delta = q_z - c_z
+                acc += delta * delta
+            distance = math.sqrt(acc) / math.sqrt(len(shared))
+            neighbours.append(
+                ExperienceNeighbour(
+                    case_id=case.id,
+                    case_as_of=case.as_of,
+                    distance=distance,
+                    feature_overlap=overlap,
+                    state=view.state,
+                    realized=view.realized,
+                    lesson=view.lesson,
+                )
+            )
+
+    # (5) deterministic top-k by (distance, case_id).
+    neighbours.sort(key=lambda n: (n.distance, n.case_id))
+    top = tuple(neighbours[: query.k])
+    badges: tuple[str, ...] = () if top else ("cold_start:0_neighbours",)
+
+    return ExperienceSelection.build(
+        query_digest=query.content_digest,
+        scaler_digest=scaler.content_digest,
+        feature_schema_version=query.feature_schema_version,
+        neighbours=top,
+        visible_case_count=visible_case_count,
+        badges=badges,
+    )
