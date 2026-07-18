@@ -37,8 +37,17 @@ with no network / file / store I/O (asserted by an import-surface inspection in
    returns ``status="unavailable"`` with reasons rather than fabricating a governance
    number (brief invariant 5).
 
-The D6 revision-throttle primitive is a **separate later task** and is deliberately
-not implemented here.
+4. **D6 revision-throttle.** :data:`REVISION_THROTTLE_MIN_MATURED` freezes the AMEND-5
+   overfitting red line ③ (spec:289) once at the governor, and
+   :func:`revision_throttle_check` is the pure admission pre-check on a revision
+   proposal (a revision = a new study in the same family): the previous
+   ``definition_version`` must carry at least N matured observations at the family's own
+   frequency before a fresh revision is admitted. An **unknown frequency is rejected**
+   (never a silent default-allow) — the same honesty construction as L2
+   ``status="unavailable"``. The matured observation count is supplied by the caller
+   under PIT matured semantics (data source = the Phase 5 matured-case grader); this
+   module ships the rule only and never binds the data. It is deliberately **not** wired
+   into :meth:`Governor.should_stop` or ``run_optimize``.
 """
 from __future__ import annotations
 
@@ -61,6 +70,7 @@ __all__ = [
     "GOVERNOR_VERSION",
     "STUDY_FAMILY_DOMAIN",
     "FAMILY_ATTESTATION_DOMAIN",
+    "REVISION_THROTTLE_MIN_MATURED",
     "FamilyAttestationError",
     "cscv_pbo",
     "oos_verdict",
@@ -69,6 +79,7 @@ __all__ = [
     "verify_family_attestation",
     "effective_n_trials",
     "complexity_score",
+    "revision_throttle_check",
     "Governor",
 ]
 
@@ -79,6 +90,12 @@ GOVERNOR_VERSION = "governor-v1"
 STUDY_FAMILY_DOMAIN = "study-family-v1"
 #: Domain tag for the governor's family attestation digest.
 FAMILY_ATTESTATION_DOMAIN = "study-family-attestation-v1"
+#: D6 revision-throttle minimum matured-observation counts, keyed by the family's own
+#: frequency (AMEND-5 red line ③, spec:289). The unit is that frequency's matured
+#: observation span — ``monthly`` = periods, ``daily`` = trading days. Frozen in the
+#: same batch as :data:`GOVERNOR_VERSION`; any frequency absent from this mapping is a
+#: hard reject in :func:`revision_throttle_check` (never a silent default-allow).
+REVISION_THROTTLE_MIN_MATURED = {"monthly": 3, "daily": 20}
 
 
 class FamilyAttestationError(ValueError):
@@ -367,6 +384,52 @@ def complexity_score(candidate: OptimizeCandidate) -> float:
             if isinstance(params, dict):
                 total_params += len(params)
     return float(n_nodes + n_edges + 0.1 * total_params)
+
+
+# --------------------------------------------------------------------------- #
+# D6 revision-throttle governance primitive                                   #
+# --------------------------------------------------------------------------- #
+def revision_throttle_check(
+    *, frequency: str, matured_observation_count: int
+) -> tuple[bool, str]:
+    """D6 admission pre-check on a revision proposal — ``(allowed, reason)``.
+
+    A revision is a **new study in the same family**; before one is admitted the
+    previous ``definition_version`` must carry at least
+    ``REVISION_THROTTLE_MIN_MATURED[frequency]`` matured observations at the family's own
+    frequency (AMEND-5 red line ③, spec:289). ``matured_observation_count`` is supplied
+    by the caller under PIT matured semantics (data source = the Phase 5 matured-case
+    grader); this function ships the rule only and never binds the data.
+
+    An **unknown ``frequency``** (any key absent from
+    :data:`REVISION_THROTTLE_MIN_MATURED`, e.g. ``"weekly"`` or ``""``) is **rejected**
+    with a named reason — never a silent default-allow, the same honesty construction as
+    the L2 governor's ``status="unavailable"``. Every returned path (allowed or blocked)
+    carries a non-empty ``reason``; every blocked path names the threshold ``N``.
+
+    Deliberately not wired into :meth:`Governor.should_stop` or ``run_optimize``: the
+    throttle is a proposal-admission check, not an optimize-round predicate.
+    """
+    threshold = REVISION_THROTTLE_MIN_MATURED.get(frequency)
+    if threshold is None:
+        known = ", ".join(sorted(REVISION_THROTTLE_MIN_MATURED))
+        return (
+            False,
+            f"revision throttle: unknown frequency {frequency!r}; no default-allow "
+            f"(governed frequencies: {known})",
+        )
+    count = int(matured_observation_count)
+    if count < threshold:
+        return (
+            False,
+            f"revision throttle: prior definition_version has {count} matured "
+            f"{frequency} observations (< {threshold} required)",
+        )
+    return (
+        True,
+        f"revision throttle: {count} matured {frequency} observations "
+        f"(>= {threshold} required)",
+    )
 
 
 # --------------------------------------------------------------------------- #

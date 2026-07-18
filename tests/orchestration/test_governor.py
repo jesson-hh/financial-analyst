@@ -36,6 +36,7 @@ import pytest
 from guanlan_v2.orchestration.governor import (
     FAMILY_ATTESTATION_DOMAIN,
     GOVERNOR_VERSION,
+    REVISION_THROTTLE_MIN_MATURED,
     STUDY_FAMILY_DOMAIN,
     FamilyAttestationError,
     Governor,
@@ -45,6 +46,7 @@ from guanlan_v2.orchestration.governor import (
     dsr,
     effective_n_trials,
     oos_verdict,
+    revision_throttle_check,
     verify_family_attestation,
 )
 from guanlan_v2.orchestration.trial import (
@@ -471,3 +473,70 @@ def test_no_io_module_level_import_surface():
         assert not name.startswith("guanlan_v2.workflow")
         assert not name.startswith("guanlan_v2.datafeed")
         assert not name.startswith("financial_analyst")
+
+
+# --------------------------------------------------------------------------- #
+# D6 revision-throttle governance primitive (Task 4b)                         #
+# --------------------------------------------------------------------------- #
+def test_revision_throttle_constant_frozen():
+    # the D6 ruling values (spec:289), frozen alongside GOVERNOR_VERSION.
+    assert REVISION_THROTTLE_MIN_MATURED == {"monthly": 3, "daily": 20}
+
+
+@pytest.mark.parametrize(
+    "frequency, count, allowed",
+    [
+        # boundary matrix (brief invariant 1)
+        ("monthly", 2, False),
+        ("monthly", 3, True),
+        ("monthly", 4, True),
+        ("daily", 19, False),
+        ("daily", 20, True),
+        ("daily", 21, True),
+    ],
+)
+def test_revision_throttle_boundary_matrix(frequency, count, allowed):
+    ok, reason = revision_throttle_check(
+        frequency=frequency, matured_observation_count=count
+    )
+    assert ok is allowed
+    # a reason string accompanies every path (allowed and blocked alike).
+    assert isinstance(reason, str) and reason
+
+
+@pytest.mark.parametrize(
+    "frequency, count",
+    [("monthly", 0), ("monthly", 2), ("daily", 0), ("daily", 19)],
+)
+def test_revision_throttle_blocked_reason_names_threshold(frequency, count):
+    # every blocked path names the threshold N in the reason (brief §Step 1).
+    ok, reason = revision_throttle_check(
+        frequency=frequency, matured_observation_count=count
+    )
+    assert ok is False
+    threshold = REVISION_THROTTLE_MIN_MATURED[frequency]
+    assert str(threshold) in reason
+    assert str(count) in reason
+
+
+@pytest.mark.parametrize("frequency", ["weekly", "", "1d", "annual"])
+def test_revision_throttle_unknown_frequency_rejected(frequency):
+    # unknown frequency ⇒ rejected with a named reason, never a silent
+    # default-allow — even with an enormous matured count (brief invariant 2).
+    ok, reason = revision_throttle_check(
+        frequency=frequency, matured_observation_count=10_000
+    )
+    assert ok is False
+    assert isinstance(reason, str) and reason
+    assert "frequency" in reason.lower()
+
+
+def test_revision_throttle_no_default_allow_for_unknown():
+    # the honesty construction: there is no frequency that is both unknown to
+    # REVISION_THROTTLE_MIN_MATURED and yet admitted.
+    for freq in ("MONTHLY", "Daily", "d", "m", "1mon", "bogus"):
+        assert freq not in REVISION_THROTTLE_MIN_MATURED
+        ok, _ = revision_throttle_check(
+            frequency=freq, matured_observation_count=1_000_000
+        )
+        assert ok is False
