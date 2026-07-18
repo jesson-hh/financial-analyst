@@ -108,10 +108,19 @@ PHASE5_MODULES: tuple[str, ...] = (
     "guanlan_v2.orchestration.bootstrap",
 )
 
-#: Deferred payloads frozen in later consumer phases. None exist yet; the guard
-#: proves they stay out of Phase 1 (registry, classification and namespaces).
+#: Deferred payloads whose ABSENCE FROM PHASE 1 this guard proves (registry,
+#: classification and namespaces). The five Phase-5 market-factor/regime/rotation
+#: payloads stay listed here for that Phase-1 absence half — they must never leak
+#: into the sealed Phase-1 surface — while Task 9 added the *presence half* (they
+#: now exist and register in the Phase-5 cumulative registry) as a PURE ADDITION,
+#: never a removal (the Phase-4 Trial/Holdout precedent: absence-in-Phase-1 AND
+#: presence-in-owning-phase-registry). See :data:`PHASE5_FLIPPED_PAYLOADS` and
+#: ``test_phase5_flipped_payloads_absent_from_phase1_present_in_phase5`` below; the
+#: full Phase-5 firewall lives in ``tests/orchestration/test_phase5_registry.py``.
+#: The Phase-6/8 names below have no owning-phase registry yet — pure absence.
 DEFERRED_PHASE_PAYLOADS: tuple[str, ...] = (
-    # Phase 5 — market-factor / regime / rotation layer
+    # Phase 5 — market-factor / regime / rotation layer (flipped: also present in
+    # the Phase-5 registry; the entries here remain the Phase-1 absence guard)
     "MarketFactorValue",
     "MarketFactorReport",
     "RegimeReport",
@@ -124,6 +133,18 @@ DEFERRED_PHASE_PAYLOADS: tuple[str, ...] = (
     "DecisionSchedule",
     # Phase 8 — debate layer
     "DebateMessage",
+)
+
+#: The five Phase-5 payloads whose presence half Task 9 added: each EXISTS as a
+#: public contract in a Phase-5 module and is registered in the Phase-5 cumulative
+#: registry, while staying absent from the sealed Phase-1 registry (retained in
+#: DEFERRED_PHASE_PAYLOADS above for the absence half — a pure addition).
+PHASE5_FLIPPED_PAYLOADS: tuple[str, ...] = (
+    "MarketFactorValue",
+    "MarketFactorReport",
+    "RegimeReport",
+    "RealizedRegime",
+    "RotationReport",
 )
 
 #: Task-11 sealed-holdout evaluation types (Phase 4). Absent from Phase 1.
@@ -374,6 +395,52 @@ def test_deferred_phase_payloads_absent_from_every_module():
                 f"{name} is frozen in a later phase and must not be defined in "
                 f"{module_name}"
             )
+
+
+# --------------------------------------------------------------------------- #
+# Phase 5 guard flip (Task 9) — the five market-factor/regime/rotation payloads  #
+# now EXIST + register in the Phase-5 registry, staying absent from Phase 1       #
+# --------------------------------------------------------------------------- #
+def test_phase5_flipped_payloads_absent_from_phase1_present_in_phase5():
+    """The Phase-5 flip: absence-in-Phase-1 AND presence-in-Phase-5-registry.
+
+    Mirrors the Phase 4 Trial/Holdout flip (``test_no_trial_or_holdout_type_registered``):
+    a deferred payload guard graduates from "does not exist anywhere" to "absent
+    from the sealed Phase-1 registry/classification/modules, present as a public
+    contract registered in its owning phase's cumulative registry".
+    """
+    from guanlan_v2.orchestration import bootstrap
+
+    # -- absence half: never in the sealed Phase-1 registry or classification --
+    reg = default_registry()
+    registered_names = {e.schema_ref.name for e in reg.manifest()}
+    classified_names = {
+        m.__name__ for m in set(PHASE1_PUBLIC_MODELS) | set(INTERNAL_MODELS)
+    }
+    for name in PHASE5_FLIPPED_PAYLOADS:
+        assert name not in registered_names, f"{name} must stay out of the Phase-1 registry"
+        assert name not in classified_names, f"{name} must stay out of Phase-1 classification"
+        for module_name in PHASE1_MODULES:
+            module = importlib.import_module(module_name)
+            assert not hasattr(module, name), (
+                f"{name} is a Phase-5 payload and must not be defined in {module_name}"
+            )
+
+    # -- presence half: exists as a public contract + registered in Phase 5 ----
+    phase5_registered = {
+        e.schema_ref.name
+        for e in bootstrap.build_phase5_registry(
+            bootstrap.PHASE5_BASE_REGISTRY_DIGEST
+        ).manifest()
+    }
+    phase5_public_by_name = {m.__name__ for m in bootstrap.PHASE5_PUBLIC_MODELS}
+    for name in PHASE5_FLIPPED_PAYLOADS:
+        assert name in phase5_public_by_name, (
+            f"{name} must be a member of PHASE5_PUBLIC_MODELS"
+        )
+        assert name in phase5_registered, (
+            f"{name} must register in the Phase-5 cumulative registry"
+        )
 
 
 # --------------------------------------------------------------------------- #

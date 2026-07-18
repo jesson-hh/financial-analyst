@@ -63,6 +63,7 @@ from guanlan_v2.orchestration.catalog import (
     build_catalog_snapshot,
     catalog_material_digest,
     parse_skill_v1,
+    validate_catalog_snapshot,
 )
 from guanlan_v2.orchestration.catalog_runtime import (
     InMemoryMaterialSource,
@@ -75,6 +76,7 @@ from guanlan_v2.orchestration.digest import (
     DigestHex,
     DigestModel,
     NonEmptyStr,
+    NonNegativeInt,
     PositiveInt,
     canonical_json,
     content_digest,
@@ -87,6 +89,7 @@ from guanlan_v2.orchestration.enums import (
     Tier,
     ToolCallRequirement,
 )
+from guanlan_v2.orchestration.market import factors as _factors
 from guanlan_v2.orchestration.market.factors import (
     MARKET_FACTOR_REPORT_SCHEMA_REF,
     REGIME_REPORT_SCHEMA_REF,
@@ -94,7 +97,9 @@ from guanlan_v2.orchestration.market.factors import (
     market_factor_handler,
     render_factor_report_for_prompt,
 )
+from guanlan_v2.orchestration.memory import experience as _experience
 from guanlan_v2.orchestration.memory.experience import (
+    EXPERIENCE_PUBLIC_MODELS,
     EXPERIENCE_QUERY_SCHEMA_REF,
     EXPERIENCE_SELECTION_SCHEMA_REF,
     ExperienceQuery,
@@ -107,6 +112,7 @@ from guanlan_v2.orchestration.refs import (
     ContentRef,
     LogicalId,
     SchemaRef,
+    TypedPayloadRef,
 )
 from guanlan_v2.orchestration.runtime_contracts import (
     BridgeStaticSupportSummary,
@@ -149,8 +155,25 @@ __all__ = [
     "BootstrapRuntimeProfile",
     "bootstrap_runtime_profile",
     "BOOTSTRAP_RUNTIME_PROFILE",
+    # -- Task 9 bootstrap payload contracts (schema-frozen here; Task 10 glue) #
+    "BootstrapPlan",
+    "BootstrapContextManifest",
     # -- Task 9 chain surface ---------------------------------------------- #
     "BOOTSTRAP_PUBLIC_MODELS",
+    "PHASE5_PUBLIC_MODELS",
+    "PHASE5_INTERNAL_MODELS",
+    "PHASE5_INTERNAL_SURFACE",
+    "Phase5RegistryError",
+    "build_phase5_registry",
+    "FACTOR_MINER_WORKER_ID",
+    "MARKET_FACTOR_SET_SPEC_SCHEMA_REF",
+    "factor_miner_placeholder",
+    "build_phase5_catalog_snapshot",
+    "phase5_catalog_snapshot",
+    "PHASE5_BASE_REGISTRY_DIGEST",  # noqa: F822 — lazy via module __getattr__
+    "PHASE5_REGISTRY_DIGEST",  # noqa: F822 — lazy via module __getattr__
+    "PHASE5_BASE_CATALOG_DIGEST",  # noqa: F822 — lazy via module __getattr__
+    "PHASE5_CATALOG_DIGEST",  # noqa: F822 — lazy via module __getattr__
 ]
 
 _DIGEST_PLACEHOLDER = "0" * 64
@@ -923,3 +946,509 @@ BOOTSTRAP_PUBLIC_MODELS: tuple[type[DigestModel], ...] = (
     ExperiencePrefetchBinding,
     BootstrapRuntimeProfile,
 )
+
+
+# =========================================================================== #
+# Task 9 · bootstrap payload contracts (schema-frozen here; Task 10 adds the   #
+# builders / runtime glue against these frozen schemas — the golden changes     #
+# exactly once).                                                                #
+# =========================================================================== #
+class BootstrapPlan(DigestModel):
+    """The fixed, versioned, auditable bootstrap preset record (registered
+    ``BootstrapPlan@1``).
+
+    Freezes every knob of the Lane 0 bootstrap preset — the bound factor-set
+    identity + digest, the grader digest, the experience retrieval ``k``, the
+    per-node timeout and the budget request — so the preset is one reviewable,
+    content-digested value. Changing any field is a new preset version (never a
+    silent edit). Task 10 builds the concrete draft/admission glue against this
+    frozen schema.
+    """
+
+    schema_version: Literal["1"] = "1"
+    preset_id: Literal["bootstrap.lane0"] = "bootstrap.lane0"
+    preset_version: NonEmptyStr
+    factor_set_version: NonEmptyStr
+    factor_set_digest: DigestHex
+    grader_digest: DigestHex
+    experience_k: PositiveInt = Field(le=20)
+    node_timeout_sec: PositiveInt
+    budget_request_tokens: NonNegativeInt
+    budget_request_llm_invocations: NonNegativeInt
+    content_digest: DigestHex
+
+    SELF_DIGEST_FIELDS: ClassVar[frozenset[str]] = frozenset({"content_digest"})
+
+    @model_validator(mode="after")
+    def _verify(self) -> "BootstrapPlan":
+        if self.content_digest != self.semantic_digest():
+            raise ValueError("declared content_digest does not match canonical digest")
+        return self
+
+    @classmethod
+    def build(cls, **fields: Any) -> "BootstrapPlan":
+        try:
+            digest = cls.digest_of_fields(projection="semantic", **fields)
+        except (ValueError, TypeError, AttributeError, KeyError):
+            digest = _DIGEST_PLACEHOLDER
+        return cls(**fields, content_digest=digest)
+
+
+class BootstrapContextManifest(DigestModel):
+    """The honesty carrier for the bootstrap ContextSnapshot (registered
+    ``BootstrapContextManifest@1``).
+
+    Carries the frozen report refs and degradation badges of a bootstrap run as
+    an explicit payload, because Phase 1 owns the ``ContextSnapshot`` schema and
+    is not extended here (D6). Each ``None`` report ref must be named by a
+    matching ``regime_missing`` / ``rotation_missing`` badge — the explicit
+    ``unknown/degraded`` ContextSnapshot of spec §2.0 carried as payload honesty
+    rather than a fabricated ref. ``bootstrap_run_id`` is audit-only
+    (``SEMANTIC_EXCLUDE``): re-attesting byte-identical manifest content under a
+    different run id leaves the semantic identity stable.
+    """
+
+    schema_version: Literal["1"] = "1"
+    context_snapshot_digest: DigestHex
+    bootstrap_plan_digest: DigestHex
+    bootstrap_run_id: NonEmptyStr
+    market_factor_report_ref: TypedPayloadRef
+    regime_report_ref: TypedPayloadRef | None = None
+    rotation_report_ref: TypedPayloadRef | None = None
+    degradation_badges: tuple[NonEmptyStr, ...] = ()
+    content_digest: DigestHex
+
+    SEMANTIC_EXCLUDE: ClassVar[frozenset[str]] = frozenset({"bootstrap_run_id"})
+    SELF_DIGEST_FIELDS: ClassVar[frozenset[str]] = frozenset({"content_digest"})
+
+    @model_validator(mode="after")
+    def _verify(self) -> "BootstrapContextManifest":
+        badges = list(self.degradation_badges)
+        if badges != sorted(badges):
+            raise ValueError("degradation_badges must be canonically sorted")
+        if len(set(badges)) != len(badges):
+            raise ValueError("degradation_badges must be duplicate-free")
+        badge_set = set(badges)
+
+        self._require_ref(
+            self.market_factor_report_ref, "MarketFactorReport", "market_factor_report_ref"
+        )
+        self._require_optional_ref(
+            self.regime_report_ref, "RegimeReport", "regime_report_ref",
+            "regime_missing", badge_set,
+        )
+        self._require_optional_ref(
+            self.rotation_report_ref, "RotationReport", "rotation_report_ref",
+            "rotation_missing", badge_set,
+        )
+        if self.content_digest != self.semantic_digest():
+            raise ValueError("declared content_digest does not match canonical digest")
+        return self
+
+    @staticmethod
+    def _require_ref(ref: TypedPayloadRef, schema_name: str, label: str) -> None:
+        if ref.schema_ref.name != schema_name or ref.schema_ref.version != "1":
+            raise ValueError(f"{label} must resolve {schema_name}@1")
+        if ref.payload_ref.namespace != "main":
+            raise ValueError(f"{label} must reference a main-namespace payload")
+
+    @classmethod
+    def _require_optional_ref(
+        cls,
+        ref: TypedPayloadRef | None,
+        schema_name: str,
+        label: str,
+        missing_badge: str,
+        badge_set: set[str],
+    ) -> None:
+        if ref is None:
+            if missing_badge not in badge_set:
+                raise ValueError(
+                    f"{label}=None requires a {missing_badge!r} degradation badge"
+                )
+            return
+        cls._require_ref(ref, schema_name, label)
+        if missing_badge in badge_set:
+            raise ValueError(
+                f"a present {label} forbids the {missing_badge!r} badge (a present "
+                "report is not missing)"
+            )
+
+    @classmethod
+    def build(cls, **fields: Any) -> "BootstrapContextManifest":
+        try:
+            digest = cls.digest_of_fields(projection="semantic", **fields)
+        except (ValueError, TypeError, AttributeError, KeyError):
+            digest = _DIGEST_PLACEHOLDER
+        return cls(**fields, content_digest=digest)
+
+
+# =========================================================================== #
+# Task 9 · the reviewed Phase-5 public / internal contract partition           #
+# =========================================================================== #
+#: the exactly-17 registered Phase-5 payload/fact contracts the Phase-5
+#: cumulative registry resolves a :class:`SchemaRef` to (5 market-factor/report,
+#: 8 experience, 4 bootstrap). ``BootstrapRuntimeProfile`` is registered per the
+#: reviewed Option-4 ruling (it is a real Phase-5 model, not a static-runtime v1
+#: fork), so the golden freezes it — this is the "17 not 16" the plan's earlier
+#: 16-count predates.
+PHASE5_PUBLIC_MODELS: tuple[type[DigestModel], ...] = (
+    # market/factors.py (Tasks 1-2)
+    _factors.MarketFactorValue,
+    _factors.MarketFactorSetSpec,
+    _factors.MarketFactorReport,
+    _factors.RegimeReport,
+    _factors.RotationReport,
+    # memory/experience.py (Tasks 4-6) — RegimeGraderSpec already lives here
+    *EXPERIENCE_PUBLIC_MODELS,
+    # bootstrap.py (Tasks 8-9)
+    ExperiencePrefetchBinding,
+    BootstrapRuntimeProfile,
+    BootstrapPlan,
+    BootstrapContextManifest,
+)
+
+_R_NESTED = "nested value-object component embedded only inside a registered payload; never independently SchemaRef-resolved"
+_R_COMPUTE_CARRIER = "internal PIT compute-input carrier (loader/compute core); never a registered payload"
+_R_DERIVED_VIEW = "event-folded derived view / record; never a registered payload"
+
+#: the reviewed ``ContractModel -> reason`` map of every Phase-5 public contract
+#: model that is deliberately NOT registered. The Phase-5 completeness firewall
+#: (``tests/orchestration/test_phase5_registry.py``) proves
+#: ``PHASE5_PUBLIC_MODELS`` ∪ ``PHASE5_INTERNAL_MODELS`` partitions every public
+#: ``ContractModel`` defined across the three Phase-5 contract modules exactly.
+PHASE5_INTERNAL_MODELS: dict[type[DigestModel], str] = {
+    # market/factors.py nested value objects + report components
+    _factors.MarketFactorPoint: _R_NESTED,
+    _factors.MarketFactorDefinition: _R_NESTED,
+    _factors.FactorSummary: _R_NESTED,
+    _factors.FactorProvenance: _R_NESTED,
+    _factors.CoverageSummary: _R_NESTED,
+    _factors.EvidenceAnchor: _R_NESTED,
+    _factors.MainlineRead: _R_NESTED,
+    # market/factors.py PIT compute-input carriers (Task 3)
+    _factors.DailyValueRow: _R_COMPUTE_CARRIER,
+    _factors.UpDownRow: _R_COMPUTE_CARRIER,
+    _factors.PanelCloseRow: _R_COMPUTE_CARRIER,
+    _factors.BreakCountRow: _R_COMPUTE_CARRIER,
+    _factors.BoardPoolRow: _R_COMPUTE_CARRIER,
+    _factors.StringRow: _R_COMPUTE_CARRIER,
+    _factors.TapePoint: _R_COMPUTE_CARRIER,
+    _factors.MarketFactorInputs: _R_COMPUTE_CARRIER,
+    _factors.PanelAvailabilityRule: _R_COMPUTE_CARRIER,
+    # memory/experience.py nested / derived
+    _experience.ExperienceNeighbour: _R_NESTED,
+    _experience.CaseView: _R_DERIVED_VIEW,
+    _experience.SeedReport: _R_DERIVED_VIEW,
+}
+
+#: the reviewed reason map for the deliberately-unregistered NON-``ContractModel``
+#: Phase-5 surface (axis enums + service ports/carriers). These never reach the
+#: schema registry and are documented here so the full unregistered Phase-5
+#: surface is reviewed in one place (mirrors ``trial.PHASE4_INTERNAL_SURFACE``).
+PHASE5_INTERNAL_SURFACE: dict[str, str] = {
+    "TrendState": "Phase-5 trend axis enum (④§1; Chinese values per R6); a str Enum, not a payload",
+    "RiskState": "Phase-5 risk axis enum (④§1); a str Enum, not a payload",
+    "HeatState": "Phase-5 heat axis enum (④§1); a str Enum, not a payload",
+    "ExperienceLog": "event-sourced experience append/read service port; not a payload",
+    "ObservedTradeDateCalendar": "PIT trade-date calendar carrier (TradingCalendar impl); not a registered payload",
+    "CaseMaturityPending": "grader maturity-wakeup control carrier; not a payload",
+}
+
+
+# =========================================================================== #
+# Task 9 · the cumulative Phase-5 schema registry (linear chain over Phase 4)   #
+# =========================================================================== #
+class Phase5RegistryError(Exception):
+    """A Phase-5 cumulative-registry construction invariant was violated."""
+
+
+def _phase4_registry_digest() -> str:
+    from guanlan_v2.orchestration import trial
+
+    return trial.PHASE4_REGISTRY_DIGEST
+
+
+def _phase4_catalog_digest() -> str:
+    from guanlan_v2.orchestration import trial
+
+    return trial.PHASE4_CATALOG_DIGEST
+
+
+def build_phase5_registry(expected_phase4_digest: DigestHex):
+    """Build + seal the cumulative Phase-5 registry, pinned to the Phase-4 base.
+
+    Verifies ``expected_phase4_digest`` against the actual sealed Phase-4
+    cumulative registry digest first — any other base digest is rejected *before
+    any registration* — then registers the complete inherited cumulative set
+    (Phase-1 public + Phase-2 runtime facts + Phase-3 data + Phase-3 memory +
+    :data:`~guanlan_v2.orchestration.trial.PHASE4_PUBLIC_MODELS`) followed by
+    :data:`PHASE5_PUBLIC_MODELS` into a *fresh*
+    :class:`~guanlan_v2.orchestration.runtime_contracts.Phase2RuntimeRegistry`
+    and seals it. No upstream registry is mutated; a fresh sealed instance is
+    returned per call. Inherited JSON Schemas stay byte-identical to their
+    Phase-≤4 goldens; there is no "latest" alias.
+    """
+    from guanlan_v2.orchestration import trial
+    from guanlan_v2.orchestration.data.schema_registry import (
+        PHASE3_PUBLIC_MODELS as _DATA_PUBLIC,
+    )
+    from guanlan_v2.orchestration.memory.schema_registry import (
+        PHASE3_MEMORY_PUBLIC_MODELS as _MEM_PUBLIC,
+    )
+    from guanlan_v2.orchestration.runtime_contracts import (
+        Phase2RuntimeRegistry,
+        phase2_public_models,
+    )
+
+    actual = _phase4_registry_digest()
+    if expected_phase4_digest != actual:
+        raise Phase5RegistryError(
+            "build_phase5_registry requires the exact Phase-4 registry digest "
+            f"{actual!r}; got {expected_phase4_digest!r}"
+        )
+    reg = Phase2RuntimeRegistry()
+    for model in (
+        tuple(phase2_public_models())
+        + tuple(_DATA_PUBLIC)
+        + tuple(_MEM_PUBLIC)
+        + tuple(trial.PHASE4_PUBLIC_MODELS)
+        + PHASE5_PUBLIC_MODELS
+    ):
+        reg.register(model)
+    reg.seal()
+    return reg
+
+
+# =========================================================================== #
+# Task 9 · #25 market.factor_miner placeholder assembly (ruling R9)            #
+# =========================================================================== #
+#: the offline factor-mining research worker id (a catalog occupant only).
+FACTOR_MINER_WORKER_ID = "market.factor_miner"
+
+#: the draft-only primary output schema of the #25 placeholder (a battery-revision
+#: draft; the richer lifecycle-proposal schema belongs to the curator phase).
+MARKET_FACTOR_SET_SPEC_SCHEMA_REF = SchemaRef(name="MarketFactorSetSpec", version="1")
+
+#: the #25 placeholder's two physical materials (id, catalog kind, filename).
+_FACTOR_MINER_FILES: tuple[tuple[str, str, str], ...] = (
+    ("lane0.factor_miner.prompt", "prompt", "factor_miner_prompt.md"),
+    ("lane0.factor_miner.skill", "skill", "factor_miner_skill.md"),
+)
+
+
+@dataclass(frozen=True)
+class FactorMinerPlaceholder:
+    """The #25 ``market.factor_miner`` placeholder catalog contribution.
+
+    A *catalog slot only* (ruling R9): one ``final`` WorkerSpec plus its two
+    reviewed prompt/skill materials. No runtime handler is registered, no graph
+    references it, and it never participates in a seeder/e2e run — 占位装配 only.
+    真跑 stays deferred until the experience library matures.
+    """
+
+    worker: WorkerSpec
+    content_manifest: tuple[ContentManifestEntry, ...]
+    skill_manifest: tuple[SkillManifest, ...]
+    resolved: tuple[ResolvedMaterial, ...]
+    refs: Mapping[str, ContentRef]
+
+
+def factor_miner_placeholder(
+    materials_dir: Path = LANE0_MATERIALS_DIR,
+) -> FactorMinerPlaceholder:
+    """Assemble the #25 ``market.factor_miner`` placeholder from its material bytes.
+
+    Note the schema-forced deviation from the plan's ``selection_scope="static"``
+    wording: the frozen Phase-1 ``WorkerSpec`` schema (consume-don't-fork) only
+    admits ``selection_scope ∈ {"dynamic_allowed", "static_legacy_only"}`` and
+    requires a ``final`` worker to be ``"dynamic_allowed"``. The "never
+    dynamically selected" intent is therefore carried structurally — **no trusted
+    handler is registered** (it can never execute), it is **never referenced by
+    any preset graph or DAG**, and its offline/draft-only boundary is stated in
+    the prompt/skill material text.
+    """
+    refs: dict[str, ContentRef] = {}
+    materials: dict[str, ResolvedTextMaterial] = {}
+    content_entries: list[ContentManifestEntry] = []
+    skill_entries: list[SkillManifest] = []
+    for content_id, kind, filename in _FACTOR_MINER_FILES:
+        raw = (materials_dir / filename).read_bytes()
+        ref, mat = build_text_material(id=content_id, version="1", kind=kind, raw=raw)
+        refs[content_id] = ref
+        materials[content_id] = mat
+        if kind == "skill":
+            parsed = parse_skill_v1(mat.raw_utf8.decode("utf-8"))
+            skill_entries.append(SkillManifest(
+                ref=ref, name=parsed.name, summary=parsed.summary,
+                perfect_for=parsed.perfect_for, not_ideal_for=parsed.not_ideal_for,
+                critical_data_source_heading="⚠️ CRITICAL: Data Source Priority",
+                source_identity=_SOURCE_IDENTITY))
+        else:
+            content_entries.append(ContentManifestEntry(
+                ref=ref, kind=kind, name=content_id,
+                description="offline factor-battery miner system prompt (draft-only, R9 placeholder)",
+                source_identity=_SOURCE_IDENTITY))
+
+    worker = WorkerSpec(
+        id=FACTOR_MINER_WORKER_ID,
+        catalog_role="final",
+        selection_scope="dynamic_allowed",  # schema-forced; never selected (no handler / no graph)
+        lane="market",
+        persona="Offline factor-battery miner — draft-only research, zero trading authority (R9 placeholder)",
+        tier=Tier.WRITER,
+        execution=ExecutionSpec(
+            kind=ExecutionKind.LLM, model_tier="reasoner", thinking_budget=0
+        ),
+        system_prompt_ref=refs["lane0.factor_miner.prompt"],
+        skills=(SkillBinding(skill_ref=refs["lane0.factor_miner.skill"]),),
+        capability_allowlist=(),
+        read_categories=(),
+        inputs=(),
+        outputs=(OutputBinding(name="primary", schema_ref=MARKET_FACTOR_SET_SPEC_SCHEMA_REF),),
+        evidence_policy=EvidencePolicy(
+            tool_calls=ToolCallRequirement.FORBIDDEN,
+            require_input_refs=False,
+            require_number_anchors=False,
+            allow_unsourced_numbers=False,
+            optional_data_may_degrade=True,
+        ),
+        supported_modes=(DataMode.ONLINE, DataMode.PIT_REPLAY),
+        can_emit_decision=False,
+        decision_authority="none",
+    )
+    return FactorMinerPlaceholder(
+        worker=worker,
+        content_manifest=tuple(content_entries),
+        skill_manifest=tuple(skill_entries),
+        resolved=tuple(materials.values()),
+        refs=dict(refs),
+    )
+
+
+# =========================================================================== #
+# Task 9 · the cumulative Phase-5 catalog (Lane 0 finals + #25 placeholder)     #
+# =========================================================================== #
+PHASE5_CATALOG_VERSION = "phase5-full-v1"
+
+
+def build_phase5_catalog_snapshot(
+    phase4_snapshot: WorkerCatalogSnapshot,
+    *,
+    lane0: Lane0Catalog,
+    factor_miner: FactorMinerPlaceholder,
+) -> WorkerCatalogSnapshot:
+    """Extend the immutable Phase-4 catalog with the Lane 0 finals + #25 placeholder.
+
+    Rejects any base whose ``catalog_digest`` differs from the canonical Phase-4
+    cumulative catalog digest (the sole legal base), then adds **exactly four
+    final workers** — the three Lane 0 finals (``market.factor`` / ``market.regime``
+    / ``market.rotation``) plus the #25 ``market.factor_miner`` placeholder — and
+    the Lane 0 experience capability/bridge materials + the #25 prompt/skill
+    materials. Every inherited Phase-≤4 manifest entry and worker passes through
+    byte-identical; ``compat.*`` workers are untouched. Component material bytes
+    were byte-verified when ``lane0`` and ``factor_miner`` were assembled; this
+    merge combines the verified declarations, seals the cumulative
+    ``catalog_digest`` and re-validates every cross-reference.
+    """
+    base_digest = _phase4_catalog_digest()
+    if phase4_snapshot.catalog_digest != base_digest:
+        raise CatalogError(
+            "build_phase5_catalog_snapshot requires the canonical immutable Phase-4 "
+            f"catalog ({base_digest}); got base {phase4_snapshot.catalog_digest}"
+        )
+
+    content = (
+        tuple(phase4_snapshot.content_manifest)
+        + tuple(lane0.content_manifest)
+        + tuple(factor_miner.content_manifest)
+    )
+    skills = (
+        tuple(phase4_snapshot.skill_manifest)
+        + tuple(lane0.skill_manifest)
+        + tuple(factor_miner.skill_manifest)
+    )
+    caps = tuple(phase4_snapshot.capability_manifest) + tuple(lane0.capability_manifest)
+    workers = (
+        tuple(phase4_snapshot.workers) + tuple(lane0.workers) + (factor_miner.worker,)
+    )
+
+    _reject_collisions(content, lambda e: e.ref_key, "content material")
+    _reject_collisions(skills, lambda e: e.ref_key, "skill material")
+    _reject_collisions(caps, lambda e: e.ref_key, "capability")
+    _reject_collisions(workers, lambda w: w.id, "worker")
+
+    content_sorted = tuple(sorted(content, key=lambda e: e.ref_key))
+    skills_sorted = tuple(sorted(skills, key=lambda e: e.ref_key))
+    caps_sorted = tuple(sorted(caps, key=lambda e: e.ref_key))
+    workers_sorted = tuple(sorted(workers, key=lambda w: w.id))
+
+    fields: dict[str, Any] = dict(
+        catalog_version=PHASE5_CATALOG_VERSION,
+        content_manifest=content_sorted,
+        skill_manifest=skills_sorted,
+        capability_manifest=caps_sorted,
+        workers=workers_sorted,
+    )
+    try:
+        digest = WorkerCatalogSnapshot.digest_of_fields(projection="semantic", **fields)
+    except (ValueError, TypeError, AttributeError, KeyError):
+        digest = _DIGEST_PLACEHOLDER
+    try:
+        snapshot = WorkerCatalogSnapshot(**fields, catalog_digest=digest)
+    except Exception as exc:  # surface structural failures as CatalogError
+        raise CatalogError(f"phase5 catalog snapshot is not runnable: {exc}") from exc
+    validate_catalog_snapshot(snapshot)
+    return snapshot
+
+
+def _reject_collisions(items: Sequence[Any], keyfn: Any, label: str) -> None:
+    seen: set[Any] = set()
+    for item in items:
+        key = keyfn(item)
+        if key in seen:
+            raise CatalogError(
+                f"phase5 catalog {label} key collides with an inherited entry: {key!r}"
+            )
+        seen.add(key)
+
+
+def phase5_catalog_snapshot() -> WorkerCatalogSnapshot:
+    """The canonical immutable cumulative Phase-5 catalog snapshot.
+
+    Rebuilds the reviewed Phase-4 full catalog, the Lane 0 additions and the #25
+    placeholder the same way their owning modules assemble them, then merges them
+    into the cumulative Phase-5 catalog.
+    """
+    from guanlan_v2.orchestration import trial
+
+    base = trial.phase4_catalog_snapshot()
+    lane0 = load_lane0_catalog()
+    miner = factor_miner_placeholder()
+    return build_phase5_catalog_snapshot(base, lane0=lane0, factor_miner=miner)
+
+
+# --------------------------------------------------------------------------- #
+# Lazy canonical digests (PEP 562) — computed once, never a mutable "latest"    #
+# --------------------------------------------------------------------------- #
+_PHASE5_REGISTRY_DIGEST: str | None = None
+_PHASE5_CATALOG_DIGEST: str | None = None
+
+
+def __getattr__(name: str) -> Any:
+    global _PHASE5_REGISTRY_DIGEST, _PHASE5_CATALOG_DIGEST
+    if name == "PHASE5_BASE_REGISTRY_DIGEST":
+        return _phase4_registry_digest()
+    if name == "PHASE5_REGISTRY_DIGEST":
+        if _PHASE5_REGISTRY_DIGEST is None:
+            _PHASE5_REGISTRY_DIGEST = build_phase5_registry(
+                _phase4_registry_digest()
+            ).registry_digest
+        return _PHASE5_REGISTRY_DIGEST
+    if name == "PHASE5_BASE_CATALOG_DIGEST":
+        return _phase4_catalog_digest()
+    if name == "PHASE5_CATALOG_DIGEST":
+        if _PHASE5_CATALOG_DIGEST is None:
+            _PHASE5_CATALOG_DIGEST = phase5_catalog_snapshot().catalog_digest
+        return _PHASE5_CATALOG_DIGEST
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
