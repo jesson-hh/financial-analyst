@@ -70,6 +70,19 @@ PHASE1_MODULES: tuple[str, ...] = (
     "guanlan_v2.orchestration.migration",
 )
 
+#: Phase 4 (Evaluator-Optimizer / Governor) contract modules. These define public
+#: ``ContractModel`` subclasses but are governed by the Phase 4 completeness
+#: firewall (``PHASE4_PUBLIC_MODELS`` / ``PHASE4_INTERNAL_MODELS`` in ``trial.py``,
+#: frozen in Phase 4 Task 9), NOT the Phase 1 buckets — so the discovery firewall
+#: below excludes them from the Phase-1 ``missing`` check. The Phase 1
+#: classification tests (which key off ``DISCOVERED``, derived only from
+#: ``PHASE1_MODULES``) never see them, so no Phase-4 public model is mislabeled as
+#: a Phase-1 internal model. Task 9 grows this tuple for the remaining Phase 4
+#: modules (governor / trial_ledger / sealed / evaluator / optimize).
+PHASE4_MODULES: tuple[str, ...] = (
+    "guanlan_v2.orchestration.trial",
+)
+
 #: Deferred payloads frozen in later consumer phases. None exist yet; the guard
 #: proves they stay out of Phase 1 (registry, classification and namespaces).
 DEFERRED_PHASE_PAYLOADS: tuple[str, ...] = (
@@ -166,11 +179,14 @@ def test_phase1_modules_lists_every_module_defining_a_public_contract_model():
     defining = _modules_defining_public_contract_models()
     # sanity: the walk found the known payload-bearing modules (not silently empty)
     assert "guanlan_v2.orchestration.schemas" in defining
-    missing = defining - set(PHASE1_MODULES)
+    # Phase 4 contract modules are governed by the Phase 4 firewall (Task 9), not
+    # the Phase 1 buckets, so they are excluded from the Phase-1 review here.
+    missing = defining - set(PHASE1_MODULES) - set(PHASE4_MODULES)
     assert not missing, (
         "these modules define a public ContractModel subclass but are absent from "
-        "PHASE1_MODULES, so the completeness firewall would never review their "
-        "contracts — add them to PHASE1_MODULES: " + ", ".join(sorted(missing))
+        "PHASE1_MODULES (and are not Phase 4 modules), so the completeness firewall "
+        "would never review their contracts — add them to PHASE1_MODULES: "
+        + ", ".join(sorted(missing))
     )
 
 
