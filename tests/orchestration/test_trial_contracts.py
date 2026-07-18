@@ -30,19 +30,28 @@ import pytest
 from pydantic import ValidationError
 
 from guanlan_v2.orchestration.digest import DigestModel, content_digest
-from guanlan_v2.orchestration.enums import Confidence
+from guanlan_v2.orchestration.enums import Confidence, ExperimentStatus
+from guanlan_v2.orchestration.refs import PayloadRef, SchemaRef, TypedPayloadRef
 from guanlan_v2.orchestration.trial import (
     CANDIDATE_HASH_DOMAIN,
     STUDY_FAMILY_DOMAIN,
     Feedback,
     GateResult,
     GovernanceReport,
+    HoldoutLease,
+    HoldoutReceipt,
+    HoldoutWindow,
     HonestyGateReport,
     OptimizeCandidate,
+    OptimizeResult,
     OptimizeRound,
+    OptimizeRunState,
+    SealedCapability,
+    SealedEvaluationRecord,
     SplitSpec,
     StudyFamily,
     StudySpec,
+    TrialRecord,
     ValidationMetrics,
 )
 
@@ -552,3 +561,427 @@ def test_round_rejects_naive_datetime():
             experiment_id="e", round_index=0, candidate_hash=DA,
             created_at=datetime(2026, 7, 15, 3, 0),  # naive
         )
+
+
+# =========================================================================== #
+# Task 2 — trial / holdout / sealed record contracts                          #
+# =========================================================================== #
+FAM = "fam." + DA[:16]
+
+
+def _window(**over) -> HoldoutWindow:
+    base = dict(
+        holdout_window_id="win-2025q1",
+        family_identity_digest=DA,
+        start_at=_dt(1, 0),
+        end_at=_dt(2, 0),
+        matured_at=_dt(3, 0),
+        data_snapshot_id="snap-1",
+        vintage_manifest_digest=DB,
+        non_overlap_attestation=DC,
+    )
+    base.update(over)
+    return HoldoutWindow(**base)
+
+
+def _trial_validation(**over) -> TrialRecord:
+    base = dict(
+        trial_id="trial-v1",
+        family_id=FAM,
+        candidate_hash=DA,
+        data_snapshot_hash=DB,
+        split_spec_hash=DC,
+        code_prompt_model_hash=DD,
+        stage="validation",
+        status="reserved",
+        idempotency_key="idem-v1",
+        created_at=_dt(3, 0),
+    )
+    base.update(over)
+    return TrialRecord(**base)
+
+
+def _trial_validation_revealed(**over) -> TrialRecord:
+    base = dict(
+        status="revealed",
+        validation_result_artifact_id="art-v1",
+        result_digest=DE,
+        revealed_at=_dt(4, 0),
+        metrics_revealed=("rank_ic", "sharpe"),
+    )
+    base.update(over)
+    return _trial_validation(**base)
+
+
+def _trial_holdout(**over) -> TrialRecord:
+    base = dict(
+        trial_id="trial-h1",
+        family_id=FAM,
+        candidate_hash=DA,
+        data_snapshot_hash=DB,
+        split_spec_hash=DC,
+        code_prompt_model_hash=DD,
+        stage="sealed_holdout",
+        status="reserved",
+        holdout_window_id="win-1",
+        holdout_lease_id="lease-1",
+        lease_state="reserved",
+        idempotency_key="idem-h1",
+        created_at=_dt(3, 0),
+    )
+    base.update(over)
+    return TrialRecord(**base)
+
+
+def _run_state(**over) -> OptimizeRunState:
+    base = dict(
+        experiment_id="exp-1",
+        family_id=FAM,
+        status=ExperimentStatus.RUNNING,
+        updated_at=_dt(3, 0),
+    )
+    base.update(over)
+    return OptimizeRunState(**base)
+
+
+def _receipt(**over) -> HoldoutReceipt:
+    base = dict(
+        trial_id="trial-h1",
+        family_id=FAM,
+        holdout_window_id="win-1",
+        status="failed",
+    )
+    base.update(over)
+    return HoldoutReceipt(**base)
+
+
+def _lease(**over) -> HoldoutLease:
+    base = dict(
+        lease_id="lease-1",
+        trial_id="trial-h1",
+        candidate_hash=DA,
+        holdout_window_id="win-1",
+        issued_at=_dt(1, 0),
+        expires_at=_dt(2, 0),
+        nonce="nonce-xyz",
+        signature=DB,
+    )
+    base.update(over)
+    return HoldoutLease(**base)
+
+
+def _typed_ref(namespace: str = "sealed") -> TypedPayloadRef:
+    return TypedPayloadRef(
+        schema_ref=SchemaRef(name="EquityCurve", version="1"),
+        payload_ref=PayloadRef(namespace=namespace, object_id="obj-1", content_digest=DA),
+    )
+
+
+def _sealed(**over) -> SealedEvaluationRecord:
+    base = dict(
+        trial_id="trial-h1",
+        result_artifact_id="art-sealed",
+        result_digest=DA,
+        metrics_payload={"rank_ic": 0.03, "sharpe": 1.4},
+        created_at=_dt(3, 0),
+    )
+    base.update(over)
+    return SealedEvaluationRecord(**base)
+
+
+def _capability(**over) -> SealedCapability:
+    base = dict(
+        token_id="tok-1",
+        scope="final_report",
+        principal_id="principal-1",
+        expires_at=_dt(5, 0),
+        signature=DA,
+    )
+    base.update(over)
+    return SealedCapability(**base)
+
+
+# --------------------------------------------------------------------------- #
+# HoldoutWindow — time ordering + prior-window hygiene                        #
+# --------------------------------------------------------------------------- #
+def test_window_time_ordering():
+    ok = _window()
+    assert ok.start_at < ok.end_at <= ok.matured_at
+    with pytest.raises(ValidationError):  # start_at >= end_at
+        _window(start_at=_dt(2, 0), end_at=_dt(2, 0))
+    with pytest.raises(ValidationError):  # end_at > matured_at
+        _window(end_at=_dt(4, 0), matured_at=_dt(3, 0))
+
+
+def test_window_end_may_equal_matured():
+    ok = _window(end_at=_dt(3, 0), matured_at=_dt(3, 0))
+    assert ok.end_at == ok.matured_at
+
+
+def test_window_prior_ids_dedup_and_exclude_self():
+    ok = _window(prior_window_ids=("win-a", "win-b"))
+    assert ok.prior_window_ids == ("win-a", "win-b")
+    with pytest.raises(ValidationError):  # contains its own id
+        _window(prior_window_ids=("win-a", "win-2025q1"))
+    with pytest.raises(ValidationError):  # duplicate
+        _window(prior_window_ids=("win-a", "win-a"))
+
+
+def test_window_data_snapshot_id_excluded_from_semantic_digest():
+    a = _window(data_snapshot_id="snap-1")
+    b = _window(data_snapshot_id="snap-2")
+    assert a.semantic_digest() == b.semantic_digest()
+    assert a.audit_digest_value() != b.audit_digest_value()
+
+
+# --------------------------------------------------------------------------- #
+# TrialRecord — stage / status / lease matrix                                 #
+# --------------------------------------------------------------------------- #
+def test_trial_validation_reserved_valid():
+    t = _trial_validation()
+    assert t.stage == "validation" and t.lease_state == "none"
+    assert t.holdout_window_id is None and t.holdout_lease_id is None
+
+
+def test_trial_validation_forbids_holdout_fields():
+    with pytest.raises(ValidationError):
+        _trial_validation(holdout_window_id="win-1")
+    with pytest.raises(ValidationError):
+        _trial_validation(holdout_lease_id="lease-1")
+    with pytest.raises(ValidationError):
+        _trial_validation(lease_state="reserved")
+
+
+def test_trial_holdout_cannot_carry_metrics():
+    # even a revealed holdout cannot carry a metric name (public-record emptiness)
+    with pytest.raises(ValidationError):
+        _trial_holdout(status="revealed", lease_state="consumed", metrics_revealed=("rank_ic",))
+
+
+def test_trial_holdout_cannot_carry_validation_artifact():
+    with pytest.raises(ValidationError):
+        _trial_holdout(
+            status="revealed", lease_state="consumed", validation_result_artifact_id="art-x"
+        )
+
+
+def test_trial_reserved_forbids_results():
+    with pytest.raises(ValidationError):  # result_digest
+        _trial_validation(result_digest=DA)
+    with pytest.raises(ValidationError):  # revealed_at
+        _trial_validation(revealed_at=_dt(4, 0))
+    with pytest.raises(ValidationError):  # non-empty metrics
+        _trial_validation(metrics_revealed=("rank_ic",))
+
+
+def test_trial_reserved_holdout_requires_reserved_lease():
+    assert _trial_holdout().lease_state == "reserved"
+    with pytest.raises(ValidationError):  # reserved holdout with consumed lease
+        _trial_holdout(lease_state="consumed")
+
+
+def test_trial_validation_revealed_requires_all_evidence():
+    assert _trial_validation_revealed()  # baseline valid
+    with pytest.raises(ValidationError):
+        _trial_validation_revealed(validation_result_artifact_id=None)
+    with pytest.raises(ValidationError):
+        _trial_validation_revealed(result_digest=None)
+    with pytest.raises(ValidationError):
+        _trial_validation_revealed(revealed_at=None)
+    with pytest.raises(ValidationError):
+        _trial_validation_revealed(metrics_revealed=())
+
+
+def test_trial_holdout_lease_state_matrix():
+    assert _trial_holdout(status="revealed", lease_state="consumed")  # ok
+    assert _trial_holdout(status="failed", lease_state="exhausted")  # ok
+    assert _trial_holdout(status="timed_out", lease_state="exhausted")  # ok
+    assert _trial_holdout(status="inconclusive", lease_state="exhausted")  # ok
+    with pytest.raises(ValidationError):  # revealed but exhausted
+        _trial_holdout(status="revealed", lease_state="exhausted")
+    with pytest.raises(ValidationError):  # failed but consumed
+        _trial_holdout(status="failed", lease_state="consumed")
+
+
+def test_trial_semantic_digest_excludes_audit_fields():
+    a = _trial_validation_revealed(trial_id="t-a", created_at=_dt(3, 0), revealed_at=_dt(4, 0))
+    b = _trial_validation_revealed(trial_id="t-b", created_at=_dt(9, 0), revealed_at=_dt(10, 30))
+    assert a.semantic_digest() == b.semantic_digest()
+    assert a.audit_digest_value() != b.audit_digest_value()
+
+
+# --------------------------------------------------------------------------- #
+# OptimizeRunState — WAITING_FOR_MATURITY biconditional                       #
+# --------------------------------------------------------------------------- #
+def test_run_state_waiting_requires_resume_and_wakeup():
+    ok = _run_state(
+        status=ExperimentStatus.WAITING_FOR_MATURITY,
+        resume_after=_dt(5, 0),
+        wakeup_key="wake-1",
+    )
+    assert ok.wakeup_key == "wake-1"
+    with pytest.raises(ValidationError):  # missing resume_after
+        _run_state(status=ExperimentStatus.WAITING_FOR_MATURITY, wakeup_key="wake-1")
+    with pytest.raises(ValidationError):  # missing wakeup_key
+        _run_state(status=ExperimentStatus.WAITING_FOR_MATURITY, resume_after=_dt(5, 0))
+
+
+def test_run_state_non_waiting_forbids_resume_and_wakeup():
+    with pytest.raises(ValidationError):
+        _run_state(status=ExperimentStatus.RUNNING, resume_after=_dt(5, 0))
+    with pytest.raises(ValidationError):
+        _run_state(status=ExperimentStatus.RUNNING, wakeup_key="wake-1")
+
+
+def test_run_state_updated_at_excluded_from_semantic_digest():
+    a = _run_state(updated_at=_dt(3, 0))
+    b = _run_state(updated_at=_dt(9, 0))
+    assert a.semantic_digest() == b.semantic_digest()
+    assert a.audit_digest_value() != b.audit_digest_value()
+
+
+# --------------------------------------------------------------------------- #
+# OptimizeResult — status-conditioned evidence                                #
+# --------------------------------------------------------------------------- #
+def test_result_passed_validation_requires_best_candidate():
+    st = _run_state(status=ExperimentStatus.PASSED_VALIDATION)
+    ok = OptimizeResult(state=st, best_candidate_artifact_id="art-best")
+    assert ok.best_candidate_artifact_id == "art-best"
+    with pytest.raises(ValidationError):
+        OptimizeResult(state=st, best_candidate_artifact_id=None)
+
+
+def test_result_failed_requires_stop_reason():
+    st = _run_state(status=ExperimentStatus.FAILED)
+    ok = OptimizeResult(state=st, stop_reason="trial_budget_exhausted")
+    assert ok.stop_reason == "trial_budget_exhausted"
+    with pytest.raises(ValidationError):
+        OptimizeResult(state=st, stop_reason=None)
+
+
+# --------------------------------------------------------------------------- #
+# HoldoutReceipt — frozen public surface, no sealed dereference               #
+# --------------------------------------------------------------------------- #
+def test_receipt_revealed_requires_digest_and_time():
+    ok = _receipt(status="revealed", result_digest=DE, revealed_at=_dt(4, 0))
+    assert ok.result_digest == DE
+    with pytest.raises(ValidationError):  # missing result_digest
+        _receipt(status="revealed", revealed_at=_dt(4, 0))
+    with pytest.raises(ValidationError):  # missing revealed_at
+        _receipt(status="revealed", result_digest=DE)
+
+
+def test_receipt_public_surface_is_exactly_six_fields():
+    assert set(HoldoutReceipt.model_fields) - {"schema_version"} == {
+        "trial_id",
+        "family_id",
+        "holdout_window_id",
+        "status",
+        "result_digest",
+        "revealed_at",
+    }
+
+
+def test_receipt_has_no_payload_ref_field():
+    # structural guarantee: a receipt can never dereference sealed content
+    for field in HoldoutReceipt.model_fields.values():
+        assert "PayloadRef" not in str(field.annotation)
+
+
+# --------------------------------------------------------------------------- #
+# HoldoutLease — expiry ordering                                              #
+# --------------------------------------------------------------------------- #
+def test_lease_expires_after_issue():
+    ok = _lease()
+    assert ok.expires_at > ok.issued_at
+    with pytest.raises(ValidationError):  # equal
+        _lease(expires_at=_dt(1, 0))
+    with pytest.raises(ValidationError):  # before
+        _lease(issued_at=_dt(2, 0), expires_at=_dt(1, 0))
+
+
+# --------------------------------------------------------------------------- #
+# SealedEvaluationRecord — sealed-namespace curve ref, audit created_at       #
+# --------------------------------------------------------------------------- #
+def test_sealed_record_created_at_excluded_from_semantic_digest():
+    a = _sealed(created_at=_dt(3, 0))
+    b = _sealed(created_at=_dt(9, 0))
+    assert a.semantic_digest() == b.semantic_digest()
+
+
+def test_sealed_record_curve_ref_must_be_sealed_namespace():
+    ok = _sealed(curve_ref=_typed_ref("sealed"))
+    assert ok.curve_ref.payload_ref.namespace == "sealed"
+    with pytest.raises(ValidationError):  # main-namespace curve ref rejected
+        _sealed(curve_ref=_typed_ref("main"))
+
+
+def test_sealed_record_metrics_payload_rejects_non_json():
+    with pytest.raises(ValidationError):
+        _sealed(metrics_payload={"bad": object()})
+
+
+# --------------------------------------------------------------------------- #
+# SealedCapability — closed scope literal                                     #
+# --------------------------------------------------------------------------- #
+def test_capability_scope_is_closed_literal():
+    assert _capability(scope="human_review").scope == "human_review"
+    with pytest.raises(ValidationError):
+        _capability(scope="optimizer")
+
+
+# --------------------------------------------------------------------------- #
+# Part-2 universal strict-base invariants                                     #
+# --------------------------------------------------------------------------- #
+def _part2_valid_kwargs_matrix():
+    return {
+        "HoldoutWindow": (HoldoutWindow, dict(
+            holdout_window_id="w", family_identity_digest=DA, start_at=_dt(1, 0),
+            end_at=_dt(2, 0), matured_at=_dt(3, 0), data_snapshot_id="s",
+            vintage_manifest_digest=DB, non_overlap_attestation=DC)),
+        "TrialRecord": (TrialRecord, dict(
+            trial_id="t", family_id=FAM, candidate_hash=DA, data_snapshot_hash=DB,
+            split_spec_hash=DC, code_prompt_model_hash=DD, stage="validation",
+            status="reserved", idempotency_key="k", created_at=_dt(3, 0))),
+        "OptimizeRunState": (OptimizeRunState, dict(
+            experiment_id="e", family_id=FAM, status=ExperimentStatus.RUNNING,
+            updated_at=_dt(3, 0))),
+        "OptimizeResult": (OptimizeResult, dict(
+            state=_run_state(status=ExperimentStatus.RUNNING))),
+        "HoldoutReceipt": (HoldoutReceipt, dict(
+            trial_id="t", family_id=FAM, holdout_window_id="w", status="failed")),
+        "HoldoutLease": (HoldoutLease, dict(
+            lease_id="l", trial_id="t", candidate_hash=DA, holdout_window_id="w",
+            issued_at=_dt(1, 0), expires_at=_dt(2, 0), nonce="n", signature=DB)),
+        "SealedEvaluationRecord": (SealedEvaluationRecord, dict(
+            trial_id="t", result_artifact_id="a", result_digest=DA,
+            metrics_payload={"x": 1}, created_at=_dt(3, 0))),
+        "SealedCapability": (SealedCapability, dict(
+            token_id="t", scope="final_report", principal_id="p",
+            expires_at=_dt(5, 0), signature=DA)),
+    }
+
+
+@pytest.mark.parametrize("name", list(_part2_valid_kwargs_matrix()))
+def test_part2_model_is_digest_model_and_rejects_unknown_field(name):
+    cls, kwargs = _part2_valid_kwargs_matrix()[name]
+    inst = cls(**kwargs)
+    assert isinstance(inst, DigestModel)
+    assert inst.schema_version == "1"
+    with pytest.raises(ValidationError):  # extra-forbid
+        cls(**{**kwargs, "totally_unknown_field": "x"})
+
+
+@pytest.mark.parametrize("name", list(_part2_valid_kwargs_matrix()))
+def test_part2_model_is_frozen(name):
+    cls, kwargs = _part2_valid_kwargs_matrix()[name]
+    inst = cls(**kwargs)
+    with pytest.raises(ValidationError):
+        inst.schema_version = "9"
+
+
+def test_part2_models_reject_naive_datetime():
+    with pytest.raises(ValidationError):  # HoldoutWindow naive
+        _window(matured_at=datetime(2026, 7, 15, 3, 0))
+    with pytest.raises(ValidationError):  # TrialRecord naive
+        _trial_validation(created_at=datetime(2026, 7, 15, 3, 0))

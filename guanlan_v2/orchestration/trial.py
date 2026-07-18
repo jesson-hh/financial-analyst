@@ -62,8 +62,8 @@ from guanlan_v2.orchestration.digest import (
     UtcDateTime,
     content_digest,
 )
-from guanlan_v2.orchestration.enums import Confidence
-from guanlan_v2.orchestration.refs import LogicalId
+from guanlan_v2.orchestration.enums import Confidence, ExperimentStatus
+from guanlan_v2.orchestration.refs import LogicalId, TypedPayloadRef
 
 __all__ = [
     "STUDY_FAMILY_DOMAIN",
@@ -78,6 +78,14 @@ __all__ = [
     "GovernanceReport",
     "HonestyGateReport",
     "OptimizeRound",
+    "HoldoutWindow",
+    "TrialRecord",
+    "OptimizeRunState",
+    "OptimizeResult",
+    "HoldoutReceipt",
+    "HoldoutLease",
+    "SealedEvaluationRecord",
+    "SealedCapability",
 ]
 
 #: domain tag that separates the study-family identity space from any other
@@ -542,3 +550,346 @@ class OptimizeRound(DigestModel):
     created_at: UtcDateTime
 
     SEMANTIC_EXCLUDE: ClassVar[frozenset[str]] = frozenset({"created_at"})
+
+
+# --------------------------------------------------------------------------- #
+# Holdout window                                                              #
+# --------------------------------------------------------------------------- #
+class HoldoutWindow(DigestModel):
+    """A non-overlapping, already-matured OOT holdout window.
+
+    Time discipline is structural: ``start_at < end_at <= matured_at`` (the window
+    ends no later than it matured, so a not-yet-matured window is unconstructible),
+    and ``prior_window_ids`` is duplicate-free and excludes this window's own id, so
+    a window can never claim to descend from itself. ``data_snapshot_id`` is a
+    storage locator (mirroring ``DataContext``) and is excluded from the semantic
+    digest — re-snapshotting identical vintage content under a new id leaves the
+    window's semantic identity stable; ``vintage_manifest_digest`` /
+    ``non_overlap_attestation`` carry the content-bearing evidence.
+    """
+
+    schema_version: Literal["1"] = "1"
+    holdout_window_id: NonEmptyStr
+    family_identity_digest: DigestHex
+    start_at: UtcDateTime
+    end_at: UtcDateTime
+    matured_at: UtcDateTime
+    data_snapshot_id: NonEmptyStr
+    vintage_manifest_digest: DigestHex
+    prior_window_ids: tuple[NonEmptyStr, ...] = ()
+    non_overlap_attestation: DigestHex
+
+    SEMANTIC_EXCLUDE: ClassVar[frozenset[str]] = frozenset({"data_snapshot_id"})
+
+    @model_validator(mode="after")
+    def _verify(self) -> "HoldoutWindow":
+        if not (self.start_at < self.end_at <= self.matured_at):
+            raise ValueError(
+                "HoldoutWindow requires start_at < end_at <= matured_at"
+            )
+        if self.holdout_window_id in self.prior_window_ids:
+            raise ValueError("prior_window_ids must not contain holdout_window_id")
+        if len(set(self.prior_window_ids)) != len(self.prior_window_ids):
+            raise ValueError("prior_window_ids must be duplicate-free")
+        return self
+
+
+# --------------------------------------------------------------------------- #
+# Trial record                                                                #
+# --------------------------------------------------------------------------- #
+class TrialRecord(DigestModel):
+    """The cross-run record of one trial — validation or sealed holdout.
+
+    The stage/status/lease matrix is enforced at the model so no code path can
+    publish an ill-formed trial (spec §7 public-record emptiness rule):
+
+    * ``stage="validation"`` carries no holdout locators and ``lease_state ==
+      "none"``;
+    * ``stage="sealed_holdout"`` carries the holdout window + lease and a live
+      ``lease_state``, and can **never** carry a ``validation_result_artifact_id``
+      or any ``metrics_revealed`` name — a metrics-bearing holdout record is
+      structurally unconstructible;
+    * ``status="reserved"`` carries no result/reveal evidence (and a holdout
+      reservation holds a ``reserved`` lease);
+    * a revealed validation trial carries its artifact id, ``result_digest``,
+      ``revealed_at`` and a non-empty ``metrics_revealed``; a revealed holdout
+      trial has ``lease_state == "consumed"``; a failed / timed-out / inconclusive
+      holdout trial has ``lease_state == "exhausted"`` (spec 运行不变量 line 937).
+
+    ``trial_id`` / ``created_at`` / ``revealed_at`` are audit identity and excluded
+    from the semantic digest, so the same governed evaluation fact digests
+    identically across re-issued ids and wall-clocks.
+    """
+
+    schema_version: Literal["1"] = "1"
+    trial_id: NonEmptyStr
+    family_id: LogicalId
+    candidate_hash: DigestHex
+    parent_trial_id: NonEmptyStr | None = None
+    data_snapshot_hash: DigestHex
+    split_spec_hash: DigestHex
+    code_prompt_model_hash: DigestHex
+    metrics_revealed: tuple[NonEmptyStr, ...] = ()
+    stage: Literal["validation", "sealed_holdout"]
+    status: Literal["reserved", "revealed", "failed", "timed_out", "inconclusive"]
+    validation_result_artifact_id: NonEmptyStr | None = None
+    result_digest: DigestHex | None = None
+    holdout_window_id: NonEmptyStr | None = None
+    holdout_lease_id: NonEmptyStr | None = None
+    lease_state: Literal["none", "reserved", "consumed", "exhausted"] = "none"
+    revealed_at: UtcDateTime | None = None
+    idempotency_key: NonEmptyStr
+    reused_from_trial_id: NonEmptyStr | None = None
+    created_at: UtcDateTime
+
+    SEMANTIC_EXCLUDE: ClassVar[frozenset[str]] = frozenset(
+        {"trial_id", "created_at", "revealed_at"}
+    )
+
+    @model_validator(mode="after")
+    def _matrix(self) -> "TrialRecord":
+        holdout = self.stage == "sealed_holdout"
+        # --- stage rules -------------------------------------------------- #
+        if not holdout:  # validation
+            if self.holdout_window_id is not None or self.holdout_lease_id is not None:
+                raise ValueError(
+                    "stage='validation' forbids holdout_window_id/holdout_lease_id"
+                )
+            if self.lease_state != "none":
+                raise ValueError("stage='validation' requires lease_state == 'none'")
+        else:  # sealed_holdout — the public-record emptiness rule
+            if self.validation_result_artifact_id is not None:
+                raise ValueError(
+                    "stage='sealed_holdout' forbids validation_result_artifact_id"
+                )
+            if self.metrics_revealed != ():
+                raise ValueError(
+                    "stage='sealed_holdout' forbids metrics_revealed "
+                    "(public-record emptiness)"
+                )
+            if self.holdout_window_id is None or self.holdout_lease_id is None:
+                raise ValueError(
+                    "stage='sealed_holdout' requires holdout_window_id and "
+                    "holdout_lease_id"
+                )
+            if self.lease_state == "none":
+                raise ValueError("stage='sealed_holdout' requires lease_state != 'none'")
+        # --- status rules ------------------------------------------------- #
+        if self.status == "reserved":
+            if self.result_digest is not None:
+                raise ValueError("status='reserved' forbids result_digest")
+            if self.revealed_at is not None:
+                raise ValueError("status='reserved' forbids revealed_at")
+            if self.metrics_revealed != ():
+                raise ValueError("status='reserved' forbids metrics_revealed")
+            if holdout and self.lease_state != "reserved":
+                raise ValueError(
+                    "reserved holdout trial requires lease_state == 'reserved'"
+                )
+        elif self.status == "revealed":
+            if not holdout:  # validation reveal
+                if self.validation_result_artifact_id is None:
+                    raise ValueError(
+                        "revealed validation trial requires "
+                        "validation_result_artifact_id"
+                    )
+                if self.result_digest is None:
+                    raise ValueError("revealed validation trial requires result_digest")
+                if self.revealed_at is None:
+                    raise ValueError("revealed validation trial requires revealed_at")
+                if not self.metrics_revealed:
+                    raise ValueError(
+                        "revealed validation trial requires a non-empty metrics_revealed"
+                    )
+            elif self.lease_state != "consumed":  # holdout reveal
+                raise ValueError("revealed holdout trial requires lease_state == 'consumed'")
+        else:  # failed / timed_out / inconclusive
+            if holdout and self.lease_state != "exhausted":
+                raise ValueError(
+                    f"holdout status={self.status!r} requires lease_state == 'exhausted'"
+                )
+        return self
+
+
+# --------------------------------------------------------------------------- #
+# Optimize run state + result                                                 #
+# --------------------------------------------------------------------------- #
+class OptimizeRunState(DigestModel):
+    """The persisted state of one optimize experiment.
+
+    ``updated_at`` is the audit wall-clock and is excluded from the semantic
+    digest. The maturity biconditional is structural: ``resume_after`` and
+    ``wakeup_key`` are present **iff** ``status ==
+    ExperimentStatus.WAITING_FOR_MATURITY`` — any other status carries neither, so
+    a persisted wakeup can only exist for a genuinely waiting experiment.
+    """
+
+    schema_version: Literal["1"] = "1"
+    experiment_id: NonEmptyStr
+    family_id: LogicalId
+    status: ExperimentStatus
+    candidate_hash: DigestHex | None = None
+    resume_after: UtcDateTime | None = None
+    wakeup_key: NonEmptyStr | None = None
+    updated_at: UtcDateTime
+
+    SEMANTIC_EXCLUDE: ClassVar[frozenset[str]] = frozenset({"updated_at"})
+
+    @model_validator(mode="after")
+    def _maturity_matrix(self) -> "OptimizeRunState":
+        waiting = self.status == ExperimentStatus.WAITING_FOR_MATURITY
+        has_resume = self.resume_after is not None
+        has_wakeup = self.wakeup_key is not None
+        if waiting:
+            if not (has_resume and has_wakeup):
+                raise ValueError(
+                    "status=WAITING_FOR_MATURITY requires resume_after and wakeup_key"
+                )
+        elif has_resume or has_wakeup:
+            raise ValueError(
+                "only status=WAITING_FOR_MATURITY may carry resume_after/wakeup_key"
+            )
+        return self
+
+
+class OptimizeResult(DigestModel):
+    """The terminal result of an optimize run over its :class:`OptimizeRunState`.
+
+    A ``PASSED_VALIDATION`` result names the winning ``best_candidate_artifact_id``;
+    a ``FAILED`` result carries an honest ``stop_reason`` (never a silent terminal).
+    """
+
+    schema_version: Literal["1"] = "1"
+    state: OptimizeRunState
+    best_candidate_artifact_id: NonEmptyStr | None = None
+    validation_trial_ids: tuple[NonEmptyStr, ...] = ()
+    stop_reason: NonEmptyStr | None = None
+
+    @model_validator(mode="after")
+    def _status_matrix(self) -> "OptimizeResult":
+        if (
+            self.state.status == ExperimentStatus.PASSED_VALIDATION
+            and self.best_candidate_artifact_id is None
+        ):
+            raise ValueError(
+                "state.status=PASSED_VALIDATION requires best_candidate_artifact_id"
+            )
+        if self.state.status == ExperimentStatus.FAILED and self.stop_reason is None:
+            raise ValueError("state.status=FAILED requires a stop_reason")
+        return self
+
+
+# --------------------------------------------------------------------------- #
+# Public holdout receipt                                                       #
+# --------------------------------------------------------------------------- #
+class HoldoutReceipt(DigestModel):
+    """The only public artifact of a sealed-holdout evaluation.
+
+    The receipt carries an opaque ``result_digest`` (when revealed) but **no**
+    ``PayloadRef`` / ``TypedPayloadRef`` / artifact-ref field — it can never
+    dereference the sealed metrics or curve. Its six-field surface is frozen so the
+    public information exposed by a holdout run cannot grow silently. A revealed
+    receipt carries the ``result_digest`` and ``revealed_at``; a terminal-failure
+    receipt carries neither.
+    """
+
+    schema_version: Literal["1"] = "1"
+    trial_id: NonEmptyStr
+    family_id: LogicalId
+    holdout_window_id: NonEmptyStr
+    status: Literal["revealed", "failed", "timed_out", "inconclusive"]
+    result_digest: DigestHex | None = None
+    revealed_at: UtcDateTime | None = None
+
+    @model_validator(mode="after")
+    def _revealed_matrix(self) -> "HoldoutReceipt":
+        if self.status == "revealed" and (
+            self.result_digest is None or self.revealed_at is None
+        ):
+            raise ValueError(
+                "status='revealed' requires result_digest and revealed_at"
+            )
+        return self
+
+
+# --------------------------------------------------------------------------- #
+# One-shot holdout lease                                                       #
+# --------------------------------------------------------------------------- #
+class HoldoutLease(DigestModel):
+    """A one-shot lease binding a candidate to a holdout window.
+
+    ``expires_at`` must be strictly after ``issued_at`` (a zero/negative-lived lease
+    is unconstructible). ``nonce`` + ``signature`` are the issuing gateway's
+    verifiable evidence; the lease is consumed / exhausted exactly once by the
+    ledger.
+    """
+
+    schema_version: Literal["1"] = "1"
+    lease_id: NonEmptyStr
+    trial_id: NonEmptyStr
+    candidate_hash: DigestHex
+    holdout_window_id: NonEmptyStr
+    issued_at: UtcDateTime
+    expires_at: UtcDateTime
+    nonce: NonEmptyStr
+    signature: DigestHex
+
+    @model_validator(mode="after")
+    def _expiry(self) -> "HoldoutLease":
+        if self.expires_at <= self.issued_at:
+            raise ValueError("HoldoutLease expires_at must be > issued_at")
+        return self
+
+
+# --------------------------------------------------------------------------- #
+# Sealed evaluation record + capability                                        #
+# --------------------------------------------------------------------------- #
+class SealedEvaluationRecord(DigestModel):
+    """The sealed detail of a holdout evaluation — readable only through a
+    capability-gated sealed store, never through the public :class:`HoldoutReceipt`.
+
+    ``metrics_payload`` is strict JSON-shaped detail (the exact ``PlanNode.params``
+    acceptance rule). ``curve_ref``, when present, must point into the ``sealed``
+    payload namespace — a ``main`` (public) namespace curve ref is rejected, so
+    sealed content cannot masquerade as a public payload. ``created_at`` is
+    audit-only.
+    """
+
+    schema_version: Literal["1"] = "1"
+    trial_id: NonEmptyStr
+    result_artifact_id: NonEmptyStr
+    result_digest: DigestHex
+    metrics_payload: dict[str, Any]
+    curve_ref: TypedPayloadRef | None = None
+    created_at: UtcDateTime
+
+    SEMANTIC_EXCLUDE: ClassVar[frozenset[str]] = frozenset({"created_at"})
+
+    @field_validator("metrics_payload")
+    @classmethod
+    def _json_shaped(cls, v: dict[str, Any]) -> dict[str, Any]:
+        return _ensure_json_shaped(v)
+
+    @model_validator(mode="after")
+    def _curve_namespace(self) -> "SealedEvaluationRecord":
+        if self.curve_ref is not None and self.curve_ref.payload_ref.namespace != "sealed":
+            raise ValueError(
+                "curve_ref must reference a 'sealed'-namespace payload; got "
+                f"{self.curve_ref.payload_ref.namespace!r}"
+            )
+        return self
+
+
+class SealedCapability(DigestModel):
+    """A capability token authorizing a principal to read sealed holdout content.
+
+    ``scope`` is a closed literal (``final_report`` / ``human_review``): the sealed
+    store admits no other reader scope. ``signature`` binds the issuing authority.
+    """
+
+    schema_version: Literal["1"] = "1"
+    token_id: NonEmptyStr
+    scope: Literal["final_report", "human_review"]
+    principal_id: NonEmptyStr
+    expires_at: UtcDateTime
+    signature: DigestHex
