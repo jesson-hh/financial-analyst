@@ -3,8 +3,9 @@
 
 现拉当前档(concept|industry)画板块图/排行;每次同时拉行业档做大盘分解与全A涨跌
 (行业板块=全市场互斥全覆盖划分,加总=全市场);概念/行业涨跌数=各档板块涨跌计数。
-每次真拉且(交易时段或显式 refresh)则向 var/fundflow/<当日>.jsonl 追加 concept+industry 两行快照。
-纯展示,绝不回写信号。"""
+本模块只维护 var/live/fundflow_live_<kind>.json 的 SWR 秒回缓存(read_live/read_history);
+EOD append-only 历史归档由 datafeed/snapshot_archive.py 只读本缓存另行沉淀(本模块不落历史;
+下方 _SNAP_DEFAULT 为母版 macro 抄来的死路径,留置不动)。纯展示,绝不回写信号。"""
 from __future__ import annotations
 
 import json

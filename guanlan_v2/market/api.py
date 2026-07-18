@@ -101,6 +101,11 @@ def start_market_status_scheduler() -> None:
                 if now.hour >= refresh_hour and last_sched_date != now.date():
                     if _trigger_refresh("scheduled"):
                         last_sched_date = now.date()
+                # 小 phase 甲:EOD 盘口/资金快照归档(env 闸 GUANLAN_SNAPSHOT_ARCHIVE=1 +
+                # 收盘后 15:05 + 当日 dedup,三门自控且自吞异常;只读 SWR 缓存文件,绝不挂
+                # read_tape/read_live 读路径,绝不触网)。
+                from guanlan_v2.datafeed.snapshot_archive import maybe_archive_eod
+                maybe_archive_eod(now=now)
             except Exception:  # noqa: BLE001 — 调度循环永不因单次异常退出
                 continue
 
