@@ -18,8 +18,9 @@ persist-then-publish event envelope and its visibility boundary:
   requires a ``visible_seq``.
 * Namespace boundary: a ``main`` (public) event cannot reference a
   ``sealed`` / ``review`` / ``audit`` payload namespace, and a non-public event
-  cannot masquerade as main-public. Trial / Holdout event types are deferred to
-  Task 11 and are absent from the frozen ``EventType`` set.
+  cannot masquerade as main-public. The Phase 4 (Task 3) additive Trial / Holdout
+  event types are now appended to the frozen ``EventType`` set (their per-type
+  payload rules are covered by ``test_trial_events.py``).
 * ``CommittedArtifactRef`` sequences are positive; ``LayerCommit.artifacts`` are
   unique and canonically sorted by ``artifact_seq``.
 * ``PlanApproval`` binds one request, an ``ApprovalDecision``, actor/reason and
@@ -119,12 +120,12 @@ def test_models_are_frozen_and_forbid_extra():
 
 
 # --------------------------------------------------------------------------- #
-# 1. Trial / Holdout event types are deferred (NOT in the frozen set)         #
+# 1. Phase 4 (Task 3) additively appended the Trial / Holdout event types      #
 # --------------------------------------------------------------------------- #
-def test_event_type_set_excludes_trial_and_holdout():
+def test_event_type_set_is_exactly_phase4_frozen():
     values = {m.value for m in EventType}
-    # the exact Phase-1 set is present …
-    assert {
+    # the exact 23-value frozen vocabulary: the 20 Phase-1 members …
+    assert values == {
         "RunRequested",
         "PlanDrafted",
         "PlanApproved",
@@ -145,12 +146,18 @@ def test_event_type_set_excludes_trial_and_holdout():
         "CaseCreated",
         "CaseMatured",
         "CaseReviewed",
-    } == values
-    # … and the deferred Trial / Holdout types are absent.
-    for deferred in ("TrialReserved", "TrialRevealed", "TrialExhausted"):
-        assert deferred not in values
+        # … plus the three Phase 4 (Task 3) additive Trial members.
+        "TrialReserved",
+        "TrialRevealed",
+        "TrialExhausted",
+    }
+    assert len(EventType) == 23
+    # building a TrialReserved with a TrialRecord-named schema ref succeeds …
+    ev = _event(event_type=EventType.TRIAL_RESERVED, payload_schema_ref=_schema_ref("TrialRecord"))
+    assert ev.event_type is EventType.TRIAL_RESERVED
+    # … and with any other schema name it fails (per-type payload rule).
     with pytest.raises(ValidationError):
-        _event(event_type="TrialReserved")
+        _event(event_type=EventType.TRIAL_RESERVED, payload_schema_ref=_schema_ref("HoldoutReceipt"))
 
 
 # --------------------------------------------------------------------------- #

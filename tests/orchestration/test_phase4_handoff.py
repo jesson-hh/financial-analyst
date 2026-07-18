@@ -24,8 +24,8 @@ It proves the eight points of ``.superpowers/sdd/task-0-brief.md`` Step 1:
    relocation = audit-only) is unchanged;
 3. ``ExperimentStatus`` (with ``WAITING_FOR_MATURITY`` / ``PASSED_VALIDATION`` /
    ``SEALED_EVALUATING``) resolves from ``enums.py`` and
-   ``EventType.EXPERIMENT_STATE_CHANGED`` exists — while the Trial/Holdout event
-   types are still absent (that half is deleted by Task 3's flip);
+   ``EventType.EXPERIMENT_STATE_CHANGED`` exists (the former Trial/Holdout-absence
+   half of this point was deleted by Task 3's additive ``events.py`` flip);
 4. the Phase 2 store/clock exports resolve with their public method surface, and
    ``refs.py`` payload namespaces include ``"sealed"`` with
    ``PUBLIC_PAYLOAD_NAMESPACES == frozenset({"main"})``;
@@ -305,18 +305,11 @@ def test_point3_experiment_state_changed_event_type_exists():
     assert EventType.EXPERIMENT_STATE_CHANGED.value == "ExperimentStateChanged"
 
 
-def test_point3_trial_and_holdout_event_types_are_still_absent():
-    """DELETED BY TASK 3: this half of point 3 asserts the pre-Phase-4 vocabulary.
-    Task 3's additive ``events.py`` extension adds ``TrialReserved`` /
-    ``TrialRevealed`` / ``TrialExhausted``; that same commit removes this test
-    (per the brief's Task 3 diff). Until then, the reserved names are absent."""
-    values = {m.value for m in EventType}
-    names = {m.name for m in EventType}
-    for reserved in ("TrialReserved", "TrialRevealed", "TrialExhausted"):
-        assert reserved not in values
-    for reserved in ("TRIAL_RESERVED", "TRIAL_REVEALED", "TRIAL_EXHAUSTED"):
-        assert reserved not in names
-    assert len(EventType) == 20  # the frozen Phase 1 vocabulary size
+# NOTE: the former ``test_point3_trial_and_holdout_event_types_are_still_absent``
+# (which pinned ``len(EventType) == 20`` and the absence of the reserved Trial
+# names) was DELETED BY TASK 3 as part of the additive ``events.py`` extension —
+# the reserved ``TrialReserved`` / ``TrialRevealed`` / ``TrialExhausted`` members
+# now exist and are covered by ``tests/orchestration/test_trial_events.py``.
 
 
 # =========================================================================== #

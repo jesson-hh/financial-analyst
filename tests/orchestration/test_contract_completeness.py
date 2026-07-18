@@ -264,9 +264,12 @@ def test_default_registry_registers_exactly_the_public_tuple():
 
 
 # --------------------------------------------------------------------------- #
-# Task-11 absence guard — no Trial / Holdout type in the sealed registry        #
+# Trial / Holdout guard (Task 3 flip) — absent from the sealed Phase-1 registry, #
+# present as public contracts in the Phase 4 module ``trial.py``                 #
 # --------------------------------------------------------------------------- #
 def test_no_trial_or_holdout_type_registered():
+    # Absence half (unchanged): no Trial/Holdout-prefixed schema resolves in the
+    # sealed Phase-1 registry — sealed-holdout evaluation is a Phase-4 concern.
     reg = default_registry()
     for entry in reg.manifest():
         name = entry.schema_ref.name
@@ -274,9 +277,33 @@ def test_no_trial_or_holdout_type_registered():
             f"Trial/Holdout type {name!r} is a Phase-4 deferral and must not be "
             "in the Phase-1 registry"
         )
+    # Presence half (Task 3 flip): the Trial/Holdout types now exist as public,
+    # versioned contract models in the Phase 4 module ``trial.py`` — the guard
+    # flipped from "does not exist" to "absent from Phase 1 AND present in Phase 4".
+    # The reviewed ``PHASE4_PUBLIC_MODELS`` tuple is frozen only in Phase 4 Task 9;
+    # until it lands, delegate to the module-defined public contracts via a lazy
+    # import (never importing ``trial.py`` into a Phase-1 source module).
+    trial = importlib.import_module("guanlan_v2.orchestration.trial")
+    for name in ("TrialRecord", "HoldoutWindow", "HoldoutReceipt", "HoldoutLease"):
+        model = getattr(trial, name, None)
+        assert model is not None, f"Phase 4 trial.py must define {name}"
+        assert inspect.isclass(model) and issubclass(model, ContractModel), (
+            f"trial.{name} must be a public ContractModel"
+        )
+        assert model.__module__ == "guanlan_v2.orchestration.trial"
+        assert name.startswith(TRIAL_HOLDOUT_PREFIXES)
 
 
 def test_no_trial_or_holdout_type_classified_or_defined():
+    """The Phase 4 Trial / Holdout contracts live ONLY in ``trial.py``.
+
+    No Trial/Holdout-prefixed contract is classified into a Phase-1 bucket, and no
+    Phase-1 module defines a module-level Trial/Holdout name. The Task-3 additive
+    ``EventType`` members (``TRIAL_RESERVED`` / ``TRIAL_REVEALED`` /
+    ``TRIAL_EXHAUSTED``) are class attributes of ``EventType`` — not module-level
+    names — so this sweep does not trip on them; their string values live inside
+    the enum class, and their per-type payload rules inside ``RunEvent``.
+    """
     for model in set(PHASE1_PUBLIC_MODELS) | set(INTERNAL_MODELS):
         assert not model.__name__.startswith(TRIAL_HOLDOUT_PREFIXES)
     for module_name in PHASE1_MODULES:

@@ -46,8 +46,16 @@ Visibility and namespace invariants
   payload namespace, and a non-public event cannot masquerade as main-public —
   so audit-only refusal detail never rides a public event.
 * Trial / Holdout event types (``TrialReserved`` / ``TrialRevealed`` /
-  ``TrialExhausted``) are deferred to Task 11 (Phase 4) and are absent from the
-  frozen :class:`EventType` set.
+  ``TrialExhausted``) are the Phase 4 (Task 3) **additive** extension: appended to
+  the :class:`EventType` set without renumbering or reordering the 20 Phase 1
+  members, and governed by an additive per-type payload-schema rule
+  (``TrialReserved`` ⇒ ``TrialRecord``; ``TrialRevealed`` ⇒ ``TrialRecord`` |
+  ``HoldoutReceipt``; ``TrialExhausted`` ⇒ ``HoldoutReceipt`` only on the public
+  ``main`` partition, ``HoldoutReceipt`` | ``TrialRecord`` on the non-public
+  ``audit`` ledger partition — the metrics restriction is scoped to the public
+  partition). The unchanged namespace-masquerade rule still bars any ``main``
+  trial event from referencing a ``sealed`` payload, so sealed holdout metrics
+  never ride a public event.
 """
 from __future__ import annotations
 
@@ -89,14 +97,18 @@ _DIGEST_PLACEHOLDER = "0" * 64
 
 
 # --------------------------------------------------------------------------- #
-# Closed event-type set (Trial / Holdout deferred to Task 11)                  #
+# Phase-1 event-type set + Phase 4 additive Trial / Holdout extension (Task 3)  #
 # --------------------------------------------------------------------------- #
 class EventType(str, Enum):
-    """The frozen Phase-1 run-event vocabulary.
+    """The run-event vocabulary: the 20 frozen Phase-1 members plus the three
+    Phase 4 (Task 3) additive Trial / Holdout members.
 
-    Trial / Holdout event types (``TrialReserved`` / ``TrialRevealed`` /
-    ``TrialExhausted``) are intentionally **absent**: sealed-holdout evaluation
-    is a Task 11 (Phase 4) concern and its event types are frozen there.
+    The 20 Phase-1 members keep their exact values and their original order.
+    ``TrialReserved`` / ``TrialRevealed`` / ``TrialExhausted`` are **appended**
+    (never renumbered or reordered): they are the sealed-holdout evaluation
+    vocabulary consumed by the Phase 4 ``TrialLedger``, and :class:`RunEvent`
+    enforces their per-type payload-schema rules additively (see
+    :meth:`RunEvent._trial_payload_rules`).
     """
 
     RUN_REQUESTED = "RunRequested"
@@ -119,6 +131,14 @@ class EventType(str, Enum):
     CASE_CREATED = "CaseCreated"
     CASE_MATURED = "CaseMatured"
     CASE_REVIEWED = "CaseReviewed"
+
+    # --- Phase 4 (Task 3) additive Trial / Holdout members --------------- #
+    # Appended after the 20 Phase-1 members; their values are exactly the names
+    # reserved in the Phase 1 deferral comments. Their per-type payload rules
+    # live in ``RunEvent._trial_payload_rules``.
+    TRIAL_RESERVED = "TrialReserved"
+    TRIAL_REVEALED = "TrialRevealed"
+    TRIAL_EXHAUSTED = "TrialExhausted"
 
 
 #: Closed set of event partitions — the visibility domain of an event. Only
@@ -200,6 +220,38 @@ class RunEvent(DigestModel):
             raise ValueError(
                 "a sealed/review/audit RunEvent cannot reference a "
                 "main/public payload (namespace masquerade)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _trial_payload_rules(self) -> "RunEvent":
+        """Phase 4 (Task 3) additive per-type payload-schema rules, expressed over
+        ``payload_schema_ref.name`` strings only — Phase 1 never imports ``trial.py``.
+
+        ``TrialExhausted`` is partition-conditional: the metrics restriction
+        (``HoldoutReceipt`` only) is scoped to the public ``main`` partition, so the
+        full terminal holdout ``TrialRecord`` audit copy stays constructible on the
+        non-public ``audit`` ledger partition. The pre-existing namespace-masquerade
+        rule is unaffected and still bars a ``main`` trial event from a ``sealed``
+        payload.
+        """
+        et = self.event_type
+        if et is EventType.TRIAL_RESERVED:
+            allowed = frozenset({"TrialRecord"})
+        elif et is EventType.TRIAL_REVEALED:
+            allowed = frozenset({"TrialRecord", "HoldoutReceipt"})
+        elif et is EventType.TRIAL_EXHAUSTED:
+            if self.partition in PUBLIC_EVENT_PARTITIONS:
+                allowed = frozenset({"HoldoutReceipt"})
+            else:
+                allowed = frozenset({"HoldoutReceipt", "TrialRecord"})
+        else:
+            return self
+        if self.payload_schema_ref.name not in allowed:
+            raise ValueError(
+                f"{et.value} on partition {self.partition!r} accepts payload "
+                f"schema name(s) {sorted(allowed)}, not "
+                f"{self.payload_schema_ref.name!r}"
             )
         return self
 
