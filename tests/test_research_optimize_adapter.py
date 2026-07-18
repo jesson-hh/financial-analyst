@@ -111,6 +111,11 @@ def test_first_round_pass_equivalence(monkeypatch, tmp_path):
     assert side_l["drafts"] == side_a["drafts"] == ["rank(-delta(close,5))"]
     assert side_l["graphs"] == side_a["graphs"]           # best graph stored identically
     assert "达标" in side_l["lessons"][-1] and "达标" in side_a["lessons"][-1]
+    # first-round pass: no critique ran, so the 诊断 tail is the propose diag on both paths.
+    # (Full-string equality is blocked only by the run_id-derived factor name in the draft
+    # lesson — a harness artifact, not a behaviour divergence — so lock the 诊断 tail.)
+    assert (side_l["lessons"][-1].rsplit("诊断:", 1)[-1]
+            == side_a["lessons"][-1].rsplit("诊断:", 1)[-1] == "初始生成(LLM propose)")
     assert end_a["memory_written"] is True
 
 
@@ -231,6 +236,11 @@ def test_exhausted_no_pass_same_best_round_equivalence(monkeypatch, tmp_path):
     assert end_l["best_k"] == end_a["best_k"] == 0             # equal rank_ic → first round wins
     assert side_l["graphs"] == side_a["graphs"] == [_G0]
     assert "未达标" in side_l["lessons"][-1] and "未达标" in side_a["lessons"][-1]
+    # the lesson's 诊断 tail is the loop's running diag = the LAST critique's diagnosis
+    # ("换更长窗口"), NOT the best round's diag ("初始生成…" for best_k==0). Full-string
+    # equality locks the divergence the 未达标 substring alone masked.
+    assert side_a["lessons"][-1].endswith("诊断:换更长窗口")
+    assert side_l["lessons"][-1] == side_a["lessons"][-1]
 
 
 # --------------------------------------------------------------------------- #
@@ -247,6 +257,7 @@ def test_propose_failure_honest_stop_equivalence(monkeypatch, tmp_path):
     assert end_l["promoted"] is None and end_a["promoted"] is None
     assert side_l["drafts"] == side_a["drafts"] == []
     assert "提案即失败" in side_l["lessons"][-1] and "提案即失败" in side_a["lessons"][-1]
+    assert side_l["lessons"][-1] == side_a["lessons"][-1]    # run_id-free lesson: full equality
 
 
 def test_eval_failure_round_continues_equivalence(monkeypatch, tmp_path):
@@ -258,6 +269,10 @@ def test_eval_failure_round_continues_equivalence(monkeypatch, tmp_path):
     assert end_l["n_rounds"] == end_a["n_rounds"] == 2       # failed eval round + passing round
     assert end_l["best_k"] == end_a["best_k"] == 1
     assert end_l["promoted"]["status"] == end_a["promoted"]["status"] == "draft"
+    # pass at round 1: the running diag is the round-1 critique's diagnosis on both paths;
+    # lock the 诊断 tail (draft factor name differs only by run_id — a harness artifact).
+    assert (side_l["lessons"][-1].rsplit("诊断:", 1)[-1]
+            == side_a["lessons"][-1].rsplit("诊断:", 1)[-1] == "换更长窗口")
 
 
 # --------------------------------------------------------------------------- #

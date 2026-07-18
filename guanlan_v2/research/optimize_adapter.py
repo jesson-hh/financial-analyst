@@ -31,6 +31,12 @@ Honesty inventory — what stays on the old path (explicit, reviewed)
   ``legacy_data_binding`` (a full Phase 3 ``build_data_context`` binding is deferred to
   the Phase 9 帷幄 adapter); a rule-critique fallback keeps its visible
   ``(规则兜底·非 LLM)`` badge; ``correlation_unadjusted`` is surfaced by the governor.
+* One known boundary divergence, out of production range: a *full* 8-round no-pass run
+  stops with ``trial_budget_exhausted`` (FAILED) after the 8th reveal against the
+  ``Governor(trial_budget=OPTIMIZE_MAX_ROUNDS=8)`` cap, where the old loop would exhaust
+  cleanly (``ok=True``). Never reached in production (``POST /research/loop/start`` clamps
+  ``max_rounds`` to ``1..5``) nor in the equivalence tests (``max_rounds ≤ 3``); the
+  governor budget behaving honestly, disclosed here (not only in the task report).
 
 Behaviour-equivalence seams (both paths script ONE behaviour)
 -------------------------------------------------------------
@@ -367,6 +373,11 @@ def research_improve(
         + str(cr.get("diagnosis") or ""))
     state.setdefault("diag_by_hash", {})[new_cand.candidate_hash] = diag
     state.setdefault("source_by_hash", {})[new_cand.candidate_hash] = source
+    # the loop's running ``diag`` (loop.py:393-395): the LAST critique's diagnosis, carried
+    # into the wrap-up lesson (loop.py:415/423). Recording it here lets the wrap-up align to
+    # latest-critique semantics instead of the best round's diag (which for best_k==0 would
+    # wrongly show the propose diag on a multi-round no-pass run).
+    state["latest_diag"] = diag
     return new_cand
 
 
@@ -563,7 +574,11 @@ def run_research_optimize(
     # ── best graph → workflow library + lesson (loop wrap-up parity) ──
     best_graph: Optional[Dict[str, Any]] = None
     best_metrics: Optional[Dict[str, Any]] = None
-    final_diag: Any = _PROPOSE_DIAG
+    # loop parity: the wrap-up lesson's 诊断 tail is the loop's running ``diag`` — the LAST
+    # critique's diagnosis seen during the run (loop.py:415/423), NOT the best round's diag;
+    # propose diag only when no critique ever ran. (Aligning to _display_meta(best_round)
+    # diverged for a multi-round no-pass run whose best round is round 0.)
+    final_diag: Any = imp_state.get("latest_diag", _PROPOSE_DIAG)
     if best_k is not None:
         best_round = next((r for r in archived if r.round_index == best_k), None)
         if best_round is not None:
@@ -571,8 +586,6 @@ def run_research_optimize(
             bcand = cand_by_hash.get(bh)
             best_graph = bcand.graph if bcand is not None else None
             best_metrics = (ex_by_hash.get(bh) or {}).get("metrics")
-            final_diag, _ = _display_meta(best_round.round_index, bh, diag_by_hash,
-                                          source_by_hash)
     ws = rl._save_graph(goal, run_id, best_graph) if best_graph is not None else None
 
     bm = best_metrics or {}
