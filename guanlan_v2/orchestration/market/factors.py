@@ -32,11 +32,15 @@ frozen digest is pinned by ``tests/orchestration/golden/market_factor_set_v1.jso
 from __future__ import annotations
 
 import math
+import statistics
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import AfterValidator, Field, StringConstraints, model_validator
 
+from guanlan_v2.orchestration.data.errors import FutureDataRefused
 from guanlan_v2.orchestration.digest import (
     DigestHex,
     DigestModel,
@@ -75,6 +79,23 @@ __all__ = [
     "MARKET_FACTOR_REPORT_SCHEMA_REF",
     "REGIME_REPORT_SCHEMA_REF",
     "ROTATION_REPORT_SCHEMA_REF",
+    # --- Task 3: deterministic PIT compute core + loaders + shield parity ---
+    "DailyValueRow",
+    "UpDownRow",
+    "PanelCloseRow",
+    "BreakCountRow",
+    "BoardPoolRow",
+    "StringRow",
+    "TapePoint",
+    "MarketFactorInputs",
+    "PanelAvailabilityRule",
+    "DEFAULT_AVAILABILITY_RULE",
+    "DEFAULT_UNIVERSE_REGISTRY_VERSION",
+    "TAPE_BACKFILLED_IGNORED_BADGE",
+    "compute_market_factors",
+    "load_market_factor_inputs",
+    "shield_inputs_from_factor_report",
+    "market_factor_handler",
 ]
 
 #: sealing placeholder used by the ``build`` classmethods when a raw field is
@@ -285,6 +306,12 @@ class MarketFactorValue(DigestModel):
 
     @model_validator(mode="after")
     def _verify(self) -> "MarketFactorValue":
+        # self-validator (Task 1 review carry): family is the factor_id prefix —
+        # a value can never mislabel its own family (hoisted off the assembler).
+        if self.family != self.factor_id.split(".", 1)[0]:
+            raise ValueError(
+                f"family {self.family!r} must equal the factor_id {self.factor_id!r} prefix"
+            )
         # series shape: strictly increasing dates, capped at 60, ≤ n_days.
         dates = [p.date for p in self.series]
         for a, b in zip(dates, dates[1:]):
@@ -991,3 +1018,923 @@ class RotationReport(DigestModel):
 MARKET_FACTOR_REPORT_SCHEMA_REF: SchemaRef = SchemaRef(name="MarketFactorReport", version="1")
 REGIME_REPORT_SCHEMA_REF: SchemaRef = SchemaRef(name="RegimeReport", version="1")
 ROTATION_REPORT_SCHEMA_REF: SchemaRef = SchemaRef(name="RotationReport", version="1")
+
+
+# =========================================================================== #
+# Task 3 — deterministic PIT factor compute core + PIT input loaders + shield   #
+# =========================================================================== #
+# The pure compute half. ①§0 honesty is structural: missing history is an
+# explicit UNAVAILABLE with a reason (never a zero-fill, never a current snapshot
+# masquerading as history), a future row anywhere raises Phase-3
+# ``FutureDataRefused``, and a backfilled tape snapshot is never a same-day
+# observation. The core imports nothing from screen/datafeed/macro/strategy
+# (invariant 6) — only the loader lazily imports those read-only surfaces.
+
+
+# --------------------------------------------------------------------------- #
+# Internal typed input rows (unregistered, reviewed-internal).                  #
+# --------------------------------------------------------------------------- #
+class DailyValueRow(DigestModel):
+    """One dated scalar observation with its PIT availability time."""
+
+    date: IsoDate
+    value: FiniteFloat
+    available_at: UtcDateTime
+
+
+class UpDownRow(DigestModel):
+    """Per-session advance/decline counts (breadth panel 口径)."""
+
+    date: IsoDate
+    up: NonNegativeInt
+    down: NonNegativeInt
+    total: PositiveInt
+    available_at: UtcDateTime
+
+
+class PanelCloseRow(DigestModel):
+    """One per-stock daily close (NH-NL / diffusion panel input)."""
+
+    date: IsoDate
+    code: NonEmptyStr
+    close: FiniteFloat
+    available_at: UtcDateTime
+
+
+class BreakCountRow(DigestModel):
+    """Per-session 涨停/炸板 counts — 炸板率 = zb/(zt+zb) is derived, never stored."""
+
+    date: IsoDate
+    zt: NonNegativeInt
+    zb: NonNegativeInt
+    available_at: UtcDateTime
+
+
+class BoardPoolRow(DigestModel):
+    """Per-session 连板梯队 pass-through (max_streak from real limit_days, 07-15 口径)."""
+
+    date: IsoDate
+    max_streak: NonNegativeInt
+    promotion_rate: FiniteFloat | None = None
+    available_at: UtcDateTime
+
+
+class StringRow(DigestModel):
+    """A dated string-valued carrier (涨停原因 / 领涨股 / universe diff — v1 unused)."""
+
+    date: IsoDate
+    value: NonEmptyStr
+    available_at: UtcDateTime
+
+
+class TapePoint(DigestModel):
+    """The today-only market_tape derived snapshot (`board_date`/`board_backfilled`).
+
+    A ``backfilled`` snapshot is never a same-day observation — the compute core
+    ignores it (badge ``tape_backfilled_ignored``). Every derived field is
+    nullable so 空池诚实 (an empty pool ⇒ ``None``, never ``0.0``) survives.
+    """
+
+    date: IsoDate
+    zt_count: NonNegativeInt | None = None
+    zb_count: NonNegativeInt | None = None
+    max_streak: NonNegativeInt | None = None
+    break_rate: FiniteFloat | None = None
+    promotion_rate: FiniteFloat | None = None
+    backfilled: bool
+    available_at: UtcDateTime
+
+
+#: the ordered series field names on :class:`MarketFactorInputs` (tuple carriers).
+_INPUT_SERIES_FIELDS: tuple[str, ...] = (
+    "updown", "closes_index", "closes_panel", "limit_up_total", "break_counts",
+    "board_pools", "astock_temp", "north_net", "main_net", "sector_flows",
+    "index_valuation", "concept_membership", "industry_returns",
+    "limit_reasons", "sector_leaders", "universe_versions",
+)
+
+
+class MarketFactorInputs(DigestModel):
+    """The PIT-windowed raw inputs for one battery run (internal, unregistered).
+
+    One optional named series per ``required_inputs`` id in the v1 factor set plus
+    the today-only ``today_tape``. Fields for sources with **no history store in
+    this repo** simply stay ``None`` in production (⇒ honest UNAVAILABLE
+    downstream); the compute core is total over every combination. Its
+    ``semantic_digest()`` is the report's ``data_snapshot_hash`` (the exact PIT
+    snapshot bound into the report).
+    """
+
+    updown: tuple[UpDownRow, ...] | None = None
+    closes_index: tuple[DailyValueRow, ...] | None = None
+    closes_panel: tuple[PanelCloseRow, ...] | None = None
+    limit_up_total: tuple[DailyValueRow, ...] | None = None
+    break_counts: tuple[BreakCountRow, ...] | None = None
+    board_pools: tuple[BoardPoolRow, ...] | None = None
+    astock_temp: tuple[DailyValueRow, ...] | None = None
+    north_net: tuple[DailyValueRow, ...] | None = None
+    main_net: tuple[DailyValueRow, ...] | None = None
+    sector_flows: tuple[DailyValueRow, ...] | None = None
+    index_valuation: tuple[DailyValueRow, ...] | None = None
+    concept_membership: tuple[DailyValueRow, ...] | None = None
+    industry_returns: tuple[DailyValueRow, ...] | None = None
+    limit_reasons: tuple[StringRow, ...] | None = None
+    sector_leaders: tuple[StringRow, ...] | None = None
+    universe_versions: tuple[StringRow, ...] | None = None
+    today_tape: TapePoint | None = None
+
+
+class PanelAvailabilityRule(DigestModel):
+    """The versioned assumption stamping ``available_at`` on daily observations.
+
+    ``session_close_utc`` is the reviewed knowable-time for an EOD daily bar
+    (``"07:05"`` = 15:05 Asia/Shanghai). Recorded into every produced
+    ``MarketFactorValue.params`` as ``availability_rule`` — the "when was a daily
+    bar knowable" assumption can never drift silently (invariant 7).
+    """
+
+    rule_version: NonEmptyStr
+    session_close_utc: NonEmptyStr
+
+
+#: the reviewed v1 availability rule (15:05 Asia/Shanghai daily-close knowability).
+DEFAULT_AVAILABILITY_RULE: PanelAvailabilityRule = PanelAvailabilityRule(
+    rule_version="avail-v1", session_close_utc="07:05"
+)
+#: the handler's default universe-registry version (题材/行业 taxonomy version).
+DEFAULT_UNIVERSE_REGISTRY_VERSION: str = "ureg-v1"
+#: report badge for a tape snapshot that was backfilled / foreign-date and ignored.
+TAPE_BACKFILLED_IGNORED_BADGE: str = "tape_backfilled_ignored"
+
+#: full-coverage target: a factor is ``OK`` at a full 60-session (D1) window;
+#: fewer valid sessions ⇒ ``DEGRADED`` at ``coverage = n_valid / 60``.
+_COVERAGE_TARGET: int = _MAX_SERIES_POINTS
+
+#: one-sentence missing-data semantics per factor (① ``missing_policy``).
+_MISSING_POLICY: dict[str, str] = {
+    "breadth.ad_ratio": "computed from the engine daily up/down breadth panel",
+    "breadth.nhnl": "computed from per-stock closes (new-high/new-low over 20/60 sessions)",
+    "breadth.limit_up_ema": "3-session EMA of the daily limit-up total",
+    "breadth.break_rate": "zb/(zt+zb) 炸板率 from the market_tape snapshot archive (young)",
+    "breadth.ladder_height": "最高连板 (limit_days 真连板口径) from the board-pool archive (young)",
+    "breadth.promotion_rate": "晋级率 (limit_days>=2 numerator) from the board-pool archive (young)",
+    "breadth.divergence": "z(index 20d return) − z(breadth 20d change) fitted on a trailing 250 window",
+    "flow.northbound": "5/20-session cumulative net + 250d percentile (unit 亿; no daily store in v1)",
+    "flow.main_pct": "250d percentile of whole-market main net inflow (unit 亿; no daily store in v1)",
+    "rot.hhi": "sector 净流入 HHI/top3 (needs the fundflow snapshot archive; deferred in v1)",
+    "rot.diffusion": "top3 净流入概念 上涨成分占比 (needs concept panel + archive; deferred in v1)",
+    "rot.dispersion": "industry 日收益截面 std (fid=f3 口径; needs the archive; deferred in v1)",
+    "rot.ladder_theme": "题材梯队占据度 (needs board pools + 涨停原因归因; deferred in v1)",
+    "rot.leader_persist": "top3 主线领涨股 5d 重合率 (needs 板块领涨股 archive; deferred in v1)",
+    "rot.flow_streak": "top3 主线连续净流入天数 (needs the fundflow archive; deferred in v1)",
+    "rot.theme_burst": "新题材首日爆发 (needs universe-version diff + board pools; deferred in v1)",
+    "vol.rv": "index RV20 + short/long ratio RV5/RV20 from the eqw daily return series",
+    "val.pct": "index PE/PB five-year percentile (no verified upstream in v1 — R5)",
+    "temp.astock": "打板温度 verbatim from the macro-pulse snapshots (accreting since 2026-07-06)",
+}
+
+#: rot.* + val.pct — deferred by construction in v1 (① archive/upstream not landed).
+_DEFERRED_FACTORS: dict[str, str] = {
+    "rot.hhi": "cross-sectional rotation series depends on the market_tape/fundflow "
+    "snapshot-archive deliverable (①§5); not computable in v1",
+    "rot.diffusion": "top3 净流入概念内上涨成分占比 needs the concept panel + snapshot "
+    "archive (①§5); deferred in v1",
+    "rot.dispersion": "industry cross-sectional std needs the行业排名 snapshot archive "
+    "(①§5); deferred in v1",
+    "rot.ladder_theme": "题材梯队占据度 needs board-pool + 涨停原因归因 archive (①§5); "
+    "deferred in v1",
+    "rot.leader_persist": "主线领涨股 5-session identity needs the fundflow archive (①§5); "
+    "deferred in v1",
+    "rot.flow_streak": "top3 主线连续净流入天数 needs the fundflow snapshot archive (①§5); "
+    "deferred in v1",
+    "rot.theme_burst": "新入 universe 题材首日 needs the universe-version diff archive (①§5); "
+    "deferred in v1",
+    "val.pct": "no verified index PE/PB five-year-percentile upstream (R5); the cited "
+    "baidu_valuation_percentile is per-stock only — deferred to a stocks-layer new source",
+}
+
+
+# --------------------------------------------------------------------------- #
+# Pure numeric helpers (stdlib-only; unit-tested in isolation).                 #
+# --------------------------------------------------------------------------- #
+def _sma(xs: list[float], window: int) -> list[float | None]:
+    """Trailing simple moving average; ``None`` before a full window."""
+    out: list[float | None] = [None] * len(xs)
+    for i in range(len(xs)):
+        if i >= window - 1:
+            out[i] = statistics.fmean(xs[i - window + 1 : i + 1])
+    return out
+
+
+def _ema(xs: list[float], span: int) -> list[float]:
+    """Exponential moving average (span → alpha = 2/(span+1)); seeded at ``xs[0]``."""
+    if not xs:
+        return []
+    alpha = 2.0 / (span + 1.0)
+    out = [xs[0]]
+    for x in xs[1:]:
+        out.append(alpha * x + (1.0 - alpha) * out[-1])
+    return out
+
+
+def _slope(ma: list[float | None], lag: int) -> list[float | None]:
+    """Per-session slope ``(ma[t] − ma[t−lag]) / lag`` where both ends exist."""
+    out: list[float | None] = [None] * len(ma)
+    for i in range(len(ma)):
+        if i >= lag and ma[i] is not None and ma[i - lag] is not None:
+            out[i] = (ma[i] - ma[i - lag]) / lag
+    return out
+
+
+def _zscore_trailing(xs: list[float | None], window: int) -> list[float | None]:
+    """Trailing-window z-score; ``None`` unless a *full* window of non-None ends at i.
+
+    Only data at or before the point enters the fit (walk-forward). A zero-variance
+    window yields ``0.0`` (never a division by zero).
+    """
+    out: list[float | None] = [None] * len(xs)
+    for i in range(len(xs)):
+        if i < window - 1:
+            continue
+        w = xs[i - window + 1 : i + 1]
+        if any(v is None for v in w):
+            continue
+        wf = [float(v) for v in w]
+        mean = statistics.fmean(wf)
+        sd = statistics.pstdev(wf)
+        out[i] = 0.0 if sd == 0 else (wf[-1] - mean) / sd
+    return out
+
+
+def _percentile_trailing(xs: list[float | None], window: int) -> list[float | None]:
+    """Trailing-window rank percentile (fraction ≤ current); full-window only."""
+    out: list[float | None] = [None] * len(xs)
+    for i in range(len(xs)):
+        if i < window - 1:
+            continue
+        w = xs[i - window + 1 : i + 1]
+        if any(v is None for v in w):
+            continue
+        cur = float(xs[i])
+        out[i] = sum(1 for v in w if float(v) <= cur) / window
+    return out
+
+
+def _compounded_return(rets: list[float | None], window: int) -> list[float | None]:
+    """Trailing compounded return ``∏(1+r) − 1`` over a full window of non-None."""
+    out: list[float | None] = [None] * len(rets)
+    for i in range(len(rets)):
+        if i < window - 1:
+            continue
+        w = rets[i - window + 1 : i + 1]
+        if any(v is None for v in w):
+            continue
+        prod = 1.0
+        for v in w:
+            prod *= 1.0 + float(v)
+        out[i] = prod - 1.0
+    return out
+
+
+def _yuan_to_yi(x: float) -> float:
+    """元 → 亿 (market_temp.py:125 conversion 口径)."""
+    return x / 1e8
+
+
+# --------------------------------------------------------------------------- #
+# Per-factor pure compute functions.                                           #
+# --------------------------------------------------------------------------- #
+# Each returns one of:
+#   ("ok", points, latest_available_at, force_reason_or_None)
+#   ("unavail", reason)
+def _ok(points, latest_at, force_reason=None):
+    return ("ok", points, latest_at, force_reason)
+
+
+def _unavail(reason: str):
+    return ("unavail", reason)
+
+
+def _short(name: str, have: int, need: int):
+    return _unavail(f"input {name!r} has {have} sessions (< {need} required)")
+
+
+def _missing(name: str):
+    return _unavail(f"required input {name!r} is not available (no history store in this repo)")
+
+
+def _sorted(seq) -> list:
+    return sorted(seq, key=lambda r: r.date)
+
+
+def _f_ad_ratio(inputs: "MarketFactorInputs", tape):
+    rows = inputs.updown
+    if rows is None:
+        return _missing("updown")
+    rows = _sorted(rows)
+    if len(rows) < 25:
+        return _short("updown", len(rows), 25)
+    ad = [(r.up - r.down) / r.total for r in rows]
+    ma5, ma20 = _sma(ad, 5), _sma(ad, 20)
+    slope = _slope(ma5, 20)
+    points = []
+    for i, r in enumerate(rows):
+        if ma5[i] is None or ma20[i] is None or slope[i] is None:
+            continue
+        points.append(
+            MarketFactorPoint(date=r.date, value=ad[i], aux={"ma5": ma5[i], "ma20": ma20[i], "slope": slope[i]})
+        )
+    return _ok(points, max(r.available_at for r in rows))
+
+
+def _f_nhnl(inputs: "MarketFactorInputs", tape):
+    rows = inputs.closes_panel
+    if rows is None:
+        return _missing("closes_panel")
+    dates = sorted({r.date for r in rows})
+    if len(dates) < 61:
+        return _short("closes_panel", len(dates), 61)
+    by_code: dict[str, dict[str, float]] = defaultdict(dict)
+    for r in rows:
+        by_code[r.code][r.date] = r.close
+    points = []
+    for ti in range(60, len(dates)):
+        d = dates[ti]
+        n_codes = nh20 = nl20 = nh60 = nl60 = 0
+        for closes in by_code.values():
+            if d not in closes:
+                continue
+            n_codes += 1
+            cur = closes[d]
+            p20 = [closes[dates[j]] for j in range(ti - 20, ti) if dates[j] in closes]
+            p60 = [closes[dates[j]] for j in range(ti - 60, ti) if dates[j] in closes]
+            if p20 and cur > max(p20):
+                nh20 += 1
+            if p20 and cur < min(p20):
+                nl20 += 1
+            if p60 and cur > max(p60):
+                nh60 += 1
+            if p60 and cur < min(p60):
+                nl60 += 1
+        if n_codes == 0:
+            continue
+        nhnl20 = (nh20 - nl20) / n_codes
+        nhnl60 = (nh60 - nl60) / n_codes
+        points.append(MarketFactorPoint(date=d, value=nhnl60, aux={"nhnl20": nhnl20, "nhnl60": nhnl60}))
+    return _ok(points, max(r.available_at for r in rows))
+
+
+def _f_limit_up_ema(inputs: "MarketFactorInputs", tape):
+    rows = inputs.limit_up_total
+    if rows is None:
+        return _missing("limit_up_total")
+    rows = _sorted(rows)
+    if len(rows) < 4:
+        return _short("limit_up_total", len(rows), 4)
+    ema = _ema([r.value for r in rows], 3)
+    points = [
+        MarketFactorPoint(date=r.date, value=ema[i], aux={"ema3": ema[i]})
+        for i, r in enumerate(rows)
+        if i >= 3
+    ]
+    return _ok(points, max(r.available_at for r in rows))
+
+
+def _tape_sessions(hist_pairs, tape, tape_value):
+    """Merge a per-date history (date → (value, available_at)) with a same-day tape
+    point; the tape point overrides a same-date history entry. Returns an ordered
+    ``[(date, value_or_None, available_at)]`` and the max available_at."""
+    merged: dict[str, tuple[float | None, datetime]] = dict(hist_pairs)
+    if tape is not None:
+        merged[tape.date] = (tape_value, tape.available_at)
+    if not merged:
+        return None, None
+    ordered = [(d, merged[d][0], merged[d][1]) for d in sorted(merged)]
+    latest = max(v[1] for v in merged.values())
+    return ordered, latest
+
+
+def _f_break_rate(inputs: "MarketFactorInputs", tape):
+    hist: list[tuple[str, tuple[float | None, datetime]]] = []
+    for r in _sorted(inputs.break_counts or ()):
+        tot = r.zt + r.zb
+        val = round(r.zb / tot, 4) if tot > 0 else None  # 空池诚实: gap, never 0.0
+        hist.append((r.date, (val, r.available_at)))
+    tape_val = round(tape.break_rate, 4) if (tape is not None and tape.break_rate is not None) else None
+    sessions, latest = _tape_sessions(hist, tape, tape_val)
+    if sessions is None:
+        return _missing("break_counts")
+    if len(sessions) < 5:
+        return _short("break_counts", len(sessions), 5)
+    points = [MarketFactorPoint(date=d, value=v) for d, v, _ in sessions if v is not None]
+    return _ok(points, latest)
+
+
+def _f_ladder_height(inputs: "MarketFactorInputs", tape):
+    hist = [(r.date, (float(r.max_streak), r.available_at)) for r in _sorted(inputs.board_pools or ())]
+    tape_val = float(tape.max_streak) if (tape is not None and tape.max_streak is not None) else None
+    sessions, latest = _tape_sessions(hist, tape, tape_val)
+    if sessions is None:
+        return _missing("board_pools")
+    if len(sessions) < 5:
+        return _short("board_pools", len(sessions), 5)
+    points = [MarketFactorPoint(date=d, value=v) for d, v, _ in sessions if v is not None]
+    return _ok(points, latest)
+
+
+_PROMOTION_RATE_REASON = (
+    "口径注记 (R4): numerator=limit_days>=2 (今日≥2连板家数/昨涨停池), diverges from "
+    "①严格首板晋级率; switching the numerator once the pool archive suffices is a new "
+    "definition_version, never a silent redefinition"
+)
+
+
+def _f_promotion_rate(inputs: "MarketFactorInputs", tape):
+    hist = [(r.date, (r.promotion_rate, r.available_at)) for r in _sorted(inputs.board_pools or ())]
+    tape_val = tape.promotion_rate if tape is not None else None
+    sessions, latest = _tape_sessions(hist, tape, tape_val)
+    if sessions is None:
+        return _missing("board_pools")
+    if len(sessions) < 5:
+        return _short("board_pools", len(sessions), 5)
+    points = [MarketFactorPoint(date=d, value=v) for d, v, _ in sessions if v is not None]
+    return _ok(points, latest, force_reason=_PROMOTION_RATE_REASON)
+
+
+def _f_divergence(inputs: "MarketFactorInputs", tape):
+    up_rows, ci_rows = inputs.updown, inputs.closes_index
+    if up_rows is None:
+        return _missing("updown")
+    if ci_rows is None:
+        return _missing("closes_index")
+    up_by = {r.date: r for r in up_rows}
+    ci_by = {r.date: r for r in ci_rows}
+    common = sorted(set(up_by) & set(ci_by))
+    if len(common) < 271:
+        return _short("closes_index+updown", len(common), 271)
+    rets = [ci_by[d].value for d in common]
+    ad = [(up_by[d].up - up_by[d].down) / up_by[d].total for d in common]
+    idx_ret20 = _compounded_return(rets, 20)
+    ad_ma20 = _sma(ad, 20)
+    ad_change: list[float | None] = [None] * len(common)
+    for i in range(len(common)):
+        if i >= 20 and ad_ma20[i] is not None and ad_ma20[i - 20] is not None:
+            ad_change[i] = ad_ma20[i] - ad_ma20[i - 20]
+    z_index = _zscore_trailing(idx_ret20, 250)
+    z_breadth = _zscore_trailing(ad_change, 250)
+    points = []
+    for i, d in enumerate(common):
+        if z_index[i] is None or z_breadth[i] is None:
+            continue
+        points.append(
+            MarketFactorPoint(
+                date=d, value=z_index[i] - z_breadth[i],
+                aux={"z_index": z_index[i], "z_breadth": z_breadth[i]},
+            )
+        )
+    latest = max(
+        max((up_by[d].available_at for d in common), default=inputs.updown[0].available_at),
+        max((ci_by[d].available_at for d in common), default=inputs.closes_index[0].available_at),
+    )
+    return _ok(points, latest)
+
+
+def _f_vol_rv(inputs: "MarketFactorInputs", tape):
+    rows = inputs.closes_index
+    if rows is None:
+        return _missing("closes_index")
+    rows = _sorted(rows)
+    if len(rows) < 21:
+        return _short("closes_index", len(rows), 21)
+    rets = [r.value for r in rows]
+    ann = math.sqrt(250)
+
+    def _rv(i: int, w: int) -> float:
+        return math.sqrt(sum(x * x for x in rets[i - w + 1 : i + 1])) * ann
+
+    points = []
+    for i, r in enumerate(rows):
+        if i < 20:  # need 20 returns for RV20 (min 21)
+            continue
+        rv20 = _rv(i, 20)
+        rv5 = _rv(i, 5)
+        ratio = rv5 / rv20 if rv20 != 0 else 0.0
+        points.append(MarketFactorPoint(date=r.date, value=rv20, aux={"rv_ratio": ratio}))
+    return _ok(points, max(r.available_at for r in rows))
+
+
+def _f_northbound(inputs: "MarketFactorInputs", tape):
+    rows = inputs.north_net  # unit 亿 (loader pass-through; sgt guard ⇒ gap, never 0)
+    if rows is None:
+        return _missing("north_net")
+    rows = _sorted(rows)
+    if len(rows) < 250:
+        return _short("north_net", len(rows), 250)
+    net = [r.value for r in rows]
+    cum5 = [sum(net[i - 4 : i + 1]) if i >= 4 else None for i in range(len(net))]
+    cum20 = [sum(net[i - 19 : i + 1]) if i >= 19 else None for i in range(len(net))]
+    slope = [
+        (cum5[i] - cum5[i - 5]) / 5 if i >= 9 and cum5[i] is not None and cum5[i - 5] is not None else None
+        for i in range(len(net))
+    ]
+    pct250 = _percentile_trailing(net, 250)
+    points = []
+    for i, r in enumerate(rows):
+        if pct250[i] is None or cum5[i] is None or cum20[i] is None or slope[i] is None:
+            continue
+        points.append(
+            MarketFactorPoint(
+                date=r.date, value=pct250[i],
+                aux={"cum5": cum5[i], "cum20": cum20[i], "slope": slope[i], "pct250": pct250[i]},
+            )
+        )
+    return _ok(points, max(r.available_at for r in rows))
+
+
+def _f_main_pct(inputs: "MarketFactorInputs", tape):
+    rows = inputs.main_net  # unit 亿 (loader divides 元/1e8; market_temp.py:125 口径)
+    if rows is None:
+        return _missing("main_net")
+    rows = _sorted(rows)
+    if len(rows) < 250:
+        return _short("main_net", len(rows), 250)
+    pct250 = _percentile_trailing([r.value for r in rows], 250)
+    points = [
+        MarketFactorPoint(date=r.date, value=pct250[i], aux={"pct250": pct250[i]})
+        for i, r in enumerate(rows)
+        if pct250[i] is not None
+    ]
+    return _ok(points, max(r.available_at for r in rows))
+
+
+def _f_temp_astock(inputs: "MarketFactorInputs", tape):
+    rows = inputs.astock_temp
+    if rows is None:
+        return _missing("astock_temp")
+    rows = _sorted(rows)
+    if len(rows) < 20:
+        return _short("astock_temp", len(rows), 20)
+    points = [MarketFactorPoint(date=r.date, value=r.value) for r in rows]  # verbatim
+    return _ok(points, max(r.available_at for r in rows))
+
+
+def _f_deferred(fid: str):
+    def _fn(inputs: "MarketFactorInputs", tape):
+        return _unavail(_DEFERRED_FACTORS[fid])
+
+    return _fn
+
+
+#: factor_id → pure compute function (deferred rot.*/val.pct always UNAVAILABLE).
+_FACTOR_COMPUTE = {
+    "breadth.ad_ratio": _f_ad_ratio,
+    "breadth.nhnl": _f_nhnl,
+    "breadth.limit_up_ema": _f_limit_up_ema,
+    "breadth.break_rate": _f_break_rate,
+    "breadth.ladder_height": _f_ladder_height,
+    "breadth.promotion_rate": _f_promotion_rate,
+    "breadth.divergence": _f_divergence,
+    "flow.northbound": _f_northbound,
+    "flow.main_pct": _f_main_pct,
+    "vol.rv": _f_vol_rv,
+    "temp.astock": _f_temp_astock,
+    **{fid: _f_deferred(fid) for fid in _DEFERRED_FACTORS},
+}
+
+
+# --------------------------------------------------------------------------- #
+# Value assembly + the compute entrypoint.                                     #
+# --------------------------------------------------------------------------- #
+def _value_params(defn: MarketFactorDefinition, rule: PanelAvailabilityRule) -> dict[str, Any]:
+    params: dict[str, Any] = dict(defn.params)
+    params["availability_rule"] = rule.rule_version
+    if defn.factor_id.split(".", 1)[0] == "flow":
+        params["unit"] = "yi"  # 资金 factors are 亿 (unit discipline, D9)
+    return params
+
+
+def _factor_summary(points: list[MarketFactorPoint]) -> FactorSummary:
+    vals = [p.value for p in points]
+    latest = vals[-1]
+    chg_5d = vals[-1] - vals[-6] if len(vals) >= 6 else None
+    chg_20d = vals[-1] - vals[-21] if len(vals) >= 21 else None
+    pct_250d = None
+    if len(vals) >= 250:
+        window = vals[-250:]
+        pct_250d = sum(1 for x in window if x <= latest) / 250  # never hard-computed short
+    return FactorSummary(latest=latest, chg_5d=chg_5d, chg_20d=chg_20d, pct_250d=pct_250d)
+
+
+def _build_value(
+    defn: MarketFactorDefinition, result, *, as_of: datetime, rule: PanelAvailabilityRule
+) -> MarketFactorValue:
+    fid = defn.factor_id
+    family = fid.split(".", 1)[0]
+    params = _value_params(defn, rule)
+    prov = FactorProvenance(sources=(f"input:{'+'.join(defn.required_inputs)}",))
+    policy = _MISSING_POLICY[fid]
+
+    def _unavailable(reason: str) -> MarketFactorValue:
+        return MarketFactorValue.build(
+            factor_id=fid, definition_version=defn.definition_version, family=family,
+            value=None, params=params, universe="all_a", effective_at=as_of, available_at=as_of,
+            status="UNAVAILABLE", coverage=0.0, missing_policy=policy, series=(), summary=None,
+            n_days=0, first_date=None, provenance=prov, reason=reason,
+        )
+
+    if result[0] == "unavail":
+        return _unavailable(result[1])
+
+    _, points, latest_at, force_reason = result
+    if not points:
+        return _unavailable("no valid sessions (all 空池/gaps) — never a zero-fill (①§0)")
+
+    n_out = len(points)
+    series = tuple(points[-_MAX_SERIES_POINTS:])
+    coverage = min(n_out, _COVERAGE_TARGET) / _COVERAGE_TARGET
+    avail = latest_at or as_of
+    if coverage >= 1.0 and force_reason is None:
+        status, reason, coverage = "OK", None, 1.0
+    else:
+        status = "DEGRADED"
+        coverage = min(coverage, 1.0)
+        reason = force_reason or (
+            f"partial coverage: {n_out}/{_COVERAGE_TARGET} valid sessions in the "
+            "target window (short / young series, ①§2 three-state honesty)"
+        )
+    return MarketFactorValue.build(
+        factor_id=fid, definition_version=defn.definition_version, family=family,
+        value=series[-1].value, params=params, universe="all_a",
+        effective_at=avail, available_at=avail, status=status, coverage=coverage,
+        missing_policy=policy, series=series, summary=_factor_summary(points),
+        n_days=n_out, first_date=points[0].date, provenance=prov, reason=reason,
+    )
+
+
+def _session_date(as_of: datetime) -> str:
+    """The Asia/Shanghai trading date of ``as_of`` (fixed +08:00; CN has no DST)."""
+    return as_of.astimezone(timezone(timedelta(hours=8))).date().isoformat()
+
+
+def _iter_input_rows(inputs: MarketFactorInputs):
+    for name in _INPUT_SERIES_FIELDS:
+        seq = getattr(inputs, name)
+        if seq:
+            yield from seq
+    if inputs.today_tape is not None:
+        yield inputs.today_tape
+
+
+def compute_market_factors(
+    inputs: MarketFactorInputs,
+    *,
+    spec: MarketFactorSetSpec,
+    as_of: UtcDateTime,
+    clock_mode: Literal["eod", "intraday"],
+    universe_registry_version: NonEmptyStr,
+    rule: PanelAvailabilityRule = DEFAULT_AVAILABILITY_RULE,
+) -> MarketFactorReport:
+    """Pure, deterministic, clock-free market-factor computation over PIT inputs.
+
+    Defensively refuses any future row (``available_at > as_of``) with Phase-3
+    :class:`FutureDataRefused` (windowing is the loader's job — the core refuses,
+    never silently filters). Per definition, a ``None`` or too-short required input
+    ⇒ honest ``UNAVAILABLE`` (never a zero-fill); a full 60-session window ⇒ ``OK``,
+    a short/young series ⇒ ``DEGRADED`` with a reason. A backfilled or foreign-date
+    ``today_tape`` is ignored with the ``tape_backfilled_ignored`` badge. Same
+    inputs ⇒ bit-identical report digest.
+    """
+    future = sum(1 for r in _iter_input_rows(inputs) if r.available_at > as_of)
+    if future:
+        raise FutureDataRefused(
+            f"{future} market-factor input row(s) have available_at after the frozen as_of",
+            future_rows=future,
+        )
+
+    tape_point = None
+    badges: list[str] = []
+    tape = inputs.today_tape
+    if tape is not None:
+        if not tape.backfilled and tape.date == _session_date(as_of):
+            tape_point = tape
+        else:
+            badges.append(TAPE_BACKFILLED_IGNORED_BADGE)
+
+    values = tuple(
+        _build_value(defn, _FACTOR_COMPUTE[defn.factor_id](inputs, tape_point), as_of=as_of, rule=rule)
+        for defn in spec.definitions
+    )
+    return assemble_market_factor_report(
+        spec=spec,
+        as_of=as_of,
+        clock_mode=clock_mode,
+        universe_registry_version=universe_registry_version,
+        values=values,
+        data_snapshot_hash=inputs.semantic_digest(),
+        badges=tuple(badges),
+    )
+
+
+def market_factor_handler(
+    *, spec: MarketFactorSetSpec, inputs: MarketFactorInputs, as_of: UtcDateTime
+) -> MarketFactorReport:
+    """The trusted deterministic worker entry (Task 8 handler registry).
+
+    A pure delegation to :func:`compute_market_factors` (kept separate so the
+    handler material digest pins the factor set); adds identity, never arithmetic —
+    its output equals ``compute_market_factors`` bit-for-bit (invariant 8).
+    """
+    return compute_market_factors(
+        inputs,
+        spec=spec,
+        as_of=as_of,
+        clock_mode="eod",
+        universe_registry_version=DEFAULT_UNIVERSE_REGISTRY_VERSION,
+    )
+
+
+def shield_inputs_from_factor_report(report: MarketFactorReport) -> dict[str, float | None]:
+    """Deterministic projection to the market-temp shield's inputs ("显式上游").
+
+    Surfaces ``astock_temp`` and ``break_rate`` from the report's feature vector
+    (an ``UNAVAILABLE`` factor is absent ⇒ ``None``, so the shield sleeps honestly),
+    plus ``main_net_yi=None`` until a flow history exists. On the same underlying
+    snapshot these equal ``build_market_temp()``'s board/global block values
+    bit-for-bit (parity contract, D5) — the shield's own wiring, coefficients and
+    gate constants are untouched.
+    """
+    fv = dict(report.feature_vector)
+    return {
+        "astock_temp": fv.get("temp.astock"),
+        "break_rate": fv.get("breadth.break_rate"),
+        "main_net_yi": None,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# The interim PIT input loader (thin I/O; lazy imports keep the core pure).      #
+# --------------------------------------------------------------------------- #
+def _available_at_for(date_str: str, rule: PanelAvailabilityRule) -> datetime:
+    """Stamp a daily observation's ``available_at`` per the rule's session close."""
+    hh, mm = (int(x) for x in rule.session_close_utc.split(":"))
+    y, m, d = (int(x) for x in date_str.split("-"))
+    return datetime(y, m, d, hh, mm, tzinfo=timezone.utc)
+
+
+def _window_series(seq, as_of: datetime):
+    """PIT-window one series to ``available_at <= as_of`` (empty ⇒ honest None)."""
+    if seq is None:
+        return None
+    kept = tuple(r for r in seq if r.available_at <= as_of)
+    return kept or None
+
+
+def _window_inputs(inputs: MarketFactorInputs, as_of: datetime) -> MarketFactorInputs:
+    """Window every series to ``available_at <= as_of`` (walk-forward discipline)."""
+    fields = {name: _window_series(getattr(inputs, name), as_of) for name in _INPUT_SERIES_FIELDS}
+    tape = inputs.today_tape
+    fields["today_tape"] = tape if (tape is not None and tape.available_at <= as_of) else None
+    return MarketFactorInputs(**fields)
+
+
+def _load_astock_temp_rows(as_of: datetime, rule: PanelAvailabilityRule):
+    """打板温度 series from the macro-pulse snapshots (each line's own pull ts)."""
+    try:
+        from guanlan_v2.macro.pulse import _SNAP_DEFAULT, _read_snapshots
+
+        snaps = _read_snapshots(_SNAP_DEFAULT)
+    except Exception:  # noqa: BLE001 — a missing store is honest None, not a crash
+        return None
+    rows: list[DailyValueRow] = []
+    for s in snaps or []:
+        at, ts = s.get("astock_temp"), s.get("ts")
+        if at is None or not ts:
+            continue
+        try:
+            naive = datetime.fromisoformat(str(ts))
+            avail = naive.replace(tzinfo=timezone(timedelta(hours=8)))  # macro ts = Beijing
+            rows.append(DailyValueRow(date=str(ts)[:10], value=float(at), available_at=avail))
+        except (ValueError, TypeError):
+            continue
+    return tuple(rows) or None
+
+
+def _load_closes_index_rows(as_of: datetime, rule: PanelAvailabilityRule):
+    """全A等权日收益 series (eqw_market.load_eqw_ret → date/ret)."""
+    try:
+        from guanlan_v2.strategy.compute.eqw_market import load_eqw_ret
+
+        df = load_eqw_ret()
+    except Exception:  # noqa: BLE001
+        return None
+    if df is None or len(df) == 0:
+        return None
+    rows: list[DailyValueRow] = []
+    for _, r in df.iterrows():
+        d = str(r["date"])
+        try:
+            rows.append(DailyValueRow(date=d, value=float(r["ret"]), available_at=_available_at_for(d, rule)))
+        except (ValueError, TypeError):
+            continue
+    return tuple(rows) or None
+
+
+def _load_today_tape(as_of: datetime, rule: PanelAvailabilityRule):
+    """The today-only market_tape derived snapshot (`board_date`/`board_backfilled`)."""
+    try:
+        from guanlan_v2.datafeed.market_tape import read_tape
+
+        t = read_tape()
+    except Exception:  # noqa: BLE001
+        return None
+    if not t or t.get("warming"):
+        return None
+    der = t.get("derived") or {}
+    raw_date = t.get("board_date") or t.get("pulled_at")
+    digits = "".join(ch for ch in str(raw_date or "") if ch.isdigit())
+    if len(digits) < 8:
+        return None
+    date_str = f"{digits[0:4]}-{digits[4:6]}-{digits[6:8]}"
+    try:
+        pulled = t.get("pulled_at")
+        avail = (
+            datetime.fromisoformat(str(pulled)).astimezone(timezone.utc)
+            if pulled and datetime.fromisoformat(str(pulled)).tzinfo
+            else _available_at_for(date_str, rule)
+        )
+    except (ValueError, TypeError):
+        avail = _available_at_for(date_str, rule)
+    try:
+        return TapePoint(
+            date=date_str,
+            zt_count=der.get("zt_count"),
+            zb_count=der.get("zb_count"),
+            max_streak=der.get("max_streak"),
+            break_rate=der.get("break_rate"),
+            promotion_rate=der.get("promotion_rate"),
+            backfilled=bool(t.get("board_backfilled")),
+            available_at=avail,
+        )
+    except (ValueError, TypeError):
+        return None
+
+
+def _load_panel_rows(provider_uri: str, end: str, as_of: datetime, rule: PanelAvailabilityRule):
+    """Engine daily breadth panel → (updown, closes_panel, limit_up_total).
+
+    Uses the same provider access ``strategy/compute/regen.py`` uses; per-stock
+    ``closes_panel`` is deferred (a heavy full-market read) and stays ``None`` in
+    v1. Any failure is honest ``(None, None, None)`` — no fabricated history.
+    """
+    try:
+        from financial_analyst.data.loaders.qlib_binary import QlibBinaryLoader
+        from guanlan_v2.strategy.compute.breadth import build_breadth_panel, list_all_instruments
+
+        loader = QlibBinaryLoader(provider_uri)
+        codes = list_all_instruments(provider_uri)
+        panel = build_breadth_panel(loader, codes, start="2019-11-01", end=end)
+    except Exception:  # noqa: BLE001 — interim adapter: no vendor fallback, honest None
+        return None, None, None
+    updown: list[UpDownRow] = []
+    limit_up: list[DailyValueRow] = []
+    try:
+        for idx, row in panel.iterrows():
+            d = str(idx)[:10]
+            up = int(row["up_count"])
+            down = int(row["down_count"])
+            total = up + down
+            if total <= 0:
+                continue
+            avail = _available_at_for(d, rule)
+            updown.append(UpDownRow(date=d, up=up, down=down, total=total, available_at=avail))
+            limit_up.append(DailyValueRow(date=d, value=float(row["limit_up_total"]), available_at=avail))
+    except Exception:  # noqa: BLE001
+        return None, None, None
+    return (tuple(updown) or None, None, tuple(limit_up) or None)
+
+
+def load_market_factor_inputs(
+    *, provider_uri: str, end: str, as_of: UtcDateTime, rule: PanelAvailabilityRule = DEFAULT_AVAILABILITY_RULE
+) -> MarketFactorInputs:
+    """The production PIT input loader (thin, I/O; interim Phase-5 adapter).
+
+    Stamps ``available_at`` per ``rule``, windows every series to
+    ``available_at <= as_of``, and sources each field read-only. Sources with no
+    history store in this repo stay ``None`` (⇒ honest UNAVAILABLE downstream); the
+    loader performs no vendor fallback and fabricates no history — returning ``None``
+    fields is its honest steady state.
+    """
+    updown, closes_panel, limit_up_total = _load_panel_rows(provider_uri, end, as_of, rule)
+    inputs = MarketFactorInputs(
+        updown=updown,
+        closes_index=_load_closes_index_rows(as_of, rule),
+        closes_panel=closes_panel,
+        limit_up_total=limit_up_total,
+        astock_temp=_load_astock_temp_rows(as_of, rule),
+        today_tape=_load_today_tape(as_of, rule),
+        # no history store in this repo yet ⇒ honest None (①§5 archive deliverable):
+        break_counts=None, board_pools=None, north_net=None, main_net=None,
+        sector_flows=None, index_valuation=None, concept_membership=None,
+        industry_returns=None, limit_reasons=None, sector_leaders=None, universe_versions=None,
+    )
+    return _window_inputs(inputs, as_of)
