@@ -59,7 +59,7 @@ from guanlan_v2.orchestration.eventstore import (
     RuntimeStores,
     SchemaRegistryResolver,
 )
-from guanlan_v2.orchestration.events import PlanApproval
+from guanlan_v2.orchestration.events import EventType, PlanApproval
 from guanlan_v2.orchestration.market.factors import (
     MARKET_FACTOR_REPORT_SCHEMA_REF,
     DailyValueRow,
@@ -276,7 +276,35 @@ _PHASE1_MODELS = (MarketFactorReport, RegimeReport, RotationReport,
                   ExperienceQuery, ExperienceSelection)
 
 
-def build_bootstrap_env(*, suffix="", inputs=None, fail_nodes=(), approve=True):
+def _register_lane0_factories_with_raising_factor(
+        *, factories, cat, pool, registry, scaler, experience_k):
+    """Mirror :func:`register_bootstrap_runtime_factories` but bind a ``market.factor``
+    handler that RAISES at execution time.
+
+    The factor node then terminates FAILED with **no committed artifact**, which is
+    the genuine outright-failure path (distinct from the empty-input DEGRADED reader,
+    which still commits an all-unavailable report).  A separate registrar is required
+    because :meth:`TrustedFactoryRegistry.register_handler` forbids replacing a bound
+    handler — the production registrar cannot be told to skip the factor binding.
+    """
+    refs = cat.refs
+
+    def _raising_factor_handler(*, node, input_snapshot, contributions, data_result_refs):
+        raise RuntimeError("scripted market.factor handler failure (produces no artifact)")
+
+    factories.register_handler(
+        refs["lane0.market.factor.handler"], lambda **_kw: _raising_factor_handler)
+    factories.register_handler(
+        refs["lane0.experience.provider"],
+        B.make_lane0_experience_bridge_factory(
+            pool=pool, registry=registry, capability_ref=cat.capability_ref,
+            views=(), scaler=scaler, k=experience_k, as_of=DT))
+    backend = B.ExperienceRetrievalBackend(views=(), scaler=scaler)
+    factories.register_capability_backend(cat.capability_ref, lambda **_kw: backend)
+
+
+def build_bootstrap_env(*, suffix="", inputs=None, fail_nodes=(), approve=True,
+                        fail_factor=False):
     clock = FixedClock()
     cat = load_lane0_catalog()
     catalog = CatalogRuntime.build(cat.snapshot, cat.source)
@@ -349,10 +377,15 @@ def build_bootstrap_env(*, suffix="", inputs=None, fail_nodes=(), approve=True):
     factories = TrustedFactoryRegistry(catalog)
     runtime = run_ctx = model_gateway = None
     if plan is not None:
-        register_bootstrap_runtime_factories(
-            factories=factories, catalog=cat, pool=pool, registry=registry, spec=spec,
-            inputs=inputs if inputs is not None else _happy_inputs(), as_of=DT,
-            experience_views=(), experience_scaler=scaler, experience_k=preset.experience_k)
+        if fail_factor:
+            _register_lane0_factories_with_raising_factor(
+                factories=factories, cat=cat, pool=pool, registry=registry,
+                scaler=scaler, experience_k=preset.experience_k)
+        else:
+            register_bootstrap_runtime_factories(
+                factories=factories, catalog=cat, pool=pool, registry=registry, spec=spec,
+                inputs=inputs if inputs is not None else _happy_inputs(), as_of=DT,
+                experience_views=(), experience_scaler=scaler, experience_k=preset.experience_k)
         runtime = W.ExecutionRuntime(
             catalog=catalog, bridge_view=view, factories=factories,
             support_report=bundle.support_report, runtime_registry_digest=rt_digest)
@@ -406,6 +439,27 @@ def test_happy_path_bootstrap_to_snapshot_to_main_context():
     assert manifest.degradation_badges == ()
     assert manifest.context_snapshot_digest == context.content_digest
     assert manifest.bootstrap_plan_digest == env.plan.plan_digest
+
+    # invariant 0b — the CONTEXT_SNAPSHOT_FROZEN event's payload_ref dereferences to
+    # the exact persisted manifest payload (byte-identical, not a re-derived copy).
+    frozen = [ev for ev in env.stores.events.journal(result.run_id, "main")
+              if ev.event_type is EventType.CONTEXT_SNAPSHOT_FROZEN]
+    assert len(frozen) == 1
+    frozen_manifest = env.stores.payloads.get(
+        frozen[0].payload_ref, expected_schema_ref=B._BOOTSTRAP_CONTEXT_MANIFEST_SR)
+    assert frozen_manifest == manifest
+    assert frozen_manifest.content_digest == manifest.content_digest
+
+    # invariant 0b — a second assembly is idempotent: identical snapshot + manifest
+    # digests and NO duplicate CONTEXT_SNAPSHOT_FROZEN event (one all-or-none UoW).
+    context2, manifest2 = build_context_snapshot_from_bootstrap(
+        run_result=result, pool=env.pool, data_context=env.data_context, stores=env.stores,
+        registry=env.rt_reg, clock=env.clock)
+    assert context2.content_digest == context.content_digest
+    assert manifest2.content_digest == manifest.content_digest
+    frozen_again = [ev for ev in env.stores.events.journal(result.run_id, "main")
+                    if ev.event_type is EventType.CONTEXT_SNAPSHOT_FROZEN]
+    assert len(frozen_again) == 1
 
     # derive a NEW main RunContext (no in-place mutation of the bootstrap context).
     main_budget = RunBudget(
@@ -486,14 +540,61 @@ def test_degraded_factors_run_to_a_badged_committed_snapshot():
     assert "factor_degraded" in manifest.degradation_badges
 
 
-def test_failed_factor_node_omits_input_and_still_produces_unknown():
-    # a variant where the deterministic reader itself FAILS is emulated by an empty
-    # input that DEGRADES it; the LLM nodes still run guardrail-conformant. (An
-    # outright FAILED factor node omits the required=False input entirely.)
+def test_degraded_factor_reader_still_produces_honest_unknown_regime():
+    # the DEGRADED-reader path (empty inputs): the deterministic factor node still
+    # COMMITS an all-unavailable report, and the regime LLM node reads that degraded
+    # report through a satisfied DEGRADE dependency, yielding an honest all-unknown
+    # regime (this is the committed-but-degraded factor case, NOT an omitted input).
     env = build_bootstrap_env(inputs=_empty_inputs())
     result, rec = env.run()
+    assert _status(rec, "lane0.factor") is NodeStatus.DEGRADED
+    assert env.pool.committed_output("lane0.factor", "primary") is not None
+    # the factor block that reached the gateway was the RENDERED degraded report,
+    # never the omitted-input sentinel (a committed report is still injected).
+    for nid in ("lane0.regime", "lane0.rotation"):
+        assert env.model_gateway.rendered_factor[nid] != "<no factor report — omitted input>"
     regime = env.pool.committed_output("lane0.regime", "primary").payload
     assert regime.trend is TrendState.UNKNOWN and regime.confidence is Confidence.LOW
+
+
+def test_failed_factor_node_omits_input_drives_the_omitted_branch():
+    # the genuine outright-FAILURE path: the deterministic market.factor handler
+    # RAISES ⇒ the factor node terminates FAILED with NO committed artifact ⇒ the LLM
+    # nodes' required=False `market_factor_report` DEGRADE input is OMITTED (not
+    # BLOCKED) ⇒ `_injected_report` returns None ⇒ the gateway renders the
+    # "<no factor report — omitted input>" branch ⇒ regime/rotation still EXECUTE
+    # (honest all-unknown), downgraded to DEGRADED by the omitted DEGRADE input.
+    env = build_bootstrap_env(inputs=_happy_inputs(), fail_factor=True)
+    result, rec = env.run()
+
+    # (a) the factor node genuinely FAILED — no committed artifact anchors the run.
+    assert _status(rec, "lane0.factor") is NodeStatus.FAILED
+    assert env.pool.committed_output("lane0.factor", "primary") is None
+
+    # (b) the LLM nodes EXECUTED (not BLOCKED/SKIPPED); an omitted DEGRADE input
+    #     downgrades their success to DEGRADED.
+    assert _status(rec, "lane0.regime") is NodeStatus.DEGRADED
+    assert _status(rec, "lane0.rotation") is NodeStatus.DEGRADED
+
+    # (c) the omitted-input branch text reached the fake gateway for BOTH LLM nodes.
+    for nid in ("lane0.regime", "lane0.rotation"):
+        assert env.model_gateway.rendered_factor[nid] == "<no factor report — omitted input>"
+        assert "<no factor report — omitted input>" in env.model_gateway.captured_prompts[nid]
+
+    # (d) both LLM nodes still committed honest all-unknown reads.
+    regime = env.pool.committed_output("lane0.regime", "primary").payload
+    rotation = env.pool.committed_output("lane0.rotation", "primary").payload
+    assert regime.trend is TrendState.UNKNOWN and regime.confidence is Confidence.LOW
+    assert rotation.mainlines == ()
+
+    # (e) manifest/snapshot for the factor-ABSENT case: a bootstrap ContextSnapshot
+    #     REQUIRES a committed market factor report (the mandatory manifest anchor —
+    #     only regime/rotation refs may be badged-missing, `market_factor_report_ref`
+    #     is non-optional), so assembly REFUSES honestly rather than fabricating one.
+    with pytest.raises(B.BootstrapRuntimeError):
+        build_context_snapshot_from_bootstrap(
+            run_result=result, pool=env.pool, data_context=env.data_context,
+            stores=env.stores, registry=env.rt_reg, clock=env.clock)
 
 
 # =========================================================================== #

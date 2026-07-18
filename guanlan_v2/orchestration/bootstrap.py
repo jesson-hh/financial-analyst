@@ -1652,8 +1652,14 @@ def derive_main_run_context(
             "derive_main_run_context requires the snapshot's data_context to equal the "
             "bootstrap context's DataContext (a drifted as_of derivation is a bug)"
         )
-    # frozen by construction — the original is never mutated (asserted anyway).
-    assert bootstrap_ctx.context_snapshot_id is None
+    # frozen by construction — the original is never mutated. A misuse (deriving a
+    # main context from something that already binds a snapshot) is refused loudly:
+    # a bare ``assert`` would strip under ``-O`` and let the bug through silently.
+    if bootstrap_ctx.context_snapshot_id is not None:
+        raise ValueError(
+            "derive_main_run_context requires a bootstrap RunContext with "
+            "context_snapshot_id=None (received a context that already binds a snapshot)"
+        )
     return RunContext(
         run_id=main_run_id, data=bootstrap_ctx.data,
         context_snapshot_id=snapshot.snapshot_id,
