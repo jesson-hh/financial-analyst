@@ -366,8 +366,19 @@ async def run_plan(
 
     plan_reservation = bundle.reservation
     run_id = plan.run_id
-    ctx_ref = TypedPayloadRef(schema_ref=_CONTEXT_SCHEMA_REF,
-                              payload_ref=plan.draft.context_snapshot_ref)
+    if plan.draft.context_snapshot_ref is not None:
+        ctx_ref = TypedPayloadRef(schema_ref=_CONTEXT_SCHEMA_REF,
+                                  payload_ref=plan.draft.context_snapshot_ref)
+    else:
+        # Phase 5 bootstrap (spec §2.0): a `context_snapshot_id=None` plan carries no
+        # ContextSnapshot yet — it *produces* one. The frozen InputSnapshot schema
+        # still requires a real ContextSnapshot@1 main ref, so the run persists its
+        # canonical empty-memory ContextSnapshot once and binds that ref. This branch
+        # fires ONLY for a None-ref draft; every static-runtime run keeps the exact
+        # prior behavior (bit-unchanged).
+        ctx_ref = _synthesize_bootstrap_context_ref(
+            ctx, run_id=run_id, stores=stores,
+            runtime_registry_digest=runtime.runtime_registry_digest, clock=clock)
 
     # ---- concurrency bound: min of every declared limit -------------------- #
     bound = min(
@@ -592,6 +603,48 @@ async def run_plan(
         settled_tokens=settled_tokens, settled_llm_invocations=settled_llm)
     _persist_run_result(stores, runtime, plan, result, terminal_status)
     return result
+
+
+def _synthesize_bootstrap_context_ref(
+    ctx: RunContext, *, run_id: str, stores, runtime_registry_digest: str,
+    clock: AuthoritativeClock,
+) -> TypedPayloadRef:
+    """Persist the bootstrap run's canonical empty-memory ContextSnapshot + refs.
+
+    A no-ContextSnapshot bootstrap run still needs a real ``ContextSnapshot@1`` main
+    ref for its frozen InputSnapshots (spec §2.0's ``context_snapshot_id=None``
+    RunContext produces the snapshot; it does not have one at input time). Persists
+    the two canonical empty-memory facts and the empty-memory ContextSnapshot
+    (idempotent) and returns its typed ref. The RunContext's ``memory_snapshot_hash``
+    already equals the canonical empty-memory hash, so the ContextSnapshot is a pure
+    function of the run's DataContext + the canonical empty pair.
+    """
+    from guanlan_v2.orchestration.context import (
+        ContextSnapshot,
+        build_empty_memory_binding,
+    )
+
+    binding = build_empty_memory_binding()
+    snap_sr = SchemaRef(name="EmptyMemorySnapshot", version="1")
+    sel_sr = SchemaRef(name="EmptyMemorySelection", version="1")
+    stores.payloads.put(
+        snap_sr, binding.snapshot, registry_digest=runtime_registry_digest,
+        namespace="main", idempotency_key="bootstrap-run:empty-memory-snapshot")
+    stores.payloads.put(
+        sel_sr, binding.selection, registry_digest=runtime_registry_digest,
+        namespace="main", idempotency_key="bootstrap-run:empty-memory-selection")
+    context = ContextSnapshot.build(
+        snapshot_id=f"bootstrap-run-ctx-{run_id}", data_context=ctx.data,
+        memory_snapshot_id=f"bootstrap-run-ms-{run_id}",
+        memory_snapshot_hash=binding.snapshot_hash,
+        past_context_hash=binding.past_context_hash,
+        memory_snapshot_ref=binding.memory_snapshot_ref,
+        memory_selection_ref=binding.memory_selection_ref,
+        runtime_requirements_ref=None, memory_session_id=None, built_at=clock_now(clock))
+    ref = stores.payloads.put(
+        _CONTEXT_SCHEMA_REF, context, registry_digest=runtime_registry_digest,
+        namespace="main", idempotency_key=f"bootstrap-run-ctx:{run_id}")
+    return TypedPayloadRef(schema_ref=_CONTEXT_SCHEMA_REF, payload_ref=ref)
 
 
 @dataclass

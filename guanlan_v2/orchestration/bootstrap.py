@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Mapping, Sequence
 
@@ -70,7 +71,6 @@ from guanlan_v2.orchestration.catalog_runtime import (
     TrustedFactoryRegistry,
     build_text_material,
     parse_bridge_descriptor,
-    serialize_bridge_descriptor,
 )
 from guanlan_v2.orchestration.digest import (
     DigestHex,
@@ -111,6 +111,7 @@ from guanlan_v2.orchestration.refs import (
     CapabilityRef,
     ContentRef,
     LogicalId,
+    PayloadRef,
     SchemaRef,
     TypedPayloadRef,
 )
@@ -118,9 +119,32 @@ from guanlan_v2.orchestration.runtime_contracts import (
     BridgeStaticSupportSummary,
     ExecutionBridgeDescriptor,
 )
+from guanlan_v2.orchestration.context import (
+    ContextSnapshot,
+    DataContext,
+    RunBudget,
+    RunContext,
+    build_empty_memory_binding,
+)
+from guanlan_v2.orchestration.enums import ApprovalPolicy, NodeStatus
+from guanlan_v2.orchestration.events import EventType
+from guanlan_v2.orchestration.spec import (
+    Dependency,
+    OrchestrationRequest,
+    PlanDraft,
+    PlanNode,
+)
 
 if TYPE_CHECKING:
-    from guanlan_v2.orchestration.spec import PlanNode
+    from guanlan_v2.orchestration.memory.experience import (
+        ExperienceLog,
+        MarketFactorSetSpec,
+        RegimeCase,
+        RegimeGraderSpec,
+    )
+    from guanlan_v2.orchestration.pool import ArtifactPool
+    from guanlan_v2.orchestration.runtime_clock import AuthoritativeClock
+    from guanlan_v2.orchestration.runtime_contracts import RunResult
 
 __all__ = [
     # -- Lane 0 catalog assembly ------------------------------------------- #
@@ -158,6 +182,22 @@ __all__ = [
     # -- Task 9 bootstrap payload contracts (schema-frozen here; Task 10 glue) #
     "BootstrapPlan",
     "BootstrapContextManifest",
+    # -- Task 10 bootstrap runtime glue ------------------------------------ #
+    "BOOTSTRAP_PRESET_ID",
+    "BOOTSTRAP_PRESET_VERSION",
+    "BOOTSTRAP_NODE_TIMEOUT_SEC",
+    "BOOTSTRAP_EXPERIENCE_K",
+    "BOOTSTRAP_NODE_IDS",
+    "build_bootstrap_plan",
+    "build_bootstrap_plan_draft",
+    "build_bootstrap_run_context",
+    "derive_main_run_context",
+    "build_context_snapshot_from_bootstrap",
+    "append_regime_case_from_run",
+    "Lane0ExperienceBridgeProvider",
+    "make_lane0_experience_bridge_factory",
+    "bootstrap_market_factor_handler",
+    "register_bootstrap_runtime_factories",
     # -- Task 9 chain surface ---------------------------------------------- #
     "BOOTSTRAP_PUBLIC_MODELS",
     "PHASE5_PUBLIC_MODELS",
@@ -1452,3 +1492,605 @@ def __getattr__(name: str) -> Any:
             _PHASE5_CATALOG_DIGEST = phase5_catalog_snapshot().catalog_digest
         return _PHASE5_CATALOG_DIGEST
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# =========================================================================== #
+# Task 10 · the fixed BootstrapPlan runtime — draft builder, admission-ready   #
+# RunContexts, the Lane 0 execution bridge/handler runtime, ContextSnapshot     #
+# assembly (honest unknown/degraded manifest) and the lifecycle ④ case append. #
+# =========================================================================== #
+BOOTSTRAP_PRESET_ID = "bootstrap.lane0"
+BOOTSTRAP_PRESET_VERSION = "1"
+BOOTSTRAP_NODE_TIMEOUT_SEC = 300
+BOOTSTRAP_EXPERIENCE_K = 5
+#: the three fixed bootstrap plan node ids (node ids, never worker ids).
+BOOTSTRAP_NODE_IDS: tuple[str, str, str] = ("lane0.factor", "lane0.regime", "lane0.rotation")
+
+_FACTOR_SLOT = "market_factor_report"
+_REGIME_SLOT = "regime_report"
+_ROTATION_SLOT = "rotation_report"
+_FACTOR_INJECT = "market_factor_report"
+_PRIMARY = "primary"
+_CASE_AVAILABLE_UTC = (7, 5)  # 15:05 Asia/Shanghai — the Task 7 case-visibility stamp
+
+_CONTEXT_SNAPSHOT_SR = SchemaRef(name="ContextSnapshot", version="1")
+_BOOTSTRAP_CONTEXT_MANIFEST_SR = SchemaRef(name="BootstrapContextManifest", version="1")
+_NODE_RUN_SR = SchemaRef(name="NodeRun", version="1")
+
+
+class BootstrapRuntimeError(Exception):
+    """A bootstrap runtime-assembly invariant was violated (never a data miss)."""
+
+
+# --------------------------------------------------------------------------- #
+# The fixed, versioned preset record + its static three-node draft            #
+# --------------------------------------------------------------------------- #
+def build_bootstrap_plan(
+    *,
+    spec: "MarketFactorSetSpec",
+    grader: "RegimeGraderSpec",
+    preset_version: str = BOOTSTRAP_PRESET_VERSION,
+    experience_k: int = BOOTSTRAP_EXPERIENCE_K,
+    node_timeout_sec: int = BOOTSTRAP_NODE_TIMEOUT_SEC,
+    budget_request_tokens: int = 200_000,
+    budget_request_llm_invocations: int = 2,
+) -> BootstrapPlan:
+    """The fixed v1 :class:`BootstrapPlan` preset bound to a factor set + grader.
+
+    The deterministic ``lane0.factor`` reserves zero LLM invocations; the two Lane 0
+    LLM nodes one each — the v1 ``budget_request_llm_invocations=2``. Changing any
+    field is a new preset version (never a silent edit).
+    """
+    return BootstrapPlan.build(
+        preset_version=preset_version,
+        factor_set_version=spec.factor_set_version,
+        factor_set_digest=spec.content_digest,
+        grader_digest=grader.content_digest,
+        experience_k=experience_k,
+        node_timeout_sec=node_timeout_sec,
+        budget_request_tokens=budget_request_tokens,
+        budget_request_llm_invocations=budget_request_llm_invocations,
+    )
+
+
+def _factor_dependency() -> Dependency:
+    """The DEGRADE dependency each LLM node draws the factor report through.
+
+    ``accept_statuses`` includes DEGRADED so a degraded factor report still reaches
+    the LLMs; an outright FAILED factor node leaves the ``required=False`` input
+    omitted and the guardrail forces all-unknown output — this pairing is lawful
+    only because the Task 8 ``market_factor_report`` binding is optional.
+    """
+    return Dependency(
+        upstream_node_id="lane0.factor",
+        artifact_slot=_FACTOR_SLOT,
+        inject_as=_FACTOR_INJECT,
+        policy=DependencyPolicy.DEGRADE,
+        accept_statuses=frozenset({NodeStatus.COMPLETED, NodeStatus.DEGRADED}),
+    )
+
+
+def build_bootstrap_plan_draft(
+    preset: BootstrapPlan,
+    *,
+    request: OrchestrationRequest,
+    as_of: datetime,
+    mode: DataMode,
+    catalog: WorkerCatalogSnapshot,
+    schema_registry_digest: DigestHex,
+    draft_id: str,
+    run_id: str,
+) -> PlanDraft:
+    """The fixed three-node Lane 0 bootstrap draft (pure).
+
+    ``phase="bootstrap"``, ``source=PlanSource.PRESET`` (the frozen ruling — the
+    bootstrap graph is a versioned preset, ``PlanSource.BOOTSTRAP`` stays dormant),
+    ``context_snapshot_ref=None``, ``approval_policy=REQUIRED`` (AUTO impossible),
+    ``max_attempts=1`` and ``params={}`` on every node. The sinks are the two LLM
+    nodes; the budget fields come from the preset; the legacy tuple stays all-None.
+    """
+    n_factor = PlanNode(
+        id="lane0.factor", worker_id="market.factor", writes_slot=_FACTOR_SLOT,
+        timeout_sec=preset.node_timeout_sec)
+    n_regime = PlanNode(
+        id="lane0.regime", worker_id="market.regime", writes_slot=_REGIME_SLOT,
+        dependencies=(_factor_dependency(),), timeout_sec=preset.node_timeout_sec)
+    n_rotation = PlanNode(
+        id="lane0.rotation", worker_id="market.rotation", writes_slot=_ROTATION_SLOT,
+        dependencies=(_factor_dependency(),), timeout_sec=preset.node_timeout_sec)
+    return PlanDraft(
+        id=draft_id, run_id=run_id, request_id=request.request_id, phase="bootstrap",
+        source=PlanSource.PRESET, goal=request.goal, as_of=as_of, mode=mode,
+        context_snapshot_ref=None, nodes=(n_factor, n_regime, n_rotation),
+        sink_node_ids=("lane0.regime", "lane0.rotation"),
+        catalog_version=catalog.catalog_version, catalog_digest=catalog.catalog_digest,
+        schema_registry_digest=schema_registry_digest,
+        approval_policy=ApprovalPolicy.REQUIRED,
+        budget_request_tokens=preset.budget_request_tokens,
+        budget_request_llm_invocations=preset.budget_request_llm_invocations,
+        max_concurrency=2,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# The bootstrap + derived-main RunContexts (no in-place mutation)             #
+# --------------------------------------------------------------------------- #
+def build_bootstrap_run_context(
+    *,
+    run_id: str,
+    data: DataContext,
+    budget: RunBudget,
+    cancellation_token_id: str,
+) -> RunContext:
+    """The bootstrap :class:`RunContext`: ``context_snapshot_id=None`` + the
+    canonical empty-memory hash. Immutable by construction (frozen model)."""
+    binding = build_empty_memory_binding()
+    return RunContext(
+        run_id=run_id, data=data, context_snapshot_id=None,
+        memory_snapshot_hash=binding.snapshot_hash, budget=budget,
+        cancellation_token_id=cancellation_token_id)
+
+
+def derive_main_run_context(
+    bootstrap_ctx: RunContext,
+    *,
+    snapshot: ContextSnapshot,
+    main_run_id: str,
+    budget: RunBudget,
+    cancellation_token_id: str,
+) -> RunContext:
+    """A **new** main :class:`RunContext` referencing the committed ContextSnapshot.
+
+    Carries ``context_snapshot_id=snapshot.snapshot_id`` /
+    ``memory_snapshot_hash=snapshot.memory_snapshot_hash`` and the SAME frozen
+    ``DataContext`` (one snapshot universe, spec §2.0). Refuses a snapshot whose
+    ``data_context`` differs from the bootstrap context's (a drifted-as_of
+    derivation is a bug); the bootstrap context object is never modified.
+    """
+    if snapshot.data_context != bootstrap_ctx.data:
+        raise ValueError(
+            "derive_main_run_context requires the snapshot's data_context to equal the "
+            "bootstrap context's DataContext (a drifted as_of derivation is a bug)"
+        )
+    # frozen by construction — the original is never mutated (asserted anyway).
+    assert bootstrap_ctx.context_snapshot_id is None
+    return RunContext(
+        run_id=main_run_id, data=bootstrap_ctx.data,
+        context_snapshot_id=snapshot.snapshot_id,
+        memory_snapshot_hash=snapshot.memory_snapshot_hash, budget=budget,
+        cancellation_token_id=cancellation_token_id, replays_run_id=None)
+
+
+# --------------------------------------------------------------------------- #
+# The deterministic market.factor handler (executor-compatible adapter)        #
+# --------------------------------------------------------------------------- #
+def bootstrap_market_factor_handler(
+    *,
+    spec: "MarketFactorSetSpec",
+    inputs: Any,
+    as_of: datetime,
+    universe_registry_version: str | None = None,
+):
+    """An executor-compatible deterministic ``market.factor`` handler.
+
+    Binds the pinned factor set + PIT inputs and returns a handler
+    ``(node, input_snapshot, contributions, data_result_refs) -> ModelResult``.
+    An all-``UNAVAILABLE`` report (no computable factor) is reported as an honest
+    DEGRADED node — never a silent success — so the downstream LLM nodes and the
+    ContextSnapshot manifest carry the degradation forward.
+    """
+    from guanlan_v2.orchestration.market.factors import (
+        DEFAULT_UNIVERSE_REGISTRY_VERSION,
+        compute_market_factors,
+    )
+    from guanlan_v2.orchestration.worker import ModelResult
+
+    urv = universe_registry_version or DEFAULT_UNIVERSE_REGISTRY_VERSION
+
+    def handler(*, node, input_snapshot, contributions, data_result_refs):
+        report = compute_market_factors(
+            inputs, spec=spec, as_of=as_of, clock_mode="eod",
+            universe_registry_version=urv)
+        degraded = not report.feature_vector
+        reasons = ("all_factors_unavailable",) if degraded else ()
+        rendered = (
+            f"market.factor report as_of={report.as_of.isoformat()} "
+            f"coverage={report.coverage} n_unavailable={report.coverage_summary.n_unavailable}"
+        )
+        return ModelResult(
+            payload=report, rendered_text=rendered, number_anchors=(),
+            input_tokens=0, output_tokens=0, provider="deterministic",
+            model="market.factor", provider_response_id=None,
+            degraded=degraded, degradation_reasons=reasons)
+
+    return handler
+
+
+# --------------------------------------------------------------------------- #
+# The Lane 0 experience execution bridge (real CapabilityGateway retrieval)     #
+# --------------------------------------------------------------------------- #
+class Lane0ExperienceBridgeProvider:
+    """The Phase-2 ``ExecutionBridgeProvider`` for the Lane 0 ``experience.bridge``.
+
+    ``prepare_input`` is I/O-free (``pre_input_kind="none"``); on LLM execution the
+    session reads the injected ``market_factor_report`` (through the pool), builds
+    the reviewed :class:`ExperienceQuery` from its ``feature_vector`` and invokes
+    ``experience.retrieve`` exactly once through the REAL
+    :class:`~guanlan_v2.orchestration.worker.CapabilityGateway` (one finalized
+    ToolCallRecord), returning the :class:`ExperienceSelection` as one
+    untrusted-block DTO. An omitted/failed factor input yields an empty-feature
+    query (honest cold read); the store stays read-only (no append surface).
+    """
+
+    def __init__(self, *, bridge, summary, pool, registry, capability_ref,
+                 views, scaler, k, as_of):
+        self._bridge = bridge
+        self._summary = summary
+        self._pool = pool
+        self._registry = registry
+        self._capability_ref = capability_ref
+        self._views = views
+        self._scaler = scaler
+        self._k = k
+        self._as_of = as_of
+
+    def prepare_input(self, request):
+        from guanlan_v2.orchestration.worker import (
+            BridgeInputContribution,
+            BridgeStageOutcome,
+            PreparedBridgeHandle,
+        )
+
+        token = request.token
+        if token.bridge_id != self._bridge.bridge_id:
+            raise BootstrapRuntimeError("prepare token names a different bridge")
+        contribution = BridgeInputContribution()
+        handle = PreparedBridgeHandle(
+            bridge_id=self._bridge.bridge_id, bridge_priority=self._bridge.priority,
+            summary_digest=self._summary.summary_digest, token=token,
+            input_contribution=contribution)
+        return BridgeStageOutcome(
+            status="prepared", input_contribution=contribution, prepared_handle=handle)
+
+    def open_execution(self, request):
+        return _Lane0ExperienceSession(provider=self, request=request)
+
+    def _injected_report(self, node, input_snapshot):
+        """The exact injected ``market_factor_report`` payload, or ``None``.
+
+        Reads only what the ready InputSnapshot bound (a FAILED factor node ⇒ the
+        optional input is omitted ⇒ ``None``), resolving it through the pool's
+        committed index — never a live recompute."""
+        from guanlan_v2.orchestration.market.factors import MARKET_FACTOR_REPORT_SCHEMA_REF
+
+        present = any(
+            b.input_name == _FACTOR_INJECT and b.artifact_refs
+            for b in input_snapshot.artifact_inputs
+        )
+        if not present:
+            return None
+        for dep in node.dependencies:
+            if dep.inject_as == _FACTOR_INJECT:
+                art = self._pool.committed_output(dep.upstream_node_id, _PRIMARY)
+                if art is not None:
+                    return self._registry.validate_payload(
+                        MARKET_FACTOR_REPORT_SCHEMA_REF, art.payload)
+        return None
+
+
+class _Lane0ExperienceSession:
+    """One opened experience-bridge session: query → gateway retrieval → block."""
+
+    def __init__(self, *, provider: Lane0ExperienceBridgeProvider, request):
+        self._provider = provider
+        self._request = request
+
+    def freeze_for_execution(self, *, kind):
+        from guanlan_v2.orchestration.enums import ExecutionKind
+        from guanlan_v2.orchestration.memory.experience import (
+            EXPERIENCE_QUERY_SCHEMA_REF,
+            EXPERIENCE_SELECTION_SCHEMA_REF,
+            ExperienceQuery,
+        )
+        from guanlan_v2.orchestration.worker import (
+            BridgeContribution,
+            BridgeStageOutcome,
+            ProviderUntrustedBlock,
+        )
+
+        p = self._provider
+        req = self._request
+        token = req.handle.token
+
+        report = p._injected_report(req.node, req.input_snapshot)
+        if report is not None:
+            features = dict(report.feature_vector)
+            feature_schema_version = report.feature_schema_version
+        else:
+            features = {}
+            feature_schema_version = p._scaler.feature_schema_version
+
+        query = ExperienceQuery.build(
+            as_of=p._as_of, feature_schema_version=feature_schema_version,
+            features=features, k=p._k)
+
+        gw = req.capability_gateway
+        base = f"{req.bridge.bridge_id}:{req.node.id}:a{token.attempt}:c{token.call_ordinal}"
+        pending = gw.begin(
+            ordinal_token=token, capability_ref=p._capability_ref,
+            request_schema_ref=EXPERIENCE_QUERY_SCHEMA_REF, idempotency_key=f"{base}:call")
+        unpublished = gw.invoke(pending, query)
+        selection = gw.validate_result(unpublished)
+
+        query_ref = req.evidence_writer.put(
+            token=token, role="provider_prefetch", schema_ref=EXPERIENCE_QUERY_SCHEMA_REF,
+            payload=query, idempotency_key=f"{base}:query")
+        selection_ref = req.evidence_writer.put(
+            token=token, role="tool_result", schema_ref=EXPERIENCE_SELECTION_SCHEMA_REF,
+            payload=selection, idempotency_key=f"{base}:selection")
+        record = gw.finalize_success(
+            pending, request_ref=query_ref, result_ref=selection_ref)
+
+        blocks: tuple[ProviderUntrustedBlock, ...] = ()
+        if kind is ExecutionKind.LLM:
+            rendered = render_experience_selection_for_prompt(selection)
+            blocks = (ProviderUntrustedBlock(
+                bridge_id=req.bridge.bridge_id, bridge_priority=req.bridge.priority,
+                call_ordinal=record.call_ordinal, payload_ref=selection_ref,
+                media_type="application/json",
+                rendered_length=len(rendered.encode("utf-8"))),)
+
+        contribution = BridgeContribution(
+            bridge_id=req.bridge.bridge_id, bridge_priority=req.bridge.priority,
+            summary_digest=req.summary.summary_digest, tool_call_records=(record,),
+            data_result_refs=(), direct_evidence_refs=(), untrusted_blocks=blocks)
+        return BridgeStageOutcome(status="completed", frozen_contribution=contribution)
+
+
+def make_lane0_experience_bridge_factory(
+    *, pool, registry, capability_ref, views, scaler, k, as_of,
+):
+    """The trusted provider-handler factory the service registers for the bridge."""
+
+    def factory(*, bridge, summary) -> Lane0ExperienceBridgeProvider:
+        return Lane0ExperienceBridgeProvider(
+            bridge=bridge, summary=summary, pool=pool, registry=registry,
+            capability_ref=capability_ref, views=views, scaler=scaler, k=k, as_of=as_of)
+
+    return factory
+
+
+def register_bootstrap_runtime_factories(
+    *,
+    factories,
+    catalog: "Lane0Catalog",
+    pool,
+    registry,
+    spec: "MarketFactorSetSpec",
+    inputs: Any,
+    as_of: datetime,
+    experience_views,
+    experience_scaler,
+    experience_k: int = BOOTSTRAP_EXPERIENCE_K,
+) -> None:
+    """Bind the Lane 0 runtime factories by exact catalog identity for one run.
+
+    Registers the executor-compatible deterministic ``market.factor`` handler bound
+    to the pinned factor set + inputs, the read-only ``experience.bridge`` provider,
+    and the ``experience.retrieve`` capability backend. Keyed by the exact catalog
+    ref identities, so an off-catalog handler/provider can never receive a binding.
+    """
+    refs = catalog.refs
+    handler = bootstrap_market_factor_handler(spec=spec, inputs=inputs, as_of=as_of)
+    factories.register_handler(refs["lane0.market.factor.handler"], lambda **_kw: handler)
+    factories.register_handler(
+        refs["lane0.experience.provider"],
+        make_lane0_experience_bridge_factory(
+            pool=pool, registry=registry, capability_ref=catalog.capability_ref,
+            views=experience_views, scaler=experience_scaler, k=experience_k, as_of=as_of),
+    )
+    backend = ExperienceRetrievalBackend(views=experience_views, scaler=experience_scaler)
+    factories.register_capability_backend(catalog.capability_ref, lambda **_kw: backend)
+
+
+# --------------------------------------------------------------------------- #
+# ContextSnapshot assembly + honest unknown/degraded manifest (one UoW)        #
+# --------------------------------------------------------------------------- #
+def _bootstrap_node_statuses(stores, run_id: str) -> dict[str, NodeStatus]:
+    """The latest terminal NodeStatus per node from the run's main journal."""
+    statuses: dict[str, NodeStatus] = {}
+    for ev in stores.events.journal(run_id, "main"):
+        if ev.event_type is EventType.NODE_STATE_CHANGED:
+            nr = stores.payloads.get(ev.payload_ref, expected_schema_ref=_NODE_RUN_SR)
+            statuses[nr.node_id] = nr.status
+    return statuses
+
+
+def _artifact_payload_refs(stores, run_id: str) -> dict[str, PayloadRef]:
+    """artifact_id → the exact committed report payload ref (from ArtifactStaged)."""
+    refs: dict[str, PayloadRef] = {}
+    for ev in stores.events.journal(run_id, "main"):
+        if ev.event_type is EventType.ARTIFACT_STAGED and ev.correlation_id is not None:
+            refs[ev.correlation_id] = ev.payload_ref
+    return refs
+
+
+def _bootstrap_badges(
+    statuses: dict[str, NodeStatus], *, regime_present: bool, rotation_present: bool,
+) -> tuple[str, ...]:
+    badges: set[str] = set()
+    if statuses.get("lane0.factor") is NodeStatus.DEGRADED:
+        badges.add("factor_degraded")
+    if not regime_present:
+        badges.add("regime_missing")
+    elif statuses.get("lane0.regime") is NodeStatus.DEGRADED:
+        badges.add("regime_degraded")
+    if not rotation_present:
+        badges.add("rotation_missing")
+    elif statuses.get("lane0.rotation") is NodeStatus.DEGRADED:
+        badges.add("rotation_degraded")
+    return tuple(sorted(badges))
+
+
+def build_context_snapshot_from_bootstrap(
+    *,
+    run_result: "RunResult",
+    pool: "ArtifactPool",
+    data_context: DataContext,
+    stores: Any,
+    registry: Any,
+    clock: "AuthoritativeClock",
+) -> tuple[ContextSnapshot, BootstrapContextManifest]:
+    """Assemble the committed :class:`ContextSnapshot` + honest
+    :class:`BootstrapContextManifest` from a finished bootstrap run.
+
+    Reads the committed Lane 0 artifacts from the pool (``committed_output`` +
+    the exact persisted report payload refs), builds the empty-memory ContextSnapshot
+    via the Phase 1 builder (``runtime_requirements_ref=None`` — memory is canonically
+    empty), assembles the manifest with badges from the run's NodeRun statuses
+    (missing LLM output ⇒ ``*_missing`` badge + ``None`` ref; DEGRADED ⇒ ``*_degraded``),
+    and appends ``CONTEXT_SNAPSHOT_FROZEN`` + the manifest payload in ONE all-or-none
+    UoW on the bootstrap run's main partition (replay-idempotent).
+    """
+    from guanlan_v2.orchestration import presets as P
+    from guanlan_v2.orchestration.eventstore import (
+        EventAppendCommand,
+        PayloadPutCommand,
+        RuntimeBatch,
+        StagedPayloadKey,
+    )
+
+    run_id = run_result.run_id
+    reg_digest = registry.registry_digest
+    statuses = _bootstrap_node_statuses(stores, run_id)
+    staged = _artifact_payload_refs(stores, run_id)
+
+    def _report_ref(node_id: str, schema_ref: SchemaRef) -> TypedPayloadRef | None:
+        art = pool.committed_output(node_id, _PRIMARY)
+        if art is None:
+            return None
+        payload_ref = staged.get(art.artifact_id)
+        if payload_ref is None:  # pragma: no cover - a committed artifact was staged
+            raise BootstrapRuntimeError(
+                f"committed artifact {art.artifact_id!r} has no ArtifactStaged payload ref"
+            )
+        return TypedPayloadRef(schema_ref=schema_ref, payload_ref=payload_ref)
+
+    factor_ref = _report_ref("lane0.factor", MARKET_FACTOR_REPORT_SCHEMA_REF)
+    if factor_ref is None:
+        raise BootstrapRuntimeError(
+            "bootstrap ContextSnapshot requires a committed market factor report "
+            "(the deterministic Lane 0 reader produced no artifact)"
+        )
+    regime_ref = _report_ref("lane0.regime", REGIME_REPORT_SCHEMA_REF)
+    rotation_ref = _report_ref("lane0.rotation", ROTATION_REPORT_SCHEMA_REF)
+
+    mem = P.build_empty_memory_context(
+        data_context=data_context, stores=stores, registry_digest=reg_digest,
+        built_at=clock.now(), snapshot_id=f"bootstrap-ctx-{run_id}",
+        memory_snapshot_id=f"bootstrap-ms-{run_id}")
+    context = mem.context
+
+    badges = _bootstrap_badges(
+        statuses, regime_present=regime_ref is not None,
+        rotation_present=rotation_ref is not None)
+    manifest = BootstrapContextManifest.build(
+        context_snapshot_digest=context.content_digest,
+        bootstrap_plan_digest=run_result.plan_digest,
+        bootstrap_run_id=run_id,
+        market_factor_report_ref=factor_ref,
+        regime_report_ref=regime_ref,
+        rotation_report_ref=rotation_ref,
+        degradation_badges=badges,
+    )
+
+    batch = RuntimeBatch(
+        idempotency_key=f"bootstrap-context-snapshot:{run_id}",
+        payload_puts=(
+            PayloadPutCommand(
+                staged_key=StagedPayloadKey(key="manifest"),
+                schema_ref=_BOOTSTRAP_CONTEXT_MANIFEST_SR, namespace="main",
+                payload_template=dict(manifest), registry_digest=reg_digest,
+                idempotency_key=f"bootstrap-manifest:{run_id}"),
+        ),
+        event_appends=(
+            EventAppendCommand(
+                run_id=run_id, partition="main",
+                event_type=EventType.CONTEXT_SNAPSHOT_FROZEN.value,
+                payload_schema_ref=_BOOTSTRAP_CONTEXT_MANIFEST_SR,
+                payload_target=StagedPayloadKey(key="manifest"),
+                registry_digest=reg_digest,
+                idempotency_key=f"bootstrap-context-frozen:{run_id}",
+                plan_digest=manifest.bootstrap_plan_digest),
+        ),
+    )
+    stores.unit_of_work.commit(batch)
+    return context, manifest
+
+
+# --------------------------------------------------------------------------- #
+# Lifecycle step ④ — deterministic RegimeCase append from committed artifacts   #
+# --------------------------------------------------------------------------- #
+def append_regime_case_from_run(
+    *,
+    run_result: "RunResult",
+    pool: "ArtifactPool",
+    log: "ExperienceLog",
+    spec: "MarketFactorSetSpec",
+    clock: "AuthoritativeClock",
+) -> "RegimeCase | None":
+    """Fold the day's :class:`RegimeCase` from the committed Lane 0 artifacts.
+
+    Builds the case deterministically from the committed ``RegimeReport`` (embedded
+    as ``judgment``) + the factor report's ``feature_vector``/``feature_coverage``/
+    ``missing_features`` + the ``scaler_digest`` carried in the run's committed
+    ``ExperienceSelection`` (the regime node's finalized tool result). ``links``
+    carries the producing ``artifact:{id}`` entries. Returns ``None`` with no append
+    when the regime artifact is absent (badged in the manifest instead — no case
+    without a judgment). Idempotent across same-day reruns; a drifted judgment
+    conflicts loudly. This is service code — the LLM never writes the store.
+    """
+    from guanlan_v2.orchestration.memory.experience import (
+        EXPERIENCE_SELECTION_SCHEMA_REF,
+        RegimeCase,
+    )
+
+    regime_art = pool.committed_output("lane0.regime", _PRIMARY)
+    factor_art = pool.committed_output("lane0.factor", _PRIMARY)
+    if regime_art is None or factor_art is None:
+        return None
+    judgment = regime_art.payload
+    report = factor_art.payload
+
+    scaler_digest = None
+    for rec in regime_art.provenance.tool_call_records:
+        if rec.result_ref.schema_ref == EXPERIENCE_SELECTION_SCHEMA_REF:
+            selection = log.resolve_payload(rec.result_ref)
+            scaler_digest = selection.scaler_digest
+            break
+    if scaler_digest is None:  # pragma: no cover - a COMPLETED LLM node finalized one call
+        return None
+
+    as_of = judgment.as_of
+    available_at = datetime(
+        as_of.year, as_of.month, as_of.day, *_CASE_AVAILABLE_UTC, tzinfo=timezone.utc)
+    if available_at < as_of:
+        available_at = as_of
+    links = tuple(sorted(f"artifact:{a.artifact_id}" for a in (factor_art, regime_art)))
+
+    case = RegimeCase.build(
+        id=f"rc.{spec.feature_schema_version}.{as_of.strftime('%Y%m%d')}",
+        as_of=as_of,
+        available_at=available_at,
+        feature_schema_version=spec.feature_schema_version,
+        scaler_digest=scaler_digest,
+        features=dict(report.feature_vector),
+        feature_coverage=dict(report.feature_coverage),
+        missing_features=report.missing_features,
+        judgment=judgment,
+        links=links,
+    )
+    log.append_case(
+        case, correlation_run_id=run_result.run_id,
+        idempotency_key=f"case.created:{case.id}")
+    return case
