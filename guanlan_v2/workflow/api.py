@@ -2334,20 +2334,12 @@ def _w6_perf(nav_series, ann_return, ppy: int, start: str, end: str) -> Dict[str
 def _oos_verdict(is_v, oos_v, n_oos, min_n: int = 6):
     """IS/OOS 同指标 → 过拟合判定。返回 ``(verdict, decay_ratio, label)``。
 
-    decay_ratio = OOS/IS(仅 IS>0 有意义);门槛 0.6/0.2:≥0.6 稳健、≥0.2 衰减、<0.2(含反号)
-    疑似过拟合。OOS 期数 < min_n → insufficient(不下结论);IS 无正信号 → na(无从判)。"""
-    if n_oos is None or n_oos < min_n:
-        return "insufficient", None, "样本外期数不足,暂不下结论"
-    if is_v is None or is_v != is_v or oos_v is None or oos_v != oos_v:
-        return "na", None, "指标缺失"
-    if is_v <= 0:
-        return "na", None, "样本内本身无正信号(无从判过拟合)"
-    ratio = float(oos_v) / float(is_v)
-    if ratio >= 0.6:
-        return "robust", ratio, "稳健 · 样本外保持"
-    if ratio >= 0.2:
-        return "degraded", ratio, "衰减 · 样本外走弱"
-    return "overfit", ratio, "疑似过拟合 · 样本外塌缩/反号"
+    Body relocated verbatim to ``guanlan_v2.orchestration.governor.oos_verdict``
+    (Phase 4 Task 4); this is a one-line delegate so every existing caller/test keeps
+    exact behavior. The function-local import keeps this module's import time unchanged
+    and avoids a module-level ``workflow → orchestration`` edge."""
+    from guanlan_v2.orchestration.governor import oos_verdict
+    return oos_verdict(is_v, oos_v, n_oos, min_n=min_n)
 
 
 def _rank_ic_series(fac, fwd) -> "List[Any]":
@@ -3115,38 +3107,12 @@ class FactorComposeIn(ModelTrainIn):
 def _cscv_pbo(perf_matrix, n_blocks: int = 8):
     """CSCV → PBO(回测过拟合概率,López de Prado / 华泰对抗"挑出来的虚高回测")。
 
-    ``perf_matrix``:候选 × 时间块 的表现矩阵(此处用各成员因子在各时间块的 rank-IC),
-    形状 (N候选, S块)。把 S 块枚举所有 C(S, S/2) 互补划分(一半 IS 一半 OOS):每划分用
-    IS 选表现最优候选 → 看它在 OOS 的相对排名 ω∈(0,1) → ω<0.5(落入 OOS 后半)记一次过拟合。
-    PBO = 这类划分占比。需 N≥2 候选 & S≥4 偶数块。返回 {enabled, pbo, n_combos, ...}。"""
-    import numpy as np
-    from itertools import combinations
-    M = np.asarray(perf_matrix, dtype="float64")
-    if M.ndim != 2 or M.shape[0] < 2 or M.shape[1] < 4:
-        return {"enabled": False, "reason": f"PBO 需 ≥2 候选 & ≥4 时间块(得 {tuple(M.shape) if M.ndim == 2 else M.shape})"}
-    N, S = M.shape
-    if S % 2 == 1:   # 取偶数块
-        S -= 1
-        M = M[:, :S]
-    M = np.nan_to_num(M, nan=0.0)
-    half = S // 2
-    n_below = 0
-    n_tot = 0
-    for is_idx in combinations(range(S), half):
-        oos_idx = [b for b in range(S) if b not in is_idx]
-        is_perf = M[:, list(is_idx)].mean(axis=1)
-        oos_perf = M[:, oos_idx].mean(axis=1)
-        best = int(np.argmax(is_perf))                       # IS 最优候选
-        order = oos_perf.argsort()                            # OOS 升序
-        rank = int(np.where(order == best)[0][0]) + 1         # 1=最差 .. N=最优
-        omega = rank / (N + 1.0)
-        if omega < 0.5:
-            n_below += 1
-        n_tot += 1
-    pbo = (n_below / n_tot) if n_tot else float("nan")
-    return {"enabled": True, "pbo": _num(pbo), "n_combos": int(n_tot),
-            "n_candidates": int(N), "n_blocks": int(S),
-            "note": "PBO = IS 最优候选在 OOS 落入后半的概率(CSCV);>0.5 提示选优过拟合,<0.3 较稳健。"}
+    Body relocated verbatim to ``guanlan_v2.orchestration.governor.cscv_pbo`` (Phase 4
+    Task 4); this is a one-line delegate so every existing caller/test (incl. the
+    ``_factor_compose`` call site with its ≥16-rebalance-date pre-check) keeps exact
+    behavior. The function-local import keeps this module's import time unchanged."""
+    from guanlan_v2.orchestration.governor import cscv_pbo
+    return cscv_pbo(perf_matrix, n_blocks=n_blocks)
 
 
 def _factor_compose(body: "FactorComposeIn") -> JSONResponse:
