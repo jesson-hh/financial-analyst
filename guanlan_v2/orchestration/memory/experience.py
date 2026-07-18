@@ -75,12 +75,22 @@ from guanlan_v2.orchestration.eventstore import (
     RuntimeBatch,
     StagedPayloadKey,
 )
+from guanlan_v2.orchestration.enums import Confidence
 from guanlan_v2.orchestration.events import EventType, RunEvent
 from guanlan_v2.orchestration.market.factors import (
+    DEFAULT_AVAILABILITY_RULE,
+    DEFAULT_UNIVERSE_REGISTRY_VERSION,
+    UNKNOWN_ATTENTION_THRESHOLD,
+    EvidenceAnchor,
     HeatState,
+    MarketFactorInputs,
+    MarketFactorReport,
+    MarketFactorSetSpec,
     RegimeReport,
     RiskState,
     TrendState,
+    _window_inputs,
+    compute_market_factors,
 )
 from guanlan_v2.orchestration.memory.models import AuthenticatedAdminPrincipal
 from guanlan_v2.orchestration.refs import (
@@ -137,6 +147,14 @@ __all__ = [
     "fit_scaler",
     "retrieve_neighbours",
     "EXPERIENCE_PUBLIC_MODELS",
+    # cold-start seeding (Task 7)
+    "SEED_LINK",
+    "SEED_PROXY_RULE_VERSION",
+    "QUERY_AS_OF_UTC",
+    "CASE_AVAILABLE_UTC",
+    "SeedReport",
+    "seed_judgment_proxy",
+    "seed_experience_from_history",
 ]
 
 _DIGEST_PLACEHOLDER = "0" * 64
@@ -1145,6 +1163,19 @@ def retrieve_neighbours(
             f"scaler {scaler.feature_schema_version!r}; refusing cross-schema retrieval"
         )
 
+    # (1b) Task-5 review carry-a — the scaler must not be fitted with data after the
+    #      query vantage. This is the one unguarded PIT surface: a scaler whose
+    #      ``mu``/``sd`` absorbed forward observations would leak future statistics into
+    #      a historical query's standardized distances (silently, without any candidate
+    #      being future). Filter-then-fit is the fold+``fit_scaler`` contract; here we
+    #      re-assert it defense-in-depth and refuse a future-fitted scaler.
+    if scaler.fit_as_of > query.as_of:
+        raise FutureDataRefused(
+            f"scaler fit_as_of {scaler.fit_as_of.isoformat()} is after query as_of "
+            f"{query.as_of.isoformat()} (a future-fitted scaler leaks forward statistics)",
+            future_rows=1,
+        )
+
     # (2) PIT re-assertion — no future candidate may reach the ranking.
     future = [v for v in views if v.case.available_at > query.as_of]
     if future:
@@ -1560,3 +1591,398 @@ def matured_only(views: Sequence[CaseView]) -> tuple[CaseView, ...]:
             f"— pending case id(s): {pending_ids}"
         )
     return tuple(views)
+
+
+# =========================================================================== #
+# Task 7 — cold-start historical replay seeding + future-case invariance         #
+# =========================================================================== #
+# Replays HISTORICAL data through the deterministic pipeline (Task 3 compute →
+# seed-judgment proxy → Task 4 case append → Task 6 grader maturity) to
+# pre-populate the 经验库. The value of a seed lies in its later deterministic
+# ``CaseMatured`` labels — never in a forward-looking judgment. Seeds are marked
+# by ``links`` (``SEED_LINK``); judgments come from a closed deterministic LOW-
+# confidence proxy (no LLM; plan D12).
+#
+# FUTURE-CASE INVARIANCE (the acceptance): seeding history up to date D then
+# querying as-of D' < D yields byte-identical retrieval to having seeded only up
+# to D'. This is guaranteed by construction — every seeded case's ``available_at``
+# is D's close, and ``fold_case_views`` / ``fit_scaler`` filter
+# ``available_at <= as_of`` before any ranking, so a future seeded case is
+# invisible at an earlier vantage. The seeder only has to stamp availability
+# correctly; the PIT machinery does the rest.
+
+#: recorded into every seeded ``RegimeCase.links`` (the sole seeded/live 区别).
+SEED_LINK = "seed:lane0-replay-v1"
+#: the closed proxy rule version (named in the judgment narrative; a rule change
+#: is a new version, never a silent edit).
+SEED_PROXY_RULE_VERSION = "seed-proxy-v1"
+
+#: the seed time conventions — versioned constants, part of the seed identity.
+#: A case is judged at the session *open* (09:30 Asia/Shanghai = 01:30 UTC) over
+#: data knowable then (≤ the prior session's close), and becomes a retrievable PIT
+#: fact only at the session *close* (15:05 Asia/Shanghai = 07:05 UTC) — so a
+#: same-day query at 01:30 never sees its own case (available at 07:05).
+QUERY_AS_OF_UTC = "01:30"
+CASE_AVAILABLE_UTC = "07:05"
+
+# --------------------------------------------------------------------------- #
+# The closed deterministic proxy rule (v1) — constants pinned by tests.          #
+# --------------------------------------------------------------------------- #
+#: picked-label base mass per axis. Trend/risk have three non-unknown labels so a
+#: 0.5–0.6 base strictly dominates the even split; heat has only TWO non-unknown
+#: labels (normal/overheat), so its base MUST exceed 0.5 — a 0.5/0.5 split would
+#: tie and force the declaration-order label, breaking RegimeReport validator 3
+#: (the modal must equal the picked label when coverage is full). 0.6 is the
+#: reviewed provisional that keeps the picked heat label the strict argmax.
+_SEED_TREND_PICK_MASS = 0.6
+_SEED_RISK_PICK_MASS = 0.5
+_SEED_HEAT_PICK_MASS = 0.6
+#: unknown mass is capped so a fully-missing day still leaves a sliver of signal.
+_SEED_UNKNOWN_CAP = 0.9
+#: rule thresholds (read from the summary/series side of the 19-id battery).
+_SEED_TREND_BULL_MIN_AD20 = 0.10
+_SEED_TREND_BEAR_MAX_AD20 = -0.10
+_SEED_RISK_OFF_MIN_DIVERGENCE = 1.5
+_SEED_HEAT_OVERHEAT_MIN_TEMP = 85.0
+#: the rule-referenced factors (the trend/risk/heat drivers + a vol context read).
+#: They are also the evidence/drivers set: one anchor per factor present that day.
+_SEED_TREND_FACTOR = "breadth.ad_ratio"
+_SEED_RISK_FACTOR = "breadth.divergence"
+_SEED_HEAT_FACTOR = "temp.astock"
+_SEED_CONTEXT_FACTOR = "vol.rv"
+_SEED_RULE_FACTORS: tuple[str, ...] = (
+    _SEED_TREND_FACTOR, _SEED_RISK_FACTOR, _SEED_HEAT_FACTOR, _SEED_CONTEXT_FACTOR,
+)
+_SEED_READING_AXIS: dict[str, str] = {
+    _SEED_TREND_FACTOR: "trend", _SEED_RISK_FACTOR: "risk",
+    _SEED_HEAT_FACTOR: "heat", _SEED_CONTEXT_FACTOR: "vol",
+}
+
+
+def _seed_present_value(value_by_id: dict[str, Any], fid: str) -> Any | None:
+    """The factor value for ``fid`` iff it is present that day (not UNAVAILABLE)."""
+    v = value_by_id.get(fid)
+    if v is None or v.status == "UNAVAILABLE":
+        return None
+    return v
+
+
+def _seed_read_latest(v: Any) -> float:
+    """The latest scalar read (summary.latest, else the factor's own value)."""
+    if v.summary is not None:
+        return float(v.summary.latest)
+    return float(v.value)
+
+
+def _seed_read_aux(v: Any, key: str) -> float | None:
+    """A per-date derived read from the latest series point's aux (or ``None``)."""
+    if v.series and key in v.series[-1].aux:
+        return float(v.series[-1].aux[key])
+    return None
+
+
+def _seed_axis_probs(
+    members: type, picked: Any, base_mass: float, unknown_mass: float
+) -> dict[Any, float]:
+    """A closed axis distribution: ``picked`` gets ``base_mass``, the other
+    non-unknown labels split the remainder evenly, all scaled to ``1 − unknown``,
+    and the ``unknown`` label carries ``unknown_mass``. Sums to 1 by construction."""
+    unknown = next(m for m in members if m.value == "unknown")
+    non_unknown = [m for m in members if m is not unknown]
+    other = (1.0 - base_mass) / (len(non_unknown) - 1)
+    probs: dict[Any, float] = {}
+    for lbl in non_unknown:
+        weight = base_mass if lbl is picked else other
+        probs[lbl] = weight * (1.0 - unknown_mass)
+    probs[unknown] = unknown_mass
+    return probs
+
+
+def seed_judgment_proxy(report: MarketFactorReport) -> RegimeReport:
+    """The deterministic PIT-clean proxy judgment for a seeded case (no LLM; D12).
+
+    Closed v1 rule (constants above, pinned by tests). Reads from the summary/
+    series side of the 19-id battery: ``ad20`` = ``breadth.ad_ratio`` ma20 aux,
+    ``d`` = ``breadth.divergence`` latest, ``temp`` = ``temp.astock`` latest.
+
+    * trend — ``ad20 ≥ +0.10 ⇒ 牛``, ``≤ −0.10 ⇒ 熊``, else ``震荡`` (a missing driver
+      falls to the middle default);
+    * risk — ``d ≥ 1.5 ⇒ risk_off`` else ``neutral``;
+    * heat — ``temp ≥ 85 ⇒ overheat`` else ``normal``.
+
+    On every axis ``unknown = min(0.9, missing_share)`` where
+    ``missing_share = len(missing_features)/len(spec ids)`` — a coverage-driven mass
+    that pushes an axis toward ``unknown`` structurally (a factor referenced by the
+    rule but UNAVAILABLE simply raises ``missing_share``). Non-unknown masses are
+    rescaled to ``1 − unknown``; the modal label follows from the masses. Confidence
+    is always ``LOW``. Evidence is one anchor per rule-referenced factor present that
+    day (≥1 by the seeder's input contract); ``drivers`` / ``evidence_factor_ids`` are
+    those same present ids. Seeds never look at forward data for the judgment.
+    """
+    value_by_id = {v.factor_id: v for v in report.values}
+    n_spec = len(report.values)
+    missing_share = (len(report.missing_features) / n_spec) if n_spec else 0.0
+    unknown_mass = min(_SEED_UNKNOWN_CAP, missing_share)
+
+    ad_v = _seed_present_value(value_by_id, _SEED_TREND_FACTOR)
+    div_v = _seed_present_value(value_by_id, _SEED_RISK_FACTOR)
+    heat_v = _seed_present_value(value_by_id, _SEED_HEAT_FACTOR)
+
+    ad20 = _seed_read_aux(ad_v, "ma20") if ad_v is not None else None
+    d = _seed_read_latest(div_v) if div_v is not None else None
+    temp = _seed_read_latest(heat_v) if heat_v is not None else None
+
+    if ad20 is not None and ad20 >= _SEED_TREND_BULL_MIN_AD20:
+        trend_pick = TrendState.BULL
+    elif ad20 is not None and ad20 <= _SEED_TREND_BEAR_MAX_AD20:
+        trend_pick = TrendState.BEAR
+    else:
+        trend_pick = TrendState.RANGE
+    risk_pick = (
+        RiskState.RISK_OFF if (d is not None and d >= _SEED_RISK_OFF_MIN_DIVERGENCE)
+        else RiskState.NEUTRAL
+    )
+    heat_pick = (
+        HeatState.OVERHEAT if (temp is not None and temp >= _SEED_HEAT_OVERHEAT_MIN_TEMP)
+        else HeatState.NORMAL
+    )
+
+    trend_probs = _seed_axis_probs(TrendState, trend_pick, _SEED_TREND_PICK_MASS, unknown_mass)
+    risk_probs = _seed_axis_probs(RiskState, risk_pick, _SEED_RISK_PICK_MASS, unknown_mass)
+    heat_probs = _seed_axis_probs(HeatState, heat_pick, _SEED_HEAT_PICK_MASS, unknown_mass)
+
+    def _modal(members: type, probs: dict[Any, float]) -> Any:
+        # first maximal in declaration order (matches RegimeReport's argmax).
+        return max(members, key=lambda member: probs[member])
+
+    # evidence: one anchor per rule-referenced factor present that day.
+    anchors: list[EvidenceAnchor] = []
+    present_ids: list[str] = []
+    for fid in _SEED_RULE_FACTORS:
+        v = _seed_present_value(value_by_id, fid)
+        if v is None:
+            continue
+        present_ids.append(fid)
+        anchors.append(EvidenceAnchor(
+            factor_id=fid,
+            value=float(v.value),
+            reading=f"seed proxy {_SEED_READING_AXIS[fid]} input {fid}={v.value}",
+        ))
+    if not anchors:
+        raise ValueError(
+            "seed_judgment_proxy requires at least one rule-referenced factor present "
+            f"(one of {list(_SEED_RULE_FACTORS)}); the report exposes none — the seeder's "
+            "input contract must keep the rule-referenced factors as the computable core"
+        )
+    present_ids_sorted = tuple(sorted(present_ids))
+    anchors_sorted = tuple(sorted(anchors, key=lambda a: a.factor_id))
+
+    unknown_reason: str | None = None
+    if unknown_mass >= UNKNOWN_ATTENTION_THRESHOLD:
+        shown = ", ".join(report.missing_features[:6])
+        unknown_reason = (
+            f"seed proxy: {len(report.missing_features)}/{n_spec} factors UNAVAILABLE "
+            f"({shown}) — coverage-driven unknown mass {unknown_mass:.4f}"
+        )
+
+    return RegimeReport.build(
+        as_of=report.as_of,
+        factor_report_digest=report.content_digest,
+        trend=_modal(TrendState, trend_probs),
+        risk_state=_modal(RiskState, risk_probs),
+        heat_state=_modal(HeatState, heat_probs),
+        trend_probabilities=trend_probs,
+        risk_probabilities=risk_probs,
+        heat_probabilities=heat_probs,
+        confidence=Confidence.LOW,
+        evidence=anchors_sorted,
+        conflicts=(),
+        analog_case_ids=(),
+        drivers=present_ids_sorted,
+        evidence_factor_ids=present_ids_sorted,
+        narrative=(
+            f"{SEED_LINK} deterministic PIT-clean proxy judgment "
+            f"(rule {SEED_PROXY_RULE_VERSION}); no LLM, confidence LOW"
+        ),
+        unknown_reason=unknown_reason,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# SeedReport — the internal replay summary (not a registered payload).          #
+# --------------------------------------------------------------------------- #
+class SeedReport(DigestModel):
+    """The summary of one :func:`seed_experience_from_history` walk (internal).
+
+    ``coverage_gap_dates`` are the sessions whose windowed feature vector was empty
+    (no fabricated case ever produced for them — ①§0 honesty); ``scaler_digest_last``
+    is the last per-session scaler digest recorded on a seeded case (``None`` iff no
+    case was created).
+    """
+
+    start: NonEmptyStr
+    end: NonEmptyStr
+    cases_created: NonNegativeInt
+    cases_skipped_existing: NonNegativeInt
+    matured_appended: NonNegativeInt
+    coverage_gap_dates: tuple[NonEmptyStr, ...] = ()
+    feature_schema_version: NonEmptyStr
+    scaler_digest_last: DigestHex | None = None
+
+
+# --------------------------------------------------------------------------- #
+# The time-ordered seeding walk.                                                #
+# --------------------------------------------------------------------------- #
+def _seed_stamp(day_iso: str, tag: str) -> datetime:
+    """A UTC instant on ``day_iso`` at the versioned ``HH:MM`` seed-time tag."""
+    hh, mm = (int(x) for x in tag.split(":"))
+    y, m, d = (int(x) for x in day_iso.split("-"))
+    return datetime(y, m, d, hh, mm, tzinfo=timezone.utc)
+
+
+def _seed_one_session(
+    *,
+    day_iso: str,
+    inputs: MarketFactorInputs,
+    spec: MarketFactorSetSpec,
+    prior_views: Sequence[CaseView],
+    universe_registry_version: str,
+) -> tuple[RegimeCase, ExperienceScalerSnapshot] | None:
+    """Build one seeded case for session ``day_iso`` — pure (no store I/O).
+
+    Kept a single self-contained function so the invariance tests can bisect a
+    failure to a session. Returns ``None`` for a coverage gap (empty feature
+    vector ⇒ no fabricated case). Order is load-bearing: window → compute → fit the
+    scaler on strictly-before-D cases → proxy judgment → build the case.
+    """
+    as_of = _seed_stamp(day_iso, QUERY_AS_OF_UTC)
+    windowed = _window_inputs(inputs, as_of)
+    report = compute_market_factors(
+        windowed,
+        spec=spec,
+        as_of=as_of,
+        clock_mode="eod",
+        universe_registry_version=universe_registry_version,
+        rule=DEFAULT_AVAILABILITY_RULE,
+    )
+    if not report.feature_vector:
+        return None
+    # the scaler for case D is fit only on cases available strictly before D — a
+    # prior seeded case's ``available_at`` is its own (earlier) session close, and
+    # ``fit_as_of`` = D's fixed 01:30 open, which excludes D's own not-yet-appended
+    # case. ``fit_as_of`` is date-canonical (a pure function of ``day_iso`` at the
+    # fixed open time), so re-seeding produces a byte-identical scaler digest for D
+    # (Task-5 review carry-b: a date-granular fit_as_of ↔ datetime digest can never
+    # conflict across runs).
+    scaler = fit_scaler(prior_views, as_of=as_of, feature_schema_version=spec.feature_schema_version)
+    judgment = seed_judgment_proxy(report)
+    case = RegimeCase.build(
+        id=f"rc.{spec.feature_schema_version}.{day_iso.replace('-', '')}",
+        as_of=as_of,
+        available_at=_seed_stamp(day_iso, CASE_AVAILABLE_UTC),
+        feature_schema_version=spec.feature_schema_version,
+        scaler_digest=scaler.content_digest,
+        features=dict(report.feature_vector),
+        feature_coverage=dict(report.feature_coverage),
+        missing_features=report.missing_features,
+        judgment=judgment,
+        links=(SEED_LINK,),
+    )
+    return case, scaler
+
+
+def _seed_existing_case_ids(log: ExperienceLog) -> set[str]:
+    """The ids of every case already committed to the store (re-seed skip set)."""
+    out: set[str] = set()
+    for ev in log.visible_case_events():
+        if ev.event_type is EventType.CASE_CREATED:
+            case = log.resolve_payload(
+                TypedPayloadRef(schema_ref=ev.payload_schema_ref, payload_ref=ev.payload_ref)
+            )
+            out.add(case.id)
+    return out
+
+
+def seed_experience_from_history(
+    *,
+    inputs: MarketFactorInputs,
+    spec: MarketFactorSetSpec,
+    grader: RegimeGraderSpec,
+    calendar: ObservedTradeDateCalendar,
+    log: ExperienceLog,
+    start: NonEmptyStr,
+    end: NonEmptyStr,
+    clock: AuthoritativeClock,
+    universe_registry_version: str = DEFAULT_UNIVERSE_REGISTRY_VERSION,
+) -> SeedReport:
+    """Strict time-ordered cold-start replay over sessions in ``[start, end]``.
+
+    For each observed session D (in strictly increasing order): window inputs to
+    D's 01:30 open and run ``compute_market_factors``; skip D (coverage gap) when
+    the feature vector is empty; fit the scaler on strictly-before-D cases; build
+    the deterministic case (proxy judgment, D-close availability, ``SEED_LINK``);
+    ``append_case`` (idempotent — re-seeding skips). After the walk, run
+    ``mature_pending_cases`` **once** — every ``CaseMatured.available_at`` is the
+    exit bar's availability, never the batch wall clock.
+
+    Idempotent: re-seeding the same range appends nothing new
+    (``cases_skipped_existing`` counts the already-present cases). Future-case
+    invariant by construction — the availability stamping + the fold/scaler PIT
+    filter make later-seeded cases invisible at an earlier ``as_of``.
+    """
+    sessions = tuple(d for d in calendar.sessions if start <= d <= end)
+    existing_ids = _seed_existing_case_ids(log)
+
+    prior_views: list[CaseView] = []
+    coverage_gap: list[str] = []
+    created = 0
+    skipped = 0
+    scaler_digest_last: str | None = None
+
+    for day_iso in sessions:
+        built = _seed_one_session(
+            day_iso=day_iso,
+            inputs=inputs,
+            spec=spec,
+            prior_views=prior_views,
+            universe_registry_version=universe_registry_version,
+        )
+        if built is None:
+            coverage_gap.append(day_iso)
+            continue
+        case, scaler = built
+        scaler_digest_last = scaler.content_digest
+        if case.id in existing_ids:
+            skipped += 1
+        else:
+            created += 1
+            existing_ids.add(case.id)
+        # idempotent: same key + same content returns the stored event (a re-seed
+        # skip); same key + drifted content raises IdempotencyConflict (loud).
+        log.append_case(case, correlation_run_id=None, idempotency_key=f"case.created:{case.id}")
+        prior_views.append(CaseView(case=case, state="pending"))
+
+    # after the walk, mature every case whose exit bar is observed (PIT available_at
+    # = the exit bar, never the batch wall clock; the grader is delayed + deterministic).
+    matured_appended = 0
+    bench = tuple(inputs.closes_index or ())
+    if bench:
+        vantage = datetime(2999, 1, 1, tzinfo=timezone.utc)
+        views = fold_case_views(
+            log.visible_case_events(), resolve_payload=log.resolve_payload, as_of=vantage
+        )
+        matured = mature_pending_cases(
+            views=views, bench=bench, calendar=calendar, grader=grader, log=log, clock=clock
+        )
+        matured_appended = len(matured)
+
+    return SeedReport(
+        start=start,
+        end=end,
+        cases_created=created,
+        cases_skipped_existing=skipped,
+        matured_appended=matured_appended,
+        coverage_gap_dates=tuple(coverage_gap),
+        feature_schema_version=spec.feature_schema_version,
+        scaler_digest_last=scaler_digest_last,
+    )
