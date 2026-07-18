@@ -70,17 +70,26 @@ PHASE1_MODULES: tuple[str, ...] = (
     "guanlan_v2.orchestration.migration",
 )
 
-#: Phase 4 (Evaluator-Optimizer / Governor) contract modules. These define public
-#: ``ContractModel`` subclasses but are governed by the Phase 4 completeness
-#: firewall (``PHASE4_PUBLIC_MODELS`` / ``PHASE4_INTERNAL_MODELS`` in ``trial.py``,
-#: frozen in Phase 4 Task 9), NOT the Phase 1 buckets — so the discovery firewall
-#: below excludes them from the Phase-1 ``missing`` check. The Phase 1
-#: classification tests (which key off ``DISCOVERED``, derived only from
-#: ``PHASE1_MODULES``) never see them, so no Phase-4 public model is mislabeled as
-#: a Phase-1 internal model. Task 9 grows this tuple for the remaining Phase 4
-#: modules (governor / trial_ledger / sealed / evaluator / optimize).
+#: Phase 4 (Evaluator-Optimizer / Governor) contract modules. Only ``trial.py``
+#: defines public ``ContractModel`` subclasses today, but all six Phase-4 contract
+#: modules are enumerated here so the Phase-1 discovery firewall permanently treats
+#: any future public contract added to ``governor`` / ``trial_ledger`` / ``sealed``
+#: / ``evaluator`` / ``optimize`` as Phase-4-governed (by the Phase-4 completeness
+#: firewall ``PHASE4_PUBLIC_MODELS`` / ``PHASE4_INTERNAL_MODELS`` in ``trial.py``,
+#: frozen in Phase 4 Task 9), NOT the Phase-1 buckets — so the discovery firewall
+#: below excludes them from the Phase-1 ``missing`` check. The Phase-1 classification
+#: tests (which key off ``DISCOVERED``, derived only from ``PHASE1_MODULES``) never
+#: see them, so no Phase-4 public model is mislabeled as a Phase-1 internal model.
+#: Task 9 grew this tuple from ``("...trial",)`` to the full six-module Phase-4
+#: contract surface; the real Phase-4 firewall lives in
+#: ``tests/orchestration/test_phase4_registry.py``.
 PHASE4_MODULES: tuple[str, ...] = (
     "guanlan_v2.orchestration.trial",
+    "guanlan_v2.orchestration.governor",
+    "guanlan_v2.orchestration.trial_ledger",
+    "guanlan_v2.orchestration.sealed",
+    "guanlan_v2.orchestration.evaluator",
+    "guanlan_v2.orchestration.optimize",
 )
 
 #: Deferred payloads frozen in later consumer phases. None exist yet; the guard
@@ -277,21 +286,30 @@ def test_no_trial_or_holdout_type_registered():
             f"Trial/Holdout type {name!r} is a Phase-4 deferral and must not be "
             "in the Phase-1 registry"
         )
-    # Presence half (Task 3 flip): the Trial/Holdout types now exist as public,
-    # versioned contract models in the Phase 4 module ``trial.py`` — the guard
-    # flipped from "does not exist" to "absent from Phase 1 AND present in Phase 4".
-    # The reviewed ``PHASE4_PUBLIC_MODELS`` tuple is frozen only in Phase 4 Task 9;
-    # until it lands, delegate to the module-defined public contracts via a lazy
-    # import (never importing ``trial.py`` into a Phase-1 source module).
+    # Presence half (Task 3 flip, retightened by Task 9): the Trial/Holdout types now
+    # exist as public, versioned contract models registered in the reviewed
+    # ``PHASE4_PUBLIC_MODELS`` tuple frozen by Phase 4 Task 9 — the guard flipped from
+    # "does not exist" to "absent from Phase 1 AND present in the Phase 4 registry".
+    # The earlier lazy ``getattr(trial, name)`` shim is retired now that the reviewed
+    # tuple (and the sealed cumulative registry) exists.
     trial = importlib.import_module("guanlan_v2.orchestration.trial")
+    public_by_name = {m.__name__: m for m in trial.PHASE4_PUBLIC_MODELS}
     for name in ("TrialRecord", "HoldoutWindow", "HoldoutReceipt", "HoldoutLease"):
-        model = getattr(trial, name, None)
-        assert model is not None, f"Phase 4 trial.py must define {name}"
+        model = public_by_name.get(name)
+        assert model is not None, f"{name} must be a member of PHASE4_PUBLIC_MODELS"
         assert inspect.isclass(model) and issubclass(model, ContractModel), (
             f"trial.{name} must be a public ContractModel"
         )
         assert model.__module__ == "guanlan_v2.orchestration.trial"
         assert name.startswith(TRIAL_HOLDOUT_PREFIXES)
+    # the four Trial/Holdout public contracts are actually registered in the sealed
+    # Phase-4 cumulative registry (the "present" half made concrete).
+    phase4_registered = {
+        e.schema_ref.name
+        for e in trial.build_phase4_registry(trial.PHASE4_BASE_REGISTRY_DIGEST).manifest()
+    }
+    for name in ("TrialRecord", "HoldoutWindow", "HoldoutReceipt", "HoldoutLease"):
+        assert name in phase4_registered
 
 
 def test_no_trial_or_holdout_type_classified_or_defined():

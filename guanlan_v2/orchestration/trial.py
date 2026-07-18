@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import json
 import math
+from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 from pydantic import field_validator, model_validator
@@ -86,6 +87,22 @@ __all__ = [
     "HoldoutLease",
     "SealedEvaluationRecord",
     "SealedCapability",
+    # -- Task 9 cumulative Phase-4 registry / catalog chain ----------------- #
+    "PHASE4_CATALOG_VERSION",
+    "JOINT_GATE_MATERIAL_ID",
+    "JOINT_GATE_METRIC_KIND",
+    "PHASE4_PUBLIC_MODELS",
+    "PHASE4_INTERNAL_MODELS",
+    "PHASE4_INTERNAL_SURFACE",
+    "Phase4RegistryError",
+    "build_phase4_registry",
+    "joint_gate_material",
+    "build_phase4_catalog_snapshot",
+    "phase4_catalog_snapshot",
+    "PHASE4_BASE_REGISTRY_DIGEST",  # noqa: F822 — lazy via module __getattr__
+    "PHASE4_REGISTRY_DIGEST",  # noqa: F822 — lazy via module __getattr__
+    "PHASE4_BASE_CATALOG_DIGEST",  # noqa: F822 — lazy via module __getattr__
+    "PHASE4_CATALOG_DIGEST",  # noqa: F822 — lazy via module __getattr__
 ]
 
 #: domain tag that separates the study-family identity space from any other
@@ -893,3 +910,314 @@ class SealedCapability(DigestModel):
     principal_id: NonEmptyStr
     expires_at: UtcDateTime
     signature: DigestHex
+
+
+# =========================================================================== #
+# Task 9 — cumulative Phase-4 registry / catalog chain                         #
+# =========================================================================== #
+# Phase 4 extends *only* the sealed Phase-3 FULL (data + memory) cumulative
+# registry/catalog. It never mutates or regenerates any upstream sealed
+# registry/golden: old Plans keep resolving their exact Phase-1/2/3 digest through
+# ``SchemaRegistryResolver`` while an Evaluator-Optimizer Plan binds the Phase-4
+# digest. There is deliberately no global mutable "latest" registry/catalog.
+#
+# The implemented Phase-3 chain builders return a
+# :class:`~guanlan_v2.orchestration.runtime_contracts.Phase2RuntimeRegistry` (which
+# accepts the Phase-2 strict ``_StrictModel`` facts the plain Phase-1
+# ``SchemaRegistry`` cannot), so — per the plan's Task 0 correction clause —
+# :func:`build_phase4_registry` returns that same reviewed registry type and inherits
+# its exact ``SchemaManifestEntry`` + ``content_digest`` formula, keeping every
+# inherited schema byte-identical to the Phase-3 full golden.
+
+#: catalog version tag for the cumulative Phase-4 catalog snapshot.
+PHASE4_CATALOG_VERSION = "phase4-full-v1"
+#: the sole reviewed gate-metric material id / version the Phase-4 catalog adds.
+JOINT_GATE_MATERIAL_ID = "optimize.joint_gate"
+JOINT_GATE_MATERIAL_VERSION = "1"
+JOINT_GATE_METRIC_KIND = "gate_metric"
+#: the reviewed research joint-gate material file (UTF-8, no BOM). Resolved relative
+#: to the repo root so a tampered byte moves ``catalog_material_digest`` and trips
+#: both the catalog golden and the material-digest verification.
+_JOINT_GATE_MATERIAL_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "config" / "orchestration" / "materials" / "optimize" / "joint_gate_v1.md"
+)
+
+
+class Phase4RegistryError(Exception):
+    """A Phase-4 cumulative-registry construction invariant was violated."""
+
+
+#: The exactly-16 reviewed Evaluator-Optimizer payload/fact contracts the Phase-4
+#: cumulative registry resolves a :class:`SchemaRef` to (spec §8 verbatim names).
+#: Frozen at ``@1`` — the AMEND-6 pattern-replay extension
+#: (``candidate_kind="pattern_definition"`` / ``source="pattern_replay"`` /
+#: ``profit_loss_ratio`` / ``n_occurrences``) is already part of
+#: ``OptimizeCandidate@1`` / ``ValidationMetrics@1`` at this freeze, so the curator
+#: phase needs no ``@2`` bump.
+PHASE4_PUBLIC_MODELS: tuple[type[DigestModel], ...] = (
+    StudySpec,
+    StudyFamily,
+    SplitSpec,
+    OptimizeCandidate,
+    ValidationMetrics,
+    GovernanceReport,
+    Feedback,
+    OptimizeRound,
+    HoldoutWindow,
+    TrialRecord,
+    OptimizeRunState,
+    OptimizeResult,
+    HoldoutReceipt,
+    HoldoutLease,
+    SealedEvaluationRecord,
+    SealedCapability,
+)
+
+_R_NESTED_ROUND_COMPONENT = (
+    "nested evaluation-gate component only ever embedded in an OptimizeRound record; "
+    "never independently resolved by a SchemaRef payload ref (distinct from the "
+    "Phase-1 Plan-gate spec.GateResult, which stays internal in spec.py — neither is "
+    "registered, so no SchemaConflictError is possible; a later phase registering "
+    "either requires a reviewed rename decision recorded here)"
+)
+_R_NESTED_L0_COMPONENT = (
+    "nested L0 honesty-gate report component only ever embedded in an OptimizeRound / "
+    "evaluator result; never a standalone SchemaRef-addressed payload"
+)
+
+#: The reviewed ``ContractModel -> reason`` map of the two Phase-4 contract models
+#: that are deliberately NOT registered (nested evaluation components). The Phase-4
+#: completeness firewall (``tests/orchestration/test_phase4_registry.py``) proves
+#: ``PHASE4_PUBLIC_MODELS`` ∪ ``PHASE4_INTERNAL_MODELS`` partitions every public
+#: ``ContractModel`` defined across the six Phase-4 modules exactly.
+PHASE4_INTERNAL_MODELS: dict[type[DigestModel], str] = {
+    GateResult: _R_NESTED_ROUND_COMPONENT,
+    HonestyGateReport: _R_NESTED_L0_COMPONENT,
+}
+
+#: The reviewed reason map for the deliberately-unregistered NON-contract Phase-4
+#: surface (services / ports / exception). These are not ``ContractModel``
+#: subclasses at all — they never reach the schema registry — but are documented
+#: here so the full unregistered Phase-4 surface is reviewed in one place. They are
+#: named (not imported) to keep ``trial.py`` free of any service-module import
+#: (``governor`` / ``trial_ledger`` / ``sealed`` / ``optimize`` / ``evaluator`` all
+#: import *this* module; importing them back would be circular).
+PHASE4_INTERNAL_SURFACE: dict[str, str] = {
+    "Governor": "L2 governance service (governor.py); a stateful service, not a payload",
+    "TrialLedger": "event-sourced cross-run ledger service (trial_ledger.py); not a payload",
+    "SealedResultStore": "capability-gated sealed store service (sealed.py); not a payload",
+    "SealedEvaluatorGateway": "process-separated sealed evaluator gateway (sealed.py); not a payload",
+    "ExperimentStateStore": "optimize experiment-state persistence service (optimize.py); not a payload",
+    "AttributionPort": "injectable L3 attribution Protocol (evaluator.py); not a concrete payload",
+    "OptimizeRoundStore": "append-only round-store Protocol (optimize.py); not a concrete payload",
+    "MaturityPending": "maturity-wakeup control exception (optimize.py); not a payload",
+}
+
+
+# --------------------------------------------------------------------------- #
+# The cumulative Phase-4 schema registry                                       #
+# --------------------------------------------------------------------------- #
+def _phase3_full_registry_digest() -> str:
+    from guanlan_v2.orchestration.memory import schema_registry as _reg
+
+    return _reg.PHASE3_FULL_REGISTRY_DIGEST
+
+
+def build_phase4_registry(expected_phase3_full_digest: DigestHex):
+    """Build + seal the cumulative Phase-4 registry, pinned to the Phase-3 full base.
+
+    Verifies ``expected_phase3_full_digest`` against the actual sealed Phase-3 FULL
+    (data + memory) registry digest first — any other base digest is rejected
+    *before any registration* — then registers the complete inherited cumulative set
+    (Phase-1 public + Phase-2 runtime facts + Phase-3 data + Phase-3 memory)
+    followed by :data:`PHASE4_PUBLIC_MODELS` into a *fresh*
+    :class:`~guanlan_v2.orchestration.runtime_contracts.Phase2RuntimeRegistry` and
+    seals it. No upstream registry is mutated; a fresh sealed instance is returned
+    per call.
+    """
+    from guanlan_v2.orchestration.data.schema_registry import (
+        PHASE3_PUBLIC_MODELS as _DATA_PUBLIC,
+    )
+    from guanlan_v2.orchestration.memory.schema_registry import (
+        PHASE3_MEMORY_PUBLIC_MODELS as _MEM_PUBLIC,
+    )
+    from guanlan_v2.orchestration.runtime_contracts import (
+        Phase2RuntimeRegistry,
+        phase2_public_models,
+    )
+
+    actual = _phase3_full_registry_digest()
+    if expected_phase3_full_digest != actual:
+        raise Phase4RegistryError(
+            "build_phase4_registry requires the exact Phase-3 full registry digest "
+            f"{actual!r}; got {expected_phase3_full_digest!r}"
+        )
+    reg = Phase2RuntimeRegistry()
+    for model in (
+        tuple(phase2_public_models())
+        + tuple(_DATA_PUBLIC)
+        + tuple(_MEM_PUBLIC)
+        + PHASE4_PUBLIC_MODELS
+    ):
+        reg.register(model)
+    reg.seal()
+    return reg
+
+
+# --------------------------------------------------------------------------- #
+# The cumulative Phase-4 catalog (one reviewed gate-metric material)           #
+# --------------------------------------------------------------------------- #
+def joint_gate_material():
+    """The reviewed ``optimize.joint_gate`` gate-metric material (ref + resolved bytes).
+
+    Loads the reviewed research joint-gate documentation from
+    ``config/orchestration/materials/optimize/joint_gate_v1.md`` (strict UTF-8, no
+    BOM) and seals its content-digest ``ContentRef`` through the single reviewed
+    ``build_text_material`` path — a caller never pins the digest by hand, and a
+    tampered byte moves the digest.
+    """
+    from guanlan_v2.orchestration.catalog_runtime import build_text_material
+
+    raw = _JOINT_GATE_MATERIAL_PATH.read_bytes()
+    return build_text_material(
+        id=JOINT_GATE_MATERIAL_ID,
+        version=JOINT_GATE_MATERIAL_VERSION,
+        kind=JOINT_GATE_METRIC_KIND,
+        raw=raw,
+    )
+
+
+def build_phase4_catalog_snapshot(
+    phase3_full_snapshot,
+    *,
+    joint_gate_material,
+    resolved_materials,
+):
+    """Extend the immutable Phase-3 full catalog with the one reviewed gate-metric.
+
+    Rejects any base whose ``catalog_digest`` differs from the canonical Phase-3
+    full catalog digest, verifies the joint-gate material is the exact reviewed
+    ``gate_metric`` material (``optimize.joint_gate@1``) whose declared digest
+    matches its bytes, adds exactly one ``ContentManifestEntry`` of
+    ``kind="gate_metric"`` and performs **no** WorkerSpec / capability / skill update
+    — every inherited manifest entry passes through byte-identical.
+    """
+    from guanlan_v2.orchestration.catalog import (
+        CatalogError,
+        ContentManifestEntry,
+        ResolvedTextMaterial,
+        build_catalog_snapshot,
+        catalog_material_digest,
+    )
+
+    base_catalog_digest = _phase3_full_catalog_digest()
+    if phase3_full_snapshot.catalog_digest != base_catalog_digest:
+        raise CatalogError(
+            "build_phase4_catalog_snapshot requires the canonical immutable Phase-3 "
+            f"full catalog ({base_catalog_digest}); got base "
+            f"{phase3_full_snapshot.catalog_digest}"
+        )
+    if not isinstance(joint_gate_material, ResolvedTextMaterial):
+        raise CatalogError("joint_gate_material must be a ResolvedTextMaterial")
+    ref = joint_gate_material.ref
+    if joint_gate_material.kind != JOINT_GATE_METRIC_KIND:
+        raise CatalogError(
+            f"joint_gate_material.kind must be {JOINT_GATE_METRIC_KIND!r}; "
+            f"got {joint_gate_material.kind!r}"
+        )
+    if ref.id != JOINT_GATE_MATERIAL_ID or ref.version != JOINT_GATE_MATERIAL_VERSION:
+        raise CatalogError(
+            f"joint_gate_material must be {JOINT_GATE_MATERIAL_ID}@"
+            f"{JOINT_GATE_MATERIAL_VERSION}; got {ref.id}@{ref.version}"
+        )
+    if ref.content_digest != catalog_material_digest(joint_gate_material):
+        raise CatalogError("joint-gate material digest does not match its bytes")
+    base_content_keys = {
+        (e.ref.id, e.ref.version) for e in phase3_full_snapshot.content_manifest
+    }
+    if (ref.id, ref.version) in base_content_keys:
+        raise CatalogError(
+            f"the base already carries {ref.id}@{ref.version}; the gate-metric is new"
+        )
+
+    new_entry = ContentManifestEntry(
+        ref=ref,
+        kind=JOINT_GATE_METRIC_KIND,
+        name=JOINT_GATE_MATERIAL_ID,
+        description=(
+            "Reviewed research joint-gate metric: a candidate passes only when "
+            "rank_ic >= min_rank_ic AND oos_verdict == 'robust' AND sharpe > 0."
+        ),
+        source_identity=JOINT_GATE_MATERIAL_ID,
+    )
+    return build_catalog_snapshot(
+        catalog_version=PHASE4_CATALOG_VERSION,
+        content_manifest=tuple(phase3_full_snapshot.content_manifest) + (new_entry,),
+        skill_manifest=tuple(phase3_full_snapshot.skill_manifest),
+        capability_manifest=tuple(phase3_full_snapshot.capability_manifest),
+        workers=tuple(phase3_full_snapshot.workers),
+        resolved_material=tuple(resolved_materials) + (joint_gate_material,),
+    )
+
+
+def _phase3_full_catalog_digest() -> str:
+    from guanlan_v2.orchestration.memory import catalog as _cat
+
+    return _cat.PHASE3_FULL_CATALOG_DIGEST
+
+
+def phase4_catalog_snapshot():
+    """The canonical immutable cumulative Phase-4 catalog snapshot.
+
+    Rebuilds the reviewed Phase-3 full catalog and its exact resolved-material set
+    the same way :func:`memory.catalog.phase3_full_catalog_snapshot` assembles them,
+    then extends it with the single reviewed ``optimize.joint_gate`` gate-metric.
+    """
+    from guanlan_v2.orchestration.data.catalog import phase3_data_surface
+    from guanlan_v2.orchestration.memory.catalog import (
+        phase3_full_catalog_snapshot,
+        phase3_memory_surface,
+    )
+    from guanlan_v2.orchestration.presets import load_compat_catalog
+
+    base = phase3_full_catalog_snapshot()
+    runtime = load_compat_catalog()
+    p_text, p_caps = runtime.resolved_materials()
+    data_surface = phase3_data_surface()
+    mem_surface = phase3_memory_surface()
+    phase3_materials = (
+        tuple(p_text) + tuple(p_caps)
+        + data_surface.text_materials() + data_surface.capability_materials
+        + mem_surface.text_materials() + (mem_surface.proposal_capability_material,)
+    )
+    _ref, material = joint_gate_material()
+    return build_phase4_catalog_snapshot(
+        base, joint_gate_material=material, resolved_materials=phase3_materials
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Lazy canonical digests (PEP 562) — computed once, never a mutable "latest"    #
+# --------------------------------------------------------------------------- #
+_PHASE4_REGISTRY_DIGEST: str | None = None
+_PHASE4_CATALOG_DIGEST: str | None = None
+
+
+def __getattr__(name: str) -> Any:
+    global _PHASE4_REGISTRY_DIGEST, _PHASE4_CATALOG_DIGEST
+    if name == "PHASE4_BASE_REGISTRY_DIGEST":
+        return _phase3_full_registry_digest()
+    if name == "PHASE4_REGISTRY_DIGEST":
+        if _PHASE4_REGISTRY_DIGEST is None:
+            _PHASE4_REGISTRY_DIGEST = build_phase4_registry(
+                _phase3_full_registry_digest()
+            ).registry_digest
+        return _PHASE4_REGISTRY_DIGEST
+    if name == "PHASE4_BASE_CATALOG_DIGEST":
+        return _phase3_full_catalog_digest()
+    if name == "PHASE4_CATALOG_DIGEST":
+        if _PHASE4_CATALOG_DIGEST is None:
+            _PHASE4_CATALOG_DIGEST = phase4_catalog_snapshot().catalog_digest
+        return _PHASE4_CATALOG_DIGEST
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
