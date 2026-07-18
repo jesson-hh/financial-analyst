@@ -104,6 +104,7 @@ PHASE4_MODULES: tuple[str, ...] = (
 #: ``tests/orchestration/test_phase5_registry.py``.
 PHASE5_MODULES: tuple[str, ...] = (
     "guanlan_v2.orchestration.market.factors",
+    "guanlan_v2.orchestration.memory.experience",
 )
 
 #: Deferred payloads frozen in later consumer phases. None exist yet; the guard

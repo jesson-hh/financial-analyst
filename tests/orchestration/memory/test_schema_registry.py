@@ -151,11 +151,24 @@ def test_data_only_registry_contains_no_memory_schema():
 # --------------------------------------------------------------------------- #
 # completeness over the memory package                                         #
 # --------------------------------------------------------------------------- #
+#: Phase-5 (Bootstrap Lane 0) modules that physically live under the memory package
+#: but are governed by the Phase-5 registry/completeness firewall (Task 9), NOT the
+#: Phase-3 memory registry — excluded from this Phase-3 memory completeness walk the
+#: same way the Phase-1 ``test_contract_completeness`` firewall excludes the Phase-4/5
+#: modules. ``memory.experience`` (Task 4) defines the Phase-5 experience-library
+#: contracts; Task 9 stands up their Phase-5 registry classification.
+PHASE5_MEMORY_MODULES: frozenset[str] = frozenset(
+    {"guanlan_v2.orchestration.memory.experience"}
+)
+
+
 def _discover_memory_contract_models() -> set[type[ContractModel]]:
     found: set[type[ContractModel]] = set()
     for mod_info in pkgutil.walk_packages(
         _memory_pkg.__path__, prefix=_memory_pkg.__name__ + "."
     ):
+        if mod_info.name in PHASE5_MEMORY_MODULES:
+            continue  # Phase-5 module — governed by the Phase-5 firewall (Task 9)
         module = importlib.import_module(mod_info.name)
         for obj in vars(module).values():
             if (

@@ -687,11 +687,12 @@ def test_point9_phase5_paths_never_shadow_upstream_owned_files():
             f"Phase 5 path {path} shadows a Phase 1–4 owned file — Phase 5 is additive "
             "and may never overwrite an upstream source/test/golden"
         )
-    # Task 1 landed the market-factor contracts module; it now imports cleanly.
+    # Task 1 landed the market-factor contracts module; Task 4 landed the experience
+    # library module; both now import cleanly.
     importlib.import_module("guanlan_v2.orchestration.market.factors")
-    # the remaining Phase 5 contract modules are not importable yet (later tasks).
-    for mod in ("guanlan_v2.orchestration.memory.experience",
-                "guanlan_v2.orchestration.bootstrap"):
+    importlib.import_module("guanlan_v2.orchestration.memory.experience")
+    # the remaining Phase 5 contract module is not importable yet (later tasks).
+    for mod in ("guanlan_v2.orchestration.bootstrap",):
         with pytest.raises(ModuleNotFoundError):
             importlib.import_module(mod)
 
