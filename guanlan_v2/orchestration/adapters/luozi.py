@@ -100,6 +100,9 @@ __all__ = [
     "DeterministicTargetSet",
     "SHADOW_DETERMINISTIC_APPLY_KEY_DOMAIN",
     "deterministic_apply_key",
+    # Task 7 - gap-filling exit management + corporate-action ledger
+    "CorporateActionApplication",
+    "apply_corporate_actions",
 ]
 
 #: the closed skip-reason vocabulary a :class:`ShadowOrderSkip` may carry. A reason
@@ -700,6 +703,159 @@ class _ApplicationUnit:
     point_ordinal: int | None = None
 
 
+# =========================================================================== #
+# Task 7 · gap-filling — runner-held exit state + the corporate-action ledger   #
+# =========================================================================== #
+# The engine Broker has NO take-profit, NO max-hold and NO corporate-action code
+# (Task 0 item 8 / grounding §1.5 NOT-FOUND). All three are built HERE, above the
+# Broker — never inside it. Stop-loss is the one exit reused engine-native
+# (``Order(otype="stop")``); take-profit rides the engine's OWN limit-sell touch
+# rule; max-hold is a limit sell at the 跌停 floor (the engine forced-sell
+# convention). The corporate-action ledger mutates the VirtualPortfolio's OBJECTS
+# through their public attributes (cash / qty / avg_cost / stop_loss / locked),
+# never the engine.
+
+
+@dataclasses.dataclass
+class _ExitState:
+    """Runner-held per-position exit state, keyed by engine code.
+
+    Populated when a position opens (a buy fills) whose governing
+    :class:`TargetPosition` carries any exit parameter; a later target that re-buys
+    the same symbol re-parameterizes it (overwrite). Carries the ORIGINATING apply
+    key so every exit order retains causation up to the applied target that opened
+    the position (invariant 5). ``entry_bar_index`` is the position of the entry bar
+    in the run's ``days`` list (max-hold counts bars from it); ``entry_price`` is the
+    realized buy fill price (take-profit is ``entry_price * (1 + take_profit_pct)``)
+    and is rescaled by a share-event corporate action so the take-profit level tracks
+    the ex-div-corrected price.
+    """
+
+    entry_bar_index: int
+    entry_price: float
+    apply_key: str
+    symbol: Symbol
+    position: TargetPosition
+
+
+class CorporateActionApplication(ContractModel):
+    """One applied corporate action's before/after ledger delta (internal carrier).
+
+    A reviewed internal :class:`ContractModel` (frozen, unregistered, Phase-6 scoped
+    — like the Task-5 order-plan carriers), recording exactly what
+    :func:`apply_corporate_actions` did to one held (or not-held) position:
+    ``cash_credited`` (a cash dividend's ``qty * cash_per_share``, else ``0``),
+    ``qty_before`` / ``qty_after`` (equal for a cash dividend; floor-rescaled for a
+    share event) and ``avg_cost_before`` / ``avg_cost_after`` (avg cost preserved so
+    ``qty * avg_cost`` is invariant within one floor step). A symbol not held is a
+    zero-delta application (all-zero deltas), never an order and never an intent.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    event_digest: DigestHex
+    symbol: Symbol
+    cash_credited: FiniteFloat
+    qty_before: NonNegativeInt
+    qty_after: NonNegativeInt
+    avg_cost_before: FiniteFloat
+    avg_cost_after: FiniteFloat
+
+
+def _share_event_multiplier(event: CorporateActionEvent) -> float:
+    """The share multiplier ``M`` a share event applies to a quantity.
+
+    ``stock_bonus`` adds ``shares_ratio`` shares per held share (``M = 1 + ratio``);
+    a ``split`` restates each old share into ``shares_ratio`` new shares
+    (``M = ratio``). Cash dividends never reach here.
+    """
+    if event.kind == "stock_bonus":
+        return 1.0 + event.shares_ratio
+    return event.shares_ratio  # split
+
+
+def apply_corporate_actions(
+    portfolio: Any,
+    events: tuple[CorporateActionEvent, ...],
+    *,
+    on_date: IsoDateStr,
+    applied_digests: set[str],
+) -> tuple[CorporateActionApplication, ...]:
+    """Apply every ``ex_date == on_date`` corporate action to ``portfolio`` ONCE.
+
+    Closed semantics, applied in ``(ex_date, Symbol.code, kind)`` order, each event
+    at most once (digest-keyed via ``applied_digests`` — a replayed event tuple
+    yields zero additional applications):
+
+    * ``cash_dividend`` → ``portfolio.cash += qty * cash_per_share``; qty / avg_cost
+      unchanged;
+    * ``stock_bonus`` → ``qty_after = floor(qty * (1 + shares_ratio))``;
+    * ``split``       → ``qty_after = floor(qty * shares_ratio)``;
+
+    for both share events ``avg_cost_after = avg_cost * qty / qty_after`` (cost basis
+    preserved), the per-position ``stop_loss`` price is rescaled by ``qty / qty_after``
+    (price down-scale), and every ``Position.locked`` T+1 bucket is rescaled with the
+    SAME floor rule (``floor(bucket * M)`` — T+1 never unlocks early via a corporate
+    action). A symbol not held is a zero-delta no-op recorded as an application.
+    Applying corporate actions never creates orders and never touches intents; it
+    mutates the portfolio's public attributes above the Broker (the engine is
+    untouched). ``mkt_value`` is deliberately left as-is: a share event preserves
+    ``qty * price`` (qty up ×M, price down ÷M), so the pre-ex mark IS the ex-adjusted
+    value, and the day's EOD ``mark_to_market`` overwrites it with the real close.
+    """
+    apps: list[CorporateActionApplication] = []
+    for event in sorted(
+        (e for e in events if e.ex_date == on_date),
+        key=lambda e: (e.ex_date, e.symbol.code, e.kind),
+    ):
+        digest = event.semantic_digest()
+        if digest in applied_digests:
+            continue  # at-most-once (digest idempotency)
+        applied_digests.add(digest)
+        code = event.symbol.engine_code
+        pos = portfolio.positions.get(code)
+        if pos is None or pos.qty <= 0:
+            # not held → zero-delta no-op (recorded, never an order/intent).
+            apps.append(
+                CorporateActionApplication(
+                    event_digest=digest, symbol=event.symbol, cash_credited=0.0,
+                    qty_before=0, qty_after=0, avg_cost_before=0.0, avg_cost_after=0.0,
+                )
+            )
+            continue
+        qty_before = int(pos.qty)
+        avg_before = float(pos.avg_cost)
+        if event.kind == "cash_dividend":
+            credited = qty_before * float(event.cash_per_share)
+            portfolio.cash += credited
+            qty_after = qty_before
+            avg_after = avg_before
+        else:  # stock_bonus | split — share event
+            mult = _share_event_multiplier(event)
+            qty_after = int(math.floor(qty_before * mult))
+            if qty_after <= 0:  # degenerate (never for a valid share event) — no-op
+                qty_after = qty_before
+            credited = 0.0
+            avg_after = avg_before * qty_before / qty_after  # cost basis preserved
+            price_factor = qty_before / qty_after            # < 1 (price down-scale)
+            if pos.stop_loss > 0:
+                pos.stop_loss = pos.stop_loss * price_factor
+            pos.locked = {
+                d: int(math.floor(q * mult)) for d, q in pos.locked.items()
+            }
+            pos.qty = qty_after
+            pos.avg_cost = avg_after
+        apps.append(
+            CorporateActionApplication(
+                event_digest=digest, symbol=event.symbol,
+                cash_credited=float(credited),
+                qty_before=qty_before, qty_after=qty_after,
+                avg_cost_before=avg_before, avg_cost_after=float(avg_after),
+            )
+        )
+    return tuple(apps)
+
+
 class ShadowBacktestRunner:
     """Apply-once shadow backtest runner over the fa engine ``Broker`` baseline.
 
@@ -989,19 +1145,29 @@ class ShadowBacktestRunner:
                 out_window.append(u)
 
         applied: set[str] = set()
-        for T in days:
+        exit_state: dict[str, _ExitState] = {}   # Task-7 runner-held per-position exits
+        applied_ca_digests: set[str] = set()      # Task-7 corporate-action idempotency
+        for t_index, T in enumerate(days):
             events_today = [e for e in self._corporate_actions if e.ex_date == T]
             if events_today:  # step 2 seam — reached only with matching events (Task 7)
-                self._apply_corporate_actions(portfolio, events_today, T)
+                self._apply_corporate_actions(
+                    portfolio, events_today, T, applied_ca_digests, exit_state
+                )
             for u in sorted(by_session.get(T, []), key=lambda u: (u.scheduled_for, u.dedup_key)):
                 if u.dedup_key in applied:
                     continue
                 applied.add(u.dedup_key)
                 applies.append(
-                    self._apply_unit(u, T, portfolio, broker, orders, fills, rejects, warnings, trade_log)
+                    self._apply_unit(
+                        u, T, t_index, portfolio, broker, orders, fills, rejects,
+                        warnings, trade_log, exit_state,
+                    )
                 )
-            if self._pending_exit_state(portfolio):  # step 4 seam — only with exit state (Task 7)
-                self._manage_exits(portfolio, T, broker, orders, fills, rejects, trade_log)
+            if self._pending_exit_state(portfolio, exit_state):  # step 4 seam (Task 7)
+                self._manage_exits(
+                    portfolio, T, t_index, broker, orders, fills, rejects, trade_log,
+                    exit_state,
+                )
             portfolio.record_nav(T, prices=self._eod_closes(portfolio, T))  # step 5 — EOD
 
         # honest non-application: an eligible bar outside the window is never re-timed
@@ -1031,7 +1197,8 @@ class ShadowBacktestRunner:
         )
 
     def _apply_unit(
-        self, u, T, portfolio, broker, orders, fills, rejects, warnings, trade_log
+        self, u, T, t_index, portfolio, broker, orders, fills, rejects, warnings,
+        trade_log, exit_state
     ) -> ShadowTargetApplyRecord:
         eng = _engine_api()
         snap = portfolio.snapshot()
@@ -1112,6 +1279,23 @@ class ShadowBacktestRunner:
                     )
                 )
                 trade_log.add_fill(fill)
+                # Task 7: a buy that opens/adds a position with any exit parameter
+                # registers (or re-parameterizes) runner-held exit state carrying the
+                # ORIGINATING apply key (causation survives to its exit orders).
+                if e.side == "buy":
+                    tgt = target_by_dotted.get(e.symbol.dotted)
+                    if tgt is not None and self._has_exit_rule(tgt):
+                        exit_state[code] = _ExitState(
+                            entry_bar_index=t_index,
+                            entry_price=float(fill.price),
+                            apply_key=u.record_apply_key,
+                            symbol=e.symbol,
+                            position=tgt,
+                        )
+        # drop exit state for any position this application fully exited (a full
+        # target_sell) — a stale entry never drives an exit order for a gone position.
+        for gone in [c for c in exit_state if c not in portfolio.positions]:
+            exit_state.pop(gone, None)
         for s in plan.skipped:
             warnings.append(f"skip:{s.reason}:{s.symbol.engine_code}")
         return ShadowTargetApplyRecord(
@@ -1164,28 +1348,144 @@ class ShadowBacktestRunner:
         return out
 
     @staticmethod
-    def _pending_exit_state(portfolio) -> bool:
-        """Whether any held position carries an active stop — the ONLY condition under
-        which the Task-7 exit-management seam (step 4) is invoked. Task 6 target runs
-        that set no stop never reach it."""
-        return any(pos.stop_loss > 0 for pos in portfolio.positions.values())
+    def _pending_exit_state(portfolio, exit_state) -> bool:
+        """Whether any still-held position carries runner exit state — the ONLY
+        condition under which the exit-management step (step 4) runs. Widened past the
+        Task-6 stop-only predicate: a take-profit- or max-hold-only position (no stop)
+        must still be managed, so this consults the runner-held ``exit_state`` (which
+        only ever holds positions whose governing target has an exit rule) intersected
+        with the live book. A run that stages no exit parameters never populates
+        ``exit_state`` and so never reaches step 4."""
+        return any(code in portfolio.positions for code in exit_state)
 
-    # ------------------------------------------------------------------ #
-    # Task-7 seams (reached only when there is matching event / exit state)#
-    # ------------------------------------------------------------------ #
-    def _apply_corporate_actions(self, portfolio, events, T) -> None:
-        """Step 2 seam — Task 7 supplies ex_date corporate-action application."""
-        raise NotImplementedError(
-            "corporate-action application (step 2) is deferred to Task 7; it is reached "
-            "only when an event's ex_date falls on a run day"
+    @staticmethod
+    def _has_exit_rule(pos) -> bool:
+        """Whether a :class:`TargetPosition` carries ANY exit parameter (stop / take /
+        max-hold) — the trigger for registering runner-held exit state on a buy fill."""
+        return (
+            pos.stop_loss_pct is not None
+            or pos.take_profit_pct is not None
+            or pos.max_hold_bars is not None
         )
 
-    def _manage_exits(self, portfolio, T, broker, orders, fills, rejects, trade_log) -> None:
-        """Step 4 seam — Task 7 supplies stop/take/max-hold exit-order generation."""
-        raise NotImplementedError(
-            "exit management (step 4) is deferred to Task 7; it is reached only when a "
-            "held position carries active exit state"
+    # ------------------------------------------------------------------ #
+    # Task-7 — corporate-action application (step 2) + exit mgmt (step 4)  #
+    # ------------------------------------------------------------------ #
+    def _apply_corporate_actions(
+        self, portfolio, events, T, applied_digests, exit_state
+    ) -> tuple[CorporateActionApplication, ...]:
+        """Step 2 — apply ex_date corporate actions, then rescale runner exit state.
+
+        Delegates the portfolio mutation to the module-level
+        :func:`apply_corporate_actions` (cash credit / floor-rescaled qty / preserved
+        avg_cost / rescaled stop + locked buckets, digest-keyed at-most-once), then
+        rescales the runner-held ``entry_price`` for any share event by
+        ``qty_before / qty_after`` so a take-profit level tracks the ex-div-corrected
+        price (cost-basis parity with the rescaled avg_cost / stop the portfolio just
+        took)."""
+        apps = apply_corporate_actions(
+            portfolio, tuple(events), on_date=T, applied_digests=applied_digests
         )
+        for app in apps:
+            st = exit_state.get(app.symbol.engine_code)
+            if st is None or app.qty_after == 0 or app.qty_before == app.qty_after:
+                continue  # cash dividend / not-held / no share change → no rescale
+            st.entry_price = st.entry_price * app.qty_before / app.qty_after
+        return apps
+
+    def _manage_exits(
+        self, portfolio, T, t_index, broker, orders, fills, rejects, trade_log,
+        exit_state
+    ) -> None:
+        """Step 4 — stop / take-profit / max-hold, at most ONE exit order per position
+        per bar, priority solely from ``schedule.intrabar_exit_priority``.
+
+        For each still-held position with exit state: a stop touches at
+        ``bar.low <= Position.stop_loss`` (the engine-native protective sell, reused —
+        ``Order(otype="stop")``); a take-profit touches at
+        ``bar.high >= entry_price * (1 + take_profit_pct)`` (the engine's own limit-sell
+        touch rule, ``Order(otype="limit")`` at the take price — no exchange-alien fill
+        path); on a double-touch exactly one order is emitted — ``worst_case`` /
+        ``stop_first`` → the stop (for long-only the worst case IS the stop),
+        ``take_profit_first`` → the take. Max-hold is evaluated ONLY when neither
+        triggered: at ``t_index - entry_bar_index >= max_hold_bars`` a limit sell at the
+        ex-div-corrected 跌停 floor ``dn`` (the engine forced-sell convention). Each exit
+        order id is minted from the ORIGINATING apply key (causation survives exits); a
+        rejected exit (suspension / one-word / T+1) re-arms deterministically on the next
+        tradable bar (a fresh ``trigger_bar`` → a distinct id)."""
+        eng = _engine_api()
+        priority = self._schedule.intrabar_exit_priority
+        for code in sorted(exit_state):
+            st = exit_state.get(code)
+            pos = portfolio.positions.get(code)
+            if st is None or pos is None or pos.qty <= 0:
+                exit_state.pop(code, None)  # position gone / stale → drop
+                continue
+            bar, pc = eng.prepare_bar(code, T, self._reader, self._loader, self._cfg)
+            if bar is None or pc is None:
+                continue  # no tradable bar (NaN OHLC / missing) → carry state, re-arm
+            is_st = bool(self._is_st.get(code, False))
+            stop_px = float(pos.stop_loss)
+            stop_touched = stop_px > 0 and bar["low"] <= stop_px
+            tp_pct = st.position.take_profit_pct
+            tp_px = st.entry_price * (1.0 + tp_pct) if tp_pct is not None else None
+            take_touched = tp_px is not None and bar["high"] >= tp_px
+
+            kind = limit_price = None
+            if stop_touched and take_touched:
+                if priority == "take_profit_first":
+                    kind, limit_price = "take_profit", tp_px
+                else:  # worst_case | stop_first — long-only worst case ≡ the stop
+                    kind, limit_price = "stop_loss", stop_px
+            elif stop_touched:
+                kind, limit_price = "stop_loss", stop_px
+            elif take_touched:
+                kind, limit_price = "take_profit", tp_px
+            else:
+                max_hold = st.position.max_hold_bars
+                if max_hold is not None and (t_index - st.entry_bar_index) >= max_hold:
+                    pct = eng.limit_pct_for(code, is_st=is_st)
+                    kind = "max_hold_exit"
+                    limit_price = round(pc * (1.0 - pct), 2)  # 跌停 floor (forced sell)
+            if kind is None:
+                continue
+
+            otype = "stop" if kind == "stop_loss" else "limit"
+            order = eng.Order(
+                code=code, side="sell", otype=otype, limit_price=limit_price, qty=None
+            )
+            order_id = shadow_order_id(
+                apply_key=st.apply_key, symbol=st.symbol, order_kind=kind,
+                trigger_bar=T, ordinal=0,
+            )
+            orders.append(
+                ShadowOrderRecord(
+                    order_id=order_id, target_apply_key=st.apply_key, symbol=st.symbol,
+                    order_kind=kind, trigger_bar=T, ordinal=0, side="sell",
+                    otype=otype, limit_price=float(limit_price), qty=None,
+                    cash_budget=None,
+                )
+            )
+            fill = broker.match(order, bar, pc, portfolio, is_st=is_st)
+            if fill is None:
+                rejects.append(
+                    ShadowRejectRecord(
+                        order_id=order_id, symbol=st.symbol, trade_date=T,
+                        reason=broker.last_reason,
+                    )
+                )
+                continue
+            fills.append(
+                ShadowFillRecord(
+                    fill_id=shadow_fill_id(order_id=order_id, fill_seq=1),
+                    order_id=order_id, fill_seq=1, symbol=st.symbol, side=fill.side,
+                    qty=fill.qty, price=fill.price, trade_date=fill.trade_date,
+                    gross=fill.gross, cost=fill.cost, reason=kind,
+                )
+            )
+            trade_log.add_fill(fill)
+            if code not in portfolio.positions:  # fully exited → drop exit state
+                exit_state.pop(code, None)
 
     # ------------------------------------------------------------------ #
     # result assembly                                                    #
