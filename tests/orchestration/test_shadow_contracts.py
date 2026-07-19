@@ -102,8 +102,10 @@ def test_target_position_optional_exit_param_bounds():
 
 
 def test_target_position_forbids_extra_fields():
+    # a permanently-unknown key (never a real field in any task) — tests the
+    # inherited extra="forbid" behaviour without coupling to a future field name.
     with pytest.raises(ValidationError):
-        _pos(0.5, entry_tranches=())  # Task 1b field; not present at Task 1
+        _pos(0.5, not_a_real_field="x")
 
 
 # --------------------------------------------------------------------------- #
