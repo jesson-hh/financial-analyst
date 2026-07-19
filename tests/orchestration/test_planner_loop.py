@@ -445,6 +445,49 @@ def test_reserve_planner_exhaustion_raises_budget_exceeded():
                                tokens=100, llm_invocations=1, idempotency_key="k2")
 
 
+def test_reserve_planner_through_the_real_event_sourced_sink():
+    """Blind-spot guard (Phase 7 * Task 4 review): drive ``reserve_planner`` through
+    the production ``RuntimeBudgetEventSink`` (not the in-test fake), which is the
+    exact sink ``run_planner`` mints reservations through in production. The
+    fresh-reservation-id branch of ``eventstore._append_budget_event`` must mint an
+    id for ``reserve_planner`` the same way it does for ``reserve_plan`` /
+    ``reserve_node``; before the fix the real sink fell to the else branch and
+    raised ``AttributeError`` (``ReservePlannerArgs`` has no ``reservation_id``).
+    The pre-existing planner tests all ran over the fake sink whose fresh-id branch
+    already lists ``reserve_planner``, so the real sink was never exercised.
+    """
+    resolver = SchemaRegistryResolver()
+    resolver.register(default_registry())
+    clock = ManualClock()
+    stores = RuntimeStores(resolver=resolver, clock=clock)
+    rb = RunBudget(ledger_id="ledger-1", max_tokens=5000, max_llm_invocations=40,
+                   max_concurrency=8)
+    sink = stores.budget_event_sink(run_id="run-1", ledger_id="ledger-1")
+    ledger = BudgetLedger(sink=sink, run_budget=rb)
+    rd = "d" * 64
+
+    r1 = ledger.reserve_planner(request_id="req-1", request_digest=rd, attempt=1,
+                                tokens=1200, llm_invocations=1, idempotency_key="k1")
+    r2 = ledger.reserve_planner(request_id="req-1", request_digest=rd, attempt=2,
+                                tokens=800, llm_invocations=1, idempotency_key="k2")
+
+    # a fresh, non-empty reservation id is minted per call, unique across the two.
+    assert r1.reservation_id and r2.reservation_id
+    assert r1.reservation_id != r2.reservation_id
+    assert r1.scope_type == "planner" and r2.scope_type == "planner"
+
+    # both are retrievable from the live fold over the real sink.
+    assert ledger.get(r1.reservation_id).semantic_digest() == r1.semantic_digest()
+    assert ledger.get(r2.reservation_id).semantic_digest() == r2.semantic_digest()
+
+    # replay: a fresh ledger over the same committed events reconstructs both.
+    replay = BudgetLedger(
+        sink=stores.budget_event_sink(run_id="run-1", ledger_id="ledger-1"),
+        run_budget=rb)
+    assert replay.get(r1.reservation_id).semantic_digest() == r1.semantic_digest()
+    assert replay.get(r2.reservation_id).semantic_digest() == r2.semantic_digest()
+
+
 # =========================================================================== #
 # Terminal: candidate_ready                                                    #
 # =========================================================================== #
