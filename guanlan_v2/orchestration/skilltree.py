@@ -84,7 +84,7 @@ TriggerPrefix = Literal["Perfect for: ", "Not ideal for: "]
 
 DriftCode = Literal[
     "missing_mirror", "orphan_mirror", "byte_drift", "grammar_error",
-    "manifest_digest_mismatch",
+    "manifest_digest_mismatch", "bound_skill_missing_from_tree",
 ]
 
 
@@ -292,10 +292,28 @@ def lint_drift(
 
     Checks: mirror presence (``missing_mirror``); no un-sourced mirror
     (``orphan_mirror``); byte identity (``byte_drift``); the mirror re-parses as
-    skill-v1 (``grammar_error``); and, when a ``catalog`` is supplied, that every
-    ``skill.<id>`` skill-manifest entry's ``content_digest`` equals the tree file's
-    ``catalog_material_digest`` and every tree skill bound by a final worker appears in
-    the catalog ``skill_manifest`` (``manifest_digest_mismatch``).
+    skill-v1 (``grammar_error``); and, when a ``catalog`` is supplied, the catalog
+    cross-check below.
+
+    **Catalog cross-check (join by content_digest through the owning final
+    worker).** A tree ``skill_id`` is the owning WORKER id, and a real P5/P7 catalog
+    binds that skill on the matching ``final`` :class:`WorkerSpec` (``worker.id ==
+    skill_id``) whose ``SkillBinding.skill_ref.content_digest`` equals the tree
+    file's :func:`catalog_material_digest`. The join key is therefore the
+    ``content_digest`` reached via the owning worker — never ``source_identity``
+    (real catalogs stamp the owning worker's LogicalId there, e.g.
+    ``phase5.task8.lane0`` / ``orchestrator.planner``, never ``skill.<id>``):
+
+    * **A — tree→catalog** (``manifest_digest_mismatch``): a tree skill owned by a
+      ``final`` worker must hash to exactly the digest that worker binds. A tree
+      skill with no owning final worker — the planner (materials-without-worker), or
+      a brand-new Phase-8 skill that has not yet been registered into a catalog
+      batch — is a legitimate migration state and is NOT flagged.
+    * **B — catalog→tree** (``bound_skill_missing_from_tree``): every skill a
+      ``final`` worker binds must be present in the tree, unless its owning tree file
+      is present but diverged (that is case A's finding, not re-reported here).
+      Scoped to ``final`` workers — ``compat.skill.mirror`` (bound only by
+      ``compatibility`` workers) legitimately lives outside the tree.
     """
     issues: list[DriftIssue] = []
     tree_ids = {s.skill_id for s in tree}
@@ -326,37 +344,40 @@ def lint_drift(
                     issues.append(DriftIssue("orphan_mirror", sid,
                                              f"mirror {MIRROR_SUBDIR}/{p.name} has no tree source"))
 
-    # -- catalog cross-check ------------------------------------------------ #
+    # -- catalog cross-check (join by content_digest, see docstring) -------- #
     if catalog is not None:
         digest_by_id = {s.skill_id: _skill_digest(s) for s in tree}
-        manifest_by_sid: dict[str, object] = {}
-        for entry in catalog.skill_manifest:
-            si = entry.source_identity
-            if si.startswith("skill."):
-                manifest_by_sid.setdefault(si[len("skill."):], entry)
-        # every catalog skill entry mapping to a tree skill must match its digest
-        for sid, entry in manifest_by_sid.items():
-            if sid in digest_by_id and entry.ref.content_digest != digest_by_id[sid]:
-                issues.append(DriftIssue(
-                    "manifest_digest_mismatch", sid,
-                    f"catalog skill digest {entry.ref.content_digest} != tree "
-                    f"{digest_by_id[sid]}"))
-        # every tree skill bound by a final worker must appear in skill_manifest
-        manifest_digests = {e.ref.content_digest for e in catalog.skill_manifest}
-        final_bound: set[str] = set()
+        tree_digests = set(digest_by_id.values())
+
+        # the digest(s) each FINAL worker binds, keyed by owning worker id (which
+        # equals the owning tree skill id). Attributes always exist on WorkerSpec —
+        # direct access, never getattr defaults that would silently mask a join bug.
+        final_bound_by_worker: dict[str, set[DigestHex]] = {}
         for w in catalog.workers:
-            if getattr(w, "catalog_role", "final") == "final":
-                for sb in getattr(w, "skills", ()):
-                    final_bound.add(sb.skill_ref.content_digest)
+            if w.catalog_role == "final":
+                for sb in w.skills:
+                    final_bound_by_worker.setdefault(w.id, set()).add(
+                        sb.skill_ref.content_digest)
+
+        # -- A: a tree skill owned by a final worker must match its bound digest.
         for skill in tree:
-            entry = manifest_by_sid.get(skill.skill_id)
-            if entry is None:
-                continue
-            d = digest_by_id[skill.skill_id]
-            if entry.ref.content_digest in final_bound and d not in manifest_digests:
+            bound = final_bound_by_worker.get(skill.skill_id)
+            if bound is not None and digest_by_id[skill.skill_id] not in bound:
                 issues.append(DriftIssue(
                     "manifest_digest_mismatch", skill.skill_id,
-                    "tree skill bound by a final worker is absent from the catalog "
-                    "skill_manifest"))
+                    f"tree digest {digest_by_id[skill.skill_id]} != the digest final "
+                    f"worker {skill.skill_id!r} binds ({', '.join(sorted(bound))})"))
+
+        # -- B: every final-worker-bound skill must be present in the tree, unless
+        #       its owning tree file is present-but-diverged (case A's finding).
+        for worker_id, bound in final_bound_by_worker.items():
+            if worker_id in digest_by_id:
+                continue  # owning tree file exists → integrity is case A's job
+            for d in sorted(bound):
+                if d not in tree_digests:
+                    issues.append(DriftIssue(
+                        "bound_skill_missing_from_tree", worker_id,
+                        f"final worker {worker_id!r} binds skill digest {d} that is "
+                        "absent from the tree"))
 
     return tuple(issues)

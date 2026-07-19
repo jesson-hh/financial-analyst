@@ -16,20 +16,29 @@ Covers (per brief Step 1):
 from __future__ import annotations
 
 import importlib.util
+import shutil
 from pathlib import Path
 
 import pytest
 
 from guanlan_v2.orchestration import skilltree
 from guanlan_v2.orchestration.catalog import (
+    ContentManifestEntry,
+    DataMode,
+    ExecutionKind,
+    ExecutionSpec,
+    OutputBinding,
+    ResolvedTextMaterial,
+    SkillBinding,
     SkillFormatError,
     SkillManifest,
-    ResolvedTextMaterial,
+    Tier,
+    WorkerSpec,
     build_catalog_snapshot,
     catalog_material_digest,
     parse_skill_v1,
 )
-from guanlan_v2.orchestration.refs import ContentRef
+from guanlan_v2.orchestration.refs import ContentRef, SchemaRef
 
 # --------------------------------------------------------------------------- #
 # recorded relocation digests (Task 0 evidence — catalog_material_digest of the
@@ -105,20 +114,35 @@ def _make_tree(tmp_path: Path, mapping: dict[str, str]) -> Path:
     return root
 
 
-def _minimal_catalog(skill_id: str, raw: bytes, *, source_identity: str):
-    """Build a real, sealed single-skill WorkerCatalogSnapshot (no workers)."""
+def _text_material(content_id: str, kind: str, raw: bytes):
+    """Resolve one text material with its recomputed content-digest ref."""
     placeholder = "0" * 64
     tmp = ResolvedTextMaterial(
-        ref=ContentRef(id="skill." + skill_id, version="1", content_digest=placeholder),
-        kind="skill",
-        raw_utf8=raw,
+        ref=ContentRef(id=content_id, version="1", content_digest=placeholder),
+        kind=kind, raw_utf8=raw,
     )
-    dig = catalog_material_digest(tmp)
-    ref = ContentRef(id="skill." + skill_id, version="1", content_digest=dig)
-    mat = ResolvedTextMaterial(ref=ref, kind="skill", raw_utf8=raw)
+    ref = ContentRef(id=content_id, version="1", content_digest=catalog_material_digest(tmp))
+    return ref, ResolvedTextMaterial(ref=ref, kind=kind, raw_utf8=raw)
+
+
+def _minimal_catalog(skill_id: str, raw: bytes, *, source_identity: str):
+    """Build a real, sealed single-skill catalog *with its owning final worker*.
+
+    The catalog cross-check joins a tree skill to its catalog entry through the
+    OWNING FINAL WORKER (``worker.id == skill_id``, whose ``SkillBinding`` pins the
+    skill digest) — never through ``source_identity`` (real P5/P7 catalogs stamp the
+    owning worker's LogicalId there, e.g. ``guanlan.datafeed.sentiment``, never
+    ``skill.<id>``). ``source_identity`` is therefore a realistic owning-worker id
+    here so the fixture can never again fabricate a ``skill.<id>`` convention the
+    lint keys off of. The skill id (``skill.<id>``) is just the material ref id, not
+    a join key.
+    """
+    skill_ref, skill_mat = _text_material("skill." + skill_id, "skill", raw)
+    prompt_ref, prompt_mat = _text_material(
+        "prompt." + skill_id, "prompt", b"you are the owning worker's system prompt\n")
     parsed = parse_skill_v1(raw.decode("utf-8"))
     sm = SkillManifest(
-        ref=ref,
+        ref=skill_ref,
         name=parsed.name,
         summary=parsed.summary,
         perfect_for=parsed.perfect_for,
@@ -126,13 +150,29 @@ def _minimal_catalog(skill_id: str, raw: bytes, *, source_identity: str):
         critical_data_source_heading="⚠️ CRITICAL: Data Source Priority",
         source_identity=source_identity,
     )
+    ce = ContentManifestEntry(
+        ref=prompt_ref, kind="prompt", name="prompt." + skill_id,
+        description="owning worker system prompt", source_identity=source_identity,
+    )
+    worker = WorkerSpec(
+        id=skill_id, catalog_role="final", selection_scope="dynamic_allowed",
+        lane="market", persona="demo owning worker", tier=Tier.WRITER,
+        execution=ExecutionSpec(
+            kind=ExecutionKind.LLM, model_tier="reasoner", thinking_budget=0),
+        system_prompt_ref=prompt_ref,
+        skills=(SkillBinding(skill_ref=skill_ref),),
+        outputs=(OutputBinding(
+            name="primary", schema_ref=SchemaRef(name="DemoOut", version="1")),),
+        supported_modes=(DataMode.ONLINE,),
+        can_emit_decision=False, decision_authority="none",
+    )
     return build_catalog_snapshot(
         catalog_version="skilltree-test-v1",
-        content_manifest=(),
+        content_manifest=(ce,),
         skill_manifest=(sm,),
         capability_manifest=(),
-        workers=(),
-        resolved_material=(mat,),
+        workers=(worker,),
+        resolved_material=(skill_mat, prompt_mat),
     )
 
 
@@ -345,10 +385,13 @@ def test_lint_grammar_error_in_mirror(tmp_path):
 
 
 def test_lint_manifest_digest_mismatch(tmp_path):
-    # catalog built from ORIGINAL bytes; tree edited to different (valid) bytes
+    # catalog built from ORIGINAL bytes; tree edited to different (valid) bytes.
+    # The owning final worker (id == "text.sentiment") still binds the original
+    # digest, so the edited tree file diverges from what the catalog pins.
     original = _skill_text(name="A-share sentiment read")
     catalog = _minimal_catalog(
-        "text.sentiment", original.encode("utf-8"), source_identity="skill.text.sentiment"
+        "text.sentiment", original.encode("utf-8"),
+        source_identity="guanlan.datafeed.sentiment",
     )
     diverged = _skill_text(name="A-share sentiment read", body_extra="\n## Note\nchanged\n")
     _, materials, tree = _seed(tmp_path, {"text.sentiment": diverged})
@@ -360,9 +403,29 @@ def test_lint_manifest_digest_mismatch(tmp_path):
 def test_lint_clean_with_matching_catalog(tmp_path):
     text = _skill_text(name="A-share sentiment read")
     catalog = _minimal_catalog(
-        "text.sentiment", text.encode("utf-8"), source_identity="skill.text.sentiment"
+        "text.sentiment", text.encode("utf-8"),
+        source_identity="guanlan.datafeed.sentiment",
     )
     _, materials, tree = _seed(tmp_path, {"text.sentiment": text})
+    assert skilltree.lint_drift(tree, materials_root=materials, catalog=catalog) == ()
+
+
+def test_lint_uncataloged_new_tree_skill_is_legitimate_during_migration(tmp_path):
+    """A tree skill with no owning final worker (a new Phase-8 skill that has not
+    yet been registered into a catalog batch) must NOT be flagged — cross-check A
+    joins tree→catalog through the owning final worker, so an un-owned tree skill
+    is a legitimate migration state, not drift."""
+    # catalog owns ONLY text.sentiment; the tree additionally carries a brand-new,
+    # not-yet-cataloged skill that no worker binds.
+    sentiment = _skill_text(name="A-share sentiment read")
+    catalog = _minimal_catalog(
+        "text.sentiment", sentiment.encode("utf-8"),
+        source_identity="guanlan.datafeed.sentiment",
+    )
+    _, materials, tree = _seed(tmp_path, {
+        "text.sentiment": sentiment,
+        "text.newsflow": _skill_text(name="brand-new phase-8 skill"),
+    })
     assert skilltree.lint_drift(tree, materials_root=materials, catalog=catalog) == ()
 
 
@@ -394,15 +457,98 @@ def test_real_tree_mirror_is_clean():
 
 
 # --------------------------------------------------------------------------- #
+# 6b. catalog cross-check against the REAL Phase-7 catalog (join by digest)     #
+#                                                                              #
+# Guards against the join bug the reviewer caught: the previous cross-check    #
+# keyed off ``source_identity.startswith("skill.")``, but real P5/P7 catalogs  #
+# stamp the OWNING worker's LogicalId (phase5.task8.lane0 / guanlan.decision.pm#
+# / orchestrator.planner / …) there — so both loops were dead code against a   #
+# production catalog. These tests run the lint against the real snapshot.      #
+# --------------------------------------------------------------------------- #
+def _phase7_catalog():
+    from guanlan_v2.orchestration import phase7_registry as p7
+    return p7.phase7_catalog_snapshot()
+
+
+def _copy_real_tree(tmp_path: Path) -> Path:
+    dst = tmp_path / "skills"
+    shutil.copytree(skilltree.DEFAULT_TREE_ROOT, dst)
+    return dst
+
+
+def test_lint_real_tree_clean_against_real_phase7_catalog():
+    """Real tree + real mirror + the REAL Phase-7 catalog cross-check ⇒ no drift.
+
+    Every relocated tree skill's digest equals the digest its owning final worker
+    binds; ``compat.skill.mirror`` (bound only by ``compatibility`` workers) and the
+    planner skill (materials-without-worker) are correctly NOT flagged."""
+    tree = skilltree.load_skill_tree(skilltree.DEFAULT_TREE_ROOT)
+    issues = skilltree.lint_drift(
+        tree, materials_root=skilltree.DEFAULT_MATERIALS_ROOT, catalog=_phase7_catalog())
+    assert issues == (), f"real-catalog cross-check drifted: {issues}"
+
+
+def test_lint_real_catalog_flags_tampered_relocated_skill(tmp_path):
+    """Editing a relocated tree skill (owned by a FINAL worker) so its digest no
+    longer matches the catalog binding fires ``manifest_digest_mismatch`` against
+    the REAL catalog — the exact divergence the dead-code join never detected."""
+    tree_root = _copy_real_tree(tmp_path)
+    tampered = tree_root / "market.regime" / "SKILL.md"
+    tampered.write_bytes(
+        tampered.read_bytes() + b"\n## Extra\nappended prose changes the digest\n")
+    tree = skilltree.load_skill_tree(tree_root)
+    materials = tmp_path / "materials"
+    skilltree.apply_mirror(
+        skilltree.plan_mirror(tree, materials_root=materials),
+        tree=tree, materials_root=materials,
+    )
+    issues = skilltree.lint_drift(tree, materials_root=materials, catalog=_phase7_catalog())
+    hits = [i for i in issues if i.code == "manifest_digest_mismatch"]
+    assert [i.skill_id for i in hits] == ["market.regime"], issues
+
+
+def test_lint_real_catalog_flags_bound_skill_missing_from_tree(tmp_path):
+    """Removing a tree skill that a FINAL worker still binds fires
+    ``bound_skill_missing_from_tree`` (cross-check B, the inverted loop). The lint
+    scopes this to FINAL workers, so a deleted compat-only skill would not."""
+    tree_root = _copy_real_tree(tmp_path)
+    shutil.rmtree(tree_root / "market.regime")
+    tree = skilltree.load_skill_tree(tree_root)
+    materials = tmp_path / "materials"
+    skilltree.apply_mirror(
+        skilltree.plan_mirror(tree, materials_root=materials),
+        tree=tree, materials_root=materials,
+    )
+    issues = skilltree.lint_drift(tree, materials_root=materials, catalog=_phase7_catalog())
+    hits = [i for i in issues if i.code == "bound_skill_missing_from_tree"]
+    assert [i.skill_id for i in hits] == ["market.regime"], issues
+
+
+# --------------------------------------------------------------------------- #
 # 7. structural no-skill-write invariant                                       #
 # --------------------------------------------------------------------------- #
 def test_no_catalog_capability_can_write_the_skill_tree():
     from guanlan_v2.orchestration import phase7_registry as p7
     snap = p7.phase7_catalog_snapshot()
+    # The capability *descriptor* (which carries ``operation``) is deliberately NOT
+    # carried by a sealed ``WorkerCatalogSnapshot`` — ``CapabilityManifestEntry``
+    # exposes only ``ref`` (id/version/digest), ``capability_kind`` and
+    # ``transport``. So the descriptor's ``operation`` surface is unreachable from a
+    # sealed snapshot; ``ref.id`` is the reachable proxy for "no capability names a
+    # skill write". We sweep every string-valued field the manifest entry does
+    # expose so the invariant can never be satisfied by a differently-named field.
     for entry in snap.capability_manifest:
-        assert "skill" not in entry.ref.id.lower(), (
-            f"capability {entry.ref.id} names 'skill' — no capability may write the tree"
+        surface = (
+            entry.ref.id,
+            entry.ref.version,
+            str(entry.capability_kind),
+            str(entry.transport),
         )
+        for value in surface:
+            assert "skill" not in value.lower(), (
+                f"capability {entry.ref.id} field {value!r} names 'skill' — "
+                "no capability may write the tree"
+            )
 
 
 def test_apply_mirror_never_writes_under_the_tree_root(tmp_path):
