@@ -44,3 +44,4 @@ agent_overrides:
   bear-advocate:    {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
   risk-officer:     {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
   report-writer:    {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
+  planner:          {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
