@@ -108,6 +108,22 @@ PHASE5_MODULES: tuple[str, ...] = (
     "guanlan_v2.orchestration.bootstrap",
 )
 
+#: Phase 6 (shadow consumer) contract modules. ``shadow`` (Task 1) defines public
+#: ``ContractModel`` subclasses (``TargetPosition`` / ``PortfolioTargetProposal``;
+#: still deferred payloads below — a later task flips those guards and stands up
+#: the Phase-6 completeness firewall + cumulative registry). Like the Phase-4/5
+#: precedents this scoping keeps the Phase-1 discovery firewall from mislabeling a
+#: Phase-6 module as a missing Phase-1 module; the Phase-1 classification tests
+#: (keyed off ``DISCOVERED``, derived only from ``PHASE1_MODULES``) never see it.
+#: ``adapters.luozi`` (a later task) is listed ahead of its creation per Task-0
+#: correction N5 — it is only ever used in the discovery-firewall set subtraction
+#: below (never imported here), so listing it before it exists is inert. The real
+#: Phase-6 firewall will live in ``tests/orchestration/test_phase6_registry.py``.
+PHASE6_MODULES: tuple[str, ...] = (
+    "guanlan_v2.orchestration.shadow",
+    "guanlan_v2.orchestration.adapters.luozi",
+)
+
 #: Deferred payloads whose ABSENCE FROM PHASE 1 this guard proves (registry,
 #: classification and namespaces). The five Phase-5 market-factor/regime/rotation
 #: payloads stay listed here for that Phase-1 absence half — they must never leak
@@ -225,14 +241,20 @@ def test_phase1_modules_lists_every_module_defining_a_public_contract_model():
     defining = _modules_defining_public_contract_models()
     # sanity: the walk found the known payload-bearing modules (not silently empty)
     assert "guanlan_v2.orchestration.schemas" in defining
-    # Phase 4 / Phase 5 contract modules are governed by their own phase firewalls
-    # (Task 9 in each), not the Phase 1 buckets, so they are excluded from the
-    # Phase-1 review here.
-    missing = defining - set(PHASE1_MODULES) - set(PHASE4_MODULES) - set(PHASE5_MODULES)
+    # Phase 4 / Phase 5 / Phase 6 contract modules are governed by their own phase
+    # firewalls (Task 9 in each), not the Phase 1 buckets, so they are excluded from
+    # the Phase-1 review here.
+    missing = (
+        defining
+        - set(PHASE1_MODULES)
+        - set(PHASE4_MODULES)
+        - set(PHASE5_MODULES)
+        - set(PHASE6_MODULES)
+    )
     assert not missing, (
         "these modules define a public ContractModel subclass but are absent from "
-        "PHASE1_MODULES (and are not Phase 4/5 modules), so the completeness firewall "
-        "would never review their contracts — add them to PHASE1_MODULES: "
+        "PHASE1_MODULES (and are not Phase 4/5/6 modules), so the completeness "
+        "firewall would never review their contracts — add them to PHASE1_MODULES: "
         + ", ".join(sorted(missing))
     )
 

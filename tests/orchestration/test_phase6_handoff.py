@@ -599,13 +599,27 @@ def test_point5_phase6_payloads_absent_from_every_chain_registry():
             assert name not in names, f"{name} leaked into the {label} registry"
 
 
-def test_point5_phase6_payloads_defined_nowhere_under_the_package():
-    """No module under guanlan_v2.orchestration defines a contract with a Phase-6
-    payload name yet (walked from disk, not a hand-maintained list)."""
+#: the ONLY module allowed to define a Phase-6 payload name (the reviewed Phase-6
+#: contract module ``shadow.py``). Adapters/registry live elsewhere but define no
+#: Phase-6 *payload* contract; the decision-class names are minted only here.
+_PHASE6_PAYLOAD_HOME = "guanlan_v2.orchestration.shadow"
+
+
+def test_point5_phase6_payloads_defined_only_in_the_shadow_module():
+    """FLIPPED (Phase 6 · Task 1) from the transient "defined nowhere" guard to its
+    permanent anti-shadow form: a Phase-6 payload name may now be defined ONLY in
+    ``guanlan_v2.orchestration.shadow`` (and nowhere else under the package).
+
+    Task 1 lands ``TargetPosition`` / ``PortfolioTargetProposal`` in ``shadow.py``;
+    ``TargetPortfolioIntent`` / ``DecisionSchedule`` arrive there in later tasks
+    (until then no module defines them, which this assertion also permits). Any
+    Phase-6 payload leaking into a non-shadow module fails here. The absence half —
+    none of the four resolve in any Phase 1–5 chain registry — stays enforced by
+    ``test_point5_phase6_payloads_absent_from_every_chain_registry``."""
     def _onerror(mod_name: str) -> None:  # pragma: no cover - keep import failures loud
         raise AssertionError(f"walk_packages failed to import {mod_name!r}")
 
-    defined_names: set[str] = set()
+    definers: dict[str, set[str]] = {name: set() for name in PHASE6_DEFERRED_PAYLOADS}
     for mod_info in pkgutil.walk_packages(
         orch_pkg.__path__, prefix=orch_pkg.__name__ + ".", onerror=_onerror
     ):
@@ -615,11 +629,13 @@ def test_point5_phase6_payloads_defined_nowhere_under_the_package():
                 inspect.isclass(obj)
                 and issubclass(obj, ContractModel)
                 and obj.__module__ == mod_info.name
+                and obj.__name__ in definers
             ):
-                defined_names.add(obj.__name__)
-    for name in PHASE6_DEFERRED_PAYLOADS:
-        assert name not in defined_names, (
-            f"{name} is already defined under guanlan_v2.orchestration before Phase 6"
+                definers[obj.__name__].add(mod_info.name)
+    for name, modules in definers.items():
+        assert modules <= {_PHASE6_PAYLOAD_HOME}, (
+            f"{name} is defined outside {_PHASE6_PAYLOAD_HOME}: "
+            f"{sorted(modules - {_PHASE6_PAYLOAD_HOME})}"
         )
 
 
