@@ -69,6 +69,7 @@ from guanlan_v2.orchestration.refs import ContentRef, LogicalId
 from guanlan_v2.orchestration.runtime_clock import clock_now
 
 if TYPE_CHECKING:  # annotations only (``from __future__ import annotations``) — no cycle
+    from guanlan_v2.orchestration.catalog import WorkerCatalogSnapshot
     from guanlan_v2.orchestration.runtime_clock import AuthoritativeClock
     from guanlan_v2.orchestration.schemas import Artifact
     from guanlan_v2.orchestration.spec import OrchestrationRequest
@@ -120,6 +121,17 @@ __all__ = [
     "CorporateActionEvent",
     "SHADOW_METRIC_KEYS",
     "ShadowRunResult",
+    # Task 10 — the cumulative Phase-6 registry / catalog chain + goldens
+    "PHASE6_PUBLIC_MODELS",
+    "Phase6RegistryError",
+    "build_phase6_registry",
+    "build_phase6_catalog_snapshot",
+    "phase6_catalog_snapshot",
+    "PHASE6_INTERNAL_MODELS",  # noqa: F822 — lazy via module __getattr__
+    "PHASE6_BASE_REGISTRY_DIGEST",  # noqa: F822 — lazy via module __getattr__
+    "PHASE6_REGISTRY_DIGEST",  # noqa: F822 — lazy via module __getattr__
+    "PHASE6_BASE_CATALOG_DIGEST",  # noqa: F822 — lazy via module __getattr__
+    "PHASE6_CATALOG_DIGEST",  # noqa: F822 — lazy via module __getattr__
 ]
 
 
@@ -1532,3 +1544,221 @@ class ShadowRunResult(DigestModel):
         except (ValueError, TypeError, AttributeError, KeyError):
             digest = _RUN_RESULT_DIGEST_PLACEHOLDER
         return cls(**fields, content_digest=digest)
+
+
+# =========================================================================== #
+# Task 10 · the reviewed Phase-6 public / internal contract partition           #
+# =========================================================================== #
+#: the exactly-ten registered Phase-6 payload contracts the Phase-6 cumulative
+#: registry resolves a :class:`SchemaRef` to (CRIB 4.5 order). ``TrancheTrigger``
+#: is DELIBERATELY absent — it carries no independent ``schema_version`` and
+#: versions/digests only *through its host* ``TargetPosition@1`` (a nested frozen
+#: sub-model), so it enters the registry via ``TargetPosition@1``'s JSON schema and
+#: is classified INTERNAL below, never independently registered.
+PHASE6_PUBLIC_MODELS: tuple[type[DigestModel], ...] = (
+    TargetPosition,
+    PortfolioTargetProposal,
+    TargetPortfolioIntent,
+    DecisionSchedule,
+    ShadowTargetApplyRecord,
+    ShadowOrderRecord,
+    ShadowFillRecord,
+    ShadowRejectRecord,
+    ShadowRunResult,
+    CorporateActionEvent,
+)
+
+_R6_NESTED = (
+    "nested frozen value-object component embedded only inside a registered payload "
+    "(TargetPosition@1); carries no independent schema_version and is never "
+    "independently SchemaRef-resolved"
+)
+_R6_ORDER_PLAN = (
+    "internal deterministic order-plan diff carrier (frozen ContractModel, not a "
+    "DigestModel); an intent→portfolio diff record, never a registered payload"
+)
+_R6_DETERMINISTIC = (
+    "internal deterministic dual-curve target-set carrier (envelope-free, frozen "
+    "ContractModel); a rule-computed book record, never a registered payload"
+)
+_R6_LEDGER = (
+    "internal corporate-action ledger-delta carrier (frozen ContractModel); a "
+    "before/after application record, never a registered payload"
+)
+_R6_COMPAT = (
+    "internal stage-1 frontend-compatibility mirror carrier (frozen ContractModel); "
+    "a derived runBacktest-mirror record, never a registered payload"
+)
+
+
+def _phase6_internal_models() -> "dict[type[DigestModel], str]":
+    """Build the reviewed ``ContractModel -> reason`` map of every Phase-6 public
+    contract deliberately NOT registered.
+
+    The nine ``adapters.luozi`` carriers are imported lazily here because
+    ``adapters.luozi`` imports this module at load time — a top-level import would
+    be circular. ``TrancheTrigger`` (defined here) is the nested value object that
+    versions through ``TargetPosition@1``. The Phase-6 completeness firewall
+    (``tests/orchestration/test_phase6_registry.py``) proves
+    ``PHASE6_PUBLIC_MODELS`` ∪ this map partitions every public ``ContractModel``
+    defined across the two Phase-6 contract modules exactly.
+    """
+    from guanlan_v2.orchestration.adapters import luozi as _luozi
+
+    return {
+        # shadow.py nested value object (versions through TargetPosition@1)
+        TrancheTrigger: _R6_NESTED,
+        # adapters/luozi.py Task-5 order-plan diff carriers
+        _luozi.ShadowOrderPlanEntry: _R6_ORDER_PLAN,
+        _luozi.ShadowOrderSkip: _R6_ORDER_PLAN,
+        _luozi.ShadowOrderPlan: _R6_ORDER_PLAN,
+        # adapters/luozi.py Task-6 deterministic dual-curve target set
+        _luozi.DeterministicTargetSet: _R6_DETERMINISTIC,
+        # adapters/luozi.py Task-7 corporate-action application ledger
+        _luozi.CorporateActionApplication: _R6_LEDGER,
+        # adapters/luozi.py Task-8 stage-1 compatibility mirror carriers
+        _luozi.CompatSignal: _R6_COMPAT,
+        _luozi.CompatClock: _R6_COMPAT,
+        _luozi.CompatTrade: _R6_COMPAT,
+        _luozi.CompatibilityRunResult: _R6_COMPAT,
+    }
+
+
+# =========================================================================== #
+# Task 10 · the cumulative Phase-6 schema registry (linear chain over Phase 5)   #
+# =========================================================================== #
+class Phase6RegistryError(Exception):
+    """A Phase-6 cumulative-registry construction invariant was violated."""
+
+
+def _phase5_registry_digest() -> str:
+    from guanlan_v2.orchestration import bootstrap
+
+    return bootstrap.PHASE5_REGISTRY_DIGEST
+
+
+def _phase5_catalog_digest() -> str:
+    from guanlan_v2.orchestration import bootstrap
+
+    return bootstrap.PHASE5_CATALOG_DIGEST
+
+
+def build_phase6_registry(expected_phase5_digest: "DigestHex"):
+    """Build + seal the cumulative Phase-6 registry, pinned to the Phase-5 base.
+
+    Verifies ``expected_phase5_digest`` against the actual sealed Phase-5 cumulative
+    registry digest first — any other base digest is rejected *before any
+    registration* — then registers the complete inherited cumulative set (Phase-1
+    public + Phase-2 runtime facts + Phase-3 data + Phase-3 memory +
+    :data:`~guanlan_v2.orchestration.trial.PHASE4_PUBLIC_MODELS` +
+    :data:`~guanlan_v2.orchestration.bootstrap.PHASE5_PUBLIC_MODELS`) followed by
+    :data:`PHASE6_PUBLIC_MODELS` into a *fresh*
+    :class:`~guanlan_v2.orchestration.runtime_contracts.Phase2RuntimeRegistry`
+    and seals it. No upstream registry is mutated; a fresh sealed instance is
+    returned per call. Inherited JSON Schemas stay byte-identical to their
+    Phase-≤5 goldens; there is no "latest" alias.
+    """
+    from guanlan_v2.orchestration import bootstrap, trial
+    from guanlan_v2.orchestration.data.schema_registry import (
+        PHASE3_PUBLIC_MODELS as _DATA_PUBLIC,
+    )
+    from guanlan_v2.orchestration.memory.schema_registry import (
+        PHASE3_MEMORY_PUBLIC_MODELS as _MEM_PUBLIC,
+    )
+    from guanlan_v2.orchestration.runtime_contracts import (
+        Phase2RuntimeRegistry,
+        phase2_public_models,
+    )
+
+    actual = _phase5_registry_digest()
+    if expected_phase5_digest != actual:
+        raise Phase6RegistryError(
+            "build_phase6_registry requires the exact Phase-5 registry digest "
+            f"{actual!r}; got {expected_phase5_digest!r}"
+        )
+    reg = Phase2RuntimeRegistry()
+    for model in (
+        tuple(phase2_public_models())
+        + tuple(_DATA_PUBLIC)
+        + tuple(_MEM_PUBLIC)
+        + tuple(trial.PHASE4_PUBLIC_MODELS)
+        + tuple(bootstrap.PHASE5_PUBLIC_MODELS)
+        + PHASE6_PUBLIC_MODELS
+    ):
+        reg.register(model)
+    reg.seal()
+    return reg
+
+
+# =========================================================================== #
+# Task 10 · the Phase-6 catalog identity chain node (zero workers/capabilities) #
+# =========================================================================== #
+def build_phase6_catalog_snapshot(
+    phase5_snapshot: "WorkerCatalogSnapshot",
+    *,
+    expected_phase5_digest: "DigestHex",
+) -> "WorkerCatalogSnapshot":
+    """The explicit **identity** catalog chain node for Phase 6.
+
+    CRIB 4.5: a phase adding no worker/capability still exports the chain node.
+    Phase 6 adds **zero** workers and **zero** capabilities — that emptiness is
+    itself a red-line fact (no live order/signal write tool can enter through this
+    phase). This verifies ``phase5_snapshot.catalog_digest == expected_phase5_digest``
+    (the sole legal base) and returns the *same* snapshot unchanged, so worker and
+    capability manifests stay byte-equal to Phase 5's by identity. A base whose
+    digest differs from the expected Phase-5 digest is rejected loudly.
+    """
+    from guanlan_v2.orchestration.catalog import CatalogError
+
+    if phase5_snapshot.catalog_digest != expected_phase5_digest:
+        raise CatalogError(
+            "build_phase6_catalog_snapshot is an identity node over the canonical "
+            f"Phase-5 catalog ({expected_phase5_digest}); got base "
+            f"{phase5_snapshot.catalog_digest}"
+        )
+    return phase5_snapshot
+
+
+def phase6_catalog_snapshot() -> "WorkerCatalogSnapshot":
+    """The canonical cumulative Phase-6 catalog snapshot (identical to Phase 5).
+
+    Rebuilds the reviewed cumulative Phase-5 catalog the same way its owning module
+    assembles it, then passes it through the Phase-6 identity node.
+    """
+    from guanlan_v2.orchestration import bootstrap
+
+    base = bootstrap.phase5_catalog_snapshot()
+    return build_phase6_catalog_snapshot(
+        base, expected_phase5_digest=bootstrap.PHASE5_CATALOG_DIGEST
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Lazy canonical digests (PEP 562) — computed once, never a mutable "latest"    #
+# --------------------------------------------------------------------------- #
+_PHASE6_REGISTRY_DIGEST: str | None = None
+_PHASE6_CATALOG_DIGEST: str | None = None
+_PHASE6_INTERNAL_MODELS: "dict[type[DigestModel], str] | None" = None
+
+
+def __getattr__(name: str) -> "Any":
+    global _PHASE6_REGISTRY_DIGEST, _PHASE6_CATALOG_DIGEST, _PHASE6_INTERNAL_MODELS
+    if name == "PHASE6_INTERNAL_MODELS":
+        if _PHASE6_INTERNAL_MODELS is None:
+            _PHASE6_INTERNAL_MODELS = _phase6_internal_models()
+        return _PHASE6_INTERNAL_MODELS
+    if name == "PHASE6_BASE_REGISTRY_DIGEST":
+        return _phase5_registry_digest()
+    if name == "PHASE6_REGISTRY_DIGEST":
+        if _PHASE6_REGISTRY_DIGEST is None:
+            _PHASE6_REGISTRY_DIGEST = build_phase6_registry(
+                _phase5_registry_digest()
+            ).registry_digest
+        return _PHASE6_REGISTRY_DIGEST
+    if name == "PHASE6_BASE_CATALOG_DIGEST":
+        return _phase5_catalog_digest()
+    if name == "PHASE6_CATALOG_DIGEST":
+        if _PHASE6_CATALOG_DIGEST is None:
+            _PHASE6_CATALOG_DIGEST = phase6_catalog_snapshot().catalog_digest
+        return _PHASE6_CATALOG_DIGEST
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

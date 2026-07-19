@@ -142,12 +142,15 @@ DEFERRED_PHASE_PAYLOADS: tuple[str, ...] = (
     "RegimeReport",
     "RealizedRegime",
     "RotationReport",
-    # Phase 6 — portfolio-target / schedule layer
+    # Phase 6 — portfolio-target / schedule layer (flipped by Task 10: also present
+    # in the Phase-6 cumulative registry; the entries here remain the Phase-1 absence
+    # guard). See :data:`PHASE6_FLIPPED_PAYLOADS` and
+    # ``test_phase6_payloads_present_in_phase6_registry`` below.
     "TargetPosition",
     "PortfolioTargetProposal",
     "TargetPortfolioIntent",
     "DecisionSchedule",
-    # Phase 8 — debate layer
+    # Phase 8 — debate layer (still pure absence — no owning-phase registry yet)
     "DebateMessage",
 )
 
@@ -161,6 +164,18 @@ PHASE5_FLIPPED_PAYLOADS: tuple[str, ...] = (
     "RegimeReport",
     "RealizedRegime",
     "RotationReport",
+)
+
+#: The four Phase-6 payloads whose presence half Task 10 added: each EXISTS as a
+#: public contract defined in ``guanlan_v2.orchestration.shadow`` and is registered
+#: at ``@1`` in the Phase-6 cumulative registry, while staying absent from the
+#: sealed Phase-1 registry (retained in DEFERRED_PHASE_PAYLOADS above for the
+#: absence half — a pure addition, mirroring the Phase-4/5 flip precedents).
+PHASE6_FLIPPED_PAYLOADS: tuple[str, ...] = (
+    "TargetPosition",
+    "PortfolioTargetProposal",
+    "TargetPortfolioIntent",
+    "DecisionSchedule",
 )
 
 #: Task-11 sealed-holdout evaluation types (Phase 4). Absent from Phase 1.
@@ -463,6 +478,73 @@ def test_phase5_flipped_payloads_absent_from_phase1_present_in_phase5():
         assert name in phase5_registered, (
             f"{name} must register in the Phase-5 cumulative registry"
         )
+
+
+# --------------------------------------------------------------------------- #
+# Phase 6 guard flip (Task 10) — the four portfolio-target/schedule payloads now  #
+# EXIST + register at @1 in the Phase-6 registry, staying absent from Phase 1      #
+# --------------------------------------------------------------------------- #
+def test_phase6_payloads_present_in_phase6_registry():
+    """The Phase-6 flip: absence-in-Phase-1 AND presence-in-Phase-6-registry.
+
+    Mirrors the Phase-4 Trial/Holdout and Phase-5 market-factor flips: a deferred
+    payload guard graduates from "does not exist anywhere" to "absent from the
+    sealed Phase-1 registry/classification/modules, present as a public contract
+    defined in ``shadow`` and registered at ``@1`` in its owning phase's cumulative
+    registry". The Phase-5 (retightened above) and Phase-8 (``DebateMessage``)
+    guards stay untouched.
+    """
+    from guanlan_v2.orchestration import shadow
+
+    # -- absence half: never in the sealed Phase-1 registry or classification --
+    reg = default_registry()
+    registered_names = {e.schema_ref.name for e in reg.manifest()}
+    classified_names = {
+        m.__name__ for m in set(PHASE1_PUBLIC_MODELS) | set(INTERNAL_MODELS)
+    }
+    for name in PHASE6_FLIPPED_PAYLOADS:
+        assert name not in registered_names, f"{name} must stay out of the Phase-1 registry"
+        assert name not in classified_names, f"{name} must stay out of Phase-1 classification"
+        for module_name in PHASE1_MODULES:
+            module = importlib.import_module(module_name)
+            assert not hasattr(module, name), (
+                f"{name} is a Phase-6 payload and must not be defined in {module_name}"
+            )
+
+    # -- presence half: defined in shadow + registered at @1 in Phase 6 --------
+    phase6_registered = {
+        e.key
+        for e in shadow.build_phase6_registry(
+            shadow.PHASE6_BASE_REGISTRY_DIGEST
+        ).manifest()
+    }
+    phase6_public_by_name = {m.__name__: m for m in shadow.PHASE6_PUBLIC_MODELS}
+    for name in PHASE6_FLIPPED_PAYLOADS:
+        model = phase6_public_by_name.get(name)
+        assert model is not None, f"{name} must be a member of PHASE6_PUBLIC_MODELS"
+        assert model.__module__ == "guanlan_v2.orchestration.shadow", (
+            f"{name} must be defined in guanlan_v2.orchestration.shadow"
+        )
+        assert f"{name}@1" in phase6_registered, (
+            f"{name} must register at @1 in the Phase-6 cumulative registry"
+        )
+
+
+def test_debate_message_stays_deferred_everywhere():
+    """The Phase-8 ``DebateMessage`` guard is untouched by the Phase-6 flip — it has
+    no owning-phase registry yet, so it stays pure absence (never in Phase 1, never
+    in the Phase-6 cumulative registry)."""
+    from guanlan_v2.orchestration import shadow
+
+    reg = default_registry()
+    assert "DebateMessage" not in {e.schema_ref.name for e in reg.manifest()}
+    phase6_names = {
+        e.schema_ref.name
+        for e in shadow.build_phase6_registry(
+            shadow.PHASE6_BASE_REGISTRY_DIGEST
+        ).manifest()
+    }
+    assert "DebateMessage" not in phase6_names
 
 
 # --------------------------------------------------------------------------- #
