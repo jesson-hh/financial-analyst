@@ -335,37 +335,6 @@ class _FakePlannerCatalogRuntime:
         return mat
 
 
-class _FakeRunEvent:
-    """A stand-in ``RunEvent`` for the lightweight lease-envelope coordinators."""
-
-    def __init__(self, *, event_id, decision, actor, idempotency_key):
-        self.event_id = event_id
-        self.decision = decision
-        self.actor = actor
-        self.idempotency_key = idempotency_key
-
-
-class _FakeAdmission:
-    """Records ``record_approval`` effects with durable idempotency by key (used only
-    for the pending_human lease-envelope regressions, which never freeze)."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple] = []
-        self._events: dict[str, _FakeRunEvent] = {}
-
-    def record_approval(self, candidate_id, approval_input, *, authenticated_actor,
-                        idempotency_key):
-        if idempotency_key in self._events:
-            return self._events[idempotency_key]
-        self.calls.append(
-            (candidate_id, approval_input, authenticated_actor, idempotency_key))
-        ev = _FakeRunEvent(
-            event_id=f"ev-{len(self._events) + 1}", decision=approval_input.decision,
-            actor=authenticated_actor, idempotency_key=idempotency_key)
-        self._events[idempotency_key] = ev
-        return ev
-
-
 # =========================================================================== #
 # Planner materials / spec / scripted-valid output                             #
 # =========================================================================== #
@@ -854,7 +823,11 @@ def test_scenario4_lease_admits_executes_and_envelopes_flip(tmp_path):
     assert view.admissions_used == 1 and view.admissions_remaining == 0
     assert view.budget_used == pending.budget_request_llm_invocations
 
-    # -- exhaustion: the NEXT candidate flips to pending_human ---------------- #
+    # -- exhaustion: the NEXT candidate flips to pending_human. This lease is the
+    # only lease in play here and is fully consumed above (admissions_remaining
+    # == 0), so exhaustion ALONE explains the refusal -- proven independently of
+    # the window/revocation checks, which never come into play for this lease at
+    # this `now`. -------------------------------------------------------------- #
     out_b = coord.register_and_try_lease(
         _synthetic_preset_pending(env, "b" * 64, request_id="req-s4b", candidate_id="cand-s4b"),
         idempotency_key="try-s4b", now=NOW,
@@ -863,13 +836,45 @@ def test_scenario4_lease_admits_executes_and_envelopes_flip(tmp_path):
     assert out_b.outcome == "pending_human"
     assert coord.load_decision("req-s4b", "b" * 64) is None
 
-    # -- expiry: after valid_until, the lease no longer admits ---------------- #
+    # -- revocation: a FRESH lease (never drawn on, so admissions/budget are
+    # both fully available) is revoked, THEN tried. Because it is neither
+    # exhausted nor outside its window, revocation is the ONLY condition that
+    # can explain the refusal -- deleting the revoked-lease check would flip
+    # this to a silent admit. A distinct `max_admissions` (2, vs. the headline
+    # lease's 1) guarantees a genuinely fresh lease_id (issuance is idempotent
+    # by content digest, so reusing identical params would just return the
+    # already-exhausted headline lease). --------------------------------------- #
+    revoke_lease = _issue_headline_lease(coord, env, max_admissions=2, budget_cap=100)
+    assert revoke_lease.lease_id != lease.lease_id
+    coord.revoke_lease(revoke_lease.lease_id, actor=GOOD_CRED, reason="stop it",
+                       idempotency_key="revoke-s4")
+    out_d = coord.register_and_try_lease(
+        _synthetic_preset_pending(env, "d" * 64, request_id="req-s4d", candidate_id="cand-s4d"),
+        idempotency_key="try-s4d", now=NOW,
+        candidate_catalog_digest=env.snapshot.catalog_digest,
+        candidate_registry_digest=env.registry.registry_digest)
+    assert out_d.outcome == "pending_human"
+    revoke_view = next(v for v in coord.list_leases(now=NOW)
+                       if v.lease.lease_id == revoke_lease.lease_id)
+    assert revoke_view.status == "revoked"  # pins the cause: revocation, not exhaustion.
+    assert revoke_view.admissions_remaining == 2  # never exhausted -- revocation alone bit.
+
+    # -- expiry: a SEPARATE fresh lease (distinct max_admissions=3, never
+    # revoked, never drawn on) is tried only after its window has elapsed.
+    # Admissions/budget are full and it carries no revocation, so the expired
+    # window is the ONLY condition that can explain the refusal. ------------- #
+    expiry_lease = _issue_headline_lease(coord, env, max_admissions=3, budget_cap=100)
+    assert expiry_lease.lease_id not in (lease.lease_id, revoke_lease.lease_id)
     out_c = coord.register_and_try_lease(
         _synthetic_preset_pending(env, "c" * 64, request_id="req-s4c", candidate_id="cand-s4c"),
         idempotency_key="try-s4c", now=AFTER_UNTIL,
         candidate_catalog_digest=env.snapshot.catalog_digest,
         candidate_registry_digest=env.registry.registry_digest)
     assert out_c.outcome == "pending_human"
+    expiry_view = next(v for v in coord.list_leases(now=AFTER_UNTIL)
+                        if v.lease.lease_id == expiry_lease.lease_id)
+    assert expiry_view.status == "expired"  # pins the cause: expiry, not exhaustion/revocation.
+    assert expiry_view.admissions_remaining == 3  # never exhausted -- expiry alone bit.
 
     # -- journal replay after simulated death reconstructs balances exactly --- #
     replayed = PlanApprovalCoordinator.replay(
@@ -888,18 +893,6 @@ def test_scenario4_lease_admits_executes_and_envelopes_flip(tmp_path):
         e for e in env.stores.events.journal(env.run_id, "main")
         if e.event_type is EventType.PLAN_APPROVED and e.plan_digest == candidate_digest]
     assert len(approved) == 1
-
-    # -- revocation: a revoked lease no longer admits ------------------------- #
-    coord.revoke_lease(lease.lease_id, actor=GOOD_CRED, reason="stop it",
-                       idempotency_key="revoke-s4")
-    out_d = coord.register_and_try_lease(
-        _synthetic_preset_pending(env, "d" * 64, request_id="req-s4d", candidate_id="cand-s4d"),
-        idempotency_key="try-s4d", now=NOW,
-        candidate_catalog_digest=env.snapshot.catalog_digest,
-        candidate_registry_digest=env.registry.registry_digest)
-    assert out_d.outcome == "pending_human"
-    assert next(v for v in coord.list_leases(now=NOW)
-                if v.lease.lease_id == lease.lease_id).status == "revoked"
 
 
 # =========================================================================== #
@@ -1212,3 +1205,4 @@ def test_carry_future_worker_params_schema_disjoint_from_authority_keys():
                 f"worker {w.id} params schema reuses an authority key: "
                 f"{sorted(props & banned)}")
     assert checked_workers >= 3  # the firewall really iterated the dynamic roster
+    assert checked_schemas == 0  # no dynamic worker declares a params schema today; flips when one appears
