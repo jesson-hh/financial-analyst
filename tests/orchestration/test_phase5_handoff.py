@@ -436,8 +436,26 @@ def test_point2_phase4_trial_event_types_present():
 
 
 def test_point2_event_type_vocabulary_is_exactly_23_members():
-    """20 Phase-1 members + 3 Phase-4 Trial members; Phase 5 adds no event type."""
-    assert len(list(EventType)) == 23
+    """20 Phase-1 members + 3 Phase-4 Trial members; Phase 5 adds no event type.
+
+    Phase 5's exit gate is that it introduces NO event type of its own: every one
+    of the 23 Phase-4-era members (20 Phase-1 + 3 Trial) is still present and
+    unrenamed. A later phase may additively append more — Phase 6 (Task 9) appends
+    the two shadow-consumer members ``ShadowIntentIssued`` / ``ShadowTargetApplied``
+    (owned by ``tests/orchestration/test_shadow_events.py``) — so this gate asserts
+    the 23-member floor is intact, never an absolute live-enum count that a later
+    phase lawfully grows past.
+    """
+    phase4_era_values = {
+        "RunRequested", "PlanDrafted", "PlanApproved", "PlanRejected", "PlanFrozen",
+        "BudgetReserved", "BudgetSettled", "BudgetReleased", "NodeStateChanged",
+        "ArtifactStaged", "LayerCommitted", "ContextSnapshotFrozen", "ArtifactRelated",
+        "ExperimentStateChanged", "RunCancelled", "RunCompleted", "RunFailed",
+        "CaseCreated", "CaseMatured", "CaseReviewed",
+        "TrialReserved", "TrialRevealed", "TrialExhausted",
+    }
+    assert len(phase4_era_values) == 23
+    assert phase4_era_values <= {e.value for e in EventType}
     # the three reserved case members are Phase-1 members (not renumbered away).
     names = [e.name for e in EventType]
     for name in ("CASE_CREATED", "CASE_MATURED", "CASE_REVIEWED"):

@@ -124,7 +124,7 @@ def test_models_are_frozen_and_forbid_extra():
 # --------------------------------------------------------------------------- #
 def test_event_type_set_is_exactly_phase4_frozen():
     values = {m.value for m in EventType}
-    # the exact 23-value frozen vocabulary: the 20 Phase-1 members …
+    # the exact 25-value frozen vocabulary: the 20 Phase-1 members …
     assert values == {
         "RunRequested",
         "PlanDrafted",
@@ -146,12 +146,15 @@ def test_event_type_set_is_exactly_phase4_frozen():
         "CaseCreated",
         "CaseMatured",
         "CaseReviewed",
-        # … plus the three Phase 4 (Task 3) additive Trial members.
+        # … the three Phase 4 (Task 3) additive Trial members …
         "TrialReserved",
         "TrialRevealed",
         "TrialExhausted",
+        # … plus the two Phase 6 (Task 9) additive shadow-consumer members.
+        "ShadowIntentIssued",
+        "ShadowTargetApplied",
     }
-    assert len(EventType) == 23
+    assert len(EventType) == 25
     # building a TrialReserved with a TrialRecord-named schema ref succeeds …
     ev = _event(event_type=EventType.TRIAL_RESERVED, payload_schema_ref=_schema_ref("TrialRecord"))
     assert ev.event_type is EventType.TRIAL_RESERVED

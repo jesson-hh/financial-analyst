@@ -127,17 +127,25 @@ def _event(**over: Any) -> RunEvent:
 
 # --------------------------------------------------------------------------- #
 # 1. the frozen 23-value vocabulary — 20 Phase-1 byte-identical + 3 appended    #
+#    (now the byte-frozen 23-length PREFIX of the live enum; Phase 6 · Task 9    #
+#     additively appends the two shadow-consumer members after it — see          #
+#     tests/orchestration/test_shadow_events.py.)                                #
 # --------------------------------------------------------------------------- #
 def test_event_type_is_exactly_the_23_value_frozen_vocabulary():
     ordered = tuple(m.value for m in EventType)
     # the 20 Phase-1 members are byte-identical AND still in their original order …
     assert ordered[:20] == PHASE1_EVENT_VALUES
-    # … the three Trial members are appended (never renumbered / reordered) …
-    assert ordered[20:] == TRIAL_EVENT_VALUES
-    # … and the whole set is exactly the 23-value frozen vocabulary.
-    assert ordered == FROZEN_EVENT_VALUES
-    assert {m.value for m in EventType} == set(FROZEN_EVENT_VALUES)
-    assert len(EventType) == 23
+    # … the three Phase-4 Trial members are appended at [20:23] (never renumbered
+    #   or reordered) …
+    assert ordered[20:23] == TRIAL_EVENT_VALUES
+    # … so the reviewed 23-value Phase-4 vocabulary is the exact, byte-frozen
+    #   23-length PREFIX of the live enum. Phase 6 (Task 9) additively appends the
+    #   two shadow-consumer members after it (owned by test_shadow_events.py), so
+    #   this Phase-4 guard asserts only that its own 23 stay intact + ordered —
+    #   never restoring the pre-Phase-4 shape, never renumbering the Trial members.
+    assert ordered[:23] == FROZEN_EVENT_VALUES
+    assert set(FROZEN_EVENT_VALUES) <= {m.value for m in EventType}
+    assert len(EventType) >= 23
 
 
 def test_trial_member_names_and_values():

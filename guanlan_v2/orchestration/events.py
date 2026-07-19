@@ -140,6 +140,17 @@ class EventType(str, Enum):
     TRIAL_REVEALED = "TrialRevealed"
     TRIAL_EXHAUSTED = "TrialExhausted"
 
+    # --- Phase 6 (Task 9) additive shadow-consumer members --------------- #
+    # Appended after the three Phase-4 Trial members (never renumbered or
+    # reordered): the honest shadow-consumer replay emits ``ShadowIntentIssued`` when
+    # it stages an LLM target book into a runtime intent, and ``ShadowTargetApplied``
+    # when a staged target becomes effective at an execution bar. Both are PUBLIC
+    # advisory evidence, so :meth:`RunEvent._shadow_partition_rules` pins them to
+    # the ``main`` partition; the unchanged namespace-masquerade rule then bars a
+    # main shadow event from referencing a non-public payload.
+    SHADOW_INTENT_ISSUED = "ShadowIntentIssued"
+    SHADOW_TARGET_APPLIED = "ShadowTargetApplied"
+
 
 #: Closed set of event partitions — the visibility domain of an event. Only
 #: ``main`` is publicly visible; ``sealed`` / ``review`` / ``audit`` mirror the
@@ -252,6 +263,29 @@ class RunEvent(DigestModel):
                 f"{et.value} on partition {self.partition!r} accepts payload "
                 f"schema name(s) {sorted(allowed)}, not "
                 f"{self.payload_schema_ref.name!r}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _shadow_partition_rules(self) -> "RunEvent":
+        """Phase 6 (Task 9) additive per-type rule: both shadow-consumer event
+        types are PUBLIC advisory shadow evidence and live only on the ``main``
+        partition (never ``sealed`` / ``review`` / ``audit``).
+
+        This is the shadow analogue of the ``ArtifactStaged`` / ``LayerCommitted``
+        visibility rules - expressed over ``event_type`` only, added additively
+        without touching any existing validator. The pre-existing
+        namespace-masquerade rule (:meth:`_namespace_boundary`) is unaffected and
+        still bars a ``main`` shadow event from referencing a ``sealed`` / ``review``
+        / ``audit`` payload, so audit-only detail can never ride a public shadow fact.
+        """
+        if self.event_type in (
+            EventType.SHADOW_INTENT_ISSUED,
+            EventType.SHADOW_TARGET_APPLIED,
+        ) and self.partition not in PUBLIC_EVENT_PARTITIONS:
+            raise ValueError(
+                f"{self.event_type.value} is public shadow advisory evidence and "
+                f"must be on the 'main' partition, not {self.partition!r}"
             )
         return self
 
