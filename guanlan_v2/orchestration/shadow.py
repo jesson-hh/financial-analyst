@@ -45,10 +45,10 @@ from __future__ import annotations
 
 import math
 from datetime import date, datetime, timedelta, timezone
-from typing import Annotated, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
 from guanlan_v2.orchestration.data.calendar import ImmutableTradingCalendar
@@ -58,12 +58,19 @@ from guanlan_v2.orchestration.digest import (
     DigestModel,
     FiniteFloat,
     NonEmptyStr,
+    NonNegativeInt,
     PositiveInt,
     UtcDateTime,
     content_digest,
 )
 from guanlan_v2.orchestration.enums import Confidence
 from guanlan_v2.orchestration.refs import ContentRef, LogicalId
+from guanlan_v2.orchestration.runtime_clock import clock_now
+
+if TYPE_CHECKING:  # annotations only (``from __future__ import annotations``) — no cycle
+    from guanlan_v2.orchestration.runtime_clock import AuthoritativeClock
+    from guanlan_v2.orchestration.schemas import Artifact
+    from guanlan_v2.orchestration.spec import OrchestrationRequest
 
 __all__ = [
     "ShadowContractError",
@@ -91,6 +98,17 @@ __all__ = [
     "compute_scheduled_for",
     "compute_cutoff_at",
     "compute_eligible_execution_at",
+    # Task 3 — runtime-only intent envelope + idempotency key families
+    "TargetPortfolioIntent",
+    "ShadowEnvelopeError",
+    "wrap_proposal_as_intent",
+    "SHADOW_APPLY_KEY_DOMAIN",
+    "target_apply_key",
+    "SHADOW_ORDER_ID_DOMAIN",
+    "ShadowOrderKind",
+    "shadow_order_id",
+    "SHADOW_FILL_ID_DOMAIN",
+    "shadow_fill_id",
 ]
 
 
@@ -215,6 +233,83 @@ class TargetPosition(DigestModel):
 
 
 # --------------------------------------------------------------------------- #
+# Shared long-only portfolio matrix (① duplicate ② sum ③ leverage ④ band)        #
+# --------------------------------------------------------------------------- #
+def _verify_portfolio_matrix(
+    positions: "tuple[TargetPosition, ...]", cash_weight: float
+) -> None:
+    """The closed, fixed-order long-only v1 book invariant, raising a
+    :class:`PydanticCustomError` with the closed :data:`PROPOSAL_REASON_CODES`.
+
+    Extracted so ``PortfolioTargetProposal`` (the LLM-writable payload) and
+    ``TargetPortfolioIntent`` (Task 3's runtime envelope) apply the *identical*
+    matrix — an intent can never be laxer than a proposal. The step order is
+    fixed (① duplicate → ② sum-identity → ③ leverage → ④ closed target-weight
+    band): the sequential raise stops at the first breach, so the surfaced code is
+    order-defined. :data:`TARGET_WEIGHT_BANDS` / :data:`WEIGHT_SUM_TOLERANCE` are
+    read as module globals (late-bound, single source of truth — the band
+    monkeypatch contract).
+    """
+    # ① duplicate symbol by (code, exchange) — the instrument identity a downstream
+    #    book keys on; two legs on the same instrument are never a valid book.
+    seen: set[tuple[str, str]] = set()
+    for p in positions:
+        key = (p.symbol.code, p.symbol.exchange)
+        if key in seen:
+            raise PydanticCustomError(
+                "duplicate_symbol",
+                "duplicate symbol {code}.{exchange} in positions",
+                {"code": p.symbol.code, "exchange": p.symbol.exchange},
+            )
+        seen.add(key)
+
+    # ② weight-sum identity: sum(target_weight)+cash_weight must equal 1 within
+    #    WEIGHT_SUM_TOLERANCE — NEVER renormalized. math.fsum mirrors the house
+    #    precedent for summing reported floats (RegimeReport).
+    weight_sum = math.fsum(p.target_weight for p in positions)
+    if abs(weight_sum + cash_weight - 1.0) > WEIGHT_SUM_TOLERANCE:
+        raise PydanticCustomError(
+            "weight_sum_violation",
+            "sum(target_weight)+cash_weight must equal 1 +/- {tol}, got {total}",
+            {"tol": WEIGHT_SUM_TOLERANCE, "total": weight_sum + cash_weight},
+        )
+
+    # ③ long-only aggregate leverage guard. With cash_weight >= 0 and ② already
+    #    enforcing sum+cash == 1, this is subsumed (any leverage input fails ②
+    #    first); it is kept as the explicit named long-only invariant so the
+    #    guarantee is legible and survives a future cash model that could admit a
+    #    negative cash leg. Shorts are impossible via ge=0.
+    if weight_sum > 1.0 + WEIGHT_SUM_TOLERANCE:
+        raise PydanticCustomError(
+            "leverage_or_short",
+            "aggregate target weight {total} exceeds 1 (long-only v1)",
+            {"total": weight_sum},
+        )
+
+    # ④ closed target-weight band vocabulary — the LLM anchor-drift guard. Each
+    #    position's target_weight must be EXACTLY a member of TARGET_WEIGHT_BANDS
+    #    (float `in`: zero tolerance, NEVER snapped). Imposed here at the
+    #    proposal/intent layer only (DELIBERATELY NOT on TargetPosition itself, so
+    #    Task 6's DeterministicTargetSet can express continuous rule-computed
+    #    weights). TARGET_WEIGHT_BANDS is read as the single source of truth (no
+    #    re-inlined literal), so Phase 8's allowed_actions band ceiling reuses the
+    #    identical closed vocabulary.
+    for p in positions:
+        if p.target_weight not in TARGET_WEIGHT_BANDS:
+            raise PydanticCustomError(
+                "non_band_weight",
+                "target_weight {weight} for {code}.{exchange} is not a member "
+                "of the closed band vocabulary {bands}",
+                {
+                    "weight": p.target_weight,
+                    "code": p.symbol.code,
+                    "exchange": p.symbol.exchange,
+                    "bands": list(TARGET_WEIGHT_BANDS),
+                },
+            )
+
+
+# --------------------------------------------------------------------------- #
 # PortfolioTargetProposal                                                     #
 # --------------------------------------------------------------------------- #
 class PortfolioTargetProposal(DigestModel):
@@ -236,66 +331,9 @@ class PortfolioTargetProposal(DigestModel):
 
     @model_validator(mode="after")
     def _verify(self) -> "PortfolioTargetProposal":
-        # ① duplicate symbol by (code, exchange) — the instrument identity that a
-        #    downstream book keys on; two legs on the same instrument are never a
-        #    valid target book (they would silently net or double-count).
-        seen: set[tuple[str, str]] = set()
-        for p in self.positions:
-            key = (p.symbol.code, p.symbol.exchange)
-            if key in seen:
-                raise PydanticCustomError(
-                    "duplicate_symbol",
-                    "duplicate symbol {code}.{exchange} in positions",
-                    {"code": p.symbol.code, "exchange": p.symbol.exchange},
-                )
-            seen.add(key)
-
-        # ② weight-sum identity: sum(target_weight)+cash_weight must equal 1
-        #    within WEIGHT_SUM_TOLERANCE — NEVER renormalized. math.fsum mirrors
-        #    the house precedent for summing reported floats (RegimeReport).
-        weight_sum = math.fsum(p.target_weight for p in self.positions)
-        if abs(weight_sum + self.cash_weight - 1.0) > WEIGHT_SUM_TOLERANCE:
-            raise PydanticCustomError(
-                "weight_sum_violation",
-                "sum(target_weight)+cash_weight must equal 1 +/- {tol}, got {total}",
-                {"tol": WEIGHT_SUM_TOLERANCE, "total": weight_sum + self.cash_weight},
-            )
-
-        # ③ long-only aggregate leverage guard. With cash_weight >= 0 and ②
-        #    already enforcing sum+cash == 1, this is subsumed (any leverage input
-        #    fails ② first); it is kept as the explicit named long-only invariant
-        #    so the guarantee is legible and survives a future cash model that
-        #    could admit a negative cash leg. Shorts are impossible via ge=0.
-        if weight_sum > 1.0 + WEIGHT_SUM_TOLERANCE:
-            raise PydanticCustomError(
-                "leverage_or_short",
-                "aggregate target weight {total} exceeds 1 (long-only v1)",
-                {"total": weight_sum},
-            )
-
-        # ④ closed target-weight band vocabulary — the LLM anchor-drift guard.
-        #    Each position's target_weight must be EXACTLY a member of
-        #    TARGET_WEIGHT_BANDS (float `in`: zero tolerance, NEVER snapped to the
-        #    nearest band). This is imposed here at the PROPOSAL layer only (and in
-        #    TargetPortfolioIntent, Task 3) and DELIBERATELY NOT on TargetPosition
-        #    itself, so the Task 6 deterministic lane (DeterministicTargetSet) can
-        #    express continuous rule-computed weights — do not move this check down
-        #    into TargetPosition. TARGET_WEIGHT_BANDS is read here as the single
-        #    source of truth (no re-inlined literal), so Phase 8's allowed_actions
-        #    band ceiling reuses the identical closed vocabulary.
-        for p in self.positions:
-            if p.target_weight not in TARGET_WEIGHT_BANDS:
-                raise PydanticCustomError(
-                    "non_band_weight",
-                    "target_weight {weight} for {code}.{exchange} is not a member "
-                    "of the closed band vocabulary {bands}",
-                    {
-                        "weight": p.target_weight,
-                        "code": p.symbol.code,
-                        "exchange": p.symbol.exchange,
-                        "bands": list(TARGET_WEIGHT_BANDS),
-                    },
-                )
+        # the closed fixed-order long-only book matrix (① duplicate → ② sum →
+        # ③ leverage → ④ band), shared byte-for-byte with TargetPortfolioIntent.
+        _verify_portfolio_matrix(self.positions, self.cash_weight)
         return self
 
 
@@ -319,8 +357,11 @@ IsoDateStr = Annotated[str, Field(pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")]
 
 #: the ONLY matching-engine version this phase implements. ``shadow-match-v1``
 #: supports ``bar_frequency == "1d"`` only and pins the v1 A-share session anchors
-#: below; a schedule may declare another engine/frequency (schema-valid for later
-#: phases) but :func:`compute_eligible_execution_at` refuses to compute it here.
+#: below; a schedule may declare another bar frequency (schema-valid for later
+#: phases) but :func:`compute_eligible_execution_at` refuses to compute a
+#: non-``"1d"`` frequency here. That refusal gates on ``bar_frequency`` ALONE — it
+#: does not inspect the declared ``matching_engine_version`` — so this constant
+#: names the engine version the phase implements without claiming to enforce it.
 SHADOW_MATCHING_ENGINE_VERSION: str = "shadow-match-v1"
 #: v1 A-share continuous-auction session anchors (local wall time).
 ASHARE_SESSION_OPEN: str = "09:30"
@@ -705,3 +746,324 @@ class DecisionScheduleRegistry:
     def registry_digest(self) -> DigestHex:
         """Registration-order-independent digest over the sorted manifest."""
         return content_digest(list(self.manifest()))
+
+
+# =========================================================================== #
+# Task 3 · runtime-only TargetPortfolioIntent envelope + idempotency key families #
+# =========================================================================== #
+# The proposal (Task 1) is the LLM-writable *what*; the schedule (Task 2) is the
+# deterministic *when*. Task 3 binds them into a runtime-only, content-digested
+# staging envelope — the :class:`TargetPortfolioIntent` — that no LLM can author
+# and no consumer can mutate. The envelope carries the closed single-value
+# ``origin``/``authority``/``execution_scope`` Literals so "advisory, shadow-only,
+# LLM-originated" is structural, not advisory; its cadence instants are computed
+# inside the SOLE constructor :func:`wrap_proposal_as_intent` (never accepted from
+# a caller); and its idempotency identity is minted by three pure, domain-tagged
+# key families so an apply/order/fill is applied at most once and can never
+# collide across families (distinct ``domain`` tags).
+
+
+class ShadowEnvelopeError(ShadowContractError):
+    """Staging a proposal into a shadow intent envelope was refused.
+
+    Raised by :func:`wrap_proposal_as_intent` on each closed refusal path — a
+    payload that is not a ``PortfolioTargetProposal@1``, a request that binds no
+    (or an unresolvable / digest-stale) decision schedule, a non-decision-point
+    ``session_date``, or a ``decision_as_of`` earlier than the schedule cutoff —
+    each with distinct reason text and producing NO intent object.
+    """
+
+
+class TargetPortfolioIntent(DigestModel):
+    """A runtime-only, content-sealed target-portfolio staging envelope.
+
+    The framework's own binding of an LLM :class:`PortfolioTargetProposal` to a
+    registered :class:`DecisionSchedule` point: the proposal's book (positions /
+    cash / rationale / confidence, copied **verbatim** including each position's
+    ``entry_tranches``) plus the immutable *who / when / from-what* facts an
+    honest shadow consumer replays against — the proposal artifact identity, the
+    resolved schedule triple, and the three ruled instants
+    ``cutoff <= decision_as_of < eligible_execution_at`` (only the latter two are
+    stored; the cutoff is enforced at staging).
+
+    Structural red lines (invariant 1): ``origin`` / ``authority`` /
+    ``execution_scope`` are closed single-value Literals — an intent can never
+    self-report a live/human envelope — and there is no public path that accepts a
+    caller-supplied ``scheduled_for`` / ``eligible_execution_at``; both are
+    computed inside :func:`wrap_proposal_as_intent`. It re-applies the SAME closed
+    portfolio matrix as the proposal (:func:`_verify_portfolio_matrix`, band check
+    included), so the envelope layer can never become a bypass around the
+    band/tranche constraints.
+
+    Digest identity: every business field — the schedule triple and all three
+    times included — is semantic; only the runtime-random ``intent_id`` and the
+    ``created_at`` wall clock are audit facts (:data:`SEMANTIC_EXCLUDE`), so two
+    intents differing only in those two carry an identical ``semantic_digest`` yet
+    distinct operational apply keys. The record is frozen (invariant 3): seeing
+    realized results can never mutate an intent in place.
+    """
+
+    schema_version: Literal["1"] = "1"
+    intent_id: NonEmptyStr
+    target_version: PositiveInt
+    proposal_artifact_id: NonEmptyStr
+    proposal_digest: DigestHex
+    source_decision_artifact_id: NonEmptyStr
+    decision_schedule_id: LogicalId
+    decision_schedule_version: NonEmptyStr
+    decision_schedule_digest: DigestHex
+    scheduled_for: UtcDateTime
+    decision_as_of: UtcDateTime
+    eligible_execution_at: UtcDateTime
+    valid_until: UtcDateTime | None = None
+    positions: tuple[TargetPosition, ...]
+    cash_weight: FiniteFloat = Field(ge=0, le=1)
+    origin: Literal["LLM"] = "LLM"
+    authority: Literal["ADVISORY_ONLY"] = "ADVISORY_ONLY"
+    execution_scope: Literal["SHADOW_ONLY"] = "SHADOW_ONLY"
+    rationale: NonEmptyStr
+    confidence: Confidence
+    created_at: UtcDateTime
+
+    #: the runtime-random id and the wall clock are audit facts (spec §8 line 931);
+    #: every business field — including the schedule triple and all three times —
+    #: is semantic.
+    SEMANTIC_EXCLUDE: ClassVar[frozenset[str]] = frozenset({"intent_id", "created_at"})
+
+    @model_validator(mode="after")
+    def _verify(self) -> "TargetPortfolioIntent":
+        # the SAME closed long-only book matrix a proposal must pass (an intent can
+        # never be laxer than a proposal — band check included).
+        _verify_portfolio_matrix(self.positions, self.cash_weight)
+        # the ruled time model's stored half: cutoff <= decision_as_of is enforced
+        # at staging (the cutoff instant is not carried here); the envelope pins the
+        # remaining orderings.
+        if not (self.decision_as_of < self.eligible_execution_at):
+            raise ValueError(
+                "decision_as_of must be strictly before eligible_execution_at "
+                f"(got {self.decision_as_of.isoformat()} >= "
+                f"{self.eligible_execution_at.isoformat()})"
+            )
+        if not (self.scheduled_for <= self.eligible_execution_at):
+            raise ValueError(
+                "scheduled_for must be <= eligible_execution_at "
+                f"(got {self.scheduled_for.isoformat()} > "
+                f"{self.eligible_execution_at.isoformat()})"
+            )
+        if self.valid_until is not None and not (
+            self.eligible_execution_at <= self.valid_until
+        ):
+            raise ValueError(
+                "valid_until must be >= eligible_execution_at "
+                f"(got {self.valid_until.isoformat()} < "
+                f"{self.eligible_execution_at.isoformat()})"
+            )
+        return self
+
+
+#: the canonical ``name@version`` key a proposal-bearing artifact must declare —
+#: derived from the proposal contract itself so it can never drift from the model.
+_PROPOSAL_SCHEMA_KEY: str = (
+    f"{PortfolioTargetProposal.__name__}@"
+    f"{PortfolioTargetProposal.model_fields['schema_version'].default}"
+)
+
+
+def wrap_proposal_as_intent(
+    *,
+    proposal_artifact: "Artifact",
+    source_decision_artifact_id: NonEmptyStr,
+    request: "OrchestrationRequest",
+    schedule_registry: DecisionScheduleRegistry,
+    calendar: ImmutableTradingCalendar,
+    session_date: IsoDateStr,
+    decision_as_of: UtcDateTime,
+    target_version: PositiveInt,
+    intent_id: NonEmptyStr,
+    clock: "AuthoritativeClock",
+    valid_until: UtcDateTime | None = None,
+) -> TargetPortfolioIntent:
+    """Stage a sealed :class:`PortfolioTargetProposal` artifact into a runtime-only
+    :class:`TargetPortfolioIntent` — the **sole** intent constructor path.
+
+    Closed order (each step a :class:`ShadowEnvelopeError` refusal with distinct
+    reason text, producing no intent object):
+
+    ① the artifact's ``payload_schema_ref`` must be ``PortfolioTargetProposal@1``
+       and its payload must re-validate as a :class:`PortfolioTargetProposal`;
+    ② ``request.decision_schedule_ref`` must be present and
+       :meth:`DecisionScheduleRegistry.resolve` it (the full id/version/digest
+       triple — a stale digest is refused, so no schedule is silently swapped);
+    ③ ``scheduled_for`` / ``eligible_execution_at`` are COMPUTED from the resolved
+       schedule + calendar (never caller-supplied); ``session_date`` must be a
+       decision point;
+    ④ the ruled ``cutoff <= decision_as_of`` is enforced (the cutoff is not stored
+       on the envelope; Phase 9 replay consumes the stored ordering);
+    ⑤ the envelope is assembled entirely from these runtime arguments — the
+       proposal's book (positions / cash / rationale / confidence) copied
+       **verbatim** (``entry_tranches`` included), the proposal artifact identity,
+       the resolved schedule triple, and ``created_at`` read from ``clock``.
+    """
+    # ① payload contract: exact schema key + a genuine re-validation of the payload.
+    schema_key = proposal_artifact.payload_schema_ref.key
+    if schema_key != _PROPOSAL_SCHEMA_KEY:
+        raise ShadowEnvelopeError(
+            f"proposal_artifact.payload_schema_ref {schema_key!r} is not the "
+            f"required {_PROPOSAL_SCHEMA_KEY!r}"
+        )
+    try:
+        proposal = PortfolioTargetProposal.model_validate(proposal_artifact.payload)
+    except ValidationError as exc:
+        raise ShadowEnvelopeError(
+            f"proposal_artifact payload does not re-validate as "
+            f"{_PROPOSAL_SCHEMA_KEY}: {exc}"
+        ) from exc
+
+    # ② the request must bind a registered schedule (triple-verified resolve).
+    ref = request.decision_schedule_ref
+    if ref is None:
+        raise ShadowEnvelopeError(
+            "any request producing a shadow intent must bind a registered decision "
+            "schedule (request.decision_schedule_ref is absent)"
+        )
+    try:
+        schedule = schedule_registry.resolve(ref)
+    except (UnknownScheduleError, ScheduleConflictError) as exc:
+        raise ShadowEnvelopeError(
+            f"request.decision_schedule_ref does not resolve to a registered "
+            f"schedule: {exc}"
+        ) from exc
+
+    # ③ compute the cadence instants (never caller-supplied); a non-decision-point
+    #    session_date is a distinct envelope refusal.
+    if not is_decision_point(schedule, session_date=session_date, calendar=calendar):
+        raise ShadowEnvelopeError(
+            f"session_date {session_date} is not a decision point for schedule "
+            f"{schedule.id}@{schedule.version}"
+        )
+    scheduled_for = compute_scheduled_for(
+        schedule, session_date=session_date, calendar=calendar
+    )
+    eligible_execution_at = compute_eligible_execution_at(
+        schedule, scheduled_for=scheduled_for, calendar=calendar
+    )
+
+    # ④ the ruled ordering cutoff <= decision_as_of (cutoff = upstream data/entry
+    #    freeze; decision_as_of = the decision instant).
+    cutoff_at = compute_cutoff_at(schedule, session_date=session_date)
+    if not (cutoff_at <= decision_as_of):
+        raise ShadowEnvelopeError(
+            f"decision_as_of {decision_as_of.isoformat()} is before the schedule "
+            f"cutoff {cutoff_at.isoformat()} (the ruled ordering is "
+            "cutoff <= decision_as_of)"
+        )
+
+    # ⑤ assemble entirely from runtime arguments; the book is copied verbatim.
+    return TargetPortfolioIntent(
+        intent_id=intent_id,
+        target_version=target_version,
+        proposal_artifact_id=proposal_artifact.artifact_id,
+        proposal_digest=proposal_artifact.content_digest,
+        source_decision_artifact_id=source_decision_artifact_id,
+        decision_schedule_id=schedule.id,
+        decision_schedule_version=schedule.version,
+        decision_schedule_digest=schedule.content_digest,
+        scheduled_for=scheduled_for,
+        decision_as_of=decision_as_of,
+        eligible_execution_at=eligible_execution_at,
+        valid_until=valid_until,
+        positions=proposal.positions,
+        cash_weight=proposal.cash_weight,
+        rationale=proposal.rationale,
+        confidence=proposal.confidence,
+        created_at=clock_now(clock),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Idempotency key families (pure; domain-tagged content digests)               #
+# --------------------------------------------------------------------------- #
+# Each family digests a domain-tagged mapping via Phase 1 :func:`content_digest`.
+# Datetimes are passed as their aware-UTC values and rendered by the house
+# canonicalizer as the ``sha256+cjson-v1`` canonical UTC string
+# (``YYYY-MM-DDTHH:MM:SS.ffffffZ``) — no format is invented here. The distinct
+# ``domain`` tag per family makes a cross-family key collision structurally
+# impossible (an apply key can never equal an order id can never equal a fill id).
+
+#: apply-key family domain tag: a target portfolio is applied at most once per
+#: ``(intent_id, scheduled_for, target_version)``.
+SHADOW_APPLY_KEY_DOMAIN: str = "shadow-apply-key-v1"
+
+
+def target_apply_key(intent: TargetPortfolioIntent) -> DigestHex:
+    """The idempotent apply key of ``intent`` — over exactly
+    ``{domain, intent_id, scheduled_for, target_version}``.
+
+    Apply identity is *operational*: keyed on the runtime ``intent_id`` (not the
+    semantic content), so two intents with identical books but distinct ids apply
+    separately, while re-deriving the key from the same intent is deterministic
+    and survives a JSON round-trip.
+    """
+    return content_digest(
+        {
+            "domain": SHADOW_APPLY_KEY_DOMAIN,
+            "intent_id": intent.intent_id,
+            "scheduled_for": intent.scheduled_for,
+            "target_version": intent.target_version,
+        }
+    )
+
+
+#: the closed order-kind vocabulary of the shadow order-id family.
+ShadowOrderKind = Literal[
+    "target_buy", "target_sell", "stop_loss", "take_profit", "max_hold_exit"
+]
+
+#: order-id family domain tag.
+SHADOW_ORDER_ID_DOMAIN: str = "shadow-order-id-v1"
+
+
+def shadow_order_id(
+    *,
+    apply_key: DigestHex,
+    symbol: Symbol,
+    order_kind: ShadowOrderKind,
+    trigger_bar: NonEmptyStr,
+    ordinal: NonNegativeInt,
+) -> DigestHex:
+    """The idempotent order id — over exactly ``{domain, target_apply_key,
+    symbol (Symbol.dotted), order_kind, trigger_bar, ordinal}``.
+
+    Derives from the owning ``target_apply_key`` so every order retains its
+    causation up to the applied target; ``symbol`` enters as its ``dotted`` string
+    form.
+    """
+    return content_digest(
+        {
+            "domain": SHADOW_ORDER_ID_DOMAIN,
+            "target_apply_key": apply_key,
+            "symbol": symbol.dotted,
+            "order_kind": order_kind,
+            "trigger_bar": trigger_bar,
+            "ordinal": ordinal,
+        }
+    )
+
+
+#: fill-id family domain tag.
+SHADOW_FILL_ID_DOMAIN: str = "shadow-fill-id-v1"
+
+
+def shadow_fill_id(*, order_id: DigestHex, fill_seq: PositiveInt) -> DigestHex:
+    """The idempotent fill id — over exactly ``{domain, order_id, fill_seq}``.
+
+    Derives from the owning ``order_id`` so every fill retains its causation up to
+    the order that produced it.
+    """
+    return content_digest(
+        {
+            "domain": SHADOW_FILL_ID_DOMAIN,
+            "order_id": order_id,
+            "fill_seq": fill_seq,
+        }
+    )
