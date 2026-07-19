@@ -1,0 +1,50 @@
+{
+  "schema_version": "1",
+  "preset_id": "main.research_baseline",
+  "version": "1",
+  "phase": "main",
+  "description": "观澜 · 研究基线预案 — the reviewed static fallback plan the runtime materializes when the dynamic Planner yields no admissible candidate. It mirrors the Phase-2 reviewed pilot triad text.sentiment -> dec.research_mgr -> dec.pm (all final workers, every dependency BLOCK), so the advisory PortfolioDecision at the sink requires a completed ResearchPlan and both upstream SentimentReport reads. Static-profile-admissible: no gates, no debate, no condition refs, one attempt per node.",
+  "nodes": [
+    {
+      "id": "sentiment",
+      "worker_id": "text.sentiment",
+      "writes_slot": "slot-sentiment"
+    },
+    {
+      "id": "research",
+      "worker_id": "dec.research_mgr",
+      "writes_slot": "slot-research",
+      "dependencies": [
+        {
+          "upstream_node_id": "sentiment",
+          "artifact_slot": "slot-sentiment",
+          "inject_as": "sentiment",
+          "policy": "block"
+        }
+      ]
+    },
+    {
+      "id": "pm",
+      "worker_id": "dec.pm",
+      "writes_slot": "slot-pm",
+      "dependencies": [
+        {
+          "upstream_node_id": "research",
+          "artifact_slot": "slot-research",
+          "inject_as": "research_plan",
+          "policy": "block"
+        },
+        {
+          "upstream_node_id": "sentiment",
+          "artifact_slot": "slot-sentiment",
+          "inject_as": "sentiment",
+          "policy": "block"
+        }
+      ]
+    }
+  ],
+  "sink_node_ids": ["pm"],
+  "budget_request_tokens": 2000000,
+  "budget_request_llm_invocations": 3,
+  "max_concurrency": 3
+}
