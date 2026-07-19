@@ -103,6 +103,21 @@ __all__ = [
     # Task 7 - gap-filling exit management + corporate-action ledger
     "CorporateActionApplication",
     "apply_corporate_actions",
+    # Task 8 - stage-1 compatibility mirror of the frontend runBacktest profile
+    "COMPATIBILITY_PROFILE_ID",
+    "COMPAT_TRADE_STRUCTURE_TOL",
+    "COMPAT_PRICE_REL_TOL",
+    "COMPAT_RETURN_ABS_TOL",
+    "COMPAT_EQUITY_REL_TOL",
+    "COMPAT_METRIC_REL_TOL",
+    "CompatSignal",
+    "CompatClock",
+    "CompatTrade",
+    "CompatibilityRunResult",
+    "CompatibilityProfileError",
+    "compat_metrics",
+    "run_compatibility_mirror",
+    "map_intents_to_compat_signals",
 ]
 
 #: the closed skip-reason vocabulary a :class:`ShadowOrderSkip` may carry. A reason
@@ -1551,3 +1566,435 @@ def _clock_identity(clock) -> str:
     if cid is not None:
         return str(cid)
     return f"{type(clock).__module__}.{type(clock).__qualname__}"
+
+
+# =========================================================================== #
+# Task 8 · stage-① compatibility mirror of the frontend ``runBacktest`` profile #
+# =========================================================================== #
+# A BYTE-FAITHFUL Python replication of ``ui/seats/luozi-data.jsx::runBacktest``
+# (luozi-data.jsx:1508-1563) + ``metricsOf`` (461-482), consumed as a *profile*
+# (spec decision 15), NOT as a callable — the fa Broker is structurally unable to
+# run it (T+1 / 涨跌停 / 手数 checks are not config-gated: grounding gotcha 2), so
+# the mirror is a SEPARATE compatibility fill path, never a route through the Broker.
+#
+# Frozen profile facts (each verified against the on-disk jsx line cited):
+#   * zero cost — no commission / stamp / transfer / slippage anywhere;
+#   * single symbol; the side is already derived (the ``useHybrid`` branch only
+#     chooses WHICH frontend field supplies buy/sell/watch — the mirror consumes
+#     the derived side);
+#   * same-bar-close fills — a buy/sell executes at ``+b.c`` of the signal bar
+#     (jsx:1548/1550), never a next-bar open;
+#   * fractional shares — ``shares = cash / px`` (jsx:1549), no lot rounding;
+#   * full-in / full-out — ``pos ∈ {0, 1}`` (a buy deploys all cash, a sell exits all);
+#   * no suspension / 涨跌停 / T+1 / 手数 / reject-ledger — none exist in the frontend;
+#   * clock exits fire intrabar at the EXACT trigger price (jsx:1539/1540): a stop at
+#     ``entry*(1-stop)`` on ``low <= that``, a take at ``entry*(1+take)`` on
+#     ``high >= that``;
+#   * same-bar stop+take double touch resolves STOP-FIRST (jsx:1535/1539-1540 elif
+#     ordering — for a long the worst case IS the stop);
+#   * max-hold exits at the bar CLOSE with reason ``'到期'`` (jsx:1541);
+#   * exits are checked only when ``i > entryIdx`` (jsx:1536) — a position never
+#     exits on its own entry bar;
+#   * pre-entry equity is flat ``1.0`` (jsx:1528) and is EXCLUDED from ``eqSeg`` (the
+#     metric segment starts at ``firstSig``, jsx:1561);
+#   * an all-watch run (no buy/sell) returns ``None`` (jsx:1526/1562 — honest no-curve);
+#   * an open position at the end yields a synthetic ``openEnd`` trade at the last
+#     close (jsx:1557).
+#
+# DIVERGENCE FLAG (frontend reality vs the CompatTrade contract): the frontend
+# ``openEnd`` trade carries NO ``reason`` field (jsx:1559). The ``CompatTrade.reason``
+# Literal is REQUIRED, so an openEnd trade is encoded as ``reason='到期'`` +
+# ``open_end=True``; it is unambiguously distinct from a real max-hold exit (which is
+# ``reason='到期'`` + ``open_end=False`` and closes the position, so no openEnd
+# follows it). Reason/openEnd both participate in the structural (tol 0) compare.
+#
+# METRICS ONE WAY (grounding gotcha 10): :func:`compat_metrics` reimplements the
+# ``metricsOf`` conventions verbatim; BOTH the fixture expectation and the mirror
+# output flow through it. The engine ``compute_metrics`` is NEVER compared against
+# ``metricsOf``.
+
+#: the stage-① profile identity. The frontend switch-over date is explicitly deferred
+#: to Phase 9's decommission gates; stage ① only freezes the profile + tolerances.
+COMPATIBILITY_PROFILE_ID: str = "luozi-runbacktest-compat-v1"
+
+#: declared numeric tolerances (spec §13 line 1013 leaves these to this plan). Every
+#: mirror assertion is gated by exactly these — trade structure is exact (count,
+#: entry/exit bar indices, firstSig, reason strings, openEnd flags), prices/equity are
+#: IEEE-754-double relative, per-trade returns absolute, metrics relative (the
+#: annualization stack accumulates more floating ops).
+COMPAT_TRADE_STRUCTURE_TOL: int = 0
+COMPAT_PRICE_REL_TOL: float = 1e-9
+COMPAT_RETURN_ABS_TOL: float = 1e-9
+COMPAT_EQUITY_REL_TOL: float = 1e-9
+COMPAT_METRIC_REL_TOL: float = 1e-6
+
+#: the A-share market timezone the profile derives an eligible session date under. It
+#: matches the runner's ``schedule.timezone`` (this profile is A-share-only); the
+#: mapper takes the schedule explicitly, so the tz is read from it, never hard-coded.
+_COMPAT_EXIT_PRIORITY: str = "stop_first"
+
+
+class CompatSignal(ContractModel):
+    """One already-derived signal at a bar index (internal carrier).
+
+    ``side`` is the frontend-derived direction — the ``useHybrid`` branch that maps
+    ``hybrid_direction`` / ``d.side`` to buy/sell/watch has already run; the mirror
+    consumes the result. A ``watch`` signal enters neither ``sideByIdx`` nor
+    ``firstSig`` (it is a non-position, exactly as the jsx drops it).
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    idx: NonNegativeInt
+    side: Literal["buy", "sell", "watch"]
+
+
+class CompatClock(ContractModel):
+    """The frontend execution clock (止损 / 止盈 / 最长持有), frozen (internal carrier).
+
+    Fractions (``stop_loss`` / ``take_profit``) and a bar count (``max_hold``), mapped
+    from the frontend ``clock.stopLoss`` / ``clock.takeProfit`` / ``clock.maxHold``
+    (luozi-data.jsx:1512-1514). Each is Optional; the mirror re-applies the jsx guards
+    (a value must be finite and ``> 0`` to arm).
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    stop_loss: FiniteFloat | None = None
+    take_profit: FiniteFloat | None = None
+    max_hold: PositiveInt | None = None
+
+
+class CompatTrade(ContractModel):
+    """One closed (or synthetic openEnd) trade (internal carrier).
+
+    ``reason`` is a closed Literal; ``'信号'`` = an explicit sell exit, ``'止损'`` /
+    ``'止盈'`` = an intrabar clock touch, ``'到期'`` = a max-hold close OR (with
+    ``open_end=True``) the synthetic end-of-data close of a still-open position.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    entry: FiniteFloat
+    exit: FiniteFloat
+    ret: FiniteFloat
+    in_idx: NonNegativeInt
+    out_idx: NonNegativeInt
+    reason: Literal["止损", "止盈", "到期", "信号"]
+    open_end: bool = False
+
+
+class CompatibilityRunResult(ContractModel):
+    """The mirror's whole result (internal carrier) — ``eqSeg`` only, never raw ``eq``.
+
+    ``eq_seg`` is the post-entry equity segment (``eq.slice(firstSig)``, jsx:1561): the
+    metric segment, never the raw pre-entry-padded ``eq`` (gotcha 9 — comparisons align
+    on this). ``metrics`` is the one-way :func:`compat_metrics` recompute.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    eq_seg: tuple[FiniteFloat, ...]
+    trades: tuple[CompatTrade, ...]
+    first_sig: NonNegativeInt
+    metrics: dict[str, float]
+
+
+class CompatibilityProfileError(ShadowContractError):
+    """An intent (or schedule) is out of the frontend ``runBacktest`` profile.
+
+    Raised by :func:`map_intents_to_compat_signals` when a portfolio shape the
+    frontend cannot express is presented (two positions, a fractional target weight, a
+    non-``stop_first`` schedule, a non-empty ``entry_tranches``). The profile NEVER
+    coerces or widens: it neither invents a false gate on behavior the frontend lacks
+    nor silently reinterprets an out-of-profile schedule.
+    """
+
+
+def _compat_num(value: object) -> float:
+    """``+x`` of the frontend: coerce to float, mapping ``None``/uncoercible to NaN.
+
+    Mirrors JS ``+b.field`` — a missing high/low/close becomes ``NaN`` so the jsx
+    guards (``lo > 0`` / ``hi > 0`` / ``px > 0``) fail and the bar is skipped rather
+    than fabricating a fill (JS ``NaN > 0`` is ``false``, matched by Python).
+    """
+    if value is None:
+        return float("nan")
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def run_compatibility_mirror(
+    signals: tuple[CompatSignal, ...],
+    bars: tuple[Mapping[str, float], ...],
+    clock: CompatClock | None = None,
+) -> CompatibilityRunResult | None:
+    """Byte-faithful Python replication of ``runBacktest`` fill semantics (jsx:1508-1563).
+
+    The ``useHybrid`` branch only changes which frontend field supplies the side, so
+    the mirror consumes the already-derived :class:`CompatSignal` side. Returns
+    ``None`` for an all-watch run (honest no-curve) or a ``< 2``-point ``eqSeg``.
+
+    Same operation ORDER as the jsx (so both sides compute identical IEEE-754 doubles):
+    ``shares = cash / px`` (jsx:1549), ``eq = shares * px`` (jsx:1555), a stop at
+    ``entry*(1 - stop)`` before a take at ``entry*(1 + take)`` (stop-first, jsx:1539-40),
+    a per-trade return ``exit / entry - 1``. No lot rounding, no cost, no Broker.
+    """
+    if not bars or not signals:
+        return None
+    # jsx:1512-1514 — a clock field arms only when finite and > 0 (max_hold already int).
+    stop = take = None
+    max_hold: int | None = None
+    if clock is not None:
+        if clock.stop_loss is not None and math.isfinite(clock.stop_loss) and clock.stop_loss > 0:
+            stop = float(clock.stop_loss)
+        if clock.take_profit is not None and math.isfinite(clock.take_profit) and clock.take_profit > 0:
+            take = float(clock.take_profit)
+        if clock.max_hold is not None and clock.max_hold > 0:
+            max_hold = int(clock.max_hold)
+
+    # jsx:1515-1526 — build sideByIdx (a later same-idx buy/sell overwrites), firstSig.
+    side_by_idx: dict[int, str] = {}
+    first_sig = math.inf
+    for s in signals:
+        if s.side in ("buy", "sell"):
+            side_by_idx[s.idx] = s.side
+            first_sig = min(first_sig, s.idx)
+    if first_sig == math.inf:  # all-watch → no curve
+        return None
+    first_sig = int(first_sig)
+
+    n = len(bars)
+    eq: list[float] = [1.0] * n           # jsx:1528 — pre-entry equity flat 1.0
+    trades: list[CompatTrade] = []
+    pos = 0
+    entry_px = 0.0
+    entry_idx = -1
+    cash = 1.0
+    shares = 0.0
+    for i in range(first_sig, n):
+        b = bars[i]
+        px = _compat_num(b.get("c"))
+        sig = side_by_idx.get(i)
+        # jsx:1536 — held position: check the clock BEFORE any same-bar re-entry, and
+        # only when i > entryIdx (never on the entry bar itself).
+        if pos == 1 and i > entry_idx:
+            lo = _compat_num(b.get("l"))
+            hi = _compat_num(b.get("h"))
+            exit_px: float | None = None
+            why: str | None = None
+            if stop is not None and lo > 0 and lo <= entry_px * (1 - stop):
+                exit_px = entry_px * (1 - stop)
+                why = "止损"
+            elif take is not None and hi > 0 and hi >= entry_px * (1 + take):
+                exit_px = entry_px * (1 + take)
+                why = "止盈"
+            elif max_hold is not None and (i - entry_idx) >= max_hold and px > 0:
+                exit_px = px
+                why = "到期"
+            if exit_px is not None:
+                cash = shares * exit_px
+                trades.append(
+                    CompatTrade(
+                        entry=entry_px, exit=exit_px, ret=exit_px / entry_px - 1,
+                        in_idx=entry_idx, out_idx=i, reason=why,  # type: ignore[arg-type]
+                    )
+                )
+                pos = 0
+                shares = 0.0
+        # jsx:1548/1550 — same-bar-close fill (buy deploys all cash; sell exits all).
+        if sig == "buy" and pos == 0 and px > 0:
+            pos = 1
+            entry_px = px
+            entry_idx = i
+            shares = cash / px
+            cash = 0.0
+        elif sig == "sell" and pos == 1 and px > 0:
+            cash = shares * px
+            trades.append(
+                CompatTrade(
+                    entry=entry_px, exit=px, ret=px / entry_px - 1,
+                    in_idx=entry_idx, out_idx=i, reason="信号",
+                )
+            )
+            pos = 0
+            shares = 0.0
+        # jsx:1555 — mark equity (NO rounding; the pre-entry pad stays 1.0).
+        if px > 0:
+            eq[i] = shares * px if pos == 1 else cash
+        else:
+            eq[i] = eq[i - 1] if i > 0 else 1.0
+
+    # jsx:1557 — an open position at the end → a synthetic openEnd trade at the last
+    # close. The frontend carries no reason; encode 到期 + open_end (see DIVERGENCE FLAG).
+    if pos == 1 and entry_idx >= 0:
+        last = _compat_num(bars[n - 1].get("c"))
+        trades.append(
+            CompatTrade(
+                entry=entry_px, exit=last, ret=last / entry_px - 1,
+                in_idx=entry_idx, out_idx=n - 1, reason="到期", open_end=True,
+            )
+        )
+
+    eq_seg = eq[first_sig:]  # jsx:1561 — metrics only on the post-entry segment
+    if len(eq_seg) < 2:      # jsx:1562 — < 2 points is no curve
+        return None
+    return CompatibilityRunResult(
+        eq_seg=tuple(eq_seg),
+        trades=tuple(trades),
+        first_sig=first_sig,
+        metrics=compat_metrics(tuple(eq_seg), tuple(trades), "day"),
+    )
+
+
+def compat_metrics(
+    eq: tuple[float, ...], trades: tuple[CompatTrade, ...], freq: str = "day"
+) -> dict[str, float]:
+    """The frontend ``metricsOf`` conventions, reimplemented ONE way (jsx:461-482).
+
+    ``perDay = 48 if freq=='5min' else 1``; sharpe annualized by ``sqrt(252*perDay)``
+    with the ``sd`` floor ``|| 1e-9``; ``years = (n/perDay)*1.4/365``; annual
+    ``eq[-1]**(1/max(0.3, years)) - 1``. Both the fixture expectation and the mirror
+    output flow through this; the engine ``compute_metrics`` is never compared here.
+    All values are returned as ``float`` (``nTrades`` / ``nWin`` included).
+    """
+    per_day = 48 if freq == "5min" else 1
+    n = len(eq)
+    rets = [eq[k] / eq[k - 1] - 1 for k in range(1, n)]
+    denom = len(rets) or 1
+    mean = sum(rets) / denom
+    sd = math.sqrt(sum((b - mean) ** 2 for b in rets) / denom) or 1e-9  # jsx `|| 1e-9`
+    sharpe = (mean / sd) * math.sqrt(252 * per_day)
+    total = eq[n - 1] - 1
+    years = ((n / per_day) * 1.4) / 365
+    annual = math.pow(eq[n - 1], 1 / max(0.3, years)) - 1
+    peak = eq[0]
+    mdd = 0.0
+    for v in eq:
+        peak = max(peak, v)
+        mdd = min(mdd, v / peak - 1)
+    wins = [t for t in trades if t.ret > 0]
+    losses = [t for t in trades if t.ret <= 0]
+    win_rate = (len(wins) / len(trades)) if trades else 0.0
+    avg_win = (sum(t.ret for t in wins) / len(wins)) if wins else 0.0
+    avg_loss = abs(sum(t.ret for t in losses) / len(losses)) if losses else 0.0
+    pl_ratio = (avg_win / avg_loss) if avg_loss else (99.0 if avg_win else 0.0)
+    return {
+        "total": float(total),
+        "annual": float(annual),
+        "sharpe": float(sharpe),
+        "mdd": float(mdd),
+        "winRate": float(win_rate),
+        "plRatio": float(pl_ratio),
+        "nTrades": float(len(trades)),
+        "nWin": float(len(wins)),
+    }
+
+
+def _has_compat_clock(pos: TargetPosition) -> bool:
+    """Whether a :class:`TargetPosition` carries ANY frontend clock parameter."""
+    return (
+        pos.stop_loss_pct is not None
+        or pos.take_profit_pct is not None
+        or pos.max_hold_bars is not None
+    )
+
+
+def map_intents_to_compat_signals(
+    intents: tuple[TargetPortfolioIntent, ...],
+    *,
+    bars: tuple[Mapping[str, float], ...],
+    calendar: ImmutableTradingCalendar,
+    schedule: DecisionSchedule,
+) -> tuple[tuple[CompatSignal, ...], CompatClock | None]:
+    """Map staged intents onto the frontend profile's ``(signals, clock)``.
+
+    An intent maps to the profile only when it is either **full-in** (exactly one
+    :class:`TargetPosition` with ``target_weight == 1.0`` → a ``buy`` at its eligible
+    bar) or **all-cash** (zero positions with ``cash_weight == 1.0`` → a ``sell``); the
+    entry clock fields come from that single position's ``stop_loss_pct`` /
+    ``take_profit_pct`` / ``max_hold_bars``. Any other shape — two positions, a
+    fractional target weight, a non-empty ``entry_tranches`` (Task 1b; the frontend
+    ``runBacktest`` has no tranche semantics) — raises :class:`CompatibilityProfileError`
+    rather than coercing or silently widening.
+
+    The eligible bar index is the position of the intent's ``eligible_execution_at``
+    session (derived in ``schedule.timezone``, identical to the runner) within the
+    calendar's ordered sessions; ``bars[i]`` is assumed positionally aligned with
+    calendar session ``i``. A signal whose eligible session is absent from the calendar
+    or beyond the provided bars raises :class:`CompatibilityProfileError` (an honest
+    can't-place, never a silent drop).
+
+    NOTE (signature): the brief's sketch omits ``schedule``, but the frontend hard-codes
+    stop-first and ``intrabar_exit_priority`` lives on :class:`DecisionSchedule`
+    (shadow.py) — a ``worst_case`` / ``take_profit_first`` schedule MUST raise rather
+    than be silently reinterpreted (reconciling grounding gotcha 1), so the schedule is
+    a required keyword. It also single-sources the timezone the eligible session is
+    derived under (matching the runner), removing any hard-coded market tz.
+    """
+    # the frontend hard-codes stop-first; a schedule declaring any other intrabar
+    # priority is out of profile (never silently reinterpreted).
+    if schedule.intrabar_exit_priority != _COMPAT_EXIT_PRIORITY:
+        raise CompatibilityProfileError(
+            f"the compatibility profile mirrors the frontend's hard-coded stop-first "
+            f"intrabar priority; schedule {schedule.id}@{schedule.version} declares "
+            f"{schedule.intrabar_exit_priority!r} (never silently reinterpreted)"
+        )
+    tz = ZoneInfo(schedule.timezone)
+    sessions = list(calendar.material.sessions)
+    n_bars = len(bars)
+
+    signals: list[CompatSignal] = []
+    clock: CompatClock | None = None
+    for intent in intents:
+        for p in intent.positions:
+            if p.entry_tranches:
+                raise CompatibilityProfileError(
+                    "entry_tranches (batched entry triggers) have no frontend "
+                    "runBacktest semantics; the compatibility profile never widens to "
+                    "accept them"
+                )
+        positions = intent.positions
+        buy_pos: TargetPosition | None = None
+        if len(positions) == 1 and positions[0].target_weight == 1.0:
+            side = "buy"
+            buy_pos = positions[0]
+        elif len(positions) == 0 and intent.cash_weight == 1.0:
+            side = "sell"
+        else:
+            raise CompatibilityProfileError(
+                "the compatibility profile accepts only a full-in single position "
+                "(target_weight == 1.0 → buy) or an all-cash exit (cash_weight == 1.0 → "
+                f"sell); intent {intent.intent_id} has {len(positions)} position(s) with "
+                f"cash_weight {intent.cash_weight!r} (the profile never coerces)"
+            )
+        iso = intent.eligible_execution_at.astimezone(tz).date().isoformat()
+        try:
+            idx = sessions.index(iso)
+        except ValueError:
+            raise CompatibilityProfileError(
+                f"eligible session {iso} (intent {intent.intent_id}) is not a session "
+                f"of calendar {calendar.calendar_id!r}"
+            ) from None
+        if idx >= n_bars:
+            raise CompatibilityProfileError(
+                f"eligible session {iso} maps to bar index {idx}, beyond the {n_bars} "
+                f"provided bars (intent {intent.intent_id})"
+            )
+        signals.append(CompatSignal(idx=idx, side=side))  # type: ignore[arg-type]
+        if buy_pos is not None and _has_compat_clock(buy_pos):
+            this_clock = CompatClock(
+                stop_loss=buy_pos.stop_loss_pct,
+                take_profit=buy_pos.take_profit_pct,
+                max_hold=buy_pos.max_hold_bars,
+            )
+            if clock is not None and clock != this_clock:
+                raise CompatibilityProfileError(
+                    "the compatibility profile is single-clock; two entry positions "
+                    "declare different execution clocks"
+                )
+            clock = this_clock
+
+    return tuple(signals), clock
