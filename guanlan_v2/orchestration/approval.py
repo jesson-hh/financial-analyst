@@ -403,6 +403,7 @@ class PlanApprovalCoordinator:
         clock: AuthoritativeClock,
         verifier: Any,
         console_emit: Callable[[str, dict], None] | None = None,
+        approvals_sink: "Callable[[PlanApproval], None] | None" = None,
         preset_registry: "PlanPresetRegistry | None" = None,
         catalog_digest: DigestHex | None = None,
         registry_digest: DigestHex | None = None,
@@ -412,6 +413,16 @@ class PlanApprovalCoordinator:
         self._clock = clock
         self._verifier = verifier
         self._console_emit = console_emit
+        # Task 8 (console carrier) additive seam. The coordinator constructs the ONE
+        # authoritative PlanApproval; the Phase-2 admission service (admission.py)
+        # never trusts a caller-carried authority — its ``record_approval`` LOADS the
+        # PlanApproval from its own service-owned ``_approvals`` store. This sink is
+        # the reviewed bridge that deposits the freshly-constructed, verified approval
+        # into that store *after* the durable decision row and *before* the
+        # record_approval call (see ``_record_terminal_decision``), so the loaded
+        # authority equals the durable decision. ``None`` (the Task 7/7b default) keeps
+        # the coordinator's behaviour byte-identical.
+        self._approvals_sink = approvals_sink
         # lease-issuance wiring (all optional; unwired -> honest issuance refusal,
         # mirroring the verifier=None fail-closed pattern). ``catalog_digest`` /
         # ``registry_digest`` are the CURRENT sealed chain digests a fresh lease must
@@ -574,6 +585,13 @@ class PlanApprovalCoordinator:
         self._append("decision", _to_payload(approval))
         self._decisions[key] = approval
         self._pending.pop(key, None)
+        # deposit the authoritative approval into the admission-owned store BEFORE
+        # record_approval loads it (Task 8 seam; a no-op when no sink is wired). This
+        # sits AFTER the durable decision row so persist-then-publish still holds:
+        # a crash between the row and the sink recovers via replay's idempotent
+        # record_approval resubmission (the sink is re-invoked on that path too).
+        if self._approvals_sink is not None:
+            self._approvals_sink(approval)
         event = self._ensure_event(approval)  # admission.record_approval
         return approval, event, True
 
@@ -890,6 +908,7 @@ class PlanApprovalCoordinator:
         clock: AuthoritativeClock,
         verifier: Any,
         console_emit: Callable[[str, dict], None] | None = None,
+        approvals_sink: "Callable[[PlanApproval], None] | None" = None,
         preset_registry: "PlanPresetRegistry | None" = None,
         catalog_digest: DigestHex | None = None,
         registry_digest: DigestHex | None = None,
@@ -911,9 +930,14 @@ class PlanApprovalCoordinator:
         """
         coord = cls(journal_path, admission=admission, clock=clock,
                     verifier=verifier, console_emit=console_emit,
-                    preset_registry=preset_registry, catalog_digest=catalog_digest,
-                    registry_digest=registry_digest)
+                    approvals_sink=approvals_sink, preset_registry=preset_registry,
+                    catalog_digest=catalog_digest, registry_digest=registry_digest)
         for key, approval in coord._decisions.items():
+            # re-deposit each folded approval into the admission store before its
+            # idempotent record_approval resubmission, so recovery heals even when the
+            # admission's own approvals store did not survive the restart.
+            if coord._approvals_sink is not None:
+                coord._approvals_sink(approval)
             coord._events[key] = coord._ensure_event(approval)
         return coord
 

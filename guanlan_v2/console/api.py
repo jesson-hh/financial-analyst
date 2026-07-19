@@ -13,7 +13,7 @@ import os
 import sys
 import uuid
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -407,8 +407,61 @@ def _build_review_snapshot(st, sid: str) -> str:
     return "以下是刚结束的一轮对话,请复盘并按纪律沉淀经验(无可沉淀就什么都不写):\n\n" + body
 
 
+# ── Plan 人审承载面(Phase 7 · 动态 Orchestrator Plan approval)──
+# 复用现有控制台事实库/SSE,不新建页面(spec §13 挂账 + UI 只填充不重建红线)。
+# 计划人审的镜像事件落一个 sid 固定的保留会话,与常规 cs_ 会话并列。
+_PLAN_APPROVALS_SID = "plan-approvals"
+
+
+def _ensure_reserved_session(st: ConsoleStore, sid: str, title: str) -> None:
+    """幂等物化一个 sid 固定的保留会话(ConsoleStore.create_session 只发随机 cs_ id,
+    计划人审的镜像 feed 需要一个稳定、众所周知的 sid)。只用 store 的公开属性
+    (sessions_dir)按 create_session 同一 meta schema 写盘——绝不改 store.py。
+    非 cs_ 的 sid 天然不被 delete_session 接受(_SID_RE 只放行 cs_),故不会被误删。"""
+    if st.get_meta(sid) is not None:
+        return
+    d = st.sessions_dir / sid
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "events.jsonl").touch()
+    now = datetime.now().isoformat(timespec="seconds")
+    meta = {"id": sid, "title": title, "created": now, "updated": now,
+            "status": "idle", "plan": [], "next_event_id": 1}
+    tmp = d / "meta.json.tmp"
+    tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(d / "meta.json")
+
+
+def _resolve_actor(actor: Any) -> Any:
+    """操作者凭证材料:值或 0 参可调用(生产由 Task 9 从 env 注入服务端运维凭证——
+    绝不取自请求体,镜像 Phase 3 AdminReviewVerifier『never a body field』纪律)。"""
+    return actor() if callable(actor) else actor
+
+
+def _parse_dt(v: Any) -> datetime:
+    """解析 ISO 时间串为 aware datetime(前端传 aware .isoformat();naive 补 UTC)。"""
+    dt = datetime.fromisoformat(str(v))
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 def build_console_router(store: Optional[ConsoleStore] = None,
-                         agent_factory=None) -> APIRouter:
+                         agent_factory=None,
+                         plan_approval_coordinator: Any = None,
+                         plan_approval_actor: Any = None,
+                         plan_admit: Any = None,
+                         plan_lease_context: Any = None) -> APIRouter:
+    """帷幄控制台路由。
+
+    Phase 7 加法(全部可选,默认 None → 与既有行为逐字不变):
+    * ``plan_approval_coordinator`` —— Task 7/7b 的 :class:`PlanApprovalCoordinator`
+      (自带 fail-closed verifier + admission + 耐久 journal)。为 None 时每个
+      plan-approval 端点返回诚实 503,绝不假成功空态。
+    * ``plan_approval_actor`` —— 操作者凭证材料(值或可调用),经协调器的
+      fail-closed verifier 校验(不通过 → 403);绝不取自请求体。
+    * ``plan_admit`` —— APPROVED 后的 freeze/admit 桥 ``(PlanApproval, RunEvent) -> 任意``
+      (Task 9 接线为调用 ``approval.admit_after_approval``);为 None 则诚实 admitted:false。
+    * ``plan_lease_context`` —— ``preset_id -> {preset_record_digest, catalog_digest,
+      registry_digest}``,为签发租约提供当前密封链 digest(协调器仍做 drift 拒绝)。
+    """
     router = APIRouter(prefix="/console", tags=["console"])
     st = store or ConsoleStore()
     factory = agent_factory or _default_agent_factory
@@ -439,6 +492,62 @@ def build_console_router(store: Optional[ConsoleStore] = None,
             except Exception:
                 pass
         return ev
+
+    # ── Plan 人审承载面接线(仅当协调器注入时;deps 惰性 import) ──
+    _pa = None  # orchestration.approval 模块句柄(未接线时端点走诚实 503,不触达)
+    if plan_approval_coordinator is not None:
+        from guanlan_v2.orchestration import approval as _pa
+        from guanlan_v2.orchestration.enums import ApprovalDecision as _ApprovalDecision
+        from guanlan_v2.orchestration.digest import content_digest as _content_digest
+
+        _ensure_reserved_session(st, _PLAN_APPROVALS_SID, "计划人审 ✦")
+        _coord = plan_approval_coordinator
+
+        def _plan_mirror(name: str, payload: Optional[Dict[str, Any]]) -> None:
+            """把协调器的一条 console 事件镜像进保留会话,并按 Task 8 要求整形 payload
+            (request/resolved 从协调器只读方法回补 node_count/rendered_md/reason);
+            best-effort,在耐久决策下游,绝不因镜像失败回滚决策。"""
+            p = payload or {}
+            try:
+                if name == "plan_approval_request":
+                    card = None
+                    for c in _coord.list_pending():
+                        if (c.request_id == p.get("request_id")
+                                and c.candidate_plan_digest == p.get("candidate_plan_digest")):
+                            card = c
+                            break
+                    _emit(_PLAN_APPROVALS_SID, "plan_approval_request",
+                          request_id=p.get("request_id"),
+                          candidate_plan_digest=p.get("candidate_plan_digest"),
+                          goal=(card.goal if card else p.get("goal")),
+                          source=(card.source.value if card else p.get("source")),
+                          node_count=(card.node_count if card else None),
+                          rendered_md=(card.rendered_md if card else None))
+                elif name == "plan_approval_resolved":
+                    dec = _coord.load_decision(p.get("request_id"), p.get("candidate_plan_digest"))
+                    _emit(_PLAN_APPROVALS_SID, "plan_approval_resolved",
+                          request_id=p.get("request_id"),
+                          candidate_plan_digest=p.get("candidate_plan_digest"),
+                          decision=p.get("decision"), actor_id=p.get("actor_id"),
+                          reason=(dec.reason if dec is not None else None))
+                else:
+                    # 租约生命周期事件(issued/admitted/revoked)逐字转发——
+                    # 租约自动放行永远显形,绝不静默。
+                    _emit(_PLAN_APPROVALS_SID, name, **p)
+            except Exception:  # noqa: BLE001 — 镜像是耐久决策的下游,失败不影响真值
+                pass
+
+        # 控制台是计划人审的承载面:由本路由安装保留会话镜像桥。协调器的内部 _emit
+        # 经此桥落到保留会话(register_pending 由 planner 触发也能被镜像)。Task 9 构造
+        # 协调器时应传 console_emit=None,让承载面在此安装唯一的镜像桥。
+        _coord._console_emit = _plan_mirror
+
+    def _plan_unwired() -> JSONResponse:
+        return JSONResponse({"ok": False, "reason": "plan approval surface not wired"},
+                            status_code=503)
+
+    def _perr(status: int, reason: str, **extra: Any) -> JSONResponse:
+        return JSONResponse({"ok": False, "reason": reason, **extra}, status_code=status)
 
     # ── 会话 CRUD ──
     @router.get("/sessions")
@@ -836,6 +945,184 @@ def build_console_router(store: Optional[ConsoleStore] = None,
         fut.set_result(choice)
         _emit(sid_, "confirm_resolved", turn_id=turn_id, choice=choice)
         return {"ok": True}
+
+    # ── 计划人审端点(加法;未接线一律诚实 503,绝不假成功) ──
+    # 红线:一切协调器访问走 asyncio.to_thread(journal I/O 不上 9999 事件循环);
+    # 既有确认门 confirm_request/confirm_resolved 语义完全不复用(那是 turn 域、无 digest)。
+
+    @router.get("/plan/approvals")
+    async def plan_approvals_list():
+        if _pa is None:
+            return _plan_unwired()
+        items = await asyncio.to_thread(
+            lambda: [c.model_dump(mode="json") for c in _coord.list_pending()])
+        return {"ok": True, "items": items}
+
+    @router.get("/plan/approvals/status")
+    async def plan_approval_status(request_id: str = "", candidate_plan_digest: str = ""):
+        if _pa is None:
+            return _plan_unwired()
+
+        def _load():
+            dec = _coord.load_decision(request_id, candidate_plan_digest)
+            if dec is not None:
+                return ("decided", dec)
+            for c in _coord.list_pending():
+                if (c.request_id == request_id
+                        and c.candidate_plan_digest == candidate_plan_digest):
+                    return ("pending", None)
+            return ("unknown", None)
+
+        kind, dec = await asyncio.to_thread(_load)
+        if kind == "decided":
+            return {"ok": True, "decision": dec.decision.value, "actor_id": dec.actor_id,
+                    "decided_at": dec.decided_at.isoformat(), "reason": dec.reason}
+        if kind == "pending":
+            return {"ok": True, "decision": None, "pending": True}
+        return _perr(404, "未登记的候选对:request_id/candidate 既无 pending 卡也无决策")
+
+    @router.post("/plan/approvals/decide")
+    async def plan_approval_decide(body: dict = Body(default={})):
+        if _pa is None:
+            return _plan_unwired()
+        request_id = str(body.get("request_id") or "").strip()
+        candidate = str(body.get("candidate_plan_digest") or "").strip()
+        dec_raw = str(body.get("decision") or "").strip().lower()
+        reason = str(body.get("reason") or "").strip() or None
+        if not request_id or not candidate:
+            return _perr(400, "request_id 与 candidate_plan_digest 必填")
+        try:
+            decision = _ApprovalDecision(dec_raw)
+        except ValueError:
+            return _perr(400, f"非法 decision: {dec_raw!r}(须 approved/rejected)")
+        actor = _resolve_actor(plan_approval_actor)
+        idem = "console-decide:" + _content_digest([request_id, candidate, decision.value])
+
+        try:
+            approval, event = await asyncio.to_thread(
+                _coord.decide, request_id=request_id, candidate_plan_digest=candidate,
+                decision=decision, actor=actor, reason=reason, idempotency_key=idem)
+        except _pa.ApprovalAuthorityError:
+            return _perr(503, "plan approval 未接线:coordinator 无 verifier(fail-closed)")
+        except _pa.UnknownPendingCandidate:
+            return _perr(404, "无此 pending 候选(request_id/candidate 未登记或已决策)")
+        except _pa.ApprovalDecisionConflict:
+            stored = await asyncio.to_thread(_coord.load_decision, request_id, candidate)
+            return _perr(409, "该候选已有终局决策,不能二次改判",
+                         decision=(stored.decision.value if stored is not None else None),
+                         actor_id=(stored.actor_id if stored is not None else None))
+        except Exception as e:  # noqa: BLE001
+            # verifier 拒绝是唯一在任何落盘前抛出的失败(见 approval.decide 顺序):此时
+            # load_decision 为 None → 403(操作者未验证,什么都没落);若已有决策行 → 决策
+            # 已耐久但下游 admission 失败(record_approval)→ 诚实 502,可 replay 修复。
+            stored = await asyncio.to_thread(_coord.load_decision, request_id, candidate)
+            if stored is None:
+                return _perr(403, f"操作者凭证未通过校验(actor 未验证): {type(e).__name__}")
+            return _perr(502, f"决策已落盘但 admission 失败(可 replay 修复): {type(e).__name__}: {e}",
+                         decision=stored.decision.value)
+
+        admitted = False
+        admit_wired = plan_admit is not None
+        if approval.decision is _ApprovalDecision.APPROVED and admit_wired:
+            try:
+                result = await asyncio.to_thread(plan_admit, approval, event)
+                admitted = result is not None
+            except Exception as e:  # noqa: BLE001 — 决策已批准且落盘,admit 失败诚实 502
+                return _perr(502, f"决策已批准且落盘,但 admit 失败(可 replay): {type(e).__name__}: {e}",
+                             decision=approval.decision.value, admitted=False)
+        return {"ok": True, "decision": approval.decision.value,
+                "candidate_plan_digest": candidate, "admitted": admitted,
+                "admit_wired": admit_wired}
+
+    @router.get("/plan/approvals/leases")
+    async def plan_leases_list():
+        if _pa is None:
+            return _plan_unwired()
+        now = datetime.now(timezone.utc)
+        views = await asyncio.to_thread(lambda: _coord.list_leases(now=now))
+        leases = [{
+            "lease_id": v.lease.lease_id, "preset_id": v.lease.preset_id,
+            "purpose": v.lease.purpose, "status": v.status,
+            "terminal_reason": v.terminal_reason,
+            "admissions_used": v.admissions_used,
+            "admissions_remaining": v.admissions_remaining,
+            "max_admissions": v.lease.max_admissions,
+            "budget_used": v.budget_used, "budget_remaining": v.budget_remaining,
+            "budget_cap_llm_invocations": v.lease.budget_cap_llm_invocations,
+            "valid_from": v.lease.valid_from.isoformat(),
+            "valid_until": v.lease.valid_until.isoformat(),
+            "issued_by": v.lease.issued_by, "reason": v.lease.reason,
+        } for v in views]
+        return {"ok": True, "leases": leases}
+
+    @router.post("/plan/approvals/lease")
+    async def plan_lease_issue(body: dict = Body(default={})):
+        if _pa is None:
+            return _plan_unwired()
+        if plan_lease_context is None:
+            return _perr(503, "lease 签发未接线(plan_lease_context 未提供)")
+        preset_id = str(body.get("preset_id") or "").strip()
+        if not preset_id:
+            return _perr(400, "preset_id 必填")
+        reason = str(body.get("reason") or "").strip()
+        if not reason:
+            return _perr(400, "reason 必填")
+        purpose = str(body.get("purpose") or reason).strip()
+        try:
+            valid_until = _parse_dt(body.get("valid_until"))
+            valid_from = (_parse_dt(body.get("valid_from")) if body.get("valid_from")
+                          else datetime.now(timezone.utc))
+            max_adm = int(body.get("max_admissions"))
+            budget_cap = int(body.get("budget_cap"))
+        except Exception:  # noqa: BLE001
+            return _perr(400, "valid_until/valid_from/max_admissions/budget_cap 格式非法")
+        if max_adm < 1 or budget_cap < 1:
+            return _perr(400, "max_admissions 与 budget_cap 须为正整数")
+        actor = _resolve_actor(plan_approval_actor)
+        try:
+            ctx = plan_lease_context(preset_id) or {}
+        except Exception as e:  # noqa: BLE001
+            return _perr(502, f"解析 preset 链 digest 失败: {type(e).__name__}: {e}")
+
+        try:
+            lease = await asyncio.to_thread(
+                _coord.issue_lease, purpose=purpose, preset_id=preset_id,
+                preset_record_digest=ctx.get("preset_record_digest"),
+                catalog_digest=ctx.get("catalog_digest"),
+                registry_digest=ctx.get("registry_digest"),
+                valid_from=valid_from, valid_until=valid_until,
+                max_admissions=max_adm, budget_cap_llm_invocations=budget_cap,
+                actor=actor, reason=reason)
+        except _pa.ApprovalAuthorityError:
+            return _perr(503, "lease 签发未接线:coordinator 无 verifier(fail-closed)")
+        except _pa.ApprovalLeaseError as e:
+            return _perr(409, f"lease 签发被拒(preset 未知/链漂移/未接线): {e}")
+        except Exception as e:  # noqa: BLE001 — verifier 拒绝(签发前抛,未落盘)→ 403
+            return _perr(403, f"操作者凭证未通过校验(actor 未验证): {type(e).__name__}")
+        return {"ok": True, "lease": lease.model_dump(mode="json")}
+
+    @router.post("/plan/approvals/lease/revoke")
+    async def plan_lease_revoke(body: dict = Body(default={})):
+        if _pa is None:
+            return _plan_unwired()
+        lease_id = str(body.get("lease_id") or "").strip()
+        reason = str(body.get("reason") or "").strip()
+        if not lease_id or not reason:
+            return _perr(400, "lease_id 与 reason 必填")
+        actor = _resolve_actor(plan_approval_actor)
+        idem = "console-revoke:" + _content_digest([lease_id, reason])
+        try:
+            rev = await asyncio.to_thread(
+                _coord.revoke_lease, lease_id, actor=actor, reason=reason,
+                idempotency_key=idem)
+        except _pa.ApprovalAuthorityError:
+            return _perr(503, "lease 撤销未接线:coordinator 无 verifier(fail-closed)")
+        except _pa.ApprovalLeaseError:
+            return _perr(404, f"未知 lease: {lease_id}")
+        except Exception as e:  # noqa: BLE001 — verifier 拒绝 → 403
+            return _perr(403, f"操作者凭证未通过校验(actor 未验证): {type(e).__name__}")
+        return {"ok": True, "lease_id": rev.lease_id, "actor_id": rev.actor_id,
+                "reason": rev.reason, "revoked_at": rev.revoked_at.isoformat()}
 
     # ── SSE ──
     @router.get("/stream/{sid}")
