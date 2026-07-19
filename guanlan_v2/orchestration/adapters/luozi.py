@@ -62,6 +62,7 @@ from guanlan_v2.orchestration.shadow import (
     CorporateActionEvent,
     DecisionSchedule,
     IsoDateStr,
+    SHADOW_DETERMINISTIC_APPLY_KEY_DOMAIN,
     SHADOW_MATCHING_ENGINE_VERSION,
     ShadowContractError,
     ShadowFillRecord,
@@ -76,6 +77,7 @@ from guanlan_v2.orchestration.shadow import (
     _verify_portfolio_matrix,
     compute_eligible_execution_at,
     compute_scheduled_for,
+    deterministic_apply_key_parts,
     shadow_fill_id,
     shadow_order_id,
     target_apply_key,
@@ -552,13 +554,6 @@ def _engine_api() -> SimpleNamespace:
 # --------------------------------------------------------------------------- #
 # Deterministic dual-curve lane — carrier + its own apply-key family            #
 # --------------------------------------------------------------------------- #
-#: the deterministic apply-key family domain tag. DISTINCT from the intent family's
-#: ``SHADOW_APPLY_KEY_DOMAIN`` ("shadow-apply-key-v1"), so a deterministic apply key
-#: can never collide with an intent apply key (invariant 8 — key-family disjointness
-#: is structural via the domain tag, not a runtime guard).
-SHADOW_DETERMINISTIC_APPLY_KEY_DOMAIN: str = "shadow-deterministic-apply-key-v1"
-
-
 class DeterministicTargetSet(ContractModel):
     """A rule-computed target book for the deterministic dual-curve replay lane.
 
@@ -608,20 +603,22 @@ class DeterministicTargetSet(ContractModel):
 
 
 def deterministic_apply_key(target_set: DeterministicTargetSet) -> DigestHex:
-    """The deterministic lane's idempotent apply key — over exactly
+    """The deterministic lane's idempotent apply key for ``target_set`` — over exactly
     ``{domain, rule_id, point_ordinal, target_version}``.
 
-    Its own apply-key family: the distinct :data:`SHADOW_DETERMINISTIC_APPLY_KEY_DOMAIN`
-    tag makes a collision with the intent family (``target_apply_key``) structurally
-    impossible. This is the runner's DEDUP key for ``run_targets``.
+    A thin wrapper that unpacks the target set into the shared, single-sourced
+    :func:`shadow.deterministic_apply_key_parts` component builder (the domain tag +
+    the key family live in ``shadow.py``, sibling of the three intent-family
+    builders). Its distinct :data:`SHADOW_DETERMINISTIC_APPLY_KEY_DOMAIN` tag makes a
+    collision with the intent family (``target_apply_key``) structurally impossible.
+    This is BOTH the runner's DEDUP key AND the value the apply record stores natively
+    as its ``target_apply_key`` in ``run_targets`` (the record recomputes it through
+    the same builder), so the two lanes' stored keys are disjoint by construction.
     """
-    return content_digest(
-        {
-            "domain": SHADOW_DETERMINISTIC_APPLY_KEY_DOMAIN,
-            "rule_id": target_set.rule_id,
-            "point_ordinal": target_set.point_ordinal,
-            "target_version": target_set.target_version,
-        }
+    return deterministic_apply_key_parts(
+        rule_id=target_set.rule_id,
+        point_ordinal=target_set.point_ordinal,
+        target_version=target_set.target_version,
     )
 
 
@@ -680,8 +677,13 @@ class _ApplicationUnit:
     Both lanes project their input into these units so the loop, diff, matching,
     records and result assembly are byte-for-byte shared (invariant 7 by
     construction). ``dedup_key`` is the lane's apply-key family value (the applied-
-    key set); ``record_apply_key`` is the intent-family key the Task-4
-    ``ShadowTargetApplyRecord`` / ``ShadowOrderRecord`` self-validate against.
+    key set); ``record_apply_key`` is the lane-NATIVE apply key the Task-4
+    ``ShadowTargetApplyRecord`` / ``ShadowOrderRecord`` self-validate against — the
+    intent-family key for the intent lane, the deterministic-family key for the
+    deterministic lane (so in BOTH lanes ``record_apply_key == dedup_key``).
+    ``rule_id`` / ``point_ordinal`` are the deterministic lane's business identity
+    (``None`` for the intent lane) — stamped onto the apply record so it recomputes
+    its key through the deterministic builder.
     """
 
     dedup_key: str
@@ -694,6 +696,8 @@ class _ApplicationUnit:
     eligible_session: str
     positions: tuple
     cash_weight: float
+    rule_id: str | None = None
+    point_ordinal: int | None = None
 
 
 class ShadowBacktestRunner:
@@ -816,9 +820,12 @@ class ShadowBacktestRunner:
         size, calendar id and clock identity as the ``run`` lane) else a
         :class:`ShadowContractError` is raised — the two lanes can never diverge on
         matching engine, cost model, calendar or clock. Records reuse
-        ``ShadowTargetApplyRecord`` (deduped on :func:`deterministic_apply_key`), the
-        result's ``intent_content_digests`` stays ``()``, and no record carries an
-        LLM origin.
+        ``ShadowTargetApplyRecord`` and carry the deterministic apply-key family
+        NATIVELY — each apply record stores :func:`deterministic_apply_key` (the same
+        value it dedups on) as its ``target_apply_key`` plus the ``rule_id`` /
+        ``point_ordinal`` it recomputes from, so its stored key is disjoint from every
+        intent key by domain tag (invariant 8). The result's ``intent_content_digests``
+        stays ``()``, and no record carries an LLM origin.
         """
         self._require_matching_run_config(run_config, calendar, clock)
         self._reject_tranches(ts.positions for ts in target_sets)
@@ -868,21 +875,18 @@ class ShadowBacktestRunner:
         )
         session = eligible_at.astimezone(self._tz).date().isoformat()
         intent_id = f"{ts.rule_id}#{ts.point_ordinal}"
-        # The Task-4 ShadowTargetApplyRecord/ShadowOrderRecord validators recompute
-        # their key via the INTENT-family builder over (intent_id, scheduled_for,
-        # target_version); the deterministic apply key lives in its own domain and
-        # can never satisfy that self-check, so the persisted record key is the
-        # intent-family key over the deterministic audit tuple, while the DEDUP key
-        # is deterministic_apply_key(ts) (invariant 8 — distinct-domain dedup sets).
-        record_key = target_apply_key(
-            SimpleNamespace(
-                intent_id=intent_id, scheduled_for=scheduled_for, target_version=ts.target_version
-            )
-        )
+        # The apply record carries the deterministic apply-key family NATIVELY: the
+        # Task-4 ShadowTargetApplyRecord dual-family validator recomputes the key via
+        # deterministic_apply_key_parts (rule_id/point_ordinal present) — not the
+        # intent-family builder — so the stored key IS deterministic_apply_key(ts) and
+        # is disjoint from every intent key by domain tag (invariant 8). dedup key and
+        # stored record key are one and the same here; the intent_id keeps the pinned
+        # "{rule_id}#{point_ordinal}" audit form.
+        apply_key = deterministic_apply_key(ts)
         causation = _deterministic_causation_digest(ts)
         return _ApplicationUnit(
-            dedup_key=deterministic_apply_key(ts),
-            record_apply_key=record_key,
+            dedup_key=apply_key,
+            record_apply_key=apply_key,
             dedup_semantic=causation,
             intent_content_digest=causation,
             intent_id=intent_id,
@@ -891,6 +895,8 @@ class ShadowBacktestRunner:
             eligible_session=session,
             positions=tuple(ts.positions),
             cash_weight=ts.cash_weight,
+            rule_id=ts.rule_id,
+            point_ordinal=ts.point_ordinal,
         )
 
     # ------------------------------------------------------------------ #
@@ -1010,6 +1016,8 @@ class ShadowBacktestRunner:
                     trigger_bar=u.eligible_session,
                     order_ids=(),
                     applied=False,
+                    rule_id=u.rule_id,
+                    point_ordinal=u.point_ordinal,
                 )
             )
             warnings.append(
@@ -1115,6 +1123,8 @@ class ShadowBacktestRunner:
             trigger_bar=T,
             order_ids=tuple(order_ids),
             applied=True,
+            rule_id=u.rule_id,
+            point_ordinal=u.point_ordinal,
         )
 
     @staticmethod

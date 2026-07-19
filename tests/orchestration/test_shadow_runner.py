@@ -519,6 +519,14 @@ def test_deterministic_apply_key_domain_and_disjointness():
     ts = _target_set([_pos(0.5)], 0.5)
     dk = deterministic_apply_key(ts)
     assert SHADOW_DETERMINISTIC_APPLY_KEY_DOMAIN == "shadow-deterministic-apply-key-v1"
+    # key-value STABILITY: the luozi wrapper is byte-identical to the single-sourced
+    # shadow.py component builder (same four mapping keys, same values) — the FLAG-1
+    # fix moved the domain + builder into shadow.py WITHOUT changing any key value.
+    assert dk == shadow.deterministic_apply_key_parts(
+        rule_id=ts.rule_id, point_ordinal=ts.point_ordinal, target_version=ts.target_version
+    )
+    # the domain constant is single-sourced in shadow.py (luozi re-exports the import).
+    assert SHADOW_DETERMINISTIC_APPLY_KEY_DOMAIN is shadow.SHADOW_DETERMINISTIC_APPLY_KEY_DOMAIN
     # adversarial: an intent whose apply-key components mirror the target set's
     intent = _intent([_pos(0.5)], 0.5, intent_id="rule.equal#0", target_version=1)
     assert dk != target_apply_key(intent)
@@ -557,19 +565,36 @@ def test_dual_lane_same_bar_equivalence():
     assert econ(res_i) == econ(res_d)
     # only the apply-key family / provenance differ
     assert res_i.applies[0].target_apply_key != res_d.applies[0].target_apply_key
+    # the deterministic record now stores its OWN domain-tagged key natively (FLAG-1
+    # reconciliation) — not a synthetic intent-family key over "{rule_id}#{ordinal}".
+    assert res_d.applies[0].target_apply_key == deterministic_apply_key(ts)
+    assert res_d.applies[0].rule_id == "rule.equal" and res_d.applies[0].point_ordinal == 0
+    # the intent lane carries neither deterministic component.
+    assert res_i.applies[0].rule_id is None and res_i.applies[0].point_ordinal is None
 
 
 def test_run_targets_dedup_disjoint_from_intent_lane_keys():
-    r = _runner(_alpha_frames())
+    r_i = _runner(_alpha_frames())
+    r_d = _runner(_alpha_frames())
     ts = _target_set([_pos(0.5)], 0.5)
-    res = r.run_targets((ts,), run_config=_run_config(),
-                        calendar=_calendar(), clock=r.clock)
-    det_key = deterministic_apply_key(ts)
-    # no record's applied key equals the deterministic dedup key's family, and the
-    # deterministic dedup key never collides with any intent-family apply key.
     intent = _intent([_pos(0.5)], 0.5)
+    res_d = r_d.run_targets((ts,), run_config=_run_config(),
+                            calendar=_calendar(), clock=r_d.clock)
+    res_i = r_i.run((intent,), start="2026-07-20", end="2026-07-24")
+
+    det_key = deterministic_apply_key(ts)
+    # the deterministic dedup key never collides with any intent-family apply key.
     assert det_key != target_apply_key(intent)
-    assert res is not None
+    # the deterministic record STORES its own key natively (not a synthetic intent key).
+    assert res_d.applies[0].target_apply_key == det_key
+    # invariant 8 strengthened: the two lanes' STORED apply-key sets are disjoint, not
+    # merely their dedup sets — a deterministic record can never carry an intent key.
+    det_stored = {a.target_apply_key for a in res_d.applies}
+    intent_stored = {a.target_apply_key for a in res_i.applies}
+    assert det_stored.isdisjoint(intent_stored)
+    # ... and each lane's orders/fills chain to keys of its own family only.
+    assert {o.target_apply_key for o in res_d.orders} <= det_stored
+    assert {o.target_apply_key for o in res_i.orders} <= intent_stored
 
 
 def test_run_targets_config_digest_mismatch_refused_on_cost_model():

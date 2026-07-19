@@ -202,8 +202,12 @@ def test_apply_record_field_surface():
     assert set(shadow.ShadowTargetApplyRecord.model_fields) == {
         "schema_version", "target_apply_key", "intent_content_digest", "intent_id",
         "scheduled_for", "target_version", "trigger_bar", "order_ids", "applied",
+        "rule_id", "point_ordinal",
     }
     assert shadow.ShadowTargetApplyRecord.model_fields["schema_version"].default == "1"
+    # the dual-family components default to None (an intent-lane record carries neither)
+    assert shadow.ShadowTargetApplyRecord.model_fields["rule_id"].default is None
+    assert shadow.ShadowTargetApplyRecord.model_fields["point_ordinal"].default is None
 
 
 def test_order_record_field_surface():
@@ -307,6 +311,131 @@ def test_apply_key_tampering_a_component_fails(tamper):
 def test_apply_key_forged_digest_fails():
     with pytest.raises(ValidationError):
         _apply(target_apply_key="0" * 64)
+
+
+# --------------------------------------------------------------------------- #
+# FLAG-1 reconciliation — the dual apply-key family (deterministic lane)        #
+# --------------------------------------------------------------------------- #
+# The deterministic dual-curve lane's apply record carries its OWN domain-tagged
+# key family (rule_id / point_ordinal present ⇒ target_apply_key recomputes via
+# ``deterministic_apply_key_parts``, NOT the intent-family builder), so a stored
+# deterministic key can never collide with an intent key. An intent-lane record
+# leaves both components None and self-validates EXACTLY as before.
+_DET_RULE = "rule.equal"
+_DET_ORD = 0
+_DET_VER = 1
+
+
+def _det_key(rule_id: str = _DET_RULE, point_ordinal: int = _DET_ORD,
+             target_version: int = _DET_VER) -> str:
+    return shadow.deterministic_apply_key_parts(
+        rule_id=rule_id, point_ordinal=point_ordinal, target_version=target_version
+    )
+
+
+def _det_apply(**over):
+    base = dict(
+        target_apply_key=_det_key(),
+        intent_content_digest="c" * 64,
+        intent_id=f"{_DET_RULE}#{_DET_ORD}",   # the pinned audit form
+        scheduled_for=_SCHED_UTC,
+        target_version=_DET_VER,
+        trigger_bar="2026-07-21",
+        order_ids=(),
+        applied=True,
+        rule_id=_DET_RULE,
+        point_ordinal=_DET_ORD,
+    )
+    base.update(over)
+    return shadow.ShadowTargetApplyRecord(**base)
+
+
+def test_deterministic_apply_key_parts_domain_and_disjoint_from_intent_family():
+    dk = shadow.deterministic_apply_key_parts(
+        rule_id="rule.equal", point_ordinal=0, target_version=1
+    )
+    assert len(dk) == 64
+    assert shadow.SHADOW_DETERMINISTIC_APPLY_KEY_DOMAIN == "shadow-deterministic-apply-key-v1"
+    # identical logical components, distinct domain tag → keys can never collide
+    ik = shadow.target_apply_key(
+        SimpleNamespace(intent_id="rule.equal#0", scheduled_for=_SCHED_UTC, target_version=1)
+    )
+    assert dk != ik
+
+
+def test_deterministic_apply_record_accepts_native_key():
+    a = _det_apply()
+    assert a.rule_id == _DET_RULE and a.point_ordinal == _DET_ORD
+    assert a.target_apply_key == _det_key()
+
+
+def test_deterministic_apply_record_forged_key_fails():
+    with pytest.raises(ValidationError):
+        _det_apply(target_apply_key="0" * 64)
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        {"rule_id": "rule.other"},        # key stays for rule.equal → recompute disagrees
+        {"point_ordinal": 1},             # 1 != 0 → deterministic recompute disagrees
+        {"target_version": 2},
+    ],
+)
+def test_deterministic_apply_key_tampering_a_component_fails(tamper):
+    with pytest.raises(ValidationError):
+        _det_apply(**tamper)  # target_apply_key stays _det_key() for (rule.equal, 0, 1)
+
+
+def test_deterministic_apply_record_rule_id_without_point_ordinal_fails():
+    # a deterministic apply record carries BOTH components or neither.
+    with pytest.raises(ValidationError):
+        _det_apply(point_ordinal=None)
+
+
+def test_deterministic_apply_record_intent_id_must_match_pinned_format():
+    # a valid deterministic key, but the audit intent_id is NOT "{rule_id}#{point_ordinal}"
+    with pytest.raises(ValidationError):
+        _det_apply(intent_id="rule.equal#0-tampered")
+
+
+def test_intent_family_record_with_stray_point_ordinal_fails():
+    # rule_id None but point_ordinal set (note: 0 is falsy — the guard is `is not None`).
+    with pytest.raises(ValidationError):
+        _apply(point_ordinal=0)
+
+
+def test_intent_family_record_with_a_deterministic_key_fails():
+    # cross-family: an intent-lane record (rule_id None) whose key is a deterministic
+    # key → the intent-family recompute disagrees → construction fails.
+    with pytest.raises(ValidationError):
+        _apply(target_apply_key=_det_key())
+
+
+def test_deterministic_family_record_with_an_intent_key_fails():
+    # cross-family (mirror): a deterministic record whose key is the intent-family key.
+    with pytest.raises(ValidationError):
+        _det_apply(target_apply_key=_K)
+
+
+def test_intent_family_none_none_record_behaves_as_before():
+    a = _apply()  # rule_id / point_ordinal default None
+    assert a.rule_id is None and a.point_ordinal is None
+    assert a.target_apply_key == _K
+
+
+def test_deterministic_components_are_semantic_not_excluded():
+    # rule_id / point_ordinal are deterministic BUSINESS identity (not runtime-random
+    # like intent_id), so they participate in the semantic digest (NOT SEMANTIC_EXCLUDE).
+    excl = shadow.ShadowTargetApplyRecord.SEMANTIC_EXCLUDE
+    assert "rule_id" not in excl and "point_ordinal" not in excl
+    a = _det_apply()
+    b = _det_apply(
+        rule_id="rule.other",
+        intent_id="rule.other#0",
+        target_apply_key=_det_key(rule_id="rule.other"),
+    )
+    assert a.semantic_digest() != b.semantic_digest()
 
 
 # --------------------------------------------------------------------------- #

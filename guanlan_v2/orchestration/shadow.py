@@ -110,6 +110,8 @@ __all__ = [
     "shadow_order_id",
     "SHADOW_FILL_ID_DOMAIN",
     "shadow_fill_id",
+    "SHADOW_DETERMINISTIC_APPLY_KEY_DOMAIN",
+    "deterministic_apply_key_parts",
     # Task 4 — shadow run-record contracts + corporate-action event
     "ShadowTargetApplyRecord",
     "ShadowOrderRecord",
@@ -1095,6 +1097,41 @@ def shadow_fill_id(*, order_id: DigestHex, fill_seq: PositiveInt) -> DigestHex:
     )
 
 
+#: the deterministic dual-curve lane's apply-key family domain tag. DISTINCT from
+#: the intent family's ``SHADOW_APPLY_KEY_DOMAIN`` ("shadow-apply-key-v1"), so a
+#: deterministic apply key can NEVER collide with an intent apply key — the two lanes'
+#: applied-key sets are structurally disjoint via the domain tag, not a runtime guard.
+#: Single-sourced here (a sibling of the three intent-family builders above); the
+#: ``adapters.luozi`` deterministic lane imports this constant and wraps
+#: :func:`deterministic_apply_key_parts` over a ``DeterministicTargetSet``.
+SHADOW_DETERMINISTIC_APPLY_KEY_DOMAIN: str = "shadow-deterministic-apply-key-v1"
+
+
+def deterministic_apply_key_parts(
+    *, rule_id: NonEmptyStr, point_ordinal: NonNegativeInt, target_version: PositiveInt
+) -> DigestHex:
+    """The deterministic lane's idempotent apply key from its raw components — over
+    exactly ``{domain, rule_id, point_ordinal, target_version}``.
+
+    The component-level builder of the deterministic apply-key family: rule-computed
+    business identity (a rule book at a point ordinal, at a target version), keyed in
+    its own :data:`SHADOW_DETERMINISTIC_APPLY_KEY_DOMAIN` so it is disjoint from the
+    intent family. This is byte-identical to ``adapters.luozi.deterministic_apply_key``
+    over a matching ``DeterministicTargetSet`` (same four mapping keys, same values) —
+    the adapter's function is a thin wrapper that unpacks the target set into these
+    parts. ``ShadowTargetApplyRecord`` recomputes through this builder when a record
+    carries the deterministic family (``rule_id`` present).
+    """
+    return content_digest(
+        {
+            "domain": SHADOW_DETERMINISTIC_APPLY_KEY_DOMAIN,
+            "rule_id": rule_id,
+            "point_ordinal": point_ordinal,
+            "target_version": target_version,
+        }
+    )
+
+
 # =========================================================================== #
 # Task 4 · shadow run-record contracts + corporate-action event                 #
 # =========================================================================== #
@@ -1115,18 +1152,34 @@ def shadow_fill_id(*, order_id: DigestHex, fill_seq: PositiveInt) -> DigestHex:
 
 
 class ShadowTargetApplyRecord(DigestModel):
-    """One application of a staged target portfolio at an execution bar.
+    """One application of a staged target book at an execution bar (either lane).
 
-    Records that an intent's target book became effective (or honestly did NOT —
-    ``applied is False`` when the eligible bar was never tradable inside the run
-    window, which is a truthful non-application, not an error). ``target_apply_key``
-    is self-consistent: it must re-derive from ``(intent_id, scheduled_for,
-    target_version)`` through the exact :func:`target_apply_key` builder, so a
-    forged key fails construction. The raw ``intent_id`` is audit-only causation
-    (:data:`SEMANTIC_EXCLUDE`) — its effect already flows into the semantic digest
-    through the operational ``target_apply_key`` — while ``intent_content_digest``
-    carries the *semantic* identity of the applied intent so a replay can bind the
-    record back to the exact target book it applied.
+    Records that a target book became effective (or honestly did NOT — ``applied is
+    False`` when the eligible bar was never tradable inside the run window, which is
+    a truthful non-application, not an error). One record shape serves both consumer
+    lanes, distinguished by whether it carries the deterministic components:
+
+    * **Intent lane** (``rule_id is None`` ⇒ ``point_ordinal`` also None): the
+      ``target_apply_key`` re-derives from ``(intent_id, scheduled_for,
+      target_version)`` through the intent-family :func:`target_apply_key` builder.
+    * **Deterministic dual-curve lane** (``rule_id`` present ⇒ ``point_ordinal``
+      also present): the ``target_apply_key`` re-derives from ``(rule_id,
+      point_ordinal, target_version)`` through :func:`deterministic_apply_key_parts`
+      — the record stores its OWN domain-tagged key natively, so a deterministic key
+      can never equal an intent key (invariant 8, structural). The audit ``intent_id``
+      stays pinned to the ``"{rule_id}#{point_ordinal}"`` form.
+
+    Either way a forged / cross-family key fails construction. The raw ``intent_id``
+    is audit-only causation (:data:`SEMANTIC_EXCLUDE`) — for the intent lane its
+    effect already flows into the semantic digest through the operational
+    ``target_apply_key``; for the deterministic lane it is the derived audit label of
+    ``(rule_id, point_ordinal)``. ``rule_id`` / ``point_ordinal`` are deterministic
+    BUSINESS identity (rule-computed, not runtime-random like ``intent_id``), so they
+    are SEMANTIC — they participate in the digest (an intent-lane record projects
+    them as ``null``, a coherent "not the deterministic lane" marker). ``intent_content_digest``
+    carries the *semantic* identity of the applied book (the intent's semantic digest
+    or the rule book's causation digest) so a replay can bind the record back to the
+    exact target book it applied.
     """
 
     schema_version: Literal["1"] = "1"
@@ -1138,22 +1191,59 @@ class ShadowTargetApplyRecord(DigestModel):
     trigger_bar: NonEmptyStr
     order_ids: tuple[DigestHex, ...]
     applied: bool
+    rule_id: NonEmptyStr | None = None
+    point_ordinal: NonNegativeInt | None = None
 
     SEMANTIC_EXCLUDE: ClassVar[frozenset[str]] = frozenset({"intent_id"})
 
     @model_validator(mode="after")
     def _verify_apply_key(self) -> "ShadowTargetApplyRecord":
-        recomputed = target_apply_key(
-            SimpleNamespace(
-                intent_id=self.intent_id,
-                scheduled_for=self.scheduled_for,
-                target_version=self.target_version,
+        # dual-family matrix (use `is None`, never truthiness — point_ordinal 0 is valid).
+        if self.rule_id is None:
+            # intent lane: it carries neither deterministic component, and the key
+            # recomputes via the intent-family builder (EXACTLY the Task-4 behavior).
+            if self.point_ordinal is not None:
+                raise ValueError(
+                    "point_ordinal is set without rule_id — an apply record carries "
+                    "both deterministic components (deterministic lane) or neither "
+                    "(intent lane)"
+                )
+            recomputed = target_apply_key(
+                SimpleNamespace(
+                    intent_id=self.intent_id,
+                    scheduled_for=self.scheduled_for,
+                    target_version=self.target_version,
+                )
             )
+            if self.target_apply_key != recomputed:
+                raise ValueError(
+                    "target_apply_key is not self-consistent with (intent_id, "
+                    "scheduled_for, target_version) — a forged apply key is rejected"
+                )
+            return self
+        # deterministic lane: both components required, key recomputes via the
+        # deterministic builder, and intent_id stays the pinned audit form.
+        if self.point_ordinal is None:
+            raise ValueError(
+                "rule_id is set without point_ordinal — a deterministic apply record "
+                "carries both components or neither"
+            )
+        recomputed = deterministic_apply_key_parts(
+            rule_id=self.rule_id,
+            point_ordinal=self.point_ordinal,
+            target_version=self.target_version,
         )
         if self.target_apply_key != recomputed:
             raise ValueError(
-                "target_apply_key is not self-consistent with (intent_id, "
-                "scheduled_for, target_version) — a forged apply key is rejected"
+                "target_apply_key is not self-consistent with (rule_id, "
+                "point_ordinal, target_version) — a forged deterministic apply key "
+                "is rejected"
+            )
+        expected_intent_id = f"{self.rule_id}#{self.point_ordinal}"
+        if self.intent_id != expected_intent_id:
+            raise ValueError(
+                "intent_id must be the pinned '{rule_id}#{point_ordinal}' audit form "
+                "for a deterministic apply record"
             )
         return self
 
