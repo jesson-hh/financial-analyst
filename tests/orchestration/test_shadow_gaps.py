@@ -486,6 +486,74 @@ def test_nav_continuous_across_bonus_ex_date_no_phantom_drawdown():
     # NAV is continuous across the ex-date: mkt_value(qty*price) is preserved by the
     # ex-bonus (qty up 1.3x, price down to 1/1.3) and no cash moves.
     assert nav["2026-07-23"] == pytest.approx(nav["2026-07-22"], rel=1e-9)
+    # phantom-order guard (Task-7 review, finding 2): _pos(0.5) carries NO exit
+    # parameter (no stop / take-profit / max-hold), so exit_state is never
+    # populated for this position and step 4 (_manage_exits) never reaches it —
+    # zero orders of ANY exit kind, corporate action or not.
+    exit_kinds = {"stop_loss", "take_profit", "max_hold_exit"}
+    assert [o for o in res.orders if o.order_kind in exit_kinds] == []
+
+
+# =========================================================================== #
+# invariant 6 — a share event rescales the LIVE take-profit level              #
+#               (Task-7 review, finding 1)                                    #
+# =========================================================================== #
+# entry fill 10.4 (identical mechanics to _TP: pc 10.0, half-pct ceiling 10.5,
+# clipped to the entry bar's high 10.4). tp_pct 0.05 -> un-adjusted tp_px 10.92
+# (the level a runner that FAILED to rescale entry_price would still use).
+#
+# A 10-送-10 stock_bonus (shares_ratio=1.0 -> multiplier 1+ratio = 2.0 exactly)
+# on ex_date 07-23 doubles qty for ANY integer qty_before with zero floor
+# rounding ambiguity, so qty_before/qty_after is exactly 0.5 regardless of the
+# actual sized quantity: entry_price rescales 10.4 -> 5.2, and the ADJUSTED
+# tp_px is 5.2 * 1.05 = 5.46 (well under half the un-adjusted 10.92).
+#
+# 07-23 is priced in the post-bonus regime (~half the pre-bonus level, the
+# same halving the fixture's own qty undergoes) so its high (5.50) clears the
+# ADJUSTED level while sitting nowhere near the un-adjusted one — the bar
+# shape that discriminates "rescale applied" from "rescale skipped": with the
+# bug, bar.high (5.50) never reaches 10.92 and no take-profit fires at all.
+_ENTRY_PRICE = 10.4
+_TP_PCT = 0.05
+_UNADJUSTED_TP_PX = _ENTRY_PRICE * (1.0 + _TP_PCT)                  # 10.92
+_BONUS_MULT = 2.0                                                    # 1 + shares_ratio(1.0)
+_ADJUSTED_TP_PX = (_ENTRY_PRICE / _BONUS_MULT) * (1.0 + _TP_PCT)     # 5.46
+
+_TP_BONUS = [
+    (_SEED_DAY, 9.9, 10.0, 9.7, 10.0, 1e6),
+    ("2026-07-20", 10.0, 10.4, 9.8, 10.0, 1e6),   # prev_close 10.0 for 07-21
+    ("2026-07-21", 10.0, 10.4, 9.9, 10.2, 1e6),   # entry fill 10.4; high < un-adj tp
+    ("2026-07-22", 10.2, 10.5, 10.1, 10.3, 1e6),  # pre-bonus; high 10.5 still < 10.92
+    ("2026-07-23", 5.15, 5.50, 5.05, 5.20, 1e6),  # ex-date 10-送-10; high 5.50 >= adj tp
+    ("2026-07-24", 5.20, 5.60, 5.10, 5.30, 1e6),
+]
+
+
+def test_take_profit_fires_at_ex_adjusted_level_after_share_bonus():
+    # sanity on the fixture's own arithmetic before running anything: the touch
+    # bar's high must clear the adjusted level and stay far under the
+    # un-adjusted one (the property this whole test exists to pin).
+    assert _ADJUSTED_TP_PX < 5.50 < _UNADJUSTED_TP_PX
+
+    ev = _ca("stock_bonus", shares_ratio=1.0, ex_date="2026-07-23")
+    res = _runner(_frames(_TP_BONUS), corporate_actions=(ev,)).run(
+        (_intent([_pos(0.5, take_profit_pct=_TP_PCT)], 0.5),),
+        start="2026-07-20", end="2026-07-24",
+    )
+    # no early (pre-bonus, un-adjusted-level) fire on 07-22.
+    assert _exit_kind_on(res, "2026-07-22") == []
+    tp_fills = [f for f in res.fills if f.reason == "take_profit"]
+    assert len(tp_fills) == 1
+    assert tp_fills[0].trade_date == "2026-07-23"
+    assert tp_fills[0].side == "sell"
+    # the fill lands at the ADJUSTED level (small sell-side slippage), never
+    # anywhere close to the un-adjusted 10.92 the un-rescaled code would have
+    # required this bar to reach (it never does — high tops out at 5.50).
+    assert tp_fills[0].price == pytest.approx(_ADJUSTED_TP_PX, rel=2e-3)
+    assert tp_fills[0].price < _UNADJUSTED_TP_PX / 2.0
+    tp_orders = [o for o in res.orders if o.order_kind == "take_profit"]
+    assert len(tp_orders) == 1
+    assert tp_orders[0].limit_price == pytest.approx(_ADJUSTED_TP_PX, rel=1e-6)
 
 
 # =========================================================================== #
