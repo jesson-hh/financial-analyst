@@ -25,6 +25,7 @@ import ast
 import asyncio
 import importlib
 import inspect
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -304,8 +305,11 @@ def test_two_distinct_intents_on_the_same_session_raise_apply_conflict():
 def test_module_never_references_the_engine_stock_runner_or_leg_normalizer():
     src = Path(luozi.__file__).read_text(encoding="utf-8")
     assert "legs_to_orders" not in src
-    assert "BacktestRunner" not in src
-    # not present as module attributes either
+    # the engine's own stock runner class ``BacktestRunner`` is never referenced.
+    # Task 6 adds the shadow runner ``ShadowBacktestRunner`` (a distinct class) — so
+    # the check excludes that prefix rather than matching the bare substring.
+    assert re.search(r"(?<!Shadow)BacktestRunner", src) is None
+    # not present as module attributes either (the module exposes ShadowBacktestRunner)
     assert not hasattr(luozi, "legs_to_orders")
     assert not hasattr(luozi, "BacktestRunner")
 
