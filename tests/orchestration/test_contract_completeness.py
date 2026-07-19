@@ -148,6 +148,31 @@ PHASE7_MODULES: tuple[str, ...] = (
     "guanlan_v2.orchestration.phase7_registry",
 )
 
+#: Phase 8 (四车道 lane workers / skills / Lane-D debate) contract modules. Task 0b
+#: (D11) ships ``capability_manifest`` first — it defines ``CapabilityManifest`` /
+#: ``CapabilityInterfaceRow`` public ``DigestModel`` subclasses whose Phase-8
+#: registry classification + completeness firewall land in the Task 8 registry-seal
+#: module; ``CapabilityInterfaceRow`` is a reviewed ``PHASE8_INTERNAL_MODELS`` entry
+#: there (plan §Task 8). Like the Phase-4/5/6/7 precedents this scoping keeps the
+#: Phase-1 discovery firewall from mislabeling a Phase-8 module as a missing Phase-1
+#: module; the Phase-1 classification tests (keyed off ``DISCOVERED``, derived only
+#: from ``PHASE1_MODULES``) never see them. The remaining Phase-8 modules are
+#: pre-listed ahead of their creation per the Phase-6 ``adapters.luozi`` precedent
+#: (Task-0 correction N5): each is only ever used in the discovery-firewall set
+#: subtraction below (never imported here), so listing one before it exists is inert.
+#: The real Phase-8 firewall will live in ``tests/orchestration/test_phase8_registry.py``.
+PHASE8_MODULES: tuple[str, ...] = (
+    "guanlan_v2.orchestration.capability_manifest",
+    "guanlan_v2.orchestration.skilltree",
+    "guanlan_v2.orchestration.pattern_registry",
+    "guanlan_v2.orchestration.decision_inputs",
+    "guanlan_v2.orchestration.honesty",
+    "guanlan_v2.orchestration.model_tiers",
+    "guanlan_v2.orchestration.lane_payloads",
+    "guanlan_v2.orchestration.lane_catalog",
+    "guanlan_v2.orchestration.debate",
+)
+
 #: Deferred payloads whose ABSENCE FROM PHASE 1 this guard proves (registry,
 #: classification and namespaces). The five Phase-5 market-factor/regime/rotation
 #: payloads stay listed here for that Phase-1 absence half — they must never leak
@@ -290,10 +315,11 @@ def test_phase1_modules_lists_every_module_defining_a_public_contract_model():
         - set(PHASE5_MODULES)
         - set(PHASE6_MODULES)
         - set(PHASE7_MODULES)
+        - set(PHASE8_MODULES)
     )
     assert not missing, (
         "these modules define a public ContractModel subclass but are absent from "
-        "PHASE1_MODULES (and are not Phase 4/5/6/7 modules), so the completeness "
+        "PHASE1_MODULES (and are not Phase 4/5/6/7/8 modules), so the completeness "
         "firewall would never review their contracts — add them to PHASE1_MODULES: "
         + ", ".join(sorted(missing))
     )
