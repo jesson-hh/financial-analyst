@@ -117,15 +117,18 @@ WEIGHT_SUM_TOLERANCE: float = 1e-8
 # --------------------------------------------------------------------------- #
 # TargetPosition                                                              #
 # --------------------------------------------------------------------------- #
-# One long-only target-weight leg. ``target_weight`` is REQUIRED (it is the
-# decision substance) and continuous in ``[0, 1]`` at this layer — the closed
-# five-band vocabulary is imposed only at the proposal/intent layer (Task 1b),
-# so the Task 6 deterministic lane can still express continuous rule-computed
-# weights. Every exit parameter is Optional-None with no computed default (an
-# absent stop/take-profit/hold cap is an explicit ``None``, never a fabricated
-# value). No docstring on this registered-to-be model: its JSON schema (and the
-# future Phase-6 golden) stays free of a churn-prone description string.
 class TargetPosition(DigestModel):
+    """One long-only target-weight leg (+ optional exit parameters).
+
+    ``target_weight`` is REQUIRED (it is the decision substance) and continuous
+    in ``[0, 1]`` at this layer — the closed five-band vocabulary is imposed
+    only at the proposal/intent layer (Task 1b), so the Task 6 deterministic
+    lane can still express continuous rule-computed weights. Every exit
+    parameter is Optional-None with no computed default (an absent
+    stop/take-profit/hold cap is an explicit ``None``, never a fabricated
+    value).
+    """
+
     schema_version: Literal["1"] = "1"
     symbol: Symbol
     target_weight: FiniteFloat = Field(ge=0, le=1)
@@ -137,14 +140,16 @@ class TargetPosition(DigestModel):
 # --------------------------------------------------------------------------- #
 # PortfolioTargetProposal                                                     #
 # --------------------------------------------------------------------------- #
-# The whole LLM-writable book: an ordered tuple of positions, the cash weight,
-# a non-blank rationale and a closed confidence. It carries ZERO envelope fields
-# (invariant 1); ``extra="forbid"`` (inherited) rejects any smuggled envelope
-# key. The fixed-order model validator (① duplicate → ② sum-identity →
-# ③ leverage) rejects a bad book at construction, before any staging. As with
-# TargetPosition, no class docstring — the model's JSON schema stays description-
-# free so the future Phase-6 registry golden is stable against wording edits.
 class PortfolioTargetProposal(DigestModel):
+    """The whole LLM-writable target book: positions + cash + rationale + confidence.
+
+    An ordered tuple of positions, the cash weight, a non-blank rationale and a
+    closed confidence. It carries ZERO envelope fields (invariant 1);
+    ``extra="forbid"`` (inherited) rejects any smuggled envelope key. The
+    fixed-order model validator (① duplicate → ② sum-identity → ③ leverage)
+    rejects a bad book at construction, before any staging.
+    """
+
     schema_version: Literal["1"] = "1"
     positions: tuple[TargetPosition, ...]
     cash_weight: FiniteFloat = Field(ge=0, le=1)
