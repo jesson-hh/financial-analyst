@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import math
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -109,6 +110,14 @@ __all__ = [
     "shadow_order_id",
     "SHADOW_FILL_ID_DOMAIN",
     "shadow_fill_id",
+    # Task 4 — shadow run-record contracts + corporate-action event
+    "ShadowTargetApplyRecord",
+    "ShadowOrderRecord",
+    "ShadowFillRecord",
+    "ShadowRejectRecord",
+    "CorporateActionEvent",
+    "SHADOW_METRIC_KEYS",
+    "ShadowRunResult",
 ]
 
 
@@ -788,12 +797,15 @@ class TargetPortfolioIntent(DigestModel):
 
     Structural red lines (invariant 1): ``origin`` / ``authority`` /
     ``execution_scope`` are closed single-value Literals — an intent can never
-    self-report a live/human envelope — and there is no public path that accepts a
-    caller-supplied ``scheduled_for`` / ``eligible_execution_at``; both are
-    computed inside :func:`wrap_proposal_as_intent`. It re-applies the SAME closed
-    portfolio matrix as the proposal (:func:`_verify_portfolio_matrix`, band check
-    included), so the envelope layer can never become a bypass around the
-    band/tranche constraints.
+    self-report a live/human envelope. :func:`wrap_proposal_as_intent` is the sole
+    path that DERIVES the cadence instants (``scheduled_for`` /
+    ``eligible_execution_at``) from a registered schedule + calendar rather than
+    trusting a caller — the raw constructor still exists (a runtime helper may build
+    one directly), so the *structural* guarantees are the closed Literals plus the
+    time-order validators below, not an absence of a public constructor. It
+    re-applies the SAME closed portfolio matrix as the proposal
+    (:func:`_verify_portfolio_matrix`, band check included), so the envelope layer
+    can never become a bypass around the band/tranche constraints.
 
     Digest identity: every business field — the schedule triple and all three
     times included — is semantic; only the runtime-random ``intent_id`` and the
@@ -904,6 +916,20 @@ def wrap_proposal_as_intent(
        **verbatim** (``entry_tranches`` included), the proposal artifact identity,
        the resolved schedule triple, and ``created_at`` read from ``clock``.
     """
+    # ⓪ entry guard: the shadow time model is defined only in UTC, so a naive
+    #    decision_as_of must fail here as a loud, localized refusal (never later as a
+    #    cryptic aware-vs-naive comparison TypeError inside the cutoff ordering).
+    if (
+        not isinstance(decision_as_of, datetime)
+        or decision_as_of.tzinfo is None
+        or decision_as_of.tzinfo.utcoffset(decision_as_of) is None
+    ):
+        raise ShadowEnvelopeError(
+            "decision_as_of must be a tz-aware datetime; a naive datetime is rejected "
+            "at the wrap entry (the shadow time model is defined only in UTC)"
+        )
+    decision_as_of = decision_as_of.astimezone(timezone.utc)
+
     # ① payload contract: exact schema key + a genuine re-validation of the payload.
     schema_key = proposal_artifact.payload_schema_ref.key
     if schema_key != _PROPOSAL_SCHEMA_KEY:
@@ -1067,3 +1093,352 @@ def shadow_fill_id(*, order_id: DigestHex, fill_seq: PositiveInt) -> DigestHex:
             "fill_seq": fill_seq,
         }
     )
+
+
+# =========================================================================== #
+# Task 4 · shadow run-record contracts + corporate-action event                 #
+# =========================================================================== #
+# Task 3 minted the runtime intent envelope and the three domain-tagged
+# idempotency key families; Task 4 owns the *consumer* half — the immutable record
+# vocabulary an honest shadow replay emits: what the framework APPLIED
+# (:class:`ShadowTargetApplyRecord`), the ORDERS it staged
+# (:class:`ShadowOrderRecord`), the FILLS + REJECTS the matching engine returned
+# (:class:`ShadowFillRecord` / :class:`ShadowRejectRecord`), the PIT corporate
+# actions it must honor (:class:`CorporateActionEvent`), and the whole
+# content-sealed run (:class:`ShadowRunResult`). Every id-bearing record RECOMPUTES
+# its key from its own components via the exact Task-3 builders, so a forged
+# apply/order/fill id is unconstructible; the run result closes causation over its
+# own record set and references staged intents ONLY by ``intent_content_digests``
+# (never an embedded, mutable intent). These records are NOT registered by any
+# Phase 1–5 schema registry; their reviewed Phase-6 registration lands in a later
+# task (``shadow`` is already scoped into ``PHASE6_MODULES``).
+
+
+class ShadowTargetApplyRecord(DigestModel):
+    """One application of a staged target portfolio at an execution bar.
+
+    Records that an intent's target book became effective (or honestly did NOT —
+    ``applied is False`` when the eligible bar was never tradable inside the run
+    window, which is a truthful non-application, not an error). ``target_apply_key``
+    is self-consistent: it must re-derive from ``(intent_id, scheduled_for,
+    target_version)`` through the exact :func:`target_apply_key` builder, so a
+    forged key fails construction. The raw ``intent_id`` is audit-only causation
+    (:data:`SEMANTIC_EXCLUDE`) — its effect already flows into the semantic digest
+    through the operational ``target_apply_key`` — while ``intent_content_digest``
+    carries the *semantic* identity of the applied intent so a replay can bind the
+    record back to the exact target book it applied.
+    """
+
+    schema_version: Literal["1"] = "1"
+    target_apply_key: DigestHex
+    intent_content_digest: DigestHex
+    intent_id: NonEmptyStr
+    scheduled_for: UtcDateTime
+    target_version: PositiveInt
+    trigger_bar: NonEmptyStr
+    order_ids: tuple[DigestHex, ...]
+    applied: bool
+
+    SEMANTIC_EXCLUDE: ClassVar[frozenset[str]] = frozenset({"intent_id"})
+
+    @model_validator(mode="after")
+    def _verify_apply_key(self) -> "ShadowTargetApplyRecord":
+        recomputed = target_apply_key(
+            SimpleNamespace(
+                intent_id=self.intent_id,
+                scheduled_for=self.scheduled_for,
+                target_version=self.target_version,
+            )
+        )
+        if self.target_apply_key != recomputed:
+            raise ValueError(
+                "target_apply_key is not self-consistent with (intent_id, "
+                "scheduled_for, target_version) — a forged apply key is rejected"
+            )
+        return self
+
+
+class ShadowOrderRecord(DigestModel):
+    """One staged order emitted for an applied target, self-consistent by ``order_id``.
+
+    ``order_id`` must re-derive from ``(target_apply_key, symbol, order_kind,
+    trigger_bar, ordinal)`` through the exact :func:`shadow_order_id` builder, and
+    ``target_apply_key`` retains the causation up to the applied target. ``qty`` is
+    tri-state, mirroring engine ``Order.qty``: an explicit ``None`` means a
+    cash-budget-sized buy (``cash_budget`` supplies the amount), a positive int
+    means an exact share quantity. ``limit_price`` / ``cash_budget`` are likewise
+    explicit ``None`` when they do not apply — never a fabricated zero. These
+    sizing/price fields are deliberately NOT part of the id (only the five
+    causation components are), so two orders that differ only in price still carry
+    distinct ordinals to earn distinct ids.
+    """
+
+    schema_version: Literal["1"] = "1"
+    order_id: DigestHex
+    target_apply_key: DigestHex
+    symbol: Symbol
+    order_kind: ShadowOrderKind
+    trigger_bar: NonEmptyStr
+    ordinal: NonNegativeInt
+    side: Literal["buy", "sell"]
+    otype: Literal["limit", "market", "stop"]
+    limit_price: FiniteFloat | None
+    qty: PositiveInt | None
+    cash_budget: FiniteFloat | None
+
+    @model_validator(mode="after")
+    def _verify_order_id(self) -> "ShadowOrderRecord":
+        recomputed = shadow_order_id(
+            apply_key=self.target_apply_key,
+            symbol=self.symbol,
+            order_kind=self.order_kind,
+            trigger_bar=self.trigger_bar,
+            ordinal=self.ordinal,
+        )
+        if self.order_id != recomputed:
+            raise ValueError(
+                "order_id is not self-consistent with (target_apply_key, symbol, "
+                "order_kind, trigger_bar, ordinal) — a forged order id is rejected"
+            )
+        return self
+
+
+class ShadowFillRecord(DigestModel):
+    """One realized fill returned by the matching engine, self-consistent by ``fill_id``.
+
+    ``fill_id`` must re-derive from ``(order_id, fill_seq)`` through the exact
+    :func:`shadow_fill_id` builder, and ``order_id`` retains the causation up to the
+    order that produced it. ``gross`` is the notional (price × qty) and ``cost`` the
+    modeled transaction cost, both reported floats; ``reason`` is the verbatim
+    engine fill reason (e.g. ``"target_buy"`` / ``"stop_loss"``).
+    """
+
+    schema_version: Literal["1"] = "1"
+    fill_id: DigestHex
+    order_id: DigestHex
+    fill_seq: PositiveInt
+    symbol: Symbol
+    side: Literal["buy", "sell"]
+    qty: PositiveInt
+    price: FiniteFloat
+    trade_date: NonEmptyStr
+    gross: FiniteFloat
+    cost: FiniteFloat
+    reason: NonEmptyStr
+
+    @model_validator(mode="after")
+    def _verify_fill_id(self) -> "ShadowFillRecord":
+        recomputed = shadow_fill_id(order_id=self.order_id, fill_seq=self.fill_seq)
+        if self.fill_id != recomputed:
+            raise ValueError(
+                "fill_id is not self-consistent with (order_id, fill_seq) — a forged "
+                "fill id is rejected"
+            )
+        return self
+
+
+class ShadowRejectRecord(DigestModel):
+    """One order the matching engine refused to fill, with the verbatim reason.
+
+    ``reason`` is the engine's ``Broker.last_reason`` verbatim (``"suspended"``,
+    ``"one_word_limit_up"``, ``"below_one_lot"``, ``"t1_locked_or_empty"``, …). A
+    reject carries no id of its own — it names the ``order_id`` it refused so a
+    replay can bind it back to the staged order.
+    """
+
+    schema_version: Literal["1"] = "1"
+    order_id: DigestHex
+    symbol: Symbol
+    trade_date: NonEmptyStr
+    reason: NonEmptyStr
+
+
+class CorporateActionEvent(DigestModel):
+    """One PIT corporate action the shadow replay must honor at ``ex_date``.
+
+    The closed ``kind`` × amount matrix is validator-enforced (never a free-form
+    combination):
+
+    * ``cash_dividend`` — ``cash_per_share > 0`` AND ``shares_ratio == 0``;
+    * ``stock_bonus``   — ``shares_ratio > 0`` (additional shares per held share)
+      AND ``cash_per_share == 0``;
+    * ``split``         — ``shares_ratio > 0`` and ``!= 1`` (new shares per old
+      share) AND ``cash_per_share == 0``.
+
+    ``available_at`` is a structurally required PIT fact (the instant the action
+    became knowable) — there is no silent missing-availability, so a replay can
+    never consume an action before it was observable.
+    """
+
+    schema_version: Literal["1"] = "1"
+    symbol: Symbol
+    kind: Literal["cash_dividend", "stock_bonus", "split"]
+    ex_date: IsoDateStr
+    cash_per_share: FiniteFloat = Field(ge=0)
+    shares_ratio: FiniteFloat = Field(ge=0)
+    available_at: UtcDateTime
+
+    @model_validator(mode="after")
+    def _verify_matrix(self) -> "CorporateActionEvent":
+        if self.kind == "cash_dividend":
+            if not (self.cash_per_share > 0):
+                raise ValueError("cash_dividend requires cash_per_share > 0")
+            if self.shares_ratio != 0:
+                raise ValueError("cash_dividend requires shares_ratio == 0")
+        elif self.kind == "stock_bonus":
+            if not (self.shares_ratio > 0):
+                raise ValueError("stock_bonus requires shares_ratio > 0")
+            if self.cash_per_share != 0:
+                raise ValueError("stock_bonus requires cash_per_share == 0")
+        else:  # split
+            if not (self.shares_ratio > 0):
+                raise ValueError("split requires shares_ratio > 0")
+            if self.shares_ratio == 1:
+                raise ValueError("split requires shares_ratio != 1")
+            if self.cash_per_share != 0:
+                raise ValueError("split requires cash_per_share == 0")
+        return self
+
+
+#: the closed metrics-key vocabulary a :class:`ShadowRunResult` may carry. A key
+#: outside this set is a hard validation error; a non-finite *value* is OMITTED by
+#: :meth:`ShadowRunResult.build` (never smuggled as a sentinel), and a non-finite
+#: value can never be smuggled past the ``FiniteFloat`` field on a direct construct.
+SHADOW_METRIC_KEYS: frozenset[str] = frozenset(
+    {
+        "ann_return",
+        "sharpe",
+        "max_drawdown",
+        "volatility",
+        "turnover",
+        "win_rate",
+        "calmar",
+        "trade_win_rate",
+        "profit_factor",
+    }
+)
+
+#: the all-zero placeholder used by :meth:`ShadowRunResult.build` when field
+#: pre-projection fails, so the failure surfaces as the model validator's digest
+#: mismatch rather than as a raw exception from the digest computation.
+_RUN_RESULT_DIGEST_PLACEHOLDER = "0" * 64
+
+
+def _drop_non_finite_metrics(
+    metrics: "dict[str, Any]",
+) -> "dict[str, Any]":
+    """Return ``metrics`` with every non-finite float value OMITTED (not replaced).
+
+    A NaN/±Inf metric is dropped entirely — never coerced to a sentinel like
+    ``0.0`` or ``-999`` — so a reported metrics mapping only ever carries genuinely
+    finite values. Non-float values pass through untouched (the ``FiniteFloat``
+    field then rejects anything that is not a finite float at construction).
+    """
+    return {
+        k: v
+        for k, v in metrics.items()
+        if not (isinstance(v, float) and not math.isfinite(v))
+    }
+
+
+class ShadowRunResult(DigestModel):
+    """The whole content-sealed shadow run — applies / orders / fills / rejects.
+
+    The immutable, canonically-digested record of one honest shadow replay: the
+    matching-engine version and the resolved schedule ref it ran under, the window
+    (``start`` / ``end``) and ``init_cash``, the cost-model digest, the staged
+    intents referenced ONLY by ``intent_content_digests`` (invariant 1 — a result
+    can never embed or mutate an intent), the four record tuples, the NAV path, the
+    closed-vocabulary ``metrics``, a strict-int ``n_trades`` (counts are never
+    floats and never enter the float metrics dict), and free-form ``warnings`` /
+    ``badges``.
+
+    Causation is closed over the record set (invariant 4): every fill's ``order_id``
+    and every apply's ``order_ids`` entry must appear among ``orders``, and every
+    order's ``target_apply_key`` must appear among ``applies`` — a dangling
+    reference fails construction. The record self-seals like every Phase 4/5
+    precedent: build it via :meth:`build`, which OMITS non-finite metrics, computes
+    the canonical digest and attaches it; the ``@model_validator`` re-verifies both
+    causation and the self-seal on every load.
+    """
+
+    schema_version: Literal["1"] = "1"
+    matching_engine_version: NonEmptyStr
+    schedule_ref: ContentRef
+    start: IsoDateStr
+    end: IsoDateStr
+    init_cash: FiniteFloat = Field(gt=0)
+    cost_model_digest: DigestHex
+    intent_content_digests: tuple[DigestHex, ...]
+    applies: tuple[ShadowTargetApplyRecord, ...]
+    orders: tuple[ShadowOrderRecord, ...]
+    fills: tuple[ShadowFillRecord, ...]
+    rejects: tuple[ShadowRejectRecord, ...]
+    nav_history: tuple[tuple[NonEmptyStr, FiniteFloat], ...]
+    metrics: dict[NonEmptyStr, FiniteFloat] = {}
+    n_trades: NonNegativeInt = 0
+    warnings: tuple[NonEmptyStr, ...] = ()
+    badges: tuple[NonEmptyStr, ...] = ()
+    content_digest: DigestHex
+
+    SELF_DIGEST_FIELDS: ClassVar[frozenset[str]] = frozenset({"content_digest"})
+
+    @field_validator("metrics")
+    @classmethod
+    def _metrics_in_vocabulary(cls, v: "dict[str, float]") -> "dict[str, float]":
+        unknown = set(v) - SHADOW_METRIC_KEYS
+        if unknown:
+            raise ValueError(
+                "metrics keys must be within the closed vocabulary "
+                f"{sorted(SHADOW_METRIC_KEYS)}; unknown: {sorted(unknown)}"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _verify(self) -> "ShadowRunResult":
+        order_ids = {o.order_id for o in self.orders}
+        apply_keys = {a.target_apply_key for a in self.applies}
+        # every fill's order_id is present among orders
+        for f in self.fills:
+            if f.order_id not in order_ids:
+                raise ValueError(
+                    f"fill {f.fill_id} references order_id {f.order_id} absent from "
+                    "orders (dangling causation)"
+                )
+        # every apply's order_ids entry is present among orders
+        for a in self.applies:
+            for oid in a.order_ids:
+                if oid not in order_ids:
+                    raise ValueError(
+                        f"apply {a.target_apply_key} references order_id {oid} absent "
+                        "from orders (dangling causation)"
+                    )
+        # every order's target_apply_key is present among applies
+        for o in self.orders:
+            if o.target_apply_key not in apply_keys:
+                raise ValueError(
+                    f"order {o.order_id} references target_apply_key "
+                    f"{o.target_apply_key} absent from applies (dangling causation)"
+                )
+        # self-seal: the declared digest must match the canonical semantic digest
+        if self.content_digest != self.semantic_digest():
+            raise ValueError("declared content_digest does not match canonical digest")
+        return self
+
+    @classmethod
+    def build(cls, **fields: Any) -> "ShadowRunResult":
+        """Seal + construct: OMIT non-finite metrics, compute the digest, validate.
+
+        Non-finite metric values are dropped here (:func:`_drop_non_finite_metrics`)
+        BEFORE the digest is computed, so the sealed digest is over the surviving
+        finite metrics only — a NaN/Inf metric leaves no trace and is never smuggled
+        through as a sentinel. The digest itself is computed over the cleaned field
+        values and re-verified by the constructor's self-seal.
+        """
+        if "metrics" in fields and fields["metrics"] is not None:
+            fields = {**fields, "metrics": _drop_non_finite_metrics(fields["metrics"])}
+        try:
+            digest = cls.digest_of_fields(projection="semantic", **fields)
+        except (ValueError, TypeError, AttributeError, KeyError):
+            digest = _RUN_RESULT_DIGEST_PLACEHOLDER
+        return cls(**fields, content_digest=digest)

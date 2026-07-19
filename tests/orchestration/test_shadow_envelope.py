@@ -640,6 +640,16 @@ def test_wrap_accepts_decision_as_of_exactly_at_cutoff():
     assert intent.decision_as_of == _CUTOFF_UTC
 
 
+def test_wrap_rejects_naive_decision_as_of():
+    # carry-b (Task-4): a naive decision_as_of fails as a loud, localized
+    # ShadowEnvelopeError at the wrap entry — the shadow time model is defined only
+    # in UTC — producing no intent, never a cryptic aware-vs-naive comparison deeper
+    # inside the cutoff ordering.
+    with pytest.raises(shadow.ShadowEnvelopeError) as ei:
+        _wrap(decision_as_of=datetime(2026, 7, 20, 1, 30))  # naive (no tzinfo)
+    assert "tz-aware" in str(ei.value) or "naive" in str(ei.value)
+
+
 def test_wrap_refuses_wrong_payload_schema_ref():
     art = _proposal_artifact(schema_version="2")  # PortfolioTargetProposal@2, wrong key
     with pytest.raises(shadow.ShadowEnvelopeError) as ei:
