@@ -37,7 +37,13 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from guanlan_v2.orchestration.catalog import ModelTier, SkillBinding
+from guanlan_v2.orchestration.catalog import (
+    ModelTier,
+    SkillBinding,
+    WorkerCatalogSnapshot,
+)
+from guanlan_v2.orchestration.context import ContextSnapshot
+from guanlan_v2.orchestration.data.symbols import Symbol, normalize_symbol
 from guanlan_v2.orchestration.digest import (
     ContractModel,
     DigestHex,
@@ -47,15 +53,27 @@ from guanlan_v2.orchestration.digest import (
     PositiveInt,
     UtcDateTime,
 )
+from guanlan_v2.orchestration.enums import DependencyPolicy, PlanSource
 from guanlan_v2.orchestration.refs import (
     ContentRef,
     LogicalId,
+    PayloadRef,
     TypedPayloadRef,
 )
+from guanlan_v2.orchestration.schema_registry import SchemaRegistry
 # ``_HIDDEN_AUTHORITY_KEYS`` and the shared params JSON-shape guard are the frozen
 # Phase-1 authority blacklist; re-declared here as an *import*, never a copy, so a
 # future edit to the kernel's authority surface propagates to the Planner parser.
-from guanlan_v2.orchestration.spec import _HIDDEN_AUTHORITY_KEYS, _ensure_json_shaped
+# ``assemble_dynamic_draft`` lifts the closed authored envelope into a real Phase-1
+# ``PlanDraft`` using only these reviewed contracts — it never forks one.
+from guanlan_v2.orchestration.spec import (
+    Dependency,
+    OrchestrationRequest,
+    PlanDraft,
+    PlanNode,
+    _ensure_json_shaped,
+    _HIDDEN_AUTHORITY_KEYS,
+)
 
 __all__ = [
     "PLANNER_OUTPUT_CONTRACT",
@@ -71,6 +89,8 @@ __all__ = [
     "parse_planner_output",
     "PLANNER_RESERVED_AUTHORED_FIELDS",
     "PLANNER_MAX_RATIONALE_CHARS",
+    "PlannerShapeRejected",
+    "assemble_dynamic_draft",
 ]
 
 #: Domain constant naming the authored-JSON grammar version this parser accepts.
@@ -528,3 +548,196 @@ def parse_planner_output(raw_text: str) -> PlannerDraftEnvelope:
         if not build_codes:
             build_codes.add(_C_INVALID_SHAPE)
         raise PlannerOutputRejected(tuple(build_codes))
+
+
+# =========================================================================== #
+# Runtime-stamped, shrink-only dynamic draft assembly (Task 2)                 #
+# =========================================================================== #
+# The five generation-side shape issue codes. Each is a *planner-attributed*
+# rejection of an authored proposal that the closed parser grammar cannot catch
+# (worker identity / dynamic-selectability / budget headroom / symbol grammar /
+# duplicate node id). ``planner_worker_not_dynamic`` structurally excludes every
+# ``compat.*`` / ``static_legacy_only`` worker here, *before* Phase-1
+# ``validate_plan_draft`` would re-reject it under ``compat_worker_forbidden_source``.
+_S_UNKNOWN_WORKER = "planner_unknown_worker"
+_S_WORKER_NOT_DYNAMIC = "planner_worker_not_dynamic"
+_S_BUDGET_EXCEEDS = "planner_budget_exceeds_remaining"
+_S_UNIVERSE_INVALID = "planner_universe_symbol_invalid"
+_S_DUPLICATE_NODE_ID = "planner_duplicate_node_id"
+
+
+class PlannerShapeRejected(ValueError):
+    """Raised when an authored envelope cannot be assembled into a DYNAMIC draft.
+
+    Mirrors :class:`PlannerOutputRejected`: ``issue_codes`` is a canonically-sorted,
+    duplicate-free tuple of the exact machine codes that fired, so identical inputs
+    always yield the identical codes. The assembler never partially constructs a
+    ``PlanDraft`` — every shape check is accumulated and, if any fired, raised here
+    before any node/draft is built.
+    """
+
+    def __init__(self, issue_codes: tuple[str, ...]) -> None:
+        self.issue_codes: tuple[str, ...] = tuple(sorted(set(issue_codes)))
+        super().__init__(
+            "planner draft rejected: " + ", ".join(self.issue_codes)
+        )
+
+
+def _lift_dependency(dep: PlannerDependencyEnvelope) -> Dependency:
+    """Lift one authored dependency edge into a real Phase-1 :class:`Dependency`.
+
+    The authored ``policy`` string literal is lifted to the Phase-1
+    :class:`DependencyPolicy`; ``accept_statuses`` is never model-authored, so the
+    Phase-1 default applies (a ``BLOCK`` edge therefore accepts exactly
+    ``{COMPLETED}``).
+    """
+    return Dependency(
+        upstream_node_id=dep.upstream_node_id,
+        artifact_slot=dep.artifact_slot,
+        upstream_output_key=dep.upstream_output_key,
+        inject_as=dep.inject_as,
+        policy=DependencyPolicy(dep.policy),
+    )
+
+
+def _lift_node(node: PlannerNodeEnvelope) -> PlanNode:
+    """Lift one authored node into a real Phase-1 :class:`PlanNode`.
+
+    Only the authored subset (``id`` / ``worker_id`` / ``params`` / ``dependencies``
+    / ``writes_slot`` / ``timeout_sec`` / ``token_reservation``) is carried; every
+    other :class:`PlanNode` field (gate ids, the debate identity quartet,
+    ``condition_ref``, ``auxiliary``, ``max_attempts``) takes its Phase-1 default,
+    so a proposal can never smuggle gate/debate/condition authority.
+    """
+    return PlanNode(
+        id=node.id,
+        worker_id=node.worker_id,
+        params=node.params,
+        dependencies=tuple(_lift_dependency(d) for d in node.dependencies),
+        writes_slot=node.writes_slot,
+        timeout_sec=node.timeout_sec,
+        token_reservation=node.token_reservation,
+    )
+
+
+def assemble_dynamic_draft(
+    envelope: PlannerDraftEnvelope,
+    *,
+    request: OrchestrationRequest,
+    context: ContextSnapshot,
+    context_snapshot_ref: PayloadRef,
+    catalog: WorkerCatalogSnapshot,
+    schema_registry: SchemaRegistry,
+    draft_id: LogicalId,
+    run_id: NonEmptyStr,
+    remaining_tokens: NonNegativeInt | None = None,
+    remaining_llm_invocations: NonNegativeInt | None = None,
+) -> PlanDraft:
+    """Assemble a runtime-stamped, shrink-only DYNAMIC :class:`PlanDraft`.
+
+    The returned object is a *plain* Phase-1 ``PlanDraft`` (schema_version "2"): no
+    subclass, wrapper or extra field. Every kernel-authority / identity field is
+    **runtime-stamped**, never model-authored — ``id`` / ``run_id`` / ``request_id``
+    / ``phase='main'`` / ``source=DYNAMIC`` / ``goal`` come from the trusted request
+    + caller; ``as_of`` / ``mode`` come from ``context.data_context``;
+    ``catalog_version`` / ``catalog_digest`` from the sealed catalog snapshot;
+    ``schema_registry_digest`` from the sealed registry; ``approval_policy`` is a
+    verbatim copy of the request's (the Planner never chooses it); and
+    ``debates`` / ``gates`` / ``reducers`` / ``stop_condition_refs`` are empty while
+    the legacy compatibility tuple is ``None``. Only the model-authored fields pass
+    through: the nodes (each lifted to a ``PlanNode`` with Phase-1 defaults for every
+    non-authored field), ``sink_node_ids``, the ``universe`` (each raw symbol string
+    normalized through the Phase-3 grammar), the budget request pair and
+    ``max_concurrency``.
+
+    ``context_snapshot_ref`` is a trusted runtime input; it must reference the
+    supplied ``ContextSnapshot`` (``namespace == 'main'`` and
+    ``content_digest == context.content_digest``). A mismatch is a caller wiring
+    error, raised as a plain :class:`ValueError` *before* any construction.
+
+    Every generation-side shape rejection (unknown worker; a worker that is not
+    ``dynamic_allowed``; an authored budget request that exceeds a supplied
+    remaining figure; an unnormalizable universe symbol; a duplicate node id) is
+    accumulated into one :class:`PlannerShapeRejected` with canonically-sorted
+    ``issue_codes``; the function never partially constructs a draft. Semantic
+    catalog/registry checks (params-schema conformance, dependency schema equality,
+    decision-sink authority, …) are deliberately left to Phase-1
+    :func:`~guanlan_v2.orchestration.spec.validate_plan_draft`, which processes the
+    returned plain draft unshimmed.
+    """
+    # -- 1. runtime context-ref precondition (trusted input, not the planner) - #
+    if context_snapshot_ref.namespace != "main":
+        raise ValueError(
+            "context_snapshot_ref must use namespace='main'; got "
+            f"{context_snapshot_ref.namespace!r}"
+        )
+    if context_snapshot_ref.content_digest != context.content_digest:
+        raise ValueError(
+            "context_snapshot_ref.content_digest does not bind the supplied "
+            "ContextSnapshot content"
+        )
+
+    # -- 2. generation-side shape checks (accumulate; never partial-construct) - #
+    codes: set[str] = set()
+    worker_by_id = {w.id: w for w in catalog.workers}
+    seen_ids: set[str] = set()
+    for node in envelope.nodes:
+        if node.id in seen_ids:
+            codes.add(_S_DUPLICATE_NODE_ID)
+        seen_ids.add(node.id)
+        worker = worker_by_id.get(node.worker_id)
+        if worker is None:
+            codes.add(_S_UNKNOWN_WORKER)
+        elif worker.selection_scope != "dynamic_allowed":
+            codes.add(_S_WORKER_NOT_DYNAMIC)
+
+    if remaining_tokens is not None and envelope.budget_request_tokens > remaining_tokens:
+        codes.add(_S_BUDGET_EXCEEDS)
+    if (
+        remaining_llm_invocations is not None
+        and envelope.budget_request_llm_invocations > remaining_llm_invocations
+    ):
+        codes.add(_S_BUDGET_EXCEEDS)
+
+    universe: list[Symbol] = []
+    for raw in envelope.universe:
+        try:
+            universe.append(normalize_symbol(raw))
+        except (ValueError, TypeError):
+            codes.add(_S_UNIVERSE_INVALID)
+
+    if codes:
+        raise PlannerShapeRejected(tuple(codes))
+
+    # -- 3. lift the authored nodes into real Phase-1 PlanNodes --------------- #
+    nodes = tuple(_lift_node(n) for n in envelope.nodes)
+
+    # -- 4. construct the runtime-stamped DYNAMIC main PlanDraft -------------- #
+    return PlanDraft(
+        id=draft_id,
+        run_id=run_id,
+        request_id=request.request_id,
+        phase="main",
+        source=PlanSource.DYNAMIC,
+        goal=request.goal,
+        as_of=context.data_context.as_of,
+        mode=context.data_context.mode,
+        context_snapshot_ref=context_snapshot_ref,
+        universe=tuple(universe),
+        nodes=nodes,
+        sink_node_ids=envelope.sink_node_ids,
+        debates=(),
+        gates=(),
+        reducers=(),
+        catalog_version=catalog.catalog_version,
+        catalog_digest=catalog.catalog_digest,
+        schema_registry_digest=schema_registry.registry_digest,
+        approval_policy=request.approval_policy,
+        budget_request_tokens=envelope.budget_request_tokens,
+        budget_request_llm_invocations=envelope.budget_request_llm_invocations,
+        max_concurrency=envelope.max_concurrency,
+        stop_condition_refs=(),
+        legacy_source_schema=None,
+        legacy_source_config_digest=None,
+        legacy_mapping_digest=None,
+    )
