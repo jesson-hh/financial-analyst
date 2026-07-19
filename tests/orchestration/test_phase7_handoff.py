@@ -552,19 +552,26 @@ def test_point4_budget_ledger_methods_and_closed_operation_set():
                    "get_active_plan", "available", "replay"):
         assert callable(getattr(BudgetLedger, method)), method
     assert issubclass(IdempotencyConflict, Exception)
-    # clause (a): the closed operation vocabulary Phase 7 must EXTEND, never replace.
+    # clause (a) [flipped in Phase 7 · Task 4, per the Phase 4 guard-flip ruling]:
+    # the closed operation vocabulary is EXTENDED (never replaced) by exactly the
+    # additive planner op — the original four remain, in place, unchanged.
     assert set(typing.get_args(BudgetOperation)) == {
-        "reserve_plan", "reserve_node", "settle", "release"}
+        "reserve_plan", "reserve_node", "settle", "release", "reserve_planner"}
+    assert {"reserve_plan", "reserve_node", "settle", "release"} <= set(
+        typing.get_args(BudgetOperation))
     assert "operation" in BudgetTransitionCommand.model_fields
     assert BudgetTransitionCommand.model_fields["operation"].annotation is BudgetOperation
 
 
 def test_point4_planner_scope_binding_facts_hold_for_clause_a_b():
-    # clause (a)/(b): "planner" is already a legal scope but no ledger op mints one,
-    # and a reservation's candidate_plan_digest is a required DigestHex — so the
-    # plan's reviewed pre-candidate planner binding (request semantic digest) stands.
+    # clause (a)/(b) [flipped in Phase 7 · Task 4]: "planner" is a legal scope and
+    # Phase 7 now mints a planner reservation via the additive "reserve_planner" op
+    # (never a bare "planner" op); a reservation's candidate_plan_digest stays a
+    # required DigestHex, so the reviewed pre-candidate planner binding (the request
+    # semantic digest) stands.
     assert "planner" in typing.get_args(BudgetScopeType)
-    assert "planner" not in set(typing.get_args(BudgetOperation))
+    assert "reserve_planner" in set(typing.get_args(BudgetOperation))
+    assert "planner" not in set(typing.get_args(BudgetOperation))  # not a bare op name
     cpd = BudgetReservation.model_fields["candidate_plan_digest"]
     assert cpd.is_required()
 

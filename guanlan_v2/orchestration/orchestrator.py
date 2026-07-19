@@ -33,15 +33,17 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, NamedTuple
 
 from pydantic import Field, field_validator, model_validator
 
+from guanlan_v2.orchestration.budget import BudgetError, BudgetLedger
 from guanlan_v2.orchestration.catalog import (
     ModelTier,
     SkillBinding,
     WorkerCatalogSnapshot,
 )
+from guanlan_v2.orchestration.catalog_runtime import CatalogRuntime
 from guanlan_v2.orchestration.context import ContextSnapshot
 from guanlan_v2.orchestration.data.symbols import Symbol, normalize_symbol
 from guanlan_v2.orchestration.digest import (
@@ -52,13 +54,25 @@ from guanlan_v2.orchestration.digest import (
     NonNegativeInt,
     PositiveInt,
     UtcDateTime,
+    content_digest,
 )
 from guanlan_v2.orchestration.enums import DependencyPolicy, PlanSource
+from guanlan_v2.orchestration.plan_presets import (
+    PlanPresetError,
+    PlanPresetRegistry,
+    materialize_fallback_draft,
+)
 from guanlan_v2.orchestration.refs import (
     ContentRef,
     LogicalId,
     PayloadRef,
+    SchemaRef,
     TypedPayloadRef,
+)
+from guanlan_v2.orchestration.runtime_clock import AuthoritativeClock
+from guanlan_v2.orchestration.runtime_contracts import (
+    NamedEvidenceDigest,
+    PromptUntrustedBlockRef,
 )
 from guanlan_v2.orchestration.schema_registry import SchemaRegistry
 # ``_HIDDEN_AUTHORITY_KEYS`` and the shared params JSON-shape guard are the frozen
@@ -71,9 +85,13 @@ from guanlan_v2.orchestration.spec import (
     OrchestrationRequest,
     PlanDraft,
     PlanNode,
+    PlanValidationReport,
+    validate_plan_draft,
     _ensure_json_shaped,
     _HIDDEN_AUTHORITY_KEYS,
 )
+from guanlan_v2.orchestration.eventstore import PayloadStore
+from guanlan_v2.orchestration.worker import ModelGateway, PromptAssembler
 
 __all__ = [
     "PLANNER_OUTPUT_CONTRACT",
@@ -91,6 +109,8 @@ __all__ = [
     "PLANNER_MAX_RATIONALE_CHARS",
     "PlannerShapeRejected",
     "assemble_dynamic_draft",
+    "PlannerResult",
+    "run_planner",
 ]
 
 #: Domain constant naming the authored-JSON grammar version this parser accepts.
@@ -740,4 +760,511 @@ def assemble_dynamic_draft(
         legacy_source_schema=None,
         legacy_source_config_digest=None,
         legacy_mapping_digest=None,
+    )
+
+
+# =========================================================================== #
+# Task 4 — bounded, budget-reserved dynamic Planner generation loop            #
+# =========================================================================== #
+#: The exact schema refs the loop persists into ``main``.
+_PROMPT_ASSEMBLY_SR = SchemaRef(name="PromptAssemblyRecord", version="1")
+_PLANNER_RUN_RECORD_SR = SchemaRef(name="PlannerRunRecord", version="1")
+
+#: Synthetic per-attempt issue codes for the non-parser/-shape/-validation outcomes.
+_A_BUDGET_REJECTED = "planner_budget_exhausted"
+_A_MODEL_ERROR = "planner_model_error"
+_A_TIMED_OUT = "planner_timed_out"
+
+
+class PlannerResult(NamedTuple):
+    """The internal carrier :func:`run_planner` returns.
+
+    ``record`` is the persisted :class:`PlannerRunRecord`; ``record_ref`` pairs
+    ``PlannerRunRecord@1`` with its stored ``main``-namespace locator. ``draft`` /
+    ``report`` are the admissible candidate (``candidate_ready``) or materialized
+    fallback (``fallback_materialized``) draft + Phase-1 report, or ``None`` when the
+    run halted with no admissible/fallback plan.
+    """
+
+    record: PlannerRunRecord
+    record_ref: TypedPayloadRef
+    draft: PlanDraft | None
+    report: PlanValidationReport | None
+
+
+def _planner_worker_roster(snapshot: WorkerCatalogSnapshot) -> list[dict[str, Any]]:
+    """Deterministic trusted projection of the ``dynamic_allowed`` final workers only.
+
+    A ``final`` worker is exactly a ``dynamic_allowed`` worker (Phase-1 invariant), so
+    the roster the Planner may select from excludes every ``compat.*`` /
+    ``static_legacy_only`` mirror. Sorted by worker id for a byte-stable projection.
+    """
+    rows: list[dict[str, Any]] = []
+    for w in snapshot.workers:
+        if w.catalog_role != "final":
+            continue
+        rows.append(
+            {
+                "worker_id": w.id,
+                "lane": w.lane,
+                "persona": w.persona,
+                "params_schema_ref": w.params_schema_ref.key if w.params_schema_ref else None,
+                "inputs": sorted([ib.name, ib.schema_ref.key] for ib in w.inputs),
+                "outputs": sorted([ob.name, ob.schema_ref.key] for ob in w.outputs),
+            }
+        )
+    rows.sort(key=lambda r: r["worker_id"])
+    return rows
+
+
+def _planner_trusted_digests(
+    *,
+    request: OrchestrationRequest,
+    remaining_tokens: int,
+    remaining_llm_invocations: int,
+    roster: list[dict[str, Any]],
+    prior_issue_codes: tuple[str, ...],
+) -> tuple[NamedEvidenceDigest, ...]:
+    """The trusted-channel named digests (goal + remaining budget + roster + prior
+    codes on k>1), canonically ordered by name — never raw untrusted narrative."""
+    named: dict[str, str] = {
+        "goal": content_digest(request.goal),
+        "budget_headroom": content_digest(
+            {"tokens": remaining_tokens, "llm_invocations": remaining_llm_invocations}
+        ),
+        "worker_roster": content_digest(roster),
+    }
+    if prior_issue_codes:
+        named["prior_issue_codes"] = content_digest(sorted(set(prior_issue_codes)))
+    return tuple(NamedEvidenceDigest(name=n, digest=named[n]) for n in sorted(named))
+
+
+def _planner_untrusted_blocks(
+    *, context: ContextSnapshot, context_snapshot_ref: PayloadRef
+) -> tuple[PromptUntrustedBlockRef, ...]:
+    """The ordered untrusted channel: one ``ContextSnapshot``-narrative block *ref*
+    (never bytes). Untrusted content can only enter the prompt as a data reference,
+    so hostile narrative can at most shape authored low-authority fields."""
+    typed = TypedPayloadRef(
+        schema_ref=SchemaRef(name="ContextSnapshot", version=context.schema_version),
+        payload_ref=context_snapshot_ref,
+    )
+    block = PromptUntrustedBlockRef.build(
+        ordinal=1,
+        payload_ref=typed,
+        media_type="application/json",
+        rendered_length=len(context.content_digest),
+    )
+    return (block,)
+
+
+def _classify_planner_output(
+    raw_text: str,
+    *,
+    request: OrchestrationRequest,
+    context: ContextSnapshot,
+    context_snapshot_ref: PayloadRef,
+    catalog: WorkerCatalogSnapshot,
+    schema_registry: SchemaRegistry,
+    draft_id: LogicalId,
+    run_id: NonEmptyStr,
+    remaining_tokens: int,
+    remaining_llm_invocations: int,
+) -> tuple[
+    str, tuple[str, ...], str | None, str | None, PlanDraft | None, PlanValidationReport | None
+]:
+    """Parse -> assemble DYNAMIC draft -> Phase-1 validate, returning the reviewed
+    per-attempt classification ``(outcome, issue_codes, candidate_digest,
+    report_digest, draft, report)``.
+
+    ``PlannerShapeRejected`` (including the assembly budget-headroom shape code) is a
+    generation-side *shape* rejection; ledger exhaustion (a distinct ``budget_rejected``
+    outcome) is handled by the caller's reserve step, never here. A plain
+    ``ValueError`` from assembly is a caller wiring error and is deliberately not
+    caught.
+    """
+    try:
+        envelope = parse_planner_output(raw_text)
+    except PlannerOutputRejected as exc:
+        return "parse_rejected", exc.issue_codes, None, None, None, None
+
+    try:
+        draft = assemble_dynamic_draft(
+            envelope,
+            request=request,
+            context=context,
+            context_snapshot_ref=context_snapshot_ref,
+            catalog=catalog,
+            schema_registry=schema_registry,
+            draft_id=draft_id,
+            run_id=run_id,
+            remaining_tokens=remaining_tokens,
+            remaining_llm_invocations=remaining_llm_invocations,
+        )
+    except PlannerShapeRejected as exc:
+        return "shape_rejected", exc.issue_codes, None, None, None, None
+
+    report = validate_plan_draft(
+        draft,
+        request=request,
+        context=context,
+        catalog=catalog,
+        schema_registry=schema_registry,
+    )
+    if report.valid:
+        return (
+            "draft_admissible",
+            (),
+            report.candidate_plan_digest,
+            report.semantic_digest(),
+            draft,
+            report,
+        )
+    codes = tuple(i.code for i in report.issues)
+    return "validation_rejected", codes, None, report.semantic_digest(), None, report
+
+
+def _mark_fallback_invalid(
+    attempts: list[PlannerAttemptRecord], marker: str
+) -> None:
+    """Record a ``fallback_invalid:<code>`` marker on the last attempt so a failed /
+    unknown fallback is never a silent halt (there is no separate terminal-check
+    slot on :class:`PlannerRunRecord`, and the last generation attempt is never
+    ``draft_admissible`` in the halt branch)."""
+    if not attempts:
+        return
+    last = attempts[-1]
+    if marker in last.issue_codes:
+        return
+    attempts[-1] = last.model_copy(update={"issue_codes": last.issue_codes + (marker,)})
+
+
+def _resolve_planner_fallback(
+    *,
+    request: OrchestrationRequest,
+    context: ContextSnapshot,
+    context_snapshot_ref: PayloadRef,
+    catalog: WorkerCatalogSnapshot,
+    schema_registry: SchemaRegistry,
+    presets: PlanPresetRegistry,
+    draft_id: LogicalId,
+    run_id: NonEmptyStr,
+    attempts: list[PlannerAttemptRecord],
+) -> tuple[
+    str, str | None, str | None, PlanDraft | None, PlanValidationReport | None
+]:
+    """The request-level fallback rule made executable.
+
+    Returns ``(terminal_outcome, final_candidate_digest, fallback_preset_id, draft,
+    report)``. A missing fallback field, an unknown preset id, a non-materializable
+    preset or an invalid fallback draft all yield ``halted_no_fallback`` — never a
+    silent substitute — with a ``fallback_invalid:*`` marker recorded on the last
+    attempt for the non-trivial failures.
+    """
+    if request.fallback_preset_id is None:
+        return "halted_no_fallback", None, None, None, None
+
+    try:
+        preset = presets.get(request.fallback_preset_id)
+    except PlanPresetError:
+        _mark_fallback_invalid(attempts, "fallback_invalid:unknown_preset")
+        return "halted_no_fallback", None, None, None, None
+
+    try:
+        fb_draft = materialize_fallback_draft(
+            preset,
+            request=request,
+            context=context,
+            context_snapshot_ref=context_snapshot_ref,
+            catalog=catalog,
+            schema_registry=schema_registry,
+            draft_id=draft_id,
+            run_id=run_id,
+        )
+    except PlanPresetError:
+        _mark_fallback_invalid(attempts, "fallback_invalid:preset_not_materializable")
+        return "halted_no_fallback", None, None, None, None
+
+    fb_report = validate_plan_draft(
+        fb_draft,
+        request=request,
+        context=context,
+        catalog=catalog,
+        schema_registry=schema_registry,
+    )
+    if not fb_report.valid:
+        code = fb_report.issues[0].code if fb_report.issues else "invalid_draft"
+        _mark_fallback_invalid(attempts, f"fallback_invalid:{code}")
+        return "halted_no_fallback", None, None, None, None
+
+    return (
+        "fallback_materialized",
+        fb_report.candidate_plan_digest,
+        request.fallback_preset_id,
+        fb_draft,
+        fb_report,
+    )
+
+
+def run_planner(
+    *,
+    request: OrchestrationRequest,
+    context: ContextSnapshot,
+    context_snapshot_ref: PayloadRef,
+    catalog_runtime: CatalogRuntime,
+    schema_registry: SchemaRegistry,
+    planner_spec: PlannerSpec,
+    presets: PlanPresetRegistry,
+    budget: BudgetLedger,
+    prompt_assembler: PromptAssembler,
+    model_gateway: ModelGateway,
+    payload_store: PayloadStore,
+    clock: AuthoritativeClock,
+    run_id: NonEmptyStr,
+    draft_id: LogicalId,
+) -> PlannerResult:
+    """Run the bounded, budget-reserved dynamic-Planner generation loop.
+
+    Per attempt ``k = 1..planner_spec.max_generation_attempts``: (1) reserve one
+    planner-scope allocation (ledger exhaustion => ``budget_rejected`` + immediate
+    terminal, no free retry); (2) assemble the prompt (trusted planner materials +
+    goal + remaining budget + dynamic-worker roster + prior issue codes; untrusted =
+    ordered ContextSnapshot narrative block refs) and persist ONE
+    ``PromptAssemblyRecord`` to ``main`` *before* invocation; (3) invoke the gateway
+    exactly once, bounded by ``attempt_timeout_sec``; (4) parse -> assemble DYNAMIC
+    draft -> Phase-1 validate; (5) settle the reservation with actual usage (release
+    the remainder). The first ``draft_admissible`` draft ends the loop as
+    ``candidate_ready``; exhaustion resolves the request-persisted fallback preset
+    (only if valid) else ``halted_no_fallback``.
+
+    Strictly upstream of admission: it never calls ``PlanAdmissionService``, never
+    freezes and never emits a plan-lifecycle ``RunEvent``. The persisted
+    :class:`PlannerRunRecord` (``record_ref`` = ``PlannerRunRecord@1`` in ``main``) is
+    returned inside a :class:`PlannerResult`.
+    """
+    # -- runtime context-ref precondition (trusted wiring, not the planner) --- #
+    if context_snapshot_ref.namespace != "main":
+        raise ValueError(
+            "context_snapshot_ref must use namespace='main'; got "
+            f"{context_snapshot_ref.namespace!r}"
+        )
+    if context_snapshot_ref.content_digest != context.content_digest:
+        raise ValueError(
+            "context_snapshot_ref.content_digest does not bind the supplied "
+            "ContextSnapshot content"
+        )
+
+    request_digest = request.semantic_digest()
+    snapshot = catalog_runtime.snapshot
+    roster = _planner_worker_roster(snapshot)
+    untrusted_blocks = _planner_untrusted_blocks(
+        context=context, context_snapshot_ref=context_snapshot_ref
+    )
+    # trusted planner materials, resolved by exact ref + content-digest identity.
+    system_material = catalog_runtime.text(planner_spec.system_prompt_ref)
+    skill_materials = tuple(catalog_runtime.text(sb.skill_ref) for sb in planner_spec.skills)
+    guardrail_materials = tuple(catalog_runtime.text(g) for g in planner_spec.guardrail_refs)
+
+    attempts: list[PlannerAttemptRecord] = []
+    prior_issue_codes: tuple[str, ...] = ()
+    admissible_draft: PlanDraft | None = None
+    admissible_report: PlanValidationReport | None = None
+    admissible_candidate: str | None = None
+
+    for k in range(1, planner_spec.max_generation_attempts + 1):
+        started_at = clock.now()
+
+        # -- step 1: reserve the attempt (ledger exhaustion => budget_rejected) - #
+        try:
+            reservation = budget.reserve_planner(
+                request_id=request.request_id,
+                request_digest=request_digest,
+                attempt=k,
+                tokens=planner_spec.attempt_token_reservation,
+                llm_invocations=1,
+                idempotency_key=f"{run_id}:planner:reserve:{k}",
+            )
+        except BudgetError:
+            finished_at = clock.now()
+            attempts.append(
+                PlannerAttemptRecord(
+                    attempt=k,
+                    outcome="budget_rejected",
+                    issue_codes=(_A_BUDGET_REJECTED,),
+                    reservation_id=f"planner.attempt.{k}.unreserved",
+                    started_at=started_at,
+                    finished_at=finished_at,
+                )
+            )
+            prior_issue_codes = (_A_BUDGET_REJECTED,)
+            break  # immediate terminal branch — no free retry
+
+        # -- step 2: assemble + persist ONE prompt record BEFORE invocation ---- #
+        remaining = budget.available()
+        trusted = _planner_trusted_digests(
+            request=request,
+            remaining_tokens=remaining.tokens,
+            remaining_llm_invocations=remaining.llm_invocations,
+            roster=roster,
+            prior_issue_codes=prior_issue_codes,
+        )
+        assembled = prompt_assembler.assemble(
+            plan_digest=request_digest,
+            node_id=f"planner.attempt.{k}",
+            worker_id=planner_spec.planner_id,
+            system_prompt=system_material,
+            skills=skill_materials,
+            guardrails=guardrail_materials,
+            trusted_input_digests=trusted,
+            untrusted_blocks=untrusted_blocks,
+        )
+        prompt_ref = TypedPayloadRef(
+            schema_ref=_PROMPT_ASSEMBLY_SR,
+            payload_ref=payload_store.put(
+                _PROMPT_ASSEMBLY_SR,
+                assembled.prompt_record,
+                registry_digest=schema_registry.registry_digest,
+                namespace="main",
+                idempotency_key=f"{run_id}:planner:prompt:{k}",
+            ),
+        )
+
+        # -- step 3: exactly one model invocation, bounded by attempt_timeout_sec  #
+        outcome: str
+        codes: tuple[str, ...] = ()
+        candidate_digest: str | None = None
+        report_digest: str | None = None
+        result = None
+        invoke_start = clock.now()
+        try:
+            result = model_gateway.invoke(assembled, prompt_assembly_ref=prompt_ref)
+        except Exception:  # provider exception -> model_error (no output produced)
+            outcome = "model_error"
+            codes = (_A_MODEL_ERROR,)
+        else:
+            elapsed = (clock.now() - invoke_start).total_seconds()
+            if elapsed > planner_spec.attempt_timeout_sec:
+                # wall-clock classification (v1): the sync gateway has already
+                # returned, so a truly-hung call is not preempted here — a real
+                # deadline must be enforced inside the gateway adapter (mirroring
+                # Phase 2's provider-raised timeout signal). See report.
+                outcome = "timed_out"
+                codes = (_A_TIMED_OUT,)
+                result = None  # a timed-out call's output is discarded
+            else:
+                # -- step 4: classify parse -> shape -> validation ------------- #
+                (
+                    outcome,
+                    codes,
+                    candidate_digest,
+                    report_digest,
+                    cand_draft,
+                    cand_report,
+                ) = _classify_planner_output(
+                    result.rendered_text,
+                    request=request,
+                    context=context,
+                    context_snapshot_ref=context_snapshot_ref,
+                    catalog=snapshot,
+                    schema_registry=schema_registry,
+                    draft_id=draft_id,
+                    run_id=run_id,
+                    remaining_tokens=remaining.tokens,
+                    remaining_llm_invocations=remaining.llm_invocations,
+                )
+                if outcome == "draft_admissible":
+                    admissible_draft = cand_draft
+                    admissible_report = cand_report
+                    admissible_candidate = candidate_digest
+
+        # -- step 5: settle actual usage (release the remainder) --------------- #
+        if result is not None:
+            used = min(
+                result.input_tokens + result.output_tokens,
+                planner_spec.attempt_token_reservation,
+            )
+            budget.settle(
+                reservation.reservation_id,
+                actual_tokens=used,
+                actual_llm_invocations=1,
+                idempotency_key=f"{run_id}:planner:settle:{k}",
+            )
+        else:
+            budget.release(
+                reservation.reservation_id,
+                reason=outcome,
+                idempotency_key=f"{run_id}:planner:release:{k}",
+            )
+
+        finished_at = clock.now()
+        attempts.append(
+            PlannerAttemptRecord(
+                attempt=k,
+                outcome=outcome,
+                issue_codes=codes,
+                candidate_plan_digest=candidate_digest,
+                validation_report_digest=report_digest,
+                prompt_assembly_ref=prompt_ref,
+                reservation_id=reservation.reservation_id,
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+        )
+        prior_issue_codes = codes
+
+        if outcome == "draft_admissible":
+            break
+
+    # -- terminal resolution --------------------------------------------------- #
+    if admissible_draft is not None:
+        terminal_outcome = "candidate_ready"
+        final_candidate = admissible_candidate
+        fallback_id: str | None = None
+        final_draft: PlanDraft | None = admissible_draft
+        final_report: PlanValidationReport | None = admissible_report
+    else:
+        (
+            terminal_outcome,
+            final_candidate,
+            fallback_id,
+            final_draft,
+            final_report,
+        ) = _resolve_planner_fallback(
+            request=request,
+            context=context,
+            context_snapshot_ref=context_snapshot_ref,
+            catalog=snapshot,
+            schema_registry=schema_registry,
+            presets=presets,
+            draft_id=draft_id,
+            run_id=run_id,
+            attempts=attempts,
+        )
+
+    record = PlannerRunRecord(
+        run_id=run_id,
+        request_id=request.request_id,
+        request_digest=request_digest,
+        context_content_digest=context.content_digest,
+        planner_spec_digest=planner_spec.semantic_digest(),
+        catalog_digest=catalog_runtime.catalog_digest,
+        schema_registry_digest=schema_registry.registry_digest,
+        attempts=tuple(attempts),
+        terminal_outcome=terminal_outcome,
+        fallback_preset_id=fallback_id,
+        final_candidate_plan_digest=final_candidate,
+        created_at=clock.now(),
+    )
+    record_ref = TypedPayloadRef(
+        schema_ref=_PLANNER_RUN_RECORD_SR,
+        payload_ref=payload_store.put(
+            _PLANNER_RUN_RECORD_SR,
+            record,
+            registry_digest=schema_registry.registry_digest,
+            namespace="main",
+            idempotency_key=f"{run_id}:planner:record",
+        ),
+    )
+    return PlannerResult(
+        record=record, record_ref=record_ref, draft=final_draft, report=final_report
     )

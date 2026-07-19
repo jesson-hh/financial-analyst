@@ -61,6 +61,7 @@ __all__ = [
     "AvailableBudget",
     "ReservePlanArgs",
     "ReserveNodeArgs",
+    "ReservePlannerArgs",
     "SettleArgs",
     "ReleaseArgs",
     "BudgetOperation",
@@ -157,6 +158,27 @@ class ReserveNodeArgs(_StrictModel):
     reserved_concurrency: PositiveInt
 
 
+class ReservePlannerArgs(_StrictModel):
+    """Phase 7 (Task 4) additive op: reserve one dynamic-Planner *generation attempt*.
+
+    Mints a fresh ``scope_type='planner'`` reservation drawn from the run budget
+    (never a plan/node reservation and never an active plan — see the fold /
+    validator branches). Like ``reserve_plan`` / ``reserve_node`` it carries **no**
+    reservation id for the reservation being created (the sink assigns it). The
+    reservation's ``candidate_plan_digest`` binds ``request_digest`` — the request's
+    semantic digest, the only stable pre-candidate digest; ``scope_type='planner'``
+    disambiguates it from a real candidate plan. ``reserved_concurrency`` is the
+    single transient generation slot (always ``1``).
+    """
+
+    request_id: NonEmptyStr
+    request_digest: DigestHex
+    attempt: PositiveInt
+    reserved_tokens: NonNegativeInt
+    reserved_llm_invocations: NonNegativeInt
+    reserved_concurrency: PositiveInt
+
+
 class SettleArgs(_StrictModel):
     reservation_id: NonEmptyStr  # reference to the reservation being settled
     actual_tokens: NonNegativeInt
@@ -168,7 +190,15 @@ class ReleaseArgs(_StrictModel):
     reason: NonEmptyStr
 
 
-BudgetOperation = Literal["reserve_plan", "reserve_node", "settle", "release"]
+# NOTE (Phase 7 · Task 4): ``reserve_planner`` is the *one* sanctioned additive
+# extension of this Phase-2-owned closed vocabulary (mirroring the Phase 4 events.py
+# ruling): a parallel Planner-side ledger would break the one-ledger constraint, so
+# the new closed op lands here strictly additively — no existing op's behavior is
+# changed. The Phase-7 handoff guard that froze this set at the original four is
+# flipped additively (absence -> presence-in-phase7) per the Phase 4 guard-flip rule.
+BudgetOperation = Literal[
+    "reserve_plan", "reserve_node", "settle", "release", "reserve_planner"
+]
 
 #: The closed operation -> args-type matrix.
 _OP_ARGS: dict[str, type[_StrictModel]] = {
@@ -176,6 +206,7 @@ _OP_ARGS: dict[str, type[_StrictModel]] = {
     "reserve_node": ReserveNodeArgs,
     "settle": SettleArgs,
     "release": ReleaseArgs,
+    "reserve_planner": ReservePlannerArgs,
 }
 
 
@@ -189,7 +220,9 @@ class BudgetTransitionCommand(_StrictModel):
     """
 
     operation: BudgetOperation
-    semantic_args: ReservePlanArgs | ReserveNodeArgs | SettleArgs | ReleaseArgs
+    semantic_args: (
+        ReservePlanArgs | ReserveNodeArgs | SettleArgs | ReleaseArgs | ReservePlannerArgs
+    )
     idempotency_key: NonEmptyStr
 
     @model_validator(mode="after")
@@ -350,6 +383,27 @@ def fold_budget_events(events: tuple[BudgetEvent, ...]) -> LedgerState:
             )
             reservations[res.reservation_id] = res
             parent_of[res.reservation_id] = args.plan_reservation_id
+        elif cmd.operation == "reserve_planner":
+            # Phase 7 additive: a planner-scope reservation drawn directly from the
+            # run budget. It has no parent plan and — deliberately — NO active_plan
+            # index entry, so it can never satisfy get_active_plan (invariant 3).
+            res = _build_reservation(
+                reservation_id=ev.reservation_id,
+                ledger_id=ev.ledger_id,
+                run_id=ev.run_id,
+                request_id=args.request_id,
+                candidate_plan_digest=args.request_digest,
+                scope_type="planner",
+                scope_id=f"planner.attempt.{args.attempt}",
+                reserved=(
+                    args.reserved_tokens,
+                    args.reserved_llm_invocations,
+                    args.reserved_concurrency,
+                ),
+                status="reserved",
+                reserved_at=ev.occurred_at,
+            )
+            reservations[res.reservation_id] = res
         elif cmd.operation == "settle":
             prev = reservations[args.reservation_id]
             reservations[prev.reservation_id] = _build_reservation(
@@ -434,6 +488,31 @@ def compute_available(state: LedgerState, run_budget: RunBudget) -> AvailableBud
     )
 
 
+def _planner_run_available(state: LedgerState, run_budget: RunBudget) -> AvailableBudget:
+    """Phase 7 additive: run-level availability counting BOTH ``plan`` and
+    ``planner`` holds.
+
+    ``compute_available`` (unchanged) counts only ``plan``-scope holds — the plan's
+    execution pool. A planner *generation* reservation draws from the same run
+    budget, so its own admissibility must additionally subtract every outstanding
+    planner hold; otherwise a run could mint unbounded generation attempts past the
+    run maxima. Node reservations still draw from within their plan's pool and are
+    never double-counted here.
+    """
+    ut = ul = uc = 0
+    for res in state.reservations.values():
+        if res.scope_type in ("plan", "planner"):
+            t, l, c = _hold(res)
+            ut += t
+            ul += l
+            uc += c
+    return AvailableBudget(
+        tokens=run_budget.max_tokens - ut,
+        llm_invocations=run_budget.max_llm_invocations - ul,
+        concurrency=run_budget.max_concurrency - uc,
+    )
+
+
 def _plan_available(state: LedgerState, plan_reservation_id: str) -> tuple[int, int, int]:
     """A plan reservation's remaining pool for its child node reservations."""
     plan = state.reservations[plan_reservation_id]
@@ -506,6 +585,19 @@ def validate_budget_command(
             or args.reserved_concurrency > ac
         ):
             raise BudgetExceeded("node reservation exceeds the plan reservation")
+
+    elif op == "reserve_planner":
+        # Phase 7 additive: a fresh planner-scope reservation, admissible iff it fits
+        # the run budget net of every outstanding plan + planner hold. No active-plan
+        # uniqueness check — distinct generation attempts each mint their own
+        # (planner.attempt.k) scope and never register as an active plan.
+        avail = _planner_run_available(state, run_budget)
+        if (
+            args.reserved_tokens > avail.tokens
+            or args.reserved_llm_invocations > avail.llm_invocations
+            or args.reserved_concurrency > avail.concurrency
+        ):
+            raise BudgetExceeded("planner reservation exceeds the run budget")
 
     elif op == "settle":
         res = state.reservations.get(args.reservation_id)
@@ -639,6 +731,41 @@ class BudgetLedger:
                 reserved_tokens=tokens,
                 reserved_llm_invocations=llm_invocations,
                 reserved_concurrency=concurrency,
+            ),
+            idempotency_key=idempotency_key,
+        )
+        event = self._apply(command)
+        return self._state().reservations[event.reservation_id]
+
+    def reserve_planner(
+        self,
+        *,
+        request_id: str,
+        request_digest: str,
+        attempt: int,
+        tokens: int,
+        llm_invocations: int,
+        idempotency_key: str,
+    ) -> BudgetReservation:
+        """Phase 7 (Task 4) additive: reserve one dynamic-Planner generation attempt.
+
+        Mints a ``scope_type='planner'`` reservation (``scope_id=planner.attempt.k``,
+        ``reserved_concurrency=1``) drawn directly from the run budget net of every
+        plan + planner hold. ``candidate_plan_digest`` binds ``request_digest`` (the
+        request's semantic digest). Raises :class:`BudgetExceeded` when the run budget
+        cannot admit the attempt — the caller records that as a ``budget_rejected``
+        attempt and terminates the loop (no free retry). The reservation never
+        satisfies :meth:`get_active_plan` and never masquerades as a plan reservation.
+        """
+        command = BudgetTransitionCommand(
+            operation="reserve_planner",
+            semantic_args=ReservePlannerArgs(
+                request_id=request_id,
+                request_digest=request_digest,
+                attempt=attempt,
+                reserved_tokens=tokens,
+                reserved_llm_invocations=llm_invocations,
+                reserved_concurrency=1,
             ),
             idempotency_key=idempotency_key,
         )
