@@ -20,7 +20,9 @@ that the exact active bridge summaries' numeric bounds do not satisfy.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Literal
+
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from guanlan_v2.orchestration.catalog_runtime import (
     BridgeCatalogView,
@@ -28,8 +30,9 @@ from guanlan_v2.orchestration.catalog_runtime import (
     CatalogRuntime,
 )
 from guanlan_v2.orchestration.context import verify_context_runtime_requirements
-from guanlan_v2.orchestration.digest import content_digest
+from guanlan_v2.orchestration.digest import DigestHex, content_digest
 from guanlan_v2.orchestration.enums import (
+    DependencyPolicy,
     ExecutionKind,
     PlanSource,
     ToolCallRequirement,
@@ -52,9 +55,310 @@ if TYPE_CHECKING:
 __all__ = [
     "check_runtime_support",
     "CHECKER_VERSION",
+    # -- Phase 8 · Task 8 runtime profile v2 (Option-4 new model) ----------- #
+    "StaticRuntimeProfileV2",
+    "static_runtime_profile_v2",
+    "STATIC_RUNTIME_PROFILE_V2",
+    # -- Phase 8 · Task 8 v2 support analyzers (pure, I/O-free) -------------- #
+    "analyze_reducers",
+    "analyze_gates",
+    "analyze_retry_repair",
 ]
 
 CHECKER_VERSION = "static-runtime-checker-v1"
+
+
+# =========================================================================== #
+# Phase 8 · Task 8 — StaticRuntimeProfileV2 (the Option-4 profile widening)    #
+# =========================================================================== #
+#
+# Why a NEW model rather than a v2 INSTANCE of ``StaticRuntimeProfile``
+# --------------------------------------------------------------------
+# The Phase-2 ``StaticRuntimeProfile`` pins ``profile_version: Literal["1"]``,
+# every ``supports_* : Literal[False]`` and ``max_attempts_supported: Literal[1]``,
+# and a ``model_validator`` that rejects any deviation — a v2 *instance* is
+# structurally impossible. This mirrors the Phase-5 BOOTSTRAP ruling exactly
+# (bootstrap.py ``BootstrapRuntimeProfile``): the reviewed **Option 4** resolution
+# of a profile widening is a *distinct registered model* with its own closed
+# Literals, NOT a Literal-widening of the frozen v1 schema (which four golden
+# manifests pin). Plan clause (f): ``profile_id`` stays ``"static-runtime"`` and
+# the version becomes ``"2"`` — ``bootstrap-runtime`` is a distinct ``profile_id``,
+# so ``"2"`` is free. The Phase-2 v1 constant / schema / digest and every golden
+# that pins them stay byte-identical; this model is defined here (a Task-8 file)
+# and deliberately NOT added to ``PHASE2_RUNTIME_MODELS`` / any registry golden
+# (it is a checker *input*, resolved by value like v1 is passed to
+# :func:`check_runtime_support`, never SchemaRef-resolved), so no golden moves.
+_V2_PLAN_SOURCES: tuple[PlanSource, ...] = (
+    PlanSource.PRESET, PlanSource.PRESET_FALLBACK, PlanSource.DYNAMIC,
+)
+_V2_EXECUTION_KINDS: tuple[ExecutionKind, ...] = (
+    ExecutionKind.LLM, ExecutionKind.DETERMINISTIC,
+)
+_V2_DEPENDENCY_POLICIES: tuple[DependencyPolicy, ...] = (
+    DependencyPolicy.BLOCK, DependencyPolicy.DEGRADE, DependencyPolicy.SKIP,
+)
+_V2_ZERO_DIGEST = "0" * 64
+
+
+class StaticRuntimeProfileV2(BaseModel):
+    """The closed v2 static-runtime feature matrix (self-sealed ``profile_digest``).
+
+    Extends the v1 admission matrix by exactly the reviewed v2 unlocks —
+    ``debates``, deterministic ``reducers`` / ``multi_writer`` slots, ``gate_metrics``,
+    ``max_attempts`` up to ``max_attempts_limit=2`` and bounded schema repair
+    (``schema_repairs_per_attempt=1``). Everything the v1 checker reads is present
+    with a bit-equal value except the five explicitly-unlocked switches; **conditions
+    and stop conditions stay ``Literal[False]``** (they remain rejected before
+    reservation under v2). Mirrors the Phase-1 strict config (``extra='forbid'`` /
+    ``strict=True`` / ``frozen=True``) without ``ContractModel`` identity, so the
+    Phase-1/2 completeness firewalls never discover it. ``profile_digest`` seals the
+    whole matrix over the same canonical projection idiom as v1.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    schema_version: Literal["1"] = "1"
+    profile_id: Literal["static-runtime"] = "static-runtime"
+    profile_version: Literal["2"] = "2"
+
+    supported_plan_sources: tuple[PlanSource, ...] = _V2_PLAN_SOURCES
+    supported_execution_kinds: tuple[ExecutionKind, ...] = _V2_EXECUTION_KINDS
+    supported_dependency_policies: tuple[DependencyPolicy, ...] = _V2_DEPENDENCY_POLICIES
+    supported_cardinalities: tuple[str, ...] = ("one", "many")
+
+    supports_bootstrap: Literal[False] = False
+    supports_conditions: Literal[False] = False
+    supports_reducers: Literal[True] = True
+    supports_multi_writer: Literal[True] = True
+    supports_debates: Literal[True] = True
+    supports_gates: Literal[True] = True
+    supports_stop_conditions: Literal[False] = False
+    supports_retries: Literal[True] = True
+    max_attempts_supported: Literal[2] = 2
+    max_attempts_limit: Literal[2] = 2
+    schema_repairs_per_attempt: Literal[1] = 1
+
+    bridge_pre_input_modes: tuple[str, ...] = ("none", "memory_refs_v1")
+    bridge_lifecycle: Literal["static_prefetch_v1"] = "static_prefetch_v1"
+    max_prompt_assemblies_per_llm_node: Literal[2] = 2
+    max_model_invocations_per_llm_node: Literal[2] = 2
+
+    profile_digest: DigestHex
+
+    def _semantic_payload(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "profile_id": self.profile_id,
+            "profile_version": self.profile_version,
+            "supported_plan_sources": [s.value for s in self.supported_plan_sources],
+            "supported_execution_kinds": [k.value for k in self.supported_execution_kinds],
+            "supported_dependency_policies": [
+                p.value for p in self.supported_dependency_policies
+            ],
+            "supported_cardinalities": list(self.supported_cardinalities),
+            "supports_bootstrap": self.supports_bootstrap,
+            "supports_conditions": self.supports_conditions,
+            "supports_reducers": self.supports_reducers,
+            "supports_multi_writer": self.supports_multi_writer,
+            "supports_debates": self.supports_debates,
+            "supports_gates": self.supports_gates,
+            "supports_stop_conditions": self.supports_stop_conditions,
+            "supports_retries": self.supports_retries,
+            "max_attempts_supported": self.max_attempts_supported,
+            "max_attempts_limit": self.max_attempts_limit,
+            "schema_repairs_per_attempt": self.schema_repairs_per_attempt,
+            "bridge_pre_input_modes": list(self.bridge_pre_input_modes),
+            "bridge_lifecycle": self.bridge_lifecycle,
+            "max_prompt_assemblies_per_llm_node": self.max_prompt_assemblies_per_llm_node,
+            "max_model_invocations_per_llm_node": self.max_model_invocations_per_llm_node,
+        }
+
+    @model_validator(mode="after")
+    def _verify(self) -> "StaticRuntimeProfileV2":
+        if tuple(sorted(s.value for s in self.supported_plan_sources)) != tuple(
+            sorted(s.value for s in _V2_PLAN_SOURCES)
+        ):
+            raise ValueError("supported_plan_sources must equal the closed v2 matrix")
+        if PlanSource.BOOTSTRAP in self.supported_plan_sources:
+            raise ValueError("BOOTSTRAP is never a supported static plan source")
+        if tuple(sorted(k.value for k in self.supported_execution_kinds)) != tuple(
+            sorted(k.value for k in _V2_EXECUTION_KINDS)
+        ):
+            raise ValueError("supported_execution_kinds must equal the closed v2 matrix")
+        if tuple(sorted(p.value for p in self.supported_dependency_policies)) != tuple(
+            sorted(p.value for p in _V2_DEPENDENCY_POLICIES)
+        ):
+            raise ValueError("supported_dependency_policies must equal the closed v2 matrix")
+        if tuple(sorted(self.supported_cardinalities)) != ("many", "one"):
+            raise ValueError("supported_cardinalities must equal {'one','many'}")
+        if tuple(sorted(self.bridge_pre_input_modes)) != ("memory_refs_v1", "none"):
+            raise ValueError("bridge_pre_input_modes must equal {'none','memory_refs_v1'}")
+        if self.profile_digest != content_digest(self._semantic_payload()):
+            raise ValueError("declared profile_digest does not match the canonical matrix")
+        return self
+
+    @classmethod
+    def build(cls, **fields: Any) -> "StaticRuntimeProfileV2":
+        stub = {
+            "schema_version": "1",
+            "profile_id": "static-runtime",
+            "profile_version": "2",
+            "supported_plan_sources": _V2_PLAN_SOURCES,
+            "supported_execution_kinds": _V2_EXECUTION_KINDS,
+            "supported_dependency_policies": _V2_DEPENDENCY_POLICIES,
+            "supported_cardinalities": ("one", "many"),
+            "supports_bootstrap": False,
+            "supports_conditions": False,
+            "supports_reducers": True,
+            "supports_multi_writer": True,
+            "supports_debates": True,
+            "supports_gates": True,
+            "supports_stop_conditions": False,
+            "supports_retries": True,
+            "max_attempts_supported": 2,
+            "max_attempts_limit": 2,
+            "schema_repairs_per_attempt": 1,
+            "bridge_pre_input_modes": ("none", "memory_refs_v1"),
+            "bridge_lifecycle": "static_prefetch_v1",
+            "max_prompt_assemblies_per_llm_node": 2,
+            "max_model_invocations_per_llm_node": 2,
+        }
+        stub.update(fields)
+        provisional = cls.model_construct(**stub, profile_digest=_V2_ZERO_DIGEST)
+        stub["profile_digest"] = content_digest(provisional._semantic_payload())
+        return cls(**stub)
+
+
+def static_runtime_profile_v2() -> StaticRuntimeProfileV2:
+    """The single canonical static-runtime v2 profile (a fresh, equal instance)."""
+    return StaticRuntimeProfileV2.build()
+
+
+#: the canonical exported v2 profile instance (plan Task 8: ``STATIC_RUNTIME_PROFILE_V2``).
+STATIC_RUNTIME_PROFILE_V2: StaticRuntimeProfileV2 = static_runtime_profile_v2()
+
+
+# =========================================================================== #
+# Phase 8 · Task 8 — the v2 support analyzers (pure, I/O-free)                 #
+# =========================================================================== #
+# Each is a pure function of (already Phase-1-valid draft, resolved catalog view)
+# run BEFORE reservation, exactly like every Phase-2 analyzer. They express the
+# runtime-support-level checks the v1 checker used to blanket-reject: when the v2
+# profile *admits* a feature, these validate its runtime well-formedness instead
+# of rejecting it outright. They never mutate, never touch a store/budget, and
+# never re-derive Phase-1 validity (Phase 1 already rejected an unreduced
+# multi-writer slot, an unknown reducer/gate ref kind, an unregistered reducer
+# output schema, and every debate-coherence violation).
+
+
+def _material_kind(catalog: CatalogRuntime, ref) -> str | None:
+    """The catalog material kind for ``ref`` (exact identity), or ``None`` if absent."""
+    try:
+        return catalog.text(ref).kind
+    except CatalogMaterialError:
+        return None
+
+
+def analyze_reducers(
+    draft: "PlanDraft", *, catalog: CatalogRuntime
+) -> tuple[RuntimeSupportIssue, ...]:
+    """Runtime support for the v2 deterministic multi-writer reducers.
+
+    Every multi-writer slot must have exactly one :class:`ReducerCfg` whose
+    ``reducer_ref`` resolves to a catalog ``kind="reducer"`` material and whose
+    ``producer_node_ids`` equal the slot's writers (a runtime-support mirror of the
+    Phase-1 structural check, expressed in the runtime-support vocabulary). Emits
+    canonically stable issues; empty iff every multi-writer slot is well-reduced.
+    """
+    issues: list[RuntimeSupportIssue] = []
+    slot_writers: dict[str, list[str]] = {}
+    for node in draft.nodes:
+        slot_writers.setdefault(node.writes_slot, []).append(node.id)
+
+    reducers_by_slot: dict[str, list] = {}
+    for red in draft.reducers:
+        reducers_by_slot.setdefault(red.slot, []).append(red)
+
+    # every multi-writer slot needs exactly one reducer.
+    for slot, writers in sorted(slot_writers.items()):
+        if len(writers) <= 1:
+            continue
+        reds = reducers_by_slot.get(slot, [])
+        if len(reds) != 1:
+            issues.append(_issue(
+                "reducer_missing_or_ambiguous", f"draft.reducers[slot={slot}]",
+                f"multi-writer slot {slot!r} (writers {sorted(writers)}) requires exactly one "
+                f"ReducerCfg; found {len(reds)}"))
+
+    for red in draft.reducers:
+        writers = sorted(slot_writers.get(red.slot, ()))
+        kind = _material_kind(catalog, red.reducer_ref)
+        if kind is None:
+            issues.append(_issue(
+                "reducer_ref_unresolved", "ReducerCfg.reducer_ref",
+                f"reducer {red.id!r} reducer_ref {red.reducer_ref.id}@{red.reducer_ref.version} "
+                "does not resolve to a catalog material at its exact identity"))
+        elif kind != "reducer":
+            issues.append(_issue(
+                "reducer_ref_wrong_kind", "ReducerCfg.reducer_ref",
+                f"reducer {red.id!r} reducer_ref resolves to a {kind!r} material, not a "
+                "'reducer' material"))
+        if sorted(red.producer_node_ids) != writers:
+            issues.append(_issue(
+                "reducer_producers_mismatch", "ReducerCfg.producer_node_ids",
+                f"reducer {red.id!r} producer_node_ids {sorted(red.producer_node_ids)} do not "
+                f"equal slot {red.slot!r} writers {writers}"))
+    return tuple(sorted(issues, key=lambda i: i.sort_key))
+
+
+def analyze_gates(
+    draft: "PlanDraft", *, catalog: CatalogRuntime
+) -> tuple[RuntimeSupportIssue, ...]:
+    """Runtime support for the v2 honesty gates over catalog-owned gate metrics.
+
+    Every :class:`GateCfg.metric` must resolve to a ``kind="gate_metric"`` catalog
+    material at its exact identity. A blocking gate with ``unavailable_policy="fail"``
+    is well-formed (it is *run-blocking* by design — no issue); this analyzer only
+    rejects a metric ref that does not resolve to a gate-metric material.
+    """
+    issues: list[RuntimeSupportIssue] = []
+    for gate in draft.gates:
+        kind = _material_kind(catalog, gate.metric)
+        if kind is None:
+            issues.append(_issue(
+                "gate_metric_unresolved", "GateCfg.metric",
+                f"gate {gate.id!r} metric {gate.metric.id}@{gate.metric.version} does not "
+                "resolve to a catalog material at its exact identity"))
+        elif kind != "gate_metric":
+            issues.append(_issue(
+                "gate_metric_wrong_kind", "GateCfg.metric",
+                f"gate {gate.id!r} metric resolves to a {kind!r} material, not a "
+                "'gate_metric' material"))
+    return tuple(sorted(issues, key=lambda i: i.sort_key))
+
+
+def analyze_retry_repair(
+    draft: "PlanDraft", *, profile: StaticRuntimeProfileV2
+) -> tuple[RuntimeSupportIssue, ...]:
+    """Runtime support for v2 ``max_attempts`` (cap = ``profile.max_attempts_limit``).
+
+    Every node's ``max_attempts`` must be ``<= profile.max_attempts_limit`` (the
+    reviewed cap of 2). The per-attempt LLM-invocation upper bound
+    (``max_attempts × (1 + schema_repairs_per_attempt)`` for an LLM node, zero for a
+    deterministic node) is the runner's reservation formula — it needs the catalog
+    execution kind and so is computed there (see
+    :func:`~guanlan_v2.orchestration.worker.retry_llm_invocation_upper_bound`); this
+    pure analyzer, per its ``(draft, profile)`` signature, checks only the cap.
+    """
+    issues: list[RuntimeSupportIssue] = []
+    limit = profile.max_attempts_limit
+    for node in draft.nodes:
+        if node.max_attempts > limit:
+            issues.append(_issue(
+                "max_attempts_exceeds_limit", "PlanNode.max_attempts",
+                f"node {node.id!r} requests max_attempts={node.max_attempts} which exceeds the "
+                f"v2 profile cap max_attempts_limit={limit}", node_id=node.id))
+    return tuple(sorted(issues, key=lambda i: i.sort_key))
 
 
 def _issue(code: str, model_path: str, explanation: str, *, node_id: str | None = None) -> RuntimeSupportIssue:
@@ -76,7 +380,7 @@ def check_runtime_support(
     catalog: CatalogRuntime,
     bridge_view: BridgeCatalogView,
     schema_registry: "SchemaRegistry",
-    profile: "StaticRuntimeProfile | BootstrapRuntimeProfile",
+    profile: "StaticRuntimeProfile | BootstrapRuntimeProfile | StaticRuntimeProfileV2",
 ) -> RuntimeSupportReport:
     """Pure static-runtime support check → a frozen :class:`RuntimeSupportReport`.
 
@@ -183,43 +487,70 @@ def check_runtime_support(
                 "profile, not static-runtime v1",
             )
         )
+    # -- Phase 8 · Task 8 additive: v2 profiles ADMIT reducers/gates/debates/  --
+    # multi-writer/retries (validating runtime well-formedness via the v2
+    # analyzers) instead of blanket-rejecting them. Every gate below is on a
+    # ``profile.supports_*`` switch; a v1 ``StaticRuntimeProfile`` and the Phase-5
+    # BOOTSTRAP profile carry those switches ``= False``, so their branch is the
+    # EXACT prior blanket rejection (byte-identical v1/BOOTSTRAP behavior — the
+    # regression pins). Conditions and stop conditions stay unconditionally
+    # rejected under EVERY profile (clause: "conditions and stop conditions remain
+    # rejected before reservation under v2").
+    supports_reducers = getattr(profile, "supports_reducers", False)
+    supports_gates = getattr(profile, "supports_gates", False)
+    supports_debates = getattr(profile, "supports_debates", False)
+    supports_multi_writer = getattr(profile, "supports_multi_writer", False)
+    supports_retries = getattr(profile, "supports_retries", False)
+
     if draft.reducers:
-        issues.append(_issue("reducers_unsupported", "draft.reducers",
-                             "reducers are outside the static-runtime v1 matrix"))
+        if supports_reducers:
+            issues.extend(analyze_reducers(draft, catalog=catalog))
+        else:
+            issues.append(_issue("reducers_unsupported", "draft.reducers",
+                                 "reducers are outside the static-runtime v1 matrix"))
     if draft.gates:
-        issues.append(_issue("gates_unsupported", "draft.gates",
-                             "gates / gate metrics are outside the static-runtime v1 matrix"))
-    if draft.debates:
+        if supports_gates:
+            issues.extend(analyze_gates(draft, catalog=catalog))
+        else:
+            issues.append(_issue("gates_unsupported", "draft.gates",
+                                 "gates / gate metrics are outside the static-runtime v1 matrix"))
+    if draft.debates and not supports_debates:
         issues.append(_issue("debates_unsupported", "draft.debates",
                              "debates are outside the static-runtime v1 matrix"))
     if draft.stop_condition_refs:
         issues.append(_issue("stop_conditions_unsupported", "draft.stop_condition_refs",
                              "stop conditions are outside the static-runtime v1 matrix"))
 
-    # multi-writer: a slot written by more than one node.
+    # multi-writer: a slot written by more than one node. v2 admits it (reducer
+    # coherence is validated by analyze_reducers above); v1/BOOTSTRAP reject it.
     writers: dict[str, list[str]] = {}
     for node in draft.nodes:
         writers.setdefault(node.writes_slot, []).append(node.id)
     for slot, node_ids in writers.items():
-        if len(node_ids) > 1:
+        if len(node_ids) > 1 and not supports_multi_writer:
             issues.append(
                 _issue("multi_writer_unsupported", f"draft.nodes[*].writes_slot={slot}",
                        f"slot {slot!r} has multiple writers {sorted(node_ids)}; multi-writer "
                        "slots are outside the static-runtime v1 matrix")
             )
 
+    if supports_retries:
+        # v2: max_attempts up to the profile cap is admitted; the analyzer rejects
+        # only max_attempts > max_attempts_limit.
+        issues.extend(analyze_retry_repair(draft, profile=profile))
+
     for node in draft.nodes:
         if node.condition_ref is not None:
             issues.append(_issue("conditions_unsupported", "PlanNode.condition_ref",
                                  f"node {node.id!r} carries a condition ref", node_id=node.id))
-        if node.max_attempts > 1:
+        if not supports_retries and node.max_attempts > 1:
             issues.append(_issue("retries_unsupported", "PlanNode.max_attempts",
                                  f"node {node.id!r} requests max_attempts={node.max_attempts}",
                                  node_id=node.id))
-        if node.gate_ids:
+        if node.gate_ids and not supports_gates:
             issues.append(_issue("gates_unsupported", "PlanNode.gate_ids",
                                  f"node {node.id!r} carries gate ids", node_id=node.id))
-        if node.debate_id is not None:
+        if node.debate_id is not None and not supports_debates:
             issues.append(_issue("debates_unsupported", "PlanNode.debate_id",
                                  f"node {node.id!r} carries a debate id", node_id=node.id))
         # Affirmative allow-list: every dependency policy must be IN the profile's

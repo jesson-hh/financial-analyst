@@ -70,6 +70,7 @@ and per-node CapabilityGateway are derived from the admitted catalog material.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -99,7 +100,12 @@ from guanlan_v2.orchestration.worker import (
     prepare_input,
 )
 
-__all__ = ["run_plan", "RunRecorder", "CancellationToken", "DagRunError"]
+__all__ = [
+    "run_plan", "RunRecorder", "CancellationToken", "DagRunError",
+    # Phase 8 · Task 8 — gate-metric evaluation seam
+    "GateMetricError", "parse_gate_metric_material", "project_gate_metric",
+    "evaluate_gate", "gate_downstream_disposition",
+]
 
 #: The per-node token reservation ceiling (settlement clamps to actual usage, which
 #: never exceeds it). Kept small so a wide layer's simultaneous child holds stay well
@@ -120,6 +126,132 @@ _SUCCESS_STATUSES = frozenset({NodeStatus.COMPLETED, NodeStatus.DEGRADED})
 
 class DagRunError(Exception):
     """A defense-in-depth dispatch/topology failure raised before/at execution."""
+
+
+# --------------------------------------------------------------------------- #
+# Phase 8 · Task 8 — gate-metric evaluation seam (pure, no I/O)                 #
+# --------------------------------------------------------------------------- #
+class GateMetricError(Exception):
+    """A gate-metric material or projection is malformed / not a gate_metric."""
+
+
+def parse_gate_metric_material(raw: bytes) -> dict:
+    """Parse a reviewed ``kind="gate_metric"`` material's bytes into a closed dict.
+
+    Requires the ``material_kind="gate_metric"`` marker, a string ``value_pointer``
+    and (optionally) a list of ``applies_when`` ``{"pointer","equals"}`` conditions.
+    There is NO expression language — the projection is exactly one absolute JSON
+    pointer for the value plus closed pointer==literal applicability conditions.
+    """
+    try:
+        obj = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise GateMetricError(f"gate_metric material is not valid JSON: {exc}") from exc
+    if not isinstance(obj, dict) or obj.get("material_kind") != "gate_metric":
+        raise GateMetricError("material does not carry the gate_metric marker")
+    if not isinstance(obj.get("value_pointer"), str) or not obj["value_pointer"].startswith("/"):
+        raise GateMetricError("gate_metric requires an absolute JSON-pointer value_pointer")
+    for cond in obj.get("applies_when", ()):
+        if not isinstance(cond, dict) or not isinstance(cond.get("pointer"), str):
+            raise GateMetricError("each applies_when condition needs a pointer")
+    return obj
+
+
+def _resolve_pointer(payload: Any, pointer: str) -> Any:
+    """Resolve a closed absolute JSON pointer (``/a/b``) into ``payload`` or raise KeyError."""
+    cur = payload if isinstance(payload, dict) else _as_mapping(payload)
+    for seg in pointer.strip("/").split("/"):
+        if not isinstance(cur, dict) or seg not in cur:
+            raise KeyError(pointer)
+        cur = cur[seg]
+    return cur
+
+
+def _as_mapping(payload: Any) -> dict:
+    """A dict view of a payload (pydantic model or mapping) for pointer resolution."""
+    if isinstance(payload, dict):
+        return payload
+    if hasattr(payload, "model_dump"):
+        return payload.model_dump(mode="python")
+    if hasattr(payload, "__dict__"):
+        return dict(payload.__dict__)
+    raise GateMetricError("gate metric payload is not a mapping / pydantic model")
+
+
+def project_gate_metric(material: dict, metrics_payload: Any) -> tuple[Any, bool]:
+    """Project ``(observed_value, applicable)`` from a metrics payload via the material.
+
+    ``applicable`` is ``False`` when any ``applies_when`` condition pointer is absent
+    or its value does not equal the closed literal, or when ``value_pointer`` itself
+    is absent — the gate is then ``unavailable`` and its ``unavailable_policy``
+    governs the downstream disposition. No expression evaluation occurs.
+    """
+    view = _as_mapping(metrics_payload)
+    for cond in material.get("applies_when", ()):
+        try:
+            v = _resolve_pointer(view, cond["pointer"])
+        except KeyError:
+            return (None, False)
+        if v != cond.get("equals"):
+            return (None, False)
+    try:
+        value = _resolve_pointer(view, material["value_pointer"])
+    except KeyError:
+        return (None, False)
+    return (value, True)
+
+
+_GATE_OPS = {
+    ">": lambda a, b: a > b,
+    ">=": lambda a, b: a >= b,
+    "<": lambda a, b: a < b,
+    "<=": lambda a, b: a <= b,
+    "==": lambda a, b: a == b,
+}
+
+
+def evaluate_gate(gate: Any, *, observed: Any, applicable: bool, metrics_artifact_id: str):
+    """Build the Phase-1 :class:`~guanlan_v2.orchestration.spec.GateResult` for one gate.
+
+    * not applicable / no observed value -> ``status="unavailable"``;
+    * applicable + operator/threshold satisfied -> ``status="passed"``;
+    * applicable + not satisfied -> ``status="failed"``.
+
+    Binds the observed value, the gate's ``metric`` ref, ``blocking`` and the exact
+    ``metrics_artifact_id`` (spec: a GateResult carries the metrics artifact it read).
+    """
+    from guanlan_v2.orchestration.spec import GateResult
+
+    if not applicable or observed is None:
+        return GateResult(
+            gate_id=gate.id, metric=gate.metric, status="unavailable", observed=None,
+            threshold=gate.threshold, blocking=gate.blocking,
+            reason=f"gate {gate.id!r} metric is unavailable for the observed metrics artifact",
+            metrics_artifact_id=metrics_artifact_id)
+    obs = float(observed) if isinstance(observed, (int, float)) and not isinstance(observed, bool) else observed
+    passed = bool(_GATE_OPS[gate.operator](obs, gate.threshold))
+    return GateResult(
+        gate_id=gate.id, metric=gate.metric, status="passed" if passed else "failed",
+        observed=obs, threshold=gate.threshold, blocking=gate.blocking,
+        reason=f"observed {obs} {gate.operator} threshold {gate.threshold} -> "
+               f"{'pass' if passed else 'fail'}",
+        metrics_artifact_id=metrics_artifact_id)
+
+
+def gate_downstream_disposition(result: Any, gate: Any) -> str:
+    """The closed downstream disposition for a :class:`GateResult` under its policy.
+
+    * ``passed`` -> ``"pass"`` (dependents proceed);
+    * ``failed`` + ``blocking`` -> ``"blocked"`` (dependents BLOCKED, run terminal
+      partial); ``failed`` + non-blocking -> ``"pass"`` (advisory);
+    * ``unavailable`` -> the closed ``unavailable_policy``: ``fail`` -> ``"blocked"``,
+      ``degrade`` -> ``"degraded"``, ``skip`` -> ``"skipped"``.
+    """
+    if result.status == "passed":
+        return "pass"
+    if result.status == "failed":
+        return "blocked" if gate.blocking else "pass"
+    return {"fail": "blocked", "degrade": "degraded", "skip": "skipped"}[gate.unavailable_policy]
 
 
 class CancellationToken:

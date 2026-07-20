@@ -184,6 +184,11 @@ __all__ = [
     # entry points
     "prepare_input",
     "execute_node",
+    # Phase 8 · Task 8 — bounded retry + schema-repair control loop
+    "execute_with_bounded_retry",
+    "retry_llm_invocation_upper_bound",
+    "AttemptReservation",
+    "BoundedRetryOutcome",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -1801,6 +1806,170 @@ def execute_node(
 
 
 # --------------------------------------------------------------------------- #
+# Phase 8 · Task 8 — bounded retry + schema-repair control loop                 #
+# --------------------------------------------------------------------------- #
+#: node statuses a retry may re-attempt (transient / recoverable terminals).
+_RETRYABLE_STATUSES: frozenset = frozenset(
+    {NodeStatus.FAILED, NodeStatus.INCOMPLETE, NodeStatus.TIMED_OUT}
+)
+#: node statuses that count as a usable success (one committed output per key).
+_RETRY_SUCCESS_STATUSES: frozenset = frozenset(
+    {NodeStatus.COMPLETED, NodeStatus.DEGRADED}
+)
+#: the reason_code the executor stamps when the primary payload fails registry
+#: validation — the only condition a bounded schema repair may address.
+_SCHEMA_INVALID_REASON = "output_schema_invalid"
+
+
+def retry_llm_invocation_upper_bound(
+    *, is_llm: bool, max_attempts: int, schema_repairs_per_attempt: int
+) -> int:
+    """The v2 LLM-invocation reservation upper bound for one node.
+
+    ``max_attempts × (1 + schema_repairs_per_attempt)`` for an LLM node (each attempt
+    is one primary model call plus up to ``schema_repairs_per_attempt`` repair calls),
+    **0** for a deterministic node (a deterministic ``max_attempts>1`` reserves zero
+    LLM invocations). This is the exact upper bound ``analyze_retry_repair`` documents
+    and the runner reserves against the plan LLM budget (spec §8 line 947 / §10 line
+    968).
+    """
+    if not is_llm:
+        return 0
+    return int(max_attempts) * (1 + int(schema_repairs_per_attempt))
+
+
+@dataclass(frozen=True)
+class AttemptReservation:
+    """One per-attempt child reservation minted by the bounded-retry loop.
+
+    ``role`` labels the attempt's purpose (``"primary"`` / ``"retry"`` /
+    ``"schema_repair"``). The reservation itself is a Phase-2 ``reserve_node`` child
+    (``scope_type="node"``) — the frozen Phase-7 handoff gate
+    (``test_phase7_handoff`` asserts ``BudgetOperation`` is exactly the five reviewed
+    ops) forbids minting a new closed op, so ``BudgetScopeType``'s ``"retry"`` /
+    ``"schema_repair"`` values are NOT stamped by a new ledger op here; the role is
+    carried on this record + the deterministic idempotency keys instead.
+    """
+
+    reservation_id: str
+    role: str
+    attempt: int
+    idempotency_key: str
+
+
+@dataclass(frozen=True)
+class BoundedRetryOutcome:
+    """The terminal outcome of the bounded retry + schema-repair loop for one node."""
+
+    node_run: NodeRun
+    artifact: Artifact | None
+    reservations: tuple[AttemptReservation, ...]
+    succeeded: bool
+    invocations: int
+
+
+def execute_with_bounded_retry(
+    *,
+    node_id: str,
+    run_id: str,
+    is_llm: bool,
+    max_attempts: int,
+    schema_repairs_per_attempt: int,
+    budget: Any,
+    plan_reservation_id: str,
+    node_token_reservation: int,
+    attempt_fn: Any,
+) -> BoundedRetryOutcome:
+    """Run one node under the v2 bounded retry + schema-repair discipline.
+
+    ``attempt_fn(attempt_ordinal: int, *, is_repair: bool) -> (NodeRun, Artifact|None)``
+    is the caller-owned closure that builds the fresh per-attempt plumbing (a new
+    :class:`ExecutionEvidenceSequencer` via :func:`prepare_input`, the gateways) and
+    calls :func:`execute_node` with the given attempt ordinal — each attempt is a
+    fresh sequencer / one prompt (the sequencer permits exactly one prompt per
+    attempt, so a repair is a *new attempt ordinal*, never a second prompt within an
+    attempt).
+
+    The loop, per the reviewed v2 semantics:
+
+    * for each primary attempt (``<= max_attempts``) it reserves one child node
+      budget (``reserve_node``; ``llm_invocations = 1`` for an LLM node, ``0`` for a
+      deterministic node), runs ``attempt_fn`` and settles the actuals;
+    * a COMPLETED / DEGRADED attempt returns immediately (**at most one committed
+      output per logical key** — the Phase-2 invariant);
+    * an LLM attempt that failed with ``reason_code="output_schema_invalid"`` triggers
+      up to ``schema_repairs_per_attempt`` bounded repair invocations (each a fresh
+      attempt ordinal, its own ``reserve_node`` child + settle, its own second
+      ``PromptAssemblyRecord``); a non-schema failure is not repairable;
+    * a retryable terminal (FAILED / INCOMPLETE / TIMED_OUT) with primary attempts
+      remaining retries; otherwise the loop returns the terminal record with no
+      Artifact.
+
+    Every ``reserve_node`` / ``settle`` uses a deterministic idempotency key
+    (``role``/``ordinal``), so a crash between a repair and its settle replays
+    idempotently (no duplicate reservation, no duplicated invocation billed).
+    """
+    reservations: list[AttemptReservation] = []
+    llm_per = 1 if is_llm else 0
+    invocations = 0
+    ordinal = 0
+    last_run: NodeRun | None = None
+    last_artifact: Artifact | None = None
+
+    def _reserve(role: str, ordinal: int) -> str:
+        key = f"noderes:{run_id}:{node_id}:{role}:{ordinal}"
+        res = budget.reserve_node(
+            plan_reservation_id=plan_reservation_id, node_id=node_id, attempt=ordinal,
+            tokens=node_token_reservation, llm_invocations=llm_per, concurrency=1,
+            idempotency_key=key)
+        reservations.append(AttemptReservation(
+            reservation_id=res.reservation_id, role=role, attempt=ordinal, idempotency_key=key))
+        return res.reservation_id
+
+    def _settle(reservation_id: str, role: str, ordinal: int, node_run: NodeRun) -> None:
+        actual_tokens = min(node_run.input_tokens + node_run.output_tokens, node_token_reservation)
+        actual_llm = 1 if (is_llm and node_run.output_tokens > 0) else 0
+        budget.settle(
+            reservation_id, actual_tokens=actual_tokens, actual_llm_invocations=actual_llm,
+            idempotency_key=f"settle:{run_id}:{node_id}:{role}:{ordinal}")
+
+    for primary in range(1, int(max_attempts) + 1):
+        role = "primary" if primary == 1 else "retry"
+        ordinal += 1
+        invocations += 1
+        reservation_id = _reserve(role, ordinal)
+        node_run, artifact = attempt_fn(ordinal, is_repair=False)
+        _settle(reservation_id, role, ordinal, node_run)
+        last_run, last_artifact = node_run, artifact
+        if node_run.status in _RETRY_SUCCESS_STATUSES:
+            return BoundedRetryOutcome(node_run, artifact, tuple(reservations), True, invocations)
+
+        # bounded schema repair: only an LLM output_schema_invalid is repairable.
+        if (
+            is_llm
+            and node_run.reason_code == _SCHEMA_INVALID_REASON
+            and schema_repairs_per_attempt > 0
+        ):
+            for _ in range(int(schema_repairs_per_attempt)):
+                ordinal += 1
+                invocations += 1
+                reservation_id = _reserve("schema_repair", ordinal)
+                rn2, art2 = attempt_fn(ordinal, is_repair=True)
+                _settle(reservation_id, "schema_repair", ordinal, rn2)
+                last_run, last_artifact = rn2, art2
+                if rn2.status in _RETRY_SUCCESS_STATUSES:
+                    return BoundedRetryOutcome(rn2, art2, tuple(reservations), True, invocations)
+                if rn2.reason_code != _SCHEMA_INVALID_REASON:
+                    break  # a non-schema failure is not addressable by another repair
+
+        if last_run is None or last_run.status not in _RETRYABLE_STATUSES:
+            break  # terminal-but-not-retryable (defensive; success already returned)
+
+    assert last_run is not None  # the loop always runs at least once (max_attempts >= 1)
+    return BoundedRetryOutcome(last_run, None, tuple(reservations), False, invocations)
+
+
+# --------------------------------------------------------------------------- #
 # timeout / cancellation signals                                              #
 # --------------------------------------------------------------------------- #
 class _TimeoutSignal(Exception):
@@ -2083,15 +2252,21 @@ def _persist_prompt_record(
     existing = stores.cells.load(PROMPT_CELL_NAMESPACE, cell_key)
     if existing is not None:
         return existing
+    # Phase 8 · Task 8 (additive): the first attempt keeps the EXACT prior
+    # idempotency keys (byte-identical v1); a v2 retry / schema-repair attempt
+    # (attempt >= 2) assembles a DISTINCT prompt, so its payload/batch keys carry
+    # the attempt suffix — without it a differing repair prompt would collide with
+    # attempt 1 under the attempt-independent key and raise IdempotencyConflict.
+    attempt_suffix = "" if prompt_token.attempt == 1 else f":a{prompt_token.attempt}"
     staged_key = f"{node.id}:prompt:{prompt_token.call_ordinal}"
     batch = RuntimeBatch(
-        idempotency_key=f"{ctx.run_id}:{node.id}:prompt-record",
+        idempotency_key=f"{ctx.run_id}:{node.id}{attempt_suffix}:prompt-record",
         payload_puts=(
             PayloadPutCommand(
                 staged_key=StagedPayloadKey(key=staged_key), schema_ref=_PROMPT_ASSEMBLY_RECORD_SR,
                 namespace="main", payload_template=dict(record),
                 registry_digest=runtime.runtime_registry_digest,
-                idempotency_key=f"{ctx.run_id}:{node.id}:prompt-payload"),
+                idempotency_key=f"{ctx.run_id}:{node.id}{attempt_suffix}:prompt-payload"),
         ),
         cell_cas=(
             StateCellCompareAndSwapCommand(

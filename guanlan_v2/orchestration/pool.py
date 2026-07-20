@@ -88,6 +88,8 @@ __all__ = [
     "ExpectedOutput",
     # pool
     "ArtifactPool",
+    # Phase 8 · Task 8 — deterministic multi-writer reducer fold seam
+    "fold_reducer_producers",
 ]
 
 
@@ -800,3 +802,31 @@ def _commit_signature(
             sorted((nr.node_id, nr.status.value, nr.node_run_id) for nr in node_runs),
         )
     )
+
+
+# --------------------------------------------------------------------------- #
+# Phase 8 · Task 8 — deterministic multi-writer reducer fold (barrier seam)     #
+# --------------------------------------------------------------------------- #
+def fold_reducer_producers(producers: Any, *, handler: Any) -> Any:
+    """Fold a multi-writer slot's committed producer Artifacts into one reduced
+    payload, **deterministically by Plan node order**.
+
+    The v2 ``StaticRuntimeProfileV2`` admits a slot written by more than one node
+    only when a :class:`~guanlan_v2.orchestration.spec.ReducerCfg` folds those
+    writers into one Artifact (Phase 1 rejects an unreduced multi-writer slot; the
+    runtime-support ``analyze_reducers`` re-verifies the reducer's identity /
+    producers). This is the barrier-side execution seam: at ``commit_layer`` the
+    runner resolves the trusted deterministic reducer material's handler and calls
+    this fold over the slot's committed producer Artifacts.
+
+    Determinism is the exit gate Task 9's debate reducer consumes: the producers are
+    sorted by ``producer_node_id`` (spec §6.1 line 391 — Plan order only) **before**
+    the pure ``handler`` folds them, so thread/stage/completion order can never
+    change the reduced payload — a property test with shuffled completion order sees
+    a byte-identical reduced Artifact. The ``handler`` is a pure function
+    ``(ordered_producers: tuple[Artifact, ...]) -> reduced_payload``; this seam owns
+    only the canonical ordering + the call (Task 8 ships the seam, the debate-fold
+    handler is Task 9's).
+    """
+    ordered = tuple(sorted(producers, key=lambda a: a.producer_node_id))
+    return handler(ordered)

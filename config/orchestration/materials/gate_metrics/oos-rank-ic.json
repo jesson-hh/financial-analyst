@@ -1,0 +1,17 @@
+{
+  "material_kind": "gate_metric",
+  "metric_id": "gate_metric.oos_rank_ic",
+  "metric_version": "1",
+  "value_kind": "number",
+  "value_pointer": "/rank_ic",
+  "applies_when": [
+    {"pointer": "/oos", "equals": true}
+  ],
+  "source_schema_refs": [
+    {"name": "FactorICReport", "version": "1"},
+    {"name": "MinedFactorDraft", "version": "1"}
+  ],
+  "description": "OOS rank-IC gate metric. A closed JSON-pointer projection that reads the out-of-sample rank information coefficient at /rank_ic from a FactorICReport@1 or MinedFactorDraft@1 metrics artifact, applicable only when /oos == true (the passed-gate, out-of-sample regime). There is NO expression language: the projection is exactly one absolute JSON pointer for the value plus a closed list of pointer==literal applicability conditions. When a condition pointer is absent or its value does not equal the literal, the metric is 'unavailable' for that artifact and the GateCfg.unavailable_policy (fail/degrade/skip) governs the downstream disposition.",
+  "reviewed_by": "phase8.task8",
+  "notes": "This is the one reviewed kind=gate_metric material Phase 8 ships. Do not add an expression language; a new projection is a new metric_version."
+}
