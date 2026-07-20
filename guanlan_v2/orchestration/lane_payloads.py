@@ -44,6 +44,28 @@ Lane B · 量价几何 (Task 5)
 * ``PatternLifecycleProposal`` — the #27 ``pv.curator`` draft-only output (``draft_only``
   is ``Literal[True]`` — a proposal can NEVER be constructed adopted; ``trigger_evidence``
   is non-empty — 不许"顺手优化"; ``source_label`` records an external feed's 来源作者).
+
+Lane A · 量化 (Task 6)
+---------------------
+* ``FactorICRow`` / ``FactorICReport`` — ``quant.factor`` measured factor rank-IC. ``oos``
+  is an explicit bool: the 帷幄 ``factor_ic`` source is a 近窗回看 IC, so a look-back number
+  MUST NOT masquerade as a PIT-OOS one (badge-adjacent honesty). Rows are sorted by
+  ``factor_id`` and duplicate-free.
+* ``ModelScoreRow`` / ``ModelPredictionReport`` — ``quant.model`` v4+DL ensemble ranking;
+  ranks are unique + strictly ascending, and ``stale_days`` (DL 断供显形) is carried
+  verbatim so a stale/absent DL feed is never hidden behind a zero.
+* ``BacktestEvidenceReport`` — ``quant.backtest`` vintage-IC / OOS-verdict / PBO card; every
+  metric is independently nullable so a not-yet-matured realized-date OOS window renders
+  ``oos_verdict=None`` (UNAVAILABLE), never a fabricated "pass". ``pbo`` ∈ [0, 1].
+* ``FundamentalsReport`` — ``quant.fundamentals`` valuation + market-value tier + profit
+  forecast provenance; ``inputs_complete`` reads the honest presence of the core inputs
+  (an absent field is ``None``, never fabricated).
+* ``MinedFactorDraft`` — the ``quant.factor_miner`` deterministic mined-factor DRAFT
+  (``draft_only`` is ``Literal[True]`` — factorlib promotion stays human; ``passed_gate``
+  records the research-loop Sharpe/robust 门 verdict verbatim, never upgraded).
+* ``FactorLifecycleProposal`` — the #26 ``quant.curator`` draft-only lifecycle proposal
+  (``draft_only`` is ``Literal[True]``; ``trigger_evidence`` non-empty — 不许"顺手优化";
+  ``proposed_expr`` is revision_draft-only — 表达式只进 candidate、不进 study 身份).
 """
 from __future__ import annotations
 
@@ -58,6 +80,7 @@ from guanlan_v2.orchestration.digest import (
     FiniteFloat,
     NonEmptyStr,
     NonNegativeInt,
+    PositiveInt,
     UtcDateTime,
 )
 from guanlan_v2.orchestration.pattern_registry import PatternDefinition
@@ -80,9 +103,19 @@ __all__ = [
     "TechnicalReport",
     "MicrostructureReport",
     "PatternLifecycleProposal",
+    # Lane A · quant
+    "FactorICRow",
+    "FactorICReport",
+    "ModelScoreRow",
+    "ModelPredictionReport",
+    "BacktestEvidenceReport",
+    "FundamentalsReport",
+    "MinedFactorDraft",
+    "FactorLifecycleProposal",
     # partition helpers (for the Task-11 Phase-8 firewall)
     "LANE_C_PUBLIC_MODELS",
     "LANE_B_PUBLIC_MODELS",
+    "LANE_A_PUBLIC_MODELS",
 ]
 
 #: a finite float constrained to the closed unit interval ``[0, 1]`` (bool/NaN/Inf
@@ -441,4 +474,216 @@ LANE_B_PUBLIC_MODELS: tuple[type[DigestModel], ...] = (
     TechnicalReport,
     MicrostructureReport,
     PatternLifecycleProposal,
+)
+
+
+# =========================================================================== #
+# Lane A · 量化 (Task 6)                                                       #
+# =========================================================================== #
+# --------------------------------------------------------------------------- #
+# quant.factor — FactorICReport                                                 #
+# --------------------------------------------------------------------------- #
+class FactorICRow(DigestModel):
+    """One factor's measured information coefficient for a window.
+
+    ``ic`` is the measured IC and ``rank_ic`` the rank-IC (nullable — some sources
+    report only one). ``oos`` is the load-bearing honesty flag: the 帷幄 ``factor_ic``
+    source is a 近窗回看 IC, so a look-back number MUST carry ``oos=False`` — a 回看 IC
+    must never masquerade as a PIT-OOS one (badge-adjacent honesty; documented for the
+    Task-8 gate-metric materials so an ``oos=False`` row never satisfies an OOS-labeled
+    downstream gate).
+    """
+
+    schema_version: Literal["1"] = "1"
+    factor_id: LogicalId
+    ic: FiniteFloat
+    rank_ic: FiniteFloat | None = None
+    window: NonEmptyStr
+    oos: bool
+
+
+class FactorICReport(DigestModel):
+    """A measured-IC report over the factor catalog for a decision as_of.
+
+    ``rows`` are sorted by ``factor_id`` and duplicate-free — a factor that could not be
+    computed is an honest absent row (前端 显示「—」), never a fabricated decorative IC.
+    """
+
+    schema_version: Literal["1"] = "1"
+    as_of: UtcDateTime
+    rows: tuple[FactorICRow, ...]
+
+    @model_validator(mode="after")
+    def _validate(self) -> "FactorICReport":
+        ids = [r.factor_id for r in self.rows]
+        if ids != sorted(ids):
+            raise ValueError("FactorICReport rows must be sorted by factor_id")
+        if len(set(ids)) != len(ids):
+            raise ValueError("FactorICReport rows must be duplicate-free by factor_id")
+        return self
+
+
+# --------------------------------------------------------------------------- #
+# quant.model — ModelPredictionReport                                           #
+# --------------------------------------------------------------------------- #
+class ModelScoreRow(DigestModel):
+    """One name's model score + its (1-based) rank within the prediction."""
+
+    schema_version: Literal["1"] = "1"
+    symbol: Symbol
+    score: FiniteFloat
+    rank: PositiveInt
+
+
+class ModelPredictionReport(DigestModel):
+    """A v4+DL ensemble ranking as of a decision date.
+
+    ``model_asof`` records the model's own vintage and ``stale_days`` (DL 断供显形) the
+    freshness gap in days — carried verbatim so a stale or absent DL feed is never hidden
+    behind a zero. ``rows`` ranks are unique and strictly ascending (a rank collision is a
+    ranking bug, not a tie); an empty ``rows`` is an honest empty prediction.
+    """
+
+    schema_version: Literal["1"] = "1"
+    as_of: UtcDateTime
+    model_id: NonEmptyStr
+    model_asof: UtcDateTime
+    rows: tuple[ModelScoreRow, ...]
+    stale_days: NonNegativeInt
+
+    @model_validator(mode="after")
+    def _validate(self) -> "ModelPredictionReport":
+        ranks = [r.rank for r in self.rows]
+        for a, b in zip(ranks, ranks[1:]):
+            if b <= a:
+                raise ValueError("ModelPredictionReport ranks must be strictly ascending")
+        if len(set(ranks)) != len(ranks):
+            raise ValueError("ModelPredictionReport ranks must be unique")
+        return self
+
+
+# --------------------------------------------------------------------------- #
+# quant.backtest — BacktestEvidenceReport                                       #
+# --------------------------------------------------------------------------- #
+class BacktestEvidenceReport(DigestModel):
+    """A vintage-IC / OOS-verdict / PBO evidence card for a subject.
+
+    Every metric is independently nullable and honest: a not-yet-matured realized-date
+    OOS window renders ``oos_verdict=None`` (UNAVAILABLE) with the gap named in
+    ``caveats`` — never a fabricated "pass". ``pbo`` (probability of backtest overfitting)
+    is a finite value in ``[0, 1]``.
+    """
+
+    schema_version: Literal["1"] = "1"
+    as_of: UtcDateTime
+    subject: NonEmptyStr
+    vintage_ic: FiniteFloat | None
+    oos_verdict: NonEmptyStr | None
+    pbo: UnitFloat | None
+    caveats: tuple[NonEmptyStr, ...] = ()
+
+
+# --------------------------------------------------------------------------- #
+# quant.fundamentals — FundamentalsReport                                       #
+# --------------------------------------------------------------------------- #
+class FundamentalsReport(DigestModel):
+    """A fundamentals read: valuation percentile, market-value tier, profit forecast.
+
+    Every derived field is nullable and ``inputs_complete`` reflects the honest presence
+    of the core inputs (valuation + market-value tier): a missing field is ``None`` and
+    ``inputs_complete=False``, never a fabricated score. ``profit_forecast_note`` records
+    the astock ``get_profit_forecast`` provenance when present.
+    """
+
+    schema_version: Literal["1"] = "1"
+    symbol: Symbol
+    as_of: UtcDateTime
+    valuation_score: FiniteFloat | None
+    mv_tier: NonEmptyStr | None
+    profit_forecast_note: NonEmptyStr | None
+    inputs_complete: bool
+
+
+# --------------------------------------------------------------------------- #
+# quant.factor_miner — MinedFactorDraft                                         #
+# --------------------------------------------------------------------------- #
+class MinedFactorDraft(DigestModel):
+    """A deterministic mined-factor DRAFT from the research-loop Sharpe/robust 门.
+
+    Load-bearing red line: ``draft_only`` is ``Literal[True]`` — a mined factor can NEVER
+    be constructed as promoted (factorlib promotion is always 人审, downstream of this
+    schema). ``passed_gate`` records the gate verdict verbatim (a failed gate is a failed
+    gate — never upgraded); ``sharpe`` / ``robust`` are nullable (a gate may fire on
+    ``rank_ic`` alone).
+    """
+
+    schema_version: Literal["1"] = "1"
+    as_of: UtcDateTime
+    factor_expr: NonEmptyStr
+    rank_ic: FiniteFloat
+    sharpe: FiniteFloat | None = None
+    robust: FiniteFloat | None = None
+    passed_gate: bool
+    draft_only: Literal[True] = True
+
+
+# --------------------------------------------------------------------------- #
+# quant.curator (#26) — FactorLifecycleProposal                                 #
+# --------------------------------------------------------------------------- #
+class FactorLifecycleProposal(DigestModel):
+    """The #26 ``quant.curator`` draft-only factor-lifecycle proposal (AMEND-5).
+
+    Four proposal-only 职能 (R2 §5): ``decay_alert`` (衰减警报), ``revision_draft`` (修订
+    draft — ``factor_id`` 不变, a new ``proposed_expr`` that runs through the miner's same
+    deterministic evaluation pipeline → a new ``definition_version`` downstream),
+    ``retirement`` (退役提案), ``portfolio_trigger`` (组合触发 — v4 变体重训 / 族权重调整).
+
+    Load-bearing red lines: ``draft_only`` is ``Literal[True]`` — a proposal can NEVER be
+    constructed as adopted (adoption is always 人审, downstream); ``trigger_evidence`` is
+    non-empty (不许"顺手优化" — every revision cites the specific evidence artifact that
+    fired it); ``proposed_expr`` is revision_draft-only (表达式只进 candidate、不进 study
+    身份 — 修订族恒等约定, Phase-4 契约).
+    """
+
+    schema_version: Literal["1"] = "1"
+    as_of: UtcDateTime
+    kind: Literal["decay_alert", "revision_draft", "retirement", "portfolio_trigger"]
+    factor_id: LogicalId
+    definition_version: NonEmptyStr
+    proposed_expr: NonEmptyStr | None = None
+    trigger_evidence: tuple[NonEmptyStr, ...]
+    draft_only: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _validate(self) -> "FactorLifecycleProposal":
+        if not self.trigger_evidence:
+            raise ValueError(
+                "trigger_evidence must be non-empty — a proposal cites the evidence "
+                "artifact that fired it (不许\"顺手优化\")"
+            )
+        if self.kind == "revision_draft":
+            if self.proposed_expr is None:
+                raise ValueError(
+                    "a 'revision_draft' proposal requires a proposed_expr (走 miner 同一"
+                    "确定性求值管道)"
+                )
+        elif self.proposed_expr is not None:
+            raise ValueError(
+                "proposed_expr is revision_draft-only; a "
+                f"{self.kind!r} proposal must not carry one"
+            )
+        return self
+
+
+#: The Lane A public payload models (the Task-11 Phase-8 firewall reviews this set into
+#: the cumulative registry alongside :data:`LANE_C_PUBLIC_MODELS` / :data:`LANE_B_PUBLIC_MODELS`).
+LANE_A_PUBLIC_MODELS: tuple[type[DigestModel], ...] = (
+    FactorICRow,
+    FactorICReport,
+    ModelScoreRow,
+    ModelPredictionReport,
+    BacktestEvidenceReport,
+    FundamentalsReport,
+    MinedFactorDraft,
+    FactorLifecycleProposal,
 )

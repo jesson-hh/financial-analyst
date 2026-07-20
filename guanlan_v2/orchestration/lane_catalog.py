@@ -68,6 +68,10 @@ __all__ = [
     "pv_lane_material_specs",
     "load_pv_lane_materials",
     "build_pv_worker_specs",
+    "QUANT_LANE_WORKER_IDS",
+    "quant_lane_material_specs",
+    "load_quant_lane_materials",
+    "build_quant_worker_specs",
 ]
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -462,6 +466,239 @@ def build_pv_worker_specs(
         specs.append(WorkerSpec(
             id=row.worker_id, catalog_role="final", selection_scope="dynamic_allowed",
             lane=_PV_LANE, persona=row.persona, tier=row.tier, execution=execution,
+            system_prompt_ref=prompt_ref,
+            skills=(SkillBinding(skill_ref=_content(row.skill_id)),),
+            guardrail_refs=guardrails,
+            capability_allowlist=caps,
+            read_categories=row.read_categories,
+            inputs=row.inputs,
+            outputs=(OutputBinding(name="primary", schema_ref=row.output_schema),),
+            evidence_policy=EvidencePolicy(
+                tool_calls=row.tool_calls, require_input_refs=True,
+                require_number_anchors=True, allow_unsourced_numbers=False,
+                optional_data_may_degrade=True),
+            supported_modes=_MODES,
+            can_emit_decision=False, decision_authority="none"))
+    return tuple(sorted(specs, key=lambda w: w.id))
+
+
+# =========================================================================== #
+# Batch 3 · Lane A 量化 (Task 6)                                               #
+# =========================================================================== #
+# Reviewed rulings folded into Lane A (FLAGGED in the task report):
+#
+# * No allowlist broadening is needed. Each producer's ``Data Source Priority`` promises
+#   only tools that its plan-shorthand capability already supplies: ``quant.factor`` /
+#   ``quant.model`` promise ww_factor_analyze / ww_screen_run / ww_model_health (all under
+#   ``cap.data.signals``); ``quant.fundamentals`` promises ww_f10 (``cap.data.fundamentals``).
+#   The three FORBIDDEN seats (``quant.backtest`` / ``quant.factor_miner`` / ``quant.curator``)
+#   name ZERO ww_ tools in their DSP — they read upstream artifacts / doctrine. Every shipped
+#   seat's ``lint_skill_supply(...) == ()``.
+# * The 5 producers are DETERMINISTIC (handler_ref + no tier, zero LLM reservations). Their
+#   handlers DELEGATE per clause (h): the named legacy sources (``screen/factor_ic.py`` /
+#   ``screen/model_registry.py`` / ``screen/factor_vintage.py`` / TA ``tier2/fundamental_
+#   analyst.py`` / ``research/loop.py``) are NOT import-safe pure functions — their compute
+#   paths need the engine loader / artifact-parquet IO / a full research-loop orchestration —
+#   so each handler is a self-contained stdlib projection over the legacy TYPED OUTPUT (the
+#   impure-fallback branch of clause (h)), with the honesty rails encoded (回看≠OOS,
+#   stale_days 不清零, absent verdict stays None, passed_gate 不升级).
+# * #26 ``quant.curator`` is the batch's sole LLM spec and is proposal-only / offline
+#   (AMEND-5, same treatment as ``market.factor_miner`` #25 / ``pv.curator`` #27): FORBIDDEN
+#   tool policy ⇔ empty allowlist (no write capability), ``can_emit_decision=False``,
+#   ``critic`` tier, and a ``draft_only`` ``FactorLifecycleProposal`` output. Its 过拟合红线
+#   五条 are bound via ``guardrail.draft_only_advisory`` + ``guardrail.revision_throttle``
+#   (D6: 月频因子 N=3; the material defers admission to the Phase-4 governor + Phase-5
+#   matured-case grader). This batch installs only its WorkerSpec + reused guardrails.
+
+_QUANT_LANE = "quant"
+
+QUANT_LANE_WORKER_IDS: tuple[str, ...] = (
+    "quant.factor", "quant.model", "quant.backtest", "quant.fundamentals",
+    "quant.factor_miner", "quant.curator",
+)
+
+#: input schema refs the Lane A chain binds (published by this batch's payloads).
+_FACTOR_IC_REPORT = SchemaRef(name="FactorICReport", version="1")
+_MODEL_PREDICTION_REPORT = SchemaRef(name="ModelPredictionReport", version="1")
+_BACKTEST_EVIDENCE_REPORT = SchemaRef(name="BacktestEvidenceReport", version="1")
+
+
+def quant_lane_material_specs() -> tuple[_MaterialSpec, ...]:
+    """The (id, kind, path) rows Lane A loads from disk — batch-owned + reused files.
+
+    The six seats' skills; the one LLM seat's prompt (``quant.curator``); the five
+    deterministic seats' handler modules; and the three reused shared guardrails
+    (``number_provenance`` — all six; ``draft_only_advisory`` — the two draft-only seats;
+    ``revision_throttle`` — the curator). The guardrail files are shared across lanes and
+    already on disk (Task 4/5); this batch references them, it does not recreate them.
+    """
+    rows: list[_MaterialSpec] = []
+    for wid in QUANT_LANE_WORKER_IDS:
+        rows.append(_MaterialSpec(f"skill.{wid}", "skill", _SKILLS_TREE / wid / "SKILL.md"))
+    rows.append(_MaterialSpec("prompt.quant.curator", "prompt", _PROMPTS / "quant.curator.md"))
+    for wid in ("quant.factor", "quant.model", "quant.backtest", "quant.fundamentals",
+                "quant.factor_miner"):
+        rows.append(_MaterialSpec(f"handler.{wid}", "handler", _HANDLERS / f"{wid}.py"))
+    rows.append(_MaterialSpec(
+        "guardrail.number_provenance", "guardrail", _GUARDRAILS / "number-provenance.md"))
+    rows.append(_MaterialSpec(
+        "guardrail.draft_only_advisory", "guardrail", _GUARDRAILS / "draft-only-advisory.md"))
+    rows.append(_MaterialSpec(
+        "guardrail.revision_throttle", "guardrail", _GUARDRAILS / "revision-throttle.md"))
+    return tuple(rows)
+
+
+def load_quant_lane_materials() -> tuple[ResolvedTextMaterial, ...]:
+    """Resolve every Lane A material to bytes + a content-digest-sealed ref."""
+    out: list[ResolvedTextMaterial] = []
+    for spec in quant_lane_material_specs():
+        _ref, mat = build_text_material(
+            id=spec.material_id, version="1", kind=spec.kind, raw=spec.path.read_bytes())
+        out.append(mat)
+    return tuple(out)
+
+
+class _QuantWorkerRow(NamedTuple):
+    worker_id: str
+    persona: str
+    tier: Tier
+    exec_kind: ExecutionKind
+    model_tier: str | None          # None ⇔ deterministic
+    thinking_budget: int | None     # None ⇔ deterministic
+    handler_id: str | None          # set ⇔ deterministic
+    prompt_id: str | None           # set ⇔ LLM
+    skill_id: str
+    guardrail_ids: tuple[str, ...]
+    capability_methods: tuple[str, ...]   # Phase-3 method ids (never re-typed cap strings)
+    read_categories: tuple[str, ...]
+    output_schema: SchemaRef
+    tool_calls: ToolCallRequirement
+    inputs: tuple[InputBinding, ...]
+
+
+#: The reviewed Lane A roster (frozen-order migration batch 3/5). The 5 producers are
+#: deterministic (handler_ref + no tier); ``quant.curator`` (#26) is the sole LLM spec.
+_QUANT_ROWS: tuple[_QuantWorkerRow, ...] = (
+    _QuantWorkerRow(
+        worker_id="quant.factor", persona="Factor IC reader",
+        tier=Tier.READER, exec_kind=ExecutionKind.DETERMINISTIC,
+        model_tier=None, thinking_budget=None,
+        handler_id="handler.quant.factor", prompt_id=None,
+        skill_id="skill.quant.factor",
+        guardrail_ids=("guardrail.number_provenance",),
+        capability_methods=("signals",),
+        read_categories=("market_data",),
+        output_schema=_FACTOR_IC_REPORT,
+        tool_calls=ToolCallRequirement.OPTIONAL, inputs=()),
+    _QuantWorkerRow(
+        worker_id="quant.model", persona="Model prediction reader",
+        tier=Tier.READER, exec_kind=ExecutionKind.DETERMINISTIC,
+        model_tier=None, thinking_budget=None,
+        handler_id="handler.quant.model", prompt_id=None,
+        skill_id="skill.quant.model",
+        guardrail_ids=("guardrail.number_provenance",),
+        capability_methods=("signals",),
+        read_categories=("market_data",),
+        output_schema=_MODEL_PREDICTION_REPORT,
+        tool_calls=ToolCallRequirement.OPTIONAL, inputs=()),
+    _QuantWorkerRow(
+        worker_id="quant.backtest", persona="Backtest evidence reader",
+        tier=Tier.READER, exec_kind=ExecutionKind.DETERMINISTIC,
+        model_tier=None, thinking_budget=None,
+        handler_id="handler.quant.backtest", prompt_id=None,
+        skill_id="skill.quant.backtest",
+        guardrail_ids=("guardrail.number_provenance",),
+        capability_methods=(),
+        read_categories=("upstream_artifacts",),
+        output_schema=_BACKTEST_EVIDENCE_REPORT,
+        tool_calls=ToolCallRequirement.FORBIDDEN,
+        inputs=(InputBinding(name="factor_ic", schema_ref=_FACTOR_IC_REPORT,
+                             required=True, cardinality="one"),
+                InputBinding(name="model_predictions", schema_ref=_MODEL_PREDICTION_REPORT,
+                             required=False, cardinality="one"))),
+    _QuantWorkerRow(
+        worker_id="quant.fundamentals", persona="Fundamentals reader",
+        tier=Tier.READER, exec_kind=ExecutionKind.DETERMINISTIC,
+        model_tier=None, thinking_budget=None,
+        handler_id="handler.quant.fundamentals", prompt_id=None,
+        skill_id="skill.quant.fundamentals",
+        guardrail_ids=("guardrail.number_provenance",),
+        capability_methods=("fundamentals",),
+        read_categories=("market_data",),
+        output_schema=SchemaRef(name="FundamentalsReport", version="1"),
+        tool_calls=ToolCallRequirement.OPTIONAL, inputs=()),
+    _QuantWorkerRow(
+        worker_id="quant.factor_miner", persona="Mined-factor draft producer",
+        tier=Tier.READER, exec_kind=ExecutionKind.DETERMINISTIC,
+        model_tier=None, thinking_budget=None,
+        handler_id="handler.quant.factor_miner", prompt_id=None,
+        skill_id="skill.quant.factor_miner",
+        guardrail_ids=("guardrail.draft_only_advisory", "guardrail.number_provenance"),
+        capability_methods=(),
+        read_categories=("upstream_artifacts",),
+        output_schema=SchemaRef(name="MinedFactorDraft", version="1"),
+        tool_calls=ToolCallRequirement.FORBIDDEN,
+        inputs=(InputBinding(name="factor_ic", schema_ref=_FACTOR_IC_REPORT,
+                             required=False, cardinality="one"),)),
+    _QuantWorkerRow(
+        worker_id="quant.curator",
+        persona=("Offline factor curator (#26, AMEND-5) — draft-only, zero trading "
+                 "authority"),
+        tier=Tier.CRITIC, exec_kind=ExecutionKind.LLM,
+        model_tier="reasoner", thinking_budget=0,
+        handler_id=None, prompt_id="prompt.quant.curator",
+        skill_id="skill.quant.curator",
+        guardrail_ids=("guardrail.draft_only_advisory", "guardrail.number_provenance",
+                       "guardrail.revision_throttle"),
+        capability_methods=(),
+        read_categories=("context", "upstream_artifacts"),
+        output_schema=SchemaRef(name="FactorLifecycleProposal", version="1"),
+        tool_calls=ToolCallRequirement.FORBIDDEN,
+        inputs=(InputBinding(name="factor_ic", schema_ref=_FACTOR_IC_REPORT,
+                             required=False, cardinality="one"),
+                InputBinding(name="backtest_evidence", schema_ref=_BACKTEST_EVIDENCE_REPORT,
+                             required=False, cardinality="one"))),
+)
+
+
+def build_quant_worker_specs(
+    *, materials: tuple[ResolvedTextMaterial, ...],
+) -> tuple[WorkerSpec, ...]:
+    """Build the reviewed Lane A final WorkerSpecs from resolved batch materials.
+
+    Skill/prompt/handler/guardrail refs are indexed by id from ``materials``; capability
+    allowlist refs resolve from the implemented Phase-3 ``data_capability_refs()`` (method
+    id → sealed ``CapabilityRef``), never a re-typed capability string. Deterministic seats
+    bind a ``handler_ref`` and no tier; the sole LLM seat binds a prompt + model tier.
+    Order-stable (sorted by worker id).
+    """
+    quant_ix = _text_index(materials)
+    cap_refs: dict[str, CapabilityRef] = data_capability_refs()
+
+    def _content(mid: str) -> ContentRef:
+        try:
+            return quant_ix[mid]
+        except KeyError:
+            raise KeyError(f"missing resolved text material {mid!r} for Lane A") from None
+
+    specs: list[WorkerSpec] = []
+    for row in _QUANT_ROWS:
+        guardrails = tuple(sorted(
+            (_content(g) for g in row.guardrail_ids), key=lambda r: (r.id, r.version)))
+        caps = tuple(sorted(
+            (cap_refs[m] for m in row.capability_methods), key=lambda c: (c.id, c.version)))
+        if row.exec_kind is ExecutionKind.DETERMINISTIC:
+            execution = ExecutionSpec(
+                kind=ExecutionKind.DETERMINISTIC, handler_ref=_content(row.handler_id))
+            prompt_ref: ContentRef | None = None
+        else:
+            execution = ExecutionSpec(
+                kind=ExecutionKind.LLM, model_tier=row.model_tier,
+                thinking_budget=row.thinking_budget)
+            prompt_ref = _content(row.prompt_id)
+        specs.append(WorkerSpec(
+            id=row.worker_id, catalog_role="final", selection_scope="dynamic_allowed",
+            lane=_QUANT_LANE, persona=row.persona, tier=row.tier, execution=execution,
             system_prompt_ref=prompt_ref,
             skills=(SkillBinding(skill_ref=_content(row.skill_id)),),
             guardrail_refs=guardrails,
