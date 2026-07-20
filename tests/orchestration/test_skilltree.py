@@ -66,6 +66,21 @@ LEGACY_SOURCE_PATHS = {
     "orchestrator.planner": "config/orchestration/materials/planner/SKILL.md",
 }
 
+#: Tree skills whose file Task 4/10 install WHOLESALE from the 交付物②③ 逐字安装件,
+#: superseding the Phase-2 pilot relocation. For these the tree now holds the NEW
+#: install bytes (a different digest, verified byte-verbatim in test_lane_batch_text.py),
+#: while the maps above still record the pilot-era relocation — which is exactly what the
+#: FROZEN Phase-7 pilot catalog still binds (D11: the pilot catalog is never
+#: retro-modified). So a case-A ``manifest_digest_mismatch`` on ONLY these ids, against the
+#: real Phase-7 catalog, is the sanctioned Phase-8 transitional state — not drift.
+#: CONTRACT (binding on the later tasks; inherited from p8-task-4-report interface notes):
+#:   * Task 10 ADDS "dec.research_mgr" / "dec.pm" here when it installs 交付物③ into their
+#:     tree files (the same wholesale replacement of the other two pilots).
+#:   * Task 11 RE-POINTS the real-catalog cross-check test at the Phase-8 catalog (which
+#:     binds the NEW install digests) and EMPTIES this set — the exception must not
+#:     outlive Phase 8.
+SUPERSEDED_IN_PHASE8 = {"text.sentiment"}
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -438,6 +453,13 @@ def test_real_tree_relocations_are_digest_preserving():
     for sid, want in RECORDED_SKILL_DIGESTS.items():
         assert sid in by_id, f"relocated skill {sid} missing from tree"
         got = skilltree._skill_digest(by_id[sid])
+        if sid in SUPERSEDED_IN_PHASE8:
+            # Task 4/10 installed the 交付物②③ 逐字安装件 wholesale — the tree digest is
+            # the NEW install digest (byte-verbatim-checked in test_lane_batch_text.py),
+            # NOT the pilot relocation digest `want` (which the frozen Phase-7 catalog
+            # still binds). Assert the supersession actually happened.
+            assert got != want, f"{sid}: expected a superseded (changed) tree digest"
+            continue
         assert got == want, f"{sid}: tree digest {got} != recorded {want}"
 
 
@@ -445,6 +467,8 @@ def test_real_tree_bytes_equal_legacy_golden_source_bytes():
     tree = skilltree.load_skill_tree(skilltree.DEFAULT_TREE_ROOT)
     by_id = {s.skill_id: s for s in tree}
     for sid, rel in LEGACY_SOURCE_PATHS.items():
+        if sid in SUPERSEDED_IN_PHASE8:
+            continue  # tree superseded wholesale by Task 4/10; no longer byte-identical
         legacy = (_REPO_ROOT / rel).read_bytes()
         assert by_id[sid].text.encode("utf-8") == legacy, f"{sid} bytes diverge from {rel}"
 
@@ -477,15 +501,26 @@ def _copy_real_tree(tmp_path: Path) -> Path:
 
 
 def test_lint_real_tree_clean_against_real_phase7_catalog():
-    """Real tree + real mirror + the REAL Phase-7 catalog cross-check ⇒ no drift.
+    """Real tree + real mirror + the REAL Phase-7 catalog cross-check.
 
     Every relocated tree skill's digest equals the digest its owning final worker
     binds; ``compat.skill.mirror`` (bound only by ``compatibility`` workers) and the
-    planner skill (materials-without-worker) are correctly NOT flagged."""
+    planner skill (materials-without-worker) are correctly NOT flagged. The ONLY
+    permitted issues are case-A ``manifest_digest_mismatch`` on the SUPERSEDED_IN_PHASE8
+    ids: Task 4/10 install the 交付物②③ tree files wholesale while the FROZEN Phase-7
+    pilot catalog still binds the pilot digest (D11), so exactly those ids diverge — the
+    sanctioned Phase-8 transitional state. Task 11 re-points this test at the Phase-8
+    catalog and empties the set (see SUPERSEDED_IN_PHASE8)."""
     tree = skilltree.load_skill_tree(skilltree.DEFAULT_TREE_ROOT)
     issues = skilltree.lint_drift(
         tree, materials_root=skilltree.DEFAULT_MATERIALS_ROOT, catalog=_phase7_catalog())
-    assert issues == (), f"real-catalog cross-check drifted: {issues}"
+    # every issue must be a sanctioned supersession mismatch — nothing else may drift
+    for i in issues:
+        assert i.code == "manifest_digest_mismatch" and i.skill_id in SUPERSEDED_IN_PHASE8, (
+            f"unexpected real-catalog drift: {i}")
+    # and every superseded id must actually produce that mismatch (proof the wholesale
+    # install happened and the cross-check still detects it)
+    assert {i.skill_id for i in issues} == SUPERSEDED_IN_PHASE8, issues
 
 
 def test_lint_real_catalog_flags_tampered_relocated_skill(tmp_path):
@@ -503,7 +538,12 @@ def test_lint_real_catalog_flags_tampered_relocated_skill(tmp_path):
         tree=tree, materials_root=materials,
     )
     issues = skilltree.lint_drift(tree, materials_root=materials, catalog=_phase7_catalog())
-    hits = [i for i in issues if i.code == "manifest_digest_mismatch"]
+    # exclude the sanctioned SUPERSEDED_IN_PHASE8 supersession mismatch(es) — the tampered
+    # market.regime is the divergence under test here.
+    hits = [
+        i for i in issues
+        if i.code == "manifest_digest_mismatch" and i.skill_id not in SUPERSEDED_IN_PHASE8
+    ]
     assert [i.skill_id for i in hits] == ["market.regime"], issues
 
 
