@@ -72,6 +72,10 @@ __all__ = [
     "quant_lane_material_specs",
     "load_quant_lane_materials",
     "build_quant_worker_specs",
+    "XCUT_LANE_WORKER_IDS",
+    "xcut_lane_material_specs",
+    "load_xcut_lane_materials",
+    "build_xcut_worker_specs",
 ]
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -710,6 +714,191 @@ def build_quant_worker_specs(
                 tool_calls=row.tool_calls, require_input_refs=True,
                 require_number_anchors=True, allow_unsourced_numbers=False,
                 optional_data_may_degrade=True),
+            supported_modes=_MODES,
+            can_emit_decision=False, decision_authority="none"))
+    return tuple(sorted(specs, key=lambda w: w.id))
+
+
+# =========================================================================== #
+# Batch 4 · 跨切 xcut (Task 7)                                                 #
+# =========================================================================== #
+# Reviewed rulings folded into the xcut batch (FLAGGED in the task report):
+#
+# * Lane literal is ``"xcut"``. The Task-0 D5 worker map's ``cross`` string is documentation
+#   ONLY and never appears in any WorkerSpec (a ``cross`` lane is not even in the Lane
+#   Literal — ``Lane = {market, quant, pv, text, decision, xcut}``); the firewall test
+#   asserts no shipped spec contains the ``cross`` substring.
+# * Both seats are DETERMINISTIC (handler_ref + no tier, zero LLM reservations) and are the
+#   two cross-cut FINAL critics. Their handlers bind per clause (h):
+#   ``handler.x.number_critic`` binds the import-safe PURE honesty spine DIRECTLY (branch-1,
+#   like ``pv.price_action`` binds ``compute_pa_features``); ``handler.x.quality_gate`` is a
+#   self-contained stdlib projection over the wired reports' honesty channels (the
+#   impure-fallback branch — ``datafeed.health.collect_data_health`` reads live freshness
+#   snapshots, not an import-safe pure function).
+# * Both are FORBIDDEN ⇔ empty allowlist (structural: no tool ⇒ no write capability),
+#   ``can_emit_decision=False``, and name ZERO ww_ tools in their DSP — they read upstream
+#   artifacts only. Every shipped seat's ``lint_skill_supply(...) == ()``.
+# * Per-seat EvidencePolicy ``require_number_anchors``: ``x.quality_gate`` = ``True``;
+#   ``x.number_critic`` = ``False`` — it PRODUCES the anchor verdicts, so it is not itself
+#   anchored (CONTROLLER RULING (a): ``require_number_anchors`` is subsumed by
+#   ``allow_unsourced_numbers`` in @1; the contradictory True+True combo is never set).
+# * Output schemas: ``x.quality_gate`` → this batch's ``DataQualityGrade@1``;
+#   ``x.number_critic`` → Task 2's ``HonestyReport@1`` (owned by ``honesty.py``). The input
+#   SchemaRefs bind by name+version only — the not-yet-defined Lane-D decision payloads
+#   (``BullCase`` / ``BearCase`` / ``ResearchPlan`` / ``PortfolioDecision``) are forward
+#   references (dependency injection uses exact SchemaRef equality at wiring time, spec.py
+#   999-1000); this batch introduces no premature coupling.
+
+_XCUT_LANE = "xcut"
+
+XCUT_LANE_WORKER_IDS: tuple[str, ...] = (
+    "x.quality_gate", "x.number_critic",
+)
+
+#: input schema refs the xcut chain binds (published by other lanes / Phase 8 decision layer).
+_NEWS_DIGEST = SchemaRef(name="NewsDigestReport", version="1")
+_MACRO_PULSE = SchemaRef(name="MacroPulseReport", version="1")
+_MICROSTRUCTURE = SchemaRef(name="MicrostructureReport", version="1")
+_MODEL_PREDICTION = SchemaRef(name="ModelPredictionReport", version="1")
+_BULL_CASE = SchemaRef(name="BullCase", version="1")
+_BEAR_CASE = SchemaRef(name="BearCase", version="1")
+_RESEARCH_PLAN = SchemaRef(name="ResearchPlan", version="1")
+_PORTFOLIO_DECISION = SchemaRef(name="PortfolioDecision", version="1")
+_TECHNICAL = SchemaRef(name="TechnicalReport", version="1")
+_FUNDAMENTALS = SchemaRef(name="FundamentalsReport", version="1")
+
+
+def xcut_lane_material_specs() -> tuple[_MaterialSpec, ...]:
+    """The (id, kind, path) rows the xcut batch loads from disk — batch-owned + reused files.
+
+    The two seats' skills; the two deterministic seats' handler modules; and the two reused
+    shared guardrails (``number_provenance`` — both seats; ``untrusted_input_isolation`` — the
+    number critic, binding the FSI 不可信输入隔离 doctrine). The guardrail files are shared
+    across lanes and already on disk (Task 4/5); this batch references them, not recreates.
+    """
+    rows: list[_MaterialSpec] = []
+    for wid in XCUT_LANE_WORKER_IDS:
+        rows.append(_MaterialSpec(f"skill.{wid}", "skill", _SKILLS_TREE / wid / "SKILL.md"))
+    for wid in XCUT_LANE_WORKER_IDS:
+        rows.append(_MaterialSpec(f"handler.{wid}", "handler", _HANDLERS / f"{wid}.py"))
+    rows.append(_MaterialSpec(
+        "guardrail.number_provenance", "guardrail", _GUARDRAILS / "number-provenance.md"))
+    rows.append(_MaterialSpec(
+        "guardrail.untrusted_input_isolation", "guardrail",
+        _GUARDRAILS / "untrusted-input-isolation.md"))
+    return tuple(rows)
+
+
+def load_xcut_lane_materials() -> tuple[ResolvedTextMaterial, ...]:
+    """Resolve every xcut material to bytes + a content-digest-sealed ref."""
+    out: list[ResolvedTextMaterial] = []
+    for spec in xcut_lane_material_specs():
+        _ref, mat = build_text_material(
+            id=spec.material_id, version="1", kind=spec.kind, raw=spec.path.read_bytes())
+        out.append(mat)
+    return tuple(out)
+
+
+class _XcutWorkerRow(NamedTuple):
+    worker_id: str
+    persona: str
+    tier: Tier
+    handler_id: str
+    skill_id: str
+    guardrail_ids: tuple[str, ...]
+    read_categories: tuple[str, ...]
+    output_schema: SchemaRef
+    inputs: tuple[InputBinding, ...]
+    require_number_anchors: bool   # per-seat: quality_gate True; number_critic False
+
+
+#: The reviewed xcut roster (frozen-order migration batch 4/5). Both seats are deterministic
+#: cross-cut FINAL critics (handler_ref + no tier); both FORBIDDEN ⇔ empty allowlist.
+_XCUT_ROWS: tuple[_XcutWorkerRow, ...] = (
+    _XcutWorkerRow(
+        worker_id="x.quality_gate",
+        persona=("Cross-cut data-quality ABCDF gate (xcut) — weakest-link, zero trading "
+                 "authority"),
+        tier=Tier.CRITIC, handler_id="handler.x.quality_gate",
+        skill_id="skill.x.quality_gate",
+        guardrail_ids=("guardrail.number_provenance",),
+        read_categories=("upstream_artifacts", "market_data"),
+        output_schema=SchemaRef(name="DataQualityGrade", version="1"),
+        inputs=(InputBinding(name="news_digest", schema_ref=_NEWS_DIGEST,
+                             required=False, cardinality="one"),
+                InputBinding(name="macro_pulse", schema_ref=_MACRO_PULSE,
+                             required=False, cardinality="one"),
+                InputBinding(name="microstructure", schema_ref=_MICROSTRUCTURE,
+                             required=False, cardinality="one"),
+                InputBinding(name="model_predictions", schema_ref=_MODEL_PREDICTION,
+                             required=False, cardinality="one")),
+        require_number_anchors=True),
+    _XcutWorkerRow(
+        worker_id="x.number_critic",
+        persona=("Cross-cut number-provenance and honesty critic (xcut) — zero trading "
+                 "authority"),
+        tier=Tier.CRITIC, handler_id="handler.x.number_critic",
+        skill_id="skill.x.number_critic",
+        guardrail_ids=("guardrail.number_provenance", "guardrail.untrusted_input_isolation"),
+        read_categories=("upstream_artifacts",),
+        # Task 2's HonestyReport (owned by honesty.py, registered by Task 11).
+        output_schema=SchemaRef(name="HonestyReport", version="1"),
+        inputs=(InputBinding(name="bull_case", schema_ref=_BULL_CASE,
+                             required=False, cardinality="one"),
+                InputBinding(name="bear_case", schema_ref=_BEAR_CASE,
+                             required=False, cardinality="one"),
+                InputBinding(name="research_plan", schema_ref=_RESEARCH_PLAN,
+                             required=False, cardinality="one"),
+                InputBinding(name="portfolio_decision", schema_ref=_PORTFOLIO_DECISION,
+                             required=False, cardinality="one"),
+                InputBinding(name="technical", schema_ref=_TECHNICAL,
+                             required=False, cardinality="one"),
+                InputBinding(name="fundamentals", schema_ref=_FUNDAMENTALS,
+                             required=False, cardinality="one")),
+        # it PRODUCES the anchor verdicts, so it is not itself anchored (ruling (a)).
+        require_number_anchors=False),
+)
+
+
+def build_xcut_worker_specs(
+    *, materials: tuple[ResolvedTextMaterial, ...],
+) -> tuple[WorkerSpec, ...]:
+    """Build the reviewed 跨切 xcut final WorkerSpecs from resolved batch materials.
+
+    Skill/handler/guardrail refs are indexed by id from ``materials``. Both seats are
+    DETERMINISTIC (a bound ``handler_ref``, no model tier, no prompt) and FORBIDDEN ⇔ empty
+    allowlist (no tool ⇒ no write capability). ``require_number_anchors`` is per-seat
+    (``x.number_critic`` = ``False`` — it produces the anchor verdicts). Order-stable
+    (sorted by worker id).
+    """
+    xcut_ix = _text_index(materials)
+
+    def _content(mid: str) -> ContentRef:
+        try:
+            return xcut_ix[mid]
+        except KeyError:
+            raise KeyError(f"missing resolved text material {mid!r} for xcut") from None
+
+    specs: list[WorkerSpec] = []
+    for row in _XCUT_ROWS:
+        guardrails = tuple(sorted(
+            (_content(g) for g in row.guardrail_ids), key=lambda r: (r.id, r.version)))
+        specs.append(WorkerSpec(
+            id=row.worker_id, catalog_role="final", selection_scope="dynamic_allowed",
+            lane=_XCUT_LANE, persona=row.persona, tier=row.tier,
+            execution=ExecutionSpec(
+                kind=ExecutionKind.DETERMINISTIC, handler_ref=_content(row.handler_id)),
+            system_prompt_ref=None,
+            skills=(SkillBinding(skill_ref=_content(row.skill_id)),),
+            guardrail_refs=guardrails,
+            capability_allowlist=(),
+            read_categories=row.read_categories,
+            inputs=row.inputs,
+            outputs=(OutputBinding(name="primary", schema_ref=row.output_schema),),
+            evidence_policy=EvidencePolicy(
+                tool_calls=ToolCallRequirement.FORBIDDEN, require_input_refs=True,
+                require_number_anchors=row.require_number_anchors,
+                allow_unsourced_numbers=False, optional_data_may_degrade=True),
             supported_modes=_MODES,
             can_emit_decision=False, decision_authority="none"))
     return tuple(sorted(specs, key=lambda w: w.id))

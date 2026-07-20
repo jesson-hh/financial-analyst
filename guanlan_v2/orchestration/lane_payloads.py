@@ -66,6 +66,15 @@ Lane A · 量化 (Task 6)
 * ``FactorLifecycleProposal`` — the #26 ``quant.curator`` draft-only lifecycle proposal
   (``draft_only`` is ``Literal[True]``; ``trigger_evidence`` non-empty — 不许"顺手优化";
   ``proposed_expr`` is revision_draft-only — 表达式只进 candidate、不进 study 身份).
+
+Lane 跨切 · xcut (Task 7)
+-------------------------
+* ``QualityComponent`` / ``DataQualityGrade`` — the ``x.quality_gate`` deterministic ABCDF
+  data-quality grade. The overall ``grade`` may never be BETTER than its worst component
+  (honest weakest-link: an ABCDF gate is only as good as its weakest wired source, never an
+  average that hides a failing feed); ``components`` are sorted by ``source_id`` and
+  duplicate-free. ``x.number_critic``'s output is Task 2's ``HonestyReport`` (owned by
+  ``honesty.py``, registered by Task 11) — it is deliberately NOT a lane payload here.
 """
 from __future__ import annotations
 
@@ -112,10 +121,14 @@ __all__ = [
     "FundamentalsReport",
     "MinedFactorDraft",
     "FactorLifecycleProposal",
+    # Lane 跨切 · xcut
+    "QualityComponent",
+    "DataQualityGrade",
     # partition helpers (for the Task-11 Phase-8 firewall)
     "LANE_C_PUBLIC_MODELS",
     "LANE_B_PUBLIC_MODELS",
     "LANE_A_PUBLIC_MODELS",
+    "LANE_X_PUBLIC_MODELS",
 ]
 
 #: a finite float constrained to the closed unit interval ``[0, 1]`` (bool/NaN/Inf
@@ -686,4 +699,75 @@ LANE_A_PUBLIC_MODELS: tuple[type[DigestModel], ...] = (
     FundamentalsReport,
     MinedFactorDraft,
     FactorLifecycleProposal,
+)
+
+
+# =========================================================================== #
+# Lane 跨切 · xcut (Task 7)                                                    #
+# =========================================================================== #
+#: ABCDF severity rank (A best … F worst). The overall :class:`DataQualityGrade`
+#: grade may never be *better* (lower rank) than its worst component — the honest
+#: weakest-link invariant (a gate is only as good as its weakest wired source).
+_GRADE_RANK: dict[str, int] = {"A": 0, "B": 1, "C": 2, "D": 3, "F": 4}
+
+
+# --------------------------------------------------------------------------- #
+# x.quality_gate — DataQualityGrade                                            #
+# --------------------------------------------------------------------------- #
+class QualityComponent(DigestModel):
+    """One wired source's ABCDF data-quality grade with the reason it earned it.
+
+    ``source_id`` is the graded upstream source (a wired report's logical id); ``grade``
+    is the closed ABCDF band; ``reason`` is the honest, non-blank evidence (a degradation
+    channel / staleness gap / coverage note / absence) that fixed the band — a grade is
+    never assigned without a stated reason.
+    """
+
+    schema_version: Literal["1"] = "1"
+    source_id: LogicalId
+    grade: Literal["A", "B", "C", "D", "F"]
+    reason: NonEmptyStr
+
+
+class DataQualityGrade(DigestModel):
+    """The ``x.quality_gate`` cross-cut ABCDF data-quality report.
+
+    ``grade`` is the overall band and may never be BETTER than the worst per-source
+    ``component`` (honest weakest-link: an ABCDF gate is only as good as its weakest wired
+    source, never an average that hides a failing feed; a MORE conservative overall is
+    allowed). ``components`` are sorted by ``source_id`` and duplicate-free — a source graded
+    twice is a caller bug, never silently collapsed — and non-empty (an ungrounded overall
+    grade is meaningless).
+    """
+
+    schema_version: Literal["1"] = "1"
+    as_of: UtcDateTime
+    grade: Literal["A", "B", "C", "D", "F"]
+    components: tuple[QualityComponent, ...]
+
+    @model_validator(mode="after")
+    def _validate(self) -> "DataQualityGrade":
+        if not self.components:
+            raise ValueError("DataQualityGrade must grade at least one source component")
+        ids = [c.source_id for c in self.components]
+        if ids != sorted(ids):
+            raise ValueError("DataQualityGrade components must be sorted by source_id")
+        if len(set(ids)) != len(ids):
+            raise ValueError("DataQualityGrade components must be duplicate-free by source_id")
+        worst = max(_GRADE_RANK[c.grade] for c in self.components)
+        if _GRADE_RANK[self.grade] < worst:
+            raise ValueError(
+                "overall grade must not be better than the worst component "
+                "(honest weakest-link: a gate is only as good as its weakest wired source)"
+            )
+        return self
+
+
+#: The Lane 跨切 (xcut) public payload models (the Task-11 Phase-8 firewall reviews this set
+#: into the cumulative registry alongside the other lane sets). ``x.number_critic`` emits
+#: Task 2's ``HonestyReport`` (owned by ``honesty.py``) — it is NOT a lane payload and is
+#: deliberately absent here.
+LANE_X_PUBLIC_MODELS: tuple[type[DigestModel], ...] = (
+    QualityComponent,
+    DataQualityGrade,
 )
