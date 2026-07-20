@@ -28,21 +28,40 @@ Lane C · 文本 (Task 4)
   extraction + 旧报降权 (staleness downweight).
 * ``PolicyEntry`` / ``PolicyReport`` — ``text.policy`` official-wording read.
 * ``PredictionMarketRead`` / ``MacroPulseReport`` — ``text.macro`` macro pulse.
+
+Lane B · 量价几何 (Task 5)
+-------------------------
+* ``PriceActionFeatureReport`` — ``pv.price_action`` deterministic per-bar geometry;
+  its ``features`` are the numeric (``FiniteFloat``) projection named by the extensible
+  ``pa-15key-v1`` feature-set registry (:data:`PA_FEATURE_SET_KEYS`). The categorical /
+  structural ``compute_pa_features`` keys (bar_type/breakout/limit/gap/follow/recent/date)
+  are NOT ``FiniteFloat`` and are never coerced into the numeric ``features`` dict; the
+  handler carries the full 15-key geometry verbatim (前后端镜像逐位一致 red line).
+* ``IndicatorReading`` / ``TechnicalReport`` — ``pv.technical`` ≤8 complementary
+  indicators read against a ``verified_anchor_digest`` truth anchor + an honest bias.
+* ``MicrostructureReport`` — ``pv.microstructure`` L1-book / tick / tape projection with
+  a non-fabricated ``degradation`` channel for every absent optional feed.
+* ``PatternLifecycleProposal`` — the #27 ``pv.curator`` draft-only output (``draft_only``
+  is ``Literal[True]`` — a proposal can NEVER be constructed adopted; ``trigger_evidence``
+  is non-empty — 不许"顺手优化"; ``source_label`` records an external feed's 来源作者).
 """
 from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from guanlan_v2.orchestration.data.symbols import Symbol
 from guanlan_v2.orchestration.digest import (
+    DigestHex,
     DigestModel,
     FiniteFloat,
     NonEmptyStr,
     NonNegativeInt,
     UtcDateTime,
 )
+from guanlan_v2.orchestration.pattern_registry import PatternDefinition
+from guanlan_v2.orchestration.refs import ContentRef, LogicalId
 
 __all__ = [
     # Lane C · text
@@ -54,8 +73,16 @@ __all__ = [
     "PolicyReport",
     "PredictionMarketRead",
     "MacroPulseReport",
+    # Lane B · price-volume geometry
+    "PA_FEATURE_SET_KEYS",
+    "PriceActionFeatureReport",
+    "IndicatorReading",
+    "TechnicalReport",
+    "MicrostructureReport",
+    "PatternLifecycleProposal",
     # partition helpers (for the Task-11 Phase-8 firewall)
     "LANE_C_PUBLIC_MODELS",
+    "LANE_B_PUBLIC_MODELS",
 ]
 
 #: a finite float constrained to the closed unit interval ``[0, 1]`` (bool/NaN/Inf
@@ -210,4 +237,208 @@ LANE_C_PUBLIC_MODELS: tuple[type[DigestModel], ...] = (
     PolicyReport,
     PredictionMarketRead,
     MacroPulseReport,
+)
+
+
+# =========================================================================== #
+# Lane B · 量价几何 (Task 5)                                                   #
+# =========================================================================== #
+# --------------------------------------------------------------------------- #
+# pv.price_action — PriceActionFeatureReport                                    #
+# --------------------------------------------------------------------------- #
+#: The extensible price-action feature-set registry (AMEND-1-style 15键→N键): a
+#: ``feature_set_version`` → the exact ``FiniteFloat`` feature-key vocabulary a
+#: :class:`PriceActionFeatureReport` of that version carries. ``"pa-15key-v1"`` is the
+#: numeric projection of ``compute_pa_features`` (guanlan_v2/seats/price_action.py):
+#: the seven float bar-geometry keys plus ``inside_streak`` (a count rendered as a
+#: float). The five categorical keys (bar_type/breakout/limit/gap/follow) and the two
+#: structural keys (date/recent) are NOT finite floats and are therefore NOT part of the
+#: numeric ``features`` dict — the deterministic handler carries the full 15-key geometry
+#: verbatim (前后端镜像逐位一致 red line), and a categorical fact is never fabricated into a
+#: number here. The version LABEL keeps the historical "15key" name (the source geometry
+#: is 15 keys); registering a superseding "N-key" version is an in-place map extension.
+PA_FEATURE_SET_KEYS: dict[str, tuple[str, ...]] = {
+    "pa-15key-v1": (
+        "body",
+        "close_pos",
+        "ema20_rel",
+        "inside_streak",
+        "lower_wick",
+        "range_atr",
+        "upper_wick",
+        "vol_ratio",
+    ),
+}
+
+
+class PriceActionFeatureReport(DigestModel):
+    """The deterministic per-bar price-volume geometry for a name's decision bar.
+
+    ``features`` are keyed EXACTLY by the registry vocabulary of ``feature_set_version``
+    (:data:`PA_FEATURE_SET_KEYS`) — a missing/extra/foreign key is a validation error, so
+    a partial-history bar (some numeric key still ``None``) yields no report rather than a
+    silently truncated one. ``patterns`` are ``pattern_id@definition_version`` hits from
+    the Task-4b dictionary; they stay ``()`` until the separately-chartered recognizer
+    task lands, and are NEVER fabricated. ``methodology_ref`` (可编辑方法论) is opt-in.
+    """
+
+    schema_version: Literal["1"] = "1"
+    symbol: Symbol
+    as_of: UtcDateTime
+    feature_set_version: NonEmptyStr
+    features: dict[NonEmptyStr, FiniteFloat]
+    patterns: tuple[NonEmptyStr, ...] = ()
+    methodology_ref: ContentRef | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> "PriceActionFeatureReport":
+        keys = PA_FEATURE_SET_KEYS.get(self.feature_set_version)
+        if keys is None:
+            raise ValueError(
+                f"unknown feature_set_version {self.feature_set_version!r}; "
+                f"known versions: {sorted(PA_FEATURE_SET_KEYS)}"
+            )
+        if set(self.features) != set(keys):
+            raise ValueError(
+                f"features keys must be exactly the {self.feature_set_version!r} registry "
+                f"keys {tuple(keys)!r}; got {tuple(sorted(self.features))!r}"
+            )
+        for hit in self.patterns:
+            pid, sep, ver = hit.partition("@")
+            if not sep or not pid.strip() or not ver.strip():
+                raise ValueError(
+                    f"pattern hit {hit!r} must be 'pattern_id@definition_version' "
+                    "(a bare id is never a dictionary hit)"
+                )
+        return self
+
+
+# --------------------------------------------------------------------------- #
+# pv.technical — TechnicalReport                                                #
+# --------------------------------------------------------------------------- #
+class IndicatorReading(DigestModel):
+    """One named technical-indicator reading (a finite value + an optional note)."""
+
+    schema_version: Literal["1"] = "1"
+    name: NonEmptyStr
+    value: FiniteFloat
+    note: NonEmptyStr | None = None
+
+
+class TechnicalReport(DigestModel):
+    """A multi-indicator technical read anchored to a verified-snapshot truth anchor.
+
+    ``indicators`` is 1–8 complementary readings with unique names (≤8 互补指标 — a wall
+    of redundant oscillators is not a read). ``verified_anchor_digest`` is the content
+    digest of the ``VerifiedSnapshotDataResult`` the numbers were read against (``None``
+    when no verified anchor was available — recorded honestly, never spoofed). ``bias``
+    carries an explicit ``"unknown"`` so a thin read is not coerced to ``"neutral"``.
+    """
+
+    schema_version: Literal["1"] = "1"
+    symbol: Symbol
+    as_of: UtcDateTime
+    indicators: tuple[IndicatorReading, ...]
+    verified_anchor_digest: DigestHex | None
+    bias: Literal["bullish", "bearish", "neutral", "unknown"]
+    summary: NonEmptyStr
+
+    @model_validator(mode="after")
+    def _validate(self) -> "TechnicalReport":
+        n = len(self.indicators)
+        if not (1 <= n <= 8):
+            raise ValueError(
+                f"a TechnicalReport carries 1–8 complementary indicators; got {n}"
+            )
+        names = [i.name for i in self.indicators]
+        if len(set(names)) != len(names):
+            raise ValueError("indicator names must be unique")
+        return self
+
+
+# --------------------------------------------------------------------------- #
+# pv.microstructure — MicrostructureReport                                      #
+# --------------------------------------------------------------------------- #
+class MicrostructureReport(DigestModel):
+    """An L1-book / tick / tape microstructure projection for a name.
+
+    Every metric is independently nullable and ``degradation`` is the non-fabricated
+    shortfall channel (orderbook 空档降级 precedent): when the L1 book / tick / tape /
+    fund-flow feed is absent, the corresponding metric is ``None`` AND the absence is
+    named in ``degradation`` — a down feed is never back-filled with a zero or an imputed
+    imbalance. ``narrative`` ties the composite read to the feeds that were present.
+    """
+
+    schema_version: Literal["1"] = "1"
+    symbol: Symbol
+    as_of: UtcDateTime
+    l1_spread_bp: FiniteFloat | None
+    bid_ask_imbalance: FiniteFloat | None
+    break_ratio: FiniteFloat | None
+    whale_net_inflow: FiniteFloat | None
+    degradation: tuple[NonEmptyStr, ...] = ()
+    narrative: NonEmptyStr
+
+
+# --------------------------------------------------------------------------- #
+# pv.curator (#27) — PatternLifecycleProposal                                   #
+# --------------------------------------------------------------------------- #
+class PatternLifecycleProposal(DigestModel):
+    """The #27 ``pv.curator`` draft-only lifecycle proposal (AMEND-6/6a).
+
+    Two-route discipline (两路分流): a ``"pattern_definition"`` proposal carries a
+    computable :class:`~guanlan_v2.orchestration.pattern_registry.PatternDefinition`
+    ((a) 路 — evaluated by historical daily-bar replay); a ``"skill_diff"`` proposal
+    carries a ``skill_diff_summary`` for the non-computable 判读方法论 ((b) 路 — routed
+    through the A/B shadow + matured 门). A ``"retirement"`` proposal names the
+    ``pattern_id`` to retire.
+
+    Load-bearing red lines: ``draft_only`` is ``Literal[True]`` — a proposal can NEVER be
+    constructed as adopted (adoption is always 人审, downstream of this schema);
+    ``trigger_evidence`` is non-empty (不许"顺手优化"); ``source_label`` records the 来源
+    作者 whenever the proposal originates from an external technical-analysis feed (外部
+    投喂 = 不可信数据 — its text is never elevated to a system instruction).
+    """
+
+    schema_version: Literal["1"] = "1"
+    as_of: UtcDateTime
+    kind: Literal["pattern_definition", "skill_diff", "retirement"]
+    pattern_id: LogicalId | None = None
+    proposed_definition: PatternDefinition | None = None
+    skill_diff_summary: NonEmptyStr | None = None
+    source_label: NonEmptyStr | None = None
+    trigger_evidence: tuple[NonEmptyStr, ...]
+    draft_only: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _validate(self) -> "PatternLifecycleProposal":
+        if not self.trigger_evidence:
+            raise ValueError(
+                "trigger_evidence must be non-empty — a proposal records why it fires "
+                "(不许\"顺手优化\")"
+            )
+        if self.kind == "pattern_definition":
+            if self.proposed_definition is None:
+                raise ValueError(
+                    "a 'pattern_definition' proposal requires a proposed_definition ((a) 路)"
+                )
+        elif self.kind == "skill_diff":
+            if self.skill_diff_summary is None:
+                raise ValueError(
+                    "a 'skill_diff' proposal requires a skill_diff_summary ((b) 路)"
+                )
+        else:  # retirement
+            if self.pattern_id is None:
+                raise ValueError("a 'retirement' proposal requires the pattern_id to retire")
+        return self
+
+
+#: The Lane B public payload models (the Task-11 Phase-8 firewall reviews this set into
+#: the cumulative registry alongside :data:`LANE_C_PUBLIC_MODELS`).
+LANE_B_PUBLIC_MODELS: tuple[type[DigestModel], ...] = (
+    PriceActionFeatureReport,
+    IndicatorReading,
+    TechnicalReport,
+    MicrostructureReport,
+    PatternLifecycleProposal,
 )

@@ -53,6 +53,10 @@ from guanlan_v2.orchestration.enums import (
     Tier,
     ToolCallRequirement,
 )
+from guanlan_v2.orchestration.pattern_registry import (
+    build_pattern_dictionary_material,
+    build_seed_pattern_dictionary,
+)
 from guanlan_v2.orchestration.refs import CapabilityRef, ContentRef, SchemaRef
 
 __all__ = [
@@ -60,6 +64,10 @@ __all__ = [
     "text_lane_material_specs",
     "load_text_lane_materials",
     "build_text_worker_specs",
+    "PV_LANE_WORKER_IDS",
+    "pv_lane_material_specs",
+    "load_pv_lane_materials",
+    "build_pv_worker_specs",
 ]
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -67,6 +75,7 @@ _SKILLS_TREE = _REPO / "guanlan_v2" / "orchestration" / "skills"
 _MATERIALS = _REPO / "config" / "orchestration" / "materials"
 _PROMPTS = _MATERIALS / "prompts"
 _GUARDRAILS = _MATERIALS / "guardrails"
+_HANDLERS = _MATERIALS / "handlers"
 _PILOT = _MATERIALS / "phase2-pilot-v1"
 
 _LANE = "text"
@@ -238,6 +247,222 @@ def build_text_worker_specs(
                 kind=ExecutionKind.LLM, model_tier=row.model_tier,
                 thinking_budget=row.thinking_budget),
             system_prompt_ref=_content(row.prompt_id),
+            skills=(SkillBinding(skill_ref=_content(row.skill_id)),),
+            guardrail_refs=guardrails,
+            capability_allowlist=caps,
+            read_categories=row.read_categories,
+            inputs=row.inputs,
+            outputs=(OutputBinding(name="primary", schema_ref=row.output_schema),),
+            evidence_policy=EvidencePolicy(
+                tool_calls=row.tool_calls, require_input_refs=True,
+                require_number_anchors=True, allow_unsourced_numbers=False,
+                optional_data_may_degrade=True),
+            supported_modes=_MODES,
+            can_emit_decision=False, decision_authority="none"))
+    return tuple(sorted(specs, key=lambda w: w.id))
+
+
+# =========================================================================== #
+# Batch 2 · Lane B 量价几何 (Task 5)                                           #
+# =========================================================================== #
+# Reviewed rulings folded into Lane B (FLAGGED in the task report):
+#
+# * Allowlist broadening (Task 0b review). ``pv.microstructure`` promises 五档/逐笔/主力
+#   (ww_orderbook / ww_ticks / ww_fundflow), which live under ``cap.data.verified_snapshot``
+#   (orderbook + ticks) and ``cap.data.indicators`` (fundflow). Its allowlist is broadened
+#   BEYOND the plan's ``get_signal`` shorthand to include those supplying capabilities —
+#   mirroring the ``text.macro`` correction — so ``lint_skill_supply(...) == ()`` while the
+#   plan's ``cap.data.signals`` shorthand is retained.
+# * Pattern-dictionary binding. The three pattern-consuming seats (``pv.price_action`` /
+#   ``pv.technical`` / ``pv.curator``) bind the Task-4b ``guardrail.pattern_dictionary``
+#   catalog material (content-digest-sealed ``ContentRef``, kind ``guardrail``);
+#   ``pv.microstructure`` does not consume the K-line dictionary and does not bind it.
+# * #27 ``pv.curator`` is the batch's sole LLM spec and is proposal-only / offline
+#   (AMEND-6, same treatment as ``market.factor_miner``): FORBIDDEN tool policy ⇔ empty
+#   allowlist (no write capability), ``can_emit_decision=False``, ``critic`` tier, and a
+#   ``draft_only`` ``PatternLifecycleProposal`` output. This batch installs only its
+#   WorkerSpec + guardrails; the D7 console delivery entry is later runtime wiring.
+
+_PV_LANE = "pv"
+
+PV_LANE_WORKER_IDS: tuple[str, ...] = (
+    "pv.price_action", "pv.technical", "pv.microstructure", "pv.curator",
+)
+
+#: input schema refs the Lane B chain binds (published by this batch's payloads).
+_PA_FEATURE_REPORT = SchemaRef(name="PriceActionFeatureReport", version="1")
+_TECHNICAL_REPORT = SchemaRef(name="TechnicalReport", version="1")
+
+
+def pv_lane_material_specs() -> tuple[_MaterialSpec, ...]:
+    """The (id, kind, path) rows Lane B loads from disk — batch-owned files.
+
+    The four seats' skills; the two LLM seats' prompts; the two deterministic seats'
+    handler modules; the two batch-new guardrails (``external_ta_ingest`` /
+    ``revision_throttle``) + the shared ``draft_only_advisory``; and the two reused shared
+    guardrails (``number_provenance`` / ``untrusted_input_isolation``). The Task-4b pattern
+    dictionary is a BUILT catalog material (added in :func:`load_pv_lane_materials`), not a
+    file row here.
+    """
+    rows: list[_MaterialSpec] = []
+    for wid in ("pv.price_action", "pv.technical", "pv.microstructure", "pv.curator"):
+        rows.append(_MaterialSpec(f"skill.{wid}", "skill", _SKILLS_TREE / wid / "SKILL.md"))
+    for wid in ("pv.technical", "pv.curator"):
+        rows.append(_MaterialSpec(f"prompt.{wid}", "prompt", _PROMPTS / f"{wid}.md"))
+    for wid in ("pv.price_action", "pv.microstructure"):
+        rows.append(_MaterialSpec(f"handler.{wid}", "handler", _HANDLERS / f"{wid}.py"))
+    rows.append(_MaterialSpec(
+        "guardrail.external_ta_ingest", "guardrail", _GUARDRAILS / "external-ta-ingest.md"))
+    rows.append(_MaterialSpec(
+        "guardrail.revision_throttle", "guardrail", _GUARDRAILS / "revision-throttle.md"))
+    rows.append(_MaterialSpec(
+        "guardrail.draft_only_advisory", "guardrail", _GUARDRAILS / "draft-only-advisory.md"))
+    rows.append(_MaterialSpec(
+        "guardrail.number_provenance", "guardrail", _GUARDRAILS / "number-provenance.md"))
+    rows.append(_MaterialSpec(
+        "guardrail.untrusted_input_isolation", "guardrail",
+        _GUARDRAILS / "untrusted-input-isolation.md"))
+    return tuple(rows)
+
+
+def load_pv_lane_materials() -> tuple[ResolvedTextMaterial, ...]:
+    """Resolve every Lane B material to bytes + a content-digest-sealed ref.
+
+    File-owned rows are hashed through the single reviewed ``build_text_material`` helper;
+    the Task-4b pattern dictionary is resolved through its owner's
+    ``build_pattern_dictionary_material`` (its sealed ``guardrail.pattern_dictionary``
+    ContentRef, digest ``3f24f8a1…``) so this batch never re-hashes the dictionary by hand.
+    """
+    out: list[ResolvedTextMaterial] = []
+    for spec in pv_lane_material_specs():
+        _ref, mat = build_text_material(
+            id=spec.material_id, version="1", kind=spec.kind, raw=spec.path.read_bytes())
+        out.append(mat)
+    _pd_ref, pd_mat = build_pattern_dictionary_material(build_seed_pattern_dictionary())
+    out.append(pd_mat)
+    return tuple(out)
+
+
+class _PVWorkerRow(NamedTuple):
+    worker_id: str
+    persona: str
+    tier: Tier
+    exec_kind: ExecutionKind
+    model_tier: str | None          # None ⇔ deterministic
+    thinking_budget: int | None     # None ⇔ deterministic
+    handler_id: str | None          # set ⇔ deterministic
+    prompt_id: str | None           # set ⇔ LLM
+    skill_id: str
+    guardrail_ids: tuple[str, ...]
+    capability_methods: tuple[str, ...]   # Phase-3 method ids (never re-typed cap strings)
+    read_categories: tuple[str, ...]
+    output_schema: SchemaRef
+    tool_calls: ToolCallRequirement
+    inputs: tuple[InputBinding, ...]
+
+
+#: The reviewed Lane B roster (frozen-order migration batch 2/5). Deterministic seats
+#: carry a ``handler_ref`` + no tier; ``pv.curator`` (#27) is the sole LLM spec.
+_PV_ROWS: tuple[_PVWorkerRow, ...] = (
+    _PVWorkerRow(
+        worker_id="pv.price_action", persona="Price-action geometry reader",
+        tier=Tier.READER, exec_kind=ExecutionKind.DETERMINISTIC,
+        model_tier=None, thinking_budget=None,
+        handler_id="handler.pv.price_action", prompt_id=None,
+        skill_id="skill.pv.price_action",
+        guardrail_ids=("guardrail.number_provenance", "guardrail.pattern_dictionary"),
+        capability_methods=("ohlcv",),
+        read_categories=("market_data",),
+        output_schema=SchemaRef(name="PriceActionFeatureReport", version="1"),
+        tool_calls=ToolCallRequirement.OPTIONAL, inputs=()),
+    _PVWorkerRow(
+        worker_id="pv.technical", persona="Technical indicator reader",
+        tier=Tier.READER, exec_kind=ExecutionKind.LLM,
+        model_tier="reasoner", thinking_budget=0,
+        handler_id=None, prompt_id="prompt.pv.technical",
+        skill_id="skill.pv.technical",
+        guardrail_ids=("guardrail.number_provenance", "guardrail.untrusted_input_isolation",
+                       "guardrail.pattern_dictionary"),
+        capability_methods=("verified_snapshot", "indicators"),
+        read_categories=("context", "market_data"),
+        output_schema=SchemaRef(name="TechnicalReport", version="1"),
+        tool_calls=ToolCallRequirement.REQUIRED,
+        inputs=(InputBinding(name="price_action", schema_ref=_PA_FEATURE_REPORT,
+                             required=False, cardinality="one"),)),
+    _PVWorkerRow(
+        worker_id="pv.microstructure", persona="Microstructure projection reader",
+        tier=Tier.READER, exec_kind=ExecutionKind.DETERMINISTIC,
+        model_tier=None, thinking_budget=None,
+        handler_id="handler.pv.microstructure", prompt_id=None,
+        skill_id="skill.pv.microstructure",
+        guardrail_ids=("guardrail.number_provenance",),
+        # Task-0b broadening: 五档/逐笔 (verified_snapshot) + 主力 (indicators) supply the
+        # promised ww_orderbook/ww_ticks/ww_fundflow; the get_signal shorthand is retained.
+        capability_methods=("signals", "verified_snapshot", "indicators"),
+        read_categories=("market_data",),
+        output_schema=SchemaRef(name="MicrostructureReport", version="1"),
+        tool_calls=ToolCallRequirement.OPTIONAL, inputs=()),
+    _PVWorkerRow(
+        worker_id="pv.curator",
+        persona=("Offline K-line pattern curator (#27, AMEND-6) — draft-only, zero "
+                 "trading authority"),
+        tier=Tier.CRITIC, exec_kind=ExecutionKind.LLM,
+        model_tier="reasoner", thinking_budget=0,
+        handler_id=None, prompt_id="prompt.pv.curator",
+        skill_id="skill.pv.curator",
+        guardrail_ids=("guardrail.untrusted_input_isolation", "guardrail.number_provenance",
+                       "guardrail.draft_only_advisory", "guardrail.external_ta_ingest",
+                       "guardrail.revision_throttle", "guardrail.pattern_dictionary"),
+        capability_methods=(),
+        read_categories=("context", "upstream_artifacts"),
+        output_schema=SchemaRef(name="PatternLifecycleProposal", version="1"),
+        tool_calls=ToolCallRequirement.FORBIDDEN,
+        inputs=(InputBinding(name="price_action", schema_ref=_PA_FEATURE_REPORT,
+                             required=False, cardinality="one"),
+                InputBinding(name="technical", schema_ref=_TECHNICAL_REPORT,
+                             required=False, cardinality="one"))),
+)
+
+
+def build_pv_worker_specs(
+    *, materials: tuple[ResolvedTextMaterial, ...],
+) -> tuple[WorkerSpec, ...]:
+    """Build the reviewed Lane B final WorkerSpecs from resolved batch materials.
+
+    Skill/prompt/handler/guardrail refs (including the Task-4b pattern dictionary) are
+    indexed by id from ``materials``; capability allowlist refs resolve from the
+    implemented Phase-3 ``data_capability_refs()`` (method id → sealed ``CapabilityRef``),
+    never a re-typed capability string. Deterministic seats bind a ``handler_ref`` and no
+    tier; the LLM seats bind a prompt + model tier. Order-stable (sorted by worker id).
+    """
+    pv_ix = _text_index(materials)
+    cap_refs: dict[str, CapabilityRef] = data_capability_refs()
+
+    def _content(mid: str) -> ContentRef:
+        try:
+            return pv_ix[mid]
+        except KeyError:
+            raise KeyError(f"missing resolved text material {mid!r} for Lane B") from None
+
+    specs: list[WorkerSpec] = []
+    for row in _PV_ROWS:
+        guardrails = tuple(sorted(
+            (_content(g) for g in row.guardrail_ids), key=lambda r: (r.id, r.version)))
+        caps = tuple(sorted(
+            (cap_refs[m] for m in row.capability_methods), key=lambda c: (c.id, c.version)))
+        if row.exec_kind is ExecutionKind.DETERMINISTIC:
+            execution = ExecutionSpec(
+                kind=ExecutionKind.DETERMINISTIC, handler_ref=_content(row.handler_id))
+            prompt_ref: ContentRef | None = None
+        else:
+            execution = ExecutionSpec(
+                kind=ExecutionKind.LLM, model_tier=row.model_tier,
+                thinking_budget=row.thinking_budget)
+            prompt_ref = _content(row.prompt_id)
+        specs.append(WorkerSpec(
+            id=row.worker_id, catalog_role="final", selection_scope="dynamic_allowed",
+            lane=_PV_LANE, persona=row.persona, tier=row.tier, execution=execution,
+            system_prompt_ref=prompt_ref,
             skills=(SkillBinding(skill_ref=_content(row.skill_id)),),
             guardrail_refs=guardrails,
             capability_allowlist=caps,
