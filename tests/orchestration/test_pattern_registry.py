@@ -77,7 +77,7 @@ PATTERN_REGISTRY_SRC = REPO_ROOT / "guanlan_v2" / "orchestration" / "pattern_reg
 
 #: pinned reviewed material digest (drift guard); sealed from the physical bytes.
 EXPECTED_MATERIAL_DIGEST = (
-    "e84f13698200f2b3bbda19c85abbf8baec5a3eb54ae0e66540383078ceb23a5a"
+    "3f24f8a10e76fa6c1176b8849a335d2cdb97f94ad0c86a663c21f971fbb7cddd"
 )
 
 #: reviewed per-family seed census (AMEND-6a coverage).
@@ -373,6 +373,78 @@ def test_seed_shooting_star_is_bearish_mirror():
     assert star.rule_params["upper_wick_to_body_min"] >= 2.0
     assert star.rule_params["max_close_pos"] <= 0.5
     assert "upper_wick" in star.geometry_inputs
+
+
+# =========================================================================== #
+# Review (task 4b) — recognizer bindability + threshold coherence.             #
+# =========================================================================== #
+def test_seed_failed_limit_long_upper_touched_limit_is_strictly_bindable():
+    # Review Important: the 炸板 discriminator "盘中触及涨停" must be strictly bindable. The
+    # touched-limit test is high >= prev_close * (1 + board_limit - touch_tolerance), so the
+    # entry MUST expose prev_close (a raw cross-bar input) + a touch_tolerance param; the
+    # close-derived `limit` flag can only serve the not-sealed (limit != 涨停) gate — it
+    # never carries a positive touched-limit signal for a 炸板 bar.
+    d = build_seed_pattern_dictionary()
+    e = next(x for x in d.entries if x.pattern_id == "pv.astock.failed_limit_long_upper")
+    # prev_close is required so the intraday touched-limit test is evaluable at all.
+    assert "prev_close" in e.geometry_inputs
+    assert "high" in e.geometry_inputs
+    # the close-derived limit flag remains (the not-封板 gate limit != 涨停).
+    assert "limit" in e.geometry_inputs
+    # touch_tolerance: explicit finite param mirroring compute_pa_features' L-0.003 band.
+    assert "touch_tolerance" in e.rule_params
+    tt = e.rule_params["touch_tolerance"]
+    assert 0.0 < tt <= 0.01
+    assert tt == pytest.approx(0.003)
+    # the predicate states the strictly-bindable touched-limit test + names board_limit context.
+    assert "prev_close" in e.predicate
+    assert "board_limit" in e.predicate
+    assert "touch_tolerance" in e.predicate
+    # the long-upper-wick geometry is unchanged and still bindable.
+    for p in ("min_upper_wick_frac", "max_close_pos", "min_vol_ratio"):
+        assert p in e.rule_params
+    assert "upper_wick" in e.geometry_inputs and "close_pos" in e.geometry_inputs
+
+
+def test_seed_three_soldiers_and_crows_wicks_bound_and_thresholds_coherent():
+    # Review Minor 1: 红三兵/三只乌鸦 reference a wick threshold, so the wick MUST be a named
+    # geometry input; and the implied close_pos bound must be coherent with the stated
+    # close_pos param so two implementers produce the identical recognizer. Geometry identity
+    # (compute_pa_features): 阳线 close_pos = 1 - upper_wick; 阴线 close_pos = lower_wick.
+    d = build_seed_pattern_dictionary()
+    soldiers = next(x for x in d.entries if x.pattern_id == "pv.triple.three_white_soldiers")
+    crows = next(x for x in d.entries if x.pattern_id == "pv.triple.three_black_crows")
+
+    # 红三兵 (阳线): the referenced 上影 input is bound; min_close_pos == 1 - max_upper_wick_frac.
+    assert "upper_wick" in soldiers.geometry_inputs
+    assert "close_pos" in soldiers.geometry_inputs
+    muw = soldiers.rule_params["max_upper_wick_frac"]
+    mcp = soldiers.rule_params["min_close_pos"]
+    assert mcp == pytest.approx(1.0 - muw)  # implied close_pos floor == stated min_close_pos
+
+    # 三只乌鸦 (阴线): the referenced 下影 input is bound; max_close_pos == max_lower_wick_frac.
+    assert "lower_wick" in crows.geometry_inputs
+    assert "close_pos" in crows.geometry_inputs
+    mlw = crows.rule_params["max_lower_wick_frac"]
+    xcp = crows.rule_params["max_close_pos"]
+    assert xcp == pytest.approx(mlw)  # implied close_pos ceiling == stated max_close_pos
+
+
+def test_seed_doji_vs_long_legged_overlap_documented_not_false_separation():
+    # Review Minor 2: with body <= 0.05 the doji shadows are forced into the long-legged
+    # zone, so the old "以区别长腿十字" separation was illusory. Chosen resolution: document
+    # the deliberate overlap (a long-legged doji IS a doji; both may fire).
+    d = build_seed_pattern_dictionary()
+    doji = next(x for x in d.entries if x.pattern_id == "pv.single.doji")
+    longleg = next(x for x in d.entries if x.pattern_id == "pv.single.long_legged_doji")
+    # the false separation claim is removed.
+    assert "以区别长腿十字" not in doji.predicate
+    # the overlap is real (both fire on a symmetric large-range doji): the doji per-side
+    # shadow cap admits the long-legged minimum leg length.
+    assert doji.rule_params["max_shadow_frac"] >= longleg.rule_params["min_leg_frac"]
+    # and it is documented as a deliberate, non-exclusive overlap.
+    assert "长腿十字" in doji.predicate
+    assert ("可同时触发" in doji.predicate) or ("变体" in doji.predicate)
 
 
 # =========================================================================== #

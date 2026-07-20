@@ -414,15 +414,18 @@ def _seed_entries() -> tuple[PatternDefinition, ...]:
         ),
         _p(
             "pv.single.doji", "single_bar", "十字星",
-            "实体极小(body ≤ max_body_frac,收开近乎相等)、上下影均不极端(单侧影 ≤ "
-            "max_shadow_frac,以区别长腿十字):多空僵持、变盘警示。",
+            "实体极小(body ≤ max_body_frac,收开近乎相等)、单侧影 ≤ max_shadow_frac"
+            "(排除上/下影一头独大的墓碑线/蜻蜓线):多空僵持、变盘警示。注:body 极小使上下影"
+            "必然较长,当振幅同时放大(range_atr ≥ 长腿十字 min_range_atr)时,本形态与长腿十字"
+            "为同一根 K 线、二者可同时触发(长腿十字是其大振幅剧烈变体),本词典不强制互斥。",
             ("body", "upper_wick", "lower_wick"),
             {"max_body_frac": 0.05, "max_shadow_frac": 0.60},
         ),
         _p(
             "pv.single.long_legged_doji", "single_bar", "长腿十字",
             "实体极小(body ≤ max_body_frac),上、下影均很长(各 ≥ min_leg_frac)、"
-            "当根振幅大(range_atr ≥ min_range_atr):剧烈拉锯、分歧极大。",
+            "当根振幅大(range_atr ≥ min_range_atr):剧烈拉锯、分歧极大。为十字星的大振幅"
+            "变体,与十字星可同时触发(见十字星条目)。",
             ("body", "upper_wick", "lower_wick", "range_atr"),
             {"max_body_frac": 0.05, "min_leg_frac": 0.35, "min_range_atr": 1.20},
         ),
@@ -503,18 +506,21 @@ def _seed_entries() -> tuple[PatternDefinition, ...]:
         _p(
             "pv.triple.three_white_soldiers", "triple_bar", "红三兵",
             "连续三根阳线,收盘逐根抬高(严格递增),每根实体较大(body ≥ body_min_frac)、"
-            "收于高位(close_pos ≥ min_close_pos)、上影短(upper_wick ≤ max_upper_wick_frac),"
-            "开盘落在前根实体内(稳健推进、非跳空虚涨):多头强势。",
-            ("open", "close", "body", "close_pos"),
-            {"body_min_frac": 0.50, "min_close_pos": 0.60, "max_upper_wick_frac": 0.20},
+            "上影短(upper_wick ≤ max_upper_wick_frac);对阳线 close_pos = 1 − upper_wick,故"
+            "「上影短」与「收于高位(close_pos ≥ min_close_pos)」为同一几何约束,取 "
+            "min_close_pos = 1 − max_upper_wick_frac 保持一致(收盘落在顶部 max_upper_wick_frac "
+            "之内),开盘落在前根实体内(稳健推进、非跳空虚涨):多头强势。",
+            ("open", "close", "body", "close_pos", "upper_wick"),
+            {"body_min_frac": 0.50, "min_close_pos": 0.80, "max_upper_wick_frac": 0.20},
         ),
         _p(
             "pv.triple.three_black_crows", "triple_bar", "三只乌鸦",
-            "连续三根阴线,收盘逐根走低(严格递减),每根实体较大、收于低位"
-            "(close_pos ≤ max_close_pos)、下影短(lower_wick ≤ max_lower_wick_frac),"
-            "开盘落在前根实体内:空头强势、见顶下跌。",
-            ("open", "close", "body", "close_pos"),
-            {"body_min_frac": 0.50, "max_close_pos": 0.40, "max_lower_wick_frac": 0.20},
+            "连续三根阴线,收盘逐根走低(严格递减),每根实体较大(body ≥ body_min_frac)、"
+            "下影短(lower_wick ≤ max_lower_wick_frac);对阴线 close_pos = lower_wick,故"
+            "「下影短」与「收于低位(close_pos ≤ max_close_pos)」为同一几何约束,取 "
+            "max_close_pos = max_lower_wick_frac 保持一致,开盘落在前根实体内:空头强势、见顶下跌。",
+            ("open", "close", "body", "close_pos", "lower_wick"),
+            {"body_min_frac": 0.50, "max_close_pos": 0.20, "max_lower_wick_frac": 0.20},
         ),
 
         # ---------------- 多 bar 结构 (multi_bar) — approximate + 置信分 ----------- #
@@ -657,11 +663,15 @@ def _seed_entries() -> tuple[PatternDefinition, ...]:
         ),
         _p(
             "pv.astock.failed_limit_long_upper", "astock", "炸板长上影",
-            "盘中触及涨停(high 达涨停价附近)但收盘回落未封(limit≠涨停),留下长上影"
-            "(upper_wick ≥ min_upper_wick_frac)、收于中下部(close_pos ≤ max_close_pos),"
-            "常伴放量(vol_ratio ≥ min_vol_ratio):冲高回落、多头受阻(炸板)。",
-            ("high", "close", "upper_wick", "close_pos", "vol_ratio", "limit"),
-            {"min_upper_wick_frac": 0.40, "max_close_pos": 0.50, "min_vol_ratio": 1.50},
+            "盘中触及涨停(high ≥ prev_close × (1 + board_limit − touch_tolerance);board_limit "
+            "依代码/名称上下文取值,与 compute_pa_features._board_limit 同口径:主板 0.10、科创/"
+            "创业板(688/300 开头) 0.20、北交所(8/4/BJ 开头) 0.30、ST 0.05)但收盘回落未封"
+            "(limit≠涨停,close 派生的封板判定),留下长上影(upper_wick ≥ min_upper_wick_frac)、"
+            "收于中下部(close_pos ≤ max_close_pos),常伴放量(vol_ratio ≥ min_vol_ratio):"
+            "冲高回落、多头受阻(炸板)。",
+            ("high", "close", "prev_close", "upper_wick", "close_pos", "vol_ratio", "limit"),
+            {"min_upper_wick_frac": 0.40, "max_close_pos": 0.50, "min_vol_ratio": 1.50,
+             "touch_tolerance": 0.003},
         ),
     )
 
