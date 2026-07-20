@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from pydantic import model_validator
 
@@ -82,6 +82,14 @@ __all__ = [
 #: the closed ``ModelTier`` vocabulary in canonical order (``fast`` < ``reasoner``
 #: < ``reasoner_deep``); the bridge is total over exactly this set.
 TIER_ORDER: tuple[ModelTier, ...] = ("fast", "reasoner", "reasoner_deep")
+
+#: Import-time totality guard (loud): ``TIER_ORDER`` must enumerate exactly the closed
+#: :data:`ModelTier` vocabulary. A future ``ModelTier`` member that is not added here
+#: fails at module construction, not merely in a CI totality test.
+assert set(TIER_ORDER) == set(get_args(ModelTier)), (
+    "TIER_ORDER is not total over the ModelTier vocabulary: "
+    f"TIER_ORDER={TIER_ORDER!r} get_args(ModelTier)={get_args(ModelTier)!r}"
+)
 
 #: the ONLY join key between orchestration tiers and llm.yaml ``agent_overrides``.
 ORCHESTRATION_TIER_ALIASES: Mapping[ModelTier, str] = {
@@ -175,6 +183,13 @@ def tier_map_from_llm_yaml(yaml_text: str) -> ModelTierMap:
     key ``timeout`` maps to :attr:`ModelTierBinding.timeout_sec`); any absence raises
     :class:`ModelTierUnconfigured` naming the tier — NEVER a fallback to
     ``default_provider`` / ``default_model``.
+
+    Unconfigured-vendor cross-check: when the doc declares a ``providers:`` section
+    (as the real ``config/llm.yaml`` does), an alias may only name a provider that is
+    defined there. A tier alias naming a vendor absent from ``providers`` is exactly
+    the "unconfigured vendor" the red line guards, so it raises
+    :class:`ModelTierUnconfigured` naming the tier AND the missing provider (never a
+    silent build against a vendor that has no provider config).
     """
     data = normalize_legacy_graph_config(yaml_text, source_format="yaml")
     overrides = data.get("agent_overrides")
@@ -183,6 +198,12 @@ def tier_map_from_llm_yaml(yaml_text: str) -> ModelTierMap:
             "config/llm.yaml has no 'agent_overrides' mapping; the orchestration "
             "tier aliases are unconfigured (no silent default fallback)"
         )
+    # The parsed doc already carries the ``providers:`` section when present; when it
+    # is declared we cross-check every alias's named provider against it. (Absent =>
+    # nothing to cross-check, e.g. minimal synthetic fixtures; the alias-presence +
+    # explicit provider/model requirements above still hold.)
+    providers = data.get("providers")
+    provider_names = set(providers) if isinstance(providers, Mapping) else None
 
     bindings: list[ModelTierBinding] = []
     for tier in TIER_ORDER:
@@ -200,6 +221,12 @@ def tier_map_from_llm_yaml(yaml_text: str) -> ModelTierMap:
             )
         provider = _require_str(entry.get("provider"), tier=tier, alias=alias, field="provider")
         model = _require_str(entry.get("model"), tier=tier, alias=alias, field="model")
+        if provider_names is not None and provider not in provider_names:
+            raise ModelTierUnconfigured(
+                f"tier {tier!r}: alias {alias!r} names provider {provider!r}, which is "
+                f"absent from the 'providers:' section (an unconfigured vendor; never "
+                f"binds a vendor that has no provider config)"
+            )
         bindings.append(
             ModelTierBinding(
                 tier=tier,
@@ -248,6 +275,15 @@ def build_model_tier_map_material(
     :func:`~guanlan_v2.orchestration.catalog_runtime.build_text_material` helper — a
     caller never pins a digest by hand. The returned ``ContentRef.content_digest`` is
     the ``Provenance.model_config_digest`` value for Phase-8 LLM node runs (Tasks 10/12).
+
+    WIRING GATE (Tasks 10/12 — CONDITIONAL, not an unconditional replacement): this
+    digest supersedes worker.py's ``content_digest({model_tier, thinking_budget})``
+    provenance formula ONLY on runs under an ACTIVE Phase-8 catalog — i.e. the
+    profile-v2 / tier-map-material-present path, where this ``guardrail.model_tier_map``
+    material is bound. For v1 / BOOTSTRAP-profile runs (no Phase-8 tier-map material),
+    Task 10/12 MUST branch and leave the existing
+    ``content_digest({model_tier, thinking_budget})`` formula intact — v1 provenance
+    semantics must NOT shift.
     """
     return build_text_material(
         id=MODEL_TIER_MAP_MATERIAL_ID,

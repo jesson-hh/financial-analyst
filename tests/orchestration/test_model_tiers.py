@@ -93,6 +93,25 @@ def _yaml_with_overrides(overrides: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _yaml_with_providers(provider_names: list, overrides: dict) -> str:
+    """Emit an llm.yaml doc that DOES declare a ``providers:`` section.
+
+    Mirrors the real repo yaml's shape (a ``providers:`` mapping + ``agent_overrides``)
+    so the provider cross-check surface can be exercised: an alias may name a provider
+    that is present in — or absent from — ``providers``.
+    """
+    lines = ["default_provider: deepseek", "default_model: deepseek-chat", "providers:"]
+    for name in provider_names:
+        lines.append(f"  {name}: {{api_key_env: {name.upper()}_API_KEY}}")
+    lines.append("agent_overrides:")
+    for key, entry in overrides.items():
+        if entry is None:
+            continue
+        inner = ", ".join(f"{k}: {v}" for k, v in entry.items())
+        lines.append(f"  {key}: {{{inner}}}")
+    return "\n".join(lines) + "\n"
+
+
 FULL_ALIASES: dict = {
     "orchestration-fast": {"provider": "deepseek", "model": "deepseek-chat"},
     "orchestration-reasoner": {"provider": "deepseek", "model": "deepseek-reasoner"},
@@ -191,6 +210,42 @@ def test_never_falls_back_to_default_provider_or_model():
     # and a yaml with no agent_overrides mapping at all.
     with pytest.raises(ModelTierUnconfigured):
         tier_map_from_llm_yaml("default_provider: deepseek\ndefault_model: deepseek-chat\n")
+
+
+# =========================================================================== #
+# Unconfigured-vendor red line: an alias may not name a provider that is        #
+# absent from the yaml's own ``providers:`` section (the ghost-vendor surface). #
+# =========================================================================== #
+def test_alias_naming_a_provider_absent_from_providers_raises():
+    # providers: declares ONLY deepseek; reasoner_deep's alias names openai, which is
+    # NOT in providers -> the unconfigured vendor the red line guards. Must raise
+    # ModelTierUnconfigured naming BOTH the tier AND the missing provider (never a
+    # silent build against a vendor with no provider config).
+    overrides = {k: dict(v) for k, v in FULL_ALIASES.items()}
+    overrides["orchestration-reasoner-deep"] = {
+        "provider": "openai", "model": "gpt-4o", "max_tokens": 8192, "timeout": 300,
+    }
+    yaml_text = _yaml_with_providers(["deepseek"], overrides)
+    with pytest.raises(ModelTierUnconfigured) as exc:
+        tier_map_from_llm_yaml(yaml_text)
+    msg = str(exc.value)
+    assert "reasoner_deep" in msg
+    assert "openai" in msg
+
+
+def test_alias_provider_present_in_providers_builds():
+    # same shape, but every alias names deepseek, which IS declared in providers -> builds.
+    yaml_text = _yaml_with_providers(["deepseek"], FULL_ALIASES)
+    m = tier_map_from_llm_yaml(yaml_text)
+    assert tuple(b.tier for b in m.bindings) == TIER_ORDER
+    assert all(b.provider == "deepseek" for b in m.bindings)
+
+
+def test_repo_llm_yaml_providers_cover_every_alias_provider():
+    # the real repo llm.yaml declares providers: for every vendor its orchestration
+    # aliases name, so the cross-check leaves the reviewed build (and its digest) intact.
+    m = tier_map_from_llm_yaml(_llm_yaml_text())
+    assert {b.provider for b in m.bindings} == {"deepseek"}
 
 
 # =========================================================================== #
