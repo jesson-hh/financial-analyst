@@ -81,8 +81,11 @@ from guanlan_v2.orchestration.runtime_support import (
 from guanlan_v2.orchestration.pool import fold_reducer_producers
 from guanlan_v2.orchestration import dag as D
 from guanlan_v2.orchestration import worker as W
+from guanlan_v2.orchestration.budget import BudgetLedger
+from guanlan_v2.orchestration.context import RunBudget
+from guanlan_v2.orchestration.eventstore import RuntimeStores, SchemaRegistryResolver
 
-from tests.orchestration.test_budget_ledger import _ledger, _reserve_plan
+from tests.orchestration.test_budget_ledger import AdvancingClock, _ledger, _reserve_plan
 from tests.orchestration.test_runtime_support import build_scenario
 
 UTC = timezone.utc
@@ -374,6 +377,27 @@ def test_multiwriter_without_reducer_rejected_at_phase1():
     assert "reducer" in str(exc.value).lower()
 
 
+def test_validate_plan_draft_rejects_unregistered_reducer_output_schema():
+    """Minor (Phase 8 * Task 8 review): the 'Phase 1 owns reducer output-schema
+    registration' claim is checkable — a reducer whose output_schema_ref is not in
+    the schema registry is flagged 'unknown_reducer_output_schema' by
+    validate_plan_draft (spec.py), so runtime code need not re-check it."""
+    from guanlan_v2.orchestration.spec import OrchestrationRequest, validate_plan_draft
+    runtime, view, snap, red_ref, gm_ref = build_multiwriter_catalog()
+    reg = _registry()
+    bad_reducer = ReducerCfg(
+        id="r1", slot="s", reducer_ref=red_ref, producer_node_ids=("n1", "n2"),
+        output_schema_ref=SchemaRef(name="UnregisteredReduced", version="1"))
+    draft = build_mw_draft(red_ref=red_ref, reducers=(bad_reducer,), snapshot=snap,
+                           registry_digest=reg.registry_digest)
+    request = OrchestrationRequest(
+        request_id="req-1", goal="g", workflow="orchestrate_only",
+        approval_policy=ApprovalPolicy.REQUIRED)
+    report = validate_plan_draft(draft, request=request, context=None, catalog=snap,
+                                 schema_registry=reg)
+    assert "unknown_reducer_output_schema" in {i.code for i in report.issues}
+
+
 # =========================================================================== #
 # 3. analyze_reducers matrix                                                   #
 # =========================================================================== #
@@ -577,8 +601,25 @@ class _ScriptedAttempts:
         return nr, art
 
 
+def _real_ledger():
+    """A :class:`BudgetLedger` over the PRODUCTION event-sourced
+    :class:`RuntimeBudgetEventSink` (never the in-test fake) — the exact sink the
+    runner mints reservations through in production. The bounded-retry loop's
+    ``reserve_retry`` / ``reserve_schema_repair`` ops must therefore exercise the
+    real fresh-reservation-id branch of ``eventstore._append_budget_event`` (Phase 8
+    * Task 8 exit-gate fix: retry/repair scope_type is first-class on the ledger)."""
+    resolver = SchemaRegistryResolver()
+    resolver.register(_registry())
+    stores = RuntimeStores(resolver=resolver, clock=AdvancingClock())
+    rb = RunBudget(
+        ledger_id="ledger-1", max_tokens=5000, max_llm_invocations=40, max_concurrency=8)
+    ledger = BudgetLedger(
+        sink=stores.budget_event_sink(run_id="run-1", ledger_id="ledger-1"), run_budget=rb)
+    return ledger
+
+
 def _fresh_ledger_with_plan():
-    ledger, sink = _ledger()
+    ledger = _real_ledger()
     plan_res = _reserve_plan(ledger, tokens=4000, llm=30, concurrency=4)
     return ledger, plan_res
 
@@ -605,6 +646,11 @@ def test_schema_repair_invalid_then_valid_completes():
     state = ledger.replay()
     for r in out.reservations:
         assert state.reservations[r.reservation_id].status == "settled"
+    # the LEDGER now carries the truth: the base attempt is a plain node child,
+    # the repair attempt is a first-class schema_repair-scope reservation.
+    by_role = {r.role: r for r in out.reservations}
+    assert state.reservations[by_role["primary"].reservation_id].scope_type == "node"
+    assert state.reservations[by_role["schema_repair"].reservation_id].scope_type == "schema_repair"
 
 
 def test_schema_repair_invalid_twice_is_incomplete_no_artifact():
@@ -673,5 +719,66 @@ def test_deterministic_retry_reserves_zero_llm_and_one_output():
         res = state.reservations[r.reservation_id]
         assert res.reserved_llm_invocations == 0
         assert res.status == "settled"
+    # the LEDGER carries the truth: base attempt = node scope, retry = retry scope.
+    by_role = {r.role: r for r in out.reservations}
+    assert state.reservations[by_role["primary"].reservation_id].scope_type == "node"
+    assert state.reservations[by_role["retry"].reservation_id].scope_type == "retry"
     # exactly one committed output (the winning artifact); no schema_repair role.
     assert "schema_repair" not in roles
+
+
+def test_retry_and_repair_reservations_mint_fresh_ids_through_the_real_sink():
+    """Exit-gate blind-spot guard (Phase 8 * Task 8 review, mirroring the Phase 7 *
+    Task 4 ``reserve_planner`` real-sink precedent): drive a retry AND a
+    schema_repair reservation through the production ``RuntimeBudgetEventSink``. The
+    fresh-reservation-id branch of ``eventstore._append_budget_event`` must mint an
+    id for ``reserve_retry`` / ``reserve_schema_repair`` the same way it does for
+    ``reserve_node``; without the widening the real sink falls to the else branch and
+    raises ``AttributeError`` (the retry/repair arg records carry no ``reservation_id``).
+    Replaying a fresh ledger over the same committed events reconstructs every scope
+    with its first-class ``scope_type``.
+    """
+    resolver = SchemaRegistryResolver()
+    resolver.register(_registry())
+    stores = RuntimeStores(resolver=resolver, clock=AdvancingClock())
+    rb = RunBudget(
+        ledger_id="ledger-1", max_tokens=5000, max_llm_invocations=40, max_concurrency=8)
+    ledger = BudgetLedger(
+        sink=stores.budget_event_sink(run_id="run-1", ledger_id="ledger-1"), run_budget=rb)
+    plan_res = _reserve_plan(ledger, tokens=4000, llm=30, concurrency=4)
+
+    # deterministic retry (primary FAILED -> retry COMPLETED) mints a real retry-scope
+    # reservation through the production sink.
+    retry_out = W.execute_with_bounded_retry(
+        node_id="n_retry", run_id="run-1", is_llm=False, max_attempts=2,
+        schema_repairs_per_attempt=1, budget=ledger,
+        plan_reservation_id=plan_res.reservation_id, node_token_reservation=1024,
+        attempt_fn=_ScriptedAttempts([
+            (NodeStatus.FAILED, "handler_error", 0),
+            (NodeStatus.COMPLETED, None, 0)]))
+    # schema_repair (LLM invalid -> valid) mints a real schema_repair-scope reservation.
+    repair_out = W.execute_with_bounded_retry(
+        node_id="n_repair", run_id="run-1", is_llm=True, max_attempts=1,
+        schema_repairs_per_attempt=1, budget=ledger,
+        plan_reservation_id=plan_res.reservation_id, node_token_reservation=1024,
+        attempt_fn=_ScriptedAttempts([
+            (NodeStatus.INCOMPLETE, "output_schema_invalid", 3),
+            (NodeStatus.COMPLETED, None, 7)]))
+
+    retry_res = {r.role: r for r in retry_out.reservations}["retry"]
+    repair_res = {r.role: r for r in repair_out.reservations}["schema_repair"]
+    # fresh, non-empty, distinct service-assigned reservation ids (proving the real
+    # sink's fresh-id branch fired for both new ops).
+    assert retry_res.reservation_id and repair_res.reservation_id
+    assert retry_res.reservation_id != repair_res.reservation_id
+
+    state = ledger.replay()
+    assert state.reservations[retry_res.reservation_id].scope_type == "retry"
+    assert state.reservations[repair_res.reservation_id].scope_type == "schema_repair"
+
+    # replay: a fresh ledger over the same committed events reconstructs both scopes.
+    replay = BudgetLedger(
+        sink=stores.budget_event_sink(run_id="run-1", ledger_id="ledger-1"), run_budget=rb)
+    rstate = replay.replay()
+    assert rstate.reservations[retry_res.reservation_id].scope_type == "retry"
+    assert rstate.reservations[repair_res.reservation_id].scope_type == "schema_repair"

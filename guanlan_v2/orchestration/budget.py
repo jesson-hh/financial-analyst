@@ -62,6 +62,8 @@ __all__ = [
     "ReservePlanArgs",
     "ReserveNodeArgs",
     "ReservePlannerArgs",
+    "ReserveRetryArgs",
+    "ReserveSchemaRepairArgs",
     "SettleArgs",
     "ReleaseArgs",
     "BudgetOperation",
@@ -179,6 +181,41 @@ class ReservePlannerArgs(_StrictModel):
     reserved_concurrency: PositiveInt
 
 
+class ReserveRetryArgs(_StrictModel):
+    """Phase 8 (Task 8) additive op: reserve one bounded-*retry* attempt of a node.
+
+    A first-class ``scope_type='retry'`` child of the SAME plan pool as
+    :class:`ReserveNodeArgs` — identical fields and identical ``_plan_available``
+    availability accounting (so budget math is unchanged), the ONLY difference being
+    the stamped ``scope_type``. The retry role is therefore carried by the ledger
+    itself, not merely by a worker-side record. Like ``reserve_node`` it carries no
+    reservation id for the reservation being created (the sink assigns it).
+    """
+
+    plan_reservation_id: NonEmptyStr  # reference to the parent plan reservation
+    node_id: NonEmptyStr
+    attempt: PositiveInt
+    reserved_tokens: NonNegativeInt
+    reserved_llm_invocations: NonNegativeInt
+    reserved_concurrency: PositiveInt
+
+
+class ReserveSchemaRepairArgs(_StrictModel):
+    """Phase 8 (Task 8) additive op: reserve one bounded *schema-repair* invocation.
+
+    A first-class ``scope_type='schema_repair'`` child of the same plan pool as
+    :class:`ReserveNodeArgs` (see :class:`ReserveRetryArgs`): identical shape +
+    availability accounting, only the stamped ``scope_type`` differs.
+    """
+
+    plan_reservation_id: NonEmptyStr  # reference to the parent plan reservation
+    node_id: NonEmptyStr
+    attempt: PositiveInt
+    reserved_tokens: NonNegativeInt
+    reserved_llm_invocations: NonNegativeInt
+    reserved_concurrency: PositiveInt
+
+
 class SettleArgs(_StrictModel):
     reservation_id: NonEmptyStr  # reference to the reservation being settled
     actual_tokens: NonNegativeInt
@@ -190,14 +227,17 @@ class ReleaseArgs(_StrictModel):
     reason: NonEmptyStr
 
 
-# NOTE (Phase 7 · Task 4): ``reserve_planner`` is the *one* sanctioned additive
-# extension of this Phase-2-owned closed vocabulary (mirroring the Phase 4 events.py
-# ruling): a parallel Planner-side ledger would break the one-ledger constraint, so
-# the new closed op lands here strictly additively — no existing op's behavior is
-# changed. The Phase-7 handoff guard that froze this set at the original four is
-# flipped additively (absence -> presence-in-phase7) per the Phase 4 guard-flip rule.
+# NOTE (Phase 7 · Task 4 + Phase 8 · Task 8): the sanctioned additive extensions of
+# this Phase-2-owned closed vocabulary (mirroring the Phase 4 events.py ruling): a
+# parallel Planner/retry-side ledger would break the one-ledger constraint, so each
+# new closed op lands here strictly additively — no existing op's behavior is changed.
+# Phase 7 added ``reserve_planner``; Phase 8 adds ``reserve_retry`` /
+# ``reserve_schema_repair`` (bounded-retry + schema-repair attempts as first-class
+# child scopes of the plan pool). The handoff guard that froze this set is flipped
+# additively (absence -> presence) per the Phase 4 guard-flip rule.
 BudgetOperation = Literal[
-    "reserve_plan", "reserve_node", "settle", "release", "reserve_planner"
+    "reserve_plan", "reserve_node", "settle", "release", "reserve_planner",
+    "reserve_retry", "reserve_schema_repair",
 ]
 
 #: The closed operation -> args-type matrix.
@@ -207,6 +247,8 @@ _OP_ARGS: dict[str, type[_StrictModel]] = {
     "settle": SettleArgs,
     "release": ReleaseArgs,
     "reserve_planner": ReservePlannerArgs,
+    "reserve_retry": ReserveRetryArgs,
+    "reserve_schema_repair": ReserveSchemaRepairArgs,
 }
 
 
@@ -222,6 +264,7 @@ class BudgetTransitionCommand(_StrictModel):
     operation: BudgetOperation
     semantic_args: (
         ReservePlanArgs | ReserveNodeArgs | SettleArgs | ReleaseArgs | ReservePlannerArgs
+        | ReserveRetryArgs | ReserveSchemaRepairArgs
     )
     idempotency_key: NonEmptyStr
 
@@ -404,6 +447,32 @@ def fold_budget_events(events: tuple[BudgetEvent, ...]) -> LedgerState:
                 reserved_at=ev.occurred_at,
             )
             reservations[res.reservation_id] = res
+        elif cmd.operation in ("reserve_retry", "reserve_schema_repair"):
+            # Phase 8 additive: a bounded-retry / schema-repair attempt is a
+            # first-class child of the SAME plan pool as reserve_node (registered in
+            # parent_of, so _plan_available / _has_active_children account for it
+            # exactly like a node child — budget math is unchanged). Only the stamped
+            # scope_type differs, so the ledger carries the retry/repair role.
+            parent = reservations[args.plan_reservation_id]
+            scope = "retry" if cmd.operation == "reserve_retry" else "schema_repair"
+            res = _build_reservation(
+                reservation_id=ev.reservation_id,
+                ledger_id=ev.ledger_id,
+                run_id=ev.run_id,
+                request_id=parent.request_id,
+                candidate_plan_digest=parent.candidate_plan_digest,
+                scope_type=scope,
+                scope_id=args.node_id,
+                reserved=(
+                    args.reserved_tokens,
+                    args.reserved_llm_invocations,
+                    args.reserved_concurrency,
+                ),
+                status="reserved",
+                reserved_at=ev.occurred_at,
+            )
+            reservations[res.reservation_id] = res
+            parent_of[res.reservation_id] = args.plan_reservation_id
         elif cmd.operation == "settle":
             prev = reservations[args.reservation_id]
             reservations[prev.reservation_id] = _build_reservation(
@@ -599,6 +668,26 @@ def validate_budget_command(
         ):
             raise BudgetExceeded("planner reservation exceeds the run budget")
 
+    elif op in ("reserve_retry", "reserve_schema_repair"):
+        # Phase 8 additive: identical admissibility to reserve_node — a child that
+        # must fit the parent plan's remaining pool (same _plan_available accounting).
+        plan = state.reservations.get(args.plan_reservation_id)
+        if plan is None or plan.scope_type != "plan":
+            raise InvalidBudgetTransition(
+                f"{op} references an unknown plan reservation"
+            )
+        if plan.status != "reserved":
+            raise InvalidBudgetTransition(
+                f"{op} parent plan is not active (child of inactive plan)"
+            )
+        at, al, ac = _plan_available(state, args.plan_reservation_id)
+        if (
+            args.reserved_tokens > at
+            or args.reserved_llm_invocations > al
+            or args.reserved_concurrency > ac
+        ):
+            raise BudgetExceeded(f"{op} reservation exceeds the plan reservation")
+
     elif op == "settle":
         res = state.reservations.get(args.reservation_id)
         if res is None:
@@ -766,6 +855,72 @@ class BudgetLedger:
                 reserved_tokens=tokens,
                 reserved_llm_invocations=llm_invocations,
                 reserved_concurrency=1,
+            ),
+            idempotency_key=idempotency_key,
+        )
+        event = self._apply(command)
+        return self._state().reservations[event.reservation_id]
+
+    def reserve_retry(
+        self,
+        *,
+        plan_reservation_id: str,
+        node_id: str,
+        attempt: int,
+        tokens: int,
+        llm_invocations: int,
+        concurrency: int,
+        idempotency_key: str,
+    ) -> BudgetReservation:
+        """Phase 8 (Task 8) additive: reserve one bounded-*retry* attempt of a node.
+
+        Mints a ``scope_type='retry'`` child drawn from the SAME plan pool as
+        :meth:`reserve_node` with identical availability accounting (``_plan_available``
+        — budget math unchanged); only the stamped scope_type differs, so the ledger
+        (not just a worker-side record) carries the retry role. Idempotent by the
+        caller's deterministic key; mirrors :meth:`reserve_node`'s signature so the
+        bounded-retry loop dispatches by attempt role without any other change.
+        """
+        command = BudgetTransitionCommand(
+            operation="reserve_retry",
+            semantic_args=ReserveRetryArgs(
+                plan_reservation_id=plan_reservation_id,
+                node_id=node_id,
+                attempt=attempt,
+                reserved_tokens=tokens,
+                reserved_llm_invocations=llm_invocations,
+                reserved_concurrency=concurrency,
+            ),
+            idempotency_key=idempotency_key,
+        )
+        event = self._apply(command)
+        return self._state().reservations[event.reservation_id]
+
+    def reserve_schema_repair(
+        self,
+        *,
+        plan_reservation_id: str,
+        node_id: str,
+        attempt: int,
+        tokens: int,
+        llm_invocations: int,
+        concurrency: int,
+        idempotency_key: str,
+    ) -> BudgetReservation:
+        """Phase 8 (Task 8) additive: reserve one bounded *schema-repair* invocation.
+
+        Mints a ``scope_type='schema_repair'`` child of the plan pool — see
+        :meth:`reserve_retry`; only the stamped scope_type differs from a node child.
+        """
+        command = BudgetTransitionCommand(
+            operation="reserve_schema_repair",
+            semantic_args=ReserveSchemaRepairArgs(
+                plan_reservation_id=plan_reservation_id,
+                node_id=node_id,
+                attempt=attempt,
+                reserved_tokens=tokens,
+                reserved_llm_invocations=llm_invocations,
+                reserved_concurrency=concurrency,
             ),
             idempotency_key=idempotency_key,
         )

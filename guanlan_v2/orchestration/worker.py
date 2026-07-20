@@ -1843,12 +1843,13 @@ class AttemptReservation:
     """One per-attempt child reservation minted by the bounded-retry loop.
 
     ``role`` labels the attempt's purpose (``"primary"`` / ``"retry"`` /
-    ``"schema_repair"``). The reservation itself is a Phase-2 ``reserve_node`` child
-    (``scope_type="node"``) — the frozen Phase-7 handoff gate
-    (``test_phase7_handoff`` asserts ``BudgetOperation`` is exactly the five reviewed
-    ops) forbids minting a new closed op, so ``BudgetScopeType``'s ``"retry"`` /
-    ``"schema_repair"`` values are NOT stamped by a new ledger op here; the role is
-    carried on this record + the deterministic idempotency keys instead.
+    ``"schema_repair"``) and mirrors the LEDGER truth: a ``"primary"`` attempt is a
+    ``reserve_node`` child (``scope_type="node"``); a ``"retry"`` attempt is a
+    first-class ``reserve_retry`` child (``scope_type="retry"``); a
+    ``"schema_repair"`` attempt is a first-class ``reserve_schema_repair`` child
+    (``scope_type="schema_repair"``). Phase 8 · Task 8 promoted these to their own
+    closed budget ops (the Phase-7 handoff op-set gate was flipped additively), so
+    the reservation's scope_type — not merely this record — carries the attempt role.
     """
 
     reservation_id: str
@@ -1892,22 +1893,26 @@ def execute_with_bounded_retry(
 
     The loop, per the reviewed v2 semantics:
 
-    * for each primary attempt (``<= max_attempts``) it reserves one child node
-      budget (``reserve_node``; ``llm_invocations = 1`` for an LLM node, ``0`` for a
-      deterministic node), runs ``attempt_fn`` and settles the actuals;
+    * the base attempt reserves one child node budget (``reserve_node``;
+      ``llm_invocations = 1`` for an LLM node, ``0`` for a deterministic node), runs
+      ``attempt_fn`` and settles the actuals; a subsequent retry attempt reserves via
+      ``reserve_retry`` (a first-class ``scope_type="retry"`` child of the same plan
+      pool);
     * a COMPLETED / DEGRADED attempt returns immediately (**at most one committed
       output per logical key** — the Phase-2 invariant);
     * an LLM attempt that failed with ``reason_code="output_schema_invalid"`` triggers
       up to ``schema_repairs_per_attempt`` bounded repair invocations (each a fresh
-      attempt ordinal, its own ``reserve_node`` child + settle, its own second
-      ``PromptAssemblyRecord``); a non-schema failure is not repairable;
+      attempt ordinal, its own ``reserve_schema_repair`` child + settle, its own
+      second ``PromptAssemblyRecord``); a non-schema failure is not repairable;
     * a retryable terminal (FAILED / INCOMPLETE / TIMED_OUT) with primary attempts
       remaining retries; otherwise the loop returns the terminal record with no
       Artifact.
 
-    Every ``reserve_node`` / ``settle`` uses a deterministic idempotency key
+    Every reservation / ``settle`` uses a deterministic idempotency key
     (``role``/``ordinal``), so a crash between a repair and its settle replays
-    idempotently (no duplicate reservation, no duplicated invocation billed).
+    idempotently (no duplicate reservation, no duplicated invocation billed). The
+    per-attempt op is selected by role (``reserve_node`` / ``reserve_retry`` /
+    ``reserve_schema_repair``) so the ledger carries the attempt role first-class.
     """
     reservations: list[AttemptReservation] = []
     llm_per = 1 if is_llm else 0
@@ -1916,9 +1921,20 @@ def execute_with_bounded_retry(
     last_run: NodeRun | None = None
     last_artifact: Artifact | None = None
 
+    # each attempt role draws from the plan pool through its own first-class ledger
+    # op (Phase 8 · Task 8 exit gate): the base attempt is ordinary node work
+    # (reserve_node), a bounded retry mints a scope_type="retry" reservation and a
+    # bounded schema repair a scope_type="schema_repair" one — same plan-pool
+    # accounting, but the LEDGER now carries the attempt role, not just the record.
+    _RESERVE_BY_ROLE = {
+        "primary": budget.reserve_node,
+        "retry": budget.reserve_retry,
+        "schema_repair": budget.reserve_schema_repair,
+    }
+
     def _reserve(role: str, ordinal: int) -> str:
         key = f"noderes:{run_id}:{node_id}:{role}:{ordinal}"
-        res = budget.reserve_node(
+        res = _RESERVE_BY_ROLE[role](
             plan_reservation_id=plan_reservation_id, node_id=node_id, attempt=ordinal,
             tokens=node_token_reservation, llm_invocations=llm_per, concurrency=1,
             idempotency_key=key)

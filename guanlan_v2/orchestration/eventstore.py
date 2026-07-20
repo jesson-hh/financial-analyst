@@ -541,7 +541,10 @@ def _append_budget_event(
     occurred_at: Any,
 ) -> BudgetEvent:
     wb.budget_seq += 1
-    if command.operation in ("reserve_plan", "reserve_node", "reserve_planner"):
+    if command.operation in (
+        "reserve_plan", "reserve_node", "reserve_planner",
+        "reserve_retry", "reserve_schema_repair",
+    ):
         wb.reservation_seq += 1
         reservation_id = f"res-{wb.reservation_seq}"
     else:

@@ -552,12 +552,17 @@ def test_point4_budget_ledger_methods_and_closed_operation_set():
                    "get_active_plan", "available", "replay"):
         assert callable(getattr(BudgetLedger, method)), method
     assert issubclass(IdempotencyConflict, Exception)
-    # clause (a) [flipped in Phase 7 · Task 4, per the Phase 4 guard-flip ruling]:
-    # the closed operation vocabulary is EXTENDED (never replaced) by exactly the
-    # additive planner op — the original four remain, in place, unchanged.
+    # clause (a) [flipped in Phase 7 · Task 4, then again in Phase 8 · Task 8, per the
+    # Phase 4 guard-flip ruling]: the closed operation vocabulary is EXTENDED (never
+    # replaced) by exactly the additive planner op (Phase 7) and the additive retry /
+    # schema_repair ops (Phase 8) — the original four remain, in place, unchanged.
     assert set(typing.get_args(BudgetOperation)) == {
-        "reserve_plan", "reserve_node", "settle", "release", "reserve_planner"}
+        "reserve_plan", "reserve_node", "settle", "release", "reserve_planner",
+        "reserve_retry", "reserve_schema_repair"}
     assert {"reserve_plan", "reserve_node", "settle", "release"} <= set(
+        typing.get_args(BudgetOperation))
+    # the Phase 8 additive ops are present (absence -> presence flip).
+    assert {"reserve_retry", "reserve_schema_repair"} <= set(
         typing.get_args(BudgetOperation))
     assert "operation" in BudgetTransitionCommand.model_fields
     assert BudgetTransitionCommand.model_fields["operation"].annotation is BudgetOperation
