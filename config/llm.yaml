@@ -45,3 +45,11 @@ agent_overrides:
   risk-officer:     {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
   report-writer:    {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
   planner:          {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
+  # orchestration 四车道目录 tier 别名 (2026-07-20 Phase 8 Task 3): guanlan_v2.orchestration
+  #   model_tiers.tier_map_from_llm_yaml 经 ORCHESTRATION_TIER_ALIASES 显式读这三键 (唯一 join key),
+  #   缺任一 tier -> ModelTierUnconfigured, 绝不静默回落 default_provider/default_model.
+  #   fast=deepseek-chat (填表型缝), reasoner/reasoner-deep=deepseek-reasoner (判断密集型缝),
+  #   reasoner-deep 加 max_tokens+长超时. clause(g): deepseek 唯一 live provider.
+  orchestration-fast:          {provider: deepseek, model: deepseek-chat}
+  orchestration-reasoner:      {provider: deepseek, model: deepseek-reasoner}
+  orchestration-reasoner-deep: {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
