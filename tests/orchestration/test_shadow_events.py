@@ -271,18 +271,21 @@ def test_event_type_extension_is_provably_additive():
     assert FROZEN_23_VALUES < values
     # … every one of the 23 old value strings is unchanged (nothing revalued) …
     assert FROZEN_23_VALUES <= values
-    # … the two shadow values are the only additions …
-    assert values - FROZEN_23_VALUES == set(SHADOW_EVENT_VALUES)
-    # … and the whole vocabulary is now exactly 25 values.
-    assert len(EventType) == 25
-    assert values == FROZEN_23_VALUES | set(SHADOW_EVENT_VALUES)
+    # … the two shadow values are among the post-23 additions (Phase 8 · Task 9
+    #   additively appends the Lane-D debate member after them, so this is a durable
+    #   subset form, never "the only additions") …
+    assert set(SHADOW_EVENT_VALUES) <= (values - FROZEN_23_VALUES)
+    # … and the vocabulary is at least the 25-value shadow-era total.
+    assert len(EventType) >= 25
+    assert FROZEN_23_VALUES | set(SHADOW_EVENT_VALUES) <= values
 
 
 def test_shadow_members_are_appended_after_the_23_frozen_members():
     ordered = tuple(m.value for m in EventType)
-    # the 23 Phase-1+Phase-4 members keep their order; shadow members are appended.
+    # the 23 Phase-1+Phase-4 members keep their order; the two shadow members occupy
+    # exactly positions 23..24 (a durable prefix form — Phase 8 appends after them).
     assert set(ordered[:23]) == FROZEN_23_VALUES
-    assert ordered[23:] == SHADOW_EVENT_VALUES
+    assert ordered[23:25] == SHADOW_EVENT_VALUES
 
 
 # =========================================================================== #

@@ -702,11 +702,15 @@ def test_clause_a_catalog_builders_are_heterogeneous_but_accessors_are_uniform()
 # Clause (b) — the current EventType shape + DebateMessage still guarded.        #
 # =========================================================================== #
 def test_clause_b_event_type_count_and_debate_message_still_deferred():
-    assert len(list(EventType)) == 25
-    assert not hasattr(EventType, "DEBATE_MESSAGE_PUBLISHED")
+    # Phase 8 · Task 9 FLIP (per this clause's own forecast): the additive
+    # ``DEBATE_MESSAGE_PUBLISHED`` member now exists (26 total), extending the
+    # then-current reviewed set — it never restores an older shape.
+    assert len(list(EventType)) == 26
+    assert EventType.DEBATE_MESSAGE_PUBLISHED.value == "DebateMessagePublished"
+    # ``DebateMessage`` the PAYLOAD stays a pure Phase-1 absence deferral: Task 9 adds
+    # the event + the model (unregistered); Task 11 owns registration.
     tcc = importlib.import_module("tests.orchestration.test_contract_completeness")
     assert "DebateMessage" in tcc.DEFERRED_PHASE_PAYLOADS
-    # DebateMessage is not yet registered anywhere (pure Phase-1 absence guard).
     reg = p7.build_phase7_registry(p7.PHASE7_BASE_REGISTRY_DIGEST)
     assert "DebateMessage" not in {e.schema_ref.name for e in reg.manifest()}
 

@@ -151,6 +151,15 @@ class EventType(str, Enum):
     SHADOW_INTENT_ISSUED = "ShadowIntentIssued"
     SHADOW_TARGET_APPLIED = "ShadowTargetApplied"
 
+    # --- Phase 8 (Task 9) additive Lane-D debate member ------------------ #
+    # Appended after the two Phase-6 shadow members (never renumbered or
+    # reordered): one ``DebateMessagePublished`` event is emitted per committed
+    # debate seat Artifact — the immutable public record of one seat's turn. It is
+    # PUBLIC advisory debate evidence, so :meth:`RunEvent._debate_partition_rules`
+    # pins it to the ``main`` partition; the unchanged namespace-masquerade rule
+    # then bars a main debate event from referencing a non-public payload.
+    DEBATE_MESSAGE_PUBLISHED = "DebateMessagePublished"
+
 
 #: Closed set of event partitions — the visibility domain of an event. Only
 #: ``main`` is publicly visible; ``sealed`` / ``review`` / ``audit`` mirror the
@@ -286,6 +295,29 @@ class RunEvent(DigestModel):
             raise ValueError(
                 f"{self.event_type.value} is public shadow advisory evidence and "
                 f"must be on the 'main' partition, not {self.partition!r}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _debate_partition_rules(self) -> "RunEvent":
+        """Phase 8 (Task 9) additive per-type rule: the Lane-D debate-message event
+        is PUBLIC advisory debate evidence and lives only on the ``main`` partition
+        (never ``sealed`` / ``review`` / ``audit``).
+
+        The debate analogue of the ``ArtifactStaged`` / ``LayerCommitted`` /
+        ``Shadow*`` visibility rules — expressed over ``event_type`` only, added
+        additively without touching any existing validator. The pre-existing
+        namespace-masquerade rule (:meth:`_namespace_boundary`) is unaffected and
+        still bars a ``main`` debate event from referencing a non-public payload, so
+        audit-only detail can never ride a public debate fact.
+        """
+        if (
+            self.event_type is EventType.DEBATE_MESSAGE_PUBLISHED
+            and self.partition not in PUBLIC_EVENT_PARTITIONS
+        ):
+            raise ValueError(
+                f"{self.event_type.value} is public debate advisory evidence and must be "
+                f"on the 'main' partition, not {self.partition!r}"
             )
         return self
 

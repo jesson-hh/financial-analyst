@@ -514,9 +514,17 @@ def check_runtime_support(
         else:
             issues.append(_issue("gates_unsupported", "draft.gates",
                                  "gates / gate metrics are outside the static-runtime v1 matrix"))
-    if draft.debates and not supports_debates:
-        issues.append(_issue("debates_unsupported", "draft.debates",
-                             "debates are outside the static-runtime v1 matrix"))
+    if draft.debates:
+        if supports_debates:
+            # Phase 8 * Task 9: the v2 profile ADMITS Lane-D debates; validate their
+            # runtime well-formedness (seats LLM, judge not a seat, max_rounds <= cap,
+            # budget covers the fully expanded invocation count) BEFORE any reservation.
+            from guanlan_v2.orchestration.debate import analyze_debates as _analyze_debates
+
+            issues.extend(_analyze_debates(draft, catalog=catalog, profile=profile))
+        else:
+            issues.append(_issue("debates_unsupported", "draft.debates",
+                                 "debates are outside the static-runtime v1 matrix"))
     if draft.stop_condition_refs:
         issues.append(_issue("stop_conditions_unsupported", "draft.stop_condition_refs",
                              "stop conditions are outside the static-runtime v1 matrix"))

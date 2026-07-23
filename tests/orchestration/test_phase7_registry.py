@@ -428,11 +428,13 @@ def test_planner_spec_digest_is_frozen_in_the_catalog_golden():
 
 
 # =========================================================================== #
-# Point 8 — EventType frozen (25); no Phase-7 model pins a deferred guard         #
+# Point 8 — EventType additive; no Phase-7 model pins a deferred guard            #
 # =========================================================================== #
-def test_event_type_membership_is_frozen_at_25():
+def test_event_type_membership_is_frozen_at_26():
+    # Phase 7 added no EventType member; Phase 8 · Task 9 additively appended the one
+    # Lane-D ``DEBATE_MESSAGE_PUBLISHED`` member, so the current reviewed total is 26.
     from guanlan_v2.orchestration.events import EventType
-    assert len(list(EventType)) == 25
+    assert len(list(EventType)) == 26
 
 
 def test_deferred_payload_guard_untouched_by_phase7():

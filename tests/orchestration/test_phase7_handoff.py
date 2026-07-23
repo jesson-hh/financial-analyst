@@ -229,9 +229,11 @@ PHASE1_SCHEMA_KEYS = frozenset(
     }
 )
 
-#: EventType has exactly this many members at the Phase 7 handoff; Phase 7 adds
-#: NONE (the four PLAN_* lifecycle types already exist).
-EVENT_TYPE_MEMBER_COUNT = 25
+#: EventType member count. Phase 7 added NONE (the four PLAN_* lifecycle types
+#: already existed); Phase 8 · Task 9 additively appended one Lane-D member
+#: (``DEBATE_MESSAGE_PUBLISHED``), so the current reviewed total is 26. This gate
+#: records the current shape — the count only ever EXTENDS additively.
+EVENT_TYPE_MEMBER_COUNT = 26
 
 #: clause (d): the existing console page that mounts console-report-card.jsx; the
 #: Phase-7 plan-approval card mounts beside it (read-only identification here).

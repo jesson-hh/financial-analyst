@@ -150,11 +150,13 @@ def test_event_type_set_is_exactly_phase4_frozen():
         "TrialReserved",
         "TrialRevealed",
         "TrialExhausted",
-        # … plus the two Phase 6 (Task 9) additive shadow-consumer members.
+        # … plus the two Phase 6 (Task 9) additive shadow-consumer members …
         "ShadowIntentIssued",
         "ShadowTargetApplied",
+        # … plus the one Phase 8 (Task 9) additive Lane-D debate member.
+        "DebateMessagePublished",
     }
-    assert len(EventType) == 25
+    assert len(EventType) == 26
     # building a TrialReserved with a TrialRecord-named schema ref succeeds …
     ev = _event(event_type=EventType.TRIAL_RESERVED, payload_schema_ref=_schema_ref("TrialRecord"))
     assert ev.event_type is EventType.TRIAL_RESERVED
