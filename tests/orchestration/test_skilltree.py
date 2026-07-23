@@ -79,7 +79,7 @@ LEGACY_SOURCE_PATHS = {
 #:   * Task 11 RE-POINTS the real-catalog cross-check test at the Phase-8 catalog (which
 #:     binds the NEW install digests) and EMPTIES this set — the exception must not
 #:     outlive Phase 8.
-SUPERSEDED_IN_PHASE8 = {"text.sentiment"}
+SUPERSEDED_IN_PHASE8 = {"text.sentiment", "dec.research_mgr", "dec.pm"}
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 

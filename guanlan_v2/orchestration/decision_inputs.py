@@ -281,6 +281,14 @@ class SymbolConstraintFacts:
     ``ret_60d_pct`` from daily_basic (the 游资票 veto inputs), and ``severe_negative_event``
     from :attr:`AnnouncementRiskFlags.hard_veto`. Every numeric fact is honestly nullable —
     a missing fact never fabricates a veto.
+
+    CONTRACT (binding on the Task 12 / Phase 9 runtime wiring; the *text* lands now): the
+    tradability gates (``suspended`` / ``limit_status`` / ``is_st`` / ``holding_acquired_today``)
+    MUST be populated from live surfaces **fail-closed** — an unreachable surface resolves to
+    the SAFE side (treat as ``suspended`` / at-limit / locked), never silently defaulted to the
+    permissive dataclass default. ``can_sell=False`` in the derived allowance means "≥1 lot is
+    locked" (T+1 symbol-level: a lot bought today cannot be sold today), a symbol-level verdict,
+    not a per-lot ledger.
     """
 
     symbol: Symbol

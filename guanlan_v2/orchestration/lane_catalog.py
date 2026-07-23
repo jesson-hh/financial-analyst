@@ -76,6 +76,10 @@ __all__ = [
     "xcut_lane_material_specs",
     "load_xcut_lane_materials",
     "build_xcut_worker_specs",
+    "DECISION_LANE_WORKER_IDS",
+    "decision_lane_material_specs",
+    "load_decision_lane_materials",
+    "build_decision_worker_specs",
 ]
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -901,4 +905,282 @@ def build_xcut_worker_specs(
                 allow_unsourced_numbers=False, optional_data_may_degrade=True),
             supported_modes=_MODES,
             can_emit_decision=False, decision_authority="none"))
+    return tuple(sorted(specs, key=lambda w: w.id))
+
+
+# =========================================================================== #
+# Batch 5 · Lane D 决策/风控 (Task 10) — the FINAL migration batch             #
+# =========================================================================== #
+# Reviewed rulings folded into Lane D (FLAGGED in the task report):
+#
+# * The 4 NEW seats (``dec.bull`` / ``dec.bear`` / ``dec.risk_debate`` / ``dec.trader``) are
+#   pool-fed LLM critics/writers: FORBIDDEN tool policy ⇔ empty allowlist (R2 §8: Lane D reads
+#   upstream artifacts, never calls a tool), require_input_refs=True, allow_unsourced_numbers
+#   =False. Every shipped seat's ``lint_skill_supply(...) == ()`` trivially (no ww_ promise, no
+#   capability). Debate seats use only ``fast``/``reasoner`` tiers (invariant 5).
+# * The 2 PILOT updates (``dec.research_mgr`` / ``dec.pm``) are clause-(d) surgical model_copies
+#   of the FROZEN Phase-7 baseline — they change ONLY the WorkerSpec fields the reviewed update
+#   names, never the pilot's evidence policy, capability allowlist, execution or persona. The
+#   roster's design-intent columns (e.g. research_mgr's 2-col read_categories) are NOT
+#   retro-applied. ``dec.pm`` keeps its ``cap.ashare_constraint_check`` allowlist + optional tool
+#   policy (clause d freezes them); the "every Lane-D spec FORBIDDEN" wording describes the 4 NEW
+#   seats — the pilots are frozen (text.sentiment precedent, Task 4). The tree SKILL bytes are the
+#   交付物③ 逐字安装件 (a new material version ⇒ new digest; the Phase-7 catalog still binds the
+#   pilot digest until Task 11 — the sanctioned SUPERSEDED_IN_PHASE8 transitional state).
+# * ``dec.pm`` is asserted ``reasoner_deep`` (the ONLY one across the whole lane_catalog — the
+#   pilot already carried it; the update asserts, does not change it → execution stays frozen).
+# * ``dec.trader`` emits Phase 6's ``PortfolioTargetProposal@1`` — bound by SchemaRef NAME only;
+#   no Phase-8 module defines a model by that name (invariant 2). It has no order/signal/intent
+#   capability anywhere (guardrail.advisory_shadow_only + FORBIDDEN ⇔ empty allowlist).
+# * ``dec.risk_debate`` binds ``params_schema_ref = RiskDebateParams@1`` — the single WorkerSpec
+#   is instantiated as multiple PlanNodes whose ``params.stance_role`` seat assignment is
+#   validated against the schema (per-instance seat; fixture-proven in test_lane_batch_decision).
+
+_DEC_LANE = "decision"
+
+DECISION_LANE_WORKER_IDS: tuple[str, ...] = (
+    "dec.bull", "dec.bear", "dec.research_mgr", "dec.risk_debate", "dec.pm", "dec.trader",
+)
+
+#: schema refs the Lane D chain binds (published by this batch's payloads, Phase 1/2/6, Task 9,
+#: and the Task-9b decision-input faces). Bound by name+version only — dependency injection uses
+#: exact SchemaRef equality at wiring time (spec.py 999-1000).
+_BULL_CASE_D = SchemaRef(name="BullCase", version="1")
+_BEAR_CASE_D = SchemaRef(name="BearCase", version="1")
+_RISK_STANCE = SchemaRef(name="RiskDebateStance", version="1")
+_RISK_PARAMS = SchemaRef(name="RiskDebateParams", version="1")
+_FUNDAMENTALS_D = SchemaRef(name="FundamentalsReport", version="1")
+_TECHNICAL_D = SchemaRef(name="TechnicalReport", version="1")
+_SENTIMENT_D = SchemaRef(name="SentimentReport", version="1")
+_NEWS_DIGEST_D = SchemaRef(name="NewsDigestReport", version="1")
+_RESEARCH_PLAN_D = SchemaRef(name="ResearchPlan", version="1")
+_PORTFOLIO_DECISION_D = SchemaRef(name="PortfolioDecision", version="1")
+_PORTFOLIO_TARGET_PROPOSAL = SchemaRef(name="PortfolioTargetProposal", version="1")
+_DEBATE_TRANSCRIPT = SchemaRef(name="DebateTranscript", version="1")
+_UPSTREAM_RATINGS = SchemaRef(name="UpstreamRatingsExtract", version="1")
+_ALLOWED_ACTIONS = SchemaRef(name="AllowedActions", version="1")
+_ANNOUNCEMENT_RISK = SchemaRef(name="AnnouncementRiskFlags", version="1")
+
+
+def decision_lane_material_specs() -> tuple[_MaterialSpec, ...]:
+    """The (id, kind, path) rows Lane D loads from disk — batch-owned + reused pilot bytes.
+
+    The six seats' skills (the four new + the two 交付物③ pilot installs); the four new seats'
+    prompts; the two pilots' frozen Phase-2 prompts (``prompt.research_mgr`` / ``prompt.pm``,
+    reused verbatim); the three batch-new guardrails (``debate_rounds`` / ``advisory_shadow_only``
+    / ``vf_anchor_dict``); the two shared guardrails (``number_provenance`` /
+    ``untrusted_input_isolation``, already on disk); and the two pilots' frozen guardrails
+    (``guard.provenance`` / ``guard.advisory_discipline``, reused so the model_copy'd pilot refs
+    resolve at their frozen digests).
+    """
+    rows: list[_MaterialSpec] = []
+    for wid in ("dec.bull", "dec.bear", "dec.risk_debate", "dec.trader",
+                "dec.research_mgr", "dec.pm"):
+        rows.append(_MaterialSpec(f"skill.{wid}", "skill", _SKILLS_TREE / wid / "SKILL.md"))
+    for wid in ("dec.bull", "dec.bear", "dec.risk_debate", "dec.trader"):
+        rows.append(_MaterialSpec(f"prompt.{wid}", "prompt", _PROMPTS / f"{wid}.md"))
+    rows.append(_MaterialSpec("prompt.research_mgr", "prompt", _PILOT / "prompts" / "research_mgr.md"))
+    rows.append(_MaterialSpec("prompt.pm", "prompt", _PILOT / "prompts" / "pm.md"))
+    rows.append(_MaterialSpec(
+        "guardrail.debate_rounds", "guardrail", _GUARDRAILS / "debate-rounds.md"))
+    rows.append(_MaterialSpec(
+        "guardrail.advisory_shadow_only", "guardrail", _GUARDRAILS / "advisory-shadow-only.md"))
+    rows.append(_MaterialSpec(
+        "guardrail.vf_anchor_dict", "guardrail", _GUARDRAILS / "vf-anchor-dict.md"))
+    rows.append(_MaterialSpec(
+        "guardrail.number_provenance", "guardrail", _GUARDRAILS / "number-provenance.md"))
+    rows.append(_MaterialSpec(
+        "guardrail.untrusted_input_isolation", "guardrail",
+        _GUARDRAILS / "untrusted-input-isolation.md"))
+    rows.append(_MaterialSpec("guard.provenance", "guardrail", _PILOT / "guardrails" / "provenance.md"))
+    rows.append(_MaterialSpec(
+        "guard.advisory_discipline", "guardrail", _PILOT / "guardrails" / "advisory_discipline.md"))
+    return tuple(rows)
+
+
+def load_decision_lane_materials() -> tuple[ResolvedTextMaterial, ...]:
+    """Resolve every Lane D text material to bytes + a content-digest-sealed ref."""
+    out: list[ResolvedTextMaterial] = []
+    for spec in decision_lane_material_specs():
+        _ref, mat = build_text_material(
+            id=spec.material_id, version="1", kind=spec.kind, raw=spec.path.read_bytes())
+        out.append(mat)
+    return tuple(out)
+
+
+class _DecWorkerRow(NamedTuple):
+    worker_id: str
+    persona: str
+    tier: Tier
+    model_tier: str
+    thinking_budget: int
+    prompt_id: str
+    skill_id: str
+    guardrail_ids: tuple[str, ...]
+    read_categories: tuple[str, ...]
+    output_schema: SchemaRef
+    params_schema_ref: SchemaRef | None
+    can_emit_decision: bool
+    inputs: tuple[InputBinding, ...]
+
+
+#: The reviewed Lane D roster for the FOUR NEW seats (frozen-order migration batch 5/5). All
+#: four are FORBIDDEN ⇔ empty allowlist LLM critics/writers; the two pilots are built separately
+#: as clause-(d) model_copies of the Phase-7 baseline (see :func:`build_decision_worker_specs`).
+_DEC_NEW_ROWS: tuple[_DecWorkerRow, ...] = (
+    _DecWorkerRow(
+        worker_id="dec.bull",
+        persona="Bull advocate (bounded debate seat) — zero trading authority",
+        tier=Tier.CRITIC, model_tier="reasoner", thinking_budget=4096,
+        prompt_id="prompt.dec.bull", skill_id="skill.dec.bull",
+        guardrail_ids=("guardrail.debate_rounds", "guardrail.vf_anchor_dict",
+                       "guardrail.untrusted_input_isolation", "guardrail.number_provenance"),
+        read_categories=("context", "upstream_artifacts"),
+        output_schema=_BULL_CASE_D, params_schema_ref=None, can_emit_decision=False,
+        inputs=(InputBinding(name="fundamentals", schema_ref=_FUNDAMENTALS_D,
+                             required=False, cardinality="one"),
+                InputBinding(name="technical", schema_ref=_TECHNICAL_D,
+                             required=False, cardinality="one"),
+                InputBinding(name="sentiment", schema_ref=_SENTIMENT_D,
+                             required=False, cardinality="one"),
+                InputBinding(name="news_digest", schema_ref=_NEWS_DIGEST_D,
+                             required=False, cardinality="one"),
+                InputBinding(name="opponent_case", schema_ref=_BEAR_CASE_D,
+                             required=False, cardinality="one"))),
+    _DecWorkerRow(
+        worker_id="dec.bear",
+        persona="Bear advocate (bounded debate seat, 晚一波) — zero trading authority",
+        tier=Tier.CRITIC, model_tier="reasoner", thinking_budget=4096,
+        prompt_id="prompt.dec.bear", skill_id="skill.dec.bear",
+        guardrail_ids=("guardrail.debate_rounds", "guardrail.vf_anchor_dict",
+                       "guardrail.untrusted_input_isolation", "guardrail.number_provenance"),
+        read_categories=("context", "upstream_artifacts"),
+        output_schema=_BEAR_CASE_D, params_schema_ref=None, can_emit_decision=False,
+        # asymmetric ammo: bear alone carries announcement_risk; bull has no such input.
+        inputs=(InputBinding(name="fundamentals", schema_ref=_FUNDAMENTALS_D,
+                             required=False, cardinality="one"),
+                InputBinding(name="technical", schema_ref=_TECHNICAL_D,
+                             required=False, cardinality="one"),
+                InputBinding(name="sentiment", schema_ref=_SENTIMENT_D,
+                             required=False, cardinality="one"),
+                InputBinding(name="news_digest", schema_ref=_NEWS_DIGEST_D,
+                             required=False, cardinality="one"),
+                InputBinding(name="opponent_case", schema_ref=_BULL_CASE_D,
+                             required=True, cardinality="one"),
+                InputBinding(name="announcement_risk", schema_ref=_ANNOUNCEMENT_RISK,
+                             required=False, cardinality="one"))),
+    _DecWorkerRow(
+        worker_id="dec.risk_debate",
+        persona="Risk debate seat (激进/稳健/中性 by instance) — zero trading authority",
+        tier=Tier.CRITIC, model_tier="fast", thinking_budget=0,
+        prompt_id="prompt.dec.risk_debate", skill_id="skill.dec.risk_debate",
+        guardrail_ids=("guardrail.debate_rounds", "guardrail.untrusted_input_isolation",
+                       "guardrail.number_provenance"),
+        read_categories=("context", "upstream_artifacts"),
+        output_schema=_RISK_STANCE, params_schema_ref=_RISK_PARAMS, can_emit_decision=False,
+        inputs=(InputBinding(name="research_plan", schema_ref=_RESEARCH_PLAN_D,
+                             required=True, cardinality="one"),
+                InputBinding(name="opponent_stances", schema_ref=_RISK_STANCE,
+                             required=False, cardinality="many"),
+                InputBinding(name="allowed_actions", schema_ref=_ALLOWED_ACTIONS,
+                             required=False, cardinality="one"))),
+    _DecWorkerRow(
+        worker_id="dec.trader",
+        persona="Advisory trader (proposal-only) — zero trading authority",
+        tier=Tier.WRITER, model_tier="reasoner", thinking_budget=4096,
+        prompt_id="prompt.dec.trader", skill_id="skill.dec.trader",
+        guardrail_ids=("guardrail.debate_rounds", "guardrail.advisory_shadow_only",
+                       "guardrail.untrusted_input_isolation", "guardrail.number_provenance"),
+        read_categories=("context", "upstream_artifacts"),
+        # Phase-6-owned schema, bound by name only; never redefined in Phase 8.
+        output_schema=_PORTFOLIO_TARGET_PROPOSAL, params_schema_ref=None, can_emit_decision=True,
+        inputs=(InputBinding(name="portfolio_decision", schema_ref=_PORTFOLIO_DECISION_D,
+                             required=True, cardinality="one"),)),
+)
+
+
+def _dec_index(materials: tuple[ResolvedTextMaterial, ...]) -> dict[str, ContentRef]:
+    return _text_index(materials)
+
+
+def build_decision_worker_specs(
+    *, materials: tuple[ResolvedTextMaterial, ...],
+) -> tuple[WorkerSpec, ...]:
+    """Build the reviewed Lane D final WorkerSpecs — the FINAL migration batch.
+
+    The FOUR NEW seats are built fresh from resolved batch materials (FORBIDDEN ⇔ empty
+    allowlist). The TWO PILOT updates (``dec.research_mgr`` / ``dec.pm``) are clause-(d)
+    ``model_copy`` surgeries over the FROZEN Phase-7 baseline: only the reviewed fields change
+    (skills rebind to the 交付物③ tree install; ``guardrail.debate_rounds`` appended; the
+    reviewed optional inputs added; ``dec.pm`` also gains the ``memory`` read category and is
+    asserted ``reasoner_deep``). Every other pilot field — evidence policy, capability allowlist,
+    execution, persona, tier, output — is preserved verbatim. Order-stable (sorted by worker id).
+    """
+    dec_ix = _dec_index(materials)
+
+    def _content(mid: str) -> ContentRef:
+        try:
+            return dec_ix[mid]
+        except KeyError:
+            raise KeyError(f"missing resolved text material {mid!r} for Lane D") from None
+
+    specs: list[WorkerSpec] = []
+
+    # -- the four NEW seats (built fresh) --------------------------------- #
+    for row in _DEC_NEW_ROWS:
+        guardrails = tuple(sorted(
+            (_content(g) for g in row.guardrail_ids), key=lambda r: (r.id, r.version)))
+        specs.append(WorkerSpec(
+            id=row.worker_id, catalog_role="final", selection_scope="dynamic_allowed",
+            lane=_DEC_LANE, persona=row.persona, tier=row.tier,
+            execution=ExecutionSpec(
+                kind=ExecutionKind.LLM, model_tier=row.model_tier,
+                thinking_budget=row.thinking_budget),
+            system_prompt_ref=_content(row.prompt_id),
+            skills=(SkillBinding(skill_ref=_content(row.skill_id)),),
+            guardrail_refs=guardrails,
+            capability_allowlist=(),
+            read_categories=row.read_categories,
+            params_schema_ref=row.params_schema_ref,
+            inputs=row.inputs,
+            outputs=(OutputBinding(name="primary", schema_ref=row.output_schema),),
+            evidence_policy=EvidencePolicy(
+                tool_calls=ToolCallRequirement.FORBIDDEN, require_input_refs=True,
+                require_number_anchors=True, allow_unsourced_numbers=False,
+                optional_data_may_degrade=True),
+            supported_modes=_MODES,
+            can_emit_decision=row.can_emit_decision,
+            decision_authority=("advisory_only" if row.can_emit_decision else "none")))
+
+    # -- the two PILOT updates (clause-(d) model_copy of the Phase-7 baseline) -- #
+    from guanlan_v2.orchestration.phase7_registry import phase7_catalog_snapshot
+    baseline = {w.id: w for w in phase7_catalog_snapshot().workers}
+
+    debate_rounds = _content("guardrail.debate_rounds")
+
+    rm = baseline["dec.research_mgr"]
+    specs.append(rm.model_copy(update=dict(
+        skills=(SkillBinding(skill_ref=_content("skill.dec.research_mgr")),),
+        guardrail_refs=tuple(rm.guardrail_refs) + (debate_rounds,),
+        inputs=tuple(rm.inputs) + (
+            InputBinding(name="bullbear_transcript", schema_ref=_DEBATE_TRANSCRIPT,
+                         required=False, cardinality="one"),
+            InputBinding(name="upstream_ratings", schema_ref=_UPSTREAM_RATINGS,
+                         required=False, cardinality="one")),
+    )))
+
+    pm = baseline["dec.pm"]
+    specs.append(pm.model_copy(update=dict(
+        skills=(SkillBinding(skill_ref=_content("skill.dec.pm")),),
+        guardrail_refs=tuple(pm.guardrail_refs) + (debate_rounds,),
+        read_categories=tuple(pm.read_categories) + ("memory",),
+        inputs=tuple(pm.inputs) + (
+            InputBinding(name="riskdebate_transcript", schema_ref=_DEBATE_TRANSCRIPT,
+                         required=False, cardinality="one"),
+            InputBinding(name="allowed_actions", schema_ref=_ALLOWED_ACTIONS,
+                         required=False, cardinality="one"),
+            InputBinding(name="announcement_risk", schema_ref=_ANNOUNCEMENT_RISK,
+                         required=False, cardinality="one")),
+    )))
+
     return tuple(sorted(specs, key=lambda w: w.id))

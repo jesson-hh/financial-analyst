@@ -75,12 +75,32 @@ Lane 跨切 · xcut (Task 7)
   average that hides a failing feed); ``components`` are sorted by ``source_id`` and
   duplicate-free. ``x.number_critic``'s output is Task 2's ``HonestyReport`` (owned by
   ``honesty.py``, registered by Task 11) — it is deliberately NOT a lane payload here.
+
+Lane D · 决策/风控 (Task 10)
+---------------------------
+* ``BullCase`` / ``BearCase`` — the ``dec.bull`` / ``dec.bear`` debate-seat outputs
+  (Thesis→Evidence→Counter). Prices are ``PositivePrice | None`` (an absent target is
+  honest, never fabricated); ``v_anchors`` / ``f_anchors`` cite the versioned
+  ``guardrail.vf_anchor_dict`` codes; ``rebuttal_of`` carries the round-2 逐条反驳 targets
+  and ``stance_change`` + ``stance_evidence`` the per-round 立场声明 (justified-belief:
+  a round-2 flip must name the new evidence). ``dec.bear`` alone reads the announcement-risk
+  face (不对称风险弹药, AMEND-8 §8.2).
+* ``RiskDebateStance`` — the ``dec.risk_debate`` per-seat posture. ``stance_role`` is the
+  seat identity (aggressive / steady / neutral). ``risk_score`` preserves the legacy
+  ``RiskOutput`` domain: an integer in ``[-2, 0]`` — risk is a DISCOUNT, never positive
+  (there is deliberately NO Phase-1 scalar adapter for it; the domain is preserved here
+  rather than an adapter invented).
+* ``RiskDebateParams`` — the registered params model ``dec.risk_debate`` binds via
+  ``params_schema_ref``. Each PlanNode instance sets ``stance_role`` in its params; the
+  reviewed convention (fixture-proven) is that a node's ``params.stance_role`` equals its
+  ``round_role`` seat assignment. ``dec.trader`` emits Phase 6's ``PortfolioTargetProposal``
+  (imported by SchemaRef name only — no Phase-8 module redefines that model).
 """
 from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import BeforeValidator, Field, model_validator
 
 from guanlan_v2.orchestration.data.symbols import Symbol
 from guanlan_v2.orchestration.digest import (
@@ -92,8 +112,10 @@ from guanlan_v2.orchestration.digest import (
     PositiveInt,
     UtcDateTime,
 )
+from guanlan_v2.orchestration.digest import _reject_bool
 from guanlan_v2.orchestration.pattern_registry import PatternDefinition
 from guanlan_v2.orchestration.refs import ContentRef, LogicalId
+from guanlan_v2.orchestration.schemas import PositivePrice
 
 __all__ = [
     # Lane C · text
@@ -124,11 +146,17 @@ __all__ = [
     # Lane 跨切 · xcut
     "QualityComponent",
     "DataQualityGrade",
+    # Lane D · decision / risk
+    "BullCase",
+    "BearCase",
+    "RiskDebateStance",
+    "RiskDebateParams",
     # partition helpers (for the Task-11 Phase-8 firewall)
     "LANE_C_PUBLIC_MODELS",
     "LANE_B_PUBLIC_MODELS",
     "LANE_A_PUBLIC_MODELS",
     "LANE_X_PUBLIC_MODELS",
+    "LANE_D_PUBLIC_MODELS",
 ]
 
 #: a finite float constrained to the closed unit interval ``[0, 1]`` (bool/NaN/Inf
@@ -770,4 +798,140 @@ class DataQualityGrade(DigestModel):
 LANE_X_PUBLIC_MODELS: tuple[type[DigestModel], ...] = (
     QualityComponent,
     DataQualityGrade,
+)
+
+
+# =========================================================================== #
+# Lane D · 决策/风控 (Task 10)                                                 #
+# =========================================================================== #
+#: The legacy ``RiskOutput.risk_score`` domain, preserved verbatim: an integer in
+#: ``[-2, 0]``. Risk is a DISCOUNT — never positive. ``_reject_bool`` keeps a ``bool``
+#: from masquerading as 0/1 (``True`` would otherwise coerce to an in-range 1... rejected).
+RiskScore = Annotated[int, BeforeValidator(_reject_bool), Field(ge=-2, le=0)]
+
+
+# --------------------------------------------------------------------------- #
+# dec.bull — BullCase                                                          #
+# --------------------------------------------------------------------------- #
+class BullCase(DigestModel):
+    """One ``dec.bull`` debate-seat turn: the honest bull case for a name.
+
+    ``thesis_bullets`` is non-empty (a case with no thesis is not a case). Prices are
+    ``PositivePrice | None`` — an absent target is honest, never fabricated. ``v_anchors``
+    cite the versioned ``guardrail.vf_anchor_dict`` V1–V9 codes; ``rebuttal_of`` carries the
+    round-2 逐条反驳 targets (opposing bullet texts). ``stance_change`` + ``stance_evidence``
+    are the per-round 立场声明 (justified-belief: a round-2 flip must name the new evidence);
+    ``stance_evidence`` is required exactly when ``stance_change == "update"``.
+    """
+
+    schema_version: Literal["1"] = "1"
+    symbol: Symbol
+    as_of: UtcDateTime
+    thesis_bullets: tuple[NonEmptyStr, ...]
+    catalysts: tuple[NonEmptyStr, ...] = ()
+    target_price_high: PositivePrice | None = None
+    target_price_base: PositivePrice | None = None
+    disproof_signals: tuple[NonEmptyStr, ...] = ()
+    v_anchors: tuple[NonEmptyStr, ...] = ()
+    rebuttal_of: tuple[NonEmptyStr, ...] = ()
+    stance_change: Literal["maintain", "update"] | None = None
+    stance_evidence: NonEmptyStr | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> "BullCase":
+        if not self.thesis_bullets:
+            raise ValueError("BullCase requires at least one thesis bullet")
+        if self.stance_change == "update" and self.stance_evidence is None:
+            raise ValueError(
+                "a 'update' stance_change must carry stance_evidence (justified-belief: "
+                "a flip states the new evidence that justifies it)"
+            )
+        return self
+
+
+# --------------------------------------------------------------------------- #
+# dec.bear — BearCase                                                          #
+# --------------------------------------------------------------------------- #
+class BearCase(DigestModel):
+    """One ``dec.bear`` debate-seat turn: the honest bear case + bull rebuttal.
+
+    Mirror of :class:`BullCase` on the downside: ``thesis_bullets`` non-empty,
+    ``valuation_concerns`` / ``technical_breakdown`` evidence, ``target_price_low`` /
+    ``downside_pct`` nullable, ``f_anchors`` cite the versioned F1–F14 codes, ``rebuttal_of``
+    the round-by-round bull-bullet targets, and the same per-round 立场声明 discipline.
+    """
+
+    schema_version: Literal["1"] = "1"
+    symbol: Symbol
+    as_of: UtcDateTime
+    thesis_bullets: tuple[NonEmptyStr, ...]
+    valuation_concerns: tuple[NonEmptyStr, ...] = ()
+    technical_breakdown: tuple[NonEmptyStr, ...] = ()
+    target_price_low: PositivePrice | None = None
+    downside_pct: FiniteFloat | None = None
+    f_anchors: tuple[NonEmptyStr, ...] = ()
+    rebuttal_of: tuple[NonEmptyStr, ...] = ()
+    stance_change: Literal["maintain", "update"] | None = None
+    stance_evidence: NonEmptyStr | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> "BearCase":
+        if not self.thesis_bullets:
+            raise ValueError("BearCase requires at least one thesis bullet")
+        if self.stance_change == "update" and self.stance_evidence is None:
+            raise ValueError(
+                "a 'update' stance_change must carry stance_evidence (justified-belief: "
+                "a flip states the new evidence that justifies it)"
+            )
+        return self
+
+
+# --------------------------------------------------------------------------- #
+# dec.risk_debate — RiskDebateStance + RiskDebateParams                        #
+# --------------------------------------------------------------------------- #
+class RiskDebateStance(DigestModel):
+    """One ``dec.risk_debate`` seat's posture on an already-formed research plan.
+
+    ``stance_role`` is the seat identity. ``risk_score`` preserves the legacy ``RiskOutput``
+    domain — an integer in ``[-2, 0]``, never positive (risk is a discount; there is
+    deliberately no Phase-1 scalar adapter, the domain is preserved rather than invented).
+    ``position_sizing_advice`` is concrete; ``conditional_approval`` states the terms under
+    which the trade is allowed; ``blind_spots`` names what the seat cannot see; ``rebuttal_of``
+    addresses the round-1 stances a round-2 seat read.
+    """
+
+    schema_version: Literal["1"] = "1"
+    symbol: Symbol
+    as_of: UtcDateTime
+    stance_role: Literal["aggressive", "steady", "neutral"]
+    risk_score: RiskScore
+    position_sizing_advice: NonEmptyStr
+    veto_flags: tuple[NonEmptyStr, ...] = ()
+    blind_spots: tuple[NonEmptyStr, ...] = ()
+    conditional_approval: NonEmptyStr | None = None
+    rebuttal_of: tuple[NonEmptyStr, ...] = ()
+
+
+class RiskDebateParams(DigestModel):
+    """The registered params model ``dec.risk_debate`` binds via ``params_schema_ref``.
+
+    Each PlanNode instance of the single ``dec.risk_debate`` WorkerSpec sets ``stance_role``
+    in its ``params`` — the per-instance seat assignment (激进/稳健/中性). The reviewed
+    convention, fixture-proven in the batch test, is that a node's ``params.stance_role``
+    equals its ``round_role`` seat. Validated against this schema by ``validate_plan_draft``.
+    """
+
+    schema_version: Literal["1"] = "1"
+    stance_role: Literal["aggressive", "steady", "neutral"]
+
+
+#: The Lane D public payload models (the Task-11 Phase-8 firewall reviews this set into the
+#: cumulative registry alongside the other lane sets). ``dec.trader`` emits Phase 6's
+#: ``PortfolioTargetProposal`` (imported, never redefined) — it is NOT a lane payload and is
+#: deliberately absent here, exactly like ``x.number_critic``'s ``HonestyReport``.
+LANE_D_PUBLIC_MODELS: tuple[type[DigestModel], ...] = (
+    BullCase,
+    BearCase,
+    RiskDebateStance,
+    RiskDebateParams,
 )
