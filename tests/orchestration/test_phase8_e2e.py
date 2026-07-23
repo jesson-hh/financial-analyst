@@ -204,11 +204,10 @@ class _LaneGateway:
     the node's first ``k`` invocations return an invalid payload (schema-repair drill).
     """
 
-    def __init__(self, stores, catalog, *, fail_plan=None, veto_node=None):
+    def __init__(self, stores, catalog, *, fail_plan=None):
         self._stores = stores
         self._tier = {w.id: w.execution.model_tier for w in catalog.workers}
         self._fail_plan = dict(fail_plan or {})
-        self._veto_node = veto_node
         self.seen: list[tuple[str, str, str]] = []
         self.requests: list = []
         self._calls: dict[str, int] = {}
@@ -240,8 +239,11 @@ class _LaneGateway:
         if wid == "dec.research_mgr":
             return _research()
         if wid == "dec.pm":
-            # injection-face binding: an active hard veto caps the rating at Hold.
-            return _decision(PortfolioRating.HOLD if nid == self._veto_node else PortfolioRating.HOLD)
+            # dec.pm always returns Hold in this e2e's fixture; the gateway does NOT
+            # honor any injected veto cap (see the honest-scoping note on
+            # test_hard_veto_injection_caps_pm_rating_at_hold below — that binding is
+            # Phase-9 data-binding work, not proven here).
+            return _decision(PortfolioRating.HOLD)
         if wid == "dec.trader":
             return _proposal()
         raise AssertionError(f"unexpected LLM worker {wid!r}")
@@ -546,6 +548,25 @@ def full_run(tmp_path_factory):
 # =========================================================================== #
 # Scenario — the spine: RunResult(completed) through the whole v2 path          #
 # =========================================================================== #
+# HONEST SCOPING NOTE (applies to every ``full_run``-based assertion below): the
+# folded debate transcripts ARE produced, published (``DEBATE_MESSAGE_PUBLISHED``),
+# and replayable byte-for-byte from the event log (see
+# ``test_debate_transcripts_folded_and_event_replay_matches`` and
+# ``test_audit_replay_reconstructs_with_zero_model_calls``) — but NO node in this
+# plan's DAG actually *consumes* ``slot.bullbear_transcript`` /
+# ``slot.riskdebate_transcript`` as a wired ``Dependency``. ``dec.research_mgr``
+# declares an optional ``bullbear_transcript`` input and ``dec.pm`` declares an
+# optional ``riskdebate_transcript`` input, but neither is connected by a
+# ``Dependency`` in ``_lane_nodes()``, so both run DEGRADED with that optional
+# input absent. Reducing a folded transcript into a judge's model-request input
+# (the actual debate -> judge data binding) is Phase-9 data-method work, NOT
+# proven by this e2e: the debate outcome does NOT influence ``dec.pm``'s rating
+# or ``dec.trader``'s proposal here — the fake gateway returns a fixed Hold /
+# all-cash payload for every plan, independent of anything the bull/bear/risk
+# seats produced. ``text.sentiment`` is the one real (non-debate) input judges
+# receive in this DAG — it IS wired to both ``research-mgr`` and ``pm`` — which is
+# also why the settled LLM invocation count is 14 (13 debate/judge/trader seats +
+# the sentiment producer), not a bare 13.
 def test_full_lane_d_path_completes(full_run):
     assert full_run.result.terminal_status == "completed"
     statuses = {nr.node_id: nr.status for nr in full_run.recorder.node_runs}
@@ -866,9 +887,20 @@ def test_asymmetric_ammo_bear_gets_announcement_risk_bull_does_not(full_run):
 
 
 # =========================================================================== #
-# Assertion 10 (injection faces bind): allowed_actions + hard veto -> Hold cap   #
+# Assertion 10 (injection faces): the DETERMINISTIC hard-veto adapter chain     #
 # =========================================================================== #
 def test_hard_veto_injection_caps_pm_rating_at_hold(full_run):
+    # HONEST SCOPE: this test proves the deterministic adapter chain that a hard
+    # veto rides through — scan_announcement_risk -> hard_veto -> build_allowed_actions
+    # -> can_buy=False / max_target_weight=0.0 — and that dec.pm structurally declares
+    # both injection-face inputs. It does NOT prove that the runtime gateway honors an
+    # injected veto by capping its emitted rating: this e2e's fake ``_LaneGateway``
+    # always returns Hold for dec.pm regardless of any veto input (there is no
+    # veto-conditional branch left in the double), so a passing assertion on the
+    # gateway's output would be a tautology, not evidence. Wiring the built
+    # AllowedActions/veto facts into the actual dec.pm model request (and having the
+    # runtime enforce the cap on whatever the model returns) is Phase-9 data-binding
+    # work, not proven in this e2e.
     specs = {w.id: w for w in full_run.env.snapshot.workers}
     # dec.pm declares the two injection-face inputs.
     pm_inputs = {i.name for i in specs["dec.pm"].inputs}
@@ -881,10 +913,6 @@ def test_hard_veto_injection_caps_pm_rating_at_hold(full_run):
     allowed = di.build_allowed_actions(as_of=NOW, facts=[facts])
     allowance = allowed.allowances[0]
     assert allowance.can_buy is False and allowance.max_target_weight == 0.0
-    # the injection-face contract: with the hard veto in force, dec.pm's decision is
-    # capped at Hold (never Buy). The veto-honoring gateway proves it end to end.
-    veto_gateway_decision = _decision(PortfolioRating.HOLD)
-    assert veto_gateway_decision.rating is PortfolioRating.HOLD
 
 
 # =========================================================================== #
@@ -936,10 +964,19 @@ def test_graceful_absence_pilot_chain_admits_and_completes(tmp_path):
                    for e in env.stores.events.journal(env.run_id, "main"))
 
 
-def test_v1_bound_plan_is_byte_identical_profile_passed_or_not(tmp_path):
+def test_v1_bound_plan_settled_counts_match_profile_passed_or_not(tmp_path):
     # DIFFERENTIAL PIN: a v1-bound plan (no debates/reducers/retries) run through the
-    # SAME run_plan produces the IDENTICAL RunResult whether or not a v2 profile is
-    # supplied — the v2 seams are strictly inert for a v1-shaped plan.
+    # SAME run_plan produces the SAME terminal status and the SAME settled
+    # token/invocation counts whether or not a v2 profile is supplied — the v2 seams
+    # are strictly inert for a v1-shaped plan. NOTE on naming: this pin covers
+    # terminal_status + settled_llm_invocations + settled_tokens equality, NOT a
+    # field-by-field byte-identity of the whole RunResult object (hence no longer
+    # named "byte_identical"). The actual byte-level proof that the v1 code path is
+    # untouched rests on (a) the verbatim-relocated v1 else-branch in
+    # ``dag.run_plan`` (the v2 gate wraps around it without altering a single line)
+    # and (b) the full pre-existing 124-test v1 regression suite continuing to pass
+    # unchanged — both of those, not this one pin, are what establish "byte
+    # identical" for the v1 path as a whole.
     def _once(run_id, profile, run_profile):
         env = _build_env(run_id=run_id)
         draft = _draft(env, _pilot_nodes(), (), (), budget_llm=6)
@@ -956,5 +993,6 @@ def test_v1_bound_plan_is_byte_identical_profile_passed_or_not(tmp_path):
     r_v2, rec_v2 = _once("v2b", static_runtime_profile_v2(), static_runtime_profile_v2())
     assert r_v1.terminal_status == r_v2.terminal_status == "completed"
     assert r_v1.settled_llm_invocations == r_v2.settled_llm_invocations
+    assert r_v1.settled_tokens == r_v2.settled_tokens
     # neither run engages any debate machinery.
     assert rec_v1.debate_transcripts == {} and rec_v2.debate_transcripts == {}
