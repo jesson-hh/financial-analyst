@@ -344,8 +344,17 @@ def test_pilot_install_digest_matches_bound_skill(specs, wid):
 
 
 def test_supersession_set_extended_to_both_pilots():
-    from tests.orchestration.test_skilltree import SUPERSEDED_IN_PHASE8
-    assert {"dec.research_mgr", "dec.pm"} <= SUPERSEDED_IN_PHASE8
+    # Task 10 installed 交付物③ into both pilots' tree files (a wholesale replacement of the
+    # Phase-2 pilot relocation). Task 11 then EMPTIED the transitional SUPERSEDED_IN_PHASE8
+    # catalog exception — the Phase-8 catalog binds the NEW install digests, so the real-tree
+    # cross-check is clean with zero exceptions — and moved the permanent wholesale-install
+    # fact to WHOLESALE_INSTALLED_TREE_SKILLS.
+    from tests.orchestration.test_skilltree import (
+        SUPERSEDED_IN_PHASE8,
+        WHOLESALE_INSTALLED_TREE_SKILLS,
+    )
+    assert {"dec.research_mgr", "dec.pm"} <= WHOLESALE_INSTALLED_TREE_SKILLS
+    assert SUPERSEDED_IN_PHASE8 == set()
 
 
 # --------------------------------------------------------------------------- #
