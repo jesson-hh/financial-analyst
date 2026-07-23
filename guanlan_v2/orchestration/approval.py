@@ -449,6 +449,10 @@ class PlanApprovalCoordinator:
     # ------------------------------------------------------------------ #
     # public API                                                         #
     # ------------------------------------------------------------------ #
+    def now(self) -> UtcDateTime:
+        """The console/API layer's sanctioned clock access (authoritative-clock doctrine: HTTP layers never read the wall clock directly)."""
+        return clock_now(self._clock)
+
     def register_pending(
         self, pending: PendingPlanApproval, *, idempotency_key: NonEmptyStr
     ) -> PendingPlanApproval:

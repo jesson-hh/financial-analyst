@@ -452,6 +452,41 @@ def test_lease_issue_list_revoke_happy(tmp_path):
     assert lst["leases"][0]["status"] == "revoked"
 
 
+def test_leases_endpoint_folds_at_coordinator_clock_not_wall_clock(tmp_path):
+    # Regression (authoritative-clock doctrine): GET /plan/approvals/leases must
+    # fold lease balances at the coordinator's injected clock, never datetime.now().
+    # The window below (2026-07-20 -> 2026-07-21) is already in the past relative to
+    # any real wall clock, so a wall-clock read would fold the lease "expired"; the
+    # fixed coordinator clock sits INSIDE the window, so the honest status is "active".
+    class _WindowClock:
+        def now(self) -> datetime:
+            return datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
+
+    admission = _FakeAdmission()
+
+    def _sink(approval):
+        admission.approvals[(approval.request_id, approval.candidate_plan_digest)] = approval
+
+    coord = PlanApprovalCoordinator(
+        tmp_path / "plan_approvals.jsonl", admission=admission, clock=_WindowClock(),
+        verifier=_FakeVerifier(), approvals_sink=_sink,
+        preset_registry=_FakePresetRegistry({PRESET_ID: PRESET_REC_DIG}),
+        catalog_digest=CAT_DIG, registry_digest=REG_DIG)
+    c, _ = _client(tmp_path, coord=coord, admission=admission, lease_context=_lease_context)
+
+    r = c.post("/console/plan/approvals/lease",
+               json={"preset_id": PRESET_ID, "valid_from": VALID_FROM.isoformat(),
+                     "valid_until": VALID_UNTIL.isoformat(), "max_admissions": 3,
+                     "budget_cap": 10, "reason": "clock doctrine"})
+    assert r.status_code == 200, r.text
+
+    lst = c.get("/console/plan/approvals/leases").json()
+    assert lst["ok"] is True and len(lst["leases"]) == 1
+    # coordinator now (2026-07-20 12:00) is inside the window -> active; a wall-clock
+    # read (today) would be past valid_until -> "expired". Active proves the fix.
+    assert lst["leases"][0]["status"] == "active"
+
+
 def test_lease_issue_unverified_is_403(tmp_path):
     coord, admission = _make_coord(tmp_path, lease=True)
     c, _ = _client(tmp_path, coord=coord, admission=admission, actor=BAD,

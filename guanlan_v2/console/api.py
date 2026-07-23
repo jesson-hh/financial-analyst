@@ -1038,7 +1038,7 @@ def build_console_router(store: Optional[ConsoleStore] = None,
     async def plan_leases_list():
         if _pa is None:
             return _plan_unwired()
-        now = datetime.now(timezone.utc)
+        now = _coord.now()
         views = await asyncio.to_thread(lambda: _coord.list_leases(now=now))
         leases = [{
             "lease_id": v.lease.lease_id, "preset_id": v.lease.preset_id,
@@ -1071,7 +1071,7 @@ def build_console_router(store: Optional[ConsoleStore] = None,
         try:
             valid_until = _parse_dt(body.get("valid_until"))
             valid_from = (_parse_dt(body.get("valid_from")) if body.get("valid_from")
-                          else datetime.now(timezone.utc))
+                          else _coord.now())
             max_adm = int(body.get("max_admissions"))
             budget_cap = int(body.get("budget_cap"))
         except Exception:  # noqa: BLE001
