@@ -2108,8 +2108,14 @@ def _preflight(
             "authorized base + prepared bridge memory additions")
 
     # -- active child reservation --------------------------------------------- #
-    if node_reservation.scope_type != "node":
-        raise PreflightError("node_reservation is not a node-scope reservation")
+    # Phase 8 · Task 12: a bounded-retry/schema-repair attempt (v2 only) draws its
+    # per-attempt child through the first-class ``reserve_retry`` / ``reserve_schema_repair``
+    # ops (scope_type "retry"/"schema_repair"), so an ``execute_node`` invoked for such an
+    # attempt is preflighted against a non-``node`` scope child. All three are legitimate
+    # per-attempt node children of the same plan pool; a v1 run only ever mints "node".
+    if node_reservation.scope_type not in ("node", "retry", "schema_repair"):
+        raise PreflightError(
+            "node_reservation is not a node/retry/schema_repair-scope reservation")
     if node_reservation.candidate_plan_digest != plan.plan_digest:
         raise PreflightError("node_reservation is not bound to the admitted plan digest")
     if node_reservation.status != "reserved":

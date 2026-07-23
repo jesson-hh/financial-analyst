@@ -349,6 +349,22 @@ def analyze_debates(
                 f"debate seat node {node.id!r} worker {node.worker_id!r} execution kind "
                 f"{kind.value!r} is not LLM; every debate seat is an LLM invocation",
                 node_id=node.id))
+        # -- Phase 8 · Task 12 (CONTROLLER RULING, plan:862 charter): the RUNTIME
+        # binding ``params.stance_role == round_role``. A multi-instance debate seat
+        # (``dec.risk_debate`` — one WorkerSpec, N PlanNodes) declares its stance via a
+        # ``stance_role`` param; that param MUST name the seat's own ``round_role`` (the
+        # market.rotation dual-node precedent, generalized). Task 10 proved this only at
+        # the fixture level; this is the runtime bind (run BEFORE reservation, so a
+        # drifted stance_role is refused at admission). Additive: it fires ONLY on a
+        # seat node that actually carries a ``stance_role`` param, so every seat without
+        # one (bull/bear) is untouched.
+        stance = node.params.get("stance_role") if isinstance(node.params, Mapping) else None
+        if stance is not None and stance != node.round_role:
+            issues.append(_support_issue(
+                "debate_seat_role_param_mismatch", "PlanNode.params.stance_role",
+                f"debate seat node {node.id!r} params.stance_role {stance!r} does not equal its "
+                f"round_role {node.round_role!r}; the stance param must name the seat's own role",
+                node_id=node.id))
 
     # -- per-debate: round cap + judge-not-a-seat -------------------------- #
     for debate in draft.debates:

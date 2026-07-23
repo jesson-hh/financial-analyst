@@ -97,6 +97,7 @@ from guanlan_v2.orchestration.worker import (
     PreflightError,
     WorkerExecutionError,
     execute_node,
+    execute_with_bounded_retry,
     prepare_input,
 )
 
@@ -289,6 +290,11 @@ class RunRecorder:
     node_runs: list = field(default_factory=list)
     input_snapshots: dict = field(default_factory=dict)
     layer_commits: list = field(default_factory=list)
+    #: Phase 8 · Task 12 — the folded ``DebateTranscript`` per ``debate_id`` (v2 only;
+    #: empty for every v1/BOOTSTRAP run, which carries no debates). Observational —
+    #: the durable authority is the ``DebateMessagePublished`` visible-event stream,
+    #: which ``debate.replay_debate_transcript`` reconstructs byte-identically.
+    debate_transcripts: dict = field(default_factory=dict)
 
     def record_node_run(self, node_run: NodeRun) -> None:
         self.node_runs.append(node_run)
@@ -298,6 +304,9 @@ class RunRecorder:
 
     def record_layer_commit(self, layer_commit) -> None:
         self.layer_commits.append(layer_commit)
+
+    def record_debate_transcript(self, debate_id: str, transcript) -> None:
+        self.debate_transcripts[debate_id] = transcript
 
 
 # --------------------------------------------------------------------------- #
@@ -468,6 +477,7 @@ async def run_plan(
     cancellation: CancellationToken | None = None,
     recorder: RunRecorder | None = None,
     layer_hook=None,
+    runtime_profile=None,
 ) -> RunResult:
     """Execute one admitted static Plan → the frozen :class:`RunResult`.
 
@@ -525,6 +535,21 @@ async def run_plan(
     layers = _kahn_depth_layers(plan.nodes)
     node_records, committed_layers = _load_run_history(stores, run_id)
 
+    # ---- Phase 8 · Task 12: v2 runtime features (retry/repair + debate fold) --- #
+    # Every branch below is gated on the caller supplying a v2 profile whose feature
+    # switches are on; a caller that passes no ``runtime_profile`` (every v1/BOOTSTRAP
+    # runner) keeps the EXACT prior single-attempt, no-debate path — byte-identical.
+    v2_retry = runtime_profile is not None and getattr(runtime_profile, "supports_retries", False)
+    schema_repairs = (
+        int(getattr(runtime_profile, "schema_repairs_per_attempt", 0)) if v2_retry else 0
+    )
+    debate_publish = (
+        runtime_profile is not None
+        and getattr(runtime_profile, "supports_debates", False)
+        and bool(plan.draft.debates)
+    )
+    published_debates: set[str] = set()
+
     node_status: dict[str, NodeStatus] = {}
     committed_outputs: set[tuple[str, str]] = set()
     cancelled = False
@@ -562,6 +587,7 @@ async def run_plan(
 
         # ---- (4/5) gating + preparation (sequential, node-id order) -------- #
         prepared_ctxs: list[_PreparedNode] = []
+        v2_preps: list[_V2Prep] = []
         layer_node_runs: list[NodeRun] = []
         for node in layer_nodes:  # already sorted by id
             worker = runtime.catalog.worker(node.worker_id)
@@ -583,6 +609,18 @@ async def run_plan(
                 rec.record_node_run(node_run)
                 _persist_terminal_node_run(stores, runtime, plan, node_run)
                 layer_node_runs.append(node_run)
+                continue
+
+            # Phase 8 · Task 12 — v2 executable nodes run through the Task-8 bounded
+            # retry/repair seam (``worker.execute_with_bounded_retry``), which owns the
+            # per-attempt reserve/execute/settle. Their preparation (prepare_input +
+            # snapshot freeze + gateways) is deferred into the per-attempt closure, so
+            # each attempt is a fresh sequencer / one prompt. The v1 concurrent path
+            # (below) is left byte-identical.
+            if v2_retry:
+                v2_preps.append(_V2Prep(
+                    node=node, worker=worker, gate=gate,
+                    is_llm=(worker.execution.kind is ExecutionKind.LLM)))
                 continue
 
             # executable: stage-1 bridge prepare (may fail → INCOMPLETE, no reservation).
@@ -660,49 +698,69 @@ async def run_plan(
                 node_res=node_res, gateway=gw, model_gateway=mg, is_llm=is_llm,
                 degraded_inputs=gate.degraded_inputs))
 
-        # ---- (8) bounded concurrent execution (Task 7) --------------------- #
-        sem = asyncio.Semaphore(bound)
-
-        async def _exec(pctx: "_PreparedNode"):
-            async with sem:
-                try:
-                    node_run, artifact = await asyncio.to_thread(
-                        execute_node, plan, pctx.node, runtime=runtime,
-                        prepared_bridges=pctx.prepared, input_snapshot=pctx.snapshot, ctx=ctx,
-                        node_reservation=pctx.node_res, bridge_resolver=pctx.resolver,
-                        model_gateway=pctx.model_gateway, capability_gateway=pctx.gateway,
-                        registry=registry, stores=stores, clock=clock,
-                        prompt_assembler=prompt_assembler, attempt=1)
-                    if pctx.degraded_inputs:
-                        node_run = _upgrade_to_degraded(node_run)
-                    return pctx, node_run, artifact, True
-                except Exception as exc:
-                    # an executor exception (Preflight/WorkerExecution/PromptBinding/…)
-                    # must not leak the child reservation nor abort the run silently:
-                    # release honestly and persist a reviewed FAILED NodeRun instead.
-                    _release_if_reserved(budget, pctx.node_res, run_id, pctx.node.id,
-                                         reason=f"executor-exception: {type(exc).__name__}")
-                    node_run = _terminal_node_run(
-                        run_id=run_id, plan=plan, node=pctx.node, worker=pctx.worker,
-                        status=NodeStatus.FAILED, snapshot=pctx.snapshot, clock=clock,
-                        reason_code="executor_exception", reason=str(exc))
-                    return pctx, node_run, None, False
-
-        exec_results = await asyncio.gather(*(_exec(p) for p in prepared_ctxs))
-
-        # ---- (9/10) settle + stage successes (sequential, deterministic) --- #
+        # ---- (8) execution ------------------------------------------------- #
         to_settle: list[tuple[_PreparedNode, NodeRun]] = []
-        for pctx, node_run, artifact, executed in exec_results:
-            node_status[pctx.node.id] = node_run.status
-            rec.record_node_run(node_run)
-            _persist_terminal_node_run(stores, runtime, plan, node_run)
-            layer_node_runs.append(node_run)
-            if executed:
-                to_settle.append((pctx, node_run))
-            if node_run.status in _SUCCESS_STATUSES and artifact is not None:
-                with mutation:
+        if v2_retry:
+            # ---- v2: sequential bounded retry/repair per node (Task-8 seam) --- #
+            # execute_with_bounded_retry owns each attempt's reserve/execute/settle,
+            # so run_plan neither pre-reserves nor post-settles a v2 node.
+            for prep in v2_preps:  # node-id order preserved (layer_nodes sorted)
+                node_run, artifact = _run_bounded_node(
+                    prep, plan=plan, runtime=runtime, ctx=ctx, stores=stores, registry=registry,
+                    ctx_ref=ctx_ref, clock=clock, pool=pool, layer_index=layer_index,
+                    budget=budget, run_id=run_id, plan_reservation=plan_reservation,
+                    model_gateway=model_gateway, prompt_assembler=prompt_assembler,
+                    refusal_sink=refusal_sink, rec=rec, schema_repairs=schema_repairs)
+                node_status[prep.node.id] = node_run.status
+                rec.record_node_run(node_run)
+                _persist_terminal_node_run(stores, runtime, plan, node_run)
+                layer_node_runs.append(node_run)
+                if node_run.status in _SUCCESS_STATUSES and artifact is not None:
                     pool.stage(artifact, layer_index=layer_index, node_run=node_run,
-                               idempotency_key=f"stage:{run_id}:{pctx.node.id}:L{layer_index}")
+                               idempotency_key=f"stage:{run_id}:{prep.node.id}:L{layer_index}")
+        else:
+            # ---- v1: bounded concurrent execution (Task 7) — byte-identical --- #
+            sem = asyncio.Semaphore(bound)
+
+            async def _exec(pctx: "_PreparedNode"):
+                async with sem:
+                    try:
+                        node_run, artifact = await asyncio.to_thread(
+                            execute_node, plan, pctx.node, runtime=runtime,
+                            prepared_bridges=pctx.prepared, input_snapshot=pctx.snapshot, ctx=ctx,
+                            node_reservation=pctx.node_res, bridge_resolver=pctx.resolver,
+                            model_gateway=pctx.model_gateway, capability_gateway=pctx.gateway,
+                            registry=registry, stores=stores, clock=clock,
+                            prompt_assembler=prompt_assembler, attempt=1)
+                        if pctx.degraded_inputs:
+                            node_run = _upgrade_to_degraded(node_run)
+                        return pctx, node_run, artifact, True
+                    except Exception as exc:
+                        # an executor exception (Preflight/WorkerExecution/PromptBinding/…)
+                        # must not leak the child reservation nor abort the run silently:
+                        # release honestly and persist a reviewed FAILED NodeRun instead.
+                        _release_if_reserved(budget, pctx.node_res, run_id, pctx.node.id,
+                                             reason=f"executor-exception: {type(exc).__name__}")
+                        node_run = _terminal_node_run(
+                            run_id=run_id, plan=plan, node=pctx.node, worker=pctx.worker,
+                            status=NodeStatus.FAILED, snapshot=pctx.snapshot, clock=clock,
+                            reason_code="executor_exception", reason=str(exc))
+                        return pctx, node_run, None, False
+
+            exec_results = await asyncio.gather(*(_exec(p) for p in prepared_ctxs))
+
+            # ---- (9/10) settle + stage successes (sequential, deterministic) --- #
+            for pctx, node_run, artifact, executed in exec_results:
+                node_status[pctx.node.id] = node_run.status
+                rec.record_node_run(node_run)
+                _persist_terminal_node_run(stores, runtime, plan, node_run)
+                layer_node_runs.append(node_run)
+                if executed:
+                    to_settle.append((pctx, node_run))
+                if node_run.status in _SUCCESS_STATUSES and artifact is not None:
+                    with mutation:
+                        pool.stage(artifact, layer_index=layer_index, node_run=node_run,
+                                   idempotency_key=f"stage:{run_id}:{pctx.node.id}:L{layer_index}")
 
         # ---- (11) barrier: atomically commit the layer's successful outputs  #
         expected = pool.derive_expected_outputs(layer_node_runs)
@@ -712,6 +770,16 @@ async def run_plan(
         rec.record_layer_commit(layer_commit)
         for eo in expected:
             committed_outputs.add((eo.node_id, eo.output_key))
+
+        # ---- Phase 8 · Task 12: fold + publish any now-complete debate ----- #
+        # After the barrier, every debate whose seat producers are ALL committed is
+        # folded (Task-8 pool.fold_reducer_producers + Task-9 debate handler) and each
+        # turn published as an immutable DebateMessage / DEBATE_MESSAGE_PUBLISHED event.
+        # v1 plans carry no debates, so this is a strict no-op there.
+        if debate_publish:
+            _publish_committed_debates(
+                plan, runtime=runtime, stores=stores, pool=pool,
+                committed_outputs=committed_outputs, published=published_debates, rec=rec)
 
         if layer_hook is not None:
             layer_hook(layer_index, committed=frozenset(committed_outputs))
@@ -791,6 +859,157 @@ class _PreparedNode:
     model_gateway: Any
     is_llm: bool
     degraded_inputs: bool
+
+
+# --------------------------------------------------------------------------- #
+# Phase 8 · Task 12 — v2 bounded-retry / debate-fold runner seams               #
+# --------------------------------------------------------------------------- #
+@dataclass
+class _V2Prep:
+    """A v2 executable node deferred to the bounded retry/repair seam.
+
+    Unlike ``_PreparedNode`` (v1), it carries no reservation / snapshot / gateway:
+    each attempt of ``execute_with_bounded_retry`` builds its own fresh sequencer
+    (``prepare_input``), snapshot and gateways so a repair is a NEW attempt ordinal.
+    """
+
+    node: Any
+    worker: Any
+    gate: Any
+    is_llm: bool
+
+
+_RESERVE_BY_ROLE = {"primary": "reserve_node", "retry": "reserve_retry",
+                    "schema_repair": "reserve_schema_repair"}
+
+
+def _reserve_attempt(budget, role, run_id, node_id, ordinal, plan_reservation_id, is_llm):
+    """Idempotently (re-)mint the per-attempt child reservation the bounded-retry loop
+    already minted under the same deterministic key, returning the reservation object
+    so ``execute_node`` can preflight against it. Role selects the first-class ledger
+    op (``reserve_node`` / ``reserve_retry`` / ``reserve_schema_repair``); the args
+    match the loop's exactly, so re-minting is a no-op idempotent replay."""
+    key = f"noderes:{run_id}:{node_id}:{role}:{ordinal}"
+    op = getattr(budget, _RESERVE_BY_ROLE[role])
+    return op(
+        plan_reservation_id=plan_reservation_id, node_id=node_id, attempt=ordinal,
+        tokens=_NODE_TOKEN_RESERVATION, llm_invocations=(1 if is_llm else 0),
+        concurrency=1, idempotency_key=key)
+
+
+def _run_bounded_node(prep, *, plan, runtime, ctx, stores, registry, ctx_ref, clock, pool,
+                      layer_index, budget, run_id, plan_reservation, model_gateway,
+                      prompt_assembler, refusal_sink, rec, schema_repairs):
+    """Run one v2 executable node through ``worker.execute_with_bounded_retry``.
+
+    The bounded-retry loop owns each attempt's reserve/execute/settle; the closure
+    below is the caller-owned per-attempt plumbing (fresh sequencer + snapshot +
+    gateways + ``execute_node``). Returns ``(final_node_run, final_artifact | None)``.
+    """
+    node, worker, gate, is_llm = prep.node, prep.worker, prep.gate, prep.is_llm
+
+    def attempt_fn(ordinal, *, is_repair):
+        role = "schema_repair" if is_repair else ("primary" if ordinal == 1 else "retry")
+        # -- stage-1 bridge prepare (may fail -> INCOMPLETE, no reservation drawn) --
+        try:
+            resolver, prepared, seq = prepare_input(
+                plan, node, runtime=runtime, ctx=ctx, stores=stores, registry=registry,
+                context_snapshot_ref=ctx_ref, clock=clock, attempt=ordinal)
+        except (PreflightError, WorkerExecutionError) as exc:
+            snapshot = pool.freeze_input_snapshot(
+                node, run_id=run_id, plan=plan, layer_index=layer_index, attempt=ordinal,
+                context_snapshot_ref=ctx_ref, bound_artifact_inputs=gate.exec_bindings,
+                memory_record_refs=(), readiness="ready")
+            return _terminal_node_run(
+                run_id=run_id, plan=plan, node=node, worker=worker,
+                status=NodeStatus.INCOMPLETE, snapshot=snapshot, clock=clock,
+                reason_code="bridge_preparation_failed", reason=str(exc)), None
+
+        memory_union = _canonical_memory_union(prepared)
+        snapshot = pool.freeze_input_snapshot(
+            node, run_id=run_id, plan=plan, layer_index=layer_index, attempt=ordinal,
+            context_snapshot_ref=ctx_ref, bound_artifact_inputs=gate.exec_bindings,
+            memory_record_refs=memory_union, readiness="ready")
+        if ordinal == 1:
+            rec.record_input_snapshot(node.id, snapshot)
+
+        # the loop already minted this attempt's reservation; re-mint idempotently to
+        # obtain the reservation object execute_node preflights against.
+        node_res = _reserve_attempt(
+            budget, role, run_id, node.id, ordinal, plan_reservation.reservation_id, is_llm)
+        try:
+            gw = CapabilityGateway(
+                plan_digest=plan.plan_digest, worker=worker,
+                summaries={s.summary_digest: s for s in runtime.summaries_for(node.id)},
+                catalog=runtime.catalog, factories=runtime.factories, phase1_registry=registry,
+                refusal_sink=refusal_sink, clock=clock, sequencer=seq)
+            mg = None
+            if is_llm:
+                mg = model_gateway if model_gateway is not None else \
+                    runtime.factories.model_factory(worker.execution.model_tier)(worker=worker)
+        except Exception as exc:
+            return _terminal_node_run(
+                run_id=run_id, plan=plan, node=node, worker=worker, status=NodeStatus.FAILED,
+                snapshot=snapshot, clock=clock, reason_code="executor_setup_failed",
+                reason=str(exc)), None
+        try:
+            node_run, artifact = execute_node(
+                plan, node, runtime=runtime, prepared_bridges=prepared, input_snapshot=snapshot,
+                ctx=ctx, node_reservation=node_res, bridge_resolver=resolver, model_gateway=mg,
+                capability_gateway=gw, registry=registry, stores=stores, clock=clock,
+                prompt_assembler=prompt_assembler, attempt=ordinal)
+        except Exception as exc:
+            return _terminal_node_run(
+                run_id=run_id, plan=plan, node=node, worker=worker, status=NodeStatus.FAILED,
+                snapshot=snapshot, clock=clock, reason_code="executor_exception",
+                reason=str(exc)), None
+        if gate.degraded_inputs:
+            node_run = _upgrade_to_degraded(node_run)
+        return node_run, artifact
+
+    outcome = execute_with_bounded_retry(
+        node_id=node.id, run_id=run_id, is_llm=is_llm,
+        max_attempts=node.max_attempts,
+        schema_repairs_per_attempt=(schema_repairs if is_llm else 0),
+        budget=budget, plan_reservation_id=plan_reservation.reservation_id,
+        node_token_reservation=_NODE_TOKEN_RESERVATION, attempt_fn=attempt_fn)
+    return outcome.node_run, outcome.artifact
+
+
+def _publish_committed_debates(plan, *, runtime, stores, pool, committed_outputs, published, rec):
+    """Fold + publish every debate whose seat producers are all committed.
+
+    For each ``DebateCfg`` not yet published whose seat nodes are all in
+    ``committed_outputs``, publish each turn as an immutable ``DebateMessage`` +
+    ``DEBATE_MESSAGE_PUBLISHED`` event (Task-9 ``publish_debate_message``), then fold
+    the committed producer Artifacts into the deterministic ``DebateTranscript`` via
+    the Task-8 ``pool.fold_reducer_producers`` seam + the Task-9 reducer handler and
+    record it on the recorder. Idempotent: an already-published debate is skipped.
+    """
+    from guanlan_v2.orchestration.debate import (
+        debate_transcript_reducer_handler,
+        publish_debate_message,
+    )
+    from guanlan_v2.orchestration.pool import fold_reducer_producers
+
+    for debate in plan.draft.debates:
+        if debate.id in published:
+            continue
+        seats = tuple(n for n in plan.nodes if n.debate_id == debate.id)
+        if not seats or not all((n.id, "primary") in committed_outputs for n in seats):
+            continue
+        arts = []
+        for n in sorted(seats, key=lambda n: (n.debate_round or 0, n.debate_turn or 0)):
+            art = pool.committed_output(n.id, "primary")
+            if art is None:  # pragma: no cover - guarded by the committed check above
+                break
+            publish_debate_message(
+                stores, registry_digest=runtime.runtime_registry_digest, run_id=plan.run_id,
+                plan_digest=plan.plan_digest, debate_id=debate.id, node=n, artifact=art)
+            arts.append(art)
+        handler = debate_transcript_reducer_handler(debate=debate, nodes=seats)
+        rec.record_debate_transcript(debate.id, fold_reducer_producers(arts, handler=handler))
+        published.add(debate.id)
 
 
 def _cancel_layer(layer_nodes, *, run_id, plan, runtime, pool, node_status, ctx_ref, clock, rec,
