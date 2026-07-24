@@ -340,6 +340,22 @@ def create_app():
     app.router.lifespan_context = _composed_lifespan
     app.mount("/gl-mcp", _gl_mcp_app)
 
+    # ── orchestration 持久化存储 + 诚实的启动期中断标记(Phase 9 · Task 1b)─────────
+    # 把 Phase 2 store ABI 的 durable jsonl/file 实现绑定一次(root 默认 var/orchestration/,
+    # env GUANLAN_ORCH_STORE_ROOT 覆盖供 9998 验证),折叠日志重建持久化状态;启动扫描把任何
+    # 「已受理但未完成」的节点执行 attempt 经既有 RunResult 记录通路标为 interrupted(绝不重跑/
+    # 重受理/伪造进度),被 park 的 WAITING_FOR_MATURITY head(state cell)原样保留。纯加法 +
+    # 尽力而为:此处失败绝不阻断其余启动。
+    try:
+        from guanlan_v2.orchestration.adapters.durable import (
+            bind_process_durable_stores_and_scan,
+        )
+
+        bind_process_durable_stores_and_scan()
+    except Exception as _e:  # noqa: BLE001 — durable-store 绑定是加法项,失败不阻断启动
+        print(f"[guanlan_v2] orchestration durable stores skipped "
+              f"({type(_e).__name__}: {_e})", file=sys.stderr)
+
     if not _UI_DIR.is_dir():
         raise RuntimeError(f"guanlan_v2 UI dir missing: {_UI_DIR}")
 
