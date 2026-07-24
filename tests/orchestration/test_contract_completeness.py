@@ -173,6 +173,32 @@ PHASE8_MODULES: tuple[str, ...] = (
     "guanlan_v2.orchestration.debate",
 )
 
+#: Phase 9 (完整落子/帷幄 adapters — the final phase) contract modules. Task 1 ships
+#: ``adapters.contracts`` first — it defines the public replay/curve/maturity/harness/
+#: retirement ``DigestModel`` subclasses whose Phase-9 registry classification +
+#: completeness firewall (``PHASE9_PUBLIC_MODELS`` / ``PHASE9_INTERNAL_MODELS``) land
+#: in Task 9's ``adapters.chain`` module. Like the Phase-4/5/6/7/8 precedents this
+#: scoping keeps the Phase-1 discovery firewall from mislabeling a Phase-9 module as a
+#: missing Phase-1 module; the Phase-1 classification tests (keyed off ``DISCOVERED``,
+#: derived only from ``PHASE1_MODULES``) never see them. The remaining Phase-9 adapter
+#: modules are pre-listed ahead of their creation per the Phase-6 ``adapters.luozi``
+#: precedent (Task-0 correction N5): each is only ever used in the discovery-firewall
+#: set subtraction below (never imported here), so listing one before it exists — or
+#: one that only defines internal carriers — is inert. ``adapters.luozi`` is NOT
+#: repeated here: it is a Phase-6 module (in ``PHASE6_MODULES``) extended additively by
+#: Phase 9. The real Phase-9 firewall will live in
+#: ``tests/orchestration/test_phase9_registry_chain.py``.
+PHASE9_MODULES: tuple[str, ...] = (
+    "guanlan_v2.orchestration.adapters.contracts",
+    "guanlan_v2.orchestration.adapters.replay_data",
+    "guanlan_v2.orchestration.adapters.live_data",
+    "guanlan_v2.orchestration.adapters.weiwo",
+    "guanlan_v2.orchestration.adapters.retirement",
+    "guanlan_v2.orchestration.adapters.chain",
+    "guanlan_v2.orchestration.adapters.api",
+    "guanlan_v2.orchestration.adapters.durable",
+)
+
 #: Deferred payloads whose ABSENCE FROM PHASE 1 this guard proves (registry,
 #: classification and namespaces). The five Phase-5 market-factor/regime/rotation
 #: payloads stay listed here for that Phase-1 absence half — they must never leak
@@ -305,9 +331,9 @@ def test_phase1_modules_lists_every_module_defining_a_public_contract_model():
     defining = _modules_defining_public_contract_models()
     # sanity: the walk found the known payload-bearing modules (not silently empty)
     assert "guanlan_v2.orchestration.schemas" in defining
-    # Phase 4 / Phase 5 / Phase 6 / Phase 7 contract modules are governed by their own
-    # phase firewalls (Task 9 in each), not the Phase 1 buckets, so they are excluded
-    # from the Phase-1 review here.
+    # Phase 4 / Phase 5 / Phase 6 / Phase 7 / Phase 8 / Phase 9 contract modules are
+    # governed by their own phase firewalls (a Task-9-style seal in each), not the
+    # Phase 1 buckets, so they are excluded from the Phase-1 review here.
     missing = (
         defining
         - set(PHASE1_MODULES)
@@ -316,10 +342,11 @@ def test_phase1_modules_lists_every_module_defining_a_public_contract_model():
         - set(PHASE6_MODULES)
         - set(PHASE7_MODULES)
         - set(PHASE8_MODULES)
+        - set(PHASE9_MODULES)
     )
     assert not missing, (
         "these modules define a public ContractModel subclass but are absent from "
-        "PHASE1_MODULES (and are not Phase 4/5/6/7/8 modules), so the completeness "
+        "PHASE1_MODULES (and are not Phase 4/5/6/7/8/9 modules), so the completeness "
         "firewall would never review their contracts — add them to PHASE1_MODULES: "
         + ", ".join(sorted(missing))
     )
