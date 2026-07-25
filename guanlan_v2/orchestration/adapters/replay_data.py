@@ -51,6 +51,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping
 from zoneinfo import ZoneInfo
 
@@ -91,6 +92,7 @@ __all__ = [
     "ARCHIVE_FEED_IDS",
     "ArchiveFeedFloor",
     "archive_feed_floor_from_read",
+    "macro_feed_floor_from_snapshots",
     "ArchiveFeedVerdict",
     "ReplayFeasibleWindow",
     "derive_replay_feasible_window",
@@ -221,6 +223,38 @@ def archive_feed_floor_from_read(
     """
     floor = _iso_from_yyyymmdd(read_result.get("first_date"))
     return ArchiveFeedFloor(feed_id=feed_id, floor_date=floor, archive_root=archive_root)
+
+
+def macro_feed_floor_from_snapshots(
+    *, snapshots_path: str | Path | None = None
+) -> ArchiveFeedFloor:
+    """Build the ``macro`` feed's :class:`ArchiveFeedFloor` from the macro-pulse surface.
+
+    The macro (``temp.astock``) history does **NOT** live in
+    ``snapshot_archive.read_archive`` — that serves only the three ``KINDS``. It lives
+    in the DELIVERED macro-pulse append-only jsonl (``guanlan_v2.macro.pulse``,
+    ``var/macro_pulse/snapshots.jsonl``): one row per successful pull, each stamped with
+    a Beijing-local ``ts``. The feed's coverage floor is the **earliest** snapshot's
+    calendar date (append-only ⇒ the earliest date is stable as newer rows accrete).
+    The macro-pulse module exposes no feed-id constant, so this binds to its read
+    surface directly — the private ``_read_snapshots`` / ``_SNAP_DEFAULT`` (the same
+    surface ``market.factors._load_astock_temp_rows`` reads); a real-fixture test guards
+    against drift. Lazily imported (import purity, like the engine ``PitReader``). An
+    empty / missing store ⇒ ``floor_date=None`` ⇒ honest UNAVAILABLE (never fabricated).
+    """
+    from guanlan_v2.macro.pulse import _SNAP_DEFAULT, _read_snapshots  # private read surface (bound intentionally)
+
+    path = Path(snapshots_path) if snapshots_path is not None else _SNAP_DEFAULT
+    dates: list[str] = []
+    for row in _read_snapshots(path):
+        day = str(row.get("ts") or "")[:10]  # ts = "YYYY-MM-DDTHH:MM:SS" (macro _iso)
+        try:
+            _require_iso_date(day)
+        except ValueError:
+            continue
+        dates.append(day)
+    floor = min(dates) if dates else None
+    return ArchiveFeedFloor(feed_id=_ARCHIVE_FEED_MACRO, floor_date=floor, archive_root=str(path))
 
 
 def _is_aware(value: datetime) -> bool:

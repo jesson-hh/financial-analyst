@@ -38,6 +38,7 @@ from guanlan_v2.orchestration.adapters.replay_data import (
     ReplayFeasibleWindow,
     ReplayPointClock,
     archive_feed_floor_from_read,
+    macro_feed_floor_from_snapshots,
     build_pit_replay_descriptor,
     build_replay_data_context,
     build_replay_manifest,
@@ -880,3 +881,54 @@ def test_archive_feed_ids_bound_to_delivered_kinds():
 def test_archive_feed_floor_rejects_unknown_feed():
     with pytest.raises(ValueError):
         ArchiveFeedFloor(feed_id="not_a_feed", floor_date="2026-07-01", archive_root="r")
+
+
+# --- macro feed binds to the macro-pulse surface, NOT read_archive --------------- #
+def _write_macro_snapshots(path, ts_values):
+    path.write_text(
+        "".join(
+            json.dumps({"ts": ts, "temps": {}, "markets": []}) + "\n" for ts in ts_values)
+        + "\n{ this is a dirty line, skipped }\n",  # dirty line tolerated (append-only jsonl)
+        encoding="utf-8")
+
+
+def test_macro_feed_floor_from_snapshots(tmp_path):
+    snaps = tmp_path / "snapshots.jsonl"
+    _write_macro_snapshots(
+        snaps, ["2026-07-07T09:31:00", "2026-07-06T15:03:00", "2026-07-08T10:00:00"])
+    floor = macro_feed_floor_from_snapshots(snapshots_path=str(snaps))
+    assert floor.feed_id == "macro"
+    assert floor.floor_date == "2026-07-06"          # the EARLIEST snapshot's date
+    assert floor.archive_root == str(snaps)          # audit-only physical locator
+
+
+def test_macro_pre_floor_unavailable_on_floor_ok(tmp_path):
+    snaps = tmp_path / "snapshots.jsonl"
+    _write_macro_snapshots(snaps, ["2026-07-06T15:03:00", "2026-07-07T15:03:00"])
+    floor = macro_feed_floor_from_snapshots(snapshots_path=str(snaps))
+    assert floor.floor_date == "2026-07-06"
+
+    before = derive_replay_feasible_window(
+        as_of=_at_bj_1500("2026-07-03"), feed_floors=(floor,))  # before the macro floor
+    on = derive_replay_feasible_window(
+        as_of=_at_bj_1500("2026-07-06"), feed_floors=(floor,))  # on the macro floor
+
+    assert before.verdicts[0].status == "UNAVAILABLE"
+    assert before.verdicts[0].badge == "archive_pre_floor:macro"
+    assert "macro" in before.verdicts[0].reason and "2026-07-06" in before.verdicts[0].reason
+    assert on.verdicts[0].status == "OK" and on.verdicts[0].covered is True
+
+
+def test_macro_empty_or_missing_snapshots_unavailable(tmp_path):
+    # (a) a missing store ⇒ floor None ⇒ honest UNAVAILABLE at every point (no fabrication).
+    missing = macro_feed_floor_from_snapshots(snapshots_path=str(tmp_path / "nope.jsonl"))
+    assert missing.floor_date is None
+    w_missing = derive_replay_feasible_window(
+        as_of=_at_bj_1500("2026-07-06"), feed_floors=(missing,))
+    assert w_missing.verdicts[0].status == "UNAVAILABLE"
+    assert w_missing.verdicts[0].covered is False
+
+    # (b) an empty file ⇒ floor None ⇒ UNAVAILABLE (never a fabricated floor).
+    empty = tmp_path / "snapshots.jsonl"
+    empty.write_text("", encoding="utf-8")
+    assert macro_feed_floor_from_snapshots(snapshots_path=str(empty)).floor_date is None
