@@ -677,6 +677,60 @@ def test_hostile_text_cannot_widen(schema_registry):
     assert cap_after.write_capability_names() == ()
 
 
+# =========================================================================== #
+# extra: the C2 evaluate_validation binding EXECUTES end-to-end (closure path)   #
+# =========================================================================== #
+def test_evaluate_validation_binding_drives_run_graph(schema_registry):
+    world = _World(schema_registry, clock=_FrozenClock(AS_OF),
+                   probe_stub=_ProbeStub(_ok_env(items=[])))
+    # invoke_eval=True → the optimizer actually CALLS the evaluate_validation binding,
+    # driving the full C2 closure: candidate → _candidate_graph → the run_graph wrapper
+    # (deterministic offline fixture graph) → _metrics_to_validation_metrics → a real
+    # ValidationMetrics. This is the task's headline deliverable — exercised, not just
+    # inspected.
+    opt = _FakeOptimizer(passing=(), failing=(), invoke_eval=True)
+    run_weiwo_research(_request(), bindings=_bindings(
+        world, planner=_FakePlanner(_candidate()),
+        approval=_FakeApproval(ApprovalDecision.APPROVED), optimizer=opt))
+    from guanlan_v2.orchestration.trial import ValidationMetrics
+    assert isinstance(opt.eval_result, ValidationMetrics)
+    # the deterministic offline graph produces NO metric → honest absence (all None),
+    # and the source is always the deterministic evaluator name.
+    assert opt.eval_result.source == "run_graph"
+    assert opt.eval_result.rank_ic is None and opt.eval_result.sharpe is None
+    assert opt.eval_result.oos_verdict is None and opt.eval_result.n_dates is None
+    assert opt.eval_result.factor is None
+
+
+# =========================================================================== #
+# extra: _metrics_to_validation_metrics — bool-exclusion + oos_verdict whitelist #
+# =========================================================================== #
+def test_metrics_adapter_bool_exclusion_and_oos_whitelist():
+    from guanlan_v2.orchestration.adapters.weiwo import _metrics_to_validation_metrics
+    from guanlan_v2.orchestration.trial import ValidationMetrics
+
+    # a real float is kept; a bool is EXCLUDED (never coerced to 1.0/0.0); an in-set
+    # oos_verdict is kept; n_dates as a bool is excluded (honest absence, no zero-fill).
+    vm = _metrics_to_validation_metrics({
+        "rank_ic": 0.041, "sharpe": True, "ann_return": 0.12,
+        "oos_verdict": "robust", "n_dates": True, "factor": "momentum"})
+    assert isinstance(vm, ValidationMetrics)
+    assert vm.rank_ic == 0.041 and vm.ann_return == 0.12
+    assert vm.sharpe is None                       # bool excluded, not 1.0
+    assert vm.oos_verdict == "robust"              # whitelisted verdict kept
+    assert vm.n_dates is None                       # bool excluded
+    assert vm.factor == "momentum" and vm.source == "run_graph"
+
+    # an OUT-of-whitelist verdict is honestly refused → None (never fabricated); a real
+    # int n_dates is kept.
+    vm2 = _metrics_to_validation_metrics({"oos_verdict": "garbage", "n_dates": 7})
+    assert vm2.oos_verdict is None and vm2.n_dates == 7
+
+    # a non-mapping (None from a metric-less graph) → all-None honest absence.
+    vm3 = _metrics_to_validation_metrics(None)
+    assert vm3.rank_ic is None and vm3.oos_verdict is None and vm3.source == "run_graph"
+
+
 # --------------------------------------------------------------------------- #
 # a DataInvocationScope for the raw-fetch proof in test 12                      #
 # --------------------------------------------------------------------------- #
