@@ -56,10 +56,14 @@ UPSTREAM_GOLDEN_SHA256 = {
         "0211611674174b1848858023648cb85e8a4eed7a1ef3bc7ec996a16998ae9615",
 }
 
-#: the Phase-9 contract modules whose public ContractModel subclasses the
-#: completeness firewall governs (mirrors ``test_contract_completeness.PHASE9_MODULES``
-#: minus ``adapters.luozi``, which is a Phase-6 module). Modules pre-listed ahead of a
-#: later task's creation are tolerated (they simply contribute no models yet).
+#: the Phase-9 contract modules whose public ContractModel subclasses the completeness
+#: firewall governs. This tuple MUST equal ``test_contract_completeness.PHASE9_MODULES``
+#: (asserted by ``test_phase9_contract_modules_stay_in_sync_with_the_discovery_firewall``
+#: below) — otherwise a public contract in a NEW Phase-9 module would escape BOTH the
+#: Phase-1 discovery firewall and this classification firewall. ``adapters.luozi`` is in
+#: neither list: it is a Phase-6 module (``PHASE6_MODULES``) extended additively by
+#: Phase 9. Modules pre-listed ahead of a later task's creation are tolerated (they
+#: simply contribute no models yet).
 PHASE9_CONTRACT_MODULES = (
     "guanlan_v2.orchestration.adapters.contracts",
     "guanlan_v2.orchestration.adapters.replay_data",
@@ -291,6 +295,29 @@ def test_internal_map_is_a_reviewed_reason_map():
     for model, reason in ch.PHASE9_INTERNAL_MODELS.items():
         assert isinstance(model, type)
         assert isinstance(reason, str) and reason.strip()
+
+
+def test_phase9_contract_modules_stay_in_sync_with_the_discovery_firewall():
+    """Close the "a public contract in a NEW Phase-9 module escapes both firewalls" hole.
+
+    ``PHASE9_CONTRACT_MODULES`` (this file, the classification firewall's walk) and
+    ``test_contract_completeness.PHASE9_MODULES`` (the Phase-1 discovery firewall's
+    exclusion set) are two hand-maintained lists of the same surface. If a later task
+    adds a Phase-9 module to the discovery firewall's exclusion set but not here, its
+    public contracts would be excluded from the Phase-1 review AND never classified into
+    ``PHASE9_PUBLIC_MODELS`` / ``PHASE9_INTERNAL_MODELS`` — registered by nobody, caught
+    by nobody. Tying the two lists together is what makes the partition test above a
+    real firewall rather than a firewall over a hand-picked subset.
+    """
+    tcc = importlib.import_module("tests.orchestration.test_contract_completeness")
+    assert set(PHASE9_CONTRACT_MODULES) == set(tcc.PHASE9_MODULES), (
+        "PHASE9_CONTRACT_MODULES has drifted from test_contract_completeness."
+        "PHASE9_MODULES; a public contract in a module listed in only one of them "
+        "escapes both the discovery and the classification firewall"
+    )
+    # neither list may claim adapters.luozi — it is a Phase-6-owned module.
+    assert "guanlan_v2.orchestration.adapters.luozi" not in set(PHASE9_CONTRACT_MODULES)
+    assert "guanlan_v2.orchestration.adapters.luozi" in set(tcc.PHASE6_MODULES)
 
 
 def test_internal_map_partitions_the_contract_surface_exactly():
