@@ -36,10 +36,10 @@ from __future__ import annotations
 import dataclasses
 import importlib
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import date, datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 from zoneinfo import ZoneInfo
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
@@ -56,8 +56,14 @@ from guanlan_v2.orchestration.digest import (
     PositiveInt,
     content_digest,
 )
+from guanlan_v2.orchestration.enums import ApprovalPolicy, ExperimentStatus
 from guanlan_v2.orchestration.refs import ContentRef
-from guanlan_v2.orchestration.runtime_clock import AuthoritativeClock, SystemClock
+from guanlan_v2.orchestration.runtime_clock import AuthoritativeClock, SystemClock, clock_now
+from guanlan_v2.orchestration.adapters.contracts import (
+    ReplayDecisionPoint,
+    ShadowExecutionConfig,
+    ShadowReplayRunState,
+)
 from guanlan_v2.orchestration.shadow import (
     CorporateActionEvent,
     DecisionSchedule,
@@ -65,6 +71,7 @@ from guanlan_v2.orchestration.shadow import (
     SHADOW_DETERMINISTIC_APPLY_KEY_DOMAIN,
     SHADOW_MATCHING_ENGINE_VERSION,
     ShadowContractError,
+    ShadowEnvelopeError,
     ShadowFillRecord,
     ShadowOrderKind,
     ShadowOrderRecord,
@@ -75,16 +82,21 @@ from guanlan_v2.orchestration.shadow import (
     TargetPosition,
     UnsupportedBarFrequencyError,
     _verify_portfolio_matrix,
+    compute_cutoff_at,
     compute_eligible_execution_at,
     compute_scheduled_for,
     deterministic_apply_key_parts,
+    is_decision_point,
     shadow_fill_id,
     shadow_order_id,
     target_apply_key,
+    wrap_proposal_as_intent,
 )
 
 if TYPE_CHECKING:  # annotations only (PEP 563) - never forces the engine onto the path
     from financial_analyst.backtest.decision import Decision, DecisionInput
+    from guanlan_v2.orchestration.budget import BudgetLedger
+    from guanlan_v2.orchestration.context import RunBudget
 
 __all__ = [
     "SHADOW_SKIP_REASONS",
@@ -118,6 +130,19 @@ __all__ = [
     "compat_metrics",
     "run_compatibility_mirror",
     "map_intents_to_compat_signals",
+    # Task 4 (Phase 9) - DecisionSchedule interval-replay driver
+    "RebalanceDateNotSessionError",
+    "SnapshotBindingRefused",
+    "RetroactiveIntentRefused",
+    "ReplayApprovalRefused",
+    "resolve_decision_points",
+    "reconcile_daily_llm_budget",
+    "ReplayIntentLedger",
+    "ReplayPlanCoordinator",
+    "ReplayPointSnapshot",
+    "DeterministicBook",
+    "ReplayRuntimeBindings",
+    "run_interval_replay",
 ]
 
 #: the closed skip-reason vocabulary a :class:`ShadowOrderSkip` may carry. A reason
@@ -1998,3 +2023,592 @@ def map_intents_to_compat_signals(
             clock = this_clock
 
     return tuple(signals), clock
+
+
+# =========================================================================== #
+# Task 4 (Phase 9) · DecisionSchedule interval-replay driver                     #
+# =========================================================================== #
+# This section EXTENDS the Phase-6 adapter additively (the Phase-6 shadow runner /
+# agent / mirror above are sealed and untouched). It owns the honest 双曲线回放 (dual
+# curve replay) walk over a decision schedule: a pure schedule→points resolver, a
+# pure daily-LLM-budget reconcile rule, a no-retroactive intent ledger, the frozen
+# runtime-bindings carrier, and the per-point driver. Task 5 (`build_dual_curves`)
+# consumes the intent ledger + the deterministic target sets this driver produces;
+# Task 6 (maturity/wakeup) consumes the returned `ShadowReplayRunState`.
+#
+# Time model (Phase-6-ruled, binding): cutoff_at <= decision_as_of < eligible_at, with
+# decision_as_of == scheduled_for. The three instants are NEVER re-derived inline — they
+# come ONLY from the sealed Phase-6 computations `compute_scheduled_for` /
+# `compute_cutoff_at` / `compute_eligible_execution_at`. `shadow-match-v1` supports
+# `bar_frequency == "1d"` only; a non-1d schedule is refused via the consumed Phase-6
+# `UnsupportedBarFrequencyError` (never re-raised inline).
+
+
+class RebalanceDateNotSessionError(ShadowContractError):
+    """A ``rebalance_dates`` schedule lists a date that is NOT a calendar session.
+
+    Refused loudly at resolution time — a listed rebalance date that falls on a
+    non-session is a schedule/calendar mismatch, never silently skipped.
+    """
+
+
+class SnapshotBindingRefused(ShadowContractError):
+    """A per-point ContextSnapshot does not bind the point's ``decision_as_of``.
+
+    Raised structurally BEFORE any main-plan admission/reservation for the point
+    (invariant 2): a snapshot whose ``data_context.as_of`` differs from the point's
+    ``decision_as_of`` can never anchor that point's decision plans, so the driver
+    refuses it and records no reservation for the point.
+    """
+
+
+class RetroactiveIntentRefused(ShadowContractError):
+    """A no-retroactive-intent red line was breached (invariant 3/5).
+
+    Raised when an intent is appended for a point whose ``scheduled_for`` is at or
+    before the ledger's monotone ``last_scheduled_for`` high-water mark (a backfill),
+    or whose ``decision_as_of`` differs from its point's ContextSnapshot ``as_of``.
+    An idempotent re-application of the SAME apply key is NOT retroactive — it
+    returns the stored intent and appends nothing.
+    """
+
+
+class ReplayApprovalRefused(ShadowContractError):
+    """An ``AUTO`` approval policy was presented to the replay driver (invariant 7).
+
+    ``AUTO`` approval is rejected outright for every replay run; every admitted plan
+    in the loop must have gone through ``REQUIRED`` approval. Raised before any point
+    is processed, so nothing runs.
+    """
+
+
+# --------------------------------------------------------------------------- #
+# resolve_decision_points — pure schedule→points expansion                      #
+# --------------------------------------------------------------------------- #
+def resolve_decision_points(
+    schedule: DecisionSchedule,
+    *,
+    calendar: ImmutableTradingCalendar,
+    interval_start: datetime,
+    interval_end: datetime,
+) -> tuple[ReplayDecisionPoint, ...]:
+    """Expand a :class:`DecisionSchedule` over ``[interval_start, interval_end]`` into
+    the ordered tuple of :class:`ReplayDecisionPoint` it fires at.
+
+    Pure and deterministic (same inputs ⇒ byte-identical tuple; ``point_ordinal`` dense
+    from 1). Membership is delegated to the sealed Phase-6 predicate
+    :func:`is_decision_point` (``daily``/``manual`` fire on every calendar session,
+    ``weekly`` on an ISO weekday in ``weekdays``, ``rebalance_dates`` on membership),
+    and the three instants come ONLY from the Phase-6 computations — never re-derived:
+
+    * ``scheduled_for = compute_scheduled_for(schedule, session_date=…, calendar=…)``
+      (also the ``decision_as_of`` instant, per the ruled time model);
+    * ``cutoff_at = compute_cutoff_at(schedule, session_date=…)``;
+    * ``eligible_execution_at = compute_eligible_execution_at(schedule,
+      scheduled_for=…, calendar=…)`` — which refuses a non-``1d`` ``bar_frequency`` via
+      the consumed Phase-6 :class:`UnsupportedBarFrequencyError`.
+
+    A point is kept iff ``interval_start <= scheduled_for <= interval_end`` (bounds on
+    the decision instant), so no point falls outside the interval. ``manual`` yields
+    no implicit points (an empty tuple). A ``rebalance_dates`` date that is not a
+    calendar session is refused loudly (:class:`RebalanceDateNotSessionError`), never
+    silently skipped.
+    """
+    if interval_end < interval_start:
+        raise ValueError(
+            f"interval_end {interval_end.isoformat()} must be >= interval_start "
+            f"{interval_start.isoformat()}"
+        )
+    if schedule.kind == "manual":
+        # manual points enter only via an explicit request, never implicitly here.
+        return ()
+
+    # candidate session-date ISO strings, ascending.
+    if schedule.kind == "rebalance_dates":
+        candidate_dates = list(schedule.rebalance_dates)  # already sorted+unique
+        for iso in candidate_dates:
+            if not calendar.is_session(date.fromisoformat(iso)):
+                raise RebalanceDateNotSessionError(
+                    f"rebalance date {iso} of schedule {schedule.id}@{schedule.version} "
+                    f"is not a session of calendar {calendar.calendar_id!r} "
+                    "(refused loudly, never silently skipped)"
+                )
+    else:  # daily / weekly — every calendar session is a candidate
+        candidate_dates = list(calendar.material.sessions)
+
+    schedule_ref = ContentRef(
+        id=schedule.id, version=schedule.version, content_digest=schedule.content_digest
+    )
+    points: list[ReplayDecisionPoint] = []
+    ordinal = 0
+    for iso in candidate_dates:
+        if not is_decision_point(schedule, session_date=iso, calendar=calendar):
+            continue
+        scheduled_for = compute_scheduled_for(
+            schedule, session_date=iso, calendar=calendar
+        )
+        if not (interval_start <= scheduled_for <= interval_end):
+            continue
+        cutoff_at = compute_cutoff_at(schedule, session_date=iso)
+        eligible_execution_at = compute_eligible_execution_at(
+            schedule, scheduled_for=scheduled_for, calendar=calendar
+        )
+        ordinal += 1
+        points.append(
+            ReplayDecisionPoint(
+                schedule_ref=schedule_ref,
+                schedule_digest=schedule.content_digest,
+                point_ordinal=ordinal,
+                scheduled_for=scheduled_for,
+                cutoff_at=cutoff_at,
+                decision_as_of=scheduled_for,  # decision_as_of == scheduled_for (ruled)
+                eligible_execution_at=eligible_execution_at,
+                execution_price_field=schedule.execution_price_field,
+                bar_frequency=schedule.bar_frequency,
+            )
+        )
+    return tuple(points)
+
+
+# --------------------------------------------------------------------------- #
+# reconcile_daily_llm_budget — the single daily-LLM-pool reconcile rule          #
+# --------------------------------------------------------------------------- #
+def reconcile_daily_llm_budget(
+    *,
+    seats_watch_state: Mapping[str, Any],
+    run_budget: "RunBudget",
+    requested_llm_invocations: int,
+    session_date: str,
+    is_live_session: bool,
+) -> int:
+    """The single place both pools are reconciled into an admissible LLM count.
+
+    Pure. Returns the number of LLM invocations a point may reserve, never exceeding
+    EITHER pool:
+
+    * historical ``PIT_REPLAY`` points (``is_live_session=False``) never consume the
+      seats 24/day pool — they are research compute governed SOLELY by the
+      ``RunBudget``: ``min(requested, run_budget.max_llm - run_budget.reserved_llm)``;
+    * a point executing during a live trading session (``is_live_session=True``) may
+      additionally reserve at most ``daily_budget - counts[session_date]`` from the
+      shared 24/day pool.
+
+    The returned count feeds :meth:`BudgetLedger.reserve_node`; live-session settlement
+    is reported back through the watcher seam :func:`guanlan_v2.seats.watcher.note_external_llm_use`
+    exactly once per settled reservation (one pool, counted once).
+    """
+    requested = int(requested_llm_invocations)
+    if requested < 0:
+        raise ValueError("requested_llm_invocations must be >= 0")
+    run_remaining = max(
+        0, int(run_budget.max_llm_invocations) - int(run_budget.reserved_llm_invocations)
+    )
+    admissible = min(requested, run_remaining)
+    if is_live_session:
+        # DEFAULT_BUDGET mirrors guanlan_v2.seats.watcher.DEFAULT_BUDGET (24/day);
+        # read from the injected state so the two never drift.
+        daily_budget = int(seats_watch_state.get("daily_budget") or 24)
+        counts = seats_watch_state.get("counts") or {}
+        used = int(counts.get(session_date) or 0)
+        daily_remaining = max(0, daily_budget - used)
+        admissible = min(admissible, daily_remaining)
+    return max(0, admissible)
+
+
+# --------------------------------------------------------------------------- #
+# ReplayIntentLedger — the no-retroactive, idempotent per-run intent ledger      #
+# --------------------------------------------------------------------------- #
+class ReplayIntentLedger:
+    """The per-run ledger of staged shadow intents + deterministic target sets.
+
+    Enforces the no-retroactive-intent red line (invariant 3/5): a monotone
+    ``last_scheduled_for`` high-water mark, a :class:`RetroactiveIntentRefused` on any
+    backfill (or ``decision_as_of``/snapshot mismatch), and idempotent re-application
+    (the same ``(intent_id, scheduled_for, target_version)`` apply key returns the
+    stored intent and appends nothing). The deterministic lane's per-point
+    :class:`DeterministicTargetSet` records are carried envelope-free alongside the
+    intents (Task 5 consumes both). Degraded points (a feed floor postdating the point)
+    are recorded per ordinal — a degraded point, never a run failure.
+    """
+
+    def __init__(self) -> None:
+        self._by_key: dict[str, TargetPortfolioIntent] = {}
+        self._order: list[str] = []
+        self._deterministic: list[DeterministicTargetSet] = []
+        self._degraded: dict[int, tuple[str, ...]] = {}
+        self._hwm: datetime | None = None
+
+    def append_intent(
+        self, intent: TargetPortfolioIntent, *, expected_as_of: datetime | None = None
+    ) -> TargetPortfolioIntent:
+        """Append (or idempotently return) a staged intent under the no-retroactive rule.
+
+        Idempotency is checked FIRST (a duplicate apply key returns the stored intent,
+        appends nothing — never treated as retroactive). A genuinely new key whose
+        ``decision_as_of`` mismatches its point's snapshot ``as_of``, or whose
+        ``scheduled_for`` is at/before the high-water mark, is refused.
+        """
+        key = target_apply_key(intent)
+        existing = self._by_key.get(key)
+        if existing is not None:
+            return existing  # idempotent replay: stored intent, no second envelope
+        if expected_as_of is not None and intent.decision_as_of != expected_as_of:
+            raise RetroactiveIntentRefused(
+                "intent decision_as_of "
+                f"{intent.decision_as_of.isoformat()} does not equal its point's "
+                f"ContextSnapshot as_of {expected_as_of.isoformat()}"
+            )
+        if self._hwm is not None and intent.scheduled_for <= self._hwm:
+            raise RetroactiveIntentRefused(
+                "intent scheduled_for "
+                f"{intent.scheduled_for.isoformat()} is at or before the ledger "
+                f"high-water mark {self._hwm.isoformat()} (no retroactive intent)"
+            )
+        self._by_key[key] = intent
+        self._order.append(key)
+        self._hwm = (
+            intent.scheduled_for
+            if self._hwm is None
+            else max(self._hwm, intent.scheduled_for)
+        )
+        return intent
+
+    def append_deterministic(
+        self, target_set: "DeterministicTargetSet"
+    ) -> "DeterministicTargetSet":
+        """Append one envelope-free deterministic target set (Task 5 dual-curve lane)."""
+        self._deterministic.append(target_set)
+        return target_set
+
+    def note_degraded(self, point_ordinal: int, badges: tuple[str, ...]) -> None:
+        """Record a point's honest degradation badges (never a run failure)."""
+        if badges:
+            self._degraded[int(point_ordinal)] = tuple(badges)
+
+    @property
+    def intents(self) -> tuple[TargetPortfolioIntent, ...]:
+        return tuple(self._by_key[k] for k in self._order)
+
+    @property
+    def deterministic_targets(self) -> tuple["DeterministicTargetSet", ...]:
+        return tuple(self._deterministic)
+
+    @property
+    def degraded_points(self) -> dict[int, tuple[str, ...]]:
+        return dict(self._degraded)
+
+    @property
+    def last_scheduled_for(self) -> datetime | None:
+        return self._hwm
+
+    def __len__(self) -> int:
+        return len(self._order)
+
+
+# --------------------------------------------------------------------------- #
+# Per-point plan-execution ports (production: PlanAdmissionService + run_plan)    #
+# --------------------------------------------------------------------------- #
+@dataclasses.dataclass(frozen=True)
+class ReplayPointSnapshot:
+    """The frozen per-point context a bootstrap run commits for a decision point.
+
+    ``data_context`` is the committed (Phase-1) ``DataContext`` whose ``as_of`` the
+    driver structurally binds to the point's ``decision_as_of`` (invariant 2).
+    ``degradation_badges`` carries any honest bootstrap degradation (a degraded point,
+    never a run failure). A production coordinator returns the run's real
+    ``ContextSnapshot`` (which exposes the same ``data_context``); tests supply this
+    lightweight equivalent.
+    """
+
+    data_context: Any
+    degradation_badges: tuple[str, ...] = ()
+
+
+@dataclasses.dataclass(frozen=True)
+class DeterministicBook:
+    """A rule-computed target book for the deterministic zero-LLM replay lane."""
+
+    rule_id: str
+    positions: tuple[TargetPosition, ...]
+    cash_weight: float
+
+
+class ReplayPlanCoordinator(Protocol):
+    """The per-point plan admission + execution port the driver consumes.
+
+    In production this is an adapter that composes the real Phase-2 admission
+    (``PlanAdmissionService``: prepare → persist+reserve → REQUIRED approval → freeze →
+    verify_for_dispatch) with ``run_plan`` over the run-scoped stores/pool/catalog/
+    bridge/gateways to run the versioned Phase-5 ``BootstrapPlan`` (→ a frozen
+    ``ContextSnapshot``) and then the needed MainPlan (deterministic zero-LLM lane and
+    the LLM shadow lane ending in ``dec.trader``'s ``PortfolioTargetProposal``). In
+    tests it is a recorded fake returning real-contract objects. The driver owns the
+    red-line enforcement (snapshot binding, budget children, monotone/idempotent
+    ledger, envelope wrapping) around this port; the port owns plan execution.
+    """
+
+    def bootstrap_context(self, point: ReplayDecisionPoint) -> ReplayPointSnapshot:
+        """Admit + run the versioned BootstrapPlan for ``point`` → its frozen context."""
+        ...
+
+    def llm_proposal(self, point: ReplayDecisionPoint, snapshot: ReplayPointSnapshot) -> Any:
+        """Admit + run the LLM shadow MainPlan → the ``dec.trader`` proposal artifact."""
+        ...
+
+    def deterministic_targets(
+        self, point: ReplayDecisionPoint, snapshot: ReplayPointSnapshot
+    ) -> DeterministicBook:
+        """Run the deterministic zero-LLM lane → its rule-computed target book."""
+        ...
+
+
+# --------------------------------------------------------------------------- #
+# ReplayRuntimeBindings — the internal frozen service-port carrier (unregistered) #
+# --------------------------------------------------------------------------- #
+@dataclasses.dataclass(frozen=True)
+class ReplayRuntimeBindings:
+    """The frozen service-port carrier the interval-replay driver runs against.
+
+    An internal, unregistered carrier (never a schema payload). It bundles only
+    service ports + the run-scoped material the driver needs; no callable-injected
+    business handler beyond these ports. ``admission`` is the per-point plan
+    coordinator (:class:`ReplayPlanCoordinator`, production: ``PlanAdmissionService``
+    + ``run_plan``). ``clock_factory`` yields one :class:`AuthoritativeClock` per point
+    (the driver reads NO wall clock — every instant comes through it).
+    ``intent_ledger`` is the run-scoped output ledger Task 5 consumes (carried here so
+    the driver can return the frozen ``ShadowReplayRunState`` per its pinned signature
+    while the mutable ledger stays reachable). ``seats_budget_seam`` is the
+    ``guanlan_v2.seats.watcher`` module surface (``load_state`` /
+    ``note_external_llm_use``). ``feed_floors`` are the Task-2b archive coverage floors
+    used to derive per-point feasibility (degraded-point honesty).
+    """
+
+    admission: ReplayPlanCoordinator
+    budget: "BudgetLedger"
+    run_budget: "RunBudget"
+    schedule_registry: Any
+    calendar: ImmutableTradingCalendar
+    clock_factory: Callable[[ReplayDecisionPoint], AuthoritativeClock]
+    seats_budget_seam: Any = None
+    memory_preparer: Any = None
+    shadow_runner: Any = None
+    pool: Any = None
+    stores: Any = None
+    catalog_runtime: Any = None
+    bridge_resolver: Any = None
+    model_gateway: Any = None
+    capability_gateway: Any = None
+    feed_floors: tuple = ()
+    intent_ledger: ReplayIntentLedger = dataclasses.field(default_factory=ReplayIntentLedger)
+    source_decision_artifact_id: str = "shadow.dec.trader"
+
+
+# --------------------------------------------------------------------------- #
+# run_interval_replay — the driver                                             #
+# --------------------------------------------------------------------------- #
+def _session_local_iso(instant: datetime, timezone_name: str) -> str:
+    """The A-share session date (schedule timezone, never UTC) of an instant."""
+    return instant.astimezone(ZoneInfo(timezone_name)).date().isoformat()
+
+
+def _degradation_badges_for_point(point: ReplayDecisionPoint, feed_floors: tuple) -> tuple[str, ...]:
+    """Task-2b feasibility badges for ``point`` (a feed floor postdating it ⇒ degraded).
+
+    Consumes the reviewed Task-2b :func:`derive_replay_feasible_window` — a factor whose
+    feed floor postdates the point resolves UNAVAILABLE ⇒ an honestly degraded point
+    (badges collected), NEVER a run failure. Imported lazily so importing this adapter
+    never forces the Task-2 replay-data module onto the path.
+    """
+    if not feed_floors:
+        return ()
+    from guanlan_v2.orchestration.adapters.replay_data import derive_replay_feasible_window
+
+    window = derive_replay_feasible_window(
+        as_of=point.decision_as_of, feed_floors=tuple(feed_floors)
+    )
+    return tuple(v.badge for v in window.verdicts if v.badge)
+
+
+def run_interval_replay(
+    *,
+    request: Any,
+    schedule: DecisionSchedule,
+    execution_config: ShadowExecutionConfig,
+    interval_start: datetime,
+    interval_end: datetime,
+    bindings: ReplayRuntimeBindings,
+) -> ShadowReplayRunState:
+    """Walk a decision schedule over an interval, producing per-point PIT snapshots and
+    staged shadow intents — the honest 双曲线回放 driver.
+
+    Per decision point, strictly in ``point_ordinal`` order:
+
+    ① the point's frozen per-point ContextSnapshot is obtained from the plan
+       coordinator (production: ``build_replay_data_context`` → ``prepare_pit_replay``
+       → admit+run the versioned BootstrapPlan); its ``data_context.as_of`` is bound
+       STRUCTURALLY to ``decision_as_of`` before any main-plan reservation (invariant 2;
+       a mismatch raises :class:`SnapshotBindingRefused`, records no reservation);
+    ② one ``RunBudget`` covers the whole interval — a single plan reservation, with
+       per-point node reservations as its children; the deterministic-lane node reserves
+       ZERO LLM invocations, the LLM-lane node the admissible count from
+       :func:`reconcile_daily_llm_budget` (PIT_REPLAY ⇒ seats pool untouched);
+    ③ the LLM shadow lane's ``dec.trader`` proposal is envelope-wrapped into a
+       :class:`TargetPortfolioIntent` via the sole Phase-6 constructor
+       :func:`wrap_proposal_as_intent` (all envelope fields runtime-generated); the
+       deterministic lane's book becomes an envelope-free :class:`DeterministicTargetSet`;
+    ④ the intent is appended to the run's intent ledger keyed
+       ``(intent_id, scheduled_for, target_version)`` under the no-retroactive rule.
+
+    ``AUTO`` approval is rejected outright (invariant 7). Curve building (Task 5's
+    ``build_dual_curves``) consumes ``bindings.intent_ledger`` + the returned state.
+    """
+    if getattr(request, "approval_policy", None) is ApprovalPolicy.AUTO:
+        raise ReplayApprovalRefused(
+            "AUTO approval is rejected for a shadow replay run; every admitted plan "
+            "must go through REQUIRED approval (invariant 7)"
+        )
+
+    points = resolve_decision_points(
+        schedule,
+        calendar=bindings.calendar,
+        interval_start=interval_start,
+        interval_end=interval_end,
+    )
+    if not points:
+        raise ValueError(
+            "no decision points resolve in the interval; there is nothing to replay "
+            "(the only decision times are the resolved points)"
+        )
+
+    ledger = bindings.intent_ledger
+    request_id = str(getattr(request, "request_id", "req"))
+    run_id = f"replay-run.{request_id}"
+    experiment_id = f"replay.{request_id}.{schedule.id}"
+    tz_name = schedule.timezone
+
+    # invariant 4: ONE RunBudget covers the whole interval → one plan reservation; the
+    # per-point node reservations below are its children.
+    from guanlan_v2.orchestration.budget import BudgetRequest
+
+    plan_candidate_digest = content_digest(
+        {
+            "domain": "shadow-replay-plan-v1",
+            "schedule_digest": schedule.content_digest,
+            "execution_config_digest": execution_config.semantic_digest(),
+            "request_id": request_id,
+        }
+    )
+    plan_reservation = bindings.budget.reserve_plan(
+        request_id=request_id,
+        candidate_plan_digest=plan_candidate_digest,
+        budget_request=BudgetRequest(
+            tokens=int(bindings.run_budget.max_tokens),
+            llm_invocations=int(bindings.run_budget.max_llm_invocations),
+            concurrency=int(bindings.run_budget.max_concurrency),
+        ),
+        idempotency_key=f"replay-plan:{run_id}",
+    )
+
+    seats_state: Mapping[str, Any] = {}
+    if bindings.seats_budget_seam is not None:
+        try:
+            seats_state = bindings.seats_budget_seam.load_state()
+        except Exception:  # noqa: BLE001 — a missing seam state is not a replay failure
+            seats_state = {}
+
+    last_scheduled_for: datetime | None = None
+    target_version = 1
+    for point in points:
+        session_iso = _session_local_iso(point.decision_as_of, tz_name)
+
+        # ① frozen per-point ContextSnapshot + structural as_of binding (invariant 2).
+        snapshot = bindings.admission.bootstrap_context(point)
+        snap_as_of = getattr(getattr(snapshot, "data_context", None), "as_of", None)
+        if snap_as_of != point.decision_as_of:
+            raise SnapshotBindingRefused(
+                f"point {point.point_ordinal} ContextSnapshot data_context.as_of "
+                f"{snap_as_of!r} does not bind decision_as_of "
+                f"{point.decision_as_of.isoformat()} (no reservation recorded)"
+            )
+
+        # degraded-point honesty (Task 2b): a feed floor postdating the point ⇒ badges,
+        # never a run failure.
+        badges = _degradation_badges_for_point(point, bindings.feed_floors)
+        badges = tuple(sorted(set(badges) | set(getattr(snapshot, "degradation_badges", ()))))
+        ledger.note_degraded(point.point_ordinal, badges)
+
+        # ② per-point node reservations, children of the one plan reservation.
+        llm_admissible = reconcile_daily_llm_budget(
+            seats_watch_state=seats_state,
+            run_budget=bindings.run_budget,
+            requested_llm_invocations=1,  # one dec.trader proposal per point
+            session_date=session_iso,
+            is_live_session=False,  # PIT_REPLAY points never consume the seats pool
+        )
+        bindings.budget.reserve_node(
+            plan_reservation_id=plan_reservation.reservation_id,
+            node_id=f"llm.dec.trader#{point.point_ordinal}",
+            attempt=1,
+            tokens=1000,
+            llm_invocations=llm_admissible,
+            concurrency=1,
+            idempotency_key=f"replay-node-llm:{run_id}:{point.point_ordinal}",
+        )
+        bindings.budget.reserve_node(
+            plan_reservation_id=plan_reservation.reservation_id,
+            node_id=f"det.rule#{point.point_ordinal}",
+            attempt=1,
+            tokens=1000,
+            llm_invocations=0,  # the deterministic lane reserves ZERO LLM invocations
+            concurrency=1,
+            idempotency_key=f"replay-node-det:{run_id}:{point.point_ordinal}",
+        )
+
+        clock = bindings.clock_factory(point)
+
+        # ③ LLM shadow lane → envelope-wrapped intent (sole Phase-6 constructor).
+        proposal_artifact = bindings.admission.llm_proposal(point, snapshot)
+        intent = wrap_proposal_as_intent(
+            proposal_artifact=proposal_artifact,
+            source_decision_artifact_id=bindings.source_decision_artifact_id,
+            request=request,
+            schedule_registry=bindings.schedule_registry,
+            calendar=bindings.calendar,
+            session_date=session_iso,
+            decision_as_of=point.decision_as_of,
+            target_version=target_version,
+            intent_id=f"intent.{run_id}.{point.point_ordinal}.{target_version}",
+            clock=clock,
+        )
+        # ④ append under the no-retroactive rule (monotone + idempotent).
+        ledger.append_intent(intent, expected_as_of=point.decision_as_of)
+
+        # deterministic lane → envelope-free DeterministicTargetSet (Task 5 consumes).
+        book = bindings.admission.deterministic_targets(point, snapshot)
+        ledger.append_deterministic(
+            DeterministicTargetSet(
+                rule_id=book.rule_id,
+                point_ordinal=point.point_ordinal,
+                target_version=target_version,
+                session_date=session_iso,
+                positions=tuple(book.positions),
+                cash_weight=book.cash_weight,
+            )
+        )
+        last_scheduled_for = point.scheduled_for
+
+    # audit wall-clock read through the binding (never a direct wall-clock read).
+    updated_at = clock_now(bindings.clock_factory(points[-1]))
+    return ShadowReplayRunState(
+        experiment_id=experiment_id,
+        run_id=run_id,
+        request_id=request_id,
+        schedule_digest=schedule.content_digest,
+        execution_config_digest=execution_config.semantic_digest(),
+        status=ExperimentStatus.RUNNING,  # points processed; curve build is Task 5
+        completed_points=len(points),
+        total_points=len(points),
+        last_scheduled_for=last_scheduled_for,
+        curve_report_ref=None,  # set by Task 5's curve stage, never here
+        updated_at=updated_at,
+    )

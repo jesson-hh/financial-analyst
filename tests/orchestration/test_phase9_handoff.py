@@ -906,8 +906,10 @@ def test_clause_c6_seats_and_autonomy_seams_exist_at_reviewed_names():
     assert hasattr(autonomy_runtime, "maybe_enqueue_daily_review")
     autonomy_playbooks = importlib.import_module("guanlan_v2.autonomy.playbooks")
     assert isinstance(autonomy_playbooks.PLAYBOOKS, dict)
-    # the Phase-9 additive seams do NOT yet exist — Phase 9 gates them, it does not
-    # find them already added (mirrors point 8's "gates, not already removed").
-    assert not hasattr(seats_watcher, "note_external_llm_use")
+    # Task 4 LANDED its two additive watcher seams (note_external_llm_use +
+    # orchestrated_codes) — the gate now records them as present. The Task 6/10
+    # autonomy seams are still gated (they do not yet exist).
+    assert hasattr(seats_watcher, "note_external_llm_use")
+    assert hasattr(seats_watcher, "orchestrated_codes")
     assert not hasattr(autonomy_runtime, "maybe_enqueue_shadow_wakeup")
     assert not hasattr(autonomy_runtime, "maybe_enqueue_lane0_bootstrap")

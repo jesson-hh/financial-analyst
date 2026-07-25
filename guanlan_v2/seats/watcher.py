@@ -73,6 +73,39 @@ def set_enabled(on: bool) -> dict:
     return get_status()
 
 
+# ─────────────── 编排层协作缝(Phase 9 Task 4 加法·只增)───────────────
+# 观澜编排回放/live 运行与本 watcher 共用同一个 24/日 LLM 预算池。两条缝均为纯加法:
+# note_external_llm_use 把编排消耗记进 tick 同一份 counts(gating 见得到);
+# orchestrated_codes 报出正被某编排运行接管的票,tick 对其记 skipped='orchestrated'
+# 避免双判。非编排票的既有 tick 门序逐位不变。
+
+_ORCHESTRATED_CODES: set[str] = set()
+
+
+def orchestrated_codes() -> set[str]:
+    """当前被某活跃编排运行接管的票集合(tick 对其跳过,记 skipped='orchestrated',
+    避免与编排层双判同一只票)。默认空集;编排层在其活跃期登记/撤销 _ORCHESTRATED_CODES。"""
+    return set(_ORCHESTRATED_CODES)
+
+
+def note_external_llm_use(n: int, now: Optional[datetime] = None) -> None:
+    """把 n 次外部(编排层)LLM 调用记进今日**同一份** counts —— tick 读的正是这份 —
+    使 watcher gating 看得见编排消耗的 24/日池。加法缝:tick 自身计数逻辑不变;n<=0 空操作。
+    落盘失败必抛(预算护栏丢失不静默,与 tick 同口径)。"""
+    n = int(n)
+    if n <= 0:
+        return
+    now = now or datetime.now()
+    today = now.date().isoformat()
+    st = load_state()
+    counts = st.get("counts") or {}
+    counts[today] = int(counts.get(today) or 0) + n
+    for k in sorted(counts)[:-_COUNTS_KEEP_DAYS]:      # 只留最近 N 个日键(与 tick 同)
+        counts.pop(k, None)
+    st["counts"] = counts
+    save_state(st)
+
+
 # ───────────────────────── 盯盘集(策略 bind 派生)─────────────────────────
 
 def watching_codes() -> list[dict]:
@@ -383,12 +416,16 @@ def tick(now: Optional[datetime] = None,
     judged: list = []
     skipped: dict = {}
     seen: set = set()
+    orchestrated = orchestrated_codes()        # 编排接管的票:本拍跳过(加法缝,非编排票门序不变)
     for cw in watching_codes():
         code = cw["code"]
         if code in seen:                       # 同票多策略:一拍只判一次
             skipped.setdefault(code, "duplicate_bind")
             continue
         seen.add(code)
+        if code in orchestrated:               # 被某编排运行接管 → 不双判
+            skipped[code] = "orchestrated"
+            continue
         if used + len(judged) >= budget:
             skipped[code] = "budget_exhausted"
             continue

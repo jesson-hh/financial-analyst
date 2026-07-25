@@ -495,6 +495,12 @@ _LUOZI_ALL = [
     "CompatSignal", "CompatClock", "CompatTrade", "CompatibilityRunResult",
     "CompatibilityProfileError", "compat_metrics", "run_compatibility_mirror",
     "map_intents_to_compat_signals",
+    # Task 4 (Phase 9) — the DecisionSchedule interval-replay driver surface.
+    "RebalanceDateNotSessionError", "SnapshotBindingRefused",
+    "RetroactiveIntentRefused", "ReplayApprovalRefused", "resolve_decision_points",
+    "reconcile_daily_llm_budget", "ReplayIntentLedger", "ReplayPlanCoordinator",
+    "ReplayPointSnapshot", "DeterministicBook", "ReplayRuntimeBindings",
+    "run_interval_replay",
 ]
 
 
