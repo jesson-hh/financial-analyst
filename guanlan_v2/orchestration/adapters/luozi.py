@@ -2469,6 +2469,7 @@ def run_interval_replay(
     interval_start: datetime,
     interval_end: datetime,
     bindings: ReplayRuntimeBindings,
+    is_live_session: Callable[[ReplayDecisionPoint], bool] | None = None,
 ) -> ShadowReplayRunState:
     """Walk a decision schedule over an interval, producing per-point PIT snapshots and
     staged shadow intents — the honest 双曲线回放 driver.
@@ -2493,6 +2494,20 @@ def run_interval_replay(
 
     ``AUTO`` approval is rejected outright (invariant 7). Curve building (Task 5's
     ``build_dual_curves``) consumes ``bindings.intent_ledger`` + the returned state.
+
+    **Task-10 additive seam (`is_live_session`).** A point that executes DURING a live
+    trading session shares the seats 24/day LLM pool with the watcher, so it must
+    reconcile against that pool and settle back into it. ``is_live_session`` is the
+    per-point predicate that decides this; ``None`` (the default) means every point is
+    a historical ``PIT_REPLAY`` point and the behaviour is bit-identical to Task 4 (the
+    seats pool is never read for admissibility, no reservation is settled and
+    ``note_external_llm_use`` is never called). For a live point the admissible count
+    comes from :func:`reconcile_daily_llm_budget` with ``is_live_session=True`` (capped
+    by ``daily_budget - counts[session_date]`` read through
+    ``bindings.seats_budget_seam.load_state``), its LLM-lane reservation is settled on
+    the ledger, and the settled invocations are reported back into the SAME daily
+    counts through ``bindings.seats_budget_seam.note_external_llm_use`` **exactly once
+    per settled reservation** (one pool, counted once).
     """
     if getattr(request, "approval_policy", None) is ApprovalPolicy.AUTO:
         raise ReplayApprovalRefused(
@@ -2541,17 +2556,23 @@ def run_interval_replay(
         idempotency_key=f"replay-plan:{run_id}",
     )
 
-    seats_state: Mapping[str, Any] = {}
-    if bindings.seats_budget_seam is not None:
+    def _load_seats_state() -> Mapping[str, Any]:
+        """The watcher's shared 24/day pool snapshot (a missing seam ⇒ an empty pool)."""
+        if bindings.seats_budget_seam is None:
+            return {}
         try:
-            seats_state = bindings.seats_budget_seam.load_state()
+            return bindings.seats_budget_seam.load_state()
         except Exception:  # noqa: BLE001 — a missing seam state is not a replay failure
-            seats_state = {}
+            return {}
+
+    seats_state: Mapping[str, Any] = _load_seats_state()
+    settled_reservations: set[str] = set()
 
     last_scheduled_for: datetime | None = None
     target_version = 1
     for point in points:
         session_iso = _session_local_iso(point.decision_as_of, tz_name)
+        live_point = bool(is_live_session(point)) if is_live_session is not None else False
 
         # ① frozen per-point ContextSnapshot + structural as_of binding (invariant 2).
         snapshot = bindings.admission.bootstrap_context(point)
@@ -2575,9 +2596,11 @@ def run_interval_replay(
             run_budget=bindings.run_budget,
             requested_llm_invocations=1,  # one dec.trader proposal per point
             session_date=session_iso,
-            is_live_session=False,  # PIT_REPLAY points never consume the seats pool
+            # a historical PIT_REPLAY point never consumes the seats pool; only a point
+            # executing during a live trading session shares the 24/day pool.
+            is_live_session=live_point,
         )
-        bindings.budget.reserve_node(
+        llm_reservation = bindings.budget.reserve_node(
             plan_reservation_id=plan_reservation.reservation_id,
             node_id=f"llm.dec.trader#{point.point_ordinal}",
             attempt=1,
@@ -2614,6 +2637,27 @@ def run_interval_replay(
         )
         # ④ append under the no-retroactive rule (monotone + idempotent).
         ledger.append_intent(intent, expected_as_of=point.decision_as_of)
+
+        # live-session settlement (Task 10 · carry C-B): settle the LLM-lane reservation
+        # and report the consumed invocations back into the SAME daily counts the
+        # watcher's `tick` reads — exactly once per settled reservation. A PIT_REPLAY
+        # point never reaches here, so the seats pool stays untouched.
+        # `actual_llm_invocations` is EXACT (one dec.trader proposal per admitted point —
+        # the quantity the 24/day seats pool meters); `actual_tokens` conservatively
+        # equals the reservation, because no per-point token telemetry crosses the
+        # ReplayPlanCoordinator port — an honest upper bound, never an invented count.
+        if live_point and llm_reservation.reservation_id not in settled_reservations:
+            bindings.budget.settle(
+                llm_reservation.reservation_id,
+                actual_tokens=1000,
+                actual_llm_invocations=llm_admissible,
+                idempotency_key=f"replay-settle-llm:{run_id}:{point.point_ordinal}",
+            )
+            settled_reservations.add(llm_reservation.reservation_id)
+            if bindings.seats_budget_seam is not None and llm_admissible > 0:
+                bindings.seats_budget_seam.note_external_llm_use(llm_admissible)
+                # re-read the pool so the NEXT live point sees this consumption.
+                seats_state = _load_seats_state()
 
         # deterministic lane → envelope-free DeterministicTargetSet (Task 5 consumes).
         book = bindings.admission.deterministic_targets(point, snapshot)

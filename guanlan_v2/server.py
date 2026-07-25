@@ -237,9 +237,35 @@ def create_app():
     app.include_router(build_reports_router())
 
     # ── 帷幄 console(单核心对话总控台,一期)─────────────────────
+    # Phase 9 · Task 10 · carry C-C(server 侧一半):把 Phase 7 的 PlanApprovalCoordinator
+    # 经**耐久 replay() 通路**在启动期绑一次(崩溃切口的决策行 → 一次终态 admission 效果),
+    # 并桥好 approvals_sink(协调器构造的那一条权威 PlanApproval 存进 admission 自己的
+    # approvals 库 → record_approval 载入的权威 == 耐久决策 → 审批真正抵达编排事件面)。
+    # 未接 admission provider 时诚实返回 None → 控制台 plan-approval 端点保持既有 503,
+    # 生产行为逐字不变(Task 12 接上 provider 后重启即自愈)。签名探测:console/api.py 由
+    # 并发 session 持有,kwarg 不在时退回原调用,绝不因此拖垮启动。
+    _p7_coord = None
+    try:
+        from guanlan_v2.orchestration.adapters.api import (
+            bind_process_plan_approval_coordinator,
+            plan_approval_console_kwargs,
+        )
+
+        _p7_coord = bind_process_plan_approval_coordinator()
+    except Exception as _e:  # noqa: BLE001 — P7 绑定是加法项,失败不阻断启动
+        print(f"[guanlan_v2] plan-approval coordinator skipped "
+              f"({type(_e).__name__}: {_e})", file=sys.stderr)
+        plan_approval_console_kwargs = None  # type: ignore[assignment]
+
     from guanlan_v2.console import build_console_router
 
-    app.include_router(build_console_router())
+    _console_kw = {}
+    if plan_approval_console_kwargs is not None:
+        import inspect as _inspect
+        _console_kw = plan_approval_console_kwargs(coordinator=_p7_coord)
+        _accepted = _inspect.signature(build_console_router).parameters
+        _console_kw = {k: v for k, v in _console_kw.items() if k in _accepted}
+    app.include_router(build_console_router(**_console_kw))
 
     # ── P2:自主研究回路(提案→求值→批判→改进 后台单飞;零开关零定时器,
     #     只能被显式 POST /research/loop/start 发起 → 合并零行为变化)──────
@@ -354,6 +380,19 @@ def create_app():
         bind_process_durable_stores_and_scan()
     except Exception as _e:  # noqa: BLE001 — durable-store 绑定是加法项,失败不阻断启动
         print(f"[guanlan_v2] orchestration durable stores skipped "
+              f"({type(_e).__name__}: {_e})", file=sys.stderr)
+
+    # ── orchestration 适配层薄路由(Phase 9 · Task 10)/orchestration/* 六端点 ────────
+    # 影子/草稿专用:replay start/state/curves/wakeup + weiwo start/state。start 只开
+    # REQUIRED 人审请求(绝不自审、绝不落预算/run),两个 GET 只读,未成熟曲线诚实回
+    # status/resume_after 而非编造曲线;任何端点都不写委托/信号。依赖未接线 → 诚实 503。
+    # 加法挂载(与上面十六个 build_*_router 同形);后端改动须重启 9999 才生效,验证用 9998。
+    try:
+        from guanlan_v2.orchestration.adapters.api import build_adapters_router
+
+        app.include_router(build_adapters_router())
+    except Exception as _e:  # noqa: BLE001 — 适配层路由是加法项,失败不阻断启动
+        print(f"[guanlan_v2] orchestration adapters router skipped "
               f"({type(_e).__name__}: {_e})", file=sys.stderr)
 
     if not _UI_DIR.is_dir():
