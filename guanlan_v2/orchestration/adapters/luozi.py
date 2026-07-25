@@ -2747,11 +2747,19 @@ def _attest_runner_reproduces_config(
     """Refuse (pre-bar) unless ``runner`` reproduces ``cfg``'s attested dimensions.
 
     Every runner-checkable matching dimension (init cash / cost-model digest / calendar
-    id / matching-engine version / schedule digest / intrabar exit priority) must equal
-    the shared-口径 :class:`ShadowExecutionConfig`; a mismatch raises BEFORE either lane
-    runs (no fills). The universe / data-snapshot / clock dimensions are bound
-    structurally by both curves binding ``cfg.semantic_digest()`` (the Task-1 validator),
-    so invariant 1's "Task-1 validator plus a runner-side pre-check both fire" holds.
+    id / matching-engine version / schedule digest / intrabar exit priority / clock) must
+    equal the shared-口径 :class:`ShadowExecutionConfig`; a mismatch raises BEFORE either
+    lane runs (no fills). The **clock** dimension is bound through the config's
+    :class:`ClockSpec` reasoning fields the runner actually reproduces — ``clock.timezone``
+    (the runner's schedule timezone) and ``clock.calendar_id`` (the runner's bound
+    calendar) — so a report can never be labeled with a clock the runner did not use (the
+    ``ClockSpec.as_of`` is a frozen reasoning instant a windowed multi-bar runner does not
+    reduce to; the runner's OPERATIONAL clock is bound across the two lanes by
+    ``run_targets``'s ``_require_matching_run_config``, since both lanes share the single
+    runner's ``_clock``). The universe / data-snapshot dimensions carry no runner-side
+    digest and are bound structurally by both curves binding ``cfg.semantic_digest()`` (the
+    Task-1 validator), so invariant 1's "Task-1 validator plus a runner-side pre-check both
+    fire" holds.
     """
     mism: list[str] = []
     if float(runner._init_cash) != float(cfg.init_cash):
@@ -2766,6 +2774,10 @@ def _attest_runner_reproduces_config(
         mism.append("schedule_digest")
     if runner._schedule.intrabar_exit_priority != cfg.intrabar_exit_priority:
         mism.append("intrabar_exit_priority")
+    if cfg.clock.timezone != runner._schedule.timezone:
+        mism.append("clock.timezone")
+    if cfg.clock.calendar_id != runner._calendar.calendar_id:
+        mism.append("clock.calendar_id")
     if mism:
         raise ShadowContractError(
             "the shadow runner does not reproduce the shared execution config "
@@ -2933,11 +2945,86 @@ def _feedback_study_and_window(report: DualCurveReport, run_id: str) -> tuple:
     return study, window
 
 
+class _DualCurveArtifactBarrier(Protocol):
+    """The staged→barrier subset of the Phase-2 ``ArtifactPool`` the handoff consumes.
+
+    A real :class:`~guanlan_v2.orchestration.pool.ArtifactPool` satisfies this Protocol
+    structurally (identical ``stage`` / ``commit_layer`` method names + keyword
+    signatures, `pool.py:300`/`pool.py:393`), so Task 12's production wiring is drop-in
+    once ``DualCurveReport@1`` is registered (Task 9) and a plan/worker declares it as an
+    output. Narrow by design — only the two staged→barrier methods are named; correction
+    N5-4 records why the full pool cannot validate an unregistered ``DualCurveReport@1``
+    in this phase.
+    """
+
+    def stage(
+        self, artifact: Any, *, layer_index: int, node_run: Any, idempotency_key: str
+    ) -> Any: ...
+
+    def commit_layer(
+        self, layer_index: int, *, node_runs: Any, expected_outputs: Any,
+        idempotency_key: str,
+    ) -> Any: ...
+
+
+def _stage_commit_dual_curve(
+    report: DualCurveReport, run_id: str, pool: _DualCurveArtifactBarrier
+) -> TypedPayloadRef:
+    """Drive the real ``ArtifactPool`` staged→barrier surface for the report artifact.
+
+    Wraps the ``DualCurveReport`` in a real Phase-1 :class:`Artifact` produced by a real
+    :class:`NodeRun`, then ``pool.stage(...)`` → ``pool.commit_layer(...)`` (the exact
+    real-pool method names/signatures, so a real pool is a drop-in ``pool``). Returns the
+    committed ``DualCurveReport@1`` / ``main`` :class:`TypedPayloadRef`. Phase-1/Phase-2
+    constructors are imported lazily so importing this adapter never forces the pool
+    machinery onto the path.
+    """
+    from guanlan_v2.orchestration.enums import DataMode, NodeStatus
+    from guanlan_v2.orchestration.pool import ExpectedOutput
+    from guanlan_v2.orchestration.schemas import Artifact, NodeRun, Provenance
+
+    node_id = "dec.dual_curves"
+    output_key = "dual_curve_report"
+    schema_ref = SchemaRef(name=DualCurveReport.__name__, version="1")
+    plan_digest = content_digest(
+        {"domain": "shadow-dual-curve-plan-v1", "run_id": run_id})
+    artifact = Artifact.build(
+        artifact_id=f"dualcurve.{run_id}", run_id=run_id, created_at=report.interval_end,
+        producer_node_id=node_id, slot=output_key, output_key=output_key,
+        kind=output_key, payload_schema_ref=schema_ref, payload=report, rendered_md="",
+        provenance=Provenance(
+            plan_digest=plan_digest, code_version="shadow-replay-v1",
+            as_of=report.interval_end, pit_mode=DataMode.PIT_REPLAY),
+    )
+    node_run = NodeRun(
+        node_run_id=f"noderun.{run_id}", run_id=run_id, plan_id=f"plan.{run_id}",
+        plan_digest=plan_digest, node_id=node_id, worker_id=node_id,
+        status=NodeStatus.COMPLETED, attempt_id=f"attempt.{run_id}",
+        input_snapshot_digest=content_digest({"insnap": run_id}),
+        output_keys=(output_key,), output_artifact_ids=(artifact.artifact_id,),
+    )
+    expected = (
+        ExpectedOutput(node_id=node_id, output_key=output_key, schema_ref=schema_ref),
+    )
+    pool.stage(
+        artifact, layer_index=0, node_run=node_run,
+        idempotency_key=f"dualcurve-stage:{run_id}")
+    pool.commit_layer(
+        0, node_runs=(node_run,), expected_outputs=expected,
+        idempotency_key=f"dualcurve-commit:{run_id}")
+    return TypedPayloadRef(
+        schema_ref=schema_ref,
+        payload_ref=PayloadRef(
+            namespace="main", object_id=artifact.artifact_id,
+            content_digest=report.semantic_digest()),
+    )
+
+
 def hand_off_dual_curves_to_feedback(
     report: DualCurveReport,
     *,
     run_id: NonEmptyStr,
-    pool: Any,
+    pool: _DualCurveArtifactBarrier,
     ledger: Any,
     maturity_now: datetime,
 ) -> ShadowReplayRunState:
@@ -2957,16 +3044,10 @@ def hand_off_dual_curves_to_feedback(
       for the same ``run_id`` registers nothing new) — and the run completes with the
       committed ``curve_report_ref``.
     """
-    # stage → barrier commit the report artifact (the curves are real regardless of
-    # maturity; only the feedback is gated).
-    staged = pool.stage_report(
-        report, run_id=run_id, idempotency_key=f"dualcurve-stage:{run_id}")
-    committed = pool.commit_report(
-        staged, run_id=run_id, idempotency_key=f"dualcurve-commit:{run_id}")
-    curve_ref = TypedPayloadRef(
-        schema_ref=SchemaRef(name=DualCurveReport.__name__, version="1"),
-        payload_ref=committed,
-    )
+    # stage → barrier commit the report artifact through the REAL ArtifactPool surface
+    # (stage → commit_layer) — the curves are real regardless of maturity; only the
+    # feedback is gated. Yields the committed DualCurveReport@1 / main curve_report_ref.
+    curve_ref = _stage_commit_dual_curve(report, str(run_id), pool)
     cfg_digest = report.execution_config.semantic_digest()
     n_points = report.decision_point_count
 

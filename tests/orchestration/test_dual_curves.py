@@ -81,7 +81,7 @@ from guanlan_v2.orchestration.data.calendar import build_trading_calendar
 from guanlan_v2.orchestration.data.symbols import Symbol
 from guanlan_v2.orchestration.digest import content_digest
 from guanlan_v2.orchestration.enums import Confidence, ExperimentStatus
-from guanlan_v2.orchestration.refs import ContentRef, PayloadRef
+from guanlan_v2.orchestration.refs import ContentRef
 from guanlan_v2.orchestration.runtime_clock import SystemClock
 from guanlan_v2.orchestration.shadow import (
     SHADOW_MATCHING_ENGINE_VERSION,
@@ -383,6 +383,31 @@ def test_config_mismatch_refused_at_runner():
         )
 
 
+def test_clock_mismatch_refused_at_runner():
+    # the clock dimension of the one-execution attestation: a config whose declared
+    # ClockSpec timezone differs from the runner's schedule timezone ⇒ pre-bar refusal.
+    r = _runner(_alpha_frames())
+    points = _points(r)
+    intents = tuple(_intent_for(p, [_pos(0.5)], 0.5) for p in points)
+    det = tuple(
+        derive_deterministic_targets(
+            p, factor_scores={"600000": 0.5}, universe=(_sym(),),
+            provenance_digest=_SOURCED)
+        for p in points
+    )
+    cfg = _exec_config(r)
+    bad_clock = ClockSpec(
+        as_of=datetime(2026, 7, 20, 1, 30, tzinfo=UTC),
+        timezone="America/New_York", calendar_id=_CAL_ID,
+    )
+    bad = cfg.model_copy(update={"clock": bad_clock})
+    with pytest.raises(ShadowContractError):
+        build_dual_curves(
+            execution_config=bad, points=points, deterministic_target_sets=det,
+            intents=intents, shadow_runner=r,
+        )
+
+
 # =========================================================================== #
 # Row 4 — deterministic lane is envelope-free (no intent, no LLM origin)         #
 # =========================================================================== #
@@ -593,23 +618,24 @@ class _SpyLedger:
 
 
 class _FakePool:
-    """A narrow staged→barrier artifact sink (correction N5-4)."""
+    """Implements the REAL ArtifactPool staged→barrier surface (stage → commit_layer).
+
+    A real `ArtifactPool` is a drop-in for this fake (identical method names/signatures);
+    correction N5-4 records why the full pool cannot validate an unregistered
+    `DualCurveReport@1` in this phase.
+    """
 
     def __init__(self):
         self.staged: list = []
         self.committed: list = []
 
-    def stage_report(self, report, *, run_id, idempotency_key):
-        self.staged.append((run_id, idempotency_key))
-        return {"report": report, "run_id": run_id}
+    def stage(self, artifact, *, layer_index, node_run, idempotency_key):
+        self.staged.append((layer_index, idempotency_key, artifact.artifact_id))
+        return artifact  # a real pool returns an ArtifactRef; the handoff ignores it
 
-    def commit_report(self, handle, *, run_id, idempotency_key):
-        self.committed.append((run_id, idempotency_key))
-        return PayloadRef(
-            namespace="main",
-            object_id=f"dualcurve.{run_id}",
-            content_digest=handle["report"].semantic_digest(),
-        )
+    def commit_layer(self, layer_index, *, node_runs, expected_outputs, idempotency_key):
+        self.committed.append((layer_index, idempotency_key))
+        return None
 
 
 def _report_over(runner, points):
@@ -641,7 +667,9 @@ def test_immature_interval_parks():
     assert state.status == ExperimentStatus.WAITING_FOR_MATURITY
     assert state.resume_after is not None
     assert state.wakeup_key is not None
-    # the ledger was never touched (no reveal / register / anything).
+    # the report artifact WAS staged → barrier-committed (real pool surface driven)…
+    assert pool.staged and pool.committed
+    # …but the ledger was never touched (no reveal / register / anything).
     assert spy.touched == []
 
 
