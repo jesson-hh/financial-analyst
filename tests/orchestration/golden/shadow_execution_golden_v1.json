@@ -1,0 +1,681 @@
+{
+  "fixture_id": "shadow_execution_golden_v1",
+  "matching_engine_version": "shadow-match-v1",
+  "description": "Phase 9 Task 8 mirror stage-2 backend golden execution harness. Every expected value below is HAND-COMPUTED from the frozen engine sources (broker.py reject/fill semantics, costs.py cost model, portfolio.py T+1 sellable) and the Phase-6 ShadowBacktestRunner runner-layer machinery (take-profit/max-hold/intrabar-priority/corporate-actions), never regenerated from code. Canonical setup unless a case says otherwise: SH600000 main board (limit pct 0.10, transfer_rate_sh 0.0001), init_cash 1000000, D0=2026-07-17 (seed/decision bar, factor 1.0 so ref_prev_close[t]=close[t-1]), D1=2026-07-20, D2=2026-07-21, D3=2026-07-22. The runner's target_buy limit ceiling is up=round(pc*(1+pct/2),2)=round(pc*1.05,2); the target_sell/max-hold floor is dn=round(pc*(1-pct),2). With slippage_bps=0 a buy fills at min(up,high) clipped and a limit sell fills at max(limit,low) clipped, so fills land on clean round prices; the one slippage-bearing case (stop_fill_slipped_clipped) uses the default 5bps. Float fields (price/gross/cost/nav) are compared at rel_tol 1e-9; qty and reasons are exact.",
+  "cases": [
+    {
+      "case_id": "suspended_reject",
+      "driver": "run_targets",
+      "description": "vol<=0 with finite OHLC: prepare_bar does not check vol, so the bar reaches Broker.match rule 1 (broker.py:89-90 vol<=0) => reject 'suspended'. Buy order built (target_qty=50000, budget 500000) but never fills; cash/position unchanged, NAV flat at init_cash.",
+      "sessions": ["2026-07-17", "2026-07-20"],
+      "start": "2026-07-20",
+      "end": "2026-07-20",
+      "init_cash": 1000000.0,
+      "is_st": {"SH600000": false},
+      "cost_model": {"slippage_bps": 0.0},
+      "intrabar_exit_priority": "worst_case",
+      "corporate_actions": [],
+      "frames": {
+        "SH600000": [
+          ["2026-07-17", 10.0, 10.0, 10.0, 10.0, 1000000.0],
+          ["2026-07-20", 10.0, 11.0, 9.8, 10.0, 0.0]
+        ]
+      },
+      "targets": [
+        {"rule_id": "golden-rule", "point_ordinal": 0, "target_version": 1, "session_date": "2026-07-17",
+         "positions": [{"code": "600000", "exchange": "SH", "board": "main", "target_weight": 0.5}],
+         "cash_weight": 0.5}
+      ],
+      "expected": {
+        "fills": [],
+        "rejects": [{"reason": "suspended"}],
+        "nav_series": [["2026-07-20", 1000000.0]],
+        "badges": []
+      }
+    },
+    {
+      "case_id": "one_word_up_blocks_buy",
+      "driver": "run_targets",
+      "description": "One-word up bar high==low==close==11.0==prev_close(10)*1.10, vol>0 => is_one_word up True (limits.py:61-72); broker.py:100-108 blocks BOTH directions, a buy => reject 'one_word_limit_up'. No fill, NAV flat.",
+      "sessions": ["2026-07-17", "2026-07-20"],
+      "start": "2026-07-20",
+      "end": "2026-07-20",
+      "init_cash": 1000000.0,
+      "is_st": {"SH600000": false},
+      "cost_model": {"slippage_bps": 0.0},
+      "intrabar_exit_priority": "worst_case",
+      "corporate_actions": [],
+      "frames": {
+        "SH600000": [
+          ["2026-07-17", 10.0, 10.0, 10.0, 10.0, 1000000.0],
+          ["2026-07-20", 11.0, 11.0, 11.0, 11.0, 1000000.0]
+        ]
+      },
+      "targets": [
+        {"rule_id": "golden-rule", "point_ordinal": 0, "target_version": 1, "session_date": "2026-07-17",
+         "positions": [{"code": "600000", "exchange": "SH", "board": "main", "target_weight": 0.5}],
+         "cash_weight": 0.5}
+      ],
+      "expected": {
+        "fills": [],
+        "rejects": [{"reason": "one_word_limit_up"}],
+        "nav_series": [["2026-07-20", 1000000.0]],
+        "badges": []
+      }
+    },
+    {
+      "case_id": "one_word_down_blocks_sell",
+      "driver": "run_targets",
+      "description": "Buy 100@10.50 on D1 (gross 1050, buy_cost max(0.2625,5)+0.105=5.105, cash 998944.895, avg 10.55105). On D2 the full-exit target emits a target_sell; D2 is a one-word down bar 9,9,9,9 == prev_close(10)*0.90 => broker.py:100-108 blocks the sell => reject 'one_word_limit_down' (checked before T+1). Position stays 100. NAV: D1 998944.895+100*10=999944.895; D2 998944.895+100*9=999844.895; D3 same.",
+      "sessions": ["2026-07-17", "2026-07-20", "2026-07-21", "2026-07-22"],
+      "start": "2026-07-20",
+      "end": "2026-07-22",
+      "init_cash": 1000000.0,
+      "is_st": {"SH600000": false},
+      "cost_model": {"slippage_bps": 0.0},
+      "intrabar_exit_priority": "worst_case",
+      "corporate_actions": [],
+      "frames": {
+        "SH600000": [
+          ["2026-07-17", 10.0, 10.0, 10.0, 10.0, 1000000.0],
+          ["2026-07-20", 10.0, 11.0, 9.8, 10.0, 1000000.0],
+          ["2026-07-21", 9.0, 9.0, 9.0, 9.0, 1000000.0],
+          ["2026-07-22", 9.0, 9.2, 8.9, 9.0, 1000000.0]
+        ]
+      },
+      "targets": [
+        {"rule_id": "golden-rule", "point_ordinal": 0, "target_version": 1, "session_date": "2026-07-17",
+         "positions": [{"code": "600000", "exchange": "SH", "board": "main", "target_weight": 0.002}],
+         "cash_weight": 0.998},
+        {"rule_id": "golden-rule", "point_ordinal": 1, "target_version": 1, "session_date": "2026-07-20",
+         "positions": [], "cash_weight": 1.0}
+      ],
+      "expected": {
+        "fills": [
+          {"reason": "target_buy", "qty": 100, "price": 10.50, "gross": 1050.0, "cost": 5.105}
+        ],
+        "rejects": [{"reason": "one_word_limit_down"}],
+        "nav_series": [["2026-07-20", 999944.895], ["2026-07-21", 999844.895], ["2026-07-22", 999844.895]],
+        "badges": []
+      }
+    },
+    {
+      "case_id": "t1_same_day_sell_locked",
+      "driver": "run_targets",
+      "description": "Buy 100@10.50 on D1 with stop_loss_pct=0.05 => pos.stop_loss=pc(10)*0.95=9.50, entry_price=10.50. D1 low 9.40<=9.50 so the stop touches SAME day, but Position.sellable(D1)=qty-locked(D1)=100-100=0 (portfolio.py:55-59) => broker.py:156-166 reject 't1_locked_or_empty'. D2 low 9.30<=9.50 touches again; sellable(D2)=100; stop fill raw=slip_sell(min(9.50,open 9.40))=9.40, clip[dn9,up11]->9.40, clip[low9.30,high9.60]->9.40 => 100@9.40 (gross 940, sell_cost max(0.235,5)+0.47+0.094=5.564). NAV: D1 998944.895+100*10=999944.895; D2 998944.895+934.436=999879.331; D3 same.",
+      "sessions": ["2026-07-17", "2026-07-20", "2026-07-21", "2026-07-22"],
+      "start": "2026-07-20",
+      "end": "2026-07-22",
+      "init_cash": 1000000.0,
+      "is_st": {"SH600000": false},
+      "cost_model": {"slippage_bps": 0.0},
+      "intrabar_exit_priority": "worst_case",
+      "corporate_actions": [],
+      "frames": {
+        "SH600000": [
+          ["2026-07-17", 10.0, 10.0, 10.0, 10.0, 1000000.0],
+          ["2026-07-20", 10.0, 11.0, 9.4, 10.0, 1000000.0],
+          ["2026-07-21", 9.4, 9.6, 9.3, 9.5, 1000000.0],
+          ["2026-07-22", 9.5, 9.6, 9.4, 9.5, 1000000.0]
+        ]
+      },
+      "targets": [
+        {"rule_id": "golden-rule", "point_ordinal": 0, "target_version": 1, "session_date": "2026-07-17",
+         "positions": [{"code": "600000", "exchange": "SH", "board": "main", "target_weight": 0.002, "stop_loss_pct": 0.05}],
+         "cash_weight": 0.998}
+      ],
+      "expected": {
+        "fills": [
+          {"reason": "target_buy", "qty": 100, "price": 10.50, "gross": 1050.0, "cost": 5.105},
+          {"reason": "stop_loss", "qty": 100, "price": 9.40, "gross": 940.0, "cost": 5.564}
+        ],
+        "rejects": [{"reason": "t1_locked_or_empty"}],
+        "nav_series": [["2026-07-20", 999944.895], ["2026-07-21", 999879.331], ["2026-07-22", 999879.331]],
+        "badges": []
+      }
+    },
+    {
+      "case_id": "below_one_lot_reject",
+      "driver": "run_targets",
+      "description": "target_weight 0.002 would target 200 shares at ref price 10 (budget 2000), but the fill price 10.50 makes affordable_qty small; here target_weight 0.001 targets 100 shares (budget 100*10=1000). affordable_qty(10.50,1000,SH): denom=10.50*1.00035=10.503675, 1000//10.503675=95, 95//100=0 => q0=0 (<100) => broker.py:154-155 reject 'below_one_lot'. No fill, NAV flat.",
+      "sessions": ["2026-07-17", "2026-07-20"],
+      "start": "2026-07-20",
+      "end": "2026-07-20",
+      "init_cash": 1000000.0,
+      "is_st": {"SH600000": false},
+      "cost_model": {"slippage_bps": 0.0},
+      "intrabar_exit_priority": "worst_case",
+      "corporate_actions": [],
+      "frames": {
+        "SH600000": [
+          ["2026-07-17", 10.0, 10.0, 10.0, 10.0, 1000000.0],
+          ["2026-07-20", 10.0, 11.0, 9.8, 10.0, 1000000.0]
+        ]
+      },
+      "targets": [
+        {"rule_id": "golden-rule", "point_ordinal": 0, "target_version": 1, "session_date": "2026-07-17",
+         "positions": [{"code": "600000", "exchange": "SH", "board": "main", "target_weight": 0.001}],
+         "cash_weight": 0.999}
+      ],
+      "expected": {
+        "fills": [],
+        "rejects": [{"reason": "below_one_lot"}],
+        "nav_series": [["2026-07-20", 1000000.0]],
+        "badges": []
+      }
+    },
+    {
+      "case_id": "market_next_bar_open_same_date_only",
+      "driver": "broker",
+      "description": "The ShadowBacktestRunner never emits a market order (its order construction is limit/stop only), so this pure-broker semantics case (broker.py:113-119) is driven through the real Broker directly (still the frozen engine, offline, hand-computed) - flagged as the one runner-unreachable case. A market buy with next_bar_date (07-21) != the bar's trade_date (07-20) => reject 'no_next_bar' (no cross-day leakage). Portfolio unchanged.",
+      "init_cash": 1000000.0,
+      "cost_model": {},
+      "broker_order": {"code": "SH600000", "side": "buy", "otype": "market", "cash_budget": 100000.0},
+      "bar": {"trade_date": "2026-07-20", "open": 10.2, "high": 10.6, "low": 9.9, "close": 10.4, "vol": 1000000.0},
+      "prev_close": 10.0,
+      "next_bar_open": 10.5,
+      "next_bar_date": "2026-07-21",
+      "expected": {
+        "reject_reason": "no_next_bar",
+        "cash_after": 1000000.0,
+        "positions_empty": true
+      }
+    },
+    {
+      "case_id": "stop_fill_slipped_clipped",
+      "driver": "run_targets",
+      "description": "Default cost model (slippage 5bps). Buy on D1: up=10.50, high=10.40 so min(up,high)=10.40, slip_buy(10.40)=10.4052, clip[9.80,10.40]=>10.40 (fill=10.40). target_weight 0.003 targets 300 (budget 3000); affordable_qty(10.40,3000,SH): denom=10.40*1.00035=10.40364, 3000//10.40364=288, 288//100=2 => 200 shares; gross 2080, buy_cost max(0.52,5)+0.208=5.208, cash 997914.792. stop_loss_pct 0.05 => pos.stop_loss=pc(10)*0.95=9.50. D2 gap-down open 9.00 (<stop 9.50), low 8.80<=9.50 touches: raw=slip_sell(min(9.50,9.00))=slip_sell(9.00)=8.9955, clip[dn9,up11]=>9.00 (raised to dn), clip[low8.80,high9.20]=>9.00 (fill=9.00) 200 shares (gross 1800, sell_cost max(0.45,5)+0.90+0.18=6.08). NAV: D1 997914.792+200*10=999914.792; D2 997914.792+1793.92=999708.712; D3 same.",
+      "sessions": ["2026-07-17", "2026-07-20", "2026-07-21", "2026-07-22"],
+      "start": "2026-07-20",
+      "end": "2026-07-22",
+      "init_cash": 1000000.0,
+      "is_st": {"SH600000": false},
+      "cost_model": {},
+      "intrabar_exit_priority": "worst_case",
+      "corporate_actions": [],
+      "frames": {
+        "SH600000": [
+          ["2026-07-17", 10.0, 10.0, 10.0, 10.0, 1000000.0],
+          ["2026-07-20", 10.0, 10.4, 9.8, 10.0, 1000000.0],
+          ["2026-07-21", 9.0, 9.2, 8.8, 9.0, 1000000.0],
+          ["2026-07-22", 9.0, 9.1, 8.9, 9.0, 1000000.0]
+        ]
+      },
+      "targets": [
+        {"rule_id": "golden-rule", "point_ordinal": 0, "target_version": 1, "session_date": "2026-07-17",
+         "positions": [{"code": "600000", "exchange": "SH", "board": "main", "target_weight": 0.003, "stop_loss_pct": 0.05}],
+         "cash_weight": 0.997}
+      ],
+      "expected": {
+        "fills": [
+          {"reason": "target_buy", "qty": 200, "price": 10.40, "gross": 2080.0, "cost": 5.208},
+          {"reason": "stop_loss", "qty": 200, "price": 9.00, "gross": 1800.0, "cost": 6.08}
+        ],
+        "rejects": [],
+        "nav_series": [["2026-07-20", 999914.792], ["2026-07-21", 999708.712], ["2026-07-22", 999708.712]],
+        "badges": []
+      }
+    },
+    {
+      "case_id": "limit_touch_buy",
+      "driver": "run_targets",
+      "description": "Buy limit touch: up=round(10*1.05,2)=10.50 <= high 11.0 so the limit touches (broker.py:129-134); slip 0 => fill min(10.50,11.0)=10.50, 100 shares (affordable_qty(10.50,2000)=100). gross 1050, buy_cost 5.105, cash 998944.895. D1 close 10.0 so EOD mkt 100*10.0=1000 => NAV 998944.895+1000=999944.895.",
+      "sessions": ["2026-07-17", "2026-07-20"],
+      "start": "2026-07-20",
+      "end": "2026-07-20",
+      "init_cash": 1000000.0,
+      "is_st": {"SH600000": false},
+      "cost_model": {"slippage_bps": 0.0},
+      "intrabar_exit_priority": "worst_case",
+      "corporate_actions": [],
+      "frames": {
+        "SH600000": [
+          ["2026-07-17", 10.0, 10.0, 10.0, 10.0, 1000000.0],
+          ["2026-07-20", 10.0, 11.0, 9.8, 10.0, 1000000.0]
+        ]
+      },
+      "targets": [
+        {"rule_id": "golden-rule", "point_ordinal": 0, "target_version": 1, "session_date": "2026-07-17",
+         "positions": [{"code": "600000", "exchange": "SH", "board": "main", "target_weight": 0.002}],
+         "cash_weight": 0.998}
+      ],
+      "expected": {
+        "fills": [
+          {"reason": "target_buy", "qty": 100, "price": 10.50, "gross": 1050.0, "cost": 5.105}
+        ],
+        "rejects": [],
+        "nav_series": [["2026-07-20", 999944.895]],
+        "badges": []
+      }
+    },
+    {
+      "case_id": "limit_not_touched_buy",
+      "driver": "run_targets",
+      "description": "Buy limit no-touch: up=round(10*1.05,2)=10.50 but the bar gapped up (low 10.60 > 10.50), so order.limit_price < low => broker.py:131-132 reject 'limit_not_touched'. No fill, NAV flat.",
+      "sessions": ["2026-07-17", "2026-07-20"],
+      "start": "2026-07-20",
+      "end": "2026-07-20",
+      "init_cash": 1000000.0,
+      "is_st": {"SH600000": false},
+      "cost_model": {"slippage_bps": 0.0},
+      "intrabar_exit_priority": "worst_case",
+      "corporate_actions": [],
+      "frames": {
+        "SH600000": [
+          ["2026-07-17", 10.0, 10.0, 10.0, 10.0, 1000000.0],
+          ["2026-07-20", 10.7, 10.9, 10.6, 10.8, 1000000.0]
+        ]
+      },
+      "targets": [
+        {"rule_id": "golden-rule", "point_ordinal": 0, "target_version": 1, "session_date": "2026-07-17",
+         "positions": [{"code": "600000", "exchange": "SH", "board": "main", "target_weight": 0.5}],
+         "cash_weight": 0.5}
+      ],
+      "expected": {
+        "fills": [],
+        "rejects": [{"reason": "limit_not_touched"}],
+        "nav_series": [["2026-07-20", 1000000.0]],
+        "badges": []
+      }
+    },
+    {
+      "case_id": "limit_touch_sell",
+      "driver": "run_targets",
+      "description": "Sell limit touch: buy 100@10.50 on D1 (close 10.50 => prev_close D2=10.50, dn=round(10.50*0.90,2)=9.45). D2 full-exit target_sell at dn=9.45; dn<=high 11.2 so the touch check passes (broker.py:136-139); slip 0 => fill max(9.45,low 10.80)=10.80, 100 shares (gross 1080, sell_cost max(0.27,5)+0.54+0.108=5.648). NAV: D1 998944.895+100*10.50=999994.895; D2 998944.895+1074.352=1000019.247; D3 same.",
+      "sessions": ["2026-07-17", "2026-07-20", "2026-07-21", "2026-07-22"],
+      "start": "2026-07-20",
+      "end": "2026-07-22",
+      "init_cash": 1000000.0,
+      "is_st": {"SH600000": false},
+      "cost_model": {"slippage_bps": 0.0},
+      "intrabar_exit_priority": "worst_case",
+      "corporate_actions": [],
+      "frames": {
+        "SH600000": [
+          ["2026-07-17", 10.0, 10.0, 10.0, 10.0, 1000000.0],
+          ["2026-07-20", 10.0, 11.0, 9.8, 10.5, 1000000.0],
+          ["2026-07-21", 10.9, 11.2, 10.8, 11.0, 1000000.0],
+          ["2026-07-22", 11.0, 11.1, 10.9, 11.0, 1000000.0]
+        ]
+      },
+      "targets": [
+        {"rule_id": "golden-rule", "point_ordinal": 0, "target_version": 1, "session_date": "2026-07-17",
+         "positions": [{"code": "600000", "exchange": "SH", "board": "main", "target_weight": 0.002}],
+         "cash_weight": 0.998},
+        {"rule_id": "golden-rule", "point_ordinal": 1, "target_version": 1, "session_date": "2026-07-20",
+         "positions": [], "cash_weight": 1.0}
+      ],
+      "expected": {
+        "fills": [
+          {"reason": "target_buy", "qty": 100, "price": 10.50, "gross": 1050.0, "cost": 5.105},
+          {"reason": "target_sell", "qty": 100, "price": 10.80, "gross": 1080.0, "cost": 5.648}
+        ],
+        "rejects": [],
+        "nav_series": [["2026-07-20", 999994.895], ["2026-07-21", 1000019.247], ["2026-07-22", 1000019.247]],
+        "badges": []
+      }
+    },
+    {
+      "case_id": "costs_commission_min5_stamp_sell_transfer_sh",
+      "driver": "run_targets",
+      "description": "Small SH round trip proving each cost leg (costs.py:38-62). Buy 100@10.50: gross 1050, commission max(1050*0.00025=0.2625,5)=5 (floor binds), transfer_sh 1050*0.0001=0.105, no stamp on buy => buy_cost 5.105, cash 998944.895. Sell 100@11.00 (prev_close D2=close D1=10.50, dn=9.45<=high; fill max(9.45,low 11.00)=11.00): gross 1100, commission max(0.275,5)=5, stamp (sell only) 1100*0.0005=0.55, transfer_sh 1100*0.0001=0.11 => sell_cost 5.66, cash 998944.895+1094.34=1000039.235. Realized +39.235. NAV: D1 999994.895; D2 1000039.235; D3 same.",
+      "sessions": ["2026-07-17", "2026-07-20", "2026-07-21", "2026-07-22"],
+      "start": "2026-07-20",
+      "end": "2026-07-22",
+      "init_cash": 1000000.0,
+      "is_st": {"SH600000": false},
+      "cost_model": {"slippage_bps": 0.0},
+      "intrabar_exit_priority": "worst_case",
+      "corporate_actions": [],
+      "frames": {
+        "SH600000": [
+          ["2026-07-17", 10.0, 10.0, 10.0, 10.0, 1000000.0],
+          ["2026-07-20", 10.0, 11.0, 9.8, 10.5, 1000000.0],
+          ["2026-07-21", 11.2, 11.6, 11.0, 11.2, 1000000.0],
+          ["2026-07-22", 11.2, 11.3, 11.1, 11.2, 1000000.0]
+        ]
+      },
+      "targets": [
+        {"rule_id": "golden-rule", "point_ordinal": 0, "target_version": 1, "session_date": "2026-07-17",
+         "positions": [{"code": "600000", "exchange": "SH", "board": "main", "target_weight": 0.002}],
+         "cash_weight": 0.998},
+        {"rule_id": "golden-rule", "point_ordinal": 1, "target_version": 1, "session_date": "2026-07-20",
+         "positions": [], "cash_weight": 1.0}
+      ],
+      "expected": {
+        "fills": [
+          {"reason": "target_buy", "qty": 100, "price": 10.50, "gross": 1050.0, "cost": 5.105},
+          {"reason": "target_sell", "qty": 100, "price": 11.00, "gross": 1100.0, "cost": 5.66}
+        ],
+        "rejects": [],
+        "nav_series": [["2026-07-20", 999994.895], ["2026-07-21", 1000039.235], ["2026-07-22", 1000039.235]],
+        "badges": []
+      }
+    },
+    {
+      "case_id": "take_profit_runner_level",
+      "driver": "run_targets",
+      "description": "Runner-level take-profit (engine has none). Buy 100@10.50 on D1, take_profit_pct 0.05 => tp_px=entry_price(10.50)*1.05=11.025. D1 high 11.0<11.025 no touch. D2 high 11.20>=11.025 touches: take is a limit sell at 11.025; slip 0 => fill max(11.025,low 11.10)=11.10, 100 shares (gross 1110, sell_cost max(0.2775,5)+0.555+0.111=5.666). NAV: D1 998944.895+100*10.50=999994.895; D2 998944.895+1104.334=1000049.229; D3 same.",
+      "sessions": ["2026-07-17", "2026-07-20", "2026-07-21", "2026-07-22"],
+      "start": "2026-07-20",
+      "end": "2026-07-22",
+      "init_cash": 1000000.0,
+      "is_st": {"SH600000": false},
+      "cost_model": {"slippage_bps": 0.0},
+      "intrabar_exit_priority": "worst_case",
+      "corporate_actions": [],
+      "frames": {
+        "SH600000": [
+          ["2026-07-17", 10.0, 10.0, 10.0, 10.0, 1000000.0],
+          ["2026-07-20", 10.0, 11.0, 9.8, 10.5, 1000000.0],
+          ["2026-07-21", 11.15, 11.20, 11.10, 11.15, 1000000.0],
+          ["2026-07-22", 11.1, 11.2, 11.0, 11.1, 1000000.0]
+        ]
+      },
+      "targets": [
+        {"rule_id": "golden-rule", "point_ordinal": 0, "target_version": 1, "session_date": "2026-07-17",
+         "positions": [{"code": "600000", "exchange": "SH", "board": "main", "target_weight": 0.002, "take_profit_pct": 0.05}],
+         "cash_weight": 0.998}
+      ],
+      "expected": {
+        "fills": [
+          {"reason": "target_buy", "qty": 100, "price": 10.50, "gross": 1050.0, "cost": 5.105},
+          {"reason": "take_profit", "qty": 100, "price": 11.10, "gross": 1110.0, "cost": 5.666}
+        ],
+        "rejects": [],
+        "nav_series": [["2026-07-20", 999994.895], ["2026-07-21", 1000049.229], ["2026-07-22", 1000049.229]],
+        "badges": []
+      }
+    },
+    {
+      "case_id": "max_hold_runner_level",
+      "driver": "run_targets",
+      "description": "Runner-level max-hold (engine has none). Buy 100@10.50 on D1 (entry_bar_index 0 since D1==days[0]), max_hold_bars 1. On D2 (t_index 1) neither stop nor take is set so max-hold fires: t_index-entry=1>=1; the close-out is a limit sell at the dn floor dn=round(prev_close(10.50)*0.90,2)=9.45; slip 0 => fill max(9.45,low 10.60)=10.60 (the engine forced-sell convention realizes at the favorable bar low, not literally the close), 100 shares (gross 1060, sell_cost max(0.265,5)+0.53+0.106=5.636). NAV: D1 999994.895; D2 998944.895+1054.364=999999.259; D3 same.",
+      "sessions": ["2026-07-17", "2026-07-20", "2026-07-21", "2026-07-22"],
+      "start": "2026-07-20",
+      "end": "2026-07-22",
+      "init_cash": 1000000.0,
+      "is_st": {"SH600000": false},
+      "cost_model": {"slippage_bps": 0.0},
+      "intrabar_exit_priority": "worst_case",
+      "corporate_actions": [],
+      "frames": {
+        "SH600000": [
+          ["2026-07-17", 10.0, 10.0, 10.0, 10.0, 1000000.0],
+          ["2026-07-20", 10.0, 11.0, 9.8, 10.5, 1000000.0],
+          ["2026-07-21", 10.7, 11.0, 10.6, 10.8, 1000000.0],
+          ["2026-07-22", 10.7, 10.8, 10.6, 10.7, 1000000.0]
+        ]
+      },
+      "targets": [
+        {"rule_id": "golden-rule", "point_ordinal": 0, "target_version": 1, "session_date": "2026-07-17",
+         "positions": [{"code": "600000", "exchange": "SH", "board": "main", "target_weight": 0.002, "max_hold_bars": 1}],
+         "cash_weight": 0.998}
+      ],
+      "expected": {
+        "fills": [
+          {"reason": "target_buy", "qty": 100, "price": 10.50, "gross": 1050.0, "cost": 5.105},
+          {"reason": "max_hold_exit", "qty": 100, "price": 10.60, "gross": 1060.0, "cost": 5.636}
+        ],
+        "rejects": [],
+        "nav_series": [["2026-07-20", 999994.895], ["2026-07-21", 999999.259], ["2026-07-22", 999999.259]],
+        "badges": []
+      }
+    },
+    {
+      "case_id": "intrabar_priority_worst_case",
+      "driver": "run_targets",
+      "description": "Same-bar stop+take double touch. Buy 100@10.50 on D1, stop_loss_pct 0.05 (stop_px=pc(10)*0.95=9.50), take_profit_pct 0.05 (tp_px=entry 10.50*1.05=11.025). D2 low 9.40<=9.50 (stop) AND high 11.20>=11.025 (take): worst_case => the stop wins (for long-only the worst case IS the stop). Stop fill raw=slip_sell(min(9.50,open 10.0))=9.50, clip[dn9,up11]->9.50, clip[low9.40,high11.20]->9.50 => 100@9.50 (gross 950, sell_cost max(0.2375,5)+0.475+0.095=5.57). NAV: D1 998944.895+100*10=999944.895; D2 998944.895+944.43=999889.325; D3 same.",
+      "sessions": ["2026-07-17", "2026-07-20", "2026-07-21", "2026-07-22"],
+      "start": "2026-07-20",
+      "end": "2026-07-22",
+      "init_cash": 1000000.0,
+      "is_st": {"SH600000": false},
+      "cost_model": {"slippage_bps": 0.0},
+      "intrabar_exit_priority": "worst_case",
+      "corporate_actions": [],
+      "frames": {
+        "SH600000": [
+          ["2026-07-17", 10.0, 10.0, 10.0, 10.0, 1000000.0],
+          ["2026-07-20", 10.0, 11.0, 9.8, 10.0, 1000000.0],
+          ["2026-07-21", 10.0, 11.2, 9.4, 10.0, 1000000.0],
+          ["2026-07-22", 9.5, 9.6, 9.4, 9.5, 1000000.0]
+        ]
+      },
+      "targets": [
+        {"rule_id": "golden-rule", "point_ordinal": 0, "target_version": 1, "session_date": "2026-07-17",
+         "positions": [{"code": "600000", "exchange": "SH", "board": "main", "target_weight": 0.002, "stop_loss_pct": 0.05, "take_profit_pct": 0.05}],
+         "cash_weight": 0.998}
+      ],
+      "expected": {
+        "fills": [
+          {"reason": "target_buy", "qty": 100, "price": 10.50, "gross": 1050.0, "cost": 5.105},
+          {"reason": "stop_loss", "qty": 100, "price": 9.50, "gross": 950.0, "cost": 5.57}
+        ],
+        "rejects": [],
+        "nav_series": [["2026-07-20", 999944.895], ["2026-07-21", 999889.325], ["2026-07-22", 999889.325]],
+        "badges": []
+      }
+    },
+    {
+      "case_id": "intrabar_priority_stop_first",
+      "driver": "run_targets",
+      "description": "Identical bars to intrabar_priority_worst_case but schedule.intrabar_exit_priority='stop_first' => the stop wins, same result: stop fill 100@9.50 (gross 950, sell_cost 5.57). NAV identical: D1 999944.895; D2 999889.325; D3 same.",
+      "sessions": ["2026-07-17", "2026-07-20", "2026-07-21", "2026-07-22"],
+      "start": "2026-07-20",
+      "end": "2026-07-22",
+      "init_cash": 1000000.0,
+      "is_st": {"SH600000": false},
+      "cost_model": {"slippage_bps": 0.0},
+      "intrabar_exit_priority": "stop_first",
+      "corporate_actions": [],
+      "frames": {
+        "SH600000": [
+          ["2026-07-17", 10.0, 10.0, 10.0, 10.0, 1000000.0],
+          ["2026-07-20", 10.0, 11.0, 9.8, 10.0, 1000000.0],
+          ["2026-07-21", 10.0, 11.2, 9.4, 10.0, 1000000.0],
+          ["2026-07-22", 9.5, 9.6, 9.4, 9.5, 1000000.0]
+        ]
+      },
+      "targets": [
+        {"rule_id": "golden-rule", "point_ordinal": 0, "target_version": 1, "session_date": "2026-07-17",
+         "positions": [{"code": "600000", "exchange": "SH", "board": "main", "target_weight": 0.002, "stop_loss_pct": 0.05, "take_profit_pct": 0.05}],
+         "cash_weight": 0.998}
+      ],
+      "expected": {
+        "fills": [
+          {"reason": "target_buy", "qty": 100, "price": 10.50, "gross": 1050.0, "cost": 5.105},
+          {"reason": "stop_loss", "qty": 100, "price": 9.50, "gross": 950.0, "cost": 5.57}
+        ],
+        "rejects": [],
+        "nav_series": [["2026-07-20", 999944.895], ["2026-07-21", 999889.325], ["2026-07-22", 999889.325]],
+        "badges": []
+      }
+    },
+    {
+      "case_id": "intrabar_priority_take_profit_first",
+      "driver": "run_targets",
+      "description": "Identical bars to the other two intrabar cases but schedule.intrabar_exit_priority='take_profit_first' => the take wins. Take is a limit sell at tp_px=11.025; slip 0 => fill max(11.025,low 9.40)=11.025, 100@11.025 (gross 1102.5, sell_cost max(0.275625,5)+0.55125+0.11025=5.6615). NAV: D1 999944.895; D2 998944.895+1096.8385=1000041.7335; D3 same. Only the exit differs from worst_case/stop_first.",
+      "sessions": ["2026-07-17", "2026-07-20", "2026-07-21", "2026-07-22"],
+      "start": "2026-07-20",
+      "end": "2026-07-22",
+      "init_cash": 1000000.0,
+      "is_st": {"SH600000": false},
+      "cost_model": {"slippage_bps": 0.0},
+      "intrabar_exit_priority": "take_profit_first",
+      "corporate_actions": [],
+      "frames": {
+        "SH600000": [
+          ["2026-07-17", 10.0, 10.0, 10.0, 10.0, 1000000.0],
+          ["2026-07-20", 10.0, 11.0, 9.8, 10.0, 1000000.0],
+          ["2026-07-21", 10.0, 11.2, 9.4, 10.0, 1000000.0],
+          ["2026-07-22", 9.5, 9.6, 9.4, 9.5, 1000000.0]
+        ]
+      },
+      "targets": [
+        {"rule_id": "golden-rule", "point_ordinal": 0, "target_version": 1, "session_date": "2026-07-17",
+         "positions": [{"code": "600000", "exchange": "SH", "board": "main", "target_weight": 0.002, "stop_loss_pct": 0.05, "take_profit_pct": 0.05}],
+         "cash_weight": 0.998}
+      ],
+      "expected": {
+        "fills": [
+          {"reason": "target_buy", "qty": 100, "price": 10.50, "gross": 1050.0, "cost": 5.105},
+          {"reason": "take_profit", "qty": 100, "price": 11.025, "gross": 1102.5, "cost": 5.6615}
+        ],
+        "rejects": [],
+        "nav_series": [["2026-07-20", 999944.895], ["2026-07-21", 1000041.7335], ["2026-07-22", 1000041.7335]],
+        "badges": []
+      }
+    },
+    {
+      "case_id": "dividend_cash_credit",
+      "driver": "run_targets",
+      "description": "Buy 100@10.50 on D1 (cash 998944.895, qty 100, avg 10.55105). Cash dividend ex_date D2, cash_per_share 0.50, shares_ratio 0 => portfolio.cash += 100*0.50 = 50 (=> 998994.895); qty and avg unchanged (position continuous). NAV: D1 998944.895+100*10.50=999994.895; D2 998994.895+100*10.60=1000054.895 (the +50 dividend rides into cash); D3 998994.895+100*10.70=1000064.895. badge corporate_actions_synthetic.",
+      "sessions": ["2026-07-17", "2026-07-20", "2026-07-21", "2026-07-22"],
+      "start": "2026-07-20",
+      "end": "2026-07-22",
+      "init_cash": 1000000.0,
+      "is_st": {"SH600000": false},
+      "cost_model": {"slippage_bps": 0.0},
+      "intrabar_exit_priority": "worst_case",
+      "corporate_actions": [
+        {"kind": "cash_dividend", "code": "600000", "exchange": "SH", "board": "main", "ex_date": "2026-07-21",
+         "cash_per_share": 0.5, "shares_ratio": 0.0, "available_at": "2026-07-21T00:00:00Z"}
+      ],
+      "frames": {
+        "SH600000": [
+          ["2026-07-17", 10.0, 10.0, 10.0, 10.0, 1000000.0],
+          ["2026-07-20", 10.0, 11.0, 9.8, 10.5, 1000000.0],
+          ["2026-07-21", 10.5, 10.9, 10.4, 10.6, 1000000.0],
+          ["2026-07-22", 10.6, 10.8, 10.5, 10.7, 1000000.0]
+        ]
+      },
+      "targets": [
+        {"rule_id": "golden-rule", "point_ordinal": 0, "target_version": 1, "session_date": "2026-07-17",
+         "positions": [{"code": "600000", "exchange": "SH", "board": "main", "target_weight": 0.002}],
+         "cash_weight": 0.998}
+      ],
+      "expected": {
+        "fills": [
+          {"reason": "target_buy", "qty": 100, "price": 10.50, "gross": 1050.0, "cost": 5.105}
+        ],
+        "rejects": [],
+        "nav_series": [["2026-07-20", 999994.895], ["2026-07-21", 1000054.895], ["2026-07-22", 1000064.895]],
+        "badges": ["corporate_actions_synthetic"]
+      }
+    },
+    {
+      "case_id": "split_qty_adjustment",
+      "driver": "run_targets",
+      "description": "Buy 100@10.50 on D1 (cash 998944.895, qty 100, avg 10.55105). 10-for-1 split ex_date D2 (kind split, shares_ratio 10): qty_after=floor(100*10)=1000, avg_after=10.55105*100/1000=1.055105, locked rescaled floor(100*10)=1000. The D2 close 1.05 = 10.50/10 keeps value continuous. NAV: D1 998944.895+100*10.50=999994.895; D2 998944.895+1000*1.05=999994.895; D3 same (flat across the split proves qty x10 and value continuity). badge corporate_actions_synthetic.",
+      "sessions": ["2026-07-17", "2026-07-20", "2026-07-21", "2026-07-22"],
+      "start": "2026-07-20",
+      "end": "2026-07-22",
+      "init_cash": 1000000.0,
+      "is_st": {"SH600000": false},
+      "cost_model": {"slippage_bps": 0.0},
+      "intrabar_exit_priority": "worst_case",
+      "corporate_actions": [
+        {"kind": "split", "code": "600000", "exchange": "SH", "board": "main", "ex_date": "2026-07-21",
+         "cash_per_share": 0.0, "shares_ratio": 10.0, "available_at": "2026-07-21T00:00:00Z"}
+      ],
+      "frames": {
+        "SH600000": [
+          ["2026-07-17", 10.0, 10.0, 10.0, 10.0, 1000000.0],
+          ["2026-07-20", 10.0, 11.0, 9.8, 10.5, 1000000.0],
+          ["2026-07-21", 1.05, 1.10, 1.00, 1.05, 1000000.0],
+          ["2026-07-22", 1.05, 1.08, 1.02, 1.05, 1000000.0]
+        ]
+      },
+      "targets": [
+        {"rule_id": "golden-rule", "point_ordinal": 0, "target_version": 1, "session_date": "2026-07-17",
+         "positions": [{"code": "600000", "exchange": "SH", "board": "main", "target_weight": 0.002}],
+         "cash_weight": 0.998}
+      ],
+      "expected": {
+        "fills": [
+          {"reason": "target_buy", "qty": 100, "price": 10.50, "gross": 1050.0, "cost": 5.105}
+        ],
+        "rejects": [],
+        "nav_series": [["2026-07-20", 999994.895], ["2026-07-21", 999994.895], ["2026-07-22", 999994.895]],
+        "badges": ["corporate_actions_synthetic"]
+      }
+    },
+    {
+      "case_id": "unrepresentable_corporate_action_refused",
+      "driver": "refuse_construct",
+      "description": "A rights-issue is unrepresentable at the contract boundary: CorporateActionEvent.kind is the closed Literal {cash_dividend, stock_bonus, split}, so constructing kind='rights_issue' fails pydantic ValidationError before any ledger effect. The harness asserts the typed refusal (never a silent ledger behavior).",
+      "corporate_action": {"kind": "rights_issue", "code": "600000", "exchange": "SH", "board": "main", "ex_date": "2026-07-21",
+        "cash_per_share": 0.0, "shares_ratio": 0.3, "available_at": "2026-07-21T00:00:00Z"},
+      "expected": {"construct_refused": true}
+    },
+    {
+      "case_id": "apply_once_duplicate_intent",
+      "driver": "run_intents",
+      "description": "Two byte-identical TargetPortfolioIntents delivered together dedup to a SINGLE application by target_apply_key (intent_id/scheduled_for/target_version). The intent lane enforces the closed target-weight band vocabulary {0,0.25,0.5,0.75,1.0}, so this intent uses target_weight 0.5 (a band value; the 0.002 continuous weight is deterministic-lane only). D1 is a one-word up bar (11,11,11,11) so the single application's buy rejects with 'one_word_limit_up' exactly once: apply-once means one apply record (applied=True) and ONE reject, never two. NAV flat.",
+      "sessions": ["2026-07-17", "2026-07-20"],
+      "start": "2026-07-20",
+      "end": "2026-07-20",
+      "init_cash": 1000000.0,
+      "is_st": {"SH600000": false},
+      "cost_model": {"slippage_bps": 0.0},
+      "intrabar_exit_priority": "worst_case",
+      "corporate_actions": [],
+      "frames": {
+        "SH600000": [
+          ["2026-07-17", 10.0, 10.0, 10.0, 10.0, 1000000.0],
+          ["2026-07-20", 11.0, 11.0, 11.0, 11.0, 1000000.0]
+        ]
+      },
+      "intent": {
+        "intent_id": "golden-intent-1", "target_version": 1, "session_date": "2026-07-17",
+        "positions": [{"code": "600000", "exchange": "SH", "board": "main", "target_weight": 0.5}],
+        "cash_weight": 0.5
+      },
+      "duplicate_count": 2,
+      "expected": {
+        "applied_count": 1,
+        "fills": [],
+        "rejects": [{"reason": "one_word_limit_up"}],
+        "nav_series": [["2026-07-20", 1000000.0]],
+        "badges": []
+      }
+    },
+    {
+      "case_id": "multi_fill_not_swallowed",
+      "driver": "run_targets",
+      "description": "One applied target => two order kinds (target_buy on D1 + stop_loss on D2), each keeping a distinct order_id and fill_id. Buy 100@10.50 on D1 (low 9.8>stop 9.50 no exit D1). D2 low 9.30<=9.50 touches: stop fill raw=slip_sell(min(9.50,open 9.60))=9.50, clip[dn9,up11]->9.50, clip[low9.30,high9.70]->9.50 => 100@9.50 (gross 950, sell_cost max(0.2375,5)+0.475+0.095=5.57). Both order_kinds present, all ids unique (never swallowed). NAV: D1 998944.895+100*10=999944.895; D2 998944.895+944.43=999889.325; D3 same.",
+      "sessions": ["2026-07-17", "2026-07-20", "2026-07-21", "2026-07-22"],
+      "start": "2026-07-20",
+      "end": "2026-07-22",
+      "init_cash": 1000000.0,
+      "is_st": {"SH600000": false},
+      "cost_model": {"slippage_bps": 0.0},
+      "intrabar_exit_priority": "worst_case",
+      "corporate_actions": [],
+      "frames": {
+        "SH600000": [
+          ["2026-07-17", 10.0, 10.0, 10.0, 10.0, 1000000.0],
+          ["2026-07-20", 10.0, 11.0, 9.8, 10.0, 1000000.0],
+          ["2026-07-21", 9.6, 9.7, 9.3, 9.5, 1000000.0],
+          ["2026-07-22", 9.5, 9.6, 9.4, 9.5, 1000000.0]
+        ]
+      },
+      "targets": [
+        {"rule_id": "golden-rule", "point_ordinal": 0, "target_version": 1, "session_date": "2026-07-17",
+         "positions": [{"code": "600000", "exchange": "SH", "board": "main", "target_weight": 0.002, "stop_loss_pct": 0.05}],
+         "cash_weight": 0.998}
+      ],
+      "expected": {
+        "order_kinds_present": ["target_buy", "stop_loss"],
+        "fills": [
+          {"reason": "target_buy", "qty": 100, "price": 10.50, "gross": 1050.0, "cost": 5.105},
+          {"reason": "stop_loss", "qty": 100, "price": 9.50, "gross": 950.0, "cost": 5.57}
+        ],
+        "rejects": [],
+        "nav_series": [["2026-07-20", 999944.895], ["2026-07-21", 999889.325], ["2026-07-22", 999889.325]],
+        "badges": []
+      }
+    }
+  ]
+}
