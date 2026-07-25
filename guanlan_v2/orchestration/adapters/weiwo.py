@@ -71,7 +71,7 @@ from guanlan_v2.orchestration.adapters.live_data import (
 )
 from guanlan_v2.orchestration.context import DataContext
 from guanlan_v2.orchestration.data.source import build_data_request
-from guanlan_v2.orchestration.enums import ApprovalDecision
+from guanlan_v2.orchestration.enums import ApprovalDecision, ApprovalPolicy
 from guanlan_v2.orchestration.refs import ContentRef
 from guanlan_v2.orchestration.runtime_clock import AuthoritativeClock
 from guanlan_v2.orchestration.trial import ValidationMetrics
@@ -95,6 +95,11 @@ __all__ = [
     "WeiwoSnapshotBindingError",
     "WEIWO_PRODUCT_SOURCE",
     "WEIWO_MEMORY_PROPOSE",
+    # -- Task-12 production binding (the Task-7 review carry) ---------------- #
+    "WeiwoApprovalPolicyRefused",
+    "ProductionWeiwoApprovalGate",
+    "WeiwoOnlineMemoryPreparer",
+    "build_weiwo_production_bindings",
 ]
 
 #: the reviewed ``source`` tag every weiwo draft product carries.
@@ -575,3 +580,140 @@ def run_weiwo_research(
         run_id=run_id, context_snapshot_digest=context_snapshot_digest,
         draft_ids=tuple(draft_ids),
         stop_reason="completed" if draft_ids else "completed_no_draft")
+
+
+# --------------------------------------------------------------------------- #
+# Task-12 production binding (discharging the Task-7 review carry)             #
+# --------------------------------------------------------------------------- #
+class WeiwoApprovalPolicyRefused(Exception):
+    """The production approval port was asked to decide an ``AUTO``-policy request.
+
+    The red line the Task-7 review made binding: the PRODUCTION approval port must
+    never auto-approve. A test fake may return whatever a test scripts, but the
+    production gate refuses an ``AUTO`` request OUTRIGHT rather than forwarding it to a
+    human decision surface that could be mis-wired into an auto-approval.
+    """
+
+
+class ProductionWeiwoApprovalGate:
+    """The production :class:`WeiwoApprovalGate` — human decisions only, never AUTO.
+
+    ``decide_fn(request, plan) -> ApprovalDecision`` is the real Phase-7 human decision
+    surface. This wrapper adds the two production red lines: an ``AUTO`` policy is
+    refused before the surface is consulted, and any non-``ApprovalDecision`` answer is
+    refused rather than coerced (a truthy "yes" string must never read as APPROVED).
+    """
+
+    def __init__(self, decide_fn: Callable[[Any, Any], ApprovalDecision]) -> None:
+        if not callable(decide_fn):
+            raise TypeError("ProductionWeiwoApprovalGate needs a callable decide_fn")
+        self._decide_fn = decide_fn
+
+    def decide(self, request: Any, plan: Any) -> ApprovalDecision:
+        policy = getattr(request, "approval_policy", None)
+        if policy is ApprovalPolicy.AUTO:
+            raise WeiwoApprovalPolicyRefused(
+                "the production weiwo approval port refuses an AUTO approval_policy; a "
+                "research plan runs only under a REQUIRED human decision")
+        decision = self._decide_fn(request, plan)
+        if not isinstance(decision, ApprovalDecision):
+            raise WeiwoApprovalPolicyRefused(
+                "the production approval surface must answer with an ApprovalDecision; "
+                f"got {type(decision).__name__} — a non-decision is never coerced")
+        return decision
+
+
+class WeiwoOnlineMemoryPreparer:
+    """The production :class:`WeiwoMemoryPreparer` over the real ``prepare_online``.
+
+    Binds the Phase-3 memory facade's ONLINE projection
+    (``MemoryContextPreparationService.prepare_online``) into the port shape the driver
+    consumes. The returned binding carries the frozen ``as_of`` and the
+    ``context_snapshot_digest``; ``run_weiwo_research`` re-asserts that the ``as_of``
+    did not drift from the run's start-frozen instant.
+    """
+
+    def __init__(self, service: Any, authority: Any, *, query_text: str,
+                 top_k: int = 6, operation_key: str = "weiwo-online-research") -> None:
+        self._service = service
+        self._authority = authority
+        self._query_text = query_text
+        self._top_k = int(top_k)
+        self._operation_key = operation_key
+
+    def prepare(self, data_context: DataContext) -> Any:
+        return self._service.prepare_online(
+            data_context, self._authority, query_text=self._query_text,
+            top_k=self._top_k, operation_key=self._operation_key)
+
+
+def build_weiwo_production_bindings(
+    *,
+    clock: AuthoritativeClock,
+    source_config: Any,
+    source_registry: Any,
+    routing: Any,
+    manifest: Any,
+    schema_registry: Any,
+    request_method_spec: Any,
+    request_params: Mapping[str, Any],
+    memory_preparer: WeiwoMemoryPreparer,
+    planner: WeiwoResearchPlanner,
+    approval: WeiwoApprovalGate,
+    optimizer: WeiwoOptimizer,
+    rejection_sink: WeiwoRejectionSink,
+    capability_binding: WeiwoCapabilityBinding,
+    fallback_materializer: WeiwoFallbackMaterializer | None = None,
+    factor_store: Any = None,
+    eval_overrides: Mapping[str, Any] | None = None,
+) -> WeiwoRuntimeBindings:
+    """Assemble the PRODUCTION :class:`WeiwoRuntimeBindings` with the red lines enforced.
+
+    Three production-only obligations the Task-7 review made binding (they cannot live
+    on the dataclass, whose fields are optional so tests can build partial worlds):
+
+    1. the ``DataRequest`` ``as_of`` re-assertion is **MANDATORY** — ``schema_registry`` /
+       ``request_method_spec`` / ``request_params`` must all be supplied, so
+       ``run_weiwo_research``'s invariant-1 anchor always fires in production (it is
+       skipped when they are absent);
+    2. the approval port must be an AUTO-refusing production gate
+       (:class:`ProductionWeiwoApprovalGate`) — a bare callable or a test fake is refused;
+    3. ``factor_saver`` stays defaulted to the guarded :func:`save_draft_to_factorlib`
+       (draft-only landing); it is deliberately NOT parameterised here.
+    """
+    missing = [
+        name for name, value in (
+            ("schema_registry", schema_registry),
+            ("request_method_spec", request_method_spec),
+            ("request_params", request_params),
+        ) if value is None
+    ]
+    if missing:
+        raise WeiwoSnapshotBindingError(
+            "the production weiwo binding requires "
+            f"{sorted(missing)} so the DataRequest as_of re-assertion is MANDATORY; "
+            "a production run must never skip the start-frozen as_of anchor")
+    if not isinstance(approval, ProductionWeiwoApprovalGate):
+        raise WeiwoApprovalPolicyRefused(
+            "the production weiwo binding requires a ProductionWeiwoApprovalGate "
+            "(the AUTO-refusing port); a bare decision callable is refused")
+    return WeiwoRuntimeBindings(
+        clock=clock,
+        source_config=source_config,
+        source_registry=source_registry,
+        routing=routing,
+        manifest=manifest,
+        schema_registry=schema_registry,
+        request_method_spec=request_method_spec,
+        request_params=dict(request_params),
+        memory_preparer=memory_preparer,
+        planner=planner,
+        approval=approval,
+        optimizer=optimizer,
+        rejection_sink=rejection_sink,
+        capability_binding=capability_binding,
+        fallback_materializer=fallback_materializer,
+        # factor_saver deliberately NOT parameterised — the guarded draft-only landing.
+        factor_store=factor_store,
+        eval_overrides=eval_overrides,
+    )

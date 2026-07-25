@@ -88,11 +88,19 @@ __all__ = [
     "derive_replay_plan_candidate_digest",
     # -- seats compatibility ------------------------------------------------ #
     "COMPAT_SOURCE",
+    "SEATS_DIRECTIONS",
     "persist_replay_run_compat",
     # -- C-A: the production per-point plan coordinator --------------------- #
     "ProductionReplayPlanCoordinator",
     "ReplayCoordinatorApprovalRefused",
     "build_replay_feed_floors",
+    # -- Task-12 carries (degradation honesty / Lane-0 binding / seats rows) - #
+    "REPLAY_DEGRADATION_BADGE_PREFIXES",
+    "fold_degraded_points_into_report_badges",
+    "PointEvidenceBindingRefused",
+    "verify_point_lane0_evidence",
+    "seats_rows_from_committed_decisions",
+    "persist_replay_run_compat_async",
     # -- C-C: the Phase-7 production approval binding (server-side half) ---- #
     "build_plan_approval_coordinator",
     "bind_process_plan_approval_coordinator",
@@ -225,11 +233,45 @@ _PROCESS_ROUTER_DEPS = AdaptersRouterDeps()
 
 
 def set_adapters_router_deps(deps: AdaptersRouterDeps) -> None:
-    """Bind the process-level router dependencies (Task-12 production wiring seam)."""
+    """Bind the process-level router dependencies (Task-12 production wiring seam).
+
+    Task-12 carry (e): a production binding that supplies ``replay_bindings`` WITHOUT an
+    authoritative ``clock`` permanently refuses ``POST /replay/wakeup`` (a loud
+    ``clock_unwired`` 503, since the maturity gate never falls back to the wall clock).
+    A forgotten clock would therefore silently disable maturity for the whole process,
+    so the binder refuses it at wiring time instead of at the first wakeup.
+    """
     global _PROCESS_ROUTER_DEPS
     if not isinstance(deps, AdaptersRouterDeps):
         raise TypeError("set_adapters_router_deps takes an AdaptersRouterDeps")
+    if deps.replay_bindings is not None and deps.clock is None:
+        raise ValueError(
+            "binding replay_bindings without an authoritative clock permanently "
+            "refuses /replay/wakeup (clock_unwired); bind `clock` alongside "
+            "`replay_bindings` or bind neither")
     _PROCESS_ROUTER_DEPS = deps
+
+
+def _resolve_report_for_badges(
+    store: Any, state: ShadowReplayRunState
+) -> tuple[DualCurveReport | None, bool]:
+    """Resolve a head's committed ``DualCurveReport`` for badge projection (read-only).
+
+    Returns ``(report, unresolved)``. A head with no ``curve_report_ref`` is
+    ``(None, False)`` — nothing to resolve. A ref the store cannot resolve is
+    ``(None, True)``, which the caller badges ``curve_report:unresolvable`` rather than
+    silently dropping the degradation reasons.
+    """
+    ref = state.curve_report_ref
+    if ref is None:
+        return None, False
+    resolve = getattr(store, "resolve_report", None)
+    if resolve is None:
+        return None, True
+    try:
+        return resolve(ref), False
+    except Exception:  # noqa: BLE001 — an unresolvable ref is badged, never swallowed
+        return None, True
 
 
 def process_adapters_router_deps() -> AdaptersRouterDeps:
@@ -247,8 +289,63 @@ def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
 
 
-def _state_badges(state: ShadowReplayRunState) -> list[str]:
-    """Honest provenance / degradation badges derived ONLY from the head itself."""
+#: the reviewed degradation-badge families a replay run can carry. A shortened /
+#: incomplete curve MUST arrive with its reason attached: the archive-coverage floor
+#: family (Task 2b / AMEND-1) and the seats 24/day LLM-pool family (Task 10 Fix 3).
+#: Task 12 carry (g): ``ReplayIntentLedger.degraded_points`` was consumed NOWHERE, so a
+#: degraded run projected a silent gap. These prefixes are what the projections surface.
+REPLAY_DEGRADATION_BADGE_PREFIXES: tuple[str, ...] = (
+    "archive_pre_floor:",
+    "llm_budget_exhausted:",
+)
+
+
+def fold_degraded_points_into_report_badges(
+    report: DualCurveReport, degraded_points: Mapping[int, tuple[str, ...]]
+) -> DualCurveReport:
+    """Carry the driver's per-point degradation badges onto the ``DualCurveReport``.
+
+    ``build_dual_curves`` (Task 5) folds only the RUNNER's own badges — it has no ledger
+    input — so a curve shortened by a pre-floor feed or an exhausted seats LLM pool
+    reached the projections carrying no reason at all. This is the Task-12 fold: badges
+    are ADDED (sorted, de-duplicated), never rewritten, and each carries the point
+    ordinal it came from so a consumer can name the affected decision point.
+
+    Purely additive: an empty ``degraded_points`` returns a byte-identical report.
+    """
+    if not degraded_points:
+        return report
+    extra: set[str] = set(report.badges)
+    for ordinal in sorted(degraded_points):
+        for badge in degraded_points[ordinal] or ():
+            text = str(badge).strip()
+            if not text:
+                continue
+            extra.add(text)
+            extra.add(f"point{int(ordinal)}:{text}")
+    return report.model_copy(update={"badges": tuple(sorted(extra))})
+
+
+def _degradation_badges(report: DualCurveReport | None) -> list[str]:
+    """The reviewed degradation badges carried by a committed report (or ``[]``)."""
+    if report is None:
+        return []
+    return sorted({
+        badge for badge in report.badges
+        if any(badge.startswith(p) or f":{p}" in badge
+               for p in REPLAY_DEGRADATION_BADGE_PREFIXES)
+    })
+
+
+def _state_badges(
+    state: ShadowReplayRunState, report: DualCurveReport | None = None
+) -> list[str]:
+    """Honest provenance / degradation badges for one head.
+
+    Head-derived badges plus (when the committed ``DualCurveReport`` is resolvable) the
+    reviewed degradation reasons the run recorded — so a shortened LLM curve never
+    reaches a consumer without its reason (Task-12 carry g).
+    """
     badges = [f"source:{COMPAT_SOURCE}", f"status:{state.status.value}"]
     if state.status is ExperimentStatus.WAITING_FOR_MATURITY:
         badges.append("waiting_for_maturity")
@@ -256,6 +353,7 @@ def _state_badges(state: ShadowReplayRunState) -> list[str]:
         badges.append("curve_report:pending")
     if state.completed_points < state.total_points:
         badges.append("points:partial")
+    badges.extend(_degradation_badges(report))
     return badges
 
 
@@ -470,10 +568,17 @@ def build_adapters_router(deps: AdaptersRouterDeps | None = None) -> APIRouter:
         state = await asyncio.to_thread(store.load_head, eid)
         if state is None:
             return _fail("unknown_experiment", 404)
+        # carry (g): a shortened / degraded curve must arrive WITH its reason, so the
+        # committed report's reviewed degradation badges are surfaced here too. A
+        # ref that cannot be resolved is badged honestly, never silently dropped.
+        report, unresolved = await asyncio.to_thread(_resolve_report_for_badges, store, state)
+        badges = _state_badges(state, report)
+        if unresolved:
+            badges.append("curve_report:unresolvable")
         return JSONResponse({
             "ok": True,
             "state": _state_projection(state),
-            "badges": _state_badges(state),
+            "badges": badges,
         })
 
     # ── GET /orchestration/replay/curves ─────────────────────────────────── #
@@ -490,14 +595,21 @@ def build_adapters_router(deps: AdaptersRouterDeps | None = None) -> APIRouter:
         if state is None:
             return _fail("unknown_experiment", 404)
         if state.status is not ExperimentStatus.COMPLETED or state.curve_report_ref is None:
-            # honest degradation: an explicit status + resume_after, NEVER a curve.
+            # honest degradation: an explicit status + resume_after, NEVER a curve. The
+            # committed report's degradation badges ARE surfaced (carry g) so a caller
+            # learns WHY a curve is short even before the run completes.
+            pending, unresolved = await asyncio.to_thread(
+                _resolve_report_for_badges, store, state)
+            badges = _state_badges(state, pending)
+            if unresolved:
+                badges.append("curve_report:unresolvable")
             return JSONResponse({
                 "ok": True,
                 "experiment_id": eid,
                 "report": None,
                 "status": state.status.value,
                 "resume_after": _iso(state.resume_after),
-                "badges": _state_badges(state),
+                "badges": badges,
             })
         report = await asyncio.to_thread(store.resolve_report, state.curve_report_ref)
         return JSONResponse({
@@ -505,7 +617,7 @@ def build_adapters_router(deps: AdaptersRouterDeps | None = None) -> APIRouter:
             "experiment_id": eid,
             "status": state.status.value,
             "report": _report_projection(report),
-            "badges": _state_badges(state),
+            "badges": _state_badges(state, report),
         })
 
     # ── POST /orchestration/replay/wakeup ────────────────────────────────── #
@@ -777,6 +889,93 @@ def persist_replay_run_compat(
             fh.write(json.dumps(head, ensure_ascii=False) + "\n")
 
 
+#: the EXACT seats direction vocabulary the 落子 UI renders. Nothing else is written —
+#: a direction outside this set is a refusal, never a silently-invented row.
+SEATS_DIRECTIONS: tuple[str, str, str] = ("买入", "卖出", "观望")
+
+#: the τ the deterministic/pure-factor lane already uses (``adapters.luozi``'s frozen v1
+#: rule). Reused here so the seats vocabulary mapping is the SAME dead zone the curves
+#: were built under, never a second threshold invented at the projection.
+_SEATS_TAU = 0.15
+
+
+def seats_rows_from_committed_decisions(
+    committed: tuple[Any, ...],
+    *,
+    run_head: Mapping[str, Any],
+    timezone_name: str = _DEFAULT_SESSION_TZ,
+) -> tuple[dict[str, Any], ...]:
+    """Map committed decision Artifacts onto the seats decision-row vocabulary.
+
+    Task-12 carry (f). ``committed`` is the per-point committed Proposal artifacts (or
+    any object exposing ``payload`` / ``decision_as_of`` / ``rationale``); each becomes
+    ONE row for :func:`persist_replay_run_compat`:
+
+    * ``direction`` ∈ :data:`SEATS_DIRECTIONS` — derived from the committed proposal's
+      OWN book (a non-empty long book ⇒ 买入; an all-cash book ⇒ 观望; an explicit
+      negative-signal book ⇒ 卖出), never invented and never a fourth value;
+    * ``strategy_id`` — the seat the run head names, so the existing ``RunPicker``
+      (which filters on ``strategy_id``) lists the run in THAT seat's 回测历史;
+    * ``rationale`` — verbatim from the committed artifact (a row without one is
+      refused downstream rather than fabricated).
+    """
+    strategy_id = str(run_head.get("strategy_id") or "").strip()
+    if not strategy_id:
+        raise ValueError(
+            "a seats run head must name the strategy_id (the seat) it belongs to — "
+            "RunPicker filters on it and an unnamed run never appears in any seat")
+    rows: list[dict[str, Any]] = []
+    for item in committed:
+        payload = getattr(item, "payload", None)
+        payload = payload if isinstance(payload, Mapping) else {}
+        positions = tuple(payload.get("positions") or ())
+        cash_weight = payload.get("cash_weight")
+        rationale = str(payload.get("rationale")
+                        or getattr(item, "rationale", "") or "").strip()
+        decision_as_of = (payload.get("decision_as_of")
+                          or getattr(item, "decision_as_of", None))
+        if not isinstance(decision_as_of, datetime):
+            raise ValueError(
+                "a committed decision artifact must carry an aware 'decision_as_of' — "
+                "a seats row is never fabricated from an unknown instant")
+        weights = [float(p.get("target_weight") or 0.0) if isinstance(p, Mapping)
+                   else float(getattr(p, "target_weight", 0.0)) for p in positions]
+        if any(w > _SEATS_TAU for w in weights):
+            direction = SEATS_DIRECTIONS[0]                     # 买入
+        elif any(w < -_SEATS_TAU for w in weights):
+            direction = SEATS_DIRECTIONS[1]                     # 卖出
+        else:
+            direction = SEATS_DIRECTIONS[2]                     # 观望
+        if cash_weight is not None and float(cash_weight) >= 1.0 - 1e-9:
+            direction = SEATS_DIRECTIONS[2]                     # an all-cash book is 观望
+        rows.append({
+            "decision_as_of": decision_as_of,
+            "direction": direction,
+            "rationale": rationale,
+            "confidence": payload.get("confidence"),
+            "strategy_id": strategy_id,
+            "timezone": timezone_name,
+            "code": str(run_head.get("code") or "").strip(),
+        })
+    return tuple(rows)
+
+
+async def persist_replay_run_compat_async(
+    state: ShadowReplayRunState,
+    *,
+    decisions: tuple[Mapping[str, Any], ...],
+    run_head: Mapping[str, Any],
+) -> None:
+    """``persist_replay_run_compat`` from a coroutine — through ``asyncio.to_thread``.
+
+    The compat append does blocking file IO on two append-only jsonl logs. Calling it
+    directly from a coroutine blocks the event loop, which is the house red line that
+    once got 9999 killed by the watchdog. Every async caller uses THIS wrapper.
+    """
+    await asyncio.to_thread(
+        persist_replay_run_compat, state, decisions=decisions, run_head=run_head)
+
+
 # =========================================================================== #
 # C-A — the PRODUCTION ReplayPlanCoordinator                                    #
 # =========================================================================== #
@@ -787,6 +986,59 @@ class ReplayCoordinatorApprovalRefused(ShadowContractError):
     and a missing / REJECTED decision refuses the lane, so an unapproved plan can never
     execute (invariant 7b).
     """
+
+
+class PointEvidenceBindingRefused(ShadowContractError):
+    """A point's Lane-0 reports do not bind THAT point's ``market_factor_report``.
+
+    R2 addition: a rolling replay curve is only honest if each decision point's
+    regime/rotation reasoning was produced from the factor report computed at that
+    point's ``decision_as_of``. A cross-point ``factor_report_digest`` reference (the
+    classic silent leak — reusing yesterday's regime read) is refused here, and every
+    ``EvidenceAnchor`` must resolve to a factor id the SAME report actually carries.
+    """
+
+
+def verify_point_lane0_evidence(
+    *, factor_report: Any, regime: Any, rotation: Any = None
+) -> None:
+    """Refuse unless the point's Lane-0 reports bind the point's OWN factor report.
+
+    Consumes the Phase-5 contracts rather than re-implementing their structural
+    properties (ruling R14): ``RegimeReport`` / ``RotationReport`` re-verify their own
+    axis maps, evidence non-emptiness and ``evidence_factor_ids`` consistency in their
+    model validators at construction time. What is genuinely NOT Phase-5-owned — and is
+    documented in ``RegimeReport``'s own docstring as "a downstream responsibility" — is
+    RE-RESOLVING each anchor against the bound report; that is what this function does,
+    in exactly the form the reviewed Phase-5 bootstrap e2e asserts inline
+    (``tests/orchestration/test_bootstrap_e2e.py::test_happy_path_prompt_honesty_and_
+    evidence_binding``).
+    """
+    digest = str(getattr(factor_report, "content_digest", "") or "")
+    if not digest:
+        raise PointEvidenceBindingRefused(
+            "the point's market_factor_report carries no content_digest to bind")
+    factor_ids = {v.factor_id for v in getattr(factor_report, "values", ()) or ()}
+    for label, report in (("regime", regime), ("rotation", rotation)):
+        if report is None:
+            continue
+        bound = str(getattr(report, "factor_report_digest", "") or "")
+        if bound != digest:
+            raise PointEvidenceBindingRefused(
+                f"the {label} report binds factor_report_digest {bound[:8]!r} but this "
+                f"decision point's market_factor_report is {digest[:8]!r} — a "
+                "cross-point evidence reference is refused")
+        anchors = list(getattr(report, "evidence", ()) or ())
+        for mainline in getattr(report, "mainlines", ()) or ():
+            anchors.extend(getattr(mainline, "evidence", ()) or ())
+        if not anchors:
+            raise PointEvidenceBindingRefused(
+                f"the {label} report carries no EvidenceAnchor to re-verify")
+        for anchor in anchors:
+            if anchor.factor_id not in factor_ids:
+                raise PointEvidenceBindingRefused(
+                    f"the {label} report anchors factor {anchor.factor_id!r}, which the "
+                    "bound market_factor_report does not carry")
 
 
 class _ReplayApprovalSource(Protocol):
@@ -833,6 +1085,34 @@ def build_replay_feed_floors(
     ]
     floors.append(macro_feed_floor_from_snapshots(snapshots_path=macro_snapshots_path))
     return tuple(floors)
+
+
+def _verify_bootstrap_return(produced: Any, *, data_context: Any, point: Any) -> None:
+    """Refuse a Bootstrap run whose committed ``ContextSnapshot`` is at another instant.
+
+    The bootstrap lane's return is optional (a recorded fake may return ``None``), but if
+    it carries a ``ContextSnapshot`` — directly, or as ``.context_snapshot`` /
+    ``.snapshot`` on a ``RunResult``-shaped object — its ``as_of`` MUST equal the frozen
+    per-point ``data_context.as_of`` (which the driver has already bound to
+    ``point.decision_as_of``). A snapshot frozen at any other instant would mean the
+    point reasoned over a context that is not its own PIT snapshot.
+    """
+    if produced is None:
+        return
+    snapshot = produced
+    for attribute in ("context_snapshot", "snapshot"):
+        inner = getattr(snapshot, attribute, None)
+        if inner is not None:
+            snapshot = inner
+            break
+    as_of = getattr(snapshot, "as_of", None)
+    if as_of is None:
+        return  # the lane returned something with no instant to bind — nothing to check
+    if ensure_aware_utc(as_of) != ensure_aware_utc(data_context.as_of):
+        raise ShadowContractError(
+            "the Bootstrap plan committed a ContextSnapshot at "
+            f"{as_of.isoformat()} but decision point {point.point_ordinal} is frozen at "
+            f"{data_context.as_of.isoformat()} — a per-point snapshot is never borrowed")
 
 
 class ProductionReplayPlanCoordinator:
@@ -892,6 +1172,7 @@ class ProductionReplayPlanCoordinator:
         bootstrap_candidate_plan_digest: str | None = None,
         main_candidate_plan_digest: str | None = None,
         bootstrap_node_tokens: int = 1000,
+        lane0_reports: Callable[[ReplayDecisionPoint], Mapping[str, Any]] | None = None,
     ) -> None:
         self._request = request
         self._schedule = schedule
@@ -934,6 +1215,10 @@ class ProductionReplayPlanCoordinator:
                                "plan_candidate_digest": self._plan_candidate_digest})
         )
         self._bootstrap_node_tokens = int(bootstrap_node_tokens)
+        # R2: an optional per-point Lane-0 report provider. Bound ⇒ every point's
+        # regime/rotation evidence is re-verified against THAT point's factor report
+        # (see :func:`verify_point_lane0_evidence`); unbound ⇒ structurally inert.
+        self._lane0_reports = lane0_reports
 
     # -- red lines ---------------------------------------------------------- #
     def _require_approval(self, candidate_plan_digest: str, *, lane: str) -> Any:
@@ -1004,10 +1289,21 @@ class ProductionReplayPlanCoordinator:
         self._reserve_bootstrap_child(point)
         memory_binding = self._memory.prepare_pit_replay(
             data_context, self._authority, prior_context_ref=self._prior_context_ref)
-        self._plan_runner(
+        produced = self._plan_runner(
             lane="bootstrap", point=point, approval=approval,
             data_context=data_context, memory_binding=memory_binding,
             candidate_plan_digest=self._bootstrap_candidate)
+        # Task-12 carry (b): the BootstrapPlan's committed ContextSnapshot must BE the
+        # source of the data_context this coordinator returns. The seam's return used to
+        # be discarded by design; a returned snapshot is now VERIFIED (a snapshot frozen
+        # at any other instant is a silent PIT leak, not a harmless extra).
+        _verify_bootstrap_return(produced, data_context=data_context, point=point)
+        if self._lane0_reports is not None:
+            reports = dict(self._lane0_reports(point) or {})
+            verify_point_lane0_evidence(
+                factor_report=reports.get("factor_report"),
+                regime=reports.get("regime"),
+                rotation=reports.get("rotation"))
         return ReplayPointSnapshot(
             data_context=data_context, degradation_badges=badges)
 

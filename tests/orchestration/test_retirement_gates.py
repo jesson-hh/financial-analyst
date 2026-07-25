@@ -505,12 +505,19 @@ def test_forward_reference_selectors_are_all_actually_referenced():
     )
 
 
-def test_the_task12_suites_are_the_only_pytest_forward_references():
-    assert {t for t in rt.FORWARD_REFERENCE_SELECTORS if t.endswith(".py")
-            or "::" in t} == {
-        "tests/orchestration/test_redline_regression.py",
-        "tests/orchestration/test_phase9_e2e.py::test_recovery",
+def test_no_pytest_selector_remains_a_forward_reference():
+    """Task 12 landed both suites, so the two pytest forward references were PRUNED —
+    only the three parity fixtures (a post-phase carry) remain declared."""
+    assert {t for t in rt.FORWARD_REFERENCE_SELECTORS
+            if t.endswith(".py") or "::" in t} == set()
+    assert rt.FORWARD_REFERENCE_SELECTORS == {
+        "tests/orchestration/fixtures/console_report_parity_v1.json",
+        "tests/orchestration/fixtures/radar_presets_attestation_v1.json",
+        "tests/orchestration/fixtures/research_draft_parity_v1.json",
     }
+    # …and the two Task-12 suites really do resolve now (the reason for the prune).
+    assert _resolves("tests/orchestration/test_redline_regression.py")
+    assert _resolves("tests/orchestration/test_phase9_e2e.py::test_recovery")
 
 
 # =========================================================================== #

@@ -298,7 +298,15 @@ _RESEARCH_GATE = EntryPointRetirementGate(
                 "against the ledger, and an unapproved kernel plan leaks none."
             ),
             evidence_kind="pytest_suite",
+            # RE-FROZEN by Task 12 (the Task-11 review carry): the previous selector
+            # named only the kernel-side ledger suites, so the criterion's OWN first
+            # clause — "the legacy loop holds no kernel reservation at all" — was
+            # clearable without anyone ever checking `research/loop.py`. The bespoke
+            # old-loop-vs-kernel test now leads the selector; the kernel-side suites
+            # stay as the reservation-semantics evidence they always were.
             evidence_selector=(
+                "tests/orchestration/test_redline_regression.py::"
+                "test_budget_isolation_old_loop_holds_no_kernel_reservation "
                 "tests/orchestration/test_budget.py "
                 "tests/orchestration/test_budget_ledger.py "
                 "tests/orchestration/test_weiwo_adapter.py::"
@@ -322,9 +330,13 @@ _DEFAULT_GATES: tuple[EntryPointRetirementGate, ...] = (
 #: ``test_phase9_e2e.py::test_recovery`` are Task 12's two suites; the three parity
 #: fixtures are produced with their reviewed comparison verdicts. Declaring them keeps a
 #: *typo* in a should-resolve-today selector from hiding among the legitimate futures.
+#: PRUNED by Task 12: the two pytest forward references
+#: (``test_redline_regression.py`` and ``test_phase9_e2e.py::test_recovery``) now
+#: RESOLVE on disk, so declaring them would be a stale entry masking a real typo. Only
+#: the three parity fixtures remain — a controller-ruled POST-PHASE carry owned by
+#: whoever runs the parity comparison before a removal commit. This frozenset is NOT
+#: part of the gate digest, so pruning it needs no golden re-freeze.
 FORWARD_REFERENCE_SELECTORS: frozenset[str] = frozenset({
-    "tests/orchestration/test_redline_regression.py",
-    "tests/orchestration/test_phase9_e2e.py::test_recovery",
     "tests/orchestration/fixtures/console_report_parity_v1.json",
     "tests/orchestration/fixtures/radar_presets_attestation_v1.json",
     "tests/orchestration/fixtures/research_draft_parity_v1.json",

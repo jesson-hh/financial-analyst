@@ -3113,10 +3113,29 @@ def _stage_commit_dual_curve(
     pool.commit_layer(
         0, node_runs=(node_run,), expected_outputs=expected,
         idempotency_key=f"dualcurve-commit:{run_id}")
+    # Task-12 carry (Task-5/9 review): read the COMMITTED artifact back rather than
+    # synthesizing the ref from the staged one. Now that `DualCurveReport@1` is a
+    # registered Phase-9 payload (Task 9), a real `ArtifactPool` can answer
+    # `committed_output`; if the pool's stored artifact differed from what we staged,
+    # the synthesized ref would have pointed at content the pool never committed.
+    committed = artifact
+    read_back = getattr(pool, "committed_output", None)
+    if callable(read_back):
+        stored = read_back(node_id, output_key)
+        if stored is None:
+            raise ShadowContractError(
+                "the dual-curve report was staged and the layer committed, but the pool "
+                f"has no committed output for ({node_id!r}, {output_key!r}) — the ref is "
+                "never synthesized over a commit that did not land")
+        if stored.content_digest != artifact.content_digest:
+            raise ShadowContractError(
+                "the pool committed a dual-curve artifact whose content digest differs "
+                "from the staged report; the curve ref binds the COMMITTED content only")
+        committed = stored
     return TypedPayloadRef(
-        schema_ref=schema_ref,
+        schema_ref=committed.payload_schema_ref,
         payload_ref=PayloadRef(
-            namespace="main", object_id=artifact.artifact_id,
+            namespace="main", object_id=committed.artifact_id,
             content_digest=report.semantic_digest()),
     )
 
@@ -3324,6 +3343,7 @@ class ReplayStateStore:
     def __init__(
         self, *, payload_store: Any, state_cells: Any, registry: Any,
         clock: AuthoritativeClock, uow_factory: Callable[[], Any],
+        event_store: Any = None,
     ) -> None:
         for namespace in REPLAY_STATE_CELL_NAMESPACES:
             if namespace not in state_cells.allowed_namespaces:
@@ -3337,6 +3357,12 @@ class ReplayStateStore:
         self._digest = _replay_registry_digest(registry)
         self._clock = clock
         self._uow_factory = uow_factory
+        # the DURABLE index the parked-head scan walks (Task-12 carry, Task-6 review):
+        # the daily scheduler parks on day N and wakes on day N+1 in a FRESH process,
+        # where the in-process `_waiting` map is empty — so an in-memory-only
+        # enumeration silently did nothing. A durable event store (the Task-1b
+        # `JsonlEventStore`, which exposes `run_ids`) makes the scan restart-proof.
+        self._events = event_store
         self._waiting: dict[str, ShadowReplayRunState] = {}
 
     @property
@@ -3377,7 +3403,37 @@ class ReplayStateStore:
         )
 
     def waiting_states(self) -> tuple[ShadowReplayRunState, ...]:
-        return tuple(self._waiting.values())
+        """Every head currently parked at ``WAITING_FOR_MATURITY``.
+
+        DURABLE when an event store exposing ``run_ids`` is bound (the Task-1b
+        ``JsonlEventStore``): the scan walks the persisted ``main`` journal for runs
+        carrying an ``ExperimentStateChanged`` event — this store appends those under
+        ``run_id == experiment_id`` — and re-reads each head THROUGH THE DURABLE CELLS,
+        so a fresh process (the day-N+1 scheduler) finds yesterday's parked heads. Falls
+        back to the in-process map when no scannable event store is bound (the in-memory
+        Phase-2 default every test uses), which keeps existing behaviour byte-identical.
+        """
+        found: dict[str, ShadowReplayRunState] = dict(self._waiting)
+        run_ids = getattr(self._events, "run_ids", None)
+        if callable(run_ids):
+            from guanlan_v2.orchestration.events import EventType
+
+            for run_id in run_ids("main"):
+                journal = self._events.journal(run_id, "main")
+                if not any(e.event_type is EventType.EXPERIMENT_STATE_CHANGED
+                           for e in journal):
+                    continue
+                head = self.load_head(run_id)
+                if head is None:
+                    continue
+                if head.status == ExperimentStatus.WAITING_FOR_MATURITY:
+                    found[head.experiment_id] = head
+                else:
+                    found.pop(head.experiment_id, None)
+        return tuple(
+            state for _key, state in sorted(found.items(), key=lambda kv: kv[0])
+            if state.status == ExperimentStatus.WAITING_FOR_MATURITY
+        )
 
     def _note_waiting(self, state: ShadowReplayRunState) -> None:
         if state.status == ExperimentStatus.WAITING_FOR_MATURITY:

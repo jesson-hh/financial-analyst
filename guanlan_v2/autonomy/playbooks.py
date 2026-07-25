@@ -24,12 +24,37 @@ PLAYBOOKS["review_officer"] = run_review_officer
 # =========================================================================== #
 # Phase 9 · Task 6 — shadow-replay 成熟唤醒 playbook                              #
 # =========================================================================== #
+#: Task 12 生产接线槽位:进程级 provider(callable → (store, bindings, now) 或 None)。
+#: 未绑定 ⇒ `_shadow_wakeup_context()` 仍返回 None ⇒ playbook 诚实跳过(行为不变)。
+_SHADOW_WAKEUP_PROVIDER: Optional[Callable[[], Optional[Tuple[Any, Any, Any]]]] = None
+
+
+def set_shadow_wakeup_context_provider(
+    provider: Optional[Callable[[], Optional[Tuple[Any, Any, Any]]]]
+) -> None:
+    """绑定(或清除)成熟唤醒上下文 provider——Task 12 的一次性生产接线点。
+
+    provider 返回 (ReplayStateStore, ReplayRuntimeBindings, now) 或 None。传 None 清除。
+    provider 抛错按未接线处理(诚实跳过),绝不让调度器因接线问题炸掉。"""
+    global _SHADOW_WAKEUP_PROVIDER
+    if provider is not None and not callable(provider):
+        raise TypeError("set_shadow_wakeup_context_provider takes a callable or None")
+    _SHADOW_WAKEUP_PROVIDER = provider
+
+
 def _shadow_wakeup_context() -> Optional[Tuple[Any, Any, Any]]:
     """生产接线钩子(测试打桩靶点):返回 (ReplayStateStore, ReplayRuntimeBindings, now) 或 None。
 
-    默认返回 None——生产尚未接线(Task 10/12 负责用进程级 durable stores + 绑定装配),故本
-    playbook 诚实跳过;测试 monkeypatch 本函数注入假件。"""
-    return None
+    默认返回 None——未接线 ⇒ 本 playbook 诚实跳过;Task 12 用
+    `set_shadow_wakeup_context_provider` 绑定进程级 durable stores + 绑定装配;测试
+    monkeypatch 本函数或绑定 provider 注入假件。"""
+    provider = _SHADOW_WAKEUP_PROVIDER
+    if provider is None:
+        return None
+    try:
+        return provider()
+    except Exception:  # noqa: BLE001 — 接线故障 ⇒ 诚实跳过,绝不炸调度器
+        return None
 
 
 def _run_shadow_replay_wakeup(ctx: Any) -> Dict[str, Any]:
@@ -96,9 +121,29 @@ def orchestrate_lane0_bootstrap(*, service: Lane0BootstrapService, now: Any) -> 
     return out
 
 
+#: Task 12 生产接线槽位:进程级 provider(callable → Lane0BootstrapService 或 None)。
+_LANE0_SERVICE_PROVIDER: Optional[Callable[[], Optional[Lane0BootstrapService]]] = None
+
+
+def set_lane0_bootstrap_service_provider(
+    provider: Optional[Callable[[], Optional[Lane0BootstrapService]]]
+) -> None:
+    """绑定(或清除)Lane 0 自举 service provider——Task 12 的一次性生产接线点。"""
+    global _LANE0_SERVICE_PROVIDER
+    if provider is not None and not callable(provider):
+        raise TypeError("set_lane0_bootstrap_service_provider takes a callable or None")
+    _LANE0_SERVICE_PROVIDER = provider
+
+
 def _lane0_bootstrap_service() -> Optional[Lane0BootstrapService]:
     """生产接线钩子(测试打桩靶点):返回 Lane0BootstrapService 或 None(未接线 ⇒ 诚实跳过)。"""
-    return None
+    provider = _LANE0_SERVICE_PROVIDER
+    if provider is None:
+        return None
+    try:
+        return provider()
+    except Exception:  # noqa: BLE001 — 接线故障 ⇒ 诚实跳过,绝不炸调度器
+        return None
 
 
 def _run_lane0_bootstrap(ctx: Any) -> Dict[str, Any]:
