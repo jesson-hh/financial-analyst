@@ -58,12 +58,12 @@ the ``evidence_kind``:
   records the operational lane emits;
 * ``reviewed_artifact`` — a ``review:<slug>`` pointer to the human review record.
 
-Some selectors are **forward references**: they name evidence Task 12 (the whole-framework
-e2e + red-line regression suite) and the future parity fixtures will make resolvable. That
-is by design — a gate describes a FUTURE condition, and its validity never depends on its
-selectors resolving today. :data:`FORWARD_REFERENCE_SELECTORS` declares exactly which
-tokens were unresolvable at authoring time, so a *typo* in a selector that should resolve
-today fails loudly instead of hiding among them.
+Some selectors are **forward references**: today that is exactly the three future parity
+fixtures (Task 12 landed both pytest forward references, which were then pruned from the
+declared set). That is by design — a gate describes a FUTURE condition, and its validity
+never depends on its selectors resolving today. :data:`FORWARD_REFERENCE_SELECTORS`
+declares exactly which tokens are still unresolvable, so a *typo* in a selector that
+should resolve today fails loudly instead of hiding among them.
 """
 from __future__ import annotations
 

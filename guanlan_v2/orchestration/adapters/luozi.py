@@ -3411,25 +3411,31 @@ class ReplayStateStore:
         ``run_id == experiment_id`` — and re-reads each head THROUGH THE DURABLE CELLS,
         so a fresh process (the day-N+1 scheduler) finds yesterday's parked heads. Falls
         back to the in-process map when no scannable event store is bound (the in-memory
-        Phase-2 default every test uses), which keeps existing behaviour byte-identical.
+        Phase-2 default every test uses): that path returns the map's INSERTION order,
+        byte-identical to the pre-Task-12 behaviour. The durable path merges the scanned
+        heads with the map and returns them ordered by ``experiment_id`` (a merge has no
+        meaningful insertion order — the fold order of two sources is not a history).
         """
-        found: dict[str, ShadowReplayRunState] = dict(self._waiting)
         run_ids = getattr(self._events, "run_ids", None)
-        if callable(run_ids):
-            from guanlan_v2.orchestration.events import EventType
+        if not callable(run_ids):
+            # unchanged fallback: insertion order, exactly as before Task 12.
+            return tuple(self._waiting.values())
 
-            for run_id in run_ids("main"):
-                journal = self._events.journal(run_id, "main")
-                if not any(e.event_type is EventType.EXPERIMENT_STATE_CHANGED
-                           for e in journal):
-                    continue
-                head = self.load_head(run_id)
-                if head is None:
-                    continue
-                if head.status == ExperimentStatus.WAITING_FOR_MATURITY:
-                    found[head.experiment_id] = head
-                else:
-                    found.pop(head.experiment_id, None)
+        from guanlan_v2.orchestration.events import EventType
+
+        found: dict[str, ShadowReplayRunState] = dict(self._waiting)
+        for run_id in run_ids("main"):
+            journal = self._events.journal(run_id, "main")
+            if not any(e.event_type is EventType.EXPERIMENT_STATE_CHANGED
+                       for e in journal):
+                continue
+            head = self.load_head(run_id)
+            if head is None:
+                continue
+            if head.status == ExperimentStatus.WAITING_FOR_MATURITY:
+                found[head.experiment_id] = head
+            else:
+                found.pop(head.experiment_id, None)
         return tuple(
             state for _key, state in sorted(found.items(), key=lambda kv: kv[0])
             if state.status == ExperimentStatus.WAITING_FOR_MATURITY

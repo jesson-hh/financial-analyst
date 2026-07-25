@@ -46,6 +46,7 @@ import asyncio
 import dataclasses
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -370,13 +371,14 @@ def test_luozi_interval_e2e(monkeypatch, tmp_path):
         execution_config_digest=world.config.semantic_digest())
     assert base.budget.get_active_plan(
         request.request_id, derived).reservation_id == plans[0].reservation_id
-    # the reconciliation rule, asserted structurally: the per-point admission path
-    # reserves NODES ONLY. `persist_and_reserve_candidate` mints its own plan
-    # reservation, so a production plan_runner must never call it inside the interval —
-    # the coordinator does not, and every per-point reservation is a node child.
+    # the reconciliation rule: the per-point admission path reserves NODES ONLY.
+    # `persist_and_reserve_candidate` mints its own plan reservation, so a production
+    # plan_runner must never call it inside the interval. LOAD-BEARING: the parentage
+    # walk below over the REAL ledger. SUPPLEMENT (corroborating): the coordinator
+    # module does not name that call at all.
     from guanlan_v2.orchestration.adapters import api as adapters_api
 
-    coordinator_src = open(adapters_api.__file__, encoding="utf-8").read()
+    coordinator_src = Path(adapters_api.__file__).read_text(encoding="utf-8")
     assert "persist_and_reserve_candidate(" not in coordinator_src
     for reservation in ledger_state.reservations.values():
         if reservation.scope_type == "node":
@@ -469,7 +471,7 @@ def test_luozi_interval_e2e(monkeypatch, tmp_path):
         "run_id": state.run_id, "code": f"{EXCHANGE}{CODE}", "name": "浦发银行",
         "strategy_id": "seat-e2e", "strategy_name": "回放席位", "tf": "D",
         "start_date": "2026-07-06", "end_date": "2026-07-08",
-        "n_buy": 3, "n_sell": 0, "n_watch": 0, "n_err": 0,
+        "n_buy": 1, "n_sell": 0, "n_watch": 2, "n_err": 0,
         "model": "orchestration/dec.trader",
     }
     committed = tuple(runner_seam.artifacts[o] for o in sorted(runner_seam.artifacts))
@@ -479,7 +481,11 @@ def test_luozi_interval_e2e(monkeypatch, tmp_path):
         assert row["direction"] in SEATS_DIRECTIONS
         assert row["strategy_id"] == run_head["strategy_id"]   # RunPicker filters on it
         assert row["rationale"]
-    assert [r["direction"] for r in rows] == [SEATS_DIRECTIONS[0]] * 3   # 买入 ×3
+    # the direction is the BOOK DELTA: the run opens flat, so point 1 (0 → 0.5) is 买入
+    # and the two identical follow-on books are 观望 (see test_seats_direction_matrix
+    # for the 卖出 leg — an exit is a fall, which a book-absolute reading cannot see).
+    assert [r["direction"] for r in rows] == [
+        SEATS_DIRECTIONS[0], SEATS_DIRECTIONS[2], SEATS_DIRECTIONS[2]]
 
     # the async caller path goes through asyncio.to_thread (never blocks the loop).
     asyncio.run(persist_replay_run_compat_async(
@@ -505,12 +511,92 @@ def test_luozi_interval_e2e(monkeypatch, tmp_path):
         assert "idx" not in row                    # never a frontend display coordinate
 
 
+def _committed_book(ordinal: int, weight: float | None):
+    """A committed proposal artifact whose book holds ``weight`` (``None`` ⇒ all cash)."""
+    positions = ()
+    if weight is not None:
+        positions = ({"symbol": {"code": CODE, "exchange": EXCHANGE, "board": "main"},
+                      "target_weight": weight},)
+    return SimpleNamespace(
+        payload={"positions": positions,
+                 "cash_weight": 1.0 - (weight or 0.0),
+                 "rationale": f"point {ordinal}"},
+        artifact_id=f"artifact.book.{ordinal}",
+        decision_as_of=_utc("2026-07-06", 14, 0) + timedelta(days=ordinal - 1),
+    )
+
+
+def test_seats_direction_matrix_covers_every_reachable_direction():
+    """carry (f): all THREE seats directions are reachable — an exit renders 卖出.
+
+    The mapping is delta-based precisely because the shadow contract's target book is
+    long-only: a book-absolute reading could only ever produce 买入 / 观望, so the
+    existing seats UI would never show a sell for an orchestrated run.
+    """
+    run_head = {"run_id": "r", "code": f"{EXCHANGE}{CODE}", "strategy_id": "seat-m",
+                "tf": "D"}
+    # open (0 → 0.5) ⇒ 买入 · hold (0.5 → 0.5) ⇒ 观望 · exit (0.5 → all cash) ⇒ 卖出
+    rows = seats_rows_from_committed_decisions(
+        (_committed_book(1, 0.5), _committed_book(2, 0.5), _committed_book(3, None)),
+        run_head=run_head)
+    assert [r["direction"] for r in rows] == [
+        SEATS_DIRECTIONS[0], SEATS_DIRECTIONS[2], SEATS_DIRECTIONS[1]]
+
+    # a TRIM below τ is 观望; a trim beyond τ is 卖出 (the same dead zone as the curves).
+    trims = seats_rows_from_committed_decisions(
+        (_committed_book(1, 0.5), _committed_book(2, 0.40), _committed_book(3, 0.10)),
+        run_head=run_head)
+    assert [r["direction"] for r in trims] == [
+        SEATS_DIRECTIONS[0], SEATS_DIRECTIONS[2], SEATS_DIRECTIONS[1]]
+
+    # an explicit opening book means the run does NOT start flat: holding it is 观望.
+    held = seats_rows_from_committed_decisions(
+        (_committed_book(1, 0.5),), run_head=run_head, opening_book={CODE: 0.5})
+    assert [r["direction"] for r in held] == [SEATS_DIRECTIONS[2]]
+    exited = seats_rows_from_committed_decisions(
+        (_committed_book(1, None),), run_head=run_head, opening_book={CODE: 0.5})
+    assert [r["direction"] for r in exited] == [SEATS_DIRECTIONS[1]]
+
+    # every produced direction is in the closed vocabulary, and only those three exist.
+    assert SEATS_DIRECTIONS == ("买入", "卖出", "观望")
+    # an unidentifiable position is refused, never mapped to a default direction.
+    with pytest.raises(ValueError):
+        seats_rows_from_committed_decisions(
+            (SimpleNamespace(
+                payload={"positions": ({"symbol": {}, "target_weight": 0.5},),
+                         "cash_weight": 0.5, "rationale": "r"},
+                decision_as_of=_utc("2026-07-06", 14, 0)),),
+            run_head=run_head)
+
+
 def test_persist_compat_async_uses_a_worker_thread():
     """carry (f): the compat append is blocking file IO — it MUST run off the loop."""
     import inspect
+    import threading
 
-    source = inspect.getsource(persist_replay_run_compat_async)
-    assert "asyncio.to_thread" in source
+    # LOAD-BEARING: the append really runs on a DIFFERENT thread than the event loop.
+    seen: list[int] = []
+    calls: list[tuple] = []
+
+    async def _drive():
+        loop_thread = threading.get_ident()
+        import guanlan_v2.orchestration.adapters.api as mod
+
+        real = mod.persist_replay_run_compat
+        try:
+            mod.persist_replay_run_compat = lambda *a, **kw: (
+                seen.append(threading.get_ident()), calls.append((a, kw)))[0]
+            await persist_replay_run_compat_async(
+                object(), decisions=(), run_head={"run_id": "r", "code": "600000"})
+        finally:
+            mod.persist_replay_run_compat = real
+        return loop_thread
+
+    loop_thread = asyncio.run(_drive())
+    assert calls, "the async wrapper must actually call the sync append"
+    assert seen and seen[0] != loop_thread, "the blocking append ran ON the event loop"
+    # SUPPLEMENT (corroborating, NOT load-bearing).
+    assert "asyncio.to_thread" in inspect.getsource(persist_replay_run_compat_async)
     assert inspect.iscoroutinefunction(persist_replay_run_compat_async)
 
 
@@ -848,13 +934,24 @@ def test_replay_feed_floors_default_readers_are_bound(tmp_path, monkeypatch):
     assert all(by_id[k].archive_root == str(override) for k in sa.KINDS)
     assert by_id["macro"].floor_date == "2026-01-20"
 
-    # ② the default macro path IS the real macro-pulse snapshot surface, and its floor
-    #    is either an honest ISO date or an honest None — never fabricated.
+    # ② the default macro path IS the real macro-pulse snapshot surface — proven by
+    #    redirecting that surface's OWN default to a fixture and calling the builder with
+    #    NO snapshots_path. The real `var/macro_pulse/snapshots.jsonl` is never read: it
+    #    is rotated live by another process, so reading it would make this suite
+    #    non-hermetic (and violate the fixtures-only invariant).
+    from guanlan_v2.macro import pulse as macro_pulse
+
+    fixture = tmp_path / "macro_default.jsonl"
+    fixture.write_text(
+        json.dumps({"ts": "2026-02-03T15:00:00"}) + "\n"
+        + json.dumps({"ts": "2026-01-11T15:00:00"}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(macro_pulse, "_SNAP_DEFAULT", fixture)
     default_macro = replay_data.macro_feed_floor_from_snapshots()
     assert default_macro.feed_id == "macro"
-    assert default_macro.floor_date is None or (
-        len(default_macro.floor_date) == 10 and default_macro.floor_date[4] == "-")
-    assert "macro_pulse" in str(default_macro.archive_root)
+    assert default_macro.floor_date == "2026-01-11"    # the EARLIEST snapshot's date
+    assert str(default_macro.archive_root) == str(fixture)
+    # and the module the builder binds really is the macro-pulse surface.
+    assert "macro" in macro_pulse.__name__ and hasattr(macro_pulse, "_read_snapshots")
 
 
 # =========================================================================== #

@@ -17,7 +17,10 @@ Run: ``python -m pytest tests/orchestration/test_redline_regression.py -v``
 from __future__ import annotations
 
 import ast
+import json
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -258,15 +261,41 @@ def test_unapproved_dynamic_plan_never_executes():
     assert receipt.draft_ids == ()
     assert optimizer.calls == [] and saver.calls == []
 
-    # ③ structurally, a DYNAMIC pending card can never carry preset provenance — which
+    # ③ BEHAVIOURAL: a DYNAMIC pending card can never carry preset provenance — which
     #    is exactly why the Phase-7 lease channel (which only admits a preset-backed
-    #    card) can never auto-admit a DYNAMIC plan.
+    #    card) can never auto-admit a DYNAMIC plan. Constructed for real, both ways.
     from guanlan_v2.orchestration.plan_diff import PendingPlanApproval
 
+    with pytest.raises(Exception):                       # DYNAMIC + preset provenance
+        _pending_card(source=PlanSource.DYNAMIC, preset_id="preset.x",
+                      preset_record_digest="c" * 64)
+    with pytest.raises(Exception):                       # PRESET_FALLBACK without it
+        _pending_card(source=PlanSource.PRESET_FALLBACK)
+    dynamic = _pending_card(source=PlanSource.DYNAMIC)   # the only DYNAMIC shape there is
+    assert dynamic.preset_id is None and dynamic.preset_record_digest is None
+    # SUPPLEMENT (corroborating, NOT load-bearing — the constructions above are the proof)
     assert "preset_id" in PendingPlanApproval.model_fields
-    src = Path(PendingPlanApproval.__module__.replace(".", "/") + ".py")
-    text = (REPO_ROOT / src).read_text(encoding="utf-8")
-    assert "a DYNAMIC pending card must not carry preset provenance" in text
+
+
+def _pending_card(*, source, approval_policy=None, preset_id=None,
+                  preset_record_digest=None):
+    """A REAL :class:`PendingPlanApproval` (the Phase-7 human-approval card)."""
+    from guanlan_v2.orchestration.plan_diff import PLAN_DIFF_SCHEMA_REF, PendingPlanApproval
+    from guanlan_v2.orchestration.refs import PayloadRef, TypedPayloadRef
+
+    diff_digest = "d" * 64
+    ref = TypedPayloadRef(
+        schema_ref=PLAN_DIFF_SCHEMA_REF,
+        payload_ref=PayloadRef(namespace="main", object_id="diff-obj",
+                               content_digest=diff_digest))
+    return PendingPlanApproval(
+        request_id="req-redline", candidate_plan_digest="a" * 64, goal="g",
+        source=source,
+        approval_policy=approval_policy or ApprovalPolicy.REQUIRED,
+        node_count=1, worker_ids=("w.a",), plan_diff_ref=ref, rendered_md="body",
+        rendered_from_diff_digest=diff_digest, candidate_id="cand-1",
+        requested_at=datetime(2026, 7, 5, 1, 0, tzinfo=timezone.utc),
+        preset_id=preset_id, preset_record_digest=preset_record_digest)
 
 
 def _weiwo_schema_registry():
@@ -303,8 +332,8 @@ def test_no_silent_fallback_without_explicit_preset():
     assert fallback.calls == [], "a preset was materialized without an explicit id"
     assert optimizer.calls == [] and saver.calls == []
 
-    # the orchestrator's own terminal matrix refuses the dishonest shape: a
-    # ``halted_no_fallback`` record that nonetheless names a fallback preset.
+    # SUPPLEMENT (corroborating, NOT load-bearing — the behavioural halt above is the
+    # proof): the orchestrator's own fallback resolver terminates with NO preset.
     from guanlan_v2.orchestration.orchestrator import PlannerRunRecord
 
     text = Path(PlannerRunRecord.__module__.replace(".", "/") + ".py")
@@ -345,7 +374,9 @@ def test_drafts_never_auto_promote():
                         offenders.append(f"{path.name}:{node.lineno}:{alias.name}")
     assert offenders == [], f"an orchestration module reaches a promote path: {offenders}"
 
-    # ④ the adapter always writes status="draft" (the literal it is pinned to).
+    # ④ the adapter is pinned to the draft literal. SUPPLEMENT (corroborating, NOT
+    #    load-bearing — ② and ③ above are the proof, and test_phase9_e2e's
+    #    test_weiwo_e2e reads the landed product's status off disk).
     assert ww._DRAFT_STATUS == "draft"
     src = Path(ww.__file__).read_text(encoding="utf-8")
     assert "status=_DRAFT_STATUS" in src
@@ -377,13 +408,23 @@ def test_workers_never_write_memory_skill_code():
             assert token not in cid, f"capability {cid!r} looks like a self-write"
 
     # ③ memory changes are PROPOSALS — the capability's output is a receipt, and the
-    #    proposal path is grant-gated (an ungranted actor is refused, never silently
-    #    allowed).
+    #    proposal path is grant-gated. BEHAVIOURAL: the real grant gate is EXECUTED
+    #    against a real sealed worker that holds no memory.propose capability, and it
+    #    refuses. (`_verify_grant` reads only `self._facade`, and its capability branch
+    #    fires before the request is touched, so the unbound call is the whole gate.)
+    from guanlan_v2.orchestration.memory.catalog import phase3_memory_surface
+    from guanlan_v2.orchestration.memory.models import MemoryAuthorityError
+    from guanlan_v2.orchestration.memory.proposals import MemoryProposalService
+
     assert descriptor.output_schema_ref.name == "MemoryProposalReceipt"
     assert descriptor.input_schema_ref.name == "MemoryProposalRequest"
-    proposals_src = (REPO_ROOT / "guanlan_v2" / "orchestration" / "memory"
-                     / "proposals.py").read_text(encoding="utf-8")
-    assert "MemoryAuthorityError" in proposals_src
+    facade = phase3_memory_surface().facade_descriptor
+    ungranted = snap.workers[0]
+    assert propose_ref.id not in {c.id for c in ungranted.capability_allowlist}
+    with pytest.raises(MemoryAuthorityError):
+        MemoryProposalService._verify_grant(
+            SimpleNamespace(_facade=facade), None, worker=ungranted,
+            context=SimpleNamespace(memory_session_id="cs.redline"))
 
     # ④ the 帷幄 ONLINE binding grants NO write capability whatsoever.
     binding = resolve_weiwo_capability_binding(
@@ -469,10 +510,16 @@ def test_auto_approval_still_rejected_everywhere(source):
 
 
 def test_auto_approval_is_unreachable_through_the_phase9_surfaces():
-    # ① the pending human-approval card is unconstructible for AUTO (Phase 7).
-    plan_diff_src = (REPO_ROOT / "guanlan_v2" / "orchestration"
-                     / "plan_diff.py").read_text(encoding="utf-8")
-    assert "non-REQUIRED (AUTO) approval_policy" in plan_diff_src
+    # ① BEHAVIOURAL: the pending human-approval card is genuinely unconstructible for
+    #    AUTO — a real construction is attempted for both admissible sources.
+    for source in (PlanSource.DYNAMIC, PlanSource.PRESET_FALLBACK):
+        provenance = ({} if source is PlanSource.DYNAMIC
+                      else {"preset_id": "preset.x", "preset_record_digest": "c" * 64})
+        with pytest.raises(Exception):
+            _pending_card(source=source, approval_policy=ApprovalPolicy.AUTO,
+                          **provenance)
+        assert _pending_card(source=source, **provenance).approval_policy is (
+            ApprovalPolicy.REQUIRED)
 
     # ② the interval-replay driver refuses AUTO before ANYTHING runs.
     sch, cal, start, end = _three_point_env()
@@ -512,7 +559,7 @@ def test_auto_approval_is_unreachable_through_the_phase9_surfaces():
 # =========================================================================== #
 # 9. (R2/AMEND-1) the replay boundary is honestly UNAVAILABLE                   #
 # =========================================================================== #
-def test_replay_boundary_unavailable_honest():
+def test_replay_boundary_unavailable_honest(tmp_path):
     """R2/AMEND-1: 决策点早于归档覆盖下限 ⇒ UNAVAILABLE + 徽章;绝不补零,绝不拿当前快照冒充历史。
 
     Boundary probe only — the structural Lane-0 UNAVAILABLE tests stay Phase-5-owned
@@ -538,19 +585,55 @@ def test_replay_boundary_unavailable_honest():
         # ② never zero-filled: the verdict carries NO numeric payload at all.
         assert not hasattr(verdict, "value") and not hasattr(verdict, "series")
 
-    # ③ the pre-floor verdict digest is STABLE as the archive accretes newer rows (an
-    #    older floor never moves when history grows forward).
-    assert before.digest == derive_replay_feasible_window(
-        as_of=_utc("2026-07-07", 14, 0), feed_floors=floors).digest
+    # ③ the pre-floor verdict digest is STABLE as the archive genuinely ACCRETES newer
+    #    rows: the archive feeds gain rows (same earliest `first_date`) and the macro
+    #    snapshots file gains a NEWER line on disk. An old point's verdict must not move.
+    from guanlan_v2.orchestration.adapters.replay_data import (
+        archive_feed_floor_from_read,
+        macro_feed_floor_from_snapshots,
+    )
+
+    snaps = tmp_path / "snapshots.jsonl"
+    snaps.write_text(
+        json.dumps({"ts": "2026-07-08T15:00:00"}) + "\n", encoding="utf-8")
+
+    def _floors_now(rows):
+        archive = tuple(
+            archive_feed_floor_from_read(
+                fid, {"kind": fid, "rows": rows, "first_date": "20260708"},
+                archive_root="var/archive")
+            for fid in ARCHIVE_FEED_IDS if fid != "macro")
+        return archive + (macro_feed_floor_from_snapshots(snapshots_path=snaps),)
+
+    thin_rows = [{"date": "20260708"}]
+    grown_before = _floors_now(thin_rows)
+    thin = derive_replay_feasible_window(
+        as_of=_utc("2026-07-07", 14, 0), feed_floors=grown_before)
+    lines_before = len(snaps.read_text(encoding="utf-8").strip().splitlines())
+
+    with snaps.open("a", encoding="utf-8") as fh:          # the archive really grows
+        fh.write(json.dumps({"ts": "2026-07-20T15:00:00"}) + "\n")
+    fat_rows = [{"date": "20260708"}, {"date": "20260720"}]
+    grown_after = _floors_now(fat_rows)
+    # the underlying archive GENUINELY accreted: more rows in the read result and one
+    # more line on disk in the macro snapshots store…
+    assert len(fat_rows) > len(thin_rows)
+    assert len(snaps.read_text(encoding="utf-8").strip().splitlines()) == lines_before + 1
+
+    # …yet the derived floors — and therefore the old point's verdict digest — do NOT
+    # move. That is the property: an old decision point's honesty verdict is invariant
+    # under forward growth of the archive.
+    assert grown_after == grown_before
+    fat = derive_replay_feasible_window(
+        as_of=_utc("2026-07-07", 14, 0), feed_floors=grown_after)
+    assert fat.digest == thin.digest
+    assert set(fat.unavailable_feed_ids) == set(ARCHIVE_FEED_IDS)
 
     # ④ a current snapshot can never impersonate history: a PIT_REPLAY method
     #    resolution structurally excludes the ONLINE-only descriptor.
-    from guanlan_v2.orchestration.adapters.replay_data import pit_replay_source_refs
-
     replay_desc, live_desc, _m = ch.build_phase9_source_materials()
     assert tuple(replay_desc.supported_modes) == ("pit_replay",)
     assert tuple(live_desc.supported_modes) == ("online",)
-    assert callable(pit_replay_source_refs)
 
     # ⑤ end to end: a pre-floor interval degrades honestly through the replay trace AND
     #    surfaces on the /replay/state + /replay/curves projections (never a silent gap).

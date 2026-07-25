@@ -899,37 +899,67 @@ SEATS_DIRECTIONS: tuple[str, str, str] = ("买入", "卖出", "观望")
 _SEATS_TAU = 0.15
 
 
+def _book_weights(payload: Mapping[str, Any]) -> dict[str, float]:
+    """``{symbol code: target_weight}`` for one committed proposal's target BOOK."""
+    book: dict[str, float] = {}
+    for position in tuple(payload.get("positions") or ()):
+        if isinstance(position, Mapping):
+            symbol = position.get("symbol")
+            weight = position.get("target_weight")
+        else:
+            symbol = getattr(position, "symbol", None)
+            weight = getattr(position, "target_weight", None)
+        code = (symbol.get("code") if isinstance(symbol, Mapping)
+                else getattr(symbol, "code", None))
+        code = str(code or "").strip()
+        if not code:
+            raise ValueError(
+                "a committed proposal position must name its symbol code — a seats row "
+                "is never fabricated from an unidentifiable position")
+        book[code] = float(weight or 0.0)
+    return book
+
+
 def seats_rows_from_committed_decisions(
     committed: tuple[Any, ...],
     *,
     run_head: Mapping[str, Any],
     timezone_name: str = _DEFAULT_SESSION_TZ,
+    opening_book: Mapping[str, float] | None = None,
 ) -> tuple[dict[str, Any], ...]:
     """Map committed decision Artifacts onto the seats decision-row vocabulary.
 
-    Task-12 carry (f). ``committed`` is the per-point committed Proposal artifacts (or
-    any object exposing ``payload`` / ``decision_as_of`` / ``rationale``); each becomes
-    ONE row for :func:`persist_replay_run_compat`:
+    Task-12 carry (f). ``committed`` is the per-point committed Proposal artifacts **in
+    point order** (or any object exposing ``payload`` / ``decision_as_of`` /
+    ``rationale``); each becomes ONE row for :func:`persist_replay_run_compat`:
 
-    * ``direction`` ∈ :data:`SEATS_DIRECTIONS` — derived from the committed proposal's
-      OWN book (a non-empty long book ⇒ 买入; an all-cash book ⇒ 观望; an explicit
-      negative-signal book ⇒ 卖出), never invented and never a fourth value;
+    * ``direction`` ∈ :data:`SEATS_DIRECTIONS` — the DELTA between this point's target
+      book and the previous point's (the run opens flat unless ``opening_book`` says
+      otherwise). A weight rising by more than τ ⇒ 买入; a weight FALLING by more than
+      τ ⇒ 卖出 (so exiting a position — ``0.5 → 0.0`` — renders 卖出, which a
+      book-absolute reading could never produce under the long-only shadow contract);
+      neither ⇒ 观望. Never invented, never a fourth value.
     * ``strategy_id`` — the seat the run head names, so the existing ``RunPicker``
       (which filters on ``strategy_id``) lists the run in THAT seat's 回测历史;
     * ``rationale`` — verbatim from the committed artifact (a row without one is
       refused downstream rather than fabricated).
+
+    A rise takes precedence over a fall on the same point (a rebalance that both opens
+    and trims is reported as 买入) — one row per decision point is the seats store's
+    shape, and the point's dominant intent is the entry.
     """
     strategy_id = str(run_head.get("strategy_id") or "").strip()
     if not strategy_id:
         raise ValueError(
             "a seats run head must name the strategy_id (the seat) it belongs to — "
             "RunPicker filters on it and an unnamed run never appears in any seat")
+    previous: dict[str, float] = {
+        str(k): float(v) for k, v in dict(opening_book or {}).items()
+    }
     rows: list[dict[str, Any]] = []
     for item in committed:
         payload = getattr(item, "payload", None)
         payload = payload if isinstance(payload, Mapping) else {}
-        positions = tuple(payload.get("positions") or ())
-        cash_weight = payload.get("cash_weight")
         rationale = str(payload.get("rationale")
                         or getattr(item, "rationale", "") or "").strip()
         decision_as_of = (payload.get("decision_as_of")
@@ -938,16 +968,18 @@ def seats_rows_from_committed_decisions(
             raise ValueError(
                 "a committed decision artifact must carry an aware 'decision_as_of' — "
                 "a seats row is never fabricated from an unknown instant")
-        weights = [float(p.get("target_weight") or 0.0) if isinstance(p, Mapping)
-                   else float(getattr(p, "target_weight", 0.0)) for p in positions]
-        if any(w > _SEATS_TAU for w in weights):
-            direction = SEATS_DIRECTIONS[0]                     # 买入
-        elif any(w < -_SEATS_TAU for w in weights):
-            direction = SEATS_DIRECTIONS[1]                     # 卖出
+        current = _book_weights(payload)
+        deltas = [
+            current.get(code, 0.0) - previous.get(code, 0.0)
+            for code in set(current) | set(previous)
+        ]
+        if any(d > _SEATS_TAU for d in deltas):
+            direction = SEATS_DIRECTIONS[0]                     # 买入 — the book grew
+        elif any(d < -_SEATS_TAU for d in deltas):
+            direction = SEATS_DIRECTIONS[1]                     # 卖出 — the book shrank
         else:
-            direction = SEATS_DIRECTIONS[2]                     # 观望
-        if cash_weight is not None and float(cash_weight) >= 1.0 - 1e-9:
-            direction = SEATS_DIRECTIONS[2]                     # an all-cash book is 观望
+            direction = SEATS_DIRECTIONS[2]                     # 观望 — no material move
+        previous = current
         rows.append({
             "decision_as_of": decision_as_of,
             "direction": direction,
