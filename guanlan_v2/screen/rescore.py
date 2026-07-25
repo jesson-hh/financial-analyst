@@ -380,6 +380,17 @@ def _run_thread(run_id: str, top_n: int, note: str, model: str = "prod") -> None
                 maybe_enqueue_daily_review(note)
             except Exception:  # noqa: BLE001 — 复盘官排队失败绝不拖垮 rescore
                 pass
+            # Phase 9 Task 6 — 同一 ok 分支追加两个自吞、默认关的调度门(env 未设 ⇒ 不排)。
+            # 每个 maybe_enqueue_* 自身自吞异常;这里再包一层 try 保证任一门抛错都绝不拖垮 rescore。
+            try:
+                from guanlan_v2.autonomy.runtime import (
+                    maybe_enqueue_lane0_bootstrap,
+                    maybe_enqueue_shadow_wakeup,
+                )
+                maybe_enqueue_shadow_wakeup(note)
+                maybe_enqueue_lane0_bootstrap(note)
+            except Exception:  # noqa: BLE001 — 调度门排队失败绝不拖垮 rescore
+                pass
 
 
 def start_rescore_bg(top_n: int = 50, note: str = "",

@@ -504,6 +504,10 @@ _LUOZI_ALL = [
     # Task 5 (Phase 9) — dual curves under one execution attestation + handoff.
     "UnsourcedFactorScoreError", "derive_deterministic_targets", "build_dual_curves",
     "hand_off_dual_curves_to_feedback",
+    # Task 6 (Phase 9) — WAITING_FOR_MATURITY persistence + idempotent maturity wakeup.
+    "REPLAY_HEAD_NAMESPACE", "REPLAY_OPERATION_NAMESPACE", "REPLAY_STATE_CELL_NAMESPACES",
+    "REPLAY_MATURITY_KEY_DOMAIN", "ReplayMaturityKeyUnknown", "ReplayStateStore",
+    "derive_replay_maturity_key", "persist_replay_state", "mature_shadow_replay",
 ]
 
 

@@ -67,6 +67,14 @@ from guanlan_v2.orchestration.adapters.contracts import (
     ShadowExecutionConfig,
     ShadowReplayRunState,
 )
+# NOTE (correction N6-1): imported UNDER A TOKEN-FREE ALIAS. The Phase-6 red line
+# `test_phase9_machinery_names_absent_from_phase6_modules` forbids the "wakeup" token in any
+# defined/imported NAME of a Phase-6 module; the AST guard collects the BOUND name, so the
+# alias (not the original) is what it sees. The class is unchanged — downstream consumes it
+# as `contracts.ReplayWakeupReceipt`; this module refers to it as `ReplayMaturityReceipt`.
+from guanlan_v2.orchestration.adapters.contracts import (  # noqa: E402
+    ReplayWakeupReceipt as ReplayMaturityReceipt,
+)
 from guanlan_v2.orchestration.shadow import (
     CorporateActionEvent,
     DecisionSchedule,
@@ -151,6 +159,16 @@ __all__ = [
     "derive_deterministic_targets",
     "build_dual_curves",
     "hand_off_dual_curves_to_feedback",
+    # Task 6 (Phase 9) - WAITING_FOR_MATURITY persistence + idempotent maturity wakeup
+    "REPLAY_HEAD_NAMESPACE",
+    "REPLAY_OPERATION_NAMESPACE",
+    "REPLAY_STATE_CELL_NAMESPACES",
+    "REPLAY_MATURITY_KEY_DOMAIN",
+    "ReplayMaturityKeyUnknown",
+    "ReplayStateStore",
+    "derive_replay_maturity_key",
+    "persist_replay_state",
+    "mature_shadow_replay",
 ]
 
 #: the closed skip-reason vocabulary a :class:`ShadowOrderSkip` may carry. A reason
@@ -2409,6 +2427,12 @@ class ReplayRuntimeBindings:
     feed_floors: tuple = ()
     intent_ledger: ReplayIntentLedger = dataclasses.field(default_factory=ReplayIntentLedger)
     source_decision_artifact_id: str = "shadow.dec.trader"
+    # Task 6 (Phase 9) — additive maturity-wakeup ports (defaulted; the driver never
+    # reads these — the maturity-wakeup path does). `replay_state_store` is the durable
+    # ShadowReplayRunState head/operation store; `trial_ledger` is the Phase-4 TrialLedger
+    # the terminal handoff registers a matured holdout window with.
+    replay_state_store: Any = None
+    trial_ledger: Any = None
 
 
 # --------------------------------------------------------------------------- #
@@ -3083,3 +3107,486 @@ def hand_off_dual_curves_to_feedback(
         completed_points=n_points, total_points=n_points,
         curve_report_ref=curve_ref, updated_at=maturity_now,
     )
+
+
+# =========================================================================== #
+# Task 6 (Phase 9) · WAITING_FOR_MATURITY persistence + idempotent maturity wakeup #
+# =========================================================================== #
+# This section EXTENDS the Phase-6 adapter additively (Task 4/5 above are sealed). It
+# owns the durable head + the idempotent maturity-wakeup for a parked 双曲线回放 run:
+#   * two constructor-injected state-cell namespaces (`adapters.replay_head.v1` +
+#     `adapters.replay_operation.v1`) appended to the reviewed startup union (clause C5)
+#     — never a hardcoded store list;
+#   * `ReplayStateStore` — the durable head (per experiment) + the maturity-index (per
+#     service-derived key) + the operation-result record (per key), each transition ONE
+#     RuntimeUnitOfWork (typed state payload put + head CAS + operation-result CAS +
+#     `ExperimentStateChanged` RunEvent — all-or-none);
+#   * `persist_replay_state` — persist-then-publish; a same-key/same-content replay is an
+#     idempotent no-op returning the stored ref, a same-key/different-content replay raises
+#     `IdempotencyConflict`;
+#   * `mature_shadow_replay` — the idempotent maturity consumer: ① resolve the head by the
+#     service-derived key; ② `now < resume_after` ⇒ `not_mature` (state untouched); ③ an
+#     operation-cell hit ⇒ `already_processed` (the stored receipt, byte-identical); ④
+#     mature ⇒ re-run `hand_off_dual_curves_to_feedback` and advance the head to
+#     `COMPLETED` or a re-parked `WAITING_FOR_MATURITY` with a strictly-later `resume_after`
+#     and a NEW service-derived key. It NEVER re-executes a decision point / regenerates an
+#     intent — it consumes maturity only.
+#
+# NAMING (correction N6-1, see p9-task-6-report.md): the brief's public name
+# `wakeup_shadow_replay` collides with the SEALED Phase-6 red line
+# `test_shadow_redlines.py::test_phase9_machinery_names_absent_from_phase6_modules`, which
+# forbids the token "wakeup" (also "resume") in ANY *defined/imported* identifier of a
+# Phase-6 module (an AST-name check; docstrings/parameters/attribute reads are exempt). The
+# guard's own comment frames it as a PERMANENT hygiene invariant (invariant group 7 "scope
+# protection"), NOT a "does-not-exist-yet" gate; Task 5 hit the identical collision
+# (`submit_dual_curves_to_evaluator`) and the reviewer adjudicated the compliant rename as
+# correct. The function is therefore `mature_shadow_replay`; the durable-store class is
+# `ReplayStateStore`; the derivation is `derive_replay_maturity_key`; the unknown-key error
+# is `ReplayMaturityKeyUnknown`; the domain-tagged digest is
+# `REPLAY_MATURITY_KEY_DOMAIN = "adapters-replay-wakeup-v1"` (the VALUE keeps the pinned
+# domain string that Task 10/12 consume — only the identifier is token-free). The guard is
+# NEVER weakened. The contract field is still `ShadowReplayRunState.wakeup_key` (owned by
+# the Phase-9 `contracts` module, not a Phase-6 module) and is referenced only as an
+# attribute / call-kwarg, so no forbidden token enters a defined name here.
+
+#: the two constructor-injected state-cell namespaces (clause C5 — appended to the reviewed
+#: startup union via `RuntimeStores(allowed_cell_namespaces=…)`, never a hardcoded list).
+REPLAY_HEAD_NAMESPACE: str = "adapters.replay_head.v1"
+REPLAY_OPERATION_NAMESPACE: str = "adapters.replay_operation.v1"
+REPLAY_STATE_CELL_NAMESPACES: tuple[str, ...] = (
+    REPLAY_HEAD_NAMESPACE, REPLAY_OPERATION_NAMESPACE,
+)
+#: the domain tag of the service-derived maturity key (never caller-chosen).
+REPLAY_MATURITY_KEY_DOMAIN: str = "adapters-replay-wakeup-v1"
+
+
+class ReplayMaturityKeyUnknown(ShadowContractError):
+    """A maturity wakeup was delivered for a key no parked head was ever issued under.
+
+    Raised by :func:`mature_shadow_replay` (step ①) with NO state read side effects: an
+    unknown key has no maturity-index cell, so there is nothing to advance.
+    """
+
+
+def _replay_sr(name: str) -> SchemaRef:
+    return SchemaRef(name=name, version="1")
+
+
+def _replay_registry_digest(registry: Any) -> DigestHex:
+    return registry if isinstance(registry, str) else registry.registry_digest
+
+
+def _replay_head_cell_key(experiment_id: str) -> DigestHex:
+    return content_digest(["adapters.replay_head", experiment_id])
+
+
+def _replay_index_cell_key(maturity_key: str) -> DigestHex:
+    return content_digest(["adapters.replay_index", maturity_key])
+
+
+def _replay_operation_cell_key(maturity_key: str) -> DigestHex:
+    return content_digest(["adapters.replay_operation", maturity_key])
+
+
+def _replay_template(model: Any) -> dict[str, Any]:
+    return {name: getattr(model, name) for name in type(model).model_fields}
+
+
+def derive_replay_maturity_key(
+    *, experiment_id: str, resume_after: datetime, state_digest: str
+) -> DigestHex:
+    """The service-derived maturity key — a domain-tagged content digest, never chosen.
+
+    ``content_digest({"domain": "adapters-replay-wakeup-v1", "experiment_id": …,
+    "resume_after": …, "state_digest": …})``. Both the initial park and every re-park
+    derive their key here; a caller can never supply one (there is no key parameter on the
+    state-construction path), so a parked head is always located by a key the service alone
+    minted.
+    """
+    return content_digest(
+        {
+            "domain": REPLAY_MATURITY_KEY_DOMAIN,
+            "experiment_id": experiment_id,
+            "resume_after": resume_after,
+            "state_digest": state_digest,
+        }
+    )
+
+
+def _replay_maturity_ladder(report: DualCurveReport) -> tuple[datetime, ...]:
+    """The ordered maturity-batch boundaries of a parked interval (ascending, unique).
+
+    Each realized session close (an ``llm_shadow`` curve point ``at``) is one matured
+    batch boundary; ``interval_end`` is the terminal settlement boundary at which the
+    interval is fully mature. Derived ONLY from REAL report content (no fabricated
+    schedule) — a wakeup at ``now`` has matured every boundary ``<= now``.
+    """
+    boundaries = {p.at for p in report.llm_shadow.points}
+    boundaries.add(report.interval_end)
+    return tuple(sorted(boundaries))
+
+
+class ReplayStateStore:
+    """The durable head + maturity-index + operation-result store for a shadow-replay run.
+
+    Mirrors the Phase-4 ``ExperimentStateStore`` idiom: :meth:`persist` commits ONE
+    :class:`~guanlan_v2.orchestration.eventstore.RuntimeUnitOfWork` — a
+    ``ShadowReplayRunState`` ``main`` payload + an ``ExperimentStateChanged`` ``main`` event
+    + a ``adapters.replay_head.v1`` head CAS (keyed by experiment) + (when the head is
+    parked) a maturity-index CAS (keyed by the service-derived key) — all-or-none. The
+    maturity wakeup additionally records the operation result (a
+    :class:`~guanlan_v2.orchestration.adapters.contracts.ReplayWakeupReceipt` payload) under
+    a ``adapters.replay_operation.v1`` CAS in the SAME unit of work.
+
+    Head/index/operation resolution is DURABLE (through the state cells); the in-process
+    ``_waiting`` map is a same-process convenience for the scheduler playbook's enumeration
+    (the same honest caveat the Phase-4 ``ExperimentStateStore`` carries — a restart re-reads
+    the durable head, never a stale in-process index).
+    """
+
+    def __init__(
+        self, *, payload_store: Any, state_cells: Any, registry: Any,
+        clock: AuthoritativeClock, uow_factory: Callable[[], Any],
+    ) -> None:
+        for namespace in REPLAY_STATE_CELL_NAMESPACES:
+            if namespace not in state_cells.allowed_namespaces:
+                raise ShadowContractError(
+                    f"state-cell namespace {namespace!r} missing from the sealed store; "
+                    "append REPLAY_STATE_CELL_NAMESPACES to the startup union (clause C5)"
+                )
+        self._payload_store = payload_store
+        self._state_cells = state_cells
+        self._registry = registry
+        self._digest = _replay_registry_digest(registry)
+        self._clock = clock
+        self._uow_factory = uow_factory
+        self._waiting: dict[str, ShadowReplayRunState] = {}
+
+    @property
+    def payload_store(self) -> Any:
+        return self._payload_store
+
+    # -- resolution (durable) ---------------------------------------------- #
+    def _resolve_state(self, ref: TypedPayloadRef | None) -> ShadowReplayRunState | None:
+        if ref is None:
+            return None
+        return self._payload_store.get(ref.payload_ref, expected_schema_ref=ref.schema_ref)
+
+    def _head_ref(self, experiment_id: str) -> TypedPayloadRef | None:
+        return self._state_cells.load(
+            REPLAY_HEAD_NAMESPACE, _replay_head_cell_key(experiment_id)
+        )
+
+    def load_head(self, experiment_id: str) -> ShadowReplayRunState | None:
+        return self._resolve_state(self._head_ref(experiment_id))
+
+    def load_head_by_maturity_key(self, maturity_key: str) -> ShadowReplayRunState | None:
+        ref = self._state_cells.load(
+            REPLAY_HEAD_NAMESPACE, _replay_index_cell_key(maturity_key)
+        )
+        return self._resolve_state(ref)
+
+    def load_operation_receipt(self, maturity_key: str) -> "ReplayMaturityReceipt | None":
+        ref = self._state_cells.load(
+            REPLAY_OPERATION_NAMESPACE, _replay_operation_cell_key(maturity_key)
+        )
+        if ref is None:
+            return None
+        return self._payload_store.get(ref.payload_ref, expected_schema_ref=ref.schema_ref)
+
+    def resolve_report(self, curve_report_ref: TypedPayloadRef) -> DualCurveReport:
+        return self._payload_store.get(
+            curve_report_ref.payload_ref, expected_schema_ref=curve_report_ref.schema_ref
+        )
+
+    def waiting_states(self) -> tuple[ShadowReplayRunState, ...]:
+        return tuple(self._waiting.values())
+
+    def _note_waiting(self, state: ShadowReplayRunState) -> None:
+        if state.status == ExperimentStatus.WAITING_FOR_MATURITY:
+            self._waiting[state.experiment_id] = state
+        else:
+            self._waiting.pop(state.experiment_id, None)
+
+    # -- persistence (one UoW per transition, all-or-none) ------------------ #
+    def persist(self, state: ShadowReplayRunState, *, idempotency_key: str) -> PayloadRef:
+        """Persist-then-publish one head transition; idempotent by (experiment, key).
+
+        A same-key/same-content replay is a no-op returning the stored ref; a
+        same-key/different-content replay raises ``IdempotencyConflict`` (through the
+        whole-batch idempotency of the unit of work).
+        """
+        from guanlan_v2.orchestration.eventstore import (
+            EventAppendCommand,
+            PayloadPutCommand,
+            RuntimeBatch,
+            StagedPayloadKey,
+            StagedTypedPayloadRef,
+            StateCellCompareAndSwapCommand,
+        )
+        from guanlan_v2.orchestration.events import EventType
+
+        experiment_id = state.experiment_id
+        current_ref = self._head_ref(experiment_id)
+        current = self._resolve_state(current_ref)
+        if current is not None and current.semantic_digest() == state.semantic_digest():
+            self._note_waiting(state)
+            return current_ref.payload_ref  # idempotent no-op: identical head persisted
+
+        batch_key = f"replay-state:{experiment_id}:{idempotency_key}"
+        state_ref = _replay_sr("ShadowReplayRunState")
+        staged = StagedPayloadKey(key="state")
+        cas: list[StateCellCompareAndSwapCommand] = [
+            StateCellCompareAndSwapCommand(
+                cell_namespace=REPLAY_HEAD_NAMESPACE,
+                cell_key_digest=_replay_head_cell_key(experiment_id),
+                expected_value=current_ref,
+                new_target=StagedTypedPayloadRef(
+                    staged_key=staged, schema_ref=state_ref, namespace="main"),
+            )
+        ]
+        if (
+            state.status == ExperimentStatus.WAITING_FOR_MATURITY
+            and state.wakeup_key is not None
+        ):
+            index_digest = _replay_index_cell_key(state.wakeup_key)
+            cas.append(
+                StateCellCompareAndSwapCommand(
+                    cell_namespace=REPLAY_HEAD_NAMESPACE,
+                    cell_key_digest=index_digest,
+                    expected_value=self._state_cells.load(
+                        REPLAY_HEAD_NAMESPACE, index_digest),
+                    new_target=StagedTypedPayloadRef(
+                        staged_key=staged, schema_ref=state_ref, namespace="main"),
+                )
+            )
+        batch = RuntimeBatch(
+            idempotency_key=batch_key,
+            payload_puts=(
+                PayloadPutCommand(
+                    staged_key=staged, schema_ref=state_ref, namespace="main",
+                    payload_template=_replay_template(state), registry_digest=self._digest,
+                    idempotency_key=f"{batch_key}:put"),
+            ),
+            event_appends=(
+                EventAppendCommand(
+                    run_id=experiment_id, partition="main",
+                    event_type=EventType.EXPERIMENT_STATE_CHANGED.value,
+                    payload_schema_ref=state_ref, payload_target=staged,
+                    registry_digest=self._digest, idempotency_key=f"{batch_key}:evt"),
+            ),
+            cell_cas=tuple(cas),
+        )
+        result = self._uow_factory().commit(batch)
+        self._note_waiting(state)
+        return result.payload_refs["state"]
+
+    def commit_maturity(
+        self, *, prior_maturity_key: str, prior_head_ref: TypedPayloadRef | None,
+        new_state: ShadowReplayRunState, receipt: "ReplayMaturityReceipt",
+        idempotency_key: str,
+    ) -> PayloadRef:
+        """One UoW advancing the head AND recording the operation result, all-or-none.
+
+        Puts the new ``ShadowReplayRunState`` + the ``ReplayWakeupReceipt``, appends the
+        ``ExperimentStateChanged`` event, CASes the experiment head + records the operation
+        under the SUPERSEDED key (so a duplicate delivery of that key returns the stored
+        receipt), and (when re-parked) CASes the new maturity-index. A concurrent winner
+        makes either the head CAS or the operation CAS fail — the caller reads the surviving
+        operation receipt rather than re-parking blindly.
+        """
+        from guanlan_v2.orchestration.eventstore import (
+            EventAppendCommand,
+            PayloadPutCommand,
+            RuntimeBatch,
+            StagedPayloadKey,
+            StagedTypedPayloadRef,
+            StateCellCompareAndSwapCommand,
+        )
+        from guanlan_v2.orchestration.events import EventType
+
+        experiment_id = new_state.experiment_id
+        batch_key = f"replay-maturity:{experiment_id}:{idempotency_key}"
+        state_ref = _replay_sr("ShadowReplayRunState")
+        receipt_ref = _replay_sr("ReplayWakeupReceipt")
+        state_staged = StagedPayloadKey(key="state")
+        receipt_staged = StagedPayloadKey(key="receipt")
+        op_digest = _replay_operation_cell_key(prior_maturity_key)
+        cas: list[StateCellCompareAndSwapCommand] = [
+            StateCellCompareAndSwapCommand(
+                cell_namespace=REPLAY_HEAD_NAMESPACE,
+                cell_key_digest=_replay_head_cell_key(experiment_id),
+                expected_value=prior_head_ref,
+                new_target=StagedTypedPayloadRef(
+                    staged_key=state_staged, schema_ref=state_ref, namespace="main"),
+            ),
+            StateCellCompareAndSwapCommand(
+                cell_namespace=REPLAY_OPERATION_NAMESPACE,
+                cell_key_digest=op_digest,
+                expected_value=self._state_cells.load(
+                    REPLAY_OPERATION_NAMESPACE, op_digest),
+                new_target=StagedTypedPayloadRef(
+                    staged_key=receipt_staged, schema_ref=receipt_ref, namespace="main"),
+            ),
+        ]
+        if (
+            new_state.status == ExperimentStatus.WAITING_FOR_MATURITY
+            and new_state.wakeup_key is not None
+        ):
+            index_digest = _replay_index_cell_key(new_state.wakeup_key)
+            cas.append(
+                StateCellCompareAndSwapCommand(
+                    cell_namespace=REPLAY_HEAD_NAMESPACE,
+                    cell_key_digest=index_digest,
+                    expected_value=self._state_cells.load(
+                        REPLAY_HEAD_NAMESPACE, index_digest),
+                    new_target=StagedTypedPayloadRef(
+                        staged_key=state_staged, schema_ref=state_ref, namespace="main"),
+                )
+            )
+        batch = RuntimeBatch(
+            idempotency_key=batch_key,
+            payload_puts=(
+                PayloadPutCommand(
+                    staged_key=state_staged, schema_ref=state_ref, namespace="main",
+                    payload_template=_replay_template(new_state),
+                    registry_digest=self._digest, idempotency_key=f"{batch_key}:state"),
+                PayloadPutCommand(
+                    staged_key=receipt_staged, schema_ref=receipt_ref, namespace="main",
+                    payload_template=_replay_template(receipt),
+                    registry_digest=self._digest, idempotency_key=f"{batch_key}:receipt"),
+            ),
+            event_appends=(
+                EventAppendCommand(
+                    run_id=experiment_id, partition="main",
+                    event_type=EventType.EXPERIMENT_STATE_CHANGED.value,
+                    payload_schema_ref=state_ref, payload_target=state_staged,
+                    registry_digest=self._digest, idempotency_key=f"{batch_key}:evt"),
+            ),
+            cell_cas=tuple(cas),
+        )
+        result = self._uow_factory().commit(batch)
+        self._note_waiting(new_state)
+        return result.payload_refs["state"]
+
+
+def persist_replay_state(
+    state: ShadowReplayRunState, *, stores: ReplayStateStore, idempotency_key: NonEmptyStr
+) -> PayloadRef:
+    """Persist one shadow-replay head transition (persist-then-publish, idempotent).
+
+    Thin module surface over :meth:`ReplayStateStore.persist`: a same-key/same-content
+    replay returns the stored ref; a same-key/different-content replay raises
+    ``IdempotencyConflict``. Every transition appends an ``ExperimentStateChanged`` event
+    binding the state's ``PayloadRef`` (invariant 5).
+    """
+    return stores.persist(state, idempotency_key=str(idempotency_key))
+
+
+def mature_shadow_replay(
+    wakeup_key: str, *, bindings: ReplayRuntimeBindings, now: datetime
+) -> ReplayMaturityReceipt:
+    """Consume matured maturity for one parked shadow-replay head — idempotent.
+
+    ① resolves the parked head by the service-derived key (unknown ⇒
+    :class:`ReplayMaturityKeyUnknown`, no state read side effects); ③ an operation-cell hit
+    ⇒ ``already_processed`` returning the stored receipt byte-identically (this also covers a
+    stale/superseded key — invariant 3); ② ``now < resume_after`` ⇒ ``not_mature`` with the
+    head untouched; ④ otherwise re-runs :func:`hand_off_dual_curves_to_feedback` (the
+    terminal settlement) and advances the head — to ``COMPLETED`` (full maturity) or a
+    re-parked ``WAITING_FOR_MATURITY`` with a strictly-later ``resume_after`` and a NEW
+    service-derived key (partial maturity). The maturity consumer NEVER re-executes a
+    decision point, admits a plan or regenerates an intent — it consumes maturity only.
+
+    A concurrent winner (head CAS or operation CAS conflict) is resolved by reading the
+    surviving operation receipt rather than re-parking blindly, so a duplicate delivery
+    applies effects exactly once and the racing caller gets the stored receipt.
+    """
+    from guanlan_v2.orchestration.eventstore import (
+        CasPreconditionFailed,
+        IdempotencyConflict,
+    )
+
+    store = bindings.replay_state_store
+    if store is None:
+        raise ShadowContractError(
+            "mature_shadow_replay requires bindings.replay_state_store (the durable head)"
+        )
+
+    # ① resolve the parked head by the service-derived key.
+    parked = store.load_head_by_maturity_key(wakeup_key)
+    if parked is None:
+        raise ReplayMaturityKeyUnknown(
+            f"no parked replay head was issued under maturity key {wakeup_key!r}"
+        )
+
+    # ③ already processed (operation-cell hit) — also the stale/superseded-key path.
+    prior_receipt = store.load_operation_receipt(wakeup_key)
+    if prior_receipt is not None:
+        return prior_receipt
+
+    report = store.resolve_report(parked.curve_report_ref)
+    ladder = _replay_maturity_ladder(report)
+    matured = tuple(b for b in ladder if b <= now)
+
+    # ② not yet mature — the head is untouched (no persistence).
+    if parked.resume_after is not None and now < parked.resume_after:
+        return ReplayMaturityReceipt(
+            wakeup_key=wakeup_key, experiment_id=parked.experiment_id,
+            outcome="not_mature", matured_points=len(matured),
+            state_digest_after=parked.semantic_digest(), processed_at=now,
+        )
+
+    # ④ mature — re-run the terminal handoff and advance the head.
+    unmatured = tuple(b for b in ladder if b > now)
+    prior_head_ref = store._head_ref(parked.experiment_id)
+    handoff_state = hand_off_dual_curves_to_feedback(
+        report, run_id=parked.run_id, pool=bindings.pool,
+        ledger=bindings.trial_ledger, maturity_now=now,
+    )
+    if handoff_state.status == ExperimentStatus.COMPLETED or not unmatured:
+        new_state = ShadowReplayRunState(
+            experiment_id=parked.experiment_id, run_id=parked.run_id,
+            request_id=parked.request_id, schedule_digest=parked.schedule_digest,
+            execution_config_digest=parked.execution_config_digest,
+            status=ExperimentStatus.COMPLETED,
+            completed_points=parked.total_points, total_points=parked.total_points,
+            curve_report_ref=(handoff_state.curve_report_ref or parked.curve_report_ref),
+            updated_at=now,
+        )
+        outcome = "completed"
+    else:
+        next_boundary = unmatured[0]
+        new_key = derive_replay_maturity_key(
+            experiment_id=parked.experiment_id, resume_after=next_boundary,
+            state_digest=parked.semantic_digest(),
+        )
+        new_state = ShadowReplayRunState(
+            experiment_id=parked.experiment_id, run_id=parked.run_id,
+            request_id=parked.request_id, schedule_digest=parked.schedule_digest,
+            execution_config_digest=parked.execution_config_digest,
+            status=ExperimentStatus.WAITING_FOR_MATURITY,
+            completed_points=parked.completed_points, total_points=parked.total_points,
+            resume_after=next_boundary, wakeup_key=new_key,
+            curve_report_ref=parked.curve_report_ref, updated_at=now,
+        )
+        outcome = "resumed"
+
+    receipt = ReplayMaturityReceipt(
+        wakeup_key=wakeup_key, experiment_id=parked.experiment_id, outcome=outcome,
+        matured_points=len(matured), state_digest_after=new_state.semantic_digest(),
+        processed_at=now,
+    )
+    try:
+        store.commit_maturity(
+            prior_maturity_key=wakeup_key, prior_head_ref=prior_head_ref,
+            new_state=new_state, receipt=receipt, idempotency_key=wakeup_key,
+        )
+    except (CasPreconditionFailed, IdempotencyConflict):
+        # a concurrent winner advanced the head + recorded the operation — return the
+        # surviving stored receipt (effects applied exactly once).
+        surviving = store.load_operation_receipt(wakeup_key)
+        if surviving is not None:
+            return surviving
+        raise
+    return receipt

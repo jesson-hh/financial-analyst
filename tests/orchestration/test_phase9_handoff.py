@@ -907,9 +907,11 @@ def test_clause_c6_seats_and_autonomy_seams_exist_at_reviewed_names():
     autonomy_playbooks = importlib.import_module("guanlan_v2.autonomy.playbooks")
     assert isinstance(autonomy_playbooks.PLAYBOOKS, dict)
     # Task 4 LANDED its two additive watcher seams (note_external_llm_use +
-    # orchestrated_codes) — the gate now records them as present. The Task 6/10
-    # autonomy seams are still gated (they do not yet exist).
+    # orchestrated_codes) — the gate now records them as present. Task 6 LANDED its two
+    # autonomy scheduler seams (maybe_enqueue_shadow_wakeup + maybe_enqueue_lane0_bootstrap);
+    # this "does-not-exist-yet" gate flips to present as each seam lands (the Task-4 C6
+    # precedent — an additive gate flip, never a weakened assertion).
     assert hasattr(seats_watcher, "note_external_llm_use")
     assert hasattr(seats_watcher, "orchestrated_codes")
-    assert not hasattr(autonomy_runtime, "maybe_enqueue_shadow_wakeup")
-    assert not hasattr(autonomy_runtime, "maybe_enqueue_lane0_bootstrap")
+    assert hasattr(autonomy_runtime, "maybe_enqueue_shadow_wakeup")
+    assert hasattr(autonomy_runtime, "maybe_enqueue_lane0_bootstrap")

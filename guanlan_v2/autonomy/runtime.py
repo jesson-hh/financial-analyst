@@ -138,3 +138,53 @@ def maybe_enqueue_daily_review(note: str) -> bool:
         return bool(start_job_bg("review_officer").get("ok"))
     except Exception:  # noqa: BLE001 — 排队失败绝不拖垮 rescore 主流程
         return False
+
+
+def _already_ran_today(playbook: str) -> bool:
+    """今日是否已排过该 playbook(done/running)——防重复排队。running_job_id 取自当前状态。"""
+    today = time.strftime("%Y-%m-%d")
+    st = _autonomy_public_state()
+    running_id = st.get("job_id") if st.get("running") else None
+    for j in J.read_jobs(limit=20, running_job_id=running_id):
+        if (j.get("playbook") == playbook
+                and str(j.get("started_ts") or "")[:10] == today
+                and j.get("status") in ("done", "running")):
+            return True
+    return False
+
+
+def maybe_enqueue_shadow_wakeup(note: str) -> bool:
+    """rescore 落定钩子(Phase 9 Task 6):三门全过才排队 shadow-replay 成熟唤醒 playbook——
+    ①env `GUANLAN_SHADOW_WAKEUP=="1"`、②note=="daily-scheduler"(仅日跑重排收尾排队)、
+    ③今日尚未跑过(read_jobs 查不到当日 shadow_replay_wakeup 的 done/running job)。
+    与 maybe_enqueue_daily_review 同形自吞异常——排队失败绝不拖垮调用方(rescore 主流程)。
+    默认关(env 未设 ⇒ False,不排 job)。"""
+    try:
+        import os
+        if os.environ.get("GUANLAN_SHADOW_WAKEUP") != "1":
+            return False
+        if note != "daily-scheduler":
+            return False
+        if _already_ran_today("shadow_replay_wakeup"):
+            return False
+        return bool(start_job_bg("shadow_replay_wakeup").get("ok"))
+    except Exception:  # noqa: BLE001 — 排队失败绝不拖垮 rescore 主流程
+        return False
+
+
+def maybe_enqueue_lane0_bootstrap(note: str) -> bool:
+    """rescore 落定钩子(Phase 9 Task 6 · 2026-07-18 集成修正):三门全过才排队 Lane 0 每日
+    自举 playbook——①env `GUANLAN_LANE0_DAILY=="1"`、②note=="daily-scheduler"、③今日尚未
+    跑过(lane0_bootstrap 的 done/running)。同形自吞异常;默认关(env 未设 ⇒ False)。
+    无 active lease ⇒ playbook 诚实跳过(不在此门判)。"""
+    try:
+        import os
+        if os.environ.get("GUANLAN_LANE0_DAILY") != "1":
+            return False
+        if note != "daily-scheduler":
+            return False
+        if _already_ran_today("lane0_bootstrap"):
+            return False
+        return bool(start_job_bg("lane0_bootstrap").get("ok"))
+    except Exception:  # noqa: BLE001 — 排队失败绝不拖垮 rescore 主流程
+        return False
