@@ -2438,9 +2438,20 @@ class ReplayRuntimeBindings:
 # --------------------------------------------------------------------------- #
 # run_interval_replay — the driver                                             #
 # --------------------------------------------------------------------------- #
-def _session_local_iso(instant: datetime, timezone_name: str) -> str:
-    """The A-share session date (schedule timezone, never UTC) of an instant."""
-    return instant.astimezone(ZoneInfo(timezone_name)).date().isoformat()
+def _session_local_instant(instant: datetime, timezone_name: str) -> datetime:
+    """``instant`` in the schedule timezone — its ``.date()`` is the A-share session date.
+
+    Returned as the localized DATETIME (not just the ISO date) because both the session
+    date string AND the day key the seats seam books into must come from the same value:
+    ``note_external_llm_use`` buckets by ``now.date()``, so it is handed this instant, not
+    the wall clock.
+    """
+    return instant.astimezone(ZoneInfo(timezone_name))
+
+
+#: the honest degradation badge for a live point whose shared 24/day seats LLM pool is
+#: exhausted — the LLM lane is NOT invoked (never invoke-then-skip-metering).
+_LLM_BUDGET_EXHAUSTED_BADGE = "llm_budget_exhausted:seats_daily_pool"
 
 
 def _degradation_badges_for_point(point: ReplayDecisionPoint, feed_floors: tuple) -> tuple[str, ...]:
@@ -2566,12 +2577,17 @@ def run_interval_replay(
             return {}
 
     seats_state: Mapping[str, Any] = _load_seats_state()
-    settled_reservations: set[str] = set()
 
     last_scheduled_for: datetime | None = None
     target_version = 1
     for point in points:
-        session_iso = _session_local_iso(point.decision_as_of, tz_name)
+        # ONE localized instant per point: its `.date()` IS `session_iso`, so the pool
+        # bucket the admissibility rule READS and the bucket the settlement WRITES are the
+        # same day key (the seats seam books by `now.date()`; passing wall-clock `now`
+        # would debit today's bucket while the rule read the session's — the pool would
+        # never appear to deplete).
+        session_local = _session_local_instant(point.decision_as_of, tz_name)
+        session_iso = session_local.date().isoformat()
         live_point = bool(is_live_session(point)) if is_live_session is not None else False
 
         # ① frozen per-point ContextSnapshot + structural as_of binding (invariant 2).
@@ -2600,6 +2616,14 @@ def run_interval_replay(
             # executing during a live trading session shares the 24/day pool.
             is_live_session=live_point,
         )
+        # A live point with ZERO admissible LLM budget must NOT invoke the LLM lane at
+        # all: invoking and then skipping the metering would silently over-draw the
+        # shared 24/day pool. It becomes an honestly degraded point (the same
+        # degraded-point surface an UNAVAILABLE feed uses) and the run continues.
+        run_llm_lane = not (live_point and llm_admissible <= 0)
+        if not run_llm_lane:
+            badges = tuple(sorted(set(badges) | {_LLM_BUDGET_EXHAUSTED_BADGE}))
+            ledger.note_degraded(point.point_ordinal, badges)
         llm_reservation = bindings.budget.reserve_node(
             plan_reservation_id=plan_reservation.reservation_id,
             node_id=f"llm.dec.trader#{point.point_ordinal}",
@@ -2622,41 +2646,50 @@ def run_interval_replay(
         clock = bindings.clock_factory(point)
 
         # ③ LLM shadow lane → envelope-wrapped intent (sole Phase-6 constructor).
-        proposal_artifact = bindings.admission.llm_proposal(point, snapshot)
-        intent = wrap_proposal_as_intent(
-            proposal_artifact=proposal_artifact,
-            source_decision_artifact_id=bindings.source_decision_artifact_id,
-            request=request,
-            schedule_registry=bindings.schedule_registry,
-            calendar=bindings.calendar,
-            session_date=session_iso,
-            decision_as_of=point.decision_as_of,
-            target_version=target_version,
-            intent_id=f"intent.{run_id}.{point.point_ordinal}.{target_version}",
-            clock=clock,
-        )
-        # ④ append under the no-retroactive rule (monotone + idempotent).
-        ledger.append_intent(intent, expected_as_of=point.decision_as_of)
+        if run_llm_lane:
+            proposal_artifact = bindings.admission.llm_proposal(point, snapshot)
+            intent = wrap_proposal_as_intent(
+                proposal_artifact=proposal_artifact,
+                source_decision_artifact_id=bindings.source_decision_artifact_id,
+                request=request,
+                schedule_registry=bindings.schedule_registry,
+                calendar=bindings.calendar,
+                session_date=session_iso,
+                decision_as_of=point.decision_as_of,
+                target_version=target_version,
+                intent_id=f"intent.{run_id}.{point.point_ordinal}.{target_version}",
+                clock=clock,
+            )
+            # ④ append under the no-retroactive rule (monotone + idempotent).
+            ledger.append_intent(intent, expected_as_of=point.decision_as_of)
 
         # live-session settlement (Task 10 · carry C-B): settle the LLM-lane reservation
         # and report the consumed invocations back into the SAME daily counts the
-        # watcher's `tick` reads — exactly once per settled reservation. A PIT_REPLAY
-        # point never reaches here, so the seats pool stays untouched.
+        # watcher's `tick` reads. A PIT_REPLAY point never reaches here, so the seats pool
+        # stays untouched.
+        #
+        # The once-only guard is the reservation's OWN DURABLE state, not an in-process
+        # set: `reserve_node` is idempotent by its key, so a re-run of the same interval
+        # returns the already-`settled` reservation and must NOT debit the shared pool a
+        # second time (an in-memory set is recreated per call and would double-debit).
+        #
         # `actual_llm_invocations` is EXACT (one dec.trader proposal per admitted point —
-        # the quantity the 24/day seats pool meters); `actual_tokens` conservatively
-        # equals the reservation, because no per-point token telemetry crosses the
-        # ReplayPlanCoordinator port — an honest upper bound, never an invented count.
-        if live_point and llm_reservation.reservation_id not in settled_reservations:
+        # the quantity the 24/day seats pool meters); `actual_tokens` is the reservation
+        # when the lane ran (an honest upper bound: no per-point token telemetry crosses
+        # the ReplayPlanCoordinator port) and ZERO when the lane was refused for budget.
+        if live_point and llm_reservation.status != "settled":
             bindings.budget.settle(
                 llm_reservation.reservation_id,
-                actual_tokens=1000,
+                actual_tokens=1000 if run_llm_lane else 0,
                 actual_llm_invocations=llm_admissible,
                 idempotency_key=f"replay-settle-llm:{run_id}:{point.point_ordinal}",
             )
-            settled_reservations.add(llm_reservation.reservation_id)
             if bindings.seats_budget_seam is not None and llm_admissible > 0:
-                bindings.seats_budget_seam.note_external_llm_use(llm_admissible)
-                # re-read the pool so the NEXT live point sees this consumption.
+                # book into the POINT'S session-day bucket — the same key the
+                # admissibility rule read (`session_iso`), never wall-clock today.
+                bindings.seats_budget_seam.note_external_llm_use(
+                    llm_admissible, now=session_local)
+                # re-read the pool so a later point / run sees this consumption.
                 seats_state = _load_seats_state()
 
         # deterministic lane → envelope-free DeterministicTargetSet (Task 5 consumes).

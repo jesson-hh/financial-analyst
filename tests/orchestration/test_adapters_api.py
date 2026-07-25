@@ -27,6 +27,7 @@ Run: ``python -m pytest tests/orchestration/test_adapters_api.py -v``
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -477,22 +478,68 @@ def test_weiwo_state_awaiting_before_the_run():
 # =========================================================================== #
 # unwired deps are an honest 503, never a fake empty success                     #
 # =========================================================================== #
-@pytest.mark.parametrize("method,path,payload", [
-    ("get", "/orchestration/replay/state", {"experiment_id": "e"}),
-    ("get", "/orchestration/replay/curves", {"experiment_id": "e"}),
-])
-def test_unwired_store_is_an_honest_503(method, path, payload):
+#: EVERY route with NOTHING bound — the production mount today. No route may answer a
+#: 200: a 200 whose identity nothing recorded is a fabricated success (fix-pass Fix 4).
+_ALL_SIX_UNWIRED = [
+    ("post", "/orchestration/replay/start", None, "schedule_registry_unwired"),
+    ("get", "/orchestration/replay/state", {"experiment_id": "e"}, "replay_store_unwired"),
+    ("get", "/orchestration/replay/curves", {"experiment_id": "e"}, "replay_store_unwired"),
+    ("post", "/orchestration/replay/wakeup", None, "replay_bindings_unwired"),
+    ("post", "/orchestration/weiwo/start", None, "weiwo_store_unwired"),
+    ("get", "/orchestration/weiwo/state", {"run_id": "r"}, "weiwo_store_unwired"),
+]
+
+_UNWIRED_BODIES = {
+    "/orchestration/replay/start": lambda: _start_body(),
+    "/orchestration/replay/wakeup": lambda: {"wakeup_key": "d" * 64},
+    "/orchestration/weiwo/start": lambda: {"goal": "找一个新因子"},
+}
+
+
+@pytest.mark.parametrize(
+    "method,path,params,reason", _ALL_SIX_UNWIRED,
+    ids=[p.rsplit("/", 2)[-2] + "-" + p.rsplit("/", 1)[-1] for _, p, _, _ in _ALL_SIX_UNWIRED])
+def test_all_six_routes_are_an_honest_503_when_unwired(method, path, params, reason):
     cli = _client(AdaptersRouterDeps())
-    r = cli.get(path, params=payload)
-    assert r.status_code == 503
-    assert r.json()["ok"] is False and r.json()["reason"] == "replay_store_unwired"
+    if method == "get":
+        r = cli.get(path, params=params)
+    else:
+        r = cli.post(path, json=_UNWIRED_BODIES[path]())
+    assert r.status_code == 503, (path, r.status_code, r.text)
+    assert r.json() == {"ok": False, "reason": reason}
 
 
-def test_unwired_schedule_registry_is_an_honest_503():
-    r = _client(AdaptersRouterDeps()).post(
-        "/orchestration/replay/start", json=_start_body())
+def test_start_never_returns_a_success_nothing_recorded():
+    """A bound registry with an UNBOUND request store must refuse, not fake a 200."""
+    deps = dataclasses.replace(_replay_deps(), replay_requests=None)
+    r = _client(deps).post("/orchestration/replay/start", json=_start_body())
     assert r.status_code == 503
-    assert r.json()["reason"] == "schedule_registry_unwired"
+    assert r.json()["reason"] == "replay_request_store_unwired"
+
+
+def test_weiwo_start_never_mints_a_run_id_nothing_records():
+    deps = dataclasses.replace(_replay_deps(), weiwo_requests=None)
+    r = _client(deps).post("/orchestration/weiwo/start", json={"goal": "g"})
+    assert r.status_code == 503
+    assert r.json()["reason"] == "weiwo_store_unwired"
+
+
+def test_wakeup_refuses_an_unbound_clock_rather_than_reading_the_wall_clock():
+    """A maturity gate never falls back to machine local time (Phase-8 墙钟 precedent)."""
+    env = _wakeup_env()
+    spy = _SpyStore(env.store)
+    binds = ReplayRuntimeBindings(
+        admission=_FakeCoordinator(), budget=SimpleNamespace(), run_budget=SimpleNamespace(),
+        schedule_registry=None, calendar=None, clock_factory=lambda p: SystemClock(),
+        replay_state_store=spy,
+    )
+    deps = dataclasses.replace(
+        _replay_deps(store=spy, bindings=binds), clock=None)
+    r = _client(deps).post("/orchestration/replay/wakeup", json={"wakeup_key": "d" * 64})
+    assert r.status_code == 503
+    assert r.json() == {"ok": False, "reason": "clock_unwired"}
+    # it refuses BEFORE any maturity work — the store is never even read
+    assert spy.reads == [] and spy.writes == []
 
 
 def test_server_mount_resolves_process_deps_lazily(monkeypatch):
@@ -671,6 +718,37 @@ def test_legacy_shape_unchanged(monkeypatch, tmp_path):
         assert not set(head) - _LEGACY_RUN_HEAD_KEYS
 
 
+def test_compat_idempotency_scan_reads_a_bounded_tail(monkeypatch, tmp_path):
+    """The guard reads a tail window, not the whole growing decisions log."""
+    _tmp_seats(monkeypatch, tmp_path)
+    seats_api._DEC_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with seats_api._DEC_LOG.open("w", encoding="utf-8") as fh:
+        for i in range(5000):                          # a long pre-existing history
+            fh.write(json.dumps({"id": f"d{i}", "kind": "decide", "code": "600519",
+                                 "run_id": f"old-{i}"}, ensure_ascii=False) + "\n")
+    persist_replay_run_compat(
+        _compat_state(), decisions=_compat_decisions(), run_head=_compat_head())
+    persist_replay_run_compat(
+        _compat_state(), decisions=_compat_decisions(), run_head=_compat_head())
+    lines = seats_api._DEC_LOG.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 5003                          # three appended once, not twice
+
+    reads: list = []
+    real_open = adapters_api.Path.open
+
+    def _spy_open(self, *a, **kw):
+        reads.append(a[0] if a else kw.get("mode", "r"))
+        return real_open(self, *a, **kw)
+
+    monkeypatch.setattr(adapters_api.Path, "open", _spy_open)
+    assert adapters_api._jsonl_has_run_id(seats_api._DEC_LOG, "replay-run.req-1") is True
+    assert adapters_api._jsonl_has_run_id(seats_api._DEC_LOG, "nope") is False
+    assert all(m.startswith("rb") for m in reads)      # binary tail seek, not read_text
+    tail = adapters_api._tail_lines(seats_api._DEC_LOG, max_bytes=400, max_lines=1000)
+    assert 0 < len(tail) < 5003                        # genuinely windowed
+    assert all(json.loads(line) for line in tail)      # …and never a half-cut line
+
+
 def test_compat_refuses_a_fabricated_row(monkeypatch, tmp_path):
     _tmp_seats(monkeypatch, tmp_path)
     with pytest.raises(ValueError):
@@ -847,6 +925,9 @@ def test_carry_a_unapproved_plan_never_executes():
         with pytest.raises(ReplayCoordinatorApprovalRefused):
             coord.bootstrap_context(_first_point(sch, cal, start, end))
         assert runner.lanes == []
+        # the refusal happens BEFORE the reservation: the ledger stays empty (the
+        # ordering red line, asserted rather than left incidental)
+        assert binds.budget.replay().reservations == {}
 
 
 def test_carry_a_auto_policy_is_refused_at_the_door():
@@ -996,13 +1077,79 @@ def test_carry_a_feed_floors_builder_never_reads_macro_from_the_archive(tmp_path
     assert by_id["market_tape"].floor_date == "2026-01-05"
 
 
+def test_carry_a_feed_floors_honour_the_archive_dir_env_override(tmp_path, monkeypatch):
+    """The recorded ``archive_root`` must be the root actually read (9998 verification)."""
+    from guanlan_v2.datafeed import snapshot_archive as sa
+    override = tmp_path / "archive-override"
+    monkeypatch.setenv("GUANLAN_SNAPSHOT_ARCHIVE_DIR", str(override))
+    snaps = tmp_path / "snapshots.jsonl"
+    snaps.write_text(json.dumps({"ts": "2026-01-20T15:00:00"}) + "\n", encoding="utf-8")
+
+    floors = build_replay_feed_floors(
+        read_archive=lambda kind, *a, **kw: {"kind": kind, "rows": [], "first_date": None},
+        macro_snapshots_path=snaps)
+    roots = {f.archive_root for f in floors if f.feed_id in sa.KINDS}
+    assert roots == {str(override)}
+    assert str(sa._ARCHIVE_DIR_DEFAULT) not in roots   # the default must NOT be recorded
+    # an empty archive is an honest missing floor, never a fabricated date
+    assert all(f.floor_date is None for f in floors if f.feed_id in sa.KINDS)
+
+
+def test_carry_a_real_floor_builder_product_drives_the_coordinator(tmp_path):
+    """The chartered "built from the two distinct builders" half, joined end to end."""
+    world, store_meta, reg = _coordinator_world()
+    sch, cal, start, end = _three_point_env()
+    base, _ = _bindings(sch, cal)
+    cfg, req = _exec_config(sch), _request(sch)
+    _reserve_interval_plan(base, req, sch, cfg)
+
+    snaps = tmp_path / "snapshots.jsonl"
+    snaps.write_text(json.dumps({"ts": "2026-12-01T15:00:00"}) + "\n", encoding="utf-8")
+    floors = build_replay_feed_floors(                 # the REAL builder's product
+        read_archive=lambda kind, *a, **kw: {
+            "kind": kind, "rows": [], "first_date": "20260101"},
+        archive_root=str(tmp_path), macro_snapshots_path=snaps)
+
+    coord = _production_coordinator(
+        world=world, store_meta=store_meta, schema_registry=reg, schedule=sch,
+        execution_config=cfg, request=req, budget=base.budget, feed_floors=floors)
+    point = _first_point(sch, cal, start, end)
+    snap = coord.bootstrap_context(point)
+
+    # the three archive KINDS resolve at the 2026-01-01 floor; the macro feed's real
+    # 2026-12-01 floor postdates the point ⇒ one honest badge, and the point still runs.
+    assert snap.degradation_badges == ("archive_pre_floor:macro",)
+    assert snap.data_context.as_of == point.decision_as_of
+    # and the manifest sealed the SAME builder product (a floor change moves its digest)
+    from guanlan_v2.orchestration.adapters.api import build_replay_manifest as _bm
+    common = dict(
+        data_snapshot_id="pit-root-A", store_meta=store_meta, as_of=point.decision_as_of,
+        timezone=TZ, calendar_id="cn_a_share",
+        routing_snapshot_digest=world.routing.routing_digest,
+        schema_registry_digest=reg.registry_digest)
+    other = build_replay_feed_floors(
+        read_archive=lambda kind, *a, **kw: {
+            "kind": kind, "rows": [], "first_date": "20260102"},
+        archive_root=str(tmp_path), macro_snapshots_path=snaps)
+    assert (_bm(feed_floors=floors, **common).semantic_digest()
+            != _bm(feed_floors=other, **common).semantic_digest())
+
+
 # =========================================================================== #
 # C-B — the seats live-session settlement path                                   #
 # =========================================================================== #
 class _SeatsSeamSpy:
+    """A faithful stand-in for ``guanlan_v2.seats.watcher``'s two seams.
+
+    ``note_external_llm_use`` buckets by ``(now or datetime.now()).date()`` — the REAL
+    watcher behaviour (``watcher.py:91-100``). That is exactly what makes the day-bucket
+    bug observable: if the driver omits ``now=``, the debit lands in wall-clock today
+    while ``reconcile_daily_llm_budget`` keeps reading the point's session bucket.
+    """
+
     def __init__(self, counts=None, daily_budget=24):
         self.state = {"counts": dict(counts or {}), "daily_budget": daily_budget}
-        self.noted: list[int] = []
+        self.noted: list[tuple[int, str]] = []
         self.loads = 0
 
     def load_state(self):
@@ -1014,9 +1161,20 @@ class _SeatsSeamSpy:
         n = int(n)
         if n <= 0:
             return
-        self.noted.append(n)
         day = (now or datetime.now()).date().isoformat()
+        self.noted.append((n, day))
         self.state["counts"][day] = int(self.state["counts"].get(day) or 0) + n
+
+
+def _session_day(iso_day: str) -> str:
+    return _utc(iso_day, 14, 0).astimezone(ZoneInfo(TZ)).date().isoformat()
+
+
+def _one_point_env():
+    """A single-point interval (07-06 only), so two RUNS can share one session bucket."""
+    cal = _calendar(["2026-07-06", "2026-07-07"])
+    sch = _schedule(kind="daily")
+    return sch, cal, _utc("2026-07-06", 0, 0), _utc("2026-07-06", 23, 59)
 
 
 def test_carry_b_pit_replay_never_touches_the_seats_pool():
@@ -1037,46 +1195,150 @@ def test_carry_b_live_session_settles_once_per_reservation():
         request=_request(sch), schedule=sch, execution_config=_exec_config(sch),
         interval_start=start, interval_end=end, bindings=binds,
         is_live_session=lambda point: True)
-    assert seam.noted == [1, 1, 1]                     # exactly once per settled point
+    assert [n for n, _ in seam.noted] == [1, 1, 1]     # exactly once per settled point
     # the settled reservations are visible in the REAL ledger
     settled = [r for r in binds.budget.replay().reservations.values()
                if r.scope_id.startswith("llm.dec.trader#")]
     assert len(settled) == 3
     assert all(r.status == "settled" for r in settled)
+    assert all(r.actual_llm_invocations == 1 for r in settled)
 
 
-def test_carry_b_live_session_respects_the_exhausted_daily_pool():
+# ── Fix 1: the debit lands in the POINT'S session bucket, not wall-clock today ── #
+def test_carry_b_debit_lands_in_the_points_own_session_bucket():
     sch, cal, start, end = _three_point_env()
-    today = _utc("2026-07-06", 14, 0).astimezone(ZoneInfo(TZ)).date().isoformat()
-    seam = _SeatsSeamSpy(counts={today: 24})           # the 24/day pool is exhausted
+    seam = _SeatsSeamSpy()
     binds, _ = _bindings(sch, cal, seats_seam=seam)
     run_interval_replay(
         request=_request(sch), schedule=sch, execution_config=_exec_config(sch),
         interval_start=start, interval_end=end, bindings=binds,
-        is_live_session=lambda point: point.point_ordinal == 1)
-    assert seam.noted == []                            # nothing admissible ⇒ nothing noted
-    llm = [r for r in binds.budget.replay().reservations.values()
-           if r.scope_id == "llm.dec.trader#1"]
-    assert llm and llm[0].reserved_llm_invocations == 0
+        is_live_session=lambda point: True)
+    want = [_session_day(d) for d in ("2026-07-06", "2026-07-07", "2026-07-08")]
+    assert [day for _, day in seam.noted] == want
+    assert seam.state["counts"] == {d: 1 for d in want}
+    # wall-clock today is NEVER debited (the bug: note booked to datetime.now().date())
+    assert datetime.now().date().isoformat() not in seam.state["counts"] or \
+        datetime.now().date().isoformat() in want
 
 
-def test_carry_b_default_is_bit_unchanged():
-    """No resolver ⇒ every point is PIT_REPLAY: reservations byte-identical to Task 4."""
+def test_carry_b_a_nearly_exhausted_session_bucket_is_read_and_then_filled():
+    """Reconcile READS and settlement WRITES the same day key — proven end to end."""
+    sch, cal, start, end = _one_point_env()
+    day = _session_day("2026-07-06")
+    seam = _SeatsSeamSpy(counts={day: 23})             # 23/24 already used that session
+    binds, _ = _bindings(sch, cal, seats_seam=seam)
+    run_interval_replay(
+        request=_request(sch), schedule=sch, execution_config=_exec_config(sch),
+        interval_start=start, interval_end=end, bindings=binds,
+        is_live_session=lambda point: True)
+    assert seam.noted == [(1, day)]
+    assert seam.state["counts"][day] == 24             # the SAME bucket filled to the cap
+
+
+# ── Fix 1 (cont.): a later run over the same session sees the earlier consumption ── #
+def test_carry_b_a_later_run_sees_the_earlier_runs_consumption():
+    """The 24/day pool really depletes: run B finds run A's debit and degrades.
+
+    Within ONE interval every decision point has a distinct session date (one decision
+    time per session), so cross-consumption is only reachable ACROSS runs over the same
+    session — which is exactly the shared-pool contention the watcher seam exists for.
+    """
+    sch, cal, start, end = _one_point_env()
+    day = _session_day("2026-07-06")
+    seam = _SeatsSeamSpy(daily_budget=1)               # a one-invocation day
+    coord_a = _FakeCoordinator()
+    a, _ = _bindings(sch, cal, seats_seam=seam, coordinator=coord_a)
+    run_interval_replay(
+        request=_request(sch), schedule=sch, execution_config=_exec_config(sch),
+        interval_start=start, interval_end=end, bindings=a,
+        is_live_session=lambda point: True)
+    assert seam.noted == [(1, day)] and coord_a.llm_calls == [1]
+
+    coord_b = _FakeCoordinator()
+    b, _ = _bindings(sch, cal, seats_seam=seam, coordinator=coord_b)
+    run_interval_replay(
+        request=_request(sch, rid="req-second"), schedule=sch,
+        execution_config=_exec_config(sch), interval_start=start, interval_end=end,
+        bindings=b, is_live_session=lambda point: True)
+    assert seam.noted == [(1, day)]                    # run B could not draw from the pool
+    assert coord_b.llm_calls == []                     # …so its LLM lane never ran
+    assert b.intent_ledger.degraded_points[1] == ("llm_budget_exhausted:seats_daily_pool",)
+
+
+# ── Fix 2: a re-run must not double-debit the shared pool ── #
+def test_carry_b_rerunning_the_interval_does_not_double_debit():
     sch, cal, start, end = _three_point_env()
-    a, _ = _bindings(sch, cal, seats_seam=_SeatsSeamSpy())
+    seam = _SeatsSeamSpy()
+    binds, _ = _bindings(sch, cal, seats_seam=seam)
+    for _ in range(2):                                 # the idempotency keys exist for this
+        run_interval_replay(
+            request=_request(sch), schedule=sch, execution_config=_exec_config(sch),
+            interval_start=start, interval_end=end, bindings=binds,
+            is_live_session=lambda point: True)
+    assert [n for n, _ in seam.noted] == [1, 1, 1]     # THREE debits, not six
+    assert sum(seam.state["counts"].values()) == 3
+
+
+# ── Fix 3: an exhausted pool stops the LLM lane; the point degrades honestly ── #
+def test_carry_b_exhausted_pool_does_not_invoke_the_llm_lane():
+    sch, cal, start, end = _three_point_env()
+    exhausted = _session_day("2026-07-06")
+    seam = _SeatsSeamSpy(counts={exhausted: 24})       # point 1's session is spent
+    coord = _FakeCoordinator()
+    binds, _ = _bindings(sch, cal, seats_seam=seam, coordinator=coord)
+    run_interval_replay(
+        request=_request(sch), schedule=sch, execution_config=_exec_config(sch),
+        interval_start=start, interval_end=end, bindings=binds,
+        is_live_session=lambda point: point.point_ordinal == 1)
+
+    assert coord.bootstrap_calls == [1, 2, 3]          # the run CONTINUES
+    assert coord.llm_calls == [2, 3]                   # …but point 1's LLM lane never ran
+    assert coord.det_calls == [1, 2, 3]                # the deterministic lane still runs
+    assert seam.noted == []                            # nothing admissible ⇒ nothing metered
+    # the point is honestly degraded on the SAME surface an UNAVAILABLE feed uses
+    assert binds.intent_ledger.degraded_points[1] == (
+        "llm_budget_exhausted:seats_daily_pool",)
+    assert 2 not in binds.intent_ledger.degraded_points
+    assert len(binds.intent_ledger) == 2               # no intent for the refused point
+    assert len(binds.intent_ledger.deterministic_targets) == 3
+    llm1 = [r for r in binds.budget.replay().reservations.values()
+            if r.scope_id == "llm.dec.trader#1"][0]
+    assert llm1.reserved_llm_invocations == 0
+    assert llm1.status == "settled" and llm1.actual_tokens == 0   # the hold is released
+
+
+def test_carry_b_non_live_run_matches_the_task4_reservation_shape():
+    """No resolver ⇒ every point is PIT_REPLAY; the ledger matches the Task-4 golden."""
+    sch, cal, start, end = _three_point_env()
+    seam = _SeatsSeamSpy()
+    a, _ = _bindings(sch, cal, seats_seam=seam)
     run_interval_replay(request=_request(sch), schedule=sch,
                         execution_config=_exec_config(sch), interval_start=start,
                         interval_end=end, bindings=a)
-    b, _ = _bindings(sch, cal, seats_seam=_SeatsSeamSpy())
-    run_interval_replay(request=_request(sch), schedule=sch,
-                        execution_config=_exec_config(sch), interval_start=start,
-                        interval_end=end, bindings=b, is_live_session=None)
+
     def _shape(binds):
         return sorted(
             (r.scope_type, r.scope_id, r.reserved_llm_invocations, r.status)
             for r in binds.budget.replay().reservations.values())
+
+    plan_scope = [s for s in _shape(a) if s[0] == "plan"]
+    assert len(plan_scope) == 1 and plan_scope[0][3] == "reserved"
+    assert [s for s in _shape(a) if s[0] == "node"] == [
+        ("node", "det.rule#1", 0, "reserved"),
+        ("node", "det.rule#2", 0, "reserved"),
+        ("node", "det.rule#3", 0, "reserved"),
+        ("node", "llm.dec.trader#1", 1, "reserved"),
+        ("node", "llm.dec.trader#2", 1, "reserved"),
+        ("node", "llm.dec.trader#3", 1, "reserved"),
+    ]
+    assert seam.noted == [] and seam.loads == 1        # one snapshot read, zero debits
+    assert a.intent_ledger.degraded_points == {}
+    # an explicit all-False resolver takes the identical path
+    b, _ = _bindings(sch, cal, seats_seam=_SeatsSeamSpy())
+    run_interval_replay(request=_request(sch), schedule=sch,
+                        execution_config=_exec_config(sch), interval_start=start,
+                        interval_end=end, bindings=b, is_live_session=lambda p: False)
     assert _shape(a) == _shape(b)
-    assert all(s[3] == "reserved" for s in _shape(a))   # nothing settled by default
 
 
 # =========================================================================== #
@@ -1150,3 +1412,15 @@ def test_carry_c_server_mounts_the_adapters_router_and_binds_p7():
     assert "build_adapters_router" in text
     assert "plan_approval_console_kwargs" in text
     assert "bind_process_plan_approval_coordinator" in text
+
+
+def test_carry_c_console_probe_never_drops_the_coordinator_silently():
+    """A filtered-away kwarg must be LOUD — a silent drop is a silent capability loss."""
+    from pathlib import Path
+    src = Path(adapters_api.__file__).resolve().parents[3] / "guanlan_v2" / "server.py"
+    text = src.read_text(encoding="utf-8")
+    block = text.split("_accepted = _inspect.signature(build_console_router)")[1]
+    block = block.split("app.include_router(build_console_router(")[0]
+    assert "WARNING" in block and "DROPPED" in block, (
+        "the signature probe must log loudly when it filters a kwarg away")
+    assert "stderr" in block

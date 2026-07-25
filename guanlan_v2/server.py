@@ -264,7 +264,15 @@ def create_app():
         import inspect as _inspect
         _console_kw = plan_approval_console_kwargs(coordinator=_p7_coord)
         _accepted = _inspect.signature(build_console_router).parameters
-        _console_kw = {k: v for k, v in _console_kw.items() if k in _accepted}
+        _kept = {k: v for k, v in _console_kw.items() if k in _accepted}
+        # 一旦有东西被探测过滤掉,必须**大声**报出来:静默丢弃协调器 = 把一次响亮的启动失败
+        # 换成一次无声的能力丢失(plan-approval 端点继续 503 且无任何诊断)。
+        for _k in sorted(set(_console_kw) - set(_kept)):
+            print(f"[guanlan_v2] WARNING plan-approval wiring DROPPED: "
+                  f"build_console_router() does not accept {_k!r} — the Phase-7 "
+                  f"coordinator is bound but unreachable; console plan-approval "
+                  f"endpoints will keep returning 503.", file=sys.stderr)
+        _console_kw = _kept
     app.include_router(build_console_router(**_console_kw))
 
     # ── P2:自主研究回路(提案→求值→批判→改进 后台单飞;零开关零定时器,

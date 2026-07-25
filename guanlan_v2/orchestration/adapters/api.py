@@ -368,7 +368,15 @@ def build_adapters_router(deps: AdaptersRouterDeps | None = None) -> APIRouter:
         return d.replay_state_store
 
     def _now() -> datetime:
-        return clock_now(d.clock) if d.clock is not None else datetime.now(tz=None).astimezone()
+        """The authoritative instant. An unbound clock REFUSES — it never falls back.
+
+        This value is the ``now=`` a maturity gate decides on; a wall-clock fallback would
+        silently gate a holdout window on machine local time (the Phase-8 console 墙钟
+        production bug). The caller must 503 ``clock_unwired`` before reaching here.
+        """
+        if d.clock is None:
+            raise ShadowContractError("no authoritative clock is bound")
+        return clock_now(d.clock)
 
     # ── POST /orchestration/replay/start ─────────────────────────────────── #
     @router.post("/replay/start")
@@ -393,6 +401,11 @@ def build_adapters_router(deps: AdaptersRouterDeps | None = None) -> APIRouter:
         registry = d.schedule_registry
         if registry is None:
             return _fail("schedule_registry_unwired", 503)
+        # refuse BEFORE minting an identity nothing will record: a 200 whose request_id
+        # is then unknown to every read endpoint is exactly the fake empty success this
+        # module forbids.
+        if d.replay_requests is None:
+            return _fail("replay_request_store_unwired", 503)
         ref = _resolve_schedule_ref(registry, schedule_id, schedule_version)
         if ref is None:
             return _fail("unknown_schedule", 422,
@@ -419,19 +432,20 @@ def build_adapters_router(deps: AdaptersRouterDeps | None = None) -> APIRouter:
             request_id=request_id, schedule_digest=schedule.content_digest, code=code,
             start_date=start_date, end_date=end_date, strategy_id=strategy_id)
 
-        if d.replay_requests is not None:
-            d.replay_requests[request_id] = {
-                "request": request,
-                "experiment_id": experiment_id,
-                "run_id": derive_replay_run_id(request_id=request_id),
-                "candidate_plan_digest": candidate_plan_digest,
-                "code": code,
-                "strategy_id": strategy_id,
-                "start_date": start_date,
-                "end_date": end_date,
-                "schedule_ref": ref,
-                "status": "awaiting_approval",
-            }
+        # the store is bound (refused above), so the record is NEVER skipped: a 200 always
+        # means /replay/state and the approval surface can find this request.
+        d.replay_requests[request_id] = {
+            "request": request,
+            "experiment_id": experiment_id,
+            "run_id": derive_replay_run_id(request_id=request_id),
+            "candidate_plan_digest": candidate_plan_digest,
+            "code": code,
+            "strategy_id": strategy_id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "schedule_ref": ref,
+            "status": "awaiting_approval",
+        }
         return JSONResponse({
             "ok": True,
             "request_id": request_id,
@@ -504,6 +518,10 @@ def build_adapters_router(deps: AdaptersRouterDeps | None = None) -> APIRouter:
         bindings = d.replay_bindings
         if bindings is None or getattr(bindings, "replay_state_store", None) is None:
             return _fail("replay_bindings_unwired", 503)
+        # the maturity gate decides on this instant — an unbound clock REFUSES rather than
+        # silently gating a holdout window on machine local time.
+        if d.clock is None:
+            return _fail("clock_unwired", 503)
         now = _now()
         try:
             receipt = await asyncio.to_thread(
@@ -522,6 +540,10 @@ def build_adapters_router(deps: AdaptersRouterDeps | None = None) -> APIRouter:
         goal = str(body.get("goal") or "").strip()
         if not goal:
             return _fail("missing_goal", 422)
+        # refuse BEFORE minting a run_id nothing will record: a 200 whose run_id then
+        # 404s forever on /weiwo/state is a fabricated success, not an honest degradation.
+        if d.weiwo_requests is None:
+            return _fail("weiwo_store_unwired", 503)
         fallback_preset_id = str(body.get("fallback_preset_id") or "").strip() or None
         request_id = _derive_request_id(
             "weiwo", {"goal": goal, "fallback_preset_id": fallback_preset_id or ""})
@@ -531,12 +553,12 @@ def build_adapters_router(deps: AdaptersRouterDeps | None = None) -> APIRouter:
             approval_policy=ApprovalPolicy.REQUIRED,
             fallback_preset_id=fallback_preset_id,
         )
-        if d.weiwo_requests is not None:
-            d.weiwo_requests[run_id] = {
-                "request": request, "run_id": run_id, "request_id": request_id,
-                "goal": goal, "fallback_preset_id": fallback_preset_id,
-                "status": "awaiting_approval",
-            }
+        # the store is bound (refused above) — the record is NEVER skipped.
+        d.weiwo_requests[run_id] = {
+            "request": request, "run_id": run_id, "request_id": request_id,
+            "goal": goal, "fallback_preset_id": fallback_preset_id,
+            "status": "awaiting_approval",
+        }
         return JSONResponse({
             "ok": True, "request_id": request_id, "run_id": run_id,
             "status": "awaiting_approval",
@@ -551,6 +573,10 @@ def build_adapters_router(deps: AdaptersRouterDeps | None = None) -> APIRouter:
         rid = str(run_id or "").strip()
         if not rid:
             return _fail("missing_run_id", 422)
+        # with no store bound there is no basis for "unknown" — that would be a fabricated
+        # verdict about a run we simply cannot look up.
+        if d.weiwo_requests is None and d.weiwo_receipts is None:
+            return _fail("weiwo_store_unwired", 503)
         receipts = d.weiwo_receipts or {}
         receipt = receipts.get(rid)
         if receipt is not None:
@@ -651,12 +677,38 @@ def _compat_decision_row(
     return row
 
 
+#: the idempotency scan's tail window (bytes / lines). ``var/seats_decisions.jsonl`` grows
+#: without bound, so the guard reads a bounded tail like the rest of the house
+#: (``read_picks``' 500-line tail is the precedent) instead of the whole file on every
+#: persist. Honest limit: a run whose rows have already scrolled out of the window would
+#: not be detected — irrelevant for the real caller, which persists an interval once,
+#: right after it completes.
+_COMPAT_SCAN_BYTES = 4 * 1024 * 1024
+_COMPAT_SCAN_LINES = 20_000
+
+
+def _tail_lines(path: Path, *, max_bytes: int, max_lines: int) -> list[str]:
+    """The last ``max_lines`` complete lines of ``path`` within a ``max_bytes`` window."""
+    with path.open("rb") as fh:
+        fh.seek(0, 2)
+        size = fh.tell()
+        start = max(0, size - max_bytes)
+        fh.seek(start)
+        chunk = fh.read()
+    text = chunk.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if start > 0 and lines:
+        lines = lines[1:]        # the window may have cut the first line in half
+    return lines[-max_lines:]
+
+
 def _jsonl_has_run_id(path: Path, run_id: str) -> bool:
-    """``True`` iff ``path`` already carries a row for ``run_id`` (the idempotency check)."""
+    """``True`` iff ``path``'s tail window carries a row for ``run_id`` (idempotency)."""
     try:
         if not path.exists():
             return False
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line in _tail_lines(path, max_bytes=_COMPAT_SCAN_BYTES,
+                                max_lines=_COMPAT_SCAN_LINES):
             line = line.strip()
             if not line:
                 continue
@@ -770,7 +822,11 @@ def build_replay_feed_floors(
 
     reader = read_archive if read_archive is not None else sa.read_archive
     kind_names = tuple(kinds) if kinds is not None else tuple(sa.KINDS)
-    root = archive_root if archive_root is not None else str(sa._ARCHIVE_DIR_DEFAULT)
+    # resolve through the module's OWN resolver so the ``GUANLAN_SNAPSHOT_ARCHIVE_DIR``
+    # override (snapshot_archive.py:52-55 — the override a 9998 verification run uses) is
+    # honoured. Reading `_ARCHIVE_DIR_DEFAULT` directly would record, in the floors and
+    # therefore in the sealed PIT manifest attestation, a root that was never read.
+    root = archive_root if archive_root is not None else str(sa._archive_dir(None))
     floors = [
         archive_feed_floor_from_read(kind, reader(kind), archive_root=root)
         for kind in kind_names
