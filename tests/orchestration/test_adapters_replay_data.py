@@ -21,6 +21,7 @@ Run: ``python -m pytest tests/orchestration/test_adapters_replay_data.py -v``
 from __future__ import annotations
 
 import inspect
+import json
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -29,11 +30,19 @@ import pytest
 
 from guanlan_v2.orchestration.adapters.contracts import ReplayDecisionPoint
 from guanlan_v2.orchestration.adapters.replay_data import (
+    ARCHIVE_FEED_IDS,
+    PIT_REPLAY_SOURCE_ID,
+    ArchiveFeedFloor,
+    ArchiveFeedVerdict,
     PitReaderRawSource,
+    ReplayFeasibleWindow,
     ReplayPointClock,
+    archive_feed_floor_from_read,
     build_pit_replay_descriptor,
     build_replay_data_context,
     build_replay_manifest,
+    derive_replay_feasible_window,
+    pit_replay_source_refs,
 )
 from guanlan_v2.orchestration.context import DataContext
 from guanlan_v2.orchestration.data.calendar import build_trading_calendar
@@ -650,3 +659,224 @@ def test_default_factory_wires_engine_pit_reader():
     source_code = inspect.getsource(PitReaderRawSource)
     assert "financial_analyst.backtest.pit_reader" in source_code
     assert "import PitReader" in source_code
+
+
+# =========================================================================== #
+# Task 2b — per-feed archive coverage floors + feasible-window honesty          #
+# =========================================================================== #
+# The snapshot archive (甲 commit 2d2aba8) supplies the market_tape / fundflow
+# concept+industry / macro historical series the Lane-0 factor battery reads at
+# every replay decision point (Task 4 step ③). A decision point before a feed's
+# archive coverage floor ⇒ that feed's factors resolve UNAVAILABLE + badge +
+# reason (AMEND-1: 缺历史覆盖 → UNAVAILABLE, 绝不拿当前快照冒充历史); Bootstrap
+# degrades honestly and continues, never a run failure. These tests are the
+# brief's 6-row matrix (+ one drift guard binding the feed ids to the delivered
+# snapshot_archive.KINDS surface).
+
+_MARKET_TAPE = "market_tape"
+
+
+def _at_bj_1500(iso_date: str) -> datetime:
+    """An aware-UTC as_of whose Asia/Shanghai session date is ``iso_date``.
+
+    07:00Z == 15:00 Asia/Shanghai (the A-share close), so the Beijing calendar
+    date of the returned instant is exactly ``iso_date``.
+    """
+    y, m, d = (int(x) for x in iso_date.split("-"))
+    return datetime(y, m, d, 7, 0, tzinfo=UTC)
+
+
+# --- matrix row 1: a point before a feed's floor ⇒ UNAVAILABLE + badge + reason #
+def test_pre_floor_factor_unavailable():
+    from dataclasses import fields as dc_fields
+
+    floor = ArchiveFeedFloor(
+        feed_id=_MARKET_TAPE, floor_date="2026-07-01", archive_root="root/market_tape")
+    window = derive_replay_feasible_window(
+        as_of=_at_bj_1500("2026-06-30"), feed_floors=(floor,))
+    assert isinstance(window, ReplayFeasibleWindow)
+    assert window.decision_date == "2026-06-30"
+
+    v = window.verdicts[0]
+    assert v.feed_id == _MARKET_TAPE
+    assert v.covered is False
+    assert v.status == "UNAVAILABLE"
+    assert v.reason is not None and "2026-07-01" in v.reason and _MARKET_TAPE in v.reason
+    assert v.badge == "archive_pre_floor:market_tape"
+    assert window.unavailable_feed_ids == (_MARKET_TAPE,)
+
+    # no zero/NaN fill, no partial fabricated series: the feed verdict carries NO
+    # numeric payload at all (there is nothing to fabricate at feed granularity).
+    names = {f.name for f in dc_fields(ArchiveFeedVerdict)}
+    assert "value" not in names and "series" not in names and "values" not in names
+
+
+# --- matrix row 2: the floor boundary is exact (before ⇒ UNAVAILABLE, on ⇒ OK)  #
+def test_floor_boundary_exact():
+    floor = ArchiveFeedFloor(
+        feed_id=_MARKET_TAPE, floor_date="2026-07-01", archive_root="root/market_tape")
+    w_before = derive_replay_feasible_window(
+        as_of=_at_bj_1500("2026-06-30"), feed_floors=(floor,))  # one session before
+    w_on = derive_replay_feasible_window(
+        as_of=_at_bj_1500("2026-07-01"), feed_floors=(floor,))  # on the floor
+
+    assert w_before.verdicts[0].covered is False
+    assert w_before.verdicts[0].status == "UNAVAILABLE"
+    assert w_on.verdicts[0].covered is True
+    assert w_on.verdicts[0].status == "OK"
+    assert w_on.verdicts[0].reason is None and w_on.verdicts[0].badge is None
+    assert w_on.unavailable_feed_ids == ()
+
+
+# --- matrix row 3: an old (pre-floor) point's verdict digest is archive-growth   #
+#     stable (Task-2 invariant-3 PIT stability extended to archive feeds).        #
+def test_pre_floor_digest_stable(tmp_path):
+    from guanlan_v2.datafeed.snapshot_archive import read_archive
+
+    kind_dir = tmp_path / _MARKET_TAPE
+    kind_dir.mkdir(parents=True)
+    main = kind_dir / "snapshots.jsonl"
+
+    def _row(trade_date: str, archived_at: str) -> str:
+        return json.dumps({
+            "trade_date": trade_date, "archived_at": archived_at,
+            "kind": _MARKET_TAPE, "payload": {"derived": {}}})
+
+    main.write_text(
+        _row("20260701", "2026-07-01T15:05:00") + "\n"
+        + _row("20260702", "2026-07-02T15:05:00") + "\n", encoding="utf-8")
+
+    res1 = read_archive(_MARKET_TAPE, archive_dir=str(tmp_path))
+    assert res1["first_date"] == "20260701"
+    floor1 = archive_feed_floor_from_read(_MARKET_TAPE, res1, archive_root=str(kind_dir))
+    assert floor1.floor_date == "2026-07-01"  # YYYYMMDD read-surface floor normalized to ISO
+
+    before = _at_bj_1500("2026-06-30")  # a pre-floor decision point
+    w1 = derive_replay_feasible_window(as_of=before, feed_floors=(floor1,))
+    assert w1.verdicts[0].status == "UNAVAILABLE"
+    digest1 = w1.digest
+
+    # append strictly-newer archive rows; the earliest first_date (the floor) is
+    # unchanged, so the old point's UNAVAILABLE verdict must be byte-identical.
+    with open(main, "a", encoding="utf-8") as fh:
+        fh.write(_row("20260703", "2026-07-03T15:05:00") + "\n")
+        fh.write(_row("20260706", "2026-07-06T15:05:00") + "\n")
+
+    res2 = read_archive(_MARKET_TAPE, archive_dir=str(tmp_path))
+    assert res2["first_date"] == "20260701"  # floor stable under archive growth
+    floor2 = archive_feed_floor_from_read(_MARKET_TAPE, res2, archive_root=str(kind_dir))
+    w2 = derive_replay_feasible_window(as_of=before, feed_floors=(floor2,))
+    assert w2.digest == digest1
+
+
+# --- matrix row 4: an interval straddling the floor completes with per-point      #
+#     honesty (UNAVAILABLE + normal points coexist, no run failure).              #
+def test_mixed_interval_honest():
+    floor = ArchiveFeedFloor(
+        feed_id=_MARKET_TAPE, floor_date="2026-07-03", archive_root="root/market_tape")
+    # 07-01 Wed, 07-02 Thu (before) | 07-03 Fri (on) | 07-06 Mon, 07-07 Tue (after)
+    interval = ["2026-07-01", "2026-07-02", "2026-07-03", "2026-07-06", "2026-07-07"]
+    windows = [
+        derive_replay_feasible_window(as_of=_at_bj_1500(d), feed_floors=(floor,))
+        for d in interval  # the whole interval derives without raising
+    ]
+    statuses = [w.verdicts[0].status for w in windows]
+    assert statuses == ["UNAVAILABLE", "UNAVAILABLE", "OK", "OK", "OK"]
+    # both behaviors coexist in one run.
+    assert any(w.verdicts[0].covered for w in windows)
+    assert any(not w.verdicts[0].covered for w in windows)
+
+
+# --- matrix row 5: floor entries are semantic; physical archive roots audit-only  #
+def test_manifest_floor_entries_semantic():
+    common = dict(
+        store_meta=_STORE_META, as_of=AS_OF, timezone="Asia/Shanghai",
+        calendar_id="cn_a_share", routing_snapshot_digest="e" * 64,
+        schema_registry_digest="f" * 64)
+
+    def _floors(root_tag: str, mt_floor: str = "2026-07-01"):
+        return (
+            ArchiveFeedFloor(feed_id="market_tape", floor_date=mt_floor,
+                             archive_root=f"{root_tag}/market_tape"),
+            ArchiveFeedFloor(feed_id="fundflow_industry", floor_date="2026-07-05",
+                             archive_root=f"{root_tag}/fundflow_industry"),
+        )
+
+    m1 = build_replay_manifest(data_snapshot_id="pit-root", feed_floors=_floors("A"), **common)
+    m2 = build_replay_manifest(data_snapshot_id="pit-root", feed_floors=_floors("B"), **common)
+    assert isinstance(m1.entries, tuple)
+
+    # physical archive roots are audit-only: differing roots keep the SEMANTIC digest.
+    assert m1.content_digest == m2.content_digest
+    assert m1.semantic_digest() == m2.semantic_digest()
+    # ... but the audit (dereference) identity differs (roots fold into the locator).
+    assert m1.audit_digest_value() != m2.audit_digest_value()
+    assert m1.data_snapshot_id != m2.data_snapshot_id
+
+    # a floor-DATE change moves the SEMANTIC digest (floor facts are digest-bearing).
+    m3 = build_replay_manifest(
+        data_snapshot_id="pit-root", feed_floors=_floors("A", mt_floor="2026-06-15"), **common)
+    assert m3.content_digest != m1.content_digest
+
+    # one digest-bearing entry per feed + the store-meta entry, all present.
+    datasets = {e.dataset_id for e in m1.entries}
+    assert "snapshot_archive.market_tape" in datasets
+    assert "snapshot_archive.fundflow_industry" in datasets
+    assert "pit_store.meta" in datasets
+
+    # Task 2's existing (no-floor) manifest is byte-unchanged by the additive param.
+    bare = build_replay_manifest(data_snapshot_id="pit-root", **common)
+    assert bare.data_snapshot_id == "pit-root"
+    assert {e.dataset_id for e in bare.entries} == {"pit_store.meta"}
+
+
+# --- matrix row 6: PIT_REPLAY routing can never select an ONLINE descriptor       #
+def test_pit_replay_never_routes_online():
+    surface = phase3_data_surface()
+    pit_desc = build_pit_replay_descriptor(
+        method_specs=surface.method_specs, handler_ref=_HANDLER)
+    # the "Task 3" ONLINE live descriptor stand-in: supported_modes == (ONLINE,).
+    online_desc = DataSourceDescriptor.build(
+        source_id="live.online", source_version="1",
+        method_refs=tuple(s.method_ref for s in surface.method_specs),
+        method_capability_refs=pit_desc.method_capability_refs,
+        supported_modes=(DataMode.ONLINE,),
+        supported_backends=(DataBackend.LIVE,),
+        handler_ref=_HANDLER,
+        source_config_schema_ref=SchemaRef(name="DataSourceConfigSnapshot", version="1"))
+
+    reg = DataSourceRegistry(registry_version="p9-online-guard")
+    for s in surface.method_specs:
+        reg.register_method(s)
+    reg.register_descriptor(pit_desc)
+    reg.register_descriptor(online_desc)
+    reg.seal()
+    snap = reg.snapshot()
+
+    # both descriptors carry the method; only the PIT_REPLAY one is ever resolvable.
+    assert any(d.source_id == "live.online" for d in snap.source_descriptors)
+    assert DataMode.PIT_REPLAY not in online_desc.supported_modes
+    assert pit_desc.supported_modes == (DataMode.PIT_REPLAY,)
+
+    for method_id in ("news", "ohlcv"):
+        mref = surface.spec_by_method[method_id].method_ref
+        refs = pit_replay_source_refs(snap, method_ref=mref)
+        ids = {r.id for r in refs}
+        assert ids == {PIT_REPLAY_SOURCE_ID}      # ONLINE descriptor never resolved
+        assert "live.online" not in ids
+
+
+# --- drift guard: the feed ids bind to the delivered snapshot_archive surface     #
+def test_archive_feed_ids_bound_to_delivered_kinds():
+    from guanlan_v2.datafeed.snapshot_archive import KINDS
+
+    # the three snapshot_archive-backed feeds bind to the delivered KINDS (no drift);
+    # 'macro' is the SEPARATE macro-pulse feed (macro.pulse._read_snapshots).
+    assert set(KINDS) <= set(ARCHIVE_FEED_IDS)
+    assert "macro" in ARCHIVE_FEED_IDS
+    assert set(ARCHIVE_FEED_IDS) == set(KINDS) | {"macro"}
+
+
+def test_archive_feed_floor_rejects_unknown_feed():
+    with pytest.raises(ValueError):
+        ArchiveFeedFloor(feed_id="not_a_feed", floor_date="2026-07-01", archive_root="r")

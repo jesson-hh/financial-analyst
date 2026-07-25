@@ -49,6 +49,7 @@ existing ``ohlcv`` / ``news`` method refs (Task 9 owns any registry classificati
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Iterator, Mapping
 from zoneinfo import ZoneInfo
@@ -86,6 +87,14 @@ __all__ = [
     "build_replay_manifest",
     "build_replay_data_context",
     "PIT_REPLAY_SOURCE_ID",
+    # --- Task 2b: per-feed archive coverage floors + feasible-window honesty ---
+    "ARCHIVE_FEED_IDS",
+    "ArchiveFeedFloor",
+    "archive_feed_floor_from_read",
+    "ArchiveFeedVerdict",
+    "ReplayFeasibleWindow",
+    "derive_replay_feasible_window",
+    "pit_replay_source_refs",
 ]
 
 #: the A-share pit_store trading timezone — the reviewed exchange tz whose local
@@ -113,6 +122,105 @@ _INTRADAY_FREQS = frozenset(
 #: the reviewed logical id of the PIT_REPLAY raw source.
 PIT_REPLAY_SOURCE_ID = "guanlan.pit_replay"
 _CONFIG_SCHEMA_REF = SchemaRef(name="DataSourceConfigSnapshot", version="1")
+
+# --------------------------------------------------------------------------- #
+# Per-feed snapshot-archive coverage floors (Task 2b)                          #
+# --------------------------------------------------------------------------- #
+# The Lane-0 market-factor battery reads three snapshot-archive feeds through
+# ``guanlan_v2.datafeed.snapshot_archive.read_archive(kind, ...)`` — the delivered
+# ``KINDS`` (甲 commit 2d2aba8): ``market_tape`` (炸板率/连板梯队/晋级率/北向),
+# ``fundflow_concept`` (rot.* — compute deferred), ``fundflow_industry`` (主力分位)
+# — plus the SEPARATE macro-pulse feed ``macro`` (``guanlan_v2.macro.pulse._read_snapshots``,
+# ``var/macro_pulse/snapshots.jsonl``) that supplies ``temp.astock``'s history. These
+# four are the feeds whose historical series only exist from an archive floor forward;
+# ``ARCHIVE_FEED_IDS`` is drift-guarded against ``snapshot_archive.KINDS`` in the tests.
+_ARCHIVE_FEED_MARKET_TAPE = "market_tape"
+_ARCHIVE_FEED_FUNDFLOW_CONCEPT = "fundflow_concept"
+_ARCHIVE_FEED_FUNDFLOW_INDUSTRY = "fundflow_industry"
+_ARCHIVE_FEED_MACRO = "macro"
+#: the canonical Lane-0 archive feed ids (three snapshot_archive KINDS + macro-pulse).
+ARCHIVE_FEED_IDS: tuple[str, ...] = (
+    _ARCHIVE_FEED_MARKET_TAPE,
+    _ARCHIVE_FEED_FUNDFLOW_CONCEPT,
+    _ARCHIVE_FEED_FUNDFLOW_INDUSTRY,
+    _ARCHIVE_FEED_MACRO,
+)
+
+#: the digest-bearing archive-floor entry's payload schema ref (like ``PitStoreMeta``).
+_ARCHIVE_FLOOR_SCHEMA_REF = SchemaRef(name="ArchiveCoverageFloor", version="1")
+#: the badge prefix a pre-floor feed carries (``archive_pre_floor:<feed_id>``).
+_ARCHIVE_PRE_FLOOR_BADGE = "archive_pre_floor"
+#: the shared MarketFactorValue.status vocabulary (①§2 / AMEND-1) at feed granularity.
+_STATUS_OK = "OK"
+_STATUS_UNAVAILABLE = "UNAVAILABLE"
+
+
+def _iso_from_yyyymmdd(value: Any) -> str | None:
+    """``'20260716'`` / ``'2026-07-16'`` / ``'2026-07-16T…'`` → ``'2026-07-16'``.
+
+    Mirrors ``market.factors._iso_from_yyyymmdd`` so the archive read surface's
+    ``YYYYMMDD`` ``first_date`` normalizes to the ISO date the floor comparison uses.
+    An unparseable / short value yields ``None`` (honest: no floor).
+    """
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    if len(digits) < 8:
+        return None
+    return f"{digits[0:4]}-{digits[4:6]}-{digits[6:8]}"
+
+
+def _require_iso_date(value: str) -> str:
+    """Reject anything that is not a real ISO ``YYYY-MM-DD`` calendar date."""
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError(f"floor_date must be a valid ISO YYYY-MM-DD date, got {value!r}")
+    return value
+
+
+@dataclass(frozen=True)
+class ArchiveFeedFloor:
+    """One Lane-0 feed's archive coverage floor (input to the replay manifest).
+
+    ``feed_id`` is one of :data:`ARCHIVE_FEED_IDS` (bound to the delivered
+    ``snapshot_archive.KINDS`` + the macro-pulse feed); ``floor_date`` is the feed's
+    archive coverage floor as an ISO ``YYYY-MM-DD`` date — the earliest archived
+    trading day (``read_archive(...).first_date``, normalized) — or ``None`` when the
+    archive is empty (no coverage at all). ``archive_root`` is the physical archive
+    root/locator and is **audit-only** — it never enters any semantic digest (it folds
+    into the manifest's audit-only ``data_snapshot_id``). Per ruling R13 an archive is
+    consumed by feed id + floor date only; the replay feasible window simply starts at
+    each feed's floor (never a hard Phase-9 precondition).
+    """
+
+    feed_id: str
+    floor_date: str | None
+    archive_root: str
+
+    def __post_init__(self) -> None:
+        if self.feed_id not in ARCHIVE_FEED_IDS:
+            raise ValueError(
+                f"feed_id {self.feed_id!r} is not a delivered archive feed "
+                f"{ARCHIVE_FEED_IDS}"
+            )
+        if self.floor_date is not None:
+            _require_iso_date(self.floor_date)
+        if not str(self.archive_root):
+            raise ValueError("archive_root (audit-only physical locator) must be non-empty")
+
+
+def archive_feed_floor_from_read(
+    feed_id: str, read_result: Mapping[str, Any], *, archive_root: str
+) -> ArchiveFeedFloor:
+    """Build an :class:`ArchiveFeedFloor` from a ``snapshot_archive.read_archive`` result.
+
+    ``read_result`` is the frozen ``{kind, rows, first_date}`` supply contract; its
+    ``first_date`` is a ``YYYYMMDD`` string (or ``None`` on an empty archive), which is
+    normalized to the ISO floor date. This is the sole binding to the delivered read
+    surface — the caller (Task 4) reads the archive once per feed and passes the result
+    here; the physical ``archive_root`` stays audit-only.
+    """
+    floor = _iso_from_yyyymmdd(read_result.get("first_date"))
+    return ArchiveFeedFloor(feed_id=feed_id, floor_date=floor, archive_root=archive_root)
 
 
 def _is_aware(value: datetime) -> bool:
@@ -406,6 +514,42 @@ def _store_meta_entry(store_meta: Mapping[str, Any], *, as_of: datetime) -> Data
     )
 
 
+def _feed_floor_entry(floor: ArchiveFeedFloor, *, as_of: datetime) -> DataSnapshotEntry:
+    """Bind ONE feed's archive coverage floor into a digest-bearing entry.
+
+    Only the semantic facts (``feed_id`` + ``floor_date``) enter the entry's
+    ``content_digest`` — a floor-date change moves the manifest's semantic digest,
+    exactly like the pit_store ``_meta.json`` facts. The physical ``archive_root``
+    never enters here (it is audit-only, folded into the manifest ``data_snapshot_id``).
+    """
+    facts = {"feed_id": floor.feed_id, "floor_date": floor.floor_date}
+    return DataSnapshotEntry(
+        dataset_id=f"snapshot_archive.{floor.feed_id}",
+        method_id="archive.coverage_floor", source_id="snapshot.archive",
+        revision_id=None, payload_schema_ref=_ARCHIVE_FLOOR_SCHEMA_REF,
+        content_digest=content_digest(facts), max_available_at=as_of,
+    )
+
+
+def _compose_data_snapshot_id(
+    data_snapshot_id: str, feed_floors: tuple[ArchiveFeedFloor, ...]
+) -> str:
+    """Fold the per-feed physical archive roots into the audit-only locator.
+
+    ``data_snapshot_id`` is the manifest's single audit-only field (``SEMANTIC_EXCLUDE``),
+    so appending the per-feed physical roots here keeps every physical root audit-only:
+    relocating a feed's archive root changes the manifest's audit/dereference digest
+    while leaving its semantic digest untouched. Empty ``feed_floors`` ⇒ the bare
+    ``data_snapshot_id`` unchanged (Task 2's manifests stay byte-identical).
+    """
+    if not feed_floors:
+        return data_snapshot_id
+    roots = ";".join(
+        f"{f.feed_id}={f.archive_root}" for f in sorted(feed_floors, key=lambda f: f.feed_id)
+    )
+    return f"{data_snapshot_id}::archives={roots}"
+
+
 def build_replay_manifest(
     *,
     data_snapshot_id: str,
@@ -415,6 +559,7 @@ def build_replay_manifest(
     calendar_id: str,
     routing_snapshot_digest: str,
     schema_registry_digest: str,
+    feed_floors: Iterable[ArchiveFeedFloor] = (),
     entries: tuple[DataSnapshotEntry, ...] = (),
 ) -> DataSnapshotManifest:
     """Seal a complete, immutable ``pit_frozen`` PIT_REPLAY snapshot manifest.
@@ -425,13 +570,23 @@ def build_replay_manifest(
     ``as_of`` must equal the decision point's ``decision_as_of`` (the caller's
     :func:`build_replay_data_context` re-asserts this through ``build_data_context``).
 
+    ``feed_floors`` (Task 2b) adds one **digest-bearing archive coverage-floor entry**
+    per Lane-0 feed the factor battery reads historically — each binds the semantic
+    ``feed_id`` + ``floor_date`` (a floor-date change moves the manifest's semantic
+    digest, exactly like the store-meta facts). Every feed's physical archive root
+    stays audit-only (folded into ``data_snapshot_id``); an empty ``feed_floors`` leaves
+    Task 2's manifest byte-identical.
+
     Note: the brief's illustrative ``(store_meta, entries)`` signature could not
     supply the coherence coordinates ``build_data_context`` requires; this reviewed
     signature adds them explicitly (recorded in the task report).
     """
-    ordered = tuple(entries) + (_store_meta_entry(store_meta, as_of=as_of),)
+    floors = tuple(feed_floors)
+    floor_entries = tuple(_feed_floor_entry(f, as_of=as_of) for f in floors)
+    ordered = tuple(entries) + floor_entries + (_store_meta_entry(store_meta, as_of=as_of),)
     return build_data_snapshot_manifest(
-        data_snapshot_id=data_snapshot_id, manifest_kind="pit_frozen", as_of=as_of,
+        data_snapshot_id=_compose_data_snapshot_id(data_snapshot_id, floors),
+        manifest_kind="pit_frozen", as_of=as_of,
         mode=DataMode.PIT_REPLAY, timezone=timezone, calendar_id=calendar_id,
         routing_snapshot_digest=routing_snapshot_digest,
         schema_registry_digest=schema_registry_digest, entries=ordered,
@@ -464,3 +619,140 @@ def build_replay_data_context(
         source_config=source_config, source_registry=source_registry,
         routing=routing, manifest=manifest,
     )
+
+
+# --------------------------------------------------------------------------- #
+# The replay feasible-window fact (Task 2b)                                    #
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class ArchiveFeedVerdict:
+    """One feed's coverage verdict at a replay decision point (feed granularity).
+
+    Carries the shared ``MarketFactorValue.status`` vocabulary (①§2 / AMEND-1) at
+    feed granularity: a decision point on or after the feed's ``floor_date`` is
+    ``covered`` (``OK``); a point before the floor (or a feed with no floor at all)
+    is ``UNAVAILABLE`` with a mandatory ``reason`` + ``badge`` — that feed's factors
+    resolve UNAVAILABLE downstream (缺历史覆盖 → UNAVAILABLE, 绝不补零/绝不拿当前快照冒充历史).
+    There is **no** numeric payload (no value/series) at feed granularity — there is
+    nothing to zero-fill or fabricate; the per-factor UNAVAILABLE values are produced
+    by the Phase-5 compute core, whose loaders read the same archive by feed id.
+    """
+
+    feed_id: str
+    floor_date: str | None
+    covered: bool
+    status: str
+    reason: str | None
+    badge: str | None
+
+
+@dataclass(frozen=True)
+class ReplayFeasibleWindow:
+    """The derived per-feed feasibility fact for one replay decision point.
+
+    ``decision_date`` is the Asia/Shanghai session date of the point's ``as_of`` (the
+    floors are trading-day dates, so the boundary is date-granular). ``verdicts`` are
+    sorted by ``feed_id``. Bootstrap degrades honestly on any UNAVAILABLE feed and
+    continues; the Task 4 driver records a degraded point (never a run failure), and
+    the pre-floor point's :attr:`digest` is archive-growth stable (invariant 2).
+    """
+
+    as_of: datetime
+    decision_date: str
+    verdicts: tuple[ArchiveFeedVerdict, ...]
+
+    @property
+    def unavailable_feed_ids(self) -> tuple[str, ...]:
+        """The feed ids whose factors are UNAVAILABLE at this point (sorted)."""
+        return tuple(v.feed_id for v in self.verdicts if not v.covered)
+
+    def _semantic(self) -> dict[str, Any]:
+        # date-granular identity: the raw as_of instant never enters (floors are
+        # dates), so an old point's verdict is byte-stable as the archive accretes.
+        return {
+            "decision_date": self.decision_date,
+            "verdicts": [
+                {
+                    "feed_id": v.feed_id, "floor_date": v.floor_date,
+                    "covered": v.covered, "status": v.status,
+                    "reason": v.reason, "badge": v.badge,
+                }
+                for v in self.verdicts
+            ],
+        }
+
+    @property
+    def digest(self) -> str:
+        """The feasible-window fact's content digest (date-granular; growth-stable)."""
+        return content_digest(self._semantic())
+
+
+def _feed_reason(feed_id: str, floor_date: str | None, decision_date: str) -> str:
+    tail = (
+        "its factors are UNAVAILABLE — no zero-fill, no synthetic backfill, no "
+        "current-snapshot fallback (缺历史覆盖 → UNAVAILABLE, AMEND-1)"
+    )
+    if floor_date is None:
+        return f"the {feed_id} snapshot archive has no coverage (empty); {tail}"
+    return (
+        f"decision point {decision_date} precedes the {feed_id} archive coverage "
+        f"floor {floor_date}; {tail}"
+    )
+
+
+def derive_replay_feasible_window(
+    *, as_of: datetime, feed_floors: Iterable[ArchiveFeedFloor]
+) -> ReplayFeasibleWindow:
+    """Derive the per-feed feasibility fact for one replay decision point.
+
+    Pure and deterministic (no wall-clock read): ``as_of`` must be aware (normalized
+    to UTC); its Asia/Shanghai session date is compared against each feed's ISO
+    ``floor_date``. A point **on or after** the floor ⇒ the feed is covered (``OK``);
+    a point **strictly before** the floor — or a feed whose archive is empty
+    (``floor_date is None``) — ⇒ ``UNAVAILABLE`` with a reason + badge. The floor
+    boundary is exact (one session before ⇒ UNAVAILABLE, on the floor ⇒ resolves).
+    The manifest that :func:`build_replay_manifest` seals from the SAME ``feed_floors``
+    is the digest-bearing PIT seal of these floors.
+    """
+    as_of = ensure_aware_utc(as_of)
+    decision_date = as_of.astimezone(_EXCHANGE_TZ).date().isoformat()
+    verdicts: list[ArchiveFeedVerdict] = []
+    for floor in sorted(feed_floors, key=lambda f: f.feed_id):
+        covered = floor.floor_date is not None and decision_date >= floor.floor_date
+        if covered:
+            verdicts.append(ArchiveFeedVerdict(
+                feed_id=floor.feed_id, floor_date=floor.floor_date, covered=True,
+                status=_STATUS_OK, reason=None, badge=None))
+        else:
+            verdicts.append(ArchiveFeedVerdict(
+                feed_id=floor.feed_id, floor_date=floor.floor_date, covered=False,
+                status=_STATUS_UNAVAILABLE,
+                reason=_feed_reason(floor.feed_id, floor.floor_date, decision_date),
+                badge=f"{_ARCHIVE_PRE_FLOOR_BADGE}:{floor.feed_id}"))
+    return ReplayFeasibleWindow(
+        as_of=as_of, decision_date=decision_date, verdicts=tuple(verdicts))
+
+
+# --------------------------------------------------------------------------- #
+# PIT_REPLAY source resolution (structural: never an ONLINE source)           #
+# --------------------------------------------------------------------------- #
+def pit_replay_source_refs(
+    source_registry: DataSourceRegistrySnapshot, *, method_ref: ContentRef
+) -> tuple[ContentRef, ...]:
+    """The PIT_REPLAY-eligible source refs for a method, in sealed-registry order.
+
+    Reuses the Task 2 descriptor's supported-modes mechanism: a descriptor is
+    eligible only when it binds ``method_ref`` **and** declares ``PIT_REPLAY`` in its
+    ``supported_modes``. An ONLINE-only descriptor (``supported_modes`` without
+    PIT_REPLAY — the Task 3 live source) is therefore structurally excluded, so a
+    PIT_REPLAY read can never resolve a current-snapshot ONLINE source: a current
+    snapshot can never impersonate history. Returns the descriptors' self-consistent
+    source refs (``id@version`` + descriptor digest).
+    """
+    out: list[ContentRef] = []
+    for desc in source_registry.source_descriptors:
+        if method_ref in desc.method_refs and DataMode.PIT_REPLAY in desc.supported_modes:
+            out.append(ContentRef(
+                id=desc.source_id, version=desc.source_version,
+                content_digest=desc.descriptor_digest))
+    return tuple(out)
