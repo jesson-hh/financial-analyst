@@ -526,6 +526,21 @@ def _committed_book(ordinal: int, weight: float | None):
     )
 
 
+def _committed_multi(ordinal: int, book: dict[str, float]):
+    """A committed proposal artifact holding a MULTI-symbol target book."""
+    positions = tuple(
+        {"symbol": {"code": code, "exchange": EXCHANGE, "board": "main"},
+         "target_weight": weight}
+        for code, weight in sorted(book.items()))
+    return SimpleNamespace(
+        payload={"positions": positions,
+                 "cash_weight": max(0.0, 1.0 - sum(book.values())),
+                 "rationale": f"rotation point {ordinal}"},
+        artifact_id=f"artifact.multi.{ordinal}",
+        decision_as_of=_utc("2026-07-06", 14, 0) + timedelta(days=ordinal - 1),
+    )
+
+
 def test_seats_direction_matrix_covers_every_reachable_direction():
     """carry (f): all THREE seats directions are reachable — an exit renders 卖出.
 
@@ -567,6 +582,79 @@ def test_seats_direction_matrix_covers_every_reachable_direction():
                          "cash_weight": 0.5, "rationale": "r"},
                 decision_as_of=_utc("2026-07-06", 14, 0)),),
             run_head=run_head)
+
+
+def test_seats_direction_multi_symbol_rotation_and_tie_break():
+    """The union over BOTH books (rotation) and the documented rise-wins tie-break.
+
+    Every single-symbol case leaves ``set(current) | set(previous)`` degenerate, so the
+    union — the thing that makes a rotation legible at all — and the tie-break branch
+    would never execute. Both run here.
+    """
+    run_head = {"run_id": "r", "code": f"{EXCHANGE}{CODE}", "strategy_id": "seat-rot",
+                "tf": "D"}
+    rows = seats_rows_from_committed_decisions(
+        (_committed_multi(1, {"600000": 0.6}),
+         # a FULL rotation: 600000 leaves the book entirely (-0.6) while 600519 enters
+         # (+0.6). Only the union over both books sees the leg that left; the documented
+         # rise-wins tie-break then reports the point as 买入.
+         _committed_multi(2, {"600519": 0.6}),
+         # a pure TRIM of the symbol that is no longer in the previous book's peer set:
+         # nothing rises, one leg falls beyond τ ⇒ 卖出.
+         _committed_multi(3, {"600519": 0.2}),
+         # a rebalance INSIDE the dead zone on every leg ⇒ 观望.
+         _committed_multi(4, {"600519": 0.3})),
+        run_head=run_head)
+    assert [r["direction"] for r in rows] == [
+        SEATS_DIRECTIONS[0], SEATS_DIRECTIONS[0], SEATS_DIRECTIONS[1],
+        SEATS_DIRECTIONS[2]]
+
+    # the UNION in isolation — the discriminating case. A leg is DROPPED from the book
+    # entirely (not written as 0.0) while the surviving leg does not move: without
+    # `set(current) | set(previous)` the only delta computed would be the survivor's 0.0
+    # and the point would read 观望. It must read 卖出.
+    dropped = seats_rows_from_committed_decisions(
+        (_committed_multi(1, {"600000": 0.6, "600519": 0.2}),
+         _committed_multi(2, {"600519": 0.2})),
+        run_head=run_head)
+    assert [r["direction"] for r in dropped] == [
+        SEATS_DIRECTIONS[0], SEATS_DIRECTIONS[1]]
+
+    # the tie-break in isolation: one leg rises beyond τ and another falls beyond τ on
+    # the SAME point — the row is 买入 (one row per point; the entry is the dominant
+    # intent).
+    tie = seats_rows_from_committed_decisions(
+        (_committed_multi(1, {"600000": 0.5, "600519": 0.5}),
+         _committed_multi(2, {"600000": 0.0, "600519": 1.0})),
+        run_head=run_head)
+    assert [r["direction"] for r in tie] == [SEATS_DIRECTIONS[0], SEATS_DIRECTIONS[0]]
+    fall_only = seats_rows_from_committed_decisions(
+        (_committed_multi(1, {"600000": 0.5, "600519": 0.5}),
+         _committed_multi(2, {"600000": 0.0, "600519": 0.5})),
+        run_head=run_head)
+    assert [r["direction"] for r in fall_only] == [
+        SEATS_DIRECTIONS[0], SEATS_DIRECTIONS[1]]
+
+
+def test_seats_rows_refuse_out_of_order_decisions():
+    """Point order is LOAD-BEARING for a delta reading — a shuffle is REFUSED.
+
+    Under the old book-absolute rule order was irrelevant. It is not any more: the same
+    three artifacts shuffled would silently render 观望/买入/观望 instead of
+    买入/观望/卖出. The mapping refuses rather than emitting wrong user-facing rows.
+    """
+    run_head = {"run_id": "r", "code": f"{EXCHANGE}{CODE}", "strategy_id": "seat-o",
+                "tf": "D"}
+    ordered = (_committed_book(1, 0.5), _committed_book(2, 0.5), _committed_book(3, None))
+    assert [r["direction"] for r in seats_rows_from_committed_decisions(
+        ordered, run_head=run_head)] == [
+        SEATS_DIRECTIONS[0], SEATS_DIRECTIONS[2], SEATS_DIRECTIONS[1]]
+
+    for shuffled in ((ordered[1], ordered[0], ordered[2]),      # a swap
+                     (ordered[2], ordered[1], ordered[0]),      # fully reversed
+                     (ordered[0], ordered[0])):                 # a repeated instant
+        with pytest.raises(ValueError, match="strictly increasing"):
+            seats_rows_from_committed_decisions(shuffled, run_head=run_head)
 
 
 def test_persist_compat_async_uses_a_worker_thread():

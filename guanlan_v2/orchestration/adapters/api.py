@@ -947,6 +947,10 @@ def seats_rows_from_committed_decisions(
     A rise takes precedence over a fall on the same point (a rebalance that both opens
     and trims is reported as 买入) — one row per decision point is the seats store's
     shape, and the point's dominant intent is the entry.
+
+    ``committed`` MUST be in strictly increasing ``decision_as_of`` order: point order is
+    load-bearing for a delta reading, so an out-of-order sequence is REFUSED
+    (``ValueError``) rather than silently mapped to wrong directions.
     """
     strategy_id = str(run_head.get("strategy_id") or "").strip()
     if not strategy_id:
@@ -957,6 +961,7 @@ def seats_rows_from_committed_decisions(
         str(k): float(v) for k, v in dict(opening_book or {}).items()
     }
     rows: list[dict[str, Any]] = []
+    last_as_of: datetime | None = None
     for item in committed:
         payload = getattr(item, "payload", None)
         payload = payload if isinstance(payload, Mapping) else {}
@@ -968,6 +973,18 @@ def seats_rows_from_committed_decisions(
             raise ValueError(
                 "a committed decision artifact must carry an aware 'decision_as_of' — "
                 "a seats row is never fabricated from an unknown instant")
+        # POINT ORDER IS LOAD-BEARING: the direction is a delta against the PREVIOUS
+        # point's book, so a shuffled sequence would silently emit wrong directions
+        # (a hold read as an entry, an exit read as a hold). Refuse loudly instead.
+        as_of_utc = ensure_aware_utc(decision_as_of)
+        if last_as_of is not None and as_of_utc <= last_as_of:
+            raise ValueError(
+                "committed decisions must be supplied in strictly increasing "
+                f"decision_as_of order (got {decision_as_of.isoformat()} after "
+                f"{last_as_of.isoformat()}); the seats direction is a book DELTA "
+                "against the previous point, so an out-of-order sequence would emit "
+                "silently wrong 买入/卖出/观望 rows")
+        last_as_of = as_of_utc
         current = _book_weights(payload)
         deltas = [
             current.get(code, 0.0) - previous.get(code, 0.0)
