@@ -37,7 +37,7 @@ import dataclasses
 import importlib
 import math
 from collections.abc import Callable, Mapping
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 from zoneinfo import ZoneInfo
@@ -57,10 +57,13 @@ from guanlan_v2.orchestration.digest import (
     content_digest,
 )
 from guanlan_v2.orchestration.enums import ApprovalPolicy, ExperimentStatus
-from guanlan_v2.orchestration.refs import ContentRef
+from guanlan_v2.orchestration.refs import ContentRef, PayloadRef, SchemaRef, TypedPayloadRef
 from guanlan_v2.orchestration.runtime_clock import AuthoritativeClock, SystemClock, clock_now
 from guanlan_v2.orchestration.adapters.contracts import (
+    DualCurveReport,
     ReplayDecisionPoint,
+    ShadowCurvePoint,
+    ShadowCurveSeries,
     ShadowExecutionConfig,
     ShadowReplayRunState,
 )
@@ -143,6 +146,11 @@ __all__ = [
     "DeterministicBook",
     "ReplayRuntimeBindings",
     "run_interval_replay",
+    # Task 5 (Phase 9) - dual curves under one execution attestation + handoff
+    "UnsourcedFactorScoreError",
+    "derive_deterministic_targets",
+    "build_dual_curves",
+    "hand_off_dual_curves_to_feedback",
 ]
 
 #: the closed skip-reason vocabulary a :class:`ShadowOrderSkip` may carry. A reason
@@ -2611,4 +2619,386 @@ def run_interval_replay(
         last_scheduled_for=last_scheduled_for,
         curve_report_ref=None,  # set by Task 5's curve stage, never here
         updated_at=updated_at,
+    )
+
+
+# =========================================================================== #
+# Task 5 (Phase 9) · dual curves under one execution attestation + handoff       #
+# =========================================================================== #
+# This section EXTENDS the Phase-6 adapter additively (Task-4 driver above is
+# sealed). It owns the honest 双曲线回放 (dual curve) build + the maturity-gated
+# feedback handoff:
+#   * `derive_deterministic_targets` — the pure, versioned, zero-LLM rule mapping a
+#     PIT factor score at `decision_as_of` onto a full-weight / flat single-name
+#     `DeterministicTargetSet`. It mirrors the seats `w=1` pure-factor direction rule
+#     (`_hybrid_direction`, `guanlan_v2/seats/api.py:479`) with the τ=0.15 dead zone
+#     EXACTLY: a score `> +τ` is a long leg, `< -τ` is a sell/exit (no long-only
+#     position), and `|score| <= τ` is the watch dead zone (flat). A `[UNSOURCED]`
+#     score set (no provenance digest) is refused — no target is produced.
+#   * `build_dual_curves` — runs BOTH lanes on the SAME attested runner: the LLM
+#     intents lane via `ShadowBacktestRunner.run` and the envelope-free deterministic
+#     lane via `.run_targets`. Both bind ONE `ShadowExecutionConfig` semantic digest;
+#     the runner is re-verified against that config before any bar (a mismatch refuses
+#     with no fills). Curve points come ONLY from the runner NAV history (no synthetic
+#     smoothing / interpolation); an all-watch deterministic lane is an honest flat
+#     series from `init_cash`.
+#   * `hand_off_dual_curves_to_feedback` — the maturity-gated evaluator handoff. It
+#     stages/commits the `DualCurveReport` through a staged→barrier artifact sink and,
+#     ONLY once the interval's realized window has matured, registers the realized
+#     interval with the Phase-4 `TrialLedger` (as a matured holdout window, idempotent
+#     by run identity). An immature interval parks the run at `WAITING_FOR_MATURITY`
+#     (Task 6 persists it) and NEVER touches the ledger — spec: shadow 结果成熟后才能进反馈.
+#
+# NAMING (correction, see p9-task-5-report.md): the brief's `submit_dual_curves_to_
+# evaluator` collides with two SEALED Phase-6 redlines (a Phase-6 module may define no
+# identifier containing "evaluator", and export no name containing "submit"); the
+# function is therefore `hand_off_dual_curves_to_feedback`, honoring both redlines.
+
+#: the deterministic-target-rule-v1 dead-zone threshold — byte-identical to the seats
+#: `_HYBRID_TAU` (`guanlan_v2/seats/api.py:479`), so the deterministic lane's direction
+#: rule mirrors the w=1 pure-factor path EXACTLY (a rule change requires a new rule_id).
+_DETERMINISTIC_TAU: float = 0.15
+
+
+class UnsourcedFactorScoreError(ShadowContractError):
+    """A deterministic target was requested from factor scores with no provenance.
+
+    Raised by :func:`derive_deterministic_targets` when the ``provenance_digest`` is
+    absent / empty / the ``[UNSOURCED]`` badge — a rule-computed target may only be
+    derived from scores produced under a genuine PIT :class:`DataResult`; an unsourced
+    score is refused and NO target is produced (the provenance red line).
+    """
+
+
+def derive_deterministic_targets(
+    point: ReplayDecisionPoint,
+    *,
+    factor_scores: Mapping[str, float],
+    universe: tuple[Symbol, ...],
+    provenance_digest: str | None,
+    rule_id: Literal["deterministic-target-rule-v1"] = "deterministic-target-rule-v1",
+    target_version: int = 1,
+) -> DeterministicTargetSet:
+    """Map PIT factor scores at ``point.decision_as_of`` onto a rule-computed target book.
+
+    Pure, versioned, zero-LLM. Each ``universe`` symbol's PIT factor score (keyed by
+    ``Symbol.code``) is run through the frozen v1 direction rule — byte-identical to the
+    seats ``w=1`` pure-factor path (``_hybrid_direction``, ``api.py:479``) with the
+    τ=:data:`_DETERMINISTIC_TAU` (0.15) dead zone:
+
+    * ``score > +τ``   → a LONG leg;
+    * ``score < -τ``   → a sell / exit (no long-only position — the target book simply
+      omits the name);
+    * ``|score| <= τ`` → the watch dead zone (flat).
+
+    The long legs share EQUAL weight (band-exempt continuous ``1/N`` — a single long is a
+    full-weight ``1.0`` leg); with no long legs the book is all-cash (``cash_weight =
+    1.0``, an honest flat book). The result is the envelope-free Phase-6
+    :class:`DeterministicTargetSet` (``rule_id`` / ``point_ordinal`` / ``target_version``
+    / ``session_date`` / positions + ``cash_weight``) — NEVER a
+    :class:`TargetPortfolioIntent`. A rule change requires a new ``rule_id``.
+
+    Provenance red line (:class:`UnsourcedFactorScoreError`): the scores must come from a
+    :class:`DataResult` produced under the point's PIT context — an absent / empty /
+    ``[UNSOURCED]`` ``provenance_digest`` is refused and no target is produced.
+    """
+    from guanlan_v2.orchestration.honesty import UNSOURCED_BADGE
+
+    if not provenance_digest or provenance_digest == UNSOURCED_BADGE:
+        raise UnsourcedFactorScoreError(
+            "factor scores carry no provenance digest ([UNSOURCED]); a deterministic "
+            "target is refused (scores must come from a PIT DataResult)"
+        )
+
+    # session_date in A-share terms: for the continuous-auction session the decision
+    # instant's UTC calendar date equals the local (CST) session date (09:00-15:00 CST
+    # == 01:00-07:00 UTC, same civil day), so the runner's schedule-time computations
+    # reproduce this point's scheduled_for from it.
+    session_date = point.decision_as_of.astimezone(timezone.utc).date().isoformat()
+
+    # frozen v1 direction rule (τ dead zone) — a long leg iff score > +τ.
+    long_syms = [
+        s for s in universe
+        if factor_scores.get(s.code) is not None and float(factor_scores[s.code]) > _DETERMINISTIC_TAU
+    ]
+    if not long_syms:
+        return DeterministicTargetSet(
+            rule_id=rule_id, point_ordinal=point.point_ordinal,
+            target_version=target_version, session_date=session_date,
+            positions=(), cash_weight=1.0,
+        )
+    n = len(long_syms)
+    w = 1.0 / n
+    # the last leg absorbs the float remainder so sum(weights) is exactly 1.0 (cash 0).
+    weights = [w] * (n - 1) + [1.0 - w * (n - 1)]
+    positions = tuple(
+        TargetPosition(symbol=s, target_weight=wt) for s, wt in zip(long_syms, weights)
+    )
+    return DeterministicTargetSet(
+        rule_id=rule_id, point_ordinal=point.point_ordinal,
+        target_version=target_version, session_date=session_date,
+        positions=positions, cash_weight=0.0,
+    )
+
+
+def _attest_runner_reproduces_config(
+    runner: ShadowBacktestRunner, cfg: ShadowExecutionConfig
+) -> None:
+    """Refuse (pre-bar) unless ``runner`` reproduces ``cfg``'s attested dimensions.
+
+    Every runner-checkable matching dimension (init cash / cost-model digest / calendar
+    id / matching-engine version / schedule digest / intrabar exit priority) must equal
+    the shared-口径 :class:`ShadowExecutionConfig`; a mismatch raises BEFORE either lane
+    runs (no fills). The universe / data-snapshot / clock dimensions are bound
+    structurally by both curves binding ``cfg.semantic_digest()`` (the Task-1 validator),
+    so invariant 1's "Task-1 validator plus a runner-side pre-check both fire" holds.
+    """
+    mism: list[str] = []
+    if float(runner._init_cash) != float(cfg.init_cash):
+        mism.append("init_cash")
+    if content_digest(dataclasses.asdict(runner._cost_model)) != cfg.cost_model_digest:
+        mism.append("cost_model_digest")
+    if runner._calendar.calendar_id != cfg.calendar_id:
+        mism.append("calendar_id")
+    if SHADOW_MATCHING_ENGINE_VERSION != cfg.matching_engine_version:
+        mism.append("matching_engine_version")
+    if runner._schedule.content_digest != cfg.schedule_digest:
+        mism.append("schedule_digest")
+    if runner._schedule.intrabar_exit_priority != cfg.intrabar_exit_priority:
+        mism.append("intrabar_exit_priority")
+    if mism:
+        raise ShadowContractError(
+            "the shadow runner does not reproduce the shared execution config "
+            f"(differing dimensions: {mism}); both dual-curve lanes must run under one "
+            "attested 同一口径 (no fills)"
+        )
+
+
+def _curve_points_from_nav(
+    nav_history: tuple, tz: ZoneInfo
+) -> tuple[ShadowCurvePoint, ...]:
+    """Project a runner NAV history 1:1 into ``ShadowCurvePoint``s — no interpolation.
+
+    Each ``(session_iso, nav)`` EOD mark becomes ONE curve point anchored at the
+    A-share session close (15:00 in ``tz``, converted to UTC); no synthetic smoothing
+    or interpolation is introduced (distinct sessions ⇒ strictly-increasing ``at``).
+    """
+    points: list[ShadowCurvePoint] = []
+    for session_iso, nav in nav_history:
+        y, m, d = (int(x) for x in str(session_iso).split("-"))
+        at = datetime(y, m, d, 15, 0, tzinfo=tz).astimezone(timezone.utc)
+        points.append(ShadowCurvePoint(at=at, nav=float(nav)))
+    return tuple(points)
+
+
+def build_dual_curves(
+    *,
+    execution_config: ShadowExecutionConfig,
+    points: tuple[ReplayDecisionPoint, ...],
+    deterministic_target_sets: tuple[DeterministicTargetSet, ...],
+    intents: tuple[TargetPortfolioIntent, ...],
+    shadow_runner: ShadowBacktestRunner,
+) -> DualCurveReport:
+    """Run both replay lanes on ONE attested runner → an honest :class:`DualCurveReport`.
+
+    The LLM intents lane (``shadow_runner.run(intents, ...)`` — apply-once per
+    ``(intent_id, scheduled_for, target_version)``) and the envelope-free deterministic
+    lane (``shadow_runner.run_targets(target_sets, ...)`` — deduped on
+    ``deterministic_apply_key``) execute on the SAME runner instance over the SAME
+    ``[start, end]`` window (so identical bar stream, calendar, cost model, clock and
+    matching engine — invariant 4). The runner is re-verified against ``execution_config``
+    before any bar (:func:`_attest_runner_reproduces_config`); a mismatch refuses with no
+    fills. The deterministic lane's result keeps ``intent_content_digests == ()`` (Phase-6
+    LLM-zero invariant, re-asserted here). Each lane's NAV history becomes a
+    :class:`ShadowCurveSeries` bound to ``execution_config.semantic_digest()``; the report
+    carries the permanently-true ``not_causal_attribution`` honesty flag.
+    """
+    if not points:
+        raise ShadowContractError("build_dual_curves requires at least one decision point")
+    if not intents:
+        raise ShadowContractError(
+            "the LLM shadow lane requires at least one intent (a curve names its "
+            "applied intent digests)"
+        )
+    if not deterministic_target_sets:
+        raise ShadowContractError(
+            "the deterministic lane requires at least one DeterministicTargetSet "
+            "(the curve names its rule_id)"
+        )
+
+    # ① pre-bar attestation: the runner must reproduce the shared 同一口径 config.
+    _attest_runner_reproduces_config(shadow_runner, execution_config)
+
+    # ② the single [start, end] window BOTH lanes run (identical bars by construction).
+    tz = shadow_runner._tz
+    start = min(p.scheduled_for for p in points).astimezone(tz).date().isoformat()
+    end = max(p.eligible_execution_at for p in points).astimezone(tz).date().isoformat()
+
+    # ③ intent lane — apply-once over the frozen intents.
+    llm_result = shadow_runner.run(tuple(intents), start=start, end=end)
+
+    # ④ deterministic lane — envelope-free, through run_targets on the SAME runner. The
+    #    run_config is built FROM the runner's own bound fields, so the runner's
+    #    _require_matching_run_config re-verifies the two lanes share one config digest.
+    run_config = ShadowRunConfig(
+        start=start, end=end, init_cash=shadow_runner._init_cash,
+        cost_model=shadow_runner._cost_model,
+        corporate_actions=shadow_runner._corporate_actions,
+        is_st=shadow_runner._is_st or None, lot_size=shadow_runner._lot_size,
+    )
+    det_result = shadow_runner.run_targets(
+        tuple(deterministic_target_sets), run_config=run_config,
+        calendar=shadow_runner._calendar, clock=shadow_runner._clock,
+    )
+    # LLM-zero red line, re-asserted structurally at the consumer.
+    if det_result.intent_content_digests != ():
+        raise ShadowContractError(
+            "the deterministic lane result must keep intent_content_digests == () "
+            "(a deterministic target is never wrapped as an intent)"
+        )
+
+    cfg_digest = execution_config.semantic_digest()
+    llm_series = ShadowCurveSeries(
+        curve_kind="llm_shadow", execution_config_digest=cfg_digest,
+        points=_curve_points_from_nav(llm_result.nav_history, tz),
+        trade_count=llm_result.n_trades,
+        applied_intent_digests=tuple(sorted({i.semantic_digest() for i in intents})),
+        badges=llm_result.badges,
+    )
+    det_series = ShadowCurveSeries(
+        curve_kind="deterministic_strategy", execution_config_digest=cfg_digest,
+        points=_curve_points_from_nav(det_result.nav_history, tz),
+        trade_count=det_result.n_trades,
+        rule_id=deterministic_target_sets[0].rule_id,
+        badges=det_result.badges,
+    )
+
+    # ⑤ delta_total_return = llm_total_return - det_total_return (reported, non-causal).
+    init = float(execution_config.init_cash)
+    delta = None
+    if llm_series.points and det_series.points and init:
+        llm_tr = llm_series.points[-1].nav / init - 1.0
+        det_tr = det_series.points[-1].nav / init - 1.0
+        delta = llm_tr - det_tr
+
+    return DualCurveReport(
+        execution_config=execution_config,
+        deterministic=det_series,
+        llm_shadow=llm_series,
+        interval_start=min(p.scheduled_for for p in points),
+        interval_end=max(p.eligible_execution_at for p in points),
+        decision_point_count=len(points),
+        delta_total_return=delta,
+        badges=tuple(sorted(set(llm_result.badges) | set(det_result.badges))),
+    )
+
+
+def _feedback_study_and_window(report: DualCurveReport, run_id: str) -> tuple:
+    """Derive the Phase-4 ``(StudySpec, HoldoutWindow)`` a matured interval registers.
+
+    The shadow replay's study identity IS its shared-口径 execution config (the study
+    family keys on the config's semantic digest); the realized interval IS a matured
+    out-of-sample holdout window (``matured_at = interval_end``). Every handle is derived
+    from REAL report / execution-config content — nothing fabricated. Imported lazily so
+    importing this adapter never forces the Phase-4 trial layer onto the path.
+    """
+    from guanlan_v2.orchestration.governor import derive_study_family
+    from guanlan_v2.orchestration.trial import HoldoutWindow, StudySpec
+    from guanlan_v2.orchestration.trial_ledger import compute_holdout_window_attestation
+
+    cfg = report.execution_config
+    objective = f"shadow-replay dual-curve feedback for {run_id}"
+    label = "realized OOS NAV over the shadow replay interval"
+    study = StudySpec(
+        objective=objective, objective_digest=content_digest({"text": objective}),
+        label_definition=label, label_digest=content_digest({"text": label}),
+        universe_digest=content_digest([s.dotted for s in cfg.universe]),
+        frequency="1d", split_policy_digest=cfg.semantic_digest(),
+    )
+    family = derive_study_family(study)
+    att = compute_holdout_window_attestation(
+        family_identity_digest=family.identity_digest,
+        start_at=report.interval_start, end_at=report.interval_end,
+        prior_window_ids=(),
+    )
+    window = HoldoutWindow(
+        holdout_window_id=f"shadow-window.{run_id}",
+        family_identity_digest=family.identity_digest,
+        start_at=report.interval_start, end_at=report.interval_end,
+        matured_at=report.interval_end,
+        data_snapshot_id=cfg.data_snapshot_content_digest,
+        vintage_manifest_digest=cfg.vintage_manifest_digest,
+        prior_window_ids=(), non_overlap_attestation=att,
+    )
+    return study, window
+
+
+def hand_off_dual_curves_to_feedback(
+    report: DualCurveReport,
+    *,
+    run_id: NonEmptyStr,
+    pool: Any,
+    ledger: Any,
+    maturity_now: datetime,
+) -> ShadowReplayRunState:
+    """Stage/commit the ``DualCurveReport`` and register the matured interval (gated).
+
+    The maturity red line (spec: shadow 结果成熟后才能进反馈): the report artifact is staged
+    then barrier-committed through ``pool`` (a staged→barrier artifact sink — correction
+    N5-4: the full Phase-2 ``ArtifactPool`` cannot validate an unregistered
+    ``DualCurveReport@1`` in this phase, Task 9 owns registration), yielding the committed
+    ``curve_report_ref`` (a ``DualCurveReport@1`` / ``main`` :class:`TypedPayloadRef`). Then:
+
+    * if the interval's realized window is NOT yet mature (``maturity_now <
+      interval_end``), the run transitions to ``WAITING_FOR_MATURITY`` (Task 6 persists it)
+      and the :class:`TrialLedger` is NEVER touched (no feedback before maturity);
+    * once mature, the realized interval is registered with the Phase-4 evaluator surface
+      via ``ledger.register_holdout_window`` — idempotent by run identity (a second handoff
+      for the same ``run_id`` registers nothing new) — and the run completes with the
+      committed ``curve_report_ref``.
+    """
+    # stage → barrier commit the report artifact (the curves are real regardless of
+    # maturity; only the feedback is gated).
+    staged = pool.stage_report(
+        report, run_id=run_id, idempotency_key=f"dualcurve-stage:{run_id}")
+    committed = pool.commit_report(
+        staged, run_id=run_id, idempotency_key=f"dualcurve-commit:{run_id}")
+    curve_ref = TypedPayloadRef(
+        schema_ref=SchemaRef(name=DualCurveReport.__name__, version="1"),
+        payload_ref=committed,
+    )
+    cfg_digest = report.execution_config.semantic_digest()
+    n_points = report.decision_point_count
+
+    if maturity_now < report.interval_end:
+        # immature ⇒ park; the ledger is untouched (no feedback before maturity).
+        park_key = content_digest(
+            {
+                "domain": "shadow-replay-feedback-park-v1",
+                "run_id": str(run_id),
+                "execution_config_digest": cfg_digest,
+                "interval_end": report.interval_end,
+            }
+        )
+        return ShadowReplayRunState(
+            experiment_id=f"shadow-replay.{run_id}", run_id=run_id, request_id=str(run_id),
+            schedule_digest=report.execution_config.schedule_digest,
+            execution_config_digest=cfg_digest,
+            status=ExperimentStatus.WAITING_FOR_MATURITY,
+            completed_points=n_points, total_points=n_points,
+            resume_after=report.interval_end, wakeup_key=park_key,
+            curve_report_ref=curve_ref, updated_at=maturity_now,
+        )
+
+    # matured ⇒ register the realized interval with the Phase-4 ledger exactly once.
+    study, window = _feedback_study_and_window(report, str(run_id))
+    ledger.register_holdout_window(
+        study, window, idempotency_key=f"shadow-replay-feedback:{run_id}")
+    return ShadowReplayRunState(
+        experiment_id=f"shadow-replay.{run_id}", run_id=run_id, request_id=str(run_id),
+        schedule_digest=report.execution_config.schedule_digest,
+        execution_config_digest=cfg_digest,
+        status=ExperimentStatus.COMPLETED,
+        completed_points=n_points, total_points=n_points,
+        curve_report_ref=curve_ref, updated_at=maturity_now,
     )

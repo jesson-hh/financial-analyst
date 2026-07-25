@@ -501,6 +501,9 @@ _LUOZI_ALL = [
     "reconcile_daily_llm_budget", "ReplayIntentLedger", "ReplayPlanCoordinator",
     "ReplayPointSnapshot", "DeterministicBook", "ReplayRuntimeBindings",
     "run_interval_replay",
+    # Task 5 (Phase 9) — dual curves under one execution attestation + handoff.
+    "UnsourcedFactorScoreError", "derive_deterministic_targets", "build_dual_curves",
+    "hand_off_dual_curves_to_feedback",
 ]
 
 
