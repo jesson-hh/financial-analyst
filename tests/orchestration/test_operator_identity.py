@@ -32,6 +32,7 @@ from pathlib import Path
 import pytest
 
 from guanlan_v2.orchestration.approval import (
+    ApprovalJournalRow,
     PlanApprovalCoordinator,
     admit_after_approval,
 )
@@ -42,6 +43,7 @@ from guanlan_v2.orchestration.plan_diff import build_pending_plan_approval, buil
 
 from guanlan_v2.orchestration.adapters.identity import (
     DEFAULT_OPERATOR_ALLOWLIST_PATH,
+    VERIFIED_BY,
     ConfigOperatorVerifier,
     OperatorAllowlistError,
     OperatorIdentityError,
@@ -50,7 +52,14 @@ from guanlan_v2.orchestration.adapters.identity import (
 )
 
 # the lightweight Phase-7 approval harness (house pattern: sibling-test reuse).
-from tests.orchestration.test_approval_lease import _coord, _issue, _pending, _try
+from tests.orchestration.test_approval_lease import (
+    _coord,
+    _FakeAdmission,
+    _FixedClock,
+    _issue,
+    _pending,
+    _try,
+)
 
 OPERATOR = "human:ops"
 OTHER_OPERATOR = "human:reviewer"
@@ -100,6 +109,22 @@ def test_verify_returns_a_principal_whose_dot_actor_is_the_declared_id(tmp_path)
     assert principal.verified_by and isinstance(principal.verified_by, str)
     # the returned attribute name is the one approval.py reads.
     assert getattr(principal, "actor") == OPERATOR
+
+
+def test_verified_by_is_the_module_constant_and_is_not_configurable(tmp_path):
+    """The provenance on a durable principal must name the mechanism that ran.
+
+    A caller-supplied ``verified_by`` could stamp ``"password"`` / ``"sso"`` into an
+    approval when neither existed — the exact misrepresentation this module refuses.
+    """
+    assert VERIFIED_BY == "config-operator-allowlist"
+    assert _verifier(tmp_path).verify(OPERATOR).verified_by == VERIFIED_BY
+    params = inspect.signature(ConfigOperatorVerifier.__init__).parameters
+    assert set(params) == {"self", "allowlist_path"}, (
+        "ConfigOperatorVerifier must expose no provenance knob; got "
+        f"{sorted(params)}")
+    with pytest.raises(TypeError):
+        ConfigOperatorVerifier(verified_by="password")  # type: ignore[call-arg]
 
 
 def test_verify_picks_the_matching_declared_id_out_of_several(tmp_path):
@@ -196,6 +221,31 @@ def test_config_that_is_a_directory_refuses(tmp_path):
     d.mkdir()
     with pytest.raises(OperatorAllowlistError):
         ConfigOperatorVerifier(allowlist_path=d).verify(OPERATOR)
+
+
+@pytest.mark.parametrize("body", [
+    # the audit trap: a reader sees the FIRST operators block, json keeps the LAST.
+    '{"schema_version": "1", "operators": [{"actor_id": "human:ops"}],'
+    ' "operators": [{"actor_id": "human:intruder"}]}',
+    # the same trap in the other direction (a wildcard row shown, a real id served).
+    '{"schema_version": "1", "operators": [{"actor_id": "*"}],'
+    ' "operators": [{"actor_id": "human:ops"}]}',
+    '{"schema_version": "1", "schema_version": "1",'
+    ' "operators": [{"actor_id": "human:ops"}]}',
+    # nested: a repeated key inside a row object.
+    '{"schema_version": "1",'
+    ' "operators": [{"actor_id": "human:ops", "actor_id": "human:intruder"}]}',
+])
+def test_a_repeated_json_key_refuses_instead_of_last_winning(tmp_path, body):
+    """``json`` silently keeps the LAST duplicate; this file is the audit surface for
+    approval authority, so an ambiguous document is refused, not resolved."""
+    path = tmp_path / "o.json"
+    path.write_text(body, encoding="utf-8")
+    with pytest.raises(OperatorAllowlistError) as exc:
+        load_operator_allowlist(path)
+    assert "ambiguous" in str(exc.value)
+    with pytest.raises(OperatorAllowlistError):
+        ConfigOperatorVerifier(allowlist_path=path).verify(OPERATOR)
 
 
 def test_duplicate_declared_ids_refuse(tmp_path):
@@ -324,6 +374,7 @@ def test_decide_with_a_forged_lease_actor_refuses_and_records_nothing(tmp_path):
 # =========================================================================== #
 def test_real_coordinator_decide_succeeds_for_an_allowlisted_actor(tmp_path):
     v = _verifier(tmp_path)
+    journal = tmp_path / "plan_approvals.jsonl"
     coord = _coord(tmp_path, verifier=v)
     admission = coord._admission  # the harness' recording fake
     pending = _pending()
@@ -339,6 +390,45 @@ def test_real_coordinator_decide_succeeds_for_an_allowlisted_actor(tmp_path):
     assert len(admission.calls) == 1
     assert coord.load_decision(
         pending.request_id, pending.candidate_plan_digest) == approval
+
+    # …and the decision is DURABLE, not just an in-memory fold: the verified actor
+    # is on disk in a sealed journal row.
+    rows = [json.loads(line) for line in
+            journal.read_text(encoding="utf-8").splitlines() if line]
+    kinds = [r["row_kind"] for r in rows]
+    assert kinds == ["pending", "decision"], kinds
+    assert rows[-1]["payload"]["actor_id"] == OPERATOR
+    ApprovalJournalRow.model_validate(rows[-1]).verify()  # row_digest recomputes
+
+
+def test_a_cold_coordinator_replays_the_verified_decision_off_the_journal(tmp_path):
+    """The strongest property, pinned: kill the process, rebuild from the journal
+    alone, and the operator-signed approval comes back — this is what "a real
+    PlanApproval was recorded" actually means."""
+    v = _verifier(tmp_path)
+    journal = tmp_path / "plan_approvals.jsonl"
+    pending = _pending()
+    coord = _coord(tmp_path, verifier=v)
+    coord.register_pending(pending, idempotency_key="k1")
+    approval, _event = coord.decide(
+        request_id=pending.request_id,
+        candidate_plan_digest=pending.candidate_plan_digest,
+        decision=ApprovalDecision.APPROVED, actor=OPERATOR, reason="reviewed",
+        idempotency_key="d1")
+    del coord  # simulated process death
+
+    fresh_admission = _FakeAdmission()
+    reborn = PlanApprovalCoordinator.replay(
+        journal, admission=fresh_admission, clock=_FixedClock(), verifier=v)
+    recovered = reborn.load_decision(
+        pending.request_id, pending.candidate_plan_digest)
+    assert recovered == approval
+    assert recovered.actor_id == OPERATOR
+    assert recovered.decision is ApprovalDecision.APPROVED
+    # replay re-submits the admission call idempotently -> exactly one terminal effect.
+    assert len(fresh_admission.calls) == 1
+    # the card is no longer pending on the rebuilt fold.
+    assert reborn.list_pending() == ()
 
 
 def test_real_coordinator_decide_refuses_a_non_allowlisted_actor_and_records_nothing(

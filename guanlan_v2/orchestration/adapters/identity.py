@@ -59,7 +59,16 @@ and returns nothing:
 * a missing, unreadable, BOM-carrying, non-UTF-8, non-JSON, wrong-shaped,
   extra-keyed or empty declaration; a duplicate declared id; or a single
   unusable declared row — a bad row is never skipped, the WHOLE declaration is
-  refused (no partial trust, mirroring the approval journal's fold).
+  refused (no partial trust, mirroring the approval journal's fold);
+* a declaration whose JSON repeats a key at any depth. ``json`` silently keeps
+  the LAST value, so a file could show an auditor one operator block and hand the
+  verifier a different one. This file IS the audit surface for approval authority,
+  so an ambiguous document is refused instead of silently resolved.
+
+The provenance stamped on the returned principal is the module constant
+:data:`VERIFIED_BY` and is **not configurable** — a caller-supplied ``verified_by``
+could write ``"password"`` or ``"sso"`` into a durable approval when neither
+existed, which is precisely the misrepresentation this module exists to refuse.
 
 The declaration is re-read on **every** ``verify`` call (it is a handful of
 bytes). The list in force at *decision* time is the authority, so removing an
@@ -200,6 +209,31 @@ class _OperatorAllowlistFile(BaseModel):
     operators: list[_OperatorRow]
 
 
+class _DuplicateJsonKey(ValueError):
+    """A JSON object in the declaration repeats a key (last-win would be silent)."""
+
+
+def _object_pairs_no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """``json.loads`` hook: refuse a repeated key at any depth instead of last-winning.
+
+    ``json`` silently keeps the LAST value for a duplicated key, so
+    ``{"operators": [{"actor_id": "*"}], "operators": [{"actor_id": "human:ops"}]}``
+    would load, validate and exact-match perfectly well while a human auditing the
+    file reads the *first* block and believes something false about who may approve.
+    This file IS the audit surface for approval authority, so an ambiguous document
+    is refused rather than silently resolved.
+    """
+    seen: set[str] = set()
+    for key, _value in pairs:
+        if key in seen:
+            raise _DuplicateJsonKey(
+                f"the JSON key {key!r} appears more than once in the same object — "
+                "an operator declaration must be unambiguous (json would silently "
+                "keep only the last one)")
+        seen.add(key)
+    return dict(pairs)
+
+
 def _reject_unusable_id(actor_id: str, *, where: str) -> None:
     """Raise unless ``actor_id`` is a usable identity (shared by both sides)."""
     if not actor_id or actor_id != actor_id.strip():
@@ -249,9 +283,19 @@ def load_operator_allowlist(path: Path | str | None = None) -> tuple[str, ...]:
     except UnicodeDecodeError as exc:
         raise OperatorAllowlistError(
             f"the operator declaration at {target} is not valid UTF-8: {exc}") from exc
+    # parsed via json.loads (not model_validate_json) SOLELY so the duplicate-key hook
+    # can run — pydantic's own JSON parser has no such hook and would last-win.
     try:
-        doc = _OperatorAllowlistFile.model_validate_json(text)
-    except (ValidationError, ValueError, json.JSONDecodeError) as exc:
+        parsed = json.loads(text, object_pairs_hook=_object_pairs_no_duplicates)
+    except _DuplicateJsonKey as exc:
+        raise OperatorAllowlistError(
+            f"the operator declaration at {target} is ambiguous: {exc}") from exc
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise OperatorAllowlistError(
+            f"the operator declaration at {target} is not valid JSON: {exc}") from exc
+    try:
+        doc = _OperatorAllowlistFile.model_validate(parsed)
+    except (ValidationError, ValueError) as exc:
         raise OperatorAllowlistError(
             f"the operator declaration at {target} is not a valid operator "
             f"allowlist: {exc}") from exc
@@ -290,16 +334,16 @@ class ConfigOperatorVerifier:
     membership, not identity.
     """
 
-    def __init__(
-        self,
-        *,
-        allowlist_path: Path | str | None = None,
-        verified_by: str = VERIFIED_BY,
-    ) -> None:
+    def __init__(self, *, allowlist_path: Path | str | None = None) -> None:
         self._path = Path(allowlist_path) if allowlist_path is not None \
             else DEFAULT_OPERATOR_ALLOWLIST_PATH
-        self._verified_by = verified_by
         # deliberately no eager load and no cache: see the module docstring.
+        # deliberately NO ``verified_by`` parameter either: the provenance stamped on
+        # a durable principal must name the mechanism that actually ran. A caller-
+        # supplied string could write ``verified_by="password"`` or ``"sso"`` into an
+        # approval when no password and no SSO existed — exactly the misrepresentation
+        # this module exists to refuse. The constant :data:`VERIFIED_BY` is the only
+        # honest value, so it is not configurable.
 
     @property
     def allowlist_path(self) -> Path:
@@ -332,5 +376,4 @@ class ConfigOperatorVerifier:
             raise OperatorNotAllowed(
                 f"actor {credential!r} is not a declared operator in {self._path.name} "
                 "(fail closed; there is no default operator and no wildcard)")
-        return AuthenticatedAdminPrincipal(
-            actor=credential, verified_by=self._verified_by)
+        return AuthenticatedAdminPrincipal(actor=credential, verified_by=VERIFIED_BY)
