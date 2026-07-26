@@ -567,3 +567,21 @@ def test_the_ownership_context_manager_is_single_use():
     with pytest.raises(RuntimeError, match="single-use"):
         with own:
             pass  # pragma: no cover
+
+
+def test_ensure_owned_is_refused_outside_the_with_block():
+    """Symmetric with ``__enter__``'s guard: registering with nobody left to release is
+    the same permanent-silencing leak arriving by a different door."""
+    from guanlan_v2.orchestration.adapters.luozi import _OrchestratedUniverseOwnership
+
+    own = _OrchestratedUniverseOwnership(watcher, ("SH600519",))
+    with pytest.raises(RuntimeError, match="before entry"):
+        own.ensure_owned()                     # never entered
+    assert watcher.orchestrated_codes() == set()
+    with own:
+        own.ensure_owned()
+        assert "600519" in watcher.orchestrated_codes()
+    assert watcher.orchestrated_codes() == set()
+    with pytest.raises(RuntimeError, match="after exit"):
+        own.ensure_owned()                     # already released
+    assert watcher.orchestrated_codes() == set()

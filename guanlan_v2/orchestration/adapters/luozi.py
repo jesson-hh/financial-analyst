@@ -2477,11 +2477,17 @@ class _OrchestratedUniverseOwnership:
       would have inflicted on every historical backfill run through a launcher that
       passes a real predicate. Bit-identity with Task 4 also falls out of this.
     * ownership is NOT dropped between live points. Points are strictly ascending in
-      time (``resolve_decision_points`` walks sessions in order), so live points are the
-      TAIL of a run; releasing per point would only re-open the stale-snapshot race
-      below at every gap, while gaining nothing real. A predicate that answers ``True``
-      early and ``False`` later over-owns for the rest of the run — the conservative
-      direction, bounded by the run.
+      time — VALIDATOR-enforced, not incidental: the ``rebalance_dates`` selector is
+      checked sorted-ascending + unique (``shadow.py:530`` / ``:532``) and the
+      daily/weekly branch walks a calendar whose sessions are checked canonically
+      ascending + duplicate-free (``data/calendar.py:89-90``, with
+      ``build_trading_calendar`` sorting at ``:233``) — so live points are the TAIL of a
+      run; releasing per point would only re-open the stale-snapshot race below at every
+      gap, while gaining nothing real. Nothing here DEPENDS on that ordering for
+      correctness: a predicate that answers ``True`` early and ``False`` later (or a
+      future selector branch that bypassed both validators) merely over-owns for the
+      rest of the run — the conservative direction, bounded by the run, never a leak and
+      never a missed release.
     * ownership is NOT extended to a point's ``eligible_execution_at``. That is an
       instant on the MODELLED timeline (a shadow run executes nothing; intents are
       staged ``SHADOW_ONLY`` / ``ADVISORY_ONLY``), and it usually postdates the driver's
@@ -2512,6 +2518,7 @@ class _OrchestratedUniverseOwnership:
         self._codes = codes
         self._registration: Any = None
         self._entered = False
+        self._exited = False
         self._warned = False
 
     def __enter__(self) -> "_OrchestratedUniverseOwnership":
@@ -2528,7 +2535,16 @@ class _OrchestratedUniverseOwnership:
 
         Called from the point loop at the FIRST live point. Every later call is a no-op,
         so the run holds exactly ONE registration no matter how many live points it has.
+
+        Only legal INSIDE the ``with`` — the guard is symmetric with ``__enter__``'s.
+        Registering before entry or after exit would take ownership with nobody left to
+        hand it back: the same permanent-silencing leak, arriving by a different door.
         """
+        if not self._entered or self._exited:
+            raise RuntimeError(
+                "ensure_owned() is only legal inside the `with` block — registering "
+                f"{'before entry' if not self._entered else 'after exit'} would leak the "
+                f"registration for {list(self._codes)} (nobody left to release it)")
         if self._registration is not None or not self._codes:
             return
         register = getattr(self._seam, "register_orchestrated_codes", None)
@@ -2548,6 +2564,7 @@ class _OrchestratedUniverseOwnership:
         self._registration = register(self._codes)
 
     def __exit__(self, exc_type, exc, tb) -> bool:
+        self._exited = True
         registration, self._registration = self._registration, None
         if registration is None:
             return False
