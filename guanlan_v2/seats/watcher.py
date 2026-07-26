@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import re
+import threading
 from datetime import datetime, time as dtime
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -104,6 +105,141 @@ def note_external_llm_use(n: int, now: Optional[datetime] = None) -> None:
         counts.pop(k, None)
     st["counts"] = counts
     save_state(st)
+
+
+# ────────── 编排接管登记(R17·注册半边,纯加法)──────────
+# 上面 orchestrated_codes() 是这条缝的「读」半边;这里补上「写」半边 —— 在此之前
+# 仓库里**没有任何代码**写过 _ORCHESTRATED_CODES,那条 tick 跳过分支是条死缝:编排真
+# 跑起来后,同一只票会被 watcher 与编排各判一次(不是预算超支——编排消耗经
+# note_external_llm_use 记进同一份 counts——而是同一笔真钱决策上的重复研判)。
+#
+# 语义(逐条有测试):
+#   * **引用计数**。两个编排运行同时接管同一只票 → 计数 2;任一方撤销只减 1,另一方
+#     仍然拥有。naive 的 set.discard 会替别人放手,那才是日后真会咬人的失败模式。
+#   * **一次性凭证**。register 返回 OrchestratedRegistration,release 只撤销「这张凭证
+#     登记过的那些键」且只生效一次(重复 release 是空操作,绝不误减别人的计数)。凭证
+#     自身即上下文管理器,``with register_orchestrated_codes(...)`` 在正常/异常/提前
+#     return 三条出口都归还——泄漏一次就等于在本进程里永久噤声那只票。
+#   * **纯进程内,绝不落盘**。进程崩了登记随之消失、watcher 自愈(fail-open:恢复判,
+#     绝不会卡死在不判)。代价必须说清:编排与 watcher 必须**同进程**(9999 server
+#     lifespan)互斥才成立;跨进程的编排不在这条缝的射程内。
+#   * **线程安全**。写侧持锁改引用计数后**整体重绑**一个新 set;读侧 orchestrated_codes()
+#     一字未改也永远安全(它拷贝的那个 set 对象此后不再被原地修改)。
+#   * 别名:tick 比的是策略 bind 里的原样字符串,我们不控制它的写法,所以带交易所的
+#     登记(``SZ300750`` / ``300750.SZ``)连带拥有裸六位与另一种写法。裸六位只拥有自己
+#     ——本模块不猜交易所(号段推断是别处的事,不在这里复制一份会漂移的规则)。
+
+_ORCHESTRATED_LOCK = threading.Lock()
+#: 键 → 引用计数(拥有者数)。_ORCHESTRATED_CODES 恒等于本表的键集快照。
+_ORCHESTRATED_REFS: dict[str, int] = {}
+
+#: 一只票的三种完整写法(裸六位 / 交易所前缀 / 点后缀),纯语法、锚定匹配。
+_ORCH_CODE_RE = re.compile(r"^(?:(?P<ex_pre>SH|SZ|BJ))?(?P<code>\d{6})(?:\.(?P<ex_suf>SH|SZ|BJ))?$")
+
+
+def _orchestrated_aliases(code: str) -> tuple[str, ...]:
+    """一只票的等价写法集合(纯语法,不猜交易所)。非 str/空串是调用方错误,响亮抛。"""
+    if not isinstance(code, str):
+        raise TypeError(f"orchestrated code 必须是 str,收到 {type(code).__name__}: {code!r}")
+    raw = code.strip()
+    if not raw:
+        raise ValueError("orchestrated code 不能是空串/纯空白")
+    out = {raw, raw.upper()}
+    m = _ORCH_CODE_RE.fullmatch(raw.upper())
+    if m:
+        c = m.group("code")
+        out.add(c)
+        ex = m.group("ex_pre") or m.group("ex_suf")
+        if ex:
+            out.update({f"{ex}{c}", f"{c}.{ex}"})
+    return tuple(sorted(out))
+
+
+def _publish_orchestrated() -> None:
+    """把引用计数表的键集**重绑**为新的 _ORCHESTRATED_CODES(须在持锁时调用)。
+
+    重绑而非原地改:读侧 ``set(_ORCHESTRATED_CODES)`` 拿到的对象自此不再被改写,
+    因此读侧无需加锁也不会撞上「拷贝时集合被并发修改」。"""
+    global _ORCHESTRATED_CODES
+    _ORCHESTRATED_CODES = set(_ORCHESTRATED_REFS)
+
+
+class OrchestratedRegistration:
+    """一次登记的一次性凭证;同时是上下文管理器(退出即归还,含异常路径)。"""
+
+    __slots__ = ("_keys", "_released")
+
+    def __init__(self, keys: tuple[str, ...]):
+        self._keys = keys
+        self._released = False
+
+    @property
+    def keys(self) -> tuple[str, ...]:
+        """本次登记实际增计数的键(含别名);release 只撤销这些。"""
+        return self._keys
+
+    @property
+    def released(self) -> bool:
+        return self._released
+
+    def __repr__(self) -> str:  # pragma: no cover — 诊断用
+        return (f"OrchestratedRegistration(keys={list(self._keys)!r}, "
+                f"released={self._released})")
+
+    def __enter__(self) -> "OrchestratedRegistration":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        release_orchestrated_codes(self)
+        return False       # 绝不吞异常
+
+
+def register_orchestrated_codes(codes) -> OrchestratedRegistration:
+    """登记一组被某活跃编排运行接管的票,返回一次性凭证(必须 release / with)。
+
+    ``codes`` 是 str 的可迭代物。单个裸 str / bytes / None 一律 TypeError —— 直接迭代
+    一个 str 会把 ``"300750"`` 拆成六个单字符「票」悄悄登记,那是最典型的坑。空可迭代
+    物是合法的:得到一张空凭证,登记与归还都是空操作。同一次调用里的重复(含互为别名
+    的写法)折叠成一次计数。任一元素非法则整体抛出,**绝不留下半份登记**。"""
+    if codes is None or isinstance(codes, (str, bytes, bytearray)):
+        raise TypeError(
+            f"codes 必须是 str 的可迭代物(不是单个 str/bytes/None),收到 {codes!r}")
+    try:
+        items = list(codes)
+    except TypeError as e:
+        raise TypeError(f"codes 必须是 str 的可迭代物,收到 {type(codes).__name__}") from e
+    keys: set = set()
+    for c in items:                       # 校验全部先做完(非法 → 抛,零副作用)
+        keys.update(_orchestrated_aliases(c))
+    reg = OrchestratedRegistration(tuple(sorted(keys)))
+    with _ORCHESTRATED_LOCK:
+        for k in reg.keys:
+            _ORCHESTRATED_REFS[k] = _ORCHESTRATED_REFS.get(k, 0) + 1
+        _publish_orchestrated()
+    return reg
+
+
+def release_orchestrated_codes(registration: Optional[OrchestratedRegistration]) -> None:
+    """归还一张登记凭证。``None`` 是空操作(调用方 finally 里可能什么都没拿到);
+    重复归还同一张凭证也是空操作(一次性)——否则会误减别的运行的计数。
+    传入非凭证对象是调用方错误,响亮抛 TypeError。"""
+    if registration is None:
+        return
+    if not isinstance(registration, OrchestratedRegistration):
+        raise TypeError(
+            "release_orchestrated_codes 只接受 register_orchestrated_codes 返回的凭证,"
+            f"收到 {type(registration).__name__}")
+    with _ORCHESTRATED_LOCK:
+        if registration._released:
+            return
+        registration._released = True
+        for k in registration._keys:
+            n = _ORCHESTRATED_REFS.get(k, 0) - 1
+            if n > 0:
+                _ORCHESTRATED_REFS[k] = n
+            else:
+                _ORCHESTRATED_REFS.pop(k, None)
+        _publish_orchestrated()
 
 
 # ───────────────────────── 盯盘集(策略 bind 派生)─────────────────────────
