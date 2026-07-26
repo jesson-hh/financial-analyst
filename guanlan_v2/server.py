@@ -271,6 +271,25 @@ def create_app():
     if plan_approval_console_kwargs is not None:
         import inspect as _inspect
         _console_kw = plan_approval_console_kwargs(coordinator=_p7_coord)
+        # R21 §11 / R22 §3 carry:没有任何东西生产「操作者凭证材料」,故 console/api.py 的
+        # _resolve_actor(None) 一律拒。这里补上唯一诚实的来源 —— identity.declared_operator_actor
+        # (读 config/orchestration/operators.json 的那条声明,与 ConfigOperatorVerifier 同源,
+        # 因此它给出的 id 按构造就是 verifier 接受的 id)。传**可调用**而非取值:决策时刻的
+        # 声明才是权威,撤销一个操作者立即生效、无需重启。sealed 的 plan_approval_console_kwargs
+        # 只递协调器,所以这一行只能写在这里。诚实声明:控制台本身没有认证 —— 绑上它意味着
+        # **任何能访问本机控制台的调用方都以那位被声明的操作者身份审批**,这是单用户本机
+        # 工作台 + 明文 allowlist 的真实描述,不是新增弱点,只是不再假装材料来自别处。
+        if _console_kw:
+            try:
+                from guanlan_v2.orchestration.adapters.identity import (
+                    declared_operator_actor as _declared_operator_actor,
+                )
+
+                _console_kw["plan_approval_actor"] = _declared_operator_actor
+            except Exception as _e:  # noqa: BLE001 — 拿不到声明就退回既有的 403,不阻断启动
+                print(f"[guanlan_v2] plan-approval actor material unavailable "
+                      f"({type(_e).__name__}: {_e}); /console/plan/approvals/decide "
+                      f"keeps refusing", file=sys.stderr)
         _accepted = _inspect.signature(build_console_router).parameters
         _kept = {k: v for k, v in _console_kw.items() if k in _accepted}
         # 一旦有东西被探测过滤掉,必须**大声**报出来:静默丢弃协调器 = 把一次响亮的启动失败
@@ -450,6 +469,36 @@ def create_app():
     def _orchestration_store_status():  # noqa: ANN202 — 只读运维探针
         """本进程 orchestration durable store 的绑定实况(唯一健康值 state=="bound")。"""
         return _orch_status.orchestration_store_status()
+
+    # ── R3:把适配层路由接到本进程已绑定的 durable stores(opt-in)────────────────
+    # 在此之前 set_adapters_router_deps 在生产里**从无调用方**,于是 /orchestration/* 六端点
+    # 全部诚实 503(*_unwired)。这一行是那个调用方。默认关(GUANLAN_ORCH_LAUNCHER=1 才开):
+    # 打开等于让一个原本一直在拒绝的面在同时服务 选股/落子/帷幄 的进程里真的活起来,而 launcher
+    # 的 admission 半边尚未完工(见 R3 报告),半个子系统上线必须是一次决定,不能是重启的副作用。
+    # 绑定内部全程 guard 且**从不抛**——出 bug 只记 failed、路由继续 503,启动照常。
+    _orch_launcher_status = {"state": "not_attempted"}
+    try:
+        from guanlan_v2.orchestration.startup import (
+            bind_orchestration_launcher as _bind_orch_launcher,
+        )
+
+        _orch_launcher_status = _bind_orch_launcher()
+    except Exception as _e:  # noqa: BLE001 — 加法项:绑定失败绝不阻断启动
+        _orch_launcher_status = {"state": "unavailable", "error_type": type(_e).__name__,
+                                 "error": str(_e)}
+        print(f"[guanlan_v2][ORCH-LAUNCHER-UNAVAILABLE] adapters-router binding "
+              f"skipped ({type(_e).__name__}: {_e}); /orchestration/* keeps its "
+              f"honest *_unwired 503s", file=sys.stderr)
+
+    @app.get("/orchestration/launcher_status")
+    def _orchestration_launcher_status():  # noqa: ANN202 — 只读运维探针
+        """本进程适配层路由的接线实况(state=="bound" 才是真接上)。"""
+        try:
+            from guanlan_v2.orchestration.startup import orchestration_launcher_status
+
+            return orchestration_launcher_status()
+        except Exception:  # noqa: BLE001 — 包缺席时回落到启动期记下的那份
+            return dict(_orch_launcher_status)
 
     # ── orchestration 适配层薄路由(Phase 9 · Task 10)/orchestration/* 六端点 ────────
     # 影子/草稿专用:replay start/state/curves/wakeup + weiwo start/state。start 只开

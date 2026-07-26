@@ -83,6 +83,11 @@ __all__ = [
     "bind_orchestration_stores",
     "orchestration_store_status",
     "reset_status_for_tests",
+    # -- R3: the adapters-router production binding (opt-in) ----------------- #
+    "LAUNCHER_ENV",
+    "bind_orchestration_launcher",
+    "orchestration_launcher_status",
+    "reset_launcher_status_for_tests",
 ]
 
 _LOG = logging.getLogger(__name__)
@@ -301,3 +306,153 @@ def bind_orchestration_stores(
         "orchestration durable stores bound at %s (%d state-cell namespaces, "
         "%d schema registries)", status["root"], len(namespaces), len(digests))
     return status
+
+
+# =========================================================================== #
+# R3 — the adapters-router production binding (opt-in)                         #
+# =========================================================================== #
+#: opt-in switch. Default OFF ⇒ ``/orchestration/*`` keeps its honest ``*_unwired``
+#: 503s and production is byte-identical — the same idiom ``GUANLAN_SEATS_WATCH`` /
+#: ``GUANLAN_REGEN_DAILY`` use. It is opt-in rather than always-on because binding
+#: it makes a real, previously-refusing surface live in a process that also serves
+#: 选股 / 落子 / 帷幄, and because the launcher's own admission side is not finished
+#: (see the R3 launcher report): turning on half a subsystem must be a decision, not
+#: a side effect of a restart.
+LAUNCHER_ENV = "GUANLAN_ORCH_LAUNCHER"
+
+#: the queryable record, same shape discipline as the store status.
+_LAUNCHER_STATUS: dict[str, Any] = {
+    "state": "not_attempted", "replay_state_store": False, "replay_bindings": False,
+    "shadow_wakeup_context": False, "schedule_count": 0,
+    "error_type": None, "error": None, "notes": [],
+}
+
+
+def orchestration_launcher_status() -> dict[str, Any]:
+    """A defensive copy of this process's launcher-binding record."""
+    record = dict(_LAUNCHER_STATUS)
+    record["notes"] = list(record["notes"])
+    return record
+
+
+def reset_launcher_status_for_tests() -> None:
+    """Test seam: forget the record (never called in production)."""
+    global _LAUNCHER_STATUS
+    _LAUNCHER_STATUS = {
+        "state": "not_attempted", "replay_state_store": False, "replay_bindings": False,
+        "shadow_wakeup_context": False, "schedule_count": 0,
+        "error_type": None, "error": None, "notes": [],
+    }
+
+
+def _record_launcher(record: dict[str, Any]) -> dict[str, Any]:
+    global _LAUNCHER_STATUS
+    _LAUNCHER_STATUS = dict(record)
+    _LAUNCHER_STATUS["notes"] = list(record.get("notes", ()))
+    return orchestration_launcher_status()
+
+
+def bind_orchestration_launcher(
+    *, enabled: bool | None = None, stores: Any = None,
+) -> dict[str, Any]:
+    """R3 — bind the adapters router to this process's durable stores. Never raises.
+
+    Before this, every ``/orchestration/*`` route answered ``*_unwired``: the router
+    reads ``AdaptersRouterDeps`` from a process container that nothing in production
+    ever filled (``set_adapters_router_deps`` had no production caller). This is that
+    caller.
+
+    What it binds, and what it deliberately does NOT:
+
+    * ``replay_state_store`` — a real :class:`ReplayStateStore` over the **already
+      bound** process stores (never a second store: the durable bind is
+      idempotent-once and its namespace set is frozen at construction, so a second
+      one over the same root is the R24 hazard). ``GET /replay/state`` and
+      ``GET /replay/curves`` become real, read-only answers;
+    * ``clock`` — the authoritative :class:`SystemClock`;
+    * ``schedule_registry`` / ``replay_requests`` / ``weiwo_requests`` /
+      ``weiwo_receipts`` — the process-level carriers ``POST /replay/start`` and the
+      两 weiwo routes read. An empty schedule registry is the honest starting state:
+      a route asked for an unregistered schedule refuses by name;
+    * **NOT ``replay_bindings``** — a :class:`ReplayRuntimeBindings` is *run-scoped*
+      (it carries a per-run coordinator, budget ledger and intent ledger), so there
+      is no process-level value that is not an invention. ``POST /replay/wakeup``
+      therefore keeps its honest 503, and the record says so rather than leaving a
+      reader to discover it;
+    * **NOT the shadow-wakeup context provider** — it must return
+      ``(store, bindings, now)``, and the same run-scoped ``bindings`` are missing.
+      Binding a provider that returned ``None`` for them would turn an honest 503
+      into a crash inside a scheduled playbook.
+
+    Outcomes: ``disabled`` (opt-in switch off) · ``unavailable`` (no bound process
+    store — the store bind already shouted) · ``failed`` (a wiring bug; recorded, and
+    the router keeps its 503s) · ``bound``.
+    """
+    import os
+
+    if enabled is None:
+        enabled = os.environ.get(LAUNCHER_ENV) == "1"
+    if not enabled:
+        return _record_launcher(dict(
+            _LAUNCHER_STATUS, state="disabled", error_type=None, error=None,
+            notes=[f"{LAUNCHER_ENV} is not '1': the /orchestration routes keep their "
+                   "honest *_unwired 503s and production is byte-unchanged"]))
+
+    notes: list[str] = []
+    try:
+        from guanlan_v2.orchestration.adapters import chain
+        from guanlan_v2.orchestration.adapters.api import (
+            AdaptersRouterDeps,
+            set_adapters_router_deps,
+        )
+        from guanlan_v2.orchestration.adapters.durable import process_durable_stores
+        from guanlan_v2.orchestration.adapters.luozi import ReplayStateStore
+        from guanlan_v2.orchestration.runtime_clock import SystemClock
+        from guanlan_v2.orchestration.shadow import DecisionScheduleRegistry
+
+        bound = stores if stores is not None else process_durable_stores()
+        if bound is None:
+            return _record_launcher(dict(
+                _LAUNCHER_STATUS, state="unavailable",
+                notes=["no orchestration durable store is bound in this process, so "
+                       "the adapters router cannot be wired; see "
+                       "GET /orchestration/store_status"]))
+
+        clock = SystemClock()
+        registry = chain.build_phase9_registry(chain.PHASE9_BASE_REGISTRY_DIGEST)
+        replay_store = ReplayStateStore(
+            payload_store=bound.payloads, state_cells=bound.cells, registry=registry,
+            clock=clock, uow_factory=lambda: bound.unit_of_work,
+            event_store=bound.events)
+        schedules = DecisionScheduleRegistry()
+        notes.append(
+            "replay_bindings is NOT bound: a ReplayRuntimeBindings is run-scoped "
+            "(per-run coordinator + budget + intent ledger), so POST /replay/wakeup "
+            "keeps its honest clock/bindings 503")
+        notes.append(
+            "the shadow-wakeup context provider is NOT bound for the same reason "
+            "(it must return (store, bindings, now))")
+        notes.append(
+            "the schedule registry starts EMPTY: POST /replay/start refuses an "
+            "unregistered schedule by name, which is the honest starting state")
+        set_adapters_router_deps(AdaptersRouterDeps(
+            schedule_registry=schedules, replay_state_store=replay_store,
+            replay_bindings=None, clock=clock, replay_requests={},
+            weiwo_requests={}, weiwo_receipts={}))
+    except Exception as exc:  # noqa: BLE001 — a wiring bug must never kill create_app()
+        _shout(logging.ERROR, "ORCH-LAUNCHER-FAILED",
+               f"the orchestration adapters-router binding raised "
+               f"({type(exc).__name__}: {exc}); the /orchestration routes keep their "
+               "honest *_unwired 503s and this process serves everything else "
+               "normally")
+        return _record_launcher(dict(
+            _LAUNCHER_STATUS, state="failed", error_type=type(exc).__name__,
+            error=str(exc), notes=notes))
+
+    _LOG.info("orchestration adapters router bound (replay_state_store live, "
+              "replay_bindings deliberately absent)")
+    return _record_launcher({
+        "state": "bound", "replay_state_store": True, "replay_bindings": False,
+        "shadow_wakeup_context": False, "schedule_count": 0,
+        "error_type": None, "error": None, "notes": notes,
+    })
