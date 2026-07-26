@@ -311,9 +311,14 @@ def bind_orchestration_stores(
 # =========================================================================== #
 # R3 — the adapters-router production binding (opt-in)                         #
 # =========================================================================== #
-#: opt-in switch. Default OFF ⇒ ``/orchestration/*`` keeps its honest ``*_unwired``
-#: 503s and production is byte-identical — the same idiom ``GUANLAN_SEATS_WATCH`` /
-#: ``GUANLAN_REGEN_DAILY`` use. It is opt-in rather than always-on because binding
+#: opt-in switch. Default OFF ⇒ **the six ``/orchestration`` router routes are
+#: byte-unchanged**, keeping their honest ``*_unwired`` 503s — the same idiom
+#: ``GUANLAN_SEATS_WATCH`` / ``GUANLAN_REGEN_DAILY`` use. Deliberately NOT the wider
+#: claim "production is byte-unchanged": ``GET /orchestration/launcher_status``
+#: registers on **every** boot (it must, or an operator could not ask why the
+#: subsystem is off), and ``server.py``'s ``plan_approval_actor`` line runs whenever
+#: ``_console_kw`` is non-empty — inert today only because the Phase-7 coordinator is
+#: ``None``, NOT because this flag is off. It is opt-in rather than always-on because binding
 #: it makes a real, previously-refusing surface live in a process that also serves
 #: 选股 / 落子 / 帷幄, and because the launcher's own admission side is not finished
 #: (see the R3 launcher report): turning on half a subsystem must be a decision, not

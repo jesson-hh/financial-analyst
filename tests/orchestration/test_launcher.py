@@ -101,7 +101,8 @@ def _cards_for(env, **kw):
                       main=env.coordinator._main_candidate, **kw)
 
 
-def _launch(env, *, cards=None, maturity_delta=timedelta(days=-1), **kw):
+def _launch(env, *, cards=None, coordinator=None, maturity_delta=timedelta(days=-1),
+            **kw):
     report_pool = _FakePool()
     return launch_interval_replay(
         request=env.request,
@@ -110,7 +111,7 @@ def _launch(env, *, cards=None, maturity_delta=timedelta(days=-1), **kw):
         interval_start=env.world.start,
         interval_end=env.world.end,
         cards=cards if cards is not None else _cards_for(env),
-        coordinator=env.coordinator,
+        coordinator=coordinator if coordinator is not None else env.coordinator,
         bindings=env.bindings,
         shadow_runner=env.world.runner,
         artifact_pool=report_pool,
@@ -260,6 +261,45 @@ def test_a_coordinator_built_without_the_card_digests_is_refused_before_the_driv
         _launch(env, cards=drifted)
     assert "coordinator_kwargs" in str(excinfo.value)
     assert env.seam.calls == []
+
+
+def test_a_cards_object_that_cannot_name_a_lane_digest_refuses_the_launch():
+    """Minor 6: the guard used to swallow this and drop the lane — a silent fail-open
+    that disarmed the R22 check AND blanked the outcome's own digest record."""
+    env = _launch_world()
+
+    class _Broken(_FakeCards):
+        def candidate_plan_digest(self, lane):
+            if lane == "main":
+                raise RuntimeError("no card for this lane")
+            return super().candidate_plan_digest(lane)
+
+    broken = _Broken(bootstrap=env.coordinator._bootstrap_candidate,
+                     main=env.coordinator._main_candidate)
+    with pytest.raises(LaunchRefused) as excinfo:
+        _launch(env, cards=broken)
+    assert "main" in str(excinfo.value)
+    assert env.seam.calls == []
+
+
+def test_a_coordinator_that_hides_its_lane_digests_says_the_guard_did_not_run():
+    """Minor 6: the other fail-open. A double with no ``_bootstrap_candidate`` no
+    longer passes silently — the outcome NAMES the guard as not having run."""
+    env = _launch_world()
+
+    class _Opaque:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            if name in ("_bootstrap_candidate", "_main_candidate"):
+                raise AttributeError(name)
+            return getattr(self._inner, name)
+
+    outcome = _launch(env, coordinator=_Opaque(env.coordinator))
+    joined = " | ".join(outcome.notes)
+    assert "bootstrap lane override could NOT be verified" in joined
+    assert "main lane override could NOT be verified" in joined
 
 
 def test_every_stage_the_launch_cannot_reach_is_named_on_the_outcome():

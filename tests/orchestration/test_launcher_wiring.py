@@ -4,12 +4,16 @@
 ``bind_orchestration_launcher`` is the one call site that turns the adapters
 router's honest ``*_unwired`` refusals into a real, read-only surface over the
 process durable stores. It is **opt-in** (``GUANLAN_ORCH_LAUNCHER=1``): default-off
-keeps production byte-identical, which is the same idiom every other additive
-subsystem in ``server.py`` uses.
+keeps **the six ``/orchestration`` router routes** byte-unchanged — the same idiom
+every other additive subsystem in ``server.py`` uses. Not the wider claim: the
+``launcher_status`` probe registers on every boot, and the ``plan_approval_actor``
+line runs whenever a Phase-7 coordinator is bound (never, today) regardless of this
+flag.
 """
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -106,6 +110,32 @@ def test_the_binding_never_raises_out_of_a_boot(monkeypatch):
     record = st.bind_orchestration_launcher(stores=object())   # nonsense input
     assert record["state"] == "failed"
     assert record["error_type"]
+
+
+#: the two read-only probes ``server.py`` registers OUTSIDE the adapters router but
+#: UNDER its prefix. ``ORCHESTRATION_ROUTE_PATHS`` is a closed reviewed six and its
+#: snapshot guard only sees the router, so a path added at the server level lands
+#: under the sealed prefix while evading that guard. This test is the guard that sees
+#: them. Adding a third requires a reviewed edit HERE, with a reason.
+SERVER_REGISTERED_ORCHESTRATION_PATHS = {
+    "/orchestration/store_status": "R23 — the durable-store bind probe",
+    "/orchestration/launcher_status": "R3 — the adapters-router bind probe",
+}
+
+
+def test_no_unguarded_path_hides_under_the_sealed_orchestration_prefix():
+    """Minor 4: the closed six plus exactly the declared server-level probes."""
+    src = Path(__import__("guanlan_v2.server", fromlist=["x"]).__file__).read_text(
+        encoding="utf-8")
+    found = set(re.findall(r'@app\.(?:get|post|put|delete)\(\s*"(/orchestration/[^"]*)"',
+                           src))
+    assert found == set(SERVER_REGISTERED_ORCHESTRATION_PATHS), sorted(
+        found ^ set(SERVER_REGISTERED_ORCHESTRATION_PATHS))
+    router = set(adapters_api.ORCHESTRATION_ROUTE_PATHS)
+    assert len(router) == 6
+    assert not (router & found), "a server-level probe must never shadow a router path"
+    assert all(reason.strip() for reason in
+               SERVER_REGISTERED_ORCHESTRATION_PATHS.values())
 
 
 def test_server_binds_the_console_actor_and_the_launcher(monkeypatch):

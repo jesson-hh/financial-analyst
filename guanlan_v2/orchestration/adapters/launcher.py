@@ -52,33 +52,65 @@ the lane digest. What *does* move it is ``as_of`` and the ContextSnapshot
 **content** digest — which is precisely why the approved plan's ``as_of`` and
 context must be sealed at the interval, not at a point.
 
-**What Option 1 does NOT buy — the structural limit this module discovered and
-refuses to paper over.** One approved candidate digest yields at most one admitted
-``Plan`` (``PlanAdmissionService.freeze_and_admit_candidate`` short-circuits on the
-already-admitted event, ``admission.py:554``), one ``Plan`` carries one ``run_id``
-(``plan.run_id``, read at ``dag.py:510``), and ``dag.run_plan`` **resumes** a
-``run_id`` whose layers are already committed instead of re-executing them
-(``dag.py:538`` + the ``layer_index in committed_layers`` branch). So the second
-decision point of an interval would be served the artifacts the FIRST point
-committed — a borrowed-snapshot PIT leak, exactly what the coordinator's
-``_verify_bootstrap_return`` exists to catch. :class:`MultiPointPlanExecutionRefused`
-makes it a refusal at the seam instead. A multi-point interval therefore needs
-per-point plans, which needs an approval that authorizes a family of digests —
-neither exists, and inventing either was out of scope for this module.
+**What Option 1 does NOT buy — the collision this module discovered and refuses to
+paper over.** Option 1 describes an interval-shaped graph run **once**. The sealed
+``ReplayPlanCoordinator`` port calls ``plan_runner`` **once per point per lane**, so
+this module runs ONE admitted plan N times — and that is impossible. **The blocker is
+NOT the approval.** Since ``_EXECUTABLE_FIELDS`` excludes ``run_id``, N per-point
+drafts differing only in ``run_id``/``id`` share ONE candidate digest; there is no
+"family" to authorize, and ``PlanApproval.authorizes_freeze`` (``events.py:451-455``)
+binds only ``(request_id, candidate_plan_digest)`` — it is run-agnostic and already
+authorizes freezing every one of them. What actually blocks re-execution is **four
+digest-keyed singletons**:
+
+1. the run-scoped admitted-event short-circuit (``admission.py:894-898``) — one
+   admitted ``Plan`` per candidate digest, so one ``run_id``;
+2. the single-slot active-plan reservation index (``budget.py:969-974``);
+3. the Plan-scoped :class:`ArtifactPool` (``pool.py:291-293``), whose ``stage()``
+   raises ``LateStageError`` on an already-committed output key
+   (``pool.py:339-340``) — re-execution dies here *before* resume gets a say;
+4. ``dag.run_plan``'s resume-by-``run_id`` (``dag.py:510`` + ``:538`` +
+   the ``layer_index in committed_layers`` branch), which would otherwise serve
+   point 2 the artifacts point 1 committed — a borrowed-snapshot PIT leak.
+
+:class:`MultiPointPlanExecutionRefused` makes it a refusal at the seam.
+
+**Standing decision (coordinator's ruling, recorded here, NOT implemented):
+reshape the plan graph to interval scope and call ``plan_runner`` ONCE per
+interval.** The per-point ``ContextSnapshot``s then come from per-point *nodes inside
+one interval graph*, committed by node execution exactly as Option 1 says, with the
+seam returning the slice for the requested point. That fights none of the four
+singletons. The rejected alternative — per-point admission scopes — is
+contract-legal but mints N approval events and N run budgets and breaks the
+coordinator's one-interval-reservation parentage. (A) needs a production
+interval-shaped plan graph to exist, which is the same missing piece as "no
+production graph emits ``PortfolioTargetProposal@1``".
 
 The per-point freeze decision
 -----------------------------
-**The runner DOES call ``freeze_and_admit_candidate`` at every point**, against the
-ONE interval lane digest. The first point mints the ``Plan`` + ``PlanFrozen`` event;
-every later call hits the already-admitted short-circuit, so it can never mint a
-duplicate. It is not free of meaning, though: the freeze re-loads the approval
-authority and re-checks ``authorizes_freeze``, and ``dag.run_plan``'s own
-``verify_for_dispatch`` re-verifies catalog / registry / profile / reservation /
-approval — so a revocation, a catalog reseal or a released reservation stops the run
-at the *next* point rather than being checked once at launch. A replay interval can
-span hours; "approved at t0" is not the same claim as "approved at this point". And
-the failure direction is loud: a digest the admission service never prepared is
-refused ``unknown_candidate``, never silently admitted.
+**The runner DOES call ``freeze_and_admit_candidate`` at every point it reaches**,
+against the ONE interval lane digest — and the honest scope of that has to be stated
+precisely, because two easy overstatements are both false here.
+
+* **It is genuinely idempotent.** The already-admitted short-circuit is the FIRST
+  statement in the function (``admission.py:553-556``) and returns a pure read before
+  any ``RuntimeBatch``: no double reservation, no duplicate ``PlanFrozen`` event, no
+  second admitted payload, no mutation of any kind.
+* **It does NOT re-verify anything after the first point.** That same short-circuit
+  returns *before* the reservation load, before ``_load_approval_event``, before
+  ``authorizes_freeze`` and before ``_detect_drift``. Every genuine re-verification
+  lives in ``verify_for_dispatch`` inside ``dag.run_plan``.
+* **And today no second point is ever reached**, because the
+  :class:`MultiPointPlanExecutionRefused` guard above sits *before* the freeze call.
+  So the per-point cadence is the right shape for the day the interval-scope reshape
+  lands — it is not currently buying re-verification, and claiming otherwise would
+  describe a path that cannot execute.
+
+What the per-point call DOES buy today: the freeze sits inside the same seam the
+coordinator's approval gate guards, adjacent in the code a reviewer reads, and a
+digest the admission service never prepared is refused ``unknown_candidate`` —
+loud, terminal, never a silent unapproved run. A re-verification failure propagates
+**uncaught** out of :func:`launch_interval_replay`: it raises, it never continues.
 """
 from __future__ import annotations
 
@@ -176,6 +208,16 @@ def run_coroutine_blocking(coroutine_factory: Callable[[], Any]) -> Any:
     would still block the calling loop on ``.result()``. The honest contract is that
     the whole launch owns a loop-free thread, so this refuses rather than papers
     over a caller that does not.
+
+    **Loop-lifetime hazard, recorded where the bridge lives.** ``asyncio.run``
+    creates a FRESH event loop per call and closes it on return, so anything the
+    coroutine leaves behind that is bound to that loop is dead afterwards. Today
+    nothing is: each ``dag.run_plan`` call is self-contained. But a future
+    ``ModelGateway`` holding a long-lived ``httpx.AsyncClient`` (or any loop-bound
+    connection pool) constructed on the first call would raise on the second — this
+    repo has already been bitten once by httpx binding itself to a loop. Whoever
+    binds such a gateway must construct it per call, or own a single long-lived loop
+    on the launch thread instead of this per-call ``asyncio.run``.
     """
     refuse_if_event_loop_running("the async plan-execution bridge")
     return asyncio.run(coroutine_factory())
@@ -248,6 +290,10 @@ def build_dag_plan_executor(
     graph with no LLM node: ``dag.run_plan`` does not refuse up front, it fails the
     LLM node with ``executor_setup_failed`` and returns ``terminal_status="failed"``,
     which the runner above refuses rather than reads an artifact from.
+
+    See :func:`run_coroutine_blocking` for the loop-lifetime hazard a future
+    loop-bound ``model_gateway`` would hit here: this executor calls ``asyncio.run``
+    once per lane per point, and every call closes the loop it created.
     """
     from guanlan_v2.orchestration import dag as _dag
 
@@ -441,14 +487,23 @@ class ReplayLaunchOutcome:
 # =========================================================================== #
 # launch_interval_replay — the composition                                     #
 # =========================================================================== #
-def _lane_digests(cards: Any) -> dict[str, str]:
-    out: dict[str, str] = {}
+def _lane_digests(cards: Any) -> tuple[dict[str, str], dict[str, str]]:
+    """``(digests, unavailable)`` — a lane that cannot name its digest is NAMED.
+
+    The earlier shape swallowed the exception and dropped the lane, which was a
+    silent fail-open on a record whose entire purpose is honesty: a renamed or
+    raising cards object would have produced an outcome missing a lane digest AND
+    a disarmed :func:`_refuse_forgotten_overrides`. The reason string is carried so
+    the caller can refuse (before a run) or note it (while awaiting a human).
+    """
+    digests: dict[str, str] = {}
+    unavailable: dict[str, str] = {}
     for lane in LAUNCH_LANES:
         try:
-            out[lane] = cards.candidate_plan_digest(lane)
-        except Exception:  # noqa: BLE001 — a lane with no card is reported, not raised
-            continue
-    return out
+            digests[lane] = cards.candidate_plan_digest(lane)
+        except Exception as exc:  # noqa: BLE001 — reported by name, never dropped
+            unavailable[lane] = f"{type(exc).__name__}: {exc}"
+    return digests, unavailable
 
 
 def _refuse_unapproved(request: Any, cards: Any) -> tuple[str, ...]:
@@ -471,24 +526,44 @@ def _refuse_unapproved(request: Any, cards: Any) -> tuple[str, ...]:
     return tuple(cards.awaiting_human())
 
 
-def _refuse_forgotten_overrides(coordinator: Any, digests: Mapping[str, str]) -> None:
+def _refuse_forgotten_overrides(
+    coordinator: Any, digests: Mapping[str, str]
+) -> tuple[str, ...]:
     """R22's trap: a coordinator built without the card digests can never be approved.
 
-    Read defensively — the two attributes are the sealed coordinator's private lane
-    digests, and a coordinator double that does not expose them is not second-guessed.
+    Returns the notes for any lane it could **not** compare. The only fail-open left
+    is a coordinator that does not expose the attribute at all (a test double) — and
+    that case is now NAMED on the outcome instead of silently passing, because the
+    guard's whole value is that a reader can tell whether it actually ran.
+
+    Known coupling, deliberate: the two attributes are the sealed coordinator's
+    private lane digests. A rename upstream would turn this guard into a note rather
+    than into a false pass, which is why the note exists.
     """
+    notes: list[str] = []
     for lane, attribute in (("bootstrap", "_bootstrap_candidate"),
                             ("main", "_main_candidate")):
         held = getattr(coordinator, attribute, None)
         wanted = digests.get(lane)
-        if held is None or wanted is None:
+        if held is None:
+            notes.append(
+                f"the {lane} lane override could NOT be verified: this coordinator "
+                f"exposes no {attribute!r}, so the R22 forgotten-overrides guard did "
+                "not run for it")
             continue
+        if wanted is None:
+            raise LaunchRefused(
+                f"the coordinator gates the {lane} lane on {held!r} but the cards "
+                "cannot name that lane's approved digest, so nothing can confirm the "
+                "human decided it; refusing rather than running against an "
+                "unverifiable identity")
         if held != wanted:
             raise LaunchRefused(
                 f"the coordinator's {lane} lane digest {held!r} is not the digest the "
                 f"human decided ({wanted!r}); it was built without the registered "
                 "cards' coordinator_kwargs(), so every point would refuse "
                 "unapproved. Pass ReplayApprovalCards.coordinator_kwargs().")
+    return tuple(notes)
 
 
 def launch_interval_replay(
@@ -546,7 +621,7 @@ def launch_interval_replay(
 
     refuse_if_event_loop_running("launch_interval_replay")
     request_id = str(getattr(request, "request_id", "req"))
-    digests = _lane_digests(cards)
+    digests, unavailable = _lane_digests(cards)
     awaiting = _refuse_unapproved(request, cards)
     if awaiting:
         return ReplayLaunchOutcome(
@@ -556,8 +631,15 @@ def launch_interval_replay(
             execution_config_digest=execution_config.semantic_digest(),
             schedule_digest=getattr(schedule, "content_digest", None),
             notes=(f"awaiting a human decision on lane(s) {list(awaiting)}; the "
-                   "interval was NOT started and no budget was reserved",))
-    _refuse_forgotten_overrides(coordinator, digests)
+                   "interval was NOT started and no budget was reserved",)
+            + tuple(f"lane {lane!r} could not name its approved digest ({reason})"
+                    for lane, reason in sorted(unavailable.items())))
+    if unavailable:
+        raise LaunchRefused(
+            "the cards cannot name the approved digest for lane(s) "
+            f"{sorted(unavailable)} ({'; '.join(f'{k}: {v}' for k, v in sorted(unavailable.items()))}); "
+            "an interval is never launched against a lane identity nothing can confirm")
+    notes: list[str] = list(_refuse_forgotten_overrides(coordinator, digests))
 
     # ── ① the driver ─────────────────────────────────────────────────────── #
     from guanlan_v2.orchestration.adapters.luozi import run_interval_replay
@@ -572,7 +654,6 @@ def launch_interval_replay(
     targets = tuple(ledger.deterministic_targets)
     degraded = dict(ledger.degraded_points)
     badges = tuple(sorted({b for row in degraded.values() for b in row}))
-    notes: list[str] = []
     status = "ran"
     curve_ref = None
     state_ref = None
