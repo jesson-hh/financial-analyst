@@ -38,12 +38,20 @@ that re-derives the set from the package source.
 Honest failure (see :func:`bind_orchestration_stores`)
 ------------------------------------------------------
 A bind failure is never a silent skip. Every outcome lands in a typed, queryable
-:func:`orchestration_store_status` record and, for the data-integrity case, a
-``CRITICAL`` log plus a stderr line carrying the stable :data:`CORRUPT_MARKER`.
+record owned by the dependency-free leaf :mod:`guanlan_v2.orch_store_status` (which
+holds the canonical state vocabulary — ``not_attempted`` / ``bound`` / ``unavailable``
+/ ``corrupt`` / ``failed`` — and the ``/data/health`` provider), and the
+data-integrity case also gets a ``CRITICAL`` log plus a stderr line carrying the
+stable :data:`CORRUPT_MARKER`. ``unavailable`` is written both here (a broken/absent
+``durable`` module) and by ``server.py`` (this module itself not importable).
+
 By default a corrupt store still lets the server boot (the 9999 process serves the
 entire product; an additive subsystem's damaged journal must not take the UI down)
 — but it boots *visibly* store-less, and ``GUANLAN_ORCH_STORE_STRICT=1`` turns that
-into a refused boot for operators who want the harder guarantee.
+into a refused boot for operators who want the harder guarantee. **Strict mode is the
+only way this call can ever refuse a boot**: every import and every step of the bind
+sits inside the guard, so a broken ``durable.py`` degrades to ``unavailable`` instead
+of propagating ``ImportError`` out of ``create_app()``.
 
 This module is pure additive wiring: it consumes the sealed Phase 1–9 surfaces and
 modifies none of them.
@@ -56,6 +64,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from guanlan_v2 import orch_store_status as _record
 from guanlan_v2.orchestration.adapters.luozi import REPLAY_STATE_CELL_NAMESPACES
 from guanlan_v2.orchestration.trial_ledger import PHASE4_STATE_CELL_NAMESPACES
 from guanlan_v2.orchestration.worker import PROMPT_CELL_NAMESPACE
@@ -105,23 +114,6 @@ class OrchestrationStoreBootRefused(RuntimeError):
     """Strict mode (:data:`STRICT_ENV`) refused to boot over a broken durable store."""
 
 
-def _blank_status() -> dict[str, Any]:
-    return {
-        "state": "not_attempted",   # not_attempted | bound | corrupt | failed
-        "bound": False,
-        "root": None,
-        "cell_namespaces": [],
-        "cell_namespace_count": 0,
-        "registry_digests": [],
-        "error_type": None,
-        "error": None,
-        "strict": False,
-    }
-
-
-_STATUS: dict[str, Any] = _blank_status()
-
-
 def orchestration_store_status() -> dict[str, Any]:
     """A JSON-safe defensive copy of this process's durable-store binding outcome.
 
@@ -129,15 +121,21 @@ def orchestration_store_status() -> dict[str, Any]:
     process has no orchestration durable store* — the whole point of the record is
     that an operator can tell that apart from "everything is fine" without reading
     a log line that has long since scrolled away.
+
+    The record itself lives in the dependency-free leaf
+    :mod:`guanlan_v2.orch_store_status`, which owns the canonical state vocabulary
+    (including ``unavailable``, the one state only ``server.py`` can observe — it means
+    *this* module could not be imported) and the ``/data/health`` provider. This is a
+    convenience re-export so callers inside the orchestration package need not know
+    where the record lives.
     """
-    return dict(_STATUS)
+    return _record.orchestration_store_status()
 
 
 def reset_status_for_tests() -> None:
     """Test-only: forget the recorded outcome (the store binding itself lives in
     ``durable._PROCESS_STORES`` and is reset there)."""
-    global _STATUS
-    _STATUS = _blank_status()
+    _record.reset_for_tests()
 
 
 def build_production_resolver():
@@ -192,19 +190,48 @@ def bind_orchestration_stores(
     the underlying entry point is idempotent-once and the namespace set is frozen at
     construction (R24).
 
-    Returns the :func:`orchestration_store_status` record. Never raises, except in
-    strict mode (:data:`STRICT_ENV` ``=1`` or ``strict=True``), where a broken store
-    raises :class:`OrchestrationStoreBootRefused` so the boot fails outright.
+    Returns the :func:`orchestration_store_status` record. **Never raises** — except
+    in strict mode (:data:`STRICT_ENV` ``=1`` or ``strict=True``), where a store that
+    could not be bound raises :class:`OrchestrationStoreBootRefused` so the boot fails
+    outright. Strict mode is the *only* path by which this call can refuse a boot; the
+    default server start must never depend on this optional machinery, so **every**
+    import and every step below sits inside the guard. In particular the
+    ``durable`` / ``runtime_clock`` imports are deliberately *inside* the try: this
+    module's own top-level imports do not pull in ``durable``, so a broken ``durable.py``
+    would otherwise propagate ``ImportError`` out of ``create_app()`` and take the whole
+    9999 process (选股 / 落子 / 帷幄 / datafeed / MCP) down with it — the exact failure
+    the old kwarg-less code caught and survived.
     """
-    global _STATUS
-    from guanlan_v2.orchestration.adapters.durable import DurableStoreCorrupt
-    from guanlan_v2.orchestration.runtime_clock import SystemClock
-
     if strict is None:
         strict = os.environ.get(STRICT_ENV) == "1"
     resolved_root = Path(root) if root is not None else Path(
         os.environ.get(STORE_ROOT_ENV) or _DEFAULT_ROOT)
 
+    def _degrade(state: str, marker: str, level: int, what: str, exc: BaseException):
+        _record.record_status(dict(
+            _record.blank_status(), state=state, root=str(resolved_root),
+            error_type=type(exc).__name__, error=str(exc), strict=bool(strict)))
+        _shout(level, marker, what)
+        if strict:
+            raise OrchestrationStoreBootRefused(
+                f"{marker}: refusing to boot without a correctly bound orchestration "
+                f"durable store at {resolved_root} ({type(exc).__name__}: {exc})") from exc
+        return orchestration_store_status()
+
+    # Step 1 — the imports, INSIDE the guard on purpose (see the docstring). This
+    # module's own top-level imports do NOT pull in `durable`, so a broken durable.py
+    # would otherwise escape as ImportError and kill the whole server process.
+    try:
+        from guanlan_v2.orchestration.adapters.durable import DurableStoreCorrupt
+        from guanlan_v2.orchestration.runtime_clock import SystemClock
+    except Exception as exc:  # noqa: BLE001 — absent/broken machinery, not a fatality
+        return _degrade(
+            "unavailable", "ORCH-STORE-UNAVAILABLE", logging.ERROR,
+            f"the orchestration durable-store machinery is not importable — this "
+            f"process has NO orchestration durable store, but the rest of the server "
+            f"starts normally ({type(exc).__name__}: {exc})", exc)
+
+    # Step 2 — the bind itself. `DurableStoreCorrupt` is safely nameable here.
     try:
         resolver, digests = build_production_resolver()
         stores = _bind_process_stores(
@@ -214,37 +241,22 @@ def bind_orchestration_stores(
             allowed_cell_namespaces=PRODUCTION_CELL_NAMESPACES,
         )
     except DurableStoreCorrupt as exc:
-        _STATUS = dict(
-            _blank_status(), state="corrupt", root=str(resolved_root),
-            error_type=type(exc).__name__, error=str(exc), strict=bool(strict))
-        _shout(
-            logging.CRITICAL, CORRUPT_MARKER,
+        return _degrade(
+            "corrupt", CORRUPT_MARKER, logging.CRITICAL,
             f"the orchestration durable store at {resolved_root} is CORRUPT and was "
             f"NOT bound — this process has NO orchestration durable store "
             f"({type(exc).__name__}: {exc}). Inspect the journal by hand; do not "
-            f"delete it blind. Set {STRICT_ENV}=1 to refuse the boot instead.")
-        if strict:
-            raise OrchestrationStoreBootRefused(
-                f"{CORRUPT_MARKER}: refusing to boot over a corrupt orchestration "
-                f"durable store at {resolved_root} ({exc})") from exc
-        return orchestration_store_status()
+            f"delete it blind. Set {STRICT_ENV}=1 to refuse the boot instead.", exc)
     except Exception as exc:  # noqa: BLE001 — recorded + shouted, never swallowed
-        _STATUS = dict(
-            _blank_status(), state="failed", root=str(resolved_root),
-            error_type=type(exc).__name__, error=str(exc), strict=bool(strict))
-        _shout(
-            logging.ERROR, "ORCH-STORE-FAILED",
+        return _degrade(
+            "failed", "ORCH-STORE-FAILED", logging.ERROR,
             f"binding the orchestration durable store at {resolved_root} failed — this "
-            f"process has NO orchestration durable store ({type(exc).__name__}: {exc})")
-        if strict:
-            raise OrchestrationStoreBootRefused(
-                f"ORCH-STORE-FAILED: refusing to boot without an orchestration durable "
-                f"store ({type(exc).__name__}: {exc})") from exc
-        return orchestration_store_status()
+            f"process has NO orchestration durable store ({type(exc).__name__}: {exc})",
+            exc)
 
     # Read the ACTUAL sealed values back off the store — never echo the intent.
     namespaces = sorted(stores.cells.allowed_namespaces)
-    _STATUS = {
+    status = _record.record_status({
         "state": "bound",
         "bound": True,
         "root": str(getattr(stores, "root", resolved_root)),
@@ -254,8 +266,8 @@ def bind_orchestration_stores(
         "error_type": None,
         "error": None,
         "strict": bool(strict),
-    }
+    })
     _LOG.info(
         "orchestration durable stores bound at %s (%d state-cell namespaces, "
-        "%d schema registries)", _STATUS["root"], len(namespaces), len(digests))
-    return orchestration_store_status()
+        "%d schema registries)", status["root"], len(namespaces), len(digests))
+    return status

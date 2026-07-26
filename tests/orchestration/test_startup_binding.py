@@ -37,6 +37,7 @@ from pathlib import Path
 
 import pytest
 
+from guanlan_v2 import orch_store_status as rec
 from guanlan_v2.orchestration import startup as st
 from guanlan_v2.orchestration.adapters import durable as durable_mod
 
@@ -102,41 +103,42 @@ def test_production_union_is_derived_not_hardcoded():
     assert PROMPT_CELL_NAMESPACE in st.PRODUCTION_CELL_NAMESPACES
 
 
-def _scan_package_cell_namespaces() -> dict[str, list[str]]:
-    """Every state-cell namespace name the orchestration package can CAS-write.
+#: Namespace-shaped literals in the package that are deliberately NOT state cells.
+#: Every exclusion is DECLARED here with its reason — an undeclared namespace-shaped
+#: literal fails the drift guard, so a new one cannot be waved through implicitly.
+REVIEWED_NON_CELL_LITERALS: dict[str, str] = {
+    "policy.action_surface_alias.v1":
+        "migration.POLICY_ACTION_SURFACE_ALIAS_V1 — a reviewed adapter *policy id* "
+        "stamped on migration rows; never a state-cell namespace",
+    "experience.lane0.v1":
+        "memory/experience.EXPERIENCE_STREAM_ID — an experience *event-stream id*; "
+        "never a state-cell namespace",
+}
 
-    Two mechanical sources, no import side effects:
-      1. module-level ``*NAMESPACE*`` constants (str, or tuple/list of str) whose
-         value has the state-cell shape;
-      2. any ``cell_namespace=<str literal>`` keyword argument.
+
+def _scan_package_namespace_literals() -> dict[str, list[str]]:
+    """EVERY namespace-shaped string literal in the orchestration package.
+
+    Deliberately maximal, because the two obvious rules both have blind spots that
+    already exist in-repo: the seven ``memory.*`` names are CAS-written from a *variable*
+    (``memory/store.py:195`` ``cell_namespace=ns``) whose literal container is
+    ``MEMORY_STATE_CELL_OWNERS`` — a module-level ``dict`` whose *name* contains no
+    "NAMESPACE". A rule that looks only at ``cell_namespace=<literal>`` plus
+    ``*NAMESPACE*`` constants sees neither, so a future namespace introduced in that same
+    dict-plus-variable shape would be CAS-written in production and still pass the guard.
+
+    So: every ``ast.Constant`` str of the state-cell shape, anywhere (assignments, tuples,
+    lists, **dict keys and values**, call arguments, nested scopes), minus the declared
+    :data:`REVIEWED_NON_CELL_LITERALS`. No import side effects.
     """
     found: dict[str, list[str]] = {}
-
-    def _record(value: str, where: str) -> None:
-        if _CELL_NS_RE.match(value):
-            found.setdefault(value, []).append(where)
-
     for path in sorted(_ORCH_PKG.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         rel = path.relative_to(_REPO_ROOT).as_posix()
         for node in ast.walk(tree):
-            if isinstance(node, ast.keyword) and node.arg == "cell_namespace":
-                if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-                    _record(node.value.value, f"{rel}:{node.value.lineno} cell_namespace=")
-        for node in tree.body:  # module-level constants only
-            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
-                continue
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            names = [t.id for t in targets if isinstance(t, ast.Name)]
-            if not any("NAMESPACE" in n for n in names):
-                continue
-            value = node.value
-            if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                _record(value.value, f"{rel}:{node.lineno} {names[0]}")
-            elif isinstance(value, (ast.Tuple, ast.List)):
-                for elt in value.elts:
-                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-                        _record(elt.value, f"{rel}:{elt.lineno} {names[0]}")
+            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                    and _CELL_NS_RE.match(node.value)):
+                found.setdefault(node.value, []).append(f"{rel}:{node.lineno}")
     return found
 
 
@@ -145,15 +147,42 @@ def test_union_covers_every_state_cell_namespace_in_the_package():
 
     This is the mechanical check that would have caught ``runtime.prompt.v1``.
     """
-    found = _scan_package_cell_namespaces()
-    missing = sorted(set(found) - set(st.PRODUCTION_CELL_NAMESPACES))
+    found = _scan_package_namespace_literals()
+    candidates = {k: v for k, v in found.items() if k not in REVIEWED_NON_CELL_LITERALS}
+    missing = sorted(set(candidates) - set(st.PRODUCTION_CELL_NAMESPACES))
     assert not missing, (
-        "state-cell namespaces CAS-written in the package but absent from "
-        f"PRODUCTION_CELL_NAMESPACES: "
-        + json.dumps({m: found[m] for m in missing}, indent=2, ensure_ascii=False)
+        "namespace-shaped literals in the package that are neither in "
+        "PRODUCTION_CELL_NAMESPACES nor declared in REVIEWED_NON_CELL_LITERALS: "
+        + json.dumps({m: candidates[m] for m in missing}, indent=2, ensure_ascii=False)
     )
     # and the scan really did find the whole union (guards a broken scanner)
-    assert set(found) == set(st.PRODUCTION_CELL_NAMESPACES)
+    assert set(candidates) == set(st.PRODUCTION_CELL_NAMESPACES)
+
+
+def test_the_scan_sees_the_memory_names_through_their_owner_dict():
+    """The blind spot this widening closes: ``MEMORY_STATE_CELL_OWNERS`` dict KEYS.
+
+    Its name has no "NAMESPACE" and its CAS site feeds a variable, so the narrow rules
+    saw the seven ``memory.*`` names only by luck (a second, unrelated tuple constant in
+    ``memory/models.py``). Assert the dict itself is now a source the scan reaches.
+    """
+    found = _scan_package_namespace_literals()
+    owners = "guanlan_v2/orchestration/memory/store.py"
+    seen_in_owner_dict = [
+        ns for ns in found
+        if ns.startswith("memory.") and any(w.startswith(owners) for w in found[ns])
+    ]
+    assert len(seen_in_owner_dict) == 7, sorted(seen_in_owner_dict)
+    assert set(seen_in_owner_dict) <= set(st.PRODUCTION_CELL_NAMESPACES)
+
+
+def test_every_non_cell_exclusion_is_declared_with_a_reason():
+    found = _scan_package_namespace_literals()
+    assert len(found) == 16, sorted(found)  # 14 union + 2 declared non-cells
+    for literal, reason in REVIEWED_NON_CELL_LITERALS.items():
+        assert literal in found, f"{literal!r} no longer exists — drop the exclusion"
+        assert literal not in st.PRODUCTION_CELL_NAMESPACES
+        assert len(reason) > 40, "an exclusion must carry a real reason"
 
 
 # --------------------------------------------------------------------------- #
@@ -333,6 +362,206 @@ def test_status_is_json_serialisable(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Fix 1 — ONLY strict mode may ever refuse a boot                              #
+# --------------------------------------------------------------------------- #
+_DURABLE = "guanlan_v2.orchestration.adapters.durable"
+
+
+def _break_import(monkeypatch, dotted: str, exc: Exception) -> None:
+    """Make ``from <dotted> import ...`` raise, as a broken/absent module would."""
+    import builtins
+
+    real = builtins.__import__
+
+    def fake(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == dotted:
+            raise exc
+        return real(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake)
+
+
+def test_a_broken_durable_module_degrades_to_unavailable_without_raising(
+        tmp_path, monkeypatch, capsys):
+    """A broken ``durable.py`` must NOT kill ``create_app()``.
+
+    ``startup``'s own top-level imports do not pull in ``durable``, so with the two
+    imports outside the guard an ``ImportError`` would propagate out of ``create_app()``
+    and take 选股/落子/帷幄/datafeed/MCP down — strictly worse than the kwarg-less code
+    it replaced, which caught exactly that and continued.
+    """
+    _break_import(monkeypatch, _DURABLE, ImportError("simulated broken durable.py"))
+    status = st.bind_orchestration_stores(root=tmp_path)  # must NOT raise
+    assert status["state"] == "unavailable"
+    assert status["bound"] is False
+    assert status["error_type"] == "ImportError"
+    assert "ORCH-STORE-UNAVAILABLE" in capsys.readouterr().err
+
+
+def test_a_broken_durable_module_is_loud(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG, logger=st.__name__)
+    _break_import(monkeypatch, _DURABLE, ImportError("simulated broken durable.py"))
+    st.bind_orchestration_stores(root=tmp_path)
+    assert any(r.levelno >= logging.ERROR and "ORCH-STORE-UNAVAILABLE" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_strict_mode_refuses_the_boot_when_durable_cannot_import(tmp_path, monkeypatch):
+    monkeypatch.setenv(st.STRICT_ENV, "1")
+    _break_import(monkeypatch, _DURABLE, ImportError("simulated broken durable.py"))
+    with pytest.raises(st.OrchestrationStoreBootRefused):
+        st.bind_orchestration_stores(root=tmp_path)
+    assert st.orchestration_store_status()["state"] == "unavailable"
+
+
+@pytest.mark.parametrize("boom", [
+    ImportError("broken durable.py"),
+    RuntimeError("exploded at import time"),
+    ValueError("nonsense"),
+])
+def test_no_non_strict_failure_mode_ever_raises(tmp_path, monkeypatch, boom):
+    """The property in one test: non-strict, nothing escapes."""
+    _break_import(monkeypatch, _DURABLE, boom)
+    status = st.bind_orchestration_stores(root=tmp_path)
+    assert status["state"] in {"unavailable", "failed"}
+    assert status["bound"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Fold (b) — the negative control, pinned as a test                            #
+# --------------------------------------------------------------------------- #
+def test_a_phase9_row_is_corrupt_to_the_old_binding_and_fine_to_ours(tmp_path):
+    """Why the Phase-9 registry MUST be bound — the sharpest edge, made permanent.
+
+    Writes exactly what a Phase-9 run writes, then folds the same root twice: once with
+    the old kwarg-less defaults (Phase-1 + Phase-2, zero namespaces) and once with the
+    production binding. The first is ``DurableStoreCorrupt`` — which the old
+    ``server.py`` swallowed into one stderr line, silently losing the whole store.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from guanlan_v2.orchestration.adapters import chain
+    from guanlan_v2.orchestration.adapters.contracts import ReplayDecisionPoint
+    from guanlan_v2.orchestration.adapters.durable import (
+        DurableStoreCorrupt,
+        build_durable_runtime_stores,
+    )
+    from guanlan_v2.orchestration.eventstore import (
+        PayloadPutCommand,
+        RuntimeBatch,
+        StagedPayloadKey,
+        StagedTypedPayloadRef,
+        StateCellCompareAndSwapCommand,
+    )
+    from guanlan_v2.orchestration.refs import ContentRef, SchemaRef
+    from guanlan_v2.orchestration.worker import PROMPT_CELL_NAMESPACE
+
+    st.bind_orchestration_stores(root=tmp_path)
+    stores = durable_mod.process_durable_stores()
+    phase9 = chain.build_phase9_registry(chain.PHASE9_BASE_REGISTRY_DIGEST)
+
+    as_of = datetime(2026, 7, 26, 9, 30, tzinfo=timezone.utc)
+    point = ReplayDecisionPoint(
+        schedule_ref=ContentRef(id="sched.r23", version="1", content_digest="c" * 64),
+        schedule_digest="d" * 64, point_ordinal=1, scheduled_for=as_of,
+        cutoff_at=as_of - timedelta(minutes=1), decision_as_of=as_of,
+        eligible_execution_at=as_of + timedelta(minutes=1),
+        execution_price_field="close", bar_frequency="1d",
+    )
+    schema_ref = SchemaRef(name="ReplayDecisionPoint", version="1")
+    stores.unit_of_work.commit(RuntimeBatch(
+        idempotency_key="neg-control",
+        payload_puts=(PayloadPutCommand(
+            staged_key=StagedPayloadKey(key="p9"), schema_ref=schema_ref,
+            namespace="main",
+            payload_template={n: getattr(point, n) for n in type(point).model_fields},
+            registry_digest=phase9.registry_digest, idempotency_key="neg-control-pa"),),
+        cell_cas=(StateCellCompareAndSwapCommand(
+            cell_namespace=PROMPT_CELL_NAMESPACE, cell_key_digest="e" * 64,
+            expected_value=None,
+            new_target=StagedTypedPayloadRef(
+                staged_key=StagedPayloadKey(key="p9"), schema_ref=schema_ref,
+                namespace="main")),),
+    ))
+
+    # (a) the OLD kwarg-less defaults cannot fold that row.
+    with pytest.raises(DurableStoreCorrupt) as excinfo:
+        build_durable_runtime_stores(tmp_path)
+    assert "no sealed registry registered for digest" in str(excinfo.value)
+    assert phase9.registry_digest in str(excinfo.value)
+
+    # (b) the production binding folds it, and the prompt cell survives the restart.
+    durable_mod._PROCESS_STORES = None
+    st.reset_status_for_tests()
+    again = st.bind_orchestration_stores(root=tmp_path)
+    assert again["state"] == "bound"
+    refolded = durable_mod.process_durable_stores()
+    assert refolded.cells.load(PROMPT_CELL_NAMESPACE, "e" * 64) is not None
+
+
+# --------------------------------------------------------------------------- #
+# Fix 3 — the /data/health provider (consumer deferred: health.py is dirty)    #
+# --------------------------------------------------------------------------- #
+def test_the_status_leaf_imports_with_no_orchestration_dependency():
+    """The provider must be importable from a consumer that cannot assume the package."""
+    src = (_REPO_ROOT / "guanlan_v2" / "orch_store_status.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    imports = [n for n in ast.walk(tree)
+               if isinstance(n, (ast.Import, ast.ImportFrom))
+               and not (isinstance(n, ast.ImportFrom) and n.module == "__future__")]
+    assert not imports, (
+        "the status leaf must import NOTHING — it is the safe-anywhere provider")
+
+
+def test_health_item_shape_matches_the_datafeed_gate(tmp_path):
+    """``status`` is the key ``collect_data_health`` ranks on; it must always exist."""
+    assert rec.orchestration_store_health_item()["status"] == "unknown"  # not_attempted
+    st.bind_orchestration_stores(root=tmp_path)
+    item = rec.orchestration_store_health_item()
+    assert item["status"] == "fresh" and item["state"] == "bound"
+    assert item["cell_namespace_count"] == 14
+    assert json.loads(json.dumps(item))["status"] == "fresh"
+
+
+def test_health_item_reports_a_corrupt_store_as_missing(tmp_path):
+    st.bind_orchestration_stores(root=_corrupt_root(tmp_path))
+    item = rec.orchestration_store_health_item()
+    assert item["status"] == "missing"
+    assert item["state"] == "corrupt"
+    assert "ORCH-STORE-CORRUPT" in item["note"]
+
+
+def test_health_item_does_not_cry_wolf_when_the_subsystem_is_merely_absent():
+    """``unavailable`` / ``not_attempted`` are opt-in machinery, not an operator fault."""
+    rec.record_status(dict(rec.blank_status(), state="unavailable"))
+    assert rec.orchestration_store_health_item()["status"] == "unknown"
+
+
+def test_state_accessors_are_the_one_line_a_consumer_needs(tmp_path):
+    assert rec.orchestration_store_state() == "not_attempted"
+    assert rec.orchestration_store_bound() is False
+    st.bind_orchestration_stores(root=tmp_path)
+    assert rec.orchestration_store_state() == rec.HEALTHY_STATE == "bound"
+    assert rec.orchestration_store_bound() is True
+
+
+def test_the_state_vocabulary_is_closed_and_complete():
+    assert set(rec.STATES) == {
+        "not_attempted", "bound", "unavailable", "corrupt", "failed"}
+    with pytest.raises(ValueError):
+        rec.record_status({"state": "invented"})
+
+
+def test_startup_status_and_the_leaf_are_the_same_record(tmp_path):
+    """No second copy of the record — fold (c): the duplicated literal is gone."""
+    st.bind_orchestration_stores(root=tmp_path)
+    assert st.orchestration_store_status() == rec.orchestration_store_status()
+    server_src = (_REPO_ROOT / "guanlan_v2" / "server.py").read_text(encoding="utf-8")
+    assert '"cell_namespace_count": 0' not in server_src, (
+        "server.py must not re-declare the blank-status literal — the leaf owns it")
+
+
+# --------------------------------------------------------------------------- #
 # The single call site in server.py                                            #
 # --------------------------------------------------------------------------- #
 def test_server_binds_through_the_production_helper_only():
@@ -346,5 +575,11 @@ def test_server_binds_through_the_production_helper_only():
     assert "bind_process_durable_stores_and_scan()" not in src, (
         "server.py must not call the kwarg-less bind (empty registry set + zero "
         "namespaces — R23/R24)")
-    assert src.count("bind_orchestration_stores(") == 1, "exactly one bind call site"
+    assert src.count("_bind_orch_stores()") == 1, "exactly one bind call site"
     assert "/orchestration/store_status" in src, "the operator-visible status route"
+    # Fix 1: the ONLY exception allowed to escape the call site is the strict refusal.
+    after = src.split("except _BootRefused:", 1)[1]
+    assert after.lstrip().startswith("raise"), "the strict refusal must re-raise bare"
+    assert "except Exception as _e:" in after, (
+        "every non-strict failure must also be caught AT the call site (defence in "
+        "depth): a bug in startup.py must never kill create_app()")

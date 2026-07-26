@@ -59,15 +59,13 @@ _MAINLINE_PANEL_PATH = (Path(__file__).resolve().parent.parent / "guanlan_v2" / 
 # kimi 调用会 401。文件兜底让任意代际拉起的 server 都能拿到 key(不覆盖已有 env)。
 _SECRETS_ENV = Path(__file__).resolve().parent.parent / "var" / "secrets.env"
 
-# orchestration durable-store 的绑定实况(R23+R24)。create_app() 里那**唯一一次**绑定的
-# 结果落这里,并由只读探针 GET /orchestration/store_status 暴露给运维。
-# state: not_attempted | bound | corrupt | failed | unavailable —— 只有 "bound" 是健康值,
-# 其余一律意味着「本进程没有 orchestration durable store」。绝不把失败伪装成静默正常。
-_ORCH_STORE_STATUS: dict = {
-    "state": "not_attempted", "bound": False, "root": None,
-    "cell_namespaces": [], "cell_namespace_count": 0, "registry_digests": [],
-    "error_type": None, "error": None, "strict": False,
-}
+# orchestration durable-store 的绑定实况(R23+R24)。记录本体住在零依赖叶子模块
+# guanlan_v2/orch_store_status.py —— 那里是 state 词表(not_attempted / bound /
+# unavailable / corrupt / failed)与 /data/health provider 的**唯一**定义处,故此处不再
+# 复制一份字面量(避免两份漂移)。本文件只负责写入 "unavailable"(唯一只有 server 能观察到
+# 的状态:连 startup 模块本身都导不进来)与兜底的 "failed",并由只读探针
+# GET /orchestration/store_status 暴露。叶子模块无任何 import,导它不会失败。
+from guanlan_v2 import orch_store_status as _orch_status  # noqa: E402
 
 
 def _load_secrets_env() -> None:
@@ -401,24 +399,42 @@ def create_app():
     # 默认仍放行启动 —— 9999 进程承载整个产品 UI,不能被一个加法子系统的损坏日志拖垮 —— 但是
     # 「本进程没有 orchestration store」与「一切正常」在 status 里是两个不同的 state,绝不混同。
     # 运维要更硬的保证:GUANLAN_ORCH_STORE_STRICT=1 → 直接拒绝启动。
-    global _ORCH_STORE_STATUS
+    #
+    # 红线(复核 Fix 1):**唯一**能让本段拒启动的路径是 strict 模式主动抛的
+    # OrchestrationStoreBootRefused。除它之外的任何异常(orchestration 包缺席、durable.py
+    # 坏了、接线 bug……)都必须降级成一个被记录的 state —— 绝不能让一个加法子系统的
+    # ImportError 从 create_app() 逃出去,把整个 9999(选股/落子/帷幄/datafeed/MCP)带崩。
+    # startup.bind_orchestration_stores 内部已把每一步都包进 guard;这里的两层 except 是
+    # 结构性的第二道保险,保证「只有 strict 能拒启动」这条性质由调用点本身兜住。
     try:
-        from guanlan_v2.orchestration.startup import bind_orchestration_stores
+        from guanlan_v2.orchestration.startup import (
+            OrchestrationStoreBootRefused as _BootRefused,
+            bind_orchestration_stores as _bind_orch_stores,
+        )
     except Exception as _e:  # noqa: BLE001 — orchestration 包缺席/导入失败:诚实跳过,不阻断启动
-        _ORCH_STORE_STATUS = dict(
-            _ORCH_STORE_STATUS, state="unavailable", bound=False,
-            error_type=type(_e).__name__, error=str(_e))
+        _orch_status.record_status(dict(
+            _orch_status.blank_status(), state="unavailable",
+            error_type=type(_e).__name__, error=str(_e)))
         print(f"[guanlan_v2][ORCH-STORE-UNAVAILABLE] orchestration durable stores not "
               f"wired — this process has NO orchestration store "
               f"({type(_e).__name__}: {_e})", file=sys.stderr)
     else:
-        # 只有 strict 模式会抛(OrchestrationStoreBootRefused),那是刻意的拒启动。
-        _ORCH_STORE_STATUS = bind_orchestration_stores()
+        try:
+            _bind_orch_stores()
+        except _BootRefused:
+            raise                       # strict 模式:唯一被允许拒启动的路径
+        except Exception as _e:  # noqa: BLE001 — 防御纵深:startup 自身出 bug 也不许崩启动
+            _orch_status.record_status(dict(
+                _orch_status.blank_status(), state="failed",
+                error_type=type(_e).__name__, error=str(_e)))
+            print(f"[guanlan_v2][ORCH-STORE-FAILED] orchestration durable store bind "
+                  f"raised unexpectedly — this process has NO orchestration store "
+                  f"({type(_e).__name__}: {_e})", file=sys.stderr)
 
     @app.get("/orchestration/store_status")
     def _orchestration_store_status():  # noqa: ANN202 — 只读运维探针
         """本进程 orchestration durable store 的绑定实况(唯一健康值 state=="bound")。"""
-        return dict(_ORCH_STORE_STATUS)
+        return _orch_status.orchestration_store_status()
 
     # ── orchestration 适配层薄路由(Phase 9 · Task 10)/orchestration/* 六端点 ────────
     # 影子/草稿专用:replay start/state/curves/wakeup + weiwo start/state。start 只开
