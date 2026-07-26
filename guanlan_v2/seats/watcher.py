@@ -123,6 +123,12 @@ def note_external_llm_use(n: int, now: Optional[datetime] = None) -> None:
 #   * **纯进程内,绝不落盘**。进程崩了登记随之消失、watcher 自愈(fail-open:恢复判,
 #     绝不会卡死在不判)。代价必须说清:编排与 watcher 必须**同进程**(9999 server
 #     lifespan)互斥才成立;跨进程的编排不在这条缝的射程内。
+#   * **只挡「登记之后才开拍」的 tick,不是绝对互斥**。tick 在开头一次性取
+#     ``orchestrated = orchestrated_codes()`` 快照,随后整拍时间都花在 quote_fn(网络)
+#     与 decide_fn(LLM)里 —— 几秒到几十秒。已经在飞的那一拍手里是**过期空快照**,
+#     编排在它飞行途中登记也拦不住它判同一只票。要根治得把读挪进 tick 的循环内,那就
+#     动了 tick(破坏「非编排票门序逐位不变」的约束),所以这是**记录在案的边界**,
+#     不是 bug。
 #   * **线程安全**。写侧持锁改引用计数后**整体重绑**一个新 set;读侧 orchestrated_codes()
 #     一字未改也永远安全(它拷贝的那个 set 对象此后不再被原地修改)。
 #   * 别名:tick 比的是策略 bind 里的原样字符串,我们不控制它的写法,所以带交易所的

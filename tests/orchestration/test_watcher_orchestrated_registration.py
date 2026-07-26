@@ -320,6 +320,7 @@ class _ObservingCoordinator:
 
     def __init__(self, *, observe=None, raise_in_det=False):
         self.observations: list = []
+        self.points: list = []
         self._observe = observe
         self._raise_in_det = raise_in_det
 
@@ -327,6 +328,7 @@ class _ObservingCoordinator:
         return ReplayPointSnapshot(data_context=pilot_data_context(as_of=point.decision_as_of))
 
     def llm_proposal(self, point, snapshot):
+        self.points.append(point.point_ordinal)
         if self._observe is not None:
             self.observations.append(self._observe())
         return _proposal_artifact(f"art-{point.point_ordinal}")
@@ -432,12 +434,11 @@ def test_a_live_run_owns_its_universe_and_a_real_tick_skips_it(watch_state, monk
     state = _run(coord, seats_seam=watcher, is_live_session=lambda point: True)
 
     assert len(coord.observations) == 3           # one tick per decision point
+    # every tick: 600519 is this run's universe so the watcher must NOT judge it, while
+    # the other watched code is judged exactly as before. Asserted on the WHOLE return
+    # value, strictly — no disjunction that could pass for the wrong reason.
     for out in coord.observations:
-        # 600519 is this run's universe → the watcher must NOT judge it …
-        assert out["skipped"]["600519"] == "orchestrated"
-        # … while every other watched code is judged exactly as before.
-        assert out["judged"] == ["300750"] or out["skipped"].get("300750") == "throttled"
-    assert coord.observations[0]["judged"] == ["300750"]
+        assert out == {"judged": ["300750"], "skipped": {"600519": "orchestrated"}}
     # released on the success path: after the run the watcher owns nothing again.
     assert watcher.orchestrated_codes() == set()
     assert state.completed_points == 3
@@ -465,6 +466,54 @@ def test_a_historical_replay_registers_nothing(watch_state):
     assert watcher.orchestrated_codes() == set()
 
 
+def test_a_predicate_false_for_every_point_registers_nothing(watch_state):
+    """The false-skip case: a real predicate over an all-historical interval.
+
+    This is the shape a launcher produces on every backfill (a real
+    ``is_live_session`` predicate + an interval whose points are all in the past). Owning
+    the universe here would stop 盯盘 judging live positions for the whole backtest — a
+    MISSED-研判 harm — so it must register nothing.
+    """
+    seen: list = []
+    coord = _ObservingCoordinator(observe=lambda: seen.append(watcher.orchestrated_codes()))
+    _run(coord, seats_seam=watcher, is_live_session=lambda point: False)
+    assert seen == [set(), set(), set()]
+    assert watcher.orchestrated_codes() == set()
+
+
+def test_ownership_starts_at_the_first_live_point(watch_state):
+    # points 1 historical, 2-3 live (the real shape: live points are the TAIL, because
+    # points ascend in time). Nothing is owned until the first live point.
+    seen: list = []
+    coord = _ObservingCoordinator(observe=lambda: seen.append(watcher.orchestrated_codes()))
+    _run(coord, seats_seam=watcher, is_live_session=lambda point: point.point_ordinal >= 2)
+    assert seen[0] == set()
+    assert all("600519" in s for s in seen[1:])
+    assert watcher.orchestrated_codes() == set()
+
+
+def test_ownership_is_held_to_the_end_of_the_run_not_dropped_per_point(watch_state):
+    # only point 1 is live → ownership is taken there and NOT released between points
+    # (dropping it per point would only re-open the stale-tick-snapshot race at each gap).
+    seen: list = []
+    coord = _ObservingCoordinator(observe=lambda: seen.append(watcher.orchestrated_codes()))
+    _run(coord, seats_seam=watcher, is_live_session=lambda point: point.point_ordinal == 1)
+    assert all("600519" in s for s in seen)      # still owned at points 2 and 3
+    assert watcher.orchestrated_codes() == set()  # released once, at the end
+
+
+def test_many_live_points_take_exactly_one_registration(watch_state, monkeypatch):
+    # `ensure_owned` is idempotent: three live points must not stack three refcounts,
+    # because `__exit__` releases exactly one handle.
+    calls: list = []
+    real = watcher.register_orchestrated_codes
+    monkeypatch.setattr(watcher, "register_orchestrated_codes",
+                        lambda codes: calls.append(tuple(codes)) or real(codes))
+    _run(_ObservingCoordinator(), seats_seam=watcher, is_live_session=lambda point: True)
+    assert calls == [("SH600519",)]               # once for the whole run
+    assert watcher.orchestrated_codes() == set()
+
+
 def test_a_seam_without_the_registration_half_does_not_break_the_run(watch_state, caplog):
     # a partial/fake seam (no `register_orchestrated_codes`) must degrade LOUDLY, never
     # crash the run and never silently pretend the code is owned.
@@ -480,3 +529,41 @@ def test_a_seam_without_the_registration_half_does_not_break_the_run(watch_state
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert any("register_orchestrated_codes" in m and "NOT registered" in m
                for m in warnings), warnings
+    assert len(warnings) == 1, warnings   # once per run, not once per live point
+
+
+def test_a_missing_seam_on_a_live_run_warns_instead_of_going_silent(watch_state, caplog):
+    # `seats_budget_seam=None` on a LIVE run is an unwired live run: it must leave a
+    # trace, not silently skip registration.
+    with caplog.at_level("WARNING"):
+        state = _run(_ObservingCoordinator(), seats_seam=None, is_live_session=lambda p: True)
+    assert state.completed_points == 3
+    msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("NOT registered" in m and "seam=None" in m for m in msgs), msgs
+
+
+def test_a_seam_that_cannot_release_logs_the_leak(watch_state, caplog):
+    # the WORSE branch: ownership taken, no way to hand it back → the watcher stays
+    # silenced for the life of the process. That must be an ERROR, never silent.
+    seam = SimpleNamespace(
+        load_state=lambda: {"counts": {}, "daily_budget": 24},
+        note_external_llm_use=lambda n, now=None: None,
+        register_orchestrated_codes=watcher.register_orchestrated_codes,
+    )
+    with caplog.at_level("ERROR"):
+        _run(_ObservingCoordinator(), seats_seam=seam, is_live_session=lambda p: True)
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert any("LEAKED" in m for m in errors), errors
+    assert "600519" in watcher.orchestrated_codes()   # honestly still owned — that IS the leak
+    # (the autouse fixture clears the registry so the leak cannot escape this test)
+
+
+def test_the_ownership_context_manager_is_single_use():
+    from guanlan_v2.orchestration.adapters.luozi import _OrchestratedUniverseOwnership
+
+    own = _OrchestratedUniverseOwnership(watcher, ("SH600519",))
+    with own:
+        pass
+    with pytest.raises(RuntimeError, match="single-use"):
+        with own:
+            pass  # pragma: no cover

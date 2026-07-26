@@ -2458,56 +2458,111 @@ class _OrchestratedUniverseOwnership:
     """The driver's ownership of its universe in the seats watcher's skip registry.
 
     The watcher's ``tick`` skips a code that an active orchestrated run owns
-    (``skipped[code] = "orchestrated"``) so the same stock is never judged twice — once
-    by the 盯盘 loop and once by this driver. Task 4 shipped only the READ side of that
-    seam; this is the WRITE side, and the driver is its owner because the driver is the
-    only thing that runs the per-point lanes, so the contention window is exactly this
-    call's lifetime.
+    (``skipped[code] = "orchestrated"``) so the same stock is not judged by both the 盯盘
+    loop and this driver. Task 4 shipped only the READ side of that seam; this is the
+    WRITE side, and the driver is its owner because the driver is the only thing that
+    runs the per-point lanes, so the contention window is bounded by this call.
 
-    Scope (``active``): ownership is co-extensive with the Task-10 ``is_live_session``
-    seam. A run that supplies no predicate is a purely historical ``PIT_REPLAY`` run —
-    it neither reads nor debits the seats pool and it makes no live 研判, so silencing
-    the live watcher for its universe would be a false skip; such a run registers
-    NOTHING and stays bit-identical to Task 4. A run that supplies the predicate may
-    execute during a live session, so it owns its universe for the whole run.
+    **Ownership window — acquired LAZILY at the first live point, held to the end of the
+    run.** :meth:`ensure_owned` is called from the point loop only when the Task-10
+    ``is_live_session`` predicate says the point executes during a live trading session;
+    it registers once and is idempotent thereafter, and ``__exit__`` releases whatever is
+    held. The consequences, all deliberate:
+
+    * a purely historical run — ``is_live_session=None`` OR a predicate that answers
+      ``False`` for every point — registers **NOTHING**. It makes no live 研判 and never
+      touches the seats pool, so owning its universe would be a pure FALSE SKIP: 盯盘
+      would stop judging live positions for as long as the backtest grinds. That is a
+      missed-研判 harm on real money, and it is the harm a whole-run ``active`` flag
+      would have inflicted on every historical backfill run through a launcher that
+      passes a real predicate. Bit-identity with Task 4 also falls out of this.
+    * ownership is NOT dropped between live points. Points are strictly ascending in
+      time (``resolve_decision_points`` walks sessions in order), so live points are the
+      TAIL of a run; releasing per point would only re-open the stale-snapshot race
+      below at every gap, while gaining nothing real. A predicate that answers ``True``
+      early and ``False`` later over-owns for the rest of the run — the conservative
+      direction, bounded by the run.
+    * ownership is NOT extended to a point's ``eligible_execution_at``. That is an
+      instant on the MODELLED timeline (a shadow run executes nothing; intents are
+      staged ``SHADOW_ONLY`` / ``ADVISORY_ONLY``), and it usually postdates the driver's
+      return — holding a registration past the owner's lifetime is exactly the leak
+      shape this class exists to prevent, since no one would be alive to release it.
+
+    **LIMIT — the exclusion binds only ticks that START after registration, not
+    absolutely.** ``tick`` snapshots ``orchestrated_codes()`` ONCE at the top
+    (``seats/watcher.py:555``) and then spends the rest of the tick inside ``quote_fn``
+    (network) and ``decide_fn`` (LLM) — seconds to tens of seconds. A tick already in
+    flight when :meth:`ensure_owned` runs keeps its stale, empty snapshot for its whole
+    duration and can still judge a code this run is judging. Closing that race means
+    re-reading inside ``tick``'s loop, which would modify ``tick`` and break the
+    bit-unchanged constraint, so it is a documented limit, not a bug.
 
     Codes are registered in the exchange-qualified ``engine_code`` form (``SH600519``),
     which the watcher expands to the equivalent written forms — a strategy's ``bind``
     list may hold any of them.
 
-    A seam that does not expose the registration half degrades LOUDLY (a warning) and
-    the run continues unregistered: a missing seam has never been a replay failure, but
-    an unregistered live run is a duplicated-研判 hazard and must not be silent.
+    A seam that is missing, or that does not expose the registration half, degrades
+    LOUDLY and the run continues unregistered: a missing seam has never been a replay
+    failure, but an unregistered live run is a duplicated-研判 hazard and must not be
+    silent.
     """
 
-    def __init__(self, seam: Any, codes: tuple[str, ...], *, active: bool):
+    def __init__(self, seam: Any, codes: tuple[str, ...]):
         self._seam = seam
         self._codes = codes
-        self._active = bool(active)
         self._registration: Any = None
+        self._entered = False
+        self._warned = False
 
     def __enter__(self) -> "_OrchestratedUniverseOwnership":
-        if not self._active or self._seam is None or not self._codes:
-            return self
+        if self._entered:
+            raise RuntimeError(
+                "_OrchestratedUniverseOwnership is single-use — re-entering would "
+                "overwrite the held registration and leak it, silencing the watcher for "
+                f"{list(self._codes)} until the process restarts")
+        self._entered = True
+        return self
+
+    def ensure_owned(self) -> None:
+        """Take ownership of the universe if it is not already held (idempotent).
+
+        Called from the point loop at the FIRST live point. Every later call is a no-op,
+        so the run holds exactly ONE registration no matter how many live points it has.
+        """
+        if self._registration is not None or not self._codes:
+            return
         register = getattr(self._seam, "register_orchestrated_codes", None)
         if register is None:
-            import logging
+            if not self._warned:
+                self._warned = True   # once per run, not once per live point
+                import logging
 
-            logging.getLogger(__name__).warning(
-                "seats seam exposes no register_orchestrated_codes — this live run's "
-                "universe %s is NOT registered; a concurrent watcher tick may judge the "
-                "same code twice", list(self._codes),
-            )
-            return self
+                logging.getLogger(__name__).warning(
+                    "no seats seam with register_orchestrated_codes (seam=%s) — this "
+                    "LIVE run's universe %s is NOT registered; a concurrent watcher "
+                    "tick may judge the same code twice",
+                    "None" if self._seam is None else type(self._seam).__name__,
+                    list(self._codes),
+                )
+            return
         self._registration = register(self._codes)
-        return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
         registration, self._registration = self._registration, None
         if registration is None:
             return False
         release = getattr(self._seam, "release_orchestrated_codes", None)
-        if release is None:  # pragma: no cover — a seam with register but no release
+        if release is None:
+            # the WORSE branch: ownership was taken and cannot be handed back, so the
+            # watcher stays silenced for these codes for the life of the process.
+            import logging
+
+            logging.getLogger(__name__).error(
+                "seats seam took register_orchestrated_codes but exposes no "
+                "release_orchestrated_codes — the registration for %s is LEAKED and the "
+                "watcher will not judge those codes until this process restarts",
+                list(self._codes),
+            )
             return False
         try:
             release(registration)
@@ -2647,17 +2702,17 @@ def run_interval_replay(
 
     last_scheduled_for: datetime | None = None
     target_version = 1
-    # R17 — the watcher's orchestrated-code REGISTRATION half. A live run owns its
-    # universe in `guanlan_v2.seats.watcher` for the whole walk, so a concurrent 盯盘
-    # tick records `skipped[code] = "orchestrated"` instead of judging the same stock a
-    # second time. `with` (not a bare call) because ownership MUST be handed back on
-    # every exit — success, exception, early return: a leaked registration silences the
-    # watcher for that code until the process restarts.
+    # R17 — the watcher's orchestrated-code REGISTRATION half. From its FIRST live point
+    # onwards this run owns its universe in `guanlan_v2.seats.watcher`, so a 盯盘 tick
+    # STARTING after that records `skipped[code] = "orchestrated"` instead of judging the
+    # same stock a second time. A run with no live point registers nothing (a purely
+    # historical replay must not silence the live watcher). `with` (not a bare call)
+    # because ownership MUST be handed back on every exit — success, exception, early
+    # return: a leaked registration silences that code until the process restarts.
     with _OrchestratedUniverseOwnership(
         bindings.seats_budget_seam,
         tuple(sorted({s.engine_code for s in execution_config.universe})),
-        active=is_live_session is not None,
-    ):
+    ) as orchestrated_ownership:
         for point in points:
             # ONE localized instant per point: its `.date()` IS `session_iso`, so the pool
             # bucket the admissibility rule READS and the bucket the settlement WRITES are the
@@ -2667,6 +2722,10 @@ def run_interval_replay(
             session_local = _session_local_instant(point.decision_as_of, tz_name)
             session_iso = session_local.date().isoformat()
             live_point = bool(is_live_session(point)) if is_live_session is not None else False
+            if live_point:
+                # R17 — this point judges during a live session, so the run takes the
+                # watcher skip registration here (idempotent; held to the end of the run).
+                orchestrated_ownership.ensure_owned()
 
             # ① frozen per-point ContextSnapshot + structural as_of binding (invariant 2).
             snapshot = bindings.admission.bootstrap_context(point)
