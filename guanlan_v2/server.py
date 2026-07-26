@@ -59,6 +59,16 @@ _MAINLINE_PANEL_PATH = (Path(__file__).resolve().parent.parent / "guanlan_v2" / 
 # kimi 调用会 401。文件兜底让任意代际拉起的 server 都能拿到 key(不覆盖已有 env)。
 _SECRETS_ENV = Path(__file__).resolve().parent.parent / "var" / "secrets.env"
 
+# 仓根引导:生产由 check_9999.ps1 以**脚本**形式拉起(`python guanlan_v2\server.py`),
+# CPython 于是把 sys.path[0] 设成本文件所在的**包目录**,仓根不在路径上 —— 任何模块层的
+# `import guanlan_v2.*` 都会 ModuleNotFoundError。文档里的 `python -m guanlan_v2.server`
+# 和 pytest 都自带仓根,碰不到这条路径(2026-07-26 全套件绿而 9999 起不来,就是这么来的)。
+# 必须在本文件**第一个** guanlan_v2 导入之前无条件执行。守护测试:
+# tests/test_server_script_launch.py。
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 # orchestration durable-store 的绑定实况(R23+R24)。记录本体住在零依赖叶子模块
 # guanlan_v2/orch_store_status.py —— 那里是 state 词表(not_attempted / bound /
 # unavailable / corrupt / failed)与 /data/health provider 的**唯一**定义处,故此处不再
