@@ -33,6 +33,7 @@ import ast
 import json
 import logging
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -178,11 +179,80 @@ def test_the_scan_sees_the_memory_names_through_their_owner_dict():
 
 def test_every_non_cell_exclusion_is_declared_with_a_reason():
     found = _scan_package_namespace_literals()
-    assert len(found) == 16, sorted(found)  # 14 union + 2 declared non-cells
+    assert len(found) == 16, (
+        "the package's namespace-shaped literal count moved (expected 14 union + 2 "
+        "declared non-cells). A NEW one is either a state-cell namespace that must join "
+        "PRODUCTION_CELL_NAMESPACES, or a non-cell that must be declared in "
+        "REVIEWED_NON_CELL_LITERALS with a reason. Full provenance:\n"
+        + json.dumps(found, indent=2, sort_keys=True, ensure_ascii=False))
     for literal, reason in REVIEWED_NON_CELL_LITERALS.items():
         assert literal in found, f"{literal!r} no longer exists — drop the exclusion"
         assert literal not in st.PRODUCTION_CELL_NAMESPACES
         assert len(reason) > 40, "an exclusion must carry a real reason"
+
+
+def _scan_cell_namespace_arguments() -> dict[str, list[str]]:
+    """Literals passed DIRECTLY as ``cell_namespace=<str>`` — i.e. proven CAS writes."""
+    found: dict[str, list[str]] = {}
+    for path in sorted(_ORCH_PKG.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        rel = path.relative_to(_REPO_ROOT).as_posix()
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.keyword) and node.arg == "cell_namespace"
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)):
+                found.setdefault(node.value.value, []).append(
+                    f"{rel}:{node.value.lineno}")
+    return found
+
+
+def _scan_namespace_named_constants() -> dict[str, list[str]]:
+    """Literals bound to (or inside) a module-level constant whose NAME says NAMESPACE."""
+    found: dict[str, list[str]] = {}
+    for path in sorted(_ORCH_PKG.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        rel = path.relative_to(_REPO_ROOT).as_posix()
+        for node in tree.body:
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names = [t.id for t in targets if isinstance(t, ast.Name)]
+            if not any("NAMESPACE" in n for n in names) or node.value is None:
+                continue
+            elts = ([node.value] if isinstance(node.value, ast.Constant)
+                    else getattr(node.value, "elts", []))
+            for elt in elts:
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                    found.setdefault(elt.value, []).append(f"{rel}:{elt.lineno} {names[0]}")
+    return found
+
+
+def test_declared_exclusions_are_structurally_not_cell_namespaces():
+    """Minor 2 — a 41-character reason must not be able to silence a real cell namespace.
+
+    ``len(reason) > 40`` is a prose gate, and two of today's sixteen hits are already
+    non-cells of *recurring* kinds (a row-stamped policy id, an event-stream id), so
+    future false positives are likely rather than hypothetical. Each exclusion must
+    therefore also clear two MECHANICAL bars that a genuine state-cell namespace could
+    not: it is never passed as ``cell_namespace=``, and it never appears inside a
+    ``*NAMESPACE*``-named module-level constant.
+    """
+    cas_args = _scan_cell_namespace_arguments()
+    ns_consts = _scan_namespace_named_constants()
+
+    # the scanners must actually work, or the gate below passes vacuously
+    assert "trial.family_head.v1" in cas_args, sorted(cas_args)
+    assert "runtime.prompt.v1" in ns_consts, sorted(ns_consts)
+    assert "adapters.replay_head.v1" in ns_consts, sorted(ns_consts)
+
+    for literal, reason in REVIEWED_NON_CELL_LITERALS.items():
+        assert literal not in cas_args, (
+            f"{literal!r} IS passed as cell_namespace= at {cas_args.get(literal)} — it is "
+            f"a real state-cell namespace, not an exclusion. Declared reason was: {reason}")
+        assert literal not in ns_consts, (
+            f"{literal!r} appears in a *NAMESPACE*-named constant at "
+            f"{ns_consts.get(literal)} — it walks like a state-cell namespace. "
+            f"Declared reason was: {reason}")
 
 
 # --------------------------------------------------------------------------- #
@@ -562,6 +632,136 @@ def test_startup_status_and_the_leaf_are_the_same_record(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Round 3 — strict must behave IDENTICALLY on both "unavailable" branches      #
+# --------------------------------------------------------------------------- #
+def test_the_refusal_and_the_flag_live_in_the_always_importable_leaf():
+    """Why the second branch could not honour the flag before: unimportable names.
+
+    ``server.py``'s package-not-importable branch cannot import anything from
+    ``startup``. Both the flag and the exception therefore live in the leaf, and
+    ``startup`` re-exports them so existing callers are unchanged.
+    """
+    assert rec.OrchestrationStoreBootRefused is st.OrchestrationStoreBootRefused
+    assert rec.STRICT_ENV == st.STRICT_ENV == "GUANLAN_ORCH_STORE_STRICT"
+    assert st.OrchestrationStoreBootRefused.__module__ == "guanlan_v2.orch_store_status"
+
+
+def test_refuse_if_strict_is_the_single_shared_definition():
+    assert rec.refuse_if_strict(False, "ANY-MARKER") is None
+    with pytest.raises(rec.OrchestrationStoreBootRefused) as exc:
+        rec.refuse_if_strict(True, "ORCH-STORE-UNAVAILABLE", ImportError("no package"),
+                             "at var/orchestration")
+    msg = str(exc.value)
+    assert "ORCH-STORE-UNAVAILABLE" in msg and "refusing to boot" in msg
+    assert "ImportError: no package" in msg and "var/orchestration" in msg
+    assert isinstance(exc.value.__cause__, ImportError)
+
+
+def test_strict_branch_a_durable_broken_startup_importable(tmp_path, monkeypatch):
+    """Branch A: package importable, ``durable.py`` broken → strict refuses."""
+    monkeypatch.setenv(st.STRICT_ENV, "1")
+    _break_import(monkeypatch, _DURABLE, ImportError("simulated broken durable.py"))
+    with pytest.raises(rec.OrchestrationStoreBootRefused):
+        st.bind_orchestration_stores(root=tmp_path)
+    assert rec.orchestration_store_state() == "unavailable"
+
+
+def test_strict_branch_b_startup_itself_unimportable(monkeypatch, capsys):
+    """Branch B: ``startup`` itself not importable → strict must ALSO refuse.
+
+    Before this fix ``server.py`` recorded the identical ``unavailable`` state, printed,
+    and fell through with no strict check — so an operator asserting "I require a working
+    orchestration store" got a clean boot on the machine where the package was entirely
+    missing, the most complete failure of that assertion.
+
+    This replays ``server.py``'s branch exactly: the same recorded state, the same stderr
+    line, and the same ``refuse_if_strict`` call the call site makes.
+    """
+    boom = ModuleNotFoundError("No module named 'guanlan_v2.orchestration.startup'")
+    strict = True
+    rec.record_status(dict(
+        rec.blank_status(), state="unavailable", strict=strict,
+        error_type=type(boom).__name__, error=str(boom)))
+    print(f"[guanlan_v2][ORCH-STORE-UNAVAILABLE] ... Set {rec.STRICT_ENV}=1 to refuse "
+          f"the boot instead.", file=sys.stderr)
+    with pytest.raises(rec.OrchestrationStoreBootRefused):
+        rec.refuse_if_strict(strict, "ORCH-STORE-UNAVAILABLE", boom)
+    assert rec.orchestration_store_state() == "unavailable"
+    assert "ORCH-STORE-UNAVAILABLE" in capsys.readouterr().err
+
+
+def test_branch_b_still_boots_when_not_strict():
+    boom = ModuleNotFoundError("no startup module")
+    rec.record_status(dict(rec.blank_status(), state="unavailable", strict=False,
+                           error_type=type(boom).__name__, error=str(boom)))
+    assert rec.refuse_if_strict(False, "ORCH-STORE-UNAVAILABLE", boom) is None
+    assert rec.orchestration_store_bound() is False
+
+
+def test_server_honours_the_flag_on_the_package_absent_branch():
+    """Structural guard on branch B at the real call site (the live proof is on 9998)."""
+    src = (_REPO_ROOT / "guanlan_v2" / "server.py").read_text(encoding="utf-8")
+    branch = src.split("except Exception as _e:", 1)[1].split("else:", 1)[0]
+    assert 'state="unavailable"' in branch
+    assert "refuse_if_strict(_strict" in branch, (
+        "the package-absent branch must honour GUANLAN_ORCH_STORE_STRICT — it used to "
+        "record 'unavailable' and fall through, booting normally under strict")
+    assert "_orch_status.STRICT_ENV" in src, "the flag must be read from the leaf"
+
+
+@pytest.mark.parametrize("flag_named_in", ["corrupt", "failed", "unavailable"])
+def test_every_degraded_message_names_the_strict_flag(tmp_path, monkeypatch, capsys,
+                                                      flag_named_in):
+    """The corrupt message named the flag; the other two did not. Now all three do."""
+    if flag_named_in == "corrupt":
+        st.bind_orchestration_stores(root=_corrupt_root(tmp_path))
+    elif flag_named_in == "unavailable":
+        _break_import(monkeypatch, _DURABLE, ImportError("broken"))
+        st.bind_orchestration_stores(root=tmp_path)
+    else:
+        monkeypatch.setattr(st, "_bind_process_stores",
+                            lambda **_k: (_ for _ in ()).throw(RuntimeError("boom")))
+        st.bind_orchestration_stores(root=tmp_path)
+    assert st.STRICT_ENV in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# Minor 3 — a broken stderr must not swallow the strict refusal                #
+# --------------------------------------------------------------------------- #
+class _ClosedStream:
+    def write(self, *_a, **_k):
+        raise ValueError("I/O operation on closed file")
+
+    def flush(self, *_a, **_k):
+        raise ValueError("I/O operation on closed file")
+
+
+def test_shout_never_raises_even_with_a_dead_stderr(monkeypatch):
+    monkeypatch.setattr(sys, "stderr", _ClosedStream())
+    st._shout(logging.CRITICAL, "MARKER", "message")  # must not raise
+
+
+def test_a_dead_stderr_cannot_replace_the_strict_refusal(tmp_path, monkeypatch):
+    """``_degrade`` shouts BEFORE it refuses — the one place the ordering matters.
+
+    With an unguarded ``_shout`` the ``ValueError`` would escape instead of
+    ``OrchestrationStoreBootRefused``, and ``server.py`` would record ``failed`` and
+    boot through — silently inverting the operator's strict assertion.
+    """
+    monkeypatch.setenv(st.STRICT_ENV, "1")
+    monkeypatch.setattr(sys, "stderr", _ClosedStream())
+    with pytest.raises(rec.OrchestrationStoreBootRefused):
+        st.bind_orchestration_stores(root=_corrupt_root(tmp_path))
+    assert rec.orchestration_store_state() == "corrupt"
+
+
+def test_a_dead_stderr_does_not_break_the_non_strict_degradation(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "stderr", _ClosedStream())
+    status = st.bind_orchestration_stores(root=_corrupt_root(tmp_path))
+    assert status["state"] == "corrupt"
+
+
+# --------------------------------------------------------------------------- #
 # The single call site in server.py                                            #
 # --------------------------------------------------------------------------- #
 def test_server_binds_through_the_production_helper_only():
@@ -578,7 +778,9 @@ def test_server_binds_through_the_production_helper_only():
     assert src.count("_bind_orch_stores()") == 1, "exactly one bind call site"
     assert "/orchestration/store_status" in src, "the operator-visible status route"
     # Fix 1: the ONLY exception allowed to escape the call site is the strict refusal.
-    after = src.split("except _BootRefused:", 1)[1]
+    refusal = "except _orch_status.OrchestrationStoreBootRefused:"
+    assert refusal in src, "the strict refusal must be caught by its leaf-owned name"
+    after = src.split(refusal, 1)[1]
     assert after.lstrip().startswith("raise"), "the strict refusal must re-raise bare"
     assert "except Exception as _e:" in after, (
         "every non-strict failure must also be caught AT the call site (defence in "

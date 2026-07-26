@@ -406,22 +406,31 @@ def create_app():
     # ImportError 从 create_app() 逃出去,把整个 9999(选股/落子/帷幄/datafeed/MCP)带崩。
     # startup.bind_orchestration_stores 内部已把每一步都包进 guard;这里的两层 except 是
     # 结构性的第二道保险,保证「只有 strict 能拒启动」这条性质由调用点本身兜住。
+    #
+    # strict 的两条支路必须同构(复核第三轮 Fix):记录成同一个 state="unavailable" 却在同一个
+    # 开关下有相反的启动行为,是最糟的半吊子。运维打开 GUANLAN_ORCH_STORE_STRICT=1 断言的是
+    # 「本进程必须有可用的 orchestration store」,而「包整个不在」恰恰是这个断言最彻底的失败,
+    # 绝不该反而放行。_BootRefused / STRICT_ENV 都住在零依赖叶子里,正是为了让这条支路
+    # ——startup 自己都导不进来的那条—— 也能拿到它们。
+    _strict = os.environ.get(_orch_status.STRICT_ENV) == "1"
     try:
         from guanlan_v2.orchestration.startup import (
-            OrchestrationStoreBootRefused as _BootRefused,
             bind_orchestration_stores as _bind_orch_stores,
         )
     except Exception as _e:  # noqa: BLE001 — orchestration 包缺席/导入失败:诚实跳过,不阻断启动
         _orch_status.record_status(dict(
-            _orch_status.blank_status(), state="unavailable",
+            _orch_status.blank_status(), state="unavailable", strict=_strict,
             error_type=type(_e).__name__, error=str(_e)))
         print(f"[guanlan_v2][ORCH-STORE-UNAVAILABLE] orchestration durable stores not "
               f"wired — this process has NO orchestration store "
-              f"({type(_e).__name__}: {_e})", file=sys.stderr)
+              f"({type(_e).__name__}: {_e}). Set {_orch_status.STRICT_ENV}=1 to refuse "
+              f"the boot instead.", file=sys.stderr)
+        # strict:与 startup 内部那条支路同一个拒启动定义(叶子里的 refuse_if_strict)。
+        _orch_status.refuse_if_strict(_strict, "ORCH-STORE-UNAVAILABLE", _e)
     else:
         try:
             _bind_orch_stores()
-        except _BootRefused:
+        except _orch_status.OrchestrationStoreBootRefused:
             raise                       # strict 模式:唯一被允许拒启动的路径
         except Exception as _e:  # noqa: BLE001 — 防御纵深:startup 自身出 bug 也不许崩启动
             _orch_status.record_status(dict(

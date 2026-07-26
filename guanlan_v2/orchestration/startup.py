@@ -65,6 +65,10 @@ from pathlib import Path
 from typing import Any
 
 from guanlan_v2 import orch_store_status as _record
+from guanlan_v2.orch_store_status import (  # single definition — importable without this module
+    STRICT_ENV,
+    OrchestrationStoreBootRefused,
+)
 from guanlan_v2.orchestration.adapters.luozi import REPLAY_STATE_CELL_NAMESPACES
 from guanlan_v2.orchestration.trial_ledger import PHASE4_STATE_CELL_NAMESPACES
 from guanlan_v2.orchestration.worker import PROMPT_CELL_NAMESPACE
@@ -85,8 +89,10 @@ _LOG = logging.getLogger(__name__)
 
 #: store-root override (the 9998 verification runs point this at a temp dir).
 STORE_ROOT_ENV = "GUANLAN_ORCH_STORE_ROOT"
-#: opt-in: refuse the boot instead of booting visibly store-less.
-STRICT_ENV = "GUANLAN_ORCH_STORE_STRICT"
+#: opt-in: refuse the boot instead of booting visibly store-less — on EVERY non-``bound``
+#: outcome, **including when the subsystem is absent** (broken ``durable.py``, or this
+#: module itself not importable, which ``server.py`` handles). Re-exported from the leaf
+#: :mod:`guanlan_v2.orch_store_status`, which owns the definition and the full rationale.
 #: stable, greppable operator signal for a data-integrity hard failure.
 CORRUPT_MARKER = "ORCH-STORE-CORRUPT"
 
@@ -108,10 +114,6 @@ PRODUCTION_CELL_NAMESPACES: tuple[str, ...] = tuple(
         | set(REPLAY_STATE_CELL_NAMESPACES)
     )
 )
-
-
-class OrchestrationStoreBootRefused(RuntimeError):
-    """Strict mode (:data:`STRICT_ENV`) refused to boot over a broken durable store."""
 
 
 def orchestration_store_status() -> dict[str, Any]:
@@ -174,9 +176,21 @@ def _shout(level: int, marker: str, message: str) -> None:
     Both, deliberately: the logger is the machine-readable channel an operator's log
     pipeline greps for, and the stderr line survives a process whose logging root was
     never configured (which is exactly the state a boot-time failure can be in).
+
+    Each channel is independently guarded and this function NEVER raises. That matters
+    in exactly one place: ``_degrade`` shouts *before* the strict refusal, so a closed
+    or broken stderr would otherwise replace ``OrchestrationStoreBootRefused`` with an
+    ``OSError``/``ValueError`` — which the call site records as ``failed`` and boots
+    through, silently inverting the operator's strict assertion.
     """
-    _LOG.log(level, "[%s] %s", marker, message)
-    print(f"[guanlan_v2][{marker}] {message}", file=sys.stderr, flush=True)
+    try:
+        _LOG.log(level, "[%s] %s", marker, message)
+    except Exception:  # noqa: BLE001 — a broken log handler must not eat the refusal
+        pass
+    try:
+        print(f"[guanlan_v2][{marker}] {message}", file=sys.stderr, flush=True)
+    except Exception:  # noqa: BLE001 — a closed stderr must not eat the refusal
+        pass
 
 
 def bind_orchestration_stores(
@@ -211,11 +225,8 @@ def bind_orchestration_stores(
         _record.record_status(dict(
             _record.blank_status(), state=state, root=str(resolved_root),
             error_type=type(exc).__name__, error=str(exc), strict=bool(strict)))
-        _shout(level, marker, what)
-        if strict:
-            raise OrchestrationStoreBootRefused(
-                f"{marker}: refusing to boot without a correctly bound orchestration "
-                f"durable store at {resolved_root} ({type(exc).__name__}: {exc})") from exc
+        _shout(level, marker, what)   # guaranteed not to raise (see _shout)
+        _record.refuse_if_strict(bool(strict), marker, exc, f"at {resolved_root}")
         return orchestration_store_status()
 
     # Step 1 — the imports, INSIDE the guard on purpose (see the docstring). This
@@ -229,7 +240,8 @@ def bind_orchestration_stores(
             "unavailable", "ORCH-STORE-UNAVAILABLE", logging.ERROR,
             f"the orchestration durable-store machinery is not importable — this "
             f"process has NO orchestration durable store, but the rest of the server "
-            f"starts normally ({type(exc).__name__}: {exc})", exc)
+            f"starts normally ({type(exc).__name__}: {exc}). Set {STRICT_ENV}=1 to "
+            f"refuse the boot instead.", exc)
 
     # Step 2 — the bind itself. `DurableStoreCorrupt` is safely nameable here.
     try:
@@ -251,8 +263,8 @@ def bind_orchestration_stores(
         return _degrade(
             "failed", "ORCH-STORE-FAILED", logging.ERROR,
             f"binding the orchestration durable store at {resolved_root} failed — this "
-            f"process has NO orchestration durable store ({type(exc).__name__}: {exc})",
-            exc)
+            f"process has NO orchestration durable store ({type(exc).__name__}: {exc}). "
+            f"Set {STRICT_ENV}=1 to refuse the boot instead.", exc)
 
     # Read the ACTUAL sealed values back off the store — never echo the intent.
     namespaces = sorted(stores.cells.allowed_namespaces)

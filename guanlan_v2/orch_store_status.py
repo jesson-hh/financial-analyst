@@ -47,6 +47,9 @@ from __future__ import annotations
 __all__ = [
     "STATES",
     "HEALTHY_STATE",
+    "STRICT_ENV",
+    "OrchestrationStoreBootRefused",
+    "refuse_if_strict",
     "blank_status",
     "record_status",
     "orchestration_store_status",
@@ -60,6 +63,45 @@ __all__ = [
 STATES: tuple[str, ...] = ("not_attempted", "bound", "unavailable", "corrupt", "failed")
 #: the one value that means "everything is fine".
 HEALTHY_STATE = "bound"
+
+#: Opt-in: refuse the boot instead of booting visibly store-less. The flag asserts "I
+#: require a working orchestration durable store in this process", so it refuses on
+#: **every** non-``bound`` outcome — a corrupt journal, a wiring bug, **and including
+#: when the subsystem is absent entirely** (a broken ``durable.py``, or
+#: ``guanlan_v2.orchestration.startup`` itself not importable). A missing package is the
+#: most complete failure of that assertion, not an exemption from it.
+#:
+#: This constant and :class:`OrchestrationStoreBootRefused` live in this leaf precisely
+#: so that ``server.py`` can honour the flag in the branch where the orchestration
+#: package could not be imported at all — the branch that previously fell through and
+#: booted normally under strict.
+STRICT_ENV = "GUANLAN_ORCH_STORE_STRICT"
+
+
+class OrchestrationStoreBootRefused(RuntimeError):
+    """Strict mode (:data:`STRICT_ENV`) refused to boot without a bound durable store.
+
+    The **only** exception any part of the startup binding is allowed to let escape into
+    ``create_app()``. Defined here rather than in
+    ``guanlan_v2.orchestration.startup`` so it stays importable when that module is not.
+    """
+
+
+def refuse_if_strict(strict: bool, marker: str, exc: BaseException | None = None,
+                     detail: str = "") -> None:
+    """Raise :class:`OrchestrationStoreBootRefused` when ``strict``; else do nothing.
+
+    The single definition of the refusal, shared by both callers — ``startup``'s
+    ``_degrade`` and ``server.py``'s package-not-importable branch. Having one function
+    is the point: the two paths previously produced the same recorded ``unavailable``
+    state with *opposite* boot behaviour under the same flag.
+    """
+    if not strict:
+        return None
+    cause = f" ({type(exc).__name__}: {exc})" if exc is not None else ""
+    raise OrchestrationStoreBootRefused(
+        f"{marker}: refusing to boot without a correctly bound orchestration durable "
+        f"store{(' ' + detail) if detail else ''}{cause}") from exc
 
 
 def blank_status() -> dict:
