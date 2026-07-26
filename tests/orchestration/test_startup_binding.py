@@ -762,6 +762,103 @@ def test_a_dead_stderr_does_not_break_the_non_strict_degradation(tmp_path, monke
 
 
 # --------------------------------------------------------------------------- #
+# Round 4 — the third path, and honest `strict` stamping everywhere            #
+# --------------------------------------------------------------------------- #
+def test_the_prologue_is_guarded_too(tmp_path):
+    """An unresolvable root must degrade HERE, not escape to the call site.
+
+    Resolving ``resolved_root`` was the only work left outside every try, so a ``root=``
+    that is not path-like raised ``TypeError`` straight out of ``bind_orchestration_stores``
+    into ``server.py``'s defence-in-depth branch — which recorded ``failed`` without the
+    strict flag and booted through.
+    """
+    status = st.bind_orchestration_stores(root=object())  # must NOT raise
+    assert status["state"] == "failed"
+    assert status["error_type"] == "TypeError"
+    assert status["root"] == "<unresolved store root>"
+    assert durable_mod.process_durable_stores() is None
+
+
+def test_the_prologue_honours_strict(monkeypatch):
+    monkeypatch.setenv(st.STRICT_ENV, "1")
+    with pytest.raises(rec.OrchestrationStoreBootRefused):
+        st.bind_orchestration_stores(root=object())
+    assert rec.orchestration_store_state() == "failed"
+    assert rec.orchestration_store_status()["strict"] is True
+
+
+@pytest.mark.parametrize("scenario", ["corrupt", "failed", "unavailable", "prologue"])
+def test_every_recorded_state_stamps_the_real_strict_flag(tmp_path, monkeypatch,
+                                                          scenario):
+    """A record saying ``strict: false`` while the flag is on is a small lie."""
+    monkeypatch.setenv(st.STRICT_ENV, "1")
+    if scenario == "corrupt":
+        target = _corrupt_root(tmp_path)
+    elif scenario == "unavailable":
+        _break_import(monkeypatch, _DURABLE, ImportError("broken"))
+        target = tmp_path
+    elif scenario == "prologue":
+        target = object()
+    else:
+        monkeypatch.setattr(st, "_bind_process_stores",
+                            lambda **_k: (_ for _ in ()).throw(RuntimeError("boom")))
+        target = tmp_path
+    with pytest.raises(rec.OrchestrationStoreBootRefused):
+        st.bind_orchestration_stores(root=target)
+    recorded = rec.orchestration_store_status()
+    assert recorded["strict"] is True, recorded
+    assert recorded["state"] != "bound"
+
+
+def test_server_defence_in_depth_branch_also_honours_strict():
+    """The third path: ``server.py``'s catch-all recorded ``failed`` and booted anyway.
+
+    Same divergence as round 3, one layer down — ``startup._degrade("failed")`` refused
+    while this branch's ``failed`` booted, under the same flag.
+    """
+    src = (_REPO_ROOT / "guanlan_v2" / "server.py").read_text(encoding="utf-8")
+    refusal = "except _orch_status.OrchestrationStoreBootRefused:"
+    branch = src.split(refusal, 1)[1]
+    assert 'state="failed", strict=_strict' in branch, (
+        "the catch-all must stamp the operator's real flag, not a hardcoded false")
+    assert 'refuse_if_strict(_strict, "ORCH-STORE-FAILED"' in branch, (
+        "the catch-all must honour GUANLAN_ORCH_STORE_STRICT like every other path")
+
+
+def test_all_refusal_paths_go_through_the_one_leaf_function():
+    """Structural: no path may hand-roll its own refusal (that is how they diverged)."""
+    server_src = (_REPO_ROOT / "guanlan_v2" / "server.py").read_text(encoding="utf-8")
+    startup_src = (_REPO_ROOT / "guanlan_v2" / "orchestration"
+                   / "startup.py").read_text(encoding="utf-8")
+    for name, src in (("server.py", server_src), ("startup.py", startup_src)):
+        assert "raise OrchestrationStoreBootRefused" not in src, (
+            f"{name} constructs the refusal itself — it must call "
+            "orch_store_status.refuse_if_strict, the single definition")
+    assert server_src.count("refuse_if_strict(") == 2, "both server.py branches"
+    assert startup_src.count("refuse_if_strict(") == 1, "the one _degrade call"
+
+
+def test_no_stranded_doc_comment_above_the_corrupt_marker():
+    """Minor 2: ``STRICT_ENV`` moved to the leaf but its ``#:`` block stayed behind.
+
+    Adjacent ``#:`` blocks merge, so the orphan read as documentation for
+    ``CORRUPT_MARKER``. The canonical rationale lives in the leaf.
+    """
+    lines = (_REPO_ROOT / "guanlan_v2" / "orchestration"
+             / "startup.py").read_text(encoding="utf-8").splitlines()
+    idx = next(i for i, ln in enumerate(lines) if ln.startswith("CORRUPT_MARKER"))
+    doc = []
+    for ln in reversed(lines[:idx]):
+        if not ln.startswith("#:"):
+            break
+        doc.append(ln)
+    assert len(doc) == 1, f"CORRUPT_MARKER's #: block absorbed a stranded one: {doc}"
+    assert "greppable" in doc[0]
+    joined = "\n".join(doc)
+    assert "strict" not in joined.lower() and "STRICT_ENV" not in joined
+
+
+# --------------------------------------------------------------------------- #
 # The single call site in server.py                                            #
 # --------------------------------------------------------------------------- #
 def test_server_binds_through_the_production_helper_only():

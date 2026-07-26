@@ -433,12 +433,18 @@ def create_app():
         except _orch_status.OrchestrationStoreBootRefused:
             raise                       # strict 模式:唯一被允许拒启动的路径
         except Exception as _e:  # noqa: BLE001 — 防御纵深:startup 自身出 bug 也不许崩启动
+            # strict=_strict 必须如实盖章:记录里写 "strict": false 而开关其实是开的,
+            # 就是一句小谎 —— 本项目不出这种货。三条支路(startup 内 corrupt/failed/
+            # unavailable、server 的 unavailable、以及这条兜底 failed)自此**全部**
+            # 走叶子里同一个 refuse_if_strict,不存在「记同一个 state 却有相反启动行为」。
             _orch_status.record_status(dict(
-                _orch_status.blank_status(), state="failed",
+                _orch_status.blank_status(), state="failed", strict=_strict,
                 error_type=type(_e).__name__, error=str(_e)))
             print(f"[guanlan_v2][ORCH-STORE-FAILED] orchestration durable store bind "
                   f"raised unexpectedly — this process has NO orchestration store "
-                  f"({type(_e).__name__}: {_e})", file=sys.stderr)
+                  f"({type(_e).__name__}: {_e}). Set {_orch_status.STRICT_ENV}=1 to "
+                  f"refuse the boot instead.", file=sys.stderr)
+            _orch_status.refuse_if_strict(_strict, "ORCH-STORE-FAILED", _e)
 
     @app.get("/orchestration/store_status")
     def _orchestration_store_status():  # noqa: ANN202 — 只读运维探针

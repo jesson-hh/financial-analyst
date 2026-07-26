@@ -89,10 +89,11 @@ _LOG = logging.getLogger(__name__)
 
 #: store-root override (the 9998 verification runs point this at a temp dir).
 STORE_ROOT_ENV = "GUANLAN_ORCH_STORE_ROOT"
-#: opt-in: refuse the boot instead of booting visibly store-less — on EVERY non-``bound``
-#: outcome, **including when the subsystem is absent** (broken ``durable.py``, or this
-#: module itself not importable, which ``server.py`` handles). Re-exported from the leaf
-#: :mod:`guanlan_v2.orch_store_status`, which owns the definition and the full rationale.
+# NOTE: ``STRICT_ENV`` is imported above from :mod:`guanlan_v2.orch_store_status`, which
+# owns its definition AND its rationale (it refuses on every non-``bound`` outcome,
+# including when the subsystem is absent). Deliberately no ``#:`` block here — a stranded
+# one would merge into the next constant's docs.
+
 #: stable, greppable operator signal for a data-integrity hard failure.
 CORRUPT_MARKER = "ORCH-STORE-CORRUPT"
 
@@ -218,8 +219,11 @@ def bind_orchestration_stores(
     """
     if strict is None:
         strict = os.environ.get(STRICT_ENV) == "1"
-    resolved_root = Path(root) if root is not None else Path(
-        os.environ.get(STORE_ROOT_ENV) or _DEFAULT_ROOT)
+    # Placeholder so `_degrade` below can always stamp a root, even if resolving one is
+    # what failed. `strict` is resolved FIRST and unconditionally, so every recorded
+    # state carries the operator's real flag — a record claiming `strict: false` while
+    # the flag is on would be a small lie, and this project does not ship those.
+    resolved_root: Any = "<unresolved store root>"
 
     def _degrade(state: str, marker: str, level: int, what: str, exc: BaseException):
         _record.record_status(dict(
@@ -228,6 +232,20 @@ def bind_orchestration_stores(
         _shout(level, marker, what)   # guaranteed not to raise (see _shout)
         _record.refuse_if_strict(bool(strict), marker, exc, f"at {resolved_root}")
         return orchestration_store_status()
+
+    # Step 0 — resolving the root is guarded too (round-4 Minor 1). It is the only work
+    # that used to sit outside every try, so a `root=` that is not path-like raised
+    # TypeError straight out of this function and into the call site's defence-in-depth
+    # branch, which recorded `failed` WITHOUT the strict flag and booted through.
+    try:
+        resolved_root = Path(root) if root is not None else Path(
+            os.environ.get(STORE_ROOT_ENV) or _DEFAULT_ROOT)
+    except Exception as exc:  # noqa: BLE001 — an unusable root is a recorded failure
+        return _degrade(
+            "failed", "ORCH-STORE-FAILED", logging.ERROR,
+            f"the orchestration durable-store root could not be resolved — this process "
+            f"has NO orchestration durable store ({type(exc).__name__}: {exc}). "
+            f"Set {STRICT_ENV}=1 to refuse the boot instead.", exc)
 
     # Step 1 — the imports, INSIDE the guard on purpose (see the docstring). This
     # module's own top-level imports do NOT pull in `durable`, so a broken durable.py
