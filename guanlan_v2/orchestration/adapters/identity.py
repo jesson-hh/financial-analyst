@@ -145,6 +145,7 @@ __all__ = [
     "OperatorNotAllowed",
     "ConfigOperatorVerifier",
     "load_operator_allowlist",
+    "declared_operator_actor",
 ]
 
 #: the house-convention home of the declaration (repo root / config / orchestration).
@@ -315,6 +316,47 @@ def load_operator_allowlist(path: Path | str | None = None) -> tuple[str, ...]:
             f"the operator declaration at {target} declares no operators — an empty "
             "list means nobody can approve, never everybody (fail closed)")
     return tuple(ids)
+
+
+def declared_operator_actor(path: Path | str | None = None) -> str:
+    """The ONE declared operator id — the server-side actor material (R22).
+
+    ``PlanApprovalCoordinator.decide`` needs *actor material* to hand :meth:`
+    ConfigOperatorVerifier.verify`, and until R22 nothing in the repository produced
+    any: the console router's ``plan_approval_actor`` was never supplied, so
+    ``console/api.py``'s ``_resolve_actor(None)`` handed ``None`` to the verifier and
+    every decision refused. This function is that missing producer, and the SAME
+    declaration is both its source and the verifier's authority — so an id returned
+    here is, by construction, an id ``verify`` accepts.
+
+    Read this limitation as literally as the module docstring's: the console has no
+    authentication, so binding it to this value means **any local caller of the
+    console decide endpoint approves as the declared operator**. That is the honest
+    description of a single-user local workbench with a plaintext allowlist; it adds
+    no weakness the verifier did not already have, and it invents no identity.
+
+    Fail-closed on ambiguity: a declaration naming more than one operator raises
+    :class:`OperatorAllowlistError` rather than picking one, because the server has
+    no way to know which human is at the console and a guess would stamp a durable
+    approval with the wrong name. An installation with two operators must supply the
+    actor explicitly per decision (the coordinator's ``actor=`` argument), not have
+    one chosen for it. A missing / malformed / empty declaration raises for the same
+    reasons :func:`load_operator_allowlist` does.
+
+    Pass it to a console router as the *callable* itself rather than its value
+    (``plan_approval_actor=declared_operator_actor``): ``_resolve_actor`` calls a
+    callable, so the declaration in force at DECISION time is the one that is used —
+    the same re-read-per-use property :meth:`ConfigOperatorVerifier.verify` has.
+    """
+    declared = load_operator_allowlist(path)
+    if len(declared) != 1:
+        target = Path(path) if path is not None else DEFAULT_OPERATOR_ALLOWLIST_PATH
+        raise OperatorAllowlistError(
+            f"the operator declaration at {target} names {len(declared)} operators, "
+            "so the server-side actor is ambiguous: it cannot know which human is at "
+            "the console. Declare exactly one operator, or pass the actor explicitly "
+            "to every decide/issue/revoke call (never a guess).")
+    return declared[0]
 
 
 # --------------------------------------------------------------------------- #
