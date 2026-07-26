@@ -1,0 +1,9 @@
+{
+  "schema_version": "1",
+  "operators": [
+    {
+      "actor_id": "human:ops",
+      "note": "The single local operator of this single-user workbench. Read guanlan_v2/orchestration/adapters/identity.py before adding a row: membership on this list IS plan-approval authority, and this file proves list membership only - it does not authenticate a human, proves no credential, and offers no protection against anyone who can write this file. Never put a secret here; the allowlist is a declaration, not a credential."
+    }
+  ]
+}
