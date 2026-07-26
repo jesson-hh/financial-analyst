@@ -825,17 +825,85 @@ def test_server_defence_in_depth_branch_also_honours_strict():
         "the catch-all must honour GUANLAN_ORCH_STORE_STRICT like every other path")
 
 
+#: A CONSTRUCTION of the refusal — ``OrchestrationStoreBootRefused(...)``, bare or
+#: attribute-qualified. Deliberately keyed on the ``(``: the legitimate
+#: ``except _orch_status.OrchestrationStoreBootRefused:`` and the plain ``import`` /
+#: ``__all__`` / docstring mentions carry no paren and stay green.
+_REFUSAL_CONSTRUCTION_RE = re.compile(
+    r"(?:[A-Za-z_][A-Za-z0-9_]*\s*\.\s*)?OrchestrationStoreBootRefused\s*\(")
+
+
+def _hand_rolled_refusals(src: str) -> list[str]:
+    """Lines that CONSTRUCT the refusal instead of delegating to ``refuse_if_strict``.
+
+    The ``class OrchestrationStoreBootRefused(RuntimeError):`` definition itself is a
+    declaration, not a construction, and is excluded (it exists exactly once, in the leaf).
+    """
+    return [f"{i}: {ln.strip()}" for i, ln in enumerate(src.splitlines(), 1)
+            if _REFUSAL_CONSTRUCTION_RE.search(ln)
+            and not ln.strip().startswith("class ")]
+
+
+def test_the_hand_rolled_refusal_detector_actually_detects(tmp_path):
+    """Positive control — the bar below must not be able to pass vacuously.
+
+    The earlier version asserted only ``"raise OrchestrationStoreBootRefused" not in
+    src``. In ``startup.py`` the class is imported bare so that bit; in ``server.py`` it
+    is only reachable as ``_orch_status.OrchestrationStoreBootRefused``, so a hand-rolled
+    qualified construction would have slipped past the substring check **and** left
+    ``refuse_if_strict(`` at 2, passing the count assertion too. Both spellings must be
+    caught, and the legitimate mentions must not be.
+    """
+    caught = (
+        'raise OrchestrationStoreBootRefused("bare")',
+        '            raise _orch_status.OrchestrationStoreBootRefused("qualified")',
+        "raise rec.OrchestrationStoreBootRefused (spaced)",
+        "exc = OrchestrationStoreBootRefused(msg)",
+    )
+    for poison in caught:
+        assert _hand_rolled_refusals(poison), f"detector missed: {poison!r}"
+    # the bare-name substring check ALONE would have missed the qualified spelling —
+    # this is the hole being closed, asserted rather than described.
+    assert "raise OrchestrationStoreBootRefused" not in caught[1]
+
+    allowed = (
+        "        except _orch_status.OrchestrationStoreBootRefused:",
+        "    OrchestrationStoreBootRefused,",
+        '    "OrchestrationStoreBootRefused",',
+        "    raises :class:`OrchestrationStoreBootRefused` so the boot fails",
+        "except (st.OrchestrationStoreBootRefused, ValueError):",
+        "class OrchestrationStoreBootRefused(RuntimeError):",  # the declaration itself
+    )
+    for benign in allowed:
+        assert not _hand_rolled_refusals(benign), f"detector false-positived: {benign!r}"
+
+
 def test_all_refusal_paths_go_through_the_one_leaf_function():
-    """Structural: no path may hand-roll its own refusal (that is how they diverged)."""
+    """Structural: no path may hand-roll its own refusal (that is how they diverged).
+
+    The divergence has now originated **twice** in this one file — round 3 (the
+    package-absent branch) and round 4 (the defence-in-depth catch-all) — so the guard
+    matters more than the two fixes it protects.
+    """
     server_src = (_REPO_ROOT / "guanlan_v2" / "server.py").read_text(encoding="utf-8")
     startup_src = (_REPO_ROOT / "guanlan_v2" / "orchestration"
                    / "startup.py").read_text(encoding="utf-8")
+    leaf_src = (_REPO_ROOT / "guanlan_v2" / "orch_store_status.py").read_text(
+        encoding="utf-8")
+
     for name, src in (("server.py", server_src), ("startup.py", startup_src)):
         assert "raise OrchestrationStoreBootRefused" not in src, (
             f"{name} constructs the refusal itself — it must call "
             "orch_store_status.refuse_if_strict, the single definition")
+        hand_rolled = _hand_rolled_refusals(src)
+        assert not hand_rolled, (
+            f"{name} CONSTRUCTS OrchestrationStoreBootRefused (bare or qualified) at "
+            f"{hand_rolled} — every refusal must delegate to "
+            "orch_store_status.refuse_if_strict so the paths cannot diverge again")
     assert server_src.count("refuse_if_strict(") == 2, "both server.py branches"
     assert startup_src.count("refuse_if_strict(") == 1, "the one _degrade call"
+    # …and the leaf is where the one construction lives.
+    assert len(_hand_rolled_refusals(leaf_src)) == 1, _hand_rolled_refusals(leaf_src)
 
 
 def test_no_stranded_doc_comment_above_the_corrupt_marker():
