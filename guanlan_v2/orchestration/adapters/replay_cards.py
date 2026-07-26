@@ -201,6 +201,13 @@ class ReplayApprovalCards:
     the digests ``_require_approval`` looks up. Omit it and the coordinator falls
     back to its synthetic defaults, which nothing can ever approve — a loud,
     fail-closed mistake rather than a silent one.
+
+    ``already_decided`` maps a lane to the terminal decision value (``"approved"`` /
+    ``"rejected"``) that was ALREADY on the journal when
+    :func:`register_replay_approval_cards` ran, i.e. the lanes it deliberately did
+    not re-register (a decided candidate can never be re-carded — see that
+    function's docstring). Empty on a first call. A caller that wants to know
+    whether a human still has to act reads :meth:`awaiting_human`.
     """
 
     request_id: str
@@ -208,12 +215,23 @@ class ReplayApprovalCards:
     execution_config_digest: str
     plan_candidate_digest: str
     cards: Mapping[str, PendingPlanApproval]
+    already_decided: Mapping[str, str] = dataclasses.field(
+        default_factory=lambda: MappingProxyType({}))
 
     def candidate_plan_digest(self, lane: str) -> str:
         """The digest the human decided for ``lane`` (== the admission candidate)."""
         if lane not in self.cards:
             raise ReplayLaneUnknown(f"no card was registered for lane {lane!r}")
         return self.cards[lane].candidate_plan_digest
+
+    def awaiting_human(self) -> tuple[str, ...]:
+        """The lanes still pending a decision, in lane order (``()`` ⇒ all decided).
+
+        Honest about direction only: a lane absent from this tuple was *decided*,
+        which includes ``rejected``. Read ``already_decided`` for the verdict; the
+        coordinator's own gate is what actually refuses a rejected lane.
+        """
+        return tuple(l for l in REPLAY_LANES if l not in self.already_decided)
 
     def coordinator_kwargs(self) -> dict[str, str]:
         """The two ``ProductionReplayPlanCoordinator`` constructor overrides."""
@@ -378,11 +396,34 @@ def register_replay_approval_cards(
     rather than a comment) and the resolved ``DecisionSchedule``. Both lanes must be
     supplied together, each keyed by its own lane name.
 
-    Registration is idempotent by ``(request_id, candidate_plan_digest)``: calling
-    twice with the same lane plans appends no journal row and returns equal cards; a
-    semantically different card for an already-registered identity raises
-    ``ApprovalDecisionConflict`` from the coordinator (never a silent overwrite of
-    what a reviewer is currently looking at).
+    **Re-callable, with a precise idempotence contract** (the launcher will call
+    this on every replay start and after every restart, so the boundaries matter):
+
+    * *lane still pending* — re-registering the semantically identical card appends
+      no journal row and returns the stored card (``register_pending``'s own
+      identity rule);
+    * *lane still pending, but the card content differs* — refused **before** any
+      lane is registered, by a pre-flight comparison of semantic digests, so a
+      partial write cannot happen (see the atomicity note below);
+    * *lane already DECIDED* — the lane is **skipped**, not re-registered, and named
+      in ``already_decided``. ``register_pending`` raises ``ApprovalDecisionConflict``
+      for a decided key (``approval.py:467-471``), so re-registering would crash the
+      caller exactly when a human had already done the right thing. The decision is
+      the authority; the card is only its request form. Honest limit: a decided card
+      is consumed out of the pending fold, so the non-digest-bound framing
+      (``planner_rationale``, the baseline choice) of what the human actually read
+      can no longer be compared — everything the *digest* binds (request, whole
+      executable draft, ContextSnapshot) is identical by construction, because the
+      digest is re-derived and checked above.
+
+    **Atomicity is build-time and pre-flight, not transactional.** Every lane is
+    built and pre-flight-checked before ANY lane is registered, so a refusal leaves
+    the journal untouched. It is not a transaction: `register_pending` fsyncs per
+    call and this module cannot roll one back (``approval.py`` is review-sealed and
+    the journal is append-only), so an I/O failure part-way through the registration
+    loop can still leave the first lane's card pending alone. That state stays
+    fail-closed — the unregistered lane has no decision, so the run refuses — and a
+    re-call heals it, because the already-pending lane is idempotent.
 
     Returns everything the caller needs to build the run:
     ``coordinator_kwargs()`` for ``ProductionReplayPlanCoordinator`` and
@@ -414,6 +455,24 @@ def register_replay_approval_cards(
             f"{getattr(execution_config, 'schedule_digest', None)!r} but the supplied "
             f"schedule is {schedule.content_digest!r}; the 口径 a reviewer authorizes "
             "must be the one bound to the schedule that will actually be walked")
+    # …and the REQUEST must bind that same schedule. Without this, a request bound to
+    # schedule A could be carded against schedule B and still pass the config check
+    # above (the config would simply be B's) — the drift this door exists to catch.
+    # ``shadow.wrap_proposal_as_intent`` requires the ref anyway, so an absent one is
+    # refused here rather than three layers deeper, mid-run.
+    request_ref = getattr(request, "decision_schedule_ref", None)
+    if request_ref is None:
+        raise ReplayCardRefused(
+            "the request binds no decision_schedule_ref; a replay request must name "
+            "the registered schedule it will be walked against (the shadow envelope "
+            "requires it), so there is nothing to card it against")
+    if (request_ref.id, request_ref.version, request_ref.content_digest) != (
+            schedule.id, schedule.version, schedule.content_digest):
+        raise ReplayCardRefused(
+            f"the request binds schedule {request_ref.id}@{request_ref.version} "
+            f"({request_ref.content_digest}) but the supplied schedule is "
+            f"{schedule.id}@{schedule.version} ({schedule.content_digest}); a card "
+            "must authorize the schedule the request will actually run")
 
     # imported here (not at module import time) purely to keep this module's import
     # graph free of the adapters router; the derivation itself is the router's.
@@ -428,19 +487,52 @@ def register_replay_approval_cards(
 
     at = requested_at if requested_at is not None else coordinator.now()
 
-    # BUILD both (every honesty precondition runs here), THEN register both. A lane
-    # refused halfway would otherwise leave one lane's card pending on the journal —
-    # a human could decide it and believe the run was authorized. Building is
-    # side-effecting only in the content-addressed, idempotent payload store, where an
-    # orphan PlanDiff nobody references is inert.
+    # ── phase 1: BUILD every lane. Each honesty precondition runs here, so a bad
+    # lane refuses before the journal is touched at all.
+    #
+    # Building does write: the PlanDiff `put` necessarily precedes the card, because
+    # the card needs the ref the put returns — so a later refusal can orphan a diff
+    # payload. That orphan is inert, not a leak: the payload store is
+    # content-addressed and idempotent, so the row references nothing, is referenced
+    # by nothing, is reachable only by recomputing its own content digest, and a
+    # retry of the identical build reuses it rather than adding a second.
     built: dict[str, PendingPlanApproval] = {
         lane: build_replay_lane_card(
             plan=lane_plans[lane], request=request, payloads=payloads,
             registry_digest=registry_digest, requested_at=at)
         for lane in REPLAY_LANES                   # deterministic order
     }
+
+    # ── phase 2: PRE-FLIGHT the journal for both lanes at once, so the two states
+    # register_pending can refuse (a decided key, a semantically different pending
+    # card) are known before the first append rather than discovered halfway.
+    stored_pending = {
+        (c.request_id, c.candidate_plan_digest): c for c in coordinator.list_pending()
+    }
+    decided: dict[str, str] = {}
+    drifted: list[str] = []
+    for lane in REPLAY_LANES:
+        digest = lane_plans[lane].candidate_plan_digest
+        prior = coordinator.load_decision(request_id, digest)
+        if prior is not None:
+            decided[lane] = prior.decision.value
+            continue
+        stored = stored_pending.get((request_id, digest))
+        if stored is not None and stored.semantic_digest() != built[lane].semantic_digest():
+            drifted.append(lane)
+    if drifted:
+        raise ReplayCardRefused(
+            f"a semantically different pending card already exists for lane(s) "
+            f"{sorted(drifted)} under the same identity; refusing before ANY lane is "
+            "registered rather than half-writing, and never silently replacing the "
+            "card a reviewer may be reading right now")
+
+    # ── phase 3: register only the lanes that are still undecided.
     cards: dict[str, PendingPlanApproval] = {}
     for lane in REPLAY_LANES:
+        if lane in decided:
+            cards[lane] = built[lane]      # the decision is the authority; see docstring
+            continue
         cards[lane] = coordinator.register_pending(
             built[lane],
             idempotency_key=_register_idempotency_key(request_id, lane_plans[lane]))
@@ -450,4 +542,5 @@ def register_replay_approval_cards(
         execution_config_digest=execution_config_digest,
         plan_candidate_digest=plan_candidate_digest,
         cards=MappingProxyType(cards),
+        already_decided=MappingProxyType(decided),
     )

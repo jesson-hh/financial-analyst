@@ -431,9 +431,12 @@ def test_an_unknown_lane_and_a_missing_lane_are_refused(tmp_path):
 
 
 def test_a_refused_second_lane_leaves_no_half_registered_card(tmp_path):
-    """Atomic with respect to the journal: if either lane cannot be carded, NEITHER
-    is registered. A lone pending card would let a human decide one lane and believe
-    the run was authorized."""
+    """BUILD-time atomicity: if either lane fails a card precondition, NEITHER lane
+    is registered (all lanes are built before any is registered). A lone pending card
+    would let a human decide one lane and believe the run was authorized. The
+    register-time half of this is covered by
+    ``test_a_drifted_pending_card_refuses_before_any_lane_is_registered``; a mid-loop
+    I/O failure is NOT covered and is documented as such on the function."""
     world = _world(tmp_path)
     coord = _coord(world, tmp_path)
     sch, _cal, _s, _e = _three_point_env()
@@ -528,6 +531,122 @@ def test_registration_is_idempotent(tmp_path):
     for lane in REPLAY_LANES:
         assert first.candidate_plan_digest(lane) == second.candidate_plan_digest(lane)
         assert first.cards[lane].semantic_digest() == second.cards[lane].semantic_digest()
+
+
+def test_re_registering_after_a_decision_does_not_crash_and_names_the_lane(tmp_path):
+    """The launcher calls this on every start and after every restart. Once a human
+    has decided a lane, ``register_pending`` would raise ``ApprovalDecisionConflict``
+    — i.e. it would crash precisely when someone had done the right thing. The
+    decided lane is skipped, named in ``already_decided``, and the returned digests
+    are unchanged, so a restart re-establishes the run instead of dying."""
+    world = _world(tmp_path)
+    coord = _coord(world, tmp_path)
+    first = _register(world, coord)
+    _decide_all(coord, first)
+    journal = tmp_path / "plan_approvals.jsonl"
+    before = journal.read_bytes()
+
+    # the hazard being avoided, pinned directly: re-registering a decided card is a
+    # hard conflict, so a naive re-call would crash the launcher on restart.
+    with pytest.raises(ApprovalDecisionConflict):
+        coord.register_pending(first.cards["bootstrap"], idempotency_key="naive")
+
+    again = _register(world, coord)                      # the restart call
+    assert journal.read_bytes() == before, "a decided lane must append nothing"
+    assert dict(again.already_decided) == {
+        "bootstrap": "approved", "main": "approved"}
+    assert again.awaiting_human() == ()
+    for lane in REPLAY_LANES:
+        assert again.candidate_plan_digest(lane) == first.candidate_plan_digest(lane)
+    # …and the re-established identities still authorize a real run.
+    _replay, bindings, (sch, start, end), _runner = _replay_coordinator(
+        world, approval=coord, overrides=again.coordinator_kwargs())
+    state = run_interval_replay(
+        request=world.request, schedule=sch, execution_config=_exec_config(sch),
+        interval_start=start, interval_end=end, bindings=bindings)
+    assert state.completed_points == 3
+
+
+def test_a_mixed_decided_and_pending_state_registers_only_the_pending_lane(tmp_path):
+    """The half-decided state the reviewer named: one lane decided, one not. The
+    pending lane is (idempotently) registered, the decided one is reported."""
+    world = _world(tmp_path)
+    coord = _coord(world, tmp_path)
+    cards = _register(world, coord)
+    coord.decide(
+        request_id=cards.request_id,
+        candidate_plan_digest=cards.candidate_plan_digest("bootstrap"),
+        decision=ApprovalDecision.APPROVED, actor=declared_operator_actor(),
+        reason="only the bootstrap lane so far", idempotency_key="decide-partial")
+
+    again = _register(world, coord)
+    assert dict(again.already_decided) == {"bootstrap": "approved"}
+    assert again.awaiting_human() == ("main",)
+    assert [c.candidate_plan_digest for c in coord.list_pending()] == [
+        cards.candidate_plan_digest("main")]
+
+
+def test_a_drifted_pending_card_refuses_before_any_lane_is_registered(tmp_path):
+    """The register-time half-write the build-time guard does NOT cover: a
+    semantically different card already pending for the second lane. The pre-flight
+    catches it, so the first lane is not written either."""
+    world = _world(tmp_path)
+    coord = _coord(world, tmp_path)
+    sch, _cal, _s, _e = _three_point_env()
+    # seed ONLY the main lane, with a different (non-digest-bound) framing.
+    drifted_plan = dataclasses.replace(
+        world.plans["main"], planner_rationale="an earlier, different rationale")
+    coord.register_pending(
+        build_replay_lane_card(
+            plan=drifted_plan, request=world.request, payloads=world.payloads,
+            registry_digest=world.phase7_digest, requested_at=world.env.clock.now()),
+        idempotency_key="seed-main")
+    before = (tmp_path / "plan_approvals.jsonl").read_bytes()
+
+    with pytest.raises(ReplayCardRefused) as exc:
+        register_replay_approval_cards(
+            coordinator=coord, request=world.request, schedule=sch,
+            execution_config=_exec_config(sch), lane_plans=world.plans,
+            payloads=world.payloads, registry_digest=world.phase7_digest)
+    assert "semantically different" in str(exc.value)
+    assert (tmp_path / "plan_approvals.jsonl").read_bytes() == before
+    # the bootstrap lane was NOT half-written.
+    assert [c.candidate_plan_digest for c in coord.list_pending()] == [
+        world.plans["main"].candidate_plan_digest]
+
+
+def test_a_request_bound_to_another_schedule_is_refused(tmp_path):
+    """The 口径-drift door must also check the REQUEST's schedule ref, not only the
+    execution config's — otherwise a request bound to schedule A cards cleanly
+    against schedule B whose config simply names B."""
+    world = _world(tmp_path)
+    coord = _coord(world, tmp_path)
+    sch, _cal, _s, _e = _three_point_env()
+    other = sch.model_copy(update={"id": "other.schedule"})
+    with pytest.raises(ReplayCardRefused) as exc:
+        register_replay_approval_cards(
+            coordinator=coord, request=world.request, schedule=other,
+            execution_config=_exec_config(other), lane_plans=world.plans,
+            payloads=world.payloads, registry_digest=world.phase7_digest)
+    assert "the request binds schedule" in str(exc.value)
+    assert coord.list_pending() == ()
+
+
+def test_a_request_with_no_schedule_ref_is_refused(tmp_path):
+    world = _world(tmp_path)
+    coord = _coord(world, tmp_path)
+    sch, _cal, _s, _e = _three_point_env()
+    unbound = OrchestrationRequest(
+        request_id=REQUEST_ID, goal=world.request.goal, workflow="orchestrate_only",
+        fallback_preset_id=e2e.RESEARCH_BASELINE,
+        approval_policy=ApprovalPolicy.REQUIRED)
+    with pytest.raises(ReplayCardRefused) as exc:
+        register_replay_approval_cards(
+            coordinator=coord, request=unbound, schedule=sch,
+            execution_config=_exec_config(sch), lane_plans=world.plans,
+            payloads=world.payloads, registry_digest=world.phase7_digest)
+    assert "decision_schedule_ref" in str(exc.value)
+    assert coord.list_pending() == ()
 
 
 def test_a_semantically_different_recard_conflicts(tmp_path):
@@ -750,15 +869,37 @@ def test_replay_cards_never_self_approves():
 
     import guanlan_v2.orchestration.adapters.replay_cards as mod
 
+    banned = ("decide", "register_and_try_lease", "freeze_and_admit_candidate",
+              "record_approval", "admit_after_approval", "issue_lease")
     tree = ast.parse(inspect.getsource(mod))
     called = {
         node.func.attr for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     }
-    for banned in ("decide", "register_and_try_lease", "freeze_and_admit_candidate",
-                   "record_approval", "admit_after_approval", "issue_lease"):
-        assert banned not in called, f"the sealer must never call {banned}()"
+    for name in banned:
+        assert name not in called, f"the sealer must never call {name}()"
     assert "register_pending" in called
+
+    # …and an attribute scan alone would miss ``getattr(coord, "decide")()``, so every
+    # NON-docstring string literal is checked too: a banned name can be neither called
+    # directly nor smuggled through a dynamic lookup.
+    docstrings = {
+        id(node.body[0].value) for node in ast.walk(tree)
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef))
+        and node.body and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+        and isinstance(node.body[0].value.value, str)
+    }
+    literals = [
+        node.value for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        and id(node) not in docstrings
+    ]
+    for name in banned:
+        assert name not in literals, (
+            f"a bare {name!r} string literal could feed a dynamic lookup — the sealer "
+            "registers a pending card and nothing else")
     src = inspect.getsource(mod)
     assert "ApprovalDecision.APPROVED" not in src
     assert "ApprovalPolicy.AUTO" not in src or "refus" in src.lower()
