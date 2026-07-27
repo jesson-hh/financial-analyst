@@ -15,10 +15,12 @@
   ];
   // ── 桌面壳分支 ────────────────────────────────────────────────────
   // 顶栏被八个页面共用,浏览器里也吃这一份。所以这段必须条件化:浏览器里
-  // GL_DESKTOP 与 pywebview 都不存在,glDesktopApi() 返回 null,一切照旧。
-  // 两个信号取其一:GL_DESKTOP 由壳在 loaded 时注入(可移植,但对 parse 时
-  // 执行的本脚本有竞态);window.pywebview 由 pywebview 自己注入(无竞态)。
-  // 都只在点击那一刻读,所以竞态实际不成立,两者并存只为将来换壳。
+  // window.pywebview 不存在,glDesktopApi() 返回 null,一切照旧。
+  // 唯一信号是 window.pywebview.api.open_window 是否是一个真的可调用函数 ——
+  // 这正是这条分支真正需要的东西(一座能开窗的桥),不是"看起来像桌面"就够;
+  // 只在点击那一刻读,与 pywebview 自己注入 window.pywebview 的时机没有竞态。
+  // shell.py 另外会在 loaded 时注入 window.GL_DESKTOP,那是给未来换壳用的
+  // 可移植性标记 —— 本文件刻意不读它:没有真桥撑着,一个标记开不了窗。
   function glDesktopApi() {
     var api = window.pywebview && window.pywebview.api;
     if (!api || typeof api.open_window !== 'function') return null;

@@ -20,10 +20,22 @@ def test_embed_guard_is_still_the_very_first_thing():
 
 
 def test_new_window_is_gated_on_a_desktop_signal():
+    """挡的是「把 glDesktopApi 改成无条件返回真值」这种回归 —— 光看
+    "GL_DESKTOP"/"pywebview" 是否**出现**在文件里挡不住这个,哪怕它们只活在
+    注释里、跟真正的判断逻辑毫无关系,字符串检查照样通过。必须把
+    glDesktopApi() 的函数体单独抠出来,断言判断逻辑真的长在里面。"""
     src = _NAV.read_text(encoding="utf-8")
     assert "open_window" in src, "桌面分支不在了"
-    # open_window 只能出现在同时提到 GL_DESKTOP 或 pywebview 的守卫之后
-    assert "GL_DESKTOP" in src and "pywebview" in src
+    m = re.search(r"function glDesktopApi\(\).*?(?=function glWantsNewWindow)", src, re.S)
+    assert m, "glDesktopApi 定义找不到了(函数改名或结构变了)"
+    body = m.group(0)
+    assert "window.pywebview && window.pywebview.api" in body, (
+        "glDesktopApi 必须真的读 window.pywebview.api 才能判断桥在不在 —— "
+        "不能被改成无条件返回一个真值对象(那正是本任务要防的回归)"
+    )
+    assert "typeof api.open_window !== 'function'" in body, (
+        "glDesktopApi 必须确认 open_window 真的可调用,不能只信 api 存在就当真桥"
+    )
 
 
 def test_both_click_and_auxclick_are_bound():
@@ -34,9 +46,22 @@ def test_both_click_and_auxclick_are_bound():
 
 
 def test_plain_left_click_is_not_intercepted():
-    """必须有修饰键/中键判断 —— 否则普通左键点也会被 preventDefault。"""
+    """必须有修饰键/中键判断 —— 否则普通左键点也会被 preventDefault。
+
+    只查 "ctrlKey"/"button" 这两个词是否**出现**在文件里挡不住"删掉调用、
+    留下孤儿函数"这种回归:glWantsNewWindow 的**定义**里天然就带着这两个词,
+    哪怕 glOnActivate 里那句 `if (!glWantsNewWindow(e)) return;` 被删掉、
+    这个函数变成谁都不调用的死代码,字符串检查照样通过。必须断言调用点本身
+    ——glOnActivate 函数体里确实在最前面调了它并在其为假时早退。"""
     src = _NAV.read_text(encoding="utf-8")
     assert "ctrlKey" in src and "button" in src
+    m = re.search(r"function glOnActivate\(e\).*?(?=function glBindNewWindow)", src, re.S)
+    assert m, "glOnActivate 定义找不到了(函数改名或结构变了)"
+    body = m.group(0)
+    assert re.search(r"if\s*\(\s*!\s*glWantsNewWindow\(e\)\s*\)\s*return;", body), (
+        "glOnActivate 必须在最前面调用 glWantsNewWindow(e) 并在其为假时早退 —— "
+        "否则普通左键点击也会被后面的 preventDefault 拦截"
+    )
 
 
 def test_missing_bridge_falls_back_instead_of_breaking_navigation():
