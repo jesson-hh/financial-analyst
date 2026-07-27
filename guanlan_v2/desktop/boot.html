@@ -1,0 +1,76 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>观澜</title>
+<style>
+  :root{--paper:#f1ead9;--paper-2:#ebe2cc;--ink:#1c1814;--ink-2:#6e6557;--ink-3:#9e9482;
+        --line:#cfc4ab;--yin:#a8392d;--jin:#8a6f3f;
+        --serif:"Noto Serif SC","Source Han Serif SC","Songti SC",serif;
+        --mono:"JetBrains Mono","Consolas",monospace;}
+  html,body{height:100%;margin:0;}
+  body{background:linear-gradient(180deg,var(--paper),var(--paper-2));color:var(--ink);
+       font-family:var(--serif);display:flex;align-items:center;justify-content:center;}
+  .box{text-align:center;max-width:560px;padding:0 32px;}
+  .seal{width:52px;height:52px;margin:0 auto 22px;background:var(--yin);color:var(--paper);
+        font-size:30px;line-height:52px;border-radius:3px;}
+  h1{font-size:19px;font-weight:600;letter-spacing:.22em;margin:0 0 26px;}
+  #msg{font-size:14px;color:var(--ink-2);margin:0 0 10px;}
+  #detail{font-family:var(--mono);font-size:11px;color:var(--ink-3);
+          white-space:pre-wrap;word-break:break-all;margin:0 0 18px;}
+  #warn{font-family:var(--mono);font-size:11px;color:var(--jin);margin:0 0 18px;display:none;}
+  #acts{display:none;gap:10px;justify-content:center;}
+  button{font-family:var(--serif);font-size:13px;padding:7px 20px;cursor:pointer;
+         background:var(--paper);color:var(--ink);border:1px solid var(--line);border-radius:2px;}
+  button:hover{border-color:var(--yin);color:var(--yin);}
+  .bar{height:2px;width:190px;margin:0 auto 20px;background:var(--line);overflow:hidden;}
+  .bar i{display:block;height:100%;width:38%;background:var(--yin);
+         animation:slide 1.25s ease-in-out infinite;}
+  @keyframes slide{0%{transform:translateX(-100%)}100%{transform:translateX(360%)}}
+  .done .bar{visibility:hidden;}
+</style>
+<div class="box" id="box">
+  <div class="seal">觀</div>
+  <h1>觀 瀾</h1>
+  <div class="bar"><i></i></div>
+  <p id="msg">正在启动…</p>
+  <p id="detail"></p>
+  <p id="warn"></p>
+  <div id="acts">
+    <button id="retry">重试</button>
+    <button id="log">看日志</button>
+  </div>
+</div>
+<script>
+  (function () {
+    var box = document.getElementById('box');
+    var acts = document.getElementById('acts');
+
+    // 所有对 Python 侧的调用都必须走 glCallApi('<字面量方法名>')。
+    // 这不是风格偏好:tests/desktop/test_assets.py 靠正则从源码里抽出这些字面量,
+    // 逐个和 JsApi 真有的方法对表。换成 a.retry() 或 api[m]() 这类形式,正则抽不到,
+    // 那条跨语言契约测试就会静默变成空跑 —— 它自己会因为抽到 0 个名字而失败。
+    function glCallApi(method) {
+      var a = (window.pywebview && window.pywebview.api) || null;
+      if (a && typeof a[method] === 'function') a[method]();
+    }
+
+    document.getElementById('retry').addEventListener('click', function () {
+      glCallApi('retry');
+    });
+    document.getElementById('log').addEventListener('click', function () {
+      glCallApi('open_log');
+    });
+
+    window.glBoot = {
+      setState: function (s) {
+        document.getElementById('msg').textContent = s.message || '';
+        document.getElementById('detail').textContent = s.detail || '';
+        var w = document.getElementById('warn');
+        w.textContent = s.warning || '';
+        w.style.display = s.warning ? 'block' : 'none';
+        var stuck = (s.phase === 'timeout' || s.phase === 'spawn_failed');
+        acts.style.display = stuck ? 'flex' : 'none';
+        box.className = stuck ? 'box done' : 'box';
+      }
+    };
+  })();
+</script>
