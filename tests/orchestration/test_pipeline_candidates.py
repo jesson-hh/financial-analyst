@@ -42,12 +42,23 @@ What is pinned here (the Task-2 brief's matrix):
 * red lines: zero network / zero LLM imports, no write call anywhere in the
   module (the v4 ranking surface is read-only — spec §8 v4 信号不动).
 
+Markers: the single disk-touching test is marked ``realdata`` — the default run
+is hermetic in intent and that test can be deselected with ``-m "not realdata"``
+(its read-only ``(mtime_ns, size)`` assertion can false-RED if the daily producer
+refreshes the parquet mid-test). The marker is NOT registered in an ini file:
+this repo's ``pyproject.toml`` carries no ``[tool.pytest.ini_options]`` section
+and ``tests/conftest.py`` is outside this task's pathspec, so a
+``PytestUnknownMarkWarning`` is expected until a controller-owned change
+registers it (``markers = ["realdata: touches on-disk production artifacts"]``).
+
 Run from repo root:
 ``python -m pytest tests/orchestration/test_pipeline_candidates.py -v``
+(hermetic subset: append ``-m "not realdata"``)
 """
 from __future__ import annotations
 
 import ast
+import dataclasses
 import inspect
 import sys
 import types
@@ -199,11 +210,23 @@ def test_ports_refuse_a_naive_as_of():
 def test_params_are_plain_frozen_dataclasses_not_contract_models():
     """Task 11's public/internal ContractModel partition names only
     RankingArtifact/RankingRow from this module — params ride as plain
-    dataclasses (the DeepDecideBindings precedent)."""
-    for cls in (M.CandV4Params, M.CandLane0Params, M.CandModelParams):
-        assert not issubclass(cls, ContractModel)
-        with pytest.raises(Exception):
-            cls(top_n=1).__setattr__("top_n", 2)  # frozen
+    dataclasses (the DeepDecideBindings precedent).
+
+    Each instance is built with its FULL argument set and the refusal is
+    narrowed to ``FrozenInstanceError``: a bare ``pytest.raises(Exception)``
+    over a partial construction would be satisfied by the missing-argument
+    ``TypeError`` and stay green with ``frozen=True`` removed.
+    """
+    instances = (
+        M.CandV4Params(top_n=1),
+        M.CandLane0Params(top_n=1, mainline_limit=1),
+        M.CandModelParams(top_n=1, variant_id="m_x"),
+    )
+    for instance in instances:
+        assert not isinstance(instance, ContractModel)
+        assert dataclasses.is_dataclass(instance)
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            instance.top_n = 2
 
 
 @pytest.mark.parametrize("bad", [0, 51, -3])
@@ -222,6 +245,19 @@ def test_model_params_require_a_named_variant():
     with pytest.raises(M.CandidateParamsError):
         M.CandModelParams(top_n=10, variant_id="   ")
     assert M.CandModelParams(top_n=10, variant_id="m_6dce0995a4").variant_id
+
+
+@pytest.mark.parametrize("reserved", ["prod", "PROD", "  prod  "])
+def test_the_reserved_production_variant_id_is_refused_by_name(reserved):
+    """``load_v4_ranking(model_id="prod")`` reads the PRODUCTION artifact
+    (ranking.py:59), so a cand.model slate named with it would label production
+    v4 rows ``source_kind="model_variant"`` — a mislabel Task 1's biconditional
+    cannot catch, because the field IS populated."""
+    with pytest.raises(M.CandidateParamsError) as excinfo:
+        M.CandModelParams(top_n=10, variant_id=reserved)
+    assert "prod" in str(excinfo.value)
+    assert "cand.v4" in str(excinfo.value)   # names the right worker instead
+    assert "prod" in M.RESERVED_VARIANT_IDS
 
 
 def test_params_from_mapping_refuses_an_unknown_key_and_a_wrong_type():
@@ -598,11 +634,20 @@ class _FakeRankingModule(types.ModuleType):
 
 
 class _FakeFrame:
-    """The minimal DataFrame surface the reader is allowed to use."""
+    """The minimal DataFrame surface the reader is allowed to use.
 
-    def __init__(self, records, columns=("code", "lgb_rank", "lgb_score")):
-        self._records = list(records)
-        self.columns = list(columns)
+    Records carry their own ``date`` (as the real artifact does — ``V4_COLUMNS``
+    guarantees the column), so the reader's anti-skew cross-check is exercised.
+    """
+
+    _DEFAULT_COLUMNS = ("code", "lgb_rank", "lgb_score", "date")
+
+    def __init__(self, records, columns=None, row_date="2026-07-24"):
+        self._records = [
+            dict(r) if "date" in r or row_date is None else {**r, "date": row_date}
+            for r in records
+        ]
+        self.columns = list(self._DEFAULT_COLUMNS if columns is None else columns)
 
     def to_dict(self, orient):
         assert orient == "records"
@@ -684,12 +729,63 @@ def test_the_as_of_hint_never_re_dates_the_artifact(monkeypatch, hint):
     assert M.session_date_of(artifact.as_of) == "2026-07-24"
 
 
-# --- one real-artifact read (skipped honestly when the vendored file is absent) #
+def test_a_mid_read_refresh_is_refused_naming_both_dates(monkeypatch):
+    """``ranking_date()`` performs its OWN load (ranking.py:73-81) and the daily
+    producer overwrites ``v4_ranking_latest.parquet`` IN PLACE. A refresh landing
+    between the two loads would bind yesterday's rows to today's date and
+    silently suppress the ``stale_ranking`` badge — invariant 2's exact
+    prohibition. The rows' own date is cross-checked and the skew refused."""
+    _install_fake_ranking(monkeypatch, _FakeRankingModule(
+        frame=_FakeFrame([{"code": "SZ000001", "lgb_rank": 1, "lgb_score": 1.0}],
+                         row_date="2026-07-24"),          # the rows we hold
+        date="2026-07-27"))                               # the refreshed artifact
+    with pytest.raises(M.RankingSourceUnavailable) as excinfo:
+        M.build_production_ranking_reader().read_ranking(
+            variant_id=None, as_of_hint=_RUN_AS_OF)
+    message = str(excinfo.value)
+    assert "2026-07-24" in message and "2026-07-27" in message
+    assert "stale_ranking" in message
+
+
+def test_rows_carrying_more_than_one_ranking_date_are_refused(monkeypatch):
+    _install_fake_ranking(monkeypatch, _FakeRankingModule(
+        frame=_FakeFrame([
+            {"code": "SZ000001", "lgb_rank": 1, "lgb_score": 1.0, "date": "2026-07-24"},
+            {"code": "SH600519", "lgb_rank": 2, "lgb_score": 0.5, "date": "2026-07-23"},
+        ]), date="2026-07-24"))
+    with pytest.raises(M.RankingSourceUnavailable) as excinfo:
+        M.build_production_ranking_reader().read_ranking(
+            variant_id=None, as_of_hint=_RUN_AS_OF)
+    assert "2026-07-23" in str(excinfo.value)
+
+
+def test_the_row_date_and_the_ratified_surface_agreeing_is_the_happy_path(monkeypatch):
+    """The cross-check is a skew detector, not a second date source: when the two
+    agree the artifact is stamped with that one date."""
+    _install_fake_ranking(monkeypatch, _FakeRankingModule(
+        frame=_FakeFrame([{"code": "SZ000001", "lgb_rank": 1, "lgb_score": 1.0}],
+                         row_date="2026-07-24"),
+        date="2026-07-24"))
+    artifact = M.build_production_ranking_reader().read_ranking(
+        variant_id=None, as_of_hint=_RUN_AS_OF)
+    assert M.session_date_of(artifact.as_of) == "2026-07-24"
+
+
+# --- one real-artifact read -------------------------------------------------- #
+# Marked ``realdata``: it is the only test in this module that touches the disk
+# artifact, and its (mtime_ns, size) read-only assertion can false-RED if the
+# daily producer refreshes the parquet mid-test on a production machine. The
+# DEFAULT run stays hermetic in intent — deselect with ``-m "not realdata"``.
+# (The marker is not registered in an ini file: this repo's pyproject.toml has no
+# ``[tool.pytest.ini_options]`` section and conftest.py is outside this task's
+# pathspec, so registration is a controller-owned follow-up. Without
+# ``--strict-markers`` an unregistered marker is inert.)
 def _v4_artifact_path():
     from guanlan_v2.strategy.paths import V4_RANKING_PARQUET
     return V4_RANKING_PARQUET
 
 
+@pytest.mark.realdata
 @pytest.mark.skipif(not _v4_artifact_path().exists(),
                     reason="vendored v4 ranking artifact absent (see the restore recipe)")
 def test_the_real_vendored_artifact_produces_a_slate_without_touching_it():

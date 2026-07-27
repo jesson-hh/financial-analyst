@@ -150,10 +150,18 @@ EMPTY_SLATE_BADGE = "no_candidates"
 MIN_TOP_N, MAX_TOP_N = 1, 50
 MIN_MAINLINE_LIMIT, MAX_MAINLINE_LIMIT = 1, 5
 
+#: ``model_id`` values the D5 surface reserves for the PRODUCTION artifact
+#: (ranking.py:59 — ``if model_id and model_id != "prod"``). A ``cand.model``
+#: slate named with one would claim ``source_kind="model_variant"`` provenance
+#: over production v4 rows — a mislabel Task 1's biconditional cannot catch,
+#: because the field IS populated. Refused by name instead.
+RESERVED_VARIANT_IDS = frozenset({"prod"})
+
 #: the v4 ranking artifact's column contract (ranking.py ``V4_COLUMNS``).
 _CODE_COLUMN = "code"
 _RANK_COLUMN = "lgb_rank"
 _SCORE_COLUMN = "lgb_score"
+_DATE_COLUMN = "date"
 
 _CST = timezone(timedelta(hours=8))
 
@@ -287,6 +295,16 @@ class _ProductionRankingReader:
     importable (and cheap) with no pandas, no screen/strategy state and no
     artifact on disk. A missing artifact surfaces as the upstream's own
     ``FileNotFoundError`` — honest passthrough, never a fabricated empty read.
+
+    **Date/rows skew is refused, never silently bound.** ``ranking_date()``
+    performs its OWN ``load_v4_ranking`` (ranking.py:73-81) and the daily
+    producer overwrites ``v4_ranking_latest.parquet`` **in place**, so a refresh
+    landing between the two loads would hand today's date to yesterday's rows —
+    silently suppressing the ``stale_ranking`` badge, exactly what invariant 2
+    forbids. The date the rows themselves carry (``V4_COLUMNS`` guarantees the
+    ``date`` column) is therefore cross-checked against the ratified surface's
+    answer, and a mismatch — or rows carrying more than one date — is a typed
+    refusal naming both.
     """
 
     def read_ranking(
@@ -299,7 +317,10 @@ class _ProductionRankingReader:
         # NB: a pandas ``Index`` has no truth value — `or ()` would raise.
         raw_columns = getattr(frame, "columns", None)
         columns = () if raw_columns is None else tuple(raw_columns)
-        missing = [c for c in (_CODE_COLUMN, _RANK_COLUMN) if c not in columns]
+        missing = [
+            c for c in (_CODE_COLUMN, _RANK_COLUMN, _DATE_COLUMN)
+            if c not in columns
+        ]
         if missing:
             raise RankingSourceUnavailable(
                 f"the ranking artifact for model_id={model_id!r} lacks column(s) "
@@ -311,14 +332,9 @@ class _ProductionRankingReader:
                 f"the ranking artifact for model_id={model_id!r} carries no "
                 "ranking date — refusing rather than stamping it with today's"
             )
-        try:
-            as_of = session_date_to_utc(date_text)
-        except ValueError as exc:
-            raise RankingSourceUnavailable(
-                f"unreadable ranking date {date_text!r} for model_id={model_id!r}"
-            ) from exc
 
         rows: list[RankingRow] = []
+        row_dates: set[str] = set()
         for index, record in enumerate(frame.to_dict("records")):
             raw_code = record.get(_CODE_COLUMN)
             code = "" if raw_code is None else str(raw_code).strip()
@@ -333,12 +349,41 @@ class _ProductionRankingReader:
                     f"ranking row {index} ({code}) for model_id={model_id!r} "
                     f"carries no usable {_RANK_COLUMN}"
                 ) from exc
+            raw_date = record.get(_DATE_COLUMN)
+            row_dates.add("" if raw_date is None else str(raw_date).strip())
             rows.append(
                 RankingRow(
                     code=code, rank=rank,
                     score=_finite_or_none(record.get(_SCORE_COLUMN)),
                 )
             )
+
+        # The anti-skew cross-check: the rows in hand carry their own date, and
+        # ``ranking_date()`` re-read the (in-place overwritten) artifact to answer.
+        if len(row_dates) > 1:
+            raise RankingSourceUnavailable(
+                f"the ranking artifact for model_id={model_id!r} carries "
+                f"{len(row_dates)} different row dates {sorted(row_dates)} — "
+                "refusing an artifact that is not one point in time"
+            )
+        if row_dates:
+            (row_date,) = tuple(row_dates)
+            if row_date != date_text:
+                raise RankingSourceUnavailable(
+                    "the ranking artifact changed under the read: ranking_date() "
+                    f"reports {date_text!r} but the loaded rows carry {row_date!r} "
+                    f"(model_id={model_id!r}; the daily producer overwrites the "
+                    "artifact in place). Refusing rather than binding one day's "
+                    "rows to another day's date, which would silently suppress "
+                    "the stale_ranking badge"
+                )
+        try:
+            as_of = session_date_to_utc(date_text)
+        except ValueError as exc:
+            raise RankingSourceUnavailable(
+                f"unreadable ranking date {date_text!r} for model_id={model_id!r}"
+            ) from exc
+
         ordered = tuple(sorted(rows, key=lambda r: (r.rank, r.code)))
         return RankingArtifact(
             as_of=as_of,
@@ -443,6 +488,13 @@ class CandModelParams(_CandParams):
     def __post_init__(self) -> None:
         _require_int(self.top_n, name="top_n", low=MIN_TOP_N, high=MAX_TOP_N)
         _require_text(self.variant_id, name="variant_id")
+        if self.variant_id.strip().lower() in RESERVED_VARIANT_IDS:
+            raise CandidateParamsError(
+                f"variant_id {self.variant_id!r} is reserved for the PRODUCTION "
+                f"v4 artifact ({sorted(RESERVED_VARIANT_IDS)}); a cand.model "
+                "slate named with it would label production rows as "
+                "source_kind='model_variant'. Use cand.v4 for production."
+            )
 
 
 @dataclass(frozen=True)
