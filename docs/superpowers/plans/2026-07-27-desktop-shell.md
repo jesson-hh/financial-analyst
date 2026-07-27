@@ -836,20 +836,38 @@ def test_assets_are_self_contained():
         assert "http://" not in src and "https://" not in src, f"{name} 外链了"
 
 
+_CALL_RE = re.compile(r"""glCallApi\(\s*['"](\w+)['"]\s*\)""")
+
+
 def test_both_assets_only_call_methods_that_JsApi_actually_has():
-    """两处按钮硬编码了 API 名字;名字对不上就是一个点了没反应的按钮。"""
+    """两处按钮硬编码了 API 名字;名字对不上就是一个点了没反应的按钮,而且没有
+
+    任何 Python 测试会发现 —— 契约跨了语言边界。这条测试把它钉住。
+
+    **本测试绝不允许空跑。** 资产里对 Python 侧的调用必须写成
+    ``glCallApi('<字面量方法名>')``;抽不到名字就是资产改了调用形式,那时这条
+    测试会因为 0 个名字而**失败**,而不是悄悄通过。这一点本身就是被下面第一条
+    断言保护的。
+    """
     from guanlan_v2.desktop.bridge import JsApi
+
+    found: dict[str, set[str]] = {}
     for name in ("boot.html", "overlay.js"):
         src = (_DIR / name).read_text(encoding="utf-8")
-        for method in re.findall(r"api(?:\[')?\.?(\w+)(?:'\])?\(\)", src):
-            if method in {"then", "catch"}:
-                continue
+        found[name] = set(_CALL_RE.findall(src))
+        assert found[name], (
+            f"{name} 里一个 glCallApi('...') 都没抽到 —— 要么按钮没了,"
+            "要么有人把调用改成了正则看不见的形式(a.retry() / api[m]()),"
+            "那样这条跨语言契约测试就成了空跑。"
+        )
+        for method in found[name]:
             assert hasattr(JsApi, method), f"{name} 调了 JsApi 没有的 {method}()"
-    # 两个按钮各自的方法必须真的被引用到
-    boot = (_DIR / "boot.html").read_text(encoding="utf-8")
-    overlay = (_DIR / "overlay.js").read_text(encoding="utf-8")
-    assert "retry" in boot and "open_log" in boot
-    assert "retry" in overlay and "open_log" in overlay
+
+    # 两个按钮的方法都必须真的被两处各自引用到
+    for name in ("boot.html", "overlay.js"):
+        assert found[name] == {"retry", "open_log"}, (
+            f"{name} 抽到 {sorted(found[name])},预期恰好 retry 与 open_log"
+        )
 ```
 
 本文件顶部需要 `import re`。
@@ -909,13 +927,21 @@ Expected: FAIL —— `FileNotFoundError: ...boot.html`
   (function () {
     var box = document.getElementById('box');
     var acts = document.getElementById('acts');
-    function api() { return (window.pywebview && window.pywebview.api) || null; }
+
+    // 所有对 Python 侧的调用都必须走 glCallApi('<字面量方法名>')。
+    // 这不是风格偏好:tests/desktop/test_assets.py 靠正则从源码里抽出这些字面量,
+    // 逐个和 JsApi 真有的方法对表。换成 a.retry() 或 api[m]() 这类形式,正则抽不到,
+    // 那条跨语言契约测试就会静默变成空跑 —— 它自己会因为抽到 0 个名字而失败。
+    function glCallApi(method) {
+      var a = (window.pywebview && window.pywebview.api) || null;
+      if (a && typeof a[method] === 'function') a[method]();
+    }
 
     document.getElementById('retry').addEventListener('click', function () {
-      var a = api(); if (a && a.retry) a.retry();
+      glCallApi('retry');
     });
     document.getElementById('log').addEventListener('click', function () {
-      var a = api(); if (a && a.open_log) a.open_log();
+      glCallApi('open_log');
     });
 
     window.glBoot = {
@@ -963,21 +989,25 @@ Expected: FAIL —— `FileNotFoundError: ...boot.html`
 
     var acts = document.createElement('div');
     acts.style.cssText = 'margin-top:16px;display:flex;gap:10px;justify-content:center;';
-    acts.appendChild(button('重试', 'retry'));
-    acts.appendChild(button('看日志', 'open_log'));
+    acts.appendChild(button('重试', function () { glCallApi('retry'); }));
+    acts.appendChild(button('看日志', function () { glCallApi('open_log'); }));
     inner.appendChild(acts);
     return d;
   }
 
-  function button(label, method) {
+  // 同 boot.html:对 Python 侧的调用一律走 glCallApi('<字面量>'),
+  // 否则 test_assets.py 的跨语言契约正则抽不到名字。
+  function glCallApi(method) {
+    var api = window.pywebview && window.pywebview.api;
+    if (api && typeof api[method] === 'function') api[method]();
+  }
+
+  function button(label, onClick) {
     var b = document.createElement('button');
     b.textContent = label;
     b.style.cssText = 'font-family:"Noto Serif SC",serif;font-size:13px;padding:6px 18px;' +
       'cursor:pointer;background:transparent;color:#f1ead9;border:1px solid #a8392d;border-radius:2px;';
-    b.addEventListener('click', function () {
-      var api = window.pywebview && window.pywebview.api;
-      if (api && typeof api[method] === 'function') api[method]();
-    });
+    b.addEventListener('click', onClick);
     return b;
   }
 
