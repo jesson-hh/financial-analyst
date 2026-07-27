@@ -392,12 +392,18 @@ def test_real_webview_start_accepts_a_storage_path_kwarg():
     webview 的测试照样会绿,只有真机启动时 webview.start() 才会 TypeError。这里
     直接对着真实安装的 pywebview 内省签名,把参数名字钉死。只 import 模块 +
     inspect.signature,不会触发任何 GUI —— guilib.initialize() 只在 webview.start()
-    内部被调用,这里从不调用它,在无头测试机上是安全的(已手动确认 headless 通过)。"""
+    内部被调用,这里从不调用它,在无头测试机上是安全的(已手动确认 headless 通过)。
+
+    两个 kwarg 名字都要钉,不能只钉 storage_path:假 webview 同样吞掉
+    private_mode 这个名字,而它是"这份 profile 到底持不持久化"的开关 ——
+    一个 private_mode 的笔误只会在真机启动时才 TypeError,和 storage_path
+    是同一类缺陷。"""
     import inspect
 
     import webview
 
-    assert "storage_path" in inspect.signature(webview.start).parameters
+    params = set(inspect.signature(webview.start).parameters)
+    assert {"storage_path", "private_mode"} <= params
 
 
 # ── Also fix: 看门狗拉起失败也要在 status 上留痕 ─────────────────────────────
@@ -762,3 +768,127 @@ def test_last_log_at_does_not_grow_unbounded_forever(tmp_path, monkeypatch):
         sh._log_shell_event(f"message-{i}")
 
     assert len(sh._last_log_at) == 1, "每条消息的去重窗口都已经过期,去重表不该无限堆积旧键"
+
+
+# ── Final review A — Minor 1: 两处事件绑定的吞异常此前完全不留痕 ─────────────
+#
+# win.events.loaded += ... / win.events.closed += ... 各自包着一个裸
+# `except Exception: pass`,是 shell.py 里唯一一处没有 _log_shell_event 的吞
+# 异常。真出问题时后果很大且完全无声:GL_DESKTOP/overlay.js 再也不会被注入到
+# 这扇窗口,掉线遮罩再也不会在它身上出现,而 var/desktop-shell.log 里不会有
+# 任何一行字。
+
+class _EventBindingBoomEvent:
+    """`+=` 本身抛异常 —— 模拟 pywebview 的 Event.__iadd__ 出问题的情形。"""
+
+    def __iadd__(self, fn):
+        raise RuntimeError("event binding is gone")
+
+
+class _EventBindingBoomWebview(_FakeWebview):
+    def create_window(self, title, url=None, **kw):
+        w = _FakeWindow(title, url, **kw)
+        w.events = types.SimpleNamespace(
+            loaded=_EventBindingBoomEvent(), closed=_EventBindingBoomEvent()
+        )
+        self.windows.append(w)
+        return w
+
+
+def test_event_binding_failures_are_logged_instead_of_vanishing(monkeypatch):
+    logged = []
+    monkeypatch.setattr(sh, "_log_shell_event", lambda msg: logged.append(msg))
+
+    fake = _EventBindingBoomWebview()
+    sh.create_shell(webview_module=fake)
+
+    assert len(logged) == 2, "loaded 和 closed 两次绑定失败都要各留一笔,不能只记一次"
+    assert any("loaded" in m and "event binding is gone" in m for m in logged)
+    assert any("closed" in m and "event binding is gone" in m for m in logged)
+
+
+# ── Final review A — Minor 2 (C6): 失败的导航不该把 _boot_pending 清掉 ────────
+#
+# _navigate 吞异常并留痕,但此前调用方无条件把 _boot_pending 设 False —— 于是
+# 一次没有真正发生的导航被当成"已经翻页",引导页从此再没有任何代码路径会去
+# 调 load_url。两处调用点(run_boot_sequence 的健康分支、
+# _advance_boot_window_if_pending)都要验证。
+
+class _FlakyLoadWindow(_FakeWindow):
+    """第一次 load_url 抛,第二次成功 —— 模拟"这一次导航失败,下一拍心跳的
+    重试成功"。"""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self._load_attempts = 0
+
+    def load_url(self, url):
+        self._load_attempts += 1
+        if self._load_attempts == 1:
+            raise RuntimeError("WebView2 runtime is gone")
+        self.loaded_urls.append(url)
+
+
+class _FlakyLoadWebview(_FakeWebview):
+    def create_window(self, title, url=None, **kw):
+        w = _FlakyLoadWindow(title, url, **kw)
+        self.windows.append(w)
+        return w
+
+
+def test_boot_pending_survives_a_failed_navigate_and_retries_on_next_heartbeat(monkeypatch):
+    monkeypatch.setattr(sh, "_log_shell_event", lambda msg: None)
+    fake = _FlakyLoadWebview()
+    s = sh.create_shell(webview_module=fake, ensure=lambda **kw: _healthy_outcome(),
+                        prober=lambda: True)
+
+    s.run_boot_sequence(fake.windows[0])
+    assert fake.windows[0].loaded_urls == [], "第一次导航失败,不该记为已经跳转"
+    assert s._boot_pending is True, (
+        "导航失败后 _boot_pending 必须保持 True —— 清掉它就再没有任何代码路径"
+        "会重新尝试导航,引导页原地卡死"
+    )
+
+    s.heartbeat_once()  # 心跳重试导航,这次成功
+    assert fake.windows[0].loaded_urls == [sh.APP_URL], "心跳应该重试导航并这次成功"
+    assert s._boot_pending is False
+
+
+def test_advance_boot_window_retries_when_navigate_keeps_failing(monkeypatch):
+    """_advance_boot_window_if_pending 这条调用点也要单独验证 —— 不能只验
+    run_boot_sequence 那一条,两处是各自独立的调用点。"""
+    monkeypatch.setattr(sh, "_log_shell_event", lambda msg: None)
+    fake = _FlakyLoadWebview()
+    s = sh.create_shell(webview_module=fake, ensure=lambda **kw: _timeout_outcome(),
+                        prober=lambda: True)
+    s.run_boot_sequence(fake.windows[0])
+    assert s._boot_pending is True, "超时结局本来就不清 _boot_pending"
+
+    s._advance_boot_window_if_pending()  # 第一次尝试:load_url 抛
+    assert fake.windows[0].loaded_urls == []
+    assert s._boot_pending is True, "失败的导航不该清掉 _boot_pending"
+
+    s._advance_boot_window_if_pending()  # 第二次尝试:成功
+    assert fake.windows[0].loaded_urls == [sh.APP_URL]
+    assert s._boot_pending is False
+
+
+# ── Final review A — Minor 5 (S2): 看日志失败此前彻底无声 ────────────────────
+#
+# JsApi.open_log 把这里抛出的异常包成 {ok: False, ...} 还给网页,但 JsApi 故意
+# 不 import shell、没有留痕能力 —— 如果 _on_open_log 自己不记一笔,os.startfile
+# 失败时 Python 侧和 UI 侧会同时哑掉,一丝痕迹都留不下。
+
+def test_open_log_failure_is_logged_instead_of_vanishing(monkeypatch):
+    logged = []
+    monkeypatch.setattr(sh, "_log_shell_event", lambda msg: logged.append(msg))
+
+    def _boom(path):
+        raise OSError("no handler registered for .log")
+
+    fake = _FakeWebview()
+    s = sh.create_shell(webview_module=fake, file_opener=_boom)
+    out = s.api.open_log()
+
+    assert out["ok"] is False, "JsApi 的失败语义不能被这处新加的留痕改变"
+    assert logged and "no handler registered for .log" in logged[0]

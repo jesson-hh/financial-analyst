@@ -103,16 +103,31 @@ class Shell:
             # 会被当成"要 1 个参数",传进来的东西不一定还是这扇 win,会把默认值
             # 捕获的 win 顶掉。零形参对内省天然免疫,不用去猜调度器怎么内省。
             win.events.loaded += lambda: self._on_loaded(win)
-        except Exception:  # noqa: BLE001 —— 事件挂不上不该拖垮建窗
-            pass
+        except Exception as exc:  # noqa: BLE001 —— 事件挂不上不该拖垮建窗,但要留痕:
+            # 这一挂失败,window.GL_DESKTOP 和 overlay.js 就再也不会被注入到这扇
+            # 窗口的任何一次导航里,掉线遮罩也再不会在它身上出现——这个模块里
+            # 唯一一处"后果很大、此前完全不留痕"的吞异常。
+            _log_shell_event(f"loaded event binding failed: {type(exc).__name__}: {exc}")
         try:
             win.events.closed += lambda: self._on_closed(win)
-        except Exception:  # noqa: BLE001 —— 同上
-            pass
+        except Exception as exc:  # noqa: BLE001 —— 同上,留痕
+            _log_shell_event(f"closed event binding failed: {type(exc).__name__}: {exc}")
         return win
 
     def open_ui_window(self, url: str) -> None:
-        """给 bridge 用的窗口工厂。URL 已被 bridge 的安全闸放行过。"""
+        """给 bridge 用的窗口工厂。URL 已被 bridge 的安全闸放行过。
+
+        只能在非 MainThread 上调用:真 pywebview 的 `webview.create_window`
+        只在 `threading.current_thread().name != 'MainThread'` 时才真的创建
+        窗口(`__init__.py:417-427`);在 MainThread 上它只会往
+        `webview.windows` 追加一个从未初始化、从未 show 过的 Window 就返回。
+        JsApi 的调用天然经由 pywebview 自己派生的 `Thread-N`
+        (`util.js_bridge_call`)到达这里,所以今天始终踩在对的一侧——但如果
+        以后有人把这个方法接到原生菜单或 GUI 线程回调上,后果是这个模块历史
+        上最惨的状态:一扇永不 show 的窗口,`closed` 永不触发(`_on_closed`
+        永远剔不掉它),它的 `evaluate_js` 会在之后每一拍心跳上白等 20s,拖垮
+        整条心跳线程。
+        """
         self._new_window(url, WINDOW_TITLE)
 
     def _on_closed(self, win) -> None:
@@ -175,8 +190,13 @@ class Shell:
         self._status = {"state": outcome.state, "detail": outcome.detail}
 
         if outcome.state == "healthy":
-            _navigate(win, APP_URL)
-            self._boot_pending = False
+            # 只有导航真的成功才清 _boot_pending —— 否则一次失败的导航
+            # (WebView2 运行时坏掉/GPU 挂起,_navigate 20s 后吞掉并留痕)会
+            # 把这个唯一会重试导航的开关永久关掉:引导页停在原地,以后
+            # 再也没有任何代码路径会去调 load_url。留 _boot_pending 为 True,
+            # 下一拍心跳的 _advance_boot_window_if_pending 会自动重试。
+            if _navigate(win, APP_URL):
+                self._boot_pending = False
             return
         self._push_boot(win, {"phase": outcome.state, "message": "启动失败",
                               "detail": outcome.detail, "warning": warning})
@@ -201,8 +221,19 @@ class Shell:
             self._push_boot(self.main_window, retry_state)
 
     def _on_open_log(self) -> None:
-        """用系统默认程序打开 var/server-9999.log。只读,不动服务器。"""
-        self._file_opener(str(_LOG_PATH))
+        """用系统默认程序打开 var/server-9999.log。只读,不动服务器。
+
+        JsApi.open_log 已经会把这里抛出的异常包成 {ok: False, detail: ...}
+        还给网页,但 JsApi 故意不 import shell、没有留痕能力(见其模块文档)——
+        如果不在这里也记一笔,`os.startfile` 失败(没有 .log 关联程序/文件被
+        删/漫游 profile)时 看日志 按钮就会在 UI 上和 Python 侧同时哑掉,一丝
+        痕迹都留不下。留痕后原样重新抛出,让 JsApi 那层已有的失败语义不变。
+        """
+        try:
+            self._file_opener(str(_LOG_PATH))
+        except Exception as exc:  # noqa: BLE001
+            _log_shell_event(f"open_log failed: {type(exc).__name__}: {exc}")
+            raise
 
     # ── 心跳 ────────────────────────────────────────────────────────
     def heartbeat_once(self) -> None:
@@ -246,8 +277,10 @@ class Shell:
 
     def _advance_boot_window_if_pending(self) -> None:
         if self._boot_pending:
-            _navigate(self.main_window, APP_URL)
-            self._boot_pending = False
+            # 同 run_boot_sequence 那处:只有导航真的成功才清 _boot_pending,
+            # 失败就留着,让下一拍心跳再试一次。
+            if _navigate(self.main_window, APP_URL):
+                self._boot_pending = False
 
     def _protected_heartbeat_tick(self) -> None:
         """一次心跳的异常绝不能让往后所有的心跳都消失 —— 这仓库最惨的一次停机
@@ -280,13 +313,24 @@ class Shell:
         # 和 IsInPrivateModeEnabled 是 WebView2 上两个独立的属性
         # (edgechromium.py 的 EdgeChrome.__init__),换个位置不会波及是否持久化。
         #
-        # pywebview 自己也会在这个目录不存在时兜底 makedirs 一次
-        # (winforms.py:init_storage),但那条 except 记到的是它自己那个哪儿都不去
-        # 的 logger 上(pythonw 下没有控制台接它),而且失败之后 cache_dir 已经
-        # 指向了一个不存在的目录,WebView2 环境初始化会失败、on_webview_ready
-        # 也不会被触发——磁盘满/路径被同名文件占用/权限问题,后果是一扇什么都不
-        # 渲染的窗口,var/desktop-shell.log 和崩溃日志里都不会有任何一行痕迹。
-        # 这里自己先建一遍,失败就用壳自己能读到的 _log_shell_event 留痕。
+        # 【round 2 更正】这里原来写的理由是"pywebview 自己的 makedirs 兜底
+        # 会静默失败,我们要抢在它前面"——那个说法只对**默认**的
+        # %APPDATA%/pywebview 路径成立。一旦像我们这样显式传了 storage_path,
+        # webview.start() 会先调 __set_storage_path(webview/__init__.py:
+        # 487-498):它自己 makedirs 一次、再 os.access(..., W_OK) 校验,任何
+        # 一步失败都会 raise WebViewException,这个异常会一路传到
+        # _run_and_log_crashes、留下完整 traceback——这条路径其实已经被
+        # pywebview 自己稳稳接住了,不需要我们抢跑。
+        # 这里预建目录真正补上的缺口是**路径被一个文件占用**这一种:那种情况下
+        # __set_storage_path 看到 os.path.exists() 为真、os.access(file, W_OK)
+        # 对一个可写文件同样为真,于是原样把这个文件路径设成 storage_path,
+        # 不检查它是不是目录——winforms.init_storage 跟着也不会再 makedirs
+        # 一次,WebView2 拿到一个指向文件的 UserDataFolder,后果是一扇什么都
+        # 不渲染的窗口,var/desktop-shell.log 和崩溃日志里都不会有任何一行
+        # 痕迹。我们自己的 Path.mkdir(exist_ok=True) 在路径已被文件占用时依然
+        # 会抛(CPython:exist_ok 只兜"已经是目录"这一种,不兜"已经是别的
+        # 东西"),正好在这里接住、留痕。磁盘满/权限问题这些情况 pywebview
+        # 自己也会抛,我们这里的 try 只是先一步、多一行诊断,不冲突。
         try:
             _WEBVIEW_STORAGE_PATH.mkdir(parents=True, exist_ok=True)
         except Exception as exc:  # noqa: BLE001
@@ -308,17 +352,24 @@ def _eval(win, code: str) -> None:
         _log_shell_event(f"evaluate_js failed: {type(exc).__name__}: {exc}")
 
 
-def _navigate(win, url: str) -> None:
+def _navigate(win, url: str) -> bool:
     """load_url 是壳里唯一没走 _eval 式留痕的 pywebview 调用。真 pywebview 的
     `load_url` 装了 `@_shown_call`,一扇从没 show 过的窗口(WebView2 运行时坏掉、
     GPU 挂起)会等 20s 再抛 WebViewException;导航一个已关闭的窗口则是良性的
     静默 no-op(winforms 那边实例没了直接提前返回,不会抛)。壳绝不能因为一次
     导航失败就把 run_boot_sequence/心跳线程带崩,但要留痕 —— 同 _eval。
+
+    返回是否真的成功:调用方(run_boot_sequence / _advance_boot_window_if_pending)
+    只应该在导航成功时才把 _boot_pending 清掉——否则一次吞掉的失败会让
+    "重试导航"这件事的唯一开关被永久关闭,引导页原地卡死,没有任何东西会
+    再尝试导航。
     """
     try:
         win.load_url(url)
+        return True
     except Exception as exc:  # noqa: BLE001
         _log_shell_event(f"load_url failed: {type(exc).__name__}: {exc}")
+        return False
 
 
 def _log_shell_event(message: str) -> None:
