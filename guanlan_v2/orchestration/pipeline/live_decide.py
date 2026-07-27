@@ -140,6 +140,7 @@ __all__ = [
     "SUBJECT_ASSEMBLER_VERSION",
     "SUBJECT_TRUSTED_INPUT_NAME",
     "SubjectPromptAssembler",
+    "ProductionStoresUnbound",
     "DeepDecideBindings",
     "make_orchestrated_decide",
     "build_production_bindings",
@@ -170,6 +171,21 @@ _SESSION_TZ = timezone(timedelta(hours=8))
 #: quote ``fresh`` strings that mean NOT fresh (the boolean-contract coercion —
 #: a truthy string like ``"false"`` must never arm the band trigger).
 _FALSY_FRESH_STRINGS = frozenset({"", "0", "false", "no", "none", "null"})
+
+
+class ProductionStoresUnbound(RuntimeError):
+    """The process has no correctly bound orchestration durable store (typed refusal).
+
+    Raised by :func:`build_production_bindings` when the R23/R24 startup binding
+    is absent or unhealthy (``orch_store_status`` state != ``bound``). The deep
+    lane NEVER self-binds: ``bind_process_durable_stores_and_scan`` runs exactly
+    once per process from ``guanlan_v2.orchestration.startup`` and freezes the
+    cell-namespace allowlist at construction (the server.py 全进程唯一绑定
+    invariant), so a deep-lane rebind would either be a silent no-op against a
+    broken binding or would freeze a one-namespace allowlist and starve every
+    other durable-store consumer. The server catches this, logs loudly, and
+    stays fast-only.
+    """
 
 
 # =========================================================================== #
@@ -737,74 +753,95 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
         admission=service, lane_bindings={"main": lane_binding},
         run_context_factory=_run_context_factory, request_id=request.request_id,
         prompt_assembler=assembler)
-    try:
-        artifact = runner(
-            lane="main", point=_DecisionPoint(), approval=None,
-            data_context=context.data_context, memory_binding=None,
-            candidate_plan_digest=digest)
-    except Exception as exc:  # noqa: BLE001 — invariant 3: failed runs settle honestly
+
+    # invariant 3, closed BOTH sides (review I-1): once the runner has been
+    # invoked the settled spend is real money against the watcher's 24/day pool
+    # — it must reach note_llm_use whether the run failed, the run completed, or
+    # the run completed and a LANDING step (extract/persist) then blew up. One
+    # closure, one flag, exactly one note per run.
+    note_state = {"done": False, "settled": 0}
+
+    def _note_settled_once() -> int:
+        if note_state["done"]:
+            return note_state["settled"]
+        note_state["done"] = True
         settled = 0
         try:
             settled = _settled_llm(bindings.stores, run_id, run_budget,
                                    reservation.reservation_id)
         except Exception:  # noqa: BLE001 — the fold itself failing loses no honesty
             _LOG.warning("settled-spend fold failed for %s", run_id, exc_info=True)
+        note_state["settled"] = settled
         if settled > 0:
             bindings.note_llm_use(settled)
+        return settled
+
+    try:
+        artifact = runner(
+            lane="main", point=_DecisionPoint(), approval=None,
+            data_context=context.data_context, memory_binding=None,
+            candidate_plan_digest=digest)
+    except Exception as exc:  # noqa: BLE001 — invariant 3: failed runs settle honestly
+        settled = _note_settled_once()
         _LOG.warning("deep run %s failed after settling %s LLM invocation(s): %s "
                      "(fast result stands)", run_id, settled, exc)
         return {**fast, "deep_attempted": True, "deep_outcome": OUTCOME_FAILED,
                 "run_id": run_id}
 
     # ── the two-row model: ONE orchestrated row (+ ONE advisory order rec) ─── #
-    proposal = _extract_proposal(artifact, bindings.schema_registry)
-    settled = _settled_llm(bindings.stores, run_id, run_budget,
-                           reservation.reservation_id)
-    tranches = _tranche_rows(proposal)
-    record = _only_present({
-        "code": canonical,
-        "name": fast.get("name") or payload.get("name"),
-        "strategy_id": payload.get("strategy_id"),
-        "strategy_name": payload.get("strategy_name"),
-        "mode": "deep",
-        "freq": payload.get("freq"),
-        "rationale": proposal.rationale,
-        "confidence": proposal.confidence.value,
-        "target_weights": [
-            _only_present({
-                "symbol": p.symbol.dotted,
-                "weight": p.target_weight,
-                "stop_loss_pct": p.stop_loss_pct,
-                "take_profit_pct": p.take_profit_pct,
-            })
-            for p in proposal.positions
-        ],
-        "cash_weight": proposal.cash_weight,
-        "trigger_ranges": tranches or None,
-        "triggers": [t.kind for t in report.triggers_hit],
-        "inert_ports": list(report.inert_ports) or None,
-        "asof": str(session_date),
-        "run_id": run_id,
-        "source": "orchestrated",
-        "escalation_digest": report.semantic_digest(),
-        "escalated_from_asof": fast.get("asof"),
-    })
-    bindings.persist_decision("decide", record)
-    if tranches:
-        bindings.persist_decision("order", _only_present({
+    try:
+        proposal = _extract_proposal(artifact, bindings.schema_registry)
+        tranches = _tranche_rows(proposal)
+        record = _only_present({
             "code": canonical,
             "name": fast.get("name") or payload.get("name"),
             "strategy_id": payload.get("strategy_id"),
             "strategy_name": payload.get("strategy_name"),
-            "tranches": tranches,
-            "stop": proposal.positions[0].stop_loss_pct if proposal.positions else None,
-            "take": proposal.positions[0].take_profit_pct if proposal.positions else None,
-            "logic": "深研判 trader 提案的分批触发价区间(advisory;人工执行,观澜绝不下单)",
+            "mode": "deep",
+            "freq": payload.get("freq"),
+            "rationale": proposal.rationale,
+            "confidence": proposal.confidence.value,
+            "target_weights": [
+                _only_present({
+                    "symbol": p.symbol.dotted,
+                    "weight": p.target_weight,
+                    "stop_loss_pct": p.stop_loss_pct,
+                    "take_profit_pct": p.take_profit_pct,
+                })
+                for p in proposal.positions
+            ],
+            "cash_weight": proposal.cash_weight,
+            "trigger_ranges": tranches or None,
+            "triggers": [t.kind for t in report.triggers_hit],
+            "inert_ports": list(report.inert_ports) or None,
             "asof": str(session_date),
             "run_id": run_id,
             "source": "orchestrated",
-        }))
-    bindings.note_llm_use(settled)
+            "escalation_digest": report.semantic_digest(),
+            "escalated_from_asof": fast.get("asof"),
+        })
+        bindings.persist_decision("decide", record)
+        if tranches:
+            bindings.persist_decision("order", _only_present({
+                "code": canonical,
+                "name": fast.get("name") or payload.get("name"),
+                "strategy_id": payload.get("strategy_id"),
+                "strategy_name": payload.get("strategy_name"),
+                "tranches": tranches,
+                "stop": proposal.positions[0].stop_loss_pct if proposal.positions else None,
+                "take": proposal.positions[0].take_profit_pct if proposal.positions else None,
+                "logic": "深研判 trader 提案的分批触发价区间(advisory;人工执行,观澜绝不下单)",
+                "asof": str(session_date),
+                "run_id": run_id,
+                "source": "orchestrated",
+            }))
+    except Exception as exc:  # noqa: BLE001 — the run happened; the landing failed
+        _LOG.warning("deep run %s completed but its outcome could not be landed: %s "
+                     "(fast result stands)", run_id, exc, exc_info=True)
+        return {**fast, "deep_attempted": True, "deep_outcome": OUTCOME_FAILED,
+                "run_id": run_id}
+    finally:
+        _note_settled_once()
     return {**record, "ok": True, "deep_attempted": True,
             "deep_outcome": OUTCOME_COMPLETED}
 
@@ -914,7 +951,10 @@ def build_production_bindings() -> DeepDecideBindings:
     """Assemble the production :class:`DeepDecideBindings` (durable stores, sealed chain).
 
     HONEST STATE (recorded): today this raises before a single deep run can
-    exist — ``build_production_catalog_runtime(phase9_catalog_snapshot())``
+    exist. First gate: the process durable-store binding must already be
+    ``bound`` (the R23/R24 startup binding; :class:`ProductionStoresUnbound`
+    otherwise — the deep lane never self-binds, review I-3). Second gate:
+    ``build_production_catalog_runtime(phase9_catalog_snapshot())``
     refuses because no reviewed material source resolves the full Phase-9
     catalog (Task 0b concern 2), and even with materials the sealed catalog's
     data-prefetch grants cannot support ``pv.technical`` / ``text.news`` /
@@ -926,10 +966,8 @@ def build_production_bindings() -> DeepDecideBindings:
         build_phase9_registry,
         phase9_catalog_snapshot,
     )
-    from guanlan_v2.orchestration.adapters.durable import (
-        bind_process_durable_stores_and_scan,
-        process_durable_stores,
-    )
+    from guanlan_v2 import orch_store_status as _orch_status
+    from guanlan_v2.orchestration.adapters.durable import process_durable_stores
     from guanlan_v2.orchestration.adapters.api import build_plan_approval_coordinator
     from guanlan_v2.orchestration.admission import PlanAdmissionService
     from guanlan_v2.orchestration.catalog_runtime import BridgeCatalogView
@@ -947,8 +985,18 @@ def build_production_bindings() -> DeepDecideBindings:
     from guanlan_v2.seats import watcher as _watcher
 
     clock = SystemClock()
-    stores = process_durable_stores() or bind_process_durable_stores_and_scan(
-        allowed_cell_namespaces=(_worker.PROMPT_CELL_NAMESPACE,))
+    # review I-3: consult the R23/R24 status record and REFUSE — never self-bind.
+    # A deep-lane bind here would violate the server's 全进程唯一绑定 invariant
+    # (the allowlist freezes at construction) and would side-effect the process
+    # store binding before today's catalog-runtime refusal fires.
+    stores = process_durable_stores()
+    if stores is None or not _orch_status.orchestration_store_bound():
+        raise ProductionStoresUnbound(
+            "the process orchestration durable-store binding is "
+            f"{_orch_status.orchestration_store_state()!r} (only 'bound' is "
+            "healthy); the deep lane never self-binds — fix the startup binding "
+            "(guanlan_v2.orchestration.startup / GET /orchestration/store_status) "
+            "and restart. Deep lane stays dead; fast path unaffected.")
     registry = build_phase9_registry(_chain.PHASE9_BASE_REGISTRY_DIGEST)
     stores.resolver.register(registry)
     rt_digest = registry.registry_digest

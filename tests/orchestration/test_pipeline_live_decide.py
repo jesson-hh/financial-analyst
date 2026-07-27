@@ -568,12 +568,50 @@ class TestHappyDeepPath:
             assert "300750" in blob            # the rendered trusted subject block
             assert "trusted_subject" in blob
 
+    #: the plan-side/admission evidence the "code-free journal" claim covers —
+    #: worker OUTPUT artifacts are excluded (their payloads legitimately carry
+    #: symbols the model wrote), and ``RunSubject@1`` is the ONE sanctioned carrier.
+    _PLAN_SIDE_SCHEMAS = (
+        "Plan@1", "AdmissionCandidate@1", "PlanValidationReport@1",
+        "RuntimeSupportReport@1", "PlanAdmitted@1", "PlanApproval@1",
+        "PromptAssemblyRecord@1",
+    )
+
     def test_the_draft_stays_code_free_the_subject_enters_only_at_assembly(self, run):
-        """Task 6's invariant is preserved through the runner: the admitted plan's
-        journal carries no six-digit code; only the assembler channel does."""
-        rows = run.env.stores.events.journal(run.out["run_id"], "main")
-        frozen = [e for e in rows if e.event_type == EventType.PLAN_FROZEN]
-        assert frozen, "the run must have frozen a plan"
+        """Task 6's invariant is preserved through the runner: the admitted plan
+        and every piece of its admission/prompt evidence carry NO six-digit code
+        — the subject reaches the model exclusively through the per-run
+        assembler channel, anchored by the ONE committed ``RunSubject@1``."""
+        env = run.env
+        # test-side read of the in-memory payload map (no public listing exists);
+        # pydantic's own serialization covers every stored contract model.
+        stored_by_schema: dict[str, list] = {}
+        for stored in dict(env.stores._shared.backend.payloads).values():
+            stored_by_schema.setdefault(stored.schema_key, []).append(stored)
+
+        def _blob(stored) -> str:
+            return stored.model.model_dump_json()
+
+        assert stored_by_schema.get("Plan@1"), "the frozen Plan must be persisted"
+        assert stored_by_schema.get("PromptAssemblyRecord@1")
+        # the fixture code appears in NO persisted payload except the subject.
+        for schema_key, entries in stored_by_schema.items():
+            if schema_key == "RunSubject@1":
+                continue
+            for stored in entries:
+                assert "300750" not in _blob(stored), schema_key
+        # generic sweep on the plan-side evidence: no quoted six-digit string of
+        # ANY code, not just the fixture's.
+        for schema_key in self._PLAN_SIDE_SCHEMAS:
+            for stored in stored_by_schema.get(schema_key, ()):
+                blob = _blob(stored)
+                assert re.search(r'"\d{6}"', blob) is None, (schema_key, blob)
+        # and the subject really IS committed — carried, not implied.
+        assert any("300750" in _blob(s)
+                   for s in stored_by_schema.get("RunSubject@1", ()))
+        # the frozen-plan event exists on the run journal (the original check).
+        rows = env.stores.events.journal(run.out["run_id"], "main")
+        assert any(e.event_type == EventType.PLAN_FROZEN for e in rows)
 
 
 # =========================================================================== #
@@ -716,6 +754,56 @@ class TestDegradedHonest:
         assert _decide_rows(env) == []
         # the failed run reports its settled spend (upstream nodes really ran).
         assert len(env.noted) == 1 and 0 < env.noted[0] <= 8
+
+    def test_a_post_runner_landing_failure_still_notes_the_settled_spend(
+            self, tmp_path, heavy):
+        """Review I-1: once the runner completed, its settled invocations are
+        REAL spend against the watcher's 24/day pool — a failure in the landing
+        steps (extract/persist) must not lose them, and must note exactly once."""
+        env = _build_env(tmp_path, heavy)
+        kinds: list = []
+
+        def broken_persist(kind, rec):
+            kinds.append(kind)
+            raise RuntimeError("disk full (scripted)")
+
+        fast_result = _fast_result("300750")
+        decide = make_orchestrated_decide(
+            fast_decide=_make_fast(env, fast_result),
+            bindings=_bindings(env, heavy, strat_fn=lambda sid: dict(_OPT_IN_STRAT),
+                               persist_decision=broken_persist))
+        out = decide(_payload("300750"))
+        assert out.get("deep_attempted") is True
+        assert out.get("deep_outcome") == "failed"
+        assert out.get("run_id")
+        for key, value in fast_result.items():
+            assert out[key] == value
+        assert env.noted == [8]      # the folded count reached the pool, ONCE
+        assert kinds == ["decide"]   # the landing died at the first append
+
+    def test_a_materialize_refusal_falls_back_refused_through_the_real_branch(
+            self, tmp_path, heavy, monkeypatch):
+        """Review Minor 1: drive a typed refusal THROUGH the materialize call so
+        the ``except DeepDecideError`` branch itself is exercised."""
+        from guanlan_v2.orchestration.pipeline.deep_decide import SubjectRefused
+
+        env = _build_env(tmp_path, heavy)
+        fast_result = _fast_result("300750")
+
+        def refusing_materialize(**kwargs):
+            raise SubjectRefused("scripted: the subject artifact was refused")
+
+        monkeypatch.setattr(live_decide, "materialize_deep_decide_draft",
+                            refusing_materialize)
+        decide = make_orchestrated_decide(
+            fast_decide=_make_fast(env, fast_result),
+            bindings=_bindings(env, heavy, strat_fn=lambda sid: dict(_OPT_IN_STRAT)))
+        out = decide(_payload("300750"))
+        assert out.get("deep_attempted") is True
+        assert out.get("deep_outcome") == "refused"
+        for key, value in fast_result.items():
+            assert out[key] == value
+        assert _decide_rows(env) == [] and env.noted == []
 
     def test_a_raising_binding_never_raises_into_the_tick(self, tmp_path, heavy):
         env = _build_env(tmp_path, heavy)
@@ -930,6 +1018,28 @@ class TestWatcherServerSeams:
                             lambda: _bindings(env, heavy))
         fn = live_decide.build_production_decide_fn()
         assert callable(fn)
+
+    def test_an_unbound_process_store_is_a_typed_refusal_never_a_self_bind(
+            self, monkeypatch):
+        """Review I-3: with no healthy R23/R24 process binding, the deep lane
+        REFUSES (typed) — it must never become the process binder itself (a
+        deep-lane rebind would freeze a one-namespace allowlist and violate the
+        server's 全进程唯一绑定 invariant)."""
+        from guanlan_v2.orchestration.adapters import durable as durable_mod
+
+        bind_calls: list = []
+        monkeypatch.setattr(durable_mod, "process_durable_stores", lambda: None)
+
+        def spy_bind(**kwargs):
+            bind_calls.append(kwargs)
+            raise AssertionError("the deep lane must never self-bind the stores")
+
+        monkeypatch.setattr(
+            durable_mod, "bind_process_durable_stores_and_scan", spy_bind)
+        with pytest.raises(live_decide.ProductionStoresUnbound,
+                           match="never self-binds"):
+            live_decide.build_production_bindings()
+        assert bind_calls == []
 
     def test_production_assembly_failure_is_loud_never_silent(self, monkeypatch):
         def exploding():
