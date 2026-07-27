@@ -66,6 +66,9 @@ __all__ = [
     "EscalationReport",
     "RunSubject",
     "TaSubmission",
+    # the mandatory v1 badge: exported so the producing surface IMPORTS the one
+    # source of truth instead of re-typing the string beside its own validator.
+    "NO_CROSS_SECTIONAL_SUMMARY_BADGE",
 ]
 
 #: the closed candidate-source vocabulary (the three ``cand.*`` workers).

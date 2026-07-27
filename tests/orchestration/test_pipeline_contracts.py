@@ -647,7 +647,11 @@ def test_contracts_module_exports_the_full_surface():
         "RecommendationEntry", "RecommendationSlate",
         "EscalationTrigger", "EscalationReport",
         "RunSubject", "TaSubmission",
+        # the mandatory v1 badge travels with the contracts: the producing surface
+        # (pipeline.screening) imports it rather than re-typing the literal.
+        "NO_CROSS_SECTIONAL_SUMMARY_BADGE",
     }
+    assert C.NO_CROSS_SECTIONAL_SUMMARY_BADGE == "no_cross_sectional_summary_v1"
 
 
 def test_package_reexports_the_five_publics():

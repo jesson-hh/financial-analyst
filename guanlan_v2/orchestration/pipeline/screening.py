@@ -72,6 +72,17 @@ in NO executable plan field: not in ``params`` (structurally impossible), not in
 the base request, so the N executable projections are byte-identical and the
 committed ``RunSubject@1`` stays the only sanctioned subject authority. Free-text
 goal parsing remains forbidden.
+
+**The A-line product (assemble → render → land).** After the lanes have run,
+:func:`build_recommendation_slate` folds each lane's committed ``ResearchPlan@1``
+into a ``RecommendationSlate@1``, :func:`render_recommendation_md` renders it as
+the advisory document, and :func:`land_recommendation` files that document through
+an INJECTED archive callable. The whole tail is read-only over the kernel and
+copies rather than computes: the rating is the lane's own verdict verbatim, a lane
+that produced none is named in ``degraded_lanes`` instead of being defaulted or
+dropped, the document opens with :data:`RECOMMENDATION_ADVISORY_BANNER` before any
+content, and the cross-sectional ``dec.pm`` slot stays ``None`` under its mandatory
+badge because in v1 nothing computed it.
 """
 from __future__ import annotations
 
@@ -102,7 +113,13 @@ from guanlan_v2.orchestration.digest import (
     UtcDateTime,
     content_digest,
 )
-from guanlan_v2.orchestration.enums import ApprovalPolicy, ExecutionKind, PlanSource
+from guanlan_v2.orchestration.enums import (
+    ApprovalPolicy,
+    ExecutionKind,
+    PlanSource,
+    PortfolioRating,
+)
+from guanlan_v2.orchestration.events import EventType
 from guanlan_v2.orchestration.market.factors import _session_date as session_date_of
 from guanlan_v2.orchestration.plan_diff import (
     PLAN_DIFF_SCHEMA_REF,
@@ -123,7 +140,13 @@ from guanlan_v2.orchestration.pipeline.assembly import (
     PLAN_PRESET_RECORD_V2_SCHEMA_REF,
     PlanPresetRecordV2,
 )
-from guanlan_v2.orchestration.pipeline.contracts import CandidateSlate, RunSubject
+from guanlan_v2.orchestration.pipeline.contracts import (
+    NO_CROSS_SECTIONAL_SUMMARY_BADGE,
+    CandidateSlate,
+    RecommendationEntry,
+    RecommendationSlate,
+    RunSubject,
+)
 
 if TYPE_CHECKING:  # the coordinator is duck-typed at the call seam; this is the
     # returned value's real type, imported for readers/type-checkers only so the
@@ -139,6 +162,7 @@ __all__ = [
     "SCREENING_LANE_WORKER_IDS",
     "RUN_SUBJECT_SCHEMA_REF",
     "CANDIDATE_SLATE_SCHEMA_REF",
+    "RESEARCH_PLAN_SCHEMA_REF",
     # committed source
     "SCREENING_LANE_PRESET_FILE",
     # badges
@@ -146,6 +170,11 @@ __all__ = [
     "CONTEXT_SNAPSHOT_STALE_BADGE",
     "CONTEXT_SNAPSHOT_DATA_DATE_BADGE_PREFIX",
     "AUXILIARY_EVIDENCE_UNWIRED_BADGE",
+    # recommendation product
+    "RECOMMENDATION_ADVISORY_BANNER",
+    "RECOMMENDATION_ARCHIVE_ID_PREFIX",
+    "RECOMMENDATION_ARCHIVE_ARTIFACT_TYPE",
+    "REVIEWED_RATING_ORDER",
     # errors
     "ScreeningError",
     "EmptySlateRefused",
@@ -157,6 +186,7 @@ __all__ = [
     "BatchAdmissionRefused",
     # ports
     "SubjectCommitter",
+    "ArchivePut",
     # contracts
     "ScreeningLaneEntry",
     "ScreeningCostPreview",
@@ -168,6 +198,11 @@ __all__ = [
     "build_screening_batch",
     "screening_cost_preview",
     "admit_screening_batch",
+    "build_recommendation_slate",
+    "recommendation_sort_key",
+    "render_recommendation_md",
+    "recommendation_archive_id",
+    "land_recommendation",
     "session_date_of",
 ]
 
@@ -208,6 +243,15 @@ RUN_SUBJECT_SCHEMA_REF: SchemaRef = SchemaRef(name="RunSubject", version="1")
 #: the slate artifact's schema identity (Task 1's ``CandidateSlate@1``).
 CANDIDATE_SLATE_SCHEMA_REF: SchemaRef = SchemaRef(name="CandidateSlate", version="1")
 
+#: the terminal artifact's schema identity — ``dec.research_mgr``'s sole output.
+#: A lane's rating is READ from this payload and never re-derived.
+RESEARCH_PLAN_SCHEMA_REF: SchemaRef = SchemaRef(name="ResearchPlan", version="1")
+
+#: the two control schemas the event-sourced committed-artifact lookup reads,
+#: named exactly as the reviewed readers name them (dag.py:118-119, pool.py:153).
+_NODE_RUN_SCHEMA_REF: SchemaRef = SchemaRef(name="NodeRun", version="1")
+_LAYER_COMMIT_SCHEMA_REF: SchemaRef = SchemaRef(name="LayerCommit", version="1")
+
 
 # =========================================================================== #
 # committed source location                                                    #
@@ -231,6 +275,26 @@ CONTEXT_SNAPSHOT_STALE_BADGE: str = "context_snapshot_stale"
 
 #: accompanies the stale badge with the snapshot's own session date.
 CONTEXT_SNAPSHOT_DATA_DATE_BADGE_PREFIX: str = "context_snapshot_data_date:"
+
+#: the MANDATORY first line of every rendered recommendation document. A 选股
+#: product that a human (or an agent) may read must say what it is BEFORE it says
+#: anything else: this is orchestrated research, not an order.
+RECOMMENDATION_ADVISORY_BANNER: str = "> 本推荐为编排研究产物,仅供参考,不构成交易指令"
+
+#: the archive artifact id prefix + type. The type is one of the archive router's
+#: three accepted kinds (archive/api.py:28) and the prefix keeps the id inside its
+#: ``^[A-Za-z0-9_\-\.]{1,80}$`` whitelist (archive/api.py:27).
+RECOMMENDATION_ARCHIVE_ID_PREFIX: str = "rs_orch_screen_"
+RECOMMENDATION_ARCHIVE_ARTIFACT_TYPE: str = "research"
+
+#: the reviewed rating vocabulary, in the reviewed order (``PortfolioRating``'s own
+#: declaration order — best first). It is the SORT order, never a filter and never
+#: a validator: :class:`~guanlan_v2.orchestration.pipeline.contracts.
+#: RecommendationEntry`'s ``rating`` is a free string by Task 1's ruling, so a
+#: grade outside this tuple is carried verbatim and sorted after the known ones
+#: (see :func:`recommendation_sort_key`).
+REVIEWED_RATING_ORDER: tuple[str, ...] = tuple(r.value for r in PortfolioRating)
+
 
 #: MANDATORY on every :class:`ScreeningCostPreview` (the ``subject_run_scoped_v1``
 #: precedent, and ``RecommendationSlate``'s mandatory-badge shape). The human
@@ -320,6 +384,13 @@ class _Clock(Protocol):
 #: sealed registry yet (Task 11 owns that), so the real ``payloads.put`` lands
 #: with its registration.
 SubjectCommitter = Callable[[RunSubject], TypedPayloadRef]
+
+#: the injected archive-landing port: ``(artifact_id, artifact_type, markdown)``.
+#: A CALLABLE the caller binds — never an HTTP self-call from here. Production
+#: binds it to the console ``_archive_research`` idiom (console/api.py:351), which
+#: posts the artifact envelope to ``POST /archive/put`` in-process; tests bind a
+#: spy. This module owns the id, the type and the document — never the transport.
+ArchivePut = Callable[[str, str, str], None]
 
 
 # =========================================================================== #
@@ -559,6 +630,23 @@ def _lane_request(base: OrchestrationRequest, code: str) -> OrchestrationRequest
     return base.model_copy(update={"request_id": f"{base.request_id}:{code}"})
 
 
+def _lane_draft_id(batch_id: str, code: str) -> str:
+    """The lane's draft id — kept beside :func:`_lane_run_id` so the two runtime
+    identities this builder stamps are readable (and editable) in one place."""
+    return f"screening.{batch_id[:16]}.{code}"
+
+
+def _lane_run_id(batch_id: str, code: str) -> str:
+    """The lane's run id — the key its whole event history is journalled under.
+
+    Extracted so :func:`build_recommendation_slate` reads the runs under the SAME
+    identity :func:`build_screening_batch` stamped. Two literals would be two
+    identities the day one of them is edited, and the assembler would then report
+    every lane as degraded while the runs sat in the journal untouched.
+    """
+    return f"screening-{batch_id[:16]}-{code}"
+
+
 def _batch_id(
     *,
     slate_ref: TypedPayloadRef,
@@ -746,8 +834,8 @@ def build_screening_batch(
                 "an authority")
 
         draft = PlanDraft(
-            id=f"screening.{batch_id[:16]}.{code}",
-            run_id=f"screening-{batch_id[:16]}-{code}",
+            id=_lane_draft_id(batch_id, code),
+            run_id=_lane_run_id(batch_id, code),
             request_id=request.request_id,
             phase="main",
             # PRESET_FALLBACK, not PRESET: the lease channel is structurally
@@ -973,3 +1061,271 @@ def admit_screening_batch(
             candidate_catalog_digest=prep.draft.catalog_digest,
             candidate_registry_digest=prep.draft.schema_registry_digest))
     return tuple(outcomes)
+
+
+# =========================================================================== #
+# the recommendation product: assemble → render → land                         #
+# =========================================================================== #
+def _committed_terminal_plan_ref(stores: Any, run_id: str) -> TypedPayloadRef | None:
+    """The lane's committed ``ResearchPlan@1``, or ``None`` if there is not one.
+
+    Event-sourced and READ-ONLY: this is the reviewed resume read
+    (``dag._load_run_history``, dag.py:1067-1083) with the pool's own committed-
+    visibility rule (``ArtifactPool._rebuild``, pool.py:700-731) applied to it —
+
+    1. ``NodeStateChanged`` → the durable ``NodeRun`` records, journal-ordered;
+    2. ``LayerCommitted`` → the ``LayerCommit`` payloads, whose ``artifacts`` are
+       the ONLY artifact ids a barrier ever made visible;
+    3. ``ArtifactStaged`` → each artifact's persisted typed payload (the event's
+       ``correlation_id`` IS the artifact id — pool.py:388).
+
+    A pool cannot serve here: :class:`~guanlan_v2.orchestration.pool.ArtifactPool`
+    resolves committed artifacts through its own in-process envelope storage and a
+    frozen ``Plan``, neither of which a later assembly step holds. The journal does,
+    and it is the durable authority both of them are derived from.
+
+    THREE independent facts must line up before a payload is treated as this lane's
+    verdict, so neither a bystander artifact nor an unfinished one can be read as
+    one: the artifact must be an output the run's own **terminal node** recorded,
+    it must appear in a **committed** layer, and its persisted payload must be a
+    **``ResearchPlan@1``**. Anything else — a run that never happened, a failed
+    terminal, a staged-but-unbarriered artifact — returns ``None``, which the
+    caller records as a degraded lane rather than a missing stock.
+    """
+    node_records: list[Any] = []
+    committed_artifact_ids: set[str] = set()
+    staged: dict[str, tuple[SchemaRef, PayloadRef]] = {}
+    for event in stores.events.journal(run_id, "main"):
+        if event.event_type is EventType.NODE_STATE_CHANGED:
+            node_records.append(stores.payloads.get(
+                event.payload_ref, expected_schema_ref=_NODE_RUN_SCHEMA_REF))
+        elif event.event_type is EventType.LAYER_COMMITTED:
+            layer_commit = stores.payloads.get(
+                event.payload_ref, expected_schema_ref=_LAYER_COMMIT_SCHEMA_REF)
+            committed_artifact_ids.update(
+                a.artifact_id for a in layer_commit.artifacts)
+        elif event.event_type is EventType.ARTIFACT_STAGED:
+            if event.correlation_id is not None:
+                staged[event.correlation_id] = (
+                    event.payload_schema_ref, event.payload_ref)
+
+    terminal = [nr for nr in node_records
+                if nr.node_id == SCREENING_LANE_TERMINAL_NODE_ID]
+    if not terminal:
+        return None
+    # the LAST durable record for the terminal node is its terminal status (the
+    # reviewed ``_terminal_record_at_commit`` rule, dag.py:1086-1095, without a
+    # barrier to bound it: a later attempt supersedes an earlier one).
+    for artifact_id in terminal[-1].output_artifact_ids:
+        if artifact_id not in committed_artifact_ids:
+            continue
+        entry = staged.get(artifact_id)
+        if entry is None or entry[0] != RESEARCH_PLAN_SCHEMA_REF:
+            continue
+        return TypedPayloadRef(schema_ref=entry[0], payload_ref=entry[1])
+    return None
+
+
+def recommendation_sort_key(entry: RecommendationEntry) -> tuple[int, int]:
+    """The documented slate order: rating grade first, then the candidate's rank.
+
+    ``RecommendationEntry.rating`` is a FREE ``NonEmptyStr`` (Task 1's ruling — the
+    closed ``PortfolioRating`` vocabulary is NOT assumed here), so the rule has to
+    say honestly what it does with a grade it does not know:
+
+    * a grade in :data:`REVIEWED_RATING_ORDER` sorts at its reviewed position;
+    * **every** other grade sorts after **all** of them, in one undifferentiated
+      bucket — it is never guessed into the middle of the ladder, and never
+      re-ranked by its own text (which would invent an ordering nobody reviewed);
+    * within a bucket, ``lane_index`` — the candidate's slate rank order — breaks
+      the tie, so equal grades keep the upstream ranking they arrived with.
+    """
+    try:
+        grade = REVIEWED_RATING_ORDER.index(entry.rating)
+    except ValueError:
+        grade = len(REVIEWED_RATING_ORDER)
+    return (grade, entry.lane_index)
+
+
+def build_recommendation_slate(
+    batch: ScreeningBatch, *, stores: Any
+) -> RecommendationSlate:
+    """Fold each lane's committed ``ResearchPlan@1`` into the advisory 选股 product.
+
+    Pure assembly over already-committed evidence:
+
+    * the rating is **copied verbatim** from the lane's committed plan — this
+      function re-derives, re-scores and re-thresholds nothing, and the entry pins
+      the exact payload the rating was read off so any reader can re-check it;
+    * ``lane_index`` stays the candidate's slate rank order (the vocabulary
+      :class:`ScreeningLaneEntry` and ``degraded_lanes`` already share), while the
+      ENTRY ORDER is :func:`recommendation_sort_key` — grade, then rank;
+    * a lane with no committed plan appears in ``degraded_lanes`` and nowhere else.
+      It is never dropped, never defaulted to a neutral rating, and never given a
+      rating from a staged-but-unbarriered artifact;
+    * ``portfolio_decision_ref`` is ``None`` with the mandatory
+      ``no_cross_sectional_summary_v1`` badge — the v1 invariant (ratified D3: the
+      single-code context convention makes a 全场裁决 structurally unavailable);
+    * the batch's own badges and its cost preview's badge travel onto the product
+      verbatim, deduplicated in first-seen order. What the human was told when they
+      approved the cost (seven of nine workers are auxiliary evidence; the subject
+      is run-scoped) is exactly what the product they read still says. Badges are
+      never re-counted or re-worded here.
+
+    A batch whose runs all degraded yields an EMPTY, honest slate (无推荐 is a real
+    result — the ``CandidateSlate`` precedent), not an exception.
+
+    It is READ-ONLY over the kernel: it appends no event, commits no payload and
+    touches no budget — every read goes through ``stores.events.journal`` /
+    ``stores.payloads.get``.
+    """
+    entries: list[RecommendationEntry] = []
+    degraded: list[int] = []
+    for lane in batch.entries:
+        plan_ref = _committed_terminal_plan_ref(
+            stores, _lane_run_id(batch.batch_id, lane.code))
+        if plan_ref is None:
+            degraded.append(lane.lane_index)
+            continue
+        plan = stores.payloads.get(
+            plan_ref.payload_ref, expected_schema_ref=plan_ref.schema_ref)
+        # ``.value`` unwraps the enum member to the exact string it declares; a
+        # plain string (a widened future vocabulary) passes through untouched.
+        rating = getattr(plan.recommendation, "value", plan.recommendation)
+        entries.append(RecommendationEntry(
+            code=lane.code, lane_index=lane.lane_index, rating=rating,
+            research_plan_ref=plan_ref))
+
+    badges: list[str] = [NO_CROSS_SECTIONAL_SUMMARY_BADGE]
+    for badge in tuple(batch.badges) + tuple(batch.cost_preview.badges):
+        if badge not in badges:
+            badges.append(badge)
+
+    return RecommendationSlate(
+        as_of=batch.as_of,
+        batch_id=batch.batch_id,
+        candidate_slate_ref=batch.candidate_slate_ref,
+        entries=tuple(sorted(entries, key=recommendation_sort_key)),
+        portfolio_decision_ref=None,
+        degraded_lanes=tuple(sorted(degraded)),
+        badges=tuple(badges),
+    )
+
+
+def _one_line(text: str) -> str:
+    """Model text, flattened onto ONE line — it is data, never document structure.
+
+    A rationale is untrusted generated prose: left with its own newlines it could
+    open a heading, a list or a second advisory banner inside a document a human
+    reads as ours. Collapsing every whitespace run to a single space removes that
+    reach without censoring a character of the text itself (nothing is truncated,
+    so no verdict is silently shortened).
+    """
+    return " ".join(text.split())
+
+
+def render_recommendation_md(slate: RecommendationSlate, *, stores: Any) -> str:
+    """Render the slate as the deterministic advisory markdown document.
+
+    The first line is ALWAYS :data:`RECOMMENDATION_ADVISORY_BANNER`. Every number
+    in the body traces to a payload field — a lane index, a count of a payload
+    tuple, an ``as_of``, a digest, or text copied out of the lane's committed
+    ``ResearchPlan@1``. This renderer computes no score, no weight, no target and
+    no percentage: it has no numbers of its own to state.
+
+    ``stores`` is here because the rationale and the proposed actions live in the
+    committed plan, not on the slate: each entry's ``research_plan_ref`` is
+    resolved through the payload store, which re-validates the payload against its
+    registry on read — so the document quotes the exact plan the entry pins, or the
+    store raises. A ref that no longer resolves is an outage or a tamper, never a
+    silently blank section.
+    """
+    lines: list[str] = [RECOMMENDATION_ADVISORY_BANNER, ""]
+    lines += [
+        "# 观澜 · 编排选股推荐",
+        "",
+        f"- 批次 batch_id:{slate.batch_id}",
+        f"- as_of:{slate.as_of.isoformat()}",
+        "- 候选盘 "
+        f"{slate.candidate_slate_ref.schema_ref.key}:"
+        f"{slate.candidate_slate_ref.payload_ref.content_digest}",
+        f"- 徽章:{'、'.join(slate.badges)}",
+        f"- 推荐 {len(slate.entries)} 条 / 降级车道 {len(slate.degraded_lanes)} 条",
+        "",
+        "## 推荐",
+        "",
+    ]
+    if not slate.entries:
+        lines += ["- (无):本批次没有任何车道产出已提交的研判产物。", ""]
+    for entry in slate.entries:
+        plan = stores.payloads.get(
+            entry.research_plan_ref.payload_ref,
+            expected_schema_ref=entry.research_plan_ref.schema_ref)
+        lines += [
+            f"### {entry.code} · {entry.rating}",
+            "",
+            f"- 车道序位 lane_index:{entry.lane_index}",
+            f"- 评级(逐字复制自 {entry.research_plan_ref.schema_ref.key},未再推导):"
+            f"{entry.rating}",
+            f"- 依据 {entry.research_plan_ref.schema_ref.key}:"
+            f"{entry.research_plan_ref.payload_ref.content_digest}",
+            f"- 研判理由:{_one_line(plan.rationale)}",
+        ]
+        if plan.strategic_actions:
+            lines.append("- 建议动作:")
+            lines += [f"  - {_one_line(a)}" for a in plan.strategic_actions]
+        else:
+            lines.append("- 建议动作:(该研判未提出动作)")
+        lines.append("")
+    lines += ["## 降级车道", ""]
+    if not slate.degraded_lanes:
+        lines.append("- (无):每条车道都产出了已提交的研判产物。")
+    for lane_index in slate.degraded_lanes:
+        lines.append(
+            f"- lane_index {lane_index}:该车道没有已提交的 "
+            f"{RESEARCH_PLAN_SCHEMA_REF.key},因此不进入推荐(诚实降级,不是静默丢弃)。")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def recommendation_archive_id(slate: RecommendationSlate) -> str:
+    """The archive artifact id: ``rs_orch_screen_<YYYYMMDD>`` in +08:00 session terms.
+
+    The date is :func:`session_date_of` of the slate's ``as_of`` — the same session
+    convention the batch's recency badge uses, so a 22:00Z batch files under the
+    session day it actually belongs to rather than the UTC one.
+
+    The id is DAY-scoped, not batch-scoped: that is the reviewed format, and its
+    consequence is recorded rather than hidden — two batches on one session day
+    land on ONE archive id, and the second overwrites the first (the archive is an
+    upsert by id, archive/api.py:45-55). The document names its own ``batch_id`` in
+    its header, which is how a reader tells which batch is archived.
+    """
+    return (f"{RECOMMENDATION_ARCHIVE_ID_PREFIX}"
+            f"{session_date_of(slate.as_of).replace('-', '')}")
+
+
+def land_recommendation(
+    slate: RecommendationSlate, *, stores: Any, archive_put: ArchivePut
+) -> None:
+    """Write the rendered document through the injected archive seam.
+
+    One call, through the caller's own callable: ``(artifact_id, artifact_type,
+    markdown)`` with the id from :func:`recommendation_archive_id` and the type
+    ``research`` (one of the archive router's three accepted kinds). This module
+    performs no HTTP and holds no client — the transport is the caller's.
+
+    Idempotent per batch by construction: the id is a pure function of the slate,
+    so re-landing the same slate overwrites the same archive artifact and can never
+    mint a second one.
+
+    A landing failure PROPAGATES. It is deliberately not caught, not logged-and-
+    swallowed and not converted into a typed refusal: an archive outage is not a
+    considered verdict, and a caller that believes an unlanded recommendation was
+    filed is worse off than one that sees the error.
+    """
+    archive_put(
+        recommendation_archive_id(slate),
+        RECOMMENDATION_ARCHIVE_ARTIFACT_TYPE,
+        render_recommendation_md(slate, stores=stores),
+    )
