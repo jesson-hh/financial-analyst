@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Do not require an environment-specific execution skill that may not be installed.
 
-**Goal:** Compose the completed Phase 1–9 kernel into the two user-facing product pipelines ruled in `docs/superpowers/specs/2026-07-18-orchestration-integration-design.md` (rulings I1–I6): **(A) 帷幄选股流水线** — deterministic candidate workers (`cand.v4`/`cand.lane0`/`cand.model`) feeding an N-lane per-stock deep-research plan whose whole-picture cost is approved once per run on the Phase 7 card, landing an advisory `RecommendationSlate` into the console surface and the GL research archive; **(B) 落子买卖点 live 换脑** — the seats watcher's injectable `decide_fn` wrapped so the existing fast single-LLM tick keeps running while a pure zero-LLM escalation judge (direction flip / stop-take proximity / event wordlist / pattern hit / per-strategy opt-in) promotes selected judgments to a sealed single-code deep-decide preset admitted through a Phase 7 intraday `ApprovalLease`, with every deep failure degrading honestly back to the fast result; **(C) 公共件** — the `/orchestration/pipeline` router, `ww_orchestrate_*` console tools (five-place sync), the D7 external-TA inbox, and the Phase 10 registry/catalog/preset chain node with goldens.
+**Goal:** Compose the completed Phase 1–9 kernel into the two user-facing product pipelines ruled in `docs/superpowers/specs/2026-07-18-orchestration-integration-design.md` (rulings I1–I6): **(A) 帷幄选股流水线** — deterministic candidate workers (`cand.v4`/`cand.lane0`/`cand.model`) feeding per-stock deep-research lane runs whose whole-picture cost is approved on the Phase 7 lease card (or per-card without a lease), landing an advisory `RecommendationSlate` into the console surface and the GL research archive; **(B) 落子买卖点 live 换脑** — the seats watcher's injectable `decide_fn` wrapped so the existing fast single-LLM tick keeps running while a pure zero-LLM escalation judge (direction flip / stop-take proximity / event wordlist / pattern hit / per-strategy opt-in) promotes selected judgments to a sealed single-code deep-decide preset admitted through a Phase 7 intraday `ApprovalLease`, with every deep failure degrading honestly back to the fast result; **(C) 公共件** — the `/orchestration/pipeline` router, `ww_orchestrate_*` console tools (five-place sync), the D7 external-TA inbox, and the Phase 10 registry/catalog/preset chain node with goldens.
 
-**Architecture:** Phase 10 is the product-composition phase: it imports — never redefines — Phases 1–9. Three mechanism rulings are fixed here: **(R-A)** screening plans are built by a deterministic builder as concrete-code `source=DYNAMIC` drafts (one lane per candidate code, standard Phase 8 worker params) approved once per run by a human; a byte-frozen lease-able screening preset is deferred behind correction clause D6. **(R-B)** the deep-decide preset is a sealed single-code preset in the Phase 7 pilot idiom — `code`/`asof` flow through `OrchestrationRequest` context, never plan params — so one `PlanPresetRecord` digest serves every stock and the Phase 7 `ApprovalLease` binds it. **(R-C)** the escalation judge is a pure function over an explicitly-assembled context; all I/O lives in injected ports in the context builder, and an absent port renders its trigger inert with a badge, never a guess. New code lives in `guanlan_v2/orchestration/pipeline/` plus additive seams in `guanlan_v2/seats/watcher.py`, `guanlan_v2/console/tools.py` and `guanlan_v2/server.py`.
+**Architecture:** Phase 10 is the product-composition phase: it imports — never redefines — Phases 1–9. Three mechanism rulings are fixed here: **(R-A, revised post-Task-0 — ratified D3)** screening runs are N per-code instances of a sealed single-code lane preset (code via request context; the handoff gate pinned that no Phase 8 lane worker carries `params_schema_ref`) admitted through a screening `ApprovalLease` whose issue form carries the whole-picture cost preview (count=N, budget cap), falling back to N pending human cards without a lease; the cross-sectional `dec.pm` summary is deferred with an honest badge (single-code context convention); the chat path stays the Phase 7 planner with per-plan approval. **(R-D, post-Task-0)** Task 0b supplies the production assembly (CatalogRuntime loading + worker tier ModelGateways + ExecutionRuntime/ArtifactPool composition into the Phase 9 launcher's plan-runner path) that Tasks 3/6/7 bind for real execution; the interval-shaped plan graph + per-interval `ReplayPlanCoordinator` port change (Phase 9 rulings A/C2/C3/C4) stays explicitly chartered post-Phase-10, and Task 8 uses the sanctioned injectable replay seam. **(R-B)** the deep-decide preset is a sealed single-code preset in the Phase 7 pilot idiom — `code`/`asof` flow through `OrchestrationRequest` context, never plan params — so one `PlanPresetRecord` digest serves every stock and the Phase 7 `ApprovalLease` binds it. **(R-C)** the escalation judge is a pure function over an explicitly-assembled context; all I/O lives in injected ports in the context builder, and an absent port renders its trigger inert with a badge, never a guess. New code lives in `guanlan_v2/orchestration/pipeline/` plus additive seams in `guanlan_v2/seats/watcher.py`, `guanlan_v2/console/tools.py` and `guanlan_v2/server.py`.
 
 **Tech Stack:** Python ≥3.11, Pydantic v2, `asyncio` (`to_thread` for journal/kernel I/O reached from the 9999 loop; sync HTTP self-calls from coroutines remain forbidden), `pytest` + `pytest-asyncio`, FastAPI `TestClient`. All modules `from __future__ import annotations`. Run tests from repo root `G:\guanlan-v2` with `pytest`.
 
@@ -78,7 +78,9 @@ git commit -m "test(orchestration): gate phase10 on phase1-9 contracts and produ
 | `guanlan_v2/orchestration/pipeline/__init__.py` | package export surface |
 | `guanlan_v2/orchestration/pipeline/contracts.py` | Phase 10 public contracts: `CandidateSlate@1`, `RecommendationSlate@1`, `EscalationReport@1`, `TaSubmission@1` + internal carriers |
 | `guanlan_v2/orchestration/pipeline/candidates.py` | deterministic candidate workers `cand.v4`/`cand.lane0`/`cand.model` + `RankingReader` port + production reader |
-| `guanlan_v2/orchestration/pipeline/screening.py` | deterministic N-lane screening plan builder (concrete-code DYNAMIC drafts) + cost preview + `build_recommendation_slate` assembler + archive landing |
+| `guanlan_v2/orchestration/pipeline/assembly.py` | Task 0b production assembly: CatalogRuntime loader + worker tier ModelGateways + ExecutionRuntime/ArtifactPool composition into the launcher plan-runner path + `build_phase10_preset_registry` mechanism |
+| `guanlan_v2/orchestration/pipeline/screening.py` | sealed per-code screening lane preset + lease-governed batch builder + cost preview + `build_recommendation_slate` assembler + archive landing |
+| `config/orchestration/presets/screening_lane_v1.json` | the sealed screening lane preset source |
 | `guanlan_v2/orchestration/pipeline/escalation.py` | frozen thresholds/wordlist, `EscalationContext` builder ports, pure `judge_escalation` |
 | `guanlan_v2/orchestration/pipeline/deep_decide.py` | sealed single-code deep-decide preset (context-bound) + Phase 10 preset registry extension |
 | `guanlan_v2/orchestration/pipeline/live_decide.py` | `make_orchestrated_decide` wrapper: fast passthrough + lease-admitted deep run + honest degradation + seats compat record |
@@ -94,6 +96,7 @@ git commit -m "test(orchestration): gate phase10 on phase1-9 contracts and produ
 | `tests/orchestration/golden/phase10_schema_manifest_v1.json` | registry golden |
 | `tests/orchestration/golden/phase10_catalog_manifest_v1.json` | catalog golden (cand.* workers + preset records) |
 | `tests/orchestration/test_phase10_handoff.py` | executable Phases 1–9 → 10 gate |
+| `tests/orchestration/test_pipeline_assembly.py` | Task 0b |
 | `tests/orchestration/test_pipeline_contracts.py` | Task 1 |
 | `tests/orchestration/test_pipeline_candidates.py` | Task 2 |
 | `tests/orchestration/test_pipeline_screening.py` | Tasks 3–4 |
@@ -108,6 +111,46 @@ git commit -m "test(orchestration): gate phase10 on phase1-9 contracts and produ
 
 ---
 
+## Task 0b: Production assembly (CatalogRuntime loading + worker gateways + plan-runner composition)
+
+> Chartered post-Task-0 (2026-07-27) from the Phase 9 permanent record: the kernel classes exist but nothing assembles them for lane workers in production — "no production CatalogRuntime loader / ExecutionRuntime / ArtifactPool / worker ModelGateway assembler" (Task 0 evidence, launcher docstring pins). Without this, every Phase 10 "production binding" would be a fixture stand-in — the exact overclaim the Phase 9 reviews caught. Scope is the assembler ONLY; the interval-shaped plan graph + per-interval `ReplayPlanCoordinator` port change (Phase 9 rulings A/C2/C3/C4) remains explicitly chartered post-Phase-10.
+
+**Files:**
+- Create: `guanlan_v2/orchestration/pipeline/assembly.py` (plus the minimal `pipeline/__init__.py` if this task lands first — whichever of Task 0b/Task 1 runs first creates it)
+- Test: `tests/orchestration/test_pipeline_assembly.py`
+
+**Interfaces:**
+- Consumes: the implemented kernel classes (`catalog_runtime.CatalogRuntime` + `TrustedFactoryRegistry`, the `worker.py` execution runtime + `ModelGateway` port, `pool.py` artifact pool), the Phase 9 launcher `build_admitted_plan_runner` (adapters/launcher.py) and `build_durable_runtime_stores`; the Phase 7 `planner_gateway.PlannerLLMModelGateway` idiom (engine `LLMClient.for_agent`, explicit repo `config/llm.yaml` path, single-shot, thread-isolated); the Phase 8 llm.yaml tier seats (`orchestration-fast`/`orchestration-reasoner`/`orchestration-reasoner-deep`) and ModelTier vocabulary; Phase 7 `PlanPresetRegistry`/`PlanPresetRecord`. **Correction clause E1 (binding):** the exact composition surface `build_admitted_plan_runner` requires, the deterministic-handler registration ABI, and the reviewed `ModelGateway` port signature are upstream-owned — bind to the implemented names at source before writing code; never a parallel runtime.
+- Produces:
+  - `def build_production_catalog_runtime(catalog_snapshot, *, registry, handler_registry) -> CatalogRuntime` — resolves catalog materials from their `config/orchestration/` physical sources per the manifests and registers deterministic handlers via the reviewed `TrustedFactoryRegistry` mechanism (Task 11 registers the `cand.*` handlers here);
+  - `class WorkerSeatModelGateway` — the worker-side `ModelGateway` implementation: maps a worker's model tier to the Phase 8 llm.yaml seat via `LLMClient.for_agent(<seat>, config_path=<repo>/config/llm.yaml)` (explicit path — never `find_config`); an unconfigured tier raises loudly (never a silent vendor fallback); thread-isolated, single-shot per invocation, per the planner-gateway idiom;
+  - `def build_production_plan_runner(*, stores, catalog_snapshot, registry, gateway_factory) -> <the launcher's plan-runner callable>` — composes CatalogRuntime + ExecutionRuntime + ArtifactPool + gateways into exactly what `build_admitted_plan_runner` consumes; `gateway_factory` is the ONLY seam that differs between tests (scripted gateways) and production (`WorkerSeatModelGateway`) — assembly code itself is identical in both;
+  - `def build_phase10_preset_registry(phase7_registry, records: tuple[PlanPresetRecord, ...]) -> PlanPresetRegistry` — the sealed extension mechanism (refuses non-Phase-7 bases; Phase 7 preset golden untouched); Task 3 adds the screening lane record, Task 6 the deep-decide record.
+
+**Required invariants:**
+
+1. the end-to-end proof runs the EXISTING pilot preset (`config/orchestration/presets/main_research_baseline.json`) through admission (fixture-approved) and `build_admitted_plan_runner` composed by `build_production_plan_runner` with scripted gateways — the assembly path is the real one, zero network, zero fixture stand-ins for assembly itself;
+2. tier resolution: each of the three Phase 8 seats resolves from the repo llm.yaml by explicit path; a missing/unknown tier raises a typed error naming the seat (loud, never silent);
+3. no approval/admission bypass exists anywhere in assembly (the runner only accepts admitted plans — inherited from the launcher, regression-pinned);
+4. no engine file is modified; no new EventType/method id; imports stay inside orchestration + engine LLM client.
+
+- [ ] **Step 1: Write failing assembly tests** — E1 reconciliation first (record the implemented composition surface in the test docstring with file:line); matrix: pilot-preset e2e through the composed runner (scripted gateways, RunResult completed, artifacts committed to tmp durable stores); tier happy ×3 + unconfigured-tier typed raise; gateway-factory seam (same assembly, different factory → different gateway observed); non-admitted plan refused; preset-registry extension (wrong base refused; Phase 7 golden byte-identical).
+
+Run now: `python -m pytest tests/orchestration/test_pipeline_assembly.py -v` — expected FAIL on missing module.
+
+- [ ] **Step 2: Implement `assembly.py`.**
+
+- [ ] **Step 3: Run and commit**
+
+Run: `python -m pytest tests/orchestration/test_pipeline_assembly.py tests/orchestration/test_phase10_handoff.py -v` — expected PASS.
+
+```bash
+git add guanlan_v2/orchestration/pipeline/assembly.py tests/orchestration/test_pipeline_assembly.py
+git commit -m "feat(orchestration): production assembly - catalog runtime loading, worker tier gateways, plan-runner composition"
+```
+
+---
+
 ## Task 1: Phase 10 public contracts
 
 **Files:**
@@ -119,7 +162,7 @@ git commit -m "test(orchestration): gate phase10 on phase1-9 contracts and produ
 - `class CandidateEntry(ContractModel)` (internal): `code: NonEmptyStr` (validated via Phase 3 `normalize_symbol`), `rank: PositiveInt`, `score: FiniteFloat | None`, `source_note: NonEmptyStr | None`.
 - `class CandidateSlate(DigestModel)` → **`CandidateSlate@1`**: `schema_version: Literal["1"]`, `source_kind: Literal["v4","lane0","model_variant"]`, `as_of: UtcDateTime`, `top_n: PositiveInt`, `entries: tuple[CandidateEntry, ...]` (≤ `top_n`, ranks strictly increasing, codes unique), `source_artifact_digest: DigestHex | None`, `rotation_report_ref: TypedPayloadRef | None` (schema pinned `RotationReport@1`), `variant_id: NonEmptyStr | None`, `badges: tuple[NonEmptyStr, ...]`. Validator: `source_kind=="lane0"` ⇔ `rotation_report_ref is not None`; `source_kind=="model_variant"` ⇔ `variant_id is not None`.
 - `class RecommendationEntry(ContractModel)` (internal): `code: NonEmptyStr`, `lane_index: NonNegativeInt`, `rating: NonEmptyStr` (copied from the lane's `ResearchPlan`), `research_plan_ref: TypedPayloadRef` (pinned `ResearchPlan@1`).
-- `class RecommendationSlate(DigestModel)` → **`RecommendationSlate@1`**: `schema_version`, `as_of: UtcDateTime`, `request_id: NonEmptyStr`, `candidate_slate_ref: TypedPayloadRef` (pinned `CandidateSlate@1`), `entries: tuple[RecommendationEntry, ...]`, `portfolio_decision_ref: TypedPayloadRef | None` (pinned `PortfolioDecision@1`; `None` iff the summary node degraded — badge mandatory), `degraded_lanes: tuple[NonNegativeInt, ...]`, `badges: tuple[NonEmptyStr, ...]`.
+- `class RecommendationSlate(DigestModel)` → **`RecommendationSlate@1`**: `schema_version`, `as_of: UtcDateTime`, `batch_id: NonEmptyStr`, `candidate_slate_ref: TypedPayloadRef` (pinned `CandidateSlate@1`), `entries: tuple[RecommendationEntry, ...]`, `portfolio_decision_ref: TypedPayloadRef | None` (pinned `PortfolioDecision@1`; **v1 is always `None` with mandatory badge `no_cross_sectional_summary_v1`** — the `dec.pm` 全场裁决 is deferred per ratified D3's single-code context convention; the field stays so a future summary lands without a schema bump), `degraded_lanes: tuple[NonNegativeInt, ...]`, `badges: tuple[NonEmptyStr, ...]`.
 - `class EscalationTrigger(ContractModel)` (internal): `kind: Literal["direction_flip","stop_take_proximity","event_wordlist","pattern_hit","opt_in"]`, `detail: NonEmptyStr`.
 - `class EscalationReport(DigestModel)` → **`EscalationReport@1`**: `schema_version`, `code: NonEmptyStr`, `as_of: UtcDateTime`, `thresholds_version: Literal["escalation-v1"]`, `triggers_hit: tuple[EscalationTrigger, ...]`, `escalate: bool` (validator: `escalate` ⇔ `triggers_hit` non-empty), `inert_ports: tuple[NonEmptyStr, ...]` (badges for absent context ports).
 - `class TaSubmission(DigestModel)` → **`TaSubmission@1`**: `schema_version`, `author: NonEmptyStr` (mandatory — D7 source attribution), `title: NonEmptyStr | None`, `submitted_at: UtcDateTime`, `text_digest: DigestHex`, `status: Literal["received"]`.
@@ -153,7 +196,7 @@ git commit -m "feat(orchestration): phase10 pipeline contracts (slate/recommenda
 - Consumes: Task 1 `CandidateSlate`/`CandidateEntry`; Phase 3 `normalize_symbol`; Phase 5 `RotationReport` (implemented fields per D4); the ranking read surface per D5.
 - Produces:
   - `class RankingReader(Protocol): def read_ranking(self, *, variant_id: str | None, as_of_hint: UtcDateTime) -> RankingArtifact: ...` with `class RankingArtifact(ContractModel)` (internal): `as_of: UtcDateTime`, `artifact_digest: DigestHex`, `rows: tuple[RankingRow, ...]` (`RankingRow`: `code`, `rank`, `score`).
-  - `def build_production_ranking_reader() -> RankingReader` — lazy-imports the reviewed screen helper (D5); no module-level screen import.
+  - `def build_production_ranking_reader() -> RankingReader` — lazy-imports the ratified D5 surface: `guanlan_v2.strategy.ranking:load_v4_ranking` + `:ranking_date` (one surface; `model_id=None/"prod"` → v4, a variant id → `guanlan_v2.screen.model_registry:variant_ranking_path` artifact); missing artifact ⇒ honest `FileNotFoundError` passthrough; no module-level screen/strategy import.
   - Handler callables (registered as DETERMINISTIC catalog handlers in Task 11): `def cand_v4_handler(params, inputs, ports) -> CandidateSlate`, `def cand_lane0_handler(...) -> CandidateSlate`, `def cand_model_handler(...) -> CandidateSlate` — exact handler ABI bound to the reviewed Phase 2 deterministic-handler signature (Task 0 discipline).
   - Params: `cand.v4` `{top_n: 1..50}`; `cand.lane0` `{top_n: 1..50, mainline_limit: 1..5}`; `cand.model` `{top_n: 1..50, variant_id: str}`.
 
@@ -161,11 +204,11 @@ git commit -m "feat(orchestration): phase10 pipeline contracts (slate/recommenda
 
 1. zero LLM, zero network: handlers consume only injected ports + typed inputs; import sweep proves no `httpx`/`requests`/LLM-client import;
 2. honest staleness: if the ranking artifact's `as_of` date ≠ the run context's as-of date, the slate carries badge `"stale_ranking:<artifact-date>"` — never silently re-dated, never refused (rankings are evening artifacts consumed next session);
-3. `cand.lane0` refuses (typed error) when neither the rotation report nor the ladder accessor yields leader codes (D4) — no invented universe;
+3. `cand.lane0` v1 IS the honest typed refusal (`Lane0LeadersUnavailable`) — Task 0 ratified D4: neither `RotationReport.MainlineRead` nor the ladder factor carries leader codes, and the handoff gate pins that absence; the worker ships its full param/provenance surface so it flips to real extraction the day upstream carries codes (the gate reddens then, re-opening D4) — never an invented universe;
 4. every slate carries full provenance (`source_artifact_digest` / `rotation_report_ref` / `variant_id`) and validates against Task 1's validators;
 5. `cand.v4`/`cand.model` never write anything — the v4 ranking surface is read-only (spec §8: v4 信号不动).
 
-- [ ] **Step 1: Write failing tests** — fixture `RankingReader` (deterministic rows); matrix: top_n truncation; rank monotonic + unique codes; stale badge; lane0 happy (fixture rotation report with leaders) + lane0 ladder fallback + lane0 double-absence typed refusal; model variant provenance; import sweep; handler determinism (same inputs → byte-equal slate digest).
+- [ ] **Step 1: Write failing tests** — fixture `RankingReader` (deterministic rows); matrix: top_n truncation; rank monotonic + unique codes; stale badge; lane0 typed refusal (always, v1 — carries rotation-report provenance in the error) + an xfail-marked happy-path spec documenting the future code-bearing upstream; model variant provenance; import sweep; handler determinism (same inputs → byte-equal slate digest).
 
 Run: `pytest tests/orchestration/test_pipeline_candidates.py -v` — expected FAIL.
 
@@ -182,39 +225,44 @@ git commit -m "feat(orchestration): deterministic candidate workers cand.v4/cand
 
 ---
 
-## Task 3: Screening plan builder (concrete-code N-lane DYNAMIC drafts + cost preview)
+## Task 3: Screening lane preset (sealed, per-code) + lease-governed batch builder + cost preview
+
+> Revised post-Task-0 per ratified D3: no Phase 8 lane worker carries `params_schema_ref` — the subject code flows from the run/request context. An N-lane single plan with per-lane codes is therefore structurally impossible; the reviewed form is N per-code instances of ONE sealed code-agnostic preset (the Task 6 deep-decide idiom), with the whole-picture cost approval carried by a screening `ApprovalLease` (or N pending human cards without one).
 
 **Files:**
-- Create: `guanlan_v2/orchestration/pipeline/screening.py`
+- Create: `guanlan_v2/orchestration/pipeline/screening.py`, `config/orchestration/presets/screening_lane_v1.json`
 - Test: `tests/orchestration/test_pipeline_screening.py`
 
 **Interfaces:**
-- Consumes: Task 1 `CandidateSlate`; Phase 1 `PlanDraft`/`PlanNode`/`Dependency`/`validate_plan_draft`/`compute_candidate_plan_digest`; the Phase 8 lane worker ids + `params_schema_ref`s (Task 0 item 4, clause D3); Phase 8 runtime profile v2 vocabulary (debates allowed).
+- Consumes: Task 1 `CandidateSlate`; Task 0b `build_phase10_preset_registry` + the launcher plan-runner ABI names; Phase 7 `PlanPresetRecord`/materializer + the coordinator lease methods (`register_and_try_lease` etc. — D1: methods, not free functions; `ApprovalLease` is deliberately UNREGISTERED upstream, assume no registry entry); Phase 1 `validate_plan_draft`/`compute_candidate_plan_digest`; Phase 8 runtime profile v2 vocabulary (debates allowed).
 - Produces:
-  - `def build_screening_plan_draft(slate: CandidateSlate, *, request, catalog_snapshot, registry) -> PlanDraft` — one lane per slate entry, lane k = `text.news → text.research_report → quant.factor → quant.backtest → pv.price_action` (evidence, BLOCK where the worker's contract demands, DEGRADE otherwise per the reviewed P8 dependency conventions) `→ dec.bull ↔ dec.bear` (one debate round per the P8 debate mechanism) `→ dec.research_mgr` (lane terminal, `ResearchPlan@1`); one summary node `dec.pm` consuming every lane's research-plan slot via DEGRADE deps; `source=DYNAMIC`, `phase="main"`, `approval_policy=REQUIRED` copied from the request; every lane node's params carry that lane's concrete `code` (D3).
-  - `def screening_cost_preview(draft: PlanDraft) -> ScreeningCostPreview` — `class ScreeningCostPreview(ContractModel)` (internal): `n_codes: PositiveInt`, `n_llm_nodes: NonNegativeInt`, `requested_budget: <the reviewed RunBudget unit fields>`; deterministic pure function; its JSON is what the approval card's `rendered_md` cites (the "N 票 × 成本" whole picture).
+  - Sealed preset `pipeline.screening_lane` v1 (`SCREENING_LANE_PRESET_ID`): a code-agnostic single-code graph `text.news + text.research_report + quant.factor + quant.backtest + pv.price_action` (parallel evidence, DEGRADE edges per the reviewed P8 dependency conventions) `→ dec.bull ↔ dec.bear` (one debate round per the P8 debate mechanism) `→ dec.research_mgr` (terminal, `ResearchPlan@1`); **`code`/`asof` flow from `OrchestrationRequest` context — the preset carries no code anywhere** (ratified D3; same idiom as Task 6's deep preset); registered via Task 0b's `build_phase10_preset_registry`; record digest golden-frozen.
+  - `def build_screening_batch(slate: CandidateSlate, *, preset_registry, clock, base_request) -> ScreeningBatch` — one `OrchestrationRequest` + materialized preset draft per slate entry, all sharing a `batch_id` (digest over slate ref + request semantics); `class ScreeningBatch(ContractModel)` (internal): `batch_id`, `candidate_slate_ref`, per-code `(code, request_id, candidate_plan_digest)` tuples, `cost_preview`.
+  - `def screening_cost_preview(batch: ScreeningBatch) -> ScreeningCostPreview` — `class ScreeningCostPreview(ContractModel)` (internal): `n_codes: PositiveInt`, `per_lane_llm_nodes: NonNegativeInt`, `total_llm_nodes: NonNegativeInt`, requested budget in the reviewed RunBudget units; deterministic pure function. **Its JSON is the whole picture the human approves**: on the screening `ApprovalLease` issue form (preset digest + `max_admissions=N` + budget cap mirror the preview), or across N pending cards when no lease is active.
+  - `def admit_screening_batch(batch, *, coordinator, admission, now) -> tuple[LeaseAdmissionOutcome, ...]` — per candidate: Phase 1 validate → Phase 2 reserve → coordinator `register_and_try_lease`; an active screening lease admits within its envelope, everything else stays a pending human card (`pending_human`). No third path, no self-approval, DYNAMIC never involved (the chat path stays the Phase 7 planner with per-plan approval).
 
 **Required invariants:**
 
-1. drafts pass the unmodified Phase 1 `validate_plan_draft` and the Phase 2 runtime-support check under profile v2 — the builder authors only the low-authority field set (no hidden-authority keys, no approval self-selection, no compat workers);
-2. determinism: same slate + same request → byte-identical candidate plan digest;
-3. lane independence: one lane's DEGRADE never blocks sibling lanes; the summary node runs when ≥1 lane completes and lists `degraded_lanes` honestly;
-4. slate honesty: an empty slate refuses draft construction (typed error) — no zero-lane plan;
-5. the builder never calls admission — it stops at a validated draft (admission stays the caller's Phase 2/7 sequence).
+1. the preset graph is byte-frozen and structurally code-free (no params field can carry a code — schema-level impossibility); every materialized draft passes the unmodified Phase 1 `validate_plan_draft` + profile-v2 runtime support;
+2. batch determinism: same slate + same base-request semantics → identical `batch_id` and identical per-code candidate digests;
+3. whole-picture integrity: the cost preview's totals equal the sum over the batch's drafts (arithmetic pinned); lease-admitted and pending-human candidates are disjoint and together cover the batch exactly;
+4. slate honesty: an empty slate refuses batch construction (typed error) — no zero-candidate batch;
+5. per-code independence: one candidate's refusal/failure never blocks its siblings' admission or execution;
+6. `admit_screening_batch` stops at admission — no execution, no approval minting outside the lease channel.
 
-- [ ] **Step 1: Write failing tests** — 3-entry fixture slate → draft shape assertions (node count = 8·N+1 for N lanes: 5 evidence + bull + bear + research_mgr per lane plus one pm summary; the slate enters as a committed input artifact, not a plan node); Phase 1 validation green; digest determinism; empty-slate refusal; DEGRADE topology (sever one lane's evidence → sibling lanes + summary unaffected); cost preview arithmetic; hidden-authority absence sweep.
+- [ ] **Step 1: Write failing tests** — preset load/normalize/digest pin + structural no-code assertion; per-code materialization happy (code via request context); 3-entry fixture slate → batch of 3 with deterministic digests + `batch_id`; cost-preview arithmetic (totals = sum of drafts); lease path (active lease admits all 3 within envelope; envelope exhaustion mid-batch → remainder `pending_human`, never an error); no-lease path (all pending); empty-slate refusal; Phase 1 validation green on every draft; Phase 7 preset golden byte-identical (registry extension regression).
 
 Run: `pytest tests/orchestration/test_pipeline_screening.py -v` — expected FAIL.
 
-- [ ] **Step 2: Implement the builder + preview.**
+- [ ] **Step 2: Implement the preset + batch builder + preview + admission helper.**
 
 - [ ] **Step 3: Run and commit**
 
 Run: `pytest tests/orchestration/test_pipeline_screening.py -v` — expected PASS.
 
 ```bash
-git add guanlan_v2/orchestration/pipeline/screening.py tests/orchestration/test_pipeline_screening.py
-git commit -m "feat(orchestration): N-lane screening plan builder with whole-picture cost preview"
+git add guanlan_v2/orchestration/pipeline/screening.py config/orchestration/presets/screening_lane_v1.json tests/orchestration/test_pipeline_screening.py
+git commit -m "feat(orchestration): sealed per-code screening lane preset + lease-governed batch builder"
 ```
 
 ---
@@ -228,7 +276,7 @@ git commit -m "feat(orchestration): N-lane screening plan builder with whole-pic
 **Interfaces:**
 - Consumes: Phase 2 `RunResult`/committed artifacts + stores ABI; Task 1 `RecommendationSlate`; the archive in-process seam (Task 0 item 8).
 - Produces:
-  - `def build_recommendation_slate(run_result, *, stores, request_id: str, candidate_slate_ref: TypedPayloadRef) -> RecommendationSlate` — folds each lane's committed `ResearchPlan` artifact into a `RecommendationEntry` (rating copied verbatim — never re-derived), attaches the pm `PortfolioDecision` ref when committed (`None` + badge when degraded), records `degraded_lanes`;
+  - `def build_recommendation_slate(batch: ScreeningBatch, *, stores) -> RecommendationSlate` — folds each per-code run's committed `ResearchPlan` artifact into a `RecommendationEntry` (rating copied verbatim — never re-derived; `lane_index` = the candidate's slate rank order; entries sorted by rating grade then rank), records codes with no committed plan in `degraded_lanes`, sets `portfolio_decision_ref=None` + badge `no_cross_sectional_summary_v1` (v1 invariant);
   - `def render_recommendation_md(slate: RecommendationSlate, *, stores) -> str` — deterministic markdown (per-stock rating + rationale excerpts with `[UNSOURCED]` discipline inherited from payload text; advisory banner line `> 本推荐为编排研究产物,仅供参考,不构成交易指令` mandatory first line);
   - `def land_recommendation(slate, *, stores, archive_put: Callable[[str, str, str], None]) -> None` — writes the md through the injected archive seam as artifact id `rs_orch_screen_<YYYYMMDD>` type `research`; landing failure raises (caller surfaces it) — never a silent skip.
 
@@ -237,9 +285,9 @@ git commit -m "feat(orchestration): N-lane screening plan builder with whole-pic
 1. assembly is read-only over the run's committed artifacts — it never mutates kernel state;
 2. ratings/summaries are copied, never recomputed; a lane with no committed `ResearchPlan` appears only in `degraded_lanes`;
 3. the md always opens with the advisory banner; every number in the md traces to a payload field (no assembler-invented numbers);
-4. `land_recommendation` is idempotent per `(request_id)` — a second call with the same slate overwrites the same archive id (archive semantics), never mints a second id.
+4. `land_recommendation` is idempotent per `(batch_id)` — a second call with the same slate overwrites the same archive id (archive semantics), never mints a second id.
 
-- [ ] **Step 1: Write failing tests** — fake stores with 2 committed lanes + 1 degraded; slate assembly matrix; banner-first assertion; degraded-pm `None`+badge; archive landing spy (id format, idempotent re-land, failure propagation).
+- [ ] **Step 1: Write failing tests** — fake stores with 2 committed per-code runs + 1 degraded; slate assembly matrix (sort order, rank mapping); banner-first assertion; v1 `None`+`no_cross_sectional_summary_v1` badge invariant; archive landing spy (id format, idempotent re-land per batch_id, failure propagation).
 
 Run: `pytest tests/orchestration/test_pipeline_screening.py -v` — expected FAIL on new names.
 
@@ -299,7 +347,7 @@ git commit -m "feat(orchestration): pure zero-LLM escalation judge with frozen t
 - Consumes: Phase 7 `PlanPresetRecord`/`PlanPresetRegistry` + materializer (reviewed extension mechanism per Task 0); Phase 8 workers `pv.price_action`, `pv.technical`, `pv.microstructure`, `text.news`, `dec.bull`, `dec.bear`, `dec.pm`, `dec.trader`; the Phase 5 latest committed `ContextSnapshot` accessor.
 - Produces:
   - Preset `pipeline.luozi_deep_decide` v1 (`DEEP_DECIDE_PRESET_ID = "pipeline.luozi_deep_decide"`): graph `pv.price_action + pv.technical + pv.microstructure + text.news` (parallel evidence, DEGRADE edges) `→ dec.bull ↔ dec.bear` (one round) `→ dec.pm` (deep tier) `→ dec.trader` (terminal, `PortfolioTargetProposal@1`); **`code`/`asof` flow from `OrchestrationRequest` context in the Phase 7 pilot idiom — the preset graph is code-agnostic and byte-frozen**, so one `PlanPresetRecord` digest serves every stock and an `ApprovalLease` binds it (ruling R-B).
-  - `def build_phase10_preset_registry(phase7_registry) -> PlanPresetRegistry` — extends the sealed Phase 7 registry per its reviewed extension mechanism (new sealed snapshot, own golden; Phase 7 preset golden untouched).
+  - Registers the deep-decide `PlanPresetRecord` via Task 0b's `build_phase10_preset_registry` (beside Task 3's screening-lane record); record digest golden-frozen. Note (ratified D1): `ApprovalLease` is deliberately UNREGISTERED upstream and the lease verbs are `PlanApprovalCoordinator` methods — assume no `ApprovalLease@1` registry entry anywhere.
   - `def materialize_deep_decide_draft(*, request, preset_registry, context_snapshot_ref) -> PlanDraft` — `source=PRESET`, references the latest committed Lane 0 `ContextSnapshot` (recency badge when the snapshot's data date < the session date — honest, never re-run intraday).
 
 **Required invariants:**
@@ -334,12 +382,12 @@ git commit -m "feat(orchestration): sealed context-bound deep-decide preset + ph
 **Interfaces:**
 - Consumes: Task 5 judge/context builder; Task 6 materializer; Phase 7 `register_and_try_lease`/`admit_after_approval` (D1); Phase 2 `run_plan` + Phase 9 durable stores (D2); Phase 9 `note_external_llm_use`; the seats decision-append helper (D7); the watcher injectable `tick(..., decide_fn=...)` seam.
 - Produces:
-  - `class DeepDecideBindings(ContractModel-free dataclass)`: `stores`, `preset_registry`, `coordinator`, `admission`, `clock`, `news_titles_fn: ... | None`, `persist_decision: Callable`, `note_llm_use: Callable[[int], None]`.
+  - `class DeepDecideBindings(ContractModel-free dataclass)`: `stores`, `preset_registry`, `coordinator`, `admission`, `clock`, `news_titles_fn: ... | None`, `persist_decision: Callable`, `note_llm_use: Callable[[int], None]`, `plan_runner` (the Task 0b `build_production_plan_runner` product — the ONLY execution path; scripted gateways enter through the same factory seam in tests).
   - `def make_orchestrated_decide(*, fast_decide: Callable[[dict], dict], bindings: DeepDecideBindings) -> Callable[[dict], dict]` — the wrapper:
     1. always runs `fast_decide(payload)`; on fast failure returns it unchanged (deep never rescues a broken fast path);
     2. builds the `EscalationContext` (decisions tail, quote, strat file, optional news port) and runs `judge_escalation`;
     3. `escalate=False` → returns the fast result untouched;
-    4. `escalate=True` → materialize deep draft → Phase 1 validate + Phase 2 reserve → `register_and_try_lease` → `lease_admitted` ⇒ `admit_after_approval` → `run_plan` on the durable stores → extract the committed `PortfolioTargetProposal` → append ONE orchestrated decision row via the seats helper (existing shape + `source:"orchestrated"`, `run_id=<kernel run id>`, target band + trigger ranges in the record's rationale/fields, `escalation_digest`, `escalated_from_asof=<fast row asof>`) → when the trader proposal carries tranche trigger price ranges, additionally append ONE advisory conditional-order record through the existing seats order-record persistence path (D7; same only-if-present key convention, `source:"orchestrated"`, human executes — spec §5 落现有条件单记录) → `note_llm_use(n_llm_invocations)` once → returns the deep-derived record dict with `deep_outcome:"completed"`;
+    4. `escalate=True` → materialize deep draft → Phase 1 validate + Phase 2 reserve → `register_and_try_lease` → `lease_admitted` ⇒ `admit_after_approval` → execute via `bindings.plan_runner` (the Task 0b-assembled production path) on the durable stores → extract the committed `PortfolioTargetProposal` → append ONE orchestrated decision row via the seats helper (existing shape + `source:"orchestrated"`, `run_id=<kernel run id>`, target band + trigger ranges in the record's rationale/fields, `escalation_digest`, `escalated_from_asof=<fast row asof>`) → when the trader proposal carries tranche trigger price ranges, additionally append ONE advisory conditional-order record through the existing seats order-record persistence path (D7; same only-if-present key convention, `source:"orchestrated"`, human executes — spec §5 落现有条件单记录) → `note_llm_use(n_llm_invocations)` once → returns the deep-derived record dict with `deep_outcome:"completed"`;
     5. `pending_human` / materialize refusal / any deep exception / lease budget exhaustion ⇒ returns the fast result plus only-if-present keys `deep_attempted: True, deep_outcome: "no_lease"|"failed"|"refused"` — degraded honest, never raises into the tick.
   - Watcher/server seam: `run_loop(*, decide_fn=None)` additive kwarg threading into `tick`; `guanlan_v2/server.py` builds the wrapper only when `GUANLAN_SEATS_DEEP == "1"` (bindings on `build_durable_runtime_stores`); env unset ⇒ byte-identical current behavior.
 
@@ -381,7 +429,7 @@ git commit -m "feat(orchestration): lease-gated deep-decide wrapper on the watch
 
 **Required invariants / scenarios:**
 
-1. a short fixture interval (scripted gateways, fake data context) replays the deep preset per decision point and produces both curves under one `ShadowExecutionConfig` attestation;
+1. a short fixture interval (scripted gateways, fake data context) replays the deep preset per decision point **through the Phase 9 injectable `ReplayRuntimeBindings.admission`/`ReplayPlanCoordinator` seam — the sanctioned path (real-path multi-point `dag.run_plan` remains refused upstream; its interval-shaped resolution stays chartered post-Phase-10)** — and produces both curves under one `ShadowExecutionConfig` attestation;
 2. the resulting `DualCurveReport` carries the deep preset's `preset_record_digest` in its config attestation chain (add the linkage assertion; if the implemented Phase 9 report lacks a preset-linkage field, record the candidate-plan→preset digest chain through the run events instead — no new contract invented);
 3. the evidence convention is pinned by test: `issue_lease(..., reason=...)` for `DEEP_DECIDE_PRESET_ID` leases must be non-empty (Phase 7 already enforces `reason: NonEmptyStr`) and the console lease card displays it — the convention that `reason` cites the `DualCurveReport` digest is documented in the test's docstring and the Exit Gates (procedural, human-judged — this plan does not pretend to enforce report quality structurally);
 4. zero LLM in the deterministic lane; the LLM lane runs scripted gateways only.
@@ -551,10 +599,15 @@ git commit -m "test(orchestration): phase10 pipeline e2e + red-line regression"
 - [ ] every Phase 1–9 Exit Gate remains green; `test_phase10_handoff.py` passes with reviewed frozen evidence; all eight correction clauses reconciled;
 - [ ] `PHASE10_*` chain nodes exist with hand-frozen goldens; inherited entries byte-identical; no upstream golden touched; no new `EventType`/data-method id.
 
+### Production assembly (Task 0b)
+- [ ] the assembler composes the real kernel classes (CatalogRuntime / ExecutionRuntime / ArtifactPool / worker ModelGateway) into the launcher's plan-runner path, the gateway factory being the ONLY test/production difference; the pilot preset executes end-to-end through the composed runner with scripted gateways, zero network, zero assembly stand-ins;
+- [ ] the three Phase 8 tier seats resolve via the explicit repo llm.yaml path; unconfigured tiers raise loudly; no admission/approval bypass exists in assembly;
+- [ ] `build_phase10_preset_registry` refuses non-Phase-7 bases; the Phase 7 preset golden stays byte-identical.
+
 ### A · 帷幄选股
-- [ ] `cand.*` workers are deterministic, zero-LLM, provenance-complete, staleness-badged; `cand.lane0` refuses honestly on absent leaders; v4 surface read-only;
-- [ ] screening drafts are validated concrete-code DYNAMIC plans, one whole-picture approval per run (cost preview on the card); lane DEGRADE independence holds; empty slate refuses;
-- [ ] `RecommendationSlate` copies ratings verbatim, badges degradations, opens every md with the advisory banner, lands idempotently in the archive.
+- [ ] `cand.*` workers are deterministic, zero-LLM, provenance-complete, staleness-badged; `cand.lane0` is the honest typed refusal in v1 (upstream leader-code absence is gate-pinned; refusal carries provenance); v4 surface read-only;
+- [ ] the screening lane preset is sealed and structurally code-free (code via request context); batches admit per-code through the Phase 7 lease channel with the cost preview as the human's whole picture (or N pending cards without a lease); per-code independence holds; empty slate refuses;
+- [ ] `RecommendationSlate` copies ratings verbatim, badges degradations, carries `no_cross_sectional_summary_v1` (pm 全场裁决 deferred, field retained), opens every md with the advisory banner, lands idempotently in the archive per batch_id.
 
 ### B · 落子买卖点
 - [ ] the escalation judge is pure/deterministic with frozen golden-pinned thresholds; absent ports are inert-with-badge; watch-tier never escalates;
@@ -578,11 +631,11 @@ git commit -m "test(orchestration): phase10 pipeline e2e + red-line regression"
 Implement in task order. Mandatory review checkpoints:
 
 1. after Task 0 — upstream evidence + all eight correction clauses resolved against implemented APIs;
-2. after Tasks 1–2 — contracts + deterministic candidate workers (honesty matrix);
+2. after Tasks 0b–2 — production-assembly proof (pilot preset through the composed runner), contracts, and deterministic candidate workers (honesty matrix);
 3. after Tasks 3–4 — screening builder/preview + recommendation assembly/landing;
 4. after Tasks 5–6 — escalation judge (frozen constants) + sealed deep preset;
 5. after Tasks 7–8 — live wrapper (never-blocks matrix + env-off regression) + replay evidence;
 6. after Tasks 9–10 — router/inbox + console tools five-place sync (restart 9999 to serve routes; verify on 9998 first);
 7. after Tasks 11–12 — chain goldens + full e2e/red-line suites plus all Exit Gates.
 
-A/B are independent after Task 1 (A = Tasks 2–4, B = Tasks 5–8) and may be executed as parallel workstreams by separate subagents provided each merges through the same review gate; C (Tasks 9–10) starts after both. No execution method requires a particular optional skill package.
+A/B are independent after Tasks 0b–1 (A = Tasks 2–4, B = Tasks 5–8) and may be executed as parallel workstreams by separate subagents provided each merges through the same review gate; C (Tasks 9–10) starts after both. No execution method requires a particular optional skill package.
