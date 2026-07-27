@@ -776,7 +776,7 @@ class ConnectionMonitor:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `"G:/financial-analyst/.venv/Scripts/python.exe" -m pytest tests/desktop/ -q`
-Expected: PASS,**46 passed**(17 + 22 + 7)
+Expected: PASS,**67 passed**(17 + 43 + 7 —— Task 2 的安全闸在两轮修复中从 22 条长到 43 条)
 
 - [ ] **Step 5: Commit**
 
@@ -1326,7 +1326,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `"G:/financial-analyst/.venv/Scripts/python.exe" -m pytest tests/desktop/ -q`
-Expected: PASS,**57 passed**(46 + 4 + 7)
+Expected: PASS,**78 passed**(67 + 4 + 7)
 
 - [ ] **Step 5: 真机验证 —— 窗口必须真的开出来**
 
@@ -1666,7 +1666,7 @@ powershell -NoProfile -Command "$p='G:\guanlan-v2\scripts\install_desktop_shortc
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `"G:/financial-analyst/.venv/Scripts/python.exe" -m pytest tests/desktop/ -q`
-Expected: PASS,**67 passed**(57 + 5 + 5)
+Expected: PASS,**88 passed**(78 + 5 + 5)
 
 - [ ] **Step 5: 真机验证「点击能启动」**
 
@@ -1692,7 +1692,7 @@ git commit -m "feat(desktop): icon plus idempotent shortcut installer pinned to 
 - [ ] **Step 1: 跑全套件**
 
 Run: `"G:/financial-analyst/.venv/Scripts/python.exe" -m pytest tests/ -q`
-Expected: 全绿。基线是本计划开工前的数字加上本计划新增的 **67** 条;若有**任何**先前通过的测试变红,那是本计划弄坏的,回去修,不要标注为「预先存在」。
+Expected: 全绿。基线是本计划开工前的数字加上本计划新增的 **88** 条;若有**任何**先前通过的测试变红,那是本计划弄坏的,回去修,不要标注为「预先存在」。
 
 - [ ] **Step 2: 确认没有碰到别人的文件**
 
