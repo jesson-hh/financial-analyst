@@ -106,7 +106,11 @@ class Shell:
             pass  # 已经被移除过(比如 closed 被重复触发)—— 不是错误
 
     def _on_loaded(self, win) -> None:
-        # GL_DESKTOP 是给顶栏的可移植信号;顶栏同时也认 window.pywebview,故无竞态。
+        # GL_DESKTOP 是留给将来换壳的可移植标记 —— **顶栏并不读它**。
+        # guanlan-nav.js 只认一个信号:可调用的 window.pywebview.api.open_window。
+        # 理由是一个没有桥在后面的标志位开不出窗口,而 pywebview 自己注入的 api 对象
+        # 既是真正必需的东西、又与顶栏 parse 时执行的 IIFE 无竞态。这里仍然注入它,
+        # 是为了将来换掉 pywebview 时前端不必改;别把这行读成顶栏的依赖。
         _eval(win, "window.GL_DESKTOP = true;")
         _eval(win, _OVERLAY_JS)
         # 捕获"此刻"的连接代数,交给 _maybe_show_overlay_for_late_load 在真正
