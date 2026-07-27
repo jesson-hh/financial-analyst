@@ -55,3 +55,11 @@ def _clear_bg_inflight():
     yield
     import guanlan_v2.console.api as _capi
     _capi._bg_inflight.clear()
+
+
+def pytest_configure(config):
+    """注册自定义标记(未注册标记会产生 PytestUnknownMarkWarning,测试输出须洁净)。"""
+    config.addinivalue_line(
+        "markers",
+        "realdata: 读真实生产产物的非密封测试(默认可跑但受 skipif 守卫;-m 'not realdata' 得到全密封运行)",
+    )
