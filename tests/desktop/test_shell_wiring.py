@@ -596,6 +596,90 @@ def test_late_load_show_fires_when_still_genuinely_degraded():
     assert any("glShellOverlay.show" in c for c in win.evaluated)
 
 
+# ── Review round 5 —— IMPORTANT 1: show 和 hide 曾经各自钉在两套不同的状态机上 ──
+#
+# _maybe_show_overlay_for_late_load(round 4 版本)看的是 self._status ——
+# 一个"探测级"信号,heartbeat_once 在第 1 次探测失败就已经把它标记 degraded
+# (这是 round 2 Important 3 的有意设计,server_status() 要新鲜)。而 hide 广播
+# 和代数递增看的是 decision.hide_overlay —— 一个"闩级"信号,ConnectionMonitor
+# 只在连续第 3 次失败时才会锁上那把闩。第 1、2 次失败时 _status 已经是
+# degraded,但闩没锁、没有 show 广播、也就没有"将来一定有一次 hide 广播"这个
+# 保证 —— 如果这时候恰好有一扇窗口加载完(这个 UI 里"加载完"并不罕见:顶栏在
+# 不同 .html 文档之间跳转本来就是整页导航),late-load 就会画上一层帷幄,
+# 而将来连接恢复时 hide_overlay 恒为 False(闩从没锁过),没有任何东西会去揭它。
+
+def test_late_load_show_is_skipped_below_the_broadcast_threshold_at_one_failure():
+    """round 4 修复前的样子会在这里显示一层永远没人揭的幕布 —— 这是要求里
+    "sub-threshold RED"那条:第 1 次失败 + 一次加载 → 永不消失的遮罩。"""
+    fake = _FakeWebview()
+    s = sh.create_shell(webview_module=fake, ensure=lambda **kw: _healthy_outcome(),
+                        prober=lambda: False, spawner=lambda: _spawn_result())
+    s.run_boot_sequence(fake.windows[0])
+    s.heartbeat_once()  # 第 1 次失败:_status 已经是 degraded,但闩没锁,没有广播
+    assert s.api.server_status()["state"] == "degraded"
+
+    win = fake.windows[0]
+    before = len(win.evaluated)
+    s._maybe_show_overlay_for_late_load(win, s._connection_generation)
+    assert len(win.evaluated) == before, (
+        "第 1 次失败还没到闩的阈值,late-load 不该显示一层将来没有任何 hide 会去揭的幕布"
+    )
+
+
+def test_late_load_show_is_skipped_below_the_broadcast_threshold_at_two_failures():
+    fake = _FakeWebview()
+    s = sh.create_shell(webview_module=fake, ensure=lambda **kw: _healthy_outcome(),
+                        prober=lambda: False, spawner=lambda: _spawn_result())
+    s.run_boot_sequence(fake.windows[0])
+    s.heartbeat_once()
+    s.heartbeat_once()  # 第 2 次失败,依然没到闩的阈值(3)
+    win = fake.windows[0]
+    before = len(win.evaluated)
+    s._maybe_show_overlay_for_late_load(win, s._connection_generation)
+    assert len(win.evaluated) == before
+
+
+def test_late_load_show_still_fires_once_the_broadcast_latch_is_set():
+    """确认修复没有矫枉过正:第 3 次失败一旦真的锁上闩、广播过 show,
+    late-load 该显示的还是要显示(否则和 test_late_load_show_fires_when_
+    still_genuinely_degraded 重复,这条额外确认"闩"本身是有效信号,不是
+    "永远不显示"式的过度收紧)。"""
+    fake = _FakeWebview()
+    s = sh.create_shell(webview_module=fake, ensure=lambda **kw: _healthy_outcome(),
+                        prober=lambda: False, spawner=lambda: _spawn_result())
+    s.run_boot_sequence(fake.windows[0])
+    for _ in range(3):
+        s.heartbeat_once()
+    assert s._overlay_broadcast is True
+    win = fake.windows[0]
+    s._maybe_show_overlay_for_late_load(win, s._connection_generation)
+    assert any("glShellOverlay.show" in c for c in win.evaluated)
+
+
+# ── Review round 5 —— IMPORTANT 2: 清扫循环不能在唯一"绝不能抛"的函数里抛 ─────
+#
+# _last_log_at 被好几个线程无锁地读写(心跳线程、每扇窗口各自的 loaded 事件
+# 线程、js-bridge 线程)。round 4 加的清扫循环在 _log_shell_event 自己的
+# try/except 之外遍历 .items() —— 如果遍历期间另一个线程插入了新键,CPython
+# 会抛 RuntimeError: dictionary changed size during iteration,这条异常会
+# 从 _log_shell_event 里逃出去,而它的唯一调用方是 except 块;同一个 try
+# 接不住自己 except 块里再抛出来的异常,于是这条异常会直接穿过
+# _protected_heartbeat_tick 的 try、经 _heartbeat_loop 的 while True 把
+# 心跳线程带走 —— 正是 round 3 才堵上的洞,这次是被"堵洞的工具自己"重新捅开。
+
+class _ExplodingItemsDict(dict):
+    """模拟"清扫循环恰好撞上另一个线程并发插入新键"的效果:不用真的起线程,
+    直接让 .items() 在被调用的那一刻抛出 CPython 真实会抛的那个 RuntimeError。"""
+    def items(self):
+        raise RuntimeError("dictionary changed size during iteration")
+
+
+def test_log_shell_event_never_lets_a_sweep_failure_escape(tmp_path, monkeypatch):
+    monkeypatch.setattr(sh, "_SHELL_LOG_PATH", tmp_path / "desktop-shell.log")
+    monkeypatch.setattr(sh, "_last_log_at", _ExplodingItemsDict())
+    sh._log_shell_event("boom")  # 不该向外抛 —— 这是它唯一的契约
+
+
 # ── Review round 4 —— Minor: _last_log_at 本身不能无界增长 ───────────────────
 
 def test_last_log_at_does_not_grow_unbounded_forever(tmp_path, monkeypatch):
