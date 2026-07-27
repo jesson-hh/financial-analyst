@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import types
+from pathlib import Path
 
 from guanlan_v2.desktop import shell as sh
 
@@ -329,6 +330,41 @@ def test_start_delegates_to_webview_start_with_the_startup_callback():
     func, args, kw = fake.started
     assert func == s._startup
     assert kw.get("private_mode") is False
+
+
+# ── Task 7b —— storage_path 必须专属,不能落回 WebView2 的跨应用共享默认目录 ──
+#
+# 没有显式 storage_path 时,pywebview 在 private_mode=False 下会把 profile 放进
+# %APPDATA%/pywebview 这个所有没设 storage_path 的 pywebview 应用共享的默认目录。
+# Task 7 验收时观测到:这台机器上一个不相关的 pywebview 应用
+# (G:\stocks\dist\GuanlanDataManager\GuanlanDataManager.exe)同样没设它,
+# 我们的渲染器因此接上了对方已经在跑的浏览器 broker 进程,而不是拿到自己独立的
+# 一份 —— WebView2 每个 user-data 目录对应一个浏览器 broker 进程,对方崩溃/
+# 强制更新/非正常关闭会连带拖垮我们的渲染器(反之亦然),localhost 的 cookie
+# 也不按端口区分(RFC 6265),两个不相关应用之间会串。必须显式传一个 app 专属的
+# 目录 —— 删掉这个参数这条测试就会失败。
+
+def test_start_uses_an_app_specific_webview_storage_path_not_the_shared_default():
+    fake = _FakeWebview()
+    s = sh.create_shell(webview_module=fake)
+    s.start()
+    assert fake.started is not None
+    _func, _args, kw = fake.started
+
+    storage_path = kw.get("storage_path")
+    assert storage_path, (
+        "必须显式传 storage_path,否则 WebView2 落回跨应用共享的默认 profile 目录"
+        "(%APPDATA%/pywebview),会和这台机器上其它 pywebview 应用共用同一个"
+        "浏览器 broker 进程 / 同一份 cookie"
+    )
+    assert storage_path == str(sh._WEBVIEW_STORAGE_PATH), (
+        "storage_path 必须是 shell.py 里那个 app 专属常量,不是随便一个非空字符串"
+    )
+    assert Path(storage_path).parts[-2:] == ("var", "webview2-profile"), (
+        "必须落在仓库 var/ 下(gitignored)一个专属子目录里,不能复用别的现成路径"
+        "(比如 server 日志目录本身),否则读起来像是碰巧非空,不是真的隔离"
+    )
+    assert kw.get("private_mode") is False, "storage_path 不能悄悄把已经钉住的 private_mode=False 带跑偏"
 
 
 # ── Also fix: 看门狗拉起失败也要在 status 上留痕 ─────────────────────────────

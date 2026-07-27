@@ -27,6 +27,16 @@ _WIDTH, _HEIGHT = 1400, 900
 _HEARTBEAT_SECONDS = 10.0
 _LOG_PATH = _DIR.parents[1] / "var" / "server-9999.log"
 _SHELL_LOG_PATH = _DIR.parents[1] / "var" / "desktop-shell.log"
+# webview.start() 不传 storage_path 时,private_mode=False 下 pywebview 会把
+# profile 放进 %APPDATA%/pywebview —— 所有没设 storage_path 的 pywebview 应用
+# 共享的默认目录。Task 7 验收时观测到这台机器上一个不相关的 pywebview 应用
+# (G:\stocks\dist\GuanlanDataManager\GuanlanDataManager.exe)同样没设它,我们的
+# 渲染器因此接上了对方已经在跑的浏览器 broker 进程而不是拿到独立的一份——
+# WebView2 一个 user-data 目录只有一个浏览器 broker 进程,对方崩溃/强制更新/
+# 非正常关闭会连带拖垮我们的渲染器(反之亦然),localhost 的 cookie 也不按端口
+# 区分(RFC 6265),两个不相关应用之间会串。给自己一个 app 专属目录,消掉这份
+# 耦合;pywebview 自己会在启动时把它 makedirs 出来,不需要我们提前建。
+_WEBVIEW_STORAGE_PATH = _DIR.parents[1] / "var" / "webview2-profile"
 _LOG_DEDUPE_SECONDS = 60.0
 _last_log_at: dict[str, float] = {}
 
@@ -254,7 +264,11 @@ class Shell:
         threading.Thread(target=self._heartbeat_loop, daemon=True).start()
 
     def start(self) -> None:
-        self._wv.start(self._startup, private_mode=False)
+        # storage_path 显式指向仓库 var/ 下的专属目录 —— 见上面 _WEBVIEW_STORAGE_PATH
+        # 的注释:不传就会落回跨应用共享的默认 profile 目录。private_mode 保持
+        # False 不变(这份 profile 就是要跨进程重启持久化,不是每次清空的临时区)。
+        self._wv.start(self._startup, private_mode=False,
+                       storage_path=str(_WEBVIEW_STORAGE_PATH))
 
 
 def _eval(win, code: str) -> None:
