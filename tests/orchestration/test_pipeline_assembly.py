@@ -1,0 +1,710 @@
+# -*- coding: utf-8 -*-
+"""Phase 10 - Task 0b: production assembly (catalog loading + worker tier gateways
++ plan-runner composition).
+
+Offline and deterministic (zero network). Every run below drives the REAL kernel
+surfaces; the only scripted seam is the ``gateway_factory`` -- the one seam the
+brief declares as the test/production difference.
+
+E1 reconciliation (the implemented composition surface, recorded before any code
+was written -- file:line):
+
+* ``build_admitted_plan_runner(*, admission, lane_bindings, run_context_factory,
+  request_id, plan_executor=None, sink_artifact_resolver=None,
+  freeze_idempotency_prefix="replay-freeze")`` --
+  guanlan_v2/orchestration/adapters/launcher.py:313-322; the returned runner's
+  seam kwargs are ``(lane, point, approval, data_context, memory_binding,
+  candidate_plan_digest)`` (launcher.py:356-357).
+* ``build_dag_plan_executor(*, pool, budget, runtime, registry, stores,
+  runtime_limit, clock, admission, model_gateway=None, prompt_assembler=None,
+  refusal_sink=None, runtime_profile=None, recorder_factory=None)`` --
+  launcher.py:269-284; ``pool_sink_artifact_resolver(pool)`` launcher.py:247-266;
+  ``LaneExecutionBinding(lane, candidate_plan_digest, reservation_id,
+  approval_event_id)`` launcher.py:229-244.
+* ``CatalogRuntime.build(snapshot, source)`` -- catalog_runtime.py:261-327;
+  ``MaterialSource`` protocol :127-152; ``InMemoryMaterialSource`` :154-193.
+* ``TrustedFactoryRegistry(runtime)`` -- catalog_runtime.py:437-454; handler
+  registration ABI ``register_handler(ref: ContentRef, factory)`` :456-466
+  (keys = catalog handler ContentRef identity; never rebindable). The registry is
+  constructed FROM the built CatalogRuntime -- it cannot pre-exist it, which is
+  why ``build_production_catalog_runtime`` returns the (runtime, factories) pair.
+* ``ExecutionRuntime(catalog, bridge_view, factories, support_report,
+  runtime_registry_digest)`` -- worker.py:252-268.
+* ``ModelGateway`` port: ``invoke(request: AssembledModelRequest, *,
+  prompt_assembly_ref: TypedPayloadRef) -> ModelResult`` -- worker.py:1112-1124;
+  the mandatory pre-provider check ``verify_model_request_binding``
+  worker.py:1127-1157; the executor invokes the gateway on a worker thread
+  (``asyncio.to_thread`` dag.py:728 -> worker.py:1712) and validates
+  ``ModelResult.payload`` against the output schema (worker.py:1763).
+* Planner-gateway idiom (the production reference): planner_gateway.py:170-263;
+  the explicit repo config path ``REPO_LLM_CONFIG_PATH`` planner_gateway.py:95.
+* Tier bridge: ``TIER_ORDER`` model_tiers.py:84, ``ORCHESTRATION_TIER_ALIASES``
+  :95-99, ``ModelTierUnconfigured`` :109, ``tier_map_from_llm_yaml`` :177.
+* ``PlanPresetRegistry`` register/seal/get/manifest/registry_digest --
+  plan_presets.py:188-260; ``PlanPresetRecord`` :102; ``load_preset_registry``
+  :266-299.
+* ``build_durable_runtime_stores(root, *, resolver=None, clock=None,
+  allowed_cell_namespaces=())`` -- adapters/durable.py:529-552.
+* ``dag.run_plan(plan_digest, ctx, *, admission, pool, budget, runtime, registry,
+  stores, runtime_limit, clock, ...)`` -- dag.py:462-481; it re-verifies through
+  ``admission.verify_for_dispatch`` (dag.py:500) and pins the runtime's support
+  report + catalog digests (dag.py:502-505).
+* ``ArtifactPool(*, stores, registry_digest, plan, catalog, clock)`` --
+  pool.py:244-252; ``replay()`` :690; ``committed_output`` :563.
+* ``PlanAdmissionService.freeze_and_admit_candidate(candidate_id, *,
+  reservation_id, approval_event_id, idempotency_key)`` -- admission.py:547;
+  ``verify_for_dispatch`` :660.
+
+Run from repo root: ``python -m pytest tests/orchestration/test_pipeline_assembly.py -v``
+"""
+from __future__ import annotations
+
+import ast
+import sys
+import types
+from datetime import datetime, timezone
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from guanlan_v2.orchestration import presets as P
+from guanlan_v2.orchestration import worker as W
+from guanlan_v2.orchestration.admission import AdmissionRejected, PlanAdmissionService
+from guanlan_v2.orchestration.adapters.durable import build_durable_runtime_stores
+from guanlan_v2.orchestration.adapters.launcher import (
+    LaneExecutionBinding,
+    LaunchRefused,
+)
+from guanlan_v2.orchestration.approval import PlanApprovalCoordinator
+from guanlan_v2.orchestration.catalog import build_catalog_snapshot
+from guanlan_v2.orchestration.catalog_runtime import (
+    BridgeCatalogView,
+    CatalogMaterialError,
+    CatalogRuntime,
+    InMemoryMaterialSource,
+    TrustedFactoryRegistry,
+    build_text_material,
+    load_pilot_catalog,
+)
+from guanlan_v2.orchestration.catalog import ContentManifestEntry
+from guanlan_v2.orchestration.context import RunBudget, RunContext
+from guanlan_v2.orchestration.enums import ApprovalDecision, ApprovalPolicy, PortfolioRating
+from guanlan_v2.orchestration.events import EventType
+from guanlan_v2.orchestration.eventstore import SchemaRegistryResolver
+from guanlan_v2.orchestration.memory.models import AuthenticatedAdminPrincipal
+from guanlan_v2.orchestration.model_tiers import (
+    ORCHESTRATION_TIER_ALIASES,
+    TIER_ORDER,
+    ModelTierUnconfigured,
+    tier_map_from_llm_yaml,
+)
+from guanlan_v2.orchestration.plan_diff import (
+    PLAN_DIFF_SCHEMA_REF,
+    build_pending_plan_approval,
+    build_plan_diff,
+)
+from guanlan_v2.orchestration.plan_presets import (
+    PlanPresetRecord,
+    PlanPresetRegistry,
+    load_preset_registry,
+    materialize_fallback_draft,
+)
+from guanlan_v2.orchestration.refs import PayloadRef, SchemaRef, TypedPayloadRef
+from guanlan_v2.orchestration.runtime_contracts import (
+    phase2_runtime_registry,
+    static_runtime_profile,
+)
+from guanlan_v2.orchestration.schema_registry import default_registry
+from guanlan_v2.orchestration.schemas import (
+    Confidence,
+    PortfolioDecision,
+    ResearchPlan,
+    SentimentBand,
+    SentimentReport,
+)
+from guanlan_v2.orchestration.spec import PlanNode
+from guanlan_v2.orchestration.worker import PromptBindingError
+
+from guanlan_v2.orchestration.pipeline.assembly import (
+    PRODUCTION_PRESETS_DIR,
+    PipelineAssemblyError,
+    PresetBaseRefused,
+    ProductionCatalogRuntime,
+    WorkerSeatModelGateway,
+    build_phase10_preset_registry,
+    build_production_catalog_runtime,
+    build_production_plan_runner,
+    production_gateway_factory,
+)
+
+UTC = timezone.utc
+NOW = datetime(2026, 7, 27, 2, 0, tzinfo=UTC)
+RESEARCH_BASELINE = "main.research_baseline"
+GOOD_CRED = "good-cred"
+BASELINE_PRESET_FILE = PRODUCTION_PRESETS_DIR / "main_research_baseline.json"
+
+
+# =========================================================================== #
+# deterministic doubles (transcribed from the reviewed dynamic-e2e suite)      #
+# =========================================================================== #
+class _FixedClock:
+    def now(self) -> datetime:
+        return NOW
+
+
+class _Verifier:
+    """The fail-closed Phase-3 verifier port double."""
+
+    def verify(self, credential) -> AuthenticatedAdminPrincipal:
+        if credential != GOOD_CRED:
+            raise AssertionError(f"unverifiable credential {credential!r}")
+        return AuthenticatedAdminPrincipal(actor="human-approver", verified_by="0b-verifier")
+
+
+def _sentiment() -> SentimentReport:
+    return SentimentReport(
+        overall_band=SentimentBand.NEUTRAL, overall_score=5.0,
+        confidence=Confidence.MEDIUM, narrative="Balanced flow with mild caution.")
+
+
+def _research() -> ResearchPlan:
+    return ResearchPlan(
+        recommendation=PortfolioRating.HOLD, rationale="Hold pending confirmation.",
+        strategic_actions=("Monitor breadth", "Re-check on catalyst"))
+
+
+def _decision() -> PortfolioDecision:
+    return PortfolioDecision(
+        rating=PortfolioRating.HOLD, executive_summary="Advisory hold.",
+        investment_thesis="Risk/reward balanced; no execution authority.")
+
+
+_PAYLOAD_BY_WORKER = {
+    "text.sentiment": _sentiment,
+    "dec.research_mgr": _research,
+    "dec.pm": _decision,
+}
+
+
+class _ScriptedWorkerGateway:
+    """A scripted trusted single-shot worker ``ModelGateway`` (zero network).
+
+    Enforces the exact prompt binding through the reviewed
+    ``verify_model_request_binding`` and returns the reviewed payload per pilot
+    worker -- the scripted stand-in ONLY for the provider call, never for the
+    assembly path.
+    """
+
+    def __init__(self, payload_reader, marker: str = "scripted"):
+        self._reader = payload_reader
+        self.marker = marker
+        self.invoked: list[str] = []
+
+    def invoke(self, request, *, prompt_assembly_ref):
+        record = W.verify_model_request_binding(
+            request, prompt_assembly_ref, reader=self._reader)
+        self.invoked.append(record.worker_id)
+        factory = _PAYLOAD_BY_WORKER.get(record.worker_id)
+        if factory is None:  # pragma: no cover - defensive
+            raise AssertionError(f"unexpected pilot worker {record.worker_id!r}")
+        return W.ModelResult(
+            payload=factory(), rendered_text=f"{self.marker}:{record.worker_id}",
+            input_tokens=13, output_tokens=9, provider=self.marker, model="scripted")
+
+
+class _RecordingFactory:
+    """A recording ``gateway_factory`` -- THE seam under test."""
+
+    def __init__(self, marker: str):
+        self.marker = marker
+        self.calls: list[dict] = []
+        self.gateways: list[_ScriptedWorkerGateway] = []
+
+    def __call__(self, *, payload_reader, catalog_runtime):
+        self.calls.append(
+            {"payload_reader": payload_reader, "catalog_runtime": catalog_runtime})
+        gateway = _ScriptedWorkerGateway(payload_reader, marker=self.marker)
+        self.gateways.append(gateway)
+        return gateway
+
+
+# =========================================================================== #
+# environment: the pilot preset composed through the REAL production assembly  #
+# =========================================================================== #
+class _Env:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+def _fresh_resolver():
+    registry = default_registry()
+    resolver = SchemaRegistryResolver()
+    resolver.register(registry)
+    rt_digest = resolver.register(phase2_runtime_registry(registry.registry_digest))
+    return registry, resolver, rt_digest
+
+
+def _run_context_factory(context, run_budget):
+    def _factory(*, lane, point, plan, data_context, memory_binding):
+        return RunContext(
+            run_id=plan.run_id, data=data_context,
+            context_snapshot_id=context.snapshot_id,
+            memory_snapshot_hash=context.memory_snapshot_hash,
+            budget=run_budget, cancellation_token_id="cancel-pipe")
+    return _factory
+
+
+def _compose_env(tmp_path: Path, gateway_factory, *, decide: bool = True,
+                 run_id: str = "run-pipe") -> _Env:
+    """The pilot preset admitted + composed through the production assembly.
+
+    Every stage is the real one: the EXISTING ``main_research_baseline`` preset
+    file, ``materialize_fallback_draft``, the real ``PlanAdmissionService``, the
+    real durable coordinator ``decide`` (fixture-approved), and
+    ``build_production_plan_runner`` over tmp DURABLE stores. Only the model
+    gateway is scripted, through the declared ``gateway_factory`` seam.
+    """
+    registry, resolver, rt_digest = _fresh_resolver()
+    clock = _FixedClock()
+    snapshot = load_pilot_catalog().snapshot
+    stores = build_durable_runtime_stores(
+        tmp_path / "stores", resolver=resolver, clock=clock,
+        allowed_cell_namespaces=(W.PROMPT_CELL_NAMESPACE,))
+
+    from guanlan_v2.orchestration.spec import OrchestrationRequest
+
+    request = OrchestrationRequest(
+        request_id=f"req-{run_id}", goal="pilot preset production assembly e2e",
+        workflow="orchestrate_only", fallback_preset_id=RESEARCH_BASELINE,
+        approval_policy=ApprovalPolicy.REQUIRED)
+    mem = P.build_empty_memory_context(
+        data_context=P.pilot_data_context(as_of=clock.now()), stores=stores,
+        registry_digest=rt_digest, built_at=clock.now())
+    context = mem.context
+    ctx_ref = PayloadRef(
+        namespace="main", object_id=f"ctx-{run_id}",
+        content_digest=context.content_digest)
+    run_budget = RunBudget(
+        ledger_id=f"led-{run_id}", max_tokens=6_000_000, max_llm_invocations=40,
+        max_concurrency=8)
+    stores.bind_run_budget(run_id=run_id, run_budget=run_budget)
+
+    # -- THE existing pilot preset, from its committed production file --------- #
+    presets7 = load_preset_registry(PRODUCTION_PRESETS_DIR)
+    preset = presets7.get(RESEARCH_BASELINE)
+    draft = materialize_fallback_draft(
+        preset, request=request, context=context, context_snapshot_ref=ctx_ref,
+        catalog=snapshot, schema_registry=registry, draft_id=f"plan-{run_id}",
+        run_id=run_id)
+
+    # -- the production catalog assembly (physical config/orchestration sources) #
+    bundle = build_production_catalog_runtime(snapshot)
+    view = BridgeCatalogView.build(bundle.runtime, {})
+    approvals: dict = {}
+    service = PlanAdmissionService(
+        run_id=run_id, requests={request.request_id: request},
+        drafts={draft.id: draft}, contexts={context.content_digest: context},
+        attestations={}, approvals=approvals, catalog=bundle.runtime,
+        bridge_view=view, phase1_registry=registry,
+        runtime_registry_digest=rt_digest, profile=static_runtime_profile(),
+        stores=stores, run_budget=run_budget, clock=clock)
+    prep = service.prepare_candidate(draft.id, request_id=request.request_id)
+    cand, res = service.persist_and_reserve_candidate(
+        prep, idempotency_key=f"reserve-{run_id}")
+    digest = cand.candidate_plan_digest
+
+    if decide:
+        diff = build_plan_diff(
+            draft, request=request, candidate_plan_digest=digest,
+            baseline=None, baseline_kind="none")
+        diff_ref = TypedPayloadRef(
+            schema_ref=PLAN_DIFF_SCHEMA_REF,
+            payload_ref=PayloadRef(
+                namespace="main", object_id="diff-" + digest[:8],
+                content_digest=diff.semantic_digest()))
+        pending = build_pending_plan_approval(
+            draft=draft, request=request, candidate_plan_digest=digest, diff=diff,
+            plan_diff_ref=diff_ref, planner_rationale=None,
+            candidate_id=f"cand-{run_id}", requested_at=clock.now(),
+            preset_id=RESEARCH_BASELINE,
+            preset_record_digest=preset.semantic_digest())
+        coordinator = PlanApprovalCoordinator(
+            tmp_path / "plan_approvals.jsonl", admission=service, clock=clock,
+            verifier=_Verifier(), console_emit=None,
+            approvals_sink=lambda ap: approvals.__setitem__(
+                (ap.request_id, ap.candidate_plan_digest), ap))
+        coordinator.register_pending(pending, idempotency_key=f"pending-{run_id}")
+        _approval, event = coordinator.decide(
+            request_id=request.request_id, candidate_plan_digest=digest,
+            decision=ApprovalDecision.APPROVED, actor=GOOD_CRED, reason="reviewed",
+            idempotency_key=f"decide-{run_id}")
+        approval_event_id = event.event_id
+    else:
+        approval_event_id = "ev-never-approved"
+
+    binding = LaneExecutionBinding(
+        lane="main", candidate_plan_digest=digest,
+        reservation_id=res.reservation_id, approval_event_id=approval_event_id)
+    runner = build_production_plan_runner(
+        stores=stores, catalog_snapshot=snapshot, registry=registry,
+        gateway_factory=gateway_factory, admission=service,
+        lane_bindings={"main": binding},
+        run_context_factory=_run_context_factory(context, run_budget),
+        request_id=request.request_id, clock=clock,
+        runtime_registry_digest=rt_digest, runtime_limit=3)
+
+    return _Env(
+        registry=registry, clock=clock, snapshot=snapshot, stores=stores,
+        stores_root=tmp_path / "stores", request=request, context=context,
+        run_budget=run_budget, run_id=run_id, digest=digest, runner=runner,
+        service=service, bundle=bundle)
+
+
+def _run(env: _Env):
+    return env.runner(
+        lane="main", point=SimpleNamespace(point_ordinal=1),
+        approval=SimpleNamespace(), data_context=env.context.data_context,
+        memory_binding=None, candidate_plan_digest=env.digest)
+
+
+def _event_types(stores, run_id):
+    return [e.event_type for e in stores.events.journal(run_id, "main")]
+
+
+# =========================================================================== #
+# 1. the pilot-preset e2e through the composed runner                           #
+# =========================================================================== #
+def test_pilot_preset_e2e_through_the_composed_runner(tmp_path):
+    """The EXISTING pilot preset runs through admission + the composed runner:
+    real assembly, scripted gateway, artifacts committed to tmp DURABLE stores."""
+    factory = _RecordingFactory("e2e")
+    env = _compose_env(tmp_path, factory)
+    artifact = _run(env)
+
+    # the sink artifact is the pm node's committed PortfolioDecision.
+    assert artifact is not None
+    validated = env.registry.validate_payload(artifact.payload_schema_ref, artifact.payload)
+    assert isinstance(validated, PortfolioDecision)
+
+    # the run really froze + completed on the durable journal (never a stand-in).
+    kinds = _event_types(env.stores, env.run_id)
+    assert EventType.PLAN_FROZEN in kinds
+    assert EventType.RUN_COMPLETED in kinds
+
+    # the scripted gateway saw exactly the pilot triad, via the real assembler.
+    assert sorted(factory.gateways[0].invoked) == [
+        "dec.pm", "dec.research_mgr", "text.sentiment"]
+
+    # the factory received the composition's own payload reader + catalog runtime.
+    call = factory.calls[0]
+    assert call["payload_reader"] is env.stores.payloads
+    assert call["catalog_runtime"].catalog_digest == env.snapshot.catalog_digest
+
+
+def test_e2e_artifacts_survive_a_durable_store_reopen(tmp_path):
+    """The committed run folds back byte-identically from the tmp durable root --
+    the proof the composition really wrote through ``build_durable_runtime_stores``."""
+    env = _compose_env(tmp_path, _RecordingFactory("durable"), run_id="run-dur")
+    artifact = _run(env)
+    assert artifact is not None
+
+    _registry, resolver, _rt = _fresh_resolver()
+    reopened = build_durable_runtime_stores(
+        env.stores_root, resolver=resolver, clock=_FixedClock(),
+        allowed_cell_namespaces=(W.PROMPT_CELL_NAMESPACE,))
+    assert env.run_id in reopened.events.run_ids("main")
+    kinds = _event_types(reopened, env.run_id)
+    assert EventType.PLAN_FROZEN in kinds
+    assert EventType.RUN_COMPLETED in kinds
+
+
+# =========================================================================== #
+# 2. the gateway-factory seam                                                  #
+# =========================================================================== #
+def test_gateway_factory_is_the_only_seam(tmp_path):
+    """Identical assembly, different factory -> a different gateway is observed.
+    The assembly code path itself is the same builder both times."""
+    factory_a = _RecordingFactory("seam-a")
+    factory_b = _RecordingFactory("seam-b")
+    env_a = _compose_env(tmp_path / "a", factory_a, run_id="run-seam-a")
+    env_b = _compose_env(tmp_path / "b", factory_b, run_id="run-seam-b")
+    assert _run(env_a) is not None
+    assert _run(env_b) is not None
+    assert factory_a.gateways[0].marker == "seam-a"
+    assert factory_b.gateways[0].marker == "seam-b"
+    assert factory_a.gateways[0] is not factory_b.gateways[0]
+    assert factory_a.gateways[0].invoked and factory_b.gateways[0].invoked
+
+
+# =========================================================================== #
+# 3. no approval/admission bypass                                               #
+# =========================================================================== #
+def test_an_unbound_candidate_digest_is_refused_before_any_freeze(tmp_path):
+    env = _compose_env(tmp_path, _RecordingFactory("nb"), run_id="run-nb")
+    with pytest.raises(LaunchRefused):
+        env.runner(
+            lane="main", point=SimpleNamespace(point_ordinal=1),
+            approval=SimpleNamespace(), data_context=env.context.data_context,
+            memory_binding=None, candidate_plan_digest="f" * 64)
+    assert EventType.PLAN_FROZEN not in _event_types(env.stores, env.run_id)
+
+
+def test_a_never_approved_candidate_cannot_execute(tmp_path):
+    """The composed runner inherits the admission red line: a bound digest whose
+    approval never happened dies in ``freeze_and_admit_candidate``."""
+    factory = _RecordingFactory("na")
+    env = _compose_env(tmp_path, factory, decide=False, run_id="run-na")
+    with pytest.raises(AdmissionRejected):
+        _run(env)
+    assert EventType.PLAN_FROZEN not in _event_types(env.stores, env.run_id)
+    # the freeze died before the executor: the gateway seam was never even built.
+    assert factory.calls == [] and factory.gateways == []
+
+
+# =========================================================================== #
+# 4. build_production_catalog_runtime                                           #
+# =========================================================================== #
+def test_pilot_catalog_resolves_from_its_physical_sources():
+    snapshot = load_pilot_catalog().snapshot
+    bundle = build_production_catalog_runtime(snapshot)
+    assert isinstance(bundle, ProductionCatalogRuntime)
+    assert isinstance(bundle.runtime, CatalogRuntime)
+    assert isinstance(bundle.factories, TrustedFactoryRegistry)
+    assert bundle.runtime.catalog_digest == snapshot.catalog_digest
+    resolved = bundle.runtime.resolve_worker("text.sentiment")
+    assert resolved.system_prompt is not None
+
+
+def test_an_unresolvable_material_is_refused_loudly():
+    """A snapshot referencing a material no reviewed physical source holds is a
+    typed refusal NAMING the material -- never a silent stub."""
+    ref, mat = build_text_material(
+        id="no.such.material", version="1", kind="prompt",
+        raw=b"a prompt with no physical production source")
+    snapshot = build_catalog_snapshot(
+        catalog_version="phase10-unresolvable-v1",
+        content_manifest=(ContentManifestEntry(
+            ref=ref, kind="prompt", name="orphan", description="d",
+            source_identity="gl"),),
+        skill_manifest=(), capability_manifest=(), workers=(),
+        resolved_material=(mat,))
+    with pytest.raises(CatalogMaterialError) as excinfo:
+        build_production_catalog_runtime(snapshot)
+    assert "no.such.material" in str(excinfo.value)
+
+
+def test_an_off_catalog_handler_registration_is_refused():
+    snapshot = load_pilot_catalog().snapshot
+    with pytest.raises(CatalogMaterialError) as excinfo:
+        build_production_catalog_runtime(
+            snapshot, handler_registry={"no.such.handler": lambda **kw: None})
+    assert "no.such.handler" in str(excinfo.value)
+
+
+def test_a_caller_supplied_material_source_is_honored():
+    """The material_source seam: an explicit source replaces the default physical
+    resolution (Tasks 2/11 bind their own loaders here) -- same verified build."""
+    pilot = load_pilot_catalog()
+    text, caps = pilot.resolved_materials()
+    source = InMemoryMaterialSource(
+        text={(m.ref.id, m.ref.version): m.raw_utf8 for m in text},
+        capabilities={(c.ref.id, c.ref.version): c.descriptor for c in caps})
+    bundle = build_production_catalog_runtime(pilot.snapshot, material_source=source)
+    assert bundle.runtime.catalog_digest == pilot.snapshot.catalog_digest
+
+
+# =========================================================================== #
+# 5. WorkerSeatModelGateway -- tier resolution                                  #
+# =========================================================================== #
+def _pilot_runtime():
+    return load_pilot_catalog()
+
+
+def test_all_three_tier_seats_resolve_from_the_repo_llm_yaml_by_explicit_path():
+    gateway = WorkerSeatModelGateway(
+        payload_reader=object(), catalog_runtime=_pilot_runtime())
+    # the explicit repo path -- never find_config.
+    assert gateway.config_path.name == "llm.yaml"
+    assert gateway.config_path.parent.name == "config"
+    expected = tier_map_from_llm_yaml(
+        gateway.config_path.read_text(encoding="utf-8"))
+    for tier in TIER_ORDER:
+        assert gateway.seat_for_tier(tier) == ORCHESTRATION_TIER_ALIASES[tier]
+        assert gateway.binding_for_tier(tier) == expected.binding_for(tier)
+
+
+def test_an_unconfigured_tier_raises_a_typed_error_naming_the_seat(tmp_path):
+    partial = tmp_path / "llm.yaml"
+    partial.write_text(
+        "providers:\n"
+        "  deepseek: {api_key_env: DEEPSEEK_API_KEY}\n"
+        "agent_overrides:\n"
+        "  orchestration-fast: {provider: deepseek, model: deepseek-chat}\n"
+        "  orchestration-reasoner-deep: {provider: deepseek, model: deepseek-reasoner}\n",
+        encoding="utf-8")
+    with pytest.raises(ModelTierUnconfigured) as excinfo:
+        WorkerSeatModelGateway(
+            payload_reader=object(), catalog_runtime=_pilot_runtime(),
+            config_path=partial)
+    assert "orchestration-reasoner" in str(excinfo.value)
+
+
+def test_an_unknown_tier_is_refused_by_name():
+    gateway = WorkerSeatModelGateway(
+        payload_reader=object(), catalog_runtime=_pilot_runtime())
+    with pytest.raises(ModelTierUnconfigured) as excinfo:
+        gateway.seat_for_tier("galaxy_brain")
+    assert "galaxy_brain" in str(excinfo.value)
+
+
+def test_invoke_refuses_a_forged_binding_before_any_provider_work(monkeypatch):
+    """The rehash-refusal runs BEFORE the engine client is even imported: a
+    booby-trapped engine module proves no provider work is reachable."""
+    runtime = _pilot_runtime()
+    resolved = runtime.resolve_worker("text.sentiment")
+    request = W.StaticPromptAssembler().assemble(
+        plan_digest="0" * 64, node_id="n1", worker_id="text.sentiment",
+        system_prompt=resolved.system_prompt, skills=resolved.skills,
+        guardrails=resolved.guardrails, trusted_input_digests=(),
+        untrusted_blocks=())
+
+    class _Trap(types.ModuleType):
+        def __getattr__(self, name):  # pragma: no cover - reaching this IS the failure
+            raise AssertionError("the engine client was touched before binding verification")
+
+    monkeypatch.setitem(
+        sys.modules, "financial_analyst.llm.client", _Trap("financial_analyst.llm.client"))
+    gateway = WorkerSeatModelGateway(payload_reader=object(), catalog_runtime=runtime)
+    forged = TypedPayloadRef(
+        schema_ref=SchemaRef(name="NotAPromptRecord", version="1"),
+        payload_ref=PayloadRef(
+            namespace="main", object_id="obj-x", content_digest="0" * 64))
+    with pytest.raises(PromptBindingError):
+        gateway.invoke(request, prompt_assembly_ref=forged)
+
+
+def test_production_gateway_factory_builds_the_worker_seat_gateway():
+    gateway = production_gateway_factory(
+        payload_reader=object(), catalog_runtime=_pilot_runtime())
+    assert isinstance(gateway, WorkerSeatModelGateway)
+    gateway.close()
+
+
+# =========================================================================== #
+# 6. build_phase10_preset_registry -- the sealed extension mechanism            #
+# =========================================================================== #
+def _screen_record() -> PlanPresetRecord:
+    return PlanPresetRecord(
+        preset_id="screen.lane_smoke", version="1",
+        description="phase10 extension smoke record (test-only)",
+        nodes=(PlanNode(id="s1", worker_id="text.sentiment", writes_slot="slot-s"),),
+        sink_node_ids=("s1",), budget_request_tokens=1000,
+        budget_request_llm_invocations=1, max_concurrency=1)
+
+
+def test_extension_keeps_the_phase7_preset_golden_byte_identical():
+    before = BASELINE_PRESET_FILE.read_bytes()
+    base = load_preset_registry(PRODUCTION_PRESETS_DIR)
+    extended = build_phase10_preset_registry(base, (_screen_record(),))
+    assert BASELINE_PRESET_FILE.read_bytes() == before  # golden untouched
+    assert extended.sealed
+    file_record = PlanPresetRecord.model_validate_json(
+        BASELINE_PRESET_FILE.read_text(encoding="utf-8"))
+    assert (extended.get(RESEARCH_BASELINE).semantic_digest()
+            == file_record.semantic_digest())
+    assert extended.get("screen.lane_smoke").semantic_digest() == \
+        _screen_record().semantic_digest()
+    # the base registry object itself was never mutated.
+    with pytest.raises(Exception):
+        base.get("screen.lane_smoke")
+
+
+def test_extension_refuses_a_non_phase7_base():
+    stranger = PlanPresetRegistry()
+    stranger.register(_screen_record())
+    stranger.seal()
+    with pytest.raises(PresetBaseRefused) as excinfo:
+        build_phase10_preset_registry(stranger, ())
+    assert RESEARCH_BASELINE in str(excinfo.value)
+
+
+def test_extension_refuses_an_unsealed_base():
+    unsealed = PlanPresetRegistry()
+    unsealed.register(load_preset_registry(PRODUCTION_PRESETS_DIR).get(RESEARCH_BASELINE))
+    with pytest.raises(PresetBaseRefused):
+        build_phase10_preset_registry(unsealed, ())
+
+
+def test_extension_refuses_a_mutated_baseline_record():
+    """A base carrying a DIFFERENT record under the Phase-7 preset id is not the
+    Phase-7 base -- refused, never silently substituted."""
+    real = load_preset_registry(PRODUCTION_PRESETS_DIR).get(RESEARCH_BASELINE)
+    mutated = real.model_copy(update={"budget_request_tokens": 1})
+    forged = PlanPresetRegistry()
+    forged.register(mutated)
+    forged.seal()
+    with pytest.raises(PresetBaseRefused):
+        build_phase10_preset_registry(forged, ())
+
+
+# =========================================================================== #
+# 7. red lines                                                                  #
+# =========================================================================== #
+def test_assembly_imports_stay_inside_orchestration_plus_engine_llm_client():
+    """Invariant 4: no engine file dependency beyond the LLM client; every
+    guanlan_v2 import stays inside the orchestration package."""
+    from guanlan_v2.orchestration.pipeline import assembly as assembly_mod
+
+    src = Path(assembly_mod.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module)
+    for module in modules:
+        if module.startswith("guanlan_v2"):
+            assert module.startswith("guanlan_v2.orchestration"), module
+        if module.startswith("financial_analyst"):
+            assert module == "financial_analyst.llm.client", module
+        assert not module.startswith("engine"), module
+
+
+def test_the_composed_runner_refuses_the_event_loop_thread(tmp_path):
+    """The launcher's 9999 red line is inherited intact by the composition."""
+    import asyncio
+
+    env = _compose_env(tmp_path, _RecordingFactory("loop"), run_id="run-loop")
+
+    async def _inside():
+        with pytest.raises(LaunchRefused):
+            _run(env)
+
+    asyncio.run(_inside())
+    assert EventType.PLAN_FROZEN not in _event_types(env.stores, env.run_id)
+
+
+def test_catalog_snapshot_and_prebuilt_runtime_must_agree(tmp_path):
+    """A pre-assembled catalog bundle whose digest is not the snapshot's is a
+    typed assembly refusal (no split-brain catalog identity)."""
+    pilot = load_pilot_catalog()
+    bundle = build_production_catalog_runtime(pilot.snapshot)
+    ref, mat = build_text_material(
+        id="tiny.prompt", version="1", kind="prompt", raw=b"tiny")
+    other = build_catalog_snapshot(
+        catalog_version="phase10-other-v1",
+        content_manifest=(ContentManifestEntry(
+            ref=ref, kind="prompt", name="t", description="d",
+            source_identity="gl"),),
+        skill_manifest=(), capability_manifest=(), workers=(),
+        resolved_material=(mat,))
+    with pytest.raises(PipelineAssemblyError):
+        build_production_plan_runner(
+            stores=object(), catalog_snapshot=other, registry=object(),
+            gateway_factory=_RecordingFactory("x"), admission=object(),
+            lane_bindings={}, run_context_factory=lambda **kw: None,
+            request_id="req-x", clock=_FixedClock(),
+            runtime_registry_digest="0" * 64, runtime_limit=1,
+            catalog=bundle)
