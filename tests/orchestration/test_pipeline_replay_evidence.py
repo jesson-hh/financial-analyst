@@ -107,6 +107,7 @@ from guanlan_v2.orchestration.adapters.contracts import (
 )
 from guanlan_v2.orchestration.adapters.launcher import (
     LaneExecutionBinding,
+    LaunchRefused,
     MultiPointPlanExecutionRefused,
     build_admitted_plan_runner,
 )
@@ -237,6 +238,13 @@ _DIGEST_RE = re.compile(r'[0-9a-f]{32,}')
 #: mid-string (a goal, a rationale, a node id), which a quoted-exact pattern misses,
 #: while rejecting the sealed preset's own ``budget_request_tokens: 6000000``
 #: (seven digits ⇒ the right-hand boundary fails). Proven by tripwire T2.
+#:
+#: KNOWN-BENIGN six-digit shapes this WOULD trip on if they ever reached the
+#: plan-side evidence (none do today): a round token/budget figure written with
+#: exactly six digits (``100000``, ``500000``), a microsecond field, or a
+#: six-digit port/ordinal. A future trip on one of those is a false positive to
+#: be narrowed here — it is NOT evidence of a leaked stock code. The assertion
+#: prints the offending run so the two are distinguishable at a glance.
 _CODE_RUN_RE = re.compile(r'(?<!\d)\d{6}(?!\d)')
 
 
@@ -818,7 +826,13 @@ def replay(heavy, tmp_path_factory):
             execution_config=world.config, interval_start=world.start,
             interval_end=world.end, bindings=bindings)
         intents = bindings.intent_ledger.intents
-        targets = tuple(
+        # BOTH curves come from what the RUN produced: the LLM lane's envelope-
+        # wrapped intents and the deterministic lane's book AS THE DRIVER RECORDED
+        # IT (luozi.py:2318-2320) — never a fixture recompute. The independent
+        # recompute below is kept only as the equality witness
+        # (``test_the_deterministic_curve_is_the_drivers_own_book``).
+        targets = bindings.intent_ledger.deterministic_targets
+        recomputed = tuple(
             derive_deterministic_targets(
                 point, factor_scores={CODE: _FACTOR_SCORE}, universe=(SYM,),
                 provenance_digest=_SOURCED)
@@ -828,11 +842,24 @@ def replay(heavy, tmp_path_factory):
             deterministic_target_sets=targets, intents=intents,
             shadow_runner=world.runner)
 
+    # (Minor 4) a SECOND issuing coordinator whose clock is genuinely PAST the
+    # replayed interval — so "the evidence predates the lease that cites it" is a
+    # real ordering fact, not a tautology of one frozen fixture instant. Bare
+    # constructor (not `.replay`): it folds the journal's lease + decision rows
+    # without re-submitting decisions to an admission it does not hold.
+    after_now = report.interval_end + timedelta(days=1)
+    issuing_after = PlanApprovalCoordinator(
+        journal, admission=SimpleNamespace(), clock=_FixedClock(after_now),
+        verifier=_Verifier(), console_emit=None, preset_registry=heavy.presets,
+        catalog_digest=heavy.snapshot.catalog_digest,
+        registry_digest=heavy.registry.registry_digest)
+
     return SimpleNamespace(
         world=world, state=state, report=report, intents=intents, targets=targets,
         coordinator=coordinator, bindings=bindings, sink=sink, record=record,
         record_digest=record_digest, replay_lease=replay_lease, issuing=issuing,
-        request=request)
+        request=request, recomputed=recomputed, issuing_after=issuing_after,
+        after_now=after_now)
 
 
 # =========================================================================== #
@@ -952,6 +979,9 @@ class TestBothCurvesUnderOneAttestation:
     def test_the_two_curves_bind_one_config_digest(self, replay):
         attestation = replay.world.config.semantic_digest()
         report = replay.report
+        # the DRIVER's own returned head binds the same attestation, so the ONE
+        # config runs end to end: driver state → both curves → the report.
+        assert replay.state.execution_config_digest == attestation
         assert isinstance(report, DualCurveReport)
         assert report.llm_shadow.execution_config_digest == attestation
         assert report.deterministic.execution_config_digest == attestation
@@ -1024,6 +1054,7 @@ class TestPresetLinkageChain:
                 e for e in stores.events.journal(chain.run_id, "main")
                 if e.event_id == chain.approval_event_id]
             assert len(approvals) == 1, chain.run_id
+            assert approvals[0].event_type is EventType.PLAN_APPROVED
             # frozen plan → the committed sink artifact
             assert chain.artifact.payload_schema_ref == SchemaRef(
                 name="PortfolioTargetProposal", version="1")
@@ -1071,6 +1102,26 @@ class TestZeroLlmDeterministicLane:
         assert all(t.rule_id == "deterministic-target-rule-v1" for t in replay.targets)
         # the τ=0.15 rule really produced a long book from the sourced scores.
         assert all(t.positions and t.cash_weight == 0.0 for t in replay.targets)
+
+    def test_the_deterministic_curve_is_the_drivers_own_book(self, replay):
+        """The curve is built from what the RUN recorded, not a fixture recompute.
+
+        ``replay.targets`` IS ``bindings.intent_ledger.deterministic_targets`` —
+        the books the driver appended per point through the coordinator's
+        ``deterministic_targets`` port (luozi.py:2318-2320) — and it is what
+        ``build_dual_curves`` consumed. The independent recompute is kept ONLY as
+        the equality witness: if the two ever diverge, the curve stops describing
+        the run and this reddens.
+        """
+        # (the ledger property mints a fresh tuple per read, so this is content
+        # equality by construction — the source claim is carried by the fixture
+        # handing THIS tuple to build_dual_curves, and by the recompute below.)
+        ledger_books = replay.bindings.intent_ledger.deterministic_targets
+        assert replay.targets == ledger_books
+        assert len(ledger_books) == len(replay.world.points)
+        assert ledger_books == replay.recomputed
+        assert [t.point_ordinal for t in ledger_books] == [
+            p.point_ordinal for p in replay.world.points]
 
     def test_every_model_invocation_was_a_scripted_deep_worker(self, replay):
         coordinator = replay.coordinator
@@ -1135,14 +1186,15 @@ class TestLeaseEvidenceConvention:
 
     @staticmethod
     def _intraday_lease(replay, *, reason: str):
-        return replay.issuing.issue_lease(
+        """Issued from the clock that is genuinely PAST the replayed interval."""
+        return replay.issuing_after.issue_lease(
             purpose="盘中 · deep-decide intraday lease (人工执行,观澜绝不下单)",
             preset_id=DEEP_DECIDE_PRESET_ID,
             preset_record_digest=replay.record_digest,
             catalog_digest=replay.coordinator._heavy.snapshot.catalog_digest,
             registry_digest=replay.coordinator._heavy.registry.registry_digest,
-            valid_from=replay.world.points[0].decision_as_of - timedelta(days=1),
-            valid_until=replay.world.points[-1].decision_as_of + timedelta(days=1),
+            valid_from=replay.report.interval_end,
+            valid_until=replay.report.interval_end + timedelta(days=3),
             max_admissions=4, budget_cap_llm_invocations=64, actor=GOOD_CRED,
             reason=reason)
 
@@ -1153,8 +1205,11 @@ class TestLeaseEvidenceConvention:
         assert lease.reason == reason
         assert lease.reason.strip()                      # NonEmptyStr, structurally
         assert digest in lease.reason                    # the convention, as written
-        # the evidence really predates the lease it is cited in.
-        assert lease.issued_at >= replay.report.interval_start
+        # the evidence really predates the lease that cites it — non-vacuously:
+        # the issuing clock is a full day PAST the end of the replayed interval.
+        assert lease.issued_at == replay.after_now
+        assert lease.issued_at > replay.report.interval_end
+        assert replay.report.interval_start < replay.report.interval_end
 
     def test_the_console_lease_card_displays_the_reason_verbatim(self, replay):
         """``list_leases`` is exactly what ``/plan/approvals/leases`` projects
@@ -1162,8 +1217,8 @@ class TestLeaseEvidenceConvention:
         digest = replay.report.semantic_digest()
         reason = f"已审阅双曲线回放证据 DualCurveReport@1 digest={digest};签发盘中租约"
         self._intraday_lease(replay, reason=reason)
-        now = replay.world.points[-1].decision_as_of
-        views = replay.issuing.list_leases(now=now)
+        now = replay.report.interval_end + timedelta(hours=1)
+        views = replay.issuing_after.list_leases(now=now)
         reasons = {v.lease.reason for v in views}
         assert reason in reasons
         cited = [v for v in views if v.lease.reason == reason]
@@ -1197,6 +1252,7 @@ class TestLeaseEvidenceConvention:
 class TestHonestGaps:
     @pytest.mark.xfail(
         strict=True,
+        raises=LaunchRefused,
         reason="worker._persist_prompt_record's recovery cell key is "
                "content_digest({node_id, attempt, kind}) — no run identity "
                "(worker.py:2273); a second run of the same sealed preset against "
@@ -1219,11 +1275,14 @@ class TestHonestGaps:
         hits exactly this. That is why this suite gives each decision point its
         own ``RuntimeStores``: not a preference, a forced workaround.
 
-        The ``except`` branch pins WHICH failure this is, so the xfail cannot be
-        satisfied by an unrelated error.
+        WHY ``raises=LaunchRefused`` IS LOAD-BEARING. A bare
+        ``xfail(strict=True)`` accepts ANY exception as the expected failure —
+        including an ``AssertionError`` raised by the cause-check below, which
+        would let a DIFFERENT failure mode masquerade as this one and would make
+        the cause-check itself unfalsifiable. Pinning ``raises`` narrows the
+        expected failure to the launcher's refusal; the ``except`` branch then
+        pins WHICH refusal, and any other exception type is a hard FAIL.
         """
-        from guanlan_v2.orchestration.adapters.launcher import LaunchRefused
-
         point = replay.world.points[1]
         shared = replay.coordinator.stores_by_point[
             replay.world.points[0].point_ordinal]
