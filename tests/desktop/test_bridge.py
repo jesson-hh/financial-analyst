@@ -193,3 +193,47 @@ def test_open_window_survives_oversized_port():
                    log_opener=lambda: None)
     out = api.open_window("http://127.0.0.1:99999999999999999999/ui/x.html")
     assert out["ok"] is False and out["reason"] == "bad-port"
+
+
+# ── review round 2: 百分号编码点段(与 Critical 2 同类的分歧,已在真机 Chromium 实证)──
+#
+# 真机实证:把内建浏览器(Chromium,与 WebView2 同族引擎)指向
+# http://127.0.0.1:9999/ui/%2e%2e/workflow/list,地址栏落点变成
+# http://127.0.0.1:9999/workflow/list,响应体是 /workflow/list 的 API JSON——
+# 不是 /ui 静态挂载点的 404。Chromium 的 URL 规范化器按 RFC 3986 §6.2.2.2 /
+# WHATWG URL 标准,把 "%2e" 当字面的 "." 处理,再折叠点段。
+@pytest.mark.parametrize("url", [
+    # 与真机实证完全一致的那一条
+    "http://127.0.0.1:9999/ui/%2e%2e/workflow/list",
+    # 大小写变体 —— %2E 与 %2e 是同一个字符,大小写不敏感的判断不能有漏洞
+    "http://127.0.0.1:9999/ui/%2E%2E/workflow/list",
+    # 混合形式:一半编码一半字面
+    "http://127.0.0.1:9999/ui/%2e./api/x",
+    "http://127.0.0.1:9999/ui/.%2e/api/x",
+])
+def test_percent_encoded_dot_segment_traversal_is_rejected(url):
+    v = br.validate_ui_url(url)
+    assert v.ok is False and v.reason == "not-ui-path"
+
+
+def test_double_percent_encoded_dot_segment_stays_literal_and_is_allowed():
+    # Chromium 只解码一次:"%252e" 解一次后是字面文本 "%2e",浏览器不会把它
+    # 再解成 "."。校验器同样只解码一次,所以这条落在 /ui/ 下的字面文本段
+    # (对浏览器而言确实还在 /ui/ 下)不应被误杀 —— 过度拒绝不是本函数的职责,
+    # "被批准的路径 == 浏览器真正会请求的路径" 才是。
+    v = br.validate_ui_url("http://127.0.0.1:9999/ui/%252e%252e/workflow/list")
+    assert v.ok is True
+
+
+def test_approved_url_matches_the_path_a_real_browser_will_actually_request():
+    """核心不变式:本函数批准的这条 URL,必须和浏览器实际会请求的路径一致——
+    否则校验的是一个路径、导航的是另一个路径,闸形同虚设(这正是 Critical 2
+    和这一条百分号编码发现的共同失效形状)。"""
+    cases = [
+        ("http://127.0.0.1:9999/ui/screen/x.html", True),       # 无编码,原样落在 /ui/ 下
+        ("http://127.0.0.1:9999/ui/%2e%2e/workflow/list", False),   # 解码后落在 /ui/ 外
+        ("http://127.0.0.1:9999/ui/%2E%2E/workflow/list", False),   # 同上,大小写变体
+        ("http://127.0.0.1:9999/ui/%252e%252e/workflow/list", True),  # 只解一层,仍在 /ui/ 内
+    ]
+    for url, expected_ok in cases:
+        assert br.validate_ui_url(url).ok is expected_ok, url

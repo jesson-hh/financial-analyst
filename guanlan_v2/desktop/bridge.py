@@ -5,7 +5,7 @@ from __future__ import annotations
 import posixpath
 from dataclasses import dataclass
 from typing import Callable
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from guanlan_v2.desktop.supervisor import PORT
 
@@ -64,10 +64,19 @@ def validate_ui_url(raw) -> UrlVerdict:
         return UrlVerdict(False, "bad-port", "端口号超出合法范围 0-65535")
     if (port or 80) != PORT:
         return UrlVerdict(False, "bad-port", f"只允许 {PORT},收到 {port}")
-    # 用 posixpath.normpath 把 "." / ".." 段折叠掉再比前缀 —— 原始字符串前缀比较
-    # 看不见真实客户端(浏览器/WebView2)按 RFC 3986 §5.2.4 折叠 ".." 之后的
-    # 落点,"/ui/../api/secret" 折叠后其实是 "/api/secret"。
-    normalized_path = posixpath.normpath(parts.path or "/")
+    # 先解码一次百分号编码,再用 posixpath.normpath 把 "." / ".." 段折叠掉,
+    # 最后才比前缀 —— 原始字符串前缀比较看不见真实客户端(浏览器/WebView2)
+    # 按 RFC 3986 §6.2.2.2 / WHATWG URL 标准折叠之后的落点:"/ui/../api/secret"
+    # 折叠后是 "/api/secret","/ui/%2e%2e/workflow/list" 解码折叠后同样是
+    # "/workflow/list"(真机 Chromium 实证:地址栏与响应体都落在 /ui/ 之外)。
+    #
+    # 只解码一次,不递归解码:Chromium 自己也只解码一次 —— "%252e" 解一次后
+    # 是字面文本 "%2e"(百分号本身是 %25 解出来的),不会变成 "."。递归解码会
+    # 让我们把浏览器眼里"還在 /ui/ 下的字面文本"误判成越权,这不是本函数的
+    # 职责;"批准的路径 == 浏览器真正会请求的路径"这条不变式要求两边解码次数
+    # 一致,而不是我们这边更激进。
+    decoded_path = unquote(parts.path or "/")
+    normalized_path = posixpath.normpath(decoded_path)
     if not normalized_path.startswith("/"):
         normalized_path = "/" + normalized_path
     if ".." in normalized_path.split("/") or not normalized_path.startswith(_ALLOWED_PREFIX):
