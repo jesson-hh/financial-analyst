@@ -116,6 +116,7 @@ from guanlan_v2.orchestration.digest import (
 from guanlan_v2.orchestration.enums import (
     ApprovalPolicy,
     ExecutionKind,
+    NodeStatus,
     PlanSource,
     PortfolioRating,
 )
@@ -171,6 +172,7 @@ __all__ = [
     "CONTEXT_SNAPSHOT_DATA_DATE_BADGE_PREFIX",
     "AUXILIARY_EVIDENCE_UNWIRED_BADGE",
     # recommendation product
+    "LANE_TERMINAL_DEGRADED_BADGE_PREFIX",
     "RECOMMENDATION_ADVISORY_BANNER",
     "RECOMMENDATION_ARCHIVE_ID_PREFIX",
     "RECOMMENDATION_ARCHIVE_ARTIFACT_TYPE",
@@ -280,6 +282,13 @@ CONTEXT_SNAPSHOT_DATA_DATE_BADGE_PREFIX: str = "context_snapshot_data_date:"
 #: product that a human (or an agent) may read must say what it is BEFORE it says
 #: anything else: this is orchestrated research, not an order.
 RECOMMENDATION_ADVISORY_BANNER: str = "> 本推荐为编排研究产物,仅供参考,不构成交易指令"
+
+#: emitted per lane whose TERMINAL node finished ``DEGRADED`` — it committed a real
+#: ``ResearchPlan@1``, but reached it with an input missing. Indexed by
+#: ``lane_index``, the :data:`CONTEXT_SNAPSHOT_DATA_DATE_BADGE_PREFIX` precedent, so
+#: the product names WHICH lane rather than merely admitting that one of them was
+#: degraded. It is not ``degraded_lanes``: that field means "no plan at all".
+LANE_TERMINAL_DEGRADED_BADGE_PREFIX: str = "lane_terminal_degraded:"
 
 #: the archive artifact id prefix + type. The type is one of the archive router's
 #: three accepted kinds (archive/api.py:28) and the prefix keeps the id inside its
@@ -1066,8 +1075,10 @@ def admit_screening_batch(
 # =========================================================================== #
 # the recommendation product: assemble → render → land                         #
 # =========================================================================== #
-def _committed_terminal_plan_ref(stores: Any, run_id: str) -> TypedPayloadRef | None:
-    """The lane's committed ``ResearchPlan@1``, or ``None`` if there is not one.
+def _committed_terminal_plan_ref(
+    stores: Any, run_id: str
+) -> tuple[TypedPayloadRef, Any] | None:
+    """The lane's committed ``ResearchPlan@1`` **and its terminal status**, or ``None``.
 
     Event-sourced and READ-ONLY: this is the reviewed resume read
     (``dag._load_run_history``, dag.py:1067-1083) with the pool's own committed-
@@ -1089,8 +1100,17 @@ def _committed_terminal_plan_ref(stores: Any, run_id: str) -> TypedPayloadRef | 
     one: the artifact must be an output the run's own **terminal node** recorded,
     it must appear in a **committed** layer, and its persisted payload must be a
     **``ResearchPlan@1``**. Anything else — a run that never happened, a failed
-    terminal, a staged-but-unbarriered artifact — returns ``None``, which the
-    caller records as a degraded lane rather than a missing stock.
+    terminal, a staged-but-unbarriered artifact, an artifact of some other schema —
+    returns ``None``, which the caller records as a degraded lane rather than a
+    missing stock.
+
+    The terminal ``NodeRun``'s own ``status`` is returned ALONGSIDE the ref rather
+    than being thrown away, because ``COMPLETED`` and ``DEGRADED`` both commit a
+    plan: a ``dec.research_mgr`` that reached its verdict with an input missing is
+    a real verdict, but not the same verdict, and the caller must be able to say so
+    (:data:`LANE_TERMINAL_DEGRADED_BADGE_PREFIX`) instead of publishing it
+    indistinguishable from a clean one. ``FAILED`` needs no such handling — it
+    commits nothing, so it never reaches this return at all.
     """
     node_records: list[Any] = []
     committed_artifact_ids: set[str] = set()
@@ -1116,13 +1136,20 @@ def _committed_terminal_plan_ref(stores: Any, run_id: str) -> TypedPayloadRef | 
     # the LAST durable record for the terminal node is its terminal status (the
     # reviewed ``_terminal_record_at_commit`` rule, dag.py:1086-1095, without a
     # barrier to bound it: a later attempt supersedes an earlier one).
-    for artifact_id in terminal[-1].output_artifact_ids:
+    record = terminal[-1]
+    for artifact_id in record.output_artifact_ids:
         if artifact_id not in committed_artifact_ids:
             continue
         entry = staged.get(artifact_id)
+        # the schema fact is a GUARD, not a formality: a terminal node that
+        # committed some other payload must degrade the lane, and it must degrade
+        # it QUIETLY here — building a RecommendationEntry around a foreign ref
+        # would raise out of the contract's own pin and take the whole slate down
+        # with it (contracts.py:227-232), turning one odd lane into no product.
         if entry is None or entry[0] != RESEARCH_PLAN_SCHEMA_REF:
             continue
-        return TypedPayloadRef(schema_ref=entry[0], payload_ref=entry[1])
+        return (TypedPayloadRef(schema_ref=entry[0], payload_ref=entry[1]),
+                record.status)
     return None
 
 
@@ -1163,6 +1190,12 @@ def build_recommendation_slate(
     * a lane with no committed plan appears in ``degraded_lanes`` and nowhere else.
       It is never dropped, never defaulted to a neutral rating, and never given a
       rating from a staged-but-unbarriered artifact;
+    * a lane whose terminal node finished ``DEGRADED`` DID produce a verdict, so it
+      is a real entry — but it carries a
+      ``lane_terminal_degraded:<lane_index>`` badge (the
+      ``context_snapshot_data_date:`` indexed-badge precedent), because a plan
+      reached with an input missing must not publish indistinguishable from a clean
+      one. ``degraded_lanes`` keeps its own meaning (no plan at all) untouched;
     * ``portfolio_decision_ref`` is ``None`` with the mandatory
       ``no_cross_sectional_summary_v1`` badge — the v1 invariant (ratified D3: the
       single-code context convention makes a 全场裁决 structurally unavailable);
@@ -1181,12 +1214,16 @@ def build_recommendation_slate(
     """
     entries: list[RecommendationEntry] = []
     degraded: list[int] = []
+    degraded_terminals: list[int] = []
     for lane in batch.entries:
-        plan_ref = _committed_terminal_plan_ref(
+        found = _committed_terminal_plan_ref(
             stores, _lane_run_id(batch.batch_id, lane.code))
-        if plan_ref is None:
+        if found is None:
             degraded.append(lane.lane_index)
             continue
+        plan_ref, terminal_status = found
+        if terminal_status is NodeStatus.DEGRADED:
+            degraded_terminals.append(lane.lane_index)
         plan = stores.payloads.get(
             plan_ref.payload_ref, expected_schema_ref=plan_ref.schema_ref)
         # ``.value`` unwraps the enum member to the exact string it declares; a
@@ -1200,6 +1237,8 @@ def build_recommendation_slate(
     for badge in tuple(batch.badges) + tuple(batch.cost_preview.badges):
         if badge not in badges:
             badges.append(badge)
+    badges += [f"{LANE_TERMINAL_DEGRADED_BADGE_PREFIX}{i}"
+               for i in sorted(degraded_terminals)]
 
     return RecommendationSlate(
         as_of=batch.as_of,
@@ -1261,12 +1300,19 @@ def render_recommendation_md(slate: RecommendationSlate, *, stores: Any) -> str:
         plan = stores.payloads.get(
             entry.research_plan_ref.payload_ref,
             expected_schema_ref=entry.research_plan_ref.schema_ref)
+        # ``rating`` and ``code`` are flattened too. Today neither can carry a
+        # newline (a closed enum's value; a normalized six-digit code), but this
+        # module explicitly anticipates a widened free-string vocabulary — and on
+        # that day an unflattened rating would reopen the structure-forgery hole
+        # this renderer just closed. Free insurance, bought in advance.
+        rating = _one_line(entry.rating)
+        code = _one_line(entry.code)
         lines += [
-            f"### {entry.code} · {entry.rating}",
+            f"### {code} · {rating}",
             "",
             f"- 车道序位 lane_index:{entry.lane_index}",
             f"- 评级(逐字复制自 {entry.research_plan_ref.schema_ref.key},未再推导):"
-            f"{entry.rating}",
+            f"{rating}",
             f"- 依据 {entry.research_plan_ref.schema_ref.key}:"
             f"{entry.research_plan_ref.payload_ref.content_digest}",
             f"- 研判理由:{_one_line(plan.rationale)}",
@@ -1291,15 +1337,31 @@ def render_recommendation_md(slate: RecommendationSlate, *, stores: Any) -> str:
 def recommendation_archive_id(slate: RecommendationSlate) -> str:
     """The archive artifact id: ``rs_orch_screen_<YYYYMMDD>`` in +08:00 session terms.
 
-    The date is :func:`session_date_of` of the slate's ``as_of`` — the same session
-    convention the batch's recency badge uses, so a 22:00Z batch files under the
-    session day it actually belongs to rather than the UTC one.
+    **Which day, exactly.** The date is :func:`session_date_of` of ``slate.as_of``,
+    and ``slate.as_of`` is the ``ScreeningBatch``'s ``as_of``, which is the
+    **CandidateSlate's** ``as_of`` — the *data* the batch was screened from. It is
+    NOT the production wall clock, and it is NOT the timestamp the batch's recency
+    badge compares (that one is ``context.data_context.as_of`` against
+    ``clock.now()`` — a different timestamp on a different axis). So the filing day
+    is the day of the data, in +08:00 session terms: a 22:00Z slate files under the
+    NEXT session day, which is the honest answer for a market that has already
+    rolled over.
 
-    The id is DAY-scoped, not batch-scoped: that is the reviewed format, and its
-    consequence is recorded rather than hidden — two batches on one session day
-    land on ONE archive id, and the second overwrites the first (the archive is an
-    upsert by id, archive/api.py:45-55). The document names its own ``batch_id`` in
-    its header, which is how a reader tells which batch is archived.
+    **The consequence, stated rather than hidden.** The id is day-scoped, not
+    batch-scoped (the reviewed format), so:
+
+    * two batches screened from the same session day's data land on ONE archive id
+      and the second overwrites the first — the archive is an upsert by id
+      (archive/api.py:45-55);
+    * a PIT replay or a stale slate — a batch run TODAY from an OLD ``as_of`` —
+      files under that OLD day's id and overwrites whatever genuine product was
+      archived for it. Re-running last Tuesday's slate republishes last Tuesday's
+      archive entry, not today's.
+
+    A caller that cannot accept that (a replay harness, a backfill) must not route
+    through :func:`land_recommendation` unchanged; the document does name its own
+    ``batch_id`` in its header, which is how a reader tells which batch is archived,
+    but the id alone cannot. Task 7/9 wiring reads this as the contract.
     """
     return (f"{RECOMMENDATION_ARCHIVE_ID_PREFIX}"
             f"{session_date_of(slate.as_of).replace('-', '')}")

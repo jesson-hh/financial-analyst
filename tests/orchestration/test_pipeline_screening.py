@@ -125,7 +125,7 @@ from guanlan_v2.orchestration.runtime_support import (
     analyze_retry_repair,
     check_runtime_support,
 )
-from guanlan_v2.orchestration.schemas import NodeRun, ResearchPlan
+from guanlan_v2.orchestration.schemas import NodeRun, PortfolioDecision, ResearchPlan
 from guanlan_v2.orchestration.skilltree import parse_skill_v1
 from guanlan_v2.orchestration.spec import (
     OrchestrationRequest,
@@ -153,6 +153,7 @@ from guanlan_v2.orchestration.pipeline.screening import (
     AUXILIARY_EVIDENCE_UNWIRED_BADGE,
     CONTEXT_SNAPSHOT_DATA_DATE_BADGE_PREFIX,
     CONTEXT_SNAPSHOT_STALE_BADGE,
+    LANE_TERMINAL_DEGRADED_BADGE_PREFIX,
     RECOMMENDATION_ADVISORY_BANNER,
     RECOMMENDATION_ARCHIVE_ARTIFACT_TYPE,
     RECOMMENDATION_ARCHIVE_ID_PREFIX,
@@ -1585,12 +1586,19 @@ class _RunHistory:
         self._seq = 0
 
     def commit_terminal_plan(
-        self, run_id: str, plan: ResearchPlan, *,
+        self, run_id: str, plan, *,
         node_id: str = SCREENING_LANE_TERMINAL_NODE_ID,
         output_key: str = "primary",
+        schema_ref: SchemaRef = RESEARCH_PLAN_SCHEMA_REF,
+        status: NodeStatus = NodeStatus.COMPLETED,
         commit_the_layer: bool = True,
     ) -> str:
-        """Stage the terminal artifact, record its NodeRun, cross the barrier."""
+        """Stage the terminal artifact, record its NodeRun, cross the barrier.
+
+        ``schema_ref`` is a parameter (not a constant) so a terminal node that
+        committed some OTHER registered payload can be written honestly — the third
+        of the assembler's three facts needs a real counter-example, not a mock.
+        """
         self._seq += 1
         tag = f"t{self._seq}"
         plan_digest = "a" * 63 + str(self._seq)
@@ -1599,12 +1607,12 @@ class _RunHistory:
             idempotency_key=f"stage:{run_id}:{tag}",
             payload_puts=(PayloadPutCommand(
                 staged_key=StagedPayloadKey(key="payload"),
-                schema_ref=RESEARCH_PLAN_SCHEMA_REF, namespace="main",
+                schema_ref=schema_ref, namespace="main",
                 payload_template=dict(plan), registry_digest=self._rd,
                 idempotency_key=f"{run_id}:{tag}:payload"),),
             event_appends=(EventAppendCommand(
                 run_id=run_id, partition="main", event_type="ArtifactStaged",
-                payload_schema_ref=RESEARCH_PLAN_SCHEMA_REF,
+                payload_schema_ref=schema_ref,
                 payload_target=StagedPayloadKey(key="payload"),
                 registry_digest=self._rd,
                 idempotency_key=f"{run_id}:{tag}:staged-event",
@@ -1614,7 +1622,7 @@ class _RunHistory:
         node_run = NodeRun(
             node_run_id=f"nr-{run_id}-{tag}", run_id=run_id, plan_id=f"plan-{run_id}",
             plan_digest=plan_digest, node_id=node_id, worker_id="dec.research_mgr",
-            status=NodeStatus.COMPLETED, attempt_id=f"att-{tag}", attempt=1,
+            status=status, attempt_id=f"att-{tag}", attempt=1,
             input_snapshot_digest="b" * 64, output_keys=(output_key,),
             output_artifact_ids=(artifact_id,))
         self._append_node_run(run_id, node_run, tag, plan_digest)
@@ -1694,6 +1702,16 @@ class _RecEnv:
         self.__dict__.update(kw)
 
 
+def _fresh_run_store(env) -> tuple[RuntimeStores, _RunHistory]:
+    """An empty REAL store over the sealed Phase-9 registry + its history writer."""
+    resolver = SchemaRegistryResolver()
+    resolver.register(env["registry"])
+    stores = RuntimeStores(
+        resolver=resolver, clock=_FixedClock(),
+        allowed_cell_namespaces=(W.PROMPT_CELL_NAMESPACE,))
+    return stores, _RunHistory(stores, env["registry"].registry_digest)
+
+
 #: lane 0 is the WORSE grade on purpose: sorting by grade must reorder the slate.
 _LANE_RATINGS = {0: PortfolioRating.HOLD, 1: PortfolioRating.BUY}
 _RATIONALE = {
@@ -1710,12 +1728,7 @@ def rec_env(env, built):
     identity :func:`build_screening_batch` stamped — so the assembler must find
     each lane's run the same way the runner will.
     """
-    resolver = SchemaRegistryResolver()
-    resolver.register(env["registry"])
-    stores = RuntimeStores(
-        resolver=resolver, clock=_FixedClock(),
-        allowed_cell_namespaces=(W.PROMPT_CELL_NAMESPACE,))
-    writer = _RunHistory(stores, env["registry"].registry_digest)
+    stores, writer = _fresh_run_store(env)
     plans, digests = {}, {}
     for lane_index, rating in _LANE_RATINGS.items():
         plan = ResearchPlan(
@@ -1792,12 +1805,7 @@ class TestBuildRecommendationSlate:
     def test_a_staged_but_uncommitted_plan_is_a_degraded_lane(self, env, built):
         """Committed-only, exactly like the pool's own visibility rule: a staged
         artifact is evidence of work, never of a verdict."""
-        resolver = SchemaRegistryResolver()
-        resolver.register(env["registry"])
-        stores = RuntimeStores(
-            resolver=resolver, clock=_FixedClock(),
-            allowed_cell_namespaces=(W.PROMPT_CELL_NAMESPACE,))
-        writer = _RunHistory(stores, env["registry"].registry_digest)
+        stores, writer = _fresh_run_store(env)
         writer.commit_terminal_plan(
             built.lanes[0].draft.run_id,
             ResearchPlan(recommendation=PortfolioRating.BUY, rationale="未过闸"),
@@ -1807,27 +1815,67 @@ class TestBuildRecommendationSlate:
         assert slate.degraded_lanes == (0, 1, 2)
 
     def test_a_failed_terminal_node_is_a_degraded_lane(self, env, built):
-        resolver = SchemaRegistryResolver()
-        resolver.register(env["registry"])
-        stores = RuntimeStores(
-            resolver=resolver, clock=_FixedClock(),
-            allowed_cell_namespaces=(W.PROMPT_CELL_NAMESPACE,))
-        writer = _RunHistory(stores, env["registry"].registry_digest)
+        stores, writer = _fresh_run_store(env)
         writer.record_failed_terminal(built.lanes[1].draft.run_id)
         slate = build_recommendation_slate(built.batch, stores=stores)
         assert slate.entries == ()
         assert slate.degraded_lanes == (0, 1, 2)
 
+    def test_a_degraded_terminal_is_a_real_entry_that_says_it_was_degraded(
+            self, env, built):
+        """``COMPLETED`` and ``DEGRADED`` both commit a plan. A verdict reached with
+        an input missing IS a verdict — so it is published — but it must never
+        publish indistinguishable from a clean one."""
+        stores, writer = _fresh_run_store(env)
+        writer.commit_terminal_plan(
+            built.lanes[0].draft.run_id,
+            ResearchPlan(recommendation=PortfolioRating.BUY, rationale="缺一路证据"),
+            status=NodeStatus.DEGRADED)
+        writer.commit_terminal_plan(
+            built.lanes[1].draft.run_id,
+            ResearchPlan(recommendation=PortfolioRating.HOLD, rationale="齐活"))
+        slate = build_recommendation_slate(built.batch, stores=stores)
+        assert {e.lane_index for e in slate.entries} == {0, 1}
+        assert f"{LANE_TERMINAL_DEGRADED_BADGE_PREFIX}0" in slate.badges
+        # the CLEAN lane is not badged, and the badge is not degraded_lanes.
+        assert f"{LANE_TERMINAL_DEGRADED_BADGE_PREFIX}1" not in slate.badges
+        assert slate.degraded_lanes == (2,)
+        # and the human reading the document is told which lane it was.
+        assert f"{LANE_TERMINAL_DEGRADED_BADGE_PREFIX}0" in render_recommendation_md(
+            slate, stores=stores)
+
+    def test_a_clean_batch_carries_no_terminal_degraded_badge(self, rec_env):
+        slate = build_recommendation_slate(rec_env.batch, stores=rec_env.stores)
+        assert not any(b.startswith(LANE_TERMINAL_DEGRADED_BADGE_PREFIX)
+                       for b in slate.badges)
+
+    def test_a_terminal_artifact_of_another_schema_degrades_without_raising(
+            self, env, built):
+        """The THIRD fact, with a real counter-example. A terminal node that
+        committed a ``PortfolioDecision@1`` has produced something — but not this
+        lane's verdict. It must degrade the lane **quietly**: building an entry
+        around a foreign ref would raise out of ``RecommendationEntry``'s own
+        schema pin and take the WHOLE slate down, turning one odd lane into no
+        product at all."""
+        stores, writer = _fresh_run_store(env)
+        writer.commit_terminal_plan(
+            built.lanes[0].draft.run_id,
+            PortfolioDecision(
+                rating=PortfolioRating.BUY, executive_summary="摘要",
+                investment_thesis="论点"),
+            schema_ref=SchemaRef(name="PortfolioDecision", version="1"))
+        writer.commit_terminal_plan(
+            built.lanes[1].draft.run_id,
+            ResearchPlan(recommendation=PortfolioRating.HOLD, rationale="正常"))
+        slate = build_recommendation_slate(built.batch, stores=stores)  # no raise
+        assert [e.lane_index for e in slate.entries] == [1]
+        assert slate.degraded_lanes == (0, 2)
+
     def test_an_artifact_from_another_node_is_never_read_as_the_verdict(
             self, env, built):
         """Node identity is checked, not just schema: a ``ResearchPlan@1`` committed
         by some other node of the graph is not this lane's terminal verdict."""
-        resolver = SchemaRegistryResolver()
-        resolver.register(env["registry"])
-        stores = RuntimeStores(
-            resolver=resolver, clock=_FixedClock(),
-            allowed_cell_namespaces=(W.PROMPT_CELL_NAMESPACE,))
-        writer = _RunHistory(stores, env["registry"].registry_digest)
+        stores, writer = _fresh_run_store(env)
         writer.commit_terminal_plan(
             built.lanes[0].draft.run_id,
             ResearchPlan(recommendation=PortfolioRating.SELL, rationale="旁路"),
@@ -1838,11 +1886,7 @@ class TestBuildRecommendationSlate:
 
     def test_a_batch_whose_runs_never_ran_yields_an_honest_empty_slate(
             self, env, built):
-        resolver = SchemaRegistryResolver()
-        resolver.register(env["registry"])
-        stores = RuntimeStores(
-            resolver=resolver, clock=_FixedClock(),
-            allowed_cell_namespaces=(W.PROMPT_CELL_NAMESPACE,))
+        stores, _writer = _fresh_run_store(env)
         slate = build_recommendation_slate(built.batch, stores=stores)
         assert slate.entries == ()
         assert slate.degraded_lanes == (0, 1, 2)
@@ -1918,11 +1962,7 @@ class TestRenderRecommendationMd:
         assert md.startswith(RECOMMENDATION_ADVISORY_BANNER)
 
     def test_an_empty_slate_still_opens_with_the_banner(self, env, built):
-        resolver = SchemaRegistryResolver()
-        resolver.register(env["registry"])
-        stores = RuntimeStores(
-            resolver=resolver, clock=_FixedClock(),
-            allowed_cell_namespaces=(W.PROMPT_CELL_NAMESPACE,))
+        stores, _writer = _fresh_run_store(env)
         slate = build_recommendation_slate(built.batch, stores=stores)
         md = render_recommendation_md(slate, stores=stores)
         assert md.splitlines()[0] == RECOMMENDATION_ADVISORY_BANNER
@@ -1976,12 +2016,7 @@ class TestRenderRecommendationMd:
         """Model text is DATA. A rationale carrying its own headings — or a second
         advisory banner — is flattened onto one line, so it can neither open a
         section nor impersonate the mandatory banner."""
-        resolver = SchemaRegistryResolver()
-        resolver.register(env["registry"])
-        stores = RuntimeStores(
-            resolver=resolver, clock=_FixedClock(),
-            allowed_cell_namespaces=(W.PROMPT_CELL_NAMESPACE,))
-        writer = _RunHistory(stores, env["registry"].registry_digest)
+        stores, writer = _fresh_run_store(env)
         hostile = ("真理由\n## 伪造小节\n" + RECOMMENDATION_ADVISORY_BANNER
                    + "\n- 伪造条目")
         writer.commit_terminal_plan(
@@ -2043,6 +2078,27 @@ class TestLandRecommendation:
         land_recommendation(slate, stores=rec_env.stores, archive_put=spy)
         assert len({call[0] for call in spy.calls}) == 1
         assert spy.calls[0] == spy.calls[1]
+
+    def test_the_id_follows_the_data_as_of_so_a_replay_refiles_the_old_day(
+            self, rec_env):
+        """The filing day is the CANDIDATE SLATE's +08:00 session day — the day of
+        the DATA, not the production day and not the timestamp the recency badge
+        compares (``context.data_context.as_of``). So a PIT replay run today from a
+        stale ``as_of`` files under the OLD day's id and overwrites whatever genuine
+        product was archived for it. Pinned so Task 7/9 wiring reads it as the
+        contract rather than discovering it in production."""
+        today = build_recommendation_slate(rec_env.batch, stores=rec_env.stores)
+        replayed = today.model_copy(
+            update={"as_of": NOW - timedelta(days=6), "batch_id": "e" * 64})
+        assert recommendation_archive_id(today) == "rs_orch_screen_20260724"
+        assert recommendation_archive_id(replayed) == "rs_orch_screen_20260718"
+        # a real overwrite risk, not a theoretical one: same id family, different
+        # document — the id alone cannot tell the two products apart.
+        spy = _ArchiveSpy()
+        land_recommendation(replayed, stores=rec_env.stores, archive_put=spy)
+        land_recommendation(today, stores=rec_env.stores, archive_put=spy)
+        assert spy.calls[0][0] != spy.calls[1][0]
+        assert spy.calls[0][2] != spy.calls[1][2]
 
     def test_the_id_is_day_scoped_so_a_same_day_second_batch_overwrites(self, rec_env):
         """Recorded honestly rather than papered over: the reviewed id format is
