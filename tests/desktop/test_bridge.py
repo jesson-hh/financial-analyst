@@ -118,3 +118,78 @@ def test_every_page_facing_method_exists():
     """网页侧只认这四个名字;boot.html / overlay.js / guanlan-nav.js 都硬编码了它们。"""
     for name in ("open_window", "server_status", "retry", "open_log"):
         assert callable(getattr(br.JsApi, name, None)), f"缺 {name}"
+
+
+# ── review round 1: 四个发现的回归钉 ──────────────────────────────────────
+
+# Critical 1 — dot-segment traversal 绕过 /ui/ 闸(RFC 3986 §5.2.4 会在
+# 真实客户端里把 ".." 折叠掉,原始前缀比较看不见这个折叠后的落点)。
+@pytest.mark.parametrize("url", [
+    "http://127.0.0.1:9999/ui/../api/secret",
+    "http://127.0.0.1:9999/ui/../../api/secret",
+    "http://127.0.0.1:9999/ui/x/../../api/secret",
+])
+def test_dot_segment_traversal_escapes_ui_prefix_is_rejected(url):
+    v = br.validate_ui_url(url)
+    assert v.ok is False and v.reason == "not-ui-path"
+
+
+def test_dot_segment_that_stays_inside_ui_is_still_allowed():
+    # 良性的 "./"、"../" 只要折叠后仍落在 /ui/ 下,不该被误杀。
+    assert br.validate_ui_url("http://127.0.0.1:9999/ui/x/../y.html").ok is True
+    assert br.validate_ui_url("http://127.0.0.1:9999/ui/./x.html").ok is True
+
+
+# Critical 2 — 反斜杠权威解析分歧:Python urlsplit().hostname 在 "@" 上
+# rpartition,反斜杠没有特殊含义;但 WebView2(Chromium/WHATWG)对 http 这类
+# "special scheme" 会把反斜杠当 authority 的终止符,导致两个解析器对同一个
+# 字符串给出不同的 host —— 我们校验的 host 不是最终真正导航到的 host。
+def test_backslash_before_at_defeats_authority_parsing_is_rejected():
+    v = br.validate_ui_url("http://evil.example\\@127.0.0.1:9999/ui/x.html")
+    assert v.ok is False and v.reason == "bad-host"
+
+
+def test_plain_userinfo_variant_is_still_rejected():
+    # 两个解析器在这一条上意见一致 —— 钉住防止未来重构又打开这个口子。
+    v = br.validate_ui_url("http://127.0.0.1@evil.example/ui/x.html")
+    assert v.ok is False and v.reason == "bad-host"
+
+
+# Important 3 — validate_ui_url 对抗性输入不应抛异常(JsApi 的"从不抛异常"
+# 承诺全靠它)。
+@pytest.mark.parametrize("bad_input", [123, ["x"], None, 12.5, {"a": 1}])
+def test_validate_ui_url_survives_non_string_input(bad_input):
+    v = br.validate_ui_url(bad_input)
+    assert v.ok is False and v.reason == "not-a-url"
+
+
+def test_validate_ui_url_survives_port_out_of_range():
+    v = br.validate_ui_url("http://127.0.0.1:99999999999999999999/ui/x.html")
+    assert v.ok is False and v.reason == "bad-port"
+
+
+def test_open_window_survives_non_string_input():
+    api = br.JsApi(open_window_factory=lambda u: None,
+                   status_provider=lambda: {},
+                   retry_handler=lambda: None,
+                   log_opener=lambda: None)
+    out = api.open_window(123)
+    assert out["ok"] is False
+
+
+def test_open_window_survives_list_input():
+    api = br.JsApi(open_window_factory=lambda u: None,
+                   status_provider=lambda: {},
+                   retry_handler=lambda: None,
+                   log_opener=lambda: None)
+    out = api.open_window(["x"])
+    assert out["ok"] is False
+
+
+def test_open_window_survives_oversized_port():
+    api = br.JsApi(open_window_factory=lambda u: None,
+                   status_provider=lambda: {},
+                   retry_handler=lambda: None,
+                   log_opener=lambda: None)
+    out = api.open_window("http://127.0.0.1:99999999999999999999/ui/x.html")
+    assert out["ok"] is False and out["reason"] == "bad-port"
