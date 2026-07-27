@@ -2,8 +2,6 @@
 """supervisor 的全部行为都在这里定死。这个模块不 import pywebview,故可无头测试。"""
 from __future__ import annotations
 
-import pytest
-
 from guanlan_v2.desktop import supervisor as sv
 
 

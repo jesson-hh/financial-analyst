@@ -21,8 +21,20 @@ _ICON = Path(__file__).resolve().parents[2] / "guanlan_v2" / "desktop" / "guanla
 
 
 def test_shortcut_launches_via_dash_m_not_a_script_path():
+    """只查字面量 "-m guanlan_v2.desktop" 是否**出现**在文件里挡不住:
+    install_desktop_shortcut.ps1:9 的头部注释原样含有这个字面量(「Launch form
+    is `-m guanlan_v2.desktop` ...」),把真正的 `$lnk.Arguments = '-m
+    guanlan_v2.desktop'` 赋值删掉、只留下头部这行解释性注释,这条测试照样
+    通过。第二条断言同理拦不住一条拼出来的脚本路径,比如
+    `Join-Path $Repo 'guanlan_v2' 'desktop' '__main__.py'` 再赋给
+    `$lnk.Arguments`——这正是这个守卫本该拦住的、2026-07-26 那次停机的启动
+    形态,两条字面量断言都会对它视而不见。必须断言 `$lnk.Arguments` 这条赋值
+    语句本身,同 test_shortcut_working_directory_is_the_repo_root 的做法一致。"""
     src = _PS1.read_text(encoding="utf-8-sig")
-    assert "-m guanlan_v2.desktop" in src
+    assert re.search(r"\$lnk\.Arguments\s*=\s*'-m guanlan_v2\.desktop'", src), (
+        "$lnk.Arguments must be assigned the literal '-m guanlan_v2.desktop' -- "
+        "a mention in a comment elsewhere in the file is not enough"
+    )
     assert "desktop\\__main__.py" not in src and "desktop/__main__.py" not in src
 
 
