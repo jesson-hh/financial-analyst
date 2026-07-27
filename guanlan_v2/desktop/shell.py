@@ -10,6 +10,7 @@ import datetime
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -26,6 +27,8 @@ _WIDTH, _HEIGHT = 1400, 900
 _HEARTBEAT_SECONDS = 10.0
 _LOG_PATH = _DIR.parents[1] / "var" / "server-9999.log"
 _SHELL_LOG_PATH = _DIR.parents[1] / "var" / "desktop-shell.log"
+_LOG_DEDUPE_SECONDS = 60.0
+_last_log_at: dict[str, float] = {}
 
 
 class Shell:
@@ -102,7 +105,7 @@ class Shell:
         self._status = {"state": outcome.state, "detail": outcome.detail}
 
         if outcome.state == "healthy":
-            win.load_url(APP_URL)
+            _navigate(win, APP_URL)
             self._boot_pending = False
             return
         self._push_boot(win, {"phase": outcome.state, "message": "启动失败",
@@ -113,6 +116,11 @@ class Shell:
 
     def _on_retry(self) -> None:
         self._retry_requested.set()
+        if self._boot_pending:
+            # 点了以前只是悄悄唤醒心跳提前探一次,页面上什么反应都没有 ——
+            # 第一次点和以前那个死气沉沉的按钮长得一模一样。这里立刻推一条
+            # 反馈上去,不等心跳线程真正跑完那一轮探测。
+            self._push_boot(self.main_window, {"phase": "starting", "message": "正在重试…"})
 
     def _on_open_log(self) -> None:
         """用系统默认程序打开 var/server-9999.log。只读,不动服务器。"""
@@ -126,9 +134,13 @@ class Shell:
             # 否则超时之后的引导页会让 server_status() 永远读到 "timeout"
             # (监测器压根没见过那次超时,recover 时 hide_overlay 也不会是 True)。
             self._status = {"state": "healthy", "detail": ""}
-            if decision.hide_overlay:
-                for win in list(self._windows):
-                    _eval(win, "window.glShellOverlay && window.glShellOverlay.hide();")
+            # hide 无条件发,不只在 hide_overlay 的跳变沿发一次:_on_loaded 跑在
+            # pywebview 生的线程上,如果它在这次翻健康的前一刻读到旧的 degraded
+            # 状态,会晚一步补一次 show——只发一次的 hide 已经在那次跳变沿用掉了,
+            # 之后没有任何东西会再去揭这层幕布(重试也不行,已连通时 hide_overlay
+            # 恒为 False)。overlay.js 的 hide() 本来就幂等,无条件发不会有副作用。
+            for win in list(self._windows):
+                _eval(win, "window.glShellOverlay && window.glShellOverlay.hide();")
             # 引导页不是终态:心跳一旦探到已连通,就把还停在引导页的主窗口放行到
             # 帷幄页 —— 这也是 重试/看日志 按钮(只会在 ensure 超时后显形)唯一
             # 会真正生效的地方:run_boot_sequence 只在启动那一刻跑一次,之后只有
@@ -148,17 +160,30 @@ class Shell:
 
     def _advance_boot_window_if_pending(self) -> None:
         if self._boot_pending:
-            self.main_window.load_url(APP_URL)
+            _navigate(self.main_window, APP_URL)
             self._boot_pending = False
+
+    def _protected_heartbeat_tick(self) -> None:
+        """一次心跳的异常绝不能让往后所有的心跳都消失 —— 这仓库最惨的一次停机
+        就是同一种「监督链悄悄死掉,没人发现」。"""
+        try:
+            self.heartbeat_once()
+        except Exception as exc:  # noqa: BLE001
+            _log_shell_event(f"heartbeat_once failed: {type(exc).__name__}: {exc}")
 
     def _heartbeat_loop(self) -> None:
         while True:
             if self._retry_requested.wait(timeout=_HEARTBEAT_SECONDS):
                 self._retry_requested.clear()
-            self.heartbeat_once()
+            self._protected_heartbeat_tick()
 
     def _startup(self) -> None:
-        self.run_boot_sequence(self.main_window)
+        try:
+            self.run_boot_sequence(self.main_window)
+        except Exception as exc:  # noqa: BLE001 —— 这异常死在 pywebview 生的线程上,
+            # main() 的 _run_and_log_crashes 看不到;必须自己留痕,而且无论如何都要
+            # 把心跳线程起起来 —— 否则引导页会经这第二条路再次原地卡死,悄无声息。
+            _log_shell_event(f"run_boot_sequence failed: {type(exc).__name__}: {exc}")
         threading.Thread(target=self._heartbeat_loop, daemon=True).start()
 
     def start(self) -> None:
@@ -178,7 +203,30 @@ def _eval(win, code: str) -> None:
         _log_shell_event(f"evaluate_js failed: {type(exc).__name__}: {exc}")
 
 
+def _navigate(win, url: str) -> None:
+    """load_url 是壳里唯一没走 _eval 式留痕的 pywebview 调用。真 pywebview 的
+    `load_url` 装了 `@_shown_call`,一扇从没 show 过的窗口(WebView2 运行时坏掉、
+    GPU 挂起)会等 20s 再抛 WebViewException;导航一个已关闭的窗口则是良性的
+    静默 no-op(winforms 那边实例没了直接提前返回,不会抛)。壳绝不能因为一次
+    导航失败就把 run_boot_sequence/心跳线程带崩,但要留痕 —— 同 _eval。
+    """
+    try:
+        win.load_url(url)
+    except Exception as exc:  # noqa: BLE001
+        _log_shell_event(f"load_url failed: {type(exc).__name__}: {exc}")
+
+
 def _log_shell_event(message: str) -> None:
+    """诊断日志,不能无界增长:同一条消息在 `_LOG_DEDUPE_SECONDS` 窗口内只写一次
+    —— 一扇卡在永久失败态的窗口每一拍心跳都会炸出同一条 evaluate_js 失败,
+    不限流就是一天约 8600 行、永远写下去。这是诊断用途,限流丢的是重复,不丢
+    首次出现。
+    """
+    now = time.monotonic()
+    last = _last_log_at.get(message)
+    if last is not None and (now - last) < _LOG_DEDUPE_SECONDS:
+        return
+    _last_log_at[message] = now
     try:
         _SHELL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with _SHELL_LOG_PATH.open("a", encoding="utf-8") as fh:

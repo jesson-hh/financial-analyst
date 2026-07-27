@@ -172,10 +172,13 @@ def test_double_close_does_not_raise():
 # ── IMPORTANT 3: server_status 必须每次心跳都刷新,不能只在状态跳变时刷新 ─────
 
 def test_status_reflects_the_latest_probe_even_below_the_overlay_threshold():
+    """安全靠构造,不靠算术:即便这条测试以后被改到跨过遮罩阈值,注入的
+    spawner 也保证不会有真的看门狗被拉起 —— 不依赖 iter([...]) 恰好在 3 次
+    阈值前一步停下这件"巧合"。"""
     fake = _FakeWebview()
     probes = iter([True, False])
     s = sh.create_shell(webview_module=fake, ensure=lambda **kw: _healthy_outcome(),
-                        prober=lambda: next(probes))
+                        prober=lambda: next(probes), spawner=lambda: _spawn_result())
     s.run_boot_sequence(fake.windows[0])
     s.heartbeat_once()
     assert s.api.server_status()["state"] == "healthy"
@@ -221,7 +224,18 @@ def test_three_failures_show_overlay_and_spawn_exactly_once():
     assert len(shows2) == 1
 
 
-def test_recovery_hides_overlay_exactly_once():
+def test_recovery_hides_the_overlay_and_keeps_hiding_it_while_healthy():
+    """Review round 3 / Minor 1 —— 这条测试的名字和断言都从"恰好一次"改成了
+    "至少一次,且继续健康期间不该突然停发":旧版本(`test_recovery_hides_overlay_
+    exactly_once`)钉死的正是那个只在 hide_overlay 的跳变沿发一次 hide 的行为,
+    而这行为本身留了一条窄缝竞态 —— `_on_loaded` 跑在 pywebview 生的线程上,如果
+    它在心跳翻健康、广播 hide 的**前一刻**读到旧的 degraded 状态,会晚一步在这条
+    hide 之后又补一次 show,而遮罩自己的"重试"按钮清不掉它(探测已连通时
+    hide_overlay 恒为 False),用户会卡在一扇"页面其实好的,但盖着一层永远揭不开
+    的幕布"的窗口上。修法是把 hide 从"只在跳变沿发一次"改成"只要 connected 就
+    无条件发"(overlay.js 的 hide() 本来就幂等),用持续重复的 hide 去堵那条竞态。
+    这条测试因此故意放宽:不再断言"只发一次",而是断言"至少发一次,且继续健康
+    期间不会少发"。"""
     fake = _FakeWebview()
     probes = iter([False, False, False, True, True])
     s = sh.create_shell(webview_module=fake, ensure=lambda **kw: _healthy_outcome(),
@@ -231,26 +245,28 @@ def test_recovery_hides_overlay_exactly_once():
         s.heartbeat_once()
     s.heartbeat_once()  # 恢复
     hides = [c for c in fake.windows[0].evaluated if "glShellOverlay.hide" in c]
-    assert len(hides) == 1
-    s.heartbeat_once()  # 继续健康:不该再多一次 hide
+    assert len(hides) >= 1, "恢复这一拍必须至少发一次 hide"
+    s.heartbeat_once()  # 继续健康:允许(且应该)再发一次 hide —— 这正是用来堵竞态的手段
     hides2 = [c for c in fake.windows[0].evaluated if "glShellOverlay.hide" in c]
-    assert len(hides2) == 1
+    assert len(hides2) >= len(hides), "继续健康期间不该突然不再发 hide —— 那正是堵竞态的手段"
 
 
-def test_loaded_handler_is_a_zero_argument_closure():
+def test_loaded_and_closed_handlers_are_zero_argument_closures():
     """真 pywebview 按签名内省调度:如果 handler 声明 1 个形参(哪怕带默认值),
     pywebview 会认为它要 1 个参数、传参进来,那个参数不一定还是我们想要的 win,
     会把默认值捕获的 win 顶掉。handler 必须是不接受任何参数的闭包 —— 天然免疫,
-    不依赖调度器到底怎么内省。"""
+    不依赖调度器到底怎么内省。两条绑定(loaded 和 closed)都要钉住,不能只钉
+    其中一条 —— 上一轮内省守护只钉了 loaded,closed 是这一轮才加的绑定。"""
     import inspect
 
     fake = _FakeWebview()
     sh.create_shell(webview_module=fake)
     win = fake.windows[0]
-    handler = win.events.loaded.handlers[0]
-    assert inspect.signature(handler).parameters == {}, (
-        "loaded handler 不能声明形参(哪怕带默认值)—— 必须是零参数闭包"
-    )
+    for event_name in ("loaded", "closed"):
+        handler = getattr(win.events, event_name).handlers[0]
+        assert inspect.signature(handler).parameters == {}, (
+            f"{event_name} handler 不能声明形参(哪怕带默认值)—— 必须是零参数闭包"
+        )
 
 
 def test_on_loaded_injects_gl_desktop_flag_and_overlay_script():
@@ -357,3 +373,123 @@ def test_log_shell_event_appends_to_the_shell_log_file(tmp_path, monkeypatch):
     monkeypatch.setattr(sh, "_SHELL_LOG_PATH", log_path)
     sh._log_shell_event("hello world")
     assert "hello world" in log_path.read_text(encoding="utf-8")
+
+
+# ── Review round 3 —— IMPORTANT: 引导页可以经第二条路再度变成终态,而且悄无声息 ──
+#
+# `_startup` 先跑 run_boot_sequence 再起心跳线程;run_boot_sequence 一炸,心跳线程
+# 就永远不会被起来 —— 没有监控、没有 status、没有 _advance_boot_window_if_pending,
+# 引导页原地卡死,而且这异常死在 pywebview 生的线程上,__main__.py 的
+# _run_and_log_crashes 看不到,什么痕迹都不会留下。对称地,_heartbeat_loop 的
+# while True 里一次 heartbeat_once 抛异常,就会让往后所有的心跳都消失。
+
+def test_startup_starts_the_heartbeat_thread_even_when_boot_sequence_raises(tmp_path, monkeypatch):
+    # 隔离真实的 var/desktop-shell.log —— _startup 的 except 分支会真的调
+    # _log_shell_event,不隔离就会把这条测试用的异常消息写进仓库真实的日志文件。
+    monkeypatch.setattr(sh, "_SHELL_LOG_PATH", tmp_path / "desktop-shell.log")
+    monkeypatch.setattr(sh, "_last_log_at", {})
+
+    fake = _FakeWebview()
+
+    def _boom(**kw):
+        raise RuntimeError("boot exploded")
+
+    s = sh.create_shell(webview_module=fake, ensure=_boom)
+
+    started = []
+
+    class _FakeThread:
+        def __init__(self, target=None, daemon=None):
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            started.append(self.target)
+
+    monkeypatch.setattr(sh.threading, "Thread", _FakeThread)
+
+    s._startup()  # 不该向外抛,即便 ensure 炸了
+    assert started, "run_boot_sequence 炸了之后,心跳线程还是必须被起起来 —— 否则引导页原地卡死"
+    assert started[0] == s._heartbeat_loop
+
+
+def test_a_failing_heartbeat_tick_does_not_kill_the_loop(tmp_path, monkeypatch):
+    # 同上:隔离真实日志文件,不让测试异常消息污染仓库里的 var/desktop-shell.log。
+    monkeypatch.setattr(sh, "_SHELL_LOG_PATH", tmp_path / "desktop-shell.log")
+    monkeypatch.setattr(sh, "_last_log_at", {})
+
+    fake = _FakeWebview()
+    calls = {"n": 0}
+
+    def _flaky_prober():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("network stack exploded")
+        return True
+
+    s = sh.create_shell(webview_module=fake, ensure=lambda **kw: _healthy_outcome(),
+                        prober=_flaky_prober)
+    s.run_boot_sequence(fake.windows[0])
+    s._protected_heartbeat_tick()  # 第一次探测直接炸 —— 不该向外抛
+    s._protected_heartbeat_tick()  # 第二次证明循环没被那次异常打死:探测恢复,状态照常刷新
+    assert s.api.server_status()["state"] == "healthy"
+    assert calls["n"] == 2
+
+
+def test_navigate_failure_is_logged_instead_of_crashing_the_boot_sequence(monkeypatch):
+    """load_url 是这一轮唯一没走 _eval 式留痕的 pywebview 调用 —— 一扇从没
+    show 过的窗口(WebView2 运行时坏掉/GPU 挂起)会让它等 20s 后抛
+    WebViewException。壳绝不能因为一次导航失败就把 run_boot_sequence /
+    心跳线程带崩,但要留痕。"""
+    logged = []
+    monkeypatch.setattr(sh, "_log_shell_event", lambda msg: logged.append(msg))
+
+    class _BoomWindow:
+        def load_url(self, url):
+            raise RuntimeError("WebView2 runtime is gone")
+
+    sh._navigate(_BoomWindow(), sh.APP_URL)
+    assert logged and "WebView2 runtime is gone" in logged[0]
+
+
+# ── Review round 3 —— Minor 4: shell log 要限流/去重,不能无界增长 ──────────
+
+def test_log_shell_event_dedupes_identical_messages_within_the_window(tmp_path, monkeypatch):
+    log_path = tmp_path / "desktop-shell.log"
+    monkeypatch.setattr(sh, "_SHELL_LOG_PATH", log_path)
+    monkeypatch.setattr(sh, "_last_log_at", {})
+    fake_now = [1000.0]
+    monkeypatch.setattr(sh.time, "monotonic", lambda: fake_now[0])
+
+    sh._log_shell_event("boom")
+    sh._log_shell_event("boom")  # 限流窗口内的重复 —— 不该再写一行
+    content = log_path.read_text(encoding="utf-8")
+    assert content.count("boom") == 1, "同一条消息在限流窗口内不该被重复写盘"
+
+    fake_now[0] += sh._LOG_DEDUPE_SECONDS + 1
+    sh._log_shell_event("boom")  # 窗口过了:同样的消息应该能再被记一次
+    content2 = log_path.read_text(encoding="utf-8")
+    assert content2.count("boom") == 2, "限流窗口一过,同样的消息应该还能被记录"
+
+
+# ── Review round 3 —— Minor 5: 重试要有即时反馈,不能第一次点和以前一样死气沉沉 ──
+
+def test_retry_pushes_immediate_feedback_to_the_boot_page():
+    fake = _FakeWebview()
+    s = sh.create_shell(webview_module=fake, ensure=lambda **kw: _timeout_outcome())
+    s.run_boot_sequence(fake.windows[0])
+    before = len(fake.windows[0].evaluated)
+    s.api.retry()
+    assert len(fake.windows[0].evaluated) > before, "点了重试应该立刻看到点反应,不能像以前一样死气沉沉"
+    assert any("正在重试" in c for c in fake.windows[0].evaluated)
+
+
+def test_retry_gives_no_feedback_once_already_past_the_boot_page():
+    """已经翻过引导页之后,重试不该再往 main_window 里塞 glBoot 状态(那扇窗此刻
+    多半已经不是 boot.html 了,glBoot 也早不存在,推不推都无所谓,但没必要推)。"""
+    fake = _FakeWebview()
+    s = sh.create_shell(webview_module=fake, ensure=lambda **kw: _healthy_outcome())
+    s.run_boot_sequence(fake.windows[0])
+    before = len(fake.windows[0].evaluated)
+    s.api.retry()
+    assert len(fake.windows[0].evaluated) == before

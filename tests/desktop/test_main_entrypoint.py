@@ -69,6 +69,38 @@ print("BOOTSTRAP-OK")
     )
 
 
+def test_without_the_bootstrap_the_import_would_fail_with_modulenotfounderror() -> None:
+    """负控制 —— 上面那条正控制只证明了"跑了引导之后,import 能成功",没有证明
+    "没有引导,import 会失败";如果仓根是被别的什么机制(PYTHONPATH、.pth 文件、
+    偶然的 cwd)带回 sys.path 的,正控制会照样绿,而三行引导其实什么都没做。
+    这条测试同样收窄 sys.path,但**不执行** __main__.py 的引导 —— 直接尝试
+    `import guanlan_v2.desktop.shell`,证明这确实会 ModuleNotFoundError。"""
+    driver = f"""
+import sys, os
+def _norm(p):
+    return os.path.normcase(os.path.normpath(p))
+_repo = {str(_REPO)!r}
+_pkgdir = {str(_MAIN_PY.parent)!r}
+sys.path[:] = [_pkgdir] + [p for p in sys.path[1:] if _norm(p) != _norm(_repo)]
+import guanlan_v2.desktop.shell  # 有意不跑引导 —— 这句应该失败
+"""
+    proc = subprocess.run(
+        [sys.executable, "-c", driver],
+        cwd=str(_MAIN_PY.parent),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    assert proc.returncode != 0 and "ModuleNotFoundError" in proc.stderr, (
+        "负控制失效:没有仓根引导,import guanlan_v2.desktop.shell 应该失败;\n"
+        "如果这里没有失败,说明仓根是被别的什么机制带回 sys.path 的,上面那条正控制\n"
+        "测试就不能真正证明引导三行在起作用。\n"
+        f"--- returncode {proc.returncode} ---\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr[-2000:]}"
+    )
+
+
 def test_main_records_a_crash_to_disk_instead_of_vanishing_silently(tmp_path, monkeypatch) -> None:
     """双击图标后 import webview 失败或 WebView2 缺失,不该是"什么都没发生"——
     这正是引导页要防的失败模式,原因必须落盘。"""
