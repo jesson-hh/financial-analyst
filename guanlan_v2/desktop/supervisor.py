@@ -114,3 +114,38 @@ def port_contamination() -> str | None:
     if raw and raw.strip() != str(PORT):
         return f"检测到 GUANLAN_PORT={raw}(壳仍连 {PORT})"
     return None
+
+
+@dataclass(frozen=True)
+class MonitorDecision:
+    connected: bool
+    show_overlay: bool
+    hide_overlay: bool
+    spawn_watchdog: bool
+    consecutive_failures: int
+
+
+class ConnectionMonitor:
+    """把一串心跳结果翻译成动作。纯状态机,不做 I/O。
+
+    硬约束:一次掉线只拉一次看门狗,按壳进程计不按窗口计 —— 开着三个窗口
+    掉线仍然只派生一次。恢复健康后标记复位,下一次掉线才允许再拉一次。
+    """
+
+    def __init__(self, *, failure_threshold: int = 3) -> None:
+        self._threshold = failure_threshold
+        self._failures = 0
+        self._degraded = False
+
+    def observe(self, healthy: bool) -> MonitorDecision:
+        if healthy:
+            was_degraded = self._degraded
+            self._failures = 0
+            self._degraded = False
+            return MonitorDecision(True, False, was_degraded, False, 0)
+
+        self._failures += 1
+        entering = (not self._degraded) and self._failures >= self._threshold
+        if entering:
+            self._degraded = True
+        return MonitorDecision(False, entering, False, entering, self._failures)
