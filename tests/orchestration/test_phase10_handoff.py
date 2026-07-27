@@ -34,10 +34,21 @@ Brief items covered (one test class per item):
 4.  the Phase 8 catalog resolves the twelve lane workers this plan schedules,
     each ``selection_scope="dynamic_allowed"`` with its output schema resolvable
     in the sealed cumulative registry; ``dec.trader`` emits only
-    ``PortfolioTargetProposal@1``. RECONCILIATION (D3): NONE of the twelve
-    carries a ``params_schema_ref`` — the implemented convention takes the code
-    from the run/request context; the sole ``params_schema_ref`` carrier in the
-    whole catalog is ``dec.risk_debate`` (``RiskDebateParams@1``, resolvable).
+    ``PortfolioTargetProposal@1``. RECONCILIATION (D3, corrected in round 2 —
+    the earlier "code from the run/request context (DataContext)" attribution
+    was WRONG: ``DataContext`` carries no code/symbol/universe field): NONE of
+    the twelve carries a ``params_schema_ref`` (sole catalog carrier:
+    ``dec.risk_debate``/``RiskDebateParams@1``), and there is NO single
+    structural subject-code carrier in the kernel either — a paramsless worker
+    REFUSES node params (spec.py ``params_not_allowed``), and the code reaches
+    execution only as (i) per-call data-method params
+    (``InstrumentSeriesParams.symbol`` / ``InstrumentUniverseParams.symbols``
+    riding on ``DataRequest.params``) and (ii) payload content (the request
+    ``goal`` text / upstream artifacts). The Phase-2 compat precedent maps base
+    ``code``/``asof_date`` to ``target_kind="context"`` and deliberately places
+    NOTHING on the node (``presets._CORE_BASE_INPUTS``). Task 3 must bind the
+    subject code at a reviewed seam — never through an assumed DataContext
+    field. Pinned executably by ``test_d3_subject_code_carrier_reality``.
 5.  Phase 5/6 anchors: ``RegimeReport@1`` / ``RotationReport@1`` registered,
     the bootstrap ``ContextSnapshot`` production path
     (``build_context_snapshot_from_bootstrap``), ``TARGET_WEIGHT_BANDS``
@@ -490,10 +501,11 @@ class TestItem4LaneWorkers:
 
     def test_params_schema_reality_matches_the_implemented_convention(
             self, catalog, sealed_registry):
-        """D3 RECONCILIATION: none of the twelve carries a params_schema_ref —
-        the implemented convention takes the code from the run/request context,
-        so the screening builder must emit context-consistent single-code plans.
-        The sole carrier in the whole catalog is dec.risk_debate."""
+        """D3 RECONCILIATION: none of the twelve carries a params_schema_ref,
+        so the subject code can NOT ride on node params (spec.py refuses params
+        on a paramsless worker). Where it actually rides is pinned separately by
+        test_d3_subject_code_carrier_reality. The sole params carrier in the
+        whole catalog is dec.risk_debate."""
         workers = {w.id: w for w in catalog.workers}
         for wid in PHASE10_LANE_WORKERS:
             assert workers[wid].params_schema_ref is None, (
@@ -510,9 +522,10 @@ class TestItem4LaneWorkers:
         assert refs == [("PortfolioTargetProposal", "1")]
 
     def test_d3_run_context_convention_is_pinned(self):
-        """D3 positive half: the convention that REPLACES worker params. The
-        subject code reaches a worker through the run context, so Task 3's
-        builder binds these exact names — a rename must fail HERE, not there:
+        """D3 run-context SEAM pins (round-2 corrected scope: these are the
+        one-frozen-data-universe-per-run names Task 3's plans must be
+        *consistent with* — NOT a subject-code carrier; the code carrier truth
+        is test_d3_subject_code_carrier_reality). A rename must fail HERE:
         ``bootstrap.derive_main_run_context`` (name + keyword surface) and the
         ContextSnapshot → DataContext linkage (field ``data_context``; the
         RunContext side is field ``data``, same ``DataContext`` type — the pair
@@ -528,10 +541,56 @@ class TestItem4LaneWorkers:
         assert params[0].name == "bootstrap_ctx"
         kw_only = {p.name for p in params
                    if p.kind is inspect.Parameter.KEYWORD_ONLY}
+        # exact-set EQUALITY is deliberate (siblings use subset): a NEW kwarg
+        # here changes what a context-consistent plan must supply, so growth
+        # must trip this gate too, not just renames/removals.
         assert kw_only == {"snapshot", "main_run_id", "budget",
                           "cancellation_token_id"}
         assert ContextSnapshot.model_fields["data_context"].annotation is DataContext
         assert RunContext.model_fields["data"].annotation is DataContext
+
+    def test_d3_subject_code_carrier_reality(self):
+        """D3 carrier truth (round-2 correction of a wrong attribution): there
+        is NO single structural subject-code carrier in the implemented kernel.
+        Pinned so a later change re-opens D3 loudly:
+
+        (a) ``DataContext``'s EXACT field set — no code/symbol/universe field
+            (the earlier gate text claimed the code rode here; it does not);
+        (b) the only TYPED code carriers are the per-call data-method params —
+            ``InstrumentSeriesParams.symbol`` / ``InstrumentUniverseParams.symbols``
+            — riding on each ``DataRequest.params`` (PIT-scoped by the frozen
+            as_of, never plan-bound to one code);
+        (c) the Phase-2 compat/pilot precedent maps the base ``code``/``asof_date``
+            inputs to ``target_kind="context"`` and deliberately places NOTHING
+            on the node (``presets._CORE_BASE_INPUTS``; presets.py's context
+            branch is a documented no-op) — so Task 3's single-code screening
+            builder must bind the code at a seam it reviews (params-schema
+            extension or goal/data-call convention), never via an assumed
+            DataContext field."""
+        from guanlan_v2.orchestration import presets
+        from guanlan_v2.orchestration.context import DataContext
+        from guanlan_v2.orchestration.data.source import (
+            DataRequest,
+            InstrumentSeriesParams,
+            InstrumentUniverseParams,
+        )
+        assert set(DataContext.model_fields) == {
+            "schema_version", "as_of", "clock", "mode", "backend", "strict_pit",
+            "calendar_id", "resolved_vendor_chains", "source_config_digest",
+            "source_registry_digest", "routing_snapshot_digest",
+            "data_snapshot_id", "data_snapshot_content_digest",
+            "vintage_manifest_digest", "built_at"}
+        for name in _D4_CODE_LIKE_NAMES:
+            assert name not in DataContext.model_fields, (
+                f"DataContext.{name} appeared — a structural subject carrier "
+                "surfaced; re-open D3 before Task 3's builder binds it")
+        assert "symbol" in InstrumentSeriesParams.model_fields
+        assert "symbols" in InstrumentUniverseParams.model_fields
+        assert {"params", "params_schema_ref"} <= set(DataRequest.model_fields)
+        assert presets._CORE_BASE_INPUTS["news-sentiment"] == (
+            ("code", "context", "code"), ("asof_date", "context", "asof_date"))
+        assert presets._CORE_BASE_INPUTS["report-writer"][:2] == (
+            ("code", "context", "code"), ("asof_date", "context", "asof_date"))
 
 
 # =========================================================================== #
@@ -583,6 +642,10 @@ class TestItem5Phase56Anchors:
             "name", "universe_key", "stage", "strength", "persistence",
             "evidence", "chain_nodes"}
         assert set(MarketFactorPoint.model_fields) == {"date", "value", "aux"}
+        assert set(RotationReport.model_fields) == {
+            "schema_version", "as_of", "factor_report_digest", "mainlines",
+            "confidence", "conflicts", "analog_case_ids", "narrative",
+            "evidence_factor_ids", "unknown_reason", "content_digest"}
         for model in (MainlineRead, MarketFactorPoint, RotationReport):
             for name in _D4_CODE_LIKE_NAMES:
                 assert name not in model.model_fields, (
@@ -720,9 +783,17 @@ class TestItem9NoOverwrite:
     def test_planned_phase10_paths_are_disjoint_from_phase1_9(self):
         golden_names = set(PHASE1_9_GOLDEN_FILES)
         module_names = set(PHASE1_9_ORCH_MODULES)
+        # the frozen TEST roster too (minus this gate, the one pre-existing
+        # Phase-10 file): a planned test path colliding with an upstream test
+        # module name would be an overwrite, not an addition.
+        test_names = set(TEST_MODULE_ROSTER_AT_FREEZE) - {"test_phase10_handoff.py"}
         for planned in PHASE10_PLANNED_CREATE_PATHS:
             name = planned.rsplit("/", 1)[-1]
             assert name not in golden_names, planned
+            # only a path that would LAND in tests/orchestration/ can collide
+            # with a test module name (pipeline/__init__.py is a different dir).
+            if planned.startswith("tests/orchestration/") and planned.endswith(".py"):
+                assert name not in test_names, planned
             if planned.startswith("guanlan_v2/orchestration/"):
                 top = planned.split("/")[2]
                 assert top == "pipeline"  # everything lands in the NEW package
