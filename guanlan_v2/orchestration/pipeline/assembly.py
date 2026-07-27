@@ -128,6 +128,7 @@ from guanlan_v2.orchestration.model_tiers import (
     tier_map_from_llm_yaml,
 )
 from guanlan_v2.orchestration.plan_presets import (
+    PlanPresetError,
     PlanPresetRecord,
     PlanPresetRegistry,
     load_preset_registry,
@@ -349,9 +350,13 @@ class WorkerSeatModelGateway:
     refusal — any binding mismatch raises ``PromptBindingError`` before the
     engine client is imported or built; (2) the invoked worker's catalog
     ``model_tier`` resolves to its Phase-8 seat (typed refusal on an
-    unknown/unconfigured tier); (3) exactly one JSON single-shot completion on
-    the seat, driven on the gateway-owned private loop under the invocation
-    lock; (4) the completion text is parsed as JSON into ``ModelResult.payload``
+    unknown/unconfigured tier); (3) the resolved engine client's
+    ``provider``/``model`` must EQUAL the reviewed tier binding — a client the
+    engine resolved off the binding (default-vendor fallback, shadowed config)
+    is a typed refusal naming the seat, so the silent-vendor red line is
+    self-enforcing rather than documentary; (4) exactly one JSON single-shot
+    completion on the seat, driven on the gateway-owned private loop under the
+    invocation lock; (5) the completion text is parsed as JSON into ``ModelResult.payload``
     — a non-JSON completion yields ``payload=None`` so the executor's
     output-schema validation refuses honestly (``output_schema_invalid``), never
     a fabricated payload.
@@ -463,6 +468,19 @@ class WorkerSeatModelGateway:
         from financial_analyst.llm.client import LLMClient
 
         client = LLMClient.for_agent(seat, config_path=self._config_path)
+        # the seat red line, self-enforcing: the engine re-reads the yaml itself,
+        # so a client resolved off the reviewed binding (a default_provider /
+        # default_model fallback, or a shadowed config) is refused BY SEAT before
+        # a single provider byte — never a silent vendor substitution.
+        resolved_provider = getattr(client, "provider", None)
+        resolved_model = getattr(client, "model", None)
+        if resolved_provider != binding.provider or resolved_model != binding.model:
+            raise ModelTierUnconfigured(
+                f"worker seat {seat!r}: the engine client resolved "
+                f"{resolved_provider!r}/{resolved_model!r}, not the reviewed tier "
+                f"binding {binding.provider!r}/{binding.model!r} from the explicit "
+                "config path — refusing the silent vendor fallback"
+            )
         timeout = float(
             self._timeout_override
             if self._timeout_override is not None
@@ -676,24 +694,25 @@ def build_production_plan_runner(
 # =========================================================================== #
 # 4. the sealed preset-registry extension                                      #
 # =========================================================================== #
-def _phase7_baseline_record() -> PlanPresetRecord:
-    """The committed Phase-7 baseline record, via the reviewed strict loader."""
-    return load_preset_registry(PRODUCTION_PRESETS_DIR).get(PHASE7_BASELINE_PRESET_ID)
-
-
 def build_phase10_preset_registry(
     phase7_registry: PlanPresetRegistry,
     records: Iterable[PlanPresetRecord] = (),
 ) -> PlanPresetRegistry:
     """A NEW sealed registry = the verified Phase-7 base + the Phase-10 records.
 
-    The base must be a SEALED :class:`PlanPresetRegistry` holding the committed
-    Phase-7 baseline preset with its exact reviewed content (semantic digest
-    equality against the on-disk golden) — anything else is a typed
-    :class:`PresetBaseRefused`, never a silent substitute base. The base object
-    is never mutated and the golden file is never touched; a Phase-10 record
-    colliding with a base ``preset_id`` under different content refuses through
-    the inherited :class:`~guanlan_v2.orchestration.plan_presets.PlanPresetError`.
+    The base must be a SEALED :class:`PlanPresetRegistry` that (a) holds the
+    committed Phase-7 baseline preset with its exact reviewed content (semantic
+    digest equality against the on-disk golden), and (b) holds NOTHING the
+    committed ``config/orchestration/presets/`` loader does not hold identically
+    — base ⊆ committed directory, record for record by semantic digest. A base
+    carrying an extra or mutated record is a typed :class:`PresetBaseRefused`
+    NAMING the record: a smuggled base record can never be copied into the
+    sealed production registry. The subset shape survives later phases adding
+    their own committed preset files (a base holding them still matches). The
+    base object is never mutated and the golden file is never touched; a
+    Phase-10 record colliding with a base ``preset_id`` under different content
+    refuses through the inherited
+    :class:`~guanlan_v2.orchestration.plan_presets.PlanPresetError`.
     """
     if not isinstance(phase7_registry, PlanPresetRegistry):
         raise PresetBaseRefused(
@@ -705,7 +724,8 @@ def build_phase10_preset_registry(
             "the extension base must be SEALED (the Phase-7 loader seals before "
             "returning); an unsealed registry is not the reviewed Phase-7 base"
         )
-    reviewed = _phase7_baseline_record()
+    committed = load_preset_registry(PRODUCTION_PRESETS_DIR)
+    reviewed = committed.get(PHASE7_BASELINE_PRESET_ID)
     try:
         held = phase7_registry.get(PHASE7_BASELINE_PRESET_ID)
     except Exception as exc:
@@ -719,6 +739,25 @@ def build_phase10_preset_registry(
             "equal the committed Phase-7 golden (semantic digest mismatch); a "
             "mutated baseline is not the Phase-7 base"
         )
+    # base ⊆ committed: EVERY base record must equal the committed loader's
+    # record of the same id — a record the directory does not hold (or holds
+    # differently) is smuggled, and would otherwise be copied into the sealed
+    # production registry below.
+    for entry in phase7_registry.manifest():
+        try:
+            committed_record = committed.get(entry.preset_id)
+        except PlanPresetError as exc:
+            raise PresetBaseRefused(
+                f"the extension base holds {entry.preset_id!r}, which is not a "
+                "committed config/orchestration/presets record; a smuggled base "
+                "record never reaches the sealed production registry"
+            ) from exc
+        if entry.preset_digest != committed_record.semantic_digest():
+            raise PresetBaseRefused(
+                f"the extension base's {entry.preset_id!r} record does not equal "
+                "the committed reviewed record (semantic digest mismatch); a "
+                "mutated base record never reaches the sealed production registry"
+            )
 
     extended = PlanPresetRegistry()
     for entry in phase7_registry.manifest():

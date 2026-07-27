@@ -60,6 +60,7 @@ Run from repo root: ``python -m pytest tests/orchestration/test_pipeline_assembl
 from __future__ import annotations
 
 import ast
+import asyncio
 import sys
 import types
 from datetime import datetime, timezone
@@ -105,6 +106,7 @@ from guanlan_v2.orchestration.plan_diff import (
     build_plan_diff,
 )
 from guanlan_v2.orchestration.plan_presets import (
+    PlanPresetError,
     PlanPresetRecord,
     PlanPresetRegistry,
     load_preset_registry,
@@ -126,6 +128,7 @@ from guanlan_v2.orchestration.schemas import (
 from guanlan_v2.orchestration.spec import PlanNode
 from guanlan_v2.orchestration.worker import PromptBindingError
 
+from guanlan_v2.orchestration.pipeline import assembly as assembly_mod
 from guanlan_v2.orchestration.pipeline.assembly import (
     PRODUCTION_PRESETS_DIR,
     PipelineAssemblyError,
@@ -592,6 +595,146 @@ def test_production_gateway_factory_builds_the_worker_seat_gateway():
 
 
 # =========================================================================== #
+# 5b. WorkerSeatModelGateway -- the provider path itself (fake client, no net)  #
+# =========================================================================== #
+_SEAT_YAML = (
+    "providers:\n"
+    "  prov-x: {api_key_env: PX_API_KEY}\n"
+    "agent_overrides:\n"
+    "  orchestration-fast: {provider: prov-x, model: model-fast, timeout: 77}\n"
+    "  orchestration-reasoner: {provider: prov-x, model: model-reasoner, timeout: 77}\n"
+    "  orchestration-reasoner-deep: {provider: prov-x, model: model-deep, timeout: 77}\n"
+)
+
+
+class _FakeEngineClient:
+    """An engine-client double: OpenAI-shaped response, planner-idiom attributes."""
+
+    def __init__(self, provider: str, model: str, content: str):
+        self.provider = provider
+        self.model = model
+        self.total_prompt_tokens = 42
+        self.total_completion_tokens = 17
+        self._content = content
+        self.chat_kwargs = None
+
+    async def chat(self, messages, **kwargs):
+        self.chat_kwargs = kwargs
+        return {"choices": [{"message": {"content": self._content}}]}
+
+
+def _install_fake_engine(monkeypatch, client, captured: list):
+    module = types.ModuleType("financial_analyst.llm.client")
+
+    class _FakeLLMClient:
+        @classmethod
+        def for_agent(cls, seat, *, config_path):
+            captured.append({"seat": seat, "config_path": config_path})
+            return client
+
+    module.LLMClient = _FakeLLMClient
+    monkeypatch.setitem(sys.modules, "financial_analyst.llm.client", module)
+
+
+def _provider_path_fixture(tmp_path, content: str, *, provider=None, model=None):
+    """A gateway on a synthetic seat yaml + a valid bound request + fake client."""
+    runtime = _pilot_runtime()
+    resolved = runtime.resolve_worker("text.sentiment")
+    request = W.StaticPromptAssembler().assemble(
+        plan_digest="0" * 64, node_id="n1", worker_id="text.sentiment",
+        system_prompt=resolved.system_prompt, skills=resolved.skills,
+        guardrails=resolved.guardrails, trusted_input_digests=(),
+        untrusted_blocks=())
+    ref = TypedPayloadRef(
+        schema_ref=SchemaRef(name="PromptAssemblyRecord", version="1"),
+        payload_ref=PayloadRef(
+            namespace="main", object_id="obj-rec", content_digest="0" * 64))
+
+    class _Reader:
+        def get(self, r, *, expected_schema_ref):
+            return request.prompt_record
+
+    config = tmp_path / "llm.yaml"
+    config.write_text(_SEAT_YAML, encoding="utf-8")
+    gateway = WorkerSeatModelGateway(
+        payload_reader=_Reader(), catalog_runtime=runtime, config_path=config)
+    tier = runtime.worker("text.sentiment").execution.model_tier
+    binding = gateway.binding_for_tier(tier)
+    client = _FakeEngineClient(
+        provider if provider is not None else binding.provider,
+        model if model is not None else binding.model,
+        content)
+    return SimpleNamespace(
+        gateway=gateway, request=request, ref=ref, tier=tier,
+        binding=binding, client=client)
+
+
+def test_invoke_drives_one_single_shot_completion_on_the_resolved_seat(
+        tmp_path, monkeypatch):
+    """Steps 3-5 of ``invoke`` under a fake engine client (zero network): the
+    explicit config path reaches ``for_agent`` literally, the seat is the tier's
+    alias, the binding timeout bounds the outer wait, and the result carries the
+    provider/model/token truth."""
+    fx = _provider_path_fixture(tmp_path, '{"overall_band": "neutral"}')
+    captured: list = []
+    _install_fake_engine(monkeypatch, fx.client, captured)
+
+    timeouts: list = []
+    real_wait_for = asyncio.wait_for
+
+    def _spy_wait_for(awaitable, timeout=None):
+        timeouts.append(timeout)
+        return real_wait_for(awaitable, timeout)
+
+    monkeypatch.setattr("asyncio.wait_for", _spy_wait_for)
+    result = fx.gateway.invoke(fx.request, prompt_assembly_ref=fx.ref)
+    fx.gateway.close()
+
+    assert captured == [{
+        "seat": ORCHESTRATION_TIER_ALIASES[fx.tier],
+        "config_path": fx.gateway.config_path}]
+    assert captured[0]["config_path"] is fx.gateway.config_path  # literally self._config_path
+    assert fx.binding.timeout_sec == 77  # derived from the binding, not a default
+    assert timeouts == [77 + assembly_mod._OUTER_WAIT_BUFFER_SEC]
+    assert fx.client.chat_kwargs == {
+        "response_format": {"type": "json_object"},
+        "temperature": assembly_mod._WORKER_TEMPERATURE}
+    assert result.payload == {"overall_band": "neutral"}
+    assert result.rendered_text == '{"overall_band": "neutral"}'
+    assert result.provider == fx.binding.provider
+    assert result.model == fx.binding.model
+    assert result.input_tokens == 42 and result.output_tokens == 17
+
+
+def test_a_non_json_completion_yields_payload_none_never_fabricated(
+        tmp_path, monkeypatch):
+    """The honesty claim, pinned: a non-JSON completion returns ``payload=None``
+    (the executor's ``output_schema_invalid`` refusal path), with the rendered
+    text preserved verbatim -- never a fabricated payload."""
+    fx = _provider_path_fixture(tmp_path, "not json at all")
+    _install_fake_engine(monkeypatch, fx.client, [])
+    result = fx.gateway.invoke(fx.request, prompt_assembly_ref=fx.ref)
+    fx.gateway.close()
+    assert result.payload is None
+    assert result.rendered_text == "not json at all"
+
+
+def test_an_engine_client_off_the_reviewed_binding_is_refused_by_seat(
+        tmp_path, monkeypatch):
+    """The self-enforcing seat red line: a client the engine resolved onto a
+    different provider/model (default-vendor fallback, shadowed config) is a
+    typed refusal NAMING the seat, before any completion is attempted."""
+    fx = _provider_path_fixture(
+        tmp_path, "{}", provider="default-vendor", model="default-model")
+    _install_fake_engine(monkeypatch, fx.client, [])
+    with pytest.raises(ModelTierUnconfigured) as excinfo:
+        fx.gateway.invoke(fx.request, prompt_assembly_ref=fx.ref)
+    fx.gateway.close()
+    assert ORCHESTRATION_TIER_ALIASES[fx.tier] in str(excinfo.value)
+    assert fx.client.chat_kwargs is None  # the completion was never attempted
+
+
+# =========================================================================== #
 # 6. build_phase10_preset_registry -- the sealed extension mechanism            #
 # =========================================================================== #
 def _screen_record() -> PlanPresetRecord:
@@ -615,8 +758,8 @@ def test_extension_keeps_the_phase7_preset_golden_byte_identical():
             == file_record.semantic_digest())
     assert extended.get("screen.lane_smoke").semantic_digest() == \
         _screen_record().semantic_digest()
-    # the base registry object itself was never mutated.
-    with pytest.raises(Exception):
+    # the base registry object itself was never mutated (typed lookup refusal).
+    with pytest.raises(PlanPresetError):
         base.get("screen.lane_smoke")
 
 
@@ -648,6 +791,23 @@ def test_extension_refuses_a_mutated_baseline_record():
         build_phase10_preset_registry(forged, ())
 
 
+def test_extension_refuses_a_smuggled_base_record():
+    """The base-subset seal: a base = the true Phase-7 records PLUS an injected
+    extra passes the baseline check but must NOT have the extra copied into the
+    sealed production registry -- refused by NAME (base must be a subset of the
+    committed presets directory, record for record by semantic digest)."""
+    committed = load_preset_registry(PRODUCTION_PRESETS_DIR)
+    forged = PlanPresetRegistry()
+    for entry in committed.manifest():
+        forged.register(committed.get(entry.preset_id))
+    smuggled = _screen_record().model_copy(update={"preset_id": "smuggle.extra"})
+    forged.register(smuggled)
+    forged.seal()
+    with pytest.raises(PresetBaseRefused) as excinfo:
+        build_phase10_preset_registry(forged, ())
+    assert "smuggle.extra" in str(excinfo.value)
+
+
 # =========================================================================== #
 # 7. red lines                                                                  #
 # =========================================================================== #
@@ -674,8 +834,6 @@ def test_assembly_imports_stay_inside_orchestration_plus_engine_llm_client():
 
 def test_the_composed_runner_refuses_the_event_loop_thread(tmp_path):
     """The launcher's 9999 red line is inherited intact by the composition."""
-    import asyncio
-
     env = _compose_env(tmp_path, _RecordingFactory("loop"), run_id="run-loop")
 
     async def _inside():
