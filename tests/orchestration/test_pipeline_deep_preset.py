@@ -37,9 +37,11 @@ idiom — capability-bridge binding is orthogonal Phase-9 data-method work).
 """
 from __future__ import annotations
 
+import ast
 import codecs
 import json
 import re
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -63,6 +65,7 @@ from guanlan_v2.orchestration.debate import DEBATE_MAX_ROUNDS, analyze_debates
 from guanlan_v2.orchestration.digest import canonical_json
 from guanlan_v2.orchestration.enums import (
     ApprovalPolicy,
+    ExecutionKind,
     PlanSource,
     ToolCallRequirement,
 )
@@ -85,12 +88,18 @@ from guanlan_v2.orchestration.skilltree import parse_skill_v1
 from guanlan_v2.orchestration.spec import OrchestrationRequest, validate_plan_draft
 import guanlan_v2.orchestration.worker as W
 
+from guanlan_v2.orchestration.pipeline import assembly as assembly_mod
 from guanlan_v2.orchestration.pipeline.assembly import (
+    PHASE10_PRESETS_V2_DIR,
+    PLAN_PRESET_RECORD_V2_SCHEMA_REF,
     PRODUCTION_PRESETS_DIR,
+    PlanPresetRecordV2,
     PresetBaseRefused,
     build_phase10_preset_registry,
+    load_phase10_preset_registry,
 )
 from guanlan_v2.orchestration.pipeline.contracts import RunSubject
+from guanlan_v2.orchestration.pipeline import deep_decide as deep_decide_mod
 from guanlan_v2.orchestration.pipeline.deep_decide import (
     CONTEXT_SNAPSHOT_DATA_DATE_BADGE_PREFIX,
     CONTEXT_SNAPSHOT_STALE_BADGE,
@@ -99,15 +108,12 @@ from guanlan_v2.orchestration.pipeline.deep_decide import (
     DEEP_DECIDE_PRESET_ID,
     DEEP_DECIDE_TERMINAL_NODE_ID,
     DEEP_DECIDE_WORKER_IDS,
-    PHASE10_PRESETS_V2_DIR,
-    PLAN_PRESET_RECORD_V2_SCHEMA_REF,
     SUBJECT_RUN_SCOPED_BADGE,
+    ClockRefused,
     ContextSnapshotRefused,
     DeepDecideError,
     MaterializedDeepDecide,
-    PlanPresetRecordV2,
     SubjectRefused,
-    load_phase10_preset_registry,
     materialize_deep_decide_draft,
     session_date_of,
 )
@@ -662,11 +668,21 @@ class TestValidationAndRuntimeSupport:
         assert support.supported is True, [
             (i.code, i.node_id, i.explanation) for i in support.issues]
 
-    def test_the_llm_budget_covers_the_fully_expanded_debate(self, materialized):
+    def test_the_llm_budget_equals_the_analyzers_exact_requirement(
+            self, materialized, env):
+        """`analyze_debates`' exact pre-reservation rule (debate.py:384-398):
+        `budget_request_llm_invocations >= expanded debate seats + non-debate LLM
+        nodes`. The sealed preset is pinned to EQUALITY — an over-request would
+        pass the analyzer while silently reserving budget nobody can spend."""
         draft = materialized.draft
+        workers = {w.id: w for w in env["snapshot"].workers}
         seats = sum(1 for n in draft.nodes if n.debate_id is not None)
-        assert seats == 2
-        assert draft.budget_request_llm_invocations >= seats
+        non_debate_llm = sum(
+            1 for n in draft.nodes
+            if n.debate_id is None
+            and workers[n.worker_id].execution.kind is ExecutionKind.LLM)
+        assert (seats, non_debate_llm) == (2, 6)
+        assert draft.budget_request_llm_invocations == seats + non_debate_llm == 8
 
 
 # =========================================================================== #
@@ -727,6 +743,14 @@ class TestRefusals:
     def test_a_missing_subject_refuses_typed(self, env):
         with pytest.raises(SubjectRefused):
             _materialize(env, subject=None)
+
+    def test_a_naive_clock_refuses_typed(self, env):
+        """`session_date_of` calls `astimezone`, which reads a naive datetime as
+        MACHINE-LOCAL time — on a non-UTC host that silently shifts the +08:00
+        session date and flips the recency badge. Refused, never coerced."""
+        naive = _FixedClock(datetime(2026, 7, 24, 7, 0))  # no tzinfo
+        with pytest.raises(ClockRefused, match="timezone-aware"):
+            _materialize(env, clock=naive)
 
     def test_a_subject_ref_of_the_wrong_schema_refuses_typed(self, env):
         wrong = TypedPayloadRef(
@@ -822,3 +846,99 @@ class TestRegistryExtensionChain:
         base.seal()
         with pytest.raises(PresetBaseRefused):
             build_phase10_preset_registry(base, ())
+
+
+# =========================================================================== #
+# 9. module layering — the v2 loader lives in assembly, one-directional         #
+# =========================================================================== #
+class TestPresetLoaderLayering:
+    """Review I-2: `PlanPresetRecordV2` / `load_phase10_preset_registry` live in
+    ``assembly`` beside ``PRODUCTION_PRESETS_DIR``, so ``build_phase10_preset_registry``
+    no longer reaches back into ``deep_decide`` at call time. Task 3 binds the same
+    loader without importing this task's module."""
+
+    def test_the_v2_surface_is_owned_by_assembly(self):
+        assert PlanPresetRecordV2.__module__ == (
+            "guanlan_v2.orchestration.pipeline.assembly")
+        assert load_phase10_preset_registry.__module__ == (
+            "guanlan_v2.orchestration.pipeline.assembly")
+        for name in ("PHASE10_PRESETS_V2_DIR", "PHASE10_PRESETS_V2_DIRNAME",
+                     "PLAN_PRESET_RECORD_V2_SCHEMA_REF", "PlanPresetRecordV2",
+                     "load_phase10_preset_registry"):
+            assert name in assembly_mod.__all__, name
+
+    def test_assembly_never_imports_deep_decide(self):
+        """Source-level, not just import-time: a function-local import would not
+        show up in ``sys.modules`` until the call, so the module text is the pin."""
+        source = Path(assembly_mod.__file__).read_text(encoding="utf-8")
+        assert "deep_decide" not in source
+        tree = ast.parse(source)
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module)
+            elif isinstance(node, ast.Import):
+                imported.update(a.name for a in node.names)
+        assert not any("pipeline.deep_decide" in m for m in imported)
+
+    def test_deep_decide_consumes_the_assembly_surface(self):
+        """The one-directional edge, asserted by object identity (not by name)."""
+        assert deep_decide_mod.PlanPresetRecordV2 is PlanPresetRecordV2
+        assert deep_decide_mod.PHASE10_PRESETS_V2_DIR is PHASE10_PRESETS_V2_DIR
+        assert deep_decide_mod.PLAN_PRESET_RECORD_V2_SCHEMA_REF is (
+            PLAN_PRESET_RECORD_V2_SCHEMA_REF)
+        assert DEEP_DECIDE_PRESET_FILE.parent == PHASE10_PRESETS_V2_DIR
+
+
+# =========================================================================== #
+# 10. the Lane-0 experience bridge grant gap (durable, strict-xfail pin)        #
+# =========================================================================== #
+@pytest.mark.xfail(
+    strict=True,
+    reason="KNOWN GAP: the Lane-0 experience bridge activates on the "
+           "'experience_cases' read category, which the Phase-8 worker "
+           "dec.research_mgr declares, but the reviewed experience prefetch "
+           "binding grants rows to Lane-0 workers only — so the analyzer RAISES "
+           "CatalogError (bootstrap.py:462) instead of emitting a support issue. "
+           "Closing the grant gap makes this XPASS and reddens strictly, which "
+           "re-opens the item consciously.")
+def test_full_phase9_bridge_view_supports_a_plan_containing_research_mgr(
+        env, materialized, phase9_runtime):
+    """The desired end state: `check_runtime_support` over the FULL Phase-9 runtime
+    (all three real bridge analyzers bound) completes for a plan containing
+    ``dec.research_mgr``. Task 7's real runner assembles exactly this bridge view.
+    Today it raises; the `except` branch pins WHICH worker the gap names so the
+    xfail cannot be satisfied by some unrelated failure."""
+    import guanlan_v2.orchestration.bootstrap as bs
+    import guanlan_v2.orchestration.data.catalog as dcat
+    import guanlan_v2.orchestration.memory.catalog as mcat
+    from guanlan_v2.orchestration.catalog import CatalogError
+
+    data_surface = dcat.phase3_data_surface()
+    memory_surface = mcat.phase3_memory_surface()
+    lane0 = bs.load_lane0_catalog()
+
+    def _key(ref):
+        return (ref.id, ref.version, ref.content_digest)
+
+    view = BridgeCatalogView.build(phase9_runtime, {
+        _key(data_surface.analyzer_ref): dcat.DataBridgeSupportAnalyzer(),
+        _key(memory_surface.analyzer_ref): mcat.MemoryBridgeSupportAnalyzer(),
+        lane0.analyzer_key: bs.ExperienceBridgeSupportAnalyzer(),
+    })
+    draft = materialized.draft
+    assert any(n.worker_id == "dec.research_mgr" for n in draft.nodes)
+    phase1 = validate_plan_draft(
+        draft, request=env["request"], context=env["context"],
+        catalog=env["snapshot"], schema_registry=env["registry"])
+    try:
+        report = check_runtime_support(
+            draft, phase1_report=phase1, context=env["context"],
+            context_requirements=None, catalog=phase9_runtime, bridge_view=view,
+            schema_registry=env["registry"], profile=STATIC_RUNTIME_PROFILE_V2)
+    except CatalogError as exc:
+        # pin the exact gap; then let the xfail record it.
+        assert "dec.research_mgr" in str(exc)
+        assert "experience prefetch row" in str(exc)
+        raise
+    assert report is not None
