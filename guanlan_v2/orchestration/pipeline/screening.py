@@ -145,6 +145,7 @@ __all__ = [
     "SUBJECT_RUN_SCOPED_BADGE",
     "CONTEXT_SNAPSHOT_STALE_BADGE",
     "CONTEXT_SNAPSHOT_DATA_DATE_BADGE_PREFIX",
+    "AUXILIARY_EVIDENCE_UNWIRED_BADGE",
     # errors
     "ScreeningError",
     "EmptySlateRefused",
@@ -230,6 +231,17 @@ CONTEXT_SNAPSHOT_STALE_BADGE: str = "context_snapshot_stale"
 
 #: accompanies the stale badge with the snapshot's own session date.
 CONTEXT_SNAPSHOT_DATA_DATE_BADGE_PREFIX: str = "context_snapshot_data_date:"
+
+#: MANDATORY on every :class:`ScreeningCostPreview` (the ``subject_run_scoped_v1``
+#: precedent, and ``RecommendationSlate``'s mandatory-badge shape). The human
+#: approving N × 6 LLM nodes must be told what those nodes currently buy: SEVEN of
+#: the nine workers are ``auxiliary=True``, and their reports reach the terminal
+#: ``dec.research_mgr`` only through the debate seats' shared transcript — whose
+#: reduction is not (and cannot yet be) a plan dependency. Wiring those evidence
+#: reports into the judge's model request is Phase-9 data-method work. The badge is
+#: fixed, not computed: it states a property of the sealed graph, and it must be
+#: removed only when that graph changes (which moves the record golden too).
+AUXILIARY_EVIDENCE_UNWIRED_BADGE: str = "auxiliary_evidence_unwired_v1"
 
 
 # =========================================================================== #
@@ -358,6 +370,12 @@ class ScreeningCostPreview(DigestModel):
     claims to describe cannot be constructed at all. ``max_concurrency`` has no
     total on purpose — it is a per-run slot cap, not an additive cost, and
     summing it would read as a promise about parallelism this module does not make.
+
+    ``badges`` has NO default and must contain
+    :data:`AUXILIARY_EVIDENCE_UNWIRED_BADGE`: the numbers alone would let a human
+    approve N × 6 LLM nodes believing all nine workers' reports reach the verdict,
+    and today seven of them are auxiliary evidence whose only path to the terminal
+    is the debate transcript. An honest price tag names what it does not yet buy.
     """
 
     schema_version: Literal["1"] = "1"
@@ -369,9 +387,16 @@ class ScreeningCostPreview(DigestModel):
     per_lane_budget_llm_invocations: NonNegativeInt
     total_budget_llm_invocations: NonNegativeInt
     per_lane_max_concurrency: PositiveInt
+    badges: tuple[NonEmptyStr, ...]
 
     @model_validator(mode="after")
     def _arithmetic(self) -> "ScreeningCostPreview":
+        if AUXILIARY_EVIDENCE_UNWIRED_BADGE not in self.badges:
+            raise ValueError(
+                f"badges must contain {AUXILIARY_EVIDENCE_UNWIRED_BADGE!r} — a "
+                "screening cost preview always declares that seven of the nine "
+                "lane workers are auxiliary evidence whose reports reach the "
+                "terminal only through the debate transcript")
         for total_name, per_lane_name in (
             ("total_llm_nodes", "per_lane_llm_nodes"),
             ("total_budget_tokens", "per_lane_budget_tokens"),
@@ -395,16 +420,22 @@ class ScreeningBatch(DigestModel):
     batch carries identity + cost and :func:`admit_screening_batch` reads the
     plans back from the service — the "authority is never caller-carried" rule.
 
-    ``batch_id`` binds the slate ref, the base request's semantics, this preset's
-    identity+digest and the chain digests the lanes were built against, so the
-    same slate + the same request semantics on the same chain always yield the
-    same batch id, and a moved chain or a re-reviewed preset never reuses one.
+    ``batch_id`` binds the slate ref, the base request's semantics, **the bound
+    ContextSnapshot's content digest**, this preset's identity+digest and the chain
+    digests the lanes were built against, so the same slate + the same request
+    semantics against the same context on the same chain always yield the same
+    batch id — and a refreshed Lane-0 context, a moved chain or a re-reviewed
+    preset never reuses one. The context axis is not optional: the per-lane
+    candidate digests bind the context content (``compute_candidate_plan_digest``),
+    so a batch id that ignored it would key different plans under one identity and
+    the derived idempotency keys would collide on the second run.
     """
 
     schema_version: Literal["1"] = "1"
     batch_id: DigestHex
     candidate_slate_ref: TypedPayloadRef
     base_request_digest: DigestHex
+    context_content_digest: DigestHex
     as_of: UtcDateTime
     preset_id: LogicalId
     preset_record_digest: DigestHex
@@ -515,6 +546,7 @@ def _preview_of(entries: Sequence[ScreeningLaneEntry]) -> ScreeningCostPreview:
         total_budget_llm_invocations=sum(
             e.budget_request_llm_invocations for e in entries),
         per_lane_max_concurrency=_uniform(entries, "max_concurrency"),
+        badges=(AUXILIARY_EVIDENCE_UNWIRED_BADGE,),
     )
 
 
@@ -531,15 +563,24 @@ def _batch_id(
     *,
     slate_ref: TypedPayloadRef,
     base_request: OrchestrationRequest,
+    context_content_digest: str,
     preset_id: str,
     preset_record_digest: str,
     catalog_digest: str,
     schema_registry_digest: str,
 ) -> str:
+    """Everything the lanes' candidate digests bind, folded into one identity.
+
+    The ContextSnapshot content digest is in here for a concrete reason: it is an
+    input to every lane's ``compute_candidate_plan_digest``, so two batches built
+    from the same slate + request against DIFFERENT contexts hold different plans.
+    A batch id blind to that would hand both the same derived idempotency keys.
+    """
     return content_digest([
         "screening-batch-v1",
         slate_ref.payload_ref.content_digest,
         base_request.semantic_digest(),
+        context_content_digest,
         preset_id,
         preset_record_digest,
         catalog_digest,
@@ -673,6 +714,7 @@ def build_screening_batch(
     record_digest = record.semantic_digest()
     batch_id = _batch_id(
         slate_ref=slate_ref, base_request=base_request,
+        context_content_digest=context.content_digest,
         preset_id=SCREENING_LANE_PRESET_ID, preset_record_digest=record_digest,
         catalog_digest=catalog.catalog_digest,
         schema_registry_digest=schema_registry.registry_digest)
@@ -755,6 +797,7 @@ def build_screening_batch(
         batch_id=batch_id,
         candidate_slate_ref=slate_ref,
         base_request_digest=base_request.semantic_digest(),
+        context_content_digest=context.content_digest,
         as_of=slate.as_of,
         preset_id=SCREENING_LANE_PRESET_ID,
         preset_record_digest=record_digest,
@@ -796,6 +839,11 @@ def admit_screening_batch(
     # ``build_replay_lane_card``'s parameters (adapters/replay_cards.py:316-322).
     payloads: Any,
     registry_digest: str,
+    # the run's budget ledger (``BudgetLedger`` over the run's sink + RunBudget —
+    # the reviewed `_shared_ledger` idiom). The Phase-2 service keeps its own
+    # ledger private, and the whole-picture guard below has to read remaining
+    # capacity BEFORE the first reservation is written.
+    budget: Any,
 ) -> tuple[LeaseAdmissionOutcome, ...]:
     """Admit every lane of ``batch``: validate → reserve → try the lease. Stop there.
 
@@ -821,13 +869,29 @@ def admit_screening_batch(
     disjoint and together cover the batch exactly.
 
     **Pre-flight, then act** (the reviewed replay-cards atomicity idiom): every
-    lane is prepared and digest-checked BEFORE any lane is reserved or journalled,
-    so a wiring fault — a drafted lane the service does not hold, a batch entry
-    whose digest no longer recomputes, a lane that fails Phase-1 validation —
-    raises :class:`BatchAdmissionRefused` with the journal untouched. Those faults
-    are batch-wide by construction (every lane runs the same sealed graph), never
-    a per-code accident. Re-calling is idempotent: an already-consumed candidate
-    completes without a second consume.
+    lane is prepared, digest-checked, Phase-1-checked and **runtime-support-checked**
+    BEFORE any lane is reserved or journalled, and the batch's whole-picture cost is
+    checked against the run's remaining budget, so a wiring fault — a drafted lane
+    the service does not hold, a batch entry whose digest no longer recomputes, a
+    lane that fails Phase-1 validation, a lane the runtime cannot support (today:
+    every lane, under the sealed production catalog's data-bridge grant gap), or a
+    run budget that cannot cover the previewed cost — raises
+    :class:`BatchAdmissionRefused` with **nothing written**: no report payload, no
+    reservation, no journal row. Those faults are batch-wide by construction (every
+    lane runs the same sealed graph and draws on one run budget), never a per-code
+    accident. Re-calling is idempotent: an already-consumed candidate completes
+    without a second consume.
+
+    The support check is not redundant with the service's own: without it, an
+    unsupported lane surfaces as a raw ``AdmissionRejected`` from
+    ``persist_and_reserve_candidate`` — *after* it has persisted both report
+    payloads and possibly after earlier lanes were already reserved and carded.
+
+    **A ``pending_human`` lane holds its reservation until a human decides, and
+    that is by design** (controller ruling): the budget must be there if the human
+    approves, and Phase 7's ``decide(REJECTED)`` is what releases it. This function
+    therefore never releases a reservation, and a batch that stays pending keeps its
+    previewed cost held — which is exactly what the human was shown.
     """
     # -- pre-flight: prepare + bind EVERY lane before touching anything ------- #
     prepared = []
@@ -854,7 +918,28 @@ def admit_screening_batch(
             raise BatchAdmissionRefused(
                 f"lane {entry.lane_index} ({entry.code}) fails Phase-1 validation: "
                 + ", ".join(sorted({i.code for i in prep.phase1_report.issues})))
+        if not prep.support_report.supported:
+            raise BatchAdmissionRefused(
+                f"lane {entry.lane_index} ({entry.code}) is not runtime-supported: "
+                + ", ".join(sorted({i.code for i in prep.support_report.issues}))
+                + " — refused write-free, before any report payload or reservation")
         prepared.append((entry, prep))
+
+    # -- pre-flight: the whole picture must fit the run's remaining budget ---- #
+    # The preview exists to be the human's whole picture; this is where it also
+    # becomes the machine's. Checked before the FIRST reservation so a batch that
+    # cannot fit refuses cleanly instead of half-reserving and aborting mid-loop.
+    available = budget.available()
+    preview = batch.cost_preview
+    if (preview.total_budget_llm_invocations > available.llm_invocations
+            or preview.total_budget_tokens > available.tokens):
+        raise BatchAdmissionRefused(
+            f"the batch's previewed cost ({preview.n_codes} lanes = "
+            f"{preview.total_budget_llm_invocations} llm invocations / "
+            f"{preview.total_budget_tokens} tokens) exceeds the run's remaining "
+            f"budget ({available.llm_invocations} llm invocations / "
+            f"{available.tokens} tokens); refused write-free rather than reserving "
+            "part of a batch a human approved as a whole")
 
     # -- act: reserve, card, lease — lane by lane, in batch order ------------- #
     outcomes: list[LeaseAdmissionOutcome] = []

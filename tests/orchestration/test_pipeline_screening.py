@@ -81,6 +81,7 @@ from guanlan_v2.orchestration.catalog_runtime import (
     CatalogRuntime,
     InMemoryMaterialSource,
 )
+from guanlan_v2.orchestration.budget import BudgetLedger
 from guanlan_v2.orchestration.context import RunBudget
 from guanlan_v2.orchestration.debate import DEBATE_MAX_ROUNDS, analyze_debates
 from guanlan_v2.orchestration.digest import canonical_json
@@ -91,7 +92,11 @@ from guanlan_v2.orchestration.enums import (
     PlanSource,
     ToolCallRequirement,
 )
-from guanlan_v2.orchestration.eventstore import RuntimeStores, SchemaRegistryResolver
+from guanlan_v2.orchestration.eventstore import (
+    EventStoreError,
+    RuntimeStores,
+    SchemaRegistryResolver,
+)
 from guanlan_v2.orchestration.market import factors as market_factors
 from guanlan_v2.orchestration.memory.models import AuthenticatedAdminPrincipal
 from guanlan_v2.orchestration.plan_diff import (
@@ -106,6 +111,7 @@ from guanlan_v2.orchestration.plan_presets import (
     load_preset_registry,
 )
 from guanlan_v2.orchestration.refs import PayloadRef, SchemaRef, TypedPayloadRef
+from guanlan_v2.orchestration.runtime_contracts import static_runtime_profile
 from guanlan_v2.orchestration.runtime_support import (
     STATIC_RUNTIME_PROFILE_V2,
     analyze_reducers,
@@ -133,6 +139,7 @@ from guanlan_v2.orchestration.pipeline.contracts import (
 )
 from guanlan_v2.orchestration.pipeline import screening as screening_mod
 from guanlan_v2.orchestration.pipeline.screening import (
+    AUXILIARY_EVIDENCE_UNWIRED_BADGE,
     CONTEXT_SNAPSHOT_DATA_DATE_BADGE_PREFIX,
     CONTEXT_SNAPSHOT_STALE_BADGE,
     SCREENING_LANE_DEBATE_ID,
@@ -312,6 +319,24 @@ def _build(env, *, slate=None, base_request=None, clock=None, context=...,
         catalog=catalog if catalog is not None else env["snapshot"],
         schema_registry=env["registry"],
     )
+
+
+def _fresh_context(env, *, as_of: datetime):
+    """A second REAL empty-memory ContextSnapshot at another instant (a refreshed
+    Lane-0 context, exactly what a new session produces)."""
+    resolver = SchemaRegistryResolver()
+    resolver.register(env["registry"])
+    stores = RuntimeStores(
+        resolver=resolver, clock=_FixedClock(as_of),
+        allowed_cell_namespaces=(W.PROMPT_CELL_NAMESPACE,))
+    context = P.build_empty_memory_context(
+        data_context=P.pilot_data_context(as_of=as_of), stores=stores,
+        registry_digest=env["registry"].registry_digest, built_at=as_of).context
+    return {
+        "context": context,
+        "ctx_ref": PayloadRef(namespace="main", object_id="ctx-screen-2",
+                              content_digest=context.content_digest),
+    }
 
 
 @pytest.fixture(scope="module")
@@ -505,11 +530,32 @@ def admit_env(env, trimmed_catalog, tmp_path):
         catalog_digest=snapshot.catalog_digest,
         registry_digest=registry.registry_digest)
 
+    ledger = BudgetLedger(
+        sink=stores.budget_event_sink(run_id=run_id, ledger_id=run_budget.ledger_id),
+        run_budget=run_budget)
+
+    def _service_with(*, profile=STATIC_RUNTIME_PROFILE_V2, run_budget_=None):
+        """A second REAL service over the same lanes — a different profile or a
+        different run budget, everything else identical."""
+        rb = run_budget_ or run_budget
+        stores.bind_run_budget(run_id=f"{run_id}-alt", run_budget=rb)
+        return PlanAdmissionService(
+            run_id=f"{run_id}-alt",
+            requests={lane.request.request_id: lane.request for lane in build.lanes},
+            drafts={lane.draft.id: lane.draft for lane in build.lanes},
+            contexts={context.content_digest: context}, attestations={},
+            approvals=approvals, catalog=runtime, bridge_view=view,
+            phase1_registry=registry,
+            runtime_registry_digest=registry.registry_digest,
+            profile=profile, stores=stores, run_budget=rb, clock=clock)
+
     return _AdmitEnv(
         build=build, batch=build.batch, admission=admission,
         coordinator=coordinator, stores=stores, registry=registry,
         snapshot=snapshot, journal=tmp_path / "plan_approvals.jsonl",
-        emitted=emitted, approvals=approvals, clock=clock)
+        emitted=emitted, approvals=approvals, clock=clock, budget=ledger,
+        run_budget=run_budget, run_id=run_id, context=context, ctx_ref=ctx_ref,
+        service_with=_service_with)
 
 
 def _issue_lease(admit_env, *, max_admissions=3, budget_cap=100):
@@ -524,12 +570,14 @@ def _issue_lease(admit_env, *, max_admissions=3, budget_cap=100):
         actor=GOOD_CRED, reason="reviewed whole-picture screening cost preview")
 
 
-def _admit(admit_env):
+def _admit(admit_env, batch=None, *, admission=None, budget=None):
     return admit_screening_batch(
-        admit_env.batch, coordinator=admit_env.coordinator,
-        admission=admit_env.admission, now=NOW,
+        admit_env.batch if batch is None else batch,
+        coordinator=admit_env.coordinator,
+        admission=admission or admit_env.admission, now=NOW,
         payloads=admit_env.stores.payloads,
-        registry_digest=admit_env.registry.registry_digest)
+        registry_digest=admit_env.registry.registry_digest,
+        budget=budget if budget is not None else admit_env.budget)
 
 
 def _journal_kinds(path: Path) -> list[str]:
@@ -878,6 +926,26 @@ class TestBuildScreeningBatch:
         b = _build(env, slate=_slate(("600519", "000001")))
         assert a.batch.batch_id != b.batch.batch_id
 
+    def test_a_refreshed_context_yields_a_different_batch_id(self, env):
+        """Amendment I-2: the per-lane candidate digests bind the ContextSnapshot
+        content, so a batch id blind to it would key DIFFERENT plans under one
+        identity — and every derived idempotency key would collide on the second
+        run. Same slate, same base request, a refreshed Lane-0 context."""
+        other = _fresh_context(env, as_of=NOW + timedelta(days=1))
+        a = _build(env)
+        b = _build(env, context=other["context"], ctx_ref=other["ctx_ref"])
+        assert a.batch.context_content_digest != b.batch.context_content_digest
+        assert a.batch.batch_id != b.batch.batch_id
+        # and the plans really do differ, which is what makes that mandatory.
+        assert [e.candidate_plan_digest for e in a.batch.entries] != [
+            e.candidate_plan_digest for e in b.batch.entries]
+        # the derived per-lane admission keys therefore never collide.
+        assert {f"{a.batch.batch_id}:{e.code}" for e in a.batch.entries}.isdisjoint(
+            {f"{b.batch.batch_id}:{e.code}" for e in b.batch.entries})
+
+    def test_the_batch_pins_the_context_it_was_built_against(self, built, env):
+        assert built.batch.context_content_digest == env["context"].content_digest
+
     def test_a_different_base_request_yields_a_different_batch_id(self, env):
         a = _build(env)
         b = _build(env, base_request=_base_request(request_id="req-screen-2"))
@@ -934,6 +1002,24 @@ class TestCostPreview:
             lane.draft.budget_request_llm_invocations for lane in built.lanes)
         assert preview.per_lane_budget_llm_invocations == 6
         assert preview.per_lane_max_concurrency == 4
+
+    def test_the_preview_declares_that_the_evidence_is_unwired(self, built):
+        """Amendment I-4 (product honesty): the price tag names what it does not
+        yet buy — seven of the nine workers are auxiliary evidence whose reports
+        reach the terminal only through the debate transcript."""
+        assert AUXILIARY_EVIDENCE_UNWIRED_BADGE in built.batch.cost_preview.badges
+        assert AUXILIARY_EVIDENCE_UNWIRED_BADGE in screening_cost_preview(
+            built.batch).badges
+        record = load_phase10_preset_registry(PRODUCTION_PRESETS_DIR).get(
+            SCREENING_LANE_PRESET_ID)
+        assert sum(1 for n in record.nodes if n.auxiliary) == 7
+
+    def test_a_preview_without_the_badge_is_unconstructible(self, built):
+        fields = built.batch.cost_preview.model_dump()
+        fields["badges"] = ()
+        with pytest.raises(ValidationError,
+                           match=AUXILIARY_EVIDENCE_UNWIRED_BADGE):
+            ScreeningCostPreview.model_validate(fields)
 
     def test_the_preview_is_a_deterministic_pure_function_of_the_batch(self, built):
         assert screening_cost_preview(built.batch) == screening_cost_preview(
@@ -1253,13 +1339,88 @@ class TestAdmitScreeningBatch:
                 tampered, coordinator=admit_env.coordinator,
                 admission=admit_env.admission, now=NOW,
                 payloads=admit_env.stores.payloads,
-                registry_digest=admit_env.registry.registry_digest)
+                registry_digest=admit_env.registry.registry_digest,
+                budget=admit_env.budget)
         # pre-flight: nothing was reserved or journalled — not even for lane 0,
         # which precedes the tampered one.
         assert admit_env.journal.exists() is False
         assert _journal_kinds(admit_env.journal) == []
         # and the untouched batch still admits cleanly afterwards.
         assert [o.outcome for o in _admit(admit_env)] == ["pending_human"] * 3
+
+    def test_an_unsupported_lane_refuses_write_free(self, admit_env):
+        """Amendment I-1. Under the sealed production catalog EVERY lane is
+        unsupported (the data-bridge grant gap), and the service only says so from
+        ``persist_and_reserve_candidate`` — after both report payloads are written.
+        Reproduced here with the reviewed v1 profile, which locks debates: the
+        pre-flight must refuse it typed, with nothing written."""
+        service = admit_env.service_with(profile=static_runtime_profile())
+        prep = service.prepare_candidate(
+            admit_env.batch.entries[0].draft_id,
+            request_id=admit_env.batch.entries[0].request_id)
+        assert prep.phase1_report.valid is True
+        assert prep.support_report.supported is False  # the real refusal
+        with pytest.raises(BatchAdmissionRefused, match="not runtime-supported"):
+            _admit(admit_env, admission=service)
+        assert _journal_kinds(admit_env.journal) == []
+        # write-free: not even the Phase-1 / support report payloads landed.
+        for entry in admit_env.batch.entries:
+            with pytest.raises(EventStoreError):
+                admit_env.stores.payloads.get(
+                    PayloadRef(namespace="main",
+                               object_id=f"phase1-report:{entry.candidate_plan_digest}",
+                               content_digest="0" * 64),
+                    expected_schema_ref=SchemaRef(
+                        name="PlanValidationReport", version="1"))
+        assert admit_env.budget.available().llm_invocations == (
+            admit_env.run_budget.max_llm_invocations)  # nothing reserved
+
+    def test_a_batch_that_cannot_fit_the_run_budget_refuses_write_free(
+            self, admit_env):
+        """Amendment I-3: the whole picture is checked against the run's remaining
+        capacity BEFORE the first reservation — one lane short must not leave two
+        lanes reserved and carded."""
+        preview = admit_env.batch.cost_preview
+        short = RunBudget(
+            ledger_id="led-short",
+            max_tokens=preview.total_budget_tokens,
+            # room for two lanes, not three.
+            max_llm_invocations=preview.total_budget_llm_invocations - 1,
+            max_concurrency=32)
+        service = admit_env.service_with(run_budget_=short)
+        ledger = BudgetLedger(
+            sink=admit_env.stores.budget_event_sink(
+                run_id=f"{admit_env.run_id}-alt", ledger_id=short.ledger_id),
+            run_budget=short)
+        with pytest.raises(BatchAdmissionRefused, match="exceeds the run's remaining"):
+            _admit(admit_env, admission=service, budget=ledger)
+        assert _journal_kinds(admit_env.journal) == []
+        assert ledger.available().llm_invocations == short.max_llm_invocations
+
+    def test_a_batch_that_exactly_fits_the_run_budget_admits(self, admit_env):
+        """The guard is a real bound, not a margin: exact capacity passes."""
+        preview = admit_env.batch.cost_preview
+        exact = RunBudget(
+            ledger_id="led-exact", max_tokens=preview.total_budget_tokens,
+            max_llm_invocations=preview.total_budget_llm_invocations,
+            max_concurrency=32)
+        service = admit_env.service_with(run_budget_=exact)
+        ledger = BudgetLedger(
+            sink=admit_env.stores.budget_event_sink(
+                run_id=f"{admit_env.run_id}-alt", ledger_id=exact.ledger_id),
+            run_budget=exact)
+        outcomes = _admit(admit_env, admission=service, budget=ledger)
+        assert [o.outcome for o in outcomes] == ["pending_human"] * 3
+        assert ledger.available().llm_invocations == 0  # fully held for the human
+
+    def test_a_pending_lane_keeps_holding_its_reservation(self, admit_env):
+        """Controller ruling, documented and pinned: a ``pending_human`` lane holds
+        its reservation until a human decides — Phase 7's ``decide(REJECTED)``
+        releases it. The budget must still be there if the human approves."""
+        before = admit_env.budget.available().llm_invocations
+        _admit(admit_env)
+        after = admit_env.budget.available().llm_invocations
+        assert before - after == admit_env.batch.cost_preview.total_budget_llm_invocations
 
     def test_a_lane_the_service_does_not_hold_refuses_typed(self, admit_env):
         entries = list(admit_env.batch.entries)
@@ -1270,7 +1431,8 @@ class TestAdmitScreeningBatch:
                 tampered, coordinator=admit_env.coordinator,
                 admission=admit_env.admission, now=NOW,
                 payloads=admit_env.stores.payloads,
-                registry_digest=admit_env.registry.registry_digest)
+                registry_digest=admit_env.registry.registry_digest,
+                budget=admit_env.budget)
         assert _journal_kinds(admit_env.journal) == []
 
     def test_phase1_validation_is_real_inside_admission(self, admit_env):
