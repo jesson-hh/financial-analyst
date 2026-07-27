@@ -1,0 +1,156 @@
+{
+  "schema_version": "2",
+  "preset_id": "pipeline.screening_lane",
+  "version": "1",
+  "phase": "main",
+  "description": "观澜 · 选股单股研判预案 — ONE sealed code-agnostic lane, instantiated once per candidate code: text.news + text.research_report (news_digest, DEGRADE) + quant.factor -> quant.backtest (factor_ic, BLOCK) + pv.price_action gather the evidence, text.sentiment feeds a one-round dec.bull <-> dec.bear debate (turn order bull, bear; the bear answers the bull's BullCase through opponent_case) whose judge is the single terminal dec.research_mgr (ResearchPlan@1). text.sentiment is structural, not decoration: dec.research_mgr REQUIRES sentiment and it is its only producer. The evidence and debate nodes are auxiliary because no input on the research_mgr chain accepts ResearchReportExtract/BacktestEvidenceReport/PriceActionFeatureReport/BullCase/BearCase, and a reducer's DebateTranscript is invisible to Phase 1's dependency schema check (which compares the upstream WORKER'S output schema) — the debate binds to its judge through DebateCfg.judge_node_id and its turns are folded into the shared transcript slot by debate.transcript_reducer; wiring the folded transcript into the judge's model request is Phase-9 data-method work, exactly as the reviewed Phase-8 e2e states for itself. The graph is code-agnostic and byte-frozen: no node carries params, so one record digest serves every candidate and ONE ApprovalLease binds the whole batch — the subject enters as a committed RunSubject@1 artifact, run-scoped beside each lane's plan.",
+  "nodes": [
+    {
+      "id": "news",
+      "worker_id": "text.news",
+      "writes_slot": "slot.news",
+      "auxiliary": true
+    },
+    {
+      "id": "research-report",
+      "worker_id": "text.research_report",
+      "writes_slot": "slot.research_report",
+      "auxiliary": true,
+      "dependencies": [
+        {
+          "upstream_node_id": "news",
+          "artifact_slot": "slot.news",
+          "inject_as": "news_digest",
+          "policy": "degrade"
+        }
+      ]
+    },
+    {
+      "id": "factor",
+      "worker_id": "quant.factor",
+      "writes_slot": "slot.factor_ic",
+      "auxiliary": true
+    },
+    {
+      "id": "backtest",
+      "worker_id": "quant.backtest",
+      "writes_slot": "slot.backtest",
+      "auxiliary": true,
+      "dependencies": [
+        {
+          "upstream_node_id": "factor",
+          "artifact_slot": "slot.factor_ic",
+          "inject_as": "factor_ic",
+          "policy": "block"
+        }
+      ]
+    },
+    {
+      "id": "price-action",
+      "worker_id": "pv.price_action",
+      "writes_slot": "slot.price_action",
+      "auxiliary": true
+    },
+    {
+      "id": "sentiment",
+      "worker_id": "text.sentiment",
+      "writes_slot": "slot.sentiment"
+    },
+    {
+      "id": "bull-r1",
+      "worker_id": "dec.bull",
+      "writes_slot": "slot.bullbear_transcript",
+      "auxiliary": true,
+      "debate_id": "bullbear",
+      "round_role": "bull",
+      "debate_round": 1,
+      "debate_turn": 1,
+      "dependencies": [
+        {
+          "upstream_node_id": "news",
+          "artifact_slot": "slot.news",
+          "inject_as": "news_digest",
+          "policy": "degrade"
+        },
+        {
+          "upstream_node_id": "sentiment",
+          "artifact_slot": "slot.sentiment",
+          "inject_as": "sentiment",
+          "policy": "degrade"
+        }
+      ]
+    },
+    {
+      "id": "bear-r1",
+      "worker_id": "dec.bear",
+      "writes_slot": "slot.bullbear_transcript",
+      "auxiliary": true,
+      "debate_id": "bullbear",
+      "round_role": "bear",
+      "debate_round": 1,
+      "debate_turn": 2,
+      "dependencies": [
+        {
+          "upstream_node_id": "bull-r1",
+          "artifact_slot": "slot.bullbear_transcript",
+          "inject_as": "opponent_case",
+          "policy": "block"
+        },
+        {
+          "upstream_node_id": "news",
+          "artifact_slot": "slot.news",
+          "inject_as": "news_digest",
+          "policy": "degrade"
+        },
+        {
+          "upstream_node_id": "sentiment",
+          "artifact_slot": "slot.sentiment",
+          "inject_as": "sentiment",
+          "policy": "degrade"
+        }
+      ]
+    },
+    {
+      "id": "research-mgr",
+      "worker_id": "dec.research_mgr",
+      "writes_slot": "slot.research_plan",
+      "dependencies": [
+        {
+          "upstream_node_id": "sentiment",
+          "artifact_slot": "slot.sentiment",
+          "inject_as": "sentiment",
+          "policy": "block"
+        }
+      ]
+    }
+  ],
+  "sink_node_ids": ["research-mgr"],
+  "debates": [
+    {
+      "id": "bullbear",
+      "seats": ["bull", "bear"],
+      "turn_order": ["bull", "bear"],
+      "max_rounds": 1,
+      "judge_node_id": "research-mgr"
+    }
+  ],
+  "reducers": [
+    {
+      "id": "red.bullbear",
+      "slot": "slot.bullbear_transcript",
+      "reducer_ref": {
+        "id": "debate.transcript_reducer",
+        "version": "1",
+        "content_digest": "d6b094fe7606e29af40f09dd6be24795cd02934dc0ac8a1cae456eda085bc0fa"
+      },
+      "producer_node_ids": ["bull-r1", "bear-r1"],
+      "output_schema_ref": {
+        "name": "DebateTranscript",
+        "version": "1"
+      }
+    }
+  ],
+  "budget_request_tokens": 4500000,
+  "budget_request_llm_invocations": 6,
+  "max_concurrency": 4
+}
