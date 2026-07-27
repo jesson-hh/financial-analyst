@@ -35,8 +35,17 @@ _SHELL_LOG_PATH = _DIR.parents[1] / "var" / "desktop-shell.log"
 # WebView2 一个 user-data 目录只有一个浏览器 broker 进程,对方崩溃/强制更新/
 # 非正常关闭会连带拖垮我们的渲染器(反之亦然),localhost 的 cookie 也不按端口
 # 区分(RFC 6265),两个不相关应用之间会串。给自己一个 app 专属目录,消掉这份
-# 耦合;pywebview 自己会在启动时把它 makedirs 出来,不需要我们提前建。
-_WEBVIEW_STORAGE_PATH = _DIR.parents[1] / "var" / "webview2-profile"
+# 耦合。
+#
+# 故意不放进仓库的 var/ ——那是 _LOG_PATH/_SHELL_LOG_PATH 那种一次性诊断产物的
+# 地盘,这仓库出现过 `git clean -fdx` 把 gitignored 内容整个清掉的先例;浏览器
+# profile 是反过来的东西:是要长期保留的用户状态,而且是几十到几百 MB 的二进制
+# 缓存,放进工作树只会让每一次 --no-ignore 搜索/备份遍历都要扫过它。落在
+# %LOCALAPPDATA% 下(变量缺失时才退回仓库 var/,保证任何机器都能跑起来)。
+_WEBVIEW_STORAGE_PATH = (
+    Path(os.environ.get("LOCALAPPDATA") or (_DIR.parents[1] / "var"))
+    / "Guanlan" / "webview2-profile"
+)
 _LOG_DEDUPE_SECONDS = 60.0
 _last_log_at: dict[str, float] = {}
 
@@ -264,9 +273,24 @@ class Shell:
         threading.Thread(target=self._heartbeat_loop, daemon=True).start()
 
     def start(self) -> None:
-        # storage_path 显式指向仓库 var/ 下的专属目录 —— 见上面 _WEBVIEW_STORAGE_PATH
-        # 的注释:不传就会落回跨应用共享的默认 profile 目录。private_mode 保持
-        # False 不变(这份 profile 就是要跨进程重启持久化,不是每次清空的临时区)。
+        # storage_path 显式指向 %LOCALAPPDATA%\Guanlan\webview2-profile(变量缺失
+        # 时退回仓库 var/)—— 见上面 _WEBVIEW_STORAGE_PATH 的注释:不传就会落回
+        # 跨应用共享的默认 profile 目录。private_mode 保持 False 不变(这份
+        # profile 就是要跨进程重启持久化,不是每次清空的临时区)—— UserDataFolder
+        # 和 IsInPrivateModeEnabled 是 WebView2 上两个独立的属性
+        # (edgechromium.py 的 EdgeChrome.__init__),换个位置不会波及是否持久化。
+        #
+        # pywebview 自己也会在这个目录不存在时兜底 makedirs 一次
+        # (winforms.py:init_storage),但那条 except 记到的是它自己那个哪儿都不去
+        # 的 logger 上(pythonw 下没有控制台接它),而且失败之后 cache_dir 已经
+        # 指向了一个不存在的目录,WebView2 环境初始化会失败、on_webview_ready
+        # 也不会被触发——磁盘满/路径被同名文件占用/权限问题,后果是一扇什么都不
+        # 渲染的窗口,var/desktop-shell.log 和崩溃日志里都不会有任何一行痕迹。
+        # 这里自己先建一遍,失败就用壳自己能读到的 _log_shell_event 留痕。
+        try:
+            _WEBVIEW_STORAGE_PATH.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:  # noqa: BLE001
+            _log_shell_event(f"webview storage path unusable: {type(exc).__name__}: {exc}")
         self._wv.start(self._startup, private_mode=False,
                        storage_path=str(_WEBVIEW_STORAGE_PATH))
 

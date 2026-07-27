@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 import types
 from pathlib import Path
 
@@ -322,7 +323,10 @@ def test_on_retry_wakes_the_heartbeat():
     assert s._retry_requested.is_set()
 
 
-def test_start_delegates_to_webview_start_with_the_startup_callback():
+def test_start_delegates_to_webview_start_with_the_startup_callback(tmp_path, monkeypatch):
+    # start() 现在也会 mkdir _WEBVIEW_STORAGE_PATH(见 Task 7b minor 2)—— 换成
+    # tmp_path 下的一个目录,免得这条无关的测试在真机 %LOCALAPPDATA% 下建目录。
+    monkeypatch.setattr(sh, "_WEBVIEW_STORAGE_PATH", tmp_path / "webview2-profile")
     fake = _FakeWebview()
     s = sh.create_shell(webview_module=fake)
     s.start()
@@ -344,7 +348,14 @@ def test_start_delegates_to_webview_start_with_the_startup_callback():
 # 也不按端口区分(RFC 6265),两个不相关应用之间会串。必须显式传一个 app 专属的
 # 目录 —— 删掉这个参数这条测试就会失败。
 
-def test_start_uses_an_app_specific_webview_storage_path_not_the_shared_default():
+def test_start_passes_storage_path_matching_the_module_constant(tmp_path, monkeypatch):
+    """kwarg 接线测试:用 monkeypatch 把 _WEBVIEW_STORAGE_PATH 换成 tmp_path 下的
+    一个目录,这样 start() 里那句 mkdir 不会在真机 %LOCALAPPDATA% 下真的建目录
+    —— 真实落点(是不是真的钉在 %LOCALAPPDATA% 而不是随便一个非空字符串)由
+    下面 test_webview_storage_path_constant_points_at_local_appdata_or_repo_var_fallback
+    单独钉,那条测试从不调用 start(),不会碰真实磁盘。"""
+    fake_storage = tmp_path / "webview2-profile"
+    monkeypatch.setattr(sh, "_WEBVIEW_STORAGE_PATH", fake_storage)
     fake = _FakeWebview()
     s = sh.create_shell(webview_module=fake)
     s.start()
@@ -357,14 +368,36 @@ def test_start_uses_an_app_specific_webview_storage_path_not_the_shared_default(
         "(%APPDATA%/pywebview),会和这台机器上其它 pywebview 应用共用同一个"
         "浏览器 broker 进程 / 同一份 cookie"
     )
-    assert storage_path == str(sh._WEBVIEW_STORAGE_PATH), (
-        "storage_path 必须是 shell.py 里那个 app 专属常量,不是随便一个非空字符串"
-    )
-    assert Path(storage_path).parts[-2:] == ("var", "webview2-profile"), (
-        "必须落在仓库 var/ 下(gitignored)一个专属子目录里,不能复用别的现成路径"
-        "(比如 server 日志目录本身),否则读起来像是碰巧非空,不是真的隔离"
+    assert storage_path == str(fake_storage), (
+        "storage_path 必须原样传递 shell.py 里那个 app 专属常量的当前值"
     )
     assert kw.get("private_mode") is False, "storage_path 不能悄悄把已经钉住的 private_mode=False 带跑偏"
+    assert fake_storage.is_dir(), "start() 必须自己把这个目录建出来(见 minor 2 的说明),不能指望 pywebview 兜底"
+
+
+def test_webview_storage_path_constant_points_at_local_appdata_or_repo_var_fallback():
+    """钉住真实的 _WEBVIEW_STORAGE_PATH 常量本身该落在哪 —— 不调用 start(),
+    纯粹的路径断言,不碰真实磁盘。用 parts[-2:] 只钉后两段会被"任意磁盘上某个
+    碰巧以这两段结尾的路径"糊弄过去;这里改成钉住完整的、真正打算落到的位置:
+    %LOCALAPPDATA% 存在时必须是它,不是仓库 var/(那是 _LOG_PATH/_SHELL_LOG_PATH
+    那种一次性诊断产物的地盘,不是可长期保留的浏览器 profile 该待的地方)。"""
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    expected_root = Path(local_appdata) if local_appdata else (sh._DIR.parents[1] / "var")
+    assert sh._WEBVIEW_STORAGE_PATH == expected_root / "Guanlan" / "webview2-profile"
+
+
+def test_real_webview_start_accepts_a_storage_path_kwarg():
+    """`_FakeWebview.start(self, func=None, args=None, **kw)` 吞掉任何 kwarg 的
+    名字 —— 如果 storage_path 手滑打成 storage_dir / storagePath,上面两条用假
+    webview 的测试照样会绿,只有真机启动时 webview.start() 才会 TypeError。这里
+    直接对着真实安装的 pywebview 内省签名,把参数名字钉死。只 import 模块 +
+    inspect.signature,不会触发任何 GUI —— guilib.initialize() 只在 webview.start()
+    内部被调用,这里从不调用它,在无头测试机上是安全的(已手动确认 headless 通过)。"""
+    import inspect
+
+    import webview
+
+    assert "storage_path" in inspect.signature(webview.start).parameters
 
 
 # ── Also fix: 看门狗拉起失败也要在 status 上留痕 ─────────────────────────────
