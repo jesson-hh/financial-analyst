@@ -391,7 +391,26 @@ def create_app():
                 _seats_watch = None
                 if os.environ.get("GUANLAN_SEATS_WATCH") == "1":
                     from guanlan_v2.seats import watcher as _seats_watcher
-                    _seats_watch = _aio.create_task(_seats_watcher.run_loop())
+                    # Phase 10 Task 7 加法缝:GUANLAN_SEATS_DEEP=1 才尝试装配编排深
+                    # 研判包装器(lease 门控,fast 永远照跑);env 未设 ⇒ decide_fn=None
+                    # ⇒ run_loop/tick 行为逐位不变。装配失败(今日:Phase-9 catalog 无
+                    # 生产 material source,Task 11 收口)→ 响亮记日志,维持 fast-only,
+                    # 绝不伪造深研判通道。
+                    _seats_deep_fn = None
+                    if os.environ.get("GUANLAN_SEATS_DEEP") == "1":
+                        try:
+                            from guanlan_v2.orchestration.pipeline import (
+                                live_decide as _live_decide,
+                            )
+                            _seats_deep_fn = _live_decide.build_production_decide_fn()
+                            print("[guanlan_v2] GUANLAN_SEATS_DEEP=1:编排深研判 "
+                                  "decide_fn 已装配", file=sys.stderr)
+                        except Exception as _deep_exc:  # noqa: BLE001 — 诚实降级 fast-only
+                            print(f"[guanlan_v2] GUANLAN_SEATS_DEEP=1 但深研判装配失败,"
+                                  f"维持 fast-only:{type(_deep_exc).__name__}: {_deep_exc}",
+                                  file=sys.stderr)
+                    _seats_watch = _aio.create_task(
+                        _seats_watcher.run_loop(decide_fn=_seats_deep_fn))
                 # 事件库入库 tick(小 phase 乙;opt-in:GUANLAN_EVENTS_INGEST=1 才起)。
                 # maybe_ingest_tick 内三门(env 闸/30min 节奏/EOD 兜底)自吞异常;run_loop
                 # 每拍 to_thread 调它,取数/写盘全在工作线程,绝不堵事件循环。

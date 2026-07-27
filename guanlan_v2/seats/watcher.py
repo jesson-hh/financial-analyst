@@ -612,14 +612,19 @@ def tick(now: Optional[datetime] = None,
     return {"judged": judged, "skipped": skipped}
 
 
-async def run_loop(interval_s: int = 300) -> None:
+async def run_loop(interval_s: int = 300, *,
+                   decide_fn: Optional[Callable[[dict], dict]] = None) -> None:
     """常驻循环(GUANLAN_SEATS_WATCH=1 时由 server lifespan 起):enabled 才干活;
-    tick 全量进 to_thread(内含 LLM/取数,严禁堵事件循环);异常只记日志不退出。"""
+    tick 全量进 to_thread(内含 LLM/取数,严禁堵事件循环);异常只记日志不退出。
+
+    ``decide_fn``(Phase 10 Task 7 加法缝):server 在 ``GUANLAN_SEATS_DEEP=1`` 时
+    注入编排深研判包装器,原样透传给 ``tick``;默认 ``None`` ⇒ tick 走生产缺省
+    ``_decide_production``,行为逐位不变。"""
     _log.info("seats watcher run_loop 启动(interval=%ss,budget 默认 %s/日)", interval_s, DEFAULT_BUDGET)
     while True:
         try:
             if load_state().get("enabled"):
-                out = await asyncio.to_thread(tick)
+                out = await asyncio.to_thread(tick, None, decide_fn)
                 if out.get("judged"):
                     _log.info("watcher tick judged=%s skipped=%s", out["judged"], out.get("skipped"))
         except asyncio.CancelledError:      # server 停机:干净退出
