@@ -46,6 +46,12 @@ class Shell:
         self._status: dict = {"state": "checking", "detail": ""}
         # 引导页只有 main_window 一扇;健康后放行一次就翻页,不会再被重复导航。
         self._boot_pending = True
+        # run_boot_sequence 最后一次真正推给引导页的完整 state —— 重试反馈要在
+        # 这份状态上只换 message,不能整个覆盖(不然 phase/detail/warning 全丢)。
+        self._last_boot_state: dict | None = None
+        # 每完成一次 degraded→healthy 的恢复就加一;_on_loaded 用它判断"我读到
+        # degraded 的时候,恢复是不是已经在我背后发生了"——见 _maybe_show_overlay_for_late_load。
+        self._connection_generation = 0
         self.api = JsApi(open_window_factory=self.open_ui_window,
                          status_provider=lambda: dict(self._status),
                          retry_handler=self._on_retry,
@@ -88,9 +94,24 @@ class Shell:
         # GL_DESKTOP 是给顶栏的可移植信号;顶栏同时也认 window.pywebview,故无竞态。
         _eval(win, "window.GL_DESKTOP = true;")
         _eval(win, _OVERLAY_JS)
-        if self._status.get("state") == "degraded":
-            # 这扇窗是在服务器已经掉线期间才打开的 —— 上一次 show 只广播给了当时
-            # 已经存在的窗口,不补这一手,用户会看到一扇"看起来正常"的假窗口。
+        # 捕获"此刻"的连接代数,交给 _maybe_show_overlay_for_late_load 在真正
+        # 决定要不要发 show 之前再核对一遍 —— 见该方法的说明。
+        self._maybe_show_overlay_for_late_load(win, self._connection_generation)
+
+    def _maybe_show_overlay_for_late_load(self, win, generation_at_read: int) -> None:
+        """这扇窗刚加载完;如果此刻仍是掉线状态,且这段时间里没有发生一次
+        degraded→healthy 的恢复(用 _connection_generation 判断),才补一次 show
+        —— 这扇窗是在服务器已经掉线期间才打开的,上一次 show 只广播给了当时已经
+        存在的窗口,不补这一手,用户会看到一扇"看起来正常"的假窗口。
+
+        代数比较紧跟在状态判断之后、就在进入 _eval 之前 —— 这是为了把竞态窗口从
+        "整个 _eval 往返的 IPC 耗时"收窄到"这一次判断和紧跟着的 _eval 调用之间"
+        这一条 Python 语句的距离:如果 _on_loaded 捕获代数之后、真正调用这个
+        show eval 之前,heartbeat 已经抢先完成了一次恢复(代数已经变了),这次
+        show 就必须被跳过,否则它会晚于 heartbeat 那次(现在恢复成只发一次的)
+        hide 落地,留下一层再也没人揭的幕布。
+        """
+        if self._status.get("state") == "degraded" and self._connection_generation == generation_at_read:
             _eval(win, "window.glShellOverlay && window.glShellOverlay.show('正在等待服务器恢复…');")
 
     # ── 启动序列 ────────────────────────────────────────────────────
@@ -112,15 +133,23 @@ class Shell:
                               "detail": outcome.detail, "warning": warning})
 
     def _push_boot(self, win, state: dict) -> None:
+        self._last_boot_state = state
         _eval(win, f"window.glBoot && window.glBoot.setState({json.dumps(state, ensure_ascii=False)});")
 
     def _on_retry(self) -> None:
         self._retry_requested.set()
-        if self._boot_pending:
+        if self._boot_pending and self._last_boot_state is not None:
             # 点了以前只是悄悄唤醒心跳提前探一次,页面上什么反应都没有 ——
             # 第一次点和以前那个死气沉沉的按钮长得一模一样。这里立刻推一条
             # 反馈上去,不等心跳线程真正跑完那一轮探测。
-            self._push_boot(self.main_window, {"phase": "starting", "message": "正在重试…"})
+            #
+            # 只换 message,phase/detail/warning 原样保留 —— boot.html 的
+            # setState 是无条件覆盖式的:phase 一旦被换成不代表"卡住"的值,
+            # stuck 就会算成 false,重试/看日志两个按钮直接消失,GUANLAN_PORT
+            # 污染警告也没有任何东西会再推一次完整状态回去、永久消失。
+            retry_state = dict(self._last_boot_state)
+            retry_state["message"] = "正在重试…"
+            self._push_boot(self.main_window, retry_state)
 
     def _on_open_log(self) -> None:
         """用系统默认程序打开 var/server-9999.log。只读,不动服务器。"""
@@ -134,13 +163,14 @@ class Shell:
             # 否则超时之后的引导页会让 server_status() 永远读到 "timeout"
             # (监测器压根没见过那次超时,recover 时 hide_overlay 也不会是 True)。
             self._status = {"state": "healthy", "detail": ""}
-            # hide 无条件发,不只在 hide_overlay 的跳变沿发一次:_on_loaded 跑在
-            # pywebview 生的线程上,如果它在这次翻健康的前一刻读到旧的 degraded
-            # 状态,会晚一步补一次 show——只发一次的 hide 已经在那次跳变沿用掉了,
-            # 之后没有任何东西会再去揭这层幕布(重试也不行,已连通时 hide_overlay
-            # 恒为 False)。overlay.js 的 hide() 本来就幂等,无条件发不会有副作用。
-            for win in list(self._windows):
-                _eval(win, "window.glShellOverlay && window.glShellOverlay.hide();")
+            if decision.hide_overlay:
+                # 每完成一次 degraded→healthy 的恢复就把连接代数加一 ——
+                # _on_loaded 用它判断"我读到 degraded 的那一刻,恢复是不是已经
+                # 在我背后发生了",从而跳过一次本该被这次 hide 盖掉的迟到 show。
+                # 见 _maybe_show_overlay_for_late_load 的说明。
+                self._connection_generation += 1
+                for win in list(self._windows):
+                    _eval(win, "window.glShellOverlay && window.glShellOverlay.hide();")
             # 引导页不是终态:心跳一旦探到已连通,就把还停在引导页的主窗口放行到
             # 帷幄页 —— 这也是 重试/看日志 按钮(只会在 ensure 超时后显形)唯一
             # 会真正生效的地方:run_boot_sequence 只在启动那一刻跑一次,之后只有
@@ -226,6 +256,11 @@ def _log_shell_event(message: str) -> None:
     last = _last_log_at.get(message)
     if last is not None and (now - last) < _LOG_DEDUPE_SECONDS:
         return
+    # 去重表自己不能是那个"无界增长"问题的一个更小翻版:把窗口之外的旧键清掉,
+    # 让这张表始终只装着"最近一个去重窗口内出现过的不同消息",而不是从进程
+    # 启动那一刻起见过的所有消息。
+    for key in [k for k, at in _last_log_at.items() if (now - at) >= _LOG_DEDUPE_SECONDS]:
+        del _last_log_at[key]
     _last_log_at[message] = now
     try:
         _SHELL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)

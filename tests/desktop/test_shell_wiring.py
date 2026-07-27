@@ -107,6 +107,14 @@ def _spawn_result(ok: bool = True, detail: str = "spawned"):
     return SpawnResult(ok, 4321 if ok else None, detail)
 
 
+def _parse_boot_state(code: str) -> dict:
+    """从 `window.glBoot && window.glBoot.setState({...});` 里把 JSON 部分抠出来。"""
+    import json
+
+    payload = code.split("setState(", 1)[1].rsplit(");", 1)[0]
+    return json.loads(payload)
+
+
 # ── Review round 2 —— CRITICAL 1: 引导页不该是终态 ──────────────────────────
 
 def test_heartbeat_takes_the_window_off_the_boot_page_once_the_server_recovers():
@@ -224,18 +232,18 @@ def test_three_failures_show_overlay_and_spawn_exactly_once():
     assert len(shows2) == 1
 
 
-def test_recovery_hides_the_overlay_and_keeps_hiding_it_while_healthy():
-    """Review round 3 / Minor 1 —— 这条测试的名字和断言都从"恰好一次"改成了
-    "至少一次,且继续健康期间不该突然停发":旧版本(`test_recovery_hides_overlay_
-    exactly_once`)钉死的正是那个只在 hide_overlay 的跳变沿发一次 hide 的行为,
-    而这行为本身留了一条窄缝竞态 —— `_on_loaded` 跑在 pywebview 生的线程上,如果
-    它在心跳翻健康、广播 hide 的**前一刻**读到旧的 degraded 状态,会晚一步在这条
-    hide 之后又补一次 show,而遮罩自己的"重试"按钮清不掉它(探测已连通时
-    hide_overlay 恒为 False),用户会卡在一扇"页面其实好的,但盖着一层永远揭不开
-    的幕布"的窗口上。修法是把 hide 从"只在跳变沿发一次"改成"只要 connected 就
-    无条件发"(overlay.js 的 hide() 本来就幂等),用持续重复的 hide 去堵那条竞态。
-    这条测试因此故意放宽:不再断言"只发一次",而是断言"至少发一次,且继续健康
-    期间不会少发"。"""
+def test_recovery_hides_the_overlay_exactly_once():
+    """Review round 4 —— round 3 relaxed this test's assertion to `>=` to
+    accommodate an unconditional per-tick hide, but `_FakeWindow.evaluate_js`
+    only ever appends, so a later list is always a superset of an earlier one
+    and `len(hides2) >= len(hides)` cannot fail under *any* implementation —
+    restoring the guard, and the guard couldn't be pinned. Round 4 replaces
+    the unconditional-hide approach with a structural fix (a
+    `_connection_generation` counter checked in `_on_loaded`, see
+    `test_late_load_show_is_skipped_if_a_recovery_already_bumped_the_generation`
+    below) that closes the same race *and* lets this strict assertion come
+    back for real: hide only fires on the `hide_overlay` edge, exactly once,
+    and never again while merely staying healthy."""
     fake = _FakeWebview()
     probes = iter([False, False, False, True, True])
     s = sh.create_shell(webview_module=fake, ensure=lambda **kw: _healthy_outcome(),
@@ -245,10 +253,10 @@ def test_recovery_hides_the_overlay_and_keeps_hiding_it_while_healthy():
         s.heartbeat_once()
     s.heartbeat_once()  # 恢复
     hides = [c for c in fake.windows[0].evaluated if "glShellOverlay.hide" in c]
-    assert len(hides) >= 1, "恢复这一拍必须至少发一次 hide"
-    s.heartbeat_once()  # 继续健康:允许(且应该)再发一次 hide —— 这正是用来堵竞态的手段
+    assert len(hides) == 1
+    s.heartbeat_once()  # 继续健康:不该再多一次 hide
     hides2 = [c for c in fake.windows[0].evaluated if "glShellOverlay.hide" in c]
-    assert len(hides2) >= len(hides), "继续健康期间不该突然不再发 hide —— 那正是堵竞态的手段"
+    assert len(hides2) == 1
 
 
 def test_loaded_and_closed_handlers_are_zero_argument_closures():
@@ -371,6 +379,11 @@ def test_eval_failures_are_logged_instead_of_vanishing(monkeypatch):
 def test_log_shell_event_appends_to_the_shell_log_file(tmp_path, monkeypatch):
     log_path = tmp_path / "desktop-shell.log"
     monkeypatch.setattr(sh, "_SHELL_LOG_PATH", log_path)
+    # 同一进程里如果这条测试跑了不止一次(比如某个 rerun/repeat 插件),
+    # "hello world" 这个 key 会永久留在真实的模块级 _last_log_at 里,第二次
+    # 就会被限流窗口吞掉、log_path(一个全新的 tmp_path)从未被创建过,
+    # read_text 直接炸。必须像另外两条测试一样隔离这张表。
+    monkeypatch.setattr(sh, "_last_log_at", {})
     sh._log_shell_event("hello world")
     assert "hello world" in log_path.read_text(encoding="utf-8")
 
@@ -493,3 +506,106 @@ def test_retry_gives_no_feedback_once_already_past_the_boot_page():
     before = len(fake.windows[0].evaluated)
     s.api.retry()
     assert len(fake.windows[0].evaluated) == before
+
+
+# ── Review round 4 —— IMPORTANT 1: 重试反馈把控件和污染警告一起抹掉了 ─────────
+#
+# boot.html 的 setState 是无条件覆盖式的:detail 被清空、warn 被清空并隐藏,
+# stuck 因此算出 false → 按钮 (`#acts`) 被隐藏。round 3 那个只塞
+# {"phase": "starting", "message": "正在重试…"} 的推送会让 重试/看日志 两个按钮
+# 在第一次点击后就消失,GUANLAN_PORT 污染警告也永久消失且没有任何东西会再推一次
+# 完整状态回去 —— 用户只能等第三次探测失败画上 overlay.js 才能重新拿到控件。
+
+def test_retry_feedback_preserves_phase_detail_and_warning():
+    """round 3 那条覆盖测试只断言"评估过的代码里出现了'正在重试'这几个字",
+    在这个回归存在的情况下照样能过 —— 这里改成解析真正推送的 JSON state,
+    钉住 phase/detail/warning 必须原样保留,只有 message 被换成"正在重试…"。"""
+    fake = _FakeWebview()
+    s = sh.create_shell(webview_module=fake,
+                        ensure=lambda **kw: _timeout_outcome(),
+                        contamination=lambda: "检测到 GUANLAN_PORT=9998")
+    s.run_boot_sequence(fake.windows[0])
+    s.api.retry()
+
+    boot_calls = [c for c in fake.windows[0].evaluated if "glBoot.setState" in c]
+    state = _parse_boot_state(boot_calls[-1])
+
+    assert state["message"] == "正在重试…"
+    assert state["phase"] == "timeout", "phase 必须保留 —— 否则 boot.html 算出 stuck=false,按钮消失"
+    assert state["detail"], "detail 必须保留,不能被清空成空字符串/None"
+    assert "9998" in (state.get("warning") or ""), "GUANLAN_PORT 污染警告不能被这次推送顺手抹掉"
+
+
+def test_retry_feedback_reflects_whatever_the_latest_pushed_state_was():
+    """last_boot_state 必须跟着 run_boot_sequence 期间真正推送过的最后一条状态走,
+    不是钉死某个常量 —— 这里用 spawn_failed 的结局验证 phase 也能正确带过去。"""
+    fake = _FakeWebview()
+
+    def _spawn_failed_outcome(**kw):
+        from guanlan_v2.desktop.supervisor import EnsureOutcome
+        return EnsureOutcome("spawn_failed", False, 0.4, "看门狗脚本缺失")
+
+    s = sh.create_shell(webview_module=fake, ensure=_spawn_failed_outcome)
+    s.run_boot_sequence(fake.windows[0])
+    s.api.retry()
+
+    boot_calls = [c for c in fake.windows[0].evaluated if "glBoot.setState" in c]
+    state = _parse_boot_state(boot_calls[-1])
+    assert state["phase"] == "spawn_failed"
+    assert "看门狗脚本缺失" in state["detail"]
+
+
+# ── Review round 4 —— IMPORTANT 2: 结构性修法(连接代数)取代无条件 hide ────────
+#
+# _on_loaded 在决定要不要补一次 show 之前,先记下当时的 _connection_generation;
+# 心跳每完成一次 degraded→healthy 的恢复就把这个代数加一。如果 _on_loaded 捕获
+# 代数之后、真正调用 _eval(show) 之前,heartbeat 已经抢先完成了一次恢复(代数
+# 变了),这次 show 就该被跳过 —— 用一个整数比较把竞态窗口从"整个 _eval 调用的
+# IPC 往返耗时"收窄到"捕获代数和紧跟着那一次比较之间"这一条 Python 语句的距离。
+
+def test_late_load_show_is_skipped_if_a_recovery_already_bumped_the_generation():
+    fake = _FakeWebview()
+    s = sh.create_shell(webview_module=fake, ensure=lambda **kw: _healthy_outcome(),
+                        prober=lambda: False, spawner=lambda: _spawn_result())
+    s.run_boot_sequence(fake.windows[0])
+    for _ in range(3):
+        s.heartbeat_once()  # 进入 degraded
+    win = fake.windows[0]
+
+    # 模拟竞态本身:_on_loaded 会在这一刻捕获到的代数……
+    stale_generation = s._connection_generation
+    # ……但在它真正判断/发 eval 之前,heartbeat 抢先完成了一次恢复
+    # (heartbeat_once 的顺序是先置 status 再加代数,这里照抄同一顺序)。
+    s._status = {"state": "healthy", "detail": ""}
+    s._connection_generation += 1
+
+    before = len(win.evaluated)
+    s._maybe_show_overlay_for_late_load(win, stale_generation)
+    assert len(win.evaluated) == before, "捕获时的代数已经过期,这次 show 必须被跳过"
+
+
+def test_late_load_show_fires_when_still_genuinely_degraded():
+    fake = _FakeWebview()
+    s = sh.create_shell(webview_module=fake, ensure=lambda **kw: _healthy_outcome(),
+                        prober=lambda: False, spawner=lambda: _spawn_result())
+    s.run_boot_sequence(fake.windows[0])
+    for _ in range(3):
+        s.heartbeat_once()  # 进入 degraded
+    win = fake.windows[0]
+    s._maybe_show_overlay_for_late_load(win, s._connection_generation)
+    assert any("glShellOverlay.show" in c for c in win.evaluated)
+
+
+# ── Review round 4 —— Minor: _last_log_at 本身不能无界增长 ───────────────────
+
+def test_last_log_at_does_not_grow_unbounded_forever(tmp_path, monkeypatch):
+    monkeypatch.setattr(sh, "_SHELL_LOG_PATH", tmp_path / "desktop-shell.log")
+    monkeypatch.setattr(sh, "_last_log_at", {})
+    fake_now = [0.0]
+    monkeypatch.setattr(sh.time, "monotonic", lambda: fake_now[0])
+
+    for i in range(50):
+        fake_now[0] += sh._LOG_DEDUPE_SECONDS + 1  # 每次都让上一条彻底过期
+        sh._log_shell_event(f"message-{i}")
+
+    assert len(sh._last_log_at) == 1, "每条消息的去重窗口都已经过期,去重表不该无限堆积旧键"
