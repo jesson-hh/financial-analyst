@@ -51,6 +51,7 @@ import guanlan_v2.orchestration.lane_catalog as lc
 from guanlan_v2.orchestration import presets as P
 from guanlan_v2.orchestration.adapters import chain
 from guanlan_v2.orchestration.catalog import (
+    CatalogError,
     ContentManifestEntry,
     EvidencePolicy,
     SkillManifest,
@@ -895,6 +896,7 @@ class TestPresetLoaderLayering:
 # =========================================================================== #
 @pytest.mark.xfail(
     strict=True,
+    raises=CatalogError,
     reason="KNOWN GAP: the Lane-0 experience bridge activates on the "
            "'experience_cases' read category, which the Phase-8 worker "
            "dec.research_mgr declares, but the reviewed experience prefetch "

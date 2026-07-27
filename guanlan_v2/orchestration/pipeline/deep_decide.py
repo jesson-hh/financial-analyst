@@ -63,8 +63,8 @@ recorded here rather than papered over:
    name+digest pairs only — it takes no caller-supplied text — so rendering a
    trusted subject block requires a per-run Phase-10 assembler that closes over
    the subject and occupies the ``prompt_assembler`` injection seam of
-   ``assembly.build_production_plan_runner`` (assembly.py:~562 parameter,
-   :~608 default). That belongs with the runner invocation, not with
+   ``assembly.build_production_plan_runner`` (assembly.py:~584 parameter,
+   :~630 default — locate by name, line refs drift). That belongs with the runner invocation, not with
    materialization. The always-present :data:`SUBJECT_RUN_SCOPED_BADGE` says so
    on every materialization rather than implying a binding that does not exist.
 
