@@ -181,6 +181,69 @@ PHASE1_9_ORCH_MODULES = (
     "trial.py", "trial_ledger.py", "worker.py",
 )
 
+#: the frozen tests/orchestration/*.py module roster at freeze time (2026-07-27:
+#: the 122 Phase 1-9 test modules + this gate). Item 9's test half: Phase 10 may
+#: ADD test files, but none of these may ever vanish or be renamed away.
+TEST_MODULE_ROSTER_AT_FREEZE = (
+    "__init__.py", "test_adapters_api.py", "test_adapters_contracts.py",
+    "test_adapters_live_data.py", "test_adapters_replay_data.py",
+    "test_admission.py", "test_approval_lease.py", "test_approval_store.py",
+    "test_artifact.py", "test_bootstrap_e2e.py", "test_bootstrap_plan.py",
+    "test_bootstrap_profile.py", "test_budget.py", "test_budget_ledger.py",
+    "test_capability_manifest.py", "test_catalog.py", "test_catalog_runtime.py",
+    "test_context.py", "test_contract_completeness.py", "test_dag.py",
+    "test_data_result.py", "test_debate_runtime.py", "test_decision_inputs.py",
+    "test_decision_schedule.py", "test_digest.py", "test_dual_curves.py",
+    "test_durable_stores.py", "test_dynamic_e2e.py", "test_engine_equivalence.py",
+    "test_enums.py", "test_evaluator.py", "test_event_refusal.py",
+    "test_events.py", "test_eventstore.py", "test_experience_contracts.py",
+    "test_experience_retrieval.py", "test_experience_seed.py",
+    "test_experience_store.py", "test_factor_report_render.py",
+    "test_governor.py", "test_honesty.py", "test_lane0_catalog.py",
+    "test_lane0_reports.py", "test_lane_batch_decision.py",
+    "test_lane_batch_pv.py", "test_lane_batch_quant.py",
+    "test_lane_batch_text.py", "test_lane_batch_xcut.py", "test_launcher.py",
+    "test_launcher_wiring.py", "test_legacy_inventory.py",
+    "test_luozi_replay.py", "test_luozi_wakeup.py",
+    "test_market_factor_compute.py", "test_market_factor_contracts.py",
+    "test_migration.py", "test_model_tiers.py", "test_node_run.py",
+    "test_operator_identity.py", "test_optimize.py",
+    "test_orchestrator_assembly.py", "test_orchestrator_contracts.py",
+    "test_pattern_registry.py", "test_payloads.py", "test_phase10_handoff.py",
+    "test_phase2_handoff.py", "test_phase4_handoff.py", "test_phase4_registry.py",
+    "test_phase5_handoff.py", "test_phase5_registry.py", "test_phase6_handoff.py",
+    "test_phase6_registry.py", "test_phase7_handoff.py", "test_phase7_registry.py",
+    "test_phase8_e2e.py", "test_phase8_handoff.py",
+    "test_phase8_registry_catalog.py", "test_phase9_e2e.py",
+    "test_phase9_handoff.py", "test_phase9_registry_chain.py",
+    "test_pilot_runtime.py", "test_plan_approval_console.py",
+    "test_plan_catalog_validation.py", "test_plan_diff.py",
+    "test_plan_presets.py", "test_plan_structure.py", "test_planner_gateway.py",
+    "test_planner_loop.py", "test_pool.py", "test_presets.py",
+    "test_redline_regression.py", "test_refs.py", "test_regime_grader.py",
+    "test_registry_population.py", "test_replay_approval_cards.py",
+    "test_retirement_gates.py", "test_runtime_clock.py",
+    "test_runtime_contracts.py", "test_runtime_profile_v2.py",
+    "test_runtime_support.py", "test_schema_registry.py",
+    "test_sealed_holdout.py", "test_shadow_agent.py", "test_shadow_contracts.py",
+    "test_shadow_diff.py", "test_shadow_envelope.py", "test_shadow_events.py",
+    "test_shadow_gaps.py", "test_shadow_golden_harness.py",
+    "test_shadow_mirror.py", "test_shadow_records.py",
+    "test_shadow_redlines.py", "test_shadow_runner.py", "test_skilltree.py",
+    "test_spec.py", "test_startup_binding.py", "test_symbols.py",
+    "test_trial_contracts.py", "test_trial_events.py", "test_trial_ledger.py",
+    "test_watcher_orchestrated_registration.py", "test_weiwo_adapter.py",
+    "test_worker.py",
+)
+
+#: field/attribute names that would mean "leader stock codes" surfaced upstream —
+#: the D4 tripwire vocabulary (if any appears, D4's refusal design must be
+#: re-reviewed before cand.lane0 goes stale).
+_D4_CODE_LIKE_NAMES = (
+    "code", "codes", "symbol", "symbols", "leader_codes", "leaders",
+    "leader_stocks", "stocks", "tickers",
+)
+
 #: every file the Phase 10 plan CREATES (from the plan's file-structure table;
 #: this gate file excluded — it is the one Phase-10 file that exists already).
 PHASE10_PLANNED_CREATE_PATHS = (
@@ -446,6 +509,30 @@ class TestItem4LaneWorkers:
         refs = [(o.schema_ref.name, o.schema_ref.version) for o in trader.outputs]
         assert refs == [("PortfolioTargetProposal", "1")]
 
+    def test_d3_run_context_convention_is_pinned(self):
+        """D3 positive half: the convention that REPLACES worker params. The
+        subject code reaches a worker through the run context, so Task 3's
+        builder binds these exact names — a rename must fail HERE, not there:
+        ``bootstrap.derive_main_run_context`` (name + keyword surface) and the
+        ContextSnapshot → DataContext linkage (field ``data_context``; the
+        RunContext side is field ``data``, same ``DataContext`` type — the pair
+        ``derive_main_run_context`` itself cross-checks for equality)."""
+        from guanlan_v2.orchestration.bootstrap import derive_main_run_context
+        from guanlan_v2.orchestration.context import (
+            ContextSnapshot,
+            DataContext,
+            RunContext,
+        )
+        sig = inspect.signature(derive_main_run_context)
+        params = list(sig.parameters.values())
+        assert params[0].name == "bootstrap_ctx"
+        kw_only = {p.name for p in params
+                   if p.kind is inspect.Parameter.KEYWORD_ONLY}
+        assert kw_only == {"snapshot", "main_run_id", "budget",
+                          "cancellation_token_id"}
+        assert ContextSnapshot.model_fields["data_context"].annotation is DataContext
+        assert RunContext.model_fields["data"].annotation is DataContext
+
 
 # =========================================================================== #
 # item 5 — Phase 5/6 anchors                                                    #
@@ -480,6 +567,29 @@ class TestItem5Phase56Anchors:
         for fn in (compute_scheduled_for, compute_cutoff_at,
                    compute_eligible_execution_at):
             assert callable(fn)
+
+    def test_d4_rotation_report_carries_no_leader_codes(self):
+        """D4 tripwire: TODAY neither the RotationReport mainlines nor the
+        ladder factor's point type carries leader stock codes, so ``cand.lane0``
+        must be the honest typed refusal. If upstream later DOES grow a code
+        field/accessor, this test reddens and re-opens D4 before the refusal
+        design goes stale — the exact field sets are pinned."""
+        from guanlan_v2.orchestration.market.factors import (
+            MainlineRead,
+            MarketFactorPoint,
+            RotationReport,
+        )
+        assert set(MainlineRead.model_fields) == {
+            "name", "universe_key", "stage", "strength", "persistence",
+            "evidence", "chain_nodes"}
+        assert set(MarketFactorPoint.model_fields) == {"date", "value", "aux"}
+        for model in (MainlineRead, MarketFactorPoint, RotationReport):
+            for name in _D4_CODE_LIKE_NAMES:
+                assert name not in model.model_fields, (
+                    f"{model.__name__}.{name} appeared — leader codes surfaced "
+                    "upstream; re-open D4 before cand.lane0's refusal goes stale")
+                assert not hasattr(model, name), (
+                    f"{model.__name__}.{name} accessor appeared — re-open D4")
 
 
 # =========================================================================== #
@@ -588,6 +698,15 @@ class TestItem9NoOverwrite:
     def test_phase1_9_orchestration_roster_is_intact(self):
         missing = [n for n in PHASE1_9_ORCH_MODULES
                    if not (_ORCH_SRC / n).exists()]
+        assert missing == []
+
+    def test_frozen_test_module_roster_is_intact(self):
+        """Item 9's test half: every test module present at freeze time keeps
+        existing. Phase 10's new test files are ADDITIONS — a loss or rename of
+        any frozen name is an overwrite/delete of the upstream test surface."""
+        tests_dir = Path(__file__).resolve().parent
+        missing = [n for n in TEST_MODULE_ROSTER_AT_FREEZE
+                   if not (tests_dir / n).is_file()]
         assert missing == []
 
     def test_chain_sealing_goldens_are_byte_identical(self):
