@@ -713,7 +713,28 @@ def build_phase10_preset_registry(
     Phase-10 record colliding with a base ``preset_id`` under different content
     refuses through the inherited
     :class:`~guanlan_v2.orchestration.plan_presets.PlanPresetError`.
+
+    **Task 6 (Amendment 3) — both preset generations.** "The committed directory"
+    now means BOTH ``config/orchestration/presets/*.json`` (Phase-7
+    :class:`PlanPresetRecord` v1) and ``config/orchestration/presets/v2/*.json``
+    (Phase-10 ``PlanPresetRecordV2``, which carries the debate vocabulary Phase 7
+    structurally refuses). The subset seal is therefore evaluated against the
+    Phase-10 loader's merged view — v1 semantics are bit-unchanged (the same
+    baseline record, the same digest equality), and a committed v2 record is now
+    an admissible base member instead of being mistaken for a smuggled one. The
+    v2 subdirectory exists because the Phase-7 loader's ``root/*.json`` glob is
+    non-recursive: a v2 file beside the baseline would be a hard
+    ``PlanPresetError`` for every existing caller of that loader.
+    ``PlanPresetRecordV2`` subclasses :class:`PlanPresetRecord`, so ``records``
+    may contain either generation and :meth:`PlanPresetRegistry.register`'s
+    ``isinstance`` gate accepts both unchanged.
     """
+    # (function-local: ``deep_decide`` imports ``PRODUCTION_PRESETS_DIR`` from this
+    #  module at import time, so the dependency is one-directional at module level.)
+    from guanlan_v2.orchestration.pipeline.deep_decide import (
+        load_phase10_preset_registry,
+    )
+
     if not isinstance(phase7_registry, PlanPresetRegistry):
         raise PresetBaseRefused(
             "the extension base must be a PlanPresetRegistry; got "
@@ -724,7 +745,7 @@ def build_phase10_preset_registry(
             "the extension base must be SEALED (the Phase-7 loader seals before "
             "returning); an unsealed registry is not the reviewed Phase-7 base"
         )
-    committed = load_preset_registry(PRODUCTION_PRESETS_DIR)
+    committed = load_phase10_preset_registry(PRODUCTION_PRESETS_DIR)
     reviewed = committed.get(PHASE7_BASELINE_PRESET_ID)
     try:
         held = phase7_registry.get(PHASE7_BASELINE_PRESET_ID)
@@ -749,8 +770,9 @@ def build_phase10_preset_registry(
         except PlanPresetError as exc:
             raise PresetBaseRefused(
                 f"the extension base holds {entry.preset_id!r}, which is not a "
-                "committed config/orchestration/presets record; a smuggled base "
-                "record never reaches the sealed production registry"
+                "committed config/orchestration/presets record (neither the v1 "
+                "root nor the v2 subdirectory); a smuggled base record never "
+                "reaches the sealed production registry"
             ) from exc
         if entry.preset_digest != committed_record.semantic_digest():
             raise PresetBaseRefused(
