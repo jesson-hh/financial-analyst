@@ -866,3 +866,163 @@ def test_catalog_snapshot_and_prebuilt_runtime_must_agree(tmp_path):
             request_id="req-x", clock=_FixedClock(),
             runtime_registry_digest="0" * 64, runtime_limit=1,
             catalog=bundle)
+
+
+# =========================================================================== #
+# 12. Task 11 — the promoted production material universe + planner seam        #
+# =========================================================================== #
+class TestTask11MaterialUniverse:
+    """The nine-loader promotion (Task-0b concern 2 closed): the production
+    material universe now resolves the FULL Phase-9 (and Phase-10) cumulative
+    catalogs with ``material_source=None`` — the exact recipe the deep-preset
+    suite proved, lifted out of test code into ``_reviewed_material_universe``."""
+
+    def test_the_full_phase9_catalog_builds_with_no_explicit_source(self):
+        from guanlan_v2.orchestration.adapters import chain as p9
+
+        bundle = build_production_catalog_runtime(p9.phase9_catalog_snapshot())
+        assert bundle.catalog_digest == p9.PHASE9_CATALOG_DIGEST
+        # a real Phase-8 lane worker resolves with its prompt material bytes.
+        resolved = bundle.runtime.resolve_worker("dec.pm")
+        assert resolved.system_prompt is not None
+
+    def test_the_phase10_catalog_builds_and_registers_the_cand_handlers(self):
+        """The plan's Task-11 clause: the ``cand.*`` handler callables register
+        as DETERMINISTIC catalog handlers through ``handler_registry`` against
+        the Phase-10 catalog's own handler material ids."""
+        from guanlan_v2.orchestration.pipeline import chain as p10
+        from guanlan_v2.orchestration.pipeline.candidates import (
+            CandLane0Params,
+            CandModelParams,
+            CandV4Params,
+            CandidatePorts,
+            as_handler_factory,
+            cand_lane0_handler,
+            cand_model_handler,
+            cand_v4_handler,
+        )
+
+        ports = CandidatePorts(
+            as_of=datetime(2026, 7, 28, 2, 30, tzinfo=timezone.utc),
+            ranking_reader=SimpleNamespace())
+        registry = {
+            p10.CAND_HANDLER_IDS["cand.v4"]: as_handler_factory(
+                cand_v4_handler(params=CandV4Params(top_n=5), ports=ports)),
+            p10.CAND_HANDLER_IDS["cand.lane0"]: as_handler_factory(
+                cand_lane0_handler(
+                    params=CandLane0Params(top_n=5, mainline_limit=3),
+                    ports=ports)),
+            p10.CAND_HANDLER_IDS["cand.model"]: as_handler_factory(
+                cand_model_handler(
+                    params=CandModelParams(top_n=5, variant_id="m_test"),
+                    ports=ports)),
+        }
+        snap = p10.phase10_catalog_snapshot()
+        bundle = build_production_catalog_runtime(snap, handler_registry=registry)
+        assert bundle.catalog_digest == p10.PHASE10_CATALOG_DIGEST
+        # each cand.* worker's exact handler ref resolves its registered factory.
+        for worker in snap.workers:
+            if worker.id not in p10.CAND_WORKER_IDS:
+                continue
+            factory = bundle.factories.handler_factory(
+                worker.execution.handler_ref)
+            assert factory is registry[worker.execution.handler_ref.id]
+
+    def test_production_bridge_view_binds_the_three_real_analyzers(self):
+        import guanlan_v2.orchestration.bootstrap as bs
+        import guanlan_v2.orchestration.data.catalog as dcat
+        import guanlan_v2.orchestration.memory.catalog as mcat
+        from guanlan_v2.orchestration.adapters import chain as p9
+        from guanlan_v2.orchestration.pipeline.assembly import (
+            production_bridge_view,
+        )
+
+        bundle = build_production_catalog_runtime(p9.phase9_catalog_snapshot())
+        view = production_bridge_view(bundle.runtime)
+        assert sorted(view.bridge_ids()) == [
+            "data.runtime", "experience.bridge", "memory.runtime"]
+        assert isinstance(view.resolve("data.runtime").analyzer,
+                          dcat.DataBridgeSupportAnalyzer)
+        assert isinstance(view.resolve("memory.runtime").analyzer,
+                          mcat.MemoryBridgeSupportAnalyzer)
+        assert isinstance(view.resolve("experience.bridge").analyzer,
+                          bs.ExperienceBridgeSupportAnalyzer)
+
+
+class _ExplodingPlannerGateway:
+    """A scripted provider outage: every invoke raises AFTER the real prompt
+    record was persisted (run_planner step 2 precedes step 3)."""
+
+    def __init__(self):
+        self.calls = 0
+        self.closed = False
+
+    def invoke(self, request, *, prompt_assembly_ref):
+        self.calls += 1
+        raise RuntimeError("scripted provider outage")
+
+    def close(self):
+        self.closed = True
+
+
+class TestTask11PlannerRunner:
+    def test_the_seam_runs_the_real_planner_loop_and_halts_honestly(self):
+        """``build_production_planner_runner`` drives the REAL ``run_planner``
+        over the verified production catalog runtime + the catalog-derived
+        ``PlannerSpec`` + the real ``StaticPromptAssembler`` + a planner-scoped
+        budget ledger. With a scripted always-failing gateway the loop exhausts
+        its reviewed attempts (each an honest ``model_error``) and terminates
+        ``halted_no_fallback`` (the request carries no fallback preset) — no
+        draft is ever fabricated, and the gateway is closed."""
+        from guanlan_v2.orchestration.adapters import chain as p9
+        from guanlan_v2.orchestration.eventstore import RuntimeStores
+        from guanlan_v2.orchestration.phase7_registry import (
+            build_phase7_planner_spec,
+        )
+        from guanlan_v2.orchestration.pipeline.assembly import (
+            build_production_planner_runner,
+            load_phase10_preset_registry,
+        )
+        from guanlan_v2.orchestration.spec import OrchestrationRequest
+
+        now = datetime(2026, 7, 28, 2, 30, tzinfo=timezone.utc)
+
+        class _Clock:
+            def now(self):
+                return now
+
+        registry = p9.build_phase9_registry(p9.PHASE9_BASE_REGISTRY_DIGEST)
+        resolver = SchemaRegistryResolver()
+        resolver.register(registry)
+        stores = RuntimeStores(
+            resolver=resolver, clock=_Clock(),
+            allowed_cell_namespaces=(W.PROMPT_CELL_NAMESPACE,))
+        mem = P.build_empty_memory_context(
+            data_context=P.pilot_data_context(as_of=now), stores=stores,
+            registry_digest=registry.registry_digest, built_at=now)
+        context = mem.context
+        ctx_ref = PayloadRef(
+            namespace="main", object_id="ctx-planner-t11",
+            content_digest=context.content_digest)
+        request = OrchestrationRequest(
+            request_id="req-planner-t11", goal="a goal for the seam test",
+            workflow="orchestrate_only", fallback_preset_id=None,
+            approval_policy=ApprovalPolicy.REQUIRED)
+
+        bundle = build_production_catalog_runtime(p9.phase9_catalog_snapshot())
+        gateway = _ExplodingPlannerGateway()
+        runner = build_production_planner_runner(
+            stores=stores, catalog=bundle, schema_registry=registry,
+            preset_registry=load_phase10_preset_registry(PRODUCTION_PRESETS_DIR),
+            clock=_Clock(), model_gateway_factory=lambda: gateway)
+        result = runner(
+            request=request, context=context, context_snapshot_ref=ctx_ref,
+            run_id="run-planner-t11", draft_id="plan-planner-t11")
+
+        spec = build_phase7_planner_spec(bundle.snapshot)
+        assert result.draft is None
+        assert result.record.terminal_outcome == "halted_no_fallback"
+        assert len(result.record.attempts) == spec.max_generation_attempts
+        assert all(a.outcome == "model_error" for a in result.record.attempts)
+        assert gateway.calls == spec.max_generation_attempts
+        assert gateway.closed is True  # the finally closes the gateway

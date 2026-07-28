@@ -27,10 +27,26 @@ REQUIRED-approval candidate paths and STOPS at registration:
   ``PRESET_FALLBACK``).
 * ``goal`` — the Phase-7 dynamic planner path through the injected
   ``planner_runner`` seam (the reviewed ``run_planner`` call shape); a
-  ``candidate_ready`` draft becomes ONE pending DYNAMIC card. The production
-  planner assembly needs the full catalog runtime, which
-  ``build_production_catalog_runtime`` still refuses (Task 0b concern 2 /
-  Task 11), so production wiring honestly leaves the seam ``None`` → 503.
+  ``candidate_ready`` draft becomes ONE pending DYNAMIC card. Production
+  wiring binds the seam for real via
+  ``assembly.build_production_planner_runner`` over the verified full-catalog
+  runtime (Task 11 closed Task-0b concern 2; before that the seam was an
+  honest ``None`` → 503).
+
+**The two sanctioned card forms (Task 11 convergence ruling — DOCUMENTED, no
+kernel enum widening).** ``PendingPlanApproval`` structurally refuses
+``source=PRESET`` (plan_diff.py), so every Phase-10 preset-materialized
+candidate cards as ``PRESET_FALLBACK`` with the exact ``(preset_id,
+preset_record_digest)`` pair. Two sanctioned producers exist: (1) the Task-3
+screening batch, whose request GENUINELY names ``fallback_preset_id`` (the
+kernel's own definition of the label — selected-by-fallback, no planner-failure
+story encoded); (2) the Task-7/9 deep-decide + preset doors, whose requests
+carry ``fallback_preset_id=None`` and label the card ``PRESET_FALLBACK`` with
+exact provenance. The controller ruled both HONEST and functionally equivalent:
+both carry the exact preset digests, and lease matching
+(``register_and_try_lease``) matches digests, NEVER the source label — so the
+coherent Phase-10 rule is "card path ⇒ ``PRESET_FALLBACK``", and the kernel
+vocabulary stays sealed.
 
 Every mode answers ``status="awaiting_approval"``: the status names the DOOR's
 posture — nothing this router did approved anything. A standing human lease may
@@ -1129,13 +1145,17 @@ def build_production_pipeline_deps() -> PipelineRouterDeps:
     freeze a one-namespace allowlist and violate the server's 全进程唯一绑定
     invariant).
 
-    HONEST STATE (recorded): the admission half (``admission_factory`` /
-    ``coordinator_factory``) needs ``build_production_catalog_runtime``, which
-    still refuses (Task 0b concern 2 — no reviewed material source resolves the
-    full Phase-9 catalog until Task 11); the goal-mode planner assembly needs
-    the same runtime. Both stay ``None`` — the corresponding routes answer an
-    honest ``*_unwired`` 503, never a fake. The read-only projections + the TA
-    inbox + the candidate read surface are fully wired.
+    FULLY WIRED (Task 11): ``build_production_catalog_runtime`` now resolves
+    the full Phase-9 catalog through the promoted nine-loader material universe
+    (Task-0b concern 2 closed), so the admission half (``admission_factory`` /
+    ``coordinator_factory`` over the full three-analyzer
+    ``production_bridge_view``) and the goal-mode ``planner_runner``
+    (``build_production_planner_runner``) bind for real. HONEST RESIDUE
+    (recorded): the sealed Phase-3 data-prefetch grants still cover ``dec.pm``
+    only, so a draft scheduling ``pv.technical`` / ``text.news`` prepares but
+    support-refuses with ``tool_calls_required_unmet`` (the Task-11
+    permanent-honest grant-gap ruling) — a 422 naming the issue codes, never a
+    fake admit.
     """
     from guanlan_v2 import orch_store_status as _orch_status
     from guanlan_v2.orchestration.adapters import chain as _chain
@@ -1166,18 +1186,64 @@ def build_production_pipeline_deps() -> PipelineRouterDeps:
     registry = _chain.build_phase9_registry(_chain.PHASE9_BASE_REGISTRY_DIGEST)
     stores.resolver.register(registry)
     root = Path(getattr(stores, "root", Path("var") / "orchestration"))
+    clock = SystemClock()
+    catalog = _chain.phase9_catalog_snapshot()
+    presets = load_phase10_preset_registry(PRODUCTION_PRESETS_DIR)
+
+    # -- Task 11: the verified production catalog runtime + full bridge view --- #
+    from guanlan_v2.orchestration.adapters.api import (
+        build_plan_approval_coordinator,
+    )
+    from guanlan_v2.orchestration.admission import PlanAdmissionService
+    from guanlan_v2.orchestration.runtime_support import STATIC_RUNTIME_PROFILE_V2
+    from guanlan_v2.orchestration.pipeline.assembly import (
+        build_production_catalog_runtime,
+        build_production_planner_runner,
+        production_bridge_view,
+    )
+    from guanlan_v2.orchestration.pipeline.live_decide import _ApprovalsBridge
+
+    bundle = build_production_catalog_runtime(catalog)
+    view = production_bridge_view(bundle.runtime)
+
+    def admission_factory(*, run_id, requests, drafts, context, approvals,
+                          run_budget):
+        return PlanAdmissionService(
+            run_id=run_id, requests=dict(requests), drafts=dict(drafts),
+            contexts={context.content_digest: context}, attestations={},
+            approvals=approvals, catalog=bundle.runtime, bridge_view=view,
+            phase1_registry=registry,
+            runtime_registry_digest=registry.registry_digest,
+            profile=STATIC_RUNTIME_PROFILE_V2, stores=stores,
+            run_budget=run_budget, clock=clock)
+
+    def coordinator_factory(*, admission, approvals_sink):
+        # the reviewed durable builder (replay path) over the ONE production
+        # lease journal; verifier-free — the start routes only REGISTER cards
+        # (register_pending / register_and_try_lease need no verifier; human
+        # decisions are recorded by the approval console with the production
+        # verifier). The reviewed live_decide idiom, verbatim.
+        return build_plan_approval_coordinator(
+            admission=admission, clock=clock, verifier=None,
+            approvals=_ApprovalsBridge(approvals_sink),
+            preset_registry=presets,
+            catalog_digest=catalog.catalog_digest,
+            registry_digest=registry.registry_digest)
+
     return PipelineRouterDeps(
         stores=stores,
-        preset_registry=load_phase10_preset_registry(PRODUCTION_PRESETS_DIR),
-        catalog=_chain.phase9_catalog_snapshot(),
+        preset_registry=presets,
+        catalog=catalog,
         schema_registry=registry,
-        clock=SystemClock(),
+        clock=clock,
         ranking_reader=build_production_ranking_reader(),
         subject_committer=build_stores_subject_committer(stores),
         latest_snapshot_fn=lambda: _latest_snapshot_production(stores),
-        admission_factory=None,   # Task 11: catalog-runtime materials (honest 503)
-        coordinator_factory=None,  # Task 11 (honest 503)
-        planner_runner=None,       # Task 11 (honest 503)
+        admission_factory=admission_factory,
+        coordinator_factory=coordinator_factory,
+        planner_runner=build_production_planner_runner(
+            stores=stores, catalog=bundle, schema_registry=registry,
+            preset_registry=presets, clock=clock),
         request_store=JsonlPipelineRequestStore(root / "pipeline_requests.jsonl"),
         ta_inbox_dir=Path("var") / "ta_inbox",
     )

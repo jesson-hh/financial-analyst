@@ -980,9 +980,12 @@ class TestProductionWiring:
         # the request store lands under the durable root; the inbox under var/.
         assert Path(deps.request_store.path).parent == Path(stores.root)
         assert Path(deps.ta_inbox_dir) == Path("var") / "ta_inbox"
-        # the admission half is honestly absent until Task 11 lands the
-        # catalog-runtime materials (503 admission_unwired, never a fake).
-        # (No assertion on None-ness: the day Task 11 lands, it binds.)
+        # Task 11: the admission half + the goal-mode planner seam bind for
+        # REAL (the promoted nine-loader material universe resolves the full
+        # Phase-9 catalog; the three seams are no longer honest Nones).
+        assert callable(deps.admission_factory)
+        assert callable(deps.coordinator_factory)
+        assert callable(deps.planner_runner)
 
 
 # =========================================================================== #

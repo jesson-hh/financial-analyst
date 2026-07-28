@@ -761,6 +761,25 @@ def test_defense_in_depth_mismatched_support_report_rejected():
         env.run(runtime=bad_runtime)
 
 
+def test_run_context_for_a_different_run_is_refused_before_any_execution():
+    """Task 11 (the Task-8b review carry-forward): ``ctx.run_id`` must equal the
+    admitted plan's ``run_id``. Durable state cells (the run-scoped prompt-cell
+    key), budget events and run history are all keyed by run identity — a
+    cross-run RunContext would silently file every one of them under the wrong
+    run. The refusal fires in the dispatch preamble, before any node runs."""
+    env = build_dag_env([NodeSpec("a")], sink_node_ids=("a",))
+    foreign_ctx = env.run_ctx.model_copy(update={"run_id": "run-somebody-else"})
+    with pytest.raises(D.DagRunError, match="run_id"):
+        asyncio.run(D.run_plan(
+            env.plan.plan_digest, foreign_ctx, admission=env.service,
+            pool=env.pool, budget=env.budget, runtime=env.runtime,
+            registry=env.registry, stores=env.stores, runtime_limit=8,
+            clock=env.clock, refusal_sink=env.refusal_sink,
+            model_gateway=env.model_gateway))
+    # nothing executed, nothing committed.
+    assert env.pool.committed_output("a", "primary") is None
+
+
 # =========================================================================== #
 # 12. crash-before / crash-after replay + idempotent resume                     #
 # =========================================================================== #

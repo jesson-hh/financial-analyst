@@ -164,6 +164,8 @@ __all__ = [
     "WorkerSeatModelGateway",
     "production_material_source",
     "build_production_catalog_runtime",
+    "production_bridge_view",
+    "build_production_planner_runner",
     "production_gateway_factory",
     "build_production_plan_runner",
     "build_phase10_preset_registry",
@@ -251,20 +253,68 @@ class ProductionCatalogRuntime:
 def _reviewed_material_universe():
     """``(id, version) -> resolved material`` from the reviewed physical loaders.
 
-    Today's universe is the pilot-lineage loader (the only cumulative catalog a
-    production pipeline runs, and the one the Task-0b e2e proof exercises). A
-    later phase-10 catalog brings its own reviewed loader and passes
-    ``material_source=`` explicitly — this function is deliberately NOT a place
-    to guess at bytes for materials whose loaders live elsewhere.
+    **Task 11 promotion (Task-0b concern 2 closed).** The universe is the UNION
+    of every sealed owning-module loader — exactly the nine-loader recipe the
+    deep-preset suite proved against the full Phase-9 catalog
+    (``test_pipeline_deep_preset._full_phase9_runtime``), plus the Phase-10
+    chain's own four pipeline materials. Every entry comes from the material's
+    OWN reviewed loader (never guessed bytes); duplicates across loaders keep
+    the first resolution (identical bytes — ``CatalogRuntime.build`` recomputes
+    every digest downstream, so a byte drift is loud there). With this universe
+    :func:`production_material_source` resolves the full Phase-9 AND Phase-10
+    cumulative catalogs with ``material_source=None``.
     """
+    import guanlan_v2.orchestration.bootstrap as _bs
+    import guanlan_v2.orchestration.data.catalog as _dcat
+    import guanlan_v2.orchestration.lane_catalog as _lc
+    import guanlan_v2.orchestration.memory.catalog as _mcat
+    import guanlan_v2.orchestration.phase7_registry as _p7
+    import guanlan_v2.orchestration.trial as _trial
+    from guanlan_v2.orchestration import presets as _presets
+    from guanlan_v2.orchestration.adapters import chain as _p9chain
+    from guanlan_v2.orchestration.pipeline import chain as _p10chain
+
     text: dict[tuple[str, str], Any] = {}
     caps: dict[tuple[str, str], Any] = {}
+
+    def _add(materials) -> None:
+        for material in materials:
+            key = (material.ref.id, material.ref.version)
+            if hasattr(material, "raw_utf8"):
+                text.setdefault(key, material)
+            elif hasattr(material, "descriptor"):
+                caps.setdefault(key, material)
+
+    # (1) the P8 lane materials (text/pv/quant/xcut/dec + tier map + reducer)
+    _add(_lc.load_phase8_lane_materials())
+    # (2) the P7 planner materials (prompt/skill/guardrail)
+    _add(_p7.load_planner_materials())
+    # (3) the two P9 adapter source materials (handlers + descriptors)
+    _replay_desc, _live_desc, p9_source_materials = (
+        _p9chain.build_phase9_source_materials())
+    _add(p9_source_materials)
+    # (4) the P3 data surface (methods/capabilities/bridge)
+    data_surface = _dcat.phase3_data_surface()
+    _add(data_surface.text_materials())
+    _add(data_surface.capability_materials)
+    # (5) the P3 memory surface (facade/policy/bridge + memory.propose)
+    memory_surface = _mcat.phase3_memory_surface()
+    _add(memory_surface.text_materials())
+    _add([memory_surface.proposal_capability_material])
+    # (6) Lane 0 (experience bridge + market workers) + the #25 placeholder
+    _add(_bs.load_lane0_catalog().resolved)
+    _add(_bs.factor_miner_placeholder().resolved)
+    # (7) the pilot lineage (P2 static) + the compat mirror
     pilot = load_pilot_catalog()
     pilot_text, pilot_caps = pilot.resolved_materials()
-    for material in pilot_text:
-        text.setdefault((material.ref.id, material.ref.version), material)
-    for material in pilot_caps:
-        caps.setdefault((material.ref.id, material.ref.version), material)
+    _add(pilot_text)
+    _add(pilot_caps)
+    _add(_presets._compat_materials()["text_materials"])
+    # (8) the P4 joint gate guardrail
+    _add([_trial.joint_gate_material()[1]])
+    # (9) the Phase-10 pipeline materials (cand.* handlers + preset reference)
+    _refs, p10_materials = _p10chain.build_phase10_materials()
+    _add(p10_materials)
     return text, caps
 
 
@@ -359,6 +409,117 @@ def build_production_catalog_runtime(
             registrations[handler_id],
         )
     return ProductionCatalogRuntime(runtime=runtime, factories=factories)
+
+
+def production_bridge_view(runtime: CatalogRuntime):
+    """The full three-analyzer :class:`BridgeCatalogView` production admission binds.
+
+    Task 11 promotion of the deep-preset suite's reviewed recipe
+    (``test_pipeline_deep_preset._full_phase9_bridge_view``): the sealed Phase-9
+    catalog carries exactly three execution-bridge descriptors (Phase-3 data,
+    Phase-3 memory, Lane-0 experience), and ``BridgeCatalogView.build`` REFUSES
+    a runtime whose bridges lack a reviewed analyzer binding — so production
+    admission must bind the three real analyzers, keyed by the exact sealed
+    analyzer-handler refs. With the Task-11 rowless-reader discriminations the
+    resulting support check COMPLETES for every Phase-8 worker and reports the
+    remaining data-grant gap honestly (``pv.technical`` / ``text.news``
+    ``tool_calls_required_unmet``) instead of crashing.
+    """
+    import guanlan_v2.orchestration.bootstrap as _bs
+    import guanlan_v2.orchestration.data.catalog as _dcat
+    import guanlan_v2.orchestration.memory.catalog as _mcat
+    from guanlan_v2.orchestration.catalog_runtime import BridgeCatalogView
+
+    data_surface = _dcat.phase3_data_surface()
+    memory_surface = _mcat.phase3_memory_surface()
+    lane0 = _bs.load_lane0_catalog()
+
+    def _key(ref: ContentRef):
+        return (ref.id, ref.version, ref.content_digest)
+
+    return BridgeCatalogView.build(runtime, {
+        _key(data_surface.analyzer_ref): _dcat.DataBridgeSupportAnalyzer(),
+        _key(memory_surface.analyzer_ref): _mcat.MemoryBridgeSupportAnalyzer(),
+        lane0.analyzer_key: _bs.ExperienceBridgeSupportAnalyzer(),
+    })
+
+
+def build_production_planner_runner(
+    *,
+    stores: Any,
+    catalog: ProductionCatalogRuntime,
+    schema_registry: Any,
+    preset_registry: PlanPresetRegistry,
+    clock: Any,
+    model_gateway_factory: Factory | None = None,
+) -> Factory:
+    """The production goal-mode planner seam (Task 11; the reviewed
+    ``run_planner`` call shape the pipeline router's ``planner_runner`` field
+    documents: ``(*, request, context, context_snapshot_ref, run_id, draft_id)
+    -> PlannerResult``).
+
+    The :class:`~guanlan_v2.orchestration.orchestrator.PlannerSpec` is derived
+    from the verified production catalog's own planner materials
+    (``build_phase7_planner_spec`` — exact id/version/digest, never a path).
+    Per call it builds a PLANNER-SCOPED :class:`BudgetLedger` bounded by the
+    spec's reviewed attempt arithmetic (``attempt_token_reservation`` ×
+    ``max_generation_attempts``; one invocation per attempt) over its own
+    ``{run_id}.planner`` budget-event scope — deliberately NOT the run's
+    admission ledger, whose ``RunBudget`` the api binds AFTER the planner
+    returns a draft (``bind_run_budget`` is first-bind-wins per run).
+    ``model_gateway_factory=None`` constructs the production single-shot
+    :class:`~guanlan_v2.orchestration.planner_gateway.PlannerLLMModelGateway`
+    per call (explicit repo llm.yaml path; closed in ``finally``); tests inject
+    a scripted gateway factory — the ONLY test/production difference (the
+    Task-0b gateway rule).
+    """
+    from guanlan_v2.orchestration.context import RunBudget
+    from guanlan_v2.orchestration.orchestrator import run_planner
+    from guanlan_v2.orchestration.phase7_registry import build_phase7_planner_spec
+    from guanlan_v2.orchestration.worker import StaticPromptAssembler
+
+    spec = build_phase7_planner_spec(catalog.snapshot)
+
+    def runner(*, request, context, context_snapshot_ref, run_id, draft_id):
+        run_budget = RunBudget(
+            ledger_id=f"led-planner-{run_id}",
+            max_tokens=spec.attempt_token_reservation * spec.max_generation_attempts,
+            max_llm_invocations=spec.max_generation_attempts,
+            max_concurrency=1,
+        )
+        budget = BudgetLedger(
+            sink=stores.budget_event_sink(
+                run_id=f"{run_id}.planner", ledger_id=run_budget.ledger_id),
+            run_budget=run_budget,
+        )
+        if model_gateway_factory is not None:
+            gateway = model_gateway_factory()
+        else:
+            gateway = _planner_gateway.PlannerLLMModelGateway(
+                payload_reader=stores.payloads)
+        try:
+            return run_planner(
+                request=request,
+                context=context,
+                context_snapshot_ref=context_snapshot_ref,
+                catalog_runtime=catalog.runtime,
+                schema_registry=schema_registry,
+                planner_spec=spec,
+                presets=preset_registry,
+                budget=budget,
+                prompt_assembler=StaticPromptAssembler(),
+                model_gateway=gateway,
+                payload_store=stores.payloads,
+                clock=clock,
+                run_id=run_id,
+                draft_id=draft_id,
+            )
+        finally:
+            close = getattr(gateway, "close", None)
+            if close is not None:
+                close()
+
+    return runner
 
 
 # =========================================================================== #

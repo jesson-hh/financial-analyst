@@ -1049,6 +1049,99 @@ class TestWatcherServerSeams:
         with pytest.raises(RuntimeError, match="Task 11"):
             live_decide.build_production_decide_fn()
 
+    def test_a_bound_process_store_passes_the_gate_and_builds_real_bindings(
+            self, monkeypatch, tmp_path):
+        """Task 11 (the store-gate HEALTHY arm + the promoted material source):
+        with a healthy R23/R24 binding the gate passes through and
+        ``build_production_bindings`` now assembles REAL bindings end to end —
+        the full Phase-9 catalog runtime resolves from the promoted nine-loader
+        universe and the three-analyzer bridge view builds. (The deep lane
+        remains support-refused at admission time — the permanent-honest
+        grant-gap ruling — but the ASSEMBLY no longer refuses.)"""
+        from guanlan_v2 import orch_store_status as status_mod
+        from guanlan_v2.orchestration.adapters import durable as durable_mod
+        from guanlan_v2.orchestration.adapters.durable import (
+            build_durable_runtime_stores,
+        )
+
+        stores = build_durable_runtime_stores(tmp_path / "orch")
+        monkeypatch.setattr(durable_mod, "process_durable_stores", lambda: stores)
+        monkeypatch.setattr(status_mod, "orchestration_store_bound", lambda: True)
+        bindings = live_decide.build_production_bindings()
+        assert isinstance(bindings, DeepDecideBindings)
+        assert bindings.stores is stores
+        assert bindings.catalog.catalog_digest == chain.PHASE9_CATALOG_DIGEST
+        assert callable(bindings.admission)
+        assert callable(bindings.coordinator)
+        assert callable(bindings.plan_runner)
+        assert callable(bindings.latest_snapshot_fn)
+
+
+# =========================================================================== #
+# 11b. Task 11 — the _ApprovalsBridge binding (untestable until production deps) #
+# =========================================================================== #
+class TestApprovalsBridge:
+    def test_the_bridge_mirrors_every_deposit_into_the_sink(self):
+        mirrored: list = []
+        bridge = live_decide._ApprovalsBridge(mirrored.append)
+        bridge[("r1", "d1")] = "approval-1"
+        assert bridge[("r1", "d1")] == "approval-1"  # dict semantics retained
+        assert mirrored == ["approval-1"]
+        bridge[("r1", "d1")] = "approval-2"  # an overwrite mirrors again
+        assert dict(bridge) == {("r1", "d1"): "approval-2"}
+        assert mirrored == ["approval-1", "approval-2"]
+
+    def test_the_bridge_delivers_the_durable_decision_to_both_stores(
+            self, tmp_path, heavy):
+        """The reviewed Task-8 seam, end to end over a REAL journal: the
+        coordinator's decision path deposits the ONE authoritative
+        ``PlanApproval`` into the bridged approvals store (which the admission
+        service's ``record_approval`` loads) AND mirrors it into the caller's
+        per-run sink — the exact ``build_plan_approval_coordinator`` +
+        ``_ApprovalsBridge`` composition production wiring uses."""
+        from guanlan_v2.orchestration.adapters.api import (
+            build_plan_approval_coordinator,
+        )
+        from guanlan_v2.orchestration.enums import ApprovalDecision
+
+        env = _build_env(tmp_path, heavy, lease=False)
+        decide = make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("300750")),
+            bindings=_bindings(env, heavy,
+                               strat_fn=lambda sid: dict(_OPT_IN_STRAT)))
+        decide(_payload("300750"))  # registers ONE pending card in the journal
+
+        mirrored: list = []
+        bridge = live_decide._ApprovalsBridge(mirrored.append)
+        stub_calls: list = []
+
+        class _AdmissionStub:
+            def record_approval(self, digest, submission, *,
+                                authenticated_actor, idempotency_key):
+                stub_calls.append((digest, submission.decision,
+                                   authenticated_actor))
+                return SimpleNamespace(event_id="ev-t11")
+
+        coordinator = build_plan_approval_coordinator(
+            admission=_AdmissionStub(), clock=env.clock, verifier=_Verifier(),
+            approvals=bridge, journal_path=env.journal,
+            preset_registry=heavy.presets,
+            catalog_digest=heavy.snapshot.catalog_digest,
+            registry_digest=heavy.registry.registry_digest)
+        card = coordinator.list_pending()[0]
+        approval, _event = coordinator.decide(
+            request_id=card.request_id,
+            candidate_plan_digest=card.candidate_plan_digest,
+            decision=ApprovalDecision.APPROVED, actor=GOOD_CRED,
+            reason="t11 bridge binding test", idempotency_key="t11-decide-1")
+        key = (card.request_id, card.candidate_plan_digest)
+        # both halves saw the EXACT authoritative object:
+        assert bridge[key] is approval          # the admission-owned store
+        assert mirrored == [approval]           # the caller's per-run sink
+        # …and record_approval was driven with the same durable decision.
+        assert stub_calls == [(card.candidate_plan_digest,
+                               ApprovalDecision.APPROVED, approval.actor_id)]
+
 
 # =========================================================================== #
 # 10. the pending card + the subject assembler surfaces                         #

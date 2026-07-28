@@ -506,6 +506,14 @@ async def run_plan(
     if not runtime.support_report.supported:
         raise DagRunError("plan is not runtime-supported")
 
+    if ctx.run_id != plan.run_id:
+        # Task 11 (Task-8b review carry-forward): durable state cells, budget
+        # events and run history are keyed by run identity — a cross-run
+        # RunContext would silently file all of them under the wrong run.
+        raise DagRunError(
+            f"RunContext run_id {ctx.run_id!r} does not equal the admitted "
+            f"plan's run_id {plan.run_id!r}"
+        )
     plan_reservation = bundle.reservation
     run_id = plan.run_id
     if plan.draft.context_snapshot_ref is not None:

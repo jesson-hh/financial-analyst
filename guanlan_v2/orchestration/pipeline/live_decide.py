@@ -950,17 +950,19 @@ def _latest_snapshot_production(stores: Any):
 def build_production_bindings() -> DeepDecideBindings:
     """Assemble the production :class:`DeepDecideBindings` (durable stores, sealed chain).
 
-    HONEST STATE (recorded): today this raises before a single deep run can
-    exist. First gate: the process durable-store binding must already be
-    ``bound`` (the R23/R24 startup binding; :class:`ProductionStoresUnbound`
-    otherwise — the deep lane never self-binds, review I-3). Second gate:
-    ``build_production_catalog_runtime(phase9_catalog_snapshot())``
-    refuses because no reviewed material source resolves the full Phase-9
-    catalog (Task 0b concern 2), and even with materials the sealed catalog's
-    data-prefetch grants cannot support ``pv.technical`` / ``text.news`` /
-    ``dec.research_mgr`` (the strict-xfail pin; Task 11 owns the grants and the
-    material-source loader). The server treats any raise here as "stay
-    fast-only" and logs it loudly; nothing is faked.
+    HONEST STATE (Task 11 update): the ONE remaining gate before assembly is
+    the process durable-store binding, which must already be ``bound`` (the
+    R23/R24 startup binding; :class:`ProductionStoresUnbound` otherwise — the
+    deep lane never self-binds, review I-3). The catalog runtime now builds for
+    real (``build_production_catalog_runtime`` over the promoted nine-loader
+    material universe; Task-0b concern 2 closed) with the full three-analyzer
+    bridge view, and ``check_runtime_support`` COMPLETES for the deep preset's
+    workers (the Task-11 rowless-reader discriminations). HONEST RESIDUE: the
+    sealed Phase-3 data-prefetch grants still cover ``dec.pm`` only, so a deep
+    run is SUPPORT-REFUSED at admission (``tool_calls_required_unmet`` naming
+    ``pv.technical`` / ``text.news`` — the permanent-honest grant-gap ruling);
+    the wrapper degrades to the fast chain with an honest ``deep_outcome``.
+    Nothing is faked.
     """
     from guanlan_v2.orchestration.adapters.chain import (
         build_phase9_registry,
@@ -970,7 +972,6 @@ def build_production_bindings() -> DeepDecideBindings:
     from guanlan_v2.orchestration.adapters.durable import process_durable_stores
     from guanlan_v2.orchestration.adapters.api import build_plan_approval_coordinator
     from guanlan_v2.orchestration.admission import PlanAdmissionService
-    from guanlan_v2.orchestration.catalog_runtime import BridgeCatalogView
     from guanlan_v2.orchestration.runtime_clock import SystemClock
     from guanlan_v2.orchestration.runtime_support import STATIC_RUNTIME_PROFILE_V2
     from guanlan_v2.orchestration.adapters import chain as _chain
@@ -979,6 +980,7 @@ def build_production_bindings() -> DeepDecideBindings:
         build_production_catalog_runtime,
         build_production_plan_runner,
         load_phase10_preset_registry,
+        production_bridge_view,
         production_gateway_factory,
     )
     from guanlan_v2.seats import api as _seats_api
@@ -1001,8 +1003,13 @@ def build_production_bindings() -> DeepDecideBindings:
     stores.resolver.register(registry)
     rt_digest = registry.registry_digest
     snapshot = phase9_catalog_snapshot()
-    bundle = build_production_catalog_runtime(snapshot)  # refuses today (see above)
-    view = BridgeCatalogView.build(bundle.runtime, {})
+    bundle = build_production_catalog_runtime(snapshot)
+    # Task 11: the full three-analyzer view (assembly.production_bridge_view).
+    # The sealed catalog carries three bridge descriptors, and BridgeCatalogView
+    # REFUSES a bridge without a reviewed analyzer binding — an empty analyzer
+    # map (the pre-Task-11 placeholder) would crash HERE now that the material
+    # universe resolves, instead of reaching the ruled honest support-refusal.
+    view = production_bridge_view(bundle.runtime)
     presets = load_phase10_preset_registry(PRODUCTION_PRESETS_DIR)
 
     def admission_factory(*, run_id, request, draft, context, approvals, run_budget):
