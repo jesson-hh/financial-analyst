@@ -63,7 +63,7 @@ from typing import TYPE_CHECKING, Any, Callable, ClassVar, Literal
 
 from pydantic import ValidationError, model_validator
 
-from guanlan_v2.orchestration.admission import ApprovalSubmission
+from guanlan_v2.orchestration.admission import AdmissionRejected, ApprovalSubmission
 from guanlan_v2.orchestration.digest import (
     ContractModel,
     DigestHex,
@@ -931,6 +931,20 @@ class PlanApprovalCoordinator:
         live :meth:`register_and_try_lease` retry to complete, which reuses the
         durable consume (no double-consume) — replay itself never writes a journal
         row.
+
+        **A decision row whose candidate this admission does not hold is
+        SKIPPED, never a construction failure** (Task 12 wiring-gap fix, found
+        by the whole-pipeline e2e). The reviewed production shape binds a
+        PER-RUN ``PlanAdmissionService`` (the Task-7 ABI-forced factory ruling)
+        under the ONE durable journal, so from the second run of a process
+        lifetime onward the journal necessarily holds decision rows for
+        candidates the current instance has never reserved — rows that are not
+        crash cuts THIS instance could heal (``record_approval`` requires the
+        reserving instance; healing a foreign row here is structurally
+        impossible, and its owner heals it on its own re-tick). Only the typed
+        ``unknown_candidate`` refusal is skipped — and only during this replay
+        resubmission; every other refusal stays loud, and the live
+        ``record_approval`` path is untouched.
         """
         coord = cls(journal_path, admission=admission, clock=clock,
                     verifier=verifier, console_emit=console_emit,
@@ -942,7 +956,16 @@ class PlanApprovalCoordinator:
             # admission's own approvals store did not survive the restart.
             if coord._approvals_sink is not None:
                 coord._approvals_sink(approval)
-            coord._events[key] = coord._ensure_event(approval)
+            try:
+                coord._events[key] = coord._ensure_event(approval)
+            except AdmissionRejected as exc:
+                if getattr(exc, "code", None) != "unknown_candidate":
+                    raise
+                _LOG.info(
+                    "replay: decision row for candidate %s is not held by this "
+                    "admission instance; skipped (its owner heals it — the "
+                    "durable decision row itself stays authoritative)",
+                    approval.candidate_plan_digest)
         return coord
 
     # ------------------------------------------------------------------ #
