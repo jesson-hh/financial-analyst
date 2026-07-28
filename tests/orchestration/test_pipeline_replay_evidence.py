@@ -1282,17 +1282,23 @@ class TestHonestGaps:
 
         chains_before = dict(coordinator.chains)
         factories_before = dict(coordinator.gateway_factories)
+        llm_before = len(coordinator.llm_invocations)
         try:
             artifact = coordinator.run_point(
                 point, stores=shared, run_id="replay-deep.collision-probe")
             probe_chain = coordinator.chains[point.point_ordinal]
         finally:
-            # the probe must not clobber the module-scoped fixture's chains for
-            # tests that run after this one.
+            # the probe must not clobber the module-scoped fixture's state for
+            # tests that run after this one. ``llm_invocations`` is truncated
+            # IN PLACE (the gateway factories hold a reference to this exact
+            # list), keeping the exact-count assertion in
+            # ``test_every_model_invocation_was_a_scripted_deep_worker``
+            # order-independent.
             coordinator.chains.clear()
             coordinator.chains.update(chains_before)
             coordinator.gateway_factories.clear()
             coordinator.gateway_factories.update(factories_before)
+            del coordinator.llm_invocations[llm_before:]
         assert artifact is not None
 
         # both runs completed on the ONE store: the fixture's own run of this
@@ -1334,14 +1340,18 @@ class TestHonestGaps:
         ``(run, node, attempt)`` against the same store must return the SAME
         record ref through the recovery branch — no second put, no new cell.
 
-        The proof sits at the exact crash-recovery seam
-        (``worker._persist_prompt_record``), not at a whole-plan re-run:
-        ``dag.run_plan`` RESUMES a run_id whose layers are committed instead of
-        re-executing them (launcher.py's multi-point refusal documents exactly
-        that), so a same-``run_id`` re-run of the full chain never re-enters
-        the persist step at all. The cell's contract is the narrower mid-node
-        crash window — prompt record committed, model not yet called — and
-        that window IS this seam.
+        The real same-run re-entry path exists: ``dag.run_plan`` resumes at
+        LAYER granularity (dag.py:558-572) — committed layers replay their
+        durable node records, but every node in the first UNCOMMITTED layer
+        re-executes normally at attempt=1 under ``run_id = plan.run_id``
+        (dag.py:510; both RunContext constructors carry it). A crash between
+        the prompt-record commit and that layer's barrier therefore re-enters
+        ``_persist_prompt_record`` with the same (run, node, attempt), and the
+        cell serves exactly that window. This test probes the seam directly —
+        and hands the function a stores facade that can ONLY recover: without
+        the raiser, the unit-of-work's whole-batch idempotency short-circuit
+        (eventstore.py:802-812) would return the stored batch result and
+        satisfy every assertion below even with the recovery branch deleted.
         """
         coordinator = replay.coordinator
         shared = coordinator.stores_by_point[replay.world.points[0].point_ordinal]
@@ -1359,8 +1369,17 @@ class TestHonestGaps:
 
         payloads_before = len(dict(shared._shared.backend.payloads))
         cells_before = len(dict(shared._shared.backend.cells))
+
+        def _refuse_commit(batch):
+            raise AssertionError(
+                "recovery branch bypassed: _persist_prompt_record attempted a "
+                "second commit for an already-persisted (run, node, attempt)")
+
+        recovery_only = SimpleNamespace(
+            cells=shared.cells,
+            unit_of_work=SimpleNamespace(commit=_refuse_commit))
         recovered = W._persist_prompt_record(
-            stored.model, writer=None, stores=shared,
+            stored.model, writer=None, stores=recovery_only,
             ctx=SimpleNamespace(run_id=rid), plan=None,
             node=SimpleNamespace(id=llm_node),
             runtime=SimpleNamespace(
