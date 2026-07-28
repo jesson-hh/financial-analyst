@@ -193,7 +193,7 @@ def _normalize_features(body: FeatureBuildIn) -> List[str]:
 def _norm_codes(codes: "Optional[List[str]]") -> List[str]:
     """#5 自选股池:把用户输入的代码归一为引擎 qlib 格式(``SH600519`` / ``SZ000858`` / ``BJ8…``)。
     接受 ``600519`` / ``sh600519`` / ``600519.SH`` 等写法;6 位纯数字按交易所加前缀:6→SH、0/3→SZ、
-    4/8→BJ(北交所)。去空白、去重、保序;非 6 位数字的原样保留(交给 loader 诚实失败,不猜)。"""
+    4/8/920→BJ(北交所)。去空白、去重、保序;非 6 位数字的原样保留(交给 loader 诚实失败,不猜)。"""
     out: List[str] = []
     seen: set = set()
     for raw in (codes or []):
@@ -210,7 +210,7 @@ def _norm_codes(codes: "Optional[List[str]]") -> List[str]:
                 code = "SH" + digits
             elif digits[0] in ("0", "3"):
                 code = "SZ" + digits
-            elif digits[0] in ("4", "8"):
+            elif digits[0] in ("4", "8") or digits[:3] == "920":
                 code = "BJ" + digits
             else:
                 code = "SH" + digits

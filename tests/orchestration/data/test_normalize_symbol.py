@@ -40,6 +40,13 @@ def test_bj_board():
     assert s.exchange == "BJ" and s.board == "bj"
 
 
+def test_bj_920_board():
+    # 北交所新号段(920xxx):三种完整写法都必须归一到 BJ/bj,而不是落穿到 SZ/main。
+    for raw in ["920807", "920807.BJ", "BJ920807", "bj920807"]:
+        s = normalize_symbol(raw)
+        assert s.code == "920807" and s.exchange == "BJ" and s.board == "bj"
+
+
 def test_sz_main():
     assert normalize_symbol("000001").exchange == "SZ"
 
@@ -79,6 +86,10 @@ def test_returns_symbol_instance():
         ("430047", "430047", "BJ", "bj"),  # leading 4 → 北交所
         ("830799", "830799", "BJ", "bj"),  # leading 8 → 北交所
         ("870508", "870508", "BJ", "bj"),
+        ("880001", "880001", "BJ", "bj"),  # 88 covered by leading 8
+        ("920807", "920807", "BJ", "bj"),  # 北交所 920 新号段
+        ("921000", "921000", "SZ", "main"),  # only exact 920 maps BJ; 92x stays fall-through
+        ("900001", "900001", "SZ", "main"),  # other leading-9 unchanged (documented fall-through)
     ],
 )
 def test_board_inference_by_prefix(raw, code, exchange, board):
@@ -101,6 +112,14 @@ def test_dotted_and_engine_matching_exchange_accepted():
     assert normalize_symbol("SH688981").board == "star"
     assert normalize_symbol("830799.BJ").exchange == "BJ"
     assert normalize_symbol("BJ430047").exchange == "BJ"
+    assert normalize_symbol("920807.BJ").exchange == "BJ"
+    assert normalize_symbol("BJ920807").exchange == "BJ"
+
+
+@pytest.mark.parametrize("raw", ["920807.SZ", "SZ920807", "920807.SH", "SH920807"])
+def test_bj_920_explicit_exchange_conflict_rejected(raw):
+    with pytest.raises(ValueError, match="exchange"):
+        normalize_symbol(raw)
 
 
 def test_code_is_always_six_digit_cache_key_safe():

@@ -193,3 +193,14 @@ def test_live_default_kuaixun_fn_uses_portal(monkeypatch):
     hit = next((it for it in out["items"] if it["title"] == "门户快讯X"), None)
     assert hit is not None                                # 默认 kfn 解析到门户 → 快讯流入
     assert hit["level"] == "stock" and hit["code"] == "SZ000630"   # codes 命中本票
+
+
+def test_norm_code_bj_segments():
+    """裸六位按号段推断交易所:4/8/920 → BJ(北交所);带前缀原样;6→SH 其余→SZ。"""
+    assert nm._norm_code("920807") == "BJ920807"   # 北交所 920 新号段
+    assert nm._norm_code("830799") == "BJ830799"   # leading 8
+    assert nm._norm_code("430047") == "BJ430047"   # leading 4
+    assert nm._norm_code("BJ920807") == "BJ920807"
+    assert nm._norm_code("600519") == "SH600519"
+    assert nm._norm_code("000630") == "SZ000630"
+    assert nm._norm_code("900001") == "SZ900001"   # 其余 9 开头维持原 fall-through

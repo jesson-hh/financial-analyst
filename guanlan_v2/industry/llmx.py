@@ -70,9 +70,9 @@ def _norm_code(c: str) -> Optional[str]:
         return "SH" + num
     if num.startswith(("0", "3")):
         return "SZ" + num
-    if num.startswith(("4", "8")):
-        return "BJ" + num
-    return None  # 1/2/5/7/9 开头非A股常规板块码,拒绝而非猜测
+    if num.startswith(("4", "8", "920")):
+        return "BJ" + num  # 北交所:4/8 老号段 + 920 新号段
+    return None  # 1/2/5/7 与其余 9 开头非A股常规板块码,拒绝而非猜测
 
 
 def _prompt(doc: dict, text: str, digest: str) -> str:

@@ -119,6 +119,9 @@ def test_helpers():
     assert _board_limit("SH688111", "") == 0.20
     assert _board_limit("SZ300001", "") == 0.20
     assert _board_limit("BJ830001", "") == 0.30
+    assert _board_limit("920807", "") == 0.30      # 北交所 920 新号段(裸六位)
+    assert _board_limit("BJ920807", "") == 0.30
+    assert _board_limit("900001", "") == 0.10      # 其余 9 开头不动
     assert _board_limit("SH600519", "*ST x") == 0.05
     assert _board_limit("SH600519", "") == 0.10
     assert _bar_type(10, 11, 9.8, 10.9, None, None) == "趋势阳"

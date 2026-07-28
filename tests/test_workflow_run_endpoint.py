@@ -41,3 +41,11 @@ def test_run_executor_exception_wrapped(monkeypatch):
     j = _client().post("/workflow/run", json={
         "graph": {"nodes": [{"id": "f", "type": "formula", "params": {}}], "edges": []}}).json()
     assert j["ok"] is False and "RuntimeError" in j["reason"]
+
+
+def test_norm_codes_bj_920_segment():
+    """#5 自选股池归一:北交所 920 新号段裸六位 → BJ 前缀;4/8 照旧;其余不动。"""
+    assert wapi._norm_codes(["920807"]) == ["BJ920807"]
+    assert wapi._norm_codes(["920807.BJ", "bj920807"]) == ["BJ920807"]  # 去重保序
+    assert wapi._norm_codes(["830799", "430047"]) == ["BJ830799", "BJ430047"]
+    assert wapi._norm_codes(["600519", "000630"]) == ["SH600519", "SZ000630"]

@@ -150,3 +150,14 @@ def test_extract_bad_json_honest():
     fw = load_framework()
     r = asyncio.run(extract_one(_doc(), "文", fw, client=_BadClient()))
     assert r["ok"] is False and "JSON" in r["reason"]
+
+
+def test_norm_code_bj_920_segment():
+    """北交所 920 新号段:裸六位/带前后缀都归一到 BJ;其余 9 开头仍拒绝不猜。"""
+    from guanlan_v2.industry.llmx import _norm_code
+    assert _norm_code("920807") == "BJ920807"
+    assert _norm_code("920807.BJ") == "BJ920807"
+    assert _norm_code("BJ920807") == "BJ920807"
+    assert _norm_code("830799") == "BJ830799"
+    assert _norm_code("900001") is None
+    assert _norm_code("921000") is None
