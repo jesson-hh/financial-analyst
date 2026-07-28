@@ -35,6 +35,7 @@ import hashlib
 import importlib
 import inspect
 import json
+import typing
 from pathlib import Path
 
 import pytest
@@ -377,6 +378,11 @@ def test_every_public_member_has_a_closed_schema_version():
         field = model.model_fields.get("schema_version")
         assert field is not None
         assert isinstance(field.default, str) and field.default, model.__name__
+        # FINAL-REVIEW minor 6: closedness must not rest on a non-empty string
+        # DEFAULT alone — the annotation itself must be a ``Literal`` pinning
+        # exactly that version, so a wrong schema_version cannot even construct.
+        assert typing.get_origin(field.annotation) is typing.Literal, model.__name__
+        assert typing.get_args(field.annotation) == (field.default,), model.__name__
     assert PlanPresetRecordV2.model_fields["schema_version"].default == "2"
 
 

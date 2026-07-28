@@ -45,6 +45,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -804,6 +805,43 @@ class TestDegradedHonest:
         for key, value in fast_result.items():
             assert out[key] == value
         assert _decide_rows(env) == [] and env.noted == []
+
+    def test_a_support_refusal_falls_back_refused_not_failed(
+            self, tmp_path, heavy, caplog):
+        """FINAL-REVIEW must-fix (grant-gap ruling B): the admission-time
+        support refusal is the exit EVERY production escalation takes under
+        ``GUANLAN_SEATS_DEEP=1`` once a Lane-0 snapshot exists — it must land
+        on the honest ``refused`` outcome with the run_id carried (like every
+        other post-run_id refusal arm), never fall through the blanket
+        ``failed`` arm with a spurious traceback-carrying WARNING."""
+        env = _build_env(tmp_path, heavy)
+        fast_result = _fast_result("300750")
+
+        def refusing_admission(**kw):
+            def prepare_candidate(draft_id, *, request_id):
+                return SimpleNamespace(support_report=SimpleNamespace(
+                    supported=False,
+                    issues=(SimpleNamespace(code="prefetch_grant_missing"),)))
+            return SimpleNamespace(prepare_candidate=prepare_candidate)
+
+        decide = make_orchestrated_decide(
+            fast_decide=_make_fast(env, fast_result),
+            bindings=_bindings(env, heavy, strat_fn=lambda sid: dict(_OPT_IN_STRAT),
+                               admission=refusing_admission))
+        with caplog.at_level(logging.WARNING, "guanlan.orchestration.live_decide"):
+            out = decide(_payload("300750"))
+        assert out.get("deep_attempted") is True
+        assert out.get("deep_outcome") == "refused"
+        assert out.get("run_id")            # carried, like the other refusal arms
+        for key, value in fast_result.items():
+            assert out[key] == value
+        assert _decide_rows(env) == [] and env.noted == []
+        # honest log: a refusal is not an error — the WARNING names the support
+        # issue and carries NO traceback.
+        mine = [r for r in caplog.records
+                if r.name == "guanlan.orchestration.live_decide"]
+        assert any("prefetch_grant_missing" in r.getMessage() for r in mine)
+        assert all(r.exc_info is None for r in mine)
 
     def test_a_raising_binding_never_raises_into_the_tick(self, tmp_path, heavy):
         env = _build_env(tmp_path, heavy)

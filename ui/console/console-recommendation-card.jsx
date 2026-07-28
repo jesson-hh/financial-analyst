@@ -18,11 +18,13 @@ function WwRecommendationCard() {
 
   const pull = React.useCallback(() => {
     fetch(API + '/orchestration/pipeline/screening/latest')
-      .then(r => r.json().then(d => ({ s: r.status, d })))
-      .then(({ s, d }) => {
-        setLoaded(true); setErr(false);
-        if (s === 503 || (d && d.ok === false)) { setWired(false); setSlate(null); return; }
-        setWired(true); setSlate((d && d.slate) || null);
+      .then(r => r.json().then(d => ({ s: r.status, httpOk: r.ok, d })))
+      .then(({ s, httpOk, d }) => {
+        setLoaded(true);
+        if (s === 503 || (d && d.ok === false)) { setErr(false); setWired(false); setSlate(null); return; }
+        // 非 503 的 HTTP 错误(500/404…)=读取失败,绝不冒充「暂无推荐」(红线同 15cd136)。
+        if (!httpOk) { setErr(true); setSlate(null); return; }
+        setErr(false); setWired(true); setSlate((d && d.slate) || null);
       }).catch(() => { setLoaded(true); setSlate(null); setErr(true); });
   }, [API]);
 
@@ -41,6 +43,7 @@ function WwRecommendationCard() {
 
   const dateOf = (iso) => (iso || '').slice(0, 10);
   const headline = !loaded ? '' :
+    err ? '读取失败' :
     !wired ? '未接线' :
     slate ? (dateOf(slate.as_of) + ' · ' + (slate.entries || []).length + ' 条') : '暂无';
   // 该 entry 的终端降级徽章(服务端徽章逐字判读,绝不重推导)。

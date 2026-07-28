@@ -281,6 +281,18 @@ class RecommendationSlate(DigestModel):
                 f"badges must contain {NO_CROSS_SECTIONAL_SUMMARY_BADGE!r} — a v1 "
                 "slate always declares that the cross-sectional summary is deferred"
             )
+        lanes = [e.lane_index for e in self.entries]
+        if len(set(lanes)) != len(lanes):
+            raise ValueError("entries carry duplicate lane_index values")
+        codes = [e.code for e in self.entries]
+        if len(set(codes)) != len(codes):
+            raise ValueError("entries carry duplicate codes")
+        overlap = set(self.degraded_lanes) & set(lanes)
+        if overlap:
+            raise ValueError(
+                "degraded_lanes must be disjoint from ranked entry lanes; "
+                f"both claim lane(s) {sorted(overlap)}"
+            )
         return self
 
 

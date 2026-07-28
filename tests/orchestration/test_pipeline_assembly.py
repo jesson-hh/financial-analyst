@@ -928,6 +928,22 @@ class TestTask11MaterialUniverse:
                 worker.execution.handler_ref)
             assert factory is registry[worker.execution.handler_ref.id]
 
+    def test_a_shapeless_material_is_refused_loudly_naming_the_type(
+            self, monkeypatch):
+        """FINAL-REVIEW minor 1: the ``_add`` material-shape guard (abd15de) —
+        a reviewed loader yielding a material with neither ``raw_utf8`` nor
+        ``descriptor`` is a loud typed refusal naming the offending type and
+        ref, never a silent drop."""
+        import guanlan_v2.orchestration.lane_catalog as lane_catalog
+        from guanlan_v2.orchestration.pipeline import assembly
+
+        bad = SimpleNamespace(ref=SimpleNamespace(id="bogus.material", version="1"))
+        monkeypatch.setattr(
+            lane_catalog, "load_phase8_lane_materials", lambda: [bad])
+        with pytest.raises(CatalogMaterialError, match="SimpleNamespace") as exc:
+            assembly._reviewed_material_universe()
+        assert "bogus.material@1" in str(exc.value)
+
     def test_production_bridge_view_binds_the_three_real_analyzers(self):
         import guanlan_v2.orchestration.bootstrap as bs
         import guanlan_v2.orchestration.data.catalog as dcat

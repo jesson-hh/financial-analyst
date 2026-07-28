@@ -239,8 +239,7 @@ class PipelineRouterDeps:
     coordinator_factory: Callable[..., Any] | None = None
     #: the goal-mode planner seam ``(*, request, context, context_snapshot_ref,
     #: run_id, draft_id) -> PlannerResult`` (the reviewed ``run_planner`` shape).
-    #: Production is honestly ``None`` until Task 11 lands the catalog-runtime
-    #: materials the planner assembly needs.
+    #: Production binds ``assembly.build_production_planner_runner`` (Task 11).
     planner_runner: Callable[..., Any] | None = None
     #: the durable pipeline request-record store (jsonl under the store root).
     request_store: Any = None
@@ -830,9 +829,13 @@ def _start_goal(d: Any, body: Mapping[str, Any]) -> JSONResponse:
         request_id=request_id, goal=goal, workflow="orchestrate_only",
         fallback_preset_id=None, approval_policy=ApprovalPolicy.REQUIRED)
 
-    result = d.planner_runner(
-        request=request, context=context, context_snapshot_ref=ctx_ref,
-        run_id=run_id, draft_id=f"plan-{run_id}")
+    try:
+        result = d.planner_runner(
+            request=request, context=context, context_snapshot_ref=ctx_ref,
+            run_id=run_id, draft_id=f"plan-{run_id}")
+    except Exception as exc:  # noqa: BLE001 — a crashed planner is a typed
+        # refusal on the wire (the router's idiom), never a raw 500.
+        return _fail("planner_error", 503, detail=str(exc))
     outcome_name = str(getattr(result.record, "terminal_outcome", "unknown"))
     if result.draft is None or outcome_name != "candidate_ready":
         # the planner's honest halt — never a substitute plan minted here.

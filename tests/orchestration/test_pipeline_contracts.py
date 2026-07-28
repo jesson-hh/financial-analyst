@@ -347,6 +347,19 @@ class TestRecommendationSlate:
         with pytest.raises(ValidationError):
             _rec_slate(degraded_lanes=(-1,))
 
+    # -- FINAL-REVIEW minor 7: uniqueness + ranked/degraded disjointness ---- #
+    def test_duplicate_entry_lane_index_refused(self):
+        with pytest.raises(ValidationError, match="duplicate lane_index"):
+            _rec_slate(entries=(_rec_entry("600519", 0), _rec_entry("000001", 0)))
+
+    def test_duplicate_entry_code_refused(self):
+        with pytest.raises(ValidationError, match="duplicate codes"):
+            _rec_slate(entries=(_rec_entry("600519", 0), _rec_entry("600519", 1)))
+
+    def test_degraded_lanes_must_be_disjoint_from_ranked_lanes(self):
+        with pytest.raises(ValidationError, match="disjoint"):
+            _rec_slate(degraded_lanes=(1, 2))  # lane 1 is ranked by default
+
     # -- the v1 None + mandatory-badge invariant ---------------------------- #
     def test_v1_portfolio_decision_ref_must_be_none(self):
         with pytest.raises(ValidationError, match="portfolio_decision_ref"):

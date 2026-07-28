@@ -697,9 +697,15 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
         approvals=approvals, run_budget=run_budget)
     preparation = service.prepare_candidate(draft.id, request_id=request.request_id)
     if not preparation.support_report.supported:
-        raise DeepDecideError(
-            "the deep draft is not runtime-supported: "
-            + "; ".join(i.code for i in preparation.support_report.issues))
+        # grant-gap ruling B: the admission-time support refusal is the deep
+        # lane's most-traveled honest exit — REFUSED with the run_id carried,
+        # like every other post-run_id refusal arm, never the blanket failed
+        # arm with a spurious traceback.
+        _LOG.warning(
+            "deep draft for %s is not runtime-supported: %s (fast result stands)",
+            canonical, "; ".join(i.code for i in preparation.support_report.issues))
+        return {**fast, "deep_attempted": True, "deep_outcome": OUTCOME_REFUSED,
+                "run_id": run_id}
     candidate, reservation = service.persist_and_reserve_candidate(
         preparation, idempotency_key=f"reserve-{run_id}")
     digest = candidate.candidate_plan_digest

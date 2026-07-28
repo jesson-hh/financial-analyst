@@ -255,8 +255,11 @@ _D4_CODE_LIKE_NAMES = (
     "leader_stocks", "stocks", "tickers",
 )
 
-#: every file the Phase 10 plan CREATES (from the plan's file-structure table;
-#: this gate file excluded — it is the one Phase-10 file that exists already).
+#: every file Phase 10 CREATED (the SHIPPED file set — refreshed at final
+#: review from the plan's original table: presets landed under ``presets/v2/``,
+#: ``assembly.py`` + its test were added, and the screening-lane preset shipped
+#: alongside the deep-decide one; this gate file excluded — it is the one
+#: Phase-10 file that existed already).
 PHASE10_PLANNED_CREATE_PATHS = (
     "guanlan_v2/orchestration/pipeline/__init__.py",
     "guanlan_v2/orchestration/pipeline/contracts.py",
@@ -267,8 +270,10 @@ PHASE10_PLANNED_CREATE_PATHS = (
     "guanlan_v2/orchestration/pipeline/live_decide.py",
     "guanlan_v2/orchestration/pipeline/api.py",
     "guanlan_v2/orchestration/pipeline/chain.py",
+    "guanlan_v2/orchestration/pipeline/assembly.py",
     "ui/console/console-recommendation-card.jsx",
-    "config/orchestration/presets/luozi_deep_decide_v1.json",
+    "config/orchestration/presets/v2/luozi_deep_decide_v1.json",
+    "config/orchestration/presets/v2/screening_lane_v1.json",
     "tests/orchestration/golden/phase10_schema_manifest_v1.json",
     "tests/orchestration/golden/phase10_catalog_manifest_v1.json",
     "tests/orchestration/test_pipeline_contracts.py",
@@ -279,6 +284,7 @@ PHASE10_PLANNED_CREATE_PATHS = (
     "tests/orchestration/test_pipeline_live_decide.py",
     "tests/orchestration/test_pipeline_replay_evidence.py",
     "tests/orchestration/test_pipeline_api.py",
+    "tests/orchestration/test_pipeline_assembly.py",
     "tests/orchestration/test_phase10_chain.py",
     "tests/orchestration/test_phase10_e2e.py",
 )
@@ -798,10 +804,11 @@ class TestItem9NoOverwrite:
                 top = planned.split("/")[2]
                 assert top == "pipeline"  # everything lands in the NEW package
                 assert top not in module_names
-        # the one existing preset is never replaced by the Phase 10 preset.
+        # the one existing preset is never replaced by the Phase 10 presets —
+        # they landed in their own ``presets/v2/`` directory.
         assert (_REPO / "config" / "orchestration" / "presets"
                 / "main_research_baseline.json").is_file()
-        assert ("config/orchestration/presets/luozi_deep_decide_v1.json"
+        assert ("config/orchestration/presets/v2/luozi_deep_decide_v1.json"
                 in PHASE10_PLANNED_CREATE_PATHS)
 
 

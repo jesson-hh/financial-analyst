@@ -42,14 +42,10 @@ What is pinned here (the Task-2 brief's matrix):
 * red lines: zero network / zero LLM imports, no write call anywhere in the
   module (the v4 ranking surface is read-only — spec §8 v4 信号不动).
 
-Markers: the single disk-touching test is marked ``realdata`` — the default run
-is hermetic in intent and that test can be deselected with ``-m "not realdata"``
-(its read-only ``(mtime_ns, size)`` assertion can false-RED if the daily producer
-refreshes the parquet mid-test). The marker is NOT registered in an ini file:
-this repo's ``pyproject.toml`` carries no ``[tool.pytest.ini_options]`` section
-and ``tests/conftest.py`` is outside this task's pathspec, so a
-``PytestUnknownMarkWarning`` is expected until a controller-owned change
-registers it (``markers = ["realdata: touches on-disk production artifacts"]``).
+Markers: the single disk-touching test is marked ``realdata`` (registered in
+``tests/conftest.py``) — the default run is hermetic in intent and that test can
+be deselected with ``-m "not realdata"`` (its read-only ``(mtime_ns, size)``
+assertion can false-RED if the daily producer refreshes the parquet mid-test).
 
 Run from repo root:
 ``python -m pytest tests/orchestration/test_pipeline_candidates.py -v``
@@ -772,14 +768,11 @@ def test_the_row_date_and_the_ratified_surface_agreeing_is_the_happy_path(monkey
 
 
 # --- one real-artifact read -------------------------------------------------- #
-# Marked ``realdata``: it is the only test in this module that touches the disk
-# artifact, and its (mtime_ns, size) read-only assertion can false-RED if the
-# daily producer refreshes the parquet mid-test on a production machine. The
-# DEFAULT run stays hermetic in intent — deselect with ``-m "not realdata"``.
-# (The marker is not registered in an ini file: this repo's pyproject.toml has no
-# ``[tool.pytest.ini_options]`` section and conftest.py is outside this task's
-# pathspec, so registration is a controller-owned follow-up. Without
-# ``--strict-markers`` an unregistered marker is inert.)
+# Marked ``realdata`` (registered in tests/conftest.py): it is the only test in
+# this module that touches the disk artifact, and its (mtime_ns, size) read-only
+# assertion can false-RED if the daily producer refreshes the parquet mid-test
+# on a production machine. The DEFAULT run stays hermetic in intent — deselect
+# with ``-m "not realdata"``.
 def _v4_artifact_path():
     from guanlan_v2.strategy.paths import V4_RANKING_PARQUET
     return V4_RANKING_PARQUET

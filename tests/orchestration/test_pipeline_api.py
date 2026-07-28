@@ -683,6 +683,21 @@ class TestStartGoal:
         # ONE pending DYNAMIC card, no decision.
         assert _journal_kinds(e.journal) == ["pending"]
 
+    def test_a_crashing_planner_is_a_typed_503_never_a_raw_500(
+            self, env, trimmed_catalog, tmp_path):
+        """FINAL-REVIEW minor 2: an unexpected planner exception answers the
+        router's typed-error idiom (503 ``planner_error``), never a raw 500."""
+        def exploding_planner(**kw):
+            raise RuntimeError("scripted planner explosion")
+
+        e = _make_env(env, trimmed_catalog, tmp_path, planner=exploding_planner)
+        r = _client(e.deps).post(f"{API}/start", json={"goal": "找找机会"})
+        assert r.status_code == 503
+        body = r.json()
+        assert body["reason"] == "planner_error"
+        assert "scripted planner explosion" in body["detail"]
+        assert _journal_kinds(e.journal) == []
+
     def test_a_halted_planner_is_a_typed_422(self, env, trimmed_catalog, tmp_path):
         e = _make_env(env, trimmed_catalog, tmp_path,
                       planner=_FakePlanner(env, outcome="halted_no_fallback"))
