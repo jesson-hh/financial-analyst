@@ -542,6 +542,23 @@ def create_app():
         print(f"[guanlan_v2] orchestration adapters router skipped "
               f"({type(_e).__name__}: {_e})", file=sys.stderr)
 
+    # ── orchestration pipeline 薄路由(Phase 10 · Task 9)/orchestration/pipeline/* ──
+    # 五端点:start(goal|preset_id|source_kind 三模式,都只开 REQUIRED 人审候选,绝不
+    # 自批/冻结/执行/写单)+ state/runs/screening-latest 三只读投影 + D7 TA 收件箱。
+    # 依赖未绑定 → 各端点诚实 *_unwired 503;生产绑定 GUARDED(store 未 bound / 链装配
+    # 失败只 stderr 记录,路由照常挂)。加法挂载(与上面 build_*_router 同形)。
+    try:
+        from guanlan_v2.orchestration.pipeline.api import (
+            bind_production_pipeline_deps,
+            build_pipeline_router,
+        )
+
+        app.include_router(build_pipeline_router())
+        bind_production_pipeline_deps()   # guarded inside — never raises
+    except Exception as _e:  # noqa: BLE001 — 加法项:失败不阻断启动
+        print(f"[guanlan_v2] orchestration pipeline router skipped "
+              f"({type(_e).__name__}: {_e})", file=sys.stderr)
+
     if not _UI_DIR.is_dir():
         raise RuntimeError(f"guanlan_v2 UI dir missing: {_UI_DIR}")
 
