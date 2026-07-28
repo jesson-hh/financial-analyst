@@ -12,6 +12,7 @@ function WwRecommendationCard() {
   const [slate, setSlate] = React.useState(null);   // null=未拉/读取中或无推荐;{...}=最新推荐盘
   const [loaded, setLoaded] = React.useState(false); // 首拉是否已返回(区分「读取中」与「暂无」)
   const [wired, setWired] = React.useState(true);    // 后端 503 → false(诚实空态)
+  const [err, setErr] = React.useState(false);       // 网络/解析失败 → true(「读取失败」,绝不冒充「暂无推荐」)
 
   const API = (window.WW && window.WW.API) || '';
 
@@ -19,10 +20,10 @@ function WwRecommendationCard() {
     fetch(API + '/orchestration/pipeline/screening/latest')
       .then(r => r.json().then(d => ({ s: r.status, d })))
       .then(({ s, d }) => {
-        setLoaded(true);
+        setLoaded(true); setErr(false);
         if (s === 503 || (d && d.ok === false)) { setWired(false); setSlate(null); return; }
         setWired(true); setSlate((d && d.slate) || null);
-      }).catch(() => { setLoaded(true); setSlate(null); });
+      }).catch(() => { setLoaded(true); setSlate(null); setErr(true); });
   }, [API]);
 
   // 挂载拉一次:折叠头也要能显最新盘日期+条数。
@@ -57,8 +58,9 @@ function WwRecommendationCard() {
 
       {open && <div style={{ maxHeight: 380, overflowY: 'auto', padding: '8px 13px' }}>
         {!loaded && <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>读取中…</div>}
-        {loaded && !wired && <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>recommendation surface not wired — 后端未接线(诚实空态)</div>}
-        {loaded && wired && !slate && <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>暂无编排推荐</div>}
+        {loaded && err && <div className="mono" style={{ fontSize: 10, color: 'var(--zhu)' }}>读取失败——无法连接或解析后端响应(非「暂无推荐」)</div>}
+        {loaded && !err && !wired && <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>recommendation surface not wired — 后端未接线(诚实空态)</div>}
+        {loaded && !err && wired && !slate && <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>暂无编排推荐</div>}
 
         {slate && <div>
           {/* 免责横幅:服务端 advisory_banner 逐字显示,永远在任何内容之前 */}

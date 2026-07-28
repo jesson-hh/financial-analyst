@@ -15,8 +15,11 @@ REQUIRED-approval candidate paths and STOPS at registration:
   build_screening_batch` materializes one sealed lane per code, and
   :func:`~guanlan_v2.orchestration.pipeline.screening.admit_screening_batch`
   validates → reserves → registers the reviewer cards through the injected
-  Phase-7 coordinator. A validation/support refusal is WRITE-FREE (the Task-3
-  pre-flight): typed 422, zero reservations, zero journal rows.
+  Phase-7 coordinator. A validation/support refusal is RESERVATION-FREE (the
+  Task-3 pre-flight): typed 422, zero reservations, zero journal rows — the
+  only writes that survive are the idempotent content-addressed input commits
+  (candidate slate + per-code subjects) and the run-budget binding, both
+  harmless to replay.
 * ``preset_id`` — the Task-6 sealed deep-decide preset is materialized for one
   run-scoped subject (missing subject / context / naive clock → typed 4xx) and
   ONE provenance-true reviewer card is registered (the Task-7 live_decide card
@@ -908,6 +911,8 @@ def _state_impl(d: Any, request_id: str) -> JSONResponse:
 
 
 def _runs_impl(d: Any, limit: int) -> JSONResponse:
+    # NOTE: ``status`` here is the door-time snapshot (e.g. awaiting_approval)
+    # and is never updated afterwards — ``GET /state`` is the live view.
     refused = _unwired(d, "request_store")
     if refused is not None:
         return refused
