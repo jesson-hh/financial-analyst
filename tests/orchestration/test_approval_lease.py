@@ -34,6 +34,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from guanlan_v2.orchestration.admission import AdmissionRejected
 from guanlan_v2.orchestration.enums import ApprovalDecision, ApprovalPolicy, PlanSource
 from guanlan_v2.orchestration.memory.models import AuthenticatedAdminPrincipal
 from guanlan_v2.orchestration.plan_diff import (
@@ -640,6 +641,8 @@ def test_crash_after_both_rows_replay_completes_admission(tmp_path):
     assert dec is not None and dec.actor_id == f"lease:{lease.lease_id}"
     assert len(fresh.calls) == 1
     assert _lease_view(replayed, lease.lease_id, now=NOW).admissions_used == 1
+    # a healed row is not a skipped row: the audit counter stays zero.
+    assert replayed.skipped_replay_rows == 0
 
 
 def test_replay_reconstructs_leases_and_balances_no_double(tmp_path):
@@ -661,6 +664,72 @@ def test_replay_reconstructs_leases_and_balances_no_double(tmp_path):
         assert v.admissions_used == 2 and v.budget_used == 30
     # replayed twice, still exactly two admission effects.
     assert len(admission.calls) == 2
+
+
+# =========================================================================== #
+# replay-skip NARROWNESS (Task 12 wiring fix): only ``unknown_candidate`` is  #
+# skipped, and only during the replay resubmission loop. These two cases make #
+# the guard's narrowness load-bearing — mutating the guard into an            #
+# unconditional swallow reddens the first one.                                #
+# =========================================================================== #
+class _RefusingAdmission(_FakeAdmission):
+    """``record_approval`` always refuses with the given typed code."""
+
+    def __init__(self, *, code: str) -> None:
+        super().__init__()
+        self._code = code
+
+    def record_approval(self, candidate_id, approval_input, *,
+                        authenticated_actor, idempotency_key):
+        raise AdmissionRejected(
+            f"refused for test (code={self._code})", code=self._code)
+
+
+def _decided_journal(tmp_path):
+    """One real leased decision row on the durable journal; returns the lease."""
+    coord = _coord(tmp_path, admission=_FakeAdmission())
+    lease = _issue(coord, max_admissions=5, budget_cap=100)
+    out = _try(coord, _pending(budget_llm=5), idempotency_key="i1")
+    assert out.outcome == "lease_admitted"
+    return lease
+
+
+def _replay_with(tmp_path, admission):
+    return PlanApprovalCoordinator.replay(
+        tmp_path / "plan_approvals.jsonl", admission=admission,
+        clock=_FixedClock(), verifier=_FakeVerifier(),
+        preset_registry=_FakePresetRegistry({PRESET_ID: PRESET_REC_DIG}),
+        catalog_digest=CAT_DIG, registry_digest=REG_DIG)
+
+
+def test_replay_propagates_every_non_unknown_candidate_refusal(tmp_path):
+    """Case A: a NON-``unknown_candidate`` refusal during the replay
+    resubmission MUST raise out of ``replay`` — the skip is not a blanket
+    swallow, and every other typed refusal stays loud."""
+    _decided_journal(tmp_path)
+    refusing = _RefusingAdmission(code="wrong_candidate")
+    with pytest.raises(AdmissionRejected) as exc_info:
+        _replay_with(tmp_path, refusing)
+    assert exc_info.value.code == "wrong_candidate"
+
+
+def test_replay_skips_the_unknown_candidate_row_but_keeps_the_decision(tmp_path):
+    """Case B: the typed ``unknown_candidate`` refusal is skipped AT THE
+    ADMISSION (no admission effect, construction succeeds) while the durable
+    decision row stays folded and readable — and the skip is observable on
+    the audit counter."""
+    lease = _decided_journal(tmp_path)
+    refusing = _RefusingAdmission(code="unknown_candidate")
+    replayed = _replay_with(tmp_path, refusing)
+    # skipped at the admission: the refusing service recorded nothing.
+    assert refusing.calls == []
+    # the durable decision row itself stays authoritative and readable.
+    dec = replayed.load_decision("r-1", CAND_A)
+    assert dec is not None and dec.actor_id == f"lease:{lease.lease_id}"
+    # the lease balances still fold from the journal, untouched by the skip.
+    assert _lease_view(replayed, lease.lease_id, now=NOW).admissions_used == 1
+    # the permanently-orphaned row is observable, not silent.
+    assert replayed.skipped_replay_rows == 1
 
 
 # --------------------------------------------------------------------------- #

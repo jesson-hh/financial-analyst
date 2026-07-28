@@ -21,16 +21,20 @@ shape) → ``build_recommendation_slate`` → banner-first md → archive landin
     service instance, and per-lane budget visibility at execution requires
     ``plan.run_id == admission run_id``); the dispatcher forwards, never decides.
 
-    Degraded-lane honesty comes in BOTH reachable shapes: a lane whose
-    ``text.sentiment`` fails leaves the BLOCK-fed terminal without its required
-    input → no committed plan → ``degraded_lanes`` (and a ``LauncherError``
-    refusal, never a silent artifact). The ``lane_terminal_degraded:<idx>``
-    badge half is exercised against the SAME batch identity through the Task-4
-    reviewed producer-shape history writer, because a DEGRADED terminal is
-    structurally unreachable through the sealed preset execution itself: the
-    terminal's only plan-fed input is the BLOCK-required ``sentiment`` (a BLOCK
-    weakening fails the node instead of degrading it) and the trimmed
-    bridge-free execution catalog carries no degradation-bearing bridge.
+    Degraded-lane honesty comes in ALL its reachable shapes: lane 2's
+    ``text.sentiment`` fails, leaving the BLOCK-fed terminal without its
+    required input → no committed plan → ``degraded_lanes`` (and a
+    ``LauncherError`` refusal, never a silent artifact); lane 0's verdict
+    model returns ``degraded=True`` → the REAL ``run_plan`` commits a real
+    DEGRADED terminal and the product carries its
+    ``lane_terminal_degraded:<idx>`` badge. A DEGRADED terminal is unreachable
+    via dependency policy and bridges alone (the terminal's only plan-fed
+    input is BLOCK-required — a weakening FAILS the node — and the trimmed
+    execution catalog is bridge-free); the model-result degraded channel
+    (worker.py: ``ModelResult.degraded`` ⇒ ``NodeStatus.DEGRADED``) IS the
+    production path, and it is exercised through the real runner below. The
+    Task-4 producer-shape history writer keeps a supplementary badge-shape
+    arm on the same batch identity.
 
 **B-chain (落子买卖点)** — scripted fast decide → direction-flip escalation →
 sealed deep preset → ``register_and_try_lease`` under an active one-admission
@@ -176,7 +180,9 @@ SCREEN_NOW = datetime(2026, 7, 24, 7, 0, tzinfo=UTC)
 #: the three fixture codes, in ranking order.
 CODES = ("600519", "000001", "300750")
 #: per-lane scripted verdicts — lane 0 gets the WORSE grade on purpose so the
-#: recommendation sort has to reorder the slate; lane 2's sentiment fails.
+#: recommendation sort has to reorder the slate, and its verdict model comes
+#: back ``degraded=True`` (the production degraded-terminal channel); lane 2's
+#: sentiment fails.
 LANE_RATINGS = {0: PortfolioRating.HOLD, 1: PortfolioRating.BUY}
 LANE_RATIONALE = {0: "旺季验证前观望。", 1: "订单能见度延伸,产能兑现。"}
 
@@ -262,15 +268,23 @@ def _screen_llm_payload(worker_id: str, *, code: str, rating: PortfolioRating,
     raise AssertionError(f"unexpected LLM worker {worker_id!r}")
 
 
+#: the scripted model-side degradation reason lane 0's verdict carries — the
+#: production degraded channel (worker.py: ``ModelResult.degraded`` →
+#: ``NodeStatus.DEGRADED`` on the committed terminal).
+DEGRADED_VERDICT_REASON = "scripted: 证据面收窄,研判在缺证下成verdict"
+
+
 class _ScreenGateway:
     """Scripted trusted single-shot gateway for the screening lane workers."""
 
-    def __init__(self, payload_reader, *, code, rating, rationale, fail, counter):
+    def __init__(self, payload_reader, *, code, rating, rationale, fail, counter,
+                 degrade=frozenset()):
         self._reader = payload_reader
         self._code = code
         self._rating = rating
         self._rationale = rationale
         self._fail = fail
+        self._degrade = degrade
         self._counter = counter
         self.records: list = []
 
@@ -283,18 +297,22 @@ class _ScreenGateway:
             return W.ModelResult(payload={"schema_version": "1"}, rendered_text="bad",
                                  input_tokens=3, output_tokens=1,
                                  provider="scripted", model="scripted")
+        degraded = record.worker_id in self._degrade
         return W.ModelResult(
             payload=_screen_llm_payload(
                 record.worker_id, code=self._code, rating=self._rating,
                 rationale=self._rationale),
             rendered_text=f"scripted:{record.worker_id}", input_tokens=7,
-            output_tokens=5, provider="scripted", model="scripted")
+            output_tokens=5, provider="scripted", model="scripted",
+            degraded=degraded,
+            degradation_reasons=((DEGRADED_VERDICT_REASON,) if degraded else ()))
 
 
 class _ScreenGatewayFactory:
-    def __init__(self, *, code, rating, rationale, fail, counter):
+    def __init__(self, *, code, rating, rationale, fail, counter,
+                 degrade=frozenset()):
         self._kw = dict(code=code, rating=rating, rationale=rationale, fail=fail,
-                        counter=counter)
+                        counter=counter, degrade=degrade)
         self.gateways: list[_ScreenGateway] = []
 
     def __call__(self, *, payload_reader, catalog_runtime):
@@ -523,6 +541,10 @@ def a_chain(env, trimmed_catalog, tmp_path_factory):
             code=lane.code, rating=LANE_RATINGS.get(i, PortfolioRating.HOLD),
             rationale=LANE_RATIONALE.get(i, "scripted"),
             fail=(frozenset({"text.sentiment"}) if i == 2 else frozenset()),
+            # lane 0: the PRODUCTION degradation channel — the verdict model
+            # returns ``degraded=True`` ⇒ the real run_plan commits a real
+            # DEGRADED terminal (worker.py's model-result degraded channel).
+            degrade=(frozenset({"dec.research_mgr"}) if i == 0 else frozenset()),
             counter=llm_counter)
         gateway_factories[i] = gateway_factory
 
@@ -615,7 +637,7 @@ class TestAChainE2E:
             assert prep.support_report.supported is True
             assert prep.candidate_plan_digest == entry.candidate_plan_digest
 
-    def test_the_two_clean_lanes_ran_to_committed_research_plans(self, a_chain):
+    def test_the_two_verdict_lanes_ran_to_committed_research_plans(self, a_chain):
         for i in (0, 1):
             lane = a_chain.build.lanes[i]
             kinds = [e.event_type
@@ -734,18 +756,48 @@ class TestAChainE2E:
                     assert [e.digest for e in named] == [
                         lane.subject_ref.payload_ref.content_digest]
 
-    def test_the_lane_terminal_degraded_badge_surfaces_on_the_product(
-            self, a_chain, env):
-        """The badge half of degraded-lane honesty, exercised against the SAME
-        batch identity through the Task-4 reviewed producer-shape writer.
+    def test_a_real_degraded_terminal_from_run_plan_badges_the_product(
+            self, a_chain):
+        """The PRODUCTION degraded channel, end to end: lane 0's verdict model
+        returned ``degraded=True`` (worker.py: ``ModelResult.degraded`` ⇒
+        ``NodeStatus.DEGRADED``), the REAL ``dag.run_plan`` committed the
+        DEGRADED terminal, and ``build_recommendation_slate`` carries the
+        ``lane_terminal_degraded:0`` badge onto the product and into the
+        rendered md — banner still first. The badge is DISTINCT from
+        ``degraded_lanes`` (no plan at all): lane 0's verdict is real, present
+        and verbatim, just honestly marked."""
+        # the terminal NodeRun the real run committed is DEGRADED with the
+        # scripted model-side reason (not a history-writer artifact).
+        run_id = a_chain.build.lanes[0].draft.run_id
+        node_run_ref = SchemaRef(name="NodeRun", version="1")
+        terminal_records = [
+            a_chain.stores.payloads.get(e.payload_ref,
+                                        expected_schema_ref=node_run_ref)
+            for e in a_chain.stores.events.journal(run_id, "main")
+            if e.event_type is EventType.NODE_STATE_CHANGED
+            and e.payload_schema_ref == node_run_ref]
+        terminal = [r for r in terminal_records
+                    if r.node_id == SCREENING_LANE_TERMINAL_NODE_ID]
+        assert terminal, "the terminal node left no durable NodeRun"
+        assert terminal[-1].status is NodeStatus.DEGRADED
+        assert DEGRADED_VERDICT_REASON in (terminal[-1].reason or "")
+        # …and the badge flows through the assembler onto the product:
+        badge = f"{LANE_TERMINAL_DEGRADED_BADGE_PREFIX}0"
+        assert badge in a_chain.rec_slate.badges
+        assert a_chain.rec_slate.degraded_lanes == (2,)  # badge ≠ no-plan
+        assert badge in a_chain.md
+        assert a_chain.md.splitlines()[0] == RECOMMENDATION_ADVISORY_BANNER
 
-        A DEGRADED terminal is structurally unreachable through the sealed
-        preset execution itself: the terminal's only plan-fed input is the
-        BLOCK-required ``sentiment`` (a BLOCK weakening FAILS the node — the
-        lane above proves that arm) and the trimmed bridge-free catalog carries
-        no degradation-bearing bridge. When a runtime one day commits a real
-        DEGRADED terminal, the product must badge it — pinned here end to end
-        (slate badge + rendered md), not just at the Task-4 unit level.
+    def test_the_lane_terminal_degraded_badge_shape_via_the_history_writer(
+            self, a_chain, env):
+        """Supplementary SHAPE arm through the Task-4 reviewed producer-shape
+        history writer, kept for the composition the live chain does not
+        produce: ONLY lane 0 committed ⇒ ``entries == [0]`` beside
+        ``degraded_lanes == (1, 2)``. The production channel itself — a real
+        ``run_plan``-committed DEGRADED terminal — is exercised by the test
+        above; a DEGRADED terminal is unreachable via dependency policy and
+        bridges alone, and the model-result degraded channel IS the
+        production path.
         """
         stores_b, writer = _fresh_run_store(env)
         writer.commit_terminal_plan(
@@ -761,7 +813,7 @@ class TestAChainE2E:
             render_recommendation_md(rec, stores=stores_b))
 
     def test_execution_spent_only_scripted_llm_calls(self, a_chain):
-        """6 LLM nodes per clean lane; the failing lane stops at its dead
+        """6 LLM nodes per verdict lane; the failing lane stops at its dead
         sentiment node (news/research-report ran, the debate + judge never
         did). Every invocation is a screening worker."""
         by_lane: dict[str, list[str]] = {}
@@ -1003,8 +1055,13 @@ class TestLateFailureLoudness:
     capability set and ``max_capability_invocations=0`` are the second and
     third closed doors). The failure is execution-time (LATE), LOUD and TYPED:
     a ``CapabilityGatewayError`` with an audited refusal record, zero evidence
-    writes, zero fabricated contribution — the exact shape ``execute_node``
-    records as a failed node, never a silent success.
+    writes, zero fabricated contribution. Inside ``execute_node`` this class
+    is a ``WorkerExecutionError`` subclass (worker.py:229) and the
+    open-execution scope RE-RAISES ``WorkerExecutionError`` (worker.py's
+    ``except WorkerExecutionError: raise``) — it propagates uncaught out of
+    ``execute_node`` and aborts the run: the loudest terminator, never a
+    recorded silent success (and NOT a recorded FAILED node — that branch is
+    for non-worker handler/provider exceptions).
     """
 
     @pytest.fixture(scope="class")

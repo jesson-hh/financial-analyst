@@ -430,6 +430,12 @@ class PlanApprovalCoordinator:
         self._preset_registry = preset_registry
         self._catalog_digest = catalog_digest
         self._registry_digest = registry_digest
+        # audit surface for the replay-skip (Task 12 wiring fix): the number of
+        # durable decision rows this instance's ``replay`` skipped because the
+        # bound admission does not hold their candidate (``unknown_candidate``).
+        # 0 outside replay and on every fully-healed replay; a permanently
+        # orphaned row is observable here instead of silently absorbed.
+        self.skipped_replay_rows: int = 0
         # in-memory fold, rebuilt from the journal on every construction.
         self._seq = 0
         self._pending: dict[tuple[str, str], PendingPlanApproval] = {}
@@ -944,7 +950,9 @@ class PlanApprovalCoordinator:
         impossible, and its owner heals it on its own re-tick). Only the typed
         ``unknown_candidate`` refusal is skipped — and only during this replay
         resubmission; every other refusal stays loud, and the live
-        ``record_approval`` path is untouched.
+        ``record_approval`` path is untouched. Each skip is logged at WARNING
+        and counted on the returned coordinator's ``skipped_replay_rows``, so
+        a permanently orphaned row is observable rather than silent.
         """
         coord = cls(journal_path, admission=admission, clock=clock,
                     verifier=verifier, console_emit=console_emit,
@@ -961,7 +969,8 @@ class PlanApprovalCoordinator:
             except AdmissionRejected as exc:
                 if getattr(exc, "code", None) != "unknown_candidate":
                     raise
-                _LOG.info(
+                coord.skipped_replay_rows += 1
+                _LOG.warning(
                     "replay: decision row for candidate %s is not held by this "
                     "admission instance; skipped (its owner heals it — the "
                     "durable decision row itself stays authoritative)",
