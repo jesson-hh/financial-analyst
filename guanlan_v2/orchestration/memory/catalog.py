@@ -244,9 +244,34 @@ class MemoryBridgeSupportAnalyzer:
 
     Memory retrieval is frozen pre-input evidence, not a CapabilityGateway call:
     it reports ``min_finalized_tool_calls_on_success=0`` and
-    ``max_capability_invocations=0`` and verifies every activated reader has
+    ``max_capability_invocations=0`` and verifies every REVIEWED reader has
     exactly one closed query projection. It cannot access a clock, store,
     filesystem, gateway or provider.
+
+    **Rowless discrimination (Phase 10 · Task 11, controller-ruled).** The bridge
+    activates on the ``memory`` read category alone, and the prefetch binding's
+    row set is pinned AT CATALOG BUILD to equal the Phase-3-derived memory-reader
+    set one-to-one — twice: the surface constructor refuses any row/reader
+    mismatch (``_Phase3MemorySurface.__init__``, the ``row_workers !=
+    base_memory_readers`` guard) and ``build_phase3_full_catalog`` step (8)
+    re-refuses it against the derived base-snapshot reader set; the analyzer's
+    ``config_bytes`` are the facade-pinned digest-verified material, so runtime
+    bytes equal build bytes. Therefore ``rows == 0`` at analyzer time
+    unambiguously means "this worker was NEVER a reviewed Phase-3 memory
+    reader" (a later-phase worker — e.g. Phase-8 ``dec.pm`` — that declares the
+    category without a reviewed query projection); the lost-row shape is
+    structurally excluded. Such a worker now receives the honest
+    ZERO-CONTRIBUTION summary (``min=0``/``max=0``/no refs — the same bounds a
+    reviewed reader gets, absence of a grant, not a degradation) so
+    ``check_runtime_support`` COMPLETES and reports honestly. ``rows > 1`` is
+    genuine ambiguity and keeps the LOUD ``CatalogError``; the activation-drift
+    check stays loud too.
+
+    Material-vs-code drift note (final-review triage): the byte-frozen
+    ``_ANALYZER_BYTES`` handler material still states the pre-Task-11 invariant
+    ("every activated reader needs exactly one closed query projection"). Per
+    the Task 11 controller ruling the sealed material bytes stay BYTE-FROZEN
+    (no catalog digest moves); the code is the ruled behaviour.
     """
 
     def analyze(
@@ -271,11 +296,14 @@ class MemoryBridgeSupportAnalyzer:
                 "'memory' read category (activation drift)"
             )
         rows = tuple(r for r in binding.rows if r.worker_id == worker.id)
-        if len(rows) != 1:
+        if len(rows) > 1:
             raise CatalogError(
                 f"every activated memory reader requires exactly one closed query "
                 f"projection; worker {worker.id!r} has {len(rows)}"
             )
+        # rows == 0 falls through to the SAME zero-bounds summary a reviewed
+        # reader gets: never a reviewed reader ⇒ honest zero contribution (see
+        # the class docstring's ruled discrimination + structural exclusion).
         return BridgeStaticSupportSummary.build(
             candidate_plan_digest=candidate_plan_digest,
             node_id=node.id,

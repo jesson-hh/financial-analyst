@@ -444,6 +444,29 @@ class ExperienceBridgeSupportAnalyzer:
     call (``min=1`` — ``always_invoke`` + ``success_requires_finalized_call``).
     A worker without a reviewed row fails analysis; a row granting a capability
     outside the worker allowlist is an analyzer failure, not authority.
+
+    **Rowless discrimination (Phase 10 · Task 11, controller-ruled).** The bridge
+    activates on the ``experience_cases`` read category as well as on the
+    capability, so a worker that merely *declares* the category without ever
+    having been GRANTED the capability (its allowlist holds no activation
+    capability — the Phase-8 ``dec.research_mgr`` case) reaches this analyzer
+    with no reviewed row. That is not a Lane-0 misconfiguration; it is the
+    honest absence of a grant, and it now yields a ZERO-CONTRIBUTION summary
+    (``min=0`` / ``max=0`` / no capability refs — the same posture the Phase-3
+    data analyzer takes for a rowless worker) so ``check_runtime_support`` can
+    COMPLETE and report honestly instead of crashing. A worker whose allowlist
+    DOES hold the capability but has no row keeps the LOUD ``CatalogError``:
+    that shape means a reviewed grant lost its row, and it must never degrade
+    silently. This is analyzer code, not catalog content — no catalog digest
+    moves.
+
+    Material-vs-code drift note (final-review triage): the byte-frozen
+    ``lane0.experience.analyzer`` handler material
+    (``config/orchestration/materials/lane0/experience_support_analyzer.md``)
+    still states the pre-Task-11 invariant ("a worker without a reviewed row
+    fails analysis"). Per the Task 11 controller ruling the sealed material
+    bytes stay BYTE-FROZEN (no catalog digest moves); the code is the ruled
+    behaviour.
     """
 
     def analyze(
@@ -459,6 +482,34 @@ class ExperienceBridgeSupportAnalyzer:
         rows = parse_experience_prefetch_bindings(config_bytes)
         mine = [r for r in rows if r.worker_id == worker.id]
         if not mine:
+            allow_keys = {
+                (c.id, c.version, c.content_digest)
+                for c in worker.capability_allowlist
+            }
+            granted = any(
+                (c.id, c.version, c.content_digest) in allow_keys
+                for c in descriptor.activation_capability_refs
+            )
+            if not granted:
+                # category-only activation, no reviewed grant: honest zero
+                # contribution (see the class docstring's ruled discrimination).
+                return BridgeStaticSupportSummary.build(
+                    candidate_plan_digest=candidate_plan_digest,
+                    node_id=node.id,
+                    node_params_digest=content_digest(dict(node.params)),
+                    worker_id=worker.id,
+                    worker_digest=worker.semantic_digest(),
+                    bridge_id=descriptor.bridge_id,
+                    descriptor_ref=descriptor_ref,
+                    config_ref=descriptor.config_ref,
+                    provider_ref=descriptor.provider_handler_ref,
+                    analyzer_ref=descriptor.support_analyzer_ref,
+                    allowed_capability_refs=(),
+                    min_finalized_tool_calls_on_success=0,
+                    max_capability_invocations=0,
+                    pre_input_kind=descriptor.pre_input_kind,
+                    lifecycle="static_prefetch_v1",
+                )
             raise CatalogError(
                 f"no reviewed experience prefetch row for worker {worker.id!r}"
             )

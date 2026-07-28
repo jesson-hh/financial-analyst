@@ -892,29 +892,13 @@ class TestPresetLoaderLayering:
 
 
 # =========================================================================== #
-# 10. the Lane-0 experience bridge grant gap (durable, strict-xfail pin)        #
+# 10. the Lane-0 experience bridge over the full Phase-9 runtime (the flip)     #
 # =========================================================================== #
-@pytest.mark.xfail(
-    strict=True,
-    raises=CatalogError,
-    reason="KNOWN GAP: the Lane-0 experience bridge activates on the "
-           "'experience_cases' read category, which the Phase-8 worker "
-           "dec.research_mgr declares, but the reviewed experience prefetch "
-           "binding grants rows to Lane-0 workers only — so the analyzer RAISES "
-           "CatalogError (bootstrap.py:462) instead of emitting a support issue. "
-           "Closing the grant gap makes this XPASS and reddens strictly, which "
-           "re-opens the item consciously.")
-def test_full_phase9_bridge_view_supports_a_plan_containing_research_mgr(
-        env, materialized, phase9_runtime):
-    """The desired end state: `check_runtime_support` over the FULL Phase-9 runtime
-    (all three real bridge analyzers bound) completes for a plan containing
-    ``dec.research_mgr``. Task 7's real runner assembles exactly this bridge view.
-    Today it raises; the `except` branch pins WHICH worker the gap names so the
-    xfail cannot be satisfied by some unrelated failure."""
+def _full_phase9_bridge_view(phase9_runtime):
+    """The full three-analyzer bridge view Task 7's real runner assembles."""
     import guanlan_v2.orchestration.bootstrap as bs
     import guanlan_v2.orchestration.data.catalog as dcat
     import guanlan_v2.orchestration.memory.catalog as mcat
-    from guanlan_v2.orchestration.catalog import CatalogError
 
     data_surface = dcat.phase3_data_surface()
     memory_surface = mcat.phase3_memory_surface()
@@ -923,24 +907,123 @@ def test_full_phase9_bridge_view_supports_a_plan_containing_research_mgr(
     def _key(ref):
         return (ref.id, ref.version, ref.content_digest)
 
-    view = BridgeCatalogView.build(phase9_runtime, {
+    return BridgeCatalogView.build(phase9_runtime, {
         _key(data_surface.analyzer_ref): dcat.DataBridgeSupportAnalyzer(),
         _key(memory_surface.analyzer_ref): mcat.MemoryBridgeSupportAnalyzer(),
         lane0.analyzer_key: bs.ExperienceBridgeSupportAnalyzer(),
     })
-    draft = materialized.draft
-    assert any(n.worker_id == "dec.research_mgr" for n in draft.nodes)
-    phase1 = validate_plan_draft(
-        draft, request=env["request"], context=env["context"],
-        catalog=env["snapshot"], schema_registry=env["registry"])
-    try:
+
+
+class TestFullPhase9BridgeView:
+    """THE CONSCIOUS FLIP (Task 11, controller ruling on the grant-gap plate).
+
+    This class replaces the strict-xfail that pinned the old behaviour: the
+    Lane-0 experience bridge activates on the ``experience_cases`` read category
+    (which ``dec.research_mgr`` declares) and its analyzer used to RAISE
+    ``CatalogError`` for any worker without a reviewed prefetch row — so
+    ``check_runtime_support`` over the full Phase-9 runtime could not even
+    COMPLETE for a plan containing ``dec.research_mgr`` (bootstrap.py:462).
+
+    The ruled discrimination (bootstrap.py, Task 11): a worker whose capability
+    allowlist does NOT hold the experience capability (i.e. no grant was ever
+    reviewed for it — the ``dec.research_mgr`` case) now receives an honest
+    ZERO-CONTRIBUTION summary (``min=0``/``max=0``/no capability refs — exactly
+    the data analyzer's posture for a rowless worker), while a worker whose
+    allowlist DOES hold the capability but has no row keeps the LOUD raise
+    (a Lane-0 misconfiguration must never degrade silently).
+
+    The GRANT GAP ITSELF IS NOT CLOSED and is accepted as permanent-honest for
+    Phase 10 (charter evidence in .superpowers/sdd/task-11-report.md): the
+    support report below completes but is honestly UNSUPPORTED — the REQUIRED
+    tool-call arithmetic of ``pv.technical`` / ``text.news`` stays unmet because
+    the sealed Phase-3 prefetch binding grants a data row to ``dec.pm`` only.
+    """
+
+    @pytest.fixture(scope="class")
+    def support(self, env, materialized, phase9_runtime):
+        view = _full_phase9_bridge_view(phase9_runtime)
+        draft = materialized.draft
+        assert any(n.worker_id == "dec.research_mgr" for n in draft.nodes)
+        phase1 = validate_plan_draft(
+            draft, request=env["request"], context=env["context"],
+            catalog=env["snapshot"], schema_registry=env["registry"])
         report = check_runtime_support(
             draft, phase1_report=phase1, context=env["context"],
             context_requirements=None, catalog=phase9_runtime, bridge_view=view,
             schema_registry=env["registry"], profile=STATIC_RUNTIME_PROFILE_V2)
-    except CatalogError as exc:
-        # pin the exact gap; then let the xfail record it.
-        assert "dec.research_mgr" in str(exc)
-        assert "experience prefetch row" in str(exc)
-        raise
-    assert report is not None
+        return draft, report
+
+    def test_the_full_view_now_completes_for_a_research_mgr_plan(self, support):
+        _draft, report = support
+        assert report is not None  # no CatalogError escaped — the flip's core
+
+    def test_the_report_is_honestly_unsupported_naming_the_data_grant_gap(
+            self, support):
+        """The remaining gap surfaces as ISSUES, never a crash and never a fake
+        green: exactly the two REQUIRED-tool-call workers without a reviewed
+        data prefetch row (`pv.technical` / `text.news`)."""
+        draft, report = support
+        assert report.supported is False
+        by_code: dict = {}
+        for issue in report.issues:
+            by_code.setdefault(issue.code, set()).add(issue.node_id)
+        node_worker = {n.id: n.worker_id for n in draft.nodes}
+        unmet = by_code.pop("tool_calls_required_unmet")
+        assert {node_worker[nid] for nid in unmet} == {
+            "pv.technical", "text.news"}
+        assert not by_code, (
+            "unexpected extra support issues beyond the accepted data grant "
+            f"gap: {sorted(by_code)}")
+
+    def test_research_mgr_gets_a_zero_contribution_experience_summary(
+            self, support):
+        """The bridge ACTIVATED and answered honestly (not skipped): the report
+        carries an experience.bridge summary for the research node with zero
+        bounds and no capability refs."""
+        draft, report = support
+        research_nodes = {
+            n.id for n in draft.nodes if n.worker_id == "dec.research_mgr"}
+        mine = [s for s in report.bridge_support_summaries
+                if s.bridge_id == "experience.bridge"
+                and s.node_id in research_nodes]
+        assert len(mine) == len(research_nodes) == 1
+        summary = mine[0]
+        assert summary.allowed_capability_refs == ()
+        assert summary.min_finalized_tool_calls_on_success == 0
+        assert summary.max_capability_invocations == 0
+
+    def test_an_allowlisted_worker_without_a_row_still_raises_loudly(
+            self, env, phase9_runtime):
+        """The DISCRIMINATION tripwire: the loud half is kept. A worker whose
+        allowlist HOLDS the experience capability but has no reviewed row is a
+        Lane-0 misconfiguration — the analyzer must still raise. Reverting the
+        bootstrap.py discrimination cannot pass this class both ways."""
+        import guanlan_v2.orchestration.bootstrap as bs
+
+        cap_ref, _mat = bs.experience_retrieve_capability()
+        workers = {w.id: w for w in env["snapshot"].workers}
+        rm = workers["dec.research_mgr"]
+        allowlisted = rm.model_copy(update={
+            "capability_allowlist": (cap_ref,),
+            # FORBIDDEN ⇔ empty allowlist is a WorkerSpec invariant; the probe
+            # worker flips to OPTIONAL so the allowlist can hold the capability.
+            "evidence_policy": rm.evidence_policy.model_copy(
+                update={"tool_calls": ToolCallRequirement.OPTIONAL}),
+        })
+        # the sealed descriptor + config bytes, resolved from the REAL view —
+        # the exact objects check_runtime_support hands the analyzer.
+        view = _full_phase9_bridge_view(phase9_runtime)
+        resolved = view.resolve("experience.bridge")
+        descriptor = resolved.descriptor
+        config_bytes = resolved.config_bytes
+        descriptor_ref = resolved.descriptor_ref
+        node = type("_N", (), {"id": "n-probe", "params": {}})()
+        with pytest.raises(CatalogError, match="no reviewed experience prefetch row"):
+            bs.ExperienceBridgeSupportAnalyzer().analyze(
+                candidate_plan_digest="0" * 64,
+                node=node,
+                worker=allowlisted,
+                descriptor=descriptor,
+                descriptor_ref=descriptor_ref,
+                config_bytes=config_bytes,
+            )

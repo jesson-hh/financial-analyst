@@ -258,15 +258,28 @@ def test_analyzer_reports_exact_zero_zero_bounds(surface, data_snapshot):
     assert summary.dynamic_or_model_selected_calls is False
 
 
-def test_analyzer_requires_exactly_one_projection_per_activated_reader(surface, data_snapshot):
+def test_analyzer_still_raises_on_ambiguous_multiple_projections(
+        surface, data_snapshot, monkeypatch):
+    """Phase 10 · Task 11 controller ruling (rowless discrimination): a reader
+    with ZERO rows now gets the honest zero-contribution summary (never a
+    reviewed reader — pinned in tests/orchestration/memory/
+    test_rowless_discrimination.py), so this test pins the KEPT loud half:
+    more than one projection is genuine ambiguity and must still raise.
+    ``MemoryBridgePrefetchBinding`` itself refuses duplicate worker rows
+    (sorted-unique invariant), so the ambiguous shape can only be probed past
+    the parse seam — this is the analyzer's own defense-in-depth raise."""
     worker = _memory_reader_worker(data_snapshot)
     node = SimpleNamespace(id="n1", params={})
-    empty = MC.serialize_memory_prefetch_binding(surface.prefetch_binding)
+    row = SimpleNamespace(worker_id=worker.id)
+    monkeypatch.setattr(
+        MC, "parse_memory_prefetch_binding",
+        lambda _b: SimpleNamespace(bridge_id=surface.bridge_descriptor.bridge_id,
+                                   rows=(row, row)))
     with pytest.raises(CatalogError, match="exactly one"):
         MC.MemoryBridgeSupportAnalyzer().analyze(
             candidate_plan_digest="c" * 64, node=node, worker=worker,
             descriptor=surface.bridge_descriptor, descriptor_ref=surface.descriptor_ref,
-            config_bytes=empty)
+            config_bytes=b"ignored-by-the-stubbed-parse")
 
 
 def test_analyzer_rejects_a_non_activated_worker(surface, data_snapshot):

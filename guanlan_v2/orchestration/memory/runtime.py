@@ -156,15 +156,51 @@ class MemoryRuntimeBridgeProvider:
             raise MemoryContractError(f"typed ref does not resolve {schema}@1")
         return self._stores.payloads.get(ref.payload_ref, expected_schema_ref=ref.schema_ref)
 
+    # -- the ruled rowless discrimination (Phase 10 · Task 11) ----------------- #
+    def _rows_for(self, worker_id: str) -> tuple:
+        """The reviewed rows for one worker, with the ruled discrimination.
+
+        The catalog build pins the binding's row set == the Phase-3-derived
+        memory-reader set one-to-one (``_Phase3MemorySurface.__init__`` row/
+        reader guard + ``build_phase3_full_catalog`` step (8)), and the
+        provider's ``config_bytes`` are that digest-verified material —
+        so ``rows == 0`` unambiguously means "never a reviewed reader" (a
+        later-phase worker declaring the ``memory`` category without a reviewed
+        projection). That worker honestly runs MEMORY-LESS: an empty prefetch,
+        no memory refs, no rendered memory block — the absence of a grant is
+        least-privilege enforcement, not a degradation. It mirrors the support
+        analyzer's zero-contribution summary (memory/catalog.py), which would
+        otherwise read "memory fine" (memory bounds are always 0/0 — absence is
+        inexpressible in bounds) while this provider crashed. ``rows > 1`` is
+        genuine ambiguity and stays a LOUD refusal.
+        """
+        rows = tuple(r for r in self._binding.rows if r.worker_id == worker_id)
+        if len(rows) > 1:
+            raise MemoryContractError(
+                f"worker {worker_id!r} requires exactly one reviewed memory query "
+                f"projection; found {len(rows)}"
+            )
+        return rows
+
     # -- stage 1: pre-input ---------------------------------------------------- #
     def prepare_input(self, request: BridgePrepareRequest) -> BridgeStageOutcome:
         node, worker = request.node, request.worker
-        rows = tuple(r for r in self._binding.rows if r.worker_id == worker.id)
-        if len(rows) != 1:
-            raise MemoryContractError(
-                f"worker {worker.id!r} requires exactly one reviewed memory query "
-                f"projection; found {len(rows)}"
+        rows = self._rows_for(worker.id)
+        if not rows:
+            # rowless (unreviewed) reader: the honest EMPTY prefetch — the same
+            # return ABI as a reviewed read, with an all-empty contribution (a
+            # reviewed reader whose query matches nothing already yields
+            # memory_refs=(); the rowless shape additionally has no
+            # query/selection evidence because no reviewed projection exists to
+            # persist). See ``_rows_for``.
+            handle = PreparedBridgeHandle(
+                bridge_id=self._bridge.bridge_id,
+                bridge_priority=self._bridge.priority,
+                summary_digest=self._summary.summary_digest,
+                token=request.token,
+                input_contribution=BridgeInputContribution(),
             )
+            return BridgeStageOutcome(status="prepared", prepared_handle=handle)
         row = rows[0]
         pointer = row.query_text_param_pointer.lstrip("/")
         params = dict(node.params)
@@ -230,6 +266,17 @@ class MemoryRuntimeBridgeProvider:
         re-resolved through the read-only store — no live query rewrite.
         """
         handle = request.handle
+        if not self._rows_for(request.worker.id):
+            # rowless (unreviewed) reader — the prepared handle must be the
+            # exact empty-prefetch shape stage 1 froze; anything else is drift.
+            if (handle.input_contribution.memory_refs
+                    or handle.input_contribution.memory_evidence_refs):
+                raise MemoryContractError(
+                    f"worker {request.worker.id!r} has no reviewed memory query "
+                    "projection but its prepared handle carries memory "
+                    "refs/evidence (prepared-handle drift)"
+                )
+            return _MemoryBridgeSession(provider=self, request=request, prepared=None)
         ev = handle.input_contribution.memory_evidence_refs
         if len(ev) != 2:
             raise MemoryContractError(
@@ -266,7 +313,8 @@ class MemoryRuntimeBridgeProvider:
 
 class _MemoryBridgeSession:
     def __init__(self, *, provider: MemoryRuntimeBridgeProvider,
-                 request: BridgeOpenRequest, prepared: _PreparedMemoryRead) -> None:
+                 request: BridgeOpenRequest,
+                 prepared: _PreparedMemoryRead | None) -> None:
         self._provider = provider
         self._request = request
         self._prepared = prepared
@@ -274,6 +322,18 @@ class _MemoryBridgeSession:
     def freeze_for_execution(self, *, kind: Any) -> BridgeStageOutcome:
         req = self._request
         prepared = self._prepared
+        if prepared is None:
+            # rowless (unreviewed) reader: the honest all-empty contribution —
+            # no memory refs, no query/selection evidence, no rendered memory
+            # block for ANY execution kind (see the provider's ``_rows_for``).
+            return BridgeStageOutcome(
+                status="completed",
+                frozen_contribution=BridgeContribution(
+                    bridge_id=req.bridge.bridge_id,
+                    bridge_priority=req.bridge.priority,
+                    summary_digest=req.summary.summary_digest,
+                ),
+            )
         # the frozen InputSnapshot must carry EVERY prepared memory ref (the
         # resolver additionally re-verifies the whole expected tuple).
         frozen = {(r.record_id, r.revision_id, r.content_digest)

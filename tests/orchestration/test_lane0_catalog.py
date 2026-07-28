@@ -370,13 +370,22 @@ def test_analyzer_bounds_are_max_one_min_one(cat, runtime, view):
     assert [c.id for c in summary.allowed_capability_refs] == ["experience.retrieve"]
     assert summary.pre_input_kind == "none"
     assert summary.bridge_id == EXPERIENCE_BRIDGE_ID
-    # a worker with no reviewed config row is an analyzer failure, not authority.
+    # Phase 10 · Task 11 controller ruling (rowless discrimination): a rowless
+    # worker whose allowlist does NOT hold the experience capability is the
+    # honest ABSENCE of a grant — a zero-contribution summary, never a raise.
+    # The kept LOUD half (allowlisted-but-rowless = a reviewed grant lost its
+    # row) is pinned by tests/orchestration/test_pipeline_deep_preset.py::
+    # TestFullPhase9BridgeView::test_an_allowlisted_worker_without_a_row_still_raises_loudly.
     factor_node = PlanNode(id="factor", worker_id="market.factor", writes_slot="slot-f")
-    with pytest.raises(CatalogError):
-        rb.analyzer.analyze(
-            candidate_plan_digest=DA, node=factor_node,
-            worker=runtime.worker("market.factor"), descriptor=rb.descriptor,
-            descriptor_ref=rb.descriptor_ref, config_bytes=rb.config_bytes)
+    factor = runtime.worker("market.factor")
+    assert not any(c.id == "experience.retrieve" for c in factor.capability_allowlist)
+    zero = rb.analyzer.analyze(
+        candidate_plan_digest=DA, node=factor_node,
+        worker=factor, descriptor=rb.descriptor,
+        descriptor_ref=rb.descriptor_ref, config_bytes=rb.config_bytes)
+    assert zero.max_capability_invocations == 0
+    assert zero.min_finalized_tool_calls_on_success == 0
+    assert zero.allowed_capability_refs == ()
 
 
 def test_config_covers_exactly_the_two_llm_workers(cat):
