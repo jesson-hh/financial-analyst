@@ -933,7 +933,7 @@ class TestFullPhase9BridgeView:
     (a Lane-0 misconfiguration must never degrade silently).
 
     The GRANT GAP ITSELF IS NOT CLOSED and is accepted as permanent-honest for
-    Phase 10 (charter evidence in .superpowers/sdd/task-11-report.md): the
+    Phase 10 (charter evidence in .superpowers/sdd/task-11-p10-report.md): the
     support report below completes but is honestly UNSUPPORTED — the REQUIRED
     tool-call arithmetic of ``pv.technical`` / ``text.news`` stays unmet because
     the sealed Phase-3 prefetch binding grants a data row to ``dec.pm`` only.

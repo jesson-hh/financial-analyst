@@ -386,6 +386,9 @@ def test_default_registry_does_not_register_any_phase10_public_model():
     registered = {e.schema_ref.name for e in default_registry().manifest()}
     for model in ch.PHASE10_PUBLIC_MODELS:
         assert model.__name__ not in registered, model.__name__
+    # the sixth model registers under the REVIEWED identity "PlanPresetRecord",
+    # not its class name — that is the name that could actually collide.
+    assert PLAN_PRESET_RECORD_V2_SCHEMA_REF.name not in registered
 
 
 # =========================================================================== #

@@ -284,6 +284,15 @@ def _reviewed_material_universe():
                 text.setdefault(key, material)
             elif hasattr(material, "descriptor"):
                 caps.setdefault(key, material)
+            else:
+                # never drop silently: an unrecognized material shape would
+                # otherwise resurface later as a misattributed "no reviewed
+                # physical source resolves material(s) ..." error.
+                raise CatalogMaterialError(
+                    f"reviewed loader yielded a material of unexpected shape "
+                    f"{type(material).__name__!r} for {key[0]}@{key[1]}: "
+                    "neither raw_utf8 (text) nor descriptor (capability)"
+                )
 
     # (1) the P8 lane materials (text/pv/quant/xcut/dec + tier map + reducer)
     _add(_lc.load_phase8_lane_materials())

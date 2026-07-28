@@ -235,6 +235,13 @@ def _registered_plan_preset_record_v2() -> "type[PlanPresetRecordV2]":
     keep seeing exactly the reviewed ``assembly.PlanPresetRecordV2``. Its JSON
     Schema is deterministic across constructions (same fields, same title), so
     the golden digest is stable.
+
+    CONSUMER WARNING: ``registry.resolve(PLAN_PRESET_RECORD_V2_SCHEMA_REF)``
+    returns THIS registration subclass, not ``assembly.PlanPresetRecordV2`` —
+    ``isinstance`` checks pass (it is a subclass) but ``is`` / ``type(...) is``
+    identity checks against ``PlanPresetRecordV2`` FAIL. Any phase that binds
+    this registry in production must compare by ``isinstance`` or schema ref,
+    never by class identity.
     """
     return type(
         "PlanPresetRecord",
