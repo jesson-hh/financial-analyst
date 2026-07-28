@@ -2267,10 +2267,22 @@ def _persist_prompt_record(
     """Persist the single prompt record exactly once (payload + recovery cell).
 
     A post-commit / pre-model crash is recoverable: the recovery cell holds the exact
-    prompt typed ref keyed by (node, runtime.prompt), so a retry recovers it without a
-    second prompt put.
+    prompt typed ref keyed by (run, node, attempt, runtime.prompt), so a retry of the
+    SAME run recovers it without a second prompt put.
     """
-    cell_key = content_digest({"node_id": node.id, "attempt": prompt_token.attempt, "kind": "runtime.prompt"})
+    # Phase 10 · Task 8b: the key is RUN-SCOPED. Cells are process-global per
+    # store backend, and a sealed preset pins its node ids — without the run's
+    # identity in the key, the SECOND run of the same plan against one shared
+    # store recovered the FIRST run's prompt record and every LLM node failed
+    # the verify_model_request_binding equality check. Within one run the key
+    # stays stable across re-execution of the same (run, node, attempt), which
+    # is the cell's crash-recovery purpose. Cells written under the pre-fix
+    # key shape become unreachable — deliberately NOT migrated: this is a
+    # recovery cache, and a fresh persist on the next run is the correct
+    # outcome.
+    cell_key = content_digest(
+        {"run_id": ctx.run_id, "node_id": node.id, "attempt": prompt_token.attempt,
+         "kind": "runtime.prompt"})
     existing = stores.cells.load(PROMPT_CELL_NAMESPACE, cell_key)
     if existing is not None:
         return existing

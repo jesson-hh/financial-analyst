@@ -107,7 +107,6 @@ from guanlan_v2.orchestration.adapters.contracts import (
 )
 from guanlan_v2.orchestration.adapters.launcher import (
     LaneExecutionBinding,
-    LaunchRefused,
     MultiPointPlanExecutionRefused,
     build_admitted_plan_runner,
 )
@@ -560,8 +559,9 @@ class _DeepPresetReplayCoordinator:
         self._router = router
         self._record_digest = record_digest
         self._contexts: dict[int, tuple] = {}
-        #: ONE ``RuntimeStores`` PER POINT — forced, see
-        #: ``TestHonestGaps::test_two_deep_runs_on_one_store_both_complete``.
+        #: the store each point ran against. The fixture hands every point the
+        #: SAME shared instance — Task 8b run-scoped the prompt recovery cell
+        #: key and de-forced the per-point split this dict used to carry.
         self.stores_by_point: dict[int, object] = {}
         self.chains: dict[int, _PointChain] = {}
         #: every scripted LLM invocation, in order (worker ids) — the zero-LLM
@@ -626,9 +626,9 @@ class _DeepPresetReplayCoordinator:
     def run_point(self, point, *, stores, run_id: str):
         """The WHOLE deep chain for one decision point, against ``stores``.
 
-        ``stores`` and ``run_id`` are explicit so the collision probe in
-        ``TestHonestGaps`` can re-run a point against ANOTHER point's store and
-        show exactly what a shared durable store does to the second deep run.
+        ``stores`` and ``run_id`` are explicit so ``TestHonestGaps`` can re-run
+        a point against the SAME shared store under a fresh run id and prove
+        the run-scoped prompt recovery cells keep consecutive deep runs apart.
         """
         heavy = self._heavy
         ordinal = point.point_ordinal
@@ -766,21 +766,23 @@ def replay(heavy, tmp_path_factory):
 
     clock = _FixedClock(world.points[0].decision_as_of)
 
-    def _stores_for(point) -> RuntimeStores:
-        """ONE ``RuntimeStores`` per decision point — FORCED, not preferred.
+    # ── ONE ``RuntimeStores`` shared by EVERY decision point — the natural
+    # shape, de-forced by Task 8b. The prompt recovery cell key is now
+    # run-scoped (``worker._persist_prompt_record`` folds ``ctx.run_id`` into
+    # the digest), so consecutive deep runs of the SAME sealed preset against
+    # one shared store no longer recover each other's prompt records. The whole
+    # suite passing on this shared store is the end-to-end proof; the flipped
+    # pin is ``TestHonestGaps::test_two_deep_runs_on_one_store_both_complete``.
+    shared_resolver = SchemaRegistryResolver()
+    shared_resolver.register(heavy.registry)
+    shared_stores = RuntimeStores(
+        resolver=shared_resolver, clock=clock,
+        allowed_cell_namespaces=(W.PROMPT_CELL_NAMESPACE,))
 
-        See ``TestHonestGaps::test_two_deep_runs_on_one_store_both_complete``: the
-        runtime prompt recovery cell is keyed ``(node_id, attempt)`` with no run
-        identity (worker.py:2273), so a second deep run of the SAME sealed preset
-        against the SAME store recovers the first run's prompt record and every LLM
-        node fails. Production shares one durable store, so this is a real gap —
-        recorded, pinned, and not papered over.
-        """
-        resolver = SchemaRegistryResolver()
-        resolver.register(heavy.registry)
-        return RuntimeStores(
-            resolver=resolver, clock=_FixedClock(point.decision_as_of),
-            allowed_cell_namespaces=(W.PROMPT_CELL_NAMESPACE,))
+    def _stores_for(point) -> RuntimeStores:
+        """Every point binds THE one shared store. Its event stamps carry the
+        interval's first instant — audit-only; nothing in this suite reads them."""
+        return shared_stores
 
     # ── the STANDING replay lease: evidence-gathering, explicitly scoped ───── #
     issuing = PlanApprovalCoordinator(
@@ -1247,60 +1249,126 @@ class TestLeaseEvidenceConvention:
 
 
 # =========================================================================== #
-# 6. what this evidence does NOT yet prove (recorded, never dressed up)         #
+# 6. honest gaps (recorded, never dressed up) + the flipped Task 8 pin          #
 # =========================================================================== #
 class TestHonestGaps:
-    @pytest.mark.xfail(
-        strict=True,
-        raises=LaunchRefused,
-        reason="worker._persist_prompt_record's recovery cell key is "
-               "content_digest({node_id, attempt, kind}) — no run identity "
-               "(worker.py:2273); a second run of the same sealed preset against "
-               "the same store recovers the FIRST run's prompt record")
     def test_two_deep_runs_on_one_store_both_complete(self, replay):
-        """RECORDED DEFECT — asserts the DESIRED end state, so a fix reddens this.
+        """FIXED DEFECT — the conscious flip of Task 8's strict-xfail pin.
 
-        The runtime prompt recovery cell is namespace+key scoped and the key is
-        ``content_digest({"node_id": ..., "attempt": ..., "kind": "runtime.prompt"})``
-        (worker.py:2273); ``RuntimeStateCellStore.load`` looks it up in the ONE
-        process-wide backend map (eventstore.py:737-740). The sealed deep preset
-        pins its node ids, so **run 2 of the same preset against the same store
-        loads run 1's prompt ref**, ``verify_model_request_binding`` then refuses
-        (``persisted prompt record does not equal the request's bound record``,
-        worker.py:1151) and EVERY LLM node fails ⇒ ``terminal_status='failed'``.
+        Task 8 pinned: the prompt recovery cell key was
+        ``content_digest({"node_id", "attempt", "kind"})`` with NO run identity,
+        cells are process-global per store backend (eventstore.py:737-740), and
+        the sealed deep preset pins its node ids — so run 2 of the same preset
+        against the same store recovered run 1's prompt record,
+        ``verify_model_request_binding`` refused (``persisted prompt record does
+        not equal the request's bound record``, worker.py:1151) and EVERY LLM
+        node failed. Task 8b run-scoped the key
+        (``worker._persist_prompt_record`` folds ``ctx.run_id`` into the
+        digest), and the fixture now runs every decision point on ONE shared
+        ``RuntimeStores`` — the de-forced natural shape production's shared
+        durable store (``process_durable_stores``) always had.
 
-        This is not a replay-only artifact. Production shares ONE durable store
-        per process (``process_durable_stores``), so the SECOND deep run of the
-        day — Task 7's live wrapper on a second stock, or a second escalation —
-        hits exactly this. That is why this suite gives each decision point its
-        own ``RuntimeStores``: not a preference, a forced workaround.
-
-        WHY ``raises=LaunchRefused`` IS LOAD-BEARING. A bare
-        ``xfail(strict=True)`` accepts ANY exception as the expected failure —
-        including an ``AssertionError`` raised by the cause-check below, which
-        would let a DIFFERENT failure mode masquerade as this one and would make
-        the cause-check itself unfalsifiable. Pinning ``raises`` narrows the
-        expected failure to the launcher's refusal; the ``except`` branch then
-        pins WHICH refusal, and any other exception type is a hard FAIL.
+        This test is the end-to-end proof: a FOURTH deep run of the same sealed
+        preset against that same store completes, and its prompt records are
+        per-run distinct from the fixture run that executed the same node ids.
+        The run-scoped key shape is recomputed here on purpose — it is the pin;
+        change the shape in worker.py and this test reddens consciously.
         """
         point = replay.world.points[1]
-        shared = replay.coordinator.stores_by_point[
-            replay.world.points[0].point_ordinal]
+        coordinator = replay.coordinator
+        shared = coordinator.stores_by_point[replay.world.points[0].point_ordinal]
+        # the fixture itself already ran all three points on this ONE store.
+        assert all(s is shared for s in coordinator.stores_by_point.values())
+
+        chains_before = dict(coordinator.chains)
+        factories_before = dict(coordinator.gateway_factories)
         try:
-            artifact = replay.coordinator.run_point(
+            artifact = coordinator.run_point(
                 point, stores=shared, run_id="replay-deep.collision-probe")
-        except LaunchRefused as exc:
-            assert "terminated 'failed'" in str(exc)
-            reasons = {
-                r.model.reason for r in
-                dict(shared._shared.backend.payloads).values()
-                if r.schema_key == "NodeRun@1"
-                and r.model.run_id == "replay-deep.collision-probe"
-                and r.model.status == "failed"}
-            assert reasons == {
-                "persisted prompt record does not equal the request's bound record"}
-            raise
+            probe_chain = coordinator.chains[point.point_ordinal]
+        finally:
+            # the probe must not clobber the module-scoped fixture's chains for
+            # tests that run after this one.
+            coordinator.chains.clear()
+            coordinator.chains.update(chains_before)
+            coordinator.gateway_factories.clear()
+            coordinator.gateway_factories.update(factories_before)
         assert artifact is not None
+
+        # both runs completed on the ONE store: the fixture's own run of this
+        # very point (the collision victim of the pinned defect) and the probe.
+        victim_chain = chains_before[point.point_ordinal]
+        for rid in (victim_chain.run_id, "replay-deep.collision-probe"):
+            kinds = [e.event_type for e in shared.events.journal(rid, "main")]
+            assert EventType.RUN_COMPLETED in kinds, rid
+        failed = [
+            r.model for r in dict(shared._shared.backend.payloads).values()
+            if r.schema_key == "NodeRun@1"
+            and r.model.run_id == "replay-deep.collision-probe"
+            and r.model.status == "failed"]
+        assert failed == []
+
+        # per-run DISTINCT prompt records: the two runs executed the SAME node
+        # ids (the sealed preset pins them) but each run has its OWN recovery
+        # cell holding its OWN record (the plan digests differ per run).
+        assert probe_chain.plan.plan_digest != victim_chain.plan.plan_digest
+        llm_nodes = [n.id for n in probe_chain.draft.nodes
+                     if n.worker_id in _LLM_WORKERS]
+        assert llm_nodes
+
+        def _prompt_cell(run_id: str, node_id: str):
+            key = content_digest({"run_id": run_id, "node_id": node_id,
+                                  "attempt": 1, "kind": "runtime.prompt"})
+            return shared.cells.load(W.PROMPT_CELL_NAMESPACE, key)
+
+        for nid in llm_nodes:
+            probe_ref = _prompt_cell("replay-deep.collision-probe", nid)
+            victim_ref = _prompt_cell(victim_chain.run_id, nid)
+            assert probe_ref is not None and victim_ref is not None, nid
+            assert (probe_ref.payload_ref.content_digest
+                    != victim_ref.payload_ref.content_digest), nid
+
+    def test_same_run_resume_recovers_the_same_prompt_record(self, replay):
+        """Run-scoping the key must NOT break the cell's purpose: crash
+        recovery WITHIN one run. Re-executing the persist step for the same
+        ``(run, node, attempt)`` against the same store must return the SAME
+        record ref through the recovery branch — no second put, no new cell.
+
+        The proof sits at the exact crash-recovery seam
+        (``worker._persist_prompt_record``), not at a whole-plan re-run:
+        ``dag.run_plan`` RESUMES a run_id whose layers are committed instead of
+        re-executing them (launcher.py's multi-point refusal documents exactly
+        that), so a same-``run_id`` re-run of the full chain never re-enters
+        the persist step at all. The cell's contract is the narrower mid-node
+        crash window — prompt record committed, model not yet called — and
+        that window IS this seam.
+        """
+        coordinator = replay.coordinator
+        shared = coordinator.stores_by_point[replay.world.points[0].point_ordinal]
+        chain = coordinator.chains[replay.world.points[0].point_ordinal]
+        rid = chain.run_id
+        llm_node = next(n.id for n in chain.draft.nodes
+                        if n.worker_id in _LLM_WORKERS)
+        key = content_digest({"run_id": rid, "node_id": llm_node,
+                              "attempt": 1, "kind": "runtime.prompt"})
+        original = shared.cells.load(W.PROMPT_CELL_NAMESPACE, key)
+        assert original is not None
+        stored = dict(shared._shared.backend.payloads)[
+            original.payload_ref.object_id]
+        assert stored.schema_key == "PromptAssemblyRecord@1"
+
+        payloads_before = len(dict(shared._shared.backend.payloads))
+        cells_before = len(dict(shared._shared.backend.cells))
+        recovered = W._persist_prompt_record(
+            stored.model, writer=None, stores=shared,
+            ctx=SimpleNamespace(run_id=rid), plan=None,
+            node=SimpleNamespace(id=llm_node),
+            runtime=SimpleNamespace(
+                runtime_registry_digest=coordinator._heavy.registry.registry_digest),
+            prompt_token=SimpleNamespace(attempt=1, call_ordinal=1), clock=None)
+        assert recovered == original                 # the SAME record, recovered
+        assert len(dict(shared._shared.backend.payloads)) == payloads_before
+        assert len(dict(shared._shared.backend.cells)) == cells_before
 
     def test_the_deep_plan_budget_is_not_yet_a_child_of_the_interval_reservation(
             self, replay):
