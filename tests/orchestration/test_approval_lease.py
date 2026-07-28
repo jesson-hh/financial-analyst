@@ -681,6 +681,11 @@ class _RefusingAdmission(_FakeAdmission):
 
     def record_approval(self, candidate_id, approval_input, *,
                         authenticated_actor, idempotency_key):
+        # record the attempt BEFORE refusing: the replay loop really does
+        # resubmit the row to the admission — the skip happens at (not
+        # before) the admission boundary.
+        self.calls.append(
+            (candidate_id, approval_input, authenticated_actor, idempotency_key))
         raise AdmissionRejected(
             f"refused for test (code={self._code})", code=self._code)
 
@@ -721,8 +726,9 @@ def test_replay_skips_the_unknown_candidate_row_but_keeps_the_decision(tmp_path)
     lease = _decided_journal(tmp_path)
     refusing = _RefusingAdmission(code="unknown_candidate")
     replayed = _replay_with(tmp_path, refusing)
-    # skipped at the admission: the refusing service recorded nothing.
-    assert refusing.calls == []
+    # the row WAS resubmitted (exactly once, right candidate) and the skip
+    # happened at the admission boundary — no event, no admission effect.
+    assert [c[0] for c in refusing.calls] == [CAND_A]
     # the durable decision row itself stays authoritative and readable.
     dec = replayed.load_decision("r-1", CAND_A)
     assert dec is not None and dec.actor_id == f"lease:{lease.lease_id}"

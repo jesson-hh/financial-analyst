@@ -784,6 +784,9 @@ class TestAChainE2E:
         # …and the badge flows through the assembler onto the product:
         badge = f"{LANE_TERMINAL_DEGRADED_BADGE_PREFIX}0"
         assert badge in a_chain.rec_slate.badges
+        # per-lane discrimination: the clean COMPLETED lane is NOT badged
+        # (a blanket-badging assembler bug would redden here).
+        assert f"{LANE_TERMINAL_DEGRADED_BADGE_PREFIX}1" not in a_chain.rec_slate.badges
         assert a_chain.rec_slate.degraded_lanes == (2,)  # badge ≠ no-plan
         assert badge in a_chain.md
         assert a_chain.md.splitlines()[0] == RECOMMENDATION_ADVISORY_BANNER
