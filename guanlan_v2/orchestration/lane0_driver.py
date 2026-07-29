@@ -701,24 +701,81 @@ def _committed_snapshot_for_session(stores: Any, session_date: str):
 #: ``LayerCommitted`` — a prior attempt executed at least one layer; its artifact
 #: ENVELOPES live in the process-local ``pool._PoolStorage`` while the events are
 #: durable, so a fresh pool's ``replay()`` raises ``PoolError``.
-#: The three terminal ``Run*`` events — a durable ``RunResult`` payload already
-#: exists under the once-only ``runresult:{run_id}:payload`` idempotency key, so a
-#: second run of the same identity dies with ``IdempotencyConflict`` at the very
-#: end, AFTER burning its tokens. That is exactly how the 2026-07-29 live run
-#: died: a `RunCancelled` from an earlier attempt, no committed layer at the time,
-#: so the layer-only scan below let the run proceed.
+#: The three terminal ``Run*`` events — each one OCCUPIES the write-once event
+#: idempotency key ``runresult-ev:{run_id}``, so a second run of the identity dies
+#: appending its own terminal event even if every other key were somehow free.
+#: (Measured: dropping these and keeping only the payload-slot probe let a run
+#: through that then died on ``event idempotency key 'runresult-ev:...' reused
+#: with a different event`` — after burning both LLM invocations.)
 _SPENT_IDENTITY_EVENTS: tuple[str, ...] = (
     "LAYER_COMMITTED", "RUN_COMPLETED", "RUN_FAILED", "RUN_CANCELLED")
 
 
-def _spent_run_identity(stores: Any, run_id: str) -> str | None:
-    """The name of the durable evidence that this run identity is spent, or ``None``.
+def _runresult_slot(run_id: str) -> str:
+    """The write-once payload idempotency key holding this identity's RunResult."""
+    return f"runresult:{run_id}:payload"
 
-    Returns the event type (``"RunCancelled"``, ``"LayerCommitted"``, …) so the
-    refusal can name what it actually found rather than assert a category.
+
+def _runresult_slot_taken(stores: Any, run_id: str) -> bool:
+    """Is this identity's write-once ``runresult:<run_id>:payload`` slot written?
+
+    This is the literal resource, not a proxy for it: a second RunResult for the
+    same identity raises ``IdempotencyConflict`` out of ``_apply_payload_put``,
+    and the slot is restart-durable (``durable._fold_payloads`` reloads
+    ``payload_idem`` from ``payloads/_index.jsonl``). Reads the payload backend
+    directly for the same reason :func:`_scan_snapshots` does — no reviewed
+    listing accessor exists upstream. Any doubt is an absence, never a claim.
+    """
+    try:
+        return _runresult_slot(run_id) in stores._shared.backend.payload_idem  # noqa: SLF001
+    except Exception as exc:  # noqa: BLE001 — an unreadable backend is not a claim
+        _LOG.warning("RunResult-slot probe failed for %s: %s", run_id, exc)
+        return False
+
+
+def _spent_run_identity(stores: Any, run_id: str) -> str | None:
+    """The durable evidence that this run identity is spent, or ``None``.
+
+    Three write-once durable resources can make a Lane-0 identity impossible to
+    run again. Every one of them is claimed at the END of a run, so a gate that
+    misses any of them costs a full token burn before the kernel refuses:
+
+    1. **the RunResult payload slot** — ``runresult:<run_id>:payload``, probed
+       directly at the key by :func:`_runresult_slot_taken`. This is the exact key
+       the 2026-07-29 live run died on.
+    2. **the terminal-event slot** — ``runresult-ev:<run_id>``, held by any of the
+       three terminal ``Run*`` events (see :data:`_SPENT_IDENTITY_EVENTS`).
+    3. **committed layers** — ``LayerCommitted``. Artifact ENVELOPES live in the
+       process-local ``pool._PoolStorage`` while the events are durable, so a
+       fresh process's ``replay()`` raises ``PoolError``.
+
+    (1) and (2) are written in the SAME atomic ``RuntimeUnitOfWork.commit`` batch
+    by both of their only writers — ``dag._persist_run_result`` and
+    ``durable.scan_and_mark_interrupted`` — so in practice they travel together.
+    Probing (1) at its key anyway is deliberate: it names the resource instead of
+    inferring it from an event type, so the refusal can tell the operator WHICH
+    once-only key is gone.
+
+    What this predicate does NOT do (the 2026-07-29 correction)
+    -----------------------------------------------------------
+    It does not treat a ``RunCancelled`` as proof that a prior attempt EXECUTED.
+    That was the original reading of the production journal and it was wrong:
+    ``scan_and_mark_interrupted`` used to terminate a merely-PROPOSED run, so
+    every identity acquired a ``RunCancelled`` in the gap between the ``propose``
+    process and the ``approve`` process, and no identity could ever run. The cause
+    is fixed where it lives — the scan now only interrupts runs with real
+    node-execution events. This gate stays as wide as the kernel's once-only keys
+    actually are, because narrowing it to "really executed" would hand back an
+    identity whose result slot is burned, which is a token burn followed by an
+    ``IdempotencyConflict``. Refusing here is free; guessing costs a run.
+
+    Returns the name of the evidence found, so the refusal states what it
+    measured rather than asserting a category.
     """
     from guanlan_v2.orchestration.events import EventType
 
+    if _runresult_slot_taken(stores, run_id):
+        return _runresult_slot(run_id)
     spent = {getattr(EventType, name) for name in _SPENT_IDENTITY_EVENTS}
     try:
         for ev in stores.events.journal(run_id, "main"):
@@ -1050,13 +1107,12 @@ def run_lane0_bootstrap(
     spent = None if dry_run else _spent_run_identity(bindings.stores, run_id)
     if spent is not None:
         raise Lane0Refused(
-            f"run identity {run_id!r} is spent: the durable journal already carries "
-            f"a {spent} event for it, and no assembled ContextSnapshot exists — a "
-            "prior attempt died between the run and the snapshot commit. Its "
-            "RunResult key (runresult:<run_id>:payload) and its artifact envelopes "
-            "(process-local pool._PoolStorage) can neither be rewritten nor "
-            "replayed here, so re-running this identity would burn tokens and then "
-            f"die on IdempotencyConflict. {_supersede_hint(attempt)} Nothing was "
+            f"run identity {run_id!r} is spent: a once-only durable resource for it "
+            f"is already written ({spent}), and no assembled ContextSnapshot exists. "
+            "Neither its write-once RunResult slot nor its artifact envelopes "
+            "(process-local pool._PoolStorage) can be rewritten or replayed here, so "
+            "re-running this identity would burn tokens and then die on "
+            f"IdempotencyConflict. {_supersede_hint(attempt)} Nothing was "
             "re-run and no token was burned.", code="partial_prior_run")
 
     # ---- PIT inputs: honest absence, never a zero -------------------------- #

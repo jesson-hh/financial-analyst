@@ -114,6 +114,19 @@ _TERMINAL_RUN_EVENTS = frozenset(
     {EventType.RUN_COMPLETED, EventType.RUN_FAILED, EventType.RUN_CANCELLED}
 )
 
+#: the durable evidence that a run actually STARTED EXECUTING NODES — the only
+#: state the interrupt scan may terminate.
+#:
+#: A run's journal also carries admission-lifecycle events (``PlanDrafted`` when a
+#: candidate is reserved, ``PlanApproved`` when a human decides, ``PlanFrozen``
+#: when the plan is admitted). None of them means anything ran: no node was
+#: dispatched, no token was burned, no artifact exists. Terminating such a run
+#: would state a falsehood AND consume its once-only ``runresult:<run_id>:payload``
+#: slot — see :func:`scan_and_mark_interrupted` for what that cost in production.
+_NODE_EXECUTION_EVENTS = frozenset(
+    {EventType.NODE_STATE_CHANGED, EventType.LAYER_COMMITTED}
+)
+
 
 # --------------------------------------------------------------------------- #
 # Errors                                                                      #
@@ -560,7 +573,8 @@ def scan_and_mark_interrupted(
 ) -> tuple[str, ...]:
     """Mark every admitted-but-unfinished node-execution attempt ``interrupted``.
 
-    For each run on the ``main`` journal that has events but **no** terminal
+    For each run on the ``main`` journal that has **node-execution** events
+    (``NodeStateChanged``/``LayerCommitted``) but **no** terminal
     ``RunCompleted``/``RunFailed``/``RunCancelled`` event and **no** experiment-
     lifecycle (``ExperimentStateChanged``) event, append a terminal
     ``RunResult(terminal_status="cancelled")`` through the exact reviewed Phase 2
@@ -569,6 +583,30 @@ def scan_and_mark_interrupted(
     fabricates progress; a re-scan is idempotent; parked ``WAITING_FOR_MATURITY``
     heads (state cells) and any experiment-lifecycle run are left untouched — the
     maturity/wakeup layer (Task 6) owns those. Returns the run ids marked this call.
+
+    The node-execution guard is load-bearing, not cosmetic (2026-07-29)
+    ------------------------------------------------------------------
+    Until it existed, the trigger was "has ANY event", so a run that had only been
+    PROPOSED — one ``PlanDrafted`` from
+    ``PlanAdmissionService.persist_and_reserve_candidate`` — was marked
+    ``cancelled``. Every process that binds the durable stores runs this scan, so
+    it fires in the gap between the ``propose`` process and the ``approve``
+    process. Two things went wrong at once, and the second is the expensive one:
+
+    * the ``RunCancelled`` was a falsehood — nothing had run to be interrupted;
+    * committing ``RunResult(cancelled)`` CONSUMED the identity's write-once
+      ``runresult:{run_id}:payload`` slot. That slot is restart-durable
+      (:meth:`_DurableLog._fold_payloads` reloads ``payload_idem`` from
+      ``payloads/_index.jsonl``), so when the approved run later executed for
+      real it burned its LLM invocations and then died persisting its own
+      RunResult with ``IdempotencyConflict: payload idempotency key
+      'runresult:lane0-2026-07-29:payload' reused with different content``.
+
+    Because no identity could survive its own propose→approve gap, the Lane-0
+    driver was bricked: ``lane0-2026-07-29``, ``-r2`` and ``-r3`` were all burned
+    this way before anything executed. Interrupting only what actually started
+    executing keeps the honesty red line ("nothing is displayed as running that is
+    not") pointing in BOTH directions.
     """
     events = stores.events
     if not hasattr(events, "run_ids"):  # only the durable event store is scannable
@@ -580,6 +618,8 @@ def scan_and_mark_interrupted(
             continue  # already finished (includes a prior scan's RunCancelled)
         if any(e.event_type is EventType.EXPERIMENT_STATE_CHANGED for e in journal):
             continue  # experiment-lifecycle run — owned by the Task 6 maturity layer
+        if not any(e.event_type in _NODE_EXECUTION_EVENTS for e in journal):
+            continue  # proposed/approved/frozen but never executed — nothing to interrupt
         plan_digest = next(
             (e.plan_digest for e in reversed(journal) if e.plan_digest is not None), None)
         if plan_digest is None:

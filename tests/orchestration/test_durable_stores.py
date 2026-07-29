@@ -374,6 +374,87 @@ def test_scan_leaves_experiment_lifecycle_run_untouched(tmp_path):
         for e in stores.events.journal("run-parked", "main"))
 
 
+# ---- the scan must not interrupt a run that never executed ----------------- #
+def _seed_proposed_only_run(stores, rt, run_id, *, approved=False):
+    """The writes a REAL ``propose`` (and ``approve``) makes, and nothing else.
+
+    ``lane0_driver._reserve`` → ``PlanAdmissionService.persist_and_reserve_candidate``
+    appends exactly one ``PlanDrafted`` under ``lane0-reserve:<run_id>:candidate-event``;
+    the ``approve`` verb later appends ``PlanApproved``. Neither is a node execution:
+    nothing ran, no token burned, no artifact exists. The scan reads only
+    ``event_type`` and ``plan_digest``, so the payload here is a stand-in.
+    """
+    ref = stores.payloads.put(
+        _NODE_RUN_SR, dict(_node_run(run_id=run_id)), registry_digest=rt,
+        namespace="main", idempotency_key=f"{run_id}:cand:payload")
+    stores.events.append(EventAppendRequest(
+        run_id=run_id, partition="main", event_type="PlanDrafted",
+        payload_schema_ref=_NODE_RUN_SR, payload_ref=ref, registry_digest=rt,
+        idempotency_key=f"lane0-reserve:{run_id}:candidate-event", plan_digest=DA))
+    if approved:
+        stores.events.append(EventAppendRequest(
+            run_id=run_id, partition="main", event_type="PlanApproved",
+            payload_schema_ref=_NODE_RUN_SR, payload_ref=ref, registry_digest=rt,
+            idempotency_key=f"plan-approval:{run_id}:approval-event", plan_digest=DA))
+
+
+@pytest.mark.parametrize("approved", [False, True])
+def test_scan_leaves_a_merely_proposed_run_untouched(tmp_path, approved):
+    # THE 2026-07-29 PRODUCTION DEFECT. Every process that binds the durable
+    # stores runs this scan, so it runs in the gap between `propose` (process A)
+    # and `approve` (process B). A run that has only been PROPOSED has no node
+    # events, no committed layer and no burned token — there is nothing to
+    # interrupt. Marking it `cancelled` both states a falsehood and consumes the
+    # identity's once-only `runresult:<run_id>:payload` slot, after which the
+    # approved run executes, burns its LLM invocations, and dies persisting its
+    # own RunResult. That is what bricked the Lane-0 driver: no identity could
+    # ever survive its own propose→approve gap.
+    stores, rt = _stores(tmp_path / "s")
+    _seed_proposed_only_run(stores, rt, "lane0-2026-07-29-r2", approved=approved)
+
+    marked = scan_and_mark_interrupted(stores, registry_digest=rt, clock=_AdvancingClock())
+
+    assert marked == ()
+    assert not any(
+        e.event_type is EventType.RUN_CANCELLED
+        for e in stores.events.journal("lane0-2026-07-29-r2", "main"))
+
+
+def test_scan_does_not_burn_the_runresult_slot_of_a_proposed_run(tmp_path):
+    # The falsehood is survivable; the burned slot is not. `runresult:<id>:payload`
+    # is write-once and RESTART-DURABLE (`_fold_payloads` reloads `payload_idem`
+    # from `payloads/_index.jsonl`), so once the scan takes it the identity can
+    # never persist a real RunResult again.
+    stores, rt = _stores(tmp_path / "s")
+    _seed_proposed_only_run(stores, rt, "lane0-2026-07-29-r2", approved=True)
+    scan_and_mark_interrupted(stores, registry_digest=rt, clock=_AdvancingClock())
+
+    assert ("runresult:lane0-2026-07-29-r2:payload"
+            not in stores._shared.backend.payload_idem)
+
+
+def test_the_propose_approve_gap_leaves_the_identity_runnable(tmp_path):
+    # the end-to-end consequence, stated as the operator experiences it: after
+    # propose → scan → approve, the identity must still be able to record the
+    # RunResult of a real, successful run.
+    from guanlan_v2.orchestration import dag as D
+    from guanlan_v2.orchestration.runtime_contracts import RunResult
+
+    stores, rt = _stores(tmp_path / "s")
+    _seed_proposed_only_run(stores, rt, "lane0-2026-07-29-r2", approved=True)
+    scan_and_mark_interrupted(stores, registry_digest=rt, clock=_AdvancingClock())
+
+    plan = type("P", (), {"run_id": "lane0-2026-07-29-r2", "plan_digest": DA})
+    runtime = type("R", (), {"runtime_registry_digest": rt})
+    result = RunResult(run_id="lane0-2026-07-29-r2", plan_digest=DA,
+                       terminal_status="completed",
+                       settled_tokens=4321, settled_llm_invocations=2)
+    D._persist_run_result(stores, runtime, plan, result, "completed")  # must not raise
+
+    assert any(e.event_type is EventType.RUN_COMPLETED
+               for e in stores.events.journal("lane0-2026-07-29-r2", "main"))
+
+
 def test_scan_is_idempotent(tmp_path):
     stores, rt = _stores(tmp_path / "s")
     _seed_in_flight_run(stores, rt, "run-flight")

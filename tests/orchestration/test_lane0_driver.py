@@ -577,7 +577,10 @@ def test_a_prior_terminal_run_result_refuses_by_name_before_anything_burns():
         env.run()
     assert exc.value.code == "partial_prior_run"
     assert f"lane0-{SESSION}" in str(exc.value)
-    assert "RunCancelled" in str(exc.value)      # names the evidence it found
+    # names the once-only resource it actually measured, not a category. The
+    # burned RunResult slot is the most specific evidence available, so it wins
+    # over the RunCancelled event that accompanies it.
+    assert f"runresult:lane0-{SESSION}:payload" in str(exc.value)
     assert env.gateway.invocations == []         # nothing was burned
 
 
@@ -649,6 +652,138 @@ def test_the_cli_takes_an_attempt_flag():
     args = L.build_arg_parser().parse_args(["run", "--attempt", "3"])
     assert args.attempt == 3
     assert L.build_arg_parser().parse_args(["run"]).attempt == 1
+
+
+# =========================================================================== #
+# 4a — gate ② against the REAL 2026-07-29 production journal                    #
+# =========================================================================== #
+#: ``var/orchestration/events/main.jsonl``, grouped by run identity, verbatim.
+#: Three identities, three distinct states, and the gate must tell them apart.
+REAL_JOURNAL_2026_07_29 = {
+    # executed for real: both layers committed, both LLM seats burned, then died
+    # persisting its RunResult (its slot had already been taken by the startup
+    # interrupt scan). No assembled ContextSnapshot was ever committed.
+    "lane0-2026-07-29": (
+        "PlanDrafted", "RunCancelled", "PlanApproved", "PlanApproved", "PlanFrozen",
+        "NodeStateChanged", "LayerCommitted", "NodeStateChanged", "NodeStateChanged",
+        "LayerCommitted"),
+    # proposed and approved; EXECUTED NOTHING. The `RunCancelled` between the two
+    # is the startup interrupt scan firing in the propose→approve gap — but it
+    # still consumed the write-once `runresult:<id>:payload` slot.
+    "lane0-2026-07-29-r2": ("PlanDrafted", "RunCancelled", "PlanApproved"),
+    "lane0-2026-07-29-r3": ("PlanDrafted", "RunCancelled", "PlanApproved"),
+}
+
+
+def test_the_real_journal_orderings_put_run_cancelled_before_any_execution():
+    # the ordering that misled the first reading of this journal: `RunCancelled`
+    # sits between `PlanDrafted` and `PlanApproved`, i.e. BEFORE freeze and before
+    # any node — it is not the death of a prior attempt, it is the interrupt scan.
+    for run_id, journal in REAL_JOURNAL_2026_07_29.items():
+        assert journal[0] == "PlanDrafted", run_id
+        assert journal[1] == "RunCancelled", run_id
+        assert "PlanFrozen" not in journal[:2], run_id
+
+
+def test_real_journal_attempt_one_is_still_refused():
+    # attempt 1 GENUINELY executed: its layers are committed (artifact envelopes
+    # are process-local, so `ArtifactPool.replay()` cannot resurrect them) and its
+    # RunResult slot is taken. It must stay refused, by name, with zero token burn.
+    env = Env()
+    first = env.run()
+    backend = env.stores._shared.backend
+    journal = [e.event_type.value for e in env.stores.events.journal(first.run_id, "main")]
+    assert "LayerCommitted" in journal                                   # it executed
+    assert f"runresult:{first.run_id}:payload" in backend.payload_idem   # slot taken
+    # the crash window: it died before the assembled ContextSnapshot landed.
+    for object_id, stored in list(backend.payloads.items()):
+        if getattr(stored, "schema_key", None) == "ContextSnapshot@1":
+            backend.payloads.pop(object_id)
+
+    with pytest.raises(L.Lane0Refused) as exc:
+        env.run()
+    assert exc.value.code == "partial_prior_run"
+    assert first.run_id in str(exc.value)
+    assert len(env.gateway.invocations) == 2      # nothing re-burned
+
+
+@pytest.mark.parametrize("attempt,run_id", [(2, "lane0-2026-07-29-r2"),
+                                            (3, "lane0-2026-07-29-r3")])
+def test_real_journal_r2_r3_are_refused_because_their_result_slot_is_burned(
+        attempt, run_id):
+    # MEASURED, not assumed: r2/r3 executed nothing, but the interrupt scan
+    # already wrote `RunResult(cancelled)` under their write-once
+    # `runresult:<id>:payload` key, and that key is restart-durable. Letting them
+    # "run" would burn both LLM invocations and then die on IdempotencyConflict,
+    # exactly as attempt 1 did. The gate must refuse them — for that reason.
+    env = Env()
+    _seed_terminal_run_result(env, run_id=run_id)     # what the scan wrote
+    backend = env.stores._shared.backend
+    assert f"runresult:{run_id}:payload" in backend.payload_idem
+    assert not any(                                    # ... and NOTHING executed
+        e.event_type.value in ("NodeStateChanged", "LayerCommitted")
+        for e in env.stores.events.journal(run_id, "main"))
+
+    with pytest.raises(L.Lane0Refused) as exc:
+        env.run(attempt=attempt)
+    assert exc.value.code == "partial_prior_run"
+    assert run_id in str(exc.value)
+    assert env.gateway.invocations == []               # nothing was burned
+
+
+def test_a_clean_unseen_identity_is_runnable():
+    # the escape hatch has to actually open: an identity that carries no burned
+    # result slot and no committed layer runs normally.
+    env = Env()
+    for run_id in ("lane0-2026-07-29-r2", "lane0-2026-07-29-r3"):
+        _seed_terminal_run_result(env, run_id=run_id)
+    assert L._spent_run_identity(env.stores, f"lane0-{SESSION}-r4") is None
+
+    result = env.run(attempt=4)
+    assert result.outcome == L.OUTCOME_COMPLETED, result.refusal_detail
+    assert result.run_id == f"lane0-{SESSION}-r4"
+    assert result.snapshot_visible_to_deep_lane is True
+
+
+def test_a_terminal_run_event_is_evidence_even_when_the_payload_slot_is_free():
+    # A terminal `Run*` event is NOT merely a proxy for the burned payload slot:
+    # it holds a once-only resource of its own, the event idempotency key
+    # `runresult-ev:<run_id>`. This test was written the other way round first —
+    # asserting such an identity is runnable — and the run got all the way through
+    # both LLM seats before dying on `event idempotency key 'runresult-ev:...'
+    # reused with a different event`. So the three terminal events stay in the
+    # evidence set, and the gate stays as wide as the kernel's once-only keys are.
+    from guanlan_v2.orchestration.eventstore import EventAppendRequest
+    from guanlan_v2.orchestration.refs import SchemaRef
+    from guanlan_v2.orchestration.runtime_contracts import RunResult
+
+    env = Env()
+    run_id = f"lane0-{SESSION}"
+    sr = SchemaRef(name="RunResult", version="1")
+    ref = env.stores.payloads.put(
+        sr, dict(RunResult(run_id=run_id, plan_digest="c" * 64,
+                           terminal_status="cancelled")),
+        registry_digest=env.bindings.runtime_registry_digest, namespace="main",
+        idempotency_key="some-other-key:payload")      # NOT the run's own slot
+    env.stores.events.append(EventAppendRequest(
+        run_id=run_id, partition="main", event_type="RunCancelled",
+        payload_schema_ref=sr, payload_ref=ref,
+        registry_digest=env.bindings.runtime_registry_digest,
+        idempotency_key=f"runresult-ev:{run_id}", plan_digest="c" * 64))
+
+    assert f"runresult:{run_id}:payload" not in env.stores._shared.backend.payload_idem
+    assert L._spent_run_identity(env.stores, run_id) == "RunCancelled"
+    with pytest.raises(L.Lane0Refused) as exc:
+        env.run()
+    assert exc.value.code == "partial_prior_run"
+    assert env.gateway.invocations == []               # refused BEFORE the burn
+
+
+def test_the_refusal_names_the_burned_slot_it_actually_found():
+    env = _seeded_env()
+    with pytest.raises(L.Lane0Refused) as exc:
+        env.run()
+    assert f"runresult:lane0-{SESSION}:payload" in str(exc.value)
 
 
 # =========================================================================== #
