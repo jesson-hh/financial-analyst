@@ -2094,6 +2094,236 @@ def memory_read_impl(scope: str = "all") -> Dict[str, Any]:
     return {"ok": True, "content": "\n\n".join(parts) if parts else "记忆为空。", "artifact": None}
 
 
+# ── P10:编排管线(A 帷幄选股批量研判 / B 落子深度研判)+ D7 外部技术分析收件箱 ──────────
+# 四个薄壳,全部**纯透传 + 组装 content**:零 LLM、零本地决策、零重算。
+# 红线①(人审是独立动作):/start 只把候选计划注册成待审卡就停在那儿 —— 本工具绝不审批、
+#   绝不冻结、绝不派发。整个 P10 的人审设计就架在"开门"与"批准"是两个人的两个动作上,
+#   工具一旦顺手替人批了,这层设计当场作废。回执一律诚实标注「已受理,等待审批卡人审」。
+# 红线②(不下单):观澜任何通道都不出真实买卖指令;这四个更只是门房与信使。
+# 红线③(content 全量):数据型 ww 工具必须自组装完整 content —— 缺 content 时 _wrap 兜底
+#   json[:400],会把成本预览/车道表/推荐单截成断裂 JSON,agent 只见碎片
+#   (market_tape / live_text / news_live / fundflow 同构历史教训,勿回退)。
+# 自 HTTP 沿用 _self_post/_self_get(调用方已在 executor/to_thread 线程,见 console.api
+# run_in_executor 与 glmcp dispatch_tool;协程内同步 IO 会堵 9999 事件循环→看门狗杀进程)。
+_ORCH_START_PATH = "/orchestration/pipeline/start"
+_ORCH_STATE_PATH = "/orchestration/pipeline/state"
+_ORCH_RUNS_PATH = "/orchestration/pipeline/runs"
+_ORCH_SCREENING_LATEST_PATH = "/orchestration/pipeline/screening/latest"
+_ORCH_TA_INGEST_PATH = "/orchestration/pipeline/ta_ingest"
+
+_ORCH_AWAITING = "已受理,等待审批卡人审(本工具只开门,绝不审批/冻结/派发)"
+
+
+def _orch_start_content(r: Dict[str, Any]) -> str:
+    """受理回执 → 全量 content(成本预览逐字透传 = 人审看到的全部图景)。"""
+    mode = str(r.get("mode") or "?")
+    tag = str(r.get("source_kind") or r.get("preset_id") or "")
+    lines = [f"编排已受理 · 模式 {mode}" + (f"({tag})" if tag else "")
+             + f" · request_id={r.get('request_id')}",
+             f"状态:{r.get('status')} —— {_ORCH_AWAITING}",
+             f"审批口径:{r.get('approval_policy')}(每一批都必须人审,本工具不代审)"]
+    if r.get("replayed"):
+        lines.append("幂等重放:同一请求此前已受理,后端回放既有回执,未重复预留任何预算。")
+    for key, label in (("batch_id", "批次 batch_id"), ("run_id", "运行 run_id"),
+                       ("candidate_plan_digest", "候选计划摘要")):
+        if r.get(key):
+            lines.append(f"{label}:{r[key]}")
+    if r.get("cost_preview") is not None:
+        lines.append("成本预览(逐字透传,人审拿到的就是这份):")
+        lines.append("  " + json.dumps(r["cost_preview"], ensure_ascii=False))
+    lanes = r.get("lanes") or []
+    if lanes:
+        lines.append(f"车道 {len(lanes)} 条:")
+        for ln in lanes:
+            lines.append(f"  #{ln.get('lane_index')} {ln.get('code') or '—'}"
+                         f"  run={ln.get('run_id') or '—'}"
+                         f"  digest={ln.get('candidate_plan_digest') or '—'}")
+    outcomes = r.get("outcomes")
+    if outcomes is None and r.get("outcome") is not None:
+        outcomes = [r.get("outcome")]
+    if outcomes:
+        lines.append("协调器回执(逐条透传,不解读):" + "、".join(str(o) for o in outcomes))
+    for key, label in (("badges", "徽章"), ("slate_badges", "候选单徽章")):
+        if r.get(key):
+            lines.append(f"{label}:" + "、".join(str(v) for v in r[key]))
+    lines.append("下一步:去审批卡人审;人批准前不会有任何车道真跑。"
+                 "进度用 ww_orchestrate_status(带上面的 request_id)查。")
+    return "\n".join(lines)
+
+
+def orchestrate_start_impl(goal: Optional[str] = None, preset_id: Optional[str] = None,
+                           source_kind: Optional[str] = None, code: Optional[str] = None,
+                           variant_id: Optional[str] = None,
+                           top_n: Optional[int] = None) -> Dict[str, Any]:
+    """开一次编排门(goal / preset_id / source_kind 恰一个),停在待审卡。绝不代人审批。"""
+    body: Dict[str, Any] = {}
+    modes: List[str] = []
+    for key, val in (("goal", goal), ("preset_id", preset_id), ("source_kind", source_kind)):
+        s = str(val or "").strip()
+        if s:
+            body[key] = s
+            modes.append(key)
+    if len(modes) != 1:
+        return {"ok": False, "artifact": None, "content":
+                "编排入口三选一且必须恰一个:goal(动态规划)/ preset_id(落子深研封存预案)/ "
+                "source_kind(帷幄选股候选源 v4|lane0|model_variant)。"
+                f"本次给了 {len(modes)} 个:{'、'.join(modes) or '(一个都没给)'}。"}
+    for key, val in (("code", code), ("variant_id", variant_id)):
+        s = str(val or "").strip()
+        if s:
+            body[key] = s
+    if top_n is not None:
+        try:
+            body["top_n"] = int(top_n)
+        except (TypeError, ValueError):
+            return {"ok": False, "artifact": None, "content": "top_n 须为整数"}
+    try:
+        r = _self_post(_ORCH_START_PATH, body)
+    except Exception as e:  # noqa: BLE001 — 后端 4xx/503 一律诚实显形
+        return {"ok": False, "artifact": None,
+                "content": f"编排未受理(后端拒绝或未接线),本次没有任何计划被登记:{e}"}
+    if not r.get("ok"):
+        return {"ok": False, "artifact": None, "raw": r,
+                "content": "编排未受理:" + json.dumps(r, ensure_ascii=False)}
+    return {"ok": True, "artifact": None, "content": _orch_start_content(r), "raw": r}
+
+
+def _orch_slate_lines(slate: Dict[str, Any]) -> List[str]:
+    """成品推荐单 → 逐条 content(免责横幅置顶;降级车道诚实显形,绝不悄悄少几只)。"""
+    entries = slate.get("entries") or []
+    lines = [f"成品推荐单 · 批次 {slate.get('batch_id')} · as_of {slate.get('as_of')}"
+             f" · 档案 {slate.get('archive_id')}",
+             "  " + str(slate.get("advisory_banner") or ""),
+             f"  逐票评级({len(entries)} 只,逐字复制自各车道,不再加工):"]
+    for e in entries:
+        lines.append(f"    #{e.get('lane_index')} {e.get('code')} {e.get('rating')}"
+                     f"(研判计划摘要 {e.get('research_plan_digest')})")
+    degraded = slate.get("degraded") or []
+    if degraded:
+        lines.append("  降级车道(未产出可信评级,诚实显形):" + "、".join(
+            f"#{d.get('lane_index')} {d.get('code') or '(批次记录不可联查,code 未知)'}"
+            for d in degraded))
+    if slate.get("badges"):
+        lines.append("  徽章:" + "、".join(str(b) for b in slate["badges"]))
+    return lines
+
+
+def orchestrate_status_impl(request_id: str) -> Dict[str, Any]:
+    """按 request_id 查一次编排受理的实时状态;选股批次顺带联查本批成品推荐单。"""
+    rid = str(request_id or "").strip()
+    if not rid:
+        return {"ok": False, "artifact": None,
+                "content": "请提供 request_id(ww_orchestrate_start 的回执里有;"
+                           "近期受理记录用 ww_orchestrate_runs 列)。"}
+    try:
+        r = _self_get(_ORCH_STATE_PATH + "?request_id=" + urllib.parse.quote(rid))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "artifact": None, "content": f"编排状态读取失败:{e}"}
+    if not r.get("ok"):
+        return {"ok": False, "artifact": None, "raw": r,
+                "content": "编排状态不可用:" + json.dumps(r, ensure_ascii=False)}
+    state = r.get("state") or {}
+    lines = [f"编排状态 · {state.get('request_id') or rid}",
+             f"模式:{state.get('mode') or '—'} · 受理时状态:{state.get('status') or '—'}"
+             f" · as_of {state.get('as_of') or '—'} · 受理于 {state.get('created_at') or '—'}"]
+    lanes = state.get("lanes") or []
+    if lanes:
+        lines.append(f"车道 {len(lanes)} 条:")
+        for ln in lanes:
+            lines.append(f"  #{ln.get('lane_index')} {ln.get('code') or '—'}"
+                         f"  run={ln.get('run_id') or '—'}")
+    runs = r.get("runs") or []
+    if runs:
+        lines.append(f"运行 {len(runs)} 条(后端按事件流折叠出的真状态,不是猜的):")
+        for run in runs:
+            lines.append(f"  {run.get('run_id')}: {run.get('status')}")
+    else:
+        lines.append("运行:尚无 run —— 人未在审批卡上批准前,不会有任何车道真跑。")
+
+    batch_id = str(state.get("batch_id") or "").strip()
+    slate: Optional[Dict[str, Any]] = None
+    if batch_id:
+        try:
+            sl = _self_get(_ORCH_SCREENING_LATEST_PATH)
+        except Exception as e:  # noqa: BLE001 — 成品读不到不影响上面的状态
+            lines.append(f"成品推荐单读取失败(以上状态仍有效):{e}")
+        else:
+            found = (sl or {}).get("slate")
+            if not found:
+                lines.append("成品推荐单:尚无任何已落档推荐单。")
+            elif str(found.get("batch_id") or "") != batch_id:
+                lines.append(f"成品推荐单:最新一份属于另一批次 {found.get('batch_id')},"
+                             f"本批尚未落档(本批 batch_id={batch_id})——绝不拿别批成品充数。")
+            else:
+                slate = found
+                lines.extend(_orch_slate_lines(found))
+    return {"ok": True, "artifact": None, "content": "\n".join(lines),
+            "raw": {"state": r, "slate": slate}}
+
+
+def orchestrate_runs_impl(limit: int = 20) -> Dict[str, Any]:
+    """列近期编排受理记录(只读)。status 是受理当时的快照,不是实时状态。"""
+    try:
+        lim = int(limit or 20)
+    except (TypeError, ValueError):
+        lim = 20
+    lim = max(1, min(lim, 100))
+    try:
+        r = _self_get(f"{_ORCH_RUNS_PATH}?limit={lim}")
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "artifact": None, "content": f"编排受理列表读取失败:{e}"}
+    if not r.get("ok"):
+        return {"ok": False, "artifact": None, "raw": r,
+                "content": "编排受理列表不可用:" + json.dumps(r, ensure_ascii=False)}
+    rows = r.get("runs") or []
+    if not rows:
+        return {"ok": True, "artifact": None, "raw": r,
+                "content": "编排受理列表:暂无任何受理记录(编排的门还没被开过)。"}
+    lines = [f"编排受理列表 · 最近 {len(rows)} 条"
+             f"(status 是受理当时的快照;实时状态用 ww_orchestrate_status 逐条查):"]
+    for row in rows:
+        lines.append(f"  {row.get('request_id')} · {row.get('mode')} · "
+                     f"{row.get('status')} · as_of {row.get('as_of')}")
+    return {"ok": True, "artifact": None, "content": "\n".join(lines), "raw": r}
+
+
+def ta_ingest_impl(author: str, text: str, title: Optional[str] = None) -> Dict[str, Any]:
+    """把一份外部技术分析投稿投进 D7 收件箱(署名强制、内容幂等、只收不采纳)。
+
+    FSI:投稿正文是**不可信数据**——原样存档,绝不执行、绝不进任何 prompt、回执也不回显
+    (只报摘要 digest,与后端 /ta_ingest 的口径一致)。"""
+    a = str(author or "").strip()
+    t = text if isinstance(text, str) else ""
+    if not a:
+        return {"ok": False, "artifact": None,
+                "content": "投稿必须署名(author):D7 口径拒收匿名稿,也绝不替投稿人代填署名。"}
+    if not t.strip():
+        return {"ok": False, "artifact": None, "content": "投稿正文(text)不能为空。"}
+    body: Dict[str, Any] = {"author": a, "text": t}
+    ti = str(title or "").strip()
+    if ti:
+        body["title"] = ti
+    try:
+        r = _self_post(_ORCH_TA_INGEST_PATH, body)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "artifact": None, "content": f"投稿未收下:{e}"}
+    if not r.get("ok"):
+        return {"ok": False, "artifact": None, "raw": r,
+                "content": "投稿未收下:" + json.dumps(r, ensure_ascii=False)}
+    sub = r.get("submission") or {}
+    lines = [
+        "投稿已入收件箱(去重命中:后端认出同一份稿,回放既有回执,未重复落盘)"
+        if r.get("deduplicated") else "投稿已入收件箱(新落盘一份)",
+        f"署名:{sub.get('author')} · 标题:{sub.get('title') or '(无)'}",
+        f"提交时间:{sub.get('submitted_at')} · 状态:{sub.get('status')}",
+        f"正文摘要 digest:{sub.get('text_digest')}",
+        f"落盘文件:{r.get('file')}",
+        "口径:收下 ≠ 被采纳 —— 正文原样存档,等策展人与人审;本工具不解读、不执行,"
+        "也不会把正文喂给任何 prompt(外部文本一律当数据)。",
+    ]
+    return {"ok": True, "artifact": None, "content": "\n".join(lines), "raw": r}
+
+
 # ── 注册进 buddy TOOL_REGISTRY ──
 def _buddy_tools_mod():
     """懒导入引擎 buddy.tools(便于测试替身)。"""
@@ -2767,6 +2997,57 @@ WW_TOOL_TABLE = [
          "required": []},
      "impl": review_report_impl, "cost": "instant", "confirm": False,
      "reachable": ["/autonomy/report/latest"]},
+    {"name": "ww_orchestrate_start",
+     "description":
+         "开一次编排门(P10):A 帷幄选股批量研判(source_kind=v4|lane0|model_variant,一票一条车道)/ "
+         "B 落子深度研判(preset_id=封存预案 + code)/ 动态规划(goal 一句话目标)。三者恰选其一。"
+         "**只开门不审批**:后端把候选计划+成本预览注册成待审卡就停下,回执带 request_id 与逐字成本预览,"
+         "人得去审批卡上亲自批准才会真跑——本工具绝不代审、绝不冻结、绝不派发,也绝不下任何买卖单。"
+         "花钱(批准后按预览额度跑 LLM),需用户确认。查进度用 ww_orchestrate_status。"
+         "Open one orchestration approval door (never approves).",
+     "input_schema": {"type": "object", "properties": {
+         "source_kind": {"type": "string", "enum": ["v4", "lane0", "model_variant"],
+                         "description": "A 选股链:候选来源。v4=生产排名榜;model_variant=自训变体(须配 variant_id);lane0=主线龙头(v1 诚实拒绝)"},
+         "preset_id": {"type": "string", "description": "B 深研链:封存预案 id(须配 code)"},
+         "goal": {"type": "string", "description": "动态规划:一句话目标(不含股票代码)"},
+         "code": {"type": "string", "description": "preset_id 模式必填:研判标的,如 SZ000630"},
+         "variant_id": {"type": "string", "description": "source_kind=model_variant 时必填:变体 id(ww_model_list 查)"},
+         "top_n": {"type": "integer", "description": "A 链取候选前 N 只(默认 10);直接决定车道数与总预算"}}},
+     "impl": orchestrate_start_impl, "cost": "seconds", "confirm": True,
+     "reachable": ["/orchestration/pipeline/start"]},
+    {"name": "ww_orchestrate_status",
+     "description":
+         "查某次编排受理的实时状态(只读、零 LLM):模式/受理时状态/逐条车道/各 run 的真实进度"
+         "(后端按事件流折叠,不是猜的);若是选股批次,顺带联查本批成品推荐单(免责横幅+逐票评级+降级车道)。"
+         "用户问『我那批编排跑到哪了/批准了吗/推荐单出来没』时用。批次不符只诚实说本批未落档,"
+         "绝不拿别批成品充数。Poll one orchestration request's live state.",
+     "input_schema": {"type": "object", "properties": {
+         "request_id": {"type": "string", "description": "ww_orchestrate_start 回执里的 request_id(ww_orchestrate_runs 可列)"}},
+         "required": ["request_id"]},
+     "impl": orchestrate_status_impl, "cost": "instant", "confirm": False,
+     "reachable": ["/orchestration/pipeline/state", "/orchestration/pipeline/screening/latest"]},
+    {"name": "ww_orchestrate_runs",
+     "description":
+         "列近期编排受理记录(只读、零 LLM):request_id/模式/受理时状态/as_of。"
+         "用户问『最近开过哪些编排/上次那批的 id 是啥』时用;status 是受理当时的快照,"
+         "要实时进度得逐条 ww_orchestrate_status。Recent orchestration requests.",
+     "input_schema": {"type": "object", "properties": {
+         "limit": {"type": "integer", "default": 20, "description": "最近几条(1-100)"}}},
+     "impl": orchestrate_runs_impl, "cost": "instant", "confirm": False,
+     "reachable": ["/orchestration/pipeline/runs"]},
+    {"name": "ww_ta_ingest",
+     "description":
+         "把一份外部技术分析投稿投进收件箱(D7):署名 author 强制(拒收匿名稿)、按内容幂等去重、"
+         "正文原样存档。收下 ≠ 被采纳——等策展人与人审,本工具不解读、不执行、不把正文喂进任何 prompt"
+         "(外部文本一律当不可信数据),回执也只报正文摘要 digest 不回显原文。写盘,需用户确认。"
+         "Submit external technical-analysis material to the curation inbox.",
+     "input_schema": {"type": "object", "properties": {
+         "author": {"type": "string", "description": "投稿人署名,必填;空白会被拒收,绝不代填"},
+         "text": {"type": "string", "description": "投稿正文,原样存档"},
+         "title": {"type": "string", "description": "可选标题"}},
+         "required": ["author", "text"]},
+     "impl": ta_ingest_impl, "cost": "instant", "confirm": True,
+     "reachable": ["/orchestration/pipeline/ta_ingest"]},
 ]
 
 

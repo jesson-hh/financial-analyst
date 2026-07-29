@@ -611,14 +611,14 @@ def test_engine_profile_excludes_ww_but_console_whitelist_resolves():
                           encoding="utf-8", errors="replace", timeout=180, env=env, cwd=str(repo))
     assert proc.returncode == 0, (proc.stderr or "")[-2000:]
     out = _json.loads(proc.stdout.strip().splitlines()[-1])
-    assert len(out["registered_ww"]) == 58                    # …+1 ww_review_report(盘后复盘官晨报)
+    assert len(out["registered_ww"]) == 62                    # …+4 ww_orchestrate_*/ww_ta_ingest(P10 Task 10)
     # ① 非显式白名单路径(research / 缺省 / all)一律不外露 ww_*,且不再返回 None(None=完全不限制)
     assert out["research_is_none"] is False and out["research_ww"] == []
     assert out["default_is_none"] is False and out["default_ww"] == []
     assert out["all_is_none"] is False and out["all_ww"] == []
     # ② console 显式白名单路径不受影响:80 名全部可解析,含 55 个 ww_(历史注释曾漂移,以断言数字为准)
-    assert out["console_n"] == 83 and out["console_missing"] == []
-    assert out["explicit_n"] == 83 and out["explicit_ww_n"] == 58
+    assert out["console_n"] == 87 and out["console_missing"] == []
+    assert out["explicit_n"] == 87 and out["explicit_ww_n"] == 62
 
 
 def test_f10_impl_returns_structured_facts(monkeypatch):
@@ -1084,9 +1084,9 @@ def test_registry_derivation_consistent():
     """阶段0 重构守护:CONSOLE_ALLOWED 与 _WW_REACHABLE_ENDPOINTS 必须从声明表派生且与已知集合一致。"""
     import guanlan_v2.console.tools as ct
     ww_in_table = {t["name"] for t in ct.WW_TOOL_TABLE}
-    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 58   # +ww_review_report(盘后复盘官晨报)
+    assert len([n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")]) == 62   # +4 P10 编排门/TA 收件箱
     assert ww_in_table == {n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")}
-    assert len(ct.CONSOLE_ALLOWED) == 83
+    assert len(ct.CONSOLE_ALLOWED) == 87
     assert {"/factorlib/save", "/workflow/compose", "/feature/build"} <= ct._WW_REACHABLE_ENDPOINTS
     assert ct._WW_REACHABLE_ENDPOINTS == {ep for t in ct.WW_TOOL_TABLE for ep in t.get("reachable", [])}
 
@@ -1146,6 +1146,12 @@ def test_ww_reachable_endpoints_matches_expected():
         "/seats/orderbook",       # ww_orderbook(五档盘口现拉)
         "/seats/ticks",           # ww_ticks(逐笔成交现拉)
         "/autonomy/report/latest",  # ww_review_report(盘后复盘官晨报)
+        # P10 Task 10:编排管线五路(帷幄选股 A 链 / 落子深研 B 链 的人审门 + 只读投影 + D7 收件箱)
+        "/orchestration/pipeline/start",            # ww_orchestrate_start(开门,绝不审批)
+        "/orchestration/pipeline/state",            # ww_orchestrate_status(按 request_id 轮询)
+        "/orchestration/pipeline/screening/latest", # ww_orchestrate_status(批次成品联查)
+        "/orchestration/pipeline/runs",             # ww_orchestrate_runs(近期受理列表)
+        "/orchestration/pipeline/ta_ingest",        # ww_ta_ingest(外部技术分析投稿收件箱)
     }
     assert ct._WW_REACHABLE_ENDPOINTS == expected
 
@@ -2291,3 +2297,317 @@ def test_ww_review_report_impl_no_report_is_honest(monkeypatch):
     tr = ct._wrap(ct.review_report_impl)()
     assert tr.is_error is True
     assert "暂无日报" in tr.content
+
+
+# ── P10 Task 10:ww_orchestrate_*(编排门/状态/列表)+ ww_ta_ingest(D7 收件箱)──────────
+# 红线:start 只开门绝不审批(审批是人在审批卡上的独立动作);四工具零 LLM 纯透传;
+# content 必须自带全量(否则 _wrap 兜底 json[:400],agent 只见断裂 JSON —— 存量教训)。
+
+def _orch_start_response(replayed: bool = False) -> dict:
+    """/orchestration/pipeline/start 的 source_kind 模式真实回执形状(见 pipeline/api.py)。"""
+    body = {
+        "ok": True, "request_id": "pipeline-screen-0123456789abcdef",
+        "mode": "source_kind", "source_kind": "v4", "status": "awaiting_approval",
+        "batch_id": "batch-abcdef0123456789",
+        "candidate_plan_digest": "batch-abcdef0123456789",
+        "cost_preview": {
+            "schema_version": "1", "n_codes": 3, "per_lane_llm_nodes": 6,
+            "total_llm_nodes": 18, "per_lane_budget_tokens": 120000,
+            "total_budget_tokens": 360000, "per_lane_budget_llm_invocations": 9,
+            "total_budget_llm_invocations": 27, "per_lane_max_concurrency": 2,
+            "badges": ["auxiliary_evidence_unwired_v1"]},
+        "lanes": [
+            {"lane_index": 0, "code": "SH600519", "request_id": "req-0",
+             "draft_id": "plan-lane-0", "run_id": "run-lane-0",
+             "candidate_plan_digest": "digest0000"},
+            {"lane_index": 1, "code": "SZ000630", "request_id": "req-1",
+             "draft_id": "plan-lane-1", "run_id": "run-lane-1",
+             "candidate_plan_digest": "digest1111"},
+            {"lane_index": 2, "code": "BJ920807", "request_id": "req-2",
+             "draft_id": "plan-lane-2", "run_id": "run-lane-2",
+             "candidate_plan_digest": "digest2222"},
+        ],
+        "outcomes": ["pending", "pending", "pending"],
+        "badges": ["stale_ranking:1d"], "slate_badges": ["unmappable_codes:2"],
+        "slate_ref": {"object_id": "obj-1", "content_digest": "cd-1"},
+        "approval_policy": "REQUIRED",
+    }
+    if replayed:
+        body["replayed"] = True
+    return body
+
+
+def test_ww_orchestrate_and_ta_ingest_rows_registered():
+    """五处同步①:四行进 WW_TOOL_TABLE(confirm 门 + reachable 逐条)+ 派生进 CONSOLE_ALLOWED。"""
+    import guanlan_v2.console.tools as ct
+    by = {t["name"]: t for t in ct.WW_TOOL_TABLE}
+    for name in ("ww_orchestrate_start", "ww_orchestrate_status",
+                 "ww_orchestrate_runs", "ww_ta_ingest"):
+        assert name in by and name in ct.CONSOLE_ALLOWED
+    # 花钱/写盘的两个必须确认门;两个只读投影不设门
+    assert by["ww_orchestrate_start"]["confirm"] is True
+    assert by["ww_ta_ingest"]["confirm"] is True
+    assert by["ww_orchestrate_status"]["confirm"] is False
+    assert by["ww_orchestrate_runs"]["confirm"] is False
+    assert by["ww_orchestrate_start"]["reachable"] == ["/orchestration/pipeline/start"]
+    assert by["ww_orchestrate_status"]["reachable"] == [
+        "/orchestration/pipeline/state", "/orchestration/pipeline/screening/latest"]
+    assert by["ww_orchestrate_runs"]["reachable"] == ["/orchestration/pipeline/runs"]
+    assert by["ww_ta_ingest"]["reachable"] == ["/orchestration/pipeline/ta_ingest"]
+    # D7:署名强制进 schema(不是 impl 里偷偷补默认值)
+    assert by["ww_ta_ingest"]["input_schema"]["required"] == ["author", "text"]
+    # 三模式恰一(Task 9 的 exactly-one-of 契约)在 schema 里对 agent 显形
+    start_props = by["ww_orchestrate_start"]["input_schema"]["properties"]
+    assert {"goal", "preset_id", "source_kind"} <= set(start_props)
+    assert "required" not in by["ww_orchestrate_start"]["input_schema"]
+
+
+def test_ww_orchestrate_start_passthrough_and_full_content_through_wrap(monkeypatch):
+    """start:body 逐字透传 → 回执经真 _wrap 全量可见(成本预览逐字 + 每条 lane),
+    且**只 POST /start 一次**——绝不顺手审批(P10 人审设计的地基)。"""
+    import guanlan_v2.console.tools as ct
+    posts, gets = [], []
+
+    def fake_post(path, payload, timeout=120):
+        posts.append((path, payload))
+        return _orch_start_response()
+
+    def fake_get(path, timeout=30):
+        gets.append(path)
+        return {"ok": True}
+    monkeypatch.setattr(ct, "_self_post", fake_post)
+    monkeypatch.setattr(ct, "_self_get", fake_get)
+    tr = ct._wrap(ct.orchestrate_start_impl)(source_kind="v4", top_n=3)
+    assert not tr.is_error
+    assert posts == [("/orchestration/pipeline/start", {"source_kind": "v4", "top_n": 3})]
+    assert gets == []                                     # 零额外调用 = 零审批动作
+    # 诚实口径:受理 ≠ 批准
+    assert "已受理,等待审批卡人审" in tr.content
+    assert "awaiting_approval" in tr.content
+    assert "pipeline-screen-0123456789abcdef" in tr.content
+    # 成本预览逐字(人审的全部图景)
+    assert "360000" in tr.content and "27" in tr.content and "n_codes" in tr.content
+    assert "auxiliary_evidence_unwired_v1" in tr.content
+    # 三条 lane 逐条可见 + 徽章
+    for code in ("SH600519", "SZ000630", "BJ920807"):
+        assert code in tr.content
+    assert "stale_ranking:1d" in tr.content and "unmappable_codes:2" in tr.content
+    assert len(tr.content) > 400                          # 未被 json[:400] 兜底截断
+
+
+def test_ww_orchestrate_start_replayed_receipt_is_labelled(monkeypatch):
+    """幂等门:re-POST 回放既有回执 → 明说是重放,绝不谎称新受理了一批。"""
+    import guanlan_v2.console.tools as ct
+    monkeypatch.setattr(ct, "_self_post",
+                        lambda path, payload, timeout=120: _orch_start_response(replayed=True))
+    out = ct.orchestrate_start_impl(source_kind="v4")
+    assert out["ok"] is True and "幂等重放" in out["content"]
+
+
+def test_ww_orchestrate_start_requires_exactly_one_mode(monkeypatch):
+    """exactly-one-of:零个 / 两个模式 → 本地诚实拒绝,一次 HTTP 都不打。"""
+    import guanlan_v2.console.tools as ct
+
+    def _boom(*a, **k):
+        raise AssertionError("不该打后端")
+    monkeypatch.setattr(ct, "_self_post", _boom)
+    none_out = ct.orchestrate_start_impl()
+    two_out = ct.orchestrate_start_impl(goal="随便看看", source_kind="v4")
+    assert none_out["ok"] is False and "恰一个" in none_out["content"]
+    assert two_out["ok"] is False and "goal" in two_out["content"] and "source_kind" in two_out["content"]
+
+
+def test_ww_orchestrate_start_unwired_503_is_honest(monkeypatch):
+    """未接线 503(*_unwired)→ is_error + 原因原文,绝不伪造受理回执。"""
+    import guanlan_v2.console.tools as ct
+
+    def _raise(path, payload, timeout=120):
+        raise RuntimeError('HTTP 503: {"ok": false, "reason": "ranking_reader_unwired"}')
+    monkeypatch.setattr(ct, "_self_post", _raise)
+    tr = ct._wrap(ct.orchestrate_start_impl)(source_kind="v4")
+    assert tr.is_error is True
+    assert "ranking_reader_unwired" in tr.content
+    assert "未受理" in tr.content
+    assert "awaiting_approval" not in tr.content          # 不冒充受理
+
+
+def test_ww_orchestrate_status_joins_matching_slate_through_wrap(monkeypatch):
+    """status:按 request_id 读 /state;该请求带 batch_id 时联查 /screening/latest,
+    批次相符才展示成品(逐条 entry + 免责横幅),经真 _wrap 全量可见。"""
+    import guanlan_v2.console.tools as ct
+    seen = []
+
+    def fake_get(path, timeout=30):
+        seen.append(path)
+        if path.startswith("/orchestration/pipeline/state"):
+            return {"ok": True, "state": {
+                "request_id": "pipeline-screen-01", "mode": "source_kind",
+                "status": "awaiting_approval", "as_of": "2026-07-28T00:00:00+08:00",
+                "created_at": "2026-07-28T09:00:00+08:00", "batch_id": "batch-1",
+                "lanes": [{"lane_index": 0, "code": "SH600519", "run_id": "run-0"}]},
+                "runs": [{"run_id": "run-0", "status": "completed"},
+                         {"run_id": "run-1", "status": "in_progress"}]}
+        return {"ok": True, "slate": {
+            "as_of": "2026-07-28T00:00:00+08:00", "batch_id": "batch-1",
+            "archive_id": "rec-2026-07-28-batch-1",
+            "advisory_banner": "本推荐单仅供研究参考,绝非投资建议",
+            "entries": [
+                {"code": "SH600519", "lane_index": 0, "rating": "强",
+                 "research_plan_digest": "d0"},
+                {"code": "SZ000630", "lane_index": 1, "rating": "中",
+                 "research_plan_digest": "d1"}],
+            "degraded": [{"lane_index": 2, "code": "BJ920807"}],
+            "badges": ["stale_ranking:1d", "unmappable_codes:2"]}}
+    monkeypatch.setattr(ct, "_self_get", fake_get)
+    tr = ct._wrap(ct.orchestrate_status_impl)(request_id="pipeline-screen-01")
+    assert not tr.is_error
+    assert seen == ["/orchestration/pipeline/state?request_id=pipeline-screen-01",
+                    "/orchestration/pipeline/screening/latest"]
+    assert "awaiting_approval" in tr.content
+    assert "run-0" in tr.content and "completed" in tr.content
+    assert "run-1" in tr.content and "in_progress" in tr.content
+    assert "本推荐单仅供研究参考,绝非投资建议" in tr.content     # 免责横幅置顶,绝不吞
+    assert "SH600519" in tr.content and "SZ000630" in tr.content
+    assert "BJ920807" in tr.content and "降级" in tr.content     # 降级车道诚实显形
+    assert "stale_ranking:1d" in tr.content
+    assert len(tr.content) > 400
+
+
+def test_ww_orchestrate_status_foreign_slate_is_not_claimed(monkeypatch):
+    """成品属于另一批次 → 诚实说明本批未落档,绝不把别批成品挂在本请求名下。"""
+    import guanlan_v2.console.tools as ct
+
+    def fake_get(path, timeout=30):
+        if path.startswith("/orchestration/pipeline/state"):
+            return {"ok": True, "state": {"request_id": "r1", "mode": "source_kind",
+                                          "status": "awaiting_approval", "batch_id": "batch-1"},
+                    "runs": []}
+        return {"ok": True, "slate": {"batch_id": "batch-OTHER", "as_of": "x",
+                                      "archive_id": "a", "advisory_banner": "b",
+                                      "entries": [{"code": "SH600000", "lane_index": 0,
+                                                   "rating": "强", "research_plan_digest": "z"}],
+                                      "degraded": [], "badges": []}}
+    monkeypatch.setattr(ct, "_self_get", fake_get)
+    out = ct.orchestrate_status_impl(request_id="r1")
+    assert out["ok"] is True
+    assert "batch-OTHER" in out["content"] and "本批尚未落档" in out["content"]
+    assert "SH600000" not in out["content"]              # 别批的票绝不冒充本批成品
+
+
+def test_ww_orchestrate_status_requires_request_id(monkeypatch):
+    import guanlan_v2.console.tools as ct
+
+    def _boom(*a, **k):
+        raise AssertionError("不该打后端")
+    monkeypatch.setattr(ct, "_self_get", _boom)
+    out = ct.orchestrate_status_impl(request_id="")
+    assert out["ok"] is False and "request_id" in out["content"]
+
+
+def test_ww_orchestrate_status_unknown_request_is_honest(monkeypatch):
+    """404 unknown_request → is_error,原因原文,绝不编造一个进行中的 run。"""
+    import guanlan_v2.console.tools as ct
+
+    def _raise(path, timeout=30):
+        raise RuntimeError('HTTP 404: {"ok": false, "reason": "unknown_request"}')
+    monkeypatch.setattr(ct, "_self_get", _raise)
+    tr = ct._wrap(ct.orchestrate_status_impl)(request_id="nope")
+    assert tr.is_error is True and "unknown_request" in tr.content
+
+
+def test_ww_orchestrate_runs_lists_all_rows_through_wrap(monkeypatch):
+    """runs:12 条受理记录经真 _wrap 后逐条可见(不被 json[:400] 截断)+ limit 透传。"""
+    import guanlan_v2.console.tools as ct
+    seen = {}
+
+    def fake_get(path, timeout=30):
+        seen["path"] = path
+        return {"ok": True, "runs": [
+            {"request_id": f"pipeline-screen-{i:04d}", "mode": "source_kind",
+             "status": "awaiting_approval", "as_of": f"2026-07-{i + 1:02d}"}
+            for i in range(12)]}
+    monkeypatch.setattr(ct, "_self_get", fake_get)
+    tr = ct._wrap(ct.orchestrate_runs_impl)(limit=12)
+    assert not tr.is_error
+    assert seen["path"] == "/orchestration/pipeline/runs?limit=12"
+    for i in range(12):
+        assert f"pipeline-screen-{i:04d}" in tr.content
+    assert len(tr.content) > 400
+
+
+def test_ww_orchestrate_runs_empty_is_honest(monkeypatch):
+    import guanlan_v2.console.tools as ct
+    monkeypatch.setattr(ct, "_self_get", lambda path, timeout=30: {"ok": True, "runs": []})
+    out = ct.orchestrate_runs_impl()
+    assert out["ok"] is True and "暂无" in out["content"]
+
+
+def test_ww_ta_ingest_receipt_through_wrap_and_text_not_echoed(monkeypatch):
+    """ta_ingest:回执(TaSubmission)经真 _wrap 全量可见;投稿正文只留摘要 digest,
+    绝不回显(FSI:外部文本是数据不是指令,不进任何 prompt 回路)。"""
+    import guanlan_v2.console.tools as ct
+    posts = []
+    secret = "外部技术分析正文" * 60                       # 远超 400 字
+
+    def fake_post(path, payload, timeout=120):
+        posts.append((path, payload))
+        return {"ok": True, "deduplicated": False, "file": "20260728T010203Z_ab12cd34.json",
+                "submission": {"schema_version": "1", "author": "老王",
+                               "title": "缺口理论笔记", "submitted_at": "2026-07-28T09:02:03+08:00",
+                               "text_digest": "ab12cd34" * 8, "status": "pending"}}
+    monkeypatch.setattr(ct, "_self_post", fake_post)
+    tr = ct._wrap(ct.ta_ingest_impl)(author="老王", title="缺口理论笔记", text=secret)
+    assert not tr.is_error
+    assert posts[0][0] == "/orchestration/pipeline/ta_ingest"
+    assert posts[0][1] == {"author": "老王", "title": "缺口理论笔记", "text": secret}
+    assert "老王" in tr.content and "缺口理论笔记" in tr.content
+    assert "20260728T010203Z_ab12cd34.json" in tr.content
+    assert ("ab12cd34" * 8) in tr.content and "pending" in tr.content
+    assert secret not in tr.content                       # 正文不回显
+    assert "人审" in tr.content                            # 收件箱 ≠ 已采纳
+
+
+def test_ww_ta_ingest_dedup_is_labelled(monkeypatch):
+    """内容幂等:同稿重投回既有回执 → 明说去重命中,绝不谎称又收了一份。"""
+    import guanlan_v2.console.tools as ct
+    monkeypatch.setattr(ct, "_self_post", lambda path, payload, timeout=120: {
+        "ok": True, "deduplicated": True, "file": "old.json",
+        "submission": {"author": "老王", "title": None, "submitted_at": "t",
+                       "text_digest": "d", "status": "pending"}})
+    out = ct.ta_ingest_impl(author="老王", text="正文")
+    assert out["ok"] is True and "去重" in out["content"]
+
+
+def test_ww_ta_ingest_missing_author_or_text_refused_locally(monkeypatch):
+    """D7 署名强制 + 正文非空:本地先拒,一次 HTTP 都不打(绝不匿名投稿)。"""
+    import guanlan_v2.console.tools as ct
+
+    def _boom(*a, **k):
+        raise AssertionError("不该打后端")
+    monkeypatch.setattr(ct, "_self_post", _boom)
+    no_author = ct.ta_ingest_impl(author="  ", text="正文")
+    no_text = ct.ta_ingest_impl(author="老王", text="   ")
+    assert no_author["ok"] is False and "署名" in no_author["content"]
+    assert no_text["ok"] is False and "正文" in no_text["content"]
+
+
+def test_ww_ta_ingest_422_is_honest(monkeypatch):
+    """后端 422(missing_author 等)→ is_error + 原文,绝不伪造收件回执。"""
+    import guanlan_v2.console.tools as ct
+
+    def _raise(path, payload, timeout=120):
+        raise RuntimeError('HTTP 422: {"ok": false, "reason": "missing_author"}')
+    monkeypatch.setattr(ct, "_self_post", _raise)
+    tr = ct._wrap(ct.ta_ingest_impl)(author="老王", text="正文")
+    assert tr.is_error is True and "missing_author" in tr.content
+
+
+def test_p10_tools_are_zero_llm_passthrough():
+    """红线:四个工具纯透传——源码里不得出现任何 LLM 调用/审批动作。"""
+    import inspect
+    import guanlan_v2.console.tools as ct
+    for fn in (ct.orchestrate_start_impl, ct.orchestrate_status_impl,
+               ct.orchestrate_runs_impl, ct.ta_ingest_impl):
+        src = inspect.getsource(fn)
+        for banned in ("llm", "chat_once", "BuddyAgent", "approve", "admit_after_approval"):
+            assert banned not in src, f"{fn.__name__} 触碰了 {banned}"

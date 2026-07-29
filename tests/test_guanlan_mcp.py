@@ -10,7 +10,10 @@ def test_build_mcp_tools_derivation():
     assert "ww_plan_update" not in names and "ww_show_page" not in names and "ww_seats_bind" not in names      # 去除 console-UI-only & 前端信封
     assert (ww - {"ww_plan_update", "ww_show_page", "ww_seats_bind"}) <= names                  # 其余 ww_ 全在
     assert {"alpha_list", "alpha_compare", "alpha_forge", "factor_report"} <= names
-    assert len(tools) == 62                                                    # 55 ww_(58−3 excluded) + 7 alpha-zoo
+    assert len(tools) == 66                                                    # 59 ww_(62−3 excluded) + 7 alpha-zoo
+    # P10 Task 10 的四个新工具都不在 _EXCLUDED(非 console-UI-only / 非前端信封),故自动全进 MCP
+    assert {"ww_orchestrate_start", "ww_orchestrate_status",
+            "ww_orchestrate_runs", "ww_ta_ingest"} <= names
 
 
 def test_build_mcp_tools_annotations_and_gate():
@@ -68,7 +71,7 @@ def test_build_server_prewarms_decls():
     import guanlan_v2.glmcp.server as ms
     ms._DECLS = None
     ms.build_server()
-    assert ms._DECLS is not None and len(ms._DECLS) == 62
+    assert ms._DECLS is not None and len(ms._DECLS) == 66
 
 
 def test_build_mcp_http_app_is_starlette():
@@ -97,7 +100,7 @@ def test_mcp_excludes_frontend_envelope_tools():
     names = {t["name"] for t in build_mcp_tools()}
     assert "ww_seats_bind" not in names
     assert "ww_report_run" in names          # 研报经 detached 子进程真跑,保留(gated)
-    assert len(names) == 62
+    assert len(names) == 66
 
 
 def test_spawn_background_report_branch(monkeypatch):
