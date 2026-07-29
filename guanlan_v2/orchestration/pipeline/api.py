@@ -20,11 +20,16 @@ REQUIRED-approval candidate paths and STOPS at registration:
   only writes that survive are the idempotent content-addressed input commits
   (candidate slate + per-code subjects) and the run-budget binding, both
   harmless to replay.
-* ``preset_id`` — the Task-6 sealed deep-decide preset is materialized for one
-  run-scoped subject (missing subject / context / naive clock → typed 4xx) and
-  ONE provenance-true reviewer card is registered (the Task-7 live_decide card
+* ``preset_id`` — a sealed deep-decide preset is materialized for one run-scoped
+  subject (missing subject / context / naive clock → typed 4xx) and ONE
+  provenance-true reviewer card is registered (the Task-7 live_decide card
   reconciliation: the sealed card vocabulary carries preset provenance only on
-  ``PRESET_FALLBACK``).
+  ``PRESET_FALLBACK``). BOTH sealed generations are admissible here (route A):
+  the reviewed ten-node ``pipeline.luozi_deep_decide`` — which support-refuses in
+  production, honestly, on the ``pv.technical`` / ``text.news`` grant gap — and
+  the eight-node ``pipeline.luozi_deep_decide_reduced``, whose every product
+  (badges, ``evidence_note``, the card's own rendered markdown) states what its
+  debate never saw.
 * ``goal`` — the Phase-7 dynamic planner path through the injected
   ``planner_runner`` seam (the reviewed ``run_planner`` call shape); a
   ``candidate_ready`` draft becomes ONE pending DYNAMIC card. Production
@@ -128,8 +133,13 @@ from guanlan_v2.orchestration.pipeline.contracts import (
 )
 from guanlan_v2.orchestration.pipeline.deep_decide import (
     DEEP_DECIDE_PRESET_ID,
+    DEEP_DECIDE_PRESET_IDS,
+    REDUCED_DEEP_DECIDE_PRESET_ID,
+    REDUCED_EVIDENCE_NOTE,
     DeepDecideError,
     materialize_deep_decide_draft,
+    reduced_evidence_badges,
+    render_reduced_evidence_banner,
 )
 from guanlan_v2.orchestration.pipeline.screening import (
     CANDIDATE_SLATE_SCHEMA_REF,
@@ -215,7 +225,8 @@ class PipelineRouterDeps:
 
     #: the Phase-9 ``RuntimeStores`` (durable in production, in-memory in tests).
     stores: Any = None
-    #: the sealed Phase-10 preset registry (v1 baseline + both v2 presets).
+    #: the sealed Phase-10 preset registry (v1 baseline + every committed v2
+    #: preset: the screening lane + both deep-decide generations).
     preset_registry: Any = None
     #: the sealed ``WorkerCatalogSnapshot`` the drafts bind.
     catalog: Any = None
@@ -432,7 +443,8 @@ def _resolve_snapshot(d: Any):
 
 
 def _deep_pending_card(*, draft, request, candidate_plan_digest, diff, diff_ref,
-                       preset_record_digest, run_id, requested_at) -> PendingPlanApproval:
+                       preset_record_digest, run_id, requested_at,
+                       preset_id=DEEP_DECIDE_PRESET_ID) -> PendingPlanApproval:
     """The deep-decide reviewer card (the Task-7 live_decide reconciliation).
 
     The deep draft is ``source=PRESET`` (Task 6), but the sealed card vocabulary
@@ -440,6 +452,10 @@ def _deep_pending_card(*, draft, request, candidate_plan_digest, diff, diff_ref,
     — the provenance pair itself (preset id + record digest) is exact and is what
     a lease matches on. Unlike live_decide's in-memory card, the diff ref here is
     REALLY committed (the Task-3 committed-ref idiom), so the card resolves.
+
+    路线 A: a reduced-evidence candidate's ``rendered_md`` OPENS with the
+    missing-evidence banner (the same one live_decide's card carries) — nobody
+    approves a reduced-evidence deep run without reading what it never saw.
     """
     return PendingPlanApproval(
         request_id=request.request_id,
@@ -452,12 +468,13 @@ def _deep_pending_card(*, draft, request, candidate_plan_digest, diff, diff_ref,
         budget_request_tokens=draft.budget_request_tokens,
         budget_request_llm_invocations=draft.budget_request_llm_invocations,
         plan_diff_ref=diff_ref,
-        rendered_md=render_plan_diff_md(diff),
+        rendered_md=(render_reduced_evidence_banner(preset_id)
+                     + render_plan_diff_md(diff)),
         rendered_from_diff_digest=diff.semantic_digest(),
         planner_rationale=None,
         candidate_id=f"pipeline-card.{candidate_plan_digest[:16]}",
         requested_at=requested_at,
-        preset_id=DEEP_DECIDE_PRESET_ID,
+        preset_id=preset_id,
         preset_record_digest=preset_record_digest)
 
 
@@ -712,9 +729,11 @@ def _start_source_kind(d: Any, body: Mapping[str, Any]) -> JSONResponse:
 
 def _start_preset(d: Any, body: Mapping[str, Any]) -> JSONResponse:
     preset_id = str(body.get("preset_id") or "").strip()
-    if preset_id != DEEP_DECIDE_PRESET_ID:
+    if preset_id not in DEEP_DECIDE_PRESET_IDS:
         return _fail("unsupported_preset", 422, detail=(
-            f"only {DEEP_DECIDE_PRESET_ID!r} starts through the preset door "
+            f"only {DEEP_DECIDE_PRESET_ID!r} (ten-node) and "
+            f"{REDUCED_DEEP_DECIDE_PRESET_ID!r} (eight-node reduced evidence) "
+            "start through the preset door "
             "(the screening lane starts through source_kind)"))
     refused = _unwired(d, *_PRESET_DEPS)
     if refused is not None:
@@ -750,7 +769,11 @@ def _start_preset(d: Any, body: Mapping[str, Any]) -> JSONResponse:
     replay = _replay_receipt(d, request_id)
     if replay is not None:
         return replay
-    run_id = f"pipeline-deep-{content_digest([subject.code, session_date])[:12]}"
+    # the preset id is part of the run identity (route A): two generations of the
+    # deep graph under the same code+session are genuinely different runs, and
+    # they must not share a budget ledger, a reservation or a receipt.
+    run_id = "pipeline-deep-" + content_digest(
+        [preset_id, subject.code, session_date])[:12]
 
     subject_ref = d.subject_committer(subject)
     request = OrchestrationRequest(
@@ -759,6 +782,7 @@ def _start_preset(d: Any, body: Mapping[str, Any]) -> JSONResponse:
     try:
         materialized = materialize_deep_decide_draft(
             request=request, preset_registry=d.preset_registry,
+            preset_id=preset_id,
             context_snapshot_ref=ctx_ref, subject_ref=subject_ref,
             clock=d.clock, context=context, catalog=d.catalog,
             schema_registry=d.schema_registry, draft_id=f"plan-{run_id}",
@@ -767,14 +791,14 @@ def _start_preset(d: Any, body: Mapping[str, Any]) -> JSONResponse:
         return _fail("deep_decide_refused", 422,
                      detail=f"{type(exc).__name__}: {exc}")
     draft = materialized.draft
-    record_digest = d.preset_registry.get(DEEP_DECIDE_PRESET_ID).semantic_digest()
+    record_digest = d.preset_registry.get(preset_id).semantic_digest()
 
     def card_builder(*, draft, request, candidate_plan_digest, diff, diff_ref, now):
         return _deep_pending_card(
             draft=draft, request=request,
             candidate_plan_digest=candidate_plan_digest, diff=diff,
             diff_ref=diff_ref, preset_record_digest=record_digest,
-            run_id=run_id, requested_at=now)
+            run_id=run_id, requested_at=now, preset_id=preset_id)
 
     refusal, result = _single_plan_admit(
         d, request=request, draft=draft, context=context, now=now,
@@ -796,6 +820,10 @@ def _start_preset(d: Any, body: Mapping[str, Any]) -> JSONResponse:
         "badges": list(materialized.badges),
         "approval_policy": ApprovalPolicy.REQUIRED.value,
     }
+    if reduced_evidence_badges(preset_id):
+        # route A honesty red line: the reduced generation states, on its own
+        # receipt, what the debate this card admits will never see.
+        response["evidence_note"] = REDUCED_EVIDENCE_NOTE
     return _record_and_respond(
         d, request_id=request_id, mode="preset",
         as_of=context.data_context.as_of.isoformat(), now=now,

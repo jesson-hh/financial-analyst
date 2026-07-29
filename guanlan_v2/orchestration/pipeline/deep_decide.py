@@ -72,6 +72,21 @@ recorded here rather than papered over:
 :class:`MaterializedDeepDecide` (draft + subject ref + context ref + badges).
 Registration of ``PlanPresetRecord@2`` into the cumulative Phase-10 registry is
 the Phase-10 chain task's, exactly like Task 1's contracts.
+
+**路线 A (2026-07-29) — a SECOND sealed generation, never a weakening.** The
+ten-node preset above is honestly unsupported on the production chain forever
+(the ``pv.technical`` / ``text.news`` grant gap); the eight-node
+:data:`REDUCED_DEEP_DECIDE_PRESET_ID` drops exactly those two auxiliary readers
+and passes the same ``check_runtime_support``. Both live in this module and in
+the same committed ``v2/`` directory, selected per call through the
+``preset_id`` argument (default: the ten-node one — the deep lane never
+downgrades itself). The reduction is a fact about what the debate SAW, so it is
+badged on every product (:data:`REDUCED_EVIDENCE_BADGE`) and the record's worker
+set must prove the claim in both directions
+(:class:`EvidenceScopeMismatch`). The reduced preset is deliberately NOT
+referenced by the Phase-10 catalog (the screening-preset precedent): entering
+the catalog would move the sealed chain digests, which belongs to the re-freeze
+phase.
 """
 from __future__ import annotations
 
@@ -100,21 +115,36 @@ __all__ = [
     # identity
     "DEEP_DECIDE_PRESET_ID",
     "DEEP_DECIDE_PRESET_VERSION",
+    "DEEP_DECIDE_PRESET_IDS",
     "DEEP_DECIDE_DEBATE_ID",
     "DEEP_DECIDE_TERMINAL_NODE_ID",
     "DEEP_DECIDE_WORKER_IDS",
+    "REDUCED_DEEP_DECIDE_PRESET_ID",
+    "REDUCED_DEEP_DECIDE_PRESET_VERSION",
+    "REDUCED_DEEP_DECIDE_WORKER_IDS",
+    "REDUCED_EVIDENCE_DROPPED_WORKER_IDS",
     "RUN_SUBJECT_SCHEMA_REF",
     # committed source
     "DEEP_DECIDE_PRESET_FILE",
+    "REDUCED_DEEP_DECIDE_PRESET_FILE",
     # badges
     "CONTEXT_SNAPSHOT_STALE_BADGE",
     "CONTEXT_SNAPSHOT_DATA_DATE_BADGE_PREFIX",
     "SUBJECT_RUN_SCOPED_BADGE",
+    "REDUCED_EVIDENCE_BADGE",
+    "REDUCED_EVIDENCE_MISSING_BADGE",
+    "REDUCED_EVIDENCE_MISSING_BADGE_PREFIX",
+    "REDUCED_EVIDENCE_BADGES",
+    "REDUCED_EVIDENCE_NOTE",
+    "reduced_evidence_badges",
+    "render_reduced_evidence_banner",
     # errors
     "DeepDecideError",
     "SubjectRefused",
     "ContextSnapshotRefused",
     "ClockRefused",
+    "PresetSelectionRefused",
+    "EvidenceScopeMismatch",
     # surface
     "MaterializedDeepDecide",
     "materialize_deep_decide_draft",
@@ -155,6 +185,47 @@ DEEP_DECIDE_WORKER_IDS: tuple[str, ...] = (
 RUN_SUBJECT_SCHEMA_REF: SchemaRef = SchemaRef(name="RunSubject", version="1")
 
 
+# --------------------------------------------------------------------------- #
+# 路线 A — the REDUCED-EVIDENCE generation of the same graph                    #
+# --------------------------------------------------------------------------- #
+# The ten-node preset above can never pass ``check_runtime_support`` on the
+# production chain: ``pv.technical`` / ``text.news`` declare
+# ``evidence_policy.tool_calls = REQUIRED`` while the reviewed Phase-3 prefetch
+# table grants a data row to ``dec.pm`` only, so both raise
+# ``tool_calls_required_unmet`` before one LLM call happens. Closing that for
+# real needs the subject→data-bridge path (L1), a production data runtime (L2 —
+# which does not exist) and the grants + sealed-chain re-freeze (L3); see
+# ``docs/superpowers/specs/2026-07-29-post-p10-refreeze-design.md`` §1.5.
+#
+# Dropping exactly those two AUXILIARY evidence readers — they reach the debate
+# only through ``degrade`` dependencies, and the decision spine
+# ``sentiment → research-mgr → pm → trader`` never touches them — makes the same
+# support check green. That is route A: a SECOND sealed preset, never a
+# weakening of the first, and never a silent substitution for it.
+#
+# The whole point is a run that a human can honestly read, so the reduction is
+# NAMED on every product (:data:`REDUCED_EVIDENCE_BADGE`) and the materializer
+# refuses any record whose worker set contradicts its own badge.
+
+#: the reduced-evidence preset id (deliberately distinct — a duplicate id is a
+#: hard ``PlanPresetError`` in ``load_phase10_preset_registry``).
+REDUCED_DEEP_DECIDE_PRESET_ID: LogicalId = "pipeline.luozi_deep_decide_reduced"
+REDUCED_DEEP_DECIDE_PRESET_VERSION: str = "1"
+
+#: the two evidence readers the reduced generation does NOT run.
+REDUCED_EVIDENCE_DROPPED_WORKER_IDS: tuple[str, ...] = ("pv.technical", "text.news")
+
+#: the reduced generation's eight-worker set (the ruled ten minus those two).
+REDUCED_DEEP_DECIDE_WORKER_IDS: tuple[str, ...] = tuple(
+    w for w in DEEP_DECIDE_WORKER_IDS
+    if w not in REDUCED_EVIDENCE_DROPPED_WORKER_IDS)
+
+#: every preset id this module is willing to materialize (a closed vocabulary —
+#: an arbitrary registry entry can never be materialized through this door).
+DEEP_DECIDE_PRESET_IDS: tuple[LogicalId, ...] = (
+    DEEP_DECIDE_PRESET_ID, REDUCED_DEEP_DECIDE_PRESET_ID)
+
+
 # =========================================================================== #
 # committed source location                                                    #
 # =========================================================================== #
@@ -163,6 +234,11 @@ RUN_SUBJECT_SCHEMA_REF: SchemaRef = SchemaRef(name="RunSubject", version="1")
 #: beside ``PRODUCTION_PRESETS_DIR`` (they are preset-generation infrastructure,
 #: not deep-decide specifics — Task 3 binds the same loader).
 DEEP_DECIDE_PRESET_FILE: Path = PHASE10_PRESETS_V2_DIR / "luozi_deep_decide_v1.json"
+
+#: the committed source of the reduced-evidence generation (same directory, same
+#: loader, its own preset id and its own hand-frozen record digest).
+REDUCED_DEEP_DECIDE_PRESET_FILE: Path = (
+    PHASE10_PRESETS_V2_DIR / "luozi_deep_decide_reduced_v1.json")
 
 
 # =========================================================================== #
@@ -178,6 +254,29 @@ CONTEXT_SNAPSHOT_DATA_DATE_BADGE_PREFIX: str = "context_snapshot_data_date:"
 #: ALWAYS emitted: the subject is run-scoped (reality 4). It names the deferred
 #: assembly-threading seam instead of implying a plan-level binding.
 SUBJECT_RUN_SCOPED_BADGE: str = "subject_run_scoped_v1"
+
+#: THE HONESTY RED LINE of route A — emitted on EVERY product of the reduced
+#: preset (materialization, seats ledger row, advisory order record, reviewer
+#: card). Whoever reads a reduced-evidence deep verdict must be able to see that
+#: the debate never saw technical indicators and never saw any news.
+REDUCED_EVIDENCE_BADGE: str = "reduced_evidence_preset_v1"
+
+#: accompanies it, naming the absent evidence readers by worker id.
+REDUCED_EVIDENCE_MISSING_BADGE_PREFIX: str = "reduced_evidence_missing:"
+REDUCED_EVIDENCE_MISSING_BADGE: str = (
+    REDUCED_EVIDENCE_MISSING_BADGE_PREFIX
+    + ",".join(REDUCED_EVIDENCE_DROPPED_WORKER_IDS))
+
+#: the pair, in the order every product carries them.
+REDUCED_EVIDENCE_BADGES: tuple[str, ...] = (
+    REDUCED_EVIDENCE_BADGE, REDUCED_EVIDENCE_MISSING_BADGE)
+
+#: the human-readable half of the same statement (rows / cards / responses).
+REDUCED_EVIDENCE_NOTE: str = (
+    "减证据版深链(八节点):本次辩论与 PM 判断从未见过技术指标证据"
+    "(缺 pv.technical),也从未见过任何新闻证据(缺 text.news)。"
+    "这不是运行时降级失败,是这份预案本身就没有这两个节点——请据此打折看待结论。"
+)
 
 
 # =========================================================================== #
@@ -214,6 +313,28 @@ class ClockRefused(DeepDecideError):
     """
 
 
+class PresetSelectionRefused(DeepDecideError):
+    """The caller named a preset this module will not materialize.
+
+    Either an id outside :data:`DEEP_DECIDE_PRESET_IDS`, or (in the live path's
+    env-driven selection) an unrecognized spelling. Refused rather than
+    defaulted: a typo must never silently pick an evidence scope, in either
+    direction — the reduced lane is opt-in, and the full lane's honest refusal
+    is a real product, not a fallback.
+    """
+
+
+class EvidenceScopeMismatch(DeepDecideError):
+    """The registered record's worker set contradicts the preset id's badge.
+
+    :data:`REDUCED_EVIDENCE_BADGE` is a CLAIM about what the debate saw, so the
+    graph must prove it, in both directions: a record registered under the
+    reduced id may not carry the dropped evidence readers (the badge would be a
+    lie), and a record registered under the full id may not have quietly lost
+    them (an un-badged verdict would silently be a reduced one).
+    """
+
+
 @runtime_checkable
 class _Clock(Protocol):
     """The authoritative clock port (``now() -> datetime``); never a module global."""
@@ -221,6 +342,39 @@ class _Clock(Protocol):
     def now(self) -> Any:  # pragma: no cover - structural protocol
         ...
 
+
+
+# =========================================================================== #
+# reduced-evidence badge helpers (one authority, three consumers)               #
+# =========================================================================== #
+def reduced_evidence_badges(preset_id: LogicalId) -> tuple[str, ...]:
+    """The reduced-evidence badge pair for ``preset_id`` (empty for the full one).
+
+    The ONE authority every surface reads — materialization, the seats rows, the
+    reviewer card and the router response — so the badge can never be present on
+    one product and missing from another.
+    """
+    if preset_id == REDUCED_DEEP_DECIDE_PRESET_ID:
+        return REDUCED_EVIDENCE_BADGES
+    return ()
+
+
+def render_reduced_evidence_banner(preset_id: LogicalId) -> str:
+    """The reviewer-card markdown banner for ``preset_id`` (``""`` for the full one).
+
+    Prepended to the rendered plan diff so a human approving a deep candidate
+    reads the missing-evidence statement BEFORE the graph, not after it.
+    """
+    if preset_id != REDUCED_DEEP_DECIDE_PRESET_ID:
+        return ""
+    return (
+        f"> ⚠️ **{REDUCED_EVIDENCE_BADGE}** — {REDUCED_EVIDENCE_NOTE}\n"
+        f">\n"
+        f"> 缺席节点:`"
+        + "` / `".join(REDUCED_EVIDENCE_DROPPED_WORKER_IDS)
+        + "`(它们的 `tool_calls=REQUIRED` 在当前审阅过的数据授权下无法满足,"
+        "十节点版因此在生产上恒被诚实拒绝)。\n\n"
+    )
 
 
 # =========================================================================== #
@@ -240,6 +394,10 @@ class MaterializedDeepDecide:
     subject_ref: TypedPayloadRef
     context_snapshot_ref: PayloadRef
     badges: tuple[str, ...] = ()
+    #: WHICH sealed generation produced this draft (route A's evidence scope).
+    #: Defaulted to the full one so every pre-route-A construction keeps meaning
+    #: exactly what it meant.
+    preset_id: LogicalId = DEEP_DECIDE_PRESET_ID
 
 
 # =========================================================================== #
@@ -265,6 +423,8 @@ def materialize_deep_decide_draft(
     schema_registry: SchemaRegistry,
     draft_id: LogicalId,
     run_id: NonEmptyStr,
+    # -- route A: WHICH sealed generation (default = the reviewed ten-node one) - #
+    preset_id: LogicalId = DEEP_DECIDE_PRESET_ID,
 ) -> MaterializedDeepDecide:
     """Materialize the sealed deep-decide preset into a ``source=PRESET`` draft.
 
@@ -288,8 +448,16 @@ def materialize_deep_decide_draft(
     :data:`CONTEXT_SNAPSHOT_STALE_BADGE` (+ the dated detail) whenever the
     snapshot's +08:00 session date is BEHIND the clock's session date. A snapshot
     dated at or after the session is never badged stale — honest in both
-    directions.
+    directions. Under ``preset_id=REDUCED_DEEP_DECIDE_PRESET_ID`` the
+    :data:`REDUCED_EVIDENCE_BADGES` pair is added — and the record's worker set
+    must agree with that claim (:class:`EvidenceScopeMismatch` otherwise).
     """
+    # -- 0. the closed preset vocabulary (route A) --------------------------- #
+    if preset_id not in DEEP_DECIDE_PRESET_IDS:
+        raise PresetSelectionRefused(
+            f"{preset_id!r} is not a deep-decide preset; this materializer only "
+            f"serves {', '.join(repr(p) for p in DEEP_DECIDE_PRESET_IDS)}")
+
     # -- 1. the run-scoped subject (required, schema-pinned) ------------------ #
     if subject_ref is None:
         raise SubjectRefused(
@@ -321,12 +489,29 @@ def materialize_deep_decide_draft(
             "ContextSnapshot content")
 
     # -- 3. the sealed record (must be the v2 generation) -------------------- #
-    record = preset_registry.get(DEEP_DECIDE_PRESET_ID)
+    record = preset_registry.get(preset_id)
     if not isinstance(record, PlanPresetRecordV2):
         raise DeepDecideError(
-            f"{DEEP_DECIDE_PRESET_ID!r} must be a PlanPresetRecordV2 "
+            f"{preset_id!r} must be a PlanPresetRecordV2 "
             f"({PLAN_PRESET_RECORD_V2_SCHEMA_REF.key}); the registered record is a "
             f"{type(record).__name__} and cannot carry this graph's debate")
+
+    # -- 3b. the evidence-scope claim, proved by the graph (route A) --------- #
+    # the badge says what the debate did NOT see; the record must agree, or the
+    # badge (present or absent) is a lie. Refused in BOTH directions.
+    present = {node.worker_id for node in record.nodes}
+    dropped = set(REDUCED_EVIDENCE_DROPPED_WORKER_IDS)
+    if preset_id == REDUCED_DEEP_DECIDE_PRESET_ID and (present & dropped):
+        raise EvidenceScopeMismatch(
+            f"the record registered as {preset_id!r} still runs "
+            f"{', '.join(sorted(present & dropped))} — a reduced-evidence badge "
+            "over a graph that DOES read that evidence would be a lie")
+    if preset_id == DEEP_DECIDE_PRESET_ID and not dropped <= present:
+        raise EvidenceScopeMismatch(
+            f"the record registered as {preset_id!r} no longer runs "
+            f"{', '.join(sorted(dropped - present))}; a full-evidence (un-badged) "
+            f"verdict must never come out of a reduced graph — register it as "
+            f"{REDUCED_DEEP_DECIDE_PRESET_ID!r} instead")
 
     # -- 4. final-workers-only catalog-role gate (before any construction) ---- #
     worker_by_id = {w.id: w for w in catalog.workers}
@@ -353,6 +538,7 @@ def materialize_deep_decide_draft(
     session_date = session_date_of(now)
     snapshot_date = session_date_of(context.data_context.as_of)
     badges: list[str] = [SUBJECT_RUN_SCOPED_BADGE]
+    badges.extend(reduced_evidence_badges(preset_id))
     if snapshot_date < session_date:
         badges.append(CONTEXT_SNAPSHOT_STALE_BADGE)
         badges.append(f"{CONTEXT_SNAPSHOT_DATA_DATE_BADGE_PREFIX}{snapshot_date}")
@@ -391,4 +577,5 @@ def materialize_deep_decide_draft(
         subject_ref=subject_ref,
         context_snapshot_ref=context_snapshot_ref,
         badges=tuple(badges),
+        preset_id=preset_id,
     )

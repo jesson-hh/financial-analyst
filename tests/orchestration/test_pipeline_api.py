@@ -87,6 +87,8 @@ from guanlan_v2.orchestration.pipeline.contracts import (
 from guanlan_v2.orchestration.pipeline.deep_decide import (
     DEEP_DECIDE_PRESET_ID,
     DEEP_DECIDE_WORKER_IDS,
+    REDUCED_DEEP_DECIDE_PRESET_ID,
+    REDUCED_EVIDENCE_BADGE,
     materialize_deep_decide_draft,
 )
 from guanlan_v2.orchestration.pipeline.screening import (
@@ -634,6 +636,53 @@ class TestStartPreset:
         assert r.status_code == 422
         assert r.json()["reason"] == "unsupported_preset"
         assert DEEP_DECIDE_PRESET_ID in r.json()["detail"]
+
+    def test_the_reduced_evidence_preset_starts_and_cards_with_its_banner(
+            self, env, trimmed_catalog, tmp_path):
+        """路线 A through the SAME door: the eight-node generation is admissible
+        by preset_id and stops at ONE reviewer card whose rendered markdown opens
+        with the missing-evidence banner."""
+        e = _make_env(env, trimmed_catalog, tmp_path)
+        r = _client(e.deps).post(f"{API}/start", json={
+            "preset_id": REDUCED_DEEP_DECIDE_PRESET_ID, "code": "600519"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is True and body["status"] == "awaiting_approval"
+        assert body["preset_id"] == REDUCED_DEEP_DECIDE_PRESET_ID
+        assert body["outcome"] == "pending_human"
+        assert body["cost_preview"]["node_count"] == 8
+        assert body["cost_preview"]["budget_request_llm_invocations"] == 6
+        assert REDUCED_EVIDENCE_BADGE in body["badges"]
+        assert "pv.technical" in body["evidence_note"]
+        assert "text.news" in body["evidence_note"]
+
+        assert _journal_kinds(e.journal) == ["pending"]
+        reader = PlanApprovalCoordinator(
+            e.journal, admission=SimpleNamespace(), clock=e.clock,
+            verifier=None, console_emit=None)
+        card = reader.list_pending()[0]
+        assert card.preset_id == REDUCED_DEEP_DECIDE_PRESET_ID
+        assert "pv.technical" not in card.worker_ids
+        assert "text.news" not in card.worker_ids
+        assert REDUCED_EVIDENCE_BADGE in card.rendered_md.split("\n\n")[0]
+        # THE STOP LINE holds for the reduced generation too.
+        assert [ev for ev in e.stores.events.journal(body["run_id"], "main")
+                if ev.event_type is EventType.PLAN_FROZEN] == []
+
+    def test_the_two_deep_generations_get_distinct_run_and_request_ids(
+            self, env, trimmed_catalog, tmp_path):
+        """They must not share a budget ledger, a reservation or a receipt."""
+        e = _make_env(env, trimmed_catalog, tmp_path)
+        client = _client(e.deps)
+        full = client.post(f"{API}/start", json={
+            "preset_id": DEEP_DECIDE_PRESET_ID, "code": "600519"}).json()
+        reduced = client.post(f"{API}/start", json={
+            "preset_id": REDUCED_DEEP_DECIDE_PRESET_ID, "code": "600519"}).json()
+        assert full["run_id"] != reduced["run_id"]
+        assert full["request_id"] != reduced["request_id"]
+        assert full["candidate_plan_digest"] != reduced["candidate_plan_digest"]
+        assert not (set(full["badges"]) & {REDUCED_EVIDENCE_BADGE})
+        assert "evidence_note" not in full
 
     def test_a_missing_context_snapshot_is_a_typed_422(
             self, env, trimmed_catalog, tmp_path):

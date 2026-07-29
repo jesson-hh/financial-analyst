@@ -94,6 +94,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
@@ -124,14 +126,21 @@ from guanlan_v2.orchestration.pipeline import escalation as _escalation
 from guanlan_v2.orchestration.pipeline.contracts import RunSubject
 from guanlan_v2.orchestration.pipeline.deep_decide import (
     DEEP_DECIDE_PRESET_ID,
+    REDUCED_DEEP_DECIDE_PRESET_ID,
+    REDUCED_EVIDENCE_NOTE,
     RUN_SUBJECT_SCHEMA_REF,
     DeepDecideError,
+    PresetSelectionRefused,
     materialize_deep_decide_draft,
+    reduced_evidence_badges,
+    render_reduced_evidence_banner,
     session_date_of,
 )
 
 __all__ = [
     "DEEP_GOAL",
+    "DEEP_PRESET_ENV_VAR",
+    "DEEP_PRESET_ENV_CHOICES",
     "OUTCOME_COMPLETED",
     "OUTCOME_FAILED",
     "OUTCOME_NO_LEASE",
@@ -143,6 +152,7 @@ __all__ = [
     "ProductionStoresUnbound",
     "DeepDecideBindings",
     "make_orchestrated_decide",
+    "resolve_deep_preset_id",
     "build_production_bindings",
     "build_production_decide_fn",
 ]
@@ -171,6 +181,18 @@ _SESSION_TZ = timezone(timedelta(hours=8))
 #: quote ``fresh`` strings that mean NOT fresh (the boolean-contract coercion —
 #: a truthy string like ``"false"`` must never arm the band trigger).
 _FALSY_FRESH_STRINGS = frozenset({"", "0", "false", "no", "none", "null"})
+
+#: 路线 A — the ONE environment switch that selects the deep-decide generation.
+#: UNSET (or blank / ``full``) keeps the reviewed TEN-node preset, whose honest
+#: ``tool_calls_required_unmet`` refusal is the correct production behaviour and
+#: is never quietly downgraded; ``reduced`` is the explicit human opt-in to the
+#: eight-node reduced-evidence preset (every product badged, see deep_decide).
+DEEP_PRESET_ENV_VAR = "GUANLAN_SEATS_DEEP_PRESET"
+DEEP_PRESET_ENV_CHOICES: Mapping[str, str] = {
+    "": DEEP_DECIDE_PRESET_ID,
+    "full": DEEP_DECIDE_PRESET_ID,
+    "reduced": REDUCED_DEEP_DECIDE_PRESET_ID,
+}
 
 
 class ProductionStoresUnbound(RuntimeError):
@@ -354,6 +376,36 @@ class DeepDecideBindings:
     strat_fn: Callable[[str], Any] | None = None
     #: ``(code) -> decision rows`` — the seats decisions tail, READ BEFORE fast.
     decisions_tail_fn: Callable[[str], Sequence[Mapping[str, Any]]] | None = None
+    #: 路线 A — WHICH sealed deep generation this lane runs. The default is the
+    #: reviewed TEN-node preset, so a binding that says nothing keeps meaning
+    #: exactly what it meant before route A existed; production sets it from
+    #: :func:`resolve_deep_preset_id`.
+    preset_id: str = DEEP_DECIDE_PRESET_ID
+
+
+# =========================================================================== #
+# 路线 A — the preset selection seam (pure, env-driven, explicit opt-in)         #
+# =========================================================================== #
+def resolve_deep_preset_id(env: Mapping[str, str] | None = None) -> str:
+    """The deep-decide preset id this process should run (default: the full one).
+
+    ``env`` defaults to ``os.environ``. An unrecognized spelling is a typed
+    :class:`~guanlan_v2.orchestration.pipeline.deep_decide.PresetSelectionRefused`
+    rather than a silent fallback: choosing an evidence scope by accident is
+    exactly the failure this whole route is trying not to commit. The server
+    catches the refusal, logs it loudly and stays fast-only.
+    """
+    raw = (env if env is not None else os.environ).get(DEEP_PRESET_ENV_VAR, "")
+    key = str(raw or "").strip().lower()
+    try:
+        return DEEP_PRESET_ENV_CHOICES[key]
+    except KeyError:
+        raise PresetSelectionRefused(
+            f"{DEEP_PRESET_ENV_VAR}={raw!r} is not a recognized deep-decide "
+            "preset selection; accepted: "
+            + ", ".join(repr(k) for k in sorted(DEEP_PRESET_ENV_CHOICES) if k)
+            + " (unset = the reviewed ten-node preset). Refusing rather than "
+              "guessing which evidence scope you meant.") from None
 
 
 # =========================================================================== #
@@ -438,16 +490,21 @@ def _overlay_position(
     ]
 
 
-def _derive_run_id(canonical: str, session_date: str, report) -> str:
+def _derive_run_id(canonical: str, session_date: str, report,
+                   preset_id: str = DEEP_DECIDE_PRESET_ID) -> str:
     """The deterministic kernel run id = the escalation identity (invariant 1).
 
-    One deep run per ``(code, +08:00 session, fired trigger-kind set)``: a
-    re-tick of the same identity replays instead of re-running; a genuinely NEW
-    trigger kind the same day earns its own run.
+    One deep run per ``(code, +08:00 session, fired trigger-kind set, preset)``:
+    a re-tick of the same identity replays instead of re-running; a genuinely
+    NEW trigger kind the same day earns its own run. ``preset_id`` is part of the
+    identity (route A): two generations of the graph produce genuinely different
+    verdicts under different evidence, so a reduced run must never be replayed as
+    the receipt of a full one (or the reverse).
     """
     kinds = sorted({t.kind for t in report.triggers_hit})
     return "deep-" + content_digest(
-        {"code": canonical, "session": session_date, "triggers": kinds})[:16]
+        {"code": canonical, "session": session_date, "triggers": kinds,
+         "preset": preset_id})[:16]
 
 
 _SUBJECT_REGISTRY: SchemaRegistry | None = None
@@ -492,11 +549,17 @@ def _settled_llm(stores: Any, run_id: str, run_budget: RunBudget,
 
 
 def _build_pending_card(*, draft, request, candidate_plan_digest, diff,
-                        preset_record_digest, run_id, requested_at) -> PendingPlanApproval:
+                        preset_record_digest, run_id, requested_at,
+                        preset_id: str = DEEP_DECIDE_PRESET_ID) -> PendingPlanApproval:
     """The reviewer/lease card for the deep candidate (preset provenance exact).
 
     ``source=PRESET_FALLBACK`` is the sealed card vocabulary's only
     preset-provenance-bearing value — see the module docstring's reconciliation.
+
+    Route A: a reduced-evidence candidate's ``rendered_md`` OPENS with the
+    missing-evidence banner. ``rendered_from_diff_digest`` still pins the diff
+    the card was rendered from — the banner is an addition ABOVE the diff, never
+    an edit of it.
     """
     diff_digest = diff.semantic_digest()
     diff_ref = TypedPayloadRef(
@@ -515,12 +578,13 @@ def _build_pending_card(*, draft, request, candidate_plan_digest, diff,
         budget_request_tokens=draft.budget_request_tokens,
         budget_request_llm_invocations=draft.budget_request_llm_invocations,
         plan_diff_ref=diff_ref,
-        rendered_md=render_plan_diff_md(diff),
+        rendered_md=(render_reduced_evidence_banner(preset_id)
+                     + render_plan_diff_md(diff)),
         rendered_from_diff_digest=diff_digest,
         planner_rationale=None,
         candidate_id=f"cand-{run_id}",
         requested_at=requested_at,
-        preset_id=DEEP_DECIDE_PRESET_ID,
+        preset_id=preset_id,
         preset_record_digest=preset_record_digest)
 
 
@@ -641,7 +705,7 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
         return fast
 
     session_date = session_date_of(now)
-    run_id = _derive_run_id(canonical, session_date, report)
+    run_id = _derive_run_id(canonical, session_date, report, bindings.preset_id)
 
     # ── idempotent re-tick: the prior orchestrated row IS the receipt ──────── #
     for row in tail:
@@ -669,6 +733,7 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
         materialized = materialize_deep_decide_draft(
             request=request,
             preset_registry=bindings.preset_registry,
+            preset_id=bindings.preset_id,
             context_snapshot_ref=context_snapshot_ref,
             subject_ref=subject_ref,
             clock=bindings.clock,
@@ -717,8 +782,8 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
     pending = _build_pending_card(
         draft=draft, request=request, candidate_plan_digest=digest, diff=diff,
         preset_record_digest=bindings.preset_registry.get(
-            DEEP_DECIDE_PRESET_ID).semantic_digest(),
-        run_id=run_id, requested_at=now)
+            bindings.preset_id).semantic_digest(),
+        run_id=run_id, requested_at=now, preset_id=bindings.preset_id)
 
     def _approvals_sink(approval):
         approvals[(approval.request_id, approval.candidate_plan_digest)] = approval
@@ -798,6 +863,11 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
     try:
         proposal = _extract_proposal(artifact, bindings.schema_registry)
         tranches = _tranche_rows(proposal)
+        # 路线 A honesty red line: a reduced-evidence verdict must be readable AS
+        # reduced everywhere it lands — the ledger row, the advisory order record
+        # and (above) the reviewer card all carry the same named badge + note.
+        scope_badges = reduced_evidence_badges(bindings.preset_id)
+        scope_note = REDUCED_EVIDENCE_NOTE if scope_badges else None
         record = _only_present({
             "code": canonical,
             "name": fast.get("name") or payload.get("name"),
@@ -823,6 +893,9 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
             "asof": str(session_date),
             "run_id": run_id,
             "source": "orchestrated",
+            "preset_id": bindings.preset_id,
+            "badges": list(materialized.badges) or None,
+            "evidence_note": scope_note,
             "escalation_digest": report.semantic_digest(),
             "escalated_from_asof": fast.get("asof"),
         })
@@ -840,6 +913,9 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
                 "asof": str(session_date),
                 "run_id": run_id,
                 "source": "orchestrated",
+                "preset_id": bindings.preset_id,
+                "badges": list(scope_badges) or None,
+                "evidence_note": scope_note,
             }))
     except Exception as exc:  # noqa: BLE001 — the run happened; the landing failed
         _LOG.warning("deep run %s completed but its outcome could not be landed: %s "
@@ -953,7 +1029,7 @@ def _latest_snapshot_production(stores: Any):
         return None
 
 
-def build_production_bindings() -> DeepDecideBindings:
+def build_production_bindings(*, preset_id: str | None = None) -> DeepDecideBindings:
     """Assemble the production :class:`DeepDecideBindings` (durable stores, sealed chain).
 
     HONEST STATE (Task 11 update): the ONE remaining gate before assembly is
@@ -969,7 +1045,14 @@ def build_production_bindings() -> DeepDecideBindings:
     ``pv.technical`` / ``text.news`` — the permanent-honest grant-gap ruling);
     the wrapper degrades to the fast chain with an honest ``deep_outcome``.
     Nothing is faked.
+
+    路线 A: ``preset_id`` defaults to :func:`resolve_deep_preset_id`, i.e. the
+    ten-node preset above unless ``GUANLAN_SEATS_DEEP_PRESET=reduced`` says
+    otherwise. The selection is resolved FIRST — before the store binding is even
+    consulted — so an unrecognized spelling refuses on its own terms instead of
+    hiding behind an unrelated error.
     """
+    preset_id = preset_id or resolve_deep_preset_id()
     from guanlan_v2.orchestration.adapters.chain import (
         build_phase9_registry,
         phase9_catalog_snapshot,
@@ -1047,7 +1130,17 @@ def build_production_bindings() -> DeepDecideBindings:
             request_id=request_id, clock=clock, runtime_registry_digest=rt_digest,
             runtime_limit=4, catalog=bundle, prompt_assembler=prompt_assembler)
 
+    if preset_id != DEEP_DECIDE_PRESET_ID:
+        # LOUD on the server's own stderr, not just a logger nobody configured:
+        # an operator must never discover after the fact that today's deep
+        # verdicts were produced without technical or news evidence.
+        print(f"[guanlan_v2][DEEP-PRESET] {DEEP_PRESET_ENV_VAR}=reduced → the "
+              f"deep lane runs {preset_id!r}. {REDUCED_EVIDENCE_NOTE}",
+              file=sys.stderr)
+    _LOG.info("deep lane preset selection: %s (%s=%r)", preset_id,
+              DEEP_PRESET_ENV_VAR, os.environ.get(DEEP_PRESET_ENV_VAR, ""))
     return DeepDecideBindings(
+        preset_id=preset_id,
         stores=stores, preset_registry=presets, catalog=snapshot,
         schema_registry=registry, coordinator=coordinator_factory,
         admission=admission_factory, clock=clock, plan_runner=plan_runner_factory,

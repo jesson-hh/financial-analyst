@@ -104,6 +104,10 @@ from guanlan_v2.orchestration.pipeline.assembly import (
 from guanlan_v2.orchestration.pipeline.deep_decide import (
     DEEP_DECIDE_PRESET_ID,
     DEEP_DECIDE_WORKER_IDS,
+    REDUCED_DEEP_DECIDE_PRESET_ID,
+    REDUCED_EVIDENCE_BADGE,
+    REDUCED_EVIDENCE_MISSING_BADGE,
+    REDUCED_EVIDENCE_NOTE,
 )
 
 from guanlan_v2.orchestration.pipeline import live_decide
@@ -319,7 +323,8 @@ def heavy():
 # per-test environment: stores + journal + spies + factories                    #
 # =========================================================================== #
 def _build_env(tmp_path, heavy, *, tranches=True, fail=frozenset(), lease=True,
-               lease_budget_cap=200, lease_max_admissions=20):
+               lease_budget_cap=200, lease_max_admissions=20,
+               lease_preset_id=DEEP_DECIDE_PRESET_ID):
     clock = _FixedClock(NOW)
     resolver = SchemaRegistryResolver()
     resolver.register(heavy.registry)
@@ -401,8 +406,9 @@ def _build_env(tmp_path, heavy, *, tranches=True, fail=frozenset(), lease=True,
             registry_digest=heavy.registry.registry_digest)
         issuing.issue_lease(
             purpose="落子 deep-decide standing lease (test)",
-            preset_id=DEEP_DECIDE_PRESET_ID,
-            preset_record_digest=heavy.record.semantic_digest(),
+            preset_id=lease_preset_id,
+            preset_record_digest=heavy.presets.get(
+                lease_preset_id).semantic_digest(),
             catalog_digest=heavy.snapshot.catalog_digest,
             registry_digest=heavy.registry.registry_digest,
             valid_from=NOW - timedelta(days=1), valid_until=NOW + timedelta(days=1),
@@ -1251,3 +1257,167 @@ class TestSurfaces:
         assert record.assembler_id == SUBJECT_ASSEMBLER_ID
         assert [e.name for e in record.trusted_input_digests].count(
             SUBJECT_TRUSTED_INPUT_NAME) == 1
+
+
+# =========================================================================== #
+# 12. 路线 A — the reduced-evidence generation on the SAME live seam            #
+# =========================================================================== #
+class TestReducedEvidenceDeepLane:
+    """The eight-node preset driven through the real wrapper, end to end.
+
+    Same stores, same admission, same coordinator, same production plan runner —
+    only ``bindings.preset_id`` differs. What this class defends is the honesty
+    red line: every product of a reduced-evidence run says so, and a binding that
+    does NOT opt in still runs the reviewed ten-node preset unchanged.
+    """
+
+    @pytest.fixture()
+    def run(self, tmp_path, heavy):
+        env = _build_env(tmp_path, heavy,
+                         lease_preset_id=REDUCED_DEEP_DECIDE_PRESET_ID)
+        fast = _make_fast(env, _fast_result("300750"))
+        decide = make_orchestrated_decide(
+            fast_decide=fast,
+            bindings=_bindings(env, heavy,
+                               preset_id=REDUCED_DEEP_DECIDE_PRESET_ID,
+                               strat_fn=lambda sid: dict(_OPT_IN_STRAT)))
+        out = decide(_payload("300750"))
+        return SimpleNamespace(env=env, out=out)
+
+    def test_the_reduced_deep_run_completes_through_the_same_runner(self, run):
+        assert run.out["ok"] is True
+        assert run.out["deep_attempted"] is True
+        assert run.out["deep_outcome"] == "completed"
+        assert run.out["rationale"] == "scripted deep-run trader proposal"
+        kinds = _events(run.env, run.out["run_id"])
+        assert EventType.PLAN_FROZEN in kinds
+        assert EventType.RUN_COMPLETED in kinds
+
+    def test_only_the_eight_workers_were_ever_invoked(self, run):
+        """The two dropped readers are not merely un-badged — they never ran."""
+        records = run.env.gateway_factory.gateways[0].records
+        invoked = {r.worker_id for r in records}
+        assert not invoked & {"pv.technical", "text.news"}
+        assert invoked == {"text.sentiment", "dec.bull", "dec.bear",
+                           "dec.research_mgr", "dec.pm", "dec.trader"}
+        assert run.env.noted == [6]  # the reduced preset's exact LLM budget
+
+    def test_the_ledger_row_is_badged_and_says_what_was_missing(self, run):
+        row = _decide_rows(run.env)[0]
+        assert row["preset_id"] == REDUCED_DEEP_DECIDE_PRESET_ID
+        assert REDUCED_EVIDENCE_BADGE in row["badges"]
+        assert REDUCED_EVIDENCE_MISSING_BADGE in row["badges"]
+        assert "pv.technical" in row["evidence_note"]
+        assert "text.news" in row["evidence_note"]
+        assert all(v not in (None, "") for v in row.values())
+
+    def test_the_returned_decision_surface_carries_the_same_badge(self, run):
+        """The wrapper's return value IS the decision artifact the caller reads —
+        it must not be readable as a full-evidence verdict either."""
+        assert REDUCED_EVIDENCE_BADGE in run.out["badges"]
+        assert run.out["preset_id"] == REDUCED_DEEP_DECIDE_PRESET_ID
+        assert REDUCED_EVIDENCE_NOTE == run.out["evidence_note"]
+
+    def test_the_advisory_order_record_is_badged_too(self, run):
+        order = _order_rows(run.env)[0]
+        assert REDUCED_EVIDENCE_BADGE in order["badges"]
+        assert order["preset_id"] == REDUCED_DEEP_DECIDE_PRESET_ID
+        assert "pv.technical" in order["evidence_note"]
+
+    def test_the_pending_card_opens_with_the_missing_evidence_banner(
+            self, tmp_path, heavy):
+        """The lease-free arm — THE acceptance path: registration stops at a
+        reviewer card, and the card a human opens leads with what it never saw."""
+        env = _build_env(tmp_path, heavy, lease=False)
+        fast = _make_fast(env, _fast_result("300750"))
+        out = make_orchestrated_decide(
+            fast_decide=fast,
+            bindings=_bindings(env, heavy,
+                               preset_id=REDUCED_DEEP_DECIDE_PRESET_ID,
+                               strat_fn=lambda sid: dict(_OPT_IN_STRAT)))(
+            _payload("300750"))
+        assert out["deep_outcome"] == "no_lease"
+        assert _decide_rows(env) == []            # nothing ran, nothing landed
+        reader = PlanApprovalCoordinator(
+            env.journal, admission=SimpleNamespace(), clock=env.clock,
+            verifier=None, console_emit=None)
+        card = reader.list_pending()[0]
+        assert card.preset_id == REDUCED_DEEP_DECIDE_PRESET_ID
+        assert card.preset_record_digest == heavy.presets.get(
+            REDUCED_DEEP_DECIDE_PRESET_ID).semantic_digest()
+        assert card.budget_request_llm_invocations == 6
+        assert card.node_count == 8
+        assert "pv.technical" not in card.worker_ids
+        assert "text.news" not in card.worker_ids
+        head = card.rendered_md.split("\n\n")[0]
+        assert REDUCED_EVIDENCE_BADGE in head
+        assert "pv.technical" in card.rendered_md
+        assert "text.news" in card.rendered_md
+
+    def test_the_full_preset_card_is_untouched_by_route_a(self, tmp_path, heavy):
+        """The regression pin: a binding that does NOT opt in still cards the
+        reviewed TEN-node preset, with no reduced badge anywhere on it."""
+        env = _build_env(tmp_path, heavy, lease=False)
+        fast = _make_fast(env, _fast_result("300750"))
+        out = make_orchestrated_decide(
+            fast_decide=fast,
+            bindings=_bindings(env, heavy,
+                               strat_fn=lambda sid: dict(_OPT_IN_STRAT)))(
+            _payload("300750"))
+        assert out["deep_outcome"] == "no_lease"
+        reader = PlanApprovalCoordinator(
+            env.journal, admission=SimpleNamespace(), clock=env.clock,
+            verifier=None, console_emit=None)
+        card = reader.list_pending()[0]
+        assert card.preset_id == DEEP_DECIDE_PRESET_ID
+        assert card.node_count == 10
+        assert card.budget_request_llm_invocations == 8
+        assert REDUCED_EVIDENCE_BADGE not in card.rendered_md
+
+    def test_the_default_binding_still_means_the_ten_node_preset(self):
+        """The dataclass default is the whole regression: an untouched binding
+        constructed anywhere in the codebase keeps its pre-route-A meaning."""
+        import dataclasses
+
+        field = {f.name: f
+                 for f in dataclasses.fields(DeepDecideBindings)}["preset_id"]
+        assert field.default == DEEP_DECIDE_PRESET_ID
+
+    def test_the_two_generations_never_share_a_run_identity(self, tmp_path, heavy):
+        """A reduced run must never be replayed as the receipt of a full one:
+        the preset id is part of the derived kernel run id."""
+        env = _build_env(tmp_path, heavy, lease=False)
+        full = make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("300750")),
+            bindings=_bindings(env, heavy,
+                               strat_fn=lambda sid: dict(_OPT_IN_STRAT)))(
+            _payload("300750"))
+        reduced = make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("300750")),
+            bindings=_bindings(env, heavy,
+                               preset_id=REDUCED_DEEP_DECIDE_PRESET_ID,
+                               strat_fn=lambda sid: dict(_OPT_IN_STRAT)))(
+            _payload("300750"))
+        assert full["run_id"] != reduced["run_id"]
+
+    def test_a_reduced_binding_over_the_full_record_cannot_forge_the_badge(
+            self, tmp_path, heavy):
+        """The materializer's evidence-scope guard, reached through the live
+        wrapper: an impostor registry refuses rather than badging a ten-node
+        graph as reduced. The wrapper answers the honest ``refused`` outcome."""
+        from guanlan_v2.orchestration.plan_presets import PlanPresetRegistry
+
+        impostor = PlanPresetRegistry()
+        impostor.register(heavy.presets.get(DEEP_DECIDE_PRESET_ID).model_copy(
+            update={"preset_id": REDUCED_DEEP_DECIDE_PRESET_ID}))
+        impostor.seal()
+        env = _build_env(tmp_path, heavy, lease=False)
+        out = make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("300750")),
+            bindings=_bindings(env, heavy,
+                               preset_id=REDUCED_DEEP_DECIDE_PRESET_ID,
+                               preset_registry=impostor,
+                               strat_fn=lambda sid: dict(_OPT_IN_STRAT)))(
+            _payload("300750"))
+        assert out["deep_outcome"] == "refused"
+        assert _decide_rows(env) == []

@@ -1,0 +1,142 @@
+{
+  "schema_version": "2",
+  "preset_id": "pipeline.luozi_deep_decide_reduced",
+  "version": "1",
+  "phase": "main",
+  "description": "观澜 · 落子深度研判预案(减证据版,八节点) — the REDUCED-EVIDENCE deep chain: the sealed ten-node 落子 preset MINUS its two tool-call-REQUIRED evidence readers. 为什么存在:pv.technical 与 text.news 的 evidence_policy.tool_calls=REQUIRED,而审阅过的 Phase-3 数据预取表只授权 dec.pm 一行,所以十节点版在生产上恒被 tool_calls_required_unmet 诚实拒绝——一次 LLM 都调不到;把这两个旁证节点摘掉,同一套 check_runtime_support 即为绿。代价必须被读到:这场辩论从未见过任何技术指标证据(缺 pv.technical),也从未见过任何新闻证据(缺 text.news);它们不是运行时降级失败,是这份预案本身就没有它们。凡由本预案产出的东西(台账行、决策产物、待审卡)一律强制带 reduced_evidence_preset_v1 徽章并写明缺什么。图形:pv.price_action + pv.microstructure 的价量证据与 text.sentiment 情绪读者喂给一轮 dec.bull <-> dec.bear 辩论(出场序 bull、bear;bear 经 opponent_case 回应 bull 的 BullCase),裁判是唯一的 reasoner_deep 席位 dec.pm,其 PortfolioDecision 抵达唯一终端 dec.trader(PortfolioTargetProposal@1)。text.sentiment 与 dec.research_mgr 是结构而非装饰:dec.pm 的 sentiment 与 research_plan 输入是 REQUIRED 且二者是其唯一生产者;决策主干 sentiment → research-mgr → pm → trader 与被摘掉的两个节点全无依赖关系,原先指向它们的两条依赖都是 degrade 策略,摘掉不改变其余语义。证据节点与辩论席位是 auxiliary,因为密封目录里 pm/trader 链上没有任何输入接受 BullCase/BearCase,而 reducer 的 DebateTranscript 对 Phase 1 的依赖 schema 检查不可见——辩论经 DebateCfg.judge_node_id 绑定裁判,其回合由 debate.transcript_reducer 折进共享转写槽。图形与代码无关且逐字节冻结:任何节点都不带 params,故一个记录摘要服务所有股票、一份 ApprovalLease 即可绑定,标的以已提交的 RunSubject@1 工件在运行期随计划入场。",
+  "nodes": [
+    {
+      "id": "price-action",
+      "worker_id": "pv.price_action",
+      "writes_slot": "slot.price_action",
+      "auxiliary": true
+    },
+    {
+      "id": "microstructure",
+      "worker_id": "pv.microstructure",
+      "writes_slot": "slot.microstructure",
+      "auxiliary": true
+    },
+    {
+      "id": "sentiment",
+      "worker_id": "text.sentiment",
+      "writes_slot": "slot.sentiment"
+    },
+    {
+      "id": "bull-r1",
+      "worker_id": "dec.bull",
+      "writes_slot": "slot.bullbear_transcript",
+      "auxiliary": true,
+      "debate_id": "bullbear",
+      "round_role": "bull",
+      "debate_round": 1,
+      "debate_turn": 1,
+      "dependencies": [
+        {
+          "upstream_node_id": "sentiment",
+          "artifact_slot": "slot.sentiment",
+          "inject_as": "sentiment",
+          "policy": "degrade"
+        }
+      ]
+    },
+    {
+      "id": "bear-r1",
+      "worker_id": "dec.bear",
+      "writes_slot": "slot.bullbear_transcript",
+      "auxiliary": true,
+      "debate_id": "bullbear",
+      "round_role": "bear",
+      "debate_round": 1,
+      "debate_turn": 2,
+      "dependencies": [
+        {
+          "upstream_node_id": "bull-r1",
+          "artifact_slot": "slot.bullbear_transcript",
+          "inject_as": "opponent_case",
+          "policy": "block"
+        },
+        {
+          "upstream_node_id": "sentiment",
+          "artifact_slot": "slot.sentiment",
+          "inject_as": "sentiment",
+          "policy": "degrade"
+        }
+      ]
+    },
+    {
+      "id": "research-mgr",
+      "worker_id": "dec.research_mgr",
+      "writes_slot": "slot.research_plan",
+      "dependencies": [
+        {
+          "upstream_node_id": "sentiment",
+          "artifact_slot": "slot.sentiment",
+          "inject_as": "sentiment",
+          "policy": "block"
+        }
+      ]
+    },
+    {
+      "id": "pm",
+      "worker_id": "dec.pm",
+      "writes_slot": "slot.portfolio_decision",
+      "dependencies": [
+        {
+          "upstream_node_id": "research-mgr",
+          "artifact_slot": "slot.research_plan",
+          "inject_as": "research_plan",
+          "policy": "block"
+        },
+        {
+          "upstream_node_id": "sentiment",
+          "artifact_slot": "slot.sentiment",
+          "inject_as": "sentiment",
+          "policy": "block"
+        }
+      ]
+    },
+    {
+      "id": "trader",
+      "worker_id": "dec.trader",
+      "writes_slot": "slot.target_proposal",
+      "dependencies": [
+        {
+          "upstream_node_id": "pm",
+          "artifact_slot": "slot.portfolio_decision",
+          "inject_as": "portfolio_decision",
+          "policy": "block"
+        }
+      ]
+    }
+  ],
+  "sink_node_ids": ["trader"],
+  "debates": [
+    {
+      "id": "bullbear",
+      "seats": ["bull", "bear"],
+      "turn_order": ["bull", "bear"],
+      "max_rounds": 1,
+      "judge_node_id": "pm"
+    }
+  ],
+  "reducers": [
+    {
+      "id": "red.bullbear",
+      "slot": "slot.bullbear_transcript",
+      "reducer_ref": {
+        "id": "debate.transcript_reducer",
+        "version": "1",
+        "content_digest": "d6b094fe7606e29af40f09dd6be24795cd02934dc0ac8a1cae456eda085bc0fa"
+      },
+      "producer_node_ids": ["bull-r1", "bear-r1"],
+      "output_schema_ref": {
+        "name": "DebateTranscript",
+        "version": "1"
+      }
+    }
+  ],
+  "budget_request_tokens": 4500000,
+  "budget_request_llm_invocations": 6,
+  "max_concurrency": 4
+}
