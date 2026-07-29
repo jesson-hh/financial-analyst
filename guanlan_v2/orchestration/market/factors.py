@@ -73,6 +73,7 @@ __all__ = [
     "UNKNOWN_ATTENTION_THRESHOLD",
     "HIGH_CONFIDENCE_UNKNOWN_MAX",
     "EvidenceAnchor",
+    "NO_FACTOR_REPORT_DIGEST",
     "RegimeReport",
     "MainlineRead",
     "RotationReport",
@@ -775,6 +776,25 @@ UNKNOWN_ATTENTION_THRESHOLD: float = 0.25
 #: HIGH confidence requires every axis's ``unknown`` mass to be at or below this.
 HIGH_CONFIDENCE_UNKNOWN_MAX: float = 0.10
 
+#: The runtime's canonical ``factor_report_digest`` stamp for "NO
+#: :class:`MarketFactorReport` was bound to this read".
+#:
+#: 裁决 3 (2026-07-29). The first live Lane-0 run reached both LLM seats with no
+#: factor report at all; ``evidence`` ≥ 1 then left the model no lawful honest
+#: answer, so it fabricated ``EvidenceAnchor(factor_id='missing_report',
+#: value=0.0)`` — the exact thing the same prompt's ``allow_unsourced_numbers=
+#: false`` rule forbids. A contract that makes honesty impossible is a defect.
+#:
+#: Under this stamp the report validators invert the rule: anchoring is not
+#: merely optional, it is FORBIDDEN (a reading you never received cannot be
+#: cited) and every axis must be ``unknown`` (a regime you could not read cannot
+#: be claimed). Every read that DID get a report keeps the ≥1-anchor rule
+#: unchanged. Only the runtime writes this field — a model-supplied value is
+#: dropped (see ``bootstrap.LANE0_RUNTIME_OWNED_FIELDS``) — so the stamp cannot
+#: be claimed by an answer to dodge anchoring. It is a lawful ``DigestHex``, so
+#: carrying it needs no schema change (no registered JSON schema moves).
+NO_FACTOR_REPORT_DIGEST: DigestHex = "0" * 64
+
 #: the ordered axis → (enum, probabilities-field, modal-field) wiring the
 #: RegimeReport validators iterate; ``unknown_member`` is each enum's honest mass.
 _REGIME_AXES: tuple[tuple[str, type[Enum], str, str, Enum], ...] = (
@@ -871,6 +891,7 @@ class RegimeReport(DigestModel):
         axis_probs: dict[str, dict[Any, float]] = {}
         any_unknown_attention = False
         modal_is_unknown = False
+        n_modal_unknown = 0
 
         for _label, members, probs_field, modal_field, unknown_member in _REGIME_AXES:
             probs: dict[Any, float] = getattr(self, probs_field)
@@ -897,6 +918,7 @@ class RegimeReport(DigestModel):
                 any_unknown_attention = True
             if getattr(self, modal_field) is unknown_member:
                 modal_is_unknown = True
+                n_modal_unknown += 1
 
         # 4. unknown_reason required iff some axis reaches the attention threshold.
         if any_unknown_attention and self.unknown_reason is None:
@@ -923,9 +945,25 @@ class RegimeReport(DigestModel):
                 "an axis with a modal 'unknown' label forces confidence == LOW"
             )
 
-        # 6. evidence non-empty; evidence_factor_ids == sorted distinct anchor ids;
-        #    drivers sorted + duplicate-free.
-        if not self.evidence:
+        # 6. evidence anchoring, split on whether a factor report was bound at all
+        #    (裁决 3, see NO_FACTOR_REPORT_DIGEST); evidence_factor_ids == sorted
+        #    distinct anchor ids; drivers sorted + duplicate-free.
+        if self.factor_report_digest == NO_FACTOR_REPORT_DIGEST:
+            if self.evidence:
+                raise ValueError(
+                    "no factor report was bound to this read "
+                    "(factor_report_digest == NO_FACTOR_REPORT_DIGEST), so it can "
+                    "cite no EvidenceAnchor: a reading that was never supplied "
+                    "cannot be anchored, and inventing one is the forbidden "
+                    "unsourced number"
+                )
+            if n_modal_unknown != len(_REGIME_AXES):
+                raise ValueError(
+                    "no factor report was bound to this read, so every axis modal "
+                    "must be 'unknown': a regime that could not be read cannot be "
+                    "claimed"
+                )
+        elif not self.evidence:
             raise ValueError("evidence must carry at least one EvidenceAnchor (④ ≥1)")
         distinct_ids = tuple(sorted({a.factor_id for a in self.evidence}))
         if self.evidence_factor_ids != distinct_ids:
@@ -1000,6 +1038,22 @@ class RotationReport(DigestModel):
             raise ValueError(
                 "unknown_reason is forbidden when mainlines is non-empty"
             )
+        # 裁决 3 (symmetric): with no factor report bound, a MainlineRead would
+        # have to carry EvidenceAnchors over readings that were never supplied,
+        # so the ranking must be empty and no factor id may be claimed.
+        if self.factor_report_digest == NO_FACTOR_REPORT_DIGEST:
+            if self.mainlines:
+                raise ValueError(
+                    "no factor report was bound to this read "
+                    "(factor_report_digest == NO_FACTOR_REPORT_DIGEST), so no "
+                    "mainline can be ranked: every MainlineRead anchors readings "
+                    "that were never supplied"
+                )
+            if self.evidence_factor_ids:
+                raise ValueError(
+                    "no factor report was bound to this read, so no factor id can "
+                    "be cited as evidence"
+                )
         if self.content_digest != self.semantic_digest():
             raise ValueError("declared content_digest does not match canonical digest")
         return self

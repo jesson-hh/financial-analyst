@@ -36,6 +36,7 @@ from guanlan_v2.orchestration.market.factors import (
     EvidenceAnchor,
     HeatState,
     MainlineRead,
+    NO_FACTOR_REPORT_DIGEST,
     RegimeReport,
     RiskState,
     RotationReport,
@@ -344,6 +345,98 @@ def test_drivers_must_be_sorted_and_dup_free():
 def test_conflicts_and_analog_case_ids_default_empty():
     r = _regime()
     assert r.conflicts == () and r.analog_case_ids == ()
+
+
+# --------------------------------------------------------------------------- #
+# 裁决 3 — "I had no factor report" must be expressible without inventing one   #
+# --------------------------------------------------------------------------- #
+# The first live Lane-0 run had no factor report at all and the ≥1-anchor rule
+# left the model no lawful honest answer, so it fabricated
+# ``EvidenceAnchor(factor_id='missing_report', value=0.0)`` — a contract that
+# makes honesty impossible. ``NO_FACTOR_REPORT_DIGEST`` is the runtime's stamp
+# for "no MarketFactorReport was bound to this read"; under it anchoring is not
+# merely optional, it is FORBIDDEN (you cannot cite readings you never got) and
+# every axis must be unknown (you cannot claim a regime you could not read).
+_NO_REPORT_AXES = dict(
+    trend=TrendState.UNKNOWN,
+    risk_state=RiskState.UNKNOWN,
+    heat_state=HeatState.UNKNOWN,
+    trend_probabilities={
+        TrendState.BULL: 0.0, TrendState.BEAR: 0.0,
+        TrendState.RANGE: 0.0, TrendState.UNKNOWN: 1.0,
+    },
+    risk_probabilities={
+        RiskState.RISK_ON: 0.0, RiskState.RISK_OFF: 0.0,
+        RiskState.NEUTRAL: 0.0, RiskState.UNKNOWN: 1.0,
+    },
+    heat_probabilities={
+        HeatState.NORMAL: 0.0, HeatState.OVERHEAT: 0.0, HeatState.UNKNOWN: 1.0,
+    },
+    confidence=Confidence.LOW,
+    unknown_reason="no market_factor_report was bound to this read",
+)
+
+
+def test_the_no_factor_report_stamp_is_a_valid_named_digest():
+    assert NO_FACTOR_REPORT_DIGEST == "0" * 64
+    # it is a lawful DigestHex, so it needs no schema change to carry.
+    _regime(factor_report_digest=NO_FACTOR_REPORT_DIGEST, evidence=(),
+            evidence_factor_ids=(), drivers=("no_factor_report",), **_NO_REPORT_AXES)
+
+
+def test_a_read_with_no_factor_report_needs_no_evidence_anchor():
+    r = _regime(
+        factor_report_digest=NO_FACTOR_REPORT_DIGEST, evidence=(),
+        evidence_factor_ids=(), drivers=("no_factor_report",), **_NO_REPORT_AXES)
+    assert r.evidence == () and r.evidence_factor_ids == ()
+    assert r.confidence is Confidence.LOW
+
+
+def test_a_read_with_no_factor_report_may_never_invent_an_anchor():
+    # the exact shape the live 2026-07-29 run produced.
+    with pytest.raises(ValidationError):
+        _regime(
+            factor_report_digest=NO_FACTOR_REPORT_DIGEST,
+            evidence=(_anchor("missing_report", 0.0, "no report"),),
+            evidence_factor_ids=("missing_report",),
+            drivers=("no_factor_report",), **_NO_REPORT_AXES)
+
+
+def test_a_read_with_no_factor_report_may_never_claim_a_regime():
+    axes = dict(_NO_REPORT_AXES)
+    axes.update(
+        trend=TrendState.BULL,
+        trend_probabilities={
+            TrendState.BULL: 0.7, TrendState.BEAR: 0.1,
+            TrendState.RANGE: 0.1, TrendState.UNKNOWN: 0.1,
+        },
+    )
+    with pytest.raises(ValidationError):
+        _regime(factor_report_digest=NO_FACTOR_REPORT_DIGEST, evidence=(),
+                evidence_factor_ids=(), drivers=("no_factor_report",), **axes)
+
+
+def test_a_supplied_factor_report_still_requires_at_least_one_anchor():
+    # the ④ ≥1 rule is untouched for every read that DID get a report — including
+    # an all-unknown one (this is exactly what the ruling asked to keep).
+    with pytest.raises(ValidationError):
+        _regime(factor_report_digest=DIGEST, evidence=(), evidence_factor_ids=(),
+                drivers=("insufficient_coverage",), **_NO_REPORT_AXES)
+
+
+def test_a_rotation_with_no_factor_report_may_never_rank_a_mainline():
+    # symmetric: MainlineRead carries EvidenceAnchors too, so the same
+    # fabrication is reachable through the rotation seat.
+    with pytest.raises(ValidationError):
+        _rotation(factor_report_digest=NO_FACTOR_REPORT_DIGEST)
+    with pytest.raises(ValidationError):
+        _rotation(factor_report_digest=NO_FACTOR_REPORT_DIGEST, mainlines=(),
+                  evidence_factor_ids=("rot.hhi",),
+                  unknown_reason="no market_factor_report was bound")
+    r = _rotation(
+        factor_report_digest=NO_FACTOR_REPORT_DIGEST, mainlines=(),
+        evidence_factor_ids=(), unknown_reason="no market_factor_report was bound")
+    assert r.mainlines == () and r.evidence_factor_ids == ()
 
 
 # --------------------------------------------------------------------------- #
