@@ -17,6 +17,7 @@ Run: ``python -m pytest tests/orchestration/test_bootstrap_e2e.py -v``
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -68,6 +69,7 @@ from guanlan_v2.orchestration.market.factors import (
     MainlineRead,
     MarketFactorInputs,
     MarketFactorReport,
+    NO_FACTOR_REPORT_DIGEST,
     RegimeReport,
     RiskState,
     RotationReport,
@@ -156,6 +158,8 @@ class FakeLane0Gateway:
         self.captured_prompts: dict[str, str] = {}
         self.rendered_factor: dict[str, str] = {}
         self.experience_blocks: dict[str, str] = {}
+        #: the EXACT authorized request bytes — what a real provider would see.
+        self.canonical_requests: dict[str, str] = {}
 
     def _factor_report(self):
         art = self._pool.committed_output("lane0.factor", "primary")
@@ -167,6 +171,7 @@ class FakeLane0Gateway:
         record = W.verify_model_request_binding(
             request, prompt_assembly_ref, reader=self._stores.payloads)
         node_id, worker_id = record.node_id, record.worker_id
+        self.canonical_requests[node_id] = request.canonical_request_bytes.decode("utf-8")
         if node_id in self._fail:
             raise RuntimeError(f"scripted model failure on {node_id}")
 
@@ -198,18 +203,31 @@ class FakeLane0Gateway:
 
     # -- scripted outputs --------------------------------------------------- #
     def _anchor_and_digest(self, report):
-        if report is not None and report.feature_vector:
+        """``(anchors, factor_report_digest, confident)`` — honest in all three cases.
+
+        With NO committed report the runtime's stamp is
+        ``NO_FACTOR_REPORT_DIGEST`` and the report contracts FORBID any anchor
+        (裁决 3): a reading that was never supplied cannot be cited, so the
+        scripted read cites nothing. A committed-but-all-UNAVAILABLE report is a
+        different case — the report exists, so the ④ ≥1 rule still applies.
+        """
+        if report is None:
+            return (), NO_FACTOR_REPORT_DIGEST, False
+        if report.feature_vector:
             fid, val = next(iter(report.feature_vector.items()))
-            return EvidenceAnchor(factor_id=fid, value=val, reading="reading"), report.content_digest, True
-        fid = report.values[0].factor_id if report is not None else self._seed_factor_id
-        digest = report.content_digest if report is not None else "0" * 64
-        return EvidenceAnchor(factor_id=fid, value=0.0, reading="no usable factor data"), digest, False
+            return ((EvidenceAnchor(factor_id=fid, value=val, reading="reading"),),
+                    report.content_digest, True)
+        fid = report.values[0].factor_id
+        return ((EvidenceAnchor(factor_id=fid, value=0.0,
+                                reading="no usable factor data"),),
+                report.content_digest, False)
 
     def _as_of(self, report):
         return report.as_of if report is not None else DT
 
     def _regime(self, report) -> RegimeReport:
-        anchor, digest, confident = self._anchor_and_digest(report)
+        anchors, digest, confident = self._anchor_and_digest(report)
+        anchor = anchors[0] if anchors else None
         if confident:
             return RegimeReport.build(
                 as_of=self._as_of(report), factor_report_digest=digest,
@@ -232,13 +250,16 @@ class FakeLane0Gateway:
                                 RiskState.NEUTRAL: 0.0, RiskState.UNKNOWN: 1.0},
             heat_probabilities={HeatState.NORMAL: 0.0, HeatState.OVERHEAT: 0.0,
                                 HeatState.UNKNOWN: 1.0},
-            confidence=Confidence.LOW, evidence=(anchor,),
-            drivers=("insufficient_data",), evidence_factor_ids=(anchor.factor_id,),
+            confidence=Confidence.LOW, evidence=anchors,
+            drivers=("insufficient_data",),
+            evidence_factor_ids=tuple(sorted({a.factor_id for a in anchors})),
             narrative="No usable factor data; regime unknown (honest degraded read).",
-            unknown_reason="insufficient factor coverage")
+            unknown_reason=("no market_factor_report was bound to this read"
+                            if anchor is None else "insufficient factor coverage"))
 
     def _rotation(self, report) -> RotationReport:
-        anchor, digest, confident = self._anchor_and_digest(report)
+        anchors, digest, confident = self._anchor_and_digest(report)
+        anchor = anchors[0] if anchors else None
         if confident:
             mainline = MainlineRead(
                 name="AI compute", universe_key="ai_compute", stage=RotationStage.SPREAD,
@@ -264,11 +285,17 @@ class BootstrapEnv:
 
     def run(self, *, recorder=None):
         rec = recorder if recorder is not None else D.RunRecorder()
+        # 裁决 1: the PRODUCTION Lane-0 assembler, the same object the driver
+        # injects. Before this the e2e ran on StaticPromptAssembler while the
+        # fake gateway rendered the block ITSELF — which is exactly how the
+        # "the model never receives any numbers" hole stayed invisible here.
         result = asyncio.run(D.run_plan(
             self.plan.plan_digest, self.run_ctx, admission=self.service, pool=self.pool,
             budget=self.budget, runtime=self.runtime, registry=self.registry, stores=self.stores,
             runtime_limit=3, clock=self.clock, refusal_sink=self.refusal_sink,
-            model_gateway=self.model_gateway, recorder=rec))
+            model_gateway=self.model_gateway,
+            prompt_assembler=B.Lane0PromptAssembler(pool=self.pool, registry=self.registry),
+            recorder=rec))
         return result, rec
 
 
@@ -503,6 +530,29 @@ def test_happy_path_prompt_honesty_and_evidence_binding():
         assert '"schema_version"' not in captured
         assert '"feature_vector"' not in captured
 
+    # 裁决 1 — the load-bearing one: the AUTHORIZED REQUEST BYTES (what a real
+    # provider receives) carry the rendered numbers, not merely a "block present"
+    # flag and not merely the fake gateway's own re-render.
+    rendered = B.render_factor_report_for_prompt(factor)
+    for nid in ("lane0.regime", "lane0.rotation"):
+        channel = json.loads(env.model_gateway.canonical_requests[nid])
+        section = channel[B.LANE0_FACTOR_REPORT_SECTION]
+        assert section["text"] == rendered
+        assert section["status"] == "present"
+        assert section["factor_report_digest"] == factor.content_digest
+        blob = env.model_gateway.canonical_requests[nid]
+        assert f"battery_digest={factor.battery_digest[:8]}" in blob
+        for fid in (v.factor_id for v in factor.values if v.status == "OK"):
+            assert fid in blob
+        # 裁决 2 — and the field names of the contract it is validated against.
+        out = channel[W.OUTPUT_SCHEMA_SECTION]
+        declared = set(out["required_fields"]) | set(out["optional_fields"])
+        assert "narrative" in declared
+        assert out["runtime_supplied_fields"] == sorted(B.LANE0_RUNTIME_OWNED_FIELDS)
+        # the untrusted experience block stayed a REFERENCE.
+        assert all(set(d) == {"ordinal", "schema", "namespace", "content_digest",
+                              "media_type", "length"} for d in channel["data_inputs"])
+
     regime = env.pool.committed_output("lane0.regime", "primary").payload
     rotation = env.pool.committed_output("lane0.rotation", "primary").payload
     assert regime.factor_report_digest == factor.content_digest
@@ -580,12 +630,23 @@ def test_failed_factor_node_omits_input_drives_the_omitted_branch():
     for nid in ("lane0.regime", "lane0.rotation"):
         assert env.model_gateway.rendered_factor[nid] == "<no factor report — omitted input>"
         assert "<no factor report — omitted input>" in env.model_gateway.captured_prompts[nid]
+        # 裁决 1: and the AUTHORIZED bytes state the absence — an empty question
+        # never masquerades as a complete one.
+        channel = json.loads(env.model_gateway.canonical_requests[nid])
+        section = channel[B.LANE0_FACTOR_REPORT_SECTION]
+        assert section["status"] == "absent"
+        assert section["artifact_digest"] is None
+        assert section["text"] == B.LANE0_NO_FACTOR_REPORT_TEXT
 
-    # (d) both LLM nodes still committed honest all-unknown reads.
+    # (d) both LLM nodes still committed honest all-unknown reads — and 裁决 3:
+    #     with no report bound they cite NOTHING (no invented anchor).
     regime = env.pool.committed_output("lane0.regime", "primary").payload
     rotation = env.pool.committed_output("lane0.rotation", "primary").payload
     assert regime.trend is TrendState.UNKNOWN and regime.confidence is Confidence.LOW
+    assert regime.factor_report_digest == NO_FACTOR_REPORT_DIGEST
+    assert regime.evidence == () and regime.evidence_factor_ids == ()
     assert rotation.mainlines == ()
+    assert rotation.factor_report_digest == NO_FACTOR_REPORT_DIGEST
 
     # (e) manifest/snapshot for the factor-ABSENT case: a bootstrap ContextSnapshot
     #     REQUIRES a committed market factor report (the mandatory manifest anchor —

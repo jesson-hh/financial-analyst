@@ -204,6 +204,12 @@ __all__ = [
     "normalize_lane0_llm_output",
     "Lane0OutputNormalizingGateway",
     "wrap_lane0_gateway",
+    # -- the Lane 0 prompt assembler (裁决 1 + 2) ---------------------------- #
+    "LANE0_ASSEMBLER_ID",
+    "LANE0_ASSEMBLER_VERSION",
+    "LANE0_FACTOR_REPORT_SECTION",
+    "LANE0_NO_FACTOR_REPORT_TEXT",
+    "Lane0PromptAssembler",
     # -- Task 9 chain surface ---------------------------------------------- #
     "BOOTSTRAP_PUBLIC_MODELS",
     "PHASE5_PUBLIC_MODELS",
@@ -1888,15 +1894,20 @@ class Lane0OutputNormalizingGateway:
 
     ``as_of`` / ``factor_report_digest`` come from the ``MarketFactorReport`` the
     run actually committed — resolved through the pool, never recomputed and
-    never invented: with no committed report there is nothing honest to stamp, so
-    the payload is left exactly as the model wrote it.
+    never invented. With NO committed report the runtime stamps the run's own
+    ``as_of`` and :data:`~guanlan_v2.orchestration.market.factors.NO_FACTOR_REPORT_DIGEST`
+    (裁决 3): that is the honest "no report was bound to this read" statement,
+    under which the report contracts forbid any evidence anchor. Without a run
+    ``as_of`` there is still nothing honest to stamp, so the payload is left
+    exactly as the model wrote it.
     """
 
-    def __init__(self, *, inner, catalog_runtime, pool, registry) -> None:
+    def __init__(self, *, inner, catalog_runtime, pool, registry, as_of=None) -> None:
         self._inner = inner
         self._catalog = catalog_runtime
         self._pool = pool
         self._registry = registry
+        self._as_of = as_of
 
     # -- the ModelGateway protocol ------------------------------------------ #
     def invoke(self, request, *, prompt_assembly_ref):
@@ -1908,11 +1919,14 @@ class Lane0OutputNormalizingGateway:
         if model is None:
             return result
         report = self._committed_factor_report()
-        if report is None:
+        if report is not None:
+            as_of, digest = report.as_of, report.content_digest
+        elif self._as_of is not None:
+            as_of, digest = self._as_of, _factors.NO_FACTOR_REPORT_DIGEST
+        else:
             return result
         normalized = normalize_lane0_llm_output(
-            payload, model=model, as_of=report.as_of,
-            factor_report_digest=report.content_digest)
+            payload, model=model, as_of=as_of, factor_report_digest=digest)
         if normalized is payload:
             return result
         return replace(result, payload=normalized)
@@ -1950,10 +1964,201 @@ class Lane0OutputNormalizingGateway:
         return payload
 
 
-def wrap_lane0_gateway(inner, *, catalog_runtime, pool, registry):
+def wrap_lane0_gateway(inner, *, catalog_runtime, pool, registry, as_of=None):
     """The reviewed production wiring seam (the driver's only gateway change)."""
     return Lane0OutputNormalizingGateway(
-        inner=inner, catalog_runtime=catalog_runtime, pool=pool, registry=registry)
+        inner=inner, catalog_runtime=catalog_runtime, pool=pool, registry=registry,
+        as_of=as_of)
+
+
+# --------------------------------------------------------------------------- #
+# The Lane 0 prompt assembler (裁决 1 + 裁决 2 — 2026-07-29)                     #
+# --------------------------------------------------------------------------- #
+# 裁决 1. ``StaticPromptAssembler`` places every block in the model gateway's
+# ``data_inputs`` channel as a schema/namespace/digest REFERENCE and never
+# interpolates bytes; ``render_factor_report_for_prompt`` — documented as the
+# ONLY numeric outlet feeding ``market.regime`` / ``market.rotation`` — was
+# registered as ``lane0.factor_report.renderer`` but never invoked anywhere on
+# the execution path. The first live run's ``"no factor report; all axes set to
+# unknown."`` was therefore an HONEST answer to an empty question.
+#
+# The governing distinction is trusted vs untrusted, and the deep lane already
+# drew it: ``pipeline.live_decide.SubjectPromptAssembler`` inlines its own
+# reviewed subject block while untrusted external content stays a reference.
+# The same line here:
+#
+#   * the rendered factor report — content THIS system computed from PIT inputs
+#     and can attest — is INLINED, and carries the full 64-hex ``content_digest``
+#     of the exact committed artifact it was rendered from (the rendered header
+#     shows 12 chars only), so the persisted ``PromptAssemblyRecord`` proves
+#     which report the model actually saw;
+#   * the experience-selection block (untrusted retrieval content) stays a
+#     digest reference in ``data_inputs``, byte-for-byte as before.
+#
+# Absence is stated, never silently omitted: with no committed report the
+# section is still present and says so, because an empty question must never
+# masquerade as a complete one. A bound-but-unresolvable or digest-mismatched
+# report is REFUSED (``prompt_assembly_failed``) rather than inlined — showing
+# the model a different report than the node was bound to would be worse than
+# showing it none.
+
+#: the assembler's registered identity, stamped on every Lane-0 prompt record.
+LANE0_ASSEMBLER_ID = "bootstrap.lane0_prompt_assembler"
+LANE0_ASSEMBLER_VERSION = "1"
+#: the canonical-channel key carrying the inlined, attributable factor report.
+LANE0_FACTOR_REPORT_SECTION = "trusted_factor_report"
+#: the honest text when no ``MarketFactorReport`` was bound to this node.
+LANE0_NO_FACTOR_REPORT_TEXT = (
+    "<no factor report — the market_factor_report input was omitted for this "
+    "node>\n"
+    "No factor readings were supplied to this read. Every axis must be unknown "
+    "at confidence=low with unknown_reason naming this missing input; evidence "
+    "anchors are impossible and MUST be left empty (never invent a factor_id or "
+    "a value). The runtime stamps factor_report_digest with its "
+    "no-factor-report marker."
+)
+
+
+class Lane0PromptAssembler:
+    """The per-run Lane-0 :class:`~guanlan_v2.orchestration.worker.PromptAssembler`.
+
+    Constructed once per run with the run's :class:`ArtifactPool` + schema
+    registry closed over; occupies the ``prompt_assembler`` injection seam the
+    driver already owns. The canonical channel is the reviewed static-v1 shape
+    plus two sections: :data:`LANE0_FACTOR_REPORT_SECTION` (裁决 1, above) and
+    the derived ``output_schema`` (裁决 2, ``worker.output_schema_section``)
+    with the three :data:`LANE0_RUNTIME_OWNED_FIELDS` declared as the runtime's.
+
+    The private ``worker.py`` helpers are reused deliberately (the
+    ``SubjectPromptAssembler`` precedent): assemblers must never drift on how
+    text materials render or how request bytes digest.
+    """
+
+    assembler_id = LANE0_ASSEMBLER_ID
+    assembler_version = LANE0_ASSEMBLER_VERSION
+
+    def __init__(self, *, pool, registry) -> None:
+        self._pool = pool
+        self._registry = registry
+
+    def assemble(
+        self,
+        *,
+        plan_digest: str,
+        node_id: str,
+        worker_id: str,
+        system_prompt,
+        skills,
+        guardrails,
+        trusted_input_digests: tuple,
+        untrusted_blocks: tuple,
+        output_binding=None,
+        schema_registry=None,
+    ):
+        from guanlan_v2.orchestration import worker as _worker
+        from guanlan_v2.orchestration.runtime_contracts import PromptAssemblyRecord
+
+        trusted = sorted(trusted_input_digests, key=lambda e: e.name)
+        blocks = tuple(untrusted_blocks)
+        channel = {
+            "assembler_id": self.assembler_id,
+            "assembler_version": self.assembler_version,
+            "system": _worker._text_of(system_prompt),
+            "skills": [_worker._text_of(s) for s in skills],
+            "guardrails": [_worker._text_of(g) for g in guardrails],
+            LANE0_FACTOR_REPORT_SECTION: self._factor_report_section(trusted),
+            "trusted_inputs": [{"name": e.name, "digest": e.digest} for e in trusted],
+            "data_inputs": [
+                {
+                    "ordinal": b.ordinal,
+                    "schema": b.payload_ref.schema_ref.key,
+                    "namespace": b.payload_ref.payload_ref.namespace,
+                    "content_digest": b.payload_ref.payload_ref.content_digest,
+                    "media_type": b.media_type,
+                    "length": b.rendered_length,
+                }
+                for b in blocks
+            ],
+        }
+        out_schema = _worker.output_schema_section(
+            output_binding=output_binding, schema_registry=schema_registry,
+            runtime_owned_fields=LANE0_RUNTIME_OWNED_FIELDS)
+        if out_schema is not None:
+            channel[_worker.OUTPUT_SCHEMA_SECTION] = out_schema
+
+        canonical_bytes = json.dumps(
+            channel, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        digest = _worker._model_request_digest(canonical_bytes)
+        record = PromptAssemblyRecord.build(
+            plan_digest=plan_digest, node_id=node_id, worker_id=worker_id,
+            assembler_id=self.assembler_id, assembler_version=self.assembler_version,
+            system_prompt_ref=_worker._ref_of(system_prompt),
+            skill_refs=tuple(_worker._ref_of(s) for s in skills),
+            guardrail_refs=tuple(_worker._ref_of(g) for g in guardrails),
+            trusted_input_digests=tuple(trusted), untrusted_blocks=blocks,
+            model_request_digest=digest)
+        return _worker.AssembledModelRequest(
+            canonical_request_bytes=canonical_bytes, request_digest=digest,
+            prompt_record=record)
+
+    # -- internals ----------------------------------------------------------- #
+    def _factor_report_section(self, trusted) -> dict:
+        """The inlined, attributable factor-report block — or an honest absence.
+
+        The node's ``market_factor_report`` trusted-input digest is the committed
+        **Artifact**'s ``content_digest`` (that is what ``ArtifactRef`` carries),
+        so that is what the inlined block is checked against; the report
+        payload's OWN seal travels alongside as ``factor_report_digest`` — the
+        downstream audit anchor whose 12-char prefix the rendered header shows.
+        """
+        bound = next(
+            (e.digest for e in trusted if e.name == _FACTOR_INJECT), None)
+        artifact = self._pool.committed_output(BOOTSTRAP_NODE_IDS[0], _PRIMARY)
+        if bound is None:
+            # the node's optional DEGRADE input was omitted (a FAILED factor
+            # node): there is nothing to inline and we say exactly that.
+            return {
+                "artifact_schema": MARKET_FACTOR_REPORT_SCHEMA_REF.key,
+                "artifact_digest": None,
+                "factor_report_digest": None,
+                "status": "absent",
+                "text": LANE0_NO_FACTOR_REPORT_TEXT,
+            }
+        if artifact is None:
+            raise BootstrapRuntimeError(
+                f"node input {_FACTOR_INJECT!r} binds a market-factor artifact "
+                f"(digest {bound[:12]}…) the artifact pool does not produce; "
+                "refusing to assemble a prompt that would either omit or "
+                "misattribute the report")
+        art_digest = getattr(artifact, "content_digest", None)
+        if art_digest != bound:
+            raise BootstrapRuntimeError(
+                f"the committed market-factor artifact ({str(art_digest)[:12]}…) "
+                f"is not the one this node's {_FACTOR_INJECT!r} input binds "
+                f"({bound[:12]}…); refusing to inline a report the node was never "
+                "bound to")
+        report = self._resolved_report(artifact)
+        summary = report.coverage_summary
+        return {
+            "artifact_schema": MARKET_FACTOR_REPORT_SCHEMA_REF.key,
+            "artifact_digest": art_digest,
+            "factor_report_digest": report.content_digest,
+            "status": "present" if report.feature_vector else "no_citable_reading",
+            "coverage": float(report.coverage),
+            "n_ok": summary.n_ok,
+            "n_degraded": summary.n_degraded,
+            "n_unavailable": summary.n_unavailable,
+            "badges": list(report.badges),
+            "text": render_factor_report_for_prompt(report),
+        }
+
+    def _resolved_report(self, artifact):
+        payload = artifact.payload
+        if self._registry is not None and not isinstance(payload, DigestModel):
+            payload = self._registry.validate_payload(
+                MARKET_FACTOR_REPORT_SCHEMA_REF, payload)
+        return payload
 
 
 # --------------------------------------------------------------------------- #

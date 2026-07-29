@@ -31,7 +31,11 @@ from types import SimpleNamespace
 import pytest
 
 from guanlan_v2.orchestration import bootstrap as B
-from guanlan_v2.orchestration.market.factors import RegimeReport, RotationReport
+from guanlan_v2.orchestration.market.factors import (
+    NO_FACTOR_REPORT_DIGEST,
+    RegimeReport,
+    RotationReport,
+)
 
 UTC = timezone.utc
 AS_OF = datetime(2026, 7, 29, 1, 30, tzinfo=UTC)
@@ -308,11 +312,12 @@ class _FakeRequest:
             worker_id=worker_id, node_id="lane0.regime")
 
 
-def _gateway(payload, *, report=_FakeReport(), schema_key="RegimeReport@1"):
+def _gateway(payload, *, report=_FakeReport(), schema_key="RegimeReport@1",
+             as_of=None):
     inner = _FakeInner(payload)
     gw = B.Lane0OutputNormalizingGateway(
         inner=inner, catalog_runtime=_FakeCatalog(schema_key),
-        pool=_FakePool(report), registry=None)
+        pool=_FakePool(report), registry=None, as_of=as_of)
     return gw, inner
 
 
@@ -333,11 +338,38 @@ def test_the_gateway_passes_an_instance_payload_through_untouched():
 
 
 def test_the_gateway_leaves_the_payload_alone_with_no_committed_factor_report():
-    # nothing honest to stamp as_of / factor_report_digest with ⇒ do not invent
-    # one; the executor refuses by schema, which is the truthful outcome.
+    # no committed report AND no run as_of ⇒ nothing honest to stamp at all;
+    # the executor refuses by schema, which is the truthful outcome.
     raw = conformant_regime_json()
     gw, _inner = _gateway(raw, report=None)
     assert gw.invoke(_FakeRequest(), prompt_assembly_ref=None).payload is raw
+
+
+# --- 裁决 3 — "no report was bound" is a stamp, not an invented digest ------- #
+def test_with_no_committed_report_the_runtime_stamps_the_no_report_marker():
+    raw = dict(conformant_regime_json(), evidence=[], evidence_factor_ids=[],
+               unknown_reason="no market_factor_report was bound to this read")
+    gw, _inner = _gateway(raw, report=None, as_of=AS_OF)
+    payload = gw.invoke(_FakeRequest(), prompt_assembly_ref=None).payload
+    assert isinstance(payload, RegimeReport)
+    assert payload.factor_report_digest == NO_FACTOR_REPORT_DIGEST
+    assert payload.as_of == AS_OF
+    assert payload.evidence == ()
+
+
+def test_with_no_committed_report_an_invented_anchor_is_still_refused():
+    # the exact live-run shape: the model cites `missing_report`. Under the
+    # no-report stamp the contract forbids it, so the payload comes back
+    # untouched and the executor's own output_schema_invalid stands.
+    raw = conformant_regime_json()          # carries a breadth.ad_ratio anchor
+    gw, _inner = _gateway(raw, report=None, as_of=AS_OF)
+    assert gw.invoke(_FakeRequest(), prompt_assembly_ref=None).payload is raw
+
+
+def test_a_committed_report_is_never_overwritten_by_the_no_report_marker():
+    gw, _inner = _gateway(conformant_regime_json(), as_of=AS_OF)
+    payload = gw.invoke(_FakeRequest(), prompt_assembly_ref=None).payload
+    assert payload.factor_report_digest == DIGEST != NO_FACTOR_REPORT_DIGEST
 
 
 def test_the_gateway_ignores_a_worker_outside_the_two_lane0_reports():

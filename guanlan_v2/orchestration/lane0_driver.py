@@ -1159,14 +1159,19 @@ def run_lane0_bootstrap(
             payload_reader=bindings.stores.payloads,
             catalog_runtime=bindings.catalog_runtime),
         catalog_runtime=bindings.catalog_runtime, pool=pool,
-        registry=bindings.registry)
+        registry=bindings.registry, as_of=now)
     recorder = _dag_run_recorder()
+    # 裁决 1 + 2: the Lane-0 assembler INLINES the rendered factor report (this
+    # system's own attested numbers, cited by the committed artifact's full
+    # digest) and DERIVES the output contract from the worker's OutputBinding.
+    # Untrusted retrieval blocks stay digest references exactly as before.
     executor = build_dag_plan_executor(
         pool=pool, budget=budget, runtime=runtime, registry=bindings.registry,
         stores=bindings.stores, runtime_limit=int(bindings.runtime_limit),
         clock=bindings.clock, admission=service, model_gateway=gateway,
-        prompt_assembler=_worker.StaticPromptAssembler(), refusal_sink=refusal_sink,
-        recorder_factory=lambda: recorder)
+        prompt_assembler=_bootstrap.Lane0PromptAssembler(
+            pool=pool, registry=bindings.registry),
+        refusal_sink=refusal_sink, recorder_factory=lambda: recorder)
     try:
         run_result = executor(
             plan=plan, run_context=run_context, lane="main", point=_DecisionPoint())

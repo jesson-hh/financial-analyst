@@ -201,11 +201,15 @@ class ScriptedJsonLane0Gateway:
     def __init__(self, *, stores, **_kw) -> None:
         self._stores = stores
         self.invocations: list[str] = []
+        #: the EXACT authorized request bytes — what a real provider would see.
+        self.canonical_requests: dict[str, str] = {}
 
     def invoke(self, request, *, prompt_assembly_ref):
         record = W.verify_model_request_binding(
             request, prompt_assembly_ref, reader=self._stores.payloads)
         self.invocations.append(record.node_id)
+        self.canonical_requests[record.node_id] = (
+            request.canonical_request_bytes.decode("utf-8"))
         if record.worker_id == "market.regime":
             payload = {
                 "trend": "unknown", "risk_state": "unknown", "heat_state": "unknown",
@@ -678,6 +682,44 @@ def test_the_runtime_stamps_the_digest_of_the_report_the_run_committed():
     assert regime.factor_report_digest == factor.content_digest
     assert regime.as_of == factor.as_of
     assert regime.content_digest == regime.semantic_digest()
+
+
+# =========================================================================== #
+# 4c — 裁决 1 + 2: the production run's prompt carries the data and the schema  #
+# =========================================================================== #
+def test_the_production_run_puts_the_rendered_numbers_in_the_model_request():
+    """The 2026-07-29 hole, pinned at the driver: the seat that answered
+    "no factor report" now receives the rendered block in its authorized bytes."""
+    import json as _json
+
+    from guanlan_v2.orchestration import bootstrap as _B
+    from guanlan_v2.orchestration import worker as _W
+    from guanlan_v2.orchestration.market.factors import (
+        MARKET_FACTOR_REPORT_SCHEMA_REF,
+        render_factor_report_for_prompt,
+    )
+
+    env = Env(raw_json_gateway=True)
+    env.run()
+    stored = list(dict(env.stores._shared.backend.payloads).values())
+    factor = next(s.model for s in stored
+                  if getattr(s, "schema_key", None) == MARKET_FACTOR_REPORT_SCHEMA_REF.key)
+    records = [s.model for s in stored
+               if getattr(s, "schema_key", None) == "PromptAssemblyRecord@1"]
+    assert {r.node_id for r in records} == {"lane0.regime", "lane0.rotation"}
+    # the driver injects the Lane-0 assembler, not the static one.
+    assert {r.assembler_id for r in records} == {_B.LANE0_ASSEMBLER_ID}
+
+    rendered = render_factor_report_for_prompt(factor)
+    for node_id, blob in env.gateway.canonical_requests.items():
+        channel = _json.loads(blob)
+        section = channel[_B.LANE0_FACTOR_REPORT_SECTION]
+        assert section["text"] == rendered, node_id
+        assert section["factor_report_digest"] == factor.content_digest
+        assert f"battery_digest={factor.battery_digest[:8]}" in blob
+        out = channel[_W.OUTPUT_SCHEMA_SECTION]
+        assert out["runtime_supplied_fields"] == sorted(_B.LANE0_RUNTIME_OWNED_FIELDS)
+        assert "narrative" in set(out["required_fields"]) | set(out["optional_fields"])
 
 
 # =========================================================================== #
