@@ -69,7 +69,9 @@ from guanlan_v2.orchestration.market.factors import (
     MainlineRead,
     MarketFactorInputs,
     MarketFactorReport,
+    NO_CITABLE_READING_REASON,
     NO_FACTOR_REPORT_DIGEST,
+    NO_FACTOR_REPORT_REASON,
     RegimeReport,
     RiskState,
     RotationReport,
@@ -205,30 +207,27 @@ class FakeLane0Gateway:
     def _anchor_and_digest(self, report):
         """``(anchors, factor_report_digest, confident)`` — honest in all three cases.
 
-        With NO committed report the runtime's stamp is
-        ``NO_FACTOR_REPORT_DIGEST`` and the report contracts FORBID any anchor
-        (裁决 3): a reading that was never supplied cannot be cited, so the
-        scripted read cites nothing. A committed-but-all-UNAVAILABLE report is a
-        different case — the report exists, so the ④ ≥1 rule still applies.
+        Both honest-empty cases cite NOTHING (裁决 3 + Option B) — a reading that
+        was never supplied, and a report in which every factor is UNAVAILABLE,
+        are equally uncitable, and inventing a value for either is the forbidden
+        unsourced number. Only a report with a real ``feature_vector`` entry
+        yields an anchor, and there the ④ ≥1 rule stands unchanged.
         """
         if report is None:
-            return (), NO_FACTOR_REPORT_DIGEST, False
+            return (), NO_FACTOR_REPORT_DIGEST, NO_FACTOR_REPORT_REASON
         if report.feature_vector:
             fid, val = next(iter(report.feature_vector.items()))
             return ((EvidenceAnchor(factor_id=fid, value=val, reading="reading"),),
-                    report.content_digest, True)
-        fid = report.values[0].factor_id
-        return ((EvidenceAnchor(factor_id=fid, value=0.0,
-                                reading="no usable factor data"),),
-                report.content_digest, False)
+                    report.content_digest, None)
+        return (), report.content_digest, NO_CITABLE_READING_REASON
 
     def _as_of(self, report):
         return report.as_of if report is not None else DT
 
     def _regime(self, report) -> RegimeReport:
-        anchors, digest, confident = self._anchor_and_digest(report)
+        anchors, digest, empty_reason = self._anchor_and_digest(report)
         anchor = anchors[0] if anchors else None
-        if confident:
+        if empty_reason is None:
             return RegimeReport.build(
                 as_of=self._as_of(report), factor_report_digest=digest,
                 trend=TrendState.BULL, risk_state=RiskState.RISK_ON, heat_state=HeatState.NORMAL,
@@ -254,13 +253,12 @@ class FakeLane0Gateway:
             drivers=("insufficient_data",),
             evidence_factor_ids=tuple(sorted({a.factor_id for a in anchors})),
             narrative="No usable factor data; regime unknown (honest degraded read).",
-            unknown_reason=("no market_factor_report was bound to this read"
-                            if anchor is None else "insufficient factor coverage"))
+            unknown_reason=empty_reason)
 
     def _rotation(self, report) -> RotationReport:
-        anchors, digest, confident = self._anchor_and_digest(report)
+        anchors, digest, empty_reason = self._anchor_and_digest(report)
         anchor = anchors[0] if anchors else None
-        if confident:
+        if empty_reason is None:
             mainline = MainlineRead(
                 name="AI compute", universe_key="ai_compute", stage=RotationStage.SPREAD,
                 strength=6.0, persistence="two-session inflow", evidence=(anchor,))
@@ -603,8 +601,23 @@ def test_degraded_factor_reader_still_produces_honest_unknown_regime():
     # never the omitted-input sentinel (a committed report is still injected).
     for nid in ("lane0.regime", "lane0.rotation"):
         assert env.model_gateway.rendered_factor[nid] != "<no factor report — omitted input>"
+        # 裁决 3 · Option B: the prompt says the anchor is impossible here, and
+        # says the reason is the runtime's to write.
+        section = json.loads(
+            env.model_gateway.canonical_requests[nid])[B.LANE0_FACTOR_REPORT_SECTION]
+        assert section["status"] == "no_citable_reading"
+        assert section["note"] == B.LANE0_NO_CITABLE_READING_NOTE
     regime = env.pool.committed_output("lane0.regime", "primary").payload
     assert regime.trend is TrendState.UNKNOWN and regime.confidence is Confidence.LOW
+    # the audit anchor stays the REAL committed report digest, and the read cites
+    # nothing rather than inventing a value for an UNAVAILABLE factor.
+    factor = env.registry.validate_payload(
+        MARKET_FACTOR_REPORT_SCHEMA_REF,
+        env.pool.committed_output("lane0.factor", "primary").payload)
+    assert regime.factor_report_digest == factor.content_digest
+    assert regime.factor_report_digest != NO_FACTOR_REPORT_DIGEST
+    assert regime.evidence == () and regime.evidence_factor_ids == ()
+    assert regime.unknown_reason == NO_CITABLE_READING_REASON
 
 
 def test_failed_factor_node_omits_input_drives_the_omitted_branch():

@@ -203,6 +203,8 @@ class ScriptedJsonLane0Gateway:
         self.invocations: list[str] = []
         #: the EXACT authorized request bytes — what a real provider would see.
         self.canonical_requests: dict[str, str] = {}
+        #: answer with an EMPTY citation list + self-written excuse (裁决 3 · B).
+        self.empty_evidence = False
 
     def invoke(self, request, *, prompt_assembly_ref):
         record = W.verify_model_request_binding(
@@ -225,6 +227,9 @@ class ScriptedJsonLane0Gateway:
                 "narrative": "Advisory only; every axis carries its unknown mass.",
                 "unknown_reason": "most of the battery is UNAVAILABLE",
             }
+            if self.empty_evidence:
+                payload.update(evidence=[], evidence_factor_ids=[],
+                               unknown_reason="I decided not to cite anything")
         else:
             payload = {"rotation_report": {
                 "mainlines": [], "confidence": "low", "conflicts": [],
@@ -720,6 +725,47 @@ def test_the_production_run_puts_the_rendered_numbers_in_the_model_request():
         out = channel[_W.OUTPUT_SCHEMA_SECTION]
         assert out["runtime_supplied_fields"] == sorted(_B.LANE0_RUNTIME_OWNED_FIELDS)
         assert "narrative" in set(out["required_fields"]) | set(out["optional_fields"])
+
+
+# =========================================================================== #
+# 4d — 裁决 3 · Option B through the PRODUCTION normalizer                      #
+# =========================================================================== #
+def test_an_all_unavailable_report_lets_the_seat_answer_without_an_anchor():
+    """The dark-battery case, end to end: real digest, zero citations, runtime reason."""
+    from guanlan_v2.orchestration.market.factors import (
+        MARKET_FACTOR_REPORT_SCHEMA_REF,
+        NO_CITABLE_READING_REASON,
+        NO_FACTOR_REPORT_DIGEST,
+        REGIME_REPORT_SCHEMA_REF,
+    )
+
+    env = Env(raw_json_gateway=True)
+    env.gateway.empty_evidence = True
+    result = env.run(inputs=empty_inputs())          # every factor UNAVAILABLE
+
+    assert result.node_statuses["lane0.regime"] in ("completed", "degraded")
+    stored = list(dict(env.stores._shared.backend.payloads).values())
+    factor = next(s.model for s in stored
+                  if getattr(s, "schema_key", None) == MARKET_FACTOR_REPORT_SCHEMA_REF.key)
+    regime = next(s.model for s in stored
+                  if getattr(s, "schema_key", None) == REGIME_REPORT_SCHEMA_REF.key)
+    assert factor.feature_vector == {}               # nothing citable existed
+    # the audit anchor the deep lane depends on is INTACT (never the no-report marker)…
+    assert regime.factor_report_digest == factor.content_digest
+    assert regime.factor_report_digest != NO_FACTOR_REPORT_DIGEST
+    # …the read cites nothing, and the reason is the runtime's measurement, not
+    # the model's "I decided not to cite anything".
+    assert regime.evidence == () and regime.evidence_factor_ids == ()
+    assert regime.unknown_reason == NO_CITABLE_READING_REASON
+
+
+def test_a_citable_report_still_refuses_a_seat_that_cites_nothing():
+    """The ④ ≥1 rule, bit-for-bit, on the production path."""
+    env = Env(raw_json_gateway=True)
+    env.gateway.empty_evidence = True
+    result = env.run()                               # happy inputs ⇒ citable readings
+    assert result.node_statuses["lane0.regime"] == "incomplete"
+    assert "regime_missing" in result.degradation_badges
 
 
 # =========================================================================== #

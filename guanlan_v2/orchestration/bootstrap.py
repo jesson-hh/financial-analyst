@@ -209,6 +209,7 @@ __all__ = [
     "LANE0_ASSEMBLER_VERSION",
     "LANE0_FACTOR_REPORT_SECTION",
     "LANE0_NO_FACTOR_REPORT_TEXT",
+    "LANE0_NO_CITABLE_READING_NOTE",
     "Lane0PromptAssembler",
     # -- Task 9 chain surface ---------------------------------------------- #
     "BOOTSTRAP_PUBLIC_MODELS",
@@ -1842,7 +1843,9 @@ def _decode_field(annotation, value):
         json.dumps(value, ensure_ascii=False), strict=True)
 
 
-def normalize_lane0_llm_output(payload, *, model, as_of, factor_report_digest):
+def normalize_lane0_llm_output(
+    payload, *, model, as_of, factor_report_digest, empty_evidence_reason=None,
+):
     """Decode one Lane-0 LLM JSON answer into its sealed report, or refuse.
 
     Returns a built ``model`` instance when — and only when — the model's own
@@ -1856,6 +1859,15 @@ def normalize_lane0_llm_output(payload, *, model, as_of, factor_report_digest):
     against the model's own declared annotation; the report is then sealed with
     ``build`` (which computes ``content_digest``), so every model validator —
     axis sums, modal argmax, evidence anchors, the 无主线 rule — still runs.
+
+    ``empty_evidence_reason`` is the CONDITIONALLY runtime-owned field (裁决 3 ·
+    Option B): whenever the answer cites nothing, ``unknown_reason`` stops being
+    the model's to write and becomes the runtime's measurement — a member of
+    :data:`~guanlan_v2.orchestration.market.factors.EMPTY_EVIDENCE_REASONS`
+    chosen from what was actually committed. ``None`` means the runtime measured
+    at least one citable reading, so an empty citation list is NOT available at
+    all and the payload comes back unchanged: "I cite nothing" can never become a
+    phrase that escapes citing evidence the read actually had.
     """
     if not isinstance(payload, Mapping):
         return payload
@@ -1865,6 +1877,25 @@ def normalize_lane0_llm_output(payload, *, model, as_of, factor_report_digest):
         raw = dict(raw[key])
     for field in LANE0_RUNTIME_OWNED_FIELDS:
         raw.pop(field, None)
+
+    if (
+        "evidence" in model.model_fields
+        and isinstance(raw.get("evidence"), (list, tuple))
+        and not raw["evidence"]
+    ):
+        if empty_evidence_reason is None:
+            return payload                  # a citable reading exists ⇒ refuse
+        if empty_evidence_reason not in _factors.EMPTY_EVIDENCE_REASONS:
+            # a wiring guard, not a data case: only the two reviewed measurements
+            # may license an empty citation list, so a caller cannot mint one.
+            raise BootstrapRuntimeError(
+                f"empty_evidence_reason {empty_evidence_reason!r} is not one of "
+                f"the reviewed runtime measurements "
+                f"{sorted(_factors.EMPTY_EVIDENCE_REASONS)!r}")
+        # an UNCONDITIONAL overwrite: whatever the model wrote here is discarded.
+        # (A `pop` in front of this would be dead — the assignment is the
+        # overwrite; a guard no test can turn red is not a guard.)
+        raw["unknown_reason"] = empty_evidence_reason
 
     fields: dict[str, Any] = {}
     for name, value in raw.items():
@@ -1921,12 +1952,21 @@ class Lane0OutputNormalizingGateway:
         report = self._committed_factor_report()
         if report is not None:
             as_of, digest = report.as_of, report.content_digest
+            # 裁决 3 · Option B: the licence for an empty citation list is a
+            # MEASUREMENT, not the model's prose. A report with at least one
+            # OK/DEGRADED factor leaves `feature_vector` non-empty ⇒ an anchor
+            # IS available ⇒ no licence is issued and the ④ ≥1 rule stands.
+            reason = (
+                None if report.feature_vector
+                else _factors.NO_CITABLE_READING_REASON)
         elif self._as_of is not None:
             as_of, digest = self._as_of, _factors.NO_FACTOR_REPORT_DIGEST
+            reason = _factors.NO_FACTOR_REPORT_REASON
         else:
             return result
         normalized = normalize_lane0_llm_output(
-            payload, model=model, as_of=as_of, factor_report_digest=digest)
+            payload, model=model, as_of=as_of, factor_report_digest=digest,
+            empty_evidence_reason=reason)
         if normalized is payload:
             return result
         return replace(result, payload=normalized)
@@ -2012,10 +2052,19 @@ LANE0_NO_FACTOR_REPORT_TEXT = (
     "<no factor report — the market_factor_report input was omitted for this "
     "node>\n"
     "No factor readings were supplied to this read. Every axis must be unknown "
-    "at confidence=low with unknown_reason naming this missing input; evidence "
-    "anchors are impossible and MUST be left empty (never invent a factor_id or "
-    "a value). The runtime stamps factor_report_digest with its "
-    "no-factor-report marker."
+    "at confidence=low; evidence anchors are impossible and MUST be left empty "
+    "(never invent a factor_id or a value). The runtime stamps "
+    "factor_report_digest with its no-factor-report marker AND writes "
+    "unknown_reason itself from what it measured — do not write one."
+)
+#: the honest note when a report WAS bound but carries nothing citable
+#: (裁决 3 · Option B: every factor UNAVAILABLE ⇒ no anchor is possible).
+LANE0_NO_CITABLE_READING_NOTE = (
+    "Every factor in this report is UNAVAILABLE, so it carries no value you "
+    "could anchor: no EvidenceAnchor is possible. Leave `evidence` empty and "
+    "every axis modal `unknown` at confidence=low. The runtime writes "
+    "unknown_reason itself from what it measured — do not write one. Do NOT "
+    "cite an UNAVAILABLE factor with a made-up value."
 )
 
 
@@ -2140,11 +2189,12 @@ class Lane0PromptAssembler:
                 "bound to")
         report = self._resolved_report(artifact)
         summary = report.coverage_summary
-        return {
+        citable = bool(report.feature_vector)
+        section = {
             "artifact_schema": MARKET_FACTOR_REPORT_SCHEMA_REF.key,
             "artifact_digest": art_digest,
             "factor_report_digest": report.content_digest,
-            "status": "present" if report.feature_vector else "no_citable_reading",
+            "status": "present" if citable else "no_citable_reading",
             "coverage": float(report.coverage),
             "n_ok": summary.n_ok,
             "n_degraded": summary.n_degraded,
@@ -2152,6 +2202,9 @@ class Lane0PromptAssembler:
             "badges": list(report.badges),
             "text": render_factor_report_for_prompt(report),
         }
+        if not citable:
+            section["note"] = LANE0_NO_CITABLE_READING_NOTE
+        return section
 
     def _resolved_report(self, artifact):
         payload = artifact.payload

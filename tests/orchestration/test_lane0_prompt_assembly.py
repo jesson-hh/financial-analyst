@@ -268,6 +268,21 @@ def test_a_report_with_no_citable_reading_is_declared_degraded():
     assert section["n_ok"] == 0
     assert section["factor_report_digest"] == report.content_digest
     assert section["text"] == render_factor_report_for_prompt(report)
+    # 裁决 3 · Option B: the model is told the anchor is impossible AND that the
+    # reason is the runtime's to write — never its own.
+    assert section["note"] == B.LANE0_NO_CITABLE_READING_NOTE
+    assert "do not write one" in section["note"].lower()
+
+
+def test_a_citable_report_carries_no_no_anchor_note():
+    """The note is a measurement, not decoration: with a reading available the
+    ④ ≥1 rule stands and nothing licenses an empty citation list."""
+    report = _report()
+    assert report.feature_vector
+    section = _channel(_assemble(
+        B.Lane0PromptAssembler(pool=_Pool(report), registry=_registry()),
+        report=report))[B.LANE0_FACTOR_REPORT_SECTION]
+    assert "note" not in section
 
 
 def test_a_present_report_declares_its_own_coverage_numbers():

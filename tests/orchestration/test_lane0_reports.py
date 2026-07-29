@@ -35,8 +35,11 @@ from guanlan_v2.orchestration.market.factors import (
     UNKNOWN_ATTENTION_THRESHOLD,
     EvidenceAnchor,
     HeatState,
+    EMPTY_EVIDENCE_REASONS,
     MainlineRead,
+    NO_CITABLE_READING_REASON,
     NO_FACTOR_REPORT_DIGEST,
+    NO_FACTOR_REPORT_REASON,
     RegimeReport,
     RiskState,
     RotationReport,
@@ -373,7 +376,7 @@ _NO_REPORT_AXES = dict(
         HeatState.NORMAL: 0.0, HeatState.OVERHEAT: 0.0, HeatState.UNKNOWN: 1.0,
     },
     confidence=Confidence.LOW,
-    unknown_reason="no market_factor_report was bound to this read",
+    unknown_reason=NO_FACTOR_REPORT_REASON,
 )
 
 
@@ -417,11 +420,89 @@ def test_a_read_with_no_factor_report_may_never_claim_a_regime():
 
 
 def test_a_supplied_factor_report_still_requires_at_least_one_anchor():
-    # the ④ ≥1 rule is untouched for every read that DID get a report — including
-    # an all-unknown one (this is exactly what the ruling asked to keep).
+    # the ④ ≥1 rule is untouched for every read that DID get a report and whose
+    # empty citation list is not licensed by a RUNTIME-authored reason.
     with pytest.raises(ValidationError):
         _regime(factor_report_digest=DIGEST, evidence=(), evidence_factor_ids=(),
                 drivers=("insufficient_coverage",), **_NO_REPORT_AXES)
+
+
+# --------------------------------------------------------------------------- #
+# 裁决 3 · Option B — a bound report with NO citable reading is the same defect  #
+# --------------------------------------------------------------------------- #
+# A report can be committed (so the digest is real) and still carry nothing to
+# cite: every factor UNAVAILABLE ⇒ the rendered block has ids and reasons but no
+# `value`, while EvidenceAnchor.value is a required FiniteFloat. The ≥1 rule then
+# forces the same fabrication all over again. Empty evidence is therefore lawful
+# IFF the read is a declared total non-read (all three modals unknown) AND the
+# reason is one the RUNTIME authored — never model prose, or "no evidence"
+# becomes a phrase a model can use to escape citing evidence it DOES have.
+def _no_citable(**over):
+    fields = dict(_NO_REPORT_AXES)
+    fields.update(unknown_reason=NO_CITABLE_READING_REASON)
+    fields.update(over)
+    return fields
+
+
+def test_a_bound_report_with_no_citable_reading_may_leave_evidence_empty():
+    r = _regime(factor_report_digest=DIGEST, evidence=(), evidence_factor_ids=(),
+                drivers=("no_citable_reading",), **_no_citable())
+    assert r.evidence == () and r.evidence_factor_ids == ()
+    assert r.factor_report_digest == DIGEST     # the audit anchor is INTACT
+    assert r.unknown_reason == NO_CITABLE_READING_REASON
+
+
+def test_a_model_authored_reason_can_never_license_an_empty_citation_list():
+    for prose in ("coverage is thin", "no usable factor data", ""):
+        with pytest.raises(ValidationError):
+            _regime(factor_report_digest=DIGEST, evidence=(), evidence_factor_ids=(),
+                    drivers=("no_citable_reading",), **_no_citable(unknown_reason=prose))
+
+
+def test_an_empty_citation_list_may_never_accompany_a_claim():
+    axes = _no_citable(
+        trend=TrendState.BULL,
+        trend_probabilities={
+            TrendState.BULL: 0.7, TrendState.BEAR: 0.1,
+            TrendState.RANGE: 0.1, TrendState.UNKNOWN: 0.1,
+        },
+    )
+    with pytest.raises(ValidationError):
+        _regime(factor_report_digest=DIGEST, evidence=(), evidence_factor_ids=(),
+                drivers=("no_citable_reading",), **axes)
+
+
+def test_the_two_runtime_reasons_are_not_interchangeable():
+    # each reason states a DIFFERENT measured fact; swapping them would let one
+    # cover for the other.
+    with pytest.raises(ValidationError):
+        _regime(factor_report_digest=NO_FACTOR_REPORT_DIGEST, evidence=(),
+                evidence_factor_ids=(), drivers=("x",), **_no_citable())
+    with pytest.raises(ValidationError):
+        _regime(factor_report_digest=DIGEST, evidence=(), evidence_factor_ids=(),
+                drivers=("x",), **_no_citable(unknown_reason=NO_FACTOR_REPORT_REASON))
+
+
+def test_the_runtime_reasons_are_a_closed_two_entry_set():
+    assert EMPTY_EVIDENCE_REASONS == frozenset(
+        {NO_FACTOR_REPORT_REASON, NO_CITABLE_READING_REASON})
+
+
+def test_one_citable_anchor_keeps_the_original_rule_bit_for_bit():
+    # every read that cites at least one reading is validated exactly as before:
+    # the reason vocabulary does not touch it, and a non-empty citation list
+    # neither needs nor accepts a licence.
+    r = _regime()                                   # MEDIUM, BULL, one anchor
+    assert r.evidence and r.unknown_reason is None
+    r2 = _regime(evidence=(_anchor("vol.rv", 1.0),), evidence_factor_ids=("vol.rv",))
+    assert r2.evidence_factor_ids == ("vol.rv",)
+    # …and an all-unknown read that DOES cite a reading stays lawful with its own
+    # prose reason (the ordinary degraded-coverage case).
+    r3 = _regime(factor_report_digest=DIGEST, evidence=(_anchor(),),
+                 evidence_factor_ids=("breadth.ad_ratio",),
+                 drivers=("insufficient_coverage",),
+                 **dict(_NO_REPORT_AXES, unknown_reason="most of the battery is UNAVAILABLE"))
+    assert r3.unknown_reason == "most of the battery is UNAVAILABLE"
 
 
 def test_a_rotation_with_no_factor_report_may_never_rank_a_mainline():

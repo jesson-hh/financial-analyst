@@ -74,6 +74,9 @@ __all__ = [
     "HIGH_CONFIDENCE_UNKNOWN_MAX",
     "EvidenceAnchor",
     "NO_FACTOR_REPORT_DIGEST",
+    "NO_FACTOR_REPORT_REASON",
+    "NO_CITABLE_READING_REASON",
+    "EMPTY_EVIDENCE_REASONS",
     "RegimeReport",
     "MainlineRead",
     "RotationReport",
@@ -795,6 +798,42 @@ HIGH_CONFIDENCE_UNKNOWN_MAX: float = 0.10
 #: carrying it needs no schema change (no registered JSON schema moves).
 NO_FACTOR_REPORT_DIGEST: DigestHex = "0" * 64
 
+# --------------------------------------------------------------------------- #
+# 裁决 3 · Option B (2026-07-29) — the sibling case: a report WITH no reading    #
+# --------------------------------------------------------------------------- #
+# A MarketFactorReport can be committed — so ``factor_report_digest`` is a real
+# 64-hex audit anchor — and still carry nothing citable: every factor
+# UNAVAILABLE ⇒ the rendered block lists ids and reasons but no ``value``, while
+# ``EvidenceAnchor.value`` is a required ``FiniteFloat``. The ≥1-anchor rule then
+# forces the SAME fabrication the no-report case did. Stamping
+# ``NO_FACTOR_REPORT_DIGEST`` there was rejected by the controller and by me: it
+# would destroy the audit anchor the deep lane depends on — one dishonesty
+# traded for a worse one.
+#
+# So an empty citation list is lawful IFF the read is a declared total non-read
+# (all three modal axes ``unknown``) AND it carries a reason from this CLOSED,
+# RUNTIME-authored vocabulary. The vocabulary is the whole point: were the
+# reason model prose, "I cite nothing" would become a phrase a model could use
+# to escape citing evidence it DOES have. The two entries state two different
+# MEASURED facts and are deliberately not interchangeable — each validator binds
+# one to its own ``factor_report_digest`` state, and
+# ``bootstrap.normalize_lane0_llm_output`` overwrites whatever the model wrote
+# with the one the runtime measured (refusing outright when neither applies,
+# which is every case with at least one citable reading).
+
+#: no ``MarketFactorReport`` reached this node at all.
+NO_FACTOR_REPORT_REASON: str = (
+    "runtime: no market_factor_report was bound to this read"
+)
+#: a report WAS bound and every factor in it is UNAVAILABLE (nothing citable).
+NO_CITABLE_READING_REASON: str = (
+    "runtime: the bound market_factor_report carries no citable reading "
+    "(every factor UNAVAILABLE)"
+)
+#: the closed set — the ONLY ``unknown_reason`` values that license empty evidence.
+EMPTY_EVIDENCE_REASONS: frozenset[str] = frozenset(
+    {NO_FACTOR_REPORT_REASON, NO_CITABLE_READING_REASON})
+
 #: the ordered axis → (enum, probabilities-field, modal-field) wiring the
 #: RegimeReport validators iterate; ``unknown_member`` is each enum's honest mass.
 _REGIME_AXES: tuple[tuple[str, type[Enum], str, str, Enum], ...] = (
@@ -945,26 +984,42 @@ class RegimeReport(DigestModel):
                 "an axis with a modal 'unknown' label forces confidence == LOW"
             )
 
-        # 6. evidence anchoring, split on whether a factor report was bound at all
-        #    (裁决 3, see NO_FACTOR_REPORT_DIGEST); evidence_factor_ids == sorted
-        #    distinct anchor ids; drivers sorted + duplicate-free.
-        if self.factor_report_digest == NO_FACTOR_REPORT_DIGEST:
-            if self.evidence:
-                raise ValueError(
-                    "no factor report was bound to this read "
-                    "(factor_report_digest == NO_FACTOR_REPORT_DIGEST), so it can "
-                    "cite no EvidenceAnchor: a reading that was never supplied "
-                    "cannot be anchored, and inventing one is the forbidden "
-                    "unsourced number"
-                )
+        # 6. evidence anchoring (裁决 3 + Option B, see NO_FACTOR_REPORT_DIGEST /
+        #    EMPTY_EVIDENCE_REASONS); evidence_factor_ids == sorted distinct
+        #    anchor ids; drivers sorted + duplicate-free.
+        no_report = self.factor_report_digest == NO_FACTOR_REPORT_DIGEST
+        if not self.evidence:
+            # an empty citation list is lawful ONLY as a declared total non-read
+            # carrying a reason the RUNTIME authored from what it measured.
             if n_modal_unknown != len(_REGIME_AXES):
                 raise ValueError(
-                    "no factor report was bound to this read, so every axis modal "
-                    "must be 'unknown': a regime that could not be read cannot be "
-                    "claimed"
+                    "a read that cites no EvidenceAnchor must set every axis "
+                    "modal to 'unknown': a claim with nothing behind it is the "
+                    "forbidden unsourced number"
                 )
-        elif not self.evidence:
-            raise ValueError("evidence must carry at least one EvidenceAnchor (④ ≥1)")
+            # ONE check, deliberately: the exact reason this read's
+            # factor_report_digest state calls for. A "member of
+            # EMPTY_EVIDENCE_REASONS" test in front of it could never fail on its
+            # own — a guard no test can turn red is not a guard.
+            expected = (
+                NO_FACTOR_REPORT_REASON if no_report else NO_CITABLE_READING_REASON)
+            if self.unknown_reason != expected:
+                raise ValueError(
+                    "an empty evidence list is licensed only by the RUNTIME-authored "
+                    f"reason this read's factor_report_digest state calls for "
+                    f"({expected!r}): a self-written excuse would let 'I cite "
+                    "nothing' escape citing evidence the read actually had, and the "
+                    "two runtime reasons state different measured facts so neither "
+                    "ever covers for the other"
+                )
+        elif no_report:
+            raise ValueError(
+                "no factor report was bound to this read "
+                "(factor_report_digest == NO_FACTOR_REPORT_DIGEST), so it can "
+                "cite no EvidenceAnchor: a reading that was never supplied "
+                "cannot be anchored, and inventing one is the forbidden "
+                "unsourced number"
+            )
         distinct_ids = tuple(sorted({a.factor_id for a in self.evidence}))
         if self.evidence_factor_ids != distinct_ids:
             raise ValueError(

@@ -32,7 +32,9 @@ import pytest
 
 from guanlan_v2.orchestration import bootstrap as B
 from guanlan_v2.orchestration.market.factors import (
+    NO_CITABLE_READING_REASON,
     NO_FACTOR_REPORT_DIGEST,
+    NO_FACTOR_REPORT_REASON,
     RegimeReport,
     RotationReport,
 )
@@ -294,6 +296,16 @@ class _FakeCatalog:
 class _FakeReport:
     as_of = AS_OF
     content_digest = DIGEST
+    #: at least one OK/DEGRADED factor ⇒ an anchor IS available ⇒ ④ ≥1 stands.
+    feature_vector = {"breadth.ad_ratio": 0.94}
+
+
+class _NoCitableReport:
+    """A COMMITTED report whose every factor is UNAVAILABLE (real digest, no value)."""
+
+    as_of = AS_OF
+    content_digest = DIGEST
+    feature_vector: dict = {}
 
 
 class _FakePool:
@@ -370,6 +382,65 @@ def test_a_committed_report_is_never_overwritten_by_the_no_report_marker():
     gw, _inner = _gateway(conformant_regime_json(), as_of=AS_OF)
     payload = gw.invoke(_FakeRequest(), prompt_assembly_ref=None).payload
     assert payload.factor_report_digest == DIGEST != NO_FACTOR_REPORT_DIGEST
+
+
+# --- 裁决 3 · Option B — the reason for an empty citation list is MEASURED ---- #
+def _empty_evidence_json(reason="coverage is thin, I chose not to cite"):
+    return dict(conformant_regime_json(), evidence=[], evidence_factor_ids=[],
+                unknown_reason=reason)
+
+
+def test_a_bound_report_with_no_citable_reading_licenses_the_empty_citation_list():
+    """The case the next live run walks into if the battery goes fully dark."""
+    gw, _inner = _gateway(_empty_evidence_json(), report=_NoCitableReport(), as_of=AS_OF)
+    payload = gw.invoke(_FakeRequest(), prompt_assembly_ref=None).payload
+    assert isinstance(payload, RegimeReport)
+    assert payload.evidence == () and payload.evidence_factor_ids == ()
+    # the audit anchor is the REAL report digest — never the no-report marker.
+    assert payload.factor_report_digest == DIGEST
+    assert payload.unknown_reason == NO_CITABLE_READING_REASON
+
+
+def test_the_model_never_authors_the_reason_that_licenses_an_empty_list():
+    """The runtime OVERWRITES the model's prose with what it measured."""
+    for prose in ("coverage is thin", NO_FACTOR_REPORT_REASON, "whatever I like"):
+        gw, _inner = _gateway(_empty_evidence_json(prose), report=_NoCitableReport(),
+                              as_of=AS_OF)
+        payload = gw.invoke(_FakeRequest(), prompt_assembly_ref=None).payload
+        assert isinstance(payload, RegimeReport), prose
+        assert payload.unknown_reason == NO_CITABLE_READING_REASON, prose
+
+
+def test_with_a_citable_reading_available_an_empty_citation_list_is_refused():
+    """The ④ ≥1 rule, bit-for-bit: a report WITH a reading still demands an anchor.
+
+    The runtime measured `feature_vector` non-empty, so it authors NO licence and
+    the payload comes back untouched — the executor's own output_schema_invalid
+    stands. "no evidence" can never become a phrase that escapes citing evidence
+    the model DOES have.
+    """
+    raw = _empty_evidence_json(NO_CITABLE_READING_REASON)   # even the exact string
+    gw, _inner = _gateway(raw, report=_FakeReport(), as_of=AS_OF)
+    assert gw.invoke(_FakeRequest(), prompt_assembly_ref=None).payload is raw
+
+
+def test_a_caller_cannot_mint_its_own_licence_for_an_empty_citation_list():
+    # a wiring guard: only the two reviewed MEASUREMENTS license empty evidence.
+    with pytest.raises(B.BootstrapRuntimeError):
+        B.normalize_lane0_llm_output(
+            _empty_evidence_json(), model=RegimeReport, as_of=AS_OF,
+            factor_report_digest=DIGEST,
+            empty_evidence_reason="runtime: because I said so")
+
+
+def test_a_non_empty_citation_list_keeps_its_own_reason():
+    # the ordinary degraded-coverage read is untouched by the reason vocabulary.
+    gw, _inner = _gateway(conformant_regime_json(), report=_NoCitableReport(),
+                          as_of=AS_OF)
+    payload = gw.invoke(_FakeRequest(), prompt_assembly_ref=None).payload
+    assert isinstance(payload, RegimeReport)
+    assert payload.unknown_reason == "most of the battery is UNAVAILABLE this session"
+    assert payload.evidence_factor_ids == ("breadth.ad_ratio",)
 
 
 def test_the_gateway_ignores_a_worker_outside_the_two_lane0_reports():
