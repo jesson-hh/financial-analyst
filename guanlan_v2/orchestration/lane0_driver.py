@@ -681,14 +681,6 @@ def _scan_snapshots(stores: Any):
         _LOG.warning("ContextSnapshot scan failed: %s", exc)
 
 
-def _committed_snapshot(stores: Any, snapshot_id: str):
-    """The exact assembled snapshot for one run id, or ``None``."""
-    for ref, model in _scan_snapshots(stores):
-        if getattr(model, "snapshot_id", None) == snapshot_id:
-            return model, ref
-    return None
-
-
 def _committed_snapshot_for_session(stores: Any, session_date: str):
     """Any assembled Lane-0 snapshot for this +08:00 session date, or ``None``.
 

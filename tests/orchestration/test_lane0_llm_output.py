@@ -26,6 +26,7 @@ Run: ``python -m pytest tests/orchestration/test_lane0_llm_output.py -v``
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -275,17 +276,15 @@ class _FakeInner:
 
 
 class _FakeCatalog:
+    """Just enough catalog to answer "what is this worker's primary output schema"."""
+
     def __init__(self, schema_key):
         self._schema_key = schema_key
 
     def worker(self, worker_id):
-        class _Out:
-            name = "primary"
-
-            class schema_ref:
-                key = None
-        _Out.schema_ref = type("R", (), {"key": self._schema_key})
-        return type("W", (), {"outputs": (_Out,)})
+        out = SimpleNamespace(
+            name="primary", schema_ref=SimpleNamespace(key=self._schema_key))
+        return SimpleNamespace(outputs=(out,))
 
 
 class _FakeReport:
@@ -300,13 +299,13 @@ class _FakePool:
     def committed_output(self, node_id, key):
         if self._report is None:
             return None
-        return type("A", (), {"payload": self._report})
+        return SimpleNamespace(payload=self._report)
 
 
 class _FakeRequest:
     def __init__(self, worker_id="market.regime"):
-        self.prompt_record = type("P", (), {"worker_id": worker_id,
-                                            "node_id": "lane0.regime"})
+        self.prompt_record = SimpleNamespace(
+            worker_id=worker_id, node_id="lane0.regime")
 
 
 def _gateway(payload, *, report=_FakeReport(), schema_key="RegimeReport@1"):
