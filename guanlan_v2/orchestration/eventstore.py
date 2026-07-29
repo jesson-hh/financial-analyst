@@ -586,6 +586,43 @@ class PayloadStore:
             self._shared.backend = wb
             return ref
 
+    def find_ref(
+        self,
+        *,
+        namespace: str,
+        schema_ref: SchemaRef,
+        registry_digest: str,
+        content_digest: str,
+    ) -> PayloadRef | None:
+        """The ref of an already-stored payload with EXACTLY this identity, or ``None``.
+
+        The store is content-addressed by the **semantic** digest while persisting the
+        full bytes, so two writers of the same logical fact can differ in their
+        SEMANTIC_EXCLUDEd (audit) fields — locators, builder wall clocks. A caller
+        that must not mint a second object for content the store already holds
+        (``dag._synthesize_bootstrap_context_ref``: a durable backend refuses the
+        second, byte-divergent write of one digest — measured live 2026-07-29) asks
+        here first and binds what is there.
+
+        Read-only and deliberately narrow: it writes nothing, relaxes nothing, and
+        never substitutes across namespace / schema / registry. It is **not** a
+        licence to overwrite — the durable write-once byte check is untouched and
+        still refuses any genuine byte disagreement. Scans the payload map (O(n) in
+        stored payloads) and returns the EARLIEST match, so the answer is the same
+        for every caller and stable across a fold (index order is commit order).
+        """
+        for object_id, stored in self._shared.backend.payloads.items():
+            if (
+                stored.namespace == namespace
+                and stored.schema_key == schema_ref.key
+                and stored.registry_digest == registry_digest
+                and stored.content_digest == content_digest
+            ):
+                return PayloadRef(
+                    namespace=namespace, object_id=object_id,
+                    content_digest=content_digest)
+        return None
+
     def get(self, ref: PayloadRef, *, expected_schema_ref: SchemaRef) -> Any:
         backend = self._shared.backend
         stored = backend.payloads.get(ref.object_id)

@@ -528,7 +528,7 @@ async def run_plan(
         # prior behavior (bit-unchanged).
         ctx_ref = _synthesize_bootstrap_context_ref(
             ctx, run_id=run_id, stores=stores,
-            runtime_registry_digest=runtime.runtime_registry_digest, clock=clock)
+            runtime_registry_digest=runtime.runtime_registry_digest)
 
     # ---- concurrency bound: min of every declared limit -------------------- #
     bound = min(
@@ -815,9 +815,8 @@ async def run_plan(
 
 def _synthesize_bootstrap_context_ref(
     ctx: RunContext, *, run_id: str, stores, runtime_registry_digest: str,
-    clock: AuthoritativeClock,
 ) -> TypedPayloadRef:
-    """Persist the bootstrap run's canonical empty-memory ContextSnapshot + refs.
+    """Bind the bootstrap run's canonical empty-memory ContextSnapshot + refs.
 
     A no-ContextSnapshot bootstrap run still needs a real ``ContextSnapshot@1`` main
     ref for its frozen InputSnapshots (spec §2.0's ``context_snapshot_id=None``
@@ -826,6 +825,27 @@ def _synthesize_bootstrap_context_ref(
     (idempotent) and returns its typed ref. The RunContext's ``memory_snapshot_hash``
     already equals the canonical empty-memory hash, so the ContextSnapshot is a pure
     function of the run's DataContext + the canonical empty pair.
+
+    **Write-once by construction** (the 2026-07-29 live Lane-0 incident). The payload
+    store is content-addressed by the SEMANTIC digest, and
+    ``ContextSnapshot.SEMANTIC_EXCLUDE`` drops ``snapshot_id`` /
+    ``memory_snapshot_id`` / ``built_at`` — so while those three came from the run
+    identity and the wall clock, a second attempt of the same session synthesized the
+    same digest with DIFFERENT bytes, landed on the same content-addressed file and
+    was (correctly) refused by the durable write-once byte check. Live
+    ``run --attempt 4`` died exactly there. All three are therefore derived from what
+    the digest already covers: the two locators from the canonical digest itself, and
+    ``built_at`` from the run's session-stamped ``data.as_of`` — the same convention
+    ``lane0_driver._session_as_of`` states as "the plan is rounded; the measurement is
+    not". This snapshot is *the context for session D*, not a measurement taken at
+    12:06:08, and the sentence above ("a pure function of the run's DataContext + the
+    canonical empty pair") is now true of its BYTES, not only of its digest.
+
+    A store written before that change still holds a run-stamped variant whose audit
+    bytes no deterministic builder can reproduce, so an already-stored payload of the
+    exact same semantic identity is bound rather than re-minted
+    (:meth:`PayloadStore.find_ref`). That is a read, not a relaxation: the write-once
+    byte check is untouched and still refuses any genuine byte disagreement.
     """
     from guanlan_v2.orchestration.context import (
         ContextSnapshot,
@@ -841,17 +861,34 @@ def _synthesize_bootstrap_context_ref(
     stores.payloads.put(
         sel_sr, binding.selection, registry_digest=runtime_registry_digest,
         namespace="main", idempotency_key="bootstrap-run:empty-memory-selection")
-    context = ContextSnapshot.build(
-        snapshot_id=f"bootstrap-run-ctx-{run_id}", data_context=ctx.data,
-        memory_snapshot_id=f"bootstrap-run-ms-{run_id}",
+    semantic = dict(
+        data_context=ctx.data,
         memory_snapshot_hash=binding.snapshot_hash,
         past_context_hash=binding.past_context_hash,
         memory_snapshot_ref=binding.memory_snapshot_ref,
         memory_selection_ref=binding.memory_selection_ref,
-        runtime_requirements_ref=None, memory_session_id=None, built_at=clock_now(clock))
-    ref = stores.payloads.put(
-        _CONTEXT_SCHEMA_REF, context, registry_digest=runtime_registry_digest,
-        namespace="main", idempotency_key=f"bootstrap-run-ctx:{run_id}")
+        runtime_requirements_ref=None, memory_session_id=None,
+    )
+    # the identity first: the three audit fields are SEMANTIC_EXCLUDEd, so sealing
+    # with placeholders yields the exact digest the finished snapshot will carry.
+    canonical_digest = ContextSnapshot.digest_of_fields(
+        projection="semantic", snapshot_id="bootstrap-run-ctx",
+        memory_snapshot_id="bootstrap-run-ms", built_at=ctx.data.as_of, **semantic)
+    context = ContextSnapshot.build(
+        snapshot_id=f"bootstrap-run-ctx-{canonical_digest}",
+        memory_snapshot_id=f"bootstrap-run-ms-{canonical_digest}",
+        built_at=ctx.data.as_of, **semantic)
+    if context.content_digest != canonical_digest:  # pragma: no cover - defensive
+        raise DagRunError(
+            "the synthesized bootstrap ContextSnapshot digest is not stable under "
+            "its own audit locators")
+    ref = stores.payloads.find_ref(
+        namespace="main", schema_ref=_CONTEXT_SCHEMA_REF,
+        registry_digest=runtime_registry_digest, content_digest=canonical_digest)
+    if ref is None:
+        ref = stores.payloads.put(
+            _CONTEXT_SCHEMA_REF, context, registry_digest=runtime_registry_digest,
+            namespace="main", idempotency_key=f"bootstrap-run-ctx:{run_id}")
     return TypedPayloadRef(schema_ref=_CONTEXT_SCHEMA_REF, payload_ref=ref)
 
 
