@@ -389,18 +389,48 @@ def _pointer_set(doc: dict, pointer: str, value: Any) -> None:
     cur[parts[-1]] = value
 
 
+def _node_param_cause(node: Any, node_params: Mapping) -> str:
+    """Name the CAUSE of an unresolvable ``node_param`` binding, not just the symptom.
+
+    A bare "pointer does not resolve" hides the only interesting distinction: a node
+    that carries *some* params and simply misses this one (a row/params mismatch) vs.
+    a node that structurally CANNOT carry params at all, which is a declared-but-
+    unrunnable row rather than a data problem.
+    """
+    node_id = getattr(node, "id", "?")
+    if node_params:
+        return (
+            f" -- node {node_id!r} carries params {sorted(node_params)!r}, none of "
+            "which is that pointer"
+        )
+    return (
+        f" -- node {node_id!r} carries NO params at all. A 'node_param' binding is "
+        "runnable only on a node whose worker declares a params_schema_ref; a worker "
+        "with params_schema_ref=None can never legally carry node params (plan "
+        "validation refuses such a node with 'params_not_allowed'), so a row bound "
+        "this way is DECLARED but NOT RUNNABLE until the subject->data projection "
+        "that carries the run's subject into the data bridge is built."
+    )
+
+
 def _assemble_params(row: DataPrefetchOperation, node: Any) -> dict:
     """Apply the row's closed param projection — node params / consts ONLY.
 
     ``input_value`` bindings are not supported by the v1 data bridge (loading a
     named artifact payload is the pool's concern); a reviewed row using one fails
-    loudly rather than being silently skipped.
+    loudly rather than being silently skipped. An unresolvable ``node_param``
+    binding is re-raised with :func:`_node_param_cause` appended so the failure
+    names why the node could not supply the value.
     """
     params: dict = {}
     node_params = dict(node.params)
     for binding in row.param_bindings:
         if binding.source_kind == "node_param":
-            value = _pointer_get(node_params, binding.source_pointer)
+            try:
+                value = _pointer_get(node_params, binding.source_pointer)
+            except DataRuntimeError as exc:
+                raise DataRuntimeError(
+                    f"{exc}{_node_param_cause(node, node_params)}") from exc
         elif binding.source_kind == "const":
             value = binding.const_value
         else:

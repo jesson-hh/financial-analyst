@@ -92,6 +92,8 @@ DATA_BRIDGE_ID = "data.runtime"
 PHASE3_DATA_CATALOG_VERSION = "phase3-data-v1"
 
 #: the one reviewed initial integration grant: worker id -> granted data method ids.
+#: The prefetch row this produces is DECLARED but NOT RUNNABLE — see the honesty
+#: note at the prefetch-binding construction site in :class:`_Phase3DataSurface`.
 _REVIEWED_INTEGRATION_GRANTS: dict[str, tuple[str, ...]] = {
     "dec.pm": ("verified_snapshot",),
 }
@@ -478,6 +480,30 @@ class _Phase3DataSurface:
         )
 
         # -- the reviewed prefetch binding (integration grants only) ----------- #
+        #
+        # HONESTY NOTE — this row is DECLARED, but it is NOT RUNNABLE as written.
+        # Both ``param_bindings`` below read out of ``PlanNode.params``
+        # (``source_kind="node_param"``), yet the only granted worker (``dec.pm``)
+        # declares ``params_schema_ref=None``. Phase-1 validation refuses ANY node
+        # params for such a worker (``spec.py`` issue ``params_not_allowed``) — in a
+        # sealed v2 preset (which independently forbids node params, see
+        # ``pipeline/assembly.py``) and in a dynamic plan alike. So the node these
+        # pointers read from is structurally guaranteed to be empty and
+        # ``data/runtime.py::_assemble_params`` raises ``DataRuntimeError`` on the
+        # very first binding. It has never fired only because the data bridge has no
+        # production caller yet (``data_runtime_provider_factory`` is constructed
+        # only under test).
+        #
+        # What would make it runnable is NOT a params schema on ``dec.pm``: it is the
+        # unbuilt subject->data projection — a reviewed seam carrying the run's
+        # subject (stock code + as-of date) into the data bridge without routing it
+        # through node params. That is a chartered design ruling for a later phase.
+        # Rewriting these bindings HERE would move the sealed
+        # ``bridge.data_runtime.prefetch`` material digest and the Phase-3 catalog
+        # digest, so the correction belongs to a re-freeze phase, never to a
+        # drive-by edit. Pinned by
+        # ``tests/orchestration/data/test_data_catalog.py``
+        # ``::TestVerifiedSnapshotRowIsDeclaredNotRunnable``.
         ops = []
         for worker_id, method_ids in _REVIEWED_INTEGRATION_GRANTS.items():
             for method_id in method_ids:

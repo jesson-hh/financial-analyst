@@ -15,7 +15,10 @@ Run: ``pytest tests/orchestration/data/test_data_catalog.py -v``
 """
 from __future__ import annotations
 
+import ast
+import inspect
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -42,10 +45,22 @@ from guanlan_v2.orchestration.data.catalog import (
     phase3_data_catalog_snapshot,
     phase3_data_surface,
 )
+from guanlan_v2.orchestration.data import runtime as RT
+from guanlan_v2.orchestration.data.schema_registry import build_phase3_registry
 from guanlan_v2.orchestration.data.source import RouteEntry
+from guanlan_v2.orchestration.enums import ApprovalPolicy, DataMode, PlanSource
 from guanlan_v2.orchestration.refs import ContentRef, SchemaRef
-from guanlan_v2.orchestration.runtime_contracts import ExecutionBridgeDescriptor
-from guanlan_v2.orchestration.spec import PlanNode
+from guanlan_v2.orchestration.runtime_contracts import (
+    PHASE2_BASE_REGISTRY_DIGEST,
+    ExecutionBridgeDescriptor,
+    phase2_runtime_registry,
+)
+from guanlan_v2.orchestration.spec import (
+    OrchestrationRequest,
+    PlanDraft,
+    PlanNode,
+    validate_plan_draft,
+)
 
 GOLDEN_PATH = (
     Path(__file__).resolve().parents[1] / "golden" / "data_catalog_manifest_v1.json"
@@ -458,3 +473,158 @@ def test_matches_the_frozen_golden_manifest(snapshot, surface):
     for ref in (surface.renderer_ref, surface.source_handler_ref, surface.provider_ref,
                 surface.analyzer_ref, surface.config_ref, surface.descriptor_ref):
         assert golden_mats[(ref.id, ref.version)] == ref.content_digest
+
+
+# --------------------------------------------------------------------------- #
+# the ONE reviewed integration grant: DECLARED, but NOT RUNNABLE               #
+# --------------------------------------------------------------------------- #
+UTC = timezone.utc
+_ROW_AS_OF = datetime(2026, 7, 16, 7, 0, tzinfo=UTC)
+
+
+@pytest.fixture(scope="module")
+def phase3_registry():
+    return build_phase3_registry(
+        phase2_runtime_registry(PHASE2_BASE_REGISTRY_DIGEST).registry_digest)
+
+
+@pytest.fixture(scope="module")
+def verified_snapshot_row(surface):
+    """The single real prefetch row the reviewed grant produces."""
+    rows = surface.prefetch_binding.operations
+    assert [(r.worker_id, r.method_ref.id) for r in rows] == [
+        ("dec.pm", "verified_snapshot")]
+    return rows[0]
+
+
+def _pm_draft(snapshot, registry, params):
+    """A bootstrap-phase draft whose ONLY variable is the pm node's params."""
+    node = PlanNode(id="pm", worker_id="dec.pm", writes_slot="slot-pm", params=params)
+    return PlanDraft(
+        id="plan.pm", run_id="run-1", request_id="req-1", phase="bootstrap",
+        source=PlanSource.BOOTSTRAP, goal="g", as_of=_ROW_AS_OF, mode=DataMode.ONLINE,
+        context_snapshot_ref=None, nodes=(node,), sink_node_ids=("pm",),
+        catalog_version=snapshot.catalog_version, catalog_digest=snapshot.catalog_digest,
+        schema_registry_digest=registry.registry_digest,
+        approval_policy=ApprovalPolicy.REQUIRED,
+        budget_request_tokens=500_000, budget_request_llm_invocations=100,
+        max_concurrency=8)
+
+
+def _pm_codes(snapshot, registry, params):
+    report = validate_plan_draft(
+        _pm_draft(snapshot, registry, params),
+        request=OrchestrationRequest(
+            request_id="req-1", goal="g", workflow="orchestrate_only",
+            approval_policy=ApprovalPolicy.REQUIRED),
+        context=None, catalog=snapshot, schema_registry=registry)
+    return {i.code for i in report.issues}
+
+
+class TestVerifiedSnapshotRowIsDeclaredNotRunnable:
+    """The one reviewed data grant is DECLARED material that can NEVER RUN as written.
+
+    ``_REVIEWED_INTEGRATION_GRANTS = {"dec.pm": ("verified_snapshot",)}`` produces
+    exactly one prefetch row, and that row projects its method params out of
+    ``PlanNode.params`` (``/as_of`` <- ``/asof_date``, ``/symbols`` <- ``/code``,
+    both ``source_kind="node_param"``). But ``dec.pm``'s WorkerSpec carries
+    ``params_schema_ref=None``, and Phase-1 validation refuses ANY node params for
+    such a worker (``params_not_allowed``) — in a sealed preset *and* in a dynamic
+    plan alike. So the node the row reads from is structurally guaranteed to be
+    empty, and the real runtime projection raises ``DataRuntimeError`` on the very
+    first binding. The row is a declaration with no executable path.
+
+    It has never fired in production only because the data bridge itself has never
+    executed there: ``DataRuntimeWorld`` is constructed only in
+    ``tests/orchestration/data/test_runtime_integration.py``, whose world binds a
+    FABRICATED worker (``dec.data``, which *does* declare a params schema) and
+    FABRICATED rows — never ``dec.pm`` and never this row.
+
+    What would make it runnable is NOT a bigger param schema on ``dec.pm``: it is
+    the unbuilt **subject -> data projection** — a reviewed seam that carries the
+    run's subject (the stock code + as-of date) from the request/plan into the data
+    bridge without routing it through node params. That projection is a chartered
+    design ruling for a later phase; until it exists this row stays declared-only.
+    Rewriting the row's bindings here would move the sealed
+    ``bridge.data_runtime.prefetch`` material digest and the Phase-3 catalog digest,
+    so the correction belongs to a re-freeze phase, never to a drive-by edit.
+    """
+
+    # -- fact 1/3: the worker can never legally carry params ----------------- #
+    def test_dec_pm_declares_no_params_schema_in_either_real_catalog(self, base, snapshot):
+        """Base Phase-2 catalog and the Phase-3 catalog that carries the grant agree."""
+        assert next(w for w in base.workers if w.id == "dec.pm").params_schema_ref is None
+        assert next(w for w in snapshot.workers if w.id == "dec.pm").params_schema_ref is None
+
+    def test_a_node_carrying_the_rows_params_is_refused_by_the_real_validator(
+            self, snapshot, phase3_registry):
+        """The REAL ``validate_plan_draft`` over the REAL granting catalog.
+
+        The two drafts differ in exactly one thing — whether the pm node carries the
+        params this row binds — and the issue sets differ in exactly one code.
+        """
+        row_params = {"asof_date": "2026-07-16", "code": "600519"}
+        clean = _pm_codes(snapshot, phase3_registry, {})
+        carrying = _pm_codes(snapshot, phase3_registry, row_params)
+        assert "params_not_allowed" not in clean
+        assert "params_not_allowed" in carrying
+        assert carrying - clean == {"params_not_allowed"}
+
+    # -- fact 2/4: the row's bindings cannot resolve against such a node ----- #
+    def test_the_reviewed_row_binds_every_param_out_of_node_params(
+            self, verified_snapshot_row):
+        assert [(b.target_pointer, b.source_kind, b.source_pointer)
+                for b in verified_snapshot_row.param_bindings] == [
+            ("/as_of", "node_param", "/asof_date"),
+            ("/symbols", "node_param", "/code")]
+
+    def test_the_real_runtime_projection_raises_on_the_first_binding(
+            self, verified_snapshot_row):
+        """The exact typed error from the REAL runtime path, not a re-implementation.
+
+        ``_assemble_params`` is the function the live provider session calls (see
+        the call-site assertion below); a legally-shaped ``dec.pm`` node carries no
+        params, so the first ``node_param`` binding cannot resolve.
+        """
+        node = PlanNode(id="pm", worker_id="dec.pm", writes_slot="slot-pm")
+        assert node.params == {}
+        with pytest.raises(RT.DataRuntimeError) as exc:
+            RT._assemble_params(verified_snapshot_row, node)
+        assert "'/asof_date'" in str(exc.value)
+        assert "does not resolve" in str(exc.value)
+        # the improved message names the CAUSE, not just the symptom.
+        assert "params_not_allowed" in str(exc.value)
+        assert "params_schema_ref" in str(exc.value)
+
+    def test_that_projection_is_the_one_the_live_provider_session_calls(self):
+        """Pins the call site, so the test above cannot drift onto a dead helper."""
+        src = inspect.getsource(RT._DataRuntimeBridgeSession.freeze_for_execution)
+        assert "_assemble_params(row, req.node)" in src
+
+    # -- why it has never fired: the bridge has no production caller --------- #
+    def test_the_data_bridge_provider_has_no_production_caller(self):
+        """If this goes RED the bridge just went live — the row must be fixed FIRST.
+
+        Counts real *code* references across ``guanlan_v2/orchestration`` (where all
+        bridge wiring lives: ``startup.py``, ``adapters/``, the pipelines) via an AST
+        walk, so prose in a docstring or comment neither satisfies nor trips it. The
+        factory must appear exactly once, as its own ``def`` — never referenced.
+        """
+        pkg = Path(RT.__file__).resolve().parent.parent
+        assert pkg.name == "orchestration"
+        refs: dict[str, list[str]] = {}
+        for path in sorted(pkg.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for n in ast.walk(tree):
+                named = (n.name if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                         else n.id if isinstance(n, ast.Name)
+                         else n.attr if isinstance(n, ast.Attribute)
+                         else n.name if isinstance(n, ast.alias) else None)
+                if named == "data_runtime_provider_factory":
+                    refs.setdefault(
+                        path.relative_to(pkg).as_posix(), []).append(type(n).__name__)
+        assert sorted(refs) == ["data/runtime.py"], (
+            "the data bridge now has a production caller; the reviewed "
+            "verified_snapshot row is still node_param-bound and will raise")
+        assert refs["data/runtime.py"] == ["FunctionDef"], (
+            "the defining module now references its own factory")
