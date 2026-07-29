@@ -569,6 +569,7 @@ class Lane0Candidate:
     supported: bool
     support_issue_codes: tuple[str, ...]
     registered: bool = False
+    attempt: int = 1
 
 
 @dataclass(frozen=True)
@@ -607,15 +608,27 @@ class Lane0RunResult:
 # =========================================================================== #
 # internal helpers (pure where they can be)                                    #
 # =========================================================================== #
-def _lane0_identity(session_date: str) -> tuple[str, str, str]:
+def _lane0_identity(session_date: str, attempt: int = 1) -> tuple[str, str, str]:
     """``(run_id, draft_id, request_id)`` — deterministic per session date.
 
     Determinism is what makes the whole flow work across processes: the operator
     approves a candidate digest in one invocation and a later ``run`` recomputes
     exactly the same digest to look that decision up.
+
+    ``attempt`` (default 1, the plain identity) is the documented supersede for a
+    **spent** identity — one whose durable ``RunResult`` already exists, which the
+    kernel can never rewrite (``runresult:{run_id}:payload`` is a once-only
+    idempotency key). Attempt ``N ≥ 2`` suffixes every id with ``-r{N}``, so it is
+    a genuinely different plan with a **different candidate digest** and therefore
+    requires its own human approval. It is not a ``force``: a session date that
+    already produced a ContextSnapshot is still reused, never re-burned.
     """
-    return (f"lane0-{session_date}", f"plan-lane0-{session_date}",
-            f"req-lane0-{session_date}")
+    attempt = int(attempt)
+    if attempt < 1:
+        raise Lane0Refused(f"attempt must be >= 1, got {attempt}", code="bad_attempt")
+    suffix = "" if attempt == 1 else f"-r{attempt}"
+    return (f"lane0-{session_date}{suffix}", f"plan-lane0-{session_date}{suffix}",
+            f"req-lane0-{session_date}{suffix}")
 
 
 def _session_as_of(session_date: str) -> datetime:
@@ -676,24 +689,69 @@ def _committed_snapshot(stores: Any, snapshot_id: str):
     return None
 
 
-def _run_identity_already_executed(stores: Any, run_id: str) -> bool:
-    """Has this run identity already committed an execution layer?
+def _committed_snapshot_for_session(stores: Any, session_date: str):
+    """Any assembled Lane-0 snapshot for this +08:00 session date, or ``None``.
 
-    The second half of the per-session idempotence, and the guard against a
-    kernel-level crash: :class:`~guanlan_v2.orchestration.pool.ArtifactPool`
-    keeps its artifact ENVELOPES in a process-local ``_PoolStorage`` while the
-    ``LayerCommitted`` events are durable, so a fresh pool built over stores that
-    already carry this run's layers raises ``PoolError`` inside ``replay()``.
-    Detecting it here turns that crash into a named refusal.
+    One judgment per session date is the red line, and it must hold ACROSS
+    attempts: ``--attempt 2`` exists to finish a day that produced nothing, never
+    to buy a second token burn on a day that already has a snapshot. Attempt 1's
+    id is the bare ``bootstrap-ctx-lane0-{date}``; later attempts suffix ``-r{N}``.
+    """
+    base = _snapshot_object_id(f"lane0-{session_date}")
+    for ref, model in _scan_snapshots(stores):
+        sid = getattr(model, "snapshot_id", None)
+        if sid == base or (isinstance(sid, str) and sid.startswith(f"{base}-r")):
+            return model, ref
+    return None
+
+
+#: the durable event types that mean "this run identity has been spent".
+#: ``LayerCommitted`` — a prior attempt executed at least one layer; its artifact
+#: ENVELOPES live in the process-local ``pool._PoolStorage`` while the events are
+#: durable, so a fresh pool's ``replay()`` raises ``PoolError``.
+#: The three terminal ``Run*`` events — a durable ``RunResult`` payload already
+#: exists under the once-only ``runresult:{run_id}:payload`` idempotency key, so a
+#: second run of the same identity dies with ``IdempotencyConflict`` at the very
+#: end, AFTER burning its tokens. That is exactly how the 2026-07-29 live run
+#: died: a `RunCancelled` from an earlier attempt, no committed layer at the time,
+#: so the layer-only scan below let the run proceed.
+_SPENT_IDENTITY_EVENTS: tuple[str, ...] = (
+    "LAYER_COMMITTED", "RUN_COMPLETED", "RUN_FAILED", "RUN_CANCELLED")
+
+
+def _spent_run_identity(stores: Any, run_id: str) -> str | None:
+    """The name of the durable evidence that this run identity is spent, or ``None``.
+
+    Returns the event type (``"RunCancelled"``, ``"LayerCommitted"``, …) so the
+    refusal can name what it actually found rather than assert a category.
     """
     from guanlan_v2.orchestration.events import EventType
 
+    spent = {getattr(EventType, name) for name in _SPENT_IDENTITY_EVENTS}
     try:
-        return any(ev.event_type is EventType.LAYER_COMMITTED
-                   for ev in stores.events.journal(run_id, "main"))
+        for ev in stores.events.journal(run_id, "main"):
+            if ev.event_type in spent:
+                return ev.event_type.value
     except Exception as exc:  # noqa: BLE001 — an unreadable journal is not a claim
         _LOG.warning("run-identity scan failed for %s: %s", run_id, exc)
-        return False
+    return None
+
+
+def _run_identity_already_executed(stores: Any, run_id: str) -> bool:
+    """Has this run identity already been spent (see :func:`_spent_run_identity`)?"""
+    return _spent_run_identity(stores, run_id) is not None
+
+
+def _supersede_hint(attempt: int) -> str:
+    """The one actionable sentence a spent identity owes the operator."""
+    nxt = int(attempt) + 1
+    return (
+        f"To produce today's judgment anyway, supersede with a FRESH identity: "
+        f"re-run `propose --attempt {nxt}`, have the reviewer approve the digest it "
+        f"prints, then `run --attempt {nxt}` (a different identity is a different "
+        f"plan, so it needs its own human approval — it is not a force). A session "
+        f"date that already committed a ContextSnapshot is still reused, never "
+        f"re-burned. Otherwise wait for the next session date.")
 
 
 def _deep_lane_sees(stores: Any, snapshot_digest: str) -> bool:
@@ -751,6 +809,7 @@ def propose_lane0_candidate(
     bindings: Lane0Bindings | None = None,
     journal_path: Path | str | None = None,
     register: bool = True,
+    attempt: int = 1,
 ) -> Lane0Candidate:
     """Build + validate today's Lane-0 candidate and (optionally) register its card.
 
@@ -769,7 +828,7 @@ def propose_lane0_candidate(
     bindings = bindings if bindings is not None else build_production_lane0_bindings()
     now = _resolve_as_of(as_of, bindings.clock)
     session_date = session_date_of(now)
-    run_id, draft_id, request_id = _lane0_identity(session_date)
+    run_id, draft_id, request_id = _lane0_identity(session_date, attempt)
 
     preset = _bootstrap.build_bootstrap_plan(spec=bindings.spec, grader=bindings.grader)
     request = _presets.preset_orchestration_request(
@@ -827,7 +886,7 @@ def propose_lane0_candidate(
         preparation=preparation, pending_card=card, candidate_plan_digest=digest,
         supported=bool(preparation.support_report.supported),
         support_issue_codes=tuple(i.code for i in preparation.support_report.issues),
-        registered=registered)
+        registered=registered, attempt=int(attempt))
 
 
 # =========================================================================== #
@@ -843,6 +902,7 @@ def approve_lane0_candidate(
     allowlist_path: Path | str | None = None,
     reason: str | None = None,
     decision: ApprovalDecision = ApprovalDecision.APPROVED,
+    attempt: int = 1,
 ) -> Any:
     """Record ONE terminal human decision for today's Lane-0 candidate.
 
@@ -860,7 +920,8 @@ def approve_lane0_candidate(
 
     bindings = bindings if bindings is not None else build_production_lane0_bindings()
     candidate = propose_lane0_candidate(
-        as_of=as_of, bindings=bindings, journal_path=journal_path, register=False)
+        as_of=as_of, bindings=bindings, journal_path=journal_path, register=False,
+        attempt=attempt)
     if candidate.candidate_plan_digest != candidate_plan_digest:
         raise Lane0Refused(
             f"digest {candidate_plan_digest} is not today's Lane-0 candidate "
@@ -874,7 +935,8 @@ def approve_lane0_candidate(
             + " — no decision is recorded for a plan that cannot run.",
             code="unsupported")
 
-    run_id, _draft_id, _request_id = _lane0_identity(candidate.session_date)
+    run_id, _draft_id, _request_id = _lane0_identity(
+        candidate.session_date, candidate.attempt)
     service, approvals, _budget = _admission_for(
         bindings=bindings, request=candidate.request, draft=candidate.draft,
         run_id=run_id)
@@ -939,6 +1001,7 @@ def run_lane0_bootstrap(
     dry_run: bool = False,
     bindings: Lane0Bindings | None = None,
     inputs: MarketFactorInputs | None = None,
+    attempt: int = 1,
 ) -> Lane0RunResult:
     """Drive ONE Lane-0 bootstrap run and commit its ``ContextSnapshot``.
 
@@ -962,7 +1025,7 @@ def run_lane0_bootstrap(
     bindings = bindings if bindings is not None else build_production_lane0_bindings()
     now = _resolve_as_of(as_of, bindings.clock)
     session_date = session_date_of(now)
-    run_id, draft_id, request_id = _lane0_identity(session_date)
+    run_id, draft_id, request_id = _lane0_identity(session_date, attempt)
     notes: list[str] = [
         "DataContext comes from the reviewed presets.pilot_data_context (the only "
         "producer that needs no frozen data-snapshot manifest chain); its "
@@ -970,7 +1033,9 @@ def run_lane0_bootstrap(
     ]
 
     # ---- idempotence ①: today's committed snapshot IS the receipt ---------- #
-    existing = _committed_snapshot(bindings.stores, _snapshot_object_id(run_id))
+    # scoped to the SESSION DATE, not to this attempt: a day that already produced
+    # a judgment is reused whichever attempt produced it.
+    existing = _committed_snapshot_for_session(bindings.stores, session_date)
     if existing is not None:
         context, ref = existing
         return Lane0RunResult(
@@ -990,15 +1055,17 @@ def run_lane0_bootstrap(
                 "kernel design, never a second judgment."]))
 
     # ---- idempotence ②: a prior execution of this identity, no snapshot ---- #
-    if not dry_run and _run_identity_already_executed(bindings.stores, run_id):
+    spent = None if dry_run else _spent_run_identity(bindings.stores, run_id)
+    if spent is not None:
         raise Lane0Refused(
-            f"run identity {run_id!r} already committed execution layers but no "
-            "assembled ContextSnapshot exists — a prior attempt died between the "
-            "run and the snapshot commit. Its artifact envelopes are process-local "
-            "upstream (pool._PoolStorage), so a fresh process cannot replay them; "
-            "inspect var/orchestration/ and complete the run in the process that "
-            "started it, or wait for the next session date. Nothing was re-run and "
-            "no token was burned.", code="partial_prior_run")
+            f"run identity {run_id!r} is spent: the durable journal already carries "
+            f"a {spent} event for it, and no assembled ContextSnapshot exists — a "
+            "prior attempt died between the run and the snapshot commit. Its "
+            "RunResult key (runresult:<run_id>:payload) and its artifact envelopes "
+            "(process-local pool._PoolStorage) can neither be rewritten nor "
+            "replayed here, so re-running this identity would burn tokens and then "
+            f"die on IdempotencyConflict. {_supersede_hint(attempt)} Nothing was "
+            "re-run and no token was burned.", code="partial_prior_run")
 
     # ---- PIT inputs: honest absence, never a zero -------------------------- #
     if inputs is None:
@@ -1111,6 +1178,14 @@ def run_lane0_bootstrap(
     try:
         run_result = executor(
             plan=plan, run_context=run_context, lane="main", point=_DecisionPoint())
+    except _idempotency_conflict() as exc:
+        # gate ② above catches this state from the durable journal, so reaching
+        # here means some OTHER once-only key for this identity was already
+        # written. Either way the operator gets one honest line, never a raw
+        # kernel traceback out of the CLI.
+        raise Lane0Refused(
+            f"run identity {run_id!r} collided with a durable once-only key: "
+            f"{exc}. {_supersede_hint(attempt)}", code="partial_prior_run") from exc
     finally:
         close = getattr(gateway, "close", None)
         if callable(close):
@@ -1265,6 +1340,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="approve: record a REJECTED decision instead.")
     parser.add_argument("--dry-run", action="store_true",
                         help="run: validate + support-check only; persist nothing.")
+    parser.add_argument("--attempt", type=int, default=1,
+                        help="the documented supersede for a SPENT run identity "
+                             "(default 1). N>=2 suffixes the identity with -rN, so "
+                             "it is a different plan with a different candidate "
+                             "digest and needs its own approval — pass the SAME "
+                             "--attempt to propose, approve and run. A session date "
+                             "that already committed a ContextSnapshot is still "
+                             "reused, never re-burned: this is not a force.")
     parser.add_argument("--bind-stores", action="store_true",
                         help="perform THIS process's own one-and-only durable-store "
                              "startup binding (guanlan_v2.orchestration.startup) "
@@ -1331,10 +1414,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.verb == "status":
             now = _resolve_as_of(as_of, bindings.clock)
             session_date = session_date_of(now)
-            run_id, _d, _r = _lane0_identity(session_date)
-            existing = _committed_snapshot(bindings.stores, _snapshot_object_id(run_id))
+            run_id, _d, _r = _lane0_identity(session_date, args.attempt)
+            existing = _committed_snapshot_for_session(bindings.stores, session_date)
+            spent = _spent_run_identity(bindings.stores, run_id)
             print(f"[lane0] session           : {session_date}")
-            print(f"[lane0] run_id            : {run_id}")
+            print(f"[lane0] run_id            : {run_id}"
+                  + (f" (SPENT: {spent} already in the journal)" if spent else ""))
             print(f"[lane0] provider_uri      : {bindings.provider_uri} "
                   f"(via {bindings.provider_uri_source})")
             print(f"[lane0] committed snapshot: "
@@ -1346,7 +1431,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.verb == "propose":
             candidate = propose_lane0_candidate(
-                as_of=as_of, bindings=bindings, journal_path=args.journal)
+                as_of=as_of, bindings=bindings, journal_path=args.journal,
+                attempt=args.attempt)
             print(f"[lane0] session           : {candidate.session_date}")
             print(f"[lane0] candidate digest  : {candidate.candidate_plan_digest}")
             print(f"[lane0] runtime supported : {candidate.supported} "
@@ -1355,8 +1441,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print()
             print(candidate.pending_card.rendered_md)
             print()
+            attempt_flag = ("" if candidate.attempt == 1
+                            else f" --attempt {candidate.attempt}")
             print("[lane0] next: python -m guanlan_v2.orchestration.lane0_driver "
-                  f"approve --digest {candidate.candidate_plan_digest}")
+                  f"approve --digest {candidate.candidate_plan_digest}{attempt_flag}")
             return 0
 
         if args.verb == "approve":
@@ -1374,6 +1462,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 candidate_plan_digest=args.digest, actor=actor, as_of=as_of,
                 bindings=bindings, reason=args.reason,
                 journal_path=args.journal, allowlist_path=args.allowlist,
+                attempt=args.attempt,
                 decision=(ApprovalDecision.REJECTED if args.reject
                           else ApprovalDecision.APPROVED))
             print(f"[lane0] decision recorded : {approval.decision.value} by "
@@ -1385,7 +1474,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             clock=bindings.clock, journal_path=args.journal)
         result = run_lane0_bootstrap(
             authorization=authorization, as_of=as_of, bindings=bindings,
-            dry_run=bool(args.dry_run))
+            dry_run=bool(args.dry_run), attempt=args.attempt)
         print(render_run_report(result))
         return 0
     except Lane0Unauthorized as exc:
@@ -1403,6 +1492,13 @@ def main(argv: Sequence[str] | None = None) -> int:
               f"{args.allowlist or 'config/orchestration/operators.json'} — there "
               "is no default operator and no wildcard.", file=sys.stderr)
         return 5
+
+
+def _idempotency_conflict() -> type[Exception]:
+    """The kernel's once-only-key refusal (imported lazily, like every kernel type)."""
+    from guanlan_v2.orchestration.eventstore import IdempotencyConflict
+
+    return IdempotencyConflict
 
 
 def _operator_identity_error() -> type[Exception]:

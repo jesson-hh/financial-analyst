@@ -537,6 +537,111 @@ def test_run_identity_is_one_per_session_date():
     assert L._run_identity_already_executed(env.stores, f"lane0-{SESSION}") is True
 
 
+# --------------------------------------------------------------------------- #
+# D4 — a spent run identity is a named refusal, never an IdempotencyConflict   #
+# --------------------------------------------------------------------------- #
+def _seed_terminal_run_result(env, *, terminal_status="cancelled", run_id=None):
+    """Persist a prior terminal RunResult exactly the way ``dag`` does.
+
+    Reproduces the 2026-07-29 state: a `RunCancelled` + a `RunResult` payload
+    under `runresult:<run_id>:payload`, with NO committed layer. A second run of
+    the same identity later died inside the kernel with
+    `IdempotencyConflict: payload idempotency key ... reused with different
+    content` — one RunResult per run id is a kernel-level, forever constraint.
+    """
+    from guanlan_v2.orchestration import dag as D
+    from guanlan_v2.orchestration.runtime_contracts import RunResult
+
+    rid = run_id or f"lane0-{SESSION}"
+    plan = type("P", (), {"run_id": rid, "plan_digest": "b" * 64})
+    runtime = type("R", (), {
+        "runtime_registry_digest": env.bindings.runtime_registry_digest})
+    result = RunResult(run_id=rid, plan_digest="b" * 64,
+                       terminal_status=terminal_status,
+                       settled_tokens=0, settled_llm_invocations=0)
+    D._persist_run_result(env.stores, runtime, plan, result, terminal_status)
+
+
+def test_a_prior_terminal_run_result_refuses_by_name_before_anything_burns():
+    env = _seeded_env()
+    with pytest.raises(L.Lane0Refused) as exc:
+        env.run()
+    assert exc.value.code == "partial_prior_run"
+    assert f"lane0-{SESSION}" in str(exc.value)
+    assert "RunCancelled" in str(exc.value)      # names the evidence it found
+    assert env.gateway.invocations == []         # nothing was burned
+
+
+def _seeded_env():
+    env = Env()
+    _seed_terminal_run_result(env)
+    return env
+
+
+def test_the_refusal_names_the_documented_supersede():
+    env = _seeded_env()
+    with pytest.raises(L.Lane0Refused) as exc:
+        env.run()
+    assert "--attempt 2" in str(exc.value)
+
+
+def test_attempt_two_is_a_distinct_run_identity():
+    assert L._lane0_identity(SESSION) == (
+        f"lane0-{SESSION}", f"plan-lane0-{SESSION}", f"req-lane0-{SESSION}")
+    assert L._lane0_identity(SESSION, attempt=2) == (
+        f"lane0-{SESSION}-r2", f"plan-lane0-{SESSION}-r2", f"req-lane0-{SESSION}-r2")
+
+
+def test_a_superseding_attempt_runs_on_a_spent_identity():
+    # the honest escape hatch: the prior identity is spent (its RunResult key can
+    # never be rewritten), so a fresh judgment needs a fresh identity — and a
+    # fresh identity means a different candidate digest, i.e. a NEW human
+    # approval. Nothing is forced, nothing is overwritten.
+    env = _seeded_env()
+    result = env.run(attempt=2)
+    assert result.outcome == L.OUTCOME_COMPLETED, result.refusal_detail
+    assert result.run_id == f"lane0-{SESSION}-r2"
+    assert result.snapshot_id == f"bootstrap-ctx-lane0-{SESSION}-r2"
+    assert result.snapshot_visible_to_deep_lane is True
+
+
+def test_a_snapshot_from_any_attempt_of_the_session_is_reused():
+    # one judgment per +08:00 session date stays the red line: --attempt may
+    # never buy a second token burn on a day that already produced a snapshot.
+    env = Env()
+    first = env.run()
+    second = env.run(attempt=2)
+    assert second.outcome == L.OUTCOME_REUSED
+    assert second.reused is True
+    assert second.snapshot_digest == first.snapshot_digest
+    assert len(env.gateway.invocations) == 2      # NOT re-burned
+
+
+def test_an_escaping_idempotency_conflict_becomes_the_named_refusal(monkeypatch):
+    # belt and braces: whatever else in the kernel refuses a spent run identity,
+    # the CLI must never show a raw IdempotencyConflict traceback.
+    from guanlan_v2.orchestration.eventstore import IdempotencyConflict
+
+    env = Env()
+
+    def _boom(*_a, **_kw):
+        raise IdempotencyConflict(
+            "payload idempotency key 'runresult:lane0-2026-07-29:payload' "
+            "reused with different content")
+
+    monkeypatch.setattr(L, "build_dag_plan_executor", lambda **_kw: _boom)
+    with pytest.raises(L.Lane0Refused) as exc:
+        env.run()
+    assert exc.value.code == "partial_prior_run"
+    assert "--attempt 2" in str(exc.value)
+
+
+def test_the_cli_takes_an_attempt_flag():
+    args = L.build_arg_parser().parse_args(["run", "--attempt", "3"])
+    assert args.attempt == 3
+    assert L.build_arg_parser().parse_args(["run"]).attempt == 1
+
+
 # =========================================================================== #
 # 4b — a REAL model's raw JSON completes the run (D2/D3, 2026-07-29)            #
 # =========================================================================== #
