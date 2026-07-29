@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Mapping, Sequence
@@ -198,6 +198,12 @@ __all__ = [
     "make_lane0_experience_bridge_factory",
     "bootstrap_market_factor_handler",
     "register_bootstrap_runtime_factories",
+    # -- the Lane 0 LLM output contract (D2/D3) ----------------------------- #
+    "LANE0_RUNTIME_OWNED_FIELDS",
+    "lane0_llm_output_model",
+    "normalize_lane0_llm_output",
+    "Lane0OutputNormalizingGateway",
+    "wrap_lane0_gateway",
     # -- Task 9 chain surface ---------------------------------------------- #
     "BOOTSTRAP_PUBLIC_MODELS",
     "PHASE5_PUBLIC_MODELS",
@@ -1761,6 +1767,193 @@ def bootstrap_market_factor_handler(
             degraded=degraded, degradation_reasons=reasons)
 
     return handler
+
+
+# --------------------------------------------------------------------------- #
+# The Lane 0 LLM output contract (D2/D3 — real model JSON, 2026-07-29)          #
+# --------------------------------------------------------------------------- #
+# The first live Lane-0 run returned ``incomplete / output_schema_invalid`` from
+# BOTH LLM seats. Every test gateway hands the executor an already-constructed
+# report INSTANCE, so the contract had never met a model's raw JSON. Three
+# distinct causes, each addressed here and nowhere else:
+#
+# 1. ``DigestModel`` is ``ConfigDict(extra="forbid", strict=True)``. Strict
+#    PYTHON-mode validation refuses every JSON-expressible conversion — a ``str``
+#    is not a ``TrendState``, a ``list`` is not a ``tuple``, a ``str`` is not a
+#    ``datetime`` — so ``registry.validate_payload`` could not have accepted ANY
+#    model's JSON, not even a perfectly-shaped one. Strict JSON-mode validation
+#    (what ``TypeAdapter.validate_json(..., strict=True)`` does) allows exactly
+#    the conversions JSON can express and nothing more, which is the discipline
+#    that was intended.
+# 2. Three fields are unproducible BY CONSTRUCTION and therefore the RUNTIME's:
+#    ``content_digest`` (a self-seal over the canonical projection),
+#    ``factor_report_digest`` (a full 64-hex digest, while
+#    ``render_factor_report_for_prompt`` shows only a 12-char prefix in the block
+#    header) and ``as_of`` (the factor report's own stamp). Demanding them from a
+#    model is asking it to invent numbers — the opposite of the honesty rules the
+#    same prompt enforces.
+# 3. The rotation seat wrapped its answer in ``{"rotation_report": {...}}``.
+#
+# The honesty red line: this layer NEVER repairs a judgement. Anything it cannot
+# decode comes back byte-identical so the executor's own ``output_schema_invalid``
+# refusal stands with the true pydantic errors. It drops no unknown field, fills
+# no missing one, and coerces nothing JSON cannot express.
+
+#: the fields the runtime stamps; a model-supplied value is discarded, not trusted.
+LANE0_RUNTIME_OWNED_FIELDS: tuple[str, ...] = (
+    "as_of", "factor_report_digest", "content_digest")
+
+#: the closed two-entry allowlist of normalizable Lane-0 LLM outputs.
+_LANE0_LLM_OUTPUT_SCHEMAS: dict[str, str] = {
+    REGIME_REPORT_SCHEMA_REF.key: "RegimeReport",
+    ROTATION_REPORT_SCHEMA_REF.key: "RotationReport",
+}
+
+
+def lane0_llm_output_model(schema_key: str):
+    """The Lane-0 report model for a worker's primary output schema key, or ``None``.
+
+    A closed allowlist of exactly two: ``RegimeReport@1`` / ``RotationReport@1``.
+    Every other schema — including the deterministic ``MarketFactorReport@1`` —
+    is outside this layer and is never touched.
+    """
+    name = _LANE0_LLM_OUTPUT_SCHEMAS.get(schema_key)
+    if name is None:
+        return None
+    return getattr(_factors, name)
+
+
+def _envelope_key(model) -> str:
+    """``RotationReport`` → ``rotation_report`` (the ONLY unwrappable key)."""
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", model.__name__).lower()
+
+
+def _decode_field(annotation, value):
+    """One field, decoded from JSON under STRICT discipline (never lax coercion)."""
+    from pydantic import TypeAdapter
+
+    return TypeAdapter(annotation).validate_json(
+        json.dumps(value, ensure_ascii=False), strict=True)
+
+
+def normalize_lane0_llm_output(payload, *, model, as_of, factor_report_digest):
+    """Decode one Lane-0 LLM JSON answer into its sealed report, or refuse.
+
+    Returns a built ``model`` instance when — and only when — the model's own
+    answer decodes cleanly; otherwise returns ``payload`` **unchanged** so the
+    executor refuses honestly (``output_schema_invalid``) with the real errors.
+
+    In order: a single-key envelope whose key is exactly the schema's snake_case
+    name is unwrapped (narrow and named — never "find the first dict that fits");
+    the three :data:`LANE0_RUNTIME_OWNED_FIELDS` are dropped and re-supplied by
+    the runtime; every remaining field is decoded from JSON in strict mode
+    against the model's own declared annotation; the report is then sealed with
+    ``build`` (which computes ``content_digest``), so every model validator —
+    axis sums, modal argmax, evidence anchors, the 无主线 rule — still runs.
+    """
+    if not isinstance(payload, Mapping):
+        return payload
+    raw = dict(payload)
+    key = _envelope_key(model)
+    if len(raw) == 1 and key in raw and isinstance(raw[key], Mapping):
+        raw = dict(raw[key])
+    for field in LANE0_RUNTIME_OWNED_FIELDS:
+        raw.pop(field, None)
+
+    fields: dict[str, Any] = {}
+    for name, value in raw.items():
+        spec = model.model_fields.get(name)
+        if spec is None:
+            return payload          # an undeclared field is the model's error
+        try:
+            fields[name] = _decode_field(spec.annotation, value)
+        except Exception:           # noqa: BLE001 — an undecodable field is a refusal
+            return payload
+    try:
+        return model.build(
+            as_of=as_of, factor_report_digest=factor_report_digest, **fields)
+    except Exception:               # noqa: BLE001 — a rule the answer breaks is a refusal
+        return payload
+
+
+class Lane0OutputNormalizingGateway:
+    """The production Lane-0 model gateway, with the runtime owning its own fields.
+
+    Wraps any conforming :class:`~guanlan_v2.orchestration.worker.ModelGateway`
+    (production: ``assembly.WorkerSeatModelGateway``) and applies
+    :func:`normalize_lane0_llm_output` to a raw-JSON completion for the two
+    Lane-0 report schemas. A payload that is already a typed instance (every
+    scripted test gateway) passes through untouched, and so does any worker
+    outside the two-entry allowlist.
+
+    ``as_of`` / ``factor_report_digest`` come from the ``MarketFactorReport`` the
+    run actually committed — resolved through the pool, never recomputed and
+    never invented: with no committed report there is nothing honest to stamp, so
+    the payload is left exactly as the model wrote it.
+    """
+
+    def __init__(self, *, inner, catalog_runtime, pool, registry) -> None:
+        self._inner = inner
+        self._catalog = catalog_runtime
+        self._pool = pool
+        self._registry = registry
+
+    # -- the ModelGateway protocol ------------------------------------------ #
+    def invoke(self, request, *, prompt_assembly_ref):
+        result = self._inner.invoke(request, prompt_assembly_ref=prompt_assembly_ref)
+        payload = result.payload
+        if not isinstance(payload, Mapping):
+            return result
+        model = self._output_model(request.prompt_record.worker_id)
+        if model is None:
+            return result
+        report = self._committed_factor_report()
+        if report is None:
+            return result
+        normalized = normalize_lane0_llm_output(
+            payload, model=model, as_of=report.as_of,
+            factor_report_digest=report.content_digest)
+        if normalized is payload:
+            return result
+        return replace(result, payload=normalized)
+
+    def close(self) -> None:
+        close = getattr(self._inner, "close", None)
+        if callable(close):
+            close()
+
+    # -- internals ----------------------------------------------------------- #
+    def _output_model(self, worker_id: str):
+        try:
+            worker = self._catalog.worker(worker_id)
+        except Exception:  # noqa: BLE001 - an unknown worker is simply not ours
+            return None
+        for out in worker.outputs:
+            if out.name == _PRIMARY:
+                return lane0_llm_output_model(out.schema_ref.key)
+        return None
+
+    def _committed_factor_report(self):
+        try:
+            art = self._pool.committed_output(BOOTSTRAP_NODE_IDS[0], _PRIMARY)
+        except Exception:  # noqa: BLE001 - no committed report is not a claim
+            return None
+        if art is None:
+            return None
+        payload = art.payload
+        if self._registry is not None and not isinstance(payload, DigestModel):
+            try:
+                payload = self._registry.validate_payload(
+                    MARKET_FACTOR_REPORT_SCHEMA_REF, payload)
+            except Exception:  # noqa: BLE001
+                return None
+        return payload
+
+
+def wrap_lane0_gateway(inner, *, catalog_runtime, pool, registry):
+    """The reviewed production wiring seam (the driver's only gateway change)."""
+    return Lane0OutputNormalizingGateway(
+        inner=inner, catalog_runtime=catalog_runtime, pool=pool, registry=registry)
 
 
 # --------------------------------------------------------------------------- #

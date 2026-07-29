@@ -187,10 +187,58 @@ class ScriptedLane0Gateway:
 
 
 # --------------------------------------------------------------------------- #
+# the RAW-JSON gateway — what a real provider actually hands back              #
+# --------------------------------------------------------------------------- #
+class ScriptedJsonLane0Gateway:
+    """Answers with raw JSON dicts, the way the live 2026-07-29 run's model did.
+
+    Deliberately omits ``as_of`` / ``factor_report_digest`` / ``content_digest``
+    (a model cannot know a full 64-hex digest — the rendered block header shows
+    12 chars — and cannot compute its own self-seal), and wraps the rotation
+    answer in the ``{"rotation_report": {...}}`` envelope the live run produced.
+    """
+
+    def __init__(self, *, stores, **_kw) -> None:
+        self._stores = stores
+        self.invocations: list[str] = []
+
+    def invoke(self, request, *, prompt_assembly_ref):
+        record = W.verify_model_request_binding(
+            request, prompt_assembly_ref, reader=self._stores.payloads)
+        self.invocations.append(record.node_id)
+        if record.worker_id == "market.regime":
+            payload = {
+                "trend": "unknown", "risk_state": "unknown", "heat_state": "unknown",
+                "trend_probabilities": {"牛": 0.0, "熊": 0.0, "震荡": 0.0, "unknown": 1.0},
+                "risk_probabilities": {"risk_on": 0.0, "risk_off": 0.0,
+                                       "neutral": 0.0, "unknown": 1.0},
+                "heat_probabilities": {"normal": 0.0, "overheat": 0.0, "unknown": 1.0},
+                "confidence": "low",
+                "evidence": [{"factor_id": "breadth.limit_up_ema", "value": 0.0,
+                              "reading": "coverage thin this session"}],
+                "conflicts": [], "drivers": ["insufficient_coverage"],
+                "evidence_factor_ids": ["breadth.limit_up_ema"],
+                "narrative": "Advisory only; every axis carries its unknown mass.",
+                "unknown_reason": "most of the battery is UNAVAILABLE",
+            }
+        else:
+            payload = {"rotation_report": {
+                "mainlines": [], "confidence": "low", "conflicts": [],
+                "narrative": "Themeless tape; advisory only, zero trading authority.",
+                "evidence_factor_ids": [],
+                "unknown_reason": "the rotation family is UNAVAILABLE (archive-young)",
+            }}
+        return W.ModelResult(
+            payload=payload, rendered_text="{}", number_anchors=(),
+            input_tokens=13, output_tokens=9, provider="fake-json",
+            model="fake-lane0-json", provider_response_id=f"resp-{record.node_id}")
+
+
+# --------------------------------------------------------------------------- #
 # the in-memory environment (production assembly, test stores + test gateway)  #
 # --------------------------------------------------------------------------- #
 class Env:
-    def __init__(self, *, fail_nodes=()):
+    def __init__(self, *, fail_nodes=(), raw_json_gateway=False):
         from guanlan_v2.orchestration.adapters.chain import (
             PHASE9_BASE_REGISTRY_DIGEST,
             build_phase9_registry,
@@ -203,7 +251,9 @@ class Env:
         self.stores = RuntimeStores(
             resolver=resolver, clock=self.clock,
             allowed_cell_namespaces=(W.PROMPT_CELL_NAMESPACE,))
-        self.gateway = ScriptedLane0Gateway(
+        gateway_class = (ScriptedJsonLane0Gateway if raw_json_gateway
+                         else ScriptedLane0Gateway)
+        self.gateway = gateway_class(
             stores=self.stores, registry=self.registry, fail_nodes=fail_nodes)
         self.bindings = L.build_lane0_bindings(
             stores=self.stores, clock=self.clock,
@@ -485,6 +535,44 @@ def test_run_identity_is_one_per_session_date():
     assert L._run_identity_already_executed(env.stores, f"lane0-{SESSION}") is False
     env.run()
     assert L._run_identity_already_executed(env.stores, f"lane0-{SESSION}") is True
+
+
+# =========================================================================== #
+# 4b — a REAL model's raw JSON completes the run (D2/D3, 2026-07-29)            #
+# =========================================================================== #
+def test_a_raw_json_completion_from_a_real_model_completes_the_run():
+    # The live run's two LLM seats both came back `output_schema_invalid`: the
+    # strict DigestModel could not accept JSON at all, and three fields
+    # (as_of / factor_report_digest / content_digest) are unproducible by any
+    # model. With the runtime owning those three and decoding JSON in strict
+    # JSON mode, the same raw-JSON answer — envelope and all — now seals.
+    env = Env(raw_json_gateway=True)
+    result = env.run()
+
+    assert result.outcome == L.OUTCOME_COMPLETED, result.refusal_detail
+    assert result.node_statuses["lane0.regime"] == "completed"
+    assert result.node_statuses["lane0.rotation"] == "completed"
+    assert result.llm_invocations == 2
+    assert result.snapshot_visible_to_deep_lane is True
+
+
+def test_the_runtime_stamps_the_digest_of_the_report_the_run_committed():
+    from guanlan_v2.orchestration.market.factors import (
+        MARKET_FACTOR_REPORT_SCHEMA_REF,
+        REGIME_REPORT_SCHEMA_REF,
+    )
+
+    env = Env(raw_json_gateway=True)
+    env.run()
+    stored = dict(env.stores._shared.backend.payloads).values()
+    factor = next(s.model for s in stored
+                  if getattr(s, "schema_key", None) == MARKET_FACTOR_REPORT_SCHEMA_REF.key)
+    regime = next(s.model for s in stored
+                  if getattr(s, "schema_key", None) == REGIME_REPORT_SCHEMA_REF.key)
+    # the anchor the deep lane audits: the read is bound to the exact report.
+    assert regime.factor_report_digest == factor.content_digest
+    assert regime.as_of == factor.as_of
+    assert regime.content_digest == regime.semantic_digest()
 
 
 # =========================================================================== #

@@ -1090,9 +1090,17 @@ def run_lane0_bootstrap(
     detail_registry.seal()
     refusal_sink = EventRefusalAuditSink(
         detail_registry=detail_registry, clock=bindings.clock)
-    gateway = bindings.gateway_factory(
-        payload_reader=bindings.stores.payloads,
-        catalog_runtime=bindings.catalog_runtime)
+    # the runtime owns as_of / factor_report_digest / content_digest on the two
+    # Lane-0 reports (a model cannot know a full 64-hex digest or its own
+    # self-seal), and a single-key envelope named for the schema is unwrapped.
+    # Anything else the model wrote comes through untouched, so a real refusal
+    # stays the executor's honest `output_schema_invalid`.
+    gateway = _bootstrap.wrap_lane0_gateway(
+        bindings.gateway_factory(
+            payload_reader=bindings.stores.payloads,
+            catalog_runtime=bindings.catalog_runtime),
+        catalog_runtime=bindings.catalog_runtime, pool=pool,
+        registry=bindings.registry)
     recorder = _dag_run_recorder()
     executor = build_dag_plan_executor(
         pool=pool, budget=budget, runtime=runtime, registry=bindings.registry,
