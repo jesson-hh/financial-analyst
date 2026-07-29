@@ -29,7 +29,27 @@ Phase 10 把编排内核接到了帷幄选股与落子买卖点两条产品线�
 | D | `always_invoke` 不得由 `tool_calls=REQUIRED` 反推 | `data/catalog.py:150-153`(显式禁止) | REQUIRED 的算术需要 `always_invoke` 行,只能审下来,不能推出来 |
 | E | `dec.research_mgr` 的经验行无法诚实派生 | `bootstrap.py:278-316` / `:477-481` / `runtime_support.py:676-679` | `ExperiencePrefetchBinding@1` 要 worker 没有的特征向量指针;空 allowlist 分析器拒绝;`tool_calls=FORBIDDEN` 与该行 Literal 钉死的 min=1 冲突 |
 
-**连带代价(本期的主要工作量):**任何一处改动都会移动 P3→P9 的密封目录/注册表摘要链——**13+ 个密封 golden 与字面量在 P10 的围栏之外**。九期以来"上游 golden 零位移"的纪律到此为止;本期是唯一被授权移动它们的一期,因此必须**一次性、成建制、带完整再审**地做。
+**连带代价(本期的主要工作量):**任何一处改动都会移动 P3→P9 的密封目录/注册表摘要链。2026-07-29 侦察实测:**11 个 digest、42 处字面量、散在 16 个文件**(9 个 golden manifest + 7 个 handoff 测试)。链路(每期的 base == 上期结果,全部实测):P2 `b41bf223` **不动** → P3-data `ba708692` → P3-full `c13294e5` → P4 `aefe0cf3` → P5 `42af2460` → P6 同值(恒等节点)→ P7 `c760df02` → P8 `7f00dde4` → P9 `0c48db78` → P10 `ff4cdc61`。**不动的**:7 条 data_capabilities、analyzer/provider 材料、渲染器与源句柄、planner_spec_digest、以及 10 个 schema manifest(前提是不碰 schema)。九期以来"上游 golden 零位移"的纪律到此为止;本期是唯一被授权移动它们的一期,因此必须**一次性、成建制、带完整再审**地做。
+
+---
+
+## 1.5 · 2026-07-29 侦察:补授权**不等于**真跑(必读,改变了本期的定义)
+
+多 agent 侦察 + 控制器逐条源码复核后确认:**把两行授权补上,只会让 `check_runtime_support` 变绿,不会让任何数据被真正读到。** 三个新事实:
+
+| # | 事实 | 证据 |
+|---|---|---|
+| F | **数据桥从未在生产执行过** | `DataRuntimeWorld(...)` 全仓仅在 `tests/orchestration/data/test_runtime_integration.py` 构造过;`data_runtime_provider_factory`(`data/runtime.py:653`)无任何生产调用者 |
+| G | **标的代码到不了数据桥** | `ParamBinding.source_kind` 封闭为 `node_param\|input_value\|const`(`data/catalog.py:112-141`)。封存 v2 preset **结构上禁止节点参数**(`pipeline/assembly.py:945-948`「a sealed v2 preset is structurally code-free」,十节点全 `params=None`);`input_value` 未实现(`data/runtime.py:392-411` 直接抛);`const` 语义错。标的今天**只经 `SubjectPromptAssembler` 的 prompt 注入**到达 worker,不经数据桥 |
+| H | **今天唯一存在的 `dec.pm` 授权本身就是死的** | 其绑定取 `/asof_date`、`/code` 两个 node param,而 `dec.pm` 的 `params_schema_ref=None`,`spec.py:951-954` 规定此类 worker 带 params 即 `params_not_allowed` → **任何计划(封存或动态)都不可能满足它**。从未炸过只因 F |
+
+**因此本期的真实分层**(补授权只是第三层):
+
+- **L1 · 标的→数据桥的通路(设计裁决 D-0,阻塞一切)**。三个候选,均有代价:(i) 物化时从 `RunSubject@1` 盖参数(推荐:preset 记录仍无 params 故 preset digest 不动,且顺带治好 H;代价=plan 身份变成按票,失去"每只股票草案逐字节相同/一次租约"的性质);(ii) 实现 `input_value` 并给两个 worker 声明 `subject` 输入(移动两个 P8 worker 语义摘要);(iii) 新增 `ParamBinding.source_kind`(爆炸半径最大,动桥句柄材料字节与 `worker.py` ABI)。**未裁决前不得开工。**
+- **L2 · 生产数据运行时接线**:构造 `DataRuntimeWorld`、按 source id 注册真数据源、把 provider factory 绑进执行器。**今天完全不存在,工作量大于 L1+L3 之和。**
+- **L3 · 补授权 + 重冻**(原§2.1 第 1–3 条)。另有两个待裁决点:**D-1** 一对一不变量按 worker 还是按能力(字面一对一会逼出四行,而 `indicators`/`fundamentals` 无后端适配器);**D-2** `invocation_mode="always_invoke"` + `success_requires_finalized_call=True` 是清除 `tool_calls_required_unmet` 的必要条件(`data/catalog.py:186-190`),意味着**数据中断即节点硬失败**——对新闻读取器是一个真实的生产行为选择。
+
+**唯一能在 L2 之前拿到真 LLM 深链判断的路**:去掉 `pv.technical`/`text.news` 两个要求 tool-call 的旁证节点(它们只以 `degrade` 策略流进 bull/bear,决策主干 `sentiment→research-mgr→pm→trader` 全不依赖),八节点 preset 的支持检查即通过。已向用户呈报,用户选择**先修 H 这个潜伏缺陷**再定路线。
 
 ---
 
