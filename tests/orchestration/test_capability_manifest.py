@@ -11,10 +11,16 @@ any hand edit or upstream tool-table change fails HONESTLY with a "re-run
 generator" message, never silently.
 
 FROZEN TABLE STATE: the committed material freezes against the WORKTREE
-``WW_TOOL_TABLE`` (60 rows; ``ww_newsradar`` / ``ww_overseas`` live in production
-but are uncommitted on this branch). The generator keys on the live table, so a
-foreign commit that changes the row set trips both the drift guard and the
-dangling-intent test below.
+``WW_TOOL_TABLE`` (64 rows; ``ww_newsradar`` / ``ww_overseas`` live in production
+but are uncommitted on this branch, so the committed table carries 62). The
+generator keys on the live table, so a foreign commit that changes the row set
+trips both the drift guard and the dangling-intent test below — which is exactly
+what happened when ``b969c93`` added the four orchestration-router tools and left
+the 60-row material behind. Re-freezing is a REVIEWED act, not a rubber stamp: a
+new tool joins ``_METHOD_TOOL_INTENT`` only if it genuinely supplies one of the
+six Phase-3 data capabilities. The ``ww_orchestrate_*`` / ``ww_ta_ingest`` four
+did not (control-plane + ingest, two of them confirm-gated writes), so the
+re-freeze moved only ``source_tool_count`` / ``source_tool_digest``.
 
 Run from repo root: ``pytest tests/orchestration/test_capability_manifest.py -v``
 """
@@ -47,7 +53,7 @@ _PLAN_ABI_METHODS = (
 )
 
 #: The worktree freeze this material was sealed against (documented, not derived).
-FROZEN_TOOL_COUNT = 60
+FROZEN_TOOL_COUNT = 64
 
 
 def _live_table():
@@ -157,7 +163,7 @@ def test_material_documents_the_frozen_table_state():
     # self-consistent with the live table it was regenerated from ...
     assert m.source_tool_count == len(ct.WW_TOOL_TABLE)
     assert m.source_tool_digest == content_digest(sorted(_live_names()))
-    # ... and pinned to the documented worktree freeze (60 rows).
+    # ... and pinned to the documented worktree freeze (64 rows).
     assert m.source_tool_count == FROZEN_TOOL_COUNT
 
 
