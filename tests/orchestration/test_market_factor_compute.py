@@ -347,6 +347,119 @@ def test_temp_astock_degraded_when_accreting():
 
 
 # --------------------------------------------------------------------------- #
+# temp.astock — the macro-pulse PULL LOG (several rows per session date)        #
+# --------------------------------------------------------------------------- #
+# The 2026-07-29 live Lane-0 run died here: `var/macro_pulse/snapshots.jsonl` is
+# an append-only PULL log (the page's SWR refresh appends a line per pull), so
+# `_load_astock_temp_rows` emitted 24 rows over 7 session dates and the strictly-
+# increasing series invariant refused the whole battery. One session date is one
+# observation: the LAST pull of that date (the reading closest to the session
+# close, the EOD 口径 this factor computes on).
+def _pull_log(pairs) -> tuple[DailyValueRow, ...]:
+    """Rows straight from the pull log: ``(iso-ts, value)``, several per date."""
+    out = []
+    for ts, value in pairs:
+        stamp = datetime.fromisoformat(ts).replace(tzinfo=timezone(timedelta(hours=8)))
+        out.append(DailyValueRow(date=ts[:10], value=float(value), available_at=stamp))
+    return tuple(out)
+
+
+def test_temp_astock_collapses_a_pull_log_to_one_row_per_session():
+    dates = _dates(25)
+    pairs = []
+    for i, d in enumerate(dates):
+        pairs.append((f"{d}T11:27:00", 50.0 + i))
+        pairs.append((f"{d}T15:29:31", 60.0 + i))   # the later pull of that session
+    inp = MarketFactorInputs(astock_temp=_pull_log(pairs))
+    v = _val(_compute(inp, datetime(2026, 1, 1, tzinfo=UTC)), "temp.astock")
+    assert v.status == "DEGRADED"                  # 25 of the 60-session target
+    assert v.n_days == 25                          # 50 rows, 25 sessions
+    assert [p.date for p in v.series] == dates     # strictly increasing, deduped
+    assert v.value == pytest.approx(60.0 + 24)     # the LAST pull of the last date
+
+
+def test_temp_astock_keeps_the_latest_observation_knowable_at_as_of():
+    # PIT: the collapse happens AFTER windowing, so an as_of that lands between
+    # two pulls of the same session keeps the earlier one — never a reading that
+    # had not happened yet.
+    dates = _dates(20)
+    pairs = []
+    for i, d in enumerate(dates):
+        pairs.append((f"{d}T11:00:00", 50.0 + i))
+        pairs.append((f"{d}T15:00:00", 90.0 + i))
+    inp = MarketFactorInputs(astock_temp=_pull_log(pairs))
+    mid_session = datetime.fromisoformat(f"{dates[-1]}T13:00:00").replace(
+        tzinfo=timezone(timedelta(hours=8)))
+    windowed = F._window_inputs(inp, mid_session)
+    v = _val(_compute(windowed, mid_session), "temp.astock")
+    assert v.n_days == 20
+    assert v.value == pytest.approx(50.0 + 19)     # the 11:00 pull, not the 15:00 one
+
+
+def test_temp_astock_pull_log_shorter_than_the_minimum_is_honestly_unavailable():
+    # the real 2026-07-29 shape: 24 pull rows, 7 distinct session dates. Seven
+    # sessions is below the 20-session minimum ⇒ an honest UNAVAILABLE that names
+    # the count, never a 24-point series faked out of 7 days of history.
+    pairs = [
+        ("2026-07-10T16:25:28", 62.3), ("2026-07-10T16:37:46", 62.3),
+        ("2026-07-10T16:55:39", 62.3), ("2026-07-10T16:58:48", 62.3),
+        ("2026-07-11T13:36:48", 62.3), ("2026-07-11T14:21:33", 62.3),
+        ("2026-07-13T09:10:00", 58.0), ("2026-07-15T20:22:02", 53.5),
+        ("2026-07-16T12:02:12", 51.8), ("2026-07-27T11:27:00", 51.8),
+        ("2026-07-27T11:29:31", 56.8),
+    ]
+    inp = MarketFactorInputs(astock_temp=_pull_log(pairs))
+    v = _val(_compute(inp, datetime(2026, 7, 29, tzinfo=UTC)), "temp.astock")
+    assert v.status == "UNAVAILABLE"
+    assert v.series == () and v.value is None
+    assert "6 sessions" in v.reason and "20" in v.reason
+
+
+# --------------------------------------------------------------------------- #
+# blast radius — one unbuildable factor never fails the whole battery           #
+# --------------------------------------------------------------------------- #
+def test_one_unbuildable_factor_degrades_only_itself(monkeypatch):
+    # The battery's contract is PER-FACTOR honesty (OK / DEGRADED / UNAVAILABLE).
+    # A single input series the value model refuses (the 2026-07-29 duplicate-date
+    # pull log) must never take the node down with a handler_error: the offending
+    # factor goes UNAVAILABLE with a named reason and every other factor stands.
+    def _broken(inputs, tape):
+        return F._ok(
+            [F.MarketFactorPoint(date="2025-01-02", value=1.0),
+             F.MarketFactorPoint(date="2025-01-02", value=2.0)],   # not increasing
+            _stamp("2025-01-02"))
+
+    monkeypatch.setitem(F._FACTOR_COMPUTE, "temp.astock", _broken)
+    dates = _dates(60)
+    inp = MarketFactorInputs(
+        astock_temp=_daily(dates, 50.0), limit_up_total=_daily(dates, 40.0))
+    report = _compute(inp, _stamp(dates[-1]))
+
+    bad = _val(report, "temp.astock")
+    assert bad.status == "UNAVAILABLE"
+    assert bad.value is None and bad.series == ()
+    assert "strictly increasing" in bad.reason
+    assert F.FACTOR_BUILD_REFUSED_BADGE in report.badges
+    # the rest of the battery is untouched — the failure is contained.
+    good = _val(report, "breadth.limit_up_ema")
+    assert good.status in ("OK", "DEGRADED") and good.value is not None
+    assert "temp.astock" in report.missing_features
+    assert "breadth.limit_up_ema" not in report.missing_features
+
+
+def test_a_future_row_still_refuses_the_whole_report(monkeypatch):
+    # the containment above must never swallow the PIT red line.
+    def _boom(inputs, tape):
+        raise FutureDataRefused("future row", future_rows=1)
+
+    monkeypatch.setitem(F._FACTOR_COMPUTE, "temp.astock", _boom)
+    dates = _dates(60)
+    inp = MarketFactorInputs(astock_temp=_daily(dates, 50.0))
+    with pytest.raises(FutureDataRefused):
+        _compute(inp, _stamp(dates[-1]))
+
+
+# --------------------------------------------------------------------------- #
 # rot.* + val.pct — always UNAVAILABLE in v1 (archive/upstream deferred)         #
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize(

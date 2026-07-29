@@ -92,6 +92,7 @@ __all__ = [
     "DEFAULT_AVAILABILITY_RULE",
     "DEFAULT_UNIVERSE_REGISTRY_VERSION",
     "TAPE_BACKFILLED_IGNORED_BADGE",
+    "FACTOR_BUILD_REFUSED_BADGE",
     "compute_market_factors",
     "load_market_factor_inputs",
     "shield_inputs_from_factor_report",
@@ -1341,6 +1342,29 @@ def _sorted(seq) -> list:
     return sorted(seq, key=lambda r: r.date)
 
 
+def _latest_per_session(rows: list) -> list:
+    """Collapse a PULL LOG to one row per session date — the LAST observation.
+
+    Some upstreams are append-only *pull* logs rather than daily series: the
+    macro-pulse store (``var/macro_pulse/snapshots.jsonl``) appends one line per
+    refresh, so a single session date carries several rows (the 2026-07-29 live
+    run read 24 rows over 7 dates). One session is one observation, and for an
+    ``eod`` factor that observation is the LAST reading of the day — the one
+    closest to the session close.
+
+    Applied in the compute layer, i.e. **after** PIT windowing, so an ``as_of``
+    that falls between two pulls of the same session keeps the earlier one: the
+    collapse can only ever pick a reading that had already happened. It picks,
+    never averages or interpolates — no value is invented.
+    """
+    by_date: dict[str, Any] = {}
+    for r in rows:
+        prev = by_date.get(r.date)
+        if prev is None or r.available_at >= prev.available_at:
+            by_date[r.date] = r
+    return [by_date[d] for d in sorted(by_date)]
+
+
 def _f_ad_ratio(inputs: "MarketFactorInputs", tape):
     rows = inputs.updown
     if rows is None:
@@ -1593,9 +1617,11 @@ def _f_temp_astock(inputs: "MarketFactorInputs", tape):
     rows = inputs.astock_temp
     if rows is None:
         return _missing("astock_temp")
-    rows = _sorted(rows)
+    # the macro-pulse upstream is a pull log, not a daily series (see
+    # ``_latest_per_session``): several rows can carry the same session date.
+    rows = _latest_per_session(_sorted(rows))
     if len(rows) < 20:
-        return _short("astock_temp", len(rows), 20)
+        return _short("astock_temp", len(rows), 20, first=rows[0].date if rows else None)
     points = [MarketFactorPoint(date=r.date, value=r.value) for r in rows]  # verbatim
     return _ok(points, max(r.available_at for r in rows))
 
@@ -1693,6 +1719,45 @@ def _build_value(
     )
 
 
+#: the report badge a contained per-factor build refusal raises (①§2 blast radius).
+FACTOR_BUILD_REFUSED_BADGE = "factor_build_refused"
+
+#: how much of a refusal message a factor's ``reason`` carries (the full pydantic
+#: report can run to thousands of characters; the head names the invariant).
+_REASON_MAX_CHARS = 300
+
+
+def _build_value_or_unavailable(
+    defn: MarketFactorDefinition, inputs: "MarketFactorInputs", tape, *,
+    as_of: datetime, rule: PanelAvailabilityRule,
+) -> tuple[MarketFactorValue, bool]:
+    """One factor's value, or an honest UNAVAILABLE when it cannot be built.
+
+    The battery's contract is **per-factor** honesty (①§2: OK / DEGRADED /
+    UNAVAILABLE with a reason), so one malformed input series may never take the
+    whole deterministic node down — that is what happened on 2026-07-29, where a
+    duplicate-date ``temp.astock`` series turned the entire ``market.factor`` node
+    into a ``handler_error`` and left the two Lane-0 LLM seats with no report at
+    all. A refusal is contained to its own factor, named in that factor's
+    ``reason`` and badged on the report; :class:`FutureDataRefused` (the PIT red
+    line) is re-raised untouched — containment never swallows a refusal that is
+    about the whole snapshot.
+    """
+    try:
+        return _build_value(
+            defn, _FACTOR_COMPUTE[defn.factor_id](inputs, tape), as_of=as_of, rule=rule), False
+    except FutureDataRefused:
+        raise
+    except Exception as exc:  # noqa: BLE001 — a per-factor refusal, named not hidden
+        detail = " ".join(str(exc).split())[:_REASON_MAX_CHARS] or type(exc).__name__
+        return _build_value(
+            defn,
+            _unavail(
+                f"factor build refused ({type(exc).__name__}): {detail} — contained to "
+                "this factor (①§2 per-factor honesty); no value is fabricated"),
+            as_of=as_of, rule=rule), True
+
+
 def _session_date(as_of: datetime) -> str:
     """The Asia/Shanghai trading date of ``as_of`` (fixed +08:00; CN has no DST)."""
     return as_of.astimezone(timezone(timedelta(hours=8))).date().isoformat()
@@ -1742,10 +1807,13 @@ def compute_market_factors(
         else:
             badges.append(TAPE_BACKFILLED_IGNORED_BADGE)
 
-    values = tuple(
-        _build_value(defn, _FACTOR_COMPUTE[defn.factor_id](inputs, tape_point), as_of=as_of, rule=rule)
+    built = [
+        _build_value_or_unavailable(defn, inputs, tape_point, as_of=as_of, rule=rule)
         for defn in spec.definitions
-    )
+    ]
+    values = tuple(value for value, _refused in built)
+    if any(refused for _value, refused in built):
+        badges.append(FACTOR_BUILD_REFUSED_BADGE)
     return assemble_market_factor_report(
         spec=spec,
         as_of=as_of,
