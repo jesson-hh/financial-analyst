@@ -176,6 +176,8 @@ __all__ = [
     "CapabilityGateway",
     "PromptAssembler",
     "StaticPromptAssembler",
+    "OUTPUT_SCHEMA_SECTION",
+    "output_schema_section",
     "ModelGateway",
     "ExecutionBridgeProvider",
     "ExecutionBridgeSession",
@@ -204,6 +206,8 @@ PROMPT_BRIDGE_PRIORITY = 2_147_483_647
 REVIEW_NAMESPACE = "review"
 PROMPT_CELL_NAMESPACE = "runtime.prompt.v1"
 _PRIMARY_OUTPUT_KEY = "primary"
+#: the canonical-channel key carrying the DERIVED output contract (裁决 2).
+OUTPUT_SCHEMA_SECTION = "output_schema"
 
 WithinCallRole = Literal["provider_prefetch", "tool_result", "memory_prefetch"]
 
@@ -1026,6 +1030,70 @@ class ModelResult:
     degradation_reasons: tuple[str, ...] = ()
 
 
+def output_schema_section(
+    *,
+    output_binding,
+    schema_registry,
+    runtime_owned_fields: tuple[str, ...] = (),
+) -> dict[str, Any] | None:
+    """Derive the model-facing output contract from a worker's ``OutputBinding``.
+
+    裁决 2 (2026-07-29). The reviewed prompt materials name the output schema
+    (``RegimeReport@1``) and its rules but never its FIELD NAMES, so the first
+    live Lane-0 run invented its own (``regime_type`` / ``risk`` / ``heat`` /
+    ``modal``) and was refused. This section is DERIVED — from the worker's own
+    primary :class:`~guanlan_v2.orchestration.catalog.OutputBinding`, resolved
+    through the very ``schema_registry`` the executor's step (9) validates the
+    answer against — so the contract the model is shown cannot drift from the
+    contract that is enforced. Prose in a material can silently expire; this
+    cannot.
+
+    Returns ``None`` when either input is absent (a caller with no output
+    binding — e.g. ``run_planner`` — is byte-for-byte unchanged). A binding the
+    registry cannot resolve is STATED as unresolved rather than guessed at.
+
+    ``runtime_owned_fields`` names fields the RUNTIME stamps (Lane 0:
+    ``as_of`` / ``factor_report_digest`` / ``content_digest``). They are listed
+    separately and kept out of the required/optional lists: asking a model for
+    a full 64-hex digest or its own self-seal is asking it to invent a number.
+    """
+    if output_binding is None or schema_registry is None:
+        return None
+    key = output_binding.schema_ref.key
+    section: dict[str, Any] = {
+        "schema": key,
+        "contract": (
+            f"Your answer is validated as {key}. Return ONE JSON object using "
+            "exactly the field names below — an undeclared field, a missing "
+            "required field or a value JSON cannot express as the declared type "
+            "is refused, not repaired."
+        ),
+    }
+    try:
+        model = schema_registry.resolve(output_binding.schema_ref)
+        fields = model.model_fields
+        json_schema = model.model_json_schema()
+    except Exception as exc:  # noqa: BLE001 - an unresolvable binding is stated
+        section["unresolved"] = (
+            "this run's schema registry does not resolve the binding "
+            f"({type(exc).__name__}); no field list can be derived"
+        )
+        return section
+    owned = {name for name in runtime_owned_fields if name in fields}
+    section["required_fields"] = sorted(
+        n for n, f in fields.items() if f.is_required() and n not in owned)
+    section["optional_fields"] = sorted(
+        n for n, f in fields.items() if not f.is_required() and n not in owned)
+    if owned:
+        section["runtime_supplied_fields"] = sorted(owned)
+        section["runtime_supplied_note"] = (
+            "the runtime stamps these from the artifacts this run actually "
+            "committed; do NOT write them — anything you put there is discarded"
+        )
+    section["json_schema"] = json_schema
+    return section
+
+
 @runtime_checkable
 class PromptAssembler(Protocol):
     """Combines trusted system/skill/guardrail text + untrusted block *refs* only."""
@@ -1041,6 +1109,8 @@ class PromptAssembler(Protocol):
         guardrails,
         trusted_input_digests: tuple[NamedEvidenceDigest, ...],
         untrusted_blocks: tuple[PromptUntrustedBlockRef, ...],
+        output_binding=None,
+        schema_registry=None,
     ) -> AssembledModelRequest:
         ...
 
@@ -1068,6 +1138,8 @@ class StaticPromptAssembler:
         guardrails,
         trusted_input_digests: tuple[NamedEvidenceDigest, ...],
         untrusted_blocks: tuple[PromptUntrustedBlockRef, ...],
+        output_binding=None,
+        schema_registry=None,
     ) -> AssembledModelRequest:
         system_text = _text_of(system_prompt)
         skill_texts = [_text_of(s) for s in skills]
@@ -1093,6 +1165,10 @@ class StaticPromptAssembler:
                 for b in blocks
             ],
         }
+        out_schema = output_schema_section(
+            output_binding=output_binding, schema_registry=schema_registry)
+        if out_schema is not None:
+            channel[OUTPUT_SCHEMA_SECTION] = out_schema
         canonical_bytes = json.dumps(
             channel, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         digest = _model_request_digest(canonical_bytes)
@@ -1689,12 +1765,17 @@ def execute_node(
         resolved = runtime.catalog.resolve_worker(node.worker_id)
         blocks = _assign_block_ordinals(merged.untrusted_blocks)
         trusted = _trusted_input_digests(input_snapshot)
+        # 裁决 2: the model is TOLD the contract its answer is validated against —
+        # the very same primary OutputBinding step (9) below resolves, through the
+        # very same registry, so the declared and the enforced contract are one.
+        llm_out_binding = _primary_output_binding(worker)
         try:
             request = assembler.assemble(
                 plan_digest=plan.plan_digest, node_id=node.id, worker_id=worker.id,
                 system_prompt=resolved.system_prompt, skills=resolved.skills,
                 guardrails=resolved.guardrails, trusted_input_digests=trusted,
-                untrusted_blocks=blocks)
+                untrusted_blocks=blocks, output_binding=llm_out_binding,
+                schema_registry=registry)
         except Exception as exc:  # assembly failure -> orphan blocks retained directly
             return _terminal_nodrun(
                 NodeStatus.INCOMPLETE, reason_code="prompt_assembly_failed", reason=str(exc),

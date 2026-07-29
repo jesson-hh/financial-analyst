@@ -157,7 +157,8 @@ class FakePromptAssembler:
         self.calls: list[dict] = []
 
     def assemble(self, *, plan_digest, node_id, worker_id, system_prompt, skills,
-                 guardrails, trusted_input_digests, untrusted_blocks):
+                 guardrails, trusted_input_digests, untrusted_blocks,
+                 output_binding=None, schema_registry=None):
         self.calls.append({
             "plan_digest": plan_digest, "node_id": node_id, "worker_id": worker_id,
             "trusted": tuple(e.name for e in trusted_input_digests),

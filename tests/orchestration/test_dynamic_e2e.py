@@ -257,7 +257,8 @@ class _FakePromptAssembler:
     """A faithful fake ``PromptAssembler`` binding a persistable ``PromptAssemblyRecord``."""
 
     def assemble(self, *, plan_digest, node_id, worker_id, system_prompt, skills,
-                 guardrails, trusted_input_digests, untrusted_blocks):
+                 guardrails, trusted_input_digests, untrusted_blocks,
+                 output_binding=None, schema_registry=None):
         channel = {
             "plan_digest": plan_digest, "node_id": node_id, "worker_id": worker_id,
             "system": system_prompt.ref.id,

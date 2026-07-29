@@ -254,6 +254,8 @@ class SubjectPromptAssembler:
         guardrails,
         trusted_input_digests: tuple,
         untrusted_blocks: tuple,
+        output_binding=None,
+        schema_registry=None,
     ):
         if any(e.name == SUBJECT_TRUSTED_INPUT_NAME for e in trusted_input_digests):
             raise DeepDecideError(
@@ -305,6 +307,13 @@ class SubjectPromptAssembler:
                 for b in blocks
             ],
         }
+        # 裁决 2 (2026-07-29): the derived output contract, from the SAME reviewed
+        # helper the static assembler uses — the two assemblers must never drift
+        # on what a model is told its answer is validated against.
+        out_schema = _worker.output_schema_section(
+            output_binding=output_binding, schema_registry=schema_registry)
+        if out_schema is not None:
+            channel[_worker.OUTPUT_SCHEMA_SECTION] = out_schema
         canonical_bytes = json.dumps(
             channel, sort_keys=True, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")
