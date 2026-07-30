@@ -229,6 +229,7 @@ OUTCOME_DRY_RUN = "dry_run"
 OUTCOME_REUSED = "reused"
 
 _CONTEXT_SNAPSHOT_SR = SchemaRef(name="ContextSnapshot", version="1")
+_BOOTSTRAP_MANIFEST_SR = SchemaRef(name="BootstrapContextManifest", version="1")
 _LANE0_NODE_IDS = ("lane0.factor", "lane0.regime", "lane0.rotation")
 
 
@@ -650,19 +651,6 @@ def _session_as_of(session_date: str) -> datetime:
     return session_date_to_utc(session_date)
 
 
-def _snapshot_object_id(run_id: str) -> str:
-    """The assembled Lane-0 ContextSnapshot's stable ``snapshot_id``.
-
-    ``build_context_snapshot_from_bootstrap`` seals it as
-    ``bootstrap-ctx-{run_id}``; the input-side snapshot ``dag.run_plan``
-    synthesizes for the frozen InputSnapshots is ``bootstrap-run-ctx-{run_id}``.
-    Two distinct ``ContextSnapshot@1`` payloads per run is upstream behaviour;
-    the driver names the assembled one exactly so idempotence never mistakes the
-    other for it.
-    """
-    return f"bootstrap-ctx-{run_id}"
-
-
 def _scan_snapshots(stores: Any):
     """Yield ``(payload_ref, model)`` for every committed ``ContextSnapshot@1``.
 
@@ -681,19 +669,77 @@ def _scan_snapshots(stores: Any):
         _LOG.warning("ContextSnapshot scan failed: %s", exc)
 
 
-def _committed_snapshot_for_session(stores: Any, session_date: str):
-    """Any assembled Lane-0 snapshot for this +08:00 session date, or ``None``.
+def _scan_manifests(stores: Any):
+    """Yield every committed ``BootstrapContextManifest@1`` model.
+
+    Same direct-backend read as :func:`_scan_snapshots` and for the same reason
+    (no reviewed listing accessor exists upstream). Any doubt yields nothing.
+    """
+    try:
+        backend = stores._shared.backend  # noqa: SLF001 — no public listing exists
+        for stored in dict(backend.payloads).values():
+            if getattr(stored, "schema_key", None) != _BOOTSTRAP_MANIFEST_SR.key:
+                continue
+            yield stored.model
+    except Exception as exc:  # noqa: BLE001 — an unreadable backend is an absence
+        _LOG.warning("BootstrapContextManifest scan failed: %s", exc)
+
+
+def _committed_snapshot_for_session(
+    stores: Any, session_date: str, *, registry_digest: str
+):
+    """The ContextSnapshot this +08:00 session already committed, or ``None``.
 
     One judgment per session date is the red line, and it must hold ACROSS
     attempts: ``--attempt 2`` exists to finish a day that produced nothing, never
-    to buy a second token burn on a day that already has a snapshot. Attempt 1's
-    id is the bare ``bootstrap-ctx-lane0-{date}``; later attempts suffix ``-r{N}``.
+    to buy a second token burn on a day that already has a snapshot.
+
+    **Why this asks the manifest, not the snapshot's name** (2026-07-30). The
+    predicate used to be a string match on the assembled snapshot's ``snapshot_id``
+    (``bootstrap-ctx-lane0-{date}[-rN]``) versus the input-side one dag synthesizes
+    (``bootstrap-run-ctx-…``). Those two are **not two facts**: both are
+    ``build_empty_memory_context`` over the SAME DataContext and the SAME canonical
+    empty-memory pair, so they carry the SAME semantic digest and are one
+    content-addressed payload wearing two sets of audit clothing. Writing the second
+    set is what killed live ``run --attempt 4``
+    (``PayloadWriteConflict main/a1a866af…``), and once the driver correctly binds
+    the payload already in the store there is no separately-named assembled snapshot
+    left to match on. Discriminating on an audit field was only ever possible because
+    an in-memory store let two byte-variants of one digest coexist.
+
+    So the question is asked of the record that genuinely means "this session
+    assembled its context": the driver's own ``BootstrapContextManifest@1``,
+    committed in the same all-or-none UoW as ``CONTEXT_SNAPSHOT_FROZEN``. Its
+    ``bootstrap_run_id`` names the session's attempt and its
+    ``context_snapshot_digest`` is semantic, so the snapshot is then resolved by
+    content identity (:meth:`PayloadStore.find_ref`) rather than by a name.
+
+    Note this deliberately does NOT fire on the input-side snapshot alone: dag
+    persists that at run START, so counting it would lock a session out after any
+    crashed first attempt — precisely the state ``var/orchestration/`` was in.
     """
-    base = _snapshot_object_id(f"lane0-{session_date}")
-    for ref, model in _scan_snapshots(stores):
-        sid = getattr(model, "snapshot_id", None)
-        if sid == base or (isinstance(sid, str) and sid.startswith(f"{base}-r")):
-            return model, ref
+    base = f"lane0-{session_date}"
+    for manifest in _scan_manifests(stores):
+        rid = getattr(manifest, "bootstrap_run_id", None)
+        if not isinstance(rid, str) or (rid != base and not rid.startswith(f"{base}-r")):
+            continue
+        digest = getattr(manifest, "context_snapshot_digest", None)
+        if not isinstance(digest, str):  # pragma: no cover - schema-guaranteed
+            continue
+        ref = stores.payloads.find_ref(
+            namespace="main", schema_ref=_CONTEXT_SNAPSHOT_SR,
+            registry_digest=registry_digest, content_digest=digest)
+        if ref is None:
+            _LOG.warning(
+                "manifest for %s badges ContextSnapshot %s but no such payload is "
+                "stored — treating the session as un-assembled", rid, digest[:12])
+            continue
+        try:
+            model = stores.payloads.get(ref, expected_schema_ref=_CONTEXT_SNAPSHOT_SR)
+        except Exception as exc:  # noqa: BLE001 — any doubt is an honest absence
+            _LOG.warning("committed snapshot for %s is unreadable: %s", rid, exc)
+            continue
+        return model, ref
     return None
 
 
@@ -1084,7 +1130,9 @@ def run_lane0_bootstrap(
     # ---- idempotence ①: today's committed snapshot IS the receipt ---------- #
     # scoped to the SESSION DATE, not to this attempt: a day that already produced
     # a judgment is reused whichever attempt produced it.
-    existing = _committed_snapshot_for_session(bindings.stores, session_date)
+    existing = _committed_snapshot_for_session(
+        bindings.stores, session_date,
+        registry_digest=bindings.runtime_registry_digest)
     if existing is not None:
         context, ref = existing
         return Lane0RunResult(
@@ -1260,13 +1308,35 @@ def run_lane0_bootstrap(
     # ---- make it READABLE by the deep lane --------------------------------- #
     # `build_context_snapshot_from_bootstrap` commits the manifest + the
     # CONTEXT_SNAPSHOT_FROZEN event but persists no ContextSnapshot@1 payload, so
-    # without this put the deep lane's scan would only ever find the run's own
-    # input-side snapshot — a different digest from the one the manifest badges.
-    # Idempotent by run id; the registry validates the write.
-    snapshot_ref = bindings.stores.payloads.put(
-        _CONTEXT_SNAPSHOT_SR, context,
-        registry_digest=bindings.runtime_registry_digest, namespace="main",
-        idempotency_key=f"lane0-driver-context:{plan.run_id}")
+    # the deep lane's scan needs this snapshot to be in the store.
+    #
+    # It very probably ALREADY is (2026-07-30). The comment that used to sit here
+    # said the input-side snapshot dag persists at run start carries "a different
+    # digest from the one the manifest badges" — that was false. Both are
+    # `build_empty_memory_context` over the SAME DataContext and the SAME canonical
+    # empty-memory pair, so they are ONE content-addressed payload in two sets of
+    # audit clothing (`bootstrap-ctx-{run_id}` + a wall clock here, the canonical
+    # `bootstrap-run-ctx-…` + the session stamp there). Putting the second set under
+    # this RUN-scoped key is what killed live `run --attempt 4`:
+    # `PayloadWriteConflict main/a1a866af…`, the very digest the manifest badges.
+    #
+    # So: bind what the store already holds for this exact semantic identity, and
+    # write only when nothing holds it yet. A read, not a relaxation — the durable
+    # write-once byte check is untouched and still refuses real disagreement.
+    snapshot_ref = bindings.stores.payloads.find_ref(
+        namespace="main", schema_ref=_CONTEXT_SNAPSHOT_SR,
+        registry_digest=bindings.runtime_registry_digest,
+        content_digest=context.content_digest)
+    if snapshot_ref is not None:
+        # the receipt must name the fact that IS stored, never the twin we did not
+        # write (its snapshot_id / built_at would be a locator nothing resolves).
+        context = bindings.stores.payloads.get(
+            snapshot_ref, expected_schema_ref=_CONTEXT_SNAPSHOT_SR)
+    else:
+        snapshot_ref = bindings.stores.payloads.put(
+            _CONTEXT_SNAPSHOT_SR, context,
+            registry_digest=bindings.runtime_registry_digest, namespace="main",
+            idempotency_key=f"lane0-driver-context:{plan.run_id}")
     visible = _deep_lane_sees(bindings.stores, context.content_digest)
     badges = tuple(manifest.degradation_badges) + ((badge,) if badge else ())
     if not visible:
@@ -1468,7 +1538,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             now = _resolve_as_of(as_of, bindings.clock)
             session_date = session_date_of(now)
             run_id, _d, _r = _lane0_identity(session_date, args.attempt)
-            existing = _committed_snapshot_for_session(bindings.stores, session_date)
+            existing = _committed_snapshot_for_session(
+                bindings.stores, session_date,
+                registry_digest=bindings.runtime_registry_digest)
             spent = _spent_run_identity(bindings.stores, run_id)
             print(f"[lane0] session           : {session_date}")
             print(f"[lane0] run_id            : {run_id}"

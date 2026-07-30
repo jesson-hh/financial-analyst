@@ -613,7 +613,17 @@ def test_a_superseding_attempt_runs_on_a_spent_identity():
     result = env.run(attempt=2)
     assert result.outcome == L.OUTCOME_COMPLETED, result.refusal_detail
     assert result.run_id == f"lane0-{SESSION}-r2"
-    assert result.snapshot_id == f"bootstrap-ctx-lane0-{SESSION}-r2"
+    # The receipt names the ContextSnapshot@1 payload that is ACTUALLY stored, and
+    # that payload is the canonical content-derived one (2026-07-30): the assembled
+    # snapshot and the run's input-side snapshot are the same semantic identity —
+    # `build_empty_memory_context` over the same DataContext and the same canonical
+    # empty-memory pair — so they are ONE content-addressed payload, and the driver
+    # binds it instead of writing a second, byte-divergent `bootstrap-ctx-{run_id}`
+    # twin (which is what PayloadWriteConflict-ed live `run --attempt 4`).
+    assert result.snapshot_id == f"bootstrap-run-ctx-{result.snapshot_digest}"
+    stored = env.stores.payloads.get(
+        result.snapshot_ref, expected_schema_ref=L._CONTEXT_SNAPSHOT_SR)
+    assert stored.snapshot_id == result.snapshot_id  # never an unwritten locator
     assert result.snapshot_visible_to_deep_lane is True
 
 
