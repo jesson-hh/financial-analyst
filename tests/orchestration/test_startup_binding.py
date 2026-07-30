@@ -256,10 +256,12 @@ def test_declared_exclusions_are_structurally_not_cell_namespaces():
 
 
 # --------------------------------------------------------------------------- #
-# The resolver: Phase-1 + Phase-2 + Phase-9 cumulative                          #
+# The resolver: Phase-1 + Phase-2 + Phase-9 cumulative + pipeline side regs     #
 # --------------------------------------------------------------------------- #
-def test_production_resolver_holds_phase1_phase2_and_phase9():
+def test_production_resolver_holds_phase1_phase2_phase9_and_the_side_registries():
     from guanlan_v2.orchestration.adapters import chain
+    from guanlan_v2.orchestration.pipeline.api import _pipeline_registry
+    from guanlan_v2.orchestration.pipeline.live_decide import _subject_registry
     from guanlan_v2.orchestration.runtime_contracts import phase2_runtime_registry
     from guanlan_v2.orchestration.schema_registry import default_registry
 
@@ -267,9 +269,11 @@ def test_production_resolver_holds_phase1_phase2_and_phase9():
     phase1 = default_registry().registry_digest
     phase2 = phase2_runtime_registry(phase1).registry_digest
     phase9 = chain.build_phase9_registry(chain.PHASE9_BASE_REGISTRY_DIGEST).registry_digest
+    subject = _subject_registry().registry_digest
+    pipeline = _pipeline_registry().registry_digest
 
-    assert digests == (phase1, phase2, phase9)
-    assert len(set(digests)) == 3
+    assert digests == (phase1, phase2, phase9, subject, pipeline)
+    assert len(set(digests)) == 5
     for digest in digests:
         assert resolver.resolve(digest).registry_digest == digest
 
@@ -280,7 +284,7 @@ def test_phase9_only_schema_resolves_only_through_the_phase9_registry():
     from guanlan_v2.orchestration.runtime_contracts import phase2_runtime_registry
     from guanlan_v2.orchestration.schema_registry import default_registry
 
-    resolver, (_p1, phase2, phase9) = st.build_production_resolver()
+    resolver, (_p1, phase2, phase9, _subj, _pipe) = st.build_production_resolver()
     ref = SchemaRef(name="ShadowReplayRunState", version="1")
     assert resolver.resolve(phase9).resolve(ref) is not None
     with pytest.raises(Exception):
@@ -289,9 +293,152 @@ def test_phase9_only_schema_resolves_only_through_the_phase9_registry():
 
 
 # --------------------------------------------------------------------------- #
+# The pipeline side registries — the 2026-07-31 restart wedge                  #
+# --------------------------------------------------------------------------- #
+#: The sealed digests of the two run-time side registries. These are PINNED as
+#: hex literals deliberately: the production store at ``var/orchestration``
+#: ALREADY carries durable payload rows declaring the first digest (payload
+#: ``main/c1d144aa…``, the 2026-07-30 deep run's ``RunSubject@1``), so a recipe
+#: drift that moved either digest would wedge every existing store on its next
+#: restart — exactly the class of failure this section exists to prevent.
+_SUBJECT_SIDE_REGISTRY_DIGEST = (
+    "cae973b48096a0deb51c1d32b8fcaadb6748056a15eed41b9939193e77fa5d3f")
+_PIPELINE_SIDE_REGISTRY_DIGEST = (
+    "f3a5cfdd7fae87b39e9c11f24b600a3438adf41d6f8fe194bc9a54a9526eb90d")
+
+
+def test_the_run_time_side_registries_are_sealed_pinned_and_resolvable():
+    """The startup resolver must hold BOTH side registries the run-time commits use.
+
+    ``live_decide._commit_run_subject`` and ``api.build_stores_subject_committer``
+    / ``api._commit_candidate_slate`` write durable payloads under their own
+    sealed side registries, registered into the LIVE process's resolver at run
+    time. That keeps the committing process alive — and wedges every FRESH
+    process, whose ``build_production_resolver`` set is all the fold has.
+    """
+    from guanlan_v2.orchestration.pipeline.api import _pipeline_registry
+    from guanlan_v2.orchestration.pipeline.live_decide import _subject_registry
+
+    # the recipes still seal to the digests the on-disk rows declare …
+    assert _subject_registry().registry_digest == _SUBJECT_SIDE_REGISTRY_DIGEST
+    assert _pipeline_registry().registry_digest == _PIPELINE_SIDE_REGISTRY_DIGEST
+    # … and the production resolver resolves both WITHOUT any run-time help.
+    resolver, digests = st.build_production_resolver()
+    for digest in (_SUBJECT_SIDE_REGISTRY_DIGEST, _PIPELINE_SIDE_REGISTRY_DIGEST):
+        assert resolver.resolve(digest).registry_digest == digest
+        assert digest in digests
+
+
+def test_a_store_carrying_run_time_committed_pipeline_payloads_binds_on_restart(tmp_path):
+    """The exact 2026-07-31 live failure, end-to-end (RED before the fix).
+
+    Process 1 (yesterday's live server): production-bound, then the deep lane
+    commits its ``RunSubject@1`` through the REAL ``live_decide`` side-registry
+    path and the slate lane commits through the REAL ``api`` committer — both
+    survive because ``stores.resolver.register(...)`` patched the LIVE resolver.
+    Process 2 (the restart): a FRESH production resolver folds the same root.
+    Before the fix the fold refused the ENTIRE store as ``DurableStoreCorrupt``
+    ("no sealed registry registered for digest 'cae973b4…'") — one 9999 restart
+    after any deep run killed the whole orchestration store binding.
+    """
+    from datetime import datetime, timezone
+
+    from guanlan_v2.orchestration.pipeline import api as pipeline_api
+    from guanlan_v2.orchestration.pipeline import live_decide
+    from guanlan_v2.orchestration.pipeline.contracts import RunSubject
+    from guanlan_v2.orchestration.pipeline.screening import RUN_SUBJECT_SCHEMA_REF
+
+    as_of = datetime(2026, 7, 30, 8, 0, tzinfo=timezone.utc)
+    assert st.bind_orchestration_stores(root=tmp_path)["state"] == "bound"
+    stores = durable_mod.process_durable_stores()
+    deep_ref = live_decide._commit_run_subject(
+        stores, RunSubject(code="300750", as_of=as_of), "deep-restartwedge0001")
+    slate_ref = pipeline_api.build_stores_subject_committer(stores)(
+        RunSubject(code="600519", as_of=as_of))
+
+    # the restart: fresh process, fresh resolver, same root.
+    durable_mod._PROCESS_STORES = None
+    st.reset_status_for_tests()
+    status = st.bind_orchestration_stores(root=tmp_path)
+    assert status["state"] == "bound", (status["error_type"], status["error"])
+    assert status["cell_namespace_count"] == 14
+    fresh = durable_mod.process_durable_stores()
+    for ref in (deep_ref, slate_ref):
+        subject = fresh.payloads.get(
+            ref.payload_ref, expected_schema_ref=RUN_SUBJECT_SCHEMA_REF)
+        assert isinstance(subject, RunSubject)
+
+
+#: Every reviewed ``<bound stores>.resolver.register(<arg>)`` site in the package,
+#: as ``{file relative to the orchestration package: {argument source text}}``.
+#: A registration into an ALREADY-BOUND store's resolver keeps only THAT process
+#: alive; the durable rows it licenses must fold in a fresh process too, so every
+#: recipe named here must be covered by ``build_production_resolver``. A new site
+#: (new file, or new argument spelling) fails the guard until it is BOTH reviewed
+#: here AND its registry is held by the startup resolver.
+REVIEWED_BOUND_RESOLVER_REGISTRATIONS: dict[str, set[str]] = {
+    # the Phase-9 cumulative chain registry — build_production_resolver's d9
+    "lane0_driver.py": {"registry"},
+    # _pipeline_registry() (RunSubject+CandidateSlate) + the Phase-9 cumulative
+    "pipeline/api.py": {"_pipeline_registry()", "registry"},
+    # _subject_registry() (RunSubject) + the Phase-9 cumulative
+    "pipeline/live_decide.py": {"_subject_registry()", "registry"},
+}
+
+
+def _scan_bound_resolver_registrations() -> dict[str, set[str]]:
+    """Every ``<expr>.resolver.register(<arg>)`` call in the orchestration package.
+
+    Deliberately shaped: the ``.resolver.`` attribute hop matches exactly the
+    "register into an already-bound store's resolver at run time" idiom, and NOT
+    the constructor-time ``resolver.register(...)`` calls in ``startup.py`` /
+    ``adapters/durable.py`` (bare-name receivers), which build the fresh resolver
+    itself and cannot license a row the fold will not hold.
+    """
+    found: dict[str, set[str]] = {}
+    for path in sorted(_ORCH_PKG.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        rel = path.relative_to(_ORCH_PKG).as_posix()
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "register"
+                    and isinstance(node.func.value, ast.Attribute)
+                    and node.func.value.attr == "resolver"
+                    and node.args):
+                found.setdefault(rel, set()).add(ast.unparse(node.args[0]))
+    return found
+
+
+def test_every_bound_resolver_registration_site_is_reviewed_and_covered():
+    """Drift guard: a NEW run-time resolver registration is a restart wedge by
+    construction until its registry also lives in ``build_production_resolver``."""
+    from guanlan_v2.orchestration.adapters import chain
+    from guanlan_v2.orchestration.pipeline.api import _pipeline_registry
+    from guanlan_v2.orchestration.pipeline.live_decide import _subject_registry
+
+    found = _scan_bound_resolver_registrations()
+    assert found == REVIEWED_BOUND_RESOLVER_REGISTRATIONS, (
+        "run-time `.resolver.register(...)` sites moved. Each one licenses durable "
+        "rows a FRESH process must also fold, so the registry it names must be "
+        "held by startup.build_production_resolver — review the new/changed site, "
+        "add its registry to the startup resolver, then update the reviewed map.\n"
+        + json.dumps({k: sorted(v) for k, v in found.items()}, indent=2))
+
+    # the semantic half: every recipe the reviewed sites name resolves under the
+    # production resolver (`registry` at all three sites is the Phase-9 cumulative).
+    resolver, _digests = st.build_production_resolver()
+    for registry in (
+            chain.build_phase9_registry(chain.PHASE9_BASE_REGISTRY_DIGEST),
+            _subject_registry(), _pipeline_registry()):
+        digest = registry.registry_digest
+        assert resolver.resolve(digest).registry_digest == digest
+
+
+# --------------------------------------------------------------------------- #
 # The bind itself                                                              #
 # --------------------------------------------------------------------------- #
-def test_bind_seals_the_store_with_the_full_union_and_all_three_registries(tmp_path):
+def test_bind_seals_the_store_with_the_full_union_and_all_five_registries(tmp_path):
     status = st.bind_orchestration_stores(root=tmp_path)
 
     assert status["state"] == "bound"
@@ -302,7 +449,7 @@ def test_bind_seals_the_store_with_the_full_union_and_all_three_registries(tmp_p
     assert stores.cells.allowed_namespaces == frozenset(EXPECTED_UNION)
     assert status["cell_namespaces"] == list(EXPECTED_UNION)
     assert status["cell_namespace_count"] == 14
-    assert len(status["registry_digests"]) == 3
+    assert len(status["registry_digests"]) == 5
 
 
 def test_replay_state_store_constructs_against_the_bound_stores(tmp_path):

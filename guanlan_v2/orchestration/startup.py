@@ -147,17 +147,39 @@ def reset_status_for_tests() -> None:
 
 
 def build_production_resolver():
-    """The production schema-registry resolver: Phase-1 + Phase-2 + Phase-9 cumulative.
+    """The production schema-registry resolver: Phase-1 + Phase-2 + Phase-9 cumulative
+    + the two Phase-10 pipeline side registries.
 
-    Returns ``(resolver, (phase1_digest, phase2_digest, phase9_digest))``. The Phase-9
-    registry is the *cumulative* chain node (Phase-1 public + Phase-2 runtime facts +
-    Phase-3 data/memory + Phase-4 + Phase-5 + Phase-6 + Phase-7 + Phase-8 + Phase-9),
-    so registering it covers every intermediate phase's payload contracts in one go.
-    Its Phase-8 base comes from the chain's own ``PHASE9_BASE_REGISTRY_DIGEST`` — never
-    a hardcoded digest, so a chain reseal can never leave a stale pin here.
+    Returns ``(resolver, (phase1_digest, phase2_digest, phase9_digest,
+    subject_digest, pipeline_digest))``. The Phase-9 registry is the *cumulative*
+    chain node (Phase-1 public + Phase-2 runtime facts + Phase-3 data/memory +
+    Phase-4 + Phase-5 + Phase-6 + Phase-7 + Phase-8 + Phase-9), so registering it
+    covers every intermediate phase's payload contracts in one go. Its Phase-8 base
+    comes from the chain's own ``PHASE9_BASE_REGISTRY_DIGEST`` — never a hardcoded
+    digest, so a chain reseal can never leave a stale pin here.
+
+    The side registries (2026-07-31 restart wedge). ``RunSubject@1`` /
+    ``CandidateSlate@1`` are not in the cumulative chain yet, so the pipeline
+    commits them under two sealed *side* registries
+    (``live_decide._subject_registry`` — RunSubject; ``api._pipeline_registry`` —
+    RunSubject + CandidateSlate), registered into the LIVE process's resolver at
+    run time. That kept the committing process alive — and wedged every FRESH
+    process: the startup fold re-reads the durable rows, finds a registry digest
+    this resolver did not hold, and refuses the ENTIRE store as
+    ``DurableStoreCorrupt`` (state=corrupt, deep lane dead process-wide). The one
+    honest fix is additive: hold both side registries HERE, at the single startup
+    call site. The recipes are imported from their owning modules — never rebuilt
+    — so the sealed digests (content-derived; ``cae973b4…`` already declared by
+    on-disk production rows) cannot fork. The imports stay lazy: ``pipeline.api``
+    pulls FastAPI at module level, and this function only runs inside
+    ``bind_orchestration_stores``'s guard. Drift guard:
+    ``tests/orchestration/test_startup_binding.py`` pins both digests and scans
+    the package for run-time ``.resolver.register(...)`` sites.
     """
     from guanlan_v2.orchestration.adapters import chain
     from guanlan_v2.orchestration.eventstore import SchemaRegistryResolver
+    from guanlan_v2.orchestration.pipeline.api import _pipeline_registry
+    from guanlan_v2.orchestration.pipeline.live_decide import _subject_registry
     from guanlan_v2.orchestration.runtime_contracts import phase2_runtime_registry
     from guanlan_v2.orchestration.schema_registry import default_registry
 
@@ -166,7 +188,9 @@ def build_production_resolver():
     d1 = resolver.register(phase1)
     d2 = resolver.register(phase2_runtime_registry(phase1.registry_digest))
     d9 = resolver.register(chain.build_phase9_registry(chain.PHASE9_BASE_REGISTRY_DIGEST))
-    return resolver, (d1, d2, d9)
+    ds = resolver.register(_subject_registry())
+    dp = resolver.register(_pipeline_registry())
+    return resolver, (d1, d2, d9, ds, dp)
 
 
 def _bind_process_stores(**kwargs):
