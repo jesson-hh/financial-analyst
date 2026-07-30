@@ -198,6 +198,7 @@ __all__ = [
     "Lane0ExperienceBridgeProvider",
     "make_lane0_experience_bridge_factory",
     "bootstrap_market_factor_handler",
+    "register_lane0_experience_factories",
     "register_bootstrap_runtime_factories",
     # -- the Lane 0 LLM output contract (D2/D3) ----------------------------- #
     "LANE0_RUNTIME_OWNED_FIELDS",
@@ -2224,6 +2225,40 @@ class Lane0ExperienceBridgeProvider:
     ToolCallRecord), returning the :class:`ExperienceSelection` as one
     untrusted-block DTO. An omitted/failed factor input yields an empty-feature
     query (honest cold read); the store stays read-only (no append surface).
+
+    **Non-granted discrimination (2026-07-31, controller-ruled — the C3
+    'both halves mirrored' extension).** The bridge also activates on the
+    ``experience_cases`` read category, so a worker that declares the category
+    without holding the ``experience.retrieve`` capability in its allowlist
+    (the Phase-8 ``dec.research_mgr`` case) reaches this provider under the
+    ruled analyzer half's ZERO-contribution summary
+    (:class:`ExperienceBridgeSupportAnalyzer`, ruling C:
+    ``max_capability_invocations=0``, empty capability set). The pre-ruling
+    freeze path invoked ``experience.retrieve`` unconditionally, so the
+    gateway's closed allowlist door killed the node LATE (run
+    ``deep-8eb9afef6e9a5e48``, ``dec.research_mgr``). Ruled behaviour,
+    mirroring the memory bridge's provider half
+    (:mod:`~guanlan_v2.orchestration.memory.runtime`, ``_rows_for``): a
+    non-granted worker keeps its (already-empty) prepared handle and freezes
+    with an EMPTY contribution — zero invocations, zero ToolCallRecords, zero
+    evidence writes, no untrusted block (not even the empty sentinel:
+    retrieval never ran, so rendering a cold-start block would fabricate a
+    read) — attributable through the zero-bounds summary's digest riding the
+    contribution. A GRANTED worker keeps today's behavior bit-for-bit,
+    including the honest cold read. The discrimination predicate is the SAME
+    allowlist membership test the ruled analyzer branch uses, over the same
+    capability identity (``assemble_lane0_catalog`` cross-verifies the
+    descriptor's activation refs against the in-code ``experience.retrieve``
+    identity, so ``self._capability_ref`` IS the activation identity).
+
+    Material-vs-code drift note (the C3 precedent's discipline): the
+    byte-frozen ``lane0.experience.provider`` handler material
+    (``config/orchestration/materials/lane0/experience_provider.md``) still
+    states the pre-ruling invariant ("an empty selection … still finalizes one
+    successful call" under an analyzer-bound ``max_capability_invocations=1``
+    summary) — that sentence describes the GRANTED path only. Per the ruling
+    the sealed material bytes stay BYTE-FROZEN (no catalog digest moves); the
+    code is the ruled behaviour.
     """
 
     def __init__(self, *, bridge, summary, pool, registry, capability_ref,
@@ -2256,8 +2291,21 @@ class Lane0ExperienceBridgeProvider:
         return BridgeStageOutcome(
             status="prepared", input_contribution=contribution, prepared_handle=handle)
 
+    def _capability_granted(self, worker) -> bool:
+        """The ruled discrimination predicate — the analyzer branch's own
+        membership test (ruling C), over the catalog-verified capability
+        identity. See the class docstring."""
+        ref = self._capability_ref
+        return any(
+            (c.id, c.version, c.content_digest)
+            == (ref.id, ref.version, ref.content_digest)
+            for c in worker.capability_allowlist
+        )
+
     def open_execution(self, request):
-        return _Lane0ExperienceSession(provider=self, request=request)
+        return _Lane0ExperienceSession(
+            provider=self, request=request,
+            granted=self._capability_granted(request.worker))
 
     def _injected_report(self, node, input_snapshot):
         """The exact injected ``market_factor_report`` payload, or ``None``.
@@ -2285,9 +2333,11 @@ class Lane0ExperienceBridgeProvider:
 class _Lane0ExperienceSession:
     """One opened experience-bridge session: query → gateway retrieval → block."""
 
-    def __init__(self, *, provider: Lane0ExperienceBridgeProvider, request):
+    def __init__(self, *, provider: Lane0ExperienceBridgeProvider, request,
+                 granted: bool):
         self._provider = provider
         self._request = request
+        self._granted = granted
 
     def freeze_for_execution(self, *, kind):
         from guanlan_v2.orchestration.enums import ExecutionKind
@@ -2305,6 +2355,22 @@ class _Lane0ExperienceSession:
         p = self._provider
         req = self._request
         token = req.handle.token
+
+        if not self._granted:
+            # non-granted worker (2026-07-31 ruling — the C3 provider-half
+            # mirror; see the provider class docstring): the honest EMPTY
+            # contribution. Zero gateway begins, zero ToolCallRecords, zero
+            # evidence writes, no untrusted block (never a fabricated case row
+            # and no empty-sentinel block — retrieval never ran). The
+            # attribution is the zero-bounds analyzer summary riding
+            # ``summary_digest``, exactly the facts the ruled analyzer branch
+            # stated at admission (min=0 / max=0 / no capability refs).
+            return BridgeStageOutcome(
+                status="completed",
+                frozen_contribution=BridgeContribution(
+                    bridge_id=req.bridge.bridge_id,
+                    bridge_priority=req.bridge.priority,
+                    summary_digest=req.summary.summary_digest))
 
         report = p._injected_report(req.node, req.input_snapshot)
         if report is not None:
@@ -2364,6 +2430,44 @@ def make_lane0_experience_bridge_factory(
     return factory
 
 
+def register_lane0_experience_factories(
+    *,
+    factories,
+    catalog: "Lane0Catalog",
+    pool,
+    registry,
+    experience_views,
+    experience_scaler,
+    experience_k: int = BOOTSTRAP_EXPERIENCE_K,
+    as_of: datetime,
+) -> None:
+    """The ONE reviewed ``experience.bridge`` registration recipe (2026-07-31).
+
+    Binds the read-only experience-bridge provider handler and the
+    ``experience.retrieve`` capability backend, keyed by the exact catalog ref
+    identities. Exactly two callers, one body, no fork:
+
+    * the Lane-0 driver, through :func:`register_bootstrap_runtime_factories`
+      (per run, with the run's pool / views / scaler / clock);
+    * the deep lane's production assembly
+      (``live_decide.build_production_bindings``), on the production bundle's
+      factory registry — because the sealed catalog's ``experience.bridge``
+      activates for ``dec.research_mgr`` via the ``experience_cases`` read
+      category, and ``ExecutionBridgeResolver`` requires a trusted provider
+      factory for EVERY active bridge (the live run ``deep-8eb9afef6e9a5e48``
+      died at bridge prepare on exactly this missing binding).
+    """
+    refs = catalog.refs
+    factories.register_handler(
+        refs["lane0.experience.provider"],
+        make_lane0_experience_bridge_factory(
+            pool=pool, registry=registry, capability_ref=catalog.capability_ref,
+            views=experience_views, scaler=experience_scaler, k=experience_k, as_of=as_of),
+    )
+    backend = ExperienceRetrievalBackend(views=experience_views, scaler=experience_scaler)
+    factories.register_capability_backend(catalog.capability_ref, lambda **_kw: backend)
+
+
 def register_bootstrap_runtime_factories(
     *,
     factories,
@@ -2383,18 +2487,17 @@ def register_bootstrap_runtime_factories(
     to the pinned factor set + inputs, the read-only ``experience.bridge`` provider,
     and the ``experience.retrieve`` capability backend. Keyed by the exact catalog
     ref identities, so an off-catalog handler/provider can never receive a binding.
+    The experience half is delegated to
+    :func:`register_lane0_experience_factories` — the one reviewed recipe both
+    the Lane-0 driver and the deep lane's production assembly bind through.
     """
     refs = catalog.refs
     handler = bootstrap_market_factor_handler(spec=spec, inputs=inputs, as_of=as_of)
     factories.register_handler(refs["lane0.market.factor.handler"], lambda **_kw: handler)
-    factories.register_handler(
-        refs["lane0.experience.provider"],
-        make_lane0_experience_bridge_factory(
-            pool=pool, registry=registry, capability_ref=catalog.capability_ref,
-            views=experience_views, scaler=experience_scaler, k=experience_k, as_of=as_of),
-    )
-    backend = ExperienceRetrievalBackend(views=experience_views, scaler=experience_scaler)
-    factories.register_capability_backend(catalog.capability_ref, lambda **_kw: backend)
+    register_lane0_experience_factories(
+        factories=factories, catalog=catalog, pool=pool, registry=registry,
+        experience_views=experience_views, experience_scaler=experience_scaler,
+        experience_k=experience_k, as_of=as_of)
 
 
 # --------------------------------------------------------------------------- #

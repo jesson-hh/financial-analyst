@@ -319,13 +319,12 @@ def _register_lane0_factories_with_raising_factor(
 
     factories.register_handler(
         refs["lane0.market.factor.handler"], lambda **_kw: _raising_factor_handler)
-    factories.register_handler(
-        refs["lane0.experience.provider"],
-        B.make_lane0_experience_bridge_factory(
-            pool=pool, registry=registry, capability_ref=cat.capability_ref,
-            views=(), scaler=scaler, k=experience_k, as_of=DT))
-    backend = B.ExperienceRetrievalBackend(views=(), scaler=scaler)
-    factories.register_capability_backend(cat.capability_ref, lambda **_kw: backend)
+    # the experience half rides the ONE reviewed recipe (2026-07-31 extraction)
+    # instead of a hand-mirrored copy — only the factor binding differs here.
+    B.register_lane0_experience_factories(
+        factories=factories, catalog=cat, pool=pool, registry=registry,
+        experience_views=(), experience_scaler=scaler, experience_k=experience_k,
+        as_of=DT)
 
 
 def build_bootstrap_env(*, suffix="", inputs=None, fail_nodes=(), approve=True,

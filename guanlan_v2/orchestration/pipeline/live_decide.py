@@ -1127,6 +1127,34 @@ def build_production_bindings(*, preset_id: str | None = None) -> DeepDecideBind
     # startup, deep lane stays down honestly) — never after a lease draw.
     bridge_analyzers = production_bridge_analyzers()
     view = production_bridge_view(bundle.runtime, bridge_analyzers)
+    # 2026-07-31 controller ruling (the deep decision trunk): the sealed
+    # catalog's experience.bridge activates for dec.research_mgr (the
+    # `experience_cases` read category), and ExecutionBridgeResolver requires a
+    # trusted provider factory for EVERY active bridge — unbound, every deep
+    # run died at bridge prepare AFTER its lease draw (bridge_preparation_failed,
+    # run deep-8eb9afef6e9a5e48). Bound HERE, once per bundle, through the SAME
+    # reviewed recipe the Lane-0 driver uses
+    # (bootstrap.register_lane0_experience_factories — one recipe, no fork).
+    # The values are the deep lane's honest experience facts: no committed
+    # Lane-0 pool, no reviewed view source, no fitted scaler. All of them are
+    # GRANTED-branch-only, and no worker this lane can admit holds the
+    # experience capability (the sealed v2 presets' workers only — the two
+    # granted Lane-0 readers are not among them), so under the ruled provider
+    # discrimination dec.research_mgr freezes with an honest EMPTY experience
+    # contribution and the granted branch is structurally unreachable;
+    # reaching it anyway fails LOUDLY (bridge_execution_error), never
+    # fabricates a retrieval. The DATA bridge's provider deliberately stays
+    # UNBOUND (the chartered L2-b gap: the two pv aux nodes keep degrading
+    # exactly as before), and the memory bridge's provider has no production
+    # registration ruling yet — dec.pm still refuses at its own bridge prepare
+    # until both are consciously bound (pinned in
+    # test_experience_provider_discrimination.py::TestTheNamedRemainingGap).
+    from guanlan_v2.orchestration import bootstrap as _bootstrap
+
+    _bootstrap.register_lane0_experience_factories(
+        factories=bundle.factories, catalog=_bootstrap.load_lane0_catalog(),
+        pool=None, registry=registry, experience_views=(),
+        experience_scaler=None, as_of=clock.now())
     presets = load_phase10_preset_registry(PRODUCTION_PRESETS_DIR)
 
     def admission_factory(*, run_id, request, draft, context, approvals, run_budget):

@@ -1048,23 +1048,29 @@ class _ForbiddenEvidenceWriter:
 
 
 class TestLateFailureLoudness:
-    """Task-11 review minor #1 pinned (POLICY not fixed — post-P10 owns it).
+    """CONSCIOUSLY FLIPPED 2026-07-31 (controller ruling — the deep decision
+    trunk; was: Task-11 review minor #1's late-failure pin).
 
-    A DYNAMIC plan scheduling ``dec.research_mgr`` without the two support-
-    refused workers passes admission support with the rowless zero-contribution
-    experience summary — but the Lane-0 experience provider unconditionally
-    invokes ``experience.retrieve`` on LLM freeze, and the gateway's closed
-    state machine refuses it (worker allowlist first; the zero summary's empty
-    capability set and ``max_capability_invocations=0`` are the second and
-    third closed doors). The failure is execution-time (LATE), LOUD and TYPED:
-    a ``CapabilityGatewayError`` with an audited refusal record, zero evidence
-    writes, zero fabricated contribution. Inside ``execute_node`` this class
-    is a ``WorkerExecutionError`` subclass (worker.py:229) and the
-    open-execution scope RE-RAISES ``WorkerExecutionError`` (worker.py's
-    ``except WorkerExecutionError: raise``) — it propagates uncaught out of
-    ``execute_node`` and aborts the run: the loudest terminator, never a
-    recorded silent success (and NOT a recorded FAILED node — that branch is
-    for non-worker handler/provider exceptions).
+    The original pin recorded the pre-ruling residue: a DYNAMIC plan scheduling
+    ``dec.research_mgr`` passed admission support with the rowless
+    zero-contribution experience summary, and then died LATE because the Lane-0
+    experience provider unconditionally invoked ``experience.retrieve`` on LLM
+    freeze into the gateway's closed allowlist door (``CapabilityGatewayError``)
+    — loud and typed, but a dead decision trunk (live run
+    ``deep-8eb9afef6e9a5e48`` died of exactly this once the provider factory
+    was bound). The controller then RULED the C3 discrimination extended to the
+    experience provider half, mirroring ``memory/runtime.py``: a worker whose
+    allowlist does NOT hold the experience capability freezes with an EMPTY,
+    attributable contribution (the zero-bounds summary's digest rides it) —
+    zero invocations, zero evidence, no fabricated case row, no empty-sentinel
+    block. So the non-granted case now COMPLETES prepared-empty, and this class
+    pins the ruled shape. The loud branches stay loud and stay pinned
+    elsewhere: allowlisted-but-rowless keeps its ``CatalogError`` at the
+    analyzer (``test_pipeline_deep_preset.py::TestFullPhase9BridgeView::
+    test_an_allowlisted_worker_without_a_row_still_raises_loudly``), and a
+    GRANTED worker still drives the gateway bit-for-bit
+    (``test_experience_provider_discrimination.py::TestGrantedPathUnchanged``,
+    ``test_bootstrap_e2e.py`` §4).
     """
 
     @pytest.fixture(scope="class")
@@ -1083,8 +1089,8 @@ class TestLateFailureLoudness:
                                report=report)
 
     def test_admission_support_passes_the_rowless_dynamic_plan(self, late):
-        """The EARLY half: nothing at admission catches this plan — the late
-        failure below is genuinely execution-time."""
+        """The EARLY half: nothing at admission refuses this plan — the ruled
+        empty-freeze below is genuinely the execution-time answer."""
         assert late.report.supported is True, [
             (i.code, i.node_id) for i in late.report.issues]
         mine = [s for s in late.report.bridge_support_summaries
@@ -1097,8 +1103,11 @@ class TestLateFailureLoudness:
         assert summary.max_capability_invocations == 0
         assert summary.min_finalized_tool_calls_on_success == 0
 
-    def test_the_execution_time_failure_is_loud_and_typed(self, late, env,
-                                                          phase9_runtime):
+    def test_the_execution_time_answer_is_the_ruled_empty_contribution(
+            self, late, env, phase9_runtime):
+        """FLIPPED 2026-07-31 per the controller ruling (class docstring): the
+        non-granted freeze now COMPLETES with the empty attributable
+        contribution instead of dying at the gateway's allowlist door."""
         summary = next(
             s for s in late.report.bridge_support_summaries
             if s.bridge_id == "experience.bridge"
@@ -1142,18 +1151,21 @@ class TestLateFailureLoudness:
             capability_gateway=gateway,
             evidence_writer=_ForbiddenEvidenceWriter(), reader=None,
             sequencer=sequencer))
-        # LOUD + TYPED: the provider's unconditional experience.retrieve dies at
-        # the gateway's FIRST closed door (the worker allowlist); the zero
-        # summary's empty capability set / zero max are the next two.
-        with pytest.raises(W.CapabilityGatewayError, match="allowlist"):
-            session.freeze_for_execution(kind=ExecutionKind.LLM)
-        # audited, never silent: exactly one refusal record with the honest code.
-        assert [r["reason_code"] for r in refusals.records] == [
-            "capability_not_in_worker_allowlist"]
-        # nothing fabricated: no invocation charged, no ToolCallRecord minted,
-        # no evidence write happened (the writer raises on any put).
+        # the RULED shape: prepared-empty, completes — an EMPTY contribution
+        # attributable through the zero-bounds summary's digest.
+        outcome = session.freeze_for_execution(kind=ExecutionKind.LLM)
+        assert outcome.status == "completed"
+        contribution = outcome.frozen_contribution
+        assert contribution.summary_digest == summary.summary_digest
+        assert contribution.tool_call_records == ()
+        assert contribution.direct_evidence_refs == ()
+        assert contribution.untrusted_blocks == ()
+        # nothing fabricated and nothing attempted: the gateway was never
+        # touched — zero begins, zero ToolCallRecords, zero refusal records,
+        # zero evidence writes (the writer raises on any put).
         assert gateway.begun_count() == 0
         assert gateway.finalized_records() == ()
+        assert refusals.records == []
 
 
 # =========================================================================== #
