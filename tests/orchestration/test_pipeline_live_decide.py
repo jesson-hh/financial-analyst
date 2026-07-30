@@ -1304,6 +1304,64 @@ class TestSurfaces:
         assert [e.name for e in record.trusted_input_digests].count(
             SUBJECT_TRUSTED_INPUT_NAME) == 1
 
+    def test_the_seat_gateway_stamps_as_of_from_the_real_assembler_channel(self, heavy):
+        """2026-07-31 (``deep-f1f0031d…``): the recorded ``bull-r1`` shape,
+        decoded through the REAL ``SubjectPromptAssembler`` channel. The
+        runtime's ``as_of`` stamp is read from the assembler's own
+        ``trusted_subject`` echo — the model-written ``as_of`` (a field the
+        live run refused it for not inventing) is discarded, never trusted.
+        And the derived output-schema section stops demanding it."""
+        from guanlan_v2.orchestration.lane_payloads import BullCase
+        from guanlan_v2.orchestration.pipeline.assembly import (
+            SeatOutputNormalizingGateway,
+        )
+        from guanlan_v2.orchestration.pipeline.contracts import RunSubject
+        from guanlan_v2.orchestration.refs import TypedPayloadRef
+
+        subject = RunSubject(code="300750", as_of=NOW)
+        ref = TypedPayloadRef(
+            schema_ref=SchemaRef(name="RunSubject", version="1"),
+            payload_ref=PayloadRef(namespace="main", object_id="subj-x",
+                                   content_digest="a" * 64))
+        assembler = SubjectPromptAssembler(subject=subject, subject_ref=ref)
+        resolved = heavy.runtime.resolve_worker("dec.bull")
+        binding = next(o for o in heavy.runtime.worker("dec.bull").outputs
+                       if o.name == "primary")
+        request = assembler.assemble(
+            plan_digest="0" * 64, node_id="bull-r1", worker_id="dec.bull",
+            system_prompt=resolved.system_prompt, skills=resolved.skills,
+            guardrails=resolved.guardrails, trusted_input_digests=(),
+            untrusted_blocks=(), output_binding=binding,
+            schema_registry=heavy.registry)
+
+        import json as _json
+
+        channel = _json.loads(request.canonical_request_bytes.decode("utf-8"))
+        out = channel[W.OUTPUT_SCHEMA_SECTION]
+        assert out["runtime_supplied_fields"] == ["as_of"]
+        assert "as_of" not in out["required_fields"]
+
+        raw = {   # the recorded live shape, with a model-invented as_of
+            "schema_version": "1",
+            "symbol": {"code": "300750", "exchange": "SZ", "board": "chinext"},
+            "as_of": "2020-01-01T00:00:00+00:00",
+            "thesis_bullets": ["Thesis: 300750作为全球动力电池龙头。"],
+            "catalysts": [], "disproof_signals": ["季度出货量环比下滑"],
+            "v_anchors": ["V9"], "rebuttal_of": [],
+        }
+
+        class _Inner:
+            def invoke(self, request, *, prompt_assembly_ref):
+                return W.ModelResult(payload=raw, rendered_text="raw",
+                                     input_tokens=1, output_tokens=1)
+
+        gw = SeatOutputNormalizingGateway(
+            inner=_Inner(), catalog_runtime=heavy.runtime,
+            registry=heavy.registry)
+        result = gw.invoke(request, prompt_assembly_ref=None)
+        assert isinstance(result.payload, BullCase)
+        assert result.payload.as_of == NOW          # the subject's stamp, not 2020
+
 
 # =========================================================================== #
 # 12. 路线 A — the reduced-evidence generation on the SAME live seam            #

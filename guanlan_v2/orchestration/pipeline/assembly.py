@@ -141,6 +141,7 @@ from guanlan_v2.orchestration.pool import ArtifactPool
 from guanlan_v2.orchestration.refs import ContentRef, SchemaRef, TypedPayloadRef
 from guanlan_v2.orchestration.runtime_contracts import default_audit_detail_registry
 from guanlan_v2.orchestration.spec import DebateCfg, ReducerCfg
+from guanlan_v2.orchestration import llm_output as _llm_output
 from guanlan_v2.orchestration.worker import (
     AssembledModelRequest,
     ExecutionRuntime,
@@ -162,6 +163,8 @@ __all__ = [
     "WorkerSeatModelInvocationError",
     "ProductionCatalogRuntime",
     "WorkerSeatModelGateway",
+    "SeatOutputNormalizingGateway",
+    "wrap_seat_gateway",
     "production_material_source",
     "build_production_catalog_runtime",
     "production_bridge_analyzers",
@@ -758,6 +761,135 @@ def production_gateway_factory(
 
 
 # =========================================================================== #
+# 2b. the seat-output normalizing decorator (D2/D3 for the deep lane)          #
+# =========================================================================== #
+#: the executor's primary-output key (worker.py `_PRIMARY_OUTPUT_KEY`).
+_PRIMARY_OUTPUT = "primary"
+
+
+class SeatOutputNormalizingGateway:
+    """Every worker seat under the reviewed D2/D3 decode treatment (2026-07-31).
+
+    The Lane-0 campaign's treatment for real model JSON — strict JSON-mode
+    decoding, runtime-stamped unproducible fields, a narrow named envelope
+    unwrap — was implemented as ``bootstrap.Lane0OutputNormalizingGateway`` and
+    never reached :class:`WorkerSeatModelGateway`. The live deep run
+    ``deep-f1f0031d521bea3a`` (2026-07-30) then died of exactly the diagnosed
+    disease: ``sentiment`` refused with ``'Neutral' is not an instance of
+    SentimentBand`` (a CORRECT answer, killed by python-mode decoding) and
+    ``bull-r1`` was refused for not inventing ``as_of`` well enough.
+
+    This decorator wraps any conforming ``ModelGateway`` and applies the ONE
+    shared recipe (:mod:`~guanlan_v2.orchestration.llm_output`, the same module
+    ``bootstrap`` delegates to — the two cannot drift) to raw-JSON completions:
+
+    * the invoked worker's primary ``OutputBinding`` resolves through the SAME
+      schema registry the executor's step (9) validates against;
+    * ``as_of`` (:data:`~guanlan_v2.orchestration.llm_output.DEEP_SEAT_RUNTIME_OWNED_FIELDS`)
+      is the runtime's: its stamp is read from the canonical channel's
+      ``trusted_subject`` section — OUR OWN assembler-authored echo of the
+      committed ``RunSubject@1`` — and whatever the model wrote there is
+      discarded. A channel with no trusted subject (the static assembler) has
+      nothing honest to stamp, so the model's own field decodes instead;
+    * a payload that is already a typed instance (every scripted test gateway)
+      passes through untouched, as does any worker whose binding this run's
+      registry cannot resolve — the executor then refuses honestly.
+
+    The honesty red line is the recipe's: nothing is repaired, and anything
+    undecodable comes back byte-identical; the TRUE measured error rides
+    ``ModelResult.decode_refusal`` so the executor's ``output_schema_invalid``
+    refusal stands with the real defect, never a python-mode artifact.
+    """
+
+    def __init__(self, *, inner, catalog_runtime, registry) -> None:
+        self._inner = inner
+        self._catalog = catalog_runtime
+        self._registry = registry
+
+    # -- the ModelGateway protocol ------------------------------------------ #
+    def invoke(self, request, *, prompt_assembly_ref):
+        result = self._inner.invoke(request, prompt_assembly_ref=prompt_assembly_ref)
+        payload = result.payload
+        if not isinstance(payload, Mapping):
+            return result
+        model = self._output_model(request.prompt_record.worker_id)
+        if model is None:
+            return result
+        stamp = self._subject_as_of(request, model)
+        refusals: list[str] = []
+        if stamp is not None:
+            normalized = _llm_output.decode_llm_output_json(
+                payload, model=model,
+                runtime_owned_fields=_llm_output.DEEP_SEAT_RUNTIME_OWNED_FIELDS,
+                construct=lambda fields: model(as_of=stamp, **fields),
+                refusal_sink=refusals.append)
+        else:
+            normalized = _llm_output.decode_llm_output_json(
+                payload, model=model, refusal_sink=refusals.append)
+        if normalized is payload:
+            if refusals:
+                # payload byte-identical (the red line); the TRUE measured error
+                # rides the decode_refusal channel so step (9) refuses with it.
+                return dataclasses.replace(result, decode_refusal=refusals[0])
+            return result
+        return dataclasses.replace(result, payload=normalized)
+
+    def close(self) -> None:
+        close = getattr(self._inner, "close", None)
+        if callable(close):
+            close()
+
+    # -- internals ----------------------------------------------------------- #
+    def _output_model(self, worker_id: str):
+        """The worker's primary-output model class, or ``None`` (= not ours)."""
+        try:
+            worker = self._catalog.worker(worker_id)
+        except Exception:  # noqa: BLE001 — an unknown worker is simply not ours
+            return None
+        binding = next(
+            (o for o in worker.outputs if o.name == _PRIMARY_OUTPUT), None)
+        if binding is None:
+            return None
+        resolve = getattr(self._registry, "resolve", None)
+        if resolve is None:
+            return None
+        try:
+            model = resolve(binding.schema_ref)
+        except Exception:  # noqa: BLE001 — unresolvable ⇒ the executor refuses
+            return None
+        return model if isinstance(model, type) else None
+
+    def _subject_as_of(self, request, model):
+        """The runtime's ``as_of`` stamp: the assembler-authored subject echo.
+
+        Decoded through the model's OWN ``as_of`` annotation under the same
+        strict JSON discipline as any field. ``None`` when the model declares
+        no ``as_of`` or the channel carries no trusted subject.
+        """
+        spec = model.model_fields.get("as_of")
+        if spec is None:
+            return None
+        try:
+            channel = json.loads(request.canonical_request_bytes.decode("utf-8"))
+        except Exception:  # noqa: BLE001 — a non-JSON channel has no subject
+            return None
+        subject = channel.get("trusted_subject") if isinstance(channel, Mapping) else None
+        iso = subject.get("as_of") if isinstance(subject, Mapping) else None
+        if not isinstance(iso, str):
+            return None
+        try:
+            return _llm_output.decode_field(spec.annotation, iso)
+        except Exception:  # noqa: BLE001 — an undecodable stamp is no stamp
+            return None
+
+
+def wrap_seat_gateway(inner, *, catalog_runtime, registry) -> SeatOutputNormalizingGateway:
+    """The reviewed production wiring seam (the runner's only gateway change)."""
+    return SeatOutputNormalizingGateway(
+        inner=inner, catalog_runtime=catalog_runtime, registry=registry)
+
+
+# =========================================================================== #
 # 3. the composed production plan runner                                       #
 # =========================================================================== #
 def build_production_plan_runner(
@@ -861,8 +993,19 @@ def build_production_plan_runner(
             ),
             run_budget=run_context.budget,
         )
-        gateway = gateway_factory(
-            payload_reader=stores.payloads, catalog_runtime=bundle.runtime
+        # D2/D3 for the deep lane (2026-07-31): every seat gateway — production
+        # or scripted — is wrapped in the shared strict-JSON output treatment.
+        # Typed-instance payloads pass through untouched, so scripted doubles
+        # keep their behavior; only raw model JSON is decoded, and only under
+        # the reviewed discipline. Wrapped HERE (not in the factory) because
+        # this is the one point that holds both the catalog runtime and the
+        # SAME schema registry step (9) validates against.
+        gateway = wrap_seat_gateway(
+            gateway_factory(
+                payload_reader=stores.payloads, catalog_runtime=bundle.runtime
+            ),
+            catalog_runtime=bundle.runtime,
+            registry=registry,
         )
         executor = build_dag_plan_executor(
             pool=pool,

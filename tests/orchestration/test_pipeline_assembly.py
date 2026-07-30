@@ -405,6 +405,62 @@ def test_pilot_preset_e2e_through_the_composed_runner(tmp_path):
     assert call["catalog_runtime"].catalog_digest == env.snapshot.catalog_digest
 
 
+def test_a_raw_json_sentiment_completion_completes_through_the_composed_runner(tmp_path):
+    """The deep lane under the reviewed D2/D3 treatment (2026-07-31), wired at
+    the ONE production seam. The live run ``deep-f1f0031d521bea3a`` recorded
+    ``sentiment`` refused with ``'Neutral' is not an instance of SentimentBand``
+    / ``'low' is not an instance of Confidence`` — a CORRECT answer, killed by
+    python-mode decoding because ``WorkerSeatModelGateway`` never got the Lane-0
+    gateway's strict-JSON normalization. ``build_production_plan_runner`` now
+    wraps every gateway in ``SeatOutputNormalizingGateway``; the recorded raw
+    JSON must complete the pilot chain end to end."""
+
+    class _RawSentimentGateway(_ScriptedWorkerGateway):
+        def invoke(self, request, *, prompt_assembly_ref):
+            record = W.verify_model_request_binding(
+                request, prompt_assembly_ref, reader=self._reader)
+            self.invoked.append(record.worker_id)
+            if record.worker_id == "text.sentiment":
+                # verbatim: the recorded live values that python-mode refused,
+                # inside the named envelope idiom the live lane0.rotation seat
+                # produced — only the wired decorator can unwrap it, so this
+                # test is load-bearing on the runner wiring itself (step (9)
+                # alone refuses the envelope).
+                return W.ModelResult(
+                    payload={"sentiment_report": {
+                        "schema_version": "1",
+                        "overall_band": "Neutral",
+                        "overall_score": 5.0,
+                        "confidence": "low",
+                        "narrative": "Neutral tape; flows mixed.",
+                    }},
+                    rendered_text="raw-json:text.sentiment",
+                    input_tokens=13, output_tokens=9,
+                    provider=self.marker, model="scripted")
+            return super().invoke(request, prompt_assembly_ref=prompt_assembly_ref)
+
+    class _RawFactory(_RecordingFactory):
+        def __call__(self, *, payload_reader, catalog_runtime):
+            self.calls.append(
+                {"payload_reader": payload_reader, "catalog_runtime": catalog_runtime})
+            gateway = _RawSentimentGateway(payload_reader, marker=self.marker)
+            self.gateways.append(gateway)
+            return gateway
+
+    factory = _RawFactory("raw-json")
+    env = _compose_env(tmp_path, factory, run_id="run-rawjson")
+    artifact = _run(env)
+
+    # the chain COMPLETED: the raw-JSON sentiment decoded into its typed report
+    # instead of blocking research-mgr/pm (the live run's death).
+    assert artifact is not None
+    validated = env.registry.validate_payload(artifact.payload_schema_ref, artifact.payload)
+    assert isinstance(validated, PortfolioDecision)
+    kinds = _event_types(env.stores, "run-rawjson")
+    assert EventType.RUN_COMPLETED in kinds
+    assert "text.sentiment" in factory.gateways[0].invoked
+
+
 def test_e2e_artifacts_survive_a_durable_store_reopen(tmp_path):
     """The committed run folds back byte-identically from the tmp durable root --
     the proof the composition really wrote through ``build_durable_runtime_stores``."""

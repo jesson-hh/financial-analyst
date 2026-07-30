@@ -85,6 +85,7 @@ import hashlib
 import json
 import threading
 from dataclasses import dataclass, field
+from collections.abc import Mapping
 from typing import Any, ClassVar, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -1014,6 +1015,46 @@ def _raw(value: Any) -> Any:
     return value.model_dump() if isinstance(value, BaseModel) else value
 
 
+def _validate_primary_output(registry: Any, schema_ref: Any, payload: Any) -> Any:
+    """Step (9) validation, with the decode mode matched to the payload's nature.
+
+    D2 (2026-07-29) established strict JSON-mode as the only discipline under
+    which a raw model completion can be judged: strict PYTHON-mode refuses every
+    JSON-expressible conversion, so validating a completion with it produces
+    artifact errors (``'unknown' is not an instance of TrendState``, an ISO
+    string is not a ``datetime``…) that bury the answer's TRUE defect — the
+    2026-07-31 live run ``nr-lane0-2026-07-31-lane0.regime-1`` recorded 21 such
+    artifacts over the single real error (``drivers must be sorted``).
+
+    So: a payload that arrives as a raw JSON ``Mapping`` (a completion a
+    gateway ``json.loads``-ed, or one the normalizing decorators REFUSED and
+    passed through byte-identical) validates via ``model_validate_json(...,
+    strict=True)`` — the refusal then carries the true errors. A typed instance
+    (every deterministic handler and scripted double) keeps the reviewed
+    python-mode path bit-for-bit, and so does a ``Mapping`` carrying values
+    JSON cannot express (a scripted double's python ``datetime`` is not a
+    completion). Nothing here loosens the contract: strict JSON mode still
+    refuses undeclared fields, missing fields and every non-JSON coercion, and
+    every model validator still runs.
+    """
+    if isinstance(payload, Mapping):
+        resolve = getattr(registry, "resolve", None)
+        if resolve is not None:
+            try:
+                text = json.dumps(payload, ensure_ascii=False)
+            except (TypeError, ValueError):
+                text = None                 # not JSON-expressible ⇒ not a completion
+            if text is not None:
+                declared = payload.get("schema_version")
+                if declared is not None and declared != schema_ref.version:
+                    raise ValueError(
+                        f"payload schema_version {declared!r} does not match "
+                        f"resolved schema {schema_ref.key!r}")
+                model = resolve(schema_ref)
+                return model.model_validate_json(text, strict=True)
+    return registry.validate_payload(schema_ref, _raw(payload))
+
+
 # --------------------------------------------------------------------------- #
 # Prompt assembler + model gateway                                            #
 # --------------------------------------------------------------------------- #
@@ -1042,7 +1083,20 @@ class AssembledModelRequest(_StrictModel):
 
 @dataclass(frozen=True)
 class ModelResult:
-    """The single-shot model / deterministic-handler outcome the executor consumes."""
+    """The single-shot model / deterministic-handler outcome the executor consumes.
+
+    ``decode_refusal`` (2026-07-31) is the normalizing gateways' channel for the
+    TRUE refusal: when the reviewed strict-JSON output treatment (``llm_output``,
+    via ``bootstrap.Lane0OutputNormalizingGateway`` or
+    ``assembly.SeatOutputNormalizingGateway``) cannot turn a raw completion into
+    its typed report, the payload passes through byte-identical (the honesty red
+    line) and this field carries the exact error the reviewed decode measured —
+    e.g. the 2026-07-31 live run's real defect ``drivers must be sorted``. The
+    executor's step (9) refuses with THIS reason instead of re-deriving one from
+    a payload it cannot judge fully (the runtime's stamps are not its to know),
+    which is how the live record came to bury one true error under 21
+    python-mode artifacts. ``None`` = no normalizer refused anything.
+    """
 
     payload: Any
     rendered_text: str
@@ -1054,6 +1108,7 @@ class ModelResult:
     provider_response_id: str | None = None
     degraded: bool = False
     degradation_reasons: tuple[str, ...] = ()
+    decode_refusal: str | None = None
 
 
 def output_schema_section(
@@ -1866,8 +1921,22 @@ def execute_node(
 
     # ---- (9) validate the primary payload through its OutputBinding SchemaRef  #
     out_binding = _primary_output_binding(worker)
+    if model_result.decode_refusal is not None:
+        # a reviewed normalizing gateway measured the TRUE error under the full
+        # discipline (runtime stamps included) and passed the payload through
+        # byte-identical; re-deriving a reason from the raw payload here can
+        # only bury it (the 2026-07-31 live record's 21 python-mode artifacts
+        # over one real `drivers must be sorted`). The refusal stands, with the
+        # real error as its reason.
+        return _terminal_nodrun(
+            NodeStatus.INCOMPLETE, reason_code="output_schema_invalid",
+            reason=model_result.decode_refusal,
+            data_refs=data_refs, tool_records=merged.tool_call_records,
+            evid_refs=_finalize_direct_evidence(merged, prompt_ref),
+            itok=model_result.input_tokens, otok=model_result.output_tokens), None
     try:
-        validated_payload = registry.validate_payload(out_binding.schema_ref, _raw(payload))
+        validated_payload = _validate_primary_output(
+            registry, out_binding.schema_ref, payload)
     except Exception as exc:
         return _terminal_nodrun(
             NodeStatus.INCOMPLETE, reason_code="output_schema_invalid", reason=str(exc),

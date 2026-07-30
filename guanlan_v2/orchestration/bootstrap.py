@@ -89,6 +89,7 @@ from guanlan_v2.orchestration.enums import (
     Tier,
     ToolCallRequirement,
 )
+from guanlan_v2.orchestration import llm_output as _llm_output
 from guanlan_v2.orchestration.market import factors as _factors
 from guanlan_v2.orchestration.market.factors import (
     MARKET_FACTOR_REPORT_SCHEMA_REF,
@@ -1830,21 +1831,15 @@ def lane0_llm_output_model(schema_key: str):
     return getattr(_factors, name)
 
 
-def _envelope_key(model) -> str:
-    """``RotationReport`` → ``rotation_report`` (the ONLY unwrappable key)."""
-    return re.sub(r"(?<!^)(?=[A-Z])", "_", model.__name__).lower()
-
-
-def _decode_field(annotation, value):
-    """One field, decoded from JSON under STRICT discipline (never lax coercion)."""
-    from pydantic import TypeAdapter
-
-    return TypeAdapter(annotation).validate_json(
-        json.dumps(value, ensure_ascii=False), strict=True)
+# The mechanics moved to ``llm_output`` (2026-07-31) so the deep lane's seat
+# gateway consumes the SAME reviewed recipe; these names stay as thin aliases.
+_envelope_key = _llm_output.envelope_key
+_decode_field = _llm_output.decode_field
 
 
 def normalize_lane0_llm_output(
     payload, *, model, as_of, factor_report_digest, empty_evidence_reason=None,
+    refusal_sink=None,
 ):
     """Decode one Lane-0 LLM JSON answer into its sealed report, or refuse.
 
@@ -1869,48 +1864,44 @@ def normalize_lane0_llm_output(
     all and the payload comes back unchanged: "I cite nothing" can never become a
     phrase that escapes citing evidence the read actually had.
     """
-    if not isinstance(payload, Mapping):
-        return payload
-    raw = dict(payload)
-    key = _envelope_key(model)
-    if len(raw) == 1 and key in raw and isinstance(raw[key], Mapping):
-        raw = dict(raw[key])
-    for field in LANE0_RUNTIME_OWNED_FIELDS:
-        raw.pop(field, None)
+    def _prepare(raw: dict):
+        if (
+            "evidence" in model.model_fields
+            and isinstance(raw.get("evidence"), (list, tuple))
+            and not raw["evidence"]
+        ):
+            if empty_evidence_reason is None:
+                # a citable reading exists ⇒ refuse, and say the real why.
+                if refusal_sink is not None:
+                    refusal_sink(
+                        "the answer cites no EvidenceAnchor while the committed "
+                        "market_factor_report carries at least one citable "
+                        "reading; the ≥1-anchor rule stands (裁决 3 · Option B)")
+                return None
+            if empty_evidence_reason not in _factors.EMPTY_EVIDENCE_REASONS:
+                # a wiring guard, not a data case: only the two reviewed
+                # measurements may license an empty citation list, so a caller
+                # cannot mint one.
+                raise BootstrapRuntimeError(
+                    f"empty_evidence_reason {empty_evidence_reason!r} is not one of "
+                    f"the reviewed runtime measurements "
+                    f"{sorted(_factors.EMPTY_EVIDENCE_REASONS)!r}")
+            # an UNCONDITIONAL overwrite: whatever the model wrote here is
+            # discarded. (A `pop` in front of this would be dead — the assignment
+            # is the overwrite; a guard no test can turn red is not a guard.)
+            raw["unknown_reason"] = empty_evidence_reason
+        return raw
 
-    if (
-        "evidence" in model.model_fields
-        and isinstance(raw.get("evidence"), (list, tuple))
-        and not raw["evidence"]
-    ):
-        if empty_evidence_reason is None:
-            return payload                  # a citable reading exists ⇒ refuse
-        if empty_evidence_reason not in _factors.EMPTY_EVIDENCE_REASONS:
-            # a wiring guard, not a data case: only the two reviewed measurements
-            # may license an empty citation list, so a caller cannot mint one.
-            raise BootstrapRuntimeError(
-                f"empty_evidence_reason {empty_evidence_reason!r} is not one of "
-                f"the reviewed runtime measurements "
-                f"{sorted(_factors.EMPTY_EVIDENCE_REASONS)!r}")
-        # an UNCONDITIONAL overwrite: whatever the model wrote here is discarded.
-        # (A `pop` in front of this would be dead — the assignment is the
-        # overwrite; a guard no test can turn red is not a guard.)
-        raw["unknown_reason"] = empty_evidence_reason
-
-    fields: dict[str, Any] = {}
-    for name, value in raw.items():
-        spec = model.model_fields.get(name)
-        if spec is None:
-            return payload          # an undeclared field is the model's error
-        try:
-            fields[name] = _decode_field(spec.annotation, value)
-        except Exception:           # noqa: BLE001 — an undecodable field is a refusal
-            return payload
-    try:
-        return model.build(
-            as_of=as_of, factor_report_digest=factor_report_digest, **fields)
-    except Exception:               # noqa: BLE001 — a rule the answer breaks is a refusal
-        return payload
+    # the ONE reviewed recipe (llm_output, shared with the deep lane's seat
+    # gateway — called THROUGH the module so the drift guard can see it), with
+    # the Lane-0 stamps closed over the sealing constructor.
+    return _llm_output.decode_llm_output_json(
+        payload, model=model,
+        runtime_owned_fields=LANE0_RUNTIME_OWNED_FIELDS,
+        prepare=_prepare,
+        construct=lambda fields: model.build(
+            as_of=as_of, factor_report_digest=factor_report_digest, **fields),
+        refusal_sink=refusal_sink)
 
 
 class Lane0OutputNormalizingGateway:
@@ -1964,10 +1955,15 @@ class Lane0OutputNormalizingGateway:
             reason = _factors.NO_FACTOR_REPORT_REASON
         else:
             return result
+        refusals: list[str] = []
         normalized = normalize_lane0_llm_output(
             payload, model=model, as_of=as_of, factor_report_digest=digest,
-            empty_evidence_reason=reason)
+            empty_evidence_reason=reason, refusal_sink=refusals.append)
         if normalized is payload:
+            if refusals:
+                # payload byte-identical (the red line); the TRUE measured error
+                # rides the decode_refusal channel so step (9) refuses with it.
+                return replace(result, decode_refusal=refusals[0])
             return result
         return replace(result, payload=normalized)
 

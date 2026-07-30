@@ -205,6 +205,10 @@ class ScriptedJsonLane0Gateway:
         self.canonical_requests: dict[str, str] = {}
         #: answer with an EMPTY citation list + self-written excuse (裁决 3 · B).
         self.empty_evidence = False
+        #: answer with the 2026-07-31 live run's UNSORTED ``drivers`` (verbatim
+        #: from ``nr-lane0-2026-07-31-lane0.regime-1``): a one-line lint error
+        #: that python-mode re-validation used to bury under 21 artifacts.
+        self.unsorted_drivers = False
 
     def invoke(self, request, *, prompt_assembly_ref):
         record = W.verify_model_request_binding(
@@ -230,6 +234,9 @@ class ScriptedJsonLane0Gateway:
             if self.empty_evidence:
                 payload.update(evidence=[], evidence_factor_ids=[],
                                unknown_reason="I decided not to cite anything")
+            if self.unsorted_drivers:
+                payload.update(
+                    drivers=["breadth.divergence", "vol.rv", "breadth.ad_ratio"])
         else:
             payload = {"rotation_report": {
                 "mainlines": [], "confidence": "low", "conflicts": [],
@@ -813,6 +820,30 @@ def test_a_raw_json_completion_from_a_real_model_completes_the_run():
     assert result.node_statuses["lane0.rotation"] == "completed"
     assert result.llm_invocations == 2
     assert result.snapshot_visible_to_deep_lane is True
+
+
+def test_a_refused_answer_records_the_true_error_not_python_mode_artifacts():
+    """The 2026-07-31 live mystery, pinned. ``nr-lane0-2026-07-31-lane0.regime-1``
+    answered correctly EXCEPT for one deterministic lint (``drivers`` unsorted).
+    The normalizer honestly refused — but the executor then re-validated the raw
+    JSON in strict PYTHON mode and recorded 21 artifacts (``'unknown' is not an
+    instance of TrendState``, ``str`` is not a ``datetime``…) that buried the
+    one true error. Step (9) now judges a raw-JSON payload under the SAME
+    strict JSON-mode discipline, so the recorded reason IS the real defect."""
+    env = Env(raw_json_gateway=True)
+    env.gateway.unsorted_drivers = True
+    result = env.run()
+
+    assert result.node_statuses["lane0.regime"] == "incomplete"
+    node_runs = [
+        s.model for s in dict(env.stores._shared.backend.payloads).values()
+        if getattr(s, "schema_key", None) == "NodeRun@1"
+        and getattr(s.model, "node_id", None) == "lane0.regime"]
+    assert node_runs, "the regime NodeRun must be persisted"
+    reason = node_runs[-1].reason or ""
+    assert node_runs[-1].reason_code == "output_schema_invalid"
+    assert "drivers must be sorted" in reason
+    assert "is_instance_of" not in reason       # the buried-error regression
 
 
 def test_the_runtime_stamps_the_digest_of_the_report_the_run_committed():

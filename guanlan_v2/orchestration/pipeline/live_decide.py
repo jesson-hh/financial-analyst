@@ -101,6 +101,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
 
 from guanlan_v2.orchestration import worker as _worker
+from guanlan_v2.orchestration.llm_output import DEEP_SEAT_RUNTIME_OWNED_FIELDS
 from guanlan_v2.orchestration.adapters.launcher import LaneExecutionBinding
 from guanlan_v2.orchestration.approval import admit_after_approval
 from guanlan_v2.orchestration.budget import BudgetLedger
@@ -310,8 +311,14 @@ class SubjectPromptAssembler:
         # 裁决 2 (2026-07-29): the derived output contract, from the SAME reviewed
         # helper the static assembler uses — the two assemblers must never drift
         # on what a model is told its answer is validated against.
+        # 2026-07-31: ``as_of`` is declared runtime-supplied — the seat gateway
+        # stamps it from THIS assembler's own ``trusted_subject`` echo, so
+        # demanding it from the model (the live ``bull-r1`` refusal) is the
+        # same contradiction 裁决 2 removed for Lane 0. Schemas without an
+        # ``as_of`` field are byte-for-byte unchanged (the helper intersects).
         out_schema = _worker.output_schema_section(
-            output_binding=output_binding, schema_registry=schema_registry)
+            output_binding=output_binding, schema_registry=schema_registry,
+            runtime_owned_fields=DEEP_SEAT_RUNTIME_OWNED_FIELDS)
         if out_schema is not None:
             channel[_worker.OUTPUT_SCHEMA_SECTION] = out_schema
         canonical_bytes = json.dumps(
