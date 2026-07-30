@@ -329,7 +329,10 @@ def _register_lane0_factories_with_raising_factor(
 
 
 def build_bootstrap_env(*, suffix="", inputs=None, fail_nodes=(), approve=True,
-                        fail_factor=False):
+                        fail_factor=False, stores_factory=None):
+    """``stores_factory(resolver, clock) -> RuntimeStores`` lets a test bind this
+    env to a SHARED / durable store (two run identities over one store — the
+    production ``var/orchestration/`` shape); default: a fresh in-memory store."""
     clock = FixedClock()
     cat = load_lane0_catalog()
     catalog = CatalogRuntime.build(cat.snapshot, cat.source)
@@ -344,8 +347,11 @@ def build_bootstrap_env(*, suffix="", inputs=None, fail_nodes=(), approve=True,
     resolver = SchemaRegistryResolver()
     resolver.register(registry)
     rt_digest = resolver.register(rt_reg)
-    stores = RuntimeStores(
-        resolver=resolver, clock=clock, allowed_cell_namespaces=(W.PROMPT_CELL_NAMESPACE,))
+    if stores_factory is not None:
+        stores = stores_factory(resolver, clock)
+    else:
+        stores = RuntimeStores(
+            resolver=resolver, clock=clock, allowed_cell_namespaces=(W.PROMPT_CELL_NAMESPACE,))
 
     spec = build_market_factor_set_v1()
     preset = build_bootstrap_plan(spec=spec, grader=_grader())
@@ -372,7 +378,10 @@ def build_bootstrap_env(*, suffix="", inputs=None, fail_nodes=(), approve=True,
         profile=bootstrap_runtime_profile(), stores=stores, run_budget=run_budget, clock=clock)
 
     prep = service.prepare_candidate(draft.id, request_id=request.request_id)
-    cand, res = service.persist_and_reserve_candidate(prep, idempotency_key="reserve-1")
+    # suffix-scoped like production's `lane0-reserve:{run_id}`: two envs sharing
+    # ONE store (stores_factory) must not collide on the admission keys.
+    cand, res = service.persist_and_reserve_candidate(
+        prep, idempotency_key=f"reserve-1{suffix}")
 
     plan = admitted = bundle = None
     if approve:
@@ -384,10 +393,10 @@ def build_bootstrap_env(*, suffix="", inputs=None, fail_nodes=(), approve=True,
             ApprovalSubmission(request_id=request.request_id,
                                candidate_plan_digest=cand.candidate_plan_digest,
                                decision=ApprovalDecision.APPROVED),
-            authenticated_actor="human-1", idempotency_key="approve-1")
+            authenticated_actor="human-1", idempotency_key=f"approve-1{suffix}")
         plan, admitted = service.freeze_and_admit_candidate(
             cand.candidate_plan_digest, reservation_id=res.reservation_id,
-            approval_event_id=ev.event_id, idempotency_key="freeze-1")
+            approval_event_id=ev.event_id, idempotency_key=f"freeze-1{suffix}")
         bundle = service.verify_for_dispatch(plan.plan_digest)
 
     pool = ArtifactPool(

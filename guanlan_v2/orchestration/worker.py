@@ -549,6 +549,30 @@ class BridgeEvidenceWriter:
         self._put_seq += 1
         return f"{self._node_id}:{prefix}:{self._put_seq}"
 
+    def _run_scoped(self, idempotency_key: str) -> str:
+        """Scope a provider's semantic idempotency key by THIS writer's run identity.
+
+        The sixth member of the Task 8b defect class (live ``run --attempt 4``,
+        2026-07-29): providers mint keys from per-run-local coordinates only —
+        ``{bridge_id}:{node_id}:a{attempt}:c{call_ordinal}:…`` (experience + memory
+        bridges) and ``{node_id}:a{attempt}:{semantic}`` (the data adapter) — while
+        the sealed Lane-0 preset pins its node ids and every fresh run restarts at
+        ``a1:c1``. Against the durable store (``var/orchestration/``) the SECOND
+        run identity therefore reused the FIRST run's payload keys with different
+        content (and the ``:control`` fact ALWAYS differs: it embeds ``run_id``),
+        so both LLM seats died in ``freeze_for_execution`` with
+        ``IdempotencyConflict`` before any model invoke. Folding ``run_id`` here —
+        the one choke point every provider write crosses, which already holds it —
+        run-scopes all four durable keys of a ``put`` (``:uow``/``:evidence``/
+        ``:control``/``:event``) and the three of a ``record_existing`` for every
+        current and future provider. Within one run the key is unchanged-stable
+        (crash-retry replays the identical batch); keys written under the pre-fix
+        shape become unreachable and are deliberately NOT migrated — they are
+        dedup guards, not lookups, and a fresh write under the new shape is the
+        correct outcome (the Task 8b precedent, worker._persist_prompt_record).
+        """
+        return f"{self._run_id}:{idempotency_key}"
+
     def _control_template(
         self, ordinal: ExecutionEvidenceOrdinalToken, role: str, evidence_ref: Any,
     ) -> dict[str, Any]:
@@ -573,6 +597,7 @@ class BridgeEvidenceWriter:
     ) -> TypedPayloadRef:
         self._require_open("put")
         self._sequencer.validate_token(token)
+        idempotency_key = self._run_scoped(idempotency_key)
         evidence_ordinal = self._sequencer.next_evidence_ordinal()
         ordinal = ExecutionEvidenceOrdinalToken(
             attempt=token.attempt, call_ordinal=token.call_ordinal,
@@ -618,6 +643,7 @@ class BridgeEvidenceWriter:
     ) -> TypedPayloadRef:
         self._require_open("record_existing")
         self._sequencer.validate_token(token)
+        idempotency_key = self._run_scoped(idempotency_key)
         if typed_ref.payload_ref.namespace != "main":
             raise EvidenceGatewayNamespace("record_existing requires a main-namespace typed ref")
         # revalidate the already-persisted main payload resolves at the exact digest.
