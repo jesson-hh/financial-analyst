@@ -964,6 +964,40 @@ class TestTask11MaterialUniverse:
         assert isinstance(view.resolve("experience.bridge").analyzer,
                           bs.ExperienceBridgeSupportAnalyzer)
 
+    def test_the_analyzer_map_is_one_recipe_shared_by_view_and_runner_halves(self):
+        """The 2026-07-31 burned-lease defect's structural cure: the three
+        reviewed analyzer bindings come from ONE function —
+        ``production_bridge_analyzers`` — which ``production_bridge_view``
+        consumes by default and which the live seam hands to
+        ``build_production_plan_runner`` as ``bridge_analyzers``. A caller that
+        builds the map once may inject it into the view, and the view binds
+        EXACTLY those instances (no silent second build)."""
+        import guanlan_v2.orchestration.bootstrap as bs
+        import guanlan_v2.orchestration.data.catalog as dcat
+        import guanlan_v2.orchestration.memory.catalog as mcat
+        from guanlan_v2.orchestration.adapters import chain as p9
+        from guanlan_v2.orchestration.pipeline.assembly import (
+            production_bridge_analyzers,
+            production_bridge_view,
+        )
+
+        analyzers = production_bridge_analyzers()
+        assert len(analyzers) == 3
+        by_type = {type(a) for a in analyzers.values()}
+        assert by_type == {dcat.DataBridgeSupportAnalyzer,
+                           mcat.MemoryBridgeSupportAnalyzer,
+                           bs.ExperienceBridgeSupportAnalyzer}
+        # every key is a sealed (id, version, content_digest) analyzer ref.
+        for key in analyzers:
+            assert len(key) == 3
+            assert all(isinstance(part, str) and part for part in key)
+
+        bundle = build_production_catalog_runtime(p9.phase9_catalog_snapshot())
+        view = production_bridge_view(bundle.runtime, analyzers)
+        bound = {view.resolve(bid).analyzer for bid in view.bridge_ids()}
+        # the injected instances themselves are bound — identity, not a rebuild.
+        assert bound == set(analyzers.values())
+
 
 class _ExplodingPlannerGateway:
     """A scripted provider outage: every invoke raises AFTER the real prompt

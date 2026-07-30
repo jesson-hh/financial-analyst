@@ -1078,6 +1078,7 @@ def build_production_bindings(*, preset_id: str | None = None) -> DeepDecideBind
         build_production_catalog_runtime,
         build_production_plan_runner,
         load_phase10_preset_registry,
+        production_bridge_analyzers,
         production_bridge_view,
         production_gateway_factory,
     )
@@ -1107,7 +1108,18 @@ def build_production_bindings(*, preset_id: str | None = None) -> DeepDecideBind
     # REFUSES a bridge without a reviewed analyzer binding — an empty analyzer
     # map (the pre-Task-11 placeholder) would crash HERE now that the material
     # universe resolves, instead of reaching the ruled honest support-refusal.
-    view = production_bridge_view(bundle.runtime)
+    #
+    # 2026-07-31 live-store defect: the map is built ONCE and closed over by
+    # BOTH halves — the admission view here and the runner's bridge view in
+    # plan_runner_factory. The runner half previously received NO analyzers and
+    # refused at construction AFTER register_and_try_lease had consumed the
+    # ApprovalLease (a burned human authorization with zero execution). One
+    # recipe (assembly.production_bridge_analyzers), one map, zero forks; and
+    # because THIS line already builds a view over it, the whole class of
+    # analyzer-binding refusal now fires at binding construction (server
+    # startup, deep lane stays down honestly) — never after a lease draw.
+    bridge_analyzers = production_bridge_analyzers()
+    view = production_bridge_view(bundle.runtime, bridge_analyzers)
     presets = load_phase10_preset_registry(PRODUCTION_PRESETS_DIR)
 
     def admission_factory(*, run_id, request, draft, context, approvals, run_budget):
@@ -1132,12 +1144,16 @@ def build_production_bindings(*, preset_id: str | None = None) -> DeepDecideBind
 
     def plan_runner_factory(*, admission, lane_bindings, run_context_factory,
                             request_id, prompt_assembler):
+        # bridge_analyzers: the SAME map instance the admission view above was
+        # built over — never a second recipe, never an empty placeholder (the
+        # 2026-07-31 burned-lease defect; see the binding-time comment).
         return build_production_plan_runner(
             stores=stores, catalog_snapshot=snapshot, registry=registry,
             gateway_factory=production_gateway_factory, admission=admission,
             lane_bindings=lane_bindings, run_context_factory=run_context_factory,
             request_id=request_id, clock=clock, runtime_registry_digest=rt_digest,
-            runtime_limit=4, catalog=bundle, prompt_assembler=prompt_assembler)
+            runtime_limit=4, catalog=bundle, bridge_analyzers=bridge_analyzers,
+            prompt_assembler=prompt_assembler)
 
     if preset_id != DEEP_DECIDE_PRESET_ID:
         # LOUD on the server's own stderr, not just a logger nobody configured:

@@ -1120,6 +1120,52 @@ class TestWatcherServerSeams:
         assert callable(bindings.plan_runner)
         assert callable(bindings.latest_snapshot_fn)
 
+    def test_the_production_plan_runner_factory_constructs_over_the_sealed_catalog(
+            self, monkeypatch, tmp_path):
+        """The 2026-07-31 live-store defect, pinned at the REAL factory.
+
+        ``plan_runner_factory`` handed ``build_production_plan_runner`` NO
+        ``bridge_analyzers``, so the runner's ``BridgeCatalogView.build`` got an
+        empty map and refused (``bridge 'data.runtime' has no reviewed analyzer
+        bound``) — AFTER the ApprovalLease had already been consumed: a burned
+        human authorization with zero execution. The admission half bound the
+        full three-analyzer view all along (Task 11); the runner half was the
+        second site of the same disease. The Phase-10 e2e never saw it because
+        it passes analyzers explicitly — so this test drives the production
+        ``bindings.plan_runner`` itself, over the real sealed catalog.
+
+        Construction only: nothing here approves, admits, or executes. The one
+        probe call uses a digest NO lane binding names, which the REAL admitted
+        runner refuses at its own seam BEFORE touching admission — proving the
+        constructed runner is the launcher's, not a husk."""
+        from guanlan_v2 import orch_store_status as status_mod
+        from guanlan_v2.orchestration.adapters import durable as durable_mod
+        from guanlan_v2.orchestration.adapters.durable import (
+            build_durable_runtime_stores,
+        )
+        from guanlan_v2.orchestration.adapters.launcher import (
+            LaneExecutionBinding,
+            LaunchRefused,
+        )
+
+        stores = build_durable_runtime_stores(tmp_path / "orch")
+        monkeypatch.setattr(durable_mod, "process_durable_stores", lambda: stores)
+        monkeypatch.setattr(status_mod, "orchestration_store_bound", lambda: True)
+        bindings = live_decide.build_production_bindings()
+
+        binding = LaneExecutionBinding(
+            lane="main", candidate_plan_digest="d" * 64,
+            reservation_id="res-regression", approval_event_id="ev-regression")
+        runner = bindings.plan_runner(
+            admission=object(), lane_bindings={"main": binding},
+            run_context_factory=lambda **kw: None,
+            request_id="req-runner-constructs", prompt_assembler=None)
+        assert callable(runner)
+        with pytest.raises(LaunchRefused, match="no declared lane binding"):
+            runner(lane="main", point=SimpleNamespace(point_ordinal=0),
+                   approval=None, data_context=None, memory_binding=None,
+                   candidate_plan_digest="0" * 64)
+
 
 # =========================================================================== #
 # 11b. Task 11 — the _ApprovalsBridge binding (untestable until production deps) #

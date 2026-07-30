@@ -164,6 +164,7 @@ __all__ = [
     "WorkerSeatModelGateway",
     "production_material_source",
     "build_production_catalog_runtime",
+    "production_bridge_analyzers",
     "production_bridge_view",
     "build_production_planner_runner",
     "production_gateway_factory",
@@ -420,7 +421,37 @@ def build_production_catalog_runtime(
     return ProductionCatalogRuntime(runtime=runtime, factories=factories)
 
 
-def production_bridge_view(runtime: CatalogRuntime):
+def production_bridge_analyzers() -> dict:
+    """The ONE reviewed three-analyzer map, keyed by the exact sealed refs.
+
+    Both halves of the production seam consume THIS recipe and no other: the
+    admission half through :func:`production_bridge_view`, and the execution
+    half as ``build_production_plan_runner``'s ``bridge_analyzers`` (the
+    2026-07-31 live-store defect: ``live_decide.plan_runner_factory`` handed
+    the runner NO analyzers, so ``BridgeCatalogView.build`` refused ``bridge
+    'data.runtime' has no reviewed analyzer bound`` — AFTER the ApprovalLease
+    was already consumed. Same disease Task 11 cured at the admission seam; a
+    second recipe is how the two halves drifted apart, so there is exactly one).
+    """
+    import guanlan_v2.orchestration.bootstrap as _bs
+    import guanlan_v2.orchestration.data.catalog as _dcat
+    import guanlan_v2.orchestration.memory.catalog as _mcat
+
+    data_surface = _dcat.phase3_data_surface()
+    memory_surface = _mcat.phase3_memory_surface()
+    lane0 = _bs.load_lane0_catalog()
+
+    def _key(ref: ContentRef):
+        return (ref.id, ref.version, ref.content_digest)
+
+    return {
+        _key(data_surface.analyzer_ref): _dcat.DataBridgeSupportAnalyzer(),
+        _key(memory_surface.analyzer_ref): _mcat.MemoryBridgeSupportAnalyzer(),
+        lane0.analyzer_key: _bs.ExperienceBridgeSupportAnalyzer(),
+    }
+
+
+def production_bridge_view(runtime: CatalogRuntime, analyzers: Mapping | None = None):
     """The full three-analyzer :class:`BridgeCatalogView` production admission binds.
 
     Task 11 promotion of the deep-preset suite's reviewed recipe
@@ -433,24 +464,19 @@ def production_bridge_view(runtime: CatalogRuntime):
     resulting support check COMPLETES for every Phase-8 worker and reports the
     remaining data-grant gap honestly (``pv.technical`` / ``text.news``
     ``tool_calls_required_unmet``) instead of crashing.
+
+    ``analyzers=None`` builds :func:`production_bridge_analyzers` (the default
+    for every single-view caller: api.py, lane0_driver). A caller that must hand
+    the SAME analyzer instances to both the admission view and the plan runner
+    (``live_decide.build_production_bindings``) builds the map once and passes
+    it here — the map's construction stays this module's, never the caller's.
     """
-    import guanlan_v2.orchestration.bootstrap as _bs
-    import guanlan_v2.orchestration.data.catalog as _dcat
-    import guanlan_v2.orchestration.memory.catalog as _mcat
     from guanlan_v2.orchestration.catalog_runtime import BridgeCatalogView
 
-    data_surface = _dcat.phase3_data_surface()
-    memory_surface = _mcat.phase3_memory_surface()
-    lane0 = _bs.load_lane0_catalog()
-
-    def _key(ref: ContentRef):
-        return (ref.id, ref.version, ref.content_digest)
-
-    return BridgeCatalogView.build(runtime, {
-        _key(data_surface.analyzer_ref): _dcat.DataBridgeSupportAnalyzer(),
-        _key(memory_surface.analyzer_ref): _mcat.MemoryBridgeSupportAnalyzer(),
-        lane0.analyzer_key: _bs.ExperienceBridgeSupportAnalyzer(),
-    })
+    return BridgeCatalogView.build(
+        runtime,
+        dict(production_bridge_analyzers() if analyzers is None else analyzers),
+    )
 
 
 def build_production_planner_runner(
