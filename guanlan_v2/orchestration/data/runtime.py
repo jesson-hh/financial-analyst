@@ -36,6 +36,7 @@ schemas through the existing owners.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -70,6 +71,10 @@ __all__ = [
     "DataSourceCapabilityBackend",
     "DataRuntimeBridgeProvider",
     "data_runtime_provider_factory",
+    "StructurallyDeadRowDataProvider",
+    "structurally_dead_row_fact",
+    "structurally_dead_row_data_provider_factory",
+    "register_structurally_dead_row_data_provider",
     "ResolvedDataRead",
     "DataAuditReplay",
     "audit_replay_data_evidence",
@@ -81,6 +86,8 @@ __all__ = [
 
 RENDERED_BLOCK_SCHEMA_REF = SchemaRef(name="RenderedDataBlock", version="1")
 PROMPT_ASSEMBLY_SCHEMA_REF = SchemaRef(name="PromptAssemblyRecord", version="1")
+
+_LOG = logging.getLogger(__name__)
 
 #: method id -> its reviewed schema binding (concrete params class etc.).
 _BINDING_BY_METHOD = {b.method_id: b for b in DATA_METHOD_SCHEMAS}
@@ -692,6 +699,228 @@ def data_runtime_provider_factory(world: DataRuntimeWorld):
         return DataRuntimeBridgeProvider(bridge=bridge, summary=summary, world=world)
 
     return factory
+
+
+# --------------------------------------------------------------------------- #
+# the worldless deep-lane provider (2026-07-31 controller ruling)               #
+# --------------------------------------------------------------------------- #
+def _row_is_structurally_dead(row: DataPrefetchOperation, worker: Any) -> bool:
+    """Defect H's exact pinned shape, decided STATICALLY from the catalog.
+
+    A row is unrunnable BY CONSTRUCTION iff it binds at least one param out of
+    node params (``source_kind="node_param"``) while the granted worker declares
+    ``params_schema_ref=None``: Phase-1 validation refuses ANY node params for
+    such a worker (``spec.py`` issue ``params_not_allowed``) and a sealed v2
+    preset forbids node params outright (``pipeline/assembly.py``), so no legal
+    plan — preset or dynamic — can ever carry the value the pointer reads. No
+    execution is attempted to decide this; it is a catalog+worker fact.
+    """
+    return worker.params_schema_ref is None and any(
+        b.source_kind == "node_param" for b in row.param_bindings
+    )
+
+
+def structurally_dead_row_fact(row: DataPrefetchOperation, worker: Any) -> str:
+    """The NAMED FACT the ruled empty contribution is attributable through.
+
+    States the row, why it cannot run, and that no data read was attempted —
+    logged (never persisted as evidence: persisting would fabricate the trace
+    of a read that never happened, and inventing a sentinel payload would erase
+    the audit anchor that the gateway saw zero begins). ASCII-only.
+    """
+    pointers = ", ".join(
+        b.source_pointer for b in row.param_bindings
+        if b.source_kind == "node_param")
+    return (
+        f"data.runtime row (worker={row.worker_id!r}, "
+        f"method={row.method_ref.id!r}) is DECLARED but NOT RUNNABLE by "
+        f"construction: its param bindings read node params ({pointers}) while "
+        f"worker {worker.id!r} declares params_schema_ref=None, so no legal "
+        "plan can ever carry them ('params_not_allowed'; sealed v2 presets "
+        "forbid node params outright). The bridge contributes EMPTY: no data "
+        "read was attempted, no capability invocation began, nothing was "
+        "fabricated."
+    )
+
+
+class StructurallyDeadRowDataProvider:
+    """The deep lane's ``data.runtime`` provider — honest-empty ONLY for
+    structurally-dead rows (2026-07-31 controller ruling; the pm trunk).
+
+    The deep production runtime binds NO :class:`DataRuntimeWorld` (the
+    chartered L2-b gap), so the world-bound :class:`DataRuntimeBridgeProvider`
+    cannot serve it. But leaving the provider ref unbound killed ``dec.pm`` at
+    bridge prepare (run ``deep-a06fd33840c0b3ee``: ``bridge_preparation_failed``
+    naming ``data.runtime``) over a row that could never have run in ANY legal
+    plan — defect H, pinned by ``tests/orchestration/data/test_data_catalog.py::
+    TestVerifiedSnapshotRowIsDeclaredNotRunnable``. This provider discriminates
+    NARROWLY at ``open_execution``:
+
+    * every reviewed row for the worker is structurally dead
+      (:func:`_row_is_structurally_dead` — ``node_param`` bindings against a
+      ``params_schema_ref=None`` worker, decidable statically, no execution
+      attempt) → a prepared-empty session whose freeze COMPLETES with an EMPTY
+      :class:`~guanlan_v2.orchestration.worker.BridgeContribution`: zero gateway
+      begins, zero ToolCallRecords, zero evidence writes, zero untrusted blocks,
+      attribution = the analyzer summary's digest riding ``summary_digest`` plus
+      the logged :func:`structurally_dead_row_fact`. Arithmetic honesty: the one
+      granted row is ``cache_or_invoke`` + ``success_requires_finalized_call=
+      False`` ⇒ ``row_min_finalized == 0`` ⇒ the analyzer's own bound
+      (``min_finalized_tool_calls_on_success == 0``) licenses the empty
+      contribution.
+    * ANY other shape stays LOUD (:class:`DataRuntimeError`): a row that is
+      resolvable as written (the real L2-b gap — no production world is bound,
+      and silencing it would fake a data read), an allowlisted worker without a
+      reviewed row (the two pv aux nodes keep degrading, now at bridge
+      execution rather than bridge prepare), a drifted prepared handle, a
+      config naming a foreign bridge.
+
+    Why the empty contribution is honest TODAY, not a silenced outage: the
+    row's unrunnability is a STRUCTURAL catalog fact — there is no value the
+    node "should have had" under any legal plan, so nothing lawful is being
+    withheld. The run's subject identity (code + session date, digest-bound)
+    reaches every deep seat through the ``SubjectPromptAssembler``'s trusted
+    subject block, and the live quote the row names was already in the
+    wrapper's escalation context when it admitted the run
+    (``live_decide.make_orchestrated_decide``, ``quote_fn``).
+
+    TOMBSTONE (post-P10 re-freeze phase): the real fix is L1 ruling D-0 — the
+    subject→data projection carrying ``RunSubject@1`` into the bridge params —
+    plus the L2-b production ``DataRuntimeWorld`` wiring
+    (``docs/superpowers/specs/2026-07-29-post-p10-refreeze-design.md`` §1.5).
+    When those land the dead shape ceases to exist in the sealed catalog and
+    this provider MUST be retired for the world-bound provider; this
+    discrimination must never be widened to cover a live row instead.
+
+    Material-drift note (bytes frozen, the C3 discipline): the sealed handler
+    material ``bridge.data_runtime.provider@1`` (``data/catalog.py``
+    ``_PROVIDER_BYTES``) describes the static-prefetch provider generically;
+    this ruling is recorded HERE in code — zero material bytes move, zero
+    catalog digests move.
+    """
+
+    __slots__ = ("_bridge", "_summary")
+
+    def __init__(self, *, bridge: Any, summary: Any) -> None:
+        self._bridge = bridge
+        self._summary = summary
+
+    def prepare_input(self, request: Any) -> Any:
+        """Bit-for-bit the world-bound provider's I/O-free empty prepare."""
+        from guanlan_v2.orchestration.worker import (
+            BridgeInputContribution,
+            BridgeStageOutcome,
+            PreparedBridgeHandle,
+        )
+
+        token = request.token
+        if token.bridge_id != self._bridge.bridge_id:
+            raise DataRuntimeError("prepare token names a different bridge")
+        if token.summary_digest != self._summary.summary_digest:
+            raise DataRuntimeError("prepare token is not bound to this bridge's summary")
+        contribution = BridgeInputContribution()
+        handle = PreparedBridgeHandle(
+            bridge_id=self._bridge.bridge_id, bridge_priority=self._bridge.priority,
+            summary_digest=self._summary.summary_digest, token=token,
+            input_contribution=contribution)
+        return BridgeStageOutcome(status="prepared", input_contribution=contribution,
+                                  prepared_handle=handle)
+
+    def open_execution(self, request: Any) -> "_StructurallyDeadRowSession":
+        """The ruled NARROW discrimination — empty only for the dead shape."""
+        from guanlan_v2.orchestration.worker import BridgeInputContribution
+
+        binding = parse_prefetch_binding(request.bridge.config_bytes)
+        if binding.bridge_id != self._bridge.bridge_id:
+            raise DataRuntimeError("prefetch binding names a different bridge")
+        worker = request.worker
+        rows = tuple(op for op in binding.operations if op.worker_id == worker.id)
+        if not rows:
+            raise DataRuntimeError(
+                f"worker {worker.id!r} activates the data.runtime bridge through "
+                "its capability allowlist but the sealed prefetch binding carries "
+                "no reviewed row for it, and this lane binds no production "
+                "DataRuntimeWorld (the chartered L2-b gap) -- honest refusal, "
+                "never a fabricated read"
+            )
+        live = tuple(r for r in rows if not _row_is_structurally_dead(r, worker))
+        if live:
+            raise DataRuntimeError(
+                f"worker {worker.id!r} carries {len(live)} reviewed data prefetch "
+                "row(s) resolvable as written, but this lane binds no production "
+                "DataRuntimeWorld (the chartered L2-b gap) -- the honest refusal "
+                "must keep firing; a worldless provider never fakes a data read"
+            )
+        handle = request.handle
+        if handle.input_contribution != BridgeInputContribution():
+            raise DataRuntimeError(
+                f"worker {worker.id!r}'s prepared handle carries a non-empty "
+                "input contribution (prepared-handle drift)"
+            )
+        return _StructurallyDeadRowSession(
+            bridge=self._bridge, summary=self._summary, request=request,
+            dead_rows=rows)
+
+
+class _StructurallyDeadRowSession:
+    """The prepared-empty session: freeze completes EMPTY, gateway untouched."""
+
+    __slots__ = ("_bridge", "_summary", "_request", "_dead_rows")
+
+    def __init__(self, *, bridge: Any, summary: Any, request: Any,
+                 dead_rows: tuple[DataPrefetchOperation, ...]) -> None:
+        self._bridge = bridge
+        self._summary = summary
+        self._request = request
+        self._dead_rows = dead_rows
+
+    def freeze_for_execution(self, *, kind: Any) -> Any:
+        from guanlan_v2.orchestration.worker import (
+            BridgeContribution,
+            BridgeStageOutcome,
+        )
+
+        for row in self._dead_rows:
+            _LOG.warning(structurally_dead_row_fact(row, self._request.worker))
+        return BridgeStageOutcome(
+            status="completed",
+            frozen_contribution=BridgeContribution(
+                bridge_id=self._bridge.bridge_id,
+                bridge_priority=self._bridge.priority,
+                summary_digest=self._summary.summary_digest,
+            ),
+        )
+
+
+def structurally_dead_row_data_provider_factory():
+    """The trusted provider-handler factory for the deep lane's data bridge.
+
+    Zero configuration by design: rows come from the resolved bridge's own
+    sealed ``config_bytes`` and the discrimination from the admitted worker —
+    there is nothing here to fabricate. See
+    :class:`StructurallyDeadRowDataProvider` for the ruling + tombstone.
+    """
+
+    def factory(*, bridge: Any, summary: Any) -> StructurallyDeadRowDataProvider:
+        return StructurallyDeadRowDataProvider(bridge=bridge, summary=summary)
+
+    return factory
+
+
+def register_structurally_dead_row_data_provider(*, factories: Any) -> None:
+    """The ONE reviewed deep-lane data-provider registration recipe.
+
+    Binds :func:`structurally_dead_row_data_provider_factory` under the exact
+    sealed ``bridge.data_runtime.provider@1`` handler identity
+    (``phase3_data_surface().provider_ref`` — verified equal to the Phase-9
+    resolved bridge's ``provider_ref``). Sole production caller:
+    ``live_decide.build_production_bindings``.
+    """
+    from guanlan_v2.orchestration.data.catalog import phase3_data_surface
+
+    factories.register_handler(
+        phase3_data_surface().provider_ref,
+        structurally_dead_row_data_provider_factory())
 
 
 # --------------------------------------------------------------------------- #

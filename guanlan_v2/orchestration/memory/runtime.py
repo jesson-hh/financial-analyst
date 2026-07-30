@@ -55,6 +55,7 @@ __all__ = [
     "render_memory",
     "MemoryRuntimeBridgeProvider",
     "make_memory_bridge_provider_factory",
+    "register_phase3_memory_provider_factory",
 ]
 
 _SR = lambda name: SchemaRef(name=name, version="1")  # noqa: E731
@@ -389,3 +390,50 @@ def make_memory_bridge_provider_factory(
             renderer_ref=renderer_ref, config_bytes=config_bytes)
 
     return factory
+
+
+def register_phase3_memory_provider_factory(*, factories: Any, stores: Any) -> None:
+    """The ONE reviewed production ``memory.runtime`` provider registration
+    recipe (2026-07-31 controller ruling — the pm trunk).
+
+    ``make_memory_bridge_provider_factory`` had ZERO production call sites, so
+    the sealed catalog's ``memory.runtime`` bridge (activating for ``dec.pm``
+    via the ``memory`` read category) had no bound provider factory and every
+    deep run died at pm's bridge prepare (``bridge_preparation_failed``). This
+    recipe binds it under the exact sealed ``bridge.memory_runtime.provider@1``
+    handler identity with the digest-verified catalog materials as its values:
+
+    * ``policy`` — :func:`~guanlan_v2.orchestration.memory.catalog.
+      resolved_memory_policy` (the only policy with authority);
+    * ``renderer_ref`` — the surface's sealed renderer material ref;
+    * ``config_bytes`` — the canonical serialization of the sealed prefetch
+      binding (byte-identical to the catalog's ``bridge.memory_runtime.
+      prefetch`` guardrail material and to the Phase-9 resolved bridge's
+      ``config_bytes``);
+    * ``stores`` — the caller's process durable stores (honest construction:
+      the real stores, not a stub).
+
+    The production binding carries ZERO rows (``PHASE3_FULL_MEMORY_READERS ==
+    frozenset()``), so every Phase-8 ``memory`` reader — ``dec.pm`` — takes the
+    C3 ROWLESS branch (Task 11, d265f48): an honest EMPTY prefetch and an empty
+    completed contribution, with ``stores`` never touched. A reviewed reader
+    can only appear through a catalog re-freeze, at which point the row-ful
+    branch serves it through these same values. Sole production caller:
+    ``live_decide.build_production_bindings`` (the Lane-0 driver serves no
+    memory bridge — its workers declare no ``memory`` read category).
+    """
+    from guanlan_v2.orchestration.memory.catalog import (
+        phase3_memory_surface,
+        resolved_memory_policy,
+        serialize_memory_prefetch_binding,
+    )
+
+    surface = phase3_memory_surface()
+    factories.register_handler(
+        surface.provider_ref,
+        make_memory_bridge_provider_factory(
+            stores=stores,
+            policy=resolved_memory_policy(),
+            renderer_ref=surface.renderer_ref,
+            config_bytes=serialize_memory_prefetch_binding(
+                surface.prefetch_binding)))

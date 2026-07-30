@@ -1143,18 +1143,41 @@ def build_production_bindings(*, preset_id: str | None = None) -> DeepDecideBind
     # discrimination dec.research_mgr freezes with an honest EMPTY experience
     # contribution and the granted branch is structurally unreachable;
     # reaching it anyway fails LOUDLY (bridge_execution_error), never
-    # fabricates a retrieval. The DATA bridge's provider deliberately stays
-    # UNBOUND (the chartered L2-b gap: the two pv aux nodes keep degrading
-    # exactly as before), and the memory bridge's provider has no production
-    # registration ruling yet — dec.pm still refuses at its own bridge prepare
-    # until both are consciously bound (pinned in
-    # test_experience_provider_discrimination.py::TestTheNamedRemainingGap).
+    # fabricates a retrieval.
     from guanlan_v2.orchestration import bootstrap as _bootstrap
 
     _bootstrap.register_lane0_experience_factories(
         factories=bundle.factories, catalog=_bootstrap.load_lane0_catalog(),
         pool=None, registry=registry, experience_views=(),
         experience_scaler=None, as_of=clock.now())
+    # 2026-07-31 controller ruling (pm's two bridges — run deep-a06fd33840c0b3ee:
+    # research-mgr completed, then dec.pm died at bridge prepare naming
+    # data.runtime, trader blocked behind it). dec.pm activates data.runtime
+    # (cap.data.verified_snapshot, priority 100) AND memory.runtime (the
+    # 'memory' read category, priority 200); both providers are bound HERE, on
+    # the SAME bundle.factories the per-run plan_runner_factory →
+    # build_production_plan_runner._plan_executor → ExecutionRuntime executes
+    # over. Memory: the one reviewed recipe over the sealed catalog materials —
+    # the production prefetch binding has ZERO rows, so dec.pm takes the C3
+    # rowless branch (honest empty prefetch, stores untouched). Data: the
+    # worldless StructurallyDeadRowDataProvider — honest-empty ONLY for the
+    # structurally-dead dec.pm verified_snapshot row (defect H: node_param
+    # bindings on a params_schema_ref=None worker — unrunnable in ANY legal
+    # plan); every other shape stays LOUD, so the chartered L2-b gap (no
+    # production DataRuntimeWorld) keeps firing for the two pv aux nodes and
+    # for any future resolvable row. Pinned in test_pm_two_bridges.py; the
+    # tombstone (L1 ruling D-0 + L2-b supersede this at the re-freeze phase)
+    # lives on the provider class.
+    from guanlan_v2.orchestration.data.runtime import (
+        register_structurally_dead_row_data_provider,
+    )
+    from guanlan_v2.orchestration.memory.runtime import (
+        register_phase3_memory_provider_factory,
+    )
+
+    register_phase3_memory_provider_factory(
+        factories=bundle.factories, stores=stores)
+    register_structurally_dead_row_data_provider(factories=bundle.factories)
     presets = load_phase10_preset_registry(PRODUCTION_PRESETS_DIR)
 
     def admission_factory(*, run_id, request, draft, context, approvals, run_budget):

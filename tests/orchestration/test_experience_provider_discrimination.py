@@ -21,8 +21,10 @@ Two stacked causes, both ruled and both fixed here:
   (:func:`bootstrap.register_lane0_experience_factories`, the extracted
   experience half of ``register_bootstrap_runtime_factories`` — one recipe, no
   fork), called by ``live_decide.build_production_bindings`` on the production
-  bundle's factories. The DATA bridge's provider deliberately stays UNBOUND
-  (the chartered L2-b gap) — pinned below.
+  bundle's factories. The DATA bridge's provider stayed UNBOUND under THIS
+  ruling; the 2026-07-31 pm ruling then bound it (and the memory provider)
+  through their own reviewed recipes — the flip is recorded in
+  ``TestTheNamedRemainingGap`` and owned by ``test_pm_two_bridges.py``.
 
 * **Cause 2** — once bound, the provider's freeze path invoked
   ``experience.retrieve`` unconditionally while the ruled analyzer half
@@ -57,7 +59,6 @@ import guanlan_v2.orchestration.bootstrap as bs
 import guanlan_v2.orchestration.worker as W
 from guanlan_v2.orchestration import presets as P
 from guanlan_v2.orchestration.adapters import chain
-from guanlan_v2.orchestration.catalog_runtime import CatalogMaterialError
 from guanlan_v2.orchestration.enums import ApprovalPolicy, ExecutionKind
 from guanlan_v2.orchestration.eventstore import (
     RuntimeStores,
@@ -97,8 +98,10 @@ LIVE_FAILURE_REASON = (
     "no handler factory bound for lane0.experience.provider@1"
 )
 #: the exact live failure string of the two pv aux nodes (same run, node
-#: price-action) — and, once research-mgr completes, the FIRST refusal dec.pm
-#: hits (the chartered L2-b gap; see TestTheNamedRemainingGap).
+#: price-action) — and, once research-mgr completed, the refusal dec.pm hit
+#: live (run deep-a06fd33840c0b3ee). 2026-07-31 pm ruling: now the RAW-bundle
+#: control only — the production recipes bind both of pm's providers
+#: (``test_pm_two_bridges.py``; conscious flip in TestTheNamedRemainingGap).
 LIVE_DATA_FAILURE_REASON = (
     "no trusted provider factory bound for bridge 'data.runtime': "
     "no handler factory bound for bridge.data_runtime.provider@1"
@@ -316,9 +319,12 @@ class TestTheLiveFailureAndTheBinding:
         """The deep seam (Cause 1 closed where the live run died): the
         production bindings register the experience provider on the SAME bundle
         factories the per-run plan runner executes over, via the extracted
-        driver recipe — and the DATA provider stays honestly UNBOUND (the
-        chartered L2-b gap; the two pv aux nodes keep degrading), as does the
-        memory provider (no ruling covers it yet — see TestTheNamedRemainingGap).
+        driver recipe. CONSCIOUS FLIP (2026-07-31 pm ruling, run
+        deep-a06fd33840c0b3ee): the DATA and MEMORY providers — pinned UNBOUND
+        by the previous ruling — are now BOUND on the same factories through
+        their own reviewed recipes (``register_structurally_dead_row_data_
+        provider`` / ``register_phase3_memory_provider_factory``); the full
+        semantics live in ``test_pm_two_bridges.py``.
         """
         from guanlan_v2 import orch_store_status as status_mod
         from guanlan_v2.orchestration.adapters import durable as durable_mod
@@ -326,7 +332,13 @@ class TestTheLiveFailureAndTheBinding:
             build_durable_runtime_stores,
         )
         from guanlan_v2.orchestration.data.catalog import phase3_data_surface
+        from guanlan_v2.orchestration.data.runtime import (
+            StructurallyDeadRowDataProvider,
+        )
         from guanlan_v2.orchestration.memory.catalog import phase3_memory_surface
+        from guanlan_v2.orchestration.memory.runtime import (
+            MemoryRuntimeBridgeProvider,
+        )
         from guanlan_v2.orchestration.pipeline import live_decide
 
         stores = build_durable_runtime_stores(tmp_path / "orch")
@@ -347,12 +359,17 @@ class TestTheLiveFailureAndTheBinding:
         # bound: the experience provider + backend (the ruled fix)…
         assert factories.handler_factory(lane0.refs["lane0.experience.provider"])
         assert factories.capability_backend_factory(lane0.capability_ref)
-        # …and NOT bound: the data provider (chartered L2-b) and the memory
-        # provider (unruled) — pinned so binding them is a conscious flip.
-        with pytest.raises(CatalogMaterialError, match="no handler factory"):
-            factories.handler_factory(phase3_data_surface().provider_ref)
-        with pytest.raises(CatalogMaterialError, match="no handler factory"):
-            factories.handler_factory(phase3_memory_surface().provider_ref)
+        # …and — the pm ruling — the data + memory providers on the SAME registry:
+        data_factory = factories.handler_factory(phase3_data_surface().provider_ref)
+        assert isinstance(
+            data_factory(bridge=SimpleNamespace(bridge_id="data.runtime", priority=100),
+                         summary=SimpleNamespace(summary_digest="s" * 64)),
+            StructurallyDeadRowDataProvider)
+        mem_factory = factories.handler_factory(phase3_memory_surface().provider_ref)
+        assert isinstance(
+            mem_factory(bridge=SimpleNamespace(bridge_id="memory.runtime", priority=200),
+                        summary=SimpleNamespace(summary_digest="s" * 64)),
+            MemoryRuntimeBridgeProvider)
 
 
 # =========================================================================== #
@@ -559,34 +576,55 @@ class _GatewayTouched(Exception):
 # 3. the named remaining gap — what still blocks pm (and therefore trader)      #
 # =========================================================================== #
 class TestTheNamedRemainingGap:
-    """CONSCIOUS PIN of the decision trunk's NEXT blocker, named not hidden.
+    """The named gap, CONSCIOUSLY FLIPPED (2026-07-31 pm ruling).
 
-    With Cause 1+2 fixed, ``research-mgr`` completes — but ``dec.pm`` activates
-    ``data.runtime`` (its ``cap.data.verified_snapshot`` allowlist entry) and
-    ``memory.runtime`` (its ``memory`` read category), and NEITHER provider
-    factory is bound in the deep production runtime: ``data.runtime`` is the
-    chartered L2-b gap (this controller ruling explicitly keeps it unbound —
-    the two pv aux nodes keep degrading exactly as before), and the memory
-    provider half (``memory/runtime.py``, C3-discriminated and ready) has no
-    production registration ruling yet. So the next live run completes
-    research-mgr and then dies at pm's bridge prepare with the data reason
-    verbatim below (priority order: data 100 before memory 200); trader stays
-    blocked behind it. Flipping this pin = consciously binding those providers.
+    The previous ruling pinned here that ``dec.pm`` — activating ``data.
+    runtime`` (its ``cap.data.verified_snapshot`` allowlist entry) and
+    ``memory.runtime`` (its ``memory`` read category) — still died at bridge
+    prepare because neither provider factory was bound, and the live run
+    ``deep-a06fd33840c0b3ee`` confirmed it verbatim (research-mgr completed,
+    pm ``bridge_preparation_failed`` naming ``data.runtime``, trader blocked).
+    The controller then ruled BOTH bindings: the memory provider through
+    ``register_phase3_memory_provider_factory`` (pm = the C3 rowless reader:
+    honest empty prefetch) and the data provider through
+    ``register_structurally_dead_row_data_provider`` (honest-empty ONLY for
+    pm's structurally-dead ``verified_snapshot`` row; every other shape —
+    including the pv aux nodes' rowless one — stays LOUD, so the chartered
+    L2-b gap keeps firing where it is real). Full semantics + the raw-bundle
+    control (``LIVE_DATA_FAILURE_REASON``) live in ``test_pm_two_bridges.py``.
     """
 
-    def test_pm_is_still_refused_at_its_own_bridge_prepare(
+    def test_pm_is_refused_on_the_raw_bundle_but_resolves_through_the_recipes(
             self, bundle, view, reduced, env):
         from guanlan_v2.orchestration.catalog_runtime import TrustedFactoryRegistry
+        from guanlan_v2.orchestration.data.runtime import (
+            register_structurally_dead_row_data_provider,
+        )
+        from guanlan_v2.orchestration.memory.runtime import (
+            register_phase3_memory_provider_factory,
+        )
 
-        factories = TrustedFactoryRegistry(bundle.runtime)
+        # the raw control: experience alone still refuses pm (data first, 100).
+        experience_only = TrustedFactoryRegistry(bundle.runtime)
         bs.register_lane0_experience_factories(
-            factories=factories, catalog=bs.load_lane0_catalog(), pool=None,
+            factories=experience_only, catalog=bs.load_lane0_catalog(), pool=None,
             registry=env["registry"], experience_views=(),
             experience_scaler=None, as_of=NOW)
-        runtime = _exec_runtime(bundle, view, reduced.report, factories=factories)
+        runtime = _exec_runtime(bundle, view, reduced.report,
+                                factories=experience_only)
         with pytest.raises(W.PreflightError) as exc_info:
             _resolver(runtime, reduced.draft, env["snapshot"], "pm")
         assert str(exc_info.value) == LIVE_DATA_FAILURE_REASON
+
+        # the ruled flip: with the two provider recipes, pm's resolver
+        # constructs and derives exactly its two active bridges.
+        register_phase3_memory_provider_factory(
+            factories=experience_only, stores=None)
+        register_structurally_dead_row_data_provider(factories=experience_only)
+        runtime = _exec_runtime(bundle, view, reduced.report,
+                                factories=experience_only)
+        resolver = _resolver(runtime, reduced.draft, env["snapshot"], "pm")
+        assert resolver.required_bridge_ids == ("data.runtime", "memory.runtime")
 
     def test_trader_has_no_bridge_requirement_at_all(
             self, bundle, view, reduced, env):
