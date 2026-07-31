@@ -222,6 +222,96 @@ def test_mismatched_calendar_returns_unknown_not_guess():
 
 
 # --------------------------------------------------------------------------- #
+# resolve_limit_rule — clamped lower-bound semantics for a pre-coverage listing #
+# (L2-b Task-1 review Important #1: an uncovered date is UNCOVERED, not "zero   #
+# sessions" — counting across it silently undercounts and reported a seasoned   #
+# main-board stock as limitless.)                                              #
+# --------------------------------------------------------------------------- #
+#: a calendar whose material starts mid-window (like the production 2026-only
+#: material, coverage from 2026-01-05): every earlier session is UNKNOWABLE.
+_CLAMP_COVERAGE_START = date(2026, 1, 5)
+
+CLAMPED_CALENDAR = build_trading_calendar(
+    calendar_id=_CALENDAR_ID,
+    sessions=tuple(d for d in _weekday_sessions_2026() if d >= _CLAMP_COVERAGE_START),
+    material_id="trading_calendar.xshg.2026-from-0105",
+    material_version="2026.1",
+)
+
+CLAMPED_POLICY = build_limit_rule_policy(
+    policy_id="ashare.price_limit.clamped",
+    policy_version="1",
+    calendar=CLAMPED_CALENDAR,
+    entries=(_ENTRY,),
+)
+
+
+def _clamped(sym, as_of, meta):
+    return resolve_limit_rule(
+        sym, as_of, meta, policy=CLAMPED_POLICY, calendar=CLAMPED_CALENDAR
+    )
+
+
+def test_pre_coverage_listing_early_as_of_is_honest_refusal_not_false_no_limit():
+    """Listed decades before coverage + only 4 in-coverage sessions elapsed
+    (< window 5): the true elapsed count CANNOT be established from the
+    material — a typed unknown refusal, never the false 'no ordinary price
+    limit applies' (the review's reproduced January case)."""
+    sym = Symbol(code="600519", exchange="SH", board="main")
+    rule = _clamped(
+        sym,
+        datetime(2026, 1, 8, tzinfo=UTC),
+        _meta(sym, metadata_available_at=LISTED_AT),
+    )
+    assert rule.pct is None
+    assert "listed before calendar coverage" in rule.reason
+    assert "within the initial listing sessions" not in rule.reason
+
+
+def test_pre_coverage_listing_late_as_of_gets_the_ordinary_limit():
+    """The lower bound (sessions counted from coverage start) >= window: the
+    pre-coverage listing session itself is a real session NOT in that count,
+    so the window has certainly passed — the ordinary limit applies."""
+    sym = Symbol(code="600519", exchange="SH", board="main")
+    rule = _clamped(sym, AS_OF, _meta(sym))
+    assert rule.pct == 0.10
+
+
+def test_pre_coverage_listing_late_as_of_st_still_wins():
+    """The clamp only certifies the window has passed; the ST rule still
+    applies after the fall-through."""
+    sym = Symbol(code="600519", exchange="SH", board="main")
+    rule = _clamped(sym, AS_OF, _meta(sym, is_st=True))
+    assert rule.pct == 0.05
+
+
+def test_in_coverage_listing_keeps_the_no_limit_window():
+    """True IPO fidelity pinned: listed inside coverage, 3 elapsed sessions
+    <= window 5 — the exact count governs, unchanged semantics."""
+    sym = Symbol(code="600519", exchange="SH", board="main")
+    listed = datetime(2026, 6, 1, tzinfo=UTC)  # a Monday session
+    meta = InstrumentMeta(
+        symbol=sym, is_st=False, listed_at=listed, metadata_available_at=listed
+    )
+    rule = _clamped(sym, datetime(2026, 6, 3, tzinfo=UTC), meta)
+    assert rule.pct is None
+    assert "within the initial listing sessions" in rule.reason
+
+
+def test_as_of_outside_coverage_is_unknown_not_zero_sessions():
+    """An as_of before coverage start or past coverage end is UNCOVERED: the
+    session count is not computable, so the rule is an honest unknown."""
+    sym = Symbol(code="600519", exchange="SH", board="main")
+    for as_of in (
+        datetime(2026, 1, 2, tzinfo=UTC),   # before the first covered session
+        datetime(2027, 1, 4, tzinfo=UTC),   # past the last covered session
+    ):
+        rule = _clamped(sym, as_of, _meta(sym, metadata_available_at=LISTED_AT))
+        assert rule.pct is None
+        assert "coverage" in rule.reason.lower()
+
+
+# --------------------------------------------------------------------------- #
 # TradingCalendar port + resolver (folds in the plan's test_calendar.py cases) #
 # --------------------------------------------------------------------------- #
 def test_is_session_and_holiday():

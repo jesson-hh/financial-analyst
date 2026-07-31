@@ -60,6 +60,11 @@ from guanlan_v2.orchestration.data.catalog import phase3_data_surface
 from guanlan_v2.orchestration.data.errors import SnapshotMismatchError
 from guanlan_v2.orchestration.data.registry import SealedRegistryError
 from guanlan_v2.orchestration.data.source import RouteEntry
+from guanlan_v2.orchestration.data.symbols import (
+    InstrumentMeta,
+    Symbol,
+    resolve_limit_rule,
+)
 
 UTC = timezone.utc
 #: 2026-07-16 07:00Z == 15:00 Asia/Shanghai (A-share close) — the frozen as_of
@@ -307,6 +312,68 @@ class TestCrossProcessDeterminism:
             recipe.source_registry_digest
         assert recipe.routing.source_config_digest == recipe.source_config_digest
         assert recipe.routing.audit_id == PRODUCTION_ROUTING_AUDIT_ID
+
+
+class TestLimitRuleClampedLowerBound:
+    """The L2-b Task-1 review's empirical cases as fixtures: the production
+    recipe's 5-session window + the 2026-only calendar (coverage from
+    2026-01-05) must NEVER report a pre-coverage-listed seasoned stock as
+    limitless. Pre-fix, 600519 (listed 2001-08-27) at as_of 2026-01-08 came
+    back ``pct=None, "within the initial listing sessions"`` — a 25-year-old
+    main-board stock reported limitless, recurring at every annual material
+    bump. These values seal into digests Task 7 commits into DataContexts."""
+
+    @staticmethod
+    def _rule_600519(recipe, as_of):
+        sym = Symbol(code="600519", exchange="SH", board="main")
+        listed = datetime(2001, 8, 27, tzinfo=UTC)
+        meta = InstrumentMeta(
+            symbol=sym, is_st=False, listed_at=listed,
+            metadata_available_at=listed)
+        lp = recipe.registry.snapshot().limit_policies[0]
+        return resolve_limit_rule(
+            sym, as_of, meta, policy=lp, calendar=recipe.calendar)
+
+    def test_600519_january_is_an_honest_refusal_never_false_no_limit(self, recipe):
+        """The review's reproduced January case: 4 in-coverage sessions
+        elapsed (2026-01-05..08) < window 5 and the listing predates coverage
+        — the elapsed count cannot be established, so the answer is a typed
+        unknown, never the false 'no limit'."""
+        rule = self._rule_600519(recipe, datetime(2026, 1, 8, 7, 0, tzinfo=UTC))
+        assert rule.pct is None
+        assert "listed before calendar coverage" in rule.reason
+        assert "within the initial listing sessions" not in rule.reason
+
+    def test_600519_july_gets_the_ordinary_main_board_limit(self, recipe):
+        """The lower-bound-certain arm: sessions from coverage start >> 5, so
+        the listing window has certainly passed — pct 0.1, before AND after
+        the fix."""
+        rule = self._rule_600519(recipe, AS_OF)
+        assert rule.pct == 0.1
+        assert "ordinary limit" in rule.reason
+
+    def test_synthetic_2026_ipo_keeps_its_no_limit_window(self, recipe):
+        """True IPO fidelity: listed in-coverage 2026-06-01 (a session), 3
+        elapsed sessions <= 5 — the exact-count window semantics unchanged."""
+        assert recipe.calendar.is_session(date(2026, 6, 1)) is True
+        sym = Symbol(code="600519", exchange="SH", board="main")
+        listed = datetime(2026, 6, 1, tzinfo=UTC)
+        meta = InstrumentMeta(
+            symbol=sym, is_st=False, listed_at=listed,
+            metadata_available_at=listed)
+        lp = recipe.registry.snapshot().limit_policies[0]
+        rule = resolve_limit_rule(
+            sym, datetime(2026, 6, 3, 7, 0, tzinfo=UTC), meta,
+            policy=lp, calendar=recipe.calendar)
+        assert rule.pct is None
+        assert "within the initial listing sessions" in rule.reason
+
+    def test_as_of_outside_calendar_coverage_refuses(self, recipe):
+        """2027 is past coverage: an uncovered date is UNCOVERED, not 'zero
+        sessions' — honest refusal, never a counted-across answer."""
+        rule = self._rule_600519(recipe, datetime(2027, 1, 4, 7, 0, tzinfo=UTC))
+        assert rule.pct is None
+        assert "coverage" in rule.reason.lower()
 
 
 class TestGoldens:

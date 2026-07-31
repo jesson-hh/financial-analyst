@@ -381,6 +381,34 @@ def resolve_limit_rule(
     :class:`LimitRule` with a stated reason — never a guessed percentage. The
     injected digest-frozen ``policy`` (selected by ``as_of``) owns the ST / board /
     listing-stage rules.
+
+    **Clamped lower-bound semantics for the session window** (the calendar
+    coverage contract, ``data/calendar.py``: an uncovered date is *uncovered*,
+    not "zero sessions" — counting across it silently undercounts). The
+    session-based listing-stage rule is evaluated in three arms:
+
+    1. ``as_of`` outside the calendar's covered span → the elapsed-session
+       count is not computable at all → typed unknown refusal.
+    2. ``listed_at`` inside coverage → the exact
+       ``sessions_between(listed_at, as_of)`` count governs, unchanged — true
+       IPO fidelity (a genuine new listing keeps its real no-limit window).
+    3. ``listed_at`` *before* coverage → the exact count is unknowable, but
+       ``lower_bound = sessions_between(coverage_start, as_of)`` is a certain
+       lower bound. If ``lower_bound >= first_session_window`` the window has
+       CERTAINLY passed: the listing day itself was a real trading session
+       that predates coverage and is therefore *not* in ``lower_bound``, so
+       the true count is at least ``lower_bound + 1 > window`` — the ordinary
+       limit applies. Otherwise the window may or may not have passed and the
+       answer is a typed unknown refusal ("listed before calendar coverage"),
+       **never** the false "no ordinary price limit applies" that a raw
+       undercount produced for every pre-coverage-listed instrument in the
+       material's first ``window`` sessions.
+
+    Rejected alternatives, for the record: ``first_session_window=0`` trades
+    one falsehood for another (a genuine in-coverage IPO would wrongly get the
+    ordinary pct inside its true no-limit window); a bare coverage assertion
+    on ``listed_at`` turns EVERY pre-coverage-listed instrument into unknown
+    forever.
     """
     as_of = _aware_utc(as_of)  # raises on naive / non-datetime
 
@@ -421,24 +449,48 @@ def resolve_limit_rule(
                 "the exact trading calendar is unavailable or does not match the "
                 "policy; the listing-stage price limit cannot be determined"
             )
-        sessions_since_listing = calendar.sessions_between(
-            meta.listed_at.date(), as_of.date()
-        )
-        if sessions_since_listing <= entry.first_session_window:
-            if entry.first_session_pct is None:
+        as_of_day = as_of.date()
+        listed_day = meta.listed_at.date()
+        coverage = calendar.coverage
+        if coverage is None or not (coverage[0] <= as_of_day <= coverage[1]):
+            return _unknown(
+                f"as_of {as_of_day.isoformat()} is outside the trading "
+                "calendar's coverage; an uncovered date is uncovered, not "
+                "zero sessions, so the listing-stage rule cannot be evaluated"
+            )
+        if listed_day >= coverage[0]:
+            # Arm 2 — exact count (both endpoints inside coverage): true IPO
+            # fidelity, semantics unchanged.
+            sessions_since_listing = calendar.sessions_between(listed_day, as_of_day)
+            if sessions_since_listing <= entry.first_session_window:
+                if entry.first_session_pct is None:
+                    return LimitRule(
+                        pct=None,
+                        reason=(
+                            "within the initial listing sessions: no ordinary "
+                            "price limit applies"
+                        ),
+                        rule_version=policy.rule_version,
+                    )
                 return LimitRule(
-                    pct=None,
-                    reason=(
-                        "within the initial listing sessions: no ordinary price "
-                        "limit applies"
-                    ),
+                    pct=entry.first_session_pct,
+                    reason="initial listing-session price limit",
                     rule_version=policy.rule_version,
                 )
-            return LimitRule(
-                pct=entry.first_session_pct,
-                reason="initial listing-session price limit",
-                rule_version=policy.rule_version,
-            )
+        else:
+            # Arm 3 — clamped lower bound: the listing predates coverage, so
+            # the exact count is unknowable. Counting from coverage_start is a
+            # certain lower bound; the pre-coverage listing session itself is
+            # a real session NOT in it, so lower_bound >= window certifies the
+            # window has passed (true count >= lower_bound + 1 > window).
+            lower_bound = calendar.sessions_between(coverage[0], as_of_day)
+            if lower_bound < entry.first_session_window:
+                return _unknown(
+                    "listed before calendar coverage; elapsed sessions cannot "
+                    "be established, so whether the initial listing window has "
+                    "passed is indeterminate"
+                )
+            # else: certainly past the window — fall through to ST/board.
 
     if meta.is_st:
         return LimitRule(
