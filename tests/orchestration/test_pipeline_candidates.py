@@ -339,20 +339,23 @@ def test_an_empty_slate_is_reported_as_a_degraded_node_never_a_silent_success():
 
 
 def test_a_row_outside_the_phase3_grammar_is_skipped_with_an_honest_badge():
-    """A real one: the vendored artifact's 920xxx 北交所 rows are outside the
-    Phase 3 grammar (``BJ920807`` → derived exchange SZ → refused). They are
-    EXCLUDED and COUNTED, never re-mapped by fiat and never silently dropped."""
+    """CONSCIOUSLY FLIPPED 2026-07-31 (merge c01d099, the great-meitner BJ-920
+    fix): ``BJ920807`` now maps to BJ through the shared predicate and ENTERS
+    the slate. A genuinely non-grammatical row (``白酒``) keeps the honesty
+    rule live: EXCLUDED and COUNTED, never re-mapped by fiat."""
+    # 白酒 sits at rank 1 so the scan MUST meet it while filling top_n
+    # (the builder counts unmappables ENCOUNTERED, not all rows).
     rows = (
-        M.RankingRow(code="BJ920807", rank=1, score=5.3),
-        M.RankingRow(code="SH600519", rank=2, score=5.2),
-        M.RankingRow(code="白酒", rank=3, score=5.1),
+        M.RankingRow(code="白酒", rank=1, score=5.3),
+        M.RankingRow(code="BJ920807", rank=2, score=5.2),
+        M.RankingRow(code="SH600519", rank=3, score=5.1),
         M.RankingRow(code="SZ000001", rank=4, score=5.0),
     )
     slate = M.build_v4_slate(
         params=M.CandV4Params(top_n=2),
         ports=_ports(reader=_FixtureRankingReader(_artifact(rows=rows))))
-    assert [e.code for e in slate.entries] == ["600519", "000001"]
-    assert f"{M.UNMAPPABLE_CODES_BADGE_PREFIX}2" in slate.badges
+    assert [e.code for e in slate.entries] == ["920807", "600519"]
+    assert f"{M.UNMAPPABLE_CODES_BADGE_PREFIX}1" in slate.badges
 
 
 def test_a_duplicate_code_is_refused_by_task_1_never_silently_deduped():

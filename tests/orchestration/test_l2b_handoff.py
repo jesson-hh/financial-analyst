@@ -493,35 +493,14 @@ class TestLiveClientSourceEcho:
 # =========================================================================== #
 # 5. the BJ-920 identity gate (inherited defect — HONESTLY RED, escalated)      #
 # =========================================================================== #
-@pytest.mark.xfail(strict=True, reason=(
-    "ESCALATION (L2-b Task 0 item 5 / L1 Task 1 review Important #1): the "
-    "orchestration fork's normalize_symbol maps leading 8/4 to BJ but lets "
-    "920xxx fall through to SZ/main — a 920 code would perform a wrong-market "
-    "read with a well-formed but FALSE Symbol identity once a world is bound. "
-    "The fix exists on branch great-meitner (296bd02, the shared is_bj_code "
-    "predicate; merging it also flips the test_pipeline_candidates BJ-920 "
-    "xfail + the candidates.py docstring). The controller rules on the "
-    "merge/port; NEVER hand-roll the 4/8/920 prefix rule here (the exact "
-    "defect class the D-0 ruling forbids). strict=True: the great-meitner "
-    "merge turns this into an XPASS failure — the conscious flip point."))
 def test_bj_920_identity_gate():
+    """CONSCIOUSLY FLIPPED 2026-07-31: the great-meitner BJ-920 fix (296bd02)
+    was merged at the controller's Task-0 ruling (merge c01d099) -- 920xxx now
+    derives BJ/bj through the shared predicate. This gate stays as the
+    permanent identity pin the production world stands on."""
     sym = normalize_symbol("920799")
     assert sym.exchange == "BJ"
     assert sym.board == "bj"
-
-
-def test_bj_920_defect_shape_today_is_sz_main():
-    """The defect's CURRENT shape, pinned green so its disappearance is loud:
-    bare ``920799`` derives SZ/main, and the dotted ``920807.BJ`` grammar
-    refuses on the exchange conflict (how the vendored 北交所 rows surface as
-    ``unmappable_codes`` today, candidates.py honesty rule 3). When
-    great-meitner lands, BOTH halves of this pin flip together with the xfail
-    above — delete this test in that same commit.
-    """
-    sym = normalize_symbol("920799")
-    assert (sym.exchange, sym.board) == ("SZ", "main")
-    with pytest.raises(ValueError, match="exchange"):
-        normalize_symbol("920807.BJ")
 
 
 # =========================================================================== #
