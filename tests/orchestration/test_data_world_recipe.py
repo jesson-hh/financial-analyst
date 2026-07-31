@@ -57,7 +57,10 @@ from guanlan_v2.orchestration.adapters.data_world import (
     production_data_recipe,
 )
 from guanlan_v2.orchestration.data.catalog import phase3_data_surface
-from guanlan_v2.orchestration.data.errors import SnapshotMismatchError
+from guanlan_v2.orchestration.data.errors import (
+    RoutingConfigurationError,
+    SnapshotMismatchError,
+)
 from guanlan_v2.orchestration.data.registry import SealedRegistryError
 from guanlan_v2.orchestration.data.source import RouteEntry
 from guanlan_v2.orchestration.data.symbols import (
@@ -208,6 +211,19 @@ class TestPolicyResolution:
             "main": 0.1, "star": 0.2, "chinext": 0.2, "bj": 0.3}
         assert entry.st_pct == 0.05
 
+    def test_limit_policy_validity_starts_at_the_registration_reform(self, recipe):
+        """Review minor #2: ``effective_from`` must not overstate the table —
+        the WHOLE row (chinext 0.20 + the main-board 5-session window) is only
+        true at once from 2023-02-17 全面注册制. A pre-reform as_of is
+        therefore honestly OUTSIDE every policy window: this ONLINE-at-2026
+        table must never be trusted by a PIT replay over 2020-2023."""
+        lp = recipe.registry.snapshot().limit_policies[0]
+        entry = lp.entry_for(AS_OF)
+        assert entry is not None
+        assert entry.effective_from == datetime(2023, 2, 17, tzinfo=UTC)
+        # a 2022 as_of falls in no window -> resolve_limit_rule refuses honestly
+        assert lp.entry_for(datetime(2022, 6, 1, tzinfo=UTC)) is None
+
 
 # =========================================================================== #
 # 4. calendar honesty — the committed, digest-verified 2026 session material    #
@@ -260,6 +276,27 @@ class TestCalendarHonesty:
         with pytest.raises(SnapshotMismatchError):
             _load_calendar_material(path=tampered)
 
+    def test_missing_material_file_is_a_typed_refusal(self, tmp_path):
+        """Review minor #3: a missing committed material must refuse in the
+        module's typed vocabulary (never an untyped FileNotFoundError) — the
+        recipe reads committed bytes and never fabricates a calendar."""
+        absent = tmp_path / "absent-calendar.json"
+        with pytest.raises(RoutingConfigurationError, match="never fabricates"):
+            _load_calendar_material(path=absent)
+
+    def test_corrupt_material_file_is_a_typed_refusal(self, tmp_path):
+        """Corrupt JSON and a missing required key are both typed refusals
+        naming the material path (never an untyped JSONDecodeError/KeyError)."""
+        bad = tmp_path / "corrupt-calendar.json"
+        bad.write_text("{not json", encoding="utf-8")
+        with pytest.raises(RoutingConfigurationError, match="corrupt-calendar"):
+            _load_calendar_material(path=bad)
+        keyless = tmp_path / "keyless-calendar.json"
+        keyless.write_text(json.dumps({"calendar_id": "cn_a_share"}),
+                           encoding="utf-8")
+        with pytest.raises(RoutingConfigurationError, match="keyless-calendar"):
+            _load_calendar_material(path=keyless)
+
     def test_a_date_past_coverage_is_uncovered_not_zero(self, recipe):
         """2027 is outside coverage — the honest-refusal contract downstream
         (calendar.py coverage docstring); extending into 2027 is a reviewed
@@ -300,6 +337,35 @@ class TestCrossProcessDeterminism:
 
     def test_recipe_is_cached_module_level(self):
         assert production_data_recipe() is production_data_recipe()
+
+    def test_recipe_cache_is_single_flight_under_threads(self, monkeypatch):
+        """Review minor #5: concurrent first calls build the recipe exactly
+        ONCE (the module cache is lock-guarded, double-checked) — a benign
+        race today, closed cheaply before Task 2 makes the cache load-bearing."""
+        import concurrent.futures
+        import threading
+
+        import guanlan_v2.orchestration.adapters.data_world as DW
+
+        real_build = DW._build_recipe
+        calls: list[int] = []
+
+        def counting_build(**kw):
+            calls.append(threading.get_ident())
+            return real_build(**kw)
+
+        monkeypatch.setattr(DW, "_build_recipe", counting_build)
+        monkeypatch.setattr(DW, "_RECIPE", None)  # restored by monkeypatch
+        barrier = threading.Barrier(6)
+
+        def hit():
+            barrier.wait()
+            return DW.production_data_recipe()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+            results = [f.result() for f in [ex.submit(hit) for _ in range(6)]]
+        assert len({id(r) for r in results}) == 1
+        assert len(calls) == 1, f"recipe built {len(calls)}x under contention"
 
     def test_derived_digests_are_the_component_digests(self, recipe):
         assert recipe.source_registry_digest == \

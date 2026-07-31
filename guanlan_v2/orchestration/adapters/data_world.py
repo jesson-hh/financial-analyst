@@ -39,6 +39,7 @@ hits it — regenerate with the same reviewed reader, bump
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +49,7 @@ from guanlan_v2.orchestration.data.calendar import (
     TradingCalendarMaterial,
     TradingCalendarResolver,
 )
+from guanlan_v2.orchestration.data.errors import RoutingConfigurationError
 from guanlan_v2.orchestration.data.catalog import phase3_data_surface
 from guanlan_v2.orchestration.data.registry import DataSourceRegistry
 from guanlan_v2.orchestration.data.snapshot import (
@@ -120,17 +122,39 @@ def _load_calendar_material(*, path: Path | None = None) -> ImmutableTradingCale
     it to equal the file's declared ``content_digest`` — one tampered byte in the
     session set (or a drifted declared digest) raises
     :class:`~guanlan_v2.orchestration.data.errors.SnapshotMismatchError` loudly.
+
+    A missing/unreadable file or a corrupt document (bad JSON, missing keys,
+    malformed sessions) is a typed
+    :class:`~guanlan_v2.orchestration.data.errors.RoutingConfigurationError`
+    naming the material path — never an untyped ``FileNotFoundError`` /
+    ``KeyError``, and never a fabricated or repaired calendar.
     """
     p = path if path is not None else _REPO_ROOT / PRODUCTION_CALENDAR_MATERIAL_PATH
-    doc = json.loads(p.read_text(encoding="utf-8"))
-    material = TradingCalendarMaterial(
-        calendar_id=doc["calendar_id"], sessions=tuple(doc["sessions"])
-    )
-    ref = ContentRef(
-        id=doc["material_id"],
-        version=doc["material_version"],
-        content_digest=doc["content_digest"],
-    )
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RoutingConfigurationError(
+            f"committed calendar material missing or unreadable at {p} "
+            f"({type(exc).__name__}: {exc}); the recipe reads committed bytes "
+            "and never fabricates a calendar"
+        ) from exc
+    try:
+        doc = json.loads(text)
+        material = TradingCalendarMaterial(
+            calendar_id=doc["calendar_id"], sessions=tuple(doc["sessions"])
+        )
+        ref = ContentRef(
+            id=doc["material_id"],
+            version=doc["material_version"],
+            content_digest=doc["content_digest"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RoutingConfigurationError(
+            f"committed calendar material at {p} is corrupt "
+            f"({type(exc).__name__}: {exc}); the recipe never fabricates or "
+            "repairs a calendar"
+        ) from exc
+    # digest drift stays its own typed failure: SnapshotMismatchError, unwrapped.
     return ImmutableTradingCalendar(material=material, material_ref=ref)
 
 
@@ -191,7 +215,15 @@ def _build_recipe(*, schema_registry_digest: str) -> ProductionDataWorldRecipe:
             calendar=calendar,
             entries=(
                 LimitRuleEntry(
-                    effective_from=datetime(2020, 1, 1, tzinfo=timezone.utc),
+                    # Provenance: 2023-02-17 = 全面注册制 (the full
+                    # registration-based reform taking effect across all
+                    # boards) — the earliest date this WHOLE row is true at
+                    # once: the main-board 5-session listing window exists
+                    # only from that reform, and chinext 0.20 only from
+                    # 2020-08-24. This table serves the ONLINE-at-2026 lane;
+                    # a PIT replay over 2020-2023 must NOT trust it (that
+                    # needs a properly windowed multi-entry table).
+                    effective_from=datetime(2023, 2, 17, tzinfo=timezone.utc),
                     board_pct={"main": 0.1, "star": 0.2, "chinext": 0.2, "bj": 0.3},
                     st_pct=0.05,
                     first_session_window=5,
@@ -255,6 +287,7 @@ def _production_chain_registry_digest() -> str:
 
 
 _RECIPE: ProductionDataWorldRecipe | None = None
+_RECIPE_LOCK = threading.Lock()
 
 
 def production_data_recipe() -> ProductionDataWorldRecipe:
@@ -264,10 +297,16 @@ def production_data_recipe() -> ProductionDataWorldRecipe:
     build failure (missing material, digest drift, unsealed registry) raises
     loudly at first use — Task 4 binds that first use to binding construction
     so a broken recipe kills the deep lane at startup, before any lease.
+
+    The module cache is double-checked under ``_RECIPE_LOCK`` so concurrent
+    first calls build exactly once (the build is deterministic, so the race
+    was benign — but one build is the contract worth pinning).
     """
     global _RECIPE
     if _RECIPE is None:
-        _RECIPE = _build_recipe(
-            schema_registry_digest=_production_chain_registry_digest()
-        )
+        with _RECIPE_LOCK:
+            if _RECIPE is None:
+                _RECIPE = _build_recipe(
+                    schema_registry_digest=_production_chain_registry_digest()
+                )
     return _RECIPE
