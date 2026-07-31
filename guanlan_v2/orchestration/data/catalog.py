@@ -92,8 +92,10 @@ DATA_BRIDGE_ID = "data.runtime"
 PHASE3_DATA_CATALOG_VERSION = "phase3-data-v1"
 
 #: the one reviewed initial integration grant: worker id -> granted data method ids.
-#: The prefetch row this produces is DECLARED but NOT RUNNABLE — see the honesty
-#: note at the prefetch-binding construction site in :class:`_Phase3DataSurface`.
+#: The prefetch row this produces is RUNNABLE under the materialization-stamped
+#: subject projection (L1, 2026-07-31) and SERVABLE only once L2-b binds a
+#: production DataRuntimeWorld — see the honesty note at the prefetch-binding
+#: construction site in :class:`_Phase3DataSurface`.
 _REVIEWED_INTEGRATION_GRANTS: dict[str, tuple[str, ...]] = {
     "dec.pm": ("verified_snapshot",),
 }
@@ -481,29 +483,32 @@ class _Phase3DataSurface:
 
         # -- the reviewed prefetch binding (integration grants only) ----------- #
         #
-        # HONESTY NOTE — this row is DECLARED, but it is NOT RUNNABLE as written.
-        # Both ``param_bindings`` below read out of ``PlanNode.params``
-        # (``source_kind="node_param"``), yet the only granted worker (``dec.pm``)
-        # declares ``params_schema_ref=None``. Phase-1 validation refuses ANY node
-        # params for such a worker (``spec.py`` issue ``params_not_allowed``) — in a
-        # sealed v2 preset (which independently forbids node params, see
-        # ``pipeline/assembly.py``) and in a dynamic plan alike. So the node these
-        # pointers read from is structurally guaranteed to be empty and
-        # ``data/runtime.py::_assemble_params`` raises ``DataRuntimeError`` on the
-        # very first binding. It has never fired only because the data bridge has no
-        # production caller yet (``data_runtime_provider_factory`` is constructed
-        # only under test).
+        # HONESTY NOTE (updated for L1, 2026-07-31) — this row is RUNNABLE under
+        # the subject projection, and not yet SERVABLE. Both ``param_bindings``
+        # below are ``source_kind="node_param"``, yet the only granted worker
+        # (``dec.pm``) declares ``params_schema_ref=None``: Phase-1 validation
+        # refuses ANY node params for such a worker (``spec.py`` issue
+        # ``params_not_allowed``) — in a sealed v2 preset (which independently
+        # forbids node params, see ``pipeline/assembly.py``) and in a dynamic
+        # plan alike. Both guards stand untouched and un-weakened. What made the
+        # row resolvable is the L1 subject->data projection (ruling D-0,
+        # materialization-time stamping): the run's committed ``RunSubject@1``
+        # is projected by the ONE reviewed recipe
+        # (``data/runtime.py::SubjectParams.project``) into a closed two-key
+        # document carried BESIDE the materialized draft and consumed by
+        # ``data/runtime.py::_assemble_params`` as the second, closed source for
+        # exactly these two pointers — the sealed record stays code-free and no
+        # node ever carries params.
         #
-        # What would make it runnable is NOT a params schema on ``dec.pm``: it is the
-        # unbuilt subject->data projection — a reviewed seam carrying the run's
-        # subject (stock code + as-of date) into the data bridge without routing it
-        # through node params. That is a chartered design ruling for a later phase.
-        # Rewriting these bindings HERE would move the sealed
-        # ``bridge.data_runtime.prefetch`` material digest and the Phase-3 catalog
-        # digest, so the correction belongs to a re-freeze phase, never to a
-        # drive-by edit. Pinned by
+        # SERVABLE is L2-b's business: no production ``DataRuntimeWorld`` is
+        # bound yet, so the deep lane's worldless provider PROVES resolvability
+        # against this very row and then refuses loudly rather than faking a
+        # read. Rewriting these binding bytes HERE would move the sealed
+        # ``bridge.data_runtime.prefetch`` material digest and the Phase-3
+        # catalog digest, so that correction still belongs to a re-freeze
+        # phase, never to a drive-by edit. Pinned by
         # ``tests/orchestration/data/test_data_catalog.py``
-        # ``::TestVerifiedSnapshotRowIsDeclaredNotRunnable``.
+        # ``::TestVerifiedSnapshotRowRunnableOnlyUnderSubjectProjection``.
         ops = []
         for worker_id, method_ids in _REVIEWED_INTEGRATION_GRANTS.items():
             for method_id in method_ids:

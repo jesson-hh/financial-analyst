@@ -42,11 +42,15 @@ owns the whole canonical channel (same shape as static-v1 plus one
 one :class:`NamedEvidenceDigest` (``run_subject`` → the committed artifact's
 content digest) to the trusted inputs, and stamps its own assembler identity on
 the persisted ``PromptAssemblyRecord`` so the audit trail names it honestly.
-The second E2b half — threading ``subject.code`` into the instrument-param data
-prefetch — has NO reachable seam until Task 11 binds the data-bridge provider
-factories and closes the reviewed prefetch grants (the strict-xfail pin in
-``test_pipeline_deep_preset.py``); the committed subject artifact this module
-produces is exactly what that provider will read. Recorded, not papered over.
+The second E2b half — threading the subject into the instrument-param data
+prefetch — LANDED with L1 (2026-07-31): the materializer call passes the
+committed ``RunSubject`` object (``subject=``, digest bond verified at
+materialization), and the runner call threads the stamped
+``materialized.subject_params`` into ``build_production_plan_runner``'s
+per-run subject-scoped factories view. No data is read yet — the deep lane
+binds no production ``DataRuntimeWorld``, so ``dec.pm``'s bridge refuses
+loudly naming the resolved subject (the chartered L2-b gap). Honest, not
+papered over.
 
 ABI-forced corrections (recorded, mirroring the Task 0b/6 precedent)
 --------------------------------------------------------------------

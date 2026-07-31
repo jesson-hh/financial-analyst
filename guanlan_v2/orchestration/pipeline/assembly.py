@@ -113,11 +113,6 @@ from guanlan_v2.orchestration.adapters.launcher import (
 )
 from guanlan_v2.orchestration.budget import BudgetLedger
 from guanlan_v2.orchestration.catalog import WorkerCatalogSnapshot
-from guanlan_v2.orchestration.data.catalog import phase3_data_surface
-from guanlan_v2.orchestration.data.runtime import (
-    SubjectParams,
-    worldless_data_provider_factory,
-)
 from guanlan_v2.orchestration.catalog_runtime import (
     BridgeCatalogView,
     CatalogMaterialError,
@@ -126,6 +121,11 @@ from guanlan_v2.orchestration.catalog_runtime import (
     MaterialSource,
     TrustedFactoryRegistry,
     load_pilot_catalog,
+)
+from guanlan_v2.orchestration.data.catalog import phase3_data_surface
+from guanlan_v2.orchestration.data.runtime import (
+    SubjectParams,
+    worldless_data_provider_factory,
 )
 from guanlan_v2.orchestration.enums import ExecutionKind
 from guanlan_v2.orchestration.eventstore import EventRefusalAuditSink
@@ -942,6 +942,12 @@ class _SubjectScopedFactories:
         return self._base.handler_factory(ref)
 
     def __getattr__(self, name: str):
+        if name == "_base":
+            # Recursion guard (L1 Task 5 sweep, Task-4 review): on a partially
+            # constructed instance the ``_base`` slot is unset, so delegating
+            # its own lookup back through ``__getattr__`` would recurse forever
+            # instead of raising the honest AttributeError.
+            raise AttributeError(name)
         return getattr(self._base, name)
 
 

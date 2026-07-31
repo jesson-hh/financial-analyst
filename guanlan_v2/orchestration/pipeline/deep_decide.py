@@ -56,17 +56,22 @@ recorded here rather than papered over:
    REQUIRES and schema-pins ``subject_ref`` and carries it beside the draft on
    :class:`MaterializedDeepDecide` — it never forges an ``InputArtifactBinding``
    and never invents a subject worker. The committed ``RunSubject@1`` artifact
-   stays the digest-bound authority; threading it into prompt assembly and the
-   instrument-param data prefetch is clause E2b, which lands WHOLLY in Task 7.
-   **The seam is real and located** (Task 7, read this): the reviewed
+   stays the digest-bound authority; both halves of clause E2b have LANDED:
+   the prompt-assembly half in Task 7 (the per-run ``SubjectPromptAssembler``
+   occupying the ``prompt_assembler`` injection seam of
+   ``assembly.build_production_plan_runner`` — the reviewed
    ``StaticPromptAssembler.assemble`` accepts ``trusted_input_digests`` as
-   name+digest pairs only — it takes no caller-supplied text — so rendering a
-   trusted subject block requires a per-run Phase-10 assembler that closes over
-   the subject and occupies the ``prompt_assembler`` injection seam of
-   ``assembly.build_production_plan_runner`` (assembly.py:~584 parameter,
-   :~630 default — locate by name, line refs drift). That belongs with the runner invocation, not with
-   materialization. The always-present :data:`SUBJECT_RUN_SCOPED_BADGE` says so
-   on every materialization rather than implying a binding that does not exist.
+   name+digest pairs only, no caller-supplied text, so a per-run assembler
+   closing over the subject is the ONE lawful channel), and the
+   instrument-param data-prefetch half with L1 (2026-07-31): this materializer
+   verifies the digest bond and stamps
+   :attr:`MaterializedDeepDecide.subject_params` via the ONE reviewed recipe
+   ``SubjectParams.project`` — carried beside the draft, never inside it —
+   and the runner call threads it through the per-run subject-scoped
+   factories view. Both belong with the runner invocation, not with
+   materialization. The always-present :data:`SUBJECT_RUN_SCOPED_BADGE`
+   records the run-scoped truth on every materialization rather than
+   implying a plan-level binding.
 
 ``PlanDraft`` also has no badge field, so materialization returns the composite
 :class:`MaterializedDeepDecide` (draft + subject ref + context ref + badges).
@@ -195,8 +200,9 @@ RUN_SUBJECT_SCHEMA_REF: SchemaRef = SchemaRef(name="RunSubject", version="1")
 # ``evidence_policy.tool_calls = REQUIRED`` while the reviewed Phase-3 prefetch
 # table grants a data row to ``dec.pm`` only, so both raise
 # ``tool_calls_required_unmet`` before one LLM call happens. Closing that for
-# real needs the subject→data-bridge path (L1), a production data runtime (L2 —
-# which does not exist) and the grants + sealed-chain re-freeze (L3); see
+# real needs the subject→data-bridge path (L1 — landed 2026-07-31), a production
+# data runtime (L2-b — still unbound: the worldless provider refuses loudly)
+# and the grants + sealed-chain re-freeze (L3); see
 # ``docs/superpowers/specs/2026-07-29-post-p10-refreeze-design.md`` §1.5.
 #
 # Dropping exactly those two AUXILIARY evidence readers — they reach the debate
@@ -253,8 +259,9 @@ CONTEXT_SNAPSHOT_STALE_BADGE: str = "context_snapshot_stale"
 #: accompanies the stale badge with the snapshot's own session date.
 CONTEXT_SNAPSHOT_DATA_DATE_BADGE_PREFIX: str = "context_snapshot_data_date:"
 
-#: ALWAYS emitted: the subject is run-scoped (reality 4). It names the deferred
-#: assembly-threading seam instead of implying a plan-level binding.
+#: ALWAYS emitted: the subject is run-scoped (reality 4). It records that the
+#: subject reaches seats through per-run seams (the E2b prompt assembler; the
+#: L1 subject-params stamp) instead of implying a plan-level binding.
 SUBJECT_RUN_SCOPED_BADGE: str = "subject_run_scoped_v1"
 
 #: THE HONESTY RED LINE of route A — emitted on EVERY product of the reduced

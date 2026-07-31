@@ -941,6 +941,12 @@ class WorldlessDataBridgeProvider:
                 "never a fabricated read"
             )
         handle = request.handle
+        # GUARD ORDER IS DELIBERATE (do not reorder; L1 Task 5 sweep, Task-3
+        # review): the inherited drift guard sits AFTER shape 1 — a rowless
+        # worker keeps the UNCHANGED pv-aux refusal even on a drifted handle —
+        # and BEFORE shapes 3/2, which ALWAYS raise; any later and it would be
+        # unreachable for rows-present workers, any earlier and it would
+        # silently change which refusal a rowless worker gets.
         if handle.input_contribution != BridgeInputContribution():
             raise DataRuntimeError(
                 f"worker {worker.id!r}'s prepared handle carries a non-empty "
@@ -980,9 +986,14 @@ class WorldlessDataBridgeProvider:
                     "loudly, never a fabricated read"
                 ) from exc
             methods.append(row.method_ref.id)
-        try:
+        # The invariant STATED, not caught (L1 Task 5 sweep, Task-3 review):
+        # ``SubjectParams.project`` always makes ``code_value`` the singleton
+        # instrument tuple; only a hand-built document can violate that, and
+        # the echo must not mask a foreign TypeError from inside the join to
+        # cope with it.
+        if isinstance(sp.code_value, (tuple, list)):
             codes = ", ".join(str(getattr(s, "code", s)) for s in sp.code_value)
-        except TypeError:
+        else:
             codes = str(sp.code_value)
         raise DataRuntimeError(
             f"worker {worker.id!r}: {len(rows)} reviewed data prefetch row(s) "

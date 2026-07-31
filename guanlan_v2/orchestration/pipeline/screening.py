@@ -39,9 +39,13 @@ Task 6 is the pathfinder; the idioms below are ITS idioms, mirrored:
    beside its draft on :class:`MaterializedScreeningLane`; no
    ``InputArtifactBinding`` is forged (they are built at dispatch only, from
    upstream plan-node outputs — dag.py:380-430) and no subject worker is invented.
-   :data:`SUBJECT_RUN_SCOPED_BADGE` says so on every batch. Threading the subject
-   into prompt assembly is clause E2b, which lands wholly in Task 7 (the seam is
-   the ``prompt_assembler`` parameter of ``assembly.build_production_plan_runner``).
+   :data:`SUBJECT_RUN_SCOPED_BADGE` says so on every batch. The subject reaches
+   seats through per-run runner seams, never a plan-level binding: prompt
+   assembly via clause E2b (the ``prompt_assembler`` parameter of
+   ``assembly.build_production_plan_runner``, landed in Task 7), and — since L1
+   (2026-07-31) — the data bridge via the per-lane ``subject_params`` stamp on
+   :class:`MaterializedScreeningLane` (vacuous today: zero screening workers
+   carry data prefetch rows, pinned; the wire is real for a future L3 grant).
 
 **The one place this deviates from Task 6, and why (recorded).** Task 6 stamps
 ``source=PlanSource.PRESET``; a screening draft is stamped
@@ -268,8 +272,9 @@ SCREENING_LANE_PRESET_FILE: Path = PHASE10_PRESETS_V2_DIR / "screening_lane_v1.j
 # =========================================================================== #
 # badges                                                                       #
 # =========================================================================== #
-#: ALWAYS emitted: the subject is run-scoped. It names the deferred assembly
-#: threading (clause E2b, Task 7) instead of implying a plan-level binding.
+#: ALWAYS emitted: the subject is run-scoped. It records that the subject
+#: reaches seats through per-run seams (the E2b prompt assembler, Task 7; the
+#: L1 subject-params stamp) instead of implying a plan-level binding.
 SUBJECT_RUN_SCOPED_BADGE: str = "subject_run_scoped_v1"
 
 #: emitted when the bound ContextSnapshot's data date is BEHIND the clock's +08:00

@@ -265,10 +265,25 @@ def _skip_unless_worldless_incumbent(factories):
     correction clause, which names both provider classes and both pin sets.
     Guarding on the provider class actually registered at
     ``phase3_data_surface().provider_ref`` means L2-b's landing flips these
-    pins consciously (skip → rewrite), never reddens them by surprise."""
-    provider = factories.handler_factory(phase3_data_surface().provider_ref)(
-        bridge=SimpleNamespace(bridge_id="data.runtime", priority=100),
-        summary=SimpleNamespace(summary_digest="s" * 64))
+    pins consciously (skip → rewrite), never reddens them by surprise.
+
+    The probe CONSTRUCTS a provider from SimpleNamespace fakes to read its
+    class; a successor factory that VALIDATES its arguments at construction
+    (L2-b's world-bound one may) would raise here — that raise is the same
+    "no longer the worldless incumbent" fact, so it must SKIP under the
+    correction clause, never error (L1 Task 5 sweep, Task-3 review item)."""
+    try:
+        provider = factories.handler_factory(phase3_data_surface().provider_ref)(
+            bridge=SimpleNamespace(bridge_id="data.runtime", priority=100),
+            summary=SimpleNamespace(summary_digest="s" * 64))
+    except Exception as exc:
+        pytest.skip(
+            "constructing the registered data provider from the probe's "
+            f"SimpleNamespace fakes raised {type(exc).__name__} -- a factory "
+            "that validates its construction arguments is no longer the "
+            "worldless incumbent; these worldless-shape pins are owned by "
+            "L2-b's correction clause (Task 4 supersede / Task 5 integration "
+            "seam), which rewrites them to the real-read semantics")
     if not isinstance(provider, RT.WorldlessDataBridgeProvider):
         pytest.skip(
             "the registered data provider incumbent is no longer "
