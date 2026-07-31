@@ -52,9 +52,19 @@ from guanlan_v2.orchestration.data.calendar import (
     TradingCalendarResolver,
 )
 from guanlan_v2.orchestration.data.errors import RoutingConfigurationError
-from guanlan_v2.orchestration.data.catalog import phase3_data_surface
+from guanlan_v2.orchestration.data.catalog import (
+    data_capability_refs,
+    parse_prefetch_binding,
+    phase3_data_surface,
+)
+from guanlan_v2.orchestration.data.pit import DataFetchRefusalDetails
 from guanlan_v2.orchestration.data.registry import DataSourceRegistry
-from guanlan_v2.orchestration.data.runtime import DataSourceCapabilityBackend
+from guanlan_v2.orchestration.data.runtime import (
+    DataRuntimeBridgeProvider,
+    DataRuntimeError,
+    DataRuntimeWorld,
+    DataSourceCapabilityBackend,
+)
 from guanlan_v2.orchestration.data.snapshot import (
     DataRoutingSnapshot,
     DataSourceConfigSnapshot,
@@ -70,7 +80,12 @@ from guanlan_v2.orchestration.data.symbols import (
     build_limit_rule_policy,
 )
 from guanlan_v2.orchestration.digest import content_digest
-from guanlan_v2.orchestration.refs import ContentRef
+from guanlan_v2.orchestration.eventstore import EventRefusalAuditSink
+from guanlan_v2.orchestration.refs import ContentRef, SchemaRef
+from guanlan_v2.orchestration.runtime_clock import AuthoritativeClock
+from guanlan_v2.orchestration.runtime_contracts import (
+    default_audit_detail_registry,
+)
 
 __all__ = [
     "PRODUCTION_DATA_REGISTRY_VERSION",
@@ -78,11 +93,15 @@ __all__ = [
     "PRODUCTION_CALENDAR_MATERIAL_PATH",
     "PRODUCTION_LIMIT_POLICY_ID",
     "PRODUCTION_ROUTE_POLICY_REF",
+    "ProductionDataProvider",
     "ProductionDataWorldRecipe",
+    "ProductionDataWorldResolver",
+    "ProductionNoCache",
     "ThreadConfinedDataBackend",
     "production_data_adapters",
     "production_data_backend",
     "production_data_recipe",
+    "register_production_data_provider",
 ]
 
 #: frozen identity constants (Task 1 interface).
@@ -419,3 +438,301 @@ def production_data_backend() -> ThreadConfinedDataBackend:
             if _BACKEND is None:
                 _BACKEND = ThreadConfinedDataBackend(production_data_adapters())
     return _BACKEND
+
+
+# --------------------------------------------------------------------------- #
+# Task 3 — the per-run world resolver + the production data provider           #
+# --------------------------------------------------------------------------- #
+_MANIFEST_SCHEMA_REF = SchemaRef(name="DataSnapshotManifest", version="1")
+
+#: the three DataContext fields the resolver verifies against the recipe — the
+#: recipe property names are identical by construction (Task 1).
+_WORLD_DIGEST_FIELDS = (
+    "source_registry_digest",
+    "routing_snapshot_digest",
+    "source_config_digest",
+)
+
+
+class _FrozenContextClock:
+    """A frozen clock reading exactly the admitted snapshot's ``ctx.as_of``.
+
+    Gate D-C (pinned empirically at ``test_l2b_handoff.py``):
+    ``PitGuard.from_context`` requires ``clock_now(clock) == ctx.as_of``
+    EXACTLY, in EVERY mode including ONLINE, and dispatch builds a guard per
+    read from the world's clock — so an advancing ``SystemClock`` passes the
+    first build and refuses the second.  The world therefore binds THIS
+    per-run frozen clock, constructed at :meth:`ProductionDataWorldResolver.
+    world_for` from the admitted context — never a wall clock.
+    """
+
+    __slots__ = ("_as_of",)
+
+    def __init__(self, as_of: datetime) -> None:
+        self._as_of = as_of
+
+    def now(self) -> datetime:
+        return self._as_of
+
+
+class ProductionNoCache:
+    """The honest production no-cache — REVIEWED STOPGAP, not silently absent.
+
+    ``get_verified`` always answers ``None``: every ``cache_or_invoke`` row
+    probes its first frozen-route entry, and the results still persist as
+    evidence through the reader/writer path (nothing is lost, nothing is
+    fabricated — a fabricated cache hit is the m-family mutation this class's
+    pin guards against).  A verified :class:`~guanlan_v2.orchestration.data.
+    snapshot.DataCache` over the persisted evidence is post-L2-b work; when it
+    lands it replaces this class at :meth:`ProductionDataWorldResolver.
+    world_for`'s one construction site.
+    """
+
+    __slots__ = ()
+
+    def get_verified(self, key: Any, *, ctx: Any, manifest: Any, registry: Any,
+                     payload_store: Any) -> None:
+        return None
+
+
+def _default_refusal_audit_sink_factory(clock: AuthoritativeClock):
+    """Build the per-world refusal-sink factory: the ONE authoritative
+    :class:`EventRefusalAuditSink` over a data-aware detail registry (the
+    reviewed ``data_audit_sink`` composition of the Phase-3 suite)."""
+
+    def build() -> EventRefusalAuditSink:
+        registry = default_audit_detail_registry()
+        registry.register(DataFetchRefusalDetails)
+        registry.seal()
+        return EventRefusalAuditSink(detail_registry=registry, clock=clock)
+
+    return build
+
+
+class ProductionDataWorldResolver:
+    """Resolve one opened session's :class:`DataRuntimeWorld` — per run,
+    never a process-global frozen at binding time.
+
+    Design forced by the verified constraints (Task-0 gate items 2-3): the
+    world's ``ctx`` must equal the ADMITTED snapshot's ``data_context`` by
+    full value equality, and the admitted snapshot is chosen per run — so the
+    world is resolved from the session's own
+    ``request.input_snapshot.context_snapshot_ref``.
+
+    ``catalog_runtime`` is the bound bundle runtime the rendered blocks
+    resolve their renderer material through (the plan's ``world_for`` step 4
+    requires it on the world; it rides the same registration call that hands
+    the resolver everything else).
+    """
+
+    __slots__ = ("_stores", "_recipe", "_schema_resolver", "_clock",
+                 "_sink_factory", "_catalog_runtime")
+
+    def __init__(self, *, stores: Any, recipe: ProductionDataWorldRecipe,
+                 schema_resolver: Any, clock: AuthoritativeClock,
+                 catalog_runtime: Any,
+                 refusal_audit_sink_factory: Any = None) -> None:
+        self._stores = stores
+        self._recipe = recipe
+        self._schema_resolver = schema_resolver
+        self._clock = clock
+        self._catalog_runtime = catalog_runtime
+        self._sink_factory = (
+            refusal_audit_sink_factory
+            if refusal_audit_sink_factory is not None
+            else _default_refusal_audit_sink_factory(clock))
+
+    def world_for(self, request: Any) -> DataRuntimeWorld:
+        """The per-run world: admitted snapshot → digest checks → manifest →
+        :class:`DataRuntimeWorld`.  Every refusal is a typed loud
+        :class:`DataRuntimeError`; nothing is rebuilt or fabricated."""
+        # 1) the admitted ContextSnapshot, through EXACTLY the resolution
+        #    _verify_context_binding performs (same ref, same reader).
+        ctx_ref = request.input_snapshot.context_snapshot_ref
+        snapshot = request.reader.get(
+            ctx_ref.payload_ref, expected_schema_ref=ctx_ref.schema_ref)
+        ctx = snapshot.data_context
+
+        # 2) three loud typed digest checks — each names the failing pair and
+        #    the remedy.  A pilot-era context ("a"/"b"/"c" * 64 placeholders)
+        #    fails here, before any session, read, gateway begin or lease.
+        for field in _WORLD_DIGEST_FIELDS:
+            admitted = getattr(ctx, field)
+            expected = getattr(self._recipe, field)
+            if admitted != expected:
+                raise DataRuntimeError(
+                    f"the admitted ContextSnapshot's DataContext {field} "
+                    f"({admitted}) does not equal the production data-world "
+                    f"recipe's ({expected}): the committed ContextSnapshot "
+                    "predates the production data world (L2-b); re-run Lane 0"
+                )
+
+        # 3) the run's DataSnapshotManifest through the D-D payload-store
+        #    channel: content-addressed by ctx.data_snapshot_content_digest
+        #    under the ADMITTED plan's schema-registry digest (run-scoped key
+        #    discipline).  Absent => typed refusal, NEVER a rebuilt stand-in —
+        #    a rebuilt manifest could not honestly carry the run-start
+        #    boundary Lane 0 froze.
+        digest = ctx.data_snapshot_content_digest
+        manifest_ref = self._stores.payloads.find_ref(
+            namespace="main", schema_ref=_MANIFEST_SCHEMA_REF,
+            registry_digest=request.plan.schema_registry_digest,
+            content_digest=digest)
+        if manifest_ref is None:
+            raise DataRuntimeError(
+                f"the run's DataSnapshotManifest (content digest {digest}) is "
+                "not persisted in the payload store -- manifest not persisted; "
+                "the context producer did not run the L2-b recipe (Lane 0 "
+                "persists the per-run capture, Task 7).  Refusing rather than "
+                "rebuilding a stand-in: a rebuilt manifest could not honestly "
+                "carry the run-start boundary"
+            )
+        manifest = self._stores.payloads.get(
+            manifest_ref, expected_schema_ref=_MANIFEST_SCHEMA_REF)
+
+        # 4) the full world: the recipe's frozen half + the run's admitted
+        #    ctx/manifest + the D-C frozen clock + the honest no-cache + the
+        #    ONE thread-confined backend.
+        return DataRuntimeWorld(
+            source_registry=self._recipe.registry,
+            routing=self._recipe.routing,
+            manifest=manifest,
+            source_config=self._recipe.source_config,
+            ctx=ctx,
+            schema_resolver=self._schema_resolver,
+            policy_resolver=self._recipe.policy_resolver,
+            calendar=self._recipe.calendar,
+            clock=_FrozenContextClock(ctx.as_of),
+            cache=ProductionNoCache(),
+            catalog_runtime=self._catalog_runtime,
+            refusal_audit_sink=self._sink_factory(),
+            backend=production_data_backend(),
+        )
+
+
+class _RowlessLicensedEmptyDataSession:
+    """The zero-rows session: freeze completes with the catalog-licensed EMPTY.
+
+    The reviewed analyzer summed its bounds over ZERO prefetch rows (0/0), so
+    an empty completed :class:`BridgeContribution` is exactly what the sealed
+    summary licenses for such a worker (today: the two pv aux workers) — this
+    is NOT a refusal, and it is NOT the retired dead-row discrimination (the
+    partition upstream is on row COUNT only; post-L1 that category does not
+    exist).  Zero I/O, zero gateway begins, zero evidence writes.
+    """
+
+    __slots__ = ("_bridge", "_summary")
+
+    def __init__(self, *, bridge: Any, summary: Any) -> None:
+        self._bridge = bridge
+        self._summary = summary
+
+    def freeze_for_execution(self, *, kind: Any) -> Any:
+        from guanlan_v2.orchestration.worker import (
+            BridgeContribution,
+            BridgeStageOutcome,
+        )
+
+        contribution = BridgeContribution(
+            bridge_id=self._bridge.bridge_id,
+            bridge_priority=self._bridge.priority,
+            summary_digest=self._summary.summary_digest,
+            tool_call_records=(), data_result_refs=(),
+            direct_evidence_refs=(), untrusted_blocks=())
+        return BridgeStageOutcome(
+            status="completed", frozen_contribution=contribution)
+
+
+class ProductionDataProvider:
+    """The production two-stage ``data.runtime`` provider (L2-b Task 3) —
+    registered under the sealed ``bridge.data_runtime.provider@1`` identity by
+    :func:`register_production_data_provider` (bound into
+    ``build_production_bindings`` at Task 4).
+
+    ``prepare_input`` is DELEGATED to the real provider's I/O-free empty
+    prepare (never a third copy).  ``open_execution`` partitions on row COUNT
+    only:
+
+    * **zero rows** → :class:`_RowlessLicensedEmptyDataSession` (the
+      catalog-licensed EMPTY freeze — the analyzer bounds are 0/0);
+    * **rows present** → resolve the per-run world via
+      :meth:`ProductionDataWorldResolver.world_for` and delegate the WHOLE
+      session to the real :class:`DataRuntimeBridgeProvider` — zero
+      re-implementation of the Phase-3 dispatch/PitGuard/render machinery.
+      Never an EMPTY freeze over a row that could have been read (the
+      silenced-outage shape every tombstone in this lineage forbids).
+
+    Until Task 5 (the L1<->L2-b integration seam) threads the run-subject
+    source through this provider into the delegated session, a delegated
+    ``dec.pm`` session refuses with L1's runner-seam cause — an honest
+    intra-train intermediate that never reaches production (order-conditional
+    pin in ``test_production_data_provider.py``, flipped by Task 5).
+    """
+
+    __slots__ = ("_bridge", "_summary", "_resolver")
+
+    def __init__(self, *, bridge: Any, summary: Any,
+                 resolver: ProductionDataWorldResolver) -> None:
+        self._bridge = bridge
+        self._summary = summary
+        self._resolver = resolver
+
+    def prepare_input(self, request: Any) -> Any:
+        # DELEGATED, never a third copy: the real provider's prepare touches
+        # only self._bridge / self._summary (both carried here), so the
+        # unbound forward IS its exact logic — bit-for-bit, pinned by test.
+        return DataRuntimeBridgeProvider.prepare_input(self, request)
+
+    def open_execution(self, request: Any) -> Any:
+        binding = parse_prefetch_binding(request.bridge.config_bytes)
+        if binding.bridge_id != self._bridge.bridge_id:
+            raise DataRuntimeError("prefetch binding names a different bridge")
+        rows = tuple(op for op in binding.operations
+                     if op.worker_id == request.worker.id)
+        if not rows:
+            # row COUNT is the ONLY partition (post-L1 no other category
+            # exists): a rowless worker's EMPTY freeze is catalog-licensed,
+            # and the world is not even resolved for it.
+            return _RowlessLicensedEmptyDataSession(
+                bridge=self._bridge, summary=self._summary)
+        world = self._resolver.world_for(request)
+        return DataRuntimeBridgeProvider(
+            bridge=self._bridge, summary=self._summary, world=world,
+        ).open_execution(request)
+
+
+def register_production_data_provider(
+    *, factories: Any, stores: Any, schema_resolver: Any,
+    clock: AuthoritativeClock, catalog_runtime: Any,
+    refusal_audit_sink_factory: Any = None,
+) -> None:
+    """The ONE production ``data.runtime`` registration recipe (L2-b Task 3).
+
+    Builds :func:`production_data_recipe` (so a broken recipe — missing
+    calendar material, digest drift — kills the caller at registration time,
+    before any lease; the burned-lease precedent), binds the
+    :class:`ProductionDataProvider` factory under the exact sealed
+    ``bridge.data_runtime.provider@1`` identity
+    (``phase3_data_surface().provider_ref``), and registers all seven data
+    capability backends via the gate D-A per-invocation shape
+    (``lambda **kw: production_data_backend()`` — the ONE thread-confined
+    instance handed out on every confined invoke).
+
+    Sole intended production caller: ``live_decide.build_production_bindings``
+    (Task 4 supersedes the worldless incumbent registration with this recipe).
+    """
+    resolver = ProductionDataWorldResolver(
+        stores=stores, recipe=production_data_recipe(),
+        schema_resolver=schema_resolver, clock=clock,
+        catalog_runtime=catalog_runtime,
+        refusal_audit_sink_factory=refusal_audit_sink_factory)
+
+    def _provider_factory(*, bridge: Any, summary: Any) -> ProductionDataProvider:
+        return ProductionDataProvider(
+            bridge=bridge, summary=summary, resolver=resolver)
+
+    factories.register_handler(
+        phase3_data_surface().provider_ref, _provider_factory)
+    for _method_id, cap_ref in sorted(data_capability_refs().items()):
+        factories.register_capability_backend(
+            cap_ref, lambda **kw: production_data_backend())
