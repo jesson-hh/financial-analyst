@@ -1135,6 +1135,7 @@ class TestTask11PlannerRunner:
         assert len(result.record.attempts) == spec.max_generation_attempts
         assert all(a.outcome == "model_error" for a in result.record.attempts)
         assert gateway.calls == spec.max_generation_attempts
+        assert gateway.closed is True  # the finally closes the gateway
 
 
 # =========================================================================== #
