@@ -99,6 +99,7 @@ from guanlan_v2.orchestration.pipeline.assembly import (
     build_phase10_preset_registry,
     load_phase10_preset_registry,
 )
+from guanlan_v2.orchestration.data.runtime import SubjectParams
 from guanlan_v2.orchestration.pipeline.contracts import RunSubject
 from guanlan_v2.orchestration.pipeline import deep_decide as deep_decide_mod
 from guanlan_v2.orchestration.pipeline.deep_decide import (
@@ -193,7 +194,10 @@ def _subject_ref(code: str = "600519", as_of: datetime = NOW) -> TypedPayloadRef
 
 
 def _materialize(env, *, clock=None, context=..., ctx_ref=..., subject=...,
-                 registry_override=None):
+                 registry_override=None, run_subject=None):
+    # NOTE: the helper's historical ``subject=`` kwarg is the subject REF; the
+    # materializer's L1 ``subject=`` kwarg (the committed RunSubject object for
+    # the data-param stamp) is this helper's ``run_subject=``.
     presets = registry_override or load_phase10_preset_registry(PRODUCTION_PRESETS_DIR)
     return materialize_deep_decide_draft(
         request=env["request"],
@@ -206,6 +210,7 @@ def _materialize(env, *, clock=None, context=..., ctx_ref=..., subject=...,
         schema_registry=env["registry"],
         draft_id="draft-deep-1",
         run_id="run-deep-1",
+        subject=run_subject,
     )
 
 
@@ -608,6 +613,83 @@ class TestMaterializeHappy:
 
     def test_the_run_scoped_subject_badge_is_always_present(self, materialized):
         assert SUBJECT_RUN_SCOPED_BADGE in materialized.badges
+
+
+# =========================================================================== #
+# 4b. materialization-time subject-params stamping (L1 / D-0)                   #
+# =========================================================================== #
+class TestSubjectParamsStamp:
+    """L1 Task 2 — the D-0 verbatim seam: at materialize time the ONE reviewed
+    recipe (``SubjectParams.project``) projects the run's committed
+    ``RunSubject@1`` into the closed two-key document, carried BESIDE the draft
+    on :class:`MaterializedDeepDecide`. The sealed record stays code-free:
+    ``PlanNode.params`` stays empty and the draft's executable projection does
+    not move a byte — the stamp is out-of-band by construction.
+    """
+
+    def test_the_stamp_equals_the_one_recipe_over_the_committed_subject(self, env):
+        """The stamped params provably come from THE committed artifact the ref
+        names. The ref here is opaque (its object_id encodes nothing) and the
+        subject's ``as_of`` differs from the clock's instant, so a stamp
+        fabricated from ref metadata, goal text or the clock cannot equal the
+        ONE recipe's projection of the verified subject object."""
+        subject = RunSubject(code="600519", as_of=NOW - timedelta(hours=5))
+        ref = TypedPayloadRef(
+            payload_ref=PayloadRef(
+                namespace="main", object_id="deep-artifact-0007",
+                content_digest=subject.semantic_digest()),
+            schema_ref=SchemaRef(name="RunSubject", version="1"))
+        result = _materialize(env, subject=ref, run_subject=subject)
+        assert result.subject_params == SubjectParams.project(
+            code=subject.code, as_of=subject.as_of)
+        assert result.subject_params.code_value[0].code == "600519"
+
+    def test_a_ref_that_does_not_bind_the_subject_refuses_typed(self, env):
+        """The digest bond — ``subject.semantic_digest() ==
+        subject_ref.payload_ref.content_digest``, the SAME equality the
+        screening lane enforces on its committed subjects (screening.py's
+        SubjectRefused) — is verified, never assumed."""
+        mismatched = RunSubject(code="000001", as_of=NOW)
+        with pytest.raises(SubjectRefused, match="does not bind"):
+            _materialize(env, run_subject=mismatched)  # default ref binds 600519
+
+    def test_a_non_run_subject_object_refuses_typed(self, env):
+        with pytest.raises(SubjectRefused, match="RunSubject"):
+            _materialize(env, run_subject={"code": "600519", "as_of": NOW})
+
+    def test_without_a_subject_the_stamp_is_honestly_none(self, materialized):
+        """``subject=None`` keeps every pre-existing construction meaning what
+        it meant (the module's own ``preset_id`` convention): no default and no
+        forged subject — the data bridge refuses loudly downstream instead."""
+        assert materialized.subject_params is None
+
+    def test_the_draft_is_untouched_by_the_stamp(self, env):
+        """The sealed-record rule never moved: stamping happens BESIDE the
+        draft, so ``PlanNode.params`` stays empty and the executable projection
+        is byte-identical to an unstamped run's — and across stocks."""
+        stamped = _materialize(
+            env, run_subject=RunSubject(code="600519", as_of=NOW))
+        unstamped = _materialize(env)
+        blob = canonical_json(stamped.draft.executable_projection())
+        for node in stamped.draft.nodes:
+            assert node.params == {}
+        assert blob == canonical_json(unstamped.draft.executable_projection())
+        assert "600519" not in blob
+        other = _materialize(
+            env, subject=_subject_ref("000001"),
+            run_subject=RunSubject(code="000001", as_of=NOW))
+        assert canonical_json(other.draft.executable_projection()) == blob
+        assert other.subject_params != stamped.subject_params
+
+    def test_subject_checks_still_precede_context_checks(self, env):
+        """Refusal ORDER preserved: the bond check joins the SUBJECT block, so
+        a lying subject outranks a missing context — and a missing subject_ref
+        still outranks everything the context block would say."""
+        with pytest.raises(SubjectRefused):
+            _materialize(env, subject=None, context=None, ctx_ref=None)
+        mismatched = RunSubject(code="000001", as_of=NOW)
+        with pytest.raises(SubjectRefused):
+            _materialize(env, run_subject=mismatched, context=None, ctx_ref=None)
 
 
 # =========================================================================== #

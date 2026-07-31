@@ -104,6 +104,7 @@ from pydantic import model_validator
 from guanlan_v2.orchestration.admission import AdmissionRejected
 from guanlan_v2.orchestration.catalog import WorkerCatalogSnapshot
 from guanlan_v2.orchestration.context import ContextSnapshot
+from guanlan_v2.orchestration.data.runtime import SubjectParams
 from guanlan_v2.orchestration.digest import (
     DigestHex,
     DigestModel,
@@ -576,6 +577,13 @@ class MaterializedScreeningLane:
     subject_ref: TypedPayloadRef
     candidate_plan_digest: str
     badges: tuple[str, ...] = ()
+    #: L1 / D-0 — the closed subject-params document, materialization-stamped by
+    #: the ONE reviewed recipe (``SubjectParams.project``) from this lane's
+    #: digest-verified committed ``RunSubject@1``. Out-of-band beside the draft
+    #: (``PlanNode.params`` stays empty; the sealed record stays code-free).
+    #: Honestly vacuous today — zero screening workers carry data prefetch rows
+    #: — and defaulted to None so pre-L1 constructions keep their meaning.
+    subject_params: SubjectParams | None = None
 
 
 @dataclass(frozen=True)
@@ -841,6 +849,12 @@ def build_screening_batch(
                 f"the committed subject ref for {code!r} does not bind the subject "
                 "content it was handed; a subject that is not digest-bound is not "
                 "an authority")
+        # L1 / D-0: the materialization-time data-param stamp, projected from
+        # the SAME digest-verified committed subject the checks above just
+        # bound. Vacuous today (zero screening workers carry data prefetch
+        # rows) but honest: when an L3 grant lands, the path is already true.
+        subject_params = SubjectParams.project(
+            code=subject.code, as_of=subject.as_of)
 
         draft = PlanDraft(
             id=_lane_draft_id(batch_id, code),
@@ -879,7 +893,7 @@ def build_screening_batch(
         lanes.append(MaterializedScreeningLane(
             code=code, lane_index=lane_index, request=request, draft=draft,
             subject_ref=subject_ref, candidate_plan_digest=candidate_plan_digest,
-            badges=badge_tuple))
+            badges=badge_tuple, subject_params=subject_params))
         entries.append(ScreeningLaneEntry(
             code=code, lane_index=lane_index, request_id=request.request_id,
             draft_id=draft.id, candidate_plan_digest=candidate_plan_digest,

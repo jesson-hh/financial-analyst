@@ -97,6 +97,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from guanlan_v2.orchestration.catalog import WorkerCatalogSnapshot
 from guanlan_v2.orchestration.context import ContextSnapshot
+from guanlan_v2.orchestration.data.runtime import SubjectParams
 from guanlan_v2.orchestration.digest import NonEmptyStr
 from guanlan_v2.orchestration.enums import PlanSource
 from guanlan_v2.orchestration.market.factors import _session_date as session_date_of
@@ -110,6 +111,7 @@ from guanlan_v2.orchestration.pipeline.assembly import (
     PLAN_PRESET_RECORD_V2_SCHEMA_REF,
     PlanPresetRecordV2,
 )
+from guanlan_v2.orchestration.pipeline.contracts import RunSubject
 
 __all__ = [
     # identity
@@ -398,6 +400,14 @@ class MaterializedDeepDecide:
     #: Defaulted to the full one so every pre-route-A construction keeps meaning
     #: exactly what it meant.
     preset_id: LogicalId = DEEP_DECIDE_PRESET_ID
+    #: L1 / D-0 — the closed subject-params document, materialization-stamped by
+    #: the ONE reviewed recipe (``SubjectParams.project``) from THE committed
+    #: ``RunSubject@1`` the ``subject_ref`` digest-binds. Out-of-band beside the
+    #: draft, never inside it: ``PlanNode.params`` stays empty, the sealed record
+    #: stays code-free. Defaulted to None (the ``preset_id`` convention) so every
+    #: pre-L1 construction keeps meaning exactly what it meant — the data bridge
+    #: refuses loudly downstream rather than defaulting a subject.
+    subject_params: SubjectParams | None = None
 
 
 # =========================================================================== #
@@ -425,14 +435,26 @@ def materialize_deep_decide_draft(
     run_id: NonEmptyStr,
     # -- route A: WHICH sealed generation (default = the reviewed ten-node one) - #
     preset_id: LogicalId = DEEP_DECIDE_PRESET_ID,
+    # -- L1 / D-0: the committed subject OBJECT for the data-param stamp -------- #
+    # optional so every pre-L1 caller keeps meaning exactly what it meant; when
+    # provided it must BE the artifact ``subject_ref`` names (digest bond below).
+    subject: RunSubject | None = None,
 ) -> MaterializedDeepDecide:
     """Materialize the sealed deep-decide preset into a ``source=PRESET`` draft.
 
-    Refusal order is deliberate and typed. A missing / mistyped ``subject_ref`` is
-    a :class:`SubjectRefused`; a missing or unbound ContextSnapshot is a
-    :class:`ContextSnapshotRefused` (the live path degrades to its fast chain on
-    that one); a naive ``clock.now()`` is a :class:`ClockRefused`. None is ever
-    defaulted or coerced.
+    Refusal order is deliberate and typed. A missing / mistyped ``subject_ref`` —
+    or, when ``subject`` is supplied, a subject object the ref does not
+    digest-bind — is a :class:`SubjectRefused`; a missing or unbound
+    ContextSnapshot is a :class:`ContextSnapshotRefused` (the live path degrades
+    to its fast chain on that one); a naive ``clock.now()`` is a
+    :class:`ClockRefused`. None is ever defaulted or coerced.
+
+    L1 / D-0 (materialization-time stamping): when ``subject`` is provided, the
+    ONE reviewed recipe ``SubjectParams.project`` projects it into the closed
+    two-key document stamped on ``MaterializedDeepDecide.subject_params`` —
+    carried BESIDE the draft, never inside it (``PlanNode.params`` stays empty;
+    the sealed record and its digest do not move). When ``subject`` is None the
+    stamp is honestly None and the data bridge refuses loudly downstream.
 
     The returned draft is a plain Phase-1 ``PlanDraft``: identity and authority
     fields are runtime-stamped (``id``/``run_id``/``request_id``/``phase='main'``/
@@ -472,6 +494,27 @@ def materialize_deep_decide_draft(
         raise SubjectRefused(
             f"subject_ref must name {RUN_SUBJECT_SCHEMA_REF.key}; got "
             f"{subject_ref.schema_ref.key}")
+
+    # -- 1b. the committed subject object (L1/D-0 materialization stamping) --- #
+    # the stamp must provably come from THE committed artifact the ref names, so
+    # the digest bond (``subject.semantic_digest() ==
+    # subject_ref.payload_ref.content_digest`` — the same equality the screening
+    # lane enforces on every per-code committed subject) is verified, never
+    # assumed. These checks live in the SUBJECT block deliberately: refusal
+    # order stays subject-before-context.
+    subject_params: SubjectParams | None = None
+    if subject is not None:
+        if not isinstance(subject, RunSubject):
+            raise SubjectRefused(
+                "subject must be the committed RunSubject the subject_ref "
+                f"names; got {type(subject).__name__}")
+        if subject.semantic_digest() != subject_ref.payload_ref.content_digest:
+            raise SubjectRefused(
+                "subject_ref.payload_ref.content_digest does not bind the "
+                "supplied RunSubject content; a params stamp from an unbound "
+                "subject would not be an authority")
+        subject_params = SubjectParams.project(
+            code=subject.code, as_of=subject.as_of)
 
     # -- 2. the latest committed Lane-0 ContextSnapshot ---------------------- #
     if context is None or context_snapshot_ref is None:
@@ -578,4 +621,5 @@ def materialize_deep_decide_draft(
         context_snapshot_ref=context_snapshot_ref,
         badges=tuple(badges),
         preset_id=preset_id,
+        subject_params=subject_params,
     )

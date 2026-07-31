@@ -133,6 +133,7 @@ from guanlan_v2.orchestration.spec import (
     validate_plan_draft,
 )
 
+from guanlan_v2.orchestration.data.runtime import SubjectParams
 from guanlan_v2.orchestration.pipeline.assembly import (
     PHASE10_PRESETS_V2_DIR,
     PRODUCTION_PRESETS_DIR,
@@ -171,6 +172,7 @@ from guanlan_v2.orchestration.pipeline.screening import (
     ContextSnapshotRefused,
     EmptySlateRefused,
     MaterializedScreeningBatch,
+    MaterializedScreeningLane,
     ScreeningBatch,
     ScreeningCostPreview,
     ScreeningError,
@@ -1005,6 +1007,57 @@ class TestBuildScreeningBatch:
         assert built.batch.candidate_slate_ref == _slate_ref(slate)
         assert built.batch.preset_id == SCREENING_LANE_PRESET_ID
         assert built.batch.preset_record_digest == SCREENING_LANE_RECORD_DIGEST
+
+
+# =========================================================================== #
+# 4b. materialization-time subject-params stamping (L1 / D-0)                   #
+# =========================================================================== #
+class TestSubjectParamsStamp:
+    """L1 Task 2 — the screening half of the D-0 stamp: every lane's composite
+    carries the closed subject-params document projected (by the ONE reviewed
+    recipe, ``SubjectParams.project``) from the SAME digest-verified committed
+    ``RunSubject@1`` the lane's bond checks just bound. Honestly vacuous today —
+    zero screening workers carry data prefetch rows (the vacuity pin below) —
+    but the path is already true for the day an L3 grant lands.
+    """
+
+    def test_every_lane_is_stamped_from_its_own_committed_subject(self, built):
+        for lane in built.lanes:
+            assert lane.subject_params == SubjectParams.project(
+                code=lane.code, as_of=NOW)
+            assert lane.subject_params.code_value[0].code == lane.code
+        # each lane's stamp is a DIFFERENT projection (per-code subjects).
+        assert len({lane.subject_params for lane in built.lanes}) == 3
+
+    def test_the_stamp_never_reaches_the_draft(self, built):
+        """The sealed-record rule, re-pinned against the STAMPED composite: the
+        N executable projections stay byte-identical and every ``PlanNode.params``
+        stays empty — the stamp travels beside the plan, never inside it."""
+        projections = {canonical_json(lane.draft.executable_projection())
+                       for lane in built.lanes}
+        assert len(projections) == 1
+        for lane in built.lanes:
+            for node in lane.draft.nodes:
+                assert node.params == {}
+
+    def test_a_bare_composite_defaults_to_an_honest_none(self):
+        """Pre-existing constructions keep meaning exactly what they meant: the
+        field defaults to None (never a forged or defaulted subject)."""
+        import dataclasses
+        fields = {f.name: f for f in dataclasses.fields(MaterializedScreeningLane)}
+        assert fields["subject_params"].default is None
+
+    def test_zero_screening_workers_carry_data_prefetch_rows_today(self):
+        """The vacuity pin (plan R4): TODAY the ONE reviewed prefetch row targets
+        the deep lane's ``dec.pm`` only, so the screening stamp and its Task-4
+        runner thread are exercised structurally, not behaviorally. When a
+        screening worker ever gains a reviewed grant (L3), this pin flips
+        CONSCIOUSLY there — and the already-stamped path starts serving it."""
+        import guanlan_v2.orchestration.data.catalog as dcat
+        surface = dcat.phase3_data_surface()
+        targeted = {op.worker_id for op in surface.prefetch_binding.operations}
+        assert targeted == {"dec.pm"}
+        assert not (targeted & set(SCREENING_LANE_WORKER_IDS))
 
 
 # =========================================================================== #
