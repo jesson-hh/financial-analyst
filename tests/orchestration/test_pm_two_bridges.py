@@ -349,10 +349,20 @@ class TestTheProductionRegistrationSeam:
         2. invoking ``bindings.plan_runner`` hands ``build_production_plan_
            runner`` THAT SAME bundle object (``catalog is bundle`` — identity,
            not equality), whose ``_plan_executor`` builds ``ExecutionRuntime``
-           over ``bundle.factories`` (assembly.py) — so the registration and
-           the execution seam cannot be two different registries;
+           over ``bundle.factories`` when the per-run subject projection is
+           UNBOUND — and, as of L1 Task 4, over the thin per-run
+           ``_SubjectScopedFactories`` view OVER that same registry when it is
+           bound — so the registration and the execution seam cannot be two
+           different registries (docstring flip recorded in the L1 Task 4
+           report: identity when unbound, view-over-it when bound);
         3. the constructed runner is the real launcher's (it refuses an
-           undeclared digest at its own seam), not a husk.
+           undeclared digest at its own seam), not a husk;
+        4. (L1 Task 4, the seam echo) the production ``plan_runner_factory``
+           THREADS ``subject_params`` through to ``build_production_plan_
+           runner`` — by object identity, so the half-wired-kwarg defect class
+           (accepted but dropped, the campaign's signature catch) reddens
+           here — and its default stays an honest ``None`` (the process-level
+           UNBOUND posture).
         """
         from guanlan_v2 import orch_store_status as status_mod
         from guanlan_v2.orchestration.adapters import durable as durable_mod
@@ -433,11 +443,28 @@ class TestTheProductionRegistrationSeam:
             "the per-run runner must receive the SAME bundle object the "
             "providers were registered on — a different registry at the "
             "execution seam is exactly the live-contradiction class")
+        # L1 Task 4: a factory call that says nothing about the subject stays
+        # honestly UNBOUND at the runner (never a defaulted projection).
+        assert runner_kwargs.get("subject_params") is None
         assert callable(runner)
         with pytest.raises(LaunchRefused, match="no declared lane binding"):
             runner(lane="main", point=SimpleNamespace(point_ordinal=0),
                    approval=None, data_context=None, memory_binding=None,
                    candidate_plan_digest="0" * 64)
+
+        # L1 Task 4 — the seam ECHO (the anti-half-wired-kwarg pin): the
+        # production plan_runner_factory must pass the run's stamped
+        # projection through BY IDENTITY. A factory that accepts the kwarg
+        # and drops it on the floor (mutation m2, the campaign's signature
+        # defect class) reddens on the identity assert below.
+        sentinel = RT.SubjectParams.project(code="600519", as_of=NOW)
+        runner2 = captured["bindings"].plan_runner(
+            admission=object(), lane_bindings={"main": binding},
+            run_context_factory=lambda **kw: None,
+            request_id="req-pmtwo-runner-2", prompt_assembler=None,
+            subject_params=sentinel)
+        assert callable(runner2)
+        assert runner_kwargs["subject_params"] is sentinel
 
     def test_the_recipe_refs_are_the_phase9_resolved_bridge_refs(self, view):
         """Candidate (b) closed empirically: the refs the recipes register
@@ -870,3 +897,146 @@ class TestFullTrunkShape:
                     capability_gateway=None,
                     evidence_writer=_ForbiddenEvidenceWriter(), reader=None,
                     kind=ExecutionKind.DETERMINISTIC)
+
+
+# =========================================================================== #
+# 6. L1 Task 4 — the per-run subject-scoped factories view (seam pins)          #
+# =========================================================================== #
+class TestThePerRunSubjectScopedView:
+    """The L1 Task 4 view over the REAL production bundle (design resolution
+    R2): ``_plan_executor`` wraps ``bundle.factories`` in the thin per-run
+    ``_SubjectScopedFactories`` view exactly when the run's projection is
+    bound. These pins drive the view through the REAL
+    ``ExecutionBridgeResolver`` over the REAL registered production registry
+    (the ``_production_registered_factories`` recipes, process-level UNBOUND
+    — the production posture).
+
+    Delegation-family note (verified at source): ``cand.*`` handler
+    identities are NOT ``kind='handler'`` entries of the sealed Phase-9
+    production snapshot (the 24 handler entries are bridge/adapter/lane0/
+    memory/pv/quant/x ids; Task 11's cand registration rides
+    ``handler_registry`` on OTHER snapshots), so the delegation pins cover
+    the identities THIS catalog actually holds — the memory provider, the
+    experience pair — plus a same-family member registered THROUGH the view.
+
+    L2-b hand-off: the view's override target is chartered to MOVE — L2-b
+    Task 5 (the L1↔L2-b integration seam) re-targets it from
+    ``worldless_data_provider_factory(subject_params)`` to the world-bound
+    ``production_data_provider_factory(subject_params)`` and deletes the
+    worldless names; the shape-2 pin below is guarded on the worldless
+    incumbent so that landing flips it consciously, never by surprise."""
+
+    @pytest.fixture()
+    def base(self, bundle, env):
+        return _production_registered_factories(bundle, env)
+
+    @staticmethod
+    def _scoped(base, sp):
+        from guanlan_v2.orchestration.pipeline import assembly
+
+        return assembly._SubjectScopedFactories(
+            base, provider_ref=phase3_data_surface().provider_ref,
+            factory=RT.worldless_data_provider_factory(sp))
+
+    def test_the_view_over_the_production_bundle_refuses_shape2_echoing_the_subject(
+            self, bundle, view, reduced, env, base):
+        """Invariant 2: the REAL pm resolver over the per-run VIEW (base
+        UNBOUND, exactly production's process-level state) constructs the
+        subject-bound worldless provider and refuses shape 2 naming the
+        run's own code — the F4 bound-registration pin, now driven through
+        the ACTUAL Task-4 seam object instead of a modelled bound
+        registration."""
+        _skip_unless_worldless_incumbent(base)
+        sp = RT.SubjectParams.project(code="833509", as_of=NOW)
+        scoped = self._scoped(base, sp)
+        runtime = _exec_runtime(bundle, view, reduced.report, factories=scoped)
+        node = next(n for n in reduced.draft.nodes if n.id == "pm")
+        worker = _worker_of(env, "dec.pm")
+        sequencer = W.ExecutionEvidenceSequencer(node_id="pm", attempt=1)
+        resolver = W.ExecutionBridgeResolver(
+            runtime=runtime, node=node, worker=worker, sequencer=sequencer)
+        prepared = resolver.prepare_input(
+            plan=None, context_snapshot_ref=None,
+            evidence_writer=_ForbiddenEvidenceWriter())
+        summaries = (
+            _summary_for(reduced.report, "pm", "data.runtime"),
+            _summary_for(reduced.report, "pm", "memory.runtime"))
+        gateway, refusals = _real_gateway(
+            env, reduced, bundle, worker, summaries, sequencer)
+        with pytest.raises(RT.DataRuntimeError) as exc:
+            resolver.open_execution(
+                plan=None, prepared=prepared, input_snapshot=None,
+                capability_gateway=gateway,
+                evidence_writer=_ForbiddenEvidenceWriter(), reader=None,
+                kind=ExecutionKind.LLM)
+        msg = str(exc.value)
+        assert "params resolved from the run subject projection" in msg
+        assert "833509" in msg
+        assert sp.asof_value in msg
+        assert "no production DataRuntimeWorld is bound (the chartered L2-b gap)" in msg
+        assert gateway.begun_count() == 0
+        assert refusals.records == []
+
+    def test_the_view_delegates_memory_experience_and_the_handler_family_identically(
+            self, env, base):
+        """Invariant 3: every non-data resolution through the view IS the
+        base's — factory object identity, never a copy — and the sealed data
+        ref is the ONE divergence. Mutation m1 (override ALL refs) reddens
+        here."""
+        sp = RT.SubjectParams.project(code="833509", as_of=NOW)
+        scoped = self._scoped(base, sp)
+
+        mem_ref = phase3_memory_surface().provider_ref
+        assert scoped.handler_factory(mem_ref) is base.handler_factory(mem_ref)
+        lane0 = bs.load_lane0_catalog()
+        exp_ref = lane0.refs["lane0.experience.provider"]
+        assert scoped.handler_factory(exp_ref) is base.handler_factory(exp_ref)
+        assert scoped.capability_backend_factory(lane0.capability_ref) is \
+            base.capability_backend_factory(lane0.capability_ref)
+        # the sealed data ref is the ONE divergence: base holds the UNBOUND
+        # process-level factory, the view serves the run-BOUND one.
+        data_ref = phase3_data_surface().provider_ref
+        assert scoped.handler_factory(data_ref) is not \
+            base.handler_factory(data_ref)
+        bound = scoped.handler_factory(data_ref)(
+            bridge=SimpleNamespace(bridge_id="data.runtime", priority=100),
+            summary=SimpleNamespace(summary_digest="s" * 64))
+        assert bound._subject_params is sp
+        unbound = base.handler_factory(data_ref)(
+            bridge=SimpleNamespace(bridge_id="data.runtime", priority=100),
+            summary=SimpleNamespace(summary_digest="s" * 64))
+        assert unbound._subject_params is None
+
+    def test_the_view_accepts_and_rejects_exactly_what_the_base_does(
+            self, env, base):
+        """Invariant 4: the view rejects nothing the base accepts and accepts
+        nothing the base rejects — registration delegates INTO the base
+        (off-catalog id refused; bound identity never rebindable; a free
+        catalog handler identity registered through the view resolves
+        identically from both)."""
+        from guanlan_v2.orchestration.catalog_runtime import CatalogMaterialError
+        from guanlan_v2.orchestration.refs import ContentRef
+
+        sp = RT.SubjectParams.project(code="833509", as_of=NOW)
+        scoped = self._scoped(base, sp)
+
+        bogus = ContentRef(id="handler.off_catalog", version="1",
+                           content_digest="0" * 64)
+        with pytest.raises(CatalogMaterialError,
+                           match="not a catalog handler identity"):
+            scoped.register_handler(bogus, lambda **kw: None)
+        with pytest.raises(CatalogMaterialError, match="already bound"):
+            scoped.register_handler(
+                phase3_memory_surface().provider_ref, lambda **kw: None)
+
+        free_ref = next(
+            e.ref for e in sorted(env["snapshot"].content_manifest,
+                                  key=lambda e: (e.ref.id, e.ref.version))
+            if e.kind == "handler" and e.ref.id == "handler.pv.price_action")
+
+        def marker(**kw):  # pragma: no cover - identity carrier only
+            return None
+
+        scoped.register_handler(free_ref, marker)
+        assert base.handler_factory(free_ref) is marker
+        assert scoped.handler_factory(free_ref) is marker

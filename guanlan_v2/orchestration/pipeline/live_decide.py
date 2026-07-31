@@ -379,8 +379,12 @@ class DeepDecideBindings:
     #: the authoritative clock port (aware datetimes; naive refuses → fast fallback).
     clock: Any
     #: per-run plan-runner factory ``(*, admission, lane_bindings,
-    #: run_context_factory, request_id, prompt_assembler)`` — production binds
+    #: run_context_factory, request_id, prompt_assembler,
+    #: subject_params=None)`` — production binds
     #: ``assembly.build_production_plan_runner``, the ONLY execution path.
+    #: ``subject_params`` (L1 Task 4) carries the run's materialization-stamped
+    #: subject projection to the per-run factories view; default ``None`` =
+    #: the process-level UNBOUND posture.
     plan_runner: Callable[..., Any]
     #: the seats decision-append helper (``seats.api._persist_decision`` shape).
     persist_decision: Callable[[str, dict], None]
@@ -761,6 +765,10 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
             preset_id=bindings.preset_id,
             context_snapshot_ref=context_snapshot_ref,
             subject_ref=subject_ref,
+            # L1 Task 4: the committed subject OBJECT rides beside its ref so
+            # the materializer can verify the digest bond and stamp
+            # ``subject_params`` via the ONE reviewed recipe (D-0).
+            subject=subject,
             clock=bindings.clock,
             context=context,
             catalog=bindings.catalog,
@@ -848,7 +856,11 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
     runner = bindings.plan_runner(
         admission=service, lane_bindings={"main": lane_binding},
         run_context_factory=_run_context_factory, request_id=request.request_id,
-        prompt_assembler=assembler)
+        prompt_assembler=assembler,
+        # L1 Task 4 (ONE-recipe provenance, m3): the runner receives THE
+        # materialization-stamped, digest-bonded projection — never a fresh
+        # ``SubjectParams.project`` here, which would bypass the bond check.
+        subject_params=materialized.subject_params)
 
     # invariant 3, closed BOTH sides (review I-1): once the runner has been
     # invoked the settled spend is real money against the watcher's 24/day pool
@@ -1215,17 +1227,22 @@ def build_production_bindings(*, preset_id: str | None = None) -> DeepDecideBind
             registry_digest=rt_digest)
 
     def plan_runner_factory(*, admission, lane_bindings, run_context_factory,
-                            request_id, prompt_assembler):
+                            request_id, prompt_assembler, subject_params=None):
         # bridge_analyzers: the SAME map instance the admission view above was
         # built over — never a second recipe, never an empty placeholder (the
         # 2026-07-31 burned-lease defect; see the binding-time comment).
+        # subject_params (L1 Task 4): the run's materialization-stamped
+        # projection, threaded THROUGH — a factory that accepted this kwarg
+        # and dropped it would be the half-wired-kwarg defect class (pinned
+        # by identity at the pm-two-bridges seam echo). Default None keeps
+        # every subject-less caller on the process-level UNBOUND posture.
         return build_production_plan_runner(
             stores=stores, catalog_snapshot=snapshot, registry=registry,
             gateway_factory=production_gateway_factory, admission=admission,
             lane_bindings=lane_bindings, run_context_factory=run_context_factory,
             request_id=request_id, clock=clock, runtime_registry_digest=rt_digest,
             runtime_limit=4, catalog=bundle, bridge_analyzers=bridge_analyzers,
-            prompt_assembler=prompt_assembler)
+            prompt_assembler=prompt_assembler, subject_params=subject_params)
 
     if preset_id != DEEP_DECIDE_PRESET_ID:
         # LOUD on the server's own stderr, not just a logger nobody configured:

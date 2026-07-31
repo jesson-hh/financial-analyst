@@ -1061,6 +1061,102 @@ class TestSubjectParamsStamp:
 
 
 # =========================================================================== #
+# 4b. L1 Task 4 — the screening half of the runner threading (structural, R4)  #
+# =========================================================================== #
+class TestSubjectParamsRunnerThread:
+    """L1 plan Task 4 — the screening runner thread, kept REAL at the seam it
+    CAN be real at today.
+
+    **Call-site investigation, verified at source 2026-07-31 (the plan said
+    'locate at source'):** the screening lane has NO production runner call
+    site — ``pipeline/api.py`` stops at admission by design ('THE STOP LINE:
+    no admit_after_approval, no freeze, no dispatch — even a lease-admitted
+    candidate awaits the downstream driver', api.py:544-546; module docstring
+    :59-60 'NEVER calls admit_after_approval'), and
+    ``screening.admit_screening_batch`` 'stops there ... never freezes a
+    plan, never dispatches' (screening.py:959-975). The ONLY invocation that
+    runs a screening lane through ``build_production_plan_runner`` is the
+    Phase-10 e2e's step-5 per-lane loop
+    (tests/orchestration/test_phase10_e2e.py), which L1 Task 4 threaded with
+    ``subject_params=lane.subject_params`` — pinned by source text below.
+    So the wire is real everywhere a screening lane is actually run, and
+    these pins hold the seam structurally (plan R4: vacuous behaviorally —
+    zero screening workers carry data prefetch rows, the Task-2 vacuity pin
+    above — until an L3 grant lands)."""
+
+    def test_the_lanes_stamp_reaches_the_per_run_view_at_the_executor_seam(
+            self, built, env, monkeypatch):
+        """The kwarg-arrival pin: a REAL stamped screening lane's
+        ``subject_params``, handed to the REAL ``build_production_plan_runner``
+        over the REAL sealed production catalog, reaches ``_plan_executor``'s
+        ``ExecutionRuntime`` as the per-run subject-scoped view closing over
+        THE lane's own stamp (object identity — never a re-projection)."""
+        import guanlan_v2.orchestration.data.catalog as dcat
+        from types import SimpleNamespace
+        from guanlan_v2.orchestration.pipeline import assembly
+
+        lane = built.lanes[0]
+        assert lane.subject_params is not None  # the Task-2 stamp
+
+        captured: dict = {}
+        real_ballr = assembly.build_admitted_plan_runner
+
+        def fake_ballr(**kw):
+            captured.update(kw)
+            return lambda **_kw: None
+
+        monkeypatch.setattr(assembly, "build_admitted_plan_runner", fake_ballr)
+
+        class _Seen(Exception):
+            """Stops _plan_executor right after the runtime construction."""
+
+        runtime_kwargs: dict = {}
+
+        def spy_runtime(**kw):
+            runtime_kwargs.update(kw)
+            raise _Seen()
+
+        monkeypatch.setattr(assembly, "ExecutionRuntime", spy_runtime)
+
+        runner = assembly.build_production_plan_runner(
+            stores=SimpleNamespace(), catalog_snapshot=env["snapshot"],
+            registry=env["registry"], gateway_factory=lambda **kw: None,
+            admission=SimpleNamespace(
+                verify_for_dispatch=lambda digest: SimpleNamespace(
+                    support_report="stub-support-report")),
+            lane_bindings={}, run_context_factory=lambda **kw: None,
+            request_id="req-screen-thread", clock=_FixedClock(),
+            runtime_registry_digest=env["registry"].registry_digest,
+            runtime_limit=4,
+            bridge_analyzers=assembly.production_bridge_analyzers(),
+            subject_params=lane.subject_params)
+        assert callable(runner)
+
+        plan_executor = captured["plan_executor"]
+        with pytest.raises(_Seen):
+            plan_executor(plan=SimpleNamespace(plan_digest="d" * 64),
+                          run_context=None, lane="main",
+                          point=SimpleNamespace(point_ordinal=0))
+        factories = runtime_kwargs["factories"]
+        assert isinstance(factories, assembly._SubjectScopedFactories)
+        provider = factories.handler_factory(
+            dcat.phase3_data_surface().provider_ref)(
+                bridge=SimpleNamespace(bridge_id="data.runtime", priority=100),
+                summary=SimpleNamespace(summary_digest="s" * 64))
+        assert provider._subject_params is lane.subject_params
+
+    def test_the_e2e_lane_runner_invocation_threads_the_stamp(self):
+        """Source-text pin on the ONE place a screening lane is actually run
+        through the production runner today (the Phase-10 e2e's per-lane
+        loop). CONSCIOUS-FLIP owner: when a production screening execution
+        call site lands (L3 / the downstream driver), that call site inherits
+        the thread and this pin is rewritten to name it."""
+        source = (Path(__file__).parent / "test_phase10_e2e.py").read_text(
+            encoding="utf-8")
+        assert "subject_params=lane.subject_params" in source
+
+
+# =========================================================================== #
 # 5. the whole-picture cost preview                                            #
 # =========================================================================== #
 class TestCostPreview:

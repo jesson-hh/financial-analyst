@@ -113,6 +113,11 @@ from guanlan_v2.orchestration.adapters.launcher import (
 )
 from guanlan_v2.orchestration.budget import BudgetLedger
 from guanlan_v2.orchestration.catalog import WorkerCatalogSnapshot
+from guanlan_v2.orchestration.data.catalog import phase3_data_surface
+from guanlan_v2.orchestration.data.runtime import (
+    SubjectParams,
+    worldless_data_provider_factory,
+)
 from guanlan_v2.orchestration.catalog_runtime import (
     BridgeCatalogView,
     CatalogMaterialError,
@@ -892,6 +897,54 @@ def wrap_seat_gateway(inner, *, catalog_runtime, registry) -> SeatOutputNormaliz
 # =========================================================================== #
 # 3. the composed production plan runner                                       #
 # =========================================================================== #
+class _SubjectScopedFactories:
+    """The per-run delegating view over the process-level factory registry
+    (L1 plan Task 4, design resolution R2 — the ``prompt_assembler``
+    threading precedent applied to data).
+
+    Overrides :meth:`handler_factory` for EXACTLY ONE key — the sealed
+    ``phase3_data_surface().provider_ref`` identity
+    (``(id, version, content_digest)``) — returning the run's subject-BOUND
+    data provider factory; every other attribute and every other handler ref
+    delegates verbatim to the base :class:`TrustedFactoryRegistry` via
+    ``__getattr__`` (memory recipe, experience pair, deterministic handler
+    family, model/capability factories, registration methods). The base is
+    never copied and never mutated: ``register_handler`` through the view IS
+    the base's, so the view rejects nothing the base accepts and accepts
+    nothing the base rejects.
+
+    Binding facts this design rests on (verified at source, recorded in the
+    Task-4 test docstrings): ``handler_factory`` is consumed at
+    worker.py:1687/:1719 (``rb.provider_ref`` — the override target) and
+    worker.py:2078 (``worker.execution.handler_ref`` — discriminated away by
+    the exact-key match); nothing isinstance-checks ``TrustedFactoryRegistry``
+    and ``ExecutionRuntime``'s ``factories`` field is an annotation only.
+
+    **The override target is chartered to MOVE (cross-plan seam):** L2-b
+    Task 5 — the L1↔L2-b integration seam — consciously re-targets this
+    view's ``factory`` from ``worldless_data_provider_factory(subject_params)``
+    to the world-bound ``production_data_provider_factory(subject_params)``
+    and deletes the worldless factory; that flip is cross-referenced by name
+    and number in both plans and must never happen silently.
+    """
+
+    __slots__ = ("_base", "_key", "_factory")
+
+    def __init__(self, base, *, provider_ref, factory) -> None:
+        self._base = base
+        self._key = (provider_ref.id, provider_ref.version,
+                     provider_ref.content_digest)
+        self._factory = factory
+
+    def handler_factory(self, ref):
+        if (ref.id, ref.version, ref.content_digest) == self._key:
+            return self._factory
+        return self._base.handler_factory(ref)
+
+    def __getattr__(self, name: str):
+        return getattr(self._base, name)
+
+
 def build_production_plan_runner(
     *,
     stores,
@@ -914,6 +967,7 @@ def build_production_plan_runner(
     runtime_profile=None,
     recorder_factory: Callable[[], Any] | None = None,
     freeze_idempotency_prefix: str = "replay-freeze",
+    subject_params: SubjectParams | None = None,
 ) -> Callable[..., Any]:
     """Compose the kernel into the launcher's production ``plan_runner``.
 
@@ -933,6 +987,14 @@ def build_production_plan_runner(
       :func:`build_dag_plan_executor` bridge — never a parallel ``run_plan``.
     * ``sink_artifact_resolver``: the launcher's own
       :func:`pool_sink_artifact_resolver` over the same per-plan pool.
+
+    ``subject_params`` (L1 Task 4, R2) is the run's materialization-stamped
+    subject projection: when bound, ``_plan_executor`` hands
+    :class:`ExecutionRuntime` the thin per-run :class:`_SubjectScopedFactories`
+    view over ``bundle.factories`` whose ONE override serves the sealed data
+    provider ref subject-bound; when ``None`` (screening today, dynamic
+    planner plans, replay, every non-deep caller) the factories object passes
+    through IDENTITY-unchanged — bitwise-identical behavior, pinned.
 
     Nothing here approves, admits, or bypasses: an unbound digest, a missing
     approval and the event-loop thread are all refused by the inherited
@@ -979,10 +1041,23 @@ def build_production_plan_runner(
 
     def _plan_executor(*, plan, run_context, lane, point):
         dispatch = admission.verify_for_dispatch(plan.plan_digest)
+        # L1 Task 4 (R2): identity when unbound — every non-deep caller is
+        # bitwise unchanged; the thin per-run view over the SAME registry when
+        # the run's stamped projection is bound. The worldless factory here is
+        # the L2-b Task 5 re-target point (see _SubjectScopedFactories).
+        factories = (
+            bundle.factories
+            if subject_params is None
+            else _SubjectScopedFactories(
+                bundle.factories,
+                provider_ref=phase3_data_surface().provider_ref,
+                factory=worldless_data_provider_factory(subject_params),
+            )
+        )
         runtime = ExecutionRuntime(
             catalog=bundle.runtime,
             bridge_view=bridge_view,
-            factories=bundle.factories,
+            factories=factories,
             support_report=dispatch.support_report,
             runtime_registry_digest=runtime_registry_digest,
         )

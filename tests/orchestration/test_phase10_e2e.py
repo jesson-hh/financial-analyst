@@ -573,7 +573,12 @@ def a_chain(env, trimmed_catalog, tmp_path_factory):
             run_context_factory=_run_context_factory,
             request_id=lane.request.request_id, clock=clock,
             runtime_registry_digest=rd, runtime_limit=4, catalog=bundle,
-            prompt_assembler=assembler)
+            prompt_assembler=assembler,
+            # L1 Task 4 (plan R4): the screening lane's ONLY runner invocation
+            # today — the lane's materialization-stamped projection rides the
+            # per-run seam (vacuous behaviorally: zero screening workers carry
+            # data prefetch rows; source-text-pinned in test_pipeline_screening).
+            subject_params=lane.subject_params)
         try:
             artifacts[i] = runner(
                 lane="main", point=_Point(), approval=None,

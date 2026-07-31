@@ -73,6 +73,7 @@ from guanlan_v2.orchestration.catalog_runtime import (
     InMemoryMaterialSource,
     TrustedFactoryRegistry,
 )
+from guanlan_v2.orchestration.data.runtime import SubjectParams
 from guanlan_v2.orchestration.data.symbols import normalize_symbol
 from guanlan_v2.orchestration.enums import (
     PortfolioRating,
@@ -112,6 +113,7 @@ from guanlan_v2.orchestration.pipeline.deep_decide import (
 )
 
 from guanlan_v2.orchestration.pipeline import live_decide
+from guanlan_v2.orchestration.pipeline.contracts import RunSubject
 from guanlan_v2.orchestration.pipeline.live_decide import (
     DeepDecideBindings,
     SUBJECT_ASSEMBLER_ID,
@@ -350,7 +352,8 @@ def _build_env(tmp_path, heavy, *, tranches=True, fail=frozenset(), lease=True,
     env = SimpleNamespace(
         clock=clock, stores=stores, rt_digest=rt_digest, context=context,
         ctx_ref=ctx_ref, bundle=bundle, gateway_factory=gateway_factory,
-        journal=journal, declog=[], persisted=[], noted=[], calls=[])
+        journal=journal, declog=[], persisted=[], noted=[], calls=[],
+        runner_subject_params=[])
 
     def persist_spy(kind, rec):
         env.persisted.append((kind, dict(rec)))
@@ -383,13 +386,20 @@ def _build_env(tmp_path, heavy, *, tranches=True, fail=frozenset(), lease=True,
             registry_digest=heavy.registry.registry_digest)
 
     def plan_runner_factory(*, admission, lane_bindings, run_context_factory,
-                            request_id, prompt_assembler):
+                            request_id, prompt_assembler, subject_params=None):
+        # CONSCIOUS FLIP (L1 Task 4): live_decide's runner call now threads
+        # ``subject_params=materialized.subject_params``, so the fake mirrors
+        # the production factory's passthrough (default None) and RECORDS each
+        # arrival — the threading pins below assert ONE-recipe provenance on
+        # what actually arrived here.
+        env.runner_subject_params.append(subject_params)
         return build_production_plan_runner(
             stores=stores, catalog_snapshot=heavy.snapshot, registry=heavy.registry,
             gateway_factory=gateway_factory, admission=admission,
             lane_bindings=lane_bindings, run_context_factory=run_context_factory,
             request_id=request_id, clock=clock, runtime_registry_digest=rt_digest,
-            runtime_limit=4, catalog=bundle, prompt_assembler=prompt_assembler)
+            runtime_limit=4, catalog=bundle, prompt_assembler=prompt_assembler,
+            subject_params=subject_params)
 
     env.persist_spy = persist_spy
     env.note_spy = note_spy
@@ -620,6 +630,56 @@ class TestHappyDeepPath:
         # the frozen-plan event exists on the run journal (the original check).
         rows = env.stores.events.journal(run.out["run_id"], "main")
         assert any(e.event_type == EventType.PLAN_FROZEN for e in rows)
+
+
+# =========================================================================== #
+# 1b. L1 Task 4 — the deep lane's subject-params threading (T4 pins)           #
+# =========================================================================== #
+class TestSubjectParamsRunnerThreading:
+    """L1 plan Task 4 — the deep call-site threading: ``live_decide`` passes
+    ``subject=`` (the committed ``RunSubject``) to the materializer and
+    ``materialized.subject_params`` — THE digest-bonded stamped object, the
+    ONE-recipe provenance — to the per-run runner factory. Mutation m3 (a
+    freshly-projected subject passed instead of the materialized stamp)
+    reddens on the object-identity assert; mutation m2 (the kwarg dropped in
+    the PRODUCTION factory) is pinned at the pm-two-bridges seam echo."""
+
+    def test_the_runner_receives_the_materialized_stamp_by_identity(
+            self, tmp_path, heavy, monkeypatch):
+        env = _build_env(tmp_path, heavy)
+        composites: list = []
+        real = live_decide.materialize_deep_decide_draft
+
+        def spy(**kw):
+            out = real(**kw)
+            composites.append((kw, out))
+            return out
+
+        monkeypatch.setattr(live_decide, "materialize_deep_decide_draft", spy)
+        decide = make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("300750")),
+            bindings=_bindings(env, heavy,
+                               strat_fn=lambda sid: dict(_OPT_IN_STRAT)))
+        out = decide(_payload("300750"))
+        assert out["deep_outcome"] == "completed"
+
+        assert len(composites) == 1
+        kw, materialized = composites[0]
+        # the materializer received THE committed subject — the object whose
+        # semantic digest the committed ref binds (the digest bond the
+        # materializer re-verifies).
+        assert isinstance(kw["subject"], RunSubject)
+        assert kw["subject"].code == "300750"
+        assert (kw["subject"].semantic_digest()
+                == kw["subject_ref"].payload_ref.content_digest)
+        # the stamp is non-None and IS the ONE recipe over that subject.
+        assert materialized.subject_params is not None
+        assert materialized.subject_params == SubjectParams.project(
+            code="300750", as_of=kw["subject"].as_of)
+        # ONE-recipe provenance (m3): the runner factory received THE stamped
+        # object by identity — a value-equal fresh projection is NOT enough.
+        assert env.runner_subject_params == [materialized.subject_params]
+        assert env.runner_subject_params[0] is materialized.subject_params
 
 
 # =========================================================================== #

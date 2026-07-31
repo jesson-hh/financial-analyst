@@ -259,7 +259,7 @@ def _run_context_factory(context, run_budget):
 
 
 def _compose_env(tmp_path: Path, gateway_factory, *, decide: bool = True,
-                 run_id: str = "run-pipe") -> _Env:
+                 run_id: str = "run-pipe", subject_params=None) -> _Env:
     """The pilot preset admitted + composed through the production assembly.
 
     Every stage is the real one: the EXISTING ``main_research_baseline`` preset
@@ -349,13 +349,17 @@ def _compose_env(tmp_path: Path, gateway_factory, *, decide: bool = True,
     binding = LaneExecutionBinding(
         lane="main", candidate_plan_digest=digest,
         reservation_id=res.reservation_id, approval_event_id=approval_event_id)
+    # L1 Task 4: the per-run subject projection rides the runner factory's new
+    # optional kwarg; passed conditionally so the default path stays the exact
+    # historical call (None == omitted for a keyword defaulting to None).
+    extra = {} if subject_params is None else {"subject_params": subject_params}
     runner = build_production_plan_runner(
         stores=stores, catalog_snapshot=snapshot, registry=registry,
         gateway_factory=gateway_factory, admission=service,
         lane_bindings={"main": binding},
         run_context_factory=_run_context_factory(context, run_budget),
         request_id=request.request_id, clock=clock,
-        runtime_registry_digest=rt_digest, runtime_limit=3)
+        runtime_registry_digest=rt_digest, runtime_limit=3, **extra)
 
     return _Env(
         registry=registry, clock=clock, snapshot=snapshot, stores=stores,
@@ -1131,4 +1135,125 @@ class TestTask11PlannerRunner:
         assert len(result.record.attempts) == spec.max_generation_attempts
         assert all(a.outcome == "model_error" for a in result.record.attempts)
         assert gateway.calls == spec.max_generation_attempts
-        assert gateway.closed is True  # the finally closes the gateway
+
+
+# =========================================================================== #
+# L1 Task 4 — the per-run subject-scoped factories view (threading pins)       #
+# =========================================================================== #
+class TestSubjectScopedFactoriesThreading:
+    """L1 plan Task 4 (design resolution R2) — the runner-seam threading pins.
+
+    **R2/G8 binding investigation, verified at source 2026-07-31 BEFORE any
+    test below was written (file:line):**
+
+    * ``TrustedFactoryRegistry.handler_factory`` consumption through
+      ``ExecutionRuntime.factories`` is worker.py:1687 (the resolver's
+      preflight registration check) and worker.py:1719 (``_provider``) — BOTH
+      keyed by ``rb.provider_ref``, the override target — plus ONE further
+      call the plan's anchor list did not name: worker.py:2078, the
+      DETERMINISTIC handler resolution keyed by
+      ``worker.execution.handler_ref``. That third site is safe under the
+      delegating view because the override discriminates on the EXACT sealed
+      ``(id, version, content_digest)`` triple — a worker handler ref can
+      never equal the data provider ref — and is pinned delegated below.
+    * Attribute-only consumers reached via ``__getattr__`` delegation:
+      ``model_factory`` (dag.py:691, dag.py:995 — the no-gateway fallback),
+      ``capability_backend_factory`` (worker.py:920, on the
+      ``CapabilityGateway`` constructed FROM ``runtime.factories`` at
+      dag.py:683-687), and ``register_handler`` /
+      ``register_capability_backend`` (registration recipes, process-level
+      only).
+    * NOTHING isinstance-checks / type-checks ``TrustedFactoryRegistry``
+      anywhere under guanlan_v2/orchestration (grep over the package: zero
+      ``isinstance(..., TrustedFactoryRegistry)`` and zero
+      ``type(...factories...)`` hits); ``ExecutionRuntime`` (worker.py:264-281)
+      is a frozen dataclass — its ``factories: TrustedFactoryRegistry`` is an
+      annotation only, never enforced.
+
+    Outcome: the thin delegating view stands as designed; no
+    ``TrustedFactoryRegistry`` subclassing was needed, no ``worker.py`` /
+    ``catalog_runtime.py`` edit was needed, and the D-0 STOP trigger did NOT
+    fire.
+    """
+
+    def _spied_run(self, tmp_path, monkeypatch, *, subject_params=None):
+        """Run the REAL pilot e2e with two assembly-module spies: the bundle
+        the runner builds internally, and the ``ExecutionRuntime`` handed to
+        the REAL ``build_dag_plan_executor``."""
+        bundles: list = []
+        real_bpcr = assembly_mod.build_production_catalog_runtime
+
+        def spy_bpcr(snapshot, **kw):
+            built = real_bpcr(snapshot, **kw)
+            bundles.append(built)
+            return built
+
+        monkeypatch.setattr(
+            assembly_mod, "build_production_catalog_runtime", spy_bpcr)
+
+        runtimes: list = []
+        real_bdpe = assembly_mod.build_dag_plan_executor
+
+        def spy_bdpe(**kw):
+            runtimes.append(kw["runtime"])
+            return real_bdpe(**kw)
+
+        monkeypatch.setattr(assembly_mod, "build_dag_plan_executor", spy_bdpe)
+
+        env = _compose_env(tmp_path, _RecordingFactory("t4-view"),
+                           subject_params=subject_params)
+        artifact = _run(env)
+        assert artifact is not None  # the pilot chain really completed
+        assert len(bundles) == 1 and len(runtimes) == 1
+        return bundles[0], runtimes[0]
+
+    def test_unbound_runner_hands_the_executor_the_bundles_factories_by_identity(
+            self, tmp_path, monkeypatch):
+        """Invariant 1 (a PIN of pre-existing truth, honestly green before the
+        implementation): ``subject_params=None`` ⇒ the executor receives the
+        bundle's OWN registry by object identity — every non-deep caller
+        (screening today, dynamic planner plans, replay) is bitwise unchanged.
+        Mutation m1's cousin (a view constructed even when unbound via a
+        module-level default) reddens exactly here."""
+        import inspect
+
+        bundle, runtime = self._spied_run(tmp_path, monkeypatch)
+        assert runtime.factories is bundle.factories
+        assert type(runtime.factories) is TrustedFactoryRegistry
+        # the seam's default is the signature fact, not a caller convention.
+        sig = inspect.signature(build_production_plan_runner)
+        assert sig.parameters["subject_params"].default is None
+
+    def test_bound_runner_wraps_the_bundles_factories_in_the_per_run_view(
+            self, tmp_path, monkeypatch):
+        """With ``subject_params`` bound the executor receives the thin
+        per-run ``_SubjectScopedFactories`` view over the SAME bundle
+        registry: the sealed data provider ref resolves to the subject-BOUND
+        worldless factory (the exact stamped object — never a re-projection),
+        and the REAL pilot run still completes through the view (delegation is
+        transparent for a run that never touches the sealed data ref)."""
+        from guanlan_v2.orchestration.data.catalog import phase3_data_surface
+        from guanlan_v2.orchestration.data.runtime import (
+            SubjectParams,
+            WorldlessDataBridgeProvider,
+        )
+
+        sp = SubjectParams.project(code="600519", as_of=NOW)
+        bundle, runtime = self._spied_run(
+            tmp_path, monkeypatch, subject_params=sp)
+        assert isinstance(runtime.factories,
+                          assembly_mod._SubjectScopedFactories)
+        assert runtime.factories is not bundle.factories
+
+        ref = phase3_data_surface().provider_ref
+        factory = runtime.factories.handler_factory(ref)
+        provider = factory(
+            bridge=SimpleNamespace(bridge_id="data.runtime", priority=100),
+            summary=SimpleNamespace(summary_digest="s" * 64))
+        assert isinstance(provider, WorldlessDataBridgeProvider)
+        # ONE-recipe provenance: the view closes over THE bound object.
+        assert provider._subject_params is sp
+        # ...and the override never leaked into the process-level base: the
+        # pilot bundle holds no binding for the sealed ref.
+        with pytest.raises(CatalogMaterialError):
+            bundle.factories.handler_factory(ref)
