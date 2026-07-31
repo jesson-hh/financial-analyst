@@ -2100,6 +2100,7 @@ class Lane0PromptAssembler:
         untrusted_blocks: tuple,
         output_binding=None,
         schema_registry=None,
+        trusted_artifacts: tuple = (),
     ):
         from guanlan_v2.orchestration import worker as _worker
         from guanlan_v2.orchestration.runtime_contracts import PromptAssemblyRecord
@@ -2126,6 +2127,17 @@ class Lane0PromptAssembler:
                 for b in blocks
             ],
         }
+        # 裁决 (2026-07-31, inter-node inlining): the factor report slot stays
+        # with the RICHER ruled section above (coverage stats, citable-reading
+        # notes — 裁决 1/Option B); every OTHER plan-fed upstream flows through
+        # the ONE shared renderer, so a future Lane-0 edge can never reopen the
+        # reference-only gap. In every legal Lane-0 plan today the filtered
+        # tuple is empty and the channel is byte-for-byte unchanged.
+        extra = tuple(b for b in trusted_artifacts
+                      if b.inject_as != _FACTOR_INJECT)
+        upstream = _worker.trusted_upstream_channel_section(extra)
+        if upstream is not None:
+            channel[_worker.TRUSTED_UPSTREAM_SECTION] = upstream
         out_schema = _worker.output_schema_section(
             output_binding=output_binding, schema_registry=schema_registry,
             runtime_owned_fields=LANE0_RUNTIME_OWNED_FIELDS)

@@ -288,7 +288,7 @@ class Env:
         return FakeModelGateway(self.stores, **kw)
 
     def run(self, *, provider_factory=None, model_gateway=None, observer=None, backend=None,
-            prompt_assembler=None):
+            prompt_assembler=None, artifact_pool=None):
         resolver, prepared, seq = self.sequencer_and_prepared(
             provider_factory=provider_factory, observer=observer)
         gw = self.capability_gateway(backend=backend)
@@ -299,7 +299,8 @@ class Env:
             input_snapshot=self.input_snapshot, ctx=self.ctx, node_reservation=self.node_res,
             bridge_resolver=resolver, model_gateway=mg, capability_gateway=gw,
             registry=self.sc.registry, stores=self.stores, clock=self.clock,
-            prompt_assembler=prompt_assembler, observer=observer)
+            prompt_assembler=prompt_assembler, observer=observer,
+            artifact_pool=artifact_pool)
 
 
 def build_env(*, worker_override=None, deterministic=False, one_input=None,

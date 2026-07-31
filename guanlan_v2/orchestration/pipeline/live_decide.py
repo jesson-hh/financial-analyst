@@ -257,6 +257,7 @@ class SubjectPromptAssembler:
         untrusted_blocks: tuple,
         output_binding=None,
         schema_registry=None,
+        trusted_artifacts: tuple = (),
     ):
         if any(e.name == SUBJECT_TRUSTED_INPUT_NAME for e in trusted_input_digests):
             raise DeepDecideError(
@@ -308,6 +309,14 @@ class SubjectPromptAssembler:
                 for b in blocks
             ],
         }
+        # 裁决 (2026-07-31): the run's own committed upstream artifacts are
+        # INLINED through the ONE shared renderer (run deep-73a70d27cb1651a0's
+        # six-monologue defect — pm: "only digests … no actual data"). The
+        # untrusted ``data_inputs`` references above are byte-for-byte
+        # unchanged; absence arrives as an explicit stated block.
+        upstream = _worker.trusted_upstream_channel_section(tuple(trusted_artifacts))
+        if upstream is not None:
+            channel[_worker.TRUSTED_UPSTREAM_SECTION] = upstream
         # 裁决 2 (2026-07-29): the derived output contract, from the SAME reviewed
         # helper the static assembler uses — the two assemblers must never drift
         # on what a model is told its answer is validated against.

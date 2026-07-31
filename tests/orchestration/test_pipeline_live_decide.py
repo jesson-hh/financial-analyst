@@ -45,6 +45,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import json
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -1525,3 +1526,116 @@ class TestReducedEvidenceDeepLane:
             _payload("300750"))
         assert out["deep_outcome"] == "refused"
         assert _decide_rows(env) == []
+
+
+# =========================================================================== #
+# 9. 裁决 (2026-07-31) — the inter-node seams carry CONTENT, not digests        #
+# =========================================================================== #
+class TestInterNodeInlining:
+    """An upstream artifact committed by THIS run's own runner is trusted and
+    must be INLINED into the downstream node's prompt — six monologues are not
+    a debate. The reference-only shape reproduced live in run
+    ``deep-73a70d27cb1651a0``: pm answered "The provided prompt includes only
+    digests for context_snapshot and sentiment blocks, with no actual data",
+    and trader defaulted to all cash one edge downstream of pm's committed
+    PortfolioDecision. These tests drive the REAL production runner + the REAL
+    ``SubjectPromptAssembler`` over the run's own committed artifact pool and
+    assert on the exact authorized request bytes."""
+
+    @pytest.fixture()
+    def run(self, tmp_path, heavy):
+        env = _build_env(tmp_path, heavy)
+        fast = _make_fast(env, _fast_result("300750"))
+        decide = make_orchestrated_decide(
+            fast_decide=fast,
+            bindings=_bindings(env, heavy, strat_fn=lambda sid: dict(_OPT_IN_STRAT)))
+        out = decide(_payload("300750"))
+        assert out["deep_outcome"] == "completed"
+        gateways = env.gateway_factory.gateways
+        assert len(gateways) == 1
+        return SimpleNamespace(env=env, out=out, gw=gateways[0])
+
+    @staticmethod
+    def _channel_of(gw, node_id):
+        for record, request in zip(gw.records, gw.requests):
+            if record.node_id == node_id:
+                return (json.loads(request.canonical_request_bytes.decode("utf-8")),
+                        record)
+        raise AssertionError(f"no verified LLM request for node {node_id!r}")
+
+    @staticmethod
+    def _blocks_of(channel):
+        section = channel[W.TRUSTED_UPSTREAM_SECTION]
+        return {b["inject_as"]: b for b in section["blocks"]}
+
+    def test_pm_sees_the_actual_research_plan_and_sentiment_content(self, run):
+        """THE load-bearing assertion: the pm request bytes carry the upstream
+        ResearchPlan and SentimentReport CONTENT, not merely their digests."""
+        channel, record = self._channel_of(run.gw, "pm")
+        blocks = self._blocks_of(channel)
+        plan_b = blocks["research_plan"]
+        senti_b = blocks["sentiment"]
+        assert plan_b["status"] == "present"
+        assert "Hold pending confirmation." in plan_b["content"]
+        assert "Monitor breadth" in plan_b["content"]
+        assert plan_b["artifact_schema"] == "ResearchPlan@1"
+        assert plan_b["producer_node_id"] == "research-mgr"
+        assert senti_b["status"] == "present"
+        assert "Balanced flow, mild caution." in senti_b["content"]
+        assert senti_b["artifact_schema"] == "SentimentReport@1"
+        # attribution: the inlined block cites the SAME committed-artifact digest
+        # the persisted PromptAssemblyRecord names for that slot, so the record
+        # proves which exact upstream the model saw.
+        named = {e.name: e.digest for e in record.trusted_input_digests}
+        assert plan_b["artifact_digest"] == named["research_plan"]
+        assert senti_b["artifact_digest"] == named["sentiment"]
+
+    def test_trader_sees_pms_actual_portfolio_decision(self, run):
+        """The live run's trader said "No portfolio decision provided" one edge
+        downstream of pm's committed PortfolioDecision. Never again."""
+        channel, record = self._channel_of(run.gw, "trader")
+        dec = self._blocks_of(channel)["portfolio_decision"]
+        assert dec["status"] == "present"
+        assert "Advisory hold." in dec["content"]
+        assert "Risk/reward balanced." in dec["content"]
+        assert dec["artifact_schema"] == "PortfolioDecision@1"
+        named = {e.name: e.digest for e in record.trusted_input_digests}
+        assert dec["artifact_digest"] == named["portfolio_decision"]
+
+    def test_the_debate_seats_see_each_other(self, run):
+        """bear-r1's ``opponent_case`` input carries bull's ACTUAL case — a
+        debate, not two monologues."""
+        channel, _ = self._channel_of(run.gw, "bear-r1")
+        opp = self._blocks_of(channel)["opponent_case"]
+        assert opp["status"] == "present"
+        assert "scripted bull" in opp["content"]
+        assert opp["producer_node_id"] == "bull-r1"
+
+    def test_a_seat_with_no_fed_inputs_is_byte_identical(self, run):
+        """``sentiment`` has no plan-fed artifact inputs: no section appears —
+        the reviewed channel shape is unchanged where there is nothing to say."""
+        channel, _ = self._channel_of(run.gw, "sentiment")
+        assert W.TRUSTED_UPSTREAM_SECTION not in channel
+
+    def test_a_failed_upstream_is_stated_absent_never_omitted(
+            self, tmp_path, heavy):
+        """Ruling 1's own wording: an empty question must never masquerade as a
+        complete one. A FAILED aux upstream (its DEGRADE edge dropped) is
+        STATED as absent in the downstream prompt."""
+        env = _build_env(tmp_path, heavy, fail=frozenset({"pv.technical"}))
+        fast = _make_fast(env, _fast_result("300750"))
+        out = make_orchestrated_decide(
+            fast_decide=fast,
+            bindings=_bindings(env, heavy,
+                               strat_fn=lambda sid: dict(_OPT_IN_STRAT)))(
+            _payload("300750"))
+        assert out["deep_outcome"] == "completed"
+        channel, _ = self._channel_of(env.gateway_factory.gateways[0], "bull-r1")
+        blocks = self._blocks_of(channel)
+        tech = blocks["technical"]
+        assert tech["status"] == "absent"
+        assert tech["artifact_digest"] is None
+        assert tech["content"] == W.TRUSTED_UPSTREAM_ABSENT_TEXT
+        # the satisfied siblings still arrive as real content beside the absence.
+        assert blocks["sentiment"]["status"] == "present"
+        assert "Balanced flow, mild caution." in blocks["sentiment"]["content"]

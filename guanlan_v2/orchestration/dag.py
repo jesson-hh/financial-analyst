@@ -739,7 +739,8 @@ async def run_plan(
                             node_reservation=pctx.node_res, bridge_resolver=pctx.resolver,
                             model_gateway=pctx.model_gateway, capability_gateway=pctx.gateway,
                             registry=registry, stores=stores, clock=clock,
-                            prompt_assembler=prompt_assembler, attempt=1)
+                            prompt_assembler=prompt_assembler, attempt=1,
+                            artifact_pool=pool)
                         if pctx.degraded_inputs:
                             node_run = _upgrade_to_degraded(node_run)
                         return pctx, node_run, artifact, True
@@ -1002,7 +1003,7 @@ def _run_bounded_node(prep, *, plan, runtime, ctx, stores, registry, ctx_ref, cl
                 plan, node, runtime=runtime, prepared_bridges=prepared, input_snapshot=snapshot,
                 ctx=ctx, node_reservation=node_res, bridge_resolver=resolver, model_gateway=mg,
                 capability_gateway=gw, registry=registry, stores=stores, clock=clock,
-                prompt_assembler=prompt_assembler, attempt=ordinal)
+                prompt_assembler=prompt_assembler, attempt=ordinal, artifact_pool=pool)
         except Exception as exc:
             return _terminal_node_run(
                 run_id=run_id, plan=plan, node=node, worker=worker, status=NodeStatus.FAILED,
