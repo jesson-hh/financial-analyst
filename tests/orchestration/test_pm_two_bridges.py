@@ -25,17 +25,30 @@ EVERY active bridge. Two rulings close it:
   the C3 ROWLESS reader: honest empty prefetch, empty contribution, stores never
   touched (pinned below with a poisoned stores object).
 
-* **Ruling 2 — data provider, honest-empty ONLY for structurally-dead rows.**
-  ``data/runtime.py::StructurallyDeadRowDataProvider`` serves the deep lane. Its
-  ``open_execution`` discriminates NARROWLY: a row whose param bindings are
-  unresolvable BY CONSTRUCTION (``node_param``-sourced pointers against a
-  ``params_schema_ref=None`` worker — defect H's exact pinned shape, decidable
-  statically from the catalog with no execution attempt) freezes with an EMPTY
-  completed contribution, zero gateway begins, attributable through the summary
-  digest plus a logged named fact. EVERYTHING ELSE stays LOUD: a resolvable row
-  (the real L2-b gap — no production ``DataRuntimeWorld`` is bound), an
-  allowlisted worker without a row (the two pv aux nodes keep degrading), a
-  drifted handle, a foreign config.
+* **Ruling 2, as consciously FLIPPED by L1 Task 3 — the worldless data
+  provider refuses loudly; the empty-complete branch is GONE.** The original
+  ruling completed honest-empty for the one dead-shape row (``node_param``
+  bindings against a ``params_schema_ref=None`` worker). The L1 subject
+  projection made that exact sealed row RESOLVABLE (defect H healed at the
+  root), so the dead-row provider was retired per its own tombstone:
+  ``data/runtime.py::WorldlessDataBridgeProvider`` now serves the deep lane
+  with three LOUD shapes at ``open_execution`` — (1) an allowlisted worker
+  without a reviewed row keeps the UNCHANGED pv-aux refusal; (2) rows with
+  the run's subject projection BOUND are PROVEN resolvable (the real
+  assembly + schema validation, zero gateway begins) then refused naming the
+  resolved subject and the chartered L2-b gap (the frozen marker ``params
+  resolved from the run subject projection``); (3) rows with the projection
+  UNBOUND refuse naming the runner seam (a wiring defect). Never an empty
+  contribution for a row that could have been read. So ``dec.pm`` now fails
+  loudly at bridge EXECUTION until L2-b binds the production world — the
+  chartered one-train posture (9999 deploys only after L2-b).
+
+The pm behavioural pins below are ORDER-CONDITIONAL (seam review): they
+assert the worldless shapes while ``WorldlessDataBridgeProvider`` is the
+incumbent registered at ``phase3_data_surface().provider_ref`` and SKIP
+otherwise — L2-b (Task 4 registration supersede + Task 5, the L1<->L2-b
+integration seam) flips them again to the real-read semantics under its
+correction clause, never reddening them by surprise.
 
 Everything runs against the REAL sealed Phase-9 catalog through the REAL
 production assembly; zero network, zero LLM, zero ``var/`` writes.
@@ -222,10 +235,15 @@ def _resolver(runtime, draft, snapshot, node_id: str):
         runtime=runtime, node=node, worker=worker, sequencer=sequencer)
 
 
-def _production_registered_factories(bundle, env, *, stores=None):
+def _production_registered_factories(bundle, env, *, stores=None,
+                                     subject_params=None):
     """EXACTLY the three reviewed recipes ``build_production_bindings`` calls,
     on a fresh registry over the same sealed runtime (the seam test below
-    proves production calls these very recipes on the runner's bundle)."""
+    proves production calls these very recipes on the runner's bundle).
+
+    ``subject_params`` mirrors the L1 seam: production's process-level call
+    stays UNBOUND (None); the BOUND registration models what L1 Task 4's
+    per-run subject-scoped factories view hands the executor."""
     factories = TrustedFactoryRegistry(bundle.runtime)
     bs.register_lane0_experience_factories(
         factories=factories, catalog=bs.load_lane0_catalog(), pool=None,
@@ -234,8 +252,30 @@ def _production_registered_factories(bundle, env, *, stores=None):
     MR.register_phase3_memory_provider_factory(
         factories=factories,
         stores=stores if stores is not None else _PoisonedStores())
-    RT.register_structurally_dead_row_data_provider(factories=factories)
+    RT.register_worldless_data_provider(
+        factories=factories, subject_params=subject_params)
     return factories
+
+
+def _skip_unless_worldless_incumbent(factories):
+    """ORDER-CONDITIONAL GUARD (L1 plan Task 3, seam review): the pm
+    behavioural pins assert the WORLDLESS shapes — the L1-only tree state.
+    L2-b (Task 4 registration supersede + Task 5, the L1<->L2-b integration
+    seam) consciously flips them AGAIN to the real-read semantics under its
+    correction clause, which names both provider classes and both pin sets.
+    Guarding on the provider class actually registered at
+    ``phase3_data_surface().provider_ref`` means L2-b's landing flips these
+    pins consciously (skip → rewrite), never reddens them by surprise."""
+    provider = factories.handler_factory(phase3_data_surface().provider_ref)(
+        bridge=SimpleNamespace(bridge_id="data.runtime", priority=100),
+        summary=SimpleNamespace(summary_digest="s" * 64))
+    if not isinstance(provider, RT.WorldlessDataBridgeProvider):
+        pytest.skip(
+            "the registered data provider incumbent is no longer "
+            "WorldlessDataBridgeProvider -- these worldless-shape pins are "
+            "owned by L2-b's correction clause (Task 4 supersede / Task 5 "
+            "integration seam), which rewrites them to the real-read "
+            "semantics")
 
 
 def _summary_for(report, node_id: str, bridge_id: str):
@@ -367,7 +407,10 @@ class TestTheProductionRegistrationSeam:
         provider = data_factory(
             bridge=SimpleNamespace(bridge_id="data.runtime", priority=100),
             summary=SimpleNamespace(summary_digest="s" * 64))
-        assert isinstance(provider, RT.StructurallyDeadRowDataProvider)
+        # conscious flip (L1 Task 3): the registered incumbent is the
+        # worldless provider; L2-b Task 4 re-targets this pin to the
+        # world-bound production provider per its correction clause.
+        assert isinstance(provider, RT.WorldlessDataBridgeProvider)
         mem_factory = built.factories.handler_factory(
             phase3_memory_surface().provider_ref)
         mem_provider = mem_factory(
@@ -416,9 +459,16 @@ class TestTheProductionRegistrationSeam:
 
 
 # =========================================================================== #
-# 2. pm PREPARES and its whole bridge layer completes EMPTY                     #
+# 2. pm PREPARES; its data bridge now REFUSES LOUDLY (L1 Task 3 conscious flip) #
 # =========================================================================== #
-class TestPmBridgeLayerCompletesEmpty:
+class TestPmDataBridgeRefusesLoudly:
+    """CONSCIOUS FLIP of the empty-complete pins (L1 Task 3): pm no longer
+    completes empty over its sealed ``verified_snapshot`` row — the row is
+    RESOLVABLE under the subject projection, so the worldless provider
+    refuses at bridge execution (unbound → the runner-seam shape; bound →
+    the resolved-but-no-world shape). The memory rowless-empty pins are
+    UNTOUCHED (TestPmMemoryBranch)."""
+
     def test_pm_resolver_now_constructs_with_both_bridges(
             self, bundle, view, reduced, env):
         """THE FIX at the exact live seam (was: the control's PreflightError)."""
@@ -427,13 +477,14 @@ class TestPmBridgeLayerCompletesEmpty:
         resolver = _resolver(runtime, reduced.draft, env["snapshot"], "pm")
         assert resolver.required_bridge_ids == ("data.runtime", "memory.runtime")
 
-    def test_pm_prepare_and_freeze_are_the_two_empty_attributable_contributions(
+    def test_pm_prepares_empty_then_unbound_refuses_at_the_runner_seam(
             self, bundle, view, reduced, env):
-        """Stage 1 + stage 2 through the REAL resolver over a REAL gateway:
-        two prepared-empty handles, two EMPTY completed contributions (each
-        attributable through its own analyzer summary digest), ZERO gateway
-        begins, zero finalized records, zero refusals, zero evidence writes."""
+        """Stage 1 is UNCHANGED (two prepared-empty handles, I/O-free); stage
+        2 through the REAL resolver now refuses (shape 3 — the process-level
+        registration is unbound), with ZERO gateway begins, zero finalized
+        records, zero refusals, zero evidence writes."""
         factories = _production_registered_factories(bundle, env)
+        _skip_unless_worldless_incumbent(factories)
         runtime = _exec_runtime(bundle, view, reduced.report, factories=factories)
         node = next(n for n in reduced.draft.nodes if n.id == "pm")
         worker = _worker_of(env, "dec.pm")
@@ -453,32 +504,70 @@ class TestPmBridgeLayerCompletesEmpty:
             _summary_for(reduced.report, "pm", "memory.runtime"))
         gateway, refusals = _real_gateway(
             env, reduced, bundle, worker, summaries, sequencer)
-        contributions = resolver.open_execution(
-            plan=None, prepared=prepared, input_snapshot=None,
-            capability_gateway=gateway,
-            evidence_writer=_ForbiddenEvidenceWriter(), reader=None,
-            kind=ExecutionKind.LLM)
-        assert [c.bridge_id for c in contributions] == [
-            "data.runtime", "memory.runtime"]
-        for c in contributions:
-            assert c.tool_call_records == ()
-            assert c.data_result_refs == ()
-            assert c.direct_evidence_refs == ()
-            assert c.untrusted_blocks == ()
-        assert {c.summary_digest for c in contributions} == {
-            s.summary_digest for s in summaries}
+        with pytest.raises(RT.DataRuntimeError) as exc:
+            resolver.open_execution(
+                plan=None, prepared=prepared, input_snapshot=None,
+                capability_gateway=gateway,
+                evidence_writer=_ForbiddenEvidenceWriter(), reader=None,
+                kind=ExecutionKind.LLM)
+        msg = str(exc.value)
+        assert "subject projection not bound at the runner seam" in msg
+        assert "params resolved from the run subject projection" not in msg
         assert gateway.begun_count() == 0
         assert gateway.finalized_records() == ()
         assert refusals.records == []
 
-    def test_the_real_pm_summaries_license_the_empty_contributions(
+    def test_pm_bound_refuses_naming_the_runs_own_subject(
+            self, bundle, view, reduced, env):
+        """With the run's projection bound (modelling L1 Task 4's per-run
+        view), the SAME seam raises shape 2: the frozen marker + the run's
+        own code and as-of + the row's method id + the L2-b naming — and the
+        gateway still sees ZERO begins (the proof is pure)."""
+        sp = RT.SubjectParams.project(code="833509", as_of=NOW)
+        factories = _production_registered_factories(
+            bundle, env, subject_params=sp)
+        _skip_unless_worldless_incumbent(factories)
+        runtime = _exec_runtime(bundle, view, reduced.report, factories=factories)
+        node = next(n for n in reduced.draft.nodes if n.id == "pm")
+        worker = _worker_of(env, "dec.pm")
+        sequencer = W.ExecutionEvidenceSequencer(node_id="pm", attempt=1)
+        resolver = W.ExecutionBridgeResolver(
+            runtime=runtime, node=node, worker=worker, sequencer=sequencer)
+        prepared = resolver.prepare_input(
+            plan=None, context_snapshot_ref=None,
+            evidence_writer=_ForbiddenEvidenceWriter())
+        summaries = (
+            _summary_for(reduced.report, "pm", "data.runtime"),
+            _summary_for(reduced.report, "pm", "memory.runtime"))
+        gateway, refusals = _real_gateway(
+            env, reduced, bundle, worker, summaries, sequencer)
+        with pytest.raises(RT.DataRuntimeError) as exc:
+            resolver.open_execution(
+                plan=None, prepared=prepared, input_snapshot=None,
+                capability_gateway=gateway,
+                evidence_writer=_ForbiddenEvidenceWriter(), reader=None,
+                kind=ExecutionKind.LLM)
+        msg = str(exc.value)
+        assert "params resolved from the run subject projection" in msg
+        assert "833509" in msg
+        assert sp.asof_value in msg
+        assert "verified_snapshot" in msg
+        assert "no production DataRuntimeWorld is bound (the chartered L2-b gap)" in msg
+        assert gateway.begun_count() == 0
+        assert gateway.finalized_records() == ()
+        assert refusals.records == []
+
+    def test_the_real_pm_summaries_still_license_zero_finalized_calls(
             self, reduced):
         """Arithmetic honesty, verified against the REAL support report (not
         asserted from the briefing): pm's data summary has ``min == 0`` (the
         one granted row is ``cache_or_invoke`` + ``success_requires_finalized_
-        call=False`` ⇒ ``row_min_finalized == 0``) so zero finalized calls pass
-        the executor's success bound (worker.py ``charge.finalized < min``);
-        the memory summary is the C3 zero-bounds one."""
+        call=False`` ⇒ ``row_min_finalized == 0``); the memory summary is the
+        C3 zero-bounds one. CONSCIOUS NOTE (L1 Task 3): these catalog facts
+        did not move, but the empty-contribution license is now CONSUMED only
+        by the memory bridge — the worldless data provider refuses before any
+        bound could bite; the data-side zero-finalized license becomes live
+        again under L2-b's real provider (a cache-served read)."""
         data_summary = _summary_for(reduced.report, "pm", "data.runtime")
         assert data_summary.min_finalized_tool_calls_on_success == 0
         assert data_summary.max_capability_invocations == 1
@@ -495,9 +584,21 @@ class TestPmBridgeLayerCompletesEmpty:
 
 
 # =========================================================================== #
-# 3. ruling 2 — the NARROW structurally-dead-row discrimination                 #
+# 3. the worldless provider's guards (L1 Task 3 conscious flip of ruling 2)     #
 # =========================================================================== #
-class TestStructurallyDeadRowDiscrimination:
+class TestWorldlessProviderGuards:
+    """CONSCIOUS FLIP (L1 Task 3): the dead-row discrimination is GONE — the
+    L1 subject projection made the sealed row resolvable, so 'structurally
+    dead' ceased to exist as a category and the empty-complete branch was
+    deleted per the retired provider's tombstone. The old predicate pin
+    (``test_the_pm_row_is_dead_by_construction``) died with the predicate;
+    its underlying catalog facts (no params schema / ``params_not_allowed``
+    / the sealed binding bytes) remain pinned verbatim in
+    ``test_data_catalog.py``. The full three-shape pins (poisoned gateway,
+    proof spy, marker discrimination) live in ``test_subject_projection.py``;
+    these unit pins construct the class directly and die WITH the class at
+    L2-b Task 5 (the integration seam)."""
+
     @pytest.fixture()
     def parts(self, env, view, reduced):
         worker = _worker_of(env, "dec.pm")
@@ -508,7 +609,7 @@ class TestStructurallyDeadRowDiscrimination:
         token = sequencer.issue_call_token(
             bridge_priority=rb.priority, bridge_id=rb.bridge_id,
             summary_digest=summary.summary_digest)
-        provider = RT.structurally_dead_row_data_provider_factory()(
+        provider = RT.worldless_data_provider_factory()(
             bridge=rb, summary=summary)
         return SimpleNamespace(
             worker=worker, rb=rb, summary=summary, node=node,
@@ -531,65 +632,43 @@ class TestStructurallyDeadRowDiscrimination:
             evidence_writer=_ForbiddenEvidenceWriter(), reader=None,
             sequencer=parts.sequencer)
 
-    # -- the dead shape, decided statically ---------------------------------- #
-    def test_the_pm_row_is_dead_by_construction(self, env):
-        """Defect H's exact shape on the REAL sealed row + REAL worker —
-        decidable with zero execution attempts."""
-        worker = _worker_of(env, "dec.pm")
-        assert worker.params_schema_ref is None
-        rows = phase3_data_surface().prefetch_binding.operations
-        assert [r.worker_id for r in rows] == ["dec.pm"]
-        assert [(b.target_pointer, b.source_kind, b.source_pointer)
-                for b in rows[0].param_bindings] == [
-            ("/as_of", "node_param", "/asof_date"),
-            ("/symbols", "node_param", "/code")]
-        assert RT._row_is_structurally_dead(rows[0], worker) is True
-
-    def test_dead_row_freeze_is_empty_with_the_named_fact_and_untouched_gateway(
-            self, env, reduced, bundle, parts, caplog):
-        import logging
-
-        gateway, refusals = _real_gateway(
-            env, reduced, bundle, parts.worker, (parts.summary,), parts.sequencer)
+    # -- the sealed row: shapes 3 and 2 over the REAL resolved bridge --------- #
+    def test_the_sealed_row_unbound_refuses_at_the_runner_seam(self, parts):
+        """WAS the empty-complete freeze (the dead-row shape). NOW shape 3:
+        the sealed row is resolvable under the projection, so an unbound
+        provider names the WIRING defect — never an empty contribution."""
         prepared = parts.provider.prepare_input(
             SimpleNamespace(token=parts.token,
                             evidence_writer=_ForbiddenEvidenceWriter()))
         assert prepared.status == "prepared"
         assert prepared.prepared_handle.input_contribution == \
             W.BridgeInputContribution()
-        session = parts.provider.open_execution(self._open_request(
-            parts, handle=prepared.prepared_handle))
-        with caplog.at_level(logging.WARNING,
-                             logger="guanlan_v2.orchestration.data.runtime"):
-            outcome = session.freeze_for_execution(kind=ExecutionKind.LLM)
-        assert outcome.status == "completed"
-        c = outcome.frozen_contribution
-        assert c is not None
-        assert c.bridge_id == "data.runtime"
-        assert c.bridge_priority == parts.rb.priority
-        # attribution: the analyzer summary's digest — never a fabricated row.
-        assert c.summary_digest == parts.summary.summary_digest
-        assert c.tool_call_records == ()
-        assert c.data_result_refs == ()
-        assert c.direct_evidence_refs == ()
-        assert c.untrusted_blocks == ()
-        # the gateway was NEVER touched — zero begun/finalized/refused.
-        assert gateway.begun_count() == 0
-        assert gateway.finalized_records() == ()
-        assert refusals.records == []
-        # the NAMED FACT: the row, why it cannot run, and that no read ran.
-        fact = "\n".join(caplog.messages)
-        assert "DECLARED but NOT RUNNABLE by construction" in fact
-        assert "'dec.pm'" in fact and "'verified_snapshot'" in fact
-        assert "/asof_date" in fact and "/code" in fact
-        assert "params_schema_ref=None" in fact
-        assert "no data read was attempted" in fact
+        with pytest.raises(RT.DataRuntimeError,
+                           match="not bound at the runner seam"):
+            parts.provider.open_execution(self._open_request(
+                parts, handle=prepared.prepared_handle))
 
-    # -- every OTHER shape stays LOUD (the discrimination cannot widen) ------- #
-    def test_a_resolvable_row_still_refuses_loudly(self, parts):
-        """The real L2-b gap must keep firing: a row whose params are
-        resolvable BY CONSTRUCTION (const-bound) refuses — the worldless
-        provider never fakes a data read."""
+    def test_the_sealed_row_bound_refuses_naming_the_resolved_subject(
+            self, parts):
+        """Shape 2 at the unit level: the sealed row + a bound projection →
+        proven resolvable, then refused with the frozen marker."""
+        sp = RT.SubjectParams.project(code="833509", as_of=NOW)
+        provider = RT.worldless_data_provider_factory(sp)(
+            bridge=parts.rb, summary=parts.summary)
+        with pytest.raises(RT.DataRuntimeError) as exc:
+            provider.open_execution(self._open_request(parts))
+        msg = str(exc.value)
+        assert "params resolved from the run subject projection" in msg
+        assert "833509" in msg and "verified_snapshot" in msg
+
+    # -- every rows-present shape stays LOUD (the no-fake-read family) -------- #
+    def test_a_row_that_fails_validation_refuses_loudly_never_empty(
+            self, parts):
+        """The proof REALLY validates: a const-bound row whose values assemble
+        but do NOT satisfy the reviewed params schema (naive date string, a
+        list of bare code strings) refuses loudly WITHOUT the resolved-shape
+        marker — raising the marker over an unproven row would be a lie, and
+        completing empty would be a fabrication."""
         sealed = phase3_data_surface().prefetch_binding.operations[0]
         live_row = DataPrefetchOperation(
             worker_id="dec.pm", method_ref=sealed.method_ref,
@@ -608,29 +687,34 @@ class TestStructurallyDeadRowDiscrimination:
         bridge = SimpleNamespace(bridge_id="data.runtime",
                                  priority=parts.rb.priority,
                                  config_bytes=config)
-        provider = RT.structurally_dead_row_data_provider_factory()(
+        sp = RT.SubjectParams.project(code="833509", as_of=NOW)
+        provider = RT.worldless_data_provider_factory(sp)(
             bridge=bridge, summary=parts.summary)
-        with pytest.raises(RT.DataRuntimeError,
-                           match="L2-b.*never fakes a data read"):
+        with pytest.raises(RT.DataRuntimeError) as exc:
             provider.open_execution(self._open_request(parts, bridge=bridge))
+        msg = str(exc.value)
+        assert "do not validate" in msg
+        assert "never a fabricated read" in msg
+        assert "params resolved from the run subject projection" not in msg
 
-    def test_the_same_dead_row_on_a_params_carrying_worker_still_refuses(
+    def test_rows_on_a_params_carrying_worker_still_refuse_unbound(
             self, parts):
-        """The predicate keys on the WORKER fact too: the sealed node_param row
-        against a worker that DOES declare a params schema is resolvable in a
-        dynamic plan — loud, never empty."""
+        """WAS the dead-predicate worker-fact arm. NOW: worker facts no longer
+        discriminate — ANY rows-present path on an unbound provider refuses
+        at the runner seam (there is no world to read from either way)."""
         carrying = SimpleNamespace(
             id="dec.pm", params_schema_ref=SchemaRef(name="X", version="1"))
-        with pytest.raises(RT.DataRuntimeError, match="resolvable as written"):
+        with pytest.raises(RT.DataRuntimeError,
+                           match="not bound at the runner seam"):
             parts.provider.open_execution(
                 self._open_request(parts, worker=carrying))
 
     def test_an_allowlisted_worker_without_a_row_still_refuses_loudly(
             self, env, view, reduced, parts):
-        """The two pv aux nodes' shape: capability-activated, rowless — LOUD
-        (they keep degrading; conscious flip: the refusal now fires at bridge
-        EXECUTION — ``bridge_execution_error`` — instead of bridge prepare,
-        because the factory is bound)."""
+        """The two pv aux nodes' shape (shape 1, text UNCHANGED by L1):
+        capability-activated, rowless — LOUD at bridge EXECUTION
+        (``bridge_execution_error``); they keep degrading. Shape 1's fate
+        (loud vs catalog-licensed EMPTY) is L2-b's conscious flip."""
         for wid in ("pv.price_action", "pv.microstructure"):
             worker = _worker_of(env, wid)
             assert tuple(rb.bridge_id
@@ -659,7 +743,7 @@ class TestStructurallyDeadRowDiscrimination:
         bridge = SimpleNamespace(bridge_id="other.bridge",
                                  priority=parts.rb.priority,
                                  config_bytes=config)
-        provider = RT.structurally_dead_row_data_provider_factory()(
+        provider = RT.worldless_data_provider_factory()(
             bridge=parts.rb, summary=parts.summary)
         with pytest.raises(RT.DataRuntimeError, match="different bridge"):
             provider.open_execution(self._open_request(parts, bridge=bridge))
@@ -740,9 +824,14 @@ class TestPmMemoryBranch:
 class TestFullTrunkShape:
     def test_research_mgr_pm_trader_resolver_shapes(
             self, bundle, view, reduced, env):
-        """The next live run's bridge-layer shape: research-mgr → the empty
-        experience contribution; pm → BOTH bridges prepared-empty; trader →
-        no bridge at all. Three LLM seats left on the trunk."""
+        """The bridge-layer resolver shape (unchanged facts): research-mgr →
+        the empty experience contribution; pm → both bridges construct;
+        trader → no bridge at all. CONSCIOUS NOTE (L1 Task 3, was: 'three LLM
+        seats left on the trunk' = 6 LLM invocations): between L1 and L2-b a
+        production deep run settles the 4 trunk seats before pm, then pm
+        FAILS loudly at bridge execution (the resolved-but-no-world shape,
+        zero pm LLM spend) and trader is blocked honestly behind it — the
+        chartered one-train posture; 9999 deploys only after L2-b."""
         factories = _production_registered_factories(bundle, env)
         runtime = _exec_runtime(bundle, view, reduced.report, factories=factories)
         shapes = {
@@ -758,10 +847,12 @@ class TestFullTrunkShape:
     def test_the_aux_nodes_prepare_but_refuse_loudly_at_execution(
             self, bundle, view, reduced, env):
         """The pv aux nodes keep DEGRADING (the chartered L2-b gap keeps
-        firing) — now at bridge execution (``bridge_execution_error``) instead
-        of bridge prepare, because the provider factory is bound. Their
-        failure stays loud; nothing silently succeeds."""
+        firing) — at bridge execution (``bridge_execution_error``), shape 1's
+        UNCHANGED text. Order-conditional: shape 1's fate (loud vs
+        catalog-licensed EMPTY for rowless workers) is L2-b's conscious
+        flip, so this pin is guarded on the worldless incumbent."""
         factories = _production_registered_factories(bundle, env)
+        _skip_unless_worldless_incumbent(factories)
         runtime = _exec_runtime(bundle, view, reduced.report, factories=factories)
         for wid in ("pv.price_action", "pv.microstructure"):
             node = _node_for_worker(reduced.draft, wid)

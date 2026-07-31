@@ -322,9 +322,12 @@ class TestTheLiveFailureAndTheBinding:
         driver recipe. CONSCIOUS FLIP (2026-07-31 pm ruling, run
         deep-a06fd33840c0b3ee): the DATA and MEMORY providers — pinned UNBOUND
         by the previous ruling — are now BOUND on the same factories through
-        their own reviewed recipes (``register_structurally_dead_row_data_
-        provider`` / ``register_phase3_memory_provider_factory``); the full
-        semantics live in ``test_pm_two_bridges.py``.
+        their own reviewed recipes (``register_worldless_data_provider`` /
+        ``register_phase3_memory_provider_factory``); the full semantics live
+        in ``test_pm_two_bridges.py``. (L1 Task 3 retired the dead-row
+        provider per its tombstone; the incumbent is the worldless one, and
+        the isinstance pin below is re-targeted by L2-b Task 4's correction
+        clause when the world-bound provider supersedes it.)
         """
         from guanlan_v2 import orch_store_status as status_mod
         from guanlan_v2.orchestration.adapters import durable as durable_mod
@@ -333,7 +336,7 @@ class TestTheLiveFailureAndTheBinding:
         )
         from guanlan_v2.orchestration.data.catalog import phase3_data_surface
         from guanlan_v2.orchestration.data.runtime import (
-            StructurallyDeadRowDataProvider,
+            WorldlessDataBridgeProvider,
         )
         from guanlan_v2.orchestration.memory.catalog import phase3_memory_surface
         from guanlan_v2.orchestration.memory.runtime import (
@@ -364,7 +367,7 @@ class TestTheLiveFailureAndTheBinding:
         assert isinstance(
             data_factory(bridge=SimpleNamespace(bridge_id="data.runtime", priority=100),
                          summary=SimpleNamespace(summary_digest="s" * 64)),
-            StructurallyDeadRowDataProvider)
+            WorldlessDataBridgeProvider)
         mem_factory = factories.handler_factory(phase3_memory_surface().provider_ref)
         assert isinstance(
             mem_factory(bridge=SimpleNamespace(bridge_id="memory.runtime", priority=200),
@@ -586,19 +589,21 @@ class TestTheNamedRemainingGap:
     pm ``bridge_preparation_failed`` naming ``data.runtime``, trader blocked).
     The controller then ruled BOTH bindings: the memory provider through
     ``register_phase3_memory_provider_factory`` (pm = the C3 rowless reader:
-    honest empty prefetch) and the data provider through
-    ``register_structurally_dead_row_data_provider`` (honest-empty ONLY for
-    pm's structurally-dead ``verified_snapshot`` row; every other shape —
-    including the pv aux nodes' rowless one — stays LOUD, so the chartered
-    L2-b gap keeps firing where it is real). Full semantics + the raw-bundle
-    control (``LIVE_DATA_FAILURE_REASON``) live in ``test_pm_two_bridges.py``.
+    honest empty prefetch) and the data provider through the deep-lane data
+    recipe — since L1 Task 3 that is ``register_worldless_data_provider``
+    (the dead-row honest-empty branch was retired per its tombstone: the L1
+    subject projection made pm's sealed ``verified_snapshot`` row RESOLVABLE,
+    so EVERY rows-present shape now refuses loudly at bridge execution and
+    the chartered L2-b gap keeps firing where it is real). Full semantics +
+    the raw-bundle control (``LIVE_DATA_FAILURE_REASON``) live in
+    ``test_pm_two_bridges.py``.
     """
 
     def test_pm_is_refused_on_the_raw_bundle_but_resolves_through_the_recipes(
             self, bundle, view, reduced, env):
         from guanlan_v2.orchestration.catalog_runtime import TrustedFactoryRegistry
         from guanlan_v2.orchestration.data.runtime import (
-            register_structurally_dead_row_data_provider,
+            register_worldless_data_provider,
         )
         from guanlan_v2.orchestration.memory.runtime import (
             register_phase3_memory_provider_factory,
@@ -620,7 +625,7 @@ class TestTheNamedRemainingGap:
         # constructs and derives exactly its two active bridges.
         register_phase3_memory_provider_factory(
             factories=experience_only, stores=None)
-        register_structurally_dead_row_data_provider(factories=experience_only)
+        register_worldless_data_provider(factories=experience_only)
         runtime = _exec_runtime(bundle, view, reduced.report,
                                 factories=experience_only)
         resolver = _resolver(runtime, reduced.draft, env["snapshot"], "pm")

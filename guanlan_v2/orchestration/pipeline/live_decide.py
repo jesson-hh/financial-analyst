@@ -1169,16 +1169,21 @@ def build_production_bindings(*, preset_id: str | None = None) -> DeepDecideBind
     # over. Memory: the one reviewed recipe over the sealed catalog materials —
     # the production prefetch binding has ZERO rows, so dec.pm takes the C3
     # rowless branch (honest empty prefetch, stores untouched). Data: the
-    # worldless StructurallyDeadRowDataProvider — honest-empty ONLY for the
-    # structurally-dead dec.pm verified_snapshot row (defect H: node_param
-    # bindings on a params_schema_ref=None worker — unrunnable in ANY legal
-    # plan); every other shape stays LOUD, so the chartered L2-b gap (no
-    # production DataRuntimeWorld) keeps firing for the two pv aux nodes and
-    # for any future resolvable row. Pinned in test_pm_two_bridges.py; the
-    # tombstone (L1 ruling D-0 + L2-b supersede this at the re-freeze phase)
-    # lives on the provider class.
+    # WorldlessDataBridgeProvider (L1 Task 3 retired the dead-row
+    # empty-complete provider per its own tombstone: under the L1 subject
+    # projection the sealed dec.pm verified_snapshot row RESOLVES, so
+    # completing empty over it would be a silenced outage). EVERY rows-present
+    # shape now refuses loudly; this process-level registration stays UNBOUND
+    # (subject_params=None → the runner-seam refusal) until L1 Task 4's
+    # per-run subject-scoped factories view binds the run's projection.
+    # Between L1 and L2-b a production deep run's dec.pm fails loudly at
+    # bridge EXECUTION with the resolved-but-no-world reason — the chartered
+    # one-train posture (9999 deploys only after L2-b binds the production
+    # DataRuntimeWorld; L2-b Task 4 supersedes this registration). Pinned in
+    # test_pm_two_bridges.py; the successor tombstone lives on the provider
+    # class.
     from guanlan_v2.orchestration.data.runtime import (
-        register_structurally_dead_row_data_provider,
+        register_worldless_data_provider,
     )
     from guanlan_v2.orchestration.memory.runtime import (
         register_phase3_memory_provider_factory,
@@ -1186,7 +1191,7 @@ def build_production_bindings(*, preset_id: str | None = None) -> DeepDecideBind
 
     register_phase3_memory_provider_factory(
         factories=bundle.factories, stores=stores)
-    register_structurally_dead_row_data_provider(factories=bundle.factories)
+    register_worldless_data_provider(factories=bundle.factories)
     presets = load_phase10_preset_registry(PRODUCTION_PRESETS_DIR)
 
     def admission_factory(*, run_id, request, draft, context, approvals, run_budget):
