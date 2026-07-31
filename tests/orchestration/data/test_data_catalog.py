@@ -476,7 +476,8 @@ def test_matches_the_frozen_golden_manifest(snapshot, surface):
 
 
 # --------------------------------------------------------------------------- #
-# the ONE reviewed integration grant: DECLARED, but NOT RUNNABLE               #
+# the ONE reviewed integration grant: RUNNABLE only under the subject          #
+# projection (L1); SERVABLE only once L2-b binds a production world           #
 # --------------------------------------------------------------------------- #
 UTC = timezone.utc
 _ROW_AS_OF = datetime(2026, 7, 16, 7, 0, tzinfo=UTC)
@@ -521,33 +522,29 @@ def _pm_codes(snapshot, registry, params):
     return {i.code for i in report.issues}
 
 
-class TestVerifiedSnapshotRowIsDeclaredNotRunnable:
-    """The one reviewed data grant is DECLARED material that can NEVER RUN as written.
+class TestVerifiedSnapshotRowRunnableOnlyUnderSubjectProjection:
+    """The one reviewed data grant is RUNNABLE under the subject projection — and
+    ONLY under it (L1, D-0 option (i)); it is not yet SERVABLE (no production
+    ``DataRuntimeWorld`` is bound — the chartered L2-b gap).
 
-    ``_REVIEWED_INTEGRATION_GRANTS = {"dec.pm": ("verified_snapshot",)}`` produces
-    exactly one prefetch row, and that row projects its method params out of
-    ``PlanNode.params`` (``/as_of`` <- ``/asof_date``, ``/symbols`` <- ``/code``,
-    both ``source_kind="node_param"``). But ``dec.pm``'s WorkerSpec carries
-    ``params_schema_ref=None``, and Phase-1 validation refuses ANY node params for
-    such a worker (``params_not_allowed``) — in a sealed preset *and* in a dynamic
-    plan alike. So the node the row reads from is structurally guaranteed to be
-    empty, and the real runtime projection raises ``DataRuntimeError`` on the very
-    first binding. The row is a declaration with no executable path.
+    The structural facts did NOT move: ``_REVIEWED_INTEGRATION_GRANTS =
+    {"dec.pm": ("verified_snapshot",)}`` still produces exactly one prefetch row
+    whose bindings are the sealed bytes ``/as_of <- /asof_date`` and
+    ``/symbols <- /code`` (both ``source_kind="node_param"``); ``dec.pm`` still
+    carries ``params_schema_ref=None``; Phase-1 validation still refuses ANY node
+    params for such a worker (``params_not_allowed``) in a sealed preset *and* in
+    a dynamic plan alike. What changed (2026-07-31, the L1 plan) is that
+    ``_assemble_params`` gained a second, CLOSED source for ``node_param``
+    pointers: the run-subject projection (``SubjectParams``), service-stamped at
+    materialize time from the digest-committed ``RunSubject@1``. Driven with the
+    projection bound, the REAL sealed row resolves and validates as a real
+    ``InstrumentUniverseParams``; driven without it, the refusal still fires and
+    now names the runner seam (a wiring gap), no longer an unbuilt projection.
 
-    It has never fired in production only because the data bridge itself has never
-    executed there: ``DataRuntimeWorld`` is constructed only in
-    ``tests/orchestration/data/test_runtime_integration.py``, whose world binds a
-    FABRICATED worker (``dec.data``, which *does* declare a params schema) and
-    FABRICATED rows — never ``dec.pm`` and never this row.
-
-    What would make it runnable is NOT a bigger param schema on ``dec.pm``: it is
-    the unbuilt **subject -> data projection** — a reviewed seam that carries the
-    run's subject (the stock code + as-of date) from the request/plan into the data
-    bridge without routing it through node params. That projection is a chartered
-    design ruling for a later phase; until it exists this row stays declared-only.
-    Rewriting the row's bindings here would move the sealed
-    ``bridge.data_runtime.prefetch`` material digest and the Phase-3 catalog digest,
-    so the correction belongs to a re-freeze phase, never to a drive-by edit.
+    The sealed bytes stayed sealed: rewriting the row's bindings would move the
+    ``bridge.data_runtime.prefetch`` material digest and the Phase-3 catalog
+    digest, so the bindings are untouched and the projection is out-of-band by
+    design (the L1 plan's R1 framing, recorded at ``_assemble_params``).
     """
 
     # -- fact 1/3: the worker can never legally carry params ----------------- #
@@ -578,26 +575,50 @@ class TestVerifiedSnapshotRowIsDeclaredNotRunnable:
             ("/as_of", "node_param", "/asof_date"),
             ("/symbols", "node_param", "/code")]
 
-    def test_the_real_runtime_projection_raises_on_the_first_binding(
+    def test_without_the_subject_the_row_refuses_naming_the_runner_seam(
             self, verified_snapshot_row):
         """The exact typed error from the REAL runtime path, not a re-implementation.
 
-        ``_assemble_params`` is the function the live provider session calls (see
-        the call-site assertion below); a legally-shaped ``dec.pm`` node carries no
-        params, so the first ``node_param`` binding cannot resolve.
+        A legally-shaped ``dec.pm`` node carries no params, so without the
+        subject projection bound the first ``node_param`` binding cannot resolve
+        — and the cause message now names the RUNNER SEAM (the projection exists
+        as of L1), never the pre-L1 'until the projection is built' story.
         """
         node = PlanNode(id="pm", worker_id="dec.pm", writes_slot="slot-pm")
         assert node.params == {}
         with pytest.raises(RT.DataRuntimeError) as exc:
             RT._assemble_params(verified_snapshot_row, node)
-        assert "'/asof_date'" in str(exc.value)
-        assert "does not resolve" in str(exc.value)
+        msg = str(exc.value)
+        assert "'/asof_date'" in msg
+        assert "does not resolve" in msg
         # the improved message names the CAUSE, not just the symptom.
-        assert "params_not_allowed" in str(exc.value)
-        assert "params_schema_ref" in str(exc.value)
+        assert "params_not_allowed" in msg
+        assert "params_schema_ref" in msg
+        assert "not bound at the runner seam" in msg
+        assert "is built" not in msg  # the pre-L1 unbuilt-projection story is gone
+
+    def test_with_the_subject_the_same_real_row_resolves_and_validates(
+            self, verified_snapshot_row):
+        """The conscious flip: the SAME row + the SAME params-less node now
+        resolve under the projection, and the document validates against the
+        row's REAL params class — the row is RUNNABLE, healing defect H at its
+        root. (It is still not SERVABLE: no production world — L2-b.)"""
+        node = PlanNode(id="pm", worker_id="dec.pm", writes_slot="slot-pm")
+        subject = RT.SubjectParams.project(code="600519", as_of=_ROW_AS_OF)
+        doc = RT._assemble_params(verified_snapshot_row, node, subject_params=subject)
+        params = RT._BINDING_BY_METHOD["verified_snapshot"].params_cls.model_validate(doc)
+        assert [s.code for s in params.symbols] == ["600519"]
+        assert datetime.fromisoformat(params.as_of) == _ROW_AS_OF
 
     def test_that_projection_is_the_one_the_live_provider_session_calls(self):
-        """Pins the call site, so the test above cannot drift onto a dead helper."""
+        """Pins the call site, so the tests above cannot drift onto a dead helper.
+
+        NOTE (chartered CONSCIOUS FLIP, owned by L2-b Task 5 — the L1<->L2-b
+        integration seam): the real ``_DataRuntimeBridgeSession`` does NOT yet
+        pass ``subject_params`` — this source-text pin asserts exactly that
+        state. L2-b Task 5 gives the real session the subject param source and
+        flips this pin by name; it must never go red as a surprise.
+        """
         src = inspect.getsource(RT._DataRuntimeBridgeSession.freeze_for_execution)
         assert "_assemble_params(row, req.node)" in src
 

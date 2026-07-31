@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from guanlan_v2.orchestration.data.catalog import (
@@ -56,6 +57,7 @@ from guanlan_v2.orchestration.data.source import (
     DataInvocationScope,
     RawFetch,
 )
+from guanlan_v2.orchestration.data.symbols import normalize_symbol
 from guanlan_v2.orchestration.refs import (
     ContentRef,
     SchemaRef,
@@ -68,6 +70,8 @@ from guanlan_v2.orchestration.runtime_contracts import ExecutionEvidenceOrdinalT
 __all__ = [
     "DataRuntimeError",
     "DataRuntimeWorld",
+    "SubjectParams",
+    "SUBJECT_PARAM_POINTERS",
     "DataSourceCapabilityBackend",
     "DataRuntimeBridgeProvider",
     "data_runtime_provider_factory",
@@ -361,6 +365,83 @@ class _DataEvidenceWriterAdapter:
 
 
 # --------------------------------------------------------------------------- #
+# the closed subject->data param projection (L1, D-0 option (i))                #
+# --------------------------------------------------------------------------- #
+#: The CLOSED set of source pointers the run-subject projection may serve.
+#: Exactly the two pointers the ONE reviewed prefetch row binds; widening this
+#: set is a reviewed decision, never a convenience edit.
+SUBJECT_PARAM_POINTERS: frozenset[str] = frozenset({"/asof_date", "/code"})
+
+
+@dataclass(frozen=True)
+class SubjectParams:
+    """The closed subject-params document projected from a committed run subject.
+
+    A plain frozen service object — NEVER a registered model (it carries no
+    digest, feeds no schema, and must not move any sealed byte). Built ONLY by
+    :meth:`project`, the ONE reviewed projection recipe; carried out-of-band
+    beside a materialized plan composite and consumed by :func:`_assemble_params`
+    as the second, closed source for ``node_param`` pointers.
+
+    ``code_value`` is the singleton instrument set the run subject denotes —
+    ``(normalize_symbol(code),)``, the ratified singleton-universe semantic:
+    the one-element ``tuple`` of the structured :class:`Symbol` the EXISTING
+    reviewed constructor derives (board rules are never re-derived here).
+    ``asof_value`` is the subject's ``as_of`` as an aware UTC ISO-8601 string
+    (satisfies ``IsoAwareDateTime``).
+    """
+
+    code_value: Any
+    asof_value: str
+
+    @classmethod
+    def project(cls, *, code: str, as_of: datetime) -> "SubjectParams":
+        """Project a committed subject's primitives into the closed document.
+
+        Layering-clean: takes primitives, imports nothing from ``pipeline/``.
+        Refusals are typed :class:`DataRuntimeError`, never repairs:
+
+        * ``code`` must be the watcher-canonical BARE six-digit form (exactly
+          what ``RunSubject.code`` stores). An alternate spelling that the
+          constructor could parse (dotted / engine) is still refused — the ONE
+          recipe accepts ONE input grammar.
+        * ``as_of`` must be a tz-aware :class:`datetime`; a naive instant cannot
+          prove PIT and is rejected.
+        """
+        if type(code) is not str or not code:
+            raise DataRuntimeError(
+                "subject code must be a non-empty str in the canonical "
+                f"six-digit form; got {code!r}")
+        try:
+            sym = normalize_symbol(code)
+        except (TypeError, ValueError) as exc:
+            raise DataRuntimeError(
+                f"subject code {code!r} is not a canonical A-share code: {exc}"
+            ) from exc
+        if sym.code != code:
+            raise DataRuntimeError(
+                f"subject code {code!r} is not the canonical six-digit form "
+                f"(the committed RunSubject stores {sym.code!r}); refusing an "
+                "alternate spelling rather than repairing it")
+        if not isinstance(as_of, datetime):
+            raise DataRuntimeError(
+                f"subject as_of must be a tz-aware datetime, got "
+                f"{type(as_of).__name__}")
+        if as_of.tzinfo is None or as_of.tzinfo.utcoffset(as_of) is None:
+            raise DataRuntimeError(
+                "subject as_of must be tz-aware; a naive datetime cannot prove "
+                "PIT and is rejected")
+        return cls(
+            code_value=(sym,),
+            asof_value=as_of.astimezone(timezone.utc).isoformat(),
+        )
+
+    def as_document(self) -> dict:
+        """The CLOSED two-key document — no extension point."""
+        return {"asof_date": self.asof_value, "code": self.code_value}
+
+
+# --------------------------------------------------------------------------- #
 # closed param-binding application (JSON pointers; no expression escape)        #
 # --------------------------------------------------------------------------- #
 def _unescape(segment: str) -> str:
@@ -396,48 +477,97 @@ def _pointer_set(doc: dict, pointer: str, value: Any) -> None:
     cur[parts[-1]] = value
 
 
-def _node_param_cause(node: Any, node_params: Mapping) -> str:
+def _node_param_cause(node: Any, node_params: Mapping, *, subject_bound: bool) -> str:
     """Name the CAUSE of an unresolvable ``node_param`` binding, not just the symptom.
 
-    A bare "pointer does not resolve" hides the only interesting distinction: a node
-    that carries *some* params and simply misses this one (a row/params mismatch) vs.
-    a node that structurally CANNOT carry params at all, which is a declared-but-
-    unrunnable row rather than a data problem.
+    A bare "pointer does not resolve" hides the interesting distinctions: a node
+    that carries *some* params and simply misses this one (a row/params mismatch),
+    vs. a node that structurally CANNOT carry params at all — whose only honest
+    source is the run-subject projection, so the discriminating fact is whether
+    that projection was bound (``subject_bound``) when the lookup failed.
     """
     node_id = getattr(node, "id", "?")
+    if subject_bound:
+        tail = (
+            " A subject projection IS bound, but it serves only the closed "
+            "pointer set '/asof_date', '/code' -- this pointer is outside that "
+            "closure and is refused, never guessed."
+        )
+    else:
+        tail = (
+            " The subject->data projection EXISTS (L1); the failure is that the "
+            "run's subject projection was not bound at the runner seam "
+            "(subject_params=None) -- a wiring gap at the caller, no longer an "
+            "unbuilt projection."
+        )
     if node_params:
         return (
             f" -- node {node_id!r} carries params {sorted(node_params)!r}, none of "
-            "which is that pointer"
+            "which is that pointer." + tail
         )
     return (
         f" -- node {node_id!r} carries NO params at all. A 'node_param' binding is "
-        "runnable only on a node whose worker declares a params_schema_ref; a worker "
-        "with params_schema_ref=None can never legally carry node params (plan "
-        "validation refuses such a node with 'params_not_allowed'), so a row bound "
-        "this way is DECLARED but NOT RUNNABLE until the subject->data projection "
-        "that carries the run's subject into the data bridge is built."
+        "resolvable from node params only on a node whose worker declares a "
+        "params_schema_ref; a worker with params_schema_ref=None can never legally "
+        "carry node params (plan validation refuses such a node with "
+        "'params_not_allowed'), so such a row resolves only through the run-subject "
+        "projection." + tail
     )
 
 
-def _assemble_params(row: DataPrefetchOperation, node: Any) -> dict:
-    """Apply the row's closed param projection — node params / consts ONLY.
+def _assemble_params(
+    row: DataPrefetchOperation, node: Any, *,
+    subject_params: SubjectParams | None = None,
+) -> dict:
+    """Apply the row's closed param projection — node params / subject / consts.
 
-    ``input_value`` bindings are not supported by the v1 data bridge (loading a
+    Resolution order for a ``node_param`` binding: (1) ``node.params`` (unchanged
+    semantics for workers that legally carry params); (2) else, iff
+    ``subject_params`` is bound AND the pointer is in the CLOSED
+    :data:`SUBJECT_PARAM_POINTERS`, the subject document; (3) else the
+    cause-named :class:`DataRuntimeError`. When BOTH sources supply the pointer
+    the values must be identical — a node may never contradict the run subject
+    (loud conflict, never a silent winner).
+
+    Honesty note (the L1 plan's R1 framing): the subject params ARE
+    materialization-stamped node params in every semantic sense; they travel
+    out-of-band solely because Phase-1's ``params_not_allowed`` guards the
+    *untrusted in-band* channel (model/caller-supplied ``PlanNode.params``),
+    while this channel is service-stamped from a digest-committed ``RunSubject@1``
+    after validation. That is why ``spec.py``'s guard and the sealed preset's
+    code-free rule stay untouched and un-weakened, and why the sealed
+    ``ParamBinding`` docstring bytes do not move.
+
+    ``input_value`` bindings remain unsupported by the v1 data bridge (loading a
     named artifact payload is the pool's concern); a reviewed row using one fails
-    loudly rather than being silently skipped. An unresolvable ``node_param``
-    binding is re-raised with :func:`_node_param_cause` appended so the failure
-    names why the node could not supply the value.
+    loudly rather than being silently skipped.
     """
     params: dict = {}
     node_params = dict(node.params)
+    subject_doc = subject_params.as_document() if subject_params is not None else None
     for binding in row.param_bindings:
         if binding.source_kind == "node_param":
+            pointer = binding.source_pointer
+            node_exc: DataRuntimeError | None = None
             try:
-                value = _pointer_get(node_params, binding.source_pointer)
+                value = _pointer_get(node_params, pointer)
             except DataRuntimeError as exc:
+                node_exc = exc
+            subject_serves = subject_doc is not None and pointer in SUBJECT_PARAM_POINTERS
+            if node_exc is None and subject_serves:
+                if value != _pointer_get(subject_doc, pointer):
+                    raise DataRuntimeError(
+                        f"param source pointer {pointer!r} resolves from BOTH "
+                        f"node {getattr(node, 'id', '?')!r} params and the "
+                        "run-subject projection with DIFFERING values -- a node "
+                        "may never contradict the run subject")
+            elif node_exc is not None and subject_serves:
+                value = _pointer_get(subject_doc, pointer)
+            elif node_exc is not None:
                 raise DataRuntimeError(
-                    f"{exc}{_node_param_cause(node, node_params)}") from exc
+                    f"{node_exc}"
+                    f"{_node_param_cause(node, node_params, subject_bound=subject_doc is not None)}"
+                ) from node_exc
         elif binding.source_kind == "const":
             value = binding.const_value
         else:
