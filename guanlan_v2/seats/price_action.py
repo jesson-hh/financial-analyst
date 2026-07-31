@@ -32,13 +32,13 @@ def _rnd(x, p=3):
 
 
 def _board_limit(code: str, name: str = "") -> float:
-    """涨跌停板幅:ST 0.05 / 科创(688)·创业(300) 0.20 / 北交(8/4/BJ) 0.30 / 主板 0.10。"""
+    """涨跌停板幅:ST 0.05 / 科创(688)·创业(300) 0.20 / 北交(8/4/920/BJ) 0.30 / 主板 0.10。"""
     if "ST" in (name or "").upper().replace(" ", ""):
         return 0.05
     digits = "".join(ch for ch in (code or "") if ch.isdigit())
     if digits[:3] in ("688", "300"):
         return 0.20
-    if (digits[:1] in ("8", "4")) or (code or "").upper().startswith("BJ"):
+    if (digits[:1] in ("8", "4")) or digits[:3] == "920" or (code or "").upper().startswith("BJ"):
         return 0.30
     return 0.10
 

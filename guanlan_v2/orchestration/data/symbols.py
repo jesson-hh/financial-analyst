@@ -123,7 +123,10 @@ def normalize_symbol(raw: str) -> Symbol:
 
     * ``688`` → ``SH``/``star`` (科创板)
     * ``300`` / ``301`` → ``SZ``/``chinext`` (创业板)
-    * leading ``8`` or ``4`` → ``BJ``/``bj`` (北交所)
+    * leading ``8`` or ``4``, or ``920`` → ``BJ``/``bj`` (北交所; leading 8
+      covers the 82/83/87/88 号段, leading 4 covers 40/42/43, and ``920`` is
+      the exchange's own new-issue 号段 — other ``92x``/``9xx`` codes stay on
+      the fall-through)
     * leading ``6`` → ``SH``/``main``
     * otherwise → ``SZ``/``main``
 
@@ -151,7 +154,7 @@ def normalize_symbol(raw: str) -> Symbol:
         exchange, board = "SH", "star"
     elif code.startswith(("300", "301")):
         exchange, board = "SZ", "chinext"
-    elif code[0] in ("8", "4"):
+    elif code[0] in ("8", "4") or code.startswith("920"):
         exchange, board = "BJ", "bj"
     elif code[0] == "6":
         exchange, board = "SH", "main"

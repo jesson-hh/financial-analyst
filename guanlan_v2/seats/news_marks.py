@@ -28,6 +28,8 @@ def _norm_code(code: str) -> str:
     up = str(code).upper()
     if up.startswith(("SH", "SZ", "BJ")):
         return up[:2] + s
+    if s[0] in ("4", "8") or s[:3] == "920":
+        return "BJ" + s  # 北交所:4/8 老号段 + 920 新号段
     return ("SH" if s[0] == "6" else "SZ") + s
 
 

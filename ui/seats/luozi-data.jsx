@@ -97,7 +97,7 @@ function _paBoardLimit(code, name) {
   if (String(name || '').toUpperCase().replace(/\s/g, '').indexOf('ST') >= 0) return 0.05;
   const d = String(code || '').replace(/\D/g, '');
   if (d.slice(0, 3) === '688' || d.slice(0, 3) === '300') return 0.20;
-  if ((d.slice(0, 1) === '8' || d.slice(0, 1) === '4') || String(code || '').toUpperCase().indexOf('BJ') === 0) return 0.30;
+  if ((d.slice(0, 1) === '8' || d.slice(0, 1) === '4') || d.slice(0, 3) === '920' || String(code || '').toUpperCase().indexOf('BJ') === 0) return 0.30;
   return 0.10;
 }
 function _paBarType(o, h, l, c, ph, pl) {
