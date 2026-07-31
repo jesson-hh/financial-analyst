@@ -43,7 +43,9 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Mapping
 
+from guanlan_v2.orchestration.adapters.live_data import LiveClientSource
 from guanlan_v2.orchestration.data.calendar import (
     ImmutableTradingCalendar,
     TradingCalendarMaterial,
@@ -52,6 +54,7 @@ from guanlan_v2.orchestration.data.calendar import (
 from guanlan_v2.orchestration.data.errors import RoutingConfigurationError
 from guanlan_v2.orchestration.data.catalog import phase3_data_surface
 from guanlan_v2.orchestration.data.registry import DataSourceRegistry
+from guanlan_v2.orchestration.data.runtime import DataSourceCapabilityBackend
 from guanlan_v2.orchestration.data.snapshot import (
     DataRoutingSnapshot,
     DataSourceConfigSnapshot,
@@ -76,6 +79,9 @@ __all__ = [
     "PRODUCTION_LIMIT_POLICY_ID",
     "PRODUCTION_ROUTE_POLICY_REF",
     "ProductionDataWorldRecipe",
+    "ThreadConfinedDataBackend",
+    "production_data_adapters",
+    "production_data_backend",
     "production_data_recipe",
 ]
 
@@ -310,3 +316,106 @@ def production_data_recipe() -> ProductionDataWorldRecipe:
                     schema_registry_digest=_production_chain_registry_digest()
                 )
     return _RECIPE
+
+
+# --------------------------------------------------------------------------- #
+# Task 2 — the reviewed source adapter under the sealed identity + the ONE     #
+# production backend                                                           #
+# --------------------------------------------------------------------------- #
+def production_data_adapters() -> Mapping[str, Any]:
+    """Exactly ``{"guanlan.datafeed": LiveClientSource()}``.
+
+    The key is the sealed surface identity's id — ``phase3_data_surface()``'s
+    ``source_ref.id``, the exact string the backend resolves each staged
+    ``source_ref.id`` against (the sealed identity is the registration key,
+    never new bytes).  The value is the **facade-default** construction of the
+    reviewed :class:`~guanlan_v2.orchestration.adapters.live_data.LiveClientSource`
+    (the real ``guanlan_v2.datafeed.live_client`` facade, lazily imported at
+    call time — no import-time vendor touch).  Adapters WRAP reviewed readers
+    (Global Constraints): no new vendor client, no re-implemented probe, no
+    fabricated row.  Tests inject fakes through the adapter's existing
+    ``probe_fn``/``resolve_source_fn``/``known_sources_fn`` ports — never a
+    stub of the class itself.
+
+    Supported-set honesty (Task-1 review Minor #4, chartered here): the
+    recipe's ``method_selections`` names ``guanlan.datafeed`` for all seven
+    method ids while :class:`LiveClientSource` serves only
+    ``{verified_snapshot, news, ohlcv}`` — the guard that keeps that honest is
+    the Task-2 test pinning every sealed prefetch ROW's method id inside the
+    adapter's supported set, so an L3 grant of an unsupported method fails in
+    the tree first, never live.
+    """
+    return {phase3_data_surface().source_ref.id: LiveClientSource()}
+
+
+class ThreadConfinedDataBackend(DataSourceCapabilityBackend):
+    """The ONE process-stable production data backend — thread-local staging.
+
+    Why (gate D-A, pinned by test): the dag executor runs nodes concurrently
+    in ``asyncio.to_thread`` worker threads (``pipeline/assembly.py`` module
+    thread-discipline note; ``runtime_limit=4`` at ``live_decide.py:1248``),
+    and the Phase-2 gateway resolves the capability-backend factory **per
+    capability invocation** with a ``capability_ref=`` kwarg
+    (``worker.py:920``/``:926``) — so the production registration
+    (``lambda **kw: production_data_backend()``, Task 4) hands this ONE shared
+    instance to every concurrent node thread.  The base class's single
+    ``_staged`` slot would interleave across nodes; its ``stage`` → ``invoke``
+    → ``clear`` discipline is same-thread synchronous
+    (``data/runtime.py::_DataGatewayAdapter.invoke``), so a **thread-local**
+    staged slot makes cross-node interleaving structurally impossible without
+    a lock.  The underlying ``live_client.probe`` is a subprocess per call —
+    thread-safe by isolation.
+
+    **Concurrency statement for the record (charter §2.2 item 9):** the data
+    provider does NOT serialize — N concurrent nodes may probe concurrently.
+    The LLM throughput ceiling remains the ``WorkerSeatModelGateway``
+    single-loop lock (``pipeline/assembly.py``) — that seam is the charter's
+    user-surfaced item and is NOT changed here.
+
+    Only the staged-slot **storage** is overridden (the ``_staged`` property
+    below shadows the base slot descriptor); ``stage`` / ``clear`` /
+    ``invoke`` — including invoke's whole verification chain (adapter present,
+    ``RawFetch`` type, source echo, request digest) — are INHERITED from
+    :class:`~guanlan_v2.orchestration.data.runtime.DataSourceCapabilityBackend`,
+    never copied.
+    """
+
+    __slots__ = ("_tls",)
+
+    def __init__(self, adapters: Mapping[str, Any]) -> None:
+        # the thread-local store must exist BEFORE the base __init__ writes
+        # its initial ``self._staged = None`` through the property below.
+        self._tls = threading.local()
+        super().__init__(adapters)
+
+    @property
+    def _staged(self) -> Any:
+        # a thread that never staged reads an honest None — the inherited
+        # ``invoke`` then raises its loud misuse DataRuntimeError on the
+        # CALLING thread, never consuming another thread's target.
+        return getattr(self._tls, "staged", None)
+
+    @_staged.setter
+    def _staged(self, value: Any) -> None:
+        self._tls.staged = value
+
+
+_BACKEND: ThreadConfinedDataBackend | None = None
+_BACKEND_LOCK = threading.Lock()
+
+
+def production_data_backend() -> ThreadConfinedDataBackend:
+    """The cached ONE production backend (the ``_RECIPE_LOCK`` idiom).
+
+    Backend SHARING is the registered factory's job (gate D-A): Task 4 binds
+    ``lambda **kw: production_data_backend()`` for each of the seven data
+    capability refs, so every per-invocation factory call returns this ONE
+    thread-confined instance.  Double-checked under ``_BACKEND_LOCK`` so
+    concurrent first calls build exactly once.
+    """
+    global _BACKEND
+    if _BACKEND is None:
+        with _BACKEND_LOCK:
+            if _BACKEND is None:
+                _BACKEND = ThreadConfinedDataBackend(production_data_adapters())
+    return _BACKEND

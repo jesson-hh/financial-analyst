@@ -33,6 +33,24 @@ Mutations (Task 1 Step 4, each red -> byte-identical revert): m1 two-entry
 route -> group 1 red; m2 rebuilt spec with a different freshness ref -> group 2
 red; m3 dropped limit policy -> group 3 red; m4 one-byte calendar-material
 edit -> group 4 red.
+
+--- Task 2 (appended) — the reviewed source adapter under the sealed identity
++ the ONE production backend (plan Task 2, gate D-A). Five groups (a)-(e):
+(a) ``production_data_adapters()`` is exactly the sealed source id ->
+facade-default ``LiveClientSource``; (b) the echo under the PRODUCTION
+identity: a fetch through an injected fake probe, staged with the RECIPE's
+registry-frozen route on the real backend, returns a ``RawFetch`` whose
+``source_ref`` IS ``phase3_data_surface().source_ref``; (c) unsupported method
+refuses loudly through production staging + the supported-set guard (the
+chartered closure of Task-1 review Minor #4: every method id granted a sealed
+prefetch ROW must be within ``LiveClientSource``'s supported set, so an L3
+grant of an unsupported method fails THIS test first, never live); (d) the
+interleave pin: two threads stage+invoke on the SHARED backend with different
+sources and never cross (mutation: thread-local storage removed -> base-class
+single-slot behavior -> red); (e) staging misuse still loud on the calling
+thread, and a foreign thread can never consume another thread's staged target.
+All fetch-path tests drive the REAL ``LiveClientSource`` class with injected
+fake probe functions — never a stub of the class itself; no real network.
 """
 from __future__ import annotations
 
@@ -40,6 +58,7 @@ import hashlib
 import json
 import subprocess
 import sys
+import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -48,25 +67,42 @@ import pytest
 
 import guanlan_v2.orchestration.data.runtime as RT
 from guanlan_v2.orchestration import presets as P
+from guanlan_v2.orchestration.adapters import live_data
 from guanlan_v2.orchestration.adapters.data_world import (
     PRODUCTION_CALENDAR_MATERIAL_PATH,
     PRODUCTION_DATA_REGISTRY_VERSION,
     PRODUCTION_ROUTING_AUDIT_ID,
     ProductionDataWorldRecipe,
+    ThreadConfinedDataBackend,
     _load_calendar_material,
+    production_data_adapters,
+    production_data_backend,
     production_data_recipe,
 )
+from guanlan_v2.orchestration.adapters.live_data import LiveClientSource
 from guanlan_v2.orchestration.data.catalog import phase3_data_surface
 from guanlan_v2.orchestration.data.errors import (
     RoutingConfigurationError,
     SnapshotMismatchError,
 )
 from guanlan_v2.orchestration.data.registry import SealedRegistryError
-from guanlan_v2.orchestration.data.source import RouteEntry
+from guanlan_v2.orchestration.data.schema_registry import build_phase3_registry
+from guanlan_v2.orchestration.data.source import (
+    DataInvocationScope,
+    ResolvedMethodRoute,
+    RouteEntry,
+    build_data_request,
+)
 from guanlan_v2.orchestration.data.symbols import (
     InstrumentMeta,
     Symbol,
     resolve_limit_rule,
+)
+from guanlan_v2.orchestration.refs import ContentRef
+from guanlan_v2.orchestration.runtime_contracts import (
+    PHASE2_BASE_REGISTRY_DIGEST,
+    ExecutionEvidenceOrdinalToken,
+    phase2_runtime_registry,
 )
 
 UTC = timezone.utc
@@ -457,3 +493,335 @@ class TestGoldens:
         data = (_GOLDEN_DIR / "data_source_manifest_v1.json").read_bytes()
         assert hashlib.sha256(data).hexdigest() == \
             _EXISTING_SOURCE_MANIFEST_SHA256
+
+
+# =========================================================================== #
+# Task 2 — the reviewed source adapter under the sealed identity + the ONE     #
+# production backend (groups (a)-(e); gate D-A)                                #
+# =========================================================================== #
+@pytest.fixture(scope="module")
+def p3_registry():
+    """The REAL sealed Phase-3 schema registry (the l2b-gate fixture idiom)."""
+    ph2 = phase2_runtime_registry(PHASE2_BASE_REGISTRY_DIGEST)
+    return build_phase3_registry(ph2.registry_digest)
+
+
+class _ProbeStub:
+    """A fake ``live_client.probe`` returning a controlled envelope (the
+    l2b-gate driver idiom) — injected into the REAL ``LiveClientSource`` via
+    its existing ``probe_fn`` port; no real vendor, no network."""
+
+    def __init__(self, env) -> None:
+        self.env = env
+        self.calls: list = []
+
+    def __call__(self, source, code="", date="", limit=20, timeout=90):
+        self.calls.append({"source": source, "code": code, "date": date,
+                           "limit": limit})
+        return self.env
+
+
+def _token(evidence: int) -> ExecutionEvidenceOrdinalToken:
+    return ExecutionEvidenceOrdinalToken(
+        attempt=1, call_ordinal=1, evidence_ordinal=evidence)
+
+
+def _ok_envelope(price: float) -> dict:
+    return {"ok": True, "status": "ok",
+            "items": [{"name": "贵州茅台", "price": price}],
+            "n": 1, "error": "", "note": "",
+            "pulled_at": "2026-07-16T15:00:00"}
+
+
+def _scope(route, *, registry_digest: str, node_id: str = "pm") -> DataInvocationScope:
+    return DataInvocationScope(
+        plan_digest="a" * 64, node_id=node_id, worker_id="dec.pm",
+        operation_token=_token(1), attempt_tokens=(_token(2),),
+        frozen_route=route, invocation_mode="cache_or_invoke",
+        catalog_digest="b" * 64, schema_registry_digest=registry_digest)
+
+
+def _sealed_request(p3_registry, *, request_id: str):
+    surf = phase3_data_surface()
+    spec = surf.spec_by_method["verified_snapshot"]
+    ctx = P.pilot_data_context(as_of=AS_OF)
+    return spec, build_data_request(
+        ctx, method_spec=spec,
+        params={"symbols": ({"code": "600519", "exchange": "SH",
+                             "board": "main"},),
+                "as_of": AS_OF.isoformat()},
+        registry=p3_registry, request_id=request_id)
+
+
+class TestProductionDataAdaptersGroupA:
+    def test_map_has_exactly_the_sealed_source_id(self):
+        """(a) exactly ``{"guanlan.datafeed": LiveClientSource()}`` — the key
+        IS the sealed surface identity's id (the registration key the backend
+        resolves ``source_ref.id`` against — never new bytes)."""
+        surf = phase3_data_surface()
+        adapters = production_data_adapters()
+        assert set(adapters) == {surf.source_ref.id} == {"guanlan.datafeed"}
+        assert isinstance(adapters["guanlan.datafeed"], LiveClientSource)
+
+    def test_adapter_is_the_facade_default_construction(self):
+        """The production value is the facade-default construction (every
+        injectable port unset — the real ``live_client`` facade is bound
+        lazily at call time; tests inject fakes, production never does)."""
+        src = production_data_adapters()["guanlan.datafeed"]
+        assert src._probe_fn is None
+        assert src._catalog_fn is None
+        assert src._resolve_fn is None
+        assert src._known_fn is None
+
+
+class TestBackendEchoGroupB:
+    def test_fetch_through_the_backend_echoes_the_sealed_identity(
+            self, recipe, p3_registry):
+        """(b) the echo, now under the PRODUCTION identity: the REAL
+        ``LiveClientSource`` (injected fake probe), staged on the real
+        thread-confined backend with the RECIPE's registry-frozen route,
+        returns a ``RawFetch`` whose ``source_ref`` IS
+        ``phase3_data_surface().source_ref`` — and the inherited verification
+        chain (source echo + request digest) passes it."""
+        surf = phase3_data_surface()
+        spec, req = _sealed_request(p3_registry, request_id="req-l2b-t2-echo")
+        route = recipe.registry.default_route("verified_snapshot")
+        scope = _scope(route, registry_digest=p3_registry.registry_digest)
+        stub = _ProbeStub(_ok_envelope(1000.0))
+        backend = ThreadConfinedDataBackend(
+            {surf.source_ref.id: LiveClientSource(
+                probe_fn=stub, resolve_source_fn=lambda s: s)})
+        backend.stage(surf.source_ref, scope)
+        raw = backend.invoke(capability_ref=spec.capability_ref, request=req)
+        assert raw.source_ref == surf.source_ref
+        assert raw.source_ref == scope.frozen_route.entries[0].source_ref
+        assert raw.capability_ref == spec.capability_ref
+        assert raw.request_digest == req.request_digest
+        assert [c["source"] for c in stub.calls] == ["tencent_realtime_quote"]
+        assert stub.calls[0]["code"] == "SH600519"
+
+    def test_inherited_source_echo_verification_fires_through_the_subclass(
+            self, recipe, p3_registry):
+        """WRONG-INPUT arm of the inherited chain, driven through the REAL
+        adapter: stage a source_ref that differs from the scope's frozen-route
+        entry — ``LiveClientSource`` echoes the route entry, and the INHERITED
+        ``invoke`` verification refuses the mismatched echo."""
+        surf = phase3_data_surface()
+        spec, req = _sealed_request(p3_registry, request_id="req-l2b-t2-mism")
+        foreign = ContentRef(id="guanlan.datafeed", version="1",
+                             content_digest="f" * 64)
+        route = recipe.registry.default_route("verified_snapshot")
+        scope = _scope(route, registry_digest=p3_registry.registry_digest)
+        backend = ThreadConfinedDataBackend(
+            {"guanlan.datafeed": LiveClientSource(
+                probe_fn=_ProbeStub(_ok_envelope(1.0)),
+                resolve_source_fn=lambda s: s)})
+        backend.stage(foreign, scope)
+        with pytest.raises(RT.SourceBrokenError,
+                           match="claiming a different source"):
+            backend.invoke(capability_ref=spec.capability_ref, request=req)
+
+
+class TestSupportedSetGroupC:
+    def test_unsupported_method_refuses_through_production_staging(self, recipe):
+        """(c) ``indicators`` staged with ITS recipe-frozen route on the real
+        backend still refuses loudly in the REAL adapter, before any probe."""
+        surf = phase3_data_surface()
+        spec = surf.spec_by_method["indicators"]
+        route = recipe.registry.default_route("indicators")
+        scope = _scope(route, registry_digest="c" * 64)
+        backend = ThreadConfinedDataBackend(
+            {surf.source_ref.id: LiveClientSource(
+                probe_fn=lambda *a, **k: pytest.fail(
+                    "probe must never be reached"))})
+        backend.stage(surf.source_ref, scope)
+        request = SimpleNamespace(method_spec_ref=spec.method_ref)
+        with pytest.raises(RoutingConfigurationError,
+                           match="is not bound to this source"):
+            backend.invoke(capability_ref=spec.capability_ref, request=request)
+
+    def test_every_granted_prefetch_row_is_within_the_supported_set(self):
+        """The chartered closure of Task-1 review Minor #4: the recipe's
+        ``method_selections`` claims ``guanlan.datafeed`` for all seven method
+        ids while ``LiveClientSource`` serves only three — the honest guard is
+        HERE: every method id granted a ROW in the sealed prefetch binding
+        must be within the adapter's supported set, so a future L3 grant of an
+        unsupported method (e.g. ``indicators``) fails THIS test first, and
+        forces the adapter to grow BEFORE the grant goes live."""
+        surf = phase3_data_surface()
+        granted = {row.method_ref.id
+                   for row in surf.prefetch_binding.operations}
+        assert granted  # at least dec.pm's healed verified_snapshot row
+        assert granted <= live_data._SUPPORTED_METHOD_IDS
+        # today's exact shape, so growth is a conscious edit here too:
+        assert granted == {"verified_snapshot"}
+        assert live_data._SUPPORTED_METHOD_IDS == frozenset(
+            {"verified_snapshot", "news", "ohlcv"})
+
+
+class TestInterleavePinGroupD:
+    def test_two_threads_staging_on_the_shared_backend_never_cross(
+            self, p3_registry):
+        """(d) the interleave pin: BOTH threads stage on the ONE shared
+        backend before EITHER invokes (barrier-forced), each against its own
+        source; both complete and each ``RawFetch`` matches its own thread's
+        staged source. The mutation for this guard is exactly the plan's:
+        remove the thread-local storage (base-class single-slot behavior) —
+        the second ``stage`` then dies "never consumed" / the invokes cross —
+        RED here."""
+        surf = phase3_data_surface()
+        spec, req = _sealed_request(p3_registry, request_id="req-l2b-t2-il")
+        ref_a = surf.source_ref
+        ref_b = ContentRef(id="l2b.t2.other-source", version="1",
+                           content_digest="e" * 64)
+        policy_ref = ContentRef(id="policy.route.l2b-t2", version="1",
+                                content_digest="d" * 64)
+
+        def route_for(ref):
+            return ResolvedMethodRoute(
+                method_ref=spec.method_ref,
+                entries=(RouteEntry(source_ref=ref,
+                                    capability_ref=spec.capability_ref),),
+                route_policy_ref=policy_ref)
+
+        stub_a, stub_b = _ProbeStub(_ok_envelope(111.0)), _ProbeStub(_ok_envelope(222.0))
+        backend = ThreadConfinedDataBackend({
+            ref_a.id: LiveClientSource(probe_fn=stub_a,
+                                       resolve_source_fn=lambda s: s),
+            ref_b.id: LiveClientSource(probe_fn=stub_b,
+                                       resolve_source_fn=lambda s: s),
+        })
+        barrier = threading.Barrier(2)
+        results: dict = {}
+        errors: dict = {}
+
+        def work(name, ref):
+            try:
+                backend.stage(
+                    ref, _scope(route_for(ref),
+                                registry_digest=p3_registry.registry_digest,
+                                node_id=name))
+                barrier.wait(timeout=10)  # both staged before either invokes
+                results[name] = backend.invoke(
+                    capability_ref=spec.capability_ref, request=req)
+            except BaseException as exc:  # noqa: BLE001 - recorded + re-raised below
+                errors[name] = exc
+                barrier.abort()  # never leave the sibling hanging
+
+        threads = [threading.Thread(target=work, args=("a", ref_a)),
+                   threading.Thread(target=work, args=("b", ref_b))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        assert not any(t.is_alive() for t in threads)
+        assert errors == {}
+        assert results["a"].source_ref == ref_a
+        assert results["b"].source_ref == ref_b
+        # each thread's fetch carries its OWN probe's row — never the sibling's
+        assert results["a"].candidates[0].raw_payload["price"] == 111.0
+        assert results["b"].candidates[0].raw_payload["price"] == 222.0
+        assert len(stub_a.calls) == 1 and len(stub_b.calls) == 1
+
+
+class TestStagingMisuseGroupE:
+    def test_invoke_without_stage_raises_on_the_calling_thread(self):
+        """(e) staging misuse still loud: invoke without a staged target is
+        the inherited typed ``DataRuntimeError`` — on the calling thread."""
+        backend = ThreadConfinedDataBackend(production_data_adapters())
+        with pytest.raises(RT.DataRuntimeError,
+                           match="without a staged frozen-route source"):
+            backend.invoke(capability_ref=object(), request=object())
+
+    def test_a_foreign_thread_cannot_consume_anothers_staged_target(
+            self, recipe, p3_registry):
+        """Thread confinement's sharp edge: a thread that never staged gets
+        the loud misuse error EVEN WHILE another thread holds a staged target
+        — and the staging thread's own target survives and still serves."""
+        surf = phase3_data_surface()
+        spec, req = _sealed_request(p3_registry, request_id="req-l2b-t2-fgn")
+        route = recipe.registry.default_route("verified_snapshot")
+        scope = _scope(route, registry_digest=p3_registry.registry_digest)
+        backend = ThreadConfinedDataBackend(
+            {surf.source_ref.id: LiveClientSource(
+                probe_fn=_ProbeStub(_ok_envelope(9.0)),
+                resolve_source_fn=lambda s: s)})
+        backend.stage(surf.source_ref, scope)  # the MAIN thread's target
+        box: dict = {}
+
+        def foreign():
+            try:
+                backend.invoke(capability_ref=spec.capability_ref, request=req)
+            except RT.DataRuntimeError as exc:
+                box["exc"] = exc
+
+        t = threading.Thread(target=foreign)
+        t.start()
+        t.join(timeout=10)
+        assert "without a staged frozen-route source" in str(box["exc"])
+        # the main thread's staged target is untouched and still serves:
+        raw = backend.invoke(capability_ref=spec.capability_ref, request=req)
+        assert raw.source_ref == surf.source_ref
+
+
+class TestBackendInheritanceAndSingleton:
+    def test_verification_chain_is_inherited_never_copied(self):
+        """Source-text pin: only the staged-slot STORAGE is overridden; the
+        ``stage``/``clear``/``invoke`` methods — including invoke's whole
+        verification chain — are the base class's own, never copied."""
+        sub = ThreadConfinedDataBackend
+        base = RT.DataSourceCapabilityBackend
+        assert issubclass(sub, base)
+        assert "invoke" not in sub.__dict__
+        assert "stage" not in sub.__dict__
+        assert "clear" not in sub.__dict__
+        assert sub.invoke is base.invoke
+        assert sub.stage is base.stage
+        assert sub.clear is base.clear
+        assert isinstance(sub.__dict__["_staged"], property)
+
+    def test_production_data_backend_is_a_cached_singleton(self):
+        """The ONE process-stable backend (the ``_RECIPE_LOCK`` idiom)."""
+        b = production_data_backend()
+        assert b is production_data_backend()
+        assert isinstance(b, ThreadConfinedDataBackend)
+        assert set(b._adapters) == {"guanlan.datafeed"}
+        assert isinstance(b._adapters["guanlan.datafeed"], LiveClientSource)
+
+    def test_the_d_a_factory_shape_hands_out_the_one_instance(self):
+        """Gate D-A: the gateway invokes the registered factory PER capability
+        invocation with ``capability_ref=`` — sharing is the factory's job.
+        Task 4 registers exactly this lambda; the shape is pinned here."""
+        factory = lambda **kw: production_data_backend()  # noqa: E731
+        one = production_data_backend()
+        assert factory(capability_ref=object()) is one
+        assert factory(capability_ref=object()) is one
+
+    def test_backend_cache_is_single_flight_under_threads(self, monkeypatch):
+        """Concurrent first calls build exactly ONE backend (the recipe
+        cache's contract, mirrored)."""
+        import guanlan_v2.orchestration.adapters.data_world as DW
+        monkeypatch.setattr(DW, "_BACKEND", None)
+        calls: list = []
+        real_adapters = DW.production_data_adapters
+
+        def counting_adapters():
+            calls.append(1)
+            return real_adapters()
+
+        monkeypatch.setattr(DW, "production_data_adapters", counting_adapters)
+        built: list = []
+        start = threading.Barrier(8)
+
+        def hit():
+            start.wait(timeout=10)
+            built.append(DW.production_data_backend())
+
+        threads = [threading.Thread(target=hit) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        assert len(built) == 8
+        assert len(calls) == 1
+        assert all(b is built[0] for b in built)
