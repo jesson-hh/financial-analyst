@@ -478,6 +478,16 @@ class TestTheAuxNodeOutcome:
         # the typed refusal identity travels on BOTH channels:
         assert run.error_type == "AuxDataUngranted"
         assert run.reason.startswith(f"{PV.AUX_DATA_UNGRANTED_CODE}:")
+        # …and the POSITIVE arm of the reason_code (L2-b Task 8 sweep — Task-6
+        # review F-3). The banned list below pins what the code is NOT; without
+        # this line the executor could start stamping ANY other string and the
+        # suite would stay green. `handler_error` is worker.py's hardcode for a
+        # DETERMINISTIC handler that raised (worker.py: `_terminal_nodrun(
+        # NodeStatus.FAILED, reason_code="handler_error", ...)`), and the typed
+        # identity rides `error_type` + the reason token above — so the code is
+        # deliberately generic. Changing it is a conscious flip, and it reddens
+        # here first.
+        assert run.reason_code == "handler_error"
         # …and the reason NAMES the worker, its held capability and the L3 gap.
         assert worker_id in run.reason
         assert "sealed prefetch binding grants it no row (L3)" in run.reason

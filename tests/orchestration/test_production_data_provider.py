@@ -698,6 +698,72 @@ class TestPrepareDelegation:
                 f"Phase-3 session machinery {machinery!r} re-implemented or "
                 "re-driven inside the Task-3 surface -- delegation only")
 
+    #: every internal of the real bridge provider the adapter module must never
+    #: name in EXECUTABLE code.  Each one is verified to exist in
+    #: ``data/runtime.py`` first, so the pin cannot rot into a list of names
+    #: nobody has copied because nobody could.
+    _BRIDGE_PROVIDER_INTERNALS = (
+        "_DataRuntimeBridgeSession",     # the session class itself
+        "_assemble_params", "_pointer_get", "_pointer_set",
+        "_node_param_cause",             # the param-projection half
+        "SUBJECT_PARAM_POINTERS",        # the closed subject pointer set
+        "_resolve_schema_registry", "_verify_context_binding",
+        "_frozen_route_for",             # the session's own helpers
+        "_DataTokenMap", "_DataGatewayAdapter", "_DataEvidenceWriterAdapter",
+        "_BINDING_BY_METHOD", "_READER_DOORS", "_result_ref_for",
+        "DataReader(", "DataEvidenceCollector", "issue_call_token",
+        "render_for_prompt", "model_validate", "typed_ref_sort_key",
+    )
+
+    def test_the_whole_adapter_module_never_transcribes_the_provider_internals(
+            self):
+        """WIDENED (L2-b Task 8 sweep — Task-3 review M3).
+
+        The pin above scopes its machinery scan to the four Task-3 classes, so a
+        copy of the session's param-assembly or evidence plumbing pasted into a
+        NEW helper elsewhere in ``adapters/data_world.py`` — a module-level
+        function, a Task-7 producer half, a future world builder — passed it.
+        This one scans the WHOLE module.
+
+        Comments and docstrings are stripped first (via ``ast``), which is what
+        keeps the pin discriminating rather than merely loud: the module's prose
+        legitimately NAMES ``_DataRuntimeBridgeSession._frozen_route_for`` and
+        ``_assemble_params`` when it explains what it delegates to, and a rule
+        that forbade saying the words would be a rule against documentation. A
+        transcription, by contrast, lands in executable code — and that is
+        exactly what is scanned.
+
+        The sanctioned delegation targets are pinned PRESENT in the same breath,
+        so 'no internals appear' can never be satisfied by deleting the
+        delegation."""
+        rt_src = inspect.getsource(RT)
+        for name in self._BRIDGE_PROVIDER_INTERNALS:
+            assert name.rstrip("(") in rt_src, (
+                f"{name!r} is not an internal of data/runtime.py -- this pin "
+                "must enumerate the REAL provider internals, not stale names")
+
+        module = ast.parse(inspect.getsource(DW))
+        for node in ast.walk(module):
+            if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                     ast.AsyncFunctionDef)):
+                continue
+            body = node.body
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                node.body = body[1:] or [ast.Pass()]
+        executable = ast.unparse(module)
+
+        for name in self._BRIDGE_PROVIDER_INTERNALS:
+            assert name not in executable, (
+                f"adapters/data_world.py's EXECUTABLE source names the bridge "
+                f"provider internal {name!r} -- the whole module delegates to "
+                "the real provider through data_runtime_provider_factory and "
+                "re-implements none of the Phase-3 session machinery")
+        # …and the delegation itself is still there (the other direction).
+        assert "DataRuntimeBridgeProvider.prepare_input" in executable
+        assert "data_runtime_provider_factory" in executable
+
 
 # =========================================================================== #
 # 3. zero rows — the catalog-licensed EMPTY freeze (row-count partition only)  #
@@ -989,11 +1055,18 @@ class TestPmThroughTheRealResolver:
 
     def test_the_pv_aux_nodes_freeze_empty_through_the_real_resolver(
             self, env_pilot, bundle, view):
-        """The rowless arm at the REAL seam (RED today: the worldless
-        incumbent refuses loudly): both pv aux workers complete their data
-        bridge with the catalog-licensed EMPTY contribution — no
+        """The rowless arm at the REAL seam: both pv aux workers complete their
+        data bridge with the catalog-licensed EMPTY contribution — no
         ``bridge_execution_error`` on this path, and the pilot context is
-        never even read (rowless partitions BEFORE world resolution)."""
+        never even read (rowless partitions BEFORE world resolution).
+
+        TRUED UP (L2-b Task 8 sweep — Task-5 review I3). The docstring used to
+        say "RED today: the worldless incumbent refuses loudly", which described
+        the pre-Task-4 registration: while the worldless provider was the
+        registered one, this drive really did refuse. Task 4 registered
+        ``ProductionDataProvider`` and Task 5 deleted the worldless trio, so the
+        parenthetical has been false since — and a reader who believed it would
+        read a GREEN production invariant as a known-red intermediate."""
         factories = _registered_factories(env_pilot, bundle)
         runtime = _exec_runtime(bundle, view, env_pilot.report, factories)
         for wid in ("pv.price_action", "pv.microstructure"):
@@ -1100,7 +1173,7 @@ def _tape_envelope(*, pulled_at="2026-07-16T14:59:00"):
 
 
 def _build_synthetic_env(monkeypatch, *, method_id: str, probe,
-                         subject_params=None):
+                         subject_params=None, param_bindings=None):
     """A fabricated catalog granting ONE live row to a worker, admitted for
     real, executed through THIS task's registration recipe over the REAL
     production recipe world — probe injected, zero network.
@@ -1108,6 +1181,12 @@ def _build_synthetic_env(monkeypatch, *, method_id: str, probe,
     Faithful trimmed adaptation of ``test_runtime_integration.build_data_env``
     (recorded in the module docstring): admission service dropped; validation
     + runtime support are the real ones.
+
+    ``param_bindings`` (L2-b Task 8 sweep) replaces the shape's reviewed row
+    projection wholesale — the ONE way to reach an assembled params document
+    the METHOD's params model refuses, since Phase-1 already validated the
+    node's own params against the WORKER's schema (``assert phase1.valid``
+    below is that guard, unweakened). Default ``None`` = the reviewed shape.
 
     ``subject_params`` (L2-b Task 5) drives the run through the REAL per-run
     seam object: the registered factories are wrapped in
@@ -1132,7 +1211,8 @@ def _build_synthetic_env(monkeypatch, *, method_id: str, probe,
         capability_ref=spec.capability_ref, frozen_route=route.entries,
         invocation_mode="cache_or_invoke",
         success_requires_finalized_call=False,
-        param_bindings=shape.bindings)
+        param_bindings=(shape.bindings if param_bindings is None
+                        else param_bindings))
     binding = DataBridgePrefetchBinding.build(
         bridge_id=DATA_BRIDGE_ID, bridge_version="1", operations=(row,))
     config_bytes = serialize_prefetch_binding(binding)
@@ -1518,6 +1598,57 @@ class TestSyntheticLiveRowEndToEnd:
         msg = str(exc.value)
         assert "not bound at the runner seam" in msg
         assert "subject_params=None" in msg
+        assert probe.calls == []
+        assert env.gateway.finalized_records() == ()
+
+    def test_an_invalid_assembled_params_doc_refuses_in_the_TYPED_family(
+            self, monkeypatch):
+        """L2-b Task 8 sweep (Task-5 review M2) — the OTHER refusal the real
+        session owes at the param seam.
+
+        ``_assemble_params`` raises its own typed ``DataRuntimeError`` when a
+        pointer does not resolve, but the line after it validates the assembled
+        document against the METHOD's params model, and a failure THERE used to
+        escape as a raw ``pydantic.ValidationError``: loud, never empty, but
+        outside the family every caller of the data bridge discriminates on —
+        and the family the deleted worldless provider raised at this exact seam.
+
+        Reached honestly: Phase-1 validated the node's params against the
+        WORKER's schema (the harness asserts that), so the only legal way in is
+        a ROW whose closed projection writes something the method's model
+        refuses — here a ``const`` binding putting a non-timestamp into
+        ``InstrumentSeriesParams.start``. The refusal must be typed, must carry
+        pydantic's own detail (never swallowed), must chain the original, and
+        must land BEFORE any read: zero probe calls, zero finalized records."""
+        from pydantic import ValidationError
+
+        probe = _ProbeStub(_tape_envelope())
+        bad_bindings = (
+            ParamBinding(target_pointer="/end", source_kind="node_param",
+                         source_pointer="/end"),
+            ParamBinding(target_pointer="/start", source_kind="const",
+                         const_value="not-a-timestamp"),
+            ParamBinding(target_pointer="/symbol", source_kind="node_param",
+                         source_pointer="/symbol"),
+        )
+        env = _build_synthetic_env(
+            monkeypatch, method_id="ohlcv", probe=probe,
+            param_bindings=bad_bindings)
+        with pytest.raises(RT.DataRuntimeError) as exc:
+            env.drive(kind=ExecutionKind.DETERMINISTIC)
+
+        # the TYPED family, not the raw pydantic error…
+        assert type(exc.value) is RT.DataRuntimeError
+        assert not isinstance(exc.value, ValidationError)
+        # …carrying the detail and the original cause, never swallowing either.
+        assert isinstance(exc.value.__cause__, ValidationError)
+        msg = str(exc.value)
+        assert "InstrumentSeriesParams" in msg
+        assert "start" in msg
+        assert "ohlcv" in msg and E2E_WORKER_ID in msg
+        # and it is NOT the sibling seam's refusal (that one is about pointers).
+        assert "not bound at the runner seam" not in msg
+        # nothing was read: the refusal precedes the source call and the record.
         assert probe.calls == []
         assert env.gateway.finalized_records() == ()
 

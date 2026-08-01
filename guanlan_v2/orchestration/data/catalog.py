@@ -500,10 +500,16 @@ class _Phase3DataSurface:
         # exactly these two pointers — the sealed record stays code-free and no
         # node ever carries params.
         #
-        # SERVABLE is L2-b's business: no production ``DataRuntimeWorld`` is
-        # bound yet, so the deep lane's worldless provider PROVES resolvability
-        # against this very row and then refuses loudly rather than faking a
-        # read. Rewriting these binding bytes HERE would move the sealed
+        # SERVABLE is L2-b's business and L2-b LANDED (2026-08-01, Tasks 4-5):
+        # ``live_decide.build_production_bindings`` binds the production
+        # ``DataRuntimeWorld`` recipe, and the deep lane's registered
+        # ``adapters/data_world.py::ProductionDataProvider`` resolves ONE world
+        # per run and delegates this very row to the real
+        # ``_DataRuntimeBridgeSession``. With the run's subject projection bound
+        # (the per-run ``_SubjectScopedFactories`` view) the row READS for real;
+        # unbound, it still refuses loudly at the runner seam rather than
+        # reading with a guessed subject. Rewriting these binding bytes HERE
+        # would move the sealed
         # ``bridge.data_runtime.prefetch`` material digest and the Phase-3
         # catalog digest, so that correction still belongs to a re-freeze
         # phase, never to a drive-by edit. Pinned by

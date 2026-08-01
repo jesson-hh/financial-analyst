@@ -1240,7 +1240,7 @@ def test_the_capture_persist_is_idempotent_by_content_digest():
     # own ContextSnapshot idiom — a read, not a relaxation).
     env = Env()
     manifest, _ctx = DW.build_production_capture(
-        clock=L._SessionFrozenClock(L._session_as_of(SESSION)),
+        clock=DW._FrozenContextClock(L._session_as_of(SESSION)),
         data_snapshot_id=L._capture_id(SESSION))
     first = DW.persist_capture(
         stores_or_archive=env.stores,
@@ -1261,13 +1261,13 @@ def test_a_relocated_capture_of_the_same_content_refuses_loudly():
     # world" message. The producer therefore refuses at the real cause instead.
     env = Env()
     manifest, _ctx = DW.build_production_capture(
-        clock=L._SessionFrozenClock(L._session_as_of(SESSION)),
+        clock=DW._FrozenContextClock(L._session_as_of(SESSION)),
         data_snapshot_id=L._capture_id(SESSION))
     DW.persist_capture(
         stores_or_archive=env.stores,
         registry_digest=env.bindings.runtime_registry_digest, manifest=manifest)
     relocated, _ctx2 = DW.build_production_capture(
-        clock=L._SessionFrozenClock(L._session_as_of(SESSION)),
+        clock=DW._FrozenContextClock(L._session_as_of(SESSION)),
         data_snapshot_id="some-other-locator")
     assert relocated.content_digest == manifest.content_digest   # the premise
     with pytest.raises(DW.DataRuntimeError) as exc:
@@ -1287,10 +1287,10 @@ def test_the_capture_locator_is_the_session_not_the_attempt():
     # above — while a session locator makes it the same capture.
     assert L._capture_id(SESSION) == L._capture_id(SESSION)
     one, _ = DW.build_production_capture(
-        clock=L._SessionFrozenClock(L._session_as_of(SESSION)),
+        clock=DW._FrozenContextClock(L._session_as_of(SESSION)),
         data_snapshot_id=L._capture_id(SESSION))
     two, _ = DW.build_production_capture(
-        clock=L._SessionFrozenClock(L._session_as_of(SESSION)),
+        clock=DW._FrozenContextClock(L._session_as_of(SESSION)),
         data_snapshot_id=L._capture_id(SESSION))
     assert one.data_snapshot_id == two.data_snapshot_id
     assert one.content_digest == two.content_digest
@@ -1353,3 +1353,177 @@ def test_cli_answers_a_verifier_refusal_with_one_honest_line(monkeypatch, capsys
     err = capsys.readouterr().err
     assert "REFUSED (operator)" in err
     assert "Traceback" not in err
+
+
+# =========================================================================== #
+# 12 — L2-b Task 8 sweep: the producer/consumer agreements, pinned             #
+# =========================================================================== #
+#: the ONE sealed Phase-9 schema-registry digest, transcribed from the golden
+#: ``tests/orchestration/golden/phase9_schema_manifest_v1.json``
+#: (``registry_digest``). Lane 0 keys the capture payload with it and the deep
+#: lane's resolver looks the capture up under it, from a DIFFERENT builder —
+#: this literal is what makes that agreement a measurement instead of a
+#: construction (L2-b Task-7 review M4).
+SEALED_REGISTRY_DIGEST = (
+    "9e73ddf6d23def5a5666016b1ab113e7b9920eb940ff22a0dd73d806efd3ac07"
+)
+
+
+def test_the_capture_key_is_the_one_sealed_registry_digest_on_both_halves():
+    # The round-trip test above feeds the resolver `bindings.runtime_registry_
+    # digest` — Lane 0's own key — so producer/consumer agreement there is true
+    # BY CONSTRUCTION and would survive both halves drifting together. Here the
+    # two halves are each compared to the sealed literal instead: the producer's
+    # key (what `persist_capture` binds under), the manifest's own frozen
+    # registry (what the routing snapshot sealed the world against), and the
+    # deep lane's lookup key (`plan.schema_registry_digest`).
+    env = Env()
+    result = env.run()
+    manifest, _ctx = DW.build_production_capture(
+        clock=DW._FrozenContextClock(L._session_as_of(SESSION)),
+        data_snapshot_id=L._capture_id(SESSION))
+
+    assert env.bindings.runtime_registry_digest == SEALED_REGISTRY_DIGEST
+    assert manifest.schema_registry_digest == SEALED_REGISTRY_DIGEST
+    assert (DW.production_data_recipe().routing.schema_registry_digest
+            == SEALED_REGISTRY_DIGEST)
+    assert (_deep_lane_request(env, result).plan.schema_registry_digest
+            == SEALED_REGISTRY_DIGEST)
+
+
+def test_persist_capture_refuses_a_key_the_manifest_was_not_frozen_against():
+    # L2-b Task-7 review M3. `payloads.put`'s idempotency check compares content
+    # digest / namespace / schema only, so a capture persisted under a registry
+    # digest other than the manifest's own would bind SILENTLY and then be
+    # invisible to `find_ref` (which filters on that digest) — production would
+    # read "manifest not persisted; the context producer did not run the L2-b
+    # recipe", a false accusation with nothing red in the tree. The producer
+    # refuses at the real cause instead, before any write.
+    env = Env()
+    manifest, _ctx = DW.build_production_capture(
+        clock=DW._FrozenContextClock(L._session_as_of(SESSION)),
+        data_snapshot_id=L._capture_id(SESSION))
+    stored_before = len(dict(env.stores._shared.backend.payloads))
+
+    with pytest.raises(DW.DataRuntimeError) as exc:
+        DW.persist_capture(
+            stores_or_archive=env.stores, registry_digest="f" * 64,
+            manifest=manifest)
+    msg = str(exc.value)
+    assert "f" * 64 in msg and manifest.schema_registry_digest in msg
+    assert "manifest not persisted" in msg          # names the symptom it prevents
+    # nothing was written on the refusing path.
+    assert len(dict(env.stores._shared.backend.payloads)) == stored_before
+
+    # …and the check precedes the STORE, which is what makes it a guard rather
+    # than an accident of this fixture's resolver not knowing the foreign digest:
+    # a payload surface that screams on any touch is never touched.
+    class _ForbiddenPayloads:
+        @property
+        def payloads(self):
+            raise AssertionError(
+                "persist_capture reached the payload store before verifying "
+                "that the caller's registry digest is the manifest's own")
+
+    with pytest.raises(DW.DataRuntimeError):
+        DW.persist_capture(stores_or_archive=_ForbiddenPayloads(),
+                           registry_digest="f" * 64, manifest=manifest)
+    # …and the agreeing call still persists (the guard is not a blanket refusal).
+    assert DW.persist_capture(
+        stores_or_archive=env.stores,
+        registry_digest=env.bindings.runtime_registry_digest,
+        manifest=manifest) is not None
+
+
+def test_the_world_digest_field_list_has_exactly_one_definition():
+    # L2-b Task-7 review M1. The tuple used to exist in THREE copies (resolver,
+    # deep-lane pre-flight, driver reuse note). A field added to the resolver
+    # alone would leave the pre-flight passing and the refusal landing AFTER
+    # `register_and_try_lease` — a burned human authorization. Both consumers
+    # now alias the resolver's own object, and a re-fork reddens twice: the
+    # identity check, and the source scan that forbids re-inlining the names.
+    from guanlan_v2.orchestration.pipeline import live_decide as LD
+
+    assert LD._DATA_WORLD_DIGEST_FIELDS is DW._WORLD_DIGEST_FIELDS
+    assert L._WORLD_DIGEST_FIELDS is DW._WORLD_DIGEST_FIELDS
+    assert DW._WORLD_DIGEST_FIELDS == (
+        "source_registry_digest", "routing_snapshot_digest",
+        "source_config_digest")
+
+    import inspect
+
+    for fn in (L._stale_data_world_note, LD._stale_data_world_fields):
+        body = inspect.getsource(fn)
+        body = body[body.index('"""', body.index('"""') + 3):]   # drop docstring
+        for field in DW._WORLD_DIGEST_FIELDS:
+            assert field not in body, (
+                f"{fn.__qualname__} re-inlines {field!r} instead of iterating "
+                "the resolver's own _WORLD_DIGEST_FIELDS -- the divergence this "
+                "single-sourcing exists to prevent refuses AFTER the lease")
+
+
+def test_the_reuse_note_names_the_drift_when_the_snapshot_predates_the_world():
+    # L2-b Task-7 review M2: the drift branch had ZERO coverage. A REUSED
+    # snapshot from a pilot-era (or otherwise drifted) Lane-0 run is exactly
+    # what the deep lane's pre-lease pre-flight refuses, and the one-judgment-
+    # per-session red line means the day cannot be re-captured — so the note is
+    # the operator's only warning, and it must name the fields.
+    stale = SimpleNamespace(data_context=SimpleNamespace(
+        source_registry_digest="a" * 64, routing_snapshot_digest="b" * 64,
+        source_config_digest="c" * 64))
+    note = L._stale_data_world_note(stale)
+    assert len(note) == 1
+    line = note[0]
+    assert "predates the L2-b production data world" in line
+    for field in DW._WORLD_DIGEST_FIELDS:
+        assert field in line
+    assert "context_predates_data_world" in line     # the deep lane's own code
+    assert "cannot be re-captured" in line
+
+    # ONE drifted field is enough, and only that field is named.
+    recipe = DW.production_data_recipe()
+    one_off = SimpleNamespace(data_context=SimpleNamespace(
+        source_registry_digest=recipe.source_registry_digest,
+        routing_snapshot_digest="b" * 64,
+        source_config_digest=recipe.source_config_digest))
+    line = L._stale_data_world_note(one_off)[0]
+    assert "routing_snapshot_digest" in line
+    assert "source_registry_digest" not in line
+
+
+def test_a_recipe_that_cannot_be_built_takes_the_reuse_path_down_loudly(
+        monkeypatch):
+    # ASSESSED at the sweep (Task-7 review M2, second half) and kept LOUD. An
+    # unbuildable recipe means the committed data-world material is missing or
+    # corrupt: no Lane-0 run and no deep run can happen on this box at all.
+    # Degrading this read-only path to a "could not check" note would report a
+    # clean `reused` while the server is unusable — the silenced-outage shape.
+    # The run path already dies on the same condition; the reuse path agrees.
+    from guanlan_v2.orchestration.data.errors import RoutingConfigurationError
+
+    def _boom():
+        raise RoutingConfigurationError("calendar material is unreadable")
+
+    monkeypatch.setattr(L, "production_data_recipe", _boom)
+    fine = SimpleNamespace(data_context=SimpleNamespace(
+        source_registry_digest="a" * 64, routing_snapshot_digest="b" * 64,
+        source_config_digest="c" * 64))
+    with pytest.raises(RoutingConfigurationError):
+        L._stale_data_world_note(fine)
+
+
+def test_the_driver_holds_no_second_copy_of_the_frozen_clock():
+    # L2-b Task-7 review M6: `_SessionFrozenClock` was a verbatim copy of the
+    # class the resolver binds on the consumer side. One class now — a second
+    # definition could acquire different freezing semantics on one side of a
+    # producer/consumer pair whose whole contract is that both freeze the SAME
+    # instant.
+    import inspect
+
+    assert L._FrozenContextClock is DW._FrozenContextClock
+    assert not hasattr(L, "_SessionFrozenClock")
+    src = inspect.getsource(L)
+    assert "class _SessionFrozenClock" not in src
+    # the driver still freezes the SESSION stamp, not a wall clock.
+    clock = L._FrozenContextClock(L._session_as_of(SESSION))
+    assert clock.now() == L._session_as_of(SESSION) == clock.now()

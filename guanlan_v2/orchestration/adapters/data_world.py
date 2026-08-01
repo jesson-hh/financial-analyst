@@ -976,7 +976,29 @@ def persist_capture(
     ContextSnapshot predates the production data world"), which is both false
     and unactionable.  The producer therefore refuses at the real cause,
     naming both locators.
+
+    **The two registry digests must AGREE, and disagreement refuses here.**
+    ``registry_digest`` is the key half of the D-D channel (the admitted plan's
+    schema-registry digest, which is what ``world_for`` step 3 filters
+    ``find_ref`` on), while ``manifest.schema_registry_digest`` is the registry
+    the routing snapshot froze the world against. In production both are the
+    sealed Phase-9 digest. If they ever diverged, ``payloads.put``'s idempotency
+    check compares content digest / namespace / schema only, so the capture
+    would bind silently under the OTHER key and ``find_ref`` could not locate
+    it: the deep lane would report "manifest not persisted; the context producer
+    did not run the L2-b recipe" — a false accusation, after the run, with
+    nothing red in the tree (L2-b Task 7 review M3).
     """
+    if registry_digest != manifest.schema_registry_digest:
+        raise DataRuntimeError(
+            f"the capture would be persisted under schema-registry digest "
+            f"{registry_digest}, but the manifest was frozen against "
+            f"{manifest.schema_registry_digest}. The deep lane's resolver looks "
+            "the manifest up under the ADMITTED PLAN's registry digest, so a "
+            "capture bound under any other key is unreachable and surfaces as "
+            "the (false) 'manifest not persisted' refusal at run time. Both "
+            "halves must carry the one sealed registry digest"
+        )
     payloads = stores_or_archive.payloads
     existing = payloads.find_ref(
         namespace=PRODUCTION_CAPTURE_NAMESPACE, schema_ref=_MANIFEST_SCHEMA_REF,

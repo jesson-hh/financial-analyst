@@ -114,7 +114,10 @@ from typing import Any, Callable, Mapping, Sequence
 
 from guanlan_v2.orchestration import worker as _worker
 from guanlan_v2.orchestration.llm_output import DEEP_SEAT_RUNTIME_OWNED_FIELDS
-from guanlan_v2.orchestration.adapters.data_world import production_data_recipe
+from guanlan_v2.orchestration.adapters.data_world import (
+    _WORLD_DIGEST_FIELDS,
+    production_data_recipe,
+)
 from guanlan_v2.orchestration.adapters.launcher import LaneExecutionBinding
 from guanlan_v2.orchestration.approval import admit_after_approval
 from guanlan_v2.orchestration.budget import BudgetLedger
@@ -193,15 +196,15 @@ REFUSAL_STALE_DATA_WORLD = "context_predates_data_world"
 
 #: the three ``DataContext`` digests a per-run data world is verified against.
 #: The pre-lease PRE-IMAGE of ``adapters/data_world.py``'s
-#: ``ProductionDataWorldResolver.world_for`` step 2 (its ``_WORLD_DIGEST_FIELDS``
-#: — same field names on both the context and the recipe, by Task-1
-#: construction).  Both lists must stay identical: a field checked only inside
-#: the resolver would refuse AFTER the lease was drawn.
-_DATA_WORLD_DIGEST_FIELDS = (
-    "source_registry_digest",
-    "routing_snapshot_digest",
-    "source_config_digest",
-)
+#: ``ProductionDataWorldResolver.world_for`` step 2 — same field names on both
+#: the context and the recipe, by Task-1 construction.
+#:
+#: SINGLE-SOURCED (L2-b Task 8 sweep, Task-7 review M1). This used to be a
+#: second literal tuple; the resolver's own ``_WORLD_DIGEST_FIELDS`` is now THE
+#: authority and this is an alias of that object. A field the resolver checks
+#: and the pre-flight does not would refuse AFTER the lease is drawn — a burned
+#: human authorization — so the two can no longer drift by construction.
+_DATA_WORLD_DIGEST_FIELDS = _WORLD_DIGEST_FIELDS
 
 #: the per-run assembler's registered identity (stamped on every prompt record).
 SUBJECT_ASSEMBLER_ID = "pipeline.subject_prompt_assembler"

@@ -141,6 +141,12 @@ from guanlan_v2.orchestration import bootstrap as _bootstrap
 from guanlan_v2.orchestration import presets as _presets
 from guanlan_v2.orchestration import worker as _worker
 from guanlan_v2.orchestration.admission import ApprovalSubmission
+from guanlan_v2.orchestration.adapters import data_world as _data_world
+from guanlan_v2.orchestration.adapters.data_world import (
+    _WORLD_DIGEST_FIELDS,
+    _FrozenContextClock,
+    production_data_recipe,
+)
 from guanlan_v2.orchestration.adapters.launcher import build_dag_plan_executor
 from guanlan_v2.orchestration.budget import BudgetLedger
 from guanlan_v2.orchestration.catalog_runtime import TrustedFactoryRegistry
@@ -651,15 +657,23 @@ def _stale_data_world_note(context: Any) -> list[str]:
 
     A broken recipe propagates unmasked here (the same posture as the run path):
     if the committed data-world material cannot be read at all, the operator
-    needs that told loudly, not swallowed into a missing note.
-    """
-    from guanlan_v2.orchestration.adapters.data_world import production_data_recipe
+    needs that told loudly, not swallowed into a missing note. ASSESSED and kept
+    at the L2-b Task-8 sweep (Task-7 review M2): an unbuildable recipe means the
+    committed data-world material is missing or corrupt, i.e. no Lane-0 run and
+    no deep run can happen at all on this box — degrading THIS path to a
+    "could not check" note would report ``reused`` cleanly while the server is
+    unusable, which is the silenced-outage shape this lineage forbids. Pinned
+    both ways in ``tests/orchestration/test_lane0_driver.py``.
 
+    The drifted-field list is the resolver's OWN ``_WORLD_DIGEST_FIELDS``
+    (single-sourced at the Task-8 sweep, review M1): a fourth field checked only
+    inside the resolver would leave this note silent about the very drift the
+    deep lane is about to refuse for.
+    """
     recipe = production_data_recipe()
     data_context = context.data_context
     drifted = tuple(
-        field for field in ("source_registry_digest", "routing_snapshot_digest",
-                            "source_config_digest")
+        field for field in _WORLD_DIGEST_FIELDS
         if getattr(data_context, field, None) != getattr(recipe, field))
     if not drifted:
         return []
@@ -690,22 +704,18 @@ def _capture_id(session_date: str) -> str:
     return f"lane0-capture-{session_date}"
 
 
-class _SessionFrozenClock:
-    """The session stamp as an ``AuthoritativeClock`` (never a wall clock).
-
-    ``build_production_capture`` reads its clock for the manifest boundary and
-    the reviewed ``build_data_context`` reads it again, requiring equality — so
-    the capture builder must be handed a clock that cannot move. The value is
-    :func:`_session_as_of`, i.e. exactly the ``as_of`` the plan already carries.
-    """
-
-    __slots__ = ("_as_of",)
-
-    def __init__(self, as_of: datetime) -> None:
-        self._as_of = as_of
-
-    def now(self) -> datetime:
-        return self._as_of
+#: The session stamp as an ``AuthoritativeClock`` (never a wall clock).
+#:
+#: ``build_production_capture`` reads its clock for the manifest boundary and
+#: the reviewed ``build_data_context`` reads it again, requiring equality — so
+#: the capture builder must be handed a clock that cannot move. The value passed
+#: is :func:`_session_as_of`, i.e. exactly the ``as_of`` the plan already
+#: carries.
+#:
+#: DEDUPED at the L2-b Task-8 sweep (Task-7 review M6): this was a verbatim copy
+#: of ``data_world._FrozenContextClock`` — the class the resolver binds on the
+#: consumer side. One class now, imported, so producer and consumer cannot
+#: acquire different freezing semantics.
 
 
 def _session_as_of(session_date: str) -> datetime:
@@ -1342,9 +1352,7 @@ def run_lane0_bootstrap(
     # what keeps the candidate digest stable across propose → approve → run, and
     # it is the as_of the plan already carries. Nothing about the
     # `build_empty_memory_context` sealing below changes — only this argument.
-    from guanlan_v2.orchestration.adapters import data_world as _data_world
-
-    capture_clock = _SessionFrozenClock(_session_as_of(session_date))
+    capture_clock = _FrozenContextClock(_session_as_of(session_date))
     capture_manifest, data_context = _data_world.build_production_capture(
         clock=capture_clock, data_snapshot_id=_capture_id(session_date))
     capture_ref = _data_world.persist_capture(

@@ -201,8 +201,9 @@ RUN_SUBJECT_SCHEMA_REF: SchemaRef = SchemaRef(name="RunSubject", version="1")
 # table grants a data row to ``dec.pm`` only, so both raise
 # ``tool_calls_required_unmet`` before one LLM call happens. Closing that for
 # real needs the subject→data-bridge path (L1 — landed 2026-07-31), a production
-# data runtime (L2-b — still unbound: the worldless provider refuses loudly)
-# and the grants + sealed-chain re-freeze (L3); see
+# data runtime (L2-b — landed 2026-08-01: ``build_production_bindings`` binds the
+# subject-bound ``ProductionDataProvider`` over the per-run world)
+# and the grants + sealed-chain re-freeze (L3, the one still open); see
 # ``docs/superpowers/specs/2026-07-29-post-p10-refreeze-design.md`` §1.5.
 #
 # Dropping exactly those two AUXILIARY evidence readers — they reach the debate

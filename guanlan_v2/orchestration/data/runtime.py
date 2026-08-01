@@ -40,6 +40,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
+from pydantic import ValidationError
+
 from guanlan_v2.orchestration.data.catalog import (
     DataPrefetchOperation,
     parse_prefetch_binding,
@@ -776,7 +778,26 @@ class _DataRuntimeBridgeSession:
             # runner-seam refusal — the surviving semantics of L1's deleted
             # worldless shape 3 — before any read, gateway begin or write.
             doc = _assemble_params(row, req.node, subject_params=self._subject_params)
-            params = params_cls.model_validate(doc)
+            # …and the assembled document must satisfy the METHOD's params model.
+            # The two schemas are different guards: Phase-1 validated the node's
+            # params against the WORKER's ``params_schema_ref``, while this one
+            # validates what the row's closed projection produced. A raw
+            # ``ValidationError`` escaping here would be loud but UNTYPED — the
+            # deleted worldless provider raised a typed ``DataRuntimeError`` at
+            # this exact seam, and every caller of the data bridge (the deep
+            # lane's refusal seam included) discriminates on that family. So the
+            # refusal is re-raised in the typed family with pydantic's own detail
+            # carried in the message and the original chained — never swallowed,
+            # never downgraded to an empty read (L2-b Task 5 review M2).
+            try:
+                params = params_cls.model_validate(doc)
+            except ValidationError as exc:
+                raise DataRuntimeError(
+                    f"the assembled params for prefetch row "
+                    f"{spec.method_id!r} (worker {req.worker.id!r}, node "
+                    f"{req.node.id!r}) do not validate against "
+                    f"{params_cls.__name__}: {exc}"
+                ) from exc
             if spec.method_id == "signals":
                 result = reader.get_signal(spec.method_ref, params)
             else:

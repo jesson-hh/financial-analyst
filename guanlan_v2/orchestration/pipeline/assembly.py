@@ -426,7 +426,7 @@ def build_production_catalog_runtime(
     that killed ``pv.price_action`` / ``pv.microstructure`` at an unbound
     factory, so every production caller of this function — ``live_decide``,
     ``pipeline.api``, ``lane0_driver``, all of which pass no
-    ``handler_registry`` — gets them without a second wiring. Two deliberate
+    ``handler_registry`` — gets them without a second wiring. Three deliberate
     properties:
 
     * an explicit ``handler_registry`` entry for the same id **wins** (the
@@ -437,7 +437,20 @@ def build_production_catalog_runtime(
       pilot lineage, the Phase-10 screening catalogs). A phantom registration
       would be an off-catalog handler, which ``_catalog_handler_ref`` refuses
       by design — this is the honest complement to that refusal, not a
-      silencing of it.
+      silencing of it;
+    * **the default registration widens ``_catalog_handler_ref``'s
+      ambiguous-across-versions refusal into a HARD FAILURE OF THIS BUILDER for
+      every caller** (L2-b Task 6 review F-4). Pre-default, a snapshot sealing
+      ``handler.pv.price_action`` at two versions only tripped a caller that
+      named that id in its own ``handler_registry``; now the id is registered
+      unconditionally whenever it is sealed, so such a catalog raises
+      :class:`CatalogMaterialError` before any runtime exists — ``live_decide``,
+      ``pipeline.api`` and ``lane0_driver`` alike. That is the intended posture
+      (a two-version handler id means "which bytes run?" has no honest answer,
+      and guessing one is exactly the silent-substitution failure this lineage
+      forbids), but it is a NEW blast radius: a future second version of either
+      pv handler material must retire the first in the same re-freeze, never
+      land beside it.
     """
     source = (
         material_source
