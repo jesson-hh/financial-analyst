@@ -102,13 +102,19 @@ Recorded ABI corrections (the Task-0b/6 precedent)
   **Lane 0 is approvable by a named human only, never by a standing lease.** The
   ``rendered_md`` banner names the bootstrap preset version so a reviewer is
   never left inferring it.
-* The only reviewed :class:`~guanlan_v2.orchestration.context.DataContext`
-  producer that needs no data-snapshot manifest chain is
-  ``presets.pilot_data_context`` (``data.snapshot.build_data_context`` requires a
-  frozen config/registry/routing/manifest quartet that has no production
-  producer). The driver uses it and says so in the result's ``notes`` — the
-  placeholder source/routing digests are an upstream gap, not something to
-  invent here. It is the same ``DataContext`` the deep lane consumes today.
+* **(closed 2026-08-01, L2-b Task 7.)** This bullet used to record that the only
+  reviewed :class:`~guanlan_v2.orchestration.context.DataContext` producer
+  needing no data-snapshot manifest chain was ``presets.pilot_data_context``,
+  whose placeholder source/routing digests were "an upstream gap, not something
+  to invent here". L2-b built the missing quartet: the driver now calls
+  ``adapters.data_world.build_production_capture`` (the reviewed ONLINE builders
+  over the sealed production registry / routing / source config + the committed
+  trading calendar) and persists the run's ``online_capture_root``
+  :class:`~guanlan_v2.orchestration.data.snapshot.DataSnapshotManifest` through
+  ``persist_capture`` — the same payload channel the deep lane's
+  ``ProductionDataWorldResolver`` reads it back from. Every digest on the
+  committed ``ContextSnapshot`` is now measured. Nothing else about the
+  snapshot changed: the same ``presets.build_empty_memory_context`` seals it.
 
 Out of scope, deliberately: nothing here touches ``server.py`` and no scheduler
 is wired. Driving Lane 0 stays a decision an operator makes, not a side effect
@@ -632,6 +638,76 @@ def _lane0_identity(session_date: str, attempt: int = 1) -> tuple[str, str, str]
             f"req-lane0-{session_date}{suffix}")
 
 
+def _stale_data_world_note(context: Any) -> list[str]:
+    """One honest line when a REUSED ContextSnapshot predates the data world.
+
+    The reuse gate returns a snapshot some EARLIER invocation committed — quite
+    possibly a pilot-era one, since every Lane-0 run before L2-b Task 7 wrote
+    placeholder digests. Such a snapshot is not a defect of this run, but it IS
+    the thing the deep lane will refuse today (pre-lease, by design), and the
+    one-judgment-per-session red line means the driver cannot re-capture the
+    day. Saying so is the only honest option; silently reporting ``reused`` and
+    letting the operator discover it from a deep-lane refusal is not.
+
+    A broken recipe propagates unmasked here (the same posture as the run path):
+    if the committed data-world material cannot be read at all, the operator
+    needs that told loudly, not swallowed into a missing note.
+    """
+    from guanlan_v2.orchestration.adapters.data_world import production_data_recipe
+
+    recipe = production_data_recipe()
+    data_context = context.data_context
+    drifted = tuple(
+        field for field in ("source_registry_digest", "routing_snapshot_digest",
+                            "source_config_digest")
+        if getattr(data_context, field, None) != getattr(recipe, field))
+    if not drifted:
+        return []
+    return [
+        "the REUSED ContextSnapshot predates the L2-b production data world "
+        f"({', '.join(drifted)} disagree with the recipe): the deep lane's "
+        "pre-lease pre-flight refuses it (context_predates_data_world), so no "
+        "deep run can bind it. One judgment per +08:00 session date is the red "
+        "line — this session cannot be re-captured; the snapshot stands and the "
+        "deep lane stays honestly refused."]
+
+
+def _capture_id(session_date: str) -> str:
+    """The AUDIT locator of one session's ONLINE data capture (L2-b Task 7).
+
+    Deliberately keyed on the SESSION, not on the run identity. The capture's
+    content is a pure function of the +08:00 session stamp and the frozen
+    production recipe, and ``data_snapshot_id`` is excluded from the manifest's
+    semantic digest — so two attempts of the same session produce byte-identical
+    capture CONTENT, and an attempt-suffixed locator (``lane0-<session>-r2``)
+    would make attempt 2 a *relocation* of attempt 1's already-persisted
+    capture. The deep lane's resolver looks the manifest up by content digest
+    and then checks the locator, so that relocation would commit a
+    ContextSnapshot the deep lane refuses with "predates the production data
+    world" — false and unactionable. ``persist_capture`` refuses a relocation
+    outright; this function is why one never occurs.
+    """
+    return f"lane0-capture-{session_date}"
+
+
+class _SessionFrozenClock:
+    """The session stamp as an ``AuthoritativeClock`` (never a wall clock).
+
+    ``build_production_capture`` reads its clock for the manifest boundary and
+    the reviewed ``build_data_context`` reads it again, requiring equality — so
+    the capture builder must be handed a clock that cannot move. The value is
+    :func:`_session_as_of`, i.e. exactly the ``as_of`` the plan already carries.
+    """
+
+    __slots__ = ("_as_of",)
+
+    def __init__(self, as_of: datetime) -> None:
+        self._as_of = as_of
+
+    def now(self) -> datetime:
+        return self._as_of
+
+
 def _session_as_of(session_date: str) -> datetime:
     """The session's canonical whole-day artifact stamp (+08:00 midnight).
 
@@ -1121,10 +1197,17 @@ def run_lane0_bootstrap(
     now = _resolve_as_of(as_of, bindings.clock)
     session_date = session_date_of(now)
     run_id, draft_id, request_id = _lane0_identity(session_date, attempt)
+    # CONSCIOUS FLIP (L2-b Task 7). This note used to say the DataContext came
+    # from presets.pilot_data_context and that "its source/routing digests are
+    # that builder's placeholders, not measurements". Both halves of that
+    # sentence are now false, and an operator reading the CLI report must not be
+    # told a closed gap is still open.
     notes: list[str] = [
-        "DataContext comes from the reviewed presets.pilot_data_context (the only "
-        "producer that needs no frozen data-snapshot manifest chain); its "
-        "source/routing digests are that builder's placeholders, not measurements.",
+        "DataContext is built by the L2-b production data-world recipe "
+        "(adapters.data_world.build_production_capture: the reviewed ONLINE "
+        "builders over the sealed source registry / routing / source config and "
+        "the committed trading calendar) — every digest is measured, none is a "
+        "placeholder.",
     ]
 
     # ---- idempotence ①: today's committed snapshot IS the receipt ---------- #
@@ -1149,7 +1232,8 @@ def run_lane0_bootstrap(
                 "a committed ContextSnapshot already exists for this session date; "
                 "reused rather than re-burning tokens. Lane-0 run identity is one "
                 "per +08:00 session date, so a same-day re-run is a RESUME by "
-                "kernel design, never a second judgment."]))
+                "kernel design, never a second judgment."]
+                + _stale_data_world_note(context)))
 
     # ---- idempotence ②: a prior execution of this identity, no snapshot ---- #
     spent = None if dry_run else _spent_run_identity(bindings.stores, run_id)
@@ -1244,7 +1328,38 @@ def run_lane0_bootstrap(
         catalog=bindings.catalog_runtime, bridge_view=bindings.bridge_view,
         factories=factories, support_report=dispatch.support_report,
         runtime_registry_digest=bindings.runtime_registry_digest)
-    data_context = _presets.pilot_data_context(as_of=_session_as_of(session_date))
+    # ---- the run's ONLINE data capture (L2-b Task 7, the PRODUCER half) ----- #
+    # Was: `_presets.pilot_data_context(as_of=_session_as_of(session_date))` —
+    # placeholder source/registry/routing digests this module itself flagged as
+    # an upstream gap. The recipe closed it, so the committed ContextSnapshot
+    # now carries the three MEASURED digests the deep lane's
+    # ProductionDataWorldResolver compares against, and the run's capture root
+    # is persisted through the same payload channel that resolver reads it back
+    # from (content-addressed by ctx.data_snapshot_content_digest). Both calls
+    # are composition over reviewed builders; this module invents no digest.
+    #
+    # The boundary is the SESSION stamp, exactly as before: `_session_as_of` is
+    # what keeps the candidate digest stable across propose → approve → run, and
+    # it is the as_of the plan already carries. Nothing about the
+    # `build_empty_memory_context` sealing below changes — only this argument.
+    from guanlan_v2.orchestration.adapters import data_world as _data_world
+
+    capture_clock = _SessionFrozenClock(_session_as_of(session_date))
+    capture_manifest, data_context = _data_world.build_production_capture(
+        clock=capture_clock, data_snapshot_id=_capture_id(session_date))
+    capture_ref = _data_world.persist_capture(
+        stores_or_archive=bindings.stores,
+        registry_digest=bindings.runtime_registry_digest,
+        manifest=capture_manifest)
+    notes.append(
+        f"the run's online_capture_root DataSnapshotManifest "
+        f"({capture_manifest.data_snapshot_id}, content digest "
+        f"{capture_manifest.content_digest[:12]}…) is persisted at "
+        f"{capture_ref.object_id} in the '"
+        f"{_data_world.PRODUCTION_CAPTURE_NAMESPACE}' namespace — the same "
+        "channel the deep lane's ProductionDataWorldResolver loads it back "
+        "from, keyed by the committed context's data_snapshot_content_digest.")
+
     run_context = _bootstrap.build_bootstrap_run_context(
         run_id=plan.run_id, data=data_context, budget=run_budget,
         cancellation_token_id=f"cancel-{run_id}")

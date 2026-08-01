@@ -59,6 +59,7 @@ import guanlan_v2.orchestration.worker as W
 from guanlan_v2.orchestration import lane_payloads as lp
 from guanlan_v2.orchestration import presets as P
 from guanlan_v2.orchestration.adapters import chain
+from guanlan_v2.orchestration.adapters import data_world as DW
 from guanlan_v2.orchestration.admission import PlanAdmissionService
 from guanlan_v2.orchestration.approval import PlanApprovalCoordinator
 from guanlan_v2.orchestration.catalog import (
@@ -334,8 +335,21 @@ def _build_env(tmp_path, heavy, *, tranches=True, fail=frozenset(), lease=True,
     rt_digest = heavy.registry.registry_digest
     stores = RuntimeStores(resolver=resolver, clock=clock,
                            allowed_cell_namespaces=(W.PROMPT_CELL_NAMESPACE,))
+    # L2-b Task 7 — the deep lane's PRE-LEASE pre-flight refuses a committed
+    # snapshot whose DataContext predates the production data world, so this
+    # harness now stands the environment up the way LANE 0 does after Task 7:
+    # the DataContext comes from the ONE recipe (`build_production_capture`),
+    # not from the pilot placeholder producer. The capture manifest is persisted
+    # through the same D-D channel too, so the fixture describes a complete
+    # production posture rather than a half of one. (The trimmed catalog here is
+    # bridge-free, so no world is ever resolved from it — but a fixture that
+    # committed a pilot-era context would exercise only the refusal arm.)
+    capture_manifest, capture_ctx = DW.build_production_capture(
+        clock=clock, data_snapshot_id="live-decide-capture-2026-07-24")
+    DW.persist_capture(stores_or_archive=stores, registry_digest=rt_digest,
+                       manifest=capture_manifest)
     mem = P.build_empty_memory_context(
-        data_context=P.pilot_data_context(as_of=NOW), stores=stores,
+        data_context=capture_ctx, stores=stores,
         registry_digest=rt_digest, built_at=NOW)
     context = mem.context
     ctx_ref = PayloadRef(namespace="main", object_id="ctx-live-1",
@@ -796,6 +810,122 @@ class TestDegradedHonest:
         assert out.get("deep_attempted") is True
         assert out.get("deep_outcome") == "refused"
         assert _decide_rows(env) == [] and env.noted == []
+
+    def test_a_stale_data_world_context_refuses_before_any_lease(
+            self, tmp_path, heavy, monkeypatch):
+        """L2-b Task 7 — the PRE-LEASE pre-flight (the burned-lease precedent).
+
+        A committed ContextSnapshot whose ``DataContext`` predates the
+        production data world (the pilot-era placeholder digests) cannot serve a
+        deep run: ``ProductionDataWorldResolver.world_for`` refuses it at the
+        first rows-present read. But that refusal lands INSIDE execution — after
+        ``register_and_try_lease`` has consumed a standing human authorization,
+        after the candidate is reserved, after the subject is committed. That is
+        the exact 2026-07-31 defect shape recorded at ``live_decide.py``'s
+        binding block: a burned lease with zero execution.
+
+        So the check binds where the snapshot RESOLVES, and the load-bearing
+        half of this test is the lease spy: ``register_and_try_lease`` is never
+        called, no card is registered, no subject is committed, no runner is
+        constructed. The fast result stands untouched.
+        """
+        env = _build_env(tmp_path, heavy)
+        stale = P.build_empty_memory_context(
+            data_context=P.pilot_data_context(as_of=NOW), stores=env.stores,
+            registry_digest=env.rt_digest, built_at=NOW).context
+        stale_ref = PayloadRef(namespace="main", object_id="ctx-stale-1",
+                               content_digest=stale.content_digest)
+
+        lease_calls: list = []
+        real_lease = PlanApprovalCoordinator.register_and_try_lease
+
+        def spy_lease(self, *a, **kw):
+            lease_calls.append(kw.get("idempotency_key"))
+            return real_lease(self, *a, **kw)
+
+        monkeypatch.setattr(
+            PlanApprovalCoordinator, "register_and_try_lease", spy_lease)
+
+        subjects_before = sum(
+            1 for s in dict(env.stores._shared.backend.payloads).values()
+            if s.schema_key == "RunSubject@1")
+        fast_result = _fast_result("300750")
+        out = make_orchestrated_decide(
+            fast_decide=_make_fast(env, fast_result),
+            bindings=_bindings(env, heavy,
+                               strat_fn=lambda sid: dict(_OPT_IN_STRAT),
+                               latest_snapshot_fn=lambda: (stale, stale_ref)),
+        )(_payload("300750"))
+
+        # ── the load-bearing half FIRST: ZERO lease interaction ───────────── #
+        # Asserted before the outcome deliberately, so deleting the pre-flight
+        # reddens THIS line — the burned-lease invariant — rather than only the
+        # outcome string (mutation m1's evidence).
+        assert lease_calls == []
+        reader = PlanApprovalCoordinator(
+            env.journal, admission=SimpleNamespace(), clock=env.clock,
+            verifier=None, console_emit=None)
+        assert list(reader.list_pending()) == []
+        # …and nothing downstream of the pre-flight ran either: the run subject
+        # is committed AFTER it, and the runner is never constructed.
+        assert sum(1 for s in dict(env.stores._shared.backend.payloads).values()
+                   if s.schema_key == "RunSubject@1") == subjects_before
+        assert env.runner_subject_params == []
+        assert _decide_rows(env) == [] and env.noted == []
+
+        assert out.get("deep_attempted") is True
+        assert out.get("deep_outcome") == "refused"
+        assert out.get("deep_refusal") == live_decide.REFUSAL_STALE_DATA_WORLD
+        assert live_decide.REFUSAL_STALE_DATA_WORLD == "context_predates_data_world"
+        assert out.get("run_id")                      # the identity is carried
+        for key, value in fast_result.items():        # fast stands untouched
+            assert out[key] == value
+
+    def test_the_preflight_covers_every_digest_the_resolver_verifies(
+            self, tmp_path, heavy):
+        """One arm per world-digest field — the pre-lease pre-image of the
+        resolver's own three checks (``adapters/data_world.py::world_for`` step
+        2). A context agreeing on the registry digest but drifted on routing or
+        source-config would otherwise pass the gate and burn a lease before the
+        SAME refusal fired inside execution."""
+        env = _build_env(tmp_path, heavy)
+        recipe = DW.production_data_recipe()
+        for field in ("source_registry_digest", "routing_snapshot_digest",
+                      "source_config_digest"):
+            assert getattr(env.context.data_context, field) == getattr(recipe, field)
+            drifted_dc = env.context.data_context.model_copy(
+                update={field: "e" * 64})
+            drifted = P.build_empty_memory_context(
+                data_context=drifted_dc, stores=env.stores,
+                registry_digest=env.rt_digest, built_at=NOW).context
+            ref = PayloadRef(namespace="main", object_id=f"ctx-drift-{field}",
+                             content_digest=drifted.content_digest)
+            out = make_orchestrated_decide(
+                fast_decide=_make_fast(env, _fast_result("300750")),
+                bindings=_bindings(env, heavy,
+                                   strat_fn=lambda sid: dict(_OPT_IN_STRAT),
+                                   latest_snapshot_fn=lambda: (drifted, ref)),
+            )(_payload("300750"))
+            assert out.get("deep_outcome") == "refused", field
+            assert out.get("deep_refusal") == live_decide.REFUSAL_STALE_DATA_WORLD, field
+
+    def test_a_recipe_matching_context_passes_the_preflight_untouched(
+            self, tmp_path, heavy):
+        """The positive control: the fixture context IS a recipe capture, so the
+        pre-flight is invisible — the deep run completes exactly as before.
+        Without this arm the pre-flight could be a blanket refusal and the suite
+        would still show the refusal test green."""
+        env = _build_env(tmp_path, heavy)
+        assert (env.context.data_context.source_registry_digest
+                == DW.production_data_recipe().source_registry_digest)
+        out = make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("300750")),
+            bindings=_bindings(env, heavy,
+                               strat_fn=lambda sid: dict(_OPT_IN_STRAT)),
+        )(_payload("300750"))
+        assert out.get("deep_outcome") == "completed"
+        assert "deep_refusal" not in out
+        assert len(_decide_rows(env)) == 1
 
     def test_a_naive_clock_falls_back_refused(self, tmp_path, heavy):
         env = _build_env(tmp_path, heavy)

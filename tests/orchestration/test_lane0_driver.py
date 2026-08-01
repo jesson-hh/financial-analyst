@@ -18,11 +18,13 @@ Run: ``python -m pytest tests/orchestration/test_lane0_driver.py -v``
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from guanlan_v2.orchestration import bootstrap as B
 from guanlan_v2.orchestration import worker as W
+from guanlan_v2.orchestration.adapters import data_world as DW
 from guanlan_v2.orchestration.enums import Confidence, RotationStage
 from guanlan_v2.orchestration.eventstore import RuntimeStores, SchemaRegistryResolver
 from guanlan_v2.orchestration.market.factors import (
@@ -1129,6 +1131,209 @@ def test_cli_parses_the_four_verbs():
                  ["run"], ["status"]):
         parsed = L.build_arg_parser().parse_args(argv)
         assert parsed.verb == argv[0]
+
+
+# =========================================================================== #
+# 11 — L2-b Task 7: the PRODUCER half of the ONE data-world recipe             #
+# =========================================================================== #
+#: the pilot placeholder digests (``presets.pilot_data_context``) this task
+#: retires from the committed ContextSnapshot. Kept as an explicit NEGATIVE pin
+#: so a silent regression to the placeholder producer cannot pass.
+_PILOT_PLACEHOLDERS = frozenset({"a" * 64, "b" * 64, "c" * 64, "d" * 64})
+
+
+def _deep_lane_request(env, result):
+    """The exact shape ``ProductionDataWorldResolver.world_for`` consumes.
+
+    Three fields, all read at source (``adapters/data_world.py`` step 1-3): the
+    admitted ContextSnapshot's typed ref, the reader it resolves through, and
+    the ADMITTED PLAN's ``schema_registry_digest`` — which is the registry key
+    the manifest lookup uses. The deep lane's plan and Lane 0's plan both carry
+    the cumulative Phase-9 registry digest, which is why the two halves meet.
+    """
+    return SimpleNamespace(
+        input_snapshot=SimpleNamespace(
+            context_snapshot_ref=SimpleNamespace(
+                payload_ref=result.snapshot_ref,
+                schema_ref=L._CONTEXT_SNAPSHOT_SR)),
+        reader=env.stores.payloads,
+        plan=SimpleNamespace(
+            schema_registry_digest=env.bindings.runtime_registry_digest))
+
+
+def test_the_committed_context_carries_the_recipe_digests_not_the_pilot_placeholders():
+    # L2-b Task 7 — the gap the driver's own module docstring used to declare
+    # ("the placeholder source/routing digests are an upstream gap"). The
+    # committed ContextSnapshot now carries MEASURED digests: exactly the ones
+    # the deep lane's ProductionDataWorldResolver compares against.
+    env = Env()
+    result = env.run()
+    context, _ref = _latest_snapshot_production(env.stores)
+    dc = context.data_context
+    recipe = DW.production_data_recipe()
+
+    assert dc.source_registry_digest == recipe.source_registry_digest
+    assert dc.routing_snapshot_digest == recipe.routing_snapshot_digest
+    assert dc.source_config_digest == recipe.source_config_digest
+    for field in ("source_registry_digest", "routing_snapshot_digest",
+                  "source_config_digest", "data_snapshot_content_digest"):
+        assert getattr(dc, field) not in _PILOT_PLACEHOLDERS, field
+    assert dc.data_snapshot_id != "pilot-snap-1"
+    # the ONLINE capture posture is unchanged from the pilot context's shape:
+    # the only thing that moved is that the digests are now real.
+    assert dc.mode.value == "online" and dc.backend.value == "live"
+    assert dc.strict_pit is False and dc.vintage_manifest_digest is None
+    assert dc.calendar_id == recipe.calendar.calendar_id
+    # the boundary is the SESSION stamp the plan already carries (not a wall
+    # clock): a wall-clock as_of would give every invocation a different
+    # ContextSnapshot digest, which is what `_session_as_of` exists to prevent.
+    assert dc.as_of == L._session_as_of(SESSION)
+    assert result.snapshot_digest == context.content_digest
+
+
+def test_the_capture_manifest_round_trips_through_the_resolvers_own_channel():
+    # THE round-trip: what the Lane-0 producer persists, the deep-lane consumer
+    # LOADS — through the real `ProductionDataWorldResolver.world_for`, not a
+    # hand-rolled lookup. Before this task the resolver refused here with
+    # "manifest not persisted; the context producer did not run the L2-b recipe
+    # (Lane 0 persists the per-run capture, Task 7)".
+    env = Env()
+    result = env.run()
+    context, _ref = _latest_snapshot_production(env.stores)
+
+    resolver = DW.ProductionDataWorldResolver(
+        stores=env.stores, recipe=DW.production_data_recipe(),
+        schema_resolver=env.stores.resolver, clock=env.clock,
+        catalog_runtime=None)
+    world = resolver.world_for(_deep_lane_request(env, result))
+
+    assert world.ctx == context.data_context          # FULL equality, both sides
+    assert world.manifest.manifest_kind == "online_capture_root"
+    assert world.manifest.content_digest == context.data_context.data_snapshot_content_digest
+    assert world.manifest.data_snapshot_id == context.data_context.data_snapshot_id
+    assert world.manifest.as_of == context.data_context.as_of
+    assert world.manifest.routing_snapshot_digest == world.routing.routing_digest
+
+
+def test_the_notes_name_the_recipe_and_no_longer_claim_the_pilot_gap():
+    # CONSCIOUS FLIP (L2-b Task 7). Pre-flip the driver's first note read
+    # "DataContext comes from the reviewed presets.pilot_data_context ... its
+    # source/routing digests are that builder's placeholders, not measurements."
+    # That sentence is now false, so it is pinned ABSENT and the replacement is
+    # pinned present — an operator reading the CLI report must not be told the
+    # gap still exists.
+    env = Env()
+    result = env.run()
+    joined = " ".join(result.notes)
+    assert "pilot_data_context" not in joined
+    assert "placeholders, not measurements" not in joined
+    assert "build_production_capture" in joined
+    assert "online_capture_root" in joined
+    # the note names the capture the run actually persisted, by digest.
+    _context, _ref = _latest_snapshot_production(env.stores)
+    assert _context.data_context.data_snapshot_content_digest[:12] in joined
+
+
+def test_the_capture_persist_is_idempotent_by_content_digest():
+    # `persist_capture` writes the D-D channel ONCE per content digest: a second
+    # call for the same capture binds what the store already holds (the driver's
+    # own ContextSnapshot idiom — a read, not a relaxation).
+    env = Env()
+    manifest, _ctx = DW.build_production_capture(
+        clock=L._SessionFrozenClock(L._session_as_of(SESSION)),
+        data_snapshot_id=L._capture_id(SESSION))
+    first = DW.persist_capture(
+        stores_or_archive=env.stores,
+        registry_digest=env.bindings.runtime_registry_digest, manifest=manifest)
+    stored_before = len(dict(env.stores._shared.backend.payloads))
+    second = DW.persist_capture(
+        stores_or_archive=env.stores,
+        registry_digest=env.bindings.runtime_registry_digest, manifest=manifest)
+    assert second == first
+    assert len(dict(env.stores._shared.backend.payloads)) == stored_before
+
+
+def test_a_relocated_capture_of_the_same_content_refuses_loudly():
+    # `data_snapshot_id` is SEMANTICALLY EXCLUDED from the manifest digest, so
+    # two captures of the same session differing only in their audit locator are
+    # ONE payload to `find_ref` — and the deep lane's resolver would then refuse
+    # the committed context with the (false) "predates the production data
+    # world" message. The producer therefore refuses at the real cause instead.
+    env = Env()
+    manifest, _ctx = DW.build_production_capture(
+        clock=L._SessionFrozenClock(L._session_as_of(SESSION)),
+        data_snapshot_id=L._capture_id(SESSION))
+    DW.persist_capture(
+        stores_or_archive=env.stores,
+        registry_digest=env.bindings.runtime_registry_digest, manifest=manifest)
+    relocated, _ctx2 = DW.build_production_capture(
+        clock=L._SessionFrozenClock(L._session_as_of(SESSION)),
+        data_snapshot_id="some-other-locator")
+    assert relocated.content_digest == manifest.content_digest   # the premise
+    with pytest.raises(DW.DataRuntimeError) as exc:
+        DW.persist_capture(
+            stores_or_archive=env.stores,
+            registry_digest=env.bindings.runtime_registry_digest,
+            manifest=relocated)
+    assert "some-other-locator" in str(exc.value)
+    assert L._capture_id(SESSION) in str(exc.value)
+
+
+def test_the_capture_locator_is_the_session_not_the_attempt():
+    # the forcing behind the recorded deviation: the capture's CONTENT is a pure
+    # function of the session (the +08:00 stamp) and the frozen recipe, so its
+    # audit locator must be too. An attempt-suffixed locator would make attempt
+    # 2 of the same session a relocation of attempt 1's content — the refusal
+    # above — while a session locator makes it the same capture.
+    assert L._capture_id(SESSION) == L._capture_id(SESSION)
+    one, _ = DW.build_production_capture(
+        clock=L._SessionFrozenClock(L._session_as_of(SESSION)),
+        data_snapshot_id=L._capture_id(SESSION))
+    two, _ = DW.build_production_capture(
+        clock=L._SessionFrozenClock(L._session_as_of(SESSION)),
+        data_snapshot_id=L._capture_id(SESSION))
+    assert one.data_snapshot_id == two.data_snapshot_id
+    assert one.content_digest == two.content_digest
+    assert L._capture_id(SESSION) != L._lane0_identity(SESSION, attempt=2)[0]
+
+
+def test_a_superseding_attempt_binds_the_sessions_already_persisted_capture():
+    # The production supersede path, end to end: attempt 1 REALLY executed (its
+    # capture is already in the store) and then died before its ContextSnapshot
+    # landed; the operator runs --attempt 2. The fresh run must still produce a
+    # context the deep lane can resolve — which is exactly what an attempt-keyed
+    # capture locator would have broken.
+    env = Env()
+    first = env.run()
+    backend = env.stores._shared.backend
+    assert first.outcome == L.OUTCOME_COMPLETED, first.refusal_detail
+    for object_id, stored in list(backend.payloads.items()):
+        if getattr(stored, "schema_key", None) == "ContextSnapshot@1":
+            backend.payloads.pop(object_id)
+
+    second = env.run(attempt=2)
+    assert second.outcome == L.OUTCOME_COMPLETED, second.refusal_detail
+    assert second.run_id == f"lane0-{SESSION}-r2"
+    resolver = DW.ProductionDataWorldResolver(
+        stores=env.stores, recipe=DW.production_data_recipe(),
+        schema_resolver=env.stores.resolver, clock=env.clock,
+        catalog_runtime=None)
+    world = resolver.world_for(_deep_lane_request(env, second))
+    assert world.manifest.data_snapshot_id == L._capture_id(SESSION)
+
+
+def test_an_advancing_clock_refuses_rather_than_freezing_two_instants():
+    # `build_production_capture` reads the caller's clock for the manifest
+    # boundary and hands the SAME clock to the reviewed `build_data_context`,
+    # which reads it once more and requires equality. A clock that moved between
+    # the two is therefore a LOUD typed refusal, never a manifest and a context
+    # frozen at two different instants. Production passes the session-frozen
+    # clock, so this can only fire on a mis-wiring.
+    from guanlan_v2.orchestration.data.errors import SnapshotMismatchError
+
+    with pytest.raises(SnapshotMismatchError):
+        DW.build_production_capture(
+            clock=AdvancingClock(), data_snapshot_id=L._capture_id(SESSION))
 
 
 def test_cli_answers_a_verifier_refusal_with_one_honest_line(monkeypatch, capsys):

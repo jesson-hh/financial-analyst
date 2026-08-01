@@ -47,10 +47,18 @@ prefetch — LANDED with L1 (2026-07-31): the materializer call passes the
 committed ``RunSubject`` object (``subject=``, digest bond verified at
 materialization), and the runner call threads the stamped
 ``materialized.subject_params`` into ``build_production_plan_runner``'s
-per-run subject-scoped factories view. No data is read yet — the deep lane
-binds no production ``DataRuntimeWorld``, so ``dec.pm``'s bridge refuses
-loudly naming the resolved subject (the chartered L2-b gap). Honest, not
-papered over.
+per-run subject-scoped factories view. **L2-b closed the other end** (Tasks 4/5,
+2026-07-31): the deep lane now binds the production ``DataRuntimeWorld``
+through ``adapters.data_world``, and ``dec.pm``'s row resolves its instrument
+params from the run's own committed subject inside the real Phase-3 session.
+
+Which makes the COMMITTED CONTEXT load-bearing (L2-b Task 7). The per-run
+world is resolved from the admitted ``ContextSnapshot``'s ``DataContext``, so a
+snapshot written before Lane 0 ran the recipe carries placeholder digests the
+resolver refuses — and it would refuse INSIDE execution, after a lease was
+spent. :func:`_stale_data_world_fields` therefore gates the deep lane the
+moment ``latest_snapshot_fn`` resolves, before any store write and before the
+lease channel exists (``deep_refusal=context_predates_data_world``).
 
 ABI-forced corrections (recorded, mirroring the Task 0b/6 precedent)
 --------------------------------------------------------------------
@@ -106,6 +114,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from guanlan_v2.orchestration import worker as _worker
 from guanlan_v2.orchestration.llm_output import DEEP_SEAT_RUNTIME_OWNED_FIELDS
+from guanlan_v2.orchestration.adapters.data_world import production_data_recipe
 from guanlan_v2.orchestration.adapters.launcher import LaneExecutionBinding
 from guanlan_v2.orchestration.approval import admit_after_approval
 from guanlan_v2.orchestration.budget import BudgetLedger
@@ -150,6 +159,7 @@ __all__ = [
     "OUTCOME_FAILED",
     "OUTCOME_NO_LEASE",
     "OUTCOME_REFUSED",
+    "REFUSAL_STALE_DATA_WORLD",
     "SUBJECT_ASSEMBLER_ID",
     "SUBJECT_ASSEMBLER_VERSION",
     "SUBJECT_TRUSTED_INPUT_NAME",
@@ -173,6 +183,25 @@ OUTCOME_COMPLETED = "completed"
 OUTCOME_NO_LEASE = "no_lease"
 OUTCOME_FAILED = "failed"
 OUTCOME_REFUSED = "refused"
+
+#: the named reason carried on the ONE refusal arm that has one — the pre-lease
+#: data-world pre-flight (L2-b Task 7).  ``refused`` alone has five causes on
+#: this path (unnameable code, naive clock, absent snapshot, materialization,
+#: support); a stale committed ``ContextSnapshot`` is the only one an operator
+#: fixes by re-running Lane 0, so it says so by name.
+REFUSAL_STALE_DATA_WORLD = "context_predates_data_world"
+
+#: the three ``DataContext`` digests a per-run data world is verified against.
+#: The pre-lease PRE-IMAGE of ``adapters/data_world.py``'s
+#: ``ProductionDataWorldResolver.world_for`` step 2 (its ``_WORLD_DIGEST_FIELDS``
+#: — same field names on both the context and the recipe, by Task-1
+#: construction).  Both lists must stay identical: a field checked only inside
+#: the resolver would refuse AFTER the lease was drawn.
+_DATA_WORLD_DIGEST_FIELDS = (
+    "source_registry_digest",
+    "routing_snapshot_digest",
+    "source_config_digest",
+)
 
 #: the per-run assembler's registered identity (stamped on every prompt record).
 SUBJECT_ASSEMBLER_ID = "pipeline.subject_prompt_assembler"
@@ -642,6 +671,25 @@ def _tranche_rows(proposal) -> list[dict]:
     return rows
 
 
+def _stale_data_world_fields(context: Any) -> tuple[str, ...]:
+    """Which world digests of a committed ``ContextSnapshot`` predate the recipe.
+
+    Empty ⇒ the snapshot was produced by the L2-b Lane-0 producer and the deep
+    lane may proceed. Non-empty ⇒ a pilot-era (or otherwise drifted) context
+    that ``ProductionDataWorldResolver.world_for`` would refuse at the first
+    rows-present read; naming the fields keeps the log line diagnostic rather
+    than categorical.
+
+    Pure and read-only: it touches the recipe (module-cached, already built at
+    binding construction in production) and the snapshot object only.
+    """
+    data_context = getattr(context, "data_context", None)
+    recipe = production_data_recipe()
+    return tuple(
+        field for field in _DATA_WORLD_DIGEST_FIELDS
+        if getattr(data_context, field, None) != getattr(recipe, field))
+
+
 class _DecisionPoint:
     """The single decision point of one live deep run (the runner's point seam)."""
 
@@ -754,6 +802,27 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
         return {**fast, "deep_attempted": True, "deep_outcome": OUTCOME_REFUSED,
                 "run_id": run_id}
     context, context_snapshot_ref = snapshot_pair
+
+    # ── PRE-LEASE pre-flight: a stale committed context refuses HERE ───────── #
+    # The per-run data world is resolved from THIS snapshot's DataContext, and
+    # `ProductionDataWorldResolver.world_for` refuses it when its three digests
+    # do not equal the production recipe's (a pilot-era snapshot carries
+    # placeholders). That refusal is correct — but it lands inside EXECUTION,
+    # i.e. after `register_and_try_lease` has consumed a standing human
+    # authorization, after the candidate is reserved and after the run subject
+    # is committed: the burned-lease shape recorded verbatim in this module's
+    # binding block (2026-07-31, an analyzer-binding refusal that spent a lease
+    # and executed nothing). So the check binds at the resolution point, before
+    # any store write and before the lease channel is touched at all.
+    stale = _stale_data_world_fields(context)
+    if stale:
+        _LOG.warning(
+            "deep lane refused for %s: the committed ContextSnapshot %s predates "
+            "the production data world (%s disagree with the recipe) — re-run "
+            "Lane 0. No lease was drawn (fast result stands)",
+            canonical, getattr(context, "snapshot_id", "?"), ", ".join(stale))
+        return {**fast, "deep_attempted": True, "deep_outcome": OUTCOME_REFUSED,
+                "deep_refusal": REFUSAL_STALE_DATA_WORLD, "run_id": run_id}
 
     session_dt = datetime.strptime(session_date, "%Y-%m-%d").replace(tzinfo=_SESSION_TZ)
     subject = RunSubject(code=canonical, as_of=session_dt)

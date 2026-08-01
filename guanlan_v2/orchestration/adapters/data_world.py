@@ -45,7 +45,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from guanlan_v2.orchestration.adapters.live_data import LiveClientSource
+from guanlan_v2.orchestration.adapters.live_data import (
+    LiveClientSource,
+    build_online_capture_manifest,
+    build_online_data_context,
+)
+from guanlan_v2.orchestration.context import DataContext
 from guanlan_v2.orchestration.data.calendar import (
     ImmutableTradingCalendar,
     TradingCalendarMaterial,
@@ -69,6 +74,7 @@ from guanlan_v2.orchestration.data.runtime import (
 )
 from guanlan_v2.orchestration.data.snapshot import (
     DataRoutingSnapshot,
+    DataSnapshotManifest,
     DataSourceConfigSnapshot,
     build_data_source_config_snapshot,
 )
@@ -83,8 +89,8 @@ from guanlan_v2.orchestration.data.symbols import (
 )
 from guanlan_v2.orchestration.digest import content_digest
 from guanlan_v2.orchestration.eventstore import EventRefusalAuditSink
-from guanlan_v2.orchestration.refs import ContentRef, SchemaRef
-from guanlan_v2.orchestration.runtime_clock import AuthoritativeClock
+from guanlan_v2.orchestration.refs import ContentRef, PayloadRef, SchemaRef
+from guanlan_v2.orchestration.runtime_clock import AuthoritativeClock, clock_now
 from guanlan_v2.orchestration.runtime_contracts import (
     default_audit_detail_registry,
 )
@@ -93,6 +99,8 @@ __all__ = [
     "PRODUCTION_DATA_REGISTRY_VERSION",
     "PRODUCTION_ROUTING_AUDIT_ID",
     "PRODUCTION_CALENDAR_MATERIAL_PATH",
+    "PRODUCTION_CAPTURE_NAMESPACE",
+    "PRODUCTION_CAPTURE_TIMEZONE",
     "PRODUCTION_LIMIT_POLICY_ID",
     "PRODUCTION_ROUTE_POLICY_REF",
     "ProductionDataProvider",
@@ -100,6 +108,8 @@ __all__ = [
     "ProductionDataWorldResolver",
     "ProductionNoCache",
     "ThreadConfinedDataBackend",
+    "build_production_capture",
+    "persist_capture",
     "production_data_adapters",
     "production_data_backend",
     "production_data_provider_factory",
@@ -449,6 +459,13 @@ def production_data_backend() -> ThreadConfinedDataBackend:
 # --------------------------------------------------------------------------- #
 _MANIFEST_SCHEMA_REF = SchemaRef(name="DataSnapshotManifest", version="1")
 
+#: the ONE payload namespace the per-run capture lives in.  The producer
+#: (:func:`persist_capture`, Lane 0) and the consumer
+#: (:meth:`ProductionDataWorldResolver.world_for` step 3, the deep lane) MUST
+#: agree, and they live in different processes — so the string is a shared
+#: constant here rather than a literal at each end (L2-b Task 7).
+PRODUCTION_CAPTURE_NAMESPACE = "main"
+
 #: the three DataContext fields the resolver verifies against the recipe — the
 #: recipe property names are identical by construction (Task 1).
 _WORLD_DIGEST_FIELDS = (
@@ -607,7 +624,8 @@ class ProductionDataWorldResolver:
         #    boundary Lane 0 froze.
         digest = ctx.data_snapshot_content_digest
         manifest_ref = self._stores.payloads.find_ref(
-            namespace="main", schema_ref=_MANIFEST_SCHEMA_REF,
+            namespace=PRODUCTION_CAPTURE_NAMESPACE,
+            schema_ref=_MANIFEST_SCHEMA_REF,
             registry_digest=request.plan.schema_registry_digest,
             content_digest=digest)
         if manifest_ref is None:
@@ -856,3 +874,131 @@ def register_production_data_provider(
     for _method_id, cap_ref in sorted(data_capability_refs().items()):
         factories.register_capability_backend(
             cap_ref, lambda **kw: production_data_backend())
+
+
+# --------------------------------------------------------------------------- #
+# Task 7 — the PRODUCER half: the per-run ONLINE capture + its D-D persistence  #
+# --------------------------------------------------------------------------- #
+#: the exchange wall-clock zone every A-share session date is reduced under.
+#: The same zone the reviewed ONLINE/PIT_REPLAY adapters localize a naive vendor
+#: ``pulled_at`` with (``adapters/live_data.py`` / ``adapters/replay_data.py``
+#: ``_EXCHANGE_TZ``) and the one ``adapters/api.py`` names as the session zone —
+#: never a second convention. ``PitGuard`` reduces an instant to a session date
+#: through ``ctx.clock.timezone`` (``data/pit.py``), so this string is
+#: load-bearing, not decorative.
+PRODUCTION_CAPTURE_TIMEZONE = "Asia/Shanghai"
+
+
+def build_production_capture(
+    *, clock: AuthoritativeClock, data_snapshot_id: str,
+) -> tuple[DataSnapshotManifest, DataContext]:
+    """The run's ONLINE capture root + its start-frozen :class:`DataContext`.
+
+    The producer half of the ONE recipe (L2-b Task 7).  Composition only — both
+    halves are the reviewed Phase-9 ONLINE builders
+    (:func:`~guanlan_v2.orchestration.adapters.live_data.build_online_capture_manifest`
+    and
+    :func:`~guanlan_v2.orchestration.adapters.live_data.build_online_data_context`)
+    over :func:`production_data_recipe`'s frozen half; nothing is
+    re-implemented and no digest is invented.  The returned context therefore
+    carries the recipe's MEASURED ``source_registry`` / ``routing_snapshot`` /
+    ``source_config`` digests — the exact three
+    :meth:`ProductionDataWorldResolver.world_for` compares — instead of
+    ``presets.pilot_data_context``'s ``"a"``/``"b"``/``"c"`` placeholders.
+
+    **The clock is read twice, deliberately, and disagreement is LOUD.**  The
+    manifest needs the boundary before it exists, and the reviewed
+    ``build_data_context`` reads the clock itself (exactly once, freezing
+    ``as_of`` into the context) and then requires ``as_of == manifest.as_of``.
+    Handing it the SAME clock keeps that equality check a real tripwire: a
+    caller that passes an advancing clock gets a typed
+    :class:`~guanlan_v2.orchestration.data.errors.SnapshotMismatchError` rather
+    than a manifest and a context frozen at two different instants.  Production
+    (``lane0_driver.run_lane0_bootstrap``) passes its session-frozen clock, so
+    the two readings are the same +08:00 session stamp the plan already carries.
+
+    ``data_snapshot_id`` is the capture root's AUDIT locator — semantically
+    excluded from the manifest digest (``DataSnapshotManifest.SEMANTIC_EXCLUDE``)
+    and therefore invisible to :func:`persist_capture`'s content-addressed
+    lookup.  It must consequently be a function of what the capture already
+    encodes (the session + the frozen recipe) and never of a per-attempt run
+    identity; see :func:`persist_capture`'s relocation refusal.
+    """
+    recipe = production_data_recipe()
+    as_of = clock_now(clock)
+    manifest = build_online_capture_manifest(
+        data_snapshot_id=data_snapshot_id,
+        as_of=as_of,
+        timezone=PRODUCTION_CAPTURE_TIMEZONE,
+        calendar_id=recipe.calendar.calendar_id,
+        routing_snapshot_digest=recipe.routing_snapshot_digest,
+        # the routing snapshot is the authority on which schema registry this
+        # world was frozen against; build_data_context re-asserts equality.
+        schema_registry_digest=recipe.routing.schema_registry_digest,
+    )
+    ctx = build_online_data_context(
+        clock=clock,
+        source_config=recipe.source_config,
+        source_registry=recipe.registry.snapshot(),
+        routing=recipe.routing,
+        manifest=manifest,
+    )
+    return manifest, ctx
+
+
+def persist_capture(
+    *, stores_or_archive: Any, registry_digest: str,
+    manifest: DataSnapshotManifest,
+) -> PayloadRef:
+    """Persist one capture root through the D-D channel the resolver READS.
+
+    The channel is the payload store, keyed exactly as
+    :meth:`ProductionDataWorldResolver.world_for` step 3 keys its lookup:
+    ``namespace=PRODUCTION_CAPTURE_NAMESPACE``, ``DataSnapshotManifest@1``, the
+    admitted plan's ``registry_digest``, and the manifest's CONTENT digest.
+    There is no second "archive" surface — inventing one would create a channel
+    the consumer cannot read — so ``stores_or_archive`` (the brief's parameter
+    name) is the ``RuntimeStores``-shaped object whose ``.payloads`` is that
+    store.
+
+    **Idempotent by content digest.**  A capture already held under this content
+    digest is BOUND, not rewritten — the driver's own ContextSnapshot idiom
+    (``lane0_driver.py``: "bind what the store already holds for this exact
+    semantic identity, and write only when nothing holds it yet. A read, not a
+    relaxation").  The write-once byte check is untouched.
+
+    **Relocation refuses, loudly and here.**  ``data_snapshot_id`` is excluded
+    from the digest, so a stored capture with the same content but a DIFFERENT
+    audit locator is indistinguishable to ``find_ref`` — binding it would commit
+    a ContextSnapshot whose ``data_snapshot_id`` names a locator the store does
+    not hold, and the deep lane would later refuse that snapshot with the
+    resolver's ``data_snapshot_id``-mismatch message ("the committed
+    ContextSnapshot predates the production data world"), which is both false
+    and unactionable.  The producer therefore refuses at the real cause,
+    naming both locators.
+    """
+    payloads = stores_or_archive.payloads
+    existing = payloads.find_ref(
+        namespace=PRODUCTION_CAPTURE_NAMESPACE, schema_ref=_MANIFEST_SCHEMA_REF,
+        registry_digest=registry_digest,
+        content_digest=manifest.content_digest)
+    if existing is not None:
+        stored = payloads.get(existing, expected_schema_ref=_MANIFEST_SCHEMA_REF)
+        if stored.data_snapshot_id != manifest.data_snapshot_id:
+            raise DataRuntimeError(
+                f"a data capture with content digest {manifest.content_digest} "
+                f"is already persisted under the audit locator "
+                f"{stored.data_snapshot_id!r}, but this capture names "
+                f"{manifest.data_snapshot_id!r}. data_snapshot_id is excluded "
+                "from the manifest digest, so the two are ONE payload to the "
+                "deep lane's content-addressed lookup and the committed "
+                "ContextSnapshot would name a locator nothing resolves. Derive "
+                "the capture locator from the session + recipe (what the "
+                "capture content already encodes), never from a per-attempt "
+                "run identity"
+            )
+        return existing
+    return payloads.put(
+        _MANIFEST_SCHEMA_REF, manifest, registry_digest=registry_digest,
+        namespace=PRODUCTION_CAPTURE_NAMESPACE,
+        idempotency_key=f"data-capture:{manifest.content_digest}")
