@@ -16,15 +16,22 @@ and the manifest kind. It owns exactly three things — one source and two build
   (``verified_snapshot`` for a per-code realtime quote, ``news`` for
   announcement/news-style text feeds, ``ohlcv`` for the market-wide tape snapshot —
   **no new** ``DataMethodSpec`` id is minted). Each probe-envelope row becomes a
-  :class:`~guanlan_v2.orchestration.data.pit.RawRowCandidate` whose ``available_at``
-  is the envelope's ``pulled_at`` (当时可知时间 = when we pulled it live); a missing
+  :class:`~guanlan_v2.orchestration.data.pit.RawRowCandidate` carrying **the data's
+  own availability**: a *live* candidate is stamped with the envelope's ``pulled_at``
+  (当时可知时间 = when we pulled it live), while a ``verified_snapshot`` row that
+  carries its own **settled** datum yields a *settled projection* stamped at that
+  datum's own settlement instant (see :data:`_SETTLED_CLOSE_LOCAL_TIME` and
+  :meth:`LiveClientSource._settled_candidate` — the CONTROLLER RULING behind the
+  L2-b Task-9 gate). A missing
   ``pulled_at`` yields ``available_at=None`` and the single PIT authority
   (``PitGuard.check_raw``, invoked by the reviewed Phase-3 router at ``data/registry.py``
   dispatch step 5c) refuses it as :class:`MissingAvailabilityRefused` — the adapter
   never fabricates an ``available_at``. Because ``as_of`` is the **start-frozen** run
   instant, a row whose live ``pulled_at`` is *after* run start (later than ``as_of``)
   is refused by the guard as :class:`FutureDataRefused` — the freeze is real, not
-  decorative. No method takes a caller ``as_of`` / ``strict`` override; the boundary
+  decorative; an intraday tick under a session-midnight ``as_of`` therefore stays
+  typed-refused, and only genuinely settled data passes.
+  No method takes a caller ``as_of`` / ``strict`` override; the boundary
   is the request's frozen as-of (the ``DataContext``) only, and no wall clock is
   read on the fetch path (``fetched_at`` is the frozen ``request.as_of``).
 * :func:`build_online_live_descriptor` — an ``ONLINE``-only / ``LIVE``-backend
@@ -71,7 +78,7 @@ cumulative-registry classification).
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import date as _date, datetime, time as _time, timezone
 from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
@@ -146,6 +153,47 @@ _EXCHANGE_TZ = ZoneInfo("Asia/Shanghai")
 #: projection of the live row — never a fabricated headline).
 _NEWS_TITLE_KEYS = ("title", "headline", "text", "name", "summary", "content")
 _CLIP = 400
+
+# --------------------------------------------------------------------------- #
+# the SETTLED-projection rule (CONTROLLER RULING — the L2-b Task-9 gate)       #
+# --------------------------------------------------------------------------- #
+#: **NAMED DOMAIN RULE, not a fabrication.** An A-share trading session's CLOSE price
+#: is exchange-settled and publicly disseminated at the session close, **15:00
+#: Asia/Shanghai**. A settled datum's own availability instant is therefore its own
+#: session date at this local time, normalized to UTC.
+#:
+#: This encodes the CONTROLLER RULING recorded in
+#: ``.superpowers/sdd/progress-orchestration.md`` (Task-7 concern 1 / the Task-9
+#: gate): *"THE FIX IS STAMPING SEMANTICS: verified_snapshot/settled data must carry
+#: available_at = the data's OWN availability time (bar settlement/publication), not
+#: pulled_at; data genuinely available before the midnight boundary then passes
+#: PitGuard honestly. Intraday ticks under a midnight context stay typed-refused —
+#: that IS honest PIT behavior."* The ruling keeps gate D-C intact (the run's
+#: ``ctx.as_of`` stays the session-midnight instant the admitted context describes),
+#: so the ONLY honest passer under that boundary is settled data.
+_SETTLED_CLOSE_LOCAL_TIME = _time(hour=15, minute=0)
+
+#: Row keys that carry the **settled previous-session CLOSE**, bound at source:
+#: ``prev_close`` is the key the ``verified_snapshot`` record family consumes and the
+#: key the reviewed adapter fixtures carry; ``last_close`` is the key the real
+#: ``tencent_realtime_quote`` handler emits (stocks
+#: ``src/data/live_text_sources.py::tencent_quote``); ``pre_close`` is the common
+#: alias of the same 昨收 datum. First match wins; nothing is derived or averaged.
+_SETTLED_CLOSE_KEYS = ("prev_close", "last_close", "pre_close")
+
+#: Row keys that carry the settled datum's **own session date**. Deliberately narrow:
+#: only keys that name the *previous/settled* session are accepted — a bare ``date``
+#: on a realtime-quote row means TODAY and would stamp a settled instant onto a
+#: session that has not settled. A row with none of these yields **no** settled
+#: candidate at all (never a guessed date; the live candidate's honest PitGuard
+#: refusal then stands).
+_SETTLED_SESSION_DATE_KEYS = (
+    "prev_close_date", "prev_session_date", "last_close_date", "prev_trade_date",
+    "settled_session_date",
+)
+
+#: Row keys carrying the instrument's settled display name (static reference data).
+_SETTLED_NAME_KEYS = ("name", "sec_name", "short_name")
 
 
 # --------------------------------------------------------------------------- #
@@ -243,6 +291,108 @@ def _row_payload(method_id: str, item: Mapping[str, Any], params: Mapping[str, A
     if sym is not None:
         return {"symbol": sym, **row}
     return row
+
+
+def _vendor_row_view(item: Mapping[str, Any]) -> dict[str, Any]:
+    """The item's own fields overlaid with the vendor's nested ``raw`` sub-row.
+
+    The ``live_client`` facade wraps every vendor row in the unified stocks item
+    (``LiveSourceItem.as_dict``) whose ``raw`` key carries the vendor's OWN row; the
+    facade's own consumer helper (``live_client.native_rows``) uses exactly this
+    precedence (raw first, item fields as fallback). A flat vendor row (the shape the
+    reviewed fixtures carry) passes through unchanged. Read-only projection: this
+    view is used ONLY to look up settled fields, never to build the live payload.
+    """
+    view = {str(k): v for k, v in item.items() if k != "raw"}
+    raw = item.get("raw")
+    if isinstance(raw, Mapping):
+        view.update({str(k): v for k, v in raw.items() if k != "raw"})
+    return view
+
+
+def _as_session_date(value: Any) -> _date | None:
+    """Parse a row's own session-date value — ``None`` when it is not one.
+
+    Accepts a ``date`` / ``datetime`` (its date part), an ISO ``YYYY-MM-DD`` prefix
+    or a compact ``YYYYMMDD`` string. Anything else yields ``None``: a date that
+    cannot be *read* is never guessed at.
+    """
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, _date):
+        return value
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    if not s:
+        return None
+    try:
+        return _date.fromisoformat(s[:10])
+    except ValueError:
+        pass
+    if len(s) == 8 and s.isdigit():
+        try:
+            return _date(int(s[:4]), int(s[4:6]), int(s[6:]))
+        except ValueError:
+            return None
+    return None
+
+
+def _settled_close(view: Mapping[str, Any]) -> float | None:
+    """The row's own settled close — a finite number under a bound key, or ``None``."""
+    for key in _SETTLED_CLOSE_KEYS:
+        v = view.get(key)
+        if isinstance(v, bool) or v is None:
+            continue
+        if isinstance(v, (int, float)):
+            f = float(v)
+            if math.isfinite(f):
+                return f
+    return None
+
+
+def _settled_instant(session: _date) -> datetime:
+    """The settled availability instant of ``session``: its close, in aware UTC.
+
+    :data:`_SETTLED_CLOSE_LOCAL_TIME` at :data:`_EXCHANGE_TZ`, normalized to UTC —
+    the data's OWN availability time, derived from the row's own session date by the
+    named domain rule, never from a wall clock and never from ``pulled_at``.
+    """
+    local = datetime.combine(session, _SETTLED_CLOSE_LOCAL_TIME, tzinfo=_EXCHANGE_TZ)
+    return local.astimezone(timezone.utc)
+
+
+def _settled_payload(
+    view: Mapping[str, Any], session: _date, close: float, params: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The settled projection's payload — settled fields ONLY.
+
+    Carries the settled session's date, the settled close and the static reference
+    fields (requested symbol identity + instrument name). **No intraday field ever
+    enters** (current price, open/high/low, today's volume, bid/ask, today's change):
+    claiming an intraday number was available at yesterday's close is exactly the lie
+    the stamping rule exists to prevent.
+
+    Both price slots the ``VerifiedSnapshotRecord`` family consumes (``last_price``
+    and ``prev_close``, ``data/source.py:285-305``) carry the SAME single settled
+    observation: at the settlement instant the session's last traded price IS its
+    close. The projection reports one observed number in both slots and invents no
+    second observation — a consumer computing an intraday change from a settled
+    projection therefore reads 0.0, which is honest for a settled snapshot (the
+    record model has no "unknown" slot).
+    """
+    payload: dict[str, Any] = {
+        "last_price": close,
+        "prev_close": close,
+        "settled_session_date": session.isoformat(),
+    }
+    sym = _first_symbol(params)
+    if sym is not None:
+        payload["symbol"] = sym
+    name = _first_str(view, _SETTLED_NAME_KEYS)
+    if name:
+        payload["name"] = name
+    return payload
 
 
 def _probe_args(method_id: str, params: Mapping[str, Any]) -> tuple[str, str, int]:
@@ -399,11 +549,11 @@ class LiveClientSource:
                 f"{envelope.get('error') or envelope.get('note') or ''}"
             )
 
-        # -- ok/data-bearing: wrap each row (available_at = envelope pulled_at) -- #
+        # -- ok/data-bearing: wrap each row with ITS OWN availability ----------- #
         avail = _online_availability(envelope.get("pulled_at"))
         items = envelope.get("items") or ()
         candidates = tuple(
-            self._candidate(request, method_id, item, avail) for item in items
+            self._row_candidate(request, method_id, item, avail) for item in items
         )
         entry = scope.frozen_route.entries[0]
         # fetched_at is the FROZEN as-of (audit-only) — no wall-clock read exists here.
@@ -411,6 +561,72 @@ class LiveClientSource:
             request_digest=request.request_digest, source_ref=entry.source_ref,
             capability_ref=entry.capability_ref, candidates=candidates,
             subsource=canonical, fetched_at=request.as_of, provider_request_id=None,
+        )
+
+    def _row_candidate(
+        self, request: DataRequest, method_id: str, item: Any, avail: datetime | None
+    ) -> RawRowCandidate:
+        """One candidate per envelope row, stamped with THAT row's own availability.
+
+        A ``verified_snapshot`` row that carries its own settled datum (a settled
+        close + that datum's own session date) becomes the **settled projection**
+        (:meth:`_settled_candidate`); every other row — every other method, and any
+        quote row with no readable settled datum — becomes the unchanged **live**
+        candidate stamped with the envelope's ``pulled_at``.
+
+        **Why the settled projection SUPERSEDES that row's live candidate** (a
+        recorded correction to the pre-fix brief's "in addition", verified at
+        source): ``PitGuard.check_raw`` is ALL-OR-NOTHING, not per-row — a single
+        future candidate raises :class:`FutureDataRefused` for the WHOLE batch
+        (``data/pit.py:485-540``) and the reviewed dispatch re-raises it unchanged
+        (``data/registry.py:704-708``). Emitting both candidates for the same row
+        would therefore make EVERY intraday read refuse, and the ruling's own exit
+        criterion (pm's row completes a real read over settled data) would be
+        structurally unreachable. Nothing is lost by the supersede: ``as_of`` is
+        frozen at run START and the probe necessarily happens after it, so a live
+        tick's ``pulled_at`` can never precede the boundary anyway — the ruling's own
+        premise. The adapter still performs **zero** time filtering/comparison
+        against ``as_of``: it forwards exactly one candidate per row and never drops
+        one; the single PIT authority remains ``PitGuard.check_raw``.
+        """
+        if method_id == _VERIFIED_SNAPSHOT_METHOD_ID and isinstance(item, Mapping):
+            settled = self._settled_candidate(request, item)
+            if settled is not None:
+                return settled
+        return self._candidate(request, method_id, item, avail)
+
+    def _settled_candidate(
+        self, request: DataRequest, item: Mapping[str, Any]
+    ) -> RawRowCandidate | None:
+        """The settled projection of one quote row, or ``None`` when there is none.
+
+        ``available_at`` / ``effective_at`` = the row's **own** previous-session date
+        at :data:`_SETTLED_CLOSE_LOCAL_TIME` (:data:`_EXCHANGE_TZ`), normalized to
+        UTC — the named domain rule that an A-share session's close is
+        exchange-settled and public at 15:00 local (the CONTROLLER RULING this module
+        implements). ``ingested_at`` stays the frozen ``request.as_of`` (the
+        unchanged idiom). The payload carries settled fields ONLY.
+
+        Returns ``None`` — i.e. emits NO settled candidate — when the row carries no
+        readable settled close or no readable previous-session date. A date is never
+        guessed, never derived from a calendar and never taken from the pull instant;
+        the live candidate's honest PitGuard refusal then stands as the outcome.
+        """
+        view = _vendor_row_view(item)
+        close = _settled_close(view)
+        if close is None:
+            return None
+        session: _date | None = None
+        for key in _SETTLED_SESSION_DATE_KEYS:
+            session = _as_session_date(view.get(key))
+            if session is not None:
+                break
+        if session is None:
+            return None
+        instant = _settled_instant(session)
+        return RawRowCandidate.build(
+            raw_payload=_settled_payload(view, session, close, request.params),
+            effective_at=instant, available_at=instant, ingested_at=request.as_of,
         )
 
     def _candidate(

@@ -190,7 +190,9 @@ class _SpyRecorder:
 # --------------------------------------------------------------------------- #
 class _OnlineWorld:
     def __init__(self, schema_registry, *, method_id, params, probe_stub, clock,
-                 spy_source=False, resolve_source_fn=None, data_snapshot_id="online-root-A"):
+                 spy_source=False, resolve_source_fn=None, data_snapshot_id="online-root-A",
+                 as_of=AS_OF):
+        self.as_of = as_of
         surface = phase3_data_surface()
         self.spec = surface.spec_by_method[method_id]
         online_desc = build_online_live_descriptor(
@@ -230,7 +232,7 @@ class _OnlineWorld:
             audit_id="route-1", schema_registry_digest=schema_registry.registry_digest,
             source_config=self.config)
         self.manifest = build_online_capture_manifest(
-            data_snapshot_id=data_snapshot_id, as_of=AS_OF, timezone="Asia/Shanghai",
+            data_snapshot_id=data_snapshot_id, as_of=as_of, timezone="Asia/Shanghai",
             calendar_id="cn_a_share", routing_snapshot_digest=self.routing.routing_digest,
             schema_registry_digest=schema_registry.registry_digest)
         self.clock = clock
@@ -256,7 +258,7 @@ class _OnlineWorld:
 
     def guard(self, recorder=None) -> PitGuard:
         return PitGuard.from_context(
-            self.ctx, clock=_FrozenClock(AS_OF), calendar=CALENDAR,
+            self.ctx, clock=_FrozenClock(self.as_of), calendar=CALENDAR,
             refusal_recorder=recorder or _SpyRecorder())
 
     def fetch(self) -> RawFetch:
@@ -625,3 +627,204 @@ def test_online_capture_manifest_kind_and_audit_split(schema_registry):
     # ... but audit (dereference) identity differs.
     assert m1.audit_digest_value() != m2.audit_digest_value()
     assert m1.data_snapshot_id != m2.data_snapshot_id
+
+
+# =========================================================================== #
+# THE SETTLED PROJECTION (CONTROLLER RULING — the L2-b Task-9 gate)            #
+#                                                                             #
+# Ruling (.superpowers/sdd/progress-orchestration.md, Task-7 concern 1): gate  #
+# D-C stays intact (world.ctx == admitted ctx, frozen clock = SESSION          #
+# MIDNIGHT); the fix is STAMPING SEMANTICS — settled data carries              #
+# ``available_at`` = its OWN availability instant (an A-share session's close  #
+# is exchange-settled and public at 15:00 Asia/Shanghai), so data genuinely    #
+# available before the midnight boundary passes PitGuard honestly, while       #
+# intraday ticks under that boundary stay typed-refused.                       #
+#                                                                             #
+# Recorded correction (verified at source, and it drives the shape below):     #
+# PitGuard is ALL-OR-NOTHING, not per-row — ONE future candidate raises        #
+# FutureDataRefused for the WHOLE batch (data/pit.py:485-540) and the reviewed #
+# dispatch re-raises it unchanged (data/registry.py:704-708). Emitting the     #
+# settled projection *in addition to* the same row's live tick would therefore #
+# refuse every intraday read, and the ruling's own exit criterion (pm's row    #
+# completes a REAL read over settled data) would be unreachable. The settled   #
+# projection therefore SUPERSEDES that row's live candidate; a row with no     #
+# settled projection still yields the live candidate unchanged, which the      #
+# guard then refuses honestly.                                                 #
+# =========================================================================== #
+#: 2026-07-15 16:00Z == 2026-07-16 00:00 Asia/Shanghai — the session-midnight
+#: as_of the production L2-b world freezes for a whole session.
+MIDNIGHT_AS_OF = datetime(2026, 7, 15, 16, 0, tzinfo=UTC)
+#: 2026-07-16 02:30Z == 2026-07-16 10:30 Asia/Shanghai — an intraday pull, i.e.
+#: AFTER that boundary (the structural reason a live tick can never pass it).
+INTRADAY_PULL = datetime(2026, 7, 16, 2, 30, tzinfo=UTC)
+#: 2026-07-15 07:00Z == 2026-07-15 15:00 Asia/Shanghai — the previous session's
+#: close: the settled projection's own availability instant.
+SETTLED_AT = datetime(2026, 7, 15, 7, 0, tzinfo=UTC)
+PREV_SESSION_DATE = "2026-07-15"
+SETTLED_CLOSE = 1470.0
+
+
+def _online_pulled(dt: datetime) -> datetime:
+    """The availability the LIVE candidate carries for a pull at ``dt``."""
+    return dt.astimezone(UTC)
+
+
+def _snapshot_params(as_of: datetime) -> dict:
+    return {"symbols": ({"code": "600519", "exchange": "SH", "board": "main"},),
+            "as_of": as_of.isoformat()}
+
+
+def _quote_row(*, prev_session_date=PREV_SESSION_DATE, close_key="prev_close"):
+    """A tencent_realtime_quote-shaped row: intraday fields + the settled close."""
+    row = {"symbol": "sh600519", "code": "600519", "name": "MAOTAI",
+           "price": 1487.3, close_key: SETTLED_CLOSE, "open": 1475.0,
+           "high": 1490.0, "low": 1468.0, "change_pct": 1.18}
+    if prev_session_date is not None:
+        row["prev_close_date"] = prev_session_date
+    return row
+
+
+def _quote_env(*, pulled_at=INTRADAY_PULL, **kw):
+    return _ok_env(items=[_quote_row(**kw)], pulled_at=_pulled(pulled_at))
+
+
+def _quote_world(schema_registry, env, *, method_id="verified_snapshot", params=None):
+    return _OnlineWorld(
+        schema_registry, method_id=method_id,
+        params=params if params is not None else _snapshot_params(MIDNIGHT_AS_OF),
+        probe_stub=_ProbeStub(env), clock=_FrozenClock(MIDNIGHT_AS_OF),
+        as_of=MIDNIGHT_AS_OF)
+
+
+class _CompletingGateway(_FallbackGateway):
+    """A gateway that CAN finalize a success (the base asserts against one)."""
+
+    def __init__(self, sources, sink):
+        super().__init__(sources, sink)
+        self.finalized: list = []
+
+    def finalize_success(self, pending, *, request_ref, result_ref, request_digest,
+                         result_digest):
+        self.finalized.append((pending.source_ref.id, result_digest))
+        return None  # DataReadOutcome.tool_call_record is Optional
+
+
+def _dispatch(world, schema_registry, gateway):
+    sink = _audit_sink()
+    return dispatch(
+        world.req, invocation_scope=world.scope, ctx=world.ctx, routing=world.routing,
+        manifest=world.manifest, registry=world.registry, schema_registry=schema_registry,
+        resolved_policy=world.policy, gateway=gateway, evidence_writer=_FakeWriter(),
+        payload_reader=None, refusal_audit_sink=sink, cache=_NullCache(),
+        clock=_FrozenClock(world.as_of), calendar=CALENDAR)
+
+
+# =========================================================================== #
+# 9. the settled candidate: its OWN availability, settled fields ONLY          #
+# =========================================================================== #
+def test_verified_snapshot_emits_a_settled_candidate(schema_registry):
+    world = _quote_world(schema_registry, _quote_env())
+    cands = world.fetch().candidates
+    assert len(cands) == 1
+    c = cands[0]
+
+    # (a) stamped at the settled session's close — its OWN availability instant,
+    #     NOT the pull instant.
+    assert c.available_at == SETTLED_AT
+    assert c.effective_at == SETTLED_AT
+    assert c.available_at != _online_pulled(INTRADAY_PULL)
+    assert c.ingested_at == MIDNIGHT_AS_OF          # the frozen as_of idiom, unchanged
+
+    # (b) ONLY settled fields — no intraday number may claim yesterday's availability.
+    p = c.raw_payload
+    assert set(p) == {"symbol", "name", "last_price", "prev_close", "settled_session_date"}
+    assert p["last_price"] == SETTLED_CLOSE
+    assert p["prev_close"] == SETTLED_CLOSE
+    assert p["settled_session_date"] == PREV_SESSION_DATE
+    assert p["name"] == "MAOTAI"
+    assert p["symbol"]["code"] == "600519" and p["symbol"]["exchange"] == "SH"
+    for intraday in ("price", "open", "high", "low", "change_pct"):
+        assert intraday not in p
+
+
+def test_settled_candidate_binds_the_real_nested_vendor_row(schema_registry):
+    """The real live_client item nests the vendor row under ``raw`` (and the real
+    tencent handler names the settled close ``last_close``) — bind both at source."""
+    item = {"source_id": "tencent_realtime_quote", "provider": "tencent",
+            "category": "market", "source_type": "quote_live", "title": "MAOTAI",
+            "publish_ts": "2026-07-16T10:30:00", "visible_ts": "2026-07-16T10:30:00",
+            "raw": _quote_row(close_key="last_close")}
+    world = _quote_world(schema_registry,
+                         _ok_env(items=[item], pulled_at=_pulled(INTRADAY_PULL)))
+    c = world.fetch().candidates[0]
+    assert c.available_at == SETTLED_AT
+    assert c.raw_payload["last_price"] == SETTLED_CLOSE
+    assert c.raw_payload["settled_session_date"] == PREV_SESSION_DATE
+    assert c.raw_payload["name"] == "MAOTAI"
+
+
+# =========================================================================== #
+# 10. THE PARTITION, through the REAL Phase-3 dispatch                         #
+# =========================================================================== #
+def test_settled_row_completes_a_real_read_while_ticks_refuse(schema_registry):
+    """Task 9 Step 4's exact shape: under a MIDNIGHT as_of and an INTRADAY pull a
+    settled-bearing row completes a real OK read; a tick-only row refuses loud."""
+    # (a) settled-bearing row -> the read COMPLETES over settled data.
+    world = _quote_world(schema_registry, _quote_env())
+    gateway = _CompletingGateway({world.src_ref.id: world.adapter.fetch}, _audit_sink())
+    outcome = _dispatch(world, schema_registry, gateway)
+    assert outcome.result.status is DataStatus.OK
+    assert outcome.result.pit_audit.guard_result == "passed"
+    assert outcome.result.pit_audit.as_of == MIDNIGHT_AS_OF
+    assert outcome.result.pit_audit.latest_available_at == SETTLED_AT
+    row = outcome.result.data.rows[0]
+    assert row.available_at == SETTLED_AT            # available_at <= ctx.as_of
+    assert row.available_at <= world.ctx.as_of
+    assert row.last_price == SETTLED_CLOSE
+    assert row.symbol.code == "600519"
+    assert len(gateway.finalized) == 1
+
+    # (b) tick-only row (no settled projection) -> honest typed refusal, no fabrication.
+    tick = _quote_world(schema_registry, _quote_env(prev_session_date=None))
+    tick_gw = _CompletingGateway({tick.src_ref.id: tick.adapter.fetch}, _audit_sink())
+    with pytest.raises(FutureDataRefused) as exc:
+        _dispatch(tick, schema_registry, tick_gw)
+    assert exc.value.future_rows == 1
+    assert tick_gw.finalized == []
+
+
+# =========================================================================== #
+# 11. no usable previous-session date -> NO settled candidate (never guess)    #
+# =========================================================================== #
+def test_no_prev_session_date_never_guesses_a_settled_stamp(schema_registry):
+    world = _quote_world(schema_registry, _quote_env(prev_session_date=None))
+    cands = world.fetch().candidates
+    assert len(cands) == 1
+    c = cands[0]
+    # the LIVE candidate stands, unchanged: available_at == the envelope pulled_at.
+    assert c.available_at == _online_pulled(INTRADAY_PULL)
+    assert c.raw_payload["price"] == 1487.3         # the live projection, untouched
+    assert "settled_session_date" not in c.raw_payload
+    # ... and the guard refuses it honestly under the midnight boundary.
+    with pytest.raises(FutureDataRefused):
+        world.check()
+
+    # an UNPARSEABLE date is equally never guessed at.
+    bad = _quote_world(schema_registry, _quote_env(prev_session_date="last friday"))
+    bc = bad.fetch().candidates[0]
+    assert bc.available_at == _online_pulled(INTRADAY_PULL)
+    assert "settled_session_date" not in bc.raw_payload
+
+
+# =========================================================================== #
+# 12. scope pin: the settled projection is verified_snapshot ONLY              #
+# =========================================================================== #
+@pytest.mark.parametrize("method_id", ["news", "ohlcv"])
+def test_settled_projection_is_verified_snapshot_only(schema_registry, method_id):
+    params = (_snapshot_params(MIDNIGHT_AS_OF) if method_id == "news" else
+              {"symbol": {"code": "600519", "exchange": "SH", "board": "main"},
+               "start": "2026-07-16T00:00:00+00:00", "end": "2026-07-16T00:00:00+00:00"})
+    world = _quote_world(schema_registry, _quote_env(), method_id=method_id, params=params)
+    c = world.fetch().candidates[0]
+    assert c.available_at == _online_pulled(INTRADAY_PULL)   # pulled_at, not settled
+    assert "settled_session_date" not in c.raw_payload
