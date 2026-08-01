@@ -27,7 +27,9 @@ The four assembly surfaces
   :class:`CatalogRuntime` through the Phase-2 builder, and registers
   deterministic handler factories through the reviewed
   :class:`TrustedFactoryRegistry` mechanism (Task 11 registers the ``cand.*``
-  handlers here). **E1 correction, recorded:** the brief sketched
+  handlers here; L2-b Task 6 registers the two ``pv.*`` aux handlers by
+  default, from ``pipeline/pv_aux.py``). **E1 correction, recorded:** the
+  brief sketched
   ``(catalog_snapshot, *, registry, handler_registry) -> CatalogRuntime``, but
   the implemented :class:`TrustedFactoryRegistry` is constructed FROM the built
   runtime (catalog_runtime.py:437) and its registrations must travel with the
@@ -142,6 +144,7 @@ from guanlan_v2.orchestration.plan_presets import (
     PlanPresetRegistry,
     load_preset_registry,
 )
+from guanlan_v2.orchestration.pipeline import pv_aux as _pv_aux
 from guanlan_v2.orchestration.pool import ArtifactPool
 from guanlan_v2.orchestration.refs import ContentRef, SchemaRef, TypedPayloadRef
 from guanlan_v2.orchestration.runtime_contracts import default_audit_detail_registry
@@ -398,6 +401,11 @@ def _catalog_handler_ref(
     return entries[0].ref
 
 
+def _handler_material_ids(catalog_snapshot: WorkerCatalogSnapshot) -> set[str]:
+    """Every ``kind='handler'`` material id this snapshot actually seals."""
+    return {e.ref.id for e in catalog_snapshot.content_manifest if e.kind == "handler"}
+
+
 def build_production_catalog_runtime(
     catalog_snapshot: WorkerCatalogSnapshot,
     *,
@@ -412,6 +420,24 @@ def build_production_catalog_runtime(
     :meth:`TrustedFactoryRegistry.register_handler` — an off-catalog id or a
     rebind refuses upstream, never here. Task 11 registers the ``cand.*``
     handlers through ``handler_registry``.
+
+    **L2-b Task 6 — the two pv aux seats are registered BY DEFAULT.** Their
+    trusted wrapper factories (``pipeline/pv_aux.py``) close the Task-0 D-E gap
+    that killed ``pv.price_action`` / ``pv.microstructure`` at an unbound
+    factory, so every production caller of this function — ``live_decide``,
+    ``pipeline.api``, ``lane0_driver``, all of which pass no
+    ``handler_registry`` — gets them without a second wiring. Two deliberate
+    properties:
+
+    * an explicit ``handler_registry`` entry for the same id **wins** (the
+      default is skipped, never registered beside it — ``register_handler``
+      refuses a rebind, so a scripted double would be a hard failure rather
+      than an override);
+    * a snapshot that does not SEAL the material gets no binding at all (the
+      pilot lineage, the Phase-10 screening catalogs). A phantom registration
+      would be an off-catalog handler, which ``_catalog_handler_ref`` refuses
+      by design — this is the honest complement to that refusal, not a
+      silencing of it.
     """
     source = (
         material_source
@@ -421,6 +447,11 @@ def build_production_catalog_runtime(
     runtime = CatalogRuntime.build(catalog_snapshot, source)
     factories = TrustedFactoryRegistry(runtime)
     registrations = dict(handler_registry or {})
+    sealed_handler_ids = _handler_material_ids(catalog_snapshot)
+    for handler_id, factory in _pv_aux.pv_aux_handler_registry().items():
+        if handler_id in registrations or handler_id not in sealed_handler_ids:
+            continue
+        registrations[handler_id] = factory
     for handler_id in sorted(registrations):
         factories.register_handler(
             _catalog_handler_ref(catalog_snapshot, handler_id),

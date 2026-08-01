@@ -741,21 +741,40 @@ class TestDDManifestPersistability:
 # D-E: the deterministic-handler registration ABI + the pv gap                  #
 # =========================================================================== #
 class TestDEDeterministicHandlerABI:
-    def test_pv_handler_materials_exist_but_have_no_production_registration(
+    def test_pv_handler_materials_carry_the_production_registration(
             self, snap, bundle):
-        """``handler.pv.price_action`` / ``handler.pv.microstructure`` EXIST as
-        sealed catalog handler materials (registration via the Task-11
-        ``handler_registry`` idiom is therefore possible without new bytes),
-        and the RAW production bundle — exactly live_decide's
+        """CONSCIOUS FLIP (L2-b Task 6 — the flip this pin chartered by name).
+
+        PRE-FLIP (recorded): ``handler.pv.price_action`` /
+        ``handler.pv.microstructure`` existed as sealed catalog handler
+        materials, and the RAW production bundle — exactly live_decide's
         ``build_production_catalog_runtime(snapshot)`` with NO
-        ``handler_registry`` — binds NO factory for either (the expected D-E
-        gap Task 6 closes)."""
+        ``handler_registry`` — bound NO factory for either, so
+        ``bundle.factories.handler_factory(ref)`` raised
+        ``CatalogMaterialError: no handler factory bound``.  That was the
+        expected D-E gap, and this pin's docstring named Task 6 as the task
+        that closes it.
+
+        POST-FLIP: the materials still exist unchanged (asserted below — no new
+        bytes, same ids at version 1), and the SAME raw bundle now resolves a
+        trusted factory for both, from ``pipeline/pv_aux.py``.  The pre-flip
+        refusal text is asserted ABSENT so the flip cannot be satisfied by a
+        weaker binding, and the ``handler_registry``-free call shape in
+        live_decide is re-pinned: the closure had to reach production without a
+        second wiring."""
+        from guanlan_v2.orchestration.pipeline import pv_aux as PV
+
         for hid in ("handler.pv.price_action", "handler.pv.microstructure"):
             ref = _catalog_handler_ref(snap, hid)
             assert ref.id == hid and ref.version == "1"
-            with pytest.raises(CatalogMaterialError,
-                               match="no handler factory bound"):
-                bundle.factories.handler_factory(ref)
+            factory = bundle.factories.handler_factory(ref)
+            assert callable(factory)
+        assert set(PV.pv_aux_handler_registry()) == {
+            "handler.pv.price_action", "handler.pv.microstructure"}
+        # the pre-flip refusal is now reachable only for an id nothing bound.
+        with pytest.raises(CatalogMaterialError, match="no handler factory bound"):
+            bundle.factories.handler_factory(
+                _catalog_handler_ref(snap, "handler.quant.factor"))
         # live_decide's deep bundle passes no handler_registry, by source:
         assert "build_production_catalog_runtime(snapshot)" in inspect.getsource(LD)
 
