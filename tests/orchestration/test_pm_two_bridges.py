@@ -43,12 +43,28 @@ EVERY active bridge. Two rulings close it:
   loudly at bridge EXECUTION until L2-b binds the production world — the
   chartered one-train posture (9999 deploys only after L2-b).
 
-The pm behavioural pins below are ORDER-CONDITIONAL (seam review): they
-assert the worldless shapes while ``WorldlessDataBridgeProvider`` is the
-incumbent registered at ``phase3_data_surface().provider_ref`` and SKIP
-otherwise — L2-b (Task 4 registration supersede + Task 5, the L1<->L2-b
-integration seam) flips them again to the real-read semantics under its
-correction clause, never reddening them by surprise.
+**L2-b Task 4 — the registration supersede (conscious flip, both directions
+recorded).** ``build_production_bindings`` no longer calls
+``register_worldless_data_provider``: the ONE recipe at the sealed
+``bridge.data_runtime.provider@1`` identity is now
+``adapters/data_world.py::register_production_data_provider``, so the REGISTERED
+incumbent is ``ProductionDataProvider`` over a real per-run
+``DataRuntimeWorld``. Two consequences are pinned below:
+
+* the seam pins (``TestTheProductionRegistrationSeam``) assert
+  ``ProductionDataProvider`` — pre-flip they asserted
+  ``WorldlessDataBridgeProvider``;
+* the pv aux nodes FREEZE the catalog-licensed EMPTY contribution instead of
+  refusing loudly (``TestFullTrunkShape``) — the analyzer summed 0/0 bounds
+  over zero prefetch rows, which is exactly what an empty completed
+  ``BridgeContribution`` licenses. Shape 1's fate was chartered as L2-b's
+  conscious flip and this is it.
+
+The worldless CLASS is NOT deleted here (Task 5 deletes it when the per-run
+``_SubjectScopedFactories`` view stops constructing it), so its unit shapes stay
+pinned — but only through the explicitly named ``_worldless_registered_factories``
+helper and the ``_skip_unless_worldless_incumbent`` guard, never as "what
+production registers".
 
 Everything runs against the REAL sealed Phase-9 catalog through the REAL
 production assembly; zero network, zero LLM, zero ``var/`` writes.
@@ -63,6 +79,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import guanlan_v2.orchestration.adapters.data_world as DW
 import guanlan_v2.orchestration.bootstrap as bs
 import guanlan_v2.orchestration.data.runtime as RT
 import guanlan_v2.orchestration.memory.runtime as MR
@@ -74,6 +91,7 @@ from guanlan_v2.orchestration.data.catalog import (
     DataBridgePrefetchBinding,
     DataPrefetchOperation,
     ParamBinding,
+    data_capability_refs,
     phase3_data_surface,
     serialize_prefetch_binding,
 )
@@ -170,7 +188,7 @@ def env():
         approval_policy=ApprovalPolicy.REQUIRED)
     return {
         "registry": registry, "snapshot": snapshot, "context": context,
-        "ctx_ref": ctx_ref, "request": request,
+        "ctx_ref": ctx_ref, "request": request, "stores": stores,
     }
 
 
@@ -235,37 +253,68 @@ def _resolver(runtime, draft, snapshot, node_id: str):
         runtime=runtime, node=node, worker=worker, sequencer=sequencer)
 
 
-def _production_registered_factories(bundle, env, *, stores=None,
-                                     subject_params=None):
+def _production_registered_factories(bundle, env):
     """EXACTLY the three reviewed recipes ``build_production_bindings`` calls,
     on a fresh registry over the same sealed runtime (the seam test below
     proves production calls these very recipes on the runner's bundle).
 
-    ``subject_params`` mirrors the L1 seam: production's process-level call
-    stays UNBOUND (None); the BOUND registration models what L1 Task 4's
-    per-run subject-scoped factories view hands the executor."""
+    CONSCIOUS FLIP (L2-b Task 4): the data slot was
+    ``RT.register_worldless_data_provider(factories=…, subject_params=…)``; it
+    is now the world-bound ``DW.register_production_data_provider``. The
+    ``subject_params`` knob went with it — ``ProductionDataProvider`` grows its
+    run-subject source at Task 5, and until then the per-run view (not this
+    process-level recipe) is where a projection is bound.
+
+    The memory half keeps its POISONED stores default (its rowless branch must
+    touch nothing); the data half is handed the module env's real stores,
+    because its per-run ``world_for`` genuinely reads the admitted snapshot and
+    the manifest through them."""
     factories = TrustedFactoryRegistry(bundle.runtime)
     bs.register_lane0_experience_factories(
         factories=factories, catalog=bs.load_lane0_catalog(), pool=None,
         registry=env["registry"], experience_views=(),
         experience_scaler=None, as_of=NOW)
     MR.register_phase3_memory_provider_factory(
-        factories=factories,
-        stores=stores if stores is not None else _PoisonedStores())
+        factories=factories, stores=_PoisonedStores())
+    DW.register_production_data_provider(
+        factories=factories, stores=env["stores"],
+        schema_resolver=env["stores"].resolver, clock=_FixedClock(),
+        catalog_runtime=bundle.runtime)
+    return factories
+
+
+def _worldless_registered_factories(bundle, env, *, subject_params=None):
+    """The L1 incumbent's registration, kept ALIVE for the surviving-class pins.
+
+    L2-b Task 4 superseded this recipe in production (see
+    :func:`_production_registered_factories`), but the class itself lives until
+    Task 5 deletes it — the per-run ``_SubjectScopedFactories`` view still
+    constructs it. The worldless-shape pins therefore drive it explicitly
+    through THIS helper, so nothing in the file can be misread as "what
+    production registers", and they die with the class at Task 5."""
+    factories = TrustedFactoryRegistry(bundle.runtime)
+    bs.register_lane0_experience_factories(
+        factories=factories, catalog=bs.load_lane0_catalog(), pool=None,
+        registry=env["registry"], experience_views=(),
+        experience_scaler=None, as_of=NOW)
+    MR.register_phase3_memory_provider_factory(
+        factories=factories, stores=_PoisonedStores())
     RT.register_worldless_data_provider(
         factories=factories, subject_params=subject_params)
     return factories
 
 
 def _skip_unless_worldless_incumbent(factories):
-    """ORDER-CONDITIONAL GUARD (L1 plan Task 3, seam review): the pm
-    behavioural pins assert the WORLDLESS shapes — the L1-only tree state.
-    L2-b (Task 4 registration supersede + Task 5, the L1<->L2-b integration
-    seam) consciously flips them AGAIN to the real-read semantics under its
-    correction clause, which names both provider classes and both pin sets.
-    Guarding on the provider class actually registered at
-    ``phase3_data_surface().provider_ref`` means L2-b's landing flips these
-    pins consciously (skip → rewrite), never reddens them by surprise.
+    """ORDER-CONDITIONAL GUARD, narrowed by L2-b Task 4.
+
+    Pre-flip it guarded "what production registers"; Task 4 flipped that to the
+    world-bound provider, so the guard now serves only the pins that drive the
+    SURVIVING worldless class — through ``_worldless_registered_factories`` or
+    through the per-run ``_SubjectScopedFactories`` view whose override factory
+    Task 5 re-targets. It reads the provider class actually bound at
+    ``phase3_data_surface().provider_ref`` on the registry it is handed, so
+    Task 5's landing flips those pins consciously (skip → rewrite / delete),
+    never reddens them by surprise.
 
     The probe CONSTRUCTS a provider from SimpleNamespace fakes to read its
     class; a successor factory that VALIDATES its arguments at construction
@@ -377,7 +426,20 @@ class TestTheProductionRegistrationSeam:
            runner`` — by object identity, so the half-wired-kwarg defect class
            (accepted but dropped, the campaign's signature catch) reddens
            here — and its default stays an honest ``None`` (the process-level
-           UNBOUND posture).
+           UNBOUND posture);
+        5. (L2-b Task 4) the data provider bound on that bundle is the
+           world-bound ``ProductionDataProvider`` — the CONSCIOUS FLIP of the
+           pre-flip ``isinstance(provider, RT.WorldlessDataBridgeProvider)``
+           assertion — and all SEVEN data capability backends resolve on the
+           SAME registry to the ONE ``production_data_backend()`` instance
+           (gate D-A: the per-invocation ``lambda **kw`` shape hands the one
+           thread-confined backend to every concurrent node thread);
+        6. (L2-b Task 4) REGISTRATION PRECEDES BINDING RETURN: at the moment
+           ``make_orchestrated_decide`` is handed the bindings — i.e. after
+           ``build_production_bindings`` returned — the sealed data identity is
+           ALREADY bound on the bundle. A lazily-registered provider would
+           leave a window in which a lease could be drawn against an unbound
+           bridge (the burned-lease precedent).
         """
         from guanlan_v2 import orch_store_status as status_mod
         from guanlan_v2.orchestration.adapters import durable as durable_mod
@@ -418,6 +480,11 @@ class TestTheProductionRegistrationSeam:
 
         def spy_make(*, fast_decide, bindings):
             captured["bindings"] = bindings
+            # (6) ordering proof: build_production_bindings has RETURNED by the
+            # time this runs, so the sealed data identity must already resolve.
+            captured["data_bound_at_return"] = bool(
+                bundles and bundles[0].factories.handler_factory(
+                    phase3_data_surface().provider_ref))
             return real_make(fast_decide=fast_decide, bindings=bindings)
 
         monkeypatch.setattr(live_decide, "make_orchestrated_decide", spy_make)
@@ -426,16 +493,28 @@ class TestTheProductionRegistrationSeam:
         assert callable(fn)
         assert len(bundles) == 1, "exactly ONE production bundle per binding build"
         built = bundles[0]
+        assert captured["data_bound_at_return"] is True, (
+            "the data provider must be registered DURING binding construction; "
+            "a lazy registration leaves a window in which a lease could be "
+            "drawn against an unbound bridge")
 
         data_factory = built.factories.handler_factory(
             phase3_data_surface().provider_ref)
         provider = data_factory(
             bridge=SimpleNamespace(bridge_id="data.runtime", priority=100),
             summary=SimpleNamespace(summary_digest="s" * 64))
-        # conscious flip (L1 Task 3): the registered incumbent is the
-        # worldless provider; L2-b Task 4 re-targets this pin to the
-        # world-bound production provider per its correction clause.
-        assert isinstance(provider, RT.WorldlessDataBridgeProvider)
+        # CONSCIOUS FLIP (L2-b Task 4). Pre-flip:
+        #     assert isinstance(provider, RT.WorldlessDataBridgeProvider)
+        assert isinstance(provider, DW.ProductionDataProvider)
+        # (5) the seven data capability backends, on the SAME registry, all the
+        # ONE thread-confined instance (gate D-A's per-invocation shape).
+        caps = data_capability_refs()
+        assert len(caps) == 7
+        one = DW.production_data_backend()
+        for _method_id, cap_ref in sorted(caps.items()):
+            factory = built.factories.capability_backend_factory(cap_ref)
+            assert factory(capability_ref=cap_ref) is one
+            assert factory(capability_ref=cap_ref) is one  # per invocation
         mem_factory = built.factories.handler_factory(
             phase3_memory_surface().provider_ref)
         mem_provider = mem_factory(
@@ -499,9 +578,59 @@ class TestTheProductionRegistrationSeam:
         assert rb_mem.config_bytes == serialize_memory_prefetch_binding(
             phase3_memory_surface().prefetch_binding)
 
+    def test_a_broken_data_recipe_kills_the_deep_lane_at_binding_construction(
+            self, monkeypatch, tmp_path):
+        """L2-b Task 4 (Task-3 review Minor 2 — the burned-lease precedent):
+        a data-world recipe that cannot be built (missing calendar material,
+        drifted material digest, unsealed registry) must kill
+        ``build_production_bindings`` AT BINDING CONSTRUCTION — loudly,
+        unmasked, before any bindings object exists and therefore before any
+        coordinator, any admission, any ``register_and_try_lease``, any lease.
+
+        The precedent is the 2026-07-31 live-store defect: an analyzer-binding
+        refusal that fired inside ``plan_runner_factory`` consumed a human
+        ``ApprovalLease`` and executed nothing. A recipe failure must never buy
+        that trade again.
+        """
+        from guanlan_v2 import orch_store_status as status_mod
+        from guanlan_v2.orchestration.adapters import durable as durable_mod
+        from guanlan_v2.orchestration.adapters.durable import (
+            build_durable_runtime_stores,
+        )
+        from guanlan_v2.orchestration.data.errors import RoutingConfigurationError
+        from guanlan_v2.orchestration.pipeline import live_decide
+
+        stores = build_durable_runtime_stores(tmp_path / "orch")
+        monkeypatch.setattr(durable_mod, "process_durable_stores", lambda: stores)
+        monkeypatch.setattr(status_mod, "orchestration_store_bound", lambda: True)
+
+        boom = RoutingConfigurationError(
+            "committed calendar material missing or unreadable at <probe>")
+
+        def broken_recipe():
+            raise boom
+
+        monkeypatch.setattr(DW, "production_data_recipe", broken_recipe)
+
+        # the bindings object itself is the thing a lease could ever hang off:
+        # if it is ever CONSTRUCTED the failure was not at binding construction.
+        built: list = []
+        real_bindings = live_decide.DeepDecideBindings
+        monkeypatch.setattr(
+            live_decide, "DeepDecideBindings",
+            lambda **kw: (built.append(kw) or real_bindings(**kw)))
+
+        with pytest.raises(RoutingConfigurationError) as exc:
+            live_decide.build_production_bindings()
+        assert exc.value is boom, "the recipe failure must propagate UNMASKED"
+        assert built == [], (
+            "binding construction completed past the broken data recipe; the "
+            "deep lane must die AT the registration, before any bindings "
+            "object (hence any coordinator / admission / lease) exists")
+
 
 # =========================================================================== #
-# 2. pm PREPARES; its data bridge now REFUSES LOUDLY (L1 Task 3 conscious flip) #
+# 2. pm PREPARES; the SURVIVING worldless class's refusal shapes (die Task 5)   #
 # =========================================================================== #
 class TestPmDataBridgeRefusesLoudly:
     """CONSCIOUS FLIP of the empty-complete pins (L1 Task 3): pm no longer
@@ -509,11 +638,22 @@ class TestPmDataBridgeRefusesLoudly:
     RESOLVABLE under the subject projection, so the worldless provider
     refuses at bridge execution (unbound → the runner-seam shape; bound →
     the resolved-but-no-world shape). The memory rowless-empty pins are
-    UNTOUCHED (TestPmMemoryBranch)."""
+    UNTOUCHED (TestPmMemoryBranch).
+
+    L2-b Task 4 SCOPE NOTE: production no longer registers this provider (see
+    ``TestTheProductionRegistrationSeam``), but the CLASS is alive until Task 5
+    re-targets the per-run view and deletes it — so the two refusal-shape pins
+    below drive it through the explicitly named
+    :func:`_worldless_registered_factories` and stay guarded. They die with the
+    class at Task 5. Only the resolver-construction pin (which is about the
+    production posture, not the provider's semantics) moved to the production
+    registration."""
 
     def test_pm_resolver_now_constructs_with_both_bridges(
             self, bundle, view, reduced, env):
-        """THE FIX at the exact live seam (was: the control's PreflightError)."""
+        """THE FIX at the exact live seam (was: the control's PreflightError).
+        Driven over the L2-b PRODUCTION registration — the resolver's required
+        set is a registration fact, not a provider-semantics fact."""
         factories = _production_registered_factories(bundle, env)
         runtime = _exec_runtime(bundle, view, reduced.report, factories=factories)
         resolver = _resolver(runtime, reduced.draft, env["snapshot"], "pm")
@@ -525,7 +665,7 @@ class TestPmDataBridgeRefusesLoudly:
         2 through the REAL resolver now refuses (shape 3 — the process-level
         registration is unbound), with ZERO gateway begins, zero finalized
         records, zero refusals, zero evidence writes."""
-        factories = _production_registered_factories(bundle, env)
+        factories = _worldless_registered_factories(bundle, env)
         _skip_unless_worldless_incumbent(factories)
         runtime = _exec_runtime(bundle, view, reduced.report, factories=factories)
         node = next(n for n in reduced.draft.nodes if n.id == "pm")
@@ -566,7 +706,7 @@ class TestPmDataBridgeRefusesLoudly:
         own code and as-of + the row's method id + the L2-b naming — and the
         gateway still sees ZERO begins (the proof is pure)."""
         sp = RT.SubjectParams.project(code="833509", as_of=NOW)
-        factories = _production_registered_factories(
+        factories = _worldless_registered_factories(
             bundle, env, subject_params=sp)
         _skip_unless_worldless_incumbent(factories)
         runtime = _exec_runtime(bundle, view, reduced.report, factories=factories)
@@ -868,12 +1008,13 @@ class TestFullTrunkShape:
             self, bundle, view, reduced, env):
         """The bridge-layer resolver shape (unchanged facts): research-mgr →
         the empty experience contribution; pm → both bridges construct;
-        trader → no bridge at all. CONSCIOUS NOTE (L1 Task 3, was: 'three LLM
-        seats left on the trunk' = 6 LLM invocations): between L1 and L2-b a
-        production deep run settles the 4 trunk seats before pm, then pm
-        FAILS loudly at bridge execution (the resolved-but-no-world shape,
-        zero pm LLM spend) and trader is blocked honestly behind it — the
-        chartered one-train posture; 9999 deploys only after L2-b."""
+        trader → no bridge at all. CONSCIOUS NOTE (L2-b Task 4, was L1 Task 3's
+        'pm FAILS loudly at bridge execution'): with the world-bound provider
+        registered, pm's rows-present arm now resolves a real per-run
+        ``DataRuntimeWorld``; it still cannot COMPLETE until Task 5 threads the
+        run-subject source (the real session's ``_assemble_params`` refuses at
+        the runner seam), so trader stays blocked honestly behind it. The
+        resolver SHAPE below is unchanged by either flip."""
         factories = _production_registered_factories(bundle, env)
         runtime = _exec_runtime(bundle, view, reduced.report, factories=factories)
         shapes = {
@@ -886,15 +1027,25 @@ class TestFullTrunkShape:
             "trader": (),
         }
 
-    def test_the_aux_nodes_prepare_but_refuse_loudly_at_execution(
+    def test_the_aux_nodes_freeze_the_catalog_licensed_empty(
             self, bundle, view, reduced, env):
-        """The pv aux nodes keep DEGRADING (the chartered L2-b gap keeps
-        firing) — at bridge execution (``bridge_execution_error``), shape 1's
-        UNCHANGED text. Order-conditional: shape 1's fate (loud vs
-        catalog-licensed EMPTY for rowless workers) is L2-b's conscious
-        flip, so this pin is guarded on the worldless incumbent."""
+        """CONSCIOUS FLIP (L2-b Task 4 — shape 1's chartered fate).
+
+        PRE-FLIP (recorded): both pv aux nodes kept DEGRADING — the worldless
+        provider raised ``DataRuntimeError`` matching ``"L2-b"`` at bridge
+        execution (``bridge_execution_error``), and this test asserted that
+        raise. POST-FLIP: the world-bound provider partitions on row COUNT
+        only, and the sealed prefetch binding carries NO row for either aux
+        worker, so the reviewed analyzer summed 0/0 bounds over them — an empty
+        completed ``BridgeContribution`` is exactly what the sealed summary
+        LICENSES. They now freeze the catalog-licensed EMPTY: no refusal, no
+        degradation, and (proven, not assumed) zero gateway, zero reader, zero
+        evidence writes — the world is not even resolved for a rowless worker.
+
+        This is NOT the retired dead-row empty-complete: that one completed
+        empty over a row that COULD have been read (a silenced outage). Here
+        there is no row at all."""
         factories = _production_registered_factories(bundle, env)
-        _skip_unless_worldless_incumbent(factories)
         runtime = _exec_runtime(bundle, view, reduced.report, factories=factories)
         for wid in ("pv.price_action", "pv.microstructure"):
             node = _node_for_worker(reduced.draft, wid)
@@ -906,12 +1057,38 @@ class TestFullTrunkShape:
             prepared = resolver.prepare_input(
                 plan=None, context_snapshot_ref=None,
                 evidence_writer=_ForbiddenEvidenceWriter())
-            with pytest.raises(RT.DataRuntimeError, match="L2-b"):
-                resolver.open_execution(
-                    plan=None, prepared=prepared, input_snapshot=None,
-                    capability_gateway=None,
-                    evidence_writer=_ForbiddenEvidenceWriter(), reader=None,
-                    kind=ExecutionKind.DETERMINISTIC)
+            contributions = resolver.open_execution(
+                plan=None, prepared=prepared, input_snapshot=None,
+                capability_gateway=None,
+                evidence_writer=_ForbiddenEvidenceWriter(), reader=None,
+                kind=ExecutionKind.DETERMINISTIC)
+            assert len(contributions) == 1
+            c = contributions[0]
+            assert c.bridge_id == "data.runtime"
+            assert c.tool_call_records == ()
+            assert c.data_result_refs == ()
+            assert c.direct_evidence_refs == ()
+            assert c.untrusted_blocks == ()
+
+    def test_the_live_failure_string_never_occurs_on_the_bound_path(
+            self, bundle, view, reduced, env):
+        """The NEGATIVE pin kept from the pre-flip control (L2-b Task 4): the
+        live ``deep-a06fd33840c0b3ee`` reason — the unbound-factory
+        ``PreflightError`` that killed pm, trader and both aux nodes — must
+        never occur once the production registration is bound, for ANY node of
+        the reduced graph. ``TestTheLiveFailureControl`` keeps proving it still
+        fires on a RAW bundle, so the string itself is not dead code."""
+        factories = _production_registered_factories(bundle, env)
+        runtime = _exec_runtime(bundle, view, reduced.report, factories=factories)
+        for node in reduced.draft.nodes:
+            try:
+                _resolver(runtime, reduced.draft, env["snapshot"], node.id)
+            except W.PreflightError as exc:  # pragma: no cover - the assertion
+                pytest.fail(
+                    f"node {node.id!r} still refuses at bridge prepare with "
+                    f"{str(exc)!r}"
+                    + (" — THE live failure string" if str(exc) ==
+                       LIVE_PM_FAILURE_REASON else ""))
 
 
 # =========================================================================== #
@@ -939,7 +1116,13 @@ class TestThePerRunSubjectScopedView:
     ``worldless_data_provider_factory(subject_params)`` to the world-bound
     ``production_data_provider_factory(subject_params)`` and deletes the
     worldless names; the shape-2 pin below is guarded on the worldless
-    incumbent so that landing flips it consciously, never by surprise."""
+    incumbent so that landing flips it consciously, never by surprise.
+
+    L2-b Task 4 update (recorded): the BASE is now the world-bound production
+    registration (that flip landed here), while the VIEW's override factory is
+    still the worldless one — the residue Task 5 owns. The order-conditional
+    guard therefore probes the SCOPED view (what the run executes over), not
+    the base: probing the base would now skip a pin that is still live."""
 
     @pytest.fixture()
     def base(self, bundle, env):
@@ -961,9 +1144,9 @@ class TestThePerRunSubjectScopedView:
         run's own code — the F4 bound-registration pin, now driven through
         the ACTUAL Task-4 seam object instead of a modelled bound
         registration."""
-        _skip_unless_worldless_incumbent(base)
         sp = RT.SubjectParams.project(code="833509", as_of=NOW)
         scoped = self._scoped(base, sp)
+        _skip_unless_worldless_incumbent(scoped)
         runtime = _exec_runtime(bundle, view, reduced.report, factories=scoped)
         node = next(n for n in reduced.draft.nodes if n.id == "pm")
         worker = _worker_of(env, "dec.pm")
@@ -1008,8 +1191,9 @@ class TestThePerRunSubjectScopedView:
         assert scoped.handler_factory(exp_ref) is base.handler_factory(exp_ref)
         assert scoped.capability_backend_factory(lane0.capability_ref) is \
             base.capability_backend_factory(lane0.capability_ref)
-        # the sealed data ref is the ONE divergence: base holds the UNBOUND
-        # process-level factory, the view serves the run-BOUND one.
+        # the sealed data ref is the ONE divergence: the base holds the L2-b
+        # world-bound production factory, the view still serves the run-BOUND
+        # worldless one (the Task-5 residue).
         data_ref = phase3_data_surface().provider_ref
         assert scoped.handler_factory(data_ref) is not \
             base.handler_factory(data_ref)
@@ -1017,10 +1201,15 @@ class TestThePerRunSubjectScopedView:
             bridge=SimpleNamespace(bridge_id="data.runtime", priority=100),
             summary=SimpleNamespace(summary_digest="s" * 64))
         assert bound._subject_params is sp
-        unbound = base.handler_factory(data_ref)(
+        base_provider = base.handler_factory(data_ref)(
             bridge=SimpleNamespace(bridge_id="data.runtime", priority=100),
             summary=SimpleNamespace(summary_digest="s" * 64))
-        assert unbound._subject_params is None
+        # CONSCIOUS FLIP (L2-b Task 4). Pre-flip the base served the UNBOUND
+        # worldless provider and this asserted ``_subject_params is None``;
+        # the base now serves the world-bound production provider, which has
+        # no subject source at all until Task 5 gives it one.
+        assert isinstance(base_provider, DW.ProductionDataProvider)
+        assert not hasattr(base_provider, "_subject_params")
 
     def test_the_view_accepts_and_rejects_exactly_what_the_base_does(
             self, env, base):

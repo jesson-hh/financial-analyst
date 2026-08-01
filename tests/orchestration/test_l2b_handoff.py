@@ -12,11 +12,16 @@ the pin is the conscious-flip target of a named later task (recorded per test).
 
 Gate items (Task 0 Step 1):
 
-1.  Fact F pre-flip state + the L1 landing state (the declared-order gate):
-    ``data_runtime_provider_factory`` has no production caller; the registered
-    incumbent at ``phase3_data_surface().provider_ref`` is
-    ``WorldlessDataBridgeProvider``; the dead-row names exist nowhere in code;
-    the pm pins are L1's flipped worldless set.
+1.  Fact F + the landing state (the declared-order gate). **Consciously flipped
+    by L2-b Task 4** — pre-flip: ``data_runtime_provider_factory`` had no
+    production caller, the registered incumbent at
+    ``phase3_data_surface().provider_ref`` was ``WorldlessDataBridgeProvider``
+    and the pm pins were L1's flipped worldless set. Post-flip: the factory has
+    exactly ONE enumerated production caller
+    (``adapters/data_world.py``), the registered incumbent is
+    ``ProductionDataProvider``, and the pm pins are L2-b's production set (the
+    worldless ones survive, scoped, until Task 5 deletes the class). The
+    dead-row names still exist nowhere in code — that one did not move.
 2.  The route-equality obligation (``_frozen_route_for``).
 3.  The context-equality obligation (``_verify_context_binding``).
 4.  The ``LiveClientSource`` echo + its closed supported-method set.
@@ -38,6 +43,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import guanlan_v2.orchestration.adapters.data_world as DW
 import guanlan_v2.orchestration.data.runtime as RT
 import guanlan_v2.orchestration.pipeline.live_decide as LD
 import guanlan_v2.orchestration.worker as W
@@ -131,6 +137,13 @@ class _AdvancingClock:
         t = self._t
         self._t = self._t + timedelta(seconds=1)
         return t
+
+
+class _PoisonedStores:
+    """Registration must carry the stores/resolver, never touch them."""
+
+    def __getattr__(self, name):  # pragma: no cover - failing is the assertion
+        raise AssertionError(f"the registration recipe touched .{name}")
 
 
 class _SpyRecorder:
@@ -243,18 +256,20 @@ def p3_registry():
 
 
 # =========================================================================== #
-# 1. Fact F pre-flip state + the L1 landing state (the declared-order gate)     #
+# 1. Fact F + the landing state (the declared-order gate; flipped by Task 4)    #
 # =========================================================================== #
 class TestFactFAndL1LandingState:
-    def test_fact_f_data_runtime_provider_factory_has_no_production_caller(self):
-        """Fact F, re-pinned PRE-FLIP: the world-bound factory's only code
-        occurrence in ``guanlan_v2/orchestration`` is its own ``def``.
+    def test_fact_f_data_runtime_provider_factory_has_one_production_caller(self):
+        """Fact F, POST-FLIP (L2-b Task 4 — the flip this pin's pre-flip arm
+        named): the world-bound factory's code occurrences in
+        ``guanlan_v2/orchestration`` are its own ``def`` AND the ONE delegation
+        call in ``adapters/data_world.py`` (``ProductionDataProvider.
+        open_execution`` routes its rows-present session through the factory).
 
         The same discriminating AST idiom as ``test_data_catalog.py``'s pin
-        (prose neither satisfies nor trips it). L2-b Task 4 flips this pin
-        consciously to "the def AND the delegation call in
-        ``adapters/data_world.py``" — a production caller appearing any other
-        way is the RED arm.
+        (prose neither satisfies nor trips it). Pre-flip arm, recorded: the
+        only occurrence was ``["data/runtime.py"] == ["FunctionDef"]``. A
+        production caller appearing any OTHER way is the RED arm.
         """
         pkg = Path(RT.__file__).resolve().parent.parent
         assert pkg.name == "orchestration"
@@ -269,31 +284,47 @@ class TestFactFAndL1LandingState:
                 if named == "data_runtime_provider_factory":
                     refs.setdefault(
                         path.relative_to(pkg).as_posix(), []).append(type(n).__name__)
-        assert sorted(refs) == ["data/runtime.py"], (
+        assert sorted(refs) == ["adapters/data_world.py", "data/runtime.py"], (
             "data_runtime_provider_factory grew a production caller outside the "
             "L2-b Task 4 flip; re-pin consciously, never absorb")
         assert refs["data/runtime.py"] == ["FunctionDef"]
+        assert refs["adapters/data_world.py"] == ["alias", "Name"]
 
-    def test_l1_landing_state_worldless_incumbent_registered(self, bundle):
-        """The declared L1 -> L2-b order held: the ONE production registration
-        recipe binds ``WorldlessDataBridgeProvider`` (L1 Task 3's successor to
-        the retired dead-row provider) at the sealed provider identity, and
-        ``build_production_bindings`` calls exactly that recipe.
+    def test_l2b_landing_state_production_incumbent_registered(self, bundle):
+        """CONSCIOUS FLIP (L2-b Task 4; was
+        ``test_l1_landing_state_worldless_incumbent_registered``).
 
-        RED arm: had the pre-L1 incumbent still been registered, the isinstance
-        below reddens — the broken-train STOP of the plan's Task 0 item 1 (and
-        Task 4's correction clause then governs the supersede). L2-b Task 4
-        flips this pin consciously to ``ProductionDataProvider``.
+        Pre-flip arm, recorded: the ONE production registration recipe was
+        ``RT.register_worldless_data_provider`` and the incumbent constructed
+        at ``phase3_data_surface().provider_ref`` was
+        ``WorldlessDataBridgeProvider``; ``live_decide``'s source carried
+        ``register_worldless_data_provider(factories=bundle.factories)``.
+
+        Post-flip: ``build_production_bindings`` supersedes it with the ONE
+        world-bound recipe ``register_production_data_provider``, so the
+        incumbent is ``ProductionDataProvider``. The worldless CLASS still
+        exists (the per-run ``_SubjectScopedFactories`` view constructs it until
+        Task 5 re-targets that seam and deletes it) — this pin is about the
+        REGISTERED incumbent, which is the thing production executes over.
         """
         factories = TrustedFactoryRegistry(bundle.runtime)
-        RT.register_worldless_data_provider(factories=factories)
+        # the stores/resolver are carried into the per-run resolver, never
+        # touched at REGISTRATION — a poisoned pair proves it.
+        DW.register_production_data_provider(
+            factories=factories, stores=_PoisonedStores(),
+            schema_resolver=_PoisonedStores(),
+            clock=_FrozenClock(AS_OF), catalog_runtime=bundle.runtime)
         provider = factories.handler_factory(phase3_data_surface().provider_ref)(
             bridge=SimpleNamespace(bridge_id="data.runtime", priority=100),
             summary=SimpleNamespace(summary_digest="s" * 64))
-        assert isinstance(provider, RT.WorldlessDataBridgeProvider)
+        assert isinstance(provider, DW.ProductionDataProvider)
         # the production caller is the ONE-recipe seam (live_decide), by source:
         src = inspect.getsource(LD)
-        assert "register_worldless_data_provider(factories=bundle.factories)" in src
+        assert "register_production_data_provider(" in src
+        # the pre-flip CALL is gone (the name survives only in the registration
+        # block's recorded history, which is the point of a conscious flip).
+        assert "register_worldless_data_provider(factories=bundle.factories)" \
+            not in src
 
     def test_dead_row_names_exist_nowhere_in_code(self):
         """L1 deleted the dead-row provider AND its helpers; their fate was
@@ -313,22 +344,39 @@ class TestFactFAndL1LandingState:
             "the dead-row category was resurrected somewhere; its fate was "
             f"decided once, in L1: {hits}")
 
-    def test_pm_pins_are_the_l1_flipped_worldless_set(self):
-        """``test_pm_two_bridges.py`` arrives here already flipped by L1 to the
-        worldless shapes (subject-bound refusal / runner-seam refusal), guarded
-        order-conditionally on the registered incumbent. L2-b Tasks 4-5 flip
-        them AGAIN to the real-read semantics — this pin reddens then and is
-        rewritten in the same commit (conscious flip, both directions).
+    def test_pm_pins_are_the_l2b_flipped_production_set(self):
+        """CONSCIOUS FLIP (L2-b Task 4; was
+        ``test_pm_pins_are_the_l1_flipped_worldless_set``).
+
+        Pre-flip arm, recorded: ``test_pm_two_bridges.py`` carried L1's
+        worldless markers as the REGISTERED-incumbent shapes. Post-flip the
+        production registration is the incumbent there — the pm seam pins name
+        ``ProductionDataProvider`` and the pv-aux nodes freeze the
+        catalog-licensed EMPTY instead of refusing. The worldless markers
+        SURVIVE (the class is alive until Task 5 deletes it) but only under the
+        explicitly worldless helper/guard, so this pin now asserts BOTH: the
+        L2-b production markers are present, and the worldless ones are still
+        scoped to the surviving-class pins.
         """
         text = (_REPO_ROOT / "tests" / "orchestration"
                 / "test_pm_two_bridges.py").read_text(encoding="utf-8")
         for marker in (
-            "WorldlessDataBridgeProvider",
+            "ProductionDataProvider",
+            "_production_registered_factories",
+            "production_data_backend",
+            "catalog-licensed EMPTY",
+        ):
+            assert marker in text, f"L2-b's production pm pin marker missing: {marker!r}"
+        for marker in (
+            "_worldless_registered_factories",
             "_skip_unless_worldless_incumbent",
+            "WorldlessDataBridgeProvider",
             "params resolved from the run subject projection",
             "not bound at the runner seam",
         ):
-            assert marker in text, f"L1's worldless pm pin marker missing: {marker!r}"
+            assert marker in text, (
+                f"the surviving worldless-class pin scope vanished: {marker!r} "
+                "(the class dies at Task 5, not here)")
         for needle in _DEAD_ROW_NEEDLES:
             assert needle not in text
 

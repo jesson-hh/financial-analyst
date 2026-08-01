@@ -1087,6 +1087,11 @@ def build_production_bindings(*, preset_id: str | None = None) -> DeepDecideBind
     the wrapper degrades to the fast chain with an honest ``deep_outcome``.
     Nothing is faked.
 
+    HONEST STATE (L2-b Task 4 update): the ``data.runtime`` bridge is now bound
+    to a REAL production data world (``register_production_data_provider``, the
+    ONE recipe) instead of the worldless stopgap — see the registration block's
+    comment for what that changes, what still refuses, and the Task-5 residue.
+
     路线 A: ``preset_id`` defaults to :func:`resolve_deep_preset_id`, i.e. the
     ten-node preset above unless ``GUANLAN_SEATS_DEEP_PRESET=reduced`` says
     otherwise. The selection is resolved FIRST — before the store binding is even
@@ -1184,22 +1189,41 @@ def build_production_bindings(*, preset_id: str | None = None) -> DeepDecideBind
     # build_production_plan_runner._plan_executor → ExecutionRuntime executes
     # over. Memory: the one reviewed recipe over the sealed catalog materials —
     # the production prefetch binding has ZERO rows, so dec.pm takes the C3
-    # rowless branch (honest empty prefetch, stores untouched). Data: the
-    # WorldlessDataBridgeProvider (L1 Task 3 retired the dead-row
-    # empty-complete provider per its own tombstone: under the L1 subject
-    # projection the sealed dec.pm verified_snapshot row RESOLVES, so
-    # completing empty over it would be a silenced outage). EVERY rows-present
-    # shape now refuses loudly; this process-level registration stays UNBOUND
-    # (subject_params=None → the runner-seam refusal) until L1 Task 4's
-    # per-run subject-scoped factories view binds the run's projection.
-    # Between L1 and L2-b a production deep run's dec.pm fails loudly at
-    # bridge EXECUTION with the resolved-but-no-world reason — the chartered
-    # one-train posture (9999 deploys only after L2-b binds the production
-    # DataRuntimeWorld; L2-b Task 4 supersedes this registration). Pinned in
-    # test_pm_two_bridges.py; the successor tombstone lives on the provider
-    # class.
-    from guanlan_v2.orchestration.data.runtime import (
-        register_worldless_data_provider,
+    # rowless branch (honest empty prefetch, stores untouched).
+    #
+    # DATA — L2-b Task 4, the ONE-recipe supersede. This line used to bind the
+    # worldless stopgap (`register_worldless_data_provider`, L1 Task 3's
+    # successor to the retired dead-row empty-complete provider), whose every
+    # rows-present shape refused loudly because no production DataRuntimeWorld
+    # existed. L2-b built one, so the sealed bridge.data_runtime.provider@1
+    # identity is now bound to `register_production_data_provider` — the ONE
+    # recipe (adapters/data_world.py): the world-bound ProductionDataProvider
+    # plus all seven data capability backends on the ONE thread-confined
+    # `production_data_backend()`. A rowless worker (the two pv aux nodes)
+    # freezes the catalog-licensed EMPTY (the reviewed analyzer summed 0/0
+    # bounds over zero rows); a worker WITH rows resolves a real per-run world
+    # from its own admitted ContextSnapshot and runs the real Phase-3 session.
+    #
+    # AT BINDING CONSTRUCTION, deliberately: the recipe is built inside this
+    # call, so a broken data world (missing/tampered calendar material, drifted
+    # digest, unsealed registry) kills the deep lane HERE — at server startup,
+    # loudly, before any bindings object and therefore before any coordinator,
+    # any admission and any ApprovalLease exists. That is the burned-lease
+    # precedent recorded above: the 2026-07-31 analyzer-binding refusal fired
+    # after register_and_try_lease had consumed a human authorization and
+    # executed nothing. Never again for this class of failure.
+    #
+    # TASK-5 RESIDUE (honest, named): the per-run subject seam still hands out
+    # the WORLDLESS provider — assembly._plan_executor wraps bundle.factories
+    # in _SubjectScopedFactories over `worldless_data_provider_factory(
+    # subject_params)` when a run's projection is bound. Until Task 5
+    # re-targets that view to the world-bound factory (and deletes the
+    # worldless class), a subject-bound deep run still refuses at that seam,
+    # and a subject-LESS one refuses inside the real session's
+    # `_assemble_params`. Pinned in test_pm_two_bridges.py.
+    from guanlan_v2.orchestration.adapters.data_world import (
+        production_data_refusal_audit_sink,
+        register_production_data_provider,
     )
     from guanlan_v2.orchestration.memory.runtime import (
         register_phase3_memory_provider_factory,
@@ -1207,7 +1231,24 @@ def build_production_bindings(*, preset_id: str | None = None) -> DeepDecideBind
 
     register_phase3_memory_provider_factory(
         factories=bundle.factories, stores=stores)
-    register_worldless_data_provider(factories=bundle.factories)
+    # ONE data-aware refusal audit sink per BINDING SET (the
+    # ExperienceRetrievalBackend idiom): built once here and handed to every
+    # per-run world through the factory seam, AND to the plan runner as the
+    # capability gateway's sink. Two reasons it must be one object, not the
+    # per-world default:
+    #   * a fresh sink inside each world_for is unreachable — nothing outside
+    #     that world holds it, so the refusals it records reach no audit stream;
+    #   * a PitGuard candidate-stage refusal travels to the GATEWAY as a
+    #     DataFetchRefusalDetails@1 payload (data/registry.py's
+    #     _DispatchGuardRecorder → CapabilityGateway.reject), and the runner's
+    #     own default sink is built over the BARE base audit-detail registry,
+    #     which would answer UnknownAuditDetailSchema instead of recording it.
+    data_refusal_sink = production_data_refusal_audit_sink(clock)
+    register_production_data_provider(
+        factories=bundle.factories, stores=stores,
+        schema_resolver=stores.resolver, clock=clock,
+        catalog_runtime=bundle.runtime,
+        refusal_audit_sink_factory=lambda: data_refusal_sink)
     presets = load_phase10_preset_registry(PRODUCTION_PRESETS_DIR)
 
     def admission_factory(*, run_id, request, draft, context, approvals, run_budget):
@@ -1240,13 +1281,18 @@ def build_production_bindings(*, preset_id: str | None = None) -> DeepDecideBind
         # and dropped it would be the half-wired-kwarg defect class (pinned
         # by identity at the pm-two-bridges seam echo). Default None keeps
         # every subject-less caller on the process-level UNBOUND posture.
+        # refusal_sink (L2-b Task 4): the SAME data-aware sink the data worlds
+        # record through — one audit stream per binding set, and the only sink
+        # whose detail registry can validate a DataFetchRefusalDetails@1 that
+        # the data path routes through CapabilityGateway.reject.
         return build_production_plan_runner(
             stores=stores, catalog_snapshot=snapshot, registry=registry,
             gateway_factory=production_gateway_factory, admission=admission,
             lane_bindings=lane_bindings, run_context_factory=run_context_factory,
             request_id=request_id, clock=clock, runtime_registry_digest=rt_digest,
             runtime_limit=4, catalog=bundle, bridge_analyzers=bridge_analyzers,
-            prompt_assembler=prompt_assembler, subject_params=subject_params)
+            prompt_assembler=prompt_assembler, subject_params=subject_params,
+            refusal_sink=data_refusal_sink)
 
     if preset_id != DEEP_DECIDE_PRESET_ID:
         # LOUD on the server's own stderr, not just a logger nobody configured:

@@ -622,14 +622,24 @@ class TestVerifiedSnapshotRowRunnableOnlyUnderSubjectProjection:
         src = inspect.getsource(RT._DataRuntimeBridgeSession.freeze_for_execution)
         assert "_assemble_params(row, req.node)" in src
 
-    # -- why it has never fired: the bridge has no production caller --------- #
-    def test_the_data_bridge_provider_has_no_production_caller(self):
-        """If this goes RED the bridge just went live — the row must be fixed FIRST.
+    # -- the bridge went live: ONE enumerated production caller --------------- #
+    def test_the_data_bridge_provider_has_exactly_one_production_caller(self):
+        """CONSCIOUS FLIP (L2-b Task 4; was ``…has_no_production_caller``).
 
-        Counts real *code* references across ``guanlan_v2/orchestration`` (where all
-        bridge wiring lives: ``startup.py``, ``adapters/``, the pipelines) via an AST
-        walk, so prose in a docstring or comment neither satisfies nor trips it. The
-        factory must appear exactly once, as its own ``def`` — never referenced.
+        Pre-flip (the L1 landing state, fact F): the factory's only code
+        occurrence in ``guanlan_v2/orchestration`` was its own ``def``, because
+        the reviewed ``verified_snapshot`` row was unrunnable. L1 healed the row
+        at its root (the subject projection) and L2-b bound a real production
+        ``DataRuntimeWorld``, so the bridge IS live — and this pin flips from
+        "no caller" to a POSITIVE ENUMERATION of the one caller:
+        ``adapters/data_world.py::ProductionDataProvider.open_execution``
+        delegates its rows-present session THROUGH the factory (never past it),
+        so the single-symbol pin discipline is preserved.
+
+        Same discriminating AST idiom as before (prose in a docstring or comment
+        neither satisfies nor trips it) — never deleted, never loosened to a
+        substring scan. A THIRD occurrence, a delegation moving to another
+        module, or the ``def`` disappearing is the RED arm.
         """
         pkg = Path(RT.__file__).resolve().parent.parent
         assert pkg.name == "orchestration"
@@ -644,8 +654,12 @@ class TestVerifiedSnapshotRowRunnableOnlyUnderSubjectProjection:
                 if named == "data_runtime_provider_factory":
                     refs.setdefault(
                         path.relative_to(pkg).as_posix(), []).append(type(n).__name__)
-        assert sorted(refs) == ["data/runtime.py"], (
-            "the data bridge now has a production caller; the reviewed "
-            "verified_snapshot row is still node_param-bound and will raise")
+        assert sorted(refs) == ["adapters/data_world.py", "data/runtime.py"], (
+            "the world-bound data factory's production callers moved; L2-b "
+            "Task 4 enumerated exactly one (adapters/data_world.py) — re-pin "
+            "consciously, never absorb")
         assert refs["data/runtime.py"] == ["FunctionDef"], (
             "the defining module now references its own factory")
+        assert refs["adapters/data_world.py"] == ["alias", "Name"], (
+            "the production caller is the import + the ONE delegation call; a "
+            "second call site is a second recipe")

@@ -14,7 +14,11 @@ The provider that replaces the worldless stopgap. Pinned here:
 * ``ProductionDataProvider``: prepare delegated bit-for-bit (never a third
   copy); ``open_execution`` partitions on ROW COUNT ONLY — zero rows freeze the
   catalog-licensed EMPTY, rows delegate the WHOLE session to the real
-  ``DataRuntimeBridgeProvider`` (zero re-implementation, source-text pinned);
+  ``DataRuntimeBridgeProvider`` (zero re-implementation, source-text pinned)
+  via its own ``data_runtime_provider_factory`` (L2-b Task 4's conscious flip
+  of the source pin — the single-symbol fact-F enumeration);
+* (L2-b Task 4) the resolver's early manifest-locator refusal and the ONE
+  hoisted data-aware refusal audit sink per binding set;
 * the ORDER-CONDITIONAL pm pin: with rows present and the run-subject source
   not yet threaded (that is Task 5, the L1<->L2-b integration seam), the
   delegated REAL session refuses with L1's runner-seam cause and ZERO gateway
@@ -230,6 +234,14 @@ def _data_audit_sink(clock) -> EventRefusalAuditSink:
     reg.register(DataFetchRefusalDetails)
     reg.seal()
     return EventRefusalAuditSink(detail_registry=reg, clock=clock)
+
+
+def _sealed_base_detail_registry():
+    """The BARE reviewed base registry — no Phase-3 data detail (the shape a
+    data refusal cannot be recorded against)."""
+    reg = default_audit_detail_registry()
+    reg.seal()
+    return reg
 
 
 def _subject_ref(code: str = "833509") -> TypedPayloadRef:
@@ -452,6 +464,114 @@ class TestWorldForManifestChannel:
         with pytest.raises(RT.DataRuntimeError, match="manifest not persisted"):
             resolver.world_for(_world_request(dc, registry_digest="9" * 64))
 
+    def test_a_manifest_whose_snapshot_id_disagrees_refuses_early(
+            self, reg9, recipe):
+        """L2-b Task 4 (Task-3 review Minor 1): ``data_snapshot_id`` is
+        AUDIT-ONLY — excluded from both the manifest's and the context's
+        semantic projection — so a manifest whose locator disagrees with the
+        admitted context's still matches the content-digest lookup and gets
+        bound. Downstream the disagreement DOES surface (``data/reader.py``'s
+        frozen-world proof and ``registry.py``'s per-request frozen-set check),
+        but only after the session is opened and only as a generic
+        "not one frozen set" message with no remedy.
+
+        The resolver now refuses it EARLY, in the same typed loud family as the
+        three digest checks and with the same re-run-Lane-0 remedy — before any
+        session, read, gateway begin or lease."""
+        stores = _fresh_stores(reg9)
+        resolver = _resolver_under_test(stores, recipe)
+        manifest, dc = _recipe_capture(
+            recipe, as_of=AS_OF, snapshot_id="l2b4-locator-a")
+        # the audit locator is semantically excluded, so relocating it leaves
+        # content_digest — hence the resolver's lookup key — untouched.
+        relocated = manifest.model_copy(update={"data_snapshot_id": "l2b4-other"})
+        assert relocated.content_digest == manifest.content_digest
+        assert relocated.data_snapshot_id != dc.data_snapshot_id
+        stores.payloads.put(
+            MANIFEST_SR, relocated, registry_digest=reg9.registry_digest,
+            namespace="main", idempotency_key="l2b4:locator:manifest")
+        with pytest.raises(RT.DataRuntimeError) as exc:
+            resolver.world_for(
+                _world_request(dc, registry_digest=reg9.registry_digest))
+        msg = str(exc.value)
+        assert "data_snapshot_id" in msg
+        assert "l2b4-other" in msg and "l2b4-locator-a" in msg
+        assert "re-run Lane 0" in msg
+
+
+class TestTheHoistedRefusalAuditSink:
+    """L2-b Task 4 (Task-3 review Minor 4): ONE data-aware refusal audit sink
+    per BINDING SET, hoisted through the existing ``refusal_audit_sink_factory``
+    seam — the ``ExperienceRetrievalBackend`` idiom (build once outside the
+    factory, hand the same instance out on every call).
+
+    Before the hoist the default factory built a FRESH sink inside every
+    ``world_for`` call, so the records it accumulated were unreachable: nothing
+    outside the world ever held the object."""
+
+    def test_the_seam_hands_every_world_the_same_hoisted_sink(
+            self, reg9, recipe):
+        stores = _fresh_stores(reg9)
+        one = DW.production_data_refusal_audit_sink(_FixedClock(AS_OF))
+        built: list = []
+
+        def hoisted():
+            built.append(one)
+            return one
+
+        resolver = ProductionDataWorldResolver(
+            stores=stores, recipe=recipe, schema_resolver=stores.resolver,
+            clock=_FixedClock(AS_OF), catalog_runtime=object(),
+            refusal_audit_sink_factory=hoisted)
+        manifest, dc = _recipe_capture(
+            recipe, as_of=AS_OF, snapshot_id="l2b4-sink")
+        stores.payloads.put(
+            MANIFEST_SR, manifest, registry_digest=reg9.registry_digest,
+            namespace="main", idempotency_key="l2b4:sink:manifest")
+        request = _world_request(dc, registry_digest=reg9.registry_digest)
+        worlds = [resolver.world_for(request), resolver.world_for(request)]
+        assert worlds[0] is not worlds[1]  # two genuinely distinct worlds…
+        for world in worlds:
+            assert world.refusal_audit_sink is one  # …ONE sink
+        assert len(built) == 2  # the seam is consulted per world
+
+    def test_the_hoisted_sink_recipe_is_data_aware(self):
+        """The one recipe both the default and the hoist use: the base audit
+        details PLUS ``DataFetchRefusalDetails``, sealed. A sink built from the
+        bare ``default_audit_detail_registry`` cannot validate a data refusal at
+        all (``UnknownAuditDetailSchema``), which is why the production
+        capability gateway must share THIS sink, not its own: a PitGuard
+        candidate-stage refusal reaches the gateway as a
+        ``DataFetchRefusalDetails@1`` payload (``data/registry.py``'s
+        ``_DispatchGuardRecorder`` → ``CapabilityGateway.reject``)."""
+        from guanlan_v2.orchestration.runtime_contracts import (
+            UnknownAuditDetailSchema,
+        )
+
+        sink = DW.production_data_refusal_audit_sink(_FixedClock(AS_OF))
+        detail = DataFetchRefusalDetails.build(
+            reason_code="future_data", stage="candidate_check",
+            request_digest="1" * 64, request_context_digest="2" * 64,
+            method="ohlcv", routing_snapshot_digest="3" * 64,
+            data_snapshot_content_digest="4" * 64,
+            candidate_metadata_digest="5" * 64, pit_audit_digest="6" * 64)
+        record = sink.record(
+            detail_schema_ref=SchemaRef(name="DataFetchRefusalDetails", version="1"),
+            detail_payload=detail, reason_code="future_data",
+            idempotency_key="probe:1")
+        assert record.reason_code == "future_data"
+        assert len(sink.records()) == 1
+
+        bare = EventRefusalAuditSink(
+            detail_registry=_sealed_base_detail_registry(),
+            clock=_FixedClock(AS_OF))
+        with pytest.raises(UnknownAuditDetailSchema):
+            bare.record(
+                detail_schema_ref=SchemaRef(
+                    name="DataFetchRefusalDetails", version="1"),
+                detail_payload=detail, reason_code="future_data",
+                idempotency_key="probe:2")
+
 
 # =========================================================================== #
 # 2. prepare is DELEGATED — bit-for-bit the real provider's, never a copy      #
@@ -491,14 +611,30 @@ class TestPrepareDelegation:
 
     def test_delegation_is_source_pinned_never_a_third_copy(self):
         """Anti-copy-paste source pins: prepare forwards to the REAL
-        provider's prepare; the rows-present arm constructs the REAL
-        ``DataRuntimeBridgeProvider`` and delegates the WHOLE session; and no
-        Phase-3 session machinery is re-implemented in the module."""
+        provider's prepare; the rows-present arm builds the REAL provider
+        through its own reviewed factory and delegates the WHOLE session; and
+        no Phase-3 session machinery is re-implemented in the module.
+
+        CONSCIOUS FLIP (L2-b Task 4). Pre-flip the open-arm pin was
+        ``assert "DataRuntimeBridgeProvider(" in open_src`` — a direct class
+        construction. Task 4 re-routed it through
+        ``data_runtime_provider_factory(world)`` so that the fact-F AST pins
+        (``test_data_catalog.py`` + ``test_l2b_handoff.py``) can enumerate the
+        production caller by the SINGLE factory symbol they were built around,
+        instead of degrading into a class-name scan. The delegation target is
+        unchanged — the factory's whole body is
+        ``DataRuntimeBridgeProvider(bridge=…, summary=…, world=world)``.
+        """
         prepare_src = inspect.getsource(ProductionDataProvider.prepare_input)
         assert "DataRuntimeBridgeProvider.prepare_input(self, request)" in prepare_src
         open_src = inspect.getsource(ProductionDataProvider.open_execution)
-        assert "DataRuntimeBridgeProvider(" in open_src
+        assert "data_runtime_provider_factory(world)(" in open_src
         assert ".open_execution(request)" in open_src
+        # …and the factory really is the thin constructor (so "delegated
+        # through it" is not a longer road to a different provider).
+        factory_src = inspect.getsource(RT.data_runtime_provider_factory)
+        assert "return DataRuntimeBridgeProvider(bridge=bridge, summary=summary, " \
+            "world=world)" in factory_src
         # the Task-3 surface itself never touches the session machinery (the
         # Task-2 backend docstring may NAME the gateway adapter in prose, so
         # the scan scope is exactly the Task-3 classes, code and doc alike).

@@ -64,6 +64,7 @@ from guanlan_v2.orchestration.data.runtime import (
     DataRuntimeError,
     DataRuntimeWorld,
     DataSourceCapabilityBackend,
+    data_runtime_provider_factory,
 )
 from guanlan_v2.orchestration.data.snapshot import (
     DataRoutingSnapshot,
@@ -101,6 +102,7 @@ __all__ = [
     "production_data_adapters",
     "production_data_backend",
     "production_data_recipe",
+    "production_data_refusal_audit_sink",
     "register_production_data_provider",
 ]
 
@@ -495,16 +497,43 @@ class ProductionNoCache:
         return None
 
 
+def production_data_refusal_audit_sink(
+    clock: AuthoritativeClock,
+) -> EventRefusalAuditSink:
+    """The ONE data-aware refusal audit sink recipe (one body, no fork).
+
+    An :class:`EventRefusalAuditSink` over the reviewed base audit-detail
+    registry PLUS :class:`DataFetchRefusalDetails`, sealed — the
+    ``data_audit_sink`` composition of the Phase-3 suite.  The data half is
+    load-bearing, not decorative: a data refusal reaches the sink as a
+    ``DataFetchRefusalDetails@1`` payload, and a sink over the bare base
+    registry refuses it with ``UnknownAuditDetailSchema`` instead of recording
+    it.
+
+    Callers hoist ONE of these per binding set and pass it through
+    :func:`register_production_data_provider`'s
+    ``refusal_audit_sink_factory`` (``live_decide.build_production_bindings``,
+    L2-b Task 4) — the ``ExperienceRetrievalBackend`` idiom: build once outside
+    the factory, hand the SAME instance to every per-run world.  Without the
+    hoist the default below builds a fresh sink inside every ``world_for``
+    call, and the records it accumulates are unreachable — nothing outside that
+    one world ever holds the object.
+    """
+    registry = default_audit_detail_registry()
+    registry.register(DataFetchRefusalDetails)
+    registry.seal()
+    return EventRefusalAuditSink(detail_registry=registry, clock=clock)
+
+
 def _default_refusal_audit_sink_factory(clock: AuthoritativeClock):
-    """Build the per-world refusal-sink factory: the ONE authoritative
-    :class:`EventRefusalAuditSink` over a data-aware detail registry (the
-    reviewed ``data_audit_sink`` composition of the Phase-3 suite)."""
+    """The unhoisted fallback: a fresh sink per world, same ONE recipe.
+
+    Kept for callers that bind no factory (the unit harnesses).  Production
+    hoists — see :func:`production_data_refusal_audit_sink`.
+    """
 
     def build() -> EventRefusalAuditSink:
-        registry = default_audit_detail_registry()
-        registry.register(DataFetchRefusalDetails)
-        registry.seal()
-        return EventRefusalAuditSink(detail_registry=registry, clock=clock)
+        return production_data_refusal_audit_sink(clock)
 
     return build
 
@@ -544,8 +573,9 @@ class ProductionDataWorldResolver:
 
     def world_for(self, request: Any) -> DataRuntimeWorld:
         """The per-run world: admitted snapshot → digest checks → manifest →
-        :class:`DataRuntimeWorld`.  Every refusal is a typed loud
-        :class:`DataRuntimeError`; nothing is rebuilt or fabricated."""
+        audit-locator check → :class:`DataRuntimeWorld`.  Every refusal is a
+        typed loud :class:`DataRuntimeError`; nothing is rebuilt or
+        fabricated."""
         # 1) the admitted ContextSnapshot, through EXACTLY the resolution
         #    _verify_context_binding performs (same ref, same reader).
         ctx_ref = request.input_snapshot.context_snapshot_ref
@@ -589,6 +619,21 @@ class ProductionDataWorldResolver:
             )
         manifest = self._stores.payloads.get(
             manifest_ref, expected_schema_ref=_MANIFEST_SCHEMA_REF)
+        # 3b) the audit locator agrees.  ``data_snapshot_id`` is SEMANTICALLY
+        #     EXCLUDED from both models, so a relocated manifest still matches
+        #     the content-digest lookup above and binds.  The disagreement does
+        #     surface downstream (``data/reader.py``'s frozen-world proof and
+        #     ``registry.py``'s per-request frozen-set check) — but only after
+        #     the session is opened, and only as a generic "not one frozen set"
+        #     message with no remedy.  Same typed loud family, same remedy, here.
+        if manifest.data_snapshot_id != ctx.data_snapshot_id:
+            raise DataRuntimeError(
+                f"the run's DataSnapshotManifest audit locator data_snapshot_id "
+                f"({manifest.data_snapshot_id}) does not equal the admitted "
+                f"ContextSnapshot's DataContext data_snapshot_id "
+                f"({ctx.data_snapshot_id}): the committed ContextSnapshot "
+                "predates the production data world (L2-b); re-run Lane 0"
+            )
 
         # 4) the full world: the recipe's frozen half + the run's admitted
         #    ctx/manifest + the D-C frozen clock + the honest no-cache + the
@@ -657,8 +702,12 @@ class ProductionDataProvider:
       catalog-licensed EMPTY freeze — the analyzer bounds are 0/0);
     * **rows present** → resolve the per-run world via
       :meth:`ProductionDataWorldResolver.world_for` and delegate the WHOLE
-      session to the real :class:`DataRuntimeBridgeProvider` — zero
-      re-implementation of the Phase-3 dispatch/PitGuard/render machinery.
+      session to the real :class:`DataRuntimeBridgeProvider`, constructed
+      THROUGH its own reviewed :func:`data_runtime_provider_factory` — zero
+      re-implementation of the Phase-3 dispatch/PitGuard/render machinery, and
+      the ONE production caller the fact-F AST pins enumerate (L2-b Task 4's
+      conscious flip: routing through the single named factory symbol keeps
+      that pin a single-symbol pin instead of a class-name scan).
       Never an EMPTY freeze over a row that could have been read (the
       silenced-outage shape every tombstone in this lineage forbids).
 
@@ -696,8 +745,8 @@ class ProductionDataProvider:
             return _RowlessLicensedEmptyDataSession(
                 bridge=self._bridge, summary=self._summary)
         world = self._resolver.world_for(request)
-        return DataRuntimeBridgeProvider(
-            bridge=self._bridge, summary=self._summary, world=world,
+        return data_runtime_provider_factory(world)(
+            bridge=self._bridge, summary=self._summary,
         ).open_execution(request)
 
 
