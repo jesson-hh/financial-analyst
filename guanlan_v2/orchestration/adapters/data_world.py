@@ -62,7 +62,7 @@ from guanlan_v2.orchestration.data.catalog import (
     parse_prefetch_binding,
     phase3_data_surface,
 )
-from guanlan_v2.orchestration.data.pit import DataFetchRefusalDetails
+from guanlan_v2.orchestration.data.pit import DataFetchRefusalDetails, FreshnessPolicy
 from guanlan_v2.orchestration.data.registry import DataSourceRegistry
 from guanlan_v2.orchestration.data.runtime import (
     DataRuntimeBridgeProvider,
@@ -103,6 +103,8 @@ __all__ = [
     "PRODUCTION_CAPTURE_TIMEZONE",
     "PRODUCTION_LIMIT_POLICY_ID",
     "PRODUCTION_ROUTE_POLICY_REF",
+    "PRODUCTION_SESSION_FRESHNESS_METHOD_ID",
+    "PRODUCTION_VERIFIED_SNAPSHOT_FRESHNESS_POLICY_ID",
     "ProductionDataProvider",
     "ProductionDataWorldRecipe",
     "ProductionDataWorldResolver",
@@ -122,6 +124,16 @@ __all__ = [
 PRODUCTION_DATA_REGISTRY_VERSION = "prod-data-v1"
 PRODUCTION_ROUTING_AUDIT_ID = "prod-data-routing-v1"
 PRODUCTION_LIMIT_POLICY_ID = "policy.limit.cn-a-share-prod"
+
+#: the method the ADDENDUM's session-counted freshness policy is scoped to, and
+#: that policy's own frozen identity.  ``method_or_category`` carries the method
+#: id, which is what makes ``DataPolicyResolver`` select it for this method only
+#: (``data/source.py::DataPolicyResolver._resolve_freshness``) — the method SPEC
+#: is registered unchanged, because its digest is sealed catalog material.
+PRODUCTION_SESSION_FRESHNESS_METHOD_ID = "verified_snapshot"
+PRODUCTION_VERIFIED_SNAPSHOT_FRESHNESS_POLICY_ID = (
+    "policy.freshness.verified-snapshot-session"
+)
 
 #: the committed, digest-sealed 2026 A-share session material (repo-relative).
 PRODUCTION_CALENDAR_MATERIAL_PATH = (
@@ -242,8 +254,32 @@ def _build_recipe(*, schema_registry_digest: str) -> ProductionDataWorldRecipe:
         registry.register_method(spec)
     # the ONE reviewed source under the sealed guanlan.datafeed@1 identity.
     registry.register_descriptor(surf.source_descriptor)
-    # the surface's elapsed freshness policy, unchanged.
+    # the surface's elapsed freshness policy, unchanged — the DEFAULT for every
+    # method whose id no registered policy scopes itself to.
     registry.register_freshness(surf.freshness_policy)
+    # RULING ADDENDUM Part 2 — the ADDITIONAL, method-scoped SESSION policy for
+    # ``verified_snapshot``.  WHY: the default policy is elapsed-based
+    # (max_elapsed_seconds=86400, data/catalog.py), so a settled datum stamped at
+    # FRIDAY's 15:00 close is 57h old at MONDAY's session midnight — every Monday
+    # deep run would read STALE, a permanent weekly hole with no honest way out
+    # (the datum genuinely IS the newest settled one).  Counted in TRADING
+    # SESSIONS over the committed calendar it is exactly ONE session old, which
+    # is what "the most recent completed session" means.  ``FreshnessPolicy``
+    # was built for this (max_trading_sessions + the exact calendar identity,
+    # data/pit.py); the policy therefore carries the SAME committed material ref
+    # the world binds to its PitGuard, so ``_check_freshness``'s calendar-identity
+    # assertion is a real tripwire, not a formality.  Every OTHER method keeps
+    # the elapsed default (gate D-B's limit-policy binding included).
+    registry.register_freshness(
+        FreshnessPolicy.build(
+            policy_id=PRODUCTION_VERIFIED_SNAPSHOT_FRESHNESS_POLICY_ID,
+            policy_version="1",
+            method_or_category=PRODUCTION_SESSION_FRESHNESS_METHOD_ID,
+            max_trading_sessions=1,
+            calendar_id=calendar.calendar_id,
+            calendar_material_ref=calendar.material_ref,
+        )
+    )
     # gate D-B: an elapsed method policy requires >=1 registered limit policy
     # carrying a calendar identity — the reviewed A-share board table bound to
     # the committed cn_a_share material.
@@ -356,7 +392,7 @@ def production_data_recipe() -> ProductionDataWorldRecipe:
 # production backend                                                           #
 # --------------------------------------------------------------------------- #
 def production_data_adapters() -> Mapping[str, Any]:
-    """Exactly ``{"guanlan.datafeed": LiveClientSource()}``.
+    """Exactly ``{"guanlan.datafeed": LiveClientSource(calendar=<committed>)}``.
 
     The key is the sealed surface identity's id — ``phase3_data_surface()``'s
     ``source_ref.id``, the exact string the backend resolves each staged
@@ -364,7 +400,13 @@ def production_data_adapters() -> Mapping[str, Any]:
     never new bytes).  The value is the **facade-default** construction of the
     reviewed :class:`~guanlan_v2.orchestration.adapters.live_data.LiveClientSource`
     (the real ``guanlan_v2.datafeed.live_client`` facade, lazily imported at
-    call time — no import-time vendor touch).  Adapters WRAP reviewed readers
+    call time — no import-time vendor touch) carrying ONE bound dependency: the
+    recipe's **committed trading calendar** (RULING ADDENDUM Part 1).  That
+    calendar is what attributes a quote row's settled close to a session
+    (``live_data._settled_candidate``); it is the SAME object
+    :meth:`ProductionDataWorldResolver.world_for` binds to the run's
+    ``PitGuard``, so the settled stamp and a session-counted freshness policy
+    are evaluated against one identical material.  Adapters WRAP reviewed readers
     (Global Constraints): no new vendor client, no re-implemented probe, no
     fabricated row.  Tests inject fakes through the adapter's existing
     ``probe_fn``/``resolve_source_fn``/``known_sources_fn`` ports — never a
@@ -378,7 +420,10 @@ def production_data_adapters() -> Mapping[str, Any]:
     adapter's supported set, so an L3 grant of an unsupported method fails in
     the tree first, never live.
     """
-    return {phase3_data_surface().source_ref.id: LiveClientSource()}
+    return {
+        phase3_data_surface().source_ref.id: LiveClientSource(
+            calendar=production_data_recipe().calendar)
+    }
 
 
 class ThreadConfinedDataBackend(DataSourceCapabilityBackend):

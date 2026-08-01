@@ -1051,19 +1051,43 @@ class DataPolicyResolver:
     calendar through the Task 3 :class:`TradingCalendarResolver`, and returns the
     single bound :class:`ResolvedDataMethodPolicy`. Missing, extra, wrong-type or
     drifted material fails here rather than falling back to a module global.
+
+    **Method scoping.** :class:`FreshnessPolicy` carries a ``method_or_category``
+    scope, and the model's own contract is that "a policy is selected per
+    method/category" (``data/pit.py``). A registered policy whose
+    ``method_or_category`` equals the resolved method's id is that method's
+    policy and wins over the spec's default ``freshness_policy_ref``; every
+    other method keeps the spec's ref. This is what lets ONE method carry a
+    stricter/different rule (e.g. session-counted freshness for
+    ``verified_snapshot``) **without touching the method spec** — a spec edit
+    would move ``spec_digest`` and therefore ``method_ref``, and the sealed
+    catalog's prefetch rows cross-resolve on exactly that identity
+    (``data/runtime.py::_frozen_route_for``). Category scoping is deliberately
+    NOT implemented: only an exact method-id match scopes, so a policy scoped to
+    a category name (or to ``"default"``) never silently captures a method.
     """
 
-    __slots__ = ("_snapshot", "_freshness_by_ref", "_limit_by_ref", "_calendars")
+    __slots__ = ("_snapshot", "_freshness_by_ref", "_freshness_by_scope",
+                 "_limit_by_ref", "_calendars")
 
     def __init__(self, snapshot: DataSourceRegistrySnapshot, *, calendar_resolver: Any) -> None:
         self._snapshot = snapshot
         self._calendars = calendar_resolver
         self._freshness_by_ref: dict[tuple[str, str, str], FreshnessPolicy] = {}
+        self._freshness_by_scope: dict[str, FreshnessPolicy] = {}
         for fp in snapshot.freshness_policies:
             key = (fp.policy_id, fp.policy_version, fp.policy_digest)
             if key in self._freshness_by_ref:
                 raise ValueError(f"duplicate freshness policy {fp.rule_version}")
             self._freshness_by_ref[key] = fp
+            prior_scope = self._freshness_by_scope.get(fp.method_or_category)
+            if prior_scope is not None and prior_scope.policy_digest != fp.policy_digest:
+                raise ValueError(
+                    f"two freshness policies claim the scope {fp.method_or_category!r} "
+                    f"({prior_scope.rule_version} and {fp.rule_version}); a scope "
+                    "selects exactly one policy and is never resolved by order"
+                )
+            self._freshness_by_scope[fp.method_or_category] = fp
         self._limit_by_ref: dict[tuple[str, str, str], LimitRulePolicy] = {}
         for lp in snapshot.limit_policies:
             key = (lp.policy_id, lp.policy_version, lp.policy_digest)
@@ -1072,7 +1096,8 @@ class DataPolicyResolver:
             self._limit_by_ref[key] = lp
 
     def resolve_method(self, method_spec: DataMethodSpec, *, ctx: DataContext) -> ResolvedDataMethodPolicy:
-        fp = self._resolve_freshness(method_spec.freshness_policy_ref)
+        fp = self._resolve_freshness(
+            method_spec.freshness_policy_ref, method_id=method_spec.method_id)
         limit = None
         cal_id = ctx.calendar_id
         cal_material_ref: ContentRef
@@ -1102,7 +1127,22 @@ class DataPolicyResolver:
             calendar_id=cal_id, calendar_material_ref=cal_material_ref,
         )
 
-    def _resolve_freshness(self, ref: ContentRef) -> FreshnessPolicy:
+    def _resolve_freshness(
+        self, ref: ContentRef, *, method_id: str | None = None
+    ) -> FreshnessPolicy:
+        """The method's bound policy: its own METHOD-SCOPED one, else ``ref``.
+
+        A registered policy whose ``method_or_category`` equals ``method_id`` is
+        that method's policy (see the class docstring's method-scoping clause);
+        it is registry material like any other, so it is still exact, versioned
+        and digest-sealed — there is no unversioned override path. With no
+        method-scoped policy the spec's own versioned ``ref`` is resolved, and a
+        digest drift or a missing registration is loud.
+        """
+        if method_id is not None:
+            scoped = self._freshness_by_scope.get(method_id)
+            if scoped is not None:
+                return scoped
         for fp in self._snapshot.freshness_policies:
             if (fp.policy_id, fp.policy_version) == (ref.id, ref.version):
                 if fp.policy_digest != ref.content_digest:

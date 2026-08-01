@@ -22,7 +22,10 @@ Five test groups:
    equal; the test-suite idiom of rebuilding specs is exactly what production
    must NOT do);
 3. policy resolution (elapsed surface policy + the ONE registered
-   ``LimitRulePolicy`` naming ``cn_a_share`` + the committed material ref);
+   ``LimitRulePolicy`` naming ``cn_a_share`` + the committed material ref;
+   plus the RULING ADDENDUM's ADDITIONAL method-scoped SESSION policy for
+   ``verified_snapshot`` — ``max_trading_sessions=1`` over the committed
+   calendar, the six other methods unchanged on the elapsed default);
 4. calendar honesty (digest-verified committed material; 春节 2026-02-17 absent;
    a normal Tuesday present; tamper raises);
 5. cross-process determinism (subprocess digest triple == in-process) + the NEW
@@ -37,7 +40,8 @@ edit -> group 4 red.
 --- Task 2 (appended) — the reviewed source adapter under the sealed identity
 + the ONE production backend (plan Task 2, gate D-A). Five groups (a)-(e):
 (a) ``production_data_adapters()`` is exactly the sealed source id ->
-facade-default ``LiveClientSource``; (b) the echo under the PRODUCTION
+facade-default ``LiveClientSource`` carrying the recipe's COMMITTED calendar
+(the RULING ADDENDUM's one bound dependency); (b) the echo under the PRODUCTION
 identity: a fetch through an injected fake probe, staged with the RECIPE's
 registry-frozen route on the real backend, returns a ``RawFetch`` whose
 ``source_ref`` IS ``phase3_data_surface().source_ref``; (c) unsupported method
@@ -72,6 +76,7 @@ from guanlan_v2.orchestration.adapters.data_world import (
     PRODUCTION_CALENDAR_MATERIAL_PATH,
     PRODUCTION_DATA_REGISTRY_VERSION,
     PRODUCTION_ROUTING_AUDIT_ID,
+    PRODUCTION_VERIFIED_SNAPSHOT_FRESHNESS_POLICY_ID,
     ProductionDataWorldRecipe,
     ThreadConfinedDataBackend,
     _load_calendar_material,
@@ -218,21 +223,87 @@ class TestMethodSpecIdentity:
 # 3. policy resolution — elapsed policy + the ONE registered limit policy       #
 # =========================================================================== #
 class TestPolicyResolution:
-    def test_verified_snapshot_resolves_under_an_online_context(self, recipe):
-        """``resolve_method`` succeeds for ``verified_snapshot`` under an
-        ONLINE context at a frozen as_of (gate D-B: the elapsed surface policy
-        requires the registered ``LimitRulePolicy`` carrying the ``cn_a_share``
-        calendar identity + the committed material ref). Mutation m3 (limit
-        policy dropped) reddens here with D-B's exact ValueError."""
+    def test_verified_snapshot_resolves_the_method_scoped_session_policy(self, recipe):
+        """RULING ADDENDUM Part 2: ``verified_snapshot`` resolves the ADDITIONAL
+        method-scoped SESSION policy (``max_trading_sessions=1``) bound to the
+        committed calendar identity — not the default elapsed policy. The
+        method spec itself is UNCHANGED (its ``freshness_policy_ref`` still
+        names the surface default; the spec digest is sealed material), so the
+        scoping is done by the resolver: a registered policy whose
+        ``method_or_category`` equals the method id wins over the spec's
+        default ref (``data/source.py::DataPolicyResolver._resolve_freshness``).
+        """
+        surf = phase3_data_surface()
+        spec = surf.spec_by_method["verified_snapshot"]
+        # the SPEC is untouched — it still points at the surface default ref.
+        assert spec.freshness_policy_ref == surf.freshness_ref
+        resolved = recipe.policy_resolver.resolve_method(
+            spec, ctx=P.pilot_data_context(as_of=AS_OF))
+        assert resolved.freshness_policy.policy_id == \
+            PRODUCTION_VERIFIED_SNAPSHOT_FRESHNESS_POLICY_ID
+        assert resolved.freshness_policy.is_session_based is True
+        assert resolved.freshness_policy.max_trading_sessions == 1
+        assert resolved.freshness_policy.method_or_category == "verified_snapshot"
+        # bound to the COMMITTED calendar identity, byte-for-byte.
+        assert resolved.freshness_policy.calendar_id == "cn_a_share"
+        assert resolved.freshness_policy.calendar_material_ref == \
+            recipe.calendar.material_ref
+        assert resolved.calendar_id == "cn_a_share"
+        assert resolved.calendar_material_ref == recipe.calendar.material_ref
+
+    @pytest.mark.parametrize(
+        "method_id", [m for m in _SEVEN if m != "verified_snapshot"])
+    def test_every_other_method_stays_on_the_default_elapsed_policy(
+            self, recipe, method_id):
+        """The METHOD-SCOPING pin: the session policy is scoped to
+        ``verified_snapshot`` ONLY — the other six keep the default elapsed
+        policy (and, per gate D-B, its bound limit policy). Mutation m2
+        (register the session policy under a different method scope) reddens
+        here and at the verified_snapshot arm above."""
         surf = phase3_data_surface()
         resolved = recipe.policy_resolver.resolve_method(
-            surf.spec_by_method["verified_snapshot"],
-            ctx=P.pilot_data_context(as_of=AS_OF))
+            surf.spec_by_method[method_id], ctx=P.pilot_data_context(as_of=AS_OF))
         assert resolved.freshness_policy.policy_id == \
             "policy.freshness.default-elapsed"
+        assert resolved.freshness_policy.is_session_based is False
+        assert resolved.freshness_policy.max_elapsed_seconds == 86400
+        # gate D-B: an elapsed method policy still binds the ONE limit policy.
         assert resolved.limit_policy is not None
         assert resolved.calendar_id == "cn_a_share"
         assert resolved.calendar_material_ref == recipe.calendar.material_ref
+
+    def test_both_freshness_policies_are_registered_in_the_sealed_snapshot(self, recipe):
+        """Both policies are registry MATERIAL — the session policy is
+        ADDITIONAL, the surface default is untouched. ``freshness_policies`` is
+        a sealed snapshot field (``data/source.py``), which is exactly why this
+        addendum MOVES ``source_registry_digest`` (a conscious re-freeze)."""
+        snap = recipe.registry.snapshot()
+        by_id = {p.policy_id: p for p in snap.freshness_policies}
+        assert set(by_id) == {
+            "policy.freshness.default-elapsed",
+            PRODUCTION_VERIFIED_SNAPSHOT_FRESHNESS_POLICY_ID,
+        }
+        assert by_id["policy.freshness.default-elapsed"] == \
+            phase3_data_surface().freshness_policy
+        session = by_id[PRODUCTION_VERIFIED_SNAPSHOT_FRESHNESS_POLICY_ID]
+        assert session.max_trading_sessions == 1
+        assert session.max_elapsed_seconds is None
+        assert session.calendar_material_ref == recipe.calendar.material_ref
+
+    def test_the_weekly_monday_hole_is_what_the_session_policy_closes(self, recipe):
+        """Why the addendum exists, stated as arithmetic over the COMMITTED
+        material: Friday 2026-07-17's close (15:00 +08) read at Monday
+        2026-07-20's session midnight is 57h old — permanently STALE under the
+        86400s default — but exactly ONE trading session old by the calendar."""
+        cal = recipe.calendar
+        friday, monday = date(2026, 7, 17), date(2026, 7, 20)
+        assert cal.is_session(friday) and cal.is_session(monday)
+        settled_at = datetime(2026, 7, 17, 7, 0, tzinfo=UTC)   # 15:00 +08
+        as_of = datetime(2026, 7, 19, 16, 0, tzinfo=UTC)       # Mon 00:00 +08
+        assert (as_of - settled_at).total_seconds() > 86400     # the elapsed hole
+        span = cal.sessions_between(friday, monday)
+        sessions_since = span - (1 if cal.is_session(friday) else 0)
+        assert sessions_since == 1                              # inside the policy
 
     def test_limit_policy_binds_the_committed_calendar_identity(self, recipe):
         snap = recipe.registry.snapshot()
@@ -555,9 +626,9 @@ def _sealed_request(p3_registry, *, request_id: str):
 
 class TestProductionDataAdaptersGroupA:
     def test_map_has_exactly_the_sealed_source_id(self):
-        """(a) exactly ``{"guanlan.datafeed": LiveClientSource()}`` — the key
-        IS the sealed surface identity's id (the registration key the backend
-        resolves ``source_ref.id`` against — never new bytes)."""
+        """(a) exactly one entry, ``LiveClientSource`` — the key IS the sealed
+        surface identity's id (the registration key the backend resolves
+        ``source_ref.id`` against — never new bytes)."""
         surf = phase3_data_surface()
         adapters = production_data_adapters()
         assert set(adapters) == {surf.source_ref.id} == {"guanlan.datafeed"}
@@ -572,6 +643,18 @@ class TestProductionDataAdaptersGroupA:
         assert src._catalog_fn is None
         assert src._resolve_fn is None
         assert src._known_fn is None
+
+    def test_adapter_binds_the_committed_recipe_calendar(self):
+        """RULING ADDENDUM Part 1, bound AT SOURCE: the production adapter
+        carries the recipe's COMMITTED calendar — the only thing that can
+        attribute a quote row's settled close to a session. It is the SAME
+        object the world binds to its ``PitGuard`` (``world_for`` passes
+        ``recipe.calendar``), so a session-counted freshness policy and the
+        settled stamp are evaluated against one identical material."""
+        src = production_data_adapters()["guanlan.datafeed"]
+        recipe = production_data_recipe()
+        assert src._calendar is recipe.calendar
+        assert src._calendar.material_ref == recipe.calendar.material_ref
 
 
 class TestBackendEchoGroupB:

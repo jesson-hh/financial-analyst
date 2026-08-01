@@ -20,9 +20,13 @@ and the manifest kind. It owns exactly three things — one source and two build
   own availability**: a *live* candidate is stamped with the envelope's ``pulled_at``
   (当时可知时间 = when we pulled it live), while a ``verified_snapshot`` row that
   carries its own **settled** datum yields a *settled projection* stamped at that
-  datum's own settlement instant (see :data:`_SETTLED_CLOSE_LOCAL_TIME` and
+  datum's own settlement instant — the session attributed from the row's own
+  **venue quote timestamp** plus the **committed trading calendar** (never from an
+  ``as_of`` comparison, never from a guessed date; see
+  :data:`_SETTLED_CLOSE_LOCAL_TIME` and
   :meth:`LiveClientSource._settled_candidate` — the CONTROLLER RULING behind the
-  L2-b Task-9 gate). A missing
+  L2-b Task-9 gate and its ADDENDUM). The calendar is an OPTIONAL constructor
+  dependency: without one the projection simply never fires. A missing
   ``pulled_at`` yields ``available_at=None`` and the single PIT authority
   (``PitGuard.check_raw``, invoked by the reviewed Phase-3 router at ``data/registry.py``
   dispatch step 5c) refuses it as :class:`MissingAvailabilityRefused` — the adapter
@@ -78,11 +82,12 @@ cumulative-registry classification).
 from __future__ import annotations
 
 import math
-from datetime import date as _date, datetime, time as _time, timezone
+from datetime import date as _date, datetime, time as _time, timedelta, timezone
 from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
 from guanlan_v2.orchestration.context import DataContext
+from guanlan_v2.orchestration.data.calendar import TradingCalendar
 from guanlan_v2.orchestration.data.errors import (
     NotConfiguredError,
     RoutingConfigurationError,
@@ -155,7 +160,8 @@ _NEWS_TITLE_KEYS = ("title", "headline", "text", "name", "summary", "content")
 _CLIP = 400
 
 # --------------------------------------------------------------------------- #
-# the SETTLED-projection rule (CONTROLLER RULING — the L2-b Task-9 gate)       #
+# the SETTLED-projection rule (CONTROLLER RULING — the L2-b Task-9 gate,       #
+# with its ADDENDUM: calendar-attributed session, venue-side anchor)           #
 # --------------------------------------------------------------------------- #
 #: **NAMED DOMAIN RULE, not a fabrication.** An A-share trading session's CLOSE price
 #: is exchange-settled and publicly disseminated at the session close, **15:00
@@ -181,16 +187,29 @@ _SETTLED_CLOSE_LOCAL_TIME = _time(hour=15, minute=0)
 #: alias of the same 昨收 datum. First match wins; nothing is derived or averaged.
 _SETTLED_CLOSE_KEYS = ("prev_close", "last_close", "pre_close")
 
-#: Row keys that carry the settled datum's **own session date**. Deliberately narrow:
-#: only keys that name the *previous/settled* session are accepted — a bare ``date``
-#: on a realtime-quote row means TODAY and would stamp a settled instant onto a
-#: session that has not settled. A row with none of these yields **no** settled
-#: candidate at all (never a guessed date; the live candidate's honest PitGuard
-#: refusal then stands).
-_SETTLED_SESSION_DATE_KEYS = (
-    "prev_close_date", "prev_session_date", "last_close_date", "prev_trade_date",
-    "settled_session_date",
+#: Row keys carrying the vendor row's own **QUOTE TIMESTAMP** — the venue's
+#: last-trade time, i.e. the ANCHOR the settled session is attributed from (the
+#: RULING ADDENDUM; see :meth:`LiveClientSource._settled_candidate` for the
+#: two-regime proof). This deliberately ACCEPTS a bare ``date``/``time``: on a
+#: realtime-quote row that is the venue's CURRENT trading date, which is exactly
+#: the anchor — it is never taken as the settled session (the settled session is
+#: the committed calendar's session strictly BEFORE it).
+_QUOTE_TIME_KEYS = (
+    "quote_time", "quote_ts", "tick_time", "ticktime", "trade_time",
+    "datetime", "date", "time",
 )
+
+#: Item-level (unified stocks ``LiveSourceItem``) timestamp keys, accepted as the
+#: anchor ONLY when the item's own ``time_source`` proves the value is a PROVIDER
+#: time. The item shaper stamps ``time_source="fetch_fallback"`` whenever the
+#: vendor row carried no time of its own (stocks
+#: ``src/data/live_sources.py::_item_from_dict``) — that value is the FETCH
+#: instant, not a venue quote time, and stamping a settled session from it would
+#: be exactly the pull-instant lie the ruling forbids.
+_ITEM_QUOTE_TIME_KEYS = ("publish_ts", "visible_ts")
+
+#: ``time_source`` prefixes that prove the item's timestamp is NOT venue-side.
+_UNPROVEN_TIME_SOURCES = ("fetch_fallback", "unknown")
 
 #: Row keys carrying the instrument's settled display name (static reference data).
 _SETTLED_NAME_KEYS = ("name", "sec_name", "short_name")
@@ -311,11 +330,13 @@ def _vendor_row_view(item: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _as_session_date(value: Any) -> _date | None:
-    """Parse a row's own session-date value — ``None`` when it is not one.
+    """Parse a row's own timestamp value down to its DATE — ``None`` otherwise.
 
-    Accepts a ``date`` / ``datetime`` (its date part), an ISO ``YYYY-MM-DD`` prefix
-    or a compact ``YYYYMMDD`` string. Anything else yields ``None``: a date that
-    cannot be *read* is never guessed at.
+    Accepts a ``date`` / ``datetime`` (its date part), an ISO ``YYYY-MM-DD``
+    prefix (so ``"2026-07-16T10:30:00"`` and ``"2026-07-16 10:30:00"`` both read)
+    or a compact ``YYYYMMDD`` prefix (so the vendor's ``"20260716103000"``
+    stamp reads too). Anything else yields ``None``: a date that cannot be *read*
+    is never guessed at.
     """
     if isinstance(value, datetime):
         return value.date()
@@ -330,11 +351,71 @@ def _as_session_date(value: Any) -> _date | None:
         return _date.fromisoformat(s[:10])
     except ValueError:
         pass
-    if len(s) == 8 and s.isdigit():
+    if len(s) >= 8 and s[:8].isdigit():
         try:
-            return _date(int(s[:4]), int(s[4:6]), int(s[6:]))
+            return _date(int(s[:4]), int(s[4:6]), int(s[6:8]))
         except ValueError:
             return None
+    return None
+
+
+def _quote_anchor_date(view: Mapping[str, Any]) -> _date | None:
+    """The row's own **venue quote date** — the settled-attribution anchor.
+
+    Two bound sources, in precedence order (both venue-side facts, never the
+    pull instant and never ``as_of``):
+
+    1. the vendor row's own quote-timestamp key (:data:`_QUOTE_TIME_KEYS`);
+    2. the unified item's ``publish_ts`` / ``visible_ts`` — but ONLY when the
+       item's own ``time_source`` proves it is a provider time. The stocks item
+       shaper falls back to the FETCH instant with ``time_source="fetch_fallback"``
+       whenever the vendor row carries no time of its own, and a fetch instant is
+       not a quote time.
+
+    ``None`` when neither is readable — the caller then emits **no** settled
+    candidate at all.
+    """
+    for key in _QUOTE_TIME_KEYS:
+        anchor = _as_session_date(view.get(key))
+        if anchor is not None:
+            return anchor
+    src = view.get("time_source")
+    if isinstance(src, str) and src.strip() and not src.strip().lower().startswith(
+            _UNPROVEN_TIME_SOURCES):
+        for key in _ITEM_QUOTE_TIME_KEYS:
+            anchor = _as_session_date(view.get(key))
+            if anchor is not None:
+                return anchor
+    return None
+
+
+def _previous_session(calendar: TradingCalendar, anchor: _date) -> _date | None:
+    """The committed calendar's latest session **strictly before** ``anchor``.
+
+    Answered purely from the calendar's own immutable material — no wall clock,
+    no ``as_of``, no extrapolation. Returns ``None`` (i.e. the caller emits no
+    settled candidate) whenever the material cannot ANSWER:
+
+    * empty material / ``anchor`` outside the covered span — counting past the
+      material is the silent-undercount lie ``data/calendar.py``'s coverage
+      contract exists to forbid;
+    * ``anchor`` is not itself a session — a real venue quote timestamp always
+      falls on a trading session, so a non-session anchor proves the value is
+      not one (e.g. a weekend pull instant), and attributing from it would
+      mis-stamp by a whole session;
+    * no session precedes ``anchor`` inside the covered span.
+    """
+    coverage = calendar.coverage
+    if coverage is None:
+        return None
+    lo, hi = coverage
+    if anchor < lo or anchor > hi or not calendar.is_session(anchor):
+        return None
+    day = anchor - timedelta(days=1)
+    while day >= lo:
+        if calendar.is_session(day):
+            return day
+        day -= timedelta(days=1)
     return None
 
 
@@ -437,7 +518,7 @@ class LiveClientSource:
     hit no real vendor.
     """
 
-    __slots__ = ("_probe_fn", "_catalog_fn", "_resolve_fn", "_known_fn")
+    __slots__ = ("_probe_fn", "_catalog_fn", "_resolve_fn", "_known_fn", "_calendar")
 
     def __init__(
         self,
@@ -446,15 +527,26 @@ class LiveClientSource:
         catalog_fn: Callable[..., Mapping[str, Any]] | None = None,
         resolve_source_fn: Callable[[str], str] | None = None,
         known_sources_fn: Callable[[], Any] | None = None,
+        calendar: TradingCalendar | None = None,
     ) -> None:
         # The brief's __init__ lists probe_fn/catalog_fn; resolve_source_fn/
         # known_sources_fn are added (defaulting to the facade) so invariant 4
         # (unknown source fails loud) and the 枚举钉旧 gotcha guard can be exercised
         # against injected fakes without touching a real vendor (recorded in report).
+        #
+        # ``calendar`` is the RULING ADDENDUM's committed session calendar: the
+        # ONLY thing that can attribute a quote row's settled close to a session
+        # (see :meth:`_settled_candidate`). It is OPTIONAL and defaults to
+        # ``None`` — a calendar-less construction is legal and simply emits no
+        # settled projection (no guessed attribution, no silent stand-in
+        # calendar). Production binds the recipe's committed material at
+        # ``adapters/data_world.py::production_data_adapters``; unit harnesses
+        # that never exercise the projection keep constructing without one.
         self._probe_fn = probe_fn
         self._catalog_fn = catalog_fn
         self._resolve_fn = resolve_source_fn
         self._known_fn = known_sources_fn
+        self._calendar = calendar
 
     # -- lazy facade binders (defaults; tests inject) ----------------------- #
     def _probe(self, source: str, *, code: str, date: str, limit: int) -> Mapping[str, Any]:
@@ -569,10 +661,12 @@ class LiveClientSource:
         """One candidate per envelope row, stamped with THAT row's own availability.
 
         A ``verified_snapshot`` row that carries its own settled datum (a settled
-        close + that datum's own session date) becomes the **settled projection**
-        (:meth:`_settled_candidate`); every other row — every other method, and any
-        quote row with no readable settled datum — becomes the unchanged **live**
-        candidate stamped with the envelope's ``pulled_at``.
+        close + a venue quote timestamp the committed calendar can attribute to a
+        preceding session) becomes the **settled projection**
+        (:meth:`_settled_candidate`); every other row — every other method, any
+        quote row with no readable settled datum or no venue anchor, and every row
+        when this source was constructed without a calendar — becomes the
+        unchanged **live** candidate stamped with the envelope's ``pulled_at``.
 
         **Why the settled projection SUPERSEDES that row's live candidate** (a
         recorded correction to the pre-fix brief's "in addition", verified at
@@ -600,27 +694,56 @@ class LiveClientSource:
     ) -> RawRowCandidate | None:
         """The settled projection of one quote row, or ``None`` when there is none.
 
-        ``available_at`` / ``effective_at`` = the row's **own** previous-session date
-        at :data:`_SETTLED_CLOSE_LOCAL_TIME` (:data:`_EXCHANGE_TZ`), normalized to
-        UTC — the named domain rule that an A-share session's close is
-        exchange-settled and public at 15:00 local (the CONTROLLER RULING this module
-        implements). ``ingested_at`` stays the frozen ``request.as_of`` (the
-        unchanged idiom). The payload carries settled fields ONLY.
+        **Session attribution comes from VENUE-SIDE facts + the COMMITTED
+        CALENDAR** (the RULING ADDENDUM) — never from an ``as_of`` comparison and
+        never from a guessed date:
 
-        Returns ``None`` — i.e. emits NO settled candidate — when the row carries no
-        readable settled close or no readable previous-session date. A date is never
-        guessed, never derived from a calendar and never taken from the pull instant;
-        the live candidate's honest PitGuard refusal then stands as the outcome.
+        1. the ANCHOR is the row's own **quote timestamp** (the venue's last-trade
+           time — :func:`_quote_anchor_date`);
+        2. ``settled_session`` is the committed calendar's latest session
+           **strictly before** the anchor's session (:func:`_previous_session`).
+
+        **The two-regime proof — one rule answers both.** A realtime-quote row's
+        ``last_close`` is, by the venue's own definition, the close of the session
+        preceding the session the quote belongs to. So:
+
+        * **intraday pull** — the venue is serving TODAY's snapshot, quote_time =
+          today ``T`` (a session), and ``last_close`` is the close of the session
+          before ``T``: the rule names exactly that session;
+        * **weekend / holiday / pre-open pull** — the venue is still serving the
+          LAST COMPLETED session's snapshot, so quote_time = that session ``F``
+          (its close), and the row's ``last_close`` is the close of the session
+          before ``F``: the rule names exactly that session too.
+
+        Anchoring on the *pull* instant instead would break regime 2 (a Saturday
+        pull would name Friday, whose close is in ``price``, not ``last_close``) —
+        which is precisely why the anchor must be venue-side.
+
+        ``available_at`` / ``effective_at`` = that settled session's date at
+        :data:`_SETTLED_CLOSE_LOCAL_TIME` (:data:`_EXCHANGE_TZ`), normalized to
+        UTC — the named domain rule that an A-share session's close is
+        exchange-settled and public at 15:00 local (the CONTROLLER RULING this
+        module implements). ``ingested_at`` stays the frozen ``request.as_of``
+        (the unchanged idiom). The payload carries settled fields ONLY.
+
+        Returns ``None`` — i.e. emits NO settled candidate — when this source was
+        constructed without a calendar, when the row carries no readable settled
+        close, when no venue quote timestamp is readable, or when the committed
+        calendar cannot ANSWER which session precedes the anchor (outside its
+        covered span, a non-session anchor, or no earlier covered session). The
+        live candidate's honest PitGuard refusal then stands as the outcome.
         """
+        calendar = self._calendar
+        if calendar is None:
+            return None
         view = _vendor_row_view(item)
         close = _settled_close(view)
         if close is None:
             return None
-        session: _date | None = None
-        for key in _SETTLED_SESSION_DATE_KEYS:
-            session = _as_session_date(view.get(key))
-            if session is not None:
-                break
+        anchor = _quote_anchor_date(view)
+        if anchor is None:
+            return None
+        session = _previous_session(calendar, anchor)
         if session is None:
             return None
         instant = _settled_instant(session)
