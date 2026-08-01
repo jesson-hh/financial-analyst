@@ -50,6 +50,7 @@ Run: ``python -m pytest tests/orchestration/test_production_data_provider.py -q`
 """
 from __future__ import annotations
 
+import ast
 import inspect
 from datetime import datetime, timezone
 from pathlib import Path
@@ -624,6 +625,14 @@ class TestPrepareDelegation:
         instead of degrading into a class-name scan. The delegation target is
         unchanged — the factory's whole body is
         ``DataRuntimeBridgeProvider(bridge=…, summary=…, world=world)``.
+
+        STRENGTHENED (Task-4 review, M-4): the thin-constructor arm used to pin
+        only that the return statement was PRESENT, so a factory that grew a
+        side effect or a conditional ahead of it still passed while the promise
+        above was broken. It now pins, in the sibling fact-F pins' AST idiom,
+        that the returned closure's body IS that ONE ``ast.Return`` — nothing
+        before it, nothing after it, and the constructed class and its three
+        pass-through keywords enumerated.
         """
         prepare_src = inspect.getsource(ProductionDataProvider.prepare_input)
         assert "DataRuntimeBridgeProvider.prepare_input(self, request)" in prepare_src
@@ -635,6 +644,26 @@ class TestPrepareDelegation:
         factory_src = inspect.getsource(RT.data_runtime_provider_factory)
         assert "return DataRuntimeBridgeProvider(bridge=bridge, summary=summary, " \
             "world=world)" in factory_src
+        outer = ast.parse(factory_src).body[0]
+        assert isinstance(outer, ast.FunctionDef)
+        inner = [n for n in outer.body if isinstance(n, ast.FunctionDef)]
+        assert [n.name for n in inner] == ["factory"], (
+            "data_runtime_provider_factory must close over exactly ONE "
+            "provider-handler factory")
+        body = inner[0].body
+        assert len(body) == 1 and isinstance(body[0], ast.Return), (
+            "the factory body must be the SINGLE return — a side effect, a "
+            "guard or a conditional ahead of it makes 'delegated through the "
+            "factory' a longer road to a possibly different provider")
+        call = body[0].value
+        assert isinstance(call, ast.Call)
+        assert isinstance(call.func, ast.Name)
+        assert call.func.id == "DataRuntimeBridgeProvider"
+        assert call.args == []
+        assert [(kw.arg, getattr(kw.value, "id", None)) for kw in call.keywords] == [
+            ("bridge", "bridge"), ("summary", "summary"), ("world", "world")], (
+            "the three arguments must be the delegation's own pass-throughs, "
+            "unmodified and in the reviewed order")
         # the Task-3 surface itself never touches the session machinery (the
         # Task-2 backend docstring may NAME the gateway adapter in prose, so
         # the scan scope is exactly the Task-3 classes, code and doc alike).

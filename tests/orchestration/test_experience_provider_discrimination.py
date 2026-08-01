@@ -593,13 +593,24 @@ class TestTheNamedRemainingGap:
     The controller then ruled BOTH bindings: the memory provider through
     ``register_phase3_memory_provider_factory`` (pm = the C3 rowless reader:
     honest empty prefetch) and the data provider through the deep-lane data
-    recipe — since L1 Task 3 that is ``register_worldless_data_provider``
-    (the dead-row honest-empty branch was retired per its tombstone: the L1
-    subject projection made pm's sealed ``verified_snapshot`` row RESOLVABLE,
-    so EVERY rows-present shape now refuses loudly at bridge execution and
-    the chartered L2-b gap keeps firing where it is real). Full semantics +
-    the raw-bundle control (``LIVE_DATA_FAILURE_REASON``) live in
-    ``test_pm_two_bridges.py``.
+    recipe. Full semantics + the raw-bundle control
+    (``LIVE_DATA_FAILURE_REASON``) live in ``test_pm_two_bridges.py``.
+
+    L2-b Task 4 SCOPE NOTE (review M-2 — this docstring described the L1
+    landing state and had gone stale). What production registers is now
+    ``register_production_data_provider`` / ``ProductionDataProvider``: L2-b
+    built a real ``DataRuntimeWorld``, so a rows-present worker resolves its
+    own per-run world and runs the real Phase-3 session, and only a ROWLESS
+    worker freezes the catalog-licensed EMPTY. Pinned above, in
+    ``test_build_production_bindings_registers_through_the_one_recipe``.
+    ``register_worldless_data_provider`` survives ONLY as the per-run
+    ``assembly._SubjectScopedFactories`` target (the named Task-5 residue) —
+    "EVERY rows-present shape refuses loudly" was true under that incumbent
+    and is no longer true of production. The test below still drives the
+    worldless recipe deliberately: its assertion is a REGISTRATION fact (pm's
+    resolver constructs and derives its two active bridges), which any bound
+    ``data.runtime`` provider satisfies, and it needs neither durable stores
+    nor a committed snapshot. It dies with the class at Task 5.
     """
 
     def test_pm_is_refused_on_the_raw_bundle_but_resolves_through_the_recipes(
@@ -625,7 +636,11 @@ class TestTheNamedRemainingGap:
         assert str(exc_info.value) == LIVE_DATA_FAILURE_REASON
 
         # the ruled flip: with the two provider recipes, pm's resolver
-        # constructs and derives exactly its two active bridges.
+        # constructs and derives exactly its two active bridges. The DATA half
+        # is deliberately the surviving worldless recipe, NOT what production
+        # registers since L2-b Task 4 (see the class SCOPE NOTE): what is
+        # asserted below is a registration fact — the resolver's required set —
+        # which is provider-agnostic. Dies with the class at Task 5.
         register_phase3_memory_provider_factory(
             factories=experience_only, stores=None)
         register_worldless_data_provider(factories=experience_only)

@@ -439,7 +439,17 @@ class TestTheProductionRegistrationSeam:
            ``build_production_bindings`` returned — the sealed data identity is
            ALREADY bound on the bundle. A lazily-registered provider would
            leave a window in which a lease could be drawn against an unbound
-           bridge (the burned-lease precedent).
+           bridge (the burned-lease precedent);
+        7. (L2-b Task 4 review, I-1) BOTH refusal-sink wirings are pinned BY
+           IDENTITY to the ONE hoisted ``production_data_refusal_audit_sink``:
+           the world seam's ``refusal_audit_sink_factory=`` and the plan
+           runner's ``refusal_sink=``. Deleting either kwarg is the
+           half-wired-kwarg defect class (item 4's sibling) with a SILENT
+           failure mode — the hoist would fall back to a fresh per-world
+           unreachable sink, and the gateway to a sink over the BARE audit
+           detail registry that answers ``UnknownAuditDetailSchema`` to the
+           very ``DataFetchRefusalDetails@1`` a PitGuard refusal routes
+           through it, masking the refusal it exists to audit.
         """
         from guanlan_v2 import orch_store_status as status_mod
         from guanlan_v2.orchestration.adapters import durable as durable_mod
@@ -475,6 +485,19 @@ class TestTheProductionRegistrationSeam:
 
         monkeypatch.setattr(assembly, "build_production_plan_runner", spy_bppr)
 
+        # (7) the refusal-sink identity pin: capture every sink the ONE recipe
+        # builds during binding construction. The hoist means EXACTLY one.
+        sinks: list = []
+        real_sink_recipe = DW.production_data_refusal_audit_sink
+
+        def spy_sink_recipe(clock):
+            built_sink = real_sink_recipe(clock)
+            sinks.append(built_sink)
+            return built_sink
+
+        monkeypatch.setattr(
+            DW, "production_data_refusal_audit_sink", spy_sink_recipe)
+
         captured: dict = {}
         real_make = live_decide.make_orchestrated_decide
 
@@ -506,6 +529,23 @@ class TestTheProductionRegistrationSeam:
         # CONSCIOUS FLIP (L2-b Task 4). Pre-flip:
         #     assert isinstance(provider, RT.WorldlessDataBridgeProvider)
         assert isinstance(provider, DW.ProductionDataProvider)
+        # (7a) the WORLD seam's kwarg, by identity. Exactly ONE sink is built
+        # per binding set (the ExperienceRetrievalBackend hoist idiom), and the
+        # registered resolver's factory must hand out THAT object. Drop
+        # `refusal_audit_sink_factory=` at the registration call and the
+        # resolver falls back to `_default_refusal_audit_sink_factory`, whose
+        # `build()` re-enters this spy and returns a FRESH per-world sink that
+        # nothing outside the world ever holds — the `is` below reddens (and so
+        # does the count, since the spy records the extra build).
+        assert len(sinks) == 1, (
+            "binding construction must build EXACTLY ONE data-aware refusal "
+            "audit sink (hoisted, not one per world)")
+        hoisted_sink = sinks[0]
+        assert provider._resolver._sink_factory() is hoisted_sink, (
+            "the production registration must hand the HOISTED sink through "
+            "refusal_audit_sink_factory=; a fresh per-world sink records "
+            "refusals nobody can ever read")
+        assert len(sinks) == 1, "the hoisted seam must not rebuild the sink"
         # (5) the seven data capability backends, on the SAME registry, all the
         # ONE thread-confined instance (gate D-A's per-invocation shape).
         caps = data_capability_refs()
@@ -540,6 +580,17 @@ class TestTheProductionRegistrationSeam:
         # L1 Task 4: a factory call that says nothing about the subject stays
         # honestly UNBOUND at the runner (never a defaulted projection).
         assert runner_kwargs.get("subject_params") is None
+        # (7b) the RUNNER seam's kwarg, by identity — the same hoisted sink the
+        # per-run worlds record through. Drop `refusal_sink=` from the
+        # `build_production_plan_runner` call and assembly builds its own sink
+        # over the BARE default_audit_detail_registry(), which answers
+        # UnknownAuditDetailSchema to the DataFetchRefusalDetails@1 a PitGuard
+        # candidate refusal routes through CapabilityGateway.reject — masking
+        # the refusal instead of auditing it. Silent until a real refusal
+        # fires in production, hence pinned by identity here.
+        assert runner_kwargs.get("refusal_sink") is hoisted_sink, (
+            "the capability gateway must share the data-aware refusal sink; "
+            "the runner's own default sink cannot validate a data refusal")
         assert callable(runner)
         with pytest.raises(LaunchRefused, match="no declared lane binding"):
             runner(lane="main", point=SimpleNamespace(point_ordinal=0),
