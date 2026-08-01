@@ -606,19 +606,34 @@ class PitGuard:
             # material because the range is uncovered is not "zero sessions" — it
             # would silently undercount elapsed sessions and pass stale data as
             # fresh. An uncovered range is a snapshot-integrity fault, loud.
+            material = self._calendar.material_ref
+            named = (
+                f"{self._calendar.calendar_id!r} material "
+                f"{material.id}@{material.version}"
+            )
             coverage = self._calendar.coverage
             if coverage is None:
                 raise SnapshotMismatchError(
-                    "trading-calendar material is empty; session freshness cannot "
-                    "be evaluated (no covered range)"
+                    f"trading-calendar {named} is empty; session freshness cannot "
+                    "be evaluated (no covered range). REMEDY: commit trading-calendar "
+                    "material with sessions and re-freeze the recipe; coverage is "
+                    "never extrapolated."
                 )
             lo, hi = coverage
             if latest_date < lo or as_of_date > hi:
+                # The dated cliff: a session-based policy is only evaluable inside
+                # the COMMITTED material's span, so the first run past its last
+                # covered date fails here rather than silently undercounting. The
+                # remedy is not a code change — it is committing next period's
+                # material — so name it in the message the operator reads.
                 raise SnapshotMismatchError(
-                    "trading-calendar material covers "
+                    f"trading-calendar {named} covers "
                     f"[{lo.isoformat()}, {hi.isoformat()}] but session freshness "
                     f"must count [{latest_date.isoformat()}, {as_of_date.isoformat()}]; "
-                    "an uncovered range cannot be counted (no silent undercount)"
+                    "an uncovered range cannot be counted (no silent undercount). "
+                    f"REMEDY: commit trading-calendar material covering "
+                    f"{as_of_date.year} (extend {material.id} and consciously "
+                    "re-freeze the recipe digests); coverage is never extrapolated."
                 )
             span = self._calendar.sessions_between(latest_date, as_of_date)
             sessions_since = span - (1 if self._calendar.is_session(latest_date) else 0)

@@ -54,6 +54,7 @@ from guanlan_v2.orchestration.data.errors import (
     MissingAvailabilityRefused,
     NotConfiguredError,
     RoutingConfigurationError,
+    SnapshotMismatchError,
     SourceBrokenError,
     StaleDataError,
 )
@@ -192,8 +193,13 @@ class _SpyRecorder:
 class _OnlineWorld:
     def __init__(self, schema_registry, *, method_id, params, probe_stub, clock,
                  spy_source=False, resolve_source_fn=None, data_snapshot_id="online-root-A",
-                 as_of=AS_OF, calendar_dep=CALENDAR, freshness=None):
+                 as_of=AS_OF, calendar_dep=CALENDAR, freshness=None,
+                 guard_calendar=None, policy=None):
         self.as_of = as_of
+        # the calendar the GUARD (and the real dispatch) binds. Defaults to this
+        # file's synthetic weekday material; the production-join and coverage-cliff
+        # tests bind the COMMITTED material instead.
+        self.guard_calendar = guard_calendar if guard_calendar is not None else CALENDAR
         surface = phase3_data_surface()
         self.spec = surface.spec_by_method[method_id]
         online_desc = build_online_live_descriptor(
@@ -258,15 +264,15 @@ class _OnlineWorld:
         self.adapter = LiveClientSource(
             probe_fn=probe_stub, resolve_source_fn=resolve_source_fn,
             calendar=calendar_dep)
-        self.policy = ResolvedDataMethodPolicy.build(
+        self.policy = policy if policy is not None else ResolvedDataMethodPolicy.build(
             method_ref=self.spec.method_ref,
             freshness_policy=freshness if freshness is not None else surface.freshness_policy,
-            limit_policy=None, calendar_id="cn_a_share",
-            calendar_material_ref=CALENDAR.material_ref)
+            limit_policy=None, calendar_id=self.guard_calendar.calendar_id,
+            calendar_material_ref=self.guard_calendar.material_ref)
 
     def guard(self, recorder=None) -> PitGuard:
         return PitGuard.from_context(
-            self.ctx, clock=_FrozenClock(self.as_of), calendar=CALENDAR,
+            self.ctx, clock=_FrozenClock(self.as_of), calendar=self.guard_calendar,
             refusal_recorder=recorder or _SpyRecorder())
 
     def fetch(self) -> RawFetch:
@@ -690,6 +696,11 @@ SETTLED_AT_A = datetime(2026, 7, 15, 7, 0, tzinfo=UTC)
 QUOTE_TIME_WEEKEND = "2026-07-17 15:00:00"
 SETTLED_SESSION_B = "2026-07-16"
 SETTLED_AT_B = datetime(2026, 7, 16, 7, 0, tzinfo=UTC)
+#: ... and regime B's world is a GENUINE weekend one (review M4): the run is
+#: frozen at Saturday 2026-07-18 00:00 +08 and the probe fires Saturday
+#: mid-morning - a day the committed material carries no session for.
+WEEKEND_AS_OF = datetime(2026, 7, 17, 16, 0, tzinfo=UTC)   # Sat 2026-07-18 00:00 +08
+WEEKEND_PULL = datetime(2026, 7, 18, 3, 0, tzinfo=UTC)     # Sat 2026-07-18 11:00 +08
 
 SETTLED_CLOSE = 1470.0
 
@@ -705,13 +716,15 @@ def _snapshot_params(as_of: datetime) -> dict:
 
 
 def _quote_row(*, quote_time=QUOTE_TIME_INTRADAY, close_key="prev_close",
-               time_key="quote_time"):
+               time_key="quote_time", close=SETTLED_CLOSE, extra=None):
     """A tencent_realtime_quote-shaped row: intraday fields + the settled close."""
     row = {"symbol": "sh600519", "code": "600519", "name": "MAOTAI",
-           "price": 1487.3, close_key: SETTLED_CLOSE, "open": 1475.0,
+           "price": 1487.3, close_key: close, "open": 1475.0,
            "high": 1490.0, "low": 1468.0, "change_pct": 1.18}
     if quote_time is not None:
         row[time_key] = quote_time
+    if extra:
+        row.update(extra)
     return row
 
 
@@ -720,12 +733,14 @@ def _quote_env(*, pulled_at=INTRADAY_PULL, **kw):
 
 
 def _quote_world(schema_registry, env, *, method_id="verified_snapshot", params=None,
-                 as_of=MIDNIGHT_AS_OF, calendar_dep=CALENDAR, freshness=None):
+                 as_of=MIDNIGHT_AS_OF, calendar_dep=CALENDAR, freshness=None,
+                 guard_calendar=None, policy=None):
     return _OnlineWorld(
         schema_registry, method_id=method_id,
         params=params if params is not None else _snapshot_params(as_of),
         probe_stub=_ProbeStub(env), clock=_FrozenClock(as_of),
-        as_of=as_of, calendar_dep=calendar_dep, freshness=freshness)
+        as_of=as_of, calendar_dep=calendar_dep, freshness=freshness,
+        guard_calendar=guard_calendar, policy=policy)
 
 
 class _CompletingGateway(_FallbackGateway):
@@ -748,7 +763,7 @@ def _dispatch(world, schema_registry, gateway):
         manifest=world.manifest, registry=world.registry, schema_registry=schema_registry,
         resolved_policy=world.policy, gateway=gateway, evidence_writer=_FakeWriter(),
         payload_reader=None, refusal_audit_sink=sink, cache=_NullCache(),
-        clock=_FrozenClock(world.as_of), calendar=CALENDAR)
+        clock=_FrozenClock(world.as_of), calendar=world.guard_calendar)
 
 
 # =========================================================================== #
@@ -782,13 +797,26 @@ def test_settled_session_is_calendar_attributed_intraday_regime(schema_registry)
 
 
 def test_settled_session_is_calendar_attributed_weekend_regime(schema_registry):
-    """REGIME B - a weekend/pre-open pull: the venue still serves FRIDAY's
-    snapshot (quote_time = Friday 2026-07-17 close), so the row's ``last_close``
-    belongs to THURSDAY 2026-07-16 - the session BEFORE Friday. The SAME rule
-    ('latest session strictly before the anchor's session') answers both
-    regimes; no as_of arithmetic anywhere."""
+    """REGIME B - a REAL weekend pull (review M4: this was a relabel of the
+    intraday world; it is now an actual weekend fixture). The run is frozen at
+    SATURDAY 2026-07-18 00:00 +08 and the probe happens Saturday mid-morning -
+    a non-session day - while the venue still serves FRIDAY 2026-07-17's
+    snapshot (quote_time = that session's close). The row's ``last_close``
+    therefore belongs to THURSDAY 2026-07-16 - the session BEFORE Friday. The
+    SAME rule ('latest session strictly before the anchor's session') answers
+    both regimes; no as_of arithmetic anywhere."""
+    # the fixture really is a weekend: the PULL instant falls on a Saturday,
+    # which the committed material does not carry as a session at all.
+    pull_local = WEEKEND_PULL.astimezone(_SH)
+    assert pull_local.weekday() == 5                      # Saturday
+    assert not CALENDAR.is_session(pull_local.date())
+    # the anchor (Friday) and the pull (Saturday) are genuinely different days.
+    assert pull_local.date() != date.fromisoformat(QUOTE_TIME_WEEKEND[:10])
+
     world = _quote_world(schema_registry,
-                         _quote_env(quote_time=QUOTE_TIME_WEEKEND))
+                         _quote_env(quote_time=QUOTE_TIME_WEEKEND,
+                                    pulled_at=WEEKEND_PULL),
+                         as_of=WEEKEND_AS_OF)
     c = world.fetch().candidates[0]
     assert c.available_at == SETTLED_AT_B
     assert c.effective_at == SETTLED_AT_B
@@ -796,6 +824,9 @@ def test_settled_session_is_calendar_attributed_weekend_regime(schema_registry):
     # the regimes really do differ: the same close is attributed to a DIFFERENT
     # session than regime A's, purely from the venue anchor + the calendar.
     assert SETTLED_AT_B != SETTLED_AT_A
+    # ... and anchoring on the PULL instant instead would have been a lie: the
+    # Saturday pull is not a session, so it names no settled close at all.
+    assert live_data._previous_session(CALENDAR, pull_local.date()) is None
 
 
 @pytest.mark.parametrize(
@@ -816,10 +847,20 @@ def test_settled_candidate_binds_the_real_nested_vendor_row(schema_registry):
     tencent handler names the settled close ``last_close``) - bind both at source.
 
     The item-level ``publish_ts`` is accepted as the anchor ONLY when the item's
-    own ``time_source`` proves it is a PROVIDER time. The real tencent envelope
-    stamps ``time_source="fetch_fallback"`` (the item shaper's fallback when the
-    vendor row carries no time - ``stocks/src/data/live_sources.py``), i.e. the
-    FETCH instant, which is not a venue quote time: that arm must NOT fire."""
+    own ``time_source`` proves it is a PROVIDER time. A ``fetch_fallback``
+    stamp (the item shaper's fallback when the vendor row carries no time -
+    ``stocks/src/data/live_sources.py``) is the FETCH instant, which is not a
+    venue quote time: that arm must NOT fire.
+
+    STATE-OF-THE-WORLD NOTE (review I3, recorded 2026-08-02): arm (b) is the
+    **PRE-2026-08-02 vendor shape** - the no-timestamp fallback arm - NOT
+    "today's real shape". On 2026-08-02 the controller landed the one-key
+    stocks-side fix (``G:\\stocks\\src\\data\\live_text_sources.py`` now emits
+    ``"quote_time": vals[30]``, live-confirmed ``20260731161450``), so the REAL
+    tencent row now carries a venue quote timestamp and the settled projection
+    FIRES in production. Arm (b) is KEPT deliberately: the fallback shape is
+    still reachable (any vendor/row that carries no time of its own) and its
+    honest refusal must stay pinned."""
     def _item(time_source):
         return {"source_id": "tencent_realtime_quote", "provider": "tencent",
                 "category": "market", "source_type": "quote_live", "title": "MAOTAI",
@@ -836,9 +877,11 @@ def test_settled_candidate_binds_the_real_nested_vendor_row(schema_registry):
     assert c.raw_payload["settled_session_date"] == SETTLED_SESSION_A
     assert c.raw_payload["name"] == "MAOTAI"
 
-    # (b) TODAY'S REAL SHAPE: fetch_fallback publish_ts is the PULL instant, not a
-    #     venue quote time -> NO settled candidate; the live candidate stands and
-    #     the guard refuses it honestly. Nothing is guessed to paper over it.
+    # (b) THE NO-TIMESTAMP FALLBACK ARM (the pre-2026-08-02 vendor shape, still
+    #     reachable for any row carrying no time of its own): a fetch_fallback
+    #     publish_ts is the PULL instant, not a venue quote time -> NO settled
+    #     candidate; the live candidate stands and the guard refuses it honestly.
+    #     Nothing is guessed to paper over it.
     inert = _quote_world(schema_registry, _ok_env(
         items=[_item("fetch_fallback")], pulled_at=_pulled(INTRADAY_PULL)))
     ic = inert.fetch().candidates[0]
@@ -846,6 +889,82 @@ def test_settled_candidate_binds_the_real_nested_vendor_row(schema_registry):
     assert "settled_session_date" not in ic.raw_payload
     with pytest.raises(FutureDataRefused):
         inert.check()
+
+
+def test_vendor_row_cannot_overrule_the_items_own_time_source_gate(schema_registry):
+    """REVIEW M2 - the trust direction of the module's ONE defensive check.
+
+    ``_vendor_row_view`` overlays the UNTRUSTED vendor row on top of the item
+    (raw wins), so reading the ``time_source`` gate from that merged view would
+    let a vendor row carrying its own ``time_source`` key overrule the shaper's
+    honest ``fetch_fallback`` attestation and unlock the very item-level
+    ``publish_ts`` anchor the gate exists to block. The gate - and the item-level
+    keys it unlocks - are therefore read from the ITEM."""
+    item = {"source_id": "tencent_realtime_quote", "provider": "tencent",
+            "category": "market", "source_type": "quote_live", "title": "MAOTAI",
+            "publish_ts": "2026-07-16T10:30:00", "visible_ts": "2026-07-16T10:30:00",
+            # the SHAPER's honest attestation: this publish_ts IS the fetch instant.
+            "time_source": "fetch_fallback", "time_confidence": 0.2,
+            # ... and the vendor row tries to claim otherwise (no quote-time key).
+            "raw": _quote_row(close_key="last_close", quote_time=None,
+                              extra={"time_source": "provider.publish_ts"})}
+    world = _quote_world(schema_registry, _ok_env(
+        items=[item], pulled_at=_pulled(INTRADAY_PULL)))
+    c = world.fetch().candidates[0]
+    assert c.available_at == _online_pulled(INTRADAY_PULL)   # NO settled projection
+    assert "settled_session_date" not in c.raw_payload
+    with pytest.raises(FutureDataRefused):
+        world.check()
+
+
+# =========================================================================== #
+# 10a. I1 - a close of <= 0 is a PARSE-FAILURE SENTINEL, not an observation     #
+# =========================================================================== #
+@pytest.mark.parametrize(
+    "close, why",
+    [(0.0, "the real stocks _num helper returns 0.0 on ANY parse failure"),
+     (0, "the same sentinel as an int"),
+     (-1.0, "no A-share instrument settles below zero"),
+     (float("nan"), "a NaN close is unreadable, never an observation"),
+     (float("inf"), "a non-finite close is unreadable, never an observation")])
+def test_a_non_positive_close_yields_no_settled_candidate(schema_registry, close, why):
+    """REVIEW I1 - the settled projection must REFUSE to emit when the settled
+    close is not a positive finite number.
+
+    ``G:\\stocks\\src\\data\\live_text_sources.py``'s ``_num`` helper returns
+    ``0.0`` on any parse failure, and a suspended / not-yet-listed instrument
+    quotes zeros outright; ``FiniteFloat`` only rejects bool/non-finite, so
+    before this fix a zero completed a REAL read as
+    ``VerifiedSnapshotRecord(last_price=0.0, prev_close=0.0)`` under a
+    ``guard_result="passed"`` audit. No-guess idiom: emit NO settled candidate -
+    the live candidate's honest refusal stands. Nothing is substituted or
+    clamped."""
+    world = _quote_world(schema_registry, _quote_env(close=close))
+    c = world.fetch().candidates[0]
+    assert c.available_at == _online_pulled(INTRADAY_PULL), why
+    assert "settled_session_date" not in c.raw_payload
+    assert c.raw_payload["price"] == 1487.3          # the live projection, untouched
+    # ... and the guard's honest refusal is what the read gets.
+    with pytest.raises(FutureDataRefused):
+        world.check()
+    # the pure helper agrees at source (no settled close is READABLE here).
+    assert live_data._settled_close({"prev_close": close}) is None
+
+
+def test_an_unreadable_close_key_falls_through_to_the_next_bound_alias(schema_registry):
+    """The bound close keys are spellings of ONE 昨收 datum, so an unreadable
+    spelling is simply not the readable one: a 0.0 sentinel under ``prev_close``
+    alongside a real ``last_close`` reads the real number. Nothing is averaged,
+    substituted or guessed - the fall-through only ever picks a value the vendor
+    actually transmitted."""
+    world = _quote_world(schema_registry, _quote_env(
+        close=0.0, extra={"last_close": SETTLED_CLOSE}))
+    c = world.fetch().candidates[0]
+    assert c.available_at == SETTLED_AT_A
+    assert c.raw_payload["last_price"] == SETTLED_CLOSE
+    assert c.raw_payload["prev_close"] == SETTLED_CLOSE
+    # both slots still carry the SAME single settled observation (pre-fix C-2).
+    assert c.raw_payload["settled_session_date"] == SETTLED_SESSION_A
 
 
 # =========================================================================== #
@@ -876,6 +995,84 @@ def test_settled_row_completes_a_real_read_while_ticks_refuse(schema_registry):
         _dispatch(tick, schema_registry, tick_gw)
     assert exc.value.future_rows == 1
     assert tick_gw.finalized == []
+
+
+# =========================================================================== #
+# 10b. I2 - the SETTLED marker must survive to what pm actually reads           #
+# =========================================================================== #
+def _render(result, world, schema_registry):
+    """Render a dispatched result exactly as the prompt assembler would."""
+    from guanlan_v2.orchestration.data.render import build_rendered_data_block
+    from guanlan_v2.orchestration.refs import PayloadRef, TypedPayloadRef
+    ref = TypedPayloadRef(
+        schema_ref=world.spec.result_schema_ref,
+        payload_ref=PayloadRef(namespace="main", object_id="res-1",
+                               content_digest=result.content_digest))
+    return build_rendered_data_block(
+        method_spec=world.spec, result=result, result_ref=ref, registry=schema_registry)
+
+
+def test_the_settled_marker_reaches_the_rendered_untrusted_block(schema_registry):
+    """REVIEW I2 / adjudication G - the settled-ness marker is silently dropped
+    by the SEALED record family, so what reached pm was ``last_price ==
+    prev_close`` under a method named ``verified_snapshot``: a genuine 0.00% day.
+
+    The record schema is sealed catalog material and does NOT move. The marker is
+    re-attached on the channel that already exists and already reaches the prompt
+    (``DataResult.badges`` / ``.warnings``, embedded verbatim by the deterministic
+    renderer), derived from the candidate's own ``settled_session_date`` payload
+    evidence - not inferred from a timestamp comparison."""
+    from guanlan_v2.orchestration.data.registry import SETTLED_PRIOR_SESSION_BADGE
+
+    world = _quote_world(schema_registry, _quote_env())
+    gateway = _CompletingGateway({world.src_ref.id: world.adapter.fetch}, _audit_sink())
+    result = _dispatch(world, schema_registry, gateway).result
+    assert result.status is DataStatus.OK
+
+    # (1) the sealed record really does drop it, and the two slots really are equal.
+    row = result.data.rows[0]
+    assert not hasattr(row, "settled_session_date")
+    assert row.last_price == row.prev_close == SETTLED_CLOSE
+
+    # (2) ... so the RESULT carries the honest marker instead.
+    assert SETTLED_PRIOR_SESSION_BADGE in result.badges
+    assert len(result.warnings) == 1
+    assert SETTLED_SESSION_A in result.warnings[0]
+
+    # (3) ... and it is present in the untrusted block pm actually reads, through
+    #     the REAL dispatch + the REAL renderer.
+    block = _render(result, world, schema_registry)
+    assert block.trust == "untrusted_data"
+    text = block.rendered_text
+    assert "SETTLED PRIOR-SESSION DATA" in text
+    assert SETTLED_SESSION_A in text                  # the session is NAMED
+    assert "SAME settled observation" in text         # the two slots are called out
+    assert "0.00% BY CONSTRUCTION" in text            # the day-change is not a fact
+    assert SETTLED_PRIOR_SESSION_BADGE in text
+
+
+def test_a_live_read_carries_no_settled_marker(schema_registry):
+    """The CONTROL: the marker is evidence-driven, never blanket. A live
+    (non-settled) verified_snapshot read that completes under an as_of AFTER the
+    pull carries no badge, no warning and no marker text."""
+    from guanlan_v2.orchestration.data.registry import SETTLED_PRIOR_SESSION_BADGE
+
+    # a live row with NO venue anchor (so no settled projection) whose fields the
+    # record family can adapt; the requested symbol comes from the request params.
+    live_row = {"code": "600519", "name": "MAOTAI", "price": 1487.3,
+                "last_price": 1487.3, "prev_close": SETTLED_CLOSE}
+    live = _quote_world(
+        schema_registry,
+        _ok_env(items=[live_row], pulled_at=_pulled(INTRADAY_PULL)),
+        as_of=AS_OF)                                   # 15:00 +08, AFTER the 10:30 pull
+    gateway = _CompletingGateway({live.src_ref.id: live.adapter.fetch}, _audit_sink())
+    result = _dispatch(live, schema_registry, gateway).result
+    assert result.status is DataStatus.OK
+    assert result.badges == ()
+    assert result.warnings == ()
+    text = _render(result, live, schema_registry).rendered_text
+    assert "SETTLED PRIOR-SESSION DATA" not in text
+    assert SETTLED_PRIOR_SESSION_BADGE not in text
 
 
 # =========================================================================== #
@@ -960,6 +1157,16 @@ def test_settled_projection_is_verified_snapshot_only(schema_registry, method_id
 # a permanent weekly hole. The addendum registers an ADDITIONAL method-scoped  #
 # session policy (max_trading_sessions=1) for verified_snapshot; the default   #
 # elapsed policy stays for every other method.                                 #
+#                                                                             #
+# SCOPE OF THE CLOSURE (review M7 - the CONTROLLER RULING, recorded so the     #
+# campaign day is chosen with open eyes): the hole closes ONLY when the venue  #
+# serves an anchor on the CURRENT session. A Sunday pull is still served       #
+# FRIDAY's snapshot, whose last_close is THURSDAY's - two sessions old at      #
+# Monday's boundary - so a weekend run is honestly STALE and refuses. That is  #
+# BY DESIGN, not a gap: the Monday INTRADAY run (anchor = Monday, settled =    #
+# Friday, exactly one session) is the fresh path, and it is the arm            #
+# test_monday_read_of_friday_settled_data_is_session_fresh pins. The two-      #
+# sessions-old arm below pins the refusal, deliberately.                       #
 # =========================================================================== #
 #: Monday 2026-07-20 00:00 Asia/Shanghai == 2026-07-19 16:00Z - the session
 #: midnight of the FIRST session after a weekend.
@@ -1033,3 +1240,122 @@ def test_two_sessions_old_settled_data_is_stale_under_the_session_policy(schema_
     with pytest.raises(StaleDataError) as exc:
         world.check(freshness=SESSION_FRESHNESS)
     assert exc.value.latest_available_at == SETTLED_AT_B
+
+
+# =========================================================================== #
+# 14. THE JOIN (review M3): the PRODUCTION scoping and the Monday-freshness    #
+#     dispatch behaviour, proven in ONE chain over the COMMITTED material.     #
+# =========================================================================== #
+def _production_monday_world(schema_registry, *, quote_time, calendar):
+    return _quote_world(
+        schema_registry, _quote_env(quote_time=quote_time, pulled_at=MONDAY_PULL),
+        as_of=MONDAY_AS_OF, calendar_dep=calendar, guard_calendar=calendar)
+
+
+def test_production_policy_scoping_and_the_monday_admission_are_one_chain(schema_registry):
+    """REVIEW M3 - the two halves of the freshness story were never joined: the
+    Monday admission hand-built its policy over the SYNTHETIC calendar, while the
+    production method-scoping was proven only in ``test_data_world_recipe.py``.
+    Deleting the method-scoped branch of ``DataPolicyResolver._resolve_freshness``
+    reddened exactly one test and left this file green.
+
+    This test is the join: the policy object the PRODUCTION resolver hands back
+    for ``verified_snapshot`` - unmodified, over the COMMITTED calendar material -
+    is what admits the Monday read through the REAL dispatch."""
+    from guanlan_v2.orchestration.adapters.data_world import (
+        PRODUCTION_VERIFIED_SNAPSHOT_FRESHNESS_POLICY_ID,
+        production_data_recipe,
+    )
+    recipe = production_data_recipe()
+    cal = recipe.calendar
+    # the COMMITTED material really carries this Monday shape (not a synthetic one).
+    assert cal.material_ref.id == "cal.cn-a-share-sessions-2026"
+    assert cal.is_session(date(2026, 7, 17)) and cal.is_session(date(2026, 7, 20))
+
+    world = _production_monday_world(
+        schema_registry, quote_time=QUOTE_TIME_MONDAY, calendar=cal)
+
+    # (1) the PRODUCTION resolver selects the METHOD-SCOPED session policy for
+    #     this exact method spec (whose freshness_policy_ref is untouched).
+    resolved = recipe.policy_resolver.resolve_method(world.spec, ctx=world.ctx)
+    assert resolved.freshness_policy.policy_id == \
+        PRODUCTION_VERIFIED_SNAPSHOT_FRESHNESS_POLICY_ID
+    assert resolved.freshness_policy.is_session_based is True
+    assert resolved.freshness_policy.max_trading_sessions == 1
+    assert resolved.calendar_material_ref == cal.material_ref
+    assert world.spec.freshness_policy_ref == phase3_data_surface().freshness_ref
+
+    # (2) THAT policy object, passed through unmodified, admits the Monday read
+    #     end-to-end: production scoping -> real dispatch -> OK over settled data.
+    world.policy = resolved
+    gateway = _CompletingGateway({world.src_ref.id: world.adapter.fetch}, _audit_sink())
+    outcome = _dispatch(world, schema_registry, gateway)
+    assert outcome.result.status is DataStatus.OK
+    assert outcome.result.pit_audit.guard_result == "passed"
+    assert outcome.result.pit_audit.latest_available_at == SETTLED_AT_FRIDAY
+    assert outcome.result.data.rows[0].last_price == SETTLED_CLOSE
+    assert len(gateway.finalized) == 1
+    # the elapsed default could NOT have admitted it — the scoping is load-bearing.
+    assert (MONDAY_AS_OF - SETTLED_AT_FRIDAY).total_seconds() > \
+        phase3_data_surface().freshness_policy.max_elapsed_seconds
+
+
+# =========================================================================== #
+# 15. THE 2027 COVERAGE CLIFF (review I4): a session policy is only evaluable  #
+#     inside the COMMITTED material's span, and the edge must be TYPED + loud. #
+# =========================================================================== #
+#: 2026-12-31 16:00Z == 2027-01-01 00:00 Asia/Shanghai — the first session
+#: midnight PAST the committed 2026 material's last covered date.
+CLIFF_AS_OF = datetime(2026, 12, 31, 16, 0, tzinfo=UTC)
+#: the venue anchor is the LAST covered session, so the settled projection itself
+#: is perfectly in-coverage — only the as_of has walked off the end.
+QUOTE_TIME_CLIFF = "2026-12-31 15:00:00"
+CLIFF_PULL = datetime(2027, 1, 1, 2, 30, tzinfo=UTC)
+
+
+def test_the_2027_coverage_cliff_is_a_typed_loud_refusal_with_the_remedy(schema_registry):
+    """REVIEW I4 - binding ``verified_snapshot`` to a SESSION policy made
+    ``PitGuard._check_freshness``'s coverage assertion load-bearing for that
+    method: the committed material covers 2026-01-05..2026-12-31, so from
+    2027-01-01 an ``as_of_date > hi`` raises. ``dispatch`` classified only
+    FutureDataRefused / MissingAvailabilityRefused / StaleDataError, so the fault
+    escaped as an UNCLASSIFIED exception - no reject, no audit.
+
+    It must instead surface as the module's TYPED refusal family, loud, carrying
+    the remedy that names the calendar material and the need to commit next
+    year's. Coverage is NOT extended silently and no 2027 material is generated."""
+    from guanlan_v2.orchestration.adapters.data_world import production_data_recipe
+
+    recipe = production_data_recipe()
+    cal = recipe.calendar
+    lo, hi = cal.coverage
+    assert (lo, hi) == (date(2026, 1, 5), date(2026, 12, 31))   # the committed span
+
+    world = _quote_world(
+        schema_registry, _quote_env(quote_time=QUOTE_TIME_CLIFF, pulled_at=CLIFF_PULL),
+        as_of=CLIFF_AS_OF, calendar_dep=cal, guard_calendar=cal)
+    world.policy = recipe.policy_resolver.resolve_method(world.spec, ctx=world.ctx)
+    assert world.policy.freshness_policy.is_session_based is True
+
+    # the settled projection itself is in-coverage and PIT-visible: only the
+    # as_of has walked past the material's last covered date.
+    cand = world.fetch().candidates[0]
+    assert cand.available_at == datetime(2026, 12, 30, 7, 0, tzinfo=UTC)
+    assert cand.available_at <= world.ctx.as_of
+
+    gateway = _CompletingGateway({world.src_ref.id: world.adapter.fetch}, _audit_sink())
+    with pytest.raises(SnapshotMismatchError) as exc:
+        _dispatch(world, schema_registry, gateway)
+
+    msg = str(exc.value)
+    assert "cal.cn-a-share-sessions-2026" in msg          # the material is NAMED
+    assert "2026-12-31" in msg and "2027-01-01" in msg    # the span and the ask
+    assert "REMEDY" in msg and "2027" in msg              # commit next year's material
+    assert "never extrapolated" in msg
+    # classified at the dispatch seam: terminalized EXACTLY once, never finalized.
+    assert gateway.rejects == [("snapshot_mismatch", world.src_ref.id)]
+    assert gateway.finalized == []
+
+    # and it is typed at source too (the guard itself, not only the seam).
+    with pytest.raises(SnapshotMismatchError):
+        world.check(freshness=world.policy.freshness_policy)

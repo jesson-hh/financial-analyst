@@ -359,18 +359,28 @@ def _as_session_date(value: Any) -> _date | None:
     return None
 
 
-def _quote_anchor_date(view: Mapping[str, Any]) -> _date | None:
+def _quote_anchor_date(view: Mapping[str, Any], item: Mapping[str, Any]) -> _date | None:
     """The row's own **venue quote date** — the settled-attribution anchor.
 
     Two bound sources, in precedence order (both venue-side facts, never the
     pull instant and never ``as_of``):
 
-    1. the vendor row's own quote-timestamp key (:data:`_QUOTE_TIME_KEYS`);
-    2. the unified item's ``publish_ts`` / ``visible_ts`` — but ONLY when the
+    1. the **vendor row's** own quote-timestamp key (:data:`_QUOTE_TIME_KEYS`),
+       looked up in ``view`` (the vendor's nested ``raw`` row overlaid on the
+       item) — these keys ARE the vendor's, so the vendor row rightly wins;
+    2. the **unified item's** ``publish_ts`` / ``visible_ts`` — but ONLY when the
        item's own ``time_source`` proves it is a provider time. The stocks item
        shaper falls back to the FETCH instant with ``time_source="fetch_fallback"``
        whenever the vendor row carries no time of its own, and a fetch instant is
        not a quote time.
+
+    **Trust direction (review M2):** the gate AND the item-level keys it unlocks
+    are read from ``item`` — the shaper's own attestation — never from the merged
+    ``view``. ``view`` is the item overlaid by the UNTRUSTED vendor row (raw
+    wins), so reading the gate there would let a vendor row that carries its own
+    ``time_source`` key overrule the shaper's honest ``fetch_fallback``
+    attestation and unlock the very item-level anchor the gate exists to block —
+    a trust inversion in the module's one defensive check.
 
     ``None`` when neither is readable — the caller then emits **no** settled
     candidate at all.
@@ -379,11 +389,11 @@ def _quote_anchor_date(view: Mapping[str, Any]) -> _date | None:
         anchor = _as_session_date(view.get(key))
         if anchor is not None:
             return anchor
-    src = view.get("time_source")
+    src = item.get("time_source")
     if isinstance(src, str) and src.strip() and not src.strip().lower().startswith(
             _UNPROVEN_TIME_SOURCES):
         for key in _ITEM_QUOTE_TIME_KEYS:
-            anchor = _as_session_date(view.get(key))
+            anchor = _as_session_date(item.get(key))
             if anchor is not None:
                 return anchor
     return None
@@ -420,14 +430,31 @@ def _previous_session(calendar: TradingCalendar, anchor: _date) -> _date | None:
 
 
 def _settled_close(view: Mapping[str, Any]) -> float | None:
-    """The row's own settled close — a finite number under a bound key, or ``None``."""
+    """The row's own settled close — a **strictly positive** finite number, or ``None``.
+
+    ``> 0`` is not a tidiness rule, it is the admissibility rule (review I1). The
+    real stocks handler parses every vendor field through a ``_num`` helper that
+    **returns 0.0 on any parse failure** (``G:\\stocks\\src\\data\\live_text_sources.py``),
+    and a suspended / not-yet-listed instrument quotes zeros outright — so a
+    ``0.0`` under ``prev_close`` is a *sentinel for "unreadable"*, not an
+    observation, and no A-share instrument ever settles at or below zero. Before
+    the settled projection existed such a row could never be admitted (a live
+    stamp is always after the frozen boundary); with the projection live, a
+    non-positive close would complete a REAL read carrying a price of zero.
+
+    A non-finite or non-positive value under one key falls through to the next
+    bound alias of the same 昨收 datum (they are spellings of one number, and an
+    unreadable spelling is simply not the readable one); when none is readable
+    the caller emits **no** settled candidate at all and the live candidate's
+    honest PitGuard refusal stands. Nothing is substituted, clamped or guessed.
+    """
     for key in _SETTLED_CLOSE_KEYS:
         v = view.get(key)
         if isinstance(v, bool) or v is None:
             continue
         if isinstance(v, (int, float)):
             f = float(v)
-            if math.isfinite(f):
+            if math.isfinite(f) and f > 0.0:
                 return f
     return None
 
@@ -728,10 +755,12 @@ class LiveClientSource:
 
         Returns ``None`` — i.e. emits NO settled candidate — when this source was
         constructed without a calendar, when the row carries no readable settled
-        close, when no venue quote timestamp is readable, or when the committed
-        calendar cannot ANSWER which session precedes the anchor (outside its
-        covered span, a non-session anchor, or no earlier covered session). The
-        live candidate's honest PitGuard refusal then stands as the outcome.
+        close (a non-positive/non-finite value is NOT readable — see
+        :func:`_settled_close`), when no venue quote timestamp is readable, or
+        when the committed calendar cannot ANSWER which session precedes the
+        anchor (outside its covered span, a non-session anchor, or no earlier
+        covered session). The live candidate's honest PitGuard refusal then
+        stands as the outcome.
         """
         calendar = self._calendar
         if calendar is None:
@@ -740,7 +769,9 @@ class LiveClientSource:
         close = _settled_close(view)
         if close is None:
             return None
-        anchor = _quote_anchor_date(view)
+        # the anchor gate reads the ITEM's own attestation, never the merged view
+        # (review M2 — the vendor row must not be able to overrule the shaper).
+        anchor = _quote_anchor_date(view, item)
         if anchor is None:
             return None
         session = _previous_session(calendar, anchor)

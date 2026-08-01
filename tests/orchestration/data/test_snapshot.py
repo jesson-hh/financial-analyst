@@ -653,3 +653,57 @@ def test_policy_resolver_fails_loud_on_missing_or_drifted_material(surface, conf
                                           calendar_resolver=TradingCalendarResolver([cal]))
     with pytest.raises(ValueError, match="no freshness policy"):
         missing_resolver.resolve_method(drifted_spec, ctx=ctx)
+
+
+def test_a_method_scoped_policy_still_verifies_the_specs_declared_ref(
+        surface, config, source_registry, routing, registry):
+    """REVIEW M6 — a method-scoped policy decides WHICH policy applies, never
+    WHETHER the spec's own ``freshness_policy_ref`` still resolves and is
+    undrifted. The scoped branch used to return before that verification, so a
+    method carrying a scoped policy silently stopped proving its declaration."""
+    from guanlan_v2.orchestration.data.source import DataMethodSpec
+
+    cal = _calendar()
+    declared = _session_policy(cal)                      # scoped to "prices"
+    scoped = FreshnessPolicy.build(                      # scoped to the METHOD id
+        policy_id="policy.freshness.ohlcv-session", policy_version="1",
+        method_or_category="ohlcv", max_trading_sessions=1,
+        calendar_id=cal.calendar_id, calendar_material_ref=cal.material_ref)
+    base = surface.spec_by_method["ohlcv"]
+    fields = {n: getattr(base, n) for n in type(base).model_fields if n != "spec_digest"}
+
+    def _spec(content_digest_value: str) -> DataMethodSpec:
+        return DataMethodSpec.build(**{
+            **fields,
+            "freshness_policy_ref": ContentRef(
+                id=declared.policy_id, version=declared.policy_version,
+                content_digest=content_digest_value),
+        })
+
+    def _resolver(policies) -> DataPolicyResolver:
+        snap = DataSourceRegistrySnapshot.build(
+            registry_version="v", method_specs=(_spec(declared.policy_digest),),
+            source_descriptors=(surface.source_descriptor,), default_routes=(),
+            freshness_policies=policies)
+        return DataPolicyResolver(
+            snap, calendar_resolver=TradingCalendarResolver([cal]))
+
+    manifest = _manifest(routing, registry, entries=(_entry(),))
+    ctx = build_data_context(
+        FixedClock(AS_OF), mode=DataMode.PIT_REPLAY, backend=DataBackend.PIT_STORE,
+        source_config=config, source_registry=source_registry, routing=routing,
+        manifest=manifest)
+
+    # (a) an UNDRIFTED declaration + a method-scoped policy -> the scoped one wins.
+    bundle = _resolver((declared, scoped)).resolve_method(_spec(declared.policy_digest),
+                                                          ctx=ctx)
+    assert bundle.freshness_policy == scoped
+
+    # (b) a DRIFTED declaration is STILL loud, even though a scoped policy exists
+    #     and would otherwise have been returned.
+    with pytest.raises(ValueError, match="drift"):
+        _resolver((declared, scoped)).resolve_method(_spec("9" * 64), ctx=ctx)
+
+    # (c) an UNREGISTERED declaration is equally loud under a scope.
+    with pytest.raises(ValueError, match="no freshness policy"):
+        _resolver((scoped,)).resolve_method(_spec(declared.policy_digest), ctx=ctx)

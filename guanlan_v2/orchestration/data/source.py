@@ -1138,11 +1138,28 @@ class DataPolicyResolver:
         and digest-sealed — there is no unversioned override path. With no
         method-scoped policy the spec's own versioned ``ref`` is resolved, and a
         digest drift or a missing registration is loud.
+
+        **The spec's declared ref is verified either way** (review M6): scoping
+        decides WHICH policy applies, never WHETHER the method spec's own
+        ``freshness_policy_ref`` still resolves and is undrifted. A method that
+        wins a scoped policy therefore still proves its declared ref against the
+        registered material, exactly as the unscoped branch does — a drifted or
+        missing declaration can never be masked by a scope.
         """
+        declared = self._registered_freshness(ref)
         if method_id is not None:
             scoped = self._freshness_by_scope.get(method_id)
             if scoped is not None:
                 return scoped
+        return declared
+
+    def _registered_freshness(self, ref: ContentRef) -> FreshnessPolicy:
+        """The registered policy for the exact ``(id, version)`` ref, digest-verified.
+
+        A digest drift or a missing registration is loud — this is the ONE
+        verification of a spec's declared ``freshness_policy_ref``, shared by the
+        scoped and unscoped branches of :meth:`_resolve_freshness`.
+        """
         for fp in self._snapshot.freshness_policies:
             if (fp.policy_id, fp.policy_version) == (ref.id, ref.version):
                 if fp.policy_digest != ref.content_digest:

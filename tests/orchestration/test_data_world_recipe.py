@@ -656,6 +656,35 @@ class TestProductionDataAdaptersGroupA:
         assert src._calendar is recipe.calendar
         assert src._calendar.material_ref == recipe.calendar.material_ref
 
+    def test_repeated_calls_never_re_read_the_committed_material(self, monkeypatch):
+        """REVIEW M5 — since the addendum, building the adapter map needs the
+        committed calendar, i.e. it reads + digests the material file. That must
+        happen ONCE: :func:`production_data_recipe` is the module-cached,
+        lock-guarded single build, so every later call is a dict literal over the
+        SAME already-loaded ``TradingCalendar``.
+
+        Pinned as a real call count, not by argument: with the cache warm, the
+        material loader is replaced by one that RAISES — repeated calls must
+        still succeed and must still hand back the identical object."""
+        first = production_data_adapters()["guanlan.datafeed"]      # warms the cache
+        assert production_data_recipe() is production_data_recipe()
+
+        calls: list[int] = []
+
+        def _must_not_load():                                       # pragma: no cover
+            calls.append(1)
+            raise AssertionError("the committed calendar material was re-read")
+
+        import guanlan_v2.orchestration.adapters.data_world as DW
+
+        monkeypatch.setattr(DW, "_load_calendar_material", _must_not_load)
+        again = production_data_adapters()["guanlan.datafeed"]
+        third = production_data_adapters()["guanlan.datafeed"]
+        assert calls == []
+        # determinism: a fresh adapter object each call, but ONE calendar object.
+        assert again is not first
+        assert again._calendar is first._calendar is third._calendar
+
 
 class TestBackendEchoGroupB:
     def test_fetch_through_the_backend_echoes_the_sealed_identity(

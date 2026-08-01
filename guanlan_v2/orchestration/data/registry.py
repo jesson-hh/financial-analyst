@@ -154,6 +154,8 @@ __all__ = [
     "DataEvidenceWriter",
     "dispatch",
     "FALLBACK_USED_BADGE",
+    "SETTLED_PRIOR_SESSION_BADGE",
+    "SETTLED_SESSION_DATE_KEY",
     "REQUEST_SCHEMA_REF",
     "GENERIC_DETAIL_SCHEMA_REF",
     "DATA_FETCH_REFUSAL_SCHEMA_REF",
@@ -162,6 +164,15 @@ __all__ = [
 
 #: badge added to an ``OK`` result that a fallback source served.
 FALLBACK_USED_BADGE = "FALLBACK_USED"
+
+#: badge added to a result whose PIT-passed rows are a SETTLED prior-session
+#: projection rather than a live observation (see :func:`_settled_session_marker`).
+SETTLED_PRIOR_SESSION_BADGE = "SETTLED_PRIOR_SESSION"
+
+#: the raw-payload key an adapter's settled projection stamps with the session it
+#: attributed the datum to (``adapters/live_data.py::_settled_payload``). It is the
+#: EVIDENCE the marker below is derived from — never an inference from timestamps.
+SETTLED_SESSION_DATE_KEY = "settled_session_date"
 
 #: the registered request payload schema (a ``DataRequest`` main-namespace payload).
 REQUEST_SCHEMA_REF = SchemaRef(name="DataRequest", version="1")
@@ -495,17 +506,22 @@ class _DispatchGuardRecorder(DataRefusalRecorder):
     the gateway (which persists the audit through the one sink) so a
     ``FutureDataRefused`` / ``MissingAvailabilityRefused`` is transitioned + audited
     before the guard's exception propagates. Dispatch's catch never rejects a second
-    time.
+    time — ``rejected`` records whether this adapter already terminalized the bound
+    pending, so the snapshot-integrity catch below can reject exactly once for the
+    guard paths that raise WITHOUT going through the recorder (the session-freshness
+    calendar-material faults) and never twice for the paths that do.
     """
 
-    __slots__ = ("_gateway", "_pending")
+    __slots__ = ("_gateway", "_pending", "rejected")
 
     def __init__(self, gateway: Any) -> None:
         self._gateway = gateway
         self._pending: Any = None
+        self.rejected = False
 
     def bind(self, pending: Any) -> None:
         self._pending = pending
+        self.rejected = False
 
     def record_data_refusal(
         self, details: DataFetchRefusalDetails, evidence: tuple[NamedEvidenceDigest, ...],
@@ -522,6 +538,7 @@ class _DispatchGuardRecorder(DataRefusalRecorder):
             reason_code=details.reason_code,
             idempotency_key=idempotency_key,
         )
+        self.rejected = True
 
 
 # --------------------------------------------------------------------------- #
@@ -705,6 +722,28 @@ def dispatch(
             # the guard's recorder already rejected the pending + audited exactly
             # once; re-raise unchanged (no second reject, no continue, no finalize,
             # no cache/main write).
+            raise
+        except SnapshotMismatchError:
+            # A snapshot-INTEGRITY fault raised by the guard itself — today the
+            # only reachable one is a session-based freshness policy whose
+            # committed trading-calendar material cannot ANSWER the counted range
+            # (``data/pit.py::_check_freshness``: an empty material, a
+            # calendar-identity mismatch, or an as_of past the material's last
+            # covered date — the dated coverage cliff). It is a TYPED member of
+            # the raise bucket, never a data terminal and never fallback-eligible:
+            # terminalize the pending exactly once, then re-raise unchanged so the
+            # operator reads the material's own remedy text. Without this arm the
+            # cliff escaped ``dispatch``'s classification entirely — an
+            # unclassified exception with no reject and no audit. The
+            # ``rejected`` check keeps the guard paths that DO go through the
+            # recorder (request_context_digest_mismatch) at exactly one reject.
+            if not guard_recorder.rejected:
+                gateway.reject(
+                    pending, detail_schema_ref=GENERIC_DETAIL_SCHEMA_REF,
+                    detail_payload=_generic_detail(
+                        "snapshot_integrity_freshness", method_id, source_ref),
+                    reason_code="snapshot_mismatch", idempotency_key=f"{idem}:reject",
+                )
             raise
         except StaleDataError as exc:
             return _finalize_terminal(
@@ -982,6 +1021,43 @@ def _batch_coverage(
     return None
 
 
+def _settled_session_marker(passed: tuple[Any, ...]) -> tuple[str, ...]:
+    """The honest SETTLED prior-session warning for a batch, or ``()``.
+
+    **Why this exists (review I2 / §G).** An adapter's settled projection
+    (``adapters/live_data.py``) stamps the session it attributed the datum to
+    under :data:`SETTLED_SESSION_DATE_KEY`, but the sealed record family
+    (``VerifiedSnapshotRecord``) has only ``symbol`` / ``last_price`` /
+    ``prev_close`` — so ``from_candidate`` DROPS that marker and what reaches the
+    model is ``last_price == prev_close`` under a method named
+    ``verified_snapshot``, which reads as a genuine 0.00% day. The record schema
+    is sealed catalog material and must not move, so the marker is re-attached
+    HERE, on the channel that already exists and already reaches the prompt: the
+    result's ``warnings`` / ``badges`` are embedded verbatim in the deterministic
+    untrusted block (``data/render.py::_deterministic_render``).
+
+    Derived from the candidates' own payload evidence, never inferred from a
+    timestamp comparison: no settled projection, no marker. The dates are sorted
+    for determinism (the rendered block is a pure function of the result).
+    """
+    sessions = sorted({
+        c.raw_payload[SETTLED_SESSION_DATE_KEY]
+        for c in passed
+        if isinstance(getattr(c, "raw_payload", None), dict)
+        and isinstance(c.raw_payload.get(SETTLED_SESSION_DATE_KEY), str)
+        and c.raw_payload[SETTLED_SESSION_DATE_KEY].strip()
+    })
+    if not sessions:
+        return ()
+    return (
+        "SETTLED PRIOR-SESSION DATA: these rows are the exchange-settled CLOSE of "
+        f"trading session(s) {', '.join(sessions)}, not a live intraday quote. "
+        "Both price slots (last_price and prev_close) carry the SAME settled "
+        "observation, so any day-change computed from this row is 0.00% BY "
+        "CONSTRUCTION and is NOT a market fact; today's move is not in this block.",
+    )
+
+
 def _finalize_ok(
     passed: tuple[Any, ...], pit_audit: PitAudit, *, method_spec: DataMethodSpec,
     req: DataRequest, ctx: DataContext, chain: tuple[str, ...],
@@ -1034,12 +1110,18 @@ def _finalize_ok(
     attempts.append(_attempt(source_ref, configured=True, outcome="success",
                              started=finished, finished=finished))
     badges = (FALLBACK_USED_BADGE,) if fallback_index > 0 else ()
+    # the settled-projection marker the sealed record family cannot carry (I2):
+    # a badge for machine consumers + one plain-language warning line, both of
+    # which the deterministic renderer embeds in the untrusted block pm reads.
+    settled = _settled_session_marker(passed)
+    if settled:
+        badges = badges + (SETTLED_PRIOR_SESSION_BADGE,)
     result = build_data_result(
         method_spec, registry=schema_registry, id=f"data-{req.request_digest[:16]}",
         request_digest=req.request_digest, status=status, data=batch,
         resolved_vendor_chain=chain, source_config_digest=ctx.source_config_digest,
         fetched_at=finished, attempts=tuple(attempts), pit_audit=pit_audit, badges=badges,
-        coverage=coverage, degradation_reason=reason,
+        warnings=settled, coverage=coverage, degradation_reason=reason,
     )
     return _persist_and_finalize(
         result, method_spec=method_spec, req=req, evidence_writer=evidence_writer,

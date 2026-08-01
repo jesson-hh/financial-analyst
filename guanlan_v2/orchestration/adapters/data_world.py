@@ -270,6 +270,16 @@ def _build_recipe(*, schema_registry_digest: str) -> ProductionDataWorldRecipe:
     # the world binds to its PitGuard, so ``_check_freshness``'s calendar-identity
     # assertion is a real tripwire, not a formality.  Every OTHER method keeps
     # the elapsed default (gate D-B's limit-policy binding included).
+    #
+    # SCOPE OF THE CLOSURE (review M7 — the controller's ruling, recorded so the
+    # campaign day is chosen with open eyes): this closes the Monday hole ONLY
+    # when the venue serves an anchor on the CURRENT session.  A genuine weekend
+    # pull is still served FRIDAY's snapshot, whose ``last_close`` is THURSDAY's
+    # close — two sessions old at Monday's boundary — so a Sunday run is honestly
+    # STALE and refuses.  That is BY DESIGN, not a gap: the Monday intraday run
+    # (anchor = Monday, settled = Friday, exactly one session) is the fresh path.
+    # Widening it would mean admitting two-session-old data, which is a policy
+    # decision (one field + another conscious re-freeze), never a silent one.
     registry.register_freshness(
         FreshnessPolicy.build(
             policy_id=PRODUCTION_VERIFIED_SNAPSHOT_FRESHNESS_POLICY_ID,
@@ -419,6 +429,17 @@ def production_data_adapters() -> Mapping[str, Any]:
     the Task-2 test pinning every sealed prefetch ROW's method id inside the
     adapter's supported set, so an L3 grant of an unsupported method fails in
     the tree first, never live.
+
+    **Cost statement, corrected (review M5).**  "No import-time vendor touch"
+    is still true of the VENDOR facade, but since the addendum this function is
+    no longer free: building the adapter map now needs the recipe's committed
+    trading calendar, i.e. it reads + digests
+    :data:`PRODUCTION_CALENDAR_MATERIAL_PATH` on the FIRST call.  Repeated calls
+    do not re-read it — :func:`production_data_recipe` is the module-cached,
+    lock-guarded single build, so every call after the first is a dict literal
+    over the SAME already-loaded ``TradingCalendar`` object (pinned by test).
+    Lock order is unidirectional (``_BACKEND_LOCK`` → ``_RECIPE_LOCK``, never the
+    reverse), so the nesting at :func:`production_data_backend` cannot deadlock.
     """
     return {
         phase3_data_surface().source_ref.id: LiveClientSource(
