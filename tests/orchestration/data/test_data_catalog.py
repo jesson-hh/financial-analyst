@@ -613,14 +613,24 @@ class TestVerifiedSnapshotRowRunnableOnlyUnderSubjectProjection:
     def test_that_projection_is_the_one_the_live_provider_session_calls(self):
         """Pins the call site, so the tests above cannot drift onto a dead helper.
 
-        NOTE (chartered CONSCIOUS FLIP, owned by L2-b Task 5 — the L1<->L2-b
-        integration seam): the real ``_DataRuntimeBridgeSession`` does NOT yet
-        pass ``subject_params`` — this source-text pin asserts exactly that
-        state. L2-b Task 5 gives the real session the subject param source and
-        flips this pin by name; it must never go red as a surprise.
+        CONSCIOUS FLIP (L2-b Task 5 — the L1<->L2-b integration seam; the flip
+        this pin's pre-flip docstring chartered BY NAME).
+
+        | | the pinned call text in ``freeze_for_execution`` |
+        |---|---|
+        | pre-flip (L1 landing state) | ``_assemble_params(row, req.node)`` — the real session had NO subject source, so pm's healed row refused at the runner seam |
+        | post-flip (here) | ``_assemble_params(row, req.node, subject_params=self._subject_params)`` — the session carries the run's projection |
+
+        BOTH directions are asserted: the subject-carrying text must be
+        present AND the subject-LESS call text must be absent, so a revert (or
+        a half-wired kwarg dropped at this one line — L2-b Task 5's mutation
+        m2) reddens here rather than silently reinstating the runner-seam
+        refusal for every deep run.
         """
         src = inspect.getsource(RT._DataRuntimeBridgeSession.freeze_for_execution)
-        assert "_assemble_params(row, req.node)" in src
+        assert ("_assemble_params(row, req.node, "
+                "subject_params=self._subject_params)") in src
+        assert "_assemble_params(row, req.node)" not in src
 
     # -- the bridge went live: ONE enumerated production caller --------------- #
     def test_the_data_bridge_provider_has_exactly_one_production_caller(self):

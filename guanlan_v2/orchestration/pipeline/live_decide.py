@@ -1087,10 +1087,13 @@ def build_production_bindings(*, preset_id: str | None = None) -> DeepDecideBind
     the wrapper degrades to the fast chain with an honest ``deep_outcome``.
     Nothing is faked.
 
-    HONEST STATE (L2-b Task 4 update): the ``data.runtime`` bridge is now bound
-    to a REAL production data world (``register_production_data_provider``, the
-    ONE recipe) instead of the worldless stopgap — see the registration block's
-    comment for what that changes, what still refuses, and the Task-5 residue.
+    HONEST STATE (L2-b Tasks 4+5): the ``data.runtime`` bridge is bound to a
+    REAL production data world (``register_production_data_provider``, the ONE
+    recipe) instead of the worldless stopgap, and the per-run subject seam is
+    closed — a deep run whose projection is bound reads pm's sealed row for
+    real. See the registration block's comment for what that changes and what
+    still refuses. What has NOT moved is the grant gap above: the deep run is
+    still SUPPORT-REFUSED at admission, so nothing downstream of it runs yet.
 
     路线 A: ``preset_id`` defaults to :func:`resolve_deep_preset_id`, i.e. the
     ten-node preset above unless ``GUANLAN_SEATS_DEEP_PRESET=reduced`` says
@@ -1191,14 +1194,14 @@ def build_production_bindings(*, preset_id: str | None = None) -> DeepDecideBind
     # the production prefetch binding has ZERO rows, so dec.pm takes the C3
     # rowless branch (honest empty prefetch, stores untouched).
     #
-    # DATA — L2-b Task 4, the ONE-recipe supersede. This line used to bind the
-    # worldless stopgap (`register_worldless_data_provider`, L1 Task 3's
-    # successor to the retired dead-row empty-complete provider), whose every
-    # rows-present shape refused loudly because no production DataRuntimeWorld
-    # existed. L2-b built one, so the sealed bridge.data_runtime.provider@1
-    # identity is now bound to `register_production_data_provider` — the ONE
-    # recipe (adapters/data_world.py): the world-bound ProductionDataProvider
-    # plus all seven data capability backends on the ONE thread-confined
+    # DATA — L2-b Task 4, the ONE-recipe supersede. This line used to bind L1
+    # Task 3's worldless stopgap registration (itself the successor to the
+    # retired dead-row empty-complete provider), whose every rows-present shape
+    # refused loudly because no production DataRuntimeWorld existed. L2-b built
+    # one, so the sealed bridge.data_runtime.provider@1 identity is now bound to
+    # `register_production_data_provider` — the ONE recipe
+    # (adapters/data_world.py): the world-bound ProductionDataProvider plus all
+    # seven data capability backends on the ONE thread-confined
     # `production_data_backend()`. A rowless worker (the two pv aux nodes)
     # freezes the catalog-licensed EMPTY (the reviewed analyzer summed 0/0
     # bounds over zero rows); a worker WITH rows resolves a real per-run world
@@ -1213,14 +1216,23 @@ def build_production_bindings(*, preset_id: str | None = None) -> DeepDecideBind
     # after register_and_try_lease had consumed a human authorization and
     # executed nothing. Never again for this class of failure.
     #
-    # TASK-5 RESIDUE (honest, named): the per-run subject seam still hands out
-    # the WORLDLESS provider — assembly._plan_executor wraps bundle.factories
-    # in _SubjectScopedFactories over `worldless_data_provider_factory(
-    # subject_params)` when a run's projection is bound. Until Task 5
-    # re-targets that view to the world-bound factory (and deletes the
-    # worldless class), a subject-bound deep run still refuses at that seam,
-    # and a subject-LESS one refuses inside the real session's
-    # `_assemble_params`. Pinned in test_pm_two_bridges.py.
+    # THE TASK-5 RESIDUE IS CLOSED (was: the per-run subject seam still handed
+    # out the worldless provider). assembly._plan_executor now wraps
+    # bundle.factories in _SubjectScopedFactories over
+    # `production_data_provider_factory(subject_params, …)` — the SAME
+    # construction recipe as the registration below, differing only in the
+    # run's projection — and the worldless class/factory/registration were
+    # deleted. Consequences for THIS seam, both pinned in
+    # test_pm_two_bridges.py:
+    #   * the registration here stays SUBJECT-UNBOUND on purpose (a run
+    #     subject is stamped per run; the recipe has no knob for one), so a
+    #     rows-present worker reached without a per-run view still refuses
+    #     loudly inside the real session's `_assemble_params` — the surviving
+    #     wiring guard, never a read with a guessed subject;
+    #   * `data_refusal_sink` below is now handed to THREE seams, not two: the
+    #     process-level data worlds, the plan runner's capability gateway, and
+    #     — through the runner's `refusal_sink` — every per-run subject-bound
+    #     world. One audit stream per binding set.
     from guanlan_v2.orchestration.adapters.data_world import (
         production_data_refusal_audit_sink,
         register_production_data_provider,

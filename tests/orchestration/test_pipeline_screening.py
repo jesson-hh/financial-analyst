@@ -1090,7 +1090,19 @@ class TestSubjectParamsRunnerThread:
         ``subject_params``, handed to the REAL ``build_production_plan_runner``
         over the REAL sealed production catalog, reaches ``_plan_executor``'s
         ``ExecutionRuntime`` as the per-run subject-scoped view closing over
-        THE lane's own stamp (object identity — never a re-projection)."""
+        THE lane's own stamp (object identity — never a re-projection).
+
+        L2-b Task 5 NOTE (harness only — the assertion did not move): the
+        ``stores`` stand-in now carries a ``resolver`` attribute, because the
+        view's override target became the world-bound
+        ``production_data_provider_factory``, which is wired from the runner's
+        own ``stores`` / ``stores.resolver`` (the real
+        :class:`RuntimeStores` exposes ``resolver`` as a public property, so a
+        bare ``SimpleNamespace()`` was always a stand-in that under-described
+        it — it merely went unread while the override was the worldless
+        factory). Nothing here TOUCHES it: the sentinel is carried into the
+        per-run world resolver and only a real read would consult it, which
+        this pin never performs."""
         import guanlan_v2.orchestration.data.catalog as dcat
         from types import SimpleNamespace
         from guanlan_v2.orchestration.pipeline import assembly
@@ -1119,7 +1131,8 @@ class TestSubjectParamsRunnerThread:
         monkeypatch.setattr(assembly, "ExecutionRuntime", spy_runtime)
 
         runner = assembly.build_production_plan_runner(
-            stores=SimpleNamespace(), catalog_snapshot=env["snapshot"],
+            stores=SimpleNamespace(resolver=SimpleNamespace()),
+            catalog_snapshot=env["snapshot"],
             registry=env["registry"], gateway_factory=lambda **kw: None,
             admission=SimpleNamespace(
                 verify_for_dispatch=lambda digest: SimpleNamespace(

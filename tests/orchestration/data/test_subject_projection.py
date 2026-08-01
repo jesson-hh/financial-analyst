@@ -33,14 +33,20 @@ were written — outcomes recorded here per the plan):
   ``InstrumentUniverseParams.model_validate`` accepts the honest projection of
   one code + one aware datetime.
 
-L1 Task 3 adds the ``WorldlessDataBridgeProvider`` shape tests (R3): the
-dead-row provider is retired per its own tombstone; its successor NEVER
-completes empty over a resolvable row — three LOUD shapes, exercised over the
-REAL reduced support report + the real resolver bundle (the
-``test_pm_two_bridges`` fixture idiom), with POISONED gateway/writer objects
-proving zero begins / zero writes for shapes 2/3. Shape 2's message marker
-``params resolved from the run subject projection`` is a FROZEN CONTRACT
-within the L1 plan (Task 6's live verification greps for it).
+L1 Task 3 added the worldless provider's three LOUD shape tests (R3) HERE.
+**L2-b Task 5 (the L1<->L2-b integration seam) deleted that class** — the
+per-run ``assembly._SubjectScopedFactories`` view, its last caller, was
+re-targeted to the world-bound ``production_data_provider_factory(
+subject_params)``, so a run that resolves its subject now READS instead of
+refusing. The shape tests died WITH the class (they constructed it directly);
+what replaced each of them is enumerated in
+``TestTheTombstoneIsHonored::test_the_worldless_provider_names_survive_nowhere_outside_docs``
+below, which also pins repo-wide that the three worldless names are gone.
+Shape 2's frozen marker ``params resolved from the run subject projection``
+was an L1-internal contract for a refusal that no longer has a premise; the
+one surviving shape (3, the unbound-subject wiring refusal) is pinned by
+``TestRealRowRoundTrip::test_without_the_subject_the_same_real_row_still_refuses``
+at its real home, ``_assemble_params``.
 
 Run: ``pytest tests/orchestration/data/test_subject_projection.py -v``
 """
@@ -54,48 +60,16 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel
 
-import guanlan_v2.orchestration.worker as W
-from guanlan_v2.orchestration import presets as P
-from guanlan_v2.orchestration.adapters import chain
-from guanlan_v2.orchestration.catalog_runtime import TrustedFactoryRegistry
 from guanlan_v2.orchestration.data import runtime as RT
 from guanlan_v2.orchestration.data.catalog import ParamBinding, phase3_data_surface
 from guanlan_v2.orchestration.data.source import InstrumentUniverseParams
 from guanlan_v2.orchestration.data.symbols import normalize_symbol
-from guanlan_v2.orchestration.enums import ApprovalPolicy
-from guanlan_v2.orchestration.eventstore import (
-    RuntimeStores,
-    SchemaRegistryResolver,
-)
-from guanlan_v2.orchestration.pipeline.assembly import (
-    PRODUCTION_PRESETS_DIR,
-    build_production_catalog_runtime,
-    load_phase10_preset_registry,
-    production_bridge_view,
-)
-from guanlan_v2.orchestration.pipeline.contracts import RunSubject
-from guanlan_v2.orchestration.pipeline.deep_decide import (
-    REDUCED_DEEP_DECIDE_PRESET_ID,
-    materialize_deep_decide_draft,
-)
-from guanlan_v2.orchestration.refs import PayloadRef, SchemaRef, TypedPayloadRef
-from guanlan_v2.orchestration.runtime_support import (
-    STATIC_RUNTIME_PROFILE_V2,
-    check_runtime_support,
-)
-from guanlan_v2.orchestration.spec import (
-    OrchestrationRequest,
-    PlanNode,
-    validate_plan_draft,
-)
+from guanlan_v2.orchestration.spec import PlanNode
 
 UTC = timezone.utc
 
 #: the run's session as-of used throughout — aware, non-UTC offsets also probed.
 _AS_OF = datetime(2026, 7, 31, 7, 0, tzinfo=UTC)
-
-#: shape 2's FROZEN message marker (L1 plan Task 3/Task 6 contract).
-FROZEN_MARKER = "params resolved from the run subject projection"
 
 
 @pytest.fixture(scope="module")
@@ -211,7 +185,15 @@ class TestRealRowRoundTrip:
 
     def test_without_the_subject_the_same_real_row_still_refuses(self, real_row):
         """The refusal survives — but its cause is now the RUNNER SEAM, not an
-        unbuilt projection (the projection exists as of this task)."""
+        unbuilt projection (the projection exists as of this task).
+
+        L2-b Task 5 SUCCESSION NOTE: this raise is where the deleted worldless
+        provider's **shape 3** (its ``subject projection not bound at the
+        runner seam`` refusal) now lives. The stopgap class raised it BEFORE a
+        session could open; the real world-bound session reaches the same
+        wiring fact here, inside ``_assemble_params``, before any read, any
+        gateway begin or any evidence write. Deleting the class therefore
+        dropped a duplicate, not a guard — and this test is that guard."""
         with pytest.raises(RT.DataRuntimeError) as exc:
             RT._assemble_params(real_row, _pm_node())
         msg = str(exc.value)
@@ -279,265 +261,60 @@ class TestNothingIsRegistered:
         assert not issubclass(RT.SubjectParams, BaseModel)
 
 
-# =========================================================================== #
-# L1 Task 3 — the worldless provider's three LOUD shapes (R3)                   #
-# the REAL sealed catalog through the REAL production assembly (the             #
-# test_pm_two_bridges fixture idiom); zero network, zero LLM, zero var/ writes  #
-# =========================================================================== #
-NOW = datetime(2026, 7, 24, 7, 0, tzinfo=UTC)
-PHASE8_REGISTRY_DIGEST = (
-    "d719e19bc8c64f56324ee36ca0d3aa039e5eac1c9488d80babe6ddce81e5e089"
-)
-
-
-class _FixedClock:
-    def __init__(self, now: datetime = NOW) -> None:
-        self._now = now
-
-    def now(self) -> datetime:
-        return self._now
-
-
-class _PoisonedGateway:
-    """Shapes 2/3 promise ZERO gateway begins — ANY attribute access is the
-    failure (least privilege, proven not asserted)."""
-
-    def __getattr__(self, name):  # pragma: no cover - failing is the assertion
-        raise AssertionError(f"gateway.{name} touched by the worldless provider")
-
-
-class _PoisonedWriter:
-    """The worldless provider must never persist evidence — ANY attribute
-    access is the failure."""
-
-    def __getattr__(self, name):  # pragma: no cover - failing is the assertion
-        raise AssertionError(f"writer.{name} touched by the worldless provider")
-
-
-@pytest.fixture(scope="module")
-def deep_env():
-    registry = chain.build_phase9_registry(PHASE8_REGISTRY_DIGEST)
-    snapshot = chain.phase9_catalog_snapshot()
-    resolver = SchemaRegistryResolver()
-    resolver.register(registry)
-    stores = RuntimeStores(
-        resolver=resolver, clock=_FixedClock(),
-        allowed_cell_namespaces=(W.PROMPT_CELL_NAMESPACE,))
-    mem = P.build_empty_memory_context(
-        data_context=P.pilot_data_context(as_of=NOW), stores=stores,
-        registry_digest=registry.registry_digest, built_at=NOW)
-    context = mem.context
-    ctx_ref = PayloadRef(
-        namespace="main", object_id="ctx-l1t3-1",
-        content_digest=context.content_digest)
-    request = OrchestrationRequest(
-        request_id="req-l1t3-1", goal="观澜 · L1 无世界数据桥三形状",
-        workflow="orchestrate_only", fallback_preset_id=None,
-        approval_policy=ApprovalPolicy.REQUIRED)
-    return {
-        "registry": registry, "snapshot": snapshot, "context": context,
-        "ctx_ref": ctx_ref, "request": request,
-    }
-
-
-@pytest.fixture(scope="module")
-def deep_bundle(deep_env):
-    return build_production_catalog_runtime(deep_env["snapshot"])
-
-
-@pytest.fixture(scope="module")
-def deep_view(deep_bundle):
-    return production_bridge_view(deep_bundle.runtime)
-
-
-@pytest.fixture(scope="module")
-def deep_reduced(deep_env, deep_bundle, deep_view):
-    """The materialized reduced draft + its REAL support report (the live shape)."""
-    subject = RunSubject(code="833509", as_of=NOW)
-    subject_ref = TypedPayloadRef(
-        payload_ref=PayloadRef(
-            namespace="main", object_id="subject-833509",
-            content_digest=subject.semantic_digest()),
-        schema_ref=SchemaRef(name="RunSubject", version="1"))
-    presets = load_phase10_preset_registry(PRODUCTION_PRESETS_DIR)
-    materialized = materialize_deep_decide_draft(
-        request=deep_env["request"], preset_registry=presets,
-        preset_id=REDUCED_DEEP_DECIDE_PRESET_ID,
-        context_snapshot_ref=deep_env["ctx_ref"], subject_ref=subject_ref,
-        clock=_FixedClock(), context=deep_env["context"],
-        catalog=deep_env["snapshot"], schema_registry=deep_env["registry"],
-        draft_id="draft-l1t3-1", run_id="run-l1t3-1")
-    draft = materialized.draft
-    phase1 = validate_plan_draft(
-        draft, request=deep_env["request"], context=deep_env["context"],
-        catalog=deep_env["snapshot"], schema_registry=deep_env["registry"])
-    assert phase1.valid is True, [(i.code, i.node_id) for i in phase1.issues]
-    report = check_runtime_support(
-        draft, phase1_report=phase1, context=deep_env["context"],
-        context_requirements=None, catalog=deep_bundle.runtime,
-        bridge_view=deep_view, schema_registry=deep_env["registry"],
-        profile=STATIC_RUNTIME_PROFILE_V2)
-    assert report.supported is True, [(i.code, i.node_id) for i in report.issues]
-    return SimpleNamespace(draft=draft, report=report)
-
-
-def _summary_for(report, node_id: str, bridge_id: str):
-    mine = [s for s in report.bridge_support_summaries
-            if s.bridge_id == bridge_id and s.node_id == node_id]
-    assert len(mine) == 1
-    return mine[0]
-
-
-class TestWorldlessDataBridgeProviderShapes:
-    """R3's three shapes over the REAL sealed row — all loud, none empty."""
-
-    @pytest.fixture()
-    def parts(self, deep_env, deep_view, deep_reduced):
-        worker = {w.id: w for w in deep_env["snapshot"].workers}["dec.pm"]
-        rb = deep_view.resolve("data.runtime")
-        summary = _summary_for(deep_reduced.report, "pm", "data.runtime")
-        node = next(n for n in deep_reduced.draft.nodes if n.id == "pm")
-        sequencer = W.ExecutionEvidenceSequencer(node_id="pm", attempt=1)
-        token = sequencer.issue_call_token(
-            bridge_priority=rb.priority, bridge_id=rb.bridge_id,
-            summary_digest=summary.summary_digest)
-        return SimpleNamespace(
-            worker=worker, rb=rb, summary=summary, node=node,
-            sequencer=sequencer, token=token,
-            env=deep_env, view=deep_view)
-
-    def _provider(self, parts, subject_params=None):
-        return RT.worldless_data_provider_factory(subject_params)(
-            bridge=parts.rb, summary=parts.summary)
-
-    def _empty_handle(self, parts):
-        return W.PreparedBridgeHandle(
-            bridge_id="data.runtime", bridge_priority=parts.rb.priority,
-            summary_digest=parts.summary.summary_digest, token=parts.token,
-            input_contribution=W.BridgeInputContribution())
-
-    def _open_request(self, parts, *, worker=None, bridge=None, handle=None):
-        return SimpleNamespace(
-            plan=None, node=parts.node,
-            worker=worker if worker is not None else parts.worker,
-            bridge=bridge if bridge is not None else parts.rb,
-            summary=parts.summary,
-            handle=handle if handle is not None else self._empty_handle(parts),
-            input_snapshot=None, capability_gateway=_PoisonedGateway(),
-            evidence_writer=_PoisonedWriter(), reader=None,
-            sequencer=parts.sequencer)
-
-    # -- shape 1: rowless allowlisted worker — the UNCHANGED pv-aux text ------ #
-    def test_shape1_rowless_worker_keeps_the_unchanged_loud_text(self, parts):
-        """The pv aux nodes' refusal is byte-identical to the retired
-        provider's (their ``bridge_execution_error`` + degrade behavior did
-        not move), bound or unbound alike."""
-        expected = (
-            "worker 'pv.price_action' activates the data.runtime bridge through "
-            "its capability allowlist but the sealed prefetch binding carries "
-            "no reviewed row for it, and this lane binds no production "
-            "DataRuntimeWorld (the chartered L2-b gap) -- honest refusal, "
-            "never a fabricated read")
-        pv = {w.id: w for w in parts.env["snapshot"].workers}["pv.price_action"]
-        for subject_params in (None, _subject()):
-            provider = self._provider(parts, subject_params)
-            with pytest.raises(RT.DataRuntimeError) as exc:
-                provider.open_execution(self._open_request(parts, worker=pv))
-            assert str(exc.value) == expected
-
-    # -- shape 2: rows + subject bound — proven resolvable, then refused ------ #
-    def test_shape2_bound_proves_the_row_then_refuses_naming_the_subject(
-            self, parts):
-        """The NEW refusal: the frozen marker, the subject's code and as-of,
-        the row's method id and the L2-b naming — raised only AFTER the real
-        assembly+validation proof, with the POISONED gateway/writer proving
-        zero begins and zero writes."""
-        sp = _subject()
-        provider = self._provider(parts, sp)
-        with pytest.raises(RT.DataRuntimeError) as exc:
-            provider.open_execution(self._open_request(parts))
-        msg = str(exc.value)
-        assert FROZEN_MARKER in msg
-        assert "600519" in msg
-        assert sp.asof_value in msg
-        assert "verified_snapshot" in msg
-        assert "no production DataRuntimeWorld is bound (the chartered L2-b gap)" in msg
-        assert "faking a data read" in msg
-
-    def test_shape2_actually_runs_the_real_param_assembly(
-            self, parts, real_row, monkeypatch):
-        """The resolvability-proof pin (mutation m2's target): shape 2 must
-        RUN ``_assemble_params`` over the REAL sealed row with the bound
-        subject — a fabricated message that skips the proof reddens this."""
-        sp = _subject()
-        calls: list = []
-        real = RT._assemble_params
-
-        def spy(row, node, **kwargs):
-            calls.append((row, kwargs.get("subject_params")))
-            return real(row, node, **kwargs)
-
-        monkeypatch.setattr(RT, "_assemble_params", spy)
-        provider = self._provider(parts, sp)
-        with pytest.raises(RT.DataRuntimeError, match="run subject projection"):
-            provider.open_execution(self._open_request(parts))
-        assert len(calls) == 1
-        called_row, called_sp = calls[0]
-        assert called_sp is sp
-        # the row the proof ran over IS the sealed row (parsed from the
-        # resolved bridge's own config bytes — model equality, not identity).
-        assert called_row == real_row
-
-    # -- shape 3: rows + subject unbound — the wiring defect ------------------ #
-    def test_shape3_unbound_names_the_runner_seam_never_the_marker(self, parts):
-        """Mutation m3's discrimination: the unbound shape names the runner
-        seam and must NOT carry shape 2's frozen marker (that would claim a
-        resolution that never happened)."""
-        provider = self._provider(parts, None)
-        with pytest.raises(RT.DataRuntimeError) as exc:
-            provider.open_execution(self._open_request(parts))
-        msg = str(exc.value)
-        assert "subject projection not bound at the runner seam" in msg
-        assert "wiring defect" in msg
-        assert FROZEN_MARKER not in msg
-
-    # -- the registration recipe threads the subject (half-wired-kwarg pin) --- #
-    def test_the_registration_recipe_passes_the_subject_through(
-            self, parts, deep_bundle):
-        """``register_worldless_data_provider(subject_params=…)`` must hand
-        the BOUND factory to the sealed provider ref — an accepted-but-dropped
-        kwarg (the campaign's half-wired defect class) reddens the echo."""
-        sp = _subject()
-        factories = TrustedFactoryRegistry(deep_bundle.runtime)
-        RT.register_worldless_data_provider(
-            factories=factories, subject_params=sp)
-        provider = factories.handler_factory(
-            phase3_data_surface().provider_ref)(
-            bridge=parts.rb, summary=parts.summary)
-        assert isinstance(provider, RT.WorldlessDataBridgeProvider)
-        with pytest.raises(RT.DataRuntimeError) as exc:
-            provider.open_execution(self._open_request(parts))
-        assert FROZEN_MARKER in str(exc.value)
-        assert "600519" in str(exc.value)
-
-    def test_the_registration_recipe_defaults_to_the_unbound_process_level(
-            self, parts, deep_bundle):
-        """Process-level registration stays UNBOUND (subject_params=None →
-        shape 3); the per-run bound view is L1 Task 4's seam."""
-        factories = TrustedFactoryRegistry(deep_bundle.runtime)
-        RT.register_worldless_data_provider(factories=factories)
-        provider = factories.handler_factory(
-            phase3_data_surface().provider_ref)(
-            bridge=parts.rb, summary=parts.summary)
-        with pytest.raises(RT.DataRuntimeError,
-                           match="not bound at the runner seam"):
-            provider.open_execution(self._open_request(parts))
-
-
 # --------------------------------------------------------------------------- #
-# the tombstone is honored — the dead-row names survive nowhere outside docs    #
+# the tombstones are honored — the retired names survive nowhere outside docs   #
 # --------------------------------------------------------------------------- #
 class TestTheTombstoneIsHonored:
+    def test_the_worldless_provider_names_survive_nowhere_outside_docs(self):
+        """L2-b Task 5's conscious flip 3, pinned repo-wide.
+
+        The worldless stopgap — its provider class, its provider-handler
+        factory and its registration recipe (the three needles below, spelled
+        only by concatenation) — was DELETED when this task re-targeted its
+        last caller, the per-run ``assembly._SubjectScopedFactories`` view, to
+        the world-bound ``production_data_provider_factory(subject_params)``.
+        Its own successor tombstone named this task as the executor.
+
+        Deleted means DELETED: the three names exist in NO ``.py`` file under
+        ``guanlan_v2/`` or ``tests/``; ``docs/`` and ``.superpowers/`` keep the
+        history (and are not scanned). The needles are concatenation-built so
+        this pin never matches itself.
+
+        What SURVIVED, and where (so the deletion cannot be read as dropped
+        coverage):
+
+        * shape 3 — the unbound-subject WIRING refusal — lives inside the real
+          path, at :func:`_assemble_params`' cause-named ``node_param`` raise;
+          pinned by
+          ``TestRealRowRoundTrip::test_without_the_subject_the_same_real_row_still_refuses``
+          above, and end-to-end through the REAL registered production provider
+          by ``test_production_data_provider.py::TestPmThroughTheRealResolver::
+          test_pm_rows_present_without_a_subject_refuse_inside_the_real_session``;
+        * shape 1 — the rowless worker — became the catalog-licensed EMPTY
+          freeze at L2-b Task 4 (``TestRowlessLicensedEmpty``), its conscious
+          flip;
+        * shape 2 — the resolved-but-no-world refusal — has no successor
+          because its premise is gone: a world IS bound, so the row is READ
+          (``TestSyntheticLiveRowEndToEnd::
+          test_the_subject_bound_sealed_row_reads_for_real_through_the_per_run_view``).
+        """
+        root = Path(__file__).resolve().parents[3]
+        needles = (
+            "Worldless" + "DataBridgeProvider",
+            "worldless" + "_data_provider_factory",
+            "register" + "_worldless_data_provider",
+        )
+        offenders: list[str] = []
+        for base in ("guanlan_v2", "tests"):
+            for p in sorted((root / base).rglob("*.py")):
+                text = p.read_text(encoding="utf-8", errors="ignore")
+                for needle in needles:
+                    if needle in text:
+                        offenders.append(f"{p.relative_to(root)}: {needle}")
+        assert offenders == [], (
+            "the worldless stopgap's names came back; its fate was decided "
+            f"once, at L2-b Task 5: {offenders}")
+
     def test_the_dead_row_provider_names_survive_nowhere_outside_docs(self):
         """Repo-wide grep pin (L1 plan Task 3): the retired provider's names
         (class, fact helper, predicate, factory, recipe, session) exist in NO

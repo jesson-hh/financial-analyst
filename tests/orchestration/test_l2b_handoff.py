@@ -13,15 +13,17 @@ the pin is the conscious-flip target of a named later task (recorded per test).
 Gate items (Task 0 Step 1):
 
 1.  Fact F + the landing state (the declared-order gate). **Consciously flipped
-    by L2-b Task 4** — pre-flip: ``data_runtime_provider_factory`` had no
-    production caller, the registered incumbent at
-    ``phase3_data_surface().provider_ref`` was ``WorldlessDataBridgeProvider``
-    and the pm pins were L1's flipped worldless set. Post-flip: the factory has
+    by L2-b Task 4, then again by Task 5** — pre-flip: ``data_runtime_provider_
+    factory`` had no production caller, the registered incumbent at
+    ``phase3_data_surface().provider_ref`` was L1's worldless stopgap class and
+    the pm pins were L1's flipped worldless set. Post-flip: the factory has
     exactly ONE enumerated production caller
     (``adapters/data_world.py``), the registered incumbent is
-    ``ProductionDataProvider``, and the pm pins are L2-b's production set (the
-    worldless ones survive, scoped, until Task 5 deletes the class). The
-    dead-row names still exist nowhere in code — that one did not move.
+    ``ProductionDataProvider``, and the pm pins are L2-b's production set. At
+    Task 5 the stopgap's three names were DELETED outright (its last caller,
+    the per-run subject view, was re-targeted), so the pm-pin gate below now
+    asserts their ABSENCE. The dead-row names still exist nowhere in code —
+    that one did not move.
 2.  The route-equality obligation (``_frozen_route_for``).
 3.  The context-equality obligation (``_verify_context_binding``).
 4.  The ``LiveClientSource`` echo + its closed supported-method set.
@@ -295,17 +297,18 @@ class TestFactFAndL1LandingState:
         ``test_l1_landing_state_worldless_incumbent_registered``).
 
         Pre-flip arm, recorded: the ONE production registration recipe was
-        ``RT.register_worldless_data_provider`` and the incumbent constructed
-        at ``phase3_data_surface().provider_ref`` was
-        ``WorldlessDataBridgeProvider``; ``live_decide``'s source carried
-        ``register_worldless_data_provider(factories=bundle.factories)``.
+        L1's worldless registration function and the incumbent constructed at
+        ``phase3_data_surface().provider_ref`` was its worldless provider
+        class; ``live_decide``'s source carried that call verbatim against
+        ``factories=bundle.factories`` (the exact pre-flip call string is
+        rebuilt by concatenation below, so this file never trips the repo-wide
+        deletion scan).
 
         Post-flip: ``build_production_bindings`` supersedes it with the ONE
         world-bound recipe ``register_production_data_provider``, so the
-        incumbent is ``ProductionDataProvider``. The worldless CLASS still
-        exists (the per-run ``_SubjectScopedFactories`` view constructs it until
-        Task 5 re-targets that seam and deletes it) — this pin is about the
-        REGISTERED incumbent, which is the thing production executes over.
+        incumbent is ``ProductionDataProvider``. L2-b Task 5 then deleted the
+        worldless class outright, so the absence assertion below is now
+        doubly true — by supersede AND by deletion.
         """
         factories = TrustedFactoryRegistry(bundle.runtime)
         # the stores/resolver are carried into the per-run resolver, never
@@ -321,9 +324,10 @@ class TestFactFAndL1LandingState:
         # the production caller is the ONE-recipe seam (live_decide), by source:
         src = inspect.getsource(LD)
         assert "register_production_data_provider(" in src
-        # the pre-flip CALL is gone (the name survives only in the registration
-        # block's recorded history, which is the point of a conscious flip).
-        assert "register_worldless_data_provider(factories=bundle.factories)" \
+        # the pre-flip CALL is gone. Needle built by concatenation (the L1
+        # tombstone idiom): after Task 5 the symbol is DELETED repo-wide, and
+        # a pin that spells it contiguously would trip that deletion scan.
+        assert ("register" + "_worldless_data_provider(factories=bundle.factories)") \
             not in src
 
     def test_dead_row_names_exist_nowhere_in_code(self):
@@ -345,18 +349,27 @@ class TestFactFAndL1LandingState:
             f"decided once, in L1: {hits}")
 
     def test_pm_pins_are_the_l2b_flipped_production_set(self):
-        """CONSCIOUS FLIP (L2-b Task 4; was
-        ``test_pm_pins_are_the_l1_flipped_worldless_set``).
+        """CONSCIOUS FLIP, twice (this pin was
+        ``test_pm_pins_are_the_l1_flipped_worldless_set`` before Task 4).
 
         Pre-flip arm, recorded: ``test_pm_two_bridges.py`` carried L1's
-        worldless markers as the REGISTERED-incumbent shapes. Post-flip the
-        production registration is the incumbent there — the pm seam pins name
-        ``ProductionDataProvider`` and the pv-aux nodes freeze the
-        catalog-licensed EMPTY instead of refusing. The worldless markers
-        SURVIVE (the class is alive until Task 5 deletes it) but only under the
-        explicitly worldless helper/guard, so this pin now asserts BOTH: the
-        L2-b production markers are present, and the worldless ones are still
-        scoped to the surviving-class pins.
+        worldless markers as the REGISTERED-incumbent shapes. **Task 4**
+        flipped the incumbent — the pm seam pins name ``ProductionDataProvider``
+        and the pv-aux nodes freeze the catalog-licensed EMPTY instead of
+        refusing — while the worldless markers SURVIVED under an explicitly
+        worldless helper/guard, and this pin asserted both halves with the note
+        "the class dies at Task 5, not here".
+
+        **Task 5 is here**: the per-run ``_SubjectScopedFactories`` view was
+        re-targeted to ``production_data_provider_factory(subject_params)`` and
+        the worldless class + factory + registration recipe were DELETED, so
+        the surviving-scope half flips to its ABSENCE arm. The repo-wide
+        deletion pin itself lives at
+        ``data/test_subject_projection.py::TestTheTombstoneIsHonored::
+        test_the_worldless_provider_names_survive_nowhere_outside_docs``; what
+        THIS pin adds is that the pm file kept its production markers and grew
+        the seam's own — the subject-bound view marker — so the deletion cannot
+        be satisfied by simply dropping coverage.
         """
         text = (_REPO_ROOT / "tests" / "orchestration"
                 / "test_pm_two_bridges.py").read_text(encoding="utf-8")
@@ -365,18 +378,20 @@ class TestFactFAndL1LandingState:
             "_production_registered_factories",
             "production_data_backend",
             "catalog-licensed EMPTY",
+            # L2-b Task 5: the seam the view now hands out, and the surviving
+            # wiring-guard cause that discriminates it from a silent read.
+            "production_data_provider_factory",
+            "not bound at the runner seam",
         ):
             assert marker in text, f"L2-b's production pm pin marker missing: {marker!r}"
         for marker in (
-            "_worldless_registered_factories",
-            "_skip_unless_worldless_incumbent",
-            "WorldlessDataBridgeProvider",
-            "params resolved from the run subject projection",
-            "not bound at the runner seam",
+            "_worldless" + "_registered_factories",
+            "_skip_unless" + "_worldless_incumbent",
+            "Worldless" + "DataBridgeProvider",
         ):
-            assert marker in text, (
-                f"the surviving worldless-class pin scope vanished: {marker!r} "
-                "(the class dies at Task 5, not here)")
+            assert marker not in text, (
+                f"the retired worldless pin scope came back: {marker!r} "
+                "(the class died at L2-b Task 5)")
         for needle in _DEAD_ROW_NEEDLES:
             assert needle not in text
 

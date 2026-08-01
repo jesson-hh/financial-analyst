@@ -1230,14 +1230,31 @@ class TestSubjectScopedFactoriesThreading:
         """With ``subject_params`` bound the executor receives the thin
         per-run ``_SubjectScopedFactories`` view over the SAME bundle
         registry: the sealed data provider ref resolves to the subject-BOUND
-        worldless factory (the exact stamped object — never a re-projection),
-        and the REAL pilot run still completes through the view (delegation is
-        transparent for a run that never touches the sealed data ref)."""
-        from guanlan_v2.orchestration.data.catalog import phase3_data_surface
-        from guanlan_v2.orchestration.data.runtime import (
-            SubjectParams,
-            WorldlessDataBridgeProvider,
+        data provider factory (the exact stamped object — never a
+        re-projection), and the REAL pilot run still completes through the
+        view (delegation is transparent for a run that never touches the
+        sealed data ref).
+
+        CONSCIOUS FLIP (L2-b Task 5 — the L1<->L2-b integration seam; the
+        ``_SubjectScopedFactories`` docstring chartered this move by name and
+        number in BOTH plans).
+
+        | | what the view's override constructs |
+        |---|---|
+        | L1 (pre-flip) | L1's worldless stopgap provider — subject-bound, but with no ``DataRuntimeWorld``, so every rows-present shape refused (class deleted here) |
+        | here | ``ProductionDataProvider`` — the SAME class ``register_production_data_provider`` binds process-level, subject-bound |
+
+        UNCHANGED and deliberately re-asserted (L1 Task 4's invariants): the
+        view is a distinct object over the SAME base, it closes over THE
+        stamped projection by identity, and the override NEVER leaked into the
+        process-level base — the pilot bundle still holds no binding at all
+        for the sealed ref, which is also why the view's override must build
+        its own provider rather than decorate the base's."""
+        from guanlan_v2.orchestration.adapters.data_world import (
+            ProductionDataProvider,
         )
+        from guanlan_v2.orchestration.data.catalog import phase3_data_surface
+        from guanlan_v2.orchestration.data.runtime import SubjectParams
 
         sp = SubjectParams.project(code="600519", as_of=NOW)
         bundle, runtime = self._spied_run(
@@ -1251,10 +1268,75 @@ class TestSubjectScopedFactoriesThreading:
         provider = factory(
             bridge=SimpleNamespace(bridge_id="data.runtime", priority=100),
             summary=SimpleNamespace(summary_digest="s" * 64))
-        assert isinstance(provider, WorldlessDataBridgeProvider)
+        assert isinstance(provider, ProductionDataProvider)
         # ONE-recipe provenance: the view closes over THE bound object.
         assert provider._subject_params is sp
         # ...and the override never leaked into the process-level base: the
         # pilot bundle holds no binding for the sealed ref.
         with pytest.raises(CatalogMaterialError):
             bundle.factories.handler_factory(ref)
+
+    def test_the_views_provider_is_wired_from_the_runners_own_seam_objects(
+            self, tmp_path, monkeypatch):
+        """L2-b Task 5: the per-run view builds a world resolver, so it must
+        build it from the RUNNER's own collaborators — never a second,
+        silently-divergent wiring.
+
+        Pinned by OBJECT IDENTITY against the runner's inputs: the resolver's
+        ``stores`` and its ``catalog_runtime`` are the composition's own, its
+        ``schema_resolver`` is ``stores.resolver``, and its refusal-audit sink
+        is the runner's ``refusal_sink`` — the same object the capability
+        gateway records through, which in production IS the ONE hoisted
+        data-aware sink ``build_production_bindings`` passes to BOTH seams
+        (pinned there by ``test_pm_two_bridges.py`` items 7a/7b). A per-run
+        world quietly recording into a private sink nobody drains is exactly
+        the defect the Task-4 hoist closed; this keeps it closed on the
+        subject-bound path too.
+
+        The recipe is a process-level singleton, so it is pinned as identity
+        against the module's own ``production_data_recipe()`` rather than
+        against the runner. (The ONE thread-confined backend never reaches the
+        resolver at all — ``world_for`` calls ``production_data_backend()``
+        when it builds the world, and gate D-A's sharing property is pinned at
+        the registration seam.)"""
+        from guanlan_v2.orchestration.adapters import data_world as DW
+        from guanlan_v2.orchestration.data.catalog import phase3_data_surface
+        from guanlan_v2.orchestration.data.runtime import SubjectParams
+
+        bundles: list = []
+        real_bpcr = assembly_mod.build_production_catalog_runtime
+
+        def spy_bpcr(snapshot, **kw):
+            built = real_bpcr(snapshot, **kw)
+            bundles.append(built)
+            return built
+
+        monkeypatch.setattr(
+            assembly_mod, "build_production_catalog_runtime", spy_bpcr)
+
+        seen: list = []
+        real_bdpe = assembly_mod.build_dag_plan_executor
+
+        def spy_bdpe(**kw):
+            seen.append((kw["runtime"], kw["refusal_sink"]))
+            return real_bdpe(**kw)
+
+        monkeypatch.setattr(assembly_mod, "build_dag_plan_executor", spy_bdpe)
+
+        sp = SubjectParams.project(code="600519", as_of=NOW)
+        env = _compose_env(tmp_path, _RecordingFactory("t5-wiring"),
+                           run_id="run-t5-wiring", subject_params=sp)
+        assert _run(env) is not None
+        assert len(seen) == 1 and len(bundles) == 1
+        runtime, refusal_sink = seen[0]
+
+        provider = runtime.factories.handler_factory(
+            phase3_data_surface().provider_ref)(
+            bridge=SimpleNamespace(bridge_id="data.runtime", priority=100),
+            summary=SimpleNamespace(summary_digest="s" * 64))
+        resolver = provider._resolver
+        assert resolver._stores is env.stores
+        assert resolver._schema_resolver is env.stores.resolver
+        assert resolver._catalog_runtime is bundles[0].runtime
+        assert resolver._recipe is DW.production_data_recipe()
+        assert resolver._sink_factory() is refusal_sink

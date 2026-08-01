@@ -326,11 +326,12 @@ class TestTheLiveFailureAndTheBinding:
         ``test_pm_two_bridges.py``.
 
         CONSCIOUS FLIP (L2-b Task 4, the correction clause this pin's previous
-        docstring named): the data half's recipe was
-        ``register_worldless_data_provider`` and the isinstance below asserted
-        ``WorldlessDataBridgeProvider`` (L1's incumbent, itself L1 Task 3's
-        successor to the retired dead-row provider). It is now the world-bound
-        ``register_production_data_provider`` / ``ProductionDataProvider``.
+        docstring named): the data half's recipe was L1's worldless
+        registration and the isinstance below asserted its worldless provider
+        class (L1's incumbent, itself L1 Task 3's successor to the retired
+        dead-row provider; deleted outright at L2-b Task 5). It is now the
+        world-bound ``register_production_data_provider`` /
+        ``ProductionDataProvider``.
         """
         from guanlan_v2 import orch_store_status as status_mod
         from guanlan_v2.orchestration.adapters import durable as durable_mod
@@ -603,25 +604,36 @@ class TestTheNamedRemainingGap:
     own per-run world and runs the real Phase-3 session, and only a ROWLESS
     worker freezes the catalog-licensed EMPTY. Pinned above, in
     ``test_build_production_bindings_registers_through_the_one_recipe``.
-    ``register_worldless_data_provider`` survives ONLY as the per-run
-    ``assembly._SubjectScopedFactories`` target (the named Task-5 residue) —
-    "EVERY rows-present shape refuses loudly" was true under that incumbent
-    and is no longer true of production. The test below still drives the
-    worldless recipe deliberately: its assertion is a REGISTRATION fact (pm's
-    resolver constructs and derives its two active bridges), which any bound
-    ``data.runtime`` provider satisfies, and it needs neither durable stores
-    nor a committed snapshot. It dies with the class at Task 5.
+    L2-b Task 5 UPDATE (the flip this docstring's predecessor announced): the
+    worldless recipe is GONE — its last caller, the per-run
+    ``assembly._SubjectScopedFactories`` view, was re-targeted to the
+    world-bound ``production_data_provider_factory(subject_params)`` and the
+    class deleted. The test below therefore drives the ONE production recipe
+    instead. Its assertion is UNCHANGED and still provider-agnostic: pm's
+    resolver constructs and derives its two active bridges — a REGISTRATION
+    fact (the resolver's required set is derived from the node's activations,
+    never from provider semantics), which any bound ``data.runtime`` provider
+    satisfies. Registration itself touches neither stores nor a committed
+    snapshot (proven here by handing it a POISONED stores object, which is
+    also a free re-pin of the Task-4 "carries but never touches" property).
     """
 
     def test_pm_is_refused_on_the_raw_bundle_but_resolves_through_the_recipes(
             self, bundle, view, reduced, env):
-        from guanlan_v2.orchestration.catalog_runtime import TrustedFactoryRegistry
-        from guanlan_v2.orchestration.data.runtime import (
-            register_worldless_data_provider,
+        from guanlan_v2.orchestration.adapters.data_world import (
+            register_production_data_provider,
         )
+        from guanlan_v2.orchestration.catalog_runtime import TrustedFactoryRegistry
         from guanlan_v2.orchestration.memory.runtime import (
             register_phase3_memory_provider_factory,
         )
+
+        class _PoisonedStores:
+            """Registration must CARRY the stores and never touch them."""
+
+            def __getattr__(self, name):  # pragma: no cover - failing is it
+                raise AssertionError(
+                    f"stores.{name} touched at data-provider registration")
 
         # the raw control: experience alone still refuses pm (data first, 100).
         experience_only = TrustedFactoryRegistry(bundle.runtime)
@@ -637,13 +649,16 @@ class TestTheNamedRemainingGap:
 
         # the ruled flip: with the two provider recipes, pm's resolver
         # constructs and derives exactly its two active bridges. The DATA half
-        # is deliberately the surviving worldless recipe, NOT what production
-        # registers since L2-b Task 4 (see the class SCOPE NOTE): what is
-        # asserted below is a registration fact — the resolver's required set —
-        # which is provider-agnostic. Dies with the class at Task 5.
+        # is the ONE production recipe (L2-b Task 5 re-target — the worldless
+        # recipe it used to drive was deleted with its class); what is asserted
+        # below is a registration fact — the resolver's required set — which is
+        # provider-agnostic.
         register_phase3_memory_provider_factory(
             factories=experience_only, stores=None)
-        register_worldless_data_provider(factories=experience_only)
+        register_production_data_provider(
+            factories=experience_only, stores=_PoisonedStores(),
+            schema_resolver=None, clock=_FixedClock(),
+            catalog_runtime=bundle.runtime)
         runtime = _exec_runtime(bundle, view, reduced.report,
                                 factories=experience_only)
         resolver = _resolver(runtime, reduced.draft, env["snapshot"], "pm")

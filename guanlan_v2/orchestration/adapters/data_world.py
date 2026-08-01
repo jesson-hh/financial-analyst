@@ -64,6 +64,7 @@ from guanlan_v2.orchestration.data.runtime import (
     DataRuntimeError,
     DataRuntimeWorld,
     DataSourceCapabilityBackend,
+    SubjectParams,
     data_runtime_provider_factory,
 )
 from guanlan_v2.orchestration.data.snapshot import (
@@ -101,6 +102,7 @@ __all__ = [
     "ThreadConfinedDataBackend",
     "production_data_adapters",
     "production_data_backend",
+    "production_data_provider_factory",
     "production_data_recipe",
     "production_data_refusal_audit_sink",
     "register_production_data_provider",
@@ -711,20 +713,35 @@ class ProductionDataProvider:
       Never an EMPTY freeze over a row that could have been read (the
       silenced-outage shape every tombstone in this lineage forbids).
 
-    Until Task 5 (the L1<->L2-b integration seam) threads the run-subject
-    source through this provider into the delegated session, a delegated
-    ``dec.pm`` session refuses with L1's runner-seam cause — an honest
-    intra-train intermediate that never reaches production (order-conditional
-    pin in ``test_production_data_provider.py``, flipped by Task 5).
+    **The run-subject source (L2-b Task 5 — the L1<->L2-b integration seam).**
+    ``subject_params`` is the run's committed subject projection
+    (:class:`~guanlan_v2.orchestration.data.runtime.SubjectParams`), carried
+    construction-side and threaded into the DELEGATED session, where
+    ``_assemble_params`` consumes it as the second, closed source for the
+    row's ``node_param`` pointers. It is what makes the sealed
+    ``dec.pm``/``verified_snapshot`` row resolvable at all: that row's
+    ``InstrumentUniverseParams.symbols`` is a strict tuple no legal
+    ``PlanNode.params`` can carry.
+
+    ``None`` is the honest UNBOUND posture and is what
+    :func:`register_production_data_provider` binds process-level — a run
+    subject is service-stamped PER RUN, so only the per-run factories view
+    (``pipeline/assembly.py::_SubjectScopedFactories``, built over
+    :func:`production_data_provider_factory`) ever binds one. Unbound, a
+    rows-present worker refuses at the runner seam inside the real session
+    (the surviving semantics of L1's retired worldless shape 3) rather than
+    reading with a guessed subject.
     """
 
-    __slots__ = ("_bridge", "_summary", "_resolver")
+    __slots__ = ("_bridge", "_summary", "_resolver", "_subject_params")
 
     def __init__(self, *, bridge: Any, summary: Any,
-                 resolver: ProductionDataWorldResolver) -> None:
+                 resolver: ProductionDataWorldResolver,
+                 subject_params: SubjectParams | None = None) -> None:
         self._bridge = bridge
         self._summary = summary
         self._resolver = resolver
+        self._subject_params = subject_params
 
     def prepare_input(self, request: Any) -> Any:
         # DELEGATED, never a third copy: the real provider's prepare touches
@@ -745,9 +762,63 @@ class ProductionDataProvider:
             return _RowlessLicensedEmptyDataSession(
                 bridge=self._bridge, summary=self._summary)
         world = self._resolver.world_for(request)
-        return data_runtime_provider_factory(world)(
+        return data_runtime_provider_factory(world, subject_params=self._subject_params)(
             bridge=self._bridge, summary=self._summary,
         ).open_execution(request)
+
+
+def production_data_provider_factory(
+    subject_params: SubjectParams | None = None, *,
+    stores: Any, schema_resolver: Any, clock: AuthoritativeClock,
+    catalog_runtime: Any, refusal_audit_sink_factory: Any = None,
+):
+    """The ONE construction recipe for a bound ``data.runtime`` provider factory
+    (L2-b Task 5 — the L1<->L2-b integration seam).
+
+    Returns the provider-handler factory (``factory(*, bridge, summary)``) that
+    hands out a :class:`ProductionDataProvider` over a
+    :class:`ProductionDataWorldResolver` built from the caller's own
+    collaborators plus the module-cached :func:`production_data_recipe` and
+    :func:`production_data_backend`. ONE recipe, two callers, differing in
+    exactly one argument — the run's subject projection:
+
+    * :func:`register_production_data_provider` (process level, via
+      ``live_decide.build_production_bindings``) leaves ``subject_params``
+      UNBOUND — a run subject is per-run and cannot honestly live on a
+      process-level binding;
+    * ``pipeline/assembly.py::build_production_plan_runner._plan_executor``
+      calls it with the run's stamped projection and installs the result as
+      the SINGLE override of the thin per-run ``_SubjectScopedFactories`` view
+      over the same base registry.
+
+    **Why the view builds its own provider instead of decorating the base's.**
+    The view must serve the sealed provider ref even on a bundle where the
+    base holds NO binding for it (the pilot catalog is exactly that, pinned by
+    ``test_pipeline_assembly.py``'s negative ``register_handler`` arm), and it
+    must never mutate the base. Wiring divergence between the two call sites
+    is the real risk that trade takes on, so it is pinned by OBJECT IDENTITY
+    against the runner's own seam objects
+    (``test_the_views_provider_is_wired_from_the_runners_own_seam_objects``),
+    including the refusal-audit sink — production hands BOTH seams the same
+    hoisted data-aware sink.
+
+    Construction is I/O-free apart from the recipe's first build (committed
+    calendar material bytes); it performs no store, reader or gateway touch,
+    so a caller may build it before a run and a broken recipe still refuses at
+    the earliest possible point.
+    """
+    resolver = ProductionDataWorldResolver(
+        stores=stores, recipe=production_data_recipe(),
+        schema_resolver=schema_resolver, clock=clock,
+        catalog_runtime=catalog_runtime,
+        refusal_audit_sink_factory=refusal_audit_sink_factory)
+
+    def factory(*, bridge: Any, summary: Any) -> ProductionDataProvider:
+        return ProductionDataProvider(
+            bridge=bridge, summary=summary, resolver=resolver,
+            subject_params=subject_params)
+
+    return factory
 
 
 def register_production_data_provider(
@@ -757,31 +828,31 @@ def register_production_data_provider(
 ) -> None:
     """The ONE production ``data.runtime`` registration recipe (L2-b Task 3).
 
-    Builds :func:`production_data_recipe` (so a broken recipe — missing
-    calendar material, digest drift — kills the caller at registration time,
-    before any lease; the burned-lease precedent), binds the
-    :class:`ProductionDataProvider` factory under the exact sealed
+    Builds :func:`production_data_recipe` — through
+    :func:`production_data_provider_factory`, the shared construction recipe
+    (L2-b Task 5; no fork) — so a broken recipe (missing calendar material,
+    digest drift) kills the caller at registration time, before any lease: the
+    burned-lease precedent. Binds that factory under the exact sealed
     ``bridge.data_runtime.provider@1`` identity
     (``phase3_data_surface().provider_ref``), and registers all seven data
     capability backends via the gate D-A per-invocation shape
     (``lambda **kw: production_data_backend()`` — the ONE thread-confined
     instance handed out on every confined invoke).
 
+    The process-level binding is deliberately SUBJECT-UNBOUND: this recipe
+    takes no ``subject_params`` knob at all, because a run subject is stamped
+    per run and the only honest place to bind one is the per-run factories
+    view (see :func:`production_data_provider_factory`).
+
     Sole intended production caller: ``live_decide.build_production_bindings``
-    (Task 4 supersedes the worldless incumbent registration with this recipe).
+    (Task 4 superseded the worldless incumbent registration with this recipe).
     """
-    resolver = ProductionDataWorldResolver(
-        stores=stores, recipe=production_data_recipe(),
-        schema_resolver=schema_resolver, clock=clock,
-        catalog_runtime=catalog_runtime,
-        refusal_audit_sink_factory=refusal_audit_sink_factory)
-
-    def _provider_factory(*, bridge: Any, summary: Any) -> ProductionDataProvider:
-        return ProductionDataProvider(
-            bridge=bridge, summary=summary, resolver=resolver)
-
     factories.register_handler(
-        phase3_data_surface().provider_ref, _provider_factory)
+        phase3_data_surface().provider_ref,
+        production_data_provider_factory(
+            stores=stores, schema_resolver=schema_resolver, clock=clock,
+            catalog_runtime=catalog_runtime,
+            refusal_audit_sink_factory=refusal_audit_sink_factory))
     for _method_id, cap_ref in sorted(data_capability_refs().items()):
         factories.register_capability_backend(
             cap_ref, lambda **kw: production_data_backend())

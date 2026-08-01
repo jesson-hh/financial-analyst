@@ -19,11 +19,14 @@ The provider that replaces the worldless stopgap. Pinned here:
   of the source pin — the single-symbol fact-F enumeration);
 * (L2-b Task 4) the resolver's early manifest-locator refusal and the ONE
   hoisted data-aware refusal audit sink per binding set;
-* the ORDER-CONDITIONAL pm pin: with rows present and the run-subject source
-  not yet threaded (that is Task 5, the L1<->L2-b integration seam), the
-  delegated REAL session refuses with L1's runner-seam cause and ZERO gateway
-  begins — guarded on the provider's subject seam so Task 5's landing flips it
-  consciously (skip -> rewrite), never by surprise;
+* (L2-b Task 5, the L1<->L2-b integration seam) the run-subject source: the
+  provider carries ``subject_params`` into the delegated session, and
+  ``production_data_provider_factory`` is the ONE construction recipe the
+  per-run ``assembly._SubjectScopedFactories`` view overrides with. Pinned in
+  BOTH directions — a subject-bound view READS the sealed ``dec.pm`` shape for
+  real, and the same shape WITHOUT a view refuses at the runner seam (the
+  permanent process-level posture: only a per-run view may bind a subject, so
+  this pin stopped being order-conditional and became an invariant);
 * the synthetic live-row END-TO-END read through the delegated real session
   over an injected fake probe (fabricated catalog in the
   ``test_runtime_integration.py`` idiom — faithful adaptation recorded): one
@@ -69,6 +72,7 @@ from guanlan_v2.orchestration.adapters.data_world import (
     ProductionDataProvider,
     ProductionDataWorldResolver,
     ProductionNoCache,
+    production_data_provider_factory,
     production_data_recipe,
     register_production_data_provider,
 )
@@ -274,20 +278,6 @@ def _recipe_capture(recipe, *, as_of: datetime, snapshot_id: str):
         source_registry=recipe.registry.snapshot(), routing=recipe.routing,
         manifest=manifest)
     return manifest, dc
-
-
-def _skip_unless_subjectless_provider():
-    """ORDER-CONDITIONAL GUARD (the Task-3 runner-seam pin): Task 5 (the
-    L1<->L2-b integration seam) threads the run-subject source into
-    ``ProductionDataProvider`` and flips this pin to the real-read shape in the
-    same commit. Guarding on the provider's construction signature means that
-    landing flips the pin consciously (skip -> rewrite), never by surprise."""
-    sig = inspect.signature(ProductionDataProvider.__init__)
-    if "subject_params" in sig.parameters:
-        pytest.skip(
-            "ProductionDataProvider now carries the run-subject source -- the "
-            "runner-seam refusal pin is owned by L2-b Task 5's conscious flip "
-            "to the real-read semantics")
 
 
 # =========================================================================== #
@@ -631,25 +621,54 @@ class TestPrepareDelegation:
         side effect or a conditional ahead of it still passed while the promise
         above was broken. It now pins, in the sibling fact-F pins' AST idiom,
         that the returned closure's body IS that ONE ``ast.Return`` — nothing
-        before it, nothing after it, and the constructed class and its three
+        before it, nothing after it, and the constructed class and its
         pass-through keywords enumerated.
-        """
+
+        CONSCIOUS FLIP (L2-b Task 5 — forced by the integration seam; the
+        Task-4 review's M-4 pin is STRENGTHENED here, never weakened).
+
+        | | delegation call text | the factory's enumerated keywords |
+        |---|---|---|
+        | Task 4 | ``data_runtime_provider_factory(world)(`` | ``[bridge, summary, world]`` |
+        | here | ``data_runtime_provider_factory(world, subject_params=self._subject_params)(`` | ``[bridge, summary, world, subject_params]`` |
+
+        Why the OUTER call grew the argument rather than the inner one: the
+        inner ``factory`` IS the provider-handler protocol the
+        ``ExecutionBridgeResolver`` calls (``factory(*, bridge, summary)``),
+        and widening THAT signature would have made the run-subject look like
+        something a resolver could pass. Currying it with the world keeps the
+        protocol exact and keeps every keyword below a pure pass-through.
+
+        Both halves stay bidirectional: the pre-flip call text must be ABSENT
+        (a revert, or Task 5's mutation m1 dropping the kwarg at this one
+        line, reddens here), and the fourth keyword must be its own
+        pass-through (a hard-coded ``subject_params=None`` reddens too — that
+        is the campaign's half-wired-kwarg defect class one call deeper)."""
         prepare_src = inspect.getsource(ProductionDataProvider.prepare_input)
         assert "DataRuntimeBridgeProvider.prepare_input(self, request)" in prepare_src
         open_src = inspect.getsource(ProductionDataProvider.open_execution)
-        assert "data_runtime_provider_factory(world)(" in open_src
+        assert ("data_runtime_provider_factory("
+                "world, subject_params=self._subject_params)(") in open_src
+        assert "data_runtime_provider_factory(world)(" not in open_src
         assert ".open_execution(request)" in open_src
         # …and the factory really is the thin constructor (so "delegated
         # through it" is not a longer road to a different provider).
         factory_src = inspect.getsource(RT.data_runtime_provider_factory)
-        assert "return DataRuntimeBridgeProvider(bridge=bridge, summary=summary, " \
-            "world=world)" in factory_src
+        # whitespace-squashed so the arm survives the line wrap the fourth
+        # keyword forced, while staying EXACT about tokens and their order.
+        squashed = "".join(factory_src.split())
+        assert ("returnDataRuntimeBridgeProvider(bridge=bridge,summary=summary,"
+                "world=world,subject_params=subject_params)") in squashed
         outer = ast.parse(factory_src).body[0]
         assert isinstance(outer, ast.FunctionDef)
         inner = [n for n in outer.body if isinstance(n, ast.FunctionDef)]
         assert [n.name for n in inner] == ["factory"], (
             "data_runtime_provider_factory must close over exactly ONE "
             "provider-handler factory")
+        # the inner factory IS the untouched provider-handler protocol.
+        inner_args = inner[0].args
+        assert inner_args.args == [] and inner_args.posonlyargs == []
+        assert [a.arg for a in inner_args.kwonlyargs] == ["bridge", "summary"]
         body = inner[0].body
         assert len(body) == 1 and isinstance(body[0], ast.Return), (
             "the factory body must be the SINGLE return — a side effect, a "
@@ -661,8 +680,9 @@ class TestPrepareDelegation:
         assert call.func.id == "DataRuntimeBridgeProvider"
         assert call.args == []
         assert [(kw.arg, getattr(kw.value, "id", None)) for kw in call.keywords] == [
-            ("bridge", "bridge"), ("summary", "summary"), ("world", "world")], (
-            "the three arguments must be the delegation's own pass-throughs, "
+            ("bridge", "bridge"), ("summary", "summary"), ("world", "world"),
+            ("subject_params", "subject_params")], (
+            "the four arguments must be the delegation's own pass-throughs, "
             "unmodified and in the reviewed order")
         # the Task-3 surface itself never touches the session machinery (the
         # Task-2 backend docstring may NAME the gateway adapter in prose, so
@@ -933,19 +953,25 @@ class TestPmThroughTheRealResolver:
         assert gateway.finalized_records() == ()
         assert sink.records() == ()
 
-    def test_pm_rows_present_refuse_at_the_runner_seam_until_task5(
+    def test_pm_rows_present_without_a_subject_refuse_inside_the_real_session(
             self, env_recipe, bundle, view):
-        """ORDER-CONDITIONAL PIN (consciously flipped by Task 5, the L1<->L2-b
-        integration seam, to the real-read shape): with a RECIPE-built
-        committed context the digest checks PASS, the manifest loads, and the
-        WHOLE session is delegated to the real ``DataRuntimeBridgeProvider`` —
-        whose real ``_assemble_params`` then refuses pm's healed row with L1's
-        runner-seam cause (``subject_params=None`` — the subject source is
-        threaded by Task 5). Zero gateway begins: the refusal is pure.
+        """THE SURVIVING SHAPE 3 (L2-b Task 5's conscious flip 3, negative
+        half): the deleted worldless provider's ``subject projection not bound
+        at the runner seam`` refusal lives on INSIDE the real path.
 
-        An honest intra-train intermediate that never reaches production
-        (9999 deploys only after the whole L2-b plan, Task 9)."""
-        _skip_unless_subjectless_provider()
+        Pre-flip this test was order-conditional
+        (``_skip_unless_subjectless_provider``) because it described an
+        intra-train intermediate — the provider had no subject source at all.
+        Post-flip it describes a PERMANENT production invariant: the
+        process-level registration is UNBOUND by design (only a per-run
+        ``_SubjectScopedFactories`` view binds a projection), so a rows-present
+        worker reached WITHOUT one must still refuse loudly rather than read
+        with a guessed subject. The guard therefore stopped being conditional
+        and the docstring stopped promising a rewrite.
+
+        With a RECIPE-built committed context the digest checks PASS and the
+        manifest loads, so this is the REAL delegated session refusing in the
+        REAL ``_assemble_params`` — zero gateway begins, the refusal is pure."""
         factories = _registered_factories(env_recipe, bundle)
         run, gateway, sink = _pm_drive(env_recipe, bundle, view, factories)
         with pytest.raises(RT.DataRuntimeError) as exc:
@@ -1003,13 +1029,18 @@ class TestPmThroughTheRealResolver:
 E2E_WORKER_ID = "dec.data"
 
 #: per-method synthetic shapes.  The e2e row uses ``ohlcv`` (series params —
-#: strict-safe from JSON-normalized node params); ``verified_snapshot``'s
-#: ``InstrumentUniverseParams.symbols`` is a STRICT tuple and therefore
-#: structurally unreachable from ``PlanNode.params`` — the exact catalog
-#: honesty fact that forced the L1 subject projection; the verified_snapshot
-#: real read is Task 5's flip (subject-bound tuple through the run subject).
-#: ``news`` binds only ``/as_of`` (``symbols`` defaults empty) — the optional
-#: degradation arm.
+#: strict-safe from JSON-normalized node params); ``news`` binds only
+#: ``/as_of`` (``symbols`` defaults empty) — the optional degradation arm.
+#:
+#: ``verified_snapshot`` is the L2-b Task 5 arm and is shaped as the SEALED
+#: ``dec.pm`` row is: ``params_schema=None`` (the worker can never legally
+#: carry node params — Phase-1 refuses them with ``params_not_allowed``),
+#: ``node_params={}``, and the two sealed ``node_param`` bindings verbatim.
+#: ``InstrumentUniverseParams.symbols`` is a STRICT tuple of ``Symbol``, so
+#: this row is structurally UNREACHABLE from node params — the exact catalog
+#: honesty fact that forced the L1 subject projection. It resolves ONLY when a
+#: run subject is bound, which is why it is the proof that the integration
+#: seam is really closed (``subject_params=`` on the shape below).
 _E2E_METHODS = {
     "ohlcv": SimpleNamespace(
         params_schema=SchemaRef(name="InstrumentSeriesParams", version="1"),
@@ -1033,6 +1064,11 @@ _E2E_METHODS = {
             ParamBinding(target_pointer="/as_of", source_kind="node_param",
                          source_pointer="/as_of"),
         )),
+    "verified_snapshot": SimpleNamespace(
+        params_schema=None,          # exactly dec.pm: no params schema at all
+        node_params={},              # …so the node can carry nothing
+        bindings=phase3_data_surface(
+        ).prefetch_binding.operations[0].param_bindings),
 }
 
 
@@ -1044,6 +1080,16 @@ def _synthetic_schema_registry() -> Phase2RuntimeRegistry:
     return reg
 
 
+def _snapshot_envelope(*, pulled_at="2026-07-16T14:59:00"):
+    """A ``tencent_realtime_quote``-shaped envelope: the two fields
+    ``VerifiedSnapshotRecord.from_candidate`` consumes, nothing fabricated
+    beyond them."""
+    return {"ok": True, "status": "ok", "n": 1, "error": "", "note": "",
+            "pulled_at": pulled_at,
+            "items": [{"name": "贵州茅台", "last_price": 1487.3,
+                       "prev_close": 1470.0}]}
+
+
 def _tape_envelope(*, pulled_at="2026-07-16T14:59:00"):
     env = {"ok": True, "status": "ok", "n": 1, "error": "", "note": "",
            "items": [{"name": "全市场", "open": 1480.0, "high": 1490.0,
@@ -1053,14 +1099,24 @@ def _tape_envelope(*, pulled_at="2026-07-16T14:59:00"):
     return env
 
 
-def _build_synthetic_env(monkeypatch, *, method_id: str, probe):
-    """A fabricated catalog granting ONE live row to a params-carrying worker,
-    admitted for real, executed through THIS task's registration recipe over
-    the REAL production recipe world — probe injected, zero network.
+def _build_synthetic_env(monkeypatch, *, method_id: str, probe,
+                         subject_params=None):
+    """A fabricated catalog granting ONE live row to a worker, admitted for
+    real, executed through THIS task's registration recipe over the REAL
+    production recipe world — probe injected, zero network.
 
     Faithful trimmed adaptation of ``test_runtime_integration.build_data_env``
     (recorded in the module docstring): admission service dropped; validation
     + runtime support are the real ones.
+
+    ``subject_params`` (L2-b Task 5) drives the run through the REAL per-run
+    seam object: the registered factories are wrapped in
+    ``assembly._SubjectScopedFactories`` over
+    ``production_data_provider_factory(subject_params, …)`` — the exact
+    construction ``build_production_plan_runner._plan_executor`` performs when
+    a deep run's projection is bound. It is NOT a second registration: the
+    process-level binding stays UNBOUND underneath, and the view overrides
+    exactly the sealed provider ref.
     """
     recipe = production_data_recipe()
     schema_registry = _synthetic_schema_registry()
@@ -1235,10 +1291,20 @@ def _build_synthetic_env(monkeypatch, *, method_id: str, probe):
     monkeypatch.setattr(DW, "_BACKEND", fake_backend)
     assert DW.production_data_backend() is fake_backend
 
-    factories = TrustedFactoryRegistry(catalog_runtime)
+    base_factories = TrustedFactoryRegistry(catalog_runtime)
     register_production_data_provider(
-        factories=factories, stores=stores, schema_resolver=resolver,
+        factories=base_factories, stores=stores, schema_resolver=resolver,
         clock=_FixedClock(AS_OF), catalog_runtime=catalog_runtime)
+    if subject_params is None:
+        factories = base_factories
+    else:
+        from guanlan_v2.orchestration.pipeline import assembly as _assembly
+
+        factories = _assembly._SubjectScopedFactories(
+            base_factories, provider_ref=surface.provider_ref,
+            factory=production_data_provider_factory(
+                subject_params, stores=stores, schema_resolver=resolver,
+                clock=_FixedClock(AS_OF), catalog_runtime=catalog_runtime))
 
     plan_ns = SimpleNamespace(
         plan_digest=compute_candidate_plan_digest(
@@ -1281,7 +1347,9 @@ def _build_synthetic_env(monkeypatch, *, method_id: str, probe):
 
     return SimpleNamespace(
         drive=drive, stores=stores, gateway=gateway, sink=sink,
-        method_spec=spec, manifest=manifest, dc=dc, probe=probe)
+        method_spec=spec, manifest=manifest, dc=dc, probe=probe,
+        factories=factories, base_factories=base_factories,
+        provider_ref=surface.provider_ref)
 
 
 class TestSyntheticLiveRowEndToEnd:
@@ -1345,6 +1413,113 @@ class TestSyntheticLiveRowEndToEnd:
             expected_schema_ref=record.request_ref.schema_ref)
         assert request.params["symbol"]["code"] == "600519"
         assert request.params["end"] == AS_OF.isoformat()
+
+    def test_the_subject_bound_sealed_row_reads_for_real_through_the_per_run_view(
+            self, monkeypatch):
+        """**THE L2-b Task 5 pin — conscious flip 2, the end state both plans
+        exist for.**
+
+        The row here is shaped EXACTLY as the sealed ``dec.pm`` grant: a worker
+        with ``params_schema_ref=None``, a node with NO params, and the two
+        sealed ``node_param`` bindings (``/as_of <- /asof_date``,
+        ``/symbols <- /code``). ``InstrumentUniverseParams.symbols`` is a
+        STRICT tuple of ``Symbol``, so this row is structurally unreachable
+        from node params — before this task it could only ever refuse:
+
+        | | outcome for this exact row |
+        |---|---|
+        | L1 | worldless provider: PROVEN resolvable under a bound projection, then refused (``no production DataRuntimeWorld is bound``) |
+        | L2-b Task 4 | world bound, but the per-run view still handed out the worldless provider AND the real session had no subject source ⇒ ``subject projection not bound at the runner seam`` |
+        | here | READ — the per-run view hands out the subject-bound production provider, and the run subject IS the param source |
+
+        Driven through the ACTUAL seam object (``_SubjectScopedFactories`` over
+        ``production_data_provider_factory(sp, …)``) with the process-level
+        registration left UNBOUND underneath, over the REAL production recipe
+        world, against an injected fake probe (zero network). The echoes are
+        EXACT — the subject's own code and as-of, not merely "some values" —
+        at all three places the projection has to survive:
+
+        1. the persisted ``DataRequest.params`` (post ``params_cls`` validation);
+        2. the vendor door (``_probe_args`` builds ``exchange+code``, so the
+           probe argument proves the Symbol identity the reviewed constructor
+           derived — a wrong-market projection would show up here);
+        3. the persisted, PIT-audited ``VerifiedSnapshotDataResult`` row.
+        """
+        sp = RT.SubjectParams.project(code="600519", as_of=AS_OF)
+        probe = _ProbeStub(_snapshot_envelope())
+        env = _build_synthetic_env(
+            monkeypatch, method_id="verified_snapshot", probe=probe,
+            subject_params=sp)
+
+        # the seam object really is the per-run view over an UNBOUND base.
+        base_provider = env.base_factories.handler_factory(env.provider_ref)(
+            bridge=SimpleNamespace(bridge_id=DATA_BRIDGE_ID, priority=100),
+            summary=SimpleNamespace(summary_digest="s" * 64))
+        assert base_provider._subject_params is None
+
+        contributions = env.drive(kind=ExecutionKind.LLM)
+        assert len(contributions) == 1
+        c = contributions[0]
+
+        # (1) ONE finalized ToolCallRecord under the sealed capability.
+        assert len(c.tool_call_records) == 1
+        record = c.tool_call_records[0]
+        assert record.tool_ref.id == "cap.data.verified_snapshot"
+        request = env.stores.payloads.get(
+            record.request_ref.payload_ref,
+            expected_schema_ref=record.request_ref.schema_ref)
+        assert [s["code"] for s in request.params["symbols"]] == ["600519"]
+        assert [s["exchange"] for s in request.params["symbols"]] == ["SH"]
+        assert request.params["as_of"] == sp.asof_value
+        assert request.params["as_of"] == AS_OF.isoformat()
+
+        # (2) the vendor door saw the subject's Symbol identity.
+        assert len(probe.calls) == 1
+        assert probe.calls[0]["source"] == "tencent_realtime_quote"
+        assert probe.calls[0]["code"] == "SH600519"
+
+        # (3) the persisted, PIT-audited named result.
+        assert len(c.data_result_refs) == 1
+        result_ref = c.data_result_refs[0]
+        assert result_ref == record.result_ref
+        assert result_ref.schema_ref == SchemaRef(
+            name="VerifiedSnapshotDataResult", version="1")
+        result = env.stores.payloads.get(
+            result_ref.payload_ref, expected_schema_ref=result_ref.schema_ref)
+        assert result.status is DataStatus.OK
+        assert result.pit_audit.guard_result == "passed"
+        assert result.resolved_vendor_chain == ("guanlan.datafeed",)
+        assert result.data.rows[0].symbol.code == "600519"
+        assert result.data.rows[0].last_price == 1487.3
+
+        # the rendered untrusted block for the LLM kind.
+        assert len(c.untrusted_blocks) == 1
+        block = env.stores.payloads.get(
+            c.untrusted_blocks[0].payload_ref.payload_ref,
+            expected_schema_ref=SchemaRef(name="RenderedDataBlock", version="1"))
+        assert block.method == "verified_snapshot"
+        assert "1487.3" in block.rendered_text
+
+    def test_without_the_subject_the_same_sealed_shape_refuses_at_the_seam(
+            self, monkeypatch):
+        """The negative half of the flip above, over the SAME fabricated
+        catalog: drop the per-run view (process-level UNBOUND, everything else
+        byte-identical) and the identical row refuses inside the real session
+        naming the runner seam — zero probe calls, zero finalized records.
+
+        This is what makes the positive pin mean something: the read is caused
+        by the SUBJECT reaching the session, not by the fabricated catalog
+        being permissive."""
+        probe = _ProbeStub(_snapshot_envelope())
+        env = _build_synthetic_env(
+            monkeypatch, method_id="verified_snapshot", probe=probe)
+        with pytest.raises(RT.DataRuntimeError) as exc:
+            env.drive(kind=ExecutionKind.LLM)
+        msg = str(exc.value)
+        assert "not bound at the runner seam" in msg
+        assert "subject_params=None" in msg
+        assert probe.calls == []
+        assert env.gateway.finalized_records() == ()
 
 
 class TestPitHonestyAtTheSeam:

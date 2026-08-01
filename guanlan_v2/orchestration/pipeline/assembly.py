@@ -122,11 +122,11 @@ from guanlan_v2.orchestration.catalog_runtime import (
     TrustedFactoryRegistry,
     load_pilot_catalog,
 )
-from guanlan_v2.orchestration.data.catalog import phase3_data_surface
-from guanlan_v2.orchestration.data.runtime import (
-    SubjectParams,
-    worldless_data_provider_factory,
+from guanlan_v2.orchestration.adapters.data_world import (
+    production_data_provider_factory,
 )
+from guanlan_v2.orchestration.data.catalog import phase3_data_surface
+from guanlan_v2.orchestration.data.runtime import SubjectParams
 from guanlan_v2.orchestration.enums import ExecutionKind
 from guanlan_v2.orchestration.eventstore import EventRefusalAuditSink
 from guanlan_v2.orchestration.debate import DEBATE_MAX_ROUNDS
@@ -920,12 +920,23 @@ class _SubjectScopedFactories:
     the exact-key match); nothing isinstance-checks ``TrustedFactoryRegistry``
     and ``ExecutionRuntime``'s ``factories`` field is an annotation only.
 
-    **The override target is chartered to MOVE (cross-plan seam):** L2-b
-    Task 5 — the L1↔L2-b integration seam — consciously re-targets this
-    view's ``factory`` from ``worldless_data_provider_factory(subject_params)``
-    to the world-bound ``production_data_provider_factory(subject_params)``
-    and deletes the worldless factory; that flip is cross-referenced by name
-    and number in both plans and must never happen silently.
+    **The chartered override move, EXECUTED (L2-b Task 5 — the L1↔L2-b
+    integration seam).** This view's ``factory`` was L1's worldless
+    provider-handler factory, subject-bound: a provider with no
+    ``DataRuntimeWorld``, so a bound run's every rows-present shape refused
+    loudly. It is now
+    ``production_data_provider_factory(subject_params, …)`` — the SAME
+    construction recipe ``register_production_data_provider`` binds at process
+    level, differing in exactly one argument, the run's projection. The
+    worldless factory and its class were deleted in the same commit; the flip
+    was cross-referenced by name and number in both plans, and its evidence
+    lives in ``test_pipeline_assembly.py`` +
+    ``test_pm_two_bridges.py::TestThePerRunSubjectScopedView``.
+
+    The override BUILDS a provider rather than decorating the base's, and that
+    is load-bearing: the view must serve the sealed ref even on a bundle whose
+    base holds NO binding for it (the pilot catalog — the negative
+    ``register_handler`` pin below), and it must never mutate the base.
     """
 
     __slots__ = ("_base", "_key", "_factory")
@@ -1049,15 +1060,31 @@ def build_production_plan_runner(
         dispatch = admission.verify_for_dispatch(plan.plan_digest)
         # L1 Task 4 (R2): identity when unbound — every non-deep caller is
         # bitwise unchanged; the thin per-run view over the SAME registry when
-        # the run's stamped projection is bound. The worldless factory here is
-        # the L2-b Task 5 re-target point (see _SubjectScopedFactories).
+        # the run's stamped projection is bound.
+        #
+        # L2-b Task 5 (the L1<->L2-b integration seam): the override target is
+        # the world-bound production factory, wired from THIS runner's own
+        # collaborators — the same ``stores`` / ``clock`` / catalog bundle the
+        # composition already holds, ``stores.resolver`` as the schema
+        # resolver, and ``refusal_sink`` as the world's refusal-audit sink.
+        # That last one is deliberate: in production it IS the ONE hoisted
+        # data-aware sink ``build_production_bindings`` also hands the
+        # capability gateway (and the process-level data registration), so a
+        # subject-bound run records into the same audit stream as every other
+        # run instead of a private accumulator nobody drains. Built HERE
+        # rather than at composition time so an unbound (non-deep) runner
+        # never touches the data recipe at all.
         factories = (
             bundle.factories
             if subject_params is None
             else _SubjectScopedFactories(
                 bundle.factories,
                 provider_ref=phase3_data_surface().provider_ref,
-                factory=worldless_data_provider_factory(subject_params),
+                factory=production_data_provider_factory(
+                    subject_params, stores=stores,
+                    schema_resolver=stores.resolver, clock=clock,
+                    catalog_runtime=bundle.runtime,
+                    refusal_audit_sink_factory=lambda: refusal_sink),
             )
         )
         runtime = ExecutionRuntime(
