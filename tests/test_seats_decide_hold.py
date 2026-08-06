@@ -74,7 +74,13 @@ def test_hold_injects_block(tmp_path, monkeypatch):
     assert r["ok"] is True
     assert "【持仓】" in _CAP["user"]
     assert "入场价 10.0" in _CAP["user"] and "持有约 3" in _CAP["user"]
-    assert "了结卖出" in _CAP["user"]          # 卖出指引真的进了 prompt
+    # 2026-08-02 有意识翻钉:旧断言钉的是旧文案「了结卖出 → side 填…」,而 side/note 在 schema 里
+    # 根本不存在(要的是 direction/rationale),且「继续持有」能靠被动观望蒙混——出场评估等于没发生。
+    # 结构化出场把处置升为必答字段(见 test_seats_decide_exit_action.py 与
+    # docs/research/2026-08-02-cards-factors-backtest.md 的 336 次持仓感知实证)。
+    # 本钉的意图不变:**卖出指引真的进了 prompt**;只是指引形态从一句话变成必答枚举。
+    assert "position_action" in _CAP["user"]
+    assert "清仓" in _CAP["user"] and "减仓" in _CAP["user"]
     # 浮盈亏 = 桩行情最后收盘/10.0-1(用 _DayLoader 固定收盘价算出精确百分数断言)
     pnl_pct = (_LAST_CLOSE / 10.0 - 1.0) * 100.0
     assert f"{pnl_pct:.2f}%" in _CAP["user"]

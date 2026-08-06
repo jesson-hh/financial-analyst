@@ -1513,6 +1513,7 @@ function runBacktest(runDecs, bars, useHybrid, clock) {
   const take = (clock && isFinite(+clock.takeProfit) && +clock.takeProfit > 0) ? +clock.takeProfit : null;
   const maxHold = (clock && isFinite(+clock.maxHold) && +clock.maxHold > 0) ? Math.round(+clock.maxHold) : null;
   const sideByIdx = {};
+  const fracByIdx = {};                                        // 2026-08-03:卖出的**了结比例**(减仓=0.5 / 清仓=1)
   let firstSig = Infinity;
   runDecs.forEach(d => {
     if (!d || !(d.idx >= 0)) return;
@@ -1521,6 +1522,12 @@ function runBacktest(runDecs, bars, useHybrid, clock) {
     if (useHybrid) { const hd = String(d.hybrid_direction || d.direction || ''); side = /买/.test(hd) ? 'buy' : (/卖/.test(hd) ? 'sell' : 'watch'); }
     if (side === 'buy' || side === 'sell') {
       sideByIdx[d.idx] = side; firstSig = Math.min(firstSig, d.idx);
+      // exit_fraction 由后端 position_action 派生(减仓 0.5 / 清仓 1.0);
+      // 旧决策无此字段 → 1(全平),故历史 run 的净值逐位不变。
+      if (side === 'sell') {
+        const f = +d.exit_fraction;
+        fracByIdx[d.idx] = (isFinite(f) && f > 0 && f < 1) ? f : 1;
+      }
     }
   });
   if (!isFinite(firstSig)) return null;                       // 全程观望 → 无回测净值
@@ -1540,7 +1547,9 @@ function runBacktest(runDecs, bars, useHybrid, clock) {
       else if (take != null && hi > 0 && hi >= entryPx * (1 + take)) { exitPx = entryPx * (1 + take); why = '止盈'; }
       else if (maxHold != null && (i - entryIdx) >= maxHold && px > 0) { exitPx = px; why = '到期'; }
       if (exitPx != null) {
-        cash = shares * exitPx;
+        // 时钟出场平掉**剩余**仓位:cash 用 += 而非 =(减仓后现金里已有前次了结的钱,
+        // 旧式赋值会把它抹掉——全进全出时两者等价,故旧 run 逐位不变)。
+        cash += shares * exitPx;
         trades.push({ entry: entryPx, exit: exitPx, ret: exitPx / entryPx - 1, in: entryIdx, out: i, reason: why });
         pos = 0; shares = 0;
       }
@@ -1548,11 +1557,18 @@ function runBacktest(runDecs, bars, useHybrid, clock) {
     if (sig === 'buy' && pos === 0 && px > 0) {
       pos = 1; entryPx = px; entryIdx = i; shares = cash / px; cash = 0;
     } else if (sig === 'sell' && pos === 1 && px > 0) {
-      cash = shares * px;
-      trades.push({ entry: entryPx, exit: px, ret: px / entryPx - 1, in: entryIdx, out: i, reason: '信号' });
-      pos = 0; shares = 0;
+      // 部分了结(减仓):只卖 frac,仓位继续持有剩余部分——入场价/入场序号不动,
+      // 后续止损止盈仍按原入场锚判定(与「减仓不改成本」的台账口径一致)。
+      const frac = fracByIdx[i] || 1;
+      const sold = shares * frac;
+      cash += sold * px;
+      shares -= sold;
+      trades.push({ entry: entryPx, exit: px, ret: px / entryPx - 1, in: entryIdx, out: i,
+        reason: frac < 1 ? '减仓' : '信号', frac: frac, partial: frac < 1 });
+      if (shares <= 1e-12) { pos = 0; shares = 0; }
     }
-    eq[i] = (px > 0) ? (pos === 1 ? shares * px : cash) : (i > 0 ? eq[i - 1] : 1);
+    // 净值 = 现金 + 持股市值(部分持仓下两者同时非零;全进全出时与旧式逐位相等)
+    eq[i] = (px > 0) ? (cash + shares * px) : (i > 0 ? eq[i - 1] : 1);
   }
   if (pos === 1 && entryIdx >= 0) {
     const px = +bars[n - 1].c;

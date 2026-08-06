@@ -479,6 +479,26 @@ def _resolve_factor_id(rf: dict, index: dict):
 _HYBRID_TAU = 0.15   # 死区:|bias|≤τ → 观望(仅 w>0 混合路径)
 
 
+#: 持仓语境的结构化出场处置(2026-08-02):position_action → (direction, exit_fraction)。
+#: 只在 held=True 时生效;非法/缺失取值一律不落地、不猜方向(诚实降级为 direction 原值)。
+_EXIT_ACTIONS = {
+    "继续持有": ("观望", 0.0),   # 已持仓 → 不重复买入,继续持有即观望
+    "减仓": ("卖出", 0.5),
+    "清仓": ("卖出", 1.0),
+}
+
+
+def _resolve_exit_action(raw, held: bool):
+    """返回 (position_action, exit_fraction, direction_override);任一不成立 → (None, None, None)。"""
+    if not held:
+        return (None, None, None)
+    key = str(raw or "").strip()
+    hit = _EXIT_ACTIONS.get(key)
+    if hit is None:
+        return (None, None, None)
+    return (key, hit[1], hit[0])
+
+
 def _llm_score(direction, confidence) -> float:
     """LLM 决策 → [-1,1]:买+ 卖− 观望0,幅度=confidence/100。"""
     d = str(direction or "")
@@ -849,17 +869,30 @@ async def _decide_impl(payload: dict) -> dict:
         hold_line = ""
         if held:
             _pnl = f"{(last_close / hold_entry - 1.0) * 100.0:.2f}%" if last_close else "—"
+            # 2026-08-02 结构化出场评估(研究台实证驱动,见 docs/research/2026-08-02-cards-factors-backtest.md):
+            #   旧文案让模型填 side/note —— schema 里根本没有这两个字段(要的是 direction/rationale),
+            #   且「继续持有」可以靠一个被动的观望蒙混过去,出场评估等于从未发生:
+            #   336 次持仓感知回放里,加两张专门的卖出卡反而把卖出率从 4.9% 压到 2.1%
+            #   → 持有偏好是**结构**问题不是知识问题。故 position_action 升为必答字段,
+            #   模型必须显式在【继续持有/减仓/清仓】三者中择一,direction 由它决定(见下方 _EXIT_*)。
             hold_line = (
                 f"【持仓】入场价 {hold_entry} · 持有约 {hold_bars if hold_bars is not None else '—'} {unit}"
                 f" · 最新收盘 {last_close if last_close else '—'} · 浮动盈亏 {_pnl}\n"
-                "你已持有该股:重点判断【继续持有】还是【了结卖出】——继续持有 → side 填\"观望\";"
-                "了结卖出 → side 填\"卖出\"并在 note 给理由。输出 JSON 结构不变。\n")
+                "你已持有该股:本次研判的问题不是「是否进场」,而是**这笔持仓怎么处置**。\n"
+                "必须在 position_action 里显式给出【继续持有】【减仓】【清仓】三者之一,"
+                "并在 rationale 说明触发了哪条依据(继续持有也要说明为什么现在不减)。"
+                "不允许回避:「看不准」不是继续持有的理由,请按证据给最合适的处置。\n")
 
         sys_p = (f"你是「观澜」量化交易系统中的{seat_cn}(信条:{creed})。"
                  f"基于**截至 {asof} 已发生的信息**(point-in-time,严禁使用该日之后任何信息或后见之明),"
                  f"判断此刻是否对 {name}({c}) 落子。只依据下方证据推理,不得编造数据;证据不足就给「观望」。")
         _json_fmt = ('JSON 格式:{"direction":"买入或卖出或观望","confidence":0到100整数,'
                      '"rationale":"≤140字结论理由","key_evidence":["最多3条支撑点"]}')
+        if held:   # 持仓语境:出场处置是必答项(空仓时格式逐字节不变)
+            _json_fmt = ('JSON 格式:{"direction":"买入或卖出或观望","confidence":0到100整数,'
+                         '"rationale":"≤140字结论理由","key_evidence":["最多3条支撑点"],'
+                         '"position_action":"继续持有或减仓或清仓"}'
+                         '(你已持仓,position_action 必填)')
         if mode == "fast":
             _ask = (f"研判:此刻{seat_cn}是否落子?综合上面证据与本席信条权衡,"
                     f"**只输出一个 JSON 对象**(不要任何其他文字)。\n" + _json_fmt)
@@ -922,6 +955,12 @@ async def _decide_impl(payload: dict) -> dict:
             audit_flags = audit_claims(_claims, fac, _audit_src)
         except Exception:  # noqa: BLE001 — 质检失败不挡研判
             audit_flags = []
+        # 结构化出场(2026-08-02):持仓语境下 position_action 是这一问的答案,故它决定 direction;
+        # 缺失/非法 → (None,None,None),direction 逐字保持模型原值(不猜、不编)。
+        _pos_act, _exit_frac, _dir_override = _resolve_exit_action(
+            j.get("position_action"), held)
+        if _dir_override is not None:
+            j["direction"] = _dir_override
         # P3 加权混合:llm_score(LLM 方向×置信)+ factor_score(配方因子 dir·z clip 等权)→ hybrid。
         # w=0 / factor_score=None → hybrid_direction 透传 LLM 方向(纯 LLM,不经死区)。
         _llm_s = _llm_score(j.get("direction"), j.get("confidence"))
@@ -950,6 +989,9 @@ async def _decide_impl(payload: dict) -> dict:
             **({"source": source} if source else {}),   # watcher 溯源:有值才落键
             **({"hold_entry": hold_entry} if held else {}),      # 单元三:有持仓才落键,旧记录形状不变
             **({"hold_bars": hold_bars} if hold_bars is not None else {}),
+            # 结构化出场:仅持仓且模型给出合法处置时才落键(空仓/缺失 → 旧记录形状逐字不变)
+            **({"position_action": _pos_act, "exit_fraction": _exit_frac}
+               if _pos_act is not None else {}),
         })
         return {
             "ok": True, "code": c, "name": name, "asof": asof, "seat": seat_cn,
@@ -963,6 +1005,8 @@ async def _decide_impl(payload: dict) -> dict:
             "w": w, "llm_score": _llm_s, "factor_score": _factor_s,   # P3:加权混合输入/分量
             "hybrid_bias": _hyb_bias, "hybrid_direction": _hyb_dir,   # P3:混合偏置 + 最终方向
             "pa_features": pa_feat,   # 几何常显:无论 pa 开关都回前端供决策卡显示
+            # 结构化出场:持仓语境的必答处置(空仓/缺失/非法 → None,消费方据此判断是否可用)
+            "position_action": _pos_act, "exit_fraction": _exit_frac,
         }
     except Exception as exc:  # noqa: BLE001 — LLM/取数失败诚实降级,不 500
         return {"ok": False, "code": c, "reason": f"{type(exc).__name__}: {exc}"}

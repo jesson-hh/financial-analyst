@@ -198,6 +198,9 @@ function LuoziApp() {
         side: /买/.test(r.direction || '') ? 'buy' : (/卖/.test(r.direction || '') ? 'sell' : 'watch'),
         direction: r.direction || '', conf: (r.confidence != null ? r.confidence : null),
         rationale: r.rationale || '', asof: r.asof || r.ts, model_name: r.model_name || '',
+        // 出场语义(2026-08-03):持仓语境的研判才有,缺席即 null(空仓行逐字同旧)
+        position_action: r.position_action || null,
+        exit_fraction: (r.exit_fraction == null ? null : +r.exit_fraction),
       })));
     });
     pull();
@@ -322,13 +325,14 @@ function LuoziApp() {
     let done = 0, errors = 0;
     // 持仓状态机(纯 LLM 口径,镜像 lzRunBacktest 的 pos/entryPx/entryIdx):只活在本次「真跑」作用域,
     //   不落盘不外泄——喂给 decide 的 hold_entry/hold_bars 只是上下文,后端不因此改输出 schema。
-    let pos = 0, entryPx = null, entryIdx = null;
+    let pos = 0, entryPx = null, entryIdx = null, posFrac = 0;   // posFrac:剩余仓位比例(减仓后 <1)
     for (let k = 0; k < total; k++) {
       if (realStopRef.current) break;
       const bar = runBars[k];
       if (!bar) continue;
       setRealRun(s => Object.assign({}, s, { cur: k }));
       let res = null;
+      // 减仓后仍持仓(posFrac<1),持仓语境照传——入场锚不因减仓改变(与台账「减仓不改成本」同口径)
       const holdExtra = (pos === 1) ? { hold_entry: entryPx, hold_bars: k - entryIdx } : null;
       try {
         res = await window.lzSeatDecide({
@@ -352,15 +356,26 @@ function LuoziApp() {
         const dir = res.direction;
         const side = /买/.test(dir) ? 'buy' : (/卖/.test(dir) ? 'sell' : 'watch');
         if (side === 'buy') nBuy++; else if (side === 'sell') nSell++; else nWatch++;
-        // 状态机更新(纯 LLM side 驱动,不掺 hybrid w):买入建仓/卖出清仓,其余(观望)不动。
-        if (side === 'buy' && pos === 0) { pos = 1; entryPx = +bar.c; entryIdx = k; }
-        else if (side === 'sell' && pos === 1) { pos = 0; entryPx = null; entryIdx = null; }
+        // 了结比例(2026-08-03):后端持仓语境下 position_action=减仓 → exit_fraction=0.5、清仓 → 1.0;
+        //   旧记录/空仓语境无此字段 → 1(全平),故旧行为逐位不变。
+        const efRaw = +res.exit_fraction;
+        const exitFrac = (side === 'sell' && isFinite(efRaw) && efRaw > 0 && efRaw < 1) ? efRaw : 1;
+        // 状态机更新(纯 LLM side 驱动,不掺 hybrid w):买入建仓;卖出按比例了结——
+        //   减仓后**仍在持仓**,故下一根 bar 依旧带 hold_entry 提问(否则会误以为已空仓而重新问「是否进场」)。
+        if (side === 'buy' && pos === 0) { pos = 1; entryPx = +bar.c; entryIdx = k; posFrac = 1; }
+        else if (side === 'sell' && pos === 1) {
+          posFrac = +(posFrac * (1 - exitFrac)).toFixed(6);
+          if (posFrac <= 1e-6) { pos = 0; entryPx = null; entryIdx = null; posFrac = 0; }
+        }
         if (!firstDate) firstDate = bar.date;
         lastDate = bar.date;
         if (res.model_name) lastModel = res.model_name;
-        const rd = { key: 'true_' + sid + '@' + bar.date, seat: sid, date: bar.date, side: side,
+        const rd = { key: 'true_' + sid + '@' + bar.date, seat: sid, code: codeNow, date: bar.date, side: side,
           direction: dir, conf: (res.confidence != null ? res.confidence : null),
-          rationale: res.rationale || '', reasoning: res.reasoning || '', asof: res.asof || bar.date, model_name: res.model_name || '' };
+          rationale: res.rationale || '', reasoning: res.reasoning || '', asof: res.asof || bar.date, model_name: res.model_name || '',
+          // 出场语义原样带下去:回测按 exit_fraction 部分了结,卡片按 position_action 显形
+          position_action: res.position_action || null,
+          exit_fraction: (side === 'sell' ? exitFrac : null) };
         setRealDecs(prev => {
           const arr = (prev[codeNow] || []).filter(x => x.key !== rd.key).concat([rd]);
           return Object.assign({}, prev, { [codeNow]: arr });
@@ -418,6 +433,10 @@ function LuoziApp() {
                  factor_score: (r.factor_score == null ? null : r.factor_score),
                  hybrid_bias: (r.hybrid_bias == null ? null : r.hybrid_bias),
                  w: r.w || 0,
+                 // 出场语义(2026-08-03):后端持仓语境下才有;复盘回测按 exit_fraction 部分了结,
+                 //   研判卡按 position_action 显形。缺席即 null(空仓语境的行逐字同旧)。
+                 position_action: r.position_action || null,
+                 exit_fraction: (r.exit_fraction == null ? null : +r.exit_fraction),
                  offChart: byKey[key] == null, _isRun: true };
       }));
     })();

@@ -502,13 +502,66 @@ def _decisions_tail_production(code: str, max_lines: int = 4000) -> Optional[str
     return last
 
 
+def _positions_for_payload() -> dict:
+    """台账 READ-ONLY 回放 → ``{code: avg_cost}``(只读,不新增任何写路径)。
+
+    与 `orchestration/pipeline/live_decide.py::_position_production` 同源同算法;
+    这里独立成函数是为了让 `_build_payload` 可注入、可钉(见 tests/test_seats_watcher_hold_context.py)。
+    """
+    from guanlan_v2.seats import api as _api
+
+    state = _api._ledger_replay(_api._ledger_events())
+    if not state.get("opened"):
+        return {}
+    out: dict = {}
+    for code, position in (state.get("positions") or {}).items():
+        try:
+            qty = int(position.get("qty") or 0)
+            cost = float(position.get("avg_cost") or 0)
+        except (TypeError, ValueError):
+            continue
+        if qty > 0 and cost > 0:
+            out[str(code)] = cost
+    return out
+
+
+def _hold_entry_for(code: str) -> Optional[float]:
+    """本票在台账里的真入场价;无持仓 / 台账不可读 → None(诚实缺席,绝不编造)。
+
+    2026-08-03 真机验证驱动:此前 payload 从不带持仓语境,导致盘中每一拍都只问
+    「是否进场」,后端的出场追问(api.py 的【持仓】块 + position_action 必答字段)
+    **结构上永远不会触发**——生产自动化的卖出率恒 0 与经验卡无关。
+    台账键与盯盘码写法可能不同(300308 / SZ300308),故按数字核匹配。
+    """
+    try:
+        positions = _positions_for_payload() or {}
+    except Exception as exc:  # noqa: BLE001 — 台账不可读是缺席,不是崩,更不是编一个价
+        _log.warning("台账持仓读取失败,本拍按无持仓语境研判: %s", exc)
+        return None
+    core = re.sub(r"\D", "", str(code or ""))
+    for key, cost in positions.items():
+        if re.sub(r"\D", "", str(key)) == core and core:
+            try:
+                c = float(cost)
+            except (TypeError, ValueError):
+                return None
+            return c if c > 0 else None
+    return None
+
+
 def _build_payload(cw: dict, now: datetime, quote: dict) -> dict:
     """decide payload(既有字段名,api.seats_decide 同口径消费):cards/recipe_factors
     由 refs 服务端 best-effort 解析;industry 为引擎元数据真值(取不到 '');
-    source='watcher' 随 _persist_decision 落盘。"""
+    source='watcher' 随 _persist_decision 落盘。
+
+    持仓语境(2026-08-03):台账已持有本票 → 带真入场价 hold_entry,后端据此把问题
+    从「是否进场」换成「这笔持仓怎么处置」;未持有 → 不落该键,payload 逐字节同旧。
+    """
     cards, factors = _resolve_refs(cw.get("refs"))
     name = str((quote or {}).get("name") or "") or cw["code"]
+    _hold = _hold_entry_for(cw["code"])
     return {
+        **({"hold_entry": _hold} if _hold is not None else {}),
         "code": cw["code"],
         "name": name,
         "date": now.date().isoformat(),

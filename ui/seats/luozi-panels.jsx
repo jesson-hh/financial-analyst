@@ -977,8 +977,26 @@ function RunDecCard({ dec }) {
 //   容忍两种行形状:run 映射行(conf)与落盘原始行(confidence);字段缺席即不渲染,绝不编造。
 function EvidenceFields({ dec }) {
   if (!dec) return null;
+  // 出场语义(2026-08-03):后端持仓语境下 position_action ∈ {继续持有,减仓,清仓},
+  //   减仓带 exit_fraction=0.5。**减仓绝不冒充清仓**——比例逐字来自后端,前端不猜、缺席即不渲染。
+  const pa = dec.position_action || null;
+  const ef = +dec.exit_fraction;
+  const partial = pa === '减仓' && isFinite(ef) && ef > 0 && ef < 1;
   return (
     <React.Fragment>
+      {pa && (
+        <Field label="出场评估(持仓语境·必答)">
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' }}>
+            <span className="serif" style={{ fontSize: 12, fontWeight: 600,
+              color: pa === '继续持有' ? 'var(--ink-1)' : 'var(--dai)' }}>{pa}</span>
+            {partial && <span className="mono" style={{ fontSize: 9.5, color: 'var(--dai)',
+              border: '1px solid var(--line)', borderRadius: 3, padding: '0 5px' }}>
+              了结 {Math.round(ef * 100)}% · 余仓续持</span>}
+            {pa === '清仓' && <span className="mono" style={{ fontSize: 9.5, color: 'var(--dai)',
+              border: '1px solid var(--line)', borderRadius: 3, padding: '0 5px' }}>了结 100%</span>}
+          </div>
+        </Field>
+      )}
       {dec.rationale && <div className="serif" style={{ fontSize: 12.5, color: 'var(--ink-1)', lineHeight: 1.6, textWrap: 'pretty' }}>「{dec.rationale}」</div>}
       {(dec.key_evidence || []).length > 0 && (
         <Field label="关键证据">
