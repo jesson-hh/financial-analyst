@@ -100,7 +100,12 @@ HEAD 实测:`source_registry = bb81979af8824a99574c67b9ef6176720568745a8e58772af
 
 ---
 
-## 3. 字面量清单 —— 42 处 / 16 文件 **[gate-parsed]**
+## 3. 字面量清单 —— 表内 **43 行** = 42 处家族内链字面量 + 1 处家族外(#2);**必改文件 16 个** **[gate-parsed]**
+
+> 表按 1..43 连续编号,**行号即行号**,Task 5 操作员按编号逐行走即可,不需要跨表换算。
+> spec §1 的「42 处」= 本表 43 行**减去**家族外的 #2(`fixtures/…json:11`,且它是 FROZEN);
+> spec §1 的「16 文件」= `class=MOVES` 行去重后的文件数(9 golden + 7 handoff)。
+> 两个数都由 gate 从本表现算并断言,不是手抄。
 
 `class` 列:`FROZEN` = P2 静态目录摘要,本期**必须验证其不动**;`MOVES` = Task 5 必须逐处重写。
 `family` 列:`golden` / `handoff` = spec §1 的 16 文件家族;`other` = 家族外(只 1 处,且是 FROZEN)。
@@ -167,34 +172,44 @@ HEAD 实测:`source_registry = bb81979af8824a99574c67b9ef6176720568745a8e58772af
 
 ---
 
-## 4. 兄弟计划钉 + 支持拒绝钉 —— Task 3-4 的 allowed-red 集 **[gate-parsed:第一列]**
+## 4. 兄弟计划钉 + 支持拒绝钉 —— Task 3-4 的 allowed-red 集 **[gate-parsed]**
 
-`verdict` 语义:
+`verdict` 是**封闭词表**,只有三个取值(gate 断言:任何第四种拼法 = 红):
 `FLIP` = D-1/D-2 一旦授权就必然变红,Task 3-5 必须有意识翻转并留双向证据;
 `FLIP-IF` = 只在某个具体裁决下变红(条件写在备注);
 `GREEN-VERIFY` = 不该变红,但每次红窗都要显式复核(它变红说明改动越界)。
 
-| # | file:line | 钉 | verdict | 备注 |
-|---|---|---|---|---|
-| 1 | `tests/orchestration/test_pipeline_deep_preset.py:1042` | `test_the_report_is_honestly_unsupported_naming_the_data_grant_gap` —— 断言 `report.supported is False` 且 unmet worker 恰为 `{pv.technical, text.news}` | **FLIP** | 授权后 supported 转 True(或 unmet 集缩小),本钉正是「诚实拒绝」的化身,必须双向翻 |
-| 2 | `tests/orchestration/test_pipeline_reduced_deep_preset.py:327` | `test_the_untouched_ten_node_baseline_is_still_honestly_unsupported` | **FLIP** | 同上;它同时是减证据预设「存在理由」的回归半边 |
-| 3 | `tests/orchestration/test_pipeline_reduced_deep_preset.py:344` | `test_the_two_dropped_nodes_are_exactly_the_unmet_ones` —— 断言 `full_ids - reduced_ids == unmet_nodes` | **FLIP** | 授权后 unmet 集空,等式两边同时塌;翻转时必须换成新的因果断言而不是删掉 |
-| 4 | `tests/orchestration/test_pipeline_reduced_deep_preset.py:321` | `test_the_reduced_draft_is_runtime_supported` | **GREEN-VERIFY** | 减证据预设本来就绿;授权不该动它。它变红 = 授权改到了八节点通路上 |
-| 5 | `tests/orchestration/test_runtime_support.py:595` | 通用 `tool_calls_required_unmet` 算术钉(合成 worker,非两位读者) | **GREEN-VERIFY** | 算术本身不变;变红说明动了 `runtime_support.py:673` 的判据 |
-| 6 | `tests/orchestration/data/test_phase_handoff.py:828` | Phase-3 handoff 的 `tool_calls_required_unmet` 存在性钉 | **GREEN-VERIFY** | 同上 |
-| 7 | `tests/orchestration/test_pv_aux_nodes.py:472` `:479` `:546` `:566` + 文件头 `:26-27` | L2-b 的 pv-aux 类型化拒绝钉(`AuxDataUngranted` / `aux_data_ungranted`) | **FLIP-IF** | **只在 D-1 给 `pv.price_action` / `pv.microstructure` 授行时翻**。今天的 D-1 候选是 `pv.technical` / `text.news`,与这两个 aux 座席**不是同一批 worker** —— 见 §7.0 的 17 条 grant 全表。若 D-1 只授两位读者,本组**保持绿**(GREEN-VERIFY)。 |
-| 8 | `tests/orchestration/test_data_world_recipe.py:755` | `test_every_granted_prefetch_row_is_within_the_supported_set` —— `granted ⊆ {verified_snapshot, news, ohlcv}` 且 `granted == {verified_snapshot}` | **FLIP**(必然) | 任何新增行都会动 `granted == {verified_snapshot}` 这一行,**即使新方法在支持集内**。若授的方法在支持集**外**(`indicators`/`fundamentals`),`granted ⊆ …` 那一行会**先**红 —— 这是 L2-b 设计的第一道拦截,不许绕。 |
-| 9 | `tests/orchestration/test_data_world_recipe.py:155` | `test_every_sealed_prefetch_row_route_equality` —— 逐行 `default_route(m).entries == row.frozen_route` | **GREEN-VERIFY** | 每条新行都会进入这个迭代。七个方法的默认路由都已注册为单条 `(surface.source_ref, spec.capability_ref)`,所以新行只要照同一配方冻结路由就应保持绿;它变红 = 新行的 `frozen_route` 写错了。 |
-| 10 | `tests/orchestration/test_data_world_recipe.py:165` | `test_all_seven_methods_have_the_single_surface_route` | **GREEN-VERIFY** | 与新行无关(全七方法),但列在这里作为红窗越界探针 |
-| 11 | `tests/orchestration/test_data_world_recipe.py:179` | `test_the_real_session_cross_resolves_the_production_registry` | **GREEN-VERIFY** | 用真 `_frozen_route_for` 交叉解析首行;新行进来后应仍绿 |
-| 12 | `tests/orchestration/test_data_world_recipe.py:738` | `test_unsupported_method_refuses_through_production_staging`(`indicators` 在真适配器前被拒) | **GREEN-VERIFY**(A/C 下)· **FLIP**(B 下) | 只有 D-1 选 B(建 `indicators` 后端)才翻 |
-| 13 | `tests/orchestration/data/test_data_catalog.py:181` `:211` | one-to-one 不变量的两向 `CatalogError` 钉 | **GREEN-VERIFY** | 不变量本身**字节不动**(计划红线)。它变红 = 有人改了 `catalog.py:803` 的判据。 |
-| 14 | `tests/orchestration/test_pipeline_deep_preset.py:135`、`tests/orchestration/test_pipeline_reduced_deep_preset.py:130`、`tests/orchestration/golden/phase10_catalog_manifest_v1.json:27` | 深度预设 record digest `d7c5092f…` | **FLIP**(若 Task 5 改预设描述里的 `pv.microstructure` 过陈述) | 不是链摘要,但和链一起在本期唯一的重冻窗口里动;3 处字面量 |
-| 15 | `tests/orchestration/golden/phase8_catalog_manifest_v1.json`(`final_worker_semantic_digests`) | `pv.technical` = `3aacbf8be000b9e5e5b061ebb38eb86d9299cdfee4b7d190aa08e3def04357ab`;`text.news` = `2794a57155bdf312a5f48ee4bdd3554c6d2e32920706fbb5d79b5bfdc78fcbea` | **FLIP-IF** | 只在 D-1 选 A(收窄 allowlist)或 D-2 选 B(改 `tool_calls`)时移动。**P8 worker 摘要本来就在本期重冻范围内**,所以是零额外爆炸半径。 |
-| 16 | `guanlan_v2/orchestration/pipeline/api.py:1186-1189` | 文档钉:「sealed Phase-3 data-prefetch grants still cover `dec.pm` only … support-refuses with `tool_calls_required_unmet`(Task-11 permanent-honest grant-gap ruling)」 | **FLIP**(文档) | 授权后这段话变成假的,Task 5 必须改字 |
-| 17 | `guanlan_v2/orchestration/pipeline/deep_decide.py:330-334` (`PresetSelectionRefused` docstring) | 「the full lane's honest refusal is a real product, not a fallback」 | **FLIP**(文档) | 同上;这是减证据预设「存在理由」的散文半边 |
-| 18 | `guanlan_v2/orchestration/pipeline/live_decide.py:1157-1168` | 「the deep run is still SUPPORT-REFUSED at admission」 | **FLIP**(文档) | 同上 |
-| 19 | `guanlan_v2/orchestration/pipeline/pv_aux.py:195-199` | `AuxDataUngranted` 的消息字面量「the sealed prefetch binding grants it no row (L3)」 | **FLIP-IF** | 同 #7:只在授 aux 座席时 |
+**表的契约是 `anchor` 列,不是 `line` 列。** gate 断言:每行的 `file` 存在,且 `anchor` 字符串
+**出现在该文件中**(全文件匹配,不按行号)—— 所以上游代码上下移动不会让这张表假红,而钉被
+**删掉或改名**会立刻红。`line` 列只是给人用的导航提示,允许漂移,不参与断言。
+gate 另外断言解析出的行数 == §4 表里编号行的行数,所以没有哪一行能被正则悄悄跳过。
+
+| # | file | line(s) | anchor | verdict | 钉 / 备注 |
+|---|---|---|---|---|---|
+| 1 | `tests/orchestration/test_pipeline_deep_preset.py` | 1042 | `test_the_report_is_honestly_unsupported_naming_the_data_grant_gap` | FLIP | 断言 `report.supported is False` 且 unmet worker 恰为 `{pv.technical, text.news}`。授权后 supported 转 True(或 unmet 集缩小)—— 本钉正是「诚实拒绝」的化身,必须双向翻。 |
+| 2 | `tests/orchestration/test_pipeline_reduced_deep_preset.py` | 327 | `test_the_untouched_ten_node_baseline_is_still_honestly_unsupported` | FLIP | 同 #1;它同时是减证据预设「存在理由」的回归半边。 |
+| 3 | `tests/orchestration/test_pipeline_reduced_deep_preset.py` | 344 | `test_the_two_dropped_nodes_are_exactly_the_unmet_ones` | FLIP | 断言 `full_ids - reduced_ids == unmet_nodes`。授权后 unmet 集空,等式两边同时塌;翻转时必须换成新的因果断言,不是删掉。 |
+| 4 | `tests/orchestration/test_pipeline_reduced_deep_preset.py` | 321 | `test_the_reduced_draft_is_runtime_supported` | GREEN-VERIFY | 减证据预设本来就绿;授权不该动它。它变红 = 授权改到了八节点通路上。 |
+| 5 | `tests/orchestration/test_runtime_support.py` | 595 | `tool_calls_required_unmet` | GREEN-VERIFY | 通用算术钉(合成 worker,非两位读者)。算术本身不变;变红说明动了 `runtime_support.py:673` 的判据。 |
+| 6 | `tests/orchestration/data/test_phase_handoff.py` | 828 | `tool_calls_required_unmet` | GREEN-VERIFY | Phase-3 handoff 的存在性钉。同 #5。 |
+| 7 | `tests/orchestration/test_pv_aux_nodes.py` | 26, 479, 546, 566 | `AuxDataUngranted` | FLIP-IF | **只在 D-1 给 `pv.price_action` / `pv.microstructure` 授行时翻。** 今天的 D-1 候选是 `pv.technical` / `text.news`,与这两个 aux 座席**不是同一批 worker**(见 §7.0 的 17 条 grant 全表)。若 D-1 只授两位读者,本组保持绿。 |
+| 8 | `tests/orchestration/test_pv_aux_nodes.py` | 27, 472 | `aux_data_ungranted` | FLIP-IF | 同 #7(类型化拒绝码的那一半)。 |
+| 9 | `tests/orchestration/test_data_world_recipe.py` | 755 | `test_every_granted_prefetch_row_is_within_the_supported_set` | FLIP | **必然翻。** 任何新增行都会动它的 `granted == {verified_snapshot}` 那一行,**即使新方法在支持集内**。若授的方法在支持集**外**(`indicators`/`fundamentals`),更早的 `granted ⊆ {verified_snapshot, news, ohlcv}` 那一行会**先**红 —— 这是 L2-b 设计的第一道拦截,不许绕。 |
+| 10 | `tests/orchestration/test_data_world_recipe.py` | 155 | `test_every_sealed_prefetch_row_route_equality` | GREEN-VERIFY | 每条新行都会进入这个迭代。七方法默认路由都已注册为单条 `(surface.source_ref, spec.capability_ref)`,新行照同一配方冻结路由就应保持绿;变红 = 新行 `frozen_route` 写错了。 |
+| 11 | `tests/orchestration/test_data_world_recipe.py` | 165 | `test_all_seven_methods_have_the_single_surface_route` | GREEN-VERIFY | 与新行无关(全七方法),列在这里作为红窗越界探针。 |
+| 12 | `tests/orchestration/test_data_world_recipe.py` | 179 | `test_the_real_session_cross_resolves_the_production_registry` | GREEN-VERIFY | 用真 `_frozen_route_for` 交叉解析首行;新行进来后应仍绿。 |
+| 13 | `tests/orchestration/test_data_world_recipe.py` | 738 | `test_unsupported_method_refuses_through_production_staging` | FLIP-IF | 只有 D-1 选 **B**(建 `indicators` 后端)才翻;A/C 下保持绿。 |
+| 14 | `tests/orchestration/data/test_data_catalog.py` | 179 | `test_grant_without_prefetch_row_fails` | GREEN-VERIFY | one-to-one 不变量的「有授权无行」方向。不变量**字节不动**(计划红线);变红 = 有人改了 `catalog.py:803` 的判据。 |
+| 15 | `tests/orchestration/data/test_data_catalog.py` | 185 | `test_prefetch_row_without_grant_fails` | GREEN-VERIFY | 同 #14 的「有行无授权」方向。注意:它用的是 `dec.research_mgr`(Phase-3 内、未授权),与 §7.0 用 `pv.technical`(Phase-3 外)证的不是同一件事。 |
+| 16 | `tests/orchestration/test_pipeline_deep_preset.py` | 135 | `d7c5092fda61ca242de3fb91f48897e06fcc2e8a5836bfae80aae23e6e08a918` | FLIP-IF | 深度预设 record digest。只在 Task 5 改预设描述里的 `pv.microstructure` 过陈述时移动;不是链摘要,但和链一起在本期唯一的重冻窗口里动。 |
+| 17 | `tests/orchestration/test_pipeline_reduced_deep_preset.py` | 130 | `d7c5092fda61ca242de3fb91f48897e06fcc2e8a5836bfae80aae23e6e08a918` | FLIP-IF | 同 #16(第 2 处)。 |
+| 18 | `tests/orchestration/golden/phase10_catalog_manifest_v1.json` | 27 | `d7c5092fda61ca242de3fb91f48897e06fcc2e8a5836bfae80aae23e6e08a918` | FLIP-IF | 同 #16(第 3 处,golden 侧)。 |
+| 19 | `tests/orchestration/golden/phase8_catalog_manifest_v1.json` | 153 | `3aacbf8be000b9e5e5b061ebb38eb86d9299cdfee4b7d190aa08e3def04357ab` | FLIP-IF | `pv.technical` 的 WorkerSpec 语义摘要。只在 D-1 选 A(收窄 allowlist)或 D-2 选 B(改 `tool_calls`)时移动。**P8 worker 摘要本来就在本期重冻范围内**,零额外爆炸半径。 |
+| 20 | `tests/orchestration/golden/phase8_catalog_manifest_v1.json` | 161 | `2794a57155bdf312a5f48ee4bdd3554c6d2e32920706fbb5d79b5bfdc78fcbea` | FLIP-IF | `text.news` 的 WorkerSpec 语义摘要。同 #19。 |
+| 21 | `guanlan_v2/orchestration/pipeline/api.py` | 1188 | `permanent-honest grant-gap ruling` | FLIP | 文档钉:「sealed Phase-3 data-prefetch grants still cover `dec.pm` only … support-refuses with `tool_calls_required_unmet`」。授权后这段话变成假的,Task 5 必须改字。 |
+| 22 | `guanlan_v2/orchestration/pipeline/deep_decide.py` | 333 | `is a real product, not a fallback` | FLIP | `PresetSelectionRefused` docstring —— 减证据预设「存在理由」的散文半边。同 #21。 |
+| 23 | `guanlan_v2/orchestration/pipeline/live_decide.py` | 1157, 1168 | `SUPPORT-REFUSED at admission` | FLIP | 「the deep run is still SUPPORT-REFUSED at admission」。同 #21。 |
+| 24 | `guanlan_v2/orchestration/pipeline/pv_aux.py` | 197 | `sealed prefetch binding grants it no row (L3)` | FLIP-IF | `AuxDataUngranted` 的消息字面量。同 #7:只在授 aux 座席时。 |
 
 > **红窗纪律(计划 Global Constraints):** Task 3-4 期间,`tests/orchestration` 全套只允许在
 > 本表 `FLIP` / `FLIP-IF`(且其条件成立)的条目上红。**本表之外的任何一处红 = STOP,上报。**
@@ -349,8 +364,16 @@ text.research_report/news
 #### Option C —— 放宽 one-to-one 不变量
 
 计划**建议反对**,实测支持这个反对:该不变量是 `catalog.py:803` 唯一一处,是 rows==0 对 ruling C3 无歧义的**唯一**依据,
-且已被变异证明承重(`test_data_catalog.py:181`/`:211` 两向钉)。放宽它会在两个方向上重新打开静默授权洞。
-**另外要注意:§7.0 的 (0-a) 不是 C** —— (0-a) 改的是判据的**作用域**,判据字节不动;C 改的是判据本身。
+且已被变异证明承重(§4 #14/#15 两向钉)。放宽它会在两个方向上重新打开静默授权洞。
+
+**对 L2-b supported-methods 守卫的可执行代价(计划 Step 3 要求逐选项说明):**
+C **让守卫继续站着,但不再保护** —— 被容忍的「有授权无行」grant 根本不产生 prefetch 行,而
+`test_data_world_recipe.py:755` 的守卫是**在行上**求 `granted`(`{row.method_ref.id for row in
+prefetch_binding.operations}`),所以这类 grant **从守卫下面绕过去**:守卫保持绿,而未经适配器
+检查的能力已经授出。对照:A 只要收窄后的方法落在支持集内就不触发第一行断言(但必然要改
+`granted == {verified_snapshot}` 那一行);B 的可执行代价**就是**那道守卫(适配器先长、守卫后有意识翻)。
+
+**另外要注意:§7.0 的 (0-a) 不是 C** —— (0-a) 加的是判据的**求值点**,判据字节不动;C 改的是判据本身。
 
 ### 7.2 建议(不构成裁决)
 

@@ -38,11 +38,20 @@ Gate items (Task 1 Step 1), one class each:
 5. **Pointer-set satisfiability** — for every D-1 candidate method, the real L1
    round-trip idiom decides satisfiable vs L1-module-movement.
 
-Plus one item the brief could not know (recorded as such in the ledger §7.0):
+Plus three items the brief could not know (recorded as such in the ledger):
 
-6. **Grant site** — the one-to-one invariant's ``granted`` set is derived over
-   the end-of-Phase-2 worker set, which contains NEITHER candidate worker. The
-   gate proves both consequences so D-1 is ruled with that fact in hand.
+6. **Grant site** (ledger §7.0) — the one-to-one invariant's ``granted`` set is
+   derived over the end-of-Phase-2 worker set, which contains NEITHER candidate
+   worker. The gate proves both consequences so D-1 is ruled with that fact in
+   hand.
+7. **The D-2 arithmetic + the two outage vocabularies** (ledger §8) — a data
+   outage splits on the method's ``optional`` bit into ``bridge_execution_error``
+   (core) vs ``tool_discipline_unmet`` (optional). Task 5 must pin both.
+8. **§4's allowed-red set is executable** — every row in the ledger's
+   allowed-red table is bound to a real file + a real in-file anchor, and the
+   flip-classification column is a closed vocabulary. §4 is what Tasks 3-4
+   enforce the red window against, so it may not be the one big table with no
+   executable protection.
 
 Run: ``python -m pytest tests/orchestration/test_l3_refreeze_gate.py -v``
 """
@@ -153,6 +162,18 @@ _MATERIAL_ROW = re.compile(
     r"^\|\s*`(bridge\.data_runtime\.\w+@1)`\s*\|\s*`([0-9a-f]{64})`\s*\|"
     r"\s*\*\*(不动|移动)\*\*",
     re.MULTILINE)
+#: §4's allowed-red rows: | # | `file` | line(s) | `anchor` | verdict | notes |
+#: The backtick groups forbid ``|`` so a malformed row can never swallow a column
+#: and masquerade as a well-formed one.
+_PIN_ROW = re.compile(
+    r"^\|\s*(\d+)\s*\|\s*`([^`|]+)`\s*\|([^|]*)\|\s*`([^`|]+)`\s*\|([^|]*)\|",
+    re.MULTILINE)
+_NUMBERED_ROW = re.compile(r"^\|\s*\d+\s*\|", re.MULTILINE)
+
+#: the CLOSED verdict vocabulary of §4. A fourth spelling is a gate failure: the
+#: red-window discipline is "red only on FLIP / FLIP-IF rows", which is
+#: meaningless if the column can carry free text.
+_PIN_VERDICTS = frozenset({"FLIP", "FLIP-IF", "GREEN-VERIFY"})
 _RECIPE_DIGEST = re.compile(
     r"`(source_registry|routing|source_config) = ([0-9a-f]{64})`")
 
@@ -171,6 +192,34 @@ def _ledger_literals() -> list[tuple[str, int, str, str, str, str]]:
              m.group(6), m.group(7))
             for m in _LITERAL_ROW.finditer(_LEDGER_TEXT)]
     assert rows, "the ledger's literal-inventory table did not parse"
+    return rows
+
+
+def _ledger_section(number: str) -> str:
+    """The text of one top-level ledger section, so a table's parser can never
+    accidentally reach across into a neighbouring section's rows."""
+    start = _LEDGER_TEXT.index(f"\n## {number}.")
+    nxt = _LEDGER_TEXT.find("\n## ", start + 1)
+    return _LEDGER_TEXT[start:nxt if nxt != -1 else len(_LEDGER_TEXT)]
+
+
+def _ledger_pins() -> list[tuple[int, str, str, str, str]]:
+    """(#, path, lines, anchor, verdict) from the ledger's §4 allowed-red table.
+
+    Also asserts NO numbered row was silently skipped by the regex — without
+    that, a row that fails to parse would quietly leave the allowed-red set and
+    the red-window discipline would be enforced against an incomplete list.
+    """
+    section = _ledger_section("4")
+    rows = [(int(m.group(1)), m.group(2), m.group(3).strip(), m.group(4),
+             m.group(5).strip())
+            for m in _PIN_ROW.finditer(section)]
+    numbered = _NUMBERED_ROW.findall(section)
+    assert len(rows) == len(numbered), (
+        f"§4 has {len(numbered)} numbered rows but only {len(rows)} parsed — a "
+        "row fell out of the allowed-red set; restructure the row, never "
+        "weaken the parser")
+    assert rows, "the ledger's §4 allowed-red table did not parse"
     return rows
 
 
@@ -232,6 +281,67 @@ def _candidate_row(surface, method_id: str, worker_id: str) -> DataPrefetchOpera
                                  capability_ref=spec.capability_ref),),
         invocation_mode="always_invoke", success_requires_finalized_call=True,
         param_bindings=bindings)
+
+
+def _row_augmented_materials(surface):
+    """The sealed data-bridge materials REBUILT over a binding that carries one
+    extra candidate row — the exact edit D-1/D-2 will make.
+
+    Returns ``(binding, config_ref, config_material, descriptor, desc_ref,
+    desc_material)``. This is the one place the "which material digests move"
+    question is answered by construction rather than by assertion: the caller
+    compares these refs against the sealed surface's.
+    """
+    row = _candidate_row(surface, "verified_snapshot", "pv.technical")
+    binding = DataBridgePrefetchBinding.build(
+        bridge_id=DC.DATA_BRIDGE_ID, bridge_version="1",
+        operations=tuple(surface.prefetch_binding.operations) + (row,))
+    config_ref, config_material = build_text_material(
+        id="bridge.data_runtime.prefetch", version="1", kind="guardrail",
+        raw=serialize_prefetch_binding(binding))
+    descriptor = surface.bridge_descriptor.model_copy(
+        update={"config_ref": config_ref})
+    desc_ref, desc_material = build_text_material(
+        id="bridge.data_runtime.descriptor", version="1", kind="guardrail",
+        raw=serialize_bridge_descriptor(descriptor))
+    return binding, config_ref, config_material, descriptor, desc_ref, desc_material
+
+
+def _measured_material_verdicts(surface) -> dict[str, tuple[str, str]]:
+    """key -> (sealed digest, MEASURED 不动/移动) for the four bridge materials.
+
+    Every verdict is computed from a real comparison, never declared:
+
+    * **prefetch / descriptor** — rebuilt over the row-augmented binding and
+      compared against the sealed refs (the bytes genuinely change);
+    * **provider / analyzer** — rebuilt from their OWN bytes through the same
+      ``build_text_material`` recipe and compared against the sealed refs. The
+      material digest is content-addressed, so equality here IS the statement
+      that the binding edit cannot reach these bytes.
+    """
+    _binding, config_ref, _cm, _desc, desc_ref, _dm = _row_augmented_materials(surface)
+    verdicts: dict[str, tuple[str, str]] = {}
+    for key, ref, material in (
+        ("bridge.data_runtime.provider@1", surface.provider_ref,
+         surface.provider_material),
+        ("bridge.data_runtime.analyzer@1", surface.analyzer_ref,
+         surface.analyzer_material),
+    ):
+        rebuilt, _ = build_text_material(
+            id=ref.id, version=ref.version, kind=material.kind,
+            raw=material.raw_utf8)
+        verdicts[key] = (
+            ref.content_digest,
+            "不动" if rebuilt.content_digest == ref.content_digest else "移动")
+    verdicts["bridge.data_runtime.prefetch@1"] = (
+        surface.config_ref.content_digest,
+        "移动" if config_ref.content_digest != surface.config_ref.content_digest
+        else "不动")
+    verdicts["bridge.data_runtime.descriptor@1"] = (
+        surface.descriptor_ref.content_digest,
+        "移动" if desc_ref.content_digest != surface.descriptor_ref.content_digest
+        else "不动")
+    return verdicts
 
 
 # --------------------------------------------------------------------------- #
@@ -511,17 +621,26 @@ def _measured_chain() -> dict[str, str]:
     }
 
 
+#: text suffixes scanned for chain-digest literals. Deliberately wider than the
+#: golden/handoff family's ``.py``/``.json``: a chain digest pasted into a README,
+#: a fixture manifest or a config under ``tests/`` is just as much a literal
+#: Task 5 must re-freeze, and a narrow scan would hide it from the
+#: both-directions equality below.
+_TEXT_SUFFIXES = (".py", ".json", ".md", ".txt", ".yaml", ".yml", ".cfg",
+                  ".ini", ".toml")
+
+
 def _tree_literals() -> list[tuple[str, int, str]]:
     """Every chain-digest literal under ``tests/`` — (path, line, digest64)."""
     by_digest = {d: node for node, (d, _) in _ledger_chain().items()}
     hits: list[tuple[str, int, str]] = []
     root = _REPO_ROOT / "tests"
     for path in sorted(root.rglob("*")):
-        if path.suffix not in (".py", ".json") or "__pycache__" in path.parts:
+        if path.suffix not in _TEXT_SUFFIXES or "__pycache__" in path.parts:
             continue
         rel = path.relative_to(_REPO_ROOT).as_posix()
         for i, line in enumerate(
-                path.read_text(encoding="utf-8").splitlines(), 1):
+                path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
             for digest in by_digest:
                 if digest in line:
                     hits.append((rel, i, digest))
@@ -551,24 +670,42 @@ class TestGate4BaselineDigests:
             "exactly one chain node does not move this phase (P2); the ledger "
             f"marks {sorted(frozen)}")
 
-    def test_the_ledger_records_the_two_moving_bridge_material_digests(
+    def test_the_bridge_material_movement_is_measured_not_declared(self, surface):
+        """The 移动 half, derived by construction: rebuild the prefetch config +
+        descriptor over a binding carrying one extra candidate row — exactly the
+        edit D-1/D-2 makes — and the digests genuinely differ from the sealed
+        ones. The 不动 half: provider/analyzer rebuilt from their own bytes are
+        digest-identical, so the binding edit cannot reach them.
+
+        The plan header said all FOUR move; this is the measurement that says
+        two."""
+        _b, config_ref, _cm, _d, desc_ref, _dm = _row_augmented_materials(surface)
+        assert config_ref.content_digest != surface.config_ref.content_digest, (
+            "adding a prefetch row did not change the prefetch material bytes — "
+            "the whole 'the binding edit moves this digest' claim is wrong")
+        assert desc_ref.content_digest != surface.descriptor_ref.content_digest, (
+            "the descriptor embeds config_ref, so it must move with it")
+        for ref, material in ((surface.provider_ref, surface.provider_material),
+                              (surface.analyzer_ref, surface.analyzer_material)):
+            rebuilt, _ = build_text_material(
+                id=ref.id, version=ref.version, kind=material.kind,
+                raw=material.raw_utf8)
+            assert rebuilt.content_digest == ref.content_digest, ref.id
+
+    def test_the_ledger_records_the_measured_bridge_material_verdicts(
             self, surface):
         recorded = {m.group(1): (m.group(2), m.group(3))
                     for m in _MATERIAL_ROW.finditer(_LEDGER_TEXT)}
-        live = {
-            "bridge.data_runtime.provider@1": (surface.provider_ref, "不动"),
-            "bridge.data_runtime.analyzer@1": (surface.analyzer_ref, "不动"),
-            "bridge.data_runtime.prefetch@1": (surface.config_ref, "移动"),
-            "bridge.data_runtime.descriptor@1": (surface.descriptor_ref, "移动"),
-        }
-        assert sorted(recorded) == sorted(live)
-        for key, (ref, verdict) in live.items():
-            assert recorded[key] == (ref.content_digest, verdict), key
-        # the ledger's "11 digests" reconciliation: 9 distinct chain values plus
-        # the two material digests the binding edit moves.
+        measured = _measured_material_verdicts(surface)
+        assert sorted(recorded) == sorted(measured)
+        assert recorded == measured, (
+            f"ledger vs measured bridge-material verdicts: {recorded} != {measured}")
+        # the ledger's "11 digests" reconciliation now rests on a MEASURED
+        # verdict: 9 distinct chain values + the materials measured to move.
         distinct_chain = {d for d, _ in _ledger_chain().values()}
-        moving_materials = {k for k, v in recorded.items() if v[1] == "移动"}
+        moving_materials = {k for k, v in measured.items() if v[1] == "移动"}
         assert len(distinct_chain) == 9
+        assert len(moving_materials) == 2
         assert len(distinct_chain) + len(moving_materials) == 11
 
     def test_the_ledger_records_the_l2b_refrozen_recipe_digests(self, recipe):
@@ -777,18 +914,8 @@ class TestGate6GrantSiteReality:
         worker (materials rebuilt so the row actually reaches the check) is
         refused as a row without a grant. This is the executable cost every D-1
         option inherits."""
-        row = _candidate_row(surface, "verified_snapshot", "pv.technical")
-        binding = DataBridgePrefetchBinding.build(
-            bridge_id=DC.DATA_BRIDGE_ID, bridge_version="1",
-            operations=tuple(surface.prefetch_binding.operations) + (row,))
-        config_ref, config_material = build_text_material(
-            id="bridge.data_runtime.prefetch", version="1", kind="guardrail",
-            raw=serialize_prefetch_binding(binding))
-        descriptor = surface.bridge_descriptor.model_copy(
-            update={"config_ref": config_ref})
-        _desc_ref, desc_material = build_text_material(
-            id="bridge.data_runtime.descriptor", version="1", kind="guardrail",
-            raw=serialize_bridge_descriptor(descriptor))
+        (binding, _config_ref, config_material, descriptor, _desc_ref,
+         desc_material) = _row_augmented_materials(surface)
 
         runtime = load_compat_catalog()
         base = runtime.snapshot
@@ -829,13 +956,125 @@ class TestGate6GrantSiteReality:
         from guanlan_v2.orchestration.data.catalog import data_capability_refs
         from guanlan_v2.orchestration.pipeline.chain import phase10_catalog_snapshot
 
-        cap_keys = {(c.id, c.version) for c in data_capability_refs().values()}
+        method_by_cap = {(c.id, c.version): mid
+                         for mid, c in data_capability_refs().items()}
         grants = {(w.id, c.id) for w in phase10_catalog_snapshot().workers
-                  for c in w.capability_allowlist if (c.id, c.version) in cap_keys}
+                  for c in w.capability_allowlist if (c.id, c.version) in method_by_cap}
         assert len(grants) == 17, sorted(grants)
         assert len(surface.prefetch_binding.operations) == 1
+
+        # MINOR #4 — the frozen candidate table must EQUAL the live allowlist ∩
+        # data capabilities, not merely be contained in it. A grown allowlist
+        # would otherwise silently stale §5/§6's per-method pricing (a method
+        # nobody measured for backend or pointer satisfiability).
+        live: dict[str, set[str]] = {}
+        for worker in phase10_catalog_snapshot().workers:
+            methods = {method_by_cap[(c.id, c.version)]
+                       for c in worker.capability_allowlist
+                       if (c.id, c.version) in method_by_cap}
+            if methods:
+                live[worker.id] = methods
         for worker_id, methods in _D1_CANDIDATES.items():
-            assert {(worker_id, f"cap.data.{m}") for m in methods} <= grants
+            assert live[worker_id] == set(methods), (
+                f"{worker_id!r}'s live data-capability allowlist is "
+                f"{sorted(live[worker_id])} but the gate prices "
+                f"{sorted(methods)}; re-measure §5/§6 before ruling D-1")
+
+
+# =========================================================================== #
+# GATE 8 — §4's allowed-red set is REAL (not just labelled)                     #
+# =========================================================================== #
+class TestGate8TheAllowedRedSetIsExecutable:
+    """§4 governs Tasks 3-4's red-window discipline ("red ONLY on these rows")
+    and Task 5's flip checklist. A checklist nobody can execute is worse than
+    none, so every row is bound to the tree here.
+
+    The contract is the ANCHOR column, not the line column: the gate asserts the
+    file exists and the anchor string occurs somewhere in it. That is
+    deliberately line-drift tolerant — upstream code moving up or down must not
+    redden this table — while a pin that is DELETED or RENAMED reddens
+    immediately, which is the failure mode that would actually silently shrink
+    the allowed-red set.
+    """
+
+    def test_every_pin_row_names_a_real_file_and_a_real_anchor_inside_it(self):
+        missing_files: list[str] = []
+        missing_anchors: list[str] = []
+        for num, rel, _lines, anchor, _verdict in _ledger_pins():
+            path = _REPO_ROOT / rel
+            if not path.is_file():
+                missing_files.append(f"#{num} {rel}")
+                continue
+            if anchor not in path.read_text(encoding="utf-8", errors="replace"):
+                missing_anchors.append(f"#{num} {rel} <- {anchor!r}")
+        assert missing_files == [], (
+            f"§4 rows name files that do not exist: {missing_files}")
+        assert missing_anchors == [], (
+            "§4 rows name pins that no longer exist in their file — the pin was "
+            f"deleted or renamed, so the allowed-red set is stale: {missing_anchors}")
+
+    def test_the_verdict_column_is_a_closed_vocabulary(self):
+        """A fourth spelling makes "red only on FLIP / FLIP-IF rows" unenforceable,
+        so the column is closed by assertion, not by convention."""
+        offenders = [(num, verdict) for num, _rel, _l, _a, verdict
+                     in _ledger_pins() if verdict not in _PIN_VERDICTS]
+        assert offenders == [], (
+            f"§4 verdicts outside the closed set {sorted(_PIN_VERDICTS)}: "
+            f"{offenders}")
+
+    def test_the_row_numbering_is_contiguous_from_one(self):
+        """Task 5 works this table by row number; a gap or a duplicate silently
+        drops a flip from the checklist."""
+        numbers = [num for num, *_ in _ledger_pins()]
+        assert numbers == list(range(1, len(numbers) + 1)), numbers
+
+    def test_the_allowed_red_set_covers_every_family_the_plan_enumerates(self):
+        """The plan's Step 2 names the families by hand; this asserts each one is
+        actually in the table, so a future edit cannot quietly drop a whole
+        family and still look complete."""
+        pins = {(rel, anchor) for _n, rel, _l, anchor, _v in _ledger_pins()}
+        required = {
+            # the two support-refusal pins Task 5 flips
+            ("tests/orchestration/test_pipeline_deep_preset.py",
+             "test_the_report_is_honestly_unsupported_naming_the_data_grant_gap"),
+            ("tests/orchestration/test_pipeline_reduced_deep_preset.py",
+             "test_the_untouched_ten_node_baseline_is_still_honestly_unsupported"),
+            # L2-b's pv-aux typed-refusal pins (seam-review finding 5)
+            ("tests/orchestration/test_pv_aux_nodes.py", "AuxDataUngranted"),
+            ("tests/orchestration/test_pv_aux_nodes.py", "aux_data_ungranted"),
+            # L2-b's supported-methods guard
+            ("tests/orchestration/test_data_world_recipe.py",
+             "test_every_granted_prefetch_row_is_within_the_supported_set"),
+            # L2-b's route-coverage pins (every new row enters their iteration)
+            ("tests/orchestration/test_data_world_recipe.py",
+             "test_every_sealed_prefetch_row_route_equality"),
+            ("tests/orchestration/test_data_world_recipe.py",
+             "test_all_seven_methods_have_the_single_surface_route"),
+            # the api.py:1187-adjacent doc pin
+            ("guanlan_v2/orchestration/pipeline/api.py",
+             "permanent-honest grant-gap ruling"),
+        }
+        assert required <= pins, f"missing from §4: {sorted(required - pins)}"
+
+    def test_the_pv_aux_pins_are_conditional_not_unconditional_flips(self):
+        """The measured classification from the report: the aux pins belong to
+        ``pv.price_action``/``pv.microstructure``, NOT to the D-1 candidates, so
+        they are FLIP-IF. Recording it as an unconditional FLIP would licence a
+        red that nothing in D-1 justifies."""
+        verdicts = {anchor: verdict for _n, rel, _l, anchor, verdict
+                    in _ledger_pins()
+                    if rel == "tests/orchestration/test_pv_aux_nodes.py"}
+        assert verdicts == {"AuxDataUngranted": "FLIP-IF",
+                            "aux_data_ungranted": "FLIP-IF"}
+
+    def test_the_supported_methods_guard_is_an_unconditional_flip(self):
+        """It reddens under ANY grant (its literal ``granted == {…}`` arm), so it
+        must not be filed as conditional."""
+        verdict = next(
+            v for _n, rel, _l, a, v in _ledger_pins()
+            if rel == "tests/orchestration/test_data_world_recipe.py"
+            and a == "test_every_granted_prefetch_row_is_within_the_supported_set")
+        assert verdict == "FLIP"
 
 
 # =========================================================================== #
