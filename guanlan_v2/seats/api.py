@@ -913,6 +913,26 @@ async def _decide_impl(payload: dict) -> dict:
                           "text": render_t_lines(_ref)}
             except Exception as _e:  # noqa: BLE001
                 _log.warning("t_engine skipped for %s: %s", c, _e)
+            # 实时日型判定(2026-08-10,做T第二步GO):WatchFeed 当日5min → 判别器打分。
+            # PIT 红线:仅当研判日 == 今天才注入实时数据;历史回放绝不碰。失败诚实缺席。
+            try:
+                if t_info is not None:
+                    from datetime import datetime as _dt_now
+                    _is_today = (str(payload.get("date") or "").strip()[:10]
+                                 == _dt_now.now().strftime("%Y-%m-%d"))
+                    if _is_today:
+                        from guanlan_v2.seats.intraday import (build_intraday_context,
+                                                               render_daytype_lines)
+                        _ctx = await asyncio.to_thread(build_intraday_context, c, df)
+                        if _ctx:
+                            t_info["text"] += "\n" + render_daytype_lines(_ctx)
+                            _sc = (_ctx.get("score") or {})
+                            if _sc.get("ok"):
+                                t_info["daytype"] = {"p_trend": _sc["p_trend"],
+                                                     "tier": _sc["tier"],
+                                                     "session": _ctx.get("session")}
+            except Exception as _e:  # noqa: BLE001
+                _log.warning("intraday daytype skipped for %s: %s", c, _e)
             if exit_info:
                 hold_line += exit_info["text"] + "\n"
             if t_info:
