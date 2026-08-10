@@ -17,6 +17,16 @@ conditions, reducers / multi-writer, debates, gates, stop conditions,
 ``max_attempts>1``, an unsupported bridge shape, a missing/mismatched
 ContextRuntimeRequirements closure, or a REQUIRED / FORBIDDEN tool-call discipline
 that the exact active bridge summaries' numeric bounds do not satisfy.
+
+L3 · item 6 adds one structural refusal in the same spirit: a worker that reaches
+a capability-declaring bridge through a READ CATEGORY alone (never granted, so it
+can hold no reviewed prefetch row) gets that bridge's ruled ZERO-CONTRIBUTION
+summary — the licensed-EMPTY posture of ruling C3 — and that posture is honest
+only while the worker can run on nothing. When the worker's own
+``evidence_policy.tool_calls`` is ``REQUIRED`` the empty contribution can never
+satisfy it, so ``rowless_read_category_unrunnable`` refuses the seat HERE, at
+admission, naming the worker/bridge/category/missing row, instead of admitting it
+into a downstream failure.
 """
 from __future__ import annotations
 
@@ -604,9 +614,14 @@ def check_runtime_support(
         node_params_digest = content_digest(dict(node.params))
         worker_digest = worker.semantic_digest()
         worker_cap_keys = {_ref_key(c) for c in worker.capability_allowlist}
+        worker_read_categories = frozenset(worker.read_categories)
 
         active = bridge_view.active_bridges_for(worker)
         node_summaries: list[BridgeStaticSupportSummary] = []
+        #: (bridge_id, matched read categories) per accepted summary that is
+        #: category-activated-without-grant AND structurally empty — see the
+        #: L3 item-6 refusal below.
+        rowless_category_bridges: list[tuple[str, tuple[str, ...]]] = []
         for rb in active:
             desc = rb.descriptor
             if desc.pre_input_kind not in profile.bridge_pre_input_modes:
@@ -665,6 +680,32 @@ def check_runtime_support(
             provider_refs.add(rb.provider_ref)
             analyzer_refs.add(rb.analyzer_ref)
 
+            # A descriptor activates on an activation capability OR on a read
+            # category. When a worker reaches a capability-declaring bridge
+            # through the CATEGORY alone — its allowlist holds none of that
+            # bridge's activation capabilities — it was never granted, so it can
+            # hold no reviewed prefetch row, and the ruled honest posture is a
+            # ZERO-CONTRIBUTION summary (ruling C3, mirrored into the
+            # experience provider half by the campaign commit): licensed-EMPTY,
+            # admitted, and provably never touching the gateway. Recorded here,
+            # judged against the worker's OWN tool-call discipline after the loop.
+            # (The allowlisted-but-rowless shape is a different fact — a reviewed
+            # grant that LOST its row — and stays the analyzer's LOUD refusal.)
+            activation_cap_keys = {
+                _ref_key(c) for c in desc.activation_capability_refs}
+            if (
+                activation_cap_keys
+                and not (activation_cap_keys & worker_cap_keys)
+                and summary.allowed_capability_refs == ()
+                and summary.max_capability_invocations == 0
+                and summary.min_finalized_tool_calls_on_success == 0
+            ):
+                matched = tuple(sorted(
+                    c for c in desc.activation_read_categories
+                    if c in worker_read_categories))
+                if matched:
+                    rowless_category_bridges.append((desc.bridge_id, matched))
+
         # tool-call arithmetic over this node's active summaries.
         tc = worker.evidence_policy.tool_calls
         min_sum = sum(s.min_finalized_tool_calls_on_success for s in node_summaries)
@@ -677,6 +718,32 @@ def check_runtime_support(
             issues.append(_issue("tool_calls_forbidden_violated", "WorkerSpec.evidence_policy.tool_calls",
                                  f"worker {worker.id!r} forbids tool calls but the summed active-bridge "
                                  f"max_capability_invocations is {max_sum} (!= 0)", node_id=node.id))
+        # L3 · item 6 — the rowless reader is decided HERE, not at the gateway.
+        # An ungranted, rowless, structurally EMPTY bridge contribution is the
+        # reviewed licensed-EMPTY posture for a worker that can RUN on nothing
+        # (FORBIDDEN / OPTIONAL — ruled C3; refusing those would turn a reviewed
+        # absence into a fault). A worker whose OWN evidence policy REQUIRES tool
+        # calls cannot: an empty contribution can never satisfy it, so the seat is
+        # structurally dead and is refused at admission — named by worker, bridge,
+        # read category and the missing row — instead of being admitted and then
+        # failed downstream. This is the read-category mirror of the D-1(0)
+        # asymmetry the controller ruled for the catalog's grant→row direction
+        # (enforced only for REQUIRED workers, licensed-EMPTY left standing for
+        # the rest). It is derived PER offending summary, never from ``min_sum``,
+        # so a sibling bridge's row can never mask it.
+        if tc is ToolCallRequirement.REQUIRED:
+            for bridge_id, matched in rowless_category_bridges:
+                cats = ", ".join(repr(c) for c in matched)
+                issues.append(_issue(
+                    "rowless_read_category_unrunnable", "WorkerSpec.read_categories",
+                    f"worker {worker.id!r} activates bridge {bridge_id!r} through read "
+                    f"category {cats} while its capability_allowlist holds none of that "
+                    f"bridge's activation capabilities, so no reviewed prefetch row can "
+                    f"exist for it and the bridge contributes a structurally EMPTY "
+                    f"summary (max_capability_invocations=0); the worker's "
+                    f"evidence_policy.tool_calls is REQUIRED, which an empty contribution "
+                    f"can never satisfy, so the seat is refused at admission rather than "
+                    f"admitted and failed at the gateway", node_id=node.id))
 
     # -- (4) ContextRuntimeRequirements closure ---------------------------- #
     ctx_req_ref = None

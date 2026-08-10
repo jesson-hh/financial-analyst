@@ -501,6 +501,93 @@ L2-b 退役的是**无行 worker** 的那条拒绝路径(两个 pv aux 座席现
 
 ---
 
+### RULING — dec.research_mgr experience row
+
+(§2.1 item 2;**「控制器已裁」= 计划冻结时预裁**,执行期无需回程;本节由 L3 Task 2 落笔,
+证据为 HEAD `54176b2e` 上的实测 —— 真 Phase-9 目录 + 真生产桥视图 + 真 `ExperienceBridgeSupportAnalyzer`。)
+
+#### 裁决:Option A
+
+**rowless-EMPTY 就是本期 `dec.research_mgr` 经验位的评审终态。** 计划正文逐字:
+
+> **Option A (RULED — 控制器已裁): rowless-EMPTY is the reviewed end state for this phase.**
+> Consistent with C3 and `4ee43ca`; the live reduced run proved research-mgr completes honestly
+> with an empty contribution (4 LLM invocations settled). Deriving a real row remains blocked on
+> facts the worker does not have (`ExperiencePrefetchBinding@1` feature-vector pointer) and a
+> Literal conflict (`tool_calls=FORBIDDEN` vs min=1) — resolving those is a contract change beyond
+> L3's fence.
+
+#### 冲突裁决:`tool_calls=FORBIDDEN` ↔ 行的 Literal `min=1`(item 2 的「冲突裁决落文档」)
+
+实测三条(逐条可复现):
+
+1. `dec.research_mgr.evidence_policy.tool_calls == FORBIDDEN`;`read_categories` 含
+   `experience_cases`;`capability_allowlist` **不含** `experience.retrieve@1`。
+   —— 它是靠**读类目**activate 到 `experience.bridge` 的、从未被授权的读者。
+2. `ExperiencePrefetchBinding@1` 的 `invocation_mode` / `success_requires_finalized_call`
+   是 **Literal 钉死**的 `"always_invoke"` / `True`:实测把它们分别改成 `"cache_or_invoke"` /
+   `False` 去构造,`ValidationError` 当场拒绝。于是**任何**一条经验预取行都必然让真分析器
+   产出 `min_finalized_tool_calls_on_success=1` / `max_capability_invocations=1` 的摘要
+   —— 用真 `ExperiencePrefetchBinding.build` 造一条 `dec.research_mgr` 候选行 + 真序列化器 +
+   真分析器实测:`min=1 max=1 caps=['experience.retrieve']`。
+3. 因此「给 `dec.research_mgr` 配经验行」与「它 FORBIDDEN 工具调用」在**准入期**正面对撞:
+   `check_runtime_support` 的 `tool_calls_forbidden_violated`(判据 `max_sum != 0`)会当场拒掉
+   这个座位(该判据本身由 `test_runtime_support.py:618` 与 `data/test_phase_handoff.py:842` 钉住)。
+   这不是口味问题,是两条 Literal 之间的**结构性矛盾**。
+
+**冲突往哪边让:本期哪边都不让 —— 不配行。** 让任一边都要动契约:
+
+- **让 worker 一边** = 把 `dec.research_mgr` 的 `tool_calls` 从 FORBIDDEN 翻成 REQUIRED/OPTIONAL。
+  代价:P8 WorkerSpec 语义摘要移动 + 一次逐能力评审;而且把一个「只吃上游产物、不外呼」的研究经理
+  改成允许外呼是**产品语义变更**,不是重冻顺手捎带。
+- **让绑定一边** = 改 `ExperiencePrefetchBinding@1` 的 Literal。代价:它是**注册模型**,
+  pydantic class docstring 即 JSON-Schema `description`,属本计划红线点名的「不可动」那一类;
+  连带 P5 schema manifest 位移。
+
+两条都在 L3 围栏外。**Option A 因此不是「拖着」,是本期唯一不越界的诚实终态。**
+
+**另有一条独立的先决缺口(与上面的冲突互不依赖,任一条都足以否掉配行):**
+`ExperiencePrefetchBinding@1` 要求 `feature_vector_pointer` / `feature_schema_version_pointer`
+两个闭合 JSON 指针,投影进**绑定输入 `market_factor_report`** 的载荷。实测:
+已配行的 `market.regime` 的**唯一** input 就是 `market_factor_report`;而 `dec.research_mgr` 的
+inputs 是 `sentiment(SentimentReport)` / `bullbear_transcript(DebateTranscript)` /
+`upstream_ratings(UpstreamRatingsExtract)` —— **没有特征向量的源**,两个指针无处可指。
+这与 §6 里 `indicators`/`fundamentals` 的「指针不可满足」是同一类结构性缺口。
+
+#### 与 Task 2 的早拒绝(item 6)的关系:不冲突,互为另一半
+
+Task 2 新增的准入拒绝 `rowless_read_category_unrunnable` **只**打
+`evidence_policy.tool_calls == REQUIRED` 的无行读者。`dec.research_mgr` 是 FORBIDDEN,
+所以本裁决的 rowless-EMPTY 终态**原样保留**,并被
+`tests/orchestration/test_experience_rowless_admission.py::TestC3RowlessReaderPreserved` 正向钉住
+(真 `PlanAdmissionService` 准入通过 + 真 provider/真 gateway 上零调用、零 ToolCallRecord、
+零证据写、零 untrusted block)。判据不对称的理由与 §9 D-1(0) 第 3 条同源:
+**能靠空跑诚实完成的座位是 C3 已裁的 licensed-EMPTY;自己声明 REQUIRED 的座位靠空跑永远完不成,
+是结构性死座位。** 变异证明(Task 2 Step 3)在两个方向上都取了证:去掉 REQUIRED 判据让它见谁打谁,
+红的恰是上述 C3 保留钉(含兄弟套件 `test_phase10_e2e.py::TestLateFailureLoudness`)。
+
+**红窗分类(给 Task 3-5 的提示,未擅自改 §4 表):** `test_experience_rowless_admission.py` 全套按
+§4 的词表属 **GREEN-VERIFY** —— 本期两位候选读者(`pv.technical`/`text.news`)都不声明
+`experience_cases`,授权也只动 data 侧,所以它不该变红;其中
+`TestThePremise::test_no_sealed_worker_can_trip_the_new_refusal` 是最灵敏的越界探针
+(它断言「靠读类目 activate 且完全无授权」的密封 worker 集恰为 `{dec.research_mgr: FORBIDDEN}`),
+一旦 Task 3 的收窄/授权动到了任何 worker 的 `read_categories` 或 `capability_allowlist`,它会立刻红。
+若 Task 5 认为该入表,按 §4 的行格式补编号行(gate 只断言连号 + 全行可解析 + 词表封闭)。
+
+#### Option B —— 本期不取的路(road-not-taken,原文留档)
+
+> **Option B: derive the row this phase** — requires ruling where the feature-vector pointer comes
+> from (widen worker capability vs change the binding contract), moves additional digests, grows the
+> window. Only take if the controller wants experience-grounded research-mgr output before the next
+> phase.
+
+否决理由(实测定价):三件围栏外工程叠加 —— (a) 解 FORBIDDEN↔min=1(改 P8 worker 语义 **或** 改注册
+schema 的 Literal);(b) 给 `dec.research_mgr` 一个 `market_factor_report` 量级的特征向量来源
+(改 worker inputs = P8 语义摘要 + 上游节点拓扑);(c) 相应的 P5/P8 摘要位移进本期重冻窗口。
+**归 post-L3 backlog**,与 §9 D-1(0) 第 4 条的 13 组 OPTIONAL paper 授权同列。
+
+---
+
 ## 10. 附:本任务未做、但 Task 5 会用到的东西
 
 - **密封材料文本对齐(计划 item 5)**:`guanlan_v2/orchestration/bootstrap.py` 的 experience 分析器
@@ -508,4 +595,7 @@ L2-b 退役的是**无行 worker** 的那条拒绝路径(两个 pv aux 座席现
   的 material-vs-code drift note(明说 `_ANALYZER_BYTES` 仍陈述 pre-Task-11 不变量、按裁决**字节冻结**)。
   两处在 HEAD 上都存在,行号相对 spec 有小幅漂移(已按实测记录)。
   regime prompt material 与深度预设描述的 `pv.microstructure` 过陈述见 §4 #14。
-- **无行 experience worker(计划 items 2+6)**:本任务未度量,Task 6 的范围。
+- **无行 experience worker(计划 items 2+6)**:本任务未度量。
+  ~~Task 6 的范围。~~ **勘误(Task 2 落笔):是 Task 2 的范围**,已于 HEAD `54176b2e` 实测并交付
+  —— 裁决见 §9 的 “RULING — dec.research_mgr experience row”,早拒绝见
+  `tests/orchestration/test_experience_rowless_admission.py`。
