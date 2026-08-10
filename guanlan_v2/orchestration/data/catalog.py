@@ -22,10 +22,13 @@ between grants and prefetch rows is one-to-one, and ``compat.*`` remains
 
 That coverage is checked at TWO evaluation points, because the grant holders do
 not all exist at the same phase. Phase 3 checks the rows whose worker it can see
-(the end-of-Phase-2 five) and carries the rest forward;
-:func:`verify_cumulative_prefetch_coverage`, called from the Phase-8 fold, claims
-the carried rows against the cumulative worker set. The predicate's bytes are the
-same at both points; only its scope differs (ruling D-1(0), 2026-08-11).
+(the end-of-Phase-2 five) and skips the rest; nothing is threaded between the two
+points, because the sealed prefetch binding is the single source both of them
+read — :func:`verify_cumulative_prefetch_coverage`, called at the Phase-8 fold,
+re-derives the FULL row set and its strict rows->grants direction necessarily
+claims every row Phase 3 skipped. The predicate's bytes are the same at both
+points; only its scope differs (ruling D-1(0), 2026-08-11). The Phase-8 CALL is
+therefore load-bearing, not decorative, and is pinned as such.
 """
 from __future__ import annotations
 
@@ -139,8 +142,10 @@ _REVIEWED_INTEGRATION_GRANTS: dict[str, tuple[str, ...]] = {
 #: cannot be reported as node success.
 #:
 #: Their one-to-one coverage is NOT verified at Phase 3 (the workers are not
-#: there to be verified against); it is carried forward and enforced at the
-#: Phase-8 fold by :func:`verify_cumulative_prefetch_coverage`.
+#: there to be verified against). It is enforced at the Phase-8 fold by
+#: :func:`verify_cumulative_prefetch_coverage`, which re-reads THIS SAME sealed
+#: binding — the single source both evaluation points share — and claims every
+#: row Phase 3 skipped.
 _REVIEWED_LANE_DATA_GRANTS: dict[str, tuple[str, ...]] = {
     "pv.technical": ("verified_snapshot",),
     "text.news": ("news",),
@@ -854,13 +859,18 @@ def build_phase3_catalog(
     # set of the end-of-Phase-2 workers — the only workers this builder can see.
     # A row naming one of them is checked HERE, both directions, with the
     # predicate below untouched byte-for-byte. A row naming a worker this phase
-    # does not know is NOT silently accepted (that would be the privilege hole
-    # this invariant exists to close): it is carried forward in
-    # ``deferred_rows`` and MUST be claimed by the second evaluation point at
-    # the Phase-8 fold, where its worker finally exists. A deferred row that no
-    # later fold claims fails there, with this same message.
+    # does NOT know is skipped by this scope — but skipped is not accepted, and
+    # nothing needs to be threaded forward to say so: the binding IS the single
+    # source both evaluation points read, so
+    # :func:`verify_cumulative_prefetch_coverage` re-derives the FULL row set at
+    # the Phase-8 fold and its strict rows->grants direction claims every row
+    # this phase skipped. A row no worker ever grants therefore fails there, with
+    # this same message — the skip is a deferral by construction, not by
+    # bookkeeping. What makes that true operationally is the call site at the end
+    # of ``lane_catalog.build_phase8_catalog_snapshot``; delete it and the skip
+    # silently becomes an acceptance, which is why that wiring is pinned
+    # (``test_l3_grants.py::TestTheFoldIsWired``).
     rows: set[tuple[str, str, str]] = set()
-    deferred_rows: set[tuple[str, str, str]] = set()
     for op in data_bridge_prefetch_binding.operations:
         mkey = (op.method_ref.id, op.method_ref.version, op.method_ref.content_digest)
         spec = spec_by_method_ref.get(mkey)
@@ -885,11 +895,8 @@ def build_phase3_catalog(
                 raise CatalogError(
                     "prefetch route entries must carry the row's exact method capability"
                 )
-        key = (op.worker_id, op.capability_ref.id, op.capability_ref.version)
         if op.worker_id in base_workers:
-            rows.add(key)
-        else:
-            deferred_rows.add(key)
+            rows.add((op.worker_id, op.capability_ref.id, op.capability_ref.version))
 
     if granted != rows:
         missing_rows = granted - rows
@@ -960,9 +967,12 @@ def verify_cumulative_prefetch_coverage(
     """The SECOND evaluation point of the one-to-one grant/row invariant (L3).
 
     Phase 3 can only judge coverage for the five end-of-Phase-2 workers; the lane
-    readers that hold data capabilities are added at the Phase-8 fold, so their
-    rows are carried forward and claimed HERE, against the cumulative worker set.
-    ``build_phase8_catalog_snapshot`` is the caller: Phase 8 is the first fold at
+    readers that hold data capabilities are added at the Phase-8 fold, so the rows
+    Phase 3 skipped are claimed HERE, against the cumulative worker set. Nothing
+    is threaded between the two points: the sealed prefetch binding is the single
+    source both of them read, so this function re-derives the FULL row set and its
+    strict rows->grants direction necessarily covers every row Phase 3 left
+    unjudged. ``build_phase8_catalog_snapshot`` is the caller: Phase 8 is the first fold at
     which a deferred row *can* be claimed, and the grant set is measured
     identical at Phase 8, 9 and 10, so claiming early loses no coverage. That
     last fact is an assumption about later phases, and it is pinned executably

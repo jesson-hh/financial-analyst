@@ -222,7 +222,6 @@ gate 另外断言解析出的行数 == §4 表里编号行的行数,所以没有
 | 23 | `guanlan_v2/orchestration/pipeline/live_decide.py` | 1157, 1168 | `SUPPORT-REFUSED at admission` | FLIP | 「the deep run is still SUPPORT-REFUSED at admission」。同 #21。 |
 | 24 | `guanlan_v2/orchestration/pipeline/pv_aux.py` | 197 | `sealed prefetch binding grants it no row (L3)` | FLIP-IF | `AuxDataUngranted` 的消息字面量。同 #7:只在授 aux 座席时。 |
 | 25 | `tests/orchestration/test_experience_rowless_admission.py` | 246 | `test_no_sealed_worker_can_trip_the_new_refusal` | GREEN-VERIFY | L3 Task 2 早拒绝的**越界探针**(本行由 Task 2 补入,裁决见 §9 的 “RULING — dec.research_mgr experience row”)。它断言「靠读类目 activate 到某个声明了能力的桥、且完全无授权」的密封 worker 集恰为 `{dec.research_mgr: FORBIDDEN}`。D-1 只收窄 `pv.technical`/`text.news` 的 data 侧,两位都不声明 `experience_cases`,所以本行**不该红**。**Task 3-4 期间它变红 = 收窄/授权动到了某个 worker 的 `read_categories` 或 `capability_allowlist`,即越界信号按设计生效 —— STOP,上报。** **耦合提示:**同文件的 `TestRunnableRequiredWorkerNotRefused`(min_sum≥1 不早拒的那条裁决钉)**复用 `test_runtime_support.py` 的私有合成桥手法**(`_Analyzer` / `_BridgeSpec` / `build_scenario`)—— 有意「复用而非重新推导」(密封目录表达不出「一个节点两条桥、边界不同」),代价是**改动该手法的签名会同时打断两个套件**,动它时两边一起看。 |
-
 | 26 | `tests/orchestration/test_lane_batch_pv.py` | 128, 187 | `test_worker_spec_matrix` | FLIP | **D-1 Option A 收窄的行为半边(Task 3 实测补入,控制器已裁)。** `:187` 逐字断言 `tuple(c.id for c in w.capability_allowlist) == exp["caps"]`,而 `:128` 的期望是 `("cap.data.indicators", "cap.data.verified_snapshot")`。收窄后必红。§4 #19 只钉了 golden 侧的语义摘要,**行为侧的这条钉 Task 1 未枚举** —— 红窗清单在此之前是不完整的。Task 5 有意识改期望值,不是删钉。 |
 | 27 | `tests/orchestration/test_lane_batch_text.py` | 65, 127 | `test_worker_spec_matrix` | FLIP | 同 #26 的 `text.news` 半边:`:127` 同一条相等断言,`:65` 期望 `("cap.data.fundamentals", "cap.data.news")`。对应 §4 #20 的行为侧。 |
 | 28 | `tests/orchestration/test_lane_batch_text.py` | 152-154 | `test_allowlist_broadening_applied` | FLIP | `:154` `assert "cap.data.fundamentals" in {…text.news allowlist}`。**注意它是「上一次评审过的扩权」的档案钉**,D-1 现在有意识地把那次扩权反转 —— Task 5 **改写**这条钉使其记录新的裁决,**绝不删除**:删掉就等于抹掉「曾经授过、后来按逐能力论证收回」这段评审史。 |
@@ -763,3 +762,47 @@ Task 3 提交点的 **实测** 全套结果(`python -m pytest tests/orchestratio
 - red ⊆ (§3 ∪ §4):**否** —— A 组 27 + B 组 8 = 35 项在表内;C 组 8 项归属清楚但表内无行;D 组 7 项待裁。
 - **零红出现在 GREEN-VERIFY 行上。** 没有任何一处红指示越界或实现缺陷。
 - goldens **未再生成**;`CHECKER_VERSION` **未动**;密封 schema 的三个 class docstring **未动**。
+
+### 11.1 控制器裁决:C 组 / D 组处置 + 红窗操作账本(2026-08-11,Task 3 复审轮,逐字记录)
+
+**红窗操作账本:** 自本次提交起、至 Task 4 重推为止,红窗的**操作性**允许集 =
+**§4 ∪ §11(含本节处置)**。
+
+**§4 本身在 Task 4 开工时从度量重推**(它已被实测推翻三次:`text.policy` 的 tool-call 归类、
+四条 lane-batch 行为钉、本节 D 组)—— **逐行打补丁的做法到此为止**。重推经 gate 解析器,
+每一处红都必须有归属,**归不到的 = STOP**。此项由控制器写进 Task 4 派工。
+
+**C 组处置(`test_l3_refreeze_gate.py`,8 项):**
+
+- 5 条**链/材料重度量**测试(`test_the_measured_chain_equals_the_spec_section_1_values`、
+  `test_the_ledger_records_exactly_the_measured_chain`、
+  `test_the_bridge_material_movement_is_measured_not_declared`、
+  `test_the_ledger_records_the_measured_bridge_material_verdicts`、
+  `test_the_provider_and_analyzer_materials_are_binding_INDEPENDENT`)——
+  **在 Task 5 重钉**,取 §2 / §2.3 重冻后的新值。
+- 3 条**候选行探针**测试(含 `_row_augmented_materials` 的使用者、
+  `test_a_candidate_row_alone_trips_the_invariant_in_the_rows_direction`)——
+  **Task 5 必须把探针重新指向一个仍未授权的 (worker, method) 组合**。
+  **只把它改到能跑通、不重新指向 = 探针从此不再证明任何东西**(Task 3 的提示,现为记录在案的义务)。
+- `test_the_seventeen_p8_grants_stand_against_one_sealed_row` —— 重钉为 **15 组对 4 条行**。
+
+**D 组处置:**
+
+| # | 处置 |
+|---|---|
+| D1 `data/test_subject_projection.py::TestRealRowRoundTrip`(5) | **Task 5 FLIP** —— 与 Task 3 在 `data/test_data_catalog.py` 里被授权做的**同一行 fixture 改法**,只是换个文件。 |
+| D2 `test_pipeline_screening.py::test_zero_screening_workers_carry_data_prefetch_rows_today` | **Task 5 FLIP**;**外加 `guanlan_v2/orchestration/pipeline/screening.py:~577` 的注释「zero screening workers carry data prefetch rows」为 Task 4 义务**(item-5 类散文,随 `ww_f10` 一起改)。 |
+| D3 `test_phase8_registry_catalog.py::test_capability_promise_supply_lint_clean_across_every_seat` | **FLIP-IF,交叉引用 §4 #29** —— 随 Task 4 改 SKILL.md 后**无需改测试即自愈**。 |
+
+### 11.2 Task 7 必须计入的行为变更:每一次选股跑都会强制一次真新闻读取
+
+`text.news` 的新行是 `always_invoke` + `success_requires_finalized_call=True`,而 `text.news`
+**是选股 lane 的 worker**(`config/orchestration/presets/v2/screening_lane_v1.json` 九个 worker 之一)。
+于是 **每条选股 lane、每一次跑,都会强制一次真实的 news 读取**,`cache_or_invoke` 的缓存旁路对它不适用
+—— 这是 D-2 Option A 有意选择的语义(读不到就不许宣称成功),但它同时是一条**真实的成本 / 时延
+行为变更**:选股是**批量**通路(实测 fixture 为 3 条 lane,生产按候选数量放大),
+所以放大系数是「每批候选数」而不是 1。
+
+**Task 7 义务:**(a) 把这项计入真跑的成本与时延预算;(b) **实测**并记录每批的实际读取次数与耗时,
+不要按「和深度研判一样」估;(c) 顺带验证 §8.2 的第二种失败语汇 ——
+news 断供 → `tool_discipline_unmet` / INCOMPLETE —— 在**选股**通路上也成立,而不只在深度通路上。

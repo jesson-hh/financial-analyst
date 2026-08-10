@@ -464,6 +464,59 @@ class TestSecondEvaluationPoint:
 
 
 # =========================================================================== #
+# 6b. the CALL SITE — the wiring is the enforcement, so the wiring is pinned    #
+# =========================================================================== #
+class TestTheFoldIsWired:
+    """The one thing every other test in this module takes for granted.
+
+    Everything above calls :func:`verify_cumulative_prefetch_coverage` directly,
+    and every mutation of it hits its internals — so deleting the single call at
+    the end of ``lane_catalog.build_phase8_catalog_snapshot`` would leave this
+    module, and the whole suite, green while the second evaluation point stopped
+    running. That is not a hypothetical: it was measured during this task's
+    review.
+
+    **This wiring is load-bearing for ruling D-1(0) item 2.** Phase 3 does not
+    thread its skipped rows anywhere; the deferral is real only because the P8
+    fold re-reads the same sealed binding and claims them. Unwire the call and
+    Phase 3's "skip" silently becomes "accept" — the privilege hole the invariant
+    exists to close, reopened with no test noticing. Hence a pin on the CALL, not
+    on the callee.
+    """
+
+    def test_the_phase8_fold_actually_calls_the_coverage_check(self, monkeypatch):
+        import guanlan_v2.orchestration.lane_catalog as lc
+
+        class _Sentinel(Exception):
+            pass
+
+        def _boom(snapshot, prefetch_binding):
+            raise _Sentinel("the fold reached the coverage check")
+
+        monkeypatch.setattr(lc, "verify_cumulative_prefetch_coverage", _boom)
+        with pytest.raises(_Sentinel):
+            lc.phase8_catalog_snapshot()
+
+    def test_the_check_receives_the_sealed_catalog_and_binding(self, monkeypatch):
+        """…and it is called with the REAL arguments, not with placeholders: the
+        snapshot it judges is the Phase-8 one being sealed, and the binding is
+        the sealed Phase-3 material."""
+        import guanlan_v2.orchestration.lane_catalog as lc
+
+        seen: dict = {}
+
+        def _record(snapshot, prefetch_binding):
+            seen["snapshot"] = snapshot
+            seen["binding"] = prefetch_binding
+
+        monkeypatch.setattr(lc, "verify_cumulative_prefetch_coverage", _record)
+        built = lc.phase8_catalog_snapshot()
+        assert seen["snapshot"] is built or (
+            seen["snapshot"].catalog_digest == built.catalog_digest)
+        assert seen["binding"] is phase3_data_surface().prefetch_binding
+
+
+# =========================================================================== #
 # 7. the coverage assumption behind choosing the P8 fold (controller-ruled pin) #
 # =========================================================================== #
 class TestP8CoverageAssumption:
