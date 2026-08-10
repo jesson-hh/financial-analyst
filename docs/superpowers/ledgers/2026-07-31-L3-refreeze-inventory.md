@@ -1250,6 +1250,20 @@ L2-b 退役的是**无行 worker** 的拒绝路径;**有行 core 方法**断供�
 **结论:有意不动,已记录。** 若将来要 bump,它必须走自己的 charter,并自带一次 schema
 manifest 位移的评审 —— 不允许再搭任何重冻的便车(本期是唯一被授权的重冻窗口,且已关闭)。
 
+### 12.9 交叉引用格式加固(Gate 8 扩展)
+
+`test_every_section4_cross_reference_resolves` 只检查**已经**写成 `§4 #NN(`token`)` 的引用;
+写成裸 `§4 #NN` 的引用**整个绕过它** —— §3.1 第一版整体差 +5 就是这么活下来的。
+本轮把格式本身变成强制:
+
+- 新增 `test_no_bare_section4_citation_survives_outside_the_enforced_format`:
+  ledger 里每一处 `§4 #NN` 要么带见证 token,要么显式标 `旧`。
+- 新增 `test_the_historical_escape_hatch_is_bounded`:`旧` 不是免检通道 ——
+  其总数被钉死(6),且 `旧` 与 token **互斥**(历史引用不得同时声称能解析到今天的行)。
+- 逐条处置:`:221` 转成强制格式;**live 散文**里的三处按今天的编号**改对**
+  (旧编号 `#14/#15` → 今 #79/#80;两处旧 `#9` → 今 #31;此处刻意不写 `§4 ` 前缀,以免这段说明本身被解析成一条待解析的引用);**§11/§11.1 的历史记录**里的三处标 `旧`
+  (它们引用的是 Task 4 重推前那张 29 行表,按定义不该解析到今天的行)。
+
 ### 12.10 关窗测量 —— 红窗从 56 红回到全绿
 
 同一棵脏工作树、同一环境、同一命令 `python -m pytest tests/orchestration -q -p no:randomly`:
@@ -1273,17 +1287,63 @@ manifest 位移的评审 —— 不允许再搭任何重冻的便车(本期是�
 
 **此后任何一处 golden 位移都是回归。**
 
-### 12.9 交叉引用格式加固(Gate 8 扩展)
+### 12.11 独立复审条件记录(2026-08-11,复审判定 READY TO PROCEED: YES)
 
-`test_every_section4_cross_reference_resolves` 只检查**已经**写成 `§4 #NN(`token`)` 的引用;
-写成裸 `§4 #NN` 的引用**整个绕过它** —— §3.1 第一版整体差 +5 就是这么活下来的。
-本轮把格式本身变成强制:
+独立复审对 P3-data / P10 两端做了独立再推导、逐行审 §12.2 对照表、逐条审翻转的双向证据,
+并用穷举 hex 集差确认**零无主位移**。判定通过,附一条 actionable 条件 + 三条挂账 + 一条 Task 7 交底。
 
-- 新增 `test_no_bare_section4_citation_survives_outside_the_enforced_format`:
-  ledger 里每一处 `§4 #NN` 要么带见证 token,要么显式标 `旧`。
-- 新增 `test_the_historical_escape_hatch_is_bounded`:`旧` 不是免检通道 ——
-  其总数被钉死(6),且 `旧` 与 token **互斥**(历史引用不得同时声称能解析到今天的行)。
-- 逐条处置:`:221` 转成强制格式;**live 散文**里的三处按今天的编号**改对**
-  (旧编号 `#14/#15` → 今 #79/#80;两处旧 `#9` → 今 #31;此处刻意不写 `§4 ` 前缀,以免这段说明本身被解析成一条待解析的引用);**§11/§11.1 的历史记录**里的三处标 `旧`
-  (它们引用的是 Task 4 重推前那张 29 行表,按定义不该解析到今天的行)。
+#### 已闭环(本轮微修)
+
+- **A-1(actionable):** `test_l3_refreeze_gate.py` 的 gate item 1 取
+  `surface.prefetch_binding.operations[0]` 并当作 `dec.pm` 的行 —— 绑定从 1 条长到 4 条之后,
+  它**只是按排序恰好还是** `dec.pm`,不是按身份。已改为按 `worker_id == "dec.pm"` 取,
+  并加断言 `method_ref.id == "verified_snapshot"`。与
+  `data/test_data_catalog.py::verified_snapshot_row`、
+  `data/test_subject_projection.py::real_row` 是同一个改法、同一个理由。
+
+#### Task 7 必须先做的事(I-2)—— **不是运行期才发现,是开工前就要排进计划**
+
+`var/orchestration` 里有 **72 个 payload + 47 行 `plan_approvals.jsonl`**,全部绑定在
+**重冻前**的 P9 目录摘要 `0c48db78` 上。`approval.py:871` 的 lease 匹配键是
+**(preset_id, preset_record_digest, catalog_digest, registry_digest)** 四元组,
+而**不匹配时它 fall through 到「问人」**—— 这是**静默**的,不报错。
+
+后果说白:**每一条重冻前的 `ApprovalLease` 都已经停止自动准入。** 这不是缺陷
+(设计上就该如此:目录变了,旧批准不该继续生效),但它**看起来像什么都没发生**,
+于是极易在真跑中途被误读成「审批坏了」。
+
+**Task 7 义务:把「重新铸 lease」写进开工步骤,而不是留给运行期去撞。**
+本期不动它 —— 重铸属于 Task 7 的真跑准备,不属于重冻窗口。
+
+#### post-L3 backlog(复审提出,本期不动)
+
+- **I-1 · 第三类清单逃逸:对「本次改动会让其变长的集合」做位置/下标访问。**
+  它和已知两类并列,且**最阴**:摘要值 grep 扫不到它,文件 sha grep 也扫不到它,
+  而失效方式是**静默**的(指到了另一行却依然全绿)。下一次爆炸半径清单**必须加第三条 grep**。
+  复审已逐点分类了剩余位置:
+  **良性**(取到的行随即被 `model_copy` 整体改写,或本就只当形状模板用) ——
+  `test_l2b_handoff.py:203/426/441`、`test_data_world_recipe.py:185`、
+  `test_production_data_provider.py:819/1144`;
+  **自我保护**(取到行后立刻断言只有 `dec.pm` 行才满足的形状 ——
+  `cache_or_invoke` + `success_requires_finalized_call=False` + `row_min_finalized=0`,
+  取错行当场红) —— `test_l3_refreeze_gate.py:1420`、`test_pm_two_bridges.py:738`。
+  两类都**不改**:良性的改了没有收益,自我保护的本来就带着自己的证明。
+  记录在案的是**判据**,不是「以后有空再说」。
+
+- **M-1 · golden 的字节 sha 钉读的是工作树字节,而工作树是混合 EOL 的。**
+  于是这些 sha 是**机器相关**的。这是**既有**状况(不是本期引入):本次再生成
+  **逐文件保持了原有 EOL 分类**,所以没有把它变坏,但也没有把它治好。
+  §12.4.1 立的规矩(要断言「字节没动」就用 git 对象身份,别用工作树原始字节)
+  **尚未推广到 `tests/orchestration/golden`**。推广它 = 一次单独的 charter。
+
+- **M-2 · `test_l3_d2_outage.py:679` 的阳性对照把断言在自己体内重写了一遍。**
+  对照因此验证的是「这段重写的逻辑会红」,而不是「上面那条真断言会红」——
+  两者今天等价,但会各自漂移。改法:抽一个共享 helper,让对照绑定**真**断言。
+
+#### 计划正文的历史值标注(M-3)
+
+`docs/superpowers/plans/2026-07-31-orchestration-L3-grants-refreeze.md` 的 Ground-truth
+段落里那条链路值(`ba708692 … ff4cdc61`)现在是**重冻前的历史值**。已在该处加一行标注,
+指向本文件 §12.2 的当前链路。不改数值本身:那段文字记录的是 07-29 侦察时的实测,
+把它改成今天的值等于伪造一次历史测量。
 

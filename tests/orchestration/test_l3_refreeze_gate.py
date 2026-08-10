@@ -458,8 +458,18 @@ class TestGate1L1Landed:
         row's REAL params class validates. Zero ``param source pointer … does
         not resolve``.
 
-        If L1 had not landed this raises, and the gate STOPs the plan."""
-        row = surface.prefetch_binding.operations[0]
+        If L1 had not landed this raises, and the gate STOPs the plan.
+
+        The row is selected BY IDENTITY (review round, L3 Task 5). It used to be
+        ``operations[0]``, which was ``dec.pm``'s row only by sort order — true
+        when the binding held one row, and still accidentally true at four, but
+        an accident either way. The next row that sorts ahead of ``dec.pm``
+        would silently re-point this whole gate item at a different worker while
+        staying green. Same fix, same reason, as the twin fixtures in
+        ``data/test_data_catalog.py`` and ``data/test_subject_projection.py``."""
+        row = next(r for r in surface.prefetch_binding.operations
+                   if r.worker_id == "dec.pm")
+        assert row.method_ref.id == "verified_snapshot"
         node = PlanNode(id="pm", worker_id="dec.pm", writes_slot="slot-pm")
         assert node.params == {}, "the pm node must stay structurally params-less"
         doc = RT._assemble_params(row, node, subject_params=subject_params)
