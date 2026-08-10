@@ -65,14 +65,13 @@ Run: ``python -m pytest tests/orchestration/test_l3_d2_outage.py -q``
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
 import guanlan_v2.orchestration.adapters.data_world as DW
 import guanlan_v2.orchestration.bootstrap as bs
-import guanlan_v2.orchestration.data.runtime as RT
 import guanlan_v2.orchestration.memory.runtime as MR
 import guanlan_v2.orchestration.worker as W
 from guanlan_v2.orchestration import presets as P
@@ -129,10 +128,7 @@ from guanlan_v2.orchestration.pipeline.screening import (
     build_screening_batch,
 )
 from guanlan_v2.orchestration.refs import PayloadRef, SchemaRef, TypedPayloadRef
-from guanlan_v2.orchestration.runtime_support import (
-    STATIC_RUNTIME_PROFILE_V2,
-    check_runtime_support,
-)
+from guanlan_v2.orchestration.runtime_support import STATIC_RUNTIME_PROFILE_V2
 from guanlan_v2.orchestration.spec import OrchestrationRequest, validate_plan_draft
 
 UTC = timezone.utc
