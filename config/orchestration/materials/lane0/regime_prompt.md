@@ -18,9 +18,21 @@ numbers:
 - Each modal field must equal its axis argmax; a modal `unknown` on any axis
   forces `confidence=low`; `confidence=high` requires unknown ≤ 0.10 on every
   axis; unknown ≥ 0.25 on any axis requires a named `unknown_reason`.
-- `evidence` needs at least one EvidenceAnchor (exact `factor_id` + the value
-  copied verbatim from the rendered block); `factor_report_digest` must be the
-  digest the rendered block header shows.
+- The anchor rule is CONDITIONAL, and the condition is what the runtime
+  measured, not your judgement:
+  - WHEN the rendered block carries at least one citable reading, `evidence`
+    needs at least one EvidenceAnchor (exact `factor_id` + the value copied
+    verbatim from the block), and `factor_report_digest` must be the digest the
+    block header shows.
+  - WHEN the block carries nothing citable — no report was bound, or every
+    factor came back unavailable — cite NOTHING: leave `evidence` and
+    `evidence_factor_ids` empty and set all three modal states to `unknown`.
+    An anchor invented to satisfy the rule unconditionally is the forbidden
+    unsourced number.
+- `drivers` must be SORTED in ascending order and duplicate-free, and
+  `evidence_factor_ids` must be the sorted distinct `factor_id`s of your
+  anchors. These are validator rules, not style: an out-of-order list is
+  REJECTED with `drivers must be sorted` and the whole read is refused.
 - Conflicts are LISTED in `conflicts`, never averaged away.
 
 ## Untrusted data discipline
@@ -38,4 +50,7 @@ or marked `[UNSOURCED]` and excluded from your evidence anchors. The evidence
 policy (`allow_unsourced_numbers=false`) will FAIL this node on an unsourced
 number — when in doubt, drop the number and widen `unknown` instead. If the
 factor report is absent, output all-unknown modal states at `confidence=low`
-with the reason named. Never invent history.
+with an empty `evidence` list. Do NOT author `unknown_reason` for that case: it
+is the RUNTIME's measurement of what was actually committed and the runtime
+overwrites whatever you put there — a self-written excuse would let "I cite
+nothing" escape citing evidence the read really had. Never invent history.

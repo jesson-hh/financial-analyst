@@ -472,16 +472,15 @@ class ExperienceBridgeSupportAnalyzer:
     COMPLETE and report honestly instead of crashing. A worker whose allowlist
     DOES hold the capability but has no row keeps the LOUD ``CatalogError``:
     that shape means a reviewed grant lost its row, and it must never degrade
-    silently. This is analyzer code, not catalog content — no catalog digest
-    moves.
+    silently.
 
-    Material-vs-code drift note (final-review triage): the byte-frozen
-    ``lane0.experience.analyzer`` handler material
+    The sealed ``lane0.experience.analyzer`` handler material
     (``config/orchestration/materials/lane0/experience_support_analyzer.md``)
-    still states the pre-Task-11 invariant ("a worker without a reviewed row
-    fails analysis"). Per the Task 11 controller ruling the sealed material
-    bytes stay BYTE-FROZEN (no catalog digest moves); the code is the ruled
-    behaviour.
+    states this same discrimination: L3 Task 4 moved those bytes inside the
+    chartered re-freeze window, so the material and the code no longer
+    disagree. Because that material's digest is embedded in the sealed bridge
+    descriptor material, the two move together or ``assemble_lane0_catalog``
+    refuses loudly.
     """
 
     def analyze(

@@ -18,5 +18,19 @@ Reviewed bounds (closed; derived from the config rows, never trusted numbers):
   `capability_ref`, cross-checked against the WorkerSpec allowlist — a row
   granting a capability outside the allowlist is an analyzer failure, not
   authority.
-- One config row per Lane 0 LLM worker (`market.regime`, `market.rotation`);
-  a worker without a reviewed row fails analysis (never a default grant).
+- One config row per Lane 0 LLM worker (`market.regime`, `market.rotation`).
+  A worker that reaches this analyzer with ZERO rows is discriminated by its
+  allowlist, never by default (controller ruling C3, Phase 10 · Task 11):
+  - its `capability_allowlist` does NOT hold the activation capability — the
+    bridge activated on the `experience_cases` read category alone, so this
+    worker was never granted anything. It receives the honest
+    ZERO-CONTRIBUTION summary (`min=0`, `max=0`, no capability refs — the same
+    posture the Phase-3 data analyzer takes for a rowless worker) and
+    `check_runtime_support` COMPLETES and reports the absence instead of
+    crashing.
+  - its `capability_allowlist` DOES hold it — a reviewed grant lost its row.
+    That is LOUD (`CatalogError`) and must never degrade silently: "never
+    granted" and "granted, row missing" are two different facts and this
+    analyzer refuses to collapse them.
+  More than one row for one worker is LOUD for the same reason — ambiguity is
+  refused, never averaged.

@@ -10,7 +10,6 @@ description: |
 - `ww_news_live` realtime per-name news + 7x24 flash (each item carries its own published_at / available_at)
 - `ww_newsradar` industry-chain RSS radar (attributed sources, MIT-licensed corpus)
 - `ww_live_text` stocks rich-layer announcement / report / hot-list probe
-- `ww_f10` structured corporate events (LHB, unlock, share-capital) to cross-check a headline against the filing
 
 Only these allowlisted, runtime-prefetched tool products are trusted. If a claim
 is not in one of them, it does not exist for this read. Never browse or invent a

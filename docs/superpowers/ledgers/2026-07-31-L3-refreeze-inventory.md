@@ -183,54 +183,156 @@ HEAD 实测:`source_registry = bb81979af8824a99574c67b9ef6176720568745a8e58772af
 
 ---
 
-## 4. 兄弟计划钉 + 支持拒绝钉 —— Task 3-4 的 allowed-red 集 **[gate-parsed]**
+### 3.1 Task 4 的新落点 —— **不是链摘要,所以不进上表**(2026-08-11 实测)
 
-`verdict` 是**封闭词表**,只有三个取值(gate 断言:任何第四种拼法 = 红):
-`FLIP` = D-1/D-2 一旦授权就必然变红,Task 3-5 必须有意识翻转并留双向证据;
-`FLIP-IF` = 只在某个具体裁决下变红(条件写在备注);
-`GREEN-VERIFY` = 不该变红,但每次红窗都要显式复核(它变红说明改动越界)。
+上表(以及解析它的 gate)只收 **链 catalog 摘要**的字面量:`_LITERAL_ROW` 要求 `P<node>` + 8 位
+digest8 + `FROZEN|MOVES` 三列同时成立,`_tree_literals()` 也只扫链摘要。Task 4 移动的密封材料
+摘要**不是链节点**,把它们塞进上表会同时打断「42 处 / 16 文件」的对账和「记录 == 实测」的漂移断言。
+因此按**实测集治**的原则**记录在此**,不改上表结构 —— 但 Task 5 的再生成清单必须包含它们:
 
-**表的契约是 `anchor` 列,不是 `line` 列。** gate 断言:每行的 `file` 存在,且 `anchor` 字符串
-**出现在该文件中**(全文件匹配,不按行号)—— 所以上游代码上下移动不会让这张表假红,而钉被
-**删掉或改名**会立刻红。`line` 列只是给人用的导航提示,允许漂移,不参与断言。
-gate 另外断言解析出的行数 == §4 表里编号行的行数,所以没有哪一行能被正则悄悄跳过。
+- `tests/orchestration/golden/phase3_full_catalog_manifest_v1.json` —— `bridge.memory_runtime.analyzer`
+  的材料摘要 `b233d619…`(随 `memory/catalog.py` 的 `_ANALYZER_BYTES` 改写移动)。§4 行 #66。
+- `tests/orchestration/golden/phase8_catalog_manifest_v1.json` —— `skill.text.news@1` 的
+  skill-manifest 摘要 `34bf82c2…`(随 SKILL.md 去掉 `ww_f10` 移动)。§4 行 #65。
+- `tests/orchestration/golden/phase8_catalog_manifest_v1.json` —— `text.news` / `pv.technical` 的两个
+  WorkerSpec 语义摘要(D-1 收窄 + Task 4 的 SKILL 字节共同推动)。§4 行 #63 / #64。
+- `tests/orchestration/test_phase8_handoff.py` —— `FINAL_WORKER_DIGESTS` 里 **`market.regime` 一项**
+  `4e1a747870f3…` → `813fe36ee5e4…`(随 regime prompt 材料字节移动;其余 6 个 final worker 逐字节不变)。
+  §4 行 #55。
+- 深度预设 record digest `d7c5092f…` 的三处落点(golden 1 + 测试常量 2)。§4 行 #67-#69。
+- **无落点、但确实移动的两个材料摘要**:`lane0.experience.analyzer`
+  `1a613689…` → `88cb5048…`,`lane0.regime.prompt` `903e49ac…` → 新值。
+  它们不出现在任何 golden 的字面量里(P5 golden 只列 **id**,不列摘要),只经由链摘要间接显形。
+  **`lane0.experience.analyzer` 有一处非 golden 的强耦合落点:密封材料
+  `config/orchestration/materials/lane0/experience_bridge_descriptor.md` 内嵌它的 `content_digest`**,
+  `bootstrap.assemble_lane0_catalog` 会对比并在漂移时抛 `CatalogError`。Task 4 已同步重生成该描述符;
+  **今后任何改动 experience 分析器材料的人都必须一起改它,否则 Lane-0 目录加载当场炸(响亮,不静默)。**
 
-| # | file | line(s) | anchor | verdict | 钉 / 备注 |
+**工具链危险(Task 4 实测,记录给 Task 5):** 本仓 `core.autocrlf=true` 且**没有 `.gitattributes`**。
+`git checkout -- <material>` 会把 LF 的密封材料重写成 CRLF —— **每一个材料摘要当场改变**,
+而 `git status` / `git diff` 仍报告该文件「未修改」(因为 git 在入索引时又把 CRLF 归一回 LF)。
+Task 4 有两轮全套测量因此作废。**Task 5 再生成 goldens 时,不要用 `git checkout` 还原
+`config/orchestration/materials` 下的任何文件**;要还原就按字节写回(`git show HEAD:<path>` 的原始输出)。
+
+## 4. 红窗 allowed-red 账本 —— **Task 4 从度量整表重推** **[gate-parsed]**
+
+> **本表已于 2026-08-11 由 L3 Task 4 从实测整表重写**,替换了 Task 1 起草、Task 2/3 逐行打补丁的旧 29 行表。
+> 重推的理由是控制器裁决(§11.1):旧表被实测推翻过三次(`text.policy` 的 tool-call 归类、
+> 四条 lane-batch 行为钉、§11 的 D 组)—— **逐行打补丁的做法到此为止**。
+> 自本节起,红窗的**操作性**允许集 = **本表**(不再是「§4 ∪ §11 处置」);
+> §11 / §11.1 原样保留为**历史记录**,其每一条处置都已折进本表成行。
+>
+> **重推方法(可复现):** 在同一棵脏工作树上跑两次全套
+> `python -m pytest tests/orchestration -q -p no:randomly` —— 一次在 Task 4 改动**之前**
+> (改动集按 sha256 备份后还原 HEAD 字节、新测试文件移出树),一次在改动**之后**(按 sha256 还原改动集)。
+> 表里每一行 = 两次红集**并集**中的一个测试,外加 Task 5 必须改写的非测试落点与红窗越界探针。
+> 实测:改前 **50 红**(45 failed + 5 errors),与 §11 记录的 Task 3 红集**逐条相同** ——
+> 「Task 3 修订轮未改变红集」由此验证,不是假设;改后 **55 红**(50 failed + 5 errors):
+> **2 治愈、7 新增,7 条全部可归属**,逐条见 §11.3。
+>
+> `verdict` 是**封闭词表**,只有三个取值(gate 断言:任何第四种拼法 = 红):
+> `FLIP` = 已经红(或本期必然变红),必须由 owner 有意识翻转并留双向证据;
+> `FLIP-IF` = 只在某个具体裁决/条件下变红(条件写在备注,并注明今天是否成立);
+> `GREEN-VERIFY` = 不该红,每次红窗都要显式复核(它变红说明改动越界)。
+>
+> **表的契约是 `anchor` 列,不是 `line` 列。** gate 断言每行的 `file` 存在、且 `anchor` 字符串
+> 出现在该文件中(全文件匹配)。上游代码上下移动不会让本表假红,而钉被**删掉或改名**会立刻红。
+> `line` 列一律写 `—`:行号在九期里漂移过太多次,写进表里只会制造假精确。
+>
+> **每一行都带 owner。** `Task 5` = 关窗时的再生成 / 有意识翻转;`Task 4` = 本期已交付。
+> **归不到任何一行的红 = STOP,上报。**
+
+| # | file | line(s) | anchor | verdict | 成因归属 / owner |
 |---|---|---|---|---|---|
-| 1 | `tests/orchestration/test_pipeline_deep_preset.py` | 1042 | `test_the_report_is_honestly_unsupported_naming_the_data_grant_gap` | FLIP | 断言 `report.supported is False` 且 unmet worker 恰为 `{pv.technical, text.news}`。授权后 supported 转 True(或 unmet 集缩小)—— 本钉正是「诚实拒绝」的化身,必须双向翻。 |
-| 2 | `tests/orchestration/test_pipeline_reduced_deep_preset.py` | 327 | `test_the_untouched_ten_node_baseline_is_still_honestly_unsupported` | FLIP | 同 #1;它同时是减证据预设「存在理由」的回归半边。 |
-| 3 | `tests/orchestration/test_pipeline_reduced_deep_preset.py` | 344 | `test_the_two_dropped_nodes_are_exactly_the_unmet_ones` | FLIP | 断言 `full_ids - reduced_ids == unmet_nodes`。授权后 unmet 集空,等式两边同时塌;翻转时必须换成新的因果断言,不是删掉。 |
-| 4 | `tests/orchestration/test_pipeline_reduced_deep_preset.py` | 321 | `test_the_reduced_draft_is_runtime_supported` | GREEN-VERIFY | 减证据预设本来就绿;授权不该动它。它变红 = 授权改到了八节点通路上。 |
-| 5 | `tests/orchestration/test_runtime_support.py` | 595 | `tool_calls_required_unmet` | GREEN-VERIFY | 通用算术钉(合成 worker,非两位读者)。算术本身不变;变红说明动了 `check_runtime_support` 里 `tool_calls_required_unmet` 那条判据(`tc is ToolCallRequirement.REQUIRED and min_sum < 1`)。**按符号写,不写行号** —— L3 Task 2 的插入已经让原来记的 `:673` 失效,而 gate 的锚点检查本来就是「符号在文件里」而非按行,备注也照此对齐。 |
-| 6 | `tests/orchestration/data/test_phase_handoff.py` | 828 | `tool_calls_required_unmet` | GREEN-VERIFY | Phase-3 handoff 的存在性钉。同 #5。 |
-| 7 | `tests/orchestration/test_pv_aux_nodes.py` | 26, 479, 546, 566 | `AuxDataUngranted` | FLIP-IF | **只在 D-1 给 `pv.price_action` / `pv.microstructure` 授行时翻。** 今天的 D-1 候选是 `pv.technical` / `text.news`,与这两个 aux 座席**不是同一批 worker**(见 §7.0 的 17 条 grant 全表)。若 D-1 只授两位读者,本组保持绿。 |
-| 8 | `tests/orchestration/test_pv_aux_nodes.py` | 27, 472 | `aux_data_ungranted` | FLIP-IF | 同 #7(类型化拒绝码的那一半)。 |
-| 9 | `tests/orchestration/test_data_world_recipe.py` | 755 | `test_every_granted_prefetch_row_is_within_the_supported_set` | FLIP | **必然翻。** 任何新增行都会动它的 `granted == {verified_snapshot}` 那一行,**即使新方法在支持集内**。若授的方法在支持集**外**(`indicators`/`fundamentals`),更早的 `granted ⊆ {verified_snapshot, news, ohlcv}` 那一行会**先**红 —— 这是 L2-b 设计的第一道拦截,不许绕。 |
-| 10 | `tests/orchestration/test_data_world_recipe.py` | 155 | `test_every_sealed_prefetch_row_route_equality` | GREEN-VERIFY | 每条新行都会进入这个迭代。七方法默认路由都已注册为单条 `(surface.source_ref, spec.capability_ref)`,新行照同一配方冻结路由就应保持绿;变红 = 新行 `frozen_route` 写错了。 |
-| 11 | `tests/orchestration/test_data_world_recipe.py` | 165 | `test_all_seven_methods_have_the_single_surface_route` | GREEN-VERIFY | 与新行无关(全七方法),列在这里作为红窗越界探针。 |
-| 12 | `tests/orchestration/test_data_world_recipe.py` | 179 | `test_the_real_session_cross_resolves_the_production_registry` | GREEN-VERIFY | 用真 `_frozen_route_for` 交叉解析首行;新行进来后应仍绿。 |
-| 13 | `tests/orchestration/test_data_world_recipe.py` | 738 | `test_unsupported_method_refuses_through_production_staging` | FLIP-IF | 只有 D-1 选 **B**(建 `indicators` 后端)才翻;A/C 下保持绿。 |
-| 14 | `tests/orchestration/data/test_data_catalog.py` | 179 | `test_grant_without_prefetch_row_fails` | GREEN-VERIFY | one-to-one 不变量的「有授权无行」方向。不变量**字节不动**(计划红线);变红 = 有人改了 `catalog.py:803` 的判据。 |
-| 15 | `tests/orchestration/data/test_data_catalog.py` | 185 | `test_prefetch_row_without_grant_fails` | GREEN-VERIFY | 同 #14 的「有行无授权」方向。注意:它用的是 `dec.research_mgr`(Phase-3 内、未授权),与 §7.0 用 `pv.technical`(Phase-3 外)证的不是同一件事。 |
-| 16 | `tests/orchestration/test_pipeline_deep_preset.py` | 135 | `d7c5092fda61ca242de3fb91f48897e06fcc2e8a5836bfae80aae23e6e08a918` | FLIP-IF | 深度预设 record digest。只在 Task 5 改预设描述里的 `pv.microstructure` 过陈述时移动;不是链摘要,但和链一起在本期唯一的重冻窗口里动。 |
-| 17 | `tests/orchestration/test_pipeline_reduced_deep_preset.py` | 130 | `d7c5092fda61ca242de3fb91f48897e06fcc2e8a5836bfae80aae23e6e08a918` | FLIP-IF | 同 #16(第 2 处)。 |
-| 18 | `tests/orchestration/golden/phase10_catalog_manifest_v1.json` | 27 | `d7c5092fda61ca242de3fb91f48897e06fcc2e8a5836bfae80aae23e6e08a918` | FLIP-IF | 同 #16(第 3 处,golden 侧)。 |
-| 19 | `tests/orchestration/golden/phase8_catalog_manifest_v1.json` | 153 | `3aacbf8be000b9e5e5b061ebb38eb86d9299cdfee4b7d190aa08e3def04357ab` | FLIP-IF | `pv.technical` 的 WorkerSpec 语义摘要。只在 D-1 选 A(收窄 allowlist)或 D-2 选 B(改 `tool_calls`)时移动。**P8 worker 摘要本来就在本期重冻范围内**,零额外爆炸半径。 |
-| 20 | `tests/orchestration/golden/phase8_catalog_manifest_v1.json` | 161 | `2794a57155bdf312a5f48ee4bdd3554c6d2e32920706fbb5d79b5bfdc78fcbea` | FLIP-IF | `text.news` 的 WorkerSpec 语义摘要。同 #19。 |
-| 21 | `guanlan_v2/orchestration/pipeline/api.py` | 1188 | `permanent-honest grant-gap ruling` | FLIP | 文档钉:「sealed Phase-3 data-prefetch grants still cover `dec.pm` only … support-refuses with `tool_calls_required_unmet`」。授权后这段话变成假的,Task 5 必须改字。 |
-| 22 | `guanlan_v2/orchestration/pipeline/deep_decide.py` | 333 | `is a real product, not a fallback` | FLIP | `PresetSelectionRefused` docstring —— 减证据预设「存在理由」的散文半边。同 #21。 |
-| 23 | `guanlan_v2/orchestration/pipeline/live_decide.py` | 1157, 1168 | `SUPPORT-REFUSED at admission` | FLIP | 「the deep run is still SUPPORT-REFUSED at admission」。同 #21。 |
-| 24 | `guanlan_v2/orchestration/pipeline/pv_aux.py` | 197 | `sealed prefetch binding grants it no row (L3)` | FLIP-IF | `AuxDataUngranted` 的消息字面量。同 #7:只在授 aux 座席时。 |
-| 25 | `tests/orchestration/test_experience_rowless_admission.py` | 246 | `test_no_sealed_worker_can_trip_the_new_refusal` | GREEN-VERIFY | L3 Task 2 早拒绝的**越界探针**(本行由 Task 2 补入,裁决见 §9 的 “RULING — dec.research_mgr experience row”)。它断言「靠读类目 activate 到某个声明了能力的桥、且完全无授权」的密封 worker 集恰为 `{dec.research_mgr: FORBIDDEN}`。D-1 只收窄 `pv.technical`/`text.news` 的 data 侧,两位都不声明 `experience_cases`,所以本行**不该红**。**Task 3-4 期间它变红 = 收窄/授权动到了某个 worker 的 `read_categories` 或 `capability_allowlist`,即越界信号按设计生效 —— STOP,上报。** **耦合提示:**同文件的 `TestRunnableRequiredWorkerNotRefused`(min_sum≥1 不早拒的那条裁决钉)**复用 `test_runtime_support.py` 的私有合成桥手法**(`_Analyzer` / `_BridgeSpec` / `build_scenario`)—— 有意「复用而非重新推导」(密封目录表达不出「一个节点两条桥、边界不同」),代价是**改动该手法的签名会同时打断两个套件**,动它时两边一起看。 |
-| 26 | `tests/orchestration/test_lane_batch_pv.py` | 128, 187 | `test_worker_spec_matrix` | FLIP | **D-1 Option A 收窄的行为半边(Task 3 实测补入,控制器已裁)。** `:187` 逐字断言 `tuple(c.id for c in w.capability_allowlist) == exp["caps"]`,而 `:128` 的期望是 `("cap.data.indicators", "cap.data.verified_snapshot")`。收窄后必红。§4 #19 只钉了 golden 侧的语义摘要,**行为侧的这条钉 Task 1 未枚举** —— 红窗清单在此之前是不完整的。Task 5 有意识改期望值,不是删钉。 |
-| 27 | `tests/orchestration/test_lane_batch_text.py` | 65, 127 | `test_worker_spec_matrix` | FLIP | 同 #26 的 `text.news` 半边:`:127` 同一条相等断言,`:65` 期望 `("cap.data.fundamentals", "cap.data.news")`。对应 §4 #20 的行为侧。 |
-| 28 | `tests/orchestration/test_lane_batch_text.py` | 152-154 | `test_allowlist_broadening_applied` | FLIP | `:154` `assert "cap.data.fundamentals" in {…text.news allowlist}`。**注意它是「上一次评审过的扩权」的档案钉**,D-1 现在有意识地把那次扩权反转 —— Task 5 **改写**这条钉使其记录新的裁决,**绝不删除**:删掉就等于抹掉「曾经授过、后来按逐能力论证收回」这段评审史。 |
-| 29 | `tests/orchestration/test_lane_batch_text.py` | 160-166 | `test_promise_supply_lint_clean` | FLIP-IF | **不只是钉,是真缺口。** Task 3 实测:收窄后 `lint_skill_supply` 对 `text.news` 返回 `skill promises tool 'ww_f10' but no allowlisted capability supplies it (allowlist capabilities: ['cap.data.news'])`(收窄前为 `()`)。**该缺口是控制器已裁的 Task-4 义务**:Task 4 从 `guanlan_v2/orchestration/skills/text.news/SKILL.md` 去掉 `ww_f10` 承诺(item 5 密封材料文本对齐),本钉届时**无需改测试即自愈**,并且**必须在 Task 5 出口重新为绿**。实测不对称:`pv.technical` 的同一 lint 收窄前后**都是空元组**,其 SKILL.md 不承诺任何只由 `indicators` 供给的工具 —— D-1 要求的逐能力论证在两处收窄上都已闭合。Task 4 的 SKILL.md 编辑会带动 skill 材料摘要 + P8 skill manifest 位移,§3 字面量表可能需要一次 Task-4 实测扩表(Task 4 量,Task 5 再生成)。 |
+| 1 | `tests/orchestration/data/test_data_catalog.py` | — | `test_matches_the_frozen_golden_manifest` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 2 | `tests/orchestration/memory/test_catalog.py` | — | `test_data_catalog_golden_is_byte_untouched` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 3 | `tests/orchestration/memory/test_catalog.py` | — | `test_full_catalog_golden_matches` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 4 | `tests/orchestration/test_phase4_registry.py` | — | `test_phase4_catalog_matches_the_frozen_golden` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 5 | `tests/orchestration/test_phase5_registry.py` | — | `test_phase5_catalog_matches_the_frozen_golden` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 6 | `tests/orchestration/test_phase6_registry.py` | — | `test_phase6_catalog_matches_the_frozen_golden` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 7 | `tests/orchestration/test_phase7_registry.py` | — | `test_phase7_catalog_matches_the_frozen_golden` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 8 | `tests/orchestration/test_phase8_registry_catalog.py` | — | `test_phase8_catalog_matches_the_frozen_golden` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 9 | `tests/orchestration/test_phase9_registry_chain.py` | — | `test_phase9_catalog_matches_the_frozen_golden` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 10 | `tests/orchestration/test_phase10_chain.py` | — | `test_phase10_catalog_matches_the_frozen_golden` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 11 | `tests/orchestration/test_phase4_handoff.py` | — | `test_point5_phase3_full_catalog_export_reproduces_the_frozen_digest` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 12 | `tests/orchestration/test_phase4_handoff.py` | — | `test_point8_owning_modules_of_frozen_symbols_are_upstream` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 13 | `tests/orchestration/test_phase4_handoff.py` | — | `test_step2_records_the_exact_phase3_full_registry_and_catalog_digests` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 14 | `tests/orchestration/test_phase5_handoff.py` | — | `test_point4_phase3_full_registry_and_catalog_reproduce` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 15 | `tests/orchestration/test_phase5_handoff.py` | — | `test_point5_phase4_registry_and_catalog_chain_reproduce` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 16 | `tests/orchestration/test_phase5_handoff.py` | — | `test_step2_records_the_exact_phase3_full_registry_and_catalog_digests` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 17 | `tests/orchestration/test_phase5_handoff.py` | — | `test_step2_records_the_exact_phase4_registry_and_catalog_digests` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 18 | `tests/orchestration/test_phase6_handoff.py` | — | `test_point3_catalog_builders_verify_their_predecessor_snapshot` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 19 | `tests/orchestration/test_phase6_handoff.py` | — | `test_point3_catalog_chain_digests_reproduce_and_link` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 20 | `tests/orchestration/test_phase6_handoff.py` | — | `test_step2_records_the_exact_catalog_chain_digests` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 21 | `tests/orchestration/test_phase7_handoff.py` | — | `test_point6_catalog_chain_nodes_reproduce_and_link` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 22 | `tests/orchestration/test_phase7_handoff.py` | — | `test_step2_records_the_exact_phase4_5_6_chain_digests` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 23 | `tests/orchestration/test_phase8_handoff.py` | — | `test_clause_a_catalog_builders_are_heterogeneous_but_accessors_are_uniform` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 24 | `tests/orchestration/test_phase8_handoff.py` | — | `test_point1_chain_verifies_back_through_p6_p5_p4_to_p3_full` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 25 | `tests/orchestration/test_phase8_handoff.py` | — | `test_point1_phase7_chain_symbols_resolve_and_reproduce` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 26 | `tests/orchestration/test_phase9_handoff.py` | — | `test_point2_catalog_chain_resolves_and_base_pins_verify` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 27 | `tests/orchestration/test_phase10_handoff.py` | — | `test_catalog_chain_resolves_by_exact_frozen_digest` | FLIP | 链摘要/golden 位移。**成因**:Task 3 的三条新行(prefetch/descriptor 材料摘要)+ Task 4 的四处密封材料字节(experience 分析器、memory `_ANALYZER_BYTES`、regime prompt、深度预设描述)沿 P3→P10 同一条链累加。**owner**:Task 5 一次性再生成。 |
+| 28 | `tests/orchestration/test_pipeline_deep_preset.py` | — | `test_the_report_is_honestly_unsupported_naming_the_data_grant_gap` | FLIP | **成因**:D-1/D-2 授权(Task 3)。断言 `report.supported is False` 且 unmet 恰为 `{pv.technical, text.news}`。**owner**:Task 5 有意识翻转,留双向证据。 |
+| 29 | `tests/orchestration/test_pipeline_reduced_deep_preset.py` | — | `test_the_untouched_ten_node_baseline_is_still_honestly_unsupported` | FLIP | 同上;它同时是减证据预设「存在理由」的回归半边。**owner**:Task 5。 |
+| 30 | `tests/orchestration/test_pipeline_reduced_deep_preset.py` | — | `test_the_two_dropped_nodes_are_exactly_the_unmet_ones` | FLIP | **成因**:授权后 unmet 集空,`full_ids - reduced_ids == unmet_nodes` 两边同时塌。**owner**:Task 5 换成新的因果断言,不是删钉。 |
+| 31 | `tests/orchestration/test_data_world_recipe.py` | — | `test_every_granted_prefetch_row_is_within_the_supported_set` | FLIP | **成因**:任何新增行都会动它的 `granted == {verified_snapshot}` 那一行。**owner**:Task 5 改为 `{verified_snapshot, news}`。 |
+| 32 | `tests/orchestration/test_lane_batch_pv.py` | — | `test_worker_spec_matrix` | FLIP | **成因**:D-1 Option A 收窄 `pv.technical.capability_methods`(行为侧的相等断言)。**owner**:Task 5 有意识改期望值。 |
+| 33 | `tests/orchestration/test_lane_batch_text.py` | — | `test_worker_spec_matrix` | FLIP | 同上的 `text.news` 半边。**owner**:Task 5。 |
+| 34 | `tests/orchestration/test_lane_batch_text.py` | — | `test_allowlist_broadening_applied` | FLIP | **成因**:D-1 有意识反转了上一次评审过的扩权。**owner**:Task 5 **改写**本钉使其记录新裁决,**绝不删除** —— 删掉等于抹掉「曾经授过、后来按逐能力论证收回」这段评审史。 |
+| 35 | `tests/orchestration/test_l3_refreeze_gate.py` | — | `test_the_measured_chain_equals_the_spec_section_1_values` | FLIP | **成因**:门把 §2/§2.3 的表逐行重新度量并断言相等,本期正是要移动那些值。**owner**:Task 5 取重冻后的新值重钉。 |
+| 36 | `tests/orchestration/test_l3_refreeze_gate.py` | — | `test_the_ledger_records_exactly_the_measured_chain` | FLIP | **成因**:门把 §2/§2.3 的表逐行重新度量并断言相等,本期正是要移动那些值。**owner**:Task 5 取重冻后的新值重钉。 |
+| 37 | `tests/orchestration/test_l3_refreeze_gate.py` | — | `test_the_bridge_material_movement_is_measured_not_declared` | FLIP | **成因**:门把 §2/§2.3 的表逐行重新度量并断言相等,本期正是要移动那些值。**owner**:Task 5 取重冻后的新值重钉。 |
+| 38 | `tests/orchestration/test_l3_refreeze_gate.py` | — | `test_the_ledger_records_the_measured_bridge_material_verdicts` | FLIP | **成因**:门把 §2/§2.3 的表逐行重新度量并断言相等,本期正是要移动那些值。**owner**:Task 5 取重冻后的新值重钉。 |
+| 39 | `tests/orchestration/test_l3_refreeze_gate.py` | — | `test_the_provider_and_analyzer_materials_are_binding_INDEPENDENT` | FLIP | **成因**:门把 §2/§2.3 的表逐行重新度量并断言相等,本期正是要移动那些值。**owner**:Task 5 取重冻后的新值重钉。 |
+| 40 | `tests/orchestration/test_l3_refreeze_gate.py` | — | `test_the_one_reviewed_grant_is_still_the_single_pm_row` | FLIP | **成因**:唯一评审授权从 1 组变 4 组。**owner**:Task 5 重钉。 |
+| 41 | `tests/orchestration/test_l3_refreeze_gate.py` | — | `test_the_seventeen_p8_grants_stand_against_one_sealed_row` | FLIP | **成因**:17 组授权对 1 条行,实测已是 15 组对 4 条行。**owner**:Task 5 重钉为 15 对 4。 |
+| 42 | `tests/orchestration/test_l3_refreeze_gate.py` | — | `test_a_candidate_row_alone_trips_the_invariant_in_the_rows_direction` | FLIP | **成因**:候选行探针用的 `pv.technical/verified_snapshot` 现在是真行,`operations must be duplicate-free per (worker, capability)` 当场拒绝,探针自炸。**owner**:Task 5 **必须把探针重新指向一个仍未授权的 (worker, method) 组合** —— 只改到能跑通、不重新指向 = 探针从此不再证明任何东西。 |
+| 43 | `tests/orchestration/data/test_subject_projection.py` | — | `test_the_real_sealed_row_resolves_and_validates_from_the_subject` | FLIP | **成因**:`real_row` fixture 断言「绑定里只有一条行」—— 与 `data/test_data_catalog.py` 的 `verified_snapshot_row` 是 L1 期的同一句话。**owner**:Task 5 翻转(同一改法,换个文件);控制器已裁,见 §11.1 D1。 |
+| 44 | `tests/orchestration/data/test_subject_projection.py` | — | `test_without_the_subject_the_same_real_row_still_refuses` | FLIP | **成因**:`real_row` fixture 断言「绑定里只有一条行」—— 与 `data/test_data_catalog.py` 的 `verified_snapshot_row` 是 L1 期的同一句话。**owner**:Task 5 翻转(同一改法,换个文件);控制器已裁,见 §11.1 D1。 |
+| 45 | `tests/orchestration/data/test_subject_projection.py` | — | `test_a_node_may_never_contradict_the_run_subject` | FLIP | **成因**:`real_row` fixture 断言「绑定里只有一条行」—— 与 `data/test_data_catalog.py` 的 `verified_snapshot_row` 是 L1 期的同一句话。**owner**:Task 5 翻转(同一改法,换个文件);控制器已裁,见 §11.1 D1。 |
+| 46 | `tests/orchestration/data/test_subject_projection.py` | — | `test_a_node_carrying_the_same_value_resolves` | FLIP | **成因**:`real_row` fixture 断言「绑定里只有一条行」—— 与 `data/test_data_catalog.py` 的 `verified_snapshot_row` 是 L1 期的同一句话。**owner**:Task 5 翻转(同一改法,换个文件);控制器已裁,见 §11.1 D1。 |
+| 47 | `tests/orchestration/data/test_subject_projection.py` | — | `test_a_pointer_outside_the_closed_set_is_still_refused` | FLIP | **成因**:`real_row` fixture 断言「绑定里只有一条行」—— 与 `data/test_data_catalog.py` 的 `verified_snapshot_row` 是 L1 期的同一句话。**owner**:Task 5 翻转(同一改法,换个文件);控制器已裁,见 §11.1 D1。 |
+| 48 | `tests/orchestration/test_pipeline_screening.py` | — | `test_zero_screening_workers_carry_data_prefetch_rows_today` | FLIP | **成因**:`targeted` 实测已是 `{dec.pm, pv.technical, text.news, text.policy}`;钉名里的 today 说明它记录的本就是当期事实。**owner**:Task 5 翻转(§11.1 D2)。**其源码注释半边已由 Task 4 交付**(`pipeline/screening.py` 的 `subject_params` 字段注释,原文「zero screening workers carry data prefetch rows」已为假)。 |
+| 49 | `tests/orchestration/test_lane_batch_text.py` | — | `test_new_seats_data_source_priority_names_real_tools` | FLIP | **Task 4 新造红。成因**:控制器裁决(旧 §4 #29)要求去掉 `text.news` SKILL.md 的 `ww_f10` 承诺,本钉的 `ww_f10 in news` 随之为假。**owner**:Task 5 改写期望 —— D-1 拿走了唯一供给它的 `cap.data.fundamentals`,这条承诺不该再存在。 |
+| 50 | `tests/orchestration/test_pipeline_deep_preset.py` | — | `test_the_record_digest_is_golden_frozen` | FLIP | **Task 4 新造红。成因**:`config/orchestration/presets/v2/luozi_deep_decide_v1.json` 的 `pv.microstructure` 过陈述订正 → 深度预设 record digest `d7c5092f…` 位移。**owner**:Task 5 重冻该 record digest。 |
+| 51 | `tests/orchestration/test_pipeline_deep_preset.py` | — | `test_the_phase10_registry_holds_the_base_plus_the_deep_record` | FLIP | **Task 4 新造红。成因**:`config/orchestration/presets/v2/luozi_deep_decide_v1.json` 的 `pv.microstructure` 过陈述订正 → 深度预设 record digest `d7c5092f…` 位移。**owner**:Task 5 重冻该 record digest。 |
+| 52 | `tests/orchestration/test_pipeline_reduced_deep_preset.py` | — | `test_the_sealed_ten_node_record_digest_did_not_move` | FLIP | **Task 4 新造红。成因**:`config/orchestration/presets/v2/luozi_deep_decide_v1.json` 的 `pv.microstructure` 过陈述订正 → 深度预设 record digest `d7c5092f…` 位移。**owner**:Task 5 重冻该 record digest。 减证据预设**自己的** record digest 不动(它的预设文件未被触碰);本钉红的是它对**十节点**预设的引用。 |
+| 53 | `tests/orchestration/test_pipeline_reduced_deep_preset.py` | — | `test_the_phase10_catalog_reference_names_only_the_sealed_ten_node_preset` | FLIP | **Task 4 新造红。成因**:`config/orchestration/presets/v2/luozi_deep_decide_v1.json` 的 `pv.microstructure` 过陈述订正 → 深度预设 record digest `d7c5092f…` 位移。**owner**:Task 5 重冻该 record digest。 |
+| 54 | `tests/orchestration/test_phase10_chain.py` | — | `test_deep_decide_preset_reference_binds_the_committed_sealed_record` | FLIP | **Task 4 新造红。成因**:`config/orchestration/presets/v2/luozi_deep_decide_v1.json` 的 `pv.microstructure` 过陈述订正 → 深度预设 record digest `d7c5092f…` 位移。**owner**:Task 5 重冻该 record digest。 本钉比对 golden 的 `deep_decide_preset_record_ref` 与**已提交的预设文件**,正是「改预设而不重冻目录必须响亮」的守卫 —— 响亮如设计地成立。 |
+| 55 | `tests/orchestration/test_phase8_handoff.py` | — | `test_point2_final_worker_semantic_digests_are_the_frozen_baseline` | FLIP | **Task 4 新造红。成因**:regime prompt 材料字节改动 → `lane0.regime.prompt` 内容摘要位移 → `market.regime` 的 WorkerSpec `system_prompt_ref` 变 → 其 semantic digest `4e1a747870f3…` → `813fe36ee5e4…`。实测**只有 `market.regime` 一项**变动,其余 6 个 final worker 逐字节不变。**owner**:Task 5 重冻 `FINAL_WORKER_DIGESTS`。 |
+| 56 | `tests/orchestration/test_lane_batch_text.py` | — | `test_promise_supply_lint_clean` | GREEN-VERIFY | **Task 4 已治愈**(旧 §4 #29)。去掉 `ww_f10` 承诺后 `lint_skill_supply(text.news)` 由一条 issue 回到 `()`,**未改任何测试**。**owner**:Task 4 交付 / Task 5 出口必须仍绿。 |
+| 57 | `tests/orchestration/test_phase8_registry_catalog.py` | — | `test_capability_promise_supply_lint_clean_across_every_seat` | GREEN-VERIFY | **Task 4 已治愈**(§11 D3,同一根因在全 27 席作用域上的第二处落点)。**owner**:同上。 |
+| 58 | `tests/orchestration/golden/phase8_catalog_manifest_v1.json` | — | `3aacbf8be000b9e5e5b061ebb38eb86d9299cdfee4b7d190aa08e3def04357ab` | FLIP | `pv.technical` 的 WorkerSpec 语义摘要,随 D-1 收窄移动。**owner**:Task 5 重写。 |
+| 59 | `tests/orchestration/golden/phase8_catalog_manifest_v1.json` | — | `2794a57155bdf312a5f48ee4bdd3554c6d2e32920706fbb5d79b5bfdc78fcbea` | FLIP | `text.news` 的 WorkerSpec 语义摘要,随 D-1 收窄**与** Task 4 的 SKILL 字节共同移动。**owner**:Task 5 重写。 |
+| 60 | `tests/orchestration/golden/phase8_catalog_manifest_v1.json` | — | `34bf82c246461f197493cde7008fe59fcef0a5cfc275073b29762ecd5be731d4` | FLIP | **Task 4 新增落点**:`skill.text.news@1` 的 skill-manifest 摘要,随 SKILL.md 去掉 `ww_f10` 移动。**owner**:Task 5 重写。 |
+| 61 | `tests/orchestration/golden/phase3_full_catalog_manifest_v1.json` | — | `b233d6191bd8ad1cb363e0cdf3dee3c7b6e989b94b3e72906abebeabdb9f883e` | FLIP | **Task 4 新增落点**:`bridge.memory_runtime.analyzer` 材料摘要,随 `_ANALYZER_BYTES` 改写移动。**owner**:Task 5 重写。 |
+| 62 | `tests/orchestration/golden/phase10_catalog_manifest_v1.json` | — | `d7c5092fda61ca242de3fb91f48897e06fcc2e8a5836bfae80aae23e6e08a918` | FLIP | 深度预设 record digest(golden 侧)。**owner**:Task 5 重写。 |
+| 63 | `tests/orchestration/test_pipeline_deep_preset.py` | — | `d7c5092fda61ca242de3fb91f48897e06fcc2e8a5836bfae80aae23e6e08a918` | FLIP | 同上(测试常量第 1 处)。**owner**:Task 5 重写。 |
+| 64 | `tests/orchestration/test_pipeline_reduced_deep_preset.py` | — | `d7c5092fda61ca242de3fb91f48897e06fcc2e8a5836bfae80aae23e6e08a918` | FLIP | 同上(测试常量第 2 处)。**owner**:Task 5 重写。 |
+| 65 | `guanlan_v2/orchestration/pipeline/api.py` | — | `permanent-honest grant-gap ruling` | FLIP | 文档钉:「sealed Phase-3 data-prefetch grants still cover `dec.pm` only … support-refuses with `tool_calls_required_unmet`」。授权后这段话是假的。**owner**:Task 5 改字(本行不产生测试红,但属再冻结清单,必须逐行走过)。 |
+| 66 | `guanlan_v2/orchestration/pipeline/deep_decide.py` | — | `is a real product, not a fallback` | FLIP | `PresetSelectionRefused` docstring —— 减证据预设「存在理由」的散文半边。**owner**:Task 5 改字。 |
+| 67 | `guanlan_v2/orchestration/pipeline/live_decide.py` | — | `SUPPORT-REFUSED at admission` | FLIP | 「the deep run is still SUPPORT-REFUSED at admission」(实测 2 处)。**owner**:Task 5 改字。 |
+| 68 | `guanlan_v2/orchestration/pipeline/pv_aux.py` | — | `sealed prefetch binding grants it no row (L3)` | FLIP-IF | `AuxDataUngranted` 的消息字面量。**条件**:只在 D-1 给 `pv.price_action`/`pv.microstructure` 授行时;裁决未授它们 → 今天条件不成立。 |
+| 69 | `tests/orchestration/test_pv_aux_nodes.py` | — | `AuxDataUngranted` | FLIP-IF | **条件**:只在 D-1 给两个 aux 座席授行时翻。本期授权对象是 `pv.technical`/`text.news`/`text.policy`,与它们不是同一批 worker → 两轮全套实测**全程绿**。 |
+| 70 | `tests/orchestration/test_pv_aux_nodes.py` | — | `aux_data_ungranted` | FLIP-IF | 同上(类型化拒绝码的那一半)。两轮实测绿。 |
+| 71 | `tests/orchestration/test_data_world_recipe.py` | — | `test_unsupported_method_refuses_through_production_staging` | FLIP-IF | **条件**:只有 D-1 选 B(建 `indicators` 后端)才翻;裁决取 A → 两轮实测绿。 |
+| 72 | `tests/orchestration/test_pipeline_reduced_deep_preset.py` | — | `test_the_reduced_draft_is_runtime_supported` | GREEN-VERIFY | 减证据预设本来就 supported;它变红 = 授权改到了八节点通路上。两轮实测绿。 |
+| 73 | `tests/orchestration/test_runtime_support.py` | — | `tool_calls_required_unmet` | GREEN-VERIFY | 通用算术钉(合成 worker,非两位读者)。变红 = 动了 `check_runtime_support` 的 `tc is REQUIRED and min_sum < 1` 判据。两轮实测绿。 |
+| 74 | `tests/orchestration/data/test_phase_handoff.py` | — | `tool_calls_required_unmet` | GREEN-VERIFY | Phase-3 handoff 的同一判据存在性钉。两轮实测绿。**同一文件另钉 P2 静态摘要(§3 #1)—— 本期唯一不许移动的链节点 —— 亦两轮实测绿,这是「P2 不动」的正向证据,不是没去看。** |
+| 75 | `tests/orchestration/test_data_world_recipe.py` | — | `test_every_sealed_prefetch_row_route_equality` | GREEN-VERIFY | 每条新行都会进入这个迭代;照同一配方冻结路由就应保持绿。两轮实测绿。 |
+| 76 | `tests/orchestration/test_data_world_recipe.py` | — | `test_all_seven_methods_have_the_single_surface_route` | GREEN-VERIFY | 与新行无关(全七方法),作为红窗越界探针留表。两轮实测绿。 |
+| 77 | `tests/orchestration/test_data_world_recipe.py` | — | `test_the_real_session_cross_resolves_the_production_registry` | GREEN-VERIFY | 用真 `_frozen_route_for` 交叉解析生产注册表。两轮实测绿。 |
+| 78 | `tests/orchestration/data/test_data_catalog.py` | — | `test_grant_without_prefetch_row_fails` | GREEN-VERIFY | one-to-one 不变量的「有授权无行」方向。判据字节全程不动(计划红线)。两轮实测绿。 |
+| 79 | `tests/orchestration/data/test_data_catalog.py` | — | `test_prefetch_row_without_grant_fails` | GREEN-VERIFY | 同上的「有行无授权」方向。两轮实测绿。 |
+| 80 | `tests/orchestration/test_experience_rowless_admission.py` | — | `test_no_sealed_worker_can_trip_the_new_refusal` | GREEN-VERIFY | **最灵敏的越界探针**:一旦收窄/授权动到任何 worker 的 `read_categories` 或 `capability_allowlist` 就立刻红。Task 4 只动材料文本与散文,两轮实测绿。 |
+| 81 | `tests/orchestration/test_lane_batch_text.py` | — | `test_skill_grammar_and_mirror_identity` | GREEN-VERIFY | **Task 4 的自证行**:`guanlan_v2/orchestration/skills/text.news/SKILL.md` 与 `config/orchestration/materials/skills/text.news.md` 镜像必须逐字节相等。Task 4 同步改了两处 → 实测绿;只改一处会立刻红。 |
+| 82 | `tests/orchestration/test_l3_material_texts.py` | — | `TestTheExperienceAnalyzerMaterialStatesTheRuledBehaviour` | GREEN-VERIFY | Task 4 新增钉(RED-first 证据:改前 19 failed / 13 passed)。实测绿。 |
+| 83 | `tests/orchestration/test_l3_material_texts.py` | — | `TestTheMemoryAnalyzerMaterialStatesTheRuledBehaviour` | GREEN-VERIFY | 同上。实测绿。 |
+| 84 | `tests/orchestration/test_l3_material_texts.py` | — | `TestTheDriftRecordingCommentsAreGone` | GREEN-VERIFY | 同上 —— 它钉的是「P10 期的 material-vs-code 漂移注释已被删除」;注释回归即红。实测绿。 |
 
-> **红窗纪律(计划 Global Constraints):** Task 3-4 期间,`tests/orchestration` 全套只允许在
+> **红窗纪律(计划 Global Constraints):** Task 4-5 期间,`tests/orchestration` 全套只允许在
 > 本表 `FLIP` / `FLIP-IF`(且其条件成立)的条目上红。**本表之外的任何一处红 = STOP,上报。**
+> Task 5 关窗后本表每一行都必须回到绿;此后任何 golden 位移都是回归。
 
----
 
 ## 5. 适配器清单(按 source id) **[gate-parsed]**
 
@@ -806,3 +908,48 @@ Task 3 提交点的 **实测** 全套结果(`python -m pytest tests/orchestratio
 **Task 7 义务:**(a) 把这项计入真跑的成本与时延预算;(b) **实测**并记录每批的实际读取次数与耗时,
 不要按「和深度研判一样」估;(c) 顺带验证 §8.2 的第二种失败语汇 ——
 news 断供 → `tool_discipline_unmet` / INCOMPLETE —— 在**选股**通路上也成立,而不只在深度通路上。
+
+### 11.3 红窗实测红集 (Task 4) —— 收官测量与逐条归属
+
+两轮全套 `python -m pytest tests/orchestration -q -p no:randomly`,同一棵脏工作树、同一环境,
+差别**只有** Task 4 的改动集(按 sha256 备份/还原,逐字节可复现):
+
+| 轮次 | 结果 | 红集大小 |
+|---|---|---|
+| 改动前(HEAD `65510271` 字节,新测试文件移出树) | 45 failed, 5975 passed, 1 xfailed, 5 errors in 18:14 | **50** |
+| 改动后(Task 4 全部交付物在树) | 50 failed, 6002 passed, 1 xfailed, 5 errors in 18:16 | **55** |
+
+**改前 50 红与 §11 记录的 Task 3 红集逐条相同** —— 简报要求的「Task 3 修订轮未改变红集」由此
+**验证**(Task 3 修订轮本身没有重跑全套,所以这是该断言的第一次实测)。
+
+**转移(2 治愈 / 7 新增,全部命中重推后的 §4):**
+
+| 方向 | 测试 | §4 行 | 归属 |
+|---|---|---|---|
+| 治愈 | `test_lane_batch_text.py::test_promise_supply_lint_clean[text.news]` | #61 | 去掉 `ww_f10` 承诺;**未改测试** |
+| 治愈 | `test_phase8_registry_catalog.py::test_capability_promise_supply_lint_clean_across_every_seat` | #62 | 同上,27 席作用域的第二处落点 |
+| 新增 | `test_lane_batch_text.py::test_new_seats_data_source_priority_names_real_tools` | #54 | 同一次 SKILL.md 编辑的**另一面**:该钉断言 `ww_f10 in news` |
+| 新增 | `test_pipeline_deep_preset.py::TestPresetLoadAndSeal::test_the_record_digest_is_golden_frozen` | #55(下移后见表) | 预设描述订正 → record digest 位移 |
+| 新增 | `test_pipeline_deep_preset.py::TestRegistryExtensionChain::test_the_phase10_registry_holds_the_base_plus_the_deep_record` | 同族 | 同上 |
+| 新增 | `test_pipeline_reduced_deep_preset.py::TestReducedPresetSeal::test_the_sealed_ten_node_record_digest_did_not_move` | 同族 | 同上(减证据预设自己的摘要不动) |
+| 新增 | `test_pipeline_reduced_deep_preset.py::TestNoUpstreamMovement::test_the_phase10_catalog_reference_names_only_the_sealed_ten_node_preset` | 同族 | 同上 |
+| 新增 | `test_phase10_chain.py::test_deep_decide_preset_reference_binds_the_committed_sealed_record` | 同族 | 同上;这正是「改预设不重冻目录必须响亮」的守卫 |
+| 新增 | `test_phase8_handoff.py::test_point2_final_worker_semantic_digests_are_the_frozen_baseline` | 同族 | regime prompt 字节 → `market.regime` 的 WorkerSpec 语义摘要位移(**只此一项**) |
+
+**预测对账(诚实记录):** Task 4 开工前预判 5 条新红,实测 7 条。多出的两条是
+`test_phase10_chain.py::test_deep_decide_preset_reference_binds_the_committed_sealed_record` 与
+`test_phase8_handoff.py::test_point2_final_worker_semantic_digests_are_the_frozen_baseline`。
+两条**都在事后完整归因到 Task 4 自己的材料字节**(前者=预设描述,后者=regime prompt),
+**没有一条指示实现缺陷,也没有一条落在 GREEN-VERIFY 行上**;但「预测 5、实测 7」本身说明
+「材料摘要 → WorkerSpec 语义摘要」这条二级传播在开工估算里被漏掉了 —— 记录下来,别粉饰。
+
+**结论:**
+
+- `red ⊆ 重推后的 §4`:**是**。55 条收官红逐条落在 §4 的 `FLIP` 行上;
+  零红落在 `GREEN-VERIFY` 行;四条 `FLIP-IF` 的条件今天都不成立,四条实测全绿。
+- goldens **未再生成**(Task 5 的活);`CHECKER_VERSION` **未动**;
+  三个注册模型的 class docstring(`ParamBinding` / `DataPrefetchOperation` /
+  `DataBridgePrefetchBinding`)**未动** —— Task 4 改的两个分析器都是**普通类**,不是注册模型,
+  所以 10 份 schema manifest 零位移(两轮实测中 schema manifest 相关测试全绿)。
+- **P2 锚点未动的正向证据**:`data/test_phase_handoff.py`(§3 #1)与
+  `fixtures/stock_deep_dive_equivalence_v1.json`(§3 #2)两轮全绿。

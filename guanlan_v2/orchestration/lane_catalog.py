@@ -1750,13 +1750,14 @@ def build_phase8_catalog_snapshot(
     validate_catalog_snapshot(snapshot)
     # L3 ruling D-1(0): the SECOND evaluation point of the one-to-one grant/row
     # invariant. Phase 3 could only judge coverage for its own five workers and
-    # carried every other row forward; this fold is where the lane readers that
+    # left every other row unjudged; this fold is where the lane readers that
     # own those rows finally exist, so it is where the deferred rows are claimed
     # — and where a REQUIRED reader holding a rowless data grant is refused
-    # instead of shipping as a permanently unsupportable seat. The binding is the
-    # sealed Phase-3 one this catalog inherits (the check re-derives its material
-    # digest and requires the snapshot to carry it, so it cannot be satisfied by
-    # a binding this catalog never sealed).
+    # instead of shipping as a permanently unsupportable seat. Nothing is
+    # threaded between the two points: the sealed Phase-3 binding this catalog
+    # inherits is the single source both of them read, and the check re-derives
+    # its material digest and requires the snapshot to carry it, so it cannot be
+    # satisfied by a binding this catalog never sealed.
     verify_cumulative_prefetch_coverage(
         snapshot, phase3_data_surface().prefetch_binding)
     return snapshot

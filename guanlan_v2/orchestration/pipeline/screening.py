@@ -586,8 +586,10 @@ class MaterializedScreeningLane:
     #: the ONE reviewed recipe (``SubjectParams.project``) from this lane's
     #: digest-verified committed ``RunSubject@1``. Out-of-band beside the draft
     #: (``PlanNode.params`` stays empty; the sealed record stays code-free).
-    #: Honestly vacuous today — zero screening workers carry data prefetch rows
-    #: — and defaulted to None so pre-L1 constructions keep their meaning.
+    #: NO LONGER vacuous (L3 D-1, 2026-08-11): ``text.news`` is one of this
+    #: lane's nine workers AND now carries a reviewed data prefetch row, so the
+    #: stamp feeds a real param binding on every screening run. Defaulted to
+    #: None so pre-L1 constructions keep their meaning.
     subject_params: SubjectParams | None = None
 
 

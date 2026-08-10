@@ -265,13 +265,9 @@ class MemoryBridgeSupportAnalyzer:
     reviewed reader gets, absence of a grant, not a degradation) so
     ``check_runtime_support`` COMPLETES and reports honestly. ``rows > 1`` is
     genuine ambiguity and keeps the LOUD ``CatalogError``; the activation-drift
-    check stays loud too.
-
-    Material-vs-code drift note (final-review triage): the byte-frozen
-    ``_ANALYZER_BYTES`` handler material still states the pre-Task-11 invariant
-    ("every activated reader needs exactly one closed query projection"). Per
-    the Task 11 controller ruling the sealed material bytes stay BYTE-FROZEN
-    (no catalog digest moves); the code is the ruled behaviour.
+    check stays loud too. The sealed ``_ANALYZER_BYTES`` handler material states
+    this same discrimination (L3 Task 4 moved it inside the chartered re-freeze
+    window); the material and the code no longer disagree.
     """
 
     def analyze(
@@ -348,8 +344,15 @@ _ANALYZER_BYTES = (
     b"# bridge.memory_runtime.analyzer v1\n"
     b"Pure reviewed memory support analyzer: memory retrieval is frozen\n"
     b"pre-input evidence -- min_finalized_tool_calls_on_success=0 and\n"
-    b"max_capability_invocations=0; every activated reader needs exactly one\n"
-    b"closed query projection.\n"
+    b"max_capability_invocations=0. Every REVIEWED reader has exactly one\n"
+    b"closed query projection; row discrimination for the rest is ruled\n"
+    b"(C3 / Phase 10 Task 11): rows == 0 means the worker was never a\n"
+    b"reviewed Phase-3 memory reader -- the row set is pinned one-to-one\n"
+    b"against the derived reader set at catalog build, so the lost-row shape\n"
+    b"is structurally excluded -- and it gets the same honest zero-bounds\n"
+    b"summary a reviewed reader gets: an absent grant, not a degradation.\n"
+    b"rows > 1 is genuine ambiguity and stays LOUD (CatalogError), and so\n"
+    b"does the 'memory' read-category activation-drift check.\n"
 )
 
 
