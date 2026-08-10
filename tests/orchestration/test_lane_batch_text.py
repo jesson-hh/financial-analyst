@@ -62,7 +62,14 @@ def cap_manifest():
 EXPECTED = {
     "text.news": dict(
         tier="reader", model_tier="fast", tool_calls="required",
-        caps=("cap.data.fundamentals", "cap.data.news"),
+        # L3 D-1 Option A (2026-08-11): NARROWED from
+        # ("cap.data.fundamentals", "cap.data.news"). Same per-capability
+        # argument as pv.technical/indicators: ``fundamentals`` has no
+        # registered backend (ledger §5) and is pointer-unsatisfiable from the
+        # closed L1 pointer set (§6). The paired half of this narrowing is the
+        # SKILL.md edit that withdrew the ww_f10 promise it could not supply —
+        # see test_new_seats_data_source_priority_names_real_tools below.
+        caps=("cap.data.news",),
         guardrails=("guardrail.anti_fabrication", "guardrail.number_provenance",
                     "guardrail.untrusted_input_isolation"),
         prompt="prompt.text.news", skill="skill.text.news",
@@ -150,8 +157,27 @@ def test_worker_spec_matrix(specs, wid):
 
 
 def test_allowlist_broadening_applied(specs):
-    # text.news gains cap.data.fundamentals (promises ww_f10)
-    assert "cap.data.fundamentals" in {c.id for c in specs["text.news"].capability_allowlist}
+    """The Phase-8 broadening — and the ONE half of it L3 consciously REVERSED.
+
+    REWRITTEN, never deleted (L3 Task 5): this pin is the surviving record that
+    ``text.news`` was once reviewed-and-granted ``cap.data.fundamentals``. Ruling
+    D-1 Option A (2026-08-11) took that grant back, per capability and with an
+    argument, because the capability was measured to be structurally
+    unexercisable — no registered backend (ledger §5) and no satisfiable param
+    projection from L1's closed pointer set (§6). Deleting the pin would erase
+    the fact that the grant existed and was withdrawn on evidence; keeping it as
+    a two-sided assertion states the whole history.
+
+    ``text.macro``'s half of the same Phase-8 broadening is UNTOUCHED — it holds
+    no reviewed prefetch row, so its grants are the C3 licensed-EMPTY paper
+    shape that D-1(0)'s asymmetric criterion deliberately left alone (they are on
+    the post-L3 backlog, not in this window).
+    """
+    news = {c.id for c in specs["text.news"].capability_allowlist}
+    # withdrawn by D-1 Option A — the reversal, asserted rather than remembered:
+    assert "cap.data.fundamentals" not in news
+    # …and what the seat kept is exactly the capability it can actually exercise.
+    assert news == {"cap.data.news"}
     # text.macro gains indicators + verified_snapshot (promises ww_macro_pulse/tape/overseas)
     macro = {c.id for c in specs["text.macro"].capability_allowlist}
     assert {"cap.data.indicators", "cap.data.verified_snapshot"} <= macro
@@ -235,7 +261,13 @@ def test_new_seats_data_source_priority_names_real_tools():
     # every DSP ww_ token a seat names is one an allowlisted capability supplies —
     # already machine-checked by lint; here we pin the key promised names exist.
     news = (_TREE / "text.news" / "SKILL.md").read_text(encoding="utf-8")
-    assert "ww_news_live" in news and "ww_f10" in news
+    assert "ww_news_live" in news
+    # L3 (Task 4's SKILL.md edit + Task 5's conscious flip): ``ww_f10`` is GONE.
+    # D-1 Option A withdrew ``cap.data.fundamentals``, the only capability that
+    # could ever have supplied it, so a promise of it would be a seat advertising
+    # a tool it structurally cannot call. The absence is asserted, not merely
+    # un-asserted — its return without the capability is a regression.
+    assert "ww_f10" not in news
     macro = (_TREE / "text.macro" / "SKILL.md").read_text(encoding="utf-8")
     assert "ww_macro_pulse" in macro and "ww_overseas" in macro
 

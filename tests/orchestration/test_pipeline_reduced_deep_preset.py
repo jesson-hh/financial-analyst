@@ -1,22 +1,36 @@
 # -*- coding: utf-8 -*-
-"""路线 A — the REDUCED-EVIDENCE deep-decide preset (eight nodes).
+"""路线 A — the REDUCED-EVIDENCE deep-decide preset (eight nodes), the CHEAP TIER.
 
-Why this preset exists (the empirical finding this module makes permanent):
-the sealed ten-node deep preset can never pass ``check_runtime_support`` on the
-production chain, because ``pv.technical`` and ``text.news`` declare
-``evidence_policy.tool_calls = REQUIRED`` while the reviewed Phase-3 data
-prefetch table grants a row to ``dec.pm`` ONLY — so both nodes raise
-``tool_calls_required_unmet`` and the whole plan is refused before a single LLM
-call. Closing that gap for real needs three layers (subject→data-bridge path L1,
-a production data runtime L2, the grants + re-freeze L3), and L2 does not exist
-(``docs/superpowers/specs/2026-07-29-post-p10-refreeze-design.md`` §1.5).
+**Why this preset exists — RE-CHARTERED by L3 (2026-08-11), not retired.**
 
-Dropping exactly those two auxiliary evidence nodes — they only reach the debate
-through ``degrade`` dependencies, and the decision spine
-``sentiment → research-mgr → pm → trader`` never touches them — makes the SAME
-runtime-support check green. :class:`TestTheSupportFinding` pins BOTH sides of
-that against the real sealed Phase-9 catalog + registry + the full three-analyzer
-bridge view, so neither half can rot silently.
+It was born as a workaround. Through Phase 10 the sealed ten-node deep preset
+could never pass ``check_runtime_support`` on the production chain: ``pv.technical``
+and ``text.news`` declare ``evidence_policy.tool_calls = REQUIRED`` while the
+reviewed Phase-3 data prefetch table granted a row to ``dec.pm`` ONLY, so both
+nodes raised ``tool_calls_required_unmet`` and the whole plan was refused before
+a single LLM call. Dropping exactly those two auxiliary evidence nodes made the
+SAME check green — that was this preset's entire justification.
+
+**That justification is now GONE, and the preset stays.** L3's rulings D-1/D-2
+granted both readers reviewed one-to-one rows, so the full ten-node lane is
+SUPPORTED for real (pinned in ``test_pipeline_deep_preset.py``). This preset is
+therefore re-chartered as what it should have been all along: the **cheap tier /
+fallback** that sits BESIDE a supported full lane — eight nodes, six LLM seats,
+no forced data reads — chosen deliberately when the caller wants the cheaper
+verdict, never because the expensive one is broken.
+
+Everything that made the cheap tier HONEST is unchanged and still pinned:
+its badges (:data:`REDUCED_EVIDENCE_BADGE` + the ``reduced_evidence_missing:*``
+statement of what the debate never saw), its exact eight-worker set, and its
+refusal — in BOTH directions — to be confused with the full preset. Only the
+"because the full lane is support-refused" justification flipped;
+:class:`TestTheSupportFinding` now pins the ten-node baseline as SUPPORTED with
+an EMPTY unsupported set, beside the reduced draft that is supported too.
+
+Selection is unchanged and re-pinned in :class:`TestPresetSelectionSeam`:
+``GUANLAN_SEATS_DEEP_PRESET=reduced`` still selects this preset, and an UNSET
+env still selects the FULL ten-node preset — the cheap tier never becomes the
+default just because it got cheaper to justify.
 
 The honesty red line (deliverable 4 of the charter): a reduced-evidence verdict
 must never be readable as a full-evidence verdict. Every product of this preset
@@ -298,11 +312,21 @@ def _support(env, phase9_runtime, draft):
 # 1. THE FINDING — both sides, permanently pinned                              #
 # =========================================================================== #
 class TestTheSupportFinding:
-    """The controller's 2026-07-29 probe, promoted to a resident regression.
+    """The controller's 2026-07-29 probe, promoted to a resident regression —
+    and CONSCIOUSLY FLIPPED by L3 (2026-08-11).
 
-    Same fixtures, same production analyzers, same profile: the ten-node preset
-    is honestly UNSUPPORTED for exactly two reasons, and the eight-node preset
-    that drops exactly those two nodes is SUPPORTED.
+    It used to read: same fixtures, same production analyzers, same profile —
+    the ten-node preset is honestly UNSUPPORTED for exactly two reasons, and the
+    eight-node preset that drops exactly those two nodes is SUPPORTED. The
+    causal link between the two halves was the whole finding.
+
+    After D-1/D-2 BOTH presets are supported, so the finding is re-pinned as
+    what it has become: the cheap tier is supported (unchanged — that half never
+    depended on the gap), and the ten-node baseline is supported with an EMPTY
+    unsupported set. The old causal assertion (``full_ids - reduced_ids ==
+    unmet_nodes``) would now be the vacuous ``X == {}``-vs-``{}`` accident, so it
+    is replaced by the causal statement that survived the flip: the two nodes the
+    cheap tier drops are exactly the two the grants healed.
     """
 
     @pytest.fixture(scope="class")
@@ -324,33 +348,60 @@ class TestTheSupportFinding:
         assert report.supported is True, [
             (i.code, i.node_id, i.explanation) for i in report.issues]
 
-    def test_the_untouched_ten_node_baseline_is_still_honestly_unsupported(
+    def test_the_ten_node_baseline_is_now_supported_with_an_empty_unmet_set(
             self, baseline, full_materialized):
-        """The regression half: adding a reduced preset must NOT make the sealed
-        ten-node preset pretend to be supported. Its honest refusal is exactly
-        the two REQUIRED-tool-call evidence readers, unchanged."""
+        """The flipped regression half (L3, was
+        ``test_the_untouched_ten_node_baseline_is_still_honestly_unsupported``).
+
+        Its old job was to stop the reduced preset's arrival from making the
+        sealed ten-node preset PRETEND to be supported. That job is still done
+        here, from the other side: the ten-node baseline is supported because
+        its two readers were GRANTED rows, and the claim is pinned as an
+        emptiness so a future third unsupported worker cannot hide inside a
+        weaker 'no longer contains those two' assertion.
+        """
         phase1, report = baseline
         assert phase1.valid is True
-        assert report.supported is False
+        assert report.supported is True, [
+            (i.code, i.node_id, i.explanation) for i in report.issues]
         by_code: dict = {}
         for issue in report.issues:
             by_code.setdefault(issue.code, set()).add(issue.node_id)
+        assert by_code == {}, sorted(by_code)
         node_worker = {n.id: n.worker_id for n in full_materialized.draft.nodes}
-        unmet = by_code.pop("tool_calls_required_unmet")
-        assert {node_worker[nid] for nid in unmet} == set(
-            REDUCED_EVIDENCE_DROPPED_WORKER_IDS)
-        assert not by_code, sorted(by_code)
+        unmet = {node_worker[i.node_id] for i in report.issues
+                 if i.code == "tool_calls_required_unmet"}
+        assert unmet == set()
 
-    def test_the_two_dropped_nodes_are_exactly_the_unmet_ones(
-            self, baseline, full_materialized):
-        """The causal link, asserted rather than assumed: the node ids the
-        reduced preset removes ARE the node ids the baseline reports unmet."""
-        _phase1, report = baseline
-        unmet_nodes = {i.node_id for i in report.issues
-                       if i.code == "tool_calls_required_unmet"}
+    def test_the_two_dropped_nodes_are_exactly_the_two_healed_readers(
+            self, full_materialized):
+        """The causal link that SURVIVED the flip (L3, was
+        ``test_the_two_dropped_nodes_are_exactly_the_unmet_ones``).
+
+        The old form compared the dropped node ids against the baseline's unmet
+        node ids. Both sides of that equality collapse to the empty set once the
+        grants land, so it would have stayed green while proving nothing — the
+        precise shape this program refuses to leave behind.
+
+        What still says something: the cheap tier drops EXACTLY the two workers
+        the grants healed. That is why it is the cheap tier (it buys its price
+        by declining the two forced data reads) and it is the assertion that
+        would redden if the reduced graph were ever re-cut somewhere else.
+        """
         full_ids = {n.id for n in full_materialized.draft.nodes}
         reduced_ids = {n.id for n in _reduced_record().nodes}
-        assert full_ids - reduced_ids == unmet_nodes
+        node_worker = {n.id: n.worker_id for n in full_materialized.draft.nodes}
+        dropped = full_ids - reduced_ids
+        assert {node_worker[nid] for nid in dropped} == set(
+            REDUCED_EVIDENCE_DROPPED_WORKER_IDS)
+        # …and those two are precisely the workers L3 granted reviewed rows to,
+        # measured off the sealed binding rather than restated from the ledger.
+        import guanlan_v2.orchestration.data.catalog as _dcat
+        granted = {op.worker_id
+                   for op in _dcat.phase3_data_surface().prefetch_binding.operations}
+        assert set(REDUCED_EVIDENCE_DROPPED_WORKER_IDS) <= granted, (
+            "the cheap tier drops workers the full lane has NOT healed; its "
+            "price/benefit story no longer holds")
 
     def test_the_profile_v2_analyzers_are_clean_on_the_reduced_draft(
             self, materialized, phase9_runtime):

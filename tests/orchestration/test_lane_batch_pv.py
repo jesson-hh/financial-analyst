@@ -125,7 +125,16 @@ EXPECTED = {
         inputs=(), persona="Price-action geometry reader"),
     "pv.technical": dict(
         kind="llm", tier="reader", model_tier="reasoner", tool_calls="required",
-        caps=("cap.data.indicators", "cap.data.verified_snapshot"),
+        # L3 D-1 Option A (2026-08-11): NARROWED from
+        # ("cap.data.indicators", "cap.data.verified_snapshot"). ``indicators``
+        # was measured to have NO registered backend adapter (ledger §5) AND to
+        # be pointer-unsatisfiable from L1's closed SUBJECT_PARAM_POINTERS
+        # (§6: InstrumentSeriesParams wants one Symbol + two instants, the
+        # closure serves a tuple and one instant) — a permission that could not
+        # be exercised in any execution this catalog can produce. Restoring it
+        # is priced as two out-of-fence projects (grow LiveClientSource, widen
+        # the L1 closure), not as a one-line allowlist edit.
+        caps=("cap.data.verified_snapshot",),
         guardrails=("guardrail.number_provenance", "guardrail.pattern_dictionary",
                     "guardrail.untrusted_input_isolation"),
         handler=None, skill="skill.pv.technical", prompt="prompt.pv.technical",

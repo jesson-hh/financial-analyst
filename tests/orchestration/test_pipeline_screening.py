@@ -1047,17 +1047,32 @@ class TestSubjectParamsStamp:
         fields = {f.name: f for f in dataclasses.fields(MaterializedScreeningLane)}
         assert fields["subject_params"].default is None
 
-    def test_zero_screening_workers_carry_data_prefetch_rows_today(self):
-        """The vacuity pin (plan R4): TODAY the ONE reviewed prefetch row targets
-        the deep lane's ``dec.pm`` only, so the screening stamp and its Task-4
-        runner thread are exercised structurally, not behaviorally. When a
-        screening worker ever gains a reviewed grant (L3), this pin flips
-        CONSCIOUSLY there — and the already-stamped path starts serving it."""
+    def test_the_screening_stamp_now_serves_a_real_row(self):
+        """The vacuity pin, CONSCIOUSLY FLIPPED where it said it would be
+        (L3 Task 5, 2026-08-11 — was
+        ``test_zero_screening_workers_carry_data_prefetch_rows_today``).
+
+        Its own words were: "TODAY the ONE reviewed prefetch row targets the deep
+        lane's ``dec.pm`` only, so the screening stamp and its Task-4 runner
+        thread are exercised structurally, not behaviorally. When a screening
+        worker ever gains a reviewed grant (L3), this pin flips CONSCIOUSLY
+        there — and the already-stamped path starts serving it."
+
+        That day is today. Ruling D-1 granted ``text.news`` — one of this lane's
+        nine workers — a reviewed row, so the subject-params stamp is no longer
+        vacuous on the A-line: every screening run binds that row's params from
+        the stamp. The pin is kept (never deleted) and re-pointed at the fact
+        that replaced it, both directions: the lane DOES intersect the reviewed
+        row set, and it intersects it in exactly one worker.
+        """
         import guanlan_v2.orchestration.data.catalog as dcat
         surface = dcat.phase3_data_surface()
         targeted = {op.worker_id for op in surface.prefetch_binding.operations}
-        assert targeted == {"dec.pm"}
-        assert not (targeted & set(SCREENING_LANE_WORKER_IDS))
+        assert targeted == {"dec.pm", "pv.technical", "text.news", "text.policy"}
+        on_lane = targeted & set(SCREENING_LANE_WORKER_IDS)
+        assert on_lane == {"text.news"}, (
+            "the screening lane's reviewed-row membership changed; the runner "
+            "thread's cost and outage profile must be re-measured (ledger §11.2)")
 
 
 # =========================================================================== #

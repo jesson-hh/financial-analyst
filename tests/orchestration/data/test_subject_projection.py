@@ -79,8 +79,22 @@ def surface():
 
 @pytest.fixture(scope="module")
 def real_row(surface):
-    """The single REAL sealed prefetch row the reviewed grant produces."""
-    rows = surface.prefetch_binding.operations
+    """``dec.pm``'s REAL sealed prefetch row — the ORIGINAL reviewed grant.
+
+    CONSCIOUS FLIP (L3 Task 5, 2026-08-11): this fixture used to assert the
+    sealed binding held exactly ONE row and return it by position. Rulings
+    D-1/D-2 added three reviewed LANE rows to the same sealed material
+    (``pv.technical``/``verified_snapshot``, ``text.news``/``news``,
+    ``text.policy``/``news``), so "the single row" stopped being a true statement
+    about the tree. Everything this module proves is about ``dec.pm``'s row in
+    particular — the L1 subject projection that healed defect H — so the fixture
+    selects that row BY IDENTITY, exactly the one-line change L3 Task 3 made to
+    the twin fixture in ``data/test_data_catalog.py::verified_snapshot_row``.
+    What stays pinned here is that ``dec.pm``'s row is unique and unmoved; the
+    full four-row roster is pinned in ``test_l3_grants.py``.
+    """
+    rows = [r for r in surface.prefetch_binding.operations
+            if r.worker_id == "dec.pm"]
     assert [(r.worker_id, r.method_ref.id) for r in rows] == [
         ("dec.pm", "verified_snapshot")]
     return rows[0]

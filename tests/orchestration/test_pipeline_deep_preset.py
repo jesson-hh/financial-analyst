@@ -1014,11 +1014,17 @@ class TestFullPhase9BridgeView:
     allowlist DOES hold the capability but has no row keeps the LOUD raise
     (a Lane-0 misconfiguration must never degrade silently).
 
-    The GRANT GAP ITSELF IS NOT CLOSED and is accepted as permanent-honest for
-    Phase 10 (charter evidence in .superpowers/sdd/task-11-p10-report.md): the
-    support report below completes but is honestly UNSUPPORTED — the REQUIRED
-    tool-call arithmetic of ``pv.technical`` / ``text.news`` stays unmet because
-    the sealed Phase-3 prefetch binding grants a data row to ``dec.pm`` only.
+    THE GRANT GAP IS CLOSED (L3, 2026-08-11 — conscious flip). Through Phase 10
+    this class recorded the opposite: the support report completed but was
+    honestly UNSUPPORTED, because the REQUIRED tool-call arithmetic of
+    ``pv.technical`` / ``text.news`` stayed unmet while the sealed Phase-3
+    prefetch binding granted a data row to ``dec.pm`` only (the permanent-honest
+    grant-gap ruling, charter evidence in
+    ``.superpowers/sdd/task-11-p10-report.md``). Rulings D-1 (Option A) and D-2
+    (Option A) granted both readers a reviewed one-to-one row in the
+    ``always_invoke`` + ``success_requires_finalized_call`` shape, so the report
+    is now SUPPORTED with an EMPTY issue set — pinned below as an emptiness,
+    which is the only form of that claim a third regression cannot slip past.
     """
 
     @pytest.fixture(scope="class")
@@ -1039,23 +1045,40 @@ class TestFullPhase9BridgeView:
         _draft, report = support
         assert report is not None  # no CatalogError escaped — the flip's core
 
-    def test_the_report_is_honestly_unsupported_naming_the_data_grant_gap(
+    def test_the_report_is_supported_and_the_unsupported_set_is_EMPTY(
             self, support):
-        """The remaining gap surfaces as ISSUES, never a crash and never a fake
-        green: exactly the two REQUIRED-tool-call workers without a reviewed
-        data prefetch row (`pv.technical` / `text.news`)."""
+        """L3's semantic payoff, CONSCIOUSLY FLIPPED (2026-08-11).
+
+        Until L3 this test asserted ``report.supported is False`` with the
+        honestly-unsupported set EXACTLY ``{pv.technical, text.news}`` — the
+        Task-11 permanent-honest grant-gap ruling. Rulings D-1/D-2 closed that
+        gap for real: both readers now hold a reviewed data-prefetch row that is
+        ``always_invoke`` + ``success_requires_finalized_call``, which is the
+        only shape that clears ``tool_calls_required_unmet``.
+
+        The flip is pinned as an EMPTINESS, not as a weakening. Asserting "the
+        unsupported set no longer contains those two" would still pass if some
+        THIRD worker had quietly become unsupported; asserting the set is
+        exactly empty cannot. ``report.supported is True`` and zero issues of
+        any code — the plan's exit-gate fact, stated at its strongest.
+        """
         draft, report = support
-        assert report.supported is False
+        assert report.supported is True, [
+            (i.code, i.node_id, i.explanation) for i in report.issues]
         by_code: dict = {}
         for issue in report.issues:
             by_code.setdefault(issue.code, set()).add(issue.node_id)
+        assert by_code == {}, (
+            "the ten-node deep preset must now be supported with an EMPTY "
+            f"issue set; still reported: {sorted(by_code)}")
+        # …and the specific gap that used to exist is gone at its own seam:
+        # no node in the draft carries a tool-call-arithmetic complaint.
         node_worker = {n.id: n.worker_id for n in draft.nodes}
-        unmet = by_code.pop("tool_calls_required_unmet")
-        assert {node_worker[nid] for nid in unmet} == {
-            "pv.technical", "text.news"}
-        assert not by_code, (
-            "unexpected extra support issues beyond the accepted data grant "
-            f"gap: {sorted(by_code)}")
+        unmet = {node_worker[i.node_id] for i in report.issues
+                 if i.code == "tool_calls_required_unmet"}
+        assert unmet == set(), (
+            "the honestly-unsupported set is EXACTLY empty this phase; "
+            f"still unmet: {sorted(unmet)}")
 
     def test_research_mgr_gets_a_zero_contribution_experience_summary(
             self, support):

@@ -484,6 +484,23 @@ class TestTheFoldIsWired:
     on the callee.
     """
 
+    def test_the_name_the_fold_calls_IS_the_function_under_test(self):
+        """The one-line identity that closes the last gap in this class
+        (L3 Task 5, a campaign carry).
+
+        Every mutation test here monkeypatches ``lane_catalog``'s NAME, and
+        every direct test calls ``data.catalog``'s FUNCTION. If those two ever
+        stopped being the same object — a re-export replaced by a local wrapper,
+        a shim added for a signature change — the mutations would prove things
+        about a function the fold no longer runs, and nothing would say so.
+        Identity, not equality: a wrapper delegating perfectly still breaks the
+        argument these tests make.
+        """
+        import guanlan_v2.orchestration.lane_catalog as lc
+
+        assert (lc.verify_cumulative_prefetch_coverage
+                is DC.verify_cumulative_prefetch_coverage)
+
     def test_the_phase8_fold_actually_calls_the_coverage_check(self, monkeypatch):
         import guanlan_v2.orchestration.lane_catalog as lc
 

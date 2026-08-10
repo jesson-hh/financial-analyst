@@ -765,8 +765,13 @@ class TestSupportedSetGroupC:
                    for row in surf.prefetch_binding.operations}
         assert granted  # at least dec.pm's healed verified_snapshot row
         assert granted <= live_data._SUPPORTED_METHOD_IDS
-        # today's exact shape, so growth is a conscious edit here too:
-        assert granted == {"verified_snapshot"}
+        # today's exact shape, so growth is a conscious edit here too.
+        # L3 (2026-08-11): flipped from {"verified_snapshot"} to add "news" —
+        # ruling D-1 Option A granted rows to pv.technical/verified_snapshot,
+        # text.news/news and text.policy/news. The guard did exactly its job:
+        # both newly granted method ids were INSIDE the adapter's supported set
+        # before the grants went live, which is why no adapter had to grow.
+        assert granted == {"verified_snapshot", "news"}
         assert live_data._SUPPORTED_METHOD_IDS == frozenset(
             {"verified_snapshot", "news", "ohlcv"})
 

@@ -114,17 +114,49 @@ _CODE = "000858"
 _SEVEN = ("fundamentals", "indicators", "instrument_names", "news", "ohlcv",
           "signals", "verified_snapshot")
 
-#: the two D-1 candidate workers and the methods their P8 allowlists hold.
+#: the two D-1 candidate workers and the four methods their P8 allowlists held
+#: WHEN THE PACKET WAS PRICED. Kept as the historical pricing scope: ledger §5
+#: (adapter inventory) and §6 (pointer satisfiability) measured all four, and
+#: those measurements are what justified narrowing two of them away.
 _D1_CANDIDATES = {
     "pv.technical": ("indicators", "verified_snapshot"),
     "text.news": ("fundamentals", "news"),
 }
 
-#: the spec §1 chain, verbatim (the CROSS-CHECK; the measured tree governs).
-_SPEC_CHAIN_PREFIXES = {
-    "P2-static": "b41bf223", "P3-data": "ba708692", "P3-full": "c13294e5",
-    "P4": "aefe0cf3", "P5": "42af2460", "P6": "42af2460", "P7": "c760df02",
-    "P8": "7f00dde4", "P9": "0c48db78", "P10": "ff4cdc61",
+#: what those two allowlists hold AFTER ruling D-1 Option A (the conscious
+#: narrowing). Separate from the pricing scope above on purpose: a live-vs-frozen
+#: equality has to be checked against the RULED shape, while the priced shape has
+#: to survive as the record of what was considered and why two were dropped.
+_D1_GRANTED = {
+    "pv.technical": ("verified_snapshot",),
+    "text.news": ("news",),
+}
+
+#: an (worker, method) pair that is STILL UNGRANTED after L3 — the probe target
+#: for every "adding a row alone trips the invariant" construction below.
+#: ``pv.price_action`` is a real Phase-8 worker whose data allowlist holds
+#: ``cap.data.ohlcv`` and nothing else, so ``verified_snapshot`` is genuinely
+#: ungranted for it; and ``verified_snapshot`` is pointer-satisfiable (§6), so a
+#: LEGALLY SHAPED candidate row can be built and the refusal that follows is the
+#: invariant's, never a malformed-input artifact.
+#:
+#: Re-pointed consciously (L3 Task 5): the probes used to aim at
+#: ``pv.technical``/``verified_snapshot``, which IS a real row now — leaving them
+#: there would have made them self-detonate on duplicate-detection, and merely
+#: patching them until they ran again would have retired the proof instead of
+#: moving it.
+_UNGRANTED_PROBE = ("pv.price_action", "verified_snapshot")
+
+#: the POST-RE-FREEZE chain (L3 Task 5). Was ``_SPEC_CHAIN_PREFIXES``, the
+#: 2026-07-29 spec §1 values, until this phase's one chartered re-freeze moved
+#: every node except P2. Still a LIVE re-derivation vs a frozen expectation —
+#: only the frozen side moved, so the drift detector keeps working exactly as
+#: before. P2 ``b41bf223`` is byte-identical: the one chain node this program
+#: never authorized moving.
+_REFREEZE_CHAIN_PREFIXES = {
+    "P2-static": "b41bf223", "P3-data": "13210944", "P3-full": "0601eef7",
+    "P4": "8aea7bc0", "P5": "af064cba", "P6": "af064cba", "P7": "b78b63e4",
+    "P8": "78f79d33", "P9": "e3a29361", "P10": "f1b73052",
 }
 
 #: the two retired provider families' names, spelled ONLY by concatenation so
@@ -304,7 +336,7 @@ def _row_augmented_materials(surface):
     question is answered by construction rather than by assertion: the caller
     compares these refs against the sealed surface's.
     """
-    row = _candidate_row(surface, "verified_snapshot", "pv.technical")
+    row = _candidate_row(surface, _UNGRANTED_PROBE[1], _UNGRANTED_PROBE[0])
     binding = DataBridgePrefetchBinding.build(
         bridge_id=DC.DATA_BRIDGE_ID, bridge_version="1",
         operations=tuple(surface.prefetch_binding.operations) + (row,))
@@ -393,11 +425,30 @@ class TestGate1L1Landed:
     def test_the_closed_pointer_set_is_the_two_pointer_l1_closure(self):
         assert RT.SUBJECT_PARAM_POINTERS == frozenset({"/asof_date", "/code"})
 
-    def test_the_one_reviewed_grant_is_still_the_single_pm_row(self, surface):
+    def test_the_reviewed_rows_are_the_pm_row_plus_the_three_l3_grants(
+            self, surface):
+        """CONSCIOUS FLIP (L3 Task 5) — was
+        ``test_the_one_reviewed_grant_is_still_the_single_pm_row``.
+
+        ``_REVIEWED_INTEGRATION_GRANTS`` is unchanged and still names ``dec.pm``
+        alone: it is the PHASE-2-scoped reviewed-grant door, and rulings D-1(0)
+        forbade re-pointing it at post-Phase-2 workers (that was the (0-c)
+        option, structurally impossible). What grew is the sealed binding, whose
+        three new LANE rows are claimed at the second evaluation point instead.
+        Both halves are pinned so the distinction cannot silently blur.
+        """
         assert DC._REVIEWED_INTEGRATION_GRANTS == {"dec.pm": ("verified_snapshot",)}
         rows = surface.prefetch_binding.operations
-        assert [(r.worker_id, r.method_ref.id) for r in rows] == [
-            ("dec.pm", "verified_snapshot")]
+        assert sorted((r.worker_id, r.method_ref.id) for r in rows) == [
+            ("dec.pm", "verified_snapshot"),
+            ("pv.technical", "verified_snapshot"),
+            ("text.news", "news"),
+            ("text.policy", "news")]
+        # dec.pm's row is still the ONE that came through the Phase-2 door and
+        # its shape is untouched by D-2 (cache_or_invoke, min 0).
+        pm = next(r for r in rows if r.worker_id == "dec.pm")
+        assert pm.invocation_mode == "cache_or_invoke"
+        assert pm.success_requires_finalized_call is False
 
     def test_the_real_sealed_row_is_runnable_from_a_committed_run_subject(
             self, surface, subject_params):
@@ -664,18 +715,30 @@ def _tree_literals() -> list[tuple[str, int, str]]:
 
 
 class TestGate4BaselineDigests:
-    def test_the_measured_chain_equals_the_spec_section_1_values(self):
-        """The plan's riskiest assumption, made executable: if ANY chain digest
-        differs from spec §1, the 07-29 blast-radius inventory is stale and every
-        count in the plan must be re-derived before proceeding."""
+    def test_the_measured_chain_equals_the_refreeze_baseline(self):
+        """The plan's riskiest assumption, made executable — RE-PINNED at the
+        post-re-freeze values (L3 Task 5, the conscious flip).
+
+        Before this phase the frozen side was the 2026-07-29 spec §1 chain and a
+        difference meant "the blast-radius inventory is stale". The window has
+        now closed on the one authorized regeneration, so the frozen side is the
+        re-freeze baseline and a difference means something far simpler and far
+        worse: **a golden moved after the window closed, i.e. a regression.**
+
+        The test's SHAPE is deliberately unchanged — one live re-derivation of
+        all ten nodes against one frozen expectation. It did not become
+        frozen-vs-frozen; only the expectation moved.
+        """
         measured = _measured_chain()
-        drifted = {node: (digest, _SPEC_CHAIN_PREFIXES[node])
+        drifted = {node: (digest, _REFREEZE_CHAIN_PREFIXES[node])
                    for node, digest in measured.items()
-                   if not digest.startswith(_SPEC_CHAIN_PREFIXES[node])}
+                   if not digest.startswith(_REFREEZE_CHAIN_PREFIXES[node])}
         assert drifted == {}, (
-            "sealed chain drift vs spec §1 — the 07-29 blast-radius inventory "
-            f"is stale and the plan's counts must be re-derived: {drifted}")
+            "sealed chain drift AFTER the one-shot re-freeze closed the window "
+            f"— any movement here is now a regression: {drifted}")
         assert measured["P6"] == measured["P5"], "P6 is the identity node"
+        # the one node the re-freeze was forbidden to move, asserted by value.
+        assert measured["P2-static"].startswith("b41bf223")
 
     def test_the_ledger_records_exactly_the_measured_chain(self):
         recorded = _ledger_chain()
@@ -973,13 +1036,99 @@ class TestGate6GrantSiteReality:
 
     def test_a_candidate_row_alone_trips_the_invariant_in_the_rows_direction(
             self, surface):
-        """The other direction, driven for real through the REAL
-        ``build_phase3_catalog``: adding ONLY a prefetch row for a Phase-8
-        worker (materials rebuilt so the row actually reaches the check) is
-        refused as a row without a grant. This is the executable cost every D-1
-        option inherits."""
+        """The rows->grants direction, driven for real — RE-POINTED, not patched
+        (L3 Task 5; the recorded obligation from ledger §11.1's C-group ruling).
+
+        The probe used to add a ``pv.technical``/``verified_snapshot`` row and
+        watch ``build_phase3_catalog`` refuse it. That pair is a REAL reviewed
+        row now, so the old probe would have died on duplicate detection —
+        "adding a duplicate is refused", which proves nothing about privilege
+        escalation. Patching it until it ran again would have quietly retired
+        the proof, so the probe was moved to a pair that is still genuinely
+        ungranted (:data:`_UNGRANTED_PROBE`) and re-aimed at the evaluation point
+        that now owns the refusal.
+
+        The re-aim is itself a measurement, and it records the D-1(0) scope
+        split: Phase 3 no longer refuses a row for a worker it cannot see — it
+        CARRIES IT FORWARD (refusing there would have been a silent
+        false-negative in the other direction) — and the cumulative Phase-8 fold
+        claims it. The refusal sentence is the same one Phase 3 uses, which is
+        what makes "one invariant, two evaluation points" true rather than
+        aspirational.
+        """
+        from guanlan_v2.orchestration.lane_catalog import phase8_catalog_snapshot
+
         (binding, _config_ref, config_material, descriptor, _desc_ref,
          desc_material) = _row_augmented_materials(surface)
+
+        # (a) Phase 3 accepts and carries forward — the scope split, measured.
+        runtime0 = load_compat_catalog()
+        base0 = runtime0.snapshot
+        p_text0, p_caps0 = runtime0.resolved_materials()
+        updates0 = []
+        for worker_id, method_ids in DC._REVIEWED_INTEGRATION_GRANTS.items():
+            base_worker = next(w for w in base0.workers if w.id == worker_id)
+            grants = tuple(surface.spec_by_method[m].capability_ref
+                           for m in method_ids)
+            fields = {n: getattr(base_worker, n)
+                      for n in type(base_worker).model_fields}
+            fields["capability_allowlist"] = tuple(sorted(
+                tuple(base_worker.capability_allowlist) + grants,
+                key=lambda c: (c.id, c.version)))
+            updates0.append(WorkerSpec(**fields))
+        kept0 = tuple(m for m in surface.text_materials()
+                      if m.ref.id not in ("bridge.data_runtime.prefetch",
+                                          "bridge.data_runtime.descriptor"))
+        DC.build_phase3_catalog(
+            base0, reviewed_worker_updates=tuple(updates0),
+            reviewed_source_descriptors=(surface.source_descriptor,),
+            reviewed_method_specs=surface.method_specs,
+            data_bridge_descriptor=descriptor,
+            data_bridge_prefetch_binding=binding,
+            resolved_materials=tuple(p_text0) + tuple(p_caps0) + kept0
+            + (config_material, desc_material) + surface.capability_materials)
+
+        # (b) the Phase-8 fold claims it and REFUSES — by name, both halves.
+        with pytest.raises(CatalogError) as exc:
+            DC.verify_cumulative_prefetch_coverage(
+                phase8_catalog_snapshot(), binding)
+        msg = str(exc.value)
+        assert "one-to-one" in msg
+        assert "rows without a grant" in msg
+        assert _UNGRANTED_PROBE[0] in msg
+        # …and the probe target really is ungranted, so (b) is the invariant
+        # speaking and not an accident of a mistyped worker id.
+        by_id = {w.id: w for w in phase8_catalog_snapshot().workers}
+        held = {c.id for c in by_id[_UNGRANTED_PROBE[0]].capability_allowlist}
+        assert surface.spec_by_method[
+            _UNGRANTED_PROBE[1]].capability_ref.id not in held
+
+    def test_the_superseded_phase3_probe_shape_is_recorded_as_superseded(
+            self, surface):
+        """Why (a) above is an acceptance and not a weakened guard.
+
+        Phase 3 still refuses a row it CAN adjudicate — one naming a worker in
+        its own five-worker scope. Only rows for workers Phase 3 cannot see are
+        carried forward. Without this pin, "Phase 3 accepted the rogue row"
+        above would be indistinguishable from "Phase 3's guard was gutted"."""
+        spec = surface.spec_by_method["news"]
+        rogue = DataPrefetchOperation(
+            worker_id="dec.pm",  # IN the Phase-2 scope, and ungranted for news
+            method_ref=spec.method_ref, capability_ref=spec.capability_ref,
+            frozen_route=(RouteEntry(source_ref=surface.source_ref,
+                                     capability_ref=spec.capability_ref),),
+            invocation_mode="cache_or_invoke")
+        binding = DataBridgePrefetchBinding.build(
+            bridge_id=DC.DATA_BRIDGE_ID, bridge_version="1",
+            operations=tuple(surface.prefetch_binding.operations) + (rogue,))
+        config_ref, config_material = build_text_material(
+            id="bridge.data_runtime.prefetch", version="1", kind="guardrail",
+            raw=serialize_prefetch_binding(binding))
+        descriptor = surface.bridge_descriptor.model_copy(
+            update={"config_ref": config_ref})
+        _dr, desc_material = build_text_material(
+            id="bridge.data_runtime.descriptor", version="1", kind="guardrail",
+            raw=serialize_bridge_descriptor(descriptor))
 
         runtime = load_compat_catalog()
         base = runtime.snapshot
@@ -1007,16 +1156,24 @@ class TestGate6GrantSiteReality:
                 data_bridge_prefetch_binding=binding,
                 resolved_materials=tuple(p_text) + tuple(p_caps) + kept
                 + (config_material, desc_material) + surface.capability_materials)
-        msg = str(exc.value)
-        assert "one-to-one" in msg
-        assert "rows without a grant" in msg
-        assert "pv.technical" in msg
+        assert "one-to-one" in str(exc.value)
+        assert "rows without a grant" in str(exc.value)
 
-    def test_the_seventeen_p8_grants_stand_against_one_sealed_row(self, surface):
-        """The scope fact in numbers, so D-1(0)'s cost is not a guess: the
-        Phase-10 catalog carries SEVENTEEN (worker, data-capability) grants and
-        the sealed binding carries ONE row. The invariant sees 1 vs 1 because it
-        only ever looks at the five Phase-2 workers."""
+    def test_the_fifteen_p8_grants_stand_against_four_sealed_rows(self, surface):
+        """The scope fact in numbers — RE-PINNED at the post-ruling reality
+        (L3 Task 5; was ``test_the_seventeen_p8_grants_stand_against_one_sealed_row``).
+
+        The measurement that priced D-1(0) was **17 grants vs 1 row**, with the
+        invariant seeing 1-vs-1 because it only ever looked at the five Phase-2
+        workers. The rulings changed both sides deliberately: D-1 Option A
+        withdrew two structurally unexercisable grants (17 -> 15), and D-1/D-2
+        added three reviewed rows (1 -> 4). The residual 11 rowless grants are
+        the OPTIONAL paper set the asymmetric criterion licensed as C3
+        licensed-EMPTY, on the post-L3 backlog rather than swept in this window.
+
+        Both numbers are pinned, so neither can drift without an argument:
+        a 16th grant appearing, or a 5th row, is a reviewed change.
+        """
         from guanlan_v2.orchestration.data.catalog import data_capability_refs
         from guanlan_v2.orchestration.pipeline.chain import phase10_catalog_snapshot
 
@@ -1024,13 +1181,23 @@ class TestGate6GrantSiteReality:
                          for mid, c in data_capability_refs().items()}
         grants = {(w.id, c.id) for w in phase10_catalog_snapshot().workers
                   for c in w.capability_allowlist if (c.id, c.version) in method_by_cap}
-        assert len(grants) == 17, sorted(grants)
-        assert len(surface.prefetch_binding.operations) == 1
+        assert len(grants) == 15, sorted(grants)
+        assert len(surface.prefetch_binding.operations) == 4
+
+        # the 15 = 11 licensed-EMPTY paper grants + 4 rowed ones, so the
+        # asymmetric criterion's residue is a number, not a hand-wave.
+        rowed = {(op.worker_id, op.capability_ref.id)
+                 for op in surface.prefetch_binding.operations}
+        assert rowed <= grants
+        assert len(grants - rowed) == 11
 
         # MINOR #4 — the frozen candidate table must EQUAL the live allowlist ∩
         # data capabilities, not merely be contained in it. A grown allowlist
         # would otherwise silently stale §5/§6's per-method pricing (a method
-        # nobody measured for backend or pointer satisfiability).
+        # nobody measured for backend or pointer satisfiability). Checked
+        # against the RULED shape (``_D1_GRANTED``); the priced shape
+        # (``_D1_CANDIDATES``) is asserted to be its superset, which is what
+        # "the narrowing only ever removed" means.
         live: dict[str, set[str]] = {}
         for worker in phase10_catalog_snapshot().workers:
             methods = {method_by_cap[(c.id, c.version)]
@@ -1038,11 +1205,14 @@ class TestGate6GrantSiteReality:
                        if (c.id, c.version) in method_by_cap}
             if methods:
                 live[worker.id] = methods
-        for worker_id, methods in _D1_CANDIDATES.items():
+        for worker_id, methods in _D1_GRANTED.items():
             assert live[worker_id] == set(methods), (
                 f"{worker_id!r}'s live data-capability allowlist is "
-                f"{sorted(live[worker_id])} but the gate prices "
-                f"{sorted(methods)}; re-measure §5/§6 before ruling D-1")
+                f"{sorted(live[worker_id])} but the gate pins the D-1 ruled "
+                f"{sorted(methods)}")
+            assert set(methods) < set(_D1_CANDIDATES[worker_id]), (
+                "D-1 Option A only ever NARROWED; a method outside the priced "
+                "set would be an unpriced grant")
 
 
 # =========================================================================== #
@@ -1098,11 +1268,13 @@ class TestGate8TheAllowedRedSetIsExecutable:
         family and still look complete."""
         pins = {(rel, anchor) for _n, rel, _l, anchor, _v in _ledger_pins()}
         required = {
-            # the two support-refusal pins Task 5 flips
+            # the two support pins Task 5 FLIPPED (names re-pinned with them:
+            # the family must stay covered by its post-flip anchor, or the
+            # coverage claim would silently follow the deleted name).
             ("tests/orchestration/test_pipeline_deep_preset.py",
-             "test_the_report_is_honestly_unsupported_naming_the_data_grant_gap"),
+             "test_the_report_is_supported_and_the_unsupported_set_is_EMPTY"),
             ("tests/orchestration/test_pipeline_reduced_deep_preset.py",
-             "test_the_untouched_ten_node_baseline_is_still_honestly_unsupported"),
+             "test_the_ten_node_baseline_is_now_supported_with_an_empty_unmet_set"),
             # L2-b's pv-aux typed-refusal pins (seam-review finding 5)
             ("tests/orchestration/test_pv_aux_nodes.py", "AuxDataUngranted"),
             ("tests/orchestration/test_pv_aux_nodes.py", "aux_data_ungranted"),
@@ -1157,6 +1329,55 @@ class TestGate8TheAllowedRedSetIsExecutable:
         assert broken == [], (
             "§4 cross-references that do not resolve to the row they name "
             f"(the numbering drifted under them): {broken}")
+
+    def test_no_bare_section4_citation_survives_outside_the_enforced_format(
+            self):
+        """The other half of the cross-reference guard (L3 Task 5).
+
+        ``test_every_section4_cross_reference_resolves`` only checks references
+        that were ALREADY written in the enforced ``§4 #NN(`token`)`` form — a
+        citation written as a bare ``§4 #NN`` escapes it entirely, which is
+        exactly how §3.1's +5 renumber survived a human read. So the format
+        itself is now mandatory: every ``§4 #NN`` in the ledger either carries
+        its witness token, or is explicitly marked ``旧`` — the historical form,
+        which says "this number belonged to a table that has since been
+        rebuilt" and is deliberately NOT resolvable against today's rows.
+
+        A bare citation is neither, and is refused here rather than quietly
+        pointing at whatever row later inherits its number.
+        """
+        bare = []
+        for i, line in enumerate(_LEDGER_TEXT.splitlines(), 1):
+            for m in re.finditer(r"(旧\s*)?§4\s*#(\d+)(\(`[^`]+`\))?", line):
+                if m.group(3) or m.group(1):
+                    continue
+                bare.append(f"line {i}: {m.group(0)!r}")
+        assert bare == [], (
+            "bare §4 citations — write them as §4 #NN(`token`) so a renumber "
+            f"reddens, or mark them 旧 if they cite the superseded table: {bare}")
+
+    def test_the_historical_escape_hatch_is_bounded(self):
+        """The ``旧`` escape hatch is real but bounded.
+
+        It exists so prose about the SUPERSEDED §4 (the 29-row table Task 4
+        rebuilt from measurement) can keep quoting the numbering it was written
+        against. Left unbounded it would become the way to opt any inconvenient
+        citation out of the format check, so two bounds are pinned:
+
+        1. the population is a fixed COUNT — adding a sixth 旧 citation is a
+           conscious act somebody has to come here and justify;
+        2. ``旧`` and a witness token are MUTUALLY EXCLUSIVE — a historical
+           citation cannot also claim to resolve against today's rows, which is
+           what a live citation dressed as historical would look like.
+        """
+        marked = list(re.finditer(r"旧\s*§4\s*#(\d+)(\(`[^`]+`\))?", _LEDGER_TEXT))
+        assert len(marked) == 6, (
+            "the 旧-marked historical §4 citation population changed "
+            f"({len(marked)} found, 6 pinned) — justify the new one here")
+        dressed = [m.group(0) for m in marked if m.group(2)]
+        assert dressed == [], (
+            "a 旧-marked citation carries a witness token: it is either "
+            f"historical or resolvable, never both: {dressed}")
 
     def test_the_supported_methods_guard_is_an_unconditional_flip(self):
         """It reddens under ANY grant (its literal ``granted == {…}`` arm), so it

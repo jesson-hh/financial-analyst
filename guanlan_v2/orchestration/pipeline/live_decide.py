@@ -1152,11 +1152,18 @@ def build_production_bindings(*, preset_id: str | None = None) -> DeepDecideBind
     real (``build_production_catalog_runtime`` over the promoted nine-loader
     material universe; Task-0b concern 2 closed) with the full three-analyzer
     bridge view, and ``check_runtime_support`` COMPLETES for the deep preset's
-    workers (the Task-11 rowless-reader discriminations). HONEST RESIDUE: the
-    sealed Phase-3 data-prefetch grants still cover ``dec.pm`` only, so a deep
-    run is SUPPORT-REFUSED at admission (``tool_calls_required_unmet`` naming
-    ``pv.technical`` / ``text.news`` — the permanent-honest grant-gap ruling);
-    the wrapper degrades to the fast chain with an honest ``deep_outcome``.
+    workers (the Task-11 rowless-reader discriminations).
+
+    THE GRANT GAP IS CLOSED (L3, 2026-08-11). The HONEST RESIDUE recorded here
+    was: the sealed Phase-3 data-prefetch grants covered ``dec.pm`` only, so a
+    deep run was SUPPORT-REFUSED at admission (``tool_calls_required_unmet``
+    naming ``pv.technical`` / ``text.news`` — the permanent-honest grant-gap
+    ruling) and the wrapper degraded to the fast chain with an honest
+    ``deep_outcome``. Rulings D-1/D-2 granted both readers reviewed rows, so the
+    deep run now ADMITS. The degrade-to-fast path is NOT removed: it is the
+    honest response to any admission refusal, and it is now the path a real
+    DATA OUTAGE reaches instead (D-2 Option A: an outage is a hard node failure,
+    loudly, in one of two vocabularies — see ``test_l3_d2_outage.py``).
     Nothing is faked.
 
     HONEST STATE (L2-b Tasks 4+5): the ``data.runtime`` bridge is bound to a
@@ -1164,8 +1171,11 @@ def build_production_bindings(*, preset_id: str | None = None) -> DeepDecideBind
     recipe) instead of the worldless stopgap, and the per-run subject seam is
     closed — a deep run whose projection is bound reads pm's sealed row for
     real. See the registration block's comment for what that changes and what
-    still refuses. What has NOT moved is the grant gap above: the deep run is
-    still SUPPORT-REFUSED at admission, so nothing downstream of it runs yet.
+    still refuses. (L3 update: the sentence that stood here — "what has NOT
+    moved is the grant gap above: the deep run is still SUPPORT-REFUSED at
+    admission, so nothing downstream of it runs yet" — is retired. The grant gap
+    moved; the same per-run subject seam now serves three more reviewed rows,
+    and everything downstream of admission runs.)
 
     路线 A: ``preset_id`` defaults to :func:`resolve_deep_preset_id`, i.e. the
     ten-node preset above unless ``GUANLAN_SEATS_DEEP_PRESET=reduced`` says

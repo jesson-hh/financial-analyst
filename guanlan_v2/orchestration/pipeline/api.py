@@ -1181,12 +1181,18 @@ def build_production_pipeline_deps() -> PipelineRouterDeps:
     (Task-0b concern 2 closed), so the admission half (``admission_factory`` /
     ``coordinator_factory`` over the full three-analyzer
     ``production_bridge_view``) and the goal-mode ``planner_runner``
-    (``build_production_planner_runner``) bind for real. HONEST RESIDUE
-    (recorded): the sealed Phase-3 data-prefetch grants still cover ``dec.pm``
-    only, so a draft scheduling ``pv.technical`` / ``text.news`` prepares but
-    support-refuses with ``tool_calls_required_unmet`` (the Task-11
+    (``build_production_planner_runner``) bind for real.
+
+    THE GRANT GAP IS CLOSED (L3, 2026-08-11). This paragraph used to record an
+    HONEST RESIDUE: the sealed Phase-3 data-prefetch grants covered ``dec.pm``
+    only, so a draft scheduling ``pv.technical`` / ``text.news`` prepared but
+    support-refused with ``tool_calls_required_unmet`` (the Task-11
     permanent-honest grant-gap ruling) — a 422 naming the issue codes, never a
-    fake admit.
+    fake admit. Rulings D-1/D-2 gave both readers reviewed one-to-one prefetch
+    rows (``always_invoke`` + ``success_requires_finalized_call``), so such a
+    draft now ADMITS: the ten-node deep preset's support report is supported
+    with an empty issue set. The 422-over-fake-admit posture is unchanged and
+    still the rule — it simply no longer fires for these two workers.
     """
     from guanlan_v2 import orch_store_status as _orch_status
     from guanlan_v2.orchestration.adapters import chain as _chain

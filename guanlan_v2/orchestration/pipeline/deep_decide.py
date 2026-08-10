@@ -329,8 +329,15 @@ class PresetSelectionRefused(DeepDecideError):
     Either an id outside :data:`DEEP_DECIDE_PRESET_IDS`, or (in the live path's
     env-driven selection) an unrecognized spelling. Refused rather than
     defaulted: a typo must never silently pick an evidence scope, in either
-    direction — the reduced lane is opt-in, and the full lane's honest refusal
-    is a real product, not a fallback.
+    direction — the reduced lane is opt-in, and the full lane is the default.
+
+    (L3, 2026-08-11: this sentence used to end "…and the full lane's honest
+    refusal is a real product, not a fallback" — the reduced preset's raison
+    d'être while the full lane could not pass ``check_runtime_support``. Rulings
+    D-1/D-2 made the full lane genuinely supported, so the reduced preset is now
+    the CHEAP TIER beside it. The refusal-over-default rule is untouched and
+    matters more, not less: with both lanes viable, a typo silently choosing one
+    would be choosing an evidence scope on the operator's behalf.)
     """
 
 
