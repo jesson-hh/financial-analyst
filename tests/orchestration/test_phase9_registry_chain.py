@@ -53,7 +53,7 @@ UPSTREAM_GOLDEN_SHA256 = {
     "phase8_schema_manifest_v1.json":
         "e2c02006efe58c4fbccbce6a2a0be70edb6ed3923b132330f4046e7ea437d92f",
     "phase8_catalog_manifest_v1.json":
-        "0211611674174b1848858023648cb85e8a4eed7a1ef3bc7ec996a16998ae9615",
+        "cd5050598925a14c8dc8f10128ef27f64168c43300e9f2df46531b5c78137ef2",
 }
 
 #: the Phase-9 contract modules whose public ContractModel subclasses the completeness

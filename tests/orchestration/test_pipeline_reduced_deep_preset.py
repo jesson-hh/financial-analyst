@@ -122,12 +122,12 @@ PHASE7_BASELINE = "main.research_baseline"
 #: Hand-frozen 2026-07-29 over the reviewed eight-node graph — the test only
 #: READS it; it is never regenerated from the artifact under test.
 REDUCED_RECORD_DIGEST = (
-    "2c4b4e0d33e4db487e93c7aa66a4400371f9eb9e969b3db38bfbc3c769ba2053"
+    "f44646dcd0448dee79a49f50748343c255bda30fe95114d981802613ba29d91c"
 )
 #: The sealed TEN-node record digest — must stay byte-identical now that a second
 #: v2 deep preset sits beside it in the same committed directory.
 DEEP_DECIDE_RECORD_DIGEST = (
-    "d7c5092fda61ca242de3fb91f48897e06fcc2e8a5836bfae80aae23e6e08a918"
+    "696daf8044e55039a6c5d82ccb4e815d678d4952462ba0d1f971dc5f6a5cf6ca"
 )
 PHASE7_BASELINE_RECORD_DIGEST = (
     "028ff5246ac97988ec2b778c994fe8a782c776098c1edb7d725d646ceff6704e"

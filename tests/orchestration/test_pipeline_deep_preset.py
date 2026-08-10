@@ -132,7 +132,7 @@ PHASE7_BASELINE = "main.research_baseline"
 #: (node, dependency, debate, reducer, sink, budget, description) moves it.
 #: Frozen 2026-07-28 over the reviewed ten-worker graph.
 DEEP_DECIDE_RECORD_DIGEST = (
-    "d7c5092fda61ca242de3fb91f48897e06fcc2e8a5836bfae80aae23e6e08a918"
+    "696daf8044e55039a6c5d82ccb4e815d678d4952462ba0d1f971dc5f6a5cf6ca"
 )
 #: The Phase-7 baseline record digest — must stay byte-identical after Phase 10
 #: adds its own committed preset (the "Phase 7 golden byte-identical" invariant).

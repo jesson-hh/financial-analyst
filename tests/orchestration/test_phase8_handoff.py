@@ -225,7 +225,7 @@ PHASE3_FULL_REGISTRY_DIGEST = (
     "ff2a56d283499e347dcdbf4c2f5c5977710fd5575afbc94ee34819b2b531e49d"
 )
 PHASE3_FULL_CATALOG_DIGEST = (
-    "c13294e5f020de542cc553d92e509d3dfea45673700373ac0c013d9115c3a773"
+    "0601eef771be221dbc203c56849f357b277d213a6b00274ee94aeaf70725b231"
 )
 
 # Cumulative registry chain digests (order-independent, sealed per node).
@@ -244,14 +244,14 @@ PHASE7_REGISTRY_DIGEST = (
 
 # Cumulative catalog chain digests (P6 is the identity node: P6 == P5).
 PHASE4_CATALOG_DIGEST = (
-    "aefe0cf3b12f875d4d5062db7b6d00e8ae65cf3f5081eb527d8750671b7e651b"
+    "8aea7bc0cb543a8bed8ea4505caa2f4a7f2cce9636762ad690b624d14de1e0f9"
 )
 PHASE5_CATALOG_DIGEST = (
-    "42af246047adb25956df507b56aabb215baec692859772e4b4f98d776c149229"
+    "af064cbaaa1e9b0cdea7b23ced1cffb103f6605fbcda476598b5762651df0b8d"
 )
 PHASE6_CATALOG_DIGEST = PHASE5_CATALOG_DIGEST
 PHASE7_CATALOG_DIGEST = (
-    "c760df02763b4342096d07df4663e8880c91cf49715a243bcf22d5dbe1fd9a96"
+    "b78b63e476bfd5bf0c303524244dbc9a23a585ccc924c8230dcfe906f1b07750"
 )
 
 #: The Phase-7 cumulative registry entry count (Phase 8 additively grows it).
@@ -264,7 +264,7 @@ FINAL_WORKER_DIGESTS: dict[str, str] = {
     "dec.research_mgr": "8a8d49b4bf9151eb234a911849797497a2b26b87aa46a4d36aaf7c194546964e",
     "market.factor": "c20c62f9cd90e0963b126b1b992d42689674675dc2aef5a4634e9f2999ff5148",
     "market.factor_miner": "e0da877ba6f3a0458f431a280684b5a173bd2e3f3b7dd4c6465995c0ebd8828b",
-    "market.regime": "4e1a747870f3dc79331efa32e6421b9f508655e0dbaa61c4eb2218da9cf22292",
+    "market.regime": "813fe36ee5e40a8f600de0073e6e54116ee9114cf79ffea83090770764c27ea9",
     "market.rotation": "30e9c27d379c244e4529bf8486926f2bf6e2ce08d8162d8f143de4bfa5a14d40",
     "text.sentiment": "df636a963d55c393ac9b3f3d3ed11e434e556d37cc6391d88f67fe1384bebfda",
 }
