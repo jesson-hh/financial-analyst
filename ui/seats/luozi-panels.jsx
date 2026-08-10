@@ -997,6 +997,17 @@ function EvidenceFields({ dec }) {
           </div>
         </Field>
       )}
+      {/* 确定性证据(2026-08-08):后端持仓语境注入的出场引擎+做T参考,文本逐字来自后端,缺席即不渲染 */}
+      {dec.exit_engine && dec.exit_engine.text && (
+        <Field label="出场引擎(确定性计算·LLM只复核)">
+          <div className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{dec.exit_engine.text}</div>
+        </Field>
+      )}
+      {dec.t_ref && dec.t_ref.text && (
+        <Field label="做T参考(带位+日型纪律·advisory)">
+          <div className="mono" style={{ fontSize: 9, color: 'var(--ink-2)', lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{dec.t_ref.text}</div>
+        </Field>
+      )}
       {dec.rationale && <div className="serif" style={{ fontSize: 12.5, color: 'var(--ink-1)', lineHeight: 1.6, textWrap: 'pretty' }}>「{dec.rationale}」</div>}
       {(dec.key_evidence || []).length > 0 && (
         <Field label="关键证据">

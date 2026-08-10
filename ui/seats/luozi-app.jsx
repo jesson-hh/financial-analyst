@@ -201,6 +201,7 @@ function LuoziApp() {
         // 出场语义(2026-08-03):持仓语境的研判才有,缺席即 null(空仓行逐字同旧)
         position_action: r.position_action || null,
         exit_fraction: (r.exit_fraction == null ? null : +r.exit_fraction),
+        exit_engine: r.exit_engine || null, t_ref: r.t_ref || null,
       })));
     });
     pull();
@@ -375,7 +376,8 @@ function LuoziApp() {
           rationale: res.rationale || '', reasoning: res.reasoning || '', asof: res.asof || bar.date, model_name: res.model_name || '',
           // 出场语义原样带下去:回测按 exit_fraction 部分了结,卡片按 position_action 显形
           position_action: res.position_action || null,
-          exit_fraction: (side === 'sell' ? exitFrac : null) };
+          exit_fraction: (side === 'sell' ? exitFrac : null),
+          exit_engine: res.exit_engine || null, t_ref: res.t_ref || null };
         setRealDecs(prev => {
           const arr = (prev[codeNow] || []).filter(x => x.key !== rd.key).concat([rd]);
           return Object.assign({}, prev, { [codeNow]: arr });
@@ -437,6 +439,7 @@ function LuoziApp() {
                  //   研判卡按 position_action 显形。缺席即 null(空仓语境的行逐字同旧)。
                  position_action: r.position_action || null,
                  exit_fraction: (r.exit_fraction == null ? null : +r.exit_fraction),
+                 exit_engine: r.exit_engine || null, t_ref: r.t_ref || null,
                  offChart: byKey[key] == null, _isRun: true };
       }));
     })();

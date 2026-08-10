@@ -882,6 +882,41 @@ async def _decide_impl(payload: dict) -> dict:
                 "必须在 position_action 里显式给出【继续持有】【减仓】【清仓】三者之一,"
                 "并在 rationale 说明触发了哪条依据(继续持有也要说明为什么现在不减)。"
                 "不允许回避:「看不准」不是继续持有的理由,请按证据给最合适的处置。\n")
+        # 2026-08-08 持仓语境两条确定性证据(代码算,LLM 只复核;advisory only,永不下单):
+        #   ① 出场引擎(exit_engine 7/7 实测):三重障碍+吊灯线的数值化处置建议;
+        #   ② 做T参考(t_engine,30万回合回测背书):枢轴带位+日型纪律。
+        # 仅 held+day 频注入;任一计算失败诚实缺席(不挡研判);空仓路径逐字节不变。
+        exit_info = None
+        t_info = None
+        if held and freq == "day":
+            try:
+                from guanlan_v2.seats.exit_engine import compute_exit_plan
+                from guanlan_v2.seats.exit_engine import render_lines as _exit_render
+                _dfx = df.rename(columns={"trade_date": "date"})[
+                    ["date", "open", "high", "low", "close"]]
+                _plan = compute_exit_plan(_dfx, float(hold_entry))
+                exit_info = {
+                    "action": _plan["action"], "text": _exit_render(_plan),
+                    "initial_stop": _plan["initial_stop"], "chandelier": _plan["chandelier"],
+                    "r_multiple": _plan["r_multiple"],
+                    "triggers": {k: bool(v) for k, v in _plan["triggers"].items()},
+                }
+            except Exception as _e:  # noqa: BLE001
+                _log.warning("exit_engine skipped for %s: %s", c, _e)
+            try:
+                from guanlan_v2.seats.t_engine import compute_t_ref, render_t_lines
+                _q = payload.get("quote") or {}
+                _ref = compute_t_ref(df, {"open": _q.get("open"),
+                                          "price": _q.get("price") or payload.get("price")})
+                t_info = {"base_date": _ref["base_date"], "pivot": _ref["pivot"],
+                          "r1": _ref["r1"], "s1": _ref["s1"], "theta": _ref["theta"],
+                          "text": render_t_lines(_ref)}
+            except Exception as _e:  # noqa: BLE001
+                _log.warning("t_engine skipped for %s: %s", c, _e)
+            if exit_info:
+                hold_line += exit_info["text"] + "\n"
+            if t_info:
+                hold_line += t_info["text"] + "\n"
 
         sys_p = (f"你是「观澜」量化交易系统中的{seat_cn}(信条:{creed})。"
                  f"基于**截至 {asof} 已发生的信息**(point-in-time,严禁使用该日之后任何信息或后见之明),"
@@ -992,6 +1027,9 @@ async def _decide_impl(payload: dict) -> dict:
             # 结构化出场:仅持仓且模型给出合法处置时才落键(空仓/缺失 → 旧记录形状逐字不变)
             **({"position_action": _pos_act, "exit_fraction": _exit_frac}
                if _pos_act is not None else {}),
+            # 确定性证据(2026-08-08):有才落键,空仓/计算缺席 → 旧记录形状不变
+            **({"exit_engine": exit_info} if exit_info else {}),
+            **({"t_ref": t_info} if t_info else {}),
         })
         return {
             "ok": True, "code": c, "name": name, "asof": asof, "seat": seat_cn,
@@ -1007,6 +1045,8 @@ async def _decide_impl(payload: dict) -> dict:
             "pa_features": pa_feat,   # 几何常显:无论 pa 开关都回前端供决策卡显示
             # 结构化出场:持仓语境的必答处置(空仓/缺失/非法 → None,消费方据此判断是否可用)
             "position_action": _pos_act, "exit_fraction": _exit_frac,
+            # 确定性证据(2026-08-08):仅持仓语境回传(空仓不加键,响应形状不变)
+            **({"exit_engine": exit_info, "t_ref": t_info} if held else {}),
         }
     except Exception as exc:  # noqa: BLE001 — LLM/取数失败诚实降级,不 500
         return {"ok": False, "code": c, "reason": f"{type(exc).__name__}: {exc}"}
