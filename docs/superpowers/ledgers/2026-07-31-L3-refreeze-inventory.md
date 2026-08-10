@@ -459,19 +459,45 @@ L2-b 退役的是**无行 worker** 的那条拒绝路径(两个 pv aux 座席现
 
 ---
 
-## 9. 控制器裁决(Task 2 派工前由控制器逐字写入)
+## 9. 控制器裁决(2026-08-11,控制器 = 主 session;基于 0c3275a0+2840dda3+c0dcefea 的实测证据,复审 Approved 后落笔)
 
 ### D-1(0) 授权落点
 
-> _(待裁)_
+**裁决:取 (0-a) 的形,附三条钉死的边界。**
+
+1. one-to-one 判据获得**第二求值点**,位于全目录折叠处(`build_phase10_catalog_snapshot`,或 Task 3 实测发现更自然的 P8 折叠点——以真实接缝绑定,机制逐字记录进任务报告),输入 = 该期累计 worker 集 + 继承的全部预取行。
+2. **P3 求值点对它的 5 个 worker 的判据字节与语义逐字保持不动**;但 P3 构建器的行侧检查需要一个作用域拆分:属于 P3-known worker 的行照旧在 P3 双向检查;属于 P3-unknown worker 的行**不许静默接受**——结转,由第二求值点强制认领(在最终折叠点仍无授权的行 = `CatalogError`,消息复用既有措辞)。这是计划 Task 3 Step 2 预授权的 correction-clause 级修订("widening a P3 builder signature"),按修订记录,不是即兴。
+3. 第二求值点的判据是**方向不对称的**,编码的是本程序已有语义,不是新语义:
+   - **行→授权:全集严格**——任何行必须有对应授权;特权升级洞在任何作用域都关死;
+   - **授权→行:仅对 `evidence_policy.tool_calls == REQUIRED` 的 worker 强制**——一个 REQUIRED 读者的无行授权 = 结构性死座位(永远 unsupported),构建期即拒;OPTIONAL worker 的无行授权 = C3 已裁的 licensed-EMPTY 评审态,**不在本期清扫**。
+4. 后果账(以 §7.0 的 17 组为底):13 组 OPTIONAL paper 授权保持 licensed-EMPTY,**列入 post-L3 backlog**(附 §5/§6 测量:各自后端缺席/指针不可满足状况);2 组 REQUIRED 无行授权(`pv.technical/indicators`、`text.news/fundamentals`)按 D-1 Option A 收窄;2 组候选(`pv.technical/verified_snapshot`、`text.news/news`)配行;`dec.pm/verified_snapshot` 既有行不动。
+5. **否决 (0-b)**(为一个 bridge 再造一份材料/descriptor 的形状——fact C 红线,本程序一直在收口的东西);**(0-c)/(0-d) 按实测不可行/空集否决**。新行落在**既有** P3 密封预取材料里,其 config_ref + descriptor 摘要移动——与 §2.3 实测「恰好两个材料摘要移动」一致,已在重冻清单内。
+
+不对称的理由(记录在案):全双向强制会迫使 13 组 OPTIONAL 授权当场配行(多数后端缺席且指针不可满足)或当场收窄(13 处超出 charter 的 P8 语义修改)——把一次补授权行动膨胀成全目录清账,且每处收窄各自应得的逐能力评审会在同一个窗口里被稀释。判据不对称不是 Option C 式放宽:P3 一字不动,新求值点在从未有过强制的地方**加**强制。
 
 ### D-1 授权粒度
 
-> _(待裁)_
+**裁决:Option A。**
+
+- `pv.technical.capability_methods`: `("verified_snapshot", "indicators")` → `("verified_snapshot",)`
+- `text.news.capability_methods`: `("news", "fundamentals")` → `("news",)`
+- 逐能力论证(计划要求,不许一刀切):`indicators` 与 `fundamentals` 同时是「无后端」(§5)且「指针不可满足」(§6:`InstrumentSeriesParams` 需单个 `Symbol` + 两个时点,闭合集给不出)——收窄不是削权,是把一个结构上无法行使的纸面权限从纸面上拿掉。恢复它们 = 「补 LiveClientSource 后端 + 扩 L1 闭合指针集」两件围栏外工程,归未来 charter(post-L3 backlog,与 13 组 OPTIONAL paper 授权同列)。
+- 于是是**两行,不是四行**。P8 两个 WorkerSpec 语义摘要(`pv.technical` `3aacbf8b…`、`text.news` `2794a571…`)移动——已在本期重冻范围,零额外爆炸半径。L2-b supported-methods 守卫的 `granted == {"verified_snapshot"}` 字面量 → `{"verified_snapshot", "news"}`,有意识翻转(§4 #9)。
+- **Option B 否决**(实测定价 = 两个计划的开工:后端 + L1 模块移动,均在 L3 围栏外);**Option C 否决**(不变量判据字节全程不动——两处求值点都是;§7.0 (0-a) 改的是作用域,不是判据)。
 
 ### D-2 `always_invoke` 与断供语义
 
-> _(待裁)_
+**裁决:Option A。** 两条新行 = `always_invoke` + `success_requires_finalized_call=True`(`row_min_finalized=1`)。
+
+- 确认 §8.3:`text.news`/`news` 的硬失败语义是**新决定,不是先例延伸**——有意裁之:一个全部价值就是读数据的 REQUIRED 读者,读不到时不许宣称成功;optional 方法的 honest-UNAVAILABLE 经 tool discipline 成为 INCOMPLETE(`tool_discipline_unmet`),响亮且有界(AUX 证据节点,主干 sentiment→research-mgr→pm→trader 走完)。
+- 确认 §8.2:断供落在**两种失败语汇**——core `verified_snapshot` → `bridge_execution_error`/FAILED;optional `news` → `tool_discipline_unmet`/INCOMPLETE。**Task 5 必须把两条路径、两个预设都钉住**,只钉一条 = 让另一半降级路径无证据。此实测修正随裁决进入 Task 3/5 简报;计划正文「`bridge_execution_error` 已在此路径退役」按 §8.2 勘误(该退役只覆盖无行 worker 的拒绝路径)。
+- **Option B 否决**(断供 = 节点假成功 + 陈旧/空证据 = 程序原则性拒绝的静默降级形状)。
+
+### 执行注记(随裁决进 Task 3/5 简报)
+
+- 求值点机制 = Task 3 实测绑定 + 报告记录;若唯一诚实接缝要求加宽 P3 构建器签名,按 correction-clause 修订记录(已预授权)。
+- 行的形状:与已密封 `dec.pm` 行同形的 `node_param` 指针对(`/as_of ← /asof_date`、`/symbols ← /code`),⊆ `SUBJECT_PARAM_POINTERS`;逐行 `_assemble_params` + `params_cls.model_validate` round-trip(§6 手法)。
+- 变异证明(Task 3 Step 3)在**新求值点**做两向 + D-2 算术;P3 既有两向钉(`test_data_catalog.py` 的 `test_grant_without_prefetch_row_fails`/`test_prefetch_row_without_grant_fails`)保持原样继续跑。
 
 ---
 
