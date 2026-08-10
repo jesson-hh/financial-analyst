@@ -221,7 +221,7 @@ gate 另外断言解析出的行数 == §4 表里编号行的行数,所以没有
 | 22 | `guanlan_v2/orchestration/pipeline/deep_decide.py` | 333 | `is a real product, not a fallback` | FLIP | `PresetSelectionRefused` docstring —— 减证据预设「存在理由」的散文半边。同 #21。 |
 | 23 | `guanlan_v2/orchestration/pipeline/live_decide.py` | 1157, 1168 | `SUPPORT-REFUSED at admission` | FLIP | 「the deep run is still SUPPORT-REFUSED at admission」。同 #21。 |
 | 24 | `guanlan_v2/orchestration/pipeline/pv_aux.py` | 197 | `sealed prefetch binding grants it no row (L3)` | FLIP-IF | `AuxDataUngranted` 的消息字面量。同 #7:只在授 aux 座席时。 |
-| 25 | `tests/orchestration/test_experience_rowless_admission.py` | 246 | `test_no_sealed_worker_can_trip_the_new_refusal` | GREEN-VERIFY | L3 Task 2 早拒绝的**越界探针**(本行由 Task 2 补入,裁决见 §9 的 “RULING — dec.research_mgr experience row”)。它断言「靠读类目 activate 到某个声明了能力的桥、且完全无授权」的密封 worker 集恰为 `{dec.research_mgr: FORBIDDEN}`。D-1 只收窄 `pv.technical`/`text.news` 的 data 侧,两位都不声明 `experience_cases`,所以本行**不该红**。**Task 3-4 期间它变红 = 收窄/授权动到了某个 worker 的 `read_categories` 或 `capability_allowlist`,即越界信号按设计生效 —— STOP,上报。** |
+| 25 | `tests/orchestration/test_experience_rowless_admission.py` | 246 | `test_no_sealed_worker_can_trip_the_new_refusal` | GREEN-VERIFY | L3 Task 2 早拒绝的**越界探针**(本行由 Task 2 补入,裁决见 §9 的 “RULING — dec.research_mgr experience row”)。它断言「靠读类目 activate 到某个声明了能力的桥、且完全无授权」的密封 worker 集恰为 `{dec.research_mgr: FORBIDDEN}`。D-1 只收窄 `pv.technical`/`text.news` 的 data 侧,两位都不声明 `experience_cases`,所以本行**不该红**。**Task 3-4 期间它变红 = 收窄/授权动到了某个 worker 的 `read_categories` 或 `capability_allowlist`,即越界信号按设计生效 —— STOP,上报。** **耦合提示:**同文件的 `TestRunnableRequiredWorkerNotRefused`(min_sum≥1 不早拒的那条裁决钉)**复用 `test_runtime_support.py` 的私有合成桥手法**(`_Analyzer` / `_BridgeSpec` / `build_scenario`)—— 有意「复用而非重新推导」(密封目录表达不出「一个节点两条桥、边界不同」),代价是**改动该手法的签名会同时打断两个套件**,动它时两边一起看。 |
 
 > **红窗纪律(计划 Global Constraints):** Task 3-4 期间,`tests/orchestration` 全套只允许在
 > 本表 `FLIP` / `FLIP-IF`(且其条件成立)的条目上红。**本表之外的任何一处红 = STOP,上报。**
@@ -557,23 +557,49 @@ inputs 是 `sentiment(SentimentReport)` / `bullbear_transcript(DebateTranscript)
 
 #### 与 Task 2 的早拒绝(item 6)的关系:不冲突,互为另一半
 
-Task 2 新增的准入拒绝 `rowless_read_category_unrunnable` **只**打
-`evidence_policy.tool_calls == REQUIRED` 的无行读者。`dec.research_mgr` 是 FORBIDDEN,
-所以本裁决的 rowless-EMPTY 终态**原样保留**,并被
+Task 2 新增的准入拒绝 `rowless_read_category_unrunnable` 的**完整裁定判据**是两条,不是一条:
+
+> `evidence_policy.tool_calls == REQUIRED` **且** `min_sum == 0`
+> —— 即该节点上**没有任何**活跃桥保证它一次 finalized 调用
+> (`sum(min_finalized_tool_calls_on_success) == 0`)。
+
+`dec.research_mgr` 是 FORBIDDEN,第一条就不满足,所以本裁决的 rowless-EMPTY 终态**原样保留**,并被
 `tests/orchestration/test_experience_rowless_admission.py::TestC3RowlessReaderPreserved` 正向钉住
 (真 `PlanAdmissionService` 准入通过 + 真 provider/真 gateway 上零调用、零 ToolCallRecord、
-零证据写、零 untrusted block)。判据不对称的理由与 §9 D-1(0) 第 3 条同源:
-**能靠空跑诚实完成的座位是 C3 已裁的 licensed-EMPTY;自己声明 REQUIRED 的座位靠空跑永远完不成,
-是结构性死座位。** 变异证明(Task 2 Step 3)在两个方向上都取了证:去掉 REQUIRED 判据让它见谁打谁,
-红的恰是上述 C3 保留钉(含兄弟套件 `test_phase10_e2e.py::TestLateFailureLoudness`)。
+零证据写、零 untrusted block)。
 
-**红窗分类(给 Task 3-5 的提示,未擅自改 §4 表):** `test_experience_rowless_admission.py` 全套按
+**判据的理由(2026-08-11 控制器裁决,复审第一轮把先前写法推翻,此处按裁决重写):**
+item 6 的授权是**晚失败 → 早拒绝的「转换」**,不是新增一类拒绝 —— **一个不会在 gateway 上失败的
+worker,就不许在准入期被拒**。`tool_calls == REQUIRED` 是 **worker 级**纪律,由该节点的**求和**
+边界满足:一个 REQUIRED 座位只要有 granted + 配行的**兄弟桥**把 `min_sum` 抬到 ≥ 1,它就**跑得完**,
+而它那条空的 category 桥贡献恰恰**就是 C3 已裁的 licensed-EMPTY**,不构成缺陷,更不许早拒。
+因此发拒的判据是 **worker 级的 `min_sum == 0`**,不是贡献级的「空贡献满足不了 REQUIRED」。
+(先前本节写的「自己声明 REQUIRED 的座位靠空跑永远完不成,是结构性死座位」是**贡献 vs worker 的
+混淆**,已被控制器推翻,不再是本程序的说法。)与 §9 D-1(0) 第 3 条同源的,是**判据不对称**这件事
+本身——只对 REQUIRED 加强制,其余留给 licensed-EMPTY——而不是那句被推翻的理由。
+
+**变异证明(三次,方向各不相同):**
+
+1. **M1(静默)** —— 让发拒条件永不成立:红的恰是三条新准入钉,
+   兄弟套件的控制钉 `test_phase10_e2e.py::TestLateFailureLoudness` **保持绿**
+   (证明「已准入的计划到不了 gateway」这半边仍然成立)。
+2. **M2(过打)** —— 去掉 REQUIRED 判据让它见谁打谁:红的恰是上述 C3 保留钉,
+   **含**兄弟套件 `TestLateFailureLoudness::test_admission_support_passes_the_rowless_dynamic_plan`。
+3. **M3(复审修正轮)** —— 去掉 `min_sum == 0` 这一条:红的**恰好一条**,
+   `TestRunnableRequiredWorkerNotRefused::test_the_runnable_required_worker_is_admitted`
+   (`1 failed, 13 passed`)。这一条就是本次裁决新加的**另一侧钉**:
+   REQUIRED worker + granted/配行兄弟桥(min=1)+ 靠读类目 activate 的 0/0 空桥 ⇒ **准入通过**,
+   既不出 `rowless_read_category_unrunnable` 也不出 `tool_calls_required_unmet`。
+   三次变异后源码均按 sha256 逐字还原。
+
+**红窗分类(§4 已补行,不是留给 Task 5 的建议):** `test_experience_rowless_admission.py` 全套按
 §4 的词表属 **GREEN-VERIFY** —— 本期两位候选读者(`pv.technical`/`text.news`)都不声明
 `experience_cases`,授权也只动 data 侧,所以它不该变红;其中
 `TestThePremise::test_no_sealed_worker_can_trip_the_new_refusal` 是最灵敏的越界探针
 (它断言「靠读类目 activate 且完全无授权」的密封 worker 集恰为 `{dec.research_mgr: FORBIDDEN}`),
 一旦 Task 3 的收窄/授权动到了任何 worker 的 `read_categories` 或 `capability_allowlist`,它会立刻红。
-若 Task 5 认为该入表,按 §4 的行格式补编号行(gate 只断言连号 + 全行可解析 + 词表封闭)。
+**该钉已按控制器指示于复审修正轮补进 §4,编号 25,verdict = GREEN-VERIFY,并已过 gate 解析器**
+(连号 + 全行可解析 + 词表封闭 + file/anchor 实解析)。
 
 #### Option B —— 本期不取的路(road-not-taken,原文留档)
 
