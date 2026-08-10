@@ -471,7 +471,7 @@ L2-b 退役的是**无行 worker** 的那条拒绝路径(两个 pv aux 座席现
 3. 第二求值点的判据是**方向不对称的**,编码的是本程序已有语义,不是新语义:
    - **行→授权:全集严格**——任何行必须有对应授权;特权升级洞在任何作用域都关死;
    - **授权→行:仅对 `evidence_policy.tool_calls == REQUIRED` 的 worker 强制**——一个 REQUIRED 读者的无行授权 = 结构性死座位(永远 unsupported),构建期即拒;OPTIONAL worker 的无行授权 = C3 已裁的 licensed-EMPTY 评审态,**不在本期清扫**。
-4. 后果账(以 §7.0 的 17 组为底):13 组 OPTIONAL paper 授权保持 licensed-EMPTY,**列入 post-L3 backlog**(附 §5/§6 测量:各自后端缺席/指针不可满足状况);2 组 REQUIRED 无行授权(`pv.technical/indicators`、`text.news/fundamentals`)按 D-1 Option A 收窄;2 组候选(`pv.technical/verified_snapshot`、`text.news/news`)配行;`dec.pm/verified_snapshot` 既有行不动。
+4. 后果账(以 §7.0 的 17 组为底)——**本条计数经 Task 3 实测更正,见下方「修正裁决」**:~~13 组~~ **11 组** OPTIONAL paper 授权保持 licensed-EMPTY,**列入 post-L3 backlog**(附 §5/§6 测量:各自后端缺席/指针不可满足状况);2 组 REQUIRED 无行授权(`pv.technical/indicators`、`text.news/fundamentals`)按 D-1 Option A 收窄;2 组候选(`pv.technical/verified_snapshot`、`text.news/news`)配行;**1 组 REQUIRED paper(`text.policy/news`,原稿误归 OPTIONAL)按修正裁决配第三条行**;`dec.pm/verified_snapshot` 既有行不动。11+2+2+1+1 = 17。
 5. **否决 (0-b)**(为一个 bridge 再造一份材料/descriptor 的形状——fact C 红线,本程序一直在收口的东西);**(0-c)/(0-d) 按实测不可行/空集否决**。新行落在**既有** P3 密封预取材料里,其 config_ref + descriptor 摘要移动——与 §2.3 实测「恰好两个材料摘要移动」一致,已在重冻清单内。
 
 不对称的理由(记录在案):全双向强制会迫使 13 组 OPTIONAL 授权当场配行(多数后端缺席且指针不可满足)或当场收窄(13 处超出 charter 的 P8 语义修改)——把一次补授权行动膨胀成全目录清账,且每处收窄各自应得的逐能力评审会在同一个窗口里被稀释。判据不对称不是 Option C 式放宽:P3 一字不动,新求值点在从未有过强制的地方**加**强制。
@@ -493,6 +493,28 @@ L2-b 退役的是**无行 worker** 的那条拒绝路径(两个 pv aux 座席现
 - 确认 §8.3:`text.news`/`news` 的硬失败语义是**新决定,不是先例延伸**——有意裁之:一个全部价值就是读数据的 REQUIRED 读者,读不到时不许宣称成功;optional 方法的 honest-UNAVAILABLE 经 tool discipline 成为 INCOMPLETE(`tool_discipline_unmet`),响亮且有界(AUX 证据节点,主干 sentiment→research-mgr→pm→trader 走完)。
 - 确认 §8.2:断供落在**两种失败语汇**——core `verified_snapshot` → `bridge_execution_error`/FAILED;optional `news` → `tool_discipline_unmet`/INCOMPLETE。**Task 5 必须把两条路径、两个预设都钉住**,只钉一条 = 让另一半降级路径无证据。此实测修正随裁决进入 Task 3/5 简报;计划正文「`bridge_execution_error` 已在此路径退役」按 §8.2 勘误(该退役只覆盖无行 worker 的拒绝路径)。
 - **Option B 否决**(断供 = 节点假成功 + 陈旧/空证据 = 程序原则性拒绝的静默降级形状)。
+
+### D-1(0)/D-1 修正裁决:`text.policy/news` 配第三条行(2026-08-11,Task 3 实测触发)
+
+Task 3 实现者以真 P8/P9/P10 快照 + 真 `data_capability_refs()` 枚举 17 组授权的 `tool_calls` 位,实测分解为:
+**11 OPTIONAL paper + 1 REQUIRED paper(`text.policy/news`,`lane_catalog.py` `tool_calls=REQUIRED`)
++ 2 REQUIRED 收窄 + 2 候选配行 + 1 `dec.pm` 既有行 = 17**。
+本节 item 4 原写「13 组 OPTIONAL paper」计数错一,且把 `text.policy/news` 误归 OPTIONAL——
+原句已按实测更正,不再是本程序的说法。若不修正,新求值点会在每次目录构建上因
+`text.policy/news`(REQUIRED、无行)抛 `CatalogError`,红溢出 §4——实现者按红窗法 STOP,正确。
+
+**裁决:`text.policy/news` 配第三条行(实现者选项 B)。**
+
+- **理由**:该方法有真后端(§5)且指针可满足(§6),Option A 的「拿掉无法行使的纸面权限」论证对它**不成立**——收窄 = 真削权,且不治死座位(REQUIRED + 零数据能力 = 一旦被调度即永远 `tool_calls_required_unmet` 的静默不可支持态,本程序拒绝的形状)。豁免表(把它例外在新判据之外)= 判据首日带例外 + 纸面 REQUIRED 授权继续挂账,同样拒绝。**把拒绝变成支持**是唯一同时满足「判据无例外」与「不削可行使权限」的形(spec §2.4)。
+- **行形状**:与两条已裁行同形(`node_param` `/as_of ← /asof_date`、`/symbols ← /code` ⊆ 闭合集;`always_invoke` + `success_requires_finalized_call=True`)。D-2 语汇:`news` 为 optional 方法,断供 → `tool_discipline_unmet`/INCOMPLETE(§8.2 第二种)。
+- **边界**:`text.policy` 不在任何 preset;本裁决**不**把它排进任何 preset,不扩 Task 7 真跑范围;其「supported」新真值仅经 DYNAMIC 计划 + 人批通道可达——与既有审批纪律一致。
+- **爆炸半径(实现者实测)**:零额外——`capability_methods` 不动 → 其 P8 WorkerSpec 摘要不动;prefetch/descriptor 摘要本就移动(§2.3);supported-methods 守卫集合仍 `{verified_snapshot, news}`(§4 #9 已 FLIP)。若 grep 发现引用 text.policy 支持态的既有钉,按 §4 行格式入表(经解析器)。
+
+**求值点确认:P8 折叠(`build_phase8_catalog_snapshot`)**,按实现者四条实测理由
+(P8 = 行首次可认领的折叠;授权集 P8/P9/P10 实测恒等 17;既有 import 边零新增;单一真调用方)。
+**附加一条覆盖假设钉**:post-P8 折叠(P9/P10)不新增持有 data capability 的 worker——
+用测试钉死该假设;未来任何期在 P8 之后引入数据授权 worker 时此钉变红,
+强制该期把求值点扩到自己的折叠处,而不是静默漏检。
 
 ### 执行注记(随裁决进 Task 3/5 简报)
 
