@@ -12,21 +12,26 @@ honest EMPTY contribution and the gateway is never touched (pinned at
 ``test_phase10_e2e.py::TestLateFailureLoudness``, this suite's control).
 
 So the residue this task closes is NOT the ruled licensed-EMPTY reader. It is the
-one rowless shape that emptiness cannot honestly serve: a worker whose OWN
-``evidence_policy.tool_calls`` is ``REQUIRED``. An empty contribution can never
-satisfy a REQUIRED tool-call discipline, so such a seat is structurally dead —
-and today ``check_runtime_support`` only ever notices it through the *summed*
-tool-call arithmetic (``tool_calls_required_unmet``), a cause-blind number that
-names neither the bridge nor the missing row and that a sibling bridge's row can
-mask. This suite pins the DISCRIMINATION:
+one rowless shape whose WORKER cannot run: ``evidence_policy.tool_calls`` is
+``REQUIRED`` and nothing on the node guarantees it a finalized call. Such a seat
+is structurally dead, and today ``check_runtime_support`` notices it only through
+the summed tool-call arithmetic (``tool_calls_required_unmet``), a cause-blind
+number that names neither the bridge nor the missing row. This suite pins the
+DISCRIMINATION:
 
-* ``tool_calls=REQUIRED`` + category-only activation + no reviewed row
+* ``tool_calls=REQUIRED`` + category-only activation + no reviewed row + no other
+  bridge guaranteeing a call (``min_sum == 0``)
   => refused AT ADMISSION by a typed, named ``rowless_read_category_unrunnable``
   issue that names the worker, the bridge, the read category and the missing row;
 * ``tool_calls=FORBIDDEN`` (the sealed ``dec.research_mgr``) and
   ``tool_calls=OPTIONAL`` => the C3 licensed-EMPTY posture is PRESERVED, byte for
   byte: admitted, and provably never reaching the gateway. **Rowless reader is
   not a refusal** — regressing that would regress ruling C3.
+* ``tool_calls=REQUIRED`` whose granted, rowed SIBLING bridge already guarantees
+  the call => also PRESERVED (controller ruling, fix round): that worker is
+  runnable, would not have failed at the gateway, and must not be refused at
+  admission. Item 6 converts a late failure into an early refusal; it never
+  invents a refusal for a plan that would have run.
 * the allowlisted-but-rowless half (a reviewed grant that LOST its row) keeps its
   LOUD ``CatalogError`` — untouched here, pinned by its owners.
 
@@ -78,6 +83,16 @@ from tests.orchestration.test_pipeline_screening import (  # noqa: F401
     _FixedClock,
     env,
     phase9_runtime,
+)
+# The seam's OWN suite already owns the reviewed synthetic-bridge harness for
+# tool-call arithmetic (`§4 #5`: "通用算术钉(合成 worker,非两位读者)"). The
+# runnable-REQUIRED shape below needs two bridges on one node with different
+# bounds, which the sealed catalog cannot express, so it is built there rather
+# than re-derived here.
+from tests.orchestration.test_runtime_support import (
+    _Analyzer,
+    _BridgeSpec,
+    build_scenario,
 )
 
 #: the typed refusal this task adds.
@@ -402,10 +417,15 @@ class TestRequiredRowlessRefusedAtAdmission:
         assert issue.model_path == "WorkerSpec.read_categories"
 
     def test_the_refusal_is_structural_not_the_arithmetic_renamed(self, refused):
-        """The pre-existing cause-blind arithmetic refusal STAYS (it is a
-        different fact about a different model path). The new one is derived
-        per offending bridge summary, so a sibling bridge's row could never mask
-        it — two independent refusals, not one renamed."""
+        """The pre-existing cause-blind arithmetic refusal STAYS: it is a
+        different fact (this node's summed bounds) on a different model path
+        (``evidence_policy.tool_calls``). The new one names WHICH bridge reached
+        the worker by category and WHICH reviewed row is absent, and is emitted
+        once per offending summary rather than once per node — two independent
+        refusals, not one renamed. They share the ``min_sum == 0`` premise by
+        ruling, not by derivation: a REQUIRED worker whose sibling bridge
+        guarantees the call is runnable and gets NEITHER (pinned in
+        ``TestRunnableRequiredWorkerNotRefused``)."""
         arithmetic = _issues_with(refused, ARITHMETIC_CODE)
         rowless = _issues_with(refused, ROWLESS_CODE)
         assert arithmetic[0].model_path == "WorkerSpec.evidence_policy.tool_calls"
@@ -421,6 +441,86 @@ class TestRequiredRowlessRefusedAtAdmission:
                        and s.node_id == "research-mgr")
         assert summary.allowed_capability_refs == ()
         assert summary.max_capability_invocations == 0
+
+
+# =========================================================================== #
+# 2b — PRESERVED: a RUNNABLE required worker is never refused                  #
+# =========================================================================== #
+class TestRunnableRequiredWorkerNotRefused:
+    """Controller ruling (L3 Task 2 fix round), pinned from the other side.
+
+    Item 6's mandate is late-failure → early-refusal CONVERSION. A worker that
+    would NOT fail at the gateway must NOT be refused at admission.
+    ``evidence_policy.tool_calls=REQUIRED`` is per-worker discipline, satisfied by
+    the node's SUMMED bounds: a REQUIRED worker whose granted, rowed sibling
+    bridge guarantees the finalized call is runnable, and its empty
+    category-activated contribution is exactly ruling C3's licensed-EMPTY posture.
+    So the emission gate carries ``min_sum == 0`` and this shape is ADMITTED.
+
+    The sealed catalog cannot express two bridges with different bounds on one
+    node (every rowless bridge is 0/0 and rows are sealed per worker id), so this
+    uses the seam suite's own reviewed scenario harness — real
+    ``check_runtime_support``, real descriptors and real summaries, configurable
+    bounds.
+    """
+
+    @staticmethod
+    def _masked_scenario(*, rowless_bounds=(0, 0), sibling_min=1):
+        """REQUIRED worker + granted/rowed sibling (min>=1) + a
+        capability-declaring bridge reached by READ CATEGORY alone, 0/0."""
+        return build_scenario(
+            tool_calls=ToolCallRequirement.REQUIRED,
+            worker_caps=("cap.data",),
+            worker_read_categories=("context", EXPERIENCE_CATEGORY),
+            bridges=[
+                _BridgeSpec(bridge_id="bridge.data", priority=10,
+                            activation_caps=("cap.data",),
+                            min_calls=sibling_min, max_calls=1),
+                _BridgeSpec(
+                    bridge_id="bridge.rowless", priority=20,
+                    # declared but NOT in the worker's allowlist -> category-only
+                    activation_caps=("cap.rowless",),
+                    activation_cats=(EXPERIENCE_CATEGORY,),
+                    analyzer=_Analyzer(min_calls=rowless_bounds[0],
+                                       max_calls=rowless_bounds[1],
+                                       forge_allowlist=())),
+            ])
+
+    def test_the_premise_is_the_masked_shape_not_something_else(self):
+        """Assert the construction really IS the shape under ruling: the rowless
+        bridge is category-activated with zero contribution, and the sibling
+        supplies the guaranteed call."""
+        report = self._masked_scenario().check()
+        by_bridge = {s.bridge_id: s for s in report.bridge_support_summaries}
+        assert set(by_bridge) == {"bridge.data", "bridge.rowless"}
+        rowless = by_bridge["bridge.rowless"]
+        assert rowless.allowed_capability_refs == ()
+        assert rowless.max_capability_invocations == 0
+        assert rowless.min_finalized_tool_calls_on_success == 0
+        assert by_bridge["bridge.data"].min_finalized_tool_calls_on_success == 1
+        min_sum = sum(s.min_finalized_tool_calls_on_success
+                      for s in report.bridge_support_summaries)
+        assert min_sum == 1
+
+    def test_the_runnable_required_worker_is_admitted(self):
+        """THE RULING: runnable => admitted, and NOT carrying the new refusal."""
+        report = self._masked_scenario().check()
+        assert report.supported is True, [
+            (i.code, i.node_id) for i in report.issues]
+        assert ROWLESS_CODE not in _codes(report)
+        assert ARITHMETIC_CODE not in _codes(report)
+
+    def test_the_same_shape_without_the_sibling_call_is_refused(self):
+        """The discriminating half, so the test above cannot pass by the check
+        being dead: drop the sibling's guarantee (min 1 -> 0) and the very same
+        construction IS refused, naming the bridge and the missing row."""
+        report = self._masked_scenario(sibling_min=0).check()
+        assert report.supported is False
+        assert ROWLESS_CODE in _codes(report)
+        issue = _issues_with(report, ROWLESS_CODE)[0]
+        assert "bridge.rowless" in issue.explanation
+        assert EXPERIENCE_CATEGORY in issue.explanation
+        assert "row" in issue.explanation
 
 
 # =========================================================================== #

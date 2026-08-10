@@ -22,11 +22,16 @@ L3 · item 6 adds one structural refusal in the same spirit: a worker that reach
 a capability-declaring bridge through a READ CATEGORY alone (never granted, so it
 can hold no reviewed prefetch row) gets that bridge's ruled ZERO-CONTRIBUTION
 summary — the licensed-EMPTY posture of ruling C3 — and that posture is honest
-only while the worker can run on nothing. When the worker's own
-``evidence_policy.tool_calls`` is ``REQUIRED`` the empty contribution can never
-satisfy it, so ``rowless_read_category_unrunnable`` refuses the seat HERE, at
-admission, naming the worker/bridge/category/missing row, instead of admitting it
-into a downstream failure.
+only while **the worker** can run. When the worker's own
+``evidence_policy.tool_calls`` is ``REQUIRED`` *and* no active bridge on the node
+guarantees it a finalized call (``min_sum == 0``), the worker cannot run at all:
+the seat is structurally dead, and ``rowless_read_category_unrunnable`` refuses it
+HERE, at admission, naming the worker/bridge/category/missing row, instead of
+admitting it into a downstream failure. A REQUIRED worker whose granted, rowed
+sibling bridge does guarantee the call IS runnable, so its empty category-bridge
+contribution stays the licensed-EMPTY posture and is NOT refused — item 6 converts
+a late failure into an early refusal, it never invents a refusal for a plan that
+would have run.
 """
 from __future__ import annotations
 
@@ -720,18 +725,21 @@ def check_runtime_support(
                                  f"max_capability_invocations is {max_sum} (!= 0)", node_id=node.id))
         # L3 · item 6 — the rowless reader is decided HERE, not at the gateway.
         # An ungranted, rowless, structurally EMPTY bridge contribution is the
-        # reviewed licensed-EMPTY posture for a worker that can RUN on nothing
-        # (FORBIDDEN / OPTIONAL — ruled C3; refusing those would turn a reviewed
-        # absence into a fault). A worker whose OWN evidence policy REQUIRES tool
-        # calls cannot: an empty contribution can never satisfy it, so the seat is
-        # structurally dead and is refused at admission — named by worker, bridge,
-        # read category and the missing row — instead of being admitted and then
-        # failed downstream. This is the read-category mirror of the D-1(0)
-        # asymmetry the controller ruled for the catalog's grant→row direction
-        # (enforced only for REQUIRED workers, licensed-EMPTY left standing for
-        # the rest). It is derived PER offending summary, never from ``min_sum``,
-        # so a sibling bridge's row can never mask it.
-        if tc is ToolCallRequirement.REQUIRED:
+        # reviewed licensed-EMPTY posture (ruling C3); refusing it would turn a
+        # reviewed absence into a fault. What item 6 converts is a LATE failure
+        # into an EARLY refusal — so this fires only where the worker would in
+        # fact be un-runnable: ``tool_calls`` is REQUIRED (per-worker discipline)
+        # AND nothing on this node guarantees it a finalized call (min_sum == 0).
+        # A REQUIRED worker whose granted, rowed sibling bridge supplies the call
+        # IS runnable; its empty category-bridge contribution is C3's posture and
+        # is deliberately NOT refused (controller ruling, L3 Task 2 fix round).
+        # The remaining shape — REQUIRED with nothing guaranteeing a call — is a
+        # structurally dead seat, refused here and NAMED (worker, bridge, read
+        # category, missing row) rather than left to the cause-blind arithmetic
+        # below/above it. This is the read-category mirror of the D-1(0) asymmetry
+        # the controller ruled for the catalog's grant→row direction: enforced for
+        # REQUIRED only, licensed-EMPTY left standing for everyone else.
+        if tc is ToolCallRequirement.REQUIRED and min_sum == 0:
             for bridge_id, matched in rowless_category_bridges:
                 cats = ", ".join(repr(c) for c in matched)
                 issues.append(_issue(
@@ -741,9 +749,11 @@ def check_runtime_support(
                     f"bridge's activation capabilities, so no reviewed prefetch row can "
                     f"exist for it and the bridge contributes a structurally EMPTY "
                     f"summary (max_capability_invocations=0); the worker's "
-                    f"evidence_policy.tool_calls is REQUIRED, which an empty contribution "
-                    f"can never satisfy, so the seat is refused at admission rather than "
-                    f"admitted and failed at the gateway", node_id=node.id))
+                    f"evidence_policy.tool_calls is REQUIRED and no active bridge on this "
+                    f"node guarantees it a finalized call (summed "
+                    f"min_finalized_tool_calls_on_success=0), so the seat can never run "
+                    f"and is refused at admission rather than admitted and failed at the "
+                    f"gateway", node_id=node.id))
 
     # -- (4) ContextRuntimeRequirements closure ---------------------------- #
     ctx_req_ref = None

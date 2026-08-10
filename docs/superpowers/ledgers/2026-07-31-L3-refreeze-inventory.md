@@ -201,7 +201,7 @@ gate 另外断言解析出的行数 == §4 表里编号行的行数,所以没有
 | 2 | `tests/orchestration/test_pipeline_reduced_deep_preset.py` | 327 | `test_the_untouched_ten_node_baseline_is_still_honestly_unsupported` | FLIP | 同 #1;它同时是减证据预设「存在理由」的回归半边。 |
 | 3 | `tests/orchestration/test_pipeline_reduced_deep_preset.py` | 344 | `test_the_two_dropped_nodes_are_exactly_the_unmet_ones` | FLIP | 断言 `full_ids - reduced_ids == unmet_nodes`。授权后 unmet 集空,等式两边同时塌;翻转时必须换成新的因果断言,不是删掉。 |
 | 4 | `tests/orchestration/test_pipeline_reduced_deep_preset.py` | 321 | `test_the_reduced_draft_is_runtime_supported` | GREEN-VERIFY | 减证据预设本来就绿;授权不该动它。它变红 = 授权改到了八节点通路上。 |
-| 5 | `tests/orchestration/test_runtime_support.py` | 595 | `tool_calls_required_unmet` | GREEN-VERIFY | 通用算术钉(合成 worker,非两位读者)。算术本身不变;变红说明动了 `runtime_support.py:673` 的判据。 |
+| 5 | `tests/orchestration/test_runtime_support.py` | 595 | `tool_calls_required_unmet` | GREEN-VERIFY | 通用算术钉(合成 worker,非两位读者)。算术本身不变;变红说明动了 `check_runtime_support` 里 `tool_calls_required_unmet` 那条判据(`tc is ToolCallRequirement.REQUIRED and min_sum < 1`)。**按符号写,不写行号** —— L3 Task 2 的插入已经让原来记的 `:673` 失效,而 gate 的锚点检查本来就是「符号在文件里」而非按行,备注也照此对齐。 |
 | 6 | `tests/orchestration/data/test_phase_handoff.py` | 828 | `tool_calls_required_unmet` | GREEN-VERIFY | Phase-3 handoff 的存在性钉。同 #5。 |
 | 7 | `tests/orchestration/test_pv_aux_nodes.py` | 26, 479, 546, 566 | `AuxDataUngranted` | FLIP-IF | **只在 D-1 给 `pv.price_action` / `pv.microstructure` 授行时翻。** 今天的 D-1 候选是 `pv.technical` / `text.news`,与这两个 aux 座席**不是同一批 worker**(见 §7.0 的 17 条 grant 全表)。若 D-1 只授两位读者,本组保持绿。 |
 | 8 | `tests/orchestration/test_pv_aux_nodes.py` | 27, 472 | `aux_data_ungranted` | FLIP-IF | 同 #7(类型化拒绝码的那一半)。 |
@@ -221,6 +221,7 @@ gate 另外断言解析出的行数 == §4 表里编号行的行数,所以没有
 | 22 | `guanlan_v2/orchestration/pipeline/deep_decide.py` | 333 | `is a real product, not a fallback` | FLIP | `PresetSelectionRefused` docstring —— 减证据预设「存在理由」的散文半边。同 #21。 |
 | 23 | `guanlan_v2/orchestration/pipeline/live_decide.py` | 1157, 1168 | `SUPPORT-REFUSED at admission` | FLIP | 「the deep run is still SUPPORT-REFUSED at admission」。同 #21。 |
 | 24 | `guanlan_v2/orchestration/pipeline/pv_aux.py` | 197 | `sealed prefetch binding grants it no row (L3)` | FLIP-IF | `AuxDataUngranted` 的消息字面量。同 #7:只在授 aux 座席时。 |
+| 25 | `tests/orchestration/test_experience_rowless_admission.py` | 246 | `test_no_sealed_worker_can_trip_the_new_refusal` | GREEN-VERIFY | L3 Task 2 早拒绝的**越界探针**(本行由 Task 2 补入,裁决见 §9 的 “RULING — dec.research_mgr experience row”)。它断言「靠读类目 activate 到某个声明了能力的桥、且完全无授权」的密封 worker 集恰为 `{dec.research_mgr: FORBIDDEN}`。D-1 只收窄 `pv.technical`/`text.news` 的 data 侧,两位都不声明 `experience_cases`,所以本行**不该红**。**Task 3-4 期间它变红 = 收窄/授权动到了某个 worker 的 `read_categories` 或 `capability_allowlist`,即越界信号按设计生效 —— STOP,上报。** |
 
 > **红窗纪律(计划 Global Constraints):** Task 3-4 期间,`tests/orchestration` 全套只允许在
 > 本表 `FLIP` / `FLIP-IF`(且其条件成立)的条目上红。**本表之外的任何一处红 = STOP,上报。**
@@ -586,6 +587,15 @@ schema 的 Literal);(b) 给 `dec.research_mgr` 一个 `market_factor_report` 量
 (改 worker inputs = P8 语义摘要 + 上游节点拓扑);(c) 相应的 P5/P8 摘要位移进本期重冻窗口。
 **归 post-L3 backlog**,与 §9 D-1(0) 第 4 条的 13 组 OPTIONAL paper 授权同列。
 
+#### post-L3 backlog(Task 2 实测顺带发现,本期不动)
+
+- **allowlisted-but-rowless 的「响亮」目前是 *无类型* 的响亮。** 一个 allowlist 里**持有**
+  `experience.retrieve@1` 却没有评审行的 worker,会让分析器抛 `CatalogError` 一路穿出
+  `check_runtime_support` —— 准入期就炸(所以 charter item 6 的「提前到准入」在这条路上已满足),
+  但**不产出任何 support report**,运维拿到的是异常而不是具名的 typed issue,也没有落库的拒绝回执。
+  改成类型化拒绝是 post-L3 的事,且**必须不放松 Task-11 的 LOUD 裁决**:
+  「丢了行的既有授权」与「从未授权」是两件事,前者永远不许静默降级成 licensed-EMPTY。
+
 ---
 
 ## 10. 附:本任务未做、但 Task 5 会用到的东西
@@ -599,3 +609,9 @@ schema 的 Literal);(b) 给 `dec.research_mgr` 一个 `market_factor_report` 量
   ~~Task 6 的范围。~~ **勘误(Task 2 落笔):是 Task 2 的范围**,已于 HEAD `54176b2e` 实测并交付
   —— 裁决见 §9 的 “RULING — dec.research_mgr experience row”,早拒绝见
   `tests/orchestration/test_experience_rowless_admission.py`。
+- **`CHECKER_VERSION` 要不要动 —— Task 5 重冻评审必须显式过一遍。** L3 Task 2 **改变了
+  `check_runtime_support` 会拒什么**(新增 `rowless_read_category_unrunnable`),但
+  `CHECKER_VERSION = "static-runtime-checker-v1"` 未动:它是 Literal 钉死的版本标记,动它会让
+  **P5 schema manifest 位移** —— 在 L3 围栏外,所以本期**有意不动**。Task 5 在唯一的重冻窗口里
+  要么把这个版本标记一并挪、要么把「有意不动」作为一条书面决定记进重冻对照表;
+  **不允许默认跳过**(判据变了而版本标记没变,本身就是一处需要被看见的漂移)。
