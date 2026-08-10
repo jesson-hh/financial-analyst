@@ -223,6 +223,11 @@ gate 另外断言解析出的行数 == §4 表里编号行的行数,所以没有
 | 24 | `guanlan_v2/orchestration/pipeline/pv_aux.py` | 197 | `sealed prefetch binding grants it no row (L3)` | FLIP-IF | `AuxDataUngranted` 的消息字面量。同 #7:只在授 aux 座席时。 |
 | 25 | `tests/orchestration/test_experience_rowless_admission.py` | 246 | `test_no_sealed_worker_can_trip_the_new_refusal` | GREEN-VERIFY | L3 Task 2 早拒绝的**越界探针**(本行由 Task 2 补入,裁决见 §9 的 “RULING — dec.research_mgr experience row”)。它断言「靠读类目 activate 到某个声明了能力的桥、且完全无授权」的密封 worker 集恰为 `{dec.research_mgr: FORBIDDEN}`。D-1 只收窄 `pv.technical`/`text.news` 的 data 侧,两位都不声明 `experience_cases`,所以本行**不该红**。**Task 3-4 期间它变红 = 收窄/授权动到了某个 worker 的 `read_categories` 或 `capability_allowlist`,即越界信号按设计生效 —— STOP,上报。** **耦合提示:**同文件的 `TestRunnableRequiredWorkerNotRefused`(min_sum≥1 不早拒的那条裁决钉)**复用 `test_runtime_support.py` 的私有合成桥手法**(`_Analyzer` / `_BridgeSpec` / `build_scenario`)—— 有意「复用而非重新推导」(密封目录表达不出「一个节点两条桥、边界不同」),代价是**改动该手法的签名会同时打断两个套件**,动它时两边一起看。 |
 
+| 26 | `tests/orchestration/test_lane_batch_pv.py` | 128, 187 | `test_worker_spec_matrix` | FLIP | **D-1 Option A 收窄的行为半边(Task 3 实测补入,控制器已裁)。** `:187` 逐字断言 `tuple(c.id for c in w.capability_allowlist) == exp["caps"]`,而 `:128` 的期望是 `("cap.data.indicators", "cap.data.verified_snapshot")`。收窄后必红。§4 #19 只钉了 golden 侧的语义摘要,**行为侧的这条钉 Task 1 未枚举** —— 红窗清单在此之前是不完整的。Task 5 有意识改期望值,不是删钉。 |
+| 27 | `tests/orchestration/test_lane_batch_text.py` | 65, 127 | `test_worker_spec_matrix` | FLIP | 同 #26 的 `text.news` 半边:`:127` 同一条相等断言,`:65` 期望 `("cap.data.fundamentals", "cap.data.news")`。对应 §4 #20 的行为侧。 |
+| 28 | `tests/orchestration/test_lane_batch_text.py` | 152-154 | `test_allowlist_broadening_applied` | FLIP | `:154` `assert "cap.data.fundamentals" in {…text.news allowlist}`。**注意它是「上一次评审过的扩权」的档案钉**,D-1 现在有意识地把那次扩权反转 —— Task 5 **改写**这条钉使其记录新的裁决,**绝不删除**:删掉就等于抹掉「曾经授过、后来按逐能力论证收回」这段评审史。 |
+| 29 | `tests/orchestration/test_lane_batch_text.py` | 160-166 | `test_promise_supply_lint_clean` | FLIP-IF | **不只是钉,是真缺口。** Task 3 实测:收窄后 `lint_skill_supply` 对 `text.news` 返回 `skill promises tool 'ww_f10' but no allowlisted capability supplies it (allowlist capabilities: ['cap.data.news'])`(收窄前为 `()`)。**该缺口是控制器已裁的 Task-4 义务**:Task 4 从 `guanlan_v2/orchestration/skills/text.news/SKILL.md` 去掉 `ww_f10` 承诺(item 5 密封材料文本对齐),本钉届时**无需改测试即自愈**,并且**必须在 Task 5 出口重新为绿**。实测不对称:`pv.technical` 的同一 lint 收窄前后**都是空元组**,其 SKILL.md 不承诺任何只由 `indicators` 供给的工具 —— D-1 要求的逐能力论证在两处收窄上都已闭合。Task 4 的 SKILL.md 编辑会带动 skill 材料摘要 + P8 skill manifest 位移,§3 字面量表可能需要一次 Task-4 实测扩表(Task 4 量,Task 5 再生成)。 |
+
 > **红窗纪律(计划 Global Constraints):** Task 3-4 期间,`tests/orchestration` 全套只允许在
 > 本表 `FLIP` / `FLIP-IF`(且其条件成立)的条目上红。**本表之外的任何一处红 = STOP,上报。**
 
@@ -663,3 +668,98 @@ schema 的 Literal);(b) 给 `dec.research_mgr` 一个 `market_factor_report` 量
   **P5 schema manifest 位移** —— 在 L3 围栏外,所以本期**有意不动**。Task 5 在唯一的重冻窗口里
   要么把这个版本标记一并挪、要么把「有意不动」作为一条书面决定记进重冻对照表;
   **不允许默认跳过**(判据变了而版本标记没变,本身就是一处需要被看见的漂移)。
+
+---
+
+## 11. 红窗实测红集 (Task 3) —— 这就是 Task 5 的工作清单
+
+Task 3 提交点的 **实测** 全套结果(`python -m pytest tests/orchestration -q -p no:randomly`,
+脏工作树,与开工基线同一环境):
+
+| 轮次 | 结果 |
+|---|---|
+| 开工基线(HEAD `61f7e579`,改动前) | **5976 passed, 1 xfailed** in 19:20 —— 全绿,无 STOP |
+| 收官(Task 3 改动后) | **45 failed, 5973 passed, 1 xfailed, 5 errors** in 18:58 |
+
+红集共 **50 项**。逐项归属如下 —— 归属是**逐条写的,不是按文件一刀切**;
+任何归不到既有行的红都单列在 D 组并已上报控制器。
+
+### A 组 —— §3 链摘要 / golden 位移(27 项,全部落在 §3 的 43 行字面量表内)
+
+`data/test_data_catalog.py::test_matches_the_frozen_golden_manifest`(§3 #4)、
+`memory/test_catalog.py::test_data_catalog_golden_is_byte_untouched`(§3 #4)、
+`memory/test_catalog.py::test_full_catalog_golden_matches`(§3 #7/#8)、
+`test_phase4_handoff.py::{test_point5_phase3_full_catalog_export_reproduces_the_frozen_digest, test_point8_owning_modules_of_frozen_symbols_are_upstream, test_step2_records_the_exact_phase3_full_registry_and_catalog_digests}`(§3 #23)、
+`test_phase4_registry.py::test_phase4_catalog_matches_the_frozen_golden`(§3 #9/#10)、
+`test_phase5_handoff.py::{test_point4_phase3_full_registry_and_catalog_reproduce, test_point5_phase4_registry_and_catalog_chain_reproduce, test_step2_records_the_exact_phase3_full_registry_and_catalog_digests, test_step2_records_the_exact_phase4_registry_and_catalog_digests}`(§3 #24/#25)、
+`test_phase5_registry.py::test_phase5_catalog_matches_the_frozen_golden`(§3 #11/#12)、
+`test_phase6_handoff.py::{test_point3_catalog_builders_verify_their_predecessor_snapshot, test_point3_catalog_chain_digests_reproduce_and_link, test_step2_records_the_exact_catalog_chain_digests}`(§3 #26-30)、
+`test_phase6_registry.py::test_phase6_catalog_matches_the_frozen_golden`(§3 #13/#14)、
+`test_phase7_handoff.py::{test_point6_catalog_chain_nodes_reproduce_and_link, test_step2_records_the_exact_phase4_5_6_chain_digests}`(§3 #31/#32)、
+`test_phase7_registry.py::test_phase7_catalog_matches_the_frozen_golden`(§3 #15/#16)、
+`test_phase8_handoff.py::{test_clause_a_catalog_builders_are_heterogeneous_but_accessors_are_uniform, test_point1_chain_verifies_back_through_p6_p5_p4_to_p3_full, test_point1_phase7_chain_symbols_resolve_and_reproduce}`(§3 #33-36)、
+`test_phase8_registry_catalog.py::test_phase8_catalog_matches_the_frozen_golden`(§3 #17/#18,**并含 §4 #19/#20 的两个 WorkerSpec 语义摘要**)、
+`test_phase9_handoff.py::test_point2_catalog_chain_resolves_and_base_pins_verify`(§3 #37-43)、
+`test_phase9_registry_chain.py::test_phase9_catalog_matches_the_frozen_golden`(§3 #19/#20)、
+`test_phase10_chain.py::test_phase10_catalog_matches_the_frozen_golden`(§3 #5/#6)、
+`test_phase10_handoff.py::TestItem1ChainDigests::test_catalog_chain_resolves_by_exact_frozen_digest`(§3 #21/#22)。
+
+**P2 锚点未动的正向证据:**`data/test_phase_handoff.py`(§3 #1,只钉 P2)与
+`fixtures/stock_deep_dive_equivalence_v1.json`(§3 #2)**全程绿** —— 「P2 不动」这条唯一的上游锚点
+在实测上成立,不是靠不去看它。
+
+### B 组 —— §4 有意识翻转(8 项,全部命中已列行)
+
+| 测试 id | §4 行 |
+|---|---|
+| `test_pipeline_deep_preset.py::TestFullPhase9BridgeView::test_the_report_is_honestly_unsupported_naming_the_data_grant_gap` | #1 FLIP |
+| `test_pipeline_reduced_deep_preset.py::TestTheSupportFinding::test_the_untouched_ten_node_baseline_is_still_honestly_unsupported` | #2 FLIP |
+| `test_pipeline_reduced_deep_preset.py::TestTheSupportFinding::test_the_two_dropped_nodes_are_exactly_the_unmet_ones` | #3 FLIP |
+| `test_data_world_recipe.py::TestSupportedSetGroupC::test_every_granted_prefetch_row_is_within_the_supported_set` | #9 FLIP |
+| `test_lane_batch_pv.py::test_worker_spec_matrix[pv.technical]` | #26 FLIP |
+| `test_lane_batch_text.py::test_worker_spec_matrix[text.news]` | #27 FLIP |
+| `test_lane_batch_text.py::test_allowlist_broadening_applied` | #28 FLIP |
+| `test_lane_batch_text.py::test_promise_supply_lint_clean[text.news]` | #29 FLIP-IF(Task-4 义务) |
+
+**GREEN-VERIFY 全部实测为绿**,逐条复核:#4 减证据预设仍 supported;#5/#6 `tool_calls_required_unmet`
+算术钉未动;#10/#11/#12 L2-b 路由钉(三条新行照同一配方冻结路由,进迭代后仍绿);
+#14/#15 P3 两向不变量钉(判据字节未动);**#25 越界探针绿** —— 收窄/授权没有碰任何 worker 的
+`read_categories` 或 `capability_allowlist` 之外的东西。#7/#8/#13/#24 的 FLIP-IF 条件不成立,保持绿。
+
+### C 组 —— Task 1 自己的门(8 项)
+
+`test_l3_refreeze_gate.py::TestGate1L1Landed::test_the_one_reviewed_grant_is_still_the_single_pm_row`、
+`TestGate4BaselineDigests::{test_the_measured_chain_equals_the_spec_section_1_values, test_the_ledger_records_exactly_the_measured_chain, test_the_bridge_material_movement_is_measured_not_declared, test_the_ledger_records_the_measured_bridge_material_verdicts, test_the_provider_and_analyzer_materials_are_binding_INDEPENDENT}`、
+`TestGate6GrantSiteReality::{test_the_seventeen_p8_grants_stand_against_one_sealed_row, test_a_candidate_row_alone_trips_the_invariant_in_the_rows_direction}`。
+
+两类根因,都是**设计上必然**:
+
+1. **链/材料摘要类**(前 5 条):门把 §2 / §2.3 的表逐行重新度量并断言相等。本期正是要移动那些值,
+   所以门必红,直到 Task 5 把 §2 / §2.3 一并重冻。
+2. **候选行探针类**(后 3 条,含 `_row_augmented_materials` 的使用者):门用「给密封绑定**再加一条**
+   `pv.technical/verified_snapshot` 候选行」来做构造法证明。**那条候选行现在是真行了**,于是
+   `DataBridgePrefetchBinding` 的 `operations must be duplicate-free per (worker, capability)` 当场拒绝,
+   探针自己炸掉。`test_the_seventeen_p8_grants_stand_against_one_sealed_row` 同理:17 组授权对 1 条行
+   的实测事实,本期已变成 15 组对 4 条行。
+
+**§4 没有任何一行指向门文件。** Task 3 按简报要求**未编辑门**。
+**Task 5 必须给门补 §4 行并有意识翻转它**(候选行探针要换一个仍未授权的 (worker, method) 组合,
+否则它证明的东西就没了)。
+
+### D 组 —— 归不到任何既有行的红(7 项)—— **已上报控制器,待裁**
+
+| # | 测试 id | 实测根因 | 类别 |
+|---|---|---|---|
+| D1 | `data/test_subject_projection.py::TestRealRowRoundTrip`(5 条,fixture `real_row` setup ERROR) | 该 fixture 断言 `[(r.worker_id, r.method_ref.id) for r in rows] == [("dec.pm","verified_snapshot")]` —— 即「绑定里**只有一条**行」。与 `data/test_data_catalog.py` 的 `verified_snapshot_row` 是**同一句 L1 期的话**,Task 3 只被授权改后者(在本任务 charter 内),前者不在 charter 内,**按红窗法未动**。 | 有意识翻转,机械 |
+| D2 | `test_pipeline_screening.py::TestSubjectParamsStamp::test_zero_screening_workers_carry_data_prefetch_rows_today` | `assert targeted == {"dec.pm"}`,实测现为 `{dec.pm, pv.technical, text.news, text.policy}`。钉名里的 “today” 说明它本就是一条**记录当期事实**的钉;L1 Task 4 的注释也写着「vacuous behaviorally: zero screening workers carry data prefetch rows」——**这句话现在假了**:`text.news` 就是选股 lane 的 worker。 | 有意识翻转,**且连带源码注释需改** |
+| D3 | `test_phase8_registry_catalog.py::test_capability_promise_supply_lint_clean_across_every_seat` | 与 §4 #29 **同一个根因**(`text.news` 的 `ww_f10` 承诺无供给),只是在全 27 席的作用域上再钉一次。随 Task-4 去掉 `ww_f10` 承诺后**无需改测试即自愈**。 | Task-4 义务的第二处落点 |
+
+三组都是「钉记录了 L3 之前的世界」,**没有一条指示实现缺陷**;但它们不在 §3/§4 任何一行里,
+所以按红窗法(「归不到的红 = STOP,上报」)Task 3 **不自行修复、不自行入表**,列在此处等控制器裁,
+由控制器决定是补 §4 行(#30-32)还是另行处置。
+
+### 结论
+
+- red ⊆ (§3 ∪ §4):**否** —— A 组 27 + B 组 8 = 35 项在表内;C 组 8 项归属清楚但表内无行;D 组 7 项待裁。
+- **零红出现在 GREEN-VERIFY 行上。** 没有任何一处红指示越界或实现缺陷。
+- goldens **未再生成**;`CHECKER_VERSION` **未动**;密封 schema 的三个 class docstring **未动**。

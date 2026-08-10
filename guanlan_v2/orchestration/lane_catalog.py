@@ -54,7 +54,11 @@ from guanlan_v2.orchestration.catalog import (
     validate_catalog_snapshot,
 )
 from guanlan_v2.orchestration.catalog_runtime import build_text_material
-from guanlan_v2.orchestration.data.catalog import data_capability_refs
+from guanlan_v2.orchestration.data.catalog import (
+    data_capability_refs,
+    phase3_data_surface,
+    verify_cumulative_prefetch_coverage,
+)
 from guanlan_v2.orchestration.digest import DigestHex, DigestModel
 from guanlan_v2.orchestration.enums import (
     DataMode,
@@ -200,7 +204,14 @@ _TEXT_ROWS: tuple[_TextWorkerRow, ...] = (
         model_tier="fast", thinking_budget=0, prompt_id="prompt.text.news", skill_id="skill.text.news",
         guardrail_ids=("guardrail.anti_fabrication", "guardrail.number_provenance",
                        "guardrail.untrusted_input_isolation"),
-        capability_methods=("news", "fundamentals"),
+        # L3 ruling D-1 = Option A (2026-08-11): narrowed from
+        # ("news", "fundamentals"). ``fundamentals`` had NO backend adapter in the
+        # production data world AND its params class is unsatisfiable from L1's
+        # closed subject-pointer set, so holding it was a paper privilege this
+        # reader could never exercise. Restoring it means building the adapter
+        # AND widening the L1 projection — two efforts outside this fence, on the
+        # post-L3 backlog. Its ``news`` grant now carries a real prefetch row.
+        capability_methods=("news",),
         read_categories=("context", "market_data"),
         output_schema=SchemaRef(name="NewsDigestReport", version="1"),
         tool_calls=ToolCallRequirement.REQUIRED, inputs=()),
@@ -421,7 +432,12 @@ _PV_ROWS: tuple[_PVWorkerRow, ...] = (
         skill_id="skill.pv.technical",
         guardrail_ids=("guardrail.number_provenance", "guardrail.untrusted_input_isolation",
                        "guardrail.pattern_dictionary"),
-        capability_methods=("verified_snapshot", "indicators"),
+        # L3 ruling D-1 = Option A (2026-08-11): narrowed from
+        # ("verified_snapshot", "indicators") for the same measured reason as
+        # ``text.news``/``fundamentals`` — ``indicators`` has no backend adapter
+        # and its params class is unsatisfiable from the closed subject-pointer
+        # set. Its ``verified_snapshot`` grant now carries a real prefetch row.
+        capability_methods=("verified_snapshot",),
         read_categories=("context", "market_data"),
         output_schema=SchemaRef(name="TechnicalReport", version="1"),
         tool_calls=ToolCallRequirement.REQUIRED,
@@ -1732,6 +1748,17 @@ def build_phase8_catalog_snapshot(
     except Exception as exc:  # surface structural failures as CatalogError
         raise CatalogError(f"phase8 catalog snapshot is not runnable: {exc}") from exc
     validate_catalog_snapshot(snapshot)
+    # L3 ruling D-1(0): the SECOND evaluation point of the one-to-one grant/row
+    # invariant. Phase 3 could only judge coverage for its own five workers and
+    # carried every other row forward; this fold is where the lane readers that
+    # own those rows finally exist, so it is where the deferred rows are claimed
+    # — and where a REQUIRED reader holding a rowless data grant is refused
+    # instead of shipping as a permanently unsupportable seat. The binding is the
+    # sealed Phase-3 one this catalog inherits (the check re-derives its material
+    # digest and requires the snapshot to carry it, so it cannot be satisfied by
+    # a binding this catalog never sealed).
+    verify_cumulative_prefetch_coverage(
+        snapshot, phase3_data_surface().prefetch_binding)
     return snapshot
 
 

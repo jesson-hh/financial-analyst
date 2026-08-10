@@ -491,8 +491,20 @@ def phase3_registry():
 
 @pytest.fixture(scope="module")
 def verified_snapshot_row(surface):
-    """The single real prefetch row the reviewed grant produces."""
-    rows = surface.prefetch_binding.operations
+    """``dec.pm``'s real prefetch row — the ORIGINAL reviewed integration grant.
+
+    CONSCIOUS FLIP (L3 Task 3, 2026-08-11): this fixture used to assert the
+    binding held exactly ONE row and return it. L3's rulings D-1/D-2 added three
+    reviewed LANE rows to this same sealed material (``pv.technical`` /
+    ``text.news`` / ``text.policy``), so "the single row" is no longer a true
+    statement about the tree — but everything this fixture's tests prove is about
+    ``dec.pm``'s row specifically (the L1 subject-projection runnability that
+    healed defect H), so it selects that row by identity instead of by position.
+    The full row roster is pinned in ``tests/orchestration/test_l3_grants.py``;
+    what stays pinned HERE is that ``dec.pm``'s row is unique and unmoved.
+    """
+    rows = [r for r in surface.prefetch_binding.operations
+            if r.worker_id == "dec.pm"]
     assert [(r.worker_id, r.method_ref.id) for r in rows] == [
         ("dec.pm", "verified_snapshot")]
     return rows[0]

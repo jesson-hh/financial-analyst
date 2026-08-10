@@ -14,10 +14,18 @@ trusted from declared summary numbers) and the cumulative
 :func:`build_phase3_catalog` builder that extends **only** the canonical
 ``PHASE2_STATIC_CATALOG_DIGEST`` base.
 
-No capability is granted globally: the initial integration grants ``dec.pm``
-exactly one data method (``verified_snapshot``), coverage between grants and
-prefetch rows is one-to-one, and ``compat.*`` remains ``static_legacy_only`` with
-no data capability.
+No capability is granted globally: the initial integration grant gives ``dec.pm``
+exactly one data method (``verified_snapshot``), the L3 lane grants give
+``pv.technical`` / ``text.news`` / ``text.policy`` exactly one each, coverage
+between grants and prefetch rows is one-to-one, and ``compat.*`` remains
+``static_legacy_only`` with no data capability.
+
+That coverage is checked at TWO evaluation points, because the grant holders do
+not all exist at the same phase. Phase 3 checks the rows whose worker it can see
+(the end-of-Phase-2 five) and carries the rest forward;
+:func:`verify_cumulative_prefetch_coverage`, called from the Phase-8 fold, claims
+the carried rows against the cumulative worker set. The predicate's bytes are the
+same at both points; only its scope differs (ruling D-1(0), 2026-08-11).
 """
 from __future__ import annotations
 
@@ -55,7 +63,12 @@ from guanlan_v2.orchestration.digest import (
     NonEmptyStr,
     content_digest,
 )
-from guanlan_v2.orchestration.enums import DataBackend, DataMode, ExecutionKind
+from guanlan_v2.orchestration.enums import (
+    DataBackend,
+    DataMode,
+    ExecutionKind,
+    ToolCallRequirement,
+)
 from guanlan_v2.orchestration.refs import (
     CapabilityRef,
     ContentRef,
@@ -81,6 +94,7 @@ __all__ = [
     "data_capability_refs",
     "phase3_data_surface",
     "build_phase3_catalog",
+    "verify_cumulative_prefetch_coverage",
     "phase3_data_catalog_snapshot",
     "PHASE3_DATA_CATALOG_VERSION",
     "CATALOG_PUBLIC_MODELS",
@@ -98,6 +112,39 @@ PHASE3_DATA_CATALOG_VERSION = "phase3-data-v1"
 #: construction site in :class:`_Phase3DataSurface`.
 _REVIEWED_INTEGRATION_GRANTS: dict[str, tuple[str, ...]] = {
     "dec.pm": ("verified_snapshot",),
+}
+
+#: the reviewed LANE data grants (L3, rulings D-1/D-2 + the D-1 amendment):
+#: worker id -> granted data method ids, for workers that do not exist yet at
+#: Phase 3.
+#:
+#: These are deliberately a SEPARATE constant from
+#: :data:`_REVIEWED_INTEGRATION_GRANTS` rather than more entries in it, because
+#: the two feed different machinery. ``_REVIEWED_INTEGRATION_GRANTS`` drives BOTH
+#: the prefetch rows AND :func:`phase3_data_catalog_snapshot`'s reviewed
+#: worker-allowlist updates — and that second path can only name an
+#: end-of-Phase-2 worker (``build_phase3_catalog`` rejects any other update; the
+#: snapshot builder would not even find the worker to update). These three
+#: workers are Phase-8 lane finals: they already carry their capability grants in
+#: their own ``lane_catalog`` WorkerSpecs, so what they need from Phase 3 is the
+#: ROW, never an allowlist update. Feeding them into the update path is the
+#: structural impossibility ruling D-1(0) was written to route around, so this
+#: constant is read at the row-construction site ONLY.
+#:
+#: The rows are ``always_invoke`` + ``success_requires_finalized_call=True``
+#: (ruling D-2 = Option A): each of these workers declares
+#: ``tool_calls=REQUIRED``, and that is the only row shape whose
+#: ``row_min_finalized`` is 1 — i.e. the only shape under which a REQUIRED
+#: reader can clear ``tool_calls_required_unmet``, and under which a data outage
+#: cannot be reported as node success.
+#:
+#: Their one-to-one coverage is NOT verified at Phase 3 (the workers are not
+#: there to be verified against); it is carried forward and enforced at the
+#: Phase-8 fold by :func:`verify_cumulative_prefetch_coverage`.
+_REVIEWED_LANE_DATA_GRANTS: dict[str, tuple[str, ...]] = {
+    "pv.technical": ("verified_snapshot",),
+    "text.news": ("news",),
+    "text.policy": ("news",),
 }
 
 
@@ -515,6 +562,17 @@ class _Phase3DataSurface:
         # phase, never to a drive-by edit. Pinned by
         # ``tests/orchestration/data/test_data_catalog.py``
         # ``::TestVerifiedSnapshotRowRunnableOnlyUnderSubjectProjection``.
+        #
+        # L3 (2026-08-11) — the THREE reviewed LANE rows join this same sealed
+        # material. Ruling D-1(0) forbade the alternative shape explicitly: a
+        # second prefetch material / second descriptor for one bridge is the
+        # "one bridge, two configs" fact-C red line this program has been
+        # closing, so the lane rows are appended to THIS binding and the sealed
+        # ``bridge.data_runtime.prefetch@1`` + ``.descriptor@1`` digests move
+        # once, inside the chartered re-freeze window. Their param projection is
+        # byte-for-byte the ``dec.pm`` shape above (both granted methods take
+        # ``InstrumentUniverseParams``); their invocation shape is NOT — see
+        # ``_REVIEWED_LANE_DATA_GRANTS``.
         ops = []
         for worker_id, method_ids in _REVIEWED_INTEGRATION_GRANTS.items():
             for method_id in method_ids:
@@ -527,6 +585,24 @@ class _Phase3DataSurface:
                         source_ref=self.source_ref, capability_ref=spec.capability_ref),),
                     invocation_mode="cache_or_invoke",
                     success_requires_finalized_call=False,
+                    param_bindings=(
+                        ParamBinding(target_pointer="/as_of", source_kind="node_param",
+                                     source_pointer="/asof_date"),
+                        ParamBinding(target_pointer="/symbols", source_kind="node_param",
+                                     source_pointer="/code"),
+                    ),
+                ))
+        for worker_id, method_ids in _REVIEWED_LANE_DATA_GRANTS.items():
+            for method_id in method_ids:
+                spec = self.spec_by_method[method_id]
+                ops.append(DataPrefetchOperation(
+                    worker_id=worker_id,
+                    method_ref=spec.method_ref,
+                    capability_ref=spec.capability_ref,
+                    frozen_route=(RouteEntry(
+                        source_ref=self.source_ref, capability_ref=spec.capability_ref),),
+                    invocation_mode="always_invoke",
+                    success_requires_finalized_call=True,
                     param_bindings=(
                         ParamBinding(target_pointer="/as_of", source_kind="node_param",
                                      source_pointer="/asof_date"),
@@ -773,7 +849,18 @@ def build_phase3_catalog(
             if data_cap_refs.get((cap.id, cap.version)) == cap:
                 granted.add((w.id, cap.id, cap.version))
 
+    # L3 ruling D-1(0), the correction-clause amendment to this builder: the
+    # row-side check gains a SCOPE SPLIT. ``granted`` is, and stays, the grant
+    # set of the end-of-Phase-2 workers — the only workers this builder can see.
+    # A row naming one of them is checked HERE, both directions, with the
+    # predicate below untouched byte-for-byte. A row naming a worker this phase
+    # does not know is NOT silently accepted (that would be the privilege hole
+    # this invariant exists to close): it is carried forward in
+    # ``deferred_rows`` and MUST be claimed by the second evaluation point at
+    # the Phase-8 fold, where its worker finally exists. A deferred row that no
+    # later fold claims fails there, with this same message.
     rows: set[tuple[str, str, str]] = set()
+    deferred_rows: set[tuple[str, str, str]] = set()
     for op in data_bridge_prefetch_binding.operations:
         mkey = (op.method_ref.id, op.method_ref.version, op.method_ref.content_digest)
         spec = spec_by_method_ref.get(mkey)
@@ -798,7 +885,11 @@ def build_phase3_catalog(
                 raise CatalogError(
                     "prefetch route entries must carry the row's exact method capability"
                 )
-        rows.add((op.worker_id, op.capability_ref.id, op.capability_ref.version))
+        key = (op.worker_id, op.capability_ref.id, op.capability_ref.version)
+        if op.worker_id in base_workers:
+            rows.add(key)
+        else:
+            deferred_rows.add(key)
 
     if granted != rows:
         missing_rows = granted - rows
@@ -860,6 +951,90 @@ def build_phase3_catalog(
         workers=workers,
         resolved_material=tuple(text_by_key.values()) + tuple(caps_by_key.values()),
     )
+
+
+def verify_cumulative_prefetch_coverage(
+    snapshot: WorkerCatalogSnapshot,
+    prefetch_binding: DataBridgePrefetchBinding,
+) -> None:
+    """The SECOND evaluation point of the one-to-one grant/row invariant (L3).
+
+    Phase 3 can only judge coverage for the five end-of-Phase-2 workers; the lane
+    readers that hold data capabilities are added at the Phase-8 fold, so their
+    rows are carried forward and claimed HERE, against the cumulative worker set.
+    ``build_phase8_catalog_snapshot`` is the caller: Phase 8 is the first fold at
+    which a deferred row *can* be claimed, and the grant set is measured
+    identical at Phase 8, 9 and 10, so claiming early loses no coverage. That
+    last fact is an assumption about later phases, and it is pinned executably
+    (``test_l3_grants.py::TestP8CoverageAssumption``) rather than trusted: a
+    future phase that grants data to a worker it adds after Phase 8 reddens that
+    pin and must extend the evaluation point instead of silently escaping it.
+
+    The predicate is deliberately ASYMMETRIC (ruling D-1(0), item 3), and the
+    asymmetry encodes semantics this program already ruled rather than new ones:
+
+    * **rows -> grants is STRICT.** Every row must have a matching grant, in
+      every scope. This is the privilege-escalation direction: a row for a
+      capability its worker was never granted would be an unreviewed grant
+      smuggled in through the binding, and there is no scope in which that is
+      acceptable.
+    * **grants -> rows is enforced only for ``tool_calls=REQUIRED`` workers.** A
+      REQUIRED reader with no row can never satisfy its own tool-call arithmetic
+      — it is a structurally dead seat, and it is refused at build time. An
+      OPTIONAL worker's rowless grant is the licensed-EMPTY reviewed state ruled
+      in C3; sweeping those is explicitly not this phase's business, and
+      enforcing this direction over them would force a whole-catalog reckoning
+      (most of them have neither a backend adapter nor a satisfiable pointer set)
+      onto a task chartered to add three grants.
+
+    The refusal message is the Phase-3 predicate's, word for word — one
+    invariant, two evaluation points, one vocabulary for operators to recognise.
+
+    Raises :class:`CatalogError` if ``prefetch_binding`` is not the binding this
+    catalog actually carries (a check against a binding the catalog never sealed
+    would be theatre), or if coverage fails in either enforced direction.
+    """
+    data_cap_refs = {(c.id, c.version): c for c in data_capability_refs().values()}
+    workers = {w.id: w for w in snapshot.workers}
+    granted: set[tuple[str, str, str]] = set()
+    for w in snapshot.workers:
+        for cap in w.capability_allowlist:
+            if data_cap_refs.get((cap.id, cap.version)) == cap:
+                granted.add((w.id, cap.id, cap.version))
+
+    rows = {
+        (op.worker_id, op.capability_ref.id, op.capability_ref.version)
+        for op in prefetch_binding.operations
+    }
+
+    ungranted = rows - granted
+    missing_rows = {
+        key for key in granted - rows
+        if workers[key[0]].evidence_policy.tool_calls is ToolCallRequirement.REQUIRED
+    }
+    if missing_rows or ungranted:
+        raise CatalogError(
+            "worker data-capability grants and prefetch rows must be one-to-one; "
+            f"grants without a row: {sorted(missing_rows)}; rows without a grant: "
+            f"{sorted(ungranted)}"
+        )
+
+    # …and the coverage just proved is only worth anything if it was proved
+    # about the binding this catalog actually seals. Checked LAST on purpose:
+    # checked first it would mask every coverage failure behind a drift message,
+    # and it would then be unreachable in review — a guard nobody can redden is
+    # theatre. Here it catches the case coverage cannot: a binding that satisfies
+    # the invariant (e.g. an extra row for an already-granted OPTIONAL worker)
+    # yet is not the material the catalog carries.
+    config_ref, _material = build_text_material(
+        id="bridge.data_runtime.prefetch", version="1", kind="guardrail",
+        raw=serialize_prefetch_binding(prefetch_binding))
+    if not any(e.ref == config_ref for e in snapshot.content_manifest):
+        raise CatalogError(
+            "the prefetch binding does not match the catalog's sealed "
+            f"bridge.data_runtime.prefetch@1 material (binding digest "
+            f"{config_ref.content_digest})"
+        )
 
 
 def phase3_data_catalog_snapshot() -> WorkerCatalogSnapshot:
