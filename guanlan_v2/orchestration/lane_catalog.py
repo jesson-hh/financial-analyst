@@ -15,12 +15,17 @@ file's Lane C section ships first. Each builder is a pure function of resolved m
 
 Reviewed rulings folded into Lane C (FLAGGED in the task report):
 
-* **Allowlist broadening (Task 0b review).** The plan §7.1 single-capability shorthand
-  under-supplies two seats; the reviewed corrections are applied so every shipped seat's
-  ``lint_skill_supply(...) == ()``: ``text.news`` gains ``cap.data.fundamentals`` (it
-  promises ``ww_f10``) and ``text.macro`` gains ``cap.data.indicators`` +
-  ``cap.data.verified_snapshot`` (it promises ``ww_macro_pulse`` / ``ww_market_tape`` /
-  ``ww_overseas``). No tool is ever stuffed into the wrong manifest row.
+* **Allowlist broadening (Task 0b review) — and its partial REVERSAL (L3 D-1).** The plan
+  §7.1 single-capability shorthand under-supplies two seats, so the reviewed corrections were
+  applied to make every shipped seat's ``lint_skill_supply(...) == ()``: ``text.macro`` gains
+  ``cap.data.indicators`` + ``cap.data.verified_snapshot`` (it promises ``ww_macro_pulse`` /
+  ``ww_market_tape`` / ``ww_overseas``) — that half **stands**. The ``text.news`` half
+  (``cap.data.fundamentals``, for a ``ww_f10`` promise) was **reversed by ruling D-1
+  (2026-08-11)**: ``fundamentals`` has no backend adapter and its params are unsatisfiable
+  from the closed subject-pointer set, so the grant was unexercisable paper. ``text.news``
+  now allowlists ``cap.data.news`` only, and L3 Task 4 removed the ``ww_f10`` promise from
+  its SKILL — the lint stays clean by dropping a promise nothing could supply, not by
+  holding a grant nothing could exercise. No tool is ever stuffed into the wrong manifest row.
 * **Pilot reviewed update (clause d).** ``text.sentiment`` changes ONLY two WorkerSpec
   fields: ``skills`` rebinds to the Task-1 relocated ``skill.text.sentiment`` (whose
   bytes are the 交付物② 逐字安装件), and ``guardrail.anti_fabrication`` is added to

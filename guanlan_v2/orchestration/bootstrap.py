@@ -457,8 +457,9 @@ class ExperienceBridgeSupportAnalyzer:
     config rows, never trusted numbers: exactly one ``experience.retrieve``
     invocation per node (``max=1``) and node success requires one finalized
     call (``min=1`` — ``always_invoke`` + ``success_requires_finalized_call``).
-    A worker without a reviewed row fails analysis; a row granting a capability
-    outside the worker allowlist is an analyzer failure, not authority.
+    A row granting a capability outside the worker allowlist is an analyzer
+    failure, not authority. Those bounds describe the GRANTED path; what a
+    worker with NO reviewed row gets is the ruled discrimination below.
 
     **Rowless discrimination (Phase 10 · Task 11, controller-ruled).** The bridge
     activates on the ``experience_cases`` read category as well as on the
@@ -2262,14 +2263,13 @@ class Lane0ExperienceBridgeProvider:
     descriptor's activation refs against the in-code ``experience.retrieve``
     identity, so ``self._capability_ref`` IS the activation identity).
 
-    Material-vs-code drift note (the C3 precedent's discipline): the
-    byte-frozen ``lane0.experience.provider`` handler material
-    (``config/orchestration/materials/lane0/experience_provider.md``) still
-    states the pre-ruling invariant ("an empty selection … still finalizes one
-    successful call" under an analyzer-bound ``max_capability_invocations=1``
-    summary) — that sentence describes the GRANTED path only. Per the ruling
-    the sealed material bytes stay BYTE-FROZEN (no catalog digest moves); the
-    code is the ruled behaviour.
+    The sealed ``lane0.experience.provider`` handler material
+    (``config/orchestration/materials/lane0/experience_provider.md``) states
+    this same discrimination: L3 Task 4 moved those bytes inside the chartered
+    re-freeze window, so its "one successful call" sentence is now explicitly
+    the GRANTED path and the non-granted arm is written beside it. That
+    material's digest is embedded in the sealed bridge descriptor material, so
+    the two move together or ``assemble_lane0_catalog`` refuses loudly.
     """
 
     def __init__(self, *, bridge, summary, pool, registry, capability_ref,

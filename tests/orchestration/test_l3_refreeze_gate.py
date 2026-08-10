@@ -1131,6 +1131,33 @@ class TestGate8TheAllowedRedSetIsExecutable:
         assert verdicts == {"AuxDataUngranted": "FLIP-IF",
                             "aux_data_ungranted": "FLIP-IF"}
 
+    def test_every_section4_cross_reference_resolves(self):
+        """Prose elsewhere in the ledger points AT §4 rows by number. Row numbers
+        move whenever a row is inserted, and §3.1's first version shipped with
+        every number off by +5 — a drift no human reading caught and no existing
+        gate could see, because each number was individually plausible.
+
+        So the cross-reference carries its own witness: every reference is
+        written ``§4 #NN(`token`)`` and ``token`` must occur in row NN's ``file``
+        or ``anchor`` cell. A renumbering slides the token off its row and this
+        reddens; a token that is merely a filename shared by neighbouring rows
+        still catches the multi-row shifts that actually happen.
+        """
+        rows = {num: f"{rel} {anchor}"
+                for num, rel, _l, anchor, _v in _ledger_pins()}
+        refs = re.findall(r"§4 #(\d+)\(`([^`]+)`\)", _LEDGER_TEXT)
+        assert refs, ("no §4 cross-reference parsed — either the ledger stopped "
+                      "citing §4 rows or the citation format drifted")
+        broken = [
+            f"§4 #{num}(`{token}`) -> row {num} is "
+            + (f"{rows[int(num)]!r}" if int(num) in rows else "MISSING")
+            for num, token in refs
+            if int(num) not in rows or token not in rows[int(num)]
+        ]
+        assert broken == [], (
+            "§4 cross-references that do not resolve to the row they name "
+            f"(the numbering drifted under them): {broken}")
+
     def test_the_supported_methods_guard_is_an_unconditional_flip(self):
         """It reddens under ANY grant (its literal ``granted == {…}`` arm), so it
         must not be filed as conditional."""

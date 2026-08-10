@@ -165,6 +165,50 @@ class TestTheMemoryAnalyzerMaterialStatesTheRuledBehaviour:
 
 
 # =========================================================================== #
+# 2b — the experience PROVIDER handler material (the third drift note)         #
+# =========================================================================== #
+class TestTheExperienceProviderMaterialStatesTheRuledBehaviour:
+    """``lane0.experience.provider`` — the third byte-frozen material whose text
+    still described only the GRANTED path. Its drift note claimed the bytes
+    "stay BYTE-FROZEN"; this window is the only one in which that could stop
+    being true, so it stops being true here."""
+
+    @pytest.fixture(scope="class")
+    def material(self) -> str:
+        return _text(_LANE0 / "experience_provider.md")
+
+    def test_the_pinned_file_is_the_one_the_catalog_actually_seals(self):
+        catalog = B.load_lane0_catalog()
+        ref, _ = build_text_material(
+            id="lane0.experience.provider", version="1", kind="handler",
+            raw=(_LANE0 / "experience_provider.md").read_bytes())
+        assert catalog.refs["lane0.experience.provider"] == ref
+        # the same one-mirror coupling the analyzer material has
+        assert catalog.descriptor.provider_handler_ref == ref
+
+    def test_the_one_successful_call_sentence_is_now_scoped_to_the_granted_path(
+            self, material):
+        low = " ".join(material.lower().split())
+        assert "still finalizes one successful call" in low, material
+        idx = low.index("still finalizes one successful call")
+        assert "granted" in low[max(0, idx - 260):idx], (
+            "the sentence is still stated unconditionally; under C3 a "
+            "non-granted worker finalizes ZERO calls")
+
+    def test_it_states_the_non_granted_arm(self, material):
+        low = " ".join(material.lower().split())
+        assert "non-granted discrimination" in low, material
+        assert "max_capability_invocations=0" in low, material
+        assert "does not invoke" in low, material
+        assert "not even the empty sentinel" in low, material
+
+    def test_the_material_agrees_with_the_provider_the_runtime_binds(self):
+        doc = B.Lane0ExperienceBridgeProvider.__doc__ or ""
+        assert "Non-granted discrimination" in doc
+        assert "zero invocations" in doc
+
+
+# =========================================================================== #
 # 3 — the P10-era drift-recording comments are GONE                            #
 # =========================================================================== #
 class TestTheDriftRecordingCommentsAreGone:
@@ -183,10 +227,29 @@ class TestTheDriftRecordingCommentsAreGone:
         assert "BYTE-FROZEN" not in doc
         assert "pre-Task-11 invariant" not in doc
 
-    def test_neither_module_still_claims_the_material_states_the_old_invariant(self):
-        for mod in (B, MC):
-            src = inspect.getsource(mod)
-            assert "still states the pre-Task-11 invariant" not in src, mod.__name__
+    def test_the_experience_provider_docstring_no_longer_records_drift(self):
+        doc = B.Lane0ExperienceBridgeProvider.__doc__ or ""
+        assert "Material-vs-code drift note" not in doc
+        assert "BYTE-FROZEN" not in doc
+        assert "pre-ruling invariant" not in doc
+
+    def test_no_drift_note_pattern_survives_in_either_module(self):
+        """The pin must match its own name. An earlier version grepped ONE
+        phrasing (``pre-Task-11 invariant``) and therefore walked straight past
+        the third drift note, which said ``pre-ruling invariant`` — the pin
+        looked comprehensive and was not. Both phrasings, plus the note's own
+        heading and its BYTE-FROZEN conclusion, are refused in BOTH modules."""
+        needles = ("Material-vs-code drift note",
+                   "still states the pre-Task-11 invariant",
+                   "still states the pre-ruling invariant",
+                   "stay BYTE-FROZEN")
+        offenders = [
+            (mod.__name__, needle)
+            for mod in (B, MC)
+            for needle in needles
+            if needle in inspect.getsource(mod)
+        ]
+        assert offenders == [], offenders
 
 
 # =========================================================================== #
@@ -222,10 +285,17 @@ class TestTheRegimePromptRequiresSortedDriversAndAConditionalAnchor:
             "the anchor rule is still stated unconditionally; the contract "
             "licenses an empty citation list when the runtime measured nothing "
             "citable, so an unconditional rule instructs a fabrication")
-        idx = prompt.find("EvidenceAnchor")
-        assert idx != -1, prompt
-        window = " ".join(prompt[max(0, idx - 300):idx + 500].lower().split())
-        assert "when" in window or "only if" in window, window
+        # …and the replacement must actually carry BOTH arms. An earlier version
+        # of this pin only looked for the word "when" somewhere nearby, which
+        # ordinary English prose satisfies by accident — it could not tell a
+        # conditional rule from a paragraph that happens to contain "when".
+        low = " ".join(prompt.lower().split())
+        assert "the anchor rule is conditional" in low, prompt
+        assert low.count("when the ") >= 2, (
+            "a conditional rule needs BOTH arms stated, not just the one that "
+            "used to be unconditional")
+        assert "cite nothing" in low, (
+            "the second arm must say what to do when nothing is citable")
 
     def test_it_states_who_authors_the_empty_evidence_reason(self, prompt):
         low = prompt.lower()
@@ -303,6 +373,27 @@ class TestThePresetDescriptionMatchesWhatTheWorkerDoes:
         assert "pv.microstructure" in desc
         assert "slot.microstructure" in desc
         assert "x.quality_gate" in desc
+
+    def test_the_reduced_preset_carries_the_same_correction(self):
+        """The reduced preset repeated the overstatement verbatim. Truing one
+        and leaving the other would leave the same false sentence shipping under
+        a different preset id."""
+        reduced = json.loads(_text(_PRESETS / "luozi_deep_decide_reduced_v1.json"))
+        desc = reduced["description"]
+        assert "pv.price_action + pv.microstructure " not in desc, (
+            "the reduced preset still lists pv.microstructure among what feeds "
+            "the debate")
+        assert "slot.microstructure" in desc
+        assert "x.quality_gate" in desc
+
+    def test_no_node_of_the_reduced_preset_reads_it_either(self):
+        workers = {w.id: w for w in LC.phase8_catalog_snapshot().workers}
+        reduced = json.loads(_text(_PRESETS / "luozi_deep_decide_reduced_v1.json"))
+        scheduled = {n["worker_id"] for n in reduced["nodes"]}
+        assert "pv.microstructure" in scheduled     # it IS in the graph…
+        assert {wid for wid in scheduled
+                for i in workers[wid].inputs
+                if i.schema_ref.name == "MicrostructureReport"} == set()
 
 
 # =========================================================================== #
