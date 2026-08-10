@@ -89,14 +89,25 @@ HEAD 实测:`source_registry = bb81979af8824a99574c67b9ef6176720568745a8e58772af
 
 ### 2.3 四个数据桥材料摘要 —— 计划里说「四个都会动」,实测是**两个**
 
-| 材料 | 摘要 @ HEAD | D-1/D-2 改绑定后是否移动 | 理由 |
-|---|---|---|---|
-| `bridge.data_runtime.provider@1` | `3a1e727b2e3f761bfdecadf919dc678bc8dfd19b993495ca5dd223ecf3d8e065` | **不动** | 材料字节是 provider handler 文本,与 prefetch 绑定无关 |
-| `bridge.data_runtime.analyzer@1` | `3f93fdf29d28f26676e7291dbeeb1d6e3b899265862940bf5c16ae477aeb1968` | **不动** | 同上(analyzer 文本) |
-| `bridge.data_runtime.prefetch@1` | `0c9d38a76099dced0d954066539f72112a1cff7989a81c5f39b3793ab5d61172` | **移动** | 材料字节 == `serialize_prefetch_binding(binding)`,加行即改字节 |
-| `bridge.data_runtime.descriptor@1` | `797064488e810f2ae86e8f2ed49e1b5e528dfddcf6ae9958192d3df63a46c058` | **移动** | descriptor 内嵌 `config_ref`,随 prefetch 材料一起动 |
+`理由` 列写的是**实际度量方式**,不是解释:
 
-(两者的 provider/analyzer 前 8 位与计划正文引用的 `3a1e727b…` / `3f93fdf2…` 一致,交叉验证通过。)
+* **移动 半边 = 构造法。** gate 真的用「多一条候选行」的绑定重建 prefetch 材料与 descriptor
+  (`_row_augmented_materials`,与 §7.0 那条 one-to-one 证明共用同一个构造点),再与密封 ref 比 —— 摘要确实不同。
+* **不动 半边 = 独立性断言 + 源头钉。** 断言密封绑定的序列化**和**行增广绑定的序列化
+  都**不出现在** provider/analyzer 的材料字节里(以 prefetch 材料作**阳性对照** —— 它确实内嵌了密封序列化,
+  证明这个 `in` 探针不是恒真);再在源码上钉 provider/analyzer 走 `raw=_PROVIDER_BYTES` / `raw=_ANALYZER_BYTES`
+  两个模块常量,而 prefetch 走 `raw=config_bytes`(即 `serialize_prefetch_binding`)。
+  **明确不用的做法:**拿材料自己的字节重建再比摘要 —— 那是恒等式(`build_text_material` 是纯函数,
+  绑定根本不进入计算),任何伪造都翻不红它。那是本清单第一版的写法,已被复审判定「证明不了任何东西」并改掉。
+
+| 材料 | 摘要 @ HEAD | D-1/D-2 改绑定后是否移动 | 理由(度量方式) |
+|---|---|---|---|
+| `bridge.data_runtime.provider@1` | `3a1e727b2e3f761bfdecadf919dc678bc8dfd19b993495ca5dd223ecf3d8e065` | **不动** | 独立性:两份绑定序列化均不在其字节内 + 源头钉 `raw=_PROVIDER_BYTES` |
+| `bridge.data_runtime.analyzer@1` | `3f93fdf29d28f26676e7291dbeeb1d6e3b899265862940bf5c16ae477aeb1968` | **不动** | 同上,源头钉 `raw=_ANALYZER_BYTES` |
+| `bridge.data_runtime.prefetch@1` | `0c9d38a76099dced0d954066539f72112a1cff7989a81c5f39b3793ab5d61172` | **移动** | 构造法:行增广绑定重建后摘要 != 密封摘要(且它是独立性探针的阳性对照) |
+| `bridge.data_runtime.descriptor@1` | `797064488e810f2ae86e8f2ed49e1b5e528dfddcf6ae9958192d3df63a46c058` | **移动** | 构造法:内嵌 `config_ref`,随 prefetch 一起重建后摘要 != 密封摘要 |
+
+(provider/analyzer 前 8 位与计划正文引用的 `3a1e727b…` / `3f93fdf2…` 一致,交叉验证通过。)
 
 ---
 

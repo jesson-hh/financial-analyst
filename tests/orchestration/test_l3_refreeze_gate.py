@@ -219,6 +219,18 @@ def _ledger_pins() -> list[tuple[int, str, str, str, str]]:
         f"§4 has {len(numbered)} numbered rows but only {len(rows)} parsed — a "
         "row fell out of the allowed-red set; restructure the row, never "
         "weaken the parser")
+    # …and the count check alone is not enough: it keys BOTH sides on a leading
+    # "| <digits> |" cell, so a row that simply omits its number escapes both.
+    # Every table line must therefore be the header, the separator, or a row
+    # that fully parses.
+    unparsed = [line for line in section.splitlines()
+                if line.lstrip().startswith("|")
+                and not line.startswith("| # |")
+                and not re.fullmatch(r"\|(\s*:?-+:?\s*\|)+", line.strip())
+                and not _PIN_ROW.match(line)]
+    assert unparsed == [], (
+        f"§4 table lines that are neither header, separator nor a parseable "
+        f"row (an unnumbered row escapes both counts): {unparsed}")
     assert rows, "the ledger's §4 allowed-red table did not parse"
     return rows
 
@@ -310,16 +322,23 @@ def _row_augmented_materials(surface):
 def _measured_material_verdicts(surface) -> dict[str, tuple[str, str]]:
     """key -> (sealed digest, MEASURED 不动/移动) for the four bridge materials.
 
-    Every verdict is computed from a real comparison, never declared:
+    Both halves take the binding as a real input, so both are falsifiable:
 
-    * **prefetch / descriptor** — rebuilt over the row-augmented binding and
-      compared against the sealed refs (the bytes genuinely change);
-    * **provider / analyzer** — rebuilt from their OWN bytes through the same
-      ``build_text_material`` recipe and compared against the sealed refs. The
-      material digest is content-addressed, so equality here IS the statement
-      that the binding edit cannot reach these bytes.
+    * **移动 (prefetch / descriptor)** — rebuilt over the row-augmented binding
+      and compared against the sealed refs; the digests genuinely differ.
+    * **不动 (provider / analyzer)** — **INDEPENDENCE**: neither the sealed nor
+      the row-augmented binding serialization occurs anywhere in the material's
+      bytes, so no edit to the binding can reach them.
+
+    Deliberately NOT how the 不动 half is measured: rebuilding a material from
+    its OWN bytes and observing the digest is unchanged. That is a tautology
+    (``build_text_material`` is a pure function of its input) — the binding never
+    enters the computation, so no falsification could ever flip it. It was the
+    first shape of this helper and it proved nothing.
     """
-    _binding, config_ref, _cm, _desc, desc_ref, _dm = _row_augmented_materials(surface)
+    binding, config_ref, _cm, _desc, desc_ref, _dm = _row_augmented_materials(surface)
+    sealed_bytes = serialize_prefetch_binding(surface.prefetch_binding)
+    augmented_bytes = serialize_prefetch_binding(binding)
     verdicts: dict[str, tuple[str, str]] = {}
     for key, ref, material in (
         ("bridge.data_runtime.provider@1", surface.provider_ref,
@@ -327,12 +346,9 @@ def _measured_material_verdicts(surface) -> dict[str, tuple[str, str]]:
         ("bridge.data_runtime.analyzer@1", surface.analyzer_ref,
          surface.analyzer_material),
     ):
-        rebuilt, _ = build_text_material(
-            id=ref.id, version=ref.version, kind=material.kind,
-            raw=material.raw_utf8)
-        verdicts[key] = (
-            ref.content_digest,
-            "不动" if rebuilt.content_digest == ref.content_digest else "移动")
+        independent = (sealed_bytes not in material.raw_utf8
+                       and augmented_bytes not in material.raw_utf8)
+        verdicts[key] = (ref.content_digest, "不动" if independent else "移动")
     verdicts["bridge.data_runtime.prefetch@1"] = (
         surface.config_ref.content_digest,
         "移动" if config_ref.content_digest != surface.config_ref.content_digest
@@ -674,8 +690,7 @@ class TestGate4BaselineDigests:
         """The 移动 half, derived by construction: rebuild the prefetch config +
         descriptor over a binding carrying one extra candidate row — exactly the
         edit D-1/D-2 makes — and the digests genuinely differ from the sealed
-        ones. The 不动 half: provider/analyzer rebuilt from their own bytes are
-        digest-identical, so the binding edit cannot reach them.
+        ones.
 
         The plan header said all FOUR move; this is the measurement that says
         two."""
@@ -685,12 +700,61 @@ class TestGate4BaselineDigests:
             "the whole 'the binding edit moves this digest' claim is wrong")
         assert desc_ref.content_digest != surface.descriptor_ref.content_digest, (
             "the descriptor embeds config_ref, so it must move with it")
+
+    def test_the_provider_and_analyzer_materials_are_binding_INDEPENDENT(
+            self, surface):
+        """The 不动 half, with the binding as a real input.
+
+        Rebuilding a material from its own bytes and finding the digest unchanged
+        proves nothing — ``build_text_material`` is a pure function of its input,
+        so the binding never enters the computation. The falsifiable statement is
+        INDEPENDENCE: neither the sealed nor the row-augmented binding
+        serialization occurs anywhere in the provider/analyzer bytes, so no edit
+        to the binding can reach them.
+
+        The prefetch material is the POSITIVE CONTROL: it does embed the sealed
+        serialization, which is what proves the "contains" probe is sensitive
+        rather than vacuously true for every input."""
+        binding, *_ = _row_augmented_materials(surface)
+        sealed_bytes = serialize_prefetch_binding(surface.prefetch_binding)
+        augmented_bytes = serialize_prefetch_binding(binding)
+        assert sealed_bytes != augmented_bytes
+
+        # positive control — the probe CAN find a binding inside a material.
+        assert sealed_bytes in surface.config_material.raw_utf8, (
+            "the prefetch material no longer embeds its binding; the "
+            "independence probe below would then be vacuous")
+
         for ref, material in ((surface.provider_ref, surface.provider_material),
                               (surface.analyzer_ref, surface.analyzer_material)):
-            rebuilt, _ = build_text_material(
-                id=ref.id, version=ref.version, kind=material.kind,
-                raw=material.raw_utf8)
-            assert rebuilt.content_digest == ref.content_digest, ref.id
+            assert sealed_bytes not in material.raw_utf8, (
+                f"{ref.id} embeds the sealed prefetch binding — it is NOT "
+                "binding-independent and would move with a grant")
+            assert augmented_bytes not in material.raw_utf8, ref.id
+
+    def test_the_provider_and_analyzer_builders_take_no_binding_argument(self):
+        """Independence pinned at the source too, so a future refactor that
+        starts deriving these materials from the binding reddens here instead of
+        silently invalidating the 不动 verdict.
+
+        The contrast is the point: provider/analyzer are built from MODULE
+        CONSTANTS, the prefetch material from ``serialize_prefetch_binding``."""
+        src = re.sub(r"\s+", " ", inspect.getsource(DC._Phase3DataSurface))
+        assert ('build_text_material( id="bridge.data_runtime.provider", '
+                'version="1", kind="handler", raw=_PROVIDER_BYTES)') in src
+        assert ('build_text_material( id="bridge.data_runtime.analyzer", '
+                'version="1", kind="handler", raw=_ANALYZER_BYTES)') in src
+        # …and the prefetch material IS binding-derived (the contrast half).
+        assert "config_bytes = serialize_prefetch_binding(self.prefetch_binding)" in src
+        assert 'kind="guardrail", raw=config_bytes)' in src
+        # the two raw= arguments resolve to module-level byte constants, and the
+        # sealed materials really carry them byte-for-byte (so nothing
+        # per-binding can have flowed in).
+        surface = phase3_data_surface()
+        assert isinstance(DC._PROVIDER_BYTES, bytes)
+        assert isinstance(DC._ANALYZER_BYTES, bytes)
+        assert surface.provider_material.raw_utf8 == DC._PROVIDER_BYTES
+        assert surface.analyzer_material.raw_utf8 == DC._ANALYZER_BYTES
 
     def test_the_ledger_records_the_measured_bridge_material_verdicts(
             self, surface):
