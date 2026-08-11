@@ -1444,3 +1444,21 @@ manifest 位移的评审 —— 不允许再搭任何重冻的便车(本期是�
 ### 支出账
 
 LLM 结算(逐 run `RunResult.settled_llm_invocations` 实测,终审修正):Lane-0 2(8192 tok)+ 首跑 4 + reduced **5**(6 是预算非结算)+ 全预设 7 + screening lane 5 = **23 次真 LLM 调用**(计划预估 10-25 内);11:23 重试尝试 0 次(PoolError 先于任何节点)。租约:`9148bdb6`(1/2 准入耗,信封余 4 不足弃)、`044e8e07` 耗尽、`94432d81` 2 准入耗于未执行批(执行器缺口的真实成本)、`bf606b4e` 耗尽、`8d9d0f3c` 耗尽。策略 opt-in 已还原(备份保留)。
+
+### 12.13 终审复审记录 + 收官树补测(2026-08-11)
+
+终审复审(独立审计员,逐条对耐久证据重推)判 **NEEDS-CORRECTIONS 九项**,已全部逐字落
+本文件(commit 9cab9409):串行化结论反转(层内本就并发,`dag.py:759` gather+to_thread,
+三对实测重叠)、A 线出口闸降半达成(真调用零字节)、缺陷 7 补记(战役最大发现)、
+Lane-0「连续第三次」纠为「五次从无一次 completed」、解码缺陷计数 3/4/5、支出账 23 非 24、
+未证明清单补三条。租约五账/信封算术/支持检查活面/reduced 徽章/trader 反捏造理由/六个修复
+commit 全部判 EXACT。
+
+**收官树补测(出口闸「此后套件全绿」重立)**:完整 `tests/orchestration` 于终态树
+(`9cab9409`)全跑:**6141 passed, 1 xfailed, 0 failures(23:31)**。1 xfail = 章程内
+strict D4 forward spec(`test_pipeline_candidates.py`)。
+
+**L3 计划关账判定(控制器)**:七任务全交付;出口闸中 A 线一格为「⚠️ 半达成」
+(调用与产物落档达成、bytes-in-block 由深链交叉承载),且缺陷 7(密封 SKILL 白名单
+未收 L3 渲染块)使「授权→可用证据」的最后一跳落在 post-L3 charter——**该 charter
+(两份 skill 材料小重冻)与「全预设默认 vs 先回拨 reduced」的生产姿态权衡,归用户拍板。**
