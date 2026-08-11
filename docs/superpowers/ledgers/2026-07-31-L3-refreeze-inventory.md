@@ -1400,15 +1400,15 @@ manifest 位移的评审 —— 不允许再搭任何重冻的便车(本期是�
 
 | 判据 | 结果 | 证据 |
 |---|---|---|
-| 生产深链一次真跑产出真决策产物(完整十节点 preset) | ✅ | run `deep-6718268ea77b6c1a`(300308,149s,租约 `bf606b4e`):RunCompleted,`PortfolioDecision`+proposal,orchestrated 台账行(preset=`pipeline.luozi_deep_decide`,无 reduced 徽章,cash_weight=1.0+空 target=trader 真裁决「schema 残差非卖出指令」) |
+| 生产深链一次真跑产出真决策产物(完整十节点 preset) | ✅ | run `deep-6718268ea77b6c1a`(300308,149s,租约 `bf606b4e`):RunCompleted,`PortfolioDecision`+proposal,orchestrated 台账行(preset=`pipeline.luozi_deep_decide`,无 reduced 徽章,cash_weight=1.0+空 target=trader 真裁决「schema 残差非卖出指令」);(终审补记)节点实测形状 = 5 COMPLETED / 2 DEGRADED(technical、bull-r1)/ 2 FAILED(两 aux,`aux_data_ungranted`,D-1 既定姿态)/ 1 BLOCKED(bear-r1)/ 7 结算 LLM——与计划 Step 4「ten nodes COMPLETED, 8 LLM seats」有差:aux 响亮拒是设计内,**bear 未出场使本次辩论单边**,且全预设台账行不带提示徽章(reduced 行反有 evidence_note) |
 | `pv.technical` 席位真读 | ✅ | 同 run:degraded-ran(price_action 弱化缺席=语义正确),**1 条 finalized ToolCallRecord**(17s);首跑 `deep-78abf946` 里同样 1 条(101s)——两跑双证 |
 | `text.news` 席位真读 | ✅ | 同 run:COMPLETED,**1 条 finalized ToolCallRecord**(8s),**19 行真新闻服务进节点**,F2 加固的排除计数显形(「1 行按其自身认证排除」) |
 | reduced 降级档存活重章程 | ✅ | run `deep-bc98936a9131b574`(300308,79s,租约 `044e8e07`):COMPLETED,徽章三件套逐字(`subject_run_scoped_v1`+`reduced_evidence_preset_v1`+`reduced_evidence_missing:pv.technical,text.news`),orchestrated 行 target 300308.SZ@0.5 |
-| **A 线 screening 真跑 + `text.news` 真读**(出口闸) | ✅ | request `pipeline-screen-53b6f27a9cae9f21`(top_n=1,租约 `8d9d0f3c`):status=completed,lane 600071 completed,**news 节点 1 条 finalized TCR(15s)**;slate 落盘 `var/archive/rs_orch_screen_20260811.json` + `out/rs_orch_screen_20260811.md`,`/screening/latest` 真服务;推荐文档诚实性:advisory 横幅、评级逐字复制、「驱动是不足非平衡」 |
-| Lane-0 当日会话 | ✅ | snapshot `bootstrap-run-ctx-178769482b…`(payload-462,deep_lane_sees=True),9 present/8 absent;regime/rotation 仍 incomplete(模型侧,连续第三次)——**Task 4 regime prompt 修复的模型合规性无法从 incomplete 报告观察,如实记为未证明** |
+| **A 线 screening 真跑 + `text.news` 真读**(出口闸) | ⚠️ 半达成(终审修正) | request `pipeline-screen-53b6f27a9cae9f21`(top_n=1,租约 `8d9d0f3c`):status=completed,lane 600071 completed,news 节点 **1 条 finalized TCR(节点 15s)**——调用真发生、真到供应商(`rows_seen:20`)。**但读回零行**:`NewsDataResult` `987bb93b` = `status:"stale"`、`data:null`、`pit_audit.guard_result:"refused"`(最新一行 2026-08-03,陈旧策略整批拒——600071 八天无新闻是数据现实),渲染块 `row_count:0` 只带 `NO CONSUMABLE DATA — DO NOT FABRICATE` 哨兵。计划 Step 6 判据「≥1 finalized call **且 real news bytes in the evidence block**」——前半达成,后半**未达成**(bytes-in-block 的交叉证据由深链 run `deep-6718268e` 的 19 行承载,同一 worker 同一读路;screening 路的实质重跑归缺陷 7 的后续 charter 验证跑)。slate 落盘 + `/screening/latest` 真服务;文档诚实但徽章行漏了 API 已显形的 `stale_ranking:2026-07-31` |
+| Lane-0 当日会话 | ✅ | snapshot `bootstrap-run-ctx-178769482b…`(payload-462,deep_lane_sees=True),9 present/8 absent;regime/rotation 仍 incomplete(模型侧;终审实测:regime 自 07-29 起 07-29/07-31/08-02/08-06/08-11 **连续五次 incomplete、从无一次 completed**,rotation 08-06+08-11 连续两次;本次 Lane-0 `RunResult` 终态 failed,2 结算 LLM/8192 tok;「9 present/8 absent」是驱动日志载体非耐久字段)——**Task 4 regime prompt 修复的模型合规性无法从 incomplete 报告观察,如实记为未证明** |
 | 支持检查活面 | ✅ | 服务进程内准入的 runtime-support 检查对生产目录跑过(深链 pending row 59 + screening 两批全过准入)——supported=True 在真服务进程实证 |
 | 负控制 | ✅(套件+机会) | `GUANLAN_SEATS_DEEP` unset 逐位不变=Task 6 watcher 钉(byte-identical);失败回执反风暴=上午真失败后 hold-off 生效、清除流程真机首演(证据副本 scratchpad/receipts-before-clear.jsonl) |
-| 串行化测量(item 9) | ✅ | 席位严格一次一个:news 8s→technical 17s→pm 53s(间隔~1s);全 run 149s;reduced 79s;screening lane 单 lane ~7min 含装配。datum 已够用户拍板 |
+| 串行化测量(item 9) | ✅(终审修正) | **层内并发,不是席位串行**:同层节点经 `dag.py:759` `asyncio.gather`+`to_thread` 并发执行,实测重叠三对——news(+0.15→+7.92)‖sentiment(+0.29→+6.14)、research-mgr(+8.60→+18.70)‖technical(+8.58→+25.44)、bull-r1(+26.16→+64.41)‖pm(+25.98→+78.54,重叠 38s)。原写「news 8s→technical 17s→pm 53s 严格一次一个」取的是三个**不同层**的节点,那 ~1s 间隔是层屏障不是席位排队。全 run 节点跨度 142.3s;reduced 72.3s。item-9 的真 datum:供应商缝无串行化,并发度 = 层宽 |
 
 ### 战役抓到的缺陷与缺口(全部走独立 TDD 修复任务,零 drive-by)
 
@@ -1416,8 +1416,9 @@ manifest 位移的评审 —— 不允许再搭任何重冻的便车(本期是�
 2. **F2 news 源喂未来行给 PIT 闸**(text.news 盘中必死):available_at 戳拉取时刻。修 `50dce59f` + 加固 `e2bf5a66`(发布时刻凭 `pit_certified` 身份判定+`time_source` 双锁;评审抓到 `visible_ts_reason` 在该路由是常量)。**教训:注册模型 docstring=密封材料**(加一句话动三 golden,已回退)。
 3. **A 线执行半边生产不存在**(R 级缺口,出口闸阻断):`/start` 止于准入,深链执行者是 live_decide,screening 从没人建。建 `8b04fd2c`+`cc344023`+`3c094657`(`screening_driver.py`:LaneAdmissionDispatcher、同键预留重放恢复、逐 lane 失败隔离、slate_error 收据纪律、外来候选跳过);评审 Approved(自批红线结构性成立:「执行器无造权能力」)。
 4. **sink 对账本重放的历史候选 KeyError**(live-only:e2e 账本无外来行,生产 47+ 条):修 `3c094657` 双半(sink 跳过 + `record_approval` 类型化拒绝)。
-5. bull-r1/bear-r1 `output_schema_invalid`(解码 None)模型侧间歇第 3/4 次,FILED 不修。
+5. bull-r1 `output_schema_invalid`(BullCase 解码 None)模型侧间歇:本战役内**三次**(`deep-78abf946`、`deep-bc98936a`、screening lane 600071)= 累计第 3/4/5 次;同日 Lane-0 的 regime+rotation 也是同一 `output_schema_invalid` 码。FILED 不修——但发生率已不像「间歇」,post-L3 应按解码器缺陷立项而非按模型抖动挂账。
 6. `quant.factor` 生产 handler factory 未绑(screening lane 内 executor_exception,lane 仍诚实完成)——post-L3 backlog。
+7. **(终审发现,全战役最大)授权到了、密封材料没跟上——两个被授权席位真读了却报告「无证据」**:`news` 节点收到 19 行真新闻(渲染块 7765 字符)却产出 `NewsDigestReport items: []`+「No allowlisted news blocks (ww_news_live, ww_newsradar, ww_live_text) were provided」;`pv.technical` 收到真结算报价(864.58,`SETTLED_PRIOR_SESSION`)却产出 `anchor_price=0.0`+「the prefetched quote block was not made available to this node」+`bias=unknown`。下游因此全空(ResearchPlan/BullCase/PM 均只见 SentimentReport)。机理:`skills/text.news/SKILL.md` 与 `skills/pv.technical/SKILL.md` 的数据源白名单只认 `ww_*` 工具产物(「不在其中的断言对本次读取不存在」),而 L3 授权投喂的是 `RenderedDataBlock(method="news"/"verified_snapshot")`——**模型是照密封材料办事**。修复=白名单加 L3 渲染块身份(动密封 skill 材料=需 post-L3 小重冻 charter,用户拍板)或装配层映射(须论证不构成撒谎标签)。**在此之前,L3 授权在生产上产出可审计的读取记录,不产出可用的证据。**
 
 ### 战役期裁决(§9 之外的控制器裁决)
 
@@ -1428,10 +1429,13 @@ manifest 位移的评审 —— 不允许再搭任何重冻的便车(本期是�
 
 ### 未证明(不藏)
 
-- pm 行文引用数据块:数据真读、可审计、PIT 合格,但 pm 论述仍不引读数(与 08-02/08-06 同形)——归 post-L3 归因实验(留存请求体义务仍在)。
+- 引用链闭合(计划 Step 4「research-mgr 逐字引用 aux 证据或诚实弃权」):**弃权的一半成立**(research-mgr/PM/trader 全程零捏造、明写「驱动是不足非平衡」),**引用的一半无从检验**——因缺陷 7,aux 产物本身是空的,没有可引之物;pm 不引读数(与 08-02/08-06 同形)只是这条链的末端表现,不是根因。归缺陷 7 的 charter + post-L3 归因实验(留存请求体义务仍在)。
 - regime prompt 的模型合规(drivers 排序/条件锚):regime 节点连续 incomplete,无 completed 报告可验。
 - 断供语汇 live 观察:战役期无自然断供,套件钉(test_l3_d2_outage 4 格)为其证据。
 - 300750 的完整全预设跑:其今日身份被首跑烧毁;完整证据由 300308 承载。
+- 战役后全树套件状态:Task 7 落了五个生产源提交,最后两个只跑了 focused + gate 55;**收官树上的完整 `tests/orchestration` 全绿在本节写就时未重立**(见 §12.13 补测)。
+- 生产残留:`var/seats_deep_receipts.jsonl` 现存一行活回执(300750/2026-08-11/PoolError/0 LLM,清除后 11:23 重写,今日该身份仍 hold-off=诚实);`pipeline-screen-7fe349e8dbfd5089` 在 /runs 永久停在 awaiting_approval(94432d81 烧租约批)。
+- 生产姿态权衡:全预设已设为默认而缺陷 7 未修——明日起 watcher 默认档每票 ~7 结算 LLM 产出「两个授权证据席贡献为零」的辩论;是否临时回拨 reduced 或先修缺陷 7,归用户与 charter 决策。
 
 ### post-L3 backlog 增补(执行器评审 I/M 系)
 
@@ -1439,4 +1443,4 @@ manifest 位移的评审 —— 不允许再搭任何重冻的便车(本期是�
 
 ### 支出账
 
-LLM 结算:Lane-0 2 次(8192 tok)+ 首跑 4 + reduced 6 + 全预设 ~7 + screening lane ~5 ≈ **24 次真 LLM 调用**(计划预估 10-25 内)。租约:`9148bdb6`(1/2 准入耗,信封余 4 不足弃)、`044e8e07` 耗尽、`94432d81` 2 准入耗于未执行批(执行器缺口的真实成本)、`bf606b4e` 耗尽、`8d9d0f3c` 耗尽。策略 opt-in 已还原(备份保留)。
+LLM 结算(逐 run `RunResult.settled_llm_invocations` 实测,终审修正):Lane-0 2(8192 tok)+ 首跑 4 + reduced **5**(6 是预算非结算)+ 全预设 7 + screening lane 5 = **23 次真 LLM 调用**(计划预估 10-25 内);11:23 重试尝试 0 次(PoolError 先于任何节点)。租约:`9148bdb6`(1/2 准入耗,信封余 4 不足弃)、`044e8e07` 耗尽、`94432d81` 2 准入耗于未执行批(执行器缺口的真实成本)、`bf606b4e` 耗尽、`8d9d0f3c` 耗尽。策略 opt-in 已还原(备份保留)。
