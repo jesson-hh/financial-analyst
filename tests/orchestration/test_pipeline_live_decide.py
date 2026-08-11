@@ -367,7 +367,13 @@ def _build_env(tmp_path, heavy, *, tranches=True, fail=frozenset(), lease=True,
         clock=clock, stores=stores, rt_digest=rt_digest, context=context,
         ctx_ref=ctx_ref, bundle=bundle, gateway_factory=gateway_factory,
         journal=journal, declog=[], persisted=[], noted=[], calls=[],
-        runner_subject_params=[])
+        runner_subject_params=[],
+        # L3 Task 6 — the durable deep-FAILURE receipt store stands in as a list
+        # (the ``declog`` idiom): the SAME object is read and written, so a
+        # later tick sees what an earlier one appended. Every binding built here
+        # is wired to it, which is also what keeps the suite's "zero var/ writes"
+        # promise true now that the production default is a real JSONL append.
+        receipts=[], receipt_reads=[])
 
     def persist_spy(kind, rec):
         env.persisted.append((kind, dict(rec)))
@@ -381,6 +387,18 @@ def _build_env(tmp_path, heavy, *, tranches=True, fail=frozenset(), lease=True,
     def tail_fn(code):
         env.calls.append("tail")
         return [dict(r) for r in env.declog]
+
+    def receipt_spy(receipt):
+        env.receipts.append(dict(receipt))
+
+    def receipts_fn(code):
+        """The production reader's contract: this code's rows only (six-digit
+        equivalence, since the store may hold ``SZ300750`` for a bound
+        ``300750``)."""
+        env.receipt_reads.append(code)
+        want = re.sub(r"\D", "", str(code or ""))[-6:]
+        return [dict(r) for r in env.receipts
+                if re.sub(r"\D", "", str(r.get("code") or ""))[-6:] == want]
 
     def admission_factory(*, run_id, request, draft, context, approvals, run_budget):
         return PlanAdmissionService(
@@ -418,6 +436,8 @@ def _build_env(tmp_path, heavy, *, tranches=True, fail=frozenset(), lease=True,
     env.persist_spy = persist_spy
     env.note_spy = note_spy
     env.tail_fn = tail_fn
+    env.receipt_spy = receipt_spy
+    env.receipts_fn = receipts_fn
     env.admission_factory = admission_factory
     env.coordinator_factory = coordinator_factory
     env.plan_runner_factory = plan_runner_factory
@@ -452,7 +472,8 @@ def _bindings(env, heavy, **over) -> DeepDecideBindings:
         note_llm_use=env.note_spy,
         latest_snapshot_fn=lambda: (env.context, env.ctx_ref),
         news_titles_fn=None, position_fn=None, quote_fn=None, strat_fn=None,
-        decisions_tail_fn=env.tail_fn)
+        decisions_tail_fn=env.tail_fn,
+        deep_receipts_fn=env.receipts_fn, persist_deep_receipt=env.receipt_spy)
     kw.update(over)
     return DeepDecideBindings(**kw)
 
@@ -1078,6 +1099,342 @@ class TestIdempotentReTick:
         # the scripted gateway was not re-invoked for the replay.
         total = sum(len(g.records) for g in env.gateway_factory.gateways)
         assert total == 8
+
+
+# =========================================================================== #
+# 5b. L3 Task 6 — the durable deep-FAILURE receipt                              #
+# =========================================================================== #
+class TestDurableDeepFailureReceipt:
+    """A deep run that failed AFTER admission is remembered, durably.
+
+    The completed-run receipt above is the persisted orchestrated decide row.
+    Its mirror image — a run that was ADMITTED (lease drawn, plan frozen) and
+    then died — had no receipt at all until L3 Task 6, so every subsequent tick
+    of the SAME identity re-entered the lease/runner and re-charged the
+    watcher's 24/day external-LLM pool with the same settled fold. That is the
+    re-escalation storm the L3 plan names as the live-run risk (§2.2 item 7):
+    the FAST lane is starved at the tick gate by a deep lane that already lost.
+
+    These pins state the contract: **write once, hold off forever, and only for
+    identities that actually spent something.**
+    """
+
+    @staticmethod
+    def _lease_spy(monkeypatch) -> list:
+        """Every ``register_and_try_lease`` idempotency key, in order."""
+        calls: list = []
+        real = PlanApprovalCoordinator.register_and_try_lease
+
+        def spy(self, *a, **kw):
+            calls.append(kw.get("idempotency_key"))
+            return real(self, *a, **kw)
+
+        monkeypatch.setattr(
+            PlanApprovalCoordinator, "register_and_try_lease", spy)
+        return calls
+
+    def test_the_same_identity_is_never_re_escalated(
+            self, tmp_path, heavy, monkeypatch):
+        """THE no-re-escalation pin.
+
+        The load-bearing halves are the lease spy and the runner-construction
+        counter: a held-off tick must not touch the lease channel and must not
+        build a runner. The returned dict is checked after them deliberately, so
+        deleting the guard reddens the RESOURCE assertions, not merely a string.
+        """
+        env = _build_env(tmp_path, heavy, fail=frozenset({"dec.pm"}))
+        lease_calls = self._lease_spy(monkeypatch)
+        fast_result = _fast_result("300750")
+        decide = make_orchestrated_decide(
+            fast_decide=_make_fast(env, fast_result),
+            bindings=_bindings(env, heavy, strat_fn=lambda sid: dict(_OPT_IN_STRAT)))
+
+        first = decide(_payload("300750"))
+        assert first.get("deep_outcome") == "failed"
+        assert first.get("run_id")
+        runners_after_first = len(env.runner_subject_params)
+        assert lease_calls == [f"lease-{first['run_id']}"]
+
+        again = decide(_payload("300750"))
+
+        # ── the load-bearing halves FIRST ─────────────────────────────────── #
+        assert lease_calls == [f"lease-{first['run_id']}"]     # NO second lease
+        assert len(env.runner_subject_params) == runners_after_first
+        # …and the same identity really was re-derived (not dodged by accident)
+        assert again.get("run_id") == first["run_id"]
+        # ── then the honest shape of the held-off tick ────────────────────── #
+        assert again.get("deep_attempted") is True
+        assert again.get("deep_outcome") == "failed"
+        assert again.get("deep_replayed") is True
+        assert again.get("deep_failure_stage") == "execution"
+        # the reason is the TRUE one, carried verbatim off the durable receipt —
+        # never a generic "it failed" the operator cannot act on.
+        assert again.get("deep_failure_reason") == env.receipts[0]["reason"]
+        assert "LaunchRefused" in again["deep_failure_reason"]
+        assert "terminated 'failed'" in again["deep_failure_reason"]
+        assert first["run_id"] in str(again.get("deep_failure_receipt") or "")
+        for key, value in fast_result.items():                 # fast stands
+            assert again[key] == value
+
+    def test_a_persistent_failure_charges_the_watcher_pool_exactly_once(
+            self, tmp_path, heavy):
+        """THE single-charge pin — the 24/day pool is the FAST lane's fuel.
+
+        Four ticks of one persistently-failing identity. Exactly ONE charge
+        reaches ``note_llm_use``: the one the admitted run really made.
+        """
+        env = _build_env(tmp_path, heavy, fail=frozenset({"dec.pm"}))
+        fast_result = _fast_result("300750")
+        decide = make_orchestrated_decide(
+            fast_decide=_make_fast(env, fast_result),
+            bindings=_bindings(env, heavy, strat_fn=lambda sid: dict(_OPT_IN_STRAT)))
+        outs = [decide(_payload("300750")) for _ in range(4)]
+
+        assert len(env.noted) == 1 and 0 < env.noted[0] <= 8
+        # …the failure was never converted into silence: every tick ran the fast
+        # lane and every tick still says `failed` out loud.
+        assert env.calls.count("fast") == 4
+        for out in outs:
+            assert out.get("deep_attempted") is True
+            assert out.get("deep_outcome") == "failed"
+            for key, value in fast_result.items():
+                assert out[key] == value
+        # a failed run lands no verdict and no advisory order, ever.
+        assert _decide_rows(env) == [] and _order_rows(env) == []
+
+    def test_a_fresh_identity_still_escalates_normally(self, tmp_path, heavy):
+        """THE fresh-identity pin: the hold-off is keyed on the identity family
+        (code, +08:00 session, fired trigger kinds, preset) — a genuinely new
+        one earns its own deep run, exactly as before."""
+        env = _build_env(tmp_path, heavy, fail=frozenset({"dec.pm"}))
+        opt_in = dict(_OPT_IN_STRAT)
+        binds = _bindings(env, heavy, strat_fn=lambda sid: dict(opt_in))
+
+        first = make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("300750")), bindings=binds,
+        )(_payload("300750"))
+        assert first.get("deep_outcome") == "failed"
+
+        # (a) a DIFFERENT code, same session
+        other = make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("002415")), bindings=binds,
+        )(_payload("002415"))
+        assert other.get("run_id") != first["run_id"]
+        assert other.get("deep_outcome") == "failed"
+        assert other.get("deep_replayed") is None
+        assert len(env.runner_subject_params) == 2       # it really ran
+
+        # (b) a NEW +08:00 session date, same code (2026-07-24 10:30 +08:00
+        #     → +20h == 2026-07-25 06:30 +08:00, still inside the standing lease)
+        tomorrow = _bindings(env, heavy, strat_fn=lambda sid: dict(opt_in),
+                             clock=_FixedClock(NOW + timedelta(hours=20)))
+        later = make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("300750")), bindings=tomorrow,
+        )(_payload("300750"))
+        assert later.get("run_id") != first["run_id"]
+        assert later.get("deep_outcome") == "failed"
+        assert later.get("deep_replayed") is None
+        assert len(env.runner_subject_params) == 3       # it really ran too
+        assert len(env.noted) == 3                       # three admitted runs
+
+    def test_the_receipt_records_the_true_failure_never_a_silence(
+            self, tmp_path, heavy):
+        """THE receipt-written pin — the only pin that owns the WRITE side.
+
+        Dropping the write reddens this one; dropping the read-side hold-off
+        does not (the row is still appended). That is what makes the two
+        mutations distinguishable rather than two halves of one fact.
+        """
+        env = _build_env(tmp_path, heavy, fail=frozenset({"dec.pm"}))
+        out = make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("300750")),
+            bindings=_bindings(env, heavy, strat_fn=lambda sid: dict(_OPT_IN_STRAT)),
+        )(_payload("300750"))
+
+        assert len(env.receipts) == 1
+        receipt = env.receipts[0]
+        assert receipt["kind"] == "deep_failure"          # never a verdict row
+        assert receipt["code"] == "300750"
+        assert receipt["run_id"] == out["run_id"]         # THE identity family
+        assert receipt["asof"] == "2026-07-24"            # the +08:00 session
+        assert receipt["preset_id"] == DEEP_DECIDE_PRESET_ID
+        assert receipt["deep_outcome"] == "failed"
+        assert receipt["stage"] == live_decide.RECEIPT_STAGE_EXECUTION
+        assert receipt["triggers"] == ["opt_in"]
+        assert receipt["escalation_digest"]
+        # the TRUE reason, named — never "something went wrong"
+        assert "LaunchRefused" in receipt["reason"]
+        assert "terminated 'failed'" in receipt["reason"]
+        assert len(receipt["reason"]) <= 500              # a pointer, not a log
+        # the real settled spend rides along, so the receipt says what it cost
+        assert receipt["settled_llm_invocations"] == env.noted[0]
+        # …and the tick itself hands the operator the same reference
+        assert receipt["receipt_ref"] == out["deep_failure_receipt"]
+        assert out["run_id"] in receipt["receipt_ref"]
+
+        # the failure was NOT converted into silence: fast ran, the outcome is
+        # visible, and no verdict/order row was faked to paper over the failure.
+        assert out["deep_outcome"] == "failed" and out["ok"] is True
+        assert env.persisted == []
+
+    def test_a_landing_failure_earns_a_receipt_naming_the_landing_stage(
+            self, tmp_path, heavy):
+        """The second post-admission arm: the run COMPLETED and the outcome
+        could not be written down. The stages are distinguished because they
+        mean different things to an operator — here the model spend really did
+        buy a result, and it was dropped."""
+        env = _build_env(tmp_path, heavy)
+
+        def broken_persist(kind, rec):
+            raise RuntimeError("disk full (scripted)")
+
+        out = make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("300750")),
+            bindings=_bindings(env, heavy, strat_fn=lambda sid: dict(_OPT_IN_STRAT),
+                               persist_decision=broken_persist),
+        )(_payload("300750"))
+
+        assert out["deep_outcome"] == "failed"
+        assert len(env.receipts) == 1
+        assert env.receipts[0]["stage"] == live_decide.RECEIPT_STAGE_LANDING
+        assert "disk full (scripted)" in env.receipts[0]["reason"]
+        # the pool was charged for the run that really happened — the receipt
+        # stops the NEXT tick from paying again, it never un-charges this one.
+        assert env.noted == [8]
+        assert env.receipts[0]["settled_llm_invocations"] == 8
+
+    def test_a_receipt_can_never_be_read_as_a_verdict(self, tmp_path, heavy):
+        """The receipt is a CONTROL record, not a decision.
+
+        It goes to its own store (nothing reaches ``persist_decision``), and it
+        carries a non-``decide`` kind — so even if a future reader merged the
+        two stores, the escalation judge's own row matcher would reject it
+        instead of comparing this tick's direction against a receipt.
+        """
+        env = _build_env(tmp_path, heavy, fail=frozenset({"dec.pm"}))
+        make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("300750")),
+            bindings=_bindings(env, heavy, strat_fn=lambda sid: dict(_OPT_IN_STRAT)),
+        )(_payload("300750"))
+
+        receipt = env.receipts[0]
+        assert env.persisted == []                        # not the verdict ledger
+        for verdict_key in ("direction", "hybrid_direction", "target_weights",
+                            "confidence", "tranches"):
+            assert verdict_key not in receipt
+        from guanlan_v2.orchestration.pipeline import escalation as _esc
+        assert _esc._latest_decision_row([receipt], "300750") is None
+
+    def test_the_receipt_survives_a_process_restart(self, tmp_path, heavy,
+                                                    monkeypatch):
+        """THE durability pin, driven through the REAL production JSONL.
+
+        Tick 1 runs on one set of bindings and writes the receipt with the
+        production writer. Everything in-process is then thrown away — fresh
+        stores, fresh gateways, fresh coordinator, a fresh wrapper — exactly
+        what a server restart leaves behind. The only thing that survives is the
+        file, and it alone must hold the storm guard up.
+        """
+        log = tmp_path / "var" / "seats_deep_receipts.jsonl"
+        monkeypatch.setattr(live_decide, "DEEP_RECEIPTS_LOG", log)
+        lease_calls = self._lease_spy(monkeypatch)
+
+        before = _build_env(tmp_path, heavy, fail=frozenset({"dec.pm"}))
+        first = make_orchestrated_decide(
+            fast_decide=_make_fast(before, _fast_result("300750")),
+            bindings=_bindings(before, heavy,
+                               strat_fn=lambda sid: dict(_OPT_IN_STRAT),
+                               deep_receipts_fn=None, persist_deep_receipt=None),
+        )(_payload("300750"))
+        assert first["deep_outcome"] == "failed"
+        assert log.exists()
+        rows = [json.loads(ln) for ln in log.read_text(encoding="utf-8").splitlines()]
+        assert [r["run_id"] for r in rows] == [first["run_id"]]
+
+        # ── the restart: nothing in-process carries over ──────────────────── #
+        restart_dir = tmp_path / "restart"
+        restart_dir.mkdir()
+        after = _build_env(restart_dir, heavy, fail=frozenset({"dec.pm"}))
+        assert after.stores is not before.stores
+        leases_before = list(lease_calls)
+        again = make_orchestrated_decide(
+            fast_decide=_make_fast(after, _fast_result("300750")),
+            bindings=_bindings(after, heavy,
+                               strat_fn=lambda sid: dict(_OPT_IN_STRAT),
+                               deep_receipts_fn=None, persist_deep_receipt=None),
+        )(_payload("300750"))
+
+        assert again["run_id"] == first["run_id"]         # same identity family
+        assert again["deep_replayed"] is True
+        assert again["deep_outcome"] == "failed"
+        assert lease_calls == leases_before               # no lease after restart
+        assert after.runner_subject_params == []          # no runner either
+        assert after.noted == []                          # and no pool charge
+        # the store was never rewritten — one identity, one receipt.
+        assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+
+    def test_a_pre_admission_refusal_writes_no_poison_receipt(
+            self, tmp_path, heavy, monkeypatch):
+        """THE admission-boundary pin (both directions).
+
+        A plan that was never admitted spent nothing: a support refusal and a
+        no-lease refusal must NOT write a receipt, and must keep their per-tick
+        behaviour — the fix for both is an operator action (grant the row,
+        issue the lease) and the very next tick after it has to escalate.
+        """
+        # (a) support-refused at admission — prepared again on the next tick
+        env = _build_env(tmp_path, heavy)
+        prepared: list = []
+
+        def refusing_admission(**kw):
+            def prepare_candidate(draft_id, *, request_id):
+                prepared.append(draft_id)
+                return SimpleNamespace(support_report=SimpleNamespace(
+                    supported=False,
+                    issues=(SimpleNamespace(code="prefetch_grant_missing"),)))
+            return SimpleNamespace(prepare_candidate=prepare_candidate)
+
+        decide = make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("300750")),
+            bindings=_bindings(env, heavy, strat_fn=lambda sid: dict(_OPT_IN_STRAT),
+                               admission=refusing_admission))
+        outs = [decide(_payload("300750")) for _ in range(2)]
+        assert [o["deep_outcome"] for o in outs] == ["refused", "refused"]
+        assert env.receipts == []                    # no poison receipt
+        assert len(prepared) == 2                    # tried again, as before
+
+        # (b) no lease in the journal — the card stays pending for a human and
+        #     the next tick still registers, exactly as before.
+        env2 = _build_env(tmp_path / "nolease", heavy, lease=False)
+        lease_calls = self._lease_spy(monkeypatch)
+        decide2 = make_orchestrated_decide(
+            fast_decide=_make_fast(env2, _fast_result("300750")),
+            bindings=_bindings(env2, heavy, strat_fn=lambda sid: dict(_OPT_IN_STRAT)))
+        outs2 = [decide2(_payload("300750")) for _ in range(2)]
+        assert [o["deep_outcome"] for o in outs2] == ["no_lease", "no_lease"]
+        assert env2.receipts == []
+        assert len(lease_calls) == 2                 # re-offered, as before
+
+    def test_an_unreadable_receipt_store_is_an_absence_never_a_frozen_lane(
+            self, tmp_path, heavy, caplog):
+        """A store we cannot read must re-open the escalation path (loudly), not
+        silently freeze the deep lane on a guess."""
+        env = _build_env(tmp_path, heavy, fail=frozenset({"dec.pm"}))
+
+        def exploding_reader(code):
+            raise OSError("scripted: receipt store unreadable")
+
+        decide = make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("300750")),
+            bindings=_bindings(env, heavy, strat_fn=lambda sid: dict(_OPT_IN_STRAT),
+                               deep_receipts_fn=exploding_reader))
+        with caplog.at_level(logging.WARNING, "guanlan.orchestration.live_decide"):
+            out = decide(_payload("300750"))
+        assert out["deep_outcome"] == "failed"
+        assert len(env.runner_subject_params) == 1        # it really escalated
+        assert any("receipt store unreadable" in r.getMessage()
+                   for r in caplog.records
+                   if r.name == "guanlan.orchestration.live_decide")
 
 
 # =========================================================================== #

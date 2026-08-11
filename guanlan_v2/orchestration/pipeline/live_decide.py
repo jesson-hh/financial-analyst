@@ -22,6 +22,37 @@ path (``kind="order"``; a human executes, 观澜 never trades). Idempotency key 
 the kernel run id: a re-tick of the same escalation identity finds the prior
 orchestrated row in the pre-captured tail and appends nothing.
 
+The durable deep-FAILURE receipt (L3 Task 6 — the storm guard)
+---------------------------------------------------------------
+The completed-run receipt above is the persisted orchestrated row. Its mirror
+image is a run that was ADMITTED (standing lease consumed, plan frozen) and
+then DIED — and until L3 Task 6 nothing remembered it, so every later tick of
+the same identity re-entered the lease/runner and re-charged ``note_llm_use``
+with the same settled fold, draining the watcher's 24/day external-LLM pool
+until the FAST lane starved at the tick gate (the re-escalation storm the L3
+plan names as the live-run risk, §2.2 item 7).
+
+So a post-admission failure appends ONE receipt to :data:`DEEP_RECEIPTS_LOG` —
+its own append-only JSONL beside ``var/seats_decisions.jsonl``, never inside it
+(see that constant for why) — keyed by the SAME identity family as the run id
+itself: ``(code, +08:00 session date, fired trigger kinds, preset)``. The next
+tick with that identity returns the fast result plus ``deep_outcome="failed"``,
+``deep_replayed=True``, the prior stage and reason, and the receipt reference —
+without drawing a lease, without building a runner and without charging the
+pool a second time. A FRESH identity (new session, new code, a new trigger
+kind, a different preset) is untouched and escalates exactly as before.
+
+Two boundaries hold it honest:
+
+* **Post-admission only.** A PRE-admission refusal (support, no lease, stale
+  context, materialization, naive clock, absent snapshot) spent nothing and
+  writes no receipt: those refusals are transient by construction and their
+  per-tick behaviour is unchanged. A poison receipt there would freeze a deep
+  lane that a Lane-0 re-run or a fresh lease is about to un-freeze.
+* **Never failure→silence.** The receipt records the TRUE reason and stage; the
+  fast lane still runs on every tick and ``deep_outcome`` still says ``failed``
+  out loud. A receipt that cannot be persisted logs that the guard is down.
+
 The tail-before-fast trap (Task 5, Amendment 4 — regression-pinned)
 -------------------------------------------------------------------
 ``_decide_impl`` persists its own decide row on the success path, so a decisions
@@ -110,6 +141,7 @@ import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from guanlan_v2.orchestration import worker as _worker
@@ -158,10 +190,13 @@ __all__ = [
     "DEEP_GOAL",
     "DEEP_PRESET_ENV_VAR",
     "DEEP_PRESET_ENV_CHOICES",
+    "DEEP_RECEIPTS_LOG",
     "OUTCOME_COMPLETED",
     "OUTCOME_FAILED",
     "OUTCOME_NO_LEASE",
     "OUTCOME_REFUSED",
+    "RECEIPT_STAGE_EXECUTION",
+    "RECEIPT_STAGE_LANDING",
     "REFUSAL_STALE_DATA_WORLD",
     "SUBJECT_ASSEMBLER_ID",
     "SUBJECT_ASSEMBLER_VERSION",
@@ -230,6 +265,36 @@ DEEP_PRESET_ENV_CHOICES: Mapping[str, str] = {
     "full": DEEP_DECIDE_PRESET_ID,
     "reduced": REDUCED_DEEP_DECIDE_PRESET_ID,
 }
+
+#: L3 Task 6 — the durable deep-FAILURE receipt store: an append-only JSONL
+#: BESIDE ``var/seats_decisions.jsonl``, never inside it. Module-level so tests
+#: can repoint it (the ``seats.api._DEC_LOG`` precedent, api.py:200-202).
+#:
+#: WHY ITS OWN STORE. A receipt is a CONTROL record of the deep lane — "this run
+#: identity was admitted and then died" — not a verdict. ``seats_decisions.jsonl``
+#: is a verdict ledger with six readers (the escalation judge's
+#: ``_latest_decision_row``, the watcher throttle, ``seats/calibration.py``, the
+#: TCA decision map, ``GET /seats/decisions`` and the 落子 研判历史 drawer, several
+#: of them unpinned frontend). Widening a shared verdict ledger with a
+#: non-verdict row to save one file would put a control record in front of every
+#: one of them. The receipt therefore gets its own append-only log, read through
+#: its own port, and the module's persist-kind red line (`{"decide","order"}`)
+#: stays byte-untouched.
+DEEP_RECEIPTS_LOG = (
+    Path(__file__).resolve().parents[3] / "var" / "seats_deep_receipts.jsonl")
+
+#: the two POST-ADMISSION stages a deep run can die in; the receipt names which,
+#: because they mean different things to an operator (``execution`` = the plan
+#: run itself lost; ``landing`` = the run COMPLETED and the outcome could not be
+#: written down — the model spend bought a result that was then dropped).
+RECEIPT_STAGE_EXECUTION = "execution"
+RECEIPT_STAGE_LANDING = "landing"
+
+#: the receipt's ``reason`` is a POINTER, not a log: the true failure text is
+#: recorded verbatim up to this bound (the full traceback stays in the WARNING).
+_RECEIPT_REASON_MAX = 500
+#: the receipt store's bounded read window (mirrors the decisions tail's).
+_RECEIPT_SCAN_LINES = 2000
 
 
 class ProductionStoresUnbound(RuntimeError):
@@ -441,6 +506,15 @@ class DeepDecideBindings:
     strat_fn: Callable[[str], Any] | None = None
     #: ``(code) -> decision rows`` — the seats decisions tail, READ BEFORE fast.
     decisions_tail_fn: Callable[[str], Sequence[Mapping[str, Any]]] | None = None
+    #: L3 Task 6 — ``(code) -> receipt rows`` from the durable deep-FAILURE
+    #: receipt store. Read ONLY when an escalation actually fires (a tick that
+    #: does not escalate must not pay for a file read it cannot use), so unlike
+    #: the decisions tail it is NOT read before fast. ``None`` ⇒ the production
+    #: :data:`DEEP_RECEIPTS_LOG` reader.
+    deep_receipts_fn: Callable[[str], Sequence[Mapping[str, Any]]] | None = None
+    #: L3 Task 6 — ``(receipt) -> None``, the durable deep-FAILURE receipt
+    #: append. ``None`` ⇒ the production :data:`DEEP_RECEIPTS_LOG` writer.
+    persist_deep_receipt: Callable[[Mapping[str, Any]], None] | None = None
     #: 路线 A — WHICH sealed deep generation this lane runs. The default is the
     #: reviewed TEN-node preset, so a binding that says nothing keeps meaning
     #: exactly what it meant before route A existed; production sets it from
@@ -570,6 +644,104 @@ def _derive_run_id(canonical: str, session_date: str, report,
     return "deep-" + content_digest(
         {"code": canonical, "session": session_date, "triggers": kinds,
          "preset": preset_id})[:16]
+
+
+# --------------------------------------------------------------------------- #
+# L3 Task 6 — the durable deep-FAILURE receipt (the storm guard)               #
+# --------------------------------------------------------------------------- #
+def _receipt_ref(run_id: str) -> str:
+    """The operator-facing pointer to one durable receipt: ``store#identity``.
+
+    ONE function so the pointer written INTO the receipt and the pointer handed
+    back to the watcher tick can never drift into two different strings.
+    """
+    return f"{DEEP_RECEIPTS_LOG.name}#{run_id}"
+
+
+def _deep_receipts(bindings: DeepDecideBindings, code: str) -> list[Mapping[str, Any]]:
+    """This code's durable failure receipts (an unreadable store is an ABSENCE).
+
+    An absence is deliberately the LOUD-but-permissive answer: it re-opens the
+    escalation path (a run may be attempted again) rather than silently freezing
+    the deep lane on a store we could not read. The WARNING says which happened.
+    """
+    reader = bindings.deep_receipts_fn or _deep_receipt_rows_production
+    try:
+        rows = reader(code) or ()
+    except Exception as exc:  # noqa: BLE001 — unreadable receipts = absence
+        _LOG.warning("deep receipt store unreadable for %s — a prior failure of "
+                     "this identity may re-escalate: %s", code, exc)
+        return []
+    return [row for row in rows if isinstance(row, Mapping)]
+
+
+def _prior_deep_failure(receipts: Sequence[Mapping[str, Any]],
+                        run_id: str) -> Mapping[str, Any] | None:
+    """The durable receipt of a prior FAILED run of ``run_id``, or ``None``.
+
+    The store is append-only and chronological, so the LAST match is the most
+    recent one — the same "last in sequence order" rule the decisions tail uses.
+    """
+    prior: Mapping[str, Any] | None = None
+    for row in receipts:
+        if str(row.get("run_id") or "") != run_id:
+            continue
+        if str(row.get("deep_outcome") or "") != OUTCOME_FAILED:
+            continue
+        prior = row
+    return prior
+
+
+def _failure_receipt(*, canonical: str, run_id: str, session_date: str,
+                     preset_id: str, report, stage: str, exc: BaseException,
+                     settled: int, now: datetime) -> dict:
+    """The receipt of ONE admitted-then-failed deep run — the TRUE reason, named.
+
+    A receipt never converts a failure into silence: it records what died, at
+    which post-admission stage, and how much real model spend the run had
+    already settled against the watcher's 24/day pool. The fast lane still ran
+    and ``deep_outcome`` still says ``failed`` on every tick that reads it.
+    """
+    return {
+        # a self-describing NON-``decide`` kind, in the seats row convention.
+        # The receipt lives in its own store, but should one ever be merged into
+        # a decisions tail by a future reader, ``_latest_decision_row``'s
+        # ``kind != "decide"`` rule must reject it — a row with no ``kind`` at
+        # all would be accepted there as a verdict.
+        "kind": "deep_failure",
+        "code": canonical,
+        "run_id": run_id,
+        "asof": str(session_date),
+        "preset_id": preset_id,
+        "source": "orchestrated",
+        "deep_outcome": OUTCOME_FAILED,
+        "stage": stage,
+        "reason": f"{type(exc).__name__}: {exc}"[:_RECEIPT_REASON_MAX],
+        "settled_llm_invocations": int(settled),
+        "triggers": [t.kind for t in report.triggers_hit],
+        "escalation_digest": report.semantic_digest(),
+        "receipt_ref": _receipt_ref(run_id),
+        "ts": now.isoformat(),
+    }
+
+
+def _write_deep_failure_receipt(bindings: DeepDecideBindings,
+                                receipt: Mapping[str, Any]) -> None:
+    """Persist the receipt durably; a write that fails says so, LOUDLY.
+
+    Invariant 2 still holds (nothing here raises into the tick), but a receipt
+    that silently failed to land is the storm guard being down — the operator
+    must be able to read that from the log rather than infer it from a rising
+    LLM bill.
+    """
+    sink = bindings.persist_deep_receipt or _persist_deep_receipt_production
+    try:
+        sink(dict(receipt))
+    except Exception:  # noqa: BLE001 — invariant 2: never raise into the tick
+        _LOG.warning(
+            "the deep-failure receipt for %s could NOT be persisted: the next "
+            "tick WILL re-escalate this identity (the storm guard is down)",
+            receipt.get("run_id"), exc_info=True)
 
 
 _SUBJECT_REGISTRY: SchemaRegistry | None = None
@@ -791,11 +963,35 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
     session_date = session_date_of(now)
     run_id = _derive_run_id(canonical, session_date, report, bindings.preset_id)
 
-    # ── idempotent re-tick: the prior orchestrated row IS the receipt ──────── #
+    # ── idempotent re-tick #1: the prior orchestrated row IS the receipt ───── #
     for row in tail:
         if row.get("source") == "orchestrated" and row.get("run_id") == run_id:
             return {**fast, "deep_attempted": True, "deep_outcome": OUTCOME_COMPLETED,
                     "deep_replayed": True, "run_id": run_id}
+
+    # ── idempotent re-tick #2 (L3 Task 6): a prior FAILURE is a receipt too ── #
+    # THE POOL-SIDE GUARD. Checked AFTER the completed-row scan (a completed run
+    # is the stronger, authoritative outcome) and BEFORE anything that costs:
+    # before the snapshot resolves, before the subject is committed, before the
+    # lease channel is touched and before a runner exists. Without it a
+    # persistently-failing identity re-entered all of that every tick AND
+    # re-charged ``note_llm_use`` with the same settled fold, draining the
+    # watcher's 24/day external-LLM pool until the FAST lane starved at the tick
+    # gate — the re-escalation storm the L3 plan names as the live-run risk.
+    prior = _prior_deep_failure(_deep_receipts(bindings, canonical), run_id)
+    if prior is not None:
+        _LOG.info(
+            "deep lane held off for %s: run %s already failed at the %s stage "
+            "(%s) — receipt %s. No lease is drawn and the pool is not charged "
+            "again; the fast result stands. A new session, a new code, a new "
+            "trigger kind or a different preset is a NEW identity and escalates.",
+            canonical, run_id, prior.get("stage"), prior.get("reason"),
+            _receipt_ref(run_id))
+        return {**fast, "deep_attempted": True, "deep_outcome": OUTCOME_FAILED,
+                "deep_replayed": True, "run_id": run_id,
+                "deep_failure_stage": str(prior.get("stage") or ""),
+                "deep_failure_reason": str(prior.get("reason") or ""),
+                "deep_failure_receipt": _receipt_ref(run_id)}
 
     # ── resolve snapshot + commit the subject + materialize ────────────────── #
     snapshot_pair = bindings.latest_snapshot_fn()
@@ -909,6 +1105,16 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
         return {**fast, "deep_attempted": True, "deep_outcome": OUTCOME_NO_LEASE,
                 "run_id": run_id}
 
+    # ═══ THE ADMISSION BOUNDARY (L3 Task 6) ═════════════════════════════════ #
+    # Everything above this line is PRE-admission: a plan that was never
+    # admitted spent nothing, so its refusals (support, no lease, stale context,
+    # materialization, naive clock, absent snapshot) keep their per-tick
+    # behaviour and write NO receipt — a poison receipt there would freeze a
+    # deep lane whose refusal is transient by construction (re-run Lane 0, grant
+    # the row, issue the lease and the very next tick must escalate).
+    # Everything below it is POST-admission: the standing human authorization is
+    # consumed and the plan is frozen, so a failure from here on IS the durable
+    # receipt's subject.
     plan, _admitted = admit_after_approval(
         admission=service, candidate_id=digest,
         reservation_id=reservation.reservation_id,
@@ -928,15 +1134,6 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
             context_snapshot_id=context.snapshot_id,
             memory_snapshot_hash=context.memory_snapshot_hash,
             budget=run_budget, cancellation_token_id=f"cancel-{run_id}")
-
-    runner = bindings.plan_runner(
-        admission=service, lane_bindings={"main": lane_binding},
-        run_context_factory=_run_context_factory, request_id=request.request_id,
-        prompt_assembler=assembler,
-        # L1 Task 4 (ONE-recipe provenance, m3): the runner receives THE
-        # materialization-stamped, digest-bonded projection — never a fresh
-        # ``SubjectParams.project`` here, which would bypass the bond check.
-        subject_params=materialized.subject_params)
 
     # invariant 3, closed BOTH sides (review I-1): once the runner has been
     # invoked the settled spend is real money against the watcher's 24/day pool
@@ -961,16 +1158,36 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
         return settled
 
     try:
+        # L3 Task 6: the runner is CONSTRUCTED inside the guarded block. A
+        # factory that raises here is a post-admission failure like any other —
+        # the lease is already spent — so it earns a receipt instead of falling
+        # through the wrapper's blanket arm, which carries no run identity and
+        # therefore cannot remember anything.
+        runner = bindings.plan_runner(
+            admission=service, lane_bindings={"main": lane_binding},
+            run_context_factory=_run_context_factory,
+            request_id=request.request_id, prompt_assembler=assembler,
+            # L1 Task 4 (ONE-recipe provenance, m3): the runner receives THE
+            # materialization-stamped, digest-bonded projection — never a fresh
+            # ``SubjectParams.project`` here, which would bypass the bond check.
+            subject_params=materialized.subject_params)
         artifact = runner(
             lane="main", point=_DecisionPoint(), approval=None,
             data_context=context.data_context, memory_binding=None,
             candidate_plan_digest=digest)
     except Exception as exc:  # noqa: BLE001 — invariant 3: failed runs settle honestly
+        # ORDER IS LOAD-BEARING: charge the pool for what this run really spent
+        # FIRST (invariant 3), then write the receipt that stops the NEXT tick
+        # from spending it again.
         settled = _note_settled_once()
         _LOG.warning("deep run %s failed after settling %s LLM invocation(s): %s "
                      "(fast result stands)", run_id, settled, exc)
+        _write_deep_failure_receipt(bindings, _failure_receipt(
+            canonical=canonical, run_id=run_id, session_date=session_date,
+            preset_id=bindings.preset_id, report=report,
+            stage=RECEIPT_STAGE_EXECUTION, exc=exc, settled=settled, now=now))
         return {**fast, "deep_attempted": True, "deep_outcome": OUTCOME_FAILED,
-                "run_id": run_id}
+                "run_id": run_id, "deep_failure_receipt": _receipt_ref(run_id)}
 
     # ── the two-row model: ONE orchestrated row (+ ONE advisory order rec) ─── #
     try:
@@ -1031,10 +1248,18 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
                 "evidence_note": scope_note,
             }))
     except Exception as exc:  # noqa: BLE001 — the run happened; the landing failed
+        # Same load-bearing order as the execution arm: the ``finally`` below
+        # would note the spend only AFTER this block, so charge explicitly here
+        # (the closure is idempotent) BEFORE the receipt is written.
+        settled = _note_settled_once()
         _LOG.warning("deep run %s completed but its outcome could not be landed: %s "
                      "(fast result stands)", run_id, exc, exc_info=True)
+        _write_deep_failure_receipt(bindings, _failure_receipt(
+            canonical=canonical, run_id=run_id, session_date=session_date,
+            preset_id=bindings.preset_id, report=report,
+            stage=RECEIPT_STAGE_LANDING, exc=exc, settled=settled, now=now))
         return {**fast, "deep_attempted": True, "deep_outcome": OUTCOME_FAILED,
-                "run_id": run_id}
+                "run_id": run_id, "deep_failure_receipt": _receipt_ref(run_id)}
     finally:
         _note_settled_once()
     return {**record, "ok": True, "deep_attempted": True,
@@ -1065,6 +1290,50 @@ def _decisions_tail_rows_production(code: str, max_lines: int = 4000) -> list[di
         if isinstance(row, dict) and _watcher._code6(str(row.get("code") or "")) == want:
             rows.append(row)
     return rows
+
+
+def _deep_receipt_rows_production(
+        code: str, max_lines: int = _RECEIPT_SCAN_LINES) -> list[dict]:
+    """This code's durable deep-failure receipts (read-only, honest empty).
+
+    The exact shape of :func:`_decisions_tail_rows_production`: a bounded tail
+    window, the Phase-3 six-digit code equivalence (the store may hold
+    ``SZ300750`` while a strategy binds ``300750``), a bad line skipped and
+    never repaired, an unreadable store an empty answer.
+    """
+    from guanlan_v2.seats import watcher as _watcher
+
+    want = _watcher._code6(code)
+    try:
+        if not DEEP_RECEIPTS_LOG.exists():
+            return []
+        lines = DEEP_RECEIPTS_LOG.read_text(
+            encoding="utf-8").splitlines()[-max_lines:]
+    except Exception:  # noqa: BLE001 — unreadable store = no receipts
+        return []
+    rows: list[dict] = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except Exception:  # noqa: BLE001 — a bad line is skipped, never repaired
+            continue
+        if isinstance(row, dict) and _watcher._code6(str(row.get("code") or "")) == want:
+            rows.append(row)
+    return rows
+
+
+def _persist_deep_receipt_production(receipt: Mapping[str, Any]) -> None:
+    """Append ONE deep-failure receipt (append-only JSONL, never rewritten).
+
+    Deliberately NOT swallowing like ``seats.api._persist_decision``: a decision
+    that fails to land loses a history row, while a receipt that fails to land
+    re-opens the re-escalation storm. The caller
+    (:func:`_write_deep_failure_receipt`) turns the raise into ONE loud WARNING
+    that says the guard is down.
+    """
+    DEEP_RECEIPTS_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with DEEP_RECEIPTS_LOG.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(dict(receipt), ensure_ascii=False) + "\n")
 
 
 def _quote_production(code: str) -> dict:
@@ -1409,7 +1678,12 @@ def build_production_bindings(*, preset_id: str | None = None) -> DeepDecideBind
         position_fn=_position_production,
         quote_fn=_quote_production,
         strat_fn=_strat_production,
-        decisions_tail_fn=_decisions_tail_rows_production)
+        decisions_tail_fn=_decisions_tail_rows_production,
+        # L3 Task 6 — the durable deep-FAILURE receipt store, wired explicitly
+        # (the ports default to these anyway; naming them here keeps the
+        # production posture readable in ONE place, like every port above).
+        deep_receipts_fn=_deep_receipt_rows_production,
+        persist_deep_receipt=_persist_deep_receipt_production)
 
 
 class _ApprovalsBridge(dict):

@@ -932,26 +932,39 @@ class TestBChainE2E:
 class TestDeepFailureRetryBound:
     def test_persistent_deep_failure_is_bounded_and_never_blocks_fast(
             self, tmp_path, heavy):
-        """No receipt ⇒ every tick re-escalates; pinned AS OBSERVED (not fixed).
+        """CONSCIOUS FLIP (L3 Task 6): the durable failure receipt landed, so
+        the storm is now bounded at the SOURCE instead of merely at the gateway.
 
-        Tick 1 really executes the deep run (``dec.pm`` fails; the other LLM
-        nodes' spend settles and is noted). Ticks 2+ re-derive the SAME run id
-        and re-enter the runner — where the composed runner's per-plan
-        ``ArtifactPool.replay()`` resume precondition REFUSES ("committed
-        artifact ... has no persisted envelope": Task 7's recorded fact #4,
-        kernel re-execution does not cleanly resume through the composed
-        runner) BEFORE any model call. So the CURRENT honest bound is:
+        **Pre-flip arm, recorded** (this test's own posture from the Task-7
+        roll-up until 2026-08-11 — "No receipt ⇒ every tick re-escalates; pinned
+        AS OBSERVED, not fixed"): ticks 2+ re-derived the SAME run id and
+        re-entered the lease and the runner, where the composed runner's
+        per-plan ``ArtifactPool.replay()`` resume precondition REFUSED
+        ("committed artifact ... has no persisted envelope": Task 7's recorded
+        fact #4) BEFORE any model call. That capped the *model* cost at tick 1,
+        but it left the RESIDUE this test documented and deliberately did not
+        fix: each re-tick re-folded the run's settled ledger and RE-NOTED tick
+        1's spend against the watcher's 24/day pool — note-once was per wrapper
+        call, not per run — so a persistent same-identity failure over-counted
+        the external-LLM pool by one fold per tick. Measured then:
+        ``len(env_.noted) == 4`` over four ticks, all four values identical.
 
-        * the retry storm costs ZERO further LLM invocations after tick 1
-          (the loud typed resume refusal precedes the gateway);
-        * every tick returns the fast result with an honest ``failed`` —
+        **Post-flip**: the first post-admission failure appends ONE durable
+        receipt keyed by the run identity family, and every later tick of that
+        identity is held off BEFORE the lease and BEFORE the runner. So:
+
+        * the retry storm still costs ZERO further LLM invocations after tick 1
+          — now because no runner is built at all, not because the runner
+          refused late;
+        * every tick still returns the fast result with an honest ``failed`` —
           the fast lane is never blocked and never silenced;
-        * RESIDUE (documented, deliberately not fixed here — the policy fix
-          rides the post-P10 plate with the durable failure receipt): each
-          re-tick re-folds the run's settled ledger and RE-NOTES tick 1's
-          spend against the watcher's 24/day pool — note-once is per wrapper
-          call, not per run, so a persistent same-identity failure over-counts
-          the external-LLM pool by one fold per tick.
+        * the residue is RETIRED: the pool is charged exactly once per admitted
+          run (``len(env_.noted) == 1``), which is what the 24/day budget was
+          always supposed to mean.
+
+        The receipt-side contract itself is pinned in
+        ``test_pipeline_live_decide.py::TestDurableDeepFailureReceipt``; this
+        arm keeps the e2e-level storm bound honest.
         """
         env_ = _build_env(tmp_path, heavy, fail=frozenset({"dec.pm"}))
         # opt-in only: every tick re-derives the SAME escalation identity
@@ -977,17 +990,22 @@ class TestDeepFailureRetryBound:
         assert env_.calls.count("fast") == 4
         # no orchestrated row, no advisory order — a failed run lands nothing.
         assert _decide_rows(env_) == [] and _order_rows(env_) == []
-        # the bound: ALL model spend happened on tick 1; the re-ticks' loud
-        # resume refusal precedes any gateway call.
+        # the bound: ALL model spend happened on tick 1 — now because the
+        # re-ticks never reach a runner at all (the receipt holds them off).
         total_invocations = sum(
             len(g.records) for g in env_.gateway_factory.gateways)
         assert 0 < invocations_after_tick1 <= 9  # 8 LLM nodes (+ bounded repair)
         assert total_invocations == invocations_after_tick1
-        # the documented residue: one identical re-note per tick (the settled
-        # fold of tick 1's spend), never a growing figure. If this reddens with
-        # len == 1, the note became per-run — retire the residue note.
-        assert len(env_.noted) == 4
-        assert len(set(env_.noted)) == 1 and 0 < env_.noted[0] <= 8
+        assert len(env_.runner_subject_params) == 1
+        # FLIPPED (L3 Task 6): the pool is charged ONCE per admitted run. The
+        # pre-flip value here was 4 — one re-note per tick; see the docstring.
+        assert len(env_.noted) == 1 and 0 < env_.noted[0] <= 8
+        # the receipt naming the true failure is what bought that.
+        assert len(env_.receipts) == 1
+        assert env_.receipts[0]["run_id"] == first["run_id"]
+        for out in later:
+            assert out.get("deep_replayed") is True
+            assert out.get("deep_failure_reason")
 
 
 # =========================================================================== #
