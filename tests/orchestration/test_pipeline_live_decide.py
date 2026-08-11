@@ -1415,6 +1415,107 @@ class TestDurableDeepFailureReceipt:
         assert env2.receipts == []
         assert len(lease_calls) == 2                 # re-offered, as before
 
+    def test_a_raising_pool_port_loses_neither_the_warning_nor_the_receipt(
+            self, tmp_path, heavy, caplog):
+        """Review I-2: the pool port RAISES on a failed budget-state save.
+
+        ``note_llm_use`` is ``watcher.note_external_llm_use``, which raises when
+        ``save_state`` fails (watcher.py:92-103 — 落盘失败必抛). With a naive
+        "charge → log → write" order that raise would take the WARNING *and* the
+        receipt down with it, so a sick disk would delete the storm guard at
+        exactly the moment it is needed. Both must survive; the raise itself must
+        still escape (never swallowed).
+        """
+        env = _build_env(tmp_path, heavy, fail=frozenset({"dec.pm"}))
+
+        def raising_note(n):
+            env.noted.append(int(n))
+            raise OSError("scripted: seats_watch.json could not be saved")
+
+        decide = make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("300750")),
+            bindings=_bindings(env, heavy, strat_fn=lambda sid: dict(_OPT_IN_STRAT),
+                               note_llm_use=raising_note))
+        with caplog.at_level(logging.WARNING, "guanlan.orchestration.live_decide"):
+            out = decide(_payload("300750"))
+
+        mine = [r.getMessage() for r in caplog.records
+                if r.name == "guanlan.orchestration.live_decide"]
+        # 1. the WARNING survived, with the TRUE settled count in it
+        assert any("failed after settling 7 LLM invocation(s)" in m for m in mine)
+        # 2. the receipt survived — the storm guard is up even though the disk lost
+        assert len(env.receipts) == 1
+        assert env.receipts[0]["settled_llm_invocations"] == 7
+        # 3. the raise was NOT swallowed: it escaped to the wrapper's blanket arm
+        assert env.noted == [7]                       # the charge was attempted
+        assert out.get("deep_outcome") == "failed"
+        assert out.get("run_id") is None              # the blanket arm's shape
+        # 4. …and the guard really works on the next tick
+        again = decide(_payload("300750"))
+        assert again.get("deep_replayed") is True
+        assert len(env.receipts) == 1
+
+    def test_a_post_admission_freeze_failure_still_earns_a_receipt(
+            self, tmp_path, heavy, monkeypatch):
+        """Review M-2: the freeze and the two per-run carriers are INSIDE the
+        guarded block, because the standing authorization is already spent by
+        the time they run — ``register_and_try_lease`` returning
+        ``lease_admitted`` is what decrements the lease, not the freeze."""
+        env = _build_env(tmp_path, heavy)
+
+        def exploding_freeze(**kw):
+            raise RuntimeError("scripted: the freeze blew up after the lease")
+
+        monkeypatch.setattr(live_decide, "admit_after_approval", exploding_freeze)
+        decide = make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("300750")),
+            bindings=_bindings(env, heavy, strat_fn=lambda sid: dict(_OPT_IN_STRAT)))
+        out = decide(_payload("300750"))
+
+        assert out.get("deep_outcome") == "failed"
+        assert out.get("run_id")                          # NOT the blanket arm
+        assert out.get("deep_failure_receipt")
+        assert len(env.receipts) == 1
+        assert "the freeze blew up after the lease" in env.receipts[0]["reason"]
+        assert env.receipts[0]["stage"] == live_decide.RECEIPT_STAGE_EXECUTION
+        assert env.runner_subject_params == []            # no runner was built
+        # the spent lease is now remembered: the next tick is held off.
+        assert decide(_payload("300750")).get("deep_replayed") is True
+
+    def test_the_late_resume_refusal_still_guards_a_guard_that_is_down(
+            self, tmp_path, heavy):
+        """Review M-5 — the SECOND line of defence, re-pinned here.
+
+        Before the receipt landed, ticks 2+ of a failing identity re-entered the
+        runner and were stopped by the composed runner's per-plan
+        ``ArtifactPool.replay()`` resume precondition ("committed artifact …
+        has no persisted envelope": Task 7's recorded fact #4) BEFORE any model
+        call. The receipt now stops them earlier, which retired the e2e arm that
+        used to cover that refusal — so it is pinned directly here, by running
+        with a receipt store that never remembers (the storm guard down).
+
+        The point: even with the guard down, a re-tick costs ZERO further model
+        invocations and refuses LOUDLY rather than silently re-running.
+        """
+        env = _build_env(tmp_path, heavy, fail=frozenset({"dec.pm"}))
+        decide = make_orchestrated_decide(
+            fast_decide=_make_fast(env, _fast_result("300750")),
+            bindings=_bindings(env, heavy, strat_fn=lambda sid: dict(_OPT_IN_STRAT),
+                               deep_receipts_fn=lambda code: []))   # amnesiac store
+
+        first = decide(_payload("300750"))
+        after_tick1 = sum(len(g.records) for g in env.gateway_factory.gateways)
+        again = decide(_payload("300750"))
+
+        assert again.get("run_id") == first["run_id"]      # the SAME identity
+        assert again.get("deep_replayed") is None          # the guard is down…
+        assert again.get("deep_outcome") == "failed"
+        # …and the late resume refusal caught it, before any further model call
+        assert len(env.receipts) == 2
+        assert "has no persisted envelope" in env.receipts[1]["reason"]
+        assert sum(len(g.records) for g in env.gateway_factory.gateways) == after_tick1
+        assert 0 < after_tick1 <= 9
+
     def test_an_unreadable_receipt_store_is_an_absence_never_a_frozen_lane(
             self, tmp_path, heavy, caplog):
         """A store we cannot read must re-open the escalation path (loudly), not

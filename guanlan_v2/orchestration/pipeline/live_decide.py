@@ -984,9 +984,11 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
             "deep lane held off for %s: run %s already failed at the %s stage "
             "(%s) — receipt %s. No lease is drawn and the pool is not charged "
             "again; the fast result stands. A new session, a new code, a new "
-            "trigger kind or a different preset is a NEW identity and escalates.",
+            "trigger kind or a different preset is a NEW identity and escalates. "
+            "强制重试(同日同身份):删除 %s 中 run_id=%s 的那一行(或整个文件)后重试 —— "
+            "本文件是纯控制记录,删除它不会丢失任何研判。",
             canonical, run_id, prior.get("stage"), prior.get("reason"),
-            _receipt_ref(run_id))
+            _receipt_ref(run_id), DEEP_RECEIPTS_LOG, run_id)
         return {**fast, "deep_attempted": True, "deep_outcome": OUTCOME_FAILED,
                 "deep_replayed": True, "run_id": run_id,
                 "deep_failure_stage": str(prior.get("stage") or ""),
@@ -1106,28 +1108,24 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
                 "run_id": run_id}
 
     # ═══ THE ADMISSION BOUNDARY (L3 Task 6) ═════════════════════════════════ #
-    # Everything above this line is PRE-admission: a plan that was never
-    # admitted spent nothing, so its refusals (support, no lease, stale context,
-    # materialization, naive clock, absent snapshot) keep their per-tick
-    # behaviour and write NO receipt — a poison receipt there would freeze a
+    # It is THIS line, not the freeze below: ``register_and_try_lease`` returning
+    # ``lease_admitted`` is what consumes an admission off the standing human
+    # authorization (the lease's ``max_admissions`` is decremented there — that
+    # is why the e2e's one-admission lease refuses the SECOND escalation before
+    # any freeze happens). By the time control reaches here the authorization is
+    # already spent.
+    #
+    # Everything ABOVE is PRE-admission and spent nothing, so all seven of its
+    # exits keep their per-tick behaviour and write NO receipt: unnameable code,
+    # naive clock, absent snapshot, stale data world, materialization refusal,
+    # support refusal, no lease. A poison receipt on any of them would freeze a
     # deep lane whose refusal is transient by construction (re-run Lane 0, grant
-    # the row, issue the lease and the very next tick must escalate).
-    # Everything below it is POST-admission: the standing human authorization is
-    # consumed and the plan is frozen, so a failure from here on IS the durable
-    # receipt's subject.
-    plan, _admitted = admit_after_approval(
-        admission=service, candidate_id=digest,
-        reservation_id=reservation.reservation_id,
-        approval_event_id=outcome.event.event_id,
-        idempotency_key=f"freeze-{run_id}")
-
-    # ── execute through the ONE production runner, subject-closed (E2b) ────── #
-    assembler = SubjectPromptAssembler(subject=subject, subject_ref=subject_ref)
-    lane_binding = LaneExecutionBinding(
-        lane="main", candidate_plan_digest=digest,
-        reservation_id=reservation.reservation_id,
-        approval_event_id=outcome.event.event_id)
-
+    # the row, issue the lease — and the very next tick must escalate).
+    #
+    # Everything BELOW is POST-admission, so it lives inside the guarded block
+    # and a failure anywhere in it IS the durable receipt's subject — including
+    # the freeze itself and the two carriers, which used to sit outside the try
+    # and could therefore spend a lease that nothing remembered (review M-2).
     def _run_context_factory(*, lane, point, plan, data_context, memory_binding):
         return RunContext(
             run_id=plan.run_id, data=data_context,
@@ -1158,11 +1156,24 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
         return settled
 
     try:
-        # L3 Task 6: the runner is CONSTRUCTED inside the guarded block. A
-        # factory that raises here is a post-admission failure like any other —
-        # the lease is already spent — so it earns a receipt instead of falling
-        # through the wrapper's blanket arm, which carries no run identity and
-        # therefore cannot remember anything.
+        # The freeze and the two per-run carriers live INSIDE the guarded block
+        # (review M-2): they are all downstream of the admission boundary above,
+        # so a raise in any of them is a spent lease — it must earn a receipt
+        # rather than fall through the wrapper's blanket arm, which carries no
+        # run identity and therefore cannot remember anything. (The freeze's
+        # return value is deliberately unused: ``_run_context_factory`` binds
+        # the runner's OWN ``plan`` parameter, never this one.)
+        admit_after_approval(
+            admission=service, candidate_id=digest,
+            reservation_id=reservation.reservation_id,
+            approval_event_id=outcome.event.event_id,
+            idempotency_key=f"freeze-{run_id}")
+        # ── execute through the ONE production runner, subject-closed (E2b) ── #
+        assembler = SubjectPromptAssembler(subject=subject, subject_ref=subject_ref)
+        lane_binding = LaneExecutionBinding(
+            lane="main", candidate_plan_digest=digest,
+            reservation_id=reservation.reservation_id,
+            approval_event_id=outcome.event.event_id)
         runner = bindings.plan_runner(
             admission=service, lane_bindings={"main": lane_binding},
             run_context_factory=_run_context_factory,
@@ -1176,16 +1187,28 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
             data_context=context.data_context, memory_binding=None,
             candidate_plan_digest=digest)
     except Exception as exc:  # noqa: BLE001 — invariant 3: failed runs settle honestly
-        # ORDER IS LOAD-BEARING: charge the pool for what this run really spent
-        # FIRST (invariant 3), then write the receipt that stops the NEXT tick
-        # from spending it again.
-        settled = _note_settled_once()
-        _LOG.warning("deep run %s failed after settling %s LLM invocation(s): %s "
-                     "(fast result stands)", run_id, settled, exc)
-        _write_deep_failure_receipt(bindings, _failure_receipt(
-            canonical=canonical, run_id=run_id, session_date=session_date,
-            preset_id=bindings.preset_id, report=report,
-            stage=RECEIPT_STAGE_EXECUTION, exc=exc, settled=settled, now=now))
+        # ORDER IS LOAD-BEARING (review I-2). ``bindings.note_llm_use`` is
+        # ``watcher.note_external_llm_use``, which RAISES when the budget state
+        # cannot be saved (watcher.py:92-103 — 落盘失败必抛, the guardrail is
+        # never lost silently). A plain "charge, then log, then write" would let
+        # that raise take BOTH the WARNING and the receipt down with it, so a
+        # sick disk would delete the storm guard exactly when it is needed. The
+        # charge therefore runs alone in its own ``try`` and the WARNING + the
+        # receipt run in its ``finally`` — both survive a raising pool port. The
+        # settled figure is folded and stamped into ``note_state`` BEFORE the
+        # charge is attempted, so what the log and the receipt state is true
+        # either way, and the raise itself still escapes to the wrapper's
+        # blanket arm (which logs it with a traceback) — never swallowed.
+        try:
+            _note_settled_once()
+        finally:
+            settled = int(note_state["settled"])
+            _LOG.warning("deep run %s failed after settling %s LLM invocation(s): %s "
+                         "(fast result stands)", run_id, settled, exc)
+            _write_deep_failure_receipt(bindings, _failure_receipt(
+                canonical=canonical, run_id=run_id, session_date=session_date,
+                preset_id=bindings.preset_id, report=report,
+                stage=RECEIPT_STAGE_EXECUTION, exc=exc, settled=settled, now=now))
         return {**fast, "deep_attempted": True, "deep_outcome": OUTCOME_FAILED,
                 "run_id": run_id, "deep_failure_receipt": _receipt_ref(run_id)}
 
@@ -1248,16 +1271,24 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
                 "evidence_note": scope_note,
             }))
     except Exception as exc:  # noqa: BLE001 — the run happened; the landing failed
-        # Same load-bearing order as the execution arm: the ``finally`` below
-        # would note the spend only AFTER this block, so charge explicitly here
-        # (the closure is idempotent) BEFORE the receipt is written.
-        settled = _note_settled_once()
-        _LOG.warning("deep run %s completed but its outcome could not be landed: %s "
-                     "(fast result stands)", run_id, exc, exc_info=True)
-        _write_deep_failure_receipt(bindings, _failure_receipt(
-            canonical=canonical, run_id=run_id, session_date=session_date,
-            preset_id=bindings.preset_id, report=report,
-            stage=RECEIPT_STAGE_LANDING, exc=exc, settled=settled, now=now))
+        # Exactly the execution arm's shape, and for exactly the same reason
+        # (review I-2): the charge alone in a ``try``, the WARNING and the
+        # receipt in its ``finally``, so a ``note_llm_use`` that raises on a
+        # failed budget-state save cannot suppress either of them. The outer
+        # ``finally`` below is unchanged and stays a no-op on this path (the
+        # closure is idempotent via ``note_state["done"]``), so the raise is
+        # never doubled.
+        try:
+            _note_settled_once()
+        finally:
+            settled = int(note_state["settled"])
+            _LOG.warning(
+                "deep run %s completed but its outcome could not be landed: %s "
+                "(fast result stands)", run_id, exc, exc_info=True)
+            _write_deep_failure_receipt(bindings, _failure_receipt(
+                canonical=canonical, run_id=run_id, session_date=session_date,
+                preset_id=bindings.preset_id, report=report,
+                stage=RECEIPT_STAGE_LANDING, exc=exc, settled=settled, now=now))
         return {**fast, "deep_attempted": True, "deep_outcome": OUTCOME_FAILED,
                 "run_id": run_id, "deep_failure_receipt": _receipt_ref(run_id)}
     finally:
