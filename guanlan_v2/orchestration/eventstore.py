@@ -418,6 +418,27 @@ def _payload_content_digest(model: Any) -> str:
     return content_digest(model.model_dump(mode="json"))
 
 
+def _stored_with_content(
+    backend: _Backend, *, namespace: str, schema_key: str, registry_digest: str,
+    content_digest_hex: str,
+) -> tuple[str, _StoredPayload] | None:
+    """The EARLIEST stored payload holding exactly this stored identity, or ``None``.
+
+    The stored identity is the full four-tuple (namespace, schema, registry, content
+    digest) — never the digest alone. Insertion order is commit order, so the earliest
+    match is the same answer for every caller and stable across a fold.
+    """
+    for object_id, stored in backend.payloads.items():
+        if (
+            stored.namespace == namespace
+            and stored.schema_key == schema_key
+            and stored.registry_digest == registry_digest
+            and stored.content_digest == content_digest_hex
+        ):
+            return object_id, stored
+    return None
+
+
 def _apply_payload_put(
     wb: _Backend,
     resolver: SchemaRegistryResolver,
@@ -443,11 +464,35 @@ def _apply_payload_put(
                 f"payload idempotency key {idempotency_key!r} reused with different content"
             )
         return PayloadRef(namespace=stored.namespace, object_id=existing_id, content_digest=cdigest)
+    # -- canonical stored bytes: one content digest ⇒ one byte image ---------- #
+    # The store is content-addressed by the SEMANTIC digest while persisting the
+    # FULL model, so two writers of one logical fact legitimately differ in their
+    # SEMANTIC_EXCLUDEd (audit) fields — random ids, locators, builder wall clocks.
+    # Under different idempotency keys both puts are genuinely new, and the durable
+    # backend then has one content-addressed file for two byte images: it refuses
+    # the second write (``adapters/durable.py::_write_payload_content`` — measured
+    # live twice: 2026-07-29 bootstrap context, and run deep-78abf946944b9984 on
+    # 2026-08-11, where pv.technical and dec.pm issued the SAME frozen DataRequest
+    # under node-scoped evidence keys and killed the pm node).
+    #
+    # The write-once byte check is a red line and is NOT relaxed. Instead the store
+    # makes its premise true: a put whose content the store ALREADY holds under the
+    # same stored identity binds THAT model, so every object sharing a digest shares
+    # its bytes. The put still mints its own object id (each writer keeps its own
+    # evidence slot and its own idempotency binding); only the byte image is shared —
+    # which is exactly what the durable fold has always produced, since it
+    # reconstructs every object id sharing a digest from the ONE content file.
+    # A genuinely different digest is untouched: different content, different object,
+    # different file.
+    canonical = _stored_with_content(
+        wb, namespace=namespace, schema_key=schema_ref.key,
+        registry_digest=registry_digest, content_digest_hex=cdigest,
+    )
     wb.payload_seq += 1
     object_id = f"payload-{wb.payload_seq}"
     wb.payloads[object_id] = _StoredPayload(
         namespace=namespace, schema_key=schema_ref.key, registry_digest=registry_digest,
-        content_digest=cdigest, model=model,
+        content_digest=cdigest, model=model if canonical is None else canonical[1].model,
     )
     wb.payload_idem[idempotency_key] = object_id
     return PayloadRef(namespace=namespace, object_id=object_id, content_digest=cdigest)
@@ -611,17 +656,14 @@ class PayloadStore:
         stored payloads) and returns the EARLIEST match, so the answer is the same
         for every caller and stable across a fold (index order is commit order).
         """
-        for object_id, stored in self._shared.backend.payloads.items():
-            if (
-                stored.namespace == namespace
-                and stored.schema_key == schema_ref.key
-                and stored.registry_digest == registry_digest
-                and stored.content_digest == content_digest
-            ):
-                return PayloadRef(
-                    namespace=namespace, object_id=object_id,
-                    content_digest=content_digest)
-        return None
+        found = _stored_with_content(
+            self._shared.backend, namespace=namespace, schema_key=schema_ref.key,
+            registry_digest=registry_digest, content_digest_hex=content_digest,
+        )
+        if found is None:
+            return None
+        return PayloadRef(
+            namespace=namespace, object_id=found[0], content_digest=content_digest)
 
     def get(self, ref: PayloadRef, *, expected_schema_ref: SchemaRef) -> Any:
         backend = self._shared.backend

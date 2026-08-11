@@ -33,6 +33,7 @@ from guanlan_v2.orchestration.events import EventType
 from guanlan_v2.orchestration.eventstore import (
     ContentDigestMismatch,
     EventAppendRequest,
+    IdempotencyConflict,
     RuntimeStores,
     SchemaRegistryResolver,
     StagedPayloadKey,
@@ -40,9 +41,11 @@ from guanlan_v2.orchestration.eventstore import (
     RuntimeBatch,
     PayloadPutCommand,
 )
-from guanlan_v2.orchestration.refs import PayloadRef, SchemaRef, TypedPayloadRef
+from guanlan_v2.orchestration.data.source import DataRequest
+from guanlan_v2.orchestration.enums import DataBackend, DataMode
+from guanlan_v2.orchestration.refs import ContentRef, PayloadRef, SchemaRef, TypedPayloadRef
 from guanlan_v2.orchestration.runtime_contracts import phase2_runtime_registry
-from guanlan_v2.orchestration.schema_registry import default_registry
+from guanlan_v2.orchestration.schema_registry import SchemaRegistry, default_registry
 from guanlan_v2.orchestration.schemas import NodeRun, ResearchPlan
 
 from guanlan_v2.orchestration.adapters.durable import (
@@ -482,3 +485,164 @@ def test_scan_interrupt_survives_restart(tmp_path):
     cancels = [e for e in reopened.events.journal("run-flight", "main")
                if e.event_type is EventType.RUN_CANCELLED]
     assert len(cancels) == 1  # the interrupt marking is itself durable
+
+
+# =========================================================================== #
+# Family 3 — one canonical digest, one byte image                             #
+#                                                                             #
+# LIVE REGRESSION, run ``deep-78abf946944b9984`` (2026-08-11 09:49 CST, the   #
+# first FULL ten-node production deep run): node ``pm`` died with             #
+# ``PayloadWriteConflict`` — "content-addressed payload main/0a819a86… on     #
+# disk differs from the write (write-once integrity)".                        #
+#                                                                             #
+# The mechanism, verified against the conflicting on-disk object:             #
+# ``pv.technical`` (always_invoke, earlier layer) and ``dec.pm``              #
+# (cache_or_invoke, later layer) each dispatched the SAME frozen              #
+# ``DataRequest`` — same method, params, as_of and frozen universe — through  #
+# the SAME code path (``data/registry.py`` dispatch step 2). ``request_id`` is #
+# node-scoped (``data/reader.py``: ``f"data:{node_id}:{method_id}"``) and     #
+# lives in ``DataRequest.SEMANTIC_EXCLUDE``, so the two requests share ONE    #
+# content digest — one content-addressed file — while their evidence          #
+# idempotency keys are node-scoped and therefore differ                       #
+# (``data/runtime.py::_DataEvidenceWriterAdapter._scoped``): both puts were   #
+# genuinely new, and the second presented DIFFERENT bytes for a digest        #
+# already on disk.                                                            #
+#                                                                             #
+# The write-once byte check is a red line and stays exactly as strict. What   #
+# these tests pin is its premise: within one store, equal canonical content   #
+# digest ⇒ equal stored bytes.                                                #
+# =========================================================================== #
+_REQUEST_SR = SchemaRef(name="DataRequest", version="1")
+
+
+def _request_registry() -> SchemaRegistry:
+    reg = SchemaRegistry()
+    reg.register(DataRequest)
+    reg.seal()
+    return reg
+
+
+def _request_resolver() -> tuple[SchemaRegistryResolver, str]:
+    resolver = SchemaRegistryResolver()
+    resolver.register(default_registry())
+    resolver.register(phase2_runtime_registry(default_registry().registry_digest))
+    return resolver, resolver.register(_request_registry())
+
+
+def _request_stores(root, *, allowed=(HEAD_NS,)):
+    """Durable stores whose resolver also carries a sealed ``DataRequest`` registry."""
+    resolver, rt = _request_resolver()
+    stores = build_durable_runtime_stores(
+        root, resolver=resolver, clock=_AdvancingClock(), allowed_cell_namespaces=allowed)
+    return stores, rt
+
+
+def _frozen_request(request_id: str, *, limit=None) -> DataRequest:
+    """The live run's frozen ``verified_snapshot`` request, under ``request_id``.
+
+    Field values are the ones read off the conflicting object
+    ``var/orchestration/payloads/main/0a819a86….json`` (as_of 2026-08-10T16:00:00Z,
+    ONLINE/LIVE, SZ300750, capture root ``lane0-capture-2026-08-11``); the digest is
+    sealed exactly as the sole builder ``build_data_request`` seals it.
+    """
+    fields = dict(
+        request_id=request_id,
+        data_snapshot_id="lane0-capture-2026-08-11",
+        method_spec_ref=ContentRef(id="verified_snapshot", version="1", content_digest="e" * 64),
+        params_schema_ref=SchemaRef(name="VerifiedSnapshotParams", version="1"),
+        params={"schema_version": "1", "limit": limit,
+                "symbols": [{"code": "300750", "exchange": "SZ", "board": "chinext"}]},
+        as_of=datetime(2026, 8, 10, 16, 0, tzinfo=UTC),
+        mode=DataMode.ONLINE,
+        backend=DataBackend.LIVE,
+        data_snapshot_content_digest="1" * 64,
+        vintage_manifest_digest=None,
+        source_config_digest="2" * 64,
+        source_registry_digest="3" * 64,
+        routing_snapshot_digest="4" * 64,
+        request_context_digest="5" * 64,
+        schema_registry_digest="6" * 64,
+        resolved_chain_digest="7" * 64,
+    )
+    return DataRequest(
+        **fields, request_digest=DataRequest.digest_of_fields(projection="semantic", **fields))
+
+
+def test_two_nodes_one_frozen_request_is_write_once_safe(tmp_path):
+    """The live pm failure: two nodes, one frozen request, one content-addressed file."""
+    stores, rt = _request_stores(tmp_path / "s")
+    technical = _frozen_request("data:technical:verified_snapshot")
+    pm = _frozen_request("data:pm:verified_snapshot")
+    # the live shape: audit-only divergence under ONE canonical digest.
+    assert technical != pm
+    assert technical.request_digest == pm.request_digest
+
+    ref_a = stores.payloads.put(
+        _REQUEST_SR, technical, registry_digest=rt, namespace="main",
+        idempotency_key="run-1:technical:a1:data:req:request:evidence")
+    # before the fix this second put raised PayloadWriteConflict.
+    ref_b = stores.payloads.put(
+        _REQUEST_SR, pm, registry_digest=rt, namespace="main",
+        idempotency_key="run-1:pm:a1:data:req:request:evidence")
+
+    assert ref_a.content_digest == ref_b.content_digest   # one content-addressed file
+    assert ref_a.object_id != ref_b.object_id             # two evidence slots (unchanged)
+    # equal canonical digest ⇒ equal stored bytes: the second put binds the object
+    # the store already holds rather than minting a byte-divergent twin.
+    got_a = stores.payloads.get(ref_a, expected_schema_ref=_REQUEST_SR)
+    got_b = stores.payloads.get(ref_b, expected_schema_ref=_REQUEST_SR)
+    assert got_a is got_b
+
+
+def test_one_digest_one_byte_image_survives_restart(tmp_path):
+    """The in-memory view now agrees with what the fold has always produced.
+
+    ``_fold_payloads`` reads ONE content file per digest, so after a restart both
+    object ids already resolved to the same model. Before the fix the pre-restart
+    view disagreed with the post-restart view — when the write did not die outright.
+    """
+    stores, rt = _request_stores(tmp_path / "s")
+    ref_a = stores.payloads.put(
+        _REQUEST_SR, _frozen_request("data:technical:verified_snapshot"),
+        registry_digest=rt, namespace="main", idempotency_key="k-a")
+    ref_b = stores.payloads.put(
+        _REQUEST_SR, _frozen_request("data:pm:verified_snapshot"),
+        registry_digest=rt, namespace="main", idempotency_key="k-b")
+
+    resolver, _ = _request_resolver()
+    reopened = build_durable_runtime_stores(
+        tmp_path / "s", resolver=resolver, clock=_AdvancingClock(),
+        allowed_cell_namespaces=(HEAD_NS,))
+    before = stores.payloads.get(ref_b, expected_schema_ref=_REQUEST_SR)
+    after = reopened.payloads.get(ref_b, expected_schema_ref=_REQUEST_SR)
+    assert before.request_id == after.request_id
+    assert after.request_id == reopened.payloads.get(
+        ref_a, expected_schema_ref=_REQUEST_SR).request_id
+
+
+def test_reuse_is_keyed_on_the_full_stored_identity(tmp_path):
+    """Guard: the canonicalization keys on namespace+schema+registry+digest, never digest alone."""
+    stores, rt = _request_stores(tmp_path / "s")
+    a = _frozen_request("data:technical:verified_snapshot")
+    ref_a = stores.payloads.put(_REQUEST_SR, a, registry_digest=rt, namespace="main",
+                                idempotency_key="k-a")
+    # a different NAMESPACE is a different stored identity: its own object + own file.
+    ref_c = stores.payloads.put(_REQUEST_SR, a, registry_digest=rt, namespace="review",
+                                idempotency_key="k-c")
+    assert ref_c.object_id != ref_a.object_id
+    assert ref_c.namespace == "review"
+    assert (tmp_path / "s" / "payloads" / "review" / f"{ref_a.content_digest}.json").exists()
+    assert (tmp_path / "s" / "payloads" / "main" / f"{ref_a.content_digest}.json").exists()
+
+
+def test_idempotency_conflict_is_untouched(tmp_path):
+    """A reused key with genuinely different content still conflicts (no relaxation)."""
+    stores, rt = _request_stores(tmp_path / "s")
+    stores.payloads.put(
+        _REQUEST_SR, _frozen_request("data:technical:verified_snapshot"),
+        registry_digest=rt, namespace="main", idempotency_key="k")
+    other = _frozen_request("data:technical:verified_snapshot", limit=5)
+    assert other.request_digest != _frozen_request("data:pm:verified_snapshot").request_digest
+    with pytest.raises(IdempotencyConflict):
+        stores.payloads.put(_REQUEST_SR, other, registry_digest=rt, namespace="main",
+                            idempotency_key="k")
