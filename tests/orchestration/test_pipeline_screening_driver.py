@@ -461,6 +461,34 @@ class TestTheProductLands:
         assert drive.client.get(f"{API}/screening/latest").json() == {
             "ok": True, "slate": None}
 
+    def test_a_slate_assembly_fault_still_lands_the_receipt(
+            self, env, trimmed_catalog, tmp_path, monkeypatch):
+        """Review I-2: by the time the slate is assembled the lanes have RUN and
+        real LLM money is spent. A store/schema fault in the assembler must not
+        propagate — that would be a 500 with NO durable record, destroying the
+        receipt of a drive that already cost money. The fault is recorded; the
+        lane outcomes survive intact; nothing is filed."""
+        drive = _drive_env(env, trimmed_catalog, tmp_path)
+
+        def _poisoned(batch, *, stores):
+            raise RuntimeError("poisoned store during slate assembly")
+
+        monkeypatch.setattr(driver_mod, "build_recommendation_slate", _poisoned)
+        body = _start(drive)
+
+        assert "poisoned store" in body["execution"]["slate_error"]
+        assert body["execution"].get("archive_id") is None
+        assert body["execution"].get("slate") is None
+        assert drive.archive.calls == []
+        # the runs still say what they did, and the receipt is DURABLE.
+        assert [ln["status"] for ln in body["execution"]["lanes"]] == (
+            [LANE_COMPLETED] * 3)
+        assert body["status"] == BATCH_COMPLETED
+        state = drive.client.get(
+            f"{API}/state", params={"request_id": body["request_id"]}).json()
+        assert [row["status"] for row in state["state"]["lane_outcomes"]] == (
+            [LANE_COMPLETED] * 3)
+
 
 # =========================================================================== #
 # 5. the driver's own refusals + the shared reservation key                     #
@@ -497,6 +525,24 @@ class TestDriverRefusals:
             assert "screening_reserve_idempotency_key(" in src
         assert 'f"screening-reserve:' not in Path(
             driver_mod.__file__).read_text(encoding="utf-8")
+
+    def test_the_admitting_outcome_is_the_coordinators_own_vocabulary(self):
+        """Review M-2: ``LEASE_ADMITTED`` is a mirror of the KERNEL's word, and a
+        mirror needs a pin. ``LeaseAdmissionOutcome.outcome`` is a closed
+        ``Literal`` (nothing importable — a Literal member is not a name), so the
+        pin reads the annotation's own arguments. A kernel rename that left this
+        constant behind would silently pend every lane forever."""
+        import typing
+
+        import guanlan_v2.orchestration.approval as approval_mod
+
+        annotation = approval_mod.LeaseAdmissionOutcome.__annotations__["outcome"]
+        # PEP 563: the annotation is a string; evaluate it in its OWN module's
+        # namespace rather than re-typing the vocabulary here.
+        resolved = eval(annotation, vars(typing) | vars(approval_mod))  # noqa: S307
+        assert set(typing.get_args(resolved)) == {
+            "lease_admitted", "pending_human"}
+        assert driver_mod.LEASE_ADMITTED in typing.get_args(resolved)
 
     def test_the_executor_gate_names_the_one_admitting_outcome(self):
         """The load-bearing guard, pinned at source: execution is entered only

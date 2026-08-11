@@ -112,8 +112,14 @@ __all__ = [
 
 _LOG = logging.getLogger("guanlan.orchestration.pipeline.screening_driver")
 
-#: the ONE outcome value that authorizes execution (the coordinator's own
-#: vocabulary — ``pending_human`` is the only other, and it never executes).
+#: the ONE outcome value that authorizes execution. It is the KERNEL's word, not
+#: this module's: ``approval.LeaseAdmissionOutcome.outcome`` is a closed
+#: ``Literal["lease_admitted", "pending_human"]``, so there is nothing to import
+#: — a ``Literal`` member is not a name. The value is therefore mirrored here and
+#: PINNED against that annotation's own arguments
+#: (``test_the_admitting_outcome_is_the_coordinators_own_vocabulary``): a kernel
+#: rename that left this constant behind would silently pend every lane forever,
+#: which is exactly the failure this whole task exists to end.
 LEASE_ADMITTED = "lease_admitted"
 
 #: per-lane execution vocabulary (closed; never invented per call site).
@@ -182,6 +188,10 @@ class ScreeningExecutionReport:
     landed: bool = False
     landing_error: str | None = None
     projection: dict[str, Any] | None = None
+    #: the slate could not be ASSEMBLED (distinct from ``landing_error``, where
+    #: assembly succeeded and the filing failed). Either way the lane outcomes
+    #: below are still the truth about what ran.
+    slate_error: str | None = None
 
     def count(self, status: str) -> int:
         return sum(1 for lane in self.lanes if lane.status == status)
@@ -199,6 +209,8 @@ class ScreeningExecutionReport:
             row["landed"] = self.landed
         if self.landing_error is not None:
             row["landing_error"] = self.landing_error
+        if self.slate_error is not None:
+            row["slate_error"] = self.slate_error
         if self.projection is not None:
             row["slate"] = self.projection
         return row
@@ -521,7 +533,23 @@ def execute_screening_batch(
         # UPSERT, so filing an empty document here would overwrite a real one.
         return ScreeningExecutionReport(status=status, lanes=lanes)
 
-    slate = build_recommendation_slate(batch, stores=stores)
+    try:
+        slate = build_recommendation_slate(batch, stores=stores)
+    except Exception as exc:  # noqa: BLE001 — the SAME discipline the landing
+        # half already has, applied one step earlier (review I-2). By the time
+        # control reaches here the lanes have RUN: real LLM money is spent and
+        # the per-lane outcomes are the only record of it. Letting a store or
+        # schema fault propagate would take the router's durable request record
+        # down with it — a 500 with no receipt at all, which is strictly worse
+        # than a receipt that says the product could not be assembled. So the
+        # fault is recorded, logged with its traceback, and carried out on the
+        # wire; nothing is landed, and the lane outcomes are untouched (a failure
+        # to ASSEMBLE the product does not un-run the runs).
+        _LOG.warning("screening batch %s: the recommendation slate could not be "
+                     "assembled: %s", batch.batch_id, exc, exc_info=True)
+        return ScreeningExecutionReport(
+            status=status, lanes=lanes,
+            slate_error=f"{type(exc).__name__}: {exc}")
     if not slate.entries:
         _LOG.warning(
             "screening batch %s: %s lane(s) completed but none committed a "
