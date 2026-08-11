@@ -655,6 +655,14 @@ class PayloadStore:
         still refuses any genuine byte disagreement. Scans the payload map (O(n) in
         stored payloads) and returns the EARLIEST match, so the answer is the same
         for every caller and stable across a fold (index order is commit order).
+
+        Since the live ``deep-78abf946944b9984`` fix, asking here is no longer the
+        only thing standing between a caller and a byte-divergent second write:
+        :func:`_apply_payload_put` performs the same stored-identity lookup itself,
+        so the store GUARANTEES one byte image per content digest for every writer,
+        whether or not it asks. This method remains useful for callers that must
+        also avoid minting a second OBJECT (a second ref/evidence slot) for content
+        already held — its original ``dag._synthesize_bootstrap_context_ref`` duty.
         """
         found = _stored_with_content(
             self._shared.backend, namespace=namespace, schema_key=schema_ref.key,

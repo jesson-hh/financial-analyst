@@ -26,15 +26,18 @@ and the manifest kind. It owns exactly three things — one source and two build
   :data:`_SETTLED_CLOSE_LOCAL_TIME` and
   :meth:`LiveClientSource._settled_candidate` — the CONTROLLER RULING behind the
   L2-b Task-9 gate and its ADDENDUM). The calendar is an OPTIONAL constructor
-  dependency: without one the projection simply never fires. A ``news`` row that
-  ATTESTS its own **publication** instant is the same rule read on the text side:
-  it is stamped at that instant (:func:`_attested_publication`), and a row whose
-  own attested publication postdates the frozen ``as_of`` is EXCLUDED rather than
-  handed to the all-or-nothing guard, where it would refuse the whole batch of
-  long-public rows (:meth:`LiveClientSource._news_candidates` — the live
-  ``deep-78abf946944b9984`` regression). The exclusion only ever excludes: no
-  availability is fabricated or backdated, an UNATTESTED news row keeps
-  ``pulled_at`` and is forwarded unchanged, and the other two routes perform no
+  dependency: without one the projection simply never fires. A ``news`` row whose
+  own **publication** instant is PIT-CERTIFIED by the vendor's temporal contract is
+  the same rule read on the text side: it is stamped at that instant
+  (:func:`_attested_publication` — gated on ``pit_certified`` + ``time_source``,
+  never on the constant ``visible_ts_reason``), and a row whose own certified
+  publication postdates the frozen ``as_of`` is EXCLUDED rather than handed to the
+  all-or-nothing guard, where it would refuse the whole batch of long-public rows
+  (:meth:`LiveClientSource._news_candidates` — the live ``deep-78abf946944b9984``
+  regression). The exclusion only ever excludes, and never silently: no
+  availability is fabricated or backdated, an UNCERTIFIED news row keeps
+  ``pulled_at`` and is forwarded unchanged for the guard to judge, every exclusion
+  is counted onto the module logger, and the other two routes perform no
   time comparison at all. A missing
   ``pulled_at`` yields ``available_at=None`` and the single PIT authority
   (``PitGuard.check_raw``, invoked by the reviewed Phase-3 router at ``data/registry.py``
@@ -90,6 +93,7 @@ cumulative-registry classification).
 """
 from __future__ import annotations
 
+import logging
 import math
 from datetime import date as _date, datetime, time as _time, timedelta, timezone
 from typing import Any, Callable, Mapping
@@ -132,6 +136,8 @@ __all__ = [
     "ONLINE_SOURCE_ID",
     "ONLINE_SOURCE_VERSION",
 ]
+
+_LOG = logging.getLogger(__name__)
 
 #: the reviewed logical id + version of the ONLINE live source.
 ONLINE_SOURCE_ID = "guanlan.online_live"
@@ -222,25 +228,26 @@ _UNPROVEN_TIME_SOURCES = ("fetch_fallback", "unknown")
 
 #: Item keys carrying a NEWS row's own **publication instant** — the announcement's
 #: 当时可知时间, i.e. the moment the datum became public. The unified stocks item
-#: shaper stamps both (``src/data/live_text_sources.py``); the real
-#: ``eastmoney_stock_news`` rows carry ``publish_ts`` == ``visible_ts`` with
-#: ``visible_ts_reason="exact_publish_time"`` (measured live 2026-08-11). First
-#: readable spelling wins; nothing is derived.
+#: shaper stamps both (``src/data/live_text_sources.py``). First readable spelling
+#: wins; nothing is derived.
 #:
 #: Deliberately a SEPARATE name from :data:`_ITEM_QUOTE_TIME_KEYS`, which currently
-#: spells the same two keys: there they are read as a QUOTE anchor gated on
-#: ``time_source`` and consumed as a session DATE; here they are read as a
-#: PUBLICATION instant gated on ``visible_ts_reason``. Two rules, two gates, two
+#: spells the same two keys: there they are read as a QUOTE anchor and consumed as a
+#: session DATE; here they are read as a PUBLICATION instant. Two rules, two
 #: consumers — collapsing them would couple the quote calendar attribution to the
 #: news availability rule.
 _NEWS_PUBLICATION_KEYS = ("publish_ts", "visible_ts")
 
-#: ``visible_ts_reason`` prefixes that prove the item's timestamp is NOT the
-#: provider's publication instant. The shaper falls back to the FETCH instant with
-#: ``visible_ts_reason="fetch_time_or_source_time"`` whenever the vendor row carried
-#: no time of its own — the pull-instant lie the ruling forbids. An ABSENT / empty
-#: reason is equally unproven: an unattested timestamp is not an attestation.
-_UNPROVEN_PUBLICATION_REASONS = ("fetch", "unknown")
+#: The item's own PIT certification flag — the ONLY composite provenance statement
+#: the vendor makes about its timestamps, and the primary gate on the news route.
+#:
+#: ``G:\stocks\src\data\temporal_contract.py::timestamp_is_pit_eligible`` (:122-143)
+#: sets it False for exactly the cases that must not be trusted: an unparseable /
+#: missing publish, visible or first-seen instant; ``time_precision == "unknown"``;
+#: a ``time_source`` that starts with ``fetch_fallback``; or a publish/visible
+#: instant later than first-seen. That last set is what makes it strictly stronger
+#: than the ``time_source`` gate alone — see :func:`_attested_publication`.
+_PIT_CERTIFIED_KEY = "pit_certified"
 
 #: Row keys carrying the instrument's settled display name (static reference data).
 _SETTLED_NAME_KEYS = ("name", "sec_name", "short_name")
@@ -435,22 +442,54 @@ def _attested_publication(item: Any) -> datetime | None:
 
     **The row's own availability, never a fabrication.** A news/announcement datum
     becomes knowable when it is PUBLISHED, and the unified stocks item carries that
-    instant together with the shaper's own attestation of where it came from
-    (``visible_ts_reason``). This is the news-side reading of the CONTROLLER RULING
-    the settled projection implements for quotes: *available_at = the data's OWN
-    availability time (bar settlement/publication), not pulled_at*.
+    instant together with the shaper's own provenance statement. This is the
+    news-side reading of the CONTROLLER RULING the settled projection implements for
+    quotes: *available_at = the data's OWN availability time (bar
+    settlement/publication), not pulled_at*.
 
-    The attestation is the gate and it is read from the ITEM — the shaper's own
+    **The gate is provenance, NOT ``visible_ts_reason`` (review Important 1).** The
+    first cut of this function gated on ``visible_ts_reason``, which does not
+    survive contact with the vendor: on the bound news route that value is a
+    CONSTANT. ``live_text_sources.py::_visible_ts`` (:331-336) returns
+    ``"date_only_eod"`` only for ``source_type in {"announcement",
+    "research_report"}``, and ``eastmoney_stock_news`` rows are stamped
+    ``"market_news"``, so every row reads ``"exact_publish_time"`` — including the
+    dangerous one: ``_publish_or_now`` (:324-328) substitutes ``now()`` whenever the
+    vendor's date is missing or unparseable, so a date-less row arrives with a
+    FETCH-instant ``publish_ts`` wearing the "exact" label. Under the old gate that
+    row was "attested", found future, and SILENTLY EXCLUDED — breaking this module's
+    own charter sentence that a row is never dropped on anything but its own
+    attestation. ``visible_ts_reason`` is a *normalization* label (which rule
+    produced ``visible_ts``), never a provenance claim, so it is no longer read here
+    at all — and ``date_only_eod`` is a legitimately conservative instant that must
+    keep passing.
+
+    Two provenance gates, BOTH required, both read from the ITEM — the shaper's own
     statement — exactly as :func:`_quote_anchor_date` reads ``time_source`` from the
-    item and never from a vendor-overlaid view. A missing / empty / fetch-derived /
-    unknown reason yields ``None``: the row proves nothing about its own
-    publication, so the caller keeps the envelope's ``pulled_at`` and the PitGuard
-    decides, unchanged.
+    item and never from a vendor-overlaid view:
+
+    1. ``pit_certified is True`` (:data:`_PIT_CERTIFIED_KEY`) — the vendor's own
+       composite certification. It is strictly the stronger of the two: it also
+       fails a row whose raw date was present but UNPARSEABLE, where
+       ``_publish_or_now`` substituted ``now()`` while ``time_source`` still reads
+       ``"eastmoney.stock_search.date"`` (the residual hole a ``time_source``-only
+       gate leaves open) — because ``infer_time_precision`` returns ``"unknown"``
+       for such a value. Identity check, not truthiness: a ``1`` or ``"yes"`` is
+       not a certification.
+    2. ``time_source`` not in :data:`_UNPROVEN_TIME_SOURCES` — the same gate the
+       quote anchor uses, kept as an independent second lock so the rule still
+       holds if a future shaper emits ``pit_certified`` more liberally.
+
+    Either gate failing yields ``None``: the row proves nothing about its own
+    publication, so the caller keeps the envelope's ``pulled_at``, forwards the row
+    UNFILTERED, and the PitGuard decides — unchanged, loud, and visible.
     """
     if not isinstance(item, Mapping):
         return None
-    reason = str(item.get("visible_ts_reason") or "").strip().lower()
-    if not reason or reason.startswith(_UNPROVEN_PUBLICATION_REASONS):
+    if item.get(_PIT_CERTIFIED_KEY) is not True:
+        return None
+    source = str(item.get("time_source") or "").strip().lower()
+    if not source or source.startswith(_UNPROVEN_TIME_SOURCES):
         return None
     for key in _NEWS_PUBLICATION_KEYS:
         stamped = _online_availability(item.get(key))
@@ -597,10 +636,11 @@ class LiveClientSource:
     PIT authority over everything served is the reviewed Phase-3 router's
     ``PitGuard.check_raw`` (``data/registry.py`` dispatch step 5c), which refuses any
     future (``pulled_at > as_of``) / missing-availability row loudly. The ONE
-    source-side exclusion is a ``news`` row that ATTESTS its own publication instant
-    as later than the frozen boundary (:meth:`_news_candidates`) — the source never
-    hands the guard a row the row itself says was not yet public, because the guard's
-    refusal is all-or-nothing and would take the compliant rows with it. No method
+    source-side exclusion is a ``news`` row whose own PIT-CERTIFIED publication
+    instant is later than the frozen boundary (:meth:`_news_candidates`) — the source
+    never hands the guard a row the row itself certifies was not yet public, because
+    the guard's refusal is all-or-nothing and would take the compliant rows with it.
+    Every such exclusion is counted onto the module logger, never silent. No method
     takes a caller ``as_of`` / ``strict`` / ``now`` override — the boundary is
     ``request.as_of`` (the start-frozen ``DataContext`` as-of) only.
 
@@ -782,20 +822,43 @@ class LiveClientSource:
 
         The exclusion **only excludes**: no ``available_at`` is fabricated, none is
         backdated, and a row is never re-stamped to make it pass. Nothing is dropped
-        on a claim the source cannot read — only on the row's own attestation. Rows
-        that are forwarded are still judged by the single PIT authority, and the
-        adapter still performs no time comparison of any kind on the other routes
-        (``verified_snapshot`` answers the ruling through its calendar-attributed
-        settled projection; ``ohlcv`` is unchanged).
+        on a claim the source cannot read — only on the row's own PIT-certified
+        provenance (:func:`_attested_publication`). Rows that are forwarded are still
+        judged by the single PIT authority, and the adapter still performs no time
+        comparison of any kind on the other routes (``verified_snapshot`` answers the
+        ruling through its calendar-attributed settled projection; ``ohlcv`` is
+        unchanged).
+
+        **An exclusion is never silent (review Important 2).** Every excluded row is
+        counted and the count is emitted as a WARNING on this module's logger, so an
+        all-excluded read is distinguishable from "the vendor returned nothing" — the
+        same honest-badge idiom :mod:`~guanlan_v2.orchestration.adapters.durable`
+        uses for its torn-tail drop. The log is the carrier because both structural
+        carriers are closed by red lines, measured not assumed: a field on
+        :class:`RawFetch` moves the sealed phase-3 schema-registry digest
+        (``RawFetch@1`` is one of the 76 entries behind
+        ``tests/orchestration/golden/data_schema_manifest_v1.json``,
+        registry ``9119fa17…``), and a marker key in ``raw_payload`` would land an
+        UNBONDABLE claim in the trusted prompt header — the one thing
+        ``data/registry.py::_settled_session_marker``'s reviewed §I2 rule forbids,
+        since dispatch cannot re-derive a count for rows it never saw.
         """
         out: list[RawRowCandidate] = []
+        excluded = 0
         for item in items:
             published = _attested_publication(item)
             if published is not None and published > request.as_of:
-                continue  # the row itself says it was not yet public at the boundary
+                excluded += 1  # the row itself says it was not yet public
+                continue
             out.append(self._candidate(
                 request, _NEWS_METHOD_ID, item,
                 published if published is not None else envelope_avail))
+        if excluded:
+            _LOG.warning(
+                "%s: %d row(s) excluded: attested publication postdates the frozen "
+                "as_of %s (%d row(s) served)",
+                _NEWS_METHOD_ID, excluded, request.as_of.isoformat(), len(out),
+            )
         return tuple(out)
 
     def _row_candidate(

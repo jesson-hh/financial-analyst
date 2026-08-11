@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import re
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -1518,14 +1519,34 @@ PUBLISHED_AFTER = datetime(2026, 7, 16, 8, 30, tzinfo=UTC)
 NEWS_PULL_AFTER_AS_OF = AS_OF + timedelta(minutes=30)
 
 
-def _news_item(published: datetime | None, *, title="headline",
-               reason="exact_publish_time", key="publish_ts") -> dict:
-    """One unified stocks news item, shaped exactly as the live facade returns it."""
-    item: dict = {"source_id": "eastmoney_stock_news", "title": title,
-                  "text": title, "url": "http://example.invalid/a"}
+def _news_item(published: datetime | None, *, title="headline", key="publish_ts",
+               time_source="eastmoney.stock_search.date", pit_certified=True,
+               time_precision="second", time_confidence=1.0) -> dict:
+    """One unified stocks news item in the REAL live shape (measured 2026-08-11).
+
+    The full temporal contract reaches this adapter — a live
+    ``eastmoney_stock_news`` item carries ``publish_ts`` / ``visible_ts`` /
+    ``visible_ts_reason`` / ``time_source`` / ``time_precision`` /
+    ``time_confidence`` / ``pit_certified``, and the fixtures carry them too so the
+    gate is exercised against what the vendor actually sends.
+
+    ``visible_ts_reason`` is deliberately ALWAYS ``"exact_publish_time"`` here: on
+    the bound news route (``source_type="market_news"``) it is a CONSTANT
+    (``live_text_sources.py::_visible_ts`` :331-336), which is exactly why it is not
+    a provenance gate. The gate lives on ``pit_certified`` + ``time_source``.
+    """
+    item: dict = {"source_id": "eastmoney_stock_news", "provider": "eastmoney",
+                  "source_type": "market_news", "title": title,
+                  "text": title, "url": "http://example.invalid/a",
+                  "source_timezone": "Asia/Shanghai"}
     if published is not None:
-        item[key] = published.astimezone(_SH).strftime("%Y-%m-%dT%H:%M:%S")
-        item["visible_ts_reason"] = reason
+        stamp = published.astimezone(_SH).strftime("%Y-%m-%dT%H:%M:%S")
+        item[key] = stamp
+        item["visible_ts_reason"] = "exact_publish_time"   # constant on this route
+        item["time_source"] = time_source
+        item["time_precision"] = time_precision
+        item["time_confidence"] = time_confidence
+        item["pit_certified"] = pit_certified
     return item
 
 
@@ -1592,17 +1613,88 @@ def test_an_unattested_news_row_keeps_the_envelope_pull_instant(schema_registry)
                         str(exc.value))
 
 
-@pytest.mark.parametrize("reason", ["fetch_time_or_source_time", "unknown", ""])
-def test_an_unproven_timestamp_is_not_an_attested_publication(schema_registry, reason):
-    """A FETCH instant wearing a publish key is not a publication time (trust gate)."""
+@pytest.mark.parametrize("time_source", ["fetch_fallback", "unknown", ""])
+def test_an_unproven_time_source_is_not_an_attested_publication(schema_registry, time_source):
+    """A FETCH instant wearing a publish key is not a publication time (gate 2).
+
+    ``live_text_sources.py:411-412`` stamps ``time_source="fetch_fallback"`` exactly
+    when the vendor row carried no date of its own — and ``_publish_or_now``
+    (:324-328) has already substituted ``now()`` into ``publish_ts`` by then. Such a
+    row must fall back to ``pulled_at`` and reach the GUARD, never be excluded.
+    """
     world = _news_world(schema_registry, [
-        _news_item(PUBLISHED_BEFORE, reason=reason) if reason else
-        {"source_id": "eastmoney_stock_news", "title": "t",
-         "publish_ts": PUBLISHED_BEFORE.astimezone(_SH).strftime("%Y-%m-%dT%H:%M:%S")}])
+        _news_item(PUBLISHED_BEFORE, time_source=time_source)])
     cand = world.fetch().candidates[0]
     assert cand.available_at == NEWS_PULL_AFTER_AS_OF        # envelope fallback, unfiltered
     with pytest.raises(FutureDataRefused):
         world.check()
+
+
+def test_a_row_that_is_not_pit_certified_is_not_an_attested_publication(schema_registry):
+    """``pit_certified=False`` closes the hole ``time_source`` alone leaves open (gate 1).
+
+    The residual case: the vendor's raw date was PRESENT but unparseable, so
+    ``_publish_or_now`` substituted ``now()`` while ``time_source`` still reads the
+    honest-looking ``"eastmoney.stock_search.date"``. ``timestamp_is_pit_eligible``
+    (``temporal_contract.py:122-143``) refuses it because
+    ``infer_time_precision`` returned ``"unknown"``.
+    """
+    world = _news_world(schema_registry, [_news_item(
+        PUBLISHED_BEFORE, pit_certified=False, time_precision="unknown",
+        time_confidence=0.2)])
+    cand = world.fetch().candidates[0]
+    assert cand.available_at == NEWS_PULL_AFTER_AS_OF        # envelope fallback, unfiltered
+    with pytest.raises(FutureDataRefused):
+        world.check()
+
+
+@pytest.mark.parametrize("certified", [1, "true", "yes", None])
+def test_pit_certified_is_an_identity_check_not_truthiness(schema_registry, certified):
+    """Only a real ``True`` certifies — a truthy stand-in never unlocks the stamp."""
+    world = _news_world(schema_registry, [
+        _news_item(PUBLISHED_BEFORE, pit_certified=certified)])
+    assert world.fetch().candidates[0].available_at == NEWS_PULL_AFTER_AS_OF
+
+
+def test_a_date_less_row_is_never_silently_excluded(schema_registry):
+    """Review Important 1, end to end: the charter sentence now actually holds.
+
+    A date-less vendor row arrives with a FETCH-instant ``publish_ts`` (after the
+    boundary) wearing the CONSTANT ``visible_ts_reason="exact_publish_time"`` — the
+    exact shape that the first gate mistook for an attestation and then silently
+    dropped. Its honest marks are ``time_source="fetch_fallback"`` /
+    ``pit_certified=False``, so it must be SERVED to the guard, not excluded.
+    """
+    fetch_instant = NEWS_PULL_AFTER_AS_OF                    # _publish_or_now -> now()
+    world = _news_world(schema_registry, [_news_item(
+        fetch_instant, title="date-less row", time_source="fetch_fallback",
+        pit_certified=False, time_precision="unknown", time_confidence=0.2)])
+    cands = world.fetch().candidates
+    assert len(cands) == 1                                   # NOT excluded
+    assert cands[0].available_at == NEWS_PULL_AFTER_AS_OF
+    with pytest.raises(FutureDataRefused):                   # the guard decides, loudly
+        world.check()
+
+
+def test_every_exclusion_is_counted_and_visible(schema_registry, caplog):
+    """Review Important 2: an all-excluded read is never mistaken for an empty vendor."""
+    world = _news_world(schema_registry, [
+        _news_item(PUBLISHED_AFTER, title="a"), _news_item(PUBLISHED_AFTER, title="b"),
+        _news_item(PUBLISHED_BEFORE, title="c")])
+    with caplog.at_level(logging.WARNING, logger=live_data.__name__):
+        cands = world.fetch().candidates
+    assert len(cands) == 1
+    assert "2 row(s) excluded" in caplog.text
+    assert "attested publication postdates the frozen as_of" in caplog.text
+    assert "1 row(s) served" in caplog.text
+
+
+def test_a_clean_news_read_logs_no_exclusion(schema_registry, caplog):
+    """Guard: the notice fires only when something was actually excluded."""
+    world = _news_world(schema_registry, [_news_item(PUBLISHED_BEFORE)])
+    with caplog.at_level(logging.WARNING, logger=live_data.__name__):
+        assert len(world.fetch().candidates) == 1
+    assert "excluded" not in caplog.text
 
 
 def test_visible_ts_is_the_bound_fallback_publication_key(schema_registry):
