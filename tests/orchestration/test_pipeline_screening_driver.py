@@ -84,7 +84,7 @@ from tests.orchestration.test_pipeline_api import (  # noqa: F401
     env,
     trimmed_catalog,
 )
-from tests.orchestration.test_pipeline_screening import _RunHistory
+from tests.orchestration.test_pipeline_screening import _journal_kinds, _RunHistory
 
 _RATINGS = {0: PortfolioRating.BUY, 1: PortfolioRating.HOLD,
             2: PortfolioRating.BUY}
@@ -202,6 +202,46 @@ def _drive_env(env, trimmed_catalog, tmp_path, *, lease=True, max_admissions=3,
         e.deps, plan_runner_factory=scripted, archive_put=spy)
     if lease:
         _issue_screening_lease(e, max_admissions=max_admissions)
+    return _DriveEnv(e=e, client=_client(e.deps), runner=scripted, archive=spy,
+                     history=history)
+
+
+def _production_shaped_env(env, trimmed_catalog, tmp_path, *, max_admissions=6):
+    """``_drive_env``, but with the PRODUCTION coordinator builder.
+
+    The 2026-08-11 live defect lived in the gap between the two: every existing
+    fixture builds ``PlanApprovalCoordinator(...)`` directly, while production
+    builds through ``build_plan_approval_coordinator`` →
+    ``PlanApprovalCoordinator.replay``, which re-deposits every folded historical
+    decision through ``approvals_sink`` (and then through ``record_approval``)
+    before the coordinator is usable. Same journal, same deps, one different
+    constructor — and a journal with foreign rows in it.
+    """
+    from guanlan_v2.orchestration.adapters.api import (
+        build_plan_approval_coordinator,
+    )
+    from guanlan_v2.orchestration.pipeline.live_decide import _ApprovalsBridge
+
+    e = _make_env(env, trimmed_catalog, tmp_path)
+    history = _RunHistory(e.stores, e.registry.registry_digest)
+    scripted = _ScriptedRunner(history)
+    spy = _ArchiveSpy()
+    presets = load_phase10_preset_registry(PRODUCTION_PRESETS_DIR)
+
+    def coordinator_factory(*, admission, approvals_sink):
+        # verbatim api.build_production_pipeline_deps' factory (its journal path
+        # bound to the tmp one).
+        return build_plan_approval_coordinator(
+            admission=admission, clock=e.clock, verifier=None,
+            approvals=_ApprovalsBridge(approvals_sink), journal_path=e.journal,
+            preset_registry=presets,
+            catalog_digest=e.snapshot.catalog_digest,
+            registry_digest=e.registry.registry_digest)
+
+    e.deps = dataclasses.replace(
+        e.deps, plan_runner_factory=scripted, archive_put=spy,
+        coordinator_factory=coordinator_factory)
+    _issue_screening_lease(e, max_admissions=max_admissions)
     return _DriveEnv(e=e, client=_client(e.deps), runner=scripted, archive=spy,
                      history=history)
 
@@ -488,6 +528,75 @@ class TestTheProductLands:
             f"{API}/state", params={"request_id": body["request_id"]}).json()
         assert [row["status"] for row in state["state"]["lane_outcomes"]] == (
             [LANE_COMPLETED] * 3)
+
+
+# =========================================================================== #
+# 4b. the durable journal carries OTHER runs' decisions (the live-only class)   #
+# =========================================================================== #
+class TestForeignDecisionRowsInTheJournal:
+    """The 2026-08-11 live failure, reproduced in its production shape.
+
+    The real drive 500'd BEFORE admission (zero spend, lease intact):
+    ``PlanApprovalCoordinator.replay`` re-deposits every folded historical
+    decision through ``approvals_sink``, the production journal held ~50 rows
+    from earlier campaigns, and the dispatcher's sink — routing by candidate
+    digest — knew only that batch's lanes. No fixture could see it: every test
+    journal contained only its own rows AND every test fixture used the bare
+    constructor, which does not replay. Both gaps are closed here.
+    """
+
+    def test_a_second_drive_replays_the_first_ones_decisions_and_survives(
+            self, env, trimmed_catalog, tmp_path):
+        drive = _production_shaped_env(env, trimmed_catalog, tmp_path)
+        first = _start(drive, top_n=3)
+        assert first["outcomes"] == ["lease_admitted"] * 3
+
+        # the journal now carries THREE decision rows that are FOREIGN to the
+        # next batch's dispatcher — the production "second run of a process
+        # lifetime onward" shape, verbatim.
+        assert _journal_kinds(drive.e.journal).count("decision") == 3
+
+        second = _start(drive, top_n=2)
+        assert second["request_id"] != first["request_id"]
+        assert second["batch_id"] != first["batch_id"]
+        # construction survived the replay AND the second batch really ran.
+        assert second["outcomes"] == ["lease_admitted"] * 2
+        assert second["status"] == BATCH_COMPLETED
+        assert [ln["status"] for ln in second["execution"]["lanes"]] == (
+            [LANE_COMPLETED] * 2)
+        assert [c["code"] for c in drive.runner.run_calls] == [
+            *CODES, *CODES[:2]]
+
+    def test_a_foreign_row_is_skipped_and_the_owns_rows_still_route(self):
+        """The unit half: the sink deposits its own, counts and skips the rest;
+        ``record_approval`` answers the TYPED ``unknown_candidate`` the
+        coordinator's replay arm is written to skip (a bare KeyError would
+        escape it and kill construction one line after the sink)."""
+        from guanlan_v2.orchestration.admission import AdmissionRejected
+
+        dispatcher = driver_mod.LaneAdmissionDispatcher()
+        mine: dict = {}
+        service = SimpleNamespace(
+            record_approval=lambda *a, **k: "recorded")
+        dispatcher.bind(draft_id="draft-mine", digest="d" * 64, service=service,
+                        approvals=mine,
+                        run_budget=SimpleNamespace(ledger_id="led-x"))
+
+        own = SimpleNamespace(candidate_plan_digest="d" * 64, request_id="req-1")
+        foreign = SimpleNamespace(candidate_plan_digest="f" * 64,
+                                  request_id="req-other")
+        dispatcher.approvals_sink(own)
+        dispatcher.approvals_sink(foreign)
+        assert list(mine) == [("req-1", "d" * 64)]
+        assert dispatcher.skipped_foreign_approvals == 1
+
+        assert dispatcher.record_approval(
+            "d" * 64, None, authenticated_actor="a",
+            idempotency_key="k") == "recorded"
+        with pytest.raises(AdmissionRejected) as exc:
+            dispatcher.record_approval("f" * 64, None, authenticated_actor="a",
+                                       idempotency_key="k")
+        assert exc.value.code == "unknown_candidate"
 
 
 # =========================================================================== #

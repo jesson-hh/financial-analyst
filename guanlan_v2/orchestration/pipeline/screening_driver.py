@@ -71,6 +71,7 @@ from pathlib import Path
 from typing import Any, Literal, Sequence
 
 from guanlan_v2.orchestration.adapters.launcher import LaneExecutionBinding
+from guanlan_v2.orchestration.admission import AdmissionRejected
 from guanlan_v2.orchestration.approval import admit_after_approval
 from guanlan_v2.orchestration.context import RunBudget, RunContext
 from guanlan_v2.orchestration.pipeline.contracts import RecommendationSlate, RunSubject
@@ -238,6 +239,9 @@ class LaneAdmissionDispatcher:
         self._by_digest: dict[str, Any] = {}
         self._approvals: dict[str, dict] = {}
         self._budgets: dict[str, RunBudget] = {}
+        #: replayed decision rows belonging to OTHER admissions (see
+        #: :meth:`approvals_sink`) — observable rather than silent.
+        self.skipped_foreign_approvals = 0
 
     # -- binding -------------------------------------------------------- #
     def bind(self, *, draft_id: str, digest: str, service: Any,
@@ -273,14 +277,59 @@ class LaneAdmissionDispatcher:
 
     def record_approval(self, candidate_id, approval_input, *,
                         authenticated_actor, idempotency_key):
-        return self._by_digest[candidate_id].record_approval(
+        """Forward to the reserving service — or refuse in the TYPED vocabulary.
+
+        A digest this dispatcher never bound belongs to some other admission's
+        history, and the coordinator's replay knows what to do with that: it
+        skips exactly ``AdmissionRejected(code="unknown_candidate")`` and counts
+        the row. A bare ``KeyError`` is not that word, so it would escape the
+        skip arm and kill coordinator construction — which is the SAME live
+        failure as the sink below, one line later.
+        """
+        service = self._by_digest.get(candidate_id)
+        if service is None:
+            raise AdmissionRejected(
+                f"candidate {candidate_id!r} is not held by this screening "
+                "batch's admission set (it belongs to another run's history); "
+                "its own reserving instance heals it",
+                code="unknown_candidate")
+        return service.record_approval(
             candidate_id, approval_input,
             authenticated_actor=authenticated_actor,
             idempotency_key=idempotency_key)
 
     def approvals_sink(self, approval) -> None:
-        self._approvals[approval.candidate_plan_digest][
-            (approval.request_id, approval.candidate_plan_digest)] = approval
+        """Deposit an approval into ITS OWN lane's store; skip foreign rows.
+
+        **The 2026-08-11 live defect, and why the e2e could not see it.**
+        ``PlanApprovalCoordinator.replay`` — the path production builds through —
+        re-deposits EVERY folded historical decision through this sink before the
+        coordinator is usable (approval.py's replay loop). The production journal
+        carried ~50 decisions from earlier campaigns; this sink routes by
+        candidate digest and knows only THIS batch's lanes, so the first real
+        drive died with ``KeyError`` at coordinator construction — before
+        admission, before any spend. Every test journal had only its own rows, so
+        no fixture could have caught it: the exact live-only class this campaign
+        exists to find.
+
+        A foreign row is not an error here. It is another admission's history,
+        and the coordinator's own replay arm already states the rule ("a decision
+        row whose candidate this admission does not hold is SKIPPED, never a
+        construction failure"). ``live_decide`` survives the same replay only
+        because its sink is a plain dict that accepts any key. So: skip, count,
+        and log the digest at debug — the coordinator's own WARNING + its
+        ``skipped_replay_rows`` counter remain the loud channel for a row that
+        nobody can heal.
+        """
+        approvals = self._approvals.get(approval.candidate_plan_digest)
+        if approvals is None:
+            self.skipped_foreign_approvals += 1
+            _LOG.debug(
+                "approvals sink: candidate %s is outside this screening batch "
+                "(another run's durable history); skipped",
+                approval.candidate_plan_digest)
+            return
+        approvals[(approval.request_id, approval.candidate_plan_digest)] = approval
 
 
 def build_lane_admission(
