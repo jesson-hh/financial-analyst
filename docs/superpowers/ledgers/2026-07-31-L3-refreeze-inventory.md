@@ -1391,3 +1391,52 @@ manifest 位移的评审 —— 不允许再搭任何重冻的便车(本期是�
 指向本文件 §12.2 的当前链路。不改数值本身:那段文字记录的是 07-29 侦察时的实测,
 把它改成今天的值等于伪造一次历史测量。
 
+
+---
+
+## 12.12 Task 7 真机战役写账(2026-08-11,控制器亲跑,盘中)
+
+### 出口闸清点(计划 §4 gate 4/5 + Task 7 Steps)
+
+| 判据 | 结果 | 证据 |
+|---|---|---|
+| 生产深链一次真跑产出真决策产物(完整十节点 preset) | ✅ | run `deep-6718268ea77b6c1a`(300308,149s,租约 `bf606b4e`):RunCompleted,`PortfolioDecision`+proposal,orchestrated 台账行(preset=`pipeline.luozi_deep_decide`,无 reduced 徽章,cash_weight=1.0+空 target=trader 真裁决「schema 残差非卖出指令」) |
+| `pv.technical` 席位真读 | ✅ | 同 run:degraded-ran(price_action 弱化缺席=语义正确),**1 条 finalized ToolCallRecord**(17s);首跑 `deep-78abf946` 里同样 1 条(101s)——两跑双证 |
+| `text.news` 席位真读 | ✅ | 同 run:COMPLETED,**1 条 finalized ToolCallRecord**(8s),**19 行真新闻服务进节点**,F2 加固的排除计数显形(「1 行按其自身认证排除」) |
+| reduced 降级档存活重章程 | ✅ | run `deep-bc98936a9131b574`(300308,79s,租约 `044e8e07`):COMPLETED,徽章三件套逐字(`subject_run_scoped_v1`+`reduced_evidence_preset_v1`+`reduced_evidence_missing:pv.technical,text.news`),orchestrated 行 target 300308.SZ@0.5 |
+| **A 线 screening 真跑 + `text.news` 真读**(出口闸) | ✅ | request `pipeline-screen-53b6f27a9cae9f21`(top_n=1,租约 `8d9d0f3c`):status=completed,lane 600071 completed,**news 节点 1 条 finalized TCR(15s)**;slate 落盘 `var/archive/rs_orch_screen_20260811.json` + `out/rs_orch_screen_20260811.md`,`/screening/latest` 真服务;推荐文档诚实性:advisory 横幅、评级逐字复制、「驱动是不足非平衡」 |
+| Lane-0 当日会话 | ✅ | snapshot `bootstrap-run-ctx-178769482b…`(payload-462,deep_lane_sees=True),9 present/8 absent;regime/rotation 仍 incomplete(模型侧,连续第三次)——**Task 4 regime prompt 修复的模型合规性无法从 incomplete 报告观察,如实记为未证明** |
+| 支持检查活面 | ✅ | 服务进程内准入的 runtime-support 检查对生产目录跑过(深链 pending row 59 + screening 两批全过准入)——supported=True 在真服务进程实证 |
+| 负控制 | ✅(套件+机会) | `GUANLAN_SEATS_DEEP` unset 逐位不变=Task 6 watcher 钉(byte-identical);失败回执反风暴=上午真失败后 hold-off 生效、清除流程真机首演(证据副本 scratchpad/receipts-before-clear.jsonl) |
+| 串行化测量(item 9) | ✅ | 席位严格一次一个:news 8s→technical 17s→pm 53s(间隔~1s);全 run 149s;reduced 79s;screening lane 单 lane ~7min 含装配。datum 已够用户拍板 |
+
+### 战役抓到的缺陷与缺口(全部走独立 TDD 修复任务,零 drive-by)
+
+1. **F1 写一次性字节分歧杀 pm**(结构性,每次全预设必炸):`request_id` 节点域+`SEMANTIC_EXCLUDE`→同语义摘要两字节像;L3 新行首次让 always_invoke 与 cache_or_invoke 同参同跑。修 `4e52a8d5`(eventstore 同存储身份幂等绑定,字节校验原封);评审直接批准。
+2. **F2 news 源喂未来行给 PIT 闸**(text.news 盘中必死):available_at 戳拉取时刻。修 `50dce59f` + 加固 `e2bf5a66`(发布时刻凭 `pit_certified` 身份判定+`time_source` 双锁;评审抓到 `visible_ts_reason` 在该路由是常量)。**教训:注册模型 docstring=密封材料**(加一句话动三 golden,已回退)。
+3. **A 线执行半边生产不存在**(R 级缺口,出口闸阻断):`/start` 止于准入,深链执行者是 live_decide,screening 从没人建。建 `8b04fd2c`+`cc344023`+`3c094657`(`screening_driver.py`:LaneAdmissionDispatcher、同键预留重放恢复、逐 lane 失败隔离、slate_error 收据纪律、外来候选跳过);评审 Approved(自批红线结构性成立:「执行器无造权能力」)。
+4. **sink 对账本重放的历史候选 KeyError**(live-only:e2e 账本无外来行,生产 47+ 条):修 `3c094657` 双半(sink 跳过 + `record_approval` 类型化拒绝)。
+5. bull-r1/bear-r1 `output_schema_invalid`(解码 None)模型侧间歇第 3/4 次,FILED 不修。
+6. `quant.factor` 生产 handler factory 未绑(screening lane 内 executor_exception,lane 仍诚实完成)——post-L3 backlog。
+
+### 战役期裁决(§9 之外的控制器裁决)
+
+- **租约信封教训**:信封按**预算额**扣不按结算额(approval.py:811)——首张 FULL 租约 12-8=4<8 第二次准入必失配。后续铸约规则:cap ≥ 每次准入的预算额 × 准入数。
+- **receipt-clear ≠ identity-reset**:回执清除解锁升级,但内核 run 身份 (code, session, triggers, preset) 烧毁后 pool 拒重建终态 run——同日同身份重试做不到(T6-1 有界重试的第二例证)。合法换身份=换 code(preset 在身份内)。
+- **排除计数的载体裁决**:日志载体在 L3 够用(prompt 内空读已有 DO_NOT_FABRICATE 哨兵);prompt 级计数=密封材料决策,归 post-L3 徽章封闭词表工程。
+- **生产姿态切换**:`var/secrets.env` 注释 `GUANLAN_SEATS_DEEP_PRESET=reduced`(备份 .bak-l3t7)→ **全预设为生产默认**,reduced 保留为可选降级档。9999 三次代际重启(18s/3s/3s 自愈)均看门狗自愈。
+
+### 未证明(不藏)
+
+- pm 行文引用数据块:数据真读、可审计、PIT 合格,但 pm 论述仍不引读数(与 08-02/08-06 同形)——归 post-L3 归因实验(留存请求体义务仍在)。
+- regime prompt 的模型合规(drivers 排序/条件锚):regime 节点连续 incomplete,无 completed 报告可验。
+- 断供语汇 live 观察:战役期无自然断供,套件钉(test_l3_d2_outage 4 格)为其证据。
+- 300750 的完整全预设跑:其今日身份被首跑烧毁;完整证据由 300308 承载。
+
+### post-L3 backlog 增补(执行器评审 I/M 系)
+
+驱动器:I1 in-flight「drive started」记录(HTTP 超时窗)/I3 `production_archive_put` 覆盖/I4 `executor_unwired`/`archive_put_unwired` 钉/M1 approval_event_id 覆写注/M3 四处过时 docstring(含 screening.py admit「today: every lane」pre-L3 措辞)/M4 fallback 缺 landing_error/M5 write_text CRLF/M6 degraded_lanes 语义合并+当日 upsert 覆盖。另:quant.factor handler 绑定;深依赖装配期 `/start` 竞态(stores_unwired 诚实拒,但重启后需等待~60-90s)。
+
+### 支出账
+
+LLM 结算:Lane-0 2 次(8192 tok)+ 首跑 4 + reduced 6 + 全预设 ~7 + screening lane ~5 ≈ **24 次真 LLM 调用**(计划预估 10-25 内)。租约:`9148bdb6`(1/2 准入耗,信封余 4 不足弃)、`044e8e07` 耗尽、`94432d81` 2 准入耗于未执行批(执行器缺口的真实成本)、`bf606b4e` 耗尽、`8d9d0f3c` 耗尽。策略 opt-in 已还原(备份保留)。
