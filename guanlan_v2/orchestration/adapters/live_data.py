@@ -26,7 +26,16 @@ and the manifest kind. It owns exactly three things — one source and two build
   :data:`_SETTLED_CLOSE_LOCAL_TIME` and
   :meth:`LiveClientSource._settled_candidate` — the CONTROLLER RULING behind the
   L2-b Task-9 gate and its ADDENDUM). The calendar is an OPTIONAL constructor
-  dependency: without one the projection simply never fires. A missing
+  dependency: without one the projection simply never fires. A ``news`` row that
+  ATTESTS its own **publication** instant is the same rule read on the text side:
+  it is stamped at that instant (:func:`_attested_publication`), and a row whose
+  own attested publication postdates the frozen ``as_of`` is EXCLUDED rather than
+  handed to the all-or-nothing guard, where it would refuse the whole batch of
+  long-public rows (:meth:`LiveClientSource._news_candidates` — the live
+  ``deep-78abf946944b9984`` regression). The exclusion only ever excludes: no
+  availability is fabricated or backdated, an UNATTESTED news row keeps
+  ``pulled_at`` and is forwarded unchanged, and the other two routes perform no
+  time comparison at all. A missing
   ``pulled_at`` yields ``available_at=None`` and the single PIT authority
   (``PitGuard.check_raw``, invoked by the reviewed Phase-3 router at ``data/registry.py``
   dispatch step 5c) refuses it as :class:`MissingAvailabilityRefused` — the adapter
@@ -210,6 +219,28 @@ _ITEM_QUOTE_TIME_KEYS = ("publish_ts", "visible_ts")
 
 #: ``time_source`` prefixes that prove the item's timestamp is NOT venue-side.
 _UNPROVEN_TIME_SOURCES = ("fetch_fallback", "unknown")
+
+#: Item keys carrying a NEWS row's own **publication instant** — the announcement's
+#: 当时可知时间, i.e. the moment the datum became public. The unified stocks item
+#: shaper stamps both (``src/data/live_text_sources.py``); the real
+#: ``eastmoney_stock_news`` rows carry ``publish_ts`` == ``visible_ts`` with
+#: ``visible_ts_reason="exact_publish_time"`` (measured live 2026-08-11). First
+#: readable spelling wins; nothing is derived.
+#:
+#: Deliberately a SEPARATE name from :data:`_ITEM_QUOTE_TIME_KEYS`, which currently
+#: spells the same two keys: there they are read as a QUOTE anchor gated on
+#: ``time_source`` and consumed as a session DATE; here they are read as a
+#: PUBLICATION instant gated on ``visible_ts_reason``. Two rules, two gates, two
+#: consumers — collapsing them would couple the quote calendar attribution to the
+#: news availability rule.
+_NEWS_PUBLICATION_KEYS = ("publish_ts", "visible_ts")
+
+#: ``visible_ts_reason`` prefixes that prove the item's timestamp is NOT the
+#: provider's publication instant. The shaper falls back to the FETCH instant with
+#: ``visible_ts_reason="fetch_time_or_source_time"`` whenever the vendor row carried
+#: no time of its own — the pull-instant lie the ruling forbids. An ABSENT / empty
+#: reason is equally unproven: an unattested timestamp is not an attestation.
+_UNPROVEN_PUBLICATION_REASONS = ("fetch", "unknown")
 
 #: Row keys carrying the instrument's settled display name (static reference data).
 _SETTLED_NAME_KEYS = ("name", "sec_name", "short_name")
@@ -399,6 +430,35 @@ def _quote_anchor_date(view: Mapping[str, Any], item: Mapping[str, Any]) -> _dat
     return None
 
 
+def _attested_publication(item: Any) -> datetime | None:
+    """A news row's OWN publication instant (aware UTC), or ``None`` when unattested.
+
+    **The row's own availability, never a fabrication.** A news/announcement datum
+    becomes knowable when it is PUBLISHED, and the unified stocks item carries that
+    instant together with the shaper's own attestation of where it came from
+    (``visible_ts_reason``). This is the news-side reading of the CONTROLLER RULING
+    the settled projection implements for quotes: *available_at = the data's OWN
+    availability time (bar settlement/publication), not pulled_at*.
+
+    The attestation is the gate and it is read from the ITEM — the shaper's own
+    statement — exactly as :func:`_quote_anchor_date` reads ``time_source`` from the
+    item and never from a vendor-overlaid view. A missing / empty / fetch-derived /
+    unknown reason yields ``None``: the row proves nothing about its own
+    publication, so the caller keeps the envelope's ``pulled_at`` and the PitGuard
+    decides, unchanged.
+    """
+    if not isinstance(item, Mapping):
+        return None
+    reason = str(item.get("visible_ts_reason") or "").strip().lower()
+    if not reason or reason.startswith(_UNPROVEN_PUBLICATION_REASONS):
+        return None
+    for key in _NEWS_PUBLICATION_KEYS:
+        stamped = _online_availability(item.get(key))
+        if stamped is not None:
+            return stamped
+    return None
+
+
 def _previous_session(calendar: TradingCalendar, anchor: _date) -> _date | None:
     """The committed calendar's latest session **strictly before** ``anchor``.
 
@@ -533,11 +593,15 @@ class LiveClientSource:
     """The ONLINE live-data adapter (a Phase-3 ``DataSource``).
 
     Reads the ``live_client`` facade and wraps every probe-envelope row into a
-    :class:`RawRowCandidate` with ``available_at = <envelope pulled_at>`` — **without**
-    pre-filtering by time. The single PIT authority is the reviewed Phase-3 router's
+    :class:`RawRowCandidate` with ``available_at = <envelope pulled_at>``. The single
+    PIT authority over everything served is the reviewed Phase-3 router's
     ``PitGuard.check_raw`` (``data/registry.py`` dispatch step 5c), which refuses any
-    future (``pulled_at > as_of``) / missing-availability row loudly. No method takes
-    a caller ``as_of`` / ``strict`` / ``now`` override — the boundary is
+    future (``pulled_at > as_of``) / missing-availability row loudly. The ONE
+    source-side exclusion is a ``news`` row that ATTESTS its own publication instant
+    as later than the frozen boundary (:meth:`_news_candidates`) — the source never
+    hands the guard a row the row itself says was not yet public, because the guard's
+    refusal is all-or-nothing and would take the compliant rows with it. No method
+    takes a caller ``as_of`` / ``strict`` / ``now`` override — the boundary is
     ``request.as_of`` (the start-frozen ``DataContext`` as-of) only.
 
     Facade functions default to the live ``guanlan_v2.datafeed.live_client``
@@ -671,9 +735,12 @@ class LiveClientSource:
         # -- ok/data-bearing: wrap each row with ITS OWN availability ----------- #
         avail = _online_availability(envelope.get("pulled_at"))
         items = envelope.get("items") or ()
-        candidates = tuple(
-            self._row_candidate(request, method_id, item, avail) for item in items
-        )
+        if method_id == _NEWS_METHOD_ID:
+            candidates = self._news_candidates(request, items, avail)
+        else:
+            candidates = tuple(
+                self._row_candidate(request, method_id, item, avail) for item in items
+            )
         entry = scope.frozen_route.entries[0]
         # fetched_at is the FROZEN as-of (audit-only) — no wall-clock read exists here.
         return build_raw_fetch(
@@ -681,6 +748,55 @@ class LiveClientSource:
             capability_ref=entry.capability_ref, candidates=candidates,
             subsource=canonical, fetched_at=request.as_of, provider_request_id=None,
         )
+
+    def _news_candidates(
+        self, request: DataRequest, items: Any, envelope_avail: datetime | None
+    ) -> tuple[RawRowCandidate, ...]:
+        """The ``news`` route: publication-stamped rows, minus the not-yet-public ones.
+
+        **Live regression** — run ``deep-78abf946944b9984`` (2026-08-11 09:49 CST):
+        the ``news`` node died with ``FutureDataRefused`` ("20 row(s) have
+        available_at after the frozen as_of"). The read had genuinely happened and
+        every row was real; they were refused only because this adapter stamped ALL
+        of them with the envelope's ``pulled_at`` (the 09:49 pull instant) while the
+        run's ``as_of`` is the session-midnight boundary. Measured against the real
+        vendor the same morning, every ``eastmoney_stock_news`` row carries its own
+        ``publish_ts`` with ``visible_ts_reason="exact_publish_time"`` — the 20
+        refused rows had been public for weeks.
+
+        Two source-side halves, neither of which touches the guard:
+
+        1. a row that ATTESTS its own publication instant
+           (:func:`_attested_publication`) is stamped with it — the datum's own
+           availability, the CONTROLLER RULING's own rule, applied where the datum
+           actually carries it. An UNATTESTED row keeps the envelope's ``pulled_at``
+           exactly as before (so the freeze stays enforced and visible, and a
+           missing ``pulled_at`` still reaches the guard as ``available_at=None``).
+        2. a row whose OWN attested publication instant is **after** the frozen
+           ``request.as_of`` is EXCLUDED. Serving a row the source already knows the
+           guard must refuse is a source-side bug, and it is not a private bug:
+           ``PitGuard.check_raw`` is ALL-OR-NOTHING (``data/pit.py:485-540``), so one
+           announcement published this morning would refuse the WHOLE batch of
+           long-public rows — precisely the live failure, one intraday headline away
+           from recurring even with (1) in place.
+
+        The exclusion **only excludes**: no ``available_at`` is fabricated, none is
+        backdated, and a row is never re-stamped to make it pass. Nothing is dropped
+        on a claim the source cannot read — only on the row's own attestation. Rows
+        that are forwarded are still judged by the single PIT authority, and the
+        adapter still performs no time comparison of any kind on the other routes
+        (``verified_snapshot`` answers the ruling through its calendar-attributed
+        settled projection; ``ohlcv`` is unchanged).
+        """
+        out: list[RawRowCandidate] = []
+        for item in items:
+            published = _attested_publication(item)
+            if published is not None and published > request.as_of:
+                continue  # the row itself says it was not yet public at the boundary
+            out.append(self._candidate(
+                request, _NEWS_METHOD_ID, item,
+                published if published is not None else envelope_avail))
+        return tuple(out)
 
     def _row_candidate(
         self, request: DataRequest, method_id: str, item: Any, avail: datetime | None

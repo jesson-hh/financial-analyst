@@ -1481,3 +1481,157 @@ def test_the_2027_coverage_cliff_is_a_typed_loud_refusal_with_the_remedy(schema_
     # and it is typed at source too (the guard itself, not only the seam).
     with pytest.raises(SnapshotMismatchError):
         world.check(freshness=world.policy.freshness_policy)
+
+
+# =========================================================================== #
+# 15. NEWS carries its OWN publication availability (live regression)          #
+#                                                                             #
+# LIVE FAILURE, run ``deep-78abf946944b9984`` (2026-08-11 09:49 CST): node     #
+# ``news`` died with ``FutureDataRefused`` — "20 row(s) have available_at      #
+# after the frozen as_of". The read HAPPENED (the L3 grant works, real rows    #
+# reached the guard); every row was refused because the adapter stamped ALL of #
+# them with the ENVELOPE's ``pulled_at`` (the 09:49 pull instant), while the   #
+# frozen ``as_of`` is the session-midnight boundary. Measured against the real #
+# vendor the same morning, every ``eastmoney_stock_news`` row carries its own  #
+# ``publish_ts`` (e.g. ``2026-07-25T09:18:00``) with                           #
+# ``visible_ts_reason="exact_publish_time"`` — i.e. the 20 refused rows were   #
+# genuinely public WEEKS before the boundary. Overwriting a datum's own        #
+# publication instant with the pull instant is the very lie the CONTROLLER     #
+# RULING forbids ("available_at = the data's OWN availability time (bar        #
+# settlement/publication), not pulled_at").                                    #
+#                                                                             #
+# Two halves, both source-side and neither touching the guard:                 #
+#   (i)  a news row that ATTESTS its own publication time is stamped with it;  #
+#   (ii) a row whose OWN attested publication postdates the frozen as_of is    #
+#        EXCLUDED — the source never hands the guard a row it already knows    #
+#        the guard must refuse, and one such row can no longer batch-refuse    #
+#        its compliant siblings (``PitGuard.check_raw`` is all-or-nothing).    #
+# The filter only ever excludes: no availability is fabricated or backdated,   #
+# and an UNATTESTED row keeps the envelope pull instant and stays unfiltered,  #
+# so the freeze remains enforced and visible (section 1's pin).                #
+# =========================================================================== #
+#: 2026-07-15 09:18 Asia/Shanghai — published the session BEFORE the boundary.
+PUBLISHED_BEFORE = datetime(2026, 7, 15, 1, 18, tzinfo=UTC)
+#: 2026-07-16 16:30 Asia/Shanghai — published AFTER the frozen boundary.
+PUBLISHED_AFTER = datetime(2026, 7, 16, 8, 30, tzinfo=UTC)
+#: the live shape: the pull happens well after the frozen run-start instant.
+NEWS_PULL_AFTER_AS_OF = AS_OF + timedelta(minutes=30)
+
+
+def _news_item(published: datetime | None, *, title="headline",
+               reason="exact_publish_time", key="publish_ts") -> dict:
+    """One unified stocks news item, shaped exactly as the live facade returns it."""
+    item: dict = {"source_id": "eastmoney_stock_news", "title": title,
+                  "text": title, "url": "http://example.invalid/a"}
+    if published is not None:
+        item[key] = published.astimezone(_SH).strftime("%Y-%m-%dT%H:%M:%S")
+        item["visible_ts_reason"] = reason
+    return item
+
+
+def _news_world(schema_registry, items, *, pulled_at=NEWS_PULL_AFTER_AS_OF):
+    stub = _ProbeStub(_ok_env(items=items, pulled_at=_pulled(pulled_at)))
+    return _OnlineWorld(schema_registry, method_id="news", params=_NEWS_PARAMS,
+                        probe_stub=stub, clock=_FrozenClock(AS_OF))
+
+
+def test_a_news_row_carries_its_own_publication_availability(schema_registry):
+    """The live 20 rows: published before the boundary, pulled after it — they pass."""
+    world = _news_world(schema_registry, [_news_item(PUBLISHED_BEFORE)])
+    cand = world.fetch().candidates[0]
+    # the DATUM's own availability, not the pull instant (which is in the future).
+    assert cand.available_at == PUBLISHED_BEFORE
+    assert cand.effective_at == PUBLISHED_BEFORE
+    assert cand.available_at <= world.ctx.as_of
+    passed, audit = world.check()
+    assert len(passed) == 1 and audit.guard_result == "passed"
+
+
+def test_an_attested_future_news_row_never_batch_refuses_its_siblings(schema_registry):
+    """Mixed batch: the compliant rows are served, the not-yet-public row is excluded."""
+    world = _news_world(schema_registry, [
+        _news_item(PUBLISHED_BEFORE, title="public yesterday"),
+        _news_item(PUBLISHED_AFTER, title="not public at the boundary"),
+        _news_item(PUBLISHED_BEFORE, title="also public yesterday"),
+    ])
+    cands = world.fetch().candidates
+    assert len(cands) == 2                                    # the future row is excluded
+    assert {c.raw_payload["headline"] for c in cands} == {
+        "public yesterday", "also public yesterday"}
+    assert all(c.available_at == PUBLISHED_BEFORE for c in cands)
+    passed, audit = world.check()                             # no batch refusal
+    assert len(passed) == 2 and audit.guard_result == "passed"
+
+
+def test_an_all_future_news_read_is_an_honest_empty_read(schema_registry):
+    """Every row attested AFTER the boundary → an honest zero-row read, never a crash."""
+    world = _news_world(schema_registry, [
+        _news_item(PUBLISHED_AFTER, title="a"), _news_item(PUBLISHED_AFTER, title="b")])
+    assert world.fetch().candidates == ()
+    gateway = _CompletingGateway({world.src_ref.id: world.adapter.fetch}, _audit_sink())
+    outcome = _dispatch(world, schema_registry, gateway)
+    assert outcome.result.status is DataStatus.NO_DATA      # honest "nothing here"
+    assert outcome.result.data is None                      # zero rows, no fabrication
+    assert outcome.result.pit_audit.rows_returned == 0
+
+
+def test_an_unattested_news_row_keeps_the_envelope_pull_instant(schema_registry):
+    """The pinned contract: no attestation ⇒ pulled_at, unfiltered, guard is authority.
+
+    Also pins the LIVE refusal message shape the run reported, so a future
+    regression is recognisable from the node's own error text.
+    """
+    world = _news_world(schema_registry, [_news_item(None, title="bare row")])
+    cands = world.fetch().candidates
+    assert len(cands) == 1                                   # never dropped by the source
+    assert cands[0].available_at == NEWS_PULL_AFTER_AS_OF
+    with pytest.raises(FutureDataRefused) as exc:
+        world.check()
+    assert exc.value.future_rows == 1
+    assert re.fullmatch(r"1 row\(s\) have available_at after the frozen as_of",
+                        str(exc.value))
+
+
+@pytest.mark.parametrize("reason", ["fetch_time_or_source_time", "unknown", ""])
+def test_an_unproven_timestamp_is_not_an_attested_publication(schema_registry, reason):
+    """A FETCH instant wearing a publish key is not a publication time (trust gate)."""
+    world = _news_world(schema_registry, [
+        _news_item(PUBLISHED_BEFORE, reason=reason) if reason else
+        {"source_id": "eastmoney_stock_news", "title": "t",
+         "publish_ts": PUBLISHED_BEFORE.astimezone(_SH).strftime("%Y-%m-%dT%H:%M:%S")}])
+    cand = world.fetch().candidates[0]
+    assert cand.available_at == NEWS_PULL_AFTER_AS_OF        # envelope fallback, unfiltered
+    with pytest.raises(FutureDataRefused):
+        world.check()
+
+
+def test_visible_ts_is_the_bound_fallback_publication_key(schema_registry):
+    """``visible_ts`` is the second bound spelling of the same publication datum."""
+    world = _news_world(schema_registry, [
+        _news_item(PUBLISHED_BEFORE, key="visible_ts")])
+    assert world.fetch().candidates[0].available_at == PUBLISHED_BEFORE
+
+
+@pytest.mark.parametrize("method_id,params", [
+    ("verified_snapshot", _VERIFIED_SNAPSHOT_PARAMS),
+    ("ohlcv", _OHLCV_PARAMS),
+])
+def test_publication_stamping_and_exclusion_are_news_only(schema_registry, method_id, params):
+    """Scope pin: the quote/tape routes are untouched — every row still forwarded.
+
+    ``verified_snapshot`` already answers the ruling through the SETTLED projection
+    (its own calendar-attributed rule), and both routes keep the reviewed
+    "adapter forwards, guard decides" contract: a row that would be refused is
+    still handed to the guard, refusal and all.
+    """
+    stub = _ProbeStub(_ok_env(
+        items=[{"publish_ts": PUBLISHED_BEFORE.astimezone(_SH).strftime("%Y-%m-%dT%H:%M:%S"),
+                "visible_ts_reason": "exact_publish_time", "price": 1.0}],
+        pulled_at=_pulled(NEWS_PULL_AFTER_AS_OF)))
+    world = _OnlineWorld(schema_registry, method_id=method_id, params=params,
+                         probe_stub=stub, clock=_FrozenClock(AS_OF), calendar_dep=None)
+    cands = world.fetch().candidates
+    assert len(cands) == 1                                   # forwarded, never filtered
+    assert cands[0].available_at == NEWS_PULL_AFTER_AS_OF    # pulled_at, not publish_ts
+    with pytest.raises(FutureDataRefused):
+        world.check()
