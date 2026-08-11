@@ -24,6 +24,7 @@ Run: ``python -m pytest tests/orchestration/test_pipeline_api.py -v``
 """
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -98,6 +99,7 @@ from guanlan_v2.orchestration.pipeline.screening import (
 )
 
 from guanlan_v2.orchestration.pipeline import api as api_mod
+from guanlan_v2.orchestration.pipeline import screening_driver
 from guanlan_v2.orchestration.pipeline.api import (
     PIPELINE_ROUTER_PREFIX,
     PIPELINE_ROUTE_PATHS,
@@ -433,10 +435,41 @@ class TestRouteTable:
             assert "asyncio.to_thread" in body
 
     def test_the_router_never_freezes_executes_or_writes_signals(self):
+        """CONSCIOUS FLIP (L3 — the A-line executor).
+
+        Pre-flip this pin read as "the router never executes". That was true
+        while NOTHING stood downstream of the screening door, and it is exactly
+        what produced the 2026-08-10 live pathology: two lanes admitted under a
+        real ``ApprovalLease``, executed never. The honest post-flip rule is
+        DELEGATION DISCIPLINE, and it is asserted in three parts rather than
+        loosened:
+
+        1. the router itself still calls none of the banned verbs — no freeze,
+           no ``run_plan``, no decision write, no ``.plan_runner(`` invocation;
+        2. execution reaches the reviewed executor module and nothing else: the
+           ONE call site is ``screening_driver.execute_screening_batch``;
+        3. the freeze/run verbs DO live in that module (a pin that only forbade
+           them everywhere would be satisfied by an executor that never runs).
+        """
         source = Path(api_mod.__file__).read_text(encoding="utf-8")
         for banned in ("admit_after_approval(", "freeze_and_admit(", "run_plan(",
                        "persist_decision(", ".plan_runner("):
             assert banned not in source, f"{banned!r} must never appear in the router"
+        assert source.count("execute_screening_batch(") == 1  # the ONE call site
+        assert "from guanlan_v2.orchestration.pipeline.screening_driver" in source
+        driver_src = Path(screening_driver.__file__).read_text(encoding="utf-8")
+        assert "admit_after_approval(" in driver_src
+        assert "lease_admitted" == screening_driver.LEASE_ADMITTED
+
+    def test_the_two_single_plan_doors_still_stop_at_registration(self):
+        """The STOP LINE did not move for ``preset_id`` / ``goal``: their shared
+        ``_single_plan_admit`` registers a card and returns — L3 changed the
+        screening door only."""
+        source = inspect.getsource(api_mod._single_plan_admit)
+        assert "THE STOP LINE" in source
+        for banned in ("execute_screening_batch(", "admit_after_approval(",
+                       "plan_runner_factory("):
+            assert banned not in source
 
 
 # =========================================================================== #

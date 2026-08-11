@@ -8,7 +8,7 @@ an injectable frozen deps carrier whose every ``None`` field answers an honest
 handler I/O through ``asyncio.to_thread`` (the coroutine sync-I/O red line).
 
 **The door never decides.** ``POST /start`` opens exactly ONE of three
-REQUIRED-approval candidate paths and STOPS at registration:
+REQUIRED-approval candidate paths and never approves anything itself:
 
 * ``source_kind`` — the Task-2 candidate builder produces a ``CandidateSlate``,
   Task 3's :func:`~guanlan_v2.orchestration.pipeline.screening.
@@ -53,20 +53,44 @@ both carry the exact preset digests, and lease matching
 coherent Phase-10 rule is "card path ⇒ ``PRESET_FALLBACK``", and the kernel
 vocabulary stays sealed.
 
-Every mode answers ``status="awaiting_approval"``: the status names the DOOR's
-posture — nothing this router did approved anything. A standing human lease may
-admit a candidate downstream through the coordinator (reported verbatim in
-``outcomes``/``outcome``), but this module NEVER calls ``admit_after_approval``,
-never freezes a plan, never dispatches, and never writes an order/signal/trade.
+A mode that admitted nothing answers ``status="awaiting_approval"``: the status
+names the DOOR's posture — nothing this router did approved anything. This
+module still mints no approval, issues no lease, calls no ``admit_after_approval``
+and writes no order/signal/trade, and the two single-plan doors (``preset_id`` /
+``goal``) STOP at registration exactly as before — even a lease-admitted
+candidate there awaits its own downstream driver.
+
+**What L3 changed, and only there: the ``source_kind`` (screening) door now
+DRIVES what the standing lease already admitted.** Registration remained the
+end of the line for a batch whose lanes a human lease had authorized, which on
+2026-08-10 produced the measured pathology this phase exists to fix — two lanes
+``lease_admitted`` under a real ``ApprovalLease``, executed never: a spent human
+authorization with nothing to show for it. The door therefore hands the
+admission outcomes to the reviewed executor
+(:mod:`~guanlan_v2.orchestration.pipeline.screening_driver`), which runs
+``lease_admitted`` lanes ONLY — sequentially, each through the injected
+production plan-runner seam — and then assembles → renders → lands the
+recommendation. A ``pending_human`` lane is never executed, and ``status``
+becomes what really happened (``completed`` / ``partial`` / ``failed``, or
+``awaiting_approval`` when the lease admitted nothing). With no
+``plan_runner_factory`` bound the behaviour is the pre-L3 one bit-for-bit, and
+an admitted-but-undrivable lane says ``executor_unwired`` on its receipt rather
+than passing for "awaiting approval".
+
 The door is idempotent by derived request identity: a re-POST of the same body
-answers the recorded receipt instead of re-reserving (the live_decide re-tick
-idiom — the durable record IS the receipt).
+answers the recorded receipt instead of re-reserving OR re-running (the
+live_decide re-tick idiom — the durable record IS the receipt).
 
 ``GET /screening/latest`` serves the latest committed ``RecommendationSlate@1``
 with the SERVER-SIDE degraded-code join: the contract keeps ``degraded_lanes``
 index-only, so the projection joins slate→batch through the router's own durable
 request record to NAME the degraded codes (an unjoinable batch stays honestly
-``code: null``, never invented). The archive id is day-scoped by the CANDIDATE
+``code: null``, never invented). When no such payload exists it falls back to the
+slate projection the executor recorded on the durable request record — in
+production that is the ONLY authority there can be, because
+``RecommendationSlate@1`` belongs to no registry the startup resolver holds and
+adding one would move a sealed digest that on-disk rows already declare (the
+2026-07-31 restart wedge). Either way the served projection names its ``source``. The archive id is day-scoped by the CANDIDATE
 slate's ``as_of`` (the Task-4 pinned semantics — the data's day, info not alarm),
 and the slate's badges plus the resolved candidate slate's badges
 (``stale_ranking:*`` / ``unmappable_codes:<n>`` — examined rows only) surface
@@ -152,6 +176,12 @@ from guanlan_v2.orchestration.pipeline.screening import (
     build_screening_batch,
     recommendation_archive_id,
     session_date_of,
+)
+from guanlan_v2.orchestration.pipeline.screening_driver import (
+    LEASE_ADMITTED,
+    build_lane_admission,
+    execute_screening_batch,
+    production_archive_put,
 )
 
 __all__ = [
@@ -256,6 +286,18 @@ class PipelineRouterDeps:
     request_store: Any = None
     #: the D7 TA inbox directory (production: ``var/ta_inbox``; tests: tmp).
     ta_inbox_dir: Path | str | None = None
+    #: the per-run plan-runner factory ``(*, admission, lane_bindings,
+    #: run_context_factory, request_id, prompt_assembler, subject_params=None)``
+    #: — the Task-7 ABI verbatim (``live_decide.plan_runner_factory``).
+    #: OPTIONAL by design: unbound, the screening door keeps its pre-L3
+    #: behaviour bit-for-bit (admitted lanes simply are not executed) and says
+    #: so on the receipt — it never becomes a 503, because nothing needs a
+    #: runner until a standing lease actually admits a lane.
+    plan_runner_factory: Callable[..., Any] | None = None
+    #: the A-line archive landing seam ``(artifact_id, artifact_type, markdown)``
+    #: (production: ``screening_driver.production_archive_put``). Unbound, a
+    #: built slate is honestly reported as NOT filed, never silently dropped.
+    archive_put: Callable[[str, str, str], None] | None = None
 
 
 _PROCESS_ROUTER_DEPS = PipelineRouterDeps()
@@ -676,25 +718,53 @@ def _start_source_kind(d: Any, body: Mapping[str, Any]) -> JSONResponse:
         sink=d.stores.budget_event_sink(
             run_id=run_id, ledger_id=run_budget.ledger_id),
         run_budget=run_budget)
-    approvals: dict = {}
-    service = d.admission_factory(
-        run_id=run_id,
-        requests={lane.request.request_id: lane.request for lane in build.lanes},
-        drafts={lane.draft.id: lane.draft for lane in build.lanes},
-        context=context, approvals=approvals, run_budget=run_budget)
+    # ONE admission service PER LANE, under one coordinator (L3: the reviewed
+    # per-candidate dispatcher, promoted from the Phase-10 e2e). Forced, not
+    # stylistic — a lane that must be executable needs its admission service
+    # created under its OWN ``draft.run_id``: ``freeze_and_admit_candidate`` and
+    # ``record_approval`` both require the RESERVING instance, and the execution
+    # ``BudgetLedger`` folds budget events by ``(run_id, ledger_id)``, so a
+    # batch-scoped service leaves every lane's plan reservation invisible at the
+    # first layer boundary. The batch-level ``run_budget``/``ledger`` above stay
+    # exactly what they were: the caller-carried WHOLE-PICTURE pre-flight guard.
+    dispatcher = build_lane_admission(
+        build, admission_factory=d.admission_factory, stores=d.stores,
+        context=context)
     coordinator = d.coordinator_factory(
-        admission=service,
-        approvals_sink=lambda ap: approvals.__setitem__(
-            (ap.request_id, ap.candidate_plan_digest), ap))
+        admission=dispatcher, approvals_sink=dispatcher.approvals_sink)
     try:
         outcomes = admit_screening_batch(
-            batch, coordinator=coordinator, admission=service, now=now,
+            batch, coordinator=coordinator, admission=dispatcher, now=now,
             payloads=d.stores.payloads,
             registry_digest=d.schema_registry.registry_digest, budget=ledger)
     except BatchAdmissionRefused as exc:
         # invariant 2: the Task-3 pre-flight refused WRITE-FREE — zero
         # reservations, zero journal rows, zero report payloads, no record.
         return _fail("batch_admission_refused", 422, detail=str(exc))
+
+    # ── the downstream driver this door has always named ──────────────────── #
+    # Registration is still all this ROUTER does: it mints no approval, issues
+    # no lease and executes nothing itself. What changed (L3) is that a lane the
+    # STANDING HUMAN LEASE already admitted is no longer abandoned — the spent
+    # authorization is carried into the reviewed executor, which runs
+    # ``lease_admitted`` lanes only. Every ``pending_human`` lane stays exactly
+    # what it was: a card awaiting a human, unexecuted, its reservation held.
+    admitted = [o for o in outcomes if getattr(o, "outcome", None) == LEASE_ADMITTED]
+    execution = None
+    if d.plan_runner_factory is None:
+        if admitted:
+            # LOUD: an admitted lane holds a spent human authorization. Without a
+            # runner the honest answer is to say so on the receipt, never to
+            # pretend the batch merely awaits approval.
+            _LOG.warning(
+                "screening batch %s: %s lane(s) were lease-admitted but no "
+                "plan_runner_factory is bound — nothing executed",
+                batch.batch_id, len(admitted))
+    else:
+        execution = execute_screening_batch(
+            build, outcomes=outcomes, dispatcher=dispatcher, stores=d.stores,
+            context=context, plan_runner_factory=d.plan_runner_factory,
+            archive_put=d.archive_put)
 
     lanes = [
         {"lane_index": lane.lane_index, "code": lane.code,
@@ -721,10 +791,33 @@ def _start_source_kind(d: Any, body: Mapping[str, Any]) -> JSONResponse:
             "content_digest": slate_ref.payload_ref.content_digest},
         "approval_policy": ApprovalPolicy.REQUIRED.value,
     }
+    extra_record: dict[str, Any] = {"batch_id": batch.batch_id, "lanes": lanes}
+    if execution is None:
+        # the pre-L3 shape, bit-for-bit: nothing ran, the status names the
+        # door's posture. ``executor_unwired`` appears ONLY when a lane really
+        # was admitted and could not be driven — never as routine decoration.
+        if admitted:
+            response["executor_unwired"] = True
+    else:
+        response["status"] = execution.status
+        response["execution"] = execution.as_row()
+        extra_record["lane_outcomes"] = [
+            lane.as_row() for lane in execution.lanes]
+        if execution.projection is not None:
+            # the durable slate authority (``GET /screening/latest`` reads it):
+            # the candidate slate's own badges join the product's here, exactly
+            # as the payload-store projection joins them.
+            projection = dict(execution.projection)
+            badges = list(projection.get("badges") or [])
+            for badge in slate.badges:
+                if badge not in badges:
+                    badges.append(badge)
+            projection["badges"] = badges
+            extra_record["slate"] = projection
     return _record_and_respond(
         d, request_id=request_id, mode="source_kind",
         as_of=slate.as_of.isoformat(), now=now, response=response,
-        extra_record={"batch_id": batch.batch_id, "lanes": lanes})
+        extra_record=extra_record)
 
 
 def _start_preset(d: Any, body: Mapping[str, Any]) -> JSONResponse:
@@ -923,8 +1016,21 @@ def _start_impl(d: Any, body: Mapping[str, Any]) -> JSONResponse:
 # read-only projections                                                        #
 # =========================================================================== #
 def _run_status(stores: Any, run_id: str) -> str:
-    """The honest run-status fold over the journal: terminal event value, else
-    ``in_progress`` when events exist, else ``not_started`` — never invented."""
+    """The honest run-status fold over the journal — never invented.
+
+    Terminal event value if the run reached one; otherwise ``in_progress`` iff
+    the plan was FROZEN (``PlanFrozen`` is the admission boundary a dispatch
+    crosses — before it nothing of the run has executed); otherwise
+    ``not_started``.
+
+    **The freeze, not "any event" (L3).** The fold used to call a journal with
+    any event at all ``in_progress``. That read the same for a lane merely
+    reserved and carded as for one really running, and L3 made the difference
+    visible: a screening lane's admission service is now created under the
+    LANE's own run id (the executor's precondition), so a ``pending_human``
+    lane's journal carries its candidate-prepared bookkeeping — and calling that
+    "in progress" would tell an operator a card awaiting a human is executing.
+    """
     try:
         journal = stores.events.journal(run_id, "main")
     except Exception:  # noqa: BLE001 — an unreadable journal is an honest unknown
@@ -932,7 +1038,10 @@ def _run_status(stores: Any, run_id: str) -> str:
     status = "not_started"
     for event in journal:
         terminal = _TERMINAL_EVENTS.get(event.event_type)
-        status = terminal if terminal is not None else "in_progress"
+        if terminal is not None:
+            status = terminal
+        elif event.event_type is EventType.PLAN_FROZEN:
+            status = "in_progress"
     return status
 
 
@@ -993,12 +1102,36 @@ def _latest_recommendation_slate(stores: Any):
         return None
 
 
+def _recorded_slate_projection(d: Any) -> dict[str, Any] | None:
+    """The newest durable request record carrying a landed slate, or ``None``.
+
+    **Why this exists (L3).** ``RecommendationSlate@1`` lives in no registry the
+    production startup resolver holds — the five it holds are frozen, and adding
+    a sixth (or widening ``_pipeline_registry``) would change a sealed digest
+    that on-disk rows already declare, wedging every existing store on its next
+    restart (the 2026-07-31 restart-wedge law). So the A-line product is NOT
+    committed as a payload in production, and the router's own durable request
+    record — the same authority ``/state`` and the degraded-code join already
+    read — is the slate's authority. It is served as such, saying so.
+    """
+    if d.request_store is None:
+        return None
+    for row in d.request_store.recent(200):
+        projection = row.get("slate")
+        if isinstance(projection, dict) and projection.get("batch_id"):
+            return {**projection, "source": "request_record"}
+    return None
+
+
 def _screening_latest_impl(d: Any) -> JSONResponse:
     refused = _unwired(d, "stores")
     if refused is not None:
         return refused
     slate = _latest_recommendation_slate(d.stores)
     if slate is None:
+        recorded = _recorded_slate_projection(d)
+        if recorded is not None:
+            return JSONResponse({"ok": True, "slate": recorded})
         return JSONResponse({"ok": True, "slate": None})
 
     # -- the SERVER-SIDE join: degraded lanes are index-only on the contract, so
@@ -1047,6 +1180,7 @@ def _screening_latest_impl(d: Any) -> JSONResponse:
         ],
         "degraded": degraded,
         "badges": badges,
+        "source": "payload_store",
     }
     return JSONResponse({"ok": True, "slate": projection})
 
@@ -1235,13 +1369,74 @@ def build_production_pipeline_deps() -> PipelineRouterDeps:
     from guanlan_v2.orchestration.runtime_support import STATIC_RUNTIME_PROFILE_V2
     from guanlan_v2.orchestration.pipeline.assembly import (
         build_production_catalog_runtime,
+        build_production_plan_runner,
         build_production_planner_runner,
+        production_bridge_analyzers,
         production_bridge_view,
+        production_gateway_factory,
     )
     from guanlan_v2.orchestration.pipeline.live_decide import _ApprovalsBridge
 
     bundle = build_production_catalog_runtime(catalog)
-    view = production_bridge_view(bundle.runtime)
+    # ONE analyzer map for BOTH halves of this binding set — the admission view
+    # here and the plan runner below. live_decide's binding block records why
+    # (2026-07-31: the runner half received NO analyzers and refused at
+    # construction AFTER a lease had already been consumed). One recipe
+    # (``production_bridge_analyzers``), one map, zero forks.
+    bridge_analyzers = production_bridge_analyzers()
+    view = production_bridge_view(bundle.runtime, bridge_analyzers)
+
+    # -- L3: the EXECUTION half of this binding set ---------------------------- #
+    # A screening lane is only executable if the bridges its nine workers
+    # activate have trusted provider factories bound on the SAME
+    # ``bundle.factories`` the runner executes over. These are the reviewed
+    # ONE-recipe registrations live_decide already performs for the deep lane —
+    # a SECOND CALL SITE of the same recipes, never a second recipe, and each is
+    # built HERE (at binding construction, before any coordinator, admission or
+    # ApprovalLease exists) so a broken world kills the pipeline deps loudly at
+    # startup rather than after a lease draw:
+    #   * experience (dec.research_mgr's ``experience.bridge``) — the honest
+    #     empty facts, GRANTED-branch-only, exactly as the deep lane binds them;
+    #   * memory (Phase-3 memory runtime); and
+    #   * data (``register_production_data_provider``, the ONE recipe over the
+    #     real DataRuntimeWorld) — no longer vacuous for this lane: ``text.news``
+    #     carries reviewed prefetch rows since L3 D-1.
+    from guanlan_v2.orchestration import bootstrap as _bootstrap
+    from guanlan_v2.orchestration.adapters.data_world import (
+        production_data_refusal_audit_sink,
+        register_production_data_provider,
+    )
+    from guanlan_v2.orchestration.memory.runtime import (
+        register_phase3_memory_provider_factory,
+    )
+
+    _bootstrap.register_lane0_experience_factories(
+        factories=bundle.factories, catalog=_bootstrap.load_lane0_catalog(),
+        pool=None, registry=registry, experience_views=(),
+        experience_scaler=None, as_of=clock.now())
+    register_phase3_memory_provider_factory(
+        factories=bundle.factories, stores=stores)
+    # ONE data-aware refusal audit sink per BINDING SET, handed to every per-run
+    # world through the runner's ``refusal_sink`` (the live_decide idiom).
+    data_refusal_sink = production_data_refusal_audit_sink(clock)
+    register_production_data_provider(
+        factories=bundle.factories, stores=stores,
+        schema_resolver=stores.resolver, clock=clock,
+        catalog_runtime=bundle.runtime,
+        refusal_audit_sink_factory=lambda: data_refusal_sink)
+
+    def plan_runner_factory(*, admission, lane_bindings, run_context_factory,
+                            request_id, prompt_assembler, subject_params=None):
+        """The Task-7 ABI verbatim; ``live_decide.plan_runner_factory``'s twin."""
+        return build_production_plan_runner(
+            stores=stores, catalog_snapshot=catalog, registry=registry,
+            gateway_factory=production_gateway_factory, admission=admission,
+            lane_bindings=lane_bindings, run_context_factory=run_context_factory,
+            request_id=request_id, clock=clock,
+            runtime_registry_digest=registry.registry_digest,
+            runtime_limit=4, catalog=bundle, bridge_analyzers=bridge_analyzers,
+            prompt_assembler=prompt_assembler, subject_params=subject_params,
+            refusal_sink=data_refusal_sink)
 
     def admission_factory(*, run_id, requests, drafts, context, approvals,
                           run_budget):
@@ -1283,6 +1478,8 @@ def build_production_pipeline_deps() -> PipelineRouterDeps:
             preset_registry=presets, clock=clock),
         request_store=JsonlPipelineRequestStore(root / "pipeline_requests.jsonl"),
         ta_inbox_dir=Path("var") / "ta_inbox",
+        plan_runner_factory=plan_runner_factory,
+        archive_put=production_archive_put,
     )
 
 

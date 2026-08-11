@@ -192,6 +192,10 @@ _PIPELINE_DIR = Path("guanlan_v2/orchestration/pipeline")
 _PIPELINE_MODULES = (
     "api", "assembly", "candidates", "chain", "contracts", "deep_decide",
     "escalation", "live_decide", "screening",
+    # L3: the A-line executor joins the red-line sweep with the rest of the
+    # package (no HTTP client at any level, no out-of-lane top-level import, no
+    # kind="trade") — a new production module must not enter unswept.
+    "screening_driver",
 )
 
 #: independent verbatim copy of the Task-5 frozen escalation-constants digest

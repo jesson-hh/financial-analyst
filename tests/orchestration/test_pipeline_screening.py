@@ -1079,25 +1079,25 @@ class TestSubjectParamsStamp:
 # 4b. L1 Task 4 — the screening half of the runner threading (structural, R4)  #
 # =========================================================================== #
 class TestSubjectParamsRunnerThread:
-    """L1 plan Task 4 — the screening runner thread, kept REAL at the seam it
-    CAN be real at today.
+    """L1 plan Task 4 — the screening runner thread, now at a REAL production seam.
 
-    **Call-site investigation, verified at source 2026-07-31 (the plan said
-    'locate at source'):** the screening lane has NO production runner call
-    site — ``pipeline/api.py`` stops at admission by design ('THE STOP LINE:
-    no admit_after_approval, no freeze, no dispatch — even a lease-admitted
-    candidate awaits the downstream driver', api.py:544-546; module docstring
-    :59-60 'NEVER calls admit_after_approval'), and
-    ``screening.admit_screening_batch`` 'stops there ... never freezes a
-    plan, never dispatches' (screening.py:959-975). The ONLY invocation that
-    runs a screening lane through ``build_production_plan_runner`` is the
-    Phase-10 e2e's step-5 per-lane loop
-    (tests/orchestration/test_phase10_e2e.py), which L1 Task 4 threaded with
-    ``subject_params=lane.subject_params`` — pinned by source text below.
-    So the wire is real everywhere a screening lane is actually run, and
-    these pins hold the seam structurally (plan R4: vacuous behaviorally —
-    zero screening workers carry data prefetch rows, the Task-2 vacuity pin
-    above — until an L3 grant lands)."""
+    **The 2026-07-31 call-site investigation, and its CONSCIOUS FLIP (L3).**
+    L1 recorded, verified at source, that the screening lane had NO production
+    runner call site: ``pipeline/api.py`` stopped at admission ('THE STOP LINE
+    … even a lease-admitted candidate awaits the downstream driver') and
+    ``screening.admit_screening_batch`` 'stops there … never freezes a plan,
+    never dispatches'. Nothing stood downstream of either sentence, so the ONLY
+    invocation that ran a screening lane through
+    ``build_production_plan_runner`` was the Phase-10 e2e's step-5 per-lane
+    loop, and this class held the seam structurally.
+
+    L3 built the missing side (``pipeline/screening_driver.py``), which the
+    2026-08-10 live campaign forced: a real ``ApprovalLease`` admitted two lanes
+    that then executed never. The pin below therefore flips from "the e2e is the
+    only site" to naming the PRODUCTION site — and both are asserted, because
+    the e2e's thread must not silently disappear either. The stamp is also no
+    longer behaviorally vacuous: ``text.news`` carries reviewed data prefetch
+    rows since L3 D-1 (``TestSubjectParamsStamp`` above states it)."""
 
     def test_the_lanes_stamp_reaches_the_per_run_view_at_the_executor_seam(
             self, built, env, monkeypatch):
@@ -1173,15 +1173,23 @@ class TestSubjectParamsRunnerThread:
                 summary=SimpleNamespace(summary_digest="s" * 64))
         assert provider._subject_params is lane.subject_params
 
-    def test_the_e2e_lane_runner_invocation_threads_the_stamp(self):
-        """Source-text pin on the ONE place a screening lane is actually run
-        through the production runner today (the Phase-10 e2e's per-lane
-        loop). CONSCIOUS-FLIP owner: when a production screening execution
-        call site lands (L3 / the downstream driver), that call site inherits
-        the thread and this pin is rewritten to name it."""
-        source = (Path(__file__).parent / "test_phase10_e2e.py").read_text(
+    def test_the_production_lane_runner_invocation_threads_the_stamp(self):
+        """Source-text pin on BOTH places a screening lane is run through the
+        production runner: the L3 production executor (which owns the thread
+        now) and the Phase-10 e2e's per-lane loop (which proved it first).
+
+        The production half is asserted structurally as well as textually — the
+        driver must hand the runner factory the LANE's own stamp object, never a
+        fresh ``SubjectParams.project`` (that would bypass the materializer's
+        digest bond)."""
+        import guanlan_v2.orchestration.pipeline.screening_driver as sd
+
+        driver_src = Path(sd.__file__).read_text(encoding="utf-8")
+        assert "subject_params=lane.subject_params" in driver_src
+        assert "SubjectParams.project(" not in driver_src
+        e2e_src = (Path(__file__).parent / "test_phase10_e2e.py").read_text(
             encoding="utf-8")
-        assert "subject_params=lane.subject_params" in source
+        assert "subject_params=lane.subject_params" in e2e_src
 
 
 # =========================================================================== #

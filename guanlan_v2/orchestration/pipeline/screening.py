@@ -205,6 +205,7 @@ __all__ = [
     "build_screening_batch",
     "screening_cost_preview",
     "admit_screening_batch",
+    "screening_reserve_idempotency_key",
     "build_recommendation_slate",
     "recommendation_sort_key",
     "render_recommendation_md",
@@ -671,6 +672,20 @@ def _lane_run_id(batch_id: str, code: str) -> str:
     return f"screening-{batch_id[:16]}-{code}"
 
 
+def screening_reserve_idempotency_key(batch_id: str, code: str) -> str:
+    """The ONE plan-reservation idempotency key for a lane, named in one place.
+
+    :func:`admit_screening_batch` writes the lane's reservation under this key;
+    the downstream executor (``pipeline.screening_driver``) must REPLAY the same
+    unit of work to recover the ``reservation_id`` the admission discarded — and
+    a replay is only a replay while both sides spell the key identically. Two
+    literals would be two keys the day one of them is edited, and the second
+    call would then mint a SECOND plan reservation: the same lane's cost held
+    twice against one run budget, silently.
+    """
+    return f"screening-reserve:{batch_id}:{code}"
+
+
 def _batch_id(
     *,
     slate_ref: TypedPayloadRef,
@@ -1063,7 +1078,9 @@ def admit_screening_batch(
     outcomes: list[LeaseAdmissionOutcome] = []
     for entry, prep in prepared:
         admission.persist_and_reserve_candidate(
-            prep, idempotency_key=f"screening-reserve:{batch.batch_id}:{entry.code}")
+            prep,
+            idempotency_key=screening_reserve_idempotency_key(
+                batch.batch_id, entry.code))
         diff = build_plan_diff(
             prep.draft, request=prep.request,
             candidate_plan_digest=entry.candidate_plan_digest,
