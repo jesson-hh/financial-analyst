@@ -1203,8 +1203,12 @@ def _after_fast(payload: Mapping[str, Any], fast: dict, tail: list,
             _note_settled_once()
         finally:
             settled = int(note_state["settled"])
+            # ``exc_info=True`` (review N-2): this arm now also catches the
+            # freeze and the two carriers, whose raises used to reach the
+            # wrapper's blanket arm and be logged WITH a traceback. Catching
+            # them here must not cost the diagnostic that came with them.
             _LOG.warning("deep run %s failed after settling %s LLM invocation(s): %s "
-                         "(fast result stands)", run_id, settled, exc)
+                         "(fast result stands)", run_id, settled, exc, exc_info=True)
             _write_deep_failure_receipt(bindings, _failure_receipt(
                 canonical=canonical, run_id=run_id, session_date=session_date,
                 preset_id=bindings.preset_id, report=report,
