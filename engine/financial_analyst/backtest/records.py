@@ -8,7 +8,8 @@ reports.
 
 ``_action_verdict`` is copied inline (synced from
 ``dream.outcome_tracker._action_verdict``) ON PURPOSE: importing
-``financial_analyst.dream`` pulls in litellm via ``dream/__init__.py``, and this
+``financial_analyst.dream`` historically pulled in litellm via ``dream/__init__.py``
+(2026-07-30 起 llm.client 已懒化,import dream 不再拉 litellm),and this
 backtest subpackage must stay zero-LLM / zero-network. The function is 26 lines
 of pure if/else — keep it in sync manually if the dream version changes.
 """
@@ -24,7 +25,8 @@ def _action_verdict(action: str, return_5d: float, hit_target: bool, hit_stop: b
     """Map predicted action × actual outcome → verdict.
 
     Synced from ``financial_analyst.dream.outcome_tracker._action_verdict``
-    (do NOT import dream here — it pulls litellm).
+    (do NOT import dream here — zero-LLM/zero-network policy;litellm 已懒化,
+    但本子包保持零 LLM 导入政策不变).
 
     Rules:
       buy:    return_5d > 2% OR hit_target → correct, hit_stop OR < -2% → wrong, else partial

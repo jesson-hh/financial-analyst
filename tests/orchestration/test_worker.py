@@ -528,6 +528,23 @@ def test_llm_success_completed_with_finalized_tool_call():
     assert node_run.output_artifact_ids == (artifact.artifact_id,)
 
 
+def test_llm_provenance_prefers_runtime_model_tier_map_digest():
+    """V2 runtime's reviewed concrete model/thinking seal replaces legacy tier-only digest."""
+    e = build_env()
+    resolver, prepared, _ = e.sequencer_and_prepared()
+    gateway = e.capability_gateway()
+    reviewed = "a" * 64
+    object.__setattr__(e.runtime, "model_tier_map_digest", reviewed)
+    _, artifact = W.execute_node(
+        e.plan, e.node, runtime=e.runtime, prepared_bridges=prepared,
+        input_snapshot=e.input_snapshot, ctx=e.ctx, node_reservation=e.node_res,
+        bridge_resolver=resolver, model_gateway=e.model_gateway(),
+        capability_gateway=gateway, registry=e.sc.registry, stores=e.stores,
+        clock=e.clock,
+    )
+    assert artifact.provenance.model_config_digest == reviewed
+
+
 def test_deterministic_success_no_prompt_no_model():
     e = build_env(deterministic=True)
     e._det_handler = True

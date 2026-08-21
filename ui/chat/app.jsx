@@ -55,6 +55,12 @@ const TOOLS_META = [
 // ───────────────────────── 持久化 ─────────────────────────
 
 const LS_KEY = 'guanlan:state:v2';
+const DEFAULT_CHAT_MODEL = 'deepseek-v4-flash';
+const migrateModelId = model => (
+  model === 'deepseek-chat' ? 'deepseek-v4-flash'
+    : model === 'deepseek-reasoner' ? 'deepseek-v4-pro'
+      : model
+);
 
 function loadPersisted() {
   try {
@@ -120,7 +126,7 @@ function makeInitialState() {
     backendUrl,
     // 服务端发现的 model 列表 + 当前选中的后端 model
     models: [],
-    backendModel: loaded?.backendModel || null,
+    backendModel: migrateModelId(loaded?.backendModel) || null,
     // 后端 /alerts 拉到的规则; null = 未拉过 (此时用写死的 ALERTS)
     liveAlerts: null,
     // /quotes 拉到的实时价 — { CODE: { price, changePercent, ... } }
@@ -136,7 +142,7 @@ function makeInitialState() {
     return {
       ...base,
       mode: loaded.mode || 'default',
-      model: loaded.model || 'deepseek-chat',
+      model: migrateModelId(loaded.model) || DEFAULT_CHAT_MODEL,
       watch: loaded.watch || { on: true, interval: 5 },
       tokens: 0,
       autoApproved: loaded.autoApproved || ['news_query', 'quote_lookup'],
@@ -156,7 +162,7 @@ function makeInitialState() {
   const first = newSession();
   return {
     ...base,
-    mode: 'default', model: 'deepseek-chat',
+    mode: 'default', model: DEFAULT_CHAT_MODEL,
     watch: { on: true, interval: 5 }, tokens: 0,
     autoApproved: ['news_query', 'quote_lookup'],
     useRealLLM: false,
@@ -210,9 +216,12 @@ function reducer(s, a) {
     case 'clear_watch':  return { ...s, watchlist: [] };
     case 'set_indices':      return { ...s, indices: a.quotes };
     case 'set_tokens':       return { ...s, tokens: a.tokens };
-    case 'set_models':       return { ...s, models: a.models,
-      // 默认优先 deepseek-chat (qwen 默认 token 常过期会 401); 找不到才退回 /models 首项。用户可在 ⌘K 面板改。
-      backendModel: s.backendModel || (a.models?.find(m => m.id === 'deepseek-chat')?.id) || (a.models?.[0]?.id) || null };
+    case 'set_models': {
+      const currentModel = a.models?.find(m => m.id === s.backendModel)?.id || null;
+      return { ...s, models: a.models,
+        // 优先保留仍在服务端清单中的选择；旧/失效 ID 自动迁移到 V4-Flash，再退回 /models 首项。
+        backendModel: currentModel || (a.models?.find(m => m.id === DEFAULT_CHAT_MODEL)?.id) || (a.models?.[0]?.id) || null };
+    }
     case 'set_backend_model':return { ...s, backendModel: a.model, lastLLMError: null };
     case 'open_report':    return { ...s, reportDrawer: { sym: a.sym, status: a.text ? 'done' : 'running', step: REPORT_STEPS.length, text: a.text || '', path: a.path || null, startedAt: a.text ? null : (a.startedAt || Date.now()) } };
     case 'advance_report': {

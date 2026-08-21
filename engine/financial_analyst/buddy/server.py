@@ -28,12 +28,40 @@ import io
 import json
 import uuid
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel  # core dependency — safe at module level
 # fastapi is a core dependency too; UploadFile/File must be module-level so the
 # /upload route annotation resolves under ``from __future__ import annotations``
 # (forward refs are looked up in module globals, not build_app's local scope).
-from fastapi import UploadFile, File as FastAPIFile
+from fastapi import UploadFile, File as FastAPIFile, Request
+
+
+def _trusted_local_request(request: Request) -> bool:
+    """Browser writes require the local same-origin Guanlan UI.
+
+    Origin-less CLI/native clients remain compatible.  This closes the legacy
+    wildcard-CORS drive-by path without changing the desktop protocol.
+    """
+    origin = str(request.headers.get("origin") or "").strip()
+    if not origin:
+        return True
+    if origin == "null":
+        return False
+    try:
+        src = urlsplit(origin)
+        src_host = (src.hostname or "").lower()
+        dst_host = (request.url.hostname or "").lower()
+        src_port = src.port or (443 if src.scheme == "https" else 80)
+        dst_port = request.url.port or (443 if request.url.scheme == "https" else 80)
+    except ValueError:
+        return False
+    return (
+        src.scheme == request.url.scheme
+        and src_host == dst_host
+        and src_port == dst_port
+        and src_host in {"127.0.0.1", "localhost", "::1"}
+    )
 
 
 def _jsonable(obj):
@@ -439,7 +467,12 @@ def build_app():
         return True
 
     @app.post("/run")
-    async def run(body: RunReq):
+    async def run(body: RunReq, request: Request):
+        if not _trusted_local_request(request):
+            return JSONResponse(
+                {"ok": False, "reason": "agent run 只接受观澜本机同源界面请求"},
+                status_code=403,
+            )
         query = (body.query or "").strip()
         mode = body.mode
         # 模块工具域: 对话端传 profile='research' → agent 只见研究类工具 (因子类被裁掉);
@@ -546,7 +579,12 @@ def build_app():
         return StreamingResponse(stream(), media_type="text/event-stream")
 
     @app.post("/confirm")
-    async def confirm(body: ConfirmReq):
+    async def confirm(body: ConfirmReq, request: Request):
+        if not _trusted_local_request(request):
+            return JSONResponse(
+                {"ok": False, "reason": "agent confirm 只接受观澜本机同源界面请求"},
+                status_code=403,
+            )
         turn_id = body.turn_id
         choice = (body.choice or "n").lower()
         fut = pending_confirms.get(turn_id)

@@ -16,6 +16,13 @@ def _isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(mt, "_CACHE_PATH", cache)
     monkeypatch.setattr(mt, "_MEM_CACHE", {"data": None})
     monkeypatch.setattr(mt, "_REFRESH_INFLIGHT", [False])
+    # market_tape 已改走 probe_many 批量通道;测试里把它动态路由回(可能被各测试
+    # monkeypatch 的)lc.probe,既有逐源桩零改动,且绝不落到真子进程。
+    monkeypatch.setattr(lc, "probe_many",
+                        lambda reqs, timeout=None: [
+                            lc.probe(str(r.get("source") or ""), code=str(r.get("code") or ""),
+                                     date=str(r.get("date") or ""), limit=int(r.get("limit") or 20))
+                            for r in (reqs or [])])
     yield
 
 
@@ -33,6 +40,41 @@ def _probe_ok(source, code="", date="", limit=20):
     items = fixtures.get(canon, [{"raw": {"code": "600000", "x": 1}}])
     return {"ok": True, "source": canon, "status": "ok", "items": items,
             "n": len(items), "note": "", "pulled_at": "2026-07-08T10:15:01"}
+
+
+def test_refresh_batches_all_sources_into_one_probe_many(monkeypatch):
+    """2026-07-28 提速契约:_refresh 的 10 源必须合并为一次 probe_many(一个子进程),
+    不得退回逐源逐子进程(那是 10-26s 冷刷的旧世界)。"""
+    calls = []
+
+    def _many(reqs, timeout=None):
+        calls.append(list(reqs))
+        return [_probe_ok(str(r.get("source")), date=str(r.get("date") or ""),
+                          limit=int(r.get("limit") or 20)) for r in reqs]
+
+    monkeypatch.setattr(lc, "probe_many", _many)
+    mt._refresh(ttl_s=180)
+    assert len(calls) == 1, "10 源必须一次批量"
+    assert len(calls[0]) == len(mt._SOURCES)
+    assert calls[0][0]["limit"] == 300  # kw 逐条透传
+
+
+def test_refresh_mechanical_failure_keeps_previous_round(monkeypatch):
+    """评审既有缺陷回归(2026-07-28 修):probe 机械失败信封是 ok:True/status:""——
+    成功闸只认 status=="ok",机械失败必须走"保留上轮标(旧)"分支,绝不被当成功空拉
+    覆盖真数据、盖新鲜 pulled_at。"""
+    monkeypatch.setattr(lc, "probe", _probe_ok)
+    mt._refresh(ttl_s=180)                     # 第一轮:真数据落缓存
+
+    def _mech(source, code="", date="", limit=20):
+        return {"ok": True, "source": lc.resolve_source(source) or source, "status": "",
+                "items": [], "n": 0, "note": "probe 超时(90s),外源可能限流/阻塞", "error": ""}
+
+    monkeypatch.setattr(lc, "probe", _mech)
+    data = mt._refresh(ttl_s=180)              # 第二轮:全源机械失败
+    zt = lc.resolve_source("em_zt_pool")
+    assert data["sources"][zt]["rows"], "机械失败必须保留上轮真数据"
+    assert "(旧)" in data["sources"][zt]["note"]
 
 
 # ── Task 1: refresh + derive + 原子缓存写 ──────────────────────────────────────

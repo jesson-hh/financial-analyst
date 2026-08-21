@@ -5,11 +5,13 @@
    红线:研判徽章只显后端落盘真 LLM 决策;报价失败显「—」;绝不合成。
    (hooks 经 luozi-chart.jsx 顶层 const { useState... } = React 全局泄漏,与 panels 同一约定) */
 
-function TicketList({ code, onSelect, poolTick }) {
+const TICKET_TF_CN = { day: '日线', '30min': '30分', '5min': '5分', '1min': '1分' };
+const TICKET_CADENCE_CN = { daily: '每日', '60min': '60分钟', hourly: '60分钟', '30min': '30分钟', '10min': '10分钟' };
+
+function TicketList({ code, onSelect, poolTick, assignments, assignmentMode, onConfigureWatch }) {
   const metas = (window.LZ_SYMBOL_META || []).slice();
   const [quotes, setQuotes] = useState({});      // {code: quote}
   const [lastDecs, setLastDecs] = useState({});  // {digitCore: {direction, ts, kind, source}}
-  const [, setTick] = useState(0);               // 盯盘开关切换后强制重渲染
   // 报价轮询:7s 全池(本地后端,量级 ≤10 支;失败保留上次值不伪造)
   useEffect(() => {
     let alive = true;
@@ -60,7 +62,14 @@ function TicketList({ code, onSelect, poolTick }) {
           const q = quotes[m.code];
           const pctV = q && q.changePercent != null ? +q.changePercent : null;
           const pctColor = pctV == null ? 'var(--ink-3)' : pctV >= 0 ? 'var(--zhu)' : 'var(--dai)';
-          const watched = window.lzPoolIsMonitored && window.lzPoolIsMonitored(m.code);
+          const assignment = (assignments || {})[String(m.code).replace(/^(SH|SZ|BJ)/i, '')] || null;
+          const modern = assignmentMode && assignmentMode.supported === true;
+          const legacy = assignmentMode && assignmentMode.legacy === true;
+          const watched = modern ? !!(assignment && assignment.enabled)
+            : (legacy ? !!(window.lzPoolIsMonitored && window.lzPoolIsMonitored(m.code)) : false);
+          const owner = assignment && assignment.strategy_id && window.lzStrategyGet ? window.lzStrategyGet(assignment.strategy_id) : null;
+          const requestedTF = assignment && (assignment.requested_evidence_tf || assignment.evidence_tf);
+          const unsupportedTF = modern && assignment && assignment.effective_evidence_tf == null;
           const ld = lastDecs[dig(m.code)];
           const focused = m.code === code;
           return (
@@ -69,12 +78,18 @@ function TicketList({ code, onSelect, poolTick }) {
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 7 }}>
                 <span className="serif" style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--ink-1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.name}</span>
                 <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>{m.code}{m.dynamic ? ' · 池' : ''}</span>
-                <span onClick={(e) => { e.stopPropagation(); if (window.lzWatchSet) { window.lzWatchSet(m.code, !watched); setTick(t => t + 1); } }}
-                  className="mono" title={watched ? '盯盘中(已绑策略;服务端盘中自动研判)· 点关' : '未盯 · 点开 = 绑进默认策略,服务端盘中自动研判'}
+                <span onClick={(e) => { e.stopPropagation(); if (onConfigureWatch) onConfigureWatch(m); }}
+                  className="mono" title={modern ? '打开单票自动研判配置(Agent / 数据周期 / 自动节奏 / 思考强度)' : (legacy ? '旧版绑定模式 · 打开后明确确认，不会静默切换多个策略' : '单票配置接口暂不可达')}
                   style={{ marginLeft: 'auto', flexShrink: 0, fontSize: 8.5, padding: '1px 7px', borderRadius: 9, cursor: 'pointer', border: '1px solid ' + (watched ? 'var(--yin)' : 'var(--line)'), color: watched ? 'var(--paper)' : 'var(--ink-3)', background: watched ? 'var(--yin)' : 'transparent', whiteSpace: 'nowrap' }}>
-                  {watched ? '● 盯' : '○ 盯'}
+                  {modern ? (watched ? '● 已纳入' : '○ 纳入') : (legacy ? (watched ? '● 旧版绑定' : '○ 旧版绑定') : '○ 配置不可达')}
                 </span>
               </div>
+              {modern && assignment && (
+                <div className="mono" title={'负责 Agent:' + ((owner && owner.name) || assignment.strategy_id || '未指定') + ' · 请求口径:' + (TICKET_TF_CN[requestedTF] || requestedTF || '日线') + ' · 自动节奏:' + (TICKET_CADENCE_CN[assignment.decision_cadence] || assignment.decision_cadence || '—')}
+                  style={{ marginTop: 3, fontSize: 8, color: unsupportedTF ? 'var(--yin)' : 'var(--ink-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {owner ? owner.name : (assignment.strategy_name || assignment.strategy_id || '未指定 Agent')} · {TICKET_TF_CN[requestedTF] || requestedTF || '日线'} · {TICKET_CADENCE_CN[assignment.decision_cadence] || assignment.decision_cadence || '—'}{unsupportedTF ? ' · 未接通(已暂停)' : ''}
+                </div>
+              )}
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 7, marginTop: 3 }}>
                 <span className="mono num" style={{ fontSize: 12.5, fontWeight: 600, color: pctColor }}>{q && q.price != null ? q.price : '—'}</span>
                 <span className="mono" style={{ fontSize: 9.5, color: pctColor }}>{pctV == null ? '' : (pctV >= 0 ? '+' : '') + pctV.toFixed(2) + '%'}</span>
@@ -98,7 +113,9 @@ function TicketList({ code, onSelect, poolTick }) {
         })}
       </div>
       <div className="mono" style={{ padding: '7px 13px', fontSize: 8, color: 'var(--ink-3)', lineHeight: 1.55, borderTop: '1px solid var(--line-soft)' }}>
-        盯 = 绑策略,服务端盘中按节拍自动研判(须 GUANLAN_SEATS_WATCH);研判徽章 = 后端落盘真 LLM。
+        {assignmentMode && assignmentMode.supported === true
+          ? '纳入 = 建立单票配置；总闸开启后按 Agent / 数据周期 / 自动节奏研判。'
+          : (assignmentMode && assignmentMode.legacy ? '旧版绑定：后端未提供单票配置，仍兼容 strategy.bind；分钟研判不冒充已生效。' : '单票配置接口暂不可达；未切换到旧绑定，避免误改策略。')}
       </div>
     </div>
   );

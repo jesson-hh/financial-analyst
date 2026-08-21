@@ -333,6 +333,29 @@ class BuddyAgent:
     async def run_turn(self, user_text: str,
                        confirm_callback=None,
                        allowed_tools=None) -> AsyncIterator[TurnEvent]:
+        """Transactionally drive one turn.
+
+        ``_run_turn_impl`` appends messages incrementally.  If a caller cancels
+        or closes the async generator before its terminal ``done`` event, all
+        messages from this turn are removed.  This prevents a dangling
+        assistant ``tool_calls`` message from poisoning the next DeepSeek turn.
+        """
+        message_count = len(self.messages)
+        committed = False
+        try:
+            async for event in self._run_turn_impl(
+                    user_text, confirm_callback=confirm_callback,
+                    allowed_tools=allowed_tools):
+                if event.kind == "done":
+                    committed = True
+                yield event
+        finally:
+            if not committed:
+                del self.messages[message_count:]
+
+    async def _run_turn_impl(self, user_text: str,
+                             confirm_callback=None,
+                             allowed_tools=None) -> AsyncIterator[TurnEvent]:
         """Process one user turn. Yields TurnEvent objects as the LLM emits
         text + tool calls + tool results, until the LLM stops requesting tools.
 
@@ -352,6 +375,7 @@ class BuddyAgent:
 
         _budget_start = self._client.total_completion_tokens
         _budget_warned = False
+        turn_had_tool_calls = False
 
         for iteration in range(self.max_tool_iters):
             spent = self._client.total_completion_tokens - _budget_start
@@ -413,6 +437,7 @@ class BuddyAgent:
                 "role": "assistant",
                 "content": getattr(choice, "content", ""),
                 "tool_calls": getattr(choice, "tool_calls", None),
+                "reasoning_content": getattr(choice, "reasoning_content", None),
             }
             text = raw.get("content") or ""
             tool_calls = raw.get("tool_calls") or []
@@ -434,9 +459,15 @@ class BuddyAgent:
                         "arguments": fn.get("arguments") or tc.get("arguments", "{}"),
                     })
 
-            # Save the assistant message verbatim (with tool_calls intact)
+            # Save the assistant message verbatim (with tool_calls intact).
+            # DeepSeek's thinking+tools protocol requires *all* reasoning_content
+            # produced by a tool-using user turn (including its final assistant
+            # answer) to be replayed in later requests.  Pure text-only turns may
+            # omit it, which avoids retaining CoT when the protocol does not need
+            # it.
             asst_msg = {"role": "assistant", "content": text}
             if normalised_calls:
+                turn_had_tool_calls = True
                 asst_msg["tool_calls"] = [
                     {
                         "id": c["id"],
@@ -449,6 +480,8 @@ class BuddyAgent:
                     }
                     for c in normalised_calls
                 ]
+            if turn_had_tool_calls and raw.get("reasoning_content") is not None:
+                asst_msg["reasoning_content"] = raw["reasoning_content"]
             self.messages.append(Message(role="assistant", content=text, raw=asst_msg))
 
             if text:
@@ -500,13 +533,20 @@ class BuddyAgent:
                     continue
 
                 # Confirmation gate
-                if tool.confirm_required and confirm_callback is not None:
-                    ok = await confirm_callback(name, args)
+                if tool.confirm_required:
+                    # A missing confirmation surface is not consent.  This
+                    # fail-closed branch protects every future caller, not only
+                    # the Console paths that currently provide a callback.
+                    ok = False if confirm_callback is None \
+                        else await confirm_callback(name, args)
                     if not ok:
+                        reason = ("Confirmation unavailable; tool was not run."
+                                  if confirm_callback is None
+                                  else "User declined to run this tool.")
                         tool_result_messages.append({
                             "role": "tool",
                             "tool_call_id": call["id"],
-                            "content": "User declined to run this tool.",
+                            "content": reason,
                         })
                         continue
 
@@ -517,8 +557,27 @@ class BuddyAgent:
                 # animator task keeps ticking the spinner so the user can
                 # see something IS happening.
                 import asyncio as _asyncio
+                cancel_requested = False
                 try:
-                    result = await _asyncio.to_thread(tool.run, **args)
+                    # ``to_thread`` itself cannot stop a worker once it started.
+                    # Shield it and delay cancellation until the worker reaches a
+                    # real completion boundary; otherwise a new turn could run
+                    # concurrently with an old side-effecting tool.
+                    tool_task = _asyncio.create_task(
+                        _asyncio.to_thread(tool.run, **args)
+                    )
+                    while True:
+                        try:
+                            result = await _asyncio.shield(tool_task)
+                            break
+                        except _asyncio.CancelledError:
+                            cancel_requested = True
+                            if tool_task.done():
+                                result = tool_task.result()
+                                break
+                            continue
+                        except Exception:
+                            raise
                 except TypeError as e:
                     result = ToolResult(f"Tool argument error: {e}", is_error=True)
                 except Exception as e:
@@ -537,6 +596,12 @@ class BuddyAgent:
                     "content": result.content if not result.is_error
                                else f"[ERROR] {result.content}",
                 })
+                if cancel_requested:
+                    # The worker really finished and its honest result reached
+                    # Console/Buddy SSE.  Stop before any sibling tool call or
+                    # follow-up LLM request; the transaction wrapper rolls the
+                    # partial protocol turn back after the consumer resumes us.
+                    raise _asyncio.CancelledError()
 
             # Append tool results to message history for the next iteration.
             for tr in tool_result_messages:

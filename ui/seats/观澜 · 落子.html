@@ -25,6 +25,31 @@
   @keyframes lzSeal { 0% { opacity: 0; transform: scale(0.8) rotate(-7deg); } 70% { transform: scale(1.07) rotate(2deg); } 100% { opacity: 1; transform: scale(1) rotate(0); } }
   .hover-row:hover { background: rgba(28,24,20,0.04) !important; }
   body.dark .hover-row:hover { background: rgba(237,228,204,0.05) !important; }
+  .lz-news-panel { position:absolute; top:12px; right:12px; z-index:5; width:min(430px,calc(100% - 24px)); max-height:78%; display:flex; flex-direction:column; overflow:hidden; color:var(--ink); background:color-mix(in srgb,var(--paper) 95%,transparent); border:1px solid var(--line); border-radius:14px; box-shadow:0 18px 48px rgba(28,24,20,.18),0 2px 8px rgba(28,24,20,.08); backdrop-filter:blur(14px); animation:fadeIn .18s ease-out; }
+  .lz-news-panel__head { display:flex; align-items:center; gap:11px; flex:0 0 auto; padding:13px 14px 12px; border-bottom:1px solid var(--line-soft); background:linear-gradient(120deg,rgba(168,57,45,.055),transparent 52%); }
+  .lz-news-panel__mark { width:30px; height:30px; display:grid; place-items:center; flex:0 0 auto; border:1px solid var(--zhu-soft); border-radius:9px; color:var(--zhu); background:rgba(168,57,45,.06); font:600 15px var(--serif); }
+  .lz-news-panel__eyebrow { color:var(--ink-3); font:500 8px/1 var(--mono); letter-spacing:.15em; }
+  .lz-news-panel__title { margin-top:4px; color:var(--ink); font:700 15px/1.1 var(--serif); }
+  .lz-news-panel__title span { display:inline-flex; margin-left:5px; padding:2px 6px; border-radius:99px; color:var(--yin); background:rgba(74,107,92,.08); font:500 9px/1.2 var(--mono); vertical-align:2px; }
+  .lz-news-panel__close { width:28px; height:28px; margin-left:auto; display:grid; place-items:center; flex:0 0 auto; border:0; border-radius:8px; color:var(--ink-3); background:transparent; font:300 21px/1 var(--sans); cursor:pointer; transition:background .15s,color .15s; }
+  .lz-news-panel__close:hover { color:var(--ink); background:rgba(28,24,20,.06); }
+  .lz-news-panel__list { min-height:0; overflow:auto; padding:4px 8px 7px; }
+  .lz-news-item { display:grid; grid-template-columns:50px minmax(0,1fr); gap:11px; padding:11px 8px; border-bottom:1px solid var(--line-soft); border-radius:8px; transition:background .15s; }
+  .lz-news-item:last-child { border-bottom-color:transparent; }
+  .lz-news-item:hover { background:rgba(28,24,20,.035); }
+  .lz-news-item.is-hit { background:rgba(191,138,23,.09); box-shadow:inset 2px 0 0 rgba(191,138,23,.62); }
+  .lz-news-item__time { padding-top:2px; color:var(--ink-3); font:400 9px/1.35 var(--mono); text-align:right; }
+  .lz-news-item__time b { display:block; color:var(--ink-2); font-size:11px; font-weight:600; letter-spacing:.02em; }
+  .lz-news-item__time span { display:block; margin-top:2px; opacity:.78; }
+  .lz-news-item__body { min-width:0; }
+  .lz-news-item__meta { min-height:17px; display:flex; align-items:center; gap:6px; margin-bottom:5px; }
+  .lz-news-item__source { max-width:175px; overflow:hidden; padding:2px 6px; border:1px solid var(--line); border-radius:5px; color:var(--ink-3); background:rgba(255,255,255,.22); font:400 8.5px/1.2 var(--mono); text-overflow:ellipsis; white-space:nowrap; }
+  .lz-news-item__hit { padding:2px 6px; border-radius:5px; color:#8e6510; background:rgba(191,138,23,.11); font:500 8px/1.2 var(--mono); }
+  .lz-news-item__headline { color:var(--ink); font:500 13px/1.58 var(--sans); letter-spacing:.01em; overflow-wrap:anywhere; }
+  .lz-news-panel__empty { padding:34px 16px; color:var(--ink-3); font:400 11px/1.6 var(--serif); text-align:center; }
+  .lz-news-panel__foot { flex:0 0 auto; padding:7px 14px 8px; border-top:1px solid var(--line-soft); color:var(--ink-3); background:rgba(28,24,20,.018); font:400 8px/1 var(--mono); letter-spacing:.04em; }
+  body.dark .lz-news-panel__close:hover, body.dark .lz-news-item:hover { background:rgba(237,228,204,.055); }
+  body.dark .lz-news-item__source { background:rgba(255,255,255,.025); }
   select { appearance: none; -webkit-appearance: none; }
   input[type=range] { height: 4px; }
 </style>
@@ -34,7 +59,7 @@
 </head>
 <body>
 <div id="root"></div>
-<script src="../_shared/guanlan-bus.js?v=4"></script>
+<script src="../_shared/guanlan-bus.js?v=6"></script>
 <script src="../_shared/guanlan-nav.js?v=6"></script>
 <script>
   // 观澜 后端开关 — 默认同源（本页由 guanlan_v2/server.py 在 9999 服务，同源即真后端引擎）。
@@ -44,12 +69,12 @@
     (location.protocol === 'http:' || location.protocol === 'https:') ? location.origin : null;
 </script>
 <!-- 顺序：数据内核(纯JS,先) → 图表(声明 hooks) → 面板 → 舰队 → 主壳 -->
-<script type="text/babel" data-presets="env,react" src="luozi-data.jsx?v=20260803r1"></script>
+<script type="text/babel" data-presets="env,react" src="luozi-data.jsx?v=20260815w2"></script>
 <script type="text/babel" data-presets="env,react" src="luozi-chart.jsx?v=20260613n"></script>
-<script type="text/babel" data-presets="env,react" src="luozi-panels.jsx?v=20260808r1"></script>
-<script type="text/babel" data-presets="env,react" src="luozi-fleet.jsx?v=20260711r1"></script>
-<script type="text/babel" data-presets="env,react" src="luozi-foundry.jsx?v=20260711r1"></script>
-<script type="text/babel" data-presets="env,react" src="luozi-app.jsx?v=20260808r1"></script>
+<script type="text/babel" data-presets="env,react" src="luozi-panels.jsx?v=20260815w2"></script>
+<script type="text/babel" data-presets="env,react" src="luozi-fleet.jsx?v=20260815w2"></script>
+<script type="text/babel" data-presets="env,react" src="luozi-foundry.jsx?v=20260815w2"></script>
+<script type="text/babel" data-presets="env,react" src="luozi-app.jsx?v=20260817n1"></script>
 <script type="text/babel" data-presets="env,react">
   ReactDOM.createRoot(document.getElementById('root')).render(<LuoziApp />);
 </script>

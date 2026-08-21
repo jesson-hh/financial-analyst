@@ -36,6 +36,12 @@ from guanlan_v2.screen.factor_vintage import cs_vintage_asof, factor_z_asof, tsi
 from guanlan_v2.screen.catalog import FACTOR_DEFS
 
 
+def _realtime_store():
+    """Construct the global live-bar store (small injectable seam for tests)."""
+    from guanlan_v2.seats.realtime_store import RealtimeBarStore
+    return RealtimeBarStore()
+
+
 def _num(v: Any) -> Optional[float]:
     """float 化并把 NaN/无法解析 → None(前端拿到 null 而非 NaN)。"""
     try:
@@ -97,24 +103,14 @@ def _drop_unsettled(df):
         return df
 
 
-def _ctx5_sync(c: str, q: dict) -> dict:
-    """5min 触发上下文(实时 5min via ``WatchFeed.bars5`` + 当前快照 q):指标按**简单口径**算,
-    与前端 ``buildTriggerCtx`` 对齐(MA=均值、RSI=简单涨跌均值、量比=当根/近10均量),
-    使「5min 交易单」的 生成 / live 监控 / 回测检验 **同一套口径**。失败 → 仅 quote 字段(指标 None)。
-    返回 ``{price,open,high,low,ma5,ma20,maDiff20,rsi14,volRatio,hi20,lo20,n5}``。
-    """
+def _ctx_from_minute_frame(df, q: Optional[dict] = None) -> dict:
+    """Build the shared 5-minute trigger context from a PIT-safe frame."""
+    q = q or {}
     closes, vols, highs, lows = [], [], [], []
     try:
-        from financial_analyst.watch.feed import WatchFeed
-        feed = WatchFeed()
-        try:
-            df = feed.bars5(c, 240)
-        finally:
-            try:
-                feed.close()
-            except Exception:  # noqa: BLE001
-                pass
         if df is not None and len(df) > 0:
+            if "trade_date" in df.columns:
+                df = df.sort_values("trade_date")
             closes = [float(x) for x in df["close"].tolist() if x is not None]
             if "vol" in df.columns:
                 vols = [float(x) for x in df["vol"].tolist() if x is not None]
@@ -128,6 +124,7 @@ def _ctx5_sync(c: str, q: dict) -> dict:
 
     ma5 = _mean(closes[-5:]) if len(closes) >= 5 else None
     ma20 = _mean(closes[-20:]) if len(closes) >= 20 else None
+    last_row = df.iloc[-1].to_dict() if df is not None and len(df) else {}
     last = _num(q.get("price")) or (closes[-1] if closes else None)
     rsi14 = None
     if len(closes) >= 15:
@@ -147,8 +144,9 @@ def _ctx5_sync(c: str, q: dict) -> dict:
     hi = max(highs[-48:]) if highs else None
     lo = min(lows[-48:]) if lows else None
     return {
-        "price": _num(last), "open": _num(q.get("open")),
-        "high": _num(q.get("high")), "low": _num(q.get("low")),
+        "price": _num(last), "open": _num(q.get("open")) or _num(last_row.get("open")),
+        "high": _num(q.get("high")) or _num(last_row.get("high")),
+        "low": _num(q.get("low")) or _num(last_row.get("low")),
         "ma5": _num(round(ma5, 3)) if ma5 else None,
         "ma20": _num(round(ma20, 3)) if ma20 else None,
         "maDiff20": _num(round(last / ma20 - 1, 4)) if (ma20 and last) else None,
@@ -156,6 +154,24 @@ def _ctx5_sync(c: str, q: dict) -> dict:
         "hi20": _num(round(hi, 2)) if hi else None, "lo20": _num(round(lo, 2)) if lo else None,
         "n5": len(closes),
     }
+
+
+def _ctx5_sync(c: str, q: dict) -> dict:
+    """Live 5min context; historical callers must pass a PIT frame instead."""
+    df = None
+    try:
+        from financial_analyst.watch.feed import WatchFeed
+        feed = WatchFeed()
+        try:
+            df = feed.bars5(c, 240)
+        finally:
+            try:
+                feed.close()
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+    return _ctx_from_minute_frame(df, q)
 
 
 def _load_csi300(start: Optional[str] = None, end: Optional[str] = None,
@@ -246,6 +262,76 @@ def _agg_5min_to_30min(df5: "pd.DataFrame") -> "pd.DataFrame":
                 rec["amount"] = float(ch["amount"].sum())
             rows.append(rec)
     return _pd.DataFrame(rows)
+
+
+def _watcher_minute_evidence_fresh(data_ts, anchor_ts,
+                                   source_freq: str = "5min") -> bool:
+    """Whether minute evidence is fresh enough for a live Agent decision.
+
+    A 1-minute decision may lag at most three minutes; decisions sourced from
+    5-minute bars (5min/30min evidence) may lag at most ten.  The A-share lunch
+    break and completed close are session-aware exceptions.  Different dates,
+    material clock skew and stale in-session data fail closed.  Historical PIT
+    calls deliberately do not use this gate.
+    """
+    import pandas as _pd
+    try:
+        data = _pd.Timestamp(data_ts)
+        anchor = _pd.Timestamp(anchor_ts)
+        if data.tzinfo is not None:
+            data = data.tz_localize(None)
+        if anchor.tzinfo is not None:
+            anchor = anchor.tz_localize(None)
+    except Exception:
+        return False
+    if data.date() != anchor.date():
+        return False
+    wall_lag_s = (anchor - data).total_seconds()
+    if wall_lag_s < -60:
+        return False
+    limit_s = 3 * 60 if str(source_freq).lower() == "1min" else 10 * 60
+
+    # Compare *trading* time, not wall-clock time: the 90-minute lunch break
+    # contributes zero lag and anchors after 15:00 are capped at the close.
+    # This keeps the same 3m/10m budget at lunch/reopen/after-close instead of
+    # silently widening it through hand-written grace windows.
+    morning_open = 9 * 3600 + 30 * 60
+    morning_close = 11 * 3600 + 30 * 60
+    afternoon_open = 13 * 3600
+    afternoon_close = 15 * 3600
+
+    def _seconds_of_day(ts) -> float:
+        return (ts.hour * 3600 + ts.minute * 60 + ts.second
+                + ts.microsecond / 1_000_000)
+
+    def _anchor_clock(ts) -> float:
+        sec = _seconds_of_day(ts)
+        if sec <= morning_open:
+            return 0.0
+        if sec <= morning_close:
+            return sec - morning_open
+        if sec < afternoon_open:
+            return float(morning_close - morning_open)
+        if sec <= afternoon_close:
+            return float(morning_close - morning_open) + sec - afternoon_open
+        return float((morning_close - morning_open)
+                     + (afternoon_close - afternoon_open))
+
+    def _data_clock(ts):
+        sec = _seconds_of_day(ts)
+        if morning_open <= sec <= morning_close:
+            return sec - morning_open
+        if afternoon_open <= sec <= afternoon_close:
+            return float(morning_close - morning_open) + sec - afternoon_open
+        # A bar stamped during the lunch pause or outside the trading session is
+        # not accepted merely because clock compression would make it look fresh.
+        return None
+
+    data_clock = _data_clock(data)
+    if data_clock is None:
+        return False
+    trading_lag_s = _anchor_clock(anchor) - data_clock
+    return bool(-60 <= trading_lag_s <= limit_s)
 
 
 # ───────── P1:叙事卡来源(GL 镜像档案 narrative card + out/ 研报)→ 喂 narrative.build_pool ─────────
@@ -649,14 +735,43 @@ async def _decide_impl(payload: dict) -> dict:
     # 价格行为(price-action):pa 开关 + 可编辑方法论(几何始终算/回响应,pa 仅控制 prompt 注入)。
     pa = bool(payload.get("pa"))
     pa_method = str(payload.get("pa_method") or "")
-    # ⑤ 决策频率:day=日线(既有行为,默认) / 30min=日内 30 分钟 PIT(date 带时分,5min 聚 30min)。
-    freq = str(payload.get("freq") or "day").strip().lower()
-    freq = "30min" if freq in ("30min", "30", "30m") else "day"
+    # ⑤ Agent **证据周期**(不是 scheduler cadence)。四档都有独立真数据路径；
+    # requested/effective 必须完全一致，任何未知值都响亮拒绝，绝不静默退 day。
+    _tf_alias = {"d": "day", "30": "30min", "30m": "30min",
+                 "5": "5min", "5m": "5min", "1": "1min", "1m": "1min"}
+    _requested_raw = str(payload.get("requested_evidence_tf")
+                         or payload.get("freq") or "day").strip().lower()
+    requested_evidence_tf = _tf_alias.get(_requested_raw, _requested_raw)
+    if requested_evidence_tf not in ("day", "30min", "5min", "1min"):
+        return {"ok": False, "reason": "invalid_evidence_tf",
+                "requested_evidence_tf": requested_evidence_tf,
+                "effective_evidence_tf": None}
+    _effective_raw = payload.get("effective_evidence_tf")
+    if _effective_raw is None:
+        _effective_raw = payload.get("freq") or requested_evidence_tf
+    _effective_raw = str(_effective_raw).strip().lower()
+    effective_evidence_tf = _tf_alias.get(_effective_raw, _effective_raw)
+    if (requested_evidence_tf not in ("day", "30min", "5min", "1min")
+            or effective_evidence_tf not in ("day", "30min", "5min", "1min")
+            or effective_evidence_tf != requested_evidence_tf):
+        return {"ok": False, "reason": "unsupported_evidence_tf",
+                "requested_evidence_tf": requested_evidence_tf,
+                "effective_evidence_tf": None}
+    freq = effective_evidence_tf
     # run 化:批跑分组标识,仅透传落盘(有值才落键 → 旧记录/手动研判形状不变)。
     run_id = str(payload.get("run_id") or "").strip()
     # watcher 定时研判溯源(Task 1):有值才落键(与 run_id 同模式)→ 手动/旧记录形状不变。
     source = str(payload.get("source") or "").strip()
-    # ⑤ 研判模式:fast=deepseek-chat(几秒,无思维链) / deep=deepseek-reasoner(十几秒,有真思维链)。
+    decision_cadence = str(payload.get("decision_cadence") or "").strip()
+    assignment_revision = payload.get("assignment_revision")
+    try:
+        assignment_revision = (int(assignment_revision)
+                               if assignment_revision is not None else None)
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "invalid_assignment_revision",
+                "requested_evidence_tf": requested_evidence_tf,
+                "effective_evidence_tf": effective_evidence_tf}
+    # ⑤ 研判模式:fast=V4-Flash 显式关思考 / deep=V4-Flash 显式开思考(high)。
     # 默认 deep(保持既有「真思维链」行为不回退);前端 toggle 显式传 mode。
     mode = str(payload.get("mode") or "deep").strip().lower()
     if mode not in ("fast", "deep"):
@@ -690,25 +805,134 @@ async def _decide_impl(payload: dict) -> dict:
         from financial_analyst.data import loader_factory as _lf
         loader = _lf.get_default_loader()
         unit = "日"
+        data_ref = None
+        data_digest = None
+        data_source = "settled_day"
+        data_quality: dict = {}
 
-        if freq == "30min":
-            # 日内 30 分钟:date 当带时分 datetime;拉 5min 按 PIT 砍掉 >决策时刻的 bar,
-            # 每 6 根聚成 30min 序列再算因子(rev_20 等口径从「20日」变「20根30min bar」)。
-            unit = "根30分钟bar"
+        if freq in ("30min", "5min", "1min"):
+            # 当前交易日优先拉 pytdx 真分钟并写入全局 SQLite WAL；随后从同一
+            # durable snapshot 构造 DataFrame，保证 Agent 与复盘引用的是同一份证据。
+            # 拉源失败可读取已落盘快照，但 watcher 仍受 freshness 门约束。
+            unit = {"30min": "根30分钟bar", "5min": "根5分钟bar",
+                    "1min": "根1分钟bar"}[freq]
+            now_ts = _pd.Timestamp.now()
             anchor_dt = _pd.Timestamp(date)
-            if anchor_dt > _pd.Timestamp.now():
-                anchor_dt = _pd.Timestamp.now()
-            end_day = str(anchor_dt.date())
-            start_day = str((anchor_dt - _pd.Timedelta(days=40)).date())
-            df5 = await asyncio.to_thread(loader.fetch_quote, c, start_day, end_day, "5min")
-            df = _pd.DataFrame()
-            asof = str(anchor_dt)[:16]
-            if df5 is not None and len(df5) > 0:
-                df5 = df5[_pd.to_datetime(df5["trade_date"]) <= anchor_dt]   # PIT:只取 ≤决策时刻
-                df = _agg_5min_to_30min(df5)
-            if df is not None and len(df) > 0:
-                td = df["trade_date"].iloc[-1]
-                asof = str(td)[:16]
+            date_only = len(str(date).strip()) <= 10
+            if date_only and anchor_dt.date() == now_ts.date():
+                anchor_dt = now_ts
+            elif date_only:
+                # A historical date means the completed trading day, not
+                # midnight (which would accidentally discard that day's bars).
+                anchor_dt = anchor_dt + _pd.Timedelta(days=1) - _pd.Timedelta(microseconds=1)
+            if anchor_dt > now_ts:
+                anchor_dt = now_ts
+            source_freq = "1min" if freq == "1min" else "5min"
+            live_day = anchor_dt.date() == now_ts.date()
+            snapshot = None
+            live_error = None
+            from guanlan_v2.seats import minute_evidence as _minute
+            realtime_store = _realtime_store()
+            if live_day:
+                try:
+                    await asyncio.to_thread(
+                        _minute.fetch_live_snapshot, c, source_freq,
+                        n=(800 if source_freq == "1min" else 480),
+                        store=realtime_store)
+                    # Re-read with the decision anchor so the receipt digest/ref
+                    # covers exactly the PIT rows the Agent may consume, never
+                    # later bars returned in the same live pull.
+                    snapshot = await asyncio.to_thread(
+                        _minute.stored_snapshot, c, source_freq,
+                        limit=(800 if source_freq == "1min" else 480),
+                        asof=anchor_dt, store=realtime_store)
+                    data_source = "pytdx+realtime_store"
+                except Exception as exc:  # source outage may use a still-fresh durable copy
+                    live_error = f"{type(exc).__name__}:{exc}"
+            if snapshot is None:
+                try:
+                    snapshot = await asyncio.to_thread(
+                        _minute.stored_snapshot, c, source_freq,
+                        limit=(800 if source_freq == "1min" else 480), asof=anchor_dt,
+                        store=realtime_store)
+                    if snapshot:
+                        data_source = "realtime_store_cache"
+                except Exception as exc:
+                    if live_error is None:
+                        live_error = f"{type(exc).__name__}:{exc}"
+
+            minute_df = _minute.frame_from_snapshot(snapshot, asof=anchor_dt)
+            # Historical 5min/30min can use the settled provider when this local
+            # realtime cache did not capture that date.  Historical 1min has no
+            # enabled authoritative loader, so it remains fail-closed.
+            if (minute_df is None or len(minute_df) == 0) and source_freq == "5min" and not live_day:
+                end_day = str(anchor_dt.date())
+                start_day = str((anchor_dt - _pd.Timedelta(days=40)).date())
+                minute_df = await asyncio.to_thread(
+                    loader.fetch_quote, c, start_day, end_day, "5min")
+                if minute_df is not None and len(minute_df) > 0:
+                    minute_df = minute_df[
+                        _pd.to_datetime(minute_df["trade_date"]) <= anchor_dt]
+                    data_source = "settled_5min"
+                    data_ref = (f"qlib://{c}/5min?to="
+                                f"{str(minute_df['trade_date'].iloc[-1])[:16]}")
+
+            if minute_df is None or len(minute_df) == 0:
+                return {"ok": False, "reason": "minute_evidence_missing",
+                        "requested_evidence_tf": requested_evidence_tf,
+                        "effective_evidence_tf": effective_evidence_tf,
+                        "data_asof": None,
+                        **({"detail": live_error[:180]} if live_error else {})}
+            minute_df = minute_df.copy()
+            minute_df["trade_date"] = _pd.to_datetime(
+                minute_df["trade_date"], errors="coerce")
+            minute_df = minute_df.dropna(subset=["trade_date"])
+            minute_df = minute_df[minute_df["trade_date"] <= anchor_dt]
+            if len(minute_df) == 0:
+                return {"ok": False, "reason": "minute_evidence_missing",
+                        "requested_evidence_tf": requested_evidence_tf,
+                        "effective_evidence_tf": effective_evidence_tf,
+                        "data_asof": None}
+
+            raw_data_ts = _pd.Timestamp(minute_df["trade_date"].iloc[-1])
+            if snapshot:
+                data_ref = snapshot.get("data_ref")
+                data_digest = snapshot.get("digest")
+                data_quality = {
+                    "quality_flagged_n": int(snapshot.get("quality_flagged_n") or 0),
+                    "complete_n": int(snapshot.get("complete_n") or 0),
+                    "n": int(snapshot.get("n") or 0),
+                    **({"source_error": live_error[:180]} if live_error else {}),
+                }
+            if live_day and not _watcher_minute_evidence_fresh(
+                    raw_data_ts, anchor_dt, source_freq):
+                return {"ok": False, "reason": "minute_evidence_stale",
+                        "requested_evidence_tf": requested_evidence_tf,
+                        "effective_evidence_tf": effective_evidence_tf,
+                        "data_asof": str(raw_data_ts)[:16],
+                        **({"data_ref": data_ref} if data_ref else {}),
+                        **({"detail": live_error[:180]} if live_error else {})}
+
+            # UI polling computes snapshots but does not create immutable
+            # receipts.  Seal only evidence that is actually about to reach the
+            # Agent, keeping every decision replayable without unbounded 20s
+            # chart-poll receipts.
+            if snapshot and data_digest:
+                sealed = await asyncio.to_thread(
+                    realtime_store.seal_receipt, snapshot)
+                if sealed:
+                    snapshot = sealed
+                    data_ref = sealed.get("data_ref")
+                    data_digest = sealed.get("digest")
+
+            df = (_agg_5min_to_30min(minute_df)
+                  if freq == "30min" else minute_df.reset_index(drop=True))
+            if df is None or len(df) == 0:
+                return {"ok": False, "reason": "minute_evidence_insufficient",
+                        "requested_evidence_tf": requested_evidence_tf,
+                        "effective_evidence_tf": effective_evidence_tf,
+                        "data_asof": str(raw_data_ts)[:16]}
+            asof = str(df["trade_date"].iloc[-1])[:16]
         else:
             anchor = min(_pd.Timestamp(date), _pd.Timestamp.now())
             end = str(anchor.date())
@@ -954,8 +1178,16 @@ async def _decide_impl(payload: dict) -> dict:
         else:
             _ask = (f"研判:此刻{seat_cn}是否落子?请**逐步分析**上面每条证据(扣住具体数值),"
                     f"再结合本席信条权衡,最后在**单独一行**给出 JSON 结论。\n" + _json_fmt)
-        usr_p = (f"【标的】{name} {c} 截至 {asof}（{('30分钟K·日内' if freq=='30min' else '日线')}）\n"
-                 f"【量化因子·PIT≤当日收盘】{fac_line}\n"
+        _freq_cn = {"day": "日线", "30min": "30分钟K·日内",
+                    "5min": "5分钟K·日内", "1min": "1分钟K·日内"}[freq]
+        _pit_cn = "当日收盘" if freq == "day" else "当前已发生分钟bar"
+        _quality_line = ""
+        if freq != "day":
+            _quality_line = (f"【分钟证据来源】{data_source} · 数据引用 {data_ref or '—'}"
+                             f" · 质量标记 {int(data_quality.get('quality_flagged_n') or 0)} 根\n")
+        usr_p = (f"【标的】{name} {c} 截至 {asof}（{_freq_cn}）\n"
+                 f"【量化因子·PIT≤{_pit_cn}】{fac_line}\n"
+                 + _quality_line
                  + pa_block_line +
                  f"【本席经验卡】{card_line}\n"
                  f"【相关研报/情绪】{res_line}\n"
@@ -969,17 +1201,18 @@ async def _decide_impl(payload: dict) -> dict:
         import json as _json
         import re as _re
         if mode == "fast":
-            # 快:deepseek-chat + response_format=json_object,整段即 JSON 结论(无思维链,~秒级)。
+            # 快:V4-Flash + thinking=disabled，整段即 JSON 结论。
             client = LLMClient.for_agent("watch-agent").with_overrides(
-                provider="deepseek", model="deepseek-chat")
+                provider="deepseek", model="deepseek-v4-flash", thinking=False)
             resp = await client.chat(
                 [{"role": "system", "content": sys_p}, {"role": "user", "content": usr_p}],
                 temperature=0.3, response_format={"type": "json_object"})
         else:
-            # 深:deepseek-reasoner(R1)拿**真·思维链**(reasoning_content)。reasoner 不支持
-            # response_format,故让它先逐步推理、末尾给一行 JSON,再 regex 抽取结论(~十几秒)。
+            # 深:V4-Flash + thinking=enabled/high，返回 reasoning_content；让它先逐步
+            # 推理、末尾给一行 JSON，再 regex 抽取结论。
             client = LLMClient.for_agent("watch-agent").with_overrides(
-                provider="deepseek", model="deepseek-reasoner")
+                provider="deepseek", model="deepseek-v4-flash",
+                thinking=True, reasoning_effort="high")
             resp = await client.chat(
                 [{"role": "system", "content": sys_p}, {"role": "user", "content": usr_p}],
                 temperature=0.3)
@@ -1025,6 +1258,13 @@ async def _decide_impl(payload: dict) -> dict:
         _persist_decision("decide", {
             "code": c, "name": name, "strategy_id": strategy_id, "strategy_name": strategy_name,
             "mode": mode, "freq": freq, "direction": j.get("direction"), "confidence": j.get("confidence"),
+            "requested_evidence_tf": requested_evidence_tf,
+            "effective_evidence_tf": effective_evidence_tf,
+            "data_asof": asof,
+            "evidence_source": data_source,
+            **({"data_ref": data_ref} if data_ref else {}),
+            **({"data_digest": data_digest} if data_digest else {}),
+            **({"data_quality": data_quality} if data_quality else {}),
             "rationale": j.get("rationale"), "key_evidence": (j.get("key_evidence") or []),
             "reasoning": reasoning, "model_name": f"{client.provider}/{client.model}", "asof": asof,
             "factors_std": fac, "recipe_factors": recipe_factors,
@@ -1042,6 +1282,9 @@ async def _decide_impl(payload: dict) -> dict:
             "pa": pa, "pa_features": pa_feat,   # 价格行为:开关 + 确定性几何特征
             **({"run_id": run_id} if run_id else {}),   # 有 run 才落键,绝不落空键
             **({"source": source} if source else {}),   # watcher 溯源:有值才落键
+            **({"decision_cadence": decision_cadence} if decision_cadence else {}),
+            **({"assignment_revision": assignment_revision}
+               if assignment_revision is not None else {}),
             **({"hold_entry": hold_entry} if held else {}),      # 单元三:有持仓才落键,旧记录形状不变
             **({"hold_bars": hold_bars} if hold_bars is not None else {}),
             # 结构化出场:仅持仓且模型给出合法处置时才落键(空仓/缺失 → 旧记录形状逐字不变)
@@ -1054,6 +1297,16 @@ async def _decide_impl(payload: dict) -> dict:
         return {
             "ok": True, "code": c, "name": name, "asof": asof, "seat": seat_cn,
             "mode": mode, "freq": freq,
+            "requested_evidence_tf": requested_evidence_tf,
+            "effective_evidence_tf": effective_evidence_tf,
+            "data_asof": asof,
+            "evidence_source": data_source,
+            **({"data_ref": data_ref} if data_ref else {}),
+            **({"data_digest": data_digest} if data_digest else {}),
+            **({"data_quality": data_quality} if data_quality else {}),
+            **({"decision_cadence": decision_cadence} if decision_cadence else {}),
+            **({"assignment_revision": assignment_revision}
+               if assignment_revision is not None else {}),
             "audit_flags": audit_flags,
             "model_name": f"{client.provider}/{client.model}",
             "direction": j.get("direction"), "confidence": j.get("confidence"),
@@ -1994,7 +2247,7 @@ def build_seats_router() -> APIRouter:
                           strategy_name: Optional[str] = Query(None),
                           date: Optional[str] = Query(None)):
         """⑤+ agent 生成「条件单」(阶段2b):基于真实时上下文(现价+MA5/20+RSI+量比+近20日高低),
-        LLM(deepseek-chat,快)按席位信条设计一张「到价/放量/指标」触发的条件单,直接喂盯盘触发引擎。
+        LLM(V4-Flash 非思考,快)按席位信条设计一张「到价/放量/指标」触发的条件单,直接喂盯盘触发引擎。
         triggers.kind 限引擎支持的 price/volRatio/maDiff20/rsi14;op 限 >= <= > <(服务端校验清洗)。
         坏码 / 取数 / LLM 失败 → ok:False(恒 HTTP200,前端降级)。
         """
@@ -2023,21 +2276,135 @@ def build_seats_router() -> APIRouter:
             from financial_analyst.data import loader_factory as _lf
             from financial_analyst.data.collectors.tencent_quote import TencentQuoteCollector
 
-            qd = await asyncio.to_thread(TencentQuoteCollector().fetch, [c])
-            q = (qd or {}).get(c) or next(iter((qd or {}).values()), None) or {}
-            name = q.get("name") or c
-            asof_raw = str(q.get("asof") or "")
-            asof = (f"{asof_raw[0:4]}-{asof_raw[4:6]}-{asof_raw[6:8]} {asof_raw[8:10]}:{asof_raw[10:12]}"
-                    if len(asof_raw) >= 12 and asof_raw.isdigit() else None)
             pit = bool(date and str(date).strip())   # 给 date = 复盘 PIT(按该历史日思考,不串今天实时行情)
-            if pit:
-                asof = str(date)[:10]                 # 先置请求日,下方按实际取到的末根真 bar 日修正
+            tf = "5min" if str(tf).lower() in ("5min", "5", "5m") else "day"
+            q = {}
+            data_ref = None
+            data_digest = None
+            evidence_source = None
+            data_quality: dict = {}
+            asof = str(date)[:16] if pit else None
+            if not pit:
+                try:
+                    qd = await asyncio.to_thread(TencentQuoteCollector().fetch, [c])
+                    q = (qd or {}).get(c) or next(iter((qd or {}).values()), None) or {}
+                    asof_raw = str(q.get("asof") or "")
+                    asof = (f"{asof_raw[0:4]}-{asof_raw[4:6]}-{asof_raw[6:8]} {asof_raw[8:10]}:{asof_raw[10:12]}"
+                            if len(asof_raw) >= 12 and asof_raw.isdigit() else None)
+                except Exception as exc:
+                    # A live 5min order can still use a fresh, durable minute
+                    # snapshot.  Day orders have no equivalent tick receipt and
+                    # therefore retain their fail-closed quote requirement.
+                    if tf != "5min":
+                        raise
+                    data_quality["quote_error"] = type(exc).__name__
+            name = q.get("name") or c
 
             ctx: dict = {}
-            tf = "5min" if str(tf).lower() in ("5min", "5", "5m") else "day"
             if tf == "5min":
-                # 5min 交易单:用实时 5min 算指标(同前端口径),供日内短线设计
-                ctx = await asyncio.to_thread(_ctx5_sync, c, q)
+                if pit:
+                    # Historical condition orders are strict PIT: never touch
+                    # today's Tencent quote or WatchFeed.  Prefer the durable
+                    # minute cache, then the settled 5min provider.
+                    anchor = _pd.Timestamp(date)
+                    if len(str(date).strip()) <= 10:
+                        anchor = anchor + _pd.Timedelta(days=1) - _pd.Timedelta(microseconds=1)
+                    from guanlan_v2.seats import minute_evidence as _minute
+                    snap = await asyncio.to_thread(
+                        _minute.stored_snapshot, c, "5min", limit=480,
+                        asof=anchor, store=_realtime_store())
+                    df5 = _minute.frame_from_snapshot(snap, asof=anchor)
+                    if df5 is None or len(df5) == 0:
+                        loader = _lf.get_default_loader()
+                        start5 = str((anchor - _pd.Timedelta(days=40)).date())
+                        end5 = str(anchor.date())
+                        df5 = await asyncio.to_thread(
+                            loader.fetch_quote, c, start5, end5, "5min")
+                    if df5 is not None and len(df5) > 0:
+                        df5 = df5.copy()
+                        df5["trade_date"] = _pd.to_datetime(
+                            df5["trade_date"], errors="coerce")
+                        df5 = df5.dropna(subset=["trade_date"])
+                        df5 = _drop_unsettled(df5)
+                        df5 = (df5[df5["trade_date"] <= anchor]
+                               .sort_values("trade_date")
+                               .drop_duplicates(subset=["trade_date"], keep="last")
+                               .reset_index(drop=True))
+                    if df5 is None or len(df5) == 0:
+                        return JSONResponse({
+                            "ok": False, "code": c, "tf": "5min", "pit": True,
+                            "reason": "historical_5min_evidence_missing",
+                            "asof": str(anchor)[:16],
+                        })
+                    ctx = _ctx_from_minute_frame(df5, {})
+                    if not ctx.get("price"):
+                        return JSONResponse({
+                            "ok": False, "code": c, "tf": "5min", "pit": True,
+                            "reason": "historical_5min_evidence_invalid",
+                            "asof": str(anchor)[:16],
+                        })
+                    if df5 is not None and len(df5) > 0:
+                        asof = str(df5["trade_date"].iloc[-1])[:16]
+                else:
+                    # Live 5min orders use the same validated/durable evidence
+                    # channel as Agent judgments.  Never bypass it with a second
+                    # transient WatchFeed read: fetch -> persist -> PIT re-read ->
+                    # freshness gate -> immutable receipt -> Agent context.
+                    anchor = _pd.Timestamp.now()
+                    from guanlan_v2.seats import minute_evidence as _minute
+                    realtime_store = _realtime_store()
+                    snap = None
+                    source_error = None
+                    try:
+                        await asyncio.to_thread(
+                            _minute.fetch_live_snapshot, c, "5min", n=480,
+                            store=realtime_store)
+                        evidence_source = "pytdx+realtime_store"
+                    except Exception as exc:
+                        source_error = type(exc).__name__
+                        evidence_source = "realtime_store_cache"
+                    try:
+                        snap = await asyncio.to_thread(
+                            _minute.stored_snapshot, c, "5min", limit=480,
+                            asof=anchor, store=realtime_store)
+                    except Exception as exc:
+                        source_error = source_error or type(exc).__name__
+                    df5 = _minute.frame_from_snapshot(snap, asof=anchor)
+                    if df5 is None or len(df5) == 0:
+                        return JSONResponse({
+                            "ok": False, "code": c, "tf": "5min",
+                            "reason": "minute_evidence_missing",
+                            **({"detail": source_error} if source_error else {}),
+                        })
+                    raw_data_ts = _pd.Timestamp(df5["trade_date"].iloc[-1])
+                    data_ref = snap.get("data_ref") if snap else None
+                    data_digest = snap.get("digest") if snap else None
+                    data_quality.update({
+                        "quality_flagged_n": int((snap or {}).get("quality_flagged_n") or 0),
+                        "complete_n": int((snap or {}).get("complete_n") or 0),
+                        "n": int((snap or {}).get("n") or 0),
+                        **({"source_error": source_error} if source_error else {}),
+                    })
+                    if not _watcher_minute_evidence_fresh(
+                            raw_data_ts, anchor, "5min"):
+                        return JSONResponse({
+                            "ok": False, "code": c, "tf": "5min",
+                            "reason": "minute_evidence_stale",
+                            "data_asof": str(raw_data_ts)[:16],
+                            **({"data_ref": data_ref} if data_ref else {}),
+                            **({"detail": source_error} if source_error else {}),
+                        })
+                    sealed = await asyncio.to_thread(
+                        realtime_store.seal_receipt, snap)
+                    if sealed:
+                        snap = sealed
+                        data_ref = sealed.get("data_ref")
+                        data_digest = sealed.get("digest")
+                    # Quote fields are intentionally not mixed into the Agent
+                    # context: the sealed minute receipt is the complete and
+                    # replayable evidence actually used for this order.
+                    ctx = _ctx_from_minute_frame(df5, {})
+                    asof = str(raw_data_ts)[:16]
             else:
                 # 复盘 PIT:窗口收到 date 当日(含)为止,只用 ≤date 的真历史 bar;实盘:取到最新
                 _end = str(_pd.Timestamp(date).date()) if pit else "2100-01-01"
@@ -2061,9 +2428,9 @@ def build_seats_router() -> APIRouter:
                         if _td is not None:
                             asof = str(_td)[:10]       # 实际末根真 bar 日(可能 < 请求 date)
                         _vr = None
-                        if "vol" in df.columns and len(df) >= 11:
+                        if "vol" in df.columns and len(df) >= 10:
                             _vols = df["vol"].astype(float)
-                            _vm = float(_vols.tail(11).head(10).mean())   # 截至前一日的 10 日均量
+                            _vm = float(_vols.tail(10).mean())   # 与前端 buildTriggerCtx 同为含当前根的10根均量
                             _vr = round(float(_vols.iloc[-1]) / _vm, 3) if _vm else None
                     else:
                         price = _num(q.get("price")) or _num(closes.iloc[-1])
@@ -2127,7 +2494,7 @@ def build_seats_router() -> APIRouter:
             from financial_analyst.llm.client import LLMClient
             import json as _json
             client = LLMClient.for_agent("watch-agent").with_overrides(
-                provider="deepseek", model="deepseek-chat")
+                provider="deepseek", model="deepseek-v4-flash", thinking=False)
             resp = await client.chat(
                 [{"role": "system", "content": sys_p}, {"role": "user", "content": usr_p}],
                 temperature=0.3, response_format={"type": "json_object"})
@@ -2161,22 +2528,32 @@ def build_seats_router() -> APIRouter:
                 "note": order.get("note"), "validity": order.get("validity"),
                 "model_name": f"{client.provider}/{client.model}", "asof": asof, "pit": pit,
                 "creed": creed,
+                **({"evidence_source": evidence_source} if evidence_source else {}),
+                **({"data_ref": data_ref} if data_ref else {}),
+                **({"data_digest": data_digest} if data_digest else {}),
+                **({"data_quality": data_quality} if data_quality else {}),
             })
             return JSONResponse({
                 "ok": True, "code": c, "name": name, "seat": seat, "seat_cn": seat_cn, "tf": tf,
                 "asof": asof, "model_name": f"{client.provider}/{client.model}",
                 "ctx": ctx, "order": order, "pit": pit,
                 "held": held, "pnlPct": pnl_pct,
+                **({"evidence_source": evidence_source} if evidence_source else {}),
+                **({"data_ref": data_ref} if data_ref else {}),
+                **({"data_digest": data_digest} if data_digest else {}),
+                **({"data_quality": data_quality} if data_quality else {}),
             })
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"ok": False, "code": c, "reason": f"{type(exc).__name__}: {exc}"})
 
     @router.get("/bars_live")
     async def seats_bars_live(code: str, freq: str = "1min", n: int = 480):
-        """盘中实时 K(引擎 pytdx ``WatchFeed``):``freq=1min``(bars1) / ``5min``(bars5)。
-        「实时加 1min」盯盘用:1min 历史库个股为空,故 1min 只走实时口。坏码/网络失败 →
-        ok:False + 空 bars(恒 HTTP200,前端降级回退合成/历史)。
-        返回 ``{ok, code, freq, n, bars:[{date,open,high,low,close,vol}]}``(date='YYYY-MM-DD HH:MM',vol 手)。
+        """Fetch, validate and durably cache true 1/5-minute bars.
+
+        The response and Agent decisions share the same SQLite snapshot digest.
+        A transient source outage may return the last durable snapshot with
+        ``source=realtime_store_cache``; consumers decide freshness from
+        ``data_asof`` and never reinterpret it as day evidence.
         """
         try:
             from financial_analyst.buddy.tools import normalize_code
@@ -2188,34 +2565,52 @@ def build_seats_router() -> APIRouter:
             c = (code or "").strip().upper()
         if not c:
             return JSONResponse({"ok": False, "code": code, "freq": freq, "bars": [], "reason": "code 为空"})
-        freq = "1min" if str(freq or "").lower() in ("1min", "1", "min1", "1m") else "5min"
+        raw_freq = str(freq or "").lower()
+        if raw_freq in ("1min", "1", "min1", "1m"):
+            freq = "1min"
+        elif raw_freq in ("5min", "5", "min5", "5m"):
+            freq = "5min"
+        else:
+            return JSONResponse({"ok": False, "code": c, "freq": raw_freq,
+                                 "bars": [], "reason": "freq 仅支持 1min/5min"})
         n = max(1, min(int(n or 480), 800))
-        feed = None
+        from guanlan_v2.seats import minute_evidence as _minute
+        source = "pytdx+realtime_store"
+        source_error = None
+        snapshot = None
         try:
-            from financial_analyst.watch.feed import WatchFeed
-            feed = WatchFeed()
-            fn = feed.bars1 if freq == "1min" else feed.bars5
-            df = await asyncio.to_thread(fn, c, n)
-            bars = []
-            if df is not None and len(df) > 0:
-                for rec in df.to_dict("records"):
-                    td = rec.get("trade_date")
-                    bars.append({
-                        "date": (str(td)[:16] if td is not None else None),
-                        "open": _num(rec.get("open")), "high": _num(rec.get("high")),
-                        "low": _num(rec.get("low")), "close": _num(rec.get("close")),
-                        "vol": _num(rec.get("vol")),
-                    })
-            return JSONResponse({"ok": True, "code": c, "freq": freq, "n": len(bars), "bars": bars})
-        except Exception as exc:  # noqa: BLE001 — 实时拉取失败诚实降级
+            snapshot = await asyncio.to_thread(
+                _minute.fetch_live_snapshot, c, freq, n=n, store=_realtime_store())
+        except Exception as exc:  # source outage: durable cache may still support display/replay
+            source_error = f"{type(exc).__name__}: {exc}"
+            source = "realtime_store_cache"
+            try:
+                snapshot = await asyncio.to_thread(
+                    _minute.stored_snapshot, c, freq, limit=n, store=_realtime_store())
+            except Exception as store_exc:
+                source_error += f"; store={type(store_exc).__name__}: {store_exc}"
+        if not snapshot:
             return JSONResponse({"ok": False, "code": c, "freq": freq, "bars": [],
-                                 "reason": f"{type(exc).__name__}: {exc}"})
-        finally:
-            if feed is not None:
-                try:
-                    feed.close()
-                except Exception:  # noqa: BLE001
-                    pass
+                                 "reason": source_error or "minute_evidence_missing"})
+        bars = [{
+            "date": row.get("bar_time"),
+            "open": row.get("open"), "high": row.get("high"),
+            "low": row.get("low"), "close": row.get("close"),
+            "vol": row.get("volume"), "is_final": bool(row.get("is_final")),
+            "quality_flags": row.get("quality_flags") or [],
+        } for row in snapshot.get("bars") or []]
+        pulled_values = [row.get("pulled_at") for row in snapshot.get("bars") or []
+                         if row.get("pulled_at")]
+        return JSONResponse({
+            "ok": True, "code": snapshot.get("code") or c, "freq": freq,
+            "n": len(bars), "bars": bars, "source": source,
+            "data_asof": snapshot.get("last_bar_time"),
+            "fetched_at": max(pulled_values) if pulled_values else None,
+            "data_ref": snapshot.get("data_ref"), "digest": snapshot.get("digest"),
+            "complete_n": snapshot.get("complete_n"),
+            "quality_flagged_n": snapshot.get("quality_flagged_n"),
+            **({"source_error": source_error[:240]} if source_error else {}),
+        })
 
     @router.get("/basket_perf")
     async def seats_basket_perf(codes: str = "", start: str = "", horizon: int = 5,
@@ -2363,10 +2758,75 @@ def build_seats_router() -> APIRouter:
             return JSONResponse({"ok": False, "error": str(e)[:200]})
 
     # ── 后端定时盯盘(2026-07-11 落子改造 Task 1):状态 / 开关 ──────────────
+    @router.post("/watch/assignments/migrate")
+    def watch_assignments_migrate():
+        """Freeze legacy binds after the browser archiveReady handshake.
+
+        Ordinary GET/status/watcher reads never perform this one-time write,
+        preventing a partially hydrated archive from becoming authoritative.
+        """
+        from . import watcher
+        from . import watch_assignments as _wa
+        try:
+            rows = _wa.migrate_legacy_assignments(
+                path=watcher.ASSIGNMENTS_PATH,
+                archive_dir=watcher.ARCHIVE_DIR,
+                persist_empty=True)
+            return {"ok": True, "assignments": rows}
+        except Exception as exc:
+            return {"ok": False, "reason": "assignment_migration_failed",
+                    "detail": f"{type(exc).__name__}: {exc}"}
+
+    @router.get("/watch/assignments")
+    def watch_assignments_list():
+        """List the independent, per-symbol watcher assignments.
+
+        Rows expose requested/effective evidence separately.  All four values
+        have real adapters; a source/storage failure stops that decision and is
+        never presented as an effective day decision.
+        """
+        from . import watcher
+        from . import watch_assignments as _wa
+        try:
+            return {
+                "ok": True,
+                "assignments": watcher.assignment_items(),
+                "evidence_tf_values": sorted(_wa.EVIDENCE_TFS),
+                "effective_evidence_tf_values": sorted(_wa.EFFECTIVE_EVIDENCE_TFS),
+                "decision_cadence_values": ["daily", "60min", "30min", "10min"],
+                "thinking_mode_values": ["fast", "deep"],
+            }
+        except Exception as exc:  # authoritative store unreadable => visible + fail closed
+            return {"ok": False, "assignments": [],
+                    "reason": f"{type(exc).__name__}: {exc}"}
+
+    @router.put("/watch/assignments/{code}")
+    def watch_assignment_upsert(code: str, payload: dict = Body(...)):
+        """Create/update/disable one symbol's unique primary assignment.
+
+        Body: ``{enabled,strategy_id,evidence_tf,decision_cadence,
+        thinking_mode?,revision?}``.  ``revision`` is an optional optimistic
+        precondition; the returned row always carries the incremented value.
+        Setting ``enabled:false`` changes only the assignment and never edits
+        legacy ``strategy.bind``.
+        """
+        from . import watcher
+        from .watch_assignments import AssignmentError, RevisionConflict
+        try:
+            row = watcher.upsert_assignment(code, payload)
+            return {"ok": True, "assignment": row}
+        except RevisionConflict as exc:
+            return {"ok": False, "reason": "revision_conflict", "detail": str(exc)}
+        except AssignmentError as exc:
+            return {"ok": False, "reason": "invalid_assignment", "detail": str(exc)}
+        except Exception as exc:  # disk/control-plane failure is visible, never guessed
+            return {"ok": False, "reason": "assignment_store_error",
+                    "detail": f"{type(exc).__name__}: {exc}"}
+
     @router.get("/watch/status")
     def watch_status():
         """盯盘 watcher 状态:{ok, enabled, watching, today_count, daily_budget,
-        last_tick, market_open}。watching = 策略 bind 非空并集(去重)。"""
+        last_tick, market_open}。旧字段不变；assignment_items 追加展示控制面。"""
         from . import watcher
         return {"ok": True, **watcher.get_status()}
 

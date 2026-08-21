@@ -52,6 +52,13 @@ def test_first_window_carries_the_js_api():
     assert "js_api" in fake.windows[0].kw
 
 
+def test_all_windows_allow_text_selection_for_copying():
+    fake = _FakeWebview()
+    s = sh.create_shell(webview_module=fake)
+    s.open_ui_window("http://127.0.0.1:9999/ui/console/example.html")
+    assert all(w.kw.get("text_select") is True for w in fake.windows)
+
+
 def test_open_ui_window_creates_another_window_with_the_same_api():
     fake = _FakeWebview()
     s = sh.create_shell(webview_module=fake)

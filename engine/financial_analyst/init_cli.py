@@ -130,8 +130,8 @@ _LLM_PROVIDERS = [
         "en": "[bold]Recommended[/bold] · 1M free tokens on signup · fastest in CN",
     }, "green"),
     ("DEEPSEEK_API_KEY", "deepseek", {
-        "zh": "推理强 · `deepseek-reasoner` 1/10 价格",
-        "en": "Strong reasoning · `deepseek-reasoner` ~1/10 cost",
+        "zh": "V4 双档 · Flash / Pro 显式思考模式",
+        "en": "V4 dual tier · explicit thinking on Flash / Pro",
     }, "cyan"),
     ("OPENAI_API_KEY", "openai", {
         "zh": "通用 fallback · gpt-4o",

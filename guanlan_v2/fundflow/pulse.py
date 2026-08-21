@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time as _time
 from datetime import datetime
 from pathlib import Path
 
@@ -237,8 +238,28 @@ def read_live(kind: str = "concept", refresh: bool = False,
         return _annotate_live(data, ref_now, ttl)
     cached = _load_live_cache(k, cache_dir)
     if not cached:                       # 冷启动:阻塞首拉,落缓存
-        data = _refresh_live(k, refresh=False, cache_dir=cache_dir,
-                             sector_fn=sector_fn, now=now, build_fn=build_fn)
+        # 2026-07-28 评审修:首拉也过单飞旗——预热线程与页面请求并发抵达同一 kind 时
+        # 只放一个真拉东财,其余有界等缓存(拉取方失败则等窗尽头自拉兜底,返回契约不变)。
+        won = False
+        for _ in range(24):              # 等待窗 ≤ ~12s
+            with _live_lock:
+                if not _live_inflight.get(k):
+                    _live_inflight[k] = True
+                    won = True
+                    break
+            _time.sleep(0.5)
+            cached = _load_live_cache(k, cache_dir)
+            if cached:
+                return _annotate_live(cached, ref_now, ttl)
+        if not won:
+            with _live_lock:             # 等窗尽头旗仍在(拉取方挂死?):自拉兜底
+                _live_inflight[k] = True
+        try:
+            data = _refresh_live(k, refresh=False, cache_dir=cache_dir,
+                                 sector_fn=sector_fn, now=now, build_fn=build_fn)
+        finally:
+            with _live_lock:
+                _live_inflight[k] = False
         return _annotate_live(data, ref_now, ttl)
     # 非交易时段:当天数据定格,秒回缓存,绝不后台重拉(省得白打东财 + 用户无感)。
     triggered = False

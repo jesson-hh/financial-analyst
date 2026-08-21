@@ -22,10 +22,9 @@ Capability ids are bound to the *implemented* Phase-3 refs
 (``data.catalog.data_capability_refs``, clause (c)); the generator invents no
 capability and grants nothing — it produces mapping material + a lint only.
 
-FROZEN TABLE STATE (HAZARD note): ``WW_TOOL_TABLE`` is dirty on this branch — the
-worktree carries ``ww_newsradar`` / ``ww_overseas`` (live in production,
-uncommitted here). The material freezes against that worktree state (64 rows =
-the 62 committed tools plus that uncommitted pair), and the manifest records the
+FROZEN TABLE STATE (HAZARD note): the material currently freezes against the
+76-row ``WW_TOOL_TABLE`` after the reviewed workspace, media, realtime and
+control-plane additions. The manifest records the
 exact frozen table shape it derives from (``source_tool_count`` +
 ``source_tool_digest`` over the sorted tool-name projection) so a foreign commit
 that changes the table trips the drift guard with concrete numbers, never
@@ -40,6 +39,9 @@ Phase-3 market-data capability. Mapping one under a data capability would let a
 worker's DATA allowlist reach a money-spending door — exactly the 承诺-供给
 confusion :func:`lint_skill_supply` exists to catch. The re-freeze therefore moves
 ``source_tool_count`` / ``source_tool_digest`` only; every row is byte-identical.
+Re-generated to 76 for the 2026-08 product integration; the additional tools
+remain presentation/control/workspace surfaces and do not grant a new Phase-3
+market-data capability.
 
 Regenerate: ``python -m guanlan_v2.orchestration.capability_manifest``.
 """

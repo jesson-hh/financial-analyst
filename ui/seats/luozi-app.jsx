@@ -54,25 +54,113 @@ function OrderbookTicksPanel({ book, ticks }) {
   );
 }
 
-// 盯盘总闸(后端 watcher 状态条):服务未启用/盘外/预算 全显形;开关写 /seats/watch/toggle。
-function WatchStrip({ watch, onToggle }) {
-  if (watch === null) return (
-    <div className="mono" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 18px', borderBottom: '1px solid var(--line-soft)', fontSize: 9.5, color: 'var(--ink-3)', flexShrink: 0 }}>
-      ○ 后端盯盘服务未启用(重启 9999 前为旧后端,或未设 GUANLAN_SEATS_WATCH=1)· 手动研判/条件单不受影响
+const APP_TF_CN = { day: '日线', '30min': '30分钟', '5min': '5分钟', '1min': '1分钟' };
+const APP_CADENCE_CN = { daily: '每日一次', '60min': '每60分钟', hourly: '每60分钟', '30min': '每30分钟', '10min': '每10分钟' };
+
+// 全局总闸只放顶栏；详细状态按需展开，不再与单票配置、条件触发监控混成一条横栏。
+function WatchControl({ watch, onToggle, assignmentMode }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const connected = watch !== null;
+  const on = !!(watch && watch.enabled);
+  const toggle = async (e) => {
+    e.stopPropagation();
+    if (!connected || busy || !onToggle) return;
+    setBusy(true); try { await onToggle(!on); } finally { setBusy(false); }
+  };
+  return (
+    <div style={{ position: 'relative', flexShrink: 0 }}>
+      <div className="mono" onClick={() => setOpen(v => !v)} title="自动盯盘总开关与运行详情"
+        style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', padding: '4px 8px', borderRadius: 8, border: '1px solid ' + (on ? 'var(--zhu-soft)' : 'var(--line)'), background: on ? 'rgba(168,57,45,0.055)' : 'transparent', whiteSpace: 'nowrap' }}>
+        <span onClick={toggle} style={{ color: on ? 'var(--yin)' : 'var(--ink-3)', fontSize: 9.5, fontWeight: on ? 600 : 400 }}>
+          {busy ? '◌ 切换中' : (connected ? (on ? '● 自动盯盘' : '○ 自动盯盘') : '○ 自动盯盘未连接')}
+        </span>
+        {connected && <span style={{ color: 'var(--ink-3)', fontSize: 8.5 }}>{(watch.watching || []).length}票</span>}
+        <span style={{ color: 'var(--ink-3)', fontSize: 8 }}>{open ? '▴' : '▾'}</span>
+      </div>
+      {open && (
+        <div onClick={e => e.stopPropagation()} style={{ position: 'absolute', top: 34, right: 0, width: 300, zIndex: 80, background: 'var(--paper)', border: '1px solid var(--line)', borderRadius: 10, boxShadow: '0 8px 28px rgba(28,24,20,0.18)', padding: '11px 13px' }}>
+          <div className="serif" style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-1)' }}>自动盯盘 · 全局总闸</div>
+          {!connected ? (
+            <div className="mono" style={{ marginTop: 8, fontSize: 9.5, lineHeight: 1.6, color: 'var(--ink-3)' }}>状态端点不可达。手动研判与条件触发监控不受此总闸控制。</div>
+          ) : (
+            <div className="mono" style={{ marginTop: 8, display: 'grid', gridTemplateColumns: '80px 1fr', rowGap: 6, fontSize: 9.5, color: 'var(--ink-3)' }}>
+              <span>运行状态</span><b style={{ color: on ? 'var(--yin)' : 'var(--ink-2)' }}>{on ? (watch.marketOpen ? '盘中运行' : '已开启 · 下次开盘恢复') : '已关闭'}</b>
+              <span>纳入标的</span><span>{(watch.watching || []).length} 票</span>
+              <span>今日调用</span><span>{watch.todayCount != null ? watch.todayCount : '—'}{watch.budget != null ? ' / ' + watch.budget : ''}</span>
+              <span>上次巡检</span><span>{watch.lastTick ? String(watch.lastTick).replace('T', ' ').slice(5, 16) : '—'}</span>
+              <span>单票配置</span><span>{assignmentMode && assignmentMode.supported === true ? 'assignments 已接通' : (assignmentMode && assignmentMode.legacy ? '旧版绑定(分钟口径不可用)' : '配置接口不可达')}</span>
+            </div>
+          )}
+          <div className="serif" style={{ borderTop: '1px solid var(--line-soft)', marginTop: 9, paddingTop: 8, fontSize: 9.5, color: 'var(--ink-3)', lineHeight: 1.6 }}>总闸只控制服务端自动研判。单票纳入和周期在左栏配置；条件单是本页触发监控。</div>
+        </div>
+      )}
     </div>
   );
-  const on = !!watch.enabled;
+}
+
+function WatchAssignmentDialog({ meta, assignment, assignmentMode, strategies, legacyEnabled, onClose, onSave }) {
+  const legacy = !!(assignmentMode && assignmentMode.legacy);
+  const unavailable = !legacy && !(assignmentMode && assignmentMode.supported === true);
+  const explicit = (strategies || []).find(s => Array.isArray(s.bind) && s.bind.map(x => String(x).replace(/^(SH|SZ|BJ)/i, '')).indexOf(String(meta.code)) >= 0);
+  const initialSid = (assignment && assignment.strategy_id) || (explicit && explicit.id) || '__dedicated__';
+  const [enabled, setEnabled] = useState(assignment ? !!assignment.enabled : !!legacyEnabled);
+  const [strategyId, setStrategyId] = useState(initialSid);
+  const [evidenceTF, setEvidenceTF] = useState((assignment && (assignment.requested_evidence_tf || assignment.evidence_tf)) || 'day');
+  const [cadence, setCadence] = useState((assignment && assignment.decision_cadence) || '60min');
+  const [thinking, setThinking] = useState((assignment && assignment.thinking_mode) === 'deep' ? 'deep' : 'fast');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const save = async () => {
+    if (saving || unavailable) return;
+    setSaving(true); setError('');
+    const r = await onSave({ enabled, strategy_id: strategyId, evidence_tf: evidenceTF, decision_cadence: cadence, thinking_mode: thinking });
+    setSaving(false);
+    if (!r || !r.ok) { setError((r && r.reason) || '保存失败'); return; }
+    onClose();
+  };
+  const selStyle = { width: '100%', fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--ink)', background: 'var(--paper)', border: '1px solid var(--line)', borderRadius: 7, padding: '6px 8px', outline: 'none' };
+  const row = (label, child, note) => (
+    <label style={{ display: 'grid', gridTemplateColumns: '90px 1fr', gap: 9, alignItems: 'center' }}>
+      <span className="mono" style={{ fontSize: 9, color: 'var(--ink-3)' }}>{label}</span>
+      <span>{child}{note && <span className="serif" style={{ display: 'block', marginTop: 3, fontSize: 9, color: 'var(--ink-3)' }}>{note}</span>}</span>
+    </label>
+  );
   return (
-    <div className="mono" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '4px 18px', borderBottom: '1px solid var(--line-soft)', fontSize: 9.5, flexShrink: 0, background: on ? 'rgba(168,57,45,0.035)' : 'transparent' }}>
-      <span onClick={() => onToggle && onToggle(!on)} title={on ? '关闭服务端盯盘' : '开启服务端盯盘:交易日盘中按策略节拍自动研判绑定票,关页面也盯'}
-        style={{ cursor: 'pointer', padding: '1px 9px', borderRadius: 9, border: '1px solid ' + (on ? 'var(--yin)' : 'var(--line)'), color: on ? 'var(--paper)' : 'var(--ink-3)', background: on ? 'var(--yin)' : 'transparent', whiteSpace: 'nowrap' }}>
-        {on ? '● 后端盯盘中' : '○ 开后端盯盘'}
-      </span>
-      <span style={{ color: 'var(--ink-2)' }}>{(watch.watching || []).length} 支绑定</span>
-      <span style={{ color: 'var(--ink-3)' }}>今日已判 {watch.todayCount != null ? watch.todayCount : '—'}{watch.budget != null ? ' / 预算 ' + watch.budget : ''}</span>
-      <span style={{ color: 'var(--ink-3)' }}>{watch.marketOpen ? '盘中' : '盘外(到点自动跑)'}</span>
-      {watch.lastTick && <span style={{ color: 'var(--ink-3)' }}>上次巡检 {String(watch.lastTick).replace('T', ' ').slice(5, 16)}</span>}
-      <span style={{ marginLeft: 'auto', color: 'var(--ink-3)', fontSize: 8.5 }} title="服务端定时研判绑定票(策略 bind 派生),结果落研判历史;关页面照常盯">关页面也盯 · 结果进研判时间线</span>
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 120, background: 'rgba(28,24,20,0.28)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
+      <div onClick={e => e.stopPropagation()} style={{ width: 440, maxWidth: '94vw', background: 'var(--paper)', border: '1px solid var(--line)', borderRadius: 14, boxShadow: '0 16px 44px rgba(28,24,20,0.24)', padding: '17px 19px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+          <span className="seal serif" style={{ width: 27, height: 27, fontSize: 14 }}>盯</span>
+          <div><div className="serif" style={{ fontSize: 16, fontWeight: 700 }}>{meta.name} · 自动研判配置</div><div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', marginTop: 2 }}>{meta.code}</div></div>
+          <span onClick={onClose} style={{ marginLeft: 'auto', cursor: 'pointer', color: 'var(--ink-3)', fontSize: 18 }}>×</span>
+        </div>
+        <div className="mono" style={{ marginTop: 12, padding: '7px 9px', borderRadius: 7, background: legacy ? 'rgba(138,111,63,0.07)' : (unavailable ? 'rgba(168,57,45,0.06)' : 'rgba(74,107,92,0.06)'), color: legacy || unavailable ? 'var(--ink-2)' : 'var(--dai)', fontSize: 9.5, lineHeight: 1.55 }}>
+          {legacy ? '旧版绑定模式：只能明确纳入/移出；Agent、分钟口径和节奏不会假装已应用。' : (unavailable ? ((assignmentMode && assignmentMode.reason) || '单票配置接口暂不可达') + '。为防误改策略，本次不能保存，也不会回退旧 bind。' : '单票 assignment 已接通。策略适用范围与自动盯盘状态彼此独立。')}
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 11, marginTop: 14, opacity: unavailable ? 0.65 : 1 }}>
+          {row('自动研判', <span onClick={() => !unavailable && setEnabled(v => !v)} className="mono" style={{ display: 'inline-block', cursor: unavailable ? 'default' : 'pointer', padding: '4px 10px', borderRadius: 9, border: '1px solid ' + (enabled ? 'var(--yin)' : 'var(--line)'), background: enabled ? 'var(--yin)' : 'transparent', color: enabled ? 'var(--paper)' : 'var(--ink-3)', fontSize: 10 }}>{enabled ? '● 已纳入' : '○ 未纳入'}</span>)}
+          {row('负责 Agent', <select disabled={legacy || unavailable} value={legacy ? initialSid : strategyId} onChange={e => setStrategyId(e.target.value)} style={selStyle}>
+            {!legacy && <option value="__dedicated__">新建「{meta.name} · 动量盯盘」(推荐)</option>}
+            {(strategies || []).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+            {initialSid && initialSid !== '__dedicated__' && !(strategies || []).some(s => s.id === initialSid) && <option value={initialSid}>{initialSid}</option>}
+          </select>, legacy ? '旧后端继续使用已有 bind，不会在这里暗换策略。' : '新建专属 Agent 会先持久化策略，再提交 assignment。')}
+          {row('研判数据周期', <select disabled={legacy || unavailable} value={legacy ? 'day' : evidenceTF} onChange={e => setEvidenceTF(e.target.value)} style={selStyle}>
+            <option value="day">日线</option><option value="30min">30分钟</option><option value="5min">5分钟</option><option value="1min">1分钟</option>
+          </select>, legacy ? '旧后端固定日线。' : '若所选分钟内核尚未接通，服务端会暂停，不会暗退日线。')}
+          {row('自动研判节奏', <select disabled={legacy || unavailable} value={legacy ? '60min' : cadence} onChange={e => setCadence(e.target.value)} style={selStyle}>
+            <option value="10min">每10分钟</option><option value="30min">每30分钟</option><option value="60min">每60分钟</option><option value="daily">每日一次</option>
+          </select>)}
+          {row('自动思考强度', <select disabled={legacy || unavailable} value={legacy ? 'fast' : thinking} onChange={e => setThinking(e.target.value)} style={selStyle}>
+            <option value="fast">快速 · 非思考</option><option value="deep">Pro · 高强度思考</option>
+          </select>)}
+        </div>
+        {assignment && assignment.effective_evidence_tf == null && <div className="serif" style={{ marginTop: 10, color: 'var(--yin)', fontSize: 10.5, lineHeight: 1.55 }}>当前请求 {APP_TF_CN[assignment.requested_evidence_tf || assignment.evidence_tf] || assignment.evidence_tf}，后端状态为“未接通”；该票已暂停自动研判，没有退回日线。</div>}
+        {error && <div className="mono" style={{ marginTop: 10, color: 'var(--yin)', fontSize: 9.5 }}>{error}</div>}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+          <span onClick={onClose} className="serif" style={{ cursor: 'pointer', border: '1px solid var(--line)', borderRadius: 8, padding: '7px 15px', color: 'var(--ink-2)', fontSize: 11.5 }}>取消</span>
+          <span onClick={save} className="serif" style={{ cursor: unavailable || saving ? 'default' : 'pointer', borderRadius: 8, padding: '7px 17px', background: unavailable || saving ? 'var(--line)' : 'var(--yin)', color: unavailable || saving ? 'var(--ink-3)' : 'var(--paper)', fontSize: 11.5 }}>{saving ? '保存中…' : (legacy ? '确认旧版绑定' : '保存配置')}</span>
+        </div>
+      </div>
     </div>
   );
 }
@@ -89,6 +177,7 @@ function LuoziApp() {
   const [, setPoolTick] = useState(0);                // 票池增删后强制重渲染(池数组是模块级)
   const [poolTickV, setPoolTickV] = useState(0);      // 传给 TicketList 触发其轮询重建
   const [realSyms, setRealSyms] = useState({});       // code → 用真日K装配的 symbol(覆盖合成)
+  const bars1SeqRef = useRef(0);                      // 1min 请求序；切票/重拉只收最新同码响应
   const [dataMode, setDataMode] = useState('mock');   // real | mock
   const [zoom, setZoom] = useState(null);
   const [panEnd, setPanEnd] = useState(null);
@@ -102,6 +191,10 @@ function LuoziApp() {
   const [liveBar, setLiveBar] = useState(null);       // 今日柱缓存(盘后保图有今天)
   useEffect(() => { setLiveBar(window.lzLivebarLoad ? window.lzLivebarLoad(code) : null); }, [code]);
   const [watch, setWatch] = useState(null);           // 后端盯盘状态(null=端点不可达/旧后端)
+  const [watchAssignments, setWatchAssignments] = useState({});
+  const [assignmentMode, setAssignmentMode] = useState({ supported: null, legacy: false, reason: '检查单票配置中' });
+  const [watchEdit, setWatchEdit] = useState(null);   // 正在配置的股票 meta
+  const assignmentWriteRef = useRef({});              // PUT 后短窗写栅栏，防轮询旧快照覆盖刚保存配置
   const [todayDecs, setTodayDecs] = useState([]);     // 今日页 K 线金框标记源(后端落盘时间线)
   const [realDecs, setRealDecs] = useState({});       // 复盘真跑「进行中」的即时标记(跑完由选中 run 接管)
   const [realRun, setRealRun] = useState({ running: false, done: 0, total: 0, cur: null, seatName: '', errors: 0 });
@@ -185,7 +278,44 @@ function LuoziApp() {
     const iv = setInterval(pull, 30000);
     return () => { alive = false; clearInterval(iv); };
   }, [page]);
-  const toggleWatch = (on) => { if (window.lzToggleWatch) window.lzToggleWatch(on).then(w => { if (w) setWatch(w); }); };
+  const toggleWatch = (on) => {
+    if (!window.lzToggleWatch) return Promise.resolve(null);
+    return window.lzToggleWatch(on).then(w => { if (w) setWatch(w); return w; });
+  };
+
+  // 单票 assignments:与总闸同为今日页控制面，30s 刷新。只有明确 404/405 才进入 legacy；
+  // 网络抖动/5xx 只显示不可达，绝不调用会改多个 bind 的旧 watchSet。
+  useEffect(() => {
+    if (page !== 'today' || !window.lzFetchWatchAssignments) return;
+    let alive = true;
+    const pull = () => window.lzFetchWatchAssignments().then(snap => {
+      if (!alive || !snap || snap.stale) return;
+      setAssignmentMode({ supported: snap.supported, legacy: !!snap.legacy, reason: snap.reason || '' });
+      if (snap.supported === true) {
+        const now = Date.now();
+        setWatchAssignments(prev => {
+          const next = Object.assign({}, snap.assignments || {});
+          const rev = a => (a && a.revision != null && isFinite(+a.revision)) ? +a.revision : null;
+          // 慢 GET 可能在 PUT 之前发出、很久以后才回来；revision 单调时永远保留较新行，
+          // 不能只靠几秒钟时间窗，否则 >10s 的旧响应仍会回滚刚保存的配置。
+          Object.keys(prev || {}).forEach(c => {
+            const pr = rev(prev[c]), nr = rev(next[c]);
+            if (pr != null && (nr == null || pr > nr)) next[c] = prev[c];
+          });
+          Object.keys(assignmentWriteRef.current).forEach(c => {
+            const fence = assignmentWriteRef.current[c];
+            const fr = rev(fence && fence.assignment), nr = rev(next[c]);
+            if (fence && fr != null && (nr == null || fr > nr)) next[c] = fence.assignment;
+            else if (fence && fr == null && now - fence.at < 10000) next[c] = fence.assignment;
+            else delete assignmentWriteRef.current[c];
+          });
+          return next;
+        });
+      }
+    });
+    pull(); const iv = setInterval(pull, 30000);
+    return () => { alive = false; clearInterval(iv); };
+  }, [page]);
 
   // 今日页 K 线金框标记:后端落盘研判(45s;含 watcher/手动;条件单不上 K 线金框——触发另有金环)
   useEffect(() => {
@@ -232,20 +362,90 @@ function LuoziApp() {
     return () => { alive = false; clearInterval(iv); };
   }, [page, code]);
 
-  // 第3期:symbol 按 (bars, strategies) 反应式重建
+  const currentAssignment = watchAssignments[String(code).replace(/^(SH|SZ|BJ)/i, '')] || null;
+  const availableStrategies = useMemo(() => {
+    const out = (strategies || []).slice();
+    const sid = currentAssignment && currentAssignment.strategy_id;
+    const assigned = sid && window.lzStrategyGet ? window.lzStrategyGet(sid) : null;
+    if (assigned && !out.some(s => s.id === assigned.id)) out.unshift(assigned);
+    return out;
+  }, [strategies, currentAssignment && currentAssignment.strategy_id]);
+
+  // 第3期:symbol 按 (bars, strategies) 反应式重建。实时 1min/5min 都属于显示层，
+  // 必须随重建后的 symbol 一起保留；此前只带 bars5，导致 bars1 已拉到 state 却被丢掉。
   const baseBars = (realSyms[code] && realSyms[code].bars) || window.LZ_SYMBOLS[code].bars;
   const _meta = window.LZ_SYMBOLS[code].meta;
   const symbol = useMemo(() => {
-    const s = window.lzBuildSymbolFromBars(_meta, baseBars, strategies,
+    const s = window.lzBuildSymbolFromBars(_meta, baseBars, availableStrategies,
       (realSyms[code] && realSyms[code].benchRows) || null);
-    return (realSyms[code] && realSyms[code].bars5) ? Object.assign({}, s, { bars5: realSyms[code].bars5 }) : s;
-  }, [baseBars, strategies, code, realSyms]);
-  const curSid = (curStratId && strategies.some(s => s.id === curStratId)) ? curStratId : ((strategies[0] && strategies[0].id) || null);
-  const curStrat = strategies.find(s => s.id === curSid) || null;
+    const live = realSyms[code] || {};
+    return Object.assign({}, s,
+      live.bars5 ? { bars5: live.bars5 } : {},
+      live.bars1 ? { bars1: live.bars1 } : {});
+  }, [baseBars, availableStrategies, code, realSyms]);
+  const assignedSid = currentAssignment && currentAssignment.strategy_id;
+  const curSid = (page === 'today' && assignedSid && availableStrategies.some(s => s.id === assignedSid)) ? assignedSid
+    : ((curStratId && availableStrategies.some(s => s.id === curStratId)) ? curStratId
+      : ((assignedSid && availableStrategies.some(s => s.id === assignedSid)) ? assignedSid : ((availableStrategies[0] && availableStrategies[0].id) || null)));
+  const curStrat = availableStrategies.find(s => s.id === curSid) || null;
   const curName = (curStrat && curStrat.name) || '策略';
   const active = useMemo(() => curSid ? [curSid] : [], [curSid]);
   const n = symbol.bars.length;
   const cursor = n - 1;                                // 游标退役:恒末根(推演/播放已删)
+
+  const saveWatchConfig = async (draft) => {
+    if (!watchEdit) return { ok: false, reason: '未选择股票' };
+    const c = String(watchEdit.code || '').replace(/^(SH|SZ|BJ)/i, '');
+    // 只有 GET 明确 404/405 后才允许旧版 watchSet；网络/5xx/unavailable 在弹层中禁存。
+    if (assignmentMode.legacy) {
+      if (!window.lzWatchSet) return { ok: false, reason: '旧版绑定函数不可用' };
+      const ok = window.lzWatchSet(c, !!draft.enabled);
+      if (!ok && draft.enabled) return { ok: false, reason: '没有可绑定的旧版策略' };
+      setPoolTickV(v => v + 1);
+      setToast({ kind: 'handoff', text: '已按旧版绑定' + (draft.enabled ? '纳入 ' : '移出 ') + watchEdit.name + '；研判仍为日线，未应用分钟口径。' });
+      setTimeout(() => setToast(null), 5200);
+      return { ok: true, legacy: true };
+    }
+    if (assignmentMode.supported !== true || !window.lzPutWatchAssignment) {
+      return { ok: false, reason: assignmentMode.reason || '单票配置接口不可达' };
+    }
+    let sid = draft.strategy_id === '__dedicated__' ? '' : String(draft.strategy_id || '');
+    if (draft.enabled) {
+      if (!sid) {
+        if (!window.lzEnsureDedicatedWatchStrategy) return { ok: false, reason: '专属策略创建器不可用' };
+        const made = await window.lzEnsureDedicatedWatchStrategy(watchEdit, draft);
+        if (!made || !made.ok) return made || { ok: false, reason: '专属策略创建失败' };
+        sid = made.strategy.id;
+      } else {
+        const st = window.lzStrategyGet ? window.lzStrategyGet(sid) : null;
+        if (st && window.lzPersistWatchStrategy) {
+          const persisted = await window.lzPersistWatchStrategy(st);
+          if (!persisted || !persisted.ok) return persisted || { ok: false, reason: '策略持久化失败' };
+        } else if (!(currentAssignment && currentAssignment.strategy_id === sid)) {
+          return { ok: false, reason: '所选策略尚未加载，不能安全指派' };
+        }
+      }
+    } else if (!sid && currentAssignment) sid = currentAssignment.strategy_id || '';
+    const body = { enabled: !!draft.enabled, strategy_id: sid,
+      evidence_tf: draft.evidence_tf, decision_cadence: draft.decision_cadence,
+      thinking_mode: draft.thinking_mode };
+    if (currentAssignment && currentAssignment.revision != null) body.revision = currentAssignment.revision;
+    const saved = await window.lzPutWatchAssignment(c, body);
+    if (!saved || !saved.ok) {
+      if (saved && saved.legacy) setAssignmentMode({ supported: false, legacy: true, reason: saved.reason || '旧后端' });
+      return saved || { ok: false, reason: '保存失败' };
+    }
+    const a = saved.assignment;
+    assignmentWriteRef.current[c] = { at: Date.now(), assignment: a };
+    setWatchAssignments(prev => Object.assign({}, prev, { [c]: a }));
+    if (window.lzFetchWatchStatus) window.lzFetchWatchStatus().then(w => { if (w) setWatch(w); });
+    const unsupported = a && a.effective_evidence_tf == null;
+    setToast({ kind: 'handoff', text: unsupported
+      ? ('已保存 ' + watchEdit.name + ' 的 ' + (APP_TF_CN[a.requested_evidence_tf] || a.requested_evidence_tf) + ' 请求；内核尚未接通，该票已暂停且未退回日线。')
+      : ('已' + (a.enabled ? '纳入 ' : '停用 ') + watchEdit.name + ' · ' + (APP_TF_CN[a.requested_evidence_tf] || a.requested_evidence_tf) + ' · ' + (APP_CADENCE_CN[a.decision_cadence] || a.decision_cadence)) });
+    setTimeout(() => setToast(null), 6200);
+    return { ok: true, assignment: a };
+  };
 
   // ④-③ 捕获今日柱:今日页下报价晚于末根真日K日 → 提一根今日真实柱写缓存
   useEffect(() => {
@@ -525,10 +725,12 @@ function LuoziApp() {
       setRealSyms(s => {
         const cur = s[code];
         if (!cur || !cur.bars5 || !cur.bars5.length) return s;
-        const seen = new Set(cur.bars5.map(b => b.date));
-        const extra = live5.filter(b => !seen.has(b.date));
-        if (!extra.length) return s;
-        return Object.assign({}, s, { [code]: Object.assign({}, cur, { bars5: cur.bars5.concat(extra) }) });
+        // Same timestamp may be a forming 5min candle: replace by natural key,
+        // do not append-only and leave the visible candle frozen.
+        const byTime = new Map(cur.bars5.map(b => [b.date, b]));
+        live5.forEach(b => byTime.set(b.date, b));
+        const merged = Array.from(byTime.values()).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+        return Object.assign({}, s, { [code]: Object.assign({}, cur, { bars5: merged, bars5Meta: live5._meta || null }) });
       });
     });
     pull();
@@ -536,17 +738,22 @@ function LuoziApp() {
     return () => { alive = false; clearInterval(iv); };
   }, [page, tf, code]);
 
-  // 今日页 1min:整批替换(20s)
+  // 今日页 1min:整批替换(20s)。packet.code + 单调 seq 双闸，防切票时旧请求晚回覆盖。
   useEffect(() => {
     if (page !== 'today' || tf !== '1' || !window.lzFetchRealtimeBars1) return;
-    let alive = true;
-    const pull = () => window.lzFetchRealtimeBars1(code, 480).then(b1 => {
-      if (!alive || !b1 || !b1.length) return;
-      setRealSyms(s => { const cur = s[code]; if (!cur) return s; return Object.assign({}, s, { [code]: Object.assign({}, cur, { bars1: b1 }) }); });
+    let alive = true; const requestCode = String(code).replace(/^(SH|SZ|BJ)/i, '');
+    const pull = () => {
+      const seq = ++bars1SeqRef.current;
+      return window.lzFetchRealtimeBars1(requestCode, 480).then(packet => {
+      if (!alive || seq !== bars1SeqRef.current || !packet || !packet.bars || !packet.bars.length) return;
+      const responseCode = String(packet.code || packet.requestCode || '').replace(/^(SH|SZ|BJ)/i, '');
+      if (responseCode !== requestCode) return;
+      setRealSyms(s => { const cur = s[requestCode]; if (!cur) return s; return Object.assign({}, s, { [requestCode]: Object.assign({}, cur, { bars1: packet.bars, bars1Meta: { asof: packet.asof, fetchedAt: packet.fetchedAt, source: packet.source, seq } }) }); });
     });
+    };
     pull();
     const iv = setInterval(pull, 20000);
-    return () => { alive = false; clearInterval(iv); };
+    return () => { alive = false; bars1SeqRef.current++; clearInterval(iv); };
   }, [page, tf, code]);
 
   // 复盘回灌:当前 run 成绩提炼为草稿经验卡
@@ -565,11 +772,20 @@ function LuoziApp() {
   const frame = window.lzFrameData(symbol, tf, cursor, cursor, true, page === 'today');
   const intraday = tf === '60' || tf === '30' || tf === '15' || tf === '5' || tf === '1';
   const scaleReal = intraday ? !!frame.real5 : (dataMode === 'real');
+  const bars1Meta = (realSyms[code] && realSyms[code].bars1Meta) || null;
+  const bars5Meta = (realSyms[code] && realSyms[code].bars5Meta) || null;
+  const bars1Asof = bars1Meta && bars1Meta.asof;
+  const bars1Time = bars1Asof ? String(bars1Asof).slice(5, 16) : '';
+  const bars1Ms = bars1Asof ? new Date(String(bars1Asof).replace(' ', 'T')).getTime() : NaN;
+  const bars1Stale = tf === '1' && !!(watch && watch.marketOpen) && (!isFinite(bars1Ms) || (Date.now() - bars1Ms) > 180000);
+  const bars5Asof = bars5Meta && bars5Meta.asof;
+  const bars5Ms = bars5Asof ? new Date(String(bars5Asof).replace(' ', 'T')).getTime() : NaN;
+  const bars5Stale = tf !== '1' && intraday && !!(watch && watch.marketOpen) && bars5Meta && (!isFinite(bars5Ms) || (Date.now() - bars5Ms) > 600000);
   const scaleLabel = intraday
-    ? (frame.real5 ? (tf === '1' ? '真·1min' : '真·5min') : (dataMode === 'real' ? '日内·合成' : '样例'))
+    ? (frame.real5 ? (tf === '1' ? ((bars1Stale ? '1min·陈旧' : '真·1min') + (bars1Time ? ' · ' + bars1Time : '')) : (bars5Stale ? '5min·陈旧' : '真·5min')) : (dataMode === 'real' ? '日内·合成' : '样例'))
     : (dataMode === 'real' ? '真·日线' : '样例');
   const scaleTitle = intraday
-    ? (frame.real5 ? (tf === '1' ? '盘中实时 1min(/seats/bars_live?freq=1min,引擎 pytdx)' : '日内来自 stock_data 真 5min 聚合(/seats/daily?freq=5min)') : '真 5min/1min 未到 / 窗口越界 → subdivideDay 合成,仅形态示意')
+    ? (frame.real5 ? (tf === '1' ? ('盘中实时 1min · 数据截至 ' + (bars1Asof || '未知') + (bars1Stale ? ' · 已超过3分钟未推进，标记陈旧' : '') + ' · /seats/bars_live?freq=1min') : ('结算历史 + 盘中实时 5min · 数据截至 ' + (bars5Asof || '历史末根') + (bars5Stale ? ' · 已超过10分钟未推进，标记陈旧' : '') + ' · 同步写入可复盘分钟证据库(/seats/bars_live?freq=5min)')) : '真 5min/1min 未到 / 窗口越界 → subdivideDay 合成,仅形态示意')
     : (dataMode === 'real' ? '日K来自 stock_data 真数据(/seats/daily)' : '真日K未到 / 后端未起 → 回退合成样例');
   // 今日页补今日柱(forming 实时 / 缓存快照;只入显示帧,绝不入 symbol.bars)
   const dispFrame = (() => {
@@ -662,24 +878,51 @@ function LuoziApp() {
       </div>
       <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
         <CandleChart bars={dispFrame.fbars} decisions={[]} truedecs={chartMarks} activeSeats={selRun ? Array.from(new Set(runDecs.map(d => d.seat))) : active} selected={selected} onSelect={setSelected} revealTo={dispFrame.freveal} view={chartView} live={page === 'today'} asOf={{ on: false, date: '' }} triggers={orderTriggers} newsMarkers={newsMarkers} onNewsClick={setNewsPanel} />
-        {newsPanel && (
-          <div style={{ position: 'absolute', top: 8, right: 8, width: 300, maxHeight: '70%', overflow: 'auto', background: 'var(--paper)', border: '1px solid var(--line)', borderRadius: 8, boxShadow: '0 6px 20px rgba(28,24,20,0.18)', padding: '8px 10px', zIndex: 5 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-              <b className="serif" style={{ fontSize: 12, color: 'var(--ink)' }}>当日快讯 · {newsPanel.count} 条</b>
-              <span onClick={() => setNewsPanel(null)} style={{ marginLeft: 'auto', cursor: 'pointer', color: 'var(--ink-3)', fontSize: 14 }}>×</span>
-            </div>
-            {(newsPanel.items || []).map((it, i) => {
-              const hit = newsKw && newsKw.split('|').map(s => s.trim()).filter(Boolean).some(k => (it.title || '').indexOf(k) >= 0);
-              return (
-                <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'baseline', padding: '5px 6px', borderRadius: 5, background: hit ? 'rgba(191,138,23,0.12)' : 'transparent' }}>
-                  <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', minWidth: 40 }}>{String(it.ts || '').slice(5, 16).replace('T', ' ')}</span>
-                  <span className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)', border: '0.5px solid var(--line)', borderRadius: 4, padding: '0 5px' }}>{it.source || it.level}</span>
-                  <span style={{ fontSize: 12, color: 'var(--ink)' }}>{it.title}</span>
+        {newsPanel && (() => {
+          const items = newsPanel.items || [];
+          const sourceCN = {
+            eastmoney_kuaixun: '东方财富 · 快讯', eastmoney: '东方财富',
+            stock: '本票消息', macro: '宏观', policy: '政策', industry: '行业',
+          };
+          return (
+            <section className="lz-news-panel" role="dialog" aria-label={'当日快讯，共 ' + (newsPanel.count || items.length) + ' 条'}>
+              <header className="lz-news-panel__head">
+                <div className="lz-news-panel__mark" aria-hidden="true">讯</div>
+                <div>
+                  <div className="lz-news-panel__eyebrow">MARKET PULSE</div>
+                  <div className="lz-news-panel__title">当日快讯 <span>{newsPanel.count || items.length} 条</span></div>
                 </div>
-              );
-            })}
-          </div>
-        )}
+                <button className="lz-news-panel__close" type="button" aria-label="关闭快讯" title="关闭" onClick={() => setNewsPanel(null)}>×</button>
+              </header>
+              <div className="lz-news-panel__list">
+                {!items.length && <div className="lz-news-panel__empty">当前时间点没有可展示的快讯</div>}
+                {items.map((it, i) => {
+                  const keywords = newsKw.split('|').map(s => s.trim()).filter(Boolean);
+                  const hit = keywords.some(k => (it.title || '').indexOf(k) >= 0);
+                  const stamp = String(it.ts || '').replace('T', ' ');
+                  const sourceRaw = String(it.source || it.level || '快讯');
+                  const source = sourceCN[sourceRaw] || sourceRaw.replace(/_/g, ' ');
+                  return (
+                    <article key={(it.ts || '') + ':' + (it.title || '') + ':' + i} className={'lz-news-item' + (hit ? ' is-hit' : '')}>
+                      <time className="lz-news-item__time" dateTime={String(it.ts || '')}>
+                        <b>{stamp.slice(11, 16) || '—'}</b>
+                        <span>{stamp.slice(5, 10) || '—'}</span>
+                      </time>
+                      <div className="lz-news-item__body">
+                        <div className="lz-news-item__meta">
+                          <span className="lz-news-item__source" title={sourceRaw}>{source}</span>
+                          {hit && <span className="lz-news-item__hit">关键词命中</span>}
+                        </div>
+                        <div className="lz-news-item__headline">{it.title || '未命名快讯'}</div>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+              <footer className="lz-news-panel__foot">按 K 线时间聚合 · 最新在前</footer>
+            </section>
+          );
+        })()}
       </div>
       <ChartNav fbars={dispFrame.fbars} win={vWin} end={vEnd} maxEnd={maxEnd} setZoom={setZoom} setPanEnd={setPanEnd} />
       {showEquity && (
@@ -711,8 +954,8 @@ function LuoziApp() {
         {window.LZ_SYMBOL_META.map(m => <option key={m.code} value={m.code}>{m.name} {m.code}</option>)}
       </select>
       <select value={curSid || ''} onChange={e => setCurStratId(e.target.value)} className="mono" style={{ fontSize: 10.5, padding: '3px 7px', border: '1px solid var(--line)', borderRadius: 6, background: 'var(--paper)', color: 'var(--ink-1)', cursor: 'pointer' }}>
-        {strategies.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-        {!strategies.length && <option value="">无策略 · 去「策略」页建</option>}
+        {availableStrategies.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+        {!availableStrategies.length && <option value="">无策略 · 去「策略」页建</option>}
       </select>
       <input type="date" value={wizStart || defStartShown} onChange={e => setWizStart(e.target.value)} className="mono" title="起始日(默认近 120 交易日)" style={{ fontSize: 10.5, padding: '2px 6px', border: '1px solid var(--line)', borderRadius: 6, background: 'var(--paper)', color: 'var(--ink-1)' }} />
       <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>→</span>
@@ -733,15 +976,17 @@ function LuoziApp() {
 
   return (
     <div className="paper-bg" style={{ width: '100%', height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden', fontFamily: 'var(--sans)', color: 'var(--ink)' }}>
-      <TopBar page={page} setPage={setPage} dark={dark} setDark={setDark} />
+      <TopBar page={page} setPage={setPage} dark={dark} setDark={setDark}
+        watch={watch} onToggleWatch={toggleWatch} assignmentMode={assignmentMode} />
       {page === 'strategy' ? (
         <Foundry />
       ) : page === 'today' ? (
         <React.Fragment>
           <MarketBar symbol={symbol} revealTo={cursor} mode="live" market={market} quote={quote} />
-          <WatchStrip watch={watch} onToggle={toggleWatch} />
           <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
-            <TicketList code={code} onSelect={setCode} poolTick={poolTickV} />
+            <TicketList code={code} onSelect={setCode} poolTick={poolTickV}
+              assignments={watchAssignments} assignmentMode={assignmentMode}
+              onConfigureWatch={setWatchEdit} />
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0 }}>
               <div style={{ display: 'flex', alignItems: 'stretch', borderBottom: '1px solid var(--line)', flexShrink: 0, overflowX: 'auto' }}>
                 <StockHero symbol={symbol} rt={cursor} mode="live" quote={quote} />
@@ -753,8 +998,9 @@ function LuoziApp() {
               {chartCenter(false)}
             </div>
             <div style={{ width: 372, flexShrink: 0, display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto', overflowX: 'hidden', background: 'var(--paper)' }}>
-              <JudgeCard code={symbol.meta.code} name={symbol.meta.name} industry={symbol.meta.industry || ''} strat={curStrat} regime={market && market.regime} />
-              <OrderWatchPanel code={symbol.meta.code} name={symbol.meta.name} mode="live" asOf={null} seatId={curSid} strategies={strategies}
+              <JudgeCard code={symbol.meta.code} name={symbol.meta.name} industry={symbol.meta.industry || ''} strat={curStrat} regime={market && market.regime}
+                assignment={currentAssignment} assignmentMode={assignmentMode} onConfigureWatch={() => setWatchEdit(symbol.meta)} />
+              <OrderWatchPanel code={symbol.meta.code} name={symbol.meta.name} mode="live" asOf={null} seatId={curSid} strategies={availableStrategies} symbol={symbol}
                 onTrigger={(t) => setOrderTriggers(ts => [...ts.filter(x => x.id !== t.id), t])} />
               <DecisionTrail code={symbol.meta.code} />
               <OrderbookTicksPanel book={book} ticks={ticks} />
@@ -783,6 +1029,13 @@ function LuoziApp() {
           </div>
         </React.Fragment>
       )}
+      {watchEdit && (
+        <WatchAssignmentDialog meta={watchEdit}
+          assignment={watchAssignments[String(watchEdit.code || '').replace(/^(SH|SZ|BJ)/i, '')] || null}
+          assignmentMode={assignmentMode} strategies={window.lzStrategyList ? window.lzStrategyList() : availableStrategies}
+          legacyEnabled={!!(window.lzPoolIsMonitored && window.lzPoolIsMonitored(watchEdit.code))}
+          onClose={() => setWatchEdit(null)} onSave={saveWatchConfig} />
+      )}
       {toast && (
         <div style={{ position: 'fixed', bottom: 70, left: '50%', transform: 'translateX(-50%)', zIndex: 60, display: 'flex', alignItems: 'center', gap: 11, background: 'var(--paper)', border: '1px solid var(--dai-soft)', borderRadius: 11, padding: '11px 16px', boxShadow: '0 6px 26px rgba(28,24,20,0.18)', animation: 'fadeIn .3s ease' }}>
           <span className="seal" style={{ width: 22, height: 22, fontSize: 12, background: 'var(--dai)' }}>瀾</span>
@@ -795,7 +1048,7 @@ function LuoziApp() {
 }
 
 // ───────── 顶栏(单轴三页)─────────
-function TopBar({ page, setPage, dark, setDark }) {
+function TopBar({ page, setPage, dark, setDark, watch, onToggleWatch, assignmentMode }) {
   const tabs = [['today', '今日'], ['replay', '复盘'], ['strategy', '策略']];
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 13, padding: '0 16px', height: 52, borderBottom: '1px solid var(--line)', background: 'rgba(241,234,217,0.6)', flexShrink: 0 }}>
@@ -815,8 +1068,10 @@ function TopBar({ page, setPage, dark, setDark }) {
       <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', whiteSpace: 'nowrap' }}>
         {page === 'today' ? '看盘 · 研判 · 条件单 · 后端盯盘' : page === 'replay' ? '选区间一键真跑 · run 化历史' : '策略装配 · 配方 · 绑票'}
       </span>
+      <span style={{ flex: 1 }} />
+      {page === 'today' && <WatchControl watch={watch} onToggle={onToggleWatch} assignmentMode={assignmentMode} />}
       <span onClick={() => setDark(d => !d)} className="mono" title="宣纸 / 月夜"
-        style={{ marginLeft: 'auto', fontSize: 11, padding: '4px 11px', border: '1px solid var(--line)', borderRadius: 7, color: 'var(--ink-2)', cursor: 'pointer', whiteSpace: 'nowrap' }}>
+        style={{ fontSize: 11, padding: '4px 11px', border: '1px solid var(--line)', borderRadius: 7, color: 'var(--ink-2)', cursor: 'pointer', whiteSpace: 'nowrap' }}>
         {dark ? '◐ 月夜' : '◑ 宣纸'}
       </span>
     </div>
@@ -827,7 +1082,8 @@ function TopBar({ page, setPage, dark, setDark }) {
 function TfPicker({ tf, setTf }) {
   const opts = [['W', '周'], ['D', '日'], ['60', '60分'], ['30', '30分'], ['15', '15分'], ['5', '5分'], ['1', '1分']];
   return (
-    <div style={{ display: 'flex', gap: 3 }}>
+    <div title="图表周期只改变K线显示，不改变 Agent 研判数据周期、自动节奏或条件单指标口径" style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
+      <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', whiteSpace: 'nowrap', marginRight: 1 }}>图表周期·仅显示</span>
       {opts.map(([k, l]) => (
         <span key={k} onClick={() => setTf(k)} className="mono" style={{ fontSize: 10, padding: '2px 7px', borderRadius: 5, cursor: 'pointer', border: '1px solid ' + (tf === k ? 'var(--ink)' : 'var(--line)'), background: tf === k ? 'var(--ink)' : 'transparent', color: tf === k ? 'var(--paper)' : 'var(--ink-3)' }}>{l}</span>
       ))}

@@ -11,7 +11,7 @@
 <style>
   html, body, #root { height: 100%; margin: 0; }
   body { font-family: var(--sans); color: var(--ink); background: var(--paper); overflow: hidden; }
-  #root { min-width: 1280px; height: 100%; }
+  #root { min-width: 0; height: 100%; }
   .num, .mono { font-variant-numeric: tabular-nums; }
   *::-webkit-scrollbar { width: 8px; height: 8px; }
   *::-webkit-scrollbar-thumb { background: rgba(28,24,20,0.16); border-radius: 4px; }
@@ -27,6 +27,12 @@
   .ww-sess-act:hover { color: var(--ink); }
   .hover-link:hover { color: var(--ink) !important; text-decoration: underline; text-underline-offset: 3px; }
   .hover-pill:hover { background: rgba(28,24,20,0.06); }
+  .ww-workspace-dock-drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; width: min(390px, 92vw);
+    box-shadow: -12px 0 32px rgba(28,24,20,.14);
+    animation: slideInRight .16s ease-out;
+  }
+  button, input, textarea, select { font: inherit; }
   select { appearance: none; -webkit-appearance: none; }
 </style>
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
@@ -35,22 +41,21 @@
 </head>
 <body>
 <div id="root"></div>
-<script src="../_shared/guanlan-bus.js?v=4"></script>
+<script src="../_shared/guanlan-bus.js?v=6"></script>
 <script src="../_shared/guanlan-nav.js?v=6"></script>
 <script>
   // 帷幄必须经 9999 同源服务(SSE/工具都在后端);file:// 直开诚实显示「需经服务打开」。
   window.GUANLAN_BACKEND =
     (location.protocol === 'http:' || location.protocol === 'https:') ? location.origin : null;
 </script>
-<script type="text/babel" data-presets="env,react" src="console-data.jsx?v=20260615c"></script>
-<script type="text/babel" data-presets="env,react" src="console-report-card.jsx?v=20260712a"></script>
-<script type="text/babel" data-presets="env,react" src="console-plan-approval-card.jsx?v=20260720a"></script>
-<script type="text/babel" data-presets="env,react" src="console-recommendation-card.jsx?v=20260728c"></script>
-<script type="text/babel" data-presets="env,react" src="console-rail.jsx?v=20260728a"></script>
-<script type="text/babel" data-presets="env,react" src="console-thread.jsx?v=20260613n"></script>
-<script type="text/babel" data-presets="env,react" src="console-bench.jsx?v=20260615c"></script>
+<script type="text/babel" data-presets="env,react" src="console-data.jsx?v=20260819a1"></script>
+<script type="text/babel" data-presets="env,react" src="console-report-card.jsx?v=20260813d"></script>
+<script type="text/babel" data-presets="env,react" src="console-rail.jsx?v=20260819a1"></script>
+<script type="text/babel" data-presets="env,react" src="console-thread.jsx?v=20260819a1"></script>
+<script type="text/babel" data-presets="env,react" src="console-bench.jsx?v=20260813w5"></script>
+<script type="text/babel" data-presets="env,react" src="console-workspace-dock.jsx?v=20260815d1"></script>
 <script type="text/babel" data-presets="env,react" src="console-drawer.jsx?v=20260613b"></script>
-<script type="text/babel" data-presets="env,react" src="console-app.jsx?v=20260615a"></script>
+<script type="text/babel" data-presets="env,react" src="console-app.jsx?v=20260819a1"></script>
 <script type="text/babel" data-presets="env,react">
   ReactDOM.createRoot(document.getElementById('root')).render(<WeiwoApp />);
 </script>

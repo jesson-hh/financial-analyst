@@ -3,10 +3,15 @@ const { useState, useRef, useCallback, useEffect } = React;
 // 帷幄融合旗:EMBED=被帷幄嵌入(隐藏页头身份区);LEGACY=找回页内 agent 窗口(默认全局隐藏,spec §3.7)
 const WW_EMBED = new URLSearchParams(location.search).get('embed') === '1';
 const WW_LEGACY = new URLSearchParams(location.search).get('legacy') === '1';
-// 帷幄会话工作台隔离:带 ws=<会话id>(嵌入或从工作台 ↗ 独立打开)→ 「上次会话画布」「报告缓存」与 handoff 信箱
-// 按帷幄会话各自存取,防 A 会话(或独立页)的残留图/结果串进 B 会话。无 ws 时 key 不变,行为如旧。
-const WW_WS = new URLSearchParams(location.search).get('ws') || '';
-const WW_NS = WW_WS ? (':' + WW_WS) : '';
+// 帷幄研究空间隔离:新壳传 ws=<workspace_id>；显式 workspace_id 也兼容。
+// 旧版 ws=<session_id> 仍用于 handoff/本地缓存隔离，但不会冒充 workspace_id 请求私有 API。
+// 无研究空间时缓存键与 API 调用均维持旧全局行为。
+const WW_QUERY = new URLSearchParams(location.search);
+const WW_WS = WW_QUERY.get('ws') || '';
+const WW_WORKSPACE_ID = WW_QUERY.get('workspace_id') || (/^rw_[0-9A-Za-z_-]+$/.test(WW_WS) ? WW_WS : '');
+const WW_READONLY = WW_QUERY.get('readonly') === '1';
+const WW_NS_ID = WW_WORKSPACE_ID || WW_WS;
+const WW_NS = WW_NS_ID ? (':' + WW_NS_ID) : '';
 
 // ───────── 布局常量 ─────────
 const HEADER = 34, PAD = 8, ROW = 26, W = 200;
@@ -125,6 +130,46 @@ function tplG(srcParams, steps) {
   return { nodes: [src, ...c.nodes], edges };
 }
 
+// 空间私有因子不是一张已保存工作流；打开时只把受作用域校验的原表达式
+// 确定性铺成可审阅图，不自动运行。单票/ETF 本体使用时序 IC，成分池/自定义池
+// 才使用截面 IC，避免把单票因子误套到 rank/分组口径。
+function workspaceFactorGraph(asset) {
+  const expr = String((asset && asset.expr) || '').trim();
+  const applicability = String((asset && asset.applicability) || 'subject');
+  const subject = (asset && asset.subject) || {};
+  const code = String(subject.code || '').trim();
+  if ((applicability === 'subject' || applicability === 'single_security') && code) {
+    const src = { id: nid(), type: 'source', x: 60, y: 230,
+      params: Object.assign({}, ...SPECS.source.params.map(p => ({ [p.id]: p.value })),
+        { scope: '个股', code, codes: code }) };
+    const c = chain([
+      { type: 'formula', params: { expr } },
+      { type: 'tsic', params: { fwd_days: 20 } },
+    ]);
+    c.nodes.forEach(n => { n.x += 282; });
+    const tsic = c.nodes.find(n => n.type === 'tsic');
+    const edges = c.edges.slice();
+    if (tsic) edges.push({ from: [src.id, 'data'], to: [tsic.id, 'src'] });
+    return { nodes: [src, ...c.nodes], edges };
+  }
+  // 资产当前只有自由文本 scope_detail，没有可执行的成分代码/自定义池 ID。
+  // 因而绝不把 ETF 列表或 csi300 冒充原池；保留「自动」让用户先选真实池。
+  return tplG({ scope: '自选', code: '', codes: '', universe: '自动', oos_frac: '0.3', _workspace_pool_unresolved: true }, [
+    { type: 'formula', params: { expr } },
+    { type: 'feature', params: { tag: 'IC' } },
+    { type: 'analysis', params: { rebal: 'month', groups: 10, dir: '0' } },
+  ]);
+}
+
+function graphNeedsPoolReview(nodes) {
+  return Array.isArray(nodes) && nodes.some(n => {
+    if (!n || n.type !== 'source') return false;
+    const p = n.params || {};
+    const unresolvedSource = p._workspace_pool_unresolved === true || p.scope === '自选';
+    return unresolvedSource && (!p.universe || p.universe === '自动') && !_parseCodes(p.codes).length;
+  });
+}
+
 // ───────── 经验卡 → 工作流模板 ─────────
 // W8a 一键策略模板:全用真 16 字段、数据源真连线、载入即可跑;并示范这轮新能力
 // (e1/e3 样本外体检、e3 全绩效回测、e7 大盘共振、e8 行业共振)。质量/成长财务因子 W1b 未接 → 不做。
@@ -164,10 +209,12 @@ function cloneGraph(nodes, edges) {
 }
 
 // ───────── 历史工作流存储 (localStorage) ─────────
-const WF_KEY = 'guanlan:wf:list:v1';
+const WF_KEY = 'guanlan:wf:list:v1' + WW_NS;
 function wfLoadList() {
   try { const r = JSON.parse(localStorage.getItem(WF_KEY)); if (Array.isArray(r)) return r; } catch (e) {}
-  // 首次: 预置两份示例
+  // 研究空间首次进入保持空历史；示例只属于无 workspace 的旧全局页面，避免把演示项伪装为空间资产。
+  if (WW_WORKSPACE_ID) return [];
+  // 旧全局首次:预置两份示例
   const seed = [
     { id: 'w_demo1', name: '示例 · 反转 + ML · 周频', ts: Date.now() - 86400000 * 2, ...generateFromText('反转因子加机器学习并回测 沪深300') },
     { id: 'w_demo2', name: '示例 · 动量 · LightGBM 日频', ts: Date.now() - 3600000 * 5, ...generateFromText('动量 LightGBM 回测 中证500') },
@@ -176,6 +223,15 @@ function wfLoadList() {
   return seed;
 }
 function wfSaveList(list) { try { localStorage.setItem(WF_KEY, JSON.stringify(list)); } catch (e) {} }
+function wfIsGlobalTemplate(w) {
+  return !!WW_WORKSPACE_ID && !!w && (w.read_only === true || w.is_template === true || w.scope === 'global');
+}
+function wfNormalizeRemote(w) {
+  if (!w || typeof w !== 'object') return w;
+  const scope = w.scope || (w.workspace_id ? 'workspace' : 'global');
+  const template = !!WW_WORKSPACE_ID && scope === 'global';
+  return { ...w, scope, read_only: w.read_only === true || template, is_template: w.is_template === true || template };
+}
 
 // 每个工作流的「最近一次运行报告」缓存(按工作流名 key)→ 切换工作流再切回来报告不丢、刷新也在。
 const WF_REP_KEY = 'guanlan:wf:reports:v1' + WW_NS;   // 帷幄嵌入按会话隔离(WW_NS),独立页全局
@@ -189,6 +245,16 @@ function wfSaveReports(map) {
       localStorage.setItem(WF_REP_KEY, JSON.stringify(keep));
     } catch (e2) {}
   }
+}
+function wfScopeOf(w) {
+  if (w && w.scope === 'global') return 'global';
+  if (w && (w.scope === 'workspace' || w.workspace_id)) return 'workspace';
+  return WW_WORKSPACE_ID ? 'workspace' : 'global';
+}
+function wfReportKey(name, scope) {
+  // 同一空间内同名保存是覆盖语义，因此 scope + name 是稳定且足够的身份。
+  // 这也让“全局只读模板”和“当前空间同名副本”的最近结果严格分开。
+  return (scope || (WW_WORKSPACE_ID ? 'workspace' : 'global')) + ':' + String(name || '');
 }
 
 // 「上次会话」=最近运行/载入过的工作流(名+图)。进页恢复它 → 刷新/关页再回来接着上次,不必重跑。
@@ -217,6 +283,17 @@ async function _post(path, payload) {
   if (!res.ok && (!b || b.error)) throw new Error((b && b.error) || ('HTTP ' + res.status));
   return b;
 }
+function _withWorkspace(payload) {
+  return WW_WORKSPACE_ID ? { ...(payload || {}), workspace_id: WW_WORKSPACE_ID } : (payload || {});
+}
+function _scopedPath(path, includeGlobal) {
+  if (!WW_WORKSPACE_ID) return path;
+  const sep = path.indexOf('?') >= 0 ? '&' : '?';
+  return path + sep + 'workspace_id=' + encodeURIComponent(WW_WORKSPACE_ID)
+    + (includeGlobal ? '&include_global=true' : '');
+}
+function _workflowPath(path) { return _scopedPath(path, true); }
+function _reportPath(path) { return _scopedPath(path, false); }
 // GET 拉因子清单: 先试 guanlan 自有 /factorlib/list, 失败回退引擎 /factor/list。两者皆形如 {registered,user}。
 async function _list() {
   const base = _API();
@@ -914,8 +991,10 @@ function WorkflowApp() {
   const [past, setPast] = useState([]);
   const [future, setFuture] = useState([]);
   const [wfName, setWfName] = useState('因子示例 · XGBoost 多因子');
+  const [wfScope, setWfScope] = useState(WW_WORKSPACE_ID ? 'workspace' : 'global');
+  const [assetNeedsPool, setAssetNeedsPool] = useState(false);
   const [saved, setSaved] = useState(wfLoadList);
-  const [resCache, setResCache] = useState(wfLoadReports);  // 每个工作流名 → 最近一次报告(切换/刷新不丢)
+  const [resCache, setResCache] = useState(wfLoadReports);  // scope + 工作流名 → 最近一次报告
   const [saveOpen, setSaveOpen] = useState(null); // {name}
   const [histOpen, setHistOpen] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
@@ -938,7 +1017,8 @@ function WorkflowApp() {
       ? { mean_pearson: sm.mean_pearson, mean_icir: sm.mean_icir, pool_sharpe: tp.pool_sharpe, mean_r2os: sm.mean_r2os }
       : { rank_ic: ic.rank_ic_mean, sharpe: pf.sharpe, ann_return: (pf.net_ann != null ? pf.net_ann : pf.ann_return), max_drawdown: pf.max_drawdown };
     // 快照产出该报告的工作流:名 + 全图 → 「重看」时铺回画布,真正回到对应工作流。
-    _post('/report/save', { name: (nm || '').trim(), universe: r._universe, label: r._label, method, workflow_name: wfName, graph: { nodes, edges }, kpi, result: r })
+    if (WW_READONLY) { flash('归档空间只读', '历史工作流不能新增报告'); return; }
+    _post('/report/save', _withWorkspace({ name: (nm || '').trim(), universe: r._universe, label: r._label, method, workflow_name: wfName, workflow_scope: wfScope, graph: { nodes, edges }, kpi, result: r }))
       .then(res => flash(res && res.ok ? '已存入报告库 · ' + (res.name || '') : '导出失败', (res && res.reason) || '顶栏「📁 报告库」点「重看」连图一起回到本工作流', 5000))
       .catch(e => flash('导出失败', String(e.message || e)));
   };
@@ -947,57 +1027,72 @@ function WorkflowApp() {
     const r = (rec && rec.result) || rec;
     const g = rec && rec.graph;
     const nm = (rec && rec.workflow_name) || wfName;
+    const scope = (rec && rec.workflow_scope) || wfScope;
     if (g && Array.isArray(g.nodes) && g.nodes.length) {
       pushHist();
       const cg = cloneGraph(g.nodes, g.edges || []);
-      setNodes(cg.nodes); setEdges(cg.edges); setSel(null);
+      setNodes(cg.nodes); setEdges(cg.edges); setAssetNeedsPool(graphNeedsPoolReview(cg.nodes)); setSel(null);
       if (rec && rec.workflow_name) setWfName(rec.workflow_name);
-      wfSaveLast({ name: nm, nodes: cg.nodes, edges: cg.edges });   // 重看即记为「上次会话」→ 刷新恢复到此
+      setWfScope(scope);
+      wfSaveLast({ name: nm, scope, nodes: cg.nodes, edges: cg.edges });   // 重看即记为「上次会话」→ 刷新恢复到此
     }
     setResult(r); setShowRes(true); setRepOpen(false);
-    setResCache(c => { const n = { ...c, [nm]: r }; wfSaveReports(n); return n; });   // 结果按名缓存 → 刷新后「↻ 重看结果」也能恢复
+    setResCache(c => { const n = { ...c, [wfReportKey(nm, scope)]: r }; wfSaveReports(n); return n; });
     flash('已打开报告', (rec && rec.name) ? (rec.name + (g && g.nodes ? ' · 已回到对应工作流' : '')) : '');
   };
-  const pushHist = () => { setPast(p => [...p.slice(-49), { nodes, edges }]); setFuture([]); };
-  const undo = () => setPast(p => { if (!p.length) return p; const prev = p[p.length - 1]; setFuture(f => [{ nodes, edges }, ...f]); setNodes(prev.nodes); setEdges(prev.edges); setSel(null); return p.slice(0, -1); });
-  const redo = () => setFuture(f => { if (!f.length) return f; const nx = f[0]; setPast(p => [...p, { nodes, edges }]); setNodes(nx.nodes); setEdges(nx.edges); setSel(null); return f.slice(1); });
+  const pushHist = () => { setPast(p => [...p.slice(-49), { nodes, edges, assetNeedsPool }]); setFuture([]); };
+  const undo = () => setPast(p => { if (!p.length) return p; const prev = p[p.length - 1]; setFuture(f => [{ nodes, edges, assetNeedsPool }, ...f]); setNodes(prev.nodes); setEdges(prev.edges); setAssetNeedsPool(!!prev.assetNeedsPool); setSel(null); return p.slice(0, -1); });
+  const redo = () => setFuture(f => { if (!f.length) return f; const nx = f[0]; setPast(p => [...p, { nodes, edges, assetNeedsPool }]); setNodes(nx.nodes); setEdges(nx.edges); setAssetNeedsPool(!!nx.assetNeedsPool); setSel(null); return f.slice(1); });
   const duplicate = () => { if (!sel) return; const n = nodes.find(x => x.id === sel); if (!n) return; pushHist(); const id = nid(); setNodes(ns => [...ns, { ...n, id, x: n.x + 28, y: n.y + 28, params: { ...n.params } }]); setSel(id); flash('已复制节点', SPECS[n.type].title); };
-  const saveLocal = () => setSaveOpen({ name: wfName });
+  const saveLocal = () => WW_READONLY ? flash('归档空间只读', '历史工作流不能保存或覆盖') : setSaveOpen({ name: wfName });
   const saveNamed = (name) => {
+    if (WW_READONLY) { flash('归档空间只读', '历史工作流不能保存或覆盖'); return; }
     const nm = (name || '').trim() || ('工作流 ' + new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }));
-    const entry = { id: 'w' + Date.now(), name: nm, ts: Date.now(), nodes, edges };
-    setSaved(list => { const next = [entry, ...list.filter(x => x.name !== nm)]; wfSaveList(next); return next; }); // ① 本地先存 (降级保底)
-    setWfName(nm); setSaveOpen(null); flash('已保存到历史', nm);
-    wfSaveLast({ name: nm, nodes, edges });   // 保存即记为「上次会话」→ 刷新恢复到此
+    const entry = { id: 'w' + Date.now(), name: nm, ts: Date.now(), nodes, edges,
+      scope: WW_WORKSPACE_ID ? 'workspace' : 'global', workspace_id: WW_WORKSPACE_ID || null, read_only: false };
+    // 同名仅覆盖当前空间副本；全局只读模板继续保留并明确展示。
+    setSaved(list => { const next = [entry, ...list.filter(x => x.name !== nm || wfIsGlobalTemplate(x))]; wfSaveList(next); return next; }); // ① 本地先存 (降级保底)
+    const nextScope = WW_WORKSPACE_ID ? 'workspace' : 'global';
+    setWfName(nm); setWfScope(nextScope); setSaveOpen(null); flash('已保存到历史', nm);
+    wfSaveLast({ name: nm, scope: nextScope, nodes, edges });   // 保存即记为「上次会话」→ 刷新恢复到此
     // ② 也写服务端: 成功用后端 id/ts 回填该条 (payload 形状 = {name, graph:{nodes,edges}})。_post 会抛, 失败仅留 localStorage 静默降级。
-    _post('/workflow/save', { name: nm, graph: { nodes, edges } })
+    _post('/workflow/save', _withWorkspace({ name: nm, graph: { nodes, edges } }))
       .then(r => {
-        if (r && r.ok && r.id) setSaved(list => list.map(x => x.id === entry.id ? { ...x, id: r.id, ts: r.ts || x.ts } : x));
+        const rec = r && (r.workflow || r.item || r);
+        if (r && r.ok && rec && rec.id) setSaved(list => list.map(x => x.id === entry.id ? { ...x, ...wfNormalizeRemote(rec), id: rec.id, ts: rec.ts || x.ts, read_only: false, is_template: false } : x));
         else flash('已存本地 · 服务端保存未成', (r && r.reason) || '后端恢复后再保存一次即可同步', 5000);
       })
       .catch(() => flash('已存本地 · 服务端不可达', '后端恢复后再保存一次即可同步', 5000));
   };
   const loadEntry = async (entry) => {
-    let full = entry;
-    if (!Array.isArray(entry.nodes) || !entry.nodes.length) {          // 列表只给摘要 → 取全图
-      const r = await _get('/workflow/get/' + encodeURIComponent(entry.id));
-      if (r && r.ok && r.graph) full = { ...entry, nodes: r.graph.nodes, edges: r.graph.edges };
+    const entryGraph = entry && entry.graph;
+    let full = (entryGraph && Array.isArray(entryGraph.nodes) && entryGraph.nodes.length)
+      ? { ...entry, nodes: entryGraph.nodes, edges: entryGraph.edges || [] }
+      : entry;
+    if (!Array.isArray(full.nodes) || !full.nodes.length) {          // 旧列表摘要 → 取全图
+      const r = await _get(_workflowPath('/workflow/get/' + encodeURIComponent(entry.id)));
+      const rec = r && (r.workflow || r.item || r);
+      if (r && r.ok && rec && rec.graph) full = { ...entry, ...wfNormalizeRemote(rec), nodes: rec.graph.nodes, edges: rec.graph.edges };
     }
     if (!Array.isArray(full.nodes) || !full.nodes.length) { flash('载入失败', '该工作流无图数据'); return; }
     pushHist();
     const g = cloneGraph(full.nodes, full.edges || []);
-    setNodes(g.nodes); setEdges(g.edges); setWfName(full.name); setSel(null); setHistOpen(false);
-    wfSaveLast({ name: full.name, nodes: g.nodes, edges: g.edges });   // 载入即记为「上次会话」→ 刷新恢复到此
-    const cachedRep = resCache[full.name];                 // 恢复该工作流上次报告:有则展开抽屉,无则收起(顺带清掉上一个图的残留报告)
+    const scope = wfScopeOf(full);
+    setNodes(g.nodes); setEdges(g.edges); setWfName(full.name); setWfScope(scope); setAssetNeedsPool(graphNeedsPoolReview(g.nodes)); setSel(null); setHistOpen(false);
+    wfSaveLast({ name: full.name, scope, nodes: g.nodes, edges: g.edges });
+    const cachedRep = resCache[wfReportKey(full.name, scope)] || resCache[full.name]; // 旧 name-only cache 只作迁移回退
     setResult(cachedRep || null); setShowRes(!!cachedRep); setRunErr('');
-    flash('已载入', full.name + (cachedRep ? ' · 含上次报告' : ''));
+    flash(wfIsGlobalTemplate(full) ? '已载入全局模板 · 只读源' : '已载入', full.name + (wfIsGlobalTemplate(full) ? ' · 修改后保存将生成当前空间副本' : (cachedRep ? ' · 含上次报告' : '')));
   };
-  const deleteEntry = (id) => {
+  const deleteEntry = (entry) => {
+    if (WW_READONLY) { flash('归档空间只读', '历史工作流不能删除'); return; }
+    if (wfIsGlobalTemplate(entry)) { flash('全局模板只读', '不能从研究空间删除；可载入修改后另存为空间副本'); return; }
+    const id = typeof entry === 'string' ? entry : entry.id;
     setSaved(list => { const next = list.filter(x => x.id !== id); wfSaveList(next); return next; }); // 本地删 (降级保底)
-    _post('/workflow/delete', { id }).catch(() => flash('本地已删 · 服务端不可达', '若该条曾同步到服务端,刷新后会回来;后端恢复后再删一次', 5000)); // ok:false(如纯本地条目服务端本就没有)不提示
+    _post('/workflow/delete', _withWorkspace({ id })).catch(() => flash('本地已删 · 服务端不可达', '若该条曾同步到服务端,刷新后会回来;后端恢复后再删一次', 5000)); // ok:false(如纯本地条目服务端本就没有)不提示
   };
   const exportJSON = () => { const blob = new Blob([JSON.stringify({ nodes, edges }, null, 2)], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'guanlan-workflow.json'; a.click(); flash('已导出', 'guanlan-workflow.json'); };
-  const importJSON = (e) => { const f = e.target.files && e.target.files[0]; if (!f) return; const rd = new FileReader(); rd.onload = () => { try { const g = JSON.parse(rd.result); if (!Array.isArray(g.nodes)) throw new Error('格式不符'); pushHist(); setNodes(g.nodes); setEdges(g.edges || []); setSel(null); flash('已导入', f.name); } catch (err) { flash('导入失败', String(err.message)); } }; rd.readAsText(f); e.target.value = ''; };
+  const importJSON = (e) => { const f = e.target.files && e.target.files[0]; if (!f) return; if (WW_READONLY) { flash('归档空间只读', '历史工作流不能导入覆盖'); e.target.value = ''; return; } const rd = new FileReader(); rd.onload = () => { try { const g = JSON.parse(rd.result); if (!Array.isArray(g.nodes)) throw new Error('格式不符'); pushHist(); setNodes(g.nodes); setEdges(g.edges || []); setAssetNeedsPool(graphNeedsPoolReview(g.nodes)); setSel(null); flash('已导入', f.name); } catch (err) { flash('导入失败', String(err.message)); } }; rd.readAsText(f); e.target.value = ''; };
 
   // 屏幕 → 画布坐标
   const toCanvas = useCallback((cx, cy) => {
@@ -1067,12 +1162,13 @@ function WorkflowApp() {
     pushHist();
     const g = card.snapshot ? cloneGraph(card.snapshot.nodes, card.snapshot.edges)
       : CARD_GRAPH[card.id] ? CARD_GRAPH[card.id]() : seedGraph();
-    setNodes(g.nodes); setEdges(g.edges); setSel(null); setShowRes(false); setRunState({});
+    setNodes(g.nodes); setEdges(g.edges); setAssetNeedsPool(false); setSel(null); setShowRes(false); setRunState({});
     setToast({ title: '已据「' + card.title + '」搭建示例模板', build: '点 ▶ 运行出真结果 · ' + (card.build || g.nodes.map(n => SPECS[n.type].title).join(' → ')) });
     setTimeout(() => setToast(null), 6500);
   };
   // 把复合因子结果存入因子库: 表达式取值链 expr → fe.features 等权 → _label; 起名默认 _label; POST /factorlib/save。
   const saveFactor = () => {
+    if (WW_READONLY) { flash('归档空间只读', '历史结果不能发布到全局因子库'); return; }
     const r = result || {};
     const expr = r.expr || (r.fe && r.fe.features && r.fe.features.join(' + ')) || r._label;
     if (!expr) { setToast({ title: '存入因子库', build: '该结果无可保存的因子表达式' }); setTimeout(() => setToast(null), 6500); return; }
@@ -1088,6 +1184,7 @@ function WorkflowApp() {
   // 真指标快照进 insight(口径同 exportReport kpi);status=draft 留人审,卡片页批准后
   // 即可被对话/研报 wisdom_search 引用(P1⑩ 合流)。GL 用后端同一 id(EV-NNN)。
   const saveCard = () => {
+    if (WW_READONLY) { flash('归档空间只读', '历史结果不能沉淀新经验卡'); return; }
     const r = result || {};
     const ic = r.ic || {}, pf = r.portfolio || {}, sm = r.summary || {};
     const expr = r.expr || (r.fe && r.fe.features && r.fe.features.join(' + '))
@@ -1119,10 +1216,11 @@ function WorkflowApp() {
       .catch(e => flash('沉淀为经验卡', '失败 · ' + String(e.message || e), 6500));
   };
   const generate = (q) => {
+    if (WW_READONLY) { flash('归档空间只读', '历史工作流不能生成或改写'); return; }
     if (!q || !q.trim()) return;
     pushHist();
     const g = generateFromText(q);
-    setNodes(g.nodes); setEdges(g.edges); setSel(null); setShowRes(false); setRunState({});
+    setNodes(g.nodes); setEdges(g.edges); setAssetNeedsPool(false); setSel(null); setShowRes(false); setRunState({});
     setToast({ title: '已据「' + q.trim().slice(0, 22) + '」搭建工作流', build: g.nodes.map(n => SPECS[n.type].title).join(' → ') });
     setTimeout(() => setToast(null), 6500);
   };
@@ -1156,6 +1254,7 @@ function WorkflowApp() {
   };
   // AI 生成工作流 (真 LLM 联网): _post 后端 → 诚实失败判 resp.ok → SPECS 再校验 → 仅渲染待审阅, 绝不自动 run()。端点不可达 → 降级 generateFromText(关键词)。
   const aiGenerate = async (text) => {
+    if (WW_READONLY) { flash('归档空间只读', '历史工作流不能生成或改写'); return; }
     if (!text || !text.trim() || aiBusy) return;
     setAiBusy(true);
     try {
@@ -1167,7 +1266,7 @@ function WorkflowApp() {
       if (bad) { flash('AI 生成未通过校验', bad); return; }
       const g = cloneGraph(G.nodes, G.edges || []);          // 重发 id, 与当前画布零撞号
       pushHist();                                            // 入撤销栈, 用户可一键撤回 AI 生成
-      setNodes(g.nodes); setEdges(g.edges); setSel(null); setShowRes(false); setRunState({});  // 仅渲染, 不 run()
+      setNodes(g.nodes); setEdges(g.edges); setAssetNeedsPool(false); setSel(null); setShowRes(false); setRunState({});  // 仅渲染, 不 run()
       flash('AI 已生成 · 请审阅后点 ▶ 运行', g.nodes.map(n => SPECS[n.type].title).join(' → '), 6500);
     } catch (err) {
       // LLM 端点不可达 → 降级到本地关键词解析 (现有 generateFromText), 永不白屏
@@ -1175,7 +1274,7 @@ function WorkflowApp() {
         const g = generateFromText(text);
         if (g && Array.isArray(g.nodes) && g.nodes.length) {
           pushHist();
-          setNodes(g.nodes); setEdges(g.edges); setSel(null); setShowRes(false); setRunState({});
+          setNodes(g.nodes); setEdges(g.edges); setAssetNeedsPool(false); setSel(null); setShowRes(false); setRunState({});
           flash('AI 不可达 · 本地关键词规则生成(非 LLM · 仅供参考)', g.nodes.map(n => SPECS[n.type].title).join(' → '), 6500);
           return;
         }
@@ -1185,6 +1284,7 @@ function WorkflowApp() {
   };
   // W8b AI 闭环(rd-agent 式):propose(生成)→ run(真跑)→ 读回真指标 → critique(自评+改进图)→ 复跑。
   const aiLoop = async (text) => {
+    if (WW_READONLY) { flash('归档空间只读', '历史工作流不能执行 AI 闭环'); return; }
     const goal = (text || '').trim();
     if (!goal || aiBusy) return;
     setAiBusy(true);
@@ -1237,11 +1337,15 @@ function WorkflowApp() {
   const fit = () => setView({ x: 0, y: 0, z: 1 });
   const onWheel = (e) => { if (e.ctrlKey || e.metaKey) { e.preventDefault(); zoom(e.deltaY > 0 ? -0.1 : 0.1); } };
   const run = async () => {
+    if (WW_READONLY) { flash('归档空间只读', '可查看历史图，但不能运行或生成新结果'); return; }
+    if (graphNeedsPoolReview(nodes)) {
+      flash('请先选择真实股票池', '该因子的成分/自定义池尚未结构化，不能用默认池冒充'); return;
+    }
     setRunning(true); setShowRes(true); setRunState({}); setResult(null); setRunErr('');
     // 通用拓扑 DAG 执行器: 按 edges 拓扑序逐节点 await NODE_EXEC, 沿边喂数据, 经 hooks 写回 runState / 结果。
     await runGraph(nodes, edges, {
       onState: (id, st) => setRunState(s => ({ ...s, [id]: st })),
-      onResult: (rep) => { setResult(rep); setResCache(c => { const n = { ...c, [wfName]: rep }; wfSaveReports(n); return n; }); wfSaveLast({ name: wfName, nodes, edges }); },  // 报告随工作流名缓存(持久),切换不丢;并存「上次会话」供刷新恢复
+      onResult: (rep) => { setResult(rep); setResCache(c => { const n = { ...c, [wfReportKey(wfName, wfScope)]: rep }; wfSaveReports(n); return n; }); wfSaveLast({ name: wfName, scope: wfScope, nodes, edges }); },
       onError: (msg) => setRunErr(msg),
     });
     setRunning(false);
@@ -1252,6 +1356,7 @@ function WorkflowApp() {
   // 带入经验验证区 / 研究图谱传来的经验·因子 → 预填工作流
   const prefilledRef = useRef(false);   // 立旗:有交棒/?q 预填时,会话恢复(下方 effect)必须让位,否则预填图被上次图覆盖
   useEffect(() => {
+    if (new URLSearchParams(location.search).get('asset')) return;
     const h = window.GL && GL.take('workflow', WW_WS);   // WW_WS=按帷幄会话取信箱,防跨会话串扰
     if (h && (h.name || h.factor || h.expr)) {
       prefilledRef.current = true;
@@ -1266,6 +1371,7 @@ function WorkflowApp() {
           ])
         : generateFromText((h.name || '') + ' 回测');   // 只有名字没表达式才退回关键词建图
       setNodes(g.nodes); setEdges(g.edges); setSel(null); setShowRes(false); setRunState({});
+      setWfScope(WW_WORKSPACE_ID ? 'workspace' : 'global'); setAssetNeedsPool(false);
       if (h.name) setWfName(h.name + ' · 验证回测');
       setToast({ title: '已带入「' + (h.name || '因子') + '」',
         build: (px ? '原表达式直建因子链:' + px.slice(0, 46) + (px.length > 46 ? '…' : '') : '因子链已预填 · ' + g.nodes.map(n => SPECS[n.type].title).join(' → '))
@@ -1275,32 +1381,66 @@ function WorkflowApp() {
   }, []);
 
   useEffect(() => {
+    if (new URLSearchParams(location.search).get('asset')) return;
     const q = new URLSearchParams(location.search).get('q');
-    if (q && q.trim()) { prefilledRef.current = true; const g = generateFromText(q); setNodes(g.nodes); setEdges(g.edges); setToast({ title: '已据「' + q.trim().slice(0, 24) + '」搭建工作流', build: g.nodes.map(n => SPECS[n.type].title).join(' → ') }); setTimeout(() => setToast(null), 7000); }
+    if (q && q.trim()) { prefilledRef.current = true; const g = generateFromText(q); setNodes(g.nodes); setEdges(g.edges); setAssetNeedsPool(false); setToast({ title: '已据「' + q.trim().slice(0, 24) + '」搭建工作流', build: g.nodes.map(n => SPECS[n.type].title).join(' → ') }); setTimeout(() => setToast(null), 7000); }
+  }, []);
+
+  // ?asset=<wa_id> 是右侧资产卡与 Agent 新产物共用的持久深链。
+  // 表达式只从 scope-checked exact endpoint 获取；打开即审阅，不自动运行。
+  useEffect(() => {
+    const assetId = new URLSearchParams(location.search).get('asset');
+    if (!assetId) return;
+    prefilledRef.current = true;
+    if (!WW_WORKSPACE_ID || !/^wa_[0-9a-f]{16}$/.test(assetId)) {
+      setToast({ title: '空间因子载入失败', build: '缺少有效研究空间或因子资产编号' });
+      setTimeout(() => setToast(null), 6000); return;
+    }
+    _get('/console/workspaces/' + encodeURIComponent(WW_WORKSPACE_ID) + '/assets/' + encodeURIComponent(assetId)).then(r => {
+      const a = r && r.asset;
+      if (!r || !r.ok || !a || a.kind !== 'factor' || a.workspace_id !== WW_WORKSPACE_ID || !String(a.expr || '').trim()) {
+        setToast({ title: '空间因子载入失败', build: '资产不存在、已损坏或不属于当前研究空间' });
+        setTimeout(() => setToast(null), 6000); return;
+      }
+      const g = workspaceFactorGraph(a);
+      const nm = String(a.name || '空间因子') + ' · v' + String(a.version || 1) + ' 验证';
+      const needsPool = graphNeedsPoolReview(g.nodes);
+      setNodes(g.nodes); setEdges(g.edges); setWfName(nm); setWfScope('workspace'); setAssetNeedsPool(needsPool); setSel(null); setShowRes(false); setRunState({}); setRunErr('');
+      wfSaveLast({ name: nm, scope: 'workspace', nodes: g.nodes, edges: g.edges });
+      setToast({ title: '已载入空间因子「' + String(a.name || assetId) + '」', build: '原表达式已精确铺入画布 · ' + (needsPool ? '成分/自定义池尚未结构化，请先选择真实股票池 · ' : '请核对数据口径后手动运行 · ') + '不会自动发布或进入落子' });
+      setTimeout(() => setToast(null), 7000);
+    });
   }, []);
 
   // P3:?load=<wid> 深链 —— 落子页「研究回路」卡「上画布」跳转落点:从工作流库取全图铺画布。
   // 同步立旗 prefilledRef(否则「恢复上次会话」effect 抢画布,P0④ 坑);绝不自动运行。
   useEffect(() => {
     const wid = new URLSearchParams(location.search).get('load');
-    if (!wid) return;
+    if (!wid || new URLSearchParams(location.search).get('asset')) return;
     prefilledRef.current = true;
-    _get('/workflow/get/' + encodeURIComponent(wid)).then(r => {
-      if (!r || !r.ok || !r.graph || !Array.isArray(r.graph.nodes) || !r.graph.nodes.length) {
+    _get(_workflowPath('/workflow/get/' + encodeURIComponent(wid))).then(r => {
+      const rec = r && (r.workflow || r.item || r);
+      if (!r || !r.ok || !rec || !rec.graph || !Array.isArray(rec.graph.nodes) || !rec.graph.nodes.length) {
         setToast({ title: '深链载入失败', build: '工作流 ' + wid + ' 不存在或无图数据' }); setTimeout(() => setToast(null), 6000); return;
       }
-      const g = cloneGraph(r.graph.nodes, r.graph.edges || []);
-      setNodes(g.nodes); setEdges(g.edges); if (r.name) setWfName(r.name); setSel(null); setShowRes(false); setRunState({});
-      wfSaveLast({ name: r.name || '深链载入', nodes: g.nodes, edges: g.edges });
-      setToast({ title: '已载入「' + (r.name || wid) + '」', build: '深链载入(研究回路存图可由此上画布)· 待审阅,不自动运行' }); setTimeout(() => setToast(null), 6000);
+      const full = wfNormalizeRemote(rec);
+      const g = cloneGraph(full.graph.nodes, full.graph.edges || []);
+      const scope = wfScopeOf(full);
+      setNodes(g.nodes); setEdges(g.edges); if (full.name) setWfName(full.name); setWfScope(scope); setAssetNeedsPool(graphNeedsPoolReview(g.nodes)); setSel(null); setShowRes(false); setRunState({});
+      wfSaveLast({ name: full.name || '深链载入', scope, nodes: g.nodes, edges: g.edges });
+      setToast({ title: '已载入「' + (full.name || wid) + '」', build: wfIsGlobalTemplate(full) ? '全局只读模板 · 修改后保存将生成当前空间副本 · 不自动运行' : '研究空间工作流深链 · 待审阅,不自动运行' }); setTimeout(() => setToast(null), 6000);
     });
   }, []);
 
   // 进页 hydrate: 用服务端 /workflow/list 覆盖/并入 localStorage 列表 (服务端为准, 本地离线存的按 name 去重并到尾部); 不可达 → 保持 localStorage 初值。
   useEffect(() => {
-    _get('/workflow/list').then(r => {
+    _get(_workflowPath('/workflow/list')).then(r => {
       if (!r || !r.ok || !Array.isArray(r.items)) return;
-      setSaved(prev => [...r.items, ...prev.filter(p => !r.items.some(it => it.name === p.name))]);
+      const remote = r.items.map(wfNormalizeRemote);
+      setSaved(prev => {
+        const next = [...remote, ...prev.filter(p => !remote.some(it => it.id === p.id || (it.name === p.name && !wfIsGlobalTemplate(it))))];
+        wfSaveList(next); return next;
+      });
     });
   }, []);
 
@@ -1310,11 +1450,12 @@ function WorkflowApp() {
     if (prefilledRef.current) return;   // 交棒/?q 已预填 → 不抢画布(否则带因子来验证被上次会话图覆盖,P0④ 坑)
     const last = wfLoadLast();
     const name = (last && last.name) || wfName;
+    const scope = (last && last.scope) || (WW_WORKSPACE_ID ? 'workspace' : 'global');
     if (last && Array.isArray(last.nodes) && last.nodes.length) {
       const g = cloneGraph(last.nodes, last.edges || []);
-      setNodes(g.nodes); setEdges(g.edges); setWfName(name); setSel(null);
+      setNodes(g.nodes); setEdges(g.edges); setWfName(name); setWfScope(scope); setAssetNeedsPool(graphNeedsPoolReview(g.nodes)); setSel(null);
     }
-    const rep = resCache[name];
+    const rep = resCache[wfReportKey(name, scope)] || resCache[name];
     if (rep) setResult(rep);   // showRes 保持 false:只亮重看入口,不抢画布
   }, []);   // 仅 mount 一次
 
@@ -1337,7 +1478,7 @@ function WorkflowApp() {
       <TopBar onRun={run} running={running} onGenerate={generate} wfName={wfName} onOpenHist={() => setHistOpen(true)} onAIGenerate={aiGenerate} onAILoop={aiLoop} aiBusy={aiBusy} onOpenReports={() => setRepOpen(true)} hasResult={!!result} resOpen={showRes} onReopenRes={() => setShowRes(true)} />
       {loop && <AILoopModal loop={loop} onClose={() => setLoop(null)} onApply={g => {
         const ns = (g.nodes || []).map((n, i) => ({ ...n, x: (n.x != null ? n.x : 60 + i * 240), y: (n.y != null ? n.y : 210), params: { ...(n.params || {}) } }));
-        pushHist(); setNodes(ns); setEdges((g.edges || []).map(e => ({ ...e }))); setLoop(null); setSel(null); setShowRes(false); setRunState({});
+        pushHist(); setNodes(ns); setEdges((g.edges || []).map(e => ({ ...e }))); setAssetNeedsPool(false); setLoop(null); setSel(null); setShowRes(false); setRunState({});
         flash('已应用 AI 闭环工作流', ns.map(n => (SPECS[n.type] ? SPECS[n.type].title : n.type)).join(' → '), 6000);
       }} />}
       <div style={{ display: 'grid', gridTemplateColumns: '232px 1fr', minHeight: 0 }}>
@@ -1501,15 +1642,15 @@ function HistoryModal({ list, onLoad, onDelete, onClose }) {
         <div style={{ overflowY: 'auto', padding: '10px 14px 14px' }}>
           {list.length === 0 && <div className="mono" style={{ fontSize: 11, color: 'var(--ink-3)', textAlign: 'center', padding: '30px 0' }}>暂无保存的工作流 · 用右栏「存」保存当前画布</div>}
           {list.map(w => (
-            <div key={w.id} className="hover-row" style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 12px', borderRadius: 9, border: '1px solid var(--line-soft)', marginBottom: 7, cursor: 'pointer', background: 'rgba(255,255,255,0.5)' }}
+            <div key={(w.scope || '') + ':' + w.id} className="hover-row" style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 12px', borderRadius: 9, border: '1px solid var(--line-soft)', marginBottom: 7, cursor: 'pointer', background: wfIsGlobalTemplate(w) ? 'rgba(138,111,63,.06)' : 'rgba(255,255,255,0.5)' }}
               onClick={() => onLoad(w)}>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div className="serif" style={{ fontSize: 13.5, fontWeight: 500, color: 'var(--ink)' }}>{w.name}</div>
+                <div className="serif" style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13.5, fontWeight: 500, color: 'var(--ink)' }}><span>{w.name}</span>{wfIsGlobalTemplate(w) && <span className="mono" style={{ fontSize: 8.5, color: 'var(--jin)', border: '1px solid var(--jin)', padding: '1px 5px', borderRadius: 4 }}>全局只读模板</span>}</div>
                 <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)', marginTop: 3 }}>{wfAgo(w.ts)} · {((w.graph && w.graph.nodes) || w.nodes || []).length} 节点 · {((w.graph && w.graph.edges) || w.edges || []).length} 连线</div>
                 <div className="mono" style={{ fontSize: 9, color: 'var(--ink-3)', marginTop: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{(((w.graph && w.graph.nodes) || w.nodes || [])).slice().sort((a, b) => a.x - b.x).map(n => SPECS[n.type] ? SPECS[n.type].title : n.type).join(' → ')}</div>
               </div>
               <span onClick={() => onLoad(w)} className="serif" style={{ flexShrink: 0, fontSize: 12, color: 'var(--paper)', background: 'var(--ink)', borderRadius: 7, padding: '6px 13px', cursor: 'pointer' }}>载入</span>
-              <span onClick={(e) => { e.stopPropagation(); onDelete(w.id); }} title="删除" style={{ flexShrink: 0, fontSize: 13, color: 'var(--ink-3)', cursor: 'pointer', padding: '0 2px' }}>✕</span>
+              {!wfIsGlobalTemplate(w) && <span onClick={(e) => { e.stopPropagation(); onDelete(w); }} title="删除" style={{ flexShrink: 0, fontSize: 13, color: 'var(--ink-3)', cursor: 'pointer', padding: '0 2px' }}>✕</span>}
             </div>
           ))}
         </div>
@@ -2091,17 +2232,17 @@ function AILoopModal({ loop, onApply, onClose }) {
 function ReportLibModal({ onReopen, onClose }) {
   const [list, setList] = useState(null);
   const [busy, setBusy] = useState(false);
-  const load = () => { _get('/report/list').then(r => setList((r && r.reports) || [])).catch(() => setList([])); };
+  const load = () => { _get(_reportPath('/report/list')).then(r => setList((r && r.reports) || [])).catch(() => setList([])); };
   useEffect(() => { load(); }, []);
-  const del = (id) => { if (busy) return; setBusy(true); _post('/report/delete', { id }).then(() => { load(); setBusy(false); }).catch(() => setBusy(false)); };
-  const open = (rec) => { _get('/report/get/' + encodeURIComponent(rec.id)).then(full => { if (full && full.ok) onReopen(full); }).catch(() => {}); };
+  const del = (id) => { if (busy || WW_READONLY) return; setBusy(true); _post('/report/delete', _withWorkspace({ id })).then(() => { load(); setBusy(false); }).catch(() => setBusy(false)); };
+  const open = (rec) => { _get(_reportPath('/report/get/' + encodeURIComponent(rec.id))).then(full => { if (full && full.ok) onReopen(full); }).catch(() => {}); };
   const METH = { report2: '因子分析', backtest_vector: '向量化回测', portfolio_build: '组合构建', tsic: '个股时序IC', event: '事件研究', relstat: '关系稳定度' };
   return ReactDOM.createPortal(
     <div onPointerDown={onClose} style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(28,24,20,0.32)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       <div onPointerDown={e => e.stopPropagation()} style={{ width: 620, maxHeight: '82%', background: 'var(--paper)', border: '1px solid var(--ink)', borderRadius: 14, display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '0 12px 40px rgba(28,24,20,0.25)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '14px 18px 11px', borderBottom: '1px solid var(--line-soft)' }}>
           <span className="serif" style={{ fontSize: 16, fontWeight: 600 }}>📁 报告库</span>
-          <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>{list === null ? '加载中' : (list.length + ' 份 · 存于 guanlan_v2/reports/store')}</span>
+          <span className="mono" style={{ fontSize: 10, color: 'var(--ink-3)' }}>{list === null ? '加载中' : (list.length + ' 份 · ' + (WW_WORKSPACE_ID ? '当前研究空间' : '全局报告库'))}</span>
           <span onClick={onClose} style={{ marginLeft: 'auto', fontSize: 17, color: 'var(--ink-3)', cursor: 'pointer' }}>✕</span>
         </div>
         <div style={{ flex: 1, overflowY: 'auto', padding: '10px 14px' }}>
@@ -2119,7 +2260,7 @@ function ReportLibModal({ onReopen, onClose }) {
                     : <span>RankIC {_n2((r.kpi || {}).rank_ic, 3)} · 年化 {_pct((r.kpi || {}).ann_return, 1)}</span>}</div>
                 </div>
                 <span onClick={() => open(r)} className="serif" style={{ fontSize: 11.5, color: 'var(--yin)', border: '1px solid var(--zhu-soft)', borderRadius: 7, padding: '5px 10px', cursor: 'pointer', whiteSpace: 'nowrap' }}>重看</span>
-                <span onClick={() => del(r.id)} style={{ fontSize: 11.5, color: 'var(--ink-3)', border: '1px solid var(--line)', borderRadius: 7, padding: '5px 9px', cursor: busy ? 'default' : 'pointer', whiteSpace: 'nowrap' }}>删除</span>
+                {!WW_READONLY && <span onClick={() => del(r.id)} style={{ fontSize: 11.5, color: 'var(--ink-3)', border: '1px solid var(--line)', borderRadius: 7, padding: '5px 9px', cursor: busy ? 'default' : 'pointer', whiteSpace: 'nowrap' }}>删除</span>}
               </div>
             ))}
         </div>
@@ -2404,7 +2545,7 @@ function ResultsDrawer({ result, loading, error, onClose, onSaveFactor, onSaveCa
                           ['CER增益', r.tb_cer_gain != null ? ((r.tb_cer_gain >= 0 ? '+' : '') + (r.tb_cer_gain * 100).toFixed(1) + '%') : '—', sgn(r.tb_cer_gain)],
                         ])}
                       </div>
-                      <div style={{ fontSize: 8.5, color: 'var(--ink-3)', lineHeight: 1.5 }}>ICIR=跨窗稳定性(非窗内显著);NW-t 经 Newey-West HAC 修重叠(L=窗-1);PT 先抽稀到不重叠样本,命中&lt;50%+|z|大=逆向有效;桶/价差短历史薄,参考池均;R²ₒₛ>0=样本外胜「历史均值」基准(扩展窗·训练滞后防前视),CW=Clark-West 单侧显著;择时=因子 trailing 标准化>0 满仓否则空仓·扣5bps换手 vs 买入持有(成本公平),胜持有✓/CER增益>0 才有经济价值(逆向因子做多必负)。</div>
+                      <div style={{ fontSize: 8.5, color: 'var(--ink-3)', lineHeight: 1.5 }}>ICIR=跨窗稳定性(非窗内显著);NW-t 经 Newey-West HAC 修重叠(L=窗-1);PT 先抽稀到不重叠样本,命中&lt;50%+|z|大=逆向有效;桶/价差短历史薄,参考池均;R²ₒₛ&gt;0=样本外胜「历史均值」基准(扩展窗·训练滞后防前视),CW=Clark-West 单侧显著;择时=因子 trailing 标准化&gt;0 满仓否则空仓·扣5bps换手 vs 买入持有(成本公平),胜持有✓/CER增益&gt;0 才有经济价值(逆向因子做多必负)。</div>
                     </div>
                   )}
                 </div>

@@ -53,6 +53,40 @@ function defaultCfg() {
   };
 }
 
+// ───────── 选股配置持久化(切页/刷新不丢) ─────────
+// 症结:观澜各模块是独立 HTML 文档,顶栏切页 = 整页重载 → React 内存态全毁。选股页此前唯独零持久化
+// (落子/工作流/控制台早有 localStorage),故切走再回来:变体选择、因子、池、blend、约束、①/②页签 全回默认。
+// 方针:只持久化「输入」cfg 与页签;「输出」result 仍每次挂载向后端重算(诚实:恢复输入 · 重算输出,绝不缓存旧榜冒充新鲜)。
+// 帷幄右栏 iframe(?embed=1)不参与,免与独立页共享同键互相污染。
+const SCREEN_CFG_KEY = 'guanlan:screen:cfg:v1';
+const SCREEN_TAB_KEY = 'guanlan:screen:tab:v1';
+function _cfgMerge(base, raw) {
+  if (!raw || typeof raw !== 'object') return base;                     // 坏/空存档 → 默认
+  const out = { ...base, ...raw };                                      // 向前兼容:后续新增字段取默认
+  const fs = Array.isArray(raw.factors)
+    ? raw.factors.filter(f => f && f.id != null).map(f => ({ id: String(f.id), w: Number(f.w) || 0.8 }))
+    : [];
+  out.factors = fs.length ? fs : base.factors;                         // factors 必须非空有效,否则回落默认
+  return out;
+}
+function _cfgLoad() {
+  if (WW_EMBED) return defaultCfg();
+  try { return _cfgMerge(defaultCfg(), JSON.parse(localStorage.getItem(SCREEN_CFG_KEY))); }
+  catch (e) { return defaultCfg(); }
+}
+function _cfgSave(cfg) {
+  if (WW_EMBED) return;
+  try { localStorage.setItem(SCREEN_CFG_KEY, JSON.stringify(cfg)); } catch (e) {}
+}
+function _tabLoad() {
+  if (WW_EMBED) return 'cond';
+  try { return localStorage.getItem(SCREEN_TAB_KEY) === 'deci' ? 'deci' : 'cond'; } catch (e) { return 'cond'; }
+}
+function _tabSave(tab) {
+  if (WW_EMBED) return;
+  try { localStorage.setItem(SCREEN_TAB_KEY, tab); } catch (e) {}
+}
+
 // ───────── regime 族状态徽章(GET /screen/regime;缺产物诚实不渲染) ─────────
 function RegimeChips() {
   const [rg, setRg] = React.useState(null);
@@ -313,7 +347,7 @@ function ModelWorkshop({ API, models, reloadModels, flash, onPick, onClose }) {
 
 // ───────── 主组件 ─────────
 function XuanguApp() {
-  const [cfg, setCfg] = useState(defaultCfg);
+  const [cfg, setCfg] = useState(_cfgLoad);   // 恢复上次会话的输入(变体/因子/池/blend/约束)
   const [sort, setSort] = useState({ k: 'score', d: -1 });
   const [dark, setDark] = useState(false);
   const [toast, setToast] = useState(null);
@@ -404,6 +438,8 @@ function XuanguApp() {
   // 参数变动 → 标「待重算」(跳过首次挂载)
   const _mounted = useRef(false);
   useEffect(() => { if (_mounted.current) setDirty(true); else _mounted.current = true; }, [cfg]);
+  // 持久化输入 cfg → 切页/刷新回来自动恢复(变体·因子·池·blend·约束)
+  useEffect(() => { _cfgSave(cfg); }, [cfg]);
 
   // ── 动态因子目录(选股页2.0):启动拉 /screen/factors(56因子·11族·实测IC)→ 重渲染因子库 ──
   const [, setCatN] = useState(0);
@@ -423,6 +459,15 @@ function XuanguApp() {
         const vs = (j.variants || []).slice()
           .sort((a, b) => String(b.asof || '').localeCompare(String(a.asof || '')));
         setModels([{ id: 'prod', name: '生产 v4', oos_ic: null }].concat(vs));
+        // 持久化恢复的变体可能已被删除 → 用最新权威列表判定,回落生产,
+        // 免每次挂载都因缺模型打「⚠ 回落」徽章误导。
+        setCfg(c => {
+          if (c.model !== 'prod' && !vs.some(v => v.id === c.model)) {
+            setTimeout(() => flash('变体已不存在', '上次选中的变体已被删除 → 已回落生产 v4'), 0);
+            return { ...c, model: 'prod' };
+          }
+          return c;
+        });
       }
     }).catch(() => {});
   };
@@ -1173,7 +1218,8 @@ function FactorLibrary({ cfg, toggleFactor, setFactorW }) {
 // ───────── 左栏 · 条件|决策 双页签 ─────────
 function ConstraintRail({ cfg, setF, toggleFactor, setFactorW, onReset, pickFactors, picking, result, committed, onClearCommit }) {
   const rowLabel = { fontSize: 11.5, color: 'var(--ink-2)' };
-  const [tab, setTab] = useState('cond');
+  const [tab, setTab] = useState(_tabLoad);   // ①条件/②决策 页签也持久化(切页回来停在原页签)
+  useEffect(() => { _tabSave(tab); }, [tab]);
   const _dec = result.decision || {};
   const nDeci = ((_dec.final || _dec.holdings || [])).length;
   const tabBtn = (k, l, badge) => (

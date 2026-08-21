@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 from typing import Any, Dict, List, Optional
 
 _DECLS: List[Dict[str, Any]] | None = None
+_DEFAULT_STORE: Any = None
+_DEFAULT_STORE_LOCK = threading.Lock()
 
 
 def _decls() -> List[Dict[str, Any]]:
@@ -40,6 +43,53 @@ def _resolve_impl(d: Dict[str, Any], name: str):
         return {t.name: t for t in bt.TOOL_REGISTRY}[name].run
     import guanlan_v2.console.tools as ct
     return {t["name"]: t["impl"] for t in ct.WW_TOOL_TABLE}[name]
+
+
+def _console_store(store: Any = None):
+    """Use the production process's shared store; stdio gets one lazy singleton."""
+    if store is not None:
+        return store
+    global _DEFAULT_STORE
+    with _DEFAULT_STORE_LOCK:
+        if _DEFAULT_STORE is None:
+            from guanlan_v2.console.store import ConsoleStore
+            _DEFAULT_STORE = ConsoleStore()
+    return _DEFAULT_STORE
+
+
+def _workspace_list(store: Any, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    include_archived = bool((arguments or {}).get("include_archived", False))
+    fields = ("id", "name", "display_name", "kind", "code", "agent_mode",
+              "archived", "updated")
+    items = []
+    for raw in store.workspace_store.list(include_archived=include_archived):
+        items.append({key: raw.get(key) for key in fields})
+    return {"ok": True, "workspaces": items}
+
+
+def _run_workspace_impl(impl: Any, name: str, arguments: Dict[str, Any], store: Any) -> Any:
+    """Bind one explicit MCP workspace inside the worker thread and reset it."""
+    import guanlan_v2.console.tools as ct
+    from guanlan_v2.console import workspace_tools as wt
+
+    args = dict(arguments or {})
+    workspace_id = str(args.pop("workspace_id", "")).strip()
+    workspace = store.workspace_store.require(workspace_id, active_only=True)
+    if name not in wt.allowed_tools_for_workspace({name}, workspace):
+        raise wt.WorkspaceToolError(
+            f"研究空间 {workspace_id} 当前为 research 模式，不允许执行 {name}"
+        )
+    ctx = {"store": store, "sid": "mcp", "workspace_id": workspace_id,
+           "workspace": workspace}
+    workspace_token = wt.CTX_WORKSPACE.set(ctx)
+    store_token = ct.CTX_STORE.set(store)
+    sid_token = ct.CTX_SID.set("mcp")
+    try:
+        return impl(**args)
+    finally:
+        ct.CTX_SID.reset(sid_token)
+        ct.CTX_STORE.reset(store_token)
+        wt.CTX_WORKSPACE.reset(workspace_token)
 
 
 def _report_spawn_env() -> Dict[str, str]:
@@ -115,7 +165,7 @@ def _spawn_background_detached(bg: dict) -> str:
             f"产物落 reports store · 日志 {log})")
 
 
-async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> List[Any]:
+async def dispatch_tool(name: str, arguments: Dict[str, Any], *, console_store: Any = None) -> List[Any]:
     """派发一次 MCP 工具调用 → list[TextContent]。写门 + to_thread + 诚实失败。
     background 信封(研报类长任务)→ detached 子进程真执行 + 受理凭证(修假成功红线)。
     _spawn_background_detached 内部同步跑证据包构建(秒级网络调用)+ Popen,必须经
@@ -129,8 +179,19 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> List[Any]:
         return [TextContent(type="text",
                 text=f"写操作未启用:{name} 是写/销毁类工具,需在 9999 启动环境设 GUANLAN_MCP_WRITE=1 后重启才放行。")]
     try:
-        impl = _resolve_impl(d, name)
-        result = await asyncio.to_thread(impl, **(arguments or {}))
+        if d.get("builtin") == "workspace_list":
+            store = _console_store(console_store)
+            result = await asyncio.to_thread(_workspace_list, store, arguments or {})
+        else:
+            impl = _resolve_impl(d, name)
+            from guanlan_v2.console.workspace_tools import ALL_WORKSPACE_TOOLS
+            if name in ALL_WORKSPACE_TOOLS:
+                store = _console_store(console_store)
+                result = await asyncio.to_thread(
+                    _run_workspace_impl, impl, name, arguments or {}, store,
+                )
+            else:
+                result = await asyncio.to_thread(impl, **(arguments or {}))
     except Exception as e:  # noqa: BLE001 — 诚实失败显形
         return [TextContent(type="text", text=json.dumps({"error": f"{type(e).__name__}: {e}"}, ensure_ascii=False))]
     if isinstance(result, dict) and result.get("background"):
@@ -144,14 +205,23 @@ async def dispatch_tool(name: str, arguments: Dict[str, Any]) -> List[Any]:
     return [TextContent(type="text", text=_to_text(result))]
 
 
-def build_server():
+def build_server(console_store: Any = None):
     from mcp.server import Server
     from mcp.types import Tool, ToolAnnotations
-    # 急切预热:把 console.tools / 引擎 buddy.tools 这类重导入(litellm 等)在
-    # 进入 stdio 读循环【之前】跑完。否则首个 list_tools 在请求处理中触发冷导入,
-    # 会卡死 stdio 读循环(初始化能回、tools/list 永不返回)。镜像引擎模块级 TOOLS 的急切构建。
+    # 急切预热:把 console.tools / 引擎 buddy.tools 这类重导入在进入 stdio 读循环
+    # 【之前】跑完。否则首个 list_tools 在请求处理中触发冷导入,会卡死 stdio 读循环
+    # (初始化能回、tools/list 永不返回)。镜像引擎模块级 TOOLS 的急切构建。
+    # 注(2026-07-30):litellm 已懒化,不再被本预热拉起——首个 LLM 调用在 to_thread
+    # 工作线程付冷税,不堵 stdio 读循环;预热护的是 buddy/console 其余重导入。
     _decls()
-    server = Server("guanlan")
+    server = Server(
+        "guanlan",
+        instructions=(
+            "观澜本机研究控制面。调用 ww_workspace_* 前先用 guanlan_workspace_list "
+            "取得 workspace_id，并在每次调用中显式传入。全局行情/落子工具不需要空间。"
+            "写入和执行类工具受服务端写门及空间模式双重限制；错误必须原样报告，绝不假成功。"
+        ),
+    )
 
     @server.list_tools()
     async def list_tools() -> List[Tool]:
@@ -161,6 +231,6 @@ def build_server():
 
     @server.call_tool()
     async def call_tool(name: str, arguments: Dict[str, Any]) -> List[Any]:
-        return await dispatch_tool(name, arguments or {})
+        return await dispatch_tool(name, arguments or {}, console_store=console_store)
 
     return server

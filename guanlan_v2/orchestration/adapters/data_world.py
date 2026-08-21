@@ -462,11 +462,16 @@ class ThreadConfinedDataBackend(DataSourceCapabilityBackend):
     → ``clear`` discipline is same-thread synchronous
     (``data/runtime.py::_DataGatewayAdapter.invoke``), so a **thread-local**
     staged slot makes cross-node interleaving structurally impossible without
-    a lock.  The underlying ``live_client.probe`` is a subprocess per call —
-    thread-safe by isolation.
+    a lock.  The underlying ``live_client.probe`` transport (2026-07-30 T2):
+    a persistent worker serves ONE call at a time behind a short (2s) lock
+    budget; contenders that miss the budget fall back to the original
+    subprocess-per-call path — thread-safe by isolation, exactly the old
+    semantics.
 
     **Concurrency statement for the record (charter §2.2 item 9):** the data
-    provider does NOT serialize — N concurrent nodes may probe concurrently.
+    provider does NOT queue unboundedly — under contention N concurrent nodes
+    still probe concurrently (worker serves one, the rest run isolated
+    subprocesses; each caller's timeout bounds only its own call).
     The LLM throughput ceiling remains the ``WorkerSeatModelGateway``
     single-loop lock (``pipeline/assembly.py``) — that seam is the charter's
     user-surfaced item and is NOT changed here.

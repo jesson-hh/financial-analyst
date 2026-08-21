@@ -278,7 +278,23 @@ class ExecutionRuntime:
     factories: TrustedFactoryRegistry
     support_report: RuntimeSupportReport
     runtime_registry_digest: str
+    # Phase-8+ catalog runtime may seal guardrail.model_tier_map.  When present,
+    # every LLM artifact records that reviewed concrete model/thinking digest;
+    # bootstrap/v1 runtimes keep ``None`` and retain their historical formula.
+    model_tier_map_digest: str | None = field(init=False, default=None)
     code_version: str = CODE_VERSION
+
+    def __post_init__(self) -> None:
+        refs = tuple(
+            entry.ref.content_digest
+            for entry in self.catalog.snapshot.content_manifest
+            if entry.kind == "guardrail" and entry.ref.id == "guardrail.model_tier_map"
+        )
+        if len(refs) > 1:
+            raise ValueError("catalog contains ambiguous guardrail.model_tier_map materials")
+        if refs:
+            # CatalogRuntime.build already re-hashed and verified this exact ref.
+            object.__setattr__(self, "model_tier_map_digest", refs[0])
 
     def summaries_for(self, node_id: str) -> tuple[BridgeStaticSupportSummary, ...]:
         return tuple(
@@ -2140,7 +2156,8 @@ def execute_node(
         number_anchors=model_result.number_anchors, input_snapshot=input_snapshot,
         tool_call_records=merged.tool_call_records, data_result_refs=data_refs,
         execution_evidence_refs=direct_evidence, prompt_ref=prompt_ref, kind=kind,
-        model_result=model_result, clock=clock)
+        model_result=model_result, clock=clock,
+        model_tier_map_digest=runtime.model_tier_map_digest)
 
     node_run = _build_node_run(
         plan=plan, node=node, worker=worker, ctx=ctx, status=status,
@@ -2767,13 +2784,15 @@ def _build_node_run(
 def _build_artifact(
     *, plan, node, worker, ctx, out_binding, payload, rendered_text, number_anchors, input_snapshot,
     tool_call_records, data_result_refs, execution_evidence_refs, prompt_ref, kind, model_result, clock,
+    model_tier_map_digest=None,
 ) -> Artifact:
     prompt_material_ref = worker.system_prompt_ref if kind is ExecutionKind.LLM else None
     skill_refs = tuple(s.skill_ref for s in worker.skills) if kind is ExecutionKind.LLM else ()
     model_config_digest = None
     if kind is ExecutionKind.LLM:
-        model_config_digest = content_digest(
-            {"model_tier": worker.execution.model_tier, "thinking_budget": worker.execution.thinking_budget})
+        model_config_digest = model_tier_map_digest or content_digest(
+            {"model_tier": worker.execution.model_tier,
+             "thinking_budget": worker.execution.thinking_budget})
     input_refs = _input_artifact_refs(input_snapshot)
     created_at = clock_now(clock)
     provenance = Provenance(

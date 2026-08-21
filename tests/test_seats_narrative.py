@@ -122,10 +122,21 @@ class _FakeLLMClient:
 
 
 class _FakeLoader:
-    """日线替身:返回 None → decide 走 fac={} 空因子路径(asof=end,PIT 锚仍正确)。"""
+    """日线为空；分钟路径给出严格截至 10:30 的 PIT 证据。"""
 
     def fetch_quote(self, code, start, end, freq):
-        return None
+        if freq != "5min":
+            return None
+        import pandas as pd
+        dates = pd.date_range("2026-06-10 09:35", periods=12, freq="5min")
+        return pd.DataFrame({
+            "trade_date": dates,
+            "open": [10.0 + i * 0.01 for i in range(12)],
+            "high": [10.1 + i * 0.01 for i in range(12)],
+            "low": [9.9 + i * 0.01 for i in range(12)],
+            "close": [10.05 + i * 0.01 for i in range(12)],
+            "vol": [1000.0 + i for i in range(12)],
+        })
 
 
 # 合成叙事卡:同一票(605358),三张不同 as_of,各 kind 在窗口内;一张未来卡(2026-06-30)。

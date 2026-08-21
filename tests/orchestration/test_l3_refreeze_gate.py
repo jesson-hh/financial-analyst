@@ -156,7 +156,7 @@ _UNGRANTED_PROBE = ("pv.price_action", "verified_snapshot")
 _REFREEZE_CHAIN_PREFIXES = {
     "P2-static": "b41bf223", "P3-data": "13210944", "P3-full": "0601eef7",
     "P4": "8aea7bc0", "P5": "af064cba", "P6": "af064cba", "P7": "b78b63e4",
-    "P8": "78f79d33", "P9": "e3a29361", "P10": "f1b73052",
+    "P8": "17f0fed4", "P9": "6176e115", "P10": "2f81ec34",
 }
 
 #: the two retired provider families' names, spelled ONLY by concatenation so

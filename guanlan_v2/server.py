@@ -191,6 +191,12 @@ def create_app():
 
     app = build_app()  # all real endpoints, real data via get_data_paths
     print(f"[guanlan_v2] engine source: {resolved}", file=sys.stderr)
+    # ResearchWorkspace metadata is a cross-surface capability boundary.  Share
+    # one store so Console, workflow and report mutations all agree on whether
+    # a space is active or archived.
+    from guanlan_v2.console.store import ConsoleStore
+
+    _console_store = ConsoleStore()
 
     # guanlan 自有 cards 后端(经验卡 /cards/*)。卡是 UI 量化形状(cat/verdict/conf/
     # ic/expr),属 guanlan 应用层,与引擎 wisdom 的定性卡是不同领域,故落在 guanlan_v2/
@@ -235,7 +241,9 @@ def create_app():
     # P2-P5 自有节点端点(P3 /model/*、P5 /backtest/* 往同一 router 追加)。
     from guanlan_v2.workflow import build_workflow_router
 
-    app.include_router(build_workflow_router())
+    app.include_router(build_workflow_router(
+        workspace_store=_console_store.workspace_store,
+    ))
 
     # guanlan 自有选股(screen):POST /screen/run —— 把前端约束(因子+权重+TopN+行业中性+
     # 流动性/剔除)编译成「最新截面打分→约束→行业中性→TopN→分布统计」,返回与前端
@@ -252,7 +260,9 @@ def create_app():
     # (仓内自有报告 JSON,非 engine、不拷 stocks 数据)。
     from guanlan_v2.reports import build_reports_router
 
-    app.include_router(build_reports_router())
+    app.include_router(build_reports_router(
+        workspace_store=_console_store.workspace_store,
+    ))
 
     # ── 帷幄 console(单核心对话总控台,一期)─────────────────────
     # Phase 9 · Task 10 · carry C-C(server 侧一半):把 Phase 7 的 PlanApprovalCoordinator
@@ -310,6 +320,7 @@ def create_app():
                   f"coordinator is bound but unreachable; console plan-approval "
                   f"endpoints will keep returning 503.", file=sys.stderr)
         _console_kw = _kept
+    _console_kw["store"] = _console_store
     app.include_router(build_console_router(**_console_kw))
 
     # ── P2:自主研究回路(提案→求值→批判→改进 后台单飞;零开关零定时器,
@@ -376,7 +387,7 @@ def create_app():
     # **叠加**进现有 lifespan(wrap app.router.lifespan_context:先进原,再进 guanlan MCP)。
     import contextlib as _ctxlib
     from guanlan_v2.glmcp.http import build_mcp_http_app as _build_gl_mcp
-    _gl_mcp_app = _build_gl_mcp()
+    _gl_mcp_app = _build_gl_mcp(console_store=_console_store)
     _prev_lifespan = app.router.lifespan_context
 
     @_ctxlib.asynccontextmanager
@@ -389,28 +400,80 @@ def create_app():
                 # enabled 开关持久化在 var/seats_watch.json → 重启自恢复;tick 内 LLM/取数全走
                 # to_thread(run_loop 只 await asyncio.to_thread(tick)),绝不堵事件循环。
                 _seats_watch = None
-                if os.environ.get("GUANLAN_SEATS_WATCH") == "1":
-                    from guanlan_v2.seats import watcher as _seats_watcher
+                _late_watch = {"task": None}
+                _watch_on = os.environ.get("GUANLAN_SEATS_WATCH") == "1"
+                _deep_on = os.environ.get("GUANLAN_SEATS_DEEP") == "1"
+
+                def _build_deep_fn():
                     # Phase 10 Task 7 加法缝:GUANLAN_SEATS_DEEP=1 才尝试装配编排深
-                    # 研判包装器(lease 门控,fast 永远照跑);env 未设 ⇒ decide_fn=None
-                    # ⇒ run_loop/tick 行为逐位不变。装配失败(今日:Phase-9 catalog 无
-                    # 生产 material source,Task 11 收口)→ 响亮记日志,维持 fast-only,
-                    # 绝不伪造深研判通道。
-                    _seats_deep_fn = None
-                    if os.environ.get("GUANLAN_SEATS_DEEP") == "1":
-                        try:
-                            from guanlan_v2.orchestration.pipeline import (
-                                live_decide as _live_decide,
-                            )
-                            _seats_deep_fn = _live_decide.build_production_decide_fn()
-                            print("[guanlan_v2] GUANLAN_SEATS_DEEP=1:编排深研判 "
-                                  "decide_fn 已装配", file=sys.stderr)
-                        except Exception as _deep_exc:  # noqa: BLE001 — 诚实降级 fast-only
-                            print(f"[guanlan_v2] GUANLAN_SEATS_DEEP=1 但深研判装配失败,"
-                                  f"维持 fast-only:{type(_deep_exc).__name__}: {_deep_exc}",
-                                  file=sys.stderr)
+                    # 研判包装器(lease 门控,fast 永远照跑);装配失败 → 响亮记日志,
+                    # 维持 fast-only,绝不伪造深研判通道。
+                    try:
+                        from guanlan_v2.orchestration.pipeline import (
+                            live_decide as _live_decide,
+                        )
+                        fn = _live_decide.build_production_decide_fn()
+                        print("[guanlan_v2] GUANLAN_SEATS_DEEP=1:编排深研判 "
+                              "decide_fn 已装配", file=sys.stderr)
+                        return fn
+                    except Exception as _deep_exc:  # noqa: BLE001 — 诚实降级 fast-only
+                        print(f"[guanlan_v2] GUANLAN_SEATS_DEEP=1 但深研判装配失败,"
+                              f"维持 fast-only:{type(_deep_exc).__name__}: {_deep_exc}",
+                              file=sys.stderr)
+                        return None
+
+                # T2-c:深研判装配依赖 pipeline 已绑定——非 strict 时绑定链已延后,
+                # 深 watcher 的启动随链一起延后(见下方 _orch_chain_bg),绝不在未绑定
+                # 窗口装配而静默降级 fast-only;浅 watcher / strict 急切路径行为不变。
+                if _watch_on and not (_deep_on and _deferred_orch_bind is not None):
+                    from guanlan_v2.seats import watcher as _seats_watcher
+                    _seats_deep_fn = _build_deep_fn() if _deep_on else None
                     _seats_watch = _aio.create_task(
                         _seats_watcher.run_loop(decide_fn=_seats_deep_fn))
+
+                # T2-c:orchestration 三段绑定后台执行(仅非 strict;daemon 线程——评审
+                # 三修:①链任何逃逸都有护栏且 print 自身也护(死 stderr/GBK 前科),绝不
+                # 无声吞掉后续 watcher 装配;②daemon 线程关机绝不 join(to_thread 会让
+                # 优雅关机等满整条链);③深 watcher 经 call_soon_threadsafe 回事件循环
+                # 装配,_closing 旗防关机后排程)。窗口期 /orchestration/* 走既有
+                # not_attempted / *_unwired 503 诚实降级。
+                _closing = {"flag": False}
+                if _deferred_orch_bind is not None:
+                    _loop = _aio.get_running_loop()
+
+                    def _orch_chain_thread() -> None:
+                        try:
+                            _deferred_orch_bind()
+                        except BaseException as _ce:  # noqa: BLE001 — 链逃逸必须显形且不终止本线程
+                            try:
+                                print(f"[guanlan_v2][ORCH-DEFER-CHAIN-FAILED] "
+                                      f"{type(_ce).__name__}: {_ce}", file=sys.stderr)
+                            except Exception:  # noqa: BLE001 — stderr 已死也不许炸
+                                pass
+                        if not (_watch_on and _deep_on) or _closing["flag"]:
+                            return
+                        try:
+                            # 链失败时 _build_deep_fn 自带响亮日志并诚实降级 fast-only,
+                            # watcher(fast 路径)仍然启动——绝不因链失败静默丢掉盯盘。
+                            fn = _build_deep_fn()
+                            from guanlan_v2.seats import watcher as _seats_watcher_late
+
+                            def _start_late_watch() -> None:
+                                if not _closing["flag"]:
+                                    _late_watch["task"] = _aio.create_task(
+                                        _seats_watcher_late.run_loop(decide_fn=fn))
+
+                            _loop.call_soon_threadsafe(_start_late_watch)
+                        except Exception as _we:  # noqa: BLE001 — 装配/排程失败显形不冒泡
+                            try:
+                                print(f"[guanlan_v2] 深研判 watcher 延后装配失败:"
+                                      f"{type(_we).__name__}: {_we}", file=sys.stderr)
+                            except Exception:  # noqa: BLE001
+                                pass
+
+                    import threading as _th
+                    _th.Thread(target=_orch_chain_thread, daemon=True,
+                               name="orch-defer-bind").start()
                 # 事件库入库 tick(小 phase 乙;opt-in:GUANLAN_EVENTS_INGEST=1 才起)。
                 # maybe_ingest_tick 内三门(env 闸/30min 节奏/EOD 兜底)自吞异常;run_loop
                 # 每拍 to_thread 调它,取数/写盘全在工作线程,绝不堵事件循环。
@@ -418,9 +481,23 @@ def create_app():
                 if os.environ.get("GUANLAN_EVENTS_INGEST") == "1":
                     from guanlan_v2.events import ingest as _events_ingest_mod
                     _events_ingest = _aio.create_task(_events_ingest_mod.run_loop())
+                # 数据面启动预热(2026-07-28 提速):fire-and-forget daemon 线程,把
+                # market_tape/overseas/fundflow/newsradar 从冷拉到就位,切页秒回;
+                # start_prewarm 只起线程绝不阻塞事件循环,GUANLAN_DATAFEED_PREWARM=0 禁用。
+                try:
+                    from guanlan_v2.datafeed import prewarm as _prewarm
+                    _pw_started = _prewarm.start_prewarm()
+                    # 评审:失败路径必须可见——线程起不来/被禁用都要显形一行,不留静默盲区
+                    print(f"[guanlan_v2] datafeed prewarm {'started' if _pw_started else '未启动(禁用/已启动/线程失败)'}",
+                          file=sys.stderr)
+                except Exception as _pw_exc:  # noqa: BLE001 — 预热缺席只降体验,不拦启动
+                    print(f"[guanlan_v2] datafeed prewarm 未启动: {_pw_exc}", file=sys.stderr)
                 try:
                     yield
                 finally:
+                    _closing["flag"] = True     # 防关机后 call_soon_threadsafe 再排深 watcher
+                    if _late_watch["task"] is not None:
+                        _late_watch["task"].cancel()
                     if _seats_watch is not None:
                         _seats_watch.cancel()
                     if _events_ingest is not None:
@@ -461,38 +538,87 @@ def create_app():
     # 绝不该反而放行。_BootRefused / STRICT_ENV 都住在零依赖叶子里,正是为了让这条支路
     # ——startup 自己都导不进来的那条—— 也能拿到它们。
     _strict = os.environ.get(_orch_status.STRICT_ENV) == "1"
-    try:
-        from guanlan_v2.orchestration.startup import (
-            bind_orchestration_stores as _bind_orch_stores,
-        )
-    except Exception as _e:  # noqa: BLE001 — orchestration 包缺席/导入失败:诚实跳过,不阻断启动
-        _orch_status.record_status(dict(
-            _orch_status.blank_status(), state="unavailable", strict=_strict,
-            error_type=type(_e).__name__, error=str(_e)))
-        print(f"[guanlan_v2][ORCH-STORE-UNAVAILABLE] orchestration durable stores not "
-              f"wired — this process has NO orchestration store "
-              f"({type(_e).__name__}: {_e}). Set {_orch_status.STRICT_ENV}=1 to refuse "
-              f"the boot instead.", file=sys.stderr)
-        # strict:与 startup 内部那条支路同一个拒启动定义(叶子里的 refuse_if_strict)。
-        _orch_status.refuse_if_strict(_strict, "ORCH-STORE-UNAVAILABLE", _e)
-    else:
+
+    # ── T2-c(2026-07-30 启动提速):stores(1.7s)→launcher(0s)→pipeline-deps(2.7s)
+    # 三段绑定收进一条闭包链。strict=1 在 create_app 内同步跑(refuse 仍能拒启动,语义
+    # 逐位不变);非 strict 延后到 bind 之后的后台线程(lifespan 里 to_thread)——窗口期
+    # /orchestration/* 返回的正是系统已定义的诚实降级:store_status=not_attempted、
+    # 各端点 *_unwired 503;绑定失败同样只记录不冒泡。路由挂载保持急切(0.02s,503 语义
+    # 在窗口期由它承载)。R23/R24 首绑唯一性不变:全进程仍只有这一个调用方。
+    def _bind_orchestration_chain() -> None:
+        # once-per-app 旗(T2 评审):launcher/pipeline-deps 不是幂等绑定,lifespan 重入
+        # (TestClient 二次进入/嵌入式 ASGI 复用)重跑会换掉内存态载体;store 绑定本就
+        # 进程幂等。旧世界=once-per-create_app,此旗把延后世界钉回同一语义。
+        with _orch_chain_lock:
+            if _orch_chain_box["runs"]:
+                return
+            _orch_chain_box["runs"] += 1
         try:
-            _bind_orch_stores()
-        except _orch_status.OrchestrationStoreBootRefused:
-            raise                       # strict 模式:唯一被允许拒启动的路径
-        except Exception as _e:  # noqa: BLE001 — 防御纵深:startup 自身出 bug 也不许崩启动
-            # strict=_strict 必须如实盖章:记录里写 "strict": false 而开关其实是开的,
-            # 就是一句小谎 —— 本项目不出这种货。三条支路(startup 内 corrupt/failed/
-            # unavailable、server 的 unavailable、以及这条兜底 failed)自此**全部**
-            # 走叶子里同一个 refuse_if_strict,不存在「记同一个 state 却有相反启动行为」。
+            from guanlan_v2.orchestration.startup import (
+                bind_orchestration_stores as _bind_orch_stores,
+            )
+        except Exception as _e:  # noqa: BLE001 — orchestration 包缺席/导入失败:诚实跳过,不阻断启动
             _orch_status.record_status(dict(
-                _orch_status.blank_status(), state="failed", strict=_strict,
+                _orch_status.blank_status(), state="unavailable", strict=_strict,
                 error_type=type(_e).__name__, error=str(_e)))
-            print(f"[guanlan_v2][ORCH-STORE-FAILED] orchestration durable store bind "
-                  f"raised unexpectedly — this process has NO orchestration store "
-                  f"({type(_e).__name__}: {_e}). Set {_orch_status.STRICT_ENV}=1 to "
-                  f"refuse the boot instead.", file=sys.stderr)
-            _orch_status.refuse_if_strict(_strict, "ORCH-STORE-FAILED", _e)
+            print(f"[guanlan_v2][ORCH-STORE-UNAVAILABLE] orchestration durable stores not "
+                  f"wired — this process has NO orchestration store "
+                  f"({type(_e).__name__}: {_e}). Set {_orch_status.STRICT_ENV}=1 to refuse "
+                  f"the boot instead.", file=sys.stderr)
+            # strict:与 startup 内部那条支路同一个拒启动定义(叶子里的 refuse_if_strict)。
+            _orch_status.refuse_if_strict(_strict, "ORCH-STORE-UNAVAILABLE", _e)
+        else:
+            try:
+                _bind_orch_stores()
+            except _orch_status.OrchestrationStoreBootRefused:
+                raise                       # strict 模式:唯一被允许拒启动的路径
+            except Exception as _e:  # noqa: BLE001 — 防御纵深:startup 自身出 bug 也不许崩启动
+                # strict=_strict 必须如实盖章:记录里写 "strict": false 而开关其实是开的,
+                # 就是一句小谎 —— 本项目不出这种货。三条支路(startup 内 corrupt/failed/
+                # unavailable、server 的 unavailable、以及这条兜底 failed)自此**全部**
+                # 走叶子里同一个 refuse_if_strict,不存在「记同一个 state 却有相反启动行为」。
+                _orch_status.record_status(dict(
+                    _orch_status.blank_status(), state="failed", strict=_strict,
+                    error_type=type(_e).__name__, error=str(_e)))
+                print(f"[guanlan_v2][ORCH-STORE-FAILED] orchestration durable store bind "
+                      f"raised unexpectedly — this process has NO orchestration store "
+                      f"({type(_e).__name__}: {_e}). Set {_orch_status.STRICT_ENV}=1 to "
+                      f"refuse the boot instead.", file=sys.stderr)
+                _orch_status.refuse_if_strict(_strict, "ORCH-STORE-FAILED", _e)
+        # ── launcher 绑定(R3 opt-in;依赖 stores 已绑定,故与 stores 同链保序)────
+        try:
+            from guanlan_v2.orchestration.startup import (
+                bind_orchestration_launcher as _bind_orch_launcher,
+            )
+
+            _orch_launcher_box["status"] = _bind_orch_launcher()
+        except Exception as _e:  # noqa: BLE001 — 加法项:绑定失败绝不阻断启动
+            _orch_launcher_box["status"] = {"state": "unavailable",
+                                            "error_type": type(_e).__name__, "error": str(_e)}
+            print(f"[guanlan_v2][ORCH-LAUNCHER-UNAVAILABLE] adapters-router binding "
+                  f"skipped ({type(_e).__name__}: {_e}); /orchestration/* keeps its "
+                  f"honest *_unwired 503s", file=sys.stderr)
+        # ── pipeline 生产依赖绑定(guarded inside — never raises;路由已急切挂载)────
+        try:
+            from guanlan_v2.orchestration.pipeline.api import bind_production_pipeline_deps
+
+            bind_production_pipeline_deps()
+        except Exception as _e:  # noqa: BLE001 — 加法项:失败不阻断启动
+            print(f"[guanlan_v2] orchestration pipeline deps bind skipped "
+                  f"({type(_e).__name__}: {_e})", file=sys.stderr)
+
+    import threading as _threading
+    _orch_chain_lock = _threading.Lock()
+    _orch_chain_box = {"runs": 0}
+    _orch_launcher_box = {"status": {"state": "not_attempted"}}
+    _deferred_orch_bind = None
+    if _strict:
+        _bind_orchestration_chain()     # strict:同步绑定,refuse 保有拒启动权
+    else:
+        _deferred_orch_bind = _bind_orchestration_chain
+    # 测试缝(T2 评审:延后路径须有自动化覆盖):链与 once 旗经 app.state 可达。
+    app.state.orch_bind = {"chain": _bind_orchestration_chain, "box": _orch_chain_box,
+                           "deferred": _deferred_orch_bind is not None}
 
     @app.get("/orchestration/store_status")
     def _orchestration_store_status():  # noqa: ANN202 — 只读运维探针
@@ -505,20 +631,8 @@ def create_app():
     # 打开等于让一个原本一直在拒绝的面在同时服务 选股/落子/帷幄 的进程里真的活起来,而 launcher
     # 的 admission 半边尚未完工(见 R3 报告),半个子系统上线必须是一次决定,不能是重启的副作用。
     # 绑定内部全程 guard 且**从不抛**——出 bug 只记 failed、路由继续 503,启动照常。
-    _orch_launcher_status = {"state": "not_attempted"}
-    try:
-        from guanlan_v2.orchestration.startup import (
-            bind_orchestration_launcher as _bind_orch_launcher,
-        )
-
-        _orch_launcher_status = _bind_orch_launcher()
-    except Exception as _e:  # noqa: BLE001 — 加法项:绑定失败绝不阻断启动
-        _orch_launcher_status = {"state": "unavailable", "error_type": type(_e).__name__,
-                                 "error": str(_e)}
-        print(f"[guanlan_v2][ORCH-LAUNCHER-UNAVAILABLE] adapters-router binding "
-              f"skipped ({type(_e).__name__}: {_e}); /orchestration/* keeps its "
-              f"honest *_unwired 503s", file=sys.stderr)
-
+    # launcher 的实际绑定已并入 _bind_orchestration_chain(须在 stores 之后,保序同链;
+    # 非 strict 延后窗口期 box 保持 not_attempted 诚实显形)。
     @app.get("/orchestration/launcher_status")
     def _orchestration_launcher_status():  # noqa: ANN202 — 只读运维探针
         """本进程适配层路由的接线实况(state=="bound" 才是真接上)。"""
@@ -526,8 +640,8 @@ def create_app():
             from guanlan_v2.orchestration.startup import orchestration_launcher_status
 
             return orchestration_launcher_status()
-        except Exception:  # noqa: BLE001 — 包缺席时回落到启动期记下的那份
-            return dict(_orch_launcher_status)
+        except Exception:  # noqa: BLE001 — 包缺席时回落到链里记下的那份
+            return dict(_orch_launcher_box["status"])
 
     # ── orchestration 适配层薄路由(Phase 9 · Task 10)/orchestration/* 六端点 ────────
     # 影子/草稿专用:replay start/state/curves/wakeup + weiwo start/state。start 只开
@@ -548,13 +662,11 @@ def create_app():
     # 依赖未绑定 → 各端点诚实 *_unwired 503;生产绑定 GUARDED(store 未 bound / 链装配
     # 失败只 stderr 记录,路由照常挂)。加法挂载(与上面 build_*_router 同形)。
     try:
-        from guanlan_v2.orchestration.pipeline.api import (
-            bind_production_pipeline_deps,
-            build_pipeline_router,
-        )
+        from guanlan_v2.orchestration.pipeline.api import build_pipeline_router
 
         app.include_router(build_pipeline_router())
-        bind_production_pipeline_deps()   # guarded inside — never raises
+        # bind_production_pipeline_deps 已并入 _bind_orchestration_chain(2.7s 重头,
+        # 非 strict 延后;窗口期各端点走自己的 *_unwired 503 诚实降级)。
     except Exception as _e:  # noqa: BLE001 — 加法项:失败不阻断启动
         print(f"[guanlan_v2] orchestration pipeline router skipped "
               f"({type(_e).__name__}: {_e})", file=sys.stderr)

@@ -603,8 +603,8 @@ def test_an_unconfigured_tier_raises_a_typed_error_naming_the_seat(tmp_path):
         "providers:\n"
         "  deepseek: {api_key_env: DEEPSEEK_API_KEY}\n"
         "agent_overrides:\n"
-        "  orchestration-fast: {provider: deepseek, model: deepseek-chat}\n"
-        "  orchestration-reasoner-deep: {provider: deepseek, model: deepseek-reasoner}\n",
+        "  orchestration-fast: {provider: deepseek, model: deepseek-v4-flash, thinking: false}\n"
+        "  orchestration-reasoner-deep: {provider: deepseek, model: deepseek-v4-pro, thinking: true, reasoning_effort: max}\n",
         encoding="utf-8")
     with pytest.raises(ModelTierUnconfigured) as excinfo:
         WorkerSeatModelGateway(
@@ -661,18 +661,30 @@ _SEAT_YAML = (
     "providers:\n"
     "  prov-x: {api_key_env: PX_API_KEY}\n"
     "agent_overrides:\n"
-    "  orchestration-fast: {provider: prov-x, model: model-fast, timeout: 77}\n"
-    "  orchestration-reasoner: {provider: prov-x, model: model-reasoner, timeout: 77}\n"
-    "  orchestration-reasoner-deep: {provider: prov-x, model: model-deep, timeout: 77}\n"
+    "  orchestration-fast: {provider: prov-x, model: model-fast, thinking: false, timeout: 77}\n"
+    "  orchestration-reasoner: {provider: prov-x, model: model-reasoner, thinking: true, reasoning_effort: high, timeout: 77}\n"
+    "  orchestration-reasoner-deep: {provider: prov-x, model: model-deep, thinking: true, reasoning_effort: max, timeout: 77}\n"
 )
 
 
 class _FakeEngineClient:
     """An engine-client double: OpenAI-shaped response, planner-idiom attributes."""
 
-    def __init__(self, provider: str, model: str, content: str):
+    def __init__(
+        self,
+        provider: str,
+        model: str,
+        content: str,
+        *,
+        thinking: bool,
+        reasoning_effort: str | None,
+    ):
         self.provider = provider
         self.model = model
+        self.default_thinking = thinking
+        self.default_reasoning_effort = reasoning_effort
+        self.default_max_tokens = None
+        self.default_timeout = 77.0
         self.total_prompt_tokens = 42
         self.total_completion_tokens = 17
         self._content = content
@@ -696,7 +708,20 @@ def _install_fake_engine(monkeypatch, client, captured: list):
     monkeypatch.setitem(sys.modules, "financial_analyst.llm.client", module)
 
 
-def _provider_path_fixture(tmp_path, content: str, *, provider=None, model=None):
+_UNSET = object()
+
+
+def _provider_path_fixture(
+    tmp_path,
+    content: str,
+    *,
+    provider=None,
+    model=None,
+    thinking=_UNSET,
+    reasoning_effort=_UNSET,
+    max_tokens=_UNSET,
+    timeout=_UNSET,
+):
     """A gateway on a synthetic seat yaml + a valid bound request + fake client."""
     runtime = _pilot_runtime()
     resolved = runtime.resolve_worker("text.sentiment")
@@ -723,7 +748,18 @@ def _provider_path_fixture(tmp_path, content: str, *, provider=None, model=None)
     client = _FakeEngineClient(
         provider if provider is not None else binding.provider,
         model if model is not None else binding.model,
-        content)
+        content,
+        thinking=binding.thinking if thinking is _UNSET else thinking,
+        reasoning_effort=(
+            binding.reasoning_effort
+            if reasoning_effort is _UNSET
+            else reasoning_effort
+        ),
+    )
+    client.default_max_tokens = (
+        binding.max_tokens if max_tokens is _UNSET else max_tokens
+    )
+    client.default_timeout = binding.timeout_sec if timeout is _UNSET else timeout
     return SimpleNamespace(
         gateway=gateway, request=request, ref=ref, tier=tier,
         binding=binding, client=client)
@@ -763,6 +799,10 @@ def test_invoke_drives_one_single_shot_completion_on_the_resolved_seat(
     assert result.rendered_text == '{"overall_band": "neutral"}'
     assert result.provider == fx.binding.provider
     assert result.model == fx.binding.model
+    assert fx.client.default_thinking == fx.binding.thinking
+    assert fx.client.default_reasoning_effort == fx.binding.reasoning_effort
+    assert fx.client.default_max_tokens == fx.binding.max_tokens
+    assert fx.client.default_timeout == fx.binding.timeout_sec
     assert result.input_tokens == 42 and result.output_tokens == 17
 
 
@@ -792,6 +832,29 @@ def test_an_engine_client_off_the_reviewed_binding_is_refused_by_seat(
     fx.gateway.close()
     assert ORCHESTRATION_TIER_ALIASES[fx.tier] in str(excinfo.value)
     assert fx.client.chat_kwargs is None  # the completion was never attempted
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"thinking": False},
+        {"reasoning_effort": "max"},
+        {"max_tokens": 2048},
+        {"timeout": 12},
+    ],
+)
+def test_engine_client_thinking_drift_is_refused_before_provider_work(
+        tmp_path, monkeypatch, override):
+    """The sealed seat includes thinking mode and effort, not only model identity."""
+    fx = _provider_path_fixture(tmp_path, "{}", **override)
+    _install_fake_engine(monkeypatch, fx.client, [])
+    with pytest.raises(ModelTierUnconfigured) as excinfo:
+        fx.gateway.invoke(fx.request, prompt_assembly_ref=fx.ref)
+    fx.gateway.close()
+    message = str(excinfo.value)
+    assert ORCHESTRATION_TIER_ALIASES[fx.tier] in message
+    assert "thinking" in message and "reasoning_effort" in message
+    assert fx.client.chat_kwargs is None
 
 
 # =========================================================================== #

@@ -1,4 +1,4 @@
-"""Task 6:bear 反驳波(deps 加 bull-advocate)+ 辩护人/风控/写手升 reasoner deep 档。
+"""Task 6:bear 反驳波(deps 加 bull-advocate)+ 辩护人/风控/写手使用 V4 思考档。
 
 零网络零真 LLM:LLMClient.for_agent 全桩(照 tests/test_report_prompt_evidence.py 的
 _CapLLM 同款)。覆盖:
@@ -232,6 +232,14 @@ def test_llm_yaml_four_debate_seats_deep_tier():
         entry = ov.get(seat)
         assert entry is not None, f"llm.yaml 缺 {seat} 的 agent_overrides"
         assert entry.get("provider") == "deepseek"
-        assert entry.get("model") == "deepseek-reasoner", f"{seat} 应为 deep 档"
+        assert entry.get("model") == "deepseek-v4-flash", f"{seat} 应为 V4 思考档"
+        if seat in ("bull-advocate", "bear-advocate"):
+            assert entry.get("thinking") is True
+            assert entry.get("reasoning_effort") == "high"
+        else:
+            # risk/report are terminal structured-output nodes: upstream seats
+            # perform the reasoning and these two preserve the JSON budget.
+            assert entry.get("thinking") is False
+            assert "reasoning_effort" not in entry
         assert entry.get("max_tokens") == 8192
         assert entry.get("timeout") == 300

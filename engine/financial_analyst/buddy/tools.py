@@ -2901,17 +2901,25 @@ FACTOR_TOOL_NAMES = frozenset({
 def profile_tool_names(profile: Optional[str], explicit=None) -> Optional[set]:
     """把模块 profile 名解析成「可调用工具名集合」(None = 不限制)。
 
-    - ``explicit`` (显式白名单 list/set) 优先: 直接用它 ∩ TOOL_REGISTRY 真实名。
+    - ``explicit`` (显式白名单 list/set) 优先: 用它 ∩ TOOL_REGISTRY 真实名，
+      但永远剔除仅供帷幄内部绑定的 ``ww_*`` / ``ws_*`` 私有能力。
     - ``'research'`` (对话/研报域): 全部工具 − 因子类。
     - ``'factor'`` (量化域): 因子类 + 通用行情/查询 (量化也要看行情/产业链)。
     - ``'all'`` / None / 未知: 全部工具 − ww_*(旧契约返回 None=完全不限制,
       会把帷幄工具一并外露;改返具体集合,对 /run、/tools 的过滤口径等价)。
     """
     allnames = {t.name for t in TOOL_REGISTRY}
-    if explicit:
-        return {n for n in explicit if n in allnames}
+    # /run 是旧的通用本机 HTTP 面，允许请求体传 explicit tools。帷幄工具依赖
+    # console 的会话、确认和研究空间上下文，只能由 /console 路由把显式白名单
+    # 直接交给 BuddyAgent；绝不能经这里被浏览器/旧客户端点名解锁。ws_* 预留给
+    # 未来 coding tools，避免新增名字时又重开同一能力泄漏。
+    def externally_visible(name: str) -> bool:
+        return not name.startswith(("ww_", "ws_"))
+
+    if explicit is not None:
+        return {n for n in explicit if n in allnames and externally_visible(n)}
     # ww_* 是帷幄 console 专属(经 CONSOLE_ALLOWED 显式白名单走),profile 路径一律不外露——堵已退役 chat 页 /run 直链的越权面
-    allnames = {n for n in allnames if not n.startswith("ww_")}
+    allnames = {n for n in allnames if externally_visible(n)}
     if profile == "research":
         return allnames - set(FACTOR_TOOL_NAMES)
     if profile == "factor":

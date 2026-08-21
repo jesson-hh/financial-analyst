@@ -71,7 +71,7 @@ MODEL_TIERS_SRC = REPO_ROOT / "guanlan_v2" / "orchestration" / "model_tiers.py"
 
 #: pinned reviewed material digest (drift guard); sealed from the physical bytes.
 EXPECTED_MATERIAL_DIGEST = (
-    "bcbc4aeb8e63698a32571c7a110c81a82d49bd42eca32997ffa521f2ca4b4994"
+    "e4f9f926f55f58ccfcd6cbffb866dd5fa88d94e4e898771871ab9483914d4a96"
 )
 
 TIER_ORDER = ("fast", "reasoner", "reasoner_deep")
@@ -84,7 +84,7 @@ def _llm_yaml_text() -> str:
 
 def _yaml_with_overrides(overrides: dict) -> str:
     """Emit a minimal llm.yaml doc with the given agent_overrides flow mappings."""
-    lines = ["default_provider: deepseek", "default_model: deepseek-chat", "agent_overrides:"]
+    lines = ["default_provider: deepseek", "default_model: deepseek-v4-flash", "agent_overrides:"]
     for key, entry in overrides.items():
         if entry is None:
             continue
@@ -100,7 +100,7 @@ def _yaml_with_providers(provider_names: list, overrides: dict) -> str:
     so the provider cross-check surface can be exercised: an alias may name a provider
     that is present in — or absent from — ``providers``.
     """
-    lines = ["default_provider: deepseek", "default_model: deepseek-chat", "providers:"]
+    lines = ["default_provider: deepseek", "default_model: deepseek-v4-flash", "providers:"]
     for name in provider_names:
         lines.append(f"  {name}: {{api_key_env: {name.upper()}_API_KEY}}")
     lines.append("agent_overrides:")
@@ -113,10 +113,16 @@ def _yaml_with_providers(provider_names: list, overrides: dict) -> str:
 
 
 FULL_ALIASES: dict = {
-    "orchestration-fast": {"provider": "deepseek", "model": "deepseek-chat"},
-    "orchestration-reasoner": {"provider": "deepseek", "model": "deepseek-reasoner"},
+    "orchestration-fast": {
+        "provider": "deepseek", "model": "deepseek-v4-flash", "thinking": False,
+    },
+    "orchestration-reasoner": {
+        "provider": "deepseek", "model": "deepseek-v4-flash",
+        "thinking": True, "reasoning_effort": "high",
+    },
     "orchestration-reasoner-deep": {
-        "provider": "deepseek", "model": "deepseek-reasoner",
+        "provider": "deepseek", "model": "deepseek-v4-pro",
+        "thinking": True, "reasoning_effort": "max",
         "max_tokens": 8192, "timeout": 300,
     },
 }
@@ -135,15 +141,18 @@ def test_repo_llm_yaml_binds_every_tier_to_deepseek():
     assert set(by_tier) == set(TIER_ORDER)
 
     fast = by_tier["fast"]
-    assert (fast.provider, fast.model) == ("deepseek", "deepseek-chat")
+    assert (fast.provider, fast.model) == ("deepseek", "deepseek-v4-flash")
+    assert fast.thinking is False and fast.reasoning_effort is None
     assert fast.max_tokens is None and fast.timeout_sec is None
 
     reasoner = by_tier["reasoner"]
-    assert (reasoner.provider, reasoner.model) == ("deepseek", "deepseek-reasoner")
+    assert (reasoner.provider, reasoner.model) == ("deepseek", "deepseek-v4-flash")
+    assert reasoner.thinking is True and reasoner.reasoning_effort == "high"
     assert reasoner.max_tokens is None and reasoner.timeout_sec is None
 
     deep = by_tier["reasoner_deep"]
-    assert (deep.provider, deep.model) == ("deepseek", "deepseek-reasoner")
+    assert (deep.provider, deep.model) == ("deepseek", "deepseek-v4-pro")
+    assert deep.thinking is True and deep.reasoning_effort == "max"
     assert deep.max_tokens == 8192 and deep.timeout_sec == 300
 
 
@@ -166,9 +175,14 @@ def test_map_is_total_over_the_model_tier_literal():
 
 
 def test_map_validator_rejects_missing_incomplete_or_misordered_bindings():
-    fast = ModelTierBinding(tier="fast", provider="deepseek", model="deepseek-chat")
-    reasoner = ModelTierBinding(tier="reasoner", provider="deepseek", model="deepseek-reasoner")
-    deep = ModelTierBinding(tier="reasoner_deep", provider="deepseek", model="deepseek-reasoner")
+    fast = ModelTierBinding(
+        tier="fast", provider="deepseek", model="deepseek-v4-flash", thinking=False)
+    reasoner = ModelTierBinding(
+        tier="reasoner", provider="deepseek", model="deepseek-v4-flash",
+        thinking=True, reasoning_effort="high")
+    deep = ModelTierBinding(
+        tier="reasoner_deep", provider="deepseek", model="deepseek-v4-pro",
+        thinking=True, reasoning_effort="max")
     # a good, canonically ordered triple validates.
     assert ModelTierMap(bindings=(fast, reasoner, deep))
     # fewer than three tiers -> reject.
@@ -193,23 +207,40 @@ def test_removing_any_alias_key_raises_unconfigured_naming_the_tier(tier, alias)
     assert tier in str(exc.value)
 
 
-@pytest.mark.parametrize("drop", ["provider", "model"])
-def test_missing_provider_or_model_raises_unconfigured(drop):
+@pytest.mark.parametrize("drop", ["provider", "model", "thinking"])
+def test_missing_provider_model_or_thinking_raises_unconfigured(drop):
     overrides = {k: dict(v) for k, v in FULL_ALIASES.items()}
     overrides["orchestration-reasoner"].pop(drop)
     with pytest.raises(ModelTierUnconfigured):
         tier_map_from_llm_yaml(_yaml_with_overrides(overrides))
 
 
+def test_reasoning_effort_requires_thinking_and_uses_closed_vocabulary():
+    overrides = {k: dict(v) for k, v in FULL_ALIASES.items()}
+    overrides["orchestration-fast"]["reasoning_effort"] = "high"
+    with pytest.raises(ModelTierUnconfigured):
+        tier_map_from_llm_yaml(_yaml_with_overrides(overrides))
+
+    overrides = {k: dict(v) for k, v in FULL_ALIASES.items()}
+    overrides["orchestration-reasoner"]["reasoning_effort"] = "medium"
+    with pytest.raises(ModelTierUnconfigured):
+        tier_map_from_llm_yaml(_yaml_with_overrides(overrides))
+
+    with pytest.raises(ValueError):
+        ModelTierBinding(
+            tier="fast", provider="deepseek", model="deepseek-v4-flash",
+            thinking=False, reasoning_effort="high")
+
+
 def test_never_falls_back_to_default_provider_or_model():
     # a yaml with the defaults present but NO alias keys must still raise —
     # the silent-vendor red line (绝不静默回落到未配置 vendor).
-    yaml_text = "default_provider: deepseek\ndefault_model: deepseek-chat\nagent_overrides: {}\n"
+    yaml_text = "default_provider: deepseek\ndefault_model: deepseek-v4-flash\nagent_overrides: {}\n"
     with pytest.raises(ModelTierUnconfigured):
         tier_map_from_llm_yaml(yaml_text)
     # and a yaml with no agent_overrides mapping at all.
     with pytest.raises(ModelTierUnconfigured):
-        tier_map_from_llm_yaml("default_provider: deepseek\ndefault_model: deepseek-chat\n")
+        tier_map_from_llm_yaml("default_provider: deepseek\ndefault_model: deepseek-v4-flash\n")
 
 
 # =========================================================================== #
@@ -223,7 +254,8 @@ def test_alias_naming_a_provider_absent_from_providers_raises():
     # silent build against a vendor with no provider config).
     overrides = {k: dict(v) for k, v in FULL_ALIASES.items()}
     overrides["orchestration-reasoner-deep"] = {
-        "provider": "openai", "model": "gpt-4o", "max_tokens": 8192, "timeout": 300,
+        "provider": "openai", "model": "gpt-4o", "thinking": False,
+        "max_tokens": 8192, "timeout": 300,
     }
     yaml_text = _yaml_with_providers(["deepseek"], overrides)
     with pytest.raises(ModelTierUnconfigured) as exc:
@@ -276,8 +308,8 @@ def test_strict_yaml_rejects_duplicate_alias_key():
     dup = (
         "default_provider: deepseek\n"
         "agent_overrides:\n"
-        "  orchestration-fast: {provider: deepseek, model: deepseek-chat}\n"
-        "  orchestration-fast: {provider: deepseek, model: deepseek-reasoner}\n"
+        "  orchestration-fast: {provider: deepseek, model: deepseek-v4-flash, thinking: false}\n"
+        "  orchestration-fast: {provider: deepseek, model: deepseek-v4-pro, thinking: true}\n"
     )
     with pytest.raises(ValueError):
         tier_map_from_llm_yaml(dup)
@@ -287,9 +319,9 @@ def test_strict_yaml_rejects_anchors_and_aliases():
     anchored = (
         "default_provider: deepseek\n"
         "agent_overrides:\n"
-        "  orchestration-fast: &a {provider: deepseek, model: deepseek-chat}\n"
+        "  orchestration-fast: &a {provider: deepseek, model: deepseek-v4-flash, thinking: false}\n"
         "  orchestration-reasoner: *a\n"
-        "  orchestration-reasoner-deep: {provider: deepseek, model: deepseek-reasoner}\n"
+        "  orchestration-reasoner-deep: {provider: deepseek, model: deepseek-v4-pro, thinking: true}\n"
     )
     with pytest.raises(ValueError):
         tier_map_from_llm_yaml(anchored)
@@ -391,9 +423,11 @@ def test_planner_agent_override_is_untouched_by_the_additive_edit():
     # the three new alias keys landed additively.
     for alias in ORCHESTRATION_TIER_ALIASES.values():
         assert alias in overrides, f"missing additive alias key {alias!r}"
-    # the P7 planner seat override is unchanged (deepseek reasoner).
+    # the planner seat is the reviewed V4-Pro/max deep lane.
     planner = overrides["planner"]
     assert planner["provider"] == "deepseek"
-    assert planner["model"] == "deepseek-reasoner"
+    assert planner["model"] == "deepseek-v4-pro"
+    assert planner["thinking"] is True
+    assert planner["reasoning_effort"] == "max"
     # Task-0 gate line preserved (string check).
     assert "default_provider: deepseek" in _llm_yaml_text()

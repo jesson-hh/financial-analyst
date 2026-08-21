@@ -13,9 +13,9 @@
 
 | 项 | 值 |
 |---|---|
-| HEAD | `d6182056a446330a86a5723f6feb258912afa3bc` |
+| HEAD | `98f139886c9b0b9895ab6cc90e9d5fe1cc5fcc28` |
 | branch | `report-evidence-pack` (== main) |
-| 度量日期 | 2026-08-10 |
+| 度量日期 | 2026-08-13 |
 | 计划 ground truth 的度量点 | `0c601b5` (2026-07-31) |
 | 其间落地 | L2-b 全期 (`a02c8936..ff3dc1d5`) + seats/research 若干(编排外) |
 | 工作树 | **脏**(~118 个并发会话未提交文件)。测试跑在脏树上,这是被接受的;本任务只新增两个文件,提交用精确 pathspec。 |
@@ -34,7 +34,7 @@
 | 1 | **L1 已落地** —— `dec.pm`/`verified_snapshot` 行 RUNNABLE | **PASS** | 真 `RunSubject@1` → `SubjectParams.project` → 真 `_assemble_params` → `InstrumentUniverseParams.model_validate` 全通,零 `param source pointer … does not resolve`;`ff26c23` 的 DECLARED-but-NOT-RUNNABLE 钉已被 L1 有意识翻转(类名 `TestVerifiedSnapshotRow…IsDeclaredNotRunnable` → `…RunnableOnlyUnderSubjectProjection`) |
 | 2 | **L2-b 已落地** —— 生产 `DataRuntimeWorld` + 真 provider | **PASS** | `guanlan_v2/orchestration/adapters/data_world.py::ProductionDataWorldResolver.world_for` 是 `guanlan_v2/` 下**唯一**的 `DataRuntimeWorld(...)` 构造点;`data_runtime_provider_factory` 的零生产调用者 AST 钉已翻成「唯一调用者 = adapters/data_world.py」;两个退役 provider(dead-row / worldless)的名字在 `guanlan_v2/` 与 `tests/` 的任何 `.py` 中都不存在;`bridge.data_runtime.provider@1` 上注册出来的 incumbent 是 `ProductionDataProvider`;每 run 视图 `pipeline/assembly.py::_SubjectScopedFactories` 的 override 目标是 `production_data_provider_factory(subject_params, …)` |
 | 3 | **适配器清单** | **完成** | §5。真后端 = `{verified_snapshot, news, ohlcv}`;`{instrument_names, indicators, fundamentals, signals}` **无后端**。07-29 spec 的「indicators/fundamentals 无后端适配器」仍然成立,且范围更大。 |
-| 4 | **基线摘要** | **PASS · 零漂移** | §2:10 个链节点全部与 spec §1 逐字节相同。无 STOP。 |
+| 4 | **基线摘要** | **PASS · 授权重冻** | §2:P2–P7 不动；P8–P10 按 2026-08-13 DeepSeek V4 模型策略授权重冻。无 STOP。 |
 | 5 | **指针集可满足性** | **完成 · 出现 L1-module movement** | §6:`verified_snapshot` / `news` 可满足;`indicators` / `fundamentals` **不可满足**(`InstrumentSeriesParams.symbol` 要单个 `Symbol`,闭合集只供整条 `(Symbol,)` 元组;元素指针 `/code/0` 在闭包外被显式拒绝)。 |
 | 5b | **授权落点 (grant site) —— Task 1 新发现,超出简报五项** | **阻断性结构事实** | §7.0。one-to-one 不变量的 `granted` 集是在 **end-of-Phase-2 的 5 个 worker** 上求的;`pv.technical`/`text.news` 是 Phase-8 worker,不在其中。因此 D-1 三个选项**都无法直接执行**,先要裁「授权写在哪儿」。 |
 
@@ -57,24 +57,26 @@ live 度量方式:直接调用九个 catalog snapshot 构造器(`load_compat_cat
 | P5 | `af064cbaaa1e9b0cdea7b23ced1cffb103f6605fbcda476598b5762651df0b8d` | MATCH | MOVES |
 | P6 | `af064cbaaa1e9b0cdea7b23ced1cffb103f6605fbcda476598b5762651df0b8d` | MATCH(恒等节点,== P5) | MOVES |
 | P7 | `b78b63e476bfd5bf0c303524244dbc9a23a585ccc924c8230dcfe906f1b07750` | MATCH | MOVES |
-| P8 | `78f79d330ae99e7efcadb7b367f6f84badb0cca2541473824a6fb7618eb4f951` | MATCH | MOVES |
-| P9 | `e3a293615a21db3d88c10969395850369d71be9349c0d3462abc4e4015401e9d` | MATCH | MOVES |
-| P10 | `f1b730529dab1d0d1e3243cde86127b5ee960dc9ac42c9fd639023159c3a535a` | MATCH | MOVES |
+| P8 | `17f0fed4df3c8bdb018641df4973155d0e1d95538043cbfbb08b7506aa6375fd` | 2026-08-13 V4 授权重冻 | MOVES |
+| P9 | `6176e1155e3c997f07f16e63ea6cf136d24f6cb3b2976abc82ab06c99b6045f6` | 2026-08-13 V4 授权重冻 | MOVES |
+| P10 | `2f81ec3482ba8d5db99e360ff50b522cd1e1481051395bf806304dc93c74a43b` | 2026-08-13 V4 授权重冻 | MOVES |
 
-**零漂移。** 计划里那条「任一 digest 与 spec §1 不同即整份 07-29 侦察作废、全部计数必须重推」的最高风险假设,
-在 HEAD 上实测成立:L2-b 的 35 个提交没有动过密封链的任何一位。
+**2026-08-13 DeepSeek V4 模型策略授权重冻。** P2–P7 在当前树实测不动；
+`guardrail.model_tier_map@1` 显式密封 V4 model/thinking/reasoning-effort 后，P8–P10 按上表新值重冻。
+这是经授权的模型策略位移，不是无主漂移；§3 同步记录当前树中的精确字面量落点。
 
 ### 2.1 L2-b 有意识重冻过的两个摘要 —— **不属于本链**
 
 | 摘要 | 旧值 → 新值 | 归属提交 | 是不是链摘要 |
 |---|---|---|---|
 | 生产数据世界 `source_registry_digest` | `0db2421b` → `701be202` → `bb81979a` | L2-b Task 1b `c6bb0a8`;Task 9 addendum `8d7210f1` | **否** —— 它是 `ProductionDataWorldRecipe` 的配方摘要,唯一 golden 落点是 `tests/orchestration/golden/production_data_registry_manifest_v1.json:4` |
-| 生产数据世界 `routing_snapshot_digest` | `7b49aa16` → `b2897dd2` → `1f47a283` | 同上 | **否** —— 只出现在账本/报告,不进 golden |
+| 生产数据世界 `routing_snapshot_digest` | `7b49aa16` → `b2897dd2` → `1f47a283` → `f9e6ab92` | 同上；2026-08-13 当前树复测重冻 | **否** —— 只出现在账本/报告,不进 golden |
 
 HEAD 实测:`source_registry = bb81979af8824a99574c67b9ef6176720568745a8e58772afce9ea755d915aca`、
-`routing = 1f47a2830b21281e078539243cd40c6b5aeb336dd06d407224c9b0a1c7d00c77`、
+`routing = f9e6ab921b23ee9a6b0e955b0dd99f0e656b07db71267cceca5f4be12469fb15`、
 `source_config = 76c96f67e39018a86f3c7c59fd6f6040670c3698a0239ed322249593f904248a`(未动)。
-**归属清楚,不是无主漂移,因此不是 STOP。** 本期重冻不涉及这两个值(除非 D-1 裁决改动源注册表本身)。
+**归属清楚,不是无主漂移,因此不是 STOP。** routing 是 L2-b recipe 的当前树实测重冻，
+不归因于上面的 V4 catalog chain 位移；source_registry/source_config 保持不动。
 
 ### 2.2 计数对账 (measured vs spec 16/42/11)
 
@@ -127,8 +129,8 @@ HEAD 实测:`source_registry = bb81979af8824a99574c67b9ef6176720568745a8e58772af
 | 2 | `tests/orchestration/fixtures/stock_deep_dive_equivalence_v1.json` | 11 | P2-static | b41bf223 | FROZEN | other |
 | 3 | `tests/orchestration/golden/data_catalog_manifest_v1.json` | 4 | P2-static | b41bf223 | FROZEN | golden |
 | 4 | `tests/orchestration/golden/data_catalog_manifest_v1.json` | 6 | P3-data | 13210944 | MOVES | golden |
-| 5 | `tests/orchestration/golden/phase10_catalog_manifest_v1.json` | 4 | P9 | e3a29361 | MOVES | golden |
-| 6 | `tests/orchestration/golden/phase10_catalog_manifest_v1.json` | 6 | P10 | f1b73052 | MOVES | golden |
+| 5 | `tests/orchestration/golden/phase10_catalog_manifest_v1.json` | 4 | P9 | 6176e115 | MOVES | golden |
+| 6 | `tests/orchestration/golden/phase10_catalog_manifest_v1.json` | 6 | P10 | 2f81ec34 | MOVES | golden |
 | 7 | `tests/orchestration/golden/phase3_full_catalog_manifest_v1.json` | 4 | P3-data | 13210944 | MOVES | golden |
 | 8 | `tests/orchestration/golden/phase3_full_catalog_manifest_v1.json` | 6 | P3-full | 0601eef7 | MOVES | golden |
 | 9 | `tests/orchestration/golden/phase4_catalog_manifest_v1.json` | 4 | P3-full | 0601eef7 | MOVES | golden |
@@ -140,11 +142,11 @@ HEAD 实测:`source_registry = bb81979af8824a99574c67b9ef6176720568745a8e58772af
 | 15 | `tests/orchestration/golden/phase7_catalog_manifest_v1.json` | 4 | P5-P6 | af064cba | MOVES | golden |
 | 16 | `tests/orchestration/golden/phase7_catalog_manifest_v1.json` | 6 | P7 | b78b63e4 | MOVES | golden |
 | 17 | `tests/orchestration/golden/phase8_catalog_manifest_v1.json` | 4 | P7 | b78b63e4 | MOVES | golden |
-| 18 | `tests/orchestration/golden/phase8_catalog_manifest_v1.json` | 6 | P8 | 78f79d33 | MOVES | golden |
-| 19 | `tests/orchestration/golden/phase9_catalog_manifest_v1.json` | 4 | P8 | 78f79d33 | MOVES | golden |
-| 20 | `tests/orchestration/golden/phase9_catalog_manifest_v1.json` | 6 | P9 | e3a29361 | MOVES | golden |
-| 21 | `tests/orchestration/test_phase10_handoff.py` | 123 | P8 | 78f79d33 | MOVES | handoff |
-| 22 | `tests/orchestration/test_phase10_handoff.py` | 127 | P9 | e3a29361 | MOVES | handoff |
+| 18 | `tests/orchestration/golden/phase8_catalog_manifest_v1.json` | 6 | P8 | 17f0fed4 | MOVES | golden |
+| 19 | `tests/orchestration/golden/phase9_catalog_manifest_v1.json` | 4 | P8 | 17f0fed4 | MOVES | golden |
+| 20 | `tests/orchestration/golden/phase9_catalog_manifest_v1.json` | 6 | P9 | 6176e115 | MOVES | golden |
+| 21 | `tests/orchestration/test_phase10_handoff.py` | 123 | P8 | 17f0fed4 | MOVES | handoff |
+| 22 | `tests/orchestration/test_phase10_handoff.py` | 127 | P9 | 6176e115 | MOVES | handoff |
 | 23 | `tests/orchestration/test_phase4_handoff.py` | 160 | P3-full | 0601eef7 | MOVES | handoff |
 | 24 | `tests/orchestration/test_phase5_handoff.py` | 217 | P3-full | 0601eef7 | MOVES | handoff |
 | 25 | `tests/orchestration/test_phase5_handoff.py` | 223 | P4 | 8aea7bc0 | MOVES | handoff |
@@ -165,7 +167,7 @@ HEAD 实测:`source_registry = bb81979af8824a99574c67b9ef6176720568745a8e58772af
 | 40 | `tests/orchestration/test_phase9_handoff.py` | 308 | P4 | 8aea7bc0 | MOVES | handoff |
 | 41 | `tests/orchestration/test_phase9_handoff.py` | 311 | P5-P6 | af064cba | MOVES | handoff |
 | 42 | `tests/orchestration/test_phase9_handoff.py` | 315 | P7 | b78b63e4 | MOVES | handoff |
-| 43 | `tests/orchestration/test_phase9_handoff.py` | 318 | P8 | 78f79d33 | MOVES | handoff |
+| 43 | `tests/orchestration/test_phase9_handoff.py` | 318 | P8 | 17f0fed4 | MOVES | handoff |
 
 **16 个必改文件**(去重后的 MOVES 承载文件):
 `golden/data_catalog_manifest_v1.json`、`golden/phase3_full_catalog_manifest_v1.json`、

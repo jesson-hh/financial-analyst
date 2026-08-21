@@ -4,14 +4,23 @@ from __future__ import annotations
 
 import posixpath
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 from urllib.parse import unquote, urlsplit
 
+from guanlan_v2.console.store import _DEFAULT_ROOT as DEFAULT_CONSOLE_ROOT
+from guanlan_v2.console.workspaces import WorkspaceStore
 from guanlan_v2.desktop.supervisor import PORT
 
 _ALLOWED_SCHEME = "http"
 _ALLOWED_HOST = "127.0.0.1"
 _ALLOWED_PREFIX = "/ui/"
+
+def issue_research_folder_grant(
+    selected_path: str, *, console_root: Path = DEFAULT_CONSOLE_ROOT,
+) -> dict:
+    """Delegate grant creation to the canonical workspace security store."""
+    return WorkspaceStore(Path(console_root)).issue_folder_grant(selected_path)
 
 
 @dataclass(frozen=True)
@@ -94,11 +103,15 @@ class JsApi:
     def __init__(self, *, open_window_factory: Callable[[str], None],
                  status_provider: Callable[[], dict],
                  retry_handler: Callable[[], None],
-                 log_opener: Callable[[], None]) -> None:
+                 log_opener: Callable[[], None],
+                 folder_chooser: Callable[[], object] | None = None,
+                 folder_grant_factory: Callable[[str], dict] | None = None) -> None:
         self._open_window_factory = open_window_factory
         self._status_provider = status_provider
         self._retry_handler = retry_handler
         self._log_opener = log_opener
+        self._folder_chooser = folder_chooser
+        self._folder_grant_factory = folder_grant_factory
 
     def open_window(self, url: str) -> dict:
         verdict = validate_ui_url(url)
@@ -129,3 +142,63 @@ class JsApi:
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
         return {"ok": True, "detail": "log opened"}
+
+    def choose_research_folder(self) -> dict:
+        """Show the native folder dialog and mint a one-time server grant."""
+        if self._folder_chooser is None or self._folder_grant_factory is None:
+            return {
+                "ok": False,
+                "cancelled": False,
+                "reason": "folder-picker-unavailable",
+                "detail": "native folder picker is not bound",
+            }
+        try:
+            raw = self._folder_chooser()
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "cancelled": False,
+                "reason": "folder-picker-failed",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+
+        # pywebview returns a sequence for FOLDER today.  Accept a string too so
+        # older runtimes and injected test/native adapters stay compatible.
+        if isinstance(raw, str):
+            selected = raw.strip()
+        elif isinstance(raw, (list, tuple)):
+            selected = str(raw[0]).strip() if raw else ""
+        else:
+            selected = ""
+        if not selected:
+            return {
+                "ok": False,
+                "cancelled": True,
+                "reason": "cancelled",
+                "detail": "folder selection cancelled",
+            }
+
+        try:
+            issued = dict(self._folder_grant_factory(selected))
+            grant = str(issued.get("grant") or issued["id"])
+            display_path = str(issued.get("display_path") or issued["path"])
+            if not grant or not display_path:
+                raise ValueError("grant factory returned an empty value")
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "cancelled": False,
+                "reason": "folder-grant-failed",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+        return {
+            "ok": True,
+            "cancelled": False,
+            "reason": "",
+            "detail": "folder selected",
+            "grant": grant,
+            "display_path": display_path,
+            # Compatibility alias for the first UI integration.  Authority is
+            # still only the opaque grant; this display value is never trusted.
+            "path": display_path,
+        }

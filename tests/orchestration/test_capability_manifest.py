@@ -11,8 +11,8 @@ any hand edit or upstream tool-table change fails HONESTLY with a "re-run
 generator" message, never silently.
 
 FROZEN TABLE STATE: the committed material freezes against the WORKTREE
-``WW_TOOL_TABLE`` (64 rows; ``ww_newsradar`` / ``ww_overseas`` live in production
-but are uncommitted on this branch, so the committed table carries 62). The
+``WW_TOOL_TABLE`` (76 rows after the workspace/media/realtime control surfaces
+were added). The
 generator keys on the live table, so a foreign commit that changes the row set
 trips both the drift guard and the dangling-intent test below — which is exactly
 what happened when ``b969c93`` added the four orchestration-router tools and left
@@ -53,7 +53,7 @@ _PLAN_ABI_METHODS = (
 )
 
 #: The worktree freeze this material was sealed against (documented, not derived).
-FROZEN_TOOL_COUNT = 64
+FROZEN_TOOL_COUNT = 76
 
 
 def _live_table():
@@ -163,7 +163,7 @@ def test_material_documents_the_frozen_table_state():
     # self-consistent with the live table it was regenerated from ...
     assert m.source_tool_count == len(ct.WW_TOOL_TABLE)
     assert m.source_tool_digest == content_digest(sorted(_live_names()))
-    # ... and pinned to the documented worktree freeze (64 rows).
+    # ... and pinned to the documented worktree freeze (76 rows).
     assert m.source_tool_count == FROZEN_TOOL_COUNT
 
 
