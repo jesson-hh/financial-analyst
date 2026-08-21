@@ -64,9 +64,9 @@ CATALOG_GOLDEN = GOLDEN_DIR / "phase10_catalog_manifest_v1.json"
 #: sha256 pins of the immediate upstream goldens — Phase 10 never regenerates them.
 UPSTREAM_GOLDEN_SHA256 = {
     "phase9_schema_manifest_v1.json":
-        "e1bed134a0faa8ec1370bc533f70be27d5055fbdaefafc966e3adb3b47a0fce1",
+        "e7f198ce80a90581cfdfe818e6d62c0d366e1d98bc319ec42ef3d49369e40765",
     "phase9_catalog_manifest_v1.json":
-        "2735f5e78b28e4fdccbfe17df835ac77a646061c689a40ce2259926daff96fcb",
+        "60130c07b9064b281557d5939a2a6c67a0d2e1a159e5195c537466fc0d9a4cb5",
 }
 
 #: the Phase-10 contract modules whose public ContractModel subclasses the

@@ -170,9 +170,9 @@
 | 5 | `P5` | `af064cbaaa1e9b0cdea7b23ced1cffb103f6605fbcda476598b5762651df0b8d` | FROZEN |
 | 6 | `P6` | `af064cbaaa1e9b0cdea7b23ced1cffb103f6605fbcda476598b5762651df0b8d` | FROZEN |
 | 7 | `P7` | `b78b63e476bfd5bf0c303524244dbc9a23a585ccc924c8230dcfe906f1b07750` | FROZEN |
-| 8 | `P8` | `78f79d330ae99e7efcadb7b367f6f84badb0cca2541473824a6fb7618eb4f951` | MOVES |
-| 9 | `P9` | `e3a293615a21db3d88c10969395850369d71be9349c0d3462abc4e4015401e9d` | MOVES |
-| 10 | `P10` | `f1b730529dab1d0d1e3243cde86127b5ee960dc9ac42c9fd639023159c3a535a` | MOVES |
+| 8 | `P8` | `17f0fed4df3c8bdb018641df4973155d0e1d95538043cbfbb08b7506aa6375fd` | MOVES |
+| 9 | `P9` | `6176e1155e3c997f07f16e63ea6cf136d24f6cb3b2976abc82ab06c99b6045f6` | MOVES |
+| 10 | `P10` | `2f81ec3482ba8d5db99e360ff50b522cd1e1481051395bf806304dc93c74a43b` | MOVES |
 | 11 | `prefetch_binding` | `734d5c204c088c0f2a37f3485db3f3f7b844f2a19179c698274aaa6d3de8ac58` | FROZEN |
 | 12 | `bridge.data_runtime.prefetch@1` | `cab80122821607f8d6de0f72be4062174615c6789a039f67f5fe338f9250469a` | FROZEN |
 | 13 | `bridge.data_runtime.descriptor@1` | `817d2882e20760ebe06cfd41e5a1656b7554961952644fc04ee077a75ab89a7b` | FROZEN |
@@ -192,7 +192,7 @@
 | 27 | `preset:pipeline.luozi_deep_decide_reduced` | `f44646dcd0448dee79a49f50748343c255bda30fe95114d981802613ba29d91c` | FROZEN |
 | 28 | `preset:pipeline.screening_lane` | `f739f7fcce79939d23e282f6b7819a43cf5d56038825cfaf189df221e4c535ec` | FROZEN |
 
-**与 L3 §12.2 收官值的对账:零漂移。** 上表 1-10 行逐字节等于 L3 台账 §2 的收官表
+**与 2026-08-13 DeepSeek V4 授权重冻后的 L3 收官值对账:零漂移。** 上表 1-10 行逐字节等于 L3 台账 §2 的收官表
 (gate 直接解析 L3 台账那张表并做**三方相等**:live == L3 台账 == 本表);
 11-15 行等于 L3 §2.3 的四个数据桥材料 + §12.2 #10 的绑定摘要;
 17 行等于 L3 §12.2 #18(ww_f10 撤回后的 `b1775ea2…`,**本次重新度量,不是抄的**);
@@ -297,9 +297,9 @@ L3 §12.5 的教训:grep 摘要值**结构上不可能**发现「钉 golden **�
 
 | # | file | anchor | subject | sha (measured @ HEAD) |
 |---|---|---|---|---|
-| 1 | `tests/orchestration/test_phase9_registry_chain.py` | `test_upstream_goldens_are_byte_unchanged` | `tests/orchestration/golden/phase8_catalog_manifest_v1.json` | `cd5050598925a14c8dc8f10128ef27f64168c43300e9f2df46531b5c78137ef2` |
-| 2 | `tests/orchestration/test_phase10_chain.py` | `test_upstream_goldens_are_byte_unchanged` | `tests/orchestration/golden/phase9_catalog_manifest_v1.json` | `e0c57da25671adc44c8c75e8504dba022d3fdaedea833ddbe6137f82f2b0b4cf` |
-| 3 | `tests/orchestration/test_phase10_handoff.py` | `phase9_catalog_golden_sha256` | `tests/orchestration/golden/phase9_catalog_manifest_v1.json` | `e0c57da25671adc44c8c75e8504dba022d3fdaedea833ddbe6137f82f2b0b4cf` |
+| 1 | `tests/orchestration/test_phase9_registry_chain.py` | `test_upstream_goldens_are_byte_unchanged` | `tests/orchestration/golden/phase8_catalog_manifest_v1.json` | `9b3addb8df1f73cc4d7e143064aca39514d52d3f912d79440b4c9b5f49ecdf66` |
+| 2 | `tests/orchestration/test_phase10_chain.py` | `test_upstream_goldens_are_byte_unchanged` | `tests/orchestration/golden/phase9_catalog_manifest_v1.json` | `60130c07b9064b281557d5939a2a6c67a0d2e1a159e5195c537466fc0d9a4cb5` |
+| 3 | `tests/orchestration/test_phase10_handoff.py` | `phase9_catalog_golden_sha256` | `tests/orchestration/golden/phase9_catalog_manifest_v1.json` | `60130c07b9064b281557d5939a2a6c67a0d2e1a159e5195c537466fc0d9a4cb5` |
 | 4 | `tests/orchestration/test_lane_batch_text.py` | `test_skill_grammar_and_mirror_identity` | `config/orchestration/materials/skills/text.news.md` | — |
 | 5 | `tests/orchestration/test_lane_batch_pv.py` | `test_skill_grammar_and_mirror_identity` | `config/orchestration/materials/skills/pv.technical.md` | — |
 | 6 | `tests/orchestration/test_lane_batch_decision.py` | `test_skill_grammar_and_mirror_identity` | `config/orchestration/materials/skills/dec.pm.md` | — |
@@ -310,7 +310,7 @@ L3 §12.5 的教训:grep 摘要值**结构上不可能**发现「钉 golden **�
 
 * #1-#3 是**摘要位移的二阶落点**:golden 文件被重写 ⇒ 其字节 sha 变 ⇒ 这三处必须有意识翻转。
   `phase10_catalog_manifest_v1.json` 是链尾,**无人钉它的字节 sha**(实测,不是假定)——
-  其现值 `b229b9a27d3aa1cdb74b35d61f1afa9d4f5693fcb36e080322af99d93d017730` 记在此仅作交叉核对。
+  其现值 `7e12dd6f1046f1bd884c16ff83dafd5d9f6eafb23c2aba2171e4bcf72909282a` 记在此仅作交叉核对。
 * #4-#8 是**镜像同步义务**:镜像不是「顺手也改一下」,而是四处独立守卫。
   `sha` 列写 `—` 是因为这些钉断言的是 **tree == mirror 的相等关系**,不是一个冻结的常量值——
   T2 同步改两边即绿,不需要 T3 重冻。

@@ -127,9 +127,9 @@ FROZEN_EVIDENCE = {
         "6176e1155e3c997f07f16e63ea6cf136d24f6cb3b2976abc82ab06c99b6045f6",
     # -- item 9: byte seals of the two chain-sealing goldens (sha256 of bytes).
     "phase9_schema_golden_sha256":
-        "e1bed134a0faa8ec1370bc533f70be27d5055fbdaefafc966e3adb3b47a0fce1",
+        "e7f198ce80a90581cfdfe818e6d62c0d366e1d98bc319ec42ef3d49369e40765",
     "phase9_catalog_golden_sha256":
-        "2735f5e78b28e4fdccbfe17df835ac77a646061c689a40ce2259926daff96fcb",
+        "60130c07b9064b281557d5939a2a6c67a0d2e1a159e5195c537466fc0d9a4cb5",
     # -- item 7 / D5: the reviewed screen ranking read surface for
     #    cand.v4 (model_id None/"prod") and cand.model (variant model_id).
     "ranking_reader": "guanlan_v2.strategy.ranking:load_v4_ranking",
