@@ -4,7 +4,9 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import yaml
-from litellm import acompletion
+# litellm 懒导入(2026-07-30 启动提速):模块级 import litellm 单独吃 ~2.7s,是 9999
+# 冷启动 9s 里最大单项;它只被 _chat_litellm 回落路径(anthropic 等非 OpenAI 兼容
+# provider)用到,主路径 AsyncOpenAI 完全不需要。首个 litellm 调用付一次冷税。
 
 from financial_analyst._config import find_config
 
@@ -44,6 +46,7 @@ def _is_transient(exc: BaseException) -> bool:
 
 _OPENAI_COMPAT_PROVIDERS = {"qwen", "deepseek", "openai", "openrouter", "kimi"}
 _PROVIDER_CLIENTS: Dict[str, Any] = {}  # cache: f"{provider}:{base_url}" -> AsyncOpenAI
+_UNSET = object()
 
 
 def _build_http_client(network_profile: str):
@@ -103,13 +106,23 @@ def load_llm_config(path: Optional[Path] = None) -> Dict[str, Any]:
 
 class LLMClient:
     def __init__(self, provider: str, model: str, config: Dict[str, Any],
-                 max_tokens: Optional[int] = None, timeout: Optional[float] = None):
+                 max_tokens: Optional[int] = None, timeout: Optional[float] = None,
+                 thinking: Optional[bool] = None,
+                 reasoning_effort: Optional[str] = None):
         self.provider = provider
         self.model = model
         self.config = config
         # 座席级思考预算(2026-07-12 思考预算层):None=不传该 kwargs,行为与旧版逐字节一致。
         self.default_max_tokens: Optional[int] = int(max_tokens) if max_tokens is not None else None
         self.default_timeout: Optional[float] = float(timeout) if timeout is not None else None
+        # DeepSeek V4 dual-mode controls. ``None`` keeps legacy callers
+        # unchanged; explicit True/False is sent as extra_body.thinking.
+        self.default_thinking: Optional[bool] = (
+            bool(thinking) if thinking is not None else None
+        )
+        self.default_reasoning_effort: Optional[str] = (
+            str(reasoning_effort) if reasoning_effort is not None else None
+        )
         # v1.7.5: cumulative token accounting for the buddy status line.
         # Carried across /model switches via with_overrides().
         self.total_prompt_tokens: int = 0
@@ -139,22 +152,71 @@ class LLMClient:
         model = override.get("model", config["default_model"])
         return cls(provider=provider, model=model, config=config,
                    max_tokens=override.get("max_tokens"),
-                   timeout=override.get("timeout"))
+                   timeout=override.get("timeout"),
+                   thinking=override.get("thinking", config.get("default_thinking")),
+                   reasoning_effort=override.get(
+                       "reasoning_effort", config.get("default_reasoning_effort")))
 
     def with_overrides(self, provider: Optional[str] = None,
-                        model: Optional[str] = None) -> "LLMClient":
-        """Return a new LLMClient with the same config but a different
-        provider/model. Used by the buddy ``/model`` slash command to
+                        model: Optional[str] = None,
+                        thinking: Any = _UNSET,
+                        reasoning_effort: Any = _UNSET,
+                        max_tokens: Any = _UNSET,
+                        timeout: Any = _UNSET) -> "LLMClient":
+        """Return a new LLMClient with the same config but different routing
+        and optional DeepSeek thinking controls. Used by the buddy ``/model`` slash command to
         live-switch the LLM without reloading config from disk.
 
         Cumulative token counters carry over so the session total spans
         model switches."""
+        target_provider = provider or self.provider
+        target_model = model or self.model
+        target_thinking = (self.default_thinking
+                           if thinking is _UNSET else thinking)
+        target_effort = (self.default_reasoning_effort
+                         if reasoning_effort is _UNSET else reasoning_effort)
+        target_max_tokens = (self.default_max_tokens
+                             if max_tokens is _UNSET else max_tokens)
+        target_timeout = (self.default_timeout if timeout is _UNSET else timeout)
+        # Raw /model pickers only provide provider/model. Give current DeepSeek
+        # V4 names an unambiguous safe profile so switching Pro→Flash cannot leak
+        # the previous max-thinking profile, and selecting Pro really enables it.
+        # Callers that need Flash thinking (e.g. reasoning seats) pass it explicitly.
+        if model is not None and target_provider == "deepseek":
+            if target_model == "deepseek-v4-pro":
+                if thinking is _UNSET:
+                    target_thinking = True
+                if reasoning_effort is _UNSET:
+                    target_effort = "max"
+                if max_tokens is _UNSET:
+                    target_max_tokens = 8192
+                if timeout is _UNSET:
+                    target_timeout = 300
+            elif target_model == "deepseek-v4-flash":
+                if thinking is _UNSET:
+                    target_thinking = False
+                if reasoning_effort is _UNSET:
+                    target_effort = None
+                if max_tokens is _UNSET:
+                    target_max_tokens = None
+                if timeout is _UNSET:
+                    target_timeout = None
+        elif (provider is not None or model is not None) and target_provider != "deepseek":
+            # A DeepSeek profile must never alter another provider's sampling.
+            if thinking is _UNSET:
+                target_thinking = None
+            if reasoning_effort is _UNSET:
+                target_effort = None
+        if target_thinking is not True:
+            target_effort = None
         new = LLMClient(
-            provider=provider or self.provider,
-            model=model or self.model,
+            provider=target_provider,
+            model=target_model,
             config=self.config,
-            max_tokens=self.default_max_tokens,
-            timeout=self.default_timeout,
+            max_tokens=target_max_tokens,
+            timeout=target_timeout,
+            thinking=target_thinking,
+            reasoning_effort=target_effort,
         )
         new.total_prompt_tokens = self.total_prompt_tokens
         new.total_completion_tokens = self.total_completion_tokens
@@ -223,6 +285,8 @@ class LLMClient:
         temperature: float,
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
+        thinking: Optional[bool] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> Any:
         """OpenAI-compatible providers (qwen / deepseek / openai / openrouter).
         Goes through AsyncOpenAI + provider-specific http_client."""
@@ -237,8 +301,17 @@ class LLMClient:
         kwargs: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": temperature,
         }
+        # DeepSeek thinking mode ignores sampling controls. Omit temperature
+        # there; retain it for every existing/non-thinking caller.
+        if thinking is not True:
+            kwargs["temperature"] = temperature
+        if self.provider == "deepseek" and thinking is not None:
+            kwargs["extra_body"] = {
+                "thinking": {"type": "enabled" if thinking else "disabled"}
+            }
+        if self.provider == "deepseek" and thinking is True and reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
         if self.provider == "kimi" and str(self.model).startswith("kimi-k2"):
             # Moonshot k2 系列硬约束: 只接受 temperature=1, 其他值直接 400
             # ("invalid temperature: only 1 is allowed for this model", 2026-07-03 真机实测).
@@ -292,6 +365,14 @@ class LLMClient:
             if api_key:
                 kwargs["api_key"] = api_key
 
+        # 懒导入(见模块头注释,只有回落路径付冷税);首调 ~2.7s 的模块加载经 to_thread
+        # 摘出事件循环——本方法在 9999 loop 内被直接 await(seats 等),同步 import 会
+        # 堵 loop 触看门狗误杀前科。二调起 sys.modules 命中,近零成本。
+        import importlib
+
+        await asyncio.to_thread(importlib.import_module, "litellm")
+        from litellm import acompletion
+
         response = await acompletion(**kwargs)
         self._accumulate_usage(response)
         return response
@@ -304,12 +385,21 @@ class LLMClient:
         temperature: float = 0.2,
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
+        thinking: Optional[bool] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> Any:
         # 座席级思考预算(2026-07-12 思考预算层):显式参 > 座席默认(for_agent 解析的
         # agent_overrides.max_tokens/timeout)> 不传。两者都 None 时两条路径 kwargs 不出现
         # 对应键,行为与旧版逐字节一致。
         eff_mt = max_tokens if max_tokens is not None else self.default_max_tokens
         eff_timeout = timeout if timeout is not None else self.default_timeout
+        eff_thinking = thinking if thinking is not None else self.default_thinking
+        eff_reasoning_effort = (
+            reasoning_effort if reasoning_effort is not None
+            else self.default_reasoning_effort
+        )
+        if eff_thinking is not True:
+            eff_reasoning_effort = None
         # 瞬时错误(SSL hiccup / 超时 / 5xx / 429)指数退避重试。此前 chat() 零重试,
         # 任何抖动直接冒泡 → seats/decide、各研报 SubAgent、wisdom 等单次失败即判失败
         # (重试只在交互式 buddy 循环有)。鉴权/请求错(401/400)不重试,立即抛。
@@ -321,6 +411,8 @@ class LLMClient:
                     return await self._chat_openai_compat(
                         messages, tools, response_format, temperature,
                         max_tokens=eff_mt, timeout=eff_timeout,
+                        thinking=eff_thinking,
+                        reasoning_effort=eff_reasoning_effort,
                     )
                 return await self._chat_litellm(
                     messages, tools, response_format, temperature,

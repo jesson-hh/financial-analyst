@@ -29,8 +29,10 @@ dependencies = [
     "requests>=2.31",
     "hf-transfer>=0.1.6",
     "pypdf>=4",                # /upload PDF 抽取
+    "Pillow>=10",              # 帷幄量化图生成与受控图片校验/交付
     "python-multipart>=0.0.9", # /upload multipart
     "jieba>=0.42",             # 事件库 FTS 中文预分词(缺席时 LIKE 诚实降级)
+    "psutil>=5.9",             # 研究空间代码任务的进程树/内存/子进程硬闸
 ]
 
 [tool.guanlan]

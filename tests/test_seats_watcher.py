@@ -4,13 +4,23 @@
 # - 交易日盘中门(09:30-11:30 / 13:00-15:00;引擎日历失败回退周一~五)
 # - 节流:per-code 10min 硬地板 + decisionFreq hourly≥1h / daily 当日一次
 # - tick:enabled+盘中+预算余 → 逐 code(quote fresh → 节流 → decide);预算截断;source='watcher'
-# - watching_codes:读 var/archive/strat_*.json 的 bind 非空并集,坏 json 跳过
+# - watching_codes:assignment 为运行真相；首次从旧 bind 确定性迁移，坏/缺策略 fail closed
 # - refs best-effort 服务端解析(卡→cards、因子→recipe_factors,查不到跳过)
 # - _decide_impl 提取:payload 带 source → _persist_decision 落盘可见;不带 → 键不落(旧形状不变)
 # 全桩,零网络零 LLM。
 import json
 from datetime import datetime
+import pytest
 from guanlan_v2.seats import watcher
+
+
+@pytest.fixture(autouse=True)
+def _isolated_assignment_store(tmp_path, monkeypatch):
+    """Never let assignment migration read/write the developer's real var/."""
+    archive = tmp_path / "archive"
+    archive.mkdir(exist_ok=True)
+    monkeypatch.setattr(watcher, "ASSIGNMENTS_PATH", tmp_path / "assignments.json")
+    monkeypatch.setattr(watcher, "ARCHIVE_DIR", archive)
 
 def test_state_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(watcher, "STATE_PATH", tmp_path / "w.json")
@@ -70,7 +80,9 @@ def test_tick_skips_stale_quote_and_disabled(tmp_path, monkeypatch):
 # ───────── 以下为补充测试(只增不删:watching_codes 数据源 / refs 桩解析 / source 落盘 / 路由)─────────
 
 def test_watching_codes_reads_bind_and_skips_bad_json(tmp_path, monkeypatch):
+    from guanlan_v2.seats import watch_assignments as assignments
     monkeypatch.setattr(watcher, "ARCHIVE_DIR", tmp_path)
+    monkeypatch.setattr(watcher, "ASSIGNMENTS_PATH", tmp_path / "assignments.json")
     (tmp_path / "strat_a.json").write_text(json.dumps({
         "id": "s_a", "type": "strategy", "name": "动量 · 测试", "bind": ["300750", "600519"],
         "clock": {"decisionFreq": "daily"}, "creed": "突破加仓", "w": 0.2, "pa": True,
@@ -78,6 +90,11 @@ def test_watching_codes_reads_bind_and_skips_bad_json(tmp_path, monkeypatch):
     (tmp_path / "strat_b.json").write_text(json.dumps({
         "id": "s_b", "name": "空绑不盯", "bind": []}, ensure_ascii=False), encoding="utf-8")
     (tmp_path / "strat_bad.json").write_text("{oops", encoding="utf-8")   # 坏 json 跳过
+    # Ordinary watcher/status reads no longer freeze a partially hydrated
+    # archive; the UI archiveReady handshake performs this explicit migration.
+    assert watcher.watching_codes() == []
+    assignments.migrate_legacy_assignments(
+        path=watcher.ASSIGNMENTS_PATH, archive_dir=watcher.ARCHIVE_DIR)
     rows = watcher.watching_codes()
     assert [r["code"] for r in rows] == ["300750", "600519"]
     r0 = rows[0]
@@ -151,10 +168,17 @@ def test_decide_impl_persists_source(tmp_path, monkeypatch):
     seats_api = _patch_decide_deps(tmp_path, monkeypatch)
     res = asyncio.run(seats_api._decide_impl({
         "code": "SZ300750", "name": "宁德时代", "date": "2026-07-10",
-        "seat_cn": "动量 · 默认", "creed": "x", "mode": "fast", "source": "watcher"}))
+        "seat_cn": "动量 · 默认", "creed": "x", "mode": "fast", "source": "watcher",
+        "strategy_id": "s1", "requested_evidence_tf": "day",
+        "effective_evidence_tf": "day", "decision_cadence": "60min",
+        "assignment_revision": 7}))
     assert res["ok"] is True
     rec = json.loads((tmp_path / "dec.jsonl").read_text(encoding="utf-8").splitlines()[-1])
     assert rec.get("kind") == "decide" and rec.get("source") == "watcher"
+    assert rec["requested_evidence_tf"] == rec["effective_evidence_tf"] == "day"
+    assert rec["data_asof"] == rec["asof"]
+    assert rec["strategy_id"] == "s1" and rec["decision_cadence"] == "60min"
+    assert rec["assignment_revision"] == 7
     res2 = asyncio.run(seats_api._decide_impl({
         "code": "SZ300750", "date": "2026-07-10", "mode": "fast"}))
     assert res2["ok"] is True

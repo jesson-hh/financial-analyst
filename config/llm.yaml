@@ -1,14 +1,15 @@
 default_provider: deepseek
-default_model: deepseek-chat
+default_model: deepseek-v4-flash
+default_thinking: false
 
 # 2026-06-01: qwen (DashScope) 已移除 — 用户要求只用 deepseek (qwen domestic 经 Clash fake-ip 接管走海外节点, 接不上).
 # anthropic / openai 保留为休眠定义 (本机无 key, 无 agent_overrides 指向, 不会被调用).
 providers:
   deepseek:
     api_key_env: DEEPSEEK_API_KEY
-    base_url: https://api.deepseek.com/v1
+    base_url: https://api.deepseek.com
     network_profile: intl_clash   # Clash fake-ip + MITM, 必经 proxy + verify=False
-    models: [deepseek-chat, deepseek-reasoner]
+    models: [deepseek-v4-flash, deepseek-v4-pro]
   kimi:
     api_key_env: KIMI_API_KEY
     base_url: https://api.moonshot.cn/v1
@@ -26,30 +27,31 @@ providers:
 
 # agent_overrides (2026-06-01 清零后重启用):
 # - industry_extract (2026-07-03): AI投研看板研报抽取走 Kimi k2.6 (256K ctx, 用户指定读研报模型).
-# - 思考档位 (2026-07-12 思考预算层): deep=deepseek-reasoner+max_tokens+长超时(判断密集型缝),
-#   fast=deepseek-chat(填表型缝, 默认). 真机探针(2026-07-12): reasoner 别名支持
-#   json_object/tools/max_tokens/per-request timeout 且返回 reasoning_content;
-#   models.list()=[deepseek-v4-flash, deepseek-v4-pro], 别名可用.
-#   其余 agent 仍走 default_provider (deepseek/deepseek-chat).
-# - 研报辩护/风控/写手 deep 档 (2026-07-12): bull/bear-advocate 逐条交锋 + risk-officer
-#   综合裁决 + report-writer 终稿成文, 四座席判断密集型, 升 reasoner (座席名经
-#   LLMClient.for_agent(self.NAME) 实测, 见 tier3/*.py); advocates 内容重试
-#   temperature=0.3+attempt*0.2 对 reasoner 无害 (温度参数照单收, 真机已验).
+# - 帷幄双档(2026-08-13): standard=deepseek-v4-flash 且显式关闭思考;
+#   Pro=deepseek-v4-pro 且显式开启思考、reasoning_effort=max。
+# - deepseek-chat/deepseek-reasoner 已由官方于 2026-07-24 停用；全系统改为
+#   V4 显式 thinking 协议。普通判断席=V4-Flash/high，真正深档=V4-Pro/max。
 agent_overrides:
+  # 帷幄主对话双档:standard 固定 V4-Flash 非思考;Pro 固定 V4-Pro max 思考。
+  # 前端只传 standard|pro,具体 vendor/model 始终由服务端此处决定。
+  buddy:            {provider: deepseek, model: deepseek-v4-flash, thinking: false}
+  buddy-pro:        {provider: deepseek, model: deepseek-v4-pro, thinking: true, reasoning_effort: max, max_tokens: 8192, timeout: 300}
   industry_extract: {provider: kimi, model: kimi-k2.6}
-  rerank:           {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
-  review_officer:   {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
-  review_section:   {provider: deepseek, model: deepseek-chat}
-  bull-advocate:    {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
-  bear-advocate:    {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
-  risk-officer:     {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
-  report-writer:    {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
-  planner:          {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
+  rerank:           {provider: deepseek, model: deepseek-v4-flash, thinking: true, reasoning_effort: high, max_tokens: 8192, timeout: 300}
+  review_officer:   {provider: deepseek, model: deepseek-v4-flash, thinking: true, reasoning_effort: high, max_tokens: 8192, timeout: 300}
+  review_section:   {provider: deepseek, model: deepseek-v4-flash, thinking: false}
+  bull-advocate:    {provider: deepseek, model: deepseek-v4-flash, thinking: true, reasoning_effort: high, max_tokens: 8192, timeout: 300}
+  bear-advocate:    {provider: deepseek, model: deepseek-v4-flash, thinking: true, reasoning_effort: high, max_tokens: 8192, timeout: 300}
+  # Terminal structured-output nodes: keep upstream bull/bear reasoning deep,
+  # but disable thinking here so the JSON final is not starved by reasoning tokens.
+  risk-officer:     {provider: deepseek, model: deepseek-v4-flash, thinking: false, max_tokens: 8192, timeout: 300}
+  report-writer:    {provider: deepseek, model: deepseek-v4-flash, thinking: false, max_tokens: 8192, timeout: 300}
+  planner:          {provider: deepseek, model: deepseek-v4-pro, thinking: true, reasoning_effort: max, max_tokens: 8192, timeout: 300}
   # orchestration 四车道目录 tier 别名 (2026-07-20 Phase 8 Task 3): guanlan_v2.orchestration
   #   model_tiers.tier_map_from_llm_yaml 经 ORCHESTRATION_TIER_ALIASES 显式读这三键 (唯一 join key),
   #   缺任一 tier -> ModelTierUnconfigured, 绝不静默回落 default_provider/default_model.
-  #   fast=deepseek-chat (填表型缝), reasoner/reasoner-deep=deepseek-reasoner (判断密集型缝),
-  #   reasoner-deep 加 max_tokens+长超时. clause(g): deepseek 唯一 live provider.
-  orchestration-fast:          {provider: deepseek, model: deepseek-chat}
-  orchestration-reasoner:      {provider: deepseek, model: deepseek-reasoner}
-  orchestration-reasoner-deep: {provider: deepseek, model: deepseek-reasoner, max_tokens: 8192, timeout: 300}
+  #   fast=V4-Flash 非思考，reasoner=V4-Flash/high，reasoner-deep=V4-Pro/max。
+  #   clause(g): deepseek 唯一 live provider。
+  orchestration-fast:          {provider: deepseek, model: deepseek-v4-flash, thinking: false}
+  orchestration-reasoner:      {provider: deepseek, model: deepseek-v4-flash, thinking: true, reasoning_effort: high}
+  orchestration-reasoner-deep: {provider: deepseek, model: deepseek-v4-pro, thinking: true, reasoning_effort: max, max_tokens: 8192, timeout: 300}

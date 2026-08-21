@@ -94,8 +94,8 @@ __all__ = ["PlannerLLMModelGateway", "PlannerModelInvocationError"]
 #: ``parents[2]`` == repo root (``.../guanlan_v2/orchestration/planner_gateway.py``).
 REPO_LLM_CONFIG_PATH: Path = Path(__file__).resolve().parents[2] / "config" / "llm.yaml"
 
-#: Plan synthesis temperature. deepseek-reasoner accepts (and ignores) it; kept low
-#: for the rare non-reasoner fallback. JSON output is forced via ``response_format``.
+#: Plan synthesis temperature. DeepSeek V4 thinking mode omits it inside LLMClient;
+#: it remains low for any non-thinking fallback. JSON output is forced.
 _PLANNER_TEMPERATURE = 0.2
 
 #: Outer-wait buffer (seconds) over ``timeout_sec`` so the engine transport's own

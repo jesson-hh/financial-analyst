@@ -200,7 +200,7 @@ const SEATS = SEATS_ALL.filter(s => LZ_KEPT_SEATS.indexOf(s.id) >= 0);
 // ───────── 模板库(第3期:策略实例的信号引擎 = 模板进场规则 + 用户时钟出场)─────────
 const LZ_TEMPLATES = {
   momentum: { cn: '动量突破', glyph: '动', color: 'var(--jin)', creed: '突破均线、量价齐升则顺势加仓', card: '北向资金领先',
-    clock: { execTF: 'day', decisionFreq: 'hourly', maxHold: 30, stopLoss: 0.08, takeProfit: 0.18 } },
+    clock: { execTF: 'day', decisionFreq: '60min', maxHold: 30, stopLoss: 0.08, takeProfit: 0.18 } },
   reversal: { cn: '超跌反转', glyph: '反', color: 'var(--zhu)', creed: '超跌缩量企稳即落子,搏短线反弹', card: '缩量反转',
     clock: { execTF: 'day', decisionFreq: 'daily', maxHold: 13, stopLoss: 0.05, takeProfit: 0.11 } },
   event: { cn: '事件驱动', glyph: '事', color: '#3f6f8a', creed: '业绩超预期后博 60 日漂移', card: '业绩漂移 PEAD',
@@ -214,9 +214,13 @@ function _normClock(c, tpl) {
   // 会被动量的 止损0.08/持有30日/hourly 污染。tpl 不传时仍退 momentum(向后兼容)。
   const d = (tpl && tpl.clock) || LZ_TEMPLATES.momentum.clock;
   c = c || {};
+  const tf = ['day', '30min', '5min', '1min'].indexOf(String(c.execTF || '')) >= 0 ? String(c.execTF) : 'day';
+  const rawCadence = String(c.decisionFreq || d.decisionFreq || '60min');
+  const cadence = rawCadence === 'hourly' ? '60min'
+    : (['daily', '60min', '30min', '10min'].indexOf(rawCadence) >= 0 ? rawCadence : '60min');
   return {
-    execTF: c.execTF === '5min' ? '5min' : 'day',
-    decisionFreq: c.decisionFreq || d.decisionFreq || 'hourly',
+    execTF: tf,
+    decisionFreq: cadence,
     maxHold: (c.maxHold != null && isFinite(+c.maxHold)) ? +c.maxHold : d.maxHold,
     stopLoss: (c.stopLoss != null && isFinite(+c.stopLoss)) ? +c.stopLoss : d.stopLoss,
     takeProfit: (c.takeProfit != null && isFinite(+c.takeProfit)) ? +c.takeProfit : d.takeProfit,
@@ -255,7 +259,28 @@ function strategySave(o) {
   window.GL.put(obj);
   return obj.id;
 }
-function strategyDelete(id) { if (window.GL) window.GL.remove(id); }
+async function strategyDelete(id) {
+  if (!window.GL || !id) return { ok: false, reason: '策略不存在' };
+  if (WATCH_STRATEGY_DELETE_PENDING.has(id)) return { ok: false, reason: '策略删除处理中' };
+  const API = (window.GUANLAN_BACKEND || '');
+  if (!API) return { ok: false, reason: '未连接后端，不能安全删除策略' };
+  WATCH_STRATEGY_DELETE_PENDING.add(id);
+  try {
+    const res = await fetch(API + '/archive/remove', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }),
+    });
+    const j = await res.json().catch(() => null);
+    if (!res.ok || !j || !j.ok) {
+      const codes = j && Array.isArray(j.codes) && j.codes.length ? (' · 引用股票 ' + j.codes.join('、')) : '';
+      return { ok: false, reason: ((j && j.reason) || ('HTTP ' + res.status)) + codes };
+    }
+    // 远端原子检查+删除成功后才改本地；GL 的重复 remove 镜像请求幂等。
+    window.GL.remove(id);
+    WATCH_REFERENCED_STRATEGIES.delete(id);
+    return { ok: true, id };
+  } catch (e) { return { ok: false, reason: '策略删除失败:' + String(e) }; }
+  finally { WATCH_STRATEGY_DELETE_PENDING.delete(id); }
+}
 function seedDefaultStrategy() {
   if (!window.GL) return;
   if (strategyList().length > 0) return;
@@ -274,18 +299,25 @@ function _stripDeadDemoRecipe() {
     if (next.length !== refs.length) strategySave(Object.assign({}, s, { refs: next }));
   });
 }
+// assignment 引用保护：GET 成功前保持 unknown，所有自动去重/删除 fail-closed。
+// assignments 即使 enabled=false 也保留 strategy_id，故同样属于引用，不能删。
+const WATCH_REFERENCED_STRATEGIES = new Set();
+let WATCH_ASSIGNMENTS_KNOWN = false;
+let WATCH_ASSIGNMENT_FETCH_SEQ = 0;
+const WATCH_STRATEGY_DELETE_PENDING = new Set();
+
 // 去重「动量 · 默认」自动默认:seedDefaultStrategy 在模块加载时**同步**建一个,而 guanlan-bus 的后端持久化
 //   (P2-C /archive)经 setTimeout 异步回填补入上次会话存的同名默认 → 新鲜 profile(localStorage 空 + 后端有)下
 //   两个无绑定同名默认并存(回测历史按 strategy_id 过滤会张冠李戴)。保留 **ts 最小**(最早=带回测历史的持久化那个),
 //   删其余。仅针对未改名(name='动量 · 默认')未绑定(bind 空)的自动默认 → 用户改名/绑票的策略名或 bind 不同,不误删。
 //   回填走 persist→emit 通知,故挂 GL.on 自愈;折叠后只剩 1 → 再 emit 不再删 → 无环。
 function _dedupeDefaultStrategies() {
-  if (!window.GL) return;
+  if (!window.GL || !WATCH_ASSIGNMENTS_KNOWN) return;   // 配置读失败/尚未读 → 宁留重复，不误删在用 Agent
   const defs = strategyList().filter(s =>
     s && s.template === 'momentum' && s.name === '动量 · 默认' && (!s.bind || s.bind.length === 0));
   if (defs.length <= 1) return;
   defs.sort((a, b) => (a.ts || 0) - (b.ts || 0));   // 最早在前
-  defs.slice(1).forEach(s => strategyDelete(s.id));  // 删较新副本,留最早(持久化·带历史)
+  defs.slice(1).forEach(s => { if (!WATCH_REFERENCED_STRATEGIES.has(s.id)) void strategyDelete(s.id); });
 }
 // 把策略实例自己配的 refs 解析成 {cards,research,factors};区别于 seatCard/seatResearch(查老 seat_<id> 实体)。
 // 配方因子(factors)仅供喂 LLM 研判参考,不参与任何确定性计算(红线:不冒充因子回测)。
@@ -642,7 +674,7 @@ function watchSet(code, on) {
 //   ④EV-014 联调测试卡(后端已打回 rejected,syncArchive 滤 rejected 不回流)。
 //   research 类 GL.remove 经总线自动 /archive/remove(后端镜像同步删);卡/因子是 GL 本地种子,删即净。
 function _pruneRetiredStrategies() {
-  if (!window.GL) return;
+  if (!window.GL || !WATCH_ASSIGNMENTS_KNOWN) return;
   // 清单内联(勿提为模块级 const:本函数在模块顶部 L555 即被调,const 在其后声明会踩 TDZ 抛错被吞)
   const RETIRED = [
     'strat_mqae2q6f2th', 'strat_mqf7alg41jz',
@@ -653,7 +685,13 @@ function _pruneRetiredStrategies() {
     'EV-014',
   ];
   RETIRED.forEach(id => {
-    try { if (window.GL.get(id)) window.GL.remove(id); } catch (e) {}
+    try {
+      const art = window.GL.get(id);
+      if (art && !WATCH_REFERENCED_STRATEGIES.has(id)) {
+        if (art.type === 'strategy') void strategyDelete(id);
+        else window.GL.remove(id);
+      }
+    } catch (e) {}
   });
   // 配方里的死引用一并剥掉(如「动量 · 默认」旧 seed 挂的 card_reversal)
   try {
@@ -1085,23 +1123,27 @@ function realSymbolOf(code) {
   return REAL_SYM_CACHE[code].sym;
 }
 
-// ④-② 实时 5min(引擎 /watch/bars,pytdx 实时口,最近 ~240-480 根、含今日盘中):拼今日日内图。
+// ④-② 实时 5min(统一 /seats/bars_live 持久证据口,最近 ~240-480 根、含今日盘中):拼今日日内图。
 //   行 {open,high,low,close,vol,trade_date} → 映射到 normBars5 的 r.date 字段;无后端/失败 → null(诚实降级)。
 async function fetchRealtimeBars5(code, n) {
   const API = (window.GUANLAN_BACKEND || '');
   if (!API || !code) return null;
   try {
-    const res = await fetch(API + '/watch/bars?code=' + encodeURIComponent(code) + '&n=' + (n || 480));
+    const res = await fetch(API + '/seats/bars_live?freq=5min&code=' + encodeURIComponent(code) + '&n=' + (n || 480));
     if (!res.ok) return null;
     const j = await res.json();
     if (!j || !j.ok || !j.bars) return null;
-    const rows = j.bars.map(b => ({ date: b.trade_date, open: b.open, high: b.high, low: b.low, close: b.close, vol: b.vol }));
-    return normBars5(rows);
+    const rows = j.bars.map(b => ({ date: b.date || b.trade_date, open: b.open, high: b.high, low: b.low, close: b.close, vol: b.vol }));
+    const bars = normBars5(rows);
+    bars._meta = { asof: j.data_asof || (bars.length ? bars[bars.length - 1].date : null),
+      fetchedAt: j.fetched_at || new Date().toISOString(), source: j.source || 'pytdx',
+      dataRef: j.data_ref || null, qualityFlaggedN: j.quality_flagged_n || 0 };
+    return bars;
   } catch (e) { return null; }
 }
 
 // ②+ 实时 1min(/seats/bars_live?freq=1min,引擎 pytdx 1min):盘中更细盯盘。1min 历史库个股为空,故只走实时。
-//   返回行 {date,open,high,low,close,vol} 同 normBars5 形状(date 16 位 → day/o/c/h/l/v)。无后端/失败 → null。
+//   返回带 code/asof 的信封，主壳据此做 request-seq + code 双闸，防快速切票时旧请求覆盖新票。
 async function fetchRealtimeBars1(code, n) {
   const API = (window.GUANLAN_BACKEND || '');
   if (!API || !code) return null;
@@ -1110,7 +1152,10 @@ async function fetchRealtimeBars1(code, n) {
     if (!res.ok) return null;
     const j = await res.json();
     if (!j || !j.ok || !j.bars) return null;
-    return normBars5(j.bars);
+    const bars = normBars5(j.bars);
+    if (!bars || !bars.length) return null;
+    return { code: _watchCode(j.code || code), requestCode: _watchCode(code), bars,
+      asof: bars[bars.length - 1].date, fetchedAt: new Date().toISOString(), source: j.source || 'pytdx' };
   } catch (e) { return null; }
 }
 
@@ -1182,7 +1227,7 @@ async function fetchTicks(code, limit) {
   } catch (e) { return null; }
 }
 
-// ───────── 后端定时盯盘(2026-07-11 三页重排):状态/开关 + 研判时间线 ─────────
+// ───────── 后端定时盯盘:总闸 + 单票 assignment + 研判时间线 ─────────
 //   watcher 在服务端盘中按策略节拍自动研判绑定票(GUANLAN_SEATS_WATCH=1 才起);
 //   老后端无此端点 → 404 → null → UI 显「未启用」诚实态,绝不冒充在盯。
 async function fetchWatchStatus() {
@@ -1209,6 +1254,154 @@ async function toggleWatch(on) {
     return { enabled: !!j.enabled, watching: j.watching || [], todayCount: (j.today_count != null ? +j.today_count : null),
       budget: (j.daily_budget != null ? +j.daily_budget : null), lastTick: j.last_tick || null, marketOpen: !!j.market_open };
   } catch (e) { return null; }
+}
+
+// 单票盯盘配置是新后端的唯一写入口。它把「是否纳入、由哪个策略负责、看什么周期、
+// 多久判一次、自动思考强度」从 strategy.bind 中拆开；旧后端 404/405 时返回
+// supported:false，让 UI 显式降级到旧版绑定，绝不静默假装 1min 已生效。
+const LZ_WATCH_EVIDENCE = ['day', '30min', '5min', '1min'];
+const LZ_WATCH_CADENCE = ['daily', '60min', '30min', '10min'];
+function _watchCode(code) { return String(code || '').replace(/^(SH|SZ|BJ)/i, ''); }
+function _normWatchAssignment(raw, fallbackCode) {
+  const a = (raw && typeof raw === 'object') ? raw : {};
+  const code = _watchCode(a.code || fallbackCode);
+  const requestedRaw = String(a.requested_evidence_tf || a.evidence_tf || 'day').toLowerCase();
+  const requested = LZ_WATCH_EVIDENCE.indexOf(requestedRaw) >= 0 ? requestedRaw : 'day';
+  const hasEffective = Object.prototype.hasOwnProperty.call(a, 'effective_evidence_tf');
+  const effectiveRaw = a.effective_evidence_tf == null ? null : String(a.effective_evidence_tf).toLowerCase();
+  const effective = hasEffective
+    ? (LZ_WATCH_EVIDENCE.indexOf(effectiveRaw) >= 0 ? effectiveRaw : null)
+    : requested;
+  const cadenceRaw = String(a.decision_cadence || a.cadence || '60min').toLowerCase();
+  const cadence = cadenceRaw === 'hourly' ? '60min'
+    : (LZ_WATCH_CADENCE.indexOf(cadenceRaw) >= 0 ? cadenceRaw : '60min');
+  const thinkingRaw = String(a.thinking_mode || 'fast').toLowerCase();
+  return Object.assign({}, a, {
+    code,
+    enabled: !!a.enabled,
+    strategy_id: String(a.strategy_id || ''),
+    evidence_tf: requested,
+    requested_evidence_tf: requested,
+    effective_evidence_tf: effective,
+    decision_cadence: cadence,
+    thinking_mode: thinkingRaw === 'deep' ? 'deep' : 'fast',
+    status: String(a.status || (effective ? 'ready' : 'unsupported_evidence_tf')),
+  });
+}
+function _assignmentMap(rows) {
+  const out = {};
+  if (Array.isArray(rows)) {
+    rows.forEach(r => { const a = _normWatchAssignment(r); if (a.code) out[a.code] = a; });
+  } else if (rows && typeof rows === 'object') {
+    Object.keys(rows).forEach(k => { const a = _normWatchAssignment(rows[k], k); if (a.code) out[a.code] = a; });
+  }
+  return out;
+}
+async function fetchWatchAssignments() {
+  const API = (window.GUANLAN_BACKEND || '');
+  if (!API) return { supported: null, legacy: false, assignments: {}, reason: '未连接后端' };
+  const seq = ++WATCH_ASSIGNMENT_FETCH_SEQ;
+  try {
+    if (window.GL && window.GL.archiveReady) {
+      const ready = await window.GL.archiveReady;
+      if (seq !== WATCH_ASSIGNMENT_FETCH_SEQ) return { stale: true };
+      if (!ready || ready.ok !== true) return { supported: null, legacy: false, assignments: {}, reason: '策略档案尚未同步，暂不迁移盯盘配置' };
+      const migrated = await fetch(API + '/seats/watch/assignments/migrate', { method: 'POST' });
+      if (seq !== WATCH_ASSIGNMENT_FETCH_SEQ) return { stale: true };
+      if (migrated.status !== 404 && migrated.status !== 405) {
+        const mj = await migrated.json().catch(() => null);
+        if (!migrated.ok || !mj || !mj.ok) return { supported: null, legacy: false, assignments: {}, reason: (mj && (mj.detail || mj.reason)) || ('迁移接口 HTTP ' + migrated.status) };
+      }
+    }
+    const res = await fetch(API + '/seats/watch/assignments');
+    if (seq !== WATCH_ASSIGNMENT_FETCH_SEQ) return { stale: true };
+    if (res.status === 404 || res.status === 405) {
+      WATCH_REFERENCED_STRATEGIES.clear();
+      strategyList().forEach(s => {
+        if (s && s.id && Array.isArray(s.bind) && s.bind.length) WATCH_REFERENCED_STRATEGIES.add(s.id);
+      });
+      WATCH_ASSIGNMENTS_KNOWN = true;                // 明确旧后端；legacy 引用由 bind 自身显形
+      try { _dedupeDefaultStrategies(); } catch (e) {}
+      try { _pruneRetiredStrategies(); } catch (e) {}
+      return { supported: false, legacy: true, assignments: {}, reason: '旧后端无单票配置接口' };
+    }
+    if (!res.ok) return { supported: null, legacy: false, assignments: {}, reason: '配置接口 HTTP ' + res.status };
+    const j = await res.json();
+    if (seq !== WATCH_ASSIGNMENT_FETCH_SEQ) return { stale: true };
+    if (!j || !j.ok) return { supported: null, legacy: false, assignments: {}, reason: (j && j.reason) || '配置接口拒绝' };
+    const assignments = _assignmentMap(j.assignments || []);
+    WATCH_REFERENCED_STRATEGIES.clear();
+    Object.values(assignments).forEach(a => { if (a && a.strategy_id) WATCH_REFERENCED_STRATEGIES.add(a.strategy_id); });
+    WATCH_ASSIGNMENTS_KNOWN = true;
+    try { _dedupeDefaultStrategies(); } catch (e) {}
+    try { _pruneRetiredStrategies(); } catch (e) {}
+    return { supported: true, legacy: false, assignments };
+  } catch (e) {
+    return { supported: null, legacy: false, assignments: {}, reason: '配置接口不可达' };
+  }
+}
+async function putWatchAssignment(code, body) {
+  const API = (window.GUANLAN_BACKEND || '');
+  if (!API) return { ok: false, supported: null, legacy: false, reason: '未连接后端' };
+  const c = _watchCode(code);
+  try {
+    const res = await fetch(API + '/seats/watch/assignments/' + encodeURIComponent(c), {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
+    });
+    if (res.status === 404 || res.status === 405) return { ok: false, supported: false, legacy: true, reason: '旧后端无单票配置接口' };
+    const j = await res.json().catch(() => null);
+    if (!res.ok || !j || !j.ok) return { ok: false, supported: true, reason: (j && j.reason) || ('HTTP ' + res.status) };
+    let raw = j.assignment || null;
+    if (!raw && j.assignments) raw = Array.isArray(j.assignments)
+      ? j.assignments.find(x => _watchCode(x && x.code) === c)
+      : j.assignments[c];
+    const assignment = _normWatchAssignment(raw || Object.assign({ code: c }, body), c);
+    if (assignment.strategy_id) WATCH_REFERENCED_STRATEGIES.add(assignment.strategy_id);
+    return { ok: true, supported: true, legacy: false, assignment };
+  } catch (e) {
+    return { ok: false, supported: true, reason: '保存失败:' + String(e) };
+  }
+}
+
+// assignments 引用策略前，必须等 /archive/put 真落盘。GL.put 自带的镜像是 fire-and-forget，
+// 单靠它会产生「assignment 已生效但 watcher 尚找不到 strategy」的竞态。
+async function persistWatchStrategy(artifact) {
+  const API = (window.GUANLAN_BACKEND || '');
+  if (!API || !artifact || !artifact.id) return { ok: false, reason: '策略或后端缺失' };
+  try {
+    const res = await fetch(API + '/archive/put', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ artifact }),
+    });
+    const j = await res.json().catch(() => null);
+    if (!res.ok || !j || !j.ok) return { ok: false, reason: (j && j.reason) || ('策略持久化 HTTP ' + res.status) };
+    WATCH_REFERENCED_STRATEGIES.add(artifact.id); // GL emit 前先保护，避免默认策略去重删掉即将被 assignment 引用的项
+    if (window.GL) window.GL.put(artifact);       // 服务端成功后才更新本地；总线的重复 upsert 幂等。
+    return { ok: true, strategy: artifact };
+  } catch (e) { return { ok: false, reason: '策略持久化失败:' + String(e) }; }
+}
+async function ensureDedicatedWatchStrategy(meta, config) {
+  const c = _watchCode(meta && meta.code);
+  if (!c) return { ok: false, reason: '股票代码为空' };
+  const base = strategyList().find(s => s.name === '动量 · 默认')
+    || strategyList().find(s => s.template === 'momentum')
+    || { template: 'momentum', refs: [], clock: LZ_TEMPLATES.momentum.clock,
+      creed: LZ_TEMPLATES.momentum.creed, w: 0, pa: false, paMethod: '' };
+  const stamp = Date.now().toString(36) + Math.floor(Math.random() * 1296).toString(36);
+  const artifact = {
+    id: 'strat_watch_' + c + '_' + stamp, type: 'strategy',
+    name: String((meta && meta.name) || c) + ' · 动量盯盘',
+    template: base.template || 'momentum', refs: Array.isArray(base.refs) ? base.refs.slice() : [],
+    clock: _normClock(Object.assign({}, base.clock || {}, {
+      execTF: (config && config.evidence_tf) || 'day',
+      decisionFreq: (config && config.decision_cadence) || '60min',
+    }), LZ_TEMPLATES[base.template] || LZ_TEMPLATES.momentum),
+    bind: [c], color: base.color || LZ_TEMPLATES.momentum.color,
+    glyph: base.glyph || LZ_TEMPLATES.momentum.glyph,
+    creed: base.creed || LZ_TEMPLATES.momentum.creed,
+    w: isFinite(+base.w) ? Math.max(0, Math.min(1, +base.w)) : 0,
+    pa: base.pa === true, paMethod: String(base.paMethod || ''),
+  };
+  return persistWatchStrategy(artifact);
 }
 // 本票研判/条件单时间线(后端落盘全量,exclude_runs 剔批跑回放;研判卡与决策留痕共用)。
 async function fetchDecisionsTimeline(code, limit) {
@@ -1390,7 +1583,13 @@ async function seatDecide(payload, extra) {
     if (!r.ok) return { error: 'HTTP ' + r.status };
     const j = await r.json();
     if (!j) return null;
-    if (!j.ok) return { error: (j.reason || '后端拒绝') };
+    if (!j.ok) return {
+      error: (j.reason || '后端拒绝'), detail: j.detail || null,
+      data_asof: j.data_asof || null, data_ref: j.data_ref || null,
+      requested_evidence_tf: j.requested_evidence_tf || null,
+      effective_evidence_tf: j.effective_evidence_tf || null,
+      evidence_source: j.evidence_source || null,
+    };
     return j;   // {ok, direction, confidence, rationale, key_evidence, model_name, asof, factors, model}
   } catch (e) { return { error: String(e) }; }
 }
@@ -1823,10 +2022,14 @@ Object.assign(window, {
   lzShadowListAll: shadowListAll, lzShadowAggregate: shadowAggregate,
   lzStrategyList: strategyList, lzStrategyGet: strategyGet, lzStrategyForCode: strategyForCode,
   lzStrategyColor: strategyColor, lzStrategySave: strategySave, lzStrategyDelete: strategyDelete,
+  lzNormalizeClock: _normClock,
   lzRecipeForStrategy: recipeForStrategy,
   lzPoolAdd: poolAdd, lzPoolRemove: poolRemove, lzPoolIsDynamic: poolIsDynamic,   // 盯盘池扩池
   lzPoolIsMonitored: poolIsMonitored, lzMonitoredCodes: monitoredCodes, lzMonitorAgentFor: monitorAgentFor,   // 盯盘集(校场绑定派生)
-  lzWatchSet: watchSet, lzFetchWatchStatus: fetchWatchStatus, lzToggleWatch: toggleWatch,   // 后端定时盯盘(2026-07-11)
+  lzWatchSet: watchSet, lzFetchWatchStatus: fetchWatchStatus, lzToggleWatch: toggleWatch,
+  lzFetchWatchAssignments: fetchWatchAssignments, lzPutWatchAssignment: putWatchAssignment,
+  lzPersistWatchStrategy: persistWatchStrategy, lzEnsureDedicatedWatchStrategy: ensureDedicatedWatchStrategy,
+  LZ_WATCH_EVIDENCE, LZ_WATCH_CADENCE,
   lzFetchDecisionsTimeline: fetchDecisionsTimeline,
   lzSeedDefaultStrategy: seedDefaultStrategy, LZ_TEMPLATES: LZ_TEMPLATES, LZ_TEMPLATE_IDS: LZ_TEMPLATE_IDS,
   lzScanSeat: scanSeat, lzSeatEquity: seatEquity,

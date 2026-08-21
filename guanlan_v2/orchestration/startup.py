@@ -146,6 +146,129 @@ def reset_status_for_tests() -> None:
     _record.reset_for_tests()
 
 
+_PRE_V4_PHASE9_REGISTRY_DIGEST = (
+    "9e73ddf6d23def5a5666016b1ab113e7b9920eb940ff22a0dd73d806efd3ac07"
+)
+
+
+def _build_pre_v4_phase9_registry():
+    """Rebuild the Phase-9 registry used by durable rows written before V4.
+
+    DeepSeek V4 added explicit thinking fields to ``ModelTierMap@1``. Existing
+    production payloads remain content-addressed under the preceding cumulative
+    registry digest, so fresh processes must retain that exact schema recipe while
+    also registering the new registry. The final digest assertion prevents this
+    compatibility path from silently becoming an alias for another manifest.
+    """
+    from typing import Literal
+
+    from pydantic import model_validator
+
+    from guanlan_v2.orchestration import (
+        bootstrap,
+        lane_catalog as p8,
+        phase7_registry as p7,
+        shadow,
+        trial,
+    )
+    from guanlan_v2.orchestration.adapters import chain
+    from guanlan_v2.orchestration.catalog import ModelTier
+    from guanlan_v2.orchestration.data.schema_registry import (
+        PHASE3_PUBLIC_MODELS as data_public_models,
+    )
+    from guanlan_v2.orchestration.digest import DigestModel, NonEmptyStr, PositiveInt
+    from guanlan_v2.orchestration.memory.schema_registry import (
+        PHASE3_MEMORY_PUBLIC_MODELS as memory_public_models,
+    )
+    from guanlan_v2.orchestration.runtime_contracts import (
+        Phase2RuntimeRegistry,
+        phase2_public_models,
+    )
+
+    # Local on purpose: the live contract inventory must only expose the current
+    # V4-aware ModelTierMap, while this frozen class remains available for replay.
+    class _LegacyModelTierBinding(DigestModel):
+        """The reviewed provider/model (and optional limits) a single tier resolves to."""
+
+        schema_version: Literal["1"] = "1"
+        tier: ModelTier
+        provider: NonEmptyStr
+        model: NonEmptyStr
+        max_tokens: PositiveInt | None = None
+        timeout_sec: PositiveInt | None = None
+
+    class _LegacyModelTierMap(DigestModel):
+        """The total, reviewed ModelTier -> provider/model map (Task-11 registered payload).
+
+        Exactly three bindings, one per :data:`TIER_ORDER` tier, in canonical order \u2014
+        the bridge is total over the closed ``ModelTier`` vocabulary or construction
+        fails.
+        """
+
+        schema_version: Literal["1"] = "1"
+        bindings: tuple[_LegacyModelTierBinding, ...]
+
+        @model_validator(mode="after")
+        def _total_and_ordered(self) -> "_LegacyModelTierMap":
+            tiers = tuple(binding.tier for binding in self.bindings)
+            expected = ("fast", "reasoner", "reasoner_deep")
+            if len(tiers) != len(expected):
+                raise ValueError(
+                    f"ModelTierMap requires exactly {len(expected)} bindings "
+                    f"(one per tier), got {len(tiers)}"
+                )
+            if len(set(tiers)) != len(tiers):
+                raise ValueError(
+                    "ModelTierMap bindings must be one-per-tier (no duplicates)"
+                )
+            if set(tiers) != set(expected):
+                raise ValueError(
+                    f"ModelTierMap must cover every tier {expected!r}; got {tiers!r}"
+                )
+            if tiers != expected:
+                raise ValueError(
+                    f"ModelTierMap bindings must be canonically ordered {expected!r}; "
+                    f"got {tiers!r}"
+                )
+            return self
+
+    # Pydantic's registry identity and JSON-schema titles use class names. Restore
+    # the historical public names only after class construction so static contract
+    # scanners never mistake these local replay-only shapes for current contracts.
+    _LegacyModelTierBinding.__name__ = "ModelTierBinding"
+    _LegacyModelTierBinding.__qualname__ = "ModelTierBinding"
+    _LegacyModelTierMap.__name__ = "ModelTierMap"
+    _LegacyModelTierMap.__qualname__ = "ModelTierMap"
+    _LegacyModelTierBinding.model_rebuild(force=True)
+    _LegacyModelTierMap.model_rebuild(force=True)
+
+    phase8_models = tuple(
+        _LegacyModelTierMap if model.__name__ == "ModelTierMap" else model
+        for model in p8.PHASE8_PUBLIC_MODELS
+    )
+    registry = Phase2RuntimeRegistry()
+    for model in (
+        tuple(phase2_public_models())
+        + tuple(data_public_models)
+        + tuple(memory_public_models)
+        + tuple(trial.PHASE4_PUBLIC_MODELS)
+        + tuple(bootstrap.PHASE5_PUBLIC_MODELS)
+        + tuple(shadow.PHASE6_PUBLIC_MODELS)
+        + tuple(p7.PHASE7_PUBLIC_MODELS)
+        + phase8_models
+        + tuple(chain.PHASE9_PUBLIC_MODELS)
+    ):
+        registry.register(model)
+    registry.seal()
+    if registry.registry_digest != _PRE_V4_PHASE9_REGISTRY_DIGEST:
+        raise RuntimeError(
+            "pre-V4 Phase-9 registry recipe drifted: "
+            f"expected {_PRE_V4_PHASE9_REGISTRY_DIGEST}, "
+            f"got {registry.registry_digest}"
+        )
+    return registry
+
+
 def build_production_resolver():
     """The production schema-registry resolver: Phase-1 + Phase-2 + Phase-9 cumulative
     + the two Phase-10 pipeline side registries.
@@ -187,6 +310,9 @@ def build_production_resolver():
     phase1 = default_registry()
     d1 = resolver.register(phase1)
     d2 = resolver.register(phase2_runtime_registry(phase1.registry_digest))
+    # Backward compatibility is additive: old durable rows retain their exact
+    # registry identity; new writes use the V4-aware cumulative registry below.
+    resolver.register(_build_pre_v4_phase9_registry())
     d9 = resolver.register(chain.build_phase9_registry(chain.PHASE9_BASE_REGISTRY_DIGEST))
     ds = resolver.register(_subject_registry())
     dp = resolver.register(_pipeline_registry())

@@ -59,6 +59,30 @@ def build_archive_router() -> APIRouter:
         if not _ID_RE.match(aid):
             return JSONResponse({"ok": False, "reason": "非法 id"})
         p = _DIR / f"{aid}.json"
+        kind = None
+        if p.exists():
+            try:
+                raw = json.loads(p.read_text(encoding="utf-8"))
+                kind = raw.get("type") if isinstance(raw, dict) else None
+            except Exception:
+                kind = None
+        if kind not in {"research", "decision"}:
+            # Assignment rows are authoritative even when disabled: a disabled
+            # row still remembers which Agent to resume.  Check and unlink
+            # under the same assignment lock so a concurrent PUT cannot race
+            # between preflight and deletion.
+            try:
+                from guanlan_v2.seats import watch_assignments as _wa
+                result = _wa.remove_archive_if_unreferenced(
+                    aid, p, path=_wa.ASSIGNMENTS_PATH, archive_dir=_DIR)
+            except Exception as exc:  # corrupt/unavailable guard => fail closed
+                return JSONResponse({
+                    "ok": False, "reason": "assignment_guard_unavailable",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                }, status_code=503)
+            if not result.get("ok"):
+                return JSONResponse(result, status_code=409)
+            return JSONResponse(result)
         if p.exists():
             p.unlink()
         return JSONResponse({"ok": True, "id": aid})

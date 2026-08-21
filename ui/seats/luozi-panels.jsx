@@ -39,7 +39,7 @@ const LZ_REASON_CN = { manual: '手动研判', fill: '成交后研判', timer: '
 
 // ───────── 条件单 · agent 盯盘(2b:右侧栏,非全屏)─────────
 //   agent(/seats/order)按席位信条 + 真实时上下文出一张到价/放量/指标触发单 → 触发引擎(真 5min 回放)检验。
-function OrderWatchPanel({ code, name, onTrigger, mode, strategies, asOf, seatId }) {
+function OrderWatchPanel({ code, name, onTrigger, mode, strategies, asOf, seatId, symbol }) {
   // 2026-07-11 三页重排瘦身:研判循环/影子持仓/w 滑杆退役(循环归后端 watcher,持仓记账随台账退役);
   //   保留:⚡立单(LLM 拟条件单)· ◷复盘验触发(真 5min 回放)· 盘中 8s 实时比对自动触发。
   const seat = (seatId && (strategies || []).some(s => s.id === seatId)) ? seatId : ((strategies && strategies[0] && strategies[0].id) || 'momentum');
@@ -50,7 +50,7 @@ function OrderWatchPanel({ code, name, onTrigger, mode, strategies, asOf, seatId
   const [checking, setChecking] = useState(false);
   const [liveFired, setLiveFired] = useState(null);   // 盘中真实时触发结果
   const [liveCtx, setLiveCtx] = useState(null);       // 最近一次实时上下文(盯盘指示)
-  useEffect(() => { setOrder(null); setTrig(null); setGen(false); setChecking(false); setLiveFired(null); setLiveCtx(null); }, [code]);
+  useEffect(() => { setOrder(null); setTrig(null); setGen(false); setChecking(false); setLiveFired(null); setLiveCtx(null); setOtf('day'); }, [code, seat]);
   const SEATCN = { reversal: '反转席', momentum: '动量席', event: '事件席', risk: '风控席' };
   const seatName = ((strategies || []).find(s => s.id === seat) || {}).name || SEATCN[seat] || '策略';
   const runJudge = () => {
@@ -78,11 +78,15 @@ function OrderWatchPanel({ code, name, onTrigger, mode, strategies, asOf, seatId
   };
   const check = () => {
     const o = order && order.order;
-    if (!o || !(o.triggers || []).length || checking || !window.lzFetchBars5 || !window.lzRunTriggerReplay) return;
+    if (!o || !(o.triggers || []).length || checking || !window.lzRunTriggerReplay) return;
     setChecking(true); setTrig(null);
-    window.lzFetchBars5(code, 480).then(bars5 => {
-      if (!bars5 || !bars5.length) { setTrig({ error: '无 5min 数据(后端/窗口)' }); setChecking(false); return; }
-      const win = bars5.slice(-240);
+    const orderTF = order && order.tf === '5min' ? '5min' : 'day';
+    const source = orderTF === '5min'
+      ? (window.lzFetchBars5 ? window.lzFetchBars5(code, 480) : Promise.resolve(null))
+      : Promise.resolve(symbol && symbol.bars ? symbol.bars : null);
+    source.then(bars => {
+      if (!bars || !bars.length) { setTrig({ error: '无' + (orderTF === '5min' ? '5分钟' : '日线') + '数据(后端/窗口)' }); setChecking(false); return; }
+      const win = bars.slice(-(orderTF === '5min' ? 240 : 120));
       const ord = { id: 'chk', seat: order.seat, side: o.side, triggers: o.triggers, logic: o.logic };
       const res = window.lzRunTriggerReplay(win, [ord], 20);
       const f = res.fired[0];
@@ -122,20 +126,21 @@ function OrderWatchPanel({ code, name, onTrigger, mode, strategies, asOf, seatId
       {/* 第一行:令 + 标题 + 立单(标题不挤换行) */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 14px 5px' }}>
         <span className="serif" style={{ width: 19, height: 19, background: 'var(--yin)', color: 'var(--paper)', fontSize: 12, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 2, flexShrink: 0 }}>令</span>
-        <span className="serif" style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink)', letterSpacing: '0.06em', whiteSpace: 'nowrap' }}>条件单 · 盯盘</span>
+        <span className="serif" style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink)', letterSpacing: '0.06em', whiteSpace: 'nowrap' }}>条件单 · 触发监控</span>
         <span onClick={genOrder} className="serif" style={{ marginLeft: 'auto', flexShrink: 0, whiteSpace: 'nowrap', fontSize: 11, letterSpacing: '0.06em', color: gen ? 'var(--ink-3)' : 'var(--paper)', background: gen ? 'transparent' : 'var(--yin)', border: gen ? '1px solid var(--line)' : 'none', cursor: gen ? 'default' : 'pointer', borderRadius: 3, padding: '3px 11px' }}>
           {gen ? '拟单中…' : '⚡ 立 单'}
         </span>
       </div>
-      {/* 第二行:席位 / 周期 / 研判循环 各自有位置,不再换行 */}
+      {/* 第二行:当前策略 + 条件指标口径；与图表周期/自动研判周期互不混用。 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '0 14px 8px' }}>
         <span className="serif" title="当前策略(单 agent:在左栏「当前策略」卡切换;下拉退役)" style={{ fontSize: 10.5, color: 'var(--ink-1)', borderBottom: '1px solid var(--line)', padding: '0 2px 1px', whiteSpace: 'nowrap' }}>{seatName}</span>
-        <select value={otf} onChange={e => setOtf(e.target.value)} className="serif" title="交易单周期:日线波段 / 5min 日内短线" style={{ fontSize: 10.5, color: 'var(--jin)', border: 'none', borderBottom: '1px solid var(--line)', background: 'transparent', padding: '0 2px 1px', cursor: 'pointer', outline: 'none' }}>
-          <option value="day">日线</option>
-          <option value="5min">5min</option>
+        <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>指标口径</span>
+        <select value={otf} onChange={e => { const next = e.target.value; setOtf(next); if (order && order.tf !== next) { setOrder(null); setTrig(null); setLiveFired(null); setLiveCtx(null); } }} className="serif" title="只控制本张条件单的指标计算；修改后需重新立单" style={{ fontSize: 10.5, color: 'var(--jin)', border: 'none', borderBottom: '1px solid var(--line)', background: 'transparent', padding: '0 2px 1px', cursor: 'pointer', outline: 'none' }}>
+          <option value="day">日线指标</option>
+          <option value="5min">5分钟指标</option>
         </select>
       </div>
-      {!o && !gen && <div className="serif" style={{ fontSize: 10.5, color: 'var(--ink-3)', padding: '0 14px 11px', lineHeight: 1.7, textWrap: 'pretty' }}>令 <b style={{ color: 'var(--ink-2)', fontWeight: 600 }}>{seatName}</b> 依信条 + 真实时数据,拟一张 <b style={{ color: 'var(--jin)' }}>到价 · 放量 · 指标</b> 触发的条件单 —— 价到则发讯,你照讯落单。</div>}
+      {!o && !gen && <div className="serif" style={{ fontSize: 10.5, color: 'var(--ink-3)', padding: '0 14px 11px', lineHeight: 1.7, textWrap: 'pretty' }}>令 <b style={{ color: 'var(--ink-2)', fontWeight: 600 }}>{seatName}</b> 依信条 + 所选指标口径拟一张 <b style={{ color: 'var(--jin)' }}>到价 · 放量 · 指标</b> 条件单。生成后仅在本页在线时监控触发，不受自动盯盘总闸控制。</div>}
       {gen && <div className="serif" style={{ fontSize: 10.5, color: 'var(--yin)', padding: '0 14px 11px' }}>{seatName} 拟单中…(deepseek 真调,需几秒)</div>}
       {o && (
         <div style={{ margin: '1px 12px 12px', border: '1px solid var(--line)', borderLeft: '2.5px solid ' + dirColor, borderRadius: '1px 7px 7px 1px', background: 'var(--paper)', padding: '9px 12px 10px', boxShadow: '0 1px 2px rgba(28,24,20,0.05)' }}>
@@ -185,7 +190,7 @@ function OrderWatchPanel({ code, name, onTrigger, mode, strategies, asOf, seatId
                   <span className="serif" style={{ width: 26, background: 'var(--yin)', color: 'var(--paper)', fontSize: 12.5, fontWeight: 600, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', borderRadius: 2, lineHeight: 1.12, flexShrink: 0, animation: 'lzSeal .55s cubic-bezier(.2,1.5,.4,1)' }}><span>触</span><span>发</span></span>
                   <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
                     <div className="mono" style={{ fontSize: 10.5, color: 'var(--ink-1)' }}>{trig.at} · 成交 <b style={{ color: 'var(--yin)', fontSize: 12 }}>{trig.fill}</b></div>
-                    <div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', marginTop: 2, lineHeight: 1.55 }}>该 bar 高 {trig.ctx && trig.ctx.high} · 低 {trig.ctx && trig.ctx.low} · 量比 {trig.ctx && trig.ctx.volRatio} · 乖离 {trig.ctx && trig.ctx.maDiff20}<br />真历史 5min 回放 · 同一引擎 live 复用</div>
+                    <div className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', marginTop: 2, lineHeight: 1.55 }}>该 bar 高 {trig.ctx && trig.ctx.high} · 低 {trig.ctx && trig.ctx.low} · 量比 {trig.ctx && trig.ctx.volRatio} · 乖离 {trig.ctx && trig.ctx.maDiff20}<br />真历史 {order && order.tf === '5min' ? '5分钟' : '日线'} 回放 · 与本单指标口径一致</div>
                   </div>
                 </div>)}
           {/* ②搬实盘:盘中实时盯盘 + 自动触发(同一 evalTrigger,ctx 换成 /seats/live_eval 逐 poll)*/}
@@ -198,7 +203,7 @@ function OrderWatchPanel({ code, name, onTrigger, mode, strategies, asOf, seatId
                 </div>
               </div>
             : <div className="mono" style={{ marginTop: 9, fontSize: 9.5, color: 'var(--dai)', display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--dai)', animation: 'pulse 1.5s ease-in-out infinite' }} />实时盯盘中…(每 8s 比对真价/指标{liveCtx && liveCtx.price != null ? ' · 现价 ' + liveCtx.price : ''})
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--dai)', animation: 'pulse 1.5s ease-in-out infinite' }} />触发监控中…(本页在线 · 每 8s 比对真价/指标{liveCtx && liveCtx.price != null ? ' · 现价 ' + liveCtx.price : ''})
               </div>)}
         </div>
       )}
@@ -1092,7 +1097,7 @@ function ReasoningChain({ reasoning }) {
   if (!reasoning) return null;
   return (
     <details style={{ marginTop: 6 }}>
-      <summary className="mono" style={{ fontSize: 9.5, color: 'var(--yin)', cursor: 'pointer' }}>思维链 ▾(reasoner 真逐步推理 · 点开)</summary>
+      <summary className="mono" style={{ fontSize: 9.5, color: 'var(--yin)', cursor: 'pointer' }}>思维链 ▾(V4 高强度思考 · 点开)</summary>
       <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-2)', marginTop: 4, lineHeight: 1.65, whiteSpace: 'pre-wrap', maxHeight: 220, overflowY: 'auto', background: 'rgba(28,24,20,0.035)', borderRadius: 6, padding: '7px 9px' }}>{reasoning}</div>
     </details>
   );
@@ -1176,7 +1181,7 @@ function DecisionCard({ dec, symbol, mode }) {
   const [decide, setDecide] = useState(null);     // ⑤ 席位 agent 真研判(/seats/decide,on-demand)
   const [deciding, setDeciding] = useState(false);
   const [histOpen, setHistOpen] = useState(false);     // ⑤+ 研判历史抽屉(读 /seats/decisions 落盘记录)
-  const [agentMode, setAgentMode] = useState('deep');  // ⑤ 研判模式:deep=reasoner有思维链 / fast=chat快无思维链(用户偏好,跨卡保持,故不在下方 useEffect 重置)
+  const [agentMode, setAgentMode] = useState('deep');  // ⑤ 研判模式:deep=V4-Flash 高强度思考 / fast=V4-Flash 非思考(用户偏好,跨卡保持,故不在下方 useEffect 重置)
   const [wEdit, setWEdit] = useState(null);            // P3:本卡就地调因子权重 w(null=用策略持久值;拖动后覆盖并回存策略,实盘定时/手动研判同源)
   const code = symbol && symbol.meta && symbol.meta.code;
   useEffect(() => {
@@ -1428,7 +1433,7 @@ function DecisionCard({ dec, symbol, mode }) {
                 w: (st && isFinite(+st.w)) ? Math.max(0, Math.min(1, +st.w)) : 0,   // P3:手动研判按本策略 w 混合(下方滑块就地可调);w=0 严格纯 LLM
               }).then(d => { setDecide(d); setDeciding(false); });
             };
-            // 快/深双模式(用户偏好,跨卡保持):快=deepseek-chat 秒级·无思维链;深=deepseek-reasoner 十几秒·带真思维链。
+            // 快/深双模式(用户偏好,跨卡保持):两者均为 V4-Flash;快=非思考,深=thinking enabled + high。
             const modeBtn = (m, label, tip) => (
               <span onClick={(e) => { e.stopPropagation(); if (!deciding) setAgentMode(m); }} title={tip}
                 style={{ fontSize: 9, padding: '2px 7px', borderRadius: 5, cursor: deciding ? 'default' : 'pointer', fontFamily: 'var(--mono)', border: '1px solid ' + (agentMode === m ? 'var(--zhu-soft)' : 'var(--line)'), background: agentMode === m ? 'rgba(168,57,45,0.07)' : 'transparent', color: agentMode === m ? 'var(--yin)' : 'var(--ink-3)', fontWeight: agentMode === m ? 600 : 400, opacity: deciding ? 0.45 : 1 }}>{label}</span>
@@ -1436,9 +1441,9 @@ function DecisionCard({ dec, symbol, mode }) {
             const modeRow = (
               <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 7 }}>
                 <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>模式</span>
-                {modeBtn('fast', '快 · chat', 'deepseek-chat:几秒出方向,无思维链')}
-                {modeBtn('deep', '深 · reasoner', 'deepseek-reasoner:十几秒,带真思维链(逐步推理)')}
-                <span className="mono" style={{ fontSize: 8, color: 'var(--ink-3)', marginLeft: 2 }}>{agentMode === 'deep' ? '慢 · 有思维链' : '快 · 无思维链'}</span>
+                {modeBtn('fast', '快 · V4', 'deepseek-v4-flash · 非思考模式(thinking disabled)')}
+                {modeBtn('deep', '深 · V4 思考', 'deepseek-v4-flash · 高强度思考(thinking enabled · high)')}
+                <span className="mono" style={{ fontSize: 8, color: 'var(--ink-3)', marginLeft: 2 }}>{agentMode === 'deep' ? '慢 · 高强度思考' : '快 · 非思考'}</span>
                 <span onClick={(e) => { e.stopPropagation(); setHistOpen(true); }} className="mono" title="查看历次 agent 研判 / 条件单的真思维链(落盘)"
                   style={{ marginLeft: 'auto', fontSize: 9, padding: '2px 8px', borderRadius: 5, cursor: 'pointer', border: '1px solid var(--line)', color: 'var(--ink-3)' }}>研判历史 ⏱</span>
               </div>
@@ -1460,7 +1465,7 @@ function DecisionCard({ dec, symbol, mode }) {
             let body;
             if (deciding) body = (
               <div className="mono" style={{ fontSize: 10.5, color: 'var(--yin)', display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--yin)', animation: 'pulse 1s ease-in-out infinite' }} />{agentMode === 'deep' ? 'agent 研判中…(deepseek-reasoner 真推理,十几秒)' : 'agent 研判中…(deepseek-chat 快研判,几秒)'}
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--yin)', animation: 'pulse 1s ease-in-out infinite' }} />{agentMode === 'deep' ? 'agent 研判中…(V4-Flash 高强度思考)' : 'agent 研判中…(V4-Flash 非思考)'}
               </div>
             );
             else if (!decide) body = (
@@ -1470,7 +1475,7 @@ function DecisionCard({ dec, symbol, mode }) {
               </div>
             );
             else if (decide.error) body = (
-              <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)' }}>agent 研判失败:{decide.error} · <span onClick={runDecide} style={{ color: 'var(--yin)', cursor: 'pointer' }}>重试 →</span></div>
+              <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)' }}>agent 研判失败:{decide.error}{decide.data_asof ? ' · 数据截至 ' + decide.data_asof : ''}{decide.detail ? ' · ' + decide.detail : ''} · <span onClick={runDecide} style={{ color: 'var(--yin)', cursor: 'pointer' }}>重试 →</span></div>
             );
             else {
               const dirColor = decide.direction && /买/.test(decide.direction) ? 'var(--zhu)' : (decide.direction && /卖/.test(decide.direction) ? 'var(--dai)' : 'var(--ink-2)');
@@ -1512,7 +1517,15 @@ function DecisionCard({ dec, symbol, mode }) {
 // ───────── 研判卡(2026-07-11 三页重排:LiveDecideFlow + DecisionCard「席位·agent 研判」区 合一)─────────
 //   「▶ 研判一次」真调 /seats/decide + 研判时间线(后端落盘全量,修旧「流水只留最新1条」名实不符);
 //   行点开 = EvidenceFields 完整证据链。industry 传真值(修旧 runTimedDecide 恒空 bug)。
-function JudgeCard({ code, name, industry, strat, regime }) {
+const JUDGE_TF_CN = { day: '日线', '30min': '30分钟', '5min': '5分钟', '1min': '1分钟' };
+const JUDGE_CADENCE_CN = { daily: '每日一次', '60min': '每60分钟', hourly: '每60分钟', '30min': '每30分钟', '10min': '每10分钟' };
+function _judgeNow(freq) {
+  const d = new Date(), p = n => String(n).padStart(2, '0');
+  const day = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  return freq === 'day' ? day : (day + 'T' + p(d.getHours()) + ':' + p(d.getMinutes()));
+}
+
+function JudgeCard({ code, name, industry, strat, regime, assignment, assignmentMode, onConfigureWatch }) {
   const [decide, setDecide] = useState(null);
   const [deciding, setDeciding] = useState(false);
   const [agentMode, setAgentMode] = useState('deep');
@@ -1520,6 +1533,13 @@ function JudgeCard({ code, name, industry, strat, regime }) {
   const [openId, setOpenId] = useState(null);
   const [histOpen, setHistOpen] = useState(false);
   const [bump, setBump] = useState(0);
+  const modernAssignment = !!(assignmentMode && assignmentMode.supported === true);
+  const legacyAssignment = !!(assignmentMode && assignmentMode.legacy);
+  const requestedTF = modernAssignment && assignment ? (assignment.requested_evidence_tf || assignment.evidence_tf || 'day') : 'day';
+  const effectiveTF = modernAssignment && assignment
+    ? (Object.prototype.hasOwnProperty.call(assignment, 'effective_evidence_tf') ? assignment.effective_evidence_tf : requestedTF)
+    : 'day';
+  const unsupportedTF = modernAssignment && assignment && !effectiveTF;
   useEffect(() => {
     let alive = true; setDecide(null); setOpenId(null);
     if (window.lzFetchDecisionsTimeline) window.lzFetchDecisionsTimeline(code, 40)
@@ -1528,7 +1548,7 @@ function JudgeCard({ code, name, industry, strat, regime }) {
     return () => { alive = false; };
   }, [code, bump]);
   const runDecide = async () => {
-    if (!window.lzSeatDecide || deciding || !strat) return;
+    if (!window.lzSeatDecide || deciding || !strat || unsupportedTF) return;
     setDeciding(true); setDecide(null);
     const rcp = window.lzRecipeForStrategy ? window.lzRecipeForStrategy(strat.id) : { cards: [], research: [], factors: [] };
     // 持仓上下文(可选,诚实降级):台账若已开仓且本票在持 → 喂 hold_entry(加权成本);
@@ -1543,7 +1563,7 @@ function JudgeCard({ code, name, industry, strat, regime }) {
       }
     } catch (e) { holdExtra = null; }
     window.lzSeatDecide({
-      code, name, date: new Date().toISOString().slice(0, 10),
+      code, name, date: _judgeNow(effectiveTF || 'day'), freq: effectiveTF || 'day',
       seat_cn: strat.name, creed: strat.creed || '', mode: agentMode,
       strategy_id: strat.id, strategy_name: strat.name,
       industry: industry || '',
@@ -1566,24 +1586,35 @@ function JudgeCard({ code, name, industry, strat, regime }) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '10px 13px 7px' }}>
         <span className="serif" style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-1)' }}>研判</span>
         <span className="mono" style={{ fontSize: 8.5, padding: '1px 6px', borderRadius: 4, border: '1px solid var(--zhu-soft)', color: 'var(--yin)' }}>真 · LLM</span>
-        {modeBtn('fast', '快', 'deepseek-chat:几秒出方向,无思维链')}
-        {modeBtn('deep', '深', 'deepseek-reasoner:十几秒,带真思维链')}
+        <span className="mono" style={{ fontSize: 8, color: 'var(--ink-3)' }}>本次思考</span>
+        {modeBtn('fast', '快速', 'deepseek-v4-flash · 非思考模式(thinking disabled)')}
+        {modeBtn('deep', 'Pro', 'deepseek-v4-flash · 高强度思考(thinking enabled · high)')}
+        {onConfigureWatch && <span onClick={onConfigureWatch} className="mono" title="设置本票负责 Agent、研判数据周期、自动节奏和自动思考强度" style={{ marginLeft: 'auto', fontSize: 9, padding: '2px 8px', borderRadius: 5, cursor: 'pointer', border: '1px solid var(--zhu-soft)', color: 'var(--yin)' }}>盯盘设置</span>}
         <span onClick={() => setHistOpen(true)} className="mono" title="历次研判/条件单全量(落盘)"
-          style={{ marginLeft: 'auto', fontSize: 9, padding: '2px 8px', borderRadius: 5, cursor: 'pointer', border: '1px solid var(--line)', color: 'var(--ink-3)' }}>⏱ 全部</span>
+          style={{ fontSize: 9, padding: '2px 8px', borderRadius: 5, cursor: 'pointer', border: '1px solid var(--line)', color: 'var(--ink-3)' }}>⏱ 全部</span>
+      </div>
+      <div className="mono" style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', padding: '0 13px 8px', fontSize: 8.5, color: 'var(--ink-3)' }}>
+        <span title="当前实际负责的策略 Agent" style={{ border: '1px solid var(--line)', borderRadius: 4, padding: '1px 5px' }}>Agent · {(strat && strat.name) || (assignment && (assignment.strategy_name || assignment.strategy_id)) || '未指定'}</span>
+        <span title="Agent 研判所读取的数据周期；与图表周期无关" style={{ border: '1px solid ' + (unsupportedTF ? 'var(--zhu-soft)' : 'var(--line)'), borderRadius: 4, padding: '1px 5px', color: unsupportedTF ? 'var(--yin)' : 'var(--ink-3)' }}>依据 · {JUDGE_TF_CN[requestedTF] || requestedTF}{unsupportedTF ? '（未接通·已暂停）' : ''}</span>
+        {modernAssignment && assignment && <span style={{ border: '1px solid var(--line)', borderRadius: 4, padding: '1px 5px' }}>自动 · {assignment.enabled ? (JUDGE_CADENCE_CN[assignment.decision_cadence] || assignment.decision_cadence) : '已停用'}</span>}
+        {modernAssignment && assignment && <span style={{ border: '1px solid var(--line)', borderRadius: 4, padding: '1px 5px' }}>自动思考 · {assignment.thinking_mode === 'deep' ? 'Pro' : '快速'}</span>}
+        {legacyAssignment && <span style={{ color: 'var(--jin)' }}>旧版绑定 · 自动研判固定日线</span>}
+        {!modernAssignment && !legacyAssignment && <span style={{ color: 'var(--ink-3)' }}>单票配置不可达 · 手动研判仍按日线</span>}
+        {modernAssignment && !assignment && <span>未纳入自动盯盘 · 手动研判按日线</span>}
       </div>
       <div style={{ padding: '0 13px 10px' }}>
         {deciding ? (
           <div className="mono" style={{ fontSize: 10.5, color: 'var(--yin)', display: 'flex', alignItems: 'center', gap: 6, padding: '6px 0' }}>
             <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--yin)', animation: 'pulse 1s ease-in-out infinite' }} />
-            {agentMode === 'deep' ? '研判中…(reasoner 真推理,十几秒)' : '研判中…(chat 快研判,几秒)'}
+            {agentMode === 'deep' ? '研判中…(V4-Flash 高强度思考)' : '研判中…(V4-Flash 非思考)'}
           </div>
         ) : (
-          <div onClick={runDecide} title="真调 LLM:综合 配方卡/因子/研报 + 今日市况(仅 ≤当日信息)研判当下"
-            style={{ fontSize: 10.5, color: strat ? 'var(--yin)' : 'var(--ink-3)', cursor: strat ? 'pointer' : 'default', border: '1px dashed var(--zhu-soft)', borderRadius: 8, padding: '6px 10px', display: 'inline-block', fontFamily: 'var(--serif)' }}>
-            ▶ 研判一次{strat ? ' · ' + strat.name : '(无策略,去「策略」页建)'}
+          <div onClick={runDecide} title={unsupportedTF ? '所选研判数据周期尚未接通；为防伪造，未回退日线' : ('真调 LLM：按 ' + (JUDGE_TF_CN[effectiveTF] || effectiveTF || '日线') + ' 口径综合配方与市况研判')}
+            style={{ fontSize: 10.5, color: (strat && !unsupportedTF) ? 'var(--yin)' : 'var(--ink-3)', cursor: (strat && !unsupportedTF) ? 'pointer' : 'default', border: '1px dashed var(--zhu-soft)', borderRadius: 8, padding: '6px 10px', display: 'inline-block', fontFamily: 'var(--serif)' }}>
+            {unsupportedTF ? ('所选' + (JUDGE_TF_CN[requestedTF] || requestedTF) + '研判未接通 · 未降级日线') : ('▶ 研判一次' + (strat ? ' · ' + strat.name + ' · ' + (JUDGE_TF_CN[effectiveTF] || effectiveTF) : '(无策略,去「策略」页建)'))}
           </div>
         )}
-        {decide && decide.error && <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)', marginTop: 6 }}>研判失败:{decide.error} · <span onClick={runDecide} style={{ color: 'var(--yin)', cursor: 'pointer' }}>重试 →</span></div>}
+        {decide && decide.error && <div className="mono" style={{ fontSize: 9.5, color: 'var(--ink-3)', marginTop: 6 }}>研判失败:{decide.error}{decide.data_asof ? ' · 数据截至 ' + decide.data_asof : ''}{decide.detail ? ' · ' + decide.detail : ''} · <span onClick={runDecide} style={{ color: 'var(--yin)', cursor: 'pointer' }}>重试 →</span></div>}
         {decide && !decide.error && (
           <div style={{ border: '1px solid var(--zhu-soft)', borderRadius: 9, background: 'rgba(138,111,63,0.05)', padding: '9px 11px', marginTop: 8 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1616,6 +1647,7 @@ function JudgeCard({ code, name, industry, strat, regime }) {
                   {r.confidence != null && <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>置信{r.confidence}</span>}
                   <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.strategy_name || ''}</span>
                   {r.source === 'watcher' && <span className="mono" title="服务端盯盘自动研判" style={{ fontSize: 8, padding: '1px 5px', borderRadius: 4, border: '1px solid var(--line)', color: 'var(--ink-3)' }}>盯</span>}
+                  {(r.evidence_tf || r.freq) && <span className="mono" title="该条记录实际使用的数据周期" style={{ fontSize: 8, padding: '1px 4px', borderRadius: 4, border: '1px solid var(--line)', color: 'var(--ink-3)' }}>{JUDGE_TF_CN[r.evidence_tf || r.freq] || (r.evidence_tf || r.freq)}</span>}
                   <span className="mono" style={{ marginLeft: 'auto', fontSize: 8, color: 'var(--ink-3)' }}>{isOpen ? '▴' : '▾'}</span>
                 </div>
                 {isOpen && <div style={{ padding: '6px 2px 4px', display: 'flex', flexDirection: 'column', gap: 10 }}><EvidenceFields dec={r} /></div>}

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from guanlan_v2.desktop import supervisor as sv
-from guanlan_v2.desktop.bridge import JsApi
+from guanlan_v2.desktop.bridge import JsApi, issue_research_folder_grant
 
 _DIR = Path(__file__).resolve().parent
 BOOT_URI = (_DIR / "boot.html").as_uri()
@@ -53,7 +53,8 @@ _last_log_at: dict[str, float] = {}
 class Shell:
     def __init__(self, *, webview_module, ensure: Callable, prober: Callable,
                  spawner: Callable, contamination: Callable,
-                 file_opener: Callable[[str], None]) -> None:
+                 file_opener: Callable[[str], None],
+                 folder_grant_factory: Callable[[str], dict] | None = None) -> None:
         self._wv = webview_module
         self._ensure = ensure
         self._probe = prober
@@ -89,14 +90,37 @@ class Shell:
         self.api = JsApi(open_window_factory=self.open_ui_window,
                          status_provider=lambda: dict(self._status),
                          retry_handler=self._on_retry,
-                         log_opener=self._on_open_log)
+                         log_opener=self._on_open_log,
+                         folder_chooser=self._choose_research_folder,
+                         folder_grant_factory=(
+                             folder_grant_factory or issue_research_folder_grant
+                         ))
         self._retry_requested = threading.Event()
         self.main_window = self._new_window(BOOT_URI, WINDOW_TITLE)
 
     # ── 窗口 ────────────────────────────────────────────────────────
+    def _choose_research_folder(self):
+        """Open a native, main-window-owned folder dialog.
+
+        JsApi turns every exception into a JSON error, so missing GUI bindings
+        remain a safe, diagnosable failure instead of a rejected JS promise.
+        """
+        win = getattr(self, "main_window", None)
+        if win is None:
+            raise RuntimeError("desktop window is not bound")
+        dialog_enum = getattr(self._wv, "FileDialog", None)
+        folder_kind = getattr(dialog_enum, "FOLDER", None)
+        if folder_kind is None:
+            raise RuntimeError("pywebview folder dialog is unavailable")
+        create_dialog = getattr(win, "create_file_dialog", None)
+        if not callable(create_dialog):
+            raise RuntimeError("desktop window does not support file dialogs")
+        return create_dialog(dialog_type=folder_kind)
+
     def _new_window(self, url: str, title: str):
         win = self._wv.create_window(title, url=url, js_api=self.api,
-                                     width=_WIDTH, height=_HEIGHT)
+                                     width=_WIDTH, height=_HEIGHT,
+                                     text_select=True)
         self._windows.append(win)
         try:
             # 零参数闭包 —— 真 pywebview 按签名内省调度,声明形参(哪怕带默认值)
@@ -411,7 +435,8 @@ def _log_shell_event(message: str) -> None:
 def create_shell(*, webview_module, ensure: Callable | None = None,
                  prober: Callable | None = None, spawner: Callable | None = None,
                  contamination: Callable | None = None,
-                 file_opener: Callable[[str], None] | None = None) -> Shell:
+                 file_opener: Callable[[str], None] | None = None,
+                 folder_grant_factory: Callable[[str], dict] | None = None) -> Shell:
     prober = prober or sv.probe
     spawner = spawner or sv.spawn_watchdog
     return Shell(
@@ -424,4 +449,5 @@ def create_shell(*, webview_module, ensure: Callable | None = None,
         spawner=spawner,
         contamination=contamination or sv.port_contamination,
         file_opener=file_opener or os.startfile,
+        folder_grant_factory=folder_grant_factory,
     )

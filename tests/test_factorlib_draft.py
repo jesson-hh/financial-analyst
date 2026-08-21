@@ -1,10 +1,13 @@
 """factorlib draft 门(P2 §4):status 落盘/list 显形/目录过滤/人审 promote。tmp store 零生产污染。"""
 import json
+import multiprocessing
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from guanlan_v2.factorlib.api import SaveIn, _promote_factor, _save_factor, build_factorlib_router
+from guanlan_v2.factorlib.api import (
+    SaveIn, _promote_factor, _safe_filename, _save_factor, build_factorlib_router,
+)
 from guanlan_v2.factorlib.store import LibraryFactorStore
 
 
@@ -18,6 +21,26 @@ def _client(store) -> TestClient:
     app = FastAPI()
     app.include_router(build_factorlib_router(store=store))
     return TestClient(app)
+
+
+def _publish_worker(base_dir, mined_dir, gate, output, name):
+    """Spawn-safe helper for the cross-process provenance arbitration test."""
+    from guanlan_v2.factorlib.api import SaveIn, save_factor_idempotent
+    from guanlan_v2.factorlib.store import LibraryFactorStore
+
+    gate.wait(10)
+    result = save_factor_idempotent(
+        SaveIn(name=name, expr="rank(close)", source="research_workspace_publish", meta={
+            "workspace_id": "rw_aaaaaaaaaaaa",
+            "workspace_asset_id": "wa_1111111111111111",
+            "workspace_version": 1,
+        }),
+        LibraryFactorStore(base_dir=base_dir, mined_dir=mined_dir),
+        workspace_id="rw_aaaaaaaaaaaa",
+        workspace_asset_id="wa_1111111111111111",
+        workspace_version=1,
+    )
+    output.put(result)
 
 
 def test_save_with_draft_status_persisted(tmp_path):
@@ -37,6 +60,99 @@ def test_save_without_status_unchanged(tmp_path):
     data = json.loads((st.mined_dir / "lib_rl_t2.json").read_text(encoding="utf-8"))
     assert "status" not in data[0]                                   # 旧行为零变化
     assert "status" not in {f["name"]: f for f in st.list_factors(validate=False)}["lib_rl_t2"]
+
+
+def test_non_ascii_factor_filename_is_deterministic_for_atomic_arbitration():
+    first = _safe_filename("纯中文因子")
+    assert first == _safe_filename("纯中文因子")
+    assert first != _safe_filename("另一中文因子")
+    assert first.startswith("factor_")
+
+
+def test_same_provenance_is_exactly_once_across_processes(tmp_path):
+    base = tmp_path / "base"
+    mined = tmp_path / "mined"
+    base.mkdir(); mined.mkdir()
+    ctx = multiprocessing.get_context("spawn")
+    gate = ctx.Event()
+    output = ctx.Queue()
+    procs = [
+        ctx.Process(target=_publish_worker, args=(base, mined, gate, output, name))
+        for name in ("first_public_name", "second_public_name")
+    ]
+    for proc in procs:
+        proc.start()
+    gate.set()
+    results = [output.get(timeout=30) for _ in procs]
+    for proc in procs:
+        proc.join(timeout=30)
+        assert proc.exitcode == 0
+    rows = LibraryFactorStore(base_dir=base, mined_dir=mined).load_all()
+    assert len(rows) == 1
+    assert all(result["ok"] for result in results)
+    assert {result["name"] for result in results} == {rows[0]["name"]}
+
+
+def test_promote_replace_failure_preserves_original_draft(tmp_path, monkeypatch):
+    import guanlan_v2.factorlib.api as factor_api
+
+    store = _store(tmp_path)
+    saved = _save_factor(SaveIn(
+        name="lib_atomic_promote", expr="rank(close)", status="draft",
+    ), store)
+    target = store.mined_dir / saved["file"]
+    before = target.read_bytes()
+    real_replace = factor_api.os.replace
+
+    def fail_target_replace(src, dst):
+        if str(dst) == str(target):
+            raise OSError("simulated promote replace failure")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(factor_api.os, "replace", fail_target_replace)
+    failed = _promote_factor("lib_atomic_promote", store)
+    assert failed["ok"] is False
+    assert target.read_bytes() == before
+    assert json.loads(before.decode("utf-8"))[0]["status"] == "draft"
+
+    monkeypatch.setattr(factor_api.os, "replace", real_replace)
+    assert _promote_factor("lib_atomic_promote", store)["ok"] is True
+
+
+def test_save_lock_failure_is_honest_and_does_not_write(tmp_path, monkeypatch):
+    import contextlib
+    import guanlan_v2.factorlib.api as factor_api
+
+    store = _store(tmp_path)
+
+    @contextlib.contextmanager
+    def broken_guard(_store):
+        raise OSError("lock unavailable")
+        yield
+
+    monkeypatch.setattr(factor_api, "_factorlib_write_guard", broken_guard)
+    out = _save_factor(SaveIn(name="never_written", expr="rank(close)"), store)
+    assert out["ok"] is False and "写锁失败" in out["reason"]
+    assert not list(store.mined_dir.glob("*.json"))
+    response = _client(store).post("/factorlib/save", json={
+        "name": "still_never_written", "expr": "rank(close)",
+    })
+    assert response.status_code == 200 and response.json()["ok"] is False
+
+
+def test_public_save_cannot_forge_workspace_publish_provenance(tmp_path):
+    store = _store(tmp_path)
+    forged = _save_factor(SaveIn(
+        name="forged_workspace_publish", expr="rank(close)",
+        source="research_workspace_publish",
+        meta={
+            "workspace_id": "rw_aaaaaaaaaaaa",
+            "workspace_asset_id": "wa_1111111111111111",
+            "workspace_version": 1,
+        },
+    ), store)
+    assert forged["ok"] is False and "内部发布保留字段" in forged["reason"]
+    assert not list(store.mined_dir.glob("*.json"))
 
 
 def test_save_invalid_status_rejected(tmp_path):

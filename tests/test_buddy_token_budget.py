@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """帷幄长轮 token 预算闸:纯函数判定矩阵 + 工厂 env 解析。默认 0=关,行为逐字节不变。"""
 import asyncio
+import threading
+
+import pytest
 
 from financial_analyst.buddy.agent import BuddyAgent, _budget_verdict
 from financial_analyst.buddy.tools import Tool, ToolResult
@@ -93,3 +96,228 @@ def test_budget_stop_ends_turn_cleanly_no_phantom_error(monkeypatch):
     assert "达到 tool 调用上限" not in errors[0].payload
     assert not any("达到 tool 调用上限" in str(e.payload) for e in events)
     assert kinds[-2:] == ["error", "done"]
+
+
+class _ReasoningToolClient:
+    def __init__(self):
+        self.total_completion_tokens = 0
+        self.calls = []
+
+    async def chat(self, messages, tools=None, temperature=0.2):
+        self.calls.append(messages)
+        if len(self.calls) == 1:
+            return {"choices": [{"message": {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "先查工具再作答",
+                "tool_calls": [{
+                    "id": "call_reasoning",
+                    "type": "function",
+                    "function": {"name": "noop_tool", "arguments": "{}"},
+                }],
+            }}]}
+        return {"choices": [{"message": {
+            "role": "assistant", "content": "完成", "reasoning_content": "已综合",
+        }}]}
+
+
+def test_tool_loop_replays_reasoning_content_for_deepseek_v4(monkeypatch):
+    monkeypatch.setattr("financial_analyst.buddy.agent.get_tool", _fake_get_tool)
+    agent = BuddyAgent(system_prompt="test", max_tool_iters=3)
+    client = _ReasoningToolClient()
+    agent._client = client
+
+    async def _run():
+        first = [ev async for ev in agent.run_turn("测试问题")]
+        second = [ev async for ev in agent.run_turn("继续追问")]
+        return first, second
+
+    first, second = asyncio.run(_run())
+    assert first[-1].kind == "done" and second[-1].kind == "done"
+    replayed = [m for m in client.calls[1] if m.get("role") == "assistant"]
+    assert replayed[0]["reasoning_content"] == "先查工具再作答"
+    assert replayed[0]["tool_calls"][0]["id"] == "call_reasoning"
+    # 官方 V4 契约要求：发生过工具调用的 reasoning_content 不只在同一
+    # 工具循环内回传，下一次 user 追问也必须仍在完整历史中。
+    next_turn = [m for m in client.calls[2] if m.get("role") == "assistant"]
+    assert next_turn[0]["reasoning_content"] == "先查工具再作答"
+    # 同一个工具轮的最终回答 CoT 也属于官方要求的完整历史，下一用户轮继续回传。
+    assert next_turn[1]["reasoning_content"] == "已综合"
+
+
+def test_confirm_required_tool_without_callback_fails_closed(monkeypatch):
+    calls = []
+
+    class Client:
+        total_completion_tokens = 0
+
+        def __init__(self):
+            self.n = 0
+            self.messages = []
+
+        async def chat(self, messages, tools=None, temperature=0.2):
+            self.n += 1
+            self.messages.append(messages)
+            if self.n == 1:
+                return {"choices": [{"message": {
+                    "role": "assistant", "content": "", "tool_calls": [{
+                        "id": "call_gate", "type": "function",
+                        "function": {"name": "gated", "arguments": "{}"},
+                    }],
+                }}]}
+            return {"choices": [{"message": {"role": "assistant", "content": "未执行"}}]}
+
+    tool = Tool(
+        name="gated", description="test", input_schema={"type": "object"},
+        run=lambda **kwargs: calls.append(kwargs) or ToolResult("ran"),
+        confirm_required=True,
+    )
+    monkeypatch.setattr(
+        "financial_analyst.buddy.agent.get_tool",
+        lambda name: tool if name == "gated" else None,
+    )
+    agent = BuddyAgent(system_prompt="test", max_tool_iters=2)
+    client = Client()
+    agent._client = client
+
+    events = asyncio.run(_collect(agent.run_turn("执行", confirm_callback=None)))
+
+    assert events[-1].kind == "done"
+    assert calls == []
+    tool_messages = [m for m in client.messages[1] if m.get("role") == "tool"]
+    assert "Confirmation unavailable" in tool_messages[0]["content"]
+
+
+async def _collect(stream):
+    return [event async for event in stream]
+
+
+def test_cancelled_llm_turn_rolls_back_all_messages():
+    class SlowClient:
+        total_completion_tokens = 0
+
+        def __init__(self):
+            self.started = asyncio.Event()
+
+        async def chat(self, messages, tools=None, temperature=0.2):
+            self.started.set()
+            await asyncio.Event().wait()
+
+    agent = BuddyAgent(system_prompt="test")
+    client = SlowClient()
+    agent._client = client
+
+    async def scenario():
+        task = asyncio.create_task(_collect(agent.run_turn("会被转向的问题")))
+        await client.started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert agent.messages == []
+
+
+def test_cancel_waits_for_tool_result_then_rolls_back_protocol(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+
+    def run_tool(**kwargs):
+        started.set()
+        assert release.wait(3), "test tool was never released"
+        return ToolResult("写入已完成", side_effect={"written": True})
+
+    tool = Tool(
+        name="slow_write", description="test", input_schema={"type": "object"},
+        run=run_tool,
+    )
+    monkeypatch.setattr(
+        "financial_analyst.buddy.agent.get_tool",
+        lambda name: tool if name == "slow_write" else None,
+    )
+
+    class ToolClient:
+        total_completion_tokens = 0
+
+        def __init__(self):
+            self.calls = 0
+
+        async def chat(self, messages, tools=None, temperature=0.2):
+            self.calls += 1
+            return {"choices": [{"message": {
+                "role": "assistant", "content": "",
+                "reasoning_content": "先执行写工具",
+                "tool_calls": [{
+                    "id": "call_write", "type": "function",
+                    "function": {"name": "slow_write", "arguments": "{}"},
+                }],
+            }}]}
+
+    agent = BuddyAgent(system_prompt="test", max_tool_iters=2)
+    client = ToolClient()
+    agent._client = client
+    seen = []
+
+    async def scenario():
+        async def consume():
+            async for event in agent.run_turn("写入"):
+                seen.append(event)
+
+        task = asyncio.create_task(consume())
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done(), "不可取消的工具线程未结束前不能释放 foreground"
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert [event.kind for event in seen] == ["tool_call", "tool_result"]
+    assert seen[-1].payload["content"] == "写入已完成"
+    assert client.calls == 1
+    assert agent.messages == []
+
+
+def test_cancel_race_when_tool_task_is_already_done_still_yields_result(monkeypatch):
+    tool = Tool(
+        name="fast_write", description="test", input_schema={"type": "object"},
+        run=lambda **kwargs: ToolResult("fast result"),
+    )
+    monkeypatch.setattr(
+        "financial_analyst.buddy.agent.get_tool",
+        lambda name: tool if name == "fast_write" else None,
+    )
+
+    class Client:
+        total_completion_tokens = 0
+
+        async def chat(self, messages, tools=None, temperature=0.2):
+            return {"choices": [{"message": {
+                "role": "assistant", "content": "", "tool_calls": [{
+                    "id": "call_fast", "type": "function",
+                    "function": {"name": "fast_write", "arguments": "{}"},
+                }],
+            }}]}
+
+    real_shield = asyncio.shield
+
+    async def cancel_after_completion(task):
+        await real_shield(task)
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(asyncio, "shield", cancel_after_completion)
+    agent = BuddyAgent(system_prompt="test", max_tool_iters=2)
+    agent._client = Client()
+    seen = []
+
+    async def scenario():
+        with pytest.raises(asyncio.CancelledError):
+            async for event in agent.run_turn("fast race"):
+                seen.append(event)
+
+    asyncio.run(scenario())
+    assert [event.kind for event in seen] == ["tool_call", "tool_result"]
+    assert seen[-1].payload["content"] == "fast result"
+    assert agent.messages == []

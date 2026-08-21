@@ -8,13 +8,20 @@ import pytest
 from financial_analyst.llm import client as C
 
 CFG = {
-    "default_provider": "deepseek", "default_model": "deepseek-chat",
+    "default_provider": "deepseek", "default_model": "deepseek-v4-flash",
+    "default_thinking": False,
     "providers": {"deepseek": {"api_key_env": "X_KEY", "base_url": "http://local",
                                "network_profile": "domestic",
-                               "models": ["deepseek-chat", "deepseek-reasoner"]}},
+                               "models": ["deepseek-v4-flash", "deepseek-v4-pro"]}},
     "agent_overrides": {
-        "rerank": {"provider": "deepseek", "model": "deepseek-reasoner",
+        "rerank": {"provider": "deepseek", "model": "deepseek-v4-flash",
+                   "thinking": True, "reasoning_effort": "high",
                    "max_tokens": 8192, "timeout": 300},
+        "buddy": {"provider": "deepseek", "model": "deepseek-v4-flash",
+                  "thinking": False},
+        "buddy-pro": {"provider": "deepseek", "model": "deepseek-v4-pro",
+                      "thinking": True, "reasoning_effort": "max",
+                      "max_tokens": 8192, "timeout": 300},
     },
 }
 
@@ -54,7 +61,7 @@ def fake_openai(monkeypatch):
 
 def test_for_agent_parses_budget_fields(fake_openai):
     c = C.LLMClient.for_agent("rerank")
-    assert c.model == "deepseek-reasoner"
+    assert c.model == "deepseek-v4-flash"
     assert c.default_max_tokens == 8192
     assert c.default_timeout == 300.0
 
@@ -86,5 +93,61 @@ def test_explicit_arg_beats_seat_default(fake_openai):
 
 
 def test_with_overrides_carries_budget(fake_openai):
-    c = C.LLMClient.for_agent("rerank").with_overrides(model="deepseek-chat")
+    c = C.LLMClient.for_agent("rerank").with_overrides(model="deepseek-v4-pro")
     assert c.default_max_tokens == 8192 and c.default_timeout == 300.0
+    assert c.default_thinking is True and c.default_reasoning_effort == "max"
+
+
+def test_with_overrides_can_change_thinking_profile(fake_openai):
+    c = C.LLMClient.for_agent("rerank").with_overrides(
+        model="deepseek-v4-pro", thinking=True, reasoning_effort="max")
+    assert c.default_thinking is True and c.default_reasoning_effort == "max"
+    asyncio.run(c.chat([{"role": "user", "content": "hi"}]))
+    kw = fake_openai[-1]
+    assert kw["model"] == "deepseek-v4-pro"
+    assert kw["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert kw["reasoning_effort"] == "max"
+    assert "temperature" not in kw
+
+
+def test_raw_model_switch_from_pro_to_flash_clears_thinking_profile(fake_openai):
+    pro = C.LLMClient.for_agent("buddy-pro")
+    flash = pro.with_overrides(model="deepseek-v4-flash")
+    assert flash.default_thinking is False
+    assert flash.default_reasoning_effort is None
+    assert flash.default_max_tokens is None and flash.default_timeout is None
+    asyncio.run(flash.chat([{"role": "user", "content": "hi"}]))
+    kw = fake_openai[-1]
+    assert kw["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in kw
+    assert kw["temperature"] == 0.2
+
+
+def test_raw_model_switch_from_flash_to_pro_applies_full_profile(fake_openai):
+    flash = C.LLMClient.for_agent("buddy")
+    pro = flash.with_overrides(model="deepseek-v4-pro")
+    assert pro.default_thinking is True
+    assert pro.default_reasoning_effort == "max"
+    assert pro.default_max_tokens == 8192 and pro.default_timeout == 300.0
+
+
+def test_standard_v4_flash_explicitly_disables_thinking(fake_openai):
+    c = C.LLMClient.for_agent("buddy")
+    asyncio.run(c.chat([{"role": "user", "content": "hi"}]))
+    kw = fake_openai[-1]
+    assert kw["model"] == "deepseek-v4-flash"
+    assert kw["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in kw
+    assert kw["temperature"] == 0.2
+
+
+def test_pro_v4_passes_enabled_max_thinking_without_temperature(fake_openai):
+    c = C.LLMClient.for_agent("buddy-pro")
+    assert c.default_thinking is True
+    assert c.default_reasoning_effort == "max"
+    asyncio.run(c.chat([{"role": "user", "content": "hi"}]))
+    kw = fake_openai[-1]
+    assert kw["model"] == "deepseek-v4-pro"
+    assert kw["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert kw["reasoning_effort"] == "max"
+    assert "temperature" not in kw

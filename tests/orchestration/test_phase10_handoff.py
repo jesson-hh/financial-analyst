@@ -118,18 +118,18 @@ FROZEN_EVIDENCE = {
     #    Phase 8/9 goldens; the phase9 golden pins the phase8 base digests,
     #    which pin phase7, … — the whole lineage is transitively sealed).
     "phase8_registry_digest":
-        "d719e19bc8c64f56324ee36ca0d3aa039e5eac1c9488d80babe6ddce81e5e089",
+        "201e7f2cccdf56369e6c8244982eb0647172a7be7d2b8060f8eebb75de6ca650",
     "phase8_catalog_digest":
-        "78f79d330ae99e7efcadb7b367f6f84badb0cca2541473824a6fb7618eb4f951",
+        "17f0fed4df3c8bdb018641df4973155d0e1d95538043cbfbb08b7506aa6375fd",
     "phase9_registry_digest":
-        "9e73ddf6d23def5a5666016b1ab113e7b9920eb940ff22a0dd73d806efd3ac07",
+        "553a6ee558b839f57d0e372ce02cf2bffb7e564f925969da56e98e247a5760b4",
     "phase9_catalog_digest":
-        "e3a293615a21db3d88c10969395850369d71be9349c0d3462abc4e4015401e9d",
+        "6176e1155e3c997f07f16e63ea6cf136d24f6cb3b2976abc82ab06c99b6045f6",
     # -- item 9: byte seals of the two chain-sealing goldens (sha256 of bytes).
     "phase9_schema_golden_sha256":
-        "57c6ab0c1d7c09e2924f4ea602f2a984c100ecf55ac0211264072372e7077af2",
+        "e7f198ce80a90581cfdfe818e6d62c0d366e1d98bc319ec42ef3d49369e40765",
     "phase9_catalog_golden_sha256":
-        "e0c57da25671adc44c8c75e8504dba022d3fdaedea833ddbe6137f82f2b0b4cf",
+        "60130c07b9064b281557d5939a2a6c67a0d2e1a159e5195c537466fc0d9a4cb5",
     # -- item 7 / D5: the reviewed screen ranking read surface for
     #    cand.v4 (model_id None/"prod") and cand.model (variant model_id).
     "ranking_reader": "guanlan_v2.strategy.ranking:load_v4_ranking",

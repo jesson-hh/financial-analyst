@@ -177,6 +177,104 @@ def test_market_tape_in_items_and_overall(monkeypatch, tmp_path):
     assert "market_tape" not in h._OPS_ITEMS                   # 数据项(参与 overall)
 
 
+def test_newsradar_health_fresh_stale_missing(monkeypatch, tmp_path):
+    """收口:资讯雷达快照(var/live/newsradar.json)纳入总闸——缺=missing,
+    pulled_at ≤24h=fresh,超=stale(无人访问资讯页/服务停摆显形)。"""
+    import guanlan_v2.datafeed.newsradar as nr
+    p = tmp_path / "newsradar.json"
+    monkeypatch.setattr(nr, "_CACHE_PATH", p)
+    assert h._item_newsradar()["status"] == "missing"
+    now = h.datetime.now().isoformat(timespec="seconds")
+    p.write_text('{"pulled_at": "%s", "n_sources": 108, "items": []}' % now, encoding="utf-8")
+    out = h._item_newsradar()
+    assert out["status"] == "fresh" and out["n_sources"] == 108
+    p.write_text('{"pulled_at": "2020-01-01T00:00:00"}', encoding="utf-8")
+    assert h._item_newsradar()["status"] == "stale"
+
+
+def test_macro_pulse_health_fresh_stale_missing(monkeypatch, tmp_path):
+    """收口:宏观温度计快照(var/macro_pulse/snapshots.jsonl 尾行 ts)纳入总闸——
+    缺=missing,≤30h=fresh(复盘官日跑节拍),超=stale;脏尾行跳过取最近合法行。"""
+    import guanlan_v2.macro.pulse as mp
+    p = tmp_path / "snapshots.jsonl"
+    monkeypatch.setattr(mp, "_SNAP_DEFAULT", p)
+    assert h._item_macro_pulse()["status"] == "missing"
+    now = h.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    p.write_text('{"ts": "2020-01-01T00:00:00"}\n{"ts": "%s"}\n' % now, encoding="utf-8")
+    assert h._item_macro_pulse()["status"] == "fresh"          # 取最后一行,不被首行旧记录带偏
+    p.write_text('{"ts": "2020-01-01T00:00:00"}\n不是json\n', encoding="utf-8")
+    assert h._item_macro_pulse()["status"] == "stale"          # 脏尾行跳过,退最近合法行
+
+
+def test_overseas_health_mem_cache_states(monkeypatch):
+    """收口:海外看板纯内存 SWR——冷=unknown(非故障,按需预热);缓存在场=fresh 带龄期;
+    全部缺价=stale(上游不可达显形)。运维项不拖 overall。"""
+    import guanlan_v2.datafeed.overseas as ov
+    monkeypatch.setitem(ov._MEM_CACHE, "data", None)
+    out = h._item_overseas()
+    assert out["status"] == "unknown" and "预热" in out["note"]
+    now_ts = int(h.datetime.now().timestamp())
+    monkeypatch.setitem(ov._MEM_CACHE, "data",
+                        {"pulled_ts": now_ts, "pulled_at": "x", "n": 2,
+                         "rows": [{"price": 1.0}, {"price": None}]})
+    assert h._item_overseas()["status"] == "fresh"
+    monkeypatch.setitem(ov._MEM_CACHE, "data",
+                        {"pulled_ts": now_ts, "pulled_at": "x", "n": 2,
+                         "rows": [{"price": None}, {"price": None}]})
+    out = h._item_overseas()
+    assert out["status"] == "stale" and "缺价" in out["note"]
+
+
+def test_kuaixun_health_gateway_availability(monkeypatch):
+    """收口:快讯门户现拉型无快照——仅校验采集器可导入(可用=fresh 带诚实 note,
+    不可导入=missing);绝不冒充内容新鲜度。"""
+    out = h._item_kuaixun()
+    assert out["status"] == "fresh" and "不代表内容新鲜" in out["note"]
+
+    def _boom(_name):
+        raise ImportError("采集器缺席")
+    monkeypatch.setattr(h, "_import_module", _boom)
+    assert h._item_kuaixun()["status"] == "missing"
+
+
+def test_probe_worker_item_shapes(monkeypatch):
+    """T2 评审回归:worker 通道自检必须显形(否则提速可静默蒸发数周)——
+    禁用/缺文件/冷却三态各有诚实文案,归运维项不拖 overall。"""
+    import guanlan_v2.datafeed.live_client as lc
+
+    assert "probe_worker" in h._ITEMS and "probe_worker" in h._OPS_ITEMS
+    cases = [
+        (dict(enabled=False, script_exists=True, alive=False, state="cold",
+              spawn_fails=0, cooldown_until=0.0, last_error="", last_ok_ts=0.0),
+         "unknown", "禁用"),
+        (dict(enabled=True, script_exists=False, alive=False, state="cold",
+              spawn_fails=0, cooldown_until=0.0, last_error="", last_ok_ts=0.0),
+         "missing", "缺席"),
+        (dict(enabled=True, script_exists=True, alive=False, state="cooldown",
+              spawn_fails=3, cooldown_until=9e12, last_error="ImportError: boom",
+              last_ok_ts=0.0),
+         "error", "boom"),
+        (dict(enabled=True, script_exists=True, alive=True, state="ready",
+              spawn_fails=0, cooldown_until=0.0, last_error="", last_ok_ts=1.0),
+         "fresh", ""),
+    ]
+    for st, want_status, want_sub in cases:
+        monkeypatch.setattr(lc, "worker_status", lambda st=st: dict(st))
+        item = h._ITEMS["probe_worker"]()
+        assert item["status"] == want_status, (st, item)
+        assert want_sub in (item.get("note") or "")
+
+
+def test_new_faces_registered_and_classified():
+    """四新项都在 _ITEMS;macro_pulse 是数据项(复盘官日跑锚定,stale=真故障);
+    newsradar(纯请求驱动、无定时生产者,无人访问是常态非故障)与 overseas/kuaixun
+    归运维项不拖 overall——评审确认:否则周末无人开资讯页 overall 恒 stale,
+    噪声经复盘官日调 ww_data_health 直进晨报,掩盖 DL 断供等真故障。"""
+    assert {"newsradar", "macro_pulse", "overseas", "kuaixun"} <= set(h._ITEMS)
+    assert {"newsradar", "overseas", "kuaixun"} <= h._OPS_ITEMS
+    assert "macro_pulse" not in h._OPS_ITEMS
+
+
 def test_ww_data_health_registered_and_formats(monkeypatch):
     import guanlan_v2.console.tools as ct
     entry = next(t for t in ct.WW_TOOL_TABLE if t["name"] == "ww_data_health")

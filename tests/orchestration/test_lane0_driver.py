@@ -1365,7 +1365,7 @@ def test_cli_answers_a_verifier_refusal_with_one_honest_line(monkeypatch, capsys
 #: this literal is what makes that agreement a measurement instead of a
 #: construction (L2-b Task-7 review M4).
 SEALED_REGISTRY_DIGEST = (
-    "9e73ddf6d23def5a5666016b1ab113e7b9920eb940ff22a0dd73d806efd3ac07"
+    "553a6ee558b839f57d0e372ce02cf2bffb7e564f925969da56e98e247a5760b4"
 )
 
 

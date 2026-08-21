@@ -115,14 +115,22 @@ class ModelTierUnconfigured(ValueError):
 
 
 class ModelTierBinding(DigestModel):
-    """The reviewed provider/model (and optional limits) a single tier resolves to."""
+    """The reviewed provider/model/thinking contract for one orchestration tier."""
 
     schema_version: Literal["1"] = "1"
     tier: ModelTier
     provider: NonEmptyStr
     model: NonEmptyStr
+    thinking: bool
+    reasoning_effort: Literal["low", "high", "max"] | None = None
     max_tokens: PositiveInt | None = None
     timeout_sec: PositiveInt | None = None
+
+    @model_validator(mode="after")
+    def _thinking_effort_are_consistent(self) -> "ModelTierBinding":
+        if not self.thinking and self.reasoning_effort is not None:
+            raise ValueError("reasoning_effort may only be set when thinking=true")
+        return self
 
 
 class ModelTierMap(DigestModel):
@@ -174,6 +182,32 @@ def _require_str(value: Any, *, tier: str, alias: str, field: str) -> str:
     return value
 
 
+def _require_bool(value: Any, *, tier: str, alias: str, field: str) -> bool:
+    if type(value) is not bool:
+        raise ModelTierUnconfigured(
+            f"tier {tier!r}: alias {alias!r} is missing an explicit boolean "
+            f"{field!r} (thinking mode is sealed and never inferred)"
+        )
+    return value
+
+
+def _optional_reasoning_effort(
+    value: Any, *, tier: str, alias: str, thinking: bool
+) -> Literal["low", "high", "max"] | None:
+    allowed = ("low", "high", "max")
+    if value is not None and value not in allowed:
+        raise ModelTierUnconfigured(
+            f"tier {tier!r}: alias {alias!r} has invalid reasoning_effort "
+            f"{value!r}; expected one of {allowed!r} or null"
+        )
+    if not thinking and value is not None:
+        raise ModelTierUnconfigured(
+            f"tier {tier!r}: alias {alias!r} sets reasoning_effort={value!r} "
+            "while thinking=false"
+        )
+    return value
+
+
 def tier_map_from_llm_yaml(yaml_text: str) -> ModelTierMap:
     """Build the total :class:`ModelTierMap` from explicitly supplied llm.yaml bytes.
 
@@ -221,6 +255,15 @@ def tier_map_from_llm_yaml(yaml_text: str) -> ModelTierMap:
             )
         provider = _require_str(entry.get("provider"), tier=tier, alias=alias, field="provider")
         model = _require_str(entry.get("model"), tier=tier, alias=alias, field="model")
+        thinking = _require_bool(
+            entry.get("thinking"), tier=tier, alias=alias, field="thinking"
+        )
+        reasoning_effort = _optional_reasoning_effort(
+            entry.get("reasoning_effort"),
+            tier=tier,
+            alias=alias,
+            thinking=thinking,
+        )
         if provider_names is not None and provider not in provider_names:
             raise ModelTierUnconfigured(
                 f"tier {tier!r}: alias {alias!r} names provider {provider!r}, which is "
@@ -232,6 +275,8 @@ def tier_map_from_llm_yaml(yaml_text: str) -> ModelTierMap:
                 tier=tier,
                 provider=provider,
                 model=model,
+                thinking=thinking,
+                reasoning_effort=reasoning_effort,
                 max_tokens=entry.get("max_tokens"),
                 timeout_sec=entry.get("timeout"),  # engine yaml key -> timeout_sec
             )
@@ -310,6 +355,8 @@ def model_tier_map_from_material_bytes(raw: bytes) -> ModelTierMap:
             tier=b["tier"],
             provider=b["provider"],
             model=b["model"],
+            thinking=b["thinking"],
+            reasoning_effort=b.get("reasoning_effort"),
             max_tokens=b.get("max_tokens"),
             timeout_sec=b.get("timeout_sec"),
         )

@@ -5,7 +5,9 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-ALLOWED_KEYS = {"provider", "model", "max_tokens", "timeout"}
+ALLOWED_KEYS = {
+    "provider", "model", "max_tokens", "timeout", "thinking", "reasoning_effort",
+}
 
 
 def _cfg():
@@ -16,6 +18,7 @@ def _cfg():
 def test_overrides_schema_and_models_in_register():
     cfg = _cfg()
     providers = cfg["providers"]
+    assert cfg["default_model"] in providers[cfg["default_provider"]]["models"]
     for name, ov in (cfg.get("agent_overrides") or {}).items():
         assert set(ov) <= ALLOWED_KEYS, f"{name} 有未知字段: {set(ov) - ALLOWED_KEYS}"
         prov = ov.get("provider", cfg["default_provider"])
@@ -25,15 +28,58 @@ def test_overrides_schema_and_models_in_register():
             assert isinstance(ov["max_tokens"], int) and ov["max_tokens"] > 0
         if "timeout" in ov:
             assert isinstance(ov["timeout"], (int, float)) and ov["timeout"] > 0
+        if "thinking" in ov:
+            assert isinstance(ov["thinking"], bool)
+        if "reasoning_effort" in ov:
+            assert ov["thinking"] is True
+            assert ov["reasoning_effort"] in {"low", "high", "max"}
 
 
 def test_deep_tier_seats_exist():
     ov = _cfg().get("agent_overrides") or {}
-    for seat in ("rerank", "review_officer",
-                 "bull-advocate", "bear-advocate", "risk-officer", "report-writer"):
-        assert ov.get(seat, {}).get("model") == "deepseek-reasoner", f"{seat} 应为 deep 档"
-        assert ov[seat].get("timeout", 0) >= 180, f"{seat} deep 档须放宽超时(reasoner 思考 1-3 分钟)"
-    assert ov.get("review_section", {}).get("model") == "deepseek-chat"
+    for seat in ("rerank", "review_officer", "bull-advocate", "bear-advocate"):
+        assert ov.get(seat, {}).get("model") == "deepseek-v4-flash", f"{seat} 应为 V4 思考档"
+        assert ov[seat].get("thinking") is True
+        assert ov[seat].get("reasoning_effort") == "high"
+        assert ov[seat].get("timeout", 0) >= 180, f"{seat} 思考档须放宽超时"
+    # 终端结构化输出节点继承上游的深度推理结果，但自身关闭 thinking，
+    # 避免 reasoning token 挤占 JSON 终稿预算。
+    for seat in ("risk-officer", "report-writer"):
+        assert ov.get(seat, {}).get("model") == "deepseek-v4-flash"
+        assert ov[seat].get("thinking") is False
+        assert "reasoning_effort" not in ov[seat]
+        assert ov[seat].get("timeout", 0) >= 180
+    assert ov.get("review_section", {}).get("model") == "deepseek-v4-flash"
+    assert ov["review_section"].get("thinking") is False
+
+
+def test_retired_deepseek_aliases_are_absent_from_live_config():
+    cfg = _cfg()
+    assert cfg["default_model"] == "deepseek-v4-flash"
+    assert cfg.get("default_thinking") is False
+    assert set(cfg["providers"]["deepseek"]["models"]) == {
+        "deepseek-v4-flash", "deepseek-v4-pro",
+    }
+    for ov in (cfg.get("agent_overrides") or {}).values():
+        if ov.get("provider", cfg["default_provider"]) == "deepseek":
+            assert ov.get("model", cfg["default_model"]) not in {
+                "deepseek-chat", "deepseek-reasoner",
+            }
+
+
+def test_weiwo_standard_and_pro_seats_are_pinned():
+    ov = _cfg().get("agent_overrides") or {}
+    standard = ov.get("buddy") or {}
+    assert standard.get("provider") == "deepseek"
+    assert standard.get("model") == "deepseek-v4-flash"
+    assert standard.get("thinking") is False
+    pro = ov.get("buddy-pro") or {}
+    assert pro.get("provider") == "deepseek"
+    assert pro.get("model") == "deepseek-v4-pro"
+    assert pro.get("thinking") is True
+    assert pro.get("reasoning_effort") == "max"
+    assert pro.get("max_tokens", 0) >= 8192
+    assert pro.get("timeout", 0) >= 180
 
 
 def test_fa_config_dir_routes_to_repo():

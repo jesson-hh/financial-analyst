@@ -212,7 +212,7 @@ def test_static_sources_reconcile_with_stocks_registry():
     ids.discard("a_stock_live_sources")                              # catalog meta 源,非注册表条目
     static_ids = set(lc._STATIC_SOURCES)
     assert static_ids == ids, f"漂移:观澜多 {sorted(static_ids - ids)};stocks 多 {sorted(ids - static_ids)}"
-    assert len(ids) == 52   # 2026-07-15:+baidu_valuation_percentile(估值分位带)+overseas_stock_quote(海外维度)
+    assert len(ids) == 53   # 2026-07-16:+overseas_index_quote(海外六大指数,数据面收口)
 
 
 def test_new_sources_resolve_and_arg_classification():
@@ -247,3 +247,203 @@ def test_new_sources_resolve_and_arg_classification():
     # 6) 新浪期权代码档有默认标的,不强制 code(缺 code 不报错)
     nc = lc._normalize_args("sina_option_codes", "", "")
     assert nc["err"] == ""
+
+
+_FAKE_WORKER = r'''
+import json, sys, time
+def reply(obj):
+    sys.stdout.write("\x1e" + json.dumps(obj, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+reply({"id": "__ready__", "payload": {"ok": True}})
+print("stray non-protocol line")   # 杂散打印必须被宿主过滤
+sys.stdout.flush()
+for line in sys.stdin:
+    req = json.loads(line)
+    src = req.get("source")
+    if src == "eastmoney_stock_news":   # sleepy:用于超时测试
+        time.sleep(30)
+    reply({"id": req["id"],
+           "payload": {"source_id": src, "status": "ok",
+                       "items": [{"raw": {"src": src, "code": req.get("code")}}],
+                       "error": "", "fetched_ts": "t"}})
+'''
+
+
+def _enable_fake_worker(monkeypatch, tmp_path, script: str = _FAKE_WORKER):
+    p = tmp_path / "fake_worker.py"
+    p.write_text(script, encoding="utf-8")
+    monkeypatch.setenv("GUANLAN_PROBE_WORKER", "1")
+    monkeypatch.setattr(lc, "_STOCKS_WORKER", p)
+    monkeypatch.setattr(lc, "_MIN_INTERVAL_S", 0.0)   # 测试不等 1s 闸
+    monkeypatch.setattr(lc, "_WORKER", {"w": None, "seq": 0})
+    return p
+
+
+def test_worker_roundtrip_reuses_process_and_filters_stray_lines(monkeypatch, tmp_path):
+    """2026-07-30 T2:probe() 走常驻 worker——同形信封、杂散 stdout 行被 RS 前缀过滤、
+    连续两次调用复用同一进程(这就是提速的全部来源:不再每次 spawn+import)。"""
+    _enable_fake_worker(monkeypatch, tmp_path)
+    out1 = lc.probe("em_hot_rank", limit=5)
+    assert out1["ok"] is True and out1["status"] == "ok" and out1["n"] == 1
+    assert out1["items"][0]["raw"]["src"] == "eastmoney_hot_rank"   # worker 收正典 id
+    pid1 = lc._WORKER["w"]["proc"].pid
+    out2 = lc.probe("ths_hot_list", limit=5)
+    assert out2["ok"] is True and lc._WORKER["w"]["proc"].pid == pid1, "必须复用常驻进程"
+    lc._worker_kill(lc._WORKER["w"])
+
+
+def test_worker_timeout_kills_and_respawns(monkeypatch, tmp_path):
+    """超时=杀 worker 惰性重生,机械失败信封与一次性路径同形(note 超时,绝不半截数据);
+    下一条请求自动重生新进程继续服务。"""
+    _enable_fake_worker(monkeypatch, tmp_path)
+    out = lc.probe("stock_news", code="600519", timeout=2)   # fake 里 sleep 30
+    assert out["ok"] is True and out["status"] == "" and "超时" in out["note"]
+    assert lc._WORKER["w"] is None, "超时必须杀掉句柄"
+    out2 = lc.probe("em_hot_rank", limit=3)                  # 重生后继续服务
+    assert out2["ok"] is True and out2["status"] == "ok"
+    lc._worker_kill(lc._WORKER["w"])
+
+
+def test_worker_busy_falls_back_to_oneshot_not_queue(monkeypatch, tmp_path):
+    """T2 评审 important 回归:worker 单飞,抢不到锁(前一条慢源在飞)必须立即回落
+    一次性子进程(按隔离并行),绝不在锁上排队逃逸调用方 timeout 预算。"""
+    _enable_fake_worker(monkeypatch, tmp_path)
+    monkeypatch.setattr(lc, "_WORKER_LOCK_WAIT_S", 0.1)
+    seen = []
+    monkeypatch.setattr(lc, "_run_probe",
+                        lambda args, timeout=90: seen.append(1) or
+                        {"ok": True, "payload": {"source_id": "eastmoney_hot_rank",
+                                                 "status": "ok", "items": [], "error": ""}})
+    assert lc._WORKER_LOCK.acquire(timeout=1), "测试自身须先占住锁"
+    try:
+        out = lc.probe("em_hot_rank")
+        assert out["ok"] is True and len(seen) == 1, "忙时必须走一次性回落"
+        assert out.get("worker_fallback"), "回落必须带显形键"
+    finally:
+        lc._WORKER_LOCK.release()
+
+
+def test_worker_spawn_failure_enters_cooldown(monkeypatch, tmp_path):
+    """T2 评审回归:spawn 失败进入冷却窗——窗内后续调用不再付 spawn 成本直接回落;
+    状态经 worker_status() 显形(health probe_worker 项消费)。"""
+    bad = tmp_path / "bad_worker.py"
+    bad.write_text("import sys; sys.exit(3)", encoding="utf-8")   # 起来即死
+    monkeypatch.setenv("GUANLAN_PROBE_WORKER", "1")
+    monkeypatch.setattr(lc, "_STOCKS_WORKER", bad)
+    monkeypatch.setattr(lc, "_MIN_INTERVAL_S", 0.0)
+    monkeypatch.setattr(lc, "_WORKER", {"w": None, "seq": 0})
+    monkeypatch.setattr(lc, "_WORKER_STDERR_LOG", tmp_path / "w.log")
+    monkeypatch.setattr(lc, "_WORKER_STATE",
+                        {"state": "cold", "spawn_fails": 0, "cooldown_until": 0.0,
+                         "last_error": "", "last_ok_ts": 0.0})
+    monkeypatch.setattr(lc, "_run_probe",
+                        lambda args, timeout=90: {"ok": True, "payload": {
+                            "source_id": "eastmoney_hot_rank", "status": "ok",
+                            "items": [], "error": ""}})
+    spawns = []
+    real_spawn = lc._worker_spawn
+
+    def _counting_spawn(*a, **k):
+        spawns.append(1)
+        return real_spawn(*a, **k)
+
+    monkeypatch.setattr(lc, "_worker_spawn", _counting_spawn)
+    lc.probe("em_hot_rank")          # 首调:真 spawn 一次并失败
+    lc.probe("em_hot_rank")          # 冷却窗内:不再 spawn
+    assert len(spawns) == 1, "冷却窗内不得重复付 spawn 成本"
+    st = lc.worker_status()
+    assert st["state"] == "cooldown" and st["spawn_fails"] == 1
+    assert st["cooldown_until"] > 0 and st["last_error"]
+
+
+def test_worker_unavailable_falls_back_to_oneshot(monkeypatch, tmp_path):
+    """worker 脚本缺席 → 诚实回落一次性 CLI 路径(_run_probe),行为与旧世界逐位一致。"""
+    monkeypatch.setenv("GUANLAN_PROBE_WORKER", "1")
+    monkeypatch.setattr(lc, "_STOCKS_WORKER", tmp_path / "absent_worker.py")
+    seen = []
+    monkeypatch.setattr(lc, "_run_probe",
+                        lambda args, timeout=90: seen.append(args) or
+                        {"ok": True, "payload": {"source_id": "em_hot_rank", "status": "ok",
+                                                 "items": [], "error": ""}})
+    out = lc.probe("em_hot_rank")
+    assert out["ok"] is True and out["status"] == "ok" and len(seen) == 1
+
+
+def test_probe_many_single_subprocess_same_envelope(monkeypatch):
+    """2026-07-28 提速契约:probe_many 一批只起一个子进程(--batch),
+    每条结果与 probe() 同形信封、序=入参序,status/planned/error 显形照旧。"""
+    calls = []
+
+    def fake_batch(specs, timeout):
+        calls.append(list(specs))
+        payloads = []
+        for s in specs:
+            payloads.append({"source_id": s["source"], "status": "ok",
+                             "items": [{"raw": {"x": s["source"]}}], "error": "",
+                             "fetched_ts": "t"})
+        return {"ok": True, "payloads": payloads}
+
+    monkeypatch.setattr(lc, "_run_probe_batch", fake_batch)
+    outs = lc.probe_many([{"source": "em_zt_pool"}, {"source": "northbound"}])
+    assert len(calls) == 1 and len(calls[0]) == 2, "必须一次批量子进程"
+    # 别名归一为正典 id(与 probe() 同语义)
+    assert [o["source"] for o in outs] == ["em_limit_up_pool", "ths_hsgt_realtime"]
+    assert all(o["ok"] and o["status"] == "ok" and o["n"] == 1 for o in outs)
+
+
+def test_probe_many_falls_back_per_item_only_when_channel_absent(monkeypatch):
+    """旧 stocks CLI 无 --batch(退码非 0,argparse 在任何上游请求前退出)→ 逐条回退。
+    channel_absent 是回退的唯一通行证。"""
+    monkeypatch.setattr(lc, "_run_probe_batch",
+                        lambda specs, timeout: {"ok": False, "channel_absent": True,
+                                                "note": "旧 CLI 不认 --batch"})
+    seen = []
+    monkeypatch.setattr(lc, "probe",
+                        lambda source, code="", date="", limit=20, timeout=90:
+                        seen.append((source, timeout)) or {"ok": True, "source": source, "status": "ok",
+                                                           "items": [], "n": 0, "note": ""})
+    outs = lc.probe_many([{"source": "em_zt_pool"}, {"source": "northbound", "code": ""}], timeout=30)
+    assert [s for s, _ in seen] == ["em_limit_up_pool", "ths_hsgt_realtime"]  # 回退用归一后的正典 id
+    assert all(t == 30 for _, t in seen), "回退必须透传调用方 timeout(评审:不透传静默突破预算)"
+    assert len(outs) == 2 and all(o["ok"] for o in outs)
+
+
+def test_probe_many_timeout_never_refires_upstream(monkeypatch):
+    """评审 important 回归:批量超时/输出损坏=上游请求已真实发出,绝不逐条回退重打
+    (恰在限流时加压);全部条目按机械失败 ok:False 诚实作废(消费方据此保留上轮)。"""
+    monkeypatch.setattr(lc, "_run_probe_batch",
+                        lambda specs, timeout: {"ok": False, "channel_absent": False,
+                                                "note": "batch probe 超时(150s),本批作废不重拉"})
+
+    def _no_refire(*a, **k):
+        raise AssertionError("超时后绝不允许逐条重打上游")
+
+    monkeypatch.setattr(lc, "probe", _no_refire)
+    outs = lc.probe_many([{"source": "em_zt_pool"}, {"source": "northbound"}])
+    assert len(outs) == 2
+    assert all(o["ok"] is False and "作废" in o["note"] for o in outs)
+
+
+def test_probe_many_discards_misaligned_batch(monkeypatch):
+    """评审回归:payloads 与 specs 数量/源名失配(两仓漂移时 stocks 侧 skip/重排)→
+    整批 ok:False 作废,绝不按下标串位把 A 源信封装进 B 源数据。"""
+    def _skewed(specs, timeout):
+        # 模拟 stocks 侧漏掉第一条:数量少一且名字错位
+        return {"ok": True, "payloads": [{"source_id": s["source"], "status": "ok", "items": []}
+                                         for s in specs[1:]]}
+
+    monkeypatch.setattr(lc, "_run_probe_batch", _skewed)
+    outs = lc.probe_many([{"source": "em_zt_pool"}, {"source": "northbound"}])
+    assert all(o["ok"] is False and "失配" in o["note"] for o in outs)
+
+
+def test_probe_many_isolates_invalid_items(monkeypatch):
+    """非法 source 条目就地落 ok:False 信封,不进批也不拖垮其余条目;位置保持。"""
+    def fake_batch(specs, timeout):
+        return {"ok": True, "payloads": [{"source_id": s["source"], "status": "ok",
+                                          "items": [], "error": ""} for s in specs]}
+
+    monkeypatch.setattr(lc, "_run_probe_batch", fake_batch)
+    outs = lc.probe_many([{"source": "em_zt_pool"}, {"source": "no_such_src"}, {"source": "northbound"}])
+    assert outs[0]["ok"] is True and outs[2]["ok"] is True
+    assert outs[1]["ok"] is False and "非法" in outs[1]["note"]

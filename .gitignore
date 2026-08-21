@@ -54,6 +54,8 @@ vendor/models/
 _srv.*
 # 临时截图 / 截屏(根)
 /*.png
+/*.jpg
+/*.jpeg
 # playwright MCP 浏览器自动化控制台日志(运行态)
 .playwright-mcp/
 # 生成的研报产物(运行态数据,非源码)
@@ -63,6 +65,16 @@ guanlan_v2/industry/store/
 .data/workflows/
 # 运行态日志目录
 logs/
+
+# Codex/pytest 本地验证与部署暂存目录（均为可再生成产物）
+/.codex_deploy_stage_*/
+/.pytest-*/
+/.test-tmp-*/
+/.npm-cache-codex/
+/.npm-stage-cache/
+
+# 因子挖掘器运行生成的候选结果；实现和测试入库，样本留本地
+/guanlan_v2/factorlib/mined/
 
 # === 前端依赖 / 构建产物 — 数据非源码,不入库 ===
 # node 依赖(任意层级)— 防 `git add -A` 误吞 ui-next/node_modules 千文件(已发生事故)

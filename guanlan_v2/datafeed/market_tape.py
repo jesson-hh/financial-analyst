@@ -136,24 +136,28 @@ def _backfill_board_pools(sources: Dict[str, Any], today=None):
     for k in range(1, _BACKFILL_MAX_DAYS + 1):
         d = base - timedelta(days=k)
         ds = d.strftime("%Y%m%d")
+        # 两段式(2026-07-28 评审修):空候选日只探涨停池 1 条(与旧实现同上游成本——
+        # 长假可有多个空日,四池齐拉会把空日上游请求量翻 4 倍);命中日再把其余三池
+        # 一批拉(1 个子进程,较旧实现省 2 次起跑)。
         try:
             zt_probe = _lc.probe("em_zt_pool", date=ds, limit=300)
         except Exception:  # noqa: BLE001
             continue
         zt_rows = _lc.native_rows(zt_probe.get("items")) if (
-            zt_probe.get("ok") and zt_probe.get("status") in ("ok", "")) else []
+            zt_probe.get("ok") and zt_probe.get("status") == "ok") else []
         if not zt_rows:
             continue                                # 非交易日/无数据,继续往回
         badge = f"回溯至 {d.strftime('%m-%d')}"
         sources[zt_canon] = {"status": "ok", "n": len(zt_rows),
                              "pulled_at": zt_probe.get("pulled_at"), "note": badge, "rows": zt_rows}
-        for alias in ("em_zb_pool", "em_dt_pool", "em_yzt_pool"):   # 其余三池同日对齐
+        rest = _POOL_ALIASES[1:]
+        try:
+            rs = _lc.probe_many([{"source": a, "date": ds, "limit": 300} for a in rest])
+        except Exception:  # noqa: BLE001
+            rs = []
+        for alias, r in zip(rest, rs):              # 其余三池同日对齐
             canon = _lc.resolve_source(alias) or alias
-            try:
-                r = _lc.probe(alias, date=ds, limit=300)
-            except Exception:  # noqa: BLE001
-                continue
-            if r.get("ok") and r.get("status") in ("ok", ""):
+            if r.get("ok") and r.get("status") == "ok":
                 rr = _lc.native_rows(r.get("items"))
                 sources[canon] = {"status": "ok", "n": len(rr),
                                   "pulled_at": r.get("pulled_at"), "note": badge, "rows": rr}
@@ -162,20 +166,28 @@ def _backfill_board_pools(sources: Dict[str, Any], today=None):
 
 
 def _refresh(ttl_s: int = _DEFAULT_TTL_S) -> Dict[str, Any]:
-    """逐源经 live_client.probe 拉取(沿用其跨启动节流),原子落盘。
-    失败源保留上一轮条目(局部陈旧诚实显形,不整份作废)。"""
+    """10 源经 live_client.probe_many **一次批量**拉取(2026-07-28 提速:此前逐源 10 个
+    子进程 + 1s 起跑间隔 ≈10-26s,批量后一个子进程 ≈3-5s;批量通道失败由 probe_many
+    内部诚实回退逐条),原子落盘。失败源保留上一轮条目(局部陈旧诚实显形,不整份作废)。"""
     prev = _load_cache() or {}
     prev_sources = prev.get("sources") or {}
     now_iso = datetime.now().isoformat(timespec="seconds")
     sources: Dict[str, Any] = {}
-    for spec in _SOURCES:
+    reqs = [{"source": spec["sid"], **spec["kw"]} for spec in _SOURCES]
+    try:
+        results = _lc.probe_many(reqs)
+    except Exception as exc:  # noqa: BLE001
+        results = [{"ok": False, "note": f"{type(exc).__name__}: {exc}"} for _ in _SOURCES]
+    if len(results) != len(_SOURCES):   # 长度失配=通道异常,整批按失败处理(保留上轮)
+        results = [{"ok": False, "note": "probe_many 返回长度失配"} for _ in _SOURCES]
+    for spec, r in zip(_SOURCES, results):
         alias = spec["sid"]
         canon = _lc.resolve_source(alias) or alias
-        try:
-            r = _lc.probe(alias, **spec["kw"])
-        except Exception as exc:  # noqa: BLE001
-            r = {"ok": False, "note": f"{type(exc).__name__}: {exc}"}
-        if r.get("ok") and r.get("status") in ("ok", ""):
+        # 成功闸只认 status=="ok"(2026-07-28 评审修既有缺陷):probe 机械失败信封是
+        # ok:True/status:""——旧闸 in ("ok","") 会把它当"成功拉到 0 行"用空行覆盖上轮
+        # 并盖新鲜 pulled_at,击穿"失败保留上轮"红线。真成功恒 status:"ok"(_shape_payload
+        # 归一),status:"" 只可能是机械/caller 失败。
+        if r.get("ok") and r.get("status") == "ok":
             rows = _lc.native_rows(r.get("items"))
             sources[canon] = {"status": r.get("status") or "ok",
                               "n": int(r.get("n") or len(rows)),

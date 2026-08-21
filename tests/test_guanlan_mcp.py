@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 
 def test_build_mcp_tools_derivation():
@@ -10,7 +11,8 @@ def test_build_mcp_tools_derivation():
     assert "ww_plan_update" not in names and "ww_show_page" not in names and "ww_seats_bind" not in names      # 去除 console-UI-only & 前端信封
     assert (ww - {"ww_plan_update", "ww_show_page", "ww_seats_bind"}) <= names                  # 其余 ww_ 全在
     assert {"alpha_list", "alpha_compare", "alpha_forge", "factor_report"} <= names
-    assert len(tools) == 66                                                    # 59 ww_(62−3 excluded) + 7 alpha-zoo
+    assert "guanlan_workspace_list" in names
+    assert len(tools) == len(names)                                             # 工具名不得重复
     # P10 Task 10 的四个新工具都不在 _EXCLUDED(非 console-UI-only / 非前端信封),故自动全进 MCP
     assert {"ww_orchestrate_start", "ww_orchestrate_status",
             "ww_orchestrate_runs", "ww_ta_ingest"} <= names
@@ -26,6 +28,20 @@ def test_build_mcp_tools_annotations_and_gate():
     assert by["alpha_forge"]["destructive"] and by["alpha_forge"]["gated"]              # 唯一 alpha 写
     assert by["alpha_compare"]["read_only"] and not by["alpha_compare"]["gated"]        # 贵但只读=不锁
     assert by["alpha_list"]["read_only"] and not by["alpha_list"]["gated"]
+
+
+def test_workspace_mcp_schema_requires_explicit_workspace_without_mutating_console_schema():
+    from guanlan_v2.glmcp.tooltable import build_mcp_tools
+    import guanlan_v2.console.tools as ct
+
+    by = {t["name"]: t for t in build_mcp_tools()}
+    for name in ("ww_workspace_tree", "ww_workspace_read", "ww_workspace_apply_patch",
+                 "ww_workspace_quant_chart"):
+        schema = by[name]["inputSchema"]
+        assert "workspace_id" in schema["properties"]
+        assert "workspace_id" in schema["required"]
+    console_tree = next(t for t in ct.WW_TOOL_TABLE if t["name"] == "ww_workspace_tree")
+    assert "workspace_id" not in console_tree["input_schema"]["properties"]
 
 
 def test_dispatch_readonly_wraps_impl(monkeypatch):
@@ -60,6 +76,64 @@ def test_dispatch_unknown_tool():
     assert "未知工具" in res[0].text
 
 
+def test_dispatch_workspace_list_and_explicit_binding(tmp_path, monkeypatch):
+    from guanlan_v2.console.store import ConsoleStore
+    import guanlan_v2.console.tools as ct
+    from guanlan_v2.console import workspace_tools as wt
+    import guanlan_v2.glmcp.server as ms
+
+    store = ConsoleStore(Path(tmp_path) / "console")
+    item = store.workspace_store.create({
+        "kind": "stock", "code": "SH600667", "name": "太极实业",
+        "root_mode": "managed", "agent_mode": "research",
+    })
+    listed = asyncio.run(ms.dispatch_tool(
+        "guanlan_workspace_list", {}, console_store=store,
+    ))
+    assert item["id"] in listed[0].text
+    assert item["root_path"] not in listed[0].text
+
+    def fake_impl(**kwargs):
+        ctx = wt.CTX_WORKSPACE.get()
+        assert ct.CTX_STORE.get() is store
+        assert ct.CTX_SID.get() == "mcp"
+        assert "workspace_id" not in kwargs
+        return {"content": f"BOUND:{ctx['workspace_id']}"}
+
+    monkeypatch.setattr(ms, "_resolve_impl", lambda d, name: fake_impl)
+    bound = asyncio.run(ms.dispatch_tool(
+        "ww_workspace_tree", {"workspace_id": item["id"]}, console_store=store,
+    ))
+    assert bound[0].text == f"BOUND:{item['id']}"
+    assert wt.CTX_WORKSPACE.get(None) is None
+    assert ct.CTX_STORE.get(None) is None
+    assert ct.CTX_SID.get(None) is None
+
+
+def test_dispatch_workspace_rejects_missing_context_and_research_writes(tmp_path, monkeypatch):
+    from guanlan_v2.console.store import ConsoleStore
+    import guanlan_v2.glmcp.server as ms
+
+    store = ConsoleStore(Path(tmp_path) / "console")
+    item = store.workspace_store.create({
+        "kind": "stock", "code": "SH600667", "name": "太极实业",
+        "root_mode": "managed", "agent_mode": "research",
+    })
+    missing = asyncio.run(ms.dispatch_tool(
+        "ww_workspace_tree", {}, console_store=store,
+    ))
+    assert "研究空间不存在" in missing[0].text
+
+    monkeypatch.setenv("GUANLAN_MCP_WRITE", "1")
+    monkeypatch.setattr(ms, "_resolve_impl", lambda d, name: lambda **kw: {"content": "BAD"})
+    refused = asyncio.run(ms.dispatch_tool(
+        "ww_workspace_apply_patch",
+        {"workspace_id": item["id"], "path": "x.py", "new_text": "x"},
+        console_store=store,
+    ))
+    assert "research 模式" in refused[0].text and "BAD" not in refused[0].text
+
+
 def test_build_server_name():
     from guanlan_v2.glmcp.server import build_server
     assert build_server().name == "guanlan"
@@ -71,13 +145,34 @@ def test_build_server_prewarms_decls():
     import guanlan_v2.glmcp.server as ms
     ms._DECLS = None
     ms.build_server()
-    assert ms._DECLS is not None and len(ms._DECLS) == 66
+    from guanlan_v2.glmcp.tooltable import build_mcp_tools
+    assert ms._DECLS is not None and len(ms._DECLS) == len(build_mcp_tools())
 
 
 def test_build_mcp_http_app_is_starlette():
     from guanlan_v2.glmcp.http import build_mcp_http_app
     from starlette.applications import Starlette
     assert isinstance(build_mcp_http_app(), Starlette)
+
+
+def test_mcp_http_bearer_auth_and_write_fail_closed(monkeypatch):
+    from guanlan_v2.glmcp.http import _mcp_http_auth_error
+
+    def scope(auth=""):
+        headers = [(b"authorization", auth.encode("ascii"))] if auth else []
+        return {"type": "http", "headers": headers}
+
+    monkeypatch.delenv("GUANLAN_MCP_BEARER_TOKEN", raising=False)
+    monkeypatch.delenv("GUANLAN_MCP_WRITE", raising=False)
+    assert _mcp_http_auth_error(scope()) is None
+
+    monkeypatch.setenv("GUANLAN_MCP_WRITE", "1")
+    assert _mcp_http_auth_error(scope())[0] == 503
+
+    monkeypatch.setenv("GUANLAN_MCP_BEARER_TOKEN", "secret-token")
+    assert _mcp_http_auth_error(scope())[0] == 401
+    assert _mcp_http_auth_error(scope("Bearer wrong"))[0] == 401
+    assert _mcp_http_auth_error(scope("Bearer secret-token")) is None
 
 
 def test_main_module_has_main():
@@ -100,7 +195,7 @@ def test_mcp_excludes_frontend_envelope_tools():
     names = {t["name"] for t in build_mcp_tools()}
     assert "ww_seats_bind" not in names
     assert "ww_report_run" in names          # 研报经 detached 子进程真跑,保留(gated)
-    assert len(names) == 66
+    assert "guanlan_workspace_list" in names
 
 
 def test_spawn_background_report_branch(monkeypatch):

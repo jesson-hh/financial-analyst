@@ -6,6 +6,8 @@
   const LS_KEY = 'guanlan:store:v1';
   const SEED_FLAG = 'seeded:v3';
   const HANDOFF = 'guanlan:handoff:';
+  let _resolveArchiveReady;
+  const archiveReady = new Promise(function (resolve) { _resolveArchiveReady = resolve; });
 
   function load() { try { return JSON.parse(localStorage.getItem(LS_KEY)); } catch (e) { return null; } }
   let state = load() || { artifacts: {}, flags: {}, ts: 0 };
@@ -23,6 +25,9 @@
   const genId = (t) => t + '_' + Date.now().toString(36) + (_n++).toString(36);
 
   const GL = {
+    // 后端影子库首拍完成屏障。需要基于完整 archive 做一次性迁移的调用方
+    // 必须等待它，不能和 /archive/list + 本地回推竞速。
+    archiveReady,
     // ── 物料 CRUD ──
     all(type) { const a = Object.values(state.artifacts); return type ? a.filter(x => x.type === type) : a; },
     get(id) { return state.artifacts[id] || null; },
@@ -111,7 +116,7 @@
 
   // ── 后端持久桥(互通审计 P2-C):strategy/research/decision 三类真物料镜像到 /archive ──
   // 总线本体仍是 localStorage(同步、零依赖、唯一事实源);后端只是防清缓存丢失的影子库。
-  // 首拍:拉 /archive/list 合并本地缺失 id(本地优先,绝不覆盖)+ 把本地有/服务端无的上推(存量回填);
+  // 首拍:拉 /archive/list 合并本地缺失 id(本地优先,绝不覆盖)+ 把合并前的本地真物料全部上推(同 id 也以本地覆盖);
   // 此后 put/patch/remove 对三类型 fire-and-forget 上推。file:// 或后端不在 → 全静默跳过(行为同旧版)。
   const SYNC_TYPES = { strategy: 1, research: 1, decision: 1 };
   function _api() {
@@ -122,11 +127,15 @@
   }
   function _push(a) {
     const api = _api();
-    if (!api || !a || !SYNC_TYPES[a.type] || a.demo) return;
+    if (!api || !a || !SYNC_TYPES[a.type] || a.demo) return Promise.resolve({ ok: true, skipped: true });
     try {
-      fetch(api + '/archive/put', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ artifact: a }) }).catch(function () {});
-    } catch (e) {}
+      return fetch(api + '/archive/put', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ artifact: a }) }).then(function (r) {
+        return r.json().catch(function () { return null; }).then(function (j) {
+          return { ok: !!(r.ok && j && j.ok), status: r.status };
+        });
+      }).catch(function () { return { ok: false, reason: 'archive_put_failed' }; });
+    } catch (e) { return Promise.resolve({ ok: false, reason: 'archive_put_failed' }); }
   }
   function _pushRemove(id, type) {
     const api = _api();
@@ -142,24 +151,33 @@
   GL.remove = function (id) { const t = (state.artifacts[id] || {}).type; _remove0(id); _pushRemove(id, t); };
   setTimeout(function () {            // 延后一拍:bus 先于页面内联脚本加载,GUANLAN_BACKEND 此时才就绪
     const api = _api();
-    if (!api) return;
+    if (!api) { _resolveArchiveReady({ ok: false, reason: 'backend_unavailable' }); return; }
     try {
       fetch(api + '/archive/list').then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
-        if (!j || !j.ok || !j.items) return;
-        const have = {};
+        if (!j || !j.ok || !j.items) throw new Error('archive_list_failed');
+        // localStorage 是事实源：先冻结本轮需要回写的本地真物料。不能只回写
+        // 服务端缺少的 id；同 id 的本地 refs/绑定/内容也必须覆盖影子库。
+        // 冻结发生在合并前，避免把随后补入的 server-only 项误当成本地项回推。
+        const localItems = Object.values(state.artifacts).filter(function (a) {
+          return a && SYNC_TYPES[a.type] && !a.demo;
+        });
+        const pushes = [];
         let dirty = false;
         j.items.forEach(function (a) {
           if (!a || !a.id) return;
-          have[a.id] = 1;
           if (!SYNC_TYPES[a.type] || state.artifacts[a.id]) return;   // 本地优先,只补缺
           state.artifacts[a.id] = a; dirty = true;
         });
-        Object.values(state.artifacts).forEach(function (a) {          // 存量回填:本地有、影子库无 → 上推
-          if (a && SYNC_TYPES[a.type] && !a.demo && !have[a.id]) _push(a);
+        localItems.forEach(function (a) {                              // 本地真物料全部回写(含服务端同 id)
+          pushes.push(_push(a));
         });
         if (dirty) persist();
-      }).catch(function () {});
-    } catch (e) {}
+        return Promise.all(pushes);
+      }).then(function (rows) {
+        const ok = (rows || []).every(function (x) { return x && x.ok; });
+        _resolveArchiveReady({ ok: ok, reason: ok ? null : 'archive_put_failed' });
+      }).catch(function () { _resolveArchiveReady({ ok: false, reason: 'archive_sync_failed' }); });
+    } catch (e) { _resolveArchiveReady({ ok: false, reason: 'archive_sync_failed' }); }
   }, 0);
 
   window.GL = GL;

@@ -25,6 +25,14 @@ import pytest  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _disable_probe_worker(monkeypatch):
+    """常驻 probe worker 默认在测试里禁用:桩 lc._run_probe/subprocess.run 的既有测试
+    绝不能落到真 worker 子进程。worker 自身的测试显式 setenv GUANLAN_PROBE_WORKER=1
+    并把 _STOCKS_WORKER 指到假 worker 脚本。"""
+    monkeypatch.setenv("GUANLAN_PROBE_WORKER", "0")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_console_memory(tmp_path, monkeypatch):
     import guanlan_v2.console.tools as ct
     monkeypatch.setattr(ct, "_MEMORY_PATH", tmp_path / "_isolated_console" / "memory.md")

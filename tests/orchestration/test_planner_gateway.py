@@ -124,7 +124,7 @@ class FakeLLMClient:
         output: str = '{"nodes": []}',
         raises: BaseException | None = None,
         provider: str = "deepseek",
-        model: str = "deepseek-reasoner",
+        model: str = "deepseek-v4-pro",
         prompt_tokens: int = 120,
         completion_tokens: int = 340,
     ) -> None:
@@ -194,7 +194,7 @@ def test_happy_path_returns_phase2_model_result(monkeypatch):
     assert result.input_tokens == 77
     assert result.output_tokens == 88
     assert result.provider == "deepseek"
-    assert result.model == "deepseek-reasoner"
+    assert result.model == "deepseek-v4-pro"
     # binding was verified through the reader before any provider bytes
     assert reader.get_calls, "the gateway must resolve the persisted record"
 
@@ -319,7 +319,7 @@ def test_explicit_config_path_bypasses_pinned_workspace_shadow(monkeypatch):
     """Invariant 2, end-to-end: the REAL ``for_agent`` runs; only ``find_config`` and
     ``chat`` are seamed. A guarded ``find_config`` proves the pinned-workspace shadow
     (``explicit=None``) is never consulted, and the resolved seat is the repo config's
-    ``planner`` override (deepseek-reasoner)."""
+    ``planner`` override (deepseek-v4-pro, thinking=max)."""
     import financial_analyst.llm.client as engine_client
 
     real_find = engine_client.find_config
@@ -356,5 +356,5 @@ def test_explicit_config_path_bypasses_pinned_workspace_shadow(monkeypatch):
     assert all(explicit is not None for (_, explicit) in find_calls)
     # the repo config's planner override resolved to the deep tier
     assert result.provider == "deepseek"
-    assert result.model == "deepseek-reasoner"
+    assert result.model == "deepseek-v4-pro"
     assert result.rendered_text == '{"nodes": []}'

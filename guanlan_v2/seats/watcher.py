@@ -2,9 +2,9 @@
 """后端定时盯盘 watcher(2026-07-11 落子改造 Task 1,spec §2)。
 
 交易日盘中(09:30–11:30 / 13:00–15:00,引擎交易日历判日、失败回退周一~五)每 tick
-(默认 5min)遍历盯盘集(``var/archive/strat_*.json`` 里 ``bind`` 非空的策略),
-对每只绑定票:报价 fresh → 节流过(per-code 10min 硬地板 + 策略 ``clock.decisionFreq``
-hourly≥1h / daily 当日一次)→ **进程内直调 decide 内核**(``api._decide_impl``,
+(默认 5min)遍历独立单票 assignment(``var/seats_watch_assignments.json``),
+对每只启用且可运行的票:报价 fresh → assignment ``decision_cadence`` 节流 →
+**进程内直调 decide 内核**(``api._decide_impl``,
 严禁 HTTP 自调本服务,守协程红线),落盘 ``seats_decisions.jsonl`` 带 ``source:"watcher"``。
 
 烧钱保险:日预算(默认 24 次/日)存 ``var/seats_watch.json``
@@ -34,6 +34,7 @@ _log = logging.getLogger("guanlan.seats.watcher")
 
 VAR = Path(__file__).resolve().parents[2] / "var"
 ARCHIVE_DIR = VAR / "archive"
+ASSIGNMENTS_PATH = VAR / "seats_watch_assignments.json"
 DECISIONS_LOG = VAR / "seats_decisions.jsonl"     # 与 api._DEC_LOG 同一文件(读侧)
 STATE_PATH = VAR / "seats_watch.json"   # {"enabled": bool, "daily_budget": int, "counts": {"2026-07-10": 2}}
 
@@ -248,58 +249,85 @@ def release_orchestrated_codes(registration: Optional[OrchestratedRegistration])
         _publish_orchestrated()
 
 
-# ───────────────────────── 盯盘集(策略 bind 派生)─────────────────────────
+# ───────────────────────── 单票 assignment(旧 bind 一次迁移)────────────────
+
+
+def assignment_items() -> list[dict]:
+    """All persisted assignments, including disabled/non-runnable rows.
+
+    The first read performs the deterministic legacy ``strategy.bind``
+    migration.  A corrupt authoritative store raises and callers fail closed;
+    it is never silently rebuilt from binds because that could re-enable a
+    symbol an operator intentionally disabled.
+    """
+    from guanlan_v2.seats import watch_assignments as _wa
+    return _wa.list_assignments(path=ASSIGNMENTS_PATH, archive_dir=ARCHIVE_DIR)
+
+
+def upsert_assignment(code: str, payload: dict) -> dict:
+    """Persist one code's unique primary watcher strategy/configuration."""
+    from guanlan_v2.seats import watch_assignments as _wa
+    return _wa.upsert_assignment(
+        code, payload, path=ASSIGNMENTS_PATH, archive_dir=ARCHIVE_DIR)
 
 def watching_codes() -> list[dict]:
-    """读 ``var/archive/strat_*.json``,``bind`` 非空的策略逐票展开(坏 json 跳过)。
+    """Return runnable assignments joined to their exact strategy id.
 
-    返回 ``[{code, strategy_id, name, clock, creed, w, pa, pa_method, refs}]``
-    (per (策略, 票) 一行;同票多策略由 tick 内去重,绑定仍是盯盘集唯一真相,
-    与 ww_seats_bind 同源语义)。"""
-    out: list[dict] = []
+    There is exactly one row per canonical six-digit code.  Missing/duplicate
+    strategy archives and unsupported evidence timeframes are excluded rather
+    than guessed.  Tests/orchestration may continue monkeypatching this public
+    seam exactly as before.
+    """
+    from guanlan_v2.seats import watch_assignments as _wa
     try:
-        paths = sorted(ARCHIVE_DIR.glob("strat_*.json"))
-    except Exception:  # noqa: BLE001 — 目录不可读 → 诚实空集
+        joined = _wa.runtime_assignments(
+            path=ASSIGNMENTS_PATH, archive_dir=ARCHIVE_DIR)
+    except Exception as exc:  # noqa: BLE001 — 控制面不可读 → fail closed
+        _log.error("watch assignments 不可读,本拍停止:%s", exc)
         return []
-    for p in paths:
-        try:
-            s = json.loads(p.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001 — 单条坏 json 跳过
-            continue
-        if not isinstance(s, dict):
-            continue
-        binds = s.get("bind")
-        if not isinstance(binds, list) or not binds:
-            continue
-        for code in binds:
-            code = str(code or "").strip()
-            if not code:
-                continue
-            out.append({
-                "code": code,
-                "strategy_id": str(s.get("id") or p.stem),
-                "name": str(s.get("name") or ""),
-                "clock": s.get("clock") if isinstance(s.get("clock"), dict) else {},
-                "creed": str(s.get("creed") or ""),
-                "w": s.get("w") or 0,
-                "pa": bool(s.get("pa")),
-                "pa_method": str(s.get("paMethod") or s.get("pa_method") or ""),
-                "refs": s.get("refs") if isinstance(s.get("refs"), list) else [],
-            })
+    out: list[dict] = []
+    for bundle in joined:
+        a = bundle["assignment"]
+        s = bundle["strategy"]
+        out.append({
+            "code": a["code"],
+            "strategy_id": a["strategy_id"],
+            "name": str(s.get("name") or ""),
+            "clock": s.get("clock") if isinstance(s.get("clock"), dict) else {},
+            "creed": str(s.get("creed") or ""),
+            "w": s.get("w") or 0,
+            "pa": bool(s.get("pa")),
+            "pa_method": str(s.get("paMethod") or s.get("pa_method") or ""),
+            "refs": s.get("refs") if isinstance(s.get("refs"), list) else [],
+            "evidence_tf": a["evidence_tf"],
+            "requested_evidence_tf": a["requested_evidence_tf"],
+            "effective_evidence_tf": a["effective_evidence_tf"],
+            "decision_cadence": a["decision_cadence"],
+            "thinking_mode": a.get("thinking_mode") or "fast",
+            "assignment_revision": a["revision"],
+        })
     return out
 
 
 def get_status() -> dict:
-    """/seats/watch/status 载荷:{enabled, watching, today_count, daily_budget, last_tick, market_open}。"""
+    """Status with the legacy fields plus visible assignment control-plane rows."""
     st = load_state()
     now = datetime.now()
     codes: list[str] = []
     for cw in watching_codes():
         if cw["code"] not in codes:
             codes.append(cw["code"])
+    try:
+        items = assignment_items()
+        assignment_error = None
+    except Exception as exc:  # noqa: BLE001 — 状态仍可读,assignment 明确报错且不运行
+        items = []
+        assignment_error = f"{type(exc).__name__}: {exc}"
     return {
         "enabled": bool(st.get("enabled")),
         "watching": codes,
+        "assignment_items": items,
+        **({"assignment_error": assignment_error} if assignment_error else {}),
         "today_count": int((st.get("counts") or {}).get(now.date().isoformat()) or 0),
         "daily_budget": int(st.get("daily_budget") or DEFAULT_BUDGET),
         "last_tick": st.get("last_tick"),
@@ -344,7 +372,7 @@ def _is_market_open(now: datetime) -> bool:
 
 
 def _throttle_ok(code: str, freq: str, last_ts, now: datetime) -> bool:
-    """节流:10min 硬地板 + hourly≥1h + daily 当日一次;无记录/坏时间戳 → 放行。"""
+    """节流:10min 硬地板 + assignment cadence;无记录/坏时间戳 → 放行。"""
     if not last_ts:
         return True
     try:
@@ -355,9 +383,12 @@ def _throttle_ok(code: str, freq: str, last_ts, now: datetime) -> bool:
     if delta < _FLOOR_SECONDS:
         return False
     f = str(freq or "").strip().lower()
+    if f == "hourly":                 # legacy/test compatibility
+        f = "60min"
     if f == "daily":
         return last.date() != now.date()
-    return delta >= 3600.0       # hourly / 未知频率保守按 hourly
+    seconds = {"60min": 3600.0, "30min": 1800.0, "10min": 600.0}.get(f)
+    return bool(seconds is not None and delta >= seconds)  # unknown fails closed
 
 
 # ───────────────────────── refs best-effort 服务端解析 ─────────────────────────
@@ -478,9 +509,15 @@ def _code6(code: str) -> str:
     return m.group(1) if m else str(code or "")
 
 
-def _decisions_tail_production(code: str, max_lines: int = 4000) -> Optional[str]:
-    """读 ``var/seats_decisions.jsonl`` 尾部,取该 code 最新一条 kind=decide 的 ts
-    (6 位数字码等价比较:bind 存 ``300750``、落盘存 ``SZ300750``)。无 → None。"""
+def _decisions_tail_production(code: str, max_lines: int = 4000, *,
+                               strategy_id: str = "",
+                               assignment_revision: Optional[int] = None) -> Optional[str]:
+    """Latest automatic decision for this exact assignment revision.
+
+    Manual decisions, replay runs and a previous assignment revision must not
+    postpone the scheduler.  Legacy rows without a revision therefore do not
+    throttle the first run after migration, which is the intended cut-over.
+    """
     try:
         if not DECISIONS_LOG.exists():
             return None
@@ -494,7 +531,13 @@ def _decisions_tail_production(code: str, max_lines: int = 4000) -> Optional[str
             r = json.loads(ln)
         except Exception:  # noqa: BLE001
             continue
-        if r.get("kind") != "decide" or _code6(r.get("code")) != want:
+        if (r.get("kind") != "decide" or r.get("source") != "watcher"
+                or _code6(r.get("code")) != want):
+            continue
+        if strategy_id and str(r.get("strategy_id") or "") != str(strategy_id):
+            continue
+        if (assignment_revision is not None
+                and r.get("assignment_revision") != assignment_revision):
             continue
         ts = str(r.get("ts") or "")
         if ts and (last is None or ts > last):    # ISO 字符串序=时间序
@@ -560,11 +603,26 @@ def _build_payload(cw: dict, now: datetime, quote: dict) -> dict:
     cards, factors = _resolve_refs(cw.get("refs"))
     name = str((quote or {}).get("name") or "") or cw["code"]
     _hold = _hold_entry_for(cw["code"])
+    # Compatibility seam for existing unit/orchestration fakes that monkeypatch
+    # ``watching_codes`` with the pre-assignment row shape.  Production rows
+    # always carry assignment_revision + explicit requested/effective fields.
+    legacy_row = "assignment_revision" not in cw
+    effective_tf = str(cw.get("effective_evidence_tf")
+                       or ("day" if legacy_row else "")).strip().lower()
+    if effective_tf not in ("day", "30min", "5min", "1min"):
+        raise ValueError(f"unsupported effective_evidence_tf:{effective_tf or 'missing'}")
+    requested_tf = str(cw.get("requested_evidence_tf") or cw.get("evidence_tf")
+                       or effective_tf).strip().lower()
+    cadence = str(cw.get("decision_cadence")
+                  or ((cw.get("clock") or {}).get("decisionFreq") if legacy_row else "")
+                  or ("hourly" if legacy_row else "")).strip().lower()
+    mode = str(cw.get("thinking_mode") or "fast").strip().lower()
     return {
         **({"hold_entry": _hold} if _hold is not None else {}),
         "code": cw["code"],
         "name": name,
-        "date": now.date().isoformat(),
+        "date": (now.date().isoformat() if effective_tf == "day"
+                 else now.isoformat(timespec="minutes")),
         "seat_cn": cw.get("name") or "盯盘",
         "creed": cw.get("creed") or "",
         "strategy_id": cw.get("strategy_id") or "",
@@ -575,8 +633,12 @@ def _build_payload(cw: dict, now: datetime, quote: dict) -> dict:
         "pa": bool(cw.get("pa")),
         "pa_method": cw.get("pa_method") or "",
         "industry": _industry_for(cw["code"]),
-        "mode": "fast",          # 定时节拍走快档(deepseek-chat);深思留给手动「研判一次」
-        "freq": "day",
+        "mode": mode,
+        "freq": effective_tf,
+        "requested_evidence_tf": requested_tf,
+        "effective_evidence_tf": effective_tf,
+        "decision_cadence": cadence,
+        "assignment_revision": int(cw.get("assignment_revision") or 0),
         "source": "watcher",
     }
 
@@ -606,6 +668,7 @@ def tick(now: Optional[datetime] = None,
 
     decide_fn = decide_fn or _decide_production
     quote_fn = quote_fn or _quote_production
+    production_tail = decisions_tail_fn is None
     decisions_tail_fn = decisions_tail_fn or _decisions_tail_production
 
     judged: list = []
@@ -632,15 +695,28 @@ def tick(now: Optional[datetime] = None,
         if not q.get("fresh"):
             skipped[code] = "stale_quote"
             continue
-        freq = str((cw.get("clock") or {}).get("decisionFreq") or "hourly")
+        freq = str(cw.get("decision_cadence")
+                   or (cw.get("clock") or {}).get("decisionFreq") or "")
         try:
-            last_ts = decisions_tail_fn(code)
+            if production_tail:
+                last_ts = decisions_tail_fn(
+                    code, strategy_id=str(cw.get("strategy_id") or ""),
+                    assignment_revision=(int(cw["assignment_revision"])
+                                         if cw.get("assignment_revision") is not None else None))
+            else:
+                # Preserve the long-standing injectable one-argument seam used
+                # by watcher and orchestration tests.
+                last_ts = decisions_tail_fn(code)
         except Exception:  # noqa: BLE001
             last_ts = None
         if not _throttle_ok(code, freq, last_ts, now):
             skipped[code] = "throttled"
             continue
-        payload = _build_payload(cw, now, q)
+        try:
+            payload = _build_payload(cw, now, q)
+        except Exception as e:  # malformed/non-runnable assignment must fail closed per code
+            skipped[code] = f"assignment_invalid:{type(e).__name__}"
+            continue
         try:
             res = decide_fn(payload) or {}
         except Exception as e:  # noqa: BLE001 — 单票 decide 故障不拖垮整拍

@@ -195,7 +195,7 @@ NOW = datetime(2026, 7, 24, 7, 0, tzinfo=UTC)
 VALID_FROM = NOW - timedelta(days=1)
 VALID_UNTIL = NOW + timedelta(days=1)
 PHASE8_REGISTRY_DIGEST = (
-    "d719e19bc8c64f56324ee36ca0d3aa039e5eac1c9488d80babe6ddce81e5e089"
+    "201e7f2cccdf56369e6c8244982eb0647172a7be7d2b8060f8eebb75de6ca650"
 )
 PHASE7_BASELINE = "main.research_baseline"
 DEEP_DECIDE_PRESET_ID = "pipeline.luozi_deep_decide"

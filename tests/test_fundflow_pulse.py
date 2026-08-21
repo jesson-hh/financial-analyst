@@ -296,6 +296,36 @@ def test_read_live_caches_within_ttl(tmp_path):
     assert len(calls) == 1 and r2["freshness"]["stale"] is False
 
 
+def test_read_live_cold_start_single_flight(tmp_path):
+    """2026-07-28 评审回归:预热线程与页面请求并发抵达同一 kind 的冷启动,首拉过单飞旗
+    只放一个真拉东财,另一方有界等缓存后秒回——绝不双拉;返回契约不变(两方都拿到 ok 数据)。"""
+    import threading as th
+    import time as t
+    from guanlan_v2.fundflow import pulse
+    calls = []
+
+    def _slow_build(kind, refresh=False, sector_fn=None, market_fn=None, now=None, **kw):
+        calls.append(kind)
+        t.sleep(0.8)
+        stamp = (now or datetime(2026, 7, 8, 10, 0, 0)).strftime("%Y-%m-%dT%H:%M:%S")
+        return {"ok": True, "kind": "concept", "pulled_at": stamp, "trading": True,
+                "market": {"main_net": 1.0}, "breadth": {}, "boards": [], "notes": []}
+
+    results = []
+
+    def _reader():
+        results.append(pulse.read_live("concept", cache_dir=str(tmp_path), ttl_s=180,
+                                       now=datetime(2026, 7, 8, 10, 0, 0), build_fn=_slow_build))
+
+    threads = [th.Thread(target=_reader) for _ in range(2)]
+    for x in threads:
+        x.start()
+    for x in threads:
+        x.join(timeout=30)
+    assert len(results) == 2 and all(r.get("ok") for r in results)
+    assert len(calls) == 1, "并发冷启动必须只有一个真拉(单飞旗)"
+
+
 def test_read_live_refresh_bypasses_cache(tmp_path):
     from guanlan_v2.fundflow import pulse
     calls = []

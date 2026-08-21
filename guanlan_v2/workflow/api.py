@@ -4972,7 +4972,7 @@ async def _llm_complete(system: str, user: str, temperature: float = 0.2) -> str
     """LLM 单次补全(延迟 import,engine 只 import 不改)。镜像 cards/refine.py:74-79。
 
     运行时 server.py 强制 FA_CONFIG_DIR→仓内 config/llm.yaml(default_provider=deepseek/
-    deepseek-chat,agent_overrides={}),故 for_agent("workflow") 解析为 deepseek/deepseek-chat。
+    deepseek-v4-flash,default_thinking=false),故 for_agent("workflow") 走 V4-Flash 非思考档。
     deepseek 走 OpenAI 兼容 response_format={"type":"json_object"} 强约束出 JSON。
     网络/key/超时异常照常 raise,由端点 try/except 包成 {ok:false,reason} HTTP 200。
     """
@@ -5253,6 +5253,7 @@ class WorkflowSaveIn(BaseModel):
 
     name: str = ""
     graph: dict = Field(default_factory=dict)   # {nodes:[...], edges:[...]}
+    workspace_id: Optional[str] = None          # 缺省=旧全局库；有值=空间私有实例
 
 
 class WorkflowRunIn(BaseModel):
@@ -5266,7 +5267,7 @@ class WorkflowRunIn(BaseModel):
     oos_frac: Optional[float] = None
 
 
-def build_workflow_router() -> APIRouter:
+def build_workflow_router(workspace_store: Any = None) -> APIRouter:
     """工作流自有节点路由组(无 prefix,P2-P5 共用)。随 cards/seats/factorlib 工厂式。"""
     router = APIRouter(tags=["workflow"])
     # 工作流服务端持久化 store(照 cards/factorlib 工厂头部 new 一次)。
@@ -5795,33 +5796,45 @@ def build_workflow_router() -> APIRouter:
     def workflow_save(body: WorkflowSaveIn):
         """保存工作流到服务端 .data/workflows/<id>.json(后端生成 id/ts)。"""
         try:
+            if body.workspace_id and workspace_store is not None:
+                workspace_store.require(body.workspace_id, active_only=True)
             g = body.graph or {}
             if not isinstance(g.get("nodes"), list):
                 return JSONResponse({"ok": False, "reason": "graph.nodes 缺失或非数组"})
-            rec = wf_store.save(body.name, g)
+            rec = wf_store.save(body.name, g, workspace_id=body.workspace_id)
             return JSONResponse({
                 "ok": True,
                 "id": rec["id"],
                 "ts": rec["ts"],
                 "name": rec["name"],
+                "scope": rec["scope"],
+                "workspace_id": rec["workspace_id"],
             })
         except Exception as exc:  # noqa: BLE001  诚实失败 HTTP 200,不抛 500
             return JSONResponse({"ok": False, "reason": f"{type(exc).__name__}: {exc}"})
 
     @router.get("/workflow/list")
-    def workflow_list():
-        """列出全部已存工作流(回全量含 graph,按 ts 倒序)。"""
+    def workflow_list(workspace_id: Optional[str] = None, include_global: bool = False):
+        """列出当前作用域工作流；空间可显式附带全局只读模板。"""
         try:
-            items = wf_store.list()
+            items = wf_store.list(
+                workspace_id=workspace_id,
+                include_global=include_global,
+            )
             return JSONResponse({"ok": True, "items": items})
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"ok": False, "items": [], "reason": f"{type(exc).__name__}: {exc}"})
 
     @router.get("/workflow/get/{wid}")
-    def workflow_get(wid: str):
+    def workflow_get(wid: str, workspace_id: Optional[str] = None,
+                     include_global: bool = False):
         """取单个工作流全量(id 安全化防穿越;不存在回 ok:False,不抛 404)。"""
         try:
-            rec = wf_store.get(wid)
+            rec = wf_store.get(
+                wid,
+                workspace_id=workspace_id,
+                include_global=include_global,
+            )
             if rec is None:
                 return JSONResponse({"ok": False, "reason": "工作流不存在"})
             return JSONResponse({
@@ -5830,15 +5843,21 @@ def build_workflow_router() -> APIRouter:
                 "name": rec.get("name", ""),
                 "id": rec.get("id", wid),
                 "ts": rec.get("ts", 0),
+                "scope": rec.get("scope", "global"),
+                "workspace_id": rec.get("workspace_id"),
+                "read_only": bool(rec.get("read_only")),
+                "is_template": bool(rec.get("is_template")),
             })
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"ok": False, "reason": f"{type(exc).__name__}: {exc}"})
 
     @router.delete("/workflow/delete/{wid}")
-    def workflow_delete(wid: str):
+    def workflow_delete(wid: str, workspace_id: Optional[str] = None):
         """删除单个工作流(id 安全化防穿越;存在删并回 ok:True,不存在 ok:False)。"""
         try:
-            ok = wf_store.delete(wid)
+            if workspace_id and workspace_store is not None:
+                workspace_store.require(workspace_id, active_only=True)
+            ok = wf_store.delete(wid, workspace_id=workspace_id)
             if not ok:
                 return JSONResponse({"ok": False, "reason": "工作流不存在"})
             return JSONResponse({"ok": True, "id": wid})
@@ -5853,7 +5872,10 @@ def build_workflow_router() -> APIRouter:
             wid = str((body or {}).get("id", "")).strip()
             if not wid:
                 return JSONResponse({"ok": False, "reason": "id 不能为空"})
-            ok = wf_store.delete(wid)
+            workspace_id = (body or {}).get("workspace_id")
+            if workspace_id and workspace_store is not None:
+                workspace_store.require(workspace_id, active_only=True)
+            ok = wf_store.delete(wid, workspace_id=workspace_id)
             if not ok:
                 return JSONResponse({"ok": False, "reason": "工作流不存在"})
             return JSONResponse({"ok": True, "id": wid})

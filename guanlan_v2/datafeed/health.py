@@ -20,6 +20,8 @@ _DL_STALE_DAYS = 3      # **交易日**窗(与 dl_ensemble.DLSource.max_stale_da
 _TENCENT_STALE_HOURS = 24
 _PIT_STALE_DAYS = 3
 _TAPE_STALE_MIN = 30    # 盘口快照:SWR 常态 <3min;超 30min 未刷(服务停摆/盘后)→ stale
+_RADAR_STALE_HOURS = 24   # 资讯雷达:产业 RSS 日级情报;请求驱动 SWR,超 1 天未刷诚实显形
+_PULSE_STALE_HOURS = 30   # 宏观温度计快照:复盘官日跑节拍,30h 容漂移;超=日跑/刷新全停
 
 _STATUS_RANK = {"fresh": 0, "unknown": 1, "stale": 2, "missing": 3}
 
@@ -83,6 +85,21 @@ def _read_json(path: Path) -> Optional[dict]:
         return d if isinstance(d, dict) else None
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def _tail_lines(path: Path, max_bytes: int = 65536) -> list:
+    """读文件尾部 max_bytes 内的行(append-only jsonl 尾行定位用);失败→[]。
+    macro 快照无轮转会无限增长,总闸绝不全量解析拖慢自己。"""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            f.seek(max(0, size - max_bytes))
+            return f.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+
+
+from importlib import import_module as _import_module
 
 
 import functools
@@ -236,12 +253,117 @@ def _item_market_tape() -> Dict[str, Any]:
             "note": "盘口快照久未刷新(服务停摆/盘后?)" if status == "stale" else ""}
 
 
+def _item_newsradar() -> Dict[str, Any]:
+    """资讯雷达快照新鲜度(2026-07-16 收口):读 var/live/newsradar.json 的 pulled_at 龄期。
+    产业 RSS 日级情报 ≤24h=fresh;超=stale——请求驱动 SWR 无人访问资讯页即不刷,诚实显形。"""
+    try:
+        from guanlan_v2.datafeed.newsradar import _CACHE_PATH
+        m = _read_json(Path(_CACHE_PATH))
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "missing", "note": f"{type(exc).__name__}"}
+    if not m:
+        return {"status": "missing", "note": "无资讯雷达快照(未预热/资讯页从未访问)"}
+    age_h = _age_hours(m.get("pulled_at"))
+    status = "unknown" if age_h is None else ("stale" if age_h > _RADAR_STALE_HOURS else "fresh")
+    return {"status": status, "pulled_at": m.get("pulled_at"), "age_hours": age_h,
+            "n_sources": m.get("n_sources"),
+            "note": "雷达快照久未刷新(无人访问资讯页/服务停摆?)" if status == "stale" else ""}
+
+
+def _item_macro_pulse() -> Dict[str, Any]:
+    """宏观温度计快照新鲜度(2026-07-16 收口):snapshots.jsonl 尾部最近合法行的 ts。
+    刷新三驱动=UI 刷新/ww_macro_pulse/复盘官日跑;≤30h=fresh(容日跑漂移)。
+    只读尾块 64KB(_tail_lines),脏尾行跳过取最近合法行。"""
+    try:
+        from guanlan_v2.macro.pulse import _SNAP_DEFAULT as _snap
+        path = Path(_snap)
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "missing", "note": f"{type(exc).__name__}"}
+    if not path.exists():
+        return {"status": "missing", "note": "无宏观快照(温度计从未真拉成功)"}
+    ts: Optional[str] = None
+    for line in reversed(_tail_lines(path)):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:  # noqa: BLE001 — append-only jsonl 脏行惯例
+            continue
+        if isinstance(row, dict) and row.get("ts"):
+            ts = str(row["ts"])
+            break
+    age_h = _age_hours(ts)
+    status = "unknown" if age_h is None else ("stale" if age_h > _PULSE_STALE_HOURS else "fresh")
+    return {"status": status, "ts": ts, "age_hours": age_h,
+            "note": "宏观快照久未落(UI 刷新/ww_macro_pulse/复盘官日跑均未动?)"
+                    if status == "stale" else ""}
+
+
+def _item_overseas() -> Dict[str, Any]:
+    """海外看板(纯内存 SWR,运维项):冷=unknown(重启即失、按需预热,非故障);
+    缓存在场报龄期,note 诚实说明「龄期大≠故障」;全部缺价=stale(上游腾讯 qt 不可达显形)。"""
+    try:
+        from guanlan_v2.datafeed import overseas as _ov
+        data = _ov._MEM_CACHE.get("data")
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "missing", "note": f"{type(exc).__name__}"}
+    if not data:
+        return {"status": "unknown",
+                "note": "纯内存缓存冷(重启后未预热;访问海外页/ww_overseas 即自愈)"}
+    rows = data.get("rows") or []
+    age_min = round((datetime.now().timestamp() - float(data.get("pulled_ts") or 0)) / 60.0, 1)
+    if rows and all((not isinstance(r, dict)) or r.get("price") is None for r in rows):
+        return {"status": "stale", "age_min": age_min, "n": len(rows),
+                "note": "全部缺价(上游腾讯 qt 不可达?)"}
+    return {"status": "fresh", "age_min": age_min, "n": data.get("n"),
+            "pulled_at": data.get("pulled_at"),
+            "note": "按需现拉型:龄期大只代表近期无人访问,非故障"}
+
+
+def _item_kuaixun() -> Dict[str, Any]:
+    """快讯门户(现拉型零快照,运维项):仅校验引擎采集器可导入——可用=fresh,
+    不可导入=missing。绝不冒充内容新鲜度(内容新鲜度=调用时现拉)。"""
+    try:
+        _import_module("financial_analyst.data.news_pulse")
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "missing", "note": f"快讯采集器不可导入: {type(exc).__name__}"}
+    return {"status": "fresh", "note": "现拉型门户(零快照):仅校验采集器可用,不代表内容新鲜"}
+
+
+def _item_probe_worker() -> Dict[str, Any]:
+    """常驻 probe worker 通道自检(T2 提速面):通道死=提速蒸发但数据仍真(自动回落
+    一次性子进程),运维项不拖 overall;冷却态把 last_error(含 stderr 尾)显形。"""
+    from guanlan_v2.datafeed import live_client as _lc
+
+    st = _lc.worker_status()
+    if not st["enabled"]:
+        return {"status": "unknown", "note": "worker 已禁用(GUANLAN_PROBE_WORKER=0),走一次性子进程"}
+    if not st["script_exists"]:
+        return {"status": "missing", "note": "stocks probe_live_worker.py 缺席(已回落一次性子进程)"}
+    if float(st.get("cooldown_until") or 0.0) > datetime.now().timestamp():
+        return {"status": "error",
+                "note": f"worker 连败冷却中(已回落一次性):{str(st.get('last_error') or '')[:200]}"}
+    if st["state"] == "ready" or st["alive"]:
+        return {"status": "fresh", "note": ""}
+    return {"status": "unknown", "note": "worker 冷(尚无调用,首调懒起)"}
+
+
 _ITEMS = {"v4_ranking": _item_v4, "regen_scheduler": _item_regen, "dl_ensemble": _item_dl,
           "stock_basic": _item_stock_basic, "tencent_live_cache": _item_tencent_cache,
-          "pit_store": _item_pit_store, "market_tape": _item_market_tape}
+          "pit_store": _item_pit_store, "market_tape": _item_market_tape,
+          "newsradar": _item_newsradar, "macro_pulse": _item_macro_pulse,
+          "overseas": _item_overseas, "kuaixun": _item_kuaixun,
+          "probe_worker": _item_probe_worker}
 # 运维类项(非"数据新鲜度")不参与 overall 恶化:regen 调度是开关,关着不代表数据陈旧,
 # 否则生产常态(opt-in 未开)会把 overall 恒拉成 unknown 掩盖真实数据面(评审 Minor)。
-_OPS_ITEMS = {"regen_scheduler"}
+# overseas(纯内存,重启即冷)/kuaixun(现拉型零快照)同理:unknown 是常态非故障。
+# newsradar 同理(2026-07-16 评审确认):纯请求驱动 SWR 无定时生产者,无人访问资讯页
+# 是常态——归数据项会让周末 overall 恒 stale,噪声经复盘官日调 ww_data_health 进晨报,
+# 掩盖 DL 断供等真故障;items 里仍诚实显形 stale,只是不拖 overall。
+# probe_worker(2026-07-30 T2 评审):常驻 worker 通道死=提速蒸发但数据仍真(自动回落
+# 一次性子进程),属运维态;必须显形否则可静默失效数周,但不拖 overall。
+_OPS_ITEMS = {"regen_scheduler", "overseas", "kuaixun", "newsradar", "probe_worker"}
 
 
 def collect_data_health() -> Dict[str, Any]:

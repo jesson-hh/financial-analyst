@@ -21,7 +21,7 @@
 |------|------|
 | `观澜 · 帷幄.html` | 模板:React UMD + `guanlan-bus.js?v=3` + `guanlan-nav.js` + `GUANLAN_BACKEND` 同源开关(file:// 直开诚实报错) |
 | `console-data.jsx` | 事件流客户端:`EventSource`(原生,自动重连)+ `wwApply` reducer + 会话/计划/产物状态;导出 `window.WW`(API/TOOL_CN/PAGES/initState/apply/connect/send/confirm/sessions/newSession) |
-| `console-rail.jsx` | 左栏:`WwRail` — 「新对话」按钮 + 任务计划(✓/▶/○ 三态,▶ 脉冲动画)+ 会话列表(当前朱砂竖线)+ 已连流/档案件数脚注 |
+| `console-rail.jsx` | 左栏:`WwRail` — 「新对话」按钮 + 会话列表(当前朱砂竖线)+ 已连流/档案件数脚注 |
 | `console-thread.jsx` | 中栏:`WwThread` — 事件流按序渲染(用户消息右对齐卡 / agent 消息「觀」印章头像 / 工具调用卡摘要行+展开摘要 / 确认门「准/驳回」面板);`WwToolCard` 工具卡子组件 |
 | `console-bench.jsx` | 右栏:`WwBench` — tab(仅激活过的页)+ 同源 iframe 原样嵌入 + `?embed=1&_t=ts` 强制重载 + `scale(panelWidth/1280)` 自适应缩放 + ⌖钉住 + ↗独立页 + ✕收起 |
 | `console-app.jsx` | 主壳:`WeiwoApp` — `useReducer` 管全局状态、布局三栏 grid、会话切换/新建、`onSend`/`onConfirm` |
@@ -144,7 +144,7 @@
 
 ### C 批 — 体验件
 
-- **左栏后台任务分区**:按 `kind` 事件字段聚合 `bgTasks`,显示进度条
+- **右上角任务面板**:完整显示本会话计划(✓/▶/○)与完成进度;按 `kind` 事件字段聚合 `bgTasks`,显示进度条。左栏不再承载任务信息。
 - **右栏左缘拖宽把手**:分隔条拖动,存 `localStorage` 键 `guanlan:ww:benchw`,clamp 范围 480 ~ (innerWidth - 700)
 
 ### 功能呼出器 ◫(2026-06-11 追加,?v=20260613d)
@@ -155,7 +155,7 @@
 
 ### 顶栏任务芯片 + 会话管理(2026-06-11 追加,?v=20260613g)
 
-- ~~顶栏「●任务」芯片 portal 进 nav~~ → **改为会话栏 `WwSessBar`(?v=20260613i/j,用户拍板:每个对话都有不同的顶栏)**:对话区(中栏)顶部 38px 一条,随会话切换各不相同——左:会话名 + ✎ 行内改名(Enter 提交,`metaPatch` action 即时回显不等快照);右:busy 时「●+当前计划项」摘要 + 「●任务」芯片(空闲灰、运行中朱砂带计数),点开下拉面板:当前对话状态 + 后台任务卡(进度条 / done 带「查看 ↗」→ 从事件流找回 report_md 开抽屉)。nav 上不再放全局芯片;后台任务从左栏迁来,左栏不再渲染。
+- ~~顶栏「●任务」芯片 portal 进 nav~~ → **改为会话栏 `WwSessBar`(用户拍板:每个对话都有不同的顶栏)**:对话区(中栏)顶部 38px 一条,随会话切换各不相同——左:会话名 + ✎ 行内改名;右:「复盘日报」全局只读入口 + 本会话「计划/执行」芯片。任务下拉完整显示计划三态、完成数、当前执行、后台任务和全局哨兵;切换会话自动收起。SSE 快照从 `meta.plan` 恢复计划,不受最近 500 条事件窗口影响。左栏不再渲染计划、复盘或编排治理卡。
 - **会话改名/分组/状态**(console-rail.jsx):行悬停出 ✎改名 / ⊟分组,行内 input,Enter 提交 Escape 取消,经 `PATCH /console/sessions/{sid}`(白名单 title/group,group 空串=取消分组);左栏按 `meta.group` 归并渲组头(未分组平铺在前);行首状态点 = sessions 列表下发的 `running`(进程内实时态,8s 轻轮询保鲜)∪ 当前会话 busy。
 - **用户消息靠左**(console-thread.jsx):UserBubble 黑卡从右对齐改 `flex-start`(用户拍板)。
 

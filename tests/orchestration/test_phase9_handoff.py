@@ -291,7 +291,7 @@ PHASE7_REGISTRY_DIGEST = (
     "b23e389cda2a6af313d624613893ce5244fcc36379576e6591665aa77bb19dfe"
 )
 PHASE8_REGISTRY_DIGEST = (
-    "d719e19bc8c64f56324ee36ca0d3aa039e5eac1c9488d80babe6ddce81e5e089"
+    "201e7f2cccdf56369e6c8244982eb0647172a7be7d2b8060f8eebb75de6ca650"
 )
 
 # --- the cumulative catalog chain (P6 is the identity node: P6 == P5) ------- #
@@ -315,7 +315,7 @@ PHASE7_CATALOG_DIGEST = (
     "b78b63e476bfd5bf0c303524244dbc9a23a585ccc924c8230dcfe906f1b07750"
 )
 PHASE8_CATALOG_DIGEST = (
-    "78f79d330ae99e7efcadb7b367f6f84badb0cca2541473824a6fb7618eb4f951"
+    "17f0fed4df3c8bdb018641df4973155d0e1d95538043cbfbb08b7506aa6375fd"
 )
 
 #: the Phase-8 cumulative registry entry count + full-catalog final-worker count.

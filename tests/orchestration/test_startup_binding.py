@@ -82,6 +82,24 @@ def _unbind_process_stores():
 # --------------------------------------------------------------------------- #
 # The derived namespace union                                                  #
 # --------------------------------------------------------------------------- #
+def test_t2c_deferred_chain_exposed_runs_once_and_binds():
+    """T2-c 回归(评审:延后路径零自动化覆盖):非 strict 下三段绑定链经 app.state 可达;
+    真跑一次后 store 必须 bound;once 旗保证重入(lifespan 二次进入)不重绑
+    launcher/pipeline-deps(它们非幂等,重跑会换掉内存态载体)。"""
+    from guanlan_v2 import orch_store_status as oss
+    from guanlan_v2 import server as srv
+
+    ob = srv.app.state.orch_bind
+    assert ob["deferred"] is True, "套件环境非 strict,链必须是延后形态"
+    runs0 = int(ob["box"]["runs"])
+    ob["chain"]()
+    r1 = int(ob["box"]["runs"])
+    assert r1 == max(1, runs0), "至多真跑一次"
+    assert oss.orchestration_store_status()["state"] == "bound"
+    ob["chain"]()                      # 重入:once 旗 no-op
+    assert int(ob["box"]["runs"]) == r1
+
+
 def test_production_union_is_the_exact_reviewed_fourteen():
     assert st.PRODUCTION_CELL_NAMESPACES == EXPECTED_UNION
     assert len(st.PRODUCTION_CELL_NAMESPACES) == 14
@@ -290,6 +308,14 @@ def test_phase9_only_schema_resolves_only_through_the_phase9_registry():
     with pytest.raises(Exception):
         # the old two-registry resolver could not have resolved it
         phase2_runtime_registry(default_registry().registry_digest).resolve(ref)
+
+
+def test_production_resolver_keeps_the_pre_v4_registry_for_durable_history():
+    """The V4 reseal must not wedge payload rows written by the prior registry."""
+    resolver, _digests = st.build_production_resolver()
+    legacy = st._PRE_V4_PHASE9_REGISTRY_DIGEST
+    assert resolver.resolve(legacy).registry_digest == legacy
+    assert st._build_pre_v4_phase9_registry().registry_digest == legacy
 
 
 # --------------------------------------------------------------------------- #

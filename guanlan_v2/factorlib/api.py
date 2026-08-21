@@ -16,9 +16,13 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
+import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -36,9 +40,15 @@ _SAFE_NAME = re.compile(r"[^0-9A-Za-z_\-]+")
 
 
 def _safe_filename(name: str) -> str:
-    """把因子名 slug 成安全文件名(防路径穿越)。全非法字符 → 回退随机 uuid。"""
-    s = _SAFE_NAME.sub("_", (name or "").strip()).strip("_")
-    return s or ("factor_" + uuid.uuid4().hex[:8])
+    """Map a logical factor name to one deterministic, collision-safe file."""
+    logical = (name or "").strip()
+    digest = hashlib.sha256(logical.encode("utf-8")).hexdigest()[:12]
+    slug = _SAFE_NAME.sub("_", logical).strip("_")[:80]
+    # Preserve legacy ASCII filenames.  For names with no ASCII slug (for
+    # example Chinese-only names), the deterministic digest is essential: two
+    # processes must target the same destination so link publication can
+    # arbitrate instead of creating two random files for one logical name.
+    return slug or f"factor_{digest}"
 
 
 class ValidateIn(BaseModel):
@@ -58,9 +68,42 @@ class SaveIn(BaseModel):
 
 
 _VALID_SAVE_STATUS = {"", "draft"}
+_FACTORLIB_WRITE_LOCK = threading.RLock()
+_RESERVED_PROVENANCE_KEYS = frozenset({
+    "workspace_id", "workspace_asset_id", "workspace_version",
+})
+_WORKSPACE_PUBLISH_SOURCE = "research_workspace_publish"
 
 
-def _save_factor(body: SaveIn, store: LibraryFactorStore) -> dict:
+@contextmanager
+def _factorlib_write_guard(store: LibraryFactorStore):
+    """Serialize the global factor namespace across threads and processes."""
+    with _FACTORLIB_WRITE_LOCK:
+        store.mined_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = store.mined_dir / ".guanlan-factorlib.lock"
+        with lock_path.open("a+b") as handle:
+            if handle.tell() == 0:
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _save_factor_unlocked(body: SaveIn, store: LibraryFactorStore) -> dict:
     """/factorlib/save 内核(模块级;P2 研究回路直调复用)。返回 dict,端点包 JSONResponse。
 
     流程与诚实失败契约同原闭包(见 /save docstring);新增 status 校验与落盘
@@ -129,7 +172,22 @@ def _save_factor(body: SaveIn, store: LibraryFactorStore) -> dict:
         rec["saved_at"] = datetime.now().isoformat(timespec="seconds")
         rec["id"] = uuid.uuid4().hex
         fp.parent.mkdir(parents=True, exist_ok=True)
-        fp.write_text(json.dumps([rec], ensure_ascii=False, indent=2), encoding="utf-8")
+        payload = json.dumps([rec], ensure_ascii=False, indent=2)
+        tmp = fp.with_name(f".{fp.name}.{uuid.uuid4().hex[:8]}.tmp")
+        try:
+            with tmp.open("x", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            # A hard-link publishes the fully flushed temp file only if the
+            # destination does not already exist.  Unlike replace(), this is
+            # atomic and cannot overwrite a factor written by another process.
+            os.link(tmp, fp)
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass  # final file, if linked, is already complete and durable
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "zoo_expr": zexpr,
                 "reason": f"落盘失败: {type(exc).__name__}: {exc}"}
@@ -164,13 +222,72 @@ def _save_factor(body: SaveIn, store: LibraryFactorStore) -> dict:
     return resp
 
 
+def _save_factor(body: SaveIn, store: LibraryFactorStore) -> dict:
+    """Serialize global factor writes across HTTP, research and workspace paths.
+
+    ``_save_factor_unlocked`` performs a read-before-write duplicate check.  A
+    single process-wide lock makes that check and the following file creation
+    one operation, so two research spaces cannot publish the same global name
+    concurrently and overwrite one another.
+    """
+    if (body.source or "").strip() == _WORKSPACE_PUBLISH_SOURCE \
+            or any(key in (body.meta or {}) for key in _RESERVED_PROVENANCE_KEYS):
+        return {"ok": False, "reason": "workspace provenance 为内部发布保留字段"}
+    try:
+        with _factorlib_write_guard(store):
+            return _save_factor_unlocked(body, store)
+    except Exception as exc:  # keep the HTTP-200 honest-failure contract
+        return {"ok": False, "reason": f"因子库写锁失败: {type(exc).__name__}: {exc}"}
+
+
+def save_factor_idempotent(body: SaveIn, store: LibraryFactorStore, *,
+                           workspace_id: str, workspace_asset_id: str,
+                           workspace_version: int) -> dict:
+    """Create a global factor once, or recover the same workspace publish.
+
+    The provenance tuple is the idempotency key.  This is intentionally inside
+    the same lock as the global name duplicate check so concurrent spaces can
+    neither overwrite a name nor produce two files for one asset version.
+    """
+    try:
+        with _factorlib_write_guard(store):
+            for entry in store.load_all():
+                meta = entry.get("meta") or {}
+                if not isinstance(meta, dict):
+                    continue
+                try:
+                    recorded_version = int(meta.get("workspace_version") or 0)
+                except (TypeError, ValueError):
+                    recorded_version = 0
+                same_origin = (
+                    entry.get("source") == _WORKSPACE_PUBLISH_SOURCE
+                    and meta.get("workspace_id") == workspace_id
+                    and meta.get("workspace_asset_id") == workspace_asset_id
+                    and recorded_version == int(workspace_version)
+                )
+                if not same_origin:
+                    continue
+                if str(entry.get("expr") or "").strip() != str(body.expr or "").strip():
+                    return {"ok": False, "reason": "同一空间资产版本的全局记录表达式不一致"}
+                return {
+                    "ok": True, "name": entry.get("name"), "expr": entry.get("expr"),
+                    "family": entry.get("family"), "file": entry.get("_file"),
+                    "registered": False, "recovered": True,
+                }
+            if (body.source or "").strip() != _WORKSPACE_PUBLISH_SOURCE:
+                return {"ok": False, "reason": "内部空间发布来源标记缺失"}
+            return _save_factor_unlocked(body, store)
+    except Exception as exc:
+        return {"ok": False, "reason": f"因子库写锁失败: {type(exc).__name__}: {exc}"}
+
+
 class FactorPromoteIn(BaseModel):
     """``POST /factorlib/promote`` 入参:draft 因子人审转正(摘 status)。"""
 
     name: str = ""
 
 
-def _promote_factor(name: str, store: LibraryFactorStore) -> dict:
+def _promote_factor_unlocked(name: str, store: LibraryFactorStore) -> dict:
     """人审转正:在 mined/ 各 JSON 里找 name 条目,摘掉 status(draft→正式)。幂等;
     找不到 → not_found 诚实失败。转正后下次 /screen/factors 入口热刷新即上货架。"""
     nm = (name or "").strip()
@@ -189,10 +306,30 @@ def _promote_factor(name: str, store: LibraryFactorStore) -> dict:
                     e.pop("status", None)
                     hit = True
             if hit:
-                fp.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+                tmp = fp.with_name(f".{fp.name}.{uuid.uuid4().hex[:8]}.tmp")
+                try:
+                    with tmp.open("x", encoding="utf-8") as handle:
+                        handle.write(json.dumps(entries, ensure_ascii=False, indent=2))
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    os.replace(tmp, fp)
+                finally:
+                    try:
+                        tmp.unlink(missing_ok=True)
+                    except OSError:
+                        pass
                 return {"ok": True, "name": nm, "file": fp.name}
         return {"ok": False, "reason": f"not_found: {nm}"}
     except Exception as exc:  # noqa: BLE001 — 诚实失败 HTTP 200,不抛 500
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+
+def _promote_factor(name: str, store: LibraryFactorStore) -> dict:
+    """Atomically promote under the same namespace lock as every save path."""
+    try:
+        with _factorlib_write_guard(store):
+            return _promote_factor_unlocked(name, store)
+    except Exception as exc:  # lock/open failures remain an honest API result
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
 
 

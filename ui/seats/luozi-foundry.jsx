@@ -4,6 +4,11 @@
 
 const TCN = { card: '经验卡', factor: '因子', research: '研报' };
 const TCOLOR = { card: 'var(--yin)', factor: 'var(--dai)', research: 'var(--jin)' };
+const FOUNDRY_TF_CN = { day: '日线', '30min': '30分钟', '5min': '5分钟', '1min': '1分钟' };
+const FOUNDRY_CADENCE_CN = { daily: '每日一次', '60min': '每60分钟', hourly: '每60分钟', '30min': '每30分钟', '10min': '每10分钟' };
+const foundryClock = (clock, template) => window.lzNormalizeClock
+  ? window.lzNormalizeClock(clock || {}, (window.LZ_TEMPLATES || {})[template])
+  : Object.assign({ execTF: 'day', decisionFreq: '60min' }, clock || {});
 
 // 料库回收站(软删除暂存):删卡先存这里 → 可「恢复」放回共享档案库,或「彻底删」永久移除。
 // localStorage 持久(刷新不丢);恢复走 GL.put(同 id 同字段;research 类自动回推后端)。
@@ -58,7 +63,39 @@ function Foundry() {
   const trashArr = Object.values(trash).sort((a, b) => (b._trashedAt || 0) - (a._trashedAt || 0));
   const trashN = trashArr.length;
 
-  const newDraft = () => setEditing({ name: '', template: 'momentum', bind: [], clock: Object.assign({}, window.LZ_TEMPLATES.momentum.clock), refs: [], creed: window.LZ_TEMPLATES.momentum.creed, w: 0, pa: false, paMethod: '' });
+  const newDraft = () => setEditing({ name: '', template: 'momentum', bind: [], clock: foundryClock(window.LZ_TEMPLATES.momentum.clock, 'momentum'), refs: [], creed: window.LZ_TEMPLATES.momentum.creed, w: 0, pa: false, paMethod: '' });
+
+  // 新 assignment 已把「自动盯盘」从 strategy.bind 拆开。删除仍被 assignment 引用的
+  // 策略会让 watcher 找不到 Agent，故新后端下先查引用并拒绝；接口不可达时不冒充已检查。
+  const deleteStrategy = async (s) => {
+    if (window.lzFetchWatchAssignments) {
+      const snap = await window.lzFetchWatchAssignments();
+      if (snap && snap.supported === true) {
+        const used = Object.values(snap.assignments || {}).filter(a => a && a.strategy_id === s.id);
+        if (used.length) {
+          window.alert('不能删除：该策略仍被 ' + used.map(a => a.code).join('、') + ' 的单票配置引用。请先在「今日」页改派 Agent；仅停用也会保留配置引用。');
+          return;
+        }
+      } else if (snap && snap.legacy) {
+        if (Array.isArray(s.bind) && s.bind.length) {
+          window.alert('旧版绑定仍引用此策略。请先在「今日」页解除旧版绑定，再删除策略。');
+          return;
+        }
+      } else {
+        window.alert('暂时无法核验单票盯盘引用，已取消删除。后端恢复后再试，避免删掉正在使用的 Agent。');
+        return;
+      }
+    } else {
+      window.alert('当前版本无法核验单票盯盘引用，已取消删除。');
+      return;
+    }
+    const removed = await window.lzStrategyDelete(s.id);
+    if (!removed || !removed.ok) {
+      window.alert('删除失败：' + ((removed && removed.reason) || '后端未确认'));
+      return;
+    }
+    setCur(null);
+  };
 
   // 策略架:按名称序(演武排行退役,Sharpe 序无数据源)
   const board = React.useMemo(() => seats.map(s => ({ s }))
@@ -82,9 +119,9 @@ function Foundry() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 8, flexWrap: 'wrap' }}>
           <span className="mono" style={{ fontSize: 8.5, color: 'var(--ink-3)' }}>{(window.LZ_TEMPLATES[s.template] || {}).cn || s.template}</span>
-          <span className="mono" title={bindNames.length ? ('盯盘票:' + bindNames.join('、')) : '未绑票 = 全局(每票可见,不入盯盘集)'}
+          <span className="mono" title={bindNames.length ? ('适用标的:' + bindNames.join('、')) : '未限定标的 = 全局可选；是否自动盯盘在「今日」页单票配置'}
             style={{ fontSize: 8, color: (s.bind && s.bind.length) ? 'var(--yin)' : 'var(--ink-3)', border: '1px solid ' + ((s.bind && s.bind.length) ? 'var(--zhu-soft)' : 'var(--line)'), borderRadius: 4, padding: '0 4px' }}>
-            {(s.bind && s.bind.length) ? '盯 ' + s.bind.length + ' 票' : '全局'}
+            {(s.bind && s.bind.length) ? '适用 ' + s.bind.length + ' 票' : '全局可选'}
           </span>
           {(s.w || 0) > 0 && <span className="mono" style={{ fontSize: 8, color: 'var(--ink-3)' }}>w={(+s.w).toFixed(2)}</span>}
           {s.pa && <span className="mono" style={{ fontSize: 8, color: 'var(--ink-3)' }}>PA</span>}
@@ -96,7 +133,7 @@ function Foundry() {
   // ── 时钟刻度条 ──
   const ClockStrip = ({ clock }) => (
     <div style={{ display: 'flex', border: '1px solid var(--line)', borderRadius: 10, overflow: 'hidden', background: 'var(--paper)' }}>
-      {[['止损', (clock.stopLoss * 100).toFixed(0) + '%', 'var(--dai)'], ['止盈', (clock.takeProfit * 100).toFixed(0) + '%', 'var(--zhu)'], ['最长持有', clock.maxHold + ' bar', 'var(--ink)'], ['镜头', clock.execTF, 'var(--ink)'], ['研判', clock.decisionFreq, 'var(--ink)']].map(([k, v, c], i) => (
+      {[['止损', (clock.stopLoss * 100).toFixed(0) + '%', 'var(--dai)'], ['止盈', (clock.takeProfit * 100).toFixed(0) + '%', 'var(--zhu)'], ['最长持有', clock.maxHold + ' bar', 'var(--ink)'], ['研判依据', FOUNDRY_TF_CN[clock.execTF] || clock.execTF, 'var(--ink)'], ['自动节奏', FOUNDRY_CADENCE_CN[clock.decisionFreq] || clock.decisionFreq, 'var(--ink)']].map(([k, v, c], i) => (
         <div key={k} style={{ flex: 1, padding: '9px 12px', borderRight: i < 4 ? '1px solid var(--line-soft)' : 'none', background: i % 2 ? 'rgba(28,24,20,0.014)' : 'transparent' }}>
           <div className="mono" style={{ fontSize: 8, color: 'var(--ink-3)', letterSpacing: '.12em' }}>{k}</div>
           <div className="mono" style={{ fontSize: 14, fontWeight: 600, color: c, marginTop: 3 }}>{v}</div>
@@ -151,7 +188,7 @@ function Foundry() {
                 <span style={{ fontSize: 8.5, color: 'var(--ink-3)', letterSpacing: '.06em' }}>{k}</span>
                 <select value={editing.clock[key]} onChange={e => setClock(key, e.target.value)}
                   style={{ fontFamily: 'var(--mono)', fontSize: 13, color: 'var(--ink)', background: 'transparent', border: 'none', borderBottom: '1.5px solid var(--line)', padding: '2px 2px 4px', outline: 'none', cursor: 'pointer' }}>
-                  {opts.map(o => <option key={o} value={o}>{o}</option>)}
+                  {opts.map(o => { const pair = Array.isArray(o) ? o : [o, o]; return <option key={pair[0]} value={pair[0]}>{pair[1]}</option>; })}
                 </select>
               </label>
             );
@@ -169,7 +206,7 @@ function Foundry() {
                   {window.LZ_TEMPLATE_IDS.map(t => {
                     const td = window.LZ_TEMPLATES[t], on = editing.template === t;
                     return (
-                      <span key={t} onClick={() => setEditing(s => { const _td = window.LZ_TEMPLATES[t] || {}; return { ...s, template: t, creed: (!s.creed || s.creed === (window.LZ_TEMPLATES[s.template] || {}).creed) ? _td.creed : s.creed, clock: Object.assign({}, _td.clock, { execTF: s.clock.execTF }) }; })}
+                      <span key={t} onClick={() => setEditing(s => { const _td = window.LZ_TEMPLATES[t] || {}; return { ...s, template: t, creed: (!s.creed || s.creed === (window.LZ_TEMPLATES[s.template] || {}).creed) ? _td.creed : s.creed, clock: Object.assign({}, foundryClock(_td.clock, t), { execTF: s.clock.execTF, decisionFreq: s.clock.decisionFreq }) }; })}
                         style={{ display: 'flex', alignItems: 'center', gap: 7, cursor: 'pointer', padding: '8px 14px', borderRadius: 10, border: '1px solid ' + (on ? td.color : 'var(--line)'), background: on ? td.color : 'var(--paper)', transition: 'all .15s' }}>
                         <span className="serif" style={{ fontSize: 13, color: on ? 'var(--paper)' : td.color }}>{td.glyph}</span>
                         <span className="serif" style={{ fontSize: 12.5, fontWeight: 600, color: on ? 'var(--paper)' : 'var(--ink-1)' }}>{td.cn}</span>
@@ -206,13 +243,17 @@ function Foundry() {
                         padding: '8px 10px', outline: 'none', resize: 'vertical', boxSizing: 'border-box' }} />
                   )}
                 </div>
-                {lab('钟 · 交易时钟(止损止盈到价 · 最长持有时间止盈)')}
+                {lab('判 · 研判设置(策略默认;单票 assignment 可覆盖;不跟随图表周期)')}
+                <div style={{ display: 'flex', gap: 26, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                  {selCell('研判数据周期', 'execTF', [['day', '日线'], ['30min', '30分钟'], ['5min', '5分钟'], ['1min', '1分钟']])}
+                  {selCell('自动研判节奏', 'decisionFreq', [['10min', '每10分钟'], ['30min', '每30分钟'], ['60min', '每60分钟'], ['daily', '每日一次']])}
+                </div>
+                <div className="serif" style={{ fontSize: 10, color: 'var(--ink-3)', marginTop: 7, lineHeight: 1.55 }}>数据周期回答“Agent 看什么K线”；自动节奏回答“多久判断一次”。分钟口径未接通时服务端会暂停该票，不会暗退成日线。</div>
+                {lab('守 · 风险退出(止损止盈到价 · 最长持有时间退出)')}
                 <div style={{ display: 'flex', gap: 26, flexWrap: 'wrap', alignItems: 'flex-end' }}>
                   {numCell('止损', 'stopLoss', '0.01')}
                   {numCell('止盈', 'takeProfit', '0.01')}
                   {numCell('最长持有 (bar)', 'maxHold', '1')}
-                  {selCell('看盘镜头', 'execTF', ['day', '5min'])}
-                  {selCell('研判频率', 'decisionFreq', ['hourly', 'daily'])}
                 </div>
                 {/* P3:因子权重 w —— 进信号的混合系数。w 是策略级顶层字段(非 clock),独立控件。 */}
                 {lab('权 · 因子进信号(混合权重 w)')}
@@ -224,7 +265,7 @@ function Foundry() {
                   <span className="mono" style={{ fontSize: 16, fontWeight: 700, color: (editing.w > 0 ? 'var(--yin)' : 'var(--ink-3)'), minWidth: 48 }}>w={(+(editing.w != null ? editing.w : 0)).toFixed(2)}</span>
                 </div>
                 <div className="serif" style={{ fontSize: 10.5, color: 'var(--ink-3)', marginTop: 6, lineHeight: 1.55 }}>0=纯LLM(方向只由 agent 研判定);&gt;0 时按 (1−w)·LLM分 + w·vintage 因子 z 分混入决策方向(因子用 as-of 真 OOS,不看未来)。</div>
-                {lab('绑 · 这套策略管哪些票')}
+                {lab('适 · 这套策略适用于哪些票(不是自动盯盘开关)')}
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
                   {window.LZ_SYMBOL_META.map(m => {
                     const on = editing.bind.includes(m.code);
@@ -234,7 +275,7 @@ function Foundry() {
                     );
                   })}
                 </div>
-                <div className="serif" style={{ fontSize: 10.5, color: 'var(--ink-3)', marginTop: 8 }}>不绑 = 全局(每只票都可见)</div>
+                <div className="serif" style={{ fontSize: 10.5, color: 'var(--ink-3)', marginTop: 8 }}>不限定 = 每只票都可选；是否自动盯盘、由哪个 Agent 负责，请在「今日」页点单票“纳入”配置。旧后端才沿用 bind 兼容。</div>
                 <div style={{ display: 'flex', gap: 11, marginTop: 28 }}>
                   <span onClick={() => { const id = window.lzStrategySave({ id: editing.id, name: editing.name, template: editing.template, clock: editing.clock, bind: editing.bind, refs: editing.id ? (window.lzStrategyGet(editing.id) || {}).refs : [], creed: editing.creed, w: editing.w, pa: editing.pa, paMethod: editing.paMethod }); setEditing(null); setCur(id); }}
                     className="serif" style={{ fontSize: 13.5, letterSpacing: '.1em', color: 'var(--paper)', background: 'var(--yin)', borderRadius: 10, padding: '10px 26px', cursor: 'pointer', boxShadow: '0 3px 14px rgba(168,57,45,0.22)' }}>钤 印 · 保存</span>
@@ -256,9 +297,9 @@ function Foundry() {
                     <div className="serif" style={{ fontSize: 12.5, color: 'var(--ink-2)', marginTop: 4 }}><b style={{ color: scol(seat.id) }}>{tcn}</b> · {creed}</div>
                   </div>
                   <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-                    <span onClick={() => setEditing(Object.assign({}, seat, { clock: Object.assign({}, seat.clock), bind: (seat.bind || []).slice(), pa: !!seat.pa, paMethod: seat.paMethod || '' }))} className="mono" style={mgmt('var(--ink-2)')}>编辑</span>
+                  <span onClick={() => setEditing(Object.assign({}, seat, { clock: foundryClock(seat.clock, seat.template), bind: (seat.bind || []).slice(), pa: !!seat.pa, paMethod: seat.paMethod || '' }))} className="mono" style={mgmt('var(--ink-2)')}>编辑</span>
                     <span onClick={() => { const id = window.lzStrategySave(Object.assign({}, seat, { id: undefined, name: seat.name + ' 副本' })); setCur(id); }} className="mono" style={mgmt('var(--ink-2)')}>复制</span>
-                    <span onClick={() => { window.lzStrategyDelete(seat.id); setCur(null); }} className="mono" style={mgmt('var(--dai)', 'var(--dai-soft)')}>删除</span>
+                    <span onClick={() => deleteStrategy(seat)} className="mono" style={mgmt('var(--dai)', 'var(--dai-soft)')}>删除</span>
                   </div>
                 </div>
 

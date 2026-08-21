@@ -2,7 +2,7 @@
 
 Design (P2 §3):
 
-* A plain class — NOT a ``SubAgent`` subclass. ``SubAgent`` pulls litellm via
+* A plain class — NOT a ``SubAgent`` subclass. ``SubAgent`` historically pulled litellm via
   ``dream/__init__`` and binds a filesystem ``AgentMemory``; this subpackage
   stays zero-LLM-import in its default (mock-injected) path.
 * ``LLMClient`` is imported at module scope so tests can

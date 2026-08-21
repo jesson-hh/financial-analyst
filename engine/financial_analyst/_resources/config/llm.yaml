@@ -22,16 +22,16 @@ providers:
     models: [gpt-4o, gpt-4-turbo]
   deepseek:
     api_key_env: DEEPSEEK_API_KEY
-    base_url: https://api.deepseek.com/v1
+    base_url: https://api.deepseek.com
     network_profile: intl_clash   # Clash fake-ip + MITM, 必经 proxy + verify=False
-    models: [deepseek-chat, deepseek-reasoner]
+    models: [deepseek-v4-flash, deepseek-v4-pro]
 
 agent_overrides:
-  # 盘中盯盘实时 advisor — deepseek-only (用户硬约束: 不要qwen); 用 chat 不用 reasoner
-  # (盘中事件触发要快/省, reasoner 延迟高). 经 intl_clash profile 走代理.
+  # 盘中盯盘实时 advisor — DeepSeek V4-Flash 显式关闭思考，保证快档延迟。
   watch-agent:
     provider: deepseek
-    model: deepseek-chat
+    model: deepseek-v4-flash
+    thinking: false
   report-writer:
     provider: qwen
     model: qwen3.5-plus

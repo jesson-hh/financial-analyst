@@ -206,8 +206,8 @@ PHASE7_BASELINE_PRESET_ID = "main.research_baseline"
 PLAN_PRESET_RECORD_V2_SCHEMA_REF: SchemaRef = SchemaRef(
     name="PlanPresetRecord", version="2")
 
-#: worker completion temperature — mirrors the planner gateway (deepseek-reasoner
-#: ignores it; kept low for the non-reasoner tiers). JSON output is forced.
+#: worker completion temperature — mirrors the planner gateway.  The LLM client
+#: omits it automatically for DeepSeek V4 thinking-enabled tiers.
 _WORKER_TEMPERATURE = 0.2
 
 #: outer-wait buffer over the seat timeout so the engine transport's own
@@ -675,7 +675,7 @@ class WorkerSeatModelGateway:
         return seat
 
     def binding_for_tier(self, tier: str) -> ModelTierBinding:
-        """The reviewed provider/model binding for one tier (typed on absence)."""
+        """The reviewed provider/model/thinking binding for one tier."""
         self.seat_for_tier(tier)  # unknown-tier refusal names the vocabulary
         return self._tier_map.binding_for(tier)
 
@@ -740,15 +740,35 @@ class WorkerSeatModelGateway:
         client = LLMClient.for_agent(seat, config_path=self._config_path)
         # the seat red line, self-enforcing: the engine re-reads the yaml itself,
         # so a client resolved off the reviewed binding (a default_provider /
-        # default_model fallback, or a shadowed config) is refused BY SEAT before
+        # default_model fallback, shadowed config, or thinking-mode drift) is
+        # refused BY SEAT before
         # a single provider byte — never a silent vendor substitution.
         resolved_provider = getattr(client, "provider", None)
         resolved_model = getattr(client, "model", None)
-        if resolved_provider != binding.provider or resolved_model != binding.model:
+        resolved_thinking = getattr(client, "default_thinking", None)
+        resolved_effort = getattr(client, "default_reasoning_effort", None)
+        resolved_max_tokens = getattr(client, "default_max_tokens", None)
+        resolved_timeout = getattr(client, "default_timeout", None)
+        if (
+            resolved_provider != binding.provider
+            or resolved_model != binding.model
+            or resolved_thinking != binding.thinking
+            or resolved_effort != binding.reasoning_effort
+            or resolved_max_tokens != binding.max_tokens
+            or resolved_timeout != binding.timeout_sec
+        ):
             raise ModelTierUnconfigured(
                 f"worker seat {seat!r}: the engine client resolved "
-                f"{resolved_provider!r}/{resolved_model!r}, not the reviewed tier "
-                f"binding {binding.provider!r}/{binding.model!r} from the explicit "
+                f"provider={resolved_provider!r}, model={resolved_model!r}, "
+                f"thinking={resolved_thinking!r}, "
+                f"reasoning_effort={resolved_effort!r}, "
+                f"max_tokens={resolved_max_tokens!r}, timeout={resolved_timeout!r}; "
+                f"not the reviewed tier "
+                f"binding provider={binding.provider!r}, model={binding.model!r}, "
+                f"thinking={binding.thinking!r}, "
+                f"reasoning_effort={binding.reasoning_effort!r}, "
+                f"max_tokens={binding.max_tokens!r}, "
+                f"timeout={binding.timeout_sec!r} from the explicit "
                 "config path — refusing the silent vendor fallback"
             )
         timeout = float(
