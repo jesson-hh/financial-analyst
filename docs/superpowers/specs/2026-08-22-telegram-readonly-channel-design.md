@@ -1,7 +1,7 @@
 # 观澜 Telegram 只读会话通道设计
 
 **日期：** 2026-08-22  
-**状态：** 设计已逐段确认，等待书面规格复核  
+**状态：** 设计已由用户确认；实施计划已完成，待实施
 **范围：** 帷幄对话只读镜像、严格一对一 Telegram Bot 绑定、显式媒体投递、会话内定时任务  
 **参考：** OpenClaw 的显式配对与通道隔离、NanoBot 的消息总线与会话绑定自动化
 
@@ -110,7 +110,7 @@ ConsoleStore / 帷幄可见事件
 
 ### 6.3 TelegramPairingService
 
-为所有已配置 Bot 持续推进 Telegram update offset，但只在存在待配对草稿时解释入站更新。未知私聊用户产生 8 位大写配对码，字符集排除 `0/O/1/I`；请求一小时过期；每个 Bot 最多保留三个待处理请求。Bot 已激活、暂停或断开后的普通入站更新只推进 offset 并立即丢弃，不创建事件、不缓存正文，也不在未来重新配对时回放为陈旧请求。
+为状态为 `awaiting_pairing/active/paused` 且凭证健康的 Bot 持续推进 Telegram update offset，但只在存在待配对草稿时解释入站更新。`poll_conflict`、凭证故障和清理中状态必须停止 poller，等待显式恢复，不能持续争抢。未知私聊用户产生 8 位大写配对码，字符集排除 `0/O/1/I`；请求一小时过期；每个 Bot 最多保留三个待处理请求。Bot 已激活或暂停后的普通入站更新只推进 offset 并立即丢弃，不创建事件、不缓存正文，也不在未来重新配对时回放为陈旧请求；断开后停止 poller。
 
 配对批准必须发生在电脑端的当前帷幄会话，并满足：
 
@@ -164,7 +164,7 @@ ConsoleStore / 帷幄可见事件
 - `telegram_bot_id`：`getMe` 返回的稳定数字 ID；
 - `telegram_username`：仅展示；
 - `credential_id`：SecretStore 引用；
-- `status`：`draft/awaiting_pairing/active/paused/credential_invalid/disconnected`；
+- `status`：`draft/awaiting_pairing/active/paused/poll_conflict/credential_invalid/credential_unavailable/credential_cleanup_pending/disconnected`；
 - `created_at/updated_at/last_verified_at`。
 
 ### 7.2 ChannelBinding
@@ -177,7 +177,7 @@ ConsoleStore / 帷幄可见事件
 - `bot_account_id`；
 - `telegram_user_id`；
 - `telegram_chat_id`；
-- `status`：`active/paused/error/disconnected`；
+- `status`：`active/paused/disconnected`，故障原因另存且不与主动暂停混用；
 - `paired_at/sync_from/paused_at/disconnected_at`；
 - `last_sent_at/last_error_code`。
 
@@ -216,8 +216,8 @@ ConsoleStore / 帷幄可见事件
 建议字段：
 
 - `id/name/session_id`；
-- `schedule_kind = cron/once/event`；
-- `schedule_expr/timezone`；
+- `schedule_kind = once/daily/weekdays/trading_days`；
+- `run_at/local_time/timezone`；
 - `prompt_text/skill_refs`；
 - `media_policy = none/explicit`；
 - `enabled`；
@@ -225,13 +225,14 @@ ConsoleStore / 帷幄可见事件
 - `created_by/confirmed_at`。
 
 首期默认时区为 `Asia/Hong_Kong`，但每次创建或修改必须向用户复述完整时间与时区。
+首期不接受任意 cron 或 event 表达式；`trading_days` 必须使用真实 A 股交易日历，日历不可用时诚实阻塞，不能以周一至周五近似。
 
 ## 8. Agent 主导的连接流程
 
 1. 用户在当前对话说“连接 Telegram”，可同时提供 Bot 显示名称。
 2. Agent 按系统 Prompt 调用 `ww_telegram_connect` 创建绑定草稿。
 3. 对话渲染安全 Token 输入卡。Token 直接提交 SecretStore，不经过 Agent。
-4. 后端调用 Telegram `getMe`，仅把 Bot ID、用户名、头像/显示信息和校验状态返回 Agent。
+4. 后端调用 Telegram `getMe`，仅把 Bot ID、用户名、基础显示信息和校验状态返回 Agent。
 5. Agent 提示用户私聊该 Bot。未知用户的普通私聊只创建配对请求，不进入 Agent。
 6. Bot 向用户显示一小时有效的配对码；电脑端也显示待请求的安全元数据。
 7. 用户把配对码告诉 Agent。
@@ -239,11 +240,13 @@ ConsoleStore / 帷幄可见事件
 9. 用户确认后，ChannelRegistry 原子建立严格一对一绑定。
 10. 对话标题显示 `已连接 Telegram · <Bot名称>`，同步从批准后的下一个可见事件开始。
 
-如果用户把看似 Telegram Bot Token 的字符串误贴到普通输入框：
+如果用户把看似 Telegram Bot Token 的字符串误贴到普通输入框或运行中的转向输入框：
 
-- `/console/send` 必须在写 `user_msg` 前做服务端检测；
-- 当前有连接草稿时，将 Token 直接安全提交并只落占位事件 `[Telegram Bot Token 已安全提交]`；
+- `/console/send` 与 `/console/steer` 必须在写 `user_msg`、转向控制或取消请求前共用同一服务端检测；
+- 当前有连接草稿且带有绑定当前会话与草稿的一次性请求令牌时，将 Token 直接安全提交并只落占位事件 `[Telegram Bot Token 已安全提交]`；
+- 没有有效一次性请求令牌时安全拒绝并引导重新提交，不能把秘密落盘；
 - 没有连接草稿时拒绝普通发送并弹出安全连接卡；
+- `/console/steer` 命中 Token 时不得打断当前 Agent；
 - 原始 Token 不得出现在 HTTP 错误、浏览器日志、服务日志或响应回显中。
 
 客户端检测只是体验增强，服务端落盘前拦截才是安全边界。
@@ -256,7 +259,8 @@ ConsoleStore / 帷幄可见事件
 
 - 用户在电脑端成功写入的普通可见消息；
 - Agent 一轮完整结束后的最终可见回复；
-- 经产品明确标记为“对话可见通知”的定时任务或事件结果。
+
+定时任务必须先作为受控系统轮次进入帷幄，其最终回复同样以 `agent_final` 投影；首期不增加宽松的通用通知事件白名单。
 
 ### 9.2 永不自动镜像
 
