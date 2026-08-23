@@ -12,7 +12,7 @@ import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Optional, Sequence
@@ -201,6 +201,18 @@ CREATE TABLE IF NOT EXISTS credential_cleanup_queue (
     created_at TEXT NOT NULL
 );
 
+-- A replacement intent is deliberately metadata-only.  It makes the secure
+-- Token card restart-safe without putting either a raw Token or a credential
+-- reference into Console events, URL parameters, or the public status DTO.
+CREATE TABLE IF NOT EXISTS token_replacement_intents (
+    session_id TEXT PRIMARY KEY,
+    bot_account_id TEXT NOT NULL REFERENCES bot_accounts(id),
+    expected_credential_revision INTEGER,
+    expires_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS uq_live_binding_session
 ON channel_bindings(session_id)
 WHERE status IN ('active', 'paused');
@@ -237,6 +249,9 @@ ON outbox(binding_id, sequence, state, next_attempt_at);
 
 CREATE INDEX IF NOT EXISTS idx_automation_due
 ON automations(enabled, next_run_at);
+
+CREATE INDEX IF NOT EXISTS idx_token_replacement_bot
+ON token_replacement_intents(bot_account_id);
 """
 
 
@@ -374,7 +389,10 @@ _AUTOMATION_RUN_TRANSITIONS: dict[AutomationRunStatus, frozenset[AutomationRunSt
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _SAFE_STATUS_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _SAFE_ERROR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$")
-_TOKEN_SHAPE_RE = re.compile(r"(?<!\d)\d{5,}:[A-Za-z0-9_-]{20,}")
+_TOKEN_SHAPE_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:bot)?[0-9]{5,16}:[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])",
+    re.IGNORECASE,
+)
 _CREDENTIAL_ID_RE = re.compile(r"^cred_[0-9a-f]{32}$")
 _AUDIT_STATE_KEYS = {
     "status",
@@ -390,6 +408,9 @@ _AUDIT_STATE_KEYS = {
 }
 _AUDIT_ERROR_KEYS = {"error_class", "previous_error_class", "new_error_class"}
 _FORBIDDEN_AUDIT_KEY_PARTS = ("token", "code", "text", "caption", "path", "url")
+_RECOVERABLE_FAULT_PAUSE_REASONS = frozenset(
+    {"credential_invalid", "credential_unavailable", "poll_conflict"}
+)
 
 
 def _new_id(prefix: str) -> str:
@@ -506,6 +527,22 @@ class ChannelStore:
         conn = self.connect()
         try:
             conn.executescript(SCHEMA_SQL)
+            # Development/early Task 4 databases may have been created before
+            # replacement intents gained an optimistic revision and TTL.  Keep
+            # the migration additive; null legacy rows are treated as expired.
+            columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(token_replacement_intents)").fetchall()
+            }
+            if "expected_credential_revision" not in columns:
+                conn.execute(
+                    "ALTER TABLE token_replacement_intents "
+                    "ADD COLUMN expected_credential_revision INTEGER"
+                )
+            if "expires_at" not in columns:
+                conn.execute(
+                    "ALTER TABLE token_replacement_intents ADD COLUMN expires_at TEXT"
+                )
         finally:
             conn.close()
 
@@ -546,7 +583,38 @@ class ChannelStore:
     def _required_text(value: Any, field: str) -> str:
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{field} must be a non-empty string")
-        return value.strip()
+        text = value.strip()
+        if _TOKEN_SHAPE_RE.search(text):
+            raise ValueError(f"{field} must not contain a token-like secret")
+        return text
+
+    @classmethod
+    def _required_channel_text(cls, value: Any, field: str) -> str:
+        text = cls._required_text(value, field)
+        if _TOKEN_SHAPE_RE.search(text):
+            raise ValueError(f"{field} must not contain a token-like secret")
+        return text
+
+    @staticmethod
+    def _optional_channel_text(value: Any, field: str) -> Optional[str]:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError(f"{field} must be text when provided")
+        text = value.strip()
+        if _TOKEN_SHAPE_RE.search(text):
+            raise ValueError(f"{field} must not contain a token-like secret")
+        return text or None
+
+    @classmethod
+    def _optional_safe_error(cls, value: Any, field: str) -> Optional[str]:
+        """Persist only a structured, Token-free status/error marker."""
+        if value is None:
+            return None
+        text = cls._required_text(value, field)
+        if not _SAFE_ERROR_RE.fullmatch(text):
+            raise ValueError(f"{field} must be a safe structured error code")
+        return text
 
     # -- Bot accounts -------------------------------------------------
 
@@ -559,7 +627,7 @@ class ChannelStore:
     ) -> str:
         bot_account_id = _new_id("bot")
         now = self._now()
-        name = self._required_text(display_name, "display_name")
+        name = self._required_channel_text(display_name, "display_name")
         draft = None if draft_session_id is None else self._required_text(
             draft_session_id, "draft_session_id"
         )
@@ -631,6 +699,152 @@ class ChannelStore:
             conn.close()
         return {str(row[0]) for row in rows}
 
+    def enqueue_credential_cleanup(
+        self,
+        credential_id: str,
+        *,
+        bot_account_id: str | None = None,
+        reason: str,
+    ) -> None:
+        """Durably retain an opaque credential deletion obligation.
+
+        This queue is deliberately metadata-only: callers must never pass a
+        plaintext token, filesystem path, or provider error into it.  Repeated
+        compensation attempts coalesce by credential ID rather than silently
+        dropping an orphaned ciphertext.
+        """
+        if not isinstance(credential_id, str) or not _CREDENTIAL_ID_RE.fullmatch(credential_id):
+            raise ValueError("credential_id must be an opaque cred_<32 hex> id")
+        safe_bot = None if bot_account_id is None else _entity_id(bot_account_id)
+        if not isinstance(reason, str) or not _SAFE_ERROR_RE.fullmatch(reason):
+            raise ValueError("cleanup reason must be a safe error code")
+        now = self._now()
+        with self._immediate() as conn:
+            conn.execute(
+                "INSERT INTO credential_cleanup_queue "
+                "(credential_id, bot_account_id, reason, created_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(credential_id) DO UPDATE SET "
+                "bot_account_id = COALESCE(credential_cleanup_queue.bot_account_id, excluded.bot_account_id), "
+                "reason = credential_cleanup_queue.reason",
+                (credential_id, safe_bot, reason, now),
+            )
+
+    def credential_cleanup_for_bot(self, bot_account_id: Any) -> list[str]:
+        """Return opaque pending deletion IDs for one account, never secrets."""
+        entity_id = _entity_id(bot_account_id)
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT credential_id FROM credential_cleanup_queue "
+                "WHERE bot_account_id = ? ORDER BY created_at, credential_id",
+                (entity_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [str(row[0]) for row in rows]
+
+    def credential_cleanup_items(self) -> list[tuple[str, str | None, str]]:
+        """Metadata-only cleanup worklist for an eventual background worker."""
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT credential_id, bot_account_id, reason FROM credential_cleanup_queue "
+                "ORDER BY created_at, credential_id"
+            ).fetchall()
+        finally:
+            conn.close()
+        return [(str(row[0]), None if row[1] is None else str(row[1]), str(row[2])) for row in rows]
+
+    def complete_credential_cleanup(self, credential_id: str) -> None:
+        """Remove a durable obligation only after the opaque secret is gone."""
+        if not isinstance(credential_id, str) or not _CREDENTIAL_ID_RE.fullmatch(credential_id):
+            raise ValueError("credential_id must be an opaque cred_<32 hex> id")
+        with self._immediate() as conn:
+            conn.execute(
+                "DELETE FROM credential_cleanup_queue WHERE credential_id = ?", (credential_id,)
+            )
+
+    def replacement_intent_for_session(self, session_id: Any) -> Optional[str]:
+        """Return the opaque target account for a prepared secure replacement."""
+        sid = self._required_text(session_id, "session_id")
+        details = self.replacement_intent_details(sid)
+        return None if details is None else details[0]
+
+    def replacement_intent_details(self, session_id: Any) -> Optional[tuple[str, int]]:
+        """Return an unexpired opaque target plus its prepared revision."""
+        sid = self._required_text(session_id, "session_id")
+        now = self._now()
+        with self._immediate() as conn:
+            row = conn.execute(
+                "SELECT i.bot_account_id, i.expected_credential_revision, i.expires_at, "
+                "b.credential_revision AS current_credential_revision "
+                "FROM token_replacement_intents i JOIN bot_accounts b ON b.id = i.bot_account_id "
+                "WHERE i.session_id = ?",
+                (sid,),
+            ).fetchone()
+            if row is None:
+                return None
+            if (
+                row["expected_credential_revision"] is None
+                or row["expires_at"] is None
+                or str(row["expires_at"]) <= now
+                or int(row["expected_credential_revision"]) != int(row["current_credential_revision"])
+            ):
+                conn.execute(
+                    "DELETE FROM token_replacement_intents WHERE session_id = ?", (sid,)
+                )
+                return None
+            return str(row["bot_account_id"]), int(row["expected_credential_revision"])
+
+    def prepare_token_replacement(self, session_id: Any, bot_account_id: Any) -> BotAccount:
+        """Durably open a Token-card intent for the session's actual Bot.
+
+        This deliberately leaves the old credential and live binding untouched.
+        A failed verification can therefore be retried without interrupting
+        delivery, while a successful different-identity replacement later
+        fault-pauses the binding in the credential CAS transaction.
+        """
+        sid = self._required_text(session_id, "session_id")
+        entity_id = _entity_id(bot_account_id)
+        now = self._now()
+        expires_at = _aware_utc_iso(self._clock() + timedelta(hours=1), field="intent_expiry")
+        with self._immediate() as conn:
+            bot = conn.execute(
+                "SELECT * FROM bot_accounts WHERE id = ?", (entity_id,)
+            ).fetchone()
+            if bot is None or BotStatus(bot["status"]) is BotStatus.DISCONNECTED:
+                raise ChannelNotFound("replacement target is not connected")
+            owns_live = conn.execute(
+                "SELECT 1 FROM channel_bindings WHERE session_id = ? AND bot_account_id = ? "
+                "AND status IN ('active', 'paused')",
+                (sid, entity_id),
+            ).fetchone()
+            owns_draft = bot["draft_session_id"] == sid
+            if not owns_live and not owns_draft:
+                raise ChannelConflict("replacement target does not belong to session")
+            if not bot["credential_id"]:
+                raise ChannelConflict("replacement target has no credential")
+            conn.execute(
+                "INSERT INTO token_replacement_intents "
+                "(session_id, bot_account_id, expected_credential_revision, expires_at, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET bot_account_id = excluded.bot_account_id, "
+                "expected_credential_revision = excluded.expected_credential_revision, "
+                "expires_at = excluded.expires_at, updated_at = excluded.updated_at",
+                (sid, entity_id, int(bot["credential_revision"]), expires_at, now, now),
+            )
+        return self.bot(entity_id)
+
+    def clear_token_replacement_intent(self, session_id: Any, bot_account_id: Any) -> None:
+        """Clear only the matching completed replacement intent."""
+        sid = self._required_text(session_id, "session_id")
+        entity_id = _entity_id(bot_account_id)
+        with self._immediate() as conn:
+            conn.execute(
+                "DELETE FROM token_replacement_intents WHERE session_id = ? AND bot_account_id = ?",
+                (sid, entity_id),
+            )
+
     def cas_bot_credential(
         self,
         bot_account_id: Any,
@@ -641,6 +855,8 @@ class ChannelStore:
         telegram_username: Optional[str] = None,
         status: BotStatus | str | None = None,
         verified_at: datetime | str | None = None,
+        pause_live_binding_if_identity_changed: bool = False,
+        expected_replacement_session_id: str | None = None,
     ) -> BotAccount:
         """Atomically install a verified opaque credential using revision CAS.
 
@@ -656,16 +872,33 @@ class ChannelStore:
         verified = self._now() if verified_at is None else _aware_utc_iso(
             verified_at, field="verified_at"
         )
+        safe_username = self._optional_channel_text(telegram_username, "telegram_username")
         try:
             with self._immediate() as conn:
                 row = conn.execute(
-                    "SELECT credential_revision, status FROM bot_accounts WHERE id = ?",
+                    "SELECT credential_revision, status, telegram_bot_id, credential_id "
+                    "FROM bot_accounts WHERE id = ?",
                     (entity_id,),
                 ).fetchone()
                 if row is None:
                     raise ChannelNotFound(f"unknown bot account: {entity_id}")
                 if int(row["credential_revision"]) != int(expected_revision):
                     raise ChannelConflict("bot credential revision changed")
+                if expected_replacement_session_id is not None:
+                    intent = conn.execute(
+                        "SELECT bot_account_id, expected_credential_revision, expires_at "
+                        "FROM token_replacement_intents WHERE session_id = ?",
+                        (self._required_text(expected_replacement_session_id, "session_id"),),
+                    ).fetchone()
+                    if (
+                        intent is None
+                        or str(intent["bot_account_id"]) != entity_id
+                        or intent["expected_credential_revision"] is None
+                        or int(intent["expected_credential_revision"]) != int(expected_revision)
+                        or intent["expires_at"] is None
+                        or str(intent["expires_at"]) <= verified
+                    ):
+                        raise ChannelConflict("replacement intent expired or changed")
                 current = BotStatus(row["status"])
                 target = (
                     BotStatus.AWAITING_PAIRING
@@ -674,17 +907,56 @@ class ChannelStore:
                     if status is None
                     else BotStatus(_enum_value(status))
                 )
+                identity_changed = (
+                    row["telegram_bot_id"] is not None
+                    and str(row["telegram_bot_id"]) != str(telegram_bot_id)
+                )
+                fault_identity_change = bool(
+                    pause_live_binding_if_identity_changed and identity_changed
+                )
+                old_credential_id = row["credential_id"]
+                if old_credential_id is not None and str(old_credential_id) != credential_id:
+                    # The old opaque reference becomes a deletion obligation
+                    # *inside the same transaction* as the new credential
+                    # reference.  A crash after the CAS can therefore never
+                    # strand a superseded ciphertext without durable recovery
+                    # metadata, while cleanup remains orthogonal to Bot state.
+                    conn.execute(
+                        "INSERT INTO credential_cleanup_queue "
+                        "(credential_id, bot_account_id, reason, created_at) VALUES (?, ?, ?, ?) "
+                        "ON CONFLICT(credential_id) DO UPDATE SET "
+                        "bot_account_id = COALESCE(credential_cleanup_queue.bot_account_id, excluded.bot_account_id)",
+                        (str(old_credential_id), entity_id, "replace_cleanup_failed", verified),
+                    )
+                if fault_identity_change:
+                    # A recipient is bound to a Telegram *bot identity*, not
+                    # merely an opaque local account.  Atomically fault-pause
+                    # that binding before publishing a new verified identity;
+                    # Task 5 can later re-approve the same durable binding.
+                    conn.execute(
+                        "UPDATE channel_bindings SET status = 'paused', "
+                        "pause_reason = CASE WHEN status = 'paused' "
+                        "AND pause_reason IN ('manual', 'archive', 'workspace_archived') "
+                        "THEN pause_reason ELSE 'bot_identity_changed' END, "
+                        "paused_at = CASE WHEN status = 'paused' "
+                        "AND pause_reason IN ('manual', 'archive', 'workspace_archived') "
+                        "THEN paused_at ELSE ? END, updated_at = ? WHERE bot_account_id = ? "
+                        "AND status IN ('active', 'paused')",
+                        (verified, verified, entity_id),
+                    )
+                    target = BotStatus.AWAITING_PAIRING
                 updated = conn.execute(
                     "UPDATE bot_accounts SET credential_id = ?, telegram_bot_id = ?, "
                     "telegram_username = ?, credential_revision = credential_revision + 1, "
-                    "status = ?, last_verified_at = ?, last_error_code = NULL, updated_at = ? "
+                    "status = ?, last_verified_at = ?, last_error_code = ?, updated_at = ? "
                     "WHERE id = ? AND credential_revision = ?",
                     (
                         credential_id,
                         str(telegram_bot_id),
-                        telegram_username,
+                        safe_username,
                         target.value,
                         verified,
+                        "telegram_identity_changed" if fault_identity_change else None,
                         verified,
                         entity_id,
                         int(expected_revision),
@@ -692,6 +964,11 @@ class ChannelStore:
                 )
                 if updated.rowcount != 1:
                     raise ChannelConflict("bot credential revision changed")
+                if expected_replacement_session_id is not None:
+                    conn.execute(
+                        "DELETE FROM token_replacement_intents WHERE session_id = ? AND bot_account_id = ?",
+                        (expected_replacement_session_id, entity_id),
+                    )
         except sqlite3.IntegrityError as exc:
             raise ChannelConflict("telegram bot identity already belongs to a live account") from exc
         return self.bot(entity_id)
@@ -713,13 +990,14 @@ class ChannelStore:
         """
         entity_id = _entity_id(bot_account_id)
         now = self._now()
+        safe_username = self._optional_channel_text(telegram_username, "telegram_username")
         try:
             with self._immediate() as conn:
                 cur = conn.execute(
                     "UPDATE bot_accounts SET telegram_bot_id = ?, telegram_username = ?, "
                     "status = 'active', last_verified_at = ?, last_error_code = NULL, "
                     "updated_at = ? WHERE id = ? AND status <> 'disconnected'",
-                    (str(telegram_bot_id), telegram_username, now, now, entity_id),
+                    (str(telegram_bot_id), safe_username, now, now, entity_id),
                 )
                 if cur.rowcount != 1:
                     raise ChannelNotFound(f"unknown live bot account: {entity_id}")
@@ -736,6 +1014,7 @@ class ChannelStore:
     ) -> BotAccount:
         entity_id = _entity_id(bot_account_id)
         target = BotStatus(_enum_value(status))
+        safe_error = self._optional_safe_error(error_code, "error_code")
         now = self._now()
         try:
             with self._immediate() as conn:
@@ -749,11 +1028,287 @@ class ChannelStore:
                 conn.execute(
                     "UPDATE bot_accounts SET status = ?, last_error_code = ?, updated_at = ? "
                     "WHERE id = ?",
-                    (target.value, error_code, now, entity_id),
+                    (target.value, safe_error, now, entity_id),
                 )
         except sqlite3.IntegrityError as exc:
             raise ChannelConflict("bot status change violates a live identity constraint") from exc
         return self.bot(entity_id)
+
+    def fault_pause_bot(
+        self,
+        bot_account_id: Any,
+        *,
+        status: BotStatus | str,
+        error_code: str,
+        expected_credential_revision: int | None = None,
+        expected_telegram_bot_id: str | None = None,
+    ) -> BotAccount:
+        """Atomically persist a credential/identity fault and stop delivery.
+
+        Reverification must never report a transient HTTP result while leaving
+        a live binding visibly active.  This single transaction records the
+        safe fault marker and fault-pauses the existing one-to-one recipient.
+        Optional revision/identity expectations prevent a stale verifier from
+        overwriting a concurrent credential replacement.
+        """
+        entity_id = _entity_id(bot_account_id)
+        target = BotStatus(_enum_value(status))
+        if target not in {
+            BotStatus.PAUSED,
+            BotStatus.POLL_CONFLICT,
+            BotStatus.CREDENTIAL_INVALID,
+            BotStatus.CREDENTIAL_UNAVAILABLE,
+        }:
+            raise ValueError("fault pause requires a fault-safe bot status")
+        if not isinstance(error_code, str) or not _SAFE_ERROR_RE.fullmatch(error_code):
+            raise ValueError("error_code must be a safe error code")
+        now = self._now()
+        with self._immediate() as conn:
+            row = conn.execute(
+                "SELECT credential_revision, telegram_bot_id, status FROM bot_accounts WHERE id = ?",
+                (entity_id,),
+            ).fetchone()
+            if row is None:
+                raise ChannelNotFound(f"unknown bot account: {entity_id}")
+            if (
+                expected_credential_revision is not None
+                and int(row["credential_revision"]) != int(expected_credential_revision)
+            ):
+                raise ChannelConflict("bot credential revision changed during fault pause")
+            if (
+                expected_telegram_bot_id is not None
+                and row["telegram_bot_id"] != str(expected_telegram_bot_id)
+            ):
+                raise ChannelConflict("telegram bot identity changed during fault pause")
+            if BotStatus(row["status"]) is BotStatus.DISCONNECTED:
+                raise ChannelConflict("cannot fault-pause a disconnected bot")
+            # A user-selected manual pause must survive an intervening
+            # credential/poll fault.  It is still safe to record the Bot fault,
+            # but later recovery must not silently resume delivery that the user
+            # intentionally stopped.
+            conn.execute(
+                "UPDATE channel_bindings SET status = 'paused', "
+                "pause_reason = CASE WHEN status = 'paused' "
+                "AND pause_reason IN ('manual', 'archive', 'workspace_archived') "
+                "THEN pause_reason ELSE ? END, "
+                "paused_at = CASE WHEN status = 'paused' "
+                "AND pause_reason IN ('manual', 'archive', 'workspace_archived') "
+                "THEN paused_at ELSE ? END, updated_at = ? "
+                "WHERE bot_account_id = ? AND status IN ('active', 'paused')",
+                (error_code, now, now, entity_id),
+            )
+            conn.execute(
+                "UPDATE bot_accounts SET status = ?, last_error_code = ?, updated_at = ? WHERE id = ?",
+                (target.value, error_code, now, entity_id),
+            )
+        return self.bot(entity_id)
+
+    def recover_bot_after_verification(
+        self,
+        bot_account_id: Any,
+        *,
+        expected_credential_revision: int,
+        expected_telegram_bot_id: str | None,
+    ) -> BotAccount:
+        """Clear a recoverable verification fault after a matching getMe.
+
+        A manual/archive pause is deliberately preserved.  Only pauses written
+        by :meth:`fault_pause_bot` for a retryable credential/poll condition
+        resume delivery.  ``bot_identity_changed`` remains paused and needs a
+        fresh pairing approval.
+        """
+        entity_id = _entity_id(bot_account_id)
+        now = self._now()
+        with self._immediate() as conn:
+            row = conn.execute(
+                "SELECT credential_revision, telegram_bot_id, status FROM bot_accounts WHERE id = ?",
+                (entity_id,),
+            ).fetchone()
+            if row is None:
+                raise ChannelNotFound(f"unknown bot account: {entity_id}")
+            if int(row["credential_revision"]) != int(expected_credential_revision):
+                raise ChannelConflict("bot credential revision changed during recovery")
+            if (
+                expected_telegram_bot_id is not None
+                and row["telegram_bot_id"] != str(expected_telegram_bot_id)
+            ):
+                raise ChannelConflict("telegram bot identity changed during recovery")
+            current = BotStatus(row["status"])
+            if current in {
+                BotStatus.CREDENTIAL_INVALID,
+                BotStatus.CREDENTIAL_UNAVAILABLE,
+                BotStatus.POLL_CONFLICT,
+            }:
+                binding = conn.execute(
+                    "SELECT id, status, pause_reason FROM channel_bindings WHERE bot_account_id = ? "
+                    "AND status IN ('active', 'paused') ORDER BY created_at DESC, id DESC LIMIT 1",
+                    (entity_id,),
+                ).fetchone()
+                target = BotStatus.AWAITING_PAIRING
+                if binding is not None:
+                    binding_status = BindingStatus(binding["status"])
+                    reason = binding["pause_reason"]
+                    if (
+                        binding_status is BindingStatus.PAUSED
+                        and reason in _RECOVERABLE_FAULT_PAUSE_REASONS
+                    ):
+                        conn.execute(
+                            "UPDATE channel_bindings SET status = 'active', pause_reason = NULL, "
+                            "paused_at = NULL, updated_at = ? WHERE id = ?",
+                            (now, binding["id"]),
+                        )
+                        target = BotStatus.ACTIVE
+                    elif binding_status is BindingStatus.ACTIVE:
+                        target = BotStatus.ACTIVE
+                    else:
+                        target = BotStatus.PAUSED
+                conn.execute(
+                    "UPDATE bot_accounts SET status = ?, last_error_code = NULL, updated_at = ? WHERE id = ?",
+                    (target.value, now, entity_id),
+                )
+        return self.bot(entity_id)
+
+    def set_session_manual_pause(self, session_id: Any, *, paused: bool) -> BotAccount:
+        """Atomically apply or lift an intentional session pause.
+
+        Fault pauses are never resumable through this path.  In particular a
+        visible ``paused`` binding is not enough authority to resume a Bot with
+        credential, identity, or polling fault state.
+        """
+        sid = self._required_text(session_id, "session_id")
+        now = self._now()
+        with self._immediate() as conn:
+            binding = conn.execute(
+                "SELECT * FROM channel_bindings WHERE session_id = ? "
+                "AND status IN ('active', 'paused') ORDER BY created_at DESC, id DESC LIMIT 1",
+                (sid,),
+            ).fetchone()
+            if binding is None:
+                raise ChannelNotFound("session has no live channel binding")
+            bot = conn.execute(
+                "SELECT * FROM bot_accounts WHERE id = ?", (binding["bot_account_id"],)
+            ).fetchone()
+            if bot is None:
+                raise ChannelNotFound("binding references an unknown bot")
+            binding_status = BindingStatus(binding["status"])
+            bot_status = BotStatus(bot["status"])
+            if paused:
+                # Do not relabel a fault pause as manual just because a UI
+                # click races it; preserving provenance is what makes resume
+                # safe after a later reverify.
+                if binding_status is BindingStatus.ACTIVE:
+                    # Intentional pause has an explicit delivery boundary:
+                    # work that has not entered Telegram is cancelled, while
+                    # a leased send remains uncertain for human resolution.
+                    conn.execute(
+                        "UPDATE outbox SET state = 'cancelled', lease_owner = NULL, lease_until = NULL "
+                        "WHERE binding_id = ? AND state IN ('pending', 'retry_wait')",
+                        (binding["id"],),
+                    )
+                    conn.execute(
+                        "UPDATE outbox SET state = 'uncertain', lease_owner = NULL, lease_until = NULL, "
+                        "last_error_class = 'pause_inflight', last_error_at = ? "
+                        "WHERE binding_id = ? AND state = 'sending'",
+                        (now, binding["id"]),
+                    )
+                    conn.execute(
+                        "UPDATE channel_bindings SET status = 'paused', pause_reason = 'manual', "
+                        "paused_at = ?, updated_at = ? WHERE id = ?",
+                        (now, now, binding["id"]),
+                    )
+                    if bot_status is BotStatus.ACTIVE:
+                        conn.execute(
+                            "UPDATE bot_accounts SET status = 'paused', last_error_code = NULL, "
+                            "updated_at = ? WHERE id = ?",
+                            (now, bot["id"]),
+                        )
+            else:
+                reason = binding["pause_reason"]
+                if (
+                    binding_status is not BindingStatus.PAUSED
+                    or reason not in {"manual", "archive", "workspace_archived"}
+                    or bot_status is not BotStatus.PAUSED
+                ):
+                    raise ChannelConflict("only an intentional manual pause can resume")
+                conn.execute(
+                    "UPDATE channel_bindings SET status = 'active', pause_reason = NULL, "
+                    "paused_at = NULL, updated_at = ? WHERE id = ?",
+                    (now, binding["id"]),
+                )
+                conn.execute(
+                    "UPDATE bot_accounts SET status = 'active', last_error_code = NULL, "
+                    "updated_at = ? WHERE id = ?",
+                    (now, bot["id"]),
+                )
+        return self.bot(str(binding["bot_account_id"]))
+
+    def disconnect_session(self, session_id: Any) -> tuple[BotAccount, Optional[str]]:
+        """Detach delivery and credential reference in one durable transaction.
+
+        The opaque old credential is first made a durable cleanup obligation.
+        The caller may then attempt deletion outside SQLite; a crash or DPAPI
+        failure leaves the queue entry intact while the disconnected account can
+        no longer falsely claim to reference the old secret.
+        """
+        sid = self._required_text(session_id, "session_id")
+        now = self._now()
+        old_credential: Optional[str] = None
+        bot_id: Optional[str] = None
+        with self._immediate() as conn:
+            binding = conn.execute(
+                "SELECT * FROM channel_bindings WHERE session_id = ? "
+                "AND status IN ('active', 'paused') ORDER BY created_at DESC, id DESC LIMIT 1",
+                (sid,),
+            ).fetchone()
+            if binding is not None:
+                bot = conn.execute(
+                    "SELECT * FROM bot_accounts WHERE id = ?", (binding["bot_account_id"],)
+                ).fetchone()
+            else:
+                bot = conn.execute(
+                    "SELECT * FROM bot_accounts WHERE draft_session_id = ? AND status <> 'disconnected' "
+                    "ORDER BY created_at DESC, id DESC LIMIT 1",
+                    (sid,),
+                ).fetchone()
+            if bot is None:
+                raise ChannelNotFound("session has no channel account")
+            bot_id = str(bot["id"])
+            old_credential = bot["credential_id"]
+            if old_credential is not None:
+                conn.execute(
+                    "INSERT INTO credential_cleanup_queue "
+                    "(credential_id, bot_account_id, reason, created_at) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(credential_id) DO UPDATE SET "
+                    "bot_account_id = COALESCE(credential_cleanup_queue.bot_account_id, excluded.bot_account_id)",
+                    (str(old_credential), bot_id, "disconnect_cleanup_failed", now),
+                )
+            if binding is not None:
+                conn.execute(
+                    "UPDATE outbox SET state = 'cancelled', lease_owner = NULL, lease_until = NULL "
+                    "WHERE binding_id = ? AND state IN ('pending', 'retry_wait')",
+                    (binding["id"],),
+                )
+                conn.execute(
+                    "UPDATE outbox SET state = 'uncertain', lease_owner = NULL, lease_until = NULL, "
+                    "last_error_class = 'disconnect_inflight', last_error_at = ? "
+                    "WHERE binding_id = ? AND state = 'sending'",
+                    (now, binding["id"]),
+                )
+                conn.execute(
+                    "UPDATE channel_bindings SET status = 'disconnected', pause_reason = NULL, "
+                    "disconnected_at = ?, updated_at = ? WHERE id = ?",
+                    (now, now, binding["id"]),
+                )
+            conn.execute(
+                "UPDATE bot_accounts SET credential_id = NULL, credential_revision = credential_revision + 1, "
+                "status = 'disconnected', last_error_code = NULL, updated_at = ? WHERE id = ?",
+                (now, bot_id),
+            )
+            conn.execute(
+                "DELETE FROM token_replacement_intents WHERE session_id = ?", (sid,)
+            )
+        assert bot_id is not None
+        return self.bot(bot_id), None if old_credential is None else str(old_credential)
 
     # -- Bindings and pairing ----------------------------------------
 
@@ -778,6 +1333,10 @@ class ChannelStore:
             raise ValueError("sync_from_event_id must be non-negative")
         binding_id = _new_id("bind")
         now = self._now()
+        safe_username = self._optional_channel_text(telegram_username, "telegram_username")
+        safe_display_name = self._optional_channel_text(
+            telegram_display_name, "telegram_display_name"
+        )
         try:
             with self._immediate() as conn:
                 if conn.execute(
@@ -797,8 +1356,8 @@ class ChannelStore:
                         entity_id,
                         str(user_id),
                         str(chat_id),
-                        telegram_username,
-                        telegram_display_name,
+                        safe_username,
+                        safe_display_name,
                         target.value,
                         now,
                         cursor,
@@ -885,6 +1444,8 @@ class ChannelStore:
     ) -> ChannelBinding:
         entity_id = _entity_id(binding_id)
         target = BindingStatus(_enum_value(status))
+        safe_reason = self._optional_safe_error(pause_reason, "pause_reason")
+        safe_error = self._optional_safe_error(error_code, "error_code")
         now = self._now()
         try:
             with self._immediate() as conn:
@@ -897,7 +1458,7 @@ class ChannelStore:
                 _check_transition("binding", current, target, _BINDING_TRANSITIONS)
                 paused_at = now if target is BindingStatus.PAUSED else None
                 disconnected_at = now if target is BindingStatus.DISCONNECTED else None
-                reason = pause_reason if target is BindingStatus.PAUSED else None
+                reason = safe_reason if target is BindingStatus.PAUSED else None
                 conn.execute(
                     "UPDATE channel_bindings SET status = ?, pause_reason = ?, paused_at = ?, "
                     "disconnected_at = COALESCE(?, disconnected_at), last_error_code = ?, "
@@ -907,7 +1468,7 @@ class ChannelStore:
                         reason,
                         paused_at,
                         disconnected_at,
-                        error_code,
+                        safe_error,
                         now,
                         entity_id,
                     ),
@@ -940,6 +1501,10 @@ class ChannelStore:
         )
         expiry = _aware_utc_iso(expires_at, field="expires_at")
         update_id = str(telegram_update_id)
+        safe_username = self._optional_channel_text(telegram_username, "telegram_username")
+        safe_display_name = self._optional_channel_text(
+            telegram_display_name, "telegram_display_name"
+        )
         try:
             with self._immediate() as conn:
                 conn.execute(
@@ -955,11 +1520,11 @@ class ChannelStore:
                         update_id,
                         str(telegram_user_id),
                         str(telegram_chat_id),
-                        telegram_username,
-                        telegram_display_name,
+                        safe_username,
+                        safe_display_name,
                         sqlite3.Binary(bytes(code_salt)),
                         sqlite3.Binary(bytes(code_digest)),
-                        self._required_text(code_hint, "code_hint"),
+                        self._required_channel_text(code_hint, "code_hint"),
                         now,
                         expiry,
                         seen,
@@ -1168,6 +1733,9 @@ class ChannelStore:
         seen: set[int] = set()
         for raw in parts:
             part = raw if isinstance(raw, OutboundPart) else OutboundPart(**dict(raw))
+            for field, value in (("text", part.text), ("caption", part.caption)):
+                if isinstance(value, str) and _TOKEN_SHAPE_RE.search(value):
+                    raise ValueError(f"outbox {field} must not contain a token-like secret")
             number = int(part.payload_part)
             if number in seen:
                 raise ChannelConflict("payload_part must be unique within a projected event")
@@ -1193,12 +1761,14 @@ class ChannelStore:
         ).hex
         with self._immediate() as conn:
             binding = conn.execute(
-                "SELECT session_id, projection_cursor_event_id FROM channel_bindings "
+                "SELECT session_id, projection_cursor_event_id, status FROM channel_bindings "
                 "WHERE id = ?",
                 (entity_id,),
             ).fetchone()
             if binding is None:
                 raise ChannelNotFound(f"unknown channel binding: {entity_id}")
+            if BindingStatus(binding["status"]) is not BindingStatus.ACTIVE:
+                raise ChannelConflict("only an active binding may project events")
             cursor = int(binding["projection_cursor_event_id"])
             if event_id >= cursor:
                 next_sequence = int(
@@ -1278,6 +1848,8 @@ class ChannelStore:
     ) -> OutboxItem:
         entity_id = _entity_id(outbox_id)
         target = OutboxState(_enum_value(state))
+        safe_owner = self._optional_channel_text(lease_owner, "lease_owner")
+        safe_error = self._optional_safe_error(error_class, "error_class")
         changed_at = self._now() if now is None else _aware_utc_iso(now, field="now")
         lease_time = _optional_time(lease_until, field="lease_until")
         retry_time = _optional_time(next_attempt_at, field="next_attempt_at")
@@ -1293,7 +1865,7 @@ class ChannelStore:
             if target is OutboxState.SENDING and current is not target:
                 attempts += 1
             sent_at = changed_at if target is OutboxState.SENT else None
-            last_error_at = changed_at if error_class else None
+            last_error_at = changed_at if safe_error else None
             conn.execute(
                 "UPDATE outbox SET state = ?, attempts = ?, next_attempt_at = ?, "
                 "lease_owner = ?, lease_until = ?, telegram_message_id = COALESCE(?, "
@@ -1303,10 +1875,10 @@ class ChannelStore:
                     target.value,
                     attempts,
                     retry_time if target is OutboxState.RETRY_WAIT else None,
-                    lease_owner if target is OutboxState.SENDING else None,
+                    safe_owner if target is OutboxState.SENDING else None,
                     lease_time if target is OutboxState.SENDING else None,
                     None if telegram_message_id is None else str(telegram_message_id),
-                    error_class,
+                    safe_error,
                     last_error_at,
                     sent_at,
                     entity_id,
@@ -1344,12 +1916,15 @@ class ChannelStore:
             conn.execute(
                 "UPDATE outbox SET state = 'uncertain', lease_owner = NULL, lease_until = NULL, "
                 "last_error_class = 'lease_expired', last_error_at = ? "
-                "WHERE binding_id = ? AND state = 'sending' AND lease_until <= ?",
+                "WHERE binding_id = ? AND state = 'sending' AND lease_until <= ? "
+                "AND EXISTS (SELECT 1 FROM channel_bindings b WHERE b.id = outbox.binding_id "
+                "AND b.status = 'active')",
                 (claimed_at, entity_id, claimed_at),
             )
             head = conn.execute(
-                "SELECT * FROM outbox WHERE binding_id = ? AND state NOT IN ('sent', 'cancelled') "
-                "ORDER BY sequence LIMIT 1",
+                "SELECT o.* FROM outbox o JOIN channel_bindings b ON b.id = o.binding_id "
+                "WHERE o.binding_id = ? AND b.status = 'active' "
+                "AND o.state NOT IN ('sent', 'cancelled') ORDER BY o.sequence LIMIT 1",
                 (entity_id,),
             ).fetchone()
             if head is None:
@@ -1399,7 +1974,11 @@ class ChannelStore:
         run_time = _optional_time(run_at, field="run_at")
         next_time = _optional_time(next_run_at, field="next_run_at")
         last_time = _optional_time(last_run_at, field="last_run_at")
-        refs = tuple(self._required_text(ref, "skill_ref") for ref in skill_refs)
+        refs = tuple(self._required_channel_text(ref, "skill_ref") for ref in skill_refs)
+        safe_local_time = self._optional_channel_text(local_time, "local_time")
+        safe_pause_reason = self._optional_safe_error(pause_reason, "pause_reason")
+        safe_last_status = self._optional_safe_error(last_status, "last_status")
+        safe_created_by = self._optional_channel_text(created_by, "created_by")
         try:
             with self._immediate() as conn:
                 conn.execute(
@@ -1411,22 +1990,22 @@ class ChannelStore:
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         automation_id,
-                        self._required_text(name, "name"),
+                        self._required_channel_text(name, "name"),
                         self._required_text(session_id, "session_id"),
                         _enum_value(schedule_kind),
-                        local_time,
+                        safe_local_time,
                         run_time,
                         self._required_text(zone, "timezone"),
-                        self._required_text(prompt_text, "prompt_text"),
+                        self._required_channel_text(prompt_text, "prompt_text"),
                         json.dumps(refs, ensure_ascii=False, separators=(",", ":")),
                         _enum_value(media_policy),
                         int(bool(enabled)),
-                        pause_reason,
+                        safe_pause_reason,
                         next_time,
                         last_time,
-                        last_status,
+                        safe_last_status,
                         int(misfire_grace_seconds),
-                        created_by,
+                        safe_created_by,
                         confirmed,
                         now,
                         now,
@@ -1513,6 +2092,9 @@ class ChannelStore:
     ) -> AutomationRun:
         entity_id = _entity_id(automation_run_id)
         target = AutomationRunStatus(_enum_value(status))
+        safe_turn_id = self._optional_channel_text(turn_id, "turn_id")
+        safe_owner = self._optional_channel_text(lease_owner, "lease_owner")
+        safe_error = self._optional_safe_error(error_class, "error_class")
         changed_at = self._now() if now is None else _aware_utc_iso(now, field="now")
         lease_time = _optional_time(lease_until, field="lease_until")
         with self._immediate() as conn:
@@ -1544,13 +2126,13 @@ class ChannelStore:
                 "error_class = ? WHERE id = ?",
                 (
                     target.value,
-                    turn_id,
+                    safe_turn_id,
                     final_event_id,
-                    lease_owner if target is AutomationRunStatus.RUNNING else None,
+                    safe_owner if target is AutomationRunStatus.RUNNING else None,
                     lease_time if target is AutomationRunStatus.RUNNING else None,
                     started_at,
                     ended_at,
-                    error_class,
+                    safe_error,
                     entity_id,
                 ),
             )

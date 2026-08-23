@@ -7,23 +7,28 @@ SSE:连上先发 snapshot(meta+全事件),再续直播;15s 注释心跳保活。
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import math
 import os
+import re
 import sys
 import uuid
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from guanlan_v2.console.store import ConsoleStore
 from guanlan_v2.console.media import MediaNotFound, MediaStore
+from guanlan_v2.console.request_security import (
+    trusted_local_request as _request_security_trusted_local_request,
+)
 from guanlan_v2.console import tools as ct
 from guanlan_v2.console import seats_projection as seats_projection
 from guanlan_v2.console import workspace_tools as wt
@@ -35,6 +40,61 @@ from guanlan_v2.console.workspaces import (
 )
 
 log = logging.getLogger(__name__)
+
+_CONSOLE_BODY_INVALID = object()
+_CONSOLE_BODY_TOO_LARGE = object()
+_CONSOLE_BODY_UNSET = object()
+_CHANNEL_RUNTIME_RESOLUTION_FAILED = object()
+_MAX_CONSOLE_ACTION_BODY_BYTES = 128 * 1024
+_CONSOLE_TOKEN_SHAPE_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:bot)?[0-9]{5,16}:[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])",
+    re.IGNORECASE,
+)
+
+
+async def _read_console_json_object(request: Request, *, maximum: int = _MAX_CONSOLE_ACTION_BODY_BYTES):
+    """Bounded manual parse for secret-adjacent Console routes.
+
+    FastAPI/Pydantic's ordinary 422 formatter can include a rejected root
+    value.  ``/send`` and ``/steer`` are Token interception boundaries, so all
+    malformed/object-shape failures must use a fixed input-free response.
+    """
+    data = bytearray()
+    try:
+        async for chunk in request.stream():
+            if not isinstance(chunk, bytes) or len(data) + len(chunk) > maximum:
+                return _CONSOLE_BODY_TOO_LARGE
+            data.extend(chunk)
+    except Exception:
+        return _CONSOLE_BODY_INVALID
+    if not data:
+        return {}
+    try:
+        parsed = json.loads(bytes(data))
+    except Exception:
+        return _CONSOLE_BODY_INVALID
+    return parsed if isinstance(parsed, dict) else _CONSOLE_BODY_INVALID
+
+
+async def _console_action_body(request: Request, supplied: object = _CONSOLE_BODY_UNSET):
+    """Use manual HTTP parsing while retaining direct-endpoint test compatibility.
+
+    ``/send`` and ``/steer`` deliberately cannot use FastAPI's ``Body``
+    model: its normal validation response can echo an invalid root Token.  A
+    handful of Console tests call route endpoints directly with a pre-parsed
+    mapping, so accept that private compatibility input without letting it
+    change the HTTP request schema.
+    """
+    # FastAPI treats an unmodelled compatibility argument as an optional query
+    # parameter and supplies ``None`` on normal HTTP calls.  Treat that as
+    # absent so the actual request stream remains under our bounded parser.
+    if supplied is not _CONSOLE_BODY_UNSET and supplied is not None:
+        return dict(supplied) if isinstance(supplied, dict) else _CONSOLE_BODY_INVALID
+    return await _read_console_json_object(request)
+
+
+def _console_token_shape(value: object) -> bool:
+    return isinstance(value, str) and bool(_CONSOLE_TOKEN_SHAPE_RE.search(value))
 
 _SYSTEM_PROMPT = """你是「观澜 · 帷幄」——A股投研平台的统帅 agent,在一个对话里指挥全平台。
 
@@ -101,21 +161,7 @@ def _trusted_local_request(request: Request) -> bool:
     legacy app must not turn autonomous workspace writes into a drive-by web
     capability.
     """
-    origin = str(request.headers.get("origin") or "").strip()
-    if not origin:
-        return True
-    if origin == "null":
-        return False
-    try:
-        src = urlsplit(origin)
-        dst_host = (request.url.hostname or "").lower()
-        src_host = (src.hostname or "").lower()
-        src_port = src.port or (443 if src.scheme == "https" else 80)
-        dst_port = request.url.port or (443 if request.url.scheme == "https" else 80)
-    except ValueError:
-        return False
-    return (src.scheme == request.url.scheme and src_host == dst_host
-            and src_port == dst_port and src_host in {"127.0.0.1", "localhost", "::1"})
+    return _request_security_trusted_local_request(request)
 
 
 def _origin_error() -> JSONResponse:
@@ -658,7 +704,8 @@ def build_console_router(store: Optional[ConsoleStore] = None,
                          plan_approval_coordinator: Any = None,
                          plan_approval_actor: Any = None,
                          plan_admit: Any = None,
-                         plan_lease_context: Any = None) -> APIRouter:
+                         plan_lease_context: Any = None,
+                         channel_runtime: Any = None) -> APIRouter:
     """帷幄控制台路由。
 
     Phase 7 加法(全部可选,默认 None → 与既有行为逐字不变):
@@ -671,6 +718,8 @@ def build_console_router(store: Optional[ConsoleStore] = None,
       (Task 9 接线为调用 ``approval.admit_after_approval``);为 None 则诚实 admitted:false。
     * ``plan_lease_context`` —— ``preset_id -> {preset_record_digest, catalog_digest,
       registry_digest}``,为签发租约提供当前密封链 digest(协调器仍做 drift 拒绝)。
+    * ``channel_runtime`` —— Task 4 的本地 Telegram 控制门面；为 ``None`` 时
+      不改变既有 Console 请求、事件或响应。
     """
     router = APIRouter(prefix="/console", tags=["console"])
     st = store or ConsoleStore()
@@ -682,6 +731,224 @@ def build_console_router(store: Optional[ConsoleStore] = None,
     pending: Dict[str, tuple] = {}                       # turn_id → (sid, confirm future)
     running: set = set()                                # 正在跑轮的 sid
     active_turns: Dict[str, Dict[str, Any]] = {}         # sid → foreground turn control
+    # Compatibility-only fallback for focused runtimes predating Task 4's
+    # Runtime-owned reservation API.  Production Token handoffs live on
+    # ChannelRuntime so this router and /console/channels share one view.
+    secret_reservations: set[str] = set()
+
+    def _channel_runtime() -> Any | None:
+        """Three-state resolver: absent is compatible; failed is fail-closed."""
+        if channel_runtime is None:
+            return None
+        try:
+            resolved = channel_runtime() if callable(channel_runtime) else channel_runtime
+        except Exception:
+            return _CHANNEL_RUNTIME_RESOLUTION_FAILED
+        return _CHANNEL_RUNTIME_RESOLUTION_FAILED if resolved is None else resolved
+
+    async def _channel_sync(runtime: Any, method_name: str, *args: Any) -> Any:
+        """Keep Channel SQLite/DPAPI work off the ASGI event loop."""
+        method = getattr(runtime, method_name, None)
+        if not callable(method):
+            raise RuntimeError("channel_unavailable")
+        result = await asyncio.to_thread(method, *args)
+        return await result if inspect.isawaitable(result) else result
+
+    async def _channel_async(
+        runtime: Any, method_name: str, *args: Any, **kwargs: Any
+    ) -> Any:
+        """Call a runtime network method; sync fakes still run in a worker."""
+        method = getattr(runtime, method_name, None)
+        if not callable(method):
+            raise RuntimeError("channel_unavailable")
+        if inspect.iscoroutinefunction(method):
+            return await method(*args, **kwargs)
+        result = await asyncio.to_thread(method, *args, **kwargs)
+        return await result if inspect.isawaitable(result) else result
+
+    async def _channel_submit_token(
+        runtime: Any,
+        sid: str,
+        draft_id: str,
+        token: str,
+        *,
+        before_commit: Any = None,
+    ) -> Any:
+        """Use the runtime's post-getMe guard when its façade supports it."""
+        method = getattr(runtime, "submit_token", None)
+        if not callable(method):
+            raise RuntimeError("channel_unavailable")
+        supports_guard = False
+        try:
+            signature = inspect.signature(method)
+            supports_guard = (
+                "before_commit" in signature.parameters
+                or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values())
+            )
+        except Exception:
+            # Unknown callables are safer treated as unavailable rather than
+            # guessing at a secret-bearing argument contract.
+            raise RuntimeError("channel_unavailable") from None
+        kwargs = {"before_commit": before_commit} if supports_guard else {}
+        return await _channel_async(runtime, "submit_token", sid, draft_id, token, **kwargs)
+
+    def _runtime_secret_reservation_ids(runtime: Any = None) -> set[str]:
+        """Read the Runtime's nonblocking handoff snapshot without I/O."""
+        current = _channel_runtime() if runtime is None else runtime
+        if current is None or current is _CHANNEL_RUNTIME_RESOLUTION_FAILED:
+            return set()
+        getter = getattr(current, "reserved_secret_session_ids", None)
+        if not callable(getter):
+            return set()
+        try:
+            snapshot = getter()
+        except Exception:
+            # A broken injected runtime stays fail-closed for secret detection;
+            # the Console lifecycle guard itself must not crash ordinary UI.
+            return set()
+        if inspect.isawaitable(snapshot) or not isinstance(snapshot, (set, frozenset, tuple, list)):
+            return set()
+        return {
+            value for value in snapshot
+            if isinstance(value, str) and not _console_token_shape(value)
+        }
+
+    def _secret_submission_busy(sid: str, runtime: Any = None) -> bool:
+        return sid in secret_reservations or sid in _runtime_secret_reservation_ids(runtime)
+
+    async def _reserve_secret_submission(
+        runtime: Any, sid: str
+    ) -> tuple[bool, str]:
+        """Claim a Runtime-owned flag; never hold a mutex across awaits."""
+        reserve = getattr(runtime, "reserve_secret_submission", None)
+        if callable(reserve):
+            try:
+                acquired = bool(await _channel_sync(runtime, "reserve_secret_submission", sid))
+            except Exception as exc:
+                return False, _channel_reason(exc, "channel_session_read_only")
+            return (
+                (True, "")
+                if acquired
+                else (False, "telegram_token_submission_busy")
+            )
+        if sid in secret_reservations:
+            return False, "telegram_token_submission_busy"
+        secret_reservations.add(sid)
+        return True, ""
+
+    async def _release_secret_submission(runtime: Any, sid: str) -> None:
+        release = getattr(runtime, "release_secret_submission", None)
+        if callable(release):
+            try:
+                await _channel_sync(runtime, "release_secret_submission", sid)
+            except Exception:
+                # Runtime's concrete release is only a set discard.  If an
+                # injected replacement fails here, retaining its reservation
+                # is safer than allowing a concurrent secret handoff through.
+                pass
+            return
+        secret_reservations.discard(sid)
+
+    def _channel_reason(exc: BaseException, fallback: str) -> str:
+        reason = getattr(exc, "reason_code", None)
+        if isinstance(reason, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.:-]{0,127}", reason):
+            return reason
+        return fallback
+
+    async def _intercept_channel_secret(
+        sid: str,
+        text: str,
+        body: Any,
+        *,
+        commit: bool = False,
+        runtime_candidate: Any = None,
+        before_commit: Any = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Detect, then (only after Console authorization) submit a token.
+
+        ``commit=False`` only recognizes the secret shape.  Routes use that
+        first so an archived/busy session cannot persist a token and then
+        report a misleading Console failure.  ``commit=True`` is invoked after
+        the ordinary session/workspace/control checks but still before any
+        event, steer control mutation, cancellation, or Agent call.
+        """
+        runtime = _channel_runtime() if runtime_candidate is None else runtime_candidate
+        if runtime is None:
+            return None
+        if runtime is _CHANNEL_RUNTIME_RESOLUTION_FAILED:
+            return {"accepted": False, "reason_code": "channel_secret_inspection_unavailable"}
+        try:
+            matches = await _channel_sync(runtime, "extract_telegram_tokens", text)
+        except Exception:
+            # ``channel_runtime=None`` is the sole compatibility path.  Once
+            # the feature is injected, a broken detector must fail closed so
+            # raw text can never slip into user_msg/events.jsonl.
+            return {"accepted": False, "reason_code": "channel_secret_inspection_unavailable"}
+        if not isinstance(matches, (list, tuple)):
+            return {"accepted": False, "reason_code": "channel_secret_inspection_unavailable"}
+        if any(not isinstance(match, str) for match in matches):
+            return {"accepted": False, "reason_code": "channel_secret_inspection_unavailable"}
+        if not matches:
+            return None
+        if len(matches) != 1 or not isinstance(matches[0], str):
+            return {"accepted": False, "reason_code": "telegram_token_secure_submit_required"}
+        if not sid:
+            return {"accepted": False, "reason_code": "telegram_token_needs_draft"}
+        if not commit:
+            return {"accepted": True, "pending": True}
+        try:
+            target_resolver = getattr(runtime, "token_submission_target", None)
+            if callable(target_resolver):
+                target = await _channel_sync(runtime, "token_submission_target", sid)
+                draft = target[0] if isinstance(target, tuple) and target else None
+            else:
+                draft = await _channel_sync(runtime, "current_draft", sid)
+        except Exception:
+            draft = None
+        draft_id = getattr(draft, "id", None)
+        if not isinstance(draft_id, str) or not draft_id:
+            return {"accepted": False, "reason_code": "telegram_token_needs_draft"}
+        payload = body if isinstance(body, dict) else {}
+        requested_draft = payload.get("draft_id")
+        ticket = next(
+            (
+                payload.get(name)
+                for name in ("request_token", "action_ticket", "ticket")
+                if isinstance(payload.get(name), str) and 0 < len(payload.get(name)) <= 512
+            ),
+            None,
+        )
+        if requested_draft != draft_id or ticket is None:
+            return {"accepted": False, "reason_code": "telegram_token_secure_submit_required"}
+        try:
+            valid_ticket = bool(
+                await _channel_sync(
+                    runtime,
+                    "consume_action_ticket",
+                    ticket,
+                    sid,
+                    "telegram:submit-token",
+                    draft_id,
+                )
+            )
+        except Exception:
+            valid_ticket = False
+        if not valid_ticket:
+            return {"accepted": False, "reason_code": "telegram_token_secure_submit_required"}
+        try:
+            await _channel_submit_token(
+                runtime, sid, draft_id, matches[0], before_commit=before_commit
+            )
+        except Exception as exc:
+            return {
+                "accepted": False,
+                "reason_code": _channel_reason(exc, "telegram_token_submission_failed"),
+            }
+        return {
+            "accepted": True,
+            "text": "[Telegram Bot Token 已安全提交]",
+            "draft_id": draft_id,
+        }
 
     def _agent_for(sid: str, history_through_event_id: Optional[int] = None):
         if sid in agents:
@@ -777,7 +1044,24 @@ def build_console_router(store: Optional[ConsoleStore] = None,
                 ids.add(sid)
             ids.update(entry.get("watchers") or [])
         ids.update(_etf_inflight.values())
+        ids.update(secret_reservations)
+        ids.update(_runtime_secret_reservation_ids())
         return ids
+
+    def _session_writable_now(sid: str) -> bool:
+        """Small second check used immediately before a secret commit/event."""
+        if not isinstance(sid, str) or _console_token_shape(sid):
+            return False
+        meta = st.get_meta(sid)
+        if not isinstance(meta, dict) or bool(meta.get("archived")):
+            return False
+        try:
+            st.workspace_store.require(
+                str(meta.get("workspace_id") or GENERAL_WORKSPACE_ID), active_only=True,
+            )
+        except Exception:
+            return False
+        return True
 
     # ── 对话媒体(不接受本地路径；只按不可猜 media_id 读私有副本) ──
     @router.get("/media/{media_id}")
@@ -1038,11 +1322,34 @@ def build_console_router(store: Optional[ConsoleStore] = None,
 
     # ── 会话 CRUD ──
     @router.get("/sessions")
-    def sessions_list(request: Request):
+    async def sessions_list(request: Request):
         if not _trusted_local_request(request):
             return _origin_error()
         # running 是进程内实时态(不落盘——重启后即真不在跑,诚实)
-        return {"ok": True, "sessions": [dict(m, running=(m.get("id") in running)) for m in st.list_sessions()]}
+        sessions = [dict(m, running=(m.get("id") in running)) for m in st.list_sessions()]
+        runtime = _channel_runtime()
+        if runtime is not None:
+            # Reuse the Channel endpoint's final allowlist barrier here too:
+            # summaries are UI data, not a second opportunity to expose a
+            # future runtime's credential/text/path field.
+            from guanlan_v2.channels.api import _available_false_status, _stable_status
+            # This is a live derived view only.  In particular, do not write
+            # channel state into Console meta, which is not a secret boundary.
+            for item in sessions:
+                sid = item.get("id")
+                if not isinstance(sid, str):
+                    continue
+                if runtime is _CHANNEL_RUNTIME_RESOLUTION_FAILED:
+                    item["channel_summary"] = _available_false_status(sid)
+                    continue
+                try:
+                    raw_summary = await _channel_sync(
+                        runtime, "summary_for_session", sid
+                    )
+                    item["channel_summary"] = _stable_status(raw_summary, sid)
+                except Exception:
+                    item["channel_summary"] = _available_false_status(sid)
+        return {"ok": True, "sessions": sessions}
 
     @router.patch("/sessions/{sid}")
     async def sessions_update(request: Request, sid: str,
@@ -1131,11 +1438,14 @@ def build_console_router(store: Optional[ConsoleStore] = None,
         # async:OrderedDict 操作回 loop 线程,与 send/_run_turn 串行无竞态
         if not _trusted_local_request(request):
             return _origin_error()
-        if sid in running:
-            return JSONResponse({"ok": False, "reason": "该会话正有任务在跑,先等其结束"})
         if any(sid == v["sid"] or sid in v["watchers"] for v in _bg_inflight.values()) \
                 or sid in _etf_inflight.values():
             return JSONResponse({"ok": False, "reason": "该会话有后台研报在跑,先等其完成"})
+        # Background jobs also appear in _busy_session_ids(), but preserve the
+        # established, more useful report-specific response before the generic
+        # turn/confirmation/secret-reservation guard below.
+        if sid in _busy_session_ids():
+            return JSONResponse({"ok": False, "reason": "该会话正有任务在跑,先等其结束"})
         agents.pop(sid, None)
         try:
             ok = st.delete_session(sid)
@@ -1283,11 +1593,28 @@ def build_console_router(store: Optional[ConsoleStore] = None,
             return False
 
     @router.post("/send")
-    async def send(request: Request, body: dict = Body(default={})):
+    async def send(request: Request, body: Any = None):
         if not _trusted_local_request(request):
             return _origin_error()
-        text = str(body.get("text") or "").strip()
-        sid = str(body.get("sid") or "").strip()
+        body = await _console_action_body(request, body)
+        if body is _CONSOLE_BODY_INVALID or body is _CONSOLE_BODY_TOO_LARGE:
+            return JSONResponse({"ok": False, "reason_code": "console_request_invalid"}, status_code=400)
+        assert isinstance(body, dict)
+        raw_text = body.get("text")
+        raw_sid = body.get("sid")
+        if _console_token_shape(raw_sid) or _console_token_shape(body.get("workspace_id")):
+            return JSONResponse({"ok": False, "reason_code": "console_request_invalid"}, status_code=400)
+        text = raw_text.strip() if isinstance(raw_text, str) else ""
+        sid = raw_sid.strip() if isinstance(raw_sid, str) else ""
+        runtime_candidate = _channel_runtime()
+        secret_probe = await _intercept_channel_secret(
+            sid, text, body, commit=False, runtime_candidate=runtime_candidate,
+        )
+        if secret_probe is not None and not secret_probe["accepted"]:
+            return JSONResponse(
+                {"ok": False, "reason_code": secret_probe["reason_code"]}, status_code=400
+            )
+        secret: Optional[Dict[str, Any]] = None
         thinking_mode = str(body.get("thinking_mode") or "standard").strip().lower()
         if not text:
             return JSONResponse({"ok": False, "reason": "空指令"})
@@ -1297,16 +1624,21 @@ def build_console_router(store: Optional[ConsoleStore] = None,
                 status_code=400,
             )
         if not sid:
-            workspace_id = str(body.get("workspace_id") or GENERAL_WORKSPACE_ID).strip()
+            raw_workspace_id = body.get("workspace_id")
+            workspace_id = (
+                raw_workspace_id.strip()
+                if isinstance(raw_workspace_id, str) and raw_workspace_id.strip()
+                else GENERAL_WORKSPACE_ID
+            )
             try:
                 sid = st.create_session(
                     title=text[:18], workspace_id=workspace_id,
                 )["id"]
-            except WorkspaceError as exc:
-                return _perr(400, str(exc))
+            except WorkspaceError:
+                return _perr(400, "研究空间不可用")
         meta = st.get_meta(sid)
         if meta is None:
-            return JSONResponse({"ok": False, "reason": f"会话不存在: {sid}"})
+            return JSONResponse({"ok": False, "reason": "会话不存在"})
         if meta.get("archived"):
             return _perr(409, "该对话已归档；历史记录仅供查看，请先恢复后再发送")
         try:
@@ -1318,22 +1650,97 @@ def build_console_router(store: Optional[ConsoleStore] = None,
             # Fail before appending user_msg: archived sessions are durable
             # read-only history, never half-accept a turn that cannot run.
             return _perr(409, "该研究空间已归档；历史消息、文件与资产仅供查看")
-        if sid in running:
+        if sid in running or _secret_submission_busy(sid, runtime_candidate):
             return JSONResponse({"ok": False, "reason": "该会话正有任务在跑,稍候再发"})
-        user_ev = _emit(sid, "user_msg", text=text, thinking_mode=thinking_mode)
-        turn_id = uuid.uuid4().hex
-        _launch_turn(sid, text, turn_id, thinking_mode,
-                     int(user_ev["id"]) if user_ev is not None else 0)
-        return {"ok": True, "sid": sid, "turn_id": turn_id,
-                "thinking_mode": thinking_mode}
+        reservation_held = False
+        try:
+            if secret_probe is not None:
+                acquired, reservation_reason = await _reserve_secret_submission(
+                    runtime_candidate, sid
+                )
+                if not acquired:
+                    return JSONResponse(
+                        {"ok": False, "reason_code": reservation_reason}, status_code=409
+                    )
+                reservation_held = True
+                async def _before_secret_commit() -> None:
+                    if not _session_writable_now(sid) or sid in running:
+                        raise RuntimeError("session became read-only or busy")
+
+                secret = await _intercept_channel_secret(
+                    sid,
+                    text,
+                    body,
+                    commit=True,
+                    runtime_candidate=runtime_candidate,
+                    before_commit=_before_secret_commit,
+                )
+                if secret is None or not secret["accepted"]:
+                    return JSONResponse(
+                        {"ok": False, "reason_code": (secret or {}).get(
+                            "reason_code", "telegram_token_submission_failed"
+                        )},
+                        status_code=400,
+                    )
+                if not _session_writable_now(sid):
+                    # The runtime's pre-persist hook and reservation prevent
+                    # ordinary archive/delete races.  If an external writer
+                    # still wins after a committed credential, report explicit
+                    # partial success rather than a false retryable failure.
+                    return {
+                        "ok": True,
+                        "sid": sid,
+                        "secret_submitted": True,
+                        "secret_placeholder_recorded": False,
+                    }
+                text = secret["text"]
+            user_fields: Dict[str, Any] = {"text": text, "thinking_mode": thinking_mode}
+            if secret is not None and secret["accepted"]:
+                user_fields.update({"channel_projection": "never", "secret_placeholder": True})
+            user_ev = _emit(sid, "user_msg", **user_fields)
+            if user_ev is None:
+                if secret is not None and secret["accepted"]:
+                    return {
+                        "ok": True,
+                        "sid": sid,
+                        "secret_submitted": True,
+                        "secret_placeholder_recorded": False,
+                    }
+                return JSONResponse({"ok": False, "reason": "会话写入失败"}, status_code=409)
+            turn_id = uuid.uuid4().hex
+            _launch_turn(sid, text, turn_id, thinking_mode, int(user_ev["id"]))
+            response = {"ok": True, "sid": sid, "turn_id": turn_id,
+                        "thinking_mode": thinking_mode}
+            if secret is not None and secret["accepted"]:
+                response["secret_submitted"] = True
+            return response
+        finally:
+            if reservation_held:
+                await _release_secret_submission(runtime_candidate, sid)
 
     @router.post("/steer")
-    async def steer(request: Request, body: dict = Body(default={})):
+    async def steer(request: Request, body: Any = None):
         """Append direction, safely stop the foreground turn, then continue."""
         if not _trusted_local_request(request):
             return _origin_error()
-        sid = str(body.get("sid") or "").strip()
-        text = str(body.get("text") or "").strip()
+        body = await _console_action_body(request, body)
+        if body is _CONSOLE_BODY_INVALID or body is _CONSOLE_BODY_TOO_LARGE:
+            return JSONResponse({"ok": False, "reason_code": "console_request_invalid"}, status_code=400)
+        assert isinstance(body, dict)
+        raw_sid = body.get("sid")
+        raw_text = body.get("text")
+        if _console_token_shape(raw_sid):
+            return JSONResponse({"ok": False, "reason_code": "console_request_invalid"}, status_code=400)
+        sid = raw_sid.strip() if isinstance(raw_sid, str) else ""
+        text = raw_text.strip() if isinstance(raw_text, str) else ""
+        runtime_candidate = _channel_runtime()
+        secret_probe = await _intercept_channel_secret(
+            sid, text, body, commit=False, runtime_candidate=runtime_candidate,
+        )
+        if secret_probe is not None and not secret_probe["accepted"]:
+            return JSONResponse(
+                {"ok": False, "reason_code": secret_probe["reason_code"]}, status_code=400
+            )
         thinking_mode = str(body.get("thinking_mode") or "").strip().lower()
         if not sid or not text:
             return _perr(400, "sid 与追加方向 text 必填")
@@ -1353,6 +1760,52 @@ def build_console_router(store: Optional[ConsoleStore] = None,
         control = active_turns.get(sid)
         if control is None or control.get("task") is None or control["task"].done():
             return _perr(409, "该会话当前没有可转向的前台任务，请直接发送新消息")
+        if secret_probe is not None:
+            if _secret_submission_busy(sid, runtime_candidate):
+                return JSONResponse({"ok": False, "reason": "该会话正有安全提交进行中"}, status_code=409)
+            acquired, reservation_reason = await _reserve_secret_submission(
+                runtime_candidate, sid
+            )
+            if not acquired:
+                return JSONResponse(
+                    {"ok": False, "reason_code": reservation_reason}, status_code=409
+                )
+            try:
+                async def _before_secret_commit() -> None:
+                    if not _session_writable_now(sid):
+                        raise RuntimeError("session became read-only")
+
+                secret = await _intercept_channel_secret(
+                    sid,
+                    text,
+                    body,
+                    commit=True,
+                    runtime_candidate=runtime_candidate,
+                    before_commit=_before_secret_commit,
+                )
+                if secret is None or not secret["accepted"]:
+                    return JSONResponse(
+                        {"ok": False, "reason_code": (secret or {}).get(
+                            "reason_code", "telegram_token_submission_failed"
+                        )},
+                        status_code=400,
+                    )
+                if not _session_writable_now(sid):
+                    # The credential has already been safely committed.  Do
+                    # not claim a retryable failure or mutate steer/control;
+                    # report the same explicit partial success as /send.
+                    return {
+                        "ok": True,
+                        "sid": sid,
+                        "secret_submitted": True,
+                        "secret_placeholder_recorded": False,
+                    }
+                # Secure submission deliberately has no Console event, steers
+                # control, or cancellation request; the current foreground Agent
+                # continues unmodified.
+                return {"ok": True, "sid": sid, "secret_submitted": True}
+            finally:
+                await _release_secret_submission(runtime_candidate, sid)
         continuation_turn_id = control.get("continuation_turn_id") or uuid.uuid4().hex
         control["continuation_turn_id"] = continuation_turn_id
         ev = _emit(
