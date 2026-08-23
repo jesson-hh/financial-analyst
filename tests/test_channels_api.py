@@ -652,7 +652,7 @@ async def test_runtime_disconnect_clean_state_is_none_but_cleanup_failure_is_vis
     adapter.responses[TOKEN_A] = TelegramBotIdentity(bot_id="100", username="safe")
     installed = await runtime.submit_token(sid, draft.id, TOKEN_A)
     binding = store.bind_for_test(sid, installed.id, user_id="77", chat_id="77", sync_from_event_id=0)
-    pending = store.project_event(
+    pending = store.project_event_for_test(
         binding.id, source_event_id=1,
         parts=[OutboundPart(kind="text", payload_part=0, text="safe delivery")],
     )[0]
@@ -801,13 +801,13 @@ def test_store_rejects_token_shaped_channel_free_text_before_sqlite_write(tmp_pa
     with pytest.raises(ValueError):
         store.create_bot(TOKEN_A)
     with pytest.raises(ValueError):
-        store.project_event(
+        store.project_event_for_test(
             binding.id,
             source_event_id=1,
             parts=[OutboundPart(kind="text", payload_part=0, text=TOKEN_A)],
         )
     with pytest.raises(ValueError):
-        store.project_event(
+        store.project_event_for_test(
             binding.id,
             source_event_id=1,
             parts=[OutboundPart(kind="media", payload_part=0, media_id="media_safe", caption=TOKEN_A)],
@@ -824,13 +824,17 @@ def test_store_rejects_token_shaped_channel_free_text_before_sqlite_write(tmp_pa
         store.transition_binding(
             binding.id, BindingStatus.PAUSED, pause_reason=TOKEN_A
         )
-    item = store.project_event(
+    item = store.project_event_for_test(
         binding.id,
         source_event_id=2,
         parts=[OutboundPart(kind="text", payload_part=0, text="safe")],
     )[0]
     with pytest.raises(ValueError):
-        store.transition_outbox(item.id, OutboxState.SENDING, lease_owner=TOKEN_A)
+        store.transition_outbox_for_test(
+            item.id,
+            OutboxState.SENDING,
+            lease_owner=TOKEN_A,
+        )
     with pytest.raises(ValueError):
         store.create_automation(
             name="safe",
@@ -850,7 +854,7 @@ def test_paused_or_disconnected_binding_cannot_project_or_claim_new_delivery(tmp
     binding = store.bind_for_test(
         "cs_safe", bot_id, user_id="1", chat_id="1", sync_from_event_id=0
     )
-    store.project_event(
+    store.project_event_for_test(
         binding.id,
         source_event_id=1,
         parts=[OutboundPart(kind="text", payload_part=0, text="safe")],
@@ -858,7 +862,7 @@ def test_paused_or_disconnected_binding_cannot_project_or_claim_new_delivery(tmp
     store.set_session_manual_pause("cs_safe", paused=True)
 
     with pytest.raises(ChannelConflict):
-        store.project_event(
+        store.project_event_for_test(
             binding.id,
             source_event_id=2,
             parts=[OutboundPart(kind="text", payload_part=0, text="must not queue")],
@@ -1088,7 +1092,7 @@ async def test_ticket_subjects_are_server_resolved_and_delivery_tickets_require_
     bot_b = await runtime.submit_token(sid_b, draft_b.id, TOKEN_B)
     binding_a = store.bind_for_test(sid_a, bot_a.id, user_id="77", chat_id="77", sync_from_event_id=0)
     binding_b = store.bind_for_test(sid_b, bot_b.id, user_id="88", chat_id="88", sync_from_event_id=0)
-    foreign_item = store.project_event(
+    foreign_item = store.project_event_for_test(
         binding_b.id, source_event_id=1,
         parts=[OutboundPart(kind="text", payload_part=0, text="safe")],
     )[0]
@@ -1104,7 +1108,7 @@ async def test_ticket_subjects_are_server_resolved_and_delivery_tickets_require_
         )
         own_delivery_ticket = client.post(
             f"/console/channels/session/{sid_a}/request-token",
-            json={"action": "telegram:resolve:drop", "subject_id": store.project_event(
+            json={"action": "telegram:resolve:drop", "subject_id": store.project_event_for_test(
                 binding_a.id, source_event_id=1,
                 parts=[OutboundPart(kind="text", payload_part=0, text="safe")],
             )[0].id},

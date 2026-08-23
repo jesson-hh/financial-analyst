@@ -404,9 +404,9 @@ def test_project_event_has_idempotency_key_and_monotonic_binding_sequence(tmp_pa
         OutboundPart(kind="text", payload_part=1, text="B"),
     ]
 
-    store.project_event(binding.id, source_event_id=11, parts=parts)
-    store.project_event(binding.id, source_event_id=11, parts=parts)
-    store.project_event(
+    store.project_event_for_test(binding.id, source_event_id=11, parts=parts)
+    store.project_event_for_test(binding.id, source_event_id=11, parts=parts)
+    store.project_event_for_test(
         binding.id,
         source_event_id=12,
         parts=[OutboundPart(kind="text", payload_part=0, text="C")],
@@ -422,6 +422,46 @@ def test_project_event_has_idempotency_key_and_monotonic_binding_sequence(tmp_pa
     assert store.binding(binding.id).projection_cursor_event_id == 12
 
 
+def test_project_event_requires_the_current_unexpired_projection_owner(tmp_path):
+    current = [datetime(2026, 8, 23, 1, 0, tzinfo=UTC)]
+    store = ChannelStore(
+        tmp_path / "channels.sqlite3",
+        clock=lambda: current[0],
+    )
+    binding = _seed_binding(store)
+    part = [OutboundPart(kind="text", payload_part=0, text="有序消息")]
+    first_owner = store.acquire_projection_lease(binding.id, lease_seconds=1)
+    assert first_owner is not None
+
+    with pytest.raises(ChannelConflict, match="projection lease"):
+        store.project_event(
+            binding.id,
+            source_event_id=11,
+            parts=part,
+            projection_owner="projection_not_the_owner",
+        )
+
+    current[0] += timedelta(seconds=2)
+    replacement_owner = store.acquire_projection_lease(binding.id, lease_seconds=30)
+    assert replacement_owner is not None
+    assert replacement_owner != first_owner
+    with pytest.raises(ChannelConflict, match="projection lease"):
+        store.project_event(
+            binding.id,
+            source_event_id=11,
+            parts=part,
+            projection_owner=first_owner,
+        )
+
+    projected = store.project_event(
+        binding.id,
+        source_event_id=11,
+        parts=part,
+        projection_owner=replacement_owner,
+    )
+    assert [item.text for item in projected] == ["有序消息"]
+
+
 def test_project_insert_and_cursor_advance_roll_back_together(tmp_path):
     store = _store(tmp_path)
     binding = _seed_binding(store)
@@ -432,7 +472,7 @@ def test_project_insert_and_cursor_advance_roll_back_together(tmp_path):
         )
 
     with pytest.raises(sqlite3.IntegrityError, match="injected"):
-        store.project_event(
+        store.project_event_for_test(
             binding.id,
             source_event_id=11,
             parts=[
@@ -551,17 +591,17 @@ def test_domain_state_machines_reject_disallowed_transitions(
 def test_outbox_and_automation_run_state_machines(tmp_path):
     store = _store(tmp_path)
     binding = _seed_binding(store)
-    item = store.project_event(
+    item = store.project_event_for_test(
         binding.id,
         source_event_id=11,
         parts=[OutboundPart(kind="text", payload_part=0, text="A")],
     )[0]
-    sending = store.transition_outbox(item.id, OutboxState.SENDING)
+    sending = store.transition_outbox_for_test(item.id, OutboxState.SENDING)
     assert sending.state == OutboxState.SENDING
-    retrying = store.transition_outbox(item.id, OutboxState.RETRY_WAIT)
+    retrying = store.transition_outbox_for_test(item.id, OutboxState.RETRY_WAIT)
     assert retrying.state == OutboxState.RETRY_WAIT
     with pytest.raises(InvalidTransition, match="outbox"):
-        store.transition_outbox(item.id, OutboxState.SENT)
+        store.transition_outbox_for_test(item.id, OutboxState.SENT)
 
     automation = store.create_automation(
         name="一次",

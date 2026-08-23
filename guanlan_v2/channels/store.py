@@ -13,6 +13,7 @@ import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -137,6 +138,22 @@ CREATE TABLE IF NOT EXISTS outbox (
         (kind = 'text' AND text IS NOT NULL AND media_id IS NULL AND caption IS NULL)
         OR (kind = 'media' AND text IS NULL AND media_id IS NOT NULL)
     )
+);
+
+-- Recipient authority is pinned when an event is projected.  Re-pairing may
+-- update a binding row in place, so unresolved deliveries must retain the old
+-- generation and may only be dropped/assumed-sent, never silently redirected.
+CREATE TABLE IF NOT EXISTS outbox_route_fences (
+    outbox_id TEXT PRIMARY KEY REFERENCES outbox(id) ON DELETE CASCADE,
+    bot_account_id TEXT NOT NULL REFERENCES bot_accounts(id),
+    telegram_chat_id TEXT NOT NULL,
+    binding_paired_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS projection_leases (
+    binding_id TEXT PRIMARY KEY REFERENCES channel_bindings(id) ON DELETE CASCADE,
+    lease_owner TEXT NOT NULL,
+    lease_until TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS automations (
@@ -396,6 +413,9 @@ _TOKEN_SHAPE_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(?:bot)?[0-9]{5,16}:[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])",
     re.IGNORECASE,
 )
+_PAIRING_CODE_SHAPE_RE = re.compile(
+    r"(?<![0-9A-Z])[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}(?![0-9A-Z])"
+)
 _CREDENTIAL_ID_RE = re.compile(r"^cred_[0-9a-f]{32}$")
 _AUDIT_STATE_KEYS = {
     "status",
@@ -418,6 +438,21 @@ _RECOVERABLE_FAULT_PAUSE_REASONS = frozenset(
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
+
+
+@dataclass(frozen=True)
+class OutboxClaim(OutboxItem):
+    """One fenced delivery lease plus its immutable routing snapshot.
+
+    The credential remains an opaque reference.  Capturing its revision in the
+    same transaction as the claim prevents a worker from later treating a
+    credential replacement as if it were the generation it originally used.
+    """
+
+    bot_account_id: str
+    telegram_chat_id: str
+    credential_id: str
+    credential_revision: int
 
 
 def _entity_id(value: Any) -> str:
@@ -493,6 +528,16 @@ def _outbox_from_row(row: sqlite3.Row) -> OutboxItem:
     return OutboxItem(**data)
 
 
+def _outbox_claim_from_row(row: sqlite3.Row) -> OutboxClaim:
+    data = dict(row)
+    data["state"] = OutboxState(data["state"])
+    data["bot_account_id"] = data.pop("claim_bot_account_id")
+    data["telegram_chat_id"] = data.pop("claim_telegram_chat_id")
+    data["credential_id"] = data.pop("claim_credential_id")
+    data["credential_revision"] = int(data.pop("claim_credential_revision"))
+    return OutboxClaim(**data)
+
+
 def _automation_from_row(row: sqlite3.Row) -> Automation:
     data = dict(row)
     raw_refs = data.pop("skill_refs_json")
@@ -558,6 +603,24 @@ class ChannelStore:
                     "ALTER TABLE pairing_requests ADD COLUMN "
                     "issue_credential_revision INTEGER NOT NULL DEFAULT 0"
                 )
+            # Rows created before recipient-generation fences cannot be proven
+            # safe to route.  Never infer their historic recipient from the
+            # binding's current mutable value.
+            migration_now = self._now()
+            conn.execute(
+                "UPDATE outbox SET state = 'cancelled', lease_owner = NULL, "
+                "lease_until = NULL WHERE state IN ('pending', 'retry_wait') "
+                "AND NOT EXISTS (SELECT 1 FROM outbox_route_fences rf "
+                "WHERE rf.outbox_id = outbox.id)"
+            )
+            conn.execute(
+                "UPDATE outbox SET state = 'uncertain', lease_owner = NULL, "
+                "lease_until = NULL, last_error_class = 'legacy_route_unknown', "
+                "last_error_at = ? WHERE state = 'sending' "
+                "AND NOT EXISTS (SELECT 1 FROM outbox_route_fences rf "
+                "WHERE rf.outbox_id = outbox.id)",
+                (migration_now,),
+            )
         finally:
             conn.close()
 
@@ -1195,7 +1258,13 @@ class ChannelStore:
                 )
         return self.bot(entity_id)
 
-    def set_session_manual_pause(self, session_id: Any, *, paused: bool) -> BotAccount:
+    def set_session_manual_pause(
+        self,
+        session_id: Any,
+        *,
+        paused: bool,
+        resume_from_event_id: int | None = None,
+    ) -> BotAccount:
         """Atomically apply or lift an intentional session pause.
 
         Fault pauses are never resumable through this path.  In particular a
@@ -1203,6 +1272,13 @@ class ChannelStore:
         credential, identity, or polling fault state.
         """
         sid = self._required_text(session_id, "session_id")
+        resume_cursor: int | None = None
+        if not paused:
+            if isinstance(resume_from_event_id, bool) or resume_from_event_id is None:
+                raise ValueError("resume_from_event_id is required when resuming")
+            resume_cursor = int(resume_from_event_id)
+            if resume_cursor < 0:
+                raise ValueError("resume_from_event_id must be non-negative")
         now = self._now()
         with self._immediate() as conn:
             binding = conn.execute(
@@ -1259,8 +1335,9 @@ class ChannelStore:
                     raise ChannelConflict("only an intentional manual pause can resume")
                 conn.execute(
                     "UPDATE channel_bindings SET status = 'active', pause_reason = NULL, "
-                    "paused_at = NULL, updated_at = ? WHERE id = ?",
-                    (now, binding["id"]),
+                    "paused_at = NULL, sync_from_event_id = ?, "
+                    "projection_cursor_event_id = ?, updated_at = ? WHERE id = ?",
+                    (resume_cursor, resume_cursor, now, binding["id"]),
                 )
                 conn.execute(
                     "UPDATE bot_accounts SET status = 'active', last_error_code = NULL, "
@@ -2178,51 +2255,97 @@ class ChannelStore:
                     pause_reason: str | None = None
                     paused_at: str | None = None
                     if existing is not None:
-                        binding_id = str(existing["id"])
                         previous_reason = existing["pause_reason"]
                         # Approval repairs an identity-fault pause.  It must not
                         # silently override a user/archive pause that happened
                         # to coexist with the Token identity change.
-                        if previous_reason not in {
-                            "bot_identity_changed",
-                            "telegram_identity_changed",
-                        }:
+                        if (
+                            BindingStatus(existing["status"]) is BindingStatus.PAUSED
+                            and previous_reason not in {
+                                "bot_identity_changed",
+                                "telegram_identity_changed",
+                            }
+                        ):
                             binding_status = BindingStatus.PAUSED
                             pause_reason = previous_reason or "pairing_reapproved_paused"
                             paused_at = existing["paused_at"] or decided_at
-                        conn.execute(
-                            "UPDATE outbox SET state = 'cancelled', lease_owner = NULL, "
-                            "lease_until = NULL WHERE binding_id = ? "
-                            "AND state IN ('pending', 'retry_wait')",
-                            (binding_id,),
+                        same_recipient = (
+                            str(existing["telegram_user_id"])
+                            == str(request["telegram_user_id"])
+                            and str(existing["telegram_chat_id"])
+                            == str(request["telegram_chat_id"])
                         )
-                        conn.execute(
-                            "UPDATE outbox SET state = 'uncertain', lease_owner = NULL, "
-                            "lease_until = NULL, last_error_class = 'repair_inflight', "
-                            "last_error_at = ? WHERE binding_id = ? AND state = 'sending'",
-                            (decided_at, binding_id),
-                        )
-                        conn.execute(
-                            "UPDATE channel_bindings SET telegram_user_id = ?, telegram_chat_id = ?, "
-                            "telegram_username = ?, telegram_display_name = ?, status = ?, "
-                            "pause_reason = ?, paired_at = ?, sync_from_event_id = ?, "
-                            "projection_cursor_event_id = ?, paused_at = ?, last_error_code = NULL, "
-                            "updated_at = ? WHERE id = ?",
-                            (
-                                str(request["telegram_user_id"]),
-                                str(request["telegram_chat_id"]),
-                                request["telegram_username"],
-                                request["telegram_display_name"],
-                                binding_status.value,
-                                pause_reason,
-                                decided_at,
-                                cursor,
-                                cursor,
-                                paused_at,
-                                decided_at,
-                                binding_id,
-                            ),
-                        )
+                        if same_recipient:
+                            binding_id = str(existing["id"])
+                            # The recipient generation did not change.  Preserve
+                            # cursor and queued work; only an in-flight HTTP call
+                            # is ambiguous across the repair boundary.
+                            conn.execute(
+                                "UPDATE outbox SET state = 'uncertain', lease_owner = NULL, "
+                                "lease_until = NULL, last_error_class = 'repair_inflight', "
+                                "last_error_at = ? WHERE binding_id = ? AND state = 'sending'",
+                                (decided_at, binding_id),
+                            )
+                            conn.execute(
+                                "UPDATE channel_bindings SET telegram_username = ?, "
+                                "telegram_display_name = ?, status = ?, pause_reason = ?, "
+                                "paused_at = ?, last_error_code = NULL, updated_at = ? "
+                                "WHERE id = ?",
+                                (
+                                    request["telegram_username"],
+                                    request["telegram_display_name"],
+                                    binding_status.value,
+                                    pause_reason,
+                                    paused_at,
+                                    decided_at,
+                                    binding_id,
+                                ),
+                            )
+                        else:
+                            old_binding_id = str(existing["id"])
+                            conn.execute(
+                                "UPDATE outbox SET state = 'cancelled', lease_owner = NULL, "
+                                "lease_until = NULL WHERE binding_id = ? "
+                                "AND state IN ('pending', 'retry_wait')",
+                                (old_binding_id,),
+                            )
+                            conn.execute(
+                                "UPDATE outbox SET state = 'uncertain', lease_owner = NULL, "
+                                "lease_until = NULL, last_error_class = 'recipient_changed', "
+                                "last_error_at = ? WHERE binding_id = ? AND state = 'sending'",
+                                (decided_at, old_binding_id),
+                            )
+                            conn.execute(
+                                "UPDATE channel_bindings SET status = 'disconnected', "
+                                "pause_reason = NULL, disconnected_at = ?, updated_at = ? "
+                                "WHERE id = ?",
+                                (decided_at, decided_at, old_binding_id),
+                            )
+                            conn.execute(
+                                "INSERT INTO channel_bindings "
+                                "(id, channel, session_id, bot_account_id, telegram_user_id, "
+                                "telegram_chat_id, telegram_username, telegram_display_name, "
+                                "status, pause_reason, paired_at, sync_from_event_id, "
+                                "projection_cursor_event_id, paused_at, created_at, updated_at) "
+                                "VALUES (?, 'telegram', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                (
+                                    binding_id,
+                                    caller_session_id,
+                                    request["bot_account_id"],
+                                    str(request["telegram_user_id"]),
+                                    str(request["telegram_chat_id"]),
+                                    request["telegram_username"],
+                                    request["telegram_display_name"],
+                                    binding_status.value,
+                                    pause_reason,
+                                    decided_at,
+                                    cursor,
+                                    cursor,
+                                    paused_at,
+                                    decided_at,
+                                    decided_at,
+                                ),
+                            )
                     else:
                         conn.execute(
                             "INSERT INTO channel_bindings "
@@ -2349,6 +2472,90 @@ class ChannelStore:
 
     # -- Projection and outbox ---------------------------------------
 
+    def acquire_projection_lease(
+        self,
+        binding_id: Any,
+        *,
+        lease_seconds: int = 30,
+        now: datetime | str | None = None,
+    ) -> str | None:
+        """Acquire one oldest-first projector generation for a binding."""
+        entity_id = _entity_id(binding_id)
+        if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) \
+                or lease_seconds <= 0:
+            raise ValueError("lease_seconds must be a positive integer")
+        now_dt = (
+            self._clock()
+            if now is None
+            else datetime.fromisoformat(_aware_utc_iso(now, field="now"))
+        )
+        acquired_at = _aware_utc_iso(now_dt, field="now")
+        lease_until = _aware_utc_iso(
+            now_dt + timedelta(seconds=lease_seconds), field="lease_until"
+        )
+        owner = "projection_" + uuid.uuid4().hex
+        with self._immediate() as conn:
+            binding = conn.execute(
+                "SELECT status FROM channel_bindings WHERE id = ?", (entity_id,)
+            ).fetchone()
+            if binding is None:
+                raise ChannelNotFound(f"unknown channel binding: {entity_id}")
+            if BindingStatus(binding["status"]) is not BindingStatus.ACTIVE:
+                return None
+            current = conn.execute(
+                "SELECT lease_until FROM projection_leases WHERE binding_id = ?",
+                (entity_id,),
+            ).fetchone()
+            if current is not None and str(current["lease_until"]) > acquired_at:
+                return None
+            conn.execute(
+                "INSERT INTO projection_leases (binding_id, lease_owner, lease_until) "
+                "VALUES (?, ?, ?) ON CONFLICT(binding_id) DO UPDATE SET "
+                "lease_owner = excluded.lease_owner, lease_until = excluded.lease_until",
+                (entity_id, owner, lease_until),
+            )
+            return owner
+
+    def renew_projection_lease(
+        self,
+        binding_id: Any,
+        *,
+        lease_owner: str,
+        lease_seconds: int = 30,
+        now: datetime | str | None = None,
+    ) -> bool:
+        entity_id = _entity_id(binding_id)
+        safe_owner = self._required_text(lease_owner, "lease_owner")
+        if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) \
+                or lease_seconds <= 0:
+            raise ValueError("lease_seconds must be a positive integer")
+        now_dt = (
+            self._clock()
+            if now is None
+            else datetime.fromisoformat(_aware_utc_iso(now, field="now"))
+        )
+        current_time = _aware_utc_iso(now_dt, field="now")
+        lease_until = _aware_utc_iso(
+            now_dt + timedelta(seconds=lease_seconds), field="lease_until"
+        )
+        with self._immediate() as conn:
+            result = conn.execute(
+                "UPDATE projection_leases SET lease_until = ? WHERE binding_id = ? "
+                "AND lease_owner = ? AND lease_until > ?",
+                (lease_until, entity_id, safe_owner, current_time),
+            )
+            return result.rowcount == 1
+
+    def release_projection_lease(self, binding_id: Any, *, lease_owner: str) -> bool:
+        entity_id = _entity_id(binding_id)
+        safe_owner = self._required_text(lease_owner, "lease_owner")
+        with self._immediate() as conn:
+            result = conn.execute(
+                "DELETE FROM projection_leases WHERE binding_id = ? AND lease_owner = ?",
+                (entity_id, safe_owner),
+            )
+            return result.rowcount == 1
+
     @staticmethod
     def _coerce_parts(parts: Iterable[OutboundPart | Mapping[str, Any]]) -> list[OutboundPart]:
         result: list[OutboundPart] = []
@@ -2358,6 +2565,8 @@ class ChannelStore:
             for field, value in (("text", part.text), ("caption", part.caption)):
                 if isinstance(value, str) and _TOKEN_SHAPE_RE.search(value):
                     raise ValueError(f"outbox {field} must not contain a token-like secret")
+                if isinstance(value, str) and _PAIRING_CODE_SHAPE_RE.search(value):
+                    raise ValueError(f"outbox {field} must not contain a pairing code")
             number = int(part.payload_part)
             if number in seen:
                 raise ChannelConflict("payload_part must be unique within a projected event")
@@ -2371,6 +2580,7 @@ class ChannelStore:
         *,
         source_event_id: int,
         parts: Iterable[OutboundPart | Mapping[str, Any]],
+        projection_owner: str,
     ) -> list[OutboxItem]:
         entity_id = _entity_id(binding_id)
         event_id = int(source_event_id)
@@ -2378,21 +2588,42 @@ class ChannelStore:
             raise ValueError("source_event_id must be non-negative")
         projected_parts = self._coerce_parts(parts)
         now = self._now()
+        safe_projection_owner = self._required_text(
+            projection_owner, "projection_owner"
+        )
         batch_id = "batch_" + uuid.uuid5(
             uuid.NAMESPACE_URL, f"guanlan-channel:{entity_id}:{event_id}"
         ).hex
         with self._immediate() as conn:
             binding = conn.execute(
-                "SELECT session_id, projection_cursor_event_id, status FROM channel_bindings "
-                "WHERE id = ?",
+                "SELECT b.session_id, b.bot_account_id, b.telegram_chat_id, b.paired_at, "
+                "b.sync_from_event_id, b.projection_cursor_event_id, b.status, "
+                "pl.lease_owner AS projection_lease_owner, "
+                "pl.lease_until AS projection_lease_until "
+                "FROM channel_bindings b JOIN bot_accounts ba ON ba.id = b.bot_account_id "
+                "LEFT JOIN projection_leases pl ON pl.binding_id = b.id "
+                "WHERE b.id = ?",
                 (entity_id,),
             ).fetchone()
             if binding is None:
                 raise ChannelNotFound(f"unknown channel binding: {entity_id}")
             if BindingStatus(binding["status"]) is not BindingStatus.ACTIVE:
                 raise ChannelConflict("only an active binding may project events")
+            live_projection_lease = (
+                binding["projection_lease_owner"] is not None
+                and binding["projection_lease_until"] is not None
+                and str(binding["projection_lease_until"]) > now
+            )
+            if (
+                not live_projection_lease
+                or binding["projection_lease_owner"] != safe_projection_owner
+            ):
+                raise ChannelConflict("projection lease is not current")
             cursor = int(binding["projection_cursor_event_id"])
-            if event_id >= cursor:
+            boundary = max(cursor, int(binding["sync_from_event_id"]))
+            if event_id < boundary:
+                raise ChannelConflict("source event is behind the projection boundary")
+            if event_id > boundary:
                 next_sequence = int(
                     conn.execute(
                         "SELECT COALESCE(MAX(sequence), 0) + 1 FROM outbox WHERE binding_id = ?",
@@ -2400,13 +2631,14 @@ class ChannelStore:
                     ).fetchone()[0]
                 )
                 for part in projected_parts:
+                    outbox_id = _new_id("out")
                     cur = conn.execute(
                         "INSERT OR IGNORE INTO outbox "
                         "(id, binding_id, source_session_id, source_event_id, payload_part, "
                         "batch_id, sequence, kind, text, media_id, caption, state, attempts, "
                         "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?)",
                         (
-                            _new_id("out"),
+                            outbox_id,
                             entity_id,
                             binding["session_id"],
                             event_id,
@@ -2421,10 +2653,21 @@ class ChannelStore:
                         ),
                     )
                     if cur.rowcount == 1:
+                        conn.execute(
+                            "INSERT INTO outbox_route_fences "
+                            "(outbox_id, bot_account_id, telegram_chat_id, binding_paired_at) "
+                            "VALUES (?, ?, ?, ?)",
+                            (
+                                outbox_id,
+                                binding["bot_account_id"],
+                                binding["telegram_chat_id"],
+                                binding["paired_at"],
+                            ),
+                        )
                         next_sequence += 1
                 conn.execute(
-                    "UPDATE channel_bindings SET projection_cursor_event_id = MAX("
-                    "projection_cursor_event_id, ?), updated_at = ? WHERE id = ?",
+                    "UPDATE channel_bindings SET projection_cursor_event_id = ?, "
+                    "updated_at = ? WHERE id = ?",
                     (event_id, now, entity_id),
                 )
             rows = conn.execute(
@@ -2433,6 +2676,27 @@ class ChannelStore:
                 (entity_id, event_id),
             ).fetchall()
             return [_outbox_from_row(row) for row in rows]
+
+    def project_event_for_test(
+        self,
+        binding_id: Any,
+        *,
+        source_event_id: int,
+        parts: Iterable[OutboundPart | Mapping[str, Any]],
+    ) -> list[OutboxItem]:
+        """Explicit test-fixture helper; production projection requires a lease."""
+        owner = self.acquire_projection_lease(binding_id)
+        if owner is None:
+            raise ChannelConflict("test projection could not acquire binding lease")
+        try:
+            return self.project_event(
+                binding_id,
+                source_event_id=source_event_id,
+                parts=parts,
+                projection_owner=owner,
+            )
+        finally:
+            self.release_projection_lease(binding_id, lease_owner=owner)
 
     def outbox(self, outbox_id: Any) -> OutboxItem:
         entity_id = _entity_id(outbox_id)
@@ -2456,7 +2720,23 @@ class ChannelStore:
             conn.close()
         return [_outbox_from_row(row) for row in rows]
 
-    def transition_outbox(
+    def outbox_for_session(self, session_id: Any) -> list[OutboxItem]:
+        """Current deliveries plus unresolved items on historic bindings."""
+        sid = self._required_text(session_id, "session_id")
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT o.* FROM outbox o JOIN channel_bindings b ON b.id = o.binding_id "
+                "WHERE b.session_id = ? AND (b.status IN ('active', 'paused') "
+                "OR o.state IN ('pending', 'sending', 'retry_wait', 'uncertain', 'terminal')) "
+                "ORDER BY o.created_at, o.id",
+                (sid,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [_outbox_from_row(row) for row in rows]
+
+    def transition_outbox_for_test(
         self,
         outbox_id: Any,
         state: OutboxState | str,
@@ -2468,6 +2748,7 @@ class ChannelStore:
         error_class: Optional[str] = None,
         now: datetime | str | None = None,
     ) -> OutboxItem:
+        """Fixture-only state builder; runtime delivery must use fenced claims."""
         entity_id = _entity_id(outbox_id)
         target = OutboxState(_enum_value(state))
         safe_owner = self._optional_channel_text(lease_owner, "lease_owner")
@@ -2509,7 +2790,7 @@ class ChannelStore:
         return self.outbox(entity_id)
 
     def resolve_outbox(self, outbox_id: Any, action: str) -> OutboxItem:
-        current = self.outbox(outbox_id)
+        entity_id = _entity_id(outbox_id)
         resolutions: dict[tuple[OutboxState, str], OutboxState] = {
             (OutboxState.UNCERTAIN, "assume_sent"): OutboxState.SENT,
             (OutboxState.UNCERTAIN, "resend"): OutboxState.PENDING,
@@ -2517,51 +2798,355 @@ class ChannelStore:
             (OutboxState.TERMINAL, "retry"): OutboxState.PENDING,
             (OutboxState.TERMINAL, "drop"): OutboxState.CANCELLED,
         }
-        target = resolutions.get((current.state, action))
-        if target is None:
-            raise InvalidTransition(f"invalid outbox resolution: {current.state.value} / {action}")
-        return self.transition_outbox(current.id, target)
+        now = self._now()
+        with self._immediate() as conn:
+            row = conn.execute(
+                "SELECT o.state, b.status AS binding_status, "
+                "CASE WHEN rf.bot_account_id = b.bot_account_id "
+                "AND rf.telegram_chat_id = b.telegram_chat_id "
+                "AND rf.binding_paired_at = b.paired_at THEN 1 ELSE 0 END AS route_current "
+                "FROM outbox o JOIN channel_bindings b ON b.id = o.binding_id "
+                "LEFT JOIN outbox_route_fences rf ON rf.outbox_id = o.id WHERE o.id = ?",
+                (entity_id,),
+            ).fetchone()
+            if row is None:
+                raise ChannelNotFound(f"unknown outbox item: {entity_id}")
+            current = OutboxState(row["state"])
+            target = resolutions.get((current, action))
+            if target is None:
+                raise InvalidTransition(
+                    f"invalid outbox resolution: {current.value} / {action}"
+                )
+            if action in {"resend", "retry"} and (
+                BindingStatus(row["binding_status"]) is BindingStatus.DISCONNECTED
+                or int(row["route_current"]) != 1
+            ):
+                raise ChannelConflict("delivery recipient generation is no longer current")
+            conn.execute(
+                "UPDATE outbox SET state = ?, next_attempt_at = NULL, lease_owner = NULL, "
+                "lease_until = NULL, last_error_class = NULL, last_error_at = NULL, "
+                "sent_at = CASE WHEN ? = 'sent' THEN ? ELSE sent_at END WHERE id = ?",
+                (target.value, target.value, now, entity_id),
+            )
+        return self.outbox(entity_id)
 
     def claim_next_outbox(
         self,
         binding_id: Any,
         *,
-        owner: str,
+        owner: str | None = None,
         lease_until: datetime | str,
         now: datetime | str | None = None,
-    ) -> Optional[OutboxItem]:
+    ) -> Optional[OutboxClaim]:
+        """Fence and return one binding head with its routing generation.
+
+        ``owner`` is accepted as a diagnostic prefix for compatibility, but is
+        never itself the lease token.  Every successful claim receives a fresh
+        UUID so a delayed worker can never complete a later lease that happened
+        to use the same process-wide worker name.
+        """
         entity_id = _entity_id(binding_id)
         claimed_at = self._now() if now is None else _aware_utc_iso(now, field="now")
         lease_time = _aware_utc_iso(lease_until, field="lease_until")
+        if lease_time <= claimed_at:
+            raise ValueError("lease_until must be later than now")
+        if owner is not None:
+            self._required_text(owner, "owner")
+        claim_owner = "claim_" + uuid.uuid4().hex
         claimed_id: Optional[str] = None
+        claimed_row: sqlite3.Row | None = None
         with self._immediate() as conn:
             conn.execute(
                 "UPDATE outbox SET state = 'uncertain', lease_owner = NULL, lease_until = NULL, "
                 "last_error_class = 'lease_expired', last_error_at = ? "
-                "WHERE binding_id = ? AND state = 'sending' AND lease_until <= ? "
-                "AND EXISTS (SELECT 1 FROM channel_bindings b WHERE b.id = outbox.binding_id "
-                "AND b.status = 'active')",
-                (claimed_at, entity_id, claimed_at),
+                "WHERE state = 'sending' AND (lease_until IS NULL OR lease_until <= ?)",
+                (claimed_at, claimed_at),
             )
             head = conn.execute(
-                "SELECT o.* FROM outbox o JOIN channel_bindings b ON b.id = o.binding_id "
+                "SELECT o.*, CASE WHEN rf.bot_account_id = b.bot_account_id "
+                "AND rf.telegram_chat_id = b.telegram_chat_id "
+                "AND rf.binding_paired_at = b.paired_at THEN 1 ELSE 0 END AS route_current "
+                "FROM outbox o "
+                "JOIN channel_bindings b ON b.id = o.binding_id "
+                "JOIN bot_accounts ba ON ba.id = b.bot_account_id "
+                "LEFT JOIN outbox_route_fences rf ON rf.outbox_id = o.id "
                 "WHERE o.binding_id = ? AND b.status = 'active' "
+                "AND ba.status = 'active' AND ba.credential_id IS NOT NULL "
                 "AND o.state NOT IN ('sent', 'cancelled') ORDER BY o.sequence LIMIT 1",
                 (entity_id,),
             ).fetchone()
             if head is None:
+                return None
+            if int(head["route_current"]) != 1:
                 return None
             state = OutboxState(head["state"])
             due = head["next_attempt_at"] is None or head["next_attempt_at"] <= claimed_at
             if state not in {OutboxState.PENDING, OutboxState.RETRY_WAIT} or not due:
                 return None
             claimed_id = head["id"]
-            conn.execute(
+            updated = conn.execute(
                 "UPDATE outbox SET state = 'sending', attempts = attempts + 1, "
                 "next_attempt_at = NULL, lease_owner = ?, lease_until = ? WHERE id = ?",
-                (self._required_text(owner, "owner"), lease_time, claimed_id),
+                (claim_owner, lease_time, claimed_id),
             )
-        return None if claimed_id is None else self.outbox(claimed_id)
+            if updated.rowcount != 1:
+                return None
+            claimed_row = conn.execute(
+                "SELECT o.*, b.bot_account_id AS claim_bot_account_id, "
+                "b.telegram_chat_id AS claim_telegram_chat_id, "
+                "ba.credential_id AS claim_credential_id, "
+                "ba.credential_revision AS claim_credential_revision "
+                "FROM outbox o JOIN channel_bindings b ON b.id = o.binding_id "
+                "JOIN bot_accounts ba ON ba.id = b.bot_account_id "
+                "JOIN outbox_route_fences rf ON rf.outbox_id = o.id "
+                "WHERE o.id = ? AND o.state = 'sending' AND o.lease_owner = ? "
+                "AND b.status = 'active' AND ba.status = 'active' "
+                "AND ba.credential_id IS NOT NULL "
+                "AND rf.bot_account_id = b.bot_account_id "
+                "AND rf.telegram_chat_id = b.telegram_chat_id "
+                "AND rf.binding_paired_at = b.paired_at",
+                (claimed_id, claim_owner),
+            ).fetchone()
+            if claimed_row is None:
+                raise ChannelConflict("delivery routing changed during claim")
+        return _outbox_claim_from_row(claimed_row)
+
+    def delivery_bindings(self) -> list[ChannelBinding]:
+        """Return only bindings whose current Bot generation may be claimed."""
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT b.* FROM channel_bindings b "
+                "JOIN bot_accounts ba ON ba.id = b.bot_account_id "
+                "WHERE b.status = 'active' AND ba.status = 'active' "
+                "AND ba.credential_id IS NOT NULL ORDER BY b.created_at, b.id"
+            ).fetchall()
+        finally:
+            conn.close()
+        return [_binding_from_row(row) for row in rows]
+
+    def recover_sending_outbox(
+        self,
+        *,
+        error_class: str = "startup_recovery",
+        now: datetime | str | None = None,
+    ) -> int:
+        """Make every pre-existing in-flight send explicitly uncertain.
+
+        Startup cannot know whether Telegram accepted any of these requests.
+        This intentionally covers paused and disconnected bindings too.
+        """
+        safe_error = self._optional_safe_error(error_class, "error_class")
+        changed_at = self._now() if now is None else _aware_utc_iso(now, field="now")
+        with self._immediate() as conn:
+            result = conn.execute(
+                "UPDATE outbox SET state = 'uncertain', lease_owner = NULL, "
+                "lease_until = NULL, last_error_class = ?, last_error_at = ? "
+                "WHERE state = 'sending'",
+                (safe_error, changed_at),
+            )
+            return int(result.rowcount)
+
+    def renew_outbox_claim(
+        self,
+        outbox_id: Any,
+        *,
+        lease_owner: str,
+        lease_until: datetime | str,
+        bot_account_id: str,
+        telegram_chat_id: str,
+        credential_id: str,
+        credential_revision: int,
+        now: datetime | str | None = None,
+    ) -> bool:
+        entity_id = _entity_id(outbox_id)
+        safe_owner = self._required_text(lease_owner, "lease_owner")
+        lease_time = _aware_utc_iso(lease_until, field="lease_until")
+        current_time = self._now() if now is None else _aware_utc_iso(now, field="now")
+        if lease_time <= current_time:
+            raise ValueError("lease_until must be later than now")
+        expected_bot = _entity_id(bot_account_id)
+        expected_chat = self._required_text(telegram_chat_id, "telegram_chat_id")
+        expected_credential = self._required_text(credential_id, "credential_id")
+        revision = self._poll_revision(credential_revision)
+        with self._immediate() as conn:
+            result = conn.execute(
+                "UPDATE outbox SET lease_until = ? WHERE id = ? AND state = 'sending' "
+                "AND lease_owner = ? AND lease_until > ? AND EXISTS ("
+                "SELECT 1 FROM channel_bindings b "
+                "JOIN bot_accounts ba ON ba.id = b.bot_account_id "
+                "JOIN outbox_route_fences rf ON rf.outbox_id = outbox.id "
+                "WHERE b.id = outbox.binding_id AND b.status = 'active' "
+                "AND ba.status = 'active' AND b.bot_account_id = ? "
+                "AND b.telegram_chat_id = ? AND ba.credential_id = ? "
+                "AND ba.credential_revision = ? AND rf.bot_account_id = b.bot_account_id "
+                "AND rf.telegram_chat_id = b.telegram_chat_id "
+                "AND rf.binding_paired_at = b.paired_at)",
+                (
+                    lease_time,
+                    entity_id,
+                    safe_owner,
+                    current_time,
+                    expected_bot,
+                    expected_chat,
+                    expected_credential,
+                    revision,
+                ),
+            )
+            return result.rowcount == 1
+
+    def outbox_claim_is_current(
+        self,
+        claim: OutboxClaim,
+        *,
+        now: datetime | str | None = None,
+    ) -> bool:
+        current_time = self._now() if now is None else _aware_utc_iso(now, field="now")
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM outbox o JOIN channel_bindings b ON b.id = o.binding_id "
+                "JOIN bot_accounts ba ON ba.id = b.bot_account_id "
+                "JOIN outbox_route_fences rf ON rf.outbox_id = o.id "
+                "WHERE o.id = ? AND o.state = 'sending' AND o.lease_owner = ? "
+                "AND o.lease_until > ? AND b.status = 'active' AND ba.status = 'active' "
+                "AND b.bot_account_id = ? AND b.telegram_chat_id = ? "
+                "AND ba.credential_id = ? AND ba.credential_revision = ? "
+                "AND rf.bot_account_id = b.bot_account_id "
+                "AND rf.telegram_chat_id = b.telegram_chat_id "
+                "AND rf.binding_paired_at = b.paired_at",
+                (
+                    claim.id,
+                    claim.lease_owner,
+                    current_time,
+                    claim.bot_account_id,
+                    claim.telegram_chat_id,
+                    claim.credential_id,
+                    int(claim.credential_revision),
+                ),
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+
+    def finish_outbox_claim(
+        self,
+        outbox_id: Any,
+        *,
+        lease_owner: str,
+        state: OutboxState | str,
+        next_attempt_at: datetime | str | None = None,
+        telegram_message_id: str | int | None = None,
+        error_class: str | None = None,
+        bot_account_id: str,
+        telegram_chat_id: str,
+        credential_id: str,
+        credential_revision: int,
+        now: datetime | str | None = None,
+    ) -> OutboxItem | None:
+        """Complete exactly the lease identified by ``lease_owner``.
+
+        A stale worker receives ``None`` and cannot mutate a re-leased item.
+        """
+        entity_id = _entity_id(outbox_id)
+        safe_owner = self._required_text(lease_owner, "lease_owner")
+        expected_bot = _entity_id(bot_account_id)
+        expected_chat = self._required_text(telegram_chat_id, "telegram_chat_id")
+        expected_credential = self._required_text(credential_id, "credential_id")
+        revision = self._poll_revision(credential_revision)
+        target = OutboxState(_enum_value(state))
+        if target not in {
+            OutboxState.SENT,
+            OutboxState.RETRY_WAIT,
+            OutboxState.UNCERTAIN,
+            OutboxState.TERMINAL,
+        }:
+            raise ValueError("unsupported claimed outbox completion")
+        retry_time = _optional_time(next_attempt_at, field="next_attempt_at")
+        if target is OutboxState.RETRY_WAIT and retry_time is None:
+            raise ValueError("retry_wait requires next_attempt_at")
+        if target is not OutboxState.RETRY_WAIT and retry_time is not None:
+            raise ValueError("next_attempt_at is only valid for retry_wait")
+        safe_error = self._optional_safe_error(error_class, "error_class")
+        if target is not OutboxState.SENT and safe_error is None:
+            raise ValueError("failed delivery completion requires error_class")
+        message_id = None if telegram_message_id is None else str(telegram_message_id)
+        if target is OutboxState.SENT:
+            if not message_id or not message_id.isdigit():
+                raise ValueError("sent delivery requires a Telegram message id")
+        elif message_id is not None:
+            raise ValueError("Telegram message id is only valid for sent delivery")
+        changed_at = self._now() if now is None else _aware_utc_iso(now, field="now")
+        with self._immediate() as conn:
+            result = conn.execute(
+                "UPDATE outbox SET state = ?, next_attempt_at = ?, lease_owner = NULL, "
+                "lease_until = NULL, telegram_message_id = ?, last_error_class = ?, "
+                "last_error_at = ?, sent_at = ? WHERE id = ? AND state = 'sending' "
+                "AND lease_owner = ? AND lease_until > ? AND EXISTS ("
+                "SELECT 1 FROM channel_bindings b "
+                "JOIN bot_accounts ba ON ba.id = b.bot_account_id "
+                "JOIN outbox_route_fences rf ON rf.outbox_id = outbox.id "
+                "WHERE b.id = outbox.binding_id AND b.status = 'active' "
+                "AND ba.status = 'active' AND b.bot_account_id = ? "
+                "AND b.telegram_chat_id = ? AND ba.credential_id = ? "
+                "AND ba.credential_revision = ? AND rf.bot_account_id = b.bot_account_id "
+                "AND rf.telegram_chat_id = b.telegram_chat_id "
+                "AND rf.binding_paired_at = b.paired_at)",
+                (
+                    target.value,
+                    retry_time,
+                    message_id,
+                    safe_error,
+                    None if target is OutboxState.SENT else changed_at,
+                    changed_at if target is OutboxState.SENT else None,
+                    entity_id,
+                    safe_owner,
+                    changed_at,
+                    expected_bot,
+                    expected_chat,
+                    expected_credential,
+                    revision,
+                ),
+            )
+            if result.rowcount != 1:
+                return None
+            if target is OutboxState.SENT:
+                conn.execute(
+                    "UPDATE channel_bindings SET last_sent_at = ?, last_error_code = NULL, "
+                    "updated_at = ? WHERE id = (SELECT binding_id FROM outbox WHERE id = ?)",
+                    (changed_at, changed_at, entity_id),
+                )
+            elif safe_error is not None:
+                conn.execute(
+                    "UPDATE channel_bindings SET last_error_code = ?, updated_at = ? "
+                    "WHERE id = (SELECT binding_id FROM outbox WHERE id = ?)",
+                    (safe_error, changed_at, entity_id),
+                )
+        return self.outbox(entity_id)
+
+    def mark_outbox_claim_uncertain(
+        self,
+        outbox_id: Any,
+        *,
+        lease_owner: str,
+        error_class: str,
+        now: datetime | str | None = None,
+    ) -> OutboxItem | None:
+        """Owner-only safe fallback when routing generation or time changed."""
+        entity_id = _entity_id(outbox_id)
+        safe_owner = self._required_text(lease_owner, "lease_owner")
+        safe_error = self._optional_safe_error(error_class, "error_class")
+        changed_at = self._now() if now is None else _aware_utc_iso(now, field="now")
+        with self._immediate() as conn:
+            result = conn.execute(
+                "UPDATE outbox SET state = 'uncertain', lease_owner = NULL, "
+                "lease_until = NULL, next_attempt_at = NULL, last_error_class = ?, "
+                "last_error_at = ? WHERE id = ? AND state = 'sending' AND lease_owner = ?",
+                (safe_error, changed_at, entity_id, safe_owner),
+            )
+            if result.rowcount != 1:
+                return None
+        return self.outbox(entity_id)
 
     # -- Automations --------------------------------------------------
 
@@ -2861,6 +3446,7 @@ __all__ = [
     "ChannelStore",
     "ChannelStoreError",
     "InvalidTransition",
+    "OutboxClaim",
     "SCHEMA_SQL",
     "UnsafeAuditDetails",
 ]

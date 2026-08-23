@@ -29,7 +29,10 @@ from guanlan_v2.channels.store import (
     ChannelStoreError,
     InvalidTransition,
     UnsafeAuditDetails,
+    OutboxClaim,
 )
+from guanlan_v2.channels.outbox import OutboxWorker
+from guanlan_v2.channels.projector import ConsoleMessageProjector
 
 __all__ = [
     "Automation",
@@ -51,11 +54,14 @@ __all__ = [
     "OutboundKind",
     "OutboundPart",
     "OutboxItem",
+    "OutboxClaim",
     "OutboxState",
     "OutboxStatus",
+    "OutboxWorker",
     "PairingRequest",
     "PairingRequestStatus",
     "PairingStatus",
     "ScheduleKind",
+    "ConsoleMessageProjector",
     "UnsafeAuditDetails",
 ]

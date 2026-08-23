@@ -810,13 +810,15 @@ async def test_code_only_skips_expired_request_before_scrypt(tmp_path, monkeypat
 
 
 @pytest.mark.anyio
-async def test_identity_repair_updates_original_binding_and_clears_old_backlog(tmp_path):
+async def test_identity_repair_to_new_recipient_rotates_binding_and_clears_old_backlog(
+    tmp_path,
+):
     service, store, _console, telegram, _secrets, sid, bot_id, _clock = seeded_service(tmp_path)
     telegram.updates = [private_update(70, user_id="501")]
     await service.poll_once(bot_id)
     first_request = store.pairing_requests_for(bot_id, status=PairingStatus.PENDING)[0]
     first = await service.approve_pairing(sid, first_request.id, extract_code(telegram.sent[-1][1]))
-    store.project_event(
+    store.project_event_for_test(
         first.id,
         source_event_id=1,
         parts=[{"kind": "text", "payload_part": 0, "text": "旧目标待发送"}],
@@ -839,10 +841,11 @@ async def test_identity_repair_updates_original_binding_and_clears_old_backlog(t
         sid, second_request.id, extract_code(telegram.sent[-1][1])
     )
 
-    assert repaired.id == first.id
+    assert repaired.id != first.id
     assert repaired.telegram_user_id == "777"
     assert repaired.status is BindingStatus.ACTIVE
     assert len(store.live_bindings()) == 1
+    assert store.binding(first.id).status is BindingStatus.DISCONNECTED
     assert store.outbox_for(first.id)[0].state.value == "cancelled"
 
 

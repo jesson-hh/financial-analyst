@@ -16,6 +16,7 @@ import secrets
 import threading
 import time
 from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -208,6 +209,19 @@ class ChannelRuntime:
             reserve_mutation=self.reserve_secret_submission,
             release_mutation=self.release_secret_submission,
         )
+        from guanlan_v2.channels.outbox import OutboxWorker
+        from guanlan_v2.channels.projector import ConsoleMessageProjector
+
+        self.projector = ConsoleMessageProjector(console_store, channel_store)
+        self.outbox_worker = OutboxWorker(
+            channel_store=channel_store,
+            secret_store=secret_store,
+            telegram_adapter=telegram_adapter,
+            media_store=media_store,
+        )
+        self._background_stop: asyncio.Event | None = None
+        self._background_tasks: tuple[asyncio.Task[Any], ...] = ()
+        self._background_lock: asyncio.Lock | None = None
         # A reservation is deliberately just durable-process ownership state,
         # not a lock held across getMe/DPAPI/SQLite awaits.  It lets Console
         # archive/delete and the dedicated Token endpoint see the same narrow
@@ -835,11 +849,61 @@ class ChannelRuntime:
 
     async def start(self) -> None:
         """Start background channel services for the application lifespan."""
-        await self.pairing.start()
+        if self._background_lock is None:
+            self._background_lock = asyncio.Lock()
+        async with self._background_lock:
+            if self._background_tasks:
+                if all(not task.done() for task in self._background_tasks):
+                    return
+                # A partially failed generation is not healthy.  Settle the
+                # survivor before rebuilding both loops as one generation.
+                if self._background_stop is not None:
+                    self._background_stop.set()
+                for task in self._background_tasks:
+                    task.cancel()
+                await asyncio.gather(*self._background_tasks, return_exceptions=True)
+                self._background_tasks = ()
+                self._background_stop = None
+            # Resolve every ambiguous pre-crash HTTP attempt before any new
+            # delivery claim is possible.
+            await self.outbox_worker.startup_recover(force=True)
+            await self.pairing.start()
+            stop_event = asyncio.Event()
+            self._background_stop = stop_event
+            self._background_tasks = (
+                asyncio.create_task(
+                    self.projector.run_forever(stop_event),
+                    name="guanlan-channel-projector",
+                ),
+                asyncio.create_task(
+                    self.outbox_worker.run_forever(stop_event),
+                    name="guanlan-channel-outbox",
+                ),
+            )
 
     async def stop(self) -> None:
         """Stop pollers and release their durable leases before shutdown."""
-        await self.pairing.stop()
+        if self._background_lock is None:
+            self._background_lock = asyncio.Lock()
+        async with self._background_lock:
+            stop_event = self._background_stop
+            tasks = self._background_tasks
+            self._background_stop = None
+            self._background_tasks = ()
+            if stop_event is not None:
+                stop_event.set()
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            # Final shutdown fence: any claim thread that committed while its
+            # coroutine was being cancelled has now settled, so every leftover
+            # sending row can be classified without a blind resend on restart.
+            await asyncio.to_thread(
+                self.channel_store.recover_sending_outbox,
+                error_class="shutdown_recovery",
+            )
+            await self.pairing.stop()
 
     async def replace_token(
         self, session_id: str, draft_id: str, token: str, *, before_commit: Any = None
@@ -880,7 +944,23 @@ class ChannelRuntime:
     def resume(self, session_id: str):
         self._require_session(session_id, writable=True)
         try:
-            self.channel_store.set_session_manual_pause(session_id, paused=False)
+            # ``read_events`` has tail semantics.  Resetting both Channel
+            # cursors to the actual persisted tail in the same SQLite
+            # transaction that activates the binding prevents paused-period
+            # messages from being backfilled.
+            console_lock = getattr(self.console_store, "_lock", None)
+            with console_lock if hasattr(console_lock, "__enter__") else nullcontext():
+                tail = self.console_store.read_events(session_id, after_id=0, limit=1)
+                tail_event_id = 0
+                if tail:
+                    candidate = tail[-1].get("id")
+                    if isinstance(candidate, int) and not isinstance(candidate, bool):
+                        tail_event_id = max(0, candidate)
+                self.channel_store.set_session_manual_pause(
+                    session_id,
+                    paused=False,
+                    resume_from_event_id=tail_event_id,
+                )
         except (ChannelConflict, InvalidTransition):
             raise ChannelRuntimeError("channel_resume_not_allowed") from None
         except (ChannelStoreError, ValueError):
@@ -1029,11 +1109,14 @@ class ChannelRuntime:
                 pending_requests = []
 
         deliveries: list[Any] = []
-        if binding is not None:
-            try:
+        try:
+            session_reader = getattr(self.channel_store, "outbox_for_session", None)
+            if callable(session_reader):
+                deliveries = session_reader(sid)
+            elif binding is not None:
                 deliveries = self.channel_store.outbox_for(binding.id)
-            except ChannelStoreError:
-                deliveries = []
+        except ChannelStoreError:
+            deliveries = []
         counts = {
             state: sum(1 for item in deliveries if getattr(item.state, "value", item.state) == state)
             for state in ("pending", "retry_wait", "uncertain", "terminal")
@@ -1074,6 +1157,8 @@ class ChannelRuntime:
             view_state = "needs_reconnect"
         elif counts["uncertain"]:
             view_state = "uncertain"
+        elif counts["terminal"]:
+            view_state = "needs_reconnect"
         elif counts["retry_wait"]:
             view_state = "retrying"
         elif binding_status == BindingStatus.PAUSED.value or bot_status == BotStatus.PAUSED.value:
