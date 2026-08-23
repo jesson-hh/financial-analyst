@@ -28,7 +28,11 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from guanlan_v2.channels import agent_tools as channel_agent_tools
 from guanlan_v2.console.store import ConsoleStore
-from guanlan_v2.console.media import MediaNotFound, MediaStore
+from guanlan_v2.console.media import (
+    MediaNotFound,
+    MediaStore,
+    artifact_payload as _media_artifact_payload,
+)
 from guanlan_v2.console.request_security import (
     trusted_local_request as _request_security_trusted_local_request,
 )
@@ -54,11 +58,46 @@ _CONSOLE_TOKEN_SHAPE_RE = re.compile(
     re.IGNORECASE,
 )
 _PAIRING_CODE_RE = re.compile(
-    r"(?<![0-9A-Z])([23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8})(?![0-9A-Z])"
+    r"(?<![A-Za-z0-9_])([23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8})(?![A-Za-z0-9_])"
+)
+_AUTOMATION_PAIRING_CODE_RE = re.compile(
+    r"(?<![0-9A-Z])[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}(?![0-9A-Z])"
 )
 _PAIRING_CODE_REDACTION = "[Telegram 配对码已隐藏]"
 _TELEGRAM_TOKEN_REDACTION = "[Telegram Bot Token 已隐藏]"
 _PAIRING_CODE_ALPHABET = frozenset("23456789ABCDEFGHJKLMNPQRSTUVWXYZ")
+_AUTOMATION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
+_AUTOMATION_CHANNEL_ID_RE = re.compile(
+    r"(?i)\b(?:telegram[ _-]?)?(?:chat|user)[ _-]?id\s*[:=]\s*-?[0-9]{5,20}\b"
+)
+_AUTOMATION_LOCAL_PATH_RE = re.compile(
+    r"(?i)(?:\b[A-Za-z]:[\\/]|file://|\\\\[^\\\s]+\\[^\\\s]+|"
+    r"(?:^|[\s\"'(])/(?:Users|home|etc|var|tmp|mnt)(?:/|\b))"
+)
+_AUTOMATION_SPEC_KEYS = frozenset({
+    "automation_id", "name", "schedule_kind", "run_at", "local_time",
+    "timezone", "prompt_text", "skill_refs", "media_policy",
+})
+_AUTOMATION_REQUIRED_KEYS = frozenset({
+    "name", "schedule_kind", "timezone", "prompt_text", "media_policy",
+})
+_AUTOMATION_ENTITY_ID_RE = re.compile(r"^(?:auto|arun)_[0-9a-f]{32}$")
+_AUTOMATION_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_AUTOMATION_PROMPT_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _pairing_safe_hex(value: str) -> str:
+    """Keep 128-bit structural IDs length-stable without 8-char code runs."""
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{32}", value) is None:
+        raise ValueError("expected a lowercase UUID hex digest")
+    characters = list(value)
+    for index in (6, 13, 20, 27):
+        characters[index] = "x"
+    return "".join(characters)
+
+
+def _new_console_id() -> str:
+    return _pairing_safe_hex(uuid.uuid4().hex)
 
 
 async def _read_console_json_object(request: Request, *, maximum: int = _MAX_CONSOLE_ACTION_BODY_BYTES):
@@ -140,6 +179,82 @@ def _value_contains_channel_secret(value: Any) -> bool:
     return False
 
 
+def _automation_sensitive_text(value: str) -> bool:
+    return bool(
+        _CONSOLE_TOKEN_SHAPE_RE.search(value)
+        or _AUTOMATION_PAIRING_CODE_RE.search(value)
+        or _AUTOMATION_CHANNEL_ID_RE.search(value)
+        or _AUTOMATION_LOCAL_PATH_RE.search(value)
+    )
+
+
+def _automation_line(value: Any, maximum: int, *, allow_empty: bool = False) -> bool:
+    """Require the exact single-line value that the confirm card will show."""
+    if (
+        not isinstance(value, str)
+        or len(value) > maximum
+        or _AUTOMATION_CONTROL_RE.search(value)
+        or _automation_sensitive_text(value)
+    ):
+        return False
+    if not value:
+        return allow_empty
+    # Agent-tools' compact fields use whitespace folding for display.  Reject
+    # any value that folding would alter so approval always covers exact bytes.
+    return value == value.strip() and " ".join(value.split()) == value
+
+
+def _automation_tool_arguments_valid(tool_name: str, args: Any) -> bool:
+    if tool_name in {"ww_automation_skills", "ww_automation_list"}:
+        return isinstance(args, dict) and not args
+    if tool_name in {
+        "ww_automation_pause", "ww_automation_resume", "ww_automation_delete",
+    }:
+        return bool(
+            isinstance(args, dict)
+            and set(args) == {"automation_id"}
+            and isinstance(args.get("automation_id"), str)
+            and _AUTOMATION_ID_RE.fullmatch(args["automation_id"])
+        )
+    if tool_name != "ww_automation_upsert":
+        return True
+    if (
+        not isinstance(args, dict)
+        or set(args) - _AUTOMATION_SPEC_KEYS
+        or not _AUTOMATION_REQUIRED_KEYS.issubset(args)
+        or not _automation_line(args.get("name"), 128)
+        or args.get("schedule_kind") not in {
+            "once", "daily", "weekdays", "trading_days",
+        }
+        or not _automation_line(args.get("timezone"), 64)
+        or args.get("media_policy") not in {"none", "explicit"}
+        or not _automation_line(args.get("run_at", ""), 96, allow_empty=True)
+        or not _automation_line(args.get("local_time", ""), 16, allow_empty=True)
+    ):
+        return False
+    prompt = args.get("prompt_text")
+    if (
+        not isinstance(prompt, str)
+        or not prompt.strip()
+        or len(prompt) > 50_000
+        or _AUTOMATION_PROMPT_CONTROL_RE.search(prompt)
+        or _automation_sensitive_text(prompt)
+    ):
+        return False
+    automation_id = args.get("automation_id", "")
+    if automation_id and (
+        not isinstance(automation_id, str)
+        or _AUTOMATION_ID_RE.fullmatch(automation_id) is None
+    ):
+        return False
+    refs = args.get("skill_refs", [])
+    return bool(
+        isinstance(refs, list)
+        and len(refs) <= 16
+        and all(_automation_line(ref, 96) for ref in refs)
+    )
+
+
 def _console_tool_argument_guard(tool_name: str, args: Any) -> Optional[str]:
     """Fail closed if a model routes Telegram secrets through another tool.
 
@@ -161,6 +276,11 @@ def _console_tool_argument_guard(tool_name: str, args: Any) -> Optional[str]:
         and channel_agent_tools.validated_telegram_publish_args(args) is None
     ):
         return "Telegram 图片参数未通过安全检查，工具未执行。"
+    if (
+        tool_name.startswith("ww_automation_")
+        and not _automation_tool_arguments_valid(tool_name, args)
+    ):
+        return "定时任务参数未通过安全检查，工具未执行。"
     if _value_contains_channel_secret(args):
         return "检测到 Telegram 凭据或配对码被送入其他工具，已阻止执行。"
     return None
@@ -173,6 +293,8 @@ class _PairingCodeStreamRedactor:
         del codes  # shape-based filtering is bounded and covers historical codes too
         self.codes: set[str] = set()
         self.pending = ""
+        self.pending_left_identifier = False
+        self.previous_identifier = False
         self.passthrough_run = False
 
     def feed(self, value: object) -> str:
@@ -184,21 +306,40 @@ class _PairingCodeStreamRedactor:
             if in_upper_alnum:
                 if self.passthrough_run:
                     public.append(character)
+                    self.previous_identifier = True
                     continue
+                if not self.pending:
+                    self.pending_left_identifier = self.previous_identifier
                 self.pending += character
                 if len(self.pending) > 8:
                     public.append(self.pending)
                     self.pending = ""
+                    self.previous_identifier = True
                     self.passthrough_run = True
                 continue
             if self.pending:
-                if len(self.pending) == 8 and set(self.pending) <= _PAIRING_CODE_ALPHABET:
+                right_identifier = bool(
+                    "a" <= character <= "z" or character == "_"
+                )
+                if (
+                    len(self.pending) == 8
+                    and set(self.pending) <= _PAIRING_CODE_ALPHABET
+                    and not self.pending_left_identifier
+                    and not right_identifier
+                ):
                     public.append(_PAIRING_CODE_REDACTION)
                 else:
                     public.append(self.pending)
             self.pending = ""
+            self.pending_left_identifier = False
             self.passthrough_run = False
             public.append(character)
+            self.previous_identifier = bool(
+                "a" <= character <= "z"
+                or "A" <= character <= "Z"
+                or "0" <= character <= "9"
+                or character == "_"
+            )
         return "".join(public)
 
     def reset_at_protocol_boundary(self) -> str:
@@ -207,10 +348,14 @@ class _PairingCodeStreamRedactor:
             return ""
         public = (
             _PAIRING_CODE_REDACTION
-            if set(self.pending) <= _PAIRING_CODE_ALPHABET
+            if len(self.pending) == 8
+            and set(self.pending) <= _PAIRING_CODE_ALPHABET
+            and not self.pending_left_identifier
             else self.pending
         )
         self.pending = ""
+        self.pending_left_identifier = False
+        self.previous_identifier = False
         self.passthrough_run = False
         return public
 
@@ -219,9 +364,11 @@ class _PairingCodeStreamRedactor:
             _PAIRING_CODE_REDACTION
             if len(self.pending) == 8
             and set(self.pending) <= _PAIRING_CODE_ALPHABET
+            and not self.pending_left_identifier
             else self.pending
         )
         self.pending = ""
+        self.pending_left_identifier = False
         self.passthrough_run = False
         return public
 
@@ -363,6 +510,14 @@ def _public_confirm_args(tool_name: str, args: Dict[str, Any] | None) -> Dict[st
 
 def _public_tool_args(tool_name: str, args: Dict[str, Any] | None) -> Dict[str, Any]:
     """Apply the same redaction to ordinary Console ``tool_call`` events."""
+    if (
+        tool_name.startswith("ww_automation_")
+        and not _automation_tool_arguments_valid(tool_name, args)
+    ):
+        # ``tool_call`` is emitted before Buddy enters confirm_callback.  Hide
+        # the complete malformed schedule here so paths/chat identifiers never
+        # reach history even though the later authority gate also rejects it.
+        return {}
     return _public_confirm_args(tool_name, args)
 
 
@@ -604,11 +759,28 @@ def _redact_snapshot_value(value: Any, codes: set[str]) -> Any:
     if isinstance(value, list):
         return [_redact_snapshot_value(item, codes) for item in value]
     if isinstance(value, dict):
-        return {
-            _redact_pairing_codes(key, codes) if isinstance(key, str) else key:
-            _redact_snapshot_value(item, codes)
-            for key, item in value.items()
-        }
+        sanitized = {}
+        for key, item in value.items():
+            public_key = (
+                _redact_pairing_codes(key, codes)
+                if isinstance(key, str)
+                else key
+            )
+            preserve_automation_id = bool(
+                isinstance(key, str)
+                and isinstance(item, str)
+                and _AUTOMATION_ENTITY_ID_RE.fullmatch(item)
+                and (
+                    (key == "automation_id" and item.startswith("auto_"))
+                    or (key == "automation_run_id" and item.startswith("arun_"))
+                )
+            )
+            sanitized[public_key] = (
+                item
+                if preserve_automation_id
+                else _redact_snapshot_value(item, codes)
+            )
+        return sanitized
     return value
 
 
@@ -1429,6 +1601,44 @@ def build_console_router(store: Optional[ConsoleStore] = None,
             return False
         return True
 
+    def _trusted_created_media_id(
+        sid: str, tool_result: Any,
+    ) -> Optional[str]:
+        """Recognize one exact, durable media artifact produced by this turn.
+
+        ``side_effect`` is the Buddy tool adapter's structured channel, but it
+        is still treated as untrusted until the complete public artifact
+        envelope matches freshly reloaded MediaStore metadata for this exact
+        session.  Merely mentioning an old ``media_id`` in content or args can
+        therefore never grant an unattended Telegram publication capability.
+        """
+        if not isinstance(tool_result, dict) or bool(tool_result.get("is_error")):
+            return None
+        side_effect = tool_result.get("side_effect")
+        artifact = (
+            side_effect.get("artifact")
+            if isinstance(side_effect, dict)
+            else None
+        )
+        if (
+            not isinstance(artifact, dict)
+            or set(artifact) != {"kind", "page", "channel", "payload", "ref"}
+            or artifact.get("kind") != "media_image"
+            or artifact.get("page") is not None
+            or artifact.get("channel") != "conversation"
+            or not isinstance(artifact.get("payload"), dict)
+        ):
+            return None
+        payload = artifact["payload"]
+        media_id = payload.get("media_id")
+        if not isinstance(media_id, str) or artifact.get("ref") != media_id:
+            return None
+        try:
+            metadata, _data = media_store.load_for_session(media_id, sid)
+        except (MediaNotFound, OSError, ValueError):
+            return None
+        return media_id if payload == _media_artifact_payload(metadata) else None
+
     # ── 对话媒体(不接受本地路径；只按不可猜 media_id 读私有副本) ──
     @router.get("/media/{media_id}")
     def media_get(request: Request, media_id: str):
@@ -1821,7 +2031,10 @@ def build_console_router(store: Optional[ConsoleStore] = None,
 
     # ── 发令 / 运行中转向 ──
     def _launch_turn(sid: str, text: str, turn_id: str, thinking_mode: str,
-                     user_event_id: int, *, continuation_from: Optional[str] = None
+                     user_event_id: int, *, continuation_from: Optional[str] = None,
+                     source: str = "user",
+                     automation_run_id: Optional[str] = None,
+                     automation_media_policy: str = "none",
                      ) -> Dict[str, Any]:
         """Install the foreground control record before scheduling its task."""
         control: Dict[str, Any] = {
@@ -1842,6 +2055,10 @@ def build_console_router(store: Optional[ConsoleStore] = None,
             "background_suppressed": [],
             "pending_confirm": None,
             "continuation_from": continuation_from,
+            "source": source,
+            "automation_run_id": automation_run_id,
+            "automation_media_policy": automation_media_policy,
+            "created_media_ids": set(),
         }
         active_turns[sid] = control
         running.add(sid)
@@ -1852,6 +2069,105 @@ def build_console_router(store: Optional[ConsoleStore] = None,
         _BG_TASKS.add(task)
         task.add_done_callback(_BG_TASKS.discard)
         return control
+
+    async def _submit_system_turn(
+        sid: str,
+        automation_run_id: str,
+        turn_text: str,
+        media_policy: str = "none",
+    ) -> Dict[str, Any]:
+        """Submit one trusted scheduled turn directly on the Console loop.
+
+        The scheduler owns the durable run claim.  Console owns the only turn
+        admission boundary, so validation, the private trigger event and
+        ``_launch_turn`` form one await-free critical section on this loop.
+        """
+        if (
+            not isinstance(sid, str)
+            or not sid
+            or _console_token_shape(sid)
+            or not isinstance(automation_run_id, str)
+            or not automation_run_id
+            or len(automation_run_id) > 160
+            or _console_token_shape(automation_run_id)
+            or not isinstance(turn_text, str)
+            or not turn_text.strip()
+            or _console_token_shape(turn_text)
+            or media_policy not in {"none", "explicit"}
+        ):
+            return {"ok": False, "reason_code": "session_read_only"}
+        if not _session_writable_now(sid):
+            return {"ok": False, "reason_code": "session_read_only"}
+        meta = st.get_meta(sid)
+        if (
+            sid in _busy_session_ids()
+            or not isinstance(meta, dict)
+            or str(meta.get("status") or "idle") != "idle"
+        ):
+            return {"ok": False, "reason_code": "busy"}
+
+        # Deterministic for the durable occurrence: a retry can identify the
+        # same intended turn without accepting a caller-chosen Console id.
+        turn_digest = uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"guanlan:console:automation:{sid}:{automation_run_id}",
+        ).hex
+        # Pairing-code redaction intentionally scans every persisted string.
+        # Break the trusted lowercase hex digest at six-character boundaries
+        # so an all-numeric UUID run can never accidentally look like an
+        # eight-character pairing code in trigger/final/done events.
+        turn_id = "at_" + _pairing_safe_hex(turn_digest)
+        trigger = _emit(
+            sid,
+            "automation_trigger",
+            automation_run_id=automation_run_id,
+            turn_id=turn_id,
+            source="automation",
+            media_policy=media_policy,
+            channel_projection="never",
+        )
+        if trigger is None:
+            return {"ok": False, "reason_code": "session_read_only"}
+        _launch_turn(
+            sid,
+            turn_text,
+            turn_id,
+            "standard",
+            int(trigger["id"]),
+            source="automation",
+            automation_run_id=automation_run_id,
+            automation_media_policy=media_policy,
+        )
+        return {"ok": True, "turn_id": turn_id}
+
+    async def _on_turn_terminal(
+        automation_run_id: Optional[str],
+        turn_id: str,
+        ok: bool,
+        final_event_id: Optional[int],
+        error_class: Optional[str],
+    ) -> None:
+        """Close the matching durable automation run; ordinary turns no-op."""
+        if not isinstance(automation_run_id, str) or not automation_run_id:
+            return
+        runtime = _channel_runtime()
+        if runtime is None or runtime is _CHANNEL_RUNTIME_RESOLUTION_FAILED:
+            return
+        try:
+            await _channel_async(
+                runtime,
+                "automation_turn_terminal",
+                automation_run_id,
+                turn_id,
+                bool(ok),
+                final_event_id if isinstance(final_event_id, int) else None,
+                error_class if isinstance(error_class, str) else None,
+            )
+        except Exception:
+            # Console history is already terminal at this boundary.  Runtime's
+            # durable recovery reconciles the run from that evidence; never
+            # corrupt the completed conversation by raising downstream I/O.
+            log.warning("automation terminal callback failed", exc_info=True)
 
     def _request_foreground_cancel(control: Dict[str, Any], choice: str) -> bool:
         """Request cancellation, returning True when a live tool makes it deferred."""
@@ -2078,7 +2394,7 @@ def build_console_router(store: Optional[ConsoleStore] = None,
                         "secret_placeholder_recorded": False,
                     }
                 return JSONResponse({"ok": False, "reason": "会话写入失败"}, status_code=409)
-            turn_id = uuid.uuid4().hex
+            turn_id = _new_console_id()
             _launch_turn(sid, text, turn_id, thinking_mode, int(user_ev["id"]))
             response = {"ok": True, "sid": sid, "turn_id": turn_id,
                         "thinking_mode": thinking_mode}
@@ -2177,7 +2493,7 @@ def build_console_router(store: Optional[ConsoleStore] = None,
                 return {"ok": True, "sid": sid, "secret_submitted": True}
             finally:
                 await _release_secret_submission(runtime_candidate, sid)
-        continuation_turn_id = control.get("continuation_turn_id") or uuid.uuid4().hex
+        continuation_turn_id = control.get("continuation_turn_id") or _new_console_id()
         control["continuation_turn_id"] = continuation_turn_id
         steer_fields: Dict[str, Any] = {
             "text": text,
@@ -2244,7 +2560,7 @@ def build_console_router(store: Optional[ConsoleStore] = None,
         elif _k == "review":
             await _run_review_bg(sid, spec)
         else:
-            _emit(sid, "task_update", task_id="bg_" + uuid.uuid4().hex[:10],
+            _emit(sid, "task_update", task_id="bg_" + _new_console_id()[:10],
                   status="error", note=f"未知后台任务类型: {_k}")
 
     async def _run_report_bg(sid: str, spec: Dict[str, Any]):
@@ -2258,7 +2574,7 @@ def build_console_router(store: Optional[ConsoleStore] = None,
         code = spec.get("code", "")
         name = spec.get("name", "") or ""
         key = f"report:{code}"
-        bg_id = "bg_" + uuid.uuid4().hex[:10]
+        bg_id = "bg_" + _new_console_id()[:10]
         # 此块(撞车三态判定→入 watchers/占位 _bg_inflight[key])禁止 await——依赖事件循环原子性防撞车窗口
         if key in _bg_inflight:
             ent = _bg_inflight[key]
@@ -2355,7 +2671,7 @@ def build_console_router(store: Optional[ConsoleStore] = None,
         import financial_analyst.buddy.tools as bt
         code = spec.get("code", "")
         name = spec.get("name", "") or code
-        bg_id = "bg_" + uuid.uuid4().hex[:10]
+        bg_id = "bg_" + _new_console_id()[:10]
         _etf_inflight[bg_id] = sid   # 登记在首个 await 前:守卫窗口尽早开启(同步段,无交错)
         st.merge_meta_sub(sid, "bg", bg_id, {"kind": "etf_report", "code": code, "status": "running",
                                              "started": datetime.now().isoformat(timespec="seconds")})
@@ -2423,7 +2739,7 @@ def build_console_router(store: Optional[ConsoleStore] = None,
         mode = spec.get("mode") or "off"
         if mode == "off":
             return   # 兜底:调用方已过滤 off
-        bg_id = "bg_" + uuid.uuid4().hex[:10]
+        bg_id = "bg_" + _new_console_id()[:10]
         _emit(sid, "task_update", task_id=bg_id, kind="review", status="running",
               note=f"后台复盘沉淀经验中({mode})")
         tok_mode = ct.CTX_REVIEW_MODE.set(mode)
@@ -2521,6 +2837,7 @@ def build_console_router(store: Optional[ConsoleStore] = None,
         turn_base_messages: Optional[List[Any]] = None
         cancelled = False
         propagate_cancel = False
+        terminal_error_class: Optional[str] = None
         final_chunks: List[str] = []
         pairing_codes: set[str] = set()
         stream_redactor = _PairingCodeStreamRedactor(pairing_codes)
@@ -2546,6 +2863,73 @@ def build_console_router(store: Optional[ConsoleStore] = None,
                     reason=blocked_reason,
                 )
                 return False
+            # A confirmed schedule is not blanket workspace authority.  This
+            # branch deliberately precedes ``workspace_auto`` and rejects every
+            # confirm-required capability except an exact image created and
+            # revalidated inside this same scheduled turn.
+            if control.get("source") == "automation":
+                approved = False
+                choice = "automation_policy_denied"
+                validated = (
+                    channel_agent_tools.validated_telegram_publish_args(args)
+                    if tool_name == "ww_telegram_publish"
+                    and control.get("automation_media_policy") == "explicit"
+                    else None
+                )
+                created_media_ids = control.get("created_media_ids")
+                if (
+                    validated is not None
+                    and isinstance(created_media_ids, set)
+                    and validated[0] in created_media_ids
+                ):
+                    media_id, caption = validated
+                    try:
+                        extras = await _confirm_extras(tool_name, args)
+                        confirm_ready = bool(extras.pop("_confirm_ready", True))
+                        generation = extras.pop(
+                            "_media_confirmation_generation", None,
+                        )
+                        if (
+                            not confirm_ready
+                            or not isinstance(generation, dict)
+                            or not isinstance(generation.get("binding_id"), str)
+                            or not generation.get("binding_id")
+                            or not isinstance(generation.get("binding_paired_at"), str)
+                            or not generation.get("binding_paired_at")
+                            or current_channel_runtime is None
+                        ):
+                            raise RuntimeError("automation media proof unavailable")
+                        # Re-open immutable bytes at the authority boundary.  A
+                        # cross-session id, deleted owner or corrupted blob is
+                        # indistinguishable from an unavailable new image.
+                        media_store.load_for_session(media_id, sid)
+                        publication_ticket = await _channel_sync(
+                            current_channel_runtime,
+                            "issue_media_publication_confirmation",
+                            sid,
+                            media_id,
+                            caption,
+                            generation["binding_id"],
+                            generation["binding_paired_at"],
+                        )
+                        if not channel_agent_tools.stash_media_publication_ticket(
+                            media_id, caption, publication_ticket,
+                        ):
+                            raise RuntimeError("automation media proof unavailable")
+                        approved = True
+                        choice = "automation_explicit_media"
+                    except Exception:
+                        approved = False
+                        choice = "automation_media_unavailable"
+                _emit(
+                    sid,
+                    "confirm_resolved",
+                    turn_id=turn_id,
+                    tool=tool_name,
+                    choice=choice,
+                )
+                control["phase"] = "tool" if approved else "llm"
+                return approved
             # 自主模式只自动放行可撤销的空间内文本写入/私有草稿与静态检查。
             # 发布全局、执行项目代码、安装/网络/git 提交(后几项根本没有工具)
             # 永远不会借“自主”绕过确认。
@@ -2592,7 +2976,7 @@ def build_console_router(store: Optional[ConsoleStore] = None,
                     return False
                 public_payload = {
                     "turn_id": turn_id,
-                    "confirm_id": uuid.uuid4().hex,
+                    "confirm_id": _new_console_id(),
                     "tool": tool_name,
                     "args": _public_confirm_args(tool_name, args),
                     **_redact_snapshot_value(_safe(extras), set()),
@@ -2764,6 +3148,11 @@ def build_console_router(store: Optional[ConsoleStore] = None,
                 elif kind == "tool_result":
                     _reset_public_text_phase()
                     p = payload or {}
+                    created_media_id = _trusted_created_media_id(sid, p)
+                    if created_media_id is not None:
+                        created_media_ids = control.get("created_media_ids")
+                        if isinstance(created_media_ids, set):
+                            created_media_ids.add(created_media_id)
                     se = p.get("side_effect") or {}
                     if not isinstance(se, dict):
                         se = {}
@@ -2830,6 +3219,7 @@ def build_console_router(store: Optional[ConsoleStore] = None,
                     # tool_result and then continue straight into the next LLM.
                     control["phase"] = "llm"
                     turn_ok = False
+                    terminal_error_class = terminal_error_class or "agent_error"
                     _emit(sid, "task_update", task_id=turn_id, status="error",
                           note=_redact_pairing_codes(payload, pairing_codes)[:300],
                           terminal=False)
@@ -2864,6 +3254,7 @@ def build_console_router(store: Optional[ConsoleStore] = None,
                     # so a later turn cannot inherit an uncommitted reply.
                     saw_done = False
                     turn_ok = False
+                    terminal_error_class = "checkpoint_failed"
                     _emit(sid, "task_update", task_id=turn_id, status="error",
                           terminal=False,
                           note="完整回复检查点写入失败，本轮未提交")
@@ -2879,9 +3270,11 @@ def build_console_router(store: Optional[ConsoleStore] = None,
         except asyncio.CancelledError:
             cancelled = True
             turn_ok = False
+            terminal_error_class = terminal_error_class or "cancelled"
             propagate_cancel = not bool(control.get("cancel_requested"))
         except Exception as e:
             turn_ok = False
+            terminal_error_class = type(e).__name__[:128] or "turn_failed"
             _emit(sid, "task_update", task_id=turn_id, status="error",
                   note=_redact_pairing_codes(
                       f"{type(e).__name__}: {e}", pairing_codes,
@@ -2945,6 +3338,7 @@ def build_console_router(store: Optional[ConsoleStore] = None,
             and not control.get("cancel_only") and steers
         )
         if cancelled or control.get("cancel_requested"):
+            terminal_error_class = terminal_error_class or "cancelled"
             note = "当前生成已在完整协议边界安全停止"
             if control.get("completed_tools"):
                 note += "；中止前完成的工具结果将传给续跑，副作用不回滚"
@@ -2995,6 +3389,27 @@ def build_console_router(store: Optional[ConsoleStore] = None,
                         rt.add_done_callback(_BG_TASKS.discard)
                 except Exception:  # noqa: BLE001 — 复盘触发失败不影响主对话收尾
                     pass
+
+        await _on_turn_terminal(
+            control.get("automation_run_id"),
+            turn_id,
+            bool(
+                turn_ok
+                and saw_done
+                and not cancelled
+                and not control.get("cancel_requested")
+            ),
+            control.get("final_event_id"),
+            (
+                terminal_error_class
+                if terminal_error_class is not None
+                else (
+                    None
+                    if turn_ok and saw_done
+                    else "turn_failed"
+                )
+            ),
+        )
 
         if propagate_cancel:
             raise asyncio.CancelledError()
@@ -3537,5 +3952,29 @@ def build_console_router(store: Optional[ConsoleStore] = None,
                     print(f"[console] 启动扫描跳过 {sid_}/{bg_id}: {e}", file=sys.stderr)
         except Exception as e:
             print(f"[console] 启动扫描跳过 {m.get('id')}: {e}", file=sys.stderr)
+
+    # Bind only after every closure above exists.  The callbacks retain this
+    # router's owning ASGI loop when invoked by Runtime; no HTTP loopback or
+    # second Console state machine is introduced.
+    hook_runtime = _channel_runtime()
+    if hook_runtime is not None and hook_runtime is not _CHANNEL_RUNTIME_RESOLUTION_FAILED:
+        bind_console_hooks = getattr(hook_runtime, "bind_console_hooks", None)
+        if callable(bind_console_hooks):
+            try:
+                bound = bind_console_hooks(
+                    emit=_emit,
+                    is_busy=lambda sid: sid in _busy_session_ids(),
+                    submit_system_turn=_submit_system_turn,
+                    on_turn_terminal=_on_turn_terminal,
+                )
+                if inspect.isawaitable(bound):
+                    close = getattr(bound, "close", None)
+                    if callable(close):
+                        close()
+                    raise TypeError("bind_console_hooks must be synchronous")
+            except Exception:
+                # Channel remains fail-closed/unavailable; ordinary Console
+                # behavior must survive an optional integration fault.
+                log.warning("channel Console hook binding failed", exc_info=True)
 
     return router

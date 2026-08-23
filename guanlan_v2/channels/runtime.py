@@ -57,6 +57,30 @@ _SAFE_SUBJECT_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
 _PAIRING_CODE_RE = re.compile(
     r"(?<![0-9A-Z])[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}(?![0-9A-Z])"
 )
+_AUTOMATION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
+_AUTOMATION_CHAT_ID_RE = re.compile(
+    r"(?i)\b(?:telegram[ _-]?)?(?:chat|user)[ _-]?id\s*[:=]\s*-?[0-9]{4,20}\b"
+)
+_AUTOMATION_LOCAL_PATH_RE = re.compile(
+    r"(?i)(?:\b[A-Za-z]:[\\/]|file://|\\\\[^\\\s]+\\[^\\\s]+|"
+    r"(?:^|[\s\"'(])/(?:Users|home|etc|var|tmp|mnt)(?:/|\b))"
+)
+_AUTOMATION_SPEC_KEYS = frozenset(
+    {
+        "automation_id",
+        "name",
+        "schedule_kind",
+        "run_at",
+        "local_time",
+        "timezone",
+        "prompt_text",
+        "skill_refs",
+        "media_policy",
+    }
+)
+_AUTOMATION_REQUIRED_KEYS = frozenset(
+    {"name", "schedule_kind", "timezone", "prompt_text", "media_policy"}
+)
 _MAX_MEDIA_CAPTION_CHARS = 50_000
 _MEDIA_PERMIT_TTL_SECONDS = 600
 _MEDIA_CONFIRM_ACTION = "telegram:publish-media"
@@ -233,6 +257,9 @@ class ChannelRuntime:
         telegram_adapter: Any,
         media_store: Any | None = None,
         ticket_store: ActionTicketStore | None = None,
+        automation_worker: Any | None = None,
+        automation_calendar: Any | None = None,
+        automation_clock: Callable[[], Any] | None = None,
     ) -> None:
         self.console_store = console_store
         self.channel_store = channel_store
@@ -267,6 +294,29 @@ class ChannelRuntime:
             telegram_adapter=telegram_adapter,
             media_store=media_store,
         )
+        if automation_worker is None:
+            from guanlan_v2.channels.automation import AutomationWorker
+            from guanlan_v2.channels.trading_calendar import AShareTradingCalendar
+
+            calendar = (
+                automation_calendar
+                if automation_calendar is not None
+                else AShareTradingCalendar()
+            )
+            automation_worker = AutomationWorker(
+                channel_store,
+                calendar=calendar,
+                clock=automation_clock,
+            )
+        self.automation_worker = automation_worker
+        self._automation_hooks_bound = False
+        self._console_channel_emit: Callable[..., Any] | None = None
+        self._console_is_busy: Callable[[str], Any] | None = None
+        self._console_submit_system_turn: Callable[..., Any] | None = None
+        # Kept only as the Console-side terminal endpoint named by the frozen
+        # hook contract.  Runtime never invokes it (that would recurse back
+        # into ``automation_turn_terminal``).
+        self._console_on_turn_terminal: Callable[..., Any] | None = None
         self._background_stop: asyncio.Event | None = None
         self._background_tasks: tuple[asyncio.Task[Any], ...] = ()
         self._background_lock: asyncio.Lock | None = None
@@ -895,6 +945,432 @@ class ChannelRuntime:
         except PairingError as error:
             raise ChannelRuntimeError(error.reason_code) from None
 
+    # -- confirmed conversation automations -------------------------
+    @staticmethod
+    def _automation_safe_text(
+        value: object,
+        *,
+        field: str,
+        maximum: int,
+        allow_empty: bool = False,
+        single_line: bool = False,
+    ) -> str:
+        """Validate text before it can enter schedule storage or system text."""
+
+        if not isinstance(value, str) or len(value) > maximum or "\x00" in value:
+            raise ChannelRuntimeError("automation_spec_invalid")
+        if not allow_empty and not value.strip():
+            raise ChannelRuntimeError("automation_spec_invalid")
+        if single_line and any(char in value for char in ("\r", "\n")):
+            raise ChannelRuntimeError("automation_spec_invalid")
+        if (
+            ChannelRuntime.token_matches(value)
+            or _PAIRING_CODE_RE.search(value)
+            or _AUTOMATION_CHAT_ID_RE.search(value)
+            or _AUTOMATION_LOCAL_PATH_RE.search(value)
+        ):
+            raise ChannelRuntimeError("automation_sensitive_content_rejected")
+        return value
+
+    @staticmethod
+    def _automation_id(value: object, *, optional: bool = False) -> str | None:
+        if optional and value in (None, ""):
+            return None
+        if (
+            not isinstance(value, str)
+            or _AUTOMATION_ID_RE.fullmatch(value) is None
+            or ChannelRuntime.token_matches(value)
+        ):
+            raise ChannelRuntimeError("automation_not_found")
+        return value
+
+    @staticmethod
+    def _automation_status(item: Any) -> str:
+        last_status = str(getattr(item, "last_status", "") or "")
+        if not bool(getattr(item, "enabled", False)):
+            return "blocked" if last_status == "blocked" else "paused"
+        return "error" if last_status == "error" else "enabled"
+
+    def _automation_dto(self, item: Any, *, detailed: bool) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "automation_id": str(item.id),
+            "name": str(item.name),
+            "schedule_kind": str(item.schedule_kind),
+            "run_at": item.run_at,
+            "local_time": item.local_time,
+            "timezone": str(item.timezone),
+            "media_policy": str(item.media_policy),
+            "enabled": bool(item.enabled),
+            "status": self._automation_status(item),
+            "next_run_at": item.next_run_at,
+            "last_run_at": item.last_run_at,
+            "last_status": self._text(item.last_status, limit=32),
+            "pause_reason": self._text(item.pause_reason, limit=96),
+        }
+        if detailed:
+            result.update(
+                {
+                    "prompt_text": str(item.prompt_text),
+                    "skill_refs": [str(ref) for ref in item.skill_refs],
+                }
+            )
+        return result
+
+    def _raise_automation_error(self, error: BaseException) -> None:
+        from guanlan_v2.channels.automation import (
+            AutomationOwnershipError,
+            AutomationValidationError,
+        )
+        from guanlan_v2.channels.automation_skills import UnknownAutomationSkill
+        from guanlan_v2.channels.trading_calendar import CalendarUnavailable
+
+        if isinstance(error, ChannelRuntimeError):
+            raise error
+        if isinstance(error, AutomationOwnershipError):
+            raise ChannelRuntimeError("automation_not_found") from None
+        if isinstance(error, UnknownAutomationSkill):
+            raise ChannelRuntimeError("automation_skill_unknown") from None
+        if isinstance(error, CalendarUnavailable):
+            raise ChannelRuntimeError("automation_calendar_unavailable") from None
+        if isinstance(error, (AutomationValidationError, ValueError, TypeError)):
+            raise ChannelRuntimeError("automation_spec_invalid") from None
+        if isinstance(error, (ChannelNotFound, ChannelConflict)):
+            raise ChannelRuntimeError("automation_not_found") from None
+        if isinstance(error, ChannelStoreError):
+            raise ChannelRuntimeError("automation_operation_failed") from None
+        raise ChannelRuntimeError("automation_operation_failed") from None
+
+    def automation_skills(self, session_id: str | None = None) -> dict[str, Any]:
+        """Expose only stable registry metadata, never executable Skill text."""
+
+        del session_id  # Backwards-compatible tolerance for older tool adapters.
+        try:
+            skills = self.automation_worker.automation_skills()
+            return {
+                "ok": True,
+                "skills": [
+                    {
+                        "skill_id": str(skill.skill_id),
+                        "name": str(skill.name),
+                        "description": str(skill.description),
+                    }
+                    for skill in skills
+                ],
+            }
+        except Exception as error:
+            self._raise_automation_error(error)
+            raise AssertionError("unreachable")
+
+    def automation_list(self, session_id: str) -> dict[str, Any]:
+        sid = self._require_session(session_id)
+        try:
+            items = self.automation_worker.list_automations(sid)
+            return {
+                "ok": True,
+                "automations": [
+                    self._automation_dto(item, detailed=True) for item in items
+                ],
+            }
+        except Exception as error:
+            self._raise_automation_error(error)
+            raise AssertionError("unreachable")
+
+    def automation_upsert(
+        self, session_id: str, spec: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        sid = self._require_session(session_id, writable=True)
+        if (
+            not isinstance(spec, Mapping)
+            or set(spec) - _AUTOMATION_SPEC_KEYS
+            or not _AUTOMATION_REQUIRED_KEYS.issubset(spec)
+        ):
+            raise ChannelRuntimeError("automation_spec_invalid")
+
+        name = self._automation_safe_text(
+            spec.get("name"), field="name", maximum=128, single_line=True
+        ).strip()
+        prompt_text = self._automation_safe_text(
+            spec.get("prompt_text"), field="prompt_text", maximum=50_000
+        )
+        schedule_kind = self._automation_safe_text(
+            spec.get("schedule_kind"),
+            field="schedule_kind",
+            maximum=32,
+            single_line=True,
+        ).strip()
+        timezone_name = self._automation_safe_text(
+            spec.get("timezone"), field="timezone", maximum=64, single_line=True
+        ).strip()
+        run_at = self._automation_safe_text(
+            spec.get("run_at", ""),
+            field="run_at",
+            maximum=96,
+            allow_empty=True,
+            single_line=True,
+        ).strip() or None
+        local_time = self._automation_safe_text(
+            spec.get("local_time", ""),
+            field="local_time",
+            maximum=16,
+            allow_empty=True,
+            single_line=True,
+        ).strip() or None
+        media_policy = self._automation_safe_text(
+            spec.get("media_policy"),
+            field="media_policy",
+            maximum=32,
+            single_line=True,
+        ).strip()
+        automation_id = self._automation_id(
+            spec.get("automation_id"), optional=True
+        )
+        refs = spec.get("skill_refs", [])
+        if (
+            not isinstance(refs, (list, tuple))
+            or len(refs) > 16
+            or any(not isinstance(ref, str) for ref in refs)
+        ):
+            raise ChannelRuntimeError("automation_spec_invalid")
+        safe_refs = tuple(
+            self._automation_safe_text(
+                ref,
+                field="skill_ref",
+                maximum=96,
+                single_line=True,
+            ).strip()
+            for ref in refs
+        )
+        try:
+            item = self.automation_worker.upsert_automation(
+                session_id=sid,
+                name=name,
+                schedule_kind=schedule_kind,
+                prompt_text=prompt_text,
+                timezone_name=timezone_name,
+                local_time=local_time,
+                run_at=run_at,
+                skill_refs=safe_refs,
+                media_policy=media_policy,
+                automation_id=automation_id,
+                created_by="weiwo_agent_confirmed",
+            )
+            return {
+                "ok": True,
+                "automation": self._automation_dto(item, detailed=True),
+                "automation_id": str(item.id),
+            }
+        except Exception as error:
+            self._raise_automation_error(error)
+            raise AssertionError("unreachable")
+
+    def automation_pause(self, session_id: str, automation_id: str) -> dict[str, Any]:
+        sid = self._require_session(session_id, writable=True)
+        safe_id = self._automation_id(automation_id)
+        try:
+            item = self.automation_worker.pause_automation(sid, safe_id)
+            return {"ok": True, "automation": self._automation_dto(item, detailed=False)}
+        except Exception as error:
+            self._raise_automation_error(error)
+            raise AssertionError("unreachable")
+
+    def automation_resume(self, session_id: str, automation_id: str) -> dict[str, Any]:
+        sid = self._require_session(session_id, writable=True)
+        safe_id = self._automation_id(automation_id)
+        try:
+            item = self.automation_worker.resume_automation(sid, safe_id)
+            return {"ok": True, "automation": self._automation_dto(item, detailed=False)}
+        except Exception as error:
+            self._raise_automation_error(error)
+            raise AssertionError("unreachable")
+
+    def automation_delete(self, session_id: str, automation_id: str) -> dict[str, Any]:
+        sid = self._require_session(session_id, writable=True)
+        safe_id = self._automation_id(automation_id)
+        try:
+            deleted = bool(self.automation_worker.delete_automation(sid, safe_id))
+            if not deleted:
+                raise ChannelRuntimeError("automation_not_found")
+            return {"ok": True, "automation_id": safe_id, "deleted": True}
+        except Exception as error:
+            self._raise_automation_error(error)
+            raise AssertionError("unreachable")
+
+    async def _submit_automation_invocation(self, invocation: Any) -> dict[str, Any]:
+        hook = self._console_submit_system_turn
+        if hook is None:
+            return {"status": "unavailable"}
+        try:
+            sid = self._require_session(invocation.session_id, writable=True)
+            run_id = self._automation_id(invocation.automation_run_id)
+            system_text = invocation.system_text
+            # Name, Prompt and Skill refs were separately validated before
+            # persistence; repeat the secret/location fence on the rendered
+            # envelope in case storage was populated by an older caller.  V1
+            # deliberately does not embed opaque UUIDs in this text, and its
+            # durable automation IDs are segmented below eight characters.
+            if (
+                not isinstance(system_text, str)
+                or not system_text.strip()
+                or len(system_text) > 100_000
+                or "\x00" in system_text
+                or ChannelRuntime.token_matches(system_text)
+                or _PAIRING_CODE_RE.search(system_text)
+                or _AUTOMATION_CHAT_ID_RE.search(system_text)
+                or _AUTOMATION_LOCAL_PATH_RE.search(system_text)
+            ):
+                return {"status": "unavailable"}
+            policy = str(invocation.media_policy)
+            if policy not in {"none", "explicit"}:
+                return {"status": "unavailable"}
+            result = hook(sid, run_id, system_text, policy)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception:
+            return {"status": "unavailable"}
+        if isinstance(result, str) and result.strip():
+            return {"status": "started", "turn_id": result.strip()}
+        if not isinstance(result, Mapping):
+            return {"status": "unavailable"}
+        turn_id = result.get("turn_id")
+        if result.get("ok") is True and isinstance(turn_id, str) and turn_id:
+            return {"status": "started", "turn_id": turn_id}
+        reason = str(result.get("reason_code") or "")
+        if reason == "busy":
+            return {"status": "busy"}
+        return {"status": "unavailable"}
+
+    def _automation_session_archived(self, session_id: str) -> bool:
+        try:
+            self._require_session(session_id, writable=True)
+            return False
+        except ChannelRuntimeError:
+            return True
+
+    def _inspect_automation_terminal(self, run: Any) -> dict[str, Any] | None:
+        turn_id = getattr(run, "turn_id", None)
+        if not isinstance(turn_id, str) or not turn_id:
+            return None
+        try:
+            automation = self.channel_store.automation(run.automation_id)
+            sid = self._require_session(automation.session_id)
+        except Exception:
+            return None
+
+        reader = getattr(self.console_store, "read_events_forward", None)
+        if callable(reader):
+            events: list[Mapping[str, Any]] = []
+            cursor = 0
+            while True:
+                page = reader(sid, after_id=cursor, limit=500)
+                if not isinstance(page, list) or not page:
+                    break
+                events.extend(event for event in page if isinstance(event, Mapping))
+                ids = [
+                    event.get("id")
+                    for event in page
+                    if isinstance(event, Mapping)
+                    and isinstance(event.get("id"), int)
+                    and not isinstance(event.get("id"), bool)
+                ]
+                next_cursor = max(ids, default=cursor)
+                if next_cursor <= cursor or len(page) < 500:
+                    break
+                cursor = next_cursor
+        else:
+            try:
+                raw = self.console_store.read_events(sid, after_id=0, limit=1_000_000)
+            except Exception:
+                return None
+            events = [event for event in raw if isinstance(event, Mapping)]
+
+        saw_evidence = False
+        final_event_id: int | None = None
+        terminal_event: Mapping[str, Any] | None = None
+        for event in events:
+            if event.get("type") == "agent_final" and event.get("turn_id") == turn_id:
+                saw_evidence = True
+                event_id = event.get("id")
+                if isinstance(event_id, int) and not isinstance(event_id, bool):
+                    final_event_id = event_id
+            if (
+                event.get("type") == "task_update"
+                and event.get("task_id") == turn_id
+            ):
+                saw_evidence = True
+                if event.get("status") == "done":
+                    terminal_event = event
+        if terminal_event is None:
+            return {"terminal": False} if saw_evidence else None
+        ok = terminal_event.get("ok") is True
+        if ok:
+            error_class = None
+        elif terminal_event.get("cancelled") is True:
+            error_class = "console_turn_cancelled"
+        else:
+            error_class = "console_turn_failed"
+        return {
+            "terminal": True,
+            "ok": ok,
+            "final_event_id": final_event_id,
+            "error_class": error_class,
+        }
+
+    def bind_console_hooks(
+        self,
+        *,
+        emit: Callable[..., Any],
+        is_busy: Callable[[str], Any],
+        submit_system_turn: Callable[..., Any],
+        on_turn_terminal: Callable[..., Any],
+    ) -> None:
+        if not all(
+            callable(value)
+            for value in (emit, is_busy, submit_system_turn, on_turn_terminal)
+        ):
+            raise TypeError("console automation hooks must be callable")
+        self._console_channel_emit = emit
+        self._console_is_busy = is_busy
+        self._console_submit_system_turn = submit_system_turn
+        self._console_on_turn_terminal = on_turn_terminal
+        self.automation_worker.bind_hooks(
+            is_busy=is_busy,
+            submit_system_turn=self._submit_automation_invocation,
+            inspect_terminal=self._inspect_automation_terminal,
+            is_archived=self._automation_session_archived,
+        )
+        self._automation_hooks_bound = True
+
+    def automation_turn_terminal(
+        self,
+        automation_run_id: str,
+        turn_id: str,
+        ok: bool,
+        final_event_id: int | None = None,
+        error_class: str | None = None,
+    ) -> None:
+        safe_run_id = self._automation_id(automation_run_id)
+        safe_turn_id = self._automation_id(turn_id)
+        if isinstance(final_event_id, bool) or (
+            final_event_id is not None
+            and (not isinstance(final_event_id, int) or final_event_id < 0)
+        ):
+            raise ChannelRuntimeError("automation_terminal_invalid")
+        if error_class is not None and (
+            not isinstance(error_class, str)
+            or _SAFE_ACTION_RE.fullmatch(error_class) is None
+        ):
+            error_class = "console_turn_failed"
+        try:
+            self.automation_worker.on_turn_terminal(
+                safe_run_id,
+                safe_turn_id,
+                bool(ok),
+                final_event_id=final_event_id,
+                error_class=error_class,
+            )
+        except Exception as error:
+            self._raise_automation_error(error)
+
     async def start(self) -> None:
         """Start background channel services for the application lifespan."""
         if self._background_lock is None:
@@ -916,6 +1392,12 @@ class ChannelRuntime:
             # delivery claim is possible.
             await self.outbox_worker.startup_recover(force=True)
             await self.pairing.start()
+            if self._automation_hooks_bound:
+                try:
+                    await self.automation_worker.start()
+                except Exception:
+                    await self.pairing.stop()
+                    raise
             stop_event = asyncio.Event()
             self._background_stop = stop_event
             self._background_tasks = (
@@ -940,6 +1422,8 @@ class ChannelRuntime:
             self._background_tasks = ()
             if stop_event is not None:
                 stop_event.set()
+            if self._automation_hooks_bound:
+                await self.automation_worker.stop()
             for task in tasks:
                 task.cancel()
             if tasks:

@@ -281,6 +281,114 @@ def test_not_yet_wired_publish_and_automation_are_honestly_unavailable():
         }
 
 
+def test_automation_tools_use_global_skills_and_only_the_context_session():
+    from guanlan_v2.channels import agent_tools as at
+    from guanlan_v2.console import tools as ct
+
+    calls = []
+
+    class Runtime:
+        def automation_skills(self):
+            calls.append(("skills",))
+            return {"ok": True, "skills": [{"skill_id": "morning_brief_v1"}]}
+
+        def automation_list(self, sid):
+            calls.append(("list", sid))
+            return {"ok": True, "automations": []}
+
+        def automation_upsert(self, sid, spec):
+            calls.append(("upsert", sid, spec))
+            return {"ok": True, "automation_id": "auto_current"}
+
+        def automation_pause(self, sid, automation_id):
+            calls.append(("pause", sid, automation_id))
+            return {"ok": True}
+
+        def automation_resume(self, sid, automation_id):
+            calls.append(("resume", sid, automation_id))
+            return {"ok": True}
+
+        def automation_delete(self, sid, automation_id):
+            calls.append(("delete", sid, automation_id))
+            return {"ok": True}
+
+    spec = {
+        "name": "每日晨报",
+        "schedule_kind": "daily",
+        "run_at": "",
+        "local_time": "08:30",
+        "timezone": "Asia/Hong_Kong",
+        "prompt_text": "生成当前对话的研究晨报",
+        "skill_refs": ["morning_brief_v1"],
+        "media_policy": "explicit",
+        "automation_id": "",
+    }
+    sid_token = ct.CTX_SID.set("cs_current")
+    runtime_token = at.CTX_CHANNEL_RUNTIME.set(
+        at.ChannelToolContext.capture(Runtime())
+    )
+    try:
+        assert at.automation_skills_impl()["ok"] is True
+        assert at.automation_list_impl()["ok"] is True
+        assert at.automation_upsert_impl(**spec)["automation_id"] == "auto_current"
+        assert at.automation_pause_impl("auto_current")["ok"] is True
+        assert at.automation_resume_impl("auto_current")["ok"] is True
+        assert at.automation_delete_impl("auto_current")["ok"] is True
+    finally:
+        at.CTX_CHANNEL_RUNTIME.reset(runtime_token)
+        ct.CTX_SID.reset(sid_token)
+
+    assert calls == [
+        ("skills",),
+        ("list", "cs_current"),
+        ("upsert", "cs_current", spec),
+        ("pause", "cs_current", "auto_current"),
+        ("resume", "cs_current", "auto_current"),
+        ("delete", "cs_current", "auto_current"),
+    ]
+
+
+def test_automation_confirmation_repeats_the_exact_complete_schedule():
+    from guanlan_v2.channels import agent_tools as at
+
+    prompt = "第一行：生成当前对话晨报。\n第二行：逐项给出来源与失败降级。" + "研究要求。" * 80
+    refs = ["morning_brief_v1", "closing_review_v1"]
+    metadata = at.confirm_metadata(
+        "ww_automation_upsert",
+        {
+            "automation_id": "auto_current",
+            "name": "每日晨报",
+            "schedule_kind": "daily",
+            "run_at": "",
+            "local_time": "08:30",
+            "timezone": "Asia/Hong_Kong",
+            "prompt_text": prompt,
+            "skill_refs": refs,
+            "media_policy": "explicit",
+        },
+        {},
+    )
+
+    assert metadata["confirm_kind"] == "automation"
+    assert metadata["action_ticket_required"] is True
+    assert metadata["title"] == "确认定时任务"
+    assert metadata["approve_label"] == "确认保存定时任务"
+    assert metadata["public_details"] == {
+        "bot_display_name": "",
+        "bot_username": "",
+        "automation_id": "auto_current",
+        "name": "每日晨报",
+        "schedule_kind": "daily",
+        "run_at": "",
+        "local_time": "08:30",
+        "timezone": "Asia/Hong_Kong",
+        "prompt_text": prompt,
+        "skill_refs": refs,
+        "media_policy": "explicit",
+    }
+    assert "prompt_summary" not in metadata["public_details"]
+
+
 def test_publish_tool_accepts_only_exact_runtime_media_envelope_and_strips_extras():
     from guanlan_v2.channels import agent_tools as at
     from guanlan_v2.console import tools as ct

@@ -181,7 +181,7 @@ def test_confirmation_details_allowlist_public_fields_without_generic_dump():
         "media_id",
         "caption",
         "automation_id",
-        "prompt_summary",
+        "prompt_text",
         "skill_refs",
     ):
         assert f"source.{field}" in details
@@ -190,6 +190,45 @@ def test_confirmation_details_allowlist_public_fields_without_generic_dump():
     assert "['发送说明', exactCaption, 'caption']" in details
     assert "text(source.caption, 900)" not in details
     assert "ww-channel-confirm-row--' + row[2]" in details
+    assert "const exactPrompt = typeof source.prompt_text === 'string' ? source.prompt_text : ''" in details
+    assert "['任务内容', exactPrompt, 'prompt']" in details
+    assert "['单次执行时间', text(source.run_at, 96)]" in details
+    assert "['当地执行时间', text(source.local_time, 32)]" in details
+    assert "未使用内置 Skill" in details
+    assert "仅允许发送同一轮新生成且已校验的图片" in details
+    assert "不允许自动发送图片" in details
+    assert "source.prompt_summary" not in details
+
+
+def test_channel_drawer_lists_only_current_status_automations_with_run_state():
+    src = _read("console-channel.jsx")
+    drawer = src.split("function WwChannelDrawer(", 1)[1].split(
+        "window.WwChannelStatusBadge", 1
+    )[0]
+    assert "Array.isArray(source.automations) ? source.automations : []" in drawer
+    for field in (
+        "automation_id",
+        "name",
+        "schedule_kind",
+        "status",
+        "next_run_at",
+        "last_run_at",
+        "pause_reason",
+    ):
+        assert f"item.{field}" in drawer
+    for text in (
+        "自动发送日程",
+        "下次运行",
+        "最近运行",
+        "暂停原因",
+        "日程只属于当前对话，不能移动到其他对话。",
+        "还没有定时任务。",
+    ):
+        assert text in drawer
+    assert "item.session_id" not in drawer
+    assert "onMoveAutomation" not in drawer
+    assert "moveAutomation" not in drawer
+    assert "prompt_text" not in drawer
 
 
 def test_channel_css_is_isolated_and_responsive_above_workspace_dock():

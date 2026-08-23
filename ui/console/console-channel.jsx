@@ -422,6 +422,17 @@ function WwChannelConfirmDetails({ publicDetails, toolName }) {
   // 发布确认必须逐字展示后端实际授权的完整说明。不能用通用展示截断器，
   // 否则用户确认的内容可能与最终发送内容不同；React 会负责文本转义。
   const exactCaption = typeof source.caption === 'string' ? source.caption : '';
+  // 自动化 Prompt 同样是实际执行内容，确认卡必须完整展示，保留换行，
+  // 不能以摘要替代。秘密形状已由服务端参数守卫在创建确认前拒绝。
+  const exactPrompt = typeof source.prompt_text === 'string' ? source.prompt_text : '';
+  const automation = typeof toolName === 'string' && toolName.indexOf('ww_automation_') === 0;
+  const scheduleKind = text(source.schedule_kind, 64);
+  const scheduleLabel = {
+    once: '单次', daily: '每天', weekdays: '工作日', trading_days: 'A 股交易日',
+  }[scheduleKind] || scheduleKind;
+  const automationMediaPolicy = {
+    none: '不允许自动发送图片', explicit: '仅允许发送同一轮新生成且已校验的图片',
+  }[text(source.media_policy, 64)] || text(source.media_policy, 64);
   const rows = [
     ['Bot', bot],
     ['Telegram 接收者', recipient],
@@ -431,14 +442,16 @@ function WwChannelConfirmDetails({ publicDetails, toolName }) {
     ['过期时间', text(source.expires_at, 64)],
     ['图片编号', text(source.media_id, 160)],
     ['发送说明', exactCaption, 'caption'],
-    ['媒体范围', text(source.media_policy, 320)],
+    ['媒体范围', automation ? '' : text(source.media_policy, 320)],
     ['任务名称', text(source.name, 128)],
     ['任务编号', text(source.automation_id, 160)],
-    ['计划类型', text(source.schedule_kind, 64)],
-    ['执行时间', text(source.run_at || source.local_time, 64)],
+    ['计划类型', scheduleLabel],
+    ['单次执行时间', text(source.run_at, 96)],
+    ['当地执行时间', text(source.local_time, 32)],
     ['时区', text(source.timezone, 64)],
-    ['任务内容', text(source.prompt_summary, 600)],
-    ['Skills', text(source.skill_refs, 160)],
+    ['任务内容', exactPrompt, 'prompt'],
+    ['Skills', automation ? (text(source.skill_refs, 160) || '未使用内置 Skill') : ''],
+    ['自动发图策略', automation ? automationMediaPolicy : ''],
   ].filter(row => row[1]);
   const exactRecipient = source.recipient_verified === true;
   const pairing = toolName === 'ww_telegram_pair_approve';
@@ -457,7 +470,8 @@ function WwChannelConfirmDetails({ publicDetails, toolName }) {
       </div>}
       <dl className="ww-channel-confirm-list">
         {rows.map(row => <div className={'ww-channel-confirm-row'
-          + (row[2] ? ' ww-channel-confirm-row--' + row[2] : '')} key={row[0]}>
+          + (row[2] ? ' ww-channel-confirm-row--' + row[2] : '')
+          + (row[2] === 'prompt' ? ' ww-channel-confirm-row--caption' : '')} key={row[0]}>
           <dt>{row[0]}</dt><dd>{row[1]}</dd>
         </div>)}
       </dl>
@@ -479,6 +493,7 @@ function WwChannelDrawer({
   const counts = source.counts && typeof source.counts === 'object' ? source.counts : {};
   const deliveries = Array.isArray(source.recent_deliveries) ? source.recent_deliveries : [];
   const pairings = Array.isArray(source.pairing_requests) ? source.pairing_requests : [];
+  const automations = Array.isArray(source.automations) ? source.automations : [];
   const botUsername = wwChannelPublicText(bot.username, 64).replace(/^@/, '');
   const recipientUsername = wwChannelPublicText(recipient.username, 64).replace(/^@/, '');
   const hasChannelTarget = !!source.draft || view.connected
@@ -619,6 +634,36 @@ function WwChannelDrawer({
                 <small>请将完整配对码交给 Agent 后核对</small>
               </div>)}
             </section>}
+
+            <section className="ww-channel-section" aria-label="当前对话自动发送日程">
+              <div className="ww-channel-section-head">
+                <h3>自动发送日程</h3><span>{automations.length} 个</span>
+              </div>
+              {automations.length > 0 ? automations.map(item => {
+                const automationId = wwChannelPublicText(item.automation_id, 160);
+                const name = wwChannelPublicText(item.name, 128) || '未命名日程';
+                const kind = wwChannelPublicText(item.schedule_kind, 32);
+                const state = wwChannelPublicText(item.status, 32);
+                const pauseReason = wwChannelPublicText(item.pause_reason, 96);
+                const scheduleCopy = {
+                  once: '单次', daily: '每天', weekdays: '工作日', trading_days: 'A 股交易日',
+                }[kind] || '日程';
+                const statusCopy = {
+                  enabled: '已启用', paused: '已暂停', blocked: '已阻塞', error: '上次运行失败',
+                }[state] || '状态待核对';
+                return <div className="ww-channel-pairing-row ww-channel-automation-row"
+                  key={automationId || name + '-' + kind}>
+                  <strong>{name}</strong>
+                  <span>{scheduleCopy} · {statusCopy}</span>
+                  <small>下次运行：{wwChannelFormatTime(item.next_run_at) || '尚未安排'}</small>
+                  <small>最近运行：{wwChannelFormatTime(item.last_run_at) || '尚未运行'}</small>
+                  {pauseReason && <small>暂停原因：{pauseReason}</small>}
+                </div>;
+              }) : <p className="ww-channel-empty-copy">还没有定时任务。</p>}
+              <p className="ww-channel-manage-note">
+                日程只属于当前对话，不能移动到其他对话。创建、修改或暂停请直接告诉当前 Agent。
+              </p>
+            </section>
 
             <section className="ww-channel-section">
               <div className="ww-channel-section-head"><h3>投递概览</h3></div>

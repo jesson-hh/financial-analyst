@@ -237,7 +237,12 @@ def _finish_awaitable(
         raise _ChannelToolInvocationError("channel_operation_unknown") from None
 
 
-def _invoke(method_name: str, *args: Any, unavailable_if_missing: bool = False) -> Any:
+def _invoke(
+    method_name: str,
+    *args: Any,
+    unavailable_if_missing: bool = False,
+    session_scoped: bool = True,
+) -> Any:
     current = _current_context()
     if current is None:
         return dict(_CONTEXT_FAILURE)
@@ -246,7 +251,10 @@ def _invoke(method_name: str, *args: Any, unavailable_if_missing: bool = False) 
     if not callable(method):
         return dict(_CAPABILITY_FAILURE if unavailable_if_missing else _CONTEXT_FAILURE)
     try:
-        result = method(sid, *args)
+        # Every session-owned operation receives the trusted CTX_SID first;
+        # schemas never let the model name another conversation.  The stable
+        # Skill registry is the sole global read and intentionally has no sid.
+        result = method(sid, *args) if session_scoped else method(*args)
         return _finish_awaitable(
             result, owner_loop=owner_loop, owner_thread_id=owner_thread_id
         )
@@ -488,7 +496,11 @@ def telegram_publish_impl(media_id: str = "", caption: str = "") -> dict[str, An
 
 
 def automation_skills_impl() -> dict[str, Any]:
-    result = _invoke("automation_skills", unavailable_if_missing=True)
+    result = _invoke(
+        "automation_skills",
+        unavailable_if_missing=True,
+        session_scoped=False,
+    )
     return result if isinstance(result, dict) else dict(_CAPABILITY_FAILURE)
 
 
@@ -601,6 +613,22 @@ def _safe_preview_text(value: object, *, limit: int) -> str:
     return text[:limit]
 
 
+def _exact_confirm_text(value: object) -> str:
+    """Keep an approved automation prompt byte-for-byte for human review.
+
+    Unlike list/status DTOs this value is shown only in the dedicated pending
+    confirmation card.  Returning a truncated or whitespace-folded version
+    would authorize content the user did not actually see.  Secret-shaped
+    input is still fail-closed by the Console argument guard; this second
+    check keeps direct/non-Console callers from accidentally rendering it.
+    """
+    if not isinstance(value, str) or "\x00" in value:
+        return ""
+    if _TOKEN_RE.search(value) or _PAIRING_CODE_RE.search(value):
+        return "[内容已隐藏]"
+    return value
+
+
 _CONFIRM_LABELS: dict[str, tuple[str, str, str]] = {
     "ww_telegram_pair_approve": (
         "telegram_pairing", "确认永久绑定 Telegram", "确认永久绑定"
@@ -704,10 +732,12 @@ def confirm_metadata(
             "run_at": _safe_preview_text(source.get("run_at"), limit=64),
             "local_time": _safe_preview_text(source.get("local_time"), limit=16),
             "timezone": _safe_preview_text(source.get("timezone"), limit=64),
-            "prompt_summary": _safe_preview_text(source.get("prompt_text"), limit=240),
+            # Exact prompt text is required: confirmation must cover the same
+            # content later persisted and run by the automation worker.
+            "prompt_text": _exact_confirm_text(source.get("prompt_text")),
             "skill_refs": [
                 _safe_preview_text(item, limit=96)
-                for item in (refs if isinstance(refs, list) else [])[:16]
+                for item in (refs if isinstance(refs, list) else [])
                 if _safe_preview_text(item, limit=96)
             ],
             "media_policy": _safe_preview_text(source.get("media_policy"), limit=32),
@@ -880,6 +910,7 @@ CHANNEL_TOOL_TABLE = [
                 "skill_refs": {
                     "type": "array",
                     "items": {"type": "string"},
+                    "maxItems": 16,
                     "description": "ww_automation_skills 返回的稳定 Skill 编号",
                 },
                 "media_policy": {

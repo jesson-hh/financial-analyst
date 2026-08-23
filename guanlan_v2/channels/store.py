@@ -296,6 +296,13 @@ ON outbox(binding_id, sequence, state, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_automation_due
 ON automations(enabled, next_run_at);
 
+CREATE INDEX IF NOT EXISTS idx_automation_run_claim
+ON automation_runs(status, lease_until, scheduled_for);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_automation_turn
+ON automation_runs(turn_id)
+WHERE turn_id IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_token_replacement_bot
 ON token_replacement_intents(bot_account_id);
 
@@ -445,6 +452,16 @@ _TOKEN_SHAPE_RE = re.compile(
 _PAIRING_CODE_SHAPE_RE = re.compile(
     r"(?<![0-9A-Z])[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}(?![0-9A-Z])"
 )
+_CHANNEL_ID_LABEL_RE = re.compile(
+    r"\b(?:telegram[_ -]?)?(?:chat|user)[_ -]?id\s*[:=]\s*-?[0-9]{5,20}\b",
+    re.IGNORECASE,
+)
+_LOCAL_PATH_RE = re.compile(
+    r"(?:\b[A-Za-z]:[\\/]|\\\\[^\\\s]+\\[^\\\s]+|file://|"
+    r"(?<![A-Za-z0-9])/(?:Users|home|etc|var|tmp|mnt|opt|root|srv)(?:/|\b))",
+    re.IGNORECASE,
+)
+_PROMPT_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _CREDENTIAL_ID_RE = re.compile(r"^cred_[0-9a-f]{32}$")
 _AUDIT_STATE_KEYS = {
     "status",
@@ -463,10 +480,25 @@ _FORBIDDEN_AUDIT_KEY_PARTS = ("token", "code", "text", "caption", "path", "url")
 _RECOVERABLE_FAULT_PAUSE_REASONS = frozenset(
     {"credential_invalid", "credential_unavailable", "poll_conflict"}
 )
+_UNSET = object()
 
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
+
+
+def _new_automation_id(prefix: str) -> str:
+    """Keep opaque schedule IDs outside the eight-character pairing shape.
+
+    Automation IDs are frequently serialized inside generic Agent tool-result
+    text, where key-aware redaction is unavailable.  Six-character entropy
+    groups separated by a lowercase marker ensure even adversarial UUID bytes
+    cannot accidentally form one contiguous eight-character pairing code.
+    """
+
+    entropy = uuid.uuid4().hex.lower()
+    grouped = "x".join(entropy[index:index + 6] for index in range(0, len(entropy), 6))
+    return f"{prefix}_{grouped}"
 
 
 @dataclass(frozen=True)
@@ -735,6 +767,23 @@ class ChannelStore:
         if _TOKEN_SHAPE_RE.search(text):
             raise ValueError(f"{field} must not contain a token-like secret")
         return text
+
+    @staticmethod
+    def _required_prompt_text(value: Any) -> str:
+        """Validate without rewriting the exact confirmed prompt bytes."""
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("prompt_text must be non-empty text")
+        if _PROMPT_CONTROL_RE.search(value) or len(value) > 50000:
+            raise ValueError("prompt_text length or content is invalid")
+        if _TOKEN_SHAPE_RE.search(value):
+            raise ValueError("prompt_text must not contain a token-like secret")
+        if (
+            _PAIRING_CODE_SHAPE_RE.search(value)
+            or _CHANNEL_ID_LABEL_RE.search(value)
+            or _LOCAL_PATH_RE.search(value)
+        ):
+            raise ValueError("prompt_text contains forbidden channel or local metadata")
+        return value
 
     @staticmethod
     def _optional_channel_text(value: Any, field: str) -> Optional[str]:
@@ -3396,7 +3445,7 @@ class ChannelStore:
         confirmed_at: datetime | str | None = None,
     ) -> Automation:
         zone = timezone_name or timezone or "Asia/Hong_Kong"
-        automation_id = _new_id("auto")
+        automation_id = _new_automation_id("auto")
         now = self._now()
         confirmed = now if confirmed_at is None else _aware_utc_iso(
             confirmed_at, field="confirmed_at"
@@ -3426,7 +3475,7 @@ class ChannelStore:
                         safe_local_time,
                         run_time,
                         self._required_text(zone, "timezone"),
-                        self._required_channel_text(prompt_text, "prompt_text"),
+                        self._required_prompt_text(prompt_text),
                         json.dumps(refs, ensure_ascii=False, separators=(",", ":")),
                         _enum_value(media_policy),
                         int(bool(enabled)),
@@ -3458,6 +3507,280 @@ class ChannelStore:
             raise ChannelNotFound(f"unknown automation: {entity_id}")
         return _automation_from_row(row)
 
+    def automation_for_session(
+        self, automation_id: Any, session_id: str
+    ) -> Automation:
+        """Read one schedule only when it belongs to the expected session."""
+        entity_id = _entity_id(automation_id)
+        sid = self._required_text(session_id, "session_id")
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM automations WHERE id = ? AND session_id = ?",
+                (entity_id, sid),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            # Do not disclose whether an ID exists in a different conversation.
+            raise ChannelNotFound("unknown automation for session")
+        return _automation_from_row(row)
+
+    def automations_for_session(self, session_id: str) -> list[Automation]:
+        sid = self._required_text(session_id, "session_id")
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM automations WHERE session_id = ? "
+                "ORDER BY created_at, id",
+                (sid,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [_automation_from_row(row) for row in rows]
+
+    def update_automation(
+        self,
+        automation_id: Any,
+        *,
+        expected_session_id: str,
+        name: str,
+        session_id: str,
+        schedule_kind: str,
+        prompt_text: str,
+        timezone_name: Optional[str] = None,
+        timezone: Optional[str] = None,
+        local_time: Optional[str] = None,
+        run_at: datetime | str | None = None,
+        skill_refs: Sequence[str] = (),
+        media_policy: str = "none",
+        enabled: bool = True,
+        pause_reason: Optional[str] = None,
+        next_run_at: datetime | str | None = None,
+        last_run_at: datetime | str | None = None,
+        last_status: Optional[str] = None,
+        misfire_grace_seconds: int = 21600,
+        created_by: Optional[str] = None,
+        confirmed_at: datetime | str | None = None,
+    ) -> Automation:
+        """Replace a confirmed definition without allowing a session move."""
+        entity_id = _entity_id(automation_id)
+        expected_sid = self._required_text(expected_session_id, "expected_session_id")
+        supplied_sid = self._required_text(session_id, "session_id")
+        if supplied_sid != expected_sid:
+            raise ChannelConflict("automation cannot move between sessions")
+        zone = timezone_name or timezone or "Asia/Hong_Kong"
+        now = self._now()
+        confirmed = now if confirmed_at is None else _aware_utc_iso(
+            confirmed_at, field="confirmed_at"
+        )
+        run_time = _optional_time(run_at, field="run_at")
+        next_time = _optional_time(next_run_at, field="next_run_at")
+        last_time = _optional_time(last_run_at, field="last_run_at")
+        refs = tuple(self._required_channel_text(ref, "skill_ref") for ref in skill_refs)
+        safe_local_time = self._optional_channel_text(local_time, "local_time")
+        safe_pause_reason = self._optional_safe_error(pause_reason, "pause_reason")
+        safe_last_status = self._optional_safe_error(last_status, "last_status")
+        safe_created_by = self._optional_channel_text(created_by, "created_by")
+        if isinstance(misfire_grace_seconds, bool) or int(misfire_grace_seconds) < 0:
+            raise ValueError("misfire_grace_seconds must be non-negative")
+        try:
+            with self._immediate() as conn:
+                current = conn.execute(
+                    "SELECT 1 FROM automations WHERE id = ? AND session_id = ?",
+                    (entity_id, expected_sid),
+                ).fetchone()
+                if current is None:
+                    raise ChannelNotFound("unknown automation for session")
+                # A newly confirmed definition supersedes queued occurrences of
+                # the previous definition.  Running/terminal evidence remains.
+                conn.execute(
+                    "UPDATE automation_runs SET status = 'cancelled', lease_owner = NULL, "
+                    "lease_until = NULL, ended_at = ?, error_class = 'definition_replaced' "
+                    "WHERE automation_id = ? AND status = 'queued'",
+                    (now, entity_id),
+                )
+                conn.execute(
+                    "UPDATE automations SET name = ?, schedule_kind = ?, local_time = ?, "
+                    "run_at = ?, timezone = ?, prompt_text = ?, skill_refs_json = ?, "
+                    "media_policy = ?, enabled = ?, pause_reason = ?, next_run_at = ?, "
+                    "last_run_at = ?, last_status = ?, misfire_grace_seconds = ?, "
+                    "created_by = ?, confirmed_at = ?, updated_at = ? "
+                    "WHERE id = ? AND session_id = ?",
+                    (
+                        self._required_channel_text(name, "name"),
+                        _enum_value(schedule_kind),
+                        safe_local_time,
+                        run_time,
+                        self._required_text(zone, "timezone"),
+                        self._required_prompt_text(prompt_text),
+                        json.dumps(refs, ensure_ascii=False, separators=(",", ":")),
+                        _enum_value(media_policy),
+                        int(bool(enabled)),
+                        safe_pause_reason,
+                        next_time,
+                        last_time,
+                        safe_last_status,
+                        int(misfire_grace_seconds),
+                        safe_created_by,
+                        confirmed,
+                        now,
+                        entity_id,
+                        expected_sid,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ChannelConflict("automation violates the durable schedule contract") from exc
+        return self.automation_for_session(entity_id, expected_sid)
+
+    upsert_automation = update_automation
+
+    def set_automation_enabled(
+        self,
+        automation_id: Any,
+        *,
+        expected_session_id: str,
+        enabled: bool,
+        pause_reason: Optional[str] = None,
+        last_status: Optional[str] | object = _UNSET,
+        next_run_at: datetime | str | None | object = _UNSET,
+        now: datetime | str | None = None,
+    ) -> Automation:
+        entity_id = _entity_id(automation_id)
+        sid = self._required_text(expected_session_id, "expected_session_id")
+        changed_at = self._now() if now is None else _aware_utc_iso(now, field="now")
+        safe_pause = self._optional_safe_error(pause_reason, "pause_reason")
+        status_value = (
+            _UNSET
+            if last_status is _UNSET
+            else self._optional_safe_error(last_status, "last_status")
+        )
+        next_value = (
+            _UNSET
+            if next_run_at is _UNSET
+            else _optional_time(next_run_at, field="next_run_at")
+        )
+        assignments = ["enabled = ?", "pause_reason = ?", "updated_at = ?"]
+        params: list[Any] = [int(bool(enabled)), safe_pause, changed_at]
+        if status_value is not _UNSET:
+            assignments.append("last_status = ?")
+            params.append(status_value)
+        if next_value is not _UNSET:
+            assignments.append("next_run_at = ?")
+            params.append(next_value)
+        params.extend([entity_id, sid])
+        with self._immediate() as conn:
+            result = conn.execute(
+                f"UPDATE automations SET {', '.join(assignments)} "
+                "WHERE id = ? AND session_id = ?",
+                tuple(params),
+            )
+            if result.rowcount != 1:
+                raise ChannelNotFound("unknown automation for session")
+            if not enabled:
+                conn.execute(
+                    "UPDATE automation_runs SET status = 'cancelled', lease_owner = NULL, "
+                    "lease_until = NULL, ended_at = ?, error_class = 'automation_paused' "
+                    "WHERE automation_id = ? AND status = 'queued'",
+                    (changed_at, entity_id),
+                )
+        return self.automation_for_session(entity_id, sid)
+
+    def delete_automation(
+        self, automation_id: Any, *, expected_session_id: str
+    ) -> bool:
+        entity_id = _entity_id(automation_id)
+        sid = self._required_text(expected_session_id, "expected_session_id")
+        now = self._now()
+        with self._immediate() as conn:
+            parent = conn.execute(
+                "SELECT 1 FROM automations WHERE id = ? AND session_id = ?",
+                (entity_id, sid),
+            ).fetchone()
+            if parent is None:
+                raise ChannelNotFound("unknown automation for session")
+            running = conn.execute(
+                "SELECT 1 FROM automation_runs WHERE automation_id = ? "
+                "AND status = 'running' LIMIT 1",
+                (entity_id,),
+            ).fetchone()
+            if running is not None:
+                raise ChannelConflict("running automation cannot be deleted")
+            conn.execute(
+                "UPDATE automation_runs SET status = 'cancelled', lease_owner = NULL, "
+                "lease_until = NULL, ended_at = ?, error_class = 'automation_deleted' "
+                "WHERE automation_id = ? AND status = 'queued'",
+                (now, entity_id),
+            )
+            conn.execute("DELETE FROM automation_runs WHERE automation_id = ?", (entity_id,))
+            result = conn.execute(
+                "DELETE FROM automations WHERE id = ? AND session_id = ?",
+                (entity_id, sid),
+            )
+            return result.rowcount == 1
+
+    def due_automations(
+        self,
+        now: datetime | str | None = None,
+        *,
+        limit: int = 256,
+    ) -> list[Automation]:
+        current = self._now() if now is None else _aware_utc_iso(now, field="now")
+        if isinstance(limit, bool) or not 1 <= int(limit) <= 10000:
+            raise ValueError("limit is out of range")
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM automations WHERE enabled = 1 AND next_run_at IS NOT NULL "
+                "AND next_run_at <= ? ORDER BY next_run_at, id LIMIT ?",
+                (current, int(limit)),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [_automation_from_row(row) for row in rows]
+
+    def advance_automation_schedule(
+        self,
+        automation_id: Any,
+        *,
+        expected_next_run_at: datetime | str,
+        next_run_at: datetime | str | None,
+        last_run_at: datetime | str | None = None,
+        last_status: Optional[str] = None,
+        disable: bool = False,
+        now: datetime | str | None = None,
+    ) -> Automation:
+        """Optimistically advance exactly the due definition one worker read."""
+        entity_id = _entity_id(automation_id)
+        expected = _aware_utc_iso(expected_next_run_at, field="expected_next_run_at")
+        following = _optional_time(next_run_at, field="next_run_at")
+        last_time = _optional_time(last_run_at, field="last_run_at")
+        safe_status = self._optional_safe_error(last_status, "last_status")
+        changed_at = self._now() if now is None else _aware_utc_iso(now, field="now")
+        with self._immediate() as conn:
+            result = conn.execute(
+                "UPDATE automations SET next_run_at = ?, "
+                "last_run_at = COALESCE(?, last_run_at), "
+                "last_status = COALESCE(?, last_status), "
+                "enabled = CASE WHEN ? THEN 0 ELSE enabled END, "
+                "pause_reason = CASE WHEN ? THEN COALESCE(?, 'completed') ELSE pause_reason END, "
+                "updated_at = ? WHERE id = ? AND enabled = 1 AND next_run_at = ?",
+                (
+                    following,
+                    last_time,
+                    safe_status,
+                    int(bool(disable)),
+                    int(bool(disable)),
+                    safe_status,
+                    changed_at,
+                    entity_id,
+                    expected,
+                ),
+            )
+            if result.rowcount != 1:
+                raise ChannelConflict("automation schedule was advanced concurrently")
+        return self.automation(entity_id)
+
     def create_automation_run(
         self,
         automation_id: Any,
@@ -3465,7 +3788,7 @@ class ChannelStore:
     ) -> AutomationRun:
         parent_id = _entity_id(automation_id)
         occurrence = _aware_utc_iso(scheduled_for, field="scheduled_for")
-        run_id = _new_id("arun")
+        run_id = _new_automation_id("arun")
         with self._immediate() as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO automation_runs "
@@ -3507,6 +3830,362 @@ class ChannelStore:
         finally:
             conn.close()
         return [_automation_run_from_row(row) for row in rows]
+
+    def automation_runs_for_session(
+        self,
+        session_id: str,
+        *,
+        statuses: Sequence[AutomationRunStatus | str] | None = None,
+    ) -> list[AutomationRun]:
+        sid = self._required_text(session_id, "session_id")
+        values: tuple[str, ...] = ()
+        sql = (
+            "SELECT r.* FROM automation_runs r JOIN automations a "
+            "ON a.id = r.automation_id WHERE a.session_id = ?"
+        )
+        params: list[Any] = [sid]
+        if statuses is not None:
+            values = tuple(AutomationRunStatus(_enum_value(item)).value for item in statuses)
+            if not values:
+                return []
+            sql += f" AND r.status IN ({','.join('?' for _ in values)})"
+            params.extend(values)
+        sql += " ORDER BY r.scheduled_for, r.id"
+        conn = self.connect()
+        try:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+        finally:
+            conn.close()
+        return [_automation_run_from_row(row) for row in rows]
+
+    def mark_automation_run_missed(
+        self,
+        automation_run_id: Any,
+        *,
+        error_class: str = "misfire_grace_exceeded",
+        now: datetime | str | None = None,
+    ) -> AutomationRun:
+        entity_id = _entity_id(automation_run_id)
+        safe_error = self._optional_safe_error(error_class, "error_class")
+        changed_at = self._now() if now is None else _aware_utc_iso(now, field="now")
+        with self._immediate() as conn:
+            row = conn.execute(
+                "SELECT status, automation_id, scheduled_for FROM automation_runs WHERE id = ?",
+                (entity_id,),
+            ).fetchone()
+            if row is None:
+                raise ChannelNotFound(f"unknown automation run: {entity_id}")
+            if row["status"] != AutomationRunStatus.MISSED.value \
+                    and row["status"] != AutomationRunStatus.QUEUED.value:
+                raise InvalidTransition(
+                    f"invalid automation_run transition: {row['status']} -> missed"
+                )
+            if row["status"] == AutomationRunStatus.QUEUED.value:
+                conn.execute(
+                    "UPDATE automation_runs SET status = 'missed', lease_owner = NULL, "
+                    "lease_until = NULL, ended_at = ?, error_class = ? WHERE id = ?",
+                    (changed_at, safe_error, entity_id),
+                )
+                conn.execute(
+                    "UPDATE automations SET last_run_at = ?, last_status = 'missed', "
+                    "updated_at = ? WHERE id = ?",
+                    (row["scheduled_for"], changed_at, row["automation_id"]),
+                )
+        return self.automation_run(entity_id)
+
+    def claim_automation_runs(
+        self,
+        *,
+        lease_owner: str,
+        now: datetime | str | None = None,
+        lease_seconds: int = 60,
+        limit: int = 32,
+    ) -> list[AutomationRun]:
+        """Atomically lease queued occurrences to one scheduler."""
+        owner = self._required_text(lease_owner, "lease_owner")
+        if isinstance(lease_seconds, bool) or not 1 <= int(lease_seconds) <= 300:
+            raise ValueError("lease_seconds must be between 1 and 300")
+        if isinstance(limit, bool) or not 1 <= int(limit) <= 1000:
+            raise ValueError("limit is out of range")
+        current_dt = (
+            datetime.fromisoformat(self._now())
+            if now is None
+            else datetime.fromisoformat(_aware_utc_iso(now, field="now"))
+        )
+        current = current_dt.isoformat(timespec="microseconds")
+        lease_until = (current_dt + timedelta(seconds=int(lease_seconds))).isoformat(
+            timespec="microseconds"
+        )
+        claimed: list[AutomationRun] = []
+        with self._immediate() as conn:
+            rows = conn.execute(
+                "SELECT id FROM automation_runs WHERE status = 'queued' "
+                "AND (lease_owner IS NULL OR lease_until IS NULL OR lease_until <= ? "
+                "OR lease_owner = ?) ORDER BY scheduled_for, id LIMIT ?",
+                (current, owner, int(limit)),
+            ).fetchall()
+            for row in rows:
+                result = conn.execute(
+                    "UPDATE automation_runs SET lease_owner = ?, lease_until = ? "
+                    "WHERE id = ? AND status = 'queued' "
+                    "AND (lease_owner IS NULL OR lease_until IS NULL OR lease_until <= ? "
+                    "OR lease_owner = ?)",
+                    (owner, lease_until, row["id"], current, owner),
+                )
+                if result.rowcount != 1:
+                    continue
+                claimed_row = conn.execute(
+                    "SELECT * FROM automation_runs WHERE id = ?", (row["id"],)
+                ).fetchone()
+                if claimed_row is not None:
+                    claimed.append(_automation_run_from_row(claimed_row))
+        return claimed
+
+    claim_due_automation_runs = claim_automation_runs
+
+    def renew_automation_run_lease(
+        self,
+        automation_run_id: Any,
+        *,
+        lease_owner: str,
+        lease_seconds: int = 60,
+        now: datetime | str | None = None,
+    ) -> bool:
+        entity_id = _entity_id(automation_run_id)
+        owner = self._required_text(lease_owner, "lease_owner")
+        if isinstance(lease_seconds, bool) or not 1 <= int(lease_seconds) <= 300:
+            raise ValueError("lease_seconds must be between 1 and 300")
+        current_dt = (
+            datetime.fromisoformat(self._now())
+            if now is None
+            else datetime.fromisoformat(_aware_utc_iso(now, field="now"))
+        )
+        current = current_dt.isoformat(timespec="microseconds")
+        lease_until = (current_dt + timedelta(seconds=int(lease_seconds))).isoformat(
+            timespec="microseconds"
+        )
+        with self._immediate() as conn:
+            result = conn.execute(
+                "UPDATE automation_runs SET lease_until = ? WHERE id = ? "
+                "AND status IN ('queued', 'running') AND lease_owner = ? "
+                "AND lease_until > ?",
+                (lease_until, entity_id, owner, current),
+            )
+            return result.rowcount == 1
+
+    def renew_automation_run_leases(
+        self,
+        *,
+        lease_owner: str,
+        lease_seconds: int = 60,
+        now: datetime | str | None = None,
+    ) -> int:
+        owner = self._required_text(lease_owner, "lease_owner")
+        if isinstance(lease_seconds, bool) or not 1 <= int(lease_seconds) <= 300:
+            raise ValueError("lease_seconds must be between 1 and 300")
+        current_dt = (
+            datetime.fromisoformat(self._now())
+            if now is None
+            else datetime.fromisoformat(_aware_utc_iso(now, field="now"))
+        )
+        current = current_dt.isoformat(timespec="microseconds")
+        lease_until = (current_dt + timedelta(seconds=int(lease_seconds))).isoformat(
+            timespec="microseconds"
+        )
+        with self._immediate() as conn:
+            result = conn.execute(
+                "UPDATE automation_runs SET lease_until = ? WHERE lease_owner = ? "
+                "AND status IN ('queued', 'running') AND lease_until > ?",
+                (lease_until, owner, current),
+            )
+            return int(result.rowcount)
+
+    def release_automation_run_claim(
+        self, automation_run_id: Any, *, lease_owner: str
+    ) -> bool:
+        entity_id = _entity_id(automation_run_id)
+        owner = self._required_text(lease_owner, "lease_owner")
+        with self._immediate() as conn:
+            result = conn.execute(
+                "UPDATE automation_runs SET lease_owner = NULL, lease_until = NULL "
+                "WHERE id = ? AND status = 'queued' AND lease_owner = ?",
+                (entity_id, owner),
+            )
+            return result.rowcount == 1
+
+    def release_automation_run_claims(self, *, lease_owner: str) -> int:
+        """Release this scheduler's leases without changing running evidence."""
+        owner = self._required_text(lease_owner, "lease_owner")
+        with self._immediate() as conn:
+            result = conn.execute(
+                "UPDATE automation_runs SET lease_owner = NULL, lease_until = NULL "
+                "WHERE lease_owner = ? AND status IN ('queued', 'running')",
+                (owner,),
+            )
+            return int(result.rowcount)
+
+    def recover_expired_automation_claims(
+        self, *, now: datetime | str | None = None
+    ) -> int:
+        current = self._now() if now is None else _aware_utc_iso(now, field="now")
+        with self._immediate() as conn:
+            result = conn.execute(
+                "UPDATE automation_runs SET lease_owner = NULL, lease_until = NULL "
+                "WHERE status = 'queued' AND lease_owner IS NOT NULL "
+                "AND (lease_until IS NULL OR lease_until <= ?)",
+                (current,),
+            )
+            return int(result.rowcount)
+
+    def start_automation_run(
+        self,
+        automation_run_id: Any,
+        *,
+        lease_owner: str,
+        turn_id: str,
+        lease_seconds: int = 60,
+        now: datetime | str | None = None,
+    ) -> AutomationRun | None:
+        entity_id = _entity_id(automation_run_id)
+        owner = self._required_text(lease_owner, "lease_owner")
+        safe_turn = self._required_text(turn_id, "turn_id")
+        if isinstance(lease_seconds, bool) or not 1 <= int(lease_seconds) <= 300:
+            raise ValueError("lease_seconds must be between 1 and 300")
+        current_dt = (
+            datetime.fromisoformat(self._now())
+            if now is None
+            else datetime.fromisoformat(_aware_utc_iso(now, field="now"))
+        )
+        current = current_dt.isoformat(timespec="microseconds")
+        lease_until = (current_dt + timedelta(seconds=int(lease_seconds))).isoformat(
+            timespec="microseconds"
+        )
+        try:
+            with self._immediate() as conn:
+                result = conn.execute(
+                    "UPDATE automation_runs SET status = 'running', turn_id = ?, "
+                    "lease_until = ?, started_at = ?, error_class = NULL WHERE id = ? "
+                    "AND status = 'queued' AND lease_owner = ? AND lease_until > ?",
+                    (safe_turn, lease_until, current, entity_id, owner, current),
+                )
+                if result.rowcount != 1:
+                    return None
+        except sqlite3.IntegrityError as exc:
+            raise ChannelConflict("turn already belongs to an automation run") from exc
+        return self.automation_run(entity_id)
+
+    def running_automation_runs(
+        self,
+        *,
+        lease_owner: str | None = None,
+        now: datetime | str | None = None,
+        recoverable_only: bool = False,
+        include_live_owner: bool = True,
+    ) -> list[AutomationRun]:
+        sql = "SELECT * FROM automation_runs WHERE status = 'running'"
+        params: list[Any] = []
+        if recoverable_only:
+            if lease_owner is None:
+                raise ValueError("recoverable_only requires lease_owner")
+            owner = self._required_text(lease_owner, "lease_owner")
+            current = self._now() if now is None else _aware_utc_iso(now, field="now")
+            if include_live_owner:
+                sql += (
+                    " AND (lease_owner = ? OR lease_owner IS NULL OR lease_until IS NULL "
+                    "OR lease_until <= ?)"
+                )
+                params.extend([owner, current])
+            else:
+                sql += (
+                    " AND (lease_owner IS NULL OR lease_until IS NULL OR lease_until <= ?)"
+                )
+                params.append(current)
+        elif lease_owner is not None:
+            sql += " AND lease_owner = ?"
+            params.append(self._required_text(lease_owner, "lease_owner"))
+        sql += " ORDER BY scheduled_for, id"
+        conn = self.connect()
+        try:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+        finally:
+            conn.close()
+        return [_automation_run_from_row(row) for row in rows]
+
+    def finish_automation_run(
+        self,
+        automation_run_id: Any,
+        *,
+        turn_id: str | None,
+        ok: bool,
+        final_event_id: int | None = None,
+        error_class: str | None = None,
+        now: datetime | str | None = None,
+    ) -> AutomationRun | None:
+        """Idempotently converge the exact Console turn to one terminal state."""
+        entity_id = _entity_id(automation_run_id)
+        safe_turn = self._optional_channel_text(turn_id, "turn_id")
+        if final_event_id is not None and (
+            isinstance(final_event_id, bool)
+            or not isinstance(final_event_id, int)
+            or final_event_id < 0
+        ):
+            raise ValueError("final_event_id must be a non-negative integer")
+        target = AutomationRunStatus.DONE if bool(ok) else AutomationRunStatus.ERROR
+        safe_error = None if ok else self._optional_safe_error(
+            error_class or "automation_turn_failed", "error_class"
+        )
+        if ok and error_class is not None:
+            raise ValueError("successful automation run cannot carry error_class")
+        changed_at = self._now() if now is None else _aware_utc_iso(now, field="now")
+        with self._immediate() as conn:
+            row = conn.execute(
+                "SELECT * FROM automation_runs WHERE id = ?", (entity_id,)
+            ).fetchone()
+            if row is None:
+                raise ChannelNotFound(f"unknown automation run: {entity_id}")
+            current = AutomationRunStatus(row["status"])
+            if current in {
+                AutomationRunStatus.DONE,
+                AutomationRunStatus.ERROR,
+                AutomationRunStatus.MISSED,
+                AutomationRunStatus.CANCELLED,
+            }:
+                # Duplicate terminal callbacks are safe and cannot rewrite the
+                # original decision or attach a different Console turn.
+                if safe_turn is None or row["turn_id"] == safe_turn:
+                    return _automation_run_from_row(row)
+                return None
+            if current is not AutomationRunStatus.RUNNING:
+                return None
+            if safe_turn is None or row["turn_id"] != safe_turn:
+                return None
+            conn.execute(
+                "UPDATE automation_runs SET status = ?, final_event_id = ?, "
+                "lease_owner = NULL, lease_until = NULL, ended_at = ?, error_class = ? "
+                "WHERE id = ? AND status = 'running' AND turn_id = ?",
+                (
+                    target.value,
+                    final_event_id,
+                    changed_at,
+                    safe_error,
+                    entity_id,
+                    safe_turn,
+                ),
+            )
+            conn.execute(
+                "UPDATE automations SET last_run_at = ?, last_status = ?, "
+                "enabled = CASE WHEN schedule_kind = 'once' THEN 0 ELSE enabled END, "
+                "pause_reason = CASE WHEN schedule_kind = 'once' THEN ? ELSE pause_reason END, "
+                "updated_at = ? WHERE id = ?",
+                (
+                    row["scheduled_for"],
+                    target.value,
+                    "completed" if ok else "error",
+                    changed_at,
+                    row["automation_id"],
+                ),
+            )
+        return self.automation_run(entity_id)
 
     def transition_automation_run(
         self,
