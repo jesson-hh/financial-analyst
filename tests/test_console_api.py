@@ -1201,13 +1201,14 @@ def test_steer_resolves_pending_confirm_before_continuation(tmp_path, monkeypatc
             frame = next(response.iter_text()).split("\n\n", 1)[0]
         runtime = json.loads(frame.split("data: ", 1)[1])["runtime"]
         assert runtime["pending_confirm_turn_id"] == old_turn
-        assert runtime["pending_confirm"] == {
-            "turn_id": old_turn,
-            "tool": "ww_seats_decide",
-            "args": {"code": "300750"},
-            "precheck": ["只读预检"],
-            "facts": ["安全公共事实"],
-        }
+        pending_confirm = runtime["pending_confirm"]
+        assert pending_confirm["turn_id"] == old_turn
+        assert isinstance(pending_confirm["confirm_id"], str)
+        assert len(pending_confirm["confirm_id"]) == 32
+        assert pending_confirm["tool"] == "ww_seats_decide"
+        assert pending_confirm["args"] == {"code": "300750"}
+        assert pending_confirm["precheck"] == ["只读预检"]
+        assert pending_confirm["facts"] == ["安全公共事实"]
         assert c.post("/console/steer", json={"sid": sid, "text": "不要落子，只总结"}).status_code == 202
         evs = _wait(store, sid, lambda es: len([
             e for e in es if e["type"] == "task_update" and e.get("status") == "done"
@@ -2534,12 +2535,28 @@ def test_review_fork_blocks_nonwhitelisted_tool(monkeypatch):
     assert called["screen"] is False                        # ② screen_impl 没被真正调用
 
 
-def test_system_prompt_names_all_ww_tools():
-    """#3 守护:每个 ww_ 工具名都必须在 _SYSTEM_PROMPT 出现(防提示词↔工具表漂移)。"""
+def test_system_prompt_names_all_console_ww_tools():
+    """#3 守护:每个 Console ww_ 工具名都必须在 Prompt 出现。"""
     from guanlan_v2.console.api import _SYSTEM_PROMPT
     import guanlan_v2.console.tools as ct
-    missing = [t["name"] for t in ct.WW_TOOL_TABLE if t["name"] not in _SYSTEM_PROMPT]
+    missing = [
+        t["name"] for t in ct.ALL_CONSOLE_TOOL_TABLE
+        if t["name"] not in _SYSTEM_PROMPT
+    ]
     assert missing == [], f"这些 ww_ 工具未在系统提示词具名: {missing}"
+
+
+def test_system_prompt_locks_telegram_secret_pairing_and_delivery_contract():
+    from guanlan_v2.console.api import _SYSTEM_PROMPT
+
+    assert "安全输入卡" in _SYSTEM_PROMPT and "/console/send" in _SYSTEM_PROMPT
+    assert "永远不能把 Token 放入工具参数、读取、复述、导出" in _SYSTEM_PROMPT
+    assert "绝不在思考、回答、摘要" in _SYSTEM_PROMPT
+    assert "永久的一对一绑定" in _SYSTEM_PROMPT
+    assert "只有只读出站镜像" in _SYSTEM_PROMPT and "不能控制 Agent" in _SYSTEM_PROMPT
+    assert "media_id" in _SYSTEM_PROMPT and "不能传本地路径" in _SYSTEM_PROMPT
+    assert "执行时间、时区、任务内容、Skill refs 和媒体策略" in _SYSTEM_PROMPT
+    assert "不得声称 exactly-once" in _SYSTEM_PROMPT
 
 
 def test_system_prompt_routes_news_collect():

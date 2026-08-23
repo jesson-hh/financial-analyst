@@ -17,6 +17,14 @@ const WW_TOOL_CN = {
   wisdom_search: '经验检索', quant_reports: '量化报告',
   ww_report_run: '深度研报', ww_show_page: '调出界面', ww_cards_save: '沉淀经验卡',
   ww_memory_read: '读记忆', ww_memory_write: '记一笔', ww_seats_history: '研判历史',
+  ww_telegram_connect: '连接 Telegram', ww_telegram_status: 'Telegram 状态',
+  ww_telegram_pair_status: 'Telegram 配对请求', ww_telegram_pair_approve: '永久绑定 Telegram',
+  ww_telegram_pair_dismiss: '忽略 Telegram 配对', ww_telegram_pause: '暂停 Telegram',
+  ww_telegram_resume: '恢复 Telegram', ww_telegram_disconnect: '解除 Telegram 绑定',
+  ww_telegram_publish: '发送图片到 Telegram', ww_automation_skills: '定时任务能力',
+  ww_automation_list: '定时任务列表', ww_automation_upsert: '保存定时任务',
+  ww_automation_pause: '暂停定时任务', ww_automation_resume: '恢复定时任务',
+  ww_automation_delete: '删除定时任务',
 };
 
 // 页面注册表:artifact.page → 嵌入目标(channel 与各页 take() 通道一致)
@@ -322,14 +330,36 @@ function wwCancel(sid) {
   return wwTurnControl('/console/cancel', { sid }, '停止服务不可达');
 }
 
-async function wwConfirm(turnId, choice) {
-  try {
-    const r = await fetch(WW_API + '/console/confirm', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ turn_id: turnId, choice }),
-    });
-    return r.json();
-  } catch (e) { return { ok: false, reason: '确认服务不可达' }; }
+async function wwConfirm(confirm, choice) {
+  const pending = confirm && typeof confirm === 'object'
+    ? confirm : { turn_id: String(confirm || '') };
+  const turnId = String(pending.turn_id || '');
+  const confirmId = String(pending.confirm_id || '');
+  const actionTicketRequired = pending.action_ticket_required === true;
+  if (!turnId) return { ok: false, reason: '确认实例无效，请等待状态刷新' };
+
+  const body = { turn_id: turnId, choice };
+  if (actionTicketRequired) {
+    // Channel/automation confirmations are instance-scoped.  Even a rejection
+    // carries confirm_id so a stale modal cannot resolve a newer confirmation
+    // that happens to reuse the same turn/tool.
+    if (!confirmId) return { ok: false, reason: '安全确认实例已失效，请等待状态刷新' };
+    body.confirm_id = confirmId;
+    const affirmative = ['y', 'a', 'yes', 'always'].indexOf(String(choice || '').toLowerCase()) >= 0;
+    if (affirmative) {
+      const issued = await wwTurnControl('/console/confirm/request-token', {
+        turn_id: turnId, confirm_id: confirmId,
+      }, '安全确认票据服务不可达');
+      const requestToken = issued && typeof issued.request_token === 'string'
+        ? issued.request_token : '';
+      if (!issued || issued.ok !== true || !requestToken) {
+        return { ...(issued || {}), ok: false,
+          reason: (issued && issued.reason) || '未取得安全确认票据，请重试' };
+      }
+      body.request_token = requestToken;
+    }
+  }
+  return wwTurnControl('/console/confirm', body, '确认服务不可达');
 }
 
 async function wwSessions() {

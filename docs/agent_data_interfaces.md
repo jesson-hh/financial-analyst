@@ -5,14 +5,15 @@
 # 观澜 · agent 数据/操作接口总览
 
 给外部数据 agent(MCP 客户端)与帷幄内置 agent 的完整接口地图。
-工具清单与计数**派生自 `WW_TOOL_TABLE`**(guanlan_v2/console/tools.py 单一声明源),
+Console 工具清单与计数派生自 `ALL_CONSOLE_TOOL_TABLE`（冻结的 legacy
+`WW_TOOL_TABLE` + 会话私有 `CHANNEL_TOOL_TABLE`）；MCP 只从 legacy 表派生。
 本文档由生成器再生,不会漂移。
 
 ## 1. 接入通道
 
 | 通道 | 方式 | 说明 |
 |---|---|---|
-| 帷幄 console | 9999 `/console` 会话 | 内置 agent,白名单 CONSOLE_ALLOWED = 101 工具(76 个 ww_* + 25 个精选引擎工具);写类工具走会话内确认弹窗 |
+| 帷幄 console | 9999 `/console` 会话 | 内置 agent,白名单 CONSOLE_ALLOWED = 116 工具(91 个 Console 声明工具 = 76 个 legacy + 15 个通道工具，另有 25 个精选引擎工具);写类工具走会话内确认弹窗 |
 | MCP over HTTP | `http://127.0.0.1:9999/gl-mcp/` | streamable-HTTP。**必须带尾斜杠**:裸 `/gl-mcp` 的 POST 会被 307 重定向,多数客户端握手即败 |
 | MCP over stdio | `python -m guanlan_v2.glmcp` | 本地客户端拉起;配置样例 guanlan_v2/glmcp/example.mcp.json |
 | 直连 HTTP | 见 §4 端点全集 | 127.0.0.1 无鉴权;协程内严禁同步 IO 的路由全部 `asyncio.to_thread` 包装 |
@@ -110,8 +111,32 @@
 
 - 读写列:`只读` / `写(锁)` = 需 `GUANLAN_MCP_WRITE=1` / `写(不锁)` = 低危例外。
 - `[引擎]` = alpha-zoo 研究工具(经引擎 TOOL_REGISTRY,不走 ww 池)。
-- console-UI-only 不进 MCP 的工具:`ww_plan_update` / `ww_seats_bind` / `ww_show_page` —— 依赖前端 `window.GL`/会话右栏落地,
+- legacy console-UI-only 不进 MCP 的工具:`ww_plan_update` / `ww_seats_bind` / `ww_show_page` —— 依赖前端 `window.GL`/会话右栏落地,
   MCP 语境调了也不会发生任何事(空转假成功),诚实排除;要用请走帷幄 console。
+
+## 2.1 Console 私有 Telegram/automation 工具（共 15 个）
+
+这些工具只绑定当前帷幄对话，模型参数不能选择会话、Bot、Telegram 用户/私聊或本地路径；
+全部 `CHANNEL_TOOL_NAMES` 都被 defense-in-depth 加入 MCP `_EXCLUDED`，外部 ChatGPT MCP
+即使构造同名调用也只会收到“未知工具”。密钥只走安全输入卡/服务端截流，不是 Agent 工具参数。
+
+| 工具 | 说明 | 读写 | 作用域 |
+|---|---|---|---|
+| `ww_telegram_connect` | 为当前帷幄对话创建 Telegram 连接草稿；仅接收用户自定义名称，密钥另走安全卡。 | 只读/安全建草稿 | 当前 Console 对话 |
+| `ww_telegram_status` | 读取当前对话的 Telegram 连接与投递摘要。 | 只读/安全建草稿 | 当前 Console 对话 |
+| `ww_telegram_pair_status` | 读取当前 Bot 的待确认私聊配对请求。 | 只读/安全建草稿 | 当前 Console 对话 |
+| `ww_telegram_pair_approve` | 用用户提供的临时配对码确认当前对话的永久一对一绑定。 | 写(确认) | 当前 Console 对话 |
+| `ww_telegram_pair_dismiss` | 忽略当前 Bot 下一个错误或恶意的待配对请求。 | 写(确认) | 当前 Console 对话 |
+| `ww_telegram_pause` | 暂停当前对话的 Telegram 出站镜像。 | 写(确认) | 当前 Console 对话 |
+| `ww_telegram_resume` | 恢复当前对话中人为暂停的 Telegram 出站镜像。 | 写(确认) | 当前 Console 对话 |
+| `ww_telegram_disconnect` | 解除当前对话的 Telegram 永久绑定，不删除帷幄历史。 | 写(确认) | 当前 Console 对话 |
+| `ww_telegram_publish` | 把当前对话 MediaStore 中已校验的图片显式发送到唯一绑定。 | 写(确认) | 当前 Console 对话 |
+| `ww_automation_skills` | 列出通道定时任务可引用的内置 Skill。 | 只读/安全建草稿 | 当前 Console 对话 |
+| `ww_automation_list` | 列出当前对话的定时任务与下次运行摘要。 | 只读/安全建草稿 | 当前 Console 对话 |
+| `ww_automation_upsert` | 为当前对话创建或修改定时任务；保存前完整复述时间、时区、内容、Skill 与媒体策略。 | 写(确认) | 当前 Console 对话 |
+| `ww_automation_pause` | 暂停当前对话中的一个定时任务。 | 写(确认) | 当前 Console 对话 |
+| `ww_automation_resume` | 恢复当前对话中的一个定时任务。 | 写(确认) | 当前 Console 对话 |
+| `ww_automation_delete` | 删除当前对话中的一个定时任务。 | 写(确认) | 当前 Console 对话 |
 
 ## 3. 数据面导览(数据类工具背后是什么)
 

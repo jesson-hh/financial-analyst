@@ -2,7 +2,7 @@
 """agent 接口文档漂移守护。
 
 docs/agent_data_interfaces.md 由 scripts/gen_agent_interface_doc.py 全文生成
-(工具清单/计数/端点全集派生自 WW_TOOL_TABLE 与 glmcp tooltable,手写段落住在生成器模板里)。
+(Console 清单从 aggregate、MCP 从 legacy WW_TOOL_TABLE/tooltable 派生)。
 本守护保证:①盘上文档与生成器输出逐字一致(改了工具表没再生 → 红);
 ②文档覆盖全部 MCP 工具与关键接入坑。glmcp README 教训:手抄计数必腐烂(58 vs 实际 64)。
 """
@@ -44,6 +44,10 @@ def test_doc_covers_all_mcp_tools_and_counts():
     # 计数全部动态派生,任何一处硬编都会在表变动时经同步测试翻红
     assert f"共 {len(tools)} 个" in body
     assert f"{len(ct.WW_TOOL_TABLE)}" in body
+    assert f"{len(ct.ALL_CONSOLE_TOOL_TABLE)}" in body
+    assert f"共 {len(ct.CHANNEL_TOOL_TABLE)} 个" in body
+    for tool in ct.CHANNEL_TOOL_TABLE:
+        assert f"`{tool['name']}`" in body
     # console-UI-only 排除名单也要显形(告诉外部客户端为什么 MCP 里没有)
     for name in tt._EXCLUDED:
         assert f"`{name}`" in body

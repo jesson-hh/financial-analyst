@@ -93,7 +93,7 @@ def test_console_confirm_can_atomically_steer_without_keyboard_accidents():
     assert "target.isContentEditable" in thread
     assert "key === 'escape'" in thread and "resolve('n')" in thread
     assert "onSteer={onSend}" in thread
-    assert "key={state.confirm.turn_id || 'confirm'}" in thread
+    assert "state.confirm.confirm_id || 'legacy'" in thread
 
 
 def test_console_turn_scopes_interruption_and_nonterminal_errors():
@@ -356,3 +356,31 @@ def test_console_media_image_uses_only_backend_opaque_id_and_has_complete_card_s
     assert 'role="dialog"' in thread and 'aria-modal="true"' in thread
     assert "item.width" in thread and "item.height" in thread
     assert "userSelect: 'text'" in thread
+
+
+def test_channel_confirmation_uses_instance_ticket_and_exact_recipient_card():
+    data = _read("console-data.jsx")
+    app = _read("console-app.jsx")
+    thread = _read("console-thread.jsx")
+    rail = _read("console-rail.jsx")
+
+    confirm = data.split("async function wwConfirm(confirm, choice)", 1)[1].split(
+        "async function wwSessions", 1
+    )[0]
+    assert "pending.action_ticket_required === true" in confirm
+    assert "'/console/confirm/request-token'" in confirm
+    assert "turn_id: turnId, confirm_id: confirmId" in confirm
+    assert "body.confirm_id = confirmId" in confirm
+    assert "body.request_token = requestToken" in confirm
+    assert "return wwTurnControl('/console/confirm', body" in confirm
+    assert "WW.confirm(state.confirm, c)" in app
+
+    assert "c.action_ticket_required === true" in thread
+    assert "c.public_details" in thread
+    assert "details.telegram_user_id" in thread
+    assert "details.recipient_verified === true" in thread
+    assert "requiresExactPairing = c.tool === 'ww_telegram_pair_approve'" in thread
+    assert "c.approve_label || '同意 · 一次'" in thread
+    assert "配对码本身不会显示" in thread
+    assert "state.confirm.confirm_id || 'legacy'" in thread
+    assert "已连接 Telegram" in rail and "channel_summary" in rail

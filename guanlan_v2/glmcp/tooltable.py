@@ -5,12 +5,15 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Dict, List
 
+from guanlan_v2.channels.agent_tools import CHANNEL_TOOL_NAMES
 from guanlan_v2.console.workspace_tools import ALL_WORKSPACE_TOOLS
 
 # console-UI-only(改会话计划/往右栏弹页面)与前端信封类(靠 window.GL 落地,MCP 语境=空转假成功)
 # → 不暴露。ww_report_run/ww_etf_report_run 不在此列:其 background 信封经 dispatch_tool 的
 # _spawn_background_detached detached 子进程真跑(见 server.py)。
-_EXCLUDED = {"ww_plan_update", "ww_show_page", "ww_seats_bind"}
+_EXCLUDED = {
+    "ww_plan_update", "ww_show_page", "ww_seats_bind",
+} | set(CHANNEL_TOOL_NAMES)
 # 引擎 alpha-zoo 研究线(已在 CONSOLE_ALLOWED 放行)
 _ALPHA_ZOO = ["alpha_list", "alpha_show", "alpha_compare", "alpha_bench",
               "event_report", "alpha_forge", "factor_report"]

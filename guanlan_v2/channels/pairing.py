@@ -677,12 +677,12 @@ class TelegramPairingService:
         finally:
             token = ""
 
-    async def approve_pairing_code(self, session_id: str, code: str):
-        """Resolve a code only within the current session's current Bot.
+    async def resolve_pairing_code(self, session_id: str, code: str):
+        """Resolve, but do not approve, one exact current-session challenge.
 
         Agent tools intentionally do not receive request, Bot, chat, or user
         identifiers.  We derive every candidate digest (never select by the
-        two-character display hint), and proceed only when exactly one
+        two-character display hint), and return only when exactly one
         unexpired current-generation challenge matches.
         """
         sid = self._require_writable_session(session_id)
@@ -754,7 +754,12 @@ class TelegramPairingService:
                 matches.append(request)
         if len(matches) != 1:
             raise PairingError("pairing_code_invalid")
-        return await self.approve_pairing(sid, matches[0].id, code)
+        return matches[0]
+
+    async def approve_pairing_code(self, session_id: str, code: str):
+        """Approve the exact challenge resolved from the current session."""
+        request = await self.resolve_pairing_code(session_id, code)
+        return await self.approve_pairing(session_id, request.id, code)
 
     def dismiss_pairing(self, session_id: str, pairing_request_id: str):
         try:

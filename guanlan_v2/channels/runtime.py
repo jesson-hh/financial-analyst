@@ -788,6 +788,31 @@ class ChannelRuntime:
         except PairingError as error:
             raise ChannelRuntimeError(error.reason_code) from None
 
+    async def resolve_pairing_code(self, session_id: str, code: str) -> dict[str, Any]:
+        """Return a secret-free preview for the exact scrypt-matched request.
+
+        This performs no approval and persists nothing.  It exists so the
+        Console confirmation card names the precise private recipient instead
+        of guessing from the two-character display hint when several requests
+        are pending.
+        """
+        from guanlan_v2.channels.pairing import PairingError
+
+        self._require_session(session_id, writable=True)
+        try:
+            request = await self.pairing.resolve_pairing_code(session_id, code)
+        except PairingError as error:
+            raise ChannelRuntimeError(error.reason_code) from None
+        return {
+            "request_id": request.id,
+            "user_id": str(request.telegram_user_id),
+            "username": self._text(request.telegram_username, limit=64),
+            "display_name": self._text(request.telegram_display_name, limit=256),
+            "code_hint": self._text(request.code_hint, limit=8),
+            "created_at": request.created_at,
+            "expires_at": request.expires_at,
+        }
+
     async def approve_pairing_code(self, session_id: str, code: str):
         """Approve by current-session code; Agent supplies no recipient IDs."""
         from guanlan_v2.channels.pairing import PairingError

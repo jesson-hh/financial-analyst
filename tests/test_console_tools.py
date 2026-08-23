@@ -613,7 +613,7 @@ def test_engine_profile_excludes_ww_but_console_whitelist_resolves():
     assert proc.returncode == 0, (proc.stderr or "")[-2000:]
     out = _json.loads(proc.stdout.strip().splitlines()[-1])
     from guanlan_v2.console import tools as ct
-    expected_ww = {t["name"] for t in ct.WW_TOOL_TABLE}
+    expected_ww = {t["name"] for t in ct.ALL_CONSOLE_TOOL_TABLE}
     assert set(out["registered_ww"]) == expected_ww
     # ① 非显式白名单路径(research / 缺省 / all)一律不外露 ww_*,且不再返回 None(None=完全不限制)
     assert out["research_is_none"] is False and out["research_ww"] == []
@@ -1417,11 +1417,16 @@ def test_endpoints_impl_marks_reachability(monkeypatch):
 # ── 阶段0:注册表数据化重构守护 ──
 
 def test_registry_derivation_consistent():
-    """阶段0 重构守护:CONSOLE_ALLOWED 与 _WW_REACHABLE_ENDPOINTS 必须从声明表派生且与已知集合一致。"""
+    """Console 白名单从 aggregate 派生，legacy 表仍独立冻结。"""
     import guanlan_v2.console.tools as ct
-    ww_in_table = {t["name"] for t in ct.WW_TOOL_TABLE}
-    assert ww_in_table == {n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")}
-    assert ct.CONSOLE_ALLOWED == ww_in_table | set(ct._ALLOWED_ENGINE_TOOLS)
+    from guanlan_v2.channels.agent_tools import CHANNEL_TOOL_NAMES
+
+    legacy = {t["name"] for t in ct.WW_TOOL_TABLE}
+    aggregate = {t["name"] for t in ct.ALL_CONSOLE_TOOL_TABLE}
+    assert not (legacy & CHANNEL_TOOL_NAMES)
+    assert aggregate == legacy | CHANNEL_TOOL_NAMES
+    assert aggregate == {n for n in ct.CONSOLE_ALLOWED if n.startswith("ww_")}
+    assert ct.CONSOLE_ALLOWED == aggregate | set(ct._ALLOWED_ENGINE_TOOLS)
     assert {"/factorlib/save", "/workflow/compose", "/feature/build"} <= ct._WW_REACHABLE_ENDPOINTS
     assert ct._WW_REACHABLE_ENDPOINTS == {ep for t in ct.WW_TOOL_TABLE for ep in t.get("reachable", [])}
 

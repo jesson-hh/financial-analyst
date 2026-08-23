@@ -2,7 +2,7 @@
 """生成 docs/agent_data_interfaces.md(agent 数据/操作接口总览)。
 
 用法:python scripts/gen_agent_interface_doc.py
-原则:工具清单/计数/端点全集一律从 WW_TOOL_TABLE 与 glmcp tooltable 派生,
+原则:Console 工具从 ALL_CONSOLE_TOOL_TABLE、MCP 从 legacy WW_TOOL_TABLE/tooltable 派生,
 禁止手抄数字(glmcp README 曾把 58 挂到实际 64,手抄计数必腐烂);
 手写段落(接入坑/数据面导览/红线)住在本模板里,改完必须重跑生成。
 漂移守护:tests/test_agent_interface_doc.py 逐字比对盘上文档与 render_doc() 输出。
@@ -87,6 +87,18 @@ def _endpoint_lines() -> str:
                      for p, es in sorted(groups.items()))
 
 
+def _channel_rows() -> str:
+    import guanlan_v2.console.tools as ct
+
+    rows = []
+    for tool in ct.CHANNEL_TOOL_TABLE:
+        mode = "写(确认)" if tool.get("confirm") else "只读/安全建草稿"
+        rows.append(
+            f"| `{tool['name']}` | {_flat(tool['description'])} | {mode} | 当前 Console 对话 |"
+        )
+    return "\n".join(rows)
+
+
 def render_doc() -> str:
     import guanlan_v2.console.tools as ct
     import guanlan_v2.glmcp.tooltable as tt
@@ -94,10 +106,15 @@ def render_doc() -> str:
     tools = tt.build_mcp_tools()
     n_mcp = len(tools)
     n_ww = len(ct.WW_TOOL_TABLE)
+    n_channel = len(ct.CHANNEL_TOOL_TABLE)
+    n_declared_console = len(ct.ALL_CONSOLE_TOOL_TABLE)
     n_engine_allowed = len(ct._ALLOWED_ENGINE_TOOLS)
     n_console = len(ct.CONSOLE_ALLOWED)
     n_ep = len(ct._WW_REACHABLE_ENDPOINTS)
-    excluded = " / ".join(f"`{n}`" for n in sorted(tt._EXCLUDED))
+    channel_names = {tool["name"] for tool in ct.CHANNEL_TOOL_TABLE}
+    legacy_excluded = " / ".join(
+        f"`{name}`" for name in sorted(set(tt._EXCLUDED) - channel_names)
+    )
 
     head = f"""<!-- 本文件由 scripts/gen_agent_interface_doc.py 全文生成,禁止手改。
      改法:编辑生成器模板 → python scripts/gen_agent_interface_doc.py 重跑。
@@ -106,14 +123,15 @@ def render_doc() -> str:
 # 观澜 · agent 数据/操作接口总览
 
 给外部数据 agent(MCP 客户端)与帷幄内置 agent 的完整接口地图。
-工具清单与计数**派生自 `WW_TOOL_TABLE`**(guanlan_v2/console/tools.py 单一声明源),
+Console 工具清单与计数派生自 `ALL_CONSOLE_TOOL_TABLE`（冻结的 legacy
+`WW_TOOL_TABLE` + 会话私有 `CHANNEL_TOOL_TABLE`）；MCP 只从 legacy 表派生。
 本文档由生成器再生,不会漂移。
 
 ## 1. 接入通道
 
 | 通道 | 方式 | 说明 |
 |---|---|---|
-| 帷幄 console | 9999 `/console` 会话 | 内置 agent,白名单 CONSOLE_ALLOWED = {n_console} 工具({n_ww} 个 ww_* + {n_engine_allowed} 个精选引擎工具);写类工具走会话内确认弹窗 |
+| 帷幄 console | 9999 `/console` 会话 | 内置 agent,白名单 CONSOLE_ALLOWED = {n_console} 工具({n_declared_console} 个 Console 声明工具 = {n_ww} 个 legacy + {n_channel} 个通道工具，另有 {n_engine_allowed} 个精选引擎工具);写类工具走会话内确认弹窗 |
 | MCP over HTTP | `http://127.0.0.1:9999/gl-mcp/` | streamable-HTTP。**必须带尾斜杠**:裸 `/gl-mcp` 的 POST 会被 307 重定向,多数客户端握手即败 |
 | MCP over stdio | `python -m guanlan_v2.glmcp` | 本地客户端拉起;配置样例 guanlan_v2/glmcp/example.mcp.json |
 | 直连 HTTP | 见 §4 端点全集 | 127.0.0.1 无鉴权;协程内严禁同步 IO 的路由全部 `asyncio.to_thread` 包装 |
@@ -131,8 +149,18 @@ def render_doc() -> str:
 
 - 读写列:`只读` / `写(锁)` = 需 `GUANLAN_MCP_WRITE=1` / `写(不锁)` = 低危例外。
 - `[引擎]` = alpha-zoo 研究工具(经引擎 TOOL_REGISTRY,不走 ww 池)。
-- console-UI-only 不进 MCP 的工具:{excluded} —— 依赖前端 `window.GL`/会话右栏落地,
+- legacy console-UI-only 不进 MCP 的工具:{legacy_excluded} —— 依赖前端 `window.GL`/会话右栏落地,
   MCP 语境调了也不会发生任何事(空转假成功),诚实排除;要用请走帷幄 console。
+
+## 2.1 Console 私有 Telegram/automation 工具（共 {n_channel} 个）
+
+这些工具只绑定当前帷幄对话，模型参数不能选择会话、Bot、Telegram 用户/私聊或本地路径；
+全部 `CHANNEL_TOOL_NAMES` 都被 defense-in-depth 加入 MCP `_EXCLUDED`，外部 ChatGPT MCP
+即使构造同名调用也只会收到“未知工具”。密钥只走安全输入卡/服务端截流，不是 Agent 工具参数。
+
+| 工具 | 说明 | 读写 | 作用域 |
+|---|---|---|---|
+{_channel_rows()}
 
 ## 3. 数据面导览(数据类工具背后是什么)
 

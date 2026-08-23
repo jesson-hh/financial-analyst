@@ -25,10 +25,11 @@ Anthropic-style ``input_schema`` form; LiteLLM converts when needed.
 """
 from __future__ import annotations
 import asyncio
+import contextvars
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from financial_analyst.buddy.tools import (
     Tool, ToolResult, TOOL_REGISTRY, get_tool,
@@ -36,6 +37,16 @@ from financial_analyst.buddy.tools import (
 from financial_analyst.llm.client import LLMClient
 
 log = logging.getLogger(__name__)
+
+
+# Host applications may install a per-context, fail-closed policy for tool
+# arguments.  The default remains ``None`` so every non-Console Buddy caller
+# keeps its existing behaviour.  A guard returns a safe user-facing reason to
+# block the call, or ``None`` to allow it.
+ToolArgumentGuard = Callable[[str, Any], Optional[str]]
+CTX_TOOL_ARGUMENT_GUARD: contextvars.ContextVar[Optional[ToolArgumentGuard]] = (
+    contextvars.ContextVar("buddy_tool_argument_guard", default=None)
+)
 
 
 SYSTEM_PROMPT = """You are 金融助手 — a conversational A-share research assistant.
@@ -501,6 +512,36 @@ class BuddyAgent:
                     args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
                 except json.JSONDecodeError:
                     args = {}
+
+                argument_guard = CTX_TOOL_ARGUMENT_GUARD.get()
+                blocked_reason: Optional[str] = None
+                if argument_guard is not None:
+                    try:
+                        blocked_reason = argument_guard(name, args)
+                    except Exception:
+                        # A broken host policy must fail closed without echoing
+                        # the rejected arguments into either event stream.
+                        log.exception("tool argument guard failed for %s", name)
+                        blocked_reason = "工具参数未通过宿主安全检查，工具未执行。"
+                if blocked_reason:
+                    safe_reason = str(blocked_reason)[:500]
+                    # Keep the attempted tool visible while deliberately
+                    # replacing its arguments.  The private assistant protocol
+                    # still has the original call so the next LLM iteration can
+                    # recover after receiving this honest tool result.
+                    yield TurnEvent("tool_call", {"name": name, "args": {}})
+                    yield TurnEvent("tool_result", {
+                        "name": name,
+                        "content": safe_reason,
+                        "is_error": True,
+                        "side_effect": None,
+                    })
+                    tool_result_messages.append({
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "content": f"[ERROR] {safe_reason}",
+                    })
+                    continue
 
                 yield TurnEvent("tool_call", {"name": name, "args": args})
 

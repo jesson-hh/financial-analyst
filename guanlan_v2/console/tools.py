@@ -21,6 +21,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from guanlan_v2.channels import agent_tools as _channel_agent_tools
 from guanlan_v2.console import workspace_tools as _workspace_tools
 
 CTX_SID: contextvars.ContextVar = contextvars.ContextVar("weiwo_sid", default=None)
@@ -3669,20 +3670,26 @@ _ALLOWED_ENGINE_TOOLS = [
     "event_report", "alpha_forge", "factor_report",
 ]
 
-# run_turn 白名单 = 帷幄工具(WW_TOOL_TABLE) + 精选 buddy/引擎研究工具(_ALLOWED_ENGINE_TOOLS)。
-CONSOLE_ALLOWED = {t["name"] for t in WW_TOOL_TABLE} | set(_ALLOWED_ENGINE_TOOLS)
+# Telegram/automation 是 Console 会话私有能力，不属于冻结的 legacy WW 工具池。
+# 保持 WW_TOOL_TABLE 不变，避免编排 manifest/MCP 的既有能力摘要被无意扩权；Console
+# 注册和白名单只从显式 aggregate 派生。
+CHANNEL_TOOL_TABLE = _channel_agent_tools.CHANNEL_TOOL_TABLE
+ALL_CONSOLE_TOOL_TABLE = [*WW_TOOL_TABLE, *CHANNEL_TOOL_TABLE]
+
+# run_turn 白名单 = 全部 Console 私有工具 + 精选 buddy/引擎研究工具。
+CONSOLE_ALLOWED = {t["name"] for t in ALL_CONSOLE_TOOL_TABLE} | set(_ALLOWED_ENGINE_TOOLS)
 
 # ww_ 工具能直接触达的后端路径,从 WW_TOOL_TABLE 的 reachable 列表并集派生(C2 可达性标注依据)。
 _WW_REACHABLE_ENDPOINTS = {ep for t in WW_TOOL_TABLE for ep in t.get("reachable", [])}
 
 
 def register_console_tools() -> int:
-    """把帷幄工具追加进 TOOL_REGISTRY(幂等),返回帷幄工具总数。"""
+    """把 Console 工具追加进 TOOL_REGISTRY(幂等),返回声明工具总数。"""
     bt = _buddy_tools_mod()
     existing = {t.name for t in bt.TOOL_REGISTRY}
-    for t in WW_TOOL_TABLE:
+    for t in ALL_CONSOLE_TOOL_TABLE:
         if t["name"] not in existing:
             bt.TOOL_REGISTRY.append(bt.Tool(
                 name=t["name"], description=t["description"], input_schema=t["input_schema"],
                 run=_wrap(t["impl"]), cost_hint=t["cost"], confirm_required=t["confirm"]))
-    return len(WW_TOOL_TABLE)
+    return len(ALL_CONSOLE_TOOL_TABLE)

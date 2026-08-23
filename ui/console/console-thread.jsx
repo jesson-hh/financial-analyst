@@ -301,11 +301,36 @@ function ToolRow({ i, name, cn, args, t, status, result, last }) {
 // ── ConfirmModal (app.jsx:2660-2729, 适配:props改/resolve改/删'a'按钮/删fromBackend等/label+detail用WW.TOOL_CN) ──
 function ConfirmModal({ confirm, onChoice, onStop, onSteer }) {
   const c = confirm;
+  const isChannelConfirm = c.action_ticket_required === true;
+  const details = c.public_details && typeof c.public_details === 'object'
+    ? c.public_details : {};
+  const isPairing = c.confirm_kind === 'telegram_pairing';
+  const requiresExactPairing = c.tool === 'ww_telegram_pair_approve';
+  const pairingVerified = !requiresExactPairing || details.recipient_verified === true;
+  const displayValue = (value) => Array.isArray(value)
+    ? value.map(v => String(v || '')).filter(Boolean).join('、') : String(value || '');
+  const detailRows = isChannelConfirm ? [
+    ['Bot', [details.bot_display_name, details.bot_username ? ('@' + String(details.bot_username).replace(/^@/, '')) : ''].filter(Boolean).join(' · ')],
+    ['Telegram 接收者', [details.telegram_display_name, details.telegram_username ? ('@' + String(details.telegram_username).replace(/^@/, '')) : ''].filter(Boolean).join(' · ')],
+    ['Telegram 数字用户 ID', details.telegram_user_id],
+    ['身份核验', requiresExactPairing ? (pairingVerified ? '已由完整配对码精确核验' : '尚未完成精确核验') : ''],
+    ['绑定规则', details.binding_policy],
+    ['请求时间', details.requested_at], ['过期时间', details.expires_at],
+    ['图片', details.media_id], ['说明', details.caption], ['媒体范围', details.media_policy],
+    ['任务名称', details.name], ['任务编号', details.automation_id],
+    ['计划类型', details.schedule_kind], ['执行时间', details.run_at || details.local_time],
+    ['时区', details.timezone], ['任务内容', details.prompt_summary],
+    ['Skills', details.skill_refs],
+  ].map(row => [row[0], displayValue(row[1])]).filter(row => row[1]) : [];
   const [sending, setSending] = React.useState('');
   const [err, setErr] = React.useState('');
   const [steerDraft, setSteerDraft] = React.useState('');
   const resolve = async (ch) => {
     if (sending) return;
+    if (String(ch).toLowerCase() === 'y' && !pairingVerified) {
+      setErr('接收者身份尚未由完整配对码精确核验，不能批准');
+      return;
+    }
     setSending(ch); setErr('');
     try {
       const r = await onChoice(ch);
@@ -371,12 +396,26 @@ function ConfirmModal({ confirm, onChoice, onStop, onSteer }) {
             <div className="mono" style={{ fontSize: 10, color: 'var(--yin)', letterSpacing: '0.2em', marginBottom: 4 }}>
               等待工具确认
             </div>
-            <div className="serif" style={{ fontSize: 17, color: 'var(--ink)', fontWeight: 500 }}>{(window.WW.TOOL_CN[c.tool] || c.tool)}</div>
+            <div className="serif" style={{ fontSize: 17, color: 'var(--ink)', fontWeight: 500 }}>{(isChannelConfirm && c.title) || window.WW.TOOL_CN[c.tool] || c.tool}</div>
           </div>
         </div>
-        <div style={{ padding: '14px 24px', fontFamily: 'var(--serif)', fontSize: 13.5, color: 'var(--ink-1)', lineHeight: 1.75, whiteSpace: 'pre-wrap' }}>
-          {JSON.stringify(c.args, null, 1)}
-        </div>
+        {isChannelConfirm ? (
+          <div style={{ margin: '14px 24px', border: '1px solid var(--line)', background: 'var(--paper-2)' }}>
+            {requiresExactPairing && <div className="serif" style={{ padding: '10px 12px', color: pairingVerified ? 'var(--dai)' : 'var(--yin)', borderBottom: '1px solid var(--line)', fontSize: 12.5 }}>
+              {pairingVerified ? '✓ 接收者已由完整配对码精确解析；配对码本身不会显示或保存到公开记录。' : '⚠ 接收者尚未精确核验，批准按钮已锁定。'}
+            </div>}
+            {detailRows.map((row, i) => (
+              <div key={i} style={{ display: 'grid', gridTemplateColumns: '135px 1fr', gap: 10, padding: '8px 12px', borderBottom: i + 1 < detailRows.length ? '1px solid var(--line)' : 0 }}>
+                <span className="mono" style={{ color: 'var(--ink-3)', fontSize: 10.5 }}>{row[0]}</span>
+                <span className="serif" style={{ color: 'var(--ink-1)', fontSize: 12.5, wordBreak: 'break-word' }}>{row[1]}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div style={{ padding: '14px 24px', fontFamily: 'var(--serif)', fontSize: 13.5, color: 'var(--ink-1)', lineHeight: 1.75, whiteSpace: 'pre-wrap' }}>
+            {JSON.stringify(c.args, null, 1)}
+          </div>
+        )}
         {Array.isArray(c.facts) && c.facts.length > 0 && (
           <div style={{ margin: '0 24px 10px', padding: '10px 12px', background: 'var(--paper-2)', border: '1px solid var(--line)' }}>
             <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', letterSpacing: '0.15em', marginBottom: 6 }}>机器核数 · 实时真值</div>
@@ -413,9 +452,9 @@ function ConfirmModal({ confirm, onChoice, onStop, onSteer }) {
         <div style={{ padding: '8px 24px 18px' }}>
           <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', letterSpacing: '0.15em', marginBottom: 8 }}>选择操作</div>
           <div style={{ display: 'flex', gap: 10 }}>
-            <button onClick={() => resolve('y')}
-              style={{ flex: 1, padding: '10px', background: 'var(--ink)', color: 'var(--paper)', border: 'none', fontFamily: 'var(--serif)', fontSize: 13, cursor: sending ? 'default' : 'pointer', opacity: sending ? 0.6 : 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
-              <span>{sending === 'y' ? '已发送…' : '同意 · 一次'}</span>
+            <button onClick={() => resolve('y')} disabled={!!sending || !pairingVerified}
+              style={{ flex: 1, padding: '10px', background: 'var(--ink)', color: 'var(--paper)', border: 'none', fontFamily: 'var(--serif)', fontSize: 13, cursor: sending || !pairingVerified ? 'default' : 'pointer', opacity: sending || !pairingVerified ? 0.6 : 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+              <span>{sending === 'y' ? '确认中…' : (c.approve_label || '同意 · 一次')}</span>
               <span className="mono" style={{ fontSize: 9, opacity: 0.6 }}>Y</span>
             </button>
             <button onClick={() => resolve('n')}
@@ -742,7 +781,7 @@ function WwThread({ state, workspace, sessionArchived, onSend, onCancel, onConfi
             style={{ minWidth: state.busy ? 72 : 27, height: 25, padding: state.busy ? '0 7px' : 0, border: '1px solid ' + (archived || submitting || !draft.trim() ? 'var(--line)' : 'var(--ink)'), color: archived || submitting || !draft.trim() ? 'var(--ink-3)' : 'var(--ink)', background: 'var(--paper)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, cursor: archived || submitting || !draft.trim() ? 'default' : 'pointer', borderRadius: 4, whiteSpace: 'nowrap' }}>{submitting === 'steer' ? '转向中…' : state.busy ? '调整方向 ↵' : '↵'}</button>
         </div>
       </div>
-      {state.confirm && <ConfirmModal key={state.confirm.turn_id || 'confirm'} confirm={state.confirm} onChoice={onConfirm} onStop={stop} onSteer={onSend} />}
+      {state.confirm && <ConfirmModal key={(state.confirm.turn_id || 'confirm') + ':' + (state.confirm.confirm_id || 'legacy')} confirm={state.confirm} onChoice={onConfirm} onStop={stop} onSteer={onSend} />}
     </div>
   );
 }

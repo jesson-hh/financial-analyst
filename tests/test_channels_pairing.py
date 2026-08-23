@@ -711,6 +711,39 @@ async def test_code_only_approval_derives_all_candidates_not_hint_match(tmp_path
 
 
 @pytest.mark.anyio
+async def test_code_preview_resolves_exact_same_hint_request_without_approving(tmp_path):
+    service, store, _console, _telegram, _secrets, sid, bot_id, clock = seeded_service(tmp_path)
+    code_a = "222222AA"
+    code_b = "333333AA"
+    for update_id, user_id, code, salt_byte in (
+        (630, "501", code_a, b"a"),
+        (640, "502", code_b, b"b"),
+    ):
+        salt = salt_byte * 16
+        store.create_pairing_request(
+            bot_account_id=bot_id,
+            session_id=sid,
+            telegram_update_id=update_id,
+            telegram_user_id=user_id,
+            telegram_chat_id=user_id,
+            code_salt=salt,
+            code_digest=derive_pairing_digest(code, salt),
+            code_hint="AA",
+            expires_at=clock.value + timedelta(hours=1),
+        )
+
+    preview = await service.resolve_pairing_code(sid, code_b)
+
+    assert preview.telegram_user_id == "502"
+    assert preview.code_hint == "AA"
+    assert store.live_bindings() == []
+    assert all(
+        request.status == PairingStatus.PENDING
+        for request in store.pairing_requests_for(bot_id)
+    )
+
+
+@pytest.mark.anyio
 async def test_code_only_approval_never_crosses_session_or_accepts_ambiguous_code(tmp_path):
     service, store, console, _telegram, _secrets, sid, bot_id, clock = seeded_service(tmp_path)
     other_sid = console.create_session("其他研究")["id"]
