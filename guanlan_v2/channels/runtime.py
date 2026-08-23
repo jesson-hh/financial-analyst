@@ -191,12 +191,27 @@ class ChannelRuntime:
         self.telegram_adapter = telegram_adapter
         self.media_store = media_store
         self.ticket_store = ticket_store or ActionTicketStore()
+        # Shared mutation reservation is observed by Console archive/delete
+        # guards.  It covers Token submission and pairing approval alike.
+        self._secret_reservation_lock = threading.Lock()
+        self._secret_reservations: set[str] = set()
+        # Pairing owns Telegram inbound and deliberately terminates it before
+        # Console/Agent.  Construction is side-effect free; application
+        # lifespan wiring calls ``start`` explicitly when the feature is on.
+        from guanlan_v2.channels.pairing import TelegramPairingService
+
+        self.pairing = TelegramPairingService(
+            console_store=console_store,
+            channel_store=channel_store,
+            secret_store=secret_store,
+            telegram_adapter=telegram_adapter,
+            reserve_mutation=self.reserve_secret_submission,
+            release_mutation=self.release_secret_submission,
+        )
         # A reservation is deliberately just durable-process ownership state,
         # not a lock held across getMe/DPAPI/SQLite awaits.  It lets Console
         # archive/delete and the dedicated Token endpoint see the same narrow
         # in-flight handoff without serialising unrelated sessions.
-        self._secret_reservation_lock = threading.Lock()
-        self._secret_reservations: set[str] = set()
 
     # -- narrow input boundary ---------------------------------------
     @staticmethod
@@ -635,17 +650,23 @@ class ChannelRuntime:
         # callback still get the same durable writable check here.
         await self._run_before_commit(before_commit)
         await asyncio.to_thread(self.assert_session_mutable, session_id)
-        return await self._shield_critical(
-            self._persist_verified_token(
-                session_id,
-                bot,
-                token=exact,
-                telegram_bot_id=telegram_bot_id,
-                username=username,
-                replacing=replacing,
-                replacement_intent_session=replacement_intent_session,
+        try:
+            installed = await self._shield_critical(
+                self._persist_verified_token(
+                    session_id,
+                    bot,
+                    token=exact,
+                    telegram_bot_id=telegram_bot_id,
+                    username=username,
+                    replacing=replacing,
+                    replacement_intent_session=replacement_intent_session,
+                )
             )
-        )
+        finally:
+            # Even a client disconnect can occur after the shielded credential
+            # CAS completed.  Reconcile from durable state in every outcome.
+            self.pairing.signal()
+        return installed
 
     async def submit_token(
         self, session_id: str, draft_id: str, token: str, *, before_commit: Any = None
@@ -750,7 +771,50 @@ class ChannelRuntime:
             # A concurrent replace wins over a stale verifier.  Do not turn a
             # successful getMe into an unsafe broad status mutation.
             pass
+        self.pairing.signal()
         return await asyncio.to_thread(self.status_for_session, session_id)
+
+    async def approve_pairing(
+        self, session_id: str, pairing_request_id: str, code: str
+    ):
+        """Approve one current-session private recipient without broad inputs."""
+        from guanlan_v2.channels.pairing import PairingError
+
+        self._require_session(session_id, writable=True)
+        try:
+            return await self.pairing.approve_pairing(
+                session_id, pairing_request_id, code
+            )
+        except PairingError as error:
+            raise ChannelRuntimeError(error.reason_code) from None
+
+    async def approve_pairing_code(self, session_id: str, code: str):
+        """Approve by current-session code; Agent supplies no recipient IDs."""
+        from guanlan_v2.channels.pairing import PairingError
+
+        self._require_session(session_id, writable=True)
+        try:
+            return await self.pairing.approve_pairing_code(session_id, code)
+        except PairingError as error:
+            raise ChannelRuntimeError(error.reason_code) from None
+
+    def dismiss_pairing(self, session_id: str, pairing_request_id: str):
+        """Dismiss one pending request scoped by durable session ownership."""
+        from guanlan_v2.channels.pairing import PairingError
+
+        self._require_session(session_id, writable=True)
+        try:
+            return self.pairing.dismiss_pairing(session_id, pairing_request_id)
+        except PairingError as error:
+            raise ChannelRuntimeError(error.reason_code) from None
+
+    async def start(self) -> None:
+        """Start background channel services for the application lifespan."""
+        await self.pairing.start()
+
+    async def stop(self) -> None:
+        """Stop pollers and release their durable leases before shutdown."""
+        await self.pairing.stop()
 
     async def replace_token(
         self, session_id: str, draft_id: str, token: str, *, before_commit: Any = None
@@ -810,6 +874,7 @@ class ChannelRuntime:
                 )
         except (ChannelStoreError, ValueError, ChannelConflict):
             raise ChannelRuntimeError("channel_disconnect_failed") from None
+        self.pairing.signal()
         return self.status_for_session(session_id)
 
     def resolve_delivery(self, session_id: str, item_id: str, action: str):

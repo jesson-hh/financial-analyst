@@ -132,6 +132,7 @@ class PairingRequest:
     code_salt: bytes
     code_digest: bytes
     code_hint: str
+    issue_credential_revision: int
     status: PairingStatus
     created_at: str
     expires_at: str

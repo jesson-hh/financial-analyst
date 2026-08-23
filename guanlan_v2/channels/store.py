@@ -8,6 +8,7 @@ stale Python pre-check.
 from __future__ import annotations
 
 import json
+import hmac
 import re
 import sqlite3
 import uuid
@@ -99,6 +100,8 @@ CREATE TABLE IF NOT EXISTS pairing_requests (
     code_salt BLOB NOT NULL,
     code_digest BLOB NOT NULL,
     code_hint TEXT NOT NULL,
+    issue_credential_revision INTEGER NOT NULL DEFAULT 0
+        CHECK (issue_credential_revision >= 0),
     status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'dismissed', 'expired')),
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
@@ -543,6 +546,18 @@ class ChannelStore:
                 conn.execute(
                     "ALTER TABLE token_replacement_intents ADD COLUMN expires_at TEXT"
                 )
+            pairing_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(pairing_requests)").fetchall()
+            }
+            if "issue_credential_revision" not in pairing_columns:
+                # Legacy challenges cannot be proven to belong to the current
+                # credential generation.  Revision zero keeps old test/empty
+                # databases readable; any later Token CAS dismisses them.
+                conn.execute(
+                    "ALTER TABLE pairing_requests ADD COLUMN "
+                    "issue_credential_revision INTEGER NOT NULL DEFAULT 0"
+                )
         finally:
             conn.close()
 
@@ -945,16 +960,28 @@ class ChannelStore:
                         (verified, verified, entity_id),
                     )
                     target = BotStatus.AWAITING_PAIRING
+                # A pairing challenge authenticates one verified credential
+                # generation.  Rotating the Token invalidates every challenge
+                # issued by the previous generation, even when getMe reports
+                # the same Telegram Bot ID.
+                conn.execute(
+                    "UPDATE pairing_requests SET status = 'dismissed', last_seen_at = ? "
+                    "WHERE bot_account_id = ? AND status = 'pending'",
+                    (verified, entity_id),
+                )
                 updated = conn.execute(
                     "UPDATE bot_accounts SET credential_id = ?, telegram_bot_id = ?, "
                     "telegram_username = ?, credential_revision = credential_revision + 1, "
-                    "status = ?, last_verified_at = ?, last_error_code = ?, updated_at = ? "
+                    "status = ?, poll_owner = NULL, poll_lease_until = NULL, "
+                    "update_offset = CASE WHEN ? THEN 0 ELSE update_offset END, "
+                    "last_verified_at = ?, last_error_code = ?, updated_at = ? "
                     "WHERE id = ? AND credential_revision = ?",
                     (
                         credential_id,
                         str(telegram_bot_id),
                         safe_username,
                         target.value,
+                        1 if identity_changed else 0,
                         verified,
                         "telegram_identity_changed" if fault_identity_change else None,
                         verified,
@@ -1310,6 +1337,414 @@ class ChannelStore:
         assert bot_id is not None
         return self.bot(bot_id), None if old_credential is None else str(old_credential)
 
+    # -- Telegram polling fences ------------------------------------
+
+    @staticmethod
+    def _poll_revision(value: Any) -> int:
+        if isinstance(value, bool):
+            raise ValueError("credential_revision must be a non-negative integer")
+        revision = int(value)
+        if revision < 0:
+            raise ValueError("credential_revision must be a non-negative integer")
+        return revision
+
+    def acquire_poll_lease(
+        self,
+        bot_account_id: Any,
+        *,
+        owner: str,
+        credential_revision: int,
+        lease_seconds: int = 60,
+    ) -> bool:
+        """Acquire one Bot poller lease, fenced by credential generation."""
+        entity_id = _entity_id(bot_account_id)
+        safe_owner = self._required_text(owner, "owner")
+        revision = self._poll_revision(credential_revision)
+        if isinstance(lease_seconds, bool) or not 1 <= int(lease_seconds) <= 300:
+            raise ValueError("lease_seconds must be between 1 and 300")
+        now_dt = self._clock()
+        now = _aware_utc_iso(now_dt, field="clock")
+        until = _aware_utc_iso(
+            now_dt + timedelta(seconds=int(lease_seconds)), field="poll_lease_until"
+        )
+        with self._immediate() as conn:
+            updated = conn.execute(
+                "UPDATE bot_accounts SET poll_owner = ?, poll_lease_until = ?, updated_at = ? "
+                "WHERE id = ? AND credential_revision = ? AND credential_id IS NOT NULL "
+                "AND status IN ('awaiting_pairing', 'active', 'paused') "
+                "AND (poll_owner IS NULL OR poll_owner = ? OR poll_lease_until IS NULL "
+                "OR poll_lease_until <= ?)",
+                (safe_owner, until, now, entity_id, revision, safe_owner, now),
+            )
+            return updated.rowcount == 1
+
+    def renew_poll_lease(
+        self,
+        bot_account_id: Any,
+        *,
+        owner: str,
+        credential_revision: int,
+        lease_seconds: int = 60,
+    ) -> bool:
+        """Renew only the still-live lease owned by this exact poller."""
+        entity_id = _entity_id(bot_account_id)
+        safe_owner = self._required_text(owner, "owner")
+        revision = self._poll_revision(credential_revision)
+        if isinstance(lease_seconds, bool) or not 1 <= int(lease_seconds) <= 300:
+            raise ValueError("lease_seconds must be between 1 and 300")
+        now_dt = self._clock()
+        now = _aware_utc_iso(now_dt, field="clock")
+        until = _aware_utc_iso(
+            now_dt + timedelta(seconds=int(lease_seconds)), field="poll_lease_until"
+        )
+        with self._immediate() as conn:
+            updated = conn.execute(
+                "UPDATE bot_accounts SET poll_lease_until = ?, updated_at = ? "
+                "WHERE id = ? AND credential_revision = ? AND poll_owner = ? "
+                "AND poll_lease_until > ? AND credential_id IS NOT NULL "
+                "AND status IN ('awaiting_pairing', 'active', 'paused')",
+                (until, now, entity_id, revision, safe_owner, now),
+            )
+            return updated.rowcount == 1
+
+    def release_poll_lease(
+        self,
+        bot_account_id: Any,
+        *,
+        owner: str,
+        credential_revision: int,
+    ) -> bool:
+        """Release only the caller's generation-fenced lease."""
+        entity_id = _entity_id(bot_account_id)
+        safe_owner = self._required_text(owner, "owner")
+        revision = self._poll_revision(credential_revision)
+        now = self._now()
+        with self._immediate() as conn:
+            updated = conn.execute(
+                "UPDATE bot_accounts SET poll_owner = NULL, poll_lease_until = NULL, "
+                "updated_at = ? WHERE id = ? AND credential_revision = ? AND poll_owner = ?",
+                (now, entity_id, revision, safe_owner),
+            )
+            return updated.rowcount == 1
+
+    @staticmethod
+    def _telegram_update_id(value: Any) -> int:
+        if isinstance(value, bool):
+            raise ValueError("telegram_update_id must be a non-negative integer")
+        update_id = int(value)
+        if update_id < 0:
+            raise ValueError("telegram_update_id must be a non-negative integer")
+        return update_id
+
+    def pairing_update_preflight(
+        self,
+        bot_account_id: Any,
+        *,
+        telegram_update_id: int,
+        telegram_chat_id: str | int,
+        owner: str,
+        credential_revision: int,
+    ) -> str:
+        """Return ``issue``, ``replace``, ``full`` or ``consumed``.
+
+        This is advisory only; the post-send commit repeats every capacity and
+        fence check under ``BEGIN IMMEDIATE``.  Its purpose is to avoid sending
+        a challenge when three other private recipients already occupy the
+        bounded pending set.
+        """
+        entity_id = _entity_id(bot_account_id)
+        update_id = self._telegram_update_id(telegram_update_id)
+        chat_id = str(telegram_chat_id)
+        safe_owner = self._required_text(owner, "owner")
+        revision = self._poll_revision(credential_revision)
+        now = self._now()
+        with self._immediate() as conn:
+            bot = conn.execute(
+                "SELECT status, update_offset, credential_revision, poll_owner, "
+                "poll_lease_until FROM bot_accounts WHERE id = ?",
+                (entity_id,),
+            ).fetchone()
+            if (
+                bot is None
+                or int(bot["credential_revision"]) != revision
+                or bot["poll_owner"] != safe_owner
+                or bot["poll_lease_until"] is None
+                or str(bot["poll_lease_until"]) <= now
+                or BotStatus(bot["status"]) is not BotStatus.AWAITING_PAIRING
+            ):
+                raise ChannelConflict("poll lease or credential generation changed")
+            if update_id < int(bot["update_offset"]):
+                return "consumed"
+            conn.execute(
+                "UPDATE pairing_requests SET status = 'expired', last_seen_at = ? "
+                "WHERE bot_account_id = ? AND status = 'pending' AND expires_at <= ?",
+                (now, entity_id, now),
+            )
+            existing_update = conn.execute(
+                "SELECT 1 FROM pairing_requests WHERE bot_account_id = ? "
+                "AND telegram_update_id = ?",
+                (entity_id, str(update_id)),
+            ).fetchone()
+            if existing_update is not None:
+                conn.execute(
+                    "UPDATE bot_accounts SET update_offset = MAX(update_offset, ?), "
+                    "updated_at = ? WHERE id = ? AND credential_revision = ? "
+                    "AND poll_owner = ? AND poll_lease_until > ?",
+                    (update_id + 1, now, entity_id, revision, safe_owner, now),
+                )
+                return "consumed"
+            same_chat = conn.execute(
+                "SELECT 1 FROM pairing_requests WHERE bot_account_id = ? "
+                "AND telegram_chat_id = ? AND status = 'pending' LIMIT 1",
+                (entity_id, chat_id),
+            ).fetchone()
+            if same_chat is not None:
+                return "replace"
+            count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM pairing_requests WHERE bot_account_id = ? "
+                    "AND status = 'pending'",
+                    (entity_id,),
+                ).fetchone()[0]
+            )
+            return "full" if count >= 3 else "issue"
+
+    def advance_poll_update(
+        self,
+        bot_account_id: Any,
+        *,
+        next_offset: int,
+        owner: str,
+        credential_revision: int,
+    ) -> bool:
+        """Advance a consumed/rejected update under owner+revision fencing."""
+        entity_id = _entity_id(bot_account_id)
+        offset = self._telegram_update_id(next_offset)
+        safe_owner = self._required_text(owner, "owner")
+        revision = self._poll_revision(credential_revision)
+        now = self._now()
+        with self._immediate() as conn:
+            updated = conn.execute(
+                "UPDATE bot_accounts SET update_offset = MAX(update_offset, ?), updated_at = ? "
+                "WHERE id = ? AND credential_revision = ? AND poll_owner = ? "
+                "AND poll_lease_until > ? AND status IN "
+                "('awaiting_pairing', 'active', 'paused')",
+                (offset, now, entity_id, revision, safe_owner, now),
+            )
+            return updated.rowcount == 1
+
+    def commit_sent_pairing_update(
+        self,
+        *,
+        bot_account_id: Any,
+        session_id: str,
+        telegram_update_id: int,
+        telegram_user_id: str | int,
+        telegram_chat_id: str | int,
+        telegram_username: str | None,
+        telegram_display_name: str | None,
+        code_salt: bytes,
+        code_digest: bytes,
+        code_hint: str,
+        owner: str,
+        credential_revision: int,
+    ) -> PairingRequest:
+        """Persist the challenge and offset only after send acceptance.
+
+        The caller may arrive here after either an explicit Bot API success or
+        an ambiguous send result.  No network call is made in this method.
+        """
+        entity_id = _entity_id(bot_account_id)
+        sid = self._required_text(session_id, "session_id")
+        update_id = self._telegram_update_id(telegram_update_id)
+        user_id = str(telegram_user_id)
+        chat_id = str(telegram_chat_id)
+        if user_id != chat_id:
+            raise ChannelConflict("pairing request must come from a private user chat")
+        safe_owner = self._required_text(owner, "owner")
+        revision = self._poll_revision(credential_revision)
+        salt = bytes(code_salt)
+        digest = bytes(code_digest)
+        if len(salt) != 16 or len(digest) != 32:
+            raise ValueError("pairing digest material has an invalid size")
+        hint = self._required_channel_text(code_hint, "code_hint")
+        if len(hint) != 2:
+            raise ValueError("code_hint must contain exactly two characters")
+        username = self._optional_channel_text(telegram_username, "telegram_username")
+        display_name = self._optional_channel_text(
+            telegram_display_name, "telegram_display_name"
+        )
+        now_dt = self._clock()
+        now = _aware_utc_iso(now_dt, field="clock")
+        expires = _aware_utc_iso(now_dt + timedelta(hours=1), field="expires_at")
+        request_id = _new_id("pair")
+        with self._immediate() as conn:
+            bot = conn.execute(
+                "SELECT * FROM bot_accounts WHERE id = ?", (entity_id,)
+            ).fetchone()
+            if (
+                bot is None
+                or int(bot["credential_revision"]) != revision
+                or bot["poll_owner"] != safe_owner
+                or bot["poll_lease_until"] is None
+                or str(bot["poll_lease_until"]) <= now
+                or BotStatus(bot["status"]) is not BotStatus.AWAITING_PAIRING
+                or bot["draft_session_id"] != sid
+            ):
+                raise ChannelConflict("poll lease, draft, or credential generation changed")
+            if update_id < int(bot["update_offset"]):
+                existing = conn.execute(
+                    "SELECT * FROM pairing_requests WHERE bot_account_id = ? "
+                    "AND telegram_update_id = ?",
+                    (entity_id, str(update_id)),
+                ).fetchone()
+                if existing is None:
+                    raise ChannelConflict("telegram update was already consumed")
+                return _pairing_from_row(existing)
+            conn.execute(
+                "UPDATE pairing_requests SET status = 'expired', last_seen_at = ? "
+                "WHERE bot_account_id = ? AND status = 'pending' AND expires_at <= ?",
+                (now, entity_id, now),
+            )
+            existing = conn.execute(
+                "SELECT * FROM pairing_requests WHERE bot_account_id = ? "
+                "AND telegram_update_id = ?",
+                (entity_id, str(update_id)),
+            ).fetchone()
+            if existing is not None:
+                # If a damaged/stale offset replays an already committed
+                # update, make the *latest* delivered code authoritative.
+                conn.execute(
+                    "UPDATE pairing_requests SET code_salt = ?, code_digest = ?, code_hint = ?, "
+                    "issue_credential_revision = ?, status = 'pending', created_at = ?, "
+                    "expires_at = ?, last_seen_at = ? WHERE id = ?",
+                    (
+                        sqlite3.Binary(salt),
+                        sqlite3.Binary(digest),
+                        hint,
+                        revision,
+                        now,
+                        expires,
+                        now,
+                        existing["id"],
+                    ),
+                )
+                request_id = str(existing["id"])
+            else:
+                other_count = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM pairing_requests WHERE bot_account_id = ? "
+                        "AND status = 'pending' AND telegram_chat_id <> ?",
+                        (entity_id, chat_id),
+                    ).fetchone()[0]
+                )
+                if other_count >= 3:
+                    raise ChannelConflict("pairing request capacity changed")
+                # The old challenge remains valid until this transaction sees
+                # proof that the replacement message was accepted.
+                conn.execute(
+                    "UPDATE pairing_requests SET status = 'dismissed', last_seen_at = ? "
+                    "WHERE bot_account_id = ? AND telegram_chat_id = ? AND status = 'pending'",
+                    (now, entity_id, chat_id),
+                )
+                conn.execute(
+                    "INSERT INTO pairing_requests "
+                    "(id, bot_account_id, session_id, telegram_update_id, telegram_user_id, "
+                    "telegram_chat_id, telegram_username, telegram_display_name, code_salt, "
+                    "code_digest, code_hint, issue_credential_revision, status, created_at, "
+                    "expires_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                    "'pending', ?, ?, ?)",
+                    (
+                        request_id,
+                        entity_id,
+                        sid,
+                        str(update_id),
+                        user_id,
+                        chat_id,
+                        username,
+                        display_name,
+                        sqlite3.Binary(salt),
+                        sqlite3.Binary(digest),
+                        hint,
+                        revision,
+                        now,
+                        expires,
+                        now,
+                    ),
+                )
+            advanced = conn.execute(
+                "UPDATE bot_accounts SET update_offset = MAX(update_offset, ?), updated_at = ? "
+                "WHERE id = ? AND credential_revision = ? AND poll_owner = ? "
+                "AND poll_lease_until > ?",
+                (update_id + 1, now, entity_id, revision, safe_owner, now),
+            )
+            if advanced.rowcount != 1:
+                raise ChannelConflict("poll lease changed before pairing commit")
+            conn.execute(
+                "INSERT INTO channel_audit (ts, event_kind, session_id, bot_account_id, "
+                "pairing_request_id, safe_details_json) VALUES (?, 'pairing_requested', ?, ?, ?, '{}')",
+                (now, sid, entity_id, request_id),
+            )
+        return self.pairing_request(request_id)
+
+    def fault_poll_bot(
+        self,
+        bot_account_id: Any,
+        *,
+        owner: str,
+        credential_revision: int,
+        status: BotStatus | str,
+        error_code: str,
+    ) -> bool:
+        """Fault-pause one Bot only if this poller still owns its generation."""
+        entity_id = _entity_id(bot_account_id)
+        safe_owner = self._required_text(owner, "owner")
+        revision = self._poll_revision(credential_revision)
+        target = BotStatus(_enum_value(status))
+        if target not in {
+            BotStatus.POLL_CONFLICT,
+            BotStatus.CREDENTIAL_INVALID,
+            BotStatus.CREDENTIAL_UNAVAILABLE,
+        }:
+            raise ValueError("unsupported poll fault status")
+        if not isinstance(error_code, str) or not _SAFE_ERROR_RE.fullmatch(error_code):
+            raise ValueError("error_code must be a safe error code")
+        now = self._now()
+        with self._immediate() as conn:
+            bot = conn.execute(
+                "SELECT status, credential_revision, poll_owner, poll_lease_until "
+                "FROM bot_accounts WHERE id = ?",
+                (entity_id,),
+            ).fetchone()
+            if (
+                bot is None
+                or int(bot["credential_revision"]) != revision
+                or bot["poll_owner"] != safe_owner
+                or bot["poll_lease_until"] is None
+                or str(bot["poll_lease_until"]) <= now
+                or BotStatus(bot["status"]) not in {
+                    BotStatus.AWAITING_PAIRING,
+                    BotStatus.ACTIVE,
+                    BotStatus.PAUSED,
+                }
+            ):
+                return False
+            conn.execute(
+                "UPDATE channel_bindings SET status = 'paused', "
+                "pause_reason = CASE WHEN status = 'paused' AND pause_reason IN "
+                "('manual', 'archive', 'workspace_archived') THEN pause_reason ELSE ? END, "
+                "paused_at = CASE WHEN status = 'paused' AND pause_reason IN "
+                "('manual', 'archive', 'workspace_archived') THEN paused_at ELSE ? END, "
+                "updated_at = ? WHERE bot_account_id = ? AND status IN ('active', 'paused')",
+                (error_code, now, now, entity_id),
+            )
+            conn.execute(
+                "UPDATE bot_accounts SET status = ?, last_error_code = ?, poll_owner = NULL, "
+                "poll_lease_until = NULL, updated_at = ? WHERE id = ?",
+                (target.value, error_code, now, entity_id),
+            )
+            return True
+
     # -- Bindings and pairing ----------------------------------------
 
     def bind_for_test(
@@ -1489,6 +1924,7 @@ class ChannelStore:
         code_digest: bytes,
         code_hint: str,
         expires_at: datetime | str,
+        issue_credential_revision: int | None = None,
         telegram_username: Optional[str] = None,
         telegram_display_name: Optional[str] = None,
         last_seen_at: datetime | str | None = None,
@@ -1507,12 +1943,28 @@ class ChannelStore:
         )
         try:
             with self._immediate() as conn:
+                bot = conn.execute(
+                    "SELECT credential_revision FROM bot_accounts WHERE id = ?",
+                    (entity_id,),
+                ).fetchone()
+                if bot is None:
+                    raise ChannelNotFound(f"unknown bot account: {entity_id}")
+                issue_revision = (
+                    int(bot["credential_revision"])
+                    if issue_credential_revision is None
+                    else int(issue_credential_revision)
+                )
+                if issue_revision < 0:
+                    raise ValueError("issue_credential_revision must be non-negative")
+                if issue_revision != int(bot["credential_revision"]):
+                    raise ChannelConflict("pairing challenge credential revision is stale")
                 conn.execute(
                     "INSERT INTO pairing_requests "
                     "(id, bot_account_id, session_id, telegram_update_id, telegram_user_id, "
                     "telegram_chat_id, telegram_username, telegram_display_name, code_salt, "
-                    "code_digest, code_hint, status, created_at, expires_at, last_seen_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
+                    "code_digest, code_hint, issue_credential_revision, status, created_at, "
+                    "expires_at, last_seen_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
                     (
                         request_id,
                         entity_id,
@@ -1525,6 +1977,7 @@ class ChannelStore:
                         sqlite3.Binary(bytes(code_salt)),
                         sqlite3.Binary(bytes(code_digest)),
                         self._required_channel_text(code_hint, "code_hint"),
+                        issue_revision,
                         now,
                         expiry,
                         seen,
@@ -1569,7 +2022,13 @@ class ChannelStore:
         params: list[Any] = [entity_id]
         if status is not None:
             sql += " AND status = ?"
-            params.append(PairingStatus(_enum_value(status)).value)
+            requested_status = PairingStatus(_enum_value(status))
+            params.append(requested_status.value)
+            if requested_status is PairingStatus.PENDING:
+                # Status DTOs must not keep presenting expired challenges just
+                # because no new Telegram update arrived to run preflight.
+                sql += " AND expires_at > ?"
+                params.append(self._now())
         sql += " ORDER BY created_at, id"
         conn = self.connect()
         try:
@@ -1586,6 +2045,8 @@ class ChannelStore:
         sync_from_event_id: int,
         expected_credential_revision: Optional[int] = None,
         expected_telegram_bot_id: Optional[str | int] = None,
+        expected_code_digest: bytes | None = None,
+        require_private: bool = False,
         now: datetime | str | None = None,
     ) -> ChannelBinding:
         request_id = _entity_id(pairing_request_id)
@@ -1620,6 +2081,31 @@ class ChannelStore:
 
                 request_status = PairingStatus(request["status"])
                 if request_status is PairingStatus.APPROVED:
+                    # The public idempotency path still requires the same
+                    # proof when secure expectations are supplied.  Knowing a
+                    # request ID alone must not disclose/confirm ownership.
+                    if expected_credential_revision is not None and int(
+                        bot["credential_revision"]
+                    ) != int(expected_credential_revision):
+                        raise ChannelConflict("bot credential revision changed during approval")
+                    if int(request["issue_credential_revision"]) != int(
+                        bot["credential_revision"]
+                    ):
+                        raise ChannelConflict("pairing challenge belongs to an old credential")
+                    if expected_telegram_bot_id is not None and bot[
+                        "telegram_bot_id"
+                    ] != str(expected_telegram_bot_id):
+                        raise ChannelConflict("telegram bot identity changed during approval")
+                    if require_private and str(request["telegram_user_id"]) != str(
+                        request["telegram_chat_id"]
+                    ):
+                        raise ChannelConflict("pairing request is not a private user chat")
+                    if expected_code_digest is not None:
+                        supplied_digest = bytes(expected_code_digest)
+                        if len(supplied_digest) != len(bytes(request["code_digest"])) or not hmac.compare_digest(
+                            supplied_digest, bytes(request["code_digest"])
+                        ):
+                            raise ChannelConflict("pairing code does not match")
                     approved_id = request["approved_binding_id"]
                     row = conn.execute(
                         "SELECT * FROM channel_bindings WHERE id = ?", (approved_id,)
@@ -1644,6 +2130,10 @@ class ChannelStore:
                     )
                     expired = True
                 else:
+                    if int(request["issue_credential_revision"]) != int(
+                        bot["credential_revision"]
+                    ):
+                        raise ChannelConflict("pairing challenge belongs to an old credential")
                     if expected_credential_revision is not None and int(
                         bot["credential_revision"]
                     ) != int(expected_credential_revision):
@@ -1652,28 +2142,109 @@ class ChannelStore:
                         "telegram_bot_id"
                     ] != str(expected_telegram_bot_id):
                         raise ChannelConflict("telegram bot identity changed during approval")
+                    if require_private and str(request["telegram_user_id"]) != str(
+                        request["telegram_chat_id"]
+                    ):
+                        raise ChannelConflict("pairing request is not a private user chat")
+                    if expected_code_digest is not None:
+                        supplied_digest = bytes(expected_code_digest)
+                        if len(supplied_digest) != len(bytes(request["code_digest"])) or not hmac.compare_digest(
+                            supplied_digest, bytes(request["code_digest"])
+                        ):
+                            raise ChannelConflict("pairing code does not match")
 
-                    conn.execute(
-                        "INSERT INTO channel_bindings "
-                        "(id, channel, session_id, bot_account_id, telegram_user_id, "
-                        "telegram_chat_id, telegram_username, telegram_display_name, status, "
-                        "paired_at, sync_from_event_id, projection_cursor_event_id, created_at, "
-                        "updated_at) VALUES (?, 'telegram', ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
-                        (
-                            binding_id,
-                            caller_session_id,
-                            request["bot_account_id"],
-                            str(request["telegram_user_id"]),
-                            str(request["telegram_chat_id"]),
-                            request["telegram_username"],
-                            request["telegram_display_name"],
-                            decided_at,
-                            cursor,
-                            cursor,
-                            decided_at,
-                            decided_at,
-                        ),
-                    )
+                    live_for_session = conn.execute(
+                        "SELECT * FROM channel_bindings WHERE session_id = ? "
+                        "AND status IN ('active', 'paused') ORDER BY created_at DESC, id DESC LIMIT 1",
+                        (caller_session_id,),
+                    ).fetchone()
+                    live_for_bot = conn.execute(
+                        "SELECT * FROM channel_bindings WHERE bot_account_id = ? "
+                        "AND status IN ('active', 'paused') ORDER BY created_at DESC, id DESC LIMIT 1",
+                        (request["bot_account_id"],),
+                    ).fetchone()
+                    existing = live_for_session or live_for_bot
+                    if live_for_session is not None and live_for_bot is not None and (
+                        live_for_session["id"] != live_for_bot["id"]
+                    ):
+                        raise ChannelConflict("pairing approval conflicts with one-to-one ownership")
+                    if existing is not None and (
+                        existing["session_id"] != caller_session_id
+                        or existing["bot_account_id"] != request["bot_account_id"]
+                    ):
+                        raise ChannelConflict("pairing approval conflicts with one-to-one ownership")
+
+                    binding_status = BindingStatus.ACTIVE
+                    pause_reason: str | None = None
+                    paused_at: str | None = None
+                    if existing is not None:
+                        binding_id = str(existing["id"])
+                        previous_reason = existing["pause_reason"]
+                        # Approval repairs an identity-fault pause.  It must not
+                        # silently override a user/archive pause that happened
+                        # to coexist with the Token identity change.
+                        if previous_reason not in {
+                            "bot_identity_changed",
+                            "telegram_identity_changed",
+                        }:
+                            binding_status = BindingStatus.PAUSED
+                            pause_reason = previous_reason or "pairing_reapproved_paused"
+                            paused_at = existing["paused_at"] or decided_at
+                        conn.execute(
+                            "UPDATE outbox SET state = 'cancelled', lease_owner = NULL, "
+                            "lease_until = NULL WHERE binding_id = ? "
+                            "AND state IN ('pending', 'retry_wait')",
+                            (binding_id,),
+                        )
+                        conn.execute(
+                            "UPDATE outbox SET state = 'uncertain', lease_owner = NULL, "
+                            "lease_until = NULL, last_error_class = 'repair_inflight', "
+                            "last_error_at = ? WHERE binding_id = ? AND state = 'sending'",
+                            (decided_at, binding_id),
+                        )
+                        conn.execute(
+                            "UPDATE channel_bindings SET telegram_user_id = ?, telegram_chat_id = ?, "
+                            "telegram_username = ?, telegram_display_name = ?, status = ?, "
+                            "pause_reason = ?, paired_at = ?, sync_from_event_id = ?, "
+                            "projection_cursor_event_id = ?, paused_at = ?, last_error_code = NULL, "
+                            "updated_at = ? WHERE id = ?",
+                            (
+                                str(request["telegram_user_id"]),
+                                str(request["telegram_chat_id"]),
+                                request["telegram_username"],
+                                request["telegram_display_name"],
+                                binding_status.value,
+                                pause_reason,
+                                decided_at,
+                                cursor,
+                                cursor,
+                                paused_at,
+                                decided_at,
+                                binding_id,
+                            ),
+                        )
+                    else:
+                        conn.execute(
+                            "INSERT INTO channel_bindings "
+                            "(id, channel, session_id, bot_account_id, telegram_user_id, "
+                            "telegram_chat_id, telegram_username, telegram_display_name, status, "
+                            "paired_at, sync_from_event_id, projection_cursor_event_id, created_at, "
+                            "updated_at) VALUES (?, 'telegram', ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
+                            (
+                                binding_id,
+                                caller_session_id,
+                                request["bot_account_id"],
+                                str(request["telegram_user_id"]),
+                                str(request["telegram_chat_id"]),
+                                request["telegram_username"],
+                                request["telegram_display_name"],
+                                decided_at,
+                                cursor,
+                                cursor,
+                                decided_at,
+                                decided_at,
+                            ),
+                        )
                     updated = conn.execute(
                         "UPDATE pairing_requests SET status = 'approved', "
                         "approved_binding_id = ?, last_seen_at = ? "
@@ -1685,9 +2256,20 @@ class ChannelStore:
                             "pairing request decision raced with another writer"
                         )
                     conn.execute(
-                        "UPDATE bot_accounts SET status = 'active', updated_at = ? "
+                        "UPDATE pairing_requests SET status = 'dismissed', last_seen_at = ? "
+                        "WHERE bot_account_id = ? AND id <> ? AND status = 'pending'",
+                        (decided_at, request["bot_account_id"], request_id),
+                    )
+                    conn.execute(
+                        "UPDATE bot_accounts SET status = ?, last_error_code = NULL, updated_at = ? "
                         "WHERE id = ?",
-                        (decided_at, request["bot_account_id"]),
+                        (
+                            BotStatus.ACTIVE.value
+                            if binding_status is BindingStatus.ACTIVE
+                            else BotStatus.PAUSED.value,
+                            decided_at,
+                            request["bot_account_id"],
+                        ),
                     )
         except sqlite3.IntegrityError as exc:
             raise ChannelConflict("pairing approval conflicts with a live one-to-one binding") from exc
@@ -1698,6 +2280,46 @@ class ChannelStore:
         return self.binding(binding_id)
 
     approve_pairing = approve_pairing_request
+
+    def dismiss_pairing_for_session(
+        self, session_id: str, pairing_request_id: Any
+    ) -> PairingRequest:
+        """Dismiss only the current session's current Bot challenge."""
+        sid = self._required_text(session_id, "session_id")
+        request_id = _entity_id(pairing_request_id)
+        now = self._now()
+        with self._immediate() as conn:
+            request = conn.execute(
+                "SELECT * FROM pairing_requests WHERE id = ?", (request_id,)
+            ).fetchone()
+            if request is None:
+                raise ChannelNotFound("pairing request does not exist")
+            bot = conn.execute(
+                "SELECT * FROM bot_accounts WHERE id = ?", (request["bot_account_id"],)
+            ).fetchone()
+            if (
+                bot is None
+                or request["session_id"] != sid
+                or bot["draft_session_id"] != sid
+                or BotStatus(bot["status"]) is BotStatus.DISCONNECTED
+            ):
+                raise ChannelConflict("pairing request does not belong to current session")
+            status = PairingStatus(request["status"])
+            if status is PairingStatus.DISMISSED:
+                return _pairing_from_row(request)
+            if status is not PairingStatus.PENDING:
+                raise ChannelConflict("pairing request is no longer pending")
+            conn.execute(
+                "UPDATE pairing_requests SET status = 'dismissed', last_seen_at = ? WHERE id = ?",
+                (now, request_id),
+            )
+            conn.execute(
+                "INSERT INTO channel_audit (ts, event_kind, session_id, bot_account_id, "
+                "pairing_request_id, safe_details_json) VALUES "
+                "(?, 'pairing_dismissed', ?, ?, ?, '{}')",
+                (now, sid, request["bot_account_id"], request_id),
+            )
+        return self.pairing_request(request_id)
 
     def transition_pairing_request(
         self,
