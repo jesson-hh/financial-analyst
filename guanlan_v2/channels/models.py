@@ -174,6 +174,7 @@ class OutboxItem:
     text: Optional[str]
     media_id: Optional[str]
     caption: Optional[str]
+    media_authorization_version: Optional[int]
     state: OutboxState
     attempts: int
     next_attempt_at: Optional[str]

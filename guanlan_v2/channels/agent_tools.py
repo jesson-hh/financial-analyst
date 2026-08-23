@@ -15,12 +15,23 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from guanlan_v2.channels.media_policy import (
+    MEDIA_ID_RE,
+    MEDIA_PERMIT_ID_RE,
+    caption_contains_location,
+    media_call_key,
+)
+
 _SAFE_REASON_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$")
 _TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(?:bot)?[0-9]{5,16}:[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])",
     re.IGNORECASE,
 )
+_PAIRING_CODE_RE = re.compile(
+    r"(?<![0-9A-Z])[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}(?![0-9A-Z])"
+)
 _ASYNC_TOOL_TIMEOUT_SECONDS = 180.0
+_MAX_MEDIA_CAPTION_CHARS = 50_000
 
 
 class _ChannelToolInvocationError(RuntimeError):
@@ -64,6 +75,94 @@ CTX_CHANNEL_OWNER_LOOP: contextvars.ContextVar = contextvars.ContextVar(
 CTX_CHANNEL_OWNER_THREAD: contextvars.ContextVar = contextvars.ContextVar(
     "weiwo_channel_owner_thread", default=None
 )
+CTX_MEDIA_PUBLICATION_TICKETS: contextvars.ContextVar = contextvars.ContextVar(
+    "weiwo_media_publication_tickets", default=None
+)
+
+
+def stash_media_publication_ticket(
+    media_id: str,
+    caption: str,
+    ticket: str,
+) -> bool:
+    """Store one proof in the current turn without exposing it to tool args."""
+    mapping = CTX_MEDIA_PUBLICATION_TICKETS.get(None)
+    if (
+        not isinstance(mapping, dict)
+        or not isinstance(media_id, str)
+        or MEDIA_ID_RE.fullmatch(media_id) is None
+        or not isinstance(caption, str)
+        or caption_contains_location(caption)
+        or not isinstance(ticket, str)
+        or not ticket
+        or len(ticket) > 512
+    ):
+        return False
+    mapping[media_call_key(media_id, caption)] = ticket
+    return True
+
+
+def _pop_media_publication_ticket(media_id: str, caption: str) -> str | None:
+    mapping = CTX_MEDIA_PUBLICATION_TICKETS.get(None)
+    if not isinstance(mapping, dict):
+        return None
+    value = mapping.pop(media_call_key(media_id, caption), None)
+    return value if isinstance(value, str) and value else None
+
+
+def validated_telegram_publish_args(
+    args: Mapping[str, Any] | None,
+) -> tuple[str, str] | None:
+    """Return the exact safe media request or fail closed without echoing it."""
+    if not isinstance(args, Mapping) or not set(args).issubset(
+        {"media_id", "caption"}
+    ):
+        return None
+    if "media_id" not in args:
+        return None
+    media_id = args.get("media_id")
+    caption = args.get("caption", "")
+    if not isinstance(media_id, str) or MEDIA_ID_RE.fullmatch(media_id) is None:
+        return None
+    if (
+        not isinstance(caption, str)
+        or len(caption) > _MAX_MEDIA_CAPTION_CHARS
+        or "\x00" in caption
+        or _TOKEN_RE.search(caption)
+        or _PAIRING_CODE_RE.search(caption)
+        or caption_contains_location(caption)
+    ):
+        return None
+    return media_id, caption
+
+
+def public_telegram_publish_artifact(value: object) -> dict[str, Any] | None:
+    """Return the only Telegram media artifact safe for Console/SSE storage."""
+    if not isinstance(value, Mapping) or set(value) != {
+        "kind", "page", "channel", "payload", "ref"
+    }:
+        return None
+    validated = validated_telegram_publish_args(
+        value.get("payload") if isinstance(value.get("payload"), Mapping) else None
+    )
+    permit_id = value.get("ref")
+    if (
+        value.get("kind") != "telegram_media_publish"
+        or value.get("page") is not None
+        or value.get("channel") != "telegram"
+        or validated is None
+        or not isinstance(permit_id, str)
+        or MEDIA_PERMIT_ID_RE.fullmatch(permit_id) is None
+    ):
+        return None
+    media_id, caption = validated
+    return {
+        "kind": "telegram_media_publish",
+        "page": None,
+        "channel": "telegram",
+        "payload": {"media_id": media_id, "caption": caption},
+        "ref": permit_id,
+    }
 
 
 def _failure(reason_code: str, content: str) -> dict[str, Any]:
@@ -333,12 +432,59 @@ def telegram_disconnect_impl() -> dict[str, Any]:
 
 
 def telegram_publish_impl(media_id: str = "", caption: str = "") -> dict[str, Any]:
+    # Validate the deliberately narrow Agent surface before it reaches the
+    # runtime.  In particular, paths and URLs can never be interpreted as a
+    # file capability: the only accepted handle is an opaque MediaStore id.
+    current = _current_context()
+    if current is None:
+        return dict(_CONTEXT_FAILURE)
+    if not callable(getattr(current[1], "publish_media", None)):
+        return dict(_CAPABILITY_FAILURE)
+    if not isinstance(media_id, str) or MEDIA_ID_RE.fullmatch(media_id) is None:
+        return _failure(
+            "telegram_media_invalid",
+            "只能发送当前对话中已生成的媒体编号，不能传入路径或 URL。",
+        )
+    validated = validated_telegram_publish_args(
+        {"media_id": media_id, "caption": caption}
+    )
+    if validated is None:
+        return _failure("telegram_caption_invalid", "图片说明格式不合法。")
+    media_id, caption = validated
+    confirmation_ticket = _pop_media_publication_ticket(media_id, caption)
+    if confirmation_ticket is None:
+        return _failure(
+            "telegram_publish_confirmation_required",
+            "本次图片发送缺少当前确认，请重新发起并由用户确认。",
+        )
     result = _invoke(
-        "publish_media", media_id, caption, unavailable_if_missing=True
+        "publish_media",
+        media_id,
+        caption,
+        confirmation_ticket,
+        unavailable_if_missing=True,
     )
     if isinstance(result, dict) and result.get("ok") is False:
         return result
-    return result if isinstance(result, dict) else dict(_CAPABILITY_FAILURE)
+    if not isinstance(result, dict):
+        return dict(_CAPABILITY_FAILURE)
+
+    # Runtime owns session/binding/media verification.  Accept only its exact
+    # non-path-bearing publication envelope, then rebuild the public result so
+    # an injected runtime cannot smuggle internal fields into Console events.
+    candidate = result.get("artifact") if "artifact" in result else result
+    expected_payload = {"media_id": media_id, "caption": caption}
+    artifact = public_telegram_publish_artifact(candidate)
+    if artifact is None or artifact["payload"] != expected_payload:
+        return _failure(
+            "telegram_media_publish_invalid",
+            "Telegram 图片发布结果无法验证，本次未进入发送队列。",
+        )
+    return {
+        "ok": True,
+        "content": f"已将媒体编号 {media_id} 加入 Telegram 发送队列。",
+        "artifact": artifact,
+    }
 
 
 def automation_skills_impl() -> dict[str, Any]:
@@ -409,8 +555,8 @@ def public_tool_args(tool_name: str, args: Mapping[str, Any] | None) -> dict[str
         value = _safe_preview_text(source.get("pairing_request_id"), limit=160)
         return {"pairing_request_id": value} if value else {}
     if tool_name == "ww_telegram_publish":
-        value = _safe_preview_text(source.get("media_id"), limit=160)
-        return {"media_id": value} if value else {}
+        validated = validated_telegram_publish_args(source)
+        return {"media_id": validated[0]} if validated is not None else {}
     if tool_name == "ww_automation_upsert":
         limits = {
             "automation_id": 160,
@@ -525,10 +671,29 @@ def confirm_metadata(
             "binding_policy": "本对话与此 Bot/私聊永久一对一绑定",
         })
     elif tool_name == "ww_telegram_publish":
+        validated = validated_telegram_publish_args(source)
+        recipient = (
+            safe_status.get("recipient")
+            if isinstance(safe_status.get("recipient"), Mapping)
+            else {}
+        )
         details.update({
-            "media_id": _safe_preview_text(source.get("media_id"), limit=160),
-            "caption": _safe_preview_text(source.get("caption"), limit=300),
+            "media_id": validated[0] if validated is not None else "",
+            # This is intentionally exact rather than a whitespace-folded or
+            # truncated preview: the authority below binds the same bytes.
+            "caption": validated[1] if validated is not None else "",
+            "caption_length": len(validated[1]) if validated is not None else 0,
             "media_policy": "只发送当前对话 MediaStore 中已校验的图片",
+            "telegram_username": _safe_preview_text(
+                recipient.get("username"), limit=64
+            ),
+            "telegram_user_id": _safe_preview_text(
+                recipient.get("user_id"), limit=32
+            ),
+            "telegram_display_name": _safe_preview_text(
+                recipient.get("display_name"), limit=128
+            ),
+            "recipient_generation_policy": "本次确认仅对当前接收者代次有效",
         })
     elif tool_name.startswith("ww_automation_"):
         refs = source.get("skill_refs")
@@ -665,7 +830,11 @@ CHANNEL_TOOL_TABLE = [
         "description": "把当前对话 MediaStore 中已校验的图片显式发送到唯一绑定。",
         "input_schema": _object_schema(
             {
-                "media_id": {"type": "string", "description": "当前对话的媒体编号"},
+                "media_id": {
+                    "type": "string",
+                    "pattern": r"^mi_[0-9a-f]{32}$",
+                    "description": "当前对话的不透明媒体编号；不能传路径或 URL",
+                },
                 "caption": {"type": "string", "description": "可选图片说明"},
             },
             ["media_id"],
@@ -766,7 +935,11 @@ __all__ = [
     "CTX_CHANNEL_OWNER_LOOP",
     "CTX_CHANNEL_OWNER_THREAD",
     "CTX_CHANNEL_RUNTIME",
+    "CTX_MEDIA_PUBLICATION_TICKETS",
     "ChannelToolContext",
     "confirm_metadata",
+    "public_telegram_publish_artifact",
     "public_tool_args",
+    "stash_media_publication_ticket",
+    "validated_telegram_publish_args",
 ]

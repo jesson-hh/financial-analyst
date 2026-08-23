@@ -1,14 +1,15 @@
-"""Reliable, strictly ordered Telegram text delivery from the durable outbox."""
+"""Reliable, strictly ordered Telegram delivery from the durable outbox."""
 from __future__ import annotations
 
 import asyncio
 import logging
 import random
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from guanlan_v2.channels.media_policy import caption_contains_location
 from guanlan_v2.channels.models import BotStatus, OutboxState
 from guanlan_v2.channels.secrets import SecretUnavailable
 from guanlan_v2.channels.store import ChannelConflict, OutboxClaim
@@ -29,6 +30,13 @@ IDLE_SECONDS = 0.5
 CIRCUIT_FAILURE_THRESHOLD = 5
 CIRCUIT_INITIAL_COOLDOWN_SECONDS = 60.0
 CIRCUIT_MAX_COOLDOWN_SECONDS = 900.0
+MAX_MEDIA_BYTES = 10 * 1024 * 1024
+MAX_PHOTO_CAPTION = 900
+_MEDIA_FILENAMES = {
+    "image/png": "image.png",
+    "image/jpeg": "image.jpg",
+    "image/webp": "image.webp",
+}
 
 
 @dataclass
@@ -262,6 +270,7 @@ class OutboxWorker:
         retryable_recorded = False
         renewal: asyncio.Task | None = None
         token = ""
+        media_bytes: bytes | None = None
         try:
             current = await asyncio.to_thread(
                 self.channel_store.outbox_claim_is_current, claim, now=self._now()
@@ -269,6 +278,67 @@ class OutboxWorker:
             if not current:
                 await self._mark_uncertain(claim, "credential_generation_changed")
                 return
+            # Media integrity/ownership verification may read and hash up to
+            # 10 MB.  Renew from the start of local preparation so a slow disk
+            # cannot expire the claim before the provider call even begins.
+            renewal = asyncio.create_task(self._renew_loop(claim))
+            media_metadata: Mapping[str, Any] | None = None
+            if claim.kind == "media":
+                if (
+                    self.media_store is None
+                    or claim.media_authorization_version != 1
+                    or not isinstance(claim.media_id, str)
+                    or not claim.media_id
+                    or claim.text is not None
+                    or (
+                        claim.caption is not None
+                        and (
+                            not isinstance(claim.caption, str)
+                            or len(claim.caption) > MAX_PHOTO_CAPTION
+                            or "\x00" in claim.caption
+                            or caption_contains_location(claim.caption)
+                        )
+                    )
+                ):
+                    completed = await self._finish(
+                        claim,
+                        OutboxState.TERMINAL,
+                        error_class="invalid_media_delivery",
+                    )
+                    if completed is not None:
+                        await self._audit(
+                            "outbox_terminal", claim, "invalid_media_delivery"
+                        )
+                    return
+                loaded = await asyncio.to_thread(
+                    self.media_store.load_for_session,
+                    claim.media_id,
+                    claim.source_session_id,
+                )
+                if (
+                    not isinstance(loaded, tuple)
+                    or len(loaded) != 2
+                    or not isinstance(loaded[0], Mapping)
+                    or not isinstance(loaded[1], bytes)
+                ):
+                    raise ValueError("invalid media store response")
+                media_metadata, media_bytes = loaded
+                mime = media_metadata.get("mime")
+                if (
+                    media_metadata.get("id") != claim.media_id
+                    or mime not in _MEDIA_FILENAMES
+                    or not media_bytes
+                    or len(media_bytes) > MAX_MEDIA_BYTES
+                ):
+                    raise ValueError("invalid media store response")
+            elif claim.kind != "text" or not isinstance(claim.text, str) or not claim.text:
+                completed = await self._finish(
+                    claim, OutboxState.TERMINAL, error_class="unsupported_outbound_kind"
+                )
+                if completed is not None:
+                    await self._audit("outbox_terminal", claim, "unsupported_outbound_kind")
+                return
+
             token = await asyncio.to_thread(self.secret_store.get, claim.credential_id)
             # Close the DPAPI/replacement race again immediately before the
             # provider call.  Completion is fenced a third time.
@@ -278,20 +348,28 @@ class OutboxWorker:
             if not current:
                 await self._mark_uncertain(claim, "credential_generation_changed")
                 return
-            if claim.kind != "text" or not isinstance(claim.text, str) or not claim.text:
-                completed = await self._finish(
-                    claim, OutboxState.TERMINAL, error_class="unsupported_outbound_kind"
-                )
-                if completed is not None:
-                    await self._audit("outbox_terminal", claim, "unsupported_outbound_kind")
-                return
-            renewal = asyncio.create_task(self._renew_loop(claim))
             send_started = True
-            result = await self.telegram_adapter.send_message(
-                token,
-                chat_id=claim.telegram_chat_id,
-                text=claim.text,
-            )
+            if claim.kind == "media":
+                # Metadata was revalidated above and the name is selected from
+                # a closed map; neither a source path nor the private blob name
+                # crosses the provider boundary.
+                assert media_metadata is not None and media_bytes is not None
+                mime = str(media_metadata["mime"])
+                result = await self.telegram_adapter.send_photo(
+                    token,
+                    chat_id=claim.telegram_chat_id,
+                    data=media_bytes,
+                    filename=_MEDIA_FILENAMES[mime],
+                    mime_type=mime,
+                    caption=claim.caption,
+                )
+            else:
+                assert isinstance(claim.text, str)
+                result = await self.telegram_adapter.send_message(
+                    token,
+                    chat_id=claim.telegram_chat_id,
+                    text=claim.text,
+                )
             message_id = getattr(result, "message_id", None)
             if not isinstance(message_id, str) or not message_id.isdigit():
                 raise TelegramUncertain()
@@ -387,6 +465,7 @@ class OutboxWorker:
                     await self._audit("outbox_terminal", claim, "local_delivery_error")
         finally:
             token = ""
+            media_bytes = None
             # A half-open probe must end on every outcome, including ambiguous
             # or terminal delivery and task cancellation.  Retryable handling
             # already reopens the circuit; this is an idempotent final fence.
@@ -486,5 +565,7 @@ __all__ = [
     "CIRCUIT_MAX_COOLDOWN_SECONDS",
     "IDLE_SECONDS",
     "LEASE_SECONDS",
+    "MAX_MEDIA_BYTES",
+    "MAX_PHOTO_CAPTION",
     "OutboxWorker",
 ]

@@ -1259,7 +1259,12 @@ def workspace_quant_chart_impl(benchmark: str = "csi300",
         payload = artifact_payload(metadata)
         return {
             "ok": True,
-            "content": _quant_chart_content(result, json_rel),
+            "content": (
+                _quant_chart_content(result, json_rel)
+                + f"\n媒体编号: {metadata['id']}。"
+                "如需发送到 Telegram，只能在当前对话显式调用"
+                " ww_telegram_publish，不能传入本地路径。"
+            ),
             "artifact": {
                 "kind": "media_image",
                 "page": None,
@@ -1293,6 +1298,9 @@ def workspace_publish_image_impl(path: str, alt: str = "") -> Dict[str, Any]:
             "content": (
                 f"图片已安全发布到当前对话: {metadata['name']} "
                 f"({metadata['width']}×{metadata['height']})。"
+                f" 媒体编号: {metadata['id']}。"
+                " 如需发送到 Telegram，只能在当前对话显式调用"
+                " ww_telegram_publish，不能传入本地路径。"
             ),
             "artifact": {
                 "kind": "media_image",

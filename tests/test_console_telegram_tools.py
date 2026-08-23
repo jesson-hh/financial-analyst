@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import threading
 import time
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -110,6 +112,12 @@ def test_channel_tool_table_is_narrow_and_separate_from_core_table():
     assert set(by_name["ww_telegram_pair_dismiss"]["input_schema"]["properties"]) == {
         "pairing_request_id"
     }
+    publish_schema = by_name["ww_telegram_publish"]["input_schema"]
+    assert set(publish_schema["properties"]) == {"media_id", "caption"}
+    assert publish_schema["required"] == ["media_id"]
+    assert publish_schema["properties"]["media_id"]["pattern"] == (
+        r"^mi_[0-9a-f]{32}$"
+    )
 
     for row in at.CHANNEL_TOOL_TABLE:
         assert row["input_schema"].get("additionalProperties") is False
@@ -130,7 +138,7 @@ def test_channel_writes_fail_honestly_without_session_or_runtime_context():
         "ww_telegram_pause": {},
         "ww_telegram_resume": {},
         "ww_telegram_disconnect": {},
-        "ww_telegram_publish": {"media_id": "media_one"},
+        "ww_telegram_publish": {"media_id": "mi_" + "1" * 32},
         "ww_automation_upsert": {
             "name": "每日晨报",
             "schedule_kind": "daily",
@@ -249,7 +257,7 @@ def test_not_yet_wired_publish_and_automation_are_honestly_unavailable():
     sid_token = ct.CTX_SID.set("cs_current")
     runtime_token = at.CTX_CHANNEL_RUNTIME.set(at.ChannelToolContext.capture(Runtime()))
     try:
-        publish = at.telegram_publish_impl(media_id="media_one", caption="图")
+        publish = at.telegram_publish_impl(media_id="mi_" + "1" * 32, caption="图")
         skills = at.automation_skills_impl()
         listed = at.automation_list_impl()
         upserted = at.automation_upsert_impl(
@@ -271,6 +279,636 @@ def test_not_yet_wired_publish_and_automation_are_honestly_unavailable():
             "reason_code": "channel_capability_unavailable",
             "content": "该通道能力尚未接通，当前不能执行。",
         }
+
+
+def test_publish_tool_accepts_only_exact_runtime_media_envelope_and_strips_extras():
+    from guanlan_v2.channels import agent_tools as at
+    from guanlan_v2.console import tools as ct
+
+    media_id = "mi_" + "a" * 32
+
+    class Runtime:
+        def __init__(self):
+            self.calls = []
+
+        def publish_media(self, sid, supplied_media_id, caption, confirmation_ticket):
+            self.calls.append((sid, supplied_media_id, caption, confirmation_ticket))
+            return {
+                "ok": True,
+                "content": r"internal C:\\private\\chart.png",
+                "artifact": {
+                    "kind": "telegram_media_publish",
+                    "page": None,
+                    "channel": "telegram",
+                    "payload": {"media_id": supplied_media_id, "caption": caption},
+                    "ref": "pub_" + "1" * 32,
+                },
+                "internal_path": r"C:\\private\\chart.png",
+            }
+
+    runtime = Runtime()
+    sid_token = ct.CTX_SID.set("cs_current")
+    runtime_token = at.CTX_CHANNEL_RUNTIME.set(
+        at.ChannelToolContext.capture(runtime)
+    )
+    permit_token = at.CTX_MEDIA_PUBLICATION_TICKETS.set({})
+    try:
+        assert at.stash_media_publication_ticket(
+            media_id, "支撑压力位", "confirmation-proof"
+        )
+        result = at.telegram_publish_impl(media_id=media_id, caption="支撑压力位")
+    finally:
+        at.CTX_MEDIA_PUBLICATION_TICKETS.reset(permit_token)
+        at.CTX_CHANNEL_RUNTIME.reset(runtime_token)
+        ct.CTX_SID.reset(sid_token)
+
+    assert runtime.calls == [
+        ("cs_current", media_id, "支撑压力位", "confirmation-proof")
+    ]
+    assert set(result) == {"ok", "content", "artifact"}
+    assert result["ok"] is True
+    assert result["artifact"] == {
+        "kind": "telegram_media_publish",
+        "page": None,
+        "channel": "telegram",
+        "payload": {"media_id": media_id, "caption": "支撑压力位"},
+        "ref": "pub_" + "1" * 32,
+    }
+    assert "private" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_publish_tool_rejects_paths_urls_tokens_and_malformed_runtime_envelope():
+    from guanlan_v2.channels import agent_tools as at
+    from guanlan_v2.console import tools as ct
+
+    media_id = "mi_" + "b" * 32
+
+    class Runtime:
+        def __init__(self):
+            self.calls = 0
+
+        def publish_media(self, sid, supplied_media_id, caption, confirmation_ticket):
+            self.calls += 1
+            return {
+                "ok": True,
+                "artifact": {
+                    "kind": "media_image",  # ordinary UI image is never outbound
+                    "page": None,
+                    "channel": "conversation",
+                    "payload": {"media_id": supplied_media_id, "caption": caption},
+                    "ref": "pub_" + "2" * 32,
+                },
+            }
+
+    runtime = Runtime()
+    sid_token = ct.CTX_SID.set("cs_current")
+    runtime_token = at.CTX_CHANNEL_RUNTIME.set(
+        at.ChannelToolContext.capture(runtime)
+    )
+    permit_token = at.CTX_MEDIA_PUBLICATION_TICKETS.set({})
+    try:
+        for invalid in (
+            r"C:\\private\\chart.png",
+            "output/chart.png",
+            "https://example.invalid/chart.png",
+            "file:///private/chart.png",
+        ):
+            denied = at.telegram_publish_impl(media_id=invalid, caption="图")
+            assert denied["ok"] is False
+            assert denied["reason_code"] == "telegram_media_invalid"
+        secret_caption = at.telegram_publish_impl(
+            media_id=media_id,
+            caption="123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghi",
+        )
+        assert secret_caption["ok"] is False
+        for path_caption in (
+            r"C:\x.png",
+            "/tmp/x",
+            "file:///tmp/x.png",
+            "https://example.invalid/x.png",
+            "output/chart.png",
+        ):
+            denied_caption = at.telegram_publish_impl(
+                media_id=media_id,
+                caption=path_caption,
+            )
+            assert denied_caption["ok"] is False
+            assert denied_caption["reason_code"] == "telegram_caption_invalid"
+        assert at.stash_media_publication_ticket(media_id, "图", "proof")
+        malformed = at.telegram_publish_impl(media_id=media_id, caption="图")
+    finally:
+        at.CTX_MEDIA_PUBLICATION_TICKETS.reset(permit_token)
+        at.CTX_CHANNEL_RUNTIME.reset(runtime_token)
+        ct.CTX_SID.reset(sid_token)
+
+    assert runtime.calls == 1
+    assert malformed["ok"] is False
+    assert malformed["reason_code"] == "telegram_media_publish_invalid"
+
+
+def test_runtime_publish_media_requires_active_writable_owner_scope(tmp_path):
+    from guanlan_v2.channels.runtime import ChannelRuntime, ChannelRuntimeError
+    from guanlan_v2.channels.store import ChannelStore
+
+    console = ConsoleStore(root=tmp_path / "console")
+    sid = console.create_session("图片投递")['id']
+    channels = ChannelStore(tmp_path / "channels.sqlite3")
+    bot_id = channels.create_bot("图片 Bot", draft_session_id=sid)
+    channels.cas_bot_credential(
+        bot_id,
+        expected_revision=0,
+        credential_id="cred_" + "a" * 32,
+        telegram_bot_id="1001",
+    )
+    channels.bind_for_test(
+        sid,
+        bot_id,
+        user_id="7",
+        chat_id="7",
+        sync_from_event_id=0,
+    )
+    media_id = "mi_" + "c" * 32
+
+    class SessionMedia:
+        def __init__(self):
+            self.calls = []
+
+        def load_for_session(self, candidate, owner_sid):
+            self.calls.append((candidate, owner_sid))
+            if candidate != media_id or owner_sid != sid:
+                raise LookupError("not owned")
+            return ({"id": candidate, "mime": "image/png"}, b"image")
+
+    session_media = SessionMedia()
+    runtime = ChannelRuntime(
+        console_store=console,
+        channel_store=channels,
+        secret_store=object(),
+        telegram_adapter=object(),
+        media_store=session_media,
+    )
+
+    def issue(candidate_media_id, candidate_caption):
+        preview = runtime.media_publication_confirmation_preview(
+            sid, candidate_media_id, candidate_caption
+        )
+        return runtime.issue_media_publication_confirmation(
+            sid,
+            candidate_media_id,
+            candidate_caption,
+            preview["binding_id"],
+            preview["binding_paired_at"],
+        )
+
+    for path_caption in (
+        r"C:\x.png",
+        "/tmp/x",
+        "file:///tmp/x.png",
+        "https://example.invalid/x.png",
+        "output/chart.png",
+    ):
+        with pytest.raises(ChannelRuntimeError) as location:
+            runtime.issue_media_publication_confirmation(
+                sid, media_id, path_caption
+            )
+        assert location.value.reason_code == "telegram_caption_rejected"
+    assert isinstance(
+        issue(
+            media_id,
+            "Alpha:0.3 · Beta:1.2 · 20/60/120\n中文分析",
+        ),
+        str,
+    )
+
+    with pytest.raises(ChannelRuntimeError) as unconfirmed:
+        runtime.publish_media(sid, media_id, "压力与支撑")
+    assert unconfirmed.value.reason_code == "telegram_publish_confirmation_required"
+    assert session_media.calls == []
+
+    confirmation = issue(media_id, "压力与支撑")
+    published = runtime.publish_media(
+        sid, media_id, "压力与支撑", confirmation
+    )
+    assert published["artifact"] == {
+        "kind": "telegram_media_publish",
+        "page": None,
+        "channel": "telegram",
+        "payload": {"media_id": media_id, "caption": "压力与支撑"},
+        "ref": published["artifact"]["ref"],
+    }
+    assert re.fullmatch(r"pub_[0-9a-f]{32}", published["artifact"]["ref"])
+    assert session_media.calls == [(media_id, sid)]
+
+    with pytest.raises(ChannelRuntimeError) as replayed:
+        runtime.publish_media(sid, media_id, "压力与支撑", confirmation)
+    assert replayed.value.reason_code == "telegram_publish_confirmation_required"
+    assert session_media.calls == [(media_id, sid)]
+
+    card_generation = runtime.media_publication_confirmation_preview(
+        sid, media_id, "确认卡代次"
+    )
+    with channels.connect() as conn:
+        conn.execute(
+            "UPDATE channel_bindings SET paired_at = ? WHERE session_id = ? "
+            "AND status = 'active'",
+            ("2030-01-01T00:00:00.000000+00:00", sid),
+        )
+    with pytest.raises(ChannelRuntimeError) as changed_before_approval:
+        runtime.issue_media_publication_confirmation(
+            sid,
+            media_id,
+            "确认卡代次",
+            card_generation["binding_id"],
+            card_generation["binding_paired_at"],
+        )
+    assert changed_before_approval.value.reason_code == "telegram_recipient_changed"
+
+    old_generation_ticket = issue(media_id, "接收者代次")
+    with channels.connect() as conn:
+        conn.execute(
+            "UPDATE channel_bindings SET paired_at = ? WHERE session_id = ? "
+            "AND status = 'active'",
+            ("2031-01-01T00:00:00.000000+00:00", sid),
+        )
+    with pytest.raises(ChannelRuntimeError) as generation_changed:
+        runtime.publish_media(
+            sid, media_id, "接收者代次", old_generation_ticket
+        )
+    assert (
+        generation_changed.value.reason_code
+        == "telegram_publish_confirmation_required"
+    )
+    assert session_media.calls == [(media_id, sid)]
+
+    with pytest.raises(ChannelRuntimeError) as foreign:
+        foreign_id = "mi_" + "d" * 32
+        foreign_ticket = issue(foreign_id, "图")
+        runtime.publish_media(sid, foreign_id, "图", foreign_ticket)
+    assert foreign.value.reason_code == "telegram_media_not_found"
+
+    console.set_archived(sid, True)
+    with pytest.raises(ChannelRuntimeError) as archived:
+        runtime.publish_media(sid, media_id, "图")
+    assert archived.value.reason_code == "channel_session_read_only"
+    # The archive gate runs before any media read, so a newly requested send
+    # cannot become an implicit historic-media capability.
+    assert session_media.calls == [(media_id, sid), ("mi_" + "d" * 32, sid)]
+
+
+def test_rejected_publish_confirmation_emits_no_media_publish_result(tmp_path):
+    media_id = "mi_" + "e" * 32
+
+    class Runtime:
+        def extract_telegram_tokens(self, _text):
+            return ()
+
+        def media_publication_confirmation_preview(self, sid, candidate, caption):
+            assert candidate == media_id and caption == "压力与支撑"
+            return {
+                "binding_id": "bind_generation_a",
+                "binding_paired_at": "2026-08-23T00:00:00.000000+00:00",
+                "recipient": {
+                    "user_id": "7",
+                    "username": "owner",
+                    "display_name": "",
+                },
+            }
+
+        def status_for_session(self, sid):
+            return {
+                "available": True,
+                "session_id": sid,
+                "view_state": "active",
+                "bot": {"display_name": "图片 Bot", "username": "image_bot"},
+                "recipient": {"user_id": "7", "username": "owner"},
+                "pairing_requests": [],
+                "counts": {},
+                "warnings": [],
+                "recent_deliveries": [],
+                "automations": [],
+            }
+
+    class Agent:
+        def __init__(self):
+            self.messages = []
+            self.approved = None
+
+        async def run_turn(self, _text, confirm_callback=None, allowed_tools=None):
+            self.approved = await confirm_callback(
+                "ww_telegram_publish",
+                {"media_id": media_id, "caption": "压力与支撑"},
+            )
+            if self.approved:
+                # This branch makes an accidental approval visible as a
+                # projectable event instead of letting the test pass silently.
+                yield type("Evt", (), {
+                    "kind": "tool_result",
+                    "payload": {
+                        "name": "ww_telegram_publish",
+                        "content": "published",
+                        "is_error": False,
+                        "side_effect": {"artifact": {
+                            "kind": "telegram_media_publish",
+                            "page": None,
+                            "channel": "telegram",
+                            "payload": {
+                                "media_id": media_id,
+                                "caption": "压力与支撑",
+                            },
+                            "ref": media_id,
+                        }},
+                    },
+                })()
+            yield type("Evt", (), {"kind": "done", "payload": None})()
+
+    store = ConsoleStore(root=tmp_path)
+    agent = Agent()
+    app = FastAPI()
+    app.include_router(build_console_router(
+        store=store,
+        agent_factory=lambda _sid: agent,
+        channel_runtime=Runtime(),
+    ))
+    with TestClient(app) as client:
+        sid = client.post("/console/sessions", json={}).json()["meta"]["id"]
+        assert client.post(
+            "/console/send", json={"sid": sid, "text": "把这张图发给我"}
+        ).json()["ok"]
+        events = _wait(store, sid, lambda items: any(
+            item.get("type") == "confirm_request"
+            and item.get("tool") == "ww_telegram_publish"
+            for item in items
+        ))
+        request = next(
+            item for item in events
+            if item.get("type") == "confirm_request"
+            and item.get("tool") == "ww_telegram_publish"
+        )
+        assert client.post("/console/confirm", json={
+            "turn_id": request["turn_id"],
+            "confirm_id": request["confirm_id"],
+            "choice": "n",
+        }).json()["ok"]
+        events = _wait(store, sid, lambda items: any(
+            item.get("type") == "task_update" and item.get("status") == "done"
+            for item in items
+        ))
+
+    assert agent.approved is False
+    assert not any(
+        item.get("type") == "tool_result"
+        and item.get("tool") == "ww_telegram_publish"
+        for item in events
+    )
+
+
+def test_publish_confirmation_freezes_displayed_recipient_generation(tmp_path):
+    media_id = "mi_" + "f" * 32
+    caption = "第一行\n" + "甲" * 400
+
+    class RecipientChanged(RuntimeError):
+        reason_code = "telegram_recipient_changed"
+
+    class Runtime:
+        def __init__(self):
+            self.tickets = ActionTicketStore(ttl_seconds=120)
+            self.generation = {
+                "binding_id": "bind_a",
+                "binding_paired_at": "2026-08-23T00:00:00.000000+00:00",
+                "recipient": {
+                    "user_id": "7",
+                    "username": "recipient_a",
+                    "display_name": "A",
+                },
+            }
+            self.issue_calls = []
+
+        def issue_action_ticket(self, sid, action, subject_id):
+            return self.tickets.issue(sid, action, subject_id)
+
+        def consume_action_ticket(self, ticket, sid, action, subject_id):
+            return self.tickets.consume(ticket, sid, action, subject_id)
+
+        def extract_telegram_tokens(self, _text):
+            return ()
+
+        def status_for_session(self, sid):
+            return {
+                "available": True,
+                "session_id": sid,
+                "view_state": "active",
+                "bot": {"display_name": "图片 Bot", "username": "image_bot"},
+                "recipient": dict(self.generation["recipient"]),
+                "pairing_requests": [],
+                "counts": {},
+                "warnings": [],
+                "recent_deliveries": [],
+                "automations": [],
+            }
+
+        def media_publication_confirmation_preview(self, sid, candidate, supplied):
+            assert sid and candidate == media_id and supplied == caption
+            return {
+                "binding_id": self.generation["binding_id"],
+                "binding_paired_at": self.generation["binding_paired_at"],
+                "recipient": dict(self.generation["recipient"]),
+            }
+
+        def issue_media_publication_confirmation(
+            self, sid, candidate, supplied, expected_binding_id, expected_paired_at
+        ):
+            self.issue_calls.append(
+                (sid, candidate, supplied, expected_binding_id, expected_paired_at)
+            )
+            if (
+                expected_binding_id != self.generation["binding_id"]
+                or expected_paired_at != self.generation["binding_paired_at"]
+            ):
+                raise RecipientChanged("recipient changed")
+            return "ticket"
+
+    class Agent:
+        def __init__(self):
+            self.messages = []
+            self.approved = None
+
+        async def run_turn(self, _text, confirm_callback=None, allowed_tools=None):
+            self.approved = await confirm_callback(
+                "ww_telegram_publish",
+                {"media_id": media_id, "caption": caption},
+            )
+            yield type("Evt", (), {"kind": "done", "payload": None})()
+
+    runtime = Runtime()
+    agent = Agent()
+    store = ConsoleStore(root=tmp_path)
+    app = FastAPI()
+    app.include_router(
+        build_console_router(
+            store=store,
+            agent_factory=lambda _sid: agent,
+            channel_runtime=runtime,
+        )
+    )
+    with TestClient(app) as client:
+        sid = client.post("/console/sessions", json={}).json()["meta"]["id"]
+        assert client.post(
+            "/console/send", json={"sid": sid, "text": "发图"}
+        ).json()["ok"]
+        events = _wait(
+            store,
+            sid,
+            lambda items: any(
+                item.get("type") == "confirm_request"
+                and item.get("tool") == "ww_telegram_publish"
+                for item in items
+            ),
+        )
+        request = next(
+            item
+            for item in events
+            if item.get("type") == "confirm_request"
+            and item.get("tool") == "ww_telegram_publish"
+        )
+        assert request["public_details"]["telegram_username"] == "recipient_a"
+        assert request["public_details"]["caption"] == caption
+        assert request["public_details"]["caption_length"] == len(caption)
+
+        runtime.generation = {
+            "binding_id": "bind_b",
+            "binding_paired_at": "2026-08-23T00:01:00.000000+00:00",
+            "recipient": {
+                "user_id": "8",
+                "username": "recipient_b",
+                "display_name": "B",
+            },
+        }
+        issued = client.post(
+            "/console/confirm/request-token",
+            json={
+                "turn_id": request["turn_id"],
+                "confirm_id": request["confirm_id"],
+            },
+        )
+        assert issued.status_code == 200
+        assert client.post(
+            "/console/confirm",
+            json={
+                "turn_id": request["turn_id"],
+                "confirm_id": request["confirm_id"],
+                "choice": "y",
+                "request_token": issued.json()["request_token"],
+            },
+        ).json()["ok"]
+        events = _wait(
+            store,
+            sid,
+            lambda items: any(
+                item.get("type") == "task_update" and item.get("status") == "done"
+                for item in items
+            ),
+        )
+
+    assert agent.approved is False
+    assert runtime.issue_calls[-1][3:] == (
+        "bind_a",
+        "2026-08-23T00:00:00.000000+00:00",
+    )
+    assert not any(
+        item.get("type") == "tool_result"
+        and item.get("tool") == "ww_telegram_publish"
+        for item in events
+    )
+
+
+def test_invalid_publish_location_never_enters_console_public_events(tmp_path):
+    media_id = "mi_" + "1" * 32
+    unsafe_caption = r"C:\private\chart.png"
+
+    class Runtime:
+        def extract_telegram_tokens(self, _text):
+            return ()
+
+    class Agent:
+        def __init__(self):
+            self.messages = []
+            self.approved = None
+
+        async def run_turn(self, _text, confirm_callback=None, allowed_tools=None):
+            args = {"media_id": media_id, "caption": unsafe_caption}
+            self.approved = await confirm_callback("ww_telegram_publish", args)
+            # A hostile/custom Agent may still emit its private call after the
+            # guard rejects it.  The public event projection must remain empty.
+            yield type(
+                "Evt",
+                (),
+                {
+                    "kind": "tool_call",
+                    "payload": {"name": "ww_telegram_publish", "args": args},
+                },
+            )()
+            yield type(
+                "Evt",
+                (),
+                {
+                    "kind": "tool_result",
+                    "payload": {
+                        "name": "ww_telegram_publish",
+                        "content": f"pretend success {unsafe_caption}",
+                        "is_error": False,
+                        "side_effect": {
+                            "artifact": {
+                                "kind": "telegram_media_publish",
+                                "page": None,
+                                "channel": "telegram",
+                                "payload": {
+                                    "media_id": media_id,
+                                    "caption": unsafe_caption,
+                                },
+                                "ref": "pub_" + "2" * 32,
+                            }
+                        },
+                    },
+                },
+            )()
+            yield type("Evt", (), {"kind": "done", "payload": None})()
+
+    store = ConsoleStore(root=tmp_path)
+    agent = Agent()
+    app = FastAPI()
+    app.include_router(
+        build_console_router(
+            store=store,
+            agent_factory=lambda _sid: agent,
+            channel_runtime=Runtime(),
+        )
+    )
+    with TestClient(app) as client:
+        sid = client.post("/console/sessions", json={}).json()["meta"]["id"]
+        assert client.post(
+            "/console/send", json={"sid": sid, "text": "尝试发图"}
+        ).json()["ok"]
+        events = _wait(
+            store,
+            sid,
+            lambda items: any(
+                item.get("type") == "task_update" and item.get("status") == "done"
+                for item in items
+            ),
+        )
+
+    assert agent.approved is False
+    public_non_user = json.dumps(
+        [item for item in events if item.get("type") != "user_msg"],
+        ensure_ascii=False,
+    )
+    assert unsafe_caption not in public_non_user
+    assert not any(item.get("type") == "confirm_request" for item in events)
+    tool_call = next(item for item in events if item.get("type") == "tool_call")
+    assert tool_call["args"] == {}
+    tool_result = next(item for item in events if item.get("type") == "tool_result")
+    assert tool_result["ok"] is False
+    assert tool_result["artifact"] is None
 
 
 def test_completed_mutation_stays_successful_when_status_refresh_fails():
@@ -611,6 +1249,7 @@ def test_no_runtime_fails_closed_before_send_or_steer_can_persist_token(tmp_path
 
 def test_channel_public_argument_whitelists_hide_secrets_and_bound_text():
     from guanlan_v2.channels import agent_tools as at
+    from guanlan_v2.console.api import _console_tool_argument_guard
 
     secret = "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghi"
     assert at.public_tool_args(
@@ -628,6 +1267,27 @@ def test_channel_public_argument_whitelists_hide_secrets_and_bound_text():
     assert set(public) == {"name", "timezone"}
     assert len(public["name"]) <= 128
     assert secret not in json.dumps(public, ensure_ascii=False)
+
+    media_id = "mi_" + "a" * 32
+    assert at.public_tool_args(
+        "ww_telegram_publish", {"media_id": media_id, "caption": "正常分析"}
+    ) == {"media_id": media_id}
+    for unsafe in (
+        {"media_id": r"C:\private\chart.png", "caption": ""},
+        {"media_id": media_id, "caption": "https:example.invalid/chart"},
+        {"media_id": media_id, "caption": "reports/secret"},
+        {"media_id": media_id, "caption": "正常", "extra": "C:/hidden"},
+    ):
+        assert at.public_tool_args("ww_telegram_publish", unsafe) == {}
+        assert _console_tool_argument_guard("ww_telegram_publish", unsafe)
+        rendered = json.dumps(
+            at.confirm_metadata("ww_telegram_publish", unsafe, {}),
+            ensure_ascii=False,
+        )
+        assert "private" not in rendered
+        assert "example.invalid" not in rendered
+        assert "reports/secret" not in rendered
+        assert "C:/hidden" not in rendered
 
 
 def test_pair_confirm_event_redacts_code_and_requires_scoped_one_use_ticket(

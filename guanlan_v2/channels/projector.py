@@ -8,15 +8,23 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+from guanlan_v2.channels.media_policy import (
+    MEDIA_ID_RE,
+    MEDIA_PERMIT_ID_RE,
+    caption_contains_location,
+)
 from guanlan_v2.channels.models import BindingStatus, OutboundPart
 from guanlan_v2.channels.store import ChannelConflict, ChannelNotFound
 
 
 log = logging.getLogger(__name__)
 
-PROJECTABLE_EVENT_TYPES = frozenset({"user_msg", "agent_final"})
+PROJECTABLE_EVENT_TYPES = frozenset({"user_msg", "agent_final", "tool_result"})
 DEFAULT_PAGE_SIZE = 200
 MAX_TELEGRAM_TEXT_PART = 4000
+MAX_TELEGRAM_PHOTO_CAPTION = 900
+TELEGRAM_MEDIA_TOOL = "ww_telegram_publish"
+TELEGRAM_MEDIA_ARTIFACT_KIND = "telegram_media_publish"
 _TOKEN_SHAPE_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(?:bot)?[0-9]{5,16}:[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])",
     re.IGNORECASE,
@@ -96,22 +104,101 @@ class ConsoleMessageProjector:
 
     @staticmethod
     def _parts_for_event(event: Mapping[str, Any]) -> tuple[OutboundPart, ...]:
+        return ConsoleMessageProjector._projection_for_event(event)[0]
+
+    @staticmethod
+    def _projection_for_event(
+        event: Mapping[str, Any],
+    ) -> tuple[tuple[OutboundPart, ...], str | None]:
         if event.get("channel_projection") == "never":
-            return ()
-        if event.get("type") not in PROJECTABLE_EVENT_TYPES:
-            return ()
+            return (), None
+        event_type = event.get("type")
+        if event_type not in PROJECTABLE_EVENT_TYPES:
+            return (), None
+        if event_type == "tool_result":
+            return ConsoleMessageProjector._media_projection_for_event(event)
         text = event.get("text")
         if not isinstance(text, str) or not text:
-            return ()
+            return (), None
         # Token/card ingress and pairing-code user messages are marked never by
         # Console.  Repeat the guard here so a legacy or hand-written event can
         # never strand secret material in Channel SQLite.
         if _TOKEN_SHAPE_RE.search(text) or _PAIRING_CODE_SHAPE_RE.search(text):
-            return ()
-        return tuple(
-            OutboundPart(kind="text", payload_part=index, text=part)
-            for index, part in enumerate(split_outbound_text(text))
+            return (), None
+        return (
+            tuple(
+                OutboundPart(kind="text", payload_part=index, text=part)
+                for index, part in enumerate(split_outbound_text(text))
+            ),
+            None,
         )
+
+    @staticmethod
+    def _media_projection_for_event(
+        event: Mapping[str, Any],
+    ) -> tuple[tuple[OutboundPart, ...], str | None]:
+        """Project only the explicit, successful Telegram media capability.
+
+        Ordinary workspace ``media_image`` artifacts remain conversation-only.
+        Requiring the exact capability envelope keeps future tool artifacts
+        fail-closed instead of accidentally turning them into outbound sends.
+        """
+        if event.get("tool") != TELEGRAM_MEDIA_TOOL or event.get("ok") is not True:
+            return (), None
+        artifact = event.get("artifact")
+        if not isinstance(artifact, Mapping):
+            return (), None
+        if set(artifact) != {"kind", "page", "channel", "payload", "ref"}:
+            return (), None
+        if (
+            artifact.get("kind") != TELEGRAM_MEDIA_ARTIFACT_KIND
+            or artifact.get("page") is not None
+            or artifact.get("channel") != "telegram"
+        ):
+            return (), None
+        payload = artifact.get("payload")
+        if not isinstance(payload, Mapping) or set(payload) != {"media_id", "caption"}:
+            return (), None
+        media_id = payload.get("media_id")
+        caption = payload.get("caption")
+        permit_id = artifact.get("ref")
+        if (
+            not isinstance(media_id, str)
+            or MEDIA_ID_RE.fullmatch(media_id) is None
+            or not isinstance(permit_id, str)
+            or MEDIA_PERMIT_ID_RE.fullmatch(permit_id) is None
+            or not isinstance(caption, str)
+            or "\x00" in caption
+            or _TOKEN_SHAPE_RE.search(caption)
+            or _PAIRING_CODE_SHAPE_RE.search(caption)
+            or caption_contains_location(caption)
+        ):
+            return (), None
+
+        # Telegram allows a longer caption today, but a conservative ceiling
+        # gives the product room for future presentation metadata.  When the
+        # caption is longer, every leading character becomes an ordinary,
+        # durably ordered text item; the final <=900 characters stay attached
+        # to the image.  Joining text parts and the final caption is lossless.
+        leading = ""
+        photo_caption: str | None = caption or None
+        if len(caption) > MAX_TELEGRAM_PHOTO_CAPTION:
+            leading = caption[:-MAX_TELEGRAM_PHOTO_CAPTION]
+            photo_caption = caption[-MAX_TELEGRAM_PHOTO_CAPTION:]
+        text_parts = split_outbound_text(leading)
+        result = [
+            OutboundPart(kind="text", payload_part=index, text=text)
+            for index, text in enumerate(text_parts)
+        ]
+        result.append(
+            OutboundPart(
+                kind="media",
+                payload_part=len(result),
+                media_id=media_id,
+                caption=photo_caption,
+            )
+        )
+        return tuple(result), permit_id
 
     def project_once(self, binding_id: str) -> int:
         """Project at most one oldest-first page and return advanced events."""
@@ -163,11 +250,13 @@ class ConsoleMessageProjector:
                 ):
                     continue
                 try:
+                    parts, media_permit_id = self._projection_for_event(raw_event)
                     self.channel_store.project_event(
                         binding.id,
                         source_event_id=event_id,
-                        parts=self._parts_for_event(raw_event),
+                        parts=parts,
                         projection_owner=owner,
+                        media_permit_id=media_permit_id,
                     )
                 except (ChannelConflict, ChannelNotFound):
                     # Pause/disconnect/lease expiry raced this page.  A future
@@ -238,6 +327,9 @@ __all__ = [
     "ConsoleMessageProjector",
     "DEFAULT_PAGE_SIZE",
     "MAX_TELEGRAM_TEXT_PART",
+    "MAX_TELEGRAM_PHOTO_CAPTION",
     "PROJECTABLE_EVENT_TYPES",
+    "TELEGRAM_MEDIA_ARTIFACT_KIND",
+    "TELEGRAM_MEDIA_TOOL",
     "split_outbound_text",
 ]

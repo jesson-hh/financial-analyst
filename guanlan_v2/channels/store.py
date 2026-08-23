@@ -8,6 +8,7 @@ stale Python pre-check.
 from __future__ import annotations
 
 import json
+import hashlib
 import hmac
 import re
 import sqlite3
@@ -32,6 +33,12 @@ from guanlan_v2.channels.models import (
     OutboxState,
     PairingRequest,
     PairingStatus,
+)
+from guanlan_v2.channels.media_policy import (
+    MEDIA_ID_RE,
+    MEDIA_PERMIT_ID_RE,
+    SHA256_HEX_RE,
+    caption_contains_location,
 )
 
 
@@ -122,6 +129,9 @@ CREATE TABLE IF NOT EXISTS outbox (
     text TEXT,
     media_id TEXT,
     caption TEXT,
+    media_authorization_version INTEGER CHECK (
+        media_authorization_version IS NULL OR media_authorization_version = 1
+    ),
     state TEXT NOT NULL CHECK (state IN (
         'pending', 'sending', 'sent', 'retry_wait', 'uncertain', 'terminal', 'cancelled'
     )),
@@ -135,8 +145,10 @@ CREATE TABLE IF NOT EXISTS outbox (
     created_at TEXT NOT NULL,
     sent_at TEXT,
     CHECK (
-        (kind = 'text' AND text IS NOT NULL AND media_id IS NULL AND caption IS NULL)
-        OR (kind = 'media' AND text IS NULL AND media_id IS NOT NULL)
+        (kind = 'text' AND text IS NOT NULL AND media_id IS NULL AND caption IS NULL
+            AND media_authorization_version IS NULL)
+        OR (kind = 'media' AND text IS NULL AND media_id IS NOT NULL
+            AND media_authorization_version = 1)
     )
 );
 
@@ -154,6 +166,20 @@ CREATE TABLE IF NOT EXISTS projection_leases (
     binding_id TEXT PRIMARY KEY REFERENCES channel_bindings(id) ON DELETE CASCADE,
     lease_owner TEXT NOT NULL,
     lease_until TEXT NOT NULL
+);
+
+-- One-use authority created only after an approved Agent confirmation.  The
+-- caption itself remains in Console until projection; Channel stores only its
+-- digest here, and removes the permit in the same transaction as Outbox insert.
+CREATE TABLE IF NOT EXISTS media_publish_permits (
+    permit_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    binding_id TEXT NOT NULL REFERENCES channel_bindings(id) ON DELETE CASCADE,
+    binding_paired_at TEXT NOT NULL,
+    media_id TEXT NOT NULL,
+    caption_sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS automations (
@@ -272,6 +298,9 @@ ON automations(enabled, next_run_at);
 
 CREATE INDEX IF NOT EXISTS idx_token_replacement_bot
 ON token_replacement_intents(bot_account_id);
+
+CREATE INDEX IF NOT EXISTS idx_media_publish_permits_expiry
+ON media_publish_permits(expires_at);
 """
 
 
@@ -603,6 +632,18 @@ class ChannelStore:
                     "ALTER TABLE pairing_requests ADD COLUMN "
                     "issue_credential_revision INTEGER NOT NULL DEFAULT 0"
                 )
+            outbox_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(outbox)").fetchall()
+            }
+            if "media_authorization_version" not in outbox_columns:
+                # A route fence authenticates only the recipient generation;
+                # it does not prove that a pre-Task8 image was confirmed.
+                conn.execute(
+                    "ALTER TABLE outbox ADD COLUMN media_authorization_version "
+                    "INTEGER CHECK (media_authorization_version IS NULL "
+                    "OR media_authorization_version = 1)"
+                )
             # Rows created before recipient-generation fences cannot be proven
             # safe to route.  Never infer their historic recipient from the
             # binding's current mutable value.
@@ -619,6 +660,28 @@ class ChannelStore:
                 "last_error_at = ? WHERE state = 'sending' "
                 "AND NOT EXISTS (SELECT 1 FROM outbox_route_fences rf "
                 "WHERE rf.outbox_id = outbox.id)",
+                (migration_now,),
+            )
+            # Task7 understood the media kind but deliberately never sent it.
+            # Even a legacy row with a valid recipient route fence lacks the
+            # Task8 one-use publication proof.  Mark such rows before the new
+            # worker can claim them; rows inserted by Task8 carry version 1.
+            conn.execute(
+                "UPDATE outbox SET state = 'cancelled', lease_owner = NULL, "
+                "lease_until = NULL, last_error_class = 'legacy_media_unauthorized', "
+                "last_error_at = ? WHERE batch_id IN ("
+                "SELECT legacy.batch_id FROM outbox legacy WHERE legacy.kind = 'media' "
+                "AND legacy.media_authorization_version IS NOT 1) "
+                "AND state IN ('pending', 'retry_wait')",
+                (migration_now,),
+            )
+            conn.execute(
+                "UPDATE outbox SET state = 'uncertain', lease_owner = NULL, "
+                "lease_until = NULL, last_error_class = 'legacy_media_unauthorized', "
+                "last_error_at = ? WHERE batch_id IN ("
+                "SELECT legacy.batch_id FROM outbox legacy WHERE legacy.kind = 'media' "
+                "AND legacy.media_authorization_version IS NOT 1) "
+                "AND state = 'sending'",
                 (migration_now,),
             )
         finally:
@@ -2556,6 +2619,78 @@ class ChannelStore:
             )
             return result.rowcount == 1
 
+    def create_media_publish_permit(
+        self,
+        session_id: str,
+        media_id: str,
+        caption_digest: str,
+        *,
+        expected_binding_id: str,
+        expected_paired_at: str,
+        ttl_seconds: int = 600,
+    ) -> str:
+        """Pin one short-lived image publication to the active recipient generation."""
+        safe_session_id = self._required_text(session_id, "session_id")
+        if not isinstance(media_id, str) or MEDIA_ID_RE.fullmatch(media_id) is None:
+            raise ValueError("media_id must be an opaque MediaStore id")
+        if (
+            not isinstance(caption_digest, str)
+            or SHA256_HEX_RE.fullmatch(caption_digest) is None
+        ):
+            raise ValueError("caption_digest must be a SHA-256 hex digest")
+        if (
+            isinstance(ttl_seconds, bool)
+            or not isinstance(ttl_seconds, int)
+            or ttl_seconds <= 0
+            or ttl_seconds > 3600
+        ):
+            raise ValueError("ttl_seconds must be between 1 and 3600")
+        safe_binding_id = self._required_text(
+            expected_binding_id, "expected_binding_id"
+        )
+        safe_paired_at = _aware_utc_iso(
+            expected_paired_at, field="expected_paired_at"
+        )
+        now_dt = self._clock()
+        created_at = _aware_utc_iso(now_dt, field="clock")
+        expires_at = _aware_utc_iso(
+            now_dt + timedelta(seconds=ttl_seconds), field="expires_at"
+        )
+        permit_id = "pub_" + uuid.uuid4().hex
+        with self._immediate() as conn:
+            conn.execute(
+                "DELETE FROM media_publish_permits WHERE expires_at <= ?",
+                (created_at,),
+            )
+            binding = conn.execute(
+                "SELECT b.id, b.paired_at FROM channel_bindings b "
+                "JOIN bot_accounts ba ON ba.id = b.bot_account_id "
+                "WHERE b.session_id = ? AND b.status = 'active' "
+                "AND b.id = ? AND b.paired_at = ? "
+                "AND ba.status = 'active' AND ba.credential_id IS NOT NULL "
+                "ORDER BY b.created_at DESC, b.id DESC LIMIT 1",
+                (safe_session_id, safe_binding_id, safe_paired_at),
+            ).fetchone()
+            if binding is None:
+                raise ChannelConflict("media publication requires an active binding")
+            conn.execute(
+                "INSERT INTO media_publish_permits "
+                "(permit_id, session_id, binding_id, binding_paired_at, media_id, "
+                "caption_sha256, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    permit_id,
+                    safe_session_id,
+                    binding["id"],
+                    binding["paired_at"],
+                    media_id,
+                    caption_digest,
+                    created_at,
+                    expires_at,
+                ),
+            )
+        return permit_id
+
     @staticmethod
     def _coerce_parts(parts: Iterable[OutboundPart | Mapping[str, Any]]) -> list[OutboundPart]:
         result: list[OutboundPart] = []
@@ -2567,12 +2702,85 @@ class ChannelStore:
                     raise ValueError(f"outbox {field} must not contain a token-like secret")
                 if isinstance(value, str) and _PAIRING_CODE_SHAPE_RE.search(value):
                     raise ValueError(f"outbox {field} must not contain a pairing code")
+            if isinstance(part.caption, str) and caption_contains_location(part.caption):
+                raise ValueError("outbox caption must not contain a resource location")
             number = int(part.payload_part)
             if number in seen:
                 raise ChannelConflict("payload_part must be unique within a projected event")
             seen.add(number)
             result.append(part)
         return sorted(result, key=lambda item: item.payload_part)
+
+    @staticmethod
+    def _media_batch_caption(parts: Sequence[OutboundPart]) -> tuple[str, str] | None:
+        """Return ``(media_id, original_caption)`` for the one canonical media batch."""
+        if not parts or [part.payload_part for part in parts] != list(range(len(parts))):
+            return None
+        media_positions = [
+            index for index, part in enumerate(parts) if str(part.kind) == "media"
+        ]
+        if media_positions != [len(parts) - 1]:
+            return None
+        if any(str(part.kind) != "text" for part in parts[:-1]):
+            return None
+        media = parts[-1]
+        if not isinstance(media.media_id, str) or MEDIA_ID_RE.fullmatch(media.media_id) is None:
+            return None
+        caption = "".join(str(part.text) for part in parts[:-1]) + str(
+            media.caption or ""
+        )
+        if caption_contains_location(caption):
+            return None
+        return media.media_id, caption
+
+    @staticmethod
+    def _consume_media_permit(
+        conn: sqlite3.Connection,
+        *,
+        permit_id: str | None,
+        binding: sqlite3.Row,
+        parts: Sequence[OutboundPart],
+        now: str,
+    ) -> bool:
+        if (
+            not isinstance(permit_id, str)
+            or MEDIA_PERMIT_ID_RE.fullmatch(permit_id) is None
+        ):
+            return False
+        batch = ChannelStore._media_batch_caption(parts)
+        if batch is None:
+            # A correctly shaped id still represents a one-use attempt.  Burn
+            # it on a malformed batch rather than leaving confused authority.
+            conn.execute(
+                "DELETE FROM media_publish_permits WHERE permit_id = ?",
+                (permit_id,),
+            )
+            return False
+        media_id, caption = batch
+        permit = conn.execute(
+            "SELECT * FROM media_publish_permits WHERE permit_id = ?",
+            (permit_id,),
+        ).fetchone()
+        if permit is None:
+            return False
+        # Delete before evaluating the match, inside the surrounding immediate
+        # transaction.  A valid match commits together with Outbox rows; an
+        # exception rolls both changes back.  A wrong attempt burns authority.
+        conn.execute(
+            "DELETE FROM media_publish_permits WHERE permit_id = ?",
+            (permit_id,),
+        )
+        actual_digest = hashlib.sha256(caption.encode("utf-8")).hexdigest()
+        return (
+            str(permit["expires_at"]) > now
+            and hmac.compare_digest(str(permit["session_id"]), str(binding["session_id"]))
+            and hmac.compare_digest(str(permit["binding_id"]), str(binding["id"]))
+            and hmac.compare_digest(
+                str(permit["binding_paired_at"]), str(binding["paired_at"])
+            )
+            and hmac.compare_digest(str(permit["media_id"]), media_id)
+            and hmac.compare_digest(str(permit["caption_sha256"]), actual_digest)
+        )
 
     def project_event(
         self,
@@ -2581,6 +2789,7 @@ class ChannelStore:
         source_event_id: int,
         parts: Iterable[OutboundPart | Mapping[str, Any]],
         projection_owner: str,
+        media_permit_id: str | None = None,
     ) -> list[OutboxItem]:
         entity_id = _entity_id(binding_id)
         event_id = int(source_event_id)
@@ -2596,7 +2805,7 @@ class ChannelStore:
         ).hex
         with self._immediate() as conn:
             binding = conn.execute(
-                "SELECT b.session_id, b.bot_account_id, b.telegram_chat_id, b.paired_at, "
+                "SELECT b.id, b.session_id, b.bot_account_id, b.telegram_chat_id, b.paired_at, "
                 "b.sync_from_event_id, b.projection_cursor_event_id, b.status, "
                 "pl.lease_owner AS projection_lease_owner, "
                 "pl.lease_until AS projection_lease_until "
@@ -2624,19 +2833,30 @@ class ChannelStore:
             if event_id < boundary:
                 raise ChannelConflict("source event is behind the projection boundary")
             if event_id > boundary:
+                parts_to_insert = projected_parts
+                if any(str(part.kind) == "media" for part in projected_parts):
+                    permitted = self._consume_media_permit(
+                        conn,
+                        permit_id=media_permit_id,
+                        binding=binding,
+                        parts=projected_parts,
+                        now=now,
+                    )
+                    parts_to_insert = projected_parts if permitted else []
                 next_sequence = int(
                     conn.execute(
                         "SELECT COALESCE(MAX(sequence), 0) + 1 FROM outbox WHERE binding_id = ?",
                         (entity_id,),
                     ).fetchone()[0]
                 )
-                for part in projected_parts:
+                for part in parts_to_insert:
                     outbox_id = _new_id("out")
                     cur = conn.execute(
                         "INSERT OR IGNORE INTO outbox "
                         "(id, binding_id, source_session_id, source_event_id, payload_part, "
-                        "batch_id, sequence, kind, text, media_id, caption, state, attempts, "
-                        "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?)",
+                        "batch_id, sequence, kind, text, media_id, caption, "
+                        "media_authorization_version, state, attempts, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?)",
                         (
                             outbox_id,
                             entity_id,
@@ -2649,6 +2869,7 @@ class ChannelStore:
                             part.text,
                             part.media_id,
                             part.caption,
+                            1 if str(part.kind) == "media" else None,
                             now,
                         ),
                     )
@@ -2683,6 +2904,7 @@ class ChannelStore:
         *,
         source_event_id: int,
         parts: Iterable[OutboundPart | Mapping[str, Any]],
+        media_permit_id: str | None = None,
     ) -> list[OutboxItem]:
         """Explicit test-fixture helper; production projection requires a lease."""
         owner = self.acquire_projection_lease(binding_id)
@@ -2694,6 +2916,7 @@ class ChannelStore:
                 source_event_id=source_event_id,
                 parts=parts,
                 projection_owner=owner,
+                media_permit_id=media_permit_id,
             )
         finally:
             self.release_projection_lease(binding_id, lease_owner=owner)

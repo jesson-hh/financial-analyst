@@ -102,6 +102,55 @@ def test_bound_tool_publishes_opaque_media_artifact_and_persistent_metadata(tmp_
     metadata, data = MediaStore(store).load(payload["media_id"])
     assert data == _PNG and metadata["workspace_id"] == ws["id"]
     assert "source_path" not in metadata and "root_path" not in metadata
+    assert payload["media_id"] in result["content"]
+    assert "ww_telegram_publish" in result["content"]
+
+
+def test_load_for_session_requires_exact_durable_owner_but_allows_archive(tmp_path):
+    store = ConsoleStore(root=tmp_path / "console")
+    ws, owner_sid = _workspace(store, "600667")
+    other_sid = store.create_session("其他对话", workspace_id=ws["id"])["id"]
+    image = tmp_path / "console" / "workspace_files" / ws["id"] / "owned.png"
+    image.write_bytes(_PNG)
+    with _bound(store, owner_sid):
+        media_id = wt.workspace_publish_image_impl("owned.png")["media"]["media_id"]
+
+    media_store = MediaStore(store)
+    metadata, data = media_store.load_for_session(media_id, owner_sid)
+    assert metadata["session_id"] == owner_sid
+    assert data == _PNG
+    with pytest.raises(media.MediaNotFound):
+        media_store.load_for_session(media_id, other_sid)
+    with pytest.raises(media.MediaNotFound):
+        media_store.load_for_session(media_id, "")
+
+    # Archival blocks new Channel publication at Runtime's writable gate, but
+    # must not strand an image that was already placed in the durable Outbox.
+    store.set_archived(owner_sid, True)
+    assert media_store.load_for_session(media_id, owner_sid)[1] == _PNG
+
+
+def test_load_for_session_rejects_ownerless_legacy_metadata(tmp_path):
+    store = ConsoleStore(root=tmp_path / "console")
+    ws, sid = _workspace(store, "601318")
+    image = tmp_path / "console" / "workspace_files" / ws["id"] / "legacy.png"
+    image.write_bytes(_PNG)
+    with _bound(store, sid):
+        media_id = wt.workspace_publish_image_impl("legacy.png")["media"]["media_id"]
+
+    media_store = MediaStore(store)
+    metadata_path = media_store._metadata_path(media_id)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["session_id"] = ""
+    metadata_path.write_text(
+        json.dumps(metadata, ensure_ascii=False), encoding="utf-8",
+    )
+
+    # The ordinary historic image endpoint remains compatible, while the
+    # stronger outbound-channel ownership read fails closed.
+    assert media_store.load(media_id)[1] == _PNG
+    with pytest.raises(media.MediaNotFound):
+        media_store.load_for_session(media_id, sid)
 
 
 def test_cross_workspace_traversal_non_image_mismatch_and_oversize_are_rejected(

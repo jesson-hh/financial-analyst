@@ -25,6 +25,12 @@ from guanlan_v2.channels.models import (
     BotStatus,
     PairingStatus,
 )
+from guanlan_v2.channels.media_policy import (
+    MEDIA_ID_RE,
+    caption_contains_location,
+    caption_sha256,
+    media_confirmation_subject,
+)
 from guanlan_v2.channels.secrets import SecretUnavailable
 from guanlan_v2.channels.store import (
     ChannelConflict,
@@ -48,6 +54,12 @@ _TOKEN_RE = re.compile(
 _SAFE_SID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
 _SAFE_ACTION_RE = re.compile(r"^[a-z][a-z0-9:_-]{0,95}$")
 _SAFE_SUBJECT_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
+_PAIRING_CODE_RE = re.compile(
+    r"(?<![0-9A-Z])[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}(?![0-9A-Z])"
+)
+_MAX_MEDIA_CAPTION_CHARS = 50_000
+_MEDIA_PERMIT_TTL_SECONDS = 600
+_MEDIA_CONFIRM_ACTION = "telegram:publish-media"
 
 
 class ChannelRuntimeError(RuntimeError):
@@ -981,6 +993,169 @@ class ChannelRuntime:
             raise ChannelRuntimeError("channel_disconnect_failed") from None
         self.pairing.signal()
         return self.status_for_session(session_id)
+
+    def _media_publication_generation(self, session_id: str):
+        sid = self._require_session(session_id, writable=True)
+        try:
+            binding = self.channel_store.binding_for_session(sid, live_only=True)
+            if binding is None:
+                raise ChannelRuntimeError("channel_not_connected")
+            if binding.status is not BindingStatus.ACTIVE:
+                raise ChannelRuntimeError("channel_paused")
+            bot = self.channel_store.bot(binding.bot_account_id)
+            if bot.status is not BotStatus.ACTIVE:
+                raise ChannelRuntimeError("channel_not_active")
+        except ChannelRuntimeError:
+            raise
+        except (ChannelStoreError, ValueError):
+            raise ChannelRuntimeError("channel_not_connected") from None
+        return sid, binding
+
+    def _validate_media_publication_input(
+        self, media_id: object, caption: object,
+    ) -> tuple[str, str]:
+        if not isinstance(media_id, str) or MEDIA_ID_RE.fullmatch(media_id) is None:
+            raise ChannelRuntimeError("telegram_media_not_found")
+        if (
+            not isinstance(caption, str)
+            or len(caption) > _MAX_MEDIA_CAPTION_CHARS
+            or "\x00" in caption
+        ):
+            raise ChannelRuntimeError("telegram_caption_invalid")
+        if (
+            self.token_matches(caption)
+            or _PAIRING_CODE_RE.search(caption)
+            or caption_contains_location(caption)
+        ):
+            raise ChannelRuntimeError("telegram_caption_rejected")
+        return media_id, caption
+
+    def media_publication_confirmation_preview(
+        self,
+        session_id: str,
+        media_id: str,
+        caption: str = "",
+    ) -> dict[str, Any]:
+        """Freeze the exact recipient generation rendered on a confirm card."""
+        self._validate_media_publication_input(media_id, caption)
+        _sid, binding = self._media_publication_generation(session_id)
+        return {
+            "binding_id": binding.id,
+            "binding_paired_at": binding.paired_at,
+            "recipient": {
+                "user_id": str(binding.telegram_user_id),
+                "username": self._text(binding.telegram_username, limit=64),
+                "display_name": self._text(
+                    binding.telegram_display_name, limit=256
+                ),
+            },
+        }
+
+    def publish_media(
+        self,
+        session_id: str,
+        media_id: str,
+        caption: str = "",
+        confirmation_ticket: str = "",
+    ) -> dict[str, Any]:
+        """Authorize one current-session MediaStore image for projection.
+
+        This method deliberately does not enqueue or send anything.  Its exact
+        artifact is persisted by Console only after the Agent tool's ordinary
+        confirmation gate succeeds; the projector then creates the durable
+        outbox batch.  The worker re-loads the same opaque id before delivery.
+        """
+        media_id, caption = self._validate_media_publication_input(
+            media_id, caption
+        )
+
+        # This proof is minted by Console only after the user approves the
+        # exact media-id/caption pair.  It is consumed before any mutable state
+        # or private media access, and never enters an event, artifact, or DB.
+        sid, binding = self._media_publication_generation(session_id)
+        confirmation_subject = media_confirmation_subject(
+            media_id,
+            caption,
+            binding.id,
+            binding.paired_at,
+        )
+        if not self.ticket_store.consume(
+            confirmation_ticket,
+            session_id,
+            _MEDIA_CONFIRM_ACTION,
+            confirmation_subject,
+        ):
+            raise ChannelRuntimeError("telegram_publish_confirmation_required")
+        loader = getattr(self.media_store, "load_for_session", None)
+        if not callable(loader):
+            raise ChannelRuntimeError("channel_capability_unavailable")
+        try:
+            # Validation reads immutable private bytes now.  Bytes and paths
+            # never enter this return value or Channel storage.
+            loader(media_id, sid)
+        except Exception:
+            raise ChannelRuntimeError("telegram_media_not_found") from None
+
+        try:
+            permit_id = self.channel_store.create_media_publish_permit(
+                sid,
+                media_id,
+                caption_sha256(caption),
+                expected_binding_id=binding.id,
+                expected_paired_at=binding.paired_at,
+                ttl_seconds=_MEDIA_PERMIT_TTL_SECONDS,
+            )
+        except (ChannelStoreError, ValueError):
+            # The active binding/bot generation is atomically rechecked after
+            # the potentially slow MediaStore read.  A concurrent pause,
+            # disconnect, or recipient change therefore creates no authority.
+            raise ChannelRuntimeError("channel_not_active") from None
+
+        artifact = {
+            "kind": "telegram_media_publish",
+            "page": None,
+            "channel": "telegram",
+            "payload": {"media_id": media_id, "caption": caption},
+            "ref": permit_id,
+        }
+        return {
+            "ok": True,
+            "content": "图片已通过当前对话所有权校验，等待可靠投递。",
+            "artifact": artifact,
+        }
+
+    def issue_media_publication_confirmation(
+        self,
+        session_id: str,
+        media_id: str,
+        caption: str = "",
+        expected_binding_id: str = "",
+        expected_paired_at: str = "",
+    ) -> str:
+        """Mint one in-memory proof for an already user-approved exact call."""
+        media_id, caption = self._validate_media_publication_input(
+            media_id, caption
+        )
+        sid, binding = self._media_publication_generation(session_id)
+        if (
+            not isinstance(expected_binding_id, str)
+            or not isinstance(expected_paired_at, str)
+            or not expected_binding_id
+            or not expected_paired_at
+            or not hmac.compare_digest(binding.id, expected_binding_id)
+            or not hmac.compare_digest(binding.paired_at, expected_paired_at)
+        ):
+            raise ChannelRuntimeError("telegram_recipient_changed")
+        return self.ticket_store.issue(
+            sid,
+            _MEDIA_CONFIRM_ACTION,
+            media_confirmation_subject(
+                media_id,
+                caption,
+                binding.id,
+                binding.paired_at,
+            ),
+        )
 
     def resolve_delivery(self, session_id: str, item_id: str, action: str):
         self._require_session(session_id, writable=True)

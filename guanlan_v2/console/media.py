@@ -26,6 +26,7 @@ MAX_IMAGE_DIMENSION = 16_384
 MAX_IMAGE_PIXELS = 40_000_000
 
 _MEDIA_ID_RE = re.compile(r"^mi_[0-9a-f]{32}$")
+_SESSION_ID_RE = re.compile(r"^cs_[0-9a-f]{12}$")
 _WORKSPACE_ID_RE = re.compile(r"^rw_(?:general|[0-9a-f]{12})$")
 _EXTENSIONS = {
     "image/png": ".png",
@@ -406,6 +407,32 @@ class MediaStore:
         if (actual_mime != mime or width != metadata.get("width")
                 or height != metadata.get("height") or len(data) != metadata.get("size")
                 or hashlib.sha256(data).hexdigest() != metadata.get("sha256")):
+            raise MediaNotFound("图片不存在")
+        return metadata, data
+
+    def load_for_session(
+        self, media_id: str, session_id: str,
+    ) -> Tuple[Dict[str, Any], bytes]:
+        """Load a fully revalidated image owned by exactly one Console session.
+
+        This is the capability boundary used by outbound channels.  It first
+        performs every immutable-blob, format, size and workspace check in
+        :meth:`load`, then compares the durable owner to the trusted session
+        supplied by the caller.  A missing owner (legacy media), a deleted
+        session, or a cross-session id is intentionally indistinguishable from
+        an unknown media id.
+
+        Archived sessions remain readable here so an image that was explicitly
+        queued while the session was active can still finish delivery.  The
+        caller must enforce the writable-session gate before *new* publication.
+        """
+        if not isinstance(session_id, str) or not _SESSION_ID_RE.fullmatch(session_id):
+            raise MediaNotFound("图片不存在")
+        metadata, data = self.load(media_id)
+        if metadata.get("session_id") != session_id:
+            raise MediaNotFound("图片不存在")
+        meta = self.console_store.get_meta(session_id)
+        if not isinstance(meta, dict):
             raise MediaNotFound("图片不存在")
         return metadata, data
 

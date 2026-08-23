@@ -156,6 +156,11 @@ def _console_tool_argument_guard(tool_name: str, args: Any) -> Optional[str]:
         ):
             return None
         return "Telegram 配对参数未通过安全检查，工具未执行。"
+    if (
+        tool_name == "ww_telegram_publish"
+        and channel_agent_tools.validated_telegram_publish_args(args) is None
+    ):
+        return "Telegram 图片参数未通过安全检查，工具未执行。"
     if _value_contains_channel_secret(args):
         return "检测到 Telegram 凭据或配对码被送入其他工具，已阻止执行。"
     return None
@@ -363,6 +368,11 @@ def _public_tool_args(tool_name: str, args: Dict[str, Any] | None) -> Dict[str, 
 
 async def _channel_confirm_extras(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     """Build dedicated confirmation metadata from the trusted turn context."""
+    if (
+        tool_name == "ww_telegram_publish"
+        and channel_agent_tools.validated_telegram_publish_args(args) is None
+    ):
+        return {"_confirm_ready": False}
     status: Dict[str, Any] = {}
     raw_runtime = channel_agent_tools.CTX_CHANNEL_RUNTIME.get(None)
     runtime = (
@@ -402,8 +412,54 @@ async def _channel_confirm_extras(tool_name: str, args: Dict[str, Any]) -> Dict[
         # therefore based only on the exact scrypt digest match.
         status = dict(status)
         status["pairing_requests"] = [exact_request]
+    media_generation: dict[str, str] | None = None
+    if tool_name == "ww_telegram_publish":
+        previewer = getattr(runtime, "media_publication_confirmation_preview", None)
+        if not isinstance(sid, str) or not callable(previewer):
+            return {"_confirm_ready": False}
+        try:
+            if inspect.iscoroutinefunction(previewer):
+                preview = await previewer(
+                    sid, args.get("media_id"), args.get("caption", "")
+                )
+            else:
+                preview = await asyncio.to_thread(
+                    previewer,
+                    sid,
+                    args.get("media_id"),
+                    args.get("caption", ""),
+                )
+                if inspect.isawaitable(preview):
+                    preview = await preview
+            binding_id = preview.get("binding_id") if isinstance(preview, dict) else None
+            paired_at = (
+                preview.get("binding_paired_at")
+                if isinstance(preview, dict)
+                else None
+            )
+            recipient = preview.get("recipient") if isinstance(preview, dict) else None
+            if (
+                not isinstance(binding_id, str)
+                or not binding_id
+                or not isinstance(paired_at, str)
+                or not paired_at
+                or not isinstance(recipient, dict)
+            ):
+                return {"_confirm_ready": False}
+        except Exception:
+            return {"_confirm_ready": False}
+        # The card and its hidden generation come from the same durable
+        # binding snapshot.  A re-pair after this point invalidates approval.
+        status = dict(status)
+        status["recipient"] = recipient
+        media_generation = {
+            "binding_id": binding_id,
+            "binding_paired_at": paired_at,
+        }
     metadata = channel_agent_tools.confirm_metadata(tool_name, args, status)
     metadata["_confirm_ready"] = True
+    if media_generation is not None:
+        metadata["_media_confirmation_generation"] = media_generation
     if tool_name == "ww_telegram_pair_approve":
         details = metadata.get("public_details")
         if isinstance(details, dict):
@@ -744,11 +800,18 @@ def _select_memory_lines(text: str) -> str:
     from guanlan_v2.console.curator import classify_lines
     keyed, unkeyed = classify_lines(text)
     sel_unkeyed = unkeyed[-_INJECT_N_UNKEYED:]
-    while len(sel_unkeyed) > 1 and sum(len(l) + 1 for l in sel_unkeyed) > _INJECT_UNKEYED_MAX_CHARS:
+    while (
+        len(sel_unkeyed) > 1
+        and sum(len(line) + 1 for line in sel_unkeyed)
+        > _INJECT_UNKEYED_MAX_CHARS
+    ):
         sel_unkeyed.pop(0)
     sel_keyed = list(keyed)
     clamped = False
-    while len(sel_keyed) > 1 and sum(len(l) + 1 for l in sel_keyed) > _INJECT_KEYED_MAX_CHARS:
+    while (
+        len(sel_keyed) > 1
+        and sum(len(line) + 1 for line in sel_keyed) > _INJECT_KEYED_MAX_CHARS
+    ):
         sel_keyed.pop(0)
         clamped = True
     out: List[str] = list(sel_keyed)
@@ -2445,6 +2508,7 @@ def build_console_router(store: Optional[ConsoleStore] = None,
         tok_cr = channel_agent_tools.CTX_CHANNEL_RUNTIME.set(current_channel_runtime)
         tok_cl = channel_agent_tools.CTX_CHANNEL_OWNER_LOOP.set(asyncio.get_running_loop())
         tok_ct = channel_agent_tools.CTX_CHANNEL_OWNER_THREAD.set(threading.get_ident())
+        tok_mp = channel_agent_tools.CTX_MEDIA_PUBLICATION_TICKETS.set({})
         turn_ok = True  # done 与成败分离:status=done 清 busy,ok 标成败(W7 前端契约)
         tool_calls = 0  # 本轮工具调用数(阶段1 自学回路触发门:≥_REVIEW_MIN_TOOLS 或 turn 失败 → 复盘)
         turn_agent = None
@@ -2501,9 +2565,22 @@ def build_console_router(store: Optional[ConsoleStore] = None,
                 return True
             control["phase"] = "confirm"
             fut: "asyncio.Future[str]" = asyncio.get_running_loop().create_future()
+            media_confirmation_generation: dict[str, str] | None = None
             try:
                 extras = await _confirm_extras(tool_name, args)
                 confirm_ready = bool(extras.pop("_confirm_ready", True))
+                raw_media_generation = extras.pop(
+                    "_media_confirmation_generation", None
+                )
+                if isinstance(raw_media_generation, dict):
+                    media_confirmation_generation = {
+                        "binding_id": str(
+                            raw_media_generation.get("binding_id") or ""
+                        ),
+                        "binding_paired_at": str(
+                            raw_media_generation.get("binding_paired_at") or ""
+                        ),
+                    }
                 if is_channel_confirm and not confirm_ready:
                     _emit(
                         sid,
@@ -2545,6 +2622,47 @@ def build_console_router(store: Optional[ConsoleStore] = None,
             # 唯一放行闸门 = 用户选择。上方 _confirm_extras 的 precheck/facts 仅 advisory 展示,
             # 不参与此判定(人最终拍板;若要"机器核到矛盾即硬拒",需另立设计,当前刻意不做)。
             approved = choice in ("y", "a", "yes", "always")
+            if approved and tool_name == "ww_telegram_publish":
+                runtime = current_channel_runtime
+                try:
+                    if runtime is None:
+                        raise RuntimeError("channel runtime unavailable")
+                    media_id = args.get("media_id") if isinstance(args, dict) else None
+                    caption = args.get("caption", "") if isinstance(args, dict) else ""
+                    publication_ticket = await _channel_sync(
+                        runtime,
+                        "issue_media_publication_confirmation",
+                        sid,
+                        media_id,
+                        caption,
+                        (
+                            media_confirmation_generation.get("binding_id", "")
+                            if media_confirmation_generation is not None
+                            else ""
+                        ),
+                        (
+                            media_confirmation_generation.get(
+                                "binding_paired_at", ""
+                            )
+                            if media_confirmation_generation is not None
+                            else ""
+                        ),
+                    )
+                    if not channel_agent_tools.stash_media_publication_ticket(
+                        media_id,
+                        caption,
+                        publication_ticket,
+                    ):
+                        raise RuntimeError("media publication proof unavailable")
+                except Exception:
+                    approved = False
+                    _emit(
+                        sid,
+                        "confirm_resolved",
+                        turn_id=turn_id,
+                        tool=tool_name,
+                        choice="publication_proof_unavailable",
+                    )
             if approved:
                 control["phase"] = "tool"
             return approved
@@ -2652,8 +2770,22 @@ def build_console_router(store: Optional[ConsoleStore] = None,
                     summary = _redact_pairing_codes(
                         p.get("content", ""), pairing_codes,
                     )[:500]
+                    public_tool_ok = not p.get("is_error")
+                    public_artifact = _safe(se.get("artifact"))
+                    if p.get("name") == "ww_telegram_publish":
+                        public_artifact = (
+                            channel_agent_tools.public_telegram_publish_artifact(
+                                se.get("artifact")
+                            )
+                        )
+                        summary = (
+                            "Telegram 图片已进入可靠投递流程。"
+                            if public_tool_ok and public_artifact is not None
+                            else "Telegram 图片发布未完成。"
+                        )
+                        public_tool_ok = bool(public_tool_ok and public_artifact)
                     control["completed_tools"].append({
-                        "name": p.get("name"), "ok": not p.get("is_error"),
+                        "name": p.get("name"), "ok": public_tool_ok,
                         "summary": summary,
                     })
                     if "plan" in se:
@@ -2681,11 +2813,12 @@ def build_console_router(store: Optional[ConsoleStore] = None,
                             control["background_suppressed"].append(bg_label)
                         else:
                             bt_ = asyncio.get_running_loop().create_task(_spawn_bg(sid, bg))
-                            _BG_TASKS.add(bt_); bt_.add_done_callback(_BG_TASKS.discard)
+                            _BG_TASKS.add(bt_)
+                            bt_.add_done_callback(_BG_TASKS.discard)
                             control["background_started"].append(bg_label)
                     _emit(sid, "tool_result", tool=p.get("name"),
-                          ok=not p.get("is_error"), summary=summary,
-                          artifact=_safe(se.get("artifact")))
+                          ok=public_tool_ok, summary=summary,
+                          artifact=public_artifact)
                     if control.get("cancel_requested"):
                         cancelled = True
                         turn_ok = False
@@ -2758,6 +2891,7 @@ def build_console_router(store: Optional[ConsoleStore] = None,
                 turn_agent._client = original_client
             if tok_w is not None:
                 wt.CTX_WORKSPACE.reset(tok_w)
+            channel_agent_tools.CTX_MEDIA_PUBLICATION_TICKETS.reset(tok_mp)
             channel_agent_tools.CTX_CHANNEL_OWNER_THREAD.reset(tok_ct)
             channel_agent_tools.CTX_CHANNEL_OWNER_LOOP.reset(tok_cl)
             channel_agent_tools.CTX_CHANNEL_RUNTIME.reset(tok_cr)
