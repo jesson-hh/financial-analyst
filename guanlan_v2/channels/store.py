@@ -516,6 +516,99 @@ class OutboxClaim(OutboxItem):
     credential_revision: int
 
 
+@dataclass(frozen=True)
+class LifecyclePauseResult:
+    """Metadata-only result of one atomic lifecycle freeze.
+
+    ``safe_paused_sids`` is deliberately the complete normalized input, not
+    merely the sessions that happened to own a live Bot.  Console can therefore
+    report exactly which sessions are already safe if its later JSON archive
+    write fails, including sessions whose only channel state was an automation.
+    """
+
+    safe_paused_sids: tuple[str, ...]
+    paused_binding_count: int
+    frozen_setup_bot_count: int
+    paused_automation_count: int
+    cancelled_outbox_count: int
+    uncertain_outbox_count: int
+    cancelled_automation_run_count: int
+    dismissed_pairing_request_count: int
+    cleared_replacement_intent_count: int
+
+    def as_safe_dict(self) -> dict[str, Any]:
+        return {
+            "safe_paused_sids": list(self.safe_paused_sids),
+            "paused_binding_count": self.paused_binding_count,
+            "frozen_setup_bot_count": self.frozen_setup_bot_count,
+            "paused_automation_count": self.paused_automation_count,
+            "cancelled_outbox_count": self.cancelled_outbox_count,
+            "uncertain_outbox_count": self.uncertain_outbox_count,
+            "cancelled_automation_run_count": self.cancelled_automation_run_count,
+            "dismissed_pairing_request_count": self.dismissed_pairing_request_count,
+            "cleared_replacement_intent_count": self.cleared_replacement_intent_count,
+        }
+
+
+@dataclass(frozen=True)
+class HardDeleteBlockers:
+    """Safe, secret-free reasons a Console session cannot be hard deleted."""
+
+    session_id: str
+    live_binding_count: int
+    unresolved_outbox_counts: tuple[tuple[str, int], ...]
+    automation_count: int
+    setup_bot_count: int
+    credential_cleanup_count: int
+
+    @property
+    def blocked(self) -> bool:
+        return any(
+            (
+                self.live_binding_count,
+                sum(count for _, count in self.unresolved_outbox_counts),
+                self.automation_count,
+                self.setup_bot_count,
+                self.credential_cleanup_count,
+            )
+        )
+
+    @property
+    def reason_code(self) -> str | None:
+        return "channel_cleanup_required" if self.blocked else None
+
+    def as_safe_dict(self) -> dict[str, Any]:
+        blockers: list[dict[str, Any]] = []
+        if self.live_binding_count:
+            blockers.append({"kind": "live_binding", "count": self.live_binding_count})
+        if self.unresolved_outbox_counts:
+            blockers.append(
+                {
+                    "kind": "unresolved_outbox",
+                    "count": sum(count for _, count in self.unresolved_outbox_counts),
+                    "states": {
+                        state: count for state, count in self.unresolved_outbox_counts
+                    },
+                }
+            )
+        if self.automation_count:
+            blockers.append({"kind": "automation", "count": self.automation_count})
+        if self.setup_bot_count:
+            blockers.append({"kind": "bot_setup", "count": self.setup_bot_count})
+        if self.credential_cleanup_count:
+            blockers.append(
+                {
+                    "kind": "credential_cleanup",
+                    "count": self.credential_cleanup_count,
+                }
+            )
+        return {
+            "blocked": self.blocked,
+            "reason_code": self.reason_code,
+            "blockers": blockers,
+        }
+
+
 def _entity_id(value: Any) -> str:
     if isinstance(value, str):
         return value
@@ -1457,6 +1550,229 @@ class ChannelStore:
                     (now, bot["id"]),
                 )
         return self.bot(str(binding["bot_account_id"]))
+
+    # -- Console lifecycle fences -----------------------------------
+
+    @classmethod
+    def _lifecycle_session_ids(cls, session_ids: Iterable[Any]) -> tuple[str, ...]:
+        if isinstance(session_ids, (str, bytes)):
+            session_ids = (session_ids,)
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in session_ids:
+            sid = cls._required_text(value, "session_id")
+            if sid not in seen:
+                seen.add(sid)
+                normalized.append(sid)
+        return tuple(normalized)
+
+    def intentional_pause_sessions(
+        self,
+        session_ids: Iterable[Any],
+        *,
+        reason: str,
+    ) -> LifecyclePauseResult:
+        """Freeze one or more sessions in a single ``BEGIN IMMEDIATE`` decision.
+
+        This is the SQLite half of Console archive.  The immediate transaction
+        serializes against projector and outbox claim transactions.  If a claim
+        committed first it is converted from ``sending`` to ``uncertain``; if
+        this transaction committed first, the paused binding prevents the claim
+        from being created.  A workspace passes all member session IDs here so
+        either every member is frozen or the whole operation rolls back.
+
+        Restore intentionally has no inverse store operation: restoring Console
+        visibility must never silently resume Telegram delivery or schedules.
+        """
+
+        sids = self._lifecycle_session_ids(session_ids)
+        safe_reason = self._optional_safe_error(reason, "reason")
+        if safe_reason not in {"archive", "workspace_archived"}:
+            raise ValueError("lifecycle pause reason must be archive or workspace_archived")
+        if not sids:
+            return LifecyclePauseResult((), 0, 0, 0, 0, 0, 0, 0, 0)
+
+        placeholders = ",".join("?" for _ in sids)
+        now = self._now()
+        with self._immediate() as conn:
+            # Freeze the authority rows first.  BEGIN IMMEDIATE already excludes
+            # another writer, and these updates make the fence durable before
+            # any later claim transaction can acquire its write lock.
+            paused_bindings = conn.execute(
+                f"UPDATE channel_bindings SET status = 'paused', pause_reason = ?, "
+                f"paused_at = ?, updated_at = ? WHERE session_id IN ({placeholders}) "
+                "AND status = 'active'",
+                (safe_reason, now, now, *sids),
+            ).rowcount
+            conn.execute(
+                f"UPDATE bot_accounts SET status = 'paused', last_error_code = NULL, "
+                f"updated_at = ? WHERE status = 'active' AND EXISTS ("
+                "SELECT 1 FROM channel_bindings b WHERE b.bot_account_id = bot_accounts.id "
+                f"AND b.session_id IN ({placeholders}) AND b.status = 'paused')",
+                (now, *sids),
+            )
+            # An unbound awaiting-pairing account would otherwise keep polling
+            # and could create a fresh challenge after the Console archive.  A
+            # credential-unavailable lifecycle fence is an existing non-pollable
+            # durable state; explicit reverify after Console restore is required
+            # to leave it.  Draft/poll-conflict accounts are already non-pollable
+            # but still have any stale lease revoked in the same transaction.
+            frozen_setup_bots = conn.execute(
+                "UPDATE bot_accounts SET "
+                "status = CASE WHEN status IN ('awaiting_pairing', 'paused') "
+                "THEN 'credential_unavailable' ELSE status END, "
+                "last_error_code = CASE WHEN status IN ('awaiting_pairing', 'paused') "
+                "THEN 'session_archived' ELSE last_error_code END, "
+                "poll_owner = NULL, poll_lease_until = NULL, updated_at = ? "
+                f"WHERE draft_session_id IN ({placeholders}) AND status <> 'disconnected' "
+                "AND NOT EXISTS (SELECT 1 FROM channel_bindings b "
+                "WHERE b.bot_account_id = bot_accounts.id "
+                "AND b.status IN ('active', 'paused'))",
+                (now, *sids),
+            ).rowcount
+            dismissed_pairing = conn.execute(
+                "UPDATE pairing_requests SET status = 'dismissed', last_seen_at = ? "
+                "WHERE status = 'pending' AND bot_account_id IN ("
+                "SELECT id FROM bot_accounts "
+                f"WHERE draft_session_id IN ({placeholders}))",
+                (now, *sids),
+            ).rowcount
+            cleared_replacement = conn.execute(
+                f"DELETE FROM token_replacement_intents WHERE session_id IN ({placeholders})",
+                sids,
+            ).rowcount
+            conn.execute(
+                "DELETE FROM projection_leases WHERE binding_id IN ("
+                f"SELECT id FROM channel_bindings WHERE session_id IN ({placeholders}))",
+                sids,
+            )
+
+            cancelled_outbox = conn.execute(
+                "UPDATE outbox SET state = 'cancelled', next_attempt_at = NULL, "
+                "lease_owner = NULL, lease_until = NULL WHERE state IN ('pending', 'retry_wait') "
+                "AND binding_id IN (SELECT id FROM channel_bindings "
+                f"WHERE session_id IN ({placeholders}))",
+                sids,
+            ).rowcount
+            uncertain_outbox = conn.execute(
+                "UPDATE outbox SET state = 'uncertain', next_attempt_at = NULL, "
+                "lease_owner = NULL, lease_until = NULL, last_error_class = 'archive_inflight', "
+                "last_error_at = ? WHERE state = 'sending' AND binding_id IN ("
+                f"SELECT id FROM channel_bindings WHERE session_id IN ({placeholders}))",
+                (now, *sids),
+            ).rowcount
+
+            paused_automations = conn.execute(
+                f"UPDATE automations SET enabled = 0, pause_reason = ?, updated_at = ? "
+                f"WHERE session_id IN ({placeholders}) AND enabled = 1",
+                (safe_reason, now, *sids),
+            ).rowcount
+            cancelled_runs = conn.execute(
+                "UPDATE automation_runs SET status = 'cancelled', lease_owner = NULL, "
+                "lease_until = NULL, ended_at = ?, error_class = 'session_archived' "
+                "WHERE status = 'queued' AND automation_id IN ("
+                f"SELECT id FROM automations WHERE session_id IN ({placeholders}))",
+                (now, *sids),
+            ).rowcount
+
+        return LifecyclePauseResult(
+            safe_paused_sids=sids,
+            paused_binding_count=int(paused_bindings),
+            frozen_setup_bot_count=int(frozen_setup_bots),
+            paused_automation_count=int(paused_automations),
+            cancelled_outbox_count=int(cancelled_outbox),
+            uncertain_outbox_count=int(uncertain_outbox),
+            cancelled_automation_run_count=int(cancelled_runs),
+            dismissed_pairing_request_count=int(dismissed_pairing),
+            cleared_replacement_intent_count=int(cleared_replacement),
+        )
+
+    def pause_session_for_archive(self, session_id: Any) -> LifecyclePauseResult:
+        return self.intentional_pause_sessions((session_id,), reason="archive")
+
+    def pause_workspace_sessions_for_archive(
+        self, session_ids: Iterable[Any]
+    ) -> LifecyclePauseResult:
+        return self.intentional_pause_sessions(
+            session_ids, reason="workspace_archived"
+        )
+
+    def hard_delete_blockers(self, session_id: Any) -> HardDeleteBlockers:
+        """Return every durable channel reason that must block hard deletion.
+
+        The result intentionally contains counts and enum-like state names only.
+        In particular it never exposes credential IDs, Telegram recipient IDs,
+        message content, automation prompts, or filesystem locations.
+        """
+
+        sid = self._required_text(session_id, "session_id")
+        unresolved_states = (
+            "pending",
+            "sending",
+            "retry_wait",
+            "uncertain",
+            "terminal",
+        )
+        conn = self.connect()
+        try:
+            live_binding_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM channel_bindings WHERE session_id = ? "
+                    "AND status IN ('active', 'paused')",
+                    (sid,),
+                ).fetchone()[0]
+            )
+            rows = conn.execute(
+                "SELECT o.state, COUNT(*) AS item_count FROM outbox o "
+                "JOIN channel_bindings b ON b.id = o.binding_id "
+                "WHERE b.session_id = ? "
+                "AND o.state IN ('pending', 'sending', 'retry_wait', 'uncertain', 'terminal') "
+                "GROUP BY o.state ORDER BY o.state",
+                (sid,),
+            ).fetchall()
+            unresolved = tuple((str(row["state"]), int(row["item_count"])) for row in rows)
+            automation_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM automations WHERE session_id = ?", (sid,)
+                ).fetchone()[0]
+            )
+            setup_bot_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM bot_accounts WHERE draft_session_id = ? "
+                    "AND status IN ('draft', 'awaiting_pairing', 'poll_conflict', "
+                    "'credential_invalid', 'credential_unavailable', "
+                    "'credential_cleanup_pending')",
+                    (sid,),
+                ).fetchone()[0]
+            )
+            credential_cleanup_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM credential_cleanup_queue q "
+                    "JOIN bot_accounts ba ON ba.id = q.bot_account_id "
+                    "WHERE ba.draft_session_id = ? OR EXISTS ("
+                    "SELECT 1 FROM channel_bindings b "
+                    "WHERE b.bot_account_id = ba.id AND b.session_id = ?)",
+                    (sid, sid),
+                ).fetchone()[0]
+            )
+        finally:
+            conn.close()
+        # Keep the order stable for API snapshots and UI tests.
+        ordered_unresolved = tuple(
+            (state, dict(unresolved)[state])
+            for state in unresolved_states
+            if state in dict(unresolved)
+        )
+        return HardDeleteBlockers(
+            session_id=sid,
+            live_binding_count=live_binding_count,
+            unresolved_outbox_counts=ordered_unresolved,
+            automation_count=automation_count,
+            setup_bot_count=setup_bot_count,
+            credential_cleanup_count=credential_cleanup_count,
+        )
+
+    session_hard_delete_blockers = hard_delete_blockers
 
     def disconnect_session(self, session_id: Any) -> tuple[BotAccount, Optional[str]]:
         """Detach delivery and credential reference in one durable transaction.
@@ -4347,7 +4663,9 @@ __all__ = [
     "ChannelNotFound",
     "ChannelStore",
     "ChannelStoreError",
+    "HardDeleteBlockers",
     "InvalidTransition",
+    "LifecyclePauseResult",
     "OutboxClaim",
     "SCHEMA_SQL",
     "UnsafeAuditDetails",

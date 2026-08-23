@@ -58,6 +58,7 @@ _PAIRING_CODE_RE = re.compile(
     r"(?<![0-9A-Z])[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}(?![0-9A-Z])"
 )
 _AUTOMATION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
+_CREDENTIAL_ID_RE = re.compile(r"^cred_[0-9a-f]{32}$")
 _AUTOMATION_CHAT_ID_RE = re.compile(
     r"(?i)\b(?:telegram[ _-]?)?(?:chat|user)[ _-]?id\s*[:=]\s*-?[0-9]{4,20}\b"
 )
@@ -86,6 +87,16 @@ _MEDIA_PERMIT_TTL_SECONDS = 600
 _MEDIA_CONFIRM_ACTION = "telegram:publish-media"
 _STATUS_DELIVERY_LIMIT = 20
 _ACTION_REQUIRED_DELIVERY_STATES = frozenset({"uncertain", "terminal"})
+_STARTUP_REVERIFY_STATUSES = frozenset(
+    {
+        BotStatus.AWAITING_PAIRING,
+        BotStatus.ACTIVE,
+        BotStatus.PAUSED,
+        BotStatus.POLL_CONFLICT,
+        BotStatus.CREDENTIAL_INVALID,
+        BotStatus.CREDENTIAL_UNAVAILABLE,
+    }
+)
 
 
 def _status_delivery_window(deliveries: list[Any]) -> list[Any]:
@@ -260,6 +271,9 @@ class ChannelRuntime:
         automation_worker: Any | None = None,
         automation_calendar: Any | None = None,
         automation_clock: Callable[[], Any] | None = None,
+        credential_orphan_grace_seconds: float = 3600.0,
+        maintenance_interval_seconds: float = 900.0,
+        wall_clock: Callable[[], float] | None = None,
     ) -> None:
         self.console_store = console_store
         self.channel_store = channel_store
@@ -271,6 +285,7 @@ class ChannelRuntime:
         # guards.  It covers Token submission and pairing approval alike.
         self._secret_reservation_lock = threading.Lock()
         self._secret_reservations: set[str] = set()
+        self._lifecycle_frozen_sessions: set[str] = set()
         # Pairing owns Telegram inbound and deliberately terminates it before
         # Console/Agent.  Construction is side-effect free; application
         # lifespan wiring calls ``start`` explicitly when the feature is on.
@@ -319,7 +334,21 @@ class ChannelRuntime:
         self._console_on_turn_terminal: Callable[..., Any] | None = None
         self._background_stop: asyncio.Event | None = None
         self._background_tasks: tuple[asyncio.Task[Any], ...] = ()
+        self._maintenance_task: asyncio.Task[Any] | None = None
         self._background_lock: asyncio.Lock | None = None
+        try:
+            orphan_grace = float(credential_orphan_grace_seconds)
+            maintenance_interval = float(maintenance_interval_seconds)
+        except (TypeError, ValueError):
+            raise ValueError("channel maintenance intervals must be numeric") from None
+        if orphan_grace < 0 or maintenance_interval <= 0:
+            raise ValueError("channel maintenance intervals are out of range")
+        self._credential_orphan_grace_seconds = orphan_grace
+        self._maintenance_interval_seconds = maintenance_interval
+        self._wall_clock = wall_clock or time.time
+        self._pairing_started = False
+        self._automation_started = False
+        self._adapter_closed = False
         # A reservation is deliberately just durable-process ownership state,
         # not a lock held across getMe/DPAPI/SQLite awaits.  It lets Console
         # archive/delete and the dedicated Token endpoint see the same narrow
@@ -396,7 +425,10 @@ class ChannelRuntime:
         """
         sid = self._require_session(session_id, writable=True)
         with self._secret_reservation_lock:
-            if sid in self._secret_reservations:
+            if (
+                sid in self._secret_reservations
+                or sid in self._lifecycle_frozen_sessions
+            ):
                 return False
             self._secret_reservations.add(sid)
             return True
@@ -416,6 +448,12 @@ class ChannelRuntime:
         """Snapshot for Console archive/delete guards; exposes no secrets."""
         with self._secret_reservation_lock:
             return frozenset(self._secret_reservations)
+
+    def _reserve_owned_mutation(self, session_id: object) -> str:
+        sid = self._require_session(session_id, writable=True)
+        if not self.reserve_secret_submission(sid):
+            raise ChannelRuntimeError("channel_lifecycle_busy")
+        return sid
 
     def current_draft(self, session_id: str):
         self._require_session(session_id)
@@ -466,6 +504,13 @@ class ChannelRuntime:
         return draft, bool(getattr(draft, "credential_id", None)), None
 
     def prepare_replacement(self, session_id: str):
+        sid = self._reserve_owned_mutation(session_id)
+        try:
+            return self._prepare_replacement_reserved(sid)
+        finally:
+            self.release_secret_submission(sid)
+
+    def _prepare_replacement_reserved(self, session_id: str):
         sid = self._require_session(session_id, writable=True)
         bot, _binding = self._session_target(sid, writable=True)
         try:
@@ -499,6 +544,13 @@ class ChannelRuntime:
         )
 
     def create_draft(self, session_id: str, display_name: str):
+        sid = self._reserve_owned_mutation(session_id)
+        try:
+            return self._create_draft_reserved(sid, display_name)
+        finally:
+            self.release_secret_submission(sid)
+
+    def _create_draft_reserved(self, session_id: str, display_name: str):
         sid = self._require_session(session_id, writable=True)
         if not isinstance(display_name, str) or not display_name.strip():
             raise ChannelRuntimeError("invalid_display_name")
@@ -579,6 +631,17 @@ class ChannelRuntime:
         queued = self._queue_credential_cleanup(
             credential_id, bot_account_id=bot_account_id, reason=reason
         )
+        referenced_ids = getattr(self.channel_store, "referenced_credential_ids", None)
+        if not callable(referenced_ids):
+            return "queued" if queued else "failed"
+        try:
+            # A stale queue row must never delete the credential currently
+            # referenced by a Bot.  Keep the durable obligation visible until
+            # its reference is removed by the owning SQLite transaction.
+            if credential_id in referenced_ids():
+                return "queued" if queued else "failed"
+        except Exception:
+            return "queued" if queued else "failed"
         try:
             self.secret_store.delete(credential_id)
         except Exception:
@@ -807,6 +870,16 @@ class ChannelRuntime:
         )
 
     async def reverify(self, session_id: str):
+        # Reservation is a short local metadata read plus in-memory mutex.  Do
+        # it synchronously so request cancellation cannot land between a
+        # worker-thread acquisition and the finally block that releases it.
+        sid = self._reserve_owned_mutation(session_id)
+        try:
+            return await self._reverify_reserved(sid)
+        finally:
+            self.release_secret_submission(sid)
+
+    async def _reverify_reserved(self, session_id: str):
         bot, _binding = await asyncio.to_thread(self._bot_for_session, session_id, writable=True)
         if not bot.credential_id:
             await asyncio.to_thread(
@@ -1078,6 +1151,15 @@ class ChannelRuntime:
     def automation_upsert(
         self, session_id: str, spec: Mapping[str, Any]
     ) -> dict[str, Any]:
+        sid = self._reserve_owned_mutation(session_id)
+        try:
+            return self._automation_upsert_reserved(sid, spec)
+        finally:
+            self.release_secret_submission(sid)
+
+    def _automation_upsert_reserved(
+        self, session_id: str, spec: Mapping[str, Any]
+    ) -> dict[str, Any]:
         sid = self._require_session(session_id, writable=True)
         if (
             not isinstance(spec, Mapping)
@@ -1174,6 +1256,15 @@ class ChannelRuntime:
             raise AssertionError("unreachable")
 
     def automation_resume(self, session_id: str, automation_id: str) -> dict[str, Any]:
+        sid = self._reserve_owned_mutation(session_id)
+        try:
+            return self._automation_resume_reserved(sid, automation_id)
+        finally:
+            self.release_secret_submission(sid)
+
+    def _automation_resume_reserved(
+        self, session_id: str, automation_id: str
+    ) -> dict[str, Any]:
         sid = self._require_session(session_id, writable=True)
         safe_id = self._automation_id(automation_id)
         try:
@@ -1371,71 +1462,666 @@ class ChannelRuntime:
         except Exception as error:
             self._raise_automation_error(error)
 
+    # -- Console lifecycle and restart fences -----------------------
+    @staticmethod
+    def _safe_pause_result(result: Any, session_ids: tuple[str, ...]) -> dict[str, Any]:
+        payload: Mapping[str, Any] = {}
+        converter = getattr(result, "as_safe_dict", None)
+        if callable(converter):
+            try:
+                converted = converter()
+                if isinstance(converted, Mapping):
+                    payload = converted
+            except Exception:
+                payload = {}
+        safe_sids = payload.get("safe_paused_sids")
+        if not isinstance(safe_sids, list) or any(
+            not isinstance(item, str) or _SAFE_SID_RE.fullmatch(item) is None
+            for item in safe_sids
+        ):
+            safe_sids = list(session_ids)
+        response: dict[str, Any] = {
+            "ok": True,
+            "safe_paused_sids": list(dict.fromkeys(safe_sids)),
+        }
+        for name in (
+            "paused_binding_count",
+            "paused_automation_count",
+            "cancelled_outbox_count",
+            "uncertain_outbox_count",
+            "cancelled_automation_run_count",
+        ):
+            value = payload.get(name)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                response[name] = value
+        return response
+
+    def _assert_lifecycle_not_reserved(self, session_ids: tuple[str, ...]) -> None:
+        with self._secret_reservation_lock:
+            if any(sid in self._secret_reservations for sid in session_ids):
+                raise ChannelRuntimeError("channel_lifecycle_busy")
+            # This in-process fence closes the check→pause window: a Token
+            # handoff cannot reserve after the archive decision but before the
+            # Console JSON commit.  The durable archived bit takes over across
+            # restarts; restore or an explicit resume releases this marker.
+            self._lifecycle_frozen_sessions.update(session_ids)
+
+    def _release_lifecycle_freeze(self, session_ids: tuple[str, ...]) -> None:
+        with self._secret_reservation_lock:
+            for sid in session_ids:
+                self._lifecycle_frozen_sessions.discard(sid)
+
+    def _intentional_pause(
+        self, session_ids: tuple[str, ...], *, reason: str
+    ) -> dict[str, Any]:
+        method = getattr(self.channel_store, "intentional_pause_sessions", None)
+        if not callable(method):
+            raise ChannelRuntimeError("channel_lifecycle_unavailable")
+        try:
+            result = method(session_ids, reason=reason)
+        except ChannelRuntimeError:
+            raise
+        except Exception:
+            raise ChannelRuntimeError("channel_lifecycle_failed") from None
+        return self._safe_pause_result(result, session_ids)
+
+    def prepare_session_archive(self, session_id: str) -> dict[str, Any]:
+        """Durably stop one session before Console marks it archived."""
+        sid = self._require_session(session_id)
+        session_ids = (sid,)
+        self._assert_lifecycle_not_reserved(session_ids)
+        try:
+            return self._intentional_pause(session_ids, reason="archive")
+        except Exception:
+            self._release_lifecycle_freeze(session_ids)
+            raise
+
+    def prepare_workspace_archive(
+        self, workspace_id: str, session_ids: Any
+    ) -> dict[str, Any]:
+        """Freeze every supplied workspace member in one Channel transaction."""
+        if (
+            not isinstance(workspace_id, str)
+            or not workspace_id
+            or self.token_matches(workspace_id)
+        ):
+            raise ChannelRuntimeError("channel_workspace_not_found")
+        workspace_store = getattr(self.console_store, "workspace_store", None)
+        require = getattr(workspace_store, "require", None)
+        if not callable(require):
+            raise ChannelRuntimeError("channel_lifecycle_unavailable")
+        try:
+            require(workspace_id, active_only=False)
+        except Exception:
+            raise ChannelRuntimeError("channel_workspace_not_found") from None
+        if isinstance(session_ids, (str, bytes)):
+            raw_session_ids = (session_ids,)
+        else:
+            try:
+                raw_session_ids = tuple(session_ids)
+            except TypeError:
+                raise ChannelRuntimeError("channel_lifecycle_invalid") from None
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_sid in raw_session_ids:
+            sid = self._require_session(raw_sid)
+            meta = self.console_store.get_meta(sid)
+            if not isinstance(meta, Mapping) or str(
+                meta.get("workspace_id") or GENERAL_WORKSPACE_ID
+            ) != workspace_id:
+                raise ChannelRuntimeError("channel_workspace_session_mismatch")
+            if sid not in seen:
+                seen.add(sid)
+                normalized.append(sid)
+        sids = tuple(normalized)
+        self._assert_lifecycle_not_reserved(sids)
+        try:
+            return self._intentional_pause(sids, reason="workspace_archived")
+        except Exception:
+            self._release_lifecycle_freeze(sids)
+            raise
+
+    def assert_session_delete_allowed(self, session_id: str) -> dict[str, Any]:
+        """Return secret-free durable blockers instead of guessing cleanup."""
+        sid = self._require_session(session_id)
+        blockers: list[str] = []
+        try:
+            # Freeze new drafts, Token/reverify work, resumes and automation
+            # mutations before taking the blocker snapshot.  A clean result
+            # keeps this marker until Console removes the session; a blocked or
+            # failed result releases it so the user can resolve the blockers.
+            self._assert_lifecycle_not_reserved((sid,))
+        except ChannelRuntimeError as error:
+            if error.reason_code == "channel_lifecycle_busy":
+                return {
+                    "ok": False,
+                    "reason_code": "channel_session_delete_blocked",
+                    "blockers": ["channel_mutation"],
+                }
+            raise
+        method = getattr(self.channel_store, "hard_delete_blockers", None)
+        if not callable(method):
+            self._release_lifecycle_freeze((sid,))
+            raise ChannelRuntimeError("channel_lifecycle_unavailable")
+        try:
+            result = method(sid)
+            converter = getattr(result, "as_safe_dict", None)
+            payload = converter() if callable(converter) else {}
+        except Exception:
+            self._release_lifecycle_freeze((sid,))
+            raise ChannelRuntimeError("channel_lifecycle_failed") from None
+        if isinstance(payload, Mapping) and isinstance(payload.get("blockers"), list):
+            for item in payload["blockers"]:
+                if not isinstance(item, Mapping):
+                    continue
+                kind = item.get("kind")
+                count = item.get("count")
+                if (
+                    not isinstance(kind, str)
+                    or _SAFE_ACTION_RE.fullmatch(kind) is None
+                    or not isinstance(count, int)
+                    or isinstance(count, bool)
+                    or count < 1
+                ):
+                    continue
+                blockers.append(kind)
+        if blockers:
+            self._release_lifecycle_freeze((sid,))
+            return {
+                "ok": False,
+                "reason_code": "channel_session_delete_blocked",
+                "blockers": list(dict.fromkeys(blockers)),
+            }
+        return {"ok": True, "blockers": []}
+
+    def on_session_restore(self, session_id: str) -> dict[str, Any]:
+        """Restore Console visibility only; delivery remains intentionally paused."""
+        sid = self._require_session(session_id)
+        self._release_lifecycle_freeze((sid,))
+        return {
+            "ok": True,
+            "session_id": sid,
+            "channel_remains_paused": True,
+        }
+
+    def _startup_archive_fence(self) -> dict[str, Any]:
+        """Reconcile archives created while the Telegram feature was disabled."""
+        list_sessions = getattr(self.console_store, "list_sessions", None)
+        if not callable(list_sessions):
+            # Narrow test facades predate workspace lifecycle.  The production
+            # ConsoleStore always supplies this method.
+            return {"safe_paused_sids": []}
+        try:
+            raw_sessions = list_sessions()
+            sessions = [item for item in raw_sessions if isinstance(item, Mapping)]
+            workspace_store = getattr(self.console_store, "workspace_store", None)
+            list_workspaces = getattr(workspace_store, "list", None)
+            archived_workspaces: set[str] = set()
+            if callable(list_workspaces):
+                archived_workspaces = {
+                    str(item.get("id"))
+                    for item in list_workspaces(include_archived=True)
+                    if isinstance(item, Mapping)
+                    and bool(item.get("archived"))
+                    and isinstance(item.get("id"), str)
+                }
+        except Exception:
+            raise ChannelRuntimeError("channel_lifecycle_scan_failed") from None
+
+        workspace_groups: dict[str, list[str]] = {}
+        archived_sessions: list[str] = []
+        for meta in sessions:
+            sid = meta.get("id")
+            if (
+                not isinstance(sid, str)
+                or _SAFE_SID_RE.fullmatch(sid) is None
+                or self.token_matches(sid)
+            ):
+                continue
+            workspace_id = str(meta.get("workspace_id") or GENERAL_WORKSPACE_ID)
+            if workspace_id in archived_workspaces:
+                workspace_groups.setdefault(workspace_id, []).append(sid)
+            elif bool(meta.get("archived")):
+                archived_sessions.append(sid)
+
+        paused: list[str] = []
+        for workspace_id in sorted(workspace_groups):
+            sids = tuple(dict.fromkeys(workspace_groups[workspace_id]))
+            result = self._intentional_pause(sids, reason="workspace_archived")
+            paused.extend(result["safe_paused_sids"])
+        direct_sids = tuple(dict.fromkeys(archived_sessions))
+        if direct_sids:
+            result = self._intentional_pause(direct_sids, reason="archive")
+            paused.extend(result["safe_paused_sids"])
+        return {"safe_paused_sids": list(dict.fromkeys(paused))}
+
+    async def _fault_startup_bot(
+        self, bot: Any, *, status: BotStatus, error_code: str
+    ) -> None:
+        try:
+            await asyncio.to_thread(
+                self.channel_store.fault_pause_bot,
+                bot.id,
+                status=status,
+                error_code=error_code,
+                expected_credential_revision=bot.credential_revision,
+                expected_telegram_bot_id=bot.telegram_bot_id,
+            )
+        except ChannelNotFound:
+            # A concurrent hard removal/disconnect owns the newer generation.
+            return
+        except ChannelConflict:
+            # A stale verifier may lose to a newer credential CAS.  Continue
+            # only if the fresh generation is already non-deliverable; an
+            # active/awaiting replacement must be verified by a fresh startup.
+            try:
+                fresh = await asyncio.to_thread(self.channel_store.bot, bot.id)
+            except ChannelNotFound:
+                return
+            except Exception:
+                raise ChannelRuntimeError("channel_registry_unavailable") from None
+            if fresh.status in {
+                BotStatus.DISCONNECTED,
+                BotStatus.PAUSED,
+                BotStatus.POLL_CONFLICT,
+                BotStatus.CREDENTIAL_INVALID,
+                BotStatus.CREDENTIAL_UNAVAILABLE,
+            }:
+                return
+            raise ChannelRuntimeError("channel_registry_changed") from None
+        except Exception:
+            # Detecting an invalid credential or changed identity and then
+            # failing to persist the pause is a startup-fatal condition.
+            raise ChannelRuntimeError("channel_registry_unavailable") from None
+
+    async def _startup_reverify_bot(self, bot: Any) -> None:
+        credential_id = getattr(bot, "credential_id", None)
+        if not isinstance(credential_id, str) or _CREDENTIAL_ID_RE.fullmatch(
+            credential_id
+        ) is None:
+            await self._fault_startup_bot(
+                bot,
+                status=BotStatus.CREDENTIAL_UNAVAILABLE,
+                error_code="credential_unavailable",
+            )
+            return
+        token = ""
+        try:
+            try:
+                token = await asyncio.to_thread(self.secret_store.get, credential_id)
+            except Exception:
+                await self._fault_startup_bot(
+                    bot,
+                    status=BotStatus.CREDENTIAL_UNAVAILABLE,
+                    error_code="credential_unavailable",
+                )
+                return
+            try:
+                identity = await self._get_me(token)
+                bot_id, _username = self._safe_identity(identity)
+            except TelegramCredentialInvalid:
+                await self._fault_startup_bot(
+                    bot,
+                    status=BotStatus.CREDENTIAL_INVALID,
+                    error_code="credential_invalid",
+                )
+                return
+            except TelegramPollConflict:
+                await self._fault_startup_bot(
+                    bot,
+                    status=BotStatus.POLL_CONFLICT,
+                    error_code="poll_conflict",
+                )
+                return
+            except TelegramError:
+                # Preserve the permanent binding but fail closed for delivery
+                # until an explicit successful reverify proves the identity.
+                await self._fault_startup_bot(
+                    bot,
+                    status=BotStatus.CREDENTIAL_UNAVAILABLE,
+                    error_code="credential_unavailable",
+                )
+                return
+            except Exception:
+                await self._fault_startup_bot(
+                    bot,
+                    status=BotStatus.CREDENTIAL_UNAVAILABLE,
+                    error_code="credential_unavailable",
+                )
+                return
+            if bot.telegram_bot_id is not None and str(bot.telegram_bot_id) != bot_id:
+                await self._fault_startup_bot(
+                    bot,
+                    status=BotStatus.PAUSED,
+                    error_code="telegram_identity_changed",
+                )
+                return
+            try:
+                await asyncio.to_thread(
+                    self.channel_store.recover_bot_after_verification,
+                    bot.id,
+                    expected_credential_revision=bot.credential_revision,
+                    expected_telegram_bot_id=bot.telegram_bot_id,
+                )
+            except Exception:
+                return
+        finally:
+            token = ""
+
+    async def _startup_reverify_bots(
+        self, *, skip_session_ids: set[str] | None = None
+    ) -> int:
+        if not callable(getattr(self.telegram_adapter, "get_me", None)):
+            return 0
+        skipped = skip_session_ids or set()
+        try:
+            bots = await asyncio.to_thread(self.channel_store.bots)
+        except Exception:
+            raise ChannelRuntimeError("channel_registry_unavailable") from None
+        candidates = [
+            bot
+            for bot in bots
+            if getattr(bot, "status", None) in _STARTUP_REVERIFY_STATUSES
+            and getattr(bot, "draft_session_id", None) not in skipped
+            and getattr(bot, "last_error_code", None) != "session_archived"
+        ]
+        for bot in candidates:
+            await self._startup_reverify_bot(bot)
+        if candidates:
+            try:
+                self.pairing.signal()
+            except Exception:
+                pass
+        return len(candidates)
+
+    def _wall_time_seconds(self) -> float:
+        value = self._wall_clock()
+        timestamp = getattr(value, "timestamp", None)
+        return float(timestamp()) if callable(timestamp) else float(value)
+
+    async def reconcile_credential_store(self) -> int:
+        """Delete only old, legal, unreferenced ciphertext metadata entries."""
+        iter_metadata = getattr(self.secret_store, "iter_metadata", None)
+        referenced_ids = getattr(self.channel_store, "referenced_credential_ids", None)
+        delete = getattr(self.secret_store, "delete", None)
+        if not callable(iter_metadata) or not callable(referenced_ids) or not callable(delete):
+            return 0
+        try:
+            referenced = await asyncio.to_thread(referenced_ids)
+            metadata = await asyncio.to_thread(lambda: list(iter_metadata()))
+            now = self._wall_time_seconds()
+        except Exception:
+            return 0
+        deleted = 0
+        for item in metadata:
+            credential_id = getattr(item, "credential_id", None)
+            mtime = getattr(item, "mtime", None)
+            if (
+                not isinstance(credential_id, str)
+                or _CREDENTIAL_ID_RE.fullmatch(credential_id) is None
+                or credential_id in referenced
+                or not isinstance(mtime, (int, float))
+                or isinstance(mtime, bool)
+                or now - float(mtime) <= self._credential_orphan_grace_seconds
+            ):
+                continue
+            try:
+                # Re-read references immediately before deletion.  Combined
+                # with the one-hour grace, this closes the put-before-CAS race
+                # without ever enumerating or decrypting plaintext Tokens.
+                current_references = await asyncio.to_thread(referenced_ids)
+                if credential_id in current_references:
+                    continue
+                await asyncio.to_thread(delete, credential_id)
+            except Exception:
+                continue
+            deleted += 1
+        return deleted
+
+    async def _maintenance_loop(self, stop_event: asyncio.Event) -> None:
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    stop_event.wait(), timeout=self._maintenance_interval_seconds
+                )
+            except asyncio.TimeoutError:
+                try:
+                    await self.retry_credential_cleanup()
+                    await self.reconcile_credential_store()
+                except Exception:
+                    # Maintenance is deliberately best-effort and fail-closed:
+                    # failed cleanup retains ciphertext/queue records for retry.
+                    continue
+
     async def start(self) -> None:
         """Start background channel services for the application lifespan."""
         if self._background_lock is None:
             self._background_lock = asyncio.Lock()
         async with self._background_lock:
+            if self._adapter_closed:
+                raise ChannelRuntimeError("channel_runtime_closed")
             if self._background_tasks:
-                if all(not task.done() for task in self._background_tasks):
+                maintenance_healthy = (
+                    self._maintenance_task is None
+                    or not self._maintenance_task.done()
+                )
+                if (
+                    all(not task.done() for task in self._background_tasks)
+                    and maintenance_healthy
+                ):
                     return
                 # A partially failed generation is not healthy.  Settle the
-                # survivor before rebuilding both loops as one generation.
+                # survivors before rebuilding all loops as one generation.
                 if self._background_stop is not None:
                     self._background_stop.set()
                 for task in self._background_tasks:
                     task.cancel()
-                await asyncio.gather(*self._background_tasks, return_exceptions=True)
+                if self._maintenance_task is not None:
+                    self._maintenance_task.cancel()
+                await asyncio.gather(
+                    *self._background_tasks,
+                    *(() if self._maintenance_task is None else (self._maintenance_task,)),
+                    return_exceptions=True,
+                )
                 self._background_tasks = ()
                 self._background_stop = None
-            # Resolve every ambiguous pre-crash HTTP attempt before any new
-            # delivery claim is possible.
-            await self.outbox_worker.startup_recover(force=True)
-            await self.pairing.start()
-            if self._automation_hooks_bound:
+                self._maintenance_task = None
+                cleanup_failed = False
+                if self._automation_started:
+                    try:
+                        await self.automation_worker.stop()
+                    except Exception:
+                        cleanup_failed = True
+                    else:
+                        self._automation_started = False
+                if self._pairing_started:
+                    try:
+                        await self.pairing.stop()
+                    except Exception:
+                        cleanup_failed = True
+                    else:
+                        self._pairing_started = False
                 try:
-                    await self.automation_worker.start()
+                    await asyncio.to_thread(
+                        self.channel_store.recover_sending_outbox,
+                        error_class="restart_recovery",
+                    )
                 except Exception:
-                    await self.pairing.stop()
-                    raise
-            stop_event = asyncio.Event()
-            self._background_stop = stop_event
-            self._background_tasks = (
-                asyncio.create_task(
-                    self.projector.run_forever(stop_event),
-                    name="guanlan-channel-projector",
-                ),
-                asyncio.create_task(
-                    self.outbox_worker.run_forever(stop_event),
-                    name="guanlan-channel-outbox",
-                ),
-            )
+                    cleanup_failed = True
+                if cleanup_failed:
+                    raise ChannelRuntimeError("channel_restart_cleanup_failed")
+
+            try:
+                # Feature-off periods may contain newly archived Console state.
+                # Fence it before recovery, verification, polling or claims.
+                archive_result = await asyncio.to_thread(
+                    self._startup_archive_fence
+                )
+                archived_sids = set(archive_result.get("safe_paused_sids", []))
+
+                # Resolve every ambiguous pre-crash HTTP attempt before any new
+                # delivery claim is possible.
+                await self.outbox_worker.startup_recover(force=True)
+                await self.retry_credential_cleanup()
+                await self.reconcile_credential_store()
+                await self._startup_reverify_bots(
+                    skip_session_ids=archived_sids
+                )
+
+                self._pairing_started = True
+                await self.pairing.start()
+                if self._automation_hooks_bound:
+                    self._automation_started = True
+                    await self.automation_worker.start()
+
+                stop_event = asyncio.Event()
+                self._background_stop = stop_event
+                self._background_tasks = (
+                    asyncio.create_task(
+                        self.projector.run_forever(stop_event),
+                        name="guanlan-channel-projector",
+                    ),
+                    asyncio.create_task(
+                        self.outbox_worker.run_forever(stop_event),
+                        name="guanlan-channel-outbox",
+                    ),
+                )
+                self._maintenance_task = asyncio.create_task(
+                    self._maintenance_loop(stop_event),
+                    name="guanlan-channel-maintenance",
+                )
+            except BaseException:
+                # A failed start never leaves a poller, scheduler or ambiguous
+                # delivery claim behind.  Keep the adapter open so lifespan
+                # construction may be retried deliberately.
+                if self._background_stop is not None:
+                    self._background_stop.set()
+                tasks = self._background_tasks
+                maintenance = self._maintenance_task
+                self._background_stop = None
+                self._background_tasks = ()
+                self._maintenance_task = None
+                for task in tasks:
+                    task.cancel()
+                if maintenance is not None:
+                    maintenance.cancel()
+                if tasks or maintenance is not None:
+                    await asyncio.gather(
+                        *tasks,
+                        *(() if maintenance is None else (maintenance,)),
+                        return_exceptions=True,
+                    )
+                if self._automation_started:
+                    try:
+                        await self.automation_worker.stop()
+                    except Exception:
+                        pass
+                    else:
+                        self._automation_started = False
+                if self._pairing_started:
+                    try:
+                        await self.pairing.stop()
+                    except Exception:
+                        pass
+                    else:
+                        self._pairing_started = False
+                try:
+                    await asyncio.to_thread(
+                        self.channel_store.recover_sending_outbox,
+                        error_class="startup_recovery",
+                    )
+                except Exception:
+                    pass
+                raise
 
     async def stop(self) -> None:
-        """Stop pollers and release their durable leases before shutdown."""
+        """Finish the shutdown fence before making cancellation observable."""
+        task = asyncio.create_task(self._stop_once())
+        cancelled = False
+        while True:
+            try:
+                result = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                if task.done() and task.cancelled():
+                    raise
+                cancelled = True
+                continue
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+    async def _stop_once(self) -> None:
+        """Stop every subsystem even when an earlier shutdown step fails."""
         if self._background_lock is None:
             self._background_lock = asyncio.Lock()
         async with self._background_lock:
             stop_event = self._background_stop
             tasks = self._background_tasks
+            maintenance = self._maintenance_task
             self._background_stop = None
             self._background_tasks = ()
+            self._maintenance_task = None
             if stop_event is not None:
                 stop_event.set()
-            if self._automation_hooks_bound:
-                await self.automation_worker.stop()
             for task in tasks:
                 task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            # Final shutdown fence: any claim thread that committed while its
-            # coroutine was being cancelled has now settled, so every leftover
-            # sending row can be classified without a blind resend on restart.
-            await asyncio.to_thread(
-                self.channel_store.recover_sending_outbox,
-                error_class="shutdown_recovery",
+            if maintenance is not None:
+                maintenance.cancel()
+
+            failed = False
+            cancelled = False
+
+            async def settle(operation: Any) -> bool:
+                nonlocal failed, cancelled
+                try:
+                    result = operation()
+                    if inspect.isawaitable(result):
+                        await result
+                    return True
+                except asyncio.CancelledError:
+                    cancelled = True
+                    return False
+                except Exception:
+                    failed = True
+                    return False
+
+            if self._automation_started:
+                if await settle(self.automation_worker.stop):
+                    self._automation_started = False
+
+            if tasks or maintenance is not None:
+                await settle(
+                    lambda: asyncio.gather(
+                        *tasks,
+                        *(() if maintenance is None else (maintenance,)),
+                        return_exceptions=True,
+                    )
+                )
+
+            # Final shutdown fence: every claim coroutine has settled, so no
+            # pre-crash ``sending`` row can be blindly resent on restart.
+            await settle(
+                lambda: asyncio.to_thread(
+                    self.channel_store.recover_sending_outbox,
+                    error_class="shutdown_recovery",
+                )
             )
-            await self.pairing.stop()
+
+            if self._pairing_started:
+                if await settle(self.pairing.stop):
+                    self._pairing_started = False
+
+            close = getattr(self.telegram_adapter, "aclose", None)
+            if not callable(close):
+                close = getattr(self.telegram_adapter, "close", None)
+            if callable(close) and not self._adapter_closed:
+                self._adapter_closed = await settle(close)
+
+            if cancelled:
+                raise asyncio.CancelledError
+            if failed:
+                raise ChannelRuntimeError("channel_shutdown_failed")
 
     async def replace_token(
         self, session_id: str, draft_id: str, token: str, *, before_commit: Any = None
@@ -1474,6 +2160,13 @@ class ChannelRuntime:
         return self.status_for_session(session_id)
 
     def resume(self, session_id: str):
+        sid = self._reserve_owned_mutation(session_id)
+        try:
+            return self._resume_reserved(sid)
+        finally:
+            self.release_secret_submission(sid)
+
+    def _resume_reserved(self, session_id: str):
         self._require_session(session_id, writable=True)
         try:
             # ``read_events`` has tail semantics.  Resetting both Channel
@@ -1497,6 +2190,7 @@ class ChannelRuntime:
             raise ChannelRuntimeError("channel_resume_not_allowed") from None
         except (ChannelStoreError, ValueError):
             raise ChannelRuntimeError("channel_resume_failed") from None
+        self._release_lifecycle_freeze((session_id,))
         return self.status_for_session(session_id)
 
     def disconnect(self, session_id: str):
@@ -1511,6 +2205,7 @@ class ChannelRuntime:
                 )
         except (ChannelStoreError, ValueError, ChannelConflict):
             raise ChannelRuntimeError("channel_disconnect_failed") from None
+        self._release_lifecycle_freeze((session_id,))
         self.pairing.signal()
         return self.status_for_session(session_id)
 

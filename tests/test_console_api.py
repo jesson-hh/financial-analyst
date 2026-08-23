@@ -42,6 +42,56 @@ def _client(tmp_path):
     return TestClient(app), store
 
 
+class _LifecycleRuntime:
+    """Small safe-shape fake for Console lifecycle ordering tests."""
+
+    def __init__(self, store):
+        self.store = store
+        self.calls = []
+        self.archive_result = None
+        self.workspace_result = None
+        self.restore_result = None
+        self.delete_result = None
+
+    def prepare_session_archive(self, sid):
+        self.calls.append(("prepare_session_archive", sid,
+                           bool(self.store.get_meta(sid).get("archived"))))
+        return self.archive_result or {"ok": True, "safe_paused_sids": [sid]}
+
+    def prepare_workspace_archive(self, workspace_id, session_ids):
+        workspace = self.store.workspace_store.get(workspace_id)
+        self.calls.append((
+            "prepare_workspace_archive", workspace_id, list(session_ids),
+            bool(workspace and workspace.get("archived")),
+        ))
+        return self.workspace_result or {
+            "ok": True, "safe_paused_sids": list(session_ids),
+        }
+
+    def on_session_restore(self, sid):
+        self.calls.append(("on_session_restore", sid,
+                           bool(self.store.get_meta(sid).get("archived"))))
+        return self.restore_result or {
+            "ok": True, "channel_remains_paused": True,
+        }
+
+    def assert_session_delete_allowed(self, sid):
+        self.calls.append(("assert_session_delete_allowed", sid,
+                           self.store.get_meta(sid) is not None))
+        return self.delete_result or {"ok": True, "blockers": []}
+
+
+def _client_with_lifecycle_runtime(tmp_path):
+    app = FastAPI()
+    store = ConsoleStore(root=tmp_path)
+    runtime = _LifecycleRuntime(store)
+    app.include_router(build_console_router(
+        store=store, agent_factory=lambda sid: FakeAgent(),
+        channel_runtime=runtime,
+    ))
+    return TestClient(app), store, runtime
+
+
 def test_sessions_crud(tmp_path):
     c, _ = _client(tmp_path)
     r = c.post("/console/sessions", json={"title": "测试"}).json()
@@ -87,6 +137,144 @@ def test_session_archive_rejects_running_or_pending_capability(tmp_path):
     finally:
         capi._bg_inflight.pop("report:SH600519", None)
     assert c.post(f"/console/sessions/{sid}/archive").json()["ok"] is True
+
+
+def test_channel_lifecycle_archive_restore_runs_before_console_commit(tmp_path):
+    c, store, runtime = _client_with_lifecycle_runtime(tmp_path)
+    sid = c.post("/console/sessions", json={"title": "生命周期"}).json()["meta"]["id"]
+
+    archived = c.post(f"/console/sessions/{sid}/archive")
+    assert archived.status_code == 200
+    assert archived.json()["safe_paused_sids"] == [sid]
+    # Runtime observed the pre-commit active state.
+    assert runtime.calls[-1] == ("prepare_session_archive", sid, False)
+    assert store.get_meta(sid)["archived"] is True
+
+    restored = c.post(f"/console/sessions/{sid}/restore")
+    assert restored.status_code == 200
+    assert restored.json()["channel_remains_paused"] is True
+    # Restore hook also runs before the Console flag changes, and never asks
+    # Runtime to resume a binding or automation.
+    assert runtime.calls[-1] == ("on_session_restore", sid, True)
+    assert store.get_meta(sid)["archived"] is False
+
+
+def test_channel_lifecycle_failure_is_structured_and_prevents_console_write(tmp_path):
+    c, store, runtime = _client_with_lifecycle_runtime(tmp_path)
+    sid = c.post("/console/sessions", json={}).json()["meta"]["id"]
+    runtime.archive_result = {
+        "ok": False,
+        "reason_code": "channel_session_archive_blocked",
+        "blockers": [{"code": "outbox_sending", "secret": "must-not-leak"}],
+        "chat_id": 123456,
+    }
+
+    blocked = c.post(f"/console/sessions/{sid}/archive")
+    assert blocked.status_code == 409
+    assert blocked.json() == {
+        "ok": False,
+        "reason": "Telegram 通道仍有待处理事项",
+        "reason_code": "channel_session_archive_blocked",
+        "blockers": [{"code": "outbox_sending"}],
+    }
+    assert store.get_meta(sid)["archived"] is False
+
+    class _BrokenRuntime:
+        pass
+
+    app = FastAPI()
+    app.include_router(build_console_router(
+        store=store, agent_factory=lambda _sid: FakeAgent(),
+        channel_runtime=_BrokenRuntime(),
+    ))
+    unavailable = TestClient(app).post(f"/console/sessions/{sid}/archive")
+    assert unavailable.status_code == 503
+    assert unavailable.json()["reason_code"] == "channel_lifecycle_unavailable"
+    assert store.get_meta(sid)["archived"] is False
+
+
+def test_console_archive_failure_keeps_runtime_pause_and_restore_failure_is_precommit(
+        tmp_path, monkeypatch):
+    c, store, runtime = _client_with_lifecycle_runtime(tmp_path)
+    sid = c.post("/console/sessions", json={}).json()["meta"]["id"]
+    original_set_archived = store.set_archived
+
+    def fail_console_archive(_sid, _archived):
+        raise OSError("private filesystem detail")
+
+    monkeypatch.setattr(store, "set_archived", fail_console_archive)
+    failed = c.post(f"/console/sessions/{sid}/archive")
+    assert failed.status_code == 503
+    assert failed.json() == {
+        "ok": False, "reason": "会话归档失败", "safe_paused_sids": [sid],
+    }
+    assert store.get_meta(sid)["archived"] is False
+
+    monkeypatch.setattr(store, "set_archived", original_set_archived)
+    assert c.post(f"/console/sessions/{sid}/archive").status_code == 200
+    runtime.restore_result = {
+        "ok": False, "reason_code": "channel_restore_blocked",
+        "blockers": [{"code": "lifecycle_busy"}],
+    }
+    restore = c.post(f"/console/sessions/{sid}/restore")
+    assert restore.status_code == 409
+    assert restore.json()["reason_code"] == "channel_restore_blocked"
+    assert store.get_meta(sid)["archived"] is True
+
+
+def test_workspace_archive_pauses_all_bound_sessions_before_store_write(tmp_path, monkeypatch):
+    c, store, runtime = _client_with_lifecycle_runtime(tmp_path)
+    workspace = c.post("/console/workspaces", json={
+        "name": "多会话空间", "kind": "stock", "code": "600519",
+    }).json()["workspace"]
+    sids = [c.post("/console/sessions", json={
+        "workspace_id": workspace["id"], "title": title,
+    }).json()["meta"]["id"] for title in ("甲", "乙")]
+
+    original_archive = store.workspace_store.archive
+
+    def fail_after_runtime(_workspace_id):
+        assert runtime.calls[-1][:3] == (
+            "prepare_workspace_archive", workspace["id"], sorted(sids),
+        )
+        raise RuntimeError("private storage detail")
+
+    monkeypatch.setattr(store.workspace_store, "archive", fail_after_runtime)
+    failed = c.request("DELETE", f"/console/workspaces/{workspace['id']}")
+    assert failed.status_code == 503
+    assert failed.json()["reason"] == "研究空间归档失败"
+    assert failed.json()["safe_paused_sids"] == sorted(sids)
+    assert store.workspace_store.get(workspace["id"])["archived"] is False
+
+    # A subsequent retry calls the Runtime idempotently and can commit the
+    # Console workspace archive; the previously safe pause is never rolled back.
+    monkeypatch.setattr(store.workspace_store, "archive", original_archive)
+    completed = c.request("DELETE", f"/console/workspaces/{workspace['id']}")
+    assert completed.status_code == 200
+    assert completed.json()["safe_paused_sids"] == sorted(sids)
+    assert runtime.calls[-1][3] is False
+
+
+def test_hard_delete_asks_channel_blocker_before_removing_session(tmp_path):
+    c, store, runtime = _client_with_lifecycle_runtime(tmp_path)
+    sid = c.post("/console/sessions", json={}).json()["meta"]["id"]
+    runtime.delete_result = {
+        "ok": False,
+        "reason_code": "channel_session_delete_blocked",
+        "blockers": [{"code": "binding_connected"}, {"code": "outbox_uncertain"}],
+    }
+    blocked = c.request("DELETE", f"/console/sessions/{sid}")
+    assert blocked.status_code == 409
+    assert blocked.json()["blockers"] == [
+        {"code": "binding_connected"}, {"code": "outbox_uncertain"},
+    ]
+    assert store.get_meta(sid) is not None
+    assert runtime.calls[-1] == ("assert_session_delete_allowed", sid, True)
+
+    runtime.delete_result = {"ok": True, "blockers": []}
+    deleted = c.request("DELETE", f"/console/sessions/{sid}")
+    assert deleted.status_code == 200 and deleted.json()["ok"] is True
+    assert store.get_meta(sid) is None
 
 
 def test_workspace_crud_and_session_binding(tmp_path):

@@ -17,9 +17,12 @@ not re-implemented) — so every existing endpoint (/run, /factor/*, /watch/*,
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
+from collections.abc import Callable, Mapping, MutableMapping
 from pathlib import Path
+from typing import Any
 
 # ui/ lives one level up from this package (guanlan-v2/ui/, guanlan-v2/guanlan_v2/).
 _UI_DIR = Path(__file__).resolve().parent.parent / "ui"
@@ -95,6 +98,130 @@ def _load_secrets_env() -> None:
 
 
 _load_secrets_env()
+
+
+def _telegram_feature_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    """Return the deliberately narrow Telegram feature gate.
+
+    Only the exact value ``"1"`` opts in.  Keeping this check here, above
+    ``create_app()``, makes the disabled path testable without importing any
+    Channel, DPAPI, SQLite, or HTTP implementation.
+    """
+
+    source = os.environ if environ is None else environ
+    return source.get("GUANLAN_TELEGRAM_ENABLED") == "1"
+
+
+def _build_telegram_channel_runtime(
+    console_store: Any,
+    *,
+    factories: Mapping[str, Callable[..., Any]] | None = None,
+) -> Any:
+    """Build the optional Channel graph around the one ConsoleStore instance.
+
+    Imports are intentionally local.  With the feature gate off neither the
+    Windows DPAPI boundary nor the Telegram/httpx client is even constructed.
+    ``factories`` is a narrow test seam; production always uses the concrete
+    components below.
+    """
+
+    if factories is None:
+        from guanlan_v2.channels.runtime import ChannelRuntime
+        from guanlan_v2.channels.secrets import SecretStore
+        from guanlan_v2.channels.store import ChannelStore
+        from guanlan_v2.channels.telegram import TelegramAdapter
+        from guanlan_v2.channels.trading_calendar import AShareTradingCalendar
+        from guanlan_v2.console.media import MediaStore
+
+        factories = {
+            "channel_store": ChannelStore,
+            "secret_store": SecretStore,
+            "media_store": MediaStore,
+            "telegram_adapter": TelegramAdapter,
+            "trading_calendar": AShareTradingCalendar,
+            "runtime": ChannelRuntime,
+        }
+
+    required = {
+        "channel_store",
+        "secret_store",
+        "media_store",
+        "telegram_adapter",
+        "trading_calendar",
+        "runtime",
+    }
+    if set(factories) != required:
+        raise ValueError("invalid Telegram Channel component factory set")
+
+    console_root = Path(console_store.root)
+    channel_store = factories["channel_store"](console_root / "channels.sqlite3")
+    secret_store = factories["secret_store"](console_root / "channel_secrets")
+    media_store = factories["media_store"](console_store)
+    telegram_adapter = factories["telegram_adapter"]()
+    trading_calendar = factories["trading_calendar"]()
+    return factories["runtime"](
+        console_store=console_store,
+        channel_store=channel_store,
+        secret_store=secret_store,
+        telegram_adapter=telegram_adapter,
+        media_store=media_store,
+        automation_calendar=trading_calendar,
+    )
+
+
+def _configure_telegram_channel(
+    app: Any,
+    console_store: Any,
+    console_kwargs: MutableMapping[str, Any],
+    *,
+    enabled: bool | None = None,
+    runtime_factory: Callable[[Any], Any] | None = None,
+    router_factory: Callable[[Any], Any] | None = None,
+) -> Any | None:
+    """Wire one optional runtime into Channel routes, Console, and app state."""
+
+    selected = _telegram_feature_enabled() if enabled is None else bool(enabled)
+    if not selected:
+        # Explicit None preserves the established Console behavior.  The
+        # dedicated Channel router is not mounted, so feature-off is a 404 and
+        # no optional implementation module has been imported.
+        console_kwargs["channel_runtime"] = None
+        app.state.channel_runtime = None
+        return None
+
+    build_runtime = runtime_factory or _build_telegram_channel_runtime
+    runtime = build_runtime(console_store)
+    if router_factory is None:
+        from guanlan_v2.channels.api import build_channel_router
+
+        router_factory = build_channel_router
+    app.include_router(router_factory(runtime))
+    console_kwargs["channel_runtime"] = runtime
+    app.state.channel_runtime = runtime
+    return runtime
+
+
+@contextlib.asynccontextmanager
+async def _telegram_runtime_lifespan(runtime: Any | None):
+    """Own exactly one Channel start/stop pair inside the ASGI lifespan."""
+
+    if runtime is None:
+        yield
+        return
+    try:
+        await runtime.start()
+    except BaseException:
+        # Runtime.start() is internally compensating, but stop() owns the
+        # adapter close.  A failed ASGI startup must not leak that HTTP client.
+        try:
+            await runtime.stop()
+        except Exception:
+            pass
+        raise
+    try:
+        yield
+    finally:
+        await runtime.stop()
 
 
 def _ensure_engine_importable() -> str:
@@ -321,6 +448,11 @@ def create_app():
                   f"endpoints will keep returning 503.", file=sys.stderr)
         _console_kw = _kept
     _console_kw["store"] = _console_store
+    _channel_runtime = _configure_telegram_channel(
+        app,
+        _console_store,
+        _console_kw,
+    )
     app.include_router(build_console_router(**_console_kw))
 
     # ── P2:自主研究回路(提案→求值→批判→改进 后台单飞;零开关零定时器,
@@ -391,9 +523,18 @@ def create_app():
     _prev_lifespan = app.router.lifespan_context
 
     @_ctxlib.asynccontextmanager
+    async def _gl_channel_lifespan(_gl_app):
+        # Starlette does not enter mounted-app lifespans.  Channel lifetime is
+        # nested beside the existing GL MCP lifetime so either normal shutdown
+        # or an exception in the inner server scope awaits Runtime.stop().
+        async with _gl_mcp_app.router.lifespan_context(_gl_app):
+            async with _telegram_runtime_lifespan(_channel_runtime):
+                yield
+
+    @_ctxlib.asynccontextmanager
     async def _composed_lifespan(_app):
         async with _prev_lifespan(_app):
-            async with _gl_mcp_app.router.lifespan_context(_gl_mcp_app):
+            async with _gl_channel_lifespan(_gl_mcp_app):
                 import asyncio as _aio
                 _revive = _aio.create_task(_checker_revive_loop())   # 互拉守望(见函数 docstring)
                 # 后端定时盯盘(2026-07-11 落子改造 Task 1;opt-in:GUANLAN_SEATS_WATCH=1 才起)。

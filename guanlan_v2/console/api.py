@@ -1377,6 +1377,94 @@ def build_console_router(store: Optional[ConsoleStore] = None,
             return reason
         return fallback
 
+    def _safe_lifecycle_result(value: Any) -> Dict[str, Any]:
+        """Allowlist Runtime lifecycle metadata returned to the local UI.
+
+        The Channel runtime owns richer rows, but lifecycle responses only
+        need pause evidence and delete blocker codes.  Keeping this barrier in
+        Console prevents a future Runtime field (message text, chat id, file
+        path, or credential reference) from becoming an accidental API field.
+        """
+        if not isinstance(value, dict):
+            return {}
+        public: Dict[str, Any] = {}
+        raw_sids = value.get("safe_paused_sids")
+        if isinstance(raw_sids, (list, tuple)):
+            public["safe_paused_sids"] = list(dict.fromkeys(
+                sid for sid in raw_sids
+                if isinstance(sid, str) and re.fullmatch(r"cs_[A-Za-z0-9_-]{1,80}", sid)
+            ))
+        raw_blockers = value.get("blockers")
+        if isinstance(raw_blockers, (list, tuple)):
+            blockers = []
+            for item in raw_blockers:
+                code = item.get("code") if isinstance(item, dict) else item
+                if isinstance(code, str) and re.fullmatch(
+                    r"[A-Za-z_][A-Za-z0-9_.:-]{0,127}", code
+                ):
+                    blockers.append({"code": code})
+            public["blockers"] = blockers
+        if value.get("channel_remains_paused") is True:
+            public["channel_remains_paused"] = True
+        return public
+
+    async def _channel_lifecycle(
+        method_name: str, *args: Any
+    ) -> tuple[Dict[str, Any], Optional[JSONResponse]]:
+        """Invoke one pre-commit lifecycle guard, preserving the feature gate.
+
+        No injected Runtime means the historical Console-only lifecycle stays
+        unchanged.  Once a Runtime is injected, missing/broken hooks fail
+        closed before any Console archive/restore/delete write.  Expected
+        blockers are returned as 409; infrastructure failures are 503.
+        """
+        runtime = _channel_runtime()
+        if runtime is None:
+            return {}, None
+        if runtime is _CHANNEL_RUNTIME_RESOLUTION_FAILED:
+            return {}, _perr(
+                503, "Telegram 生命周期服务暂不可用",
+                reason_code="channel_lifecycle_unavailable",
+            )
+        try:
+            result = await _channel_sync(runtime, method_name, *args)
+        except Exception as exc:
+            reason_code = _channel_reason(exc, "channel_lifecycle_unavailable")
+            # Runtime blockers normally use an ok:false result.  Raised safe
+            # domain conflicts remain 409; storage/infrastructure failures,
+            # missing hooks and unknown exceptions are availability failures.
+            unavailable_markers = (
+                "unavailable", "storage", "internal", "failed",
+            )
+            status = (
+                503 if reason_code == "channel_lifecycle_unavailable"
+                or any(marker in reason_code.lower() for marker in unavailable_markers)
+                else 409
+            )
+            return {}, _perr(
+                status,
+                "Telegram 生命周期操作被阻止" if status == 409 else "Telegram 生命周期服务暂不可用",
+                reason_code=reason_code,
+            )
+        if not isinstance(result, dict) or not isinstance(result.get("ok"), bool):
+            return {}, _perr(
+                503, "Telegram 生命周期服务返回无效结果",
+                reason_code="channel_lifecycle_invalid_result",
+            )
+        public = _safe_lifecycle_result(result)
+        if result["ok"] is not True:
+            raw_reason = result.get("reason_code")
+            reason_code = (
+                raw_reason if isinstance(raw_reason, str) and re.fullmatch(
+                    r"[A-Za-z_][A-Za-z0-9_.:-]{0,127}", raw_reason
+                ) else "channel_lifecycle_blocked"
+            )
+            return public, _perr(
+                409, "Telegram 通道仍有待处理事项",
+                reason_code=reason_code, **public,
+            )
+        return public, None
+
     async def _intercept_channel_secret(
         sid: str,
         text: str,
@@ -1884,17 +1972,40 @@ def build_console_router(store: Optional[ConsoleStore] = None,
     async def workspaces_archive(request: Request, workspace_id: str):
         if not _trusted_local_request(request):
             return _origin_error()
-        bound_sids = {m.get("id") for m in st.list_sessions()
-                      if m.get("workspace_id") == workspace_id}
-        if bound_sids & _busy_session_ids():
-            return _perr(409, "该研究空间正有任务运行，暂不能归档")
         try:
-            workspace = st.workspace_store.archive(workspace_id)
+            # Validate before pausing anything.  In particular, the reserved
+            # general workspace must not cause all of its conversations to be
+            # paused only for ConsoleStore.archive to reject it afterwards.
+            st.workspace_store.require(workspace_id, active_only=False)
+            if workspace_id == GENERAL_WORKSPACE_ID:
+                raise WorkspaceError("通用研究空间不能归档")
         except WorkspaceNotFound as exc:
             return _perr(404, str(exc))
         except WorkspaceError as exc:
             return _perr(400, str(exc))
-        return {"ok": True, "workspace": workspace}
+        bound_sids = sorted({
+            m.get("id") for m in st.list_sessions()
+            if m.get("workspace_id") == workspace_id and isinstance(m.get("id"), str)
+        })
+        if set(bound_sids) & _busy_session_ids():
+            return _perr(409, "该研究空间正有任务运行，暂不能归档")
+        lifecycle, lifecycle_error = await _channel_lifecycle(
+            "prepare_workspace_archive", workspace_id, bound_sids,
+        )
+        if lifecycle_error is not None:
+            return lifecycle_error
+        try:
+            workspace = st.workspace_store.archive(workspace_id)
+        except WorkspaceNotFound as exc:
+            return _perr(404, str(exc), **lifecycle)
+        except WorkspaceError as exc:
+            return _perr(400, str(exc), **lifecycle)
+        except Exception:
+            # Runtime pause is deliberately not rolled back: suppressing a
+            # possible delivery is safer than resuming after a partial
+            # cross-store lifecycle failure.
+            return _perr(503, "研究空间归档失败", **lifecycle)
+        return {"ok": True, "workspace": workspace, **lifecycle}
 
     # ── 会话 CRUD ──
     @router.get("/sessions")
@@ -1986,13 +2097,26 @@ def build_console_router(store: Optional[ConsoleStore] = None,
             return _perr(404, f"会话不存在: {sid}")
         if sid in _busy_session_ids():
             return _perr(409, "该会话正运行、等待确认或有后台任务，暂不能归档")
+        lifecycle, lifecycle_error = await _channel_lifecycle(
+            "prepare_session_archive", sid,
+        )
+        if lifecycle_error is not None:
+            return lifecycle_error
         if meta.get("archived"):
-            return {"ok": True, "meta": meta, "already_archived": True}
-        archived = st.set_archived(sid, True)
+            return {
+                "ok": True, "meta": meta, "already_archived": True,
+                **lifecycle,
+            }
+        try:
+            archived = st.set_archived(sid, True)
+        except Exception:
+            # Do not undo the Runtime pause across stores.  The response tells
+            # the caller exactly which session remains safely paused.
+            return _perr(503, "会话归档失败", **lifecycle)
         if archived is None:
-            return _perr(400, "该保留会话不支持归档")
+            return _perr(400, "该保留会话不支持归档", **lifecycle)
         agents.pop(sid, None)
-        return {"ok": True, "meta": archived}
+        return {"ok": True, "meta": archived, **lifecycle}
 
     @router.post("/sessions/{sid}/restore")
     async def sessions_restore(request: Request, sid: str):
@@ -2004,10 +2128,18 @@ def build_console_router(store: Optional[ConsoleStore] = None,
             return _perr(404, f"会话不存在: {sid}")
         if not meta.get("archived"):
             return {"ok": True, "meta": meta, "already_active": True}
-        restored = st.set_archived(sid, False)
+        lifecycle, lifecycle_error = await _channel_lifecycle(
+            "on_session_restore", sid,
+        )
+        if lifecycle_error is not None:
+            return lifecycle_error
+        try:
+            restored = st.set_archived(sid, False)
+        except Exception:
+            return _perr(503, "会话恢复失败", **lifecycle)
         if restored is None:
-            return _perr(400, "该保留会话不支持恢复")
-        return {"ok": True, "meta": restored}
+            return _perr(400, "该保留会话不支持恢复", **lifecycle)
+        return {"ok": True, "meta": restored, **lifecycle}
 
     @router.delete("/sessions/{sid}")
     async def sessions_delete(request: Request, sid: str):
@@ -2022,12 +2154,19 @@ def build_console_router(store: Optional[ConsoleStore] = None,
         # turn/confirmation/secret-reservation guard below.
         if sid in _busy_session_ids():
             return JSONResponse({"ok": False, "reason": "该会话正有任务在跑,先等其结束"})
+        if st.get_meta(sid) is None:
+            return {"ok": False, "id": sid}
+        lifecycle, lifecycle_error = await _channel_lifecycle(
+            "assert_session_delete_allowed", sid,
+        )
+        if lifecycle_error is not None:
+            return lifecycle_error
         agents.pop(sid, None)
         try:
             ok = st.delete_session(sid)
         except Exception as e:   # rmtree 重试后仍败(文件被外部占用等)→ 诚实信封而非裸 500
             return JSONResponse({"ok": False, "reason": f"删除失败(目录被占用?稍后重试): {e}"})
-        return {"ok": ok, "id": sid}
+        return {"ok": ok, "id": sid, **lifecycle}
 
     # ── 发令 / 运行中转向 ──
     def _launch_turn(sid: str, text: str, turn_id: str, thinking_mode: str,
