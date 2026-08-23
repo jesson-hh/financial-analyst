@@ -749,6 +749,309 @@ def _done(evs):
     return any(e["type"] == "task_update" and e.get("status") == "done" for e in evs)
 
 
+class _ScriptedFinalAgent:
+    def __init__(self, events):
+        self.messages = []
+        self._events = list(events)
+
+    async def run_turn(self, text, confirm_callback=None, allowed_tools=None):
+        for event in self._events:
+            yield event
+
+
+def test_agent_final_is_committed_once_after_checkpoint_and_before_done(tmp_path):
+    agent = _ScriptedFinalAgent([
+        _Evt("text", "第一段"),
+        _Evt("text", "第二段"),
+        _Evt("done", None),
+    ])
+    app = FastAPI()
+    store = ConsoleStore(root=tmp_path)
+    app.include_router(build_console_router(store=store, agent_factory=lambda _sid: agent))
+
+    with TestClient(app) as c:
+        sid = c.post("/console/sessions", json={}).json()["meta"]["id"]
+        receipt = c.post("/console/send", json={"sid": sid, "text": "请回答"}).json()
+        events = _wait(store, sid, _done)
+
+    user = next(event for event in events if event["type"] == "user_msg")
+    finals = [event for event in events if event["type"] == "agent_final"]
+    assert len(finals) == 1
+    assert finals[0]["text"] == "第一段\n第二段"
+    assert finals[0]["turn_id"] == receipt["turn_id"]
+    assert finals[0]["source_user_event_id"] == user["id"]
+    assert finals[0]["source"] == "user"
+    done = next(event for event in events
+                if event["type"] == "task_update" and event.get("status") == "done")
+    assert finals[0]["id"] < done["id"] and done["ok"] is True
+    # agent_final is a projection event; the visible reply remains the existing
+    # agent_delta stream and is not emitted a second time as a delta.
+    assert [event["text"] for event in events if event["type"] == "agent_delta"] \
+        == ["第一段", "第二段"]
+    completed = store.load_buddy_state(sid)["completed_turn"]
+    assert completed == {
+        "turn_id": receipt["turn_id"],
+        "source_user_event_id": user["id"],
+        "source": "user",
+        "final_text": "第一段\n第二段",
+    }
+
+
+def test_tool_preamble_is_not_committed_as_agent_final(tmp_path):
+    agent = _ScriptedFinalAgent([
+        _Evt("text", "我先查一下"),
+        _Evt("tool_call", {"name": "stock_brief", "args": {}}),
+        _Evt("tool_result", {
+            "name": "stock_brief", "content": "ok", "is_error": False,
+        }),
+        _Evt("text", "这是最终结论"),
+        _Evt("done", None),
+    ])
+    app = FastAPI()
+    store = ConsoleStore(root=tmp_path)
+    app.include_router(build_console_router(store=store, agent_factory=lambda _sid: agent))
+
+    with TestClient(app) as c:
+        sid = c.post("/console/sessions", json={}).json()["meta"]["id"]
+        c.post("/console/send", json={"sid": sid, "text": "查一下"})
+        events = _wait(store, sid, _done)
+
+    assert [event["text"] for event in events if event["type"] == "agent_final"] \
+        == ["这是最终结论"]
+
+
+def test_error_invalidates_unfinished_agent_final_candidate(tmp_path):
+    agent = _ScriptedFinalAgent([
+        _Evt("text", "这段还不能提交"),
+        _Evt("error", "工具协议失败"),
+        _Evt("done", None),
+    ])
+    app = FastAPI()
+    store = ConsoleStore(root=tmp_path)
+    app.include_router(build_console_router(store=store, agent_factory=lambda _sid: agent))
+
+    with TestClient(app) as c:
+        sid = c.post("/console/sessions", json={}).json()["meta"]["id"]
+        c.post("/console/send", json={"sid": sid, "text": "继续"})
+        events = _wait(store, sid, _done)
+
+    assert not any(event["type"] == "agent_final" for event in events)
+    done = next(event for event in events
+                if event["type"] == "task_update" and event.get("status") == "done")
+    assert done["ok"] is False
+
+
+def test_checkpoint_failure_prevents_agent_final_and_successful_done(
+        tmp_path, monkeypatch):
+    agent = _ScriptedFinalAgent([_Evt("text", "不能越过检查点"), _Evt("done", None)])
+    app = FastAPI()
+    store = ConsoleStore(root=tmp_path)
+
+    def fail_checkpoint(_sid, _state):
+        raise OSError("checkpoint unavailable")
+
+    monkeypatch.setattr(store, "save_buddy_state", fail_checkpoint)
+    app.include_router(build_console_router(store=store, agent_factory=lambda _sid: agent))
+
+    with TestClient(app) as c:
+        sid = c.post("/console/sessions", json={}).json()["meta"]["id"]
+        c.post("/console/send", json={"sid": sid, "text": "回答"})
+        events = _wait(store, sid, _done)
+
+    assert not any(event["type"] == "agent_final" for event in events)
+    successful_done = [
+        event for event in events
+        if event["type"] == "task_update" and event.get("status") == "done"
+        and event.get("ok") is True
+    ]
+    assert successful_done == []
+
+
+def test_cancelled_partial_reply_is_never_committed_as_agent_final(tmp_path):
+    class PartialAgent:
+        def __init__(self):
+            self.messages = []
+            self.started = threading.Event()
+
+        async def run_turn(self, text, confirm_callback=None, allowed_tools=None):
+            yield _Evt("text", "取消前的半句话")
+            self.started.set()
+            await asyncio.Event().wait()
+
+    agent = PartialAgent()
+    app = FastAPI()
+    store = ConsoleStore(root=tmp_path)
+    app.include_router(build_console_router(store=store, agent_factory=lambda _sid: agent))
+
+    with TestClient(app) as c:
+        sid = c.post("/console/sessions", json={}).json()["meta"]["id"]
+        c.post("/console/send", json={"sid": sid, "text": "长回答"})
+        assert agent.started.wait(2)
+        assert c.post("/console/cancel", json={"sid": sid}).status_code == 202
+        events = _wait(store, sid, _done)
+
+    assert not any(event["type"] == "agent_final" for event in events)
+
+
+def test_steered_old_turn_has_no_agent_final_and_successor_commits_own(tmp_path):
+    class SteeringFinalAgent:
+        def __init__(self):
+            self.messages = []
+            self.calls = 0
+            self.started = threading.Event()
+
+        async def run_turn(self, text, confirm_callback=None, allowed_tools=None):
+            self.calls += 1
+            if self.calls == 1:
+                yield _Evt("text", "旧轮半成品")
+                self.started.set()
+                await asyncio.Event().wait()
+            yield _Evt("text", "新轮完整回复")
+            yield _Evt("done", None)
+
+    agent = SteeringFinalAgent()
+    app = FastAPI()
+    store = ConsoleStore(root=tmp_path)
+    app.include_router(build_console_router(store=store, agent_factory=lambda _sid: agent))
+
+    with TestClient(app) as c:
+        sid = c.post("/console/sessions", json={}).json()["meta"]["id"]
+        first = c.post("/console/send", json={"sid": sid, "text": "原方向"}).json()
+        assert agent.started.wait(2)
+        steered = c.post("/console/steer", json={"sid": sid, "text": "新方向"}).json()
+        events = _wait(store, sid, lambda rows: len([
+            event for event in rows
+            if event["type"] == "task_update" and event.get("status") == "done"
+        ]) >= 2)
+
+    finals = [event for event in events if event["type"] == "agent_final"]
+    assert [event["text"] for event in finals] == ["新轮完整回复"]
+    assert all(event["turn_id"] != first["turn_id"] for event in finals)
+    assert finals[0]["turn_id"] == steered["continuation_turn_id"]
+    steer_user = next(event for event in events
+                      if event["type"] == "user_msg" and event.get("steer") is True)
+    assert finals[0]["source_user_event_id"] == steer_user["id"]
+
+
+def _seed_stale_agent_final_turn(store, *, turn_id="turn_restart"):
+    sid = store.create_session()["id"]
+    user = store.append_event(sid, "user_msg", text="重启前问题")
+    store.append_event(
+        sid, "task_update", task_id=turn_id, status="running", note="运筹中",
+    )
+    store.set_status(sid, "running")
+    return sid, user
+
+
+def _write_completed_turn_checkpoint(store, sid, completed_turn):
+    state = {
+        "schema_version": "1",
+        "checkpoint_event_id": int(store.get_meta(sid)["next_event_id"]) - 1,
+        "messages": [],
+        "completed_turn": completed_turn,
+    }
+    path = store.root / "sessions" / sid / "buddy_state.json"
+    path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+
+def test_restart_before_completed_checkpoint_interrupts_without_agent_final(tmp_path):
+    store = ConsoleStore(root=tmp_path)
+    sid, _user = _seed_stale_agent_final_turn(store)
+    store.append_event(sid, "agent_delta", text="未完成")
+
+    app = FastAPI()
+    app.include_router(build_console_router(store=store, agent_factory=lambda _sid: FakeAgent()))
+
+    events = store.read_events(sid)
+    assert not any(event["type"] == "agent_final" for event in events)
+    done = events[-1]
+    assert done["type"] == "task_update" and done["status"] == "done"
+    assert done["ok"] is False and done["interrupted"] is True
+    assert store.get_meta(sid)["status"] == "idle"
+
+
+def test_restart_after_checkpoint_before_agent_final_recovers_commit(tmp_path):
+    store = ConsoleStore(root=tmp_path)
+    turn_id = "turn_checkpointed"
+    sid, user = _seed_stale_agent_final_turn(store, turn_id=turn_id)
+    completed = {
+        "turn_id": turn_id,
+        "source_user_event_id": user["id"],
+        "source": "user",
+        "final_text": "检查点中的完整回复",
+    }
+    _write_completed_turn_checkpoint(store, sid, completed)
+
+    app = FastAPI()
+    app.include_router(build_console_router(store=store, agent_factory=lambda _sid: FakeAgent()))
+
+    events = store.read_events(sid)
+    finals = [event for event in events if event["type"] == "agent_final"]
+    assert len(finals) == 1
+    assert finals[0]["text"] == completed["final_text"]
+    assert finals[0]["turn_id"] == completed["turn_id"]
+    assert finals[0]["source_user_event_id"] == completed["source_user_event_id"]
+    assert finals[0]["source"] == completed["source"]
+    done = events[-1]
+    assert done["type"] == "task_update" and done["status"] == "done"
+    assert done["ok"] is True and done["recovered"] is True
+    assert finals[0]["id"] < done["id"]
+    assert not any(event["type"] == "task_update" and event.get("status") == "cancelled"
+                   for event in events)
+
+
+def test_restart_recovery_is_not_limited_by_sse_tail_window(tmp_path):
+    store = ConsoleStore(root=tmp_path)
+    turn_id = "turn_long_checkpointed"
+    sid, user = _seed_stale_agent_final_turn(store, turn_id=turn_id)
+    for i in range(501):
+        store.append_event(sid, "agent_delta", text=f"partial {i}", turn_id=turn_id)
+    completed = {
+        "turn_id": turn_id,
+        "source_user_event_id": user["id"],
+        "source": "user",
+        "final_text": "长轮次的完整回复",
+    }
+    _write_completed_turn_checkpoint(store, sid, completed)
+
+    app = FastAPI()
+    app.include_router(build_console_router(store=store, agent_factory=lambda _sid: FakeAgent()))
+
+    events = store.read_events(sid)
+    assert [event["text"] for event in events if event["type"] == "agent_final"] \
+        == [completed["final_text"]]
+    assert events[-1]["type"] == "task_update"
+    assert events[-1]["status"] == "done" and events[-1]["recovered"] is True
+
+
+def test_restart_after_agent_final_before_done_deduplicates_and_finishes(tmp_path):
+    store = ConsoleStore(root=tmp_path)
+    turn_id = "turn_final_written"
+    sid, user = _seed_stale_agent_final_turn(store, turn_id=turn_id)
+    completed = {
+        "turn_id": turn_id,
+        "source_user_event_id": user["id"],
+        "source": "user",
+        "final_text": "已经提交的完整回复",
+    }
+    _write_completed_turn_checkpoint(store, sid, completed)
+    original = store.append_event(sid, "agent_final", text=completed["final_text"],
+                                  turn_id=turn_id, source_user_event_id=user["id"],
+                                  source="user")
+
+    app = FastAPI()
+    app.include_router(build_console_router(store=store, agent_factory=lambda _sid: FakeAgent()))
+
+    events = store.read_events(sid)
+    finals = [event for event in events if event["type"] == "agent_final"]
+    assert [event["id"] for event in finals] == [original["id"]]
+    done = events[-1]
+    assert done["type"] == "task_update" and done["status"] == "done"
+    assert done["ok"] is True and done["recovered"] is True
+    assert not any(event["type"] == "task_update" and event.get("status") == "cancelled"
+                   for event in events)
+
+
 def test_confirm_flow(tmp_path):
     class ConfirmAgent:
         def __init__(self):

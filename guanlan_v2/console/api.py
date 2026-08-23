@@ -285,7 +285,9 @@ def _restore_buddy_state(agent, state: Optional[Dict[str, Any]]) -> bool:
         return False
 
 
-def _agent_state_snapshot(agent, checkpoint_event_id: int) -> Optional[Dict[str, Any]]:
+def _agent_state_snapshot(agent, checkpoint_event_id: int,
+                          completed_turn: Optional[Dict[str, Any]] = None
+                          ) -> Optional[Dict[str, Any]]:
     """序列化协议态；只含消息，不含 client、密钥、system prompt 或 UI 事件。"""
     messages = getattr(agent, "messages", None)
     if messages is None:
@@ -307,21 +309,32 @@ def _agent_state_snapshot(agent, checkpoint_event_id: int) -> Optional[Dict[str,
         json.dumps(out, ensure_ascii=False, allow_nan=False)
     except Exception:
         return None
-    return {
+    state = {
         "schema_version": "1",
         "checkpoint_event_id": max(0, int(checkpoint_event_id)),
         "messages": out,
     }
+    if completed_turn is not None:
+        state["completed_turn"] = _safe(dict(completed_turn))
+    return state
 
 
 def _checkpoint_agent(st: ConsoleStore, sid: str, agent,
-                      checkpoint_event_id: Optional[int] = None) -> bool:
-    """best-effort 落完整协议态；失败会明确记日志，但不抹掉已生成的回答。"""
+                      checkpoint_event_id: Optional[int] = None,
+                      completed_turn: Optional[Dict[str, Any]] = None) -> bool:
+    """Persist one complete protocol boundary, returning whether it is durable.
+
+    Callers that are merely compacting or recording a cancellation may treat a
+    failure as best-effort.  A completed foreground reply uses the return value
+    as its commit gate: no public final event may precede this checkpoint.
+    """
     try:
         if checkpoint_event_id is None:
             meta = st.get_meta(sid) or {}
             checkpoint_event_id = int(meta.get("next_event_id", 1)) - 1
-        state = _agent_state_snapshot(agent, checkpoint_event_id)
+        state = _agent_state_snapshot(
+            agent, checkpoint_event_id, completed_turn=completed_turn,
+        )
         if state is None:
             raise ValueError("agent messages are not JSON-serializable")
         st.save_buddy_state(sid, state)
@@ -1637,6 +1650,7 @@ def build_console_router(store: Optional[ConsoleStore] = None,
         turn_base_messages: Optional[List[Any]] = None
         cancelled = False
         propagate_cancel = False
+        final_chunks: List[str] = []
 
         async def confirm_cb(tool_name: str, args: dict) -> bool:
             # 自主模式只自动放行可撤销的空间内文本写入/私有草稿与静态检查。
@@ -1737,13 +1751,16 @@ def build_console_router(store: Optional[ConsoleStore] = None,
                                                  allowed_tools=allowed_tools):
                 kind, payload = evt.kind, evt.payload
                 if kind == "text" and payload:
-                    _emit(sid, "agent_delta", text=str(payload))
+                    final_chunks.append(str(payload))
+                    _emit(sid, "agent_delta", text=str(payload), turn_id=turn_id)
                 elif kind == "tool_call":
+                    final_chunks.clear()
                     control["phase"] = "tool"
                     _emit(sid, "tool_call", tool=(payload or {}).get("name"),
                           args=_safe((payload or {}).get("args")))
                     tool_calls += 1
                 elif kind == "tool_result":
+                    final_chunks.clear()
                     p = payload or {}
                     se = p.get("side_effect") or {}
                     if not isinstance(se, dict):
@@ -1779,6 +1796,7 @@ def build_console_router(store: Optional[ConsoleStore] = None,
                         break
                     control["phase"] = "llm"
                 elif kind == "error":
+                    final_chunks.clear()
                     # Unknown/blocked tools can yield an error without a public
                     # tool_result and then continue straight into the next LLM.
                     control["phase"] = "llm"
@@ -1791,7 +1809,35 @@ def build_console_router(store: Optional[ConsoleStore] = None,
             # 只有完整消费到 done 的消息链才可覆盖私有快照；若取消/异常发生在
             # assistant.tool_calls 与 tool results 之间，保留上一份完整快照。
             if saw_done:
-                _checkpoint_agent(st, sid, turn_agent)
+                final_text = "\n".join(final_chunks)
+                completed_turn = {
+                    "turn_id": turn_id,
+                    "source_user_event_id": user_event_id,
+                    "source": str(control.get("source") or "user"),
+                    "final_text": final_text,
+                }
+                checkpoint_ok = _checkpoint_agent(
+                    st, sid, turn_agent, completed_turn=completed_turn,
+                )
+                control["checkpoint_ok"] = checkpoint_ok
+                if not checkpoint_ok:
+                    # A public final without its complete Buddy protocol state
+                    # would be unrecoverable.  Roll the in-memory agent back too,
+                    # so a later turn cannot inherit an uncommitted reply.
+                    saw_done = False
+                    turn_ok = False
+                    _emit(sid, "task_update", task_id=turn_id, status="error",
+                          terminal=False,
+                          note="完整回复检查点写入失败，本轮未提交")
+                elif final_text and not control.get("cancel_requested"):
+                    final_event = _emit(
+                        sid, "agent_final", text=final_text, turn_id=turn_id,
+                        source_user_event_id=user_event_id,
+                        source=completed_turn["source"],
+                    )
+                    control["final_event_id"] = (
+                        int(final_event["id"]) if final_event is not None else None
+                    )
         except asyncio.CancelledError:
             cancelled = True
             turn_ok = False
@@ -2202,7 +2248,14 @@ def build_console_router(store: Optional[ConsoleStore] = None,
             # LLM request, confirmation Future, or tool coroutine; close any
             # durable running tail explicitly so SSE snapshot replay is idle.
             try:
-                fg_events = st.read_events(sid_, limit=500)
+                # Recovery must not inherit the SSE tail-window limit: a long
+                # turn may have hundreds of deltas between its running marker
+                # and the crash cut. ``next_event_id`` bounds one forward scan
+                # while naturally tolerating reserved-id gaps.
+                fg_events = st.read_events_forward(
+                    sid_, after_id=0,
+                    limit=max(1, int(m.get("next_event_id", 1))),
+                )
                 last_fg = next((e for e in reversed(fg_events)
                                 if e.get("type") == "task_update" and not e.get("kind")
                                 and e.get("terminal") is not False), None)
@@ -2218,35 +2271,67 @@ def build_console_router(store: Optional[ConsoleStore] = None,
                         and last_fg.get("status") in active_statuses
                     )
                     if needs_terminal:
-                        last_confirm = next((e for e in reversed(fg_events)
-                                             if e.get("type") == "confirm_request"
-                                             and e.get("turn_id") == task_id), None)
-                        resolved_after = bool(last_confirm and any(
-                            e.get("type") == "confirm_resolved"
+                        existing_final = next((
+                            e for e in reversed(fg_events)
+                            if e.get("type") == "agent_final"
                             and e.get("turn_id") == task_id
-                            and int(e.get("id", 0)) > int(last_confirm.get("id", 0))
-                            for e in fg_events
-                        ))
-                        if last_confirm and not resolved_after:
+                        ), None)
+                        buddy_state = st.load_buddy_state(sid_)
+                        completed_turn = (
+                            buddy_state.get("completed_turn")
+                            if isinstance(buddy_state, dict) else None
+                        )
+                        checkpointed = bool(
+                            isinstance(completed_turn, dict)
+                            and completed_turn.get("turn_id") == task_id
+                        )
+                        if existing_final is not None or checkpointed:
+                            if existing_final is None:
+                                final_text = str(completed_turn.get("final_text") or "")
+                                if final_text:
+                                    st.append_event(
+                                        sid_, "agent_final", text=final_text,
+                                        turn_id=task_id,
+                                        source_user_event_id=completed_turn.get(
+                                            "source_user_event_id"
+                                        ),
+                                        source=completed_turn.get("source") or "user",
+                                    )
                             st.append_event(
-                                sid_, "confirm_resolved", turn_id=task_id,
-                                choice="interrupted", reason="service_restart",
+                                sid_, "task_update", task_id=task_id,
+                                status="done", ok=True, cancelled=False,
+                                recovered=True,
                             )
-                        previous = str((last_fg or {}).get("status") or "running")
-                        control_kind = ("steer" if previous == "steering"
-                                        else "cancel" if previous in {"cancelling", "stopping"}
-                                        else None)
-                        st.append_event(
-                            sid_, "task_update", task_id=task_id,
-                            status="cancelled", ok=False, interrupted=True,
-                            control_kind=control_kind,
-                            note="服务重启，前台生成已中断；未完成内容不会续跑",
-                        )
-                        st.append_event(
-                            sid_, "task_update", task_id=task_id,
-                            status="done", ok=False, cancelled=True, interrupted=True,
-                            control_kind=control_kind,
-                        )
+                        else:
+                            last_confirm = next((e for e in reversed(fg_events)
+                                                 if e.get("type") == "confirm_request"
+                                                 and e.get("turn_id") == task_id), None)
+                            resolved_after = bool(last_confirm and any(
+                                e.get("type") == "confirm_resolved"
+                                and e.get("turn_id") == task_id
+                                and int(e.get("id", 0)) > int(last_confirm.get("id", 0))
+                                for e in fg_events
+                            ))
+                            if last_confirm and not resolved_after:
+                                st.append_event(
+                                    sid_, "confirm_resolved", turn_id=task_id,
+                                    choice="interrupted", reason="service_restart",
+                                )
+                            previous = str((last_fg or {}).get("status") or "running")
+                            control_kind = ("steer" if previous == "steering"
+                                            else "cancel" if previous in {"cancelling", "stopping"}
+                                            else None)
+                            st.append_event(
+                                sid_, "task_update", task_id=task_id,
+                                status="cancelled", ok=False, interrupted=True,
+                                control_kind=control_kind,
+                                note="服务重启，前台生成已中断；未完成内容不会续跑",
+                            )
+                            st.append_event(
+                                sid_, "task_update", task_id=task_id,
+                                status="done", ok=False, cancelled=True, interrupted=True,
+                                control_kind=control_kind,
+                            )
                     st.set_status(sid_, "idle")
             except Exception as e:
                 print(f"[console] 启动扫描前台恢复跳过 {sid_}: {e}", file=sys.stderr)

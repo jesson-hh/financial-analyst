@@ -178,6 +178,46 @@ def test_append_and_read_events_monotonic(tmp_path):
     assert st.read_events(sid, after_id=1)[0]["text"] == "收到"
 
 
+def test_read_events_forward_returns_oldest_page_after_cursor(tmp_path):
+    st = ConsoleStore(root=tmp_path)
+    sid = st.create_session()["id"]
+    for i in range(2205):
+        st.append_event(sid, "user_msg", text=str(i))
+
+    page = st.read_events_forward(sid, after_id=0, limit=200)
+
+    assert [event["id"] for event in page] == list(range(1, 201))
+    # The existing reader is the SSE snapshot reader and must keep its tail semantics.
+    assert st.read_events(sid, after_id=0, limit=200)[0]["id"] == 2006
+
+
+def test_read_events_forward_pages_across_event_id_gaps(tmp_path):
+    st = ConsoleStore(root=tmp_path)
+    sid = st.create_session()["id"]
+    for i in range(8):
+        st.append_event(sid, "user_msg", text=str(i))
+
+    # append_event deliberately reserves ids before appending.  A crash can
+    # therefore leave holes; emulate that durable shape without renumbering.
+    path = tmp_path / "sessions" / sid / "events.jsonl"
+    events = [event for event in st.read_events(sid) if event["id"] not in {3, 4, 7}]
+    path.write_text(
+        "".join(json.dumps(event, ensure_ascii=False) + "\n" for event in events),
+        encoding="utf-8",
+    )
+
+    seen = []
+    cursor = 0
+    while True:
+        page = st.read_events_forward(sid, after_id=cursor, limit=2)
+        if not page:
+            break
+        seen.extend(event["id"] for event in page)
+        cursor = page[-1]["id"]
+
+    assert seen == [1, 2, 5, 6, 8]
+
+
 def test_plan_roundtrip(tmp_path):
     st = ConsoleStore(root=tmp_path)
     sid = st.create_session()["id"]

@@ -39,6 +39,22 @@ def _valid_buddy_state(state: Any) -> bool:
     messages = state.get("messages")
     if not isinstance(checkpoint, int) or checkpoint < 0 or not isinstance(messages, list):
         return False
+    completed_turn = state.get("completed_turn")
+    if completed_turn is not None:
+        if not isinstance(completed_turn, dict):
+            return False
+        turn_id = completed_turn.get("turn_id")
+        source_event_id = completed_turn.get("source_user_event_id")
+        source = completed_turn.get("source")
+        final_text = completed_turn.get("final_text")
+        if not isinstance(turn_id, str) or not turn_id:
+            return False
+        if type(source_event_id) is not int or source_event_id < 0:
+            return False
+        if not isinstance(source, str) or not source:
+            return False
+        if not isinstance(final_text, str):
+            return False
 
     pending_tool_ids: Optional[set[str]] = None
     for message in messages:
@@ -223,6 +239,37 @@ class ConsoleStore:
                 if ev.get("id", 0) > after_id:
                     out.append(ev)
             return out[-limit:]
+
+    def read_events_forward(self, sid: str, after_id: int = 0,
+                            limit: int = 200) -> List[Dict[str, Any]]:
+        """Read the earliest persisted page strictly after ``after_id``.
+
+        Unlike :meth:`read_events`, this is a cursor reader rather than an SSE
+        snapshot reader.  It stops as soon as ``limit`` matching rows have been
+        found, and event-id gaps are preserved instead of treated as page ends.
+        """
+        if limit <= 0:
+            return []
+        with self._lock:
+            p = self._sdir(sid) / "events.jsonl"
+            if not p.exists():
+                return []
+            out: List[Dict[str, Any]] = []
+            with p.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except Exception:
+                        continue
+                    if ev.get("id", 0) <= after_id:
+                        continue
+                    out.append(ev)
+                    if len(out) >= limit:
+                        break
+            return out
 
     # ── 私有 LLM 上下文 ──
     def save_buddy_state(self, sid: str, state: Dict[str, Any]) -> None:
