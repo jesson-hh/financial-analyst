@@ -160,6 +160,11 @@ function WwMediaImageCard({ item }) {
   const [open, setOpen] = React.useState(false);
   const url = window.WW.mediaUrl(item.mediaId);
   const size = item.width && item.height ? `${item.width} × ${item.height}` : '尺寸未知';
+  const delivery = item.delivery && typeof item.delivery === 'object' ? item.delivery : null;
+  const deliveryLabels = {
+    pending: '等待投递', sending: '正在投递', sent: '已发送至 Telegram',
+    retry_wait: '等待重试', uncertain: '投递结果待确认', terminal: '投递失败', cancelled: '已放弃',
+  };
   React.useEffect(() => { setLoaded(false); setFailed(false); setOpen(false); }, [item.mediaId]);
   React.useEffect(() => {
     if (!open) return undefined;
@@ -190,7 +195,10 @@ function WwMediaImageCard({ item }) {
           <figcaption style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 4px 2px' }}>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div className="serif" style={{ color: 'var(--ink)', fontSize: 12.5, overflowWrap: 'anywhere' }}>{item.name}</div>
-              <div className="mono" style={{ marginTop: 3, color: 'var(--ink-3)', fontSize: 9.5 }}>{size} · {item.mime}</div>
+              <div className="mono" style={{ marginTop: 3, color: 'var(--ink-3)', fontSize: 9.5 }}>
+                {size} · {item.mime}
+                {delivery && deliveryLabels[delivery.state] && <span className={'ww-channel-delivery-badge ww-channel-delivery-' + delivery.state}> · {deliveryLabels[delivery.state]}</span>}
+              </div>
             </div>
             <a href={url} download={item.name} className="hover-link" title={`下载 ${item.name}`}
               style={{ flexShrink: 0, color: 'var(--yin)', fontFamily: 'var(--serif)', fontSize: 11, textDecoration: 'none' }}>下载 ↓</a>
@@ -304,26 +312,12 @@ function ConfirmModal({ confirm, onChoice, onStop, onSteer }) {
   const isChannelConfirm = c.action_ticket_required === true;
   const details = c.public_details && typeof c.public_details === 'object'
     ? c.public_details : {};
-  const isPairing = c.confirm_kind === 'telegram_pairing';
   const requiresExactPairing = c.tool === 'ww_telegram_pair_approve';
-  const pairingVerified = !requiresExactPairing || details.recipient_verified === true;
-  const displayValue = (value) => Array.isArray(value)
-    ? value.map(v => String(v || '')).filter(Boolean).join('、') : String(value || '');
-  const detailRows = isChannelConfirm ? [
-    ['Bot', [details.bot_display_name, details.bot_username ? ('@' + String(details.bot_username).replace(/^@/, '')) : ''].filter(Boolean).join(' · ')],
-    ['Telegram 接收者', [details.telegram_display_name, details.telegram_username ? ('@' + String(details.telegram_username).replace(/^@/, '')) : ''].filter(Boolean).join(' · ')],
-    ['Telegram 数字用户 ID', details.telegram_user_id],
-    ['身份核验', requiresExactPairing ? (pairingVerified ? '已由完整配对码精确核验' : '尚未完成精确核验') : ''],
-    ['绑定规则', details.binding_policy],
-    ['请求时间', details.requested_at], ['过期时间', details.expires_at],
-    ['图片', details.media_id], ['说明', details.caption], ['媒体范围', details.media_policy],
-    ['任务名称', details.name], ['任务编号', details.automation_id],
-    ['计划类型', details.schedule_kind], ['执行时间', details.run_at || details.local_time],
-    ['时区', details.timezone], ['任务内容', details.prompt_summary],
-    ['Skills', details.skill_refs],
-  ].map(row => [row[0], displayValue(row[1])]).filter(row => row[1]) : [];
+  const pairingVerified = !requiresExactPairing
+    || (details.recipient_verified === true && !!details.telegram_user_id);
   const [sending, setSending] = React.useState('');
   const [err, setErr] = React.useState('');
+  const [secretNotice, setSecretNotice] = React.useState(null);
   const [steerDraft, setSteerDraft] = React.useState('');
   const resolve = async (ch) => {
     if (sending) return;
@@ -331,7 +325,7 @@ function ConfirmModal({ confirm, onChoice, onStop, onSteer }) {
       setErr('接收者身份尚未由完整配对码精确核验，不能批准');
       return;
     }
-    setSending(ch); setErr('');
+    setSending(ch); setErr(''); setSecretNotice(null);
     try {
       const r = await onChoice(ch);
       if (!r || r.ok !== true) { setSending(''); setErr((r && r.reason) || '确认透传失败,请重试'); }
@@ -340,7 +334,7 @@ function ConfirmModal({ confirm, onChoice, onStop, onSteer }) {
   };
   const stopTurn = async () => {
     if (sending || !onStop) return;
-    setSending('stop'); setErr('');
+    setSending('stop'); setErr(''); setSecretNotice(null);
     try {
       const r = await onStop();
       if (!r || r.ok !== true) {
@@ -353,12 +347,22 @@ function ConfirmModal({ confirm, onChoice, onStop, onSteer }) {
   const steerTurn = async () => {
     const text = steerDraft.trim();
     if (!text || sending || !onSteer) return;
-    setSending('steer'); setErr('');
+    setSending('steer'); setErr(''); setSecretNotice(null);
     try {
       const r = await onSteer(text);
+      if (r && r.secret_handled === true) {
+        // Token 是安全控制输入，不是真正的转向，也不会产生 steering SSE。
+        // 因此必须立即解锁确认窗，同时明确原工具确认仍然存在。
+        const notice = wwSecretControlNotice(r);
+        setSteerDraft('');
+        setSending('');
+        setSecretNotice({ ...notice, text: notice.text + ' 当前工具确认仍待处理。' });
+        return;
+      }
       if (!r || r.ok !== true) {
         setSending('');
         setErr((r && (r.reason || r.message)) || '转向失败，请重试');
+        if (r && r.clear_input === true) setSteerDraft('');
       } else {
         setSteerDraft('');
       }
@@ -400,17 +404,7 @@ function ConfirmModal({ confirm, onChoice, onStop, onSteer }) {
           </div>
         </div>
         {isChannelConfirm ? (
-          <div style={{ margin: '14px 24px', border: '1px solid var(--line)', background: 'var(--paper-2)' }}>
-            {requiresExactPairing && <div className="serif" style={{ padding: '10px 12px', color: pairingVerified ? 'var(--dai)' : 'var(--yin)', borderBottom: '1px solid var(--line)', fontSize: 12.5 }}>
-              {pairingVerified ? '✓ 接收者已由完整配对码精确解析；配对码本身不会显示或保存到公开记录。' : '⚠ 接收者尚未精确核验，批准按钮已锁定。'}
-            </div>}
-            {detailRows.map((row, i) => (
-              <div key={i} style={{ display: 'grid', gridTemplateColumns: '135px 1fr', gap: 10, padding: '8px 12px', borderBottom: i + 1 < detailRows.length ? '1px solid var(--line)' : 0 }}>
-                <span className="mono" style={{ color: 'var(--ink-3)', fontSize: 10.5 }}>{row[0]}</span>
-                <span className="serif" style={{ color: 'var(--ink-1)', fontSize: 12.5, wordBreak: 'break-word' }}>{row[1]}</span>
-              </div>
-            ))}
-          </div>
+          <WwChannelConfirmDetails publicDetails={c.public_details} toolName={c.tool} />
         ) : (
           <div style={{ padding: '14px 24px', fontFamily: 'var(--serif)', fontSize: 13.5, color: 'var(--ink-1)', lineHeight: 1.75, whiteSpace: 'pre-wrap' }}>
             {JSON.stringify(c.args, null, 1)}
@@ -449,6 +443,9 @@ function ConfirmModal({ confirm, onChoice, onStop, onSteer }) {
           </div>
         </div>
         {err && <div className="serif" style={{ margin: '0 24px 8px', color: 'var(--yin)', fontSize: 12 }}>✗ {err}</div>}
+        {secretNotice && <div role="status" className="serif" style={{
+          margin: '0 24px 8px', color: secretNotice.ok ? 'var(--dai)' : 'var(--yin)', fontSize: 12,
+        }}>{secretNotice.ok ? '✓ ' : '✗ '}{secretNotice.text}</div>}
         <div style={{ padding: '8px 24px 18px' }}>
           <div className="mono" style={{ fontSize: 10, color: 'var(--ink-3)', letterSpacing: '0.15em', marginBottom: 8 }}>选择操作</div>
           <div style={{ display: 'flex', gap: 10 }}>
@@ -559,10 +556,28 @@ function wwControlText(control) {
   return control.note || '';
 }
 
+function wwSecretControlNotice(result) {
+  const source = result && typeof result === 'object' ? result : {};
+  const code = String(source.reason_code || source.error_code || '');
+  const failureCopy = {
+    channel_draft_required: '请先让 Agent 创建 Telegram 连接草稿，再提交 Bot Token。',
+    telegram_credential_invalid: 'Bot Token 未通过校验，请重新填写。',
+    action_ticket_required: '安全提交已过期，请重新提交。',
+    action_ticket_invalid: '安全提交已失效，请重新提交。',
+    channel_request_stale: '当前对话已经切换，请返回原对话核对真实状态。',
+  };
+  return {
+    ok: source.ok === true,
+    text: source.ok === true
+      ? 'Token 已安全提交，正在验证 Bot。'
+      : (failureCopy[code] || 'Token 安全提交没有完成，请重试。'),
+  };
+}
+
 // ── WwSessBar ── 对话区顶栏:本会话身份 + 本会话任务,随会话切换各不相同(用户拍板:每个对话都有不同的顶栏)
 // 三期:任务芯片旁挂哨兵徽章(平台级研判,unread>0 才显形)。全局条目
 // 进入独立的全局落子 Stage，不写入当前股票研究空间的 handoff 信箱。
-function WwSessBar({ state, workspace, onOpenReport, onRename, sentry, markSentrySeen, onOpenPage, onSentryFocus }) {
+function WwSessBar({ state, workspace, onOpenReport, onRename, sentry, markSentrySeen, onOpenPage, onSentryFocus, channelStatus, onOpenChannel }) {
   const [open, setOpen] = React.useState(false);
   const [edit, setEdit] = React.useState(null);          // 改名草稿 string|null
   React.useEffect(() => { setOpen(false); setEdit(null); }, [state.sid]);
@@ -610,6 +625,7 @@ function WwSessBar({ state, workspace, onOpenReport, onRename, sentry, markSentr
           style={{ border: '1px solid var(--ink-2)', background: 'var(--paper)', padding: '3px 8px', fontSize: 12.5, fontFamily: 'var(--serif)', color: 'var(--ink)', outline: 'none', width: 240 }} />
       )}
       <span style={{ flex: 1 }} />
+      <WwChannelStatusBadge status={channelStatus} onOpen={onOpenChannel} />
       {window.WwReviewReportCard && <WwReviewReportCard />}
       {sentry && sentry.unread > 0 && (
         <span onClick={() => setOpen(true)} title="落子哨兵新研判(平台级,点开任务面板查看)"
@@ -686,12 +702,22 @@ function WwSessBar({ state, workspace, onOpenReport, onRename, sentry, markSentr
 }
 
 // ── WwThread ──
-function WwThread({ state, workspace, sessionArchived, onSend, onCancel, onConfirm, onOpenReport, onOpenPage, activatedPages, onRename, sentry, markSentrySeen, onSentryFocus, thinkingMode, onThinkingMode }) {
+function WwThread({ state, workspace, sessionArchived, onSend, onCancel, onConfirm, onOpenReport, onOpenPage, activatedPages, onRename, sentry, markSentrySeen, onSentryFocus, thinkingMode, onThinkingMode, channelStatus, channelDrawerOpen = false, onOpenChannel, onChannelSubmitToken, onChannelRefresh }) {
   const [draft, setDraft] = React.useState('');
   const [submitting, setSubmitting] = React.useState(''); // send|steer|cancel；防止重复前台控制请求
+  const [secretFeedback, setSecretFeedback] = React.useState(null);
   const scrollRef = React.useRef(null);
   const stickRef = React.useRef(true);
   const items = window.WW.deriveItems(state.events, state.busy);
+  const deliveryByMediaId = {};
+  ((channelStatus && channelStatus.recent_deliveries) || []).forEach(delivery => {
+    if (delivery && delivery.media_id) {
+      // status 按创建时间升序返回；覆盖可确保同一图片再次投递时显示最新结果。
+      deliveryByMediaId[delivery.media_id] = delivery;
+    }
+  });
+  const itemsWithDelivery = items.map(item => item.kind === 'media_image'
+    ? { ...item, delivery: deliveryByMediaId[item.mediaId] || null } : item);
   const latestUser = [...state.events].reverse().find(ev => ev.type === 'user_msg');
   const activeThinkingMode = latestUser && latestUser.thinking_mode === 'pro' ? 'pro' : 'standard';
   const workspaceArchived = !!(workspace && workspace.archived);
@@ -701,7 +727,9 @@ function WwThread({ state, workspace, sessionArchived, onSend, onCancel, onConfi
     const el = scrollRef.current; if (!el) return;
     if (stickRef.current) el.scrollTop = el.scrollHeight;
   }, [state.events.length]);
-  React.useEffect(() => { stickRef.current = true; setSubmitting(''); }, [state.sid]);
+  React.useEffect(() => {
+    stickRef.current = true; setSubmitting(''); setSecretFeedback(null);
+  }, [state.sid]);
   React.useEffect(() => { if (!state.busy) setSubmitting(''); }, [state.busy]);
   const onScroll = () => { const el = scrollRef.current; if (el) stickRef.current = (el.scrollHeight - el.scrollTop - el.clientHeight) < 80; };
   const send = async () => {
@@ -711,7 +739,10 @@ function WwThread({ state, workspace, sessionArchived, onSend, onCancel, onConfi
     let r;
     try { r = await onSend(t); }
     catch (e) { r = { ok: false, reason: '发送失败: ' + e }; }
-    if (r && r.ok) setDraft('');
+    if (r && r.secret_handled === true) {
+      setSecretFeedback(wwSecretControlNotice(r));
+    }
+    if (r && (r.ok || r.clear_input === true)) setDraft('');
     setSubmitting('');
     return r;
   };
@@ -726,14 +757,14 @@ function WwThread({ state, workspace, sessionArchived, onSend, onCancel, onConfi
   };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0 }} className="paper-bg">
-      <WwSessBar state={state} workspace={workspace} onOpenReport={onOpenReport} onRename={onRename} sentry={sentry} markSentrySeen={markSentrySeen} onOpenPage={onOpenPage} onSentryFocus={onSentryFocus} />
+      <WwSessBar state={state} workspace={workspace} onOpenReport={onOpenReport} onRename={onRename} sentry={sentry} markSentrySeen={markSentrySeen} onOpenPage={onOpenPage} onSentryFocus={onSentryFocus} channelStatus={channelStatus} onOpenChannel={onOpenChannel} />
       <div ref={scrollRef} onScroll={onScroll} style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', padding: '24px 40px', display: 'flex', flexDirection: 'column', gap: 18, minHeight: 0 }}>
         {items.length === 0 && (
           <div style={{ textAlign: 'center', color: 'var(--ink-3)', fontSize: 13, marginTop: 80, fontFamily: 'var(--serif)', letterSpacing: 1 }}>
             对观澜下令——选股、回测、研报、研判、经验沉淀,一句话即可。
           </div>
         )}
-        {items.map(m => {
+        {itemsWithDelivery.map(m => {
           if (m.kind === 'user') return <UserBubble key={m.id} text={m.text} thinkingMode={m.thinkingMode} />;
           if (m.kind === 'chain') return <ToolChain key={m.id} msg={m} />;
           if (m.kind === 'media_image') return <WwMediaImageCard key={m.id} item={m} />;
@@ -758,9 +789,16 @@ function WwThread({ state, workspace, sessionArchived, onSend, onCancel, onConfi
           <div style={{ display: 'flex', gap: 12 }}><AiAvatar /><div style={{ fontSize: 12, color: controlText || activeThinkingMode === 'pro' ? 'var(--yin)' : 'var(--ink-3)', fontStyle: 'italic', padding: '6px 0' }}>{controlText || (activeThinkingMode === 'pro' ? '✦ Pro 深度思考中…' : '⠋ 运筹中…')}</div></div>
         )}
       </div>
+      {!channelDrawerOpen && <WwChannelActionCard status={channelStatus} archived={archived}
+        onOpen={onOpenChannel} onSubmitToken={onChannelSubmitToken} onRefresh={onChannelRefresh} />}
       {/* 输入坞:chat Composer 视觉(app.jsx:2284-2294),保留功能呼出 + 标准/Pro 思考档 */}
       <div style={{ padding: '10px 40px 18px' }}>
         {sessionArchived && <div role="status" style={{ marginBottom: 7, padding: '7px 10px', borderLeft: '2px solid var(--jin)', background: 'var(--paper-2)', color: 'var(--ink-2)', fontSize: 10.5 }}>该对话已归档 · 全部历史仍保留，请在左栏“已归档对话”中恢复后继续。</div>}
+        {secretFeedback && <div role="status" aria-live="polite"
+          className={'ww-channel-feedback ww-channel-composer-feedback ww-channel-feedback--'
+            + (secretFeedback.ok ? 'ok' : 'error')}>
+          {secretFeedback.text}
+        </div>}
         {state.control && <div role="status" aria-live="polite" className="mono" style={{ marginBottom: 7, padding: '6px 10px', borderLeft: '2px solid ' + (state.control.status === 'error' ? 'var(--yin)' : 'var(--jin)'), background: 'var(--paper-2)', color: state.control.status === 'error' ? 'var(--yin)' : 'var(--ink-2)', fontSize: 10.5 }}>
           {controlText}
         </div>}
@@ -769,7 +807,10 @@ function WwThread({ state, workspace, sessionArchived, onSend, onCancel, onConfi
           onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--line)'; }}>
           <WwLauncher activated={activatedPages || []} onOpenPage={onOpenPage} />
           <WwThinkingMode value={thinkingMode} onChange={onThinkingMode} disabled={archived || !!submitting} />
-          <textarea rows={1} value={draft} disabled={archived} onChange={e => setDraft(e.target.value)}
+          <textarea rows={1} value={draft} disabled={archived} onChange={e => {
+            if (secretFeedback) setSecretFeedback(null);
+            setDraft(e.target.value);
+          }}
             onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
             placeholder={sessionArchived ? '该对话已归档——恢复后可继续' : workspaceArchived ? '该研究空间已归档——历史消息仅供查看' : state.busy ? '输入新方向，Enter 将安全打断并转向…' : (thinkingMode === 'pro' ? 'Pro 深度思考——适合复杂研判与多步任务…' : '对观澜下令…(Enter 发送,Shift+Enter 换行)')}
             style={{ flex: 1, border: 0, outline: 0, resize: 'none', background: 'transparent', color: 'var(--ink)', fontFamily: 'var(--serif)', fontSize: 14, lineHeight: 1.6, minHeight: 22, maxHeight: 120 }} />

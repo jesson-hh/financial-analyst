@@ -80,7 +80,7 @@ function WwWorkspaceCreate({ onClose, onCreate, onChooseFolder }) {
   );
 }
 
-function WwRail({ state, sessions, workspaces, workspacesStatus, activeWorkspaceId, onNew, onNewWorkspace, onChooseFolder, onSwitch, onUpdate, onArchive, onRestore }) {
+function WwRail({ state, sessions, workspaces, workspacesStatus, activeWorkspaceId, onNew, onNewWorkspace, onChooseFolder, onSwitch, onUpdate, onArchive, onRestore, channelBySid }) {
   const [edit, setEdit] = React.useState(null);   // {sid,field:'title'|'workspace_id',value}
   const [closed, setClosed] = React.useState({});
   const [creating, setCreating] = React.useState(false);
@@ -108,15 +108,10 @@ function WwRail({ state, sessions, workspaces, workspacesStatus, activeWorkspace
     if (!d || d.ok === false) setLifecycleError((d && d.reason) || (action === 'restore' ? '恢复失败' : '归档失败'));
   };
   const sessionRow = (m) => {
-    const channel = m.channel_summary && typeof m.channel_summary === 'object'
-      ? m.channel_summary : {};
-    const channelBot = channel.bot && typeof channel.bot === 'object' ? channel.bot : {};
-    const channelRecipient = channel.recipient && typeof channel.recipient === 'object'
-      ? channel.recipient : null;
-    const channelBotName = String(channelBot.display_name || channelBot.username || '').replace(/^@/, '');
-    const telegramLabel = channelRecipient
-      ? ((channel.view_state === 'needs_reconnect' ? 'Telegram 需重连' : '已连接 Telegram')
-        + (channelBotName ? (' · ' + channelBotName) : '')) : '';
+    const channel = m.id === state.sid && channelBySid && channelBySid[m.id]
+      ? channelBySid[m.id]
+      : (m.channel_summary && typeof m.channel_summary === 'object' ? m.channel_summary : {});
+    // 左栏只画状态点；完整“已连接 Telegram · Bot名称”由对话顶栏承载。
     if (edit && edit.sid === m.id && edit.field === 'title') return (
       <div key={m.id} style={{ margin: '0 9px 3px 21px', padding: '3px 8px' }}>
         <input autoFocus value={edit.value} onChange={e => setEdit({ ...edit, value: e.target.value })}
@@ -137,9 +132,9 @@ function WwRail({ state, sessions, workspaces, workspacesStatus, activeWorkspace
       <div key={m.id} onClick={() => onSwitch(m.id)} className="ww-sess"
         style={{ margin: '0 9px 3px 21px', padding: '6px 8px', fontSize: 12, color: 'var(--ink-1)', cursor: 'pointer', borderLeft: '2px solid ' + (m.id === state.sid ? 'var(--yin)' : 'transparent'), background: m.id === state.sid ? 'var(--paper-2)' : 'transparent', display: 'flex', alignItems: 'center', gap: 6 }}>
         <span title={isRun(m) ? '运筹中' : '空闲'} style={{ width: 5, height: 5, borderRadius: '50%', flexShrink: 0, background: isRun(m) ? 'var(--zhu)' : 'var(--line)', animation: isRun(m) ? 'pulse 1.4s infinite' : 'none' }} />
+        <WwChannelStatusBadge status={channel} compact={true} />
         <span style={{ flex: 1, minWidth: 0 }}>
           <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.title}</span>
-          {telegramLabel && <span title={telegramLabel} className="mono" style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: channel.view_state === 'needs_reconnect' ? 'var(--yin)' : 'var(--dai)', fontSize: 8.5, marginTop: 2 }}>{telegramLabel}</span>}
         </span>
         <span className="ww-sess-act" title="改名" onClick={e => { e.stopPropagation(); setEdit({ sid: m.id, field: 'title', value: m.title || '' }); }}>✎</span>
         <span className="ww-sess-act" title="移动到其他研究空间" onClick={e => { e.stopPropagation(); setEdit({ sid: m.id, field: 'workspace_id', value: workspaceFor(m) }); }}>↪</span>

@@ -128,11 +128,13 @@ def test_console_composer_exposes_standard_pro_and_persists_choice():
 def test_console_html_bumps_every_changed_jsx_asset():
     html = _read("观澜 · 帷幄.html")
     assert "console-report-card.jsx?v=20260813d" in html
-    assert 'console-rail.jsx?v=20260819a1' in html
+    assert 'console-rail.jsx?v=20260823a1' in html
     assert 'console-workspace-dock.jsx?v=20260815d1' in html
     for asset in ("console-data.jsx", "console-thread.jsx"):
-        assert f'{asset}?v=20260819a1' in html
-    assert 'console-app.jsx?v=20260819a1' in html
+        assert f'{asset}?v=20260823a1' in html
+    assert 'console-channel.jsx?v=20260823a1' in html
+    assert 'console-channel.css?v=20260823a1' in html
+    assert 'console-app.jsx?v=20260823a1' in html
     assert 'console-bench.jsx?v=20260813w5' in html
 
 
@@ -363,6 +365,7 @@ def test_channel_confirmation_uses_instance_ticket_and_exact_recipient_card():
     app = _read("console-app.jsx")
     thread = _read("console-thread.jsx")
     rail = _read("console-rail.jsx")
+    channel = _read("console-channel.jsx")
 
     confirm = data.split("async function wwConfirm(confirm, choice)", 1)[1].split(
         "async function wwSessions", 1
@@ -373,7 +376,8 @@ def test_channel_confirmation_uses_instance_ticket_and_exact_recipient_card():
     assert "body.confirm_id = confirmId" in confirm
     assert "body.request_token = requestToken" in confirm
     assert "return wwTurnControl('/console/confirm', body" in confirm
-    assert "WW.confirm(state.confirm, c)" in app
+    assert "WW.channelConfirm(sid, pending, pending.tool, choice)" in app
+    assert "WW.confirm(pending, choice)" in app
 
     assert "c.action_ticket_required === true" in thread
     assert "c.public_details" in thread
@@ -381,6 +385,6 @@ def test_channel_confirmation_uses_instance_ticket_and_exact_recipient_card():
     assert "details.recipient_verified === true" in thread
     assert "requiresExactPairing = c.tool === 'ww_telegram_pair_approve'" in thread
     assert "c.approve_label || '同意 · 一次'" in thread
-    assert "配对码本身不会显示" in thread
+    assert "配对码本身不会显示" in channel
     assert "state.confirm.confirm_id || 'legacy'" in thread
     assert "已连接 Telegram" in rail and "channel_summary" in rail

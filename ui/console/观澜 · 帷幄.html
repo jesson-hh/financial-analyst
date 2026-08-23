@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&family=Noto+Serif+SC:wght@400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&display=swap" />
 <link rel="stylesheet" href="../_shared/tokens.css" />
+<link rel="stylesheet" href="console-channel.css?v=20260823a1" />
 <style>
   html, body, #root { height: 100%; margin: 0; }
   body { font-family: var(--sans); color: var(--ink); background: var(--paper); overflow: hidden; }
@@ -48,14 +49,15 @@
   window.GUANLAN_BACKEND =
     (location.protocol === 'http:' || location.protocol === 'https:') ? location.origin : null;
 </script>
-<script type="text/babel" data-presets="env,react" src="console-data.jsx?v=20260819a1"></script>
+<script type="text/babel" data-presets="env,react" src="console-data.jsx?v=20260823a1"></script>
+<script type="text/babel" data-presets="env,react" src="console-channel.jsx?v=20260823a1"></script>
 <script type="text/babel" data-presets="env,react" src="console-report-card.jsx?v=20260813d"></script>
-<script type="text/babel" data-presets="env,react" src="console-rail.jsx?v=20260819a1"></script>
-<script type="text/babel" data-presets="env,react" src="console-thread.jsx?v=20260819a1"></script>
+<script type="text/babel" data-presets="env,react" src="console-rail.jsx?v=20260823a1"></script>
+<script type="text/babel" data-presets="env,react" src="console-thread.jsx?v=20260823a1"></script>
 <script type="text/babel" data-presets="env,react" src="console-bench.jsx?v=20260813w5"></script>
 <script type="text/babel" data-presets="env,react" src="console-workspace-dock.jsx?v=20260815d1"></script>
 <script type="text/babel" data-presets="env,react" src="console-drawer.jsx?v=20260613b"></script>
-<script type="text/babel" data-presets="env,react" src="console-app.jsx?v=20260819a1"></script>
+<script type="text/babel" data-presets="env,react" src="console-app.jsx?v=20260823a1"></script>
 <script type="text/babel" data-presets="env,react">
   ReactDOM.createRoot(document.getElementById('root')).render(<WeiwoApp />);
 </script>

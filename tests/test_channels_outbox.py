@@ -831,7 +831,14 @@ def test_runtime_status_keeps_historic_unresolved_delivery_visible(tmp_path):
     claim = _claim(store, old_binding, clock)
     _finish(store, claim, OutboxState.UNCERTAIN, clock, error_class="uncertain")
     store.transition_binding(old_binding.id, "disconnected")
-    store.bind_for_test(sid, bot, user_id="2", chat_id="2", sync_from_event_id=1)
+    clock.advance(1)
+    current_binding = store.bind_for_test(
+        sid, bot, user_id="2", chat_id="2", sync_from_event_id=1
+    )
+    later = []
+    for event_id in range(2, 27):
+        clock.advance(1)
+        later.append(_project(store, current_binding, event_id))
     runtime = ChannelRuntime(
         console_store=console,
         channel_store=store,
@@ -841,7 +848,12 @@ def test_runtime_status_keeps_historic_unresolved_delivery_visible(tmp_path):
 
     status = runtime.status_for_session(sid)
     assert status["counts"]["uncertain"] == 1
-    assert item.id in {row["outbox_id"] for row in status["recent_deliveries"]}
+    assert status["counts"]["pending"] == len(later)
+    visible_ids = [row["outbox_id"] for row in status["recent_deliveries"]]
+    assert len(visible_ids) == 20
+    assert visible_ids[0] == item.id
+    assert later[-1].id in visible_ids
+    assert later[0].id not in visible_ids
     with pytest.raises(ChannelRuntimeError):
         runtime.resolve_delivery(sid, item.id, "resend")
     assert runtime.resolve_delivery(sid, item.id, "assume_sent")["counts"]["uncertain"] == 0

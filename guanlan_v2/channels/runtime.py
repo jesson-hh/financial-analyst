@@ -60,6 +60,42 @@ _PAIRING_CODE_RE = re.compile(
 _MAX_MEDIA_CAPTION_CHARS = 50_000
 _MEDIA_PERMIT_TTL_SECONDS = 600
 _MEDIA_CONFIRM_ACTION = "telegram:publish-media"
+_STATUS_DELIVERY_LIMIT = 20
+_ACTION_REQUIRED_DELIVERY_STATES = frozenset({"uncertain", "terminal"})
+
+
+def _status_delivery_window(deliveries: list[Any]) -> list[Any]:
+    """Keep human-resolvable rows visible, then fill with the newest rows.
+
+    Projection can continue appending pending rows while the outbox worker is
+    stopped at an older ``uncertain``/``terminal`` item.  A plain ``[-20:]``
+    window can therefore report a non-zero action-required count while hiding
+    the only row the user can resolve.  Preserve source order, prioritise the
+    oldest actionable rows (the effective queue heads), and use any remaining
+    slots for the newest non-actionable deliveries.
+    """
+
+    if len(deliveries) <= _STATUS_DELIVERY_LIMIT:
+        return list(deliveries)
+
+    def state_of(item: Any) -> object:
+        raw = item.get("state") if isinstance(item, Mapping) else getattr(item, "state", None)
+        return getattr(raw, "value", raw)
+
+    chosen = {
+        index
+        for index, item in enumerate(deliveries)
+        if state_of(item) in _ACTION_REQUIRED_DELIVERY_STATES
+    }
+    if len(chosen) > _STATUS_DELIVERY_LIMIT:
+        chosen = set(sorted(chosen)[:_STATUS_DELIVERY_LIMIT])
+
+    for index in range(len(deliveries) - 1, -1, -1):
+        if len(chosen) >= _STATUS_DELIVERY_LIMIT:
+            break
+        chosen.add(index)
+
+    return [item for index, item in enumerate(deliveries) if index in chosen]
 
 
 class ChannelRuntimeError(RuntimeError):
@@ -1360,6 +1396,7 @@ class ChannelRuntime:
                 "username": self._text(live_binding.telegram_username, limit=64),
                 "display_name": self._text(live_binding.telegram_display_name, limit=256),
             }
+        visible_deliveries = _status_delivery_window(deliveries)
         recent = [
             {
                 "outbox_id": item.id,
@@ -1371,7 +1408,7 @@ class ChannelRuntime:
                 "attempts": int(item.attempts),
                 "error_class": self._text(item.last_error_class, limit=96),
             }
-            for item in deliveries[-20:]
+            for item in visible_deliveries
         ]
         automations = [
             {

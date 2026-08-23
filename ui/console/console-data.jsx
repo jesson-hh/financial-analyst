@@ -2,6 +2,92 @@
 // 前端 = 事件流的纯渲染器:状态全部由 wwApply 从事件推导,刷新/重连 = snapshot 重放。
 const WW_API = window.GUANLAN_BACKEND || '';
 
+// Channel API 的路径和动作都来自闭集。尤其不能把 UI/Agent 提供的任意
+// action 直接拼进 URL；所有会话、草稿和投递标识也必须先校验再编码。
+const WW_CHANNEL_MANAGE_ACTIONS = Object.freeze({
+  pause: 'pause', resume: 'resume', reverify: 'reverify',
+  'replace-token': 'replace-token', disconnect: 'disconnect',
+});
+const WW_CHANNEL_RESOLUTION_ACTIONS = Object.freeze({
+  assume_sent: 'assume_sent', resend: 'resend', drop: 'drop', retry: 'retry',
+});
+const WW_CHANNEL_TICKET_ACTIONS = Object.freeze({
+  'telegram:submit-token': true,
+  'telegram:pause': true,
+  'telegram:resume': true,
+  'telegram:reverify': true,
+  'telegram:replace-token': true,
+  'telegram:disconnect': true,
+  'telegram:resolve:assume_sent': true,
+  'telegram:resolve:resend': true,
+  'telegram:resolve:drop': true,
+  'telegram:resolve:retry': true,
+});
+const WW_CHANNEL_CONFIRM_TOOLS = Object.freeze({
+  ww_telegram_pair_approve: true,
+  ww_telegram_pair_dismiss: true,
+  ww_telegram_pause: true,
+  ww_telegram_resume: true,
+  ww_telegram_disconnect: true,
+  ww_telegram_publish: true,
+  ww_automation_upsert: true,
+  ww_automation_pause: true,
+  ww_automation_resume: true,
+  ww_automation_delete: true,
+});
+const WW_TELEGRAM_TOKEN_SHAPE_RE = /(^|[^A-Za-z0-9_-])(?:bot)?[0-9]{5,16}:[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])/i;
+const WW_TELEGRAM_TOKEN_EXACT_RE = /^[0-9]{5,16}:[A-Za-z0-9_-]{20,}$/;
+
+function wwLooksLikeTelegramToken(text) {
+  return typeof text === 'string' && WW_TELEGRAM_TOKEN_SHAPE_RE.test(text);
+}
+
+function wwChannelSafeId(value) {
+  const id = typeof value === 'string' ? value : '';
+  return /^[A-Za-z0-9_.:-]{1,160}$/.test(id) && !wwLooksLikeTelegramToken(id) ? id : '';
+}
+
+function wwChannelSafeTicket(value) {
+  const ticket = typeof value === 'string' ? value : '';
+  return /^[A-Za-z0-9_-]{20,512}$/.test(ticket) && !wwLooksLikeTelegramToken(ticket)
+    ? ticket : '';
+}
+
+function wwChannelUnavailableStatus(sid) {
+  return {
+    ok: false, available: false, session_id: wwChannelSafeId(sid), view_state: 'none',
+    draft: null, bot: null, recipient: null, pairing_requests: [],
+    counts: { pending: 0, retry_wait: 0, uncertain: 0, terminal: 0 },
+    warnings: [], recent_deliveries: [], automations: [],
+  };
+}
+
+function wwChannelSafeFailure(response, data, fallback) {
+  const source = data && typeof data === 'object' ? data : {};
+  const rawCode = source.reason_code || source.error_code || '';
+  const errorCode = /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/.test(String(rawCode || ''))
+    ? String(rawCode) : '';
+  const rawReason = typeof source.reason === 'string' ? source.reason : '';
+  const safeReason = rawReason && rawReason.length <= 240 && !wwLooksLikeTelegramToken(rawReason)
+    ? rawReason.replace(/[\u0000-\u001f\u007f]/g, ' ').trim() : '';
+  const status = response && Number.isInteger(response.status) ? response.status : 0;
+  return {
+    ok: false, http_status: status,
+    reason_code: errorCode, error_code: errorCode,
+    reason: safeReason || errorCode || fallback,
+  };
+}
+
+async function wwChannelReadResponse(response, fallback) {
+  let data = {};
+  try { data = await response.json(); } catch (e) { data = {}; }
+  if (!response.ok || (data && data.ok === false)) {
+    return wwChannelSafeFailure(response, data, fallback);
+  }
+  return { ...(data && typeof data === 'object' ? data : {}), ok: true,
+    http_status: response.status };
+}
+
 // 研究空间的兜底身份。旧后端没有 /console/workspaces、旧会话没有
 // workspace_id 时，前端仍把它们稳定归入「通用研究」，不退回自由文本分组。
 const WW_GENERAL_WORKSPACE = {
@@ -317,6 +403,148 @@ async function wwTurnControl(path, body, fallbackReason) {
   } catch (e) { return { ok: false, http_status: 0, reason: fallbackReason }; }
 }
 
+async function wwChannelStatus(sid) {
+  const safeSid = wwChannelSafeId(sid);
+  if (!safeSid) return wwChannelUnavailableStatus('');
+  try {
+    const r = await fetch(WW_API + '/console/channels/session/' + encodeURIComponent(safeSid));
+    // 路由未挂载就是 feature gate 关闭，不把 404 渲染成故障徽章。
+    if (r.status === 404) return wwChannelUnavailableStatus(safeSid);
+    let data = {};
+    try { data = await r.json(); } catch (e) { data = {}; }
+    if (!r.ok || !data || data.available !== true) {
+      // available:false 只有在成功响应中才表示显式关闭。真实后端故障会返回
+      // 503 + available:false；这时必须保留旧真值并标为暂不可达。
+      if (r.ok && data && data.available === false) {
+        return { ...wwChannelUnavailableStatus(safeSid), ...data,
+          ok: false, available: false, http_status: r.status };
+      }
+      const failure = wwChannelSafeFailure(r, data, '通道状态服务暂不可达');
+      const errorCode = failure.error_code || 'channel_status_unreachable';
+      return { ...wwChannelUnavailableStatus(safeSid), ...failure,
+        transient_status_error: true, status_error: errorCode,
+        error_code: errorCode, reason_code: errorCode };
+    }
+    return { ...data, ok: data.ok !== false, available: true, http_status: r.status };
+  } catch (e) {
+    return { ...wwChannelUnavailableStatus(safeSid),
+      http_status: 0, transient_status_error: true,
+      status_error: 'channel_status_unreachable', error_code: 'channel_status_unreachable',
+      reason_code: 'channel_status_unreachable', reason: '通道状态服务暂不可达' };
+  }
+}
+
+async function wwChannelRequestToken(sid, action, subjectId) {
+  const safeSid = wwChannelSafeId(sid);
+  const safeAction = typeof action === 'string' && WW_CHANNEL_TICKET_ACTIONS[action]
+    ? action : '';
+  const subjectWasSupplied = subjectId !== undefined && subjectId !== null && subjectId !== '';
+  const safeSubject = subjectWasSupplied ? wwChannelSafeId(subjectId) : '';
+  const subjectRequired = safeAction === 'telegram:submit-token'
+    || safeAction.indexOf('telegram:resolve:') === 0;
+  if (!safeSid || !safeAction || (subjectRequired && !safeSubject)
+      || (subjectWasSupplied && !safeSubject)) {
+    return { ok: false, http_status: 0, reason_code: 'channel_ticket_request_invalid',
+      error_code: 'channel_ticket_request_invalid', reason: '安全操作参数无效' };
+  }
+  try {
+    // submit-token / resolve 用浏览器持有的 draft/outbox id 做相等性断言；
+    // 管理动作的真实 subject 是未公开的 Bot id，只能由服务端 owned_subject 推导。
+    const requestBody = { action: safeAction };
+    if (safeSubject) requestBody.subject_id = safeSubject;
+    const r = await fetch(WW_API + '/console/channels/session/'
+      + encodeURIComponent(safeSid) + '/request-token', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody),
+    });
+    return await wwChannelReadResponse(r, '安全操作票据服务暂不可达');
+  } catch (e) {
+    return { ok: false, http_status: 0, reason_code: 'channel_ticket_unreachable',
+      error_code: 'channel_ticket_unreachable', reason: '安全操作票据服务暂不可达' };
+  }
+}
+
+async function wwTelegramSubmitToken(sid, draftId, token, requestToken) {
+  const safeSid = wwChannelSafeId(sid);
+  const safeDraftId = wwChannelSafeId(draftId);
+  let secret = typeof token === 'string' ? token : '';
+  let ticket = wwChannelSafeTicket(requestToken);
+  // 缩短调用方参数引用；实际秘密只进入下方一次 HTTPS JSON 请求体。
+  token = '';
+  requestToken = '';
+  let requestBody = null;
+  try {
+    if (!safeSid || !safeDraftId || !ticket || !WW_TELEGRAM_TOKEN_EXACT_RE.test(secret)) {
+      return { ok: false, http_status: 0, reason_code: 'telegram_token_submission_invalid',
+        error_code: 'telegram_token_submission_invalid', reason: 'Telegram Bot Token 格式无效' };
+    }
+    requestBody = JSON.stringify({
+      sid: safeSid, draft_id: safeDraftId, token: secret, request_token: ticket,
+    });
+    const r = await fetch(WW_API + '/console/channels/telegram/token', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: requestBody,
+    });
+    return await wwChannelReadResponse(r, 'Telegram Token 安全提交服务暂不可达');
+  } catch (e) {
+    return { ok: false, http_status: 0, reason_code: 'telegram_token_submission_unreachable',
+      error_code: 'telegram_token_submission_unreachable', reason: 'Telegram Token 安全提交服务暂不可达' };
+  } finally {
+    // JS 无法承诺内存清零；这里只做所有本地引用的确定性缩短，且从不记录它们。
+    secret = '';
+    ticket = '';
+    requestBody = null;
+  }
+}
+
+async function wwChannelManage(sid, action, requestToken) {
+  const safeSid = wwChannelSafeId(sid);
+  const safeAction = typeof action === 'string' ? WW_CHANNEL_MANAGE_ACTIONS[action] : '';
+  let ticket = wwChannelSafeTicket(requestToken);
+  requestToken = '';
+  try {
+    if (!safeSid || !safeAction || !ticket) {
+      return { ok: false, http_status: 0, reason_code: 'channel_action_invalid',
+        error_code: 'channel_action_invalid', reason: '通道管理参数无效' };
+    }
+    const r = await fetch(WW_API + '/console/channels/session/'
+      + encodeURIComponent(safeSid) + '/' + safeAction, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ request_token: ticket }),
+    });
+    return await wwChannelReadResponse(r, '通道管理服务暂不可达');
+  } catch (e) {
+    return { ok: false, http_status: 0, reason_code: 'channel_action_unreachable',
+      error_code: 'channel_action_unreachable', reason: '通道管理服务暂不可达' };
+  } finally {
+    ticket = '';
+  }
+}
+
+async function wwChannelResolveDelivery(sid, itemId, action, requestToken) {
+  const safeSid = wwChannelSafeId(sid);
+  const safeItemId = wwChannelSafeId(itemId);
+  const safeAction = typeof action === 'string' ? WW_CHANNEL_RESOLUTION_ACTIONS[action] : '';
+  let ticket = wwChannelSafeTicket(requestToken);
+  requestToken = '';
+  try {
+    if (!safeSid || !safeItemId || !safeAction || !ticket) {
+      return { ok: false, http_status: 0, reason_code: 'channel_action_invalid',
+        error_code: 'channel_action_invalid', reason: '投递处理参数无效' };
+    }
+    const r = await fetch(WW_API + '/console/channels/deliveries/'
+      + encodeURIComponent(safeItemId) + '/resolve', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sid: safeSid, action: safeAction, request_token: ticket }),
+    });
+    return await wwChannelReadResponse(r, '投递处理服务暂不可达');
+  } catch (e) {
+    return { ok: false, http_status: 0, reason_code: 'channel_delivery_unreachable',
+      error_code: 'channel_delivery_unreachable', reason: '投递处理服务暂不可达' };
+  } finally {
+    ticket = '';
+  }
+}
+
 // 原子转向契约:后端负责取消当前 foreground、等待收尾、再启动唯一替代 turn；
 // 前端收到成功后绝不补调 /send，避免两个 foreground turn 并发。
 function wwSteer(sid, text, thinkingMode) {
@@ -339,27 +567,63 @@ async function wwConfirm(confirm, choice) {
   if (!turnId) return { ok: false, reason: '确认实例无效，请等待状态刷新' };
 
   const body = { turn_id: turnId, choice };
-  if (actionTicketRequired) {
-    // Channel/automation confirmations are instance-scoped.  Even a rejection
-    // carries confirm_id so a stale modal cannot resolve a newer confirmation
-    // that happens to reuse the same turn/tool.
-    if (!confirmId) return { ok: false, reason: '安全确认实例已失效，请等待状态刷新' };
-    body.confirm_id = confirmId;
-    const affirmative = ['y', 'a', 'yes', 'always'].indexOf(String(choice || '').toLowerCase()) >= 0;
-    if (affirmative) {
-      const issued = await wwTurnControl('/console/confirm/request-token', {
-        turn_id: turnId, confirm_id: confirmId,
-      }, '安全确认票据服务不可达');
-      const requestToken = issued && typeof issued.request_token === 'string'
-        ? issued.request_token : '';
-      if (!issued || issued.ok !== true || !requestToken) {
-        return { ...(issued || {}), ok: false,
-          reason: (issued && issued.reason) || '未取得安全确认票据，请重试' };
+  let issued = null;
+  let requestToken = '';
+  try {
+    if (actionTicketRequired) {
+      // Channel/automation confirmations are instance-scoped.  Even a rejection
+      // carries confirm_id so a stale modal cannot resolve a newer confirmation
+      // that happens to reuse the same turn/tool.
+      if (!confirmId) return { ok: false, reason: '安全确认实例已失效，请等待状态刷新' };
+      body.confirm_id = confirmId;
+      const affirmative = ['y', 'a', 'yes', 'always'].indexOf(String(choice || '').toLowerCase()) >= 0;
+      if (affirmative) {
+        issued = await wwTurnControl('/console/confirm/request-token', {
+          turn_id: turnId, confirm_id: confirmId,
+        }, '安全确认票据服务不可达');
+        requestToken = issued && typeof issued.request_token === 'string'
+          ? issued.request_token : '';
+        if (!issued || issued.ok !== true || !requestToken) {
+          return { ...(issued || {}), ok: false,
+            reason: (issued && issued.reason) || '未取得安全确认票据，请重试' };
+        }
+        body.request_token = requestToken;
       }
-      body.request_token = requestToken;
     }
+    return wwTurnControl('/console/confirm', body, '确认服务不可达');
+  } finally {
+    // 一次性票据不得被前端缓存/复用；请求结束即删除对象字段并缩短引用。
+    if (Object.prototype.hasOwnProperty.call(body, 'request_token')) delete body.request_token;
+    requestToken = '';
+    issued = null;
   }
-  return wwTurnControl('/console/confirm', body, '确认服务不可达');
+}
+
+async function wwChannelConfirm(sid, turnId, toolName, choice) {
+  const safeSid = wwChannelSafeId(sid);
+  let pending = turnId && typeof turnId === 'object' ? { ...turnId } : null;
+  const safeTool = typeof toolName === 'string' && WW_CHANNEL_CONFIRM_TOOLS[toolName]
+    ? toolName : '';
+  try {
+    // 加固后的服务端把 ticket 绑定到 turn_id + confirm_id；因此调用方应把
+    // 当前 pending-confirm 对象作为第二参传入，函数声明仍保持稳定四参 ABI。
+    if (!safeSid || !pending || !safeTool
+        || String(pending.turn_id || '') === '' || String(pending.confirm_id || '') === ''
+        || (pending.tool && pending.tool !== safeTool)) {
+      return { ok: false, http_status: 0, reason_code: 'channel_confirm_instance_required',
+        error_code: 'channel_confirm_instance_required', reason: '安全确认实例已失效，请等待状态刷新' };
+    }
+    pending.tool = safeTool;
+    pending.action_ticket_required = true;
+    // wwConfirm 的肯定分支先申请一次性 ticket，随后提交 /console/confirm；
+    // 它的 finally 会删除 body.request_token 并清掉局部引用。
+    return await wwConfirm(pending, choice);
+  } finally {
+    pending = null;
+    turnId = '';
+    toolName = '';
+    choice = '';
+  }
 }
 
 async function wwSessions() {
@@ -509,6 +773,18 @@ async function wwSeatsDecisions(limit) {
   } catch (e) { return []; }
 }
 
+// console-channel.jsx 作为后续独立脚本加载；显式挂到 window，避免依赖
+// Babel 对顶层 function 声明的实现细节。这里只暴露窄 API，不暴露任何状态。
+Object.assign(window, {
+  wwChannelStatus,
+  wwChannelRequestToken,
+  wwTelegramSubmitToken,
+  wwChannelManage,
+  wwChannelResolveDelivery,
+  wwChannelConfirm,
+  wwLooksLikeTelegramToken,
+});
+
 window.WW = { API: WW_API, TOOL_CN: WW_TOOL_CN, PAGES: WW_PAGES, GENERAL_WORKSPACE: WW_GENERAL_WORKSPACE,
               initState: wwInitState, apply: wwApply, connect: wwConnect,
               send: wwSend, steer: wwSteer, cancel: wwCancel,
@@ -520,5 +796,11 @@ window.WW = { API: WW_API, TOOL_CN: WW_TOOL_CN, PAGES: WW_PAGES, GENERAL_WORKSPA
               workspaceAgentRuns: wwWorkspaceAgentRuns, workspaceAssets: wwWorkspaceAssets,
               workspaceSeats: wwWorkspaceSeats, canonicalSecurityCode: wwCanonicalSecurityCode,
               chooseResearchFolder: wwChooseResearchFolder, deriveItems: wwDeriveItems,
-              mediaUrl: wwMediaUrl,
+              mediaUrl: wwMediaUrl, channelStatus: wwChannelStatus,
+              channelRequestToken: wwChannelRequestToken,
+              telegramSubmitToken: wwTelegramSubmitToken,
+              channelManage: wwChannelManage,
+              channelResolveDelivery: wwChannelResolveDelivery,
+              channelConfirm: wwChannelConfirm,
+              looksLikeTelegramToken: wwLooksLikeTelegramToken,
               seatsDecisions: wwSeatsDecisions };

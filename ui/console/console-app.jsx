@@ -149,6 +149,8 @@ function WeiwoApp() {
   });
   const [benchW, setBenchW] = React.useState(() => { try { return parseInt(localStorage.getItem('guanlan:ww:benchw')) || 0; } catch (e) { return 0; } });
   const [drawer, setDrawer] = React.useState(null);
+  const [channelBySid, setChannelBySid] = React.useState({});
+  const [channelDrawerOpen, setChannelDrawerOpen] = React.useState(false);
   const [sentry, setSentry] = React.useState({ items: [], unread: 0 });  // 哨兵研判(平台级,跨会话)
   const [dockOpen, setDockOpen] = React.useState(() => window.innerWidth >= 1120);
   const [narrow, setNarrow] = React.useState(() => window.innerWidth < 1120);
@@ -157,6 +159,7 @@ function WeiwoApp() {
   const streamGenRef = React.useRef(0);
   const streamSidRef = React.useRef(null);
   const requestSeqRef = React.useRef(0);
+  const channelRequestSeqRef = React.useRef(0);
 
   const generalId = (WW.GENERAL_WORKSPACE && WW.GENERAL_WORKSPACE.id) || 'rw_general';
   const sessionById = (sid) => sessions.find(m => m.id === sid) || null;
@@ -165,6 +168,11 @@ function WeiwoApp() {
   const activeWorkspaceId = ((state.meta && state.meta.workspace_id) || (sessionById(state.sid) && sessionById(state.sid).workspace_id) || generalId);
   const activeWorkspace = workspaces.find(w => w.id === activeWorkspaceId) || WW.GENERAL_WORKSPACE;
   const activeWorkspaceSessions = sessions.filter(m => !m.archived && (m.workspace_id || generalId) === activeWorkspaceId);
+  const sessionChannel = activeSession && activeSession.channel_summary
+    && typeof activeSession.channel_summary === 'object' ? activeSession.channel_summary : null;
+  const activeChannel = channelBySid[state.sid] || sessionChannel || {
+    available: false, session_id: state.sid || '', view_state: 'none', recent_deliveries: [],
+  };
   const openStage = (target) => {
     const next = typeof target === 'string' ? { page: target } : { ...(target || {}) };
     if (next.page === 'seats') {
@@ -180,6 +188,7 @@ function WeiwoApp() {
         }, stageWid);
       }
     }
+    setChannelDrawerOpen(false);
     setStage(next);
   };
   const stageWorkspaceRef = React.useRef(activeWorkspaceId);
@@ -191,6 +200,7 @@ function WeiwoApp() {
   const openReport = async (item) => {
     const reportSid = streamSidRef.current;
     const reportGeneration = streamGenRef.current;
+    setChannelDrawerOpen(false);
     setDrawer({ sym: { code: item.code, name: item.name }, status: 'running', text: '', path: item.path, startedAt: Date.now() });
     try {
       const r = await fetch(WW.API + '/report?path=' + encodeURIComponent(item.path)).then(x => x.json());
@@ -219,6 +229,12 @@ function WeiwoApp() {
     if (a.type === 'ev' && a.ev.type === 'tool_result' && a.ev.artifact && a.ev.artifact.kind === 'seat_bind') {
       applySeatBind(a.ev.artifact.payload || {}, openPage);
     }
+    if (a.type === 'ev' && a.ev.type === 'tool_result') {
+      const toolName = String(a.ev.tool || a.ev.name || '');
+      if (/^ww_(telegram|automation)_/.test(toolName)) {
+        pullChannel(a.sid || streamSidRef.current, Number(a.generation || streamGenRef.current));
+      }
+    }
   };
 
   const openPage = (p) => {                               // 呼出器/对话均可手动调出功能页
@@ -236,7 +252,32 @@ function WeiwoApp() {
 
   const refreshSessions = async () => {
     const rows = await WW.sessions();
-    if (Array.isArray(rows)) setSessions(rows);
+    if (Array.isArray(rows)) {
+      setSessions(rows);
+      setChannelBySid(current => {
+        let changed = false; const next = { ...current };
+        rows.forEach(row => {
+          const summary = row && row.channel_summary && typeof row.channel_summary === 'object'
+            ? row.channel_summary : null;
+          const prior = row && current[row.id];
+          if (summary && !prior) {
+            next[row.id] = summary; changed = true;
+          } else if (summary && prior.transient_status_error === true
+              && prior.available !== true) {
+            // 首次加载时 status 503 可能先于 sessions 摘要返回。用摘要补回
+            // 上次领域真值，但保留“暂不可达”标记，不能静默装作已恢复。
+            next[row.id] = { ...summary, ok: false,
+              transient_status_error: true,
+              status_error: prior.status_error || 'channel_status_unreachable',
+              reason_code: prior.reason_code || 'channel_status_unreachable',
+              error_code: prior.error_code || 'channel_status_unreachable',
+              http_status: prior.http_status || 0 };
+            changed = true;
+          }
+        });
+        return changed ? next : current;
+      });
+    }
     return Array.isArray(rows) ? rows : [];
   };
   const refreshWorkspaces = () => WW.workspaces().then(d => {
@@ -249,8 +290,10 @@ function WeiwoApp() {
     streamSidRef.current = sid;
     setManual([]); setBenchFocus(null);
     setDrawer(null);                                      // 切会话清研报抽屉,防上个会话的研报残留
+    setChannelDrawerOpen(false);                          // 通道抽屉同样严格跟随当前会话
     dispatch({ type: 'sid', sid, generation });
     esRef.current = WW.connect(sid, dispatchLive, generation);
+    pullChannel(sid, generation);
     // sessionStorage=本 tab 会话(刷新回到本 tab 的会话);localStorage=新 tab 兜底
     try { sessionStorage.setItem('guanlan:ww:sid', sid); } catch (e) {}
     try { localStorage.setItem('guanlan:ww:sid', sid); } catch (e) {}
@@ -258,6 +301,31 @@ function WeiwoApp() {
   const requestIsCurrent = (sid, generation) => (
     streamSidRef.current === sid && streamGenRef.current === generation
   );
+  const pullChannel = async (sid, generation) => {
+    if (!sid || !WW.channelStatus) return null;
+    const sequence = ++channelRequestSeqRef.current;
+    const result = await WW.channelStatus(sid);
+    if (!requestIsCurrent(sid, generation) || sequence !== channelRequestSeqRef.current) return result;
+    setChannelBySid(current => {
+      const prior = current[sid] || (sid === state.sid ? sessionChannel : null);
+      if (result && result.transient_status_error === true && prior && prior.available === true) {
+        return { ...current, [sid]: { ...prior, ok: false,
+          status_error: result.status_error || 'channel_status_unreachable',
+          transient_status_error: true } };
+      }
+      return { ...current, [sid]: result };
+    });
+    return result;
+  };
+  const staleChannelResult = () => ({ ok: false,
+    reason_code: 'channel_request_stale', error_code: 'channel_request_stale',
+    reason: '当前对话已切换，请返回原对话确认真实状态' });
+  const openChannel = () => {
+    if (!state.sid) return;
+    setDrawer(null);
+    setChannelDrawerOpen(true);
+    pullChannel(state.sid, streamGenRef.current);
+  };
 
   React.useEffect(() => {
     if (!WW.API) return;
@@ -269,14 +337,50 @@ function WeiwoApp() {
   }, []);
 
   const onSend = async (text) => {
+    const requestSid = state.sid;
+    const requestGeneration = streamGenRef.current;
+    // Token 是秘密控制输入，不是对话。此检测必须先于归档、busy、乐观消息、
+    // send 与 steer 的任何分支；服务端截流仍是最终安全边界。
+    if (WW.looksLikeTelegramToken && WW.looksLikeTelegramToken(text)) {
+      const draft = activeChannel && activeChannel.draft && typeof activeChannel.draft === 'object'
+        ? activeChannel.draft : null;
+      const draftId = draft && draft.draft_id;
+      let secretResult = { ok: false, reason_code: 'channel_draft_required',
+        error_code: 'channel_draft_required',
+        reason: '先让 Agent 创建连接草稿，再提交 Bot Token' };
+      try {
+        if (draftId) {
+          const issued = await WW.channelRequestToken(requestSid, 'telegram:submit-token', draftId);
+          if (issued && issued.ok && !requestIsCurrent(requestSid, requestGeneration)) {
+            secretResult = staleChannelResult();
+          } else if (issued && issued.ok) {
+            secretResult = await WW.telegramSubmitToken(
+              requestSid, draftId, text, issued.request_token || issued.ticket
+            );
+            if (!requestIsCurrent(requestSid, requestGeneration)) {
+              secretResult = staleChannelResult();
+            } else if (secretResult && secretResult.ok) {
+              await pullChannel(requestSid, requestGeneration);
+              refreshSessions();
+            }
+          } else if (issued) {
+            secretResult = issued;
+          }
+        }
+      } catch (e) {
+        secretResult = { ok: false, reason_code: 'channel_submit_failed',
+          error_code: 'channel_submit_failed', reason: 'Token 安全提交失败，请重试' };
+      } finally {
+        text = '';
+      }
+      return { ...(secretResult || {}), secret_handled: true, clear_input: true };
+    }
     if (activeSessionArchived) {
       return { ok: false, reason: '该对话已归档；历史记录仅供查看，请先恢复' };
     }
     if (activeWorkspace && activeWorkspace.archived) {
       return { ok: false, reason: '该研究空间已归档；历史消息仅供查看' };
     }
-    const requestSid = state.sid;
-    const requestGeneration = streamGenRef.current;
     const requestToken = requestSid + ':' + requestGeneration + ':' + (++requestSeqRef.current);
     if (state.busy) {
       dispatch({ type: 'control', control: {
@@ -314,6 +418,71 @@ function WeiwoApp() {
     }
     if (requestIsCurrent(sendSid, sendGeneration)) refreshSessions();
     return r;
+  };
+  const onChannelSubmitToken = async (draftId, tokenValue) => {
+    const sid = state.sid; const generation = streamGenRef.current;
+    if (activeSessionArchived || (activeWorkspace && activeWorkspace.archived)) {
+      return { ok: false, reason: '归档对话只读，请先恢复后再连接 Telegram' };
+    }
+    try {
+      const issued = await WW.channelRequestToken(sid, 'telegram:submit-token', draftId);
+      if (!issued || !issued.ok) return issued;
+      if (!requestIsCurrent(sid, generation)) return staleChannelResult();
+      const result = await WW.telegramSubmitToken(
+        sid, draftId, tokenValue, issued.request_token || issued.ticket
+      );
+      if (!requestIsCurrent(sid, generation)) return staleChannelResult();
+      if (result && result.ok) {
+        await pullChannel(sid, generation); refreshSessions();
+      }
+      return result;
+    } catch (e) {
+      return { ok: false, reason: 'Token 安全提交失败，请重试' };
+    } finally {
+      tokenValue = '';
+    }
+  };
+  const onChannelManage = async (action) => {
+    const sid = state.sid; const generation = streamGenRef.current;
+    if (activeSessionArchived || (activeWorkspace && activeWorkspace.archived)) {
+      return { ok: false, reason: '归档对话只读，请先恢复后再管理通道' };
+    }
+    const issued = await WW.channelRequestToken(sid, 'telegram:' + action, null);
+    if (!issued || !issued.ok) return issued;
+    if (!requestIsCurrent(sid, generation)) return staleChannelResult();
+    const result = await WW.channelManage(sid, action, issued.request_token || issued.ticket);
+    if (!requestIsCurrent(sid, generation)) return staleChannelResult();
+    if (result && result.ok) {
+      await pullChannel(sid, generation); refreshSessions();
+    }
+    return result;
+  };
+  const onChannelResolve = async (outboxId, action) => {
+    const sid = state.sid; const generation = streamGenRef.current;
+    if (activeSessionArchived || (activeWorkspace && activeWorkspace.archived)) {
+      return { ok: false, reason: '归档对话只读，请先恢复后再处理投递' };
+    }
+    const issued = await WW.channelRequestToken(sid, 'telegram:resolve:' + action, outboxId);
+    if (!issued || !issued.ok) return issued;
+    if (!requestIsCurrent(sid, generation)) return staleChannelResult();
+    const result = await WW.channelResolveDelivery(
+      sid, outboxId, action, issued.request_token || issued.ticket
+    );
+    if (!requestIsCurrent(sid, generation)) return staleChannelResult();
+    if (result && result.ok) {
+      await pullChannel(sid, generation); refreshSessions();
+    }
+    return result;
+  };
+  const onConfirmChoice = async (choice) => {
+    const pending = state.confirm;
+    const sid = state.sid; const generation = streamGenRef.current;
+    const result = pending && pending.action_ticket_required === true
+      ? await WW.channelConfirm(sid, pending, pending.tool, choice)
+      : await WW.confirm(pending, choice);
+    if (!requestIsCurrent(sid, generation)) return staleChannelResult();
+    if (result && result.ok) pullChannel(sid, generation);
+    return result;
   };
   const onCancel = async () => {
     if (activeWorkspace && activeWorkspace.archived) {
@@ -403,9 +572,21 @@ function WeiwoApp() {
   React.useEffect(() => {
     if (!WW.API) return;
     pullSentry();
-    const iv = setInterval(() => { refreshSessions(); refreshWorkspaces(); pullSentry(); }, 8000);
+    const iv = setInterval(() => {
+      refreshSessions(); refreshWorkspaces(); pullSentry();
+      const sid = streamSidRef.current; const generation = streamGenRef.current;
+      if (sid) pullChannel(sid, generation);
+    }, 8000);
     return () => clearInterval(iv);
   }, []);
+
+  React.useEffect(() => {
+    const viewState = activeChannel && activeChannel.view_state;
+    if (!state.sid || ['awaiting_pairing', 'pairing_pending'].indexOf(viewState) < 0) return undefined;
+    const sid = state.sid; const generation = state.streamGeneration;
+    const iv = setInterval(() => pullChannel(sid, generation), 2000);
+    return () => clearInterval(iv);
+  }, [state.sid, state.streamGeneration, activeChannel && activeChannel.view_state]);
 
   React.useEffect(() => {
     const resize = () => { const next = window.innerWidth < 1120; setNarrow(next); if (next) setDockOpen(false); };
@@ -431,13 +612,14 @@ function WeiwoApp() {
   // 二级 masthead 已裁(与顶部 nav 重复):⇋ 布局切换移入工作台头部,运筹中状态并入左栏脚注
   return (
     <div style={{ display: 'grid', gridTemplateColumns: cols, height: '100vh', minWidth: 0, position: 'relative' }}>
-      <WwRail state={state} sessions={sessions} workspaces={workspaces} workspacesStatus={workspacesStatus} activeWorkspaceId={activeWorkspaceId} onNew={onNew} onNewWorkspace={onNewWorkspace} onChooseFolder={WW.chooseResearchFolder} onSwitch={attach} onUpdate={onUpdateSession} onArchive={onArchiveSession} onRestore={onRestoreSession} />
+      <WwRail state={state} sessions={sessions} workspaces={workspaces} workspacesStatus={workspacesStatus} activeWorkspaceId={activeWorkspaceId} onNew={onNew} onNewWorkspace={onNewWorkspace} onChooseFolder={WW.chooseResearchFolder} onSwitch={attach} onUpdate={onUpdateSession} onArchive={onArchiveSession} onRestore={onRestoreSession} channelBySid={channelBySid} />
       {stage ? <WwWorkspaceStage page={stage.page} load={stage.load} asset={stage.asset} code={stage.code} name={stage.name} focus={stage.focus} readOnly={stageReadOnly} workspaceId={stage.workspaceId || activeWorkspaceId} onBack={() => setStage(null)} /> : <React.Fragment>
-      <WwThread key={state.sid || 'no-session'} state={state} workspace={activeWorkspace} sessionArchived={activeSessionArchived} onSend={onSend} onCancel={onCancel} onConfirm={(c) => WW.confirm(state.confirm, c)} onOpenReport={openReport} onOpenPage={openPage} activatedPages={activated} onRename={activeSessionArchived ? null : (t) => onUpdateSession(state.sid, { title: t })} sentry={sentry} markSentrySeen={markSentrySeen} onSentryFocus={onSentryFocus} thinkingMode={thinkingMode} onThinkingMode={onThinkingMode} />
+      <WwThread key={state.sid || 'no-session'} state={state} workspace={activeWorkspace} sessionArchived={activeSessionArchived} onSend={onSend} onCancel={onCancel} onConfirm={onConfirmChoice} onOpenReport={openReport} onOpenPage={openPage} activatedPages={activated} onRename={activeSessionArchived ? null : (t) => onUpdateSession(state.sid, { title: t })} sentry={sentry} markSentrySeen={markSentrySeen} onSentryFocus={onSentryFocus} thinkingMode={thinkingMode} onThinkingMode={onThinkingMode} channelStatus={activeChannel} channelDrawerOpen={channelDrawerOpen} onOpenChannel={openChannel} onChannelSubmitToken={onChannelSubmitToken} onChannelRefresh={() => pullChannel(state.sid, streamGenRef.current)} />
       {benchOpen && <WwBench key={activeWorkspaceId} state={{ ...state, activated }} workspaceId={activeWorkspaceId} focus={benchFocus} chatWide={chatWide} onToggleWide={() => setChatWide(w => !w)} onClose={() => dispatch({ type: 'benchClosed', v: true })} onOpenStage={openStage} onResize={(w) => { setBenchW(w); try { localStorage.setItem('guanlan:ww:benchw', String(w)); } catch (e) {} }} />}
       <WwWorkspaceDock workspace={activeWorkspace} sessions={activeWorkspaceSessions} open={dockOpen} narrow={narrow} onToggle={() => setDockOpen(true)} onClose={() => setDockOpen(false)} onOpenStage={openStage} onWorkspaceChanged={onWorkspaceChanged} />
       </React.Fragment>}
       {drawer && <WwDrawer drawer={drawer} onClose={() => setDrawer(null)} />}
+      <WwChannelDrawer key={(state.sid || 'no-session') + ':' + state.streamGeneration} open={channelDrawerOpen} status={activeChannel} archived={activeSessionArchived || !!(activeWorkspace && activeWorkspace.archived)} onClose={() => setChannelDrawerOpen(false)} onManage={onChannelManage} onResolve={onChannelResolve} onSubmitToken={onChannelSubmitToken} onRefresh={() => pullChannel(state.sid, streamGenRef.current)} />
     </div>
   );
 }
