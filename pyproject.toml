@@ -33,6 +33,7 @@ dependencies = [
     "python-multipart>=0.0.9", # /upload multipart
     "jieba>=0.42",             # 事件库 FTS 中文预分词(缺席时 LIKE 诚实降级)
     "psutil>=5.9",             # 研究空间代码任务的进程树/内存/子进程硬闸
+    "pywin32>=306; sys_platform == 'win32'", # Telegram Token: Windows CurrentUser DPAPI
 ]
 
 [tool.guanlan]
